@@ -17,3 +17,11 @@ from __future__ import annotations
 import ast
 from dataclasses import dataclass, field, asdict
 from typing import Any
+
+
+@dataclass
+class Submodule:
+    var_name: str                 # e.g. "self.c_attn"
+    constructor: str | None       # e.g. "nn.Linear"
+    args: list[str] = field(default_factory=list)       # source text of positional args
+    kwargs: dict[str, str] = field(default_factory=dict) # source text of keyword args
