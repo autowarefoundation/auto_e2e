@@ -25,3 +25,10 @@ class Submodule:
     constructor: str | None       # e.g. "nn.Linear"
     args: list[str] = field(default_factory=list)       # source text of positional args
     kwargs: dict[str, str] = field(default_factory=dict) # source text of keyword args
+
+
+@dataclass
+class BufferDecl:
+    name: str                     # buffer name, e.g. "bias"
+    persistent: bool | None       # explicit persistent= flag (default True if omitted)
+    arg_summary: str = ""         # short source summary of the tensor expression
