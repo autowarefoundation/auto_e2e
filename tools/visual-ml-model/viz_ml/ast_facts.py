@@ -41,3 +41,13 @@ class ForwardStmt:
     calls: list[str]              # attribute calls invoked, e.g. ["self.attn", "self.ln_1"]
     has_add: bool                 # a binary '+' appears in the statement (residual signal)
     source: str                   # the raw source line(s), trimmed
+
+
+@dataclass
+class ClassFacts:
+    name: str
+    bases: list[str]
+    submodules: list[Submodule] = field(default_factory=list)
+    buffers: list[BufferDecl] = field(default_factory=list)
+    forward_skeleton: list[ForwardStmt] = field(default_factory=list)
+    has_forward: bool = False
