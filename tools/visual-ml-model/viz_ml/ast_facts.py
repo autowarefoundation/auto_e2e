@@ -32,3 +32,12 @@ class BufferDecl:
     name: str                     # buffer name, e.g. "bias"
     persistent: bool | None       # explicit persistent= flag (default True if omitted)
     arg_summary: str = ""         # short source summary of the tensor expression
+
+
+@dataclass
+class ForwardStmt:
+    line: int
+    targets: list[str]            # lhs names, e.g. ["x"] or ["q", "k", "v"]
+    calls: list[str]              # attribute calls invoked, e.g. ["self.attn", "self.ln_1"]
+    has_add: bool                 # a binary '+' appears in the statement (residual signal)
+    source: str                   # the raw source line(s), trimmed
