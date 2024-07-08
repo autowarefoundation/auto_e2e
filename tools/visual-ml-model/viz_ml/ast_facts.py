@@ -92,3 +92,24 @@ def _assign_targets(node: ast.AST) -> list[str]:
 
     walk(node)
     return out
+
+
+def _calls_in(node: ast.AST) -> list[str]:
+    """Attribute/name calls invoked anywhere in an expression (in source order-ish)."""
+    found: list[str] = []
+    for sub in ast.walk(node):
+        if isinstance(sub, ast.Call):
+            n = _name_of(sub.func)
+            if n:
+                found.append(n)
+    return found
+
+
+def _has_add(node: ast.AST) -> bool:
+    for sub in ast.walk(node):
+        if isinstance(sub, ast.BinOp) and isinstance(sub.op, ast.Add):
+            return True
+        # in-place: x += ...
+        if isinstance(sub, ast.AugAssign) and isinstance(sub.op, ast.Add):
+            return True
+    return False
