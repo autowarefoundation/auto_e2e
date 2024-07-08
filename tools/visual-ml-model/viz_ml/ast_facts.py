@@ -51,3 +51,27 @@ class ClassFacts:
     buffers: list[BufferDecl] = field(default_factory=list)
     forward_skeleton: list[ForwardStmt] = field(default_factory=list)
     has_forward: bool = False
+
+
+# ---------------------------------------------------------------------------
+# helpers
+# ---------------------------------------------------------------------------
+
+def _name_of(node: ast.AST) -> str | None:
+    """Render a dotted name like nn.Linear or self.attn from an AST node."""
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        base = _name_of(node.value)
+        return f"{base}.{node.attr}" if base else node.attr
+    return None
+
+
+def _src(node: ast.AST, source: str) -> str:
+    try:
+        seg = ast.get_source_segment(source, node)
+        if seg is not None:
+            return " ".join(seg.split())
+    except Exception:
+        pass
+    return ""
