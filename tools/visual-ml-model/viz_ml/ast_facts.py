@@ -75,3 +75,20 @@ def _src(node: ast.AST, source: str) -> str:
     except Exception:
         pass
     return ""
+
+
+def _assign_targets(node: ast.AST) -> list[str]:
+    """Names assigned to on the lhs of an assignment, including tuple unpacking."""
+    out: list[str] = []
+
+    def walk(t: ast.AST) -> None:
+        if isinstance(t, (ast.Tuple, ast.List)):
+            for e in t.elts:
+                walk(e)
+        else:
+            n = _name_of(t)
+            if n:
+                out.append(n)
+
+    walk(node)
+    return out
