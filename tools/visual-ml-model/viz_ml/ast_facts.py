@@ -113,3 +113,32 @@ def _has_add(node: ast.AST) -> bool:
         if isinstance(sub, ast.AugAssign) and isinstance(sub.op, ast.Add):
             return True
     return False
+
+
+# ---------------------------------------------------------------------------
+# per-class extraction
+# ---------------------------------------------------------------------------
+
+def _extract_init(cls: ast.ClassDef, source: str, facts: ClassFacts) -> None:
+    init = next(
+        (n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name == "__init__"),
+        None,
+    )
+    if init is None:
+        return
+    for stmt in ast.walk(init):
+        # self.<name> = <Class>(...)
+        if isinstance(stmt, ast.Assign) and isinstance(stmt.value, ast.Call):
+            for tgt in stmt.targets:
+                name = _name_of(tgt)
+                if not name or not name.startswith("self."):
+                    continue
+                ctor = _name_of(stmt.value.func)
+                args = [_src(a, source) for a in stmt.value.args]
+                kwargs = {
+                    (kw.arg or "**"): _src(kw.value, source)
+                    for kw in stmt.value.keywords
+                }
+                facts.submodules.append(
+                    Submodule(var_name=name, constructor=ctor, args=args, kwargs=kwargs)
+                )
