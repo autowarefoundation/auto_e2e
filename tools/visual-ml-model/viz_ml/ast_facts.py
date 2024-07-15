@@ -142,3 +142,23 @@ def _extract_init(cls: ast.ClassDef, source: str, facts: ClassFacts) -> None:
                 facts.submodules.append(
                     Submodule(var_name=name, constructor=ctor, args=args, kwargs=kwargs)
                 )
+        # self.register_buffer("name", tensor, persistent=?)
+        if isinstance(stmt, ast.Call):
+            fn = _name_of(stmt.func)
+            if fn and fn.endswith("register_buffer"):
+                buf_name = None
+                if stmt.args and isinstance(stmt.args[0], ast.Constant):
+                    buf_name = stmt.args[0].value
+                persistent: bool | None = True  # torch default when omitted
+                for kw in stmt.keywords:
+                    if kw.arg == "persistent" and isinstance(kw.value, ast.Constant):
+                        persistent = bool(kw.value.value)
+                arg_summary = _src(stmt.args[1], source) if len(stmt.args) > 1 else ""
+                if buf_name is not None:
+                    facts.buffers.append(
+                        BufferDecl(
+                            name=str(buf_name),
+                            persistent=persistent,
+                            arg_summary=arg_summary[:160],
+                        )
+                    )
