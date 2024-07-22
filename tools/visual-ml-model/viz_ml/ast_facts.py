@@ -200,3 +200,24 @@ def _extract_forward(cls: ast.ClassDef, source: str, facts: ClassFacts) -> None:
                 source=_src(stmt, source)[:240],
             )
         )
+
+
+def extract_classes(source: str) -> dict[str, ClassFacts]:
+    """Parse source text and return AST facts for every class defined in it."""
+    tree = ast.parse(source)
+    result: dict[str, ClassFacts] = {}
+    for node in tree.body:
+        if isinstance(node, ast.ClassDef):
+            facts = ClassFacts(
+                name=node.name,
+                bases=[b for b in (_name_of(b) for b in node.bases) if b],
+            )
+            _extract_init(node, source, facts)
+            _extract_forward(node, source, facts)
+            result[node.name] = facts
+    return result
+
+
+def facts_to_dict(facts: dict[str, ClassFacts]) -> dict[str, Any]:
+    """JSON-serializable view of the extracted facts."""
+    return {name: asdict(cf) for name, cf in facts.items()}
