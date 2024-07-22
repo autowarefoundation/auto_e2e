@@ -162,3 +162,41 @@ def _extract_init(cls: ast.ClassDef, source: str, facts: ClassFacts) -> None:
                             arg_summary=arg_summary[:160],
                         )
                     )
+
+
+def _extract_forward(cls: ast.ClassDef, source: str, facts: ClassFacts) -> None:
+    fwd = next(
+        (n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name == "forward"),
+        None,
+    )
+    if fwd is None:
+        return
+    facts.has_forward = True
+    for stmt in fwd.body:
+        # only summarize top-level statements of forward (keeps the skeleton compact)
+        targets: list[str] = []
+        if isinstance(stmt, ast.Assign):
+            for t in stmt.targets:
+                targets += _assign_targets(t)
+        elif isinstance(stmt, ast.AugAssign):
+            targets += _assign_targets(stmt.target)
+        elif isinstance(stmt, ast.Return) and stmt.value is not None:
+            targets = ["<return>"]
+
+        value_node = getattr(stmt, "value", stmt)
+        calls = _calls_in(stmt)
+        # keep only self.* calls (the semantically meaningful submodule invocations) +
+        # functional calls (F.*, torch.*) which the LLM may need
+        meaningful = [
+            c for c in calls
+            if c.startswith("self.") or c.split(".")[0] in {"F", "torch", "nn"}
+        ]
+        facts.forward_skeleton.append(
+            ForwardStmt(
+                line=getattr(stmt, "lineno", -1),
+                targets=targets,
+                calls=meaningful,
+                has_add=_has_add(stmt),
+                source=_src(stmt, source)[:240],
+            )
+        )
