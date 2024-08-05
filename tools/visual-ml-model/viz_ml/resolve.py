@@ -35,3 +35,28 @@ class RegistryOption:
     key: str               # e.g. "bev"
     class_name: str        # e.g. "BEVViewFusion"
     active: bool           # True if selected by config (or the only/default option)
+
+
+@dataclass
+class Bundle:
+    entry_class: str
+    entry_file: str
+    config: dict[str, Any]
+    classes: dict[str, CollectedClass] = field(default_factory=dict)   # name -> class
+    facts: dict[str, ClassFacts] = field(default_factory=dict)         # name -> AST facts
+    source_files: list[str] = field(default_factory=list)
+    registry_options: list[RegistryOption] = field(default_factory=list)
+
+    def bundle_source(self) -> str:
+        """Concatenated, de-duplicated source of all collected classes (for the LLM)."""
+        parts: list[str] = []
+        for name, cc in self.classes.items():
+            parts.append(f"# ===== class {name}  (from {cc.file}) =====\n{cc.source_segment}")
+        return "\n\n".join(parts)
+
+    def active_variant_classes(self) -> set[str]:
+        return {o.class_name for o in self.registry_options if o.active}
+
+    def inactive_variant_classes(self) -> set[str]:
+        active = self.active_variant_classes()
+        return {o.class_name for o in self.registry_options if not o.active} - active
