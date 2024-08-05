@@ -19,3 +19,19 @@ from pathlib import Path
 from typing import Any
 
 from .ast_facts import extract_classes, ClassFacts, facts_to_dict, _name_of
+
+
+@dataclass
+class CollectedClass:
+    name: str
+    file: str
+    source_segment: str
+
+
+@dataclass
+class RegistryOption:
+    """A registry/factory variant: a string key -> class, with whether it's the selected one."""
+    registry: str          # e.g. "FUSION_REGISTRY"
+    key: str               # e.g. "bev"
+    class_name: str        # e.g. "BEVViewFusion"
+    active: bool           # True if selected by config (or the only/default option)
