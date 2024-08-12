@@ -60,3 +60,26 @@ class Bundle:
     def inactive_variant_classes(self) -> set[str]:
         active = self.active_variant_classes()
         return {o.class_name for o in self.registry_options if not o.active} - active
+
+
+def _module_classes(source: str) -> dict[str, str]:
+    """name -> source segment for every class defined in `source`."""
+    tree = ast.parse(source)
+    out: dict[str, str] = {}
+    for node in tree.body:
+        if isinstance(node, ast.ClassDef):
+            seg = ast.get_source_segment(source, node)
+            if seg:
+                out[node.name] = seg
+    return out
+
+
+def _local_import_targets(source: str) -> set[str]:
+    """Names imported via local/relative imports (candidates for same-repo following)."""
+    names: set[str] = set()
+    tree = ast.parse(source)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            for alias in node.names:
+                names.add(alias.name)
+    return names
