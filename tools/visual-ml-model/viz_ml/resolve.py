@@ -83,3 +83,15 @@ def _local_import_targets(source: str) -> set[str]:
             for alias in node.names:
                 names.add(alias.name)
     return names
+
+
+def _referenced_names(facts: ClassFacts) -> set[str]:
+    """Class names this class references: base classes + submodule constructors."""
+    refs: set[str] = set(facts.bases)
+    for sm in facts.submodules:
+        if sm.constructor:
+            # take the trailing identifier of a dotted ctor (nn.Linear -> Linear,
+            # CausalSelfAttention -> CausalSelfAttention)
+            refs.add(sm.constructor.split(".")[-1])
+            refs.add(sm.constructor)
+    return refs
