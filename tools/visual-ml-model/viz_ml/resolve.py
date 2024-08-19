@@ -95,3 +95,28 @@ def _referenced_names(facts: ClassFacts) -> set[str]:
             refs.add(sm.constructor.split(".")[-1])
             refs.add(sm.constructor)
     return refs
+
+
+def _registry_maps(source: str) -> dict[str, dict[str, str]]:
+    """Module-level registry dicts mapping a string key -> class name.
+
+    e.g. FUSION_REGISTRY = {"concat": ConcatViewFusion, "bev": BEVViewFusion}
+    -> {"FUSION_REGISTRY": {"concat": "ConcatViewFusion", "bev": "BEVViewFusion"}}
+    These let the user SELECT a variant (via config) and let us tell the LLM which
+    concrete class is actually active.
+    """
+    tree = ast.parse(source)
+    out: dict[str, dict[str, str]] = {}
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and isinstance(node.value, ast.Dict):
+            kv: dict[str, str] = {}
+            for k, v in zip(node.value.keys, node.value.values):
+                cls = _name_of(v)
+                if isinstance(k, ast.Constant) and isinstance(k.value, str) and cls:
+                    kv[k.value] = cls.split(".")[-1]
+            if kv:
+                for tgt in node.targets:
+                    tname = _name_of(tgt)
+                    if tname:
+                        out[tname] = kv
+    return out
