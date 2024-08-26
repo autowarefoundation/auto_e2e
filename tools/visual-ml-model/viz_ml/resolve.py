@@ -120,3 +120,36 @@ def _registry_maps(source: str) -> dict[str, dict[str, str]]:
                     if tname:
                         out[tname] = kv
     return out
+
+
+def _factory_class_refs(source: str) -> dict[str, set[str]]:
+    """Map repo-defined FUNCTION name -> set of class names it can return.
+
+    Handles the Registry/factory pattern where a submodule is built indirectly, e.g.
+        self.view_fusion = build_view_fusion(fusion_mode, ...)
+    where `build_view_fusion` does `return FUSION_REGISTRY[mode](...)` and
+        FUSION_REGISTRY = {"concat": ConcatViewFusion, "bev": BEVViewFusion, ...}
+    Pure AST can't know which branch runs (that depends on config), so we collect ALL
+    candidate classes and let the LLM pick the one matching the concrete config.
+
+    We resolve, per function:
+      - direct `return SomeClass(...)` / `return SomeClass`
+      - `return REGISTRY[...](...)` where REGISTRY is a module-level dict of name->Class
+      - names assigned then returned (one hop): `x = SomeClass(...); return x`
+    """
+    tree = ast.parse(source)
+
+    # module-level registries: dict literals whose values are class-name references
+    registries: dict[str, set[str]] = {}
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and isinstance(node.value, ast.Dict):
+            cls_vals = {
+                _name_of(v).split(".")[-1]
+                for v in node.value.values
+                if _name_of(v)
+            }
+            if cls_vals:
+                for tgt in node.targets:
+                    tname = _name_of(tgt)
+                    if tname:
+                        registries[tname] = cls_vals
