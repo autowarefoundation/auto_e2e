@@ -153,3 +153,41 @@ def _factory_class_refs(source: str) -> dict[str, set[str]]:
                     tname = _name_of(tgt)
                     if tname:
                         registries[tname] = cls_vals
+
+    func_refs: dict[str, set[str]] = {}
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.FunctionDef):
+            continue
+        refs: set[str] = set()
+        # local one-hop var -> class assignments inside the function
+        local_assign: dict[str, set[str]] = {}
+        for sub in ast.walk(node):
+            if isinstance(sub, ast.Assign) and isinstance(sub.value, ast.Call):
+                cname = _name_of(sub.value.func)
+                if cname:
+                    for t in sub.targets:
+                        tn = _name_of(t)
+                        if tn:
+                            local_assign.setdefault(tn, set()).add(cname.split(".")[-1])
+
+        for sub in ast.walk(node):
+            if isinstance(sub, ast.Return) and sub.value is not None:
+                rv = sub.value
+                call = rv if isinstance(rv, ast.Call) else None
+                target = call.func if call else rv
+                # return REGISTRY[...](...)  -> the subscripted name is a registry
+                if isinstance(target, ast.Subscript):
+                    base = _name_of(target.value)
+                    if base in registries:
+                        refs |= registries[base]
+                else:
+                    nm = _name_of(target)
+                    if nm:
+                        short = nm.split(".")[-1]
+                        if short in local_assign:
+                            refs |= local_assign[short]
+                        else:
+                            refs.add(short)
+        if refs:
+            func_refs[node.name] = refs
+    return func_refs
