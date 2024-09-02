@@ -191,3 +191,28 @@ def _factory_class_refs(source: str) -> dict[str, set[str]]:
         if refs:
             func_refs[node.name] = refs
     return func_refs
+
+
+def _find_class_in_repo(class_name: str, repo_files: list[Path]) -> tuple[Path, str] | None:
+    for f in repo_files:
+        try:
+            src = f.read_text(encoding="utf-8")
+        except Exception:
+            continue
+        classes = _module_classes(src)
+        if class_name in classes:
+            return f, classes[class_name]
+    return None
+
+
+def _repo_python_files(root: Path, max_files: int = 400) -> list[Path]:
+    files: list[Path] = []
+    skip = {".git", "__pycache__", ".venv", "venv", "node_modules", "build", "dist"}
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames if d not in skip]
+        for fn in filenames:
+            if fn.endswith(".py"):
+                files.append(Path(dirpath) / fn)
+                if len(files) >= max_files:
+                    return files
+    return files
