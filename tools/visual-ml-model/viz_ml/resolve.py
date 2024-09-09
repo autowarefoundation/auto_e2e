@@ -216,3 +216,44 @@ def _repo_python_files(root: Path, max_files: int = 400) -> list[Path]:
                 if len(files) >= max_files:
                     return files
     return files
+
+
+def resolve(entry_file: str, target_class: str, config: dict[str, Any]) -> Bundle:
+    """Build a code bundle for `target_class` defined in `entry_file`.
+
+    Follows references (base classes + submodule constructors) across .py files in the same
+    repository directory, transitively, ignoring obvious third-party names (nn.*, torch.*).
+    """
+    entry_path = Path(entry_file).resolve()
+    if not entry_path.exists():
+        raise FileNotFoundError(f"entry file not found: {entry_file}")
+
+    repo_root = entry_path.parent
+    repo_files = _repo_python_files(repo_root)
+    # ensure the entry file is searched first
+    repo_files = [entry_path] + [f for f in repo_files if f.resolve() != entry_path]
+
+    bundle = Bundle(entry_class=target_class, entry_file=str(entry_path), config=config)
+
+    # Repo-wide factory/registry index: function name -> candidate classes it can return.
+    # Lets us follow `self.x = build_something(mode, ...)` to the concrete classes (the
+    # Registry pattern), which a plain ctor-name scan would miss.
+    factory_index: dict[str, set[str]] = {}
+    registry_index: dict[str, dict[str, str]] = {}   # registry name -> {key: class}
+    for rf in repo_files:
+        try:
+            text = rf.read_text(encoding="utf-8")
+            factory_index.update(_factory_class_refs(text))
+            registry_index.update(_registry_maps(text))
+        except Exception:
+            continue
+
+    # Framework names we never try to follow (dotted access like nn.Linear, torch.*, F.*).
+    # Bare names (e.g. "LayerNorm") are NOT skipped on sight: if the repo defines a class
+    # of that name (a custom LayerNorm/RMSNorm/Attention), we want to collect it; only if
+    # it isn't found locally do we treat it as a framework class and silently skip.
+    builtin_prefixes = ("nn.", "torch.", "F.")
+
+    to_visit = [target_class]
+    visited: set[str] = set()
+    seen_files: set[str] = set()
