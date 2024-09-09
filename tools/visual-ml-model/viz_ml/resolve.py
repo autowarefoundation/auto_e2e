@@ -257,3 +257,42 @@ def resolve(entry_file: str, target_class: str, config: dict[str, Any]) -> Bundl
     to_visit = [target_class]
     visited: set[str] = set()
     seen_files: set[str] = set()
+
+    while to_visit:
+        name = to_visit.pop(0)
+        if name in visited:
+            continue
+        visited.add(name)
+        if name.startswith(builtin_prefixes):
+            continue
+
+        found = _find_class_in_repo(name, repo_files)
+        if found is None:
+            # not defined in the repo -> a framework/third-party class; skip quietly
+            continue
+        f, seg = found
+        bundle.classes[name] = CollectedClass(name=name, file=str(f), source_segment=seg)
+        if str(f) not in seen_files:
+            seen_files.add(str(f))
+            bundle.source_files.append(str(f))
+
+        # extract facts for this class and enqueue what it references
+        file_src = f.read_text(encoding="utf-8")
+        file_facts = extract_classes(file_src)
+        if name in file_facts:
+            bundle.facts[name] = file_facts[name]
+            for ref in _referenced_names(file_facts[name]):
+                short = ref.split(".")[-1]
+                if short not in visited and not ref.startswith(builtin_prefixes):
+                    to_visit.append(short)
+                # if this reference is actually a repo factory function, also enqueue
+                # the concrete classes it can return (Registry/factory resolution)
+                if short in factory_index:
+                    for cand in factory_index[short]:
+                        if cand not in visited:
+                            to_visit.append(cand)
+
+    if target_class not in bundle.classes:
+        raise ValueError(
+            f"target class '{target_class}' not found in {entry_file} or its same-repo imports"
+        )
