@@ -296,3 +296,40 @@ def resolve(entry_file: str, target_class: str, config: dict[str, Any]) -> Bundl
         raise ValueError(
             f"target class '{target_class}' not found in {entry_file} or its same-repo imports"
         )
+
+    # Record registry variants among the collected classes and mark the active one.
+    # A registry key is "selected" if any config VALUE equals it (e.g. fusion_mode="bev"
+    # selects the FUSION_REGISTRY["bev"] class). If a registry has options but none is
+    # selected by config, all are left inactive (the LLM will note none was chosen).
+    config_values = {str(v) for v in config.values() if isinstance(v, (str, int, float, bool))}
+    for reg_name, key_to_class in registry_index.items():
+        # only surface registries whose classes were actually collected (i.e. relevant)
+        relevant = {k: c for k, c in key_to_class.items() if c in bundle.classes}
+        if not relevant:
+            continue
+        any_selected = any(k in config_values for k in relevant)
+        for key, cls in relevant.items():
+            active = (key in config_values) if any_selected else False
+            bundle.registry_options.append(
+                RegistryOption(registry=reg_name, key=key, class_name=cls, active=active)
+            )
+
+    return bundle
+
+
+def load_config(config_path: str | None) -> dict[str, Any]:
+    if not config_path:
+        return {}
+    p = Path(config_path)
+    text = p.read_text(encoding="utf-8")
+    if p.suffix in (".yaml", ".yml"):
+        try:
+            import yaml  # optional
+            return yaml.safe_load(text) or {}
+        except ImportError as e:  # pragma: no cover
+            raise RuntimeError("PyYAML required for YAML config; use JSON instead") from e
+    return json.loads(text)
+
+
+def bundle_to_facts_dict(bundle: Bundle) -> dict[str, Any]:
+    return facts_to_dict(bundle.facts)
