@@ -26,3 +26,15 @@ _ARCH_SCHEMA = _HERE.parent / "schema" / "arch_v1.schema.json"
 
 def claude_available() -> bool:
     return shutil.which("claude") is not None
+
+
+def _registry_block(bundle: Bundle) -> list[str]:
+    """Variant guidance: which concrete class the config selects (Registry pattern)."""
+    if not bundle.registry_options:
+        return []
+    active = bundle.active_variant_classes()
+    inactive = bundle.inactive_variant_classes()
+    lines = ["## Registry / factory variants (IMPORTANT)",
+             "This model selects submodules via a registry/factory. Based on the config, "
+             "model the SELECTED variant as the real architecture and treat the others as "
+             "inactive alternatives (omit them or mark them clearly and de-emphasize)."]
