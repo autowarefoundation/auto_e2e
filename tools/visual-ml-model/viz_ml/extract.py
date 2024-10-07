@@ -38,3 +38,14 @@ def _registry_block(bundle: Bundle) -> list[str]:
              "This model selects submodules via a registry/factory. Based on the config, "
              "model the SELECTED variant as the real architecture and treat the others as "
              "inactive alternatives (omit them or mark them clearly and de-emphasize)."]
+    for o in bundle.registry_options:
+        mark = "ACTIVE (selected by config)" if o.active else "inactive"
+        lines.append(f"- `{o.registry}[\"{o.key}\"]` -> `{o.class_name}` — {mark}")
+    if active:
+        lines.append(f"\nSELECTED variant class(es): {', '.join(sorted(active))}. "
+                     f"Build through this/these; do NOT wire the inactive ones "
+                     f"({', '.join(sorted(inactive)) or 'none'}) into the active dataflow.")
+    else:
+        lines.append("\nNo variant was selected by the config; note this and pick the "
+                     "constructor default if evident, else show all at reduced confidence.")
+    return ["", "\n".join(lines), ""]
