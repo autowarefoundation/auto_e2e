@@ -49,3 +49,29 @@ def _registry_block(bundle: Bundle) -> list[str]:
         lines.append("\nNo variant was selected by the config; note this and pick the "
                      "constructor default if evident, else show all at reduced confidence.")
     return ["", "\n".join(lines), ""]
+
+
+def _shared_context_parts(bundle: Bundle) -> list[str]:
+    """Config + registry guidance + code bundle + AST facts handed to Claude."""
+    facts = bundle_to_facts_dict(bundle)
+    return [
+        f"# Target module: `{bundle.entry_class}`",
+        "",
+        "## Concrete config (Registry assumption — constructor args are supplied)",
+        "```json",
+        json.dumps(bundle.config, indent=2),
+        "```",
+        *_registry_block(bundle),
+        "## Code bundle (target class + its same-repo submodule/base classes)",
+        "```python",
+        bundle.bundle_source(),
+        "```",
+        "",
+        "## AST facts (deterministic; trust these to anchor your reading)",
+        "Submodule inventory, register_buffer persistence flags, and the forward() skeleton "
+        "(note `has_add: true` statements — those are residual merge points).",
+        "```json",
+        json.dumps(facts, indent=2),
+        "```",
+        "",
+    ]
