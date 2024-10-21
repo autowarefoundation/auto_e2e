@@ -75,3 +75,25 @@ def _shared_context_parts(bundle: Bundle) -> list[str]:
         "```",
         "",
     ]
+
+
+def build_arch_prompt(bundle: Bundle) -> str:
+    """Context for the left-to-right architecture diagram (paper/README-figure style)."""
+    arch_schema = json.loads(_ARCH_SCHEMA.read_text(encoding="utf-8"))
+    parts = [
+        *_shared_context_parts(bundle),
+        "## Architecture IR (arch_v1) JSON Schema (your output must validate against this)",
+        "```json",
+        json.dumps(arch_schema, indent=2),
+        "```",
+        "",
+        "## Task",
+        f"Emit ONE arch_v1 JSON object for `{bundle.entry_class}` configured with the config "
+        "above. ~8–16 MAJOR-BLOCK nodes laid out left-to-right: one node per distinct input, "
+        "the backbone, each fusion/merge, the policy/decoder head, each output, each train-only "
+        "auxiliary block, each learning method, and each loss. Each node has title + 1-line desc "
+        "+ a paren-string shape + role + train_only. List EVERY dataflow edge (no implied spine), "
+        "plus loss/feedback/skip edges. Add a groups[] entry {id:'train', label:'ONLY DURING "
+        "TRAINING'} if any node is train_only. Output ONLY the JSON object.",
+    ]
+    return "\n".join(parts)
