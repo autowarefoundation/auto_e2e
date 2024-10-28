@@ -97,3 +97,32 @@ def build_arch_prompt(bundle: Bundle) -> str:
         "TRAINING'} if any node is train_only. Output ONLY the JSON object.",
     ]
     return "\n".join(parts)
+
+
+def _extract_json_object(text: str) -> dict[str, Any]:
+    """Pull the first balanced top-level JSON object out of arbitrary text."""
+    start = text.find("{")
+    if start == -1:
+        raise ValueError("no JSON object found in model output")
+    depth = 0
+    in_str = False
+    esc = False
+    for i in range(start, len(text)):
+        ch = text[i]
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+        else:
+            if ch == '"':
+                in_str = True
+            elif ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    return json.loads(text[start : i + 1])
+    raise ValueError("unbalanced JSON object in model output")
