@@ -152,3 +152,4 @@ def extract_arch(bundle: Bundle, model: str | None = None, timeout: int = 600) -
     user_prompt = build_arch_prompt(bundle)
     out = _run_claude(user_prompt, system_prompt, model, timeout)
     return _extract_json_object(out)
+
