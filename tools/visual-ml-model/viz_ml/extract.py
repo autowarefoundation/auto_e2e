@@ -126,3 +126,16 @@ def _extract_json_object(text: str) -> dict[str, Any]:
                 if depth == 0:
                     return json.loads(text[start : i + 1])
     raise ValueError("unbalanced JSON object in model output")
+
+
+def _run_claude(user_prompt: str, system_prompt: str, model: str | None, timeout: int) -> str:
+    cmd = ["claude", "-p", user_prompt, "--append-system-prompt", system_prompt,
+           "--output-format", "text"]
+    if model:
+        cmd += ["--model", model]
+    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, cwd=str(_HERE.parent))
+    if proc.returncode != 0:
+        raise RuntimeError(f"claude CLI failed (exit {proc.returncode}):\n{proc.stderr[:2000]}")
+    if not proc.stdout.strip():
+        raise RuntimeError(f"claude CLI returned empty output. stderr: {proc.stderr[:500]}")
+    return proc.stdout
