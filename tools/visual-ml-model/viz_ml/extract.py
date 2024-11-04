@@ -139,3 +139,16 @@ def _run_claude(user_prompt: str, system_prompt: str, model: str | None, timeout
     if not proc.stdout.strip():
         raise RuntimeError(f"claude CLI returned empty output. stderr: {proc.stderr[:500]}")
     return proc.stdout
+
+
+def extract_arch(bundle: Bundle, model: str | None = None, timeout: int = 600) -> dict[str, Any]:
+    """Invoke Claude to produce the left-to-right architecture IR (arch_v1) for the bundle."""
+    if not claude_available():
+        raise RuntimeError(
+            "`claude` CLI not found on PATH. Either install it, or pass a pre-computed "
+            "arch IR via `--arch <file.json>` to skip the LLM stage."
+        )
+    system_prompt = _ARCH_PROMPT.read_text(encoding="utf-8")
+    user_prompt = build_arch_prompt(bundle)
+    out = _run_claude(user_prompt, system_prompt, model, timeout)
+    return _extract_json_object(out)
