@@ -7,3 +7,17 @@ Two layers:
      resolve, group members resolve, the dataflow sub-graph is acyclic (so left-to-right
      layering terminates), with soft notes when inputs/outputs are missing.
 """
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from typing import Any
+
+_SCHEMA_CACHE: dict[str, Any] = {}
+
+
+def load_schema(schema_path: str) -> dict[str, Any]:
+    if schema_path not in _SCHEMA_CACHE:
+        _SCHEMA_CACHE[schema_path] = json.loads(Path(schema_path).read_text(encoding="utf-8"))
+    return _SCHEMA_CACHE[schema_path]
