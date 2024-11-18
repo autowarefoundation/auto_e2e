@@ -75,3 +75,9 @@ def _validate_node(value: Any, schema: dict[str, Any], path: str, errors: list[s
         if not _type_ok(None, schema["type"]):
             errors.append(f"{path}: null not allowed (type {schema['type']})")
             return
+
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        if "minimum" in schema and value < schema["minimum"]:
+            errors.append(f"{path}: {value} < minimum {schema['minimum']}")
+        if "maximum" in schema and value > schema["maximum"]:
+            errors.append(f"{path}: {value} > maximum {schema['maximum']}")
