@@ -51,3 +51,18 @@ def _type_ok(value: Any, type_spec: Any) -> bool:
         if isinstance(value, py):
             return True
     return False
+
+
+def _validate_node(value: Any, schema: dict[str, Any], path: str, errors: list[str]) -> None:
+    if not isinstance(schema, dict):
+        return
+
+    if "const" in schema:
+        if value != schema["const"]:
+            errors.append(f"{path}: expected const {schema['const']!r}, got {value!r}")
+        return
+
+    if "enum" in schema:
+        if value not in schema["enum"]:
+            errors.append(f"{path}: {value!r} not in enum {schema['enum']}")
+        # continue to type checks if any
