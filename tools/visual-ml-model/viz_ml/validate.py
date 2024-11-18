@@ -94,3 +94,7 @@ def _validate_node(value: Any, schema: dict[str, Any], path: str, errors: list[s
         for k, v in value.items():
             if k in props:
                 _validate_node(v, props[k], f"{path}.{k}", errors)
+
+    if isinstance(value, list) and "items" in schema:
+        for i, item in enumerate(value):
+            _validate_node(item, schema["items"], f"{path}[{i}]", errors)
