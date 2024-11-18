@@ -66,3 +66,12 @@ def _validate_node(value: Any, schema: dict[str, Any], path: str, errors: list[s
         if value not in schema["enum"]:
             errors.append(f"{path}: {value!r} not in enum {schema['enum']}")
         # continue to type checks if any
+
+    if "type" in schema and value is not None:
+        if not _type_ok(value, schema["type"]):
+            errors.append(f"{path}: expected type {schema['type']}, got {type(value).__name__}")
+            return
+    elif "type" in schema and value is None:
+        if not _type_ok(None, schema["type"]):
+            errors.append(f"{path}: null not allowed (type {schema['type']})")
+            return
