@@ -81,3 +81,16 @@ def _validate_node(value: Any, schema: dict[str, Any], path: str, errors: list[s
             errors.append(f"{path}: {value} < minimum {schema['minimum']}")
         if "maximum" in schema and value > schema["maximum"]:
             errors.append(f"{path}: {value} > maximum {schema['maximum']}")
+
+    if isinstance(value, dict):
+        props = schema.get("properties", {})
+        for req in schema.get("required", []):
+            if req not in value:
+                errors.append(f"{path}: missing required property '{req}'")
+        if schema.get("additionalProperties") is False:
+            for k in value:
+                if k not in props:
+                    errors.append(f"{path}: additional property '{k}' not allowed")
+        for k, v in value.items():
+            if k in props:
+                _validate_node(v, props[k], f"{path}.{k}", errors)
