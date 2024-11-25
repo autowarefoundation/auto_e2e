@@ -98,3 +98,9 @@ def _validate_node(value: Any, schema: dict[str, Any], path: str, errors: list[s
     if isinstance(value, list) and "items" in schema:
         for i, item in enumerate(value):
             _validate_node(item, schema["items"], f"{path}[{i}]", errors)
+
+
+def validate_schema(ir: dict[str, Any], schema: dict[str, Any]) -> list[str]:
+    errors: list[str] = []
+    _validate_node(ir, schema, "$", errors)
+    return errors
