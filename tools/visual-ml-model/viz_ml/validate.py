@@ -125,3 +125,53 @@ def _has_cycle(adj: dict[str, list[str]]) -> bool:
         return False
 
     return any(color[n] == WHITE and visit(n) for n in adj)
+
+
+def validate_arch_structure(ir: dict[str, Any]) -> list[str]:
+    """Structural invariants for the arch_v1 IR (top-level nodes/edges/groups).
+
+    - every edge `from`/`to` resolves to a node id
+    - every group member resolves to a node id
+    - the dataflow sub-graph (kind=='dataflow') is acyclic (so layering terminates;
+      feedback/loss/skip edges are excluded, mirroring the ir_v1 / flow conventions)
+    - warns (does not fail) when there is no input/output node
+    """
+    errors: list[str] = []
+    nodes = ir.get("nodes", [])
+    edges = ir.get("edges", [])
+    ids: dict[str, dict] = {}
+    for n in nodes:
+        nid = n.get("id")
+        if nid in ids:
+            errors.append(f"duplicate node id: {nid!r}")
+        ids[nid] = n
+
+    for e in edges:
+        for end in ("from", "to"):
+            ref = e.get(end)
+            if ref not in ids:
+                errors.append(f"edge {e.get('from')!r}->{e.get('to')!r}: {end} {ref!r} does not resolve")
+
+    for g in ir.get("groups", []):
+        for m in g.get("members", []) or []:
+            if m not in ids:
+                errors.append(f"group {g.get('id')!r}: member {m!r} does not resolve")
+
+    # dataflow acyclicity (so longest-path layering terminates)
+    adj: dict[str, list[str]] = {nid: [] for nid in ids}
+    for e in edges:
+        if e.get("kind") == "dataflow":
+            s, t = e.get("from"), e.get("to")
+            if s in adj and t in ids:
+                adj[s].append(t)
+    if _has_cycle(adj):
+        errors.append("dataflow edges contain a cycle (left-to-right layering requires acyclicity; "
+                      "use kind='feedback' for recurrent/loop-back edges)")
+
+    roles = {n.get("role") for n in nodes}
+    warnings: list[str] = []
+    if "input" not in roles:
+        warnings.append("note: no node has role 'input' (left column may be empty)")
+    if "output" not in roles and "loss" not in roles:
+        warnings.append("note: no 'output' or 'loss' node (right column may be empty)")
+    return errors + warnings
