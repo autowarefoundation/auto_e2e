@@ -104,3 +104,24 @@ def validate_schema(ir: dict[str, Any], schema: dict[str, Any]) -> list[str]:
     errors: list[str] = []
     _validate_node(ir, schema, "$", errors)
     return errors
+
+
+# ---------------------------------------------------------------------------
+# structural invariants
+# ---------------------------------------------------------------------------
+
+def _has_cycle(adj: dict[str, list[str]]) -> bool:
+    WHITE, GRAY, BLACK = 0, 1, 2
+    color = {n: WHITE for n in adj}
+
+    def visit(u: str) -> bool:
+        color[u] = GRAY
+        for v in adj.get(u, []):
+            if color.get(v) == GRAY:
+                return True
+            if color.get(v) == WHITE and visit(v):
+                return True
+        color[u] = BLACK
+        return False
+
+    return any(color[n] == WHITE and visit(n) for n in adj)
