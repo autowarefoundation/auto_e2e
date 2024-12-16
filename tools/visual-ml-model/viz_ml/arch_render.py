@@ -60,3 +60,77 @@ ROLE_COLORS = {
     "buffer":             ("#1c2128", "#8896a6"),
     "other":              ("#1c2128", "#6e7681"),
 }
+
+# self-contained HTML shell (dark theme, Save-PNG button, click-to-detail tip). The inline
+# SVG keeps id="flow" so this template's JS finds it. No JS libraries, no CDN.
+_TEMPLATE = """<!doctype html>
+<html lang="en"><head><meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>__TITLE__</title>
+<style>
+  :root{color-scheme:dark}
+  html,body{margin:0;background:#0b0d12;color:#e8eaed;
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
+  #hdr{padding:14px 18px 6px;display:flex;align-items:flex-start;justify-content:space-between;gap:12px}
+  #hdr h1{margin:0;font-size:16px}
+  #hdr .sub{font-size:12px;color:#9aa0ac;margin-top:3px}
+  #btnpng{background:#1b1f2a;color:#c2c6cc;border:1px solid #2a3142;border-radius:6px;
+    padding:6px 12px;font-size:12px;cursor:pointer;white-space:nowrap}
+  #btnpng:hover{background:#232838}
+  #wrap{padding:0 18px 40px;overflow:auto}
+  #flow{max-width:100%;height:auto}
+  .stage{cursor:pointer}
+  .stage:hover rect{filter:brightness(1.18)}
+  #legend{padding:6px 18px 16px;font-size:11px;color:#9aa0ac;display:flex;flex-wrap:wrap;gap:14px}
+  #legend .row{display:flex;align-items:center;gap:5px}
+  #legend .sw{width:11px;height:11px;border-radius:3px}
+  #tip{position:fixed;bottom:14px;left:50%;transform:translateX(-50%);
+    max-width:680px;background:rgba(17,20,28,.97);border:1px solid #2a3142;border-radius:8px;
+    padding:10px 14px;font-size:12.5px;line-height:1.5;display:none;box-shadow:0 6px 24px rgba(0,0,0,.5)}
+  #tip b{color:#fff}
+</style></head>
+<body>
+<div id="hdr"><div><h1>__TITLE__</h1><div class="sub">__SUB__</div></div>
+  <button id="btnpng" title="Save this diagram as a PNG image">&#11015; Save PNG</button></div>
+<div id="legend">__LEGEND__</div>
+<div id="wrap">__SVG__</div>
+<div id="tip"></div>
+<script>
+  var tip=document.getElementById('tip');
+  document.querySelectorAll('.stage').forEach(function(g){
+    g.addEventListener('click',function(){
+      var d=g.getAttribute('data-detail');
+      var t=g.querySelector('text');
+      if(!d){tip.style.display='none';return;}
+      tip.innerHTML='<b>'+(t?t.textContent:'')+'</b><br>'+d;
+      tip.style.display='block';
+    });
+  });
+  document.addEventListener('keydown',function(e){if(e.key==='Escape')tip.style.display='none';});
+
+  // Save-PNG: rasterize the inline SVG to a 2x canvas and download.
+  document.getElementById('btnpng').addEventListener('click',function(){
+    var svg=document.getElementById('flow');
+    var vb=svg.viewBox.baseVal, W=vb&&vb.width?vb.width:svg.clientWidth, H=vb&&vb.height?vb.height:svg.clientHeight;
+    var scale=2;
+    var data=new XMLSerializer().serializeToString(svg);
+    if(data.indexOf('xmlns=')===-1) data=data.replace('<svg','<svg xmlns="http://www.w3.org/2000/svg"');
+    var blob=new Blob([data],{type:'image/svg+xml;charset=utf-8'});
+    var url=URL.createObjectURL(blob);
+    var img=new Image();
+    img.onload=function(){
+      var c=document.createElement('canvas'); c.width=W*scale; c.height=H*scale;
+      var ctx=c.getContext('2d'); ctx.fillStyle='#0b0d12'; ctx.fillRect(0,0,c.width,c.height);
+      ctx.scale(scale,scale); ctx.drawImage(img,0,0);
+      URL.revokeObjectURL(url);
+      c.toBlob(function(b){
+        var a=document.createElement('a');
+        a.download=(document.title.replace(/[^a-z0-9]+/gi,'_'))+'.png';
+        a.href=URL.createObjectURL(b); a.click();
+      });
+    };
+    img.src=url;
+  });
+</script>
+</body></html>
+"""
