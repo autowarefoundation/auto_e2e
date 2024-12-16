@@ -134,3 +134,19 @@ _TEMPLATE = """<!doctype html>
 </script>
 </body></html>
 """
+
+# ---- palette: 5 new figure roles overlaid on the shared flow palette ----
+ARCH_COLORS = {
+    "loss":            ("#3a1326", "#e06c9a"),  # pink — Trajectory/Feature Loss
+    "policy":          ("#261a3a", "#8e4ec6"),  # purple — Driving Policy (fan-out hub)
+    "prediction":      ("#10241a", "#30a46c"),  # green — predicted future features/waypoints
+    "future_state":    ("#161d3a", "#5b7fff"),  # indigo — train-only Future Visual State
+    "learning_method": ("#23252c", "#8b8d98"),  # slate — Imitation / Reinforcement Learning
+}
+
+EDGE_STYLE = {
+    "dataflow": {"color": "#5b6472", "dash": None,   "width": 2.0, "marker": "ar-data"},
+    "loss":     {"color": "#e06c9a", "dash": "6 4",  "width": 1.8, "marker": "ar-loss"},
+    "feedback": {"color": "#c9a227", "dash": "5 4",  "width": 1.6, "marker": "ar-feedback"},
+    "skip":     {"color": "#ffe08a", "dash": "4 4",  "width": 1.5, "marker": "ar-skip"},
+}
