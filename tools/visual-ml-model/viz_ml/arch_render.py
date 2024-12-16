@@ -150,3 +150,18 @@ EDGE_STYLE = {
     "feedback": {"color": "#c9a227", "dash": "5 4",  "width": 1.6, "marker": "ar-feedback"},
     "skip":     {"color": "#ffe08a", "dash": "4 4",  "width": 1.5, "marker": "ar-skip"},
 }
+
+# ---- geometry constants (dark theme, tuned for paper-figure readability) ----
+BOX_W = 212
+COL_GAP = 104
+ROW_GAP = 26
+MIN_H = 56
+PAD_L = 36
+PAD_R = 40
+PAD_BOT = 52
+LINE_H = 15
+PX = 14            # inner horizontal padding
+TITLE_H = 20
+SHAPE_H = 15
+FEEDBACK_CH = 26   # height of one feedback lane in the top channel
+BANNER_H = 22
