@@ -165,3 +165,18 @@ TITLE_H = 20
 SHAPE_H = 15
 FEEDBACK_CH = 26   # height of one feedback lane in the top channel
 BANNER_H = 22
+
+
+def _node_color(role: str) -> tuple[str, str]:
+    return ARCH_COLORS.get(role) or ROLE_COLORS.get(role) or ROLE_COLORS["other"]
+
+
+def _fmt_shape_arch(shape) -> str:
+    if shape is None or shape == "":
+        return ""
+    if isinstance(shape, list):
+        return "(" + ",".join(str(x) for x in shape) + ")"
+    s = str(shape).strip()
+    if s and not s.startswith("("):
+        s = "(" + s + ")" if ("," in s or s[0].isdigit()) else s
+    return s
