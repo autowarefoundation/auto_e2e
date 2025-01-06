@@ -204,3 +204,42 @@ def est_text_width(s: str, px: float, bold: bool = False, mono: bool = False) ->
             total += 0.55
     total *= px
     return total * 1.06 if bold else total
+
+
+def _wrap(text: str, max_w: float, px: float, max_lines: int = 2) -> tuple[list[str], bool]:
+    """Greedy word-wrap to <=max_lines. Returns (lines, truncated)."""
+    if not text:
+        return [], False
+    words = text.split()
+    lines: list[str] = []
+    cur = ""
+    for w in words:
+        trial = (cur + " " + w).strip()
+        if est_text_width(trial, px) <= max_w or not cur:
+            cur = trial
+        else:
+            lines.append(cur)
+            cur = w
+            if len(lines) == max_lines:
+                break
+    if cur and len(lines) < max_lines:
+        lines.append(cur)
+    truncated = False
+    if len(lines) >= max_lines:
+        # was there leftover content?
+        joined = " ".join(lines)
+        if joined.rstrip() != text.rstrip():
+            truncated = True
+            last = lines[-1]
+            while last and est_text_width(last + "…", px) > max_w:
+                last = last[:-1]
+            lines[-1] = last.rstrip() + "…"
+    return lines, truncated
+
+
+def _box_height(node: dict) -> tuple[int, list[str], bool]:
+    desc = node.get("desc", "") or ""
+    lines, trunc = _wrap(desc, BOX_W - 2 * PX, 11.5, max_lines=2)
+    has_shape = bool(_fmt_shape_arch(node.get("shape")))
+    h = 10 + TITLE_H + len(lines) * LINE_H + (SHAPE_H if has_shape else 0) + 12
+    return max(MIN_H, h), lines, trunc
