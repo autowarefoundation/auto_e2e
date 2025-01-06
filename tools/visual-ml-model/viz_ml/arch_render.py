@@ -180,3 +180,27 @@ def _fmt_shape_arch(shape) -> str:
     if s and not s.startswith("("):
         s = "(" + s + ")" if ("," in s or s[0].isdigit()) else s
     return s
+
+
+# ---- Python text-width estimation (no browser measureText) ----
+_NARROW = set("iljftI.,:;|!'\" ")
+_WIDE = set("mwMW@")
+
+
+def est_text_width(s: str, px: float, bold: bool = False, mono: bool = False) -> float:
+    if mono:
+        return len(s) * px * 0.60
+    total = 0.0
+    for ch in s:
+        if ch in _NARROW:
+            total += 0.30
+        elif ch in _WIDE:
+            total += 0.92
+        elif ch.isdigit() or ch.islower():
+            total += 0.52
+        elif ch.isupper():
+            total += 0.66
+        else:
+            total += 0.55
+    total *= px
+    return total * 1.06 if bold else total
