@@ -243,3 +243,40 @@ def _box_height(node: dict) -> tuple[int, list[str], bool]:
     has_shape = bool(_fmt_shape_arch(node.get("shape")))
     h = 10 + TITLE_H + len(lines) * LINE_H + (SHAPE_H if has_shape else 0) + 12
     return max(MIN_H, h), lines, trunc
+
+
+# ---------------------------------------------------------------------------
+# layout
+# ---------------------------------------------------------------------------
+
+def _layout(arch: dict[str, Any]) -> dict[str, Any]:
+    nodes = arch.get("nodes", [])
+    edges = arch.get("edges", [])
+    idx = {n["id"]: i for i, n in enumerate(nodes)}
+    by_id = {n["id"]: n for n in nodes}
+    warnings: list[str] = []
+
+    # --- Stage 1: layering over dataflow edges ---
+    df = [(e["from"], e["to"]) for e in edges
+          if e.get("kind") == "dataflow" and e.get("from") in by_id and e.get("to") in by_id]
+    succ: dict[str, list[str]] = {nid: [] for nid in by_id}
+    pred: dict[str, list[str]] = {nid: [] for nid in by_id}
+    # drop a back edge if dataflow has a cycle (keep layering finite)
+    adj = {nid: [] for nid in by_id}
+    for a, b in df:
+        adj[a].append(b)
+    if _has_cycle(adj):
+        warnings.append("dataflow had a cycle; some edges dropped from layering")
+        # simple removal: rebuild keeping edges that don't create a cycle
+        kept = []
+        adj2 = {nid: [] for nid in by_id}
+        for a, b in df:
+            adj2[a].append(b)
+            if _has_cycle(adj2):
+                adj2[a].pop()
+            else:
+                kept.append((a, b))
+        df = kept
+    for a, b in df:
+        succ[a].append(b)
+        pred[b].append(a)
