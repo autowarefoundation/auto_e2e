@@ -280,3 +280,28 @@ def _layout(arch: dict[str, Any]) -> dict[str, Any]:
     for a, b in df:
         succ[a].append(b)
         pred[b].append(a)
+
+    # longest-path via Kahn topological order
+    indeg = {nid: 0 for nid in by_id}
+    for a, b in df:
+        indeg[b] += 1
+    from collections import deque
+    q = deque(sorted([n for n in by_id if indeg[n] == 0], key=lambda n: idx[n]))
+    topo: list[str] = []
+    indeg_w = dict(indeg)
+    while q:
+        u = q.popleft()
+        topo.append(u)
+        for v in sorted(succ[u], key=lambda n: idx[n]):
+            indeg_w[v] -= 1
+            if indeg_w[v] == 0:
+                q.append(v)
+    col = {nid: 0 for nid in by_id}
+    for u in topo:
+        for v in succ[u]:
+            col[v] = max(col[v], col[u] + 1)
+
+    roles = {nid: by_id[nid].get("role") for nid in by_id}
+    for nid in by_id:
+        if roles[nid] == "input":
+            col[nid] = 0
