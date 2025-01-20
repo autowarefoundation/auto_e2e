@@ -305,3 +305,64 @@ def _layout(arch: dict[str, Any]) -> dict[str, Any]:
     for nid in by_id:
         if roles[nid] == "input":
             col[nid] = 0
+
+    # Forward column propagation over ALL edge kinds (skip/feedback/loss too, treated as
+    # left->right for placement only — they are still excluded from the DAG layering above).
+    # This pushes a node to the right of ALL its sources regardless of edge kind, so an aux
+    # head fed by a `skip`, a predicted-features node fed by `dataflow` from a late branch,
+    # and learning/true-feature nodes feeding a `loss` all settle into sensible columns
+    # instead of being stranded in column 0. Iterate to a fixed point (acyclic over the
+    # placement relation because losses/outputs are sinks).
+    place_pred: dict[str, list[str]] = {nid: [] for nid in by_id}
+    for e in edges:
+        a, b = e.get("from"), e.get("to")
+        if a in by_id and b in by_id and a != b:
+            place_pred[b].append(a)
+    for _ in range(len(by_id) + 2):
+        changed = False
+        for nid in by_id:
+            if roles[nid] == "input" or not place_pred[nid]:
+                continue
+            want = max(col[s] for s in place_pred[nid]) + 1
+            if want > col[nid]:
+                col[nid] = want
+                changed = True
+        if not changed:
+            break
+
+    # pin outputs to the last non-loss column, losses to a dedicated rightmost column
+    has_loss = any(roles[n] == "loss" for n in by_id)
+    nonloss_max = max([col[n] for n in by_id if roles[n] != "loss"], default=0)
+    for nid in by_id:
+        if roles[nid] == "output":
+            col[nid] = max(col[nid], nonloss_max)
+    if has_loss:
+        loss_col = max(col.values()) + 1
+        for nid in by_id:
+            if roles[nid] == "loss":
+                col[nid] = loss_col
+
+    # pull-right tightening: non-pinned nodes with successors hug them (shortens long
+    # left-anchored edges, e.g. a side input stranded far left).
+    pinned = {nid for nid in by_id if roles[nid] in ("input", "output", "loss")}
+    place_succ: dict[str, list[str]] = {nid: [] for nid in by_id}
+    for e in edges:
+        a, b = e.get("from"), e.get("to")
+        if a in by_id and b in by_id and a != b and col[b] > col[a]:
+            place_succ[a].append(b)
+    for u in reversed(topo):
+        if u in pinned or not place_succ.get(u):
+            continue
+        col[u] = max(col[u], 0)  # never move left here; keep longest-path placement
+        nxt = min(col[s] for s in place_succ[u])
+        if nxt - 1 > col[u]:
+            col[u] = nxt - 1
+
+    # lane hints win
+    if any(by_id[n].get("lane") is not None for n in by_id):
+        for nid in by_id:
+            lane = by_id[nid].get("lane")
+            if lane is not None:
+                col[nid] = lane
+
+    ncols = (max(col.values()) + 1) if col else 1
