@@ -366,3 +366,47 @@ def _layout(arch: dict[str, Any]) -> dict[str, Any]:
                 col[nid] = lane
 
     ncols = (max(col.values()) + 1) if col else 1
+
+    # --- Stage 2: row ordering within each column (barycenter) ---
+    layers: dict[int, list[str]] = {}
+    for nid in sorted(by_id, key=lambda n: idx[n]):
+        layers.setdefault(col[nid], []).append(nid)
+
+    def crossings(order: dict[int, list[str]]) -> int:
+        pos = {nid: p for c in order for p, nid in enumerate(order[c])}
+        cnt = 0
+        for a, b in df:
+            ca, cb = col[a], col[b]
+            if cb != ca + 1:
+                continue
+        # count pairwise inversions between adjacent columns
+        for c in range(ncols - 1):
+            es = [(pos.get(a, 0), pos.get(b, 0)) for a, b in df if col[a] == c and col[b] == c + 1]
+            for i in range(len(es)):
+                for j in range(i + 1, len(es)):
+                    if (es[i][0] - es[j][0]) * (es[i][1] - es[j][1]) < 0:
+                        cnt += 1
+        return cnt
+
+    best = {c: list(layers.get(c, [])) for c in range(ncols)}
+    best_cross = crossings(best)
+    cur = {c: list(best[c]) for c in best}
+    for sweep in range(4):
+        down = sweep % 2 == 0
+        rng = range(1, ncols) if down else range(ncols - 2, -1, -1)
+        pos = {nid: p for c in cur for p, nid in enumerate(cur[c])}
+        for c in rng:
+            neigh = pred if down else succ
+            adjc = c - 1 if down else c + 1
+            apos = {nid: p for p, nid in enumerate(cur.get(adjc, []))}
+
+            def bary(nid):
+                ns = [apos[x] for x in neigh[nid] if x in apos]
+                return (sum(ns) / len(ns)) if ns else pos.get(nid, 0)
+
+            cur[c] = sorted(cur[c], key=lambda nid: (bary(nid), idx[nid]))
+        cc = crossings(cur)
+        if cc < best_cross:
+            best_cross = cc
+            best = {c: list(cur[c]) for c in cur}
+    order = best
