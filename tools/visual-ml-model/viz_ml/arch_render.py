@@ -441,3 +441,50 @@ def _layout(arch: dict[str, Any]) -> dict[str, Any]:
     col_x = {c: PAD_L + c * (BOX_W + COL_GAP) for c in range(ncols)}
     y_top: dict[str, float] = {}
     any_train = any(by_id[n].get("train_only") for n in by_id)
+
+    # Two-band layout: the main (inference) band on top, the train-only band below it.
+    # Stack each band per column from its own cursor; the train-only band starts below the
+    # tallest main-band column so the auxiliary branch reads as a clean lower region under
+    # the spine (matching the reference figure), never interleaved with it.
+    main_h: dict[int, float] = {}
+    train_h: dict[int, float] = {}
+    for c in range(ncols):
+        mh = th = 0.0
+        for nid in order.get(c, []):
+            if by_id[nid].get("train_only"):
+                th += heights[nid] + ROW_GAP
+            else:
+                mh += heights[nid] + ROW_GAP
+        main_h[c] = max(0.0, mh - ROW_GAP)
+        train_h[c] = max(0.0, th - ROW_GAP)
+    main_tallest = max(main_h.values()) if main_h else 0.0
+    band_gap = 40 if any_train else 0
+    train_top = pad_top + main_tallest + band_gap
+
+    for c in range(ncols):
+        # main band: center each column's main stack against the tallest main column
+        cursor = pad_top + (main_tallest - main_h[c]) / 2
+        for nid in order.get(c, []):
+            if by_id[nid].get("train_only"):
+                continue
+            y_top[nid] = cursor
+            cursor += heights[nid] + ROW_GAP
+        # train-only band: start all columns at the same train_top
+        tcursor = train_top
+        for nid in order.get(c, []):
+            if not by_id[nid].get("train_only"):
+                continue
+            y_top[nid] = tcursor
+            tcursor += heights[nid] + ROW_GAP
+
+    train_tallest = max(train_h.values()) if train_h else 0.0
+    total_h = main_tallest + (band_gap + train_tallest if any_train else 0)
+    canvas_w = PAD_L + ncols * BOX_W + (ncols - 1) * COL_GAP + PAD_R
+    canvas_h = pad_top + total_h + PAD_BOT
+
+    return {
+        "by_id": by_id, "idx": idx, "col": col, "order": order, "ncols": ncols,
+        "x": col_x, "y_top": y_top, "heights": heights, "desclines": desclines,
+        "truncs": truncs, "canvas_w": canvas_w, "canvas_h": canvas_h,
+        "pad_top": pad_top, "fb_edges": fb_edges, "warnings": warnings,
+    }
