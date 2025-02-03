@@ -410,3 +410,34 @@ def _layout(arch: dict[str, Any]) -> dict[str, Any]:
             best_cross = cc
             best = {c: list(cur[c]) for c in cur}
     order = best
+
+    # push train_only nodes to the BOTTOM rows of each column so the auxiliary/training
+    # branch reads as a band below the main inference spine (like the reference figure).
+    # Stable so the barycenter ordering is preserved within each band.
+    for c in order:
+        pos = {n: i for i, n in enumerate(order[c])}
+        order[c] = sorted(order[c], key=lambda n: (1 if by_id[n].get("train_only") else 0, pos[n]))
+
+    # row hints override within a column
+    for c in order:
+        if any(by_id[n].get("row") is not None for n in order[c]):
+            order[c] = sorted(order[c], key=lambda n: (by_id[n].get("row") if by_id[n].get("row") is not None else 1e9, idx[n]))
+
+    # --- Stage 3: coordinates ---
+    heights, desclines, truncs = {}, {}, {}
+    for nid in by_id:
+        h, lines, tr = _box_height(by_id[nid])
+        heights[nid] = h
+        desclines[nid] = lines
+        truncs[nid] = tr
+
+    # count feedback lanes needed (for top channel headroom)
+    fb_edges = [e for e in edges if e.get("kind") == "feedback"
+                or (e.get("from") in by_id and e.get("to") in by_id and e.get("kind") == "dataflow"
+                    and col[e["to"]] <= col[e["from"]])]
+    n_fb = min(len(fb_edges), 4)
+    pad_top = 30 + (BANNER_H + 12 if arch.get("groups") or any(by_id[n].get("train_only") for n in by_id) else 0) + n_fb * FEEDBACK_CH
+
+    col_x = {c: PAD_L + c * (BOX_W + COL_GAP) for c in range(ncols)}
+    y_top: dict[str, float] = {}
+    any_train = any(by_id[n].get("train_only") for n in by_id)
