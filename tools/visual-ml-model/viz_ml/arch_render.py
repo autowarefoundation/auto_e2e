@@ -488,3 +488,37 @@ def _layout(arch: dict[str, Any]) -> dict[str, Any]:
         "truncs": truncs, "canvas_w": canvas_w, "canvas_h": canvas_h,
         "pad_top": pad_top, "fb_edges": fb_edges, "warnings": warnings,
     }
+
+
+# ---------------------------------------------------------------------------
+# SVG
+# ---------------------------------------------------------------------------
+
+def render_arch_svg(arch: dict[str, Any]) -> tuple[str, int, int, list[str]]:
+    L = _layout(arch)
+    by_id, col, x, y_top, heights = L["by_id"], L["col"], L["x"], L["y_top"], L["heights"]
+    W, H = L["canvas_w"], L["canvas_h"]
+    edges = arch.get("edges", [])
+    parts: list[str] = []
+
+    def cx_right(nid): return x[col[nid]] + BOX_W
+    def cx_left(nid): return x[col[nid]]
+
+    # ports: spread outbound on the right edge, inbound on the left edge
+    out_edges: dict[str, list] = {}
+    in_edges: dict[str, list] = {}
+    for e in edges:
+        a, b = e.get("from"), e.get("to")
+        if a in by_id and e.get("kind") in ("dataflow", "loss", "skip") and col.get(b, 0) > col.get(a, 0):
+            out_edges.setdefault(a, []).append(e)
+            in_edges.setdefault(b, []).append(e)
+
+    def out_port(nid, e):
+        lst = sorted(out_edges.get(nid, []), key=lambda ee: y_top.get(ee["to"], 0))
+        k = lst.index(e); K = len(lst)
+        return cx_right(nid), y_top[nid] + heights[nid] * (k + 1) / (K + 1)
+
+    def in_port(nid, e):
+        lst = sorted(in_edges.get(nid, []), key=lambda ee: y_top.get(ee["from"], 0))
+        k = lst.index(e); K = len(lst)
+        return cx_left(nid), y_top[nid] + heights[nid] * (k + 1) / (K + 1)
