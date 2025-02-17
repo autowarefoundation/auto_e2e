@@ -522,3 +522,39 @@ def render_arch_svg(arch: dict[str, Any]) -> tuple[str, int, int, list[str]]:
         lst = sorted(in_edges.get(nid, []), key=lambda ee: y_top.get(ee["from"], 0))
         k = lst.index(e); K = len(lst)
         return cx_left(nid), y_top[nid] + heights[nid] * (k + 1) / (K + 1)
+
+    # ---- group banners (drawn first, behind everything) ----
+    groups = arch.get("groups", [])
+    # the banner covers train-only *blocks*, but NOT loss nodes (losses live in the
+    # right-most column as the natural endpoint; boxing them makes the band span the whole
+    # figure). The reference figure bands the auxiliary branch, not the loss column.
+    train_ids = [n["id"] for n in arch.get("nodes", [])
+                 if n.get("train_only") and by_id[n["id"]].get("role") != "loss"]
+    banner_specs = []
+    if groups:
+        for g in groups:
+            members = g.get("members") or train_ids
+            members = [m for m in members if m in by_id and by_id[m].get("role") != "loss"]
+            if members:
+                banner_specs.append((g.get("label", "TRAINING"), members))
+    elif train_ids:
+        banner_specs.append(("ONLY DURING TRAINING", train_ids))
+
+    for label, members in banner_specs:
+        x0 = min(x[col[m]] for m in members) - 12
+        x1 = max(x[col[m]] + BOX_W for m in members) + 12
+        y0 = min(y_top[m] for m in members) - 12
+        y1 = max(y_top[m] + heights[m] for m in members) + 12
+        # the pill sits ABOVE the band so it never overlaps the first member box
+        pill_w = est_text_width(label, 11, bold=True) + 24
+        pill_y = y0 - 22
+        parts.append(
+            f'<rect x="{x0:.0f}" y="{y0:.0f}" width="{x1-x0:.0f}" height="{y1-y0:.0f}" rx="14" '
+            f'fill="#e06c9a" fill-opacity="0.06" stroke="#e06c9a" stroke-opacity="0.45" '
+            f'stroke-dasharray="6 5"/>'
+        )
+        parts.append(
+            f'<rect x="{x0:.0f}" y="{pill_y:.0f}" width="{pill_w:.0f}" height="19" rx="9.5" fill="#e06c9a"/>'
+            f'<text x="{x0+pill_w/2:.0f}" y="{pill_y+13:.0f}" fill="#1a0410" font-size="11" '
+            f'font-weight="700" text-anchor="middle" letter-spacing="0.5">{_esc(label)}</text>'
+        )
