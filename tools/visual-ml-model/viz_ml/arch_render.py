@@ -558,3 +558,26 @@ def render_arch_svg(arch: dict[str, Any]) -> tuple[str, int, int, list[str]]:
             f'<text x="{x0+pill_w/2:.0f}" y="{pill_y+13:.0f}" fill="#1a0410" font-size="11" '
             f'font-weight="700" text-anchor="middle" letter-spacing="0.5">{_esc(label)}</text>'
         )
+
+    # ---- forward edges (bezier) ----
+    edge_labels = []
+    for e in edges:
+        a, b = e.get("from"), e.get("to")
+        if a not in by_id or b not in by_id:
+            continue
+        kind = e.get("kind", "dataflow")
+        is_forward = col[b] > col[a] and kind in ("dataflow", "loss", "skip")
+        if not is_forward:
+            continue
+        st = EDGE_STYLE.get(kind, EDGE_STYLE["dataflow"])
+        xr, yr = out_port(a, e)
+        xl, yl = in_port(b, e)
+        ch = 0.45 * COL_GAP
+        dash = f' stroke-dasharray="{st["dash"]}"' if st["dash"] else ""
+        parts.append(
+            f'<path d="M {xr:.0f} {yr:.0f} C {xr+ch:.0f} {yr:.0f} {xl-ch:.0f} {yl:.0f} {xl:.0f} {yl:.0f}" '
+            f'fill="none" stroke="{st["color"]}" stroke-width="{st["width"]}"{dash} marker-end="url(#{st["marker"]})"/>'
+        )
+        if e.get("label"):
+            mx, my = (xr + xl) / 2, (yr + yl) / 2 - 4
+            edge_labels.append((mx, my, e["label"], st["color"]))
