@@ -581,3 +581,28 @@ def render_arch_svg(arch: dict[str, Any]) -> tuple[str, int, int, list[str]]:
         if e.get("label"):
             mx, my = (xr + xl) / 2, (yr + yl) / 2 - 4
             edge_labels.append((mx, my, e["label"], st["color"]))
+
+    # ---- feedback / backward edges (top channel) ----
+    fb = [e for e in edges if e.get("from") in by_id and e.get("to") in by_id and (
+        e.get("kind") == "feedback" or (e.get("kind") == "dataflow" and col[e["to"]] <= col[e["from"]]))]
+    fb = sorted(fb, key=lambda e: x[col[e["from"]]])
+    chy_base = L["pad_top"] - 14
+    if len(fb) > 4:
+        # too many — collapse to a badge near the most common source
+        for e in fb[:0]:
+            pass
+    for lane, e in enumerate(fb[:4]):
+        a, b = e["from"], e["to"]
+        st = EDGE_STYLE["feedback"]
+        xa = x[col[a]] + BOX_W / 2
+        xb = x[col[b]] + BOX_W / 2
+        ya = y_top[a]
+        yb = y_top[b]
+        chy = chy_base - lane * FEEDBACK_CH
+        parts.append(
+            f'<path d="M {xa:.0f} {ya:.0f} L {xa:.0f} {chy:.0f} L {xb:.0f} {chy:.0f} L {xb:.0f} {yb:.0f}" '
+            f'fill="none" stroke="{st["color"]}" stroke-width="{st["width"]}" stroke-dasharray="{st["dash"]}" '
+            f'marker-end="url(#ar-feedback)"/>'
+        )
+        if e.get("label"):
+            edge_labels.append(((xa + xb) / 2, chy - 4, e["label"], st["color"]))
