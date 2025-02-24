@@ -606,3 +606,38 @@ def render_arch_svg(arch: dict[str, Any]) -> tuple[str, int, int, list[str]]:
         )
         if e.get("label"):
             edge_labels.append(((xa + xb) / 2, chy - 4, e["label"], st["color"]))
+
+    # ---- boxes ----
+    for n in arch.get("nodes", []):
+        nid = n["id"]
+        if nid not in by_id:
+            continue
+        bx, by = x[col[nid]], y_top[nid]
+        h = heights[nid]
+        fill, stroke = _node_color(n.get("role", "other"))
+        low = (n.get("confidence", 1.0) or 1.0) < 0.6
+        opacity = "0.62" if (low or n.get("train_only")) else "1"
+        parts.append(f'<g class="stage" data-detail="{_esc(n.get("detail",""))}" opacity="{opacity}">')
+        dash = ' stroke-dasharray="5 4"' if n.get("train_only") else ""
+        parts.append(
+            f'<rect x="{bx:.0f}" y="{by:.0f}" width="{BOX_W}" height="{h}" rx="12" '
+            f'fill="{fill}" stroke="{stroke}" stroke-width="2"{dash}/>'
+        )
+        parts.append(f'<rect x="{bx:.0f}" y="{by:.0f}" width="6" height="{h}" rx="3" fill="{stroke}"/>')
+        ty = by + 19
+        qmark = ' <tspan fill="#ffce3f">?</tspan>' if low else ""
+        parts.append(
+            f'<text x="{bx+14:.0f}" y="{ty:.0f}" fill="#ffffff" font-size="13" font-weight="650">'
+            f'{_esc(_clip(n.get("title", nid), 30))}{qmark}</text>'
+        )
+        ly = ty + 17
+        for line in L["desclines"][nid]:
+            parts.append(f'<text x="{bx+14:.0f}" y="{ly:.0f}" fill="#c2c6cc" font-size="11.5">{_esc(line)}</text>')
+            ly += LINE_H
+        shp = _fmt_shape_arch(n.get("shape"))
+        if shp:
+            parts.append(
+                f'<text x="{bx+14:.0f}" y="{by+h-10:.0f}" fill="#8a93a6" font-size="11" '
+                f'font-family="ui-monospace,Menlo,monospace">{_esc(shp)}</text>'
+            )
+        parts.append("</g>")
