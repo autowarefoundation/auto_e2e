@@ -661,3 +661,42 @@ def render_arch_svg(arch: dict[str, Any]) -> tuple[str, int, int, list[str]]:
            f'xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,Segoe UI,Roboto,sans-serif">'
            + defs + "".join(parts) + "</svg>")
     return svg, int(W), int(H), L["warnings"]
+
+
+def _legend(arch: dict[str, Any]) -> str:
+    used_roles, seen = [], set()
+    for n in arch.get("nodes", []):
+        r = n.get("role", "other")
+        if r not in seen:
+            seen.add(r); used_roles.append(r)
+    rows = []
+    for r in used_roles:
+        _f, stroke = _node_color(r)
+        rows.append(f'<div class="row"><span class="sw" style="background:{stroke}"></span>{_esc(r)}</div>')
+    used_kinds = []
+    for e in arch.get("edges", []):
+        if e.get("kind") not in used_kinds:
+            used_kinds.append(e.get("kind"))
+    names = {"dataflow": "data flow", "loss": "loss flow", "feedback": "feedback / recurrent", "skip": "skip / reuse"}
+    for k in used_kinds:
+        st = EDGE_STYLE.get(k, EDGE_STYLE["dataflow"])
+        rows.append(f'<div class="row"><span class="sw" style="background:{st["color"]}"></span>{_esc(names.get(k,k))}</div>')
+    return "".join(rows)
+
+
+def render_arch_html(arch: dict[str, Any], out_path: str, title: str | None = None) -> tuple[str, list[str]]:
+    svg, _w, _h, warnings = render_arch_svg(arch)
+    title = title or arch.get("model_name", "model")
+    conf = arch.get("global_confidence")
+    sub = (f'{arch.get("arch_family","")} · {len(arch.get("nodes", []))} blocks · {len(arch.get("edges", []))} edges'
+           + (f' · confidence {round(conf*100)}%' if isinstance(conf, (int, float)) else "")
+           + ' · click a box for detail')
+    html_out = (_TEMPLATE
+                .replace("__TITLE__", _esc(title))
+                .replace("__SUB__", _esc(sub))
+                .replace("__LEGEND__", _legend(arch))
+                .replace("__SVG__", svg))
+    p = Path(out_path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(html_out, encoding="utf-8")
+    return str(p), warnings
