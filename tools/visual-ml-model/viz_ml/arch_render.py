@@ -641,3 +641,23 @@ def render_arch_svg(arch: dict[str, Any]) -> tuple[str, int, int, list[str]]:
                 f'font-family="ui-monospace,Menlo,monospace">{_esc(shp)}</text>'
             )
         parts.append("</g>")
+
+    # ---- edge labels (on top) ----
+    for mx, my, lbl, color in edge_labels:
+        parts.append(
+            f'<text x="{mx:.0f}" y="{my:.0f}" fill="{color}" font-size="10.5" text-anchor="middle" '
+            f'style="paint-order:stroke;stroke:#0b0d12;stroke-width:3px">{_esc(_clip(str(lbl),28))}</text>'
+        )
+
+    # markers
+    defs = "<defs>"
+    for mid, color in [("ar-data", "#5b6472"), ("ar-loss", "#e06c9a"),
+                       ("ar-feedback", "#c9a227"), ("ar-skip", "#ffe08a")]:
+        defs += (f'<marker id="{mid}" markerWidth="9" markerHeight="9" refX="7" refY="3" '
+                 f'orient="auto" markerUnits="strokeWidth"><path d="M0,0 L7,3 L0,6 Z" fill="{color}"/></marker>')
+    defs += "</defs>"
+
+    svg = (f'<svg id="flow" viewBox="0 0 {W:.0f} {H:.0f}" width="{W:.0f}" height="{H:.0f}" '
+           f'xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,Segoe UI,Roboto,sans-serif">'
+           + defs + "".join(parts) + "</svg>")
+    return svg, int(W), int(H), L["warnings"]
