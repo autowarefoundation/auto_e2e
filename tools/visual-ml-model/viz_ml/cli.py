@@ -46,3 +46,21 @@ def cmd_facts(args) -> int:
     }
     print(json.dumps(out, indent=2, ensure_ascii=False))
     return 0
+
+
+def cmd_variants(args) -> int:
+    """List registry/factory variants the model can select among (and which config picks)."""
+    cfg = load_config(args.config)
+    bundle = resolve(args.source, args.target_class, cfg)
+    if not bundle.registry_options:
+        print(f"No registry/factory variants found for `{bundle.entry_class}`.")
+        return 0
+    by_reg: dict[str, list] = {}
+    for o in bundle.registry_options:
+        by_reg.setdefault(o.registry, []).append(o)
+    print(f"Registry variants for `{bundle.entry_class}`:")
+    for reg, opts in by_reg.items():
+        print(f"\n  {reg}:")
+        for o in opts:
+            mark = "  ◀ ACTIVE (selected by config)" if o.active else ""
+            print(f'    "{o.key}"  ->  {o.class_name}{mark}')
