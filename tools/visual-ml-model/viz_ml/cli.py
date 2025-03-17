@@ -64,3 +64,7 @@ def cmd_variants(args) -> int:
         for o in opts:
             mark = "  ◀ ACTIVE (selected by config)" if o.active else ""
             print(f'    "{o.key}"  ->  {o.class_name}{mark}')
+    if not any(o.active for o in bundle.registry_options):
+        print("\n(none selected — pass a config whose value matches a key above, "
+              'e.g. {"fusion_mode": "bev"})')
+    return 0
