@@ -32,3 +32,17 @@ def _eprint(*a):
 
 def _load_ir(path: str) -> dict:
     return json.loads(Path(path).read_text(encoding="utf-8"))
+
+
+def cmd_facts(args) -> int:
+    cfg = load_config(args.config)
+    bundle = resolve(args.source, args.target_class, cfg)
+    out = {
+        "entry_class": bundle.entry_class,
+        "source_files": bundle.source_files,
+        "config": bundle.config,
+        "collected_classes": list(bundle.classes.keys()),
+        "facts": bundle_to_facts_dict(bundle),
+    }
+    print(json.dumps(out, indent=2, ensure_ascii=False))
+    return 0
