@@ -68,3 +68,17 @@ def cmd_variants(args) -> int:
         print("\n(none selected — pass a config whose value matches a key above, "
               'e.g. {"fusion_mode": "bev"})')
     return 0
+
+
+def cmd_validate(args) -> int:
+    from .validate import load_schema, validate_schema, validate_arch_structure
+    ir = _load_ir(args.ir)
+    errors = validate_schema(ir, load_schema(_ARCH_SCHEMA)) + validate_arch_structure(ir)
+    errors = [e for e in errors if not e.startswith("note:")]
+    if not errors:
+        print("VALID (arch_v1)")
+        return 0
+    print(f"INVALID (arch_v1) — {len(errors)} issue(s):")
+    for e in errors:
+        print("  -", e)
+    return 1
