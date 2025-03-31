@@ -82,3 +82,29 @@ def cmd_validate(args) -> int:
     for e in errors:
         print("  -", e)
     return 1
+
+
+def cmd_arch(args) -> int:
+    """Generate the left-to-right architecture diagram (paper/README-figure style)."""
+    from .arch_render import render_arch_html
+    from .validate import load_schema, validate_schema, validate_arch_structure
+
+    if args.arch:
+        arch = _load_ir(args.arch)
+        _eprint(f"[arch] using supplied arch IR: {args.arch}")
+        title = args.title
+    else:
+        from .extract import extract_arch, claude_available
+        cfg = load_config(args.config)
+        bundle = resolve(args.source, args.target_class, cfg)
+        if not claude_available():
+            _eprint("error: `claude` CLI not found and no --arch supplied. "
+                    "Pass --arch <file.json> to render a pre-computed arch IR.")
+            return 2
+        _eprint(f"[stage 0/1] resolved `{bundle.entry_class}`: {list(bundle.classes.keys())}")
+        if bundle.registry_options:
+            act = ", ".join(sorted(bundle.active_variant_classes())) or "(none selected)"
+            _eprint(f"[variants] active: {act}")
+        _eprint(f"[arch] invoking claude (model={args.model or 'default'}) ...")
+        arch = extract_arch(bundle, model=args.model, timeout=args.timeout)
+        title = args.title or bundle.entry_class
