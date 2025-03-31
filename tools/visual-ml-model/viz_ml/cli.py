@@ -108,3 +108,23 @@ def cmd_arch(args) -> int:
         _eprint(f"[arch] invoking claude (model={args.model or 'default'}) ...")
         arch = extract_arch(bundle, model=args.model, timeout=args.timeout)
         title = args.title or bundle.entry_class
+
+    errors = validate_schema(arch, load_schema(_ARCH_SCHEMA)) + validate_arch_structure(arch)
+    hard = [e for e in errors if not e.startswith("note:")]
+    if hard:
+        _eprint(f"[warn] arch IR has {len(hard)} issue(s) (rendering anyway):")
+        for e in hard[:15]:
+            _eprint("   -", e)
+    else:
+        _eprint("[arch] schema + structure valid.")
+
+    if getattr(args, "save_ir", None):
+        Path(args.save_ir).write_text(json.dumps(arch, indent=2, ensure_ascii=False), encoding="utf-8")
+        _eprint(f"[ok] saved arch IR -> {args.save_ir}")
+
+    out, warns = render_arch_html(arch, args.output, title=title)
+    for w in warns:
+        _eprint("   [layout]", w)
+    _eprint(f"[ok] wrote architecture diagram -> {out}")
+    _eprint(f"      open it:  open {out}")
+    return 0
