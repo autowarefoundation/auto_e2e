@@ -128,3 +128,33 @@ def cmd_arch(args) -> int:
     _eprint(f"[ok] wrote architecture diagram -> {out}")
     _eprint(f"      open it:  open {out}")
     return 0
+
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="viz_ml",
+        description="Read PyTorch model source -> a left-to-right architecture-diagram HTML.",
+    )
+    p.add_argument("--version", action="version", version=f"viz_ml {__version__}")
+    sub = p.add_subparsers(dest="command", required=True)
+
+    def add_resolve_args(sp):
+        sp.add_argument("source", help="path to the model source .py file")
+        sp.add_argument("--class", dest="target_class", required=True,
+                        help="target module class name (e.g. AutoE2E, Block)")
+        sp.add_argument("--config", default=None,
+                        help="JSON/YAML file of concrete constructor args (Registry assumption)")
+
+    sp = sub.add_parser("arch", help="left-to-right architecture diagram (paper/README-figure style)")
+    sp.add_argument("source", nargs="?", help="model source .py (omit if using --arch)")
+    sp.add_argument("--class", dest="target_class", default=None, help="target class name")
+    sp.add_argument("--config", default=None, help="JSON/YAML config of constructor args")
+    sp.add_argument("--arch", default=None,
+                    help="use a pre-computed arch IR JSON instead of invoking Claude")
+    sp.add_argument("-o", "--output", required=True, help="output .html path")
+    sp.add_argument("--save-ir", dest="save_ir", default=None,
+                    help="also write the (Claude-generated) arch IR JSON here")
+    sp.add_argument("--title", default=None, help="figure title")
+    sp.add_argument("--model", default=None, help="claude model id")
+    sp.add_argument("--timeout", type=int, default=600, help="claude call timeout (s)")
+    sp.set_defaults(func=cmd_arch)
