@@ -158,3 +158,16 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--model", default=None, help="claude model id")
     sp.add_argument("--timeout", type=int, default=600, help="claude call timeout (s)")
     sp.set_defaults(func=cmd_arch)
+
+    sp = sub.add_parser("variants", help="list registry/factory variants the model can select among")
+    add_resolve_args(sp)
+    sp.set_defaults(func=cmd_variants)
+
+    sp = sub.add_parser("facts", help="print Stage 0/1 code bundle + AST facts (no LLM)")
+    add_resolve_args(sp)
+    sp.set_defaults(func=cmd_facts)
+
+    sp = sub.add_parser("validate", help="validate an arch_v1 IR JSON file")
+    sp.add_argument("ir", help="path to arch IR JSON")
+    sp.set_defaults(func=cmd_validate)
+    return p
