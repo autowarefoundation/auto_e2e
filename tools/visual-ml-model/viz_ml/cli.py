@@ -171,3 +171,12 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("ir", help="path to arch IR JSON")
     sp.set_defaults(func=cmd_validate)
     return p
+
+
+def main(argv=None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    if args.command == "arch" and not args.arch:
+        if not args.source or not args.target_class:
+            parser.error("arch needs either --arch <file>, or <source.py> with --class <Name>")
+    return args.func(args)
