@@ -180,3 +180,7 @@ def main(argv=None) -> int:
         if not args.source or not args.target_class:
             parser.error("arch needs either --arch <file>, or <source.py> with --class <Name>")
     return args.func(args)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
