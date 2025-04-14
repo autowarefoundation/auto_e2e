@@ -29,3 +29,57 @@
             "items": { "type": ["string", "integer"] },
             "description": "ONE tensor shape shown in the box, free-form paren string PREFERRED, e.g. '(8,96,56,56)' or '(2328)'. null for loss/abstract nodes. (Array form tolerated and normalized to paren style by the renderer.)"
           },
+          "role": {
+            "description": "drives box color. The FIRST group are shared ontology/flow roles; the LAST 5 are new figure-level roles for arch mode.",
+            "enum": ["input", "output", "backbone", "embedding", "convolution",
+                     "self_attention", "cross_attention", "conditioning", "linear_proj",
+                     "ffn_mlp_block", "moe_block", "normalization", "activation",
+                     "positional_encoding", "recurrent", "pooler", "fusion", "head",
+                     "merge_add", "buffer", "other",
+                     "policy", "future_state", "prediction", "learning_method", "loss"]
+          },
+          "train_only": { "type": "boolean", "description": "true if this node exists ONLY during training (aux/self-supervision/loss path). Drives the 'ONLY DURING TRAINING' banner + a dimmed/dashed box. Default false." },
+          "lane": { "type": ["integer", "null"], "minimum": 0, "description": "OPTIONAL column hint, 0=leftmost (inputs). Omit/null to let the layout compute it (longest-path over dataflow edges). Fill for ALL nodes or NONE." },
+          "row": { "type": ["integer", "null"], "description": "OPTIONAL vertical-order hint WITHIN a lane (smaller = higher). Omit/null to auto-order." },
+          "group": { "type": ["string", "null"], "description": "id of a groups[] entry this node belongs to (banner membership), or null" },
+          "detail": { "type": "string", "description": "optional extra sentences shown on click (reuses the #tip mechanism)" },
+          "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+          "params": { "type": ["string", "integer", "null"], "description": "approx param count, e.g. '~28M'" }
+        }
+      }
+    },
+    "edges": {
+      "type": "array",
+      "description": "directed connections. SOLID = dataflow; DASHED is IMPLIED by kind. Unlike flow_v1, you MUST list the main dataflow edges (there is no implied spine).",
+      "items": {
+        "type": "object",
+        "required": ["from", "to", "kind"],
+        "additionalProperties": false,
+        "properties": {
+          "from": { "type": "string", "description": "source node id" },
+          "to": { "type": "string", "description": "target node id" },
+          "kind": {
+            "description": "dataflow=solid gray forward tensor (used for layering); loss=dashed pink edge into a loss node incl. predicted-vs-true comparisons; feedback=dashed amber temporal/recurrent/conditioning/history loop (excluded from layering, bows back); skip=thin gold residual/shortcut (excluded from layering).",
+            "enum": ["dataflow", "loss", "feedback", "skip"]
+          },
+          "label": { "type": ["string", "null"], "description": "optional edge label, e.g. 'fused 8x8 grid (K,V)', 'ego_hidden', 'Trajectory Loss'" }
+        }
+      }
+    },
+    "groups": {
+      "type": "array",
+      "description": "labeled banner bands spanning several nodes, e.g. 'ONLY DURING TRAINING'.",
+      "items": {
+        "type": "object",
+        "required": ["id", "label"],
+        "additionalProperties": false,
+        "properties": {
+          "id": { "type": "string" },
+          "label": { "type": "string", "description": "banner text, e.g. 'ONLY DURING TRAINING'" },
+          "members": { "type": "array", "items": { "type": "string" }, "description": "node ids covered; if omitted, the renderer uses all nodes with train_only=true" },
+          "kind": { "enum": ["train_only_banner", "region"], "description": "default train_only_banner" }
+        }
+      }
+    }
+  }
+}
