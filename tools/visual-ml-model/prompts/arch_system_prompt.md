@@ -50,3 +50,28 @@ Collapse internal Linear/Norm/reshape/dropout. Aim for 8–16 nodes total. Coars
   - output: a returned tensor that is NOT a loss.
 - `train_only`: true when the node is produced/used only under `if self.training:` / mode=='train'
   guards, OR is an aux/self-supervision/prediction/learning node. Set it on the loss nodes too.
+
+## Edges (you MUST list every dataflow edge — there is no implied spine)
+- `dataflow`: solid forward tensor flow (used for left→right layering).
+- `loss`: dashed pink edge into a loss node; emit one from the PREDICTED source AND one from
+  the TARGET/true source (predicted-vs-true), and from each learning_method into its loss.
+- `feedback`: dashed amber temporal/recurrent/conditioning/history loop (GRU loopback,
+  egomotion/history feeding the planner's initial state, a buffer feeding an earlier node).
+- `skip`: thin gold shortcut/reuse (e.g. fused features reused by the future-state head).
+Give edges a short `label` where it clarifies ("ego_hidden", "fused grid (K,V)", "target").
+
+## Banner & branch/merge
+- Supply ONE `groups[]` entry `{id:"train", label:"ONLY DURING TRAINING"}` whenever any node is
+  train_only. The renderer bands the train-only blocks (losses excluded) automatically.
+- fan-in = a node with ≥2 inbound dataflow edges (concat). fan-out = ≥2 outbound (the policy).
+  Just emit the multiple edges; the renderer spreads the ports.
+
+## Losses you can't see
+If loss code lives in a trainer/Lightning file NOT in the bundle, you may still INFER standard
+losses (trajectory loss from the trajectory output; feature loss from a future-features head),
+but set those nodes' `confidence` < 0.6 so they render honestly faded with a "?".
+
+## Output format
+Output ONLY the arch_v1 JSON object. It must begin with `{`, validate against the schema,
+read left-to-right (inputs → spine → outputs/losses), and look like a clean paper architecture
+figure with a training-only band below the inference spine.
