@@ -102,3 +102,64 @@ Live extraction on AutoE2E (Claude-generated; inferred losses render faded with 
 ![AutoE2E arch, live extraction](docs/autoe2e-arch-live.png)
 
 ---
+
+## The arch IR
+
+A general left-to-right node+edge graph — see [`schema/arch_v1.schema.json`](schema/arch_v1.schema.json):
+
+- **nodes**: `{id, title, desc, shape ("(8,256,8,8)"), role, train_only, ...}`. `role` drives
+  the box color (input, backbone, fusion, policy, recurrent, head, output, future_state,
+  prediction, learning_method, buffer, loss, …). `train_only` puts the box in the
+  "ONLY DURING TRAINING" band.
+- **edges**: `{from, to, kind}` where `kind ∈ {dataflow, loss, feedback, skip}` —
+  dataflow = solid gray (used for left→right layering), loss = dashed pink into a loss node,
+  feedback = dashed amber recurrent/conditioning loop, skip = thin gold shortcut.
+- **groups**: the banner label ("ONLY DURING TRAINING").
+- Every claim carries an optional `confidence`; inferred/low-confidence boxes render faded
+  with a `?`, so the figure is honestly uncertain rather than confidently wrong.
+
+The layout is **deterministic** (stdlib only): longest-path columns over dataflow edges,
+barycenter row ordering, a separate lower band for training-only blocks, a dedicated rightmost
+loss column, bezier forward edges, feedback edges routed through a reserved top channel, and a
+banner drawn over the train-only members.
+
+The Stage-3 instructions to Claude are in [`prompts/arch_system_prompt.md`](prompts/arch_system_prompt.md).
+
+---
+
+## Pipeline
+
+```
+source.py ─▶ [0] resolve ─▶ [1] AST facts ─▶ [3] Claude → arch_v1 IR ─▶ [4] validate + render ─▶ HTML
+```
+
+| Stage | What | LLM? | torch? |
+|------|------|:---:|:---:|
+| **0 resolve** | find the target class, follow same-repo imports, select the registry variant, assemble a code bundle | – | no |
+| **1 AST facts** | stdlib `ast`: submodule inventory, `register_buffer(persistent=)`, forward() skeleton | – | no |
+| **3 extract** | **Claude reads the bundle + facts + config and emits the arch_v1 IR** | **yes** | no |
+| **4 validate + render** | stdlib schema + structural checks → deterministic layout → inline SVG → self-contained HTML | – | no |
+
+Everything except Stage 3 is deterministic plumbing; the LLM does the one irreplaceable part
+(understanding the code). Verified live on Autoware **AutoE2E** (multi-file, cross-file
+relative imports, registry/factory view fusion) and a nanoGPT block.
+
+## Repository layout
+
+```
+viz_ml/            resolve.py (stage 0) · ast_facts.py (1) · extract.py (3, Claude→arch IR)
+                   validate.py · arch_render.py (layout + SVG) · cli.py
+schema/            arch_v1.schema.json — the architecture IR contract
+prompts/           arch_system_prompt.md — the Stage-3 instructions to Claude
+examples/          auto_e2e/ (configs + a hand-authored & a live arch IR) · nanogpt/ (model + config)
+docs/              architecture-diagram screenshots
+```
+
+## CLI commands
+
+| Command | Purpose |
+|---------|---------|
+| `arch` | generate the left-to-right architecture diagram (the tool's one job). |
+| `variants` | list the registry/factory variants the model can select among. |
+| `facts` | Stage 0/1 AST extraction only (no LLM). |
+| `validate` | check an arch IR against the schema + structural invariants. |
