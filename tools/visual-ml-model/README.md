@@ -48,3 +48,57 @@ claude --version
 ```
 
 ---
+
+## Usage
+
+### Generate a diagram from source (live — Claude reads your model)
+
+```bash
+python -m viz_ml arch path/to/model.py \
+    --class AutoE2E \
+    --config examples/auto_e2e/autoe2e_bev.json \
+    -o autoe2e.arch.html \
+    --save-ir autoe2e.arch.json     # optional: also keep the generated IR
+open autoe2e.arch.html
+```
+
+This resolves the target class + its same-repo submodules, hands the code + AST facts +
+config to Claude, which emits an `arch_v1` IR; the IR is validated and rendered to a
+self-contained HTML/SVG figure.
+
+### Render a pre-computed / hand-edited IR (offline, no Claude call)
+
+```bash
+python -m viz_ml arch --arch examples/auto_e2e/autoe2e.arch.json -o autoe2e.arch.html
+```
+
+The IR is plain JSON — tweak a title, a shape, or an edge and re-render instantly.
+
+### Registry / factory models — pick a variant
+
+Many models build submodules through a registry/factory (e.g. AutoE2E selects its view-fusion
+via `build_view_fusion(fusion_mode)` over `FUSION_REGISTRY = {"concat":…, "cross_attn":…,
+"bev":…}`). The tool follows the factory to all candidates and lets you choose one via config:
+
+```bash
+python -m viz_ml variants path/to/auto_e2e.py --class AutoE2E
+#   FUSION_REGISTRY:
+#     "concat"      -> ConcatViewFusion
+#     "cross_attn"  -> CrossAttentionViewFusion
+#     "bev"         -> BEVViewFusion   ◀ ACTIVE  (when config says "fusion_mode":"bev")
+```
+
+The selected class is drawn as the active architecture; the others are excluded from the flow.
+
+### Other commands
+
+```bash
+python -m viz_ml facts model.py --class AutoE2E      # Stage 0/1 AST extraction only (no LLM)
+python -m viz_ml validate autoe2e.arch.json          # check an arch IR against the schema
+```
+
+Live extraction on AutoE2E (Claude-generated; inferred losses render faded with a `?`):
+
+![AutoE2E arch, live extraction](docs/autoe2e-arch-live.png)
+
+---
