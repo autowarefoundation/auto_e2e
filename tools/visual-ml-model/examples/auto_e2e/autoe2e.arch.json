@@ -15,3 +15,35 @@
     { "id": "policy", "title": "Driving Policy", "role": "policy", "shape": "(B,256)", "desc": "decode the future trajectory from current visual features, past visual features and egomotion history" },
     { "id": "traj", "title": "Future Trajectory Prediction", "role": "output", "shape": "(128)", "desc": "tuple of future acceleration + curvature over a 6.4s horizon at 10Hz" },
     { "id": "compressed", "title": "Compressed Visual Scene Representation", "role": "buffer", "shape": "(14)", "desc": "a compact feature representation of the current visual scene" }
+,
+    { "id": "future", "title": "Future Visual State", "role": "future_state", "shape": "(8,1440,7,7)", "train_only": true, "desc": "predict the future feature state at 1.6s intervals over a 6.4s horizon (4 predictions)" },
+    { "id": "predfeat", "title": "Predicted future features", "role": "prediction", "shape": "4x(8,1440,7,7)", "train_only": true, "desc": "future visual feature at 1.6s / 3.2s / 4.8s / 6.4s" },
+    { "id": "truefeat", "title": "True future features", "role": "buffer", "shape": "4x(8,1440,7,7)", "train_only": true, "desc": "recorded relative future camera frames + map state at the 4 horizons (frozen SwinV2-Tiny)" },
+    { "id": "il", "title": "Imitation Learning", "role": "learning_method", "shape": null, "train_only": true, "desc": "ground-truth human driving" },
+    { "id": "rl", "title": "Reinforcement Learning", "role": "learning_method", "shape": null, "train_only": true, "desc": "world-model simulation" },
+    { "id": "featloss", "title": "Feature Loss", "role": "loss", "shape": null, "train_only": true },
+    { "id": "trajloss", "title": "Trajectory Loss", "role": "loss", "shape": null, "train_only": true }
+  ],
+  "edges": [
+    { "from": "cams", "to": "backbone", "kind": "dataflow" },
+    { "from": "backbone", "to": "fusion", "kind": "dataflow", "label": "multi-scale" },
+    { "from": "fusion", "to": "concat", "kind": "dataflow", "label": "fused (8,1440,7,7) -> 1176" },
+    { "from": "ego", "to": "concat", "kind": "dataflow" },
+    { "from": "vhist", "to": "concat", "kind": "dataflow" },
+    { "from": "concat", "to": "policy", "kind": "dataflow" },
+    { "from": "policy", "to": "traj", "kind": "dataflow" },
+    { "from": "policy", "to": "compressed", "kind": "dataflow" },
+    { "from": "compressed", "to": "vhist", "kind": "feedback", "label": "into scene-history buffer" },
+    { "from": "fusion", "to": "future", "kind": "skip", "label": "fused features" },
+    { "from": "policy", "to": "future", "kind": "feedback", "label": "ego_hidden" },
+    { "from": "future", "to": "predfeat", "kind": "dataflow" },
+    { "from": "predfeat", "to": "featloss", "kind": "loss" },
+    { "from": "truefeat", "to": "featloss", "kind": "loss", "label": "target" },
+    { "from": "traj", "to": "trajloss", "kind": "loss" },
+    { "from": "il", "to": "trajloss", "kind": "loss" },
+    { "from": "rl", "to": "trajloss", "kind": "loss" }
+  ],
+  "groups": [
+    { "id": "train", "label": "ONLY DURING TRAINING" }
+  ]
+}
