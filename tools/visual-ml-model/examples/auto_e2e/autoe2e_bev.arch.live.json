@@ -29,3 +29,21 @@
     { "id": "loss_trajectory", "title": "Trajectory Loss", "desc": "Supervision on predicted vs ground-truth waypoints (inferred)", "shape": null, "role": "loss", "train_only": true, "confidence": 0.5 },
     { "id": "loss_feature", "title": "Feature Prediction Loss", "desc": "Self-supervised loss: predicted future BEV vs actual future BEV (inferred)", "shape": null, "role": "loss", "train_only": true, "confidence": 0.5 }
   ],
+  "edges": [
+    { "from": "input_cameras", "to": "backbone", "kind": "dataflow", "label": "(B*8,3,H,W)" },
+    { "from": "backbone", "to": "bev_fusion", "kind": "dataflow", "label": "4 multi-scale feature maps" },
+    { "from": "input_camera_params", "to": "bev_fusion", "kind": "dataflow", "label": "ego-to-pixel projection" },
+    { "from": "bev_fusion", "to": "trajectory_planner", "kind": "dataflow", "label": "BEV grid (256,450,300)" },
+    { "from": "input_visual_history", "to": "trajectory_planner", "kind": "feedback", "label": "visual memory GRU h0" },
+    { "from": "input_egomotion", "to": "trajectory_planner", "kind": "feedback", "label": "ego history GRU h0" },
+    { "from": "trajectory_planner", "to": "output_trajectory", "kind": "dataflow", "label": null },
+    { "from": "trajectory_planner", "to": "output_ego_hidden", "kind": "dataflow", "label": null },
+    { "from": "trajectory_planner", "to": "future_state", "kind": "dataflow", "label": "ego_hidden" },
+    { "from": "bev_fusion", "to": "future_state", "kind": "skip", "label": "fused BEV (reuse)" },
+    { "from": "output_trajectory", "to": "loss_trajectory", "kind": "loss", "label": "predicted" },
+    { "from": "future_state", "to": "loss_feature", "kind": "loss", "label": "predicted future features" }
+  ],
+  "groups": [
+    { "id": "train", "label": "ONLY DURING TRAINING", "kind": "train_only_banner" }
+  ]
+}
