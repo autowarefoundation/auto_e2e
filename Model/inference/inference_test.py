@@ -25,13 +25,13 @@ def main():
     # Length 14 compressed visual feature vector at 10Hz
     # for 6.4s past horizon giving 896 samples
     visual_history = torch.randn(896)
-
     
-    # Run inference
+    # Run inference - returns trajectory and compressed
+    # visual feature vector of the current scene
     trajectory, compressed_visual_feature_vector = \
         model(visual_tiles, visual_history, egomotion_history)
 
-    # Print the output tensor shape
+    # Print the output tensor shapes
     print("Trajectory : ", trajectory.shape)
     print("Visual Feature Vector : ", compressed_visual_feature_vector.shape)
 
