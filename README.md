@@ -30,3 +30,7 @@
 AutoFSD outputs can be fused with Physics-based sensors such as LIDAR/RADAR to power **fully driverless Robotaxi applications**, and the basline camera-only model can be used to enable **L2++ automotive ADAS** applications for point-to-point hands-free navigation.
 
 To learn more about how to participate in this project, please read the [onboarding guide](/ONBOARDING.md)
+
+## Getting started
+- Install the dependencies from the **requirements.txt** file
+- Visit the [Model](./Model/) folder to view the model components, run training and perform inference
