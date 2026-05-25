@@ -11,7 +11,7 @@ class DrivingPolicy(nn.Module):
         # Linear layers to process fused features
         self.fc1 = nn.Linear(1176, 1176)
         self.fc2 = nn.Linear(1176, 588)
-        self.fc3 = nn.Linear(588, 64)
+        self.fc3 = nn.Linear(588, 128)
 
         # Dropout
         self.dropout = nn.Dropout(0.25)
