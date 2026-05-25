@@ -16,5 +16,5 @@ dummy_input = torch.randn(1, 3, 224, 224)
 # Run inference
 output = model(dummy_input)
 
-# Verify output shape (Expected for Tiny: [batch, 768])
+# Print the output tensor shape
 print(output.shape)
