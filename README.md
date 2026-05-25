@@ -1,0 +1,32 @@
+# AutoFSD - End-to-End AI for Self Driving
+
+<p align="center">
+    <picture>
+        <source media="(prefers-color-scheme: dark)">
+        <img src="./Media/autofsd_logo.jpg" alt="VisionPilot" width="100%">
+    </picture>
+</p>
+
+<div align="center">
+
+[![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
+[![Discord](https://img.shields.io/discord/953808765935816715?label=Autoware%20Discord)](https://discord.com/invite/Q94UsPvReQ)
+
+![PyTorch](https://img.shields.io/badge/PyTorch-EE4C2C?style=for-the-badge&logo=pytorch&logoColor=white)
+[![LinkedIn](https://img.shields.io/badge/LinkedIn-0077B5?style=for-the-badge&logo=linkedin&logoColor=white)](https://www.linkedin.com/company/the-autoware-foundation)
+[![YouTube](https://img.shields.io/badge/YouTube-FF0000?style=for-the-badge&logo=youtube&logoColor=white)](https://www.youtube.com/@autowarefoundation)
+[![Website](https://img.shields.io/badge/website-000000?style=for-the-badge&logo=About.me&logoColor=white)](https://autoware.org/)
+</div>
+
+<div align="center">
+
+⭐ Star us on GitHub — your support motivates us a lot!
+
+</div>
+
+## Free and fully open-source End-to-End AI model
+**AutoFSD is an open-source End-to-End AI model** which enables autonomous driving across highways, arterial roads and city streets using cameras-only, and without reliance on HD-maps. 
+
+AutoFSD outputs can be fused with Physics-based sensors such as LIDAR/RADAR to power **fully driverless Robotaxi applications**, and the basline camera-only model can be used to enable **L2++ automotive ADAS** applications for point-to-point hands-free navigation.
+
+To learn more about how to participate in this project, please read the [onboarding guide](/ONBOARDING.md)
