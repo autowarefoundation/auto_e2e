@@ -1,6 +1,7 @@
 import torch.nn as nn
 from .backbone import Backbone
 from .feature_fusion import FeatureFusion
+from .driving_policy import DrivingPolicy
 
 
 class AutoFSD(nn.Module):
@@ -12,9 +13,13 @@ class AutoFSD(nn.Module):
 
         # Multi-scale feature fusion
         self.FeatureFusion = FeatureFusion()
+
+        # Driving policy head
+        self.DrivingPolicy = DrivingPolicy()
    
 
     def forward(self,image):
         features = self.Backbone(image)
         fused_features = self.FeatureFusion(features)
-        return fused_features
+        driving_policy = self.DrivingPolicy(fused_features)
+        return driving_policy
