@@ -11,8 +11,9 @@ def main():
     # Instantiate model
     model = AutoFSD()
 
-    # Dummy Visual Input
+    # Dummy Visual Scene Input
     # 7 cameras + 1 map tile - in batch dimension
+    # giving 8 effective visual inputs
     visual_tiles = torch.randn(8, 3, 224, 224)
 
     # Dummy Egomotion History Input
@@ -20,12 +21,19 @@ def main():
     # 6.4s past history giving 64 x 4 samples at 10Hz
     egomotion_history = torch.randn(256)
 
+    # Dummy Visual Scene History
+    # Length 14 compressed visual feature vector at 10Hz
+    # for 6.4s past horizon giving 896 samples
+    visual_history = torch.randn(896)
+
     
     # Run inference
-    output = model(visual_tiles, egomotion_history)
+    trajectory, compressed_visual_feature_vector = \
+        model(visual_tiles, visual_history, egomotion_history)
 
     # Print the output tensor shape
-    print(output.shape)
+    print("Trajectory : ", trajectory.shape)
+    print("Visual Feature Vector : ", compressed_visual_feature_vector.shape)
 
 if __name__ == "__main__":
     main()
