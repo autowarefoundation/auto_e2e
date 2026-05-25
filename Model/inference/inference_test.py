@@ -13,16 +13,16 @@ def main():
 
     # Dummy Visual Input
     # 7 cameras + 1 map tile - in batch dimension
-    dummy_visual_input = torch.randn(8, 3, 224, 224)
+    visual_tiles = torch.randn(8, 3, 224, 224)
 
     # Dummy Egomotion History Input
     # Speed, Acceleration, Yaw Angle, Yaw Rate for
     # 6.4s past history giving 64 x 4 samples at 10Hz
-    dummy_egomotion_history_input = torch.randn(256)
+    egomotion_history = torch.randn(256)
 
     
     # Run inference
-    output = model(dummy_visual_input, dummy_egomotion_history_input)
+    output = model(visual_tiles, egomotion_history)
 
     # Print the output tensor shape
     print(output.shape)
