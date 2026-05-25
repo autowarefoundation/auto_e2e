@@ -6,9 +6,9 @@ class DrivingPolicy(nn.Module):
         super(DrivingPolicy, self).__init__()
 
         # 2D Conv layer to reduce channels
-        self.reduce_channels = nn.Conv2d(1440, 24, 3, 1, 1)
+        self.reduce_channels = nn.Conv2d(1440, 3, 3, 1, 1)
 
-        # Linear layers to process fused features
+        # Linear layers to process reduced features
         self.fc1 = nn.Linear(1176, 1176)
         self.fc2 = nn.Linear(1176, 588)
         self.fc3 = nn.Linear(588, 128)
@@ -24,6 +24,7 @@ class DrivingPolicy(nn.Module):
         # Reduce channels
         feature_map = self.reduce_channels(fused_features)
         feature_vector = torch.flatten(feature_map)
+        print(feature_vector.shape)
 
         # Multi-layer perceptron
         f1 = self.fc1(feature_vector)
