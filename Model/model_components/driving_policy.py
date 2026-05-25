@@ -9,9 +9,12 @@ class DrivingPolicy(nn.Module):
         self.reduce_channels = nn.Conv2d(1440, 3, 3, 1, 1)
 
         # Linear layers to process reduced features
-        self.fc1 = nn.Linear(1432, 1432)
-        self.fc2 = nn.Linear(1432, 716)
-        self.fc3 = nn.Linear(716, 128)
+        self.fc1 = nn.Linear(2328, 2328)
+        self.fc2 = nn.Linear(2328, 1164)
+        self.fc3 = nn.Linear(1164, 128)
+
+        # Visual history compression layer
+        self.compress_vision = nn.Linear(1176, 14)
 
         # Dropout
         self.dropout = nn.Dropout(0.25)
@@ -19,15 +22,16 @@ class DrivingPolicy(nn.Module):
         # Activation
         self.activation = nn.GELU()
  
-    def forward(self, fused_features, ego_motion):
+    def forward(self, fused_features, visual_history, egomotion_history):
 
         # Reduce visual feature channels
         feature_map = self.reduce_channels(fused_features)
 
         # Flatten visual features and concatenate with
-        # egomotion history
-        feature_vector = torch.cat((torch.flatten(feature_map), 
-                                    ego_motion), dim=0)
+        # visual scene history and egomotion history
+        visual_feature_vector = torch.flatten(feature_map)
+        feature_vector = torch.cat((visual_feature_vector, 
+                                    visual_history, egomotion_history), dim=0)
         
         # Multi-layer perceptron
         f1 = self.fc1(feature_vector)
@@ -42,4 +46,9 @@ class DrivingPolicy(nn.Module):
         # 10Hz yielding a 6.4s future time horizon prediction
         trajectory = self.fc3(f2)
 
-        return trajectory   
+        # Compressed visual feature vector of length 14 to form
+        # visual history
+        compressed_visual_feature_vector = \
+            self.compress_vision(visual_feature_vector)
+
+        return trajectory, compressed_visual_feature_vector   

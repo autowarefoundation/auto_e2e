@@ -18,8 +18,11 @@ class AutoFSD(nn.Module):
         self.DrivingPolicy = DrivingPolicy()
    
 
-    def forward(self, image, ego_motion):
+    def forward(self, image, visual_history, egomotion_history):
         features = self.Backbone(image)
         fused_features = self.FeatureFusion(features)
-        driving_policy = self.DrivingPolicy(fused_features, ego_motion)
-        return driving_policy
+
+        driving_policy, compressed_visual_feature_vector = \
+            self.DrivingPolicy(fused_features, visual_history, egomotion_history)
+        
+        return driving_policy, compressed_visual_feature_vector
