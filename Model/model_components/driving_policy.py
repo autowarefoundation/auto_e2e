@@ -21,9 +21,13 @@ class DrivingPolicy(nn.Module):
  
     def forward(self, fused_features, ego_motion):
 
-        # Reduce channels
+        # Reduce visual feature channels
         feature_map = self.reduce_channels(fused_features)
-        feature_vector = torch.cat((torch.flatten(feature_map), ego_motion), dim=0)
+
+        # Flatten visual features and concatenate with
+        # egomotion history
+        feature_vector = torch.cat((torch.flatten(feature_map), 
+                                    ego_motion), dim=0)
         
         # Multi-layer perceptron
         f1 = self.fc1(feature_vector)
@@ -34,6 +38,8 @@ class DrivingPolicy(nn.Module):
         f2 = self.activation(f2)
         f2 = self.dropout(f2)
 
+        # Trajectory output - 64 x (acceleration & curvature) at
+        # 10Hz yielding a 6.4s future time horizon prediction
         trajectory = self.fc3(f2)
 
         return trajectory   
