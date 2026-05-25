@@ -9,9 +9,9 @@ class DrivingPolicy(nn.Module):
         self.reduce_channels = nn.Conv2d(1440, 3, 3, 1, 1)
 
         # Linear layers to process reduced features
-        self.fc1 = nn.Linear(1176, 1176)
-        self.fc2 = nn.Linear(1176, 588)
-        self.fc3 = nn.Linear(588, 128)
+        self.fc1 = nn.Linear(1432, 1432)
+        self.fc2 = nn.Linear(1432, 716)
+        self.fc3 = nn.Linear(716, 128)
 
         # Dropout
         self.dropout = nn.Dropout(0.25)
@@ -19,13 +19,12 @@ class DrivingPolicy(nn.Module):
         # Activation
         self.activation = nn.GELU()
  
-    def forward(self, fused_features):
+    def forward(self, fused_features, ego_motion):
 
         # Reduce channels
         feature_map = self.reduce_channels(fused_features)
-        feature_vector = torch.flatten(feature_map)
-        print(feature_vector.shape)
-
+        feature_vector = torch.cat((torch.flatten(feature_map), ego_motion), dim=0)
+        
         # Multi-layer perceptron
         f1 = self.fc1(feature_vector)
         f1 = self.activation(f1)
