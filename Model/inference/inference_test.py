@@ -1,7 +1,7 @@
 import torch
 import sys
 sys.path.append('..')
-from model_components.auto_fsd import AutoFSD
+from model_components.auto_e2e import AutoE2E
 
 def main():
     # Device for inference
@@ -9,7 +9,7 @@ def main():
     print(f'Using {device} for inference \n')
             
     # Instantiate model
-    model = AutoFSD()
+    model = AutoE2E()
 
     # Dummy Visual Scene Input
     # 7 cameras + 1 map tile - in batch dimension
