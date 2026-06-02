@@ -1,9 +1,9 @@
-# AutoFSD - End-to-End AI for Self Driving
+# AutoE2E - End-to-End AI for Self Driving
 
 <p align="center">
     <picture>
         <source media="(prefers-color-scheme: dark)">
-        <img src="./Media/autofsd_logo.jpg" alt="VisionPilot" width="100%">
+        <img src="./Media/auto_e2e_logo.jpg" alt="VisionPilot" width="100%">
     </picture>
 </p>
 
@@ -11,8 +11,8 @@
 
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 [![Discord](https://img.shields.io/discord/953808765935816715?label=Autoware%20Discord)](https://discord.com/invite/Q94UsPvReQ)
-![GitHub commit activity](https://img.shields.io/github/commit-activity/m/autowarefoundation/auto_fsd)
-![GitHub Repo stars](https://img.shields.io/github/stars/autowarefoundation/auto_fsd)
+![GitHub commit activity](https://img.shields.io/github/commit-activity/m/autowarefoundation/auto_e2e)
+![GitHub Repo stars](https://img.shields.io/github/stars/autowarefoundation/auto_e2e)
 
 ![PyTorch](https://img.shields.io/badge/PyTorch-EE4C2C?style=for-the-badge&logo=pytorch&logoColor=white)
 [![LinkedIn](https://img.shields.io/badge/LinkedIn-0077B5?style=for-the-badge&logo=linkedin&logoColor=white)](https://www.linkedin.com/company/the-autoware-foundation)
@@ -27,9 +27,9 @@
 </div>
 
 ## Free and fully open-source End-to-End AI model
-**AutoFSD is an open-source End-to-End AI model** which enables autonomous driving across highways, arterial roads and city streets using cameras-only, and without reliance on HD-maps. 
+**AutoE2E is an open-source End-to-End AI model** which enables autonomous driving across highways, arterial roads and city streets using cameras-only, and without reliance on HD-maps. 
 
-AutoFSD outputs can be fused with Physics-based sensors such as LIDAR/RADAR to power **fully driverless Robotaxi applications**, and the basline camera-only model can be used to enable **L2++ automotive ADAS** applications for point-to-point hands-free navigation.
+AutoE2E outputs can be fused with Physics-based sensors such as LIDAR/RADAR to power **fully driverless Robotaxi applications**, and the basline camera-only model can be used to enable **L2++ automotive ADAS** applications for point-to-point hands-free navigation.
 
 To learn more about how to participate in this project, please read the [onboarding guide](/ONBOARDING.md)
 
