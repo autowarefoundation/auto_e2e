@@ -5,9 +5,9 @@ from .driving_policy import DrivingPolicy
 from .future_state import FutureState
 
 
-class AutoFSD(nn.Module):
+class AutoE2E(nn.Module):
     def __init__(self):
-        super(AutoFSD, self).__init__()
+        super(AutoE2E, self).__init__()
         
         # Backbone feature extractor
         self.Backbone = Backbone()
