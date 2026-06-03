@@ -37,10 +37,11 @@ To learn more about how to participate in this project, please read the [onboard
 - Install the dependencies from the **requirements.txt** file
 - Visit the [Model](./Model/) folder to view the model components, run training and perform inference
 
+## Inference Speed Benchmark
 
-## Inference Speed Benchmarks
-Coming soon - stay tuned
-- Frame rate (FPS):
-- Inference time (ms):
-- Jitter (inference time stability in ms):
-- VRAM usage (GB):
+| GPU | FPS | Average Latency [ms] | Worst-Case Latency [ms] | Latency Jitter [ms] | Peak VRAM Allocated [MB] | Peak VRAM Reserved [MB] |
+| --- | --- | --------------- | ------------------ | -------------- | ------------------- | ------------------ |
+| NVIDIA GeForce RTX 4050 | 17.30 | 57.80 | 60.19| 3.04 | 2863.16 | 3242.00 |
+| ADD YOURS! | - | - | -| - | - | - |
+
+To obtain benchmarks for your GPU, simply run the [benchmarking script](https://github.com/autowarefoundation/auto_e2e/tree/speed_benchmarking/Model/speed_benchmark). There, you can also read more about the meaning of benchmark parameters.
