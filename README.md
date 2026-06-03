@@ -38,7 +38,7 @@ To learn more about how to participate in this project, please read the [onboard
 - Visit the [Model](./Model/) folder to view the model components, run training and perform inference
 
 
-# Inference Speed Benchmarks
+## Inference Speed Benchmarks
 Coming soon - stay tuned
 - Frame rate (FPS):
 - Inference time (ms):
