@@ -1,0 +1,1 @@
+# Data parsing recipe for [LeRobot L2D Dataset](https://huggingface.co/blog/lerobot-goes-to-driving-school)

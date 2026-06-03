@@ -1,0 +1,1 @@
+# Data parsing recipe for [KIT Scenes Multimodal Dataset](https://kitscenes.com/multimodal/)
