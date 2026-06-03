@@ -40,3 +40,7 @@ To learn more about how to participate in this project, please read the [onboard
 
 # Inference Speed Benchmarks
 Coming soon - stay tuned
+- Frame rate (FPS):
+- Inference time (ms):
+- Jitter (inference time stability in ms):
+- VRAM usage (GB):
