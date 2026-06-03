@@ -44,4 +44,4 @@ To learn more about how to participate in this project, please read the [onboard
 | NVIDIA GeForce RTX 4050 | 17.30 | 57.80 | 60.19| 3.04 | 2863.16 | 3242.00 |
 | ADD YOURS! | - | - | -| - | - | - |
 
-To obtain benchmarks for your GPU, simply run the [benchmarking script](https://github.com/autowarefoundation/auto_e2e/tree/speed_benchmarking/Model/speed_benchmark). There, you can also read more about the meaning of benchmark parameters.
+To obtain benchmarks for your GPU, simply run the [benchmarking script](https://github.com/autowarefoundation/auto_e2e/tree/main/Model/speed_benchmark). There, you can also read more about the meaning of benchmark parameters.
