@@ -31,11 +31,11 @@ def main():
 
     # 1. Warm-up Phase
     print("Warming up GPU...")
-    for _ in range(10):
+    for _ in range(30):
         _ = model(visual_tiles, visual_history, egomotion_history) # we discard the output
 
     # 2. Benchmark Phase
-
+    print("Benchmarking now ...")
     num_iters = 100
 
     latencies = []
@@ -58,15 +58,17 @@ def main():
     avg_latency = np.mean(latencies)
     p1_latency = np.percentile(latencies, 1)
     p99_latency = np.percentile(latencies, 99)
+    jitter = p99_latency - p1_latency
 
     peak_allocated = torch.cuda.max_memory_allocated() / (1024 ** 2)
     peak_reserved = torch.cuda.max_memory_reserved() / (1024 ** 2)
 
+    print("======================")
     print(f"Average FPS: {avg_fps:.2f}")
     print(f"Average Latency: {avg_latency:.2f}")
-    print(f"Best-Case Latency (p1): {p1_latency:.2f} ms")
     print(f"Worst-Case Latency (p99): {p99_latency:.2f} ms")
-    print("---")
+    print(f"Latency Jitter (p99 - p1): {jitter:.2f} ms")
+    print("----------------------")
     print(f"Peak VRAM Allocated: {peak_allocated:.2f} MB")
     print(f"Peak VRAM Reserved: {peak_reserved:.2f} MB")
 
