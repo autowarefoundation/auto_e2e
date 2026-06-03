@@ -36,3 +36,7 @@ To learn more about how to participate in this project, please read the [onboard
 ## Getting started
 - Install the dependencies from the **requirements.txt** file
 - Visit the [Model](./Model/) folder to view the model components, run training and perform inference
+
+
+# Inference Speed Benchmarks
+Coming soon - stay tuned
