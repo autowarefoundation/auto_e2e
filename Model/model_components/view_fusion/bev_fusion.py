@@ -185,6 +185,10 @@ class BEVViewFusion(nn.Module):
         output = torch.zeros(B, N, C, device=fused_per_view.device)
         visible_count = torch.zeros(B, N, 1, device=fused_per_view.device)
 
+        # Reshape value-projected features to spatial format for grid_sample
+        # values: [B, V, H*W, C] -> [B*V, C, H, W]
+        values_spatial = values.permute(0, 1, 3, 2).reshape(B * V, C, H, W)
+
         for v_idx in range(V):
             # Sampling locations for this camera: [B, N, num_z, 2]
             sample_locs = ref_2d[:, v_idx] + offset_mean  # [B, N, num_z, 2]
@@ -192,11 +196,8 @@ class BEVViewFusion(nn.Module):
             # Convert to grid_sample format: [-1, 1] range
             sample_grid = sample_locs * 2 - 1  # [B, N, num_z, 2]
 
-            # Reshape image features for grid_sample: [B, C, H, W]
-            feat_v = fused_per_view[
-                torch.arange(B).unsqueeze(1).expand(B, 1).reshape(-1) * V + v_idx
-            ]  # [B, C, H, W]
-            feat_v = fused_per_view.reshape(B, V, C, H, W)[:, v_idx]  # [B, C, H, W]
+            # Use value-projected features (not raw features) for sampling
+            feat_v = values_spatial.reshape(B, V, C, H, W)[:, v_idx]  # [B, C, H, W]
 
             # grid_sample expects grid of shape [B, H_out, W_out, 2]
             # We treat our sampling as [B, N, num_z, 2]
