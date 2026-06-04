@@ -269,8 +269,14 @@ class BEVViewFusion(nn.Module):
         # Average across visible cameras
         output = output / visible_count.clamp(min=1.0)
 
+        # Zero out BEV cells with no visible camera observations.
+        # Without this, learned queries alone would produce non-zero features
+        # for unobserved regions, misleading downstream planning.
+        has_observation = (visible_count > 0).float()  # [B, N, 1]
+        output = output * has_observation
+
         # --- 6. Post-attention: residual + LayerNorm + FFN ---
-        output = queries + self.output_proj(output)
+        output = queries * has_observation + self.output_proj(output)
         output = self.norm1(output)
         output = output + self.ffn(output)
         output = self.norm2(output)

@@ -242,7 +242,7 @@ Our design trades geometric precision for simplicity. When camera calibration be
 
 ### 7.1 Design
 
-Implements BEVFormer-style [1] spatial cross-attention where learnable BEV queries attend to multi-camera image features at geometry-guided 3D reference points. This is the same architecture used as the default BEV encoder in UniAD [2].
+Implements a simplified BEV fusion module inspired by BEVFormer [1]. Learnable BEV queries attend to multi-camera image features at geometry-guided 3D reference points. This is a single-head, single-layer simplification — not a full replication of BEVFormer's multi-head, 6-layer encoder as used in UniAD [2]. It serves as a functional BEV fusion baseline and foundation for future expansion.
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
@@ -337,10 +337,12 @@ sampled_features = F.grid_sample(value_features, sample_locations)
 output = attention_weights * sampled_features
 ```
 
-This is mathematically equivalent to deformable attention [8] when:
+This is conceptually similar to deformable attention [8], sharing key principles:
 - Reference points correspond to the projected 3D locations
 - Offsets are predicted from queries (analogous to deformable offsets)
 - Attention weights are predicted from queries (not from Q-K dot product)
+
+Note: Our implementation is a single-head simplification using `F.grid_sample`. Full BEVFormer uses multi-head deformable attention with per-head independent sampling patterns and custom CUDA kernels for efficiency.
 
 The key difference from standard attention [7]:
 
@@ -488,9 +490,9 @@ Model/model_components/
 | Module | Parameters | Notes |
 |--------|-----------|-------|
 | Backbone (Swin-Tiny) | ~28M | Pretrained, optionally frozen |
-| ConcatViewFusion | ~15M | Single Conv2d(11520, 1440, 1) |
-| CrossAttentionViewFusion | ~12M | MHA + FFN |
-| BEVViewFusion | ~18M | Queries + projections + attention + FFN |
+| ConcatViewFusion | ~16.6M | Conv2d(11520, 1440, 1) |
+| CrossAttentionViewFusion | ~16.6M | MHA(1440, 8 heads) + FFN(1440→2880→1440) |
+| BEVViewFusion | ~13.0M | Queries + value_proj + offsets + attn_weights + output_proj + FFN |
 | DrivingPolicy | ~3M | Conv + MLP |
 | FutureState | ~25M | Two large Conv2d layers |
 
