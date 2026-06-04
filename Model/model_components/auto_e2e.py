@@ -6,30 +6,36 @@ from .future_state import FutureState
 
 
 class AutoE2E(nn.Module):
-    def __init__(self):
+    def __init__(self, num_views=8, fusion_mode="concat"):
         super(AutoE2E, self).__init__()
-        
+
+        self.num_views = num_views
+
         # Backbone feature extractor
         self.Backbone = Backbone()
 
-        # Multi-scale feature fusion
-        self.FeatureFusion = FeatureFusion()
+        # Multi-scale feature fusion with view unification
+        self.FeatureFusion = FeatureFusion(num_views=num_views, fusion_mode=fusion_mode)
 
         # Driving policy prediction
         self.DrivingPolicy = DrivingPolicy()
 
         # Future visual state prediction
         self.FutureState = FutureState()
-   
 
-    def forward(self, image, visual_history, egomotion_history):
+    def forward(self, x, visual_history, egomotion_history):
+        B, V, C, H, W = x.shape
 
-        features = self.Backbone(image)
-        fused_features = self.FeatureFusion(features)
+        # Merge batch and views for backbone processing
+        x = x.reshape(B * V, C, H, W)
+        features = self.Backbone(x)
+
+        # Fuse multi-scale features and unify across views
+        fused_features = self.FeatureFusion(features, B, V)
 
         driving_policy, compressed_visual_feature_vector = \
             self.DrivingPolicy(fused_features, visual_history, egomotion_history)
-        
+
         future_visual_features = self.FutureState(fused_features)
-        
+
         return driving_policy, compressed_visual_feature_vector, future_visual_features
