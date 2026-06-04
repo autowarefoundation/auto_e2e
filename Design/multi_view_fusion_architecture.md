@@ -57,7 +57,7 @@ Input: [B, V, 3, 224, 224]
          │  reshape to [B*V, 3, 224, 224]
          ▼
 ┌─────────────────────────────┐
-│  Backbone (SwinV2-Tiny)     │  Pretrained on ImageNet-22k [5]
+│  Backbone (Swin-Tiny)     │  Pretrained on ImageNet-22k [5]
 │  Multi-scale feature maps   │  4 stages: 96, 192, 384, 768 channels
 └─────────────────────────────┘
          │
@@ -119,19 +119,22 @@ model = AutoE2E(num_views=8, fusion_mode="bev")
 
 ---
 
-## 4. Backbone: SwinV2-Tiny
+## 4. Backbone: Swin V1 Tiny (Current)
 
-### 4.1 Choice Rationale
+### 4.1 Current Choice
 
-| Criterion | SwinV2-Tiny | ResNet-50 | ViT-Base |
+The current backbone is **Swin V1 Tiny** (`swin_tiny_patch4_window7_224.ms_in22k`), pretrained on ImageNet-22k. This was chosen as an initial starting point. A separate proposal to make the backbone configurable is tracked in a dedicated issue.
+
+| Criterion | Swin V1 Tiny | ResNet-50 | ViT-Base |
 |-----------|-------------|-----------|----------|
 | Parameters | 28M | 25M | 86M |
 | ImageNet-22k pretrained | ✓ | ✓ | ✓ |
 | Multi-scale features | ✓ (4 stages) | ✓ (4 stages) | ✗ (single scale) |
 | Window attention | ✓ (efficient) | N/A (conv) | ✗ (quadratic) |
-| Cross-resolution transfer | ✓ (log-CPB [5]) | N/A | ✗ |
 
-SwinV2 [5] provides hierarchical multi-scale features (essential for multi-scale pooling in the fusion stage) while maintaining computational efficiency through shifted window attention. The Tiny variant balances model capacity with the project's current stage (no large-scale dataset yet).
+Swin V1 [5] provides hierarchical multi-scale features (essential for multi-scale pooling in the fusion stage) while maintaining computational efficiency through shifted window attention. The Tiny variant balances model capacity with the project's current stage (no large-scale dataset yet).
+
+> **Note**: The backbone choice is subject to change. See the backbone configurability issue for discussion on ResNet-50 (BEVFormer/UniAD default), Swin V2, ConvNeXt, and other candidates.
 
 ### 4.2 Multi-Scale Feature Extraction
 
@@ -468,7 +471,7 @@ Following UniAD [2]:
 ```
 Model/model_components/
 ├── auto_e2e.py                        # Main model (num_views, fusion_mode params)
-├── backbone.py                        # SwinV2-Tiny
+├── backbone.py                        # Swin-Tiny
 ├── feature_fusion.py                  # Multi-scale pool + dispatch to view_fusion
 ├── view_fusion/
 │   ├── __init__.py                    # FUSION_REGISTRY + build_view_fusion()
@@ -484,7 +487,7 @@ Model/model_components/
 
 | Module | Parameters | Notes |
 |--------|-----------|-------|
-| Backbone (SwinV2-Tiny) | ~28M | Pretrained, optionally frozen |
+| Backbone (Swin-Tiny) | ~28M | Pretrained, optionally frozen |
 | ConcatViewFusion | ~15M | Single Conv2d(11520, 1440, 1) |
 | CrossAttentionViewFusion | ~12M | MHA + FFN |
 | BEVViewFusion | ~18M | Queries + projections + attention + FFN |

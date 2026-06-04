@@ -5,7 +5,7 @@ class FrozenBackbone(nn.Module):
     def __init__(self):
         super(FrozenBackbone, self).__init__()
 
-        # Load SwinV2 Tiny pre-trained on ImageNet-22k wihtout classifier head
+        # Load Swin V1 Tiny pre-trained on ImageNet-22k without classifier head
         self.backbone = timm.create_model('swin_tiny_patch4_window7_224.ms_in22k', 
                                           pretrained=True, features_only=True)
         
