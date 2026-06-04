@@ -478,61 +478,42 @@ class TestBEVFusion:
             "BEV center should project near image center with identity-like camera"
 
     def test_out_of_bounds_points_not_counted_visible(self, device):
-        """Sampling locations shifted out of bounds should not count as visible."""
+        """When all reference points project out of image bounds, output should be zero."""
         fusion = BEVViewFusion(num_views=1, embed_dim=1440, image_size=224,
                                pc_range=(-10, -10, -5, 10, 10, 3)).to(device)
         fusion.eval()
 
-        # Force large offsets that push all points out of [0,1]
-        with torch.no_grad():
-            fusion.sampling_offsets.weight.fill_(0)
-            fusion.sampling_offsets.bias.fill_(100.0)  # huge offset
-
-        # Use real camera_params (not pseudo) so sigmoid is not applied to ref_2d.
-        # Camera projects everything to a small valid region, but offset pushes out.
+        # Camera that projects everything to far-right of image (u >> image_size)
+        # u = fx * x / z + cx, with fx=1000 and cx=5000, u/224 >> 1 for all points
         cam = torch.zeros(1, 1, 3, 4, device=device)
-        cam[0, 0, 0, 0] = 112.0   # fx
-        cam[0, 0, 0, 2] = 112.0   # cx
-        cam[0, 0, 1, 1] = 112.0   # fy
-        cam[0, 0, 1, 2] = 112.0   # cy
-        cam[0, 0, 2, 2] = 1.0     # z
+        cam[0, 0, 0, 0] = 1000.0  # fx (very large)
+        cam[0, 0, 0, 2] = 5000.0  # cx (way off image)
+        cam[0, 0, 1, 1] = 1000.0  # fy
+        cam[0, 0, 1, 2] = 5000.0  # cy (way off image)
+        cam[0, 0, 2, 2] = 1.0     # z passthrough (positive depth)
 
         x = torch.ones(1, 1440, 7, 7, device=device)
         out = fusion(x, B=1, V=1, camera_params=cam)
 
-        # With offsets of 100 (scaled by 0.1 → 10.0), sample_locs > 1
-        # combined_mask should be False everywhere → zero output
-        assert out.abs().max() < 1e-3, \
-            "Out-of-bounds samples should not produce non-trivial output"
+        # ref_2d normalized = (fx*x/z + cx) / 224 >> 1, so all out of bounds
+        # → mask = False everywhere → visible_count = 0 → has_observation = 0
+        assert out.abs().max() < 1e-6, \
+            "Out-of-bounds projections should produce zero output"
 
-    def test_no_visible_camera_produces_attenuated_output(self, device):
-        """If no camera can see a BEV cell, image-derived features should be zero.
-
-        Note: LayerNorm bias may produce small non-zero values even with zero input,
-        so we verify the output is significantly attenuated compared to normal operation.
-        """
+    def test_no_visible_camera_produces_zero_output(self, device):
+        """If no camera can see any BEV cell, output should be exactly zero."""
         fusion = BEVViewFusion(num_views=1, embed_dim=1440, image_size=224,
                                pc_range=(-10, -10, -5, 10, 10, 3)).to(device)
         fusion.eval()
 
         x = torch.ones(1, 1440, 7, 7, device=device)
 
-        # Normal operation: camera sees everything
-        cam_visible = torch.zeros(1, 1, 3, 4, device=device)
-        cam_visible[0, 0, 0, 0] = 112.0
-        cam_visible[0, 0, 0, 2] = 112.0
-        cam_visible[0, 0, 1, 1] = 112.0
-        cam_visible[0, 0, 1, 2] = 112.0
-        cam_visible[0, 0, 2, 2] = 1.0
-        out_visible = fusion(x, B=1, V=1, camera_params=cam_visible)
-
-        # No visibility: camera behind
+        # Camera that places everything behind (negative depth)
         cam_behind = torch.zeros(1, 1, 3, 4, device=device)
         cam_behind[0, 0, 2, 2] = -1.0
         cam_behind[0, 0, 2, 3] = -100.0
-        out_behind = fusion(x, B=1, V=1, camera_params=cam_behind)
+        out = fusion(x, B=1, V=1, camera_params=cam_behind)
 
-        # Output with no visible camera should be significantly smaller
-        ratio = out_behind.abs().mean() / out_visible.abs().mean().clamp(min=1e-8)
-        assert ratio < 0.3, \
-            f"No-visible output should be much smaller than visible output, got ratio {ratio:.3f}"
+        # has_observation mask zeroes output after FFN
+        assert out.abs().max() < 1e-6, \
+            "No visible camera should produce zero BEV features"
