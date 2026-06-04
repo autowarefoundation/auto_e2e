@@ -36,6 +36,8 @@ To learn more about how to participate in this project, please read the [onboard
 ## Getting started
 - Install the dependencies from the **requirements.txt** file
 - Visit the [Model](./Model/) folder to view the model components, run training and perform inference
+- See the [Trial Guide](./TRIAL.md) for step-by-step instructions on running the inference test on AWS EC2
+=======
 
 
 ## Inference Speed Benchmarks
