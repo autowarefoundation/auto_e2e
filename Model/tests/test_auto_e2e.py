@@ -10,6 +10,7 @@ from model_components.driving_policy import DrivingPolicy
 from model_components.future_state import FutureState
 from model_components.view_fusion import build_view_fusion, FUSION_REGISTRY
 from model_components.view_fusion.cross_attention_fusion import CrossAttentionViewFusion
+from model_components.view_fusion.bev_fusion import BEVViewFusion
 
 
 # ---------------------------------------------------------------------------
@@ -21,16 +22,19 @@ def device():
     return torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 
-@pytest.fixture(params=["concat", "cross_attn"])
+@pytest.fixture(params=["concat", "cross_attn", "bev"])
 def model(request, device):
     m = AutoE2E(num_views=8, fusion_mode=request.param)
     return m.to(device)
 
 
-def make_inputs(batch_size, num_views, device):
+def make_inputs(batch_size, num_views, device, include_camera_params=False):
     visual = torch.randn(batch_size, num_views, 3, 224, 224, device=device)
     visual_history = torch.randn(batch_size, 896, device=device)
     egomotion = torch.randn(batch_size, 256, device=device)
+    if include_camera_params:
+        camera_params = torch.randn(batch_size, num_views, 3, 4, device=device)
+        return visual, visual_history, egomotion, camera_params
     return visual, visual_history, egomotion
 
 
@@ -192,6 +196,7 @@ class TestNumViewsFlexibility:
     @pytest.mark.parametrize("num_views,fusion_mode", [
         (1, "concat"), (4, "concat"), (8, "concat"), (12, "concat"),
         (1, "cross_attn"), (4, "cross_attn"), (8, "cross_attn"), (12, "cross_attn"),
+        (1, "bev"), (4, "bev"), (8, "bev"), (12, "bev"),
     ])
     def test_various_num_views(self, device, num_views, fusion_mode):
         model = AutoE2E(num_views=num_views, fusion_mode=fusion_mode).to(device)
@@ -294,6 +299,7 @@ class TestFusionRegistry:
     def test_all_modes_registered(self):
         assert "concat" in FUSION_REGISTRY
         assert "cross_attn" in FUSION_REGISTRY
+        assert "bev" in FUSION_REGISTRY
 
     def test_invalid_mode_raises(self):
         with pytest.raises(ValueError, match="Unknown fusion_mode"):
@@ -357,3 +363,69 @@ class TestCrossAttentionFusion:
 
         assert not torch.allclose(out_original, out_permuted, atol=1e-5), \
             "View position embeddings have no effect — output is order-invariant"
+
+
+# ---------------------------------------------------------------------------
+# BEV Fusion specific tests
+# ---------------------------------------------------------------------------
+
+class TestBEVFusion:
+    def test_output_shape(self, device):
+        fusion = BEVViewFusion(num_views=8, embed_dim=1440).to(device)
+        x = torch.randn(16, 1440, 7, 7, device=device)
+        out = fusion(x, B=2, V=8)
+        assert out.shape == (2, 1440, 7, 7)
+
+    def test_output_shape_with_camera_params(self, device):
+        """BEV fusion should work with explicit camera projection matrices."""
+        fusion = BEVViewFusion(num_views=8, embed_dim=1440).to(device)
+        x = torch.randn(16, 1440, 7, 7, device=device)
+        cam_params = torch.randn(2, 8, 3, 4, device=device)
+        out = fusion(x, B=2, V=8, camera_params=cam_params)
+        assert out.shape == (2, 1440, 7, 7)
+
+    def test_pseudo_projection_is_learned(self, device):
+        """Without camera_params, pseudo_projection should receive gradients."""
+        fusion = BEVViewFusion(num_views=4, embed_dim=1440).to(device)
+        x = torch.randn(4, 1440, 7, 7, device=device)
+        out = fusion(x, B=1, V=4)
+        out.sum().backward()
+        assert fusion.pseudo_projection.grad is not None
+        assert fusion.pseudo_projection.grad.abs().max() > 0
+
+    def test_bev_queries_are_learned(self, device):
+        """BEV queries should receive gradients during training."""
+        fusion = BEVViewFusion(num_views=4, embed_dim=1440).to(device)
+        x = torch.randn(4, 1440, 7, 7, device=device)
+        out = fusion(x, B=1, V=4)
+        out.sum().backward()
+        assert fusion.bev_queries.weight.grad is not None
+        assert fusion.bev_queries.weight.grad.abs().max() > 0
+
+    def test_camera_params_influence_output(self, device):
+        """Different camera parameters should produce different BEV features."""
+        fusion = BEVViewFusion(num_views=4, embed_dim=1440).to(device)
+        fusion.eval()
+        x = torch.randn(4, 1440, 7, 7, device=device)
+
+        cam_a = torch.randn(1, 4, 3, 4, device=device)
+        cam_b = torch.randn(1, 4, 3, 4, device=device)
+
+        out_a = fusion(x, B=1, V=4, camera_params=cam_a)
+        out_b = fusion(x, B=1, V=4, camera_params=cam_b)
+
+        assert not torch.allclose(out_a, out_b, atol=1e-5), \
+            "Different camera params produced identical output — projection has no effect"
+
+    def test_reference_points_shape(self, device):
+        """3D reference points should have expected shape."""
+        fusion = BEVViewFusion(num_views=8, embed_dim=1440, bev_h=7, bev_w=7,
+                               num_points_in_pillar=4).to(device)
+        assert fusion.reference_points_3d.shape == (49, 4, 3)
+
+    def test_no_nan_without_camera_params(self, device):
+        """BEV fusion with pseudo-projection should not produce NaN."""
+        fusion = BEVViewFusion(num_views=8, embed_dim=1440).to(device)
+        x = torch.randn(16, 1440, 7, 7, device=device)
+        out = fusion(x, B=2, V=8)
+        assert not torch.isnan(out).any(), "NaN in BEV output with pseudo-projection"
