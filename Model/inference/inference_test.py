@@ -3,58 +3,44 @@ import sys
 sys.path.append('..')
 from model_components.auto_e2e import AutoE2E
 
-def main():
-    # Device for inference
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    print(f'Using {device} for inference \n')
-            
+def run_inference(fusion_mode, device, batch_size=2, num_views=8):
+    print(f"{'='*60}")
+    print(f"  fusion_mode = '{fusion_mode}' | batch={batch_size} | views={num_views}")
+    print(f"{'='*60}\n")
+
     # Instantiate model
-    model = AutoE2E()
+    model = AutoE2E(num_views=num_views, fusion_mode=fusion_mode)
+    model = model.to(device)
 
-    # Dummy Visual Scene Input
-    # 7 cameras + 1 map tile - in batch dimension
-    # giving 8 effective visual inputs assuming batch
-    # size of 1
-    visual_tiles = torch.randn(8, 3, 224, 224)
+    # Visual Scene Input: [batch, num_views, channels, height, width]
+    visual_tiles = torch.randn(batch_size, num_views, 3, 224, 224).to(device)
 
-    # Dummy Egomotion History Input
-    # Speed, Acceleration, Yaw Angle, Yaw Rate for
-    # 6.4s past history giving 64 x 4 samples at 10Hz
-    egomotion_history = torch.randn(256)
+    # Egomotion History Input: [batch, 256]
+    egomotion_history = torch.randn(batch_size, 256).to(device)
 
-    # Dummy Visual Scene History
-    # Length 14 compressed visual feature vector at 10Hz
-    # for 6.4s past horizon giving 64 x 14 samples
-    visual_history = torch.randn(896)
-    
-    # Run inference - returns trajectory and compressed
-    # visual feature vector of the current scene alongside
-    # a prediction of the future visual state of the scene
-    # in feature space
+    # Visual Scene History: [batch, 896]
+    visual_history = torch.randn(batch_size, 896).to(device)
+
+    # Run inference
     trajectory, compressed_visual_feature_vector, future_visual_features = \
         model(visual_tiles, visual_history, egomotion_history)
 
-    # Trajectory Prediction
-    print("---")
-    print("\n")
-    print("Trajectory Prediction: \n")
-    print(trajectory.shape, "\n")
+    print(f"Trajectory Prediction:              {trajectory.shape}")
+    print(f"Compressed Visual Feature Vector:   {compressed_visual_feature_vector.shape}")
+    print(f"Future Visual Features Prediction:")
+    for i, f in enumerate(future_visual_features):
+        print(f"  t+{(i+1)*1.6:.1f}s: {f.shape}")
+    print(f"\nCOMPLETE\n")
 
-    # Compressed Visual Feature Vector
-    print("---")
-    print("\n")
-    print("Compressed Current Scene Visual Feature Vector: \n")
-    print(compressed_visual_feature_vector.shape, "\n")
 
-    # Future Visual Feature Prediction
-    print("---")
-    print("\n")
-    print("Future Visual Features Prediction: \n")
-    for i in range(0, len(future_visual_features)):
-        print(future_visual_features[i].shape)
-    print("\n")
+def main():
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    print(f'Using {device} for inference\n')
 
-    print("COMPLETE")
+    # Test all registered fusion modes
+    run_inference("concat", device)
+    run_inference("cross_attn", device)
+
 
 if __name__ == "__main__":
     main()
