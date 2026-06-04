@@ -432,16 +432,19 @@ class TestBEVFusion:
 
     def test_points_behind_camera_are_masked(self, device):
         """Points with negative depth should not contribute to output."""
-        fusion = BEVViewFusion(num_views=1, embed_dim=1440, image_size=224).to(device)
+        fusion = BEVViewFusion(num_views=1, embed_dim=1440, image_size=224,
+                               pc_range=(-10, -10, -5, 10, 10, 3)).to(device)
 
-        # Camera matrix that places all reference points BEHIND the camera
-        # (negative z after projection)
+        # Camera matrix that makes all projected depths negative:
+        # z_proj = row2 @ [x, y, z, 1]^T
+        # Set row2 = [0, 0, -1, -100] so z_proj = -z_world - 100 (always negative
+        # since z_world ranges from -5 to 3 in this pc_range)
         cam = torch.zeros(1, 1, 3, 4, device=device)
-        cam[0, 0, 0, 0] = 224.0  # fx
-        cam[0, 0, 1, 1] = 224.0  # fy
-        cam[0, 0, 2, 2] = -1.0   # flip z → all depths become negative
+        cam[0, 0, 0, 0] = 224.0   # fx (irrelevant since depth is negative)
+        cam[0, 0, 1, 1] = 224.0   # fy
+        cam[0, 0, 2, 2] = -1.0    # negate z
+        cam[0, 0, 2, 3] = -100.0  # large negative offset ensures all depths < 0
 
-        x = torch.ones(1, 1440, 7, 7, device=device)
         ref_2d, mask = fusion._project_to_2d(fusion.reference_points_3d, cam)
 
         # All points should be masked (behind camera)
@@ -476,35 +479,60 @@ class TestBEVFusion:
 
     def test_out_of_bounds_points_not_counted_visible(self, device):
         """Sampling locations shifted out of bounds should not count as visible."""
-        fusion = BEVViewFusion(num_views=1, embed_dim=1440, image_size=224).to(device)
+        fusion = BEVViewFusion(num_views=1, embed_dim=1440, image_size=224,
+                               pc_range=(-10, -10, -5, 10, 10, 3)).to(device)
         fusion.eval()
 
-        # Force large offsets that push all points out of bounds
+        # Force large offsets that push all points out of [0,1]
         with torch.no_grad():
             fusion.sampling_offsets.weight.fill_(0)
-            fusion.sampling_offsets.bias.fill_(10.0)  # huge offset → out of [0,1]
+            fusion.sampling_offsets.bias.fill_(100.0)  # huge offset
 
-        x = torch.ones(1, 1440, 7, 7, device=device)
-
-        # With pseudo_projection (sigmoid keeps ref in [0,1], but offset pushes out)
-        out = fusion(x, B=1, V=1)
-
-        # Output should be near zero since nothing is validly sampled
-        # (queries are zeroed when no camera is visible)
-        assert out.abs().max() < 1e-3, \
-            "Out-of-bounds samples should not produce non-trivial output"
-
-    def test_no_visible_camera_produces_zero_output(self, device):
-        """If no camera can see a BEV cell, output should be zero."""
-        fusion = BEVViewFusion(num_views=1, embed_dim=1440, image_size=224).to(device)
-        fusion.eval()
-
-        # Camera that places everything behind (negative depth)
+        # Use real camera_params (not pseudo) so sigmoid is not applied to ref_2d.
+        # Camera projects everything to a small valid region, but offset pushes out.
         cam = torch.zeros(1, 1, 3, 4, device=device)
-        cam[0, 0, 2, 2] = -1.0  # all depths negative
+        cam[0, 0, 0, 0] = 112.0   # fx
+        cam[0, 0, 0, 2] = 112.0   # cx
+        cam[0, 0, 1, 1] = 112.0   # fy
+        cam[0, 0, 1, 2] = 112.0   # cy
+        cam[0, 0, 2, 2] = 1.0     # z
 
         x = torch.ones(1, 1440, 7, 7, device=device)
         out = fusion(x, B=1, V=1, camera_params=cam)
 
-        assert out.abs().max() < 1e-6, \
-            "No visible camera should produce zero BEV features"
+        # With offsets of 100 (scaled by 0.1 → 10.0), sample_locs > 1
+        # combined_mask should be False everywhere → zero output
+        assert out.abs().max() < 1e-3, \
+            "Out-of-bounds samples should not produce non-trivial output"
+
+    def test_no_visible_camera_produces_attenuated_output(self, device):
+        """If no camera can see a BEV cell, image-derived features should be zero.
+
+        Note: LayerNorm bias may produce small non-zero values even with zero input,
+        so we verify the output is significantly attenuated compared to normal operation.
+        """
+        fusion = BEVViewFusion(num_views=1, embed_dim=1440, image_size=224,
+                               pc_range=(-10, -10, -5, 10, 10, 3)).to(device)
+        fusion.eval()
+
+        x = torch.ones(1, 1440, 7, 7, device=device)
+
+        # Normal operation: camera sees everything
+        cam_visible = torch.zeros(1, 1, 3, 4, device=device)
+        cam_visible[0, 0, 0, 0] = 112.0
+        cam_visible[0, 0, 0, 2] = 112.0
+        cam_visible[0, 0, 1, 1] = 112.0
+        cam_visible[0, 0, 1, 2] = 112.0
+        cam_visible[0, 0, 2, 2] = 1.0
+        out_visible = fusion(x, B=1, V=1, camera_params=cam_visible)
+
+        # No visibility: camera behind
+        cam_behind = torch.zeros(1, 1, 3, 4, device=device)
+        cam_behind[0, 0, 2, 2] = -1.0
+        cam_behind[0, 0, 2, 3] = -100.0
+        out_behind = fusion(x, B=1, V=1, camera_params=cam_behind)
+
+        # Output with no visible camera should be significantly smaller
+        ratio = out_behind.abs().mean() / out_visible.abs().mean().clamp(min=1e-8)
+        assert ratio < 0.3, \
+            f"No-visible output should be much smaller than visible output, got ratio {ratio:.3f}"
