@@ -41,7 +41,7 @@ To learn more about how to participate in this project, please read the [onboard
 
 | GPU | FPS | Average Latency [ms] | Worst-Case Latency [ms] | Latency Jitter [ms] | Peak VRAM Allocated [MB] | Peak VRAM Reserved [MB] |
 | --- | --- | --------------- | ------------------ | -------------- | ------------------- | ------------------ |
-| NVIDIA GeForce RTX 4050 | 17.30 | 57.80 | 60.19| 3.04 | 2863.16 | 3242.00 |
+| NVIDIA GeForce RTX 4050 | 17.33 | 57.70 | 60.14 | 2.53 | 2042.23 | 2574.00 |
 | ADD YOURS! | - | - | -| - | - | - |
 
 To obtain benchmarks for your GPU, simply run the [benchmarking script](https://github.com/autowarefoundation/auto_e2e/tree/main/Model/speed_benchmark). There, you can also read more about the meaning of benchmark parameters.

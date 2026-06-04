@@ -8,7 +8,7 @@ The script outputs:
 * Average FPS — Frames per second that the model can process.
 * Average Latency [ms] — The typical delay it takes the GPU to complete a single forward pass of the model from start to finish.
 * Worst-Case Latency [ms] — The 99th percentile latency. It means 99% of your frames were processed faster than this number.
-* Latency Jitter [ms] — This measures the predictability and stability of the inference. By taking your slowest typical frame (p99) and subtracting your fastest typical frame (p1), you get the "spread" or variance in your processing time.
+* Latency Jitter [ms] — This measures the predictability and stability of the inference. By taking your slowest typical frame (p99) and subtracting your median typical frame (p50), you get the variance in your processing time.
 * Peak VRAM Allocated [MB] — The minimum theoretical footprint your model needs to exist. This is the maximum amount of GPU memory that actually held the forward-pass-related data.
 * Peak VRAM Reserved [MB] — The realistic memory footprint your system feels. This is the maximum amount of GPU memory walled off from the computer's operating system.
 

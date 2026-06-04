@@ -12,6 +12,7 @@ def main():
 
     # Instantiate model
     model = AutoE2E().to(device)
+    model.eval()
 
     # Dummy Visual Scene Input
     # 7 cameras + 1 map tile - in batch dimension
@@ -31,8 +32,9 @@ def main():
 
     # 1. Warm-up Phase
     print("Warming up GPU...")
-    for _ in range(30):
-        _ = model(visual_tiles, visual_history, egomotion_history) # we discard the output
+    with torch.no_grad():
+        for _ in range(30):
+            _ = model(visual_tiles, visual_history, egomotion_history) # we discard the output
 
     # 2. Benchmark Phase
     print("Benchmarking now ...")
@@ -40,25 +42,26 @@ def main():
 
     latencies = []
 
-    for _ in range(num_iters):
+    with torch.no_grad():
+        for _ in range(num_iters):
 
-        torch.cuda.synchronize()
-        start_time = time.perf_counter()
+            torch.cuda.synchronize()
+            start_time = time.perf_counter()
 
-        _ = model(visual_tiles, visual_history, egomotion_history) # we discard the output
+            _ = model(visual_tiles, visual_history, egomotion_history) # we discard the output
 
-        torch.cuda.synchronize()
-        # Record individual frame processing times in milliseconds
-        latencies.append((time.perf_counter() - start_time) * 1000)
+            torch.cuda.synchronize()
+            # Record individual frame processing times in milliseconds
+            latencies.append((time.perf_counter() - start_time) * 1000)
 
     latencies = np.array(latencies)
 
     # 3. Calculate and Print Metrics
     avg_fps = 1000 / np.mean(latencies)
     avg_latency = np.mean(latencies)
-    p1_latency = np.percentile(latencies, 1)
+    p50_latency = np.percentile(latencies, 50)
     p99_latency = np.percentile(latencies, 99)
-    jitter = p99_latency - p1_latency
+    jitter = p99_latency - p50_latency
 
     peak_allocated = torch.cuda.max_memory_allocated() / (1024 ** 2)
     peak_reserved = torch.cuda.max_memory_reserved() / (1024 ** 2)
@@ -67,7 +70,7 @@ def main():
     print(f"Average FPS: {avg_fps:.2f}")
     print(f"Average Latency: {avg_latency:.2f}")
     print(f"Worst-Case Latency (p99): {p99_latency:.2f} ms")
-    print(f"Latency Jitter (p99 - p1): {jitter:.2f} ms")
+    print(f"Latency Jitter (p99 - p50): {jitter:.2f} ms")
     print("----------------------")
     print(f"Peak VRAM Allocated: {peak_allocated:.2f} MB")
     print(f"Peak VRAM Reserved: {peak_reserved:.2f} MB")
