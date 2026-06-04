@@ -1,7 +1,9 @@
 from .concat_fusion import ConcatViewFusion
+from .cross_attention_fusion import CrossAttentionViewFusion
 
 FUSION_REGISTRY = {
     "concat": ConcatViewFusion,
+    "cross_attn": CrossAttentionViewFusion,
 }
 
 

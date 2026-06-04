@@ -9,6 +9,7 @@ from model_components.feature_fusion import FeatureFusion
 from model_components.driving_policy import DrivingPolicy
 from model_components.future_state import FutureState
 from model_components.view_fusion import build_view_fusion, FUSION_REGISTRY
+from model_components.view_fusion.cross_attention_fusion import CrossAttentionViewFusion
 
 
 # ---------------------------------------------------------------------------
@@ -20,9 +21,9 @@ def device():
     return torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 
-@pytest.fixture
-def model(device):
-    m = AutoE2E(num_views=8, fusion_mode="concat")
+@pytest.fixture(params=["concat", "cross_attn"])
+def model(request, device):
+    m = AutoE2E(num_views=8, fusion_mode=request.param)
     return m.to(device)
 
 
@@ -188,9 +189,12 @@ class TestGradientFlow:
 # ---------------------------------------------------------------------------
 
 class TestNumViewsFlexibility:
-    @pytest.mark.parametrize("num_views", [1, 4, 8, 12])
-    def test_various_num_views(self, device, num_views):
-        model = AutoE2E(num_views=num_views, fusion_mode="concat").to(device)
+    @pytest.mark.parametrize("num_views,fusion_mode", [
+        (1, "concat"), (4, "concat"), (8, "concat"), (12, "concat"),
+        (1, "cross_attn"), (4, "cross_attn"), (8, "cross_attn"), (12, "cross_attn"),
+    ])
+    def test_various_num_views(self, device, num_views, fusion_mode):
+        model = AutoE2E(num_views=num_views, fusion_mode=fusion_mode).to(device)
         visual, vh, ego = make_inputs(2, num_views, device)
         traj, compressed, future = model(visual, vh, ego)
 
@@ -287,9 +291,69 @@ class TestDrivingPolicyComponent:
 # ---------------------------------------------------------------------------
 
 class TestFusionRegistry:
-    def test_concat_registered(self):
+    def test_all_modes_registered(self):
         assert "concat" in FUSION_REGISTRY
+        assert "cross_attn" in FUSION_REGISTRY
 
     def test_invalid_mode_raises(self):
         with pytest.raises(ValueError, match="Unknown fusion_mode"):
             build_view_fusion("nonexistent", num_views=8)
+
+    @pytest.mark.parametrize("fusion_mode", list(FUSION_REGISTRY.keys()))
+    def test_all_modes_produce_correct_shape(self, device, fusion_mode):
+        fusion = FeatureFusion(num_views=8, fusion_mode=fusion_mode).to(device)
+        features = [
+            torch.randn(16, 56, 56, 96, device=device),
+            torch.randn(16, 28, 28, 192, device=device),
+            torch.randn(16, 14, 14, 384, device=device),
+            torch.randn(16, 7, 7, 768, device=device),
+        ]
+        out = fusion(features, B=2, V=8)
+        assert out.shape == (2, 1440, 7, 7)
+
+
+# ---------------------------------------------------------------------------
+# Cross-Attention specific tests
+# ---------------------------------------------------------------------------
+
+class TestCrossAttentionFusion:
+    def test_output_shape(self, device):
+        fusion = CrossAttentionViewFusion(num_views=8, embed_dim=1440).to(device)
+        x = torch.randn(16, 1440, 7, 7, device=device)
+        out = fusion(x, B=2, V=8)
+        assert out.shape == (2, 1440, 7, 7)
+
+    def test_view_embeddings_are_learned(self, device):
+        """View embeddings should receive gradients during training."""
+        fusion = CrossAttentionViewFusion(num_views=8, embed_dim=1440).to(device)
+        x = torch.randn(8, 1440, 7, 7, device=device)
+        out = fusion(x, B=1, V=8)
+        out.sum().backward()
+        assert fusion.view_embed.grad is not None
+        assert fusion.view_embed.grad.abs().max() > 0
+
+    def test_attention_mixes_views(self, device):
+        """Attention should produce different output than simple mean pooling."""
+        fusion = CrossAttentionViewFusion(num_views=4, embed_dim=1440).to(device)
+        fusion.eval()
+        x = torch.randn(4, 1440, 7, 7, device=device)
+
+        attn_out = fusion(x, B=1, V=4)
+        mean_out = x.reshape(1, 4, 1440, 7, 7).mean(dim=1)
+
+        assert not torch.allclose(attn_out, mean_out, atol=1e-3), \
+            "Cross-attention output is identical to naive mean — attention has no effect"
+
+    def test_different_view_orders_produce_different_output(self, device):
+        """Attention with positional embeddings should be order-sensitive."""
+        fusion = CrossAttentionViewFusion(num_views=4, embed_dim=1440).to(device)
+        fusion.eval()
+
+        x = torch.randn(4, 1440, 7, 7, device=device)
+        out_original = fusion(x, B=1, V=4)
+
+        x_permuted = x[[2, 0, 3, 1]]
+        out_permuted = fusion(x_permuted, B=1, V=4)
+
+        assert not torch.allclose(out_original, out_permuted, atol=1e-5), \
+            "View position embeddings have no effect — output is order-invariant"
