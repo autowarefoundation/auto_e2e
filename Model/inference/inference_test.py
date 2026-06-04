@@ -7,30 +7,30 @@ def main():
     # Device for inference
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f'Using {device} for inference \n')
-            
+
+    # Model configuration
+    num_views = 8  # 7 cameras + 1 map tile
+    batch_size = 2
+
     # Instantiate model
-    model = AutoE2E()
+    model = AutoE2E(num_views=num_views, fusion_mode="concat")
+    model = model.to(device)
 
-    # Dummy Visual Scene Input
-    # 7 cameras + 1 map tile - in batch dimension
-    # giving 8 effective visual inputs assuming batch
-    # size of 1
-    visual_tiles = torch.randn(8, 3, 224, 224)
+    # Visual Scene Input: [batch, num_views, channels, height, width]
+    # 7 cameras + 1 map tile at 224x224 resolution
+    visual_tiles = torch.randn(batch_size, num_views, 3, 224, 224).to(device)
 
-    # Dummy Egomotion History Input
+    # Egomotion History Input: [batch, 256]
     # Speed, Acceleration, Yaw Angle, Yaw Rate for
     # 6.4s past history giving 64 x 4 samples at 10Hz
-    egomotion_history = torch.randn(256)
+    egomotion_history = torch.randn(batch_size, 256).to(device)
 
-    # Dummy Visual Scene History
+    # Visual Scene History: [batch, 896]
     # Length 14 compressed visual feature vector at 10Hz
     # for 6.4s past horizon giving 64 x 14 samples
-    visual_history = torch.randn(896)
-    
-    # Run inference - returns trajectory and compressed
-    # visual feature vector of the current scene alongside
-    # a prediction of the future visual state of the scene
-    # in feature space
+    visual_history = torch.randn(batch_size, 896).to(device)
+
+    # Run inference
     trajectory, compressed_visual_feature_vector, future_visual_features = \
         model(visual_tiles, visual_history, egomotion_history)
 
