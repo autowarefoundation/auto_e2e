@@ -260,7 +260,7 @@ Implements a simplified BEV fusion module inspired by BEVFormer [1]. Learnable B
 └─────────────────────────────────────────────────────────────┘
          │
          │  Predict sampling offsets from BEV queries
-         │  offset: [B, N, num_heads, num_z, 2]
+         │  offset: [B, N, num_z, 2]
          ▼
 ┌─────────────────────────────────────────────────────────────┐
 │ For each camera:                                            │
@@ -356,8 +356,18 @@ The key difference from standard attention [7]:
 #### 7.2.5 Visibility Masking
 
 ```python
-mask = (ref_2d[..., 0] > 0.01) & (ref_2d[..., 0] < 0.99) & \
-       (ref_2d[..., 1] > 0.01) & (ref_2d[..., 1] < 0.99)
+# Step 1: depth validity (points must be in front of camera)
+valid_depth = depth > 1e-5
+
+# Step 2: image bounds after normalization
+in_bounds = (ref_2d[..., 0] >= 0) & (ref_2d[..., 0] <= 1) & \
+            (ref_2d[..., 1] >= 0) & (ref_2d[..., 1] <= 1)
+mask = valid_depth & in_bounds
+
+# Step 3: re-check bounds AFTER adding learned offsets
+sample_locs = ref_2d + offsets
+sample_in_bounds = (sample_locs >= 0) & (sample_locs <= 1)
+combined_mask = mask & sample_in_bounds
 ```
 
 Critical for correctness: a BEV query representing a location behind the vehicle should not attend to the front camera's features. The mask ensures each BEV query only aggregates from cameras that can physically observe its corresponding 3D location.
@@ -504,7 +514,7 @@ Model/model_components/
 | embed_dim | 1440 | Derived from backbone |
 | bev_h, bev_w | 7 | ✓ (BEV only) |
 | num_points_in_pillar | 4 | ✓ (BEV only) |
-| num_heads | 8 | ✓ (cross_attn and BEV) |
+| num_heads | 8 | ✓ (cross_attn only; BEV is single-head) |
 | pc_range | [-51.2, -51.2, -5.0, 51.2, 51.2, 3.0] | ✓ (BEV only) |
 | dropout | 0.1 | ✓ (cross_attn and BEV) |
 

@@ -452,30 +452,36 @@ class TestBEVFusion:
             "Points behind camera (negative depth) should all be masked"
 
     def test_projected_center_maps_near_image_center(self, device):
-        """A simple identity-like projection should map BEV center to image center."""
+        """A simple projection should map BEV center to image center."""
         fusion = BEVViewFusion(num_views=1, embed_dim=1440, bev_h=7, bev_w=7,
-                               image_size=224, pc_range=(-1, -1, -1, 1, 1, 1)).to(device)
+                               image_size=224, pc_range=(-1, -1, 0.5, 1, 1, 2)).to(device)
 
-        # Camera at origin looking down -Z, with focal length = image_size
-        # Maps (x,y,z) → (fx*x/z + cx, fy*y/z + cy, z)
+        # Camera: fx=fy=112, cx=cy=112 (image center), z passthrough
+        # BEV center (x=0, y=0) at any z > 0 projects to:
+        #   u = fx*0/z + cx = 112, v = fy*0/z + cy = 112
+        #   normalized: u/224 = 0.5, v/224 = 0.5
         cam = torch.zeros(1, 1, 3, 4, device=device)
         cam[0, 0, 0, 0] = 112.0   # fx
-        cam[0, 0, 0, 2] = 112.0   # cx (center)
+        cam[0, 0, 0, 2] = 112.0   # cx
         cam[0, 0, 1, 1] = 112.0   # fy
-        cam[0, 0, 1, 2] = 112.0   # cy (center)
+        cam[0, 0, 1, 2] = 112.0   # cy
         cam[0, 0, 2, 2] = 1.0     # z passthrough
 
         ref_2d, mask = fusion._project_to_2d(fusion.reference_points_3d, cam)
-        # ref_2d shape: [1, 1, 49, num_z, 2]
+        # ref_2d: [1, 1, 49, num_z, 2]
 
-        # BEV center is query index 24 (7*7 grid, center = row 3, col 3)
+        # BEV center is query index 24 (7×7 grid, row 3 col 3)
         center_2d = ref_2d[0, 0, 24, :, :]  # [num_z, 2]
+        center_mask = mask[0, 0, 24, :]      # [num_z]
 
-        # With pc_range=(-1,1) and camera at origin, center BEV point (0,0,z)
-        # projects to (cx/z + cx, cy/z + cy) → normalized by 224 → ~0.5
-        # At least some pillar points should project near center
-        assert (center_2d > 0.3).any() and (center_2d < 0.7).any(), \
-            "BEV center should project near image center with identity-like camera"
+        # At least some pillar points should be valid
+        assert center_mask.any(), "Center point should have valid projections"
+
+        # Valid points should project exactly to (0.5, 0.5) since x=y=0
+        valid_points = center_2d[center_mask]  # [num_valid, 2]
+        expected = torch.tensor([0.5, 0.5], device=device)
+        assert torch.allclose(valid_points[0], expected, atol=0.01), \
+            f"BEV center should project to image center (0.5, 0.5), got {valid_points[0]}"
 
     def test_out_of_bounds_points_not_counted_visible(self, device):
         """When all reference points project out of image bounds, output should be zero."""

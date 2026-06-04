@@ -18,12 +18,16 @@ class BEVViewFusion(nn.Module):
 
     Camera Parameters Convention:
         camera_params: [B, num_views, 3, 4] matrices that project
-        homogeneous 3D world coordinates to 2D image coordinates.
+        homogeneous 3D ego/vehicle-frame coordinates to 2D pixel coordinates.
 
-        Expected to be: intrinsic @ extrinsic (world-to-pixel)
-        - extrinsic: [3, 4] or [4, 4] world-to-camera transform
+        Expected to be: intrinsic @ extrinsic (ego-to-pixel)
+        - extrinsic: [3, 4] or [4, 4] ego/vehicle-frame-to-camera transform
         - intrinsic: [3, 3] camera matrix (focal length, principal point)
         - Combined: [3, 4] = intrinsic @ extrinsic[:3, :]
+
+        The BEV reference points are defined in ego/vehicle frame (centered
+        on the vehicle, X=forward, Y=left, Z=up). camera_params must
+        transform these ego-frame coordinates to pixel coordinates.
 
         Output of projection: [u, v, depth] in pixel coordinates where
         - u: horizontal pixel (0 to image_width)
@@ -31,7 +35,7 @@ class BEVViewFusion(nn.Module):
         - depth: distance along camera optical axis (positive = in front)
 
         The module normalizes pixel coords to [0, 1] using the provided
-        image_size parameter (default: 224, matching input resolution).
+        image_size parameter (default: 224, matching square input resolution).
 
         When camera_params is None, a learnable pseudo_projection is used
         as a shape-testing and ablation fallback. This does NOT learn true
@@ -45,7 +49,7 @@ class BEVViewFusion(nn.Module):
     """
 
     def __init__(self, num_views=8, embed_dim=1440, bev_h=7, bev_w=7,
-                 num_points_in_pillar=4, num_heads=1, dropout=0.1,
+                 num_points_in_pillar=4, dropout=0.1,
                  pc_range=(-51.2, -51.2, -5.0, 51.2, 51.2, 3.0),
                  image_size=224):
         super().__init__()
@@ -55,7 +59,6 @@ class BEVViewFusion(nn.Module):
         self.bev_h = bev_h
         self.bev_w = bev_w
         self.num_points_in_pillar = num_points_in_pillar
-        self.num_heads = num_heads
         self.pc_range = pc_range
         self.image_size = image_size
 
@@ -71,12 +74,12 @@ class BEVViewFusion(nn.Module):
         )
 
         # Sampling offsets predicted from BEV queries
-        num_sample_points = num_points_in_pillar
-        self.sampling_offsets = nn.Linear(embed_dim, num_sample_points * 2)
+        self.sampling_offsets = nn.Linear(embed_dim, num_points_in_pillar * 2)
 
-        # Attention weights over (num_views × num_points_in_pillar)
-        # Softmax is applied across all cameras and pillar points jointly,
-        # allowing the model to learn camera-level and height-level relevance.
+        # Attention weights over (num_views × num_points_in_pillar).
+        # Softmax is applied per-camera over pillar points (height-level relevance).
+        # Camera-level weighting uses visibility-based averaging, matching
+        # BEVFormer's SCA formula: output = (1/|V_hit|) * sum_{i in V_hit}(...)
         self.attention_weights = nn.Linear(
             embed_dim, num_views * num_points_in_pillar
         )
@@ -104,7 +107,8 @@ class BEVViewFusion(nn.Module):
         """Pre-compute normalized 3D reference points for the BEV grid.
 
         Each BEV cell (x, y) gets a vertical "pillar" of points along Z.
-        These represent the 3D world locations that each BEV query should attend to.
+        These represent the 3D ego/vehicle-frame locations that each BEV
+        query should attend to.
         """
         xs = torch.linspace(0.5, self.bev_w - 0.5, self.bev_w) / self.bev_w
         ys = torch.linspace(0.5, self.bev_h - 0.5, self.bev_h) / self.bev_h
@@ -122,7 +126,7 @@ class BEVViewFusion(nn.Module):
 
         Args:
             reference_points_3d: [N, num_z, 3] normalized 3D points in [0, 1]
-            camera_params: [B, num_views, 3, 4] world-to-pixel projection matrices.
+            camera_params: [B, num_views, 3, 4] ego-to-pixel projection matrices.
                 If None, uses pseudo_projection fallback (testing/ablation only).
 
         Returns:
@@ -133,7 +137,7 @@ class BEVViewFusion(nn.Module):
         """
         N, num_z, _ = reference_points_3d.shape
 
-        # Scale normalized [0,1] coords to world coordinates using pc_range
+        # Scale normalized [0,1] coords to ego/vehicle coordinates using pc_range
         pc_range = self.pc_range
         ref_world = reference_points_3d.clone()
         ref_world[..., 0] = ref_world[..., 0] * (pc_range[3] - pc_range[0]) + pc_range[0]
@@ -189,9 +193,10 @@ class BEVViewFusion(nn.Module):
             fused_per_view: [B*V, C, H, W] multi-view image features
             B: batch size
             V: number of views
-            camera_params: [B, V, 3, 4] world-to-pixel projection matrices.
-                Combined intrinsic @ extrinsic that maps homogeneous 3D world
-                coordinates [x, y, z, 1] to pixel coordinates [u, v, depth].
+            camera_params: [B, V, 3, 4] ego-to-pixel projection matrices.
+                Combined intrinsic @ extrinsic that maps homogeneous 3D
+                ego/vehicle-frame coordinates [x, y, z, 1] to pixel
+                coordinates [u, v, depth].
                 If None, pseudo_projection is used (testing/ablation only).
 
         Returns:
@@ -217,12 +222,12 @@ class BEVViewFusion(nn.Module):
         offsets = offsets.reshape(B, N, self.num_points_in_pillar, 2)
         offsets = offsets * 0.1  # Scale down for stability
 
-        # Attention weights: softmax over ALL (views × pillar_points) jointly
-        # This allows the model to learn both camera-level and height-level relevance
+        # Attention weights: per-camera softmax over pillar points (height relevance).
+        # Camera-level weighting is handled by visibility-based averaging,
+        # matching BEVFormer's SCA: output = (1/|V_hit|) * sum_{i in V_hit}(...)
         attn_weights = self.attention_weights(queries)  # [B, N, V * num_z]
         attn_weights = attn_weights.reshape(B, N, V, self.num_points_in_pillar)
-        attn_weights = attn_weights.softmax(dim=-1)  # Normalize per-camera over pillar points
-        # Camera-level weighting is handled by visibility mask + averaging
+        attn_weights = attn_weights.softmax(dim=-1)  # Per-camera over pillar points
 
         # --- 5. Sample features from each camera via grid_sample ---
         values_spatial = values.permute(0, 1, 3, 2).reshape(B * V, C, H, W)
@@ -250,12 +255,11 @@ class BEVViewFusion(nn.Module):
                 padding_mode='zeros', align_corners=False
             )  # [B, C, N, num_z]
 
-            # Apply per-point mask to sampled features
+            # Apply per-point mask and re-normalize weights over valid points
             point_mask = combined_mask.float()  # [B, N, num_z]
-
-            # Weighted sum over pillar points
             w = attn_weights[:, :, v_idx, :]  # [B, N, num_z]
-            w = w * point_mask  # Zero out masked points
+            w = w * point_mask
+            w = w / w.sum(dim=-1, keepdim=True).clamp(min=1e-8)  # Re-normalize
 
             # sampled: [B, C, N, num_z] → [B, N, num_z, C]
             sampled = sampled.permute(0, 2, 3, 1)
@@ -266,7 +270,7 @@ class BEVViewFusion(nn.Module):
             output = output + weighted * cam_visible
             visible_count = visible_count + cam_visible
 
-        # Average across visible cameras
+        # Average across visible cameras (matches BEVFormer's 1/|V_hit|)
         output = output / visible_count.clamp(min=1.0)
 
         # --- 6. Post-attention: residual + LayerNorm + FFN ---
