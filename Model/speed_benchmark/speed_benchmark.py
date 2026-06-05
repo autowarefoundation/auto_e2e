@@ -72,8 +72,12 @@ def run_speed_benchmark(backbone, fusion_mode, device, batch_size=1, num_views=8
     p99_latency = np.percentile(latencies, 99)
     jitter = p99_latency - p50_latency
 
-    peak_allocated = torch.cuda.max_memory_allocated() / (1024 ** 2)
-    peak_reserved = torch.cuda.max_memory_reserved() / (1024 ** 2)
+    if device.type == 'cuda':
+        peak_allocated = torch.cuda.max_memory_allocated() / (1024 ** 2)
+        peak_reserved = torch.cuda.max_memory_reserved() / (1024 ** 2)
+    else:
+        peak_allocated = 0.0
+        peak_reserved = 0.0
 
     # Count model parameters
     total_params = sum(p.numel() for p in model.parameters())
