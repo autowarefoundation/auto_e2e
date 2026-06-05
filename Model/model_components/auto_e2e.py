@@ -23,7 +23,7 @@ class AutoE2E(nn.Module):
         # Future visual state prediction
         self.FutureState = FutureState()
 
-    def forward(self, x, visual_history, egomotion_history, backbone, camera_params=None, mode="train"):
+    def forward(self, x, visual_history, egomotion_history, backbone="swin_v2_tiny", camera_params=None, mode="train"):
         B, V, C, H, W = x.shape
 
         # Merge batch and views for backbone processing
