@@ -39,10 +39,11 @@ To learn more about how to participate in this project, please read the [onboard
 - See the [Trial Guide](./TRIAL.md) for step-by-step instructions on running the inference test on AWS EC2
 =======
 
+## Inference Speed Benchmark
 
-## Inference Speed Benchmarks
-Coming soon - stay tuned
-- Frame rate (FPS):
-- Inference time (ms):
-- Jitter (inference time stability in ms):
-- VRAM usage (GB):
+| GPU | FPS | Average Latency [ms] | Worst-Case Latency [ms] | Latency Jitter [ms] | Peak VRAM Allocated [MB] | Peak VRAM Reserved [MB] |
+| --- | --- | --------------- | ------------------ | -------------- | ------------------- | ------------------ |
+| NVIDIA GeForce RTX 4050 | 17.33 | 57.70 | 60.14 | 2.53 | 2042.23 | 2574.00 |
+| ADD YOURS! | - | - | -| - | - | - |
+
+To obtain benchmarks for your GPU, simply run the [benchmarking script](https://github.com/autowarefoundation/auto_e2e/tree/main/Model/speed_benchmark). There, you can also read more about the meaning of benchmark parameters.
