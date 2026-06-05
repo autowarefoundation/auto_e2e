@@ -2,6 +2,12 @@ import timm
 import torch.nn as nn
 
 class ConvNextV2Tiny(nn.Module):
+    """ConvNext V2 Tiny Backbone
+
+    Pre-trained ConvNext V2 Tiny Backbone with for downstream processing and fine-tuning
+    pre-trained on the ImageNet-22k dataset and then fine-tuned on the ImageNet-1k dataset
+    """
+        
     def __init__(self):
         super().__init__()
 

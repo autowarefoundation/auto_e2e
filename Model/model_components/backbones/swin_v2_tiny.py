@@ -2,6 +2,13 @@ import timm
 import torch.nn as nn
 
 class SwinV2Tiny(nn.Module):
+    """SwinV2 Tiny Backbone
+
+    Pre-trained SwinV2 Tiny Backbone with window size of 16 and input image 
+    size of 256 for downstream processing and fine-tuning, pre-trained on
+    the ImageNet-1k dataset
+    """
+
     def __init__(self):
         super().__init__()
 
