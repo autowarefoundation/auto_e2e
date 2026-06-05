@@ -1,40 +1,43 @@
 import torch
 import time
 import sys
+import numpy as np
 sys.path.append('..')
 from model_components.auto_e2e import AutoE2E
-import numpy as np
 
-def main():
-    # Device for benchmarking
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    print(f'Using {device} for benchmarking \n')
+
+def run_speed_test(fusion_mode, device, batch_size=1, num_views=8):
+    
+    print(f"{'='*60}")
+    print(f"  fusion_mode = '{fusion_mode}' | batch={batch_size} | views={num_views}")
+    print(f"{'='*60}\n")
 
     # Instantiate model
-    model = AutoE2E().to(device)
+    model = AutoE2E(num_views=num_views, fusion_mode=fusion_mode)
+    model = model.to(device)
     model.eval()
 
-    # Dummy Visual Scene Input
-    # 7 cameras + 1 map tile - in batch dimension
-    # giving 8 effective visual inputs assuming batch
-    # size of 1
-    visual_tiles = torch.randn(8, 3, 224, 224).to(device)
+    # Visual Scene Input: [batch, num_views, channels, height, width]
+    visual_tiles = torch.randn(batch_size, num_views, 3, 224, 224).to(device)
 
-    # Egomotion History Input
-    # Speed, Acceleration, Yaw Angle, Yaw Rate for
-    # 6.4s past history giving 64 x 4 samples at 10Hz
-    egomotion_history = torch.randn(256).to(device)
+    # Egomotion History Input: [batch, 256]
+    egomotion_history = torch.randn(batch_size, 256).to(device)
 
-    # Dummy Visual Scene History
-    # Length 14 compressed visual feature vector at 10Hz
-    # for 6.4s past horizon giving 64 x 14 samples
-    visual_history = torch.randn(896).to(device)
+    # Visual Scene History: [batch, 896]
+    visual_history = torch.randn(batch_size, 896).to(device)
+
+    # Camera parameters: [batch, num_views, 3, 4] projection matrices
+    # Only used by BEV fusion; None triggers learnable pseudo-projection
+    camera_params = None
+    if fusion_mode == "bev":
+        camera_params = torch.randn(batch_size, num_views, 3, 4).to(device)
 
     # 1. Warm-up Phase
     print("Warming up GPU...")
     with torch.no_grad():
         for _ in range(30):
-            _ = model(visual_tiles, visual_history, egomotion_history) # we discard the output
+            _ = model(visual_tiles, visual_history, egomotion_history, 
+                      camera_params=camera_params) # we discard the output
 
     # 2. Benchmark Phase
     print("Benchmarking now ...")
@@ -48,7 +51,8 @@ def main():
             torch.cuda.synchronize()
             start_time = time.perf_counter()
 
-            _ = model(visual_tiles, visual_history, egomotion_history) # we discard the output
+            _ = model(visual_tiles, visual_history, egomotion_history, 
+                      camera_params=camera_params) # we discard the output
 
             torch.cuda.synchronize()
             # Record individual frame processing times in milliseconds
@@ -74,6 +78,17 @@ def main():
     print("----------------------")
     print(f"Peak VRAM Allocated: {peak_allocated:.2f} MB")
     print(f"Peak VRAM Reserved: {peak_reserved:.2f} MB")
+
+
+def main():
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    print(f'Using {device} for inference\n')
+
+    # Test all registered fusion modes
+    run_speed_test("concat", device)
+    run_speed_test("cross_attn", device)
+    run_speed_test("bev", device)
+
 
 if __name__ == "__main__":
     main()
