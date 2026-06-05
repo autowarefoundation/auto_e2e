@@ -15,8 +15,7 @@ The script outputs:
 ## How to Run
 
 ```bash
-cd Model/speed_benchmark
-python speed_benchmark.py
+make benchmark
 ```
 
 The script will:
