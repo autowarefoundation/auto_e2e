@@ -43,8 +43,8 @@ def run_speed_benchmark(backbone, fusion_mode, device, batch_size=1, num_views=8
                        backbone=backbone, camera_params=camera_params, mode="infer")
 
     # 2. Benchmark Phase
-    print("Benchmarking now ...")
-    num_iters = 100
+    num_iters = 100 if device.type == 'cuda' else 10
+    print(f"Benchmarking ({num_iters} iterations)...")
 
     latencies = []
 
