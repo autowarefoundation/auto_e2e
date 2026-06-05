@@ -50,15 +50,17 @@ def run_speed_benchmark(backbone, fusion_mode, device, batch_size=1, num_views=8
 
     with torch.no_grad():
         for _ in range(num_iters):
+            if device.type == 'cuda':
+                torch.cuda.synchronize()
 
-            torch.cuda.synchronize()
             start_time = time.perf_counter()
 
-            _ = model(visual_tiles, visual_history, egomotion_history, 
-                      backbone=backbone, camera_params=camera_params, mode="infer") # we discard the output
+            _ = model(visual_tiles, visual_history, egomotion_history,
+                      backbone=backbone, camera_params=camera_params, mode="infer")
 
-            torch.cuda.synchronize()
-            # Record individual frame processing times in milliseconds
+            if device.type == 'cuda':
+                torch.cuda.synchronize()
+
             latencies.append((time.perf_counter() - start_time) * 1000)
 
     latencies = np.array(latencies)
