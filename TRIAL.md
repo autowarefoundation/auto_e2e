@@ -73,7 +73,7 @@ source ~/e2e-env/bin/activate
 
 Install dependencies:
 ```bash
-pip install torch timm
+make setup
 ```
 
 This takes 2–3 minutes. Verify the installation:
