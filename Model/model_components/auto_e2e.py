@@ -6,13 +6,13 @@ from .future_state import FutureState
 
 
 class AutoE2E(nn.Module):
-    def __init__(self, num_views=8, fusion_mode="concat"):
+    def __init__(self, backbone="swin_v2_tiny", num_views=8, fusion_mode="concat"):
         super(AutoE2E, self).__init__()
 
         self.num_views = num_views
 
         # Backbone feature extractor
-        self.Backbone = Backbone()
+        self.Backbone = Backbone(backbone)
 
         # Multi-scale feature fusion with view unification
         self.FeatureFusion = FeatureFusion(num_views=num_views, fusion_mode=fusion_mode)
