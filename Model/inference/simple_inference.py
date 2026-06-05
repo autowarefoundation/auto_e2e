@@ -44,6 +44,9 @@ def main():
     print(f'Using {device} for inference\n')
 
     # Test all registered fusion modes
+    run_inference("swin_v2_tiny", "concat", device)
+    run_inference("swin_v2_tiny", "cross_attn", device)
+    run_inference("swin_v2_tiny", "bev", device)
     run_inference("conv_next_v2_tiny", "concat", device)
     run_inference("conv_next_v2_tiny", "cross_attn", device)
     run_inference("conv_next_v2_tiny", "bev", device)
