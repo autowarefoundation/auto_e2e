@@ -37,7 +37,7 @@ def run_speed_benchmark(backbone, fusion_mode, device, batch_size=1, num_views=8
     with torch.no_grad():
         for _ in range(30):
             _ = model(visual_tiles, visual_history, egomotion_history, 
-                       backbone=backbone, camera_params=camera_params) # we discard the output
+                       backbone=backbone, camera_params=camera_params, mode="infer") # we discard the output
 
     # 2. Benchmark Phase
     print("Benchmarking now ...")
@@ -52,7 +52,7 @@ def run_speed_benchmark(backbone, fusion_mode, device, batch_size=1, num_views=8
             start_time = time.perf_counter()
 
             _ = model(visual_tiles, visual_history, egomotion_history, 
-                      backbone=backbone, camera_params=camera_params) # we discard the output
+                      backbone=backbone, camera_params=camera_params, mode="infer") # we discard the output
 
             torch.cuda.synchronize()
             # Record individual frame processing times in milliseconds
