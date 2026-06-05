@@ -12,7 +12,7 @@ class AutoE2E(nn.Module):
         self.num_views = num_views
 
         # Backbone feature extractor
-        self.Backbone = Backbone(backbone)
+        self.Backbone = Backbone(backbone=backbone)
 
         # Multi-scale feature fusion with view unification
         self.FeatureFusion = FeatureFusion(num_views=num_views, fusion_mode=fusion_mode)

@@ -1,16 +1,15 @@
-from .conv_next_v2_tiny import ConvNextV2Tiny
-from .swin_v2_tiny import SwinV2Tiny
+import timm
 
 BACKBONE_REGISTRY = {
-    "conv_next_v2_tiny": ConvNextV2Tiny,
-    "swin_v2_tiny": SwinV2Tiny,
+    "swin_v2_tiny": lambda **kwargs: timm.create_model("swinv2_tiny_window8_256", pretrained=True, features_only=True, **kwargs),
+    "conv_next_v2_tiny": lambda **kwargs: timm.create_model("convnextv2_tiny", pretrained=True, features_only=True, **kwargs)
 }
 
 
-def build_backbone(backbone):
+def build_backbone(backbone, **kwargs):
     if backbone not in BACKBONE_REGISTRY:
         raise ValueError(
             f"Unknown backbone '{backbone}'. "
             f"Available: {list(BACKBONE_REGISTRY.keys())}"
         )
-    return BACKBONE_REGISTRY[backbone]
+    return BACKBONE_REGISTRY[backbone](**kwargs)

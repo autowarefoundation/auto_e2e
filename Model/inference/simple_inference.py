@@ -3,17 +3,17 @@ import sys
 sys.path.append('..')
 from model_components.auto_e2e import AutoE2E
 
-def run_inference(fusion_mode, device, batch_size=2, num_views=8):
-    print(f"{'='*60}")
-    print(f"  fusion_mode = '{fusion_mode}' | batch={batch_size} | views={num_views}")
-    print(f"{'='*60}\n")
+def run_inference(backbone, fusion_mode, device, batch_size=2, num_views=8):
+    print(f"{'='*80}")
+    print(f"  backbone = '{backbone}' | fusion_mode = '{fusion_mode}' | batch={batch_size} | views={num_views}")
+    print(f"{'='*80}\n")
 
     # Instantiate model
     model = AutoE2E(num_views=num_views, fusion_mode=fusion_mode)
     model = model.to(device)
 
     # Visual Scene Input: [batch, num_views, channels, height, width]
-    visual_tiles = torch.randn(batch_size, num_views, 3, 224, 224).to(device)
+    visual_tiles = torch.randn(batch_size, num_views, 3, 256, 256).to(device)
 
     # Egomotion History Input: [batch, 256]
     egomotion_history = torch.randn(batch_size, 256).to(device)
@@ -44,9 +44,9 @@ def main():
     print(f'Using {device} for inference\n')
 
     # Test all registered fusion modes
-    run_inference("concat", device)
-    run_inference("cross_attn", device)
-    run_inference("bev", device)
+    run_inference("conv_next_v2_tiny", "concat", device)
+    run_inference("conv_next_v2_tiny", "cross_attn", device)
+    run_inference("conv_next_v2_tiny", "bev", device)
 
 
 if __name__ == "__main__":
