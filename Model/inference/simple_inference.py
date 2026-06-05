@@ -43,7 +43,7 @@ def main():
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f'Using {device} for inference\n')
 
-    # Test all registered fusion modes
+    # Test all registered backbones and fusion modes
     run_inference("swin_v2_tiny", "concat", device)
     run_inference("swin_v2_tiny", "cross_attn", device)
     run_inference("swin_v2_tiny", "bev", device)
