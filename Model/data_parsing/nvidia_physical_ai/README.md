@@ -36,13 +36,13 @@ from data_parsing.nvidia_physical_ai import NvidiaAVDataset
 from torch.utils.data import DataLoader
 
 dataset = NvidiaAVDataset(
-    subset_root="/path/to/nvidia_av_camera_subset",
+    data_root="/path/to/nvidia_physical_ai_dataset",
     backbone_name="swin_tiny_patch4_window7_224.ms_in22k",
 )
 
 # Single clip for forward pass validation
 dataset = NvidiaAVDataset(
-    subset_root="/path/to/nvidia_av_camera_subset",
+    data_root="/path/to/nvidia_physical_ai_dataset",
     backbone_name="swin_tiny_patch4_window7_224.ms_in22k",
     clip_uuids=["fd1d1b6b-59bf-4292-8295-5028aa6aa5e3"],
 )
