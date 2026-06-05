@@ -6,14 +6,15 @@ sys.path.append('..')
 from model_components.auto_e2e import AutoE2E
 
 
-def run_speed_benchmark(fusion_mode, device, batch_size=1, num_views=8):
+def run_speed_benchmark(backbone, fusion_mode, device, batch_size=1, num_views=8):
     
     print(f"{'='*60}")
-    print(f"  fusion_mode = '{fusion_mode}' | batch={batch_size} | views={num_views}")
-    print(f"{'='*60}\n")
+    print(f"{'='*80}")
+    print(f"  backbone = '{backbone}' | fusion_mode = '{fusion_mode}' | batch={batch_size} | views={num_views}")
+    print(f"{'='*80}\n")
 
     # Instantiate model
-    model = AutoE2E(num_views=num_views, fusion_mode=fusion_mode)
+    model = AutoE2E(backbone=backbone, num_views=num_views, fusion_mode=fusion_mode)
     model = model.to(device)
     model.eval()
 
@@ -37,7 +38,7 @@ def run_speed_benchmark(fusion_mode, device, batch_size=1, num_views=8):
     with torch.no_grad():
         for _ in range(30):
             _ = model(visual_tiles, visual_history, egomotion_history, 
-                      camera_params=camera_params) # we discard the output
+                       backbone=backbone, camera_params=camera_params) # we discard the output
 
     # 2. Benchmark Phase
     print("Benchmarking now ...")
@@ -52,7 +53,7 @@ def run_speed_benchmark(fusion_mode, device, batch_size=1, num_views=8):
             start_time = time.perf_counter()
 
             _ = model(visual_tiles, visual_history, egomotion_history, 
-                      camera_params=camera_params) # we discard the output
+                      backbone=backbone, camera_params=camera_params) # we discard the output
 
             torch.cuda.synchronize()
             # Record individual frame processing times in milliseconds
@@ -84,10 +85,13 @@ def main():
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f'Using {device} for inference\n')
 
-    # Test all registered fusion modes
-    run_speed_benchmark("concat", device)
-    run_speed_benchmark("cross_attn", device)
-    run_speed_benchmark("bev", device)
+    # Test all registered backbones and fusion modes
+    run_speed_benchmark("swin_v2_tiny", "concat", device)
+    run_speed_benchmark("swin_v2_tiny", "cross_attn", device)
+    run_speed_benchmark("swin_v2_tiny", "bev", device)
+    run_speed_benchmark("conv_next_v2_tiny", "concat", device)
+    run_speed_benchmark("conv_next_v2_tiny", "cross_attn", device)
+    run_speed_benchmark("conv_next_v2_tiny", "bev", device)
 
 
 if __name__ == "__main__":
