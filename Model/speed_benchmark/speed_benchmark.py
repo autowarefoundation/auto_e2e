@@ -6,7 +6,7 @@ sys.path.append('..')
 from model_components.auto_e2e import AutoE2E
 
 
-def run_speed_test(fusion_mode, device, batch_size=1, num_views=8):
+def run_speed_benchmark(fusion_mode, device, batch_size=1, num_views=8):
     
     print(f"{'='*60}")
     print(f"  fusion_mode = '{fusion_mode}' | batch={batch_size} | views={num_views}")
@@ -85,9 +85,9 @@ def main():
     print(f'Using {device} for inference\n')
 
     # Test all registered fusion modes
-    run_speed_test("concat", device)
-    run_speed_test("cross_attn", device)
-    run_speed_test("bev", device)
+    run_speed_benchmark("concat", device)
+    run_speed_benchmark("cross_attn", device)
+    run_speed_benchmark("bev", device)
 
 
 if __name__ == "__main__":
