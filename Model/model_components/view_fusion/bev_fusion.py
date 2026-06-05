@@ -35,7 +35,7 @@ class BEVViewFusion(nn.Module):
         - depth: distance along camera optical axis (positive = in front)
 
         The module normalizes pixel coords to [0, 1] using the provided
-        image_size parameter (default: 224, matching square input resolution).
+        image_size parameter (default: 256, matching square input resolution).
 
         When camera_params is None, a learnable pseudo_projection is used
         as a shape-testing and ablation fallback. This does NOT learn true
@@ -51,7 +51,7 @@ class BEVViewFusion(nn.Module):
     def __init__(self, num_views=8, embed_dim=1440, bev_h=7, bev_w=7,
                  num_points_in_pillar=4, dropout=0.1,
                  pc_range=(-51.2, -51.2, -5.0, 51.2, 51.2, 3.0),
-                 image_size=224):
+                 image_size=256):
         super().__init__()
 
         self.num_views = num_views
