@@ -106,17 +106,55 @@ def run_speed_benchmark(backbone, fusion_mode, device, batch_size=1, num_views=8
     return results
 
 
+def save_results_json(all_results, device):
+    """Save benchmark results to a JSON file with hardware metadata."""
+    output = {
+        "timestamp": datetime.now().isoformat(),
+        "device": str(device),
+        "gpu_name": torch.cuda.get_device_name(0) if torch.cuda.is_available() else "N/A",
+        "cuda_version": torch.version.cuda if torch.cuda.is_available() else "N/A",
+        "pytorch_version": torch.__version__,
+        "results": all_results,
+    }
+    filepath = "benchmark_results.json"
+    with open(filepath, "w") as f:
+        json.dump(output, f, indent=2)
+    print(f"\nResults saved to {filepath}")
+
+
+def print_markdown_table(all_results):
+    """Print results as a Markdown table for easy pasting into README."""
+    print("\n## Benchmark Results\n")
+    print("| Backbone | Fusion Mode | Batch | FPS | Latency (ms) | p99 (ms) | VRAM (MB) | Params |")
+    print("|----------|-------------|-------|-----|--------------|----------|-----------|--------|")
+    for r in all_results:
+        params_m = r["total_params"] / 1_000_000
+        print(f"| {r['backbone']} | {r['fusion_mode']} | {r['batch_size']} | "
+              f"{r['avg_fps']:.1f} | {r['avg_latency_ms']:.1f} | {r['p99_latency_ms']:.1f} | "
+              f"{r['peak_vram_allocated_mb']:.0f} | {params_m:.1f}M |")
+
+
 def main():
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f'Using {device} for inference\n')
 
+    all_results = []
+
     # Test all registered backbones and fusion modes
-    run_speed_benchmark("swin_v2_tiny", "concat", device)
-    run_speed_benchmark("swin_v2_tiny", "cross_attn", device)
-    run_speed_benchmark("swin_v2_tiny", "bev", device)
-    run_speed_benchmark("conv_next_v2_tiny", "concat", device)
-    run_speed_benchmark("conv_next_v2_tiny", "cross_attn", device)
-    run_speed_benchmark("conv_next_v2_tiny", "bev", device)
+    backbones = ["swin_v2_tiny", "conv_next_v2_tiny"]
+    fusion_modes = ["concat", "cross_attn", "bev"]
+
+    for backbone in backbones:
+        for fusion_mode in fusion_modes:
+            result = run_speed_benchmark(backbone, fusion_mode, device)
+            all_results.append(result)
+            print()
+
+    # Save structured results
+    save_results_json(all_results, device)
+
+    # Print Markdown table for README
+    print_markdown_table(all_results)
 
 
 if __name__ == "__main__":
