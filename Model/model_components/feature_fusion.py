@@ -24,7 +24,7 @@ class FeatureFusion(nn.Module):
         # View fusion strategy (pluggable)
         self.view_fusion = build_view_fusion(fusion_mode, num_views, embed_dim)
 
-    def forward(self, features, B, V):
+    def forward(self, features, B, V, camera_params=None):
         # features: list of 4 multi-scale feature maps from backbone
         # Each has shape [B*V, H, W, C] (SwinV2 output format)
 
@@ -37,6 +37,7 @@ class FeatureFusion(nn.Module):
         fused_per_view = torch.cat((f0, f1, f2, f3), dim=1)
 
         # Unify across views: [B*V, 1440, 7, 7] → [B, 1440, 7, 7]
-        fused = self.view_fusion(fused_per_view, B, V)
+        # camera_params is passed through for BEV fusion; ignored by other modes
+        fused = self.view_fusion(fused_per_view, B, V, camera_params=camera_params)
 
         return fused

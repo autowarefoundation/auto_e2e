@@ -21,9 +21,15 @@ def run_inference(fusion_mode, device, batch_size=2, num_views=8):
     # Visual Scene History: [batch, 896]
     visual_history = torch.randn(batch_size, 896).to(device)
 
+    # Camera parameters: [batch, num_views, 3, 4] projection matrices
+    # Only used by BEV fusion; None triggers learnable pseudo-projection
+    camera_params = None
+    if fusion_mode == "bev":
+        camera_params = torch.randn(batch_size, num_views, 3, 4).to(device)
+
     # Run inference
     trajectory, compressed_visual_feature_vector, future_visual_features = \
-        model(visual_tiles, visual_history, egomotion_history)
+        model(visual_tiles, visual_history, egomotion_history, camera_params=camera_params)
 
     print(f"Trajectory Prediction:              {trajectory.shape}")
     print(f"Compressed Visual Feature Vector:   {compressed_visual_feature_vector.shape}")
@@ -40,6 +46,7 @@ def main():
     # Test all registered fusion modes
     run_inference("concat", device)
     run_inference("cross_attn", device)
+    run_inference("bev", device)
 
 
 if __name__ == "__main__":

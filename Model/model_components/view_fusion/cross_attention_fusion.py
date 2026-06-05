@@ -44,7 +44,7 @@ class CrossAttentionViewFusion(nn.Module):
         )
         self.norm_ffn = nn.LayerNorm(embed_dim)
 
-    def forward(self, fused_per_view, B, V):
+    def forward(self, fused_per_view, B, V, camera_params=None):
         # fused_per_view: [B*V, C, H, W]
         C, H, W = fused_per_view.shape[1], fused_per_view.shape[2], fused_per_view.shape[3]
 
