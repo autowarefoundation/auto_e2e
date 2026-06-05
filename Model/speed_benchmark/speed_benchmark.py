@@ -143,12 +143,15 @@ def main():
     # Test all registered backbones and fusion modes
     backbones = ["swin_v2_tiny", "conv_next_v2_tiny"]
     fusion_modes = ["concat", "cross_attn", "bev"]
+    batch_sizes = [1, 2, 4]
 
     for backbone in backbones:
         for fusion_mode in fusion_modes:
-            result = run_speed_benchmark(backbone, fusion_mode, device)
-            all_results.append(result)
-            print()
+            for batch_size in batch_sizes:
+                torch.cuda.reset_peak_memory_stats() if torch.cuda.is_available() else None
+                result = run_speed_benchmark(backbone, fusion_mode, device, batch_size=batch_size)
+                all_results.append(result)
+                print()
 
     # Save structured results
     save_results_json(all_results, device)
