@@ -34,12 +34,13 @@ def run_speed_benchmark(backbone, fusion_mode, device, batch_size=1, num_views=8
     if fusion_mode == "bev":
         camera_params = torch.randn(batch_size, num_views, 3, 4).to(device)
 
-    # 1. Warm-up Phase
-    print("Warming up GPU...")
+    # 1. Warm-up Phase (GPU kernel compilation and cache warming)
+    num_warmup = 30 if device.type == 'cuda' else 5
+    print(f"Warming up ({num_warmup} iterations)...")
     with torch.no_grad():
-        for _ in range(30):
-            _ = model(visual_tiles, visual_history, egomotion_history, 
-                       backbone=backbone, camera_params=camera_params, mode="infer") # we discard the output
+        for _ in range(num_warmup):
+            _ = model(visual_tiles, visual_history, egomotion_history,
+                       backbone=backbone, camera_params=camera_params, mode="infer")
 
     # 2. Benchmark Phase
     print("Benchmarking now ...")
