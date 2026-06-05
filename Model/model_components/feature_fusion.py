@@ -14,8 +14,8 @@ class FeatureFusion(nn.Module):
     def __init__(self, num_views=8, fusion_mode="concat"):
         super(FeatureFusion, self).__init__()
 
-        # Adaptive pooling to achieve 7x7 resolution
-        self.pool = nn.AdaptiveMaxPool2d(7)
+        # Adaptive pooling to achieve 8x8 resolution
+        self.pool = nn.AdaptiveMaxPool2d(8)
 
         # Channel count after concatenating all 4 SwinV2 stages:
         # 96 + 192 + 384 + 768 = 1440
