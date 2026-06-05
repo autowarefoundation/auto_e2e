@@ -89,8 +89,8 @@ PyTorch 2.12.0, CUDA available: True
 ## Step 5: Run the Inference Test
 
 ```bash
-cd ~/auto_e2e/Model/inference
-python inference_test.py
+cd ~/auto_e2e
+make test
 ```
 
 ## Expected Output
