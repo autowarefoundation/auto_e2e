@@ -2,7 +2,7 @@ from .conv_next_v2_tiny import ConvNextV2Tiny
 from .swin_v2_tiny import SwinV2Tiny
 
 BACKBONE_REGISTRY = {
-    "swin_tiny": ConvNextV2Tiny,
+    "conv_next_v2_tiny": ConvNextV2Tiny,
     "swin_v2_tiny": SwinV2Tiny,
 }
 
