@@ -72,14 +72,38 @@ def run_speed_benchmark(backbone, fusion_mode, device, batch_size=1, num_views=8
     peak_allocated = torch.cuda.max_memory_allocated() / (1024 ** 2)
     peak_reserved = torch.cuda.max_memory_reserved() / (1024 ** 2)
 
+    # Count model parameters
+    total_params = sum(p.numel() for p in model.parameters())
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+
+    results = {
+        "backbone": backbone,
+        "fusion_mode": fusion_mode,
+        "batch_size": batch_size,
+        "num_views": num_views,
+        "avg_fps": round(avg_fps, 2),
+        "avg_latency_ms": round(avg_latency, 2),
+        "p50_latency_ms": round(p50_latency, 2),
+        "p99_latency_ms": round(p99_latency, 2),
+        "jitter_ms": round(jitter, 2),
+        "peak_vram_allocated_mb": round(peak_allocated, 2),
+        "peak_vram_reserved_mb": round(peak_reserved, 2),
+        "total_params": total_params,
+        "trainable_params": trainable_params,
+    }
+
     print("======================")
     print(f"Average FPS: {avg_fps:.2f}")
-    print(f"Average Latency: {avg_latency:.2f}")
+    print(f"Average Latency: {avg_latency:.2f} ms")
     print(f"Worst-Case Latency (p99): {p99_latency:.2f} ms")
     print(f"Latency Jitter (p99 - p50): {jitter:.2f} ms")
     print("----------------------")
     print(f"Peak VRAM Allocated: {peak_allocated:.2f} MB")
     print(f"Peak VRAM Reserved: {peak_reserved:.2f} MB")
+    print(f"Total Parameters: {total_params:,}")
+    print(f"Trainable Parameters: {trainable_params:,}")
+
+    return results
 
 
 def main():
