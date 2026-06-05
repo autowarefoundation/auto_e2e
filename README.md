@@ -39,11 +39,22 @@ To learn more about how to participate in this project, please read the [onboard
 - See the [Trial Guide](./TRIAL.md) for step-by-step instructions on running the inference test on AWS EC2
 =======
 
-## Inference Speed Benchmark
+## Inference Speed Benchmarks
 
-| GPU | FPS | Average Latency [ms] | Worst-Case Latency [ms] | Latency Jitter [ms] | Peak VRAM Allocated [MB] | Peak VRAM Reserved [MB] |
-| --- | --- | --------------- | ------------------ | -------------- | ------------------- | ------------------ |
-| NVIDIA GeForce RTX 4050 | 17.33 | 57.70 | 60.14 | 2.53 | 2042.23 | 2574.00 |
-| ADD YOURS! | - | - | -| - | - | - |
+### NVIDIA GeForce RTX 3060 Laptop GPU 
+<details>
+  <summary>Click here to view the table</summary>
+
+| Backbone | Fusion Method | FPS | Average Latency [ms] | Worst-Case Latency [ms] | Latency Jitter [ms] | Peak VRAM Allocated [MB] | Peak VRAM Reserved [MB] |
+| -------- | ------------- | --- | --------------- | ------------------ | -------------- | ------------------- | ------------------ |
+| SwinV2 Tiny | Feature Concat | 24.99 | 40.01 | 40.68 | 0.71 | 1067.52 | 1216.00 |
+| SwinV2 Tiny | Spatial Attention | 24.48 | 44.49 | 47.23 | 2.75 | 1069.18 | 1218.00 |
+| SwinV2 Tiny | BEV Fusion | 22.02 | 45.42 | 67.72 | 23.87 | 1069.18 | 1220.00 |
+| ConvNextV2 Tiny | Feature Concat | 22.99 | 43.49 | 49.23 | 7.26 | 1092.58 | 1268.00 |
+| ConvNextV2 Tiny | Spatial Attention | 18.60 | 53.75 | 54.15 | 0.36 | 1092.58 | 1268.00 |
+| ConvNextV2 Tiny | BEV Fusion | 18.63 | 53.69 | 54.37 | 0.67 | 1092.58 | 1268.00 |
+</details>
+
+### Add benchmarks for your own GPU .... 
 
 To obtain benchmarks for your GPU, simply run the [benchmarking script](https://github.com/autowarefoundation/auto_e2e/tree/main/Model/speed_benchmark). There, you can also read more about the meaning of benchmark parameters.
