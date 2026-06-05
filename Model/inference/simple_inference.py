@@ -9,7 +9,7 @@ def run_inference(backbone, fusion_mode, device, batch_size=2, num_views=8):
     print(f"{'='*80}\n")
 
     # Instantiate model
-    model = AutoE2E(num_views=num_views, fusion_mode=fusion_mode)
+    model = AutoE2E(backbone=backbone, num_views=num_views, fusion_mode=fusion_mode)
     model = model.to(device)
 
     # Visual Scene Input: [batch, num_views, channels, height, width]
@@ -29,7 +29,8 @@ def run_inference(backbone, fusion_mode, device, batch_size=2, num_views=8):
 
     # Run inference
     trajectory, compressed_visual_feature_vector, future_visual_features = \
-        model(visual_tiles, visual_history, egomotion_history, camera_params=camera_params)
+        model(visual_tiles, visual_history, egomotion_history, 
+              backbone=backbone, camera_params=camera_params, mode="train")
 
     print(f"Trajectory Prediction:              {trajectory.shape}")
     print(f"Compressed Visual Feature Vector:   {compressed_visual_feature_vector.shape}")
