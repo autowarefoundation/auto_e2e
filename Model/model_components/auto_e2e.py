@@ -19,11 +19,11 @@ class AutoE2E(nn.Module):
 
         # Driving policy prediction
         self.DrivingPolicy = DrivingPolicy()
-
+        
         # Future visual state prediction
         self.FutureState = FutureState()
 
-    def forward(self, x, visual_history, egomotion_history, camera_params=None):
+    def forward(self, x, visual_history, egomotion_history, backbone, camera_params=None, mode="train"):
         B, V, C, H, W = x.shape
 
         # Merge batch and views for backbone processing
@@ -31,11 +31,14 @@ class AutoE2E(nn.Module):
         features = self.Backbone(x)
 
         # Fuse multi-scale features and unify across views
-        fused_features = self.FeatureFusion(features, B, V, camera_params=camera_params)
+        fused_features = self.FeatureFusion(features, B, V, backbone=backbone, camera_params=camera_params)
 
         driving_policy, compressed_visual_feature_vector = \
             self.DrivingPolicy(fused_features, visual_history, egomotion_history)
 
-        future_visual_features = self.FutureState(fused_features)
+        if(mode == "train"):
+            future_visual_features = self.FutureState(fused_features)
+        else:
+            future_visual_features = None
 
         return driving_policy, compressed_visual_feature_vector, future_visual_features
