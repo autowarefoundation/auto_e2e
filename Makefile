@@ -1,13 +1,10 @@
-.PHONY: setup test test-unit test-integration
+.PHONY: setup test benchmark
 
 setup:
-	python -m pip install -r requirements.txt
+	pip install torch timm pytest
 
 test:
-	cd Model && python -m pytest tests/ -v
+	cd Model/tests && python -m pytest test_auto_e2e.py -v
 
-test-unit:
-	cd Model && python -m pytest tests/ -v -m "not integration"
-
-test-integration:
-	cd Model && python -m pytest tests/ -v -m "integration"
+benchmark:
+	cd Model/speed_benchmark && python speed_benchmark.py
