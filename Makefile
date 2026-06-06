@@ -1,7 +1,7 @@
 .PHONY: setup test test-unit test-integration
 
 setup:
-	pip install -r requirements.txt
+	python -m pip install -r requirements.txt
 
 test:
 	cd Model && python -m pytest tests/ -v
