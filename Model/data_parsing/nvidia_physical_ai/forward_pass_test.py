@@ -51,7 +51,7 @@ def main(dataset_root: str, clip_uuid: str, batch_size: int = 4, pretrained_back
     t0 = time.time()
     dataset = NvidiaAVDataset(
         data_root=dataset_root,
-        backbone_name="swin_tiny_patch4_window7_224.ms_in22k",
+        backbone_name="swinv2_tiny_window8_256",
         clip_uuids=clip_uuids,
     )
     print(f"Valid samples in clip: {len(dataset)}")
