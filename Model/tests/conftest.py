@@ -112,12 +112,13 @@ def model(request, device):
 
 
 @pytest.fixture(autouse=True)
-def _reset_model_grads(request):
-    """Zero gradients on session-scoped model between tests."""
+def _reset_model_state(request):
+    """Reset session-scoped model state between tests."""
     yield
     if "model" in request.fixturenames:
         model = request.getfixturevalue("model")
         model.zero_grad(set_to_none=True)
+        model.train()
 
 
 @pytest.fixture(params=["concat", "cross_attn", "bev"])
@@ -125,5 +126,8 @@ def full_model(request, device):
     """Full model with real backbone — use only for integration tests."""
     from model_components.auto_e2e import AutoE2E
 
-    model = AutoE2E(num_views=8, fusion_mode=request.param)
+    try:
+        model = AutoE2E(num_views=8, fusion_mode=request.param)
+    except (FileNotFoundError, OSError) as e:
+        pytest.skip(f"Pretrained weights unavailable: {e}")
     return model.to(device)
