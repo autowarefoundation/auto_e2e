@@ -42,25 +42,6 @@ def _make_map_tile(transform: Compose, reference: torch.Tensor) -> torch.Tensor:
     return torch.zeros_like(reference)
 
 
-# def _egomotion_ts_to_frame_idx(timestamps_path: Path, egomotion_timestamp_us: int) -> int:
-#     """Find the camera frame index closest to an egomotion timestamp.
-
-#     Both egomotion and camera timestamps are in microseconds relative to the
-#     same clip anchor (t=0). This finds the camera frame whose timestamp is
-#     nearest to the egomotion timestamp at the sample point.
-
-#     Args:
-#         timestamps_path: Path to the sidecar timestamps parquet for this camera.
-#         egomotion_timestamp_us: Egomotion timestamp in microseconds at the
-#             desired sample point, read directly from the egomotion parquet.
-
-#     Returns:
-#         0-based frame index into the video.
-#     """
-#     df = pd.read_parquet(timestamps_path)
-#     camera_timestamps_us = df["timestamp"].to_numpy()
-#     return int(np.argmin(np.abs(camera_timestamps_us - egomotion_timestamp_us)))
-
 def _egomotion_ts_to_frame_idx(
     egomotion_timestamp_us: int,
     camera_timestamps_us: np.ndarray,
