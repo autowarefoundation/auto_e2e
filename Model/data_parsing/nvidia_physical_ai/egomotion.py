@@ -33,7 +33,7 @@ EGOMOTION_DIM = _HISTORY_TIMESTEPS * _NUM_HISTORY_SIGNALS   # 256
 TRAJECTORY_DIM = _FUTURE_TIMESTEPS * _NUM_TARGET_SIGNALS    # 128
 
 # Minimum rows in the downsampled sequence for a clip to be usable.
-MIN_ROWS = _HISTORY_TIMESTEPS + _FUTURE_TIMESTEPS  # 128
+MIN_ROWS = _HISTORY_TIMESTEPS + _FUTURE_TIMESTEPS + 1  # 129
 
 # The parquet is ~100Hz; downsample to the model's 10Hz.
 # TODO: check sampling integrity (e.g. no missing rows).
@@ -41,6 +41,8 @@ _SOURCE_HZ = 100.0
 _TARGET_HZ = 10.0
 _DOWNSAMPLE_STEP = int(_SOURCE_HZ / _TARGET_HZ)  # keep every 10th row
 
+# To read in just the required columns
+_EGOMOTION_COLUMNS = ["timestamp", "qx", "qy", "qz", "qw", "x", "y", "z", "vx", "vy", "vz", "ax", "ay", "az", "curvature"]
 
 def _to_history_signals(state: EgomotionState) -> np.ndarray:
     """Extract the 4 history signals from an EgomotionState.
@@ -75,7 +77,7 @@ def _load_downsampled_df(data_root: Path, clip_uuid: str) -> pd.DataFrame:
     if not parquet_path.exists():
         raise FileNotFoundError(f"Egomotion parquet not found: {parquet_path}")
 
-    df = pd.read_parquet(parquet_path)
+    df = pd.read_parquet(parquet_path, columns=_EGOMOTION_COLUMNS)
     if df.empty:
         raise ValueError(f"Egomotion parquet is empty: {parquet_path}")
 
@@ -86,6 +88,7 @@ def load_egomotion(
     data_root: Path | str,
     clip_uuid: str,
     sample_idx: int | None = None,
+    df: pd.DataFrame | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Load egomotion history and trajectory target in a single parquet read.
 
@@ -98,7 +101,7 @@ def load_egomotion(
         clip_uuid: UUID of the clip to load.
         sample_idx: Index into the downsampled (10Hz) sequence to treat as
             the current moment. Must satisfy:
-                64 <= sample_idx <= len(df) - 64
+                _HISTORY_TIMESTEPS <= sample_idx <= len(df) - _FUTURE_TIMESTEPS - 1
             Defaults to the midpoint of the valid range. During training,
             pass a random value in the valid range to augment over time
             within the clip.
@@ -107,7 +110,8 @@ def load_egomotion(
         egomotion_history: Float tensor of shape ``(256,)``.
         trajectory_target: Float tensor of shape ``(128,)``.
     """
-    df = _load_downsampled_df(Path(data_root), clip_uuid)
+    if df is None:
+        df = _load_downsampled_df(data_root, clip_uuid)
 
     if len(df) < MIN_ROWS:
         raise ValueError(
@@ -116,7 +120,7 @@ def load_egomotion(
         )
 
     min_idx = _HISTORY_TIMESTEPS                   # 64
-    max_idx = len(df) - _FUTURE_TIMESTEPS          # e.g. 136 for a 200-row clip
+    max_idx = len(df) - _FUTURE_TIMESTEPS - 1         # e.g. 135 for a 200-row clip
 
     if sample_idx is None:
         sample_idx = (min_idx + max_idx) // 2
@@ -127,7 +131,7 @@ def load_egomotion(
         )
 
     history_df = df.iloc[sample_idx - _HISTORY_TIMESTEPS:sample_idx].reset_index(drop=True)
-    future_df = df.iloc[sample_idx:sample_idx + _FUTURE_TIMESTEPS].reset_index(drop=True)
+    future_df = df.iloc[sample_idx + 1:sample_idx + 1 + _FUTURE_TIMESTEPS].reset_index(drop=True)
 
     history_signals = _to_history_signals(EgomotionState.from_egomotion_df(history_df))
     future_signals = _to_target_signals(EgomotionState.from_egomotion_df(future_df))
