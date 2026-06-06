@@ -29,12 +29,14 @@ from pathlib import Path
 from typing import TypedDict
 
 import timm
+import numpy as np
 import pandas as pd
 import torch
 from torch.utils.data import Dataset
 
 from .camera import CAMERA_NAMES, load_camera_frame
 from .egomotion import (
+    _EGOMOTION_COLUMNS,
     MIN_ROWS,
     _DOWNSAMPLE_STEP,
     _FUTURE_TIMESTEPS,
@@ -94,12 +96,18 @@ class NvidiaAVDataset(Dataset):
             raise ValueError(
                 f"No valid clips found under: {self.data_root / 'camera' / _DISCOVERY_CAMERA}"
             )
+        
+        self._egomotion_dfs: dict[str, pd.DataFrame] = {}
+        self._camera_timestamps: dict[tuple[str, str], np.ndarray] = {}
 
         # Build the flat sample index: list of (clip_uuid, sample_idx, egomotion_timestamp_us).
         # Precomputing this means __getitem__ never touches pandas.
         self._samples: list[tuple[str, int, int]] = []
         for clip_uuid in clips:
-            self._samples.extend(self._valid_samples_for_clip(clip_uuid))
+            samples = self._valid_samples_for_clip(clip_uuid)
+            if samples:
+                self._samples.extend(samples)
+                self._load_camera_timestamps(clip_uuid)
 
         if not self._samples:
             raise ValueError("No valid samples found across all clips.")
@@ -107,6 +115,18 @@ class NvidiaAVDataset(Dataset):
         logger.info(
             "NvidiaAVDataset: %d samples from %d clips", len(self._samples), len(clips)
         )
+
+    def _load_camera_timestamps(self, clip_uuid: str) -> None:
+        """Load and cache camera timestamp arrays for all cameras in a clip."""
+        for cam_name in self.camera_names:
+            timestamps_path = (
+                self.data_root / "camera" / cam_name
+                / f"{clip_uuid}.{cam_name}.timestamps.parquet"
+            )
+ 
+            self._camera_timestamps[(clip_uuid, cam_name)] = (
+                pd.read_parquet(timestamps_path)["timestamp"].to_numpy()
+            )
 
     def _discover_clip_uuids(self) -> list[str]:
         """Scan the reference camera directory for clip UUIDs."""
@@ -117,14 +137,62 @@ class NvidiaAVDataset(Dataset):
             )
         return sorted(p.name.split(".")[0] for p in discovery_dir.glob("*.mp4"))
 
+    def _validate_clip(self, clip_uuid: str) -> bool:
+        """Validate a clip before adding it to the sample index.
+
+        Checks:
+        - All expected camera video files and timestamp parquets exist.
+
+        Returns True if the clip passes all checks, False otherwise.
+        """
+
+        # Check camera file completeness
+        for cam_name in self.camera_names:
+            cam_dir = self.data_root / "camera" / cam_name
+            video_path = cam_dir / f"{clip_uuid}.{cam_name}.mp4"
+            timestamps_path = cam_dir / f"{clip_uuid}.{cam_name}.timestamps.parquet"
+
+            if not video_path.exists():
+                logger.warning(
+                    "Clip %s: missing video file for camera %s. Skipping.",
+                    clip_uuid, cam_name,
+                )
+                return False
+
+            if not timestamps_path.exists():
+                logger.warning(
+                    "Clip %s: missing timestamps parquet for camera %s. Skipping.",
+                    clip_uuid, cam_name,
+                )
+                return False
+
+        return True
+
+
+    def _validate_egomotion_timestamps(self, clip_uuid: str, df_ds: pd.DataFrame) -> bool:
+        """Check that downsampled egomotion timestamps are strictly monotonically increasing."""
+        timestamps = df_ds["timestamp"].to_numpy()
+        if not np.all(np.diff(timestamps) > 0):
+            logger.warning(
+                "Clip %s: egomotion timestamps are not strictly monotonically increasing. Skipping.",
+                clip_uuid,
+            )
+            return False
+        return True
+
     def _valid_samples_for_clip(
         self, clip_uuid: str
     ) -> list[tuple[str, int, int]]:
         """Return all valid (clip_uuid, sample_idx, egomotion_timestamp_us) for one clip.
+        Also checks whether all required columns are present in the parquet.
 
         A sample_idx is valid when there are _HISTORY_TIMESTEPS rows behind it
         and _FUTURE_TIMESTEPS rows ahead of it in the downsampled sequence.
         """
+
+        if not self._validate_clip(clip_uuid):
+            return []
+        
         parquet_path = (
             self.data_root / "labels" / "egomotion" / f"{clip_uuid}.egomotion.parquet"
         )
@@ -132,7 +200,20 @@ class NvidiaAVDataset(Dataset):
             logger.warning("Egomotion parquet missing for clip %s, skipping.", clip_uuid)
             return []
 
-        df = pd.read_parquet(parquet_path)
+        # Checking for required columns
+        try:
+            df = pd.read_parquet(parquet_path, columns=_EGOMOTION_COLUMNS)
+        except KeyError as e:
+            logger.warning(
+                "Clip %s: egomotion parquet missing columns: %s. Skipping.", clip_uuid, e
+            )
+            return []
+        except Exception as e:
+            logger.warning(
+                "Clip %s: failed to read egomotion parquet: %s. Skipping.", clip_uuid, e
+            )
+            return []
+        
         df_ds = df.iloc[::_DOWNSAMPLE_STEP].reset_index(drop=True)
 
         if len(df_ds) < MIN_ROWS:
@@ -141,9 +222,14 @@ class NvidiaAVDataset(Dataset):
                 clip_uuid, len(df_ds), MIN_ROWS,
             )
             return []
+        
+        if not self._validate_egomotion_timestamps(clip_uuid, df_ds):
+            return []
+        
+        self._egomotion_dfs[clip_uuid] = df_ds  # cache the downsampled df for later use in __getitem__
 
         min_idx = _HISTORY_TIMESTEPS           # first valid sample_idx
-        max_idx = len(df_ds) - _FUTURE_TIMESTEPS  # last valid sample_idx (inclusive)
+        max_idx = len(df_ds) - _FUTURE_TIMESTEPS  - 1   # last valid sample_idx (inclusive) corrected by -1
 
         return [
             (clip_uuid, sample_idx, int(df_ds.iloc[sample_idx]["timestamp"]))
@@ -156,18 +242,25 @@ class NvidiaAVDataset(Dataset):
     def __getitem__(self, idx: int) -> ClipSample:
         clip_uuid, sample_idx, egomotion_timestamp_us = self._samples[idx]
 
+        camera_timestamps = {
+            cam_name: self._camera_timestamps.get((clip_uuid, cam_name))
+            for cam_name in self.camera_names
+        }
+
         visual_tiles = load_camera_frame(
             self.data_root,
             clip_uuid,
             egomotion_timestamp_us=egomotion_timestamp_us,
             transform=self.transform,
             camera_names=self.camera_names,
+            camera_timestamps=camera_timestamps,
         )
 
         egomotion_history, trajectory_target = load_egomotion(
             self.data_root,
             clip_uuid,
             sample_idx=sample_idx,
+            df=self._egomotion_dfs[clip_uuid],
         )
 
         visual_history = torch.zeros(_VISUAL_HISTORY_DIM, dtype=torch.float32)
