@@ -83,7 +83,7 @@ To learn more about how to participate in this project, please read the [onboard
 | SwinV2 Tiny | BEV Fusion | 103.26 | 9.68 | 10.02 | 0.30 | 1070.18 | 1220.00 |
 | ConvNextV2 Tiny | Feature Concat | 111.24 | 8.99 | 9.28 | 0.25 | 1093.58 | 1284.00 |
 | ConvNextV2 Tiny | Spatial Attention | 101.10 | 9.89 | 10.35 | 0.41 | 1093.58 | 1284.00 |
-| ConvNextV2 Tiny | BEV Fusion | 98.39 | 10.16 | 10.45 | 0.25 | 1093.58 | 1284.00 
+| ConvNextV2 Tiny | BEV Fusion | 98.39 | 10.16 | 10.45 | 0.25 | 1093.58 | 1284.00 |
 
 </details>
 
