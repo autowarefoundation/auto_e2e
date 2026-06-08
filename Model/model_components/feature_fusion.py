@@ -11,13 +11,11 @@ class FeatureFusion(nn.Module):
       2. Unify across camera views using the selected fusion strategy
     """
 
-    def __init__(self, num_views=8, backbone_channels=1440, fusion_mode="concat"):
+    def __init__(self, num_views=8, backbone_channels=1440, embed_dim=256, fusion_mode="concat"):
         super(FeatureFusion, self).__init__()
 
         # Adaptive pooling to achieve 8x8 resolution
         self.pool = nn.AdaptiveMaxPool2d(8)
-
-        embed_dim = 256
 
         self.channel_proj = nn.Sequential(
             nn.Conv2d(backbone_channels, embed_dim, kernel_size=1),
