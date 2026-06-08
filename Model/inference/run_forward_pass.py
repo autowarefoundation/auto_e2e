@@ -3,13 +3,13 @@ import sys
 sys.path.append('..')
 from model_components.auto_e2e import AutoE2E
 
-def run_forward_pass(backbone, fusion_mode, device, batch_size=2, num_views=8):
+def run_forward_pass(backbone, fusion_mode, device, embed_dim=256, batch_size=2, num_views=8):
     print(f"{'='*80}")
     print(f"  backbone = '{backbone}' | fusion_mode = '{fusion_mode}' | batch={batch_size} | views={num_views}")
     print(f"{'='*80}\n")
 
     # Instantiate model
-    model = AutoE2E(backbone=backbone, num_views=num_views, fusion_mode=fusion_mode)
+    model = AutoE2E(backbone=backbone, num_views=num_views, embed_dim=embed_dim, fusion_mode=fusion_mode)
     model = model.to(device)
 
     # Visual Scene Input: [batch, num_views, channels, height, width]
@@ -30,7 +30,7 @@ def run_forward_pass(backbone, fusion_mode, device, batch_size=2, num_views=8):
     # Run inference - train mode means all layers are activated
     trajectory, compressed_visual_feature_vector, future_visual_features = \
         model(visual_tiles, visual_history, egomotion_history, 
-              backbone=backbone, camera_params=camera_params, mode="train")
+              camera_params=camera_params, mode="train")
 
     print(f"Trajectory Prediction:              {trajectory.shape}")
     print(f"Compressed Visual Feature Vector:   {compressed_visual_feature_vector.shape}")

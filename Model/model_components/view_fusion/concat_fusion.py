@@ -5,7 +5,7 @@ import torch.nn as nn
 class ConcatViewFusion(nn.Module):
     """Fuse multi-view features by concatenating along channels and reducing with Conv2d."""
 
-    def __init__(self, num_views, embed_dim=1440):
+    def __init__(self, num_views, embed_dim=256):
         super().__init__()
         self.view_reduce = nn.Sequential(
             nn.Conv2d(num_views * embed_dim, embed_dim, kernel_size=1),

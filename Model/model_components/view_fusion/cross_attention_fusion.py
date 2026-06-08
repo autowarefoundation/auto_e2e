@@ -14,7 +14,7 @@ class CrossAttentionViewFusion(nn.Module):
         - UniAD (Hu et al., CVPR 2023): unified query-based cross-attention
     """
 
-    def __init__(self, num_views, embed_dim=1440, num_heads=8, dropout=0.1):
+    def __init__(self, num_views, embed_dim=256, num_heads=8, dropout=0.1):
         super().__init__()
 
         self.num_views = num_views

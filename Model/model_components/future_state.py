@@ -3,12 +3,12 @@ import torch.nn as nn
 
 
 class FutureState(nn.Module):
-    def __init__(self, backbone_channels=1440):
+    def __init__(self, embed_dim=256):
         super(FutureState, self).__init__()
 
         # Predict future visual features (4 timesteps × C channels = 4C)
-        self.predict_future_1 = nn.Conv2d(backbone_channels, 2*backbone_channels, 3, 1, 1)
-        self.predict_future_2 = nn.Conv2d(2*backbone_channels, 4*backbone_channels, 3, 1, 1)
+        self.predict_future_1 = nn.Conv2d(embed_dim, 2*embed_dim, 3, 1, 1)
+        self.predict_future_2 = nn.Conv2d(2*embed_dim, 4*embed_dim, 3, 1, 1)
 
         # Activation
         self.activation = nn.GELU()
