@@ -17,7 +17,6 @@ class Backbone(nn.Module):
                 features[i] = features[i].permute(0, 3, 1, 2)
 
             _, C, _, _ = features[i].shape
-            print(features[i].shape)
             backbone_channels += C
-            
+
         return features, backbone_channels
