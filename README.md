@@ -57,6 +57,22 @@ To learn more about how to participate in this project, please read the [onboard
 
 </details>
 
+### NVIDIA GeForce RTX 4050 Laptop GPU 
+<details open>
+  <summary>Toggle view</summary>
+
+
+| Backbone | Fusion Method | FPS | Average Latency [ms] | Worst-Case Latency [ms] | Latency Jitter [ms] | Peak VRAM Allocated [MB] | Peak VRAM Reserved [MB] |
+| -------- | ------------- | --- | --------------- | ------------------ | -------------- | ------------------- | ------------------ |
+| SwinV2 Tiny | Feature Concat | 25.76 | 38.81 | 40.60 | 1.80 | 1067.52 | 1216.00 |
+| SwinV2 Tiny | Spatial Attention | 24.85 | 40.24 | 41.32 | 1.04 | 1069.18 | 1218.00 |
+| SwinV2 Tiny | BEV Fusion | 25.47 | 39.27 | 41.36 | 2.36 | 1069.18 | 1220.00 |
+| ConvNextV2 Tiny | Feature Concat | 25.92 | 38.58 | 39.27 | 0.74 | 1092.58 | 1268.00 |
+| ConvNextV2 Tiny | Spatial Attention | 23.06 | 43.37 | 52.16 | 9.03 | 1092.58 | 1268.00 |
+| ConvNextV2 Tiny | BEV Fusion | 21.70 | 46.09 | 77.30 | 33.68 | 1092.58 | 1268.00 |
+
+</details>
+
 ### Add benchmarks for your own GPU .... 
 
 To obtain benchmarks for your GPU, simply run the [benchmarking script](https://github.com/autowarefoundation/auto_e2e/tree/main/Model/speed_benchmark). There, you can also read more about the meaning of benchmark parameters.
