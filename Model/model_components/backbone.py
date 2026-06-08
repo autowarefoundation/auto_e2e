@@ -6,7 +6,7 @@ class Backbone(nn.Module):
         super().__init__()
 
         # Pre-trained backbone (pluggable)
-        self.backbone = build_backbone(backbone, is_pretrained=is_pretrained)
+        self.backbone = build_backbone(backbone, pretrained=is_pretrained)
         self.backbone_name = backbone
          
     def forward(self, image):
