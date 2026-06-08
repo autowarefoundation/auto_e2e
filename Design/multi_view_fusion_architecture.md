@@ -52,18 +52,18 @@ This is a solved problem in the literature. BEVFormer [1], LSS [4], PETR [3], an
 ### 3.1 Full Network Pipeline
 
 ```
-Input: [B, V, 3, 224, 224]
+Input: [B, V, 3, 256, 256]
          │
-         │  reshape to [B*V, 3, 224, 224]
+         │  reshape to [B*V, 3, 256, 256]
          ▼
 ┌─────────────────────────────┐
-│  Backbone (Swin-Tiny)     │  Pretrained on ImageNet-22k [5]
+│  Backbone (SwinV2-Tiny)     │  Pretrained on ImageNet-22k [5]
 │  Multi-scale feature maps   │  4 stages: 96, 192, 384, 768 channels
 └─────────────────────────────┘
          │
-         │  Pool to 7×7 + concatenate scales
+         │  Pool to 8×8 + concatenate scales
          ▼
-    [B*V, 1440, 7, 7]
+    [B*V, 1440, 8, 8]
          │
          │  ┌──────────────────────────────────────────┐
          │  │  View Fusion (selectable via fusion_mode) │
@@ -74,12 +74,12 @@ Input: [B, V, 3, 224, 224]
          │  └──────────────────────────────────────────┘
          │
          ▼
-    [B, 1440, 7, 7]  ← Unified scene representation
+    [B, 256, 8, 8]  ← Unified scene representation
          │
     ┌────┴────┐
     ▼         ▼
 DrivingPolicy  FutureState
-[B, 128]       [B, 1440, 7, 7] × 4
+[B, 128]       [B, 256, 8, 8] × 4
 ```
 
 ### 3.2 Module Interface
@@ -88,17 +88,17 @@ All view fusion modules implement the same interface:
 
 ```python
 class ViewFusionModule(nn.Module):
-    def __init__(self, num_views: int, embed_dim: int = 1440): ...
+    def __init__(self, num_views: int, embed_dim: int = 256): ...
     def forward(self, fused_per_view: Tensor, B: int, V: int,
                 camera_params: Optional[Tensor] = None) -> Tensor:
         """
         Args:
-            fused_per_view: [B*V, embed_dim, 7, 7]
+            fused_per_view: [B*V, embed_dim, 8, 8]
             B: batch size
             V: number of views
             camera_params: [B, V, 3, 4] optional camera matrices
         Returns:
-            [B, embed_dim, 7, 7]
+            [B, embed_dim, 8, 8]
         """
 ```
 
@@ -119,11 +119,11 @@ model = AutoE2E(num_views=8, fusion_mode="bev")
 
 ---
 
-## 4. Backbone: Swin V1 Tiny (Current)
+## 4. Backbone: Swin V2 Tiny (Current)
 
 ### 4.1 Current Choice
 
-The current backbone is **Swin V1 Tiny** (`swin_tiny_patch4_window7_224.ms_in22k`), pretrained on ImageNet-22k. This was chosen as an initial starting point. A separate proposal to make the backbone configurable is tracked in a dedicated issue.
+The current backbone is **Swin V2 Tiny** (`swin_tiny_patch4_window7_224.ms_in22k`), pretrained on ImageNet-22k. This was chosen as an initial starting point. A separate proposal to make the backbone configurable is tracked in a dedicated issue.
 
 | Criterion | Swin V1 Tiny | ResNet-50 | ViT-Base |
 |-----------|-------------|-----------|----------|
@@ -139,13 +139,13 @@ Swin V1 [5] provides hierarchical multi-scale features (essential for multi-scal
 ### 4.2 Multi-Scale Feature Extraction
 
 ```
-Stage 0: [B*V, 56, 56, 96]   → 1/4 resolution, low-level features
-Stage 1: [B*V, 28, 28, 192]  → 1/8 resolution, mid-level features
-Stage 2: [B*V, 14, 14, 384]  → 1/16 resolution, high-level features
-Stage 3: [B*V, 7, 7, 768]    → 1/32 resolution, semantic features
+Stage 0: [B*V, 64, 64, 96]   → 1/4 resolution, low-level features
+Stage 1: [B*V, 32, 32, 192]  → 1/8 resolution, mid-level features
+Stage 2: [B*V, 16, 16, 384]  → 1/16 resolution, high-level features
+Stage 3: [B*V, 8, 8, 768]    → 1/32 resolution, semantic features
 ```
 
-All stages are pooled to 7×7 and concatenated along the channel dimension, yielding 96 + 192 + 384 + 768 = **1440 channels**. This multi-scale fusion captures both fine-grained spatial detail and high-level semantics, following FPN-style design principles [6].
+All stages are pooled to 8×8 and concatenated along the channel dimension, yielding 96 + 192 + 384 + 768 = **1440 channels**. This multi-scale fusion captures both fine-grained spatial detail and high-level semantics, following FPN-style design principles [6]. The channel dimension is then reduced to acheive an embedding of length 256, which is used in downstream fusion modules in-line with other SOTA approaches.
 
 ---
 
@@ -156,11 +156,11 @@ All stages are pooled to 7×7 and concatenated along the channel dimension, yiel
 The simplest fusion strategy. All camera features are concatenated along the channel dimension and reduced via a 1×1 convolution.
 
 ```
-[B*V, 1440, 7, 7]
+[B*V, 256, 8, 8]
     ↓ reshape
-[B, V*1440, 7, 7]     ← V=8 → 11,520 channels
-    ↓ Conv2d(V*1440, 1440, kernel=1) + GELU
-[B, 1440, 7, 7]
+[B, V*256, 8, 8]     ← V=8 → 2,048 channels
+    ↓ Conv2d(V*256, 256, kernel=1) + GELU
+[B, 256, 8, 8]
 ```
 
 ### 5.2 Rationale
@@ -191,18 +191,18 @@ The simplest fusion strategy. All camera features are concatenated along the cha
 Applies multi-head self-attention across camera views at each spatial position, with learnable camera position embeddings.
 
 ```
-[B*V, 1440, 7, 7]
+[B*V, 256, 8, 8]
     ↓ reshape
-[B*H*W, V, 1440]          ← Each spatial position: V vectors of dim 1440
-    ↓ + view_embed          ← Learnable camera identity [1, V, 1440]
+[B*H*W, V, 256]          ← Each spatial position: V vectors of dim 256
+    ↓ + view_embed          ← Learnable camera identity [1, V, 256]
     ↓ LayerNorm
     ↓ MultiheadAttention(Q=K=V=x, num_heads=8)
     ↓ + residual
     ↓ LayerNorm
-    ↓ FFN(1440 → 2880 → 1440) + residual
+    ↓ FFN(256 → 512 → 256) + residual
     ↓ mean(dim=1)           ← Pool across views
     ↓ reshape
-[B, 1440, 7, 7]
+[B, 256, 8, 8]
 ```
 
 ### 6.2 Rationale
@@ -246,7 +246,7 @@ Implements a simplified BEV fusion module inspired by BEVFormer [1]. Learnable B
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│ BEV Queries: nn.Embedding(H_bev × W_bev, 1440)             │
+│ BEV Queries: nn.Embedding(H_bev × W_bev, 256)             │
 │ Each query represents one cell in the BEV grid              │
 └─────────────────────────────────────────────────────────────┘
          │
@@ -279,7 +279,7 @@ Implements a simplified BEV fusion module inspired by BEVFormer [1]. Learnable B
 └─────────────────────────────────────────────────────────────┘
          │
          ▼
-    [B, 1440, 7, 7]  ← BEV feature grid
+    [B, 256, 8, 8]  ← BEV feature grid
 ```
 
 ### 7.2 Component Design Details
@@ -290,11 +290,11 @@ Implements a simplified BEV fusion module inspired by BEVFormer [1]. Learnable B
 self.bev_queries = nn.Embedding(bev_h * bev_w, embed_dim)
 ```
 
-- **Shape**: [49, 1440] (7×7 BEV grid, matching downstream feature resolution)
+- **Shape**: [49, 256] (8×8 BEV grid, matching downstream feature resolution)
 - **Initialization**: Standard random (learned from scratch)
 - **Role**: Each query "asks" the image features: "What is happening at my BEV grid location?"
 
-In BEVFormer [1], BEV queries are 200×200 with 256 channels for nuScenes. We use 7×7 with 1440 channels to match the existing architecture's spatial resolution and channel count.
+In BEVFormer [1], BEV queries are 200×200 with 256 channels for nuScenes. We use 8×8 with 256 channels to match the existing architecture's spatial resolution and channel count.
 
 #### 7.2.2 3D Reference Points
 
@@ -434,8 +434,8 @@ Future upgrades may include:
 
 ```python
 class FutureState(nn.Module):
-    # Conv2d(1440, 2880) → GELU → Conv2d(2880, 5760) → chunk(4)
-    # Output: 4 × [B, 1440, 7, 7] at 1.6s intervals over 6.4s
+    # Conv2d(256, 512) → GELU → Conv2d(512, 1024) → chunk(4)
+    # Output: 4 × [B, 256, 8, 8] at 1.6s intervals over 6.4s
 ```
 
 ### 9.2 Relation to JEPA
