@@ -12,4 +12,20 @@ The script outputs:
 * Peak VRAM Allocated [MB] — The minimum theoretical footprint your model needs to exist. This is the maximum amount of GPU memory that actually held the forward-pass-related data.
 * Peak VRAM Reserved [MB] — The realistic memory footprint your system feels. This is the maximum amount of GPU memory walled off from the computer's operating system.
 
-After running the `speed_benchmarking.py` script, please kindly add the results to the [main README](https://github.com/autowarefoundation/auto_e2e/blob/main/README.md) 🙂
+## How to Run
+
+```bash
+make benchmark
+```
+
+The script will:
+1. Run all combinations of backbones × fusion modes × batch sizes
+2. Print results to stdout
+3. Save structured results to `benchmark_results.json`
+4. Print a Markdown table ready to paste into the main README
+
+## Output Files
+
+* `benchmark_results.json` — Full results with hardware metadata (GPU name, CUDA version, PyTorch version, timestamp)
+
+After running the script, please kindly add the results to the [main README](https://github.com/autowarefoundation/auto_e2e/blob/main/README.md)
