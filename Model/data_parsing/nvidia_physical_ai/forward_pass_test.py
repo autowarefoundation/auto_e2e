@@ -30,8 +30,8 @@ from torch.utils.data import DataLoader
 _MODEL_DIR = pathlib.Path(__file__).parent.parent.parent.resolve()
 sys.path.insert(0, str(_MODEL_DIR))
 
-from data_parsing.nvidia_physical_ai import NvidiaAVDataset
-from model_components.auto_e2e import AutoE2E
+from data_parsing.nvidia_physical_ai import NvidiaAVDataset  # noqa: E402
+from model_components.auto_e2e import AutoE2E  # noqa: E402
 
 
 def main(dataset_root: str, clip_uuid: str, batch_size: int = 4, pretrained_backbone: bool = True) -> None:
