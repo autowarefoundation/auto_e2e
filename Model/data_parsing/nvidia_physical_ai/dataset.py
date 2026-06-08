@@ -14,7 +14,7 @@ Usage
     )
 
     sample = dataset[0]
-    # sample["visual_tiles"]       (8, 3, 224, 224)
+    # sample["visual_tiles"]       (8, 3, 256, 256)
     # sample["egomotion_history"]  (256,)
     # sample["visual_history"]     (896,)
     # sample["trajectory_target"]  (128,)
@@ -51,7 +51,7 @@ _DISCOVERY_CAMERA = "camera_front_wide_120fov"
 
 
 class ClipSample(TypedDict):
-    visual_tiles: torch.Tensor        # (8, 3, 224, 224)
+    visual_tiles: torch.Tensor        # (8, 3, 256, 256)
     egomotion_history: torch.Tensor   # (256,)
     visual_history: torch.Tensor      # (896,)
     trajectory_target: torch.Tensor   # (128,)
@@ -76,7 +76,7 @@ class NvidiaAVDataset(Dataset):
     def __init__(
         self,
         data_root: Path | str,
-        backbone_name: str = "swin_tiny_patch4_window7_224.ms_in22k",
+        backbone_name: str = "swinv2_tiny_window8_256",
         camera_names: list[str] | None = None,
         clip_uuids: list[str] | None = None,
     ) -> None:
