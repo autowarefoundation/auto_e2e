@@ -3,11 +3,8 @@ import torch
 import sys
 sys.path.append('..')
 
-from model_components.auto_e2e import AutoE2E
-from model_components.backbone import Backbone
 from model_components.feature_fusion import FeatureFusion
 from model_components.driving_policy import DrivingPolicy
-from model_components.future_state import FutureState
 from model_components.view_fusion import build_view_fusion, FUSION_REGISTRY
 from model_components.view_fusion.cross_attention_fusion import CrossAttentionViewFusion
 from model_components.view_fusion.bev_fusion import BEVViewFusion
