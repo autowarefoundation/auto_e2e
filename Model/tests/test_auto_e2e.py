@@ -337,7 +337,7 @@ class TestCrossAttentionFusion:
         fusion = CrossAttentionViewFusion(num_views=4, embed_dim=1440).to(device)
         fusion.eval()
 
-        x = torch.randn(4, 1440, 7, 7, device=device)
+        x = torch.randn(4, 256, 7, 7, device=device)
         out_original = fusion(x, B=1, V=4)
 
         x_permuted = x[[2, 0, 3, 1]]
