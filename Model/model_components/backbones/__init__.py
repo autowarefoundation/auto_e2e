@@ -7,6 +7,9 @@ BACKBONE_REGISTRY = {
     "conv_next_v2_tiny": lambda pretrained=True, **kwargs: timm.create_model(
         "convnextv2_tiny", pretrained=pretrained, features_only=True, **kwargs
     ),
+    "res_net_50": lambda pretrained=True, **kwargs: timm.create_model(
+        "resnet50", pretrained=pretrained, features_only=True, **kwargs
+    ),
 }
 
 def build_backbone(backbone, pretrained=True, **kwargs):

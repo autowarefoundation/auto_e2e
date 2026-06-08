@@ -51,6 +51,9 @@ def main():
     run_forward_pass("conv_next_v2_tiny", "concat", device)
     run_forward_pass("conv_next_v2_tiny", "cross_attn", device)
     run_forward_pass("conv_next_v2_tiny", "bev", device)
+    run_forward_pass("res_net_50", "concat", device)
+    run_forward_pass("res_net_50", "cross_attn", device)
+    run_forward_pass("res_net_50", "bev", device)
 
 
 if __name__ == "__main__":

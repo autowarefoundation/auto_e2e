@@ -17,6 +17,7 @@ class FeatureFusion(nn.Module):
         # Adaptive pooling to achieve 8x8 resolution
         self.pool = nn.AdaptiveMaxPool2d(8)
 
+        # Channel reduction to achieve correct embedding dimension
         self.channel_proj = nn.Sequential(
             nn.Conv2d(backbone_channels, embed_dim, kernel_size=1),
             nn.GELU()
@@ -29,16 +30,13 @@ class FeatureFusion(nn.Module):
         # features: list of 4 multi-scale feature maps from backbone
         # Each has shape [B*V, H, W, C] (SwinV2 output format)
 
-        # Pooling features to 8x8 size
-        f0 = self.pool(features[0])
-        f1 = self.pool(features[1])
-        f2 = self.pool(features[2])
-        f3 = features[3]
+        for i in range(0, len(features)):
+            features[i] = self.pool(features[i])
 
         # Concatenate scales along channels: [B*V, 1440, 8, 8]
-        fused_per_view = torch.cat((f0, f1, f2, f3), dim=1)    # [B*V, backbone_channels, 8, 8]
+        fused_per_view = torch.cat(features, dim=1)    # [B*V, backbone_channels, 8, 8]
         fused_per_view = self.channel_proj(fused_per_view)     # [B*V, 256, 8, 8]
-  
+        
         # Unify across views: [B*V, 256, 8, 8] → [B, 256, 8, 8]
         # camera_params is passed through for BEV fusion; ignored by other modes
         fused = self.view_fusion(fused_per_view, B, V, camera_params=camera_params)
