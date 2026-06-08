@@ -70,6 +70,21 @@ To learn more about how to participate in this project, please read the [onboard
 | ConvNextV2 Tiny | Feature Concat | 25.92 | 38.58 | 39.27 | 0.74 | 1092.58 | 1268.00 |
 | ConvNextV2 Tiny | Spatial Attention | 23.06 | 43.37 | 52.16 | 9.03 | 1092.58 | 1268.00 |
 | ConvNextV2 Tiny | BEV Fusion | 21.70 | 46.09 | 77.30 | 33.68 | 1092.58 | 1268.00 |
+  
+</details>
+
+### NVIDIA GeForce RTX 5080 GPU 
+<details open>
+  <summary>Toggle view</summary>
+  
+| Backbone | Fusion Method | FPS | Average Latency [ms] | Worst-Case Latency [ms] | Latency Jitter [ms] | Peak VRAM Allocated [MB] | Peak VRAM Reserved [MB] |
+| -------- | ------------- | --- | --------------- | ------------------ | -------------- | ------------------- | ------------------ |
+| SwinV2 Tiny | Feature Concat | 118.09 | 8.47 | 8.83 | 0.34 | 1068.52 | 1218.00 |
+| SwinV2 Tiny | Spatial Attention | 106.45 | 9.39 | 9.74 | 0.29 | 1070.18 | 1218.00 |
+| SwinV2 Tiny | BEV Fusion | 103.26 | 9.68 | 10.02 | 0.30 | 1070.18 | 1220.00 |
+| ConvNextV2 Tiny | Feature Concat | 111.24 | 8.99 | 9.28 | 0.25 | 1093.58 | 1284.00 |
+| ConvNextV2 Tiny | Spatial Attention | 101.10 | 9.89 | 10.35 | 0.41 | 1093.58 | 1284.00 |
+| ConvNextV2 Tiny | BEV Fusion | 98.39 | 10.16 | 10.45 | 0.25 | 1093.58 | 1284.00 
 
 </details>
 
