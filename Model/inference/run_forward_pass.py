@@ -34,10 +34,10 @@ def run_forward_pass(backbone, fusion_mode, device, batch_size=2, num_views=8):
 
     print(f"Trajectory Prediction:              {trajectory.shape}")
     print(f"Compressed Visual Feature Vector:   {compressed_visual_feature_vector.shape}")
-    print(f"Future Visual Features Prediction:")
+    print("Future Visual Features Prediction:")
     for i, f in enumerate(future_visual_features):
         print(f"  t+{(i+1)*1.6:.1f}s: {f.shape}")
-    print(f"\nCOMPLETE\n")
+    print("\nCOMPLETE\n")
 
 
 def main():
