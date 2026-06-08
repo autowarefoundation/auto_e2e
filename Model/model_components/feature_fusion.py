@@ -11,15 +11,18 @@ class FeatureFusion(nn.Module):
       2. Unify across camera views using the selected fusion strategy
     """
 
-    def __init__(self, num_views=8, fusion_mode="concat"):
+    def __init__(self, num_views=8, backbone_channels=1440, fusion_mode="concat"):
         super(FeatureFusion, self).__init__()
 
         # Adaptive pooling to achieve 8x8 resolution
         self.pool = nn.AdaptiveMaxPool2d(8)
 
-        # Channel count after concatenating all 4 SwinV2 stages:
-        # 96 + 192 + 384 + 768 = 1440
-        embed_dim = 1440
+        embed_dim = 256
+
+        self.channel_proj = nn.Sequential(
+            nn.Conv2d(backbone_channels, embed_dim, kernel_size=1),
+            nn.GELU()
+        )
 
         # View fusion strategy (pluggable)
         self.view_fusion = build_view_fusion(fusion_mode, num_views, embed_dim)
@@ -50,7 +53,8 @@ class FeatureFusion(nn.Module):
 
 
         # Concatenate scales along channels: [B*V, 1440, 8, 8]
-        fused_per_view = torch.cat((f0, f1, f2, f3), dim=1)
+        fused_per_view = torch.cat((f0, f1, f2, f3), dim=1)    # [B*V, backbone_channels, 7, 7]
+        fused_per_view = self.channel_proj(fused_per_view)     # [B*V, 256, 7, 7]
 
         # Unify across views: [B*V, 1440, 8, 8] → [B, 1440, 8, 8]
         # camera_params is passed through for BEV fusion; ignored by other modes
