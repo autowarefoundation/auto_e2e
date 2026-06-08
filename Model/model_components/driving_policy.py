@@ -3,7 +3,7 @@ import torch.nn as nn
 
 
 class DrivingPolicy(nn.Module):
-    def __init__(self, visual_feature_dim=1440 * 8 * 8, visual_history_dim=896, egomotion_dim=256):
+    def __init__(self, embed_dim=256, visual_history_dim=896, egomotion_dim=256):
         super(DrivingPolicy, self).__init__()
 
         # Dimensions for the compressed visual feature vector
@@ -11,7 +11,7 @@ class DrivingPolicy(nn.Module):
         visual_flat_dim = 3 * 8 * 8  # After channel reduction
 
         # 2D Conv layer to reduce channels
-        self.reduce_channels = nn.Conv2d(1440, 3, 3, 1, 1)
+        self.reduce_channels = nn.Conv2d(embed_dim, 3, 3, 1, 1)
 
         # Total input dimension to MLP
         mlp_input_dim = visual_flat_dim + visual_history_dim + egomotion_dim
@@ -31,7 +31,7 @@ class DrivingPolicy(nn.Module):
         self.activation = nn.GELU()
 
     def forward(self, fused_features, visual_history, egomotion_history):
-        # fused_features: [B, 1440, 8, 8]
+        # fused_features: [B, C, 8, 8]
 
         # Reduce visual feature channels: [B, 3, 8, 8]
         feature_map = self.reduce_channels(fused_features)
