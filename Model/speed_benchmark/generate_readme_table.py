@@ -82,6 +82,7 @@ def main():
         print("Error: no JSON result files found in results/.", file=sys.stderr)
         sys.exit(1)
 
+    # Only the latest run per GPU is displayed in the generated table.
     markdown = generate_markdown(gpu_groups)
     print(markdown)
 
