@@ -150,7 +150,7 @@ def save_results_json(all_results, device, input_resolution=(256, 256)):
         "input_resolution": list(input_resolution),
         "results": all_results,
     }
-    gpu_slug = output["gpu_name"].replace(" ", "_").lower()
+    gpu_slug = output["gpu_name"].replace(" ", "_").replace("/", "-").lower()
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     results_dir = Path(__file__).parent / "results"
     results_dir.mkdir(exist_ok=True)
