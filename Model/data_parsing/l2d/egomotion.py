@@ -45,7 +45,7 @@ def _derive_signals(vehicle_states: np.ndarray) -> np.ndarray:
         Float32 array of shape (T, 4): [speed, acceleration_x, yaw_rate, curvature].
     """
     speed = vehicle_states[:, 0]
-    heading = vehicle_states[:, 1]
+    heading = np.unwrap(vehicle_states[:, 1])
     accel_x = vehicle_states[:, 6]
 
     # yaw_rate = d(heading) / dt, with zero at boundaries
