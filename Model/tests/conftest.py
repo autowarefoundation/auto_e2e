@@ -15,13 +15,13 @@ import torch.nn as nn
 
 
 class MockBackboneModel(nn.Module):
-    """Minimal Conv backbone producing 4 feature maps matching SwinV2 output shapes.
+    """Minimal Conv backbone producing 4 feature maps in channels-first format.
 
-    SwinV2 Tiny at 256x256 input produces (channels-last):
-      Stage 0: [B*V, 64, 64, 96]
-      Stage 1: [B*V, 32, 32, 192]
-      Stage 2: [B*V, 16, 16, 384]
-      Stage 3: [B*V,  8,  8, 768]
+    Matches the output of Backbone.forward() which returns channels-first:
+      Stage 0: [B*V, 96, 64, 64]
+      Stage 1: [B*V, 192, 32, 32]
+      Stage 2: [B*V, 384, 16, 16]
+      Stage 3: [B*V, 768,  8,  8]
 
     Uses adaptive pooling after each conv to guarantee correct spatial dims
     regardless of input resolution, keeping gradients flowing for
@@ -53,21 +53,17 @@ class MockBackboneModel(nn.Module):
         s2 = self.stage2(s1)  # [B*V, 384, 16, 16]
         s3 = self.stage3(s2)  # [B*V, 768, 8, 8]
 
-        # Convert to channels-last to match SwinV2 output format
-        return [
-            s0.permute(0, 2, 3, 1),  # [B*V, 64, 64, 96]
-            s1.permute(0, 2, 3, 1),  # [B*V, 32, 32, 192]
-            s2.permute(0, 2, 3, 1),  # [B*V, 16, 16, 384]
-            s3.permute(0, 2, 3, 1),  # [B*V,  8,  8, 768]
-        ]
+        return [s0, s1, s2, s3]
 
 
 class MockBackbone(nn.Module):
     """Drop-in replacement for model_components.backbone.Backbone."""
 
-    def __init__(self, **kwargs):
+    def __init__(self, backbone="swin_v2_tiny", is_pretrained=True, **kwargs):
         super().__init__()
         self.backbone = MockBackboneModel()
+        self.backbone_name = backbone
+        self.backbone_channels = 1440
 
     def forward(self, image):
         return self.backbone(image)
