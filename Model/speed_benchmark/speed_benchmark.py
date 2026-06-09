@@ -149,7 +149,9 @@ def save_results_json(all_results, device, input_resolution=(256, 256)):
         "input_resolution": list(input_resolution),
         "results": all_results,
     }
-    filepath = "benchmark_results.json"
+    gpu_slug = output["gpu_name"].replace(" ", "_").lower()
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    filepath = f"results/{gpu_slug}_{timestamp}.json"
     with open(filepath, "w") as f:
         json.dump(output, f, indent=2)
     print(f"\nResults saved to {filepath}")
