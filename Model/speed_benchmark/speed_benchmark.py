@@ -6,6 +6,7 @@ import sys
 import json
 import numpy as np
 from datetime import datetime
+from pathlib import Path
 sys.path.append('..')
 from model_components.auto_e2e import AutoE2E
 
@@ -151,7 +152,9 @@ def save_results_json(all_results, device, input_resolution=(256, 256)):
     }
     gpu_slug = output["gpu_name"].replace(" ", "_").lower()
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    filepath = f"results/{gpu_slug}_{timestamp}.json"
+    results_dir = Path(__file__).parent / "results"
+    results_dir.mkdir(exist_ok=True)
+    filepath = results_dir / f"{gpu_slug}_{timestamp}.json"
     with open(filepath, "w") as f:
         json.dump(output, f, indent=2)
     print(f"\nResults saved to {filepath}")
