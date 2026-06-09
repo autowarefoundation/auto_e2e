@@ -19,12 +19,14 @@ from __future__ import annotations
 import logging
 from typing import TypedDict
 
-import numpy as np
 import timm
 import torch
+import torchvision.transforms.functional as TF
 from torch.utils.data import Dataset
 
-from .camera import CAMERA_NAMES, NUM_VIEWS, load_camera_frames
+import numpy as np
+
+from .camera import CAMERA_NAMES, NUM_VIEWS
 from .egomotion import (
     MIN_FRAMES,
     _FUTURE_TIMESTEPS,
@@ -79,7 +81,9 @@ class L2DDataset(Dataset):
 
         _backbone = timm.create_model(backbone_name, pretrained=False)
         data_config = timm.data.resolve_model_data_config(_backbone)
-        self.transform = timm.data.create_transform(**data_config, is_training=False)
+        self._input_size = data_config["input_size"][1:]  # (H, W)
+        self._mean = torch.tensor(data_config["mean"]).view(3, 1, 1)
+        self._std = torch.tensor(data_config["std"]).view(3, 1, 1)
         del _backbone
 
         self._samples = self._build_sample_index()
@@ -147,14 +151,14 @@ class L2DDataset(Dataset):
 
         # Load camera frames for the current timestep
         item = self.lerobot_dataset[global_frame_idx]
-        frames = {}
+        tensors = []
         for cam_name in CAMERA_NAMES:
-            frame_tensor = item[cam_name]
-            # LeRobot returns CHW float [0,1]; convert to HWC uint8 for PIL
-            frame_np = (frame_tensor.permute(1, 2, 0).numpy() * 255).astype(np.uint8)
-            frames[cam_name] = frame_np
+            frame = item[cam_name]  # CHW float [0,1]
+            frame = TF.resize(frame, list(self._input_size), antialias=True)
+            frame = TF.normalize(frame, self._mean.squeeze(), self._std.squeeze())
+            tensors.append(frame)
 
-        visual_tiles = load_camera_frames(frames, self.transform)
+        visual_tiles = torch.stack(tensors, dim=0)
 
         visual_history = torch.zeros(_VISUAL_HISTORY_DIM, dtype=torch.float32)
 
