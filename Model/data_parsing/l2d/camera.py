@@ -31,6 +31,10 @@ def make_camera_params_placeholder() -> torch.Tensor:
 
     Uses identity-like projection matrices. Replace with real intrinsic @
     extrinsic once calibration YAML is parsed.
+
+    Note: This is a placeholder only suitable for concat and cross_attn fusion
+    modes. BEV fusion mode requires real extrinsics parsed from the
+    extrinsic_RDF.yaml calibration file to produce meaningful projections.
     """
     params = torch.zeros(NUM_VIEWS, 3, 4, dtype=torch.float32)
     for i in range(NUM_VIEWS):
