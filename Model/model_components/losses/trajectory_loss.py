@@ -15,15 +15,15 @@ class TrajectoryImitationLoss(nn.Module):
         else:
             raise ValueError(f"Unsupported loss_type: {loss_type}")
 
-        self.temporal_decay = temporal_decay
         self.num_timesteps = num_timesteps
         self.num_signals = num_signals
 
-    def _build_temporal_weights(self, num_timesteps: int, device: torch.device) -> torch.Tensor:
-        if self.temporal_decay == 1.0:
-            return torch.ones(num_timesteps, device=device)
-        t = torch.arange(num_timesteps, device=device, dtype=torch.float32)
-        return self.temporal_decay ** t
+        if temporal_decay == 1.0:
+            weights = torch.ones(num_timesteps)
+        else:
+            t = torch.arange(num_timesteps, dtype=torch.float32)
+            weights = temporal_decay ** t
+        self.register_buffer("temporal_weights", weights)
 
     def forward(self, trajectory_pred: torch.Tensor, trajectory_target: torch.Tensor) -> torch.Tensor:
         B = trajectory_pred.shape[0]
@@ -33,7 +33,6 @@ class TrajectoryImitationLoss(nn.Module):
         per_element_loss = self.loss_fn(pred, target)
         per_timestep_loss = per_element_loss.mean(dim=2)
 
-        weights = self._build_temporal_weights(self.num_timesteps, trajectory_pred.device)
-        weighted_loss = per_timestep_loss * weights.unsqueeze(0)
+        weighted_loss = per_timestep_loss * self.temporal_weights.unsqueeze(0)
 
         return weighted_loss.mean()
