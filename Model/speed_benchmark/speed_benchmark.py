@@ -1,3 +1,4 @@
+import argparse
 import torch
 import time
 import sys
@@ -141,7 +142,18 @@ def print_markdown_table(all_results):
               f"{r['peak_vram_allocated_mb']:.0f} | {params_m:.1f}M |")
 
 
+def parse_args():
+    parser = argparse.ArgumentParser(description="AutoE2E speed benchmark")
+    parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility")
+    return parser.parse_args()
+
+
 def main():
+    args = parse_args()
+
+    torch.manual_seed(args.seed)
+    np.random.seed(args.seed)
+
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f'Using {device} for inference\n')
 
