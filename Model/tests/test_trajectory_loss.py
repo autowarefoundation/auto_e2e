@@ -32,7 +32,7 @@ class TestTrajectoryImitationLoss:
         uniform_loss = TrajectoryImitationLoss(temporal_decay=1.0)(pred, target)
         decayed_loss = TrajectoryImitationLoss(temporal_decay=0.9)(pred, target)
 
-        assert not torch.isclose(uniform_loss, decayed_loss)
+        assert uniform_loss.item() != decayed_loss.item()
 
     def test_zero_input_produces_zero_loss(self):
         loss_fn = TrajectoryImitationLoss()
@@ -48,7 +48,7 @@ class TestTrajectoryImitationLoss:
         l1_loss = TrajectoryImitationLoss(loss_type="smooth_l1")(pred, target)
         mse_loss = TrajectoryImitationLoss(loss_type="mse")(pred, target)
 
-        assert not torch.isclose(l1_loss, mse_loss)
+        assert l1_loss.item() != mse_loss.item()
 
     def test_invalid_loss_type_raises(self):
         with pytest.raises(ValueError, match="Unsupported loss_type"):
