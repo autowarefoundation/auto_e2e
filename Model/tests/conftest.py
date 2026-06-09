@@ -68,6 +68,7 @@ class MockBackbone(nn.Module):
     def __init__(self, **kwargs):
         super().__init__()
         self.backbone = MockBackboneModel()
+        self.backbone_channels = 1440
 
     def forward(self, image):
         return self.backbone(image)
