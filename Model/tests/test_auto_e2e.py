@@ -13,11 +13,12 @@ from model_components.view_fusion.bev_fusion import BEVViewFusion
 
 def make_inputs(batch_size, num_views, device, include_camera_params=False):
     visual = torch.randn(batch_size, num_views, 3, 256, 256, device=device)
+    visual_history = torch.randn(batch_size, 896, device=device)
     egomotion = torch.randn(batch_size, 256, device=device)
     if include_camera_params:
         camera_params = torch.randn(batch_size, num_views, 3, 4, device=device)
-        return visual, egomotion, camera_params
-    return visual, egomotion
+        return visual, visual_history, egomotion, camera_params
+    return visual, visual_history, egomotion
 
 
 # ---------------------------------------------------------------------------
@@ -27,20 +28,20 @@ def make_inputs(batch_size, num_views, device, include_camera_params=False):
 class TestOutputShapes:
     @pytest.mark.parametrize("batch_size", [1, 2, 4])
     def test_trajectory_shape(self, model, device, batch_size):
-        visual, ego = make_inputs(batch_size, 8, device)
-        traj, _, _ = model(visual, ego)
+        visual, vis_hist, ego = make_inputs(batch_size, 8, device)
+        traj, _, _ = model(visual, vis_hist, ego)
         assert traj.shape == (batch_size, 128)
 
     @pytest.mark.parametrize("batch_size", [1, 2, 4])
     def test_ego_hidden_shape(self, model, device, batch_size):
-        visual, ego = make_inputs(batch_size, 8, device)
-        _, ego_hidden, _ = model(visual, ego)
+        visual, vis_hist, ego = make_inputs(batch_size, 8, device)
+        _, ego_hidden, _ = model(visual, vis_hist, ego)
         assert ego_hidden.shape == (batch_size, 256)
 
     @pytest.mark.parametrize("batch_size", [1, 2, 4])
     def test_future_features_shape(self, model, device, batch_size):
-        visual, ego = make_inputs(batch_size, 8, device)
-        _, _, future = model(visual, ego)
+        visual, vis_hist, ego = make_inputs(batch_size, 8, device)
+        _, _, future = model(visual, vis_hist, ego)
         assert len(future) == 4
         for f in future:
             assert f.shape == (batch_size, 256, 8, 8)
@@ -54,13 +55,13 @@ class TestBatchIndependence:
     def test_samples_do_not_interfere(self, model, device):
         model.eval()
         torch.manual_seed(42)
-        visual, ego = make_inputs(2, 8, device)
+        visual, vis_hist, ego = make_inputs(2, 8, device)
 
         # Full batch forward
-        traj_both, _, _ = model(visual, ego)
+        traj_both, _, _ = model(visual, vis_hist, ego)
 
         # Single sample forward (sample 0)
-        traj_single, _, _ = model(visual[0:1], ego[0:1])
+        traj_single, _, _ = model(visual[0:1], vis_hist[0:1], ego[0:1])
 
         # Sample 0's output must be identical regardless of what sample 1 contains
         assert torch.allclose(traj_both[0], traj_single[0], atol=1e-5), \
@@ -69,15 +70,15 @@ class TestBatchIndependence:
     def test_different_batch_neighbor_no_effect(self, model, device):
         model.eval()
         torch.manual_seed(42)
-        visual, ego = make_inputs(2, 8, device)
+        visual, vis_hist, ego = make_inputs(2, 8, device)
 
-        traj_a, _, _ = model(visual, ego)
+        traj_a, _, _ = model(visual, vis_hist, ego)
 
         # Change sample 1 completely
         visual_modified = visual.clone()
         visual_modified[1] = torch.randn_like(visual_modified[1])
 
-        traj_b, _, _ = model(visual_modified, ego)
+        traj_b, _, _ = model(visual_modified, vis_hist, ego)
 
         # Sample 0 output must remain unchanged
         assert torch.allclose(traj_a[0], traj_b[0], atol=1e-5), \
@@ -92,15 +93,15 @@ class TestViewFusion:
     def test_different_views_produce_different_output(self, model, device):
         model.eval()
         torch.manual_seed(42)
-        visual, ego = make_inputs(1, 8, device)
+        visual, vis_hist, ego = make_inputs(1, 8, device)
 
-        traj_a, _, _ = model(visual, ego)
+        traj_a, _, _ = model(visual, vis_hist, ego)
 
         # Replace one camera view with zeros
         visual_zeroed = visual.clone()
         visual_zeroed[0, 3] = 0.0
 
-        traj_b, _, _ = model(visual_zeroed, ego)
+        traj_b, _, _ = model(visual_zeroed, vis_hist, ego)
 
         # Output should differ — proving that the zeroed view had influence
         assert not torch.allclose(traj_a, traj_b, atol=1e-5), \
@@ -115,14 +116,14 @@ class TestViewFusion:
         """
         model.eval()
         torch.manual_seed(42)
-        visual, ego = make_inputs(1, 8, device)
+        visual, vis_hist, ego = make_inputs(1, 8, device)
 
-        traj_base, _, _ = model(visual, ego)
+        traj_base, _, _ = model(visual, vis_hist, ego)
 
         for view_idx in range(8):
             visual_mod = visual.clone()
             visual_mod[0, view_idx] = 5.0
-            traj_mod, _, _ = model(visual_mod, ego)
+            traj_mod, _, _ = model(visual_mod, vis_hist, ego)
             assert not torch.allclose(traj_base, traj_mod, atol=1e-5), \
                 f"View {view_idx} has no influence on the output"
 
@@ -133,15 +134,15 @@ class TestViewFusion:
 
 class TestGradientFlow:
     def test_backward_succeeds(self, model, device):
-        visual, ego = make_inputs(2, 8, device)
-        traj, ego_hidden, future = model(visual, ego)
+        visual, vis_hist, ego = make_inputs(2, 8, device)
+        traj, ego_hidden, future = model(visual, vis_hist, ego)
 
         loss = traj.sum() + ego_hidden.sum() + sum(f.sum() for f in future)
         loss.backward()
 
     def test_all_parameters_have_gradients(self, model, device):
-        visual, ego = make_inputs(2, 8, device)
-        traj, ego_hidden, future = model(visual, ego)
+        visual, vis_hist, ego = make_inputs(2, 8, device)
+        traj, ego_hidden, future = model(visual, vis_hist, ego)
 
         loss = traj.sum() + ego_hidden.sum() + sum(f.sum() for f in future)
         loss.backward()
@@ -155,8 +156,8 @@ class TestGradientFlow:
             f"Parameters with no gradient: {params_without_grad}"
 
     def test_no_vanishing_gradients(self, model, device):
-        visual, ego = make_inputs(2, 8, device)
-        traj, ego_hidden, future = model(visual, ego)
+        visual, vis_hist, ego = make_inputs(2, 8, device)
+        traj, ego_hidden, future = model(visual, vis_hist, ego)
 
         loss = traj.sum() + ego_hidden.sum() + sum(f.sum() for f in future)
         loss.backward()
@@ -183,8 +184,8 @@ class TestNumViewsFlexibility:
     ])
     def test_various_num_views(self, build_mock_model, device, num_views, fusion_mode):
         model = build_mock_model(num_views, fusion_mode, device)
-        visual, ego = make_inputs(2, num_views, device)
-        traj, ego_hidden, future = model(visual, ego)
+        visual, vis_hist, ego = make_inputs(2, num_views, device)
+        traj, ego_hidden, future = model(visual, vis_hist, ego)
 
         assert traj.shape == (2, 128)
         assert ego_hidden.shape == (2, 256)
@@ -197,8 +198,8 @@ class TestNumViewsFlexibility:
 
 class TestNumericalStability:
     def test_no_nan_in_outputs(self, model, device):
-        visual, ego = make_inputs(2, 8, device)
-        traj, ego_hidden, future = model(visual, ego)
+        visual, vis_hist, ego = make_inputs(2, 8, device)
+        traj, ego_hidden, future = model(visual, vis_hist, ego)
 
         assert not torch.isnan(traj).any(), "NaN in trajectory output"
         assert not torch.isnan(ego_hidden).any(), "NaN in ego_hidden"
@@ -206,8 +207,8 @@ class TestNumericalStability:
             assert not torch.isnan(f).any(), f"NaN in future feature {i}"
 
     def test_no_inf_in_outputs(self, model, device):
-        visual, ego = make_inputs(2, 8, device)
-        traj, ego_hidden, future = model(visual, ego)
+        visual, vis_hist, ego = make_inputs(2, 8, device)
+        traj, ego_hidden, future = model(visual, vis_hist, ego)
 
         assert not torch.isinf(traj).any(), "Inf in trajectory output"
         assert not torch.isinf(ego_hidden).any(), "Inf in ego_hidden"
@@ -217,8 +218,9 @@ class TestNumericalStability:
     def test_large_input_values(self, model, device):
         """Model should not produce NaN/Inf even with large inputs."""
         visual = torch.randn(1, 8, 3, 256, 256, device=device) * 100
+        vis_hist = torch.randn(1, 896, device=device) * 100
         ego = torch.randn(1, 256, device=device) * 100
-        traj, ego_hidden, future = model(visual, ego)
+        traj, ego_hidden, future = model(visual, vis_hist, ego)
 
         assert not torch.isnan(traj).any(), "NaN with large inputs"
         assert not torch.isinf(traj).any(), "Inf with large inputs"
@@ -264,8 +266,9 @@ class TestTrajectoryPlannerComponent:
     def test_output_shapes(self, device):
         planner = TrajectoryPlanner(embed_dim=256).to(device)
         bev = torch.randn(4, 256, 8, 8, device=device)
+        vis_hist = torch.randn(4, 896, device=device)
         ego = torch.randn(4, 256, device=device)
-        traj, ego_hidden = planner(bev, ego)
+        traj, ego_hidden = planner(bev, vis_hist, ego)
 
         assert traj.shape == (4, 128), "Expected 64 timesteps × 2 signals"
         assert ego_hidden.shape == (4, 256), "ego_hidden must be 256-dim"
@@ -273,23 +276,25 @@ class TestTrajectoryPlannerComponent:
     def test_works_with_arbitrary_bev_resolution(self, device):
         """Deformable cross-attention via grid_sample should be size-agnostic."""
         planner = TrajectoryPlanner(embed_dim=256).to(device)
+        vis_hist = torch.randn(2, 896, device=device)
         ego = torch.randn(2, 256, device=device)
         for h, w in [(8, 8), (16, 32), (45, 30)]:
             bev = torch.randn(2, 256, h, w, device=device)
-            traj, ego_hidden = planner(bev, ego)
+            traj, ego_hidden = planner(bev, vis_hist, ego)
             assert traj.shape == (2, 128)
             assert ego_hidden.shape == (2, 256)
 
     def test_bev_features_influence_trajectory(self, device):
         planner = TrajectoryPlanner(embed_dim=256).to(device)
         planner.eval()
+        vis_hist = torch.randn(1, 896, device=device)
         ego = torch.randn(1, 256, device=device)
 
         bev_a = torch.randn(1, 256, 8, 8, device=device)
         bev_b = torch.randn(1, 256, 8, 8, device=device)
 
-        traj_a, _ = planner(bev_a, ego)
-        traj_b, _ = planner(bev_b, ego)
+        traj_a, _ = planner(bev_a, vis_hist, ego)
+        traj_b, _ = planner(bev_b, vis_hist, ego)
 
         assert not torch.allclose(traj_a, traj_b, atol=1e-5), \
             "Trajectory should depend on BEV features"
@@ -298,27 +303,43 @@ class TestTrajectoryPlannerComponent:
         planner = TrajectoryPlanner(embed_dim=256).to(device)
         planner.eval()
         bev = torch.randn(1, 256, 8, 8, device=device)
+        vis_hist = torch.randn(1, 896, device=device)
 
-        traj_a, _ = planner(bev, torch.randn(1, 256, device=device))
-        traj_b, _ = planner(bev, torch.randn(1, 256, device=device))
+        traj_a, _ = planner(bev, vis_hist, torch.randn(1, 256, device=device))
+        traj_b, _ = planner(bev, vis_hist, torch.randn(1, 256, device=device))
 
         assert not torch.allclose(traj_a, traj_b, atol=1e-5), \
             "Trajectory should depend on egomotion history"
 
+    def test_visual_history_influences_trajectory(self, device):
+        planner = TrajectoryPlanner(embed_dim=256).to(device)
+        planner.eval()
+        bev = torch.randn(1, 256, 8, 8, device=device)
+        ego = torch.randn(1, 256, device=device)
+
+        traj_a, _ = planner(bev, torch.randn(1, 896, device=device), ego)
+        traj_b, _ = planner(bev, torch.randn(1, 896, device=device), ego)
+
+        assert not torch.allclose(traj_a, traj_b, atol=1e-5), \
+            "Trajectory should depend on visual history"
+
     def test_configurable_horizon(self, device):
         planner = TrajectoryPlanner(embed_dim=256, num_timesteps=32, num_signals=3).to(device)
         bev = torch.randn(2, 256, 8, 8, device=device)
+        vis_hist = torch.randn(2, 896, device=device)
         ego = torch.randn(2, 256, device=device)
-        traj, _ = planner(bev, ego)
+        traj, _ = planner(bev, vis_hist, ego)
         assert traj.shape == (2, 32 * 3)
 
     def test_gradients_flow(self, device):
         planner = TrajectoryPlanner(embed_dim=256, num_timesteps=4).to(device)
         bev = torch.randn(1, 256, 8, 8, device=device, requires_grad=True)
+        vis_hist = torch.randn(1, 896, device=device, requires_grad=True)
         ego = torch.randn(1, 256, device=device, requires_grad=True)
-        traj, ego_hidden = planner(bev, ego)
+        traj, ego_hidden = planner(bev, vis_hist, ego)
         (traj.sum() + ego_hidden.sum()).backward()
         assert bev.grad is not None and bev.grad.abs().max() > 0
+        assert vis_hist.grad is not None and vis_hist.grad.abs().max() > 0
         assert ego.grad is not None and ego.grad.abs().max() > 0
 
 
@@ -614,8 +635,8 @@ class TestFullBackboneIntegration:
 
     def test_full_forward_pass(self, full_model, device):
         """Smoke test: full model forward produces expected output shapes."""
-        visual, ego = make_inputs(1, 8, device)
-        traj, ego_hidden, future = full_model(visual, ego)
+        visual, vis_hist, ego = make_inputs(1, 8, device)
+        traj, ego_hidden, future = full_model(visual, vis_hist, ego)
 
         assert traj.shape == (1, 128)
         assert ego_hidden.shape == (1, 256)
@@ -625,8 +646,8 @@ class TestFullBackboneIntegration:
 
     def test_full_forward_no_nan(self, full_model, device):
         """Full pipeline must not produce NaN with real backbone weights."""
-        visual, ego = make_inputs(2, 8, device)
-        traj, ego_hidden, future = full_model(visual, ego)
+        visual, vis_hist, ego = make_inputs(2, 8, device)
+        traj, ego_hidden, future = full_model(visual, vis_hist, ego)
 
         assert not torch.isnan(traj).any()
         assert not torch.isnan(ego_hidden).any()
