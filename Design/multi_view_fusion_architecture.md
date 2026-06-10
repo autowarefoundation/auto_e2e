@@ -52,43 +52,45 @@ This is a solved problem in the literature. BEVFormer [1], LSS [4], PETR [3], an
 ### 3.1 Full Network Pipeline
 
 ```
-Input: [B, V, 3, 256, 256]              egomotion_history: [B, 256]
-         │                                       │
-         │  reshape to [B*V, 3, 256, 256]        │
-         ▼                                       │
-┌─────────────────────────────┐                  │
-│  Backbone (SwinV2-Tiny)     │                  │
-│  Multi-scale feature maps   │                  │
-│  4 stages: 96/192/384/768 ch│                  │
-└─────────────────────────────┘                  │
-         │                                       │
-         │  Pool to 8×8 + concat scales          │
-         ▼                                       │
-    [B*V, 1440, 8, 8]                            │
-         │                                       │
-         │  Channel proj → embed_dim=256         │
-         ▼                                       │
-    [B*V, 256, 8, 8]                             │
-         │                                       │
-         │  ┌──────────────────────────────────────────┐
-         │  │  View Fusion (selectable via fusion_mode)│
-         │  │                                          │
-         │  │  "concat"     → ConcatViewFusion         │
-         │  │  "cross_attn" → CrossAttentionViewFusion │
-         │  │  "bev"        → BEVViewFusion            │
-         │  └──────────────────────────────────────────┘
-         │
-         ▼
-    [B, 256, H_out, W_out]  ← Unified scene representation
-    (BEV: [B, 256, 450, 300]; concat/cross_attn: [B, 256, 8, 8])
-         │                                       │
-         ├───────────────┐                       │
-         │               │                       │
-         │               ▼                       ▼
+Input: [B, V, 3, 256, 256]   visual_history: [B, 896]   egomotion_history: [B, 256]
+         │                            │                          │
+         │  reshape to [B*V, 3, ...]  │                          │
+         ▼                            │                          │
+┌─────────────────────────────┐       │                          │
+│  Backbone (SwinV2-Tiny)     │       │                          │
+│  Multi-scale feature maps   │       │                          │
+│  4 stages: 96/192/384/768 ch│       │                          │
+└─────────────────────────────┘       │                          │
+         │                            │                          │
+         │  Pool to 8×8 + concat      │                          │
+         ▼                            │                          │
+    [B*V, 1440, 8, 8]                 │                          │
+         │                            │                          │
+         │  Channel proj → 256        │                          │
+         ▼                            │                          │
+    [B*V, 256, 8, 8]                  │                          │
+         │                            │                          │
+         │  ┌──────────────────────────────────────────┐         │
+         │  │  View Fusion (selectable via fusion_mode)│         │
+         │  │                                          │         │
+         │  │  "concat"     → ConcatViewFusion         │         │
+         │  │  "cross_attn" → CrossAttentionViewFusion │         │
+         │  │  "bev"        → BEVViewFusion            │         │
+         │  └──────────────────────────────────────────┘         │
+         │                            │                          │
+         ▼                            │                          │
+    [B, 256, H_out, W_out]  ← Unified scene representation       │
+    (BEV: [B, 256, 450, 300]; concat/cross_attn: [B, 256, 8, 8]) │
+         │                            │                          │
+         ├───────────────┐            │                          │
+         │               │            │                          │
+         │               ▼            ▼                          ▼
          │        ┌───────────────────────────────────┐
          │        │  TrajectoryPlanner                │
          │        │  ego query + GRU(64 steps) +      │
-         │        │  deformable cross-attn to BEV     │
+         │        │  deformable cross-attn to BEV;    │
+         │        │  h_0 = ego_state_proj(ego_hist)   │
+         │        │      + visual_history_proj(vis_h) │
          │        └───────────────────────────────────┘
          │               │
          │               ├──► trajectory:  [B, 128]   (64 × 2)
@@ -434,28 +436,31 @@ The owner explicitly requested **spatial cross-attention instead of depth predic
 class TrajectoryPlanner(nn.Module):
     # Single learnable ego query + per-timestep deformable cross-attention to BEV + GRU.
     #
-    #   ego_query:     nn.Embedding(1, 256)
-    #   ego_state_proj: Linear(256, 256)               # initial GRU hidden = f(egomotion_history)
-    #   reference_point:   Linear(256, 2)              # per-step BEV anchor in [0, 1]^2 (sigmoid)
-    #   sampling_offsets:  Linear(256, num_points * 2) # offsets around the anchor
-    #   attention_weights: Linear(256, num_points)     # softmax over P sampled features
-    #   value_proj:        Linear(256, 256)            # 1×1 projection of BEV features
-    #   output_proj:       Linear(256, 256)
-    #   gru:               GRU(256, 256)
-    #   waypoint_head:     Linear(256, num_signals)
+    #   ego_query:           nn.Embedding(1, 256)
+    #   ego_state_proj:      Linear(256, 256)         # contributes to h_0 from egomotion_history
+    #   visual_history_proj: Linear(896, 256)         # contributes to h_0 from visual_history
+    #   reference_point:     Linear(256, 2)           # per-step BEV anchor in [0, 1]^2 (sigmoid)
+    #   sampling_offsets:    Linear(256, num_points * 2)  # offsets around the anchor
+    #   attention_weights:   Linear(256, num_points)  # softmax over P sampled features
+    #   value_proj:          Linear(256, 256)         # 1×1 projection of BEV features
+    #   output_proj:         Linear(256, 256)
+    #   gru:                 GRU(256, 256)
+    #   waypoint_head:       Linear(256, num_signals)
 ```
 
 ```
-egomotion_history [B, 256]         BEV features [B, 256, H, W]
-        │                                  │
-        │                            value_proj (1×1)
-        ▼                                  │
-ego_state_proj                             ▼
-        │                          values [B, 256, H, W]
-        ▼
-   h_0 [1, B, 256]
-        │
-        ▼
+egomotion_history [B, 256]   visual_history [B, 896]      BEV features [B, 256, H, W]
+        │                            │                            │
+        │                            │                      value_proj (1×1)
+        ▼                            ▼                            │
+ego_state_proj             visual_history_proj                    ▼
+        │                            │                    values [B, 256, H, W]
+        └────────── (+) ─────────────┘
+                    │
+                    ▼
+             h_0 [1, B, 256]
+                    │
+                    ▼
    ┌──────────────────────────────────────────────────┐
    │  for t in range(num_timesteps=64):               │
    │     query  = h_{t-1} + ego_query                 │
@@ -474,7 +479,7 @@ ego_state_proj                             ▼
 
 - **Output 1 — `trajectory`**: 128-dim vector = 64 timesteps × (acceleration + curvature) at 10 Hz = 6.4 s horizon.
 - **Output 2 — `ego_hidden`**: 256-dim final GRU hidden state. Replaces the legacy 14-dim `compressed_visual_feature_vector`. It encodes the planner's intent over the prediction horizon and is fed to `FutureState` (Section 9).
-- **Initial GRU hidden state**: derived from `egomotion_history` via `ego_state_proj`, so the planner is conditioned on past ego dynamics from step 0 rather than relying on a separate learned init.
+- **Initial GRU hidden state**: sum of `ego_state_proj(egomotion_history)` and `visual_history_proj(visual_history)`. The two signals serve different roles — egomotion captures past dynamics, while `visual_history` (896 = 64 frames × 14-dim compressed scene memory) carries frame-to-frame visual context that the GRU's intra-trajectory recurrence cannot supply. `FutureState` does not receive `visual_history` directly; it consumes `ego_hidden`, which already incorporates both signals.
 - **Deformable cross-attention**: each step predicts a single BEV anchor, then samples `num_points = 8` features around it via `F.grid_sample` (no custom CUDA kernels). `offset_scale = 0.1` bounds the local fan-out; the anchor itself is sigmoid-bounded to the full BEV grid.
 - **Shape-agnostic w.r.t. BEV resolution**: because sampling is done in normalized coordinates, the planner runs unchanged on (8, 8) (concat / cross_attn fusion) or (450, 300) (BEV fusion).
 
@@ -613,7 +618,7 @@ Model/model_components/
 | ConcatViewFusion | ~0.5M | Conv2d(V·256, 256, 1) at embed_dim=256 |
 | CrossAttentionViewFusion | ~0.5M | MHA(256, 8 heads) + FFN(256→512→256) |
 | BEVViewFusion | ~35M | Mostly nn.Embedding(450·300, 256) BEV queries (~34.6M) + value_proj/offsets/attn/output_proj/FFN |
-| TrajectoryPlanner | ~0.5M | ego_query + ego_state_proj + ref/offsets/attn/value/output projections + GRU(256, 256) + waypoint_head |
+| TrajectoryPlanner | ~0.7M | ego_query + ego_state_proj + visual_history_proj(896→256, ~0.23M) + ref/offsets/attn/value/output projections + GRU(256, 256) + waypoint_head |
 | FutureState | ~3.7M | ego_proj(256→256) + Conv2d(256→512) + Conv2d(512→1024) |
 
 ### 11.3 Hyperparameters
@@ -632,6 +637,7 @@ Model/model_components/
 | num_signals | 2 | ✓ (TrajectoryPlanner; acceleration + curvature) |
 | num_points (planner) | 8 | ✓ (TrajectoryPlanner deformable cross-attn) |
 | egomotion_dim | 256 | ✓ (TrajectoryPlanner; matches dataset egomotion_history) |
+| visual_history_dim | 896 | ✓ (TrajectoryPlanner; 64 frames × 14-dim compressed scene memory) |
 | offset_scale | 0.1 | ✓ (TrajectoryPlanner; bounds offsets in normalized BEV coords) |
 
 ---
