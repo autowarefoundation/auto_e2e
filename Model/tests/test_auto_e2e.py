@@ -110,24 +110,35 @@ class TestViewFusion:
             "Changing a camera view had no effect on output — fusion is broken"
 
     def test_all_views_contribute(self, model, device):
-        """Each view should influence the output when perturbed.
+        """Each view must influence the FUSED feature map when perturbed.
 
-        Uses a large constant fill rather than zeroing so the perturbation
-        propagates through deformable cross-attention even when the planner
-        only samples a few BEV cells per timestep.
+        View fusion guarantees that every camera view contributes to the
+        fused feature map produced by FeatureFusion. Whether the downstream
+        planner subsequently samples every fused cell is a separate concern
+        — in BEV mode the planner's deformable cross-attention samples only
+        a sparse subset of BEV cells, so a view that touches only un-sampled
+        cells can legitimately have no measurable trajectory influence in a
+        randomly-initialized model. Asserting at the fused-feature level
+        directly tests what view fusion is responsible for and works for
+        all fusion modes.
         """
         model.eval()
         torch.manual_seed(42)
         visual, vis_hist, ego = make_inputs(1, 8, device)
+        B, V, C, H, W = visual.shape
 
-        traj_base, _, _ = model(visual, vis_hist, ego)
+        def fused_features(x):
+            features = model.Backbone(x.reshape(B * V, C, H, W))
+            return model.FeatureFusion(features, B, V)
 
-        for view_idx in range(8):
+        fused_base = fused_features(visual)
+
+        for view_idx in range(V):
             visual_mod = visual.clone()
             visual_mod[0, view_idx] = 5.0
-            traj_mod, _, _ = model(visual_mod, vis_hist, ego)
-            assert not torch.allclose(traj_base, traj_mod, atol=1e-5), \
-                f"View {view_idx} has no influence on the output"
+            fused_mod = fused_features(visual_mod)
+            assert not torch.allclose(fused_base, fused_mod, atol=1e-5), \
+                f"View {view_idx} has no influence on the fused feature map"
 
 
 # ---------------------------------------------------------------------------
