@@ -21,7 +21,7 @@ class Backbone(nn.Module):
     def forward(self, image):
         features = self.backbone(image)
         for i in range(0, len(features)):
-            if(self.backbone_name == "swin_v2_tiny"):
+            if "swin" in self.backbone_name:
                 features[i] = features[i].permute(0, 3, 1, 2)
 
         return features
