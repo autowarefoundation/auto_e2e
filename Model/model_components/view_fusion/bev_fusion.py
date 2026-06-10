@@ -1,10 +1,24 @@
 import logging
+import math
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
 logger = logging.getLogger(__name__)
+
+
+def _validate_offset_scale(offset_scale):
+    if not isinstance(offset_scale, (int, float)) or isinstance(offset_scale, bool):
+        raise ValueError(
+            f"offset_scale must be a finite non-negative number, "
+            f"got {offset_scale!r}."
+        )
+    if not math.isfinite(offset_scale) or offset_scale < 0:
+        raise ValueError(
+            f"offset_scale must be a finite non-negative number, "
+            f"got {offset_scale!r}."
+        )
 
 
 class BEVViewFusion(nn.Module):
@@ -65,6 +79,7 @@ class BEVViewFusion(nn.Module):
         self.num_points_in_pillar = num_points_in_pillar
         self.pc_range = pc_range
         self.image_size = image_size
+        _validate_offset_scale(offset_scale)
         self.offset_scale = offset_scale
 
         # Learnable BEV queries: each grid cell gets its own query vector

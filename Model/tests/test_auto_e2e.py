@@ -360,6 +360,41 @@ class TestTrajectoryPlannerComponent:
         with pytest.raises(ValueError, match="egomotion_history last dim must be 256"):
             planner(bev, vis_hist, bad_ego)
 
+    def test_offset_scale_negative_raises(self):
+        with pytest.raises(ValueError, match="offset_scale"):
+            TrajectoryPlanner(embed_dim=256, offset_scale=-1.0)
+
+    def test_offset_scale_nan_raises(self):
+        with pytest.raises(ValueError, match="offset_scale"):
+            TrajectoryPlanner(embed_dim=256, offset_scale=float("nan"))
+
+    def test_offset_scale_inf_raises(self):
+        with pytest.raises(ValueError, match="offset_scale"):
+            TrajectoryPlanner(embed_dim=256, offset_scale=float("inf"))
+
+    def test_offset_scale_zero_vs_nonzero_differ(self, device):
+        """offset_scale=0 makes deformable attention sample only at the
+        reference point; output must still be valid but differ from the
+        nonzero default."""
+        torch.manual_seed(0)
+        planner_zero = TrajectoryPlanner(embed_dim=256, offset_scale=0.0).to(device)
+        torch.manual_seed(0)
+        planner_pos = TrajectoryPlanner(embed_dim=256, offset_scale=0.1).to(device)
+        planner_zero.eval()
+        planner_pos.eval()
+
+        bev = torch.randn(1, 256, 8, 8, device=device)
+        vis_hist = torch.randn(1, 896, device=device)
+        ego = torch.randn(1, 256, device=device)
+
+        traj_zero, _ = planner_zero(bev, vis_hist, ego)
+        traj_pos, _ = planner_pos(bev, vis_hist, ego)
+
+        assert torch.isfinite(traj_zero).all(), \
+            "offset_scale=0 (reference-point-only) must still produce finite output"
+        assert not torch.allclose(traj_zero, traj_pos, atol=1e-5), \
+            "offset_scale=0 and offset_scale=0.1 should produce different trajectories"
+
 
 class TestFutureStateComponent:
     def test_accepts_ego_hidden(self, device):
@@ -617,6 +652,38 @@ class TestBEVFusion:
         # → mask = False everywhere → visible_count = 0 → has_observation = 0
         assert out.abs().max() < 1e-6, \
             "Out-of-bounds projections should produce zero output"
+
+    def test_offset_scale_zero_vs_nonzero_differ(self, device):
+        """offset_scale=0 disables fan-out; output must differ from a nonzero
+        scale at the same seed."""
+        torch.manual_seed(0)
+        fusion_zero = BEVViewFusion(num_views=4, embed_dim=256, bev_h=8, bev_w=8,
+                                    offset_scale=0.0).to(device)
+        torch.manual_seed(0)
+        fusion_pos = BEVViewFusion(num_views=4, embed_dim=256, bev_h=8, bev_w=8,
+                                   offset_scale=0.1).to(device)
+        fusion_zero.eval()
+        fusion_pos.eval()
+        x = torch.randn(4, 256, 8, 8, device=device)
+        out_zero = fusion_zero(x, B=1, V=4)
+        out_pos = fusion_pos(x, B=1, V=4)
+        assert not torch.allclose(out_zero, out_pos, atol=1e-5), \
+            "offset_scale=0 and offset_scale=0.1 produced identical BEV output"
+
+    def test_offset_scale_negative_raises(self):
+        with pytest.raises(ValueError, match="offset_scale"):
+            BEVViewFusion(num_views=4, embed_dim=256, bev_h=8, bev_w=8,
+                          offset_scale=-1.0)
+
+    def test_offset_scale_nan_raises(self):
+        with pytest.raises(ValueError, match="offset_scale"):
+            BEVViewFusion(num_views=4, embed_dim=256, bev_h=8, bev_w=8,
+                          offset_scale=float("nan"))
+
+    def test_offset_scale_inf_raises(self):
+        with pytest.raises(ValueError, match="offset_scale"):
+            BEVViewFusion(num_views=4, embed_dim=256, bev_h=8, bev_w=8,
+                          offset_scale=float("inf"))
 
     def test_no_visible_camera_produces_zero_output(self, device):
         """If no camera can see any BEV cell, output should be exactly zero."""

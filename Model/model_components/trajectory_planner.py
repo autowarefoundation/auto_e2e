@@ -1,6 +1,21 @@
+import math
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
+
+def _validate_offset_scale(offset_scale):
+    if not isinstance(offset_scale, (int, float)) or isinstance(offset_scale, bool):
+        raise ValueError(
+            f"offset_scale must be a finite non-negative number, "
+            f"got {offset_scale!r}."
+        )
+    if not math.isfinite(offset_scale) or offset_scale < 0:
+        raise ValueError(
+            f"offset_scale must be a finite non-negative number, "
+            f"got {offset_scale!r}."
+        )
 
 
 class TrajectoryPlanner(nn.Module):
@@ -36,6 +51,7 @@ class TrajectoryPlanner(nn.Module):
         # reference point itself is sigmoid-bounded to [0, 1], so the head can
         # still attend anywhere on the grid — offset_scale only constrains the
         # local fan-out around that anchor.
+        _validate_offset_scale(offset_scale)
         self.offset_scale = offset_scale
 
         self.ego_query = nn.Embedding(1, embed_dim)
