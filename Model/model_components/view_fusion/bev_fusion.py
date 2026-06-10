@@ -1,11 +1,8 @@
-import logging
 import math
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
-logger = logging.getLogger(__name__)
 
 
 def _validate_offset_scale(offset_scale):
