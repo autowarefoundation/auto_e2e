@@ -48,11 +48,11 @@ def generate_markdown(gpu_groups):
 
         lines.append(
             "| Backbone | Fusion Mode | Batch | FPS | Latency (ms) "
-            "| p99 (ms) | VRAM (MB) | Params |"
+            "| p99 (ms) | Jitter (ms) | VRAM (MB) | Params |"
         )
         lines.append(
             "|----------|-------------|-------|-----|----------"
-            "----|----------|-----------|--------|"
+            "----|----------|-------------|-----------|--------|"
         )
 
         for r in latest["results"]:
@@ -60,7 +60,7 @@ def generate_markdown(gpu_groups):
             lines.append(
                 f"| {r['backbone']} | {r['fusion_mode']} | {r['batch_size']} | "
                 f"{r['avg_fps']:.1f} | {r['avg_latency_ms']:.1f} | "
-                f"{r['p99_latency_ms']:.1f} | "
+                f"{r['p99_latency_ms']:.1f} | {r['jitter_ms']:.1f} | "
                 f"{r['peak_vram_allocated_mb']:.0f} | {params_m:.1f}M |"
             )
 
