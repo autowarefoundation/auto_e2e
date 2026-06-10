@@ -7,7 +7,7 @@ from .base import BasePlanner
 
 
 class FlowMatchingPlanner(BasePlanner):
-    """Flow Matching trajectory decoder.
+    """Flow Matching trajectory decoder with BEV cross-attention.
 
     Replaces the autoregressive GRU loop with a conditional vector field
     v_theta(u_t, t, c) trained to map a noise prior x_0 ~ N(0, I) to the
@@ -16,24 +16,34 @@ class FlowMatchingPlanner(BasePlanner):
     target velocity at u_t is simply ``x_1 - x_0``, so training reduces to
     a per-sample MSE between v_theta and that constant velocity.
 
+    The velocity network preserves the BEV grid's spatial structure: the
+    noisy trajectory is treated as a sequence of ``num_timesteps`` action
+    tokens (each ``num_signals``-dimensional) which act as queries over a
+    flattened BEV spatial map (``H*W`` keys/values) via multi-head
+    cross-attention. Time and the ego/visual_history conditioning are
+    injected on the attention output through AdaLN-style affine
+    modulation (gamma, beta) — the DiT pattern adapted to flow matching.
+    A per-token velocity head maps each attended action token back to
+    ``num_signals`` and the output is reshaped to ``(B, T*num_signals)``.
+
     At inference, we sample a fresh noise tensor and integrate
     ``dx/dt = v_theta(x, t, c)`` from t=0 to t=1 with a fixed-step Euler
-    solver (``num_inference_steps`` steps). The full conditioning context
-    c is built once per sample from BEV mean-pooling, visual history, and
-    egomotion history; it is reused across all integration steps so the
-    ODE call is cheap.
+    solver (``num_inference_steps`` steps). The BEV map and the
+    modulation conditioning are computed once per sample and reused
+    across all integration steps so the ODE call is cheap.
 
     Outputs match the GRU planner contract: ``(trajectory, ego_hidden)``
-    where ``ego_hidden`` is a learned projection of the conditioning and
-    is consumed downstream by FutureState. In training mode the first
-    return is the *predicted velocity* at the sampled (u_t, t), not a
-    trajectory — the caller pairs it with the matching target velocity
-    when computing the flow-matching loss.
+    where ``ego_hidden`` is a learned projection of pooled BEV plus
+    visual_history and ego state, and is consumed downstream by
+    FutureState. In training mode the first return is the *predicted
+    velocity* at the sampled (u_t, t), not a trajectory — the caller
+    pairs it with the matching target velocity when computing the
+    flow-matching loss.
     """
 
     def __init__(self, embed_dim=256, num_timesteps=64, num_signals=2,
                  egomotion_dim=256, visual_history_dim=896,
-                 num_inference_steps=10, hidden_dim=512, time_embed_dim=128):
+                 num_inference_steps=10, time_embed_dim=128, num_heads=4):
         super().__init__()
 
         if num_inference_steps < 1:
@@ -53,11 +63,17 @@ class FlowMatchingPlanner(BasePlanner):
         self.visual_history_dim = visual_history_dim
         self.num_inference_steps = num_inference_steps
         self.time_embed_dim = time_embed_dim
+        self.num_heads = num_heads
 
-        # Conditioning encoders mirror GRUPlanner so swapping planners is
-        # weight-shape-comparable for the ego/visual_history paths.
+        # Conditioning encoders for the AdaLN modulation path. BEV is NOT
+        # pooled into this conditioning — it enters the velocity field via
+        # cross-attention to preserve spatial detail.
         self.ego_state_proj = nn.Linear(egomotion_dim, embed_dim)
         self.visual_history_proj = nn.Linear(visual_history_dim, embed_dim)
+
+        # ego_hidden is a single summary vector consumed by FutureState, so
+        # it can still pool BEV — its job is "scene gist", not waypoint
+        # placement.
         self.bev_pool_proj = nn.Linear(embed_dim, embed_dim)
         self.cond_to_ego_hidden = nn.Linear(embed_dim, embed_dim)
 
@@ -67,14 +83,24 @@ class FlowMatchingPlanner(BasePlanner):
             nn.Linear(embed_dim, embed_dim),
         )
 
-        v_in = self.trajectory_dim + 2 * embed_dim
-        self.v_net = nn.Sequential(
-            nn.Linear(v_in, hidden_dim),
-            nn.SiLU(),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.SiLU(),
-            nn.Linear(hidden_dim, self.trajectory_dim),
+        # Per-timestep action token projection: each (acc, curv) pair becomes
+        # an embed_dim query.
+        self.action_proj = nn.Linear(num_signals, embed_dim)
+        self.bev_kv_proj = nn.Linear(embed_dim, embed_dim)
+
+        self.cross_attn = nn.MultiheadAttention(
+            embed_dim, num_heads, batch_first=True,
         )
+
+        # AdaLN: produce (gamma, beta) from (time + visual_history + ego).
+        # The LayerNorm has no affine — gamma/beta supply the scale and shift.
+        self.attn_norm = nn.LayerNorm(embed_dim, elementwise_affine=False)
+        self.adaln_modulation = nn.Sequential(
+            nn.SiLU(),
+            nn.Linear(embed_dim, 2 * embed_dim),
+        )
+
+        self.velocity_head = nn.Linear(embed_dim, num_signals)
 
     def _validate_inputs(self, visual_history, egomotion_history):
         if visual_history.shape[-1] != self.visual_history_dim:
@@ -105,14 +131,17 @@ class FlowMatchingPlanner(BasePlanner):
         args = t.unsqueeze(-1) * freqs.unsqueeze(0)
         return torch.cat([torch.sin(args), torch.cos(args)], dim=-1)
 
-    def _build_conditioning(self, bev_features, visual_history, egomotion_history):
-        # Spatial mean-pool keeps the velocity head BEV-resolution-agnostic.
-        bev_pool = bev_features.mean(dim=(2, 3))
+    def _modulation_conditioning(self, visual_history, egomotion_history):
+        """Conditioning vector fed into AdaLN — excludes BEV (cross-attn) and
+        time (added per-step in the Euler loop)."""
         return (
-            self.bev_pool_proj(bev_pool)
-            + self.visual_history_proj(visual_history)
+            self.visual_history_proj(visual_history)
             + self.ego_state_proj(egomotion_history)
         )
+
+    def _ego_hidden(self, bev_features, mod_cond):
+        bev_pool = bev_features.mean(dim=(2, 3))
+        return self.cond_to_ego_hidden(self.bev_pool_proj(bev_pool) + mod_cond)
 
     def _construct_training_data(self, trajectory_target):
         """Sample (u_t, t, target_velocity) for one flow-matching training step.
@@ -131,19 +160,38 @@ class FlowMatchingPlanner(BasePlanner):
         target_velocity = trajectory_target - x_0
         return u_t, t, target_velocity
 
-    def _v_theta(self, u_t, t, cond):
-        """Conditional velocity network.
+    def _v_theta(self, u_t, t, bev_features, mod_cond):
+        """Conditional velocity network with BEV cross-attention + AdaLN.
 
         Args:
             u_t: [B, trajectory_dim]
             t: [B]
-            cond: [B, embed_dim]
+            bev_features: [B, embed_dim, H, W]
+            mod_cond: [B, embed_dim] — visual_history + egomotion conditioning.
 
         Returns:
             velocity: [B, trajectory_dim]
         """
+        B = u_t.shape[0]
+
+        # Action queries: one token per future timestep.
+        u_t_seq = u_t.reshape(B, self.num_timesteps, self.num_signals)
+        queries = self.action_proj(u_t_seq)                      # [B, T, C]
+
+        # BEV spatial keys/values: H*W tokens, channels last.
+        bev_seq = bev_features.flatten(2).transpose(1, 2)        # [B, H*W, C]
+        bev_seq = self.bev_kv_proj(bev_seq)
+
+        attended, _ = self.cross_attn(queries, bev_seq, bev_seq) # [B, T, C]
+
+        # AdaLN: time + (visual_history + egomotion) → (gamma, beta).
         t_emb = self.time_mlp(self._sinusoidal_time_embedding(t))
-        return self.v_net(torch.cat([u_t, t_emb, cond], dim=-1))
+        gamma, beta = self.adaln_modulation(mod_cond + t_emb).chunk(2, dim=-1)
+        normed = self.attn_norm(attended)
+        modulated = normed * (1 + gamma.unsqueeze(1)) + beta.unsqueeze(1)
+
+        velocity_seq = self.velocity_head(modulated)             # [B, T, S]
+        return velocity_seq.reshape(B, self.trajectory_dim)
 
     def forward(self, bev_features, visual_history, egomotion_history,
                 mode="train", trajectory_target=None,
@@ -171,10 +219,8 @@ class FlowMatchingPlanner(BasePlanner):
             infer mode: (trajectory [B, trajectory_dim], ego_hidden [B, embed_dim])
         """
         self._validate_inputs(visual_history, egomotion_history)
-        cond = self._build_conditioning(
-            bev_features, visual_history, egomotion_history
-        )
-        ego_hidden = self.cond_to_ego_hidden(cond)
+        mod_cond = self._modulation_conditioning(visual_history, egomotion_history)
+        ego_hidden = self._ego_hidden(bev_features, mod_cond)
 
         if mode == "train":
             if noisy_trajectory is not None and flow_timestep is not None:
@@ -187,10 +233,10 @@ class FlowMatchingPlanner(BasePlanner):
                     "trajectory_target, or both noisy_trajectory and "
                     "flow_timestep."
                 )
-            velocity_pred = self._v_theta(u_t, t, cond)
+            velocity_pred = self._v_theta(u_t, t, bev_features, mod_cond)
             return velocity_pred, ego_hidden
 
-        # Inference: Euler-integrate dx/dt = v_theta(x, t, cond) over [0, 1].
+        # Inference: Euler-integrate dx/dt = v_theta(x, t, ...) over [0, 1].
         B = bev_features.shape[0]
         x = torch.randn(B, self.trajectory_dim,
                         device=bev_features.device, dtype=bev_features.dtype)
@@ -199,6 +245,6 @@ class FlowMatchingPlanner(BasePlanner):
             t_val = step * dt
             t = torch.full((B,), t_val,
                            device=bev_features.device, dtype=bev_features.dtype)
-            v = self._v_theta(x, t, cond)
+            v = self._v_theta(x, t, bev_features, mod_cond)
             x = x + dt * v
         return x, ego_hidden
