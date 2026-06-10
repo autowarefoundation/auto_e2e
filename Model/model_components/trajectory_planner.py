@@ -94,6 +94,11 @@ class TrajectoryPlanner(nn.Module):
         ego_q = self.ego_query.weight                                      # [1, C]
 
         waypoints = []
+        # NOTE: this loop is inherently sequential: each step's query depends on
+        # the previous GRU hidden state, so the 64 iterations cannot be batched
+        # along the time axis. This is a known latency concern; future work may
+        # replace it with non-autoregressive decoding (parallel waypoint heads
+        # over a fixed set of learned time queries) to amortize cost.
         for _ in range(self.num_timesteps):
             query = h.squeeze(0) + ego_q                                   # [B, C]
             attended = self._deformable_cross_attn(query, values)          # [B, C]
