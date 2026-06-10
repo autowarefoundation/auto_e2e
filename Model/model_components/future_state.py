@@ -21,6 +21,11 @@ class FutureState(nn.Module):
 
         # Predict future visual features (4 timesteps × C channels = 4C)
         self.predict_future_1 = nn.Conv2d(embed_dim, 2*embed_dim, 3, 1, 1)
+        # WARNING: at full 450x300 BEV resolution the 4*embed_dim output is
+        # memory-intensive — roughly 450 * 300 * 4 * 256 * 4 bytes ≈ 550MB per
+        # sample in fp32. Training will likely require mixed precision (bf16/fp16)
+        # or spatial downsampling of fused_features before FutureState to fit on
+        # commodity GPUs.
         self.predict_future_2 = nn.Conv2d(2*embed_dim, 4*embed_dim, 3, 1, 1)
 
         # Activation
