@@ -2,3 +2,4 @@ __pycache__/
 *.py[cod]
 ._*
 benchmark_results.json
+**/data/
