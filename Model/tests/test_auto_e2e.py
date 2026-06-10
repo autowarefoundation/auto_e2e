@@ -1270,3 +1270,278 @@ class TestFeatureFusionWithSwinChannels:
         out = fusion(features, B=2, V=8)
         assert out.shape == (2, 256, 8, 8)
         assert torch.isfinite(out).all()
+
+
+# ---------------------------------------------------------------------------
+# Planner registry / Flow Matching planner / backcompat
+# ---------------------------------------------------------------------------
+
+
+class TestPlannerRegistry:
+    def test_all_modes_registered(self):
+        assert "gru" in PLANNER_REGISTRY
+        assert "flow_matching" in PLANNER_REGISTRY
+
+    def test_invalid_mode_raises(self):
+        with pytest.raises(ValueError, match="Unknown planner_mode"):
+            build_planner("nonexistent", embed_dim=256)
+
+    def test_build_returns_correct_type(self):
+        gru = build_planner("gru", embed_dim=256)
+        assert isinstance(gru, GRUPlanner)
+        fm = build_planner("flow_matching", embed_dim=256)
+        assert isinstance(fm, FlowMatchingPlanner)
+
+
+class TestFlowMatchingPlanner:
+    def test_construct_training_data_shapes(self, device):
+        planner = FlowMatchingPlanner(embed_dim=256).to(device)
+        target = torch.randn(4, 128, device=device)
+        u_t, t, target_velocity = planner._construct_training_data(target)
+        assert u_t.shape == (4, 128)
+        assert t.shape == (4,)
+        assert target_velocity.shape == (4, 128)
+        assert (t >= 0).all() and (t <= 1).all()
+
+    def test_training_forward_returns_velocity_shape(self, device):
+        planner = FlowMatchingPlanner(embed_dim=256).to(device)
+        bev = torch.randn(2, 256, 8, 8, device=device)
+        vis_hist = torch.randn(2, 896, device=device)
+        ego = torch.randn(2, 256, device=device)
+        target = torch.randn(2, 128, device=device)
+        velocity, ego_hidden = planner(
+            bev, vis_hist, ego, mode="train", trajectory_target=target,
+        )
+        assert velocity.shape == (2, 128)
+        assert ego_hidden.shape == (2, 256)
+
+    def test_inference_forward_returns_trajectory_shape(self, device):
+        planner = FlowMatchingPlanner(embed_dim=256).to(device)
+        planner.eval()
+        bev = torch.randn(2, 256, 8, 8, device=device)
+        vis_hist = torch.randn(2, 896, device=device)
+        ego = torch.randn(2, 256, device=device)
+        traj, ego_hidden = planner(bev, vis_hist, ego, mode="infer")
+        assert traj.shape == (2, 128)
+        assert ego_hidden.shape == (2, 256)
+
+    def test_inference_output_is_finite(self, device):
+        planner = FlowMatchingPlanner(embed_dim=256, num_inference_steps=10).to(device)
+        planner.eval()
+        bev = torch.randn(1, 256, 8, 8, device=device)
+        vis_hist = torch.randn(1, 896, device=device)
+        ego = torch.randn(1, 256, device=device)
+        traj, _ = planner(bev, vis_hist, ego, mode="infer")
+        assert torch.isfinite(traj).all()
+
+    def test_velocity_depends_on_bev(self, device):
+        torch.manual_seed(0)
+        planner = FlowMatchingPlanner(embed_dim=256).to(device)
+        planner.eval()
+        vis_hist = torch.randn(1, 896, device=device)
+        ego = torch.randn(1, 256, device=device)
+        target = torch.randn(1, 128, device=device)
+        u_t = torch.randn(1, 128, device=device)
+        t = torch.tensor([0.5], device=device)
+
+        bev_a = torch.randn(1, 256, 8, 8, device=device)
+        bev_b = torch.randn(1, 256, 8, 8, device=device)
+
+        v_a, _ = planner(
+            bev_a, vis_hist, ego, mode="train",
+            noisy_trajectory=u_t, flow_timestep=t,
+        )
+        v_b, _ = planner(
+            bev_b, vis_hist, ego, mode="train",
+            noisy_trajectory=u_t, flow_timestep=t,
+        )
+        assert not torch.allclose(v_a, v_b, atol=1e-5), \
+            "v_theta is not sensitive to BEV features"
+
+    def test_velocity_depends_on_timestep(self, device):
+        torch.manual_seed(0)
+        planner = FlowMatchingPlanner(embed_dim=256).to(device)
+        planner.eval()
+        bev = torch.randn(1, 256, 8, 8, device=device)
+        vis_hist = torch.randn(1, 896, device=device)
+        ego = torch.randn(1, 256, device=device)
+        u_t = torch.randn(1, 128, device=device)
+
+        v_t1, _ = planner(
+            bev, vis_hist, ego, mode="train",
+            noisy_trajectory=u_t, flow_timestep=torch.tensor([0.1], device=device),
+        )
+        v_t2, _ = planner(
+            bev, vis_hist, ego, mode="train",
+            noisy_trajectory=u_t, flow_timestep=torch.tensor([0.9], device=device),
+        )
+        assert not torch.allclose(v_t1, v_t2, atol=1e-5), \
+            "v_theta is not sensitive to flow timestep"
+
+    def test_velocity_depends_on_conditioning(self, device):
+        torch.manual_seed(0)
+        planner = FlowMatchingPlanner(embed_dim=256).to(device)
+        planner.eval()
+        bev = torch.randn(1, 256, 8, 8, device=device)
+        u_t = torch.randn(1, 128, device=device)
+        t = torch.tensor([0.5], device=device)
+
+        v_a, _ = planner(
+            bev, torch.randn(1, 896, device=device),
+            torch.randn(1, 256, device=device),
+            mode="train", noisy_trajectory=u_t, flow_timestep=t,
+        )
+        v_b, _ = planner(
+            bev, torch.randn(1, 896, device=device),
+            torch.randn(1, 256, device=device),
+            mode="train", noisy_trajectory=u_t, flow_timestep=t,
+        )
+        assert not torch.allclose(v_a, v_b, atol=1e-5), \
+            "v_theta is not sensitive to ego/visual_history conditioning"
+
+    def test_inference_differs_from_noise(self, device):
+        """Euler integration must actually transform the noise — output
+        cannot match the input noise sample."""
+        torch.manual_seed(0)
+        planner = FlowMatchingPlanner(embed_dim=256, num_inference_steps=10).to(device)
+        planner.eval()
+        bev = torch.randn(1, 256, 8, 8, device=device)
+        vis_hist = torch.randn(1, 896, device=device)
+        ego = torch.randn(1, 256, device=device)
+
+        torch.manual_seed(123)
+        x0 = torch.randn(1, 128, device=device)
+        torch.manual_seed(123)  # same seed — planner draws an identical x0 inside
+        traj, _ = planner(bev, vis_hist, ego, mode="infer")
+        assert not torch.allclose(traj, x0, atol=1e-3), \
+            "Inference output equals the input noise — ODE did not advance"
+
+    def test_gradient_flows(self, device):
+        planner = FlowMatchingPlanner(embed_dim=256).to(device)
+        bev = torch.randn(1, 256, 8, 8, device=device, requires_grad=True)
+        vis_hist = torch.randn(1, 896, device=device, requires_grad=True)
+        ego = torch.randn(1, 256, device=device, requires_grad=True)
+        target = torch.randn(1, 128, device=device)
+        velocity, ego_hidden = planner(
+            bev, vis_hist, ego, mode="train", trajectory_target=target,
+        )
+        (velocity.sum() + ego_hidden.sum()).backward()
+        assert bev.grad is not None and bev.grad.abs().max() > 0
+        assert vis_hist.grad is not None and vis_hist.grad.abs().max() > 0
+        assert ego.grad is not None and ego.grad.abs().max() > 0
+
+    def test_train_without_target_raises(self, device):
+        planner = FlowMatchingPlanner(embed_dim=256).to(device)
+        bev = torch.randn(1, 256, 8, 8, device=device)
+        vis_hist = torch.randn(1, 896, device=device)
+        ego = torch.randn(1, 256, device=device)
+        with pytest.raises(ValueError, match="trajectory_target"):
+            planner(bev, vis_hist, ego, mode="train")
+
+
+class TestGRUPlannerBackcompat:
+    """The GRU planner moved into the trajectory_planning subpackage —
+    its public behavior must be unchanged."""
+
+    def test_shape_unchanged(self, device):
+        planner = GRUPlanner(embed_dim=256).to(device)
+        bev = torch.randn(2, 256, 8, 8, device=device)
+        vis_hist = torch.randn(2, 896, device=device)
+        ego = torch.randn(2, 256, device=device)
+        traj, ego_hidden = planner(bev, vis_hist, ego)
+        assert traj.shape == (2, 128)
+        assert ego_hidden.shape == (2, 256)
+
+    def test_mode_argument_accepted(self, device):
+        """forward must accept mode without changing GRU output."""
+        torch.manual_seed(0)
+        planner = GRUPlanner(embed_dim=256).to(device)
+        planner.eval()
+        bev = torch.randn(1, 256, 8, 8, device=device)
+        vis_hist = torch.randn(1, 896, device=device)
+        ego = torch.randn(1, 256, device=device)
+        traj_train, _ = planner(bev, vis_hist, ego, mode="train")
+        traj_infer, _ = planner(bev, vis_hist, ego, mode="infer")
+        assert torch.allclose(traj_train, traj_infer)
+
+    def test_extra_kwargs_ignored(self, device):
+        """forward must silently swallow flow-matching-only kwargs."""
+        planner = GRUPlanner(embed_dim=256).to(device)
+        planner.eval()
+        bev = torch.randn(1, 256, 8, 8, device=device)
+        vis_hist = torch.randn(1, 896, device=device)
+        ego = torch.randn(1, 256, device=device)
+        traj, _ = planner(
+            bev, vis_hist, ego,
+            trajectory_target=torch.randn(1, 128, device=device),
+            noisy_trajectory=torch.randn(1, 128, device=device),
+            flow_timestep=torch.tensor([0.5], device=device),
+        )
+        assert traj.shape == (1, 128)
+
+
+def _build_flow_matching_model(num_views, fusion_mode, device,
+                               num_timesteps=64, num_inference_steps=4):
+    from unittest.mock import patch
+    from model_components.auto_e2e import AutoE2E
+    from conftest import MockBackbone
+
+    view_fusion_kwargs = {"bev_h": 8, "bev_w": 8} if fusion_mode == "bev" else None
+
+    with patch('model_components.auto_e2e.Backbone', MockBackbone):
+        model = AutoE2E(
+            num_views=num_views,
+            fusion_mode=fusion_mode,
+            view_fusion_kwargs=view_fusion_kwargs,
+            num_timesteps=num_timesteps,
+            planner_mode="flow_matching",
+            planner_kwargs={"num_inference_steps": num_inference_steps},
+        )
+    return model.to(device)
+
+
+class TestAutoE2EWithFlowMatching:
+    def test_train_mode_with_target(self, device):
+        model = _build_flow_matching_model(8, "concat", device)
+        model.train()
+        visual, vis_hist, ego = make_inputs(2, 8, device)
+        target = torch.randn(2, 128, device=device)
+        velocity, ego_hidden, future = model(
+            visual, vis_hist, ego, mode="train", trajectory_target=target,
+        )
+        assert velocity.shape == (2, 128)
+        assert ego_hidden.shape == (2, 256)
+        assert future is not None and len(future) == 4
+
+    def test_infer_mode_returns_trajectory(self, device):
+        model = _build_flow_matching_model(8, "concat", device)
+        model.eval()
+        visual, vis_hist, ego = make_inputs(1, 8, device)
+        traj, ego_hidden, future = model(visual, vis_hist, ego, mode="infer")
+        assert traj.shape == (1, 128)
+        assert ego_hidden.shape == (1, 256)
+        assert future is None
+        assert torch.isfinite(traj).all()
+
+    def test_backward_flows_through_velocity(self, device):
+        model = _build_flow_matching_model(8, "concat", device)
+        model.train()
+        visual, vis_hist, ego = make_inputs(2, 8, device)
+        target = torch.randn(2, 128, device=device)
+        velocity, ego_hidden, future = model(
+            visual, vis_hist, ego, mode="train", trajectory_target=target,
+        )
+        loss = (velocity - target).pow(2).mean() + ego_hidden.sum()
+        loss = loss + sum(f.sum() for f in future)
+        loss.backward()
+        # At least one Backbone and one TrajectoryPlanner param must see grad.
+        backbone_grad = any(
+            p.grad is not None and p.grad.abs().max() > 0
+            for n, p in model.named_parameters() if n.startswith("Backbone.")
+        )
+        planner_grad = any(
+            p.grad is not None and p.grad.abs().max() > 0
+            for n, p in model.named_parameters()
+            if n.startswith("TrajectoryPlanner.")
+        )
+        assert backbone_grad and planner_grad
