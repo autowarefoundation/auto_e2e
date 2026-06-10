@@ -51,7 +51,7 @@ class BEVViewFusion(nn.Module):
     def __init__(self, num_views=8, embed_dim=256, bev_h=450, bev_w=300,
                  num_points_in_pillar=4, dropout=0.1,
                  pc_range=(-60.0, -60.0, -5.0, 120.0, 60.0, 3.0),
-                 image_size=256):
+                 image_size=256, offset_scale=0.1):
         super().__init__()
 
         self.num_views = num_views
@@ -61,6 +61,7 @@ class BEVViewFusion(nn.Module):
         self.num_points_in_pillar = num_points_in_pillar
         self.pc_range = pc_range
         self.image_size = image_size
+        self.offset_scale = offset_scale
 
         # Learnable BEV queries: each grid cell gets its own query vector
         self.bev_queries = nn.Embedding(bev_h * bev_w, embed_dim)
@@ -220,7 +221,7 @@ class BEVViewFusion(nn.Module):
         # --- 4. Predict sampling offsets and attention weights from queries ---
         offsets = self.sampling_offsets(queries)  # [B, N, num_z * 2]
         offsets = offsets.reshape(B, N, self.num_points_in_pillar, 2)
-        offsets = offsets * 0.1  # Scale down for stability
+        offsets = offsets * self.offset_scale  # Scale down for stability
 
         # Attention weights: per-camera softmax over pillar points (height relevance).
         # Camera-level weighting is handled by visibility-based averaging,
