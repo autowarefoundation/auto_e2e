@@ -802,3 +802,80 @@ class TestVisualHistoryNonZeroDifference:
 
         assert not torch.allclose(traj_a, traj_b, atol=1e-5), \
             "Two distinct non-zero visual_history inputs produced the same trajectory"
+
+
+# ---------------------------------------------------------------------------
+# Full-pipeline robustness
+# ---------------------------------------------------------------------------
+
+class TestFullPipelineRobustness:
+    def test_all_zero_inputs_produce_finite_outputs(self, build_mock_model, device):
+        """Zero inputs across all paths must not cause NaN/Inf anywhere downstream."""
+        model = build_mock_model(num_views=8, fusion_mode="concat", device=device)
+        model.eval()
+
+        visual = torch.zeros(2, 8, 3, 256, 256, device=device)
+        vis_hist = torch.zeros(2, 896, device=device)
+        ego = torch.zeros(2, 256, device=device)
+
+        traj, ego_hidden, future = model(visual, vis_hist, ego)
+
+        assert torch.isfinite(traj).all(), "NaN/Inf in trajectory with zero inputs"
+        assert torch.isfinite(ego_hidden).all(), "NaN/Inf in ego_hidden with zero inputs"
+        for i, f in enumerate(future):
+            assert torch.isfinite(f).all(), f"NaN/Inf in future feature {i} with zero inputs"
+
+    def test_camera_params_none_then_valid_switching(self, build_mock_model, device):
+        """A BEV-fusion model must accept both None and valid camera_params on the
+        same instance, producing finite and distinct outputs."""
+        model = build_mock_model(num_views=8, fusion_mode="bev", device=device)
+        model.eval()
+
+        visual, vis_hist, ego = make_inputs(1, 8, device, include_camera_params=False)
+
+        traj_none, _, _ = model(visual, vis_hist, ego, camera_params=None)
+        cam_params = torch.randn(1, 8, 3, 4, device=device)
+        traj_cam, _, _ = model(visual, vis_hist, ego, camera_params=cam_params)
+
+        assert torch.isfinite(traj_none).all(), "NaN/Inf with camera_params=None"
+        assert torch.isfinite(traj_cam).all(), "NaN/Inf with valid camera_params"
+        assert not torch.allclose(traj_none, traj_cam, atol=1e-5), \
+            "camera_params None vs valid produced identical outputs — projection has no effect"
+
+    def test_batch_size_one_smoke(self, build_mock_model, device):
+        """End-to-end forward must work at batch_size=1 with correct shapes and no NaN."""
+        model = build_mock_model(num_views=8, fusion_mode="concat", device=device)
+        model.eval()
+        visual, vis_hist, ego = make_inputs(1, 8, device)
+        traj, ego_hidden, future = model(visual, vis_hist, ego)
+
+        assert traj.shape == (1, 128)
+        assert ego_hidden.shape == (1, 256)
+        assert len(future) == 4
+        for f in future:
+            assert f.shape == (1, 256, 8, 8)
+        assert torch.isfinite(traj).all()
+        assert torch.isfinite(ego_hidden).all()
+        for f in future:
+            assert torch.isfinite(f).all()
+
+
+class TestFeatureFusionWithSwinChannels:
+    def test_dynamic_backbone_channels_with_swin_sizes(self, device):
+        """FeatureFusion should accept Swin's per-stage channels (96, 192, 384, 768)
+        at their natural spatial resolutions and produce the expected fused shape."""
+        backbone_channels = 96 + 192 + 384 + 768  # 1440
+        fusion = FeatureFusion(
+            num_views=8, backbone_channels=backbone_channels, fusion_mode="concat",
+        ).to(device)
+
+        # Per-stage Swin spatial dims for a 256x256 input
+        features = [
+            torch.randn(16, 96, 64, 64, device=device),
+            torch.randn(16, 192, 32, 32, device=device),
+            torch.randn(16, 384, 16, 16, device=device),
+            torch.randn(16, 768, 8, 8, device=device),
+        ]
+        out = fusion(features, B=2, V=8)
+        assert out.shape == (2, 256, 8, 8)
+        assert torch.isfinite(out).all()
