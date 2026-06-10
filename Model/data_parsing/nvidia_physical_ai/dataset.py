@@ -16,7 +16,6 @@ Usage
     sample = dataset[0]
     # sample["visual_tiles"]       (8, 3, 256, 256)
     # sample["egomotion_history"]  (256,)
-    # sample["visual_history"]     (896,)
     # sample["trajectory_target"]  (128,)
     # sample["clip_uuid"]          str
     # sample["sample_idx"]         int
@@ -46,14 +45,12 @@ from .egomotion import (
 
 logger = logging.getLogger(__name__)
 
-_VISUAL_HISTORY_DIM = 896
 _DISCOVERY_CAMERA = "camera_front_wide_120fov"
 
 
 class ClipSample(TypedDict):
     visual_tiles: torch.Tensor        # (8, 3, 256, 256)
     egomotion_history: torch.Tensor   # (256,)
-    visual_history: torch.Tensor      # (896,)
     trajectory_target: torch.Tensor   # (128,)
     clip_uuid: str
     sample_idx: int
@@ -263,12 +260,9 @@ class NvidiaAVDataset(Dataset):
             df=self._egomotion_dfs[clip_uuid],
         )
 
-        visual_history = torch.zeros(_VISUAL_HISTORY_DIM, dtype=torch.float32)
-
         return ClipSample(
             visual_tiles=visual_tiles,
             egomotion_history=egomotion_history,
-            visual_history=visual_history,
             trajectory_target=trajectory_target,
             clip_uuid=clip_uuid,
             sample_idx=sample_idx,
