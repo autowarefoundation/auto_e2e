@@ -27,6 +27,12 @@ class TrajectoryPlanner(nn.Module):
         self.num_timesteps = num_timesteps
         self.num_signals = num_signals
         self.num_points = num_points
+        # offset_scale bounds the per-point sampling offset around the predicted
+        # reference point in normalized BEV coordinates. The default 0.1 means
+        # offsets reach up to 10% of the BEV grid extent in each direction. The
+        # reference point itself is sigmoid-bounded to [0, 1], so the head can
+        # still attend anywhere on the grid — offset_scale only constrains the
+        # local fan-out around that anchor.
         self.offset_scale = offset_scale
 
         self.ego_query = nn.Embedding(1, embed_dim)
