@@ -107,7 +107,12 @@ class TestViewFusion:
             "Changing a camera view had no effect on output — fusion is broken"
 
     def test_all_views_contribute(self, model, device):
-        """Each view should influence the output when zeroed out."""
+        """Each view should influence the output when perturbed.
+
+        Uses a large constant fill rather than zeroing so the perturbation
+        propagates through deformable cross-attention even when the planner
+        only samples a few BEV cells per timestep.
+        """
         model.eval()
         torch.manual_seed(42)
         visual, ego = make_inputs(1, 8, device)
@@ -116,7 +121,7 @@ class TestViewFusion:
 
         for view_idx in range(8):
             visual_mod = visual.clone()
-            visual_mod[0, view_idx] = 0.0
+            visual_mod[0, view_idx] = 5.0
             traj_mod, _, _ = model(visual_mod, ego)
             assert not torch.allclose(traj_base, traj_mod, atol=1e-5), \
                 f"View {view_idx} has no influence on the output"
