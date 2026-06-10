@@ -1,7 +1,7 @@
 import torch.nn as nn
 from .backbone import Backbone
 from .feature_fusion import FeatureFusion
-from .trajectory_planner import TrajectoryPlanner
+from .trajectory_planning import build_planner
 from .future_state import FutureState
 
 
@@ -10,7 +10,8 @@ class AutoE2E(nn.Module):
                  fusion_mode="concat", is_pretrained=True,
                  image_feature_size=8, view_fusion_kwargs=None,
                  num_timesteps=64, num_signals=2, egomotion_dim=256,
-                 visual_history_dim=896):
+                 visual_history_dim=896, planner_mode="gru",
+                 planner_kwargs=None):
         super(AutoE2E, self).__init__()
 
         # Backbone feature extractor
@@ -27,19 +28,22 @@ class AutoE2E(nn.Module):
             view_fusion_kwargs=view_fusion_kwargs,
         )
 
-        # Trajectory decoder with deformable cross-attention to BEV
-        self.TrajectoryPlanner = TrajectoryPlanner(
+        # Trajectory decoder — swappable via planner_mode (gru, flow_matching).
+        self.TrajectoryPlanner = build_planner(
+            planner_mode,
             embed_dim=embed_dim,
             num_timesteps=num_timesteps,
             num_signals=num_signals,
             egomotion_dim=egomotion_dim,
             visual_history_dim=visual_history_dim,
+            **(planner_kwargs or {}),
         )
 
         # Future visual state prediction conditioned on planner ego_hidden
         self.FutureState = FutureState(embed_dim=embed_dim, ego_hidden_dim=embed_dim)
 
-    def forward(self, x, visual_history, egomotion_history, camera_params=None, mode="train"):
+    def forward(self, x, visual_history, egomotion_history, camera_params=None,
+                mode="train", **kwargs):
         B, V, C, H, W = x.shape
 
         # Merge batch and views for backbone processing
@@ -50,7 +54,8 @@ class AutoE2E(nn.Module):
         fused_features = self.FeatureFusion(features, B, V, camera_params=camera_params)
 
         trajectory, ego_hidden = self.TrajectoryPlanner(
-            fused_features, visual_history, egomotion_history
+            fused_features, visual_history, egomotion_history,
+            mode=mode, **kwargs,
         )
 
         if mode == "train":
