@@ -23,7 +23,7 @@ The design draws heavily from recent advances in vision-centric autonomous drivi
 
 ### 2.1 Original Problem
 
-The initial AutoE2E architecture had no cross-camera fusion mechanism. The 7 cameras + 1 map tile were stacked along the batch dimension and processed independently through the backbone. The `DrivingPolicy` module collapsed all dimensions (including batch) via `torch.flatten()`, making mini-batch training impossible and preventing any meaningful multi-view reasoning.
+The initial AutoE2E architecture had no cross-camera fusion mechanism. The 7 cameras + 1 map tile were stacked along the batch dimension and processed independently through the backbone. The legacy `DrivingPolicy` module collapsed all dimensions (including batch) via `torch.flatten()`, making mini-batch training impossible and preventing any meaningful multi-view reasoning. It has since been replaced by `TrajectoryPlanner` (see Section 8).
 
 ### 2.2 Why Multi-View Fusion Matters
 
@@ -43,7 +43,7 @@ This is a solved problem in the literature. BEVFormer [1], LSS [4], PETR [3], an
 | Batch-dimension correctness | Training requires batch_size > 1 for stability and GPU efficiency |
 | No custom CUDA kernels | Portability across hardware; reduced maintenance burden |
 | Graceful degradation without camera calibration | Dataset choice is pending; model must be testable with dummy data |
-| Uniform interface for all fusion modes | Downstream modules (DrivingPolicy, FutureState) should not change |
+| Uniform interface for all fusion modes | Downstream modules (TrajectoryPlanner, FutureState) should not change |
 
 ---
 
@@ -52,34 +52,55 @@ This is a solved problem in the literature. BEVFormer [1], LSS [4], PETR [3], an
 ### 3.1 Full Network Pipeline
 
 ```
-Input: [B, V, 3, 256, 256]
-         │
-         │  reshape to [B*V, 3, 256, 256]
-         ▼
-┌─────────────────────────────┐
-│  Backbone (SwinV2-Tiny)     │  Pretrained on ImageNet-22k [5]
-│  Multi-scale feature maps   │  4 stages: 96, 192, 384, 768 channels
-└─────────────────────────────┘
-         │
-         │  Pool to 8×8 + concatenate scales
-         ▼
-    [B*V, 1440, 8, 8]
-         │
+Input: [B, V, 3, 256, 256]              egomotion_history: [B, 256]
+         │                                       │
+         │  reshape to [B*V, 3, 256, 256]        │
+         ▼                                       │
+┌─────────────────────────────┐                  │
+│  Backbone (SwinV2-Tiny)     │                  │
+│  Multi-scale feature maps   │                  │
+│  4 stages: 96/192/384/768 ch│                  │
+└─────────────────────────────┘                  │
+         │                                       │
+         │  Pool to 8×8 + concat scales          │
+         ▼                                       │
+    [B*V, 1440, 8, 8]                            │
+         │                                       │
+         │  Channel proj → embed_dim=256         │
+         ▼                                       │
+    [B*V, 256, 8, 8]                             │
+         │                                       │
          │  ┌──────────────────────────────────────────┐
-         │  │  View Fusion (selectable via fusion_mode) │
+         │  │  View Fusion (selectable via fusion_mode)│
          │  │                                          │
          │  │  "concat"     → ConcatViewFusion         │
-         │  │  "cross_attn" → CrossAttentionViewFusion  │
-         │  │  "bev"        → BEVViewFusion             │
+         │  │  "cross_attn" → CrossAttentionViewFusion │
+         │  │  "bev"        → BEVViewFusion            │
          │  └──────────────────────────────────────────┘
          │
          ▼
-    [B, 256, 8, 8]  ← Unified scene representation
-         │
-    ┌────┴────┐
-    ▼         ▼
-DrivingPolicy  FutureState
-[B, 128]       [B, 256, 8, 8] × 4
+    [B, 256, H_out, W_out]  ← Unified scene representation
+    (BEV: [B, 256, 450, 300]; concat/cross_attn: [B, 256, 8, 8])
+         │                                       │
+         ├───────────────┐                       │
+         │               │                       │
+         │               ▼                       ▼
+         │        ┌───────────────────────────────────┐
+         │        │  TrajectoryPlanner                │
+         │        │  ego query + GRU(64 steps) +      │
+         │        │  deformable cross-attn to BEV     │
+         │        └───────────────────────────────────┘
+         │               │
+         │               ├──► trajectory:  [B, 128]   (64 × 2)
+         │               │
+         │               └──► ego_hidden:  [B, 256]
+         │                       │
+         ▼                       ▼
+    ┌──────────────────────────────────────┐
+    │  FutureState (training only)         │
+    │  fused_features + ego_hidden bias    │
+    │  → 4 × [B, 256, H_out, W_out]        │
+    └──────────────────────────────────────┘
 ```
 
 ### 3.2 Module Interface
@@ -290,11 +311,11 @@ Implements a simplified BEV fusion module inspired by BEVFormer [1]. Learnable B
 self.bev_queries = nn.Embedding(bev_h * bev_w, embed_dim)
 ```
 
-- **Shape**: [49, 256] (8×8 BEV grid, matching downstream feature resolution)
+- **Shape**: [bev_h × bev_w, 256] (default 450×300 = 135,000 queries with 256 channels)
 - **Initialization**: Standard random (learned from scratch)
 - **Role**: Each query "asks" the image features: "What is happening at my BEV grid location?"
 
-In BEVFormer [1], BEV queries are 200×200 with 256 channels for nuScenes. We use 8×8 with 256 channels to match the existing architecture's spatial resolution and channel count.
+In BEVFormer [1], BEV queries are 200×200 with 256 channels for nuScenes. We use a higher-resolution rectangular grid (450×300, see Section 7.3) to better resolve forward-biased ego coordinates over the asymmetric `pc_range`. The downstream `TrajectoryPlanner` is shape-agnostic with respect to (bev_h, bev_w) thanks to its `F.grid_sample`-based deformable cross-attention (see Section 8), so the BEV resolution can change without retraining the head.
 
 #### 7.2.2 3D Reference Points
 
@@ -306,7 +327,7 @@ In BEVFormer [1], BEV queries are 200×200 with 256 channels for nuScenes. We us
 
 - **num_points_in_pillar = 4**: Following BEVFormer's default, sample 4 heights per BEV cell
 - **Z range**: -5.0m to +3.0m (below ground for ramps/tunnels, above for overpasses)
-- **pc_range**: [-51.2, -51.2, -5.0, 51.2, 51.2, 3.0] (default nuScenes range [10])
+- **pc_range**: [-60.0, -60.0, -5.0, 120.0, 60.0, 3.0] (asymmetric — 120m forward, 60m back/side, biased toward the planning-relevant region ahead of the ego vehicle)
 
 The pillar sampling strategy addresses depth ambiguity: by sampling at multiple heights, the attention mechanism can learn which height is relevant for each spatial location, effectively performing implicit depth estimation without explicit depth prediction.
 
@@ -376,8 +397,8 @@ Critical for correctness: a BEV query representing a location behind the vehicle
 
 | Aspect | BEVFormer [1] | BEVViewFusion (Ours) |
 |--------|---------------|----------------------|
-| BEV resolution | 200×200 | 7×7 (matches existing arch) |
-| Embed dim | 256 | 1440 (matches backbone output) |
+| BEV resolution | 200×200 (square, 102.4 m × 102.4 m) | 450×300 (rectangular, asymmetric pc_range) |
+| Embed dim | 256 | 256 |
 | Num encoder layers | 6 | 1 (single pass) |
 | Temporal self-attention | ✓ | ✗ (future work) |
 | Deformable attention | Custom CUDA ops | F.grid_sample (portable) |
@@ -405,26 +426,75 @@ The owner explicitly requested **spatial cross-attention instead of depth predic
 
 ---
 
-## 8. Driving Policy Head
+## 8. Trajectory Planner
 
 ### 8.1 Design
 
 ```python
-class DrivingPolicy(nn.Module):
-    # Conv2d(1440, 3, 3, 1, 1) → flatten(start_dim=1) → MLP(3 layers) → [B, 128]
+class TrajectoryPlanner(nn.Module):
+    # Single learnable ego query + per-timestep deformable cross-attention to BEV + GRU.
+    #
+    #   ego_query:     nn.Embedding(1, 256)
+    #   ego_state_proj: Linear(256, 256)               # initial GRU hidden = f(egomotion_history)
+    #   reference_point:   Linear(256, 2)              # per-step BEV anchor in [0, 1]^2 (sigmoid)
+    #   sampling_offsets:  Linear(256, num_points * 2) # offsets around the anchor
+    #   attention_weights: Linear(256, num_points)     # softmax over P sampled features
+    #   value_proj:        Linear(256, 256)            # 1×1 projection of BEV features
+    #   output_proj:       Linear(256, 256)
+    #   gru:               GRU(256, 256)
+    #   waypoint_head:     Linear(256, num_signals)
 ```
 
-- **Output**: 128-dim vector = 64 timesteps × (acceleration + curvature) at 10Hz = 6.4s horizon
-- **flatten(start_dim=1)**: Critical fix from PR 1 — preserves batch dimension
+```
+egomotion_history [B, 256]         BEV features [B, 256, H, W]
+        │                                  │
+        │                            value_proj (1×1)
+        ▼                                  │
+ego_state_proj                             ▼
+        │                          values [B, 256, H, W]
+        ▼
+   h_0 [1, B, 256]
+        │
+        ▼
+   ┌──────────────────────────────────────────────────┐
+   │  for t in range(num_timesteps=64):               │
+   │     query  = h_{t-1} + ego_query                 │
+   │     ref    = sigmoid(reference_point(query))     │  → [B, 2] in [0,1]^2
+   │     off    = offset_scale * sampling_offsets(...)│  → [B, P, 2]
+   │     attn_w = softmax(attention_weights(query))   │  → [B, P]
+   │     samp   = grid_sample(values, ref + off)      │  → [B, 256, P]
+   │     attended = output_proj(Σ attn_w · samp)      │  → [B, 256]
+   │     _, h_t = GRU(attended, h_{t-1})              │
+   │     waypoints[t] = waypoint_head(h_t)            │  → [B, num_signals]
+   └──────────────────────────────────────────────────┘
+        │
+        ├─► trajectory  = cat(waypoints) [B, T·num_signals] = [B, 128]
+        └─► ego_hidden  = h_T            [B, 256]   ← consumed by FutureState
+```
+
+- **Output 1 — `trajectory`**: 128-dim vector = 64 timesteps × (acceleration + curvature) at 10 Hz = 6.4 s horizon.
+- **Output 2 — `ego_hidden`**: 256-dim final GRU hidden state. Replaces the legacy 14-dim `compressed_visual_feature_vector`. It encodes the planner's intent over the prediction horizon and is fed to `FutureState` (Section 9).
+- **Initial GRU hidden state**: derived from `egomotion_history` via `ego_state_proj`, so the planner is conditioned on past ego dynamics from step 0 rather than relying on a separate learned init.
+- **Deformable cross-attention**: each step predicts a single BEV anchor, then samples `num_points = 8` features around it via `F.grid_sample` (no custom CUDA kernels). `offset_scale = 0.1` bounds the local fan-out; the anchor itself is sigmoid-bounded to the full BEV grid.
+- **Shape-agnostic w.r.t. BEV resolution**: because sampling is done in normalized coordinates, the planner runs unchanged on (8, 8) (concat / cross_attn fusion) or (450, 300) (BEV fusion).
 
 ### 8.2 Design Rationale
 
-The current policy head is intentionally simple (MLP). AD-MLP [12] demonstrated that even a pure MLP on ego-status can achieve competitive open-loop planning performance, suggesting that the fusion module's representation quality matters more than the policy head's complexity at this stage.
+The previous head was an MLP over `flatten(Conv2d(1440, 3, 3, 1, 1))` of the fused feature map. That design discarded all spatial structure and was only justifiable at low BEV resolution; once BEV is increased to 450×300, flattening becomes prohibitive (~135 k spatial cells × 256 channels).
 
-Future upgrades may include:
-- GRU/Transformer decoder for autoregressive trajectory generation
-- Multi-modal trajectory prediction (multiple hypotheses)
-- Cost-volume-based planning (as in UniAD [2])
+Replacing it with deformable cross-attention follows the same principle as in `BEVViewFusion`: instead of squashing the grid, learn *where* to look. Drawing on UniAD [2] and VAD [16], the planner is now a single-query autoregressive decoder — light enough to train end-to-end while still able to ground each waypoint in a small set of BEV locations selected per step.
+
+**Key design choices:**
+
+1. **Single ego query (not multi-query)**: The model plans one ego trajectory, not many object tracks. A single learnable query is sufficient and keeps the head small. Multi-modal hypotheses can be added later by widening this query into a multi-query bank.
+2. **GRU instead of a Transformer decoder**: The temporal dependency is a strict left-to-right recurrence (waypoint t depends on waypoint t-1's implicit state). A GRU captures this with O(T) parameters instead of O(T²) attention compute, and avoids needing causal masking. AD-MLP [12] showed even an MLP on ego-status can plan; we keep the lightweight ethos but recover spatial grounding via the cross-attention loop.
+3. **`F.grid_sample` over deformable-DETR CUDA kernels**: Same portability rationale as `BEVViewFusion` (Section 7.2.4) — single-head sampling is enough to validate the architecture without locking the project into custom ops.
+4. **`ego_hidden` as the world-model handoff**: `FutureState` previously consumed a 14-dim summary that was discarded by the policy head. Threading the GRU's final hidden state instead gives `FutureState` access to the planner's full 256-dim trajectory-conditioned state — closer in spirit to MILE [14] / GAIA-1 [15], where the future-prediction module sees what the planner intends to do.
+
+### 8.3 Limitations
+
+- The 64-step recurrence is inherently sequential and dominates planner latency. A non-autoregressive variant (parallel waypoint heads over a fixed bank of learned time queries) is on the roadmap.
+- Single-query planning yields a unimodal prediction. Multi-modal trajectory prediction (multiple hypotheses with mixture loss) is straightforward to add by widening `ego_query` and the `waypoint_head`.
 
 ---
 
@@ -434,11 +504,46 @@ Future upgrades may include:
 
 ```python
 class FutureState(nn.Module):
-    # Conv2d(256, 512) → GELU → Conv2d(512, 1024) → chunk(4)
-    # Output: 4 × [B, 256, 8, 8] at 1.6s intervals over 6.4s
+    # Inputs:
+    #   fused_features: [B, 256, H, W]            ← BEV feature map from FeatureFusion
+    #   ego_hidden:     [B, 256]                  ← final GRU hidden from TrajectoryPlanner
+    #
+    # Conditioning: per-channel bias broadcast across the BEV grid
+    #   bias = ego_proj(ego_hidden).view(B, 256, 1, 1)
+    #   conditioned = fused_features + bias
+    #
+    # Conv2d(256, 512) → GELU → Conv2d(512, 1024) → chunk(4) along channels
+    # Output: 4 × [B, 256, H, W] at 1.6 s intervals over 6.4 s
 ```
 
-### 9.2 Relation to JEPA
+```
+fused_features [B, 256, H, W]       ego_hidden [B, 256]
+        │                                   │
+        │                              ego_proj
+        │                                   │
+        │                          [B, 256, 1, 1]  (broadcast over H×W)
+        │                                   │
+        └───────────────────► (+) ◄─────────┘
+                              │
+                              ▼
+                      conditioned [B, 256, H, W]
+                              │
+                       Conv2d(256→512) + GELU
+                              │
+                       Conv2d(512→1024)
+                              │
+                              ▼
+                       chunk(4) along channel
+                              │
+                              ▼
+                   4 × [B, 256, H, W]   (t+1.6s, t+3.2s, t+4.8s, t+6.4s)
+```
+
+### 9.2 What Changed vs. the Legacy Design
+
+The previous `FutureState` consumed a 14-dim `compressed_visual_feature_vector` produced by the old `DrivingPolicy`'s flatten-then-MLP path. With `TrajectoryPlanner` now exposing a 256-dim `ego_hidden` (Section 8), the conditioning signal is much richer: it summarises the planner's intent over the full 6.4 s horizon rather than being a bottleneck of the input scene. Empirically this also matches the JEPA principle of *predicting the future in latent space conditioned on the action* — `ego_hidden` is the closest available proxy to that action.
+
+### 9.3 Relation to JEPA
 
 This module is inspired by the Joint Embedding Predictive Architecture (JEPA) [13] proposed by LeCun. Key principles adopted:
 
@@ -447,6 +552,10 @@ This module is inspired by the Joint Embedding Predictive Architecture (JEPA) [1
 2. **Self-supervised learning signal**: During training, the predicted future features can be compared against actual future features extracted by the frozen backbone (FrozenBackbone module), providing a self-supervised loss signal.
 
 3. **Compressed world model**: The future state predictions encode the model's "understanding" of how the scene will evolve — a form of implicit world model, similar to MILE [14] and GAIA-1 [15].
+
+### 9.4 Memory Note at 450×300 BEV
+
+The 4·embed_dim Conv2d output is memory-intensive at full BEV resolution: roughly `450 × 300 × 4 × 256 × 4 bytes ≈ 550 MB per sample` in fp32. Training will likely require mixed precision (bf16 / fp16) or spatial downsampling of `fused_features` before `FutureState`. This is tracked separately and does not affect the forward-pass interface.
 
 ---
 
@@ -490,8 +599,8 @@ Model/model_components/
 │   ├── concat_fusion.py              # Mode "concat"
 │   ├── cross_attention_fusion.py     # Mode "cross_attn"
 │   └── bev_fusion.py                 # Mode "bev"
-├── driving_policy.py                  # Trajectory prediction head
-├── future_state.py                    # Future feature prediction
+├── trajectory_planner.py              # Ego-query GRU + deformable cross-attn to BEV
+├── future_state.py                    # Future feature prediction (conditioned on ego_hidden)
 └── frozen_backbone.py                 # For feature reconstruction loss
 ```
 
@@ -500,23 +609,30 @@ Model/model_components/
 | Module | Parameters | Notes |
 |--------|-----------|-------|
 | Backbone (Swin-Tiny) | ~28M | Pretrained, optionally frozen |
-| ConcatViewFusion | ~16.6M | Conv2d(11520, 1440, 1) |
-| CrossAttentionViewFusion | ~16.6M | MHA(1440, 8 heads) + FFN(1440→2880→1440) |
-| BEVViewFusion | ~13.0M | Queries + value_proj + offsets + attn_weights + output_proj + FFN |
-| DrivingPolicy | ~3M | Conv + MLP |
-| FutureState | ~25M | Two large Conv2d layers |
+| FeatureFusion channel proj | ~0.4M | Conv2d(1440, 256, 1) — 1440→256 channel reduction |
+| ConcatViewFusion | ~0.5M | Conv2d(V·256, 256, 1) at embed_dim=256 |
+| CrossAttentionViewFusion | ~0.5M | MHA(256, 8 heads) + FFN(256→512→256) |
+| BEVViewFusion | ~35M | Mostly nn.Embedding(450·300, 256) BEV queries (~34.6M) + value_proj/offsets/attn/output_proj/FFN |
+| TrajectoryPlanner | ~0.5M | ego_query + ego_state_proj + ref/offsets/attn/value/output projections + GRU(256, 256) + waypoint_head |
+| FutureState | ~3.7M | ego_proj(256→256) + Conv2d(256→512) + Conv2d(512→1024) |
 
 ### 11.3 Hyperparameters
 
 | Parameter | Value | Configurable |
 |-----------|-------|--------------|
 | num_views | 8 | ✓ (constructor arg) |
-| embed_dim | 1440 | Derived from backbone |
-| bev_h, bev_w | 7 | ✓ (BEV only) |
+| embed_dim | 256 | ✓ (constructor arg; backbone channels reduced to this via FeatureFusion's channel proj) |
+| image_feature_size | 8 | ✓ (per-view pooled spatial size before view fusion) |
+| bev_h, bev_w | 450, 300 | ✓ (BEV only) |
 | num_points_in_pillar | 4 | ✓ (BEV only) |
 | num_heads | 8 | ✓ (cross_attn only; BEV is single-head) |
-| pc_range | [-51.2, -51.2, -5.0, 51.2, 51.2, 3.0] | ✓ (BEV only) |
+| pc_range | [-60.0, -60.0, -5.0, 120.0, 60.0, 3.0] | ✓ (BEV only; asymmetric, forward-biased) |
 | dropout | 0.1 | ✓ (cross_attn and BEV) |
+| num_timesteps | 64 | ✓ (TrajectoryPlanner) |
+| num_signals | 2 | ✓ (TrajectoryPlanner; acceleration + curvature) |
+| num_points (planner) | 8 | ✓ (TrajectoryPlanner deformable cross-attn) |
+| egomotion_dim | 256 | ✓ (TrajectoryPlanner; matches dataset egomotion_history) |
+| offset_scale | 0.1 | ✓ (TrajectoryPlanner; bounds offsets in normalized BEV coords) |
 
 ---
 
