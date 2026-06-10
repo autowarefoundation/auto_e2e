@@ -4,6 +4,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+logger = logging.getLogger(__name__)
+
 
 class BEVViewFusion(nn.Module):
     """Fuse multi-view features into a BEV representation via learned sparse grid sampling.
