@@ -731,11 +731,20 @@ class TestTrainingLoop:
         loss.backward()
 
         assert torch.isfinite(loss), "Loss is non-finite"
-        any_grad = any(
-            p.grad is not None and p.grad.abs().max() > 0
-            for p in model.parameters() if p.requires_grad
-        )
-        assert any_grad, "No parameter received gradient from loss"
+        # Verify gradient propagates through the full network depth, not just
+        # the last layer: both the upstream Backbone and the downstream
+        # TrajectoryPlanner must each see a nonzero grad on at least one param.
+        groups = {"Backbone": False, "TrajectoryPlanner": False}
+        for name, p in model.named_parameters():
+            if not p.requires_grad or p.grad is None:
+                continue
+            if p.grad.abs().max() == 0:
+                continue
+            for prefix in groups:
+                if name.startswith(prefix + "."):
+                    groups[prefix] = True
+        for prefix, has_grad in groups.items():
+            assert has_grad, f"No parameter in {prefix} received nonzero gradient"
 
 
 # ---------------------------------------------------------------------------
