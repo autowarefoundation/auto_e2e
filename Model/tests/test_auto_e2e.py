@@ -777,7 +777,18 @@ class TestResNet50Backbone:
 
 class TestTrainingLoop:
     def test_optimizer_step_updates_parameters(self, build_mock_model, device):
-        """forward → loss → backward → optimizer.step() must move parameters."""
+        """forward → loss → backward → optimizer.step() must move parameters
+        in EACH submodule, not just somewhere in the model. A grad that only
+        reaches the last layer would still satisfy a "any parameter changed"
+        check; this verifies every major group actually trains.
+
+        The loss is constructed from trajectory + ego_hidden + future so that
+        every group has a path to the loss:
+          - Backbone: feeds image features into FeatureFusion
+          - FeatureFusion: produces BEV / fused feats
+          - TrajectoryPlanner: outputs trajectory + ego_hidden
+          - FutureState: produces future feature pyramid (consumed below)
+        """
         model = build_mock_model(num_views=8, fusion_mode="concat", device=device)
         model.train()
 
@@ -787,19 +798,27 @@ class TestTrainingLoop:
                   if p.requires_grad}
 
         visual, vis_hist, ego = make_inputs(2, 8, device)
-        traj, _, _ = model(visual, vis_hist, ego)
-        loss = traj.sum()
+        traj, ego_hidden, future = model(visual, vis_hist, ego)
+        loss = traj.sum() + ego_hidden.sum() + sum(f.sum() for f in future)
 
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
 
-        changed = [
-            n for n, p in model.named_parameters()
-            if p.requires_grad and not torch.equal(p.detach(), before[n])
-        ]
-        assert len(changed) > 0, \
-            "optimizer.step() did not update any parameters"
+        groups = ["Backbone", "FeatureFusion", "TrajectoryPlanner", "FutureState"]
+        changed_per_group = {g: False for g in groups}
+        for name, p in model.named_parameters():
+            if not p.requires_grad:
+                continue
+            if torch.equal(p.detach(), before[name]):
+                continue
+            for prefix in groups:
+                if name.startswith(prefix + "."):
+                    changed_per_group[prefix] = True
+
+        unchanged = [g for g, ok in changed_per_group.items() if not ok]
+        assert not unchanged, \
+            f"optimizer.step() did not update any parameter in: {unchanged}"
 
     def test_model_to_loss_backward_integration(self, build_mock_model, device):
         """Pipe trajectory output into TrajectoryImitationLoss and run backward."""
@@ -860,19 +879,69 @@ class TestTrajectoryDynamics:
 
     def test_deformable_clamp_handles_extreme_query(self, device):
         """Extreme query magnitudes push sampling locations outside [0, 1];
-        the clamp inside _deformable_cross_attn must keep output finite."""
+        the clamp inside _deformable_cross_attn must keep output finite AND
+        actively engage. Verified by:
+          1. With offset_scale=0.1, an extreme query produces sample_locs
+             that fall outside [0, 1] BEFORE the clamp — so the clamp is
+             the only thing keeping the result finite.
+          2. Output is finite at offset_scale=0.1 with the extreme query.
+          3. With offset_scale=0 (offsets disabled), the same extreme query
+             still produces finite output via the reference point alone.
+        """
         torch.manual_seed(0)
-        planner = TrajectoryPlanner(embed_dim=256).to(device)
-        planner.eval()
+        planner_pos = TrajectoryPlanner(embed_dim=256, offset_scale=0.1).to(device)
+        torch.manual_seed(0)
+        planner_zero = TrajectoryPlanner(embed_dim=256, offset_scale=0.0).to(device)
+        planner_pos.eval()
+        planner_zero.eval()
 
         # Build extreme query and value tensors directly to exercise the clamp.
         B, C, H, W = 1, 256, 8, 8
         query = torch.full((B, C), 1e6, device=device)
         values = torch.randn(B, C, H, W, device=device)
 
-        out = planner._deformable_cross_attn(query, values)
-        assert torch.isfinite(out).all(), \
-            "Clamp failed: output contains NaN/Inf for extreme query"
+        # Sanity: with offsets active, sample_locs WITHOUT clamp would land
+        # outside [0, 1] for this query, so the clamp is the only reason
+        # the output remains finite.
+        ref = planner_pos.reference_point(query).sigmoid()
+        offs = (planner_pos.sampling_offsets(query)
+                .reshape(B, planner_pos.num_points, 2) * planner_pos.offset_scale)
+        unclamped = ref.unsqueeze(1) + offs
+        outside = ((unclamped < 0) | (unclamped > 1)).any()
+        assert outside, \
+            "Test setup failed: extreme query did not push sample_locs out of bounds"
+
+        out_pos = planner_pos._deformable_cross_attn(query, values)
+        out_zero = planner_zero._deformable_cross_attn(query, values)
+
+        assert torch.isfinite(out_pos).all(), \
+            "Clamp failed: output contains NaN/Inf for extreme query (offset_scale=0.1)"
+        assert torch.isfinite(out_zero).all(), \
+            "Reference-point-only path produced NaN/Inf for extreme query"
+
+    def test_offset_scale_zero_vs_nonzero_differ_in_attn(self, device):
+        """With normal-magnitude queries, offset_scale=0 vs 0.1 must produce
+        different deformable attention outputs — proving offsets actually
+        contribute (and don't just get squashed by the clamp). Uses the same
+        seed for the two planners so the only meaningful difference is whether
+        offsets fan out around the reference point."""
+        torch.manual_seed(0)
+        planner_pos = TrajectoryPlanner(embed_dim=256, offset_scale=0.1).to(device)
+        torch.manual_seed(0)
+        planner_zero = TrajectoryPlanner(embed_dim=256, offset_scale=0.0).to(device)
+        planner_pos.eval()
+        planner_zero.eval()
+
+        B, C, H, W = 1, 256, 8, 8
+        query = torch.randn(B, C, device=device)
+        values = torch.randn(B, C, H, W, device=device)
+
+        out_pos = planner_pos._deformable_cross_attn(query, values)
+        out_zero = planner_zero._deformable_cross_attn(query, values)
+
+        assert torch.isfinite(out_pos).all() and torch.isfinite(out_zero).all()
+        assert not torch.allclose(out_pos, out_zero, atol=1e-5), \
+            "offset_scale=0 vs 0.1 produced identical attn output — offsets inactive"
 
 
 class TestFutureStateChunkSplit:
