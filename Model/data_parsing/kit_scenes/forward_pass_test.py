@@ -67,6 +67,7 @@ def main(
     visual_history = batch["visual_history"].to(device)       # (B, 896)
     egomotion_history = batch["egomotion_history"].to(device) # (B, 256)
     trajectory_target = batch["trajectory_target"].to(device) # (B, 128)
+    camera_params = batch["camera_params"].to(device)
     t_dataset = time.time() - t0
 
     print(f"Dataset creation: {t_dataset:.2f}s")
@@ -74,6 +75,7 @@ def main(
     print(f"visual_tiles: {tuple(visual_tiles.shape)}")
     print(f"egomotion_history: {tuple(egomotion_history.shape)}")
     print(f"trajectory_target: {tuple(trajectory_target.shape)}")
+    print(f"camera_params: {tuple(camera_params.shape)}")
 
     # --------------------
     # forward pass

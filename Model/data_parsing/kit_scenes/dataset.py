@@ -36,7 +36,7 @@ from kitscenes.dataset import KITScenesDataset as _KITScenesSDK
 from kitscenes.poses import load_ego_poses
 from torch.utils.data import Dataset
 
-from .camera import CAMERA_NAMES, load_camera_frame
+from .camera import CAMERA_NAMES, load_camera_frame, compute_camera_projection_matrices
 from .egomotion import (
     MIN_ROWS,
     _FUTURE_TIMESTEPS,
@@ -108,6 +108,7 @@ class KitScenesDataset(Dataset):
         # Per-scene caches populated during construction.
         self._scene_egomotion: dict[str, np.ndarray] = {}      # (T, 4) float32
         self._scene_positions: dict[str, np.ndarray] = {}      # (T, 2) float64
+        self._scene_camera_params: dict[str, torch.Tensor] = {}  # (7, 3, 4) float32
 
         # Build the flat sample index: list of (scene_id, frame_idx).
         # Precomputing this means __getitem__ never touches the SDK metadata.
@@ -171,6 +172,14 @@ class KitScenesDataset(Dataset):
         self._scene_egomotion[scene_id] = egomotion
         self._scene_positions[scene_id] = translations_local
 
+        # Projection matrices are frame-invariant; compute once per scene.
+        # min_idx is any valid frame; used only as fallback if calib.image_size
+        # is absent from calib.json (triggers a single image-header read).
+        self._scene_camera_params[scene_id] = compute_camera_projection_matrices(
+            loader,
+            camera_names=self.camera_names,
+        )
+
         return [(scene_id, frame_idx) for frame_idx in range(min_idx, max_idx + 1)]
 
     def __len__(self) -> int:
@@ -209,4 +218,5 @@ class KitScenesDataset(Dataset):
             trajectory_target=trajectory_target,
             scene_id=scene_id,
             frame_idx=frame_idx,
+            camera_params=self._scene_camera_params[scene_id],
         )
