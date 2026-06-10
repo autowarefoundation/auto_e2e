@@ -29,6 +29,11 @@ class MockBackboneModel(nn.Module):
     Uses adaptive pooling after each conv to guarantee correct spatial dims
     regardless of input resolution, keeping gradients flowing for
     gradient-flow tests.
+
+    NOTE: produces 4 feature maps, matching Swin/ConvNeXt backbones.
+    ResNet50 in timm exposes 5 feature stages, so this mock does NOT
+    cover that backbone — tests exercising ResNet50 must use a real
+    backbone or a separate mock.
     """
 
     def __init__(self):
