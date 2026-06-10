@@ -1,3 +1,5 @@
+import logging
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -232,6 +234,17 @@ class BEVViewFusion(nn.Module):
 
         # --- 5. Sample features from each camera via grid_sample ---
         values_spatial = values.permute(0, 1, 3, 2).reshape(B * V, C, H, W)
+
+        # Validate that the spatial dims of the input feature map match
+        # self.image_size. The reference points are normalized by
+        # self.image_size in _project_to_2d; if the actual feature map
+        # is at a different resolution, sampling locations will be off.
+        if H != self.image_size or W != self.image_size:
+            logging.warning(
+                "BEVViewFusion received feature map with spatial dims "
+                "(%d, %d) but image_size=%d. Sampling locations may be "
+                "misaligned.", H, W, self.image_size,
+            )
 
         output = torch.zeros(B, N, C, device=fused_per_view.device, dtype=dtype)
         visible_count = torch.zeros(B, N, 1, device=fused_per_view.device, dtype=dtype)
