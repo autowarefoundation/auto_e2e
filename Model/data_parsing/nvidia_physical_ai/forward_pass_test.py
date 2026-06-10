@@ -64,7 +64,7 @@ def main(dataset_root: str, clip_uuid: str, batch_size: int = 4, pretrained_back
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=0)
 
     batch = next(iter(loader))
-    visual_tiles = batch["visual_tiles"].to(device)           # (B, 8, 3, 224, 224)
+    visual_tiles = batch["visual_tiles"].to(device)           # (B, 8, 3, 256, 256)
     visual_history = batch["visual_history"].to(device)       # (B, 896)
     egomotion_history = batch["egomotion_history"].to(device) # (B, 256)
     trajectory_target = batch["trajectory_target"].to(device) # (B, 128)
