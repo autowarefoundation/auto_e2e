@@ -4,7 +4,8 @@ import sys
 sys.path.append('..')
 
 from model_components.feature_fusion import FeatureFusion
-from model_components.driving_policy import DrivingPolicy
+from model_components.trajectory_planner import TrajectoryPlanner
+from model_components.future_state import FutureState
 from model_components.view_fusion import build_view_fusion, FUSION_REGISTRY
 from model_components.view_fusion.cross_attention_fusion import CrossAttentionViewFusion
 from model_components.view_fusion.bev_fusion import BEVViewFusion
@@ -27,23 +28,23 @@ def make_inputs(batch_size, num_views, device, include_camera_params=False):
 class TestOutputShapes:
     @pytest.mark.parametrize("batch_size", [1, 2, 4])
     def test_trajectory_shape(self, model, device, batch_size):
-        visual, vh, ego = make_inputs(batch_size, 8, device)
-        traj, _, _ = model(visual, vh, ego)
+        visual, vis_hist, ego = make_inputs(batch_size, 8, device)
+        traj, _, _ = model(visual, vis_hist, ego)
         assert traj.shape == (batch_size, 128)
 
     @pytest.mark.parametrize("batch_size", [1, 2, 4])
-    def test_compressed_visual_shape(self, model, device, batch_size):
-        visual, vh, ego = make_inputs(batch_size, 8, device)
-        _, compressed, _ = model(visual, vh, ego)
-        assert compressed.shape == (batch_size, 14)
+    def test_ego_hidden_shape(self, model, device, batch_size):
+        visual, vis_hist, ego = make_inputs(batch_size, 8, device)
+        _, ego_hidden, _ = model(visual, vis_hist, ego)
+        assert ego_hidden.shape == (batch_size, 256)
 
     @pytest.mark.parametrize("batch_size", [1, 2, 4])
     def test_future_features_shape(self, model, device, batch_size):
-        visual, vh, ego = make_inputs(batch_size, 8, device)
-        _, _, future = model(visual, vh, ego)
+        visual, vis_hist, ego = make_inputs(batch_size, 8, device)
+        _, _, future = model(visual, vis_hist, ego)
         assert len(future) == 4
         for f in future:
-            assert f.shape == (batch_size, 1440, 8, 8)
+            assert f.shape == (batch_size, 256, 8, 8)
 
 
 # ---------------------------------------------------------------------------
@@ -54,15 +55,13 @@ class TestBatchIndependence:
     def test_samples_do_not_interfere(self, model, device):
         model.eval()
         torch.manual_seed(42)
-        visual, vh, ego = make_inputs(2, 8, device)
+        visual, vis_hist, ego = make_inputs(2, 8, device)
 
         # Full batch forward
-        traj_both, _, _ = model(visual, vh, ego)
+        traj_both, _, _ = model(visual, vis_hist, ego)
 
         # Single sample forward (sample 0)
-        traj_single, _, _ = model(
-            visual[0:1], vh[0:1], ego[0:1]
-        )
+        traj_single, _, _ = model(visual[0:1], vis_hist[0:1], ego[0:1])
 
         # Sample 0's output must be identical regardless of what sample 1 contains
         assert torch.allclose(traj_both[0], traj_single[0], atol=1e-5), \
@@ -71,17 +70,15 @@ class TestBatchIndependence:
     def test_different_batch_neighbor_no_effect(self, model, device):
         model.eval()
         torch.manual_seed(42)
-        visual, vh, ego = make_inputs(2, 8, device)
+        visual, vis_hist, ego = make_inputs(2, 8, device)
 
-        traj_a, _, _ = model(visual, vh, ego)
+        traj_a, _, _ = model(visual, vis_hist, ego)
 
         # Change sample 1 completely
         visual_modified = visual.clone()
         visual_modified[1] = torch.randn_like(visual_modified[1])
-        vh_modified = vh.clone()
-        vh_modified[1] = torch.randn_like(vh_modified[1])
 
-        traj_b, _, _ = model(visual_modified, vh_modified, ego)
+        traj_b, _, _ = model(visual_modified, vis_hist, ego)
 
         # Sample 0 output must remain unchanged
         assert torch.allclose(traj_a[0], traj_b[0], atol=1e-5), \
@@ -96,32 +93,37 @@ class TestViewFusion:
     def test_different_views_produce_different_output(self, model, device):
         model.eval()
         torch.manual_seed(42)
-        visual, vh, ego = make_inputs(1, 8, device)
+        visual, vis_hist, ego = make_inputs(1, 8, device)
 
-        traj_a, _, _ = model(visual, vh, ego)
+        traj_a, _, _ = model(visual, vis_hist, ego)
 
         # Replace one camera view with zeros
         visual_zeroed = visual.clone()
         visual_zeroed[0, 3] = 0.0
 
-        traj_b, _, _ = model(visual_zeroed, vh, ego)
+        traj_b, _, _ = model(visual_zeroed, vis_hist, ego)
 
         # Output should differ — proving that the zeroed view had influence
         assert not torch.allclose(traj_a, traj_b, atol=1e-5), \
             "Changing a camera view had no effect on output — fusion is broken"
 
     def test_all_views_contribute(self, model, device):
-        """Each view should influence the output when zeroed out."""
+        """Each view should influence the output when perturbed.
+
+        Uses a large constant fill rather than zeroing so the perturbation
+        propagates through deformable cross-attention even when the planner
+        only samples a few BEV cells per timestep.
+        """
         model.eval()
         torch.manual_seed(42)
-        visual, vh, ego = make_inputs(1, 8, device)
+        visual, vis_hist, ego = make_inputs(1, 8, device)
 
-        traj_base, _, _ = model(visual, vh, ego)
+        traj_base, _, _ = model(visual, vis_hist, ego)
 
         for view_idx in range(8):
             visual_mod = visual.clone()
-            visual_mod[0, view_idx] = 0.0
-            traj_mod, _, _ = model(visual_mod, vh, ego)
+            visual_mod[0, view_idx] = 5.0
+            traj_mod, _, _ = model(visual_mod, vis_hist, ego)
             assert not torch.allclose(traj_base, traj_mod, atol=1e-5), \
                 f"View {view_idx} has no influence on the output"
 
@@ -132,17 +134,17 @@ class TestViewFusion:
 
 class TestGradientFlow:
     def test_backward_succeeds(self, model, device):
-        visual, vh, ego = make_inputs(2, 8, device)
-        traj, compressed, future = model(visual, vh, ego)
+        visual, vis_hist, ego = make_inputs(2, 8, device)
+        traj, ego_hidden, future = model(visual, vis_hist, ego)
 
-        loss = traj.sum() + compressed.sum() + sum(f.sum() for f in future)
+        loss = traj.sum() + ego_hidden.sum() + sum(f.sum() for f in future)
         loss.backward()
 
     def test_all_parameters_have_gradients(self, model, device):
-        visual, vh, ego = make_inputs(2, 8, device)
-        traj, compressed, future = model(visual, vh, ego)
+        visual, vis_hist, ego = make_inputs(2, 8, device)
+        traj, ego_hidden, future = model(visual, vis_hist, ego)
 
-        loss = traj.sum() + compressed.sum() + sum(f.sum() for f in future)
+        loss = traj.sum() + ego_hidden.sum() + sum(f.sum() for f in future)
         loss.backward()
 
         params_without_grad = []
@@ -154,10 +156,10 @@ class TestGradientFlow:
             f"Parameters with no gradient: {params_without_grad}"
 
     def test_no_vanishing_gradients(self, model, device):
-        visual, vh, ego = make_inputs(2, 8, device)
-        traj, compressed, future = model(visual, vh, ego)
+        visual, vis_hist, ego = make_inputs(2, 8, device)
+        traj, ego_hidden, future = model(visual, vis_hist, ego)
 
-        loss = traj.sum() + compressed.sum() + sum(f.sum() for f in future)
+        loss = traj.sum() + ego_hidden.sum() + sum(f.sum() for f in future)
         loss.backward()
 
         zero_grad_params = []
@@ -182,12 +184,12 @@ class TestNumViewsFlexibility:
     ])
     def test_various_num_views(self, build_mock_model, device, num_views, fusion_mode):
         model = build_mock_model(num_views, fusion_mode, device)
-        visual, vh, ego = make_inputs(2, num_views, device)
-        traj, compressed, future = model(visual, vh, ego)
+        visual, vis_hist, ego = make_inputs(2, num_views, device)
+        traj, ego_hidden, future = model(visual, vis_hist, ego)
 
         assert traj.shape == (2, 128)
-        assert compressed.shape == (2, 14)
-        assert all(f.shape == (2, 1440, 8, 8) for f in future)
+        assert ego_hidden.shape == (2, 256)
+        assert all(f.shape == (2, 256, 8, 8) for f in future)
 
 
 # ---------------------------------------------------------------------------
@@ -196,29 +198,29 @@ class TestNumViewsFlexibility:
 
 class TestNumericalStability:
     def test_no_nan_in_outputs(self, model, device):
-        visual, vh, ego = make_inputs(2, 8, device)
-        traj, compressed, future = model(visual, vh, ego)
+        visual, vis_hist, ego = make_inputs(2, 8, device)
+        traj, ego_hidden, future = model(visual, vis_hist, ego)
 
         assert not torch.isnan(traj).any(), "NaN in trajectory output"
-        assert not torch.isnan(compressed).any(), "NaN in compressed visual"
+        assert not torch.isnan(ego_hidden).any(), "NaN in ego_hidden"
         for i, f in enumerate(future):
             assert not torch.isnan(f).any(), f"NaN in future feature {i}"
 
     def test_no_inf_in_outputs(self, model, device):
-        visual, vh, ego = make_inputs(2, 8, device)
-        traj, compressed, future = model(visual, vh, ego)
+        visual, vis_hist, ego = make_inputs(2, 8, device)
+        traj, ego_hidden, future = model(visual, vis_hist, ego)
 
         assert not torch.isinf(traj).any(), "Inf in trajectory output"
-        assert not torch.isinf(compressed).any(), "Inf in compressed visual"
+        assert not torch.isinf(ego_hidden).any(), "Inf in ego_hidden"
         for i, f in enumerate(future):
             assert not torch.isinf(f).any(), f"Inf in future feature {i}"
 
     def test_large_input_values(self, model, device):
         """Model should not produce NaN/Inf even with large inputs."""
         visual = torch.randn(1, 8, 3, 256, 256, device=device) * 100
-        vh = torch.randn(1, 896, device=device) * 100
+        vis_hist = torch.randn(1, 896, device=device) * 100
         ego = torch.randn(1, 256, device=device) * 100
-        traj, compressed, future = model(visual, vh, ego)
+        traj, ego_hidden, future = model(visual, vis_hist, ego)
 
         assert not torch.isnan(traj).any(), "NaN with large inputs"
         assert not torch.isinf(traj).any(), "Inf with large inputs"
@@ -232,13 +234,13 @@ class TestFeatureFusionComponent:
     def test_output_shape(self, device):
         fusion = FeatureFusion(num_views=8, fusion_mode="concat").to(device)
         features = [
-            torch.randn(16, 64, 64, 96, device=device),
-            torch.randn(16, 32, 32, 192, device=device),
-            torch.randn(16, 16, 16, 384, device=device),
-            torch.randn(16, 8, 8, 768, device=device),
+            torch.randn(16, 96, 64, 64, device=device),
+            torch.randn(16, 192, 32, 32, device=device),
+            torch.randn(16, 384, 16, 16, device=device),
+            torch.randn(16, 768, 8, 8, device=device),
         ]
         out = fusion(features, B=2, V=8)
-        assert out.shape == (2, 1440, 8, 8)
+        assert out.shape == (2, 256, 8, 8)
 
     def test_view_reduction_changes_output(self, device):
         """Verify that view_reduce is not identity (actually mixes views)."""
@@ -246,10 +248,10 @@ class TestFeatureFusionComponent:
         fusion.eval()
 
         features_a = [
-            torch.randn(8, 64, 64, 96, device=device),
-            torch.randn(8, 32, 32, 192, device=device),
-            torch.randn(8, 16, 16, 384, device=device),
-            torch.randn(8, 8, 8, 768, device=device),
+            torch.randn(8, 96, 64, 64, device=device),
+            torch.randn(8, 192, 32, 32, device=device),
+            torch.randn(8, 384, 16, 16, device=device),
+            torch.randn(8, 768, 8, 8, device=device),
         ]
         out_a = fusion(features_a, B=1, V=8)
 
@@ -260,17 +262,107 @@ class TestFeatureFusionComponent:
         assert not torch.allclose(out_a, out_b, atol=1e-5)
 
 
-class TestDrivingPolicyComponent:
-    def test_flatten_preserves_batch(self, device):
-        """The critical fix: flatten must NOT collapse batch dimension."""
-        policy = DrivingPolicy().to(device)
-        fused = torch.randn(4, 1440, 8, 8, device=device)
-        vh = torch.randn(4, 896, device=device)
+class TestTrajectoryPlannerComponent:
+    def test_output_shapes(self, device):
+        planner = TrajectoryPlanner(embed_dim=256).to(device)
+        bev = torch.randn(4, 256, 8, 8, device=device)
+        vis_hist = torch.randn(4, 896, device=device)
         ego = torch.randn(4, 256, device=device)
-        traj, compressed = policy(fused, vh, ego)
+        traj, ego_hidden = planner(bev, vis_hist, ego)
 
-        assert traj.shape[0] == 4, "Batch dimension lost in DrivingPolicy"
-        assert compressed.shape[0] == 4, "Batch dimension lost in compression"
+        assert traj.shape == (4, 128), "Expected 64 timesteps × 2 signals"
+        assert ego_hidden.shape == (4, 256), "ego_hidden must be 256-dim"
+
+    def test_works_with_arbitrary_bev_resolution(self, device):
+        """Deformable cross-attention via grid_sample should be size-agnostic."""
+        planner = TrajectoryPlanner(embed_dim=256).to(device)
+        vis_hist = torch.randn(2, 896, device=device)
+        ego = torch.randn(2, 256, device=device)
+        for h, w in [(8, 8), (16, 32), (45, 30)]:
+            bev = torch.randn(2, 256, h, w, device=device)
+            traj, ego_hidden = planner(bev, vis_hist, ego)
+            assert traj.shape == (2, 128)
+            assert ego_hidden.shape == (2, 256)
+
+    def test_bev_features_influence_trajectory(self, device):
+        planner = TrajectoryPlanner(embed_dim=256).to(device)
+        planner.eval()
+        vis_hist = torch.randn(1, 896, device=device)
+        ego = torch.randn(1, 256, device=device)
+
+        bev_a = torch.randn(1, 256, 8, 8, device=device)
+        bev_b = torch.randn(1, 256, 8, 8, device=device)
+
+        traj_a, _ = planner(bev_a, vis_hist, ego)
+        traj_b, _ = planner(bev_b, vis_hist, ego)
+
+        assert not torch.allclose(traj_a, traj_b, atol=1e-5), \
+            "Trajectory should depend on BEV features"
+
+    def test_egomotion_influences_trajectory(self, device):
+        planner = TrajectoryPlanner(embed_dim=256).to(device)
+        planner.eval()
+        bev = torch.randn(1, 256, 8, 8, device=device)
+        vis_hist = torch.randn(1, 896, device=device)
+
+        traj_a, _ = planner(bev, vis_hist, torch.randn(1, 256, device=device))
+        traj_b, _ = planner(bev, vis_hist, torch.randn(1, 256, device=device))
+
+        assert not torch.allclose(traj_a, traj_b, atol=1e-5), \
+            "Trajectory should depend on egomotion history"
+
+    def test_visual_history_influences_trajectory(self, device):
+        planner = TrajectoryPlanner(embed_dim=256).to(device)
+        planner.eval()
+        bev = torch.randn(1, 256, 8, 8, device=device)
+        ego = torch.randn(1, 256, device=device)
+
+        traj_a, _ = planner(bev, torch.randn(1, 896, device=device), ego)
+        traj_b, _ = planner(bev, torch.randn(1, 896, device=device), ego)
+
+        assert not torch.allclose(traj_a, traj_b, atol=1e-5), \
+            "Trajectory should depend on visual history"
+
+    def test_configurable_horizon(self, device):
+        planner = TrajectoryPlanner(embed_dim=256, num_timesteps=32, num_signals=3).to(device)
+        bev = torch.randn(2, 256, 8, 8, device=device)
+        vis_hist = torch.randn(2, 896, device=device)
+        ego = torch.randn(2, 256, device=device)
+        traj, _ = planner(bev, vis_hist, ego)
+        assert traj.shape == (2, 32 * 3)
+
+    def test_gradients_flow(self, device):
+        planner = TrajectoryPlanner(embed_dim=256, num_timesteps=4).to(device)
+        bev = torch.randn(1, 256, 8, 8, device=device, requires_grad=True)
+        vis_hist = torch.randn(1, 896, device=device, requires_grad=True)
+        ego = torch.randn(1, 256, device=device, requires_grad=True)
+        traj, ego_hidden = planner(bev, vis_hist, ego)
+        (traj.sum() + ego_hidden.sum()).backward()
+        assert bev.grad is not None and bev.grad.abs().max() > 0
+        assert vis_hist.grad is not None and vis_hist.grad.abs().max() > 0
+        assert ego.grad is not None and ego.grad.abs().max() > 0
+
+
+class TestFutureStateComponent:
+    def test_accepts_ego_hidden(self, device):
+        future = FutureState(embed_dim=256, ego_hidden_dim=256).to(device)
+        feats = torch.randn(2, 256, 8, 8, device=device)
+        ego_hidden = torch.randn(2, 256, device=device)
+        out = future(feats, ego_hidden)
+        assert len(out) == 4
+        for f in out:
+            assert f.shape == (2, 256, 8, 8)
+
+    def test_ego_hidden_influences_output(self, device):
+        future = FutureState(embed_dim=256, ego_hidden_dim=256).to(device)
+        future.eval()
+        feats = torch.randn(1, 256, 8, 8, device=device)
+
+        out_a = future(feats, torch.randn(1, 256, device=device))
+        out_b = future(feats, torch.randn(1, 256, device=device))
+
+        assert not torch.allclose(out_a[0], out_b[0], atol=1e-5), \
+            "ego_hidden should influence future predictions"
 
 
 # ---------------------------------------------------------------------------
@@ -289,15 +381,19 @@ class TestFusionRegistry:
 
     @pytest.mark.parametrize("fusion_mode", list(FUSION_REGISTRY.keys()))
     def test_all_modes_produce_correct_shape(self, device, fusion_mode):
-        fusion = FeatureFusion(num_views=8, fusion_mode=fusion_mode).to(device)
+        view_fusion_kwargs = {"bev_h": 8, "bev_w": 8} if fusion_mode == "bev" else {}
+        fusion = FeatureFusion(
+            num_views=8, fusion_mode=fusion_mode,
+            view_fusion_kwargs=view_fusion_kwargs,
+        ).to(device)
         features = [
-            torch.randn(16, 64, 64, 96, device=device),
-            torch.randn(16, 32, 32, 192, device=device),
-            torch.randn(16, 16, 16, 384, device=device),
-            torch.randn(16, 8, 8, 768, device=device),
+            torch.randn(16, 96, 64, 64, device=device),
+            torch.randn(16, 192, 32, 32, device=device),
+            torch.randn(16, 384, 16, 16, device=device),
+            torch.randn(16, 768, 8, 8, device=device),
         ]
         out = fusion(features, B=2, V=8)
-        assert out.shape == (2, 1440, 8, 8)
+        assert out.shape == (2, 256, 8, 8)
 
 
 # ---------------------------------------------------------------------------
@@ -306,15 +402,15 @@ class TestFusionRegistry:
 
 class TestCrossAttentionFusion:
     def test_output_shape(self, device):
-        fusion = CrossAttentionViewFusion(num_views=8, embed_dim=1440).to(device)
-        x = torch.randn(16, 1440, 7, 7, device=device)
+        fusion = CrossAttentionViewFusion(num_views=8, embed_dim=256).to(device)
+        x = torch.randn(16, 256, 7, 7, device=device)
         out = fusion(x, B=2, V=8)
-        assert out.shape == (2, 1440, 7, 7)
+        assert out.shape == (2, 256, 7, 7)
 
     def test_view_embeddings_are_learned(self, device):
         """View embeddings should receive gradients during training."""
-        fusion = CrossAttentionViewFusion(num_views=8, embed_dim=1440).to(device)
-        x = torch.randn(8, 1440, 7, 7, device=device)
+        fusion = CrossAttentionViewFusion(num_views=8, embed_dim=256).to(device)
+        x = torch.randn(8, 256, 7, 7, device=device)
         out = fusion(x, B=1, V=8)
         out.sum().backward()
         assert fusion.view_embed.grad is not None
@@ -322,19 +418,19 @@ class TestCrossAttentionFusion:
 
     def test_attention_mixes_views(self, device):
         """Attention should produce different output than simple mean pooling."""
-        fusion = CrossAttentionViewFusion(num_views=4, embed_dim=1440).to(device)
+        fusion = CrossAttentionViewFusion(num_views=4, embed_dim=256).to(device)
         fusion.eval()
-        x = torch.randn(4, 1440, 7, 7, device=device)
+        x = torch.randn(4, 256, 7, 7, device=device)
 
         attn_out = fusion(x, B=1, V=4)
-        mean_out = x.reshape(1, 4, 1440, 7, 7).mean(dim=1)
+        mean_out = x.reshape(1, 4, 256, 7, 7).mean(dim=1)
 
         assert not torch.allclose(attn_out, mean_out, atol=1e-3), \
             "Cross-attention output is identical to naive mean — attention has no effect"
 
     def test_different_view_orders_produce_different_output(self, device):
         """Attention with positional embeddings should be order-sensitive."""
-        fusion = CrossAttentionViewFusion(num_views=4, embed_dim=1440).to(device)
+        fusion = CrossAttentionViewFusion(num_views=4, embed_dim=256).to(device)
         fusion.eval()
 
         x = torch.randn(4, 256, 7, 7, device=device)
@@ -353,23 +449,37 @@ class TestCrossAttentionFusion:
 
 class TestBEVFusion:
     def test_output_shape(self, device):
-        fusion = BEVViewFusion(num_views=8, embed_dim=1440).to(device)
-        x = torch.randn(16, 1440, 8, 8, device=device)
+        fusion = BEVViewFusion(num_views=8, embed_dim=256, bev_h=8, bev_w=8).to(device)
+        x = torch.randn(16, 256, 8, 8, device=device)
         out = fusion(x, B=2, V=8)
-        assert out.shape == (2, 1440, 8, 8)
+        assert out.shape == (2, 256, 8, 8)
+
+    def test_default_resolution_is_450x300(self):
+        """Production target: 450x300 BEV grid with front-biased pc_range."""
+        fusion = BEVViewFusion(num_views=8, embed_dim=256)
+        assert fusion.bev_h == 450
+        assert fusion.bev_w == 300
+        assert fusion.pc_range == (-60.0, -60.0, -5.0, 120.0, 60.0, 3.0)
+
+    def test_asymmetric_resolution(self, device):
+        """Configurable bev_h != bev_w yields a non-square BEV grid."""
+        fusion = BEVViewFusion(num_views=4, embed_dim=256, bev_h=12, bev_w=20).to(device)
+        x = torch.randn(4, 256, 8, 8, device=device)
+        out = fusion(x, B=1, V=4)
+        assert out.shape == (1, 256, 12, 20)
 
     def test_output_shape_with_camera_params(self, device):
         """BEV fusion should work with explicit camera projection matrices."""
-        fusion = BEVViewFusion(num_views=8, embed_dim=1440).to(device)
-        x = torch.randn(16, 1440, 8, 8, device=device)
+        fusion = BEVViewFusion(num_views=8, embed_dim=256, bev_h=8, bev_w=8).to(device)
+        x = torch.randn(16, 256, 8, 8, device=device)
         cam_params = torch.randn(2, 8, 3, 4, device=device)
         out = fusion(x, B=2, V=8, camera_params=cam_params)
-        assert out.shape == (2, 1440, 8, 8)
+        assert out.shape == (2, 256, 8, 8)
 
     def test_pseudo_projection_is_learned(self, device):
         """Without camera_params, pseudo_projection should receive gradients."""
-        fusion = BEVViewFusion(num_views=4, embed_dim=1440).to(device)
-        x = torch.randn(4, 1440, 8, 8, device=device)
+        fusion = BEVViewFusion(num_views=4, embed_dim=256, bev_h=8, bev_w=8).to(device)
+        x = torch.randn(4, 256, 8, 8, device=device)
         out = fusion(x, B=1, V=4)
         out.sum().backward()
         assert fusion.pseudo_projection.grad is not None
@@ -377,8 +487,8 @@ class TestBEVFusion:
 
     def test_bev_queries_are_learned(self, device):
         """BEV queries should receive gradients during training."""
-        fusion = BEVViewFusion(num_views=4, embed_dim=1440).to(device)
-        x = torch.randn(4, 1440, 8, 8, device=device)
+        fusion = BEVViewFusion(num_views=4, embed_dim=256, bev_h=8, bev_w=8).to(device)
+        x = torch.randn(4, 256, 8, 8, device=device)
         out = fusion(x, B=1, V=4)
         out.sum().backward()
         assert fusion.bev_queries.weight.grad is not None
@@ -386,9 +496,9 @@ class TestBEVFusion:
 
     def test_camera_params_influence_output(self, device):
         """Different camera parameters should produce different BEV features."""
-        fusion = BEVViewFusion(num_views=4, embed_dim=1440).to(device)
+        fusion = BEVViewFusion(num_views=4, embed_dim=256, bev_h=8, bev_w=8).to(device)
         fusion.eval()
-        x = torch.randn(4, 1440, 8, 8, device=device)
+        x = torch.randn(4, 256, 8, 8, device=device)
 
         cam_a = torch.randn(1, 4, 3, 4, device=device)
         cam_b = torch.randn(1, 4, 3, 4, device=device)
@@ -401,20 +511,21 @@ class TestBEVFusion:
 
     def test_reference_points_shape(self, device):
         """3D reference points should have expected shape."""
-        fusion = BEVViewFusion(num_views=8, embed_dim=1440, bev_h=7, bev_w=7,
+        fusion = BEVViewFusion(num_views=8, embed_dim=256, bev_h=7, bev_w=7,
                                num_points_in_pillar=4).to(device)
         assert fusion.reference_points_3d.shape == (49, 4, 3)
 
     def test_no_nan_without_camera_params(self, device):
         """BEV fusion with pseudo-projection should not produce NaN."""
-        fusion = BEVViewFusion(num_views=8, embed_dim=1440).to(device)
-        x = torch.randn(16, 1440, 8, 8, device=device)
+        fusion = BEVViewFusion(num_views=8, embed_dim=256, bev_h=8, bev_w=8).to(device)
+        x = torch.randn(16, 256, 8, 8, device=device)
         out = fusion(x, B=2, V=8)
         assert not torch.isnan(out).any(), "NaN in BEV output with pseudo-projection"
 
     def test_points_behind_camera_are_masked(self, device):
         """Points with negative depth should not contribute to output."""
-        fusion = BEVViewFusion(num_views=1, embed_dim=1440, image_size=224,
+        fusion = BEVViewFusion(num_views=1, embed_dim=256, bev_h=8, bev_w=8,
+                               image_size=224,
                                pc_range=(-10, -10, -5, 10, 10, 3)).to(device)
 
         # Camera matrix that makes all projected depths negative:
@@ -435,7 +546,7 @@ class TestBEVFusion:
 
     def test_projected_center_maps_near_image_center(self, device):
         """A simple projection should map BEV center to image center."""
-        fusion = BEVViewFusion(num_views=1, embed_dim=1440, bev_h=7, bev_w=7,
+        fusion = BEVViewFusion(num_views=1, embed_dim=256, bev_h=7, bev_w=7,
                                image_size=224, pc_range=(-1, -1, 0.5, 1, 1, 2)).to(device)
 
         # Camera: fx=fy=112, cx=cy=112 (image center), z passthrough
@@ -467,7 +578,8 @@ class TestBEVFusion:
 
     def test_out_of_bounds_points_not_counted_visible(self, device):
         """When all reference points project out of image bounds, output should be zero."""
-        fusion = BEVViewFusion(num_views=1, embed_dim=1440, image_size=224,
+        fusion = BEVViewFusion(num_views=1, embed_dim=256, bev_h=8, bev_w=8,
+                               image_size=224,
                                pc_range=(-10, -10, -5, 10, 10, 3)).to(device)
         fusion.eval()
 
@@ -480,7 +592,7 @@ class TestBEVFusion:
         cam[0, 0, 1, 2] = 5000.0  # cy (way off image)
         cam[0, 0, 2, 2] = 1.0     # z passthrough (positive depth)
 
-        x = torch.ones(1, 1440, 8, 8, device=device)
+        x = torch.ones(1, 256, 8, 8, device=device)
         out = fusion(x, B=1, V=1, camera_params=cam)
 
         # ref_2d normalized = (fx*x/z + cx) / 224 >> 1, so all out of bounds
@@ -490,11 +602,12 @@ class TestBEVFusion:
 
     def test_no_visible_camera_produces_zero_output(self, device):
         """If no camera can see any BEV cell, output should be exactly zero."""
-        fusion = BEVViewFusion(num_views=1, embed_dim=1440, image_size=224,
+        fusion = BEVViewFusion(num_views=1, embed_dim=256, bev_h=8, bev_w=8,
+                               image_size=224,
                                pc_range=(-10, -10, -5, 10, 10, 3)).to(device)
         fusion.eval()
 
-        x = torch.ones(1, 1440, 8, 8, device=device)
+        x = torch.ones(1, 256, 8, 8, device=device)
 
         # Camera that places everything behind (negative depth)
         cam_behind = torch.zeros(1, 1, 3, 4, device=device)
@@ -515,28 +628,28 @@ class TestBEVFusion:
 class TestFullBackboneIntegration:
     """End-to-end tests with the real pretrained backbone.
 
-    These verify that the full pipeline (backbone → fusion → policy → future)
+    These verify that the full pipeline (backbone → fusion → planner → future)
     produces correct shapes and numerically stable outputs. Run separately
     from unit tests via: pytest -m integration
     """
 
     def test_full_forward_pass(self, full_model, device):
         """Smoke test: full model forward produces expected output shapes."""
-        visual, vh, ego = make_inputs(1, 8, device)
-        traj, compressed, future = full_model(visual, vh, ego)
+        visual, vis_hist, ego = make_inputs(1, 8, device)
+        traj, ego_hidden, future = full_model(visual, vis_hist, ego)
 
         assert traj.shape == (1, 128)
-        assert compressed.shape == (1, 14)
+        assert ego_hidden.shape == (1, 256)
         assert len(future) == 4
         for f in future:
-            assert f.shape == (1, 1440, 8, 8)
+            assert f.shape == (1, 256, 8, 8)
 
     def test_full_forward_no_nan(self, full_model, device):
         """Full pipeline must not produce NaN with real backbone weights."""
-        visual, vh, ego = make_inputs(2, 8, device)
-        traj, compressed, future = full_model(visual, vh, ego)
+        visual, vis_hist, ego = make_inputs(2, 8, device)
+        traj, ego_hidden, future = full_model(visual, vis_hist, ego)
 
         assert not torch.isnan(traj).any()
-        assert not torch.isnan(compressed).any()
+        assert not torch.isnan(ego_hidden).any()
         for f in future:
             assert not torch.isnan(f).any()

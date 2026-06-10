@@ -48,9 +48,9 @@ class BEVViewFusion(nn.Module):
         - UniAD (Hu et al., CVPR 2023): uses BEVFormer as BEV encoder
     """
 
-    def __init__(self, num_views=8, embed_dim=256, bev_h=8, bev_w=8,
+    def __init__(self, num_views=8, embed_dim=256, bev_h=450, bev_w=300,
                  num_points_in_pillar=4, dropout=0.1,
-                 pc_range=(-51.2, -51.2, -5.0, 51.2, 51.2, 3.0),
+                 pc_range=(-60.0, -60.0, -5.0, 120.0, 60.0, 3.0),
                  image_size=256):
         super().__init__()
 

@@ -4,7 +4,10 @@ The real backbone (SwinV2/ConvNeXt) dominates test time (~80% per forward pass)
 but is never the subject under test — it is pretrained and frozen. We replace it
 with a lightweight stub that produces tensors of the correct shape, reducing
 per-forward cost from ~50ms to <1ms while still exercising View Fusion,
-DrivingPolicy, and FutureState end-to-end.
+TrajectoryPlanner, and FutureState end-to-end.
+
+Tests use a small BEV grid (8x8) for the ``bev`` fusion mode; the production
+default (450x300) is verified separately via configuration tests.
 
 Full-backbone integration tests are available via the 'integration' marker.
 """
@@ -15,13 +18,13 @@ import torch.nn as nn
 
 
 class MockBackboneModel(nn.Module):
-    """Minimal Conv backbone producing 4 feature maps matching SwinV2 output shapes.
+    """Minimal Conv backbone producing 4 feature maps in channels-first format.
 
-    SwinV2 Tiny at 256x256 input produces (channels-last):
-      Stage 0: [B*V, 64, 64, 96]
-      Stage 1: [B*V, 32, 32, 192]
-      Stage 2: [B*V, 16, 16, 384]
-      Stage 3: [B*V,  8,  8, 768]
+    Matches the output of Backbone.forward() which returns channels-first:
+      Stage 0: [B*V, 96, 64, 64]
+      Stage 1: [B*V, 192, 32, 32]
+      Stage 2: [B*V, 384, 16, 16]
+      Stage 3: [B*V, 768,  8,  8]
 
     Uses adaptive pooling after each conv to guarantee correct spatial dims
     regardless of input resolution, keeping gradients flowing for
@@ -53,19 +56,13 @@ class MockBackboneModel(nn.Module):
         s2 = self.stage2(s1)  # [B*V, 384, 16, 16]
         s3 = self.stage3(s2)  # [B*V, 768, 8, 8]
 
-        # Convert to channels-last to match SwinV2 output format
-        return [
-            s0.permute(0, 2, 3, 1),  # [B*V, 64, 64, 96]
-            s1.permute(0, 2, 3, 1),  # [B*V, 32, 32, 192]
-            s2.permute(0, 2, 3, 1),  # [B*V, 16, 16, 384]
-            s3.permute(0, 2, 3, 1),  # [B*V,  8,  8, 768]
-        ]
+        return [s0, s1, s2, s3]
 
 
 class MockBackbone(nn.Module):
     """Drop-in replacement for model_components.backbone.Backbone."""
 
-    def __init__(self, **kwargs):
+    def __init__(self, backbone="swin_v2_tiny", is_pretrained=True, **kwargs):
         super().__init__()
         self.backbone = MockBackboneModel()
         self.backbone_channels = 1440
@@ -74,17 +71,27 @@ class MockBackbone(nn.Module):
         return self.backbone(image)
 
 
-def _build_model_with_mock_backbone(num_views, fusion_mode, device):
+def _build_model_with_mock_backbone(num_views, fusion_mode, device,
+                                    num_timesteps=64):
     """Construct AutoE2E with the mock backbone injected.
 
     Patches Backbone at the module level during construction to avoid
-    loading pretrained weights entirely.
+    loading pretrained weights entirely. Forces BEV fusion to a small
+    8x8 grid so tests stay fast and memory-light; the production default
+    (450x300) is exercised by dedicated configuration tests.
     """
     from unittest.mock import patch
     from model_components.auto_e2e import AutoE2E
 
+    view_fusion_kwargs = {"bev_h": 8, "bev_w": 8} if fusion_mode == "bev" else None
+
     with patch('model_components.auto_e2e.Backbone', MockBackbone):
-        model = AutoE2E(num_views=num_views, fusion_mode=fusion_mode)
+        model = AutoE2E(
+            num_views=num_views,
+            fusion_mode=fusion_mode,
+            view_fusion_kwargs=view_fusion_kwargs,
+            num_timesteps=num_timesteps,
+        )
     return model.to(device)
 
 
@@ -127,8 +134,12 @@ def full_model(request, device):
     """Full model with real backbone — use only for integration tests."""
     from model_components.auto_e2e import AutoE2E
 
+    view_fusion_kwargs = {"bev_h": 8, "bev_w": 8} if request.param == "bev" else None
     try:
-        model = AutoE2E(num_views=8, fusion_mode=request.param)
+        model = AutoE2E(
+            num_views=8, fusion_mode=request.param,
+            view_fusion_kwargs=view_fusion_kwargs,
+        )
     except (FileNotFoundError, OSError) as e:
         pytest.skip(f"Pretrained weights unavailable: {e}")
     return model.to(device)
