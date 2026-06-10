@@ -73,20 +73,21 @@ def main(dataset_root: str, clip_uuid: str, batch_size: int = 4, pretrained_back
     print(f"Dataset creation for {len(clip_uuids)} clips: {t_dataset:.2f}s")
 
     print(f"visual_tiles: {tuple(visual_tiles.shape)}")
+    print(f"visual_history: {tuple(visual_history.shape)}")
     print(f"egomotion_history: {tuple(egomotion_history.shape)}")
     print(f"trajectory_target: {tuple(trajectory_target.shape)}")
 
     # --------------------
     # forward pass
-    model = AutoE2E(pretrained_backbone=pretrained_backbone).to(device)
+    model = AutoE2E(is_pretrained=pretrained_backbone).to(device)
 
     t0 = time.time()
-    trajectory_, compressed_, future_ = model(visual_tiles, visual_history, egomotion_history)
+    trajectory_, ego_hidden_, future_ = model(visual_tiles, visual_history, egomotion_history)
     t_forward = time.time() - t0
     print(f"Forward pass: {t_forward:.2f}s")
 
     print(f"trajectory output: {tuple(trajectory_.shape)}")
-    print(f"compressed visual feature output: {tuple(compressed_.shape)}")
+    print(f"ego_hidden output: {tuple(ego_hidden_.shape)}")
     print(f"future visual features: {[tuple(f.shape) for f in future_]}")
     # --------------------
 

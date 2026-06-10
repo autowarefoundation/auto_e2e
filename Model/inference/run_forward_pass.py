@@ -15,11 +15,11 @@ def run_forward_pass(backbone, fusion_mode, device, embed_dim=256, batch_size=2,
     # Visual Scene Input: [batch, num_views, channels, height, width]
     visual_tiles = torch.randn(batch_size, num_views, 3, 256, 256).to(device)
 
+    # Visual History Input: [batch, 896] — 64 frames × 14-dim compressed scene memory
+    visual_history = torch.randn(batch_size, 896).to(device)
+
     # Egomotion History Input: [batch, 256]
     egomotion_history = torch.randn(batch_size, 256).to(device)
-
-    # Visual Scene History: [batch, 896]
-    visual_history = torch.randn(batch_size, 896).to(device)
 
     # Camera parameters: [batch, num_views, 3, 4] projection matrices
     # Only used by BEV fusion; None triggers learnable pseudo-projection
@@ -28,12 +28,12 @@ def run_forward_pass(backbone, fusion_mode, device, embed_dim=256, batch_size=2,
         camera_params = torch.randn(batch_size, num_views, 3, 4).to(device)
 
     # Run inference - train mode means all layers are activated
-    trajectory, compressed_visual_feature_vector, future_visual_features = \
-        model(visual_tiles, visual_history, egomotion_history, 
+    trajectory, ego_hidden, future_visual_features = \
+        model(visual_tiles, visual_history, egomotion_history,
               camera_params=camera_params, mode="train")
 
     print(f"Trajectory Prediction:              {trajectory.shape}")
-    print(f"Compressed Visual Feature Vector:   {compressed_visual_feature_vector.shape}")
+    print(f"Ego Hidden State:                   {ego_hidden.shape}")
     print("Future Visual Features Prediction:")
     for i, f in enumerate(future_visual_features):
         print(f"  t+{(i+1)*1.6:.1f}s: {f.shape}")
