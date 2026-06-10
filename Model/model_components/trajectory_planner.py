@@ -28,6 +28,8 @@ class TrajectoryPlanner(nn.Module):
         self.num_timesteps = num_timesteps
         self.num_signals = num_signals
         self.num_points = num_points
+        self.egomotion_input_dim = egomotion_input_dim
+        self.visual_history_dim = visual_history_dim
         # offset_scale bounds the per-point sampling offset around the predicted
         # reference point in normalized BEV coordinates. The default 0.1 means
         # offsets reach up to 10% of the BEV grid extent in each direction. The
@@ -96,6 +98,16 @@ class TrajectoryPlanner(nn.Module):
             trajectory: [B, num_timesteps * num_signals]
             ego_hidden: [B, embed_dim] — final GRU hidden state.
         """
+        if visual_history.shape[-1] != self.visual_history_dim:
+            raise ValueError(
+                f"visual_history last dim must be {self.visual_history_dim}, "
+                f"got tensor of shape {tuple(visual_history.shape)}."
+            )
+        if egomotion_history.shape[-1] != self.egomotion_input_dim:
+            raise ValueError(
+                f"egomotion_history last dim must be {self.egomotion_input_dim}, "
+                f"got tensor of shape {tuple(egomotion_history.shape)}."
+            )
 
         # Initialize GRU hidden state from ego state + visual history: [1, B, C]
         h = (self.ego_state_proj(egomotion_history)

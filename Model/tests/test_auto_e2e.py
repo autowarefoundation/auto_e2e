@@ -344,6 +344,22 @@ class TestTrajectoryPlannerComponent:
         assert vis_hist.grad is not None and vis_hist.grad.abs().max() > 0
         assert ego.grad is not None and ego.grad.abs().max() > 0
 
+    def test_wrong_visual_history_dim_raises(self, device):
+        planner = TrajectoryPlanner(embed_dim=256, visual_history_dim=896).to(device)
+        bev = torch.randn(1, 256, 8, 8, device=device)
+        bad_vis_hist = torch.randn(1, 1024, device=device)  # wrong last dim
+        ego = torch.randn(1, 256, device=device)
+        with pytest.raises(ValueError, match="visual_history last dim must be 896"):
+            planner(bev, bad_vis_hist, ego)
+
+    def test_wrong_egomotion_dim_raises(self, device):
+        planner = TrajectoryPlanner(embed_dim=256, egomotion_input_dim=256).to(device)
+        bev = torch.randn(1, 256, 8, 8, device=device)
+        vis_hist = torch.randn(1, 896, device=device)
+        bad_ego = torch.randn(1, 128, device=device)  # wrong last dim
+        with pytest.raises(ValueError, match="egomotion_history last dim must be 256"):
+            planner(bev, vis_hist, bad_ego)
+
 
 class TestFutureStateComponent:
     def test_accepts_ego_hidden(self, device):
