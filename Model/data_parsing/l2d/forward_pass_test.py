@@ -32,8 +32,6 @@ from data_parsing.l2d.egomotion import (  # noqa: E402
     EGOMOTION_DIM,
     MIN_FRAMES,
     TRAJECTORY_DIM,
-    _HISTORY_TIMESTEPS,
-    _NUM_HISTORY_SIGNALS,
     extract_egomotion,
 )
 from model_components.auto_e2e import AutoE2E  # noqa: E402

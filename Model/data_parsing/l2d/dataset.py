@@ -26,7 +26,7 @@ from torch.utils.data import Dataset
 
 import numpy as np
 
-from .camera import CAMERA_NAMES, NUM_VIEWS
+from .camera import CAMERA_NAMES
 from .egomotion import (
     MIN_FRAMES,
     _FUTURE_TIMESTEPS,
