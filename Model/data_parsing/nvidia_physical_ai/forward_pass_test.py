@@ -65,6 +65,7 @@ def main(dataset_root: str, clip_uuid: str, batch_size: int = 4, pretrained_back
 
     batch = next(iter(loader))
     visual_tiles = batch["visual_tiles"].to(device)           # (B, 8, 3, 224, 224)
+    visual_history = batch["visual_history"].to(device)       # (B, 896)
     egomotion_history = batch["egomotion_history"].to(device) # (B, 256)
     trajectory_target = batch["trajectory_target"].to(device) # (B, 128)
     t_dataset = time.time() - t0
@@ -72,6 +73,7 @@ def main(dataset_root: str, clip_uuid: str, batch_size: int = 4, pretrained_back
     print(f"Dataset creation for {len(clip_uuids)} clips: {t_dataset:.2f}s")
 
     print(f"visual_tiles: {tuple(visual_tiles.shape)}")
+    print(f"visual_history: {tuple(visual_history.shape)}")
     print(f"egomotion_history: {tuple(egomotion_history.shape)}")
     print(f"trajectory_target: {tuple(trajectory_target.shape)}")
 
@@ -80,7 +82,7 @@ def main(dataset_root: str, clip_uuid: str, batch_size: int = 4, pretrained_back
     model = AutoE2E(is_pretrained=pretrained_backbone).to(device)
 
     t0 = time.time()
-    trajectory_, ego_hidden_, future_ = model(visual_tiles, egomotion_history)
+    trajectory_, ego_hidden_, future_ = model(visual_tiles, visual_history, egomotion_history)
     t_forward = time.time() - t0
     print(f"Forward pass: {t_forward:.2f}s")
 
