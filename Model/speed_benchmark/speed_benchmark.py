@@ -22,11 +22,11 @@ def run_speed_benchmark(backbone, fusion_mode, device, batch_size=1, num_views=8
     # Visual Scene Input: [batch, num_views, channels, height, width]
     visual_tiles = torch.randn(batch_size, num_views, 3, 256, 256).to(device)
 
+    # Visual History Input: [batch, 896] — 64 frames × 14-dim compressed scene memory
+    visual_history = torch.randn(batch_size, 896).to(device)
+
     # Egomotion History Input: [batch, 256]
     egomotion_history = torch.randn(batch_size, 256).to(device)
-
-    # Visual Scene History: [batch, 896]
-    visual_history = torch.randn(batch_size, 896).to(device)
 
     # Camera parameters: [batch, num_views, 3, 4] projection matrices
     # Only used by BEV fusion; None triggers learnable pseudo-projection
@@ -40,7 +40,7 @@ def run_speed_benchmark(backbone, fusion_mode, device, batch_size=1, num_views=8
     with torch.no_grad():
         for _ in range(num_warmup):
             _ = model(visual_tiles, visual_history, egomotion_history,
-                       backbone=backbone, camera_params=camera_params, mode="infer")
+                       camera_params=camera_params, mode="infer")
 
     # 2. Benchmark Phase
     num_iters = 100 if device.type == 'cuda' else 10
@@ -56,7 +56,7 @@ def run_speed_benchmark(backbone, fusion_mode, device, batch_size=1, num_views=8
             start_time = time.perf_counter()
 
             _ = model(visual_tiles, visual_history, egomotion_history,
-                      backbone=backbone, camera_params=camera_params, mode="infer")
+                      camera_params=camera_params, mode="infer")
 
             if device.type == 'cuda':
                 torch.cuda.synchronize()

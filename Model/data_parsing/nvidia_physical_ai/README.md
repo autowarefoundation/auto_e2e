@@ -7,8 +7,8 @@ Download (a subset of) the dataset into `data`.
 ## Model inputs produced
 
 - `visual_tiles` `(8, 3, H, W)` — 7 camera frames + 1 map tile placeholder
+- `visual_history` `(896,)` — 64 frames × 14-dim compressed scene memory (currently a zero placeholder; populated at training time by a rolling-buffer encoder)
 - `egomotion_history` `(256,)` — 64 past timesteps × 4 signals at 10 Hz
-- `visual_history` `(896,)` — zero-initialised; populated during sequential inference
 - `trajectory_target` `(128,)` — 64 future timesteps × 2 signals (supervision target)
 
 ### Egomotion history signals `(256,) = 64 × 4`
@@ -55,7 +55,7 @@ for batch in loader:
     egomotion_history = batch["egomotion_history"].to(device)  # (B, 256)
     trajectory_target = batch["trajectory_target"].to(device)  # (B, 128)
 
-    trajectory, compressed, future = model(visual_tiles, visual_history, egomotion_history)
+    trajectory, ego_hidden, future = model(visual_tiles, visual_history, egomotion_history)
     loss = criterion(trajectory, trajectory_target)
 ```
 

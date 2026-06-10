@@ -4,7 +4,10 @@ The real backbone (SwinV2/ConvNeXt) dominates test time (~80% per forward pass)
 but is never the subject under test — it is pretrained and frozen. We replace it
 with a lightweight stub that produces tensors of the correct shape, reducing
 per-forward cost from ~50ms to <1ms while still exercising View Fusion,
-DrivingPolicy, and FutureState end-to-end.
+TrajectoryPlanner, and FutureState end-to-end.
+
+Tests use a small BEV grid (8x8) for the ``bev`` fusion mode; the production
+default (450x300) is verified separately via configuration tests.
 
 Full-backbone integration tests are available via the 'integration' marker.
 """
@@ -69,17 +72,27 @@ class MockBackbone(nn.Module):
         return self.backbone(image)
 
 
-def _build_model_with_mock_backbone(num_views, fusion_mode, device):
+def _build_model_with_mock_backbone(num_views, fusion_mode, device,
+                                    num_timesteps=64):
     """Construct AutoE2E with the mock backbone injected.
 
     Patches Backbone at the module level during construction to avoid
-    loading pretrained weights entirely.
+    loading pretrained weights entirely. Forces BEV fusion to a small
+    8x8 grid so tests stay fast and memory-light; the production default
+    (450x300) is exercised by dedicated configuration tests.
     """
     from unittest.mock import patch
     from model_components.auto_e2e import AutoE2E
 
+    view_fusion_kwargs = {"bev_h": 8, "bev_w": 8} if fusion_mode == "bev" else None
+
     with patch('model_components.auto_e2e.Backbone', MockBackbone):
-        model = AutoE2E(num_views=num_views, fusion_mode=fusion_mode)
+        model = AutoE2E(
+            num_views=num_views,
+            fusion_mode=fusion_mode,
+            view_fusion_kwargs=view_fusion_kwargs,
+            num_timesteps=num_timesteps,
+        )
     return model.to(device)
 
 
@@ -122,8 +135,12 @@ def full_model(request, device):
     """Full model with real backbone — use only for integration tests."""
     from model_components.auto_e2e import AutoE2E
 
+    view_fusion_kwargs = {"bev_h": 8, "bev_w": 8} if request.param == "bev" else None
     try:
-        model = AutoE2E(num_views=8, fusion_mode=request.param)
+        model = AutoE2E(
+            num_views=8, fusion_mode=request.param,
+            view_fusion_kwargs=view_fusion_kwargs,
+        )
     except (FileNotFoundError, OSError) as e:
         pytest.skip(f"Pretrained weights unavailable: {e}")
     return model.to(device)
