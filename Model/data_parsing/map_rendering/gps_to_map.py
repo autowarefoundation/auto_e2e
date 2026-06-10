@@ -173,3 +173,52 @@ def render_map_tile(
     if img.size != image_size:
         img = img.resize(image_size, Image.BILINEAR)
     return img
+
+
+def gps_to_tensor(
+    latitudes: Sequence[float],
+    longitudes: Sequence[float],
+    transform,
+    radius_m: int = DEFAULT_RADIUS_M,
+    image_size: tuple[int, int] = DEFAULT_IMAGE_SIZE,
+    dpi: int = DEFAULT_DPI,
+    show_raw_gps: bool = True,
+    graph: nx.MultiDiGraph | None = None,
+) -> torch.Tensor:
+    """End-to-end: GPS coords in, model-ready `(3, H, W)` tensor out.
+
+    `transform` is the timm backbone transform — same one used for camera
+    tiles — which handles resize + normalization. Pass `graph` to skip the
+    Overpass fetch when the network has been cached for the area.
+    """
+    lats = np.asarray(latitudes, dtype=float)
+    lons = np.asarray(longitudes, dtype=float)
+    if lats.shape != lons.shape:
+        raise ValueError("latitudes and longitudes must have the same shape")
+    if lats.size == 0:
+        raise ValueError("at least one GPS point is required")
+
+    center_lat = float(lats.mean())
+    center_lon = float(lons.mean())
+
+    if graph is None:
+        graph = fetch_road_network(center_lat, center_lon, radius_m=radius_m)
+
+    _, route = map_match_waypoints(graph, lats.tolist(), lons.tolist())
+    raw_points = list(zip(lats.tolist(), lons.tolist()))
+
+    image = render_map_tile(
+        graph,
+        route_nodes=route,
+        raw_gps_points=raw_points,
+        image_size=image_size,
+        dpi=dpi,
+        show_raw_gps=show_raw_gps,
+    )
+
+    tensor = transform(image)
+    if tensor.dim() != 3 or tensor.shape[0] != 3:
+        raise ValueError(
+            f"transform must return a (3, H, W) tensor, got shape {tuple(tensor.shape)}"
+        )
+    return tensor
