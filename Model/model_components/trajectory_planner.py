@@ -73,6 +73,7 @@ class TrajectoryPlanner(nn.Module):
         attn_w = self.attention_weights(query).softmax(dim=-1)             # [B, P]
 
         sample_locs = ref_point.unsqueeze(1) + offsets                     # [B, P, 2]
+        sample_locs = sample_locs.clamp(0, 1)
         sample_grid = (sample_locs * 2 - 1).unsqueeze(2)                   # [B, P, 1, 2]
 
         sampled = F.grid_sample(
