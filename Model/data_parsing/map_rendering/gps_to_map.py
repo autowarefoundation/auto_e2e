@@ -104,3 +104,72 @@ def map_match_waypoints(
         route = [matched_nodes[0]]
 
     return matched_nodes, route
+
+
+def _node_xy(graph: nx.MultiDiGraph, node_id: int) -> tuple[float, float]:
+    data = graph.nodes[node_id]
+    return data["x"], data["y"]  # (lon, lat)
+
+
+def render_map_tile(
+    graph: nx.MultiDiGraph,
+    route_nodes: Sequence[int],
+    raw_gps_points: Sequence[tuple[float, float]] | None = None,
+    image_size: tuple[int, int] = DEFAULT_IMAGE_SIZE,
+    dpi: int = DEFAULT_DPI,
+    bg_color: str = DEFAULT_BG_COLOR,
+    road_color: str = DEFAULT_ROAD_COLOR,
+    route_color: str = DEFAULT_ROUTE_COLOR,
+    gps_color: str = DEFAULT_GPS_COLOR,
+    show_raw_gps: bool = True,
+) -> Image.Image:
+    """Render the road network, the matched route, and (optionally) raw GPS.
+
+    `raw_gps_points` is a sequence of `(lat, lon)` tuples — same convention as
+    the rest of this module's public API. They are drawn on top of the route as
+    small markers when `show_raw_gps=True`.
+    """
+    width_px, height_px = image_size
+    fig_w_in = width_px / dpi
+    fig_h_in = height_px / dpi
+
+    fig, ax = plt.subplots(figsize=(fig_w_in, fig_h_in), dpi=dpi)
+    fig.patch.set_facecolor(bg_color)
+    ax.set_facecolor(bg_color)
+
+    try:
+        ox.plot_graph(
+            graph,
+            ax=ax,
+            node_size=0,
+            edge_color=road_color,
+            edge_linewidth=0.8,
+            bgcolor=bg_color,
+            show=False,
+            close=False,
+        )
+
+        if len(route_nodes) >= 2:
+            xs, ys = zip(*(_node_xy(graph, n) for n in route_nodes))
+            ax.plot(xs, ys, color=route_color, linewidth=2.0, zorder=3)
+        elif len(route_nodes) == 1:
+            x, y = _node_xy(graph, route_nodes[0])
+            ax.scatter([x], [y], color=route_color, s=12, zorder=3)
+
+        if show_raw_gps and raw_gps_points:
+            lats, lons = zip(*raw_gps_points)
+            ax.scatter(lons, lats, color=gps_color, s=6, zorder=4)
+
+        ax.set_axis_off()
+        fig.subplots_adjust(left=0, right=1, top=1, bottom=0)
+
+        buf = io.BytesIO()
+        fig.savefig(buf, format="png", facecolor=bg_color, dpi=dpi, pad_inches=0)
+    finally:
+        plt.close(fig)
+
+    buf.seek(0)
+    img = Image.open(buf).convert("RGB")
+    if img.size != image_size:
+        img = img.resize(image_size, Image.BILINEAR)
+    return img
