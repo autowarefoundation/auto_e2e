@@ -10,7 +10,7 @@ from __future__ import annotations
 import logging
 import pickle
 from pathlib import Path
-from typing import Iterable, Mapping, Sequence
+from typing import Mapping, Sequence
 
 import networkx as nx
 
