@@ -759,7 +759,10 @@ class TestTrajectoryDynamics:
         traj, _ = planner(bev, vis_hist, ego)
         # traj: [1, 128] = [1, 64*2]; reshape so dim 1 = timesteps
         late = traj.view(1, 64, 2)[0, 32:, 0]
-        assert late.unique().numel() > 1, \
+        # Require substantial variation across the 32 late timesteps. A bare
+        # >1 threshold would pass even when 31 of 32 values collapse to the
+        # same constant — near-saturation we still want to catch.
+        assert late.unique().numel() >= 8, \
             "Trajectory saturates to a constant value over the last 32 timesteps"
 
     def test_deformable_clamp_handles_extreme_query(self, device):
