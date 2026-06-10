@@ -705,3 +705,100 @@ class TestTrainingLoop:
             for p in model.parameters() if p.requires_grad
         )
         assert any_grad, "No parameter received gradient from loss"
+
+
+# ---------------------------------------------------------------------------
+# Behavioral tests on planner / future-state internals
+# ---------------------------------------------------------------------------
+
+class TestTrajectoryDynamics:
+    def test_trajectory_does_not_saturate(self, device):
+        """The GRU should produce time-varying outputs, not saturate to a constant.
+
+        Reshape the 64×2 trajectory and check that the second half of the
+        first signal channel is NOT a single repeated value.
+        """
+        torch.manual_seed(0)
+        planner = TrajectoryPlanner(embed_dim=256).to(device)
+        planner.eval()
+        bev = torch.randn(1, 256, 8, 8, device=device)
+        vis_hist = torch.randn(1, 896, device=device)
+        ego = torch.randn(1, 256, device=device)
+
+        traj, _ = planner(bev, vis_hist, ego)
+        # traj: [1, 128] = [1, 64*2]; reshape so dim 1 = timesteps
+        late = traj.view(1, 64, 2)[0, 32:, 0]
+        assert late.unique().numel() > 1, \
+            "Trajectory saturates to a constant value over the last 32 timesteps"
+
+    def test_deformable_clamp_handles_extreme_query(self, device):
+        """Extreme query magnitudes push sampling locations outside [0, 1];
+        the clamp inside _deformable_cross_attn must keep output finite."""
+        torch.manual_seed(0)
+        planner = TrajectoryPlanner(embed_dim=256).to(device)
+        planner.eval()
+
+        # Build extreme query and value tensors directly to exercise the clamp.
+        B, C, H, W = 1, 256, 8, 8
+        query = torch.full((B, C), 1e6, device=device)
+        values = torch.randn(B, C, H, W, device=device)
+
+        out = planner._deformable_cross_attn(query, values)
+        assert torch.isfinite(out).all(), \
+            "Clamp failed: output contains NaN/Inf for extreme query"
+
+
+class TestFutureStateChunkSplit:
+    def test_four_outputs_are_distinct(self, device):
+        """torch.chunk must split along channels, not return 4 views of the same data."""
+        torch.manual_seed(0)
+        future = FutureState(embed_dim=256, ego_hidden_dim=256).to(device)
+        future.eval()
+        feats = torch.randn(2, 256, 8, 8, device=device)
+        ego_hidden = torch.randn(2, 256, device=device)
+
+        out = future(feats, ego_hidden)
+        assert len(out) == 4
+        for i in range(4):
+            for j in range(i + 1, 4):
+                assert not torch.allclose(out[i], out[j], atol=1e-5), \
+                    f"FutureState outputs {i} and {j} are identical — chunk is broken"
+
+    def test_ego_hidden_changes_all_four_outputs(self, device):
+        """Different ego_hidden must shift every one of the 4 future predictions."""
+        torch.manual_seed(0)
+        future = FutureState(embed_dim=256, ego_hidden_dim=256).to(device)
+        future.eval()
+        feats = torch.randn(1, 256, 8, 8, device=device)
+
+        ego_a = torch.randn(1, 256, device=device)
+        ego_b = torch.randn(1, 256, device=device)
+
+        out_a = future(feats, ego_a)
+        out_b = future(feats, ego_b)
+
+        for i in range(4):
+            assert not torch.allclose(out_a[i], out_b[i], atol=1e-5), \
+                f"Future output {i} did not change when ego_hidden changed"
+
+
+class TestVisualHistoryNonZeroDifference:
+    def test_two_nonzero_visual_histories_differ(self, device):
+        """Both visual_history inputs are non-zero and distinct — outputs must differ."""
+        torch.manual_seed(0)
+        planner = TrajectoryPlanner(embed_dim=256).to(device)
+        planner.eval()
+        bev = torch.randn(1, 256, 8, 8, device=device)
+        ego = torch.randn(1, 256, device=device)
+
+        vh_a = torch.randn(1, 896, device=device)
+        vh_b = torch.randn(1, 896, device=device)
+        # Sanity: both are non-zero
+        assert vh_a.abs().max() > 0 and vh_b.abs().max() > 0
+        assert not torch.allclose(vh_a, vh_b)
+
+        traj_a, _ = planner(bev, vh_a, ego)
+        traj_b, _ = planner(bev, vh_b, ego)
+
+        assert not torch.allclose(traj_a, traj_b, atol=1e-5), \
+            "Two distinct non-zero visual_history inputs produced the same trajectory"
