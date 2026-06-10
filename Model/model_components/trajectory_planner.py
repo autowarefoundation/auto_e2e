@@ -20,7 +20,7 @@ class TrajectoryPlanner(nn.Module):
     """
 
     def __init__(self, embed_dim=256, num_timesteps=64, num_signals=2,
-                 num_points=8, egomotion_dim=256, visual_history_dim=896,
+                 num_points=8, egomotion_input_dim=256, visual_history_dim=896,
                  offset_scale=0.1):
         super().__init__()
 
@@ -37,7 +37,7 @@ class TrajectoryPlanner(nn.Module):
         self.offset_scale = offset_scale
 
         self.ego_query = nn.Embedding(1, embed_dim)
-        self.ego_state_proj = nn.Linear(egomotion_dim, embed_dim)
+        self.ego_state_proj = nn.Linear(egomotion_input_dim, embed_dim)
         # visual_history carries frame-to-frame visual memory (default 896 =
         # 64 frames × 14-dim compressed per frame), distinct from the GRU's
         # intra-trajectory temporal coherence. Both signals are summed into
@@ -90,7 +90,7 @@ class TrajectoryPlanner(nn.Module):
         Args:
             bev_features: [B, embed_dim, H, W] — any spatial resolution.
             visual_history: [B, visual_history_dim].
-            egomotion_history: [B, egomotion_dim].
+            egomotion_history: [B, egomotion_input_dim].
 
         Returns:
             trajectory: [B, num_timesteps * num_signals]
