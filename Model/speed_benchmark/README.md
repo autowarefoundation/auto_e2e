@@ -1,31 +1,61 @@
 # Speed Benchmark
 
-`speed_benchmarking.py` is a script to load dummy data, warm up the GPU, and perform inference on 100 samples to calculate inference speed benchmarks of the model.
+`speed_benchmark.py` loads dummy data, warms up the GPU, and performs inference on 100 samples to calculate inference speed benchmarks of the model.
 
-## Tracked parameters
+## Tracked Parameters
 
 The script outputs:
 * Average FPS — Frames per second that the model can process.
-* Average Latency [ms] — The typical delay it takes the GPU to complete a single forward pass of the model from start to finish.
-* Worst-Case Latency [ms] — The 99th percentile latency. It means 99% of your frames were processed faster than this number.
-* Latency Jitter [ms] — This measures the predictability and stability of the inference. By taking your slowest typical frame (p99) and subtracting your median typical frame (p50), you get the variance in your processing time.
-* Peak VRAM Allocated [MB] — The minimum theoretical footprint your model needs to exist. This is the maximum amount of GPU memory that actually held the forward-pass-related data.
-* Peak VRAM Reserved [MB] — The realistic memory footprint your system feels. This is the maximum amount of GPU memory walled off from the computer's operating system.
+* Average Latency [ms] — The typical delay for a single forward pass.
+* Worst-Case Latency [ms] — The 99th percentile latency.
+* Latency Jitter [ms] — Variance in processing time (p99 - p50).
+* Peak VRAM Allocated [MB] — Minimum theoretical GPU memory footprint.
+* Peak VRAM Reserved [MB] — Realistic memory footprint seen by the OS.
 
-## How to Run
+## JSON Schema
+
+Each result file in `results/` includes the following metadata:
+* `timestamp` — ISO 8601 timestamp of the run
+* `device` — PyTorch device string (e.g. `cuda`)
+* `gpu_name` — GPU model name
+* `cuda_version` — CUDA toolkit version
+* `driver_version` — NVIDIA driver version
+* `pytorch_version` — PyTorch version
+* `commit_sha` — Git short SHA at time of benchmark
+* `input_resolution` — [height, width] of input tiles
+
+## Workflow
+
+### 1. Run the benchmark
 
 ```bash
-make benchmark
+cd Model/speed_benchmark
+python speed_benchmark.py --seed 42
 ```
 
-The script will:
-1. Run all combinations of backbones × fusion modes × batch sizes
-2. Print results to stdout
-3. Save structured results to `benchmark_results.json`
-4. Print a Markdown table ready to paste into the main README
+Results are saved to `results/<gpu_name>_<timestamp>.json`.
+
+### 2. Commit the JSON result
+
+```bash
+git add results/*.json
+git commit --signoff -m "bench: add <GPU> results"
+```
+
+### 3. Generate the README table
+
+```bash
+python generate_readme_table.py
+```
+
+Copy the output into the main project README under the benchmark section.
+
+## CLI Options
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--seed` | 42 | Random seed for reproducibility |
 
 ## Output Files
 
-* `benchmark_results.json` — Full results with hardware metadata (GPU name, CUDA version, PyTorch version, timestamp)
-
-After running the script, please kindly add the results to the [main README](https://github.com/autowarefoundation/auto_e2e/blob/main/README.md)
+* `results/*.json` — Benchmark results with full hardware and environment metadata

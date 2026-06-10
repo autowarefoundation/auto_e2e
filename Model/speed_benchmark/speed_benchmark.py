@@ -1,9 +1,12 @@
+import argparse
+import subprocess
 import torch
 import time
 import sys
 import json
 import numpy as np
 from datetime import datetime
+from pathlib import Path
 sys.path.append('..')
 from model_components.auto_e2e import AutoE2E
 
@@ -113,17 +116,45 @@ def run_speed_benchmark(backbone, fusion_mode, device, batch_size=1, num_views=8
     return results
 
 
-def save_results_json(all_results, device):
+def get_commit_sha():
+    try:
+        return subprocess.check_output(
+            ["git", "rev-parse", "--short", "HEAD"],
+            stderr=subprocess.DEVNULL,
+        ).decode().strip()
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return "unknown"
+
+
+def get_driver_version():
+    try:
+        output = subprocess.check_output(
+            ["nvidia-smi", "--query-gpu=driver_version", "--format=csv,noheader"],
+            stderr=subprocess.DEVNULL,
+        ).decode().strip()
+        return output.split("\n")[0]
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return "N/A"
+
+
+def save_results_json(all_results, device, input_resolution=(256, 256)):
     """Save benchmark results to a JSON file with hardware metadata."""
     output = {
         "timestamp": datetime.now().isoformat(),
         "device": str(device),
         "gpu_name": torch.cuda.get_device_name(0) if torch.cuda.is_available() else "N/A",
         "cuda_version": torch.version.cuda if torch.cuda.is_available() else "N/A",
+        "driver_version": get_driver_version(),
         "pytorch_version": torch.__version__,
+        "commit_sha": get_commit_sha(),
+        "input_resolution": list(input_resolution),
         "results": all_results,
     }
-    filepath = "benchmark_results.json"
+    gpu_slug = output["gpu_name"].replace(" ", "_").replace("/", "-").lower()
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    results_dir = Path(__file__).parent / "results"
+    results_dir.mkdir(exist_ok=True)
+    filepath = results_dir / f"{gpu_slug}_{timestamp}.json"
     with open(filepath, "w") as f:
         json.dump(output, f, indent=2)
     print(f"\nResults saved to {filepath}")
@@ -141,7 +172,19 @@ def print_markdown_table(all_results):
               f"{r['peak_vram_allocated_mb']:.0f} | {params_m:.1f}M |")
 
 
+def parse_args():
+    parser = argparse.ArgumentParser(description="AutoE2E speed benchmark")
+    parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility")
+    return parser.parse_args()
+
+
 def main():
+    args = parse_args()
+
+    torch.manual_seed(args.seed)
+    torch.cuda.manual_seed_all(args.seed)
+    np.random.seed(args.seed)
+
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f'Using {device} for inference\n')
 
