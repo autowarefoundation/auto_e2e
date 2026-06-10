@@ -43,6 +43,80 @@ CAMERA_NAMES: list[str] = [
 # Total views fed to the model = 7 cameras + 1 map tile.
 NUM_VIEWS = 8
 
+_BACKBONE_IMAGE_SIZE = 256
+
+def scale_intrinsic(
+    K: np.ndarray,
+    original_wh: tuple[int, int],
+    target_size: int = _BACKBONE_IMAGE_SIZE,
+) -> np.ndarray:
+    """Return K rescaled for a square ``target_size`` output.
+ 
+    Args:
+        K: (3, 3) pinhole camera matrix at the camera's native resolution.
+        original_wh: (width, height) of the native camera image.
+        target_size: Square side length after the backbone preprocessing
+            transform. Defaults to ``_BACKBONE_IMAGE_SIZE`` (256).
+ 
+    Returns:
+        (3, 3) float64 array with ``fx``, ``fy``, ``cx``, ``cy`` scaled.
+    """
+    orig_w, orig_h = original_wh
+    sx = target_size / orig_w
+    sy = target_size / orig_h
+    K_scaled = K.copy()
+    K_scaled[0, 0] *= sx   # fx
+    K_scaled[1, 1] *= sy   # fy
+    K_scaled[0, 2] *= sx   # cx
+    K_scaled[1, 2] *= sy   # cy
+    return K_scaled
+ 
+ 
+def compute_camera_projection_matrices(
+    loader: SensorDataLoader,
+    camera_names: list[str] | None = None,
+) -> torch.Tensor:
+    """Compute ``(3, 4)`` projection matrices for each camera view.
+ 
+    ``P = K_scaled @ T_ref_to_cam`` maps 3-D reference-frame points to
+    pixel coordinates in the backbone-resized image.
+ 
+    KIT Scenes ``calib.json`` always provides a ``resolution`` field, so
+    ``CameraCalibration.image_size`` is always populated and no image I/O
+    is required here.
+ 
+    Args:
+        loader: ``SensorDataLoader`` for the scene.
+        camera_names: Cameras to compute matrices for, in slot order.
+            Defaults to ``CAMERA_NAMES``.
+ 
+    Returns:
+        Float32 tensor of shape ``(len(camera_names), 3, 4)``.
+        Does not include a slot for the map tile.
+    """
+    if camera_names is None:
+        camera_names = CAMERA_NAMES
+ 
+    matrices = []
+    for cam_name in camera_names:
+        calib = loader.get_camera_calibration(cam_name)
+ 
+        if calib.image_size is None:
+            raise ValueError(
+                f"Camera {cam_name!r} has no resolution in calib.json. "
+                "KIT Scenes calibration files are expected to always include "
+                "a resolution field."
+            )
+ 
+        K_scaled = scale_intrinsic(calib.intrinsic, calib.image_size)
+ 
+        # invert calib.extrinsic to get T_ref_to_cam.
+        T_ref_to_cam = np.linalg.inv(calib.extrinsic)   # (4, 4)
+        P = K_scaled @ T_ref_to_cam[:3, :]              # (3, 4)
+        matrices.append(P)
+ 
+    return torch.tensor(np.stack(matrices, axis=0), dtype=torch.float32)  # (V, 3, 4)
+
 
 def load_camera_frame(
     loader: SensorDataLoader,
