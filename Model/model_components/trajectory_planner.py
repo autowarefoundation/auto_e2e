@@ -20,7 +20,8 @@ class TrajectoryPlanner(nn.Module):
     """
 
     def __init__(self, embed_dim=256, num_timesteps=64, num_signals=2,
-                 num_points=8, egomotion_dim=256, offset_scale=0.1):
+                 num_points=8, egomotion_dim=256, visual_history_dim=896,
+                 offset_scale=0.1):
         super().__init__()
 
         self.embed_dim = embed_dim
@@ -37,6 +38,12 @@ class TrajectoryPlanner(nn.Module):
 
         self.ego_query = nn.Embedding(1, embed_dim)
         self.ego_state_proj = nn.Linear(egomotion_dim, embed_dim)
+        # visual_history carries frame-to-frame visual memory (default 896 =
+        # 64 frames × 14-dim compressed per frame), distinct from the GRU's
+        # intra-trajectory temporal coherence. Both signals are summed into
+        # the initial hidden state so the planner conditions on past dynamics
+        # AND past scene context from step 0.
+        self.visual_history_proj = nn.Linear(visual_history_dim, embed_dim)
 
         # Deformable cross-attention parameters predicted from the query state
         self.reference_point = nn.Linear(embed_dim, 2)
@@ -77,10 +84,11 @@ class TrajectoryPlanner(nn.Module):
         attended = (sampled * attn_w.unsqueeze(-1)).sum(dim=1)             # [B, C]
         return self.output_proj(attended)
 
-    def forward(self, bev_features, egomotion_history):
+    def forward(self, bev_features, visual_history, egomotion_history):
         """
         Args:
             bev_features: [B, embed_dim, H, W] — any spatial resolution.
+            visual_history: [B, visual_history_dim].
             egomotion_history: [B, egomotion_dim].
 
         Returns:
@@ -89,8 +97,9 @@ class TrajectoryPlanner(nn.Module):
         """
         B = bev_features.shape[0]
 
-        # Initialize GRU hidden state from ego state: [1, B, C]
-        h = self.ego_state_proj(egomotion_history).unsqueeze(0)
+        # Initialize GRU hidden state from ego state + visual history: [1, B, C]
+        h = (self.ego_state_proj(egomotion_history)
+             + self.visual_history_proj(visual_history)).unsqueeze(0)
 
         # Pre-project BEV features for value lookup, preserving spatial layout
         # required by grid_sample: [B, C, H, W]
