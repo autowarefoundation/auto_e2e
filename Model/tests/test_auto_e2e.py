@@ -656,6 +656,37 @@ class TestFullBackboneIntegration:
             assert not torch.isnan(f).any()
 
 
+@pytest.mark.integration
+class TestResNet50Backbone:
+    """Exercises the dynamic backbone_channels computation on a backbone
+    whose feature_info shape differs from Swin (5 stages of channels
+    64/256/512/1024/2048 vs Swin's 4 stages of 96/192/384/768)."""
+
+    def test_resnet50_forward_pass(self, device):
+        from model_components.auto_e2e import AutoE2E
+        try:
+            model = AutoE2E(
+                backbone="res_net_50", num_views=8, fusion_mode="concat",
+                is_pretrained=False,
+            ).to(device)
+        except (FileNotFoundError, OSError) as e:
+            pytest.skip(f"Backbone construction failed: {e}")
+
+        # Dynamic backbone_channels = sum of all 5 ResNet50 stages = 3904
+        assert model.Backbone.backbone_channels == 64 + 256 + 512 + 1024 + 2048
+
+        visual, vis_hist, ego = make_inputs(1, 8, device)
+        traj, ego_hidden, future = model(visual, vis_hist, ego)
+
+        assert traj.shape == (1, 128)
+        assert ego_hidden.shape == (1, 256)
+        assert len(future) == 4
+        for f in future:
+            assert f.shape == (1, 256, 8, 8)
+        assert torch.isfinite(traj).all()
+        assert torch.isfinite(ego_hidden).all()
+
+
 # ---------------------------------------------------------------------------
 # Training loop integration — optimizer.step + loss
 # ---------------------------------------------------------------------------
