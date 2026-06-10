@@ -4,7 +4,7 @@ The real backbone (SwinV2/ConvNeXt) dominates test time (~80% per forward pass)
 but is never the subject under test — it is pretrained and frozen. We replace it
 with a lightweight stub that produces tensors of the correct shape, reducing
 per-forward cost from ~50ms to <1ms while still exercising View Fusion,
-TrajectoryPlanner, and FutureState end-to-end.
+GRUPlanner, and FutureState end-to-end.
 
 Tests use a small BEV grid (8x8) for the ``bev`` fusion mode; the production
 default (450x300) is verified separately via configuration tests.

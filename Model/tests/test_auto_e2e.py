@@ -5,7 +5,12 @@ sys.path.append('..')
 
 from model_components.backbone import Backbone
 from model_components.feature_fusion import FeatureFusion
-from model_components.trajectory_planner import TrajectoryPlanner
+from model_components.trajectory_planning import (
+    GRUPlanner,
+    FlowMatchingPlanner,
+    build_planner,
+    PLANNER_REGISTRY,
+)
 from model_components.future_state import FutureState
 from model_components.view_fusion import build_view_fusion, FUSION_REGISTRY
 from model_components.view_fusion.cross_attention_fusion import CrossAttentionViewFusion
@@ -329,9 +334,9 @@ class TestFeatureFusionComponent:
         assert not torch.allclose(out_a, out_b, atol=1e-5)
 
 
-class TestTrajectoryPlannerComponent:
+class TestGRUPlannerComponent:
     def test_output_shapes(self, device):
-        planner = TrajectoryPlanner(embed_dim=256).to(device)
+        planner = GRUPlanner(embed_dim=256).to(device)
         bev = torch.randn(4, 256, 8, 8, device=device)
         vis_hist = torch.randn(4, 896, device=device)
         ego = torch.randn(4, 256, device=device)
@@ -342,7 +347,7 @@ class TestTrajectoryPlannerComponent:
 
     def test_works_with_arbitrary_bev_resolution(self, device):
         """Deformable cross-attention via grid_sample should be size-agnostic."""
-        planner = TrajectoryPlanner(embed_dim=256).to(device)
+        planner = GRUPlanner(embed_dim=256).to(device)
         vis_hist = torch.randn(2, 896, device=device)
         ego = torch.randn(2, 256, device=device)
         for h, w in [(8, 8), (16, 32), (45, 30)]:
@@ -352,7 +357,7 @@ class TestTrajectoryPlannerComponent:
             assert ego_hidden.shape == (2, 256)
 
     def test_bev_features_influence_trajectory(self, device):
-        planner = TrajectoryPlanner(embed_dim=256).to(device)
+        planner = GRUPlanner(embed_dim=256).to(device)
         planner.eval()
         vis_hist = torch.randn(1, 896, device=device)
         ego = torch.randn(1, 256, device=device)
@@ -367,7 +372,7 @@ class TestTrajectoryPlannerComponent:
             "Trajectory should depend on BEV features"
 
     def test_egomotion_influences_trajectory(self, device):
-        planner = TrajectoryPlanner(embed_dim=256).to(device)
+        planner = GRUPlanner(embed_dim=256).to(device)
         planner.eval()
         bev = torch.randn(1, 256, 8, 8, device=device)
         vis_hist = torch.randn(1, 896, device=device)
@@ -379,7 +384,7 @@ class TestTrajectoryPlannerComponent:
             "Trajectory should depend on egomotion history"
 
     def test_visual_history_influences_trajectory(self, device):
-        planner = TrajectoryPlanner(embed_dim=256).to(device)
+        planner = GRUPlanner(embed_dim=256).to(device)
         planner.eval()
         bev = torch.randn(1, 256, 8, 8, device=device)
         ego = torch.randn(1, 256, device=device)
@@ -391,7 +396,7 @@ class TestTrajectoryPlannerComponent:
             "Trajectory should depend on visual history"
 
     def test_configurable_horizon(self, device):
-        planner = TrajectoryPlanner(embed_dim=256, num_timesteps=32, num_signals=3).to(device)
+        planner = GRUPlanner(embed_dim=256, num_timesteps=32, num_signals=3).to(device)
         bev = torch.randn(2, 256, 8, 8, device=device)
         vis_hist = torch.randn(2, 896, device=device)
         ego = torch.randn(2, 256, device=device)
@@ -399,7 +404,7 @@ class TestTrajectoryPlannerComponent:
         assert traj.shape == (2, 32 * 3)
 
     def test_gradients_flow(self, device):
-        planner = TrajectoryPlanner(embed_dim=256, num_timesteps=4).to(device)
+        planner = GRUPlanner(embed_dim=256, num_timesteps=4).to(device)
         bev = torch.randn(1, 256, 8, 8, device=device, requires_grad=True)
         vis_hist = torch.randn(1, 896, device=device, requires_grad=True)
         ego = torch.randn(1, 256, device=device, requires_grad=True)
@@ -410,7 +415,7 @@ class TestTrajectoryPlannerComponent:
         assert ego.grad is not None and ego.grad.abs().max() > 0
 
     def test_wrong_visual_history_dim_raises(self, device):
-        planner = TrajectoryPlanner(embed_dim=256, visual_history_dim=896).to(device)
+        planner = GRUPlanner(embed_dim=256, visual_history_dim=896).to(device)
         bev = torch.randn(1, 256, 8, 8, device=device)
         bad_vis_hist = torch.randn(1, 1024, device=device)  # wrong last dim
         ego = torch.randn(1, 256, device=device)
@@ -418,7 +423,7 @@ class TestTrajectoryPlannerComponent:
             planner(bev, bad_vis_hist, ego)
 
     def test_wrong_egomotion_dim_raises(self, device):
-        planner = TrajectoryPlanner(embed_dim=256, egomotion_dim=256).to(device)
+        planner = GRUPlanner(embed_dim=256, egomotion_dim=256).to(device)
         bev = torch.randn(1, 256, 8, 8, device=device)
         vis_hist = torch.randn(1, 896, device=device)
         bad_ego = torch.randn(1, 128, device=device)  # wrong last dim
@@ -427,15 +432,15 @@ class TestTrajectoryPlannerComponent:
 
     def test_offset_scale_negative_raises(self):
         with pytest.raises(ValueError, match="offset_scale"):
-            TrajectoryPlanner(embed_dim=256, offset_scale=-1.0)
+            GRUPlanner(embed_dim=256, offset_scale=-1.0)
 
     def test_offset_scale_nan_raises(self):
         with pytest.raises(ValueError, match="offset_scale"):
-            TrajectoryPlanner(embed_dim=256, offset_scale=float("nan"))
+            GRUPlanner(embed_dim=256, offset_scale=float("nan"))
 
     def test_offset_scale_inf_raises(self):
         with pytest.raises(ValueError, match="offset_scale"):
-            TrajectoryPlanner(embed_dim=256, offset_scale=float("inf"))
+            GRUPlanner(embed_dim=256, offset_scale=float("inf"))
 
     def test_offset_scale_bool_raises(self):
         # bool is an int subclass; the validator must reject it explicitly.
@@ -451,9 +456,9 @@ class TestTrajectoryPlannerComponent:
         reference point; output must still be valid but differ from the
         nonzero default."""
         torch.manual_seed(0)
-        planner_zero = TrajectoryPlanner(embed_dim=256, offset_scale=0.0).to(device)
+        planner_zero = GRUPlanner(embed_dim=256, offset_scale=0.0).to(device)
         torch.manual_seed(0)
-        planner_pos = TrajectoryPlanner(embed_dim=256, offset_scale=0.1).to(device)
+        planner_pos = GRUPlanner(embed_dim=256, offset_scale=0.1).to(device)
         planner_zero.eval()
         planner_pos.eval()
 
@@ -947,7 +952,7 @@ class TestTrajectoryDynamics:
         first signal channel is NOT a single repeated value.
         """
         torch.manual_seed(0)
-        planner = TrajectoryPlanner(embed_dim=256).to(device)
+        planner = GRUPlanner(embed_dim=256).to(device)
         planner.eval()
         bev = torch.randn(1, 256, 8, 8, device=device)
         vis_hist = torch.randn(1, 896, device=device)
@@ -974,9 +979,9 @@ class TestTrajectoryDynamics:
              still produces finite output via the reference point alone.
         """
         torch.manual_seed(0)
-        planner_pos = TrajectoryPlanner(embed_dim=256, offset_scale=0.1).to(device)
+        planner_pos = GRUPlanner(embed_dim=256, offset_scale=0.1).to(device)
         torch.manual_seed(0)
-        planner_zero = TrajectoryPlanner(embed_dim=256, offset_scale=0.0).to(device)
+        planner_zero = GRUPlanner(embed_dim=256, offset_scale=0.0).to(device)
         planner_pos.eval()
         planner_zero.eval()
 
@@ -1011,9 +1016,9 @@ class TestTrajectoryDynamics:
         seed for the two planners so the only meaningful difference is whether
         offsets fan out around the reference point."""
         torch.manual_seed(0)
-        planner_pos = TrajectoryPlanner(embed_dim=256, offset_scale=0.1).to(device)
+        planner_pos = GRUPlanner(embed_dim=256, offset_scale=0.1).to(device)
         torch.manual_seed(0)
-        planner_zero = TrajectoryPlanner(embed_dim=256, offset_scale=0.0).to(device)
+        planner_zero = GRUPlanner(embed_dim=256, offset_scale=0.0).to(device)
         planner_pos.eval()
         planner_zero.eval()
 
@@ -1067,7 +1072,7 @@ class TestVisualHistoryNonZeroDifference:
     def test_two_nonzero_visual_histories_differ(self, device):
         """Both visual_history inputs are non-zero and distinct — outputs must differ."""
         torch.manual_seed(0)
-        planner = TrajectoryPlanner(embed_dim=256).to(device)
+        planner = GRUPlanner(embed_dim=256).to(device)
         planner.eval()
         bev = torch.randn(1, 256, 8, 8, device=device)
         ego = torch.randn(1, 256, device=device)
