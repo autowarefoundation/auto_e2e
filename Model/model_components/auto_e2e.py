@@ -9,7 +9,7 @@ class AutoE2E(nn.Module):
     def __init__(self, backbone="swin_v2_tiny", num_views=8, embed_dim=256,
                  fusion_mode="concat", is_pretrained=True,
                  image_feature_size=8, view_fusion_kwargs=None,
-                 num_timesteps=64, num_signals=2, egomotion_input_dim=256,
+                 num_timesteps=64, num_signals=2, egomotion_dim=256,
                  visual_history_dim=896):
         super(AutoE2E, self).__init__()
 
@@ -32,7 +32,7 @@ class AutoE2E(nn.Module):
             embed_dim=embed_dim,
             num_timesteps=num_timesteps,
             num_signals=num_signals,
-            egomotion_input_dim=egomotion_input_dim,
+            egomotion_dim=egomotion_dim,
             visual_history_dim=visual_history_dim,
         )
 

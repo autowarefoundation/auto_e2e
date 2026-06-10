@@ -35,7 +35,7 @@ class TrajectoryPlanner(nn.Module):
     """
 
     def __init__(self, embed_dim=256, num_timesteps=64, num_signals=2,
-                 num_points=8, egomotion_input_dim=256, visual_history_dim=896,
+                 num_points=8, egomotion_dim=256, visual_history_dim=896,
                  offset_scale=0.1):
         super().__init__()
 
@@ -43,7 +43,7 @@ class TrajectoryPlanner(nn.Module):
         self.num_timesteps = num_timesteps
         self.num_signals = num_signals
         self.num_points = num_points
-        self.egomotion_input_dim = egomotion_input_dim
+        self.egomotion_dim = egomotion_dim
         self.visual_history_dim = visual_history_dim
         # offset_scale bounds the per-point sampling offset around the predicted
         # reference point in normalized BEV coordinates. The default 0.1 means
@@ -55,7 +55,7 @@ class TrajectoryPlanner(nn.Module):
         self.offset_scale = offset_scale
 
         self.ego_query = nn.Embedding(1, embed_dim)
-        self.ego_state_proj = nn.Linear(egomotion_input_dim, embed_dim)
+        self.ego_state_proj = nn.Linear(egomotion_dim, embed_dim)
         # visual_history carries frame-to-frame visual memory (default 896 =
         # 64 frames × 14-dim compressed per frame), distinct from the GRU's
         # intra-trajectory temporal coherence. Both signals are summed into
@@ -108,7 +108,7 @@ class TrajectoryPlanner(nn.Module):
         Args:
             bev_features: [B, embed_dim, H, W] — any spatial resolution.
             visual_history: [B, visual_history_dim].
-            egomotion_history: [B, egomotion_input_dim].
+            egomotion_history: [B, egomotion_dim].
 
         Returns:
             trajectory: [B, num_timesteps * num_signals]
@@ -119,9 +119,9 @@ class TrajectoryPlanner(nn.Module):
                 f"visual_history last dim must be {self.visual_history_dim}, "
                 f"got tensor of shape {tuple(visual_history.shape)}."
             )
-        if egomotion_history.shape[-1] != self.egomotion_input_dim:
+        if egomotion_history.shape[-1] != self.egomotion_dim:
             raise ValueError(
-                f"egomotion_history last dim must be {self.egomotion_input_dim}, "
+                f"egomotion_history last dim must be {self.egomotion_dim}, "
                 f"got tensor of shape {tuple(egomotion_history.shape)}."
             )
 

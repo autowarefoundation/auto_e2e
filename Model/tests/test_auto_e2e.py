@@ -353,7 +353,7 @@ class TestTrajectoryPlannerComponent:
             planner(bev, bad_vis_hist, ego)
 
     def test_wrong_egomotion_dim_raises(self, device):
-        planner = TrajectoryPlanner(embed_dim=256, egomotion_input_dim=256).to(device)
+        planner = TrajectoryPlanner(embed_dim=256, egomotion_dim=256).to(device)
         bev = torch.randn(1, 256, 8, 8, device=device)
         vis_hist = torch.randn(1, 896, device=device)
         bad_ego = torch.randn(1, 128, device=device)  # wrong last dim
