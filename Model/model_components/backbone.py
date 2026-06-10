@@ -8,15 +8,16 @@ class Backbone(nn.Module):
         # Pre-trained backbone (pluggable)
         self.backbone = build_backbone(backbone, pretrained=is_pretrained)
         self.backbone_name = backbone
-        self.backbone_channels = 0
 
+        if not hasattr(self.backbone, "feature_info"):
+            raise ValueError(
+                f"Backbone '{backbone}' does not expose feature_info; "
+                "cannot infer backbone_channels dynamically."
+            )
+        self.backbone_channels = sum(
+            info["num_chs"] for info in self.backbone.feature_info
+        )
 
-        if(backbone=="swin_v2_tiny" or backbone =="conv_next_v2_tiny"):
-            self.backbone_channels = 1440
-        
-        if(backbone=="res_net_50"):
-            self.backbone_channels = 3904
-         
     def forward(self, image):
         features = self.backbone(image)
         for i in range(0, len(features)):
