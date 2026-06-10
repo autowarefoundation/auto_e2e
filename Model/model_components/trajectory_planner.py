@@ -1,6 +1,21 @@
+import math
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
+
+def _validate_offset_scale(offset_scale):
+    if not isinstance(offset_scale, (int, float)) or isinstance(offset_scale, bool):
+        raise ValueError(
+            f"offset_scale must be a finite non-negative number, "
+            f"got {offset_scale!r}."
+        )
+    if not math.isfinite(offset_scale) or offset_scale < 0:
+        raise ValueError(
+            f"offset_scale must be a finite non-negative number, "
+            f"got {offset_scale!r}."
+        )
 
 
 class TrajectoryPlanner(nn.Module):
@@ -28,12 +43,15 @@ class TrajectoryPlanner(nn.Module):
         self.num_timesteps = num_timesteps
         self.num_signals = num_signals
         self.num_points = num_points
+        self.egomotion_dim = egomotion_dim
+        self.visual_history_dim = visual_history_dim
         # offset_scale bounds the per-point sampling offset around the predicted
         # reference point in normalized BEV coordinates. The default 0.1 means
         # offsets reach up to 10% of the BEV grid extent in each direction. The
         # reference point itself is sigmoid-bounded to [0, 1], so the head can
         # still attend anywhere on the grid — offset_scale only constrains the
         # local fan-out around that anchor.
+        _validate_offset_scale(offset_scale)
         self.offset_scale = offset_scale
 
         self.ego_query = nn.Embedding(1, embed_dim)
@@ -96,6 +114,16 @@ class TrajectoryPlanner(nn.Module):
             trajectory: [B, num_timesteps * num_signals]
             ego_hidden: [B, embed_dim] — final GRU hidden state.
         """
+        if visual_history.shape[-1] != self.visual_history_dim:
+            raise ValueError(
+                f"visual_history last dim must be {self.visual_history_dim}, "
+                f"got tensor of shape {tuple(visual_history.shape)}."
+            )
+        if egomotion_history.shape[-1] != self.egomotion_dim:
+            raise ValueError(
+                f"egomotion_history last dim must be {self.egomotion_dim}, "
+                f"got tensor of shape {tuple(egomotion_history.shape)}."
+            )
 
         # Initialize GRU hidden state from ego state + visual history: [1, B, C]
         h = (self.ego_state_proj(egomotion_history)

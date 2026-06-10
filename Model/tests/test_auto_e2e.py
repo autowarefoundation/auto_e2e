@@ -3,12 +3,14 @@ import torch
 import sys
 sys.path.append('..')
 
+from model_components.backbone import Backbone
 from model_components.feature_fusion import FeatureFusion
 from model_components.trajectory_planner import TrajectoryPlanner
 from model_components.future_state import FutureState
 from model_components.view_fusion import build_view_fusion, FUSION_REGISTRY
 from model_components.view_fusion.cross_attention_fusion import CrossAttentionViewFusion
 from model_components.view_fusion.bev_fusion import BEVViewFusion
+from model_components.losses import TrajectoryImitationLoss
 
 
 def make_inputs(batch_size, num_views, device, include_camera_params=False):
@@ -342,6 +344,57 @@ class TestTrajectoryPlannerComponent:
         assert vis_hist.grad is not None and vis_hist.grad.abs().max() > 0
         assert ego.grad is not None and ego.grad.abs().max() > 0
 
+    def test_wrong_visual_history_dim_raises(self, device):
+        planner = TrajectoryPlanner(embed_dim=256, visual_history_dim=896).to(device)
+        bev = torch.randn(1, 256, 8, 8, device=device)
+        bad_vis_hist = torch.randn(1, 1024, device=device)  # wrong last dim
+        ego = torch.randn(1, 256, device=device)
+        with pytest.raises(ValueError, match="visual_history last dim must be 896"):
+            planner(bev, bad_vis_hist, ego)
+
+    def test_wrong_egomotion_dim_raises(self, device):
+        planner = TrajectoryPlanner(embed_dim=256, egomotion_dim=256).to(device)
+        bev = torch.randn(1, 256, 8, 8, device=device)
+        vis_hist = torch.randn(1, 896, device=device)
+        bad_ego = torch.randn(1, 128, device=device)  # wrong last dim
+        with pytest.raises(ValueError, match="egomotion_history last dim must be 256"):
+            planner(bev, vis_hist, bad_ego)
+
+    def test_offset_scale_negative_raises(self):
+        with pytest.raises(ValueError, match="offset_scale"):
+            TrajectoryPlanner(embed_dim=256, offset_scale=-1.0)
+
+    def test_offset_scale_nan_raises(self):
+        with pytest.raises(ValueError, match="offset_scale"):
+            TrajectoryPlanner(embed_dim=256, offset_scale=float("nan"))
+
+    def test_offset_scale_inf_raises(self):
+        with pytest.raises(ValueError, match="offset_scale"):
+            TrajectoryPlanner(embed_dim=256, offset_scale=float("inf"))
+
+    def test_offset_scale_zero_vs_nonzero_differ(self, device):
+        """offset_scale=0 makes deformable attention sample only at the
+        reference point; output must still be valid but differ from the
+        nonzero default."""
+        torch.manual_seed(0)
+        planner_zero = TrajectoryPlanner(embed_dim=256, offset_scale=0.0).to(device)
+        torch.manual_seed(0)
+        planner_pos = TrajectoryPlanner(embed_dim=256, offset_scale=0.1).to(device)
+        planner_zero.eval()
+        planner_pos.eval()
+
+        bev = torch.randn(1, 256, 8, 8, device=device)
+        vis_hist = torch.randn(1, 896, device=device)
+        ego = torch.randn(1, 256, device=device)
+
+        traj_zero, _ = planner_zero(bev, vis_hist, ego)
+        traj_pos, _ = planner_pos(bev, vis_hist, ego)
+
+        assert torch.isfinite(traj_zero).all(), \
+            "offset_scale=0 (reference-point-only) must still produce finite output"
+        assert not torch.allclose(traj_zero, traj_pos, atol=1e-5), \
+            "offset_scale=0 and offset_scale=0.1 should produce different trajectories"
+
 
 class TestFutureStateComponent:
     def test_accepts_ego_hidden(self, device):
@@ -600,6 +653,38 @@ class TestBEVFusion:
         assert out.abs().max() < 1e-6, \
             "Out-of-bounds projections should produce zero output"
 
+    def test_offset_scale_zero_vs_nonzero_differ(self, device):
+        """offset_scale=0 disables fan-out; output must differ from a nonzero
+        scale at the same seed."""
+        torch.manual_seed(0)
+        fusion_zero = BEVViewFusion(num_views=4, embed_dim=256, bev_h=8, bev_w=8,
+                                    offset_scale=0.0).to(device)
+        torch.manual_seed(0)
+        fusion_pos = BEVViewFusion(num_views=4, embed_dim=256, bev_h=8, bev_w=8,
+                                   offset_scale=0.1).to(device)
+        fusion_zero.eval()
+        fusion_pos.eval()
+        x = torch.randn(4, 256, 8, 8, device=device)
+        out_zero = fusion_zero(x, B=1, V=4)
+        out_pos = fusion_pos(x, B=1, V=4)
+        assert not torch.allclose(out_zero, out_pos, atol=1e-5), \
+            "offset_scale=0 and offset_scale=0.1 produced identical BEV output"
+
+    def test_offset_scale_negative_raises(self):
+        with pytest.raises(ValueError, match="offset_scale"):
+            BEVViewFusion(num_views=4, embed_dim=256, bev_h=8, bev_w=8,
+                          offset_scale=-1.0)
+
+    def test_offset_scale_nan_raises(self):
+        with pytest.raises(ValueError, match="offset_scale"):
+            BEVViewFusion(num_views=4, embed_dim=256, bev_h=8, bev_w=8,
+                          offset_scale=float("nan"))
+
+    def test_offset_scale_inf_raises(self):
+        with pytest.raises(ValueError, match="offset_scale"):
+            BEVViewFusion(num_views=4, embed_dim=256, bev_h=8, bev_w=8,
+                          offset_scale=float("inf"))
+
     def test_no_visible_camera_produces_zero_output(self, device):
         """If no camera can see any BEV cell, output should be exactly zero."""
         fusion = BEVViewFusion(num_views=1, embed_dim=256, bev_h=8, bev_w=8,
@@ -653,3 +738,445 @@ class TestFullBackboneIntegration:
         assert not torch.isnan(ego_hidden).any()
         for f in future:
             assert not torch.isnan(f).any()
+
+
+@pytest.mark.integration
+class TestResNet50Backbone:
+    """Exercises the dynamic backbone_channels computation on a backbone
+    whose feature_info shape differs from Swin (5 stages of channels
+    64/256/512/1024/2048 vs Swin's 4 stages of 96/192/384/768)."""
+
+    def test_resnet50_forward_pass(self, device):
+        from model_components.auto_e2e import AutoE2E
+        try:
+            model = AutoE2E(
+                backbone="res_net_50", num_views=8, fusion_mode="concat",
+                is_pretrained=False,
+            ).to(device)
+        except (FileNotFoundError, OSError) as e:
+            pytest.skip(f"Backbone construction failed: {e}")
+
+        # Dynamic backbone_channels = sum of all 5 ResNet50 stages = 3904
+        assert model.Backbone.backbone_channels == 64 + 256 + 512 + 1024 + 2048
+
+        visual, vis_hist, ego = make_inputs(1, 8, device)
+        traj, ego_hidden, future = model(visual, vis_hist, ego)
+
+        assert traj.shape == (1, 128)
+        assert ego_hidden.shape == (1, 256)
+        assert len(future) == 4
+        for f in future:
+            assert f.shape == (1, 256, 8, 8)
+        assert torch.isfinite(traj).all()
+        assert torch.isfinite(ego_hidden).all()
+
+
+# ---------------------------------------------------------------------------
+# Training loop integration — optimizer.step + loss
+# ---------------------------------------------------------------------------
+
+class TestTrainingLoop:
+    def test_optimizer_step_updates_parameters(self, build_mock_model, device):
+        """forward → loss → backward → optimizer.step() must move parameters
+        in EACH submodule, not just somewhere in the model. A grad that only
+        reaches the last layer would still satisfy a "any parameter changed"
+        check; this verifies every major group actually trains.
+
+        The loss is constructed from trajectory + ego_hidden + future so that
+        every group has a path to the loss:
+          - Backbone: feeds image features into FeatureFusion
+          - FeatureFusion: produces BEV / fused feats
+          - TrajectoryPlanner: outputs trajectory + ego_hidden
+          - FutureState: produces future feature pyramid (consumed below)
+        """
+        model = build_mock_model(num_views=8, fusion_mode="concat", device=device)
+        model.train()
+
+        optimizer = torch.optim.SGD(model.parameters(), lr=1e-2)
+
+        before = {n: p.detach().clone() for n, p in model.named_parameters()
+                  if p.requires_grad}
+
+        visual, vis_hist, ego = make_inputs(2, 8, device)
+        traj, ego_hidden, future = model(visual, vis_hist, ego)
+        loss = traj.sum() + ego_hidden.sum() + sum(f.sum() for f in future)
+
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+
+        groups = ["Backbone", "FeatureFusion", "TrajectoryPlanner", "FutureState"]
+        changed_per_group = {g: False for g in groups}
+        for name, p in model.named_parameters():
+            if not p.requires_grad:
+                continue
+            if torch.equal(p.detach(), before[name]):
+                continue
+            for prefix in groups:
+                if name.startswith(prefix + "."):
+                    changed_per_group[prefix] = True
+
+        unchanged = [g for g, ok in changed_per_group.items() if not ok]
+        assert not unchanged, \
+            f"optimizer.step() did not update any parameter in: {unchanged}"
+
+    def test_model_to_loss_backward_integration(self, build_mock_model, device):
+        """Pipe trajectory output into TrajectoryImitationLoss and run backward."""
+        model = build_mock_model(num_views=8, fusion_mode="concat", device=device)
+        model.train()
+        loss_fn = TrajectoryImitationLoss(num_timesteps=64, num_signals=2).to(device)
+
+        visual, vis_hist, ego = make_inputs(2, 8, device)
+        traj, _, _ = model(visual, vis_hist, ego)
+
+        target = torch.randn_like(traj)
+        loss = loss_fn(traj, target)
+        loss.backward()
+
+        assert torch.isfinite(loss), "Loss is non-finite"
+        # Verify gradient propagates through the full network depth, not just
+        # the last layer: both the upstream Backbone and the downstream
+        # TrajectoryPlanner must each see a nonzero grad on at least one param.
+        groups = {"Backbone": False, "TrajectoryPlanner": False}
+        for name, p in model.named_parameters():
+            if not p.requires_grad or p.grad is None:
+                continue
+            if p.grad.abs().max() == 0:
+                continue
+            for prefix in groups:
+                if name.startswith(prefix + "."):
+                    groups[prefix] = True
+        for prefix, has_grad in groups.items():
+            assert has_grad, f"No parameter in {prefix} received nonzero gradient"
+
+
+# ---------------------------------------------------------------------------
+# Behavioral tests on planner / future-state internals
+# ---------------------------------------------------------------------------
+
+class TestTrajectoryDynamics:
+    def test_trajectory_does_not_saturate(self, device):
+        """The GRU should produce time-varying outputs, not saturate to a constant.
+
+        Reshape the 64×2 trajectory and check that the second half of the
+        first signal channel is NOT a single repeated value.
+        """
+        torch.manual_seed(0)
+        planner = TrajectoryPlanner(embed_dim=256).to(device)
+        planner.eval()
+        bev = torch.randn(1, 256, 8, 8, device=device)
+        vis_hist = torch.randn(1, 896, device=device)
+        ego = torch.randn(1, 256, device=device)
+
+        traj, _ = planner(bev, vis_hist, ego)
+        # traj: [1, 128] = [1, 64*2]; reshape so dim 1 = timesteps
+        late = traj.view(1, 64, 2)[0, 32:, 0]
+        # Require substantial variation across the 32 late timesteps. A bare
+        # >1 threshold would pass even when 31 of 32 values collapse to the
+        # same constant — near-saturation we still want to catch.
+        assert late.unique().numel() >= 8, \
+            "Trajectory saturates to a constant value over the last 32 timesteps"
+
+    def test_deformable_clamp_handles_extreme_query(self, device):
+        """Extreme query magnitudes push sampling locations outside [0, 1];
+        the clamp inside _deformable_cross_attn must keep output finite AND
+        actively engage. Verified by:
+          1. With offset_scale=0.1, an extreme query produces sample_locs
+             that fall outside [0, 1] BEFORE the clamp — so the clamp is
+             the only thing keeping the result finite.
+          2. Output is finite at offset_scale=0.1 with the extreme query.
+          3. With offset_scale=0 (offsets disabled), the same extreme query
+             still produces finite output via the reference point alone.
+        """
+        torch.manual_seed(0)
+        planner_pos = TrajectoryPlanner(embed_dim=256, offset_scale=0.1).to(device)
+        torch.manual_seed(0)
+        planner_zero = TrajectoryPlanner(embed_dim=256, offset_scale=0.0).to(device)
+        planner_pos.eval()
+        planner_zero.eval()
+
+        # Build extreme query and value tensors directly to exercise the clamp.
+        B, C, H, W = 1, 256, 8, 8
+        query = torch.full((B, C), 1e6, device=device)
+        values = torch.randn(B, C, H, W, device=device)
+
+        # Sanity: with offsets active, sample_locs WITHOUT clamp would land
+        # outside [0, 1] for this query, so the clamp is the only reason
+        # the output remains finite.
+        ref = planner_pos.reference_point(query).sigmoid()
+        offs = (planner_pos.sampling_offsets(query)
+                .reshape(B, planner_pos.num_points, 2) * planner_pos.offset_scale)
+        unclamped = ref.unsqueeze(1) + offs
+        outside = ((unclamped < 0) | (unclamped > 1)).any()
+        assert outside, \
+            "Test setup failed: extreme query did not push sample_locs out of bounds"
+
+        out_pos = planner_pos._deformable_cross_attn(query, values)
+        out_zero = planner_zero._deformable_cross_attn(query, values)
+
+        assert torch.isfinite(out_pos).all(), \
+            "Clamp failed: output contains NaN/Inf for extreme query (offset_scale=0.1)"
+        assert torch.isfinite(out_zero).all(), \
+            "Reference-point-only path produced NaN/Inf for extreme query"
+
+    def test_offset_scale_zero_vs_nonzero_differ_in_attn(self, device):
+        """With normal-magnitude queries, offset_scale=0 vs 0.1 must produce
+        different deformable attention outputs — proving offsets actually
+        contribute (and don't just get squashed by the clamp). Uses the same
+        seed for the two planners so the only meaningful difference is whether
+        offsets fan out around the reference point."""
+        torch.manual_seed(0)
+        planner_pos = TrajectoryPlanner(embed_dim=256, offset_scale=0.1).to(device)
+        torch.manual_seed(0)
+        planner_zero = TrajectoryPlanner(embed_dim=256, offset_scale=0.0).to(device)
+        planner_pos.eval()
+        planner_zero.eval()
+
+        B, C, H, W = 1, 256, 8, 8
+        query = torch.randn(B, C, device=device)
+        values = torch.randn(B, C, H, W, device=device)
+
+        out_pos = planner_pos._deformable_cross_attn(query, values)
+        out_zero = planner_zero._deformable_cross_attn(query, values)
+
+        assert torch.isfinite(out_pos).all() and torch.isfinite(out_zero).all()
+        assert not torch.allclose(out_pos, out_zero, atol=1e-5), \
+            "offset_scale=0 vs 0.1 produced identical attn output — offsets inactive"
+
+
+class TestFutureStateChunkSplit:
+    def test_four_outputs_are_distinct(self, device):
+        """torch.chunk must split along channels, not return 4 views of the same data."""
+        torch.manual_seed(0)
+        future = FutureState(embed_dim=256, ego_hidden_dim=256).to(device)
+        future.eval()
+        feats = torch.randn(2, 256, 8, 8, device=device)
+        ego_hidden = torch.randn(2, 256, device=device)
+
+        out = future(feats, ego_hidden)
+        assert len(out) == 4
+        for i in range(4):
+            for j in range(i + 1, 4):
+                assert not torch.allclose(out[i], out[j], atol=1e-5), \
+                    f"FutureState outputs {i} and {j} are identical — chunk is broken"
+
+    def test_ego_hidden_changes_all_four_outputs(self, device):
+        """Different ego_hidden must shift every one of the 4 future predictions."""
+        torch.manual_seed(0)
+        future = FutureState(embed_dim=256, ego_hidden_dim=256).to(device)
+        future.eval()
+        feats = torch.randn(1, 256, 8, 8, device=device)
+
+        ego_a = torch.randn(1, 256, device=device)
+        ego_b = torch.randn(1, 256, device=device)
+
+        out_a = future(feats, ego_a)
+        out_b = future(feats, ego_b)
+
+        for i in range(4):
+            assert not torch.allclose(out_a[i], out_b[i], atol=1e-5), \
+                f"Future output {i} did not change when ego_hidden changed"
+
+
+class TestVisualHistoryNonZeroDifference:
+    def test_two_nonzero_visual_histories_differ(self, device):
+        """Both visual_history inputs are non-zero and distinct — outputs must differ."""
+        torch.manual_seed(0)
+        planner = TrajectoryPlanner(embed_dim=256).to(device)
+        planner.eval()
+        bev = torch.randn(1, 256, 8, 8, device=device)
+        ego = torch.randn(1, 256, device=device)
+
+        vh_a = torch.randn(1, 896, device=device)
+        vh_b = torch.randn(1, 896, device=device)
+        # Sanity: both are non-zero
+        assert vh_a.abs().max() > 0 and vh_b.abs().max() > 0
+        assert not torch.allclose(vh_a, vh_b)
+
+        traj_a, _ = planner(bev, vh_a, ego)
+        traj_b, _ = planner(bev, vh_b, ego)
+
+        assert not torch.allclose(traj_a, traj_b, atol=1e-5), \
+            "Two distinct non-zero visual_history inputs produced the same trajectory"
+
+
+# ---------------------------------------------------------------------------
+# Full-pipeline robustness
+# ---------------------------------------------------------------------------
+
+class TestFullPipelineRobustness:
+    def test_all_zero_inputs_produce_finite_outputs(self, build_mock_model, device):
+        """Zero inputs across all paths must not cause NaN/Inf anywhere downstream."""
+        model = build_mock_model(num_views=8, fusion_mode="concat", device=device)
+        model.eval()
+
+        visual = torch.zeros(2, 8, 3, 256, 256, device=device)
+        vis_hist = torch.zeros(2, 896, device=device)
+        ego = torch.zeros(2, 256, device=device)
+
+        traj, ego_hidden, future = model(visual, vis_hist, ego)
+
+        assert torch.isfinite(traj).all(), "NaN/Inf in trajectory with zero inputs"
+        assert torch.isfinite(ego_hidden).all(), "NaN/Inf in ego_hidden with zero inputs"
+        for i, f in enumerate(future):
+            assert torch.isfinite(f).all(), f"NaN/Inf in future feature {i} with zero inputs"
+
+    def test_camera_params_none_then_valid_switching(self, build_mock_model, device):
+        """A BEV-fusion model must accept both None and valid camera_params on the
+        same instance, producing finite and distinct outputs."""
+        model = build_mock_model(num_views=8, fusion_mode="bev", device=device)
+        model.eval()
+
+        visual, vis_hist, ego = make_inputs(1, 8, device, include_camera_params=False)
+
+        traj_none, _, _ = model(visual, vis_hist, ego, camera_params=None)
+        cam_params = torch.randn(1, 8, 3, 4, device=device)
+        traj_cam, _, _ = model(visual, vis_hist, ego, camera_params=cam_params)
+
+        assert torch.isfinite(traj_none).all(), "NaN/Inf with camera_params=None"
+        assert torch.isfinite(traj_cam).all(), "NaN/Inf with valid camera_params"
+        assert not torch.allclose(traj_none, traj_cam, atol=1e-5), \
+            "camera_params None vs valid produced identical outputs — projection has no effect"
+
+    def test_batch_size_one_smoke(self, build_mock_model, device):
+        """End-to-end forward must work at batch_size=1 with correct shapes and no NaN."""
+        model = build_mock_model(num_views=8, fusion_mode="concat", device=device)
+        model.eval()
+        visual, vis_hist, ego = make_inputs(1, 8, device)
+        traj, ego_hidden, future = model(visual, vis_hist, ego)
+
+        assert traj.shape == (1, 128)
+        assert ego_hidden.shape == (1, 256)
+        assert len(future) == 4
+        for f in future:
+            assert f.shape == (1, 256, 8, 8)
+        assert torch.isfinite(traj).all()
+        assert torch.isfinite(ego_hidden).all()
+        for f in future:
+            assert torch.isfinite(f).all()
+
+
+class _StubBackboneWithFeatureInfo(torch.nn.Module):
+    """Channels-first backbone exposing timm-style feature_info."""
+
+    def __init__(self):
+        super().__init__()
+        self.stage0 = torch.nn.Conv2d(3, 32, 3, stride=2, padding=1)
+        self.stage1 = torch.nn.Conv2d(32, 48, 3, stride=2, padding=1)
+        self.stage2 = torch.nn.Conv2d(48, 64, 3, stride=2, padding=1)
+        self.feature_info = [{"num_chs": 32}, {"num_chs": 48}, {"num_chs": 64}]
+
+    def forward(self, x):
+        s0 = self.stage0(x)
+        s1 = self.stage1(s0)
+        s2 = self.stage2(s1)
+        return [s0, s1, s2]
+
+
+class _StubBackboneNoFeatureInfo(torch.nn.Module):
+    """Channels-first backbone with NO feature_info (probe fallback path)."""
+
+    def __init__(self):
+        super().__init__()
+        self.stage0 = torch.nn.Conv2d(3, 24, 3, stride=2, padding=1)
+        self.stage1 = torch.nn.Conv2d(24, 56, 3, stride=2, padding=1)
+        self.stage2 = torch.nn.Conv2d(56, 112, 3, stride=2, padding=1)
+
+    def forward(self, x):
+        s0 = self.stage0(x)
+        s1 = self.stage1(s0)
+        s2 = self.stage2(s1)
+        return [s0, s1, s2]
+
+
+class _StubBackboneSwinLike(torch.nn.Module):
+    """Channels-last backbone (B, H, W, C) — exercises permute branch."""
+
+    def __init__(self):
+        super().__init__()
+        self.stage0 = torch.nn.Conv2d(3, 32, 3, stride=2, padding=1)
+        self.stage1 = torch.nn.Conv2d(32, 48, 3, stride=2, padding=1)
+        self.feature_info = [{"num_chs": 32}, {"num_chs": 48}]
+
+    def forward(self, x):
+        s0_cf = self.stage0(x)                                  # [B, 32, H, W]
+        s1_cf = self.stage1(s0_cf)                              # [B, 48, H, W]
+        s0 = s0_cf.permute(0, 2, 3, 1).contiguous()             # [B, H, W, 32]
+        s1 = s1_cf.permute(0, 2, 3, 1).contiguous()             # [B, H, W, 48]
+        return [s0, s1]
+
+
+class TestBackboneChannelDiscovery:
+    """Cover the backbone_channels discovery + layout-detection in Backbone."""
+
+    def _make_backbone(self, monkeypatch, stub_module):
+        # Patch the registry call so build_backbone returns our stub.
+        monkeypatch.setattr(
+            "model_components.backbone.build_backbone",
+            lambda *a, **kw: stub_module,
+        )
+        return Backbone(backbone="stub", is_pretrained=False)
+
+    def test_feature_info_path_sums_channels(self, monkeypatch):
+        bb = self._make_backbone(monkeypatch, _StubBackboneWithFeatureInfo())
+        assert bb.backbone_channels == 32 + 48 + 64
+
+    def test_probe_fallback_when_feature_info_missing(self, monkeypatch):
+        bb = self._make_backbone(monkeypatch, _StubBackboneNoFeatureInfo())
+        # No feature_info — channels recovered via probing.
+        assert bb.backbone_channels == 24 + 56 + 112
+
+    def test_feature_info_channels_match_forward_output(self, monkeypatch, device):
+        """sum(feature_info channels) must equal the actual concat-channel dim
+        of the forward output."""
+        bb = self._make_backbone(monkeypatch, _StubBackboneWithFeatureInfo()).to(device)
+        x = torch.randn(2, 3, 32, 32, device=device)
+        feats = bb(x)
+        total_c = sum(f.shape[1] for f in feats)
+        assert total_c == bb.backbone_channels
+
+    def test_probe_channels_match_forward_output(self, monkeypatch, device):
+        bb = self._make_backbone(monkeypatch, _StubBackboneNoFeatureInfo()).to(device)
+        x = torch.randn(2, 3, 32, 32, device=device)
+        feats = bb(x)
+        total_c = sum(f.shape[1] for f in feats)
+        assert total_c == bb.backbone_channels
+
+    def test_channels_last_backbone_is_permuted(self, monkeypatch, device):
+        """Channels-last (B, H, W, C) output must be permuted to (B, C, H, W)
+        based on tensor shape, NOT on the backbone name."""
+        bb = self._make_backbone(monkeypatch, _StubBackboneSwinLike()).to(device)
+        x = torch.randn(2, 3, 32, 32, device=device)
+        feats = bb(x)
+        # After Backbone.forward, every feature must be channels-first with the
+        # expected channel count at dim 1.
+        assert feats[0].shape[1] == 32
+        assert feats[1].shape[1] == 48
+
+    def test_channels_first_backbone_not_permuted(self, monkeypatch, device):
+        bb = self._make_backbone(monkeypatch, _StubBackboneWithFeatureInfo()).to(device)
+        x = torch.randn(2, 3, 32, 32, device=device)
+        feats = bb(x)
+        for f, expected in zip(feats, [32, 48, 64]):
+            assert f.shape[1] == expected
+
+
+class TestFeatureFusionWithSwinChannels:
+    def test_dynamic_backbone_channels_with_swin_sizes(self, device):
+        """FeatureFusion should accept Swin's per-stage channels (96, 192, 384, 768)
+        at their natural spatial resolutions and produce the expected fused shape."""
+        backbone_channels = 96 + 192 + 384 + 768  # 1440
+        fusion = FeatureFusion(
+            num_views=8, backbone_channels=backbone_channels, fusion_mode="concat",
+        ).to(device)
+
+        # Per-stage Swin spatial dims for a 256x256 input
+        features = [
+            torch.randn(16, 96, 64, 64, device=device),
+            torch.randn(16, 192, 32, 32, device=device),
+            torch.randn(16, 384, 16, 16, device=device),
+            torch.randn(16, 768, 8, 8, device=device),
+        ]
+        out = fusion(features, B=2, V=8)
+        assert out.shape == (2, 256, 8, 8)
+        assert torch.isfinite(out).all()
