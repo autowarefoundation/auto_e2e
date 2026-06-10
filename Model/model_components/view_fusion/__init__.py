@@ -9,7 +9,7 @@ FUSION_REGISTRY = {
 }
 
 
-def build_view_fusion(fusion_mode, num_views, embed_dim=1440, **kwargs):
+def build_view_fusion(fusion_mode, num_views, embed_dim=256, **kwargs):
     if fusion_mode not in FUSION_REGISTRY:
         raise ValueError(
             f"Unknown fusion_mode '{fusion_mode}'. "
