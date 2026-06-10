@@ -48,7 +48,6 @@ _RGB_TABLE: dict[tuple[str, str | None], tuple[int, int, int]] = {
     ("guard_rail",         None):          (139,  69,  19),   # saddlebrown
     ("wall",               None):          (205, 133,  63),   # peru
     ("building",           None):          (244, 164,  96),   # sandybrown
-    ("drivable_area",      None):          (173, 216, 230),   # lightblue
     ("line_thin",          "dashed"):      (  0,   0, 255),   # blue
     ("line_thick",         "dashed"):      (  0,   0, 255),   # blue
     ("line_thin",          "solid"):       (  0,   0, 255),   # blue
@@ -70,10 +69,13 @@ _FALLBACK_RGB: tuple[int, int, int] = (128, 0, 128)  # purple
 
 _BORDER_TYPES = {
     "road_border", "curbstone", "fence", "guard_rail",
-    "wall", "building", "drivable_area",
+    "wall", "building"
 }
 _DIVIDER_TYPES = {"line_thin", "line_thick"}
 _DIVIDER_SUBTYPES = {"solid", "dashed", "solid_solid", "solid_dashed", "dashed_solid"}
+
+_RENDER_SIZE = 2048  # fixed internal resolution for rendering map
+
 
 
 def _get_rgb(line_type: str, subtype: str) -> tuple[int, int, int]:
@@ -110,30 +112,24 @@ def _to_px(pts: np.ndarray, ego: np.ndarray, yaw: float, scale: float, rs: int) 
 def _cv_line(canvas, pts, ego, yaw, scale, rs, rgb, thickness):
     if len(pts) < 2:
         return
-    bgr = (rgb[2], rgb[1], rgb[0])
     cv2.polylines(canvas, [_to_px(pts, ego, yaw, scale, rs)],
-                  isClosed=False, color=bgr, thickness=thickness,
+                  isClosed=False, color=rgb, thickness=thickness,
                   lineType=cv2.LINE_AA)
 
-
-def _cv_divider(canvas, pts, ego, yaw, scale, rs, rgb):
-    """Gray background stroke then thin coloured stroke — mirrors _plot_lane_dividers."""
+def _cv_divider(canvas, pts, ego, yaw, scale, rs, rgb, thickness):
     if len(pts) < 2:
         return
     px = _to_px(pts, ego, yaw, scale, rs)
     cv2.polylines(canvas, [px], isClosed=False,
-                  color=(128, 128, 128), thickness=2, lineType=cv2.LINE_AA)
-    bgr = (rgb[2], rgb[1], rgb[0])
+                  color=(128, 128, 128), thickness=thickness * 2, lineType=cv2.LINE_AA)
     cv2.polylines(canvas, [px], isClosed=False,
-                  color=bgr, thickness=1, lineType=cv2.LINE_AA)
-
+                  color=rgb, thickness=thickness, lineType=cv2.LINE_AA)
 
 def _cv_dashed(canvas, pts, ego, yaw, scale, rs, rgb, thickness, dash, gap):
-    """Dashed polyline (OpenCV has no native dash support)."""
     if len(pts) < 2:
         return
     px = _to_px(pts, ego, yaw, scale, rs).reshape(-1, 2)
-    bgr = (rgb[2], rgb[1], rgb[0])
+    # remove bgr swap — use rgb directly
     accum, drawing = 0.0, True
     for i in range(len(px) - 1):
         p0, p1 = px[i].astype(float), px[i + 1].astype(float)
@@ -149,7 +145,7 @@ def _cv_dashed(canvas, pts, ego, yaw, scale, rs, rgb, thickness, dash, gap):
                 cv2.line(canvas,
                          tuple((p0 + d * pos).astype(int)),
                          tuple((p0 + d * (pos + step)).astype(int)),
-                         bgr, thickness, lineType=cv2.LINE_AA)
+                         rgb, thickness, lineType=cv2.LINE_AA)
             pos += step
             accum += step
             if accum >= (dash if drawing else gap):
@@ -163,34 +159,29 @@ def generate_bev_map_tile(
     ego_yaw: float = 0.0,
     canvas_size: int = 224,
     radius_meters: float = 60.0,
-    supersample: int = 4,
+    linewidths: float = 1.5,
 ) -> np.ndarray | None:
-    """Rasterise a semantic BEV map tile centred on the ego vehicle (OpenCV).
-
+    """
     Args:
         scene_path: Scene directory path.
-        ego_local_x: Ego X in map-local frame (metres).
-        ego_local_y: Ego Y in map-local frame (metres).
-        ego_yaw: Ego heading in map frame (radians, Z-up convention). The tile
-            is rotated so the ego's heading always points straight up.
-        canvas_size: Output side length in pixels.
+        ego_x: Ego X in map-local frame (metres).
+        ego_y: Ego Y in map-local frame (metres).
+        ego_yaw: Ego heading in map frame (radians, Z-up convention).
+        canvas_size: Output size in pixels. Rendered internally at
+            _RENDER_SIZE and resized to this.
         radius_meters: Half-width of the observation window in metres.
-        supersample: Render at N×canvas_size then downsample with INTER_AREA.
-
-    Returns:
-        uint8 RGB (canvas_size, canvas_size, 3). White if map unavailable.
+        linewidths: Base line weight; scaled internally to the render size.
     """
     scene_map = _cached_scene_map(scene_path)
     if scene_map is None:
-        # Returning None to distinguish map load failure from an empty map (white).
         return None
 
-    rs = canvas_size * supersample
+    rs = _RENDER_SIZE
     canvas = np.full((rs, rs, 3), 255, dtype=np.uint8)
     scale = rs / (radius_meters * 2.0)
     ego = np.array([ego_x, ego_y], dtype=np.float64)
     yaw = float(ego_yaw)
-    ss = supersample
+    lw = max(1, round(linewidths * rs / 1000))  # scale line weight to render size; linewidths is in "units per 1000px"
 
     try:
         lanelets = scene_map.get_lanelets_in_roi(center=ego, radius=radius_meters)
@@ -205,12 +196,12 @@ def generate_bev_map_tile(
             b_type = _attr(bound, "type")
             b_sub = _attr(bound, "subtype")
             if b_type in _BORDER_TYPES:
-                _cv_line(canvas, pts, ego, yaw, scale, rs, _get_rgb(b_type, b_sub), 1)
+                _cv_line(canvas, pts, ego, yaw, scale, rs, _get_rgb(b_type, b_sub), lw)
             elif b_type in _DIVIDER_TYPES and b_sub in _DIVIDER_SUBTYPES:
                 _cv_divider(canvas, pts, ego, yaw, scale, rs,
-                            _get_rgb(b_type, b_sub))
+                            _get_rgb(b_type, b_sub), lw)
             elif b_type == "virtual":
-                _cv_line(canvas, pts, ego, yaw, scale, rs, _get_rgb("virtual", ""), 1)
+                _cv_line(canvas, pts, ego, yaw, scale, rs, _get_rgb("virtual", ""), lw)
 
     # Pass 2: centerlines — dashed darkred
     for llt in lanelets:
@@ -220,29 +211,33 @@ def generate_bev_map_tile(
         if len(cl) >= 2:
             _cv_dashed(canvas, cl, ego, yaw, scale, rs,
                        _get_rgb("line_thin", "centerline"),
-                       1, dash=8 * ss, gap=8 * ss)
+                       thickness=lw, dash=4 * lw, gap=4 * lw)
 
-    # Pass 3: pedestrian crossings — yellow
+    # Pass 3: pedestrian crossings
     for llt in lanelets:
         if _attr(llt, "subtype") != "crosswalk":
             continue
         for bound in (llt.leftBound, llt.rightBound):
             pts = np.array([[p.x, p.y] for p in bound], dtype=np.float64)
-            _cv_line(canvas, pts, ego, yaw, scale, rs,
-                     _get_rgb("pedestrian_marking", ""), 1)
+            b_type = _attr(bound, "type")
+            b_sub = _attr(bound, "subtype")
+            color = _get_rgb(b_type, b_sub)
+            if color == _FALLBACK_RGB:
+                color = _get_rgb("pedestrian_marking", None)
+            _cv_line(canvas, pts, ego, yaw, scale, rs, color, lw)
 
-    # Pass 4: stop lines — red
+    # Pass 4: stop lines
     try:
         for line in scene_map.get_stop_lines():
             pts = np.array(line, dtype=np.float64)
-            _cv_line(canvas, pts, ego, yaw, scale, rs, _get_rgb("stop_line", ""), 1)
+            _cv_line(canvas, pts, ego, yaw, scale, rs, _get_rgb("stop_line", ""), lw)
     except Exception:
         pass
 
-    if supersample == 1:
+    if canvas_size == rs:
         return canvas
-    return cv2.resize(canvas, (canvas_size, canvas_size),
-                      interpolation=cv2.INTER_AREA)
+    interp = cv2.INTER_AREA if canvas_size < rs else cv2.INTER_LINEAR
+    return cv2.resize(canvas, (canvas_size, canvas_size), interpolation=interp)
 
 
 # ---------------------------------------------------------------------------
@@ -255,16 +250,13 @@ _LEGEND_ENTRIES: list[tuple[str, tuple[float, float, float]]] = [
     ("Curbstone High",     (0,      100/255, 0)),
     ("Curbstone Low",      (50/255, 205/255, 50/255)),
     ("Fence / Guard Rail", (139/255, 69/255, 19/255)),
-    ("Drivable Area",      (173/255, 216/255, 230/255)),
     ("Dashed lane",        (0,      0,       1.0)),
     ("Solid lane",         (0,      0,       139/255)),
     ("Solid-Dashed",       (65/255, 105/255, 225/255)),
-    ("Virtual",            (105/255, 105/255, 105/255)),
     ("Centerline",         (139/255, 0,       0)),
     ("Stop Line",          (1.0,    0,       0)),
     ("Ped. Crossing",      (1.0,    1.0,     0)),
 ]
-
 
 def visualise_bev_tile(
     bev_rgb: np.ndarray,
