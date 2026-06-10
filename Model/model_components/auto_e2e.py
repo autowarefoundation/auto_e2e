@@ -37,7 +37,7 @@ class AutoE2E(nn.Module):
         # Future visual state prediction conditioned on planner ego_hidden
         self.FutureState = FutureState(embed_dim=embed_dim, ego_hidden_dim=embed_dim)
 
-    def forward(self, x, egomotion_history, camera_params=None, mode="train"):
+    def forward(self, x, visual_history, egomotion_history, camera_params=None, mode="train"):
         B, V, C, H, W = x.shape
 
         # Merge batch and views for backbone processing
@@ -47,7 +47,9 @@ class AutoE2E(nn.Module):
         # Fuse multi-scale features and unify across views
         fused_features = self.FeatureFusion(features, B, V, camera_params=camera_params)
 
-        trajectory, ego_hidden = self.TrajectoryPlanner(fused_features, egomotion_history)
+        trajectory, ego_hidden = self.TrajectoryPlanner(
+            fused_features, visual_history, egomotion_history
+        )
 
         if mode == "train":
             future_visual_features = self.FutureState(fused_features, ego_hidden)
