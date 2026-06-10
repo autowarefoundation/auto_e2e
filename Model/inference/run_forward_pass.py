@@ -15,6 +15,9 @@ def run_forward_pass(backbone, fusion_mode, device, embed_dim=256, batch_size=2,
     # Visual Scene Input: [batch, num_views, channels, height, width]
     visual_tiles = torch.randn(batch_size, num_views, 3, 256, 256).to(device)
 
+    # Visual History Input: [batch, 896] — 64 frames × 14-dim compressed scene memory
+    visual_history = torch.randn(batch_size, 896).to(device)
+
     # Egomotion History Input: [batch, 256]
     egomotion_history = torch.randn(batch_size, 256).to(device)
 
@@ -26,7 +29,7 @@ def run_forward_pass(backbone, fusion_mode, device, embed_dim=256, batch_size=2,
 
     # Run inference - train mode means all layers are activated
     trajectory, ego_hidden, future_visual_features = \
-        model(visual_tiles, egomotion_history,
+        model(visual_tiles, visual_history, egomotion_history,
               camera_params=camera_params, mode="train")
 
     print(f"Trajectory Prediction:              {trajectory.shape}")
