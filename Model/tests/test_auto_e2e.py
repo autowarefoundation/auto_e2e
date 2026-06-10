@@ -9,6 +9,7 @@ from model_components.future_state import FutureState
 from model_components.view_fusion import build_view_fusion, FUSION_REGISTRY
 from model_components.view_fusion.cross_attention_fusion import CrossAttentionViewFusion
 from model_components.view_fusion.bev_fusion import BEVViewFusion
+from model_components.losses import TrajectoryImitationLoss
 
 
 def make_inputs(batch_size, num_views, device, include_camera_params=False):
@@ -653,3 +654,54 @@ class TestFullBackboneIntegration:
         assert not torch.isnan(ego_hidden).any()
         for f in future:
             assert not torch.isnan(f).any()
+
+
+# ---------------------------------------------------------------------------
+# Training loop integration — optimizer.step + loss
+# ---------------------------------------------------------------------------
+
+class TestTrainingLoop:
+    def test_optimizer_step_updates_parameters(self, build_mock_model, device):
+        """forward → loss → backward → optimizer.step() must move parameters."""
+        model = build_mock_model(num_views=8, fusion_mode="concat", device=device)
+        model.train()
+
+        optimizer = torch.optim.SGD(model.parameters(), lr=1e-2)
+
+        before = {n: p.detach().clone() for n, p in model.named_parameters()
+                  if p.requires_grad}
+
+        visual, vis_hist, ego = make_inputs(2, 8, device)
+        traj, _, _ = model(visual, vis_hist, ego)
+        loss = traj.sum()
+
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+
+        changed = [
+            n for n, p in model.named_parameters()
+            if p.requires_grad and not torch.equal(p.detach(), before[n])
+        ]
+        assert len(changed) > 0, \
+            "optimizer.step() did not update any parameters"
+
+    def test_model_to_loss_backward_integration(self, build_mock_model, device):
+        """Pipe trajectory output into TrajectoryImitationLoss and run backward."""
+        model = build_mock_model(num_views=8, fusion_mode="concat", device=device)
+        model.train()
+        loss_fn = TrajectoryImitationLoss(num_timesteps=64, num_signals=2).to(device)
+
+        visual, vis_hist, ego = make_inputs(2, 8, device)
+        traj, _, _ = model(visual, vis_hist, ego)
+
+        target = torch.randn_like(traj)
+        loss = loss_fn(traj, target)
+        loss.backward()
+
+        assert torch.isfinite(loss), "Loss is non-finite"
+        any_grad = any(
+            p.grad is not None and p.grad.abs().max() > 0
+            for p in model.parameters() if p.requires_grad
+        )
+        assert any_grad, "No parameter received gradient from loss"
