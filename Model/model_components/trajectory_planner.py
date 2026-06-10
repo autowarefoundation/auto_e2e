@@ -96,7 +96,6 @@ class TrajectoryPlanner(nn.Module):
             trajectory: [B, num_timesteps * num_signals]
             ego_hidden: [B, embed_dim] — final GRU hidden state.
         """
-        B = bev_features.shape[0]
 
         # Initialize GRU hidden state from ego state + visual history: [1, B, C]
         h = (self.ego_state_proj(egomotion_history)
