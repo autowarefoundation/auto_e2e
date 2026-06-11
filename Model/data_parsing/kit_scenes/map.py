@@ -121,7 +121,7 @@ def _cv_divider(canvas, pts, ego, yaw, scale, rs, rgb, thickness):
         return
     px = _to_px(pts, ego, yaw, scale, rs)
     cv2.polylines(canvas, [px], isClosed=False,
-                  color=(128, 128, 128), thickness=thickness * 2, lineType=cv2.LINE_AA)
+                  color=(128, 128, 128), thickness=thickness * 3, lineType=cv2.LINE_AA)
     cv2.polylines(canvas, [px], isClosed=False,
                   color=rgb, thickness=thickness, lineType=cv2.LINE_AA)
 
@@ -246,16 +246,17 @@ def generate_bev_map_tile(
 
 # Legend entries matching ls_type_to_color in ml_converter_vis_utils
 _LEGEND_ENTRIES: list[tuple[str, tuple[float, float, float]]] = [
-    ("Road Border",        (0,      200/255, 0)),
-    ("Curbstone High",     (0,      100/255, 0)),
-    ("Curbstone Low",      (50/255, 205/255, 50/255)),
-    ("Fence / Guard Rail", (139/255, 69/255, 19/255)),
-    ("Dashed lane",        (0,      0,       1.0)),
-    ("Solid lane",         (0,      0,       139/255)),
-    ("Solid-Dashed",       (65/255, 105/255, 225/255)),
-    ("Centerline",         (139/255, 0,       0)),
-    ("Stop Line",          (1.0,    0,       0)),
-    ("Ped. Crossing",      (1.0,    1.0,     0)),
+    ("Road Border",                                      (0,       200/255, 0)),
+    ("Curbstone High",                                   (0,       100/255, 0)),
+    ("Curbstone Low",                                    (50/255,  205/255, 50/255)),
+    ("Fence / Guard Rail",                               (139/255, 69/255,  19/255)),
+    ("Virtual boundary",                                 (105/255, 105/255, 105/255)),
+    ("Dashed lane divider (blue + grey outline)",        (0,       0,       1.0)),
+    ("Solid lane divider (darkblue + grey outline)",     (0,       0,       139/255)),
+    ("Solid-Dashed divider (royalblue + grey outline)",  (65/255,  105/255, 225/255)),
+    ("Centerline",                                       (139/255, 0,       0)),
+    ("Stop Line",                                        (1.0,     0,       0)),
+    ("Ped. Crossing",                                    (1.0,     1.0,     0)),
 ]
 
 def visualise_bev_tile(
