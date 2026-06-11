@@ -2,6 +2,7 @@ import math
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from .base import BasePlanner
 
@@ -35,10 +36,10 @@ class FlowMatchingPlanner(BasePlanner):
     Outputs match the GRU planner contract: ``(trajectory, ego_hidden)``
     where ``ego_hidden`` is a learned projection of pooled BEV plus
     visual_history and ego state, and is consumed downstream by
-    FutureState. In training mode the first return is the *predicted
-    velocity* at the sampled (u_t, t), not a trajectory — the caller
-    pairs it with the matching target velocity when computing the
-    flow-matching loss.
+    FutureState. ``forward()`` always returns the integrated trajectory;
+    the flow-matching loss lives in ``compute_planner_loss`` so the raw
+    velocity tensor never escapes the planner — the caller cannot pair it
+    with the wrong target.
     """
 
     def __init__(self, embed_dim=256, num_timesteps=64, num_signals=2,
@@ -146,17 +147,10 @@ class FlowMatchingPlanner(BasePlanner):
     def construct_training_data(self, trajectory_target):
         """Sample (u_t, t, target_velocity) for one flow-matching training step.
 
-        Public so the training loop can compute the flow-matching loss: the
-        target velocity is x_1 - x_0 where x_0 is the *internal* random noise
-        sample drawn here, so it cannot be reconstructed from forward()'s
-        return value alone. Intended usage::
-
-            u_t, t, target_velocity = planner.construct_training_data(trajectory_target)
-            velocity_pred, ego_hidden = model(
-                bev, vis_hist, ego, mode="train",
-                noisy_trajectory=u_t, flow_timestep=t,
-            )
-            loss = F.mse_loss(velocity_pred, target_velocity)
+        Used internally by ``compute_planner_loss``. Kept public so that
+        advanced callers can share the same (u_t, t) across multiple loss
+        terms without re-sampling — the canonical path is
+        ``compute_planner_loss``, which never exposes the raw velocity.
 
         Returns:
             u_t: [B, trajectory_dim] — the noisy interpolated state.
@@ -214,55 +208,29 @@ class FlowMatchingPlanner(BasePlanner):
         return velocity_seq.reshape(B, self.trajectory_dim)
 
     def forward(self, bev_features, visual_history, egomotion_history,
-                mode="train", trajectory_target=None,
-                noisy_trajectory=None, flow_timestep=None,
                 generator=None, **kwargs):
-        """
+        """Inference: Euler-integrate ``dx/dt = v_theta(x, t, ...)`` over [0, 1].
+
         Args:
             bev_features: [B, embed_dim, H, W].
             visual_history: [B, visual_history_dim].
             egomotion_history: [B, egomotion_dim].
-            mode: "train" returns predicted velocity at a sampled (u_t, t);
-                anything else (e.g. "infer") integrates the ODE from noise
-                to trajectory.
-            trajectory_target: [B, trajectory_dim], required in train mode
-                unless ``noisy_trajectory`` and ``flow_timestep`` are both
-                supplied. Used to sample (u_t, t, target_velocity).
-            noisy_trajectory: optional pre-sampled u_t for train mode, lets
-                the caller share the same (u_t, t) across loss components
-                without re-sampling.
-            flow_timestep: optional pre-sampled t paired with
-                ``noisy_trajectory``.
             generator: optional ``torch.Generator`` used to seed the noise
-                prior in inference mode, so evaluation runs are
-                reproducible. Ignored in train mode.
-            **kwargs: ignored.
+                prior so evaluation runs are reproducible.
+            **kwargs: ignored. Accepts extra inputs other planners or
+                callers might pass so call sites can stay planner-agnostic.
 
         Returns:
-            train mode: (velocity_pred [B, trajectory_dim], ego_hidden [B, embed_dim])
-            infer mode: (trajectory [B, trajectory_dim], ego_hidden [B, embed_dim])
+            trajectory: [B, trajectory_dim] — integrated from a noise sample.
+            ego_hidden: [B, embed_dim] — context vector consumed downstream
+                by FutureState.
         """
         self._validate_inputs(visual_history, egomotion_history)
         mod_cond = self._modulation_conditioning(visual_history, egomotion_history)
         ego_hidden = self._ego_hidden(bev_features, mod_cond)
+        # bev_seq is computed once and reused across every Euler step.
         bev_seq = self._project_bev(bev_features)
 
-        if mode == "train":
-            if noisy_trajectory is not None and flow_timestep is not None:
-                u_t, t = noisy_trajectory, flow_timestep
-            elif trajectory_target is not None:
-                u_t, t, _ = self.construct_training_data(trajectory_target)
-            else:
-                raise ValueError(
-                    "FlowMatchingPlanner train mode requires either "
-                    "trajectory_target, or both noisy_trajectory and "
-                    "flow_timestep."
-                )
-            velocity_pred = self._v_theta(u_t, t, bev_seq, mod_cond)
-            return velocity_pred, ego_hidden
-
-        # Inference: Euler-integrate dx/dt = v_theta(x, t, ...) over [0, 1].
-        # bev_seq is computed once above and reused across every Euler step.
         B = bev_features.shape[0]
         x = torch.randn(B, self.trajectory_dim,
                         device=bev_features.device, dtype=bev_features.dtype,
@@ -275,3 +243,30 @@ class FlowMatchingPlanner(BasePlanner):
             v = self._v_theta(x, t, bev_seq, mod_cond)
             x = x + dt * v
         return x, ego_hidden
+
+    def compute_planner_loss(self, bev_features, visual_history,
+                             egomotion_history, trajectory_target):
+        """Flow-matching MSE between predicted and target conditional velocity.
+
+        Samples (u_t, t, target_velocity) from ``construct_training_data``
+        and computes ``F.mse_loss(v_theta(u_t, t, c), target_velocity)``.
+        The raw predicted velocity never leaves this method, so the caller
+        cannot accidentally MSE it against a trajectory target.
+
+        Returns ``(loss, ego_hidden)`` as required by ``BasePlanner``.
+        """
+        self._validate_inputs(visual_history, egomotion_history)
+        B = bev_features.shape[0]
+        self._validate_trajectory_target(
+            trajectory_target, B, bev_features.device,
+        )
+
+        u_t, t, target_velocity = self.construct_training_data(trajectory_target)
+
+        mod_cond = self._modulation_conditioning(visual_history, egomotion_history)
+        ego_hidden = self._ego_hidden(bev_features, mod_cond)
+        bev_seq = self._project_bev(bev_features)
+
+        velocity_pred = self._v_theta(u_t, t, bev_seq, mod_cond)
+        loss = F.mse_loss(velocity_pred, target_velocity)
+        return loss, ego_hidden
