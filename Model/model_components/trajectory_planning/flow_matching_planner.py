@@ -172,13 +172,25 @@ class FlowMatchingPlanner(BasePlanner):
         target_velocity = trajectory_target - x_0
         return u_t, t, target_velocity
 
-    def _v_theta(self, u_t, t, bev_features, mod_cond):
+    def _project_bev(self, bev_features):
+        """Flatten BEV to a sequence of projected key/value tokens.
+
+        ``[B, embed_dim, H, W]`` → ``[B, H*W, embed_dim]``. The projection
+        is independent of u_t and t, so callers compute it once per
+        forward() and reuse it across all Euler steps in inference.
+        """
+        bev_seq = bev_features.flatten(2).transpose(1, 2)
+        return self.bev_kv_proj(bev_seq)
+
+    def _v_theta(self, u_t, t, bev_seq, mod_cond):
         """Conditional velocity network with BEV cross-attention + AdaLN.
 
         Args:
             u_t: [B, trajectory_dim]
             t: [B]
-            bev_features: [B, embed_dim, H, W]
+            bev_seq: [B, H*W, embed_dim] — BEV keys/values already produced
+                by ``_project_bev``. Precomputed once per forward() to avoid
+                re-flattening and re-projecting on every Euler step.
             mod_cond: [B, embed_dim] — visual_history + egomotion conditioning.
 
         Returns:
@@ -189,10 +201,6 @@ class FlowMatchingPlanner(BasePlanner):
         # Action queries: one token per future timestep.
         u_t_seq = u_t.reshape(B, self.num_timesteps, self.num_signals)
         queries = self.action_proj(u_t_seq)                      # [B, T, C]
-
-        # BEV spatial keys/values: H*W tokens, channels last.
-        bev_seq = bev_features.flatten(2).transpose(1, 2)        # [B, H*W, C]
-        bev_seq = self.bev_kv_proj(bev_seq)
 
         attended, _ = self.cross_attn(queries, bev_seq, bev_seq) # [B, T, C]
 
@@ -237,6 +245,7 @@ class FlowMatchingPlanner(BasePlanner):
         self._validate_inputs(visual_history, egomotion_history)
         mod_cond = self._modulation_conditioning(visual_history, egomotion_history)
         ego_hidden = self._ego_hidden(bev_features, mod_cond)
+        bev_seq = self._project_bev(bev_features)
 
         if mode == "train":
             if noisy_trajectory is not None and flow_timestep is not None:
@@ -249,10 +258,11 @@ class FlowMatchingPlanner(BasePlanner):
                     "trajectory_target, or both noisy_trajectory and "
                     "flow_timestep."
                 )
-            velocity_pred = self._v_theta(u_t, t, bev_features, mod_cond)
+            velocity_pred = self._v_theta(u_t, t, bev_seq, mod_cond)
             return velocity_pred, ego_hidden
 
         # Inference: Euler-integrate dx/dt = v_theta(x, t, ...) over [0, 1].
+        # bev_seq is computed once above and reused across every Euler step.
         B = bev_features.shape[0]
         x = torch.randn(B, self.trajectory_dim,
                         device=bev_features.device, dtype=bev_features.dtype,
@@ -262,6 +272,6 @@ class FlowMatchingPlanner(BasePlanner):
             t_val = step * dt
             t = torch.full((B,), t_val,
                            device=bev_features.device, dtype=bev_features.dtype)
-            v = self._v_theta(x, t, bev_features, mod_cond)
+            v = self._v_theta(x, t, bev_seq, mod_cond)
             x = x + dt * v
         return x, ego_hidden
