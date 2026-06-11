@@ -96,6 +96,38 @@ def test_gradients_flow_to_all_parameters_and_input():
         assert torch.isfinite(p.grad).all(), f"Non-finite grad for {name}"
 
 
+def test_keeps_most_recent_frames_when_length_not_multiple_of_ratio():
+    """With T not a multiple of the ratio, the OLDEST ``T % ratio`` frames
+    must be dropped (zero gradient) and every most-recent frame must receive
+    gradient. History is ordered oldest -> most recent, so this guarantees
+    the most informative (recent) 0.x s of the past are never discarded.
+
+    Regression test: the previous implementation let the strided Conv1d drop
+    the trailing window, i.e. with T=64/ratio=10 the most RECENT frames
+    60-63 had exactly zero gradient.
+    """
+    encoder = HistoryEncoder(
+        input_dim=INPUT_DIM, hidden_dim=HIDDEN_DIM, subsample_ratio=10,
+    )
+    T = 64  # 64 % 10 = 4 leftover frames
+    remainder = T % encoder.subsample_ratio
+    history = torch.randn(B, T, INPUT_DIM, requires_grad=True)
+    encoder(history).pow(2).mean().backward()
+
+    per_frame_grad = history.grad.abs().sum(dim=(0, 2))  # [T]
+    # The oldest ``remainder`` frames are discarded (left-trim) ...
+    assert torch.all(per_frame_grad[:remainder] == 0), (
+        "Oldest leftover frames should not influence the output"
+    )
+    # ... and ALL remaining frames — most-recent ones included — contribute.
+    assert torch.all(per_frame_grad[remainder:] > 0), (
+        "Most recent frames must receive gradient (they were dropped "
+        "before the fix)"
+    )
+    # Output length contract is unchanged: T' = T // ratio.
+    assert encoder.compress(history.detach()).shape[1] == T // 10
+
+
 def test_context_depends_on_history():
     torch.manual_seed(0)
     encoder = HistoryEncoder(input_dim=INPUT_DIM, hidden_dim=HIDDEN_DIM)

@@ -27,7 +27,11 @@ class HistoryEncoder(nn.Module):
          ``kernel=stride=subsample_ratio`` pools each ``subsample_ratio``-step
          window (e.g. 10 steps at 10 Hz -> 1 step at 1 Hz) while EXPANDING the
          feature dimension to ``hidden_dim`` (coarser in time, richer in
-         feature). A trailing window shorter than the ratio is dropped.
+         feature). The history is assumed to be ordered oldest -> most
+         recent; when ``T`` is not a multiple of the ratio, the OLDEST
+         ``T % subsample_ratio`` steps are dropped (left-trim) so that the
+         pooling windows stay aligned to the present and the most recent
+         frames are always kept.
       2. Sequence summarisation: a GRU over the ~1 Hz sequence; the final
          hidden state is the history context.
 
@@ -71,13 +75,24 @@ class HistoryEncoder(nn.Module):
 
     def compress(self, history: torch.Tensor) -> torch.Tensor:
         """Temporal compression only: [B, T, input_dim] -> [B, T', hidden_dim]
-        with ``T' = T // subsample_ratio``."""
+        with ``T' = T // subsample_ratio``.
+
+        Assumes ``history`` is ordered oldest -> most recent. If ``T`` is not
+        a multiple of ``subsample_ratio``, the leading (oldest)
+        ``T % subsample_ratio`` steps are dropped so the most recent frames
+        always contribute to the output.
+        """
         B, T, _ = history.shape
         if T < self.subsample_ratio:
             raise ValueError(
                 f"History length {T} is shorter than subsample_ratio "
                 f"{self.subsample_ratio}; need at least one full window."
             )
+        # Left-trim the remainder: keep the most recent frames (the history
+        # is oldest -> most recent), discarding only the oldest leftovers.
+        remainder = T % self.subsample_ratio
+        if remainder:
+            history = history[:, remainder:, :]
         x = history.transpose(1, 2)            # [B, input_dim, T]
         x = self.temporal_compress(x)          # [B, hidden_dim, T']
         x = self.activation(x)
@@ -88,7 +103,8 @@ class HistoryEncoder(nn.Module):
         """Encode the past.
 
         Args:
-            history: ``[B, T, input_dim]`` past sequence (e.g. T=64 at 10 Hz).
+            history: ``[B, T, input_dim]`` past sequence ordered oldest ->
+                most recent (e.g. T=64 at 10 Hz).
 
         Returns:
             context: ``[B, hidden_dim]`` summary of the compressed history.
