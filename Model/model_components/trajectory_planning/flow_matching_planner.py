@@ -115,6 +115,42 @@ class FlowMatchingPlanner(BasePlanner):
                 f"got tensor of shape {tuple(egomotion_history.shape)}."
             )
 
+    def _validate_flow_inputs(self, u_t, t, batch_size):
+        expected_u = (batch_size, self.trajectory_dim)
+        if tuple(u_t.shape) != expected_u:
+            raise ValueError(
+                f"noisy_trajectory must have shape {expected_u} "
+                f"(batch_size, num_timesteps * num_signals), got {tuple(u_t.shape)}."
+            )
+        if tuple(t.shape) != (batch_size,):
+            raise ValueError(
+                f"flow_timestep must have shape ({batch_size},), got {tuple(t.shape)}."
+            )
+        if u_t.device != t.device:
+            raise ValueError(
+                f"noisy_trajectory and flow_timestep must be on the same device, "
+                f"got {u_t.device} and {t.device}."
+            )
+        if u_t.dtype != t.dtype:
+            raise ValueError(
+                f"noisy_trajectory and flow_timestep must share dtype, "
+                f"got {u_t.dtype} and {t.dtype}."
+            )
+
+    def _validate_trajectory_target(self, trajectory_target, batch_size, device):
+        expected = (batch_size, self.trajectory_dim)
+        if tuple(trajectory_target.shape) != expected:
+            raise ValueError(
+                f"trajectory_target must have shape {expected} "
+                f"(batch_size, num_timesteps * num_signals), got "
+                f"{tuple(trajectory_target.shape)}."
+            )
+        if trajectory_target.device != device:
+            raise ValueError(
+                f"trajectory_target must be on the same device as bev_features, "
+                f"got {trajectory_target.device} and {device}."
+            )
+
     def _sinusoidal_time_embedding(self, t):
         """Map t in [0, 1] to a sinusoidal embedding of size time_embed_dim.
 
@@ -164,6 +200,9 @@ class FlowMatchingPlanner(BasePlanner):
                        dtype=trajectory_target.dtype)
         u_t = (1.0 - t).unsqueeze(-1) * x_0 + t.unsqueeze(-1) * trajectory_target
         target_velocity = trajectory_target - x_0
+        # Cheap defense-in-depth: catch shape regressions even on the
+        # internal sampling path.
+        self._validate_flow_inputs(u_t, t, B)
         return u_t, t, target_velocity
 
     def _project_bev(self, bev_features):
