@@ -1498,6 +1498,60 @@ class TestFlowMatchingPlanner:
         assert not torch.allclose(traj_a, traj_c), \
             "different generator seeds must produce different trajectories"
 
+    def test_compute_planner_loss_wrong_target_shape_raises(self, device):
+        planner = FlowMatchingPlanner(embed_dim=256).to(device)
+        bev = torch.randn(2, 256, 8, 8, device=device)
+        vis_hist = torch.randn(2, 896, device=device)
+        ego = torch.randn(2, 256, device=device)
+        # Wrong batch dim
+        bad_target = torch.randn(3, 128, device=device)
+        with pytest.raises(ValueError, match="trajectory_target must have shape"):
+            planner.compute_planner_loss(bev, vis_hist, ego, bad_target)
+        # Wrong feature dim
+        bad_target2 = torch.randn(2, 64, device=device)
+        with pytest.raises(ValueError, match="trajectory_target must have shape"):
+            planner.compute_planner_loss(bev, vis_hist, ego, bad_target2)
+
+    def test_construct_training_data_wrong_target_shape_propagates(self, device):
+        """The internal _validate_flow_inputs guard must catch shape regressions
+        even when the user only calls construct_training_data."""
+        planner = FlowMatchingPlanner(
+            embed_dim=256, num_timesteps=4, num_signals=2,
+        ).to(device)
+        # construct_training_data uses target's shape verbatim; if that shape
+        # disagrees with planner.trajectory_dim, the internal validator fires.
+        bad_target = torch.randn(2, 16, device=device)  # 16 != 4*2
+        with pytest.raises(ValueError, match="noisy_trajectory must have shape"):
+            planner.construct_training_data(bad_target)
+
+    def test_validate_flow_inputs_shape_dtype(self, device):
+        planner = FlowMatchingPlanner(embed_dim=256).to(device)
+        good_u = torch.randn(2, 128, device=device)
+        good_t = torch.rand(2, device=device)
+        # Wrong u_t shape
+        with pytest.raises(ValueError, match="noisy_trajectory must have shape"):
+            planner._validate_flow_inputs(torch.randn(2, 64, device=device),
+                                          good_t, batch_size=2)
+        # Wrong t shape
+        with pytest.raises(ValueError, match="flow_timestep must have shape"):
+            planner._validate_flow_inputs(good_u,
+                                          torch.rand(3, device=device),
+                                          batch_size=2)
+        # Dtype mismatch
+        good_u_f64 = good_u.to(torch.float64)
+        with pytest.raises(ValueError, match="must share dtype"):
+            planner._validate_flow_inputs(good_u_f64, good_t, batch_size=2)
+
+    @pytest.mark.skipif(not torch.cuda.is_available(),
+                        reason="device-mismatch case requires CUDA")
+    def test_validate_flow_inputs_device_mismatch(self):
+        planner = FlowMatchingPlanner(embed_dim=256)
+        u_cpu = torch.randn(1, 128)
+        t_cuda = torch.rand(1, device="cuda")
+        with pytest.raises(ValueError, match="must be on the same device"):
+            planner._validate_flow_inputs(u_cpu, t_cuda, batch_size=1)
+
+
 class TestGRUPlannerBackcompat:
     """The GRU planner moved into the trajectory_planning subpackage —
     its public behavior must be unchanged."""
