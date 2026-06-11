@@ -112,7 +112,12 @@ def render_and_cache_tiles(
                 image_size=image_size,
             )
         except Exception as exc:  # noqa: BLE001 — matplotlib/osmnx errors vary
-            logger.warning("clip %s: render failed (%s); skipping", clip_id, exc)
+            logger.warning(
+                "clip %s: render failed (%s); skipping",
+                clip_id,
+                exc,
+                exc_info=True,
+            )
             continue
 
         image.save(tile_path)
