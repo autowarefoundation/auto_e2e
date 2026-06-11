@@ -1609,3 +1609,22 @@ class TestAutoE2EWithFlowMatching:
         )
         assert backbone_grad and planner_grad
 
+    def test_train_mode_requires_target(self, device):
+        model = _build_flow_matching_model(8, "concat", device)
+        visual, vis_hist, ego = make_inputs(1, 8, device)
+        with pytest.raises(ValueError, match="trajectory_target"):
+            model(visual, vis_hist, ego, mode="train")
+
+    def test_gru_and_fm_interchangeable_at_inference(self, build_mock_model, device):
+        """GRU and FM both produce a [B, T*S] trajectory in inference mode —
+        callers can swap planners with no other code changes."""
+        gru_model = build_mock_model(num_views=8, fusion_mode="concat",
+                                     device=device)
+        fm_model = _build_flow_matching_model(8, "concat", device)
+        gru_model.eval()
+        fm_model.eval()
+
+        visual, vis_hist, ego = make_inputs(2, 8, device)
+        gru_traj, _, _ = gru_model(visual, vis_hist, ego, mode="infer")
+        fm_traj, _, _ = fm_model(visual, vis_hist, ego, mode="infer")
+        assert gru_traj.shape == fm_traj.shape == (2, 128)
