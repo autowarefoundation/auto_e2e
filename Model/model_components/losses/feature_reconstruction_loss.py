@@ -36,7 +36,12 @@ class FeatureReconstructionLoss(nn.Module):
                     f"got {weights.numel()}"
                 )
         # Normalise so the weighted mean stays on the same scale as plain MSE.
-        weights = weights / weights.sum() * num_future_steps
+        # Guard against a zero (or numerically negligible) sum: dividing by it
+        # would turn the loss into NaN. In that degenerate case we skip the
+        # normalisation and keep the weights as provided.
+        total = weights.sum()
+        if torch.abs(total) > 1e-8:
+            weights = weights / total * num_future_steps
         self.register_buffer("temporal_weights", weights)
 
     def forward(self, predicted_features, target_features) -> torch.Tensor:

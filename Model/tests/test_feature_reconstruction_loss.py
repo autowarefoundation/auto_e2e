@@ -95,6 +95,21 @@ class TestFeatureReconstructionLoss:
         with pytest.raises(ValueError):
             loss_fn(pred, target)
 
+    def test_zero_sum_temporal_weights_do_not_produce_nan(self):
+        """A zero-sum weight vector must not poison the loss with NaN
+        (normalisation would otherwise divide by zero)."""
+        loss_fn = FeatureReconstructionLoss(
+            temporal_weights=[0.0, 0.0, 0.0, 0.0]
+        )
+        assert torch.isfinite(loss_fn.temporal_weights).all()
+        pred = _make_features(requires_grad=True, seed=0)
+        target = _make_features(seed=1)
+        loss = loss_fn(pred, target)
+        assert torch.isfinite(loss).all()
+        loss.backward()
+        for t in pred:
+            assert torch.isfinite(t.grad).all()
+
     def test_wrong_temporal_weights_length_raises(self):
         with pytest.raises(ValueError):
             FeatureReconstructionLoss(temporal_weights=[1.0, 2.0])
