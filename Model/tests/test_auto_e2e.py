@@ -437,6 +437,15 @@ class TestTrajectoryPlannerComponent:
         with pytest.raises(ValueError, match="offset_scale"):
             TrajectoryPlanner(embed_dim=256, offset_scale=float("inf"))
 
+    def test_offset_scale_bool_raises(self):
+        # bool is an int subclass; the validator must reject it explicitly.
+        with pytest.raises(ValueError, match="offset_scale"):
+            TrajectoryPlanner(embed_dim=256, offset_scale=True)
+
+    def test_offset_scale_non_numeric_raises(self):
+        with pytest.raises(ValueError, match="offset_scale"):
+            TrajectoryPlanner(embed_dim=256, offset_scale="0.1")
+
     def test_offset_scale_zero_vs_nonzero_differ(self, device):
         """offset_scale=0 makes deformable attention sample only at the
         reference point; output must still be valid but differ from the
@@ -749,6 +758,17 @@ class TestBEVFusion:
         with pytest.raises(ValueError, match="offset_scale"):
             BEVViewFusion(num_views=4, embed_dim=256, bev_h=8, bev_w=8,
                           offset_scale=float("inf"))
+
+    def test_offset_scale_bool_raises(self):
+        # bool is an int subclass; the validator must reject it explicitly.
+        with pytest.raises(ValueError, match="offset_scale"):
+            BEVViewFusion(num_views=4, embed_dim=256, bev_h=8, bev_w=8,
+                          offset_scale=True)
+
+    def test_offset_scale_non_numeric_raises(self):
+        with pytest.raises(ValueError, match="offset_scale"):
+            BEVViewFusion(num_views=4, embed_dim=256, bev_h=8, bev_w=8,
+                          offset_scale="0.1")
 
     def test_no_visible_camera_produces_zero_output(self, device):
         """If no camera can see any BEV cell, output should be exactly zero."""
