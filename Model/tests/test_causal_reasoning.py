@@ -137,6 +137,47 @@ def test_loss_decreases_with_training():
     assert final < initial
 
 
+def test_label_smoothing_changes_loss_and_keeps_gradients():
+    """With label_smoothing > 0 the loss must differ from the unsmoothed one
+    (the VLM pseudo-labels are noisy, so smoothing is the intended regime)
+    and must remain differentiable end-to-end."""
+    torch.manual_seed(0)
+    module = CausalReasoningModule(embed_dim=EMBED_DIM)
+    context = torch.randn(B, EMBED_DIM, requires_grad=True)
+    _, decision_logits = module(context)
+    labels = torch.randint(0, 5, (B,))
+
+    plain = causal_consistency_loss(decision_logits, labels)
+    smoothed = causal_consistency_loss(
+        decision_logits, labels, label_smoothing=0.1,
+    )
+    assert not torch.isclose(plain, smoothed), (
+        "label_smoothing > 0 must change the loss value"
+    )
+
+    smoothed.backward()
+    assert context.grad is not None
+    assert torch.isfinite(context.grad).all()
+    for name, p in module.named_parameters():
+        assert p.grad is not None, f"No gradient for {name}"
+        assert torch.isfinite(p.grad).all(), f"Non-finite grad for {name}"
+
+
+def test_class_weights_change_loss():
+    """Optional per-class weights (e.g. to upweight rare long-tail classes)
+    must be honoured by the loss."""
+    torch.manual_seed(0)
+    module = CausalReasoningModule(embed_dim=EMBED_DIM)
+    _, decision_logits = module(torch.randn(B, EMBED_DIM))
+    labels = torch.randint(0, 5, (B,))
+    plain = causal_consistency_loss(decision_logits, labels)
+    weighted = causal_consistency_loss(
+        decision_logits, labels,
+        class_weights=torch.tensor([4.0, 1.0, 1.0, 1.0, 0.5]),
+    )
+    assert not torch.isclose(plain, weighted)
+
+
 def test_autoe2e_contract_untouched_with_manual_integration(device):
     """Manual cascade integration: run AutoE2E (mock backbone), feed
     ego_hidden into the reasoning head. The AutoE2E 3-tuple contract is

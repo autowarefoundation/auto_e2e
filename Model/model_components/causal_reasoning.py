@@ -94,7 +94,10 @@ class CausalReasoningModule(nn.Module):
 
 
 def causal_consistency_loss(decision_logits: torch.Tensor,
-                            labels: torch.Tensor) -> torch.Tensor:
+                            labels: torch.Tensor,
+                            label_smoothing: float = 0.0,
+                            class_weights: torch.Tensor = None,
+                            ) -> torch.Tensor:
     """Cross-entropy between predicted causal decisions and pseudo-labels.
 
     ``labels`` are integer class indices ``[B]`` obtained by pseudo-labelling
@@ -103,5 +106,20 @@ def causal_consistency_loss(decision_logits: torch.Tensor,
     Because the labels are model-generated they are noisy — treat this as an
     auxiliary consistency objective, weighted low relative to the imitation
     loss.
+
+    Args:
+        decision_logits: ``[B, num_classes]`` raw logits.
+        labels: ``[B]`` integer class indices (VLM pseudo-labels).
+        label_smoothing: optional smoothing factor in ``[0, 1)`` passed to
+            ``F.cross_entropy``. Recommended > 0 here: the VLM pseudo-labels
+            over KITScenes LongTail are noisy, and smoothing softens the
+            penalty for confidently disagreeing with a wrong pseudo-label.
+        class_weights: optional ``[num_classes]`` per-class weights (e.g. to
+            upweight rare long-tail classes); passed as ``weight`` to
+            ``F.cross_entropy``.
     """
-    return F.cross_entropy(decision_logits, labels)
+    return F.cross_entropy(
+        decision_logits, labels,
+        weight=class_weights,
+        label_smoothing=label_smoothing,
+    )
