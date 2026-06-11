@@ -151,6 +151,49 @@ class TestViewFusion:
             assert not torch.allclose(fused_base, fused_mod, atol=1e-5), \
                 f"View {view_idx} has no influence on the fused feature map"
 
+    def test_views_contribute_to_fused_with_camera_params(self, build_mock_model, device):
+        """Every view must influence the fused feature map when REAL camera_params
+        are passed through the BEV projection path.
+
+        The other view-contribution tests run only the camera_params=None branch,
+        which exercises the learnable pseudo_projection fallback rather than the
+        geometry-driven projection. Real deployments always pass a [B, V, 3, 4]
+        ego-to-pixel matrix; this test strengthens coverage by feeding one through
+        FeatureFusion and verifying each view still contributes.
+        """
+        model = build_mock_model(num_views=4, fusion_mode="bev", device=device)
+        model.eval()
+        torch.manual_seed(42)
+        visual, vis_hist, ego = make_inputs(1, 4, device)
+        B, V, C, H, W = visual.shape
+
+        # Identity-like ego-to-pixel projection that places every BEV reference
+        # point inside the image with positive depth on every view:
+        #   u_pix = x_world + 128, v_pix = y_world + 128, depth = 1.
+        # With image_size=256 and the default pc_range
+        # (x in [-60, 120], y in [-60, 60]), normalized image coords land in
+        # [0.27, 0.97] × [0.27, 0.73] — fully visible.
+        cam_params = torch.zeros(B, V, 3, 4, device=device)
+        cam_params[..., 0, 0] = 1.0
+        cam_params[..., 0, 3] = 128.0
+        cam_params[..., 1, 1] = 1.0
+        cam_params[..., 1, 3] = 128.0
+        cam_params[..., 2, 3] = 1.0
+
+        def fused_features(x):
+            features = model.Backbone(x.reshape(B * V, C, H, W))
+            return model.FeatureFusion(features, B, V, camera_params=cam_params)
+
+        fused_base = fused_features(visual)
+
+        for view_idx in range(V):
+            visual_mod = visual.clone()
+            visual_mod[0, view_idx] = 5.0
+            fused_mod = fused_features(visual_mod)
+            assert not torch.allclose(fused_base, fused_mod, atol=1e-5), \
+                f"View {view_idx} has no influence on the fused feature map " \
+                f"under real camera_params projection"
+
 
 # ---------------------------------------------------------------------------
 # 4. Gradient flow — all parameters receive gradients
