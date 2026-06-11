@@ -77,7 +77,8 @@ class MockBackbone(nn.Module):
 
 
 def _build_model_with_mock_backbone(num_views, fusion_mode, device,
-                                    num_timesteps=64):
+                                    num_timesteps=64, planner_mode="gru",
+                                    planner_kwargs=None):
     """Construct AutoE2E with the mock backbone injected.
 
     Patches Backbone at the module level during construction to avoid
@@ -96,6 +97,8 @@ def _build_model_with_mock_backbone(num_views, fusion_mode, device,
             fusion_mode=fusion_mode,
             view_fusion_kwargs=view_fusion_kwargs,
             num_timesteps=num_timesteps,
+            planner_mode=planner_mode,
+            planner_kwargs=planner_kwargs,
         )
     return model.to(device)
 

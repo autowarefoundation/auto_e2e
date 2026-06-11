@@ -36,19 +36,21 @@ class TestOutputShapes:
     @pytest.mark.parametrize("batch_size", [1, 2, 4])
     def test_trajectory_shape(self, model, device, batch_size):
         visual, vis_hist, ego = make_inputs(batch_size, 8, device)
-        traj, _, _ = model(visual, vis_hist, ego)
+        traj, _, _ = model(visual, vis_hist, ego, mode="infer")
         assert traj.shape == (batch_size, 128)
 
     @pytest.mark.parametrize("batch_size", [1, 2, 4])
     def test_ego_hidden_shape(self, model, device, batch_size):
         visual, vis_hist, ego = make_inputs(batch_size, 8, device)
-        _, ego_hidden, _ = model(visual, vis_hist, ego)
+        _, ego_hidden, _ = model(visual, vis_hist, ego, mode="infer")
         assert ego_hidden.shape == (batch_size, 256)
 
     @pytest.mark.parametrize("batch_size", [1, 2, 4])
     def test_future_features_shape(self, model, device, batch_size):
         visual, vis_hist, ego = make_inputs(batch_size, 8, device)
-        _, _, future = model(visual, vis_hist, ego)
+        target = torch.randn(batch_size, 128, device=device)
+        _, _, future = model(visual, vis_hist, ego, mode="train",
+                             trajectory_target=target)
         assert len(future) == 4
         for f in future:
             assert f.shape == (batch_size, 256, 8, 8)
@@ -65,10 +67,11 @@ class TestBatchIndependence:
         visual, vis_hist, ego = make_inputs(2, 8, device)
 
         # Full batch forward
-        traj_both, _, _ = model(visual, vis_hist, ego)
+        traj_both, _, _ = model(visual, vis_hist, ego, mode="infer")
 
         # Single sample forward (sample 0)
-        traj_single, _, _ = model(visual[0:1], vis_hist[0:1], ego[0:1])
+        traj_single, _, _ = model(visual[0:1], vis_hist[0:1], ego[0:1],
+                                  mode="infer")
 
         # Sample 0's output must be identical regardless of what sample 1 contains
         assert torch.allclose(traj_both[0], traj_single[0], atol=1e-5), \
@@ -79,13 +82,13 @@ class TestBatchIndependence:
         torch.manual_seed(42)
         visual, vis_hist, ego = make_inputs(2, 8, device)
 
-        traj_a, _, _ = model(visual, vis_hist, ego)
+        traj_a, _, _ = model(visual, vis_hist, ego, mode="infer")
 
         # Change sample 1 completely
         visual_modified = visual.clone()
         visual_modified[1] = torch.randn_like(visual_modified[1])
 
-        traj_b, _, _ = model(visual_modified, vis_hist, ego)
+        traj_b, _, _ = model(visual_modified, vis_hist, ego, mode="infer")
 
         # Sample 0 output must remain unchanged
         assert torch.allclose(traj_a[0], traj_b[0], atol=1e-5), \
@@ -207,17 +210,23 @@ class TestViewFusion:
 class TestGradientFlow:
     def test_backward_succeeds(self, model, device):
         visual, vis_hist, ego = make_inputs(2, 8, device)
-        traj, ego_hidden, future = model(visual, vis_hist, ego)
+        target = torch.randn(2, 128, device=device)
+        loss, ego_hidden, future = model(
+            visual, vis_hist, ego, mode="train", trajectory_target=target,
+        )
 
-        loss = traj.sum() + ego_hidden.sum() + sum(f.sum() for f in future)
-        loss.backward()
+        total = loss + ego_hidden.sum() + sum(f.sum() for f in future)
+        total.backward()
 
     def test_all_parameters_have_gradients(self, model, device):
         visual, vis_hist, ego = make_inputs(2, 8, device)
-        traj, ego_hidden, future = model(visual, vis_hist, ego)
+        target = torch.randn(2, 128, device=device)
+        loss, ego_hidden, future = model(
+            visual, vis_hist, ego, mode="train", trajectory_target=target,
+        )
 
-        loss = traj.sum() + ego_hidden.sum() + sum(f.sum() for f in future)
-        loss.backward()
+        total = loss + ego_hidden.sum() + sum(f.sum() for f in future)
+        total.backward()
 
         params_without_grad = []
         for name, param in model.named_parameters():
@@ -229,10 +238,13 @@ class TestGradientFlow:
 
     def test_no_vanishing_gradients(self, model, device):
         visual, vis_hist, ego = make_inputs(2, 8, device)
-        traj, ego_hidden, future = model(visual, vis_hist, ego)
+        target = torch.randn(2, 128, device=device)
+        loss, ego_hidden, future = model(
+            visual, vis_hist, ego, mode="train", trajectory_target=target,
+        )
 
-        loss = traj.sum() + ego_hidden.sum() + sum(f.sum() for f in future)
-        loss.backward()
+        total = loss + ego_hidden.sum() + sum(f.sum() for f in future)
+        total.backward()
 
         zero_grad_params = []
         for name, param in model.named_parameters():
@@ -257,9 +269,12 @@ class TestNumViewsFlexibility:
     def test_various_num_views(self, build_mock_model, device, num_views, fusion_mode):
         model = build_mock_model(num_views, fusion_mode, device)
         visual, vis_hist, ego = make_inputs(2, num_views, device)
-        traj, ego_hidden, future = model(visual, vis_hist, ego)
+        target = torch.randn(2, 128, device=device)
+        loss, ego_hidden, future = model(
+            visual, vis_hist, ego, mode="train", trajectory_target=target,
+        )
 
-        assert traj.shape == (2, 128)
+        assert loss.dim() == 0
         assert ego_hidden.shape == (2, 256)
         assert all(f.shape == (2, 256, 8, 8) for f in future)
 
@@ -271,18 +286,24 @@ class TestNumViewsFlexibility:
 class TestNumericalStability:
     def test_no_nan_in_outputs(self, model, device):
         visual, vis_hist, ego = make_inputs(2, 8, device)
-        traj, ego_hidden, future = model(visual, vis_hist, ego)
+        target = torch.randn(2, 128, device=device)
+        loss, ego_hidden, future = model(
+            visual, vis_hist, ego, mode="train", trajectory_target=target,
+        )
 
-        assert not torch.isnan(traj).any(), "NaN in trajectory output"
+        assert not torch.isnan(loss), "NaN in planner loss"
         assert not torch.isnan(ego_hidden).any(), "NaN in ego_hidden"
         for i, f in enumerate(future):
             assert not torch.isnan(f).any(), f"NaN in future feature {i}"
 
     def test_no_inf_in_outputs(self, model, device):
         visual, vis_hist, ego = make_inputs(2, 8, device)
-        traj, ego_hidden, future = model(visual, vis_hist, ego)
+        target = torch.randn(2, 128, device=device)
+        loss, ego_hidden, future = model(
+            visual, vis_hist, ego, mode="train", trajectory_target=target,
+        )
 
-        assert not torch.isinf(traj).any(), "Inf in trajectory output"
+        assert not torch.isinf(loss), "Inf in planner loss"
         assert not torch.isinf(ego_hidden).any(), "Inf in ego_hidden"
         for i, f in enumerate(future):
             assert not torch.isinf(f).any(), f"Inf in future feature {i}"
@@ -292,7 +313,7 @@ class TestNumericalStability:
         visual = torch.randn(1, 8, 3, 256, 256, device=device) * 100
         vis_hist = torch.randn(1, 896, device=device) * 100
         ego = torch.randn(1, 256, device=device) * 100
-        traj, ego_hidden, future = model(visual, vis_hist, ego)
+        traj, ego_hidden, _ = model(visual, vis_hist, ego, mode="infer")
 
         assert not torch.isnan(traj).any(), "NaN with large inputs"
         assert not torch.isinf(traj).any(), "Inf with large inputs"
@@ -811,20 +832,29 @@ class TestFullBackboneIntegration:
     def test_full_forward_pass(self, full_model, device):
         """Smoke test: full model forward produces expected output shapes."""
         visual, vis_hist, ego = make_inputs(1, 8, device)
-        traj, ego_hidden, future = full_model(visual, vis_hist, ego)
+        target = torch.randn(1, 128, device=device)
+        loss, ego_hidden, future = full_model(
+            visual, vis_hist, ego, mode="train", trajectory_target=target,
+        )
 
-        assert traj.shape == (1, 128)
+        assert loss.dim() == 0
         assert ego_hidden.shape == (1, 256)
         assert len(future) == 4
         for f in future:
             assert f.shape == (1, 256, 8, 8)
 
+        traj, _, _ = full_model(visual, vis_hist, ego, mode="infer")
+        assert traj.shape == (1, 128)
+
     def test_full_forward_no_nan(self, full_model, device):
         """Full pipeline must not produce NaN with real backbone weights."""
         visual, vis_hist, ego = make_inputs(2, 8, device)
-        traj, ego_hidden, future = full_model(visual, vis_hist, ego)
+        target = torch.randn(2, 128, device=device)
+        loss, ego_hidden, future = full_model(
+            visual, vis_hist, ego, mode="train", trajectory_target=target,
+        )
 
-        assert not torch.isnan(traj).any()
+        assert not torch.isnan(loss)
         assert not torch.isnan(ego_hidden).any()
         for f in future:
             assert not torch.isnan(f).any()
@@ -850,15 +880,22 @@ class TestResNet50Backbone:
         assert model.Backbone.backbone_channels == 64 + 256 + 512 + 1024 + 2048
 
         visual, vis_hist, ego = make_inputs(1, 8, device)
-        traj, ego_hidden, future = model(visual, vis_hist, ego)
+        target = torch.randn(1, 128, device=device)
+        loss, ego_hidden, future = model(
+            visual, vis_hist, ego, mode="train", trajectory_target=target,
+        )
 
-        assert traj.shape == (1, 128)
+        assert loss.dim() == 0
         assert ego_hidden.shape == (1, 256)
         assert len(future) == 4
         for f in future:
             assert f.shape == (1, 256, 8, 8)
-        assert torch.isfinite(traj).all()
+        assert torch.isfinite(loss)
         assert torch.isfinite(ego_hidden).all()
+
+        traj, _, _ = model(visual, vis_hist, ego, mode="infer")
+        assert traj.shape == (1, 128)
+        assert torch.isfinite(traj).all()
 
 
 # ---------------------------------------------------------------------------
@@ -888,8 +925,11 @@ class TestTrainingLoop:
                   if p.requires_grad}
 
         visual, vis_hist, ego = make_inputs(2, 8, device)
-        traj, ego_hidden, future = model(visual, vis_hist, ego)
-        loss = traj.sum() + ego_hidden.sum() + sum(f.sum() for f in future)
+        target = torch.randn(2, 128, device=device)
+        planner_loss, ego_hidden, future = model(
+            visual, vis_hist, ego, mode="train", trajectory_target=target,
+        )
+        loss = planner_loss + ego_hidden.sum() + sum(f.sum() for f in future)
 
         optimizer.zero_grad()
         loss.backward()
@@ -911,19 +951,23 @@ class TestTrainingLoop:
             f"optimizer.step() did not update any parameter in: {unchanged}"
 
     def test_model_to_loss_backward_integration(self, build_mock_model, device):
-        """Pipe trajectory output into TrajectoryImitationLoss and run backward."""
+        """The uniform planner-loss contract: forward(mode="train") returns a
+        scalar loss, and backward propagates grads end-to-end."""
         model = build_mock_model(num_views=8, fusion_mode="concat", device=device)
         model.train()
-        loss_fn = TrajectoryImitationLoss(num_timesteps=64, num_signals=2).to(device)
 
         visual, vis_hist, ego = make_inputs(2, 8, device)
-        traj, _, _ = model(visual, vis_hist, ego)
+        target = torch.randn(2, 128, device=device)
+        loss, ego_hidden, future = model(
+            visual, vis_hist, ego, mode="train", trajectory_target=target,
+        )
 
-        target = torch.randn_like(traj)
-        loss = loss_fn(traj, target)
+        assert loss.dim() == 0, "planner loss must be a scalar in train mode"
+        assert loss.requires_grad
+        assert torch.isfinite(loss), "Loss is non-finite"
+
         loss.backward()
 
-        assert torch.isfinite(loss), "Loss is non-finite"
         # Verify gradient propagates through the full network depth, not just
         # the last layer: both the upstream Backbone and the downstream
         # TrajectoryPlanner must each see a nonzero grad on at least one param.
@@ -1104,12 +1148,10 @@ class TestFullPipelineRobustness:
         vis_hist = torch.zeros(2, 896, device=device)
         ego = torch.zeros(2, 256, device=device)
 
-        traj, ego_hidden, future = model(visual, vis_hist, ego)
+        traj, ego_hidden, _ = model(visual, vis_hist, ego, mode="infer")
 
         assert torch.isfinite(traj).all(), "NaN/Inf in trajectory with zero inputs"
         assert torch.isfinite(ego_hidden).all(), "NaN/Inf in ego_hidden with zero inputs"
-        for i, f in enumerate(future):
-            assert torch.isfinite(f).all(), f"NaN/Inf in future feature {i} with zero inputs"
 
     def test_camera_params_none_then_valid_switching(self, build_mock_model, device):
         """A BEV-fusion model must accept both None and valid camera_params on the
@@ -1119,9 +1161,11 @@ class TestFullPipelineRobustness:
 
         visual, vis_hist, ego = make_inputs(1, 8, device, include_camera_params=False)
 
-        traj_none, _, _ = model(visual, vis_hist, ego, camera_params=None)
+        traj_none, _, _ = model(visual, vis_hist, ego, mode="infer",
+                                camera_params=None)
         cam_params = torch.randn(1, 8, 3, 4, device=device)
-        traj_cam, _, _ = model(visual, vis_hist, ego, camera_params=cam_params)
+        traj_cam, _, _ = model(visual, vis_hist, ego, mode="infer",
+                               camera_params=cam_params)
 
         assert torch.isfinite(traj_none).all(), "NaN/Inf with camera_params=None"
         assert torch.isfinite(traj_cam).all(), "NaN/Inf with valid camera_params"
@@ -1133,17 +1177,12 @@ class TestFullPipelineRobustness:
         model = build_mock_model(num_views=8, fusion_mode="concat", device=device)
         model.eval()
         visual, vis_hist, ego = make_inputs(1, 8, device)
-        traj, ego_hidden, future = model(visual, vis_hist, ego)
+        traj, ego_hidden, _ = model(visual, vis_hist, ego, mode="infer")
 
         assert traj.shape == (1, 128)
         assert ego_hidden.shape == (1, 256)
-        assert len(future) == 4
-        for f in future:
-            assert f.shape == (1, 256, 8, 8)
         assert torch.isfinite(traj).all()
         assert torch.isfinite(ego_hidden).all()
-        for f in future:
-            assert torch.isfinite(f).all()
 
 
 class _StubBackboneWithFeatureInfo(torch.nn.Module):
@@ -1303,11 +1342,10 @@ class TestFlowMatchingPlanner:
         assert target_velocity.shape == (4, 128)
         assert (t >= 0).all() and (t <= 1).all()
 
-    def test_training_loop_end_to_end(self, device):
-        """The documented training-loop pattern must work: sample (u_t, t,
-        target_velocity) externally, feed (u_t, t) into forward(), backprop
-        an MSE loss against target_velocity."""
-        import torch.nn.functional as F
+    def test_compute_planner_loss_end_to_end(self, device):
+        """The canonical training-loop pattern must work:
+        compute_planner_loss returns a scalar loss + ego_hidden, and
+        backprop reaches the BEV input."""
         planner = FlowMatchingPlanner(embed_dim=256).to(device)
         planner.train()
         bev = torch.randn(2, 256, 8, 8, device=device, requires_grad=True)
@@ -1315,30 +1353,15 @@ class TestFlowMatchingPlanner:
         ego = torch.randn(2, 256, device=device)
         target = torch.randn(2, 128, device=device)
 
-        u_t, t, target_velocity = planner.construct_training_data(target)
-        velocity_pred, ego_hidden = planner(
-            bev, vis_hist, ego, mode="train",
-            noisy_trajectory=u_t, flow_timestep=t,
+        loss, ego_hidden = planner.compute_planner_loss(
+            bev, vis_hist, ego, target,
         )
-        assert velocity_pred.shape == target_velocity.shape == (2, 128)
+        assert loss.dim() == 0
         assert ego_hidden.shape == (2, 256)
-
-        loss = F.mse_loss(velocity_pred, target_velocity)
         assert torch.isfinite(loss)
+
         loss.backward()
         assert bev.grad is not None and bev.grad.abs().max() > 0
-
-    def test_training_forward_returns_velocity_shape(self, device):
-        planner = FlowMatchingPlanner(embed_dim=256).to(device)
-        bev = torch.randn(2, 256, 8, 8, device=device)
-        vis_hist = torch.randn(2, 896, device=device)
-        ego = torch.randn(2, 256, device=device)
-        target = torch.randn(2, 128, device=device)
-        velocity, ego_hidden = planner(
-            bev, vis_hist, ego, mode="train", trajectory_target=target,
-        )
-        assert velocity.shape == (2, 128)
-        assert ego_hidden.shape == (2, 256)
 
     def test_inference_forward_returns_trajectory_shape(self, device):
         planner = FlowMatchingPlanner(embed_dim=256).to(device)
@@ -1346,7 +1369,7 @@ class TestFlowMatchingPlanner:
         bev = torch.randn(2, 256, 8, 8, device=device)
         vis_hist = torch.randn(2, 896, device=device)
         ego = torch.randn(2, 256, device=device)
-        traj, ego_hidden = planner(bev, vis_hist, ego, mode="infer")
+        traj, ego_hidden = planner(bev, vis_hist, ego)
         assert traj.shape == (2, 128)
         assert ego_hidden.shape == (2, 256)
 
@@ -1356,8 +1379,15 @@ class TestFlowMatchingPlanner:
         bev = torch.randn(1, 256, 8, 8, device=device)
         vis_hist = torch.randn(1, 896, device=device)
         ego = torch.randn(1, 256, device=device)
-        traj, _ = planner(bev, vis_hist, ego, mode="infer")
+        traj, _ = planner(bev, vis_hist, ego)
         assert torch.isfinite(traj).all()
+
+    def _v_theta(self, planner, bev, vis_hist, ego, u_t, t):
+        """Run the velocity network at fixed (u_t, t) — bypasses the
+        public API so tests can pin all three inputs."""
+        mod_cond = planner._modulation_conditioning(vis_hist, ego)
+        bev_seq = planner._project_bev(bev)
+        return planner._v_theta(u_t, t, bev_seq, mod_cond)
 
     def test_velocity_depends_on_bev(self, device):
         torch.manual_seed(0)
@@ -1371,14 +1401,8 @@ class TestFlowMatchingPlanner:
         bev_a = torch.randn(1, 256, 8, 8, device=device)
         bev_b = torch.randn(1, 256, 8, 8, device=device)
 
-        v_a, _ = planner(
-            bev_a, vis_hist, ego, mode="train",
-            noisy_trajectory=u_t, flow_timestep=t,
-        )
-        v_b, _ = planner(
-            bev_b, vis_hist, ego, mode="train",
-            noisy_trajectory=u_t, flow_timestep=t,
-        )
+        v_a = self._v_theta(planner, bev_a, vis_hist, ego, u_t, t)
+        v_b = self._v_theta(planner, bev_b, vis_hist, ego, u_t, t)
         assert not torch.allclose(v_a, v_b, atol=1e-5), \
             "v_theta is not sensitive to BEV features"
 
@@ -1391,14 +1415,10 @@ class TestFlowMatchingPlanner:
         ego = torch.randn(1, 256, device=device)
         u_t = torch.randn(1, 128, device=device)
 
-        v_t1, _ = planner(
-            bev, vis_hist, ego, mode="train",
-            noisy_trajectory=u_t, flow_timestep=torch.tensor([0.1], device=device),
-        )
-        v_t2, _ = planner(
-            bev, vis_hist, ego, mode="train",
-            noisy_trajectory=u_t, flow_timestep=torch.tensor([0.9], device=device),
-        )
+        v_t1 = self._v_theta(planner, bev, vis_hist, ego, u_t,
+                             torch.tensor([0.1], device=device))
+        v_t2 = self._v_theta(planner, bev, vis_hist, ego, u_t,
+                             torch.tensor([0.9], device=device))
         assert not torch.allclose(v_t1, v_t2, atol=1e-5), \
             "v_theta is not sensitive to flow timestep"
 
@@ -1410,15 +1430,17 @@ class TestFlowMatchingPlanner:
         u_t = torch.randn(1, 128, device=device)
         t = torch.tensor([0.5], device=device)
 
-        v_a, _ = planner(
-            bev, torch.randn(1, 896, device=device),
+        v_a = self._v_theta(
+            planner, bev,
+            torch.randn(1, 896, device=device),
             torch.randn(1, 256, device=device),
-            mode="train", noisy_trajectory=u_t, flow_timestep=t,
+            u_t, t,
         )
-        v_b, _ = planner(
-            bev, torch.randn(1, 896, device=device),
+        v_b = self._v_theta(
+            planner, bev,
+            torch.randn(1, 896, device=device),
             torch.randn(1, 256, device=device),
-            mode="train", noisy_trajectory=u_t, flow_timestep=t,
+            u_t, t,
         )
         assert not torch.allclose(v_a, v_b, atol=1e-5), \
             "v_theta is not sensitive to ego/visual_history conditioning"
@@ -1436,7 +1458,7 @@ class TestFlowMatchingPlanner:
         torch.manual_seed(123)
         x0 = torch.randn(1, 128, device=device)
         torch.manual_seed(123)  # same seed — planner draws an identical x0 inside
-        traj, _ = planner(bev, vis_hist, ego, mode="infer")
+        traj, _ = planner(bev, vis_hist, ego)
         assert not torch.allclose(traj, x0, atol=1e-3), \
             "Inference output equals the input noise — ODE did not advance"
 
@@ -1446,10 +1468,10 @@ class TestFlowMatchingPlanner:
         vis_hist = torch.randn(1, 896, device=device, requires_grad=True)
         ego = torch.randn(1, 256, device=device, requires_grad=True)
         target = torch.randn(1, 128, device=device)
-        velocity, ego_hidden = planner(
-            bev, vis_hist, ego, mode="train", trajectory_target=target,
+        loss, ego_hidden = planner.compute_planner_loss(
+            bev, vis_hist, ego, target,
         )
-        (velocity.sum() + ego_hidden.sum()).backward()
+        (loss + ego_hidden.sum()).backward()
         assert bev.grad is not None and bev.grad.abs().max() > 0
         assert vis_hist.grad is not None and vis_hist.grad.abs().max() > 0
         assert ego.grad is not None and ego.grad.abs().max() > 0
@@ -1467,23 +1489,14 @@ class TestFlowMatchingPlanner:
         gen_b = torch.Generator(device=device).manual_seed(42)
         gen_c = torch.Generator(device=device).manual_seed(7)
 
-        traj_a, _ = planner(bev, vis_hist, ego, mode="infer", generator=gen_a)
-        traj_b, _ = planner(bev, vis_hist, ego, mode="infer", generator=gen_b)
-        traj_c, _ = planner(bev, vis_hist, ego, mode="infer", generator=gen_c)
+        traj_a, _ = planner(bev, vis_hist, ego, generator=gen_a)
+        traj_b, _ = planner(bev, vis_hist, ego, generator=gen_b)
+        traj_c, _ = planner(bev, vis_hist, ego, generator=gen_c)
 
         assert torch.equal(traj_a, traj_b), \
             "same generator seed must produce identical inference trajectories"
         assert not torch.allclose(traj_a, traj_c), \
             "different generator seeds must produce different trajectories"
-
-    def test_train_without_target_raises(self, device):
-        planner = FlowMatchingPlanner(embed_dim=256).to(device)
-        bev = torch.randn(1, 256, 8, 8, device=device)
-        vis_hist = torch.randn(1, 896, device=device)
-        ego = torch.randn(1, 256, device=device)
-        with pytest.raises(ValueError, match="trajectory_target"):
-            planner(bev, vis_hist, ego, mode="train")
-
 
 class TestGRUPlannerBackcompat:
     """The GRU planner moved into the trajectory_planning subpackage —
@@ -1547,15 +1560,20 @@ def _build_flow_matching_model(num_views, fusion_mode, device,
 
 
 class TestAutoE2EWithFlowMatching:
-    def test_train_mode_with_target(self, device):
+    def test_train_mode_returns_scalar_loss(self, device):
+        """Under the uniform Option-B contract, train mode must return a
+        scalar planner loss — NOT the raw flow-matching velocity tensor.
+        This documents that the velocity-vs-target footgun is gone."""
         model = _build_flow_matching_model(8, "concat", device)
         model.train()
         visual, vis_hist, ego = make_inputs(2, 8, device)
         target = torch.randn(2, 128, device=device)
-        velocity, ego_hidden, future = model(
+        loss, ego_hidden, future = model(
             visual, vis_hist, ego, mode="train", trajectory_target=target,
         )
-        assert velocity.shape == (2, 128)
+        assert loss.dim() == 0, \
+            "FM train mode must expose a scalar loss, not a [B, T*S] velocity"
+        assert loss.requires_grad
         assert ego_hidden.shape == (2, 256)
         assert future is not None and len(future) == 4
 
@@ -1569,17 +1587,16 @@ class TestAutoE2EWithFlowMatching:
         assert future is None
         assert torch.isfinite(traj).all()
 
-    def test_backward_flows_through_velocity(self, device):
+    def test_backward_flows_through_planner_loss(self, device):
         model = _build_flow_matching_model(8, "concat", device)
         model.train()
         visual, vis_hist, ego = make_inputs(2, 8, device)
         target = torch.randn(2, 128, device=device)
-        velocity, ego_hidden, future = model(
+        loss, ego_hidden, future = model(
             visual, vis_hist, ego, mode="train", trajectory_target=target,
         )
-        loss = (velocity - target).pow(2).mean() + ego_hidden.sum()
-        loss = loss + sum(f.sum() for f in future)
-        loss.backward()
+        total = loss + ego_hidden.sum() + sum(f.sum() for f in future)
+        total.backward()
         # At least one Backbone and one TrajectoryPlanner param must see grad.
         backbone_grad = any(
             p.grad is not None and p.grad.abs().max() > 0
@@ -1591,3 +1608,4 @@ class TestAutoE2EWithFlowMatching:
             if n.startswith("TrajectoryPlanner.")
         )
         assert backbone_grad and planner_grad
+
