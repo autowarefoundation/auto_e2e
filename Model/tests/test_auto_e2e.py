@@ -93,41 +93,106 @@ class TestBatchIndependence:
 
 class TestViewFusion:
     def test_different_views_produce_different_output(self, model, device):
-        model.eval()
-        torch.manual_seed(42)
-        visual, vis_hist, ego = make_inputs(1, 8, device)
+        """Zeroing one camera view must shift the FUSED feature map.
 
-        traj_a, _, _ = model(visual, vis_hist, ego)
-
-        # Replace one camera view with zeros
-        visual_zeroed = visual.clone()
-        visual_zeroed[0, 3] = 0.0
-
-        traj_b, _, _ = model(visual_zeroed, vis_hist, ego)
-
-        # Output should differ — proving that the zeroed view had influence
-        assert not torch.allclose(traj_a, traj_b, atol=1e-5), \
-            "Changing a camera view had no effect on output — fusion is broken"
-
-    def test_all_views_contribute(self, model, device):
-        """Each view should influence the output when perturbed.
-
-        Uses a large constant fill rather than zeroing so the perturbation
-        propagates through deformable cross-attention even when the planner
-        only samples a few BEV cells per timestep.
+        Asserts at the fused-feature level rather than the trajectory because
+        in BEV mode the planner's deformable cross-attention samples only a
+        sparse subset of BEV cells — a zeroed view that touches only un-sampled
+        cells could leave the trajectory unchanged in a randomly-initialized
+        model. View fusion's contract is over the fused feature map; that is
+        what this test asserts.
         """
         model.eval()
         torch.manual_seed(42)
         visual, vis_hist, ego = make_inputs(1, 8, device)
+        B, V, C, H, W = visual.shape
 
-        traj_base, _, _ = model(visual, vis_hist, ego)
+        def fused_features(x):
+            features = model.Backbone(x.reshape(B * V, C, H, W))
+            return model.FeatureFusion(features, B, V)
 
-        for view_idx in range(8):
+        fused_base = fused_features(visual)
+
+        visual_zeroed = visual.clone()
+        visual_zeroed[0, 3] = 0.0
+        fused_zeroed = fused_features(visual_zeroed)
+
+        assert not torch.allclose(fused_base, fused_zeroed, atol=1e-5), \
+            "Zeroing a camera view had no effect on the fused feature map — fusion is broken"
+
+    def test_all_views_contribute(self, model, device):
+        """Each view must influence the FUSED feature map when perturbed.
+
+        View fusion guarantees that every camera view contributes to the
+        fused feature map produced by FeatureFusion. Whether the downstream
+        planner subsequently samples every fused cell is a separate concern
+        — in BEV mode the planner's deformable cross-attention samples only
+        a sparse subset of BEV cells, so a view that touches only un-sampled
+        cells can legitimately have no measurable trajectory influence in a
+        randomly-initialized model. Asserting at the fused-feature level
+        directly tests what view fusion is responsible for and works for
+        all fusion modes.
+        """
+        model.eval()
+        torch.manual_seed(42)
+        visual, vis_hist, ego = make_inputs(1, 8, device)
+        B, V, C, H, W = visual.shape
+
+        def fused_features(x):
+            features = model.Backbone(x.reshape(B * V, C, H, W))
+            return model.FeatureFusion(features, B, V)
+
+        fused_base = fused_features(visual)
+
+        for view_idx in range(V):
             visual_mod = visual.clone()
             visual_mod[0, view_idx] = 5.0
-            traj_mod, _, _ = model(visual_mod, vis_hist, ego)
-            assert not torch.allclose(traj_base, traj_mod, atol=1e-5), \
-                f"View {view_idx} has no influence on the output"
+            fused_mod = fused_features(visual_mod)
+            assert not torch.allclose(fused_base, fused_mod, atol=1e-5), \
+                f"View {view_idx} has no influence on the fused feature map"
+
+    def test_views_contribute_to_fused_with_camera_params(self, build_mock_model, device):
+        """Every view must influence the fused feature map when REAL camera_params
+        are passed through the BEV projection path.
+
+        The other view-contribution tests run only the camera_params=None branch,
+        which exercises the learnable pseudo_projection fallback rather than the
+        geometry-driven projection. Real deployments always pass a [B, V, 3, 4]
+        ego-to-pixel matrix; this test strengthens coverage by feeding one through
+        FeatureFusion and verifying each view still contributes.
+        """
+        model = build_mock_model(num_views=4, fusion_mode="bev", device=device)
+        model.eval()
+        torch.manual_seed(42)
+        visual, vis_hist, ego = make_inputs(1, 4, device)
+        B, V, C, H, W = visual.shape
+
+        # Identity-like ego-to-pixel projection that places every BEV reference
+        # point inside the image with positive depth on every view:
+        #   u_pix = x_world + 128, v_pix = y_world + 128, depth = 1.
+        # With image_size=256 and the default pc_range
+        # (x in [-60, 120], y in [-60, 60]), normalized image coords land in
+        # [0.27, 0.97] × [0.27, 0.73] — fully visible.
+        cam_params = torch.zeros(B, V, 3, 4, device=device)
+        cam_params[..., 0, 0] = 1.0
+        cam_params[..., 0, 3] = 128.0
+        cam_params[..., 1, 1] = 1.0
+        cam_params[..., 1, 3] = 128.0
+        cam_params[..., 2, 3] = 1.0
+
+        def fused_features(x):
+            features = model.Backbone(x.reshape(B * V, C, H, W))
+            return model.FeatureFusion(features, B, V, camera_params=cam_params)
+
+        fused_base = fused_features(visual)
+
+        for view_idx in range(V):
+            visual_mod = visual.clone()
+            visual_mod[0, view_idx] = 5.0
+            fused_mod = fused_features(visual_mod)
+            assert not torch.allclose(fused_base, fused_mod, atol=1e-5), \
+                f"View {view_idx} has no influence on the fused feature map " \
+                f"under real camera_params projection"
 
 
 # ---------------------------------------------------------------------------
