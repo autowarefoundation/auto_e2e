@@ -1455,6 +1455,28 @@ class TestFlowMatchingPlanner:
         assert vis_hist.grad is not None and vis_hist.grad.abs().max() > 0
         assert ego.grad is not None and ego.grad.abs().max() > 0
 
+    def test_inference_generator_is_reproducible(self, device):
+        """A shared torch.Generator must make inference deterministic across
+        runs, and different seeds must produce different trajectories."""
+        planner = FlowMatchingPlanner(embed_dim=256, num_inference_steps=10).to(device)
+        planner.eval()
+        bev = torch.randn(2, 256, 8, 8, device=device)
+        vis_hist = torch.randn(2, 896, device=device)
+        ego = torch.randn(2, 256, device=device)
+
+        gen_a = torch.Generator(device=device).manual_seed(42)
+        gen_b = torch.Generator(device=device).manual_seed(42)
+        gen_c = torch.Generator(device=device).manual_seed(7)
+
+        traj_a, _ = planner(bev, vis_hist, ego, mode="infer", generator=gen_a)
+        traj_b, _ = planner(bev, vis_hist, ego, mode="infer", generator=gen_b)
+        traj_c, _ = planner(bev, vis_hist, ego, mode="infer", generator=gen_c)
+
+        assert torch.equal(traj_a, traj_b), \
+            "same generator seed must produce identical inference trajectories"
+        assert not torch.allclose(traj_a, traj_c), \
+            "different generator seeds must produce different trajectories"
+
     def test_train_without_target_raises(self, device):
         planner = FlowMatchingPlanner(embed_dim=256).to(device)
         bev = torch.randn(1, 256, 8, 8, device=device)
