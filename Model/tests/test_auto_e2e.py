@@ -1365,7 +1365,6 @@ class TestFlowMatchingPlanner:
         planner.eval()
         vis_hist = torch.randn(1, 896, device=device)
         ego = torch.randn(1, 256, device=device)
-        target = torch.randn(1, 128, device=device)
         u_t = torch.randn(1, 128, device=device)
         t = torch.tensor([0.5], device=device)
 
