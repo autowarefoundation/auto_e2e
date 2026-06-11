@@ -44,6 +44,7 @@ class GRUPlanner(BasePlanner):
         self.embed_dim = embed_dim
         self.num_timesteps = num_timesteps
         self.num_signals = num_signals
+        self.trajectory_dim = num_timesteps * num_signals
         self.num_points = num_points
         self.egomotion_dim = egomotion_dim
         self.visual_history_dim = visual_history_dim
@@ -106,18 +107,20 @@ class GRUPlanner(BasePlanner):
         return self.output_proj(attended)
 
     def forward(self, bev_features, visual_history, egomotion_history,
-                mode="train", **kwargs):
-        """
+                **kwargs):
+        """Inference forward — produces a fully-formed trajectory.
+
+        The GRU rollout is identical for train and inference, so this is
+        also what ``compute_planner_loss`` invokes internally before
+        applying its imitation MSE.
+
         Args:
             bev_features: [B, embed_dim, H, W] — any spatial resolution.
             visual_history: [B, visual_history_dim].
             egomotion_history: [B, egomotion_dim].
-            mode: "train" or "infer". GRU planner is mode-agnostic; the
-                argument is accepted for interface compatibility with
-                stochastic decoders (Flow Matching, diffusion).
-            **kwargs: ignored. Accepts extra inputs (e.g. trajectory_target,
-                noisy_trajectory, flow_timestep) that other planners require
-                so callers can stay planner-agnostic.
+            **kwargs: ignored. Accepts extra inputs (e.g. ``mode``,
+                ``trajectory_target``) that other planners or callers might
+                pass so call sites can stay planner-agnostic.
 
         Returns:
             trajectory: [B, num_timesteps * num_signals]
@@ -161,3 +164,26 @@ class GRUPlanner(BasePlanner):
         trajectory = torch.cat(waypoints, dim=1)                           # [B, T*S]
         ego_hidden = h.squeeze(0)                                          # [B, C]
         return trajectory, ego_hidden
+
+    def compute_planner_loss(self, bev_features, visual_history,
+                             egomotion_history, trajectory_target):
+        """Imitation MSE between the GRU rollout and ``trajectory_target``.
+
+        Returns ``(loss, ego_hidden)`` as required by ``BasePlanner``. The
+        loss is the planner's training objective; ``ego_hidden`` is the
+        same context vector ``forward()`` produces, so AutoE2E can still
+        feed FutureState in train mode without a second rollout.
+        """
+        B = bev_features.shape[0]
+        expected = (B, self.trajectory_dim)
+        if tuple(trajectory_target.shape) != expected:
+            raise ValueError(
+                f"trajectory_target must have shape {expected} "
+                f"(batch_size, num_timesteps * num_signals), got "
+                f"{tuple(trajectory_target.shape)}."
+            )
+        trajectory, ego_hidden = self(
+            bev_features, visual_history, egomotion_history,
+        )
+        loss = F.mse_loss(trajectory, trajectory_target)
+        return loss, ego_hidden
