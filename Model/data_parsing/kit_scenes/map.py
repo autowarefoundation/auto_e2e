@@ -157,7 +157,7 @@ def generate_bev_map_tile(
     ego_x: float,
     ego_y: float,
     ego_yaw: float = 0.0,
-    canvas_size: int = 224,
+    canvas_size: int = 256,
     radius_meters: float = 60.0,
     linewidths: float = 1.5,
 ) -> np.ndarray | None:
