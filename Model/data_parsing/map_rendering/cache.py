@@ -8,6 +8,7 @@ entire dataset in one batch so the DataLoader only ever reads PNGs.
 from __future__ import annotations
 
 import logging
+import math
 import pickle
 from pathlib import Path
 from typing import Mapping, Sequence
@@ -17,6 +18,7 @@ import networkx as nx
 from .gps_to_map import (
     DEFAULT_IMAGE_SIZE,
     DEFAULT_RADIUS_M,
+    EARTH_RADIUS_M,
     fetch_road_network,
     map_match_waypoints,
     render_map_tile,
@@ -85,11 +87,12 @@ def render_and_cache_tiles(
             logger.warning("clip %s has no GPS samples; skipping", clip_id)
             continue
 
-        center_lat = sum(lats) / len(lats)
-        center_lon = sum(lons) / len(lons)
+        ego_lat = float(lats[-1])
+        ego_lon = float(lons[-1])
+        ego_heading = _heading_from_trace(lats, lons, ego_lat)
 
         graph = _load_or_fetch_network(
-            center_lat, center_lon, radius_m, net_cache
+            ego_lat, ego_lon, radius_m, net_cache
         )
         if graph is None:
             logger.warning("clip %s: failed to obtain road network; skipping", clip_id)
@@ -101,7 +104,11 @@ def render_and_cache_tiles(
             image = render_map_tile(
                 graph,
                 route_nodes=route,
+                ego_lat=ego_lat,
+                ego_lon=ego_lon,
+                ego_heading=ego_heading,
                 raw_gps_points=raw_points,
+                radius_m=radius_m,
                 image_size=image_size,
             )
         except Exception as exc:  # noqa: BLE001 — matplotlib/osmnx errors vary
@@ -112,6 +119,26 @@ def render_and_cache_tiles(
         rendered.append(tile_path)
 
     return rendered
+
+
+def _heading_from_trace(
+    lats: Sequence[float], lons: Sequence[float], ref_lat: float
+) -> float:
+    """Estimate ego heading (radians) from the last segment of the GPS trace.
+
+    Uses atan2(east, north) so 0 rad ≡ north and the value matches the
+    `ego_heading` convention in `render_map_tile`. Falls back to 0 when the
+    trace has fewer than two distinct samples.
+    """
+    if len(lats) < 2:
+        return 0.0
+    cos_lat = math.cos(math.radians(ref_lat))
+    deg_to_m = EARTH_RADIUS_M * math.pi / 180.0
+    dx = (lons[-1] - lons[-2]) * cos_lat * deg_to_m
+    dy = (lats[-1] - lats[-2]) * deg_to_m
+    if dx == 0.0 and dy == 0.0:
+        return 0.0
+    return math.atan2(dx, dy)
 
 
 def _load_or_fetch_network(

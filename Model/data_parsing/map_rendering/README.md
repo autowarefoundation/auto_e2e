@@ -4,6 +4,24 @@ Offline preprocessing utility that turns raw GPS waypoints into BEV map tiles
 in the style of the L2D dataset's pre-rendered map. Use it for datasets that
 do not natively ship map images (e.g. KIT Scenes, NVIDIA PhysicalAI).
 
+## Ego-centric framing
+
+Tiles are rendered **ego-centric**, matching the L2D / NVIDIA / KIT Scenes
+convention:
+
+- Center: the ego pose `(ego_lat, ego_lon)` (defaults to the last GPS sample
+  when omitted in `gps_to_tensor`).
+- Orientation: rotated so the ego forward direction points **up** in the
+  image (forward = +y).
+- Frame: a local equirectangular projection — coordinates are converted from
+  lon/lat to metres relative to the ego, then rotated by `-ego_heading`. The
+  axes share a common metric scale (`ax.set_aspect("equal")`), so there is
+  no lat/lon aspect distortion.
+- Extent: a fixed metric window of `±radius_m` around the origin.
+
+`ego_heading` is in radians, measured CCW from north (so `0` = north, the
+ego is facing north and the tile is north-up).
+
 ## When to use
 
 - You have GPS lat/lon traces per clip and want a model input equivalent to
@@ -58,6 +76,8 @@ tensor = gps_to_tensor(
     latitudes=lats,
     longitudes=lons,
     transform=transform,
+    ego_heading=heading_rad,  # radians CCW from north
+    # ego_lat / ego_lon default to the last GPS sample
     radius_m=800,
 )
 # tensor.shape == (3, H, W) — drop straight into the visual_tiles slot.
@@ -115,5 +135,8 @@ pip install osmnx geopandas matplotlib pillow networkx
 - Map matching can fail (waypoints outside the fetched bbox, disconnected
   components). When it does, the renderer falls back to drawing the network
   plus raw GPS markers.
+- `render_and_cache_tiles` estimates `ego_heading` from the last segment of
+  each GPS trace. If you have a more accurate heading source (IMU, GNSS
+  course-over-ground), prefer calling `render_map_tile` directly with it.
 - Tests must not require internet — `osmnx.graph_from_point` and
   `osmnx.distance.nearest_nodes` are mocked.
