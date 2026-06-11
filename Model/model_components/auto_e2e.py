@@ -43,7 +43,22 @@ class AutoE2E(nn.Module):
         self.FutureState = FutureState(embed_dim=embed_dim, ego_hidden_dim=embed_dim)
 
     def forward(self, x, visual_history, egomotion_history, camera_params=None,
-                mode="train", **kwargs):
+                mode="train", trajectory_target=None, **kwargs):
+        """Run the full autonomous-driving pipeline.
+
+        The first return value's meaning depends on ``mode`` but is uniform
+        across all planners (GRU, Flow Matching, ...):
+
+        * ``mode="train"``: returns ``(planner_loss, ego_hidden, future)``
+          where ``planner_loss`` is a SCALAR — not a trajectory. The
+          planner-specific objective (imitation MSE for GRU,
+          flow-matching velocity MSE for Flow Matching) is computed
+          inside the planner so a training loop never has to know which
+          decoder is active. ``trajectory_target`` is required.
+        * any other ``mode`` (e.g. ``"infer"``): returns
+          ``(trajectory, ego_hidden, None)`` where ``trajectory`` is
+          ``[B, num_timesteps * num_signals]``.
+        """
         B, V, C, H, W = x.shape
 
         # Merge batch and views for backbone processing
@@ -53,14 +68,19 @@ class AutoE2E(nn.Module):
         # Fuse multi-scale features and unify across views
         fused_features = self.FeatureFusion(features, B, V, camera_params=camera_params)
 
-        trajectory, ego_hidden = self.TrajectoryPlanner(
-            fused_features, visual_history, egomotion_history,
-            mode=mode, **kwargs,
-        )
-
         if mode == "train":
+            if trajectory_target is None:
+                raise ValueError(
+                    "AutoE2E.forward(mode='train') requires trajectory_target."
+                )
+            planner_loss, ego_hidden = self.TrajectoryPlanner.compute_planner_loss(
+                fused_features, visual_history, egomotion_history,
+                trajectory_target,
+            )
             future_visual_features = self.FutureState(fused_features, ego_hidden)
-        else:
-            future_visual_features = None
+            return planner_loss, ego_hidden, future_visual_features
 
-        return trajectory, ego_hidden, future_visual_features
+        trajectory, ego_hidden = self.TrajectoryPlanner(
+            fused_features, visual_history, egomotion_history, **kwargs,
+        )
+        return trajectory, ego_hidden, None
