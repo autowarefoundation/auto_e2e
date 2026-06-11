@@ -1,0 +1,98 @@
+"""Optional encoder of the PAST visual/ego history (Issue #20).
+
+Addresses the "Visual Scene History too small" feedback (Zain, 03/06):
+instead of feeding the planner a long, thin 10 Hz history, this module
+compresses the past to a coarser-in-time / richer-in-feature representation
+at ~1 Hz, then summarises it into a single context vector. Slower temporal
+granularity over the past reduces decision flicker while keeping the
+per-step feature capacity high.
+
+Scope note: this is an ENCODER of history (the past), NOT a trajectory
+planner — it is deliberately distinct from the future-rollout
+``gru_planner`` proposed in PR #51, which decodes future waypoints. The
+output of this module is a context vector intended as an additional
+(optional) conditioning input; it does not modify AutoE2E's default
+forward pass or its 3-tuple return contract.
+"""
+
+import torch
+import torch.nn as nn
+
+
+class HistoryEncoder(nn.Module):
+    """Compress a [B, T, input_dim] past sequence into a [B, hidden_dim] context.
+
+    Pipeline:
+      1. Temporal compression: non-overlapping Conv1d with
+         ``kernel=stride=subsample_ratio`` pools each ``subsample_ratio``-step
+         window (e.g. 10 steps at 10 Hz -> 1 step at 1 Hz) while EXPANDING the
+         feature dimension to ``hidden_dim`` (coarser in time, richer in
+         feature). A trailing window shorter than the ratio is dropped.
+      2. Sequence summarisation: a GRU over the ~1 Hz sequence; the final
+         hidden state is the history context.
+
+    Args:
+        input_dim: feature size of each history step.
+        hidden_dim: feature size of the compressed steps and output context.
+        subsample_ratio: temporal pooling factor (default 10: 10 Hz -> 1 Hz).
+        input_hz: nominal input rate, for documentation/inspection only.
+
+    Example: T=64 at 10 Hz with ``subsample_ratio=10`` -> 6 compressed steps
+    (~1 Hz over 6.4 s) -> context ``[B, hidden_dim]``.
+    """
+
+    def __init__(self, input_dim: int = 256, hidden_dim: int = 256,
+                 subsample_ratio: int = 10, input_hz: float = 10.0):
+        super().__init__()
+        if subsample_ratio < 1:
+            raise ValueError(
+                f"subsample_ratio must be >= 1, got {subsample_ratio}"
+            )
+        self.input_dim = input_dim
+        self.hidden_dim = hidden_dim
+        self.subsample_ratio = subsample_ratio
+        self.input_hz = input_hz
+        self.output_hz = input_hz / subsample_ratio
+
+        # Non-overlapping temporal pooling with feature expansion.
+        self.temporal_compress = nn.Conv1d(
+            input_dim, hidden_dim,
+            kernel_size=subsample_ratio, stride=subsample_ratio,
+        )
+        self.activation = nn.GELU()
+        self.norm = nn.LayerNorm(hidden_dim)
+
+        # Summarise the low-rate sequence into a single context vector.
+        self.gru = nn.GRU(hidden_dim, hidden_dim, batch_first=True)
+
+    def compressed_length(self, T: int) -> int:
+        """Number of ~1 Hz steps produced from a T-step input."""
+        return T // self.subsample_ratio
+
+    def compress(self, history: torch.Tensor) -> torch.Tensor:
+        """Temporal compression only: [B, T, input_dim] -> [B, T', hidden_dim]
+        with ``T' = T // subsample_ratio``."""
+        B, T, _ = history.shape
+        if T < self.subsample_ratio:
+            raise ValueError(
+                f"History length {T} is shorter than subsample_ratio "
+                f"{self.subsample_ratio}; need at least one full window."
+            )
+        x = history.transpose(1, 2)            # [B, input_dim, T]
+        x = self.temporal_compress(x)          # [B, hidden_dim, T']
+        x = self.activation(x)
+        x = x.transpose(1, 2)                  # [B, T', hidden_dim]
+        return self.norm(x)
+
+    def forward(self, history: torch.Tensor) -> torch.Tensor:
+        """Encode the past.
+
+        Args:
+            history: ``[B, T, input_dim]`` past sequence (e.g. T=64 at 10 Hz).
+
+        Returns:
+            context: ``[B, hidden_dim]`` summary of the compressed history.
+        """
+        compressed = self.compress(history)     # [B, T', hidden_dim]
+        _, h_n = self.gru(compressed)            # h_n: [1, B, hidden_dim]
+        return h_n.squeeze(0)
