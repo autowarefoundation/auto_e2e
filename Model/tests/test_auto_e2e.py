@@ -93,21 +93,32 @@ class TestBatchIndependence:
 
 class TestViewFusion:
     def test_different_views_produce_different_output(self, model, device):
+        """Zeroing one camera view must shift the FUSED feature map.
+
+        Asserts at the fused-feature level rather than the trajectory because
+        in BEV mode the planner's deformable cross-attention samples only a
+        sparse subset of BEV cells — a zeroed view that touches only un-sampled
+        cells could leave the trajectory unchanged in a randomly-initialized
+        model. View fusion's contract is over the fused feature map; that is
+        what this test asserts.
+        """
         model.eval()
         torch.manual_seed(42)
         visual, vis_hist, ego = make_inputs(1, 8, device)
+        B, V, C, H, W = visual.shape
 
-        traj_a, _, _ = model(visual, vis_hist, ego)
+        def fused_features(x):
+            features = model.Backbone(x.reshape(B * V, C, H, W))
+            return model.FeatureFusion(features, B, V)
 
-        # Replace one camera view with zeros
+        fused_base = fused_features(visual)
+
         visual_zeroed = visual.clone()
         visual_zeroed[0, 3] = 0.0
+        fused_zeroed = fused_features(visual_zeroed)
 
-        traj_b, _, _ = model(visual_zeroed, vis_hist, ego)
-
-        # Output should differ — proving that the zeroed view had influence
-        assert not torch.allclose(traj_a, traj_b, atol=1e-5), \
-            "Changing a camera view had no effect on output — fusion is broken"
+        assert not torch.allclose(fused_base, fused_zeroed, atol=1e-5), \
+            "Zeroing a camera view had no effect on the fused feature map — fusion is broken"
 
     def test_all_views_contribute(self, model, device):
         """Each view must influence the FUSED feature map when perturbed.
