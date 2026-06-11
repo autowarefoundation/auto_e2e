@@ -22,4 +22,4 @@ jobs:
         run: ruff check
 
       - name: Run unit tests
-        run: cd Model/tests && python -m pytest -v -m "not integration"
+        run: python -m pytest Model/tests -v
