@@ -207,7 +207,8 @@ class FlowMatchingPlanner(BasePlanner):
 
     def forward(self, bev_features, visual_history, egomotion_history,
                 mode="train", trajectory_target=None,
-                noisy_trajectory=None, flow_timestep=None, **kwargs):
+                noisy_trajectory=None, flow_timestep=None,
+                generator=None, **kwargs):
         """
         Args:
             bev_features: [B, embed_dim, H, W].
@@ -224,6 +225,9 @@ class FlowMatchingPlanner(BasePlanner):
                 without re-sampling.
             flow_timestep: optional pre-sampled t paired with
                 ``noisy_trajectory``.
+            generator: optional ``torch.Generator`` used to seed the noise
+                prior in inference mode, so evaluation runs are
+                reproducible. Ignored in train mode.
             **kwargs: ignored.
 
         Returns:
@@ -251,7 +255,8 @@ class FlowMatchingPlanner(BasePlanner):
         # Inference: Euler-integrate dx/dt = v_theta(x, t, ...) over [0, 1].
         B = bev_features.shape[0]
         x = torch.randn(B, self.trajectory_dim,
-                        device=bev_features.device, dtype=bev_features.dtype)
+                        device=bev_features.device, dtype=bev_features.dtype,
+                        generator=generator)
         dt = 1.0 / self.num_inference_steps
         for step in range(self.num_inference_steps):
             t_val = step * dt
