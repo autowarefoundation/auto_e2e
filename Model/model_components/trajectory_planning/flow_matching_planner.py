@@ -143,8 +143,20 @@ class FlowMatchingPlanner(BasePlanner):
         bev_pool = bev_features.mean(dim=(2, 3))
         return self.cond_to_ego_hidden(self.bev_pool_proj(bev_pool) + mod_cond)
 
-    def _construct_training_data(self, trajectory_target):
+    def construct_training_data(self, trajectory_target):
         """Sample (u_t, t, target_velocity) for one flow-matching training step.
+
+        Public so the training loop can compute the flow-matching loss: the
+        target velocity is x_1 - x_0 where x_0 is the *internal* random noise
+        sample drawn here, so it cannot be reconstructed from forward()'s
+        return value alone. Intended usage::
+
+            u_t, t, target_velocity = planner.construct_training_data(trajectory_target)
+            velocity_pred, ego_hidden = model(
+                bev, vis_hist, ego, mode="train",
+                noisy_trajectory=u_t, flow_timestep=t,
+            )
+            loss = F.mse_loss(velocity_pred, target_velocity)
 
         Returns:
             u_t: [B, trajectory_dim] — the noisy interpolated state.
@@ -226,7 +238,7 @@ class FlowMatchingPlanner(BasePlanner):
             if noisy_trajectory is not None and flow_timestep is not None:
                 u_t, t = noisy_trajectory, flow_timestep
             elif trajectory_target is not None:
-                u_t, t, _ = self._construct_training_data(trajectory_target)
+                u_t, t, _ = self.construct_training_data(trajectory_target)
             else:
                 raise ValueError(
                     "FlowMatchingPlanner train mode requires either "

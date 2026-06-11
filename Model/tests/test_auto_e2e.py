@@ -1297,11 +1297,36 @@ class TestFlowMatchingPlanner:
     def test_construct_training_data_shapes(self, device):
         planner = FlowMatchingPlanner(embed_dim=256).to(device)
         target = torch.randn(4, 128, device=device)
-        u_t, t, target_velocity = planner._construct_training_data(target)
+        u_t, t, target_velocity = planner.construct_training_data(target)
         assert u_t.shape == (4, 128)
         assert t.shape == (4,)
         assert target_velocity.shape == (4, 128)
         assert (t >= 0).all() and (t <= 1).all()
+
+    def test_training_loop_end_to_end(self, device):
+        """The documented training-loop pattern must work: sample (u_t, t,
+        target_velocity) externally, feed (u_t, t) into forward(), backprop
+        an MSE loss against target_velocity."""
+        import torch.nn.functional as F
+        planner = FlowMatchingPlanner(embed_dim=256).to(device)
+        planner.train()
+        bev = torch.randn(2, 256, 8, 8, device=device, requires_grad=True)
+        vis_hist = torch.randn(2, 896, device=device)
+        ego = torch.randn(2, 256, device=device)
+        target = torch.randn(2, 128, device=device)
+
+        u_t, t, target_velocity = planner.construct_training_data(target)
+        velocity_pred, ego_hidden = planner(
+            bev, vis_hist, ego, mode="train",
+            noisy_trajectory=u_t, flow_timestep=t,
+        )
+        assert velocity_pred.shape == target_velocity.shape == (2, 128)
+        assert ego_hidden.shape == (2, 256)
+
+        loss = F.mse_loss(velocity_pred, target_velocity)
+        assert torch.isfinite(loss)
+        loss.backward()
+        assert bev.grad is not None and bev.grad.abs().max() > 0
 
     def test_training_forward_returns_velocity_shape(self, device):
         planner = FlowMatchingPlanner(embed_dim=256).to(device)
