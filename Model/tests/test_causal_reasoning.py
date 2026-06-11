@@ -1,0 +1,174 @@
+"""Unit tests for the optional System 2 causal reasoning head (Issue #17).
+
+The module is auxiliary and independent: it does NOT modify AutoE2E's
+forward pass or its (trajectory, ego_hidden, future) 3-tuple contract.
+Key property under test: gradients flow end-to-end (no torch.no_grad in
+the cascade), so the head can shape the shared representation and the
+reasoning latent can condition the planner.
+"""
+
+import os
+import sys
+
+import torch
+import torch.nn as nn
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+
+from model_components.causal_reasoning import (
+    CAUSAL_CLASSES,
+    CausalReasoningModule,
+    causal_consistency_loss,
+)
+
+
+class _MockBackbone(nn.Module):
+    """Minimal stand-in for Backbone (4 channels-first feature maps),
+    self-contained so this test file does not depend on conftest imports."""
+
+    def __init__(self, backbone="swin_v2_tiny", is_pretrained=True, **kwargs):
+        super().__init__()
+        self.backbone_channels = 1440
+        self._stages = nn.ModuleList([
+            nn.Sequential(nn.Conv2d(3, 96, 3, 1, 1), nn.AdaptiveAvgPool2d(64)),
+            nn.Sequential(nn.Conv2d(96, 192, 3, 1, 1), nn.AdaptiveAvgPool2d(32)),
+            nn.Sequential(nn.Conv2d(192, 384, 3, 1, 1), nn.AdaptiveAvgPool2d(16)),
+            nn.Sequential(nn.Conv2d(384, 768, 3, 1, 1), nn.AdaptiveAvgPool2d(8)),
+        ])
+
+    def forward(self, image):
+        outs, x = [], image
+        for stage in self._stages:
+            x = stage(x)
+            outs.append(x)
+        return outs
+
+
+EMBED_DIM = 256
+B = 4
+
+
+def test_class_vocabulary():
+    assert CAUSAL_CLASSES == (
+        "intersection", "pedestrian", "traffic_light", "obstacle", "clear",
+    )
+
+
+def test_output_shapes():
+    module = CausalReasoningModule(embed_dim=EMBED_DIM)
+    context = torch.randn(B, EMBED_DIM)
+    reasoning_latent, decision_logits = module(context)
+    assert decision_logits.shape == (B, 5)
+    assert reasoning_latent.shape == (B, EMBED_DIM)
+    assert torch.isfinite(decision_logits).all()
+    assert torch.isfinite(reasoning_latent).all()
+
+
+def test_custom_latent_dim():
+    module = CausalReasoningModule(embed_dim=EMBED_DIM, latent_dim=128)
+    context = torch.randn(B, EMBED_DIM)
+    reasoning_latent, decision_logits = module(context)
+    assert reasoning_latent.shape == (B, 128)
+    assert decision_logits.shape == (B, 5)
+
+
+def test_reason_method_matches_cascade_latent():
+    """reason() is the cascade hook — it must expose the same latent the
+    decision head consumes."""
+    module = CausalReasoningModule(embed_dim=EMBED_DIM)
+    module.eval()
+    context = torch.randn(B, EMBED_DIM)
+    with torch.no_grad():
+        latent_only = module.reason(context)
+        latent_full, _ = module(context)
+    assert torch.allclose(latent_only, latent_full)
+
+
+def test_gradients_flow_to_all_parameters_and_context():
+    """No torch.no_grad anywhere: gradients must reach every parameter of
+    the module AND the upstream context vector (cascade requirement)."""
+    module = CausalReasoningModule(embed_dim=EMBED_DIM)
+    context = torch.randn(B, EMBED_DIM, requires_grad=True)
+    reasoning_latent, decision_logits = module(context)
+    labels = torch.randint(0, 5, (B,))
+    loss = causal_consistency_loss(decision_logits, labels)
+    loss = loss + reasoning_latent.pow(2).mean()
+    loss.backward()
+
+    assert context.grad is not None, "Gradient must reach upstream context"
+    assert torch.isfinite(context.grad).all()
+    for name, p in module.named_parameters():
+        assert p.grad is not None, f"No gradient for {name}"
+        assert torch.isfinite(p.grad).all(), f"Non-finite grad for {name}"
+
+
+def test_loss_lower_for_correct_labels():
+    """Cross-entropy must be lower for labels matching the argmax decisions
+    than for deliberately wrong labels."""
+    torch.manual_seed(0)
+    module = CausalReasoningModule(embed_dim=EMBED_DIM)
+    context = torch.randn(B, EMBED_DIM)
+    _, decision_logits = module(context)
+    correct = decision_logits.argmax(dim=1)
+    wrong = (correct + 1) % 5
+    loss_correct = causal_consistency_loss(decision_logits, correct)
+    loss_wrong = causal_consistency_loss(decision_logits, wrong)
+    assert loss_correct.item() < loss_wrong.item()
+
+
+def test_loss_decreases_with_training():
+    """A few optimisation steps on fixed pseudo-labels must reduce the
+    consistency loss (head is trainable end-to-end)."""
+    torch.manual_seed(0)
+    module = CausalReasoningModule(embed_dim=EMBED_DIM)
+    context = torch.randn(16, EMBED_DIM)
+    labels = torch.randint(0, 5, (16,))
+    optimizer = torch.optim.Adam(module.parameters(), lr=1e-3)
+
+    _, logits = module(context)
+    initial = causal_consistency_loss(logits, labels).item()
+    for _ in range(30):
+        optimizer.zero_grad()
+        _, logits = module(context)
+        loss = causal_consistency_loss(logits, labels)
+        loss.backward()
+        optimizer.step()
+    final = causal_consistency_loss(module(context)[1], labels).item()
+    assert final < initial
+
+
+def test_autoe2e_contract_untouched_with_manual_integration(device):
+    """Manual cascade integration: run AutoE2E (mock backbone), feed
+    ego_hidden into the reasoning head. The AutoE2E 3-tuple contract is
+    untouched and gradients reach the trunk through the auxiliary loss."""
+    from unittest.mock import patch
+
+    from model_components.auto_e2e import AutoE2E
+
+    with patch("model_components.auto_e2e.Backbone", _MockBackbone):
+        model = AutoE2E(num_views=8, fusion_mode="concat").to(device)
+    head = CausalReasoningModule(embed_dim=EMBED_DIM).to(device)
+
+    x = torch.randn(2, 8, 3, 256, 256, device=device)
+    vis = torch.randn(2, 896, device=device)
+    ego = torch.randn(2, 256, device=device)
+    out = model(x, vis, ego)
+
+    # Default contract: exactly a 3-tuple (trajectory, ego_hidden, future)
+    assert isinstance(out, tuple) and len(out) == 3
+    trajectory, ego_hidden, future = out
+    assert trajectory.shape == (2, 128)
+    assert ego_hidden.shape == (2, 256)
+    assert future is not None
+
+    # Auxiliary head consumes ego_hidden; gradient reaches AutoE2E trunk.
+    _, decision_logits = head(ego_hidden)
+    labels = torch.randint(0, 5, (2,), device=device)
+    causal_consistency_loss(decision_logits, labels).backward()
+    trunk_grads = [
+        p.grad for p in model.TrajectoryPlanner.parameters()
+        if p.grad is not None
+    ]
+    assert len(trunk_grads) > 0, (
+        "Auxiliary loss must backpropagate into the shared trunk"
+    )
