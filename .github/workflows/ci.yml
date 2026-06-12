@@ -7,9 +7,6 @@ on:
 jobs:
   lint-and-test:
     runs-on: ubuntu-latest
-    env:
-      # `make setup` is platform-neutral; this steers pip to CPU torch wheels.
-      PIP_EXTRA_INDEX_URL: https://download.pytorch.org/whl/cpu
     steps:
       - uses: actions/checkout@v4
 

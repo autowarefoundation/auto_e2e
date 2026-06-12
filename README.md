@@ -34,7 +34,14 @@ AutoE2E outputs can be fused with Physics-based sensors such as LIDAR/RADAR to p
 To learn more about how to participate in this project, please read the [onboarding guide](/ONBOARDING.md)
 
 ## Getting started
-- Install the dependencies from the **requirements.txt** file
+- Install the dependencies:
+
+  ```bash
+  make setup                      # CPU torch wheels
+  make setup TORCH_CHANNEL=cu118  # CUDA 11.8 build (cu121, ... work too)
+  ```
+
+  Plain `pip install -r requirements.txt` also works and uses the default PyPI torch wheels.
 - Visit the [Model](./Model/) folder to view the model components, run training and perform inference
 - See the [Trial Guide](./TRIAL.md) for step-by-step instructions on running the inference test on AWS EC2
 
