@@ -7,6 +7,9 @@ on:
 jobs:
   lint-and-test:
     runs-on: ubuntu-latest
+    env:
+      # `make setup` is platform-neutral; this steers pip to CPU torch wheels.
+      PIP_EXTRA_INDEX_URL: https://download.pytorch.org/whl/cpu
     steps:
       - uses: actions/checkout@v4
 
@@ -16,10 +19,10 @@ jobs:
           python-version: "3.12"
 
       - name: Install dependencies
-        run: pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu && pip install timm pytest ruff
+        run: make setup
 
       - name: Lint with ruff
-        run: ruff check
+        run: make lint
 
       - name: Run unit tests
-        run: python -m pytest Model/tests -v
+        run: make test
