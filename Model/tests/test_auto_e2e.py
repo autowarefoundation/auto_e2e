@@ -1634,32 +1634,20 @@ class TestGRUPlannerBackcompat:
         assert traj.shape == (1, 128)
 
 
-def _build_flow_matching_model(num_views, fusion_mode, device,
-                               num_timesteps=64, num_inference_steps=4):
-    from unittest.mock import patch
-    from model_components.auto_e2e import AutoE2E
-    from conftest import MockBackbone
-
-    view_fusion_kwargs = {"bev_h": 8, "bev_w": 8} if fusion_mode == "bev" else None
-
-    with patch('model_components.auto_e2e.Backbone', MockBackbone):
-        model = AutoE2E(
-            num_views=num_views,
-            fusion_mode=fusion_mode,
-            view_fusion_kwargs=view_fusion_kwargs,
-            num_timesteps=num_timesteps,
-            planner_mode="flow_matching",
-            planner_kwargs={"num_inference_steps": num_inference_steps},
-        )
-    return model.to(device)
-
-
 class TestAutoE2EWithFlowMatching:
-    def test_train_mode_returns_scalar_loss(self, device):
+    @staticmethod
+    def _fm_model(build_mock_model, device):
+        return build_mock_model(
+            num_views=8, fusion_mode="concat", device=device,
+            planner_mode="flow_matching",
+            planner_kwargs={"num_inference_steps": 4},
+        )
+
+    def test_train_mode_returns_scalar_loss(self, build_mock_model, device):
         """Under the uniform Option-B contract, train mode must return a
         scalar planner loss — NOT the raw flow-matching velocity tensor.
         This documents that the velocity-vs-target footgun is gone."""
-        model = _build_flow_matching_model(8, "concat", device)
+        model = self._fm_model(build_mock_model, device)
         model.train()
         visual, vis_hist, ego = make_inputs(2, 8, device)
         target = torch.randn(2, 128, device=device)
@@ -1672,8 +1660,8 @@ class TestAutoE2EWithFlowMatching:
         assert ego_hidden.shape == (2, 256)
         assert future is not None and len(future) == 4
 
-    def test_infer_mode_returns_trajectory(self, device):
-        model = _build_flow_matching_model(8, "concat", device)
+    def test_infer_mode_returns_trajectory(self, build_mock_model, device):
+        model = self._fm_model(build_mock_model, device)
         model.eval()
         visual, vis_hist, ego = make_inputs(1, 8, device)
         traj, ego_hidden, future = model(visual, vis_hist, ego, mode="infer")
@@ -1682,8 +1670,8 @@ class TestAutoE2EWithFlowMatching:
         assert future is None
         assert torch.isfinite(traj).all()
 
-    def test_backward_flows_through_planner_loss(self, device):
-        model = _build_flow_matching_model(8, "concat", device)
+    def test_backward_flows_through_planner_loss(self, build_mock_model, device):
+        model = self._fm_model(build_mock_model, device)
         model.train()
         visual, vis_hist, ego = make_inputs(2, 8, device)
         target = torch.randn(2, 128, device=device)
@@ -1704,8 +1692,8 @@ class TestAutoE2EWithFlowMatching:
         )
         assert backbone_grad and planner_grad
 
-    def test_train_mode_requires_target(self, device):
-        model = _build_flow_matching_model(8, "concat", device)
+    def test_train_mode_requires_target(self, build_mock_model, device):
+        model = self._fm_model(build_mock_model, device)
         visual, vis_hist, ego = make_inputs(1, 8, device)
         with pytest.raises(ValueError, match="trajectory_target"):
             model(visual, vis_hist, ego, mode="train")
@@ -1715,7 +1703,7 @@ class TestAutoE2EWithFlowMatching:
         callers can swap planners with no other code changes."""
         gru_model = build_mock_model(num_views=8, fusion_mode="concat",
                                      device=device)
-        fm_model = _build_flow_matching_model(8, "concat", device)
+        fm_model = self._fm_model(build_mock_model, device)
         gru_model.eval()
         fm_model.eval()
 
