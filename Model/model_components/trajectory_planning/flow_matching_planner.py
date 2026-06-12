@@ -15,7 +15,11 @@ class FlowMatchingPlanner(BasePlanner):
     target trajectory x_1 along the linear path
     ``u_t = (1 - t) * x_0 + t * x_1``. Following Lipman et al. (2023), the
     target velocity at u_t is simply ``x_1 - x_0``, so training reduces to
-    a per-sample MSE between v_theta and that constant velocity.
+    a per-sample MSE between v_theta and that constant velocity. Training
+    timesteps are drawn by default from a shifted Beta(1.5, 1) schedule
+    (``t = 0.999 - 0.999 * Beta(1.5, 1).sample()``) following pi-0.5 /
+    Alpamayo, biasing samples toward the noisy (low-t) end where the
+    velocity field is hardest to learn.
 
     The velocity network preserves the BEV grid's spatial structure: the
     noisy trajectory is treated as a sequence of ``num_timesteps`` action
@@ -44,7 +48,8 @@ class FlowMatchingPlanner(BasePlanner):
 
     def __init__(self, embed_dim=256, num_timesteps=64, num_signals=2,
                  egomotion_dim=256, visual_history_dim=896,
-                 num_inference_steps=10, time_embed_dim=128, num_heads=4):
+                 num_inference_steps=10, time_embed_dim=128, num_heads=4,
+                 timestep_sampler="beta", beta_alpha=1.5, beta_scale=0.999):
         super().__init__()
 
         if num_inference_steps < 1:
@@ -54,6 +59,24 @@ class FlowMatchingPlanner(BasePlanner):
         if time_embed_dim % 2 != 0:
             raise ValueError(
                 f"time_embed_dim must be even, got {time_embed_dim}."
+            )
+        if timestep_sampler not in ("beta", "uniform"):
+            raise ValueError(
+                f"timestep_sampler must be 'beta' or 'uniform', "
+                f"got {timestep_sampler!r}."
+            )
+        if not (isinstance(beta_alpha, (int, float))
+                and not isinstance(beta_alpha, bool)
+                and math.isfinite(beta_alpha) and beta_alpha > 0):
+            raise ValueError(
+                f"beta_alpha must be a finite positive number, got {beta_alpha!r}."
+            )
+        if not (isinstance(beta_scale, (int, float))
+                and not isinstance(beta_scale, bool)
+                and math.isfinite(beta_scale)
+                and 0 < beta_scale <= 1):
+            raise ValueError(
+                f"beta_scale must satisfy 0 < beta_scale <= 1, got {beta_scale!r}."
             )
 
         self.embed_dim = embed_dim
@@ -65,6 +88,17 @@ class FlowMatchingPlanner(BasePlanner):
         self.num_inference_steps = num_inference_steps
         self.time_embed_dim = time_embed_dim
         self.num_heads = num_heads
+
+        # Flow timestep schedule. The default is the pi-0.5 / Alpamayo
+        # shifted Beta(beta_alpha, 1) sampler, which biases t toward the
+        # noisy (low-t) end and empirically improves flow-matching policy
+        # training; "uniform" recovers the textbook U(0, 1).
+        self.timestep_sampler = timestep_sampler
+        self.beta_alpha = float(beta_alpha)
+        self.beta_scale = float(beta_scale)
+        self._beta_dist = torch.distributions.Beta(
+            torch.tensor(self.beta_alpha), torch.tensor(1.0),
+        )
 
         # Conditioning encoders for the AdaLN modulation path. BEV is NOT
         # pooled into this conditioning — it enters the velocity field via
@@ -180,6 +214,19 @@ class FlowMatchingPlanner(BasePlanner):
         bev_pool = bev_features.mean(dim=(2, 3))
         return self.cond_to_ego_hidden(self.bev_pool_proj(bev_pool) + mod_cond)
 
+    def _sample_timesteps(self, batch_size, device, dtype):
+        """Sample flow timesteps t in [0, 1).
+
+        Default follows Alpamayo / pi-0.5: a shifted Beta(beta_alpha, 1.0)
+        biased toward the noisy (low-t) end, which improves flow-matching
+        policy training. ``timestep_sampler='uniform'`` falls back to U(0, 1).
+        """
+        if self.timestep_sampler == "uniform":
+            return torch.rand(batch_size, device=device, dtype=dtype)
+        # beta: t = beta_scale - beta_scale * Beta(alpha, 1).sample()
+        b = self._beta_dist.sample((batch_size,)).to(device=device, dtype=dtype)
+        return self.beta_scale - self.beta_scale * b
+
     def construct_training_data(self, trajectory_target):
         """Sample (u_t, t, target_velocity) for one flow-matching training step.
 
@@ -196,8 +243,9 @@ class FlowMatchingPlanner(BasePlanner):
         """
         B = trajectory_target.shape[0]
         x_0 = torch.randn_like(trajectory_target)
-        t = torch.rand(B, device=trajectory_target.device,
-                       dtype=trajectory_target.dtype)
+        t = self._sample_timesteps(
+            B, trajectory_target.device, trajectory_target.dtype,
+        )
         u_t = (1.0 - t).unsqueeze(-1) * x_0 + t.unsqueeze(-1) * trajectory_target
         target_velocity = trajectory_target - x_0
         # Cheap defense-in-depth: catch shape regressions even on the
