@@ -1550,6 +1550,48 @@ class TestFlowMatchingPlanner:
         with pytest.raises(ValueError, match="must be on the same device"):
             planner._validate_flow_inputs(u_cpu, t_cuda, batch_size=1)
 
+    def test_timestep_sampler_beta_in_range(self, device):
+        """Default shifted-Beta sampler stays inside [0, beta_scale] and
+        matches the trajectory_target dtype."""
+        torch.manual_seed(0)
+        planner = FlowMatchingPlanner(embed_dim=256).to(device)
+        target = torch.randn(256, 128, device=device)
+        _, t, _ = planner.construct_training_data(target)
+        assert t.shape == (256,)
+        assert t.dtype == target.dtype
+        assert (t >= 0).all()
+        assert (t <= planner.beta_scale + 1e-6).all()
+
+    def test_timestep_sampler_beta_biased_toward_low_t(self, device):
+        """Documents the noisy-end bias: shifted Beta(1.5, 1) puts mass
+        below 0.5 in expectation. Use a loose bound so the assertion is
+        not flaky."""
+        torch.manual_seed(0)
+        planner = FlowMatchingPlanner(embed_dim=256).to(device)
+        target = torch.randn(2048, 128, device=device)
+        _, t, _ = planner.construct_training_data(target)
+        assert t.mean().item() < 0.5
+
+    def test_timestep_sampler_uniform_option(self, device):
+        """timestep_sampler='uniform' recovers U(0, 1)."""
+        planner = FlowMatchingPlanner(
+            embed_dim=256, timestep_sampler="uniform",
+        ).to(device)
+        target = torch.randn(256, 128, device=device)
+        _, t, _ = planner.construct_training_data(target)
+        assert t.shape == (256,)
+        assert t.dtype == target.dtype
+        assert (t >= 0).all()
+        assert (t < 1).all()
+
+    def test_invalid_timestep_sampler_raises(self):
+        with pytest.raises(ValueError, match="timestep_sampler"):
+            FlowMatchingPlanner(timestep_sampler="gaussian")
+        with pytest.raises(ValueError, match="beta_alpha"):
+            FlowMatchingPlanner(beta_alpha=0)
+        with pytest.raises(ValueError, match="beta_scale"):
+            FlowMatchingPlanner(beta_scale=1.5)
+
 
 class TestGRUPlannerBackcompat:
     """The GRU planner moved into the trajectory_planning subpackage —
