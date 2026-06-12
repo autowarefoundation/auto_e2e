@@ -465,11 +465,11 @@ class TestGRUPlannerComponent:
     def test_offset_scale_bool_raises(self):
         # bool is an int subclass; the validator must reject it explicitly.
         with pytest.raises(ValueError, match="offset_scale"):
-            TrajectoryPlanner(embed_dim=256, offset_scale=True)
+            GRUPlanner(embed_dim=256, offset_scale=True)
 
     def test_offset_scale_non_numeric_raises(self):
         with pytest.raises(ValueError, match="offset_scale"):
-            TrajectoryPlanner(embed_dim=256, offset_scale="0.1")
+            GRUPlanner(embed_dim=256, offset_scale="0.1")
 
     def test_offset_scale_zero_vs_nonzero_differ(self, device):
         """offset_scale=0 makes deformable attention sample only at the
