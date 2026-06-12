@@ -3,17 +3,20 @@ from .backbone import Backbone
 from .feature_fusion import FeatureFusion
 from .trajectory_planner import TrajectoryPlanner
 from .future_state import FutureState
+from .map_encoder import build_map_encoder, build_map_bev_fusion
 
 
 class AutoE2E(nn.Module):
-    def __init__(self, backbone="swin_v2_tiny", num_views=8, embed_dim=256,
+    def __init__(self, backbone="swin_v2_tiny", num_views=7, embed_dim=256,
                  fusion_mode="concat", is_pretrained=True,
                  image_feature_size=8, view_fusion_kwargs=None,
                  num_timesteps=64, num_signals=2, egomotion_dim=256,
-                 visual_history_dim=896):
+                 visual_history_dim=896,
+                 map_type="rasterized", map_in_channels=3,
+                 map_fusion_mode="cross_attn", map_fusion_kwargs=None):
         super(AutoE2E, self).__init__()
 
-        # Backbone feature extractor
+        # Camera backbone feature extractor
         self.Backbone = Backbone(backbone=backbone, is_pretrained=is_pretrained)
 
         # Multi-scale feature fusion with view unification.
@@ -25,6 +28,36 @@ class AutoE2E(nn.Module):
             fusion_mode=fusion_mode,
             image_feature_size=image_feature_size,
             view_fusion_kwargs=view_fusion_kwargs,
+        )
+
+        # For BEV fusion mode the spatial size is bev_h × bev_w (potentially non-square).
+        # For concat/cross_attn it is image_feature_size × image_feature_size.
+        vfk = view_fusion_kwargs or {}
+        if fusion_mode == "bev":
+            if "bev_h" not in vfk or "bev_w" not in vfk:
+                raise ValueError(
+                    "bev_h and bev_w must be specified in view_fusion_kwargs for BEV fusion mode"
+                )
+            map_output_h = vfk.get("bev_h", 8)
+            map_output_w = vfk.get("bev_w", 8)
+        else:
+            map_output_h = image_feature_size
+            map_output_w = image_feature_size
+ 
+        # Map encoder: encodes the BEV nav-map image into spatial map features
+        self.MapEncoder = build_map_encoder(
+            map_type,
+            in_channels=map_in_channels,
+            embed_dim=embed_dim,
+            output_h=map_output_h,
+            output_w=map_output_w,
+        )
+ 
+        # Map BEV fusion: combines image BEV features with map BEV features
+        self.MapBEVFusion = build_map_bev_fusion(
+            map_fusion_mode,
+            embed_dim=embed_dim,
+            **(map_fusion_kwargs or {}),
         )
 
         # Trajectory decoder with deformable cross-attention to BEV
@@ -39,16 +72,36 @@ class AutoE2E(nn.Module):
         # Future visual state prediction conditioned on planner ego_hidden
         self.FutureState = FutureState(embed_dim=embed_dim, ego_hidden_dim=embed_dim)
 
-    def forward(self, x, visual_history, egomotion_history, camera_params=None, mode="train"):
-        B, V, C, H, W = x.shape
+    def forward(self, camera_tiles, map_input, visual_history, egomotion_history,
+                camera_params=None, mode="train"):
+        """
+        Args:
+            camera_tiles: (B, V, 3, H, W) — V camera images (V=7 by default).
+            map_input: (B, 3, H_map, W_map) — BEV nav-map image.
+            visual_history: (B, visual_history_dim).
+            egomotion_history: (B, egomotion_dim).
+            camera_params: Optional (B, V, 3, 4) ego-to-pixel projection matrices.
+            mode: "train" to produce future_visual_features; anything else skips it.
 
-        # Merge batch and views for backbone processing
-        x = x.reshape(B * V, C, H, W)
+        Returns:
+            trajectory: (B, num_timesteps * num_signals)
+            ego_hidden: (B, embed_dim)
+            future_visual_features: list of 4 × (B, embed_dim, H, W), or None
+        """
+        B, V, C, H, W = camera_tiles.shape
+
+        # --- Camera branch ---
+        x = camera_tiles.reshape(B * V, C, H, W)
         features = self.Backbone(x)
+        image_bev = self.FeatureFusion(features, B, V, camera_params=camera_params)
 
-        # Fuse multi-scale features and unify across views
-        fused_features = self.FeatureFusion(features, B, V, camera_params=camera_params)
+        # --- Map branch ---
+        map_bev = self.MapEncoder(map_input)
 
+        # --- Fuse image BEV + map BEV ---
+        fused_features = self.MapBEVFusion(image_bev, map_bev)
+
+        # --- Plan ---
         trajectory, ego_hidden = self.TrajectoryPlanner(
             fused_features, visual_history, egomotion_history
         )
