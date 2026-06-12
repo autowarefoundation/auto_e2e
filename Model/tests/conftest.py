@@ -4,7 +4,7 @@ The real backbone (SwinV2/ConvNeXt) dominates test time (~80% per forward pass)
 but is never the subject under test — it is pretrained and frozen. We replace it
 with a lightweight stub that produces tensors of the correct shape, reducing
 per-forward cost from ~50ms to <1ms while still exercising View Fusion,
-TrajectoryPlanner, and FutureState end-to-end.
+GRUPlanner, and FutureState end-to-end.
 
 Tests use a small BEV grid (8x8) for the ``bev`` fusion mode; the production
 default (450x300) is verified separately via configuration tests.
@@ -77,7 +77,8 @@ class MockBackbone(nn.Module):
 
 
 def _build_model_with_mock_backbone(num_views, fusion_mode, device,
-                                    num_timesteps=64):
+                                    num_timesteps=64, planner_mode="gru",
+                                    planner_kwargs=None):
     """Construct AutoE2E with the mock backbone injected.
 
     Patches Backbone at the module level during construction to avoid
@@ -96,6 +97,8 @@ def _build_model_with_mock_backbone(num_views, fusion_mode, device,
             fusion_mode=fusion_mode,
             view_fusion_kwargs=view_fusion_kwargs,
             num_timesteps=num_timesteps,
+            planner_mode=planner_mode,
+            planner_kwargs=planner_kwargs,
         )
     return model.to(device)
 
