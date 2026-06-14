@@ -1,11 +1,13 @@
 # AutoE2E Architecture
 
 ## Architecture Diagram
+> **Note:** The architecture diagram is outdated and does not reflect the current implementation (separate map encoder branch, BEV fusion as default, residual map fusion). It will be updated in a follow-up PR.
+
 <img src="../Media/auto_e2e_architecture.jpg" width="100%">
 
 ## Inputs and Predictions
 **AutoE2E consumes as input:**
-- 7 camera images at 224x224 resolution (providing a surround view of the vehicle alongside a telephoto front and rear camera for long range viewing)
+- 7 camera images at 256x256 resolution (providing a surround view of the vehicle)
 - Rendered map tile (indicating the high level road network layout and future route of the vehicle)
 - Egomotion history (speed, acceleration, yaw angle and yaw angle rate for the previous 6.4s at 10Hz sampling rate)
 - Visual history (`(896,)` = 64 frames × 14-dim compressed scene memory; provides frame-to-frame visual context, distinct from the planner GRU's intra-trajectory temporal coherence)
@@ -20,7 +22,8 @@
 **Forward signature:**
 ```python
 trajectory, ego_hidden, future_visual_features = model(
-    visual_tiles,        # (B, V, 3, H, W) — 7 cameras + 1 map tile
+    visual_tiles,        # (B, V, 3, H, W) — 7 cameras
+    map_tile,            # (B, 3, H_map, W_map) — BEV nav-map image
     visual_history,      # (B, 896) — frame-to-frame visual memory
     egomotion_history,   # (B, 256)
     camera_params=None,  # (B, V, 3, 4) optional, used by BEV fusion
@@ -29,6 +32,6 @@ trajectory, ego_hidden, future_visual_features = model(
 ```
 
 **To learn the driving policy:**
-- Imitaiton Learning is used to penalize trajectory prediciton as well as World Model Simulation based Reinforcement Learning
+- Imitation Learning is used to penalize trajectory prediction as well as World Model Simulation based Reinforcement Learning
 
 
