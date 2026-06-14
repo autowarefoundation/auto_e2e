@@ -36,13 +36,13 @@ class TestOutputShapes:
     @pytest.mark.parametrize("batch_size", [1, 2, 4])
     def test_trajectory_shape(self, model, device, batch_size):
         visual, map_input, vis_hist, ego = make_inputs(batch_size, 7, device)
-        traj, _, _ = model(visual, map_input, vis_hist, ego)
+        traj, _, _ = model(visual, map_input, vis_hist, ego, mode="infer")
         assert traj.shape == (batch_size, 128)
 
     @pytest.mark.parametrize("batch_size", [1, 2, 4])
     def test_ego_hidden_shape(self, model, device, batch_size):
         visual, map_input, vis_hist, ego = make_inputs(batch_size, 7, device)
-        _, ego_hidden, _ = model(visual, map_input, vis_hist, ego)
+        _, ego_hidden, _ = model(visual, map_input, vis_hist, ego, mode="infer")
         assert ego_hidden.shape == (batch_size, 256)
 
     @pytest.mark.parametrize("batch_size", [1, 2, 4])
@@ -229,7 +229,7 @@ class TestGradientFlow:
         params_without_grad = []
         for name, param in model.named_parameters():
             if param.requires_grad and param.grad is None:
-                # MapEncoder parameters legitimately receive zero gradient
+            # MapEncoder parameters legitimately receive zero gradient
                 # at init because ResidualMapFusion uses alpha=0, which
                 # zeroes out ∂loss/∂map_bev entirely (chain rule:
                 # ∂fused/∂map_bev = alpha = 0). This is intentional: the
@@ -823,6 +823,7 @@ class TestBEVFusion:
         # has_observation mask zeroes output after FFN
         assert out.abs().max() < 1e-6, \
             "No visible camera should produce zero BEV features"
+
 
 
 # ---------------------------------------------------------------------------
