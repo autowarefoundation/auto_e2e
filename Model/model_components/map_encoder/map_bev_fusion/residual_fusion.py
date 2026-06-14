@@ -4,10 +4,11 @@ Fuses image BEV features with map BEV features via a learned residual gate:
 
     output = image_bev + alpha * map_bev
 
-where ``alpha`` is a per-channel learnable parameter vector, initialized to
-zero. At the start of training the map branch contributes nothing, so the
-model behaves identically to training without a map encoder. As training
-progresses, ``alpha`` grows to weight whichever map channels are useful.
+where ``alpha`` is a per-channel learnable parameter vector (shape: ``embed_dim``),
+initialized to zero and reshaped to ``(1, embed_dim, 1, 1)`` for broadcasting.
+At the start of training the map branch contributes nothing, so the model behaves
+identically to training without a map encoder. As training progresses, ``alpha``
+grows to weight whichever map channels are useful.
 
 """
 

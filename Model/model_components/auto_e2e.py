@@ -13,8 +13,12 @@ class AutoE2E(nn.Module):
                  num_timesteps=64, num_signals=2, egomotion_dim=256,
                  visual_history_dim=896,
                  map_type="rasterized", map_in_channels=3,
+<<<<<<< HEAD
                  map_fusion_mode="residual", map_fusion_kwargs=None,
                  planner_mode="gru", planner_kwargs=None):
+=======
+                 map_fusion_mode="residual", map_fusion_kwargs=None):
+>>>>>>> d33638d (feat(map_encoder): update fusion modes to use 'bev' and 'residual'; set default BEV dimensions)
         super(AutoE2E, self).__init__()
 
         # Camera backbone feature extractor
