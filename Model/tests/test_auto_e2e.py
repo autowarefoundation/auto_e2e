@@ -229,6 +229,14 @@ class TestGradientFlow:
         params_without_grad = []
         for name, param in model.named_parameters():
             if param.requires_grad and param.grad is None:
+                # MapEncoder parameters legitimately receive zero gradient
+                # at init because ResidualMapFusion uses alpha=0, which
+                # zeroes out ∂loss/∂map_bev entirely (chain rule:
+                # ∂fused/∂map_bev = alpha = 0). This is intentional: the
+                # zero-init scheme ensures the map branch doesn't destabilise
+                # early training. Gradient will flow once alpha grows > 0.
+                if name.startswith("MapEncoder."):
+                    continue
                 params_without_grad.append(name)
 
         assert len(params_without_grad) == 0, \
@@ -248,12 +256,6 @@ class TestGradientFlow:
         for name, param in model.named_parameters():
             if param.requires_grad and param.grad is not None:
                 if param.grad.abs().max() == 0:
-                    # MapEncoder parameters legitimately receive zero gradient
-                    # at init because ResidualMapFusion uses alpha=0, which
-                    # zeroes out ∂loss/∂map_bev entirely (chain rule:
-                    # ∂fused/∂map_bev = alpha = 0). This is intentional: the
-                    # zero-init scheme ensures the map branch doesn't destabilise
-                    # early training. Gradient will flow once alpha grows > 0.
                     if name.startswith("MapEncoder."):
                         continue
                     zero_grad_params.append(name)

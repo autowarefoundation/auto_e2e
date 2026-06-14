@@ -232,10 +232,10 @@ class TestAutoE2EMapIntegration:
     directly (pytest makes conftest a plugin, not an importable module).
     """
 
-    def _make_model(self, build_mock_model, device, map_fusion_mode="cross_attn"):
+    def _make_model(self, build_mock_model, device, map_fusion_mode="residual"):
         return build_mock_model(
             num_views=7,
-            fusion_mode="concat",
+            fusion_mode="bev",
             device=device,
             map_fusion_mode=map_fusion_mode,
         )
@@ -275,8 +275,8 @@ class TestAutoE2EMapIntegration:
         assert not torch.allclose(traj_a, traj_b, atol=1e-5), \
             "With alpha=1, different map inputs should produce different trajectories"
 
-    def test_map_encoder_parameters_receive_gradients(self, build_mock_model, device):
-        model = self._make_model(build_mock_model, device)
+    def test_cross_attn_map_encoder_parameters_receive_gradients(self, build_mock_model, device):
+        model = self._make_model(build_mock_model, device, map_fusion_mode="cross_attn")
         model.train()
 
         visual = torch.randn(2, 7, 3, 256, 256, device=device)
@@ -292,6 +292,7 @@ class TestAutoE2EMapIntegration:
         assert not no_grad, f"MapEncoder params without grad: {no_grad}"
 
     def test_alpha_receives_gradient(self, build_mock_model, device):
+        """Only for residual fusion: alpha must receive a non-zero gradient when map influences trajectory."""
         model = self._make_model(build_mock_model, device, map_fusion_mode="residual")
         model.train()
         with torch.no_grad():
@@ -306,6 +307,25 @@ class TestAutoE2EMapIntegration:
 
         assert model.MapBEVFusion.alpha.grad is not None, "alpha has no gradient"
         assert model.MapBEVFusion.alpha.grad.abs().max() > 0, "alpha gradient is all-zero"
+
+    def test_map_encoder_receives_gradients_when_alpha_nonzero(self, build_mock_model, device):
+        """Only for residual fusion: MapEncoder parameters must receive gradients once alpha is non-zero."""
+        model = self._make_model(build_mock_model, device, map_fusion_mode="residual")
+        model.train()
+        with torch.no_grad():
+            model.MapBEVFusion.alpha.fill_(0.1)
+
+        visual = torch.randn(2, 7, 3, 256, 256, device=device)
+        map_input = torch.randn(2, 3, _MAP_H, _MAP_W, device=device)
+        vis_hist = torch.randn(2, 896, device=device)
+        ego = torch.randn(2, 256, device=device)
+
+        traj, ego_hidden, future = model(visual, map_input, vis_hist, ego)
+        (traj.sum() + ego_hidden.sum() + sum(f.sum() for f in future)).backward()
+
+        no_grad = [n for n, p in model.MapEncoder.named_parameters()
+                if p.requires_grad and p.grad is None]
+        assert not no_grad, f"MapEncoder params without grad after alpha=0.1: {no_grad}"
 
     def test_cross_attn_fusion_mode_forward_succeeds(self, build_mock_model, device):
         model = self._make_model(build_mock_model, device, map_fusion_mode="cross_attn")
@@ -327,7 +347,7 @@ class TestAutoE2EMapIntegration:
         with pytest.raises(ValueError, match="Unknown map_fusion_mode"):
             build_mock_model(
                 num_views=7,
-                fusion_mode="concat",
+                fusion_mode="bev",
                 device=device,
                 map_fusion_mode="nonexistent",
             )
