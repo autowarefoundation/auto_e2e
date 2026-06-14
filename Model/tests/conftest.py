@@ -77,12 +77,8 @@ class MockBackbone(nn.Module):
 
 
 def _build_model_with_mock_backbone(num_views, fusion_mode, device,
-<<<<<<< HEAD
                                     num_timesteps=64, map_fusion_mode="residual",
                                     planner_mode="gru", planner_kwargs=None):
-=======
-                                    num_timesteps=64, map_fusion_mode="residual"):
->>>>>>> f6da161 (feat(map_encoder): update default map fusion mode in tests to 'residual'; add test for gradient testing with non-zero alpha)
     """Construct AutoE2E with the mock backbone injected.
 
     Patches Backbone at the module level during construction to avoid
