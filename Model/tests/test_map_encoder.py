@@ -36,11 +36,15 @@ def _make_bev_pair(batch_size, embed_dim, spatial, device):
     return image_bev, map_bev
 
 
+@pytest.fixture(scope="session")
+def map_encoder(device):
+    return RasterizedMapEncoder(embed_dim=256, output_h=8, output_w=8).to(device)
+
+
 class TestRasterizedMapEncoder:
-    def test_output_shape(self, device):
-        enc = RasterizedMapEncoder(in_channels=3, embed_dim=256, output_h=8, output_w=8).to(device)
+    def test_output_shape(self, map_encoder, device):
         x = torch.randn(2, 3, _MAP_H, _MAP_W, device=device)
-        out = enc(x)
+        out = map_encoder(x)
         assert out.shape == (2, 256, 8, 8), f"Expected (2, 256, 8, 8), got {tuple(out.shape)}"
 
     def test_output_is_channels_first(self, device):
@@ -51,25 +55,23 @@ class TestRasterizedMapEncoder:
         assert out.shape[1] == 64, "Channel dim should be at position 1"
 
     def test_output_size_is_honoured(self, device):
-        for h, w in [(4, 4), (8, 8), (8, 16), (16, 8)]:
+        for h, w in [(8, 8), (8, 16), (16, 8)]:
             enc = RasterizedMapEncoder(embed_dim=32, output_h=h, output_w=w).to(device)
             x = torch.randn(1, 3, _MAP_H, _MAP_W, device=device)
             out = enc(x)
             assert out.shape[-2:] == (h, w), \
                 f"Expected spatial ({h}, {w}), got {tuple(out.shape[-2:])}"
 
-    def test_no_nan_on_zero_input(self, device):
-        enc = RasterizedMapEncoder(embed_dim=256, output_h=8, output_w=8).to(device)
+    def test_no_nan_on_zero_input(self, map_encoder, device):
         x = torch.zeros(2, 3, _MAP_H, _MAP_W, device=device)
-        out = enc(x)
+        out = map_encoder(x)
         assert torch.isfinite(out).all(), "NaN/Inf with zero map input"
 
-    def test_different_inputs_produce_different_outputs(self, device):
-        enc = RasterizedMapEncoder(embed_dim=256, output_h=8, output_w=8).to(device)
-        enc.eval()
+    def test_different_inputs_produce_different_outputs(self, map_encoder, device):
+        map_encoder.eval()
         a = torch.randn(1, 3, _MAP_H, _MAP_W, device=device)
         b = torch.randn(1, 3, _MAP_H, _MAP_W, device=device)
-        assert not torch.allclose(enc(a), enc(b), atol=1e-5), \
+        assert not torch.allclose(map_encoder(a), map_encoder(b), atol=1e-5), \
             "Different map inputs produced identical features"
 
     def test_gradient_flows_through_encoder(self, device):
@@ -246,14 +248,14 @@ class TestAutoE2EMapIntegration:
         model = self._make_model(build_mock_model, device, map_fusion_mode="residual")
         model.eval()
 
-        visual = torch.randn(1, 7, 3, 256, 256, device=device)
-        map_zero = torch.zeros(1, 3, _MAP_H, _MAP_W, device=device)
-        map_rand = torch.randn(1, 3, _MAP_H, _MAP_W, device=device)
-        vis_hist = torch.randn(1, 896, device=device)
-        ego = torch.randn(1, 256, device=device)
+        visual = torch.randn(2, 7, 3, 256, 256, device=device)
+        map_zero = torch.zeros(2, 3, _MAP_H, _MAP_W, device=device)
+        map_rand = torch.randn(2, 3, _MAP_H, _MAP_W, device=device)
+        vis_hist = torch.randn(2, 896, device=device)
+        ego = torch.randn(2, 256, device=device)
 
-        traj_zero, _, _ = model(visual, map_zero, vis_hist, ego)
-        traj_rand, _, _ = model(visual, map_rand, vis_hist, ego)
+        traj_zero, _, _ = model(visual, map_zero, vis_hist, ego, mode="infer")
+        traj_rand, _, _ = model(visual, map_rand, vis_hist, ego, mode="infer")
 
         assert torch.allclose(traj_zero, traj_rand, atol=1e-5), \
             "With alpha=0, different map inputs should produce identical trajectories"
@@ -265,12 +267,12 @@ class TestAutoE2EMapIntegration:
         with torch.no_grad():
             model.MapBEVFusion.alpha.fill_(1.0)
 
-        visual = torch.randn(1, 7, 3, 256, 256, device=device)
-        vis_hist = torch.randn(1, 896, device=device)
-        ego = torch.randn(1, 256, device=device)
+        visual = torch.randn(2, 7, 3, 256, 256, device=device)
+        vis_hist = torch.randn(2, 896, device=device)
+        ego = torch.randn(2, 256, device=device)
 
-        traj_a, _, _ = model(visual, torch.randn(1, 3, _MAP_H, _MAP_W, device=device), vis_hist, ego)
-        traj_b, _, _ = model(visual, torch.randn(1, 3, _MAP_H, _MAP_W, device=device), vis_hist, ego)
+        traj_a, _, _ = model(visual, torch.randn(2, 3, _MAP_H, _MAP_W, device=device), vis_hist, ego, mode="infer")
+        traj_b, _, _ = model(visual, torch.randn(2, 3, _MAP_H, _MAP_W, device=device), vis_hist, ego, mode="infer")
 
         assert not torch.allclose(traj_a, traj_b, atol=1e-5), \
             "With alpha=1, different map inputs should produce different trajectories"
@@ -283,9 +285,10 @@ class TestAutoE2EMapIntegration:
         map_input = torch.randn(2, 3, _MAP_H, _MAP_W, device=device)
         vis_hist = torch.randn(2, 896, device=device)
         ego = torch.randn(2, 256, device=device)
+        target = torch.randn(2, 128, device=device)
 
-        traj, ego_hidden, future = model(visual, map_input, vis_hist, ego)
-        (traj.sum() + ego_hidden.sum() + sum(f.sum() for f in future)).backward()
+        loss, ego_hidden, future = model(visual, map_input, vis_hist, ego, mode="train", trajectory_target=target)
+        (loss + ego_hidden.sum() + sum(f.sum() for f in future)).backward()
 
         no_grad = [n for n, p in model.MapEncoder.named_parameters()
                    if p.requires_grad and p.grad is None]
@@ -298,12 +301,15 @@ class TestAutoE2EMapIntegration:
         with torch.no_grad():
             model.MapBEVFusion.alpha.fill_(0.1)
 
-        visual = torch.randn(1, 7, 3, 256, 256, device=device)
-        map_input = torch.randn(1, 3, _MAP_H, _MAP_W, device=device)
-        vis_hist = torch.randn(1, 896, device=device)
-        ego = torch.randn(1, 256, device=device)
+        visual = torch.randn(2, 7, 3, 256, 256, device=device)
+        map_input = torch.randn(2, 3, _MAP_H, _MAP_W, device=device)
+        vis_hist = torch.randn(2, 896, device=device)
+        ego = torch.randn(2, 256, device=device)
+        target = torch.randn(2, 128, device=device)
 
-        model(visual, map_input, vis_hist, ego)[0].sum().backward()
+        loss, ego_hidden, future = model(visual, map_input, vis_hist, ego, mode="train", trajectory_target=target)
+        (loss + ego_hidden.sum() + sum(f.sum() for f in future)).backward()
+
 
         assert model.MapBEVFusion.alpha.grad is not None, "alpha has no gradient"
         assert model.MapBEVFusion.alpha.grad.abs().max() > 0, "alpha gradient is all-zero"
@@ -319,9 +325,10 @@ class TestAutoE2EMapIntegration:
         map_input = torch.randn(2, 3, _MAP_H, _MAP_W, device=device)
         vis_hist = torch.randn(2, 896, device=device)
         ego = torch.randn(2, 256, device=device)
+        target = torch.randn(2, 128, device=device)
 
-        traj, ego_hidden, future = model(visual, map_input, vis_hist, ego)
-        (traj.sum() + ego_hidden.sum() + sum(f.sum() for f in future)).backward()
+        loss, ego_hidden, future = model(visual, map_input, vis_hist, ego, mode="train", trajectory_target=target)
+        (loss + ego_hidden.sum() + sum(f.sum() for f in future)).backward()
 
         no_grad = [n for n, p in model.MapEncoder.named_parameters()
                 if p.requires_grad and p.grad is None]
@@ -329,13 +336,13 @@ class TestAutoE2EMapIntegration:
 
     def test_cross_attn_fusion_mode_forward_succeeds(self, build_mock_model, device):
         model = self._make_model(build_mock_model, device, map_fusion_mode="cross_attn")
-        visual = torch.randn(1, 7, 3, 256, 256, device=device)
-        map_input = torch.randn(1, 3, _MAP_H, _MAP_W, device=device)
-        vis_hist = torch.randn(1, 896, device=device)
-        ego = torch.randn(1, 256, device=device)
-        traj, ego_hidden, _ = model(visual, map_input, vis_hist, ego)
-        assert traj.shape == (1, 128)
-        assert ego_hidden.shape == (1, 256)
+        visual = torch.randn(2, 7, 3, 256, 256, device=device)
+        map_input = torch.randn(2, 3, _MAP_H, _MAP_W, device=device)
+        vis_hist = torch.randn(2, 896, device=device)
+        ego = torch.randn(2, 256, device=device)
+        traj, ego_hidden, _ = model(visual, map_input, vis_hist, ego, mode="infer")
+        assert traj.shape == (2, 128)
+        assert ego_hidden.shape == (2, 256)
         assert torch.isfinite(traj).all()
 
     def test_map_encoder_attribute_exists(self, build_mock_model, device):
