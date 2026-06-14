@@ -11,7 +11,8 @@ Map tile (slot 7)
 KIT Scenes ships Lanelet2 HD maps, which are rasterised into a semantic RGB
 image by ``map.generate_bev_map_tile``. The resulting ``(H, W, 3)`` uint8 array
 is passed through the same backbone transform as the camera frames so that all
-8 views have identical shape and normalisation. If the map is unavailable for
+8 views have identical shape and normalisation. This is a pragmatic choice pending 
+a map-specific normalization pass. If the map is unavailable for
 a scene (missing ``maps/map.osm`` or lanelet2 not installed), slot 7 falls
 back to a zero tensor.
 """
@@ -43,47 +44,68 @@ CAMERA_NAMES: list[str] = [
 # Total views fed to the model = 7 cameras + 1 map tile.
 NUM_VIEWS = 8
 
-_BACKBONE_IMAGE_SIZE = 256
-
 def scale_intrinsic(
     K: np.ndarray,
     original_wh: tuple[int, int],
-    target_size: int = _BACKBONE_IMAGE_SIZE,
+    transform: Compose,
 ) -> np.ndarray:
-    """Return K rescaled for a square ``target_size`` output.
- 
-    Args:
-        K: (3, 3) pinhole camera matrix at the camera's native resolution.
-        original_wh: (width, height) of the native camera image.
-        target_size: Square side length after the backbone preprocessing
-            transform. Defaults to ``_BACKBONE_IMAGE_SIZE`` (256).
- 
-    Returns:
-        (3, 3) float64 array with ``fx``, ``fy``, ``cx``, ``cy`` scaled.
+    """Return K adjusted for the actual resize/crop steps in `transform`.
+
+    Walks the torchvision Compose pipeline and applies the geometric effect
+    of each Resize and CenterCrop step to K. Other steps (Normalize, ToTensor,
+    ColorJitter, etc.) don't touch pixel coordinates and are ignored.
     """
-    orig_w, orig_h = original_wh
-    sx = target_size / orig_w
-    sy = target_size / orig_h
-    K_scaled = K.copy()
-    K_scaled[0, 0] *= sx   # fx
-    K_scaled[1, 1] *= sy   # fy
-    K_scaled[0, 2] *= sx   # cx
-    K_scaled[1, 2] *= sy   # cy
-    return K_scaled
+    from torchvision.transforms import Resize, CenterCrop
+
+    K_out = K.copy().astype(np.float64)
+    cur_w, cur_h = original_wh
+
+    for t in transform.transforms:
+        if isinstance(t, Resize):
+            size = t.size
+            if isinstance(size, (list, tuple)):
+                if len(size) == 1:
+                    size = size[0]
+                else:
+                    # explicit (h, w)
+                    scale_x = size[1] / cur_w
+                    scale_y = size[0] / cur_h
+                    cur_w, cur_h = size[1], size[0]
+                    K_out[0, 0] *= scale_x
+                    K_out[1, 1] *= scale_y
+                    K_out[0, 2] *= scale_x
+                    K_out[1, 2] *= scale_y
+                    continue
+            # resize with shortest-edge mode (see timm.data.transforms)
+            scale = size / min(cur_h, cur_w)
+            cur_w = int(cur_w * scale + 0.5)
+            cur_h = int(cur_h * scale + 0.5)
+            K_out[0, 0] *= scale
+            K_out[1, 1] *= scale
+            K_out[0, 2] *= scale
+            K_out[1, 2] *= scale
+
+        elif isinstance(t, CenterCrop):
+            size = t.size
+            crop_h, crop_w = (size, size) if isinstance(size, int) else size
+            offset_x = (cur_w - crop_w) / 2.0
+            offset_y = (cur_h - crop_h) / 2.0
+            K_out[0, 2] -= offset_x
+            K_out[1, 2] -= offset_y
+            cur_w, cur_h = crop_w, crop_h
+
+    return K_out.astype(np.float64)
  
  
 def compute_camera_projection_matrices(
     loader: SensorDataLoader,
+    transform: Compose,
     camera_names: list[str] | None = None,
 ) -> torch.Tensor:
     """Compute ``(3, 4)`` projection matrices for each camera view.
  
     ``P = K_scaled @ T_ref_to_cam`` maps 3-D reference-frame points to
     pixel coordinates in the backbone-resized image.
- 
-    KIT Scenes ``calib.json`` always provides a ``resolution`` field, so
-    ``CameraCalibration.image_size`` is always populated and no image I/O
-    is required here.
  
     Args:
         loader: ``SensorDataLoader`` for the scene.
@@ -107,8 +129,7 @@ def compute_camera_projection_matrices(
                 "KIT Scenes calibration files are expected to always include "
                 "a resolution field."
             )
- 
-        K_scaled = scale_intrinsic(calib.intrinsic, calib.image_size)
+        K_scaled = scale_intrinsic(calib.intrinsic, calib.image_size, transform)
  
         # invert calib.extrinsic to get T_ref_to_cam.
         T_ref_to_cam = np.linalg.inv(calib.extrinsic)   # (4, 4)
@@ -127,9 +148,6 @@ def load_camera_frame(
     camera_names: list[str] | None = None,
 ) -> torch.Tensor:
     """Load and preprocess the camera views at a single reference frame.
-
-    KIT Scenes cameras and ego poses share the 10 Hz reference timeline, so
-    ``frame_idx`` indexes both directly.
 
     The 8th tile (slot 7) is a semantic BEV map rasterised from the scene's
     Lanelet2 HD map, centred on the ego vehicle and rotated so the ego heading

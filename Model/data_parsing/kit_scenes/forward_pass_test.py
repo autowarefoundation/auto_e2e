@@ -74,22 +74,44 @@ def main(
 
     print(f"visual_tiles: {tuple(visual_tiles.shape)}")
     print(f"egomotion_history: {tuple(egomotion_history.shape)}")
-    print(f"trajectory_target: {tuple(trajectory_target.shape)}")
     print(f"camera_params: {tuple(camera_params.shape)}")
+    print(f"trajectory_target: {tuple(trajectory_target.shape)}")
+    
 
     # --------------------
-    # forward pass
+    # forward pass - Concat fusion path
+    print("Testing forward pass with Concat fusion...")
     model = AutoE2E(is_pretrained=pretrained_backbone).to(device)
 
     t0 = time.time()
-    trajectory_, compressed_, future_ = model(visual_tiles, visual_history, egomotion_history)
+    trajectory_, compressed_, future_ = model(visual_tiles, visual_history, egomotion_history, camera_params=camera_params)
     t_forward = time.time() - t0
-    print(f"Forward pass: {t_forward:.2f}s")
+    print(f"Forward pass (Concat fusion): {t_forward:.2f}s")
 
-    print(f"trajectory output: {tuple(trajectory_.shape)}")
+    print(f"trajectory output (Concat fusion): {tuple(trajectory_.shape)}")
     print(f"compressed visual feature output: {tuple(compressed_.shape)}")
     print(f"future visual features: {[tuple(f.shape) for f in future_]}")
     # --------------------
+
+    # forward pass - BEV fusion path
+    print("Testing forward pass with BEV fusion...")
+    model_bev = AutoE2E(
+        is_pretrained=pretrained_backbone,
+        fusion_mode="bev",
+    ).to(device)
+
+    t0 = time.time()
+    trajectory_bev, ego_hidden_bev, _ = model_bev(
+        visual_tiles,
+        visual_history,
+        egomotion_history,
+        camera_params=camera_params,
+        mode="infer",
+    )
+    t_forward_bev = time.time() - t0
+    print(f"Forward pass (BEV fusion): {t_forward_bev:.2f}s")
+    print(f"trajectory output (BEV fusion): {tuple(trajectory_bev.shape)}")
+    print(f"ego hidden (BEV fusion): {tuple(ego_hidden_bev.shape)}")
 
     # TODO (training): wire in loss and backprop
     # loss = F.mse_loss(trajectory, trajectory_target)

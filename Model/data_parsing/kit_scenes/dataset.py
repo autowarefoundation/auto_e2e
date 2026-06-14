@@ -20,6 +20,7 @@ Usage
     # sample["trajectory_target"]  (128,)
     # sample["scene_id"]           str
     # sample["frame_idx"]          int
+    # sample["camera_params"]      (7, 3, 4) — projection matrices for the 7 cameras
 """
 
 from __future__ import annotations
@@ -57,6 +58,7 @@ class ClipSample(TypedDict):
     trajectory_target: torch.Tensor   # (128,)
     scene_id: str
     frame_idx: int
+    camera_params: torch.Tensor       # (7, 3, 4) — projection matrices for the 7 cameras
 
 
 class KitScenesDataset(Dataset):
@@ -128,9 +130,10 @@ class KitScenesDataset(Dataset):
         """Return all valid (scene_id, frame_idx) for one scene.
 
         Validates camera presence and pose-stream length, then caches the
-        derived egomotion array and UTM translation array. A frame_idx is valid
-        when there are _HISTORY_TIMESTEPS frames behind it and _FUTURE_TIMESTEPS
-        ahead of it, within the span covered by both ego poses and camera frames.
+        derived egomotion array, scene-local position array, and camera
+        projection matrices. A frame_idx is valid when there are _HISTORY_TIMESTEPS 
+        frames behind it and _FUTURE_TIMESTEPS ahead of it, within the span 
+        covered by both ego poses and camera frames.
         """
         # Work off the sensor loader rather than get_scene. get_scene is
         # lru_cache(maxsize=None) and would pin every scene's raw ego poses in
@@ -173,10 +176,9 @@ class KitScenesDataset(Dataset):
         self._scene_positions[scene_id] = translations_local
 
         # Projection matrices are frame-invariant; compute once per scene.
-        # min_idx is any valid frame; used only as fallback if calib.image_size
-        # is absent from calib.json (triggers a single image-header read).
         self._scene_camera_params[scene_id] = compute_camera_projection_matrices(
             loader,
+            transform=self.transform,
             camera_names=self.camera_names,
         )
 
