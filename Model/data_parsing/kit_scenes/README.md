@@ -14,7 +14,7 @@ pip install --upgrade pip
 pip install -e ".[map]"   # [map] adds the vendored Lanelet2 wheel needed for the BEV map tile
 ```
 
-The `[map]` extra installs the SDK's vendored Lanelet2 build, which the BEV map rasteriser needs. Without it the parser still runs — slot 7 (the map tile) falls back to a blank white tile rather than rasterised geometry. Use `pip install -e ".[all]"` for the full SDK.
+The `[map]` extra installs the SDK's vendored Lanelet2 build, which the BEV map rasteriser needs. Without it the parser still runs — slot 7 (the map tile) falls back to a blank black tile. Use `pip install -e ".[all]"` for the full SDK.
 
 
 ## Model inputs produced
@@ -23,12 +23,14 @@ The `[map]` extra installs the SDK's vendored Lanelet2 build, which the BEV map 
 - `egomotion_history` `(256,)` — 64 past timesteps × 4 signals at 10 Hz
 - `visual_history` `(896,)` — zero-initialised placeholder; populated during sequential inference
 - `trajectory_target` `(128,)` — 64 future timesteps × 2 signals (supervision target)
+- `camera_params` `(7, 3, 4)` — projection matrices `P = K_scaled @ T_ref_to_cam` for the 7 camera views, computed from KITScenes calibration and scaled to match the backbone's resize/crop transform. 
+
 
 The 7 camera views are the hi-res front camera plus the 6 surround ring cameras (`CAMERA_NAMES` in `camera.py`). The stereo front pair is dropped as it duplicates forward coverage.
 
 ### Egomotion history signals `(256,) = 64 × 4`
 
-All four are derived from `poses.txt` (TUM format, UTM frame) by finite differencing on the real, possibly uneven, pose timestamps.
+All four are derived from `poses.txt` (TUM format) by finite differencing on the real, possibly uneven, pose timestamps.
 
 - `[0]` Speed (m/s) — `‖d/dt translation_xy‖`
 - `[1]` Acceleration (m/s^2) — `d/dt speed`
@@ -40,13 +42,12 @@ All four are derived from `poses.txt` (TUM format, UTM frame) by finite differen
 - `[0]` Acceleration (m/s^2)
 - `[1]` Curvature (1/m)
 
-This matches `DrivingPolicy`'s `fc3` output exactly.
-
 ## Sampling
 
 A sample is a `(scene_id, frame_idx)` pair, where `frame_idx` indexes the 10 Hz reference timeline. A `frame_idx` is valid when there are 64 frames behind it (history window) and 64 ahead (target window), within the span covered by *both* the ego poses and the camera frames. The current frame is excluded from both windows — history is `[idx-64, idx)`, target is `(idx, idx+64]`. A scene with `N` usable reference frames therefore yields `N − 128` valid samples.
 
-All valid pairs are enumerated at construction time, and the per-scene derived egomotion and UTM translation arrays are cached then. `__getitem__` does I/O only — no pose re-reads or index arithmetic at call time.
+All valid pairs are enumerated at construction time, and per-scene derived arrays (egomotion, scene-local positions, camera projection matrices) are cached then. `__getitem__` does I/O only.
+
 
 ## Usage
 
@@ -70,14 +71,31 @@ dataset = KitScenesDataset(
 
 loader = DataLoader(dataset, batch_size=8, shuffle=True, num_workers=4)
 
+# Training loop
 for batch in loader:
     visual_tiles = batch["visual_tiles"].to(device)           # (B, 8, 3, H, W)
     visual_history = batch["visual_history"].to(device)       # (B, 896)
     egomotion_history = batch["egomotion_history"].to(device) # (B, 256)
     trajectory_target = batch["trajectory_target"].to(device) # (B, 128)
+    camera_params = batch["camera_params"].to(device)         # (B, 7, 3, 4)
 
-    trajectory, compressed, future = model(visual_tiles, visual_history, egomotion_history)
-    loss = criterion(trajectory, trajectory_target)
+    planner_loss, ego_hidden, future_visual_features = model(
+        visual_tiles,
+        visual_history,
+        egomotion_history,
+        camera_params=camera_params,
+        mode="train",
+        trajectory_target=trajectory_target,
+    )
+
+# Inference
+trajectory, ego_hidden, _ = model(
+    visual_tiles,
+    visual_history,
+    egomotion_history,
+    camera_params=camera_params,
+    mode="infer",
+)
 ```
 
 ## Image preprocessing
@@ -95,7 +113,7 @@ The BEV map tile is passed through the same transform as the camera frames, so a
 
 `map.generate_bev_map_tile` rasterises a semantic, ego-centric tile from the scene's Lanelet2 HD map using OpenCV: road borders, lane dividers, centerlines, stop lines, and pedestrian crossings, coloured to mirror the SDK's `ml_converter` conventions. The tile is rotated so the ego heading points up (forward → up, left → left).
 
-Ego poses and the lanelet boundaries share the world frame (UTM 32N, metres); the tile is centred by subtracting the ego position, so the absolute UTM offset cancels. If the map is unavailable (`[map]` extra missing, or no `map.osm`), the tile is a blank white canvas. Inspect a tile with `map.visualise_bev_tile`.
+Ego poses and the lanelet boundaries share the scene-local frame (metres from the map origin, axes aligned with UTM 32N); the tile is centred by subtracting the ego position, so the absolute offset cancels. If the map is unavailable (`[map]` extra missing, or no `map.osm`), the tile is a zero tensor. Inspect a tile with `map.visualise_bev_tile`.
 
 ## Forward pass test
 
@@ -115,4 +133,4 @@ python forward_pass_test.py --dataset_root "$KITSCENES_ROOT" --split test_e2e
 python forward_pass_test.py --dataset_root "$KITSCENES_ROOT" --scene_id <uuid> --no-pretrained
 ```
 
-The test asserts input and output shapes (including that the trajectory head emits `(B, 128)`), so a dimension regression fails loudly instead of printing a wrong shape.
+The test runs `mode="infer"` and asserts input and output shapes.
