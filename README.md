@@ -49,14 +49,14 @@ To learn more about how to participate in this project, please read the [onboard
 
 <img src="./Media/auto_e2e_architecture.jpg" width="100%">
 
-AutoE2E takes **7 surround/telephoto cameras + a rendered map tile**, plus egomotion and
-visual history, and predicts a **6.4s future driving trajectory** (acceleration + curvature
-at 10Hz). See the [Model architecture guide](./Model/) for inputs, outputs and the forward
-signature in detail.
+AutoE2E takes **7 surround and telephoto cameras plus a rendered map tile**, along with
+egomotion and visual history, and predicts a **6.4s future driving trajectory**
+(acceleration and curvature at 10Hz). See the [Model architecture guide](./Model/) for the
+full inputs, outputs and forward signature.
 
 ## Performance
 
 Up to **~76 FPS** (SwinV2-Tiny, feature-concat fusion, RTX 5080, batch 1). Full per-GPU
-inference benchmarks — latency, jitter and VRAM across backbones, fusion modes and batch
-sizes — live in [BENCHMARKS.md](./Model/speed_benchmark/BENCHMARKS.md). Run the
+inference benchmarks covering latency, jitter and VRAM across backbones, fusion modes and
+batch sizes live in [BENCHMARKS.md](./Model/speed_benchmark/BENCHMARKS.md). Run the
 [benchmarking script](./Model/speed_benchmark) to add results for your own GPU.
