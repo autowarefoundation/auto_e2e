@@ -34,16 +34,38 @@ AutoE2E outputs can be fused with Physics-based sensors such as LIDAR/RADAR to p
 To learn more about how to participate in this project, please read the [onboarding guide](/ONBOARDING.md)
 
 ## Getting started
-- Install the dependencies:
 
-  ```bash
-  make setup                      # CPU torch wheels
-  make setup TORCH_CHANNEL=cu118  # CUDA 11.8 build (cu121, ... work too)
-  ```
+Requires **Python 3.12** (the pinned PyTorch build has no wheels for 3.13+).
 
-  Plain `pip install -r requirements.txt` also works and uses the default PyPI torch wheels.
-- Visit the [Model](./Model/) folder to view the model components, run training and perform inference
-- See the [Trial Guide](./TRIAL.md) for step-by-step instructions on running the inference test on AWS EC2
+1. **Clone and install dependencies**
+
+   ```bash
+   git clone https://github.com/autowarefoundation/auto_e2e.git
+   cd auto_e2e
+   make setup                      # CPU torch wheels
+   make setup TORCH_CHANNEL=cu118  # or a CUDA build (cu121, ... work too)
+   ```
+
+   Plain `pip install -r requirements.txt` also works and uses the default PyPI torch wheels.
+
+2. **Run your first inference**
+
+   ```bash
+   cd Model/inference && python run_forward_pass.py
+   ```
+
+   Runs a forward pass with random inputs across every backbone and fusion mode, printing
+   the predicted trajectory, ego hidden state and future feature shapes.
+
+3. **Verify the install** (optional)
+
+   ```bash
+   make test
+   ```
+
+### Next steps
+- Explore the [Model](./Model/) folder for the model components, training and inference.
+- Follow the [Trial Guide](./TRIAL.md) to run the inference test on AWS EC2.
 
 ## Architecture at a glance
 
