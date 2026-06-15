@@ -48,16 +48,7 @@ Requires **Python 3.12** (the pinned PyTorch build has no wheels for 3.13+).
 
    Plain `pip install -r requirements.txt` also works and uses the default PyPI torch wheels.
 
-2. **Run your first inference**
-
-   ```bash
-   cd Model/inference && python run_forward_pass.py
-   ```
-
-   Runs a forward pass with random inputs across every backbone and fusion mode, printing
-   the predicted trajectory, ego hidden state and future feature shapes.
-
-3. **Verify the install** (optional)
+2. **Verify the install** (optional)
 
    ```bash
    make test
