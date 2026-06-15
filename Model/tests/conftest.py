@@ -77,8 +77,8 @@ class MockBackbone(nn.Module):
 
 
 def _build_model_with_mock_backbone(num_views, fusion_mode, device,
-                                    num_timesteps=64, planner_mode="gru",
-                                    planner_kwargs=None):
+                                    num_timesteps=64, map_fusion_mode="residual",
+                                    planner_mode="gru", planner_kwargs=None):
     """Construct AutoE2E with the mock backbone injected.
 
     Patches Backbone at the module level during construction to avoid
@@ -99,6 +99,7 @@ def _build_model_with_mock_backbone(num_views, fusion_mode, device,
             num_timesteps=num_timesteps,
             planner_mode=planner_mode,
             planner_kwargs=planner_kwargs,
+            map_fusion_mode=map_fusion_mode,
         )
     return model.to(device)
 
@@ -123,7 +124,7 @@ def model(request, device):
     _reset_model_grads fixture below.
     """
     return _build_model_with_mock_backbone(
-        num_views=8, fusion_mode=request.param, device=device
+        num_views=7, fusion_mode=request.param, device=device
     )
 
 
@@ -145,7 +146,7 @@ def full_model(request, device):
     view_fusion_kwargs = {"bev_h": 8, "bev_w": 8} if request.param == "bev" else None
     try:
         model = AutoE2E(
-            num_views=8, fusion_mode=request.param,
+            num_views=7, fusion_mode=request.param,
             view_fusion_kwargs=view_fusion_kwargs,
         )
     except (FileNotFoundError, OSError) as e:
