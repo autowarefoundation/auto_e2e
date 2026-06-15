@@ -14,7 +14,7 @@
 - Future driving trajectory (modelled as future acceleration and curvature values over a 6.4s future horizon at 10Hz sampling rate)
 - `ego_hidden` — 256-dim final GRU hidden state from `TrajectoryPlanner` summarising the planner's intent over the prediction horizon. Conditions `FutureState`; replaces the legacy compressed visual feature vector / rolling visual history buffer.
 
-**During training, and for purposes of model introspection, AutoFSD also predicts:**
+**During training, and for purposes of model introspection, AutoE2E also predicts:**
 - Future visual features at 1.6s intervals for a 6.4s future horizon (what does the future feature representation of the scene look like, this is used for a feature reconstruction loss similar to JEPA)
 
 **Forward signature:**
