@@ -853,7 +853,7 @@ class TestFullBackboneIntegration:
         for f in future:
             assert f.shape == (1, 256, 8, 8)
 
-        traj, _, _ = full_model(visual, vis_hist, ego, mode="infer")
+        traj, _, _ = full_model(visual, map_input, vis_hist, ego, mode="infer")
         assert traj.shape == (1, 128)
 
     def test_full_forward_no_nan(self, full_model, device):
@@ -901,7 +901,7 @@ class TestResNet50Backbone:
         assert torch.isfinite(loss)
         assert torch.isfinite(ego_hidden).all()
 
-        traj, _, _ = model(visual, vis_hist, ego, mode="infer")
+        traj, _, _ = model(visual, map_input, vis_hist, ego, mode="infer")
         assert traj.shape == (1, 128)
         assert torch.isfinite(traj).all()
 
