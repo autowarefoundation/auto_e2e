@@ -4,6 +4,7 @@ from .feature_fusion import FeatureFusion
 from .trajectory_planning import build_planner
 from .future_state import FutureState
 from .map_encoder import build_map_encoder, build_map_bev_fusion
+from .temporal_memory import build_temporal_memory
 
 
 class AutoE2E(nn.Module):
@@ -14,6 +15,7 @@ class AutoE2E(nn.Module):
                  visual_history_dim=896,
                  map_type="rasterized", map_in_channels=3,
                  map_fusion_mode="residual", map_fusion_kwargs=None,
+                 temporal_memory_mode="no_memory", temporal_memory_kwargs=None,
                  planner_mode="gru", planner_kwargs=None):
         super(AutoE2E, self).__init__()
 
@@ -57,6 +59,14 @@ class AutoE2E(nn.Module):
             **(map_fusion_kwargs or {}),
         )
 
+        # Temporal Memory — compresses/fuses [B, T, feat] sequence histories into contexts
+        self.TemporalMemory = build_temporal_memory(
+            temporal_memory_mode,
+            visual_dim=visual_history_dim,
+            egomotion_dim=egomotion_dim,
+            **(temporal_memory_kwargs or {}),
+        )
+
         # Trajectory decoder — swappable via planner_mode (gru, flow_matching).
         self.TrajectoryPlanner = build_planner(
             planner_mode,        
@@ -92,8 +102,8 @@ class AutoE2E(nn.Module):
         Args:
             camera_tiles: (B, V, 3, H, W) — V camera images (V=7 by default).
             map_input: (B, 3, H_map, W_map) — BEV nav-map image.
-            visual_history: (B, visual_history_dim).
-            egomotion_history: (B, egomotion_dim).
+            visual_history: (B, T, visual_history_dim) or (B, visual_history_dim).
+            egomotion_history: (B, T, egomotion_dim) or (B, egomotion_dim).
             camera_params: Optional (B, V, 3, 4) ego-to-pixel projection matrices.
             mode: "train" to produce future_visual_features; anything else skips it.
 
@@ -115,13 +125,16 @@ class AutoE2E(nn.Module):
         # --- Fuse image BEV + map BEV ---
         fused_features = self.MapBEVFusion(image_bev, map_bev)
 
+        # --- Temporal Memory ---
+        visual_ctx, ego_ctx = self.TemporalMemory(visual_history, egomotion_history)
+
         if mode == "train":
             if trajectory_target is None:
                 raise ValueError(
                     "AutoE2E.forward(mode='train') requires trajectory_target."
                 )
             planner_loss, ego_hidden = self.TrajectoryPlanner.compute_planner_loss(
-                fused_features, visual_history, egomotion_history,
+                fused_features, visual_ctx, ego_ctx,
                 trajectory_target,
             )
             future_visual_features = self.FutureState(fused_features, ego_hidden)
@@ -129,6 +142,6 @@ class AutoE2E(nn.Module):
 
 
         trajectory, ego_hidden = self.TrajectoryPlanner(
-            fused_features, visual_history, egomotion_history, **kwargs,
+            fused_features, visual_ctx, ego_ctx, **kwargs,
         )
         return trajectory, ego_hidden, None

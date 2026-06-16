@@ -14,7 +14,7 @@ import torch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from model_components.history_encoder import HistoryEncoder
+from model_components.temporal_memory.one_hz_encoder import HistoryEncoder, OneHzHistoryEncoder
 
 B = 4
 INPUT_DIM = 64
@@ -136,3 +136,21 @@ def test_context_depends_on_history():
         ctx_a = encoder(torch.randn(B, 64, INPUT_DIM))
         ctx_b = encoder(torch.randn(B, 64, INPUT_DIM))
     assert not torch.allclose(ctx_a, ctx_b)
+
+
+def test_one_hz_history_encoder_pipeline():
+    encoder = OneHzHistoryEncoder(visual_dim=896, egomotion_dim=256, subsample_ratio=10)
+    visual = torch.randn(B, 64, 896)
+    ego = torch.randn(B, 64, 256)
+    
+    v_ctx, e_ctx = encoder(visual, ego)
+    
+    assert v_ctx.shape == (B, 896)
+    assert e_ctx.shape == (B, 256)
+    
+    # Fallback flat input test
+    v_flat = torch.randn(B, 896)
+    e_flat = torch.randn(B, 256)
+    v_out, e_out = encoder(v_flat, e_flat)
+    assert torch.allclose(v_flat, v_out)
+    assert torch.allclose(e_flat, e_out)
