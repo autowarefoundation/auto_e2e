@@ -906,6 +906,48 @@ class TestResNet50Backbone:
         assert torch.isfinite(traj).all()
 
 
+class TestRealArchitectureSmoke:
+    """Exercises the real timm backbone architectures with random weights
+    (is_pretrained=False, so no pretrained download), covering per-stage
+    channel discovery the mock backbone hardcodes — including ResNet50's
+    5 stages — and forward-signature regressions."""
+
+    EXPECTED_CHANNELS = {
+        "swin_v2_tiny": 96 + 192 + 384 + 768,
+        "conv_next_v2_tiny": 96 + 192 + 384 + 768,
+        "res_net_50": 64 + 256 + 512 + 1024 + 2048,
+    }
+
+    @pytest.mark.parametrize(
+        "backbone", ["swin_v2_tiny", "conv_next_v2_tiny", "res_net_50"]
+    )
+    def test_real_backbone_forward(self, backbone, device):
+        from model_components.auto_e2e import AutoE2E
+        model = AutoE2E(
+            backbone=backbone, num_views=7, fusion_mode="concat",
+            is_pretrained=False,
+        ).to(device)
+
+        assert model.Backbone.backbone_channels == self.EXPECTED_CHANNELS[backbone]
+
+        visual, map_input, vis_hist, ego = make_inputs(1, 7, device)
+        target = torch.randn(1, 128, device=device)
+
+        loss, ego_hidden, future = model(
+            visual, map_input, vis_hist, ego, mode="train",
+            trajectory_target=target)
+        assert loss.dim() == 0
+        assert ego_hidden.shape == (1, 256)
+        assert len(future) == 4
+        for f in future:
+            assert f.shape == (1, 256, 8, 8)
+        assert torch.isfinite(loss)
+
+        traj, _, _ = model(visual, map_input, vis_hist, ego, mode="infer")
+        assert traj.shape == (1, 128)
+        assert torch.isfinite(traj).all()
+
+
 # ---------------------------------------------------------------------------
 # Training loop integration — optimizer.step + loss
 # ---------------------------------------------------------------------------
