@@ -102,6 +102,22 @@ def test_gradients_flow_to_all_parameters_and_context():
         assert torch.isfinite(p.grad).all(), f"Non-finite grad for {name}"
 
 
+def test_produce_context():
+    """Test that the module produces a well-formed SceneContext with
+    confidence and provenance, as requested by the architectural review."""
+    module = CausalReasoningModule(embed_dim=EMBED_DIM)
+    context = torch.randn(B, EMBED_DIM)
+    scene_context = module.produce_context(context)
+    
+    assert scene_context.causal_reasoning is not None
+    cr = scene_context.causal_reasoning
+    assert cr.reasoning_latent.shape == (B, EMBED_DIM)
+    assert cr.causal_class_logits.shape == (B, 5)
+    assert cr.confidence.shape == (B,)
+    assert (cr.confidence >= 0).all() and (cr.confidence <= 1).all()
+    assert cr.provenance == "vlm_causal_head"
+
+
 def test_loss_lower_for_correct_labels():
     """Cross-entropy must be lower for labels matching the argmax decisions
     than for deliberately wrong labels."""
@@ -191,9 +207,11 @@ def test_autoe2e_contract_untouched_with_manual_integration(device):
     head = CausalReasoningModule(embed_dim=EMBED_DIM).to(device)
 
     x = torch.randn(2, 8, 3, 256, 256, device=device)
+    map_input = torch.randn(2, 3, 256, 256, device=device)
     vis = torch.randn(2, 896, device=device)
     ego = torch.randn(2, 256, device=device)
-    out = model(x, vis, ego)
+    # The signature is: forward(camera_tiles, map_input, visual_history, egomotion_history)
+    out = model(x, map_input, vis, ego, mode="infer")
 
     # Default contract: exactly a 3-tuple (trajectory, ego_hidden, future)
     assert isinstance(out, tuple) and len(out) == 3

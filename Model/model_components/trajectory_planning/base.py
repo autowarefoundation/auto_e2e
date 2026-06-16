@@ -1,4 +1,5 @@
 from abc import ABC, abstractmethod
+from typing import Optional
 
 import torch.nn as nn
 
@@ -28,13 +29,14 @@ class BasePlanner(nn.Module, ABC):
 
     @abstractmethod
     def forward(self, bev_features, visual_history, egomotion_history,
-                **kwargs):
+                scene_context: Optional["SceneContext"] = None, **kwargs):
         """Inference: return ``(trajectory, ego_hidden)``."""
         raise NotImplementedError
 
     @abstractmethod
     def compute_planner_loss(self, bev_features, visual_history,
-                             egomotion_history, trajectory_target):
+                             egomotion_history, trajectory_target,
+                             scene_context: Optional["SceneContext"] = None):
         """Return ``(loss, ego_hidden)``.
 
         Args:

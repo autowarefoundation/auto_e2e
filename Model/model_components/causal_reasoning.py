@@ -23,6 +23,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from .scene_context import SceneContext, CausalReasoningContext
+
 # Dominant causal factor classes (pseudo-labelled by a VLM on KITScenes
 # LongTail). Order is part of the contract — do not reorder.
 CAUSAL_CLASSES = (
@@ -91,6 +93,23 @@ class CausalReasoningModule(nn.Module):
         reasoning_latent = self.reason(context)
         decision_logits = self.decision_head(reasoning_latent)
         return reasoning_latent, decision_logits
+
+    def produce_context(self, context: torch.Tensor) -> SceneContext:
+        """Produce structured SceneContext for the planner downstream.
+        
+        This satisfies the 'optional producer' architecture requested by
+        the working group: instead of passing raw logits, it packages the
+        reasoning with explicit confidence and provenance.
+        """
+        reasoning_latent, decision_logits = self.forward(context)
+        confidence = F.softmax(decision_logits, dim=-1).max(dim=-1).values
+        causal_context = CausalReasoningContext(
+            reasoning_latent=reasoning_latent,
+            causal_class_logits=decision_logits,
+            confidence=confidence,
+            provenance="vlm_causal_head"
+        )
+        return SceneContext(causal_reasoning=causal_context)
 
 
 def causal_consistency_loss(decision_logits: torch.Tensor,
