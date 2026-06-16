@@ -39,8 +39,6 @@ import logging
 import pathlib
 import zipfile
 
-import pandas as pd
-
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 
