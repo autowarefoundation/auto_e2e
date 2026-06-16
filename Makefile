@@ -28,10 +28,10 @@ deps-map:
 lint: deps ## ruff over the whole repo (same as CI)
 	ruff check
 
-# Strict static typing for safety-critical modules only (see pyproject.toml).
-# Run from Model/ so module paths resolve to model_components.safety.*.
-typecheck: deps ## mypy over type-checked modules (same as CI)
-	cd Model && mypy model_components/safety
+# Static type-checking over the whole project (see pyproject.toml for the
+# lenient/strict policy). Run from Model/ so module paths resolve cleanly.
+typecheck: deps ## mypy over the project (same as CI)
+	cd Model && mypy .
 
 test: deps ## unit tests (same selection as CI)
 	$(PYTEST) Model/tests -v
