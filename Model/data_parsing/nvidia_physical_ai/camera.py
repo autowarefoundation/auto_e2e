@@ -70,7 +70,7 @@ def load_camera_frame(
     egomotion_timestamp_us: int,
     transform: Compose,
     camera_names: list[str] | None = None,
-    camera_timestamps: dict[str, np.ndarray | None] | None = None,
+    camera_timestamps: dict[str, np.ndarray] | None = None,
 ) -> torch.Tensor:
     """Load and preprocess the camera frame aligned to an egomotion timestamp.
 
@@ -104,10 +104,9 @@ def load_camera_frame(
         if not video_path.exists():
             raise FileNotFoundError(f"Camera video not found: {video_path}")
         
-        timestamps_us = (
-            camera_timestamps.get(cam_name) if camera_timestamps is not None else None
-        )
-        if timestamps_us is None:
+        if camera_timestamps is not None:
+            timestamps_us = camera_timestamps[cam_name]
+        else:
             timestamps_path = cam_dir / f"{clip_uuid}.{cam_name}.timestamps.parquet"
             if not timestamps_path.exists():
                 raise FileNotFoundError(
