@@ -18,6 +18,8 @@ forward pass or its 3-tuple return contract.
 import torch
 import torch.nn as nn
 
+from .base import BaseTemporalMemory
+
 
 class HistoryEncoder(nn.Module):
     """Compress a [B, T, input_dim] past sequence into a [B, hidden_dim] context.
@@ -112,3 +114,39 @@ class HistoryEncoder(nn.Module):
         compressed = self.compress(history)     # [B, T', hidden_dim]
         _, h_n = self.gru(compressed)            # h_n: [1, B, hidden_dim]
         return h_n.squeeze(0)
+
+
+class OneHzHistoryEncoder(BaseTemporalMemory):
+    """Applies the 1 Hz HistoryEncoder to both visual and egomotion streams.
+    
+    Acts as a bridge between the [B, T, feat] sequence pipeline and the 1 Hz compression
+    baseline, concatenating features for joint temporal compression.
+    """
+    def __init__(self, visual_dim=896, egomotion_dim=256, subsample_ratio=10, input_hz=10.0):
+        super().__init__()
+        self.visual_dim = visual_dim
+        self.egomotion_dim = egomotion_dim
+        
+        joint_dim = visual_dim + egomotion_dim
+        self.encoder = HistoryEncoder(
+            input_dim=joint_dim,
+            hidden_dim=joint_dim,
+            subsample_ratio=subsample_ratio,
+            input_hz=input_hz
+        )
+        
+    def forward(self, visual_history, egomotion_history, **kwargs):
+        # Flatten if passed without time dimension (fallback)
+        if visual_history.ndim == 2:
+            return visual_history, egomotion_history
+            
+        # Concat along feature dim: [B, T, visual_dim + egomotion_dim]
+        joint_history = torch.cat([visual_history, egomotion_history], dim=-1)
+        
+        # Compress to 1 Hz: [B, visual_dim + egomotion_dim]
+        joint_context = self.encoder(joint_history)
+        
+        # Split back
+        v_ctx = joint_context[:, :self.visual_dim]
+        e_ctx = joint_context[:, self.visual_dim:]
+        return v_ctx, e_ctx
