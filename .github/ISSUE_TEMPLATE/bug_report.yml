@@ -1,0 +1,77 @@
+name: Bug report
+description: Report something that is broken or behaves incorrectly
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for filing a bug. Please fill in the sections below so it can be reproduced.
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: A clear description of the bug and what you expected instead.
+      placeholder: When I run ..., I get ... but expected ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: Minimal commands or code to trigger the bug.
+      placeholder: |
+        1. make setup
+        2. cd Model && pytest tests/...
+        3. ...
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Traceback / logs
+      description: Paste the full error output. Automatically formatted as code.
+      render: shell
+    validations:
+      required: false
+
+  - type: dropdown
+    id: device
+    attributes:
+      label: Device
+      options:
+        - CPU
+        - GPU (CUDA)
+        - Both
+    validations:
+      required: true
+
+  - type: input
+    id: env
+    attributes:
+      label: Environment
+      description: OS, Python, torch/timm versions (e.g. `python -c "import torch; print(torch.__version__)"`).
+      placeholder: Ubuntu 22.04, Python 3.12, torch 2.4.1+cpu, timm 1.0.27
+    validations:
+      required: true
+
+  - type: input
+    id: model-config
+    attributes:
+      label: Model config (if relevant)
+      description: Backbone, fusion mode, planner mode, etc.
+      placeholder: backbone=swin_v2_tiny, fusion_mode=bev, planner_mode=gru
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Confirmation
+      options:
+        - label: I searched existing issues and did not find a duplicate.
+          required: true
