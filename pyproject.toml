@@ -1,9 +1,4 @@
 [tool.mypy]
-# Introduce static typing incrementally. The existing model code is largely
-# untyped, so mypy is lenient (don't fail on missing annotations or third-party
-# stubs) and just catches real type errors. As modules get fully annotated, add
-# strict per-module overrides (disallow_untyped_defs, ...) — the MISRA-spirit
-# "tighten the highest-integrity code first" approach.
 python_version = "3.12"
 mypy_path = "Model"
 explicit_package_bases = true
