@@ -2,3 +2,4 @@ __pycache__/
 *.py[cod]
 ._*
 benchmark_results.json
+sync-to-ec2.sh
