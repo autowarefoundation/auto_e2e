@@ -25,20 +25,3 @@ body:
       render: shell
     validations:
       required: false
-
-  - type: input
-    id: env
-    attributes:
-      label: Environment (if relevant)
-      description: OS, Python, torch/timm versions, CPU/GPU.
-      placeholder: Ubuntu 22.04, Python 3.12, torch 2.4.1+cpu, CPU
-    validations:
-      required: false
-
-  - type: checkboxes
-    id: checks
-    attributes:
-      label: Confirmation
-      options:
-        - label: I searched existing issues and discussions and did not find an answer.
-          required: true
