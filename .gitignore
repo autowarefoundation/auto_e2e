@@ -3,3 +3,20 @@ __pycache__/
 ._*
 benchmark_results.json
 sync-to-ec2.sh
+data/
+
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.backup
+*.tfplan
+
+# Terraform secret/account-specific values (account IDs, ODCR IDs, etc.)
+# Committed template: *.tfvars.example. Real values stay local / in CI secrets.
+*.auto.tfvars
+secrets.auto.tfvars
+platform/infra/environments/*/secrets.auto.tfvars
+
+# Environment file holding account IDs, ODCR IDs, profile names, etc.
+# Committed template: .env.example. Real values never committed.
+.env
