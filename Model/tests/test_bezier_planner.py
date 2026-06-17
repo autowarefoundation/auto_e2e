@@ -154,13 +154,14 @@ def test_autoe2e_with_bezier_planner_end_to_end(device):
     assert isinstance(model.TrajectoryPlanner, BezierPlanner)
 
     x = torch.randn(2, 8, 3, 256, 256, device=device)
+    map_input = torch.randn(2, 3, 256, 256, device=device)
     vis = torch.randn(2, 896, device=device)
     ego = torch.randn(2, 256, device=device)
-    trajectory, ego_hidden, future = model(x, vis, ego)
+    trajectory, ego_hidden, future = model(x, map_input, vis, ego, mode="infer")
 
     assert trajectory.shape == (2, 128)
     assert ego_hidden.shape == (2, 256)
-    assert future is not None  # train mode returns future visual features
+    assert future is None  # infer mode returns None for future visual features
 
 
 def test_autoe2e_default_planner_unchanged(device):
