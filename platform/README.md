@@ -25,7 +25,7 @@ Developer (Mac)
                 │  └──────────────────────────────────────────────┘ │
                 │                                                    │
                 │  ┌──────────────────────────────────────────────┐ │
-                │  │  GPU Pool (Karpenter, scale-to-zero)          │ │
+                │  │  GPU Pool (Karpenter; 1 warm g6e, do-not-disrupt) │ │
                 │  │                                               │ │
                 │  │  g6e.xlarge ── g6e.2xlarge ── (future: p5)   │ │
                 │  │       │              │                        │ │
@@ -92,7 +92,7 @@ Training-Ready Format (S3, unified across all datasets):
 | NVIDIA PhysicalAI | HuggingFace (gated, SDK) | 7 | Pose-derived 10Hz | None | Parser + DL script ready |
 | KIT Scenes | TBD | 6-9 | Pose-derived 10Hz | Lanelet2 → rasterize | PR #41 draft |
 
-## Training Pipeline (Flyte + Kubeflow Trainer)
+## Training Pipeline (Flyte + Kubeflow Training Operator)
 
 ```
 Training-Ready Data (S3)
@@ -221,29 +221,43 @@ platform/
 
 ## Implementation Phases
 
-### Phase 1: Foundation (EKS + GPU + Container Registry)
+### Phase 1: Foundation (EKS + GPU + Container Registry) — DONE
 
-Goal: `train.py` runs as a container on EKS with GPU.
+Goal: `train.py` runs as a container on EKS with GPU. Region us-west-2
+(us-east-1 was fully g6e capacity-starved across all sizes).
 
-- [ ] Terraform backend (S3 + DynamoDB state lock)
-- [ ] VPC (Private Subnets x3 AZ + Public Subnets x3 + NAT Gateway)
-- [ ] EKS Auto Mode cluster (managed Karpenter 内蔵, Private endpoint)
-- [ ] NodePool 定義 (g6e.xlarge/2xlarge, Private Subnet, AZ 制約)
-- [ ] S3 buckets (datasets, checkpoints, artifacts) + IRSA
-- [ ] ECR repositories (training, data-prep, eval)
-- [ ] CloudFront + internal ALB + Cognito 認証 (UI アクセス基盤)
-- [ ] Training Dockerfile (PyTorch + auto_e2e) → ECR push
-- [ ] Verify: Pod submit → Karpenter が g6e 起動 → train.py --smoke-test pass → node 回収
+- [x] Terraform backend (S3 + DynamoDB state lock; bucket in us-east-1)
+- [x] VPC (Private Subnets x3 AZ + Public Subnets x3 + single NAT Gateway)
+- [x] EKS Auto Mode cluster (managed Karpenter built-in, OIDC, access entry)
+- [x] GPU NodePool (g6e.4xlarge, on-demand only, ODCR AZ, nvidia.com/gpu taint)
+- [x] One warm GPU node via do-not-disrupt pause Deployment (NOT scale-to-zero;
+      g6e capacity is too scarce to re-acquire on demand, so the node + ODCR
+      are held)
+- [x] S3 buckets (datasets, checkpoints, artifacts) + IRSA
+- [x] ECR repositories (training, data-prep, eval)
+- [x] Training Dockerfile (pytorch/pytorch CUDA runtime base) → built/pushed via Finch
+- [x] Verified: smoke-test Pod on g6e — device=cuda, amp=bf16, peak VRAM ~4GB
 
-### Phase 2: Job Scheduling (Kueue + Training Operator)
+(CloudFront + Cognito UI exposure moved into Phase 2 alongside the UIs that
+need it — Flyte/MLflow consoles.)
 
-Goal: Team members submit training jobs to a queue; GPU nodes auto-scale.
+### Phase 2: Queue + Orchestration + Tracking — see PHASE2.md
 
-- [ ] Kubeflow Training Operator (PyTorchJob CRD)
-- [ ] Kueue (ClusterQueue, LocalQueue, ResourceFlavor for GPU)
-- [ ] Multi-node DDP PyTorchJob template
-- [ ] S3 Mountpoint CSI for dataset access from Pods
-- [ ] Verify: 2-node DDP training on L2D subset
+Goal: a team launches training from a UI, jobs queue on the GPU, results are
+tracked. Detailed, reviewed design in `platform/PHASE2.md`.
+
+Stack: Flyte (UI + orchestration + registry-driven hyperparameter sweep) →
+Kueue (GPU quota, 2-tier research/production priority) → Kubeflow Training
+Operator v1 (PyTorchJob) → warm g6e. MLflow (RDS-backed) for experiment
+tracking + Model Registry. UIs exposed via internal ALB → CloudFront → Cognito.
+
+- [ ] StorageClass + RDS Postgres (db.r6g.large; flyteadmin + mlflow DBs) + IRSA
+- [ ] Kubeflow Training Operator v1.9.3 + Kueue 0.18.1 (kubeflow.org/pytorchjob)
+- [ ] Kueue objects: ResourceFlavor/ClusterQueue/LocalQueue + 2 WorkloadPriorityClass
+- [ ] MLflow (server-proxied S3 artifacts) + minimal MLflow logging in train.py
+- [ ] Flyte (flyte-binary) + kfpytorch plugin; LaunchPlan enums from registries; sweep
+- [ ] Internal ALB → CloudFront + Cognito for Flyte/MLflow UIs
+- [ ] Verify: UI launch → Kueue admit → PyTorchJob on g6e → MLflow run + artifact
 
 ### Phase 3: Data Pipeline (Flyte + LakeFS)
 
@@ -257,16 +271,10 @@ Goal: Raw OSS datasets are automatically converted to training-ready format.
 - [ ] Unified DataLoader that reads from pre-extracted format
 - [ ] Verify: Flyte pipeline produces training-ready data, training job reads it
 
-### Phase 4: Experiment Management (MLflow)
+(Experiment Management / MLflow was pulled forward into Phase 2 — it is needed
+the moment the first UI-launched training run produces results to compare.)
 
-Goal: All experiments are tracked, comparable, and reproducible.
-
-- [ ] MLflow server on EKS (Helm, RDS Postgres + S3 artifact store)
-- [ ] Training container logs to MLflow (metrics, params, checkpoint artifact)
-- [ ] MLflow Model Registry (lifecycle: None → Staging → Production)
-- [ ] Verify: experiment comparison across runs in MLflow UI
-
-### Phase 5: Evaluation Pipeline (Flyte + KServe)
+### Phase 4: Evaluation Pipeline (Flyte + KServe)
 
 Goal: Every checkpoint is automatically evaluated with open-loop metrics.
 
@@ -276,7 +284,7 @@ Goal: Every checkpoint is automatically evaluated with open-loop metrics.
 - [ ] Gate logic: metrics must improve over previous best to promote
 - [ ] Verify: Flyte auto-evaluates after training, promotes to MLflow Staging
 
-### Phase 6: Closed-Loop Simulation (CARLA)
+### Phase 5: Closed-Loop Simulation (CARLA)
 
 Goal: Models are tested in simulated driving scenarios before production.
 
@@ -287,7 +295,7 @@ Goal: Models are tested in simulated driving scenarios before production.
 - [ ] Metrics: route completion, collision rate, comfort
 - [ ] Verify: model runs closed-loop in CARLA, results feed back to MLflow
 
-### Phase 7: CI/CD Integration
+### Phase 6: CI/CD Integration
 
 Goal: Code changes automatically trigger the full pipeline.
 
@@ -339,23 +347,36 @@ NAT Gateway → Internet
 
 ## EKS Configuration
 
-- **EKS Auto Mode**: Managed Karpenter 内蔵。NodePool 定義だけで GPU ノードが自動プロビジョン
-- **GPU NodePool**: g6e.xlarge / g6e.2xlarge (L40S)。Private Subnet, AZ 制約付き
-- **CPU NodePool**: system Pods (Flyte, MLflow, Prometheus 等) 用。Auto Mode default
-- **Simulation NodePool** (将来): g5.xlarge (CARLA 用)
+- **EKS Auto Mode**: Managed Karpenter built-in. GPU nodes provisioned by
+  declaring a NodePool CRD only.
+- **GPU NodePool**: g6e.4xlarge (L40S 48GB), on-demand only (no spot), pinned to
+  the ODCR AZ, taint `nvidia.com/gpu:NoSchedule`, label `workload-type=gpu-training`.
+- **Built-in NodePools** (general-purpose / system): Auto Mode default, host the
+  control-plane pods (Flyte, MLflow, Kueue, operators, Prometheus). CPU only.
+- **Simulation NodePool** (future): g5.xlarge for CARLA.
+- The NVIDIA device plugin is NOT installed — Auto Mode's Bottlerocket-NVIDIA AMI
+  exposes `nvidia.com/gpu` out of the box (verified on the live node).
 
 ## GPU Reservation Strategy
 
-- g6e はキャパシティが逼迫しやすいため、Zonal Reserved Instance で確保する方針
-- RI 購入は運用確認後 (Phase 1 完了後に AZ/サイズを確定)
-- Karpenter NodePool は RI と同じ AZ に制約をかける (購入後に設定追加)
-- RI 未購入の間は On-Demand + Spot fallback で稼働
+- g6e on-demand capacity in us-east-1 was fully exhausted across all sizes/AZs;
+  us-west-2 was too. The only capacity obtainable was a **g6e.4xlarge ODCR in
+  us-west-2b** — hence the region and instance-size choice.
+- One On-Demand Capacity Reservation (ODCR) holds the GPU capacity. The GPU
+  NodePool is pinned to that AZ; a warm node sits on the reservation and is kept
+  alive via `karpenter.sh/do-not-disrupt` (NOT scaled to zero — re-acquiring g6e
+  capacity is not guaranteed).
+- Spot is explicitly NOT used for training (no mid-run interruption).
+- Converting the ODCR to a Zonal Reserved Instance for billing discount is a
+  later cost optimization; the ODCR already guarantees the capacity.
 
 ## AWS Account & Authentication
 
 | Purpose | AWS Profile | Account | Notes |
 |---------|-------------|---------|-------|
-| EC2 dev (model code) | (default) | 833707099141 | g6e instance, SSM |
+| EC2 dev (model code) | (default) | `<DEV_ACCOUNT_ID>` | g6e instance, SSM |
 | Platform (EKS, MLOps) | `--profile autowarefoundation` | `<ACCOUNT_ID>` | Terraform, kubectl |
 
-All `aws` / `terraform` / `eksctl` commands for platform work MUST use `--profile autowarefoundation`.
+All `aws` / `terraform` / `eksctl` commands for platform work MUST use
+`--profile autowarefoundation`. Real account IDs live in `.env` (see repo root
+`.env.example`), never committed.
