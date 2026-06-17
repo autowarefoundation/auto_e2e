@@ -37,6 +37,10 @@ To learn more about how to participate in this project, please read the [onboard
 
 Requires **Python 3.12** (the pinned PyTorch build has no wheels for 3.13+).
 
+### Linux ###
+<details open>
+  <summary>Toggle view</summary>
+
 1. **Clone and install dependencies**
 
    ```bash
@@ -53,6 +57,24 @@ Requires **Python 3.12** (the pinned PyTorch build has no wheels for 3.13+).
    ```bash
    make test
    ```
+</details>
+
+### Windows ###
+<details open>
+  <summary>Toggle view</summary>
+
+**Clone and install dependencies**
+
+```bash
+git clone https://github.com/autowarefoundation/auto_e2e.git
+cd auto_e2e
+pip install -r requirements.txt                      # CPU torch wheels
+pip install -r requirements.txt --extra-index-url https://download.pytorch.org/whl/cu118  # or a CUDA build (cu121, ... work too)
+```
+
+On Windows, you unfortunately cannot verify the install using a `test` from the Makefile without extra tools. If you wish to do so, it is highly recommended to install a package manager for Windows (for example [Chocolatey](https://chocolatey.org/)). This would allow you to use the instruction for Linux above.
+
+</details>
 
 ### Next steps
 - Explore the [Model](./Model/) folder for the model components, training and inference.
