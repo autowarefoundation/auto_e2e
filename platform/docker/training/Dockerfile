@@ -1,0 +1,12 @@
+FROM pytorch/pytorch:2.4.1-cuda12.1-cudnn9-runtime
+
+WORKDIR /workspace
+
+RUN pip install --no-cache-dir timm==1.0.27 pytest==9.0.3
+
+COPY Model/ /workspace/Model/
+
+ENV PYTHONPATH=/workspace/Model
+ENV PYTHONUNBUFFERED=1
+
+ENTRYPOINT ["python", "Model/training/train.py"]
