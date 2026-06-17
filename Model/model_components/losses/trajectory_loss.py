@@ -11,6 +11,7 @@ class TrajectoryImitationLoss(nn.Module):
         # weighted more heavily than far-future ones; near-future accuracy
         # is more safety-critical for planning.
         super().__init__()
+        self.loss_fn: nn.Module
         if loss_type == "smooth_l1":
             self.loss_fn = nn.SmoothL1Loss(reduction="none")
         elif loss_type == "mse":

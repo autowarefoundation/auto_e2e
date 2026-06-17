@@ -237,7 +237,7 @@ def render_map_tile(
     buf.seek(0)
     img = Image.open(buf).convert("RGB")
     if img.size != image_size:
-        img = img.resize(image_size, Image.BILINEAR)
+        img = img.resize(image_size, Image.Resampling.BILINEAR)
     return img
 
 

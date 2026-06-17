@@ -111,7 +111,7 @@ def load_egomotion(
         trajectory_target: Float tensor of shape ``(128,)``.
     """
     if df is None:
-        df = _load_downsampled_df(data_root, clip_uuid)
+        df = _load_downsampled_df(Path(data_root), clip_uuid)
 
     if len(df) < MIN_ROWS:
         raise ValueError(

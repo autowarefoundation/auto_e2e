@@ -20,13 +20,18 @@ setup-local: setup setup-map ## full dev setup
 
 # run setup first if deps are missing (presence check only, versions not verified)
 deps:
-	@{ python -c "import torch, timm, pytest" && command -v ruff; } >/dev/null 2>&1 || $(MAKE) setup
+	@{ python -c "import torch, timm, pytest" && command -v ruff mypy; } >/dev/null 2>&1 || $(MAKE) setup
 
 deps-map:
 	@python -c "import matplotlib, osmnx" >/dev/null 2>&1 || $(MAKE) setup-map
 
 lint: deps ## ruff over the whole repo (same as CI)
 	ruff check
+
+# Static type-checking over the whole project (see pyproject.toml for the
+# lenient/strict policy). Run from Model/ so module paths resolve cleanly.
+typecheck: deps ## mypy over the project (same as CI)
+	cd Model && mypy .
 
 test: deps ## unit tests (same selection as CI)
 	$(PYTEST) Model/tests -v
@@ -43,7 +48,7 @@ test-local-all: test test-local-map test-local-integration
 
 test-local: test-local-$(SUITE) ## local tests (make test-local SUITE=all|map|integration)
 
-ci: lint test ## exactly what CI runs
+ci: lint typecheck test ## exactly what CI runs
 
 # --- Run ---------------------------------------------------------------------
 
@@ -63,4 +68,4 @@ help: ## list available targets
 	@echo ""
 	@echo "Defaults: TORCH_CHANNEL=$(TORCH_CHANNEL) (cpu | cu118 | cu121 | ...), SUITE=$(SUITE) (all | map | integration), PYTEST='$(PYTEST)'"
 
-.PHONY: setup setup-map setup-local deps deps-map lint test test-local test-local-all test-local-map test-local-integration ci benchmark help
+.PHONY: setup setup-map setup-local deps deps-map lint typecheck test test-local test-local-all test-local-map test-local-integration ci benchmark help
