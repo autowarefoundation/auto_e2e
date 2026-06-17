@@ -247,7 +247,7 @@ class NvidiaAVDataset(Dataset):
         clip_uuid, sample_idx, egomotion_timestamp_us = self._samples[idx]
 
         camera_timestamps = {
-            cam_name: self._camera_timestamps.get((clip_uuid, cam_name))
+            cam_name: self._camera_timestamps[(clip_uuid, cam_name)]
             for cam_name in self.camera_names
         }
 

@@ -21,5 +21,8 @@ jobs:
       - name: Lint with ruff
         run: make lint
 
+      - name: Type-check with mypy
+        run: make typecheck
+
       - name: Run unit tests
         run: make test
