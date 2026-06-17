@@ -1,18 +1,18 @@
 import sys
 sys.path.append('..')
-from utils.trajectory_rendering import Visualization
+from visualization.trajectory_rendering import Visualization
 import torch
 from PIL import Image
 
-def run_visualization_test():
+def run_visualization_test_dummy_data():
     print("Initializing mock inputs for visualization test...")
 
     # 1. Create a dummy action sequence (64 timesteps * 2 signals = 128 flat)
     # Let's mock a constant acceleration and a slight left turn (positive curvature)
     mock_actions = torch.zeros(128)
     mock_actions = mock_actions.view(64, 2)
-    mock_actions[:, 0] = 0.5  # Constant gentle acceleration of 0.5 m/s^2
-    mock_actions[:, 1] = 0.05  # Constant gentle left curvature
+    mock_actions[:, 0] = 0.5  # Constant acceleration of 0.5 m/s^2
+    mock_actions[:, 1] = 0.01  # Constant left curvature
     mock_actions = mock_actions.flatten()  # Flatten back to match network output
 
     # 2. Set baseline parameters
@@ -36,11 +36,10 @@ def run_visualization_test():
         output_path = "test_trajectory_output.png"
         result_img.save(output_path)
         print(f"Success! Test image saved to: {output_path}")
-        print("Verify that the green line starts at the center bottom/middle and arcs smoothly to the left.")
 
     except Exception as e:
         print(f"Test failed with an error: {e}")
 
 
 if __name__ == "__main__":
-    run_visualization_test()
+    run_visualization_test_dummy_data()
