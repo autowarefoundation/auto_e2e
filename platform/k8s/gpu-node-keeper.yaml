@@ -1,0 +1,39 @@
+# Keeps one GPU node warm. A tiny pause pod (do-not-disrupt) drives Karpenter to
+# provision a g6e node via the gpu-training NodePool, which tries all 4 AZs and
+# both instance sizes — resilient to per-AZ capacity shortages (unlike a direct
+# NodeClaim, which pins one AZ and gets deleted on InsufficientInstanceCapacity).
+#
+# The pod lands on a GPU node via nodeSelector + toleration, but requests only a
+# sliver of CPU — NOT a GPU. So the GPU stays free for training jobs, which run
+# on the same warm node with no preemption needed. The do-not-disrupt annotation
+# keeps the node alive while only the pause pod runs on it.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gpu-node-keeper
+  namespace: default
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: gpu-node-keeper
+  template:
+    metadata:
+      labels:
+        app: gpu-node-keeper
+      annotations:
+        karpenter.sh/do-not-disrupt: "true"
+    spec:
+      tolerations:
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule
+      nodeSelector:
+        workload-type: gpu-training
+      containers:
+        - name: pause
+          image: registry.k8s.io/pause:3.9
+          resources:
+            requests:
+              cpu: "10m"
+              memory: "16Mi"
