@@ -149,7 +149,7 @@ def test_autoe2e_with_bezier_planner_end_to_end(device):
 
     with patch("model_components.auto_e2e.Backbone", _MockBackbone):
         model = AutoE2E(num_views=8, fusion_mode="concat",
-                        planner="bezier").to(device)
+                        planner_mode="bezier").to(device)
 
     assert isinstance(model.TrajectoryPlanner, BezierPlanner)
 
@@ -168,7 +168,7 @@ def test_autoe2e_default_planner_unchanged(device):
     from unittest.mock import patch
 
     from model_components.auto_e2e import AutoE2E
-    from model_components.trajectory_planner import TrajectoryPlanner
+    from model_components.trajectory_planning import GRUPlanner as TrajectoryPlanner
 
     with patch("model_components.auto_e2e.Backbone", _MockBackbone):
         model = AutoE2E(num_views=8, fusion_mode="concat").to(device)
