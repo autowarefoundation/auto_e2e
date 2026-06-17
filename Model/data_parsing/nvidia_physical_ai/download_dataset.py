@@ -34,9 +34,10 @@ Expected output structure
 from __future__ import annotations
 
 import argparse
-import io
 import logging
 import pathlib
+import shutil
+import tempfile
 import zipfile
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
@@ -65,14 +66,23 @@ def parse_args():
     return p.parse_args()
 
 
-def unpack_camera_zip(zip_bytes: bytes, clip_id: str, cam_name: str, out: pathlib.Path):
+def _stream_to_tempfile(file_handle) -> pathlib.Path:
+    """Stream an SDK file handle to a temporary file to avoid multi-GB RAM spikes."""
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".zip")
+    try:
+        shutil.copyfileobj(file_handle, tmp)
+    finally:
+        tmp.close()
+    return pathlib.Path(tmp.name)
+
+
+def unpack_camera_zip(zip_path: pathlib.Path, clip_id: str, cam_name: str, out: pathlib.Path):
     """Extract camera video and timestamps from a chunk zip into parser layout."""
     cam_dir = out / "camera" / cam_name
     cam_dir.mkdir(parents=True, exist_ok=True)
 
-    with zipfile.ZipFile(io.BytesIO(zip_bytes), "r") as zf:
-        names = zf.namelist()
-        for name in names:
+    with zipfile.ZipFile(zip_path, "r") as zf:
+        for name in zf.namelist():
             if clip_id not in name:
                 continue
             data = zf.read(name)
@@ -86,14 +96,13 @@ def unpack_camera_zip(zip_bytes: bytes, clip_id: str, cam_name: str, out: pathli
             logger.info("  %s (%d KB)", dest.relative_to(out), len(data) // 1024)
 
 
-def unpack_egomotion_zip(zip_bytes: bytes, clip_id: str, out: pathlib.Path):
+def unpack_egomotion_zip(zip_path: pathlib.Path, clip_id: str, out: pathlib.Path):
     """Extract egomotion parquet from a chunk zip into parser layout."""
     ego_dir = out / "labels" / "egomotion"
     ego_dir.mkdir(parents=True, exist_ok=True)
 
-    with zipfile.ZipFile(io.BytesIO(zip_bytes), "r") as zf:
-        names = zf.namelist()
-        for name in names:
+    with zipfile.ZipFile(zip_path, "r") as zf:
+        for name in zf.namelist():
             if clip_id not in name:
                 continue
             if name.endswith(".parquet"):
@@ -132,20 +141,40 @@ def main():
         # Download chunk zips via SDK
         ds.download_clip_features(clip_id, features=features_to_dl)
 
-        # Extract each camera
+        # Extract each camera (stream to temp file to avoid multi-GB RAM spikes)
         for cam in CAMERAS:
             chunk_file = ds.features.get_chunk_feature_filename(
                 ds.get_clip_chunk(clip_id), cam
             )
             with ds.open_file(chunk_file, maybe_stream=True) as f:
-                unpack_camera_zip(f.read(), clip_id, cam, out)
+                tmp = _stream_to_tempfile(f)
+            try:
+                unpack_camera_zip(tmp, clip_id, cam, out)
+            finally:
+                tmp.unlink(missing_ok=True)
 
         # Extract egomotion
         chunk_file = ds.features.get_chunk_feature_filename(
             ds.get_clip_chunk(clip_id), "egomotion"
         )
         with ds.open_file(chunk_file, maybe_stream=True) as f:
-            unpack_egomotion_zip(f.read(), clip_id, out)
+            tmp = _stream_to_tempfile(f)
+        try:
+            unpack_egomotion_zip(tmp, clip_id, out)
+        finally:
+            tmp.unlink(missing_ok=True)
+
+        # Validate expected files were extracted
+        missing = []
+        for cam in CAMERAS:
+            if not (out / "camera" / cam / f"{clip_id}.{cam}.mp4").exists():
+                missing.append(f"camera/{cam}/{clip_id}.{cam}.mp4")
+        if not (out / "labels" / "egomotion" / f"{clip_id}.egomotion.parquet").exists():
+            missing.append(f"labels/egomotion/{clip_id}.egomotion.parquet")
+        if missing:
+            logger.error("Clip %s: missing after extraction: %s", clip_id, missing)
+        else:
+            logger.info("  Clip %s: all files verified", clip_id)
 
     logger.info("Done. data_root = %s", out)
     logger.info("Test with: NvidiaAVDataset(data_root='%s', clip_uuids=%s)", out, clip_ids)

@@ -98,7 +98,6 @@ def parse_args() -> argparse.Namespace:
                    help="Subset of episode indices; default = all")
     p.add_argument("--dataset-backbone-name", default="swinv2_tiny_window8_256",
                    help="timm name used by L2DDataset to resolve image transforms")
-    p.add_argument("--local-files-only", action="store_true")
     p.add_argument("--num-workers", type=int, default=2)
 
     # Loop / logging
@@ -146,14 +145,13 @@ def build_dataloader(args: argparse.Namespace) -> DataLoader:
         repo_id=args.repo_id,
         episodes=args.episodes,
         backbone_name=args.dataset_backbone_name,
-        local_files_only=args.local_files_only,
     )
     return DataLoader(
         dataset,
         batch_size=args.batch_size,
         shuffle=True,
         num_workers=args.num_workers,
-        pin_memory=(args.device != "cpu"),
+        pin_memory=(resolve_device(args.device).type == "cuda"),
         drop_last=True,
     )
 

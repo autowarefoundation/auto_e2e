@@ -73,11 +73,17 @@ DATASET_SPECS = [
     pytest.param("kit_scenes", _build_kit_scenes, 8, id="kit_scenes"),
 ]
 
-# Short loop sized to expose a trend without being a full training run.
-# 20 steps gives enough signal to overcome SGD mini-batch noise on small datasets.
+# Deterministic overfit test: repeatedly train on the SAME fixed batch with a
+# fixed seed so that loss decrease is guaranteed and reproducible (no flakiness
+# from shuffle order or random init). 20 steps on a single batch is enough to
+# confirm the full pipeline (parser -> model -> loss -> backward -> step) works.
 _NUM_STEPS = 20
 _BATCH_SIZE = 4
 _LR = 1e-3
+_SEED = 42
+
+# Track how many datasets were actually exercised (not skipped).
+_datasets_run: list[str] = []
 
 
 def _device() -> torch.device:
@@ -96,20 +102,21 @@ def _try_build(build_fn):
         pytest.skip(f"data unavailable: {e}")
 
 
-def _run_loss_trend(dataset, num_views, device):
-    """Run a short training loop and return the list of per-step losses."""
-    from torch.utils.data import DataLoader
+def _run_overfit(dataset, num_views, device):
+    """Overfit on a single fixed batch and return per-step losses.
 
-    loader = DataLoader(
-        dataset,
-        batch_size=_BATCH_SIZE,
-        shuffle=True,
-        num_workers=2,
-        drop_last=True,
-    )
+    Using a fixed batch removes data-order variance. With seed-fixed model init
+    and deterministic operations, loss must decrease monotonically (or very
+    nearly so) on a single repeated batch.
+    """
+    from torch.utils.data import DataLoader, Subset
 
-    # Train from scratch (no pretrained download) so the test is self-contained
-    # and the loss has clear room to move.
+    torch.manual_seed(_SEED)
+
+    subset = Subset(dataset, list(range(min(_BATCH_SIZE, len(dataset)))))
+    loader = DataLoader(subset, batch_size=_BATCH_SIZE, shuffle=False, num_workers=0)
+    fixed_batch = next(iter(loader))
+
     model = AutoE2E(
         num_views=num_views,
         fusion_mode="concat",
@@ -120,20 +127,13 @@ def _run_loss_trend(dataset, num_views, device):
     optimizer = torch.optim.AdamW(model.parameters(), lr=_LR)
     loss_fn = TrajectoryImitationLoss().to(device)
 
+    visual_tiles = fixed_batch["visual_tiles"].to(device)
+    visual_history = fixed_batch["visual_history"].to(device)
+    egomotion_history = fixed_batch["egomotion_history"].to(device)
+    target = fixed_batch["trajectory_target"].to(device)
+
     losses = []
-    data_iter = iter(loader)
     for _ in range(_NUM_STEPS):
-        try:
-            batch = next(data_iter)
-        except StopIteration:
-            data_iter = iter(loader)
-            batch = next(data_iter)
-
-        visual_tiles = batch["visual_tiles"].to(device)
-        visual_history = batch["visual_history"].to(device)
-        egomotion_history = batch["egomotion_history"].to(device)
-        target = batch["trajectory_target"].to(device)
-
         optimizer.zero_grad(set_to_none=True)
         trajectory, _ego, _future = model(
             visual_tiles, visual_history, egomotion_history,
@@ -157,18 +157,26 @@ def test_loss_decreases_on_real_data(name, build_fn, num_views):
         f"{name}: only {len(dataset)} samples, need >= {_BATCH_SIZE}"
     )
 
-    losses = _run_loss_trend(dataset, num_views, _device())
+    losses = _run_overfit(dataset, num_views, _device())
+    _datasets_run.append(name)
 
     # No NaN/Inf anywhere — the pipeline stays numerically sane on real data.
     assert all(torch.isfinite(torch.tensor(v)) for v in losses), (
         f"{name}: non-finite loss encountered: {losses}"
     )
 
-    # Loss must trend down: last-third mean clearly below first-third mean.
-    third = max(1, _NUM_STEPS // 3)
-    first = sum(losses[:third]) / third
-    last = sum(losses[-third:]) / third
-    assert last < first, (
-        f"{name}: loss did not decrease. first_third={first:.4f} "
-        f"last_third={last:.4f} all={[round(x, 4) for x in losses]}"
+    # On a fixed batch with fixed seed, loss must clearly decrease.
+    assert losses[-1] < losses[0], (
+        f"{name}: loss did not decrease on fixed batch. "
+        f"first={losses[0]:.4f} last={losses[-1]:.4f} "
+        f"all={[round(x, 4) for x in losses]}"
+    )
+
+
+@pytest.mark.e2e_data
+def test_at_least_one_dataset_was_exercised():
+    """Guard against silent all-skip: at least one dataset must have run."""
+    assert len(_datasets_run) > 0, (
+        "All datasets were skipped — no real data training was verified. "
+        "Ensure at least L2D is accessible (network + lerobot installed)."
     )

@@ -59,9 +59,6 @@ class L2DDataset(Dataset):
         episodes: Optional list of episode indices to load. If None, all
             episodes are used.
         backbone_name: timm backbone for deriving image transforms.
-        local_files_only: Accepted for backward compatibility; lerobot 0.5.x
-            removed this option (it now reads from cache by default), so the
-            flag is currently a no-op.
     """
 
     def __init__(
@@ -69,17 +66,12 @@ class L2DDataset(Dataset):
         repo_id: str = "yaak-ai/L2D",
         episodes: list[int] | None = None,
         backbone_name: str = "swinv2_tiny_window8_256",
-        local_files_only: bool = False,
     ) -> None:
         from lerobot.datasets.lerobot_dataset import LeRobotDataset
 
         self.repo_id = repo_id
         self._episodes = episodes
 
-        # lerobot 0.5.x removed `local_files_only`; it now syncs from cache by
-        # default and only re-fetches when `force_cache_sync=True`. We map the
-        # legacy flag onto that: local_files_only=True means "don't force a
-        # remote sync", which is already the default, so it is simply not passed.
         self.lerobot_dataset = LeRobotDataset(
             repo_id=repo_id,
             episodes=episodes,
