@@ -1,0 +1,32 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: train-smoke-test
+  labels:
+    app: auto-e2e-smoke-test
+spec:
+  restartPolicy: Never
+  nodeSelector:
+    workload-type: gpu-training
+  tolerations:
+    - key: nvidia.com/gpu
+      operator: Exists
+      effect: NoSchedule
+  containers:
+    - name: training
+      image: REPLACE_WITH_ECR_URL/auto-e2e/training:latest
+      args:
+        - "--smoke-test"
+        - "--fusion-mode"
+        - "concat"
+        - "--batch-size"
+        - "4"
+        - "--amp"
+        - "--no-pretrained"
+      resources:
+        limits:
+          nvidia.com/gpu: "1"
+        requests:
+          nvidia.com/gpu: "1"
+          memory: "16Gi"
+          cpu: "2"
