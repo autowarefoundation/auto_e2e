@@ -10,7 +10,6 @@ therefore *derived* from the pose sequence by finite differencing:
 
     trajectory_target  (128,) — 64 timesteps after the sample point x 2 signals
                                 [acceleration, curvature]
-                                Matches DrivingPolicy's fc3 output exactly.
 
 The pose stream is already at 10 Hz, so there is no downsampling step.
 """
@@ -22,7 +21,6 @@ import torch
 from kitscenes.schema import EgoPose
 from scipy.spatial.transform import Rotation
 
-# Must match DrivingPolicy dimensions.
 _HISTORY_TIMESTEPS = 64         # 6.4 s of past context at 10 Hz
 _FUTURE_TIMESTEPS = 64          # 6.4 s of future prediction at 10 Hz
 _NUM_HISTORY_SIGNALS = 4        # speed, acceleration, yaw_angle, curvature
