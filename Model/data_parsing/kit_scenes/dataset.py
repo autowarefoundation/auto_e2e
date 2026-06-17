@@ -14,7 +14,8 @@ Usage
     )
 
     sample = dataset[0]
-    # sample["visual_tiles"]       (8, 3, H, W)  — 7 cameras + BEV map tile
+    # sample["visual_tiles"]       (7, 3, H, W)  — 7 cameras 
+    # sample["map_tile"]          (3, H, W)     — semantic BEV map tile
     # sample["egomotion_history"]  (256,)
     # sample["visual_history"]     (896,)
     # sample["trajectory_target"]  (128,)
@@ -27,6 +28,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
+from PIL import Image
 from typing import TypedDict
 
 import numpy as np
@@ -36,6 +38,8 @@ import torch
 from kitscenes.dataset import KITScenesDataset as _KITScenesSDK
 from kitscenes.poses import load_ego_poses
 from torch.utils.data import Dataset
+
+from .map import generate_bev_map_tile
 
 from .camera import CAMERA_NAMES, load_camera_frame, compute_camera_projection_matrices
 from .egomotion import (
@@ -52,7 +56,8 @@ _VISUAL_HISTORY_DIM = 896
 
 
 class ClipSample(TypedDict):
-    visual_tiles: torch.Tensor        # (8, 3, H, W) — 7 cameras + BEV map tile
+    visual_tiles: torch.Tensor        # (7, 3, H, W) — 7 cameras
+    map_tile: torch.Tensor            # (3, H, W) — semantic BEV map tile
     egomotion_history: torch.Tensor   # (256,)
     visual_history: torch.Tensor      # (896,)
     trajectory_target: torch.Tensor   # (128,)
@@ -81,6 +86,11 @@ class KitScenesDataset(Dataset):
         scene_ids: Optional explicit list of scene IDs. If ``None``, all valid
             scenes in the split are used. Pass a single-element list for smoke
             tests or forward pass validation.
+        rasterize_map_at_runtime: If True (default), rasterize Lanelet2 map
+            tiles on-demand at runtime via generate_bev_map_tile. If False,
+            return zero tensor map tiles, representative of pre-rendered/cached
+            maps or datasets without HD maps. Use False for benchmarking to
+            measure map encoder impact independently from rendering cost.
     """
 
     def __init__(
@@ -90,8 +100,10 @@ class KitScenesDataset(Dataset):
         split: str | None = None,
         camera_names: list[str] | None = None,
         scene_ids: list[str] | None = None,
+        rasterize_map_at_runtime: bool = True,
     ) -> None:
         self.camera_names = camera_names or CAMERA_NAMES
+        self.rasterize_map_at_runtime = rasterize_map_at_runtime
 
         # Build the image transform from the backbone's own config so that
         # preprocessing always matches what the backbone expects.
@@ -201,10 +213,26 @@ class KitScenesDataset(Dataset):
             loader,
             frame_idx,
             transform=self.transform,
-            ego_xy=ego_xy,
-            ego_yaw=ego_yaw,
             camera_names=self.camera_names,
         )
+
+        # Load semantic BEV map. generate_bev_map_tile returns (H, W, 3).
+        # Passing through transform (PIL path) gives identical (3, H, W) float
+        # normalisation as the camera tiles. Falls back to zeros on failure or
+        # if rasterize_map_at_runtime is False.
+        if self.rasterize_map_at_runtime:
+            bev_map = generate_bev_map_tile(
+                scene_path=loader.scene_path,
+                ego_x=float(ego_xy[0]),
+                ego_y=float(ego_xy[1]),
+                ego_yaw=float(ego_yaw),
+            )
+            if bev_map is None:
+                map_tile = torch.zeros_like(visual_tiles[0])  # (3, H, W)
+            else:
+                map_tile = self.transform(Image.fromarray(bev_map))  # (3, H, W)
+        else:
+            map_tile = torch.zeros_like(visual_tiles[0])  # (3, H, W)
 
         egomotion_history, trajectory_target = load_egomotion(
             self._scene_egomotion[scene_id],
@@ -215,6 +243,7 @@ class KitScenesDataset(Dataset):
 
         return ClipSample(
             visual_tiles=visual_tiles,
+            map_tile=map_tile,
             egomotion_history=egomotion_history,
             visual_history=visual_history,
             trajectory_target=trajectory_target,
