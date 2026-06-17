@@ -69,5 +69,6 @@ class Visualization:
 
         draw = ImageDraw.Draw(map_with_trajectory)
         draw.line(pixel_points, fill="#33FF33", width=3)
+        draw.circle(pixel_points[0], radius=5, fill='red')
 
         return map_with_trajectory
