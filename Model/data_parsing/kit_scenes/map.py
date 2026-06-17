@@ -1,8 +1,7 @@
-"""BEV map rasterisation for the KIT Scenes Multimodal dataset.
+"""BEV map rasterization for the KIT Scenes Multimodal dataset.
 
-Provides ``generate_bev_map_tile`` for rendering using OpenCV. `kitscenes` SDK has visualization utilities based on Matplotlib.
-
-Require only base ``lanelet2`` (no ``ml_converter`` wheel).
+Provides ``generate_bev_map_tile`` for rendering using OpenCV. Requires only
+base ``lanelet2`` (no ``lanelet2_ml_converter`` wheel).
 
 Rendering mirrors ``kitscenes.visualization.ml_converter_vis_utils``:
 - White background.
