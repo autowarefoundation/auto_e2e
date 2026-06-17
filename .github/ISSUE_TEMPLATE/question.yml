@@ -1,0 +1,27 @@
+name: Question / support
+description: Ask a question about using the model, setup, or training
+title: "[Question]: "
+labels: ["question"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        For usage and setup questions. If something is broken, please use the Bug report form instead.
+
+  - type: textarea
+    id: question
+    attributes:
+      label: Your question
+      description: What are you trying to do, and what's unclear?
+      placeholder: How do I ... ? I expected ... but ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: context
+    attributes:
+      label: What you've tried
+      description: Commands, config, or docs you've already looked at.
+      render: shell
+    validations:
+      required: false

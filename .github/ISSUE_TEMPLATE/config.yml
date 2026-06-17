@@ -1,0 +1,3 @@
+# Keep blank issues enabled so reports that fit none of the forms can still
+# be opened without forcing a label.
+blank_issues_enabled: true

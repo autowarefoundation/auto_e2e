@@ -48,9 +48,9 @@ logger = logging.getLogger(__name__)
 
 _DISCOVERY_CAMERA = "camera_front_wide_120fov"
 
-# 64 frames × 14-dim compressed scene memory; matches TrajectoryPlanner's
-# visual_history_proj input dim. Currently a zero placeholder until a
-# rolling-buffer encoder writes real summaries each step.
+# 64 frames × 14-dim compressed scene memory; matches the trajectory
+# planner's visual_history_proj input dim. Currently a zero placeholder
+# until a rolling-buffer encoder writes real summaries each step.
 _VISUAL_HISTORY_DIM = 896
 
 

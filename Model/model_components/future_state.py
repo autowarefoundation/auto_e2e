@@ -6,9 +6,10 @@ class FutureState(nn.Module):
     """Predict future BEV feature maps conditioned on the planner's ego_hidden.
 
     The legacy 14-dim compressed visual vector is replaced by the GRU hidden
-    state (``ego_hidden``, 256-dim) coming from TrajectoryPlanner. ``ego_hidden``
-    summarises the planner's intent over the prediction horizon, so the future
-    feature predictions reflect the trajectory the model expects to drive.
+    state (``ego_hidden``, 256-dim) coming from the trajectory planner (GRU
+    or Flow Matching). ``ego_hidden`` summarises the planner's intent over
+    the prediction horizon, so the future feature predictions reflect the
+    trajectory the model expects to drive.
     """
 
     def __init__(self, embed_dim=256, ego_hidden_dim=256):
