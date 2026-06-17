@@ -1,8 +1,8 @@
 """
 Forward pass test for AutoE2E using the KIT Scenes Multimodal dataset.
 
-Loads a single scene (or split), runs one batch through the data pipeline, and
-optionally through the model. 
+Organizes tests into separate functions for loading the dataset, testing
+inference mode, and testing training mode.
 
 Usage:
     cd Model/data_parsing/kit_scenes
@@ -14,7 +14,7 @@ Usage:
     cd Model/data_parsing/kit_scenes
     python forward_pass_test.py \
         --dataset_root data \
-        --split test_e2e
+        --split train
 
     # Offline / CI (no pretrained weights):
     cd Model/data_parsing/kit_scenes
@@ -22,6 +22,13 @@ Usage:
         --dataset_root data \
         --scene_id <scene-uuid> \
         --no-pretrained
+
+    # Benchmark with zero tensor maps (no runtime rasterization):
+    cd Model/data_parsing/kit_scenes
+    python forward_pass_test.py \
+        --dataset_root data \
+        --scene_id <scene-uuid> \
+        --no-rasterize-maps
 """
 
 import argparse
@@ -36,18 +43,17 @@ _MODEL_DIR = pathlib.Path(__file__).parent.parent.parent.resolve()
 sys.path.insert(0, str(_MODEL_DIR))
 
 from data_parsing.kit_scenes import KitScenesDataset  # noqa: E402
-from model_components.auto_e2e import AutoE2E # noqa: E402
+from model_components.auto_e2e import AutoE2E  # noqa: E402
 
 
-def main(
+def load_dataset(
     dataset_root: str,
     scene_id: str | None,
     split: str | None,
-    batch_size: int = 4,
-    pretrained_backbone: bool = True,
-) -> None:
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Device: {device}")
+    rasterize_map_at_runtime: bool = True,
+) -> tuple[KitScenesDataset, dict]:
+    """Load KITScenes dataset and return first batch."""
+    print("[dataset] Loading KITScenes dataset...")
 
     scene_ids = [scene_id] if scene_id is not None else None
 
@@ -57,67 +63,125 @@ def main(
         backbone_name="swinv2_tiny_window8_256",
         split=split,
         scene_ids=scene_ids,
+        rasterize_map_at_runtime=rasterize_map_at_runtime,
     )
-    print(f"Valid samples: {len(dataset)}")
+    print(f"[dataset] Valid samples: {len(dataset)}")
 
-    loader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=0)
-
+    loader = DataLoader(dataset, batch_size=2, shuffle=False, num_workers=0)
     batch = next(iter(loader))
-    visual_tiles = batch["visual_tiles"].to(device)           # (B, 8, 3, H, W)
-    visual_history = batch["visual_history"].to(device)       # (B, 896)
-    egomotion_history = batch["egomotion_history"].to(device) # (B, 256)
-    trajectory_target = batch["trajectory_target"].to(device) # (B, 128)
-    camera_params = batch["camera_params"].to(device)
+
     t_dataset = time.time() - t0
+    print(f"[dataset] Creation time: {t_dataset:.2f}s")
 
-    print(f"Dataset creation: {t_dataset:.2f}s")
+    # Move batch to device
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    batch_device = {
+        "visual_tiles": batch["visual_tiles"].to(device),
+        "map_tile": batch["map_tile"].to(device),
+        "visual_history": batch["visual_history"].to(device),
+        "egomotion_history": batch["egomotion_history"].to(device),
+        "trajectory_target": batch["trajectory_target"].to(device),
+        "camera_params": batch["camera_params"].to(device),
+    }
 
-    print(f"visual_tiles: {tuple(visual_tiles.shape)}")
-    print(f"egomotion_history: {tuple(egomotion_history.shape)}")
-    print(f"camera_params: {tuple(camera_params.shape)}")
-    print(f"trajectory_target: {tuple(trajectory_target.shape)}")
-    
+    # Print shapes
+    print(f"[dataset] visual_tiles: {tuple(batch_device['visual_tiles'].shape)}")
+    print(f"[dataset] map_tile: {tuple(batch_device['map_tile'].shape)}")
+    print(f"[dataset] egomotion_history: {tuple(batch_device['egomotion_history'].shape)}")
+    print(f"[dataset] camera_params: {tuple(batch_device['camera_params'].shape)}")
+    print(f"[dataset] trajectory_target: {tuple(batch_device['trajectory_target'].shape)}")
 
-    # --------------------
-    # forward pass - Concat fusion path
-    print("Testing forward pass with Concat fusion...")
-    model = AutoE2E(is_pretrained=pretrained_backbone).to(device)
+    return dataset, batch_device
 
-    t0 = time.time()
-    trajectory_, compressed_, future_ = model(visual_tiles, visual_history, egomotion_history, camera_params=camera_params)
-    t_forward = time.time() - t0
-    print(f"Forward pass (Concat fusion): {t_forward:.2f}s")
 
-    print(f"trajectory output (Concat fusion): {tuple(trajectory_.shape)}")
-    print(f"compressed visual feature output: {tuple(compressed_.shape)}")
-    print(f"future visual features: {[tuple(f.shape) for f in future_]}")
-    # --------------------
+def test_bev_infer_mode(
+    batch: dict,
+    device: torch.device,
+    pretrained_backbone: bool,
+) -> None:
+    """Test forward pass with BEV fusion in inference mode."""
+    print("[bev_infer] Testing forward pass with BEV fusion in infer mode")
 
-    # forward pass - BEV fusion path
-    print("Testing forward pass with BEV fusion...")
-    model_bev = AutoE2E(
+    torch.cuda.empty_cache()
+    model = AutoE2E(
         is_pretrained=pretrained_backbone,
         fusion_mode="bev",
     ).to(device)
 
     t0 = time.time()
-    trajectory_bev, ego_hidden_bev, _ = model_bev(
-        visual_tiles,
-        visual_history,
-        egomotion_history,
-        camera_params=camera_params,
+    trajectory, ego_hidden, _ = model(
+        batch["visual_tiles"],
+        batch["map_tile"],
+        batch["visual_history"],
+        batch["egomotion_history"],
+        camera_params=batch["camera_params"],
         mode="infer",
     )
-    t_forward_bev = time.time() - t0
-    print(f"Forward pass (BEV fusion): {t_forward_bev:.2f}s")
-    print(f"trajectory output (BEV fusion): {tuple(trajectory_bev.shape)}")
-    print(f"ego hidden (BEV fusion): {tuple(ego_hidden_bev.shape)}")
+    t_forward = time.time() - t0
 
-    # TODO (training): wire in loss and backprop
-    # loss = F.mse_loss(trajectory, trajectory_target)
-    # loss.backward()
+    print(f"[bev_infer] Forward pass time: {t_forward:.2f}s")
+    print(f"[bev_infer] Trajectory shape: {trajectory.shape}")
+    print(f"[bev_infer] Ego Hidden shape: {tuple(ego_hidden.shape)}")
+    print("[bev_infer] PASSED")
 
-    print("Done.")
+
+def test_bev_train_mode(
+    batch: dict,
+    device: torch.device,
+    pretrained_backbone: bool,
+) -> None:
+    """Test forward pass with BEV fusion in training mode."""
+    print("[bev_train] Testing forward pass with BEV fusion in train mode")
+
+    torch.cuda.empty_cache()
+    model = AutoE2E(
+        is_pretrained=pretrained_backbone,
+        fusion_mode="bev",
+    ).to(device)
+
+    t0 = time.time()
+    planner_loss, ego_hidden, future_visual_features = model(
+        batch["visual_tiles"],
+        batch["map_tile"],
+        batch["visual_history"],
+        batch["egomotion_history"],
+        camera_params=batch["camera_params"],
+        trajectory_target=batch["trajectory_target"],
+        mode="train",
+    )
+    t_forward = time.time() - t0
+
+    print(f"[bev_train] Forward pass time: {t_forward:.2f}s")
+    print(f"[bev_train] Planner loss: {planner_loss.item():.4f}")
+    print(f"[bev_train] Ego Hidden shape: {tuple(ego_hidden.shape)}")
+    print(f"[bev_train] Future Visual Features shapes: {[tuple(f.shape) for f in future_visual_features]}")
+    print("[bev_train] PASSED")
+
+
+def main(
+    dataset_root: str,
+    scene_id: str | None,
+    split: str | None,
+    pretrained_backbone: bool = True,
+    rasterize_map_at_runtime: bool = True,
+) -> None:
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Device: {device}")
+    print()
+
+    # Load dataset and get first batch
+    dataset, batch = load_dataset(dataset_root, scene_id, split, rasterize_map_at_runtime=rasterize_map_at_runtime)
+    print()
+
+    # Test inference mode
+    test_bev_infer_mode(batch, device, pretrained_backbone)
+    print()
+
+    # Test training mode
+    test_bev_train_mode(batch, device, pretrained_backbone)
+    print()
+
+    print("All tests passed.")
 
 
 if __name__ == "__main__":
@@ -127,15 +191,16 @@ if __name__ == "__main__":
                     help="Single scene ID to test. Defaults to all scenes in the split.")
     parser.add_argument("--split", type=str, default=None,
                     help="SDK split to use (train, val, test, test_e2e, overlap_train_val).")
-    parser.add_argument("--batch_size", type=int, default=4)
     parser.add_argument("--no-pretrained", action="store_true",
                     help="Skip downloading pretrained weights for the backbone and initialize randomly.")
+    parser.add_argument("--no-rasterize-maps", action="store_true",
+                    help="Disable runtime map rasterization; use zero tensor maps instead (for benchmarking).")
     args = parser.parse_args()
 
     main(
         args.dataset_root,
         args.scene_id,
         args.split,
-        args.batch_size,
         pretrained_backbone=not args.no_pretrained,
+        rasterize_map_at_runtime=not args.no_rasterize_maps,
     )
