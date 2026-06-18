@@ -11,8 +11,9 @@ variable "pod_identity_associations" {
     service_account = string
   }))
   default = [
-    # training pods (auto-e2e-training namespace, added in Phase 2)
     { namespace = "auto-e2e-training", service_account = "training-sa" },
+    { namespace = "flyte", service_account = "flyte-backend-flyte-binary" },
+    { namespace = "mlflow", service_account = "mlflow" },
   ]
 }
 
