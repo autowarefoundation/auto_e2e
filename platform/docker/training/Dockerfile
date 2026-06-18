@@ -4,7 +4,7 @@ WORKDIR /workspace
 
 RUN pip install --no-cache-dir timm==1.0.27 pytest==9.0.3 \
     mlflow-skinny==2.22.0 flytekit==1.16.23 \
-    flytekitplugins-kfpytorch==1.16.23
+    flytekitplugins-kfpytorch==1.16.23 webdataset
 
 COPY Model/ /workspace/Model/
 
