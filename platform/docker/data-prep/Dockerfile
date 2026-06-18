@@ -5,17 +5,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /workspace
 
-# Install PyTorch CPU-only first (lerobot requires it)
+# PyTorch CPU-only (lerobot requires it)
 RUN pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu
 
-# Install flytekit first (has strict version bounds)
-RUN pip install --no-cache-dir flytekit==1.16.23 boto3 pyarrow pandas scipy pillow webdataset
+# lerobot + its minimal runtime deps
+RUN pip install --no-cache-dir lerobot==0.5.1
 
-# Install lerobot (needs torch + Python 3.12)
-RUN pip install --no-cache-dir lerobot==0.5.1 --no-deps && \
-    pip install --no-cache-dir datasets huggingface_hub safetensors
+# flytekit (latest compatible with 3.12) + data pipeline deps
+RUN pip install --no-cache-dir "flytekit>=1.14,<2" boto3 pyarrow scipy pillow webdataset
 
-# physical_ai_av (best-effort, non-critical for L2D ingest)
+# physical_ai_av (best-effort)
 RUN pip install --no-cache-dir physical_ai_av --no-deps 2>/dev/null || true
 
 COPY Model/ /workspace/Model/
