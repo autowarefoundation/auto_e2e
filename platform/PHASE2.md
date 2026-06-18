@@ -61,27 +61,30 @@ Training Operator v1 (PyTorchJob) → warm g6e node. MLflow for experiment track
 
 ```
 Phase 1 (DONE): EKS Auto Mode + GPU NodePool (taint nvidia.com/gpu:NoSchedule,
-                label workload-type=gpu-training) + warm g6e + OIDC + s3-access IRSA
+                label workload-type=gpu-training) + warm g6e +
+                Pod Identity agent + s3-access role (training-sa association)
                                    │
-   (0) StorageClass auto-ebs-sc    (1a) RDS Postgres        (1b) IRSA roles
-       (before any PVC chart)          (flyteadmin+mlflow DBs)    (flyte-backend, mlflow-server)
+   (0) StorageClass auto-ebs-sc    (1a) RDS Postgres        (1b) Pod Identity
+       (before any PVC chart)          (flyteadmin+mlflow DBs)    associations in storage
+                                                                   module variable
                                    │
    (2) Training Operator v1  ──→  (3) Kueue (Helm, framework kubeflow.org/pytorchjob)
        (CRD must exist first)          │
                                    (5) Kueue objects: ResourceFlavor + ClusterQueue
                                        + WorkloadPriorityClass + LocalQueue
-   (4) MLflow (Helm) — independent leaf (needs RDS + mlflow IRSA)
+   (4) MLflow (Helm) — independent leaf (needs RDS + mlflow Pod Identity association)
                                    │
-   (6) Flyte (flyte-binary Helm) — LAST. depends_on RDS + backend IRSA +
+   (6) Flyte (flyte-binary Helm) — LAST. depends_on RDS + backend Pod Identity +
        Training Operator CRD + Kueue objects. Enables `pytorch` task plugin.
                                    │
    (7) Internal ALB Ingress (flyteconsole + MLflow) → (8) CloudFront + Cognito
 ```
 
 Terraform mapping: (0) `kubernetes_manifest`; (1a) `aws_db_instance`; (1b)
-`aws_iam_role` x2; (2) `null_resource` kustomize apply; (3) `helm_release.kueue`;
-(4) `helm_release.mlflow`; (5) `kubernetes_manifest` x N; (6)
-`helm_release.flyte_binary`; (7) `kubernetes_manifest` Ingress; (8)
+`aws_eks_pod_identity_association` x N (added to storage module's
+`pod_identity_associations` variable); (2) `null_resource` kustomize apply;
+(3) `helm_release.kueue`; (4) `helm_release.mlflow`; (5) `kubernetes_manifest` x N;
+(6) `helm_release.flyte_binary`; (7) `kubernetes_manifest` Ingress; (8)
 `aws_cloudfront_distribution` + `aws_cognito_user_pool`.
 depends_on: `(1a),(1b),(0)→(4)`; `(2)→(3)→(5)`; `(1a),(1b),(2),(5)→(6)`; `(6)→(7)→(8)`.
 
@@ -98,10 +101,16 @@ depends_on: `(1a),(1b),(0)→(4)`; `(2)→(3)→(5)`; `(1a),(1b),(2),(5)→(6)`;
   runs its own migrations).
 - Creds → K8s Secrets `flyte-db-pass` (ns `flyte`), `mlflow-db-secret` (ns `mlflow`).
 
-### 3.2 IRSA roles (extend `modules/storage`)
-- (a) `auto-e2e-platform-flyte-backend` — trust `system:serviceaccount:flyte:flyte-backend-flyte-binary`; S3 R/W on `artifacts` bucket (prefixes `flyte/metadata`, `flyte/raw`).
-- (b) `auto-e2e-platform-mlflow-server` — trust `system:serviceaccount:mlflow:mlflow`; S3 R/W on `artifacts` bucket prefix `mlflow/`.
-- (c) training pods — reuse existing `auto-e2e-platform-s3-access` (R/W datasets/checkpoints/artifacts). Tighten trust from `*:*` to `auto-e2e-training:*` + Flyte project-domain namespaces post-Phase-2.
+### 3.2 Pod Identity associations (extend `pod_identity_associations` in `modules/storage`)
+
+Pod Identity replaces IRSA. No OIDC Provider, no per-SA annotations. Each
+association maps one `(namespace, service_account)` to the s3-access IAM role.
+Add a row to the `pod_identity_associations` variable in `modules/storage` for
+each new component. Phase 2 adds three:
+
+- `flyte / flyte-backend-flyte-binary` — S3 R/W on artifacts (prefixes `flyte/metadata`, `flyte/raw`).
+- `mlflow / mlflow` — S3 R/W on artifacts (prefix `mlflow/`). Server-proxied mode: only the server pod accesses S3.
+- `auto-e2e-training / training-sa` — S3 R/W on datasets (read), checkpoints, artifacts. Already in the default variable value from Phase 1.
 
 ### 3.3 UI exposure: internal ALB → CloudFront → Cognito
 - `IngressClassParams` `internal-alb` (`scheme: internal`, private subnets, shared `group.name`); `IngressClass` `internal-alb`.
@@ -113,11 +122,11 @@ depends_on: `(1a),(1b),(0)→(4)`; `(2)→(3)→(5)`; `(1a),(1b),(2),(5)→(6)`;
 
 | Namespace | Contents |
 |---|---|
-| `flyte` | flyte-binary pod (admin/propeller/console/webhook) + SA `flyte-backend-flyte-binary` (IRSA → backend role) |
+| `flyte` | flyte-binary pod (admin/propeller/console/webhook) + SA `flyte-backend-flyte-binary` (Pod Identity → s3-access role) |
 | `kueue-system` | Kueue controller + webhook (ClusterQueue/ResourceFlavor/WorkloadPriorityClass are cluster-scoped) |
 | `kubeflow` | Training Operator v1 controller (CPU only) |
-| `mlflow` | MLflow server + SA `mlflow` (IRSA → mlflow-server role); bundled Postgres disabled |
-| `auto-e2e-training` | PyTorchJobs + training pods; `LocalQueue gpu-queue`; `training-sa` (IRSA → reused s3-access) |
+| `mlflow` | MLflow server + SA `mlflow` (Pod Identity → s3-access role); bundled Postgres disabled |
+| `auto-e2e-training` | PyTorchJobs + training pods; `LocalQueue gpu-queue`; `training-sa` (Pod Identity → s3-access role) |
 
 LocalQueue is namespaced → must co-locate with the PyTorchJob. Control-plane pods
 stay on the un-tainted `general-purpose` Auto Mode NodePool (no GPU toleration),
@@ -244,7 +253,7 @@ spec:
 
 - Chart `flyteorg/flyte-binary`. Enable the `pytorch` task plugin in inline config
   (`enabled-plugins: [container, sidecar, k8s-array, pytorch]`,
-  `default-for-task-types: [..., pytorch: pytorch]`), wire RDS + S3 + backend SA IRSA.
+  `default-for-task-types: [..., pytorch: pytorch]`), wire RDS + S3 + backend SA (Pod Identity association).
 - flytepropeller renders+applies a `kubeflow.org/v1 PyTorchJob` into
   `auto-e2e-training`; Kueue webhook suspends → admits on GPU quota; Training
   Operator materializes pods.
@@ -259,7 +268,7 @@ spec:
 
 - community-charts/mlflow 1.8.5: RDS backend (`existingDatabaseSecret:
   mlflow-db-secret`), **server-proxied artifacts** (`proxiedArtifactStorage: true`,
-  `--serve-artifacts`) on S3 `artifacts` bucket prefix `mlflow/`, SA `mlflow` IRSA.
+  `--serve-artifacts`) on S3 `artifacts` bucket prefix `mlflow/`, SA `mlflow` (Pod Identity).
   Bundled Postgres disabled.
 - Server-proxied = only the MLflow SA needs S3; training pods need only
   `MLFLOW_TRACKING_URI`.
@@ -292,14 +301,14 @@ letting Karpenter scale.
 1. StorageClass `auto-ebs-sc` (gp3, default, encrypted, WaitForFirstConsumer).
 2. `modules/rds`: subnet group, SG (5432 from cluster SG), `db.r6g.large` Postgres
    16.x; DBs `flyteadmin`+`mlflow`; creds → Secrets Manager.
-3. IRSA: add `flyte-backend` + `mlflow-server`; reuse `s3-access` for training.
+3. Pod Identity: add flyte/flyte-backend-flyte-binary + mlflow/mlflow associations to storage module variable.
 4. Namespaces `flyte`/`kueue-system`/`kubeflow`/`mlflow`/`auto-e2e-training`; label
    `auto-e2e-training`; Secrets `flyte-db-pass`,`mlflow-db-secret`; SA `training-sa`.
 5. Training Operator v1.9.3 (kustomize via null_resource).
 6. Kueue 0.18.1 (Helm) with `kubeflow.org/pytorchjob` framework.
 7. Kueue objects: ResourceFlavor/ClusterQueue/LocalQueue/2x WorkloadPriorityClass.
-8. MLflow 1.8.5 (Helm): RDS + server-proxied S3 + IRSA.
-9. Flyte flyte-binary (Helm): RDS + S3 + backend IRSA + pytorch plugin.
+8. MLflow 1.8.5 (Helm): RDS + server-proxied S3 + Pod Identity association.
+9. Flyte flyte-binary (Helm): RDS + S3 + backend Pod Identity association + pytorch plugin.
 10. train.py changes (--dataset, MLflow block, --register-model, DDP scaffold);
     extend training image deps. Keep smoke-test + 92-test suite green (test on EC2).
 11. workflow.py: dynamic enums, `train_one` kfpytorch task w/ Kueue labels,
