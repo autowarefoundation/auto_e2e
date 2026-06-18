@@ -256,7 +256,10 @@ def run_training(args: argparse.Namespace) -> None:
         loader = build_dataloader(args)
         batches = loader
         epochs = args.epochs
-        print(f"L2D: {len(loader.dataset)} samples, {len(loader)} batches/epoch")
+        if hasattr(loader, 'dataset') and hasattr(loader.dataset, '__len__'):
+            print(f"Dataset: {len(loader.dataset)} samples, {len(loader)} batches/epoch")
+        else:
+            print(f"WebDataset streaming loader, epochs={epochs}")
 
     for epoch in range(epochs):
         if device.type == "cuda":
