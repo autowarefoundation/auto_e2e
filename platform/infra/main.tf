@@ -109,3 +109,16 @@ output "s3_buckets" {
 output "rds_endpoint" {
   value = module.rds.endpoint
 }
+
+# --- Phase 3: Data Pipeline ---
+
+module "codebuild" {
+  source = "./modules/codebuild"
+
+  cluster_name = var.cluster_name
+  environment  = var.environment
+}
+
+output "codebuild_project" {
+  value = module.codebuild.project_name
+}
