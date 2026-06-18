@@ -16,10 +16,10 @@ phases:
       - docker build -t ${ECR_URL}/auto-e2e/training:latest -f platform/docker/training/Dockerfile .
       - docker push ${ECR_URL}/auto-e2e/training:latest
       - echo "=== Building data-prep image ==="
-      - docker build -t ${ECR_URL}/auto-e2e/data-prep:latest -f platform/docker/data-prep/Dockerfile . || echo "WARN: data-prep build failed (dep issues), skipping"
+      - bash -c 'docker build -t ${ECR_URL}/auto-e2e/data-prep:latest -f platform/docker/data-prep/Dockerfile . || echo WARN data-prep build failed'
   post_build:
     commands:
-      - docker push ${ECR_URL}/auto-e2e/data-prep:latest 2>/dev/null || echo "data-prep not pushed (build failed)"
+      - bash -c 'docker push ${ECR_URL}/auto-e2e/data-prep:latest 2>/dev/null || echo data-prep not pushed'
       - echo "Done."
 
 cache:
