@@ -71,6 +71,8 @@ module "mlflow" {
   cluster_name     = var.cluster_name
   artifacts_bucket = module.storage.bucket_names["artifacts"]
   region           = var.region
+  rds_host         = module.rds.address
+  rds_password     = module.rds.master_password
 
   depends_on = [module.rds, module.storage]
 }
