@@ -1,37 +1,43 @@
 variable "cluster_name" { type = string }
 variable "artifacts_bucket" { type = string }
 variable "region" { type = string }
-variable "rds_endpoint" { type = string }
+variable "rds_host" { type = string }
+variable "rds_password" {
+  type      = string
+  sensitive = true
+}
 
 resource "helm_release" "flyte" {
-  name       = "flyte-backend"
-  repository = "https://flyteorg.github.io/flyte"
-  chart      = "flyte-binary"
-  version    = "0.1.10"
-  namespace  = "flyte"
+  name             = "flyte-backend"
+  repository       = "https://flyteorg.github.io/flyte"
+  chart            = "flyte-binary"
+  version          = "2.0.23"
+  namespace        = "flyte"
+  create_namespace = true
+  timeout          = 600
 
   values = [file("${path.module}/../../../helm-values/flyte.yaml")]
 
   # Database
   set {
-    name  = "configuration.database.postgres.host"
-    value = split(":", var.rds_endpoint)[0]
+    name  = "configuration.database.host"
+    value = var.rds_host
   }
   set {
-    name  = "configuration.database.postgres.port"
+    name  = "configuration.database.port"
     value = "5432"
   }
   set {
-    name  = "configuration.database.postgres.dbname"
+    name  = "configuration.database.dbname"
     value = "flyteadmin"
   }
   set {
-    name  = "configuration.database.postgres.username"
+    name  = "configuration.database.username"
     value = "pgadmin"
   }
-  set {
-    name  = "configuration.database.postgres.passwordPath"
-    value = "/etc/flyte/db-pass/POSTGRES_PASSWORD"
+  set_sensitive {
+    name  = "configuration.database.password"
+    value = var.rds_password
   }
 
   # Storage (S3)
@@ -51,37 +57,9 @@ resource "helm_release" "flyte" {
     name  = "configuration.storage.providerConfig.s3.region"
     value = var.region
   }
-
-  # Enable pytorch plugin
   set {
-    name  = "configuration.inline.plugins.k8s.enabled-plugins[0]"
-    value = "container"
-  }
-  set {
-    name  = "configuration.inline.plugins.k8s.enabled-plugins[1]"
-    value = "sidecar"
-  }
-  set {
-    name  = "configuration.inline.plugins.k8s.enabled-plugins[2]"
-    value = "k8s-array"
-  }
-  set {
-    name  = "configuration.inline.plugins.k8s.enabled-plugins[3]"
-    value = "pytorch"
-  }
-  set {
-    name  = "configuration.inline.plugins.k8s.default-for-task-types.container"
-    value = "container"
-  }
-  set {
-    name  = "configuration.inline.plugins.k8s.default-for-task-types.pytorch"
-    value = "pytorch"
-  }
-
-  # Mount DB secret
-  set {
-    name  = "configuration.externalSecretRef"
-    value = "flyte-db-pass"
+    name  = "configuration.storage.providerConfig.s3.authType"
+    value = "iam"
   }
 
   # SA for Pod Identity

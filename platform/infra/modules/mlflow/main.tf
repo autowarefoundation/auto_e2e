@@ -14,6 +14,7 @@ resource "helm_release" "mlflow" {
   version          = "1.8.5"
   namespace        = "mlflow"
   create_namespace = true
+  timeout          = 600
 
   values = [file("${path.module}/../../../helm-values/mlflow.yaml")]
 
