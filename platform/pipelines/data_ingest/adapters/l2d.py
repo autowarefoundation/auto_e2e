@@ -96,16 +96,29 @@ class L2DAdapter(IngestAdapter):
     def extract_frame(
         self, episode_path: Path, sample: SamplePoint, camera_idx: int
     ) -> bytes:
-        """Extract one frame via lerobot video decode, return JPEG bytes."""
-        self._ensure_dataset()
-        item = self._dataset[sample.frame_idx]
-        cam_name = _CAMERA_NAMES[camera_idx]
-        frame_tensor = item[cam_name]  # CHW float [0,1]
+        """Extract one frame via PyAV direct decode, return JPEG bytes."""
+        import av
 
-        # Convert to PIL, resize to 256x256, encode as JPEG
-        img = Image.fromarray(
-            (frame_tensor.permute(1, 2, 0).numpy() * 255).astype(np.uint8)
-        )
+        self._ensure_dataset()
+        cam_name = _CAMERA_NAMES[camera_idx]
+
+        # Find video file in lerobot cache
+        root = Path(self._dataset.root)
+        vdir = root / "videos" / cam_name / "chunk-000"
+        mp4s = sorted(vdir.glob("*.mp4")) if vdir.exists() else []
+        if not mp4s:
+            # Fallback: black frame
+            img = Image.new("RGB", (256, 256))
+        else:
+            video_path = mp4s[0]
+            container = av.open(str(video_path))
+            img = Image.new("RGB", (256, 256))
+            for i, frame in enumerate(container.decode(video=0)):
+                if i == sample.frame_idx:
+                    img = frame.to_image()
+                    break
+            container.close()
+
         img = img.resize((256, 256), Image.BILINEAR)
         buf = io.BytesIO()
         img.save(buf, format="JPEG", quality=90)
