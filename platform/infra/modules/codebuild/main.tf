@@ -88,13 +88,10 @@ resource "aws_codebuild_project" "images" {
   }
 
   source {
-    type            = "GITHUB"
-    location        = "https://github.com/autowarefoundation/auto_e2e.git"
-    git_clone_depth = 1
-    buildspec       = "platform/buildspec.yml"
+    type      = "S3"
+    location  = "${aws_s3_bucket.cache.bucket}/source.zip"
+    buildspec = "platform/buildspec.yml"
   }
-
-  source_version = "main"
 
   logs_config {
     cloudwatch_logs {
