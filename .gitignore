@@ -4,3 +4,4 @@ __pycache__/
 benchmark_results.json
 sync-to-ec2.sh
 data/
+**/data/
