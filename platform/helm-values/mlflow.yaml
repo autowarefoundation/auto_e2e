@@ -1,21 +1,14 @@
 # MLflow community-charts/mlflow 1.8.5 values override
-# RDS + S3 settings are injected via Terraform set{} blocks.
-
 resources:
   requests:
     cpu: 200m
     memory: 512Mi
   limits:
     memory: 2Gi
-
-# Disable bundled Postgres (using external RDS via set{} blocks)
 postgresql:
   enabled: false
-
-# Serve artifacts via proxy
-extraFlags:
-  - serveArtifacts
-
 service:
   type: ClusterIP
   port: 5000
+extraFlags:
+  - serveArtifacts

@@ -16,6 +16,7 @@ resource "helm_release" "mlflow" {
   create_namespace = true
   timeout          = 600
   wait             = false
+  disable_openapi_validation = true
 
   values = [file("${path.module}/../../../helm-values/mlflow.yaml")]
 
@@ -75,6 +76,14 @@ resource "helm_release" "mlflow" {
   set {
     name  = "serviceAccount.name"
     value = "mlflow"
+  }
+
+  # Allow cluster-internal Host headers (MLflow 3.x security)
+  # MLflow 3.x with gunicorn rejects non-localhost Host headers.
+  # Workaround: training pods use ClusterIP in MLFLOW_TRACKING_URI.
+  set {
+    name  = "extraFlags[0]"
+    value = "serveArtifacts"
   }
 
   # AWS region via env var
