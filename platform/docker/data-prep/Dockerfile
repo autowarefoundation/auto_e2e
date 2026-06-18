@@ -5,13 +5,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /workspace
 
-# PyTorch CPU-only (lerobot requires it)
+# PyTorch CPU-only
 RUN pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu
 
-# lerobot + its minimal runtime deps
-RUN pip install --no-cache-dir lerobot==0.5.1
+# lerobot-dataset: lightweight dataset-only package (no evdev/robot deps)
+RUN pip install --no-cache-dir lerobot-dataset
 
-# flytekit (latest compatible with 3.12) + data pipeline deps
+# flytekit + data pipeline deps
 RUN pip install --no-cache-dir "flytekit>=1.14,<2" boto3 pyarrow scipy pillow webdataset
 
 # physical_ai_av (best-effort)
