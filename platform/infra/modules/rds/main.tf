@@ -2,6 +2,10 @@ variable "cluster_name" { type = string }
 variable "vpc_id" { type = string }
 variable "private_subnet_ids" { type = list(string) }
 variable "cluster_security_group_id" { type = string }
+variable "eks_cluster_security_group_id" {
+  description = "EKS managed cluster SG (from cluster.resourcesVpcConfig.clusterSecurityGroupId)"
+  type        = string
+}
 variable "environment" { type = string }
 
 resource "random_password" "master" {
@@ -36,7 +40,7 @@ resource "aws_security_group" "rds" {
     from_port       = 5432
     to_port         = 5432
     protocol        = "tcp"
-    security_groups = [var.cluster_security_group_id]
+    security_groups = [var.cluster_security_group_id, var.eks_cluster_security_group_id]
   }
 
   egress {

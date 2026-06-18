@@ -42,11 +42,12 @@ module "ecr" {
 module "rds" {
   source = "./modules/rds"
 
-  cluster_name              = var.cluster_name
-  vpc_id                    = module.vpc.vpc_id
-  private_subnet_ids        = module.vpc.private_subnet_ids
-  cluster_security_group_id = module.eks.cluster_security_group_id
-  environment               = var.environment
+  cluster_name                  = var.cluster_name
+  vpc_id                        = module.vpc.vpc_id
+  private_subnet_ids            = module.vpc.private_subnet_ids
+  cluster_security_group_id     = module.eks.cluster_security_group_id
+  eks_cluster_security_group_id = data.aws_eks_cluster.this.vpc_config[0].cluster_security_group_id
+  environment                   = var.environment
 }
 
 module "training_operator" {
