@@ -6,13 +6,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /workspace
 
 # PyTorch CPU-only
-RUN pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu
+RUN pip install --no-cache-dir torch torchvision --index-url https://download.pytorch.org/whl/cpu
 
-# lerobot-dataset: lightweight dataset-only package (no evdev/robot deps)
-RUN pip install --no-cache-dir lerobot-dataset
+# lerobot without hardware deps (evdev etc) — install --no-deps then add what we need
+RUN pip install --no-cache-dir lerobot==0.5.1 --no-deps && \
+    pip install --no-cache-dir datasets huggingface_hub safetensors pillow numpy
 
 # flytekit + data pipeline deps
-RUN pip install --no-cache-dir "flytekit>=1.14,<2" boto3 pyarrow scipy pillow webdataset
+RUN pip install --no-cache-dir "flytekit>=1.14,<2" boto3 pyarrow scipy webdataset
 
 # physical_ai_av (best-effort)
 RUN pip install --no-cache-dir physical_ai_av --no-deps 2>/dev/null || true
