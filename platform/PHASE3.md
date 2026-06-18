@@ -142,42 +142,129 @@ Each `ingest_*_episode` task:
 4. Uploads to S3 in the training-ready layout
 5. Returns episode metadata (sample count, frame count)
 
-### 3. PreExtractedDataset (Unified DataLoader)
+### 3. Data Access: WebDataset Tar Shards + EBS Prefetch
+
+**Problem with Mountpoint S3 CSI / per-file S3 reads**: Training DataLoader does
+random-access reads of many small files (30KB JPEG x 7 cameras x batch). Each
+file triggers a separate S3 GET (~10ms). With batch_size=8, that's 56 GETs per
+step — GPU starves waiting for I/O.
+
+**Solution: WebDataset tar shards stored on S3, prefetched to EBS before training.**
+
+```
+S3 (cold storage, source of truth):
+  s3://datasets/{name}/{version}/shards/
+  ├── train-000000.tar  (100MB, ~3000 samples bundled)
+  ├── train-000001.tar
+  ├── ...
+  └── val-000000.tar
+
+Training Pod (hot storage, EBS PVC):
+  /data/shards/          ← init container syncs relevant shards from S3
+  ├── train-000000.tar
+  ├── train-000001.tar
+  └── ...
+```
+
+**Pipeline**:
+1. Flyte ingest writes individual frames + parquet to S3 (training-ready format)
+2. A **shard-packing task** (Flyte, post-ingest) bundles samples into WebDataset
+   tar files (~100MB each). Each tar entry = one sample (7 JPEG + ego .npy).
+3. Training pod **init container** syncs shard tars from S3 → EBS PVC
+   (`aws s3 sync`). ~60s for 10GB dataset at 1 Gbps.
+4. Training DataLoader reads from local EBS via `webdataset.WebLoader` —
+   sequential tar reads, no per-file S3 GET, disk throughput saturated.
+
+**WebDataset shard format** (inside each .tar):
+```
+000000.cam_0.jpg
+000000.cam_1.jpg
+...
+000000.cam_6.jpg
+000000.ego.npy          # (history_steps + future_steps, 7) float32
+000000.meta.json        # {"episode_id": "...", "frame_idx": 42}
+000001.cam_0.jpg
+...
+```
+
+**Why WebDataset**:
+- Sequential reads → EBS gp3 throughput (125-1000 MB/s) fully utilized
+- Built-in shuffling (shard-level + in-shard)
+- Native PyTorch DataLoader integration (`wds.WebLoader`)
+- DDP-friendly: each worker reads different shards (no overlap)
+- Proven at scale (Google, LAION, many AD datasets)
+
+**EBS PVC for shard cache** (per training job):
+```yaml
+# Attached to PyTorchJob via volumeClaimTemplates or pre-created PVC
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: dataset-cache
+  namespace: auto-e2e-training
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: auto-ebs-sc
+  resources:
+    requests:
+      storage: 50Gi  # sized per dataset (L2D ~7GB, NVIDIA ~30GB)
+```
+
+**Init container** in PyTorchJob:
+```yaml
+initContainers:
+  - name: fetch-shards
+    image: amazon/aws-cli:latest
+    command: ["sh", "-c"]
+    args:
+      - aws s3 sync s3://datasets/l2d/v1.0/shards/ /data/shards/ --exclude "val-*"
+    volumeMounts:
+      - name: dataset-cache
+        mountPath: /data
+```
+
+**Performance estimate** (L2D, ~150 episodes, ~7GB shards):
+- S3 sync: ~60s at 1 Gbps (EKS private subnet → S3 via gateway endpoint)
+- DataLoader: sequential tar from gp3 EBS → 125 MB/s baseline, 500 MB/s burst
+- With num_workers=4 reading 4 shards in parallel: GPU never starves
+- Compare: per-file S3 GET would be 56 × 10ms = 560ms/step (unusable)
+
+### 3b. PreExtractedDataset (WebDataset-backed)
 
 ```python
 # Model/data_parsing/pre_extracted.py
+import webdataset as wds
+import torch, numpy as np
+from torchvision import transforms
 
-class PreExtractedDataset(Dataset):
-    """Reads from the training-ready S3 format. No video decode."""
+def make_training_dataloader(shard_dir: str, batch_size: int, num_workers: int = 4):
+    """WebDataset DataLoader reading from local EBS shard cache."""
+    transform = transforms.Compose([
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+    ])
 
-    def __init__(self, manifest_path: str, split: str = "train", s3_client=None):
-        self.manifest = json.load(open(manifest_path))
-        self.samples = json.load(open(f"{base}/splits/{split}.json"))
-        ...
-
-    def __getitem__(self, idx) -> dict:
-        sample = self.samples[idx]
-        frames = [load_jpeg(f"frames/{sample['episode_id']}/{sample['frame_idx']}/cam_{i}.jpg")
-                  for i in range(self.manifest['num_cameras'])]
-        ego = load_parquet_window(sample['episode_id'], sample['frame_idx'])
+    def decode_sample(sample):
+        frames = [transform(sample[f"cam_{i}.jpg"]) for i in range(7)]
+        ego = np.frombuffer(sample["ego.npy"], dtype=np.float32).reshape(-1, 7)
+        # Split ego into history (first 16 rows) and future (next 64 rows)
+        ego_history = torch.from_numpy(ego[:16].flatten())
+        trajectory_target = torch.from_numpy(ego[16:].flatten())
         return {
             "visual_tiles": torch.stack(frames),
             "egomotion_history": ego_history,
             "visual_history": torch.zeros(896),
-            "trajectory_target": ego_future,
+            "trajectory_target": trajectory_target,
         }
+
+    dataset = (
+        wds.WebDataset(f"{shard_dir}/train-{{000000..000099}}.tar")
+        .shuffle(1000)
+        .map(decode_sample)
+    )
+    return wds.WebLoader(dataset, batch_size=batch_size, num_workers=num_workers)
 ```
 
-S3 access options (ranked by preference):
-1. **Mountpoint for S3 CSI**: S3 bucket mounted as filesystem in pod. Zero code
-   change, Dataset reads local paths. Read-only, sequential access patterns OK
-   for training.
-2. **s3fs / boto3**: Explicit S3 reads with caching. More code but works anywhere.
-3. **Pre-download to PVC**: Download entire dataset to EBS before training. Simple
-   but slow for large datasets and wastes storage.
-
-Recommendation: **Mountpoint for S3 CSI** (Phase 1 already configured the CSI
-driver via EKS Auto Mode block storage; S3 CSI is a separate addon to enable).
 
 ### 4. LakeFS (Data Versioning) — Deferred
 
@@ -219,7 +306,10 @@ ENV PYTHONUNBUFFERED=1
 ENTRYPOINT ["python"]
 ```
 
-### 6. Mountpoint for S3 CSI Driver
+### 6. Mountpoint for S3 CSI Driver (Ingest Tasks Only)
+
+Used by Flyte data ingest tasks to write processed frames directly to S3.
+**NOT used for training DataLoader** (WebDataset + EBS instead).
 
 EKS Auto Mode includes the EBS CSI driver but NOT S3 CSI. Install separately:
 
@@ -231,7 +321,7 @@ resource "aws_eks_addon" "s3_csi" {
 }
 ```
 
-PersistentVolume for the datasets bucket:
+PersistentVolume for the datasets bucket (used by ingest pods):
 ```yaml
 apiVersion: v1
 kind: PersistentVolume
@@ -240,7 +330,7 @@ metadata:
 spec:
   capacity:
     storage: 1Ti  # notional
-  accessModes: [ReadOnlyMany]
+  accessModes: [ReadWriteMany]
   csi:
     driver: s3.csi.aws.com
     volumeHandle: s3-datasets
@@ -253,15 +343,13 @@ metadata:
   name: datasets-s3
   namespace: auto-e2e-training
 spec:
-  accessModes: [ReadOnlyMany]
+  accessModes: [ReadWriteMany]
   storageClassName: ""
   resources:
     requests:
       storage: 1Ti
   volumeName: datasets-s3-pv
 ```
-
-Training pods mount this PVC and read JPEG/parquet as local files.
 
 ### 7. Implementation Plan (Ordered)
 
@@ -307,6 +395,7 @@ Training pods mount this PVC and read JPEG/parquet as local files.
    → **Yes**: gate via `--dataset-format` arg. Default remains lerobot for EC2
    development; `pre_extracted` for EKS production training.
 
-4. **S3 access pattern for DataLoader**: Mountpoint CSI vs direct boto3?
-   → **Mountpoint CSI** preferred (zero code change, kernel-level caching).
-   Fallback to boto3 if CSI has issues with random-access JPEG reads.
+4. **S3 access pattern for DataLoader**: ~~Mountpoint CSI vs direct boto3?~~
+   → **WebDataset tar shards on EBS** (decided). Init container syncs shards
+   from S3 to local EBS PVC before training starts. Sequential tar reads
+   give full disk bandwidth. Mountpoint CSI kept only for Flyte ingest tasks.
