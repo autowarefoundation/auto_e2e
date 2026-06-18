@@ -18,39 +18,28 @@ resource "helm_release" "flyte" {
   wait             = false
 
   values = [
-    file("${path.module}/../../../helm-values/flyte.yaml"),
     yamlencode({
+      flyte-core-components = {
+        admin = {
+          seedProjects = ["auto-e2e"]
+        }
+      }
       configuration = {
-        database = {
-          username = "pgadmin"
-          password = var.rds_password
-          host     = var.rds_host
-          port     = 5432
-          dbname   = "flyteadmin"
-          options  = "sslmode=require"
+        externalConfigMap = "flyte-custom-config"
+        auth = {
+          enabled = false
         }
-        storage = {
-          metadataContainer = var.artifacts_bucket
-          userDataContainer = var.artifacts_bucket
-          provider          = "s3"
-          providerConfig = {
-            s3 = {
-              region   = var.region
-              authType = "iam"
-            }
-          }
+      }
+      deployment = {
+        resources = {
+          requests = { cpu = "500m", memory = "1Gi" }
+          limits   = { memory = "2Gi" }
         }
+      }
+      serviceAccount = {
+        create = true
+        name   = "flyte-backend-flyte-binary"
       }
     })
   ]
-
-  # SA for Pod Identity
-  set {
-    name  = "serviceAccount.create"
-    value = "true"
-  }
-  set {
-    name  = "serviceAccount.name"
-    value = "flyte-backend-flyte-binary"
-  }
 }

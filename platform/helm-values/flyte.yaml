@@ -1,4 +1,5 @@
 # Flyte Binary chart v2.0.23 values override
+# DB connection is forced via inline config override (merges AFTER base).
 
 flyte-core-components:
   admin:
@@ -9,6 +10,14 @@ configuration:
   auth:
     enabled: false
   inline:
+    database:
+      postgres:
+        host: PLACEHOLDER_RDS_HOST
+        port: 5432
+        dbname: flyteadmin
+        username: pgadmin
+        password: PLACEHOLDER_RDS_PASS
+        options: "sslmode=require"
     tasks:
       task-plugins:
         enabled-plugins:
