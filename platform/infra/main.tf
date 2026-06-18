@@ -27,10 +27,8 @@ module "eks" {
 module "storage" {
   source = "./modules/storage"
 
-  cluster_name       = var.cluster_name
-  oidc_provider_arn  = module.eks.oidc_provider_arn
-  oidc_provider_url  = module.eks.oidc_provider_url
-  environment        = var.environment
+  cluster_name = var.cluster_name
+  environment  = var.environment
 }
 
 module "ecr" {
