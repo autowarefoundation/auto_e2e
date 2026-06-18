@@ -16,11 +16,9 @@ from torch.utils.data import DataLoader
 import torchvision.transforms.functional as F
 from data_parsing.l2d.camera import NUM_VIEWS
 from PIL import Image
-from pathlib import Path
-import os
 import argparse
 
-def visualization_on_l2d(save_path: Path, episodes: list[int]):
+def visualization_on_l2d(episodes: list[int]) -> Image.Image:
     result = forward_pass_for_visualization_test(episodes=episodes, batch_size=2, pretrained_backbone=False)
 
     pred_trajectory, target_trajectory, map_image, current_speed = result
@@ -33,8 +31,6 @@ def visualization_on_l2d(save_path: Path, episodes: list[int]):
         map_image=map_image,
         radius_m=radius_m
     )
-    output_path_gt = save_path / "test_trajectory_l2d_gt.png"
-    gt_img.save(output_path_gt)
 
     pred_img = Visualization.render_trajectory_map_tile(
         action_sequence=pred_trajectory,
@@ -42,12 +38,8 @@ def visualization_on_l2d(save_path: Path, episodes: list[int]):
         map_image=map_image,
         radius_m=radius_m
     )
-    output_path_pred = save_path / "test_trajectory_l2d_pred.png"
-    pred_img.save(output_path_pred)
 
-    assert not result is None, 'L2D dataset not available. Skipping L2D visualization test'
-    assert os.path.isfile(output_path_gt), "Image file was not created in the target directory"
-
+    return gt_img, pred_img
 
 def forward_pass_for_visualization_test(episodes: list[int], batch_size: int, pretrained_backbone: bool):
     """
@@ -121,6 +113,8 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     if args.live:
-        visualization_on_l2d(Path("test_images"), args.episodes)
+        ground_truth_image, prediction_image = visualization_on_l2d(args.episodes)
+        ground_truth_image.show()
+        prediction_image.show()
     else:
         print("Skipping. Run with --live to execute L2D visualization.")
