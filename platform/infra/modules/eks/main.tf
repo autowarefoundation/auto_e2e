@@ -138,15 +138,13 @@ resource "aws_security_group" "cluster" {
   tags = { Name = "${var.cluster_name}-cluster-sg" }
 }
 
-# OIDC Provider for IRSA
-data "tls_certificate" "cluster" {
-  url = aws_eks_cluster.this.identity[0].oidc[0].issuer
-}
-
-resource "aws_iam_openid_connect_provider" "cluster" {
-  url             = aws_eks_cluster.this.identity[0].oidc[0].issuer
-  client_id_list  = ["sts.amazonaws.com"]
-  thumbprint_list = [data.tls_certificate.cluster.certificates[0].sha1_fingerprint]
+# Pod Identity Agent addon — lets pods assume IAM roles without OIDC Provider.
+# EKS Auto Mode manages the agent DaemonSet once this addon is enabled.
+# Associations (namespace + SA → IAM role) are created in the storage module.
+resource "aws_eks_addon" "pod_identity" {
+  cluster_name  = aws_eks_cluster.this.name
+  addon_name    = "eks-pod-identity-agent"
+  depends_on    = [aws_eks_cluster.this]
 }
 
 # EKS Access Entry (allow current user to manage cluster)
@@ -178,14 +176,6 @@ output "cluster_endpoint" {
 
 output "cluster_ca_certificate" {
   value = aws_eks_cluster.this.certificate_authority[0].data
-}
-
-output "oidc_provider_arn" {
-  value = aws_iam_openid_connect_provider.cluster.arn
-}
-
-output "oidc_provider_url" {
-  value = replace(aws_eks_cluster.this.identity[0].oidc[0].issuer, "https://", "")
 }
 
 output "node_role_arn" {
