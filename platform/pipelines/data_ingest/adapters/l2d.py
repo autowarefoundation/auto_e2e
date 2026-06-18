@@ -86,7 +86,7 @@ class L2DAdapter(IngestAdapter):
             history = signals[i - _HISTORY_TIMESTEPS:i]
             future = signals[i + 1:i + 1 + _FUTURE_TIMESTEPS]
             samples.append(SamplePoint(
-                frame_idx=ep_start + i,
+                frame_idx=i,  # episode-local index (for PyAV video decode)
                 timestamp_s=i * 0.1,
                 ego_history=history,
                 ego_future=future[:, [1, 3]],  # accel_x, curvature only for target
