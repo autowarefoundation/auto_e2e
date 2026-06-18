@@ -11,31 +11,24 @@ video decode at training time.
 
 ## Problem Statement
 
-Current training (`L2DDataset`, `NvidiaAVDataset`) decodes video on-the-fly
-from HuggingFace / local disk. This causes:
+**全てのデータセットに共通する問題**: raw dataset はそれぞれ独自フォーマット
+(動画 + センサーログ、HF LeRobot、SDK zip、etc) で提供されるが、training DataLoader
+が求めるのは「valid sample point のフレーム + egomotion window」だけ。
 
-1. **Slow DataLoader**: video decode is CPU-bound, starves the GPU
-2. **Not cloud-native**: lerobot/physical_ai_av SDKs expect local files or HF cache
-3. **No versioning**: no way to reproduce a training run's exact data state
-4. **No parallelism**: episode processing is serial, cannot leverage Flyte map_task
+共通の非効率:
+1. **不要フレームの処理**: 数千フレーム中、実際にtrainingで使うのはhistory/future
+   窓が成立する一部のみ (例: 4200フレーム中72)
+2. **毎回decode**: DataLoader の `__getitem__` ごとに動画/アーカイブを再読み込み
+3. **format差異の学習時コスト**: データセットごとの parse ロジックが hot path に混入
+4. **クラウド非対応**: SDK がローカルファイルを前提
 
-### Specific problem: NVIDIA PhysicalAI frame loading (Issue #30)
+これは L2D (lerobot の動画デコード)、NVIDIA PhysicalAI (#30: 毎回 read_bytes +
+SeekVideoReader)、KIT Scenes (lanelet2 map rasterize + pose file parse) 全てに
+共通する。今後データセットが増えても同じ問題が発生する。
 
-The `load_camera_frame()` in `nvidia_physical_ai/camera.py` reads the **entire
-video file** into memory on every `__getitem__` call (`video_path.read_bytes()` +
-`SeekVideoReader`), decodes a single frame, then discards everything. For a
-typical 20s clip at 30fps with 7 cameras:
-
-- 4,200 frames exist per clip, but only ~72 are valid sample points (10Hz
-  egomotion with 64-step history/future windows)
-- Each `__getitem__` re-reads 7 video files (hundreds of MB) to extract 7 frames
-- With `DataLoader(num_workers=4)`: multiple full video files resident in memory
-- TorchCodec objects don't serialize cleanly across DataLoader workers
-
-**Resolution**: The pre-extraction step (§2) computes valid sample points
-offline, extracts ONLY those frames as JPEG, and bundles into WebDataset shards.
-At training time, zero video decode occurs. This is Option 3 from Issue #30
-("Pre-extracted aligned-frame cache") implemented at platform scale.
+**解決方針**: データセットごとに異なる **Ingest Adapter** が raw → unified format
+に変換する。変換後は全て同一の WebDataset shard 形式。学習コードはデータセットの
+出自を知らない。
 
 ## Solution Architecture
 
@@ -128,42 +121,106 @@ yaw_rate: float32     — yaw rate (rad/s)
 ]
 ```
 
-### 2. Flyte Data Ingest Workflow
+### 2. Flyte Data Ingest Workflow (Pluggable Adapter Design)
 
+データセットごとに raw format は異なるが、出力 (unified shard format) は共通。
+差分を **IngestAdapter** プロトコルに閉じ込めて、workflow ロジックは共通化する。
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│  Dataset-specific Adapter (protocol)                            │
+│                                                                 │
+│  class IngestAdapter(Protocol):                                 │
+│      def list_episodes(self) -> List[EpisodeRef]                │
+│      def download_episode(self, ref) -> Path                    │
+│      def compute_valid_samples(self, episode_path) -> List[...] │
+│      def extract_frame(self, episode_path, sample, cam) -> img  │
+│      def extract_egomotion(self, episode_path, sample) -> array │
+│                                                                 │
+│  Implementations:                                               │
+│    L2DAdapter        — lerobot HF, video decode via lerobot     │
+│    NvidiaAVAdapter   — SDK zip, ffmpeg -ss seek decode          │
+│    KitScenesAdapter  — rosbag/parquet, pose-based ego           │
+│    (future)          — any new dataset: implement 5 methods     │
+└─────────────────────────────────────────────────────────────────┘
+         │
+         ▼  (all adapters produce the same output)
+┌─────────────────────────────────────────────────────────────────┐
+│  Common Pipeline (dataset-agnostic)                             │
+│                                                                 │
+│  for each episode (parallel via map_task):                      │
+│    1. adapter.download_episode(ref)                             │
+│    2. valid_samples = adapter.compute_valid_samples(...)        │
+│    3. for sample in valid_samples:                              │
+│         frames = [adapter.extract_frame(..., cam)               │
+│                   for cam in cameras]                           │
+│         ego = adapter.extract_egomotion(...)                    │
+│         → append to shard buffer                                │
+│    4. flush shard buffer → .tar → upload S3                     │
+│                                                                 │
+│  After all episodes:                                            │
+│    5. build manifest.json + train/val splits                    │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+**Flyte Workflow 構造**:
 ```python
 # platform/pipelines/data_ingest/workflow.py
 
 @task(container_image=DATA_PREP_IMAGE, requests=Resources(cpu="4", mem="16Gi"))
-def ingest_l2d_episode(episode_idx: int, repo_id: str, output_prefix: str) -> str:
-    """Download one L2D episode, extract frames + egomotion, upload to S3."""
+def ingest_episode(adapter_name: str, episode_ref: str, output_prefix: str) -> EpisodeResult:
+    """Generic: instantiate adapter by name, process one episode."""
+    adapter = get_adapter(adapter_name)  # registry lookup
     ...
 
 @workflow
-def ingest_l2d(
-    repo_id: str = "yaak-ai/L2D",
-    episodes: List[int] = None,  # None = all
-    output_bucket: str = "auto-e2e-platform-datasets-381491877296",
+def ingest_dataset(
+    adapter_name: str = "l2d",           # "l2d" | "nvidia_av" | "kit_scenes" | ...
+    output_bucket: str = "...",
     version: str = "v1.0",
+    episode_limit: int = 0,              # 0 = all
 ) -> str:
-    """Full L2D ingest: parallel per episode → manifest → split."""
-    episode_results = map_task(ingest_l2d_episode)(
-        episode_idx=episodes, repo_id=[repo_id]*len(episodes), ...
+    episodes = list_episodes(adapter_name, episode_limit)
+    results = map_task(ingest_episode)(
+        adapter_name=[adapter_name]*len(episodes),
+        episode_ref=episodes, ...
     )
-    manifest = build_manifest(episode_results, version)
-    return manifest
+    return build_manifest_and_shards(results, version)
 ```
 
-Each `ingest_*_episode` task:
-1. Downloads one episode from HF (lerobot) or NVIDIA SDK
-2. **Computes valid sample points**: parses egomotion to find frames with
-   sufficient history (16 steps) and future (64 steps) context. Only these
-   frames are extracted — not every frame in the video. (This resolves Issue #30:
-   NVIDIA clips have 4200 frames but only ~72 valid sample points.)
-3. Decodes ONLY valid-sample camera frames → JPEG at 256×256 (ffmpeg `-ss` seek
-   to exact timestamp, quality 90). No full-video decode.
-4. Extracts egomotion window (history + future) for each valid sample → .npy
-5. Uploads to S3 in the training-ready layout
-6. Returns episode metadata (valid sample count, frame indices)
+**Adapter Registry** (`platform/pipelines/data_ingest/adapters/__init__.py`):
+```python
+ADAPTER_REGISTRY: dict[str, type[IngestAdapter]] = {
+    "l2d": L2DAdapter,
+    "nvidia_av": NvidiaAVAdapter,
+    "kit_scenes": KitScenesAdapter,
+}
+
+def get_adapter(name: str) -> IngestAdapter:
+    return ADAPTER_REGISTRY[name]()
+```
+
+新しいデータセットを追加するとき:
+1. `adapters/new_dataset.py` に `IngestAdapter` の5メソッドを実装
+2. `ADAPTER_REGISTRY` に1行追加
+3. Flyte UI から `adapter_name="new_dataset"` で起動 — workflow 変更不要
+
+Each `ingest_episode` task (adapter-agnostic logic):
+1. `adapter.download_episode(ref)` — raw データ取得
+2. **`adapter.compute_valid_samples()`** — history/future 窓が成立する
+   sample points を計算。全フレームではなく必要なものだけ特定 (Issue #30 解決)
+3. `adapter.extract_frame()` — 該当タイムスタンプのみデコード → JPEG 256×256
+4. `adapter.extract_egomotion()` — history + future window を切り出し → .npy
+5. WebDataset shard buffer に追加、100MB で flush → S3 upload
+
+**各 Adapter の差分**:
+
+| Adapter | Download | Valid Sample 計算 | Frame 抽出 | Egomotion |
+|---|---|---|---|---|
+| L2D | `LeRobotDataset(repo_id)` | episode_ranges + MIN_FRAMES (既存ロジック) | lerobot video decode | CAN bus state → trajectory |
+| NVIDIA AV | SDK zip DL + unpack | egomotion 100Hz→10Hz + history/future window | `ffmpeg -ss {t} -frames:v 1` (シーク抽出) | parquet window slice |
+| KIT Scenes | rosbag / parquet DL | pose timestamps + window check | 画像ファイル or rosbag image_raw | pose diff → ego |
+| (future) | implement `download_episode` | implement `compute_valid_samples` | implement `extract_frame` | implement `extract_egomotion` |
 
 ### 3. Data Access: WebDataset Tar Shards + EBS Prefetch
 
