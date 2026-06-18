@@ -1,7 +1,20 @@
 variable "cluster_name" { type = string }
-variable "oidc_provider_arn" { type = string }
-variable "oidc_provider_url" { type = string }
 variable "environment" { type = string }
+
+# Pod Identity associations: each entry maps one (namespace, service_account)
+# pair to the s3-access IAM role.  Add a row here when a new component (Flyte,
+# MLflow, data-prep, ...) needs S3 access — no trust-policy edits required.
+variable "pod_identity_associations" {
+  description = "List of {namespace, service_account} that get the s3-access role."
+  type = list(object({
+    namespace       = string
+    service_account = string
+  }))
+  default = [
+    # training pods (auto-e2e-training namespace, added in Phase 2)
+    { namespace = "auto-e2e-training", service_account = "training-sa" },
+  ]
+}
 
 data "aws_caller_identity" "current" {}
 
@@ -26,21 +39,18 @@ resource "aws_s3_bucket_versioning" "checkpoints" {
   versioning_configuration { status = "Enabled" }
 }
 
-# IRSA: allow Pods in the EKS cluster to read/write these buckets
+# Pod Identity: IAM role whose trust principal is the EKS Pod Identity service.
+# No OIDC Provider, no per-SA annotations.  Associations below bind it to
+# specific (namespace, service_account) pairs — explicit by construction.
 resource "aws_iam_role" "s3_access" {
   name = "${var.cluster_name}-s3-access"
 
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
     Statement = [{
-      Effect = "Allow"
-      Principal = { Federated = var.oidc_provider_arn }
-      Action = "sts:AssumeRoleWithWebIdentity"
-      Condition = {
-        StringLike = {
-          "${var.oidc_provider_url}:sub" = "system:serviceaccount:*:*"
-        }
-      }
+      Effect    = "Allow"
+      Principal = { Service = "pods.eks.amazonaws.com" }
+      Action    = ["sts:AssumeRole", "sts:TagSession"]
     }]
   })
 }
@@ -64,6 +74,19 @@ resource "aws_iam_role_policy" "s3_access" {
       ])
     }]
   })
+}
+
+# Pod Identity associations — one per (namespace, service_account) that needs
+# S3 access.  Extend pod_identity_associations variable when adding components.
+resource "aws_eks_pod_identity_association" "s3_access" {
+  for_each = {
+    for a in var.pod_identity_associations : "${a.namespace}/${a.service_account}" => a
+  }
+
+  cluster_name    = var.cluster_name
+  namespace       = each.value.namespace
+  service_account = each.value.service_account
+  role_arn        = aws_iam_role.s3_access.arn
 }
 
 output "bucket_names" {
