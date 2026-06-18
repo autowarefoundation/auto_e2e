@@ -97,3 +97,10 @@ output "bucket_names" {
 output "s3_access_role_arn" {
   value = aws_iam_role.s3_access.arn
 }
+
+# Mountpoint for S3 CSI driver — enables Flyte ingest pods to write directly
+# to S3 via filesystem mount. NOT used for training DataLoader (WebDataset + EBS).
+resource "aws_eks_addon" "s3_csi" {
+  cluster_name = var.cluster_name
+  addon_name   = "aws-mountpoint-s3-csi-driver"
+}
