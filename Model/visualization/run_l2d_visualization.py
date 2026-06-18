@@ -1,3 +1,12 @@
+"""
+Usage:
+    cd Model/visualization
+    python run_l2d_visualization.py
+
+    # With real data (requires lerobot + cached dataset):
+    python run_l2d_visualization.py --live --episodes 0
+"""
+
 import sys
 sys.path.append('..')
 from visualization.trajectory_rendering import Visualization
@@ -9,9 +18,10 @@ from data_parsing.l2d.camera import NUM_VIEWS
 from PIL import Image
 from pathlib import Path
 import os
+import argparse
 
-def test_visualization_on_l2d(tmp_path: Path):
-    result = forward_pass_for_visualization_test(episodes=[0], batch_size=2, pretrained_backbone=False)
+def visualization_on_l2d(save_path: Path, episodes: list[int]):
+    result = forward_pass_for_visualization_test(episodes=episodes, batch_size=2, pretrained_backbone=False)
 
     pred_trajectory, target_trajectory, map_image, current_speed = result
     radius_m = 800.0  # Standard map metric boundary assumption
@@ -23,7 +33,7 @@ def test_visualization_on_l2d(tmp_path: Path):
         map_image=map_image,
         radius_m=radius_m
     )
-    output_path_gt = tmp_path / "test_trajectory_l2d_gt.png"
+    output_path_gt = save_path / "test_trajectory_l2d_gt.png"
     gt_img.save(output_path_gt)
 
     pred_img = Visualization.render_trajectory_map_tile(
@@ -32,7 +42,7 @@ def test_visualization_on_l2d(tmp_path: Path):
         map_image=map_image,
         radius_m=radius_m
     )
-    output_path_pred = tmp_path / "test_trajectory_l2d_pred.png"
+    output_path_pred = save_path / "test_trajectory_l2d_pred.png"
     pred_img.save(output_path_pred)
 
     assert not result is None, 'L2D dataset not available. Skipping L2D visualization test'
@@ -95,10 +105,22 @@ def forward_pass_for_visualization_test(episodes: list[int], batch_size: int, pr
 
     with torch.no_grad():
         trajectory, compressed, future = model(
-            visual_tiles, visual_history,
+            visual_tiles,
             map_tensor=batch["visual_tiles"][-1, 6],
+            visual_history=visual_history,
             egomotion_history=egomotion_history,
             mode="infer"
         )
 
     return trajectory[-1].cpu(), trajectory_target[-1].cpu(), raw_map_image, current_speed
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description='L2D visualization test')
+    parser.add_argument('--live', action='store_true', help='Run live L2D dataset visualization')
+    parser.add_argument('--episodes', type=int, nargs='+', default=[0], help='List of episodes to load')
+    args = parser.parse_args()
+
+    if args.live:
+        visualization_on_l2d(Path("test_images"), args.episodes)
+    else:
+        print("Skipping. Run with --live to execute L2D visualization.")
