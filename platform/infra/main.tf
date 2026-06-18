@@ -37,6 +37,55 @@ module "ecr" {
   environment = var.environment
 }
 
+# --- Phase 2: Queue + Orchestration + Tracking ---
+
+module "rds" {
+  source = "./modules/rds"
+
+  cluster_name              = var.cluster_name
+  vpc_id                    = module.vpc.vpc_id
+  private_subnet_ids        = module.vpc.private_subnet_ids
+  cluster_security_group_id = module.eks.cluster_security_group_id
+  environment               = var.environment
+}
+
+module "training_operator" {
+  source = "./modules/training-operator"
+
+  cluster_name = var.cluster_name
+
+  depends_on = [module.eks]
+}
+
+module "kueue" {
+  source = "./modules/kueue"
+
+  cluster_name = var.cluster_name
+
+  depends_on = [module.training_operator]
+}
+
+module "mlflow" {
+  source = "./modules/mlflow"
+
+  cluster_name     = var.cluster_name
+  artifacts_bucket = module.storage.bucket_names["artifacts"]
+  region           = var.region
+
+  depends_on = [module.rds, module.storage]
+}
+
+module "flyte" {
+  source = "./modules/flyte"
+
+  cluster_name     = var.cluster_name
+  artifacts_bucket = module.storage.bucket_names["artifacts"]
+  region           = var.region
+  rds_endpoint     = module.rds.endpoint
+
+  depends_on = [module.rds, module.storage, module.training_operator, module.kueue]
+}
+
 output "cluster_name" {
   value = module.eks.cluster_name
 }
@@ -51,4 +100,8 @@ output "ecr_repositories" {
 
 output "s3_buckets" {
   value = module.storage.bucket_names
+}
+
+output "rds_endpoint" {
+  value = module.rds.endpoint
 }
