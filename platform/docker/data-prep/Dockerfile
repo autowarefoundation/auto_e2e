@@ -10,7 +10,7 @@ RUN pip install --no-cache-dir torch torchvision --index-url https://download.py
 
 # lerobot without hardware deps (evdev etc) — install --no-deps then add what we need
 RUN pip install --no-cache-dir lerobot==0.5.1 --no-deps && \
-    pip install --no-cache-dir datasets huggingface_hub safetensors pillow numpy
+    pip install --no-cache-dir datasets huggingface_hub safetensors pillow numpy av
 
 # flytekit + data pipeline deps
 RUN pip install --no-cache-dir "flytekit>=1.14,<2" boto3 pyarrow scipy webdataset
