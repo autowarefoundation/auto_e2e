@@ -8,7 +8,7 @@ _FUTURE_TIMESTEPS = 64
 class Visualization:
 
     @staticmethod
-    def render_trajectory(
+    def render_trajectory_map_tile(
             action_sequence: torch.Tensor,
             current_speed: float,
             map_image: Image.Image,
@@ -69,6 +69,9 @@ class Visualization:
 
         draw = ImageDraw.Draw(map_with_trajectory)
         draw.line(pixel_points, fill="#33FF33", width=3)
-        draw.circle(pixel_points[0], radius=5, fill='red')
+        x0 = pixel_points[0][0]
+        y0 = pixel_points[0][1]
+        r = 5.0
+        draw.ellipse([x0-r, y0-r, x0+r, y0+r], fill='red')
 
         return map_with_trajectory
