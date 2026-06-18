@@ -100,6 +100,12 @@ def parse_args() -> argparse.Namespace:
                    help="timm name used by L2DDataset to resolve image transforms")
     p.add_argument("--local-files-only", action="store_true")
     p.add_argument("--num-workers", type=int, default=2)
+    p.add_argument("--dataset-format", default="lerobot",
+                   choices=["lerobot", "pre_extracted"],
+                   help="lerobot: on-the-fly decode (EC2 dev). "
+                        "pre_extracted: WebDataset shards on local disk (EKS prod).")
+    p.add_argument("--shard-dir", default=None,
+                   help="Path to WebDataset shards (required for pre_extracted format)")
 
     # Loop / logging
     p.add_argument("--log-interval", type=int, default=10)
@@ -145,7 +151,17 @@ def build_model(args: argparse.Namespace, device: torch.device) -> AutoE2E:
 
 
 def build_dataloader(args: argparse.Namespace) -> DataLoader:
-    # Deferred import: lerobot is only needed for real training, not smoke tests.
+    if args.dataset_format == "pre_extracted":
+        from data_parsing.pre_extracted import make_pre_extracted_loader
+        if not args.shard_dir:
+            raise ValueError("--shard-dir required for pre_extracted format")
+        return make_pre_extracted_loader(
+            shard_dir=args.shard_dir,
+            batch_size=args.batch_size,
+            num_workers=args.num_workers,
+        )
+
+    # Default: lerobot on-the-fly decode
     from data_parsing.l2d import L2DDataset
 
     dataset = L2DDataset(
