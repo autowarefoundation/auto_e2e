@@ -263,12 +263,12 @@ tracking + Model Registry. UIs exposed via internal ALB → CloudFront → Cogni
 
 Goal: Raw OSS datasets are automatically converted to training-ready format.
 
-- [ ] Flyte backend on EKS (Helm)
+- [x] Flyte backend on EKS (Helm) — deployed in Phase 2
 - [ ] LakeFS on EKS (Helm, S3-backed)
-- [ ] Data prep Dockerfile (ffmpeg, torchcodec, parsers)
-- [ ] Flyte data_ingest workflow (L2D: HF → JPEG extract → S3)
-- [ ] Flyte data_ingest workflow (nvidia: SDK → extract → S3)
-- [ ] Unified DataLoader that reads from pre-extracted format
+- [x] Data prep Dockerfile (ffmpeg, torchcodec, parsers)
+- [x] Flyte data_ingest workflow (L2D: HF → JPEG extract → S3)
+- [x] Flyte data_ingest workflow (nvidia: SDK → extract → S3)
+- [x] Unified DataLoader that reads from pre-extracted format
 - [ ] Verify: Flyte pipeline produces training-ready data, training job reads it
 
 (Experiment Management / MLflow was pulled forward into Phase 2 — it is needed
