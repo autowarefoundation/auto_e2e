@@ -167,7 +167,7 @@ platform/
 │   │   ├── eks/                    EKS cluster + managed nodegroup
 │   │   ├── karpenter/              Karpenter controller + NodePool definitions
 │   │   ├── gpu-operator/           NVIDIA GPU Operator Helm release
-│   │   ├── storage/                S3 buckets + IRSA + Mountpoint CSI
+│   │   ├── storage/                S3 buckets + Pod Identity + Mountpoint CSI
 │   │   ├── ecr/                    Container registries
 │   │   ├── flyte/                  Flyte backend (Helm)
 │   │   ├── mlflow/                 MLflow server (Helm, RDS Postgres + S3)
@@ -233,7 +233,7 @@ Goal: `train.py` runs as a container on EKS with GPU. Region us-west-2
 - [x] One warm GPU node via do-not-disrupt pause Deployment (NOT scale-to-zero;
       g6e capacity is too scarce to re-acquire on demand, so the node + ODCR
       are held)
-- [x] S3 buckets (datasets, checkpoints, artifacts) + IRSA
+- [x] S3 buckets (datasets, checkpoints, artifacts) + Pod Identity
 - [x] ECR repositories (training, data-prep, eval)
 - [x] Training Dockerfile (pytorch/pytorch CUDA runtime base) → built/pushed via Finch
 - [x] Verified: smoke-test Pod on g6e — device=cuda, amp=bf16, peak VRAM ~4GB
@@ -251,7 +251,7 @@ Kueue (GPU quota, 2-tier research/production priority) → Kubeflow Training
 Operator v1 (PyTorchJob) → warm g6e. MLflow (RDS-backed) for experiment
 tracking + Model Registry. UIs exposed via internal ALB → CloudFront → Cognito.
 
-- [ ] StorageClass + RDS Postgres (db.r6g.large; flyteadmin + mlflow DBs) + IRSA
+- [ ] StorageClass + RDS Postgres (db.r6g.large; flyteadmin + mlflow DBs) + Pod Identity associations
 - [ ] Kubeflow Training Operator v1.9.3 + Kueue 0.18.1 (kubeflow.org/pytorchjob)
 - [ ] Kueue objects: ResourceFlavor/ClusterQueue/LocalQueue + 2 WorkloadPriorityClass
 - [ ] MLflow (server-proxied S3 artifacts) + minimal MLflow logging in train.py
