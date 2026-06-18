@@ -1,0 +1,43 @@
+# Flyte Binary (flyteorg/flyte-binary v0.1.10) values override
+# DB, S3, plugin settings are injected via Terraform set{} blocks.
+
+enabled:
+  postgres: false  # Using external RDS
+
+configuration:
+  # Cluster resource templates: auto-create project namespaces
+  clusterResourceTemplates:
+    inline:
+      # Map Flyte project "auto-e2e" domain "development" to K8s namespace
+      001_namespace.yaml: |
+        apiVersion: v1
+        kind: Namespace
+        metadata:
+          name: '{{ namespace }}'
+
+  # Propeller output location
+  storage:
+    rawOutputPrefix: "s3://{{ .Values.configuration.storage.metadataContainer }}/flyte/raw"
+    metadataPrefix: "s3://{{ .Values.configuration.storage.metadataContainer }}/flyte/metadata"
+
+  # Auth disabled for Phase 2 (behind CloudFront+Cognito later)
+  auth:
+    enabled: false
+
+# Mount the DB secret for password file
+extraVolumes:
+  - name: db-pass
+    secret:
+      secretName: flyte-db-pass
+
+extraVolumeMounts:
+  - name: db-pass
+    mountPath: /etc/flyte/db-pass
+    readOnly: true
+
+resources:
+  requests:
+    cpu: 500m
+    memory: 1Gi
+  limits:
+    memory: 2Gi
