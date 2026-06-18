@@ -1,9 +1,5 @@
 # Flyte Binary chart v2.0.23 values override
-# DB + S3 + SA settings are injected via Terraform set{} blocks.
-
-# Disable embedded Postgres (using external RDS)
-enabled:
-  postgres: false
+# DB host/port/user/pass + S3 bucket/region are injected via Terraform set{} blocks.
 
 # Seed the auto-e2e project
 flyte-core-components:
@@ -13,6 +9,8 @@ flyte-core-components:
 
 # Enable pytorch plugin for PyTorchJob rendering
 configuration:
+  database:
+    options: "sslmode=require"
   inline:
     tasks:
       task-plugins:
