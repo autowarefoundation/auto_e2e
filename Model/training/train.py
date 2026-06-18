@@ -106,6 +106,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--save-dir", default=None,
                    help="If set, write a checkpoint per epoch (real training only)")
 
+    # MLflow
+    p.add_argument("--register-model", action="store_true",
+                   help="Register final checkpoint in MLflow Model Registry")
+    p.add_argument("--dataset", default=None,
+                   help="Dataset name for MLflow tagging (defaults to --repo-id)")
+
     # Smoke test
     p.add_argument("--smoke-test", action="store_true",
                    help="Train on random tensors (no lerobot/dataset). Reports peak VRAM.")
@@ -182,6 +188,25 @@ def run_training(args: argparse.Namespace) -> None:
     device = resolve_device(args.device)
     use_amp = args.amp and device.type == "cuda"
 
+    # MLflow: active only when MLFLOW_TRACKING_URI is set AND not smoke-test.
+    mlflow_active = (
+        os.environ.get("MLFLOW_TRACKING_URI")
+        and not args.smoke_test
+    )
+    if mlflow_active:
+        import mlflow
+        mlflow.set_experiment(f"auto_e2e/{args.dataset or args.repo_id}")
+        mlflow.start_run()
+        mlflow.log_params({
+            "backbone": args.backbone,
+            "fusion_mode": args.fusion_mode,
+            "batch_size": args.batch_size,
+            "lr": args.lr,
+            "epochs": args.epochs,
+            "amp": args.amp,
+            "dataset": args.dataset or args.repo_id,
+        })
+
     print(f"device={device} | backbone={args.backbone} | fusion={args.fusion_mode} | "
           f"amp={'bf16' if use_amp else 'off'}")
     if args.fusion_mode == "bev":
@@ -246,6 +271,8 @@ def run_training(args: argparse.Namespace) -> None:
 
             running += loss.item()
             n += 1
+            if mlflow_active:
+                mlflow.log_metric("train_loss", loss.item(), step=epoch * 10000 + step)
             if step % args.log_interval == 0:
                 print(f"epoch {epoch} step {step} loss {loss.item():.4f}")
 
@@ -255,6 +282,9 @@ def run_training(args: argparse.Namespace) -> None:
             peak = torch.cuda.max_memory_allocated(device) / 1e9
             msg += f" | peak VRAM {peak:.2f} GB"
         print(msg)
+
+        if mlflow_active:
+            mlflow.log_metric("epoch_mean_loss", running / max(n, 1), step=epoch)
 
         if args.save_dir and not args.smoke_test:
             os.makedirs(args.save_dir, exist_ok=True)
@@ -266,6 +296,16 @@ def run_training(args: argparse.Namespace) -> None:
                 ckpt,
             )
             print(f"saved {ckpt}")
+            if mlflow_active:
+                mlflow.log_artifact(ckpt)
+
+    if mlflow_active:
+        if args.register_model and args.save_dir:
+            mlflow.pytorch.log_model(
+                model, "model",
+                registered_model_name="auto_e2e",
+            )
+        mlflow.end_run()
 
 
 def main() -> None:
