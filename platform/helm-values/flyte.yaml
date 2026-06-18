@@ -1,16 +1,13 @@
 # Flyte Binary chart v2.0.23 values override
-# DB host/port/user/pass + S3 bucket/region are injected via Terraform set{} blocks.
 
-# Seed the auto-e2e project
 flyte-core-components:
   admin:
     seedProjects:
       - auto-e2e
 
-# Enable pytorch plugin for PyTorchJob rendering
 configuration:
-  database:
-    options: "sslmode=require"
+  auth:
+    enabled: false
   inline:
     tasks:
       task-plugins:
@@ -24,8 +21,6 @@ configuration:
           sidecar: sidecar
           container_array: k8s-array
           pytorch: pytorch
-  auth:
-    enabled: false
 
 deployment:
   resources:

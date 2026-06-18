@@ -15,52 +15,34 @@ resource "helm_release" "flyte" {
   namespace        = "flyte"
   create_namespace = true
   timeout          = 600
+  wait             = false
 
-  values = [file("${path.module}/../../../helm-values/flyte.yaml")]
-
-  # Database
-  set {
-    name  = "configuration.database.host"
-    value = var.rds_host
-  }
-  set {
-    name  = "configuration.database.port"
-    value = "5432"
-  }
-  set {
-    name  = "configuration.database.dbname"
-    value = "flyteadmin"
-  }
-  set {
-    name  = "configuration.database.username"
-    value = "pgadmin"
-  }
-  set_sensitive {
-    name  = "configuration.database.password"
-    value = var.rds_password
-  }
-
-  # Storage (S3)
-  set {
-    name  = "configuration.storage.metadataContainer"
-    value = var.artifacts_bucket
-  }
-  set {
-    name  = "configuration.storage.userDataContainer"
-    value = var.artifacts_bucket
-  }
-  set {
-    name  = "configuration.storage.provider"
-    value = "s3"
-  }
-  set {
-    name  = "configuration.storage.providerConfig.s3.region"
-    value = var.region
-  }
-  set {
-    name  = "configuration.storage.providerConfig.s3.authType"
-    value = "iam"
-  }
+  values = [
+    file("${path.module}/../../../helm-values/flyte.yaml"),
+    yamlencode({
+      configuration = {
+        database = {
+          username = "pgadmin"
+          password = var.rds_password
+          host     = var.rds_host
+          port     = 5432
+          dbname   = "flyteadmin"
+          options  = "sslmode=require"
+        }
+        storage = {
+          metadataContainer = var.artifacts_bucket
+          userDataContainer = var.artifacts_bucket
+          provider          = "s3"
+          providerConfig = {
+            s3 = {
+              region   = var.region
+              authType = "iam"
+            }
+          }
+        }
+      }
+    })
+  ]
 
   # SA for Pod Identity
   set {
