@@ -1,20 +1,22 @@
-FROM pytorch/pytorch:2.4.1-cuda12.1-cudnn9-runtime
+FROM python:3.12-slim
 
-# No GPU used; base provides PyTorch (needed by lerobot) + Python 3.11
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg git && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /workspace
 
-RUN pip install --no-cache-dir \
-    lerobot==0.5.1 \
-    flytekit==1.16.23 \
-    boto3 pyarrow pandas scipy pillow \
-    webdataset
+# Install PyTorch CPU-only first (lerobot requires it)
+RUN pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu
 
-# physical_ai_av installed separately (may need --no-deps if conflicts)
-RUN pip install --no-cache-dir physical_ai_av || \
-    pip install --no-cache-dir --no-deps physical_ai_av
+# Install flytekit first (has strict version bounds)
+RUN pip install --no-cache-dir flytekit==1.16.23 boto3 pyarrow pandas scipy pillow webdataset
+
+# Install lerobot (needs torch + Python 3.12)
+RUN pip install --no-cache-dir lerobot==0.5.1 --no-deps && \
+    pip install --no-cache-dir datasets huggingface_hub safetensors
+
+# physical_ai_av (best-effort, non-critical for L2D ingest)
+RUN pip install --no-cache-dir physical_ai_av --no-deps 2>/dev/null || true
 
 COPY Model/ /workspace/Model/
 COPY platform/pipelines/ /workspace/platform/pipelines/

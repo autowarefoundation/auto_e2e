@@ -64,6 +64,10 @@ resource "helm_release" "mlflow" {
     value = "mlflow"
   }
   set {
+    name  = "service.type"
+    value = "ClusterIP"
+  }
+  set {
     name  = "artifactRoot.proxiedArtifactStorage"
     value = "true"
   }

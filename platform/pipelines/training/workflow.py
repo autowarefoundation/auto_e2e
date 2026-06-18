@@ -42,7 +42,7 @@ FusionMode = Enum("FusionMode", {
 TRAINING_IMAGE = (
     "{ACCOUNT_ID}.dkr.ecr.us-west-2.amazonaws.com/auto-e2e/training:latest"
 )
-MLFLOW_URI = "http://mlflow.mlflow.svc.cluster.local:5000"
+MLFLOW_URI = "http://172.20.240.62:5000"
 
 
 # ---------------------------------------------------------------------------
