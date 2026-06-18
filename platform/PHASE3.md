@@ -19,6 +19,24 @@ from HuggingFace / local disk. This causes:
 3. **No versioning**: no way to reproduce a training run's exact data state
 4. **No parallelism**: episode processing is serial, cannot leverage Flyte map_task
 
+### Specific problem: NVIDIA PhysicalAI frame loading (Issue #30)
+
+The `load_camera_frame()` in `nvidia_physical_ai/camera.py` reads the **entire
+video file** into memory on every `__getitem__` call (`video_path.read_bytes()` +
+`SeekVideoReader`), decodes a single frame, then discards everything. For a
+typical 20s clip at 30fps with 7 cameras:
+
+- 4,200 frames exist per clip, but only ~72 are valid sample points (10Hz
+  egomotion with 64-step history/future windows)
+- Each `__getitem__` re-reads 7 video files (hundreds of MB) to extract 7 frames
+- With `DataLoader(num_workers=4)`: multiple full video files resident in memory
+- TorchCodec objects don't serialize cleanly across DataLoader workers
+
+**Resolution**: The pre-extraction step (§2) computes valid sample points
+offline, extracts ONLY those frames as JPEG, and bundles into WebDataset shards.
+At training time, zero video decode occurs. This is Option 3 from Issue #30
+("Pre-extracted aligned-frame cache") implemented at platform scale.
+
 ## Solution Architecture
 
 ```
@@ -137,10 +155,15 @@ def ingest_l2d(
 
 Each `ingest_*_episode` task:
 1. Downloads one episode from HF (lerobot) or NVIDIA SDK
-2. Decodes all camera videos → JPEG at 256x256 (ffmpeg subprocess, quality 90)
-3. Extracts egomotion parquet at 10Hz (resampled from source rate)
-4. Uploads to S3 in the training-ready layout
-5. Returns episode metadata (sample count, frame count)
+2. **Computes valid sample points**: parses egomotion to find frames with
+   sufficient history (16 steps) and future (64 steps) context. Only these
+   frames are extracted — not every frame in the video. (This resolves Issue #30:
+   NVIDIA clips have 4200 frames but only ~72 valid sample points.)
+3. Decodes ONLY valid-sample camera frames → JPEG at 256×256 (ffmpeg `-ss` seek
+   to exact timestamp, quality 90). No full-video decode.
+4. Extracts egomotion window (history + future) for each valid sample → .npy
+5. Uploads to S3 in the training-ready layout
+6. Returns episode metadata (valid sample count, frame indices)
 
 ### 3. Data Access: WebDataset Tar Shards + EBS Prefetch
 
@@ -376,10 +399,14 @@ spec:
 - Data ingest runs on CPU nodes (Auto Mode general-purpose). No GPU cost.
 - map_task parallelism: L2D has ~150 episodes → 150 parallel tasks → completes in
   minutes not hours. Karpenter scales CPU nodes automatically.
-- S3 storage: JPEG at 256x256 quality 90 ≈ 30KB/frame. 7 cameras × 10Hz × 20s
-  episode = 1400 frames/episode ≈ 42MB/episode. 150 episodes ≈ 6.3 GB total (tiny).
-- NVIDIA PhysicalAI: 7 cameras × 30fps × 20s = 4200 frames/clip at 256x256 ≈ 126MB.
-  Unknown total clips but likely < 100 GB.
+- S3 storage (valid samples only, NOT every frame):
+  - L2D: ~72 valid samples/episode × 7 cameras × 30KB = ~15 MB/episode.
+    150 episodes ≈ 2.3 GB shards.
+  - NVIDIA: ~72 valid samples/clip × 7 cameras × 30KB = ~15 MB/clip.
+    Even 500 clips = ~7.5 GB shards.
+  - Extraction of ONLY valid samples (not all 4200 frames/clip) reduces storage
+    and processing by ~58x vs naive full-frame extraction.
+- EBS PVC for training: 50 Gi gp3 ≈ $4/month. Created per-job, deleted after.
 
 ### 9. Open Questions
 
