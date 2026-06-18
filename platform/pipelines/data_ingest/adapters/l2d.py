@@ -96,7 +96,7 @@ class L2DAdapter(IngestAdapter):
     def extract_frame(
         self, episode_path: Path, sample: SamplePoint, camera_idx: int
     ) -> bytes:
-        """Extract one frame via PyAV direct decode, return JPEG bytes."""
+        """Extract one frame via PyAV seek decode, return JPEG bytes."""
         import av
 
         self._ensure_dataset()
@@ -107,16 +107,19 @@ class L2DAdapter(IngestAdapter):
         vdir = root / "videos" / cam_name / "chunk-000"
         mp4s = sorted(vdir.glob("*.mp4")) if vdir.exists() else []
         if not mp4s:
-            # Fallback: black frame
             img = Image.new("RGB", (256, 256))
         else:
             video_path = mp4s[0]
             container = av.open(str(video_path))
+            stream = container.streams.video[0]
+            # Seek to approximate position then decode forward
+            fps = float(stream.average_rate or 10)
+            target_ts = int(sample.frame_idx / fps / stream.time_base)
+            container.seek(target_ts, stream=stream)
             img = Image.new("RGB", (256, 256))
-            for i, frame in enumerate(container.decode(video=0)):
-                if i == sample.frame_idx:
-                    img = frame.to_image()
-                    break
+            for frame in container.decode(video=0):
+                img = frame.to_image()
+                break  # Take first frame after seek
             container.close()
 
         img = img.resize((256, 256), Image.BILINEAR)
