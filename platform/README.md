@@ -251,13 +251,13 @@ Kueue (GPU quota, 2-tier research/production priority) → Kubeflow Training
 Operator v1 (PyTorchJob) → warm g6e. MLflow (RDS-backed) for experiment
 tracking + Model Registry. UIs exposed via internal ALB → CloudFront → Cognito.
 
-- [ ] StorageClass + RDS Postgres (db.r6g.large; flyteadmin + mlflow DBs) + Pod Identity associations
-- [ ] Kubeflow Training Operator v1.9.3 + Kueue 0.18.1 (kubeflow.org/pytorchjob)
-- [ ] Kueue objects: ResourceFlavor/ClusterQueue/LocalQueue + 2 WorkloadPriorityClass
-- [ ] MLflow (server-proxied S3 artifacts) + minimal MLflow logging in train.py
-- [ ] Flyte (flyte-binary) + kfpytorch plugin; LaunchPlan enums from registries; sweep
+- [x] StorageClass + RDS Postgres (db.r6g.large; flyteadmin + mlflow DBs) + Pod Identity associations
+- [x] Kubeflow Training Operator v1.9.3 + Kueue 0.18.1 (kubeflow.org/pytorchjob)
+- [x] Kueue objects: ResourceFlavor/ClusterQueue/LocalQueue + 2 WorkloadPriorityClass
+- [x] MLflow (server-proxied S3 artifacts) + minimal MLflow logging in train.py
+- [x] Flyte (flyte-binary) + kfpytorch plugin; LaunchPlan enums from registries; sweep
 - [ ] Internal ALB → CloudFront + Cognito for Flyte/MLflow UIs
-- [ ] Verify: UI launch → Kueue admit → PyTorchJob on g6e → MLflow run + artifact
+- [x] Verify: UI launch → Kueue admit → PyTorchJob on g6e → MLflow run + artifact
 
 ### Phase 3: Data Pipeline (Flyte + LakeFS)
 
