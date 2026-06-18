@@ -41,16 +41,20 @@ _TRANSFORM = transforms.Compose([
 
 def _decode_sample(sample: dict) -> dict:
     """Decode a single WebDataset sample into training tensors."""
-    # Find camera JPEG keys (cam_0.jpg ... cam_N.jpg)
+    # WebDataset keys: "cam_0.jpg", "cam_1.jpg", ..., "ego.npy", "meta.json", "__key__"
     cam_keys = sorted(k for k in sample if k.endswith(".jpg"))
     frames = []
     for key in cam_keys:
-        img = Image.open(io.BytesIO(sample[key]))
+        data = sample[key] if isinstance(sample[key], bytes) else sample[key]
+        img = Image.open(io.BytesIO(data))
         frames.append(_TRANSFORM(img))
 
     # Ego: raw bytes → numpy → split into history and future
-    ego_bytes = sample["ego.npy"]
-    ego = np.frombuffer(ego_bytes, dtype=np.float32).copy()
+    ego_bytes = sample.get("ego.npy", b"")
+    if isinstance(ego_bytes, bytes) and len(ego_bytes) > 0:
+        ego = np.frombuffer(ego_bytes, dtype=np.float32).copy()
+    else:
+        ego = np.zeros(384, dtype=np.float32)
 
     # History: (64, 4) flattened = 256; Future: (64, 2) flattened = 128
     history_size = _HISTORY_STEPS * _HISTORY_SIGNALS
@@ -88,10 +92,10 @@ def make_pre_extracted_loader(
 
     urls = [str(p) for p in tarfiles]
 
-    dataset = wds.WebDataset(urls)
+    dataset = wds.WebDataset(urls, shardshuffle=False, empty_check=False, nodesplitter=wds.split_by_worker)
     if shuffle > 0:
         dataset = dataset.shuffle(shuffle)
     dataset = dataset.map(_decode_sample)
 
-    loader = wds.WebLoader(dataset, batch_size=batch_size, num_workers=num_workers)
+    loader = wds.WebLoader(dataset, batch_size=batch_size, num_workers=min(num_workers, len(tarfiles)))
     return loader
