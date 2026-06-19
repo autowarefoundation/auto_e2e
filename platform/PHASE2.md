@@ -55,7 +55,7 @@ Training Operator v1 (PyTorchJob) → warm g6e node. MLflow for experiment track
 | cert-manager | NOT INSTALLED | — | n/a |
 | RDS Postgres | Terraform `aws_db_instance`, Postgres 16.x, **db.r6g.large**, single-AZ, 100 GB gp3, private subnets | (AWS) | DBs `flyteadmin` + `mlflow`. |
 | EBS StorageClass | manifest `auto-ebs-sc`, provisioner `ebs.csi.eks.amazonaws.com`, default | (cluster) | Default SC so PVCs bind. |
-| flytekit + plugins | `flytekit==1.16.23`, `flytekitplugins-kfpytorch==1.16.23`, `mlflow-skinny` (in training image) | (image) | SDK, PyTorch task config, registration. |
+| flytekit + plugins | `flytekit==1.16.23`, `flytekitplugins-kfpytorch==1.16.23` (in data-prep image only; registration image) | (image) | SDK, workflow registration. Training image has NO flytekit (RawContainerTask). |
 
 ## 2. Install-order DAG
 
