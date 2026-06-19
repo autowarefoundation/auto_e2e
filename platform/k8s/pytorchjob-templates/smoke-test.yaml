@@ -12,6 +12,7 @@ metadata:
 spec:
   runPolicy:
     cleanPodPolicy: None
+    suspend: true
     ttlSecondsAfterFinished: 3600
   pytorchReplicaSpecs:
     Master:
