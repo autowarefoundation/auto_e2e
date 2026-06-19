@@ -10,7 +10,7 @@ from typing import List
 
 from flytekit import task, workflow, Resources
 
-_ACCOUNT_ID = os.environ.get("AWS_ACCOUNT_ID", "381491877296")
+_ACCOUNT_ID = os.environ["AWS_ACCOUNT_ID"]
 _REGION = os.environ.get("AWS_REGION", "us-west-2")
 
 TRAINING_IMAGE = f"{_ACCOUNT_ID}.dkr.ecr.{_REGION}.amazonaws.com/auto-e2e/training:latest"
@@ -64,7 +64,7 @@ def run_carla_scenarios(checkpoint_s3: str, scenarios: str = "S01,S02,S03") -> d
 
 @workflow
 def closed_loop_eval(
-    checkpoint_s3: str = "s3://auto-e2e-platform-checkpoints-381491877296/staging.pt",
+    checkpoint_s3: str = "s3://{os.environ.get("EKS_CLUSTER","auto-e2e-platform")}-checkpoints-{os.environ["AWS_ACCOUNT_ID"]}/staging.pt",
     scenarios: str = "S01,S02,S03",
 ) -> dict:
     """Run CARLA closed-loop evaluation on staging checkpoint."""

@@ -39,7 +39,7 @@ FusionMode = Enum("FusionMode", {
 
 import os
 
-_ACCOUNT_ID = os.environ.get("AWS_ACCOUNT_ID", "381491877296")
+_ACCOUNT_ID = os.environ["AWS_ACCOUNT_ID"]
 _REGION = os.environ.get("AWS_REGION", "us-west-2")
 
 TRAINING_IMAGE = f"{_ACCOUNT_ID}.dkr.ecr.{_REGION}.amazonaws.com/auto-e2e/training:latest"

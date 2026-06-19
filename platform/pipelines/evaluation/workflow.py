@@ -10,7 +10,7 @@ from flytekit import task, workflow, Resources
 
 import os
 
-_ACCOUNT_ID = os.environ.get("AWS_ACCOUNT_ID", "381491877296")
+_ACCOUNT_ID = os.environ["AWS_ACCOUNT_ID"]
 _REGION = os.environ.get("AWS_REGION", "us-west-2")
 
 DATA_PREP_IMAGE = f"{_ACCOUNT_ID}.dkr.ecr.{_REGION}.amazonaws.com/auto-e2e/data-prep:latest"
@@ -129,7 +129,7 @@ def promote_if_passed(metrics: dict, checkpoint_s3: str, mlflow_run_id: str = ""
 
 @workflow
 def evaluate_checkpoint(
-    checkpoint_s3: str = "s3://auto-e2e-platform-checkpoints-381491877296/latest.pt",
+    checkpoint_s3: str = "s3://{os.environ.get("EKS_CLUSTER","auto-e2e-platform")}-checkpoints-{os.environ["AWS_ACCOUNT_ID"]}/latest.pt",
     val_shard_dir: str = "/data/shards",
     mlflow_run_id: str = "",
 ) -> bool:

@@ -12,7 +12,7 @@ from typing import Optional
 from flytekit import conditional, dynamic, task, workflow, Resources
 from flytekit.core.container_task import ContainerTask
 
-_ACCOUNT_ID = os.environ.get("AWS_ACCOUNT_ID", "381491877296")
+_ACCOUNT_ID = os.environ["AWS_ACCOUNT_ID"]
 _REGION = os.environ.get("AWS_REGION", "us-west-2")
 _CLUSTER = os.environ.get("EKS_CLUSTER", "auto-e2e-platform")
 

@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 
 import os
 
-_ACCOUNT_ID = os.environ.get("AWS_ACCOUNT_ID", "381491877296")
+_ACCOUNT_ID = os.environ["AWS_ACCOUNT_ID"]
 _REGION = os.environ.get("AWS_REGION", "us-west-2")
 _CLUSTER_NAME = os.environ.get("EKS_CLUSTER", "auto-e2e-platform")
 
