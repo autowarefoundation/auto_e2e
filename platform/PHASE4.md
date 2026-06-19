@@ -196,16 +196,18 @@ def evaluate_checkpoint(
 
 ### 5. Eval Container
 
-Same base as training image + metrics computation code:
+**No separate eval image needed.** Training image already contains:
+- PyTorch + model code (inference)
+- Pillow (visualization)
+- numpy (metric computation)
 
-```dockerfile
-FROM training:latest  # inherits PyTorch + model code
-RUN pip install --no-cache-dir scikit-learn  # for additional metrics
-COPY Model/evaluation/ /workspace/Model/evaluation/
-```
+The position integration logic is being contributed in PR #74
+(trajectory rendering), which implements the same
+`accel + curvature → velocity → (x, y)` integration used for eval metrics.
+Once merged, the integration function lives in `Model/` and is available
+in the training container without any Dockerfile changes.
 
-No KServe/Triton needed for Phase 4 — direct PyTorch inference in the eval
-task container. KServe is deferred to Phase 5 (online serving for closed-loop).
+Eval workflow uses the same `auto-e2e/training:latest` image as PyTorchJobs.
 
 ### 6. Integration with Training Pipeline
 
@@ -228,12 +230,14 @@ Uses MLflow **aliases** (not deprecated stages):
 ### 8. Implementation Plan
 
 1. **Metrics module** (`Model/evaluation/metrics.py`): `integrate_trajectory`,
-   `compute_open_loop_metrics`, `gate_check`.
-2. **Eval Dockerfile** (extend training image).
-3. **Flyte eval workflow** (`platform/pipelines/evaluation/workflow.py`).
-4. **Val shard generation**: split L2D shards into train/val (80/20 by episode).
-5. **Wire into training workflow**: add eval step after training completes.
-6. **End-to-end verify**: train → checkpoint → eval → gate → MLflow promote.
+   `compute_open_loop_metrics`, `gate_check`. Reuse integration logic from
+   PR #74 (trajectory rendering) — same math, different output format.
+2. **Flyte eval workflow** (`platform/pipelines/evaluation/workflow.py`).
+3. **Val shard generation**: split L2D shards into train/val (80/20 by episode).
+4. **Wire into training workflow**: add eval step after training completes.
+5. **End-to-end verify**: train → checkpoint → eval → gate → MLflow promote.
+
+No separate eval Dockerfile — training image has everything needed.
 
 ### 9. Cost
 
