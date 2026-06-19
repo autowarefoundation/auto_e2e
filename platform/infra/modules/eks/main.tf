@@ -138,13 +138,11 @@ resource "aws_security_group" "cluster" {
   tags = { Name = "${var.cluster_name}-cluster-sg" }
 }
 
-# Pod Identity Agent addon — lets pods assume IAM roles without OIDC Provider.
-# EKS Auto Mode manages the agent DaemonSet once this addon is enabled.
-# Associations (namespace + SA → IAM role) are created in the storage module.
+# Pod Identity Agent addon
 resource "aws_eks_addon" "pod_identity" {
-  cluster_name  = aws_eks_cluster.this.name
-  addon_name    = "eks-pod-identity-agent"
-  depends_on    = [aws_eks_cluster.this]
+  cluster_name = aws_eks_cluster.this.name
+  addon_name   = "eks-pod-identity-agent"
+  depends_on   = [aws_eks_cluster.this]
 }
 
 # EKS Access Entry (allow current user to manage cluster)
@@ -166,27 +164,7 @@ resource "aws_eks_access_policy_association" "admin" {
   depends_on = [aws_eks_access_entry.admin]
 }
 
-output "cluster_name" {
-  value = aws_eks_cluster.this.name
-}
-
-output "cluster_endpoint" {
-  value = aws_eks_cluster.this.endpoint
-}
-
-output "cluster_ca_certificate" {
-  value = aws_eks_cluster.this.certificate_authority[0].data
-}
-
-output "cluster_security_group_id" {
-  value = aws_security_group.cluster.id
-}
-
-output "node_role_arn" {
-  value = aws_iam_role.node.arn
-}
-
-# OIDC Provider for IRSA (required by Flyte — stow/minio-go doesn't support Pod Identity)
+# OIDC Provider for IRSA
 data "tls_certificate" "oidc" {
   url = aws_eks_cluster.this.identity[0].oidc[0].issuer
 }
@@ -197,107 +175,11 @@ resource "aws_iam_openid_connect_provider" "oidc" {
   thumbprint_list = [data.tls_certificate.oidc.certificates[0].sha1_fingerprint]
 }
 
-output "oidc_provider_arn" {
-  value = aws_iam_openid_connect_provider.oidc.arn
-}
-
-output "oidc_provider_url" {
-  value = replace(aws_eks_cluster.this.identity[0].oidc[0].issuer, "https://", "")
-}
-
-# Managed Node Group for simulation (CARLA requires Vulkan — Bottlerocket doesn't have it)
-# AL2023_x86_64_NVIDIA AMI includes full NVIDIA driver with Vulkan ICD support.
-# Uses a SEPARATE node role (EC2_LINUX type access entry, not EC2 for Auto Mode).
-resource "aws_iam_role" "simulation_node" {
-  name = "${var.cluster_name}-sim-node-role"
-
-  assume_role_policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [{
-      Action = ["sts:AssumeRole"]
-      Effect = "Allow"
-      Principal = { Service = "ec2.amazonaws.com" }
-    }]
-  })
-}
-
-resource "aws_iam_role_policy_attachment" "sim_worker" {
-  role       = aws_iam_role.simulation_node.name
-  policy_arn = "arn:aws:iam::aws:policy/AmazonEKSWorkerNodePolicy"
-}
-
-resource "aws_iam_role_policy_attachment" "sim_cni" {
-  role       = aws_iam_role.simulation_node.name
-  policy_arn = "arn:aws:iam::aws:policy/AmazonEKS_CNI_Policy"
-}
-
-resource "aws_iam_role_policy_attachment" "sim_ecr" {
-  role       = aws_iam_role.simulation_node.name
-  policy_arn = "arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly"
-}
-
-resource "aws_eks_access_entry" "simulation_node" {
-  cluster_name  = aws_eks_cluster.this.name
-  principal_arn = aws_iam_role.simulation_node.arn
-  type          = "EC2_LINUX"
-}
-
-resource "aws_eks_node_group" "simulation" {
-  cluster_name    = aws_eks_cluster.this.name
-  node_group_name = "simulation-gpu"
-  node_role_arn   = aws_iam_role.simulation_node.arn
-  subnet_ids      = [var.private_subnet_ids[1]]  # us-west-2b (ODCR AZ)
-
-  ami_type       = "AL2023_x86_64_NVIDIA"
-  instance_types = ["g5.xlarge"]
-  capacity_type  = "ON_DEMAND"
-
-  scaling_config {
-    desired_size = 1
-    min_size     = 0
-    max_size     = 1
-  }
-
-  disk_size = 100  # CARLA image is 9GB+ needs plenty of storage
-
-  labels = {
-    "workload-type" = "simulation"
-  }
-
-  taint {
-    key    = "nvidia.com/gpu-sim"
-    value  = ""
-    effect = "NO_SCHEDULE"
-  }
-
-  tags = { Name = "${var.cluster_name}-simulation-gpu" }
-
-  depends_on = [
-    aws_iam_role_policy_attachment.sim_worker,
-    aws_iam_role_policy_attachment.sim_cni,
-    aws_iam_role_policy_attachment.sim_ecr,
-    aws_eks_access_entry.simulation_node,
-  ]
-}
-
-# Additional policies needed for managed node groups (AL2023 needs full policies)
-resource "aws_iam_role_policy_attachment" "node_eks_worker" {
-  role       = aws_iam_role.node.name
-  policy_arn = "arn:aws:iam::aws:policy/AmazonEKSWorkerNodePolicy"
-}
-
-resource "aws_iam_role_policy_attachment" "node_cni" {
-  role       = aws_iam_role.node.name
-  policy_arn = "arn:aws:iam::aws:policy/AmazonEKS_CNI_Policy"
-}
-
-resource "aws_iam_role_policy_attachment" "node_ecr_readonly" {
-  role       = aws_iam_role.node.name
-  policy_arn = "arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly"
-}
-
-# VPC CNI addon — required for managed node groups (Auto Mode handles its own CNI)
-resource "aws_eks_addon" "vpc_cni" {
-  cluster_name = aws_eks_cluster.this.name
-  addon_name   = "vpc-cni"
-}
+# Outputs
+output "cluster_name" { value = aws_eks_cluster.this.name }
+output "cluster_endpoint" { value = aws_eks_cluster.this.endpoint }
+output "cluster_ca_certificate" { value = aws_eks_cluster.this.certificate_authority[0].data }
+output "cluster_security_group_id" { value = aws_security_group.cluster.id }
+output "node_role_arn" { value = aws_iam_role.node.arn }
+output "oidc_provider_arn" { value = aws_iam_openid_connect_provider.oidc.arn }
+output "oidc_provider_url" { value = replace(aws_eks_cluster.this.identity[0].oidc[0].issuer, "https://", "") }

@@ -44,8 +44,3 @@ variable "hf_token" {
   default     = ""
 }
 
-variable "sim_odcr_id" {
-  description = "ODCR ID for simulation GPU node (g5.xlarge). Empty = skip simulation NodePool."
-  type        = string
-  default     = ""
-}
