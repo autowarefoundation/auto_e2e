@@ -204,3 +204,39 @@ output "oidc_provider_arn" {
 output "oidc_provider_url" {
   value = replace(aws_eks_cluster.this.identity[0].oidc[0].issuer, "https://", "")
 }
+
+# Managed Node Group for simulation (CARLA requires Vulkan — Bottlerocket doesn't have it)
+# AL2_x86_64_GPU AMI includes full NVIDIA driver with Vulkan ICD support.
+resource "aws_eks_node_group" "simulation" {
+  cluster_name    = aws_eks_cluster.this.name
+  node_group_name = "simulation-gpu"
+  node_role_arn   = aws_iam_role.node.arn
+  subnet_ids      = [var.private_subnet_ids[1]]  # us-west-2b (ODCR AZ)
+
+  ami_type       = "AL2_x86_64_GPU"
+  instance_types = ["g5.xlarge"]
+  capacity_type  = "ON_DEMAND"
+
+  scaling_config {
+    desired_size = 1
+    min_size     = 0
+    max_size     = 1
+  }
+
+  labels = {
+    "workload-type" = "simulation"
+  }
+
+  taint {
+    key    = "nvidia.com/gpu-sim"
+    value  = ""
+    effect = "NO_SCHEDULE"
+  }
+
+  tags = { Name = "${var.cluster_name}-simulation-gpu" }
+
+  depends_on = [
+    aws_iam_role_policy_attachment.node_worker,
+    aws_iam_role_policy_attachment.node_ecr,
+  ]
+}
