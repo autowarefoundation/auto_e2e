@@ -19,7 +19,7 @@ _CLUSTER = os.environ.get("EKS_CLUSTER", "auto-e2e-platform")
 TRAINING_IMAGE = f"{_ACCOUNT_ID}.dkr.ecr.{_REGION}.amazonaws.com/auto-e2e/training:latest"
 DATA_PREP_IMAGE = f"{_ACCOUNT_ID}.dkr.ecr.{_REGION}.amazonaws.com/auto-e2e/data-prep:latest"
 TRAINING_RL_IMAGE = f"{_ACCOUNT_ID}.dkr.ecr.{_REGION}.amazonaws.com/auto-e2e/training-rl:latest"
-MLFLOW_URI = os.environ.get("MLFLOW_TRACKING_URI", "http://172.20.240.62:5000")
+MLFLOW_URI = os.environ.get("MLFLOW_TRACKING_URI", "http://mlflow.mlflow.svc.cluster.local:5000")
 DATASET_BUCKET = f"{_CLUSTER}-datasets-{_ACCOUNT_ID}"
 CHECKPOINT_BUCKET = f"{_CLUSTER}-checkpoints-{_ACCOUNT_ID}"
 
