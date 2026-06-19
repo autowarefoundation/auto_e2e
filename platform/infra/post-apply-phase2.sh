@@ -82,12 +82,30 @@ cd ../../..
 
 echo "=== 8. Register Flyte workflows ==="
 cd platform/pipelines
-pip install flytekit==1.16.23 flytekitplugins-kfpytorch==1.16.23 2>/dev/null || true
-pyflyte register training/ \
+pip install flytekit flytekitplugins-kfpytorch 2>/dev/null || true
+export AWS_ACCOUNT_ID="$ACCOUNT"
+export AWS_REGION="$REGION"
+export MLFLOW_TRACKING_URI=$(kubectl get svc mlflow -n mlflow -o jsonpath='{.spec.clusterIP}' 2>/dev/null):5000
+export MLFLOW_TRACKING_URI="http://${MLFLOW_TRACKING_URI}"
+pyflyte register training/ data_ingest/ evaluation/ \
   --project auto-e2e \
   --domain development \
-  --image "${ECR_URL}/auto-e2e/training:latest" \
+  --image "${ECR_URL}/auto-e2e/data-prep:latest" \
   || echo "WARNING: pyflyte register failed. Ensure flytekit is installed."
+
+echo "=== 9. Create HF_TOKEN K8s Secret (from Secrets Manager) ==="
+HF_SECRET_ARN=$(aws secretsmanager list-secrets --profile "$PROFILE" --region "$REGION" \
+  --query "SecretList[?contains(Name,'hf-token')].ARN" --output text 2>/dev/null)
+if [ -n "$HF_SECRET_ARN" ]; then
+  HF_TOKEN_VAL=$(aws secretsmanager get-secret-value --secret-id "$HF_SECRET_ARN" \
+    --region "$REGION" --profile "$PROFILE" --query SecretString --output text)
+  kubectl create secret generic hf-token -n auto-e2e-training \
+    --from-literal=HF_TOKEN="$HF_TOKEN_VAL" \
+    --dry-run=client -o yaml | kubectl apply -f -
+  echo "  hf-token secret created/updated"
+else
+  echo "  No HF_TOKEN in Secrets Manager (optional, skip)"
+fi
 
 echo ""
 echo "=== Done ==="
