@@ -171,14 +171,129 @@ Train a reward model from human driving preferences:
 4. **Hydra-MDP** (NVIDIA, 2024): "End-to-end driving at scale with
    multi-decoder policy." Shows RL fine-tuning improves closed-loop metrics.
 
-## Open Questions
+## Full Pipeline: IL → Gate → RL → Gate → Champion
 
-1. **GPU budget for RL**: PPO + CARLA can run on single g5.xlarge (rollout) +
-   g6e (gradient updates). AlpaGym needs 8+ GPUs. Start small.
-2. **When to start RL**: After IL model reaches reasonable open-loop metrics
-   (ADE@3s < 1.5m). RL before this wastes compute on a bad starting policy.
-3. **Sim-to-real gap**: CARLA rendering ≠ real cameras. Domain randomization
-   (weather, lighting, camera noise) helps. AlpaSim uses neural rendering
-   from real data (NuRec), reducing this gap.
-4. **Reward hacking**: Model may find exploits (e.g., driving very slowly to
-   avoid collisions). Need minimum speed reward term.
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│  Flyte End-to-End Pipeline (visible in Flyte UI as one DAG)                 │
+│                                                                             │
+│  ┌──────────┐    ┌──────────────┐    ┌─────────────┐    ┌───────────────┐  │
+│  │ IL Train │───▶│ Open-Loop    │───▶│ Closed-Loop │───▶│ RL Post-Train │  │
+│  │          │    │ Eval (ADE/   │    │ Eval (CARLA)│    │ (PPO+CARLA)   │  │
+│  │ Phase 2  │    │ FDE gate)    │    │ gate        │    │ Phase 6       │  │
+│  └──────────┘    └──────┬───────┘    └──────┬──────┘    └───────┬───────┘  │
+│                         │ FAIL              │ FAIL               │          │
+│                         ▼                   ▼                    ▼          │
+│                    STOP (log              STOP (log         ┌──────────┐    │
+│                    to MLflow)             to MLflow)        │ RL Eval  │    │
+│                                                            │(OL + CL) │    │
+│                                                            └────┬─────┘    │
+│                                                                 │ PASS     │
+│                                                                 ▼          │
+│                                                           promote to       │
+│                                                           "champion"       │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+Gates:
+- Open-Loop: ADE@3s < 2.0m, FDE@6.4s < 5.0m
+- Closed-Loop: route_completion ≥ 90%, collisions = 0
+- RL output must **also** pass both gates (no regression)
+
+## MLflow Experiment Structure
+
+IL models と RL models は **同じ MLflow experiment 内で別 run** として管理。
+tag で区別し、UI 上でフィルタ・比較可能:
+
+```
+MLflow Experiment: "auto_e2e/l2d"
+│
+├── Run: il-swin-concat-ep20-lr1e4       (tags: stage=IL, backbone=swin_v2_tiny)
+│   ├── Params: backbone, fusion, epochs, lr, dataset
+│   ├── Metrics: train_loss, ADE@3s, FDE@6.4s, route_completion, collisions
+│   └── Artifacts: checkpoint.pt
+│
+├── Run: il-convnext-concat-ep20-lr1e4   (tags: stage=IL, backbone=conv_next_v2_tiny)
+│   └── ...
+│
+├── Run: rl-swin-concat-ppo-100k         (tags: stage=RL, base_run=il-swin-concat-...)
+│   ├── Params: rl_algo=PPO, total_timesteps=100k, reward=progress_safety
+│   ├── Metrics: mean_reward, ADE@3s (post-RL), route_completion (post-RL)
+│   ├── Parent run: il-swin-concat-ep20-lr1e4  (MLflow parent_run_id)
+│   └── Artifacts: rl_checkpoint.pt
+│
+└── Run: rl-swin-concat-ppo-200k         (tags: stage=RL, extended training)
+    └── ...
+```
+
+**MLflow UI での比較**:
+- Filter by `tags.stage = IL` → IL 同士のハイパラ比較
+- Filter by `tags.stage = RL` → RL 同士の比較
+- Compare IL run vs corresponding RL run → RL の効果量を可視化
+- Sort by `metrics.ADE@3s` → 全モデル (IL+RL) 横断でベスト特定
+
+## Metrics Workflow (RL 後の評価)
+
+RL checkpoint も IL と **全く同じ eval workflow** を通す:
+
+```python
+@workflow
+def full_pipeline(
+    backbone: str = "swin_v2_tiny",
+    fusion_mode: str = "concat",
+    epochs: int = 20,
+    rl_timesteps: int = 100_000,
+):
+    # === IL Phase ===
+    il_checkpoint = train_il(backbone, fusion_mode, epochs)
+    il_metrics = eval_open_loop(il_checkpoint)
+    il_sim = eval_carla(il_checkpoint)
+
+    # Log IL results to MLflow (tags: stage=IL)
+    log_to_mlflow(il_checkpoint, il_metrics, il_sim, stage="IL")
+
+    # Gate 1: Open-loop
+    if not gate_open_loop(il_metrics):
+        return
+    # Gate 2: Closed-loop
+    if not gate_closed_loop(il_sim):
+        return
+
+    # === RL Phase (only reached by good IL models) ===
+    rl_checkpoint = train_rl(il_checkpoint, timesteps=rl_timesteps)
+    rl_metrics = eval_open_loop(rl_checkpoint)
+    rl_sim = eval_carla(rl_checkpoint)
+
+    # Log RL results to MLflow (tags: stage=RL, parent=IL run)
+    log_to_mlflow(rl_checkpoint, rl_metrics, rl_sim, stage="RL",
+                  parent_run=il_checkpoint.mlflow_run_id)
+
+    # Gate 3: RL must not regress
+    if gate_open_loop(rl_metrics) and gate_closed_loop(rl_sim):
+        promote_to_champion(rl_checkpoint)
+```
+
+**Key Design**: `eval_open_loop` と `eval_carla` は IL/RL に関わらず**同一 task**。
+checkpoint path を渡すだけ。評価コードの重複ゼロ。
+
+## MLflow Model Registry Aliases
+
+```
+auto_e2e (registered model)
+  ├── version 1: il-swin-concat       → alias: (none)
+  ├── version 2: il-convnext-concat   → alias: (none)
+  ├── version 3: il-swin-concat       → alias: "staging" (passed IL gates)
+  ├── version 4: rl-swin-concat-100k  → alias: "champion" (passed all gates)
+  └── version 5: rl-swin-concat-200k  → alias: (evaluation in progress)
+```
+
+## Flyte UI Visibility
+
+Flyte UI で見えるもの:
+- `full_pipeline` DAG: IL → eval → gate → RL → eval → gate → promote
+- 各ノードの実行ステータス (成功/失敗/スキップ)
+- Input パラメータ (backbone, fusion, epochs, rl_timesteps, dataset)
+- 各 task の出力 (metrics dict, pass/fail)
+
+LaunchPlan で「backbone × fusion × rl_timesteps」のグリッドサーチを Flyte UI から
+ワンクリックで起動可能。結果は全て MLflow に集約。
