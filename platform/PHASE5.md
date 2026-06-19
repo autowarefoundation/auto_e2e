@@ -284,3 +284,27 @@ def closed_loop_eval(checkpoint_s3: str) -> bool:
    For parallelism, spawn multiple server pods (up to NodePool limit of 2 GPUs).
 5. **When to trigger**: After Phase 4 gate passes (automatic) or manual from Flyte UI.
    Start with manual; automate in Phase 6.
+
+## Known Limitation: EKS Auto Mode + Bottlerocket + Vulkan
+
+**CARLA requires Vulkan rendering, but Bottlerocket NVIDIA AMI is compute-only.**
+
+EKS Auto Mode uses Bottlerocket with NVIDIA CUDA drivers (tesla variant).
+These drivers provide `nvidia.com/gpu` for CUDA compute but do NOT include
+Vulkan ICD (`nvidia_icd.json`). CARLA (UE4 engine) requires Vulkan for
+both headless and display rendering.
+
+### Workarounds
+
+1. **EKS Managed Node Group with Amazon Linux 2 NVIDIA AMI**: Add a separate
+   node group (not Auto Mode) using the AL2 NVIDIA optimized AMI which includes
+   full NVIDIA drivers with Vulkan support. Use node labels + taints to
+   schedule CARLA only on these nodes.
+
+2. **EC2 standalone**: Run CARLA on a dedicated EC2 instance (g5.xlarge with
+   AL2 NVIDIA AMI) outside EKS. Connect from training pods via network.
+
+3. **Custom Bottlerocket variant**: Build a custom Bottlerocket AMI with Vulkan
+   ICD included (complex, not recommended).
+
+Recommended: Option 1 (managed node group) for K8s integration.
