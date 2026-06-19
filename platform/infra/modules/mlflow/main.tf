@@ -82,12 +82,15 @@ resource "helm_release" "mlflow" {
     value = "mlflow"
   }
 
-  # Allow cluster-internal Host headers (MLflow 3.x security)
-  # MLflow 3.x with gunicorn rejects non-localhost Host headers.
-  # Workaround: training pods use ClusterIP in MLFLOW_TRACKING_URI.
+  # MLflow uvicorn mode: disable gunicorn (enables security middleware control)
+  # MLFLOW_SERVER_ALLOWED_HOSTS=* allows any Host header (CloudFront, ALB, etc)
   set {
     name  = "extraFlags[0]"
     value = "serveArtifacts"
+  }
+  set {
+    name  = "extraEnvVars.MLFLOW_SERVER_ALLOWED_HOSTS"
+    value = "*"
   }
 
   # AWS region via env var

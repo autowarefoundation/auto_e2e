@@ -1,4 +1,5 @@
 # MLflow community-charts/mlflow 1.8.5 values override
+# extraFlags and env vars managed via Terraform set{} blocks
 resources:
   requests:
     cpu: 200m
@@ -10,5 +11,3 @@ postgresql:
 service:
   type: ClusterIP
   port: 5000
-extraFlags:
-  - serveArtifacts
