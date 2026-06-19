@@ -43,7 +43,7 @@ _ACCOUNT_ID = os.environ.get("AWS_ACCOUNT_ID", "381491877296")
 _REGION = os.environ.get("AWS_REGION", "us-west-2")
 
 TRAINING_IMAGE = f"{_ACCOUNT_ID}.dkr.ecr.{_REGION}.amazonaws.com/auto-e2e/training:latest"
-MLFLOW_URI = os.environ.get("MLFLOW_TRACKING_URI", "http://172.20.240.62:5000")
+MLFLOW_URI = os.environ.get("MLFLOW_TRACKING_URI", "http://mlflow.mlflow.svc.cluster.local:5000")
 
 
 # ---------------------------------------------------------------------------
