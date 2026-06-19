@@ -1,0 +1,57 @@
+# CARLA server pod — deploy before running closed-loop eval.
+# Runs headless with Vulkan offscreen rendering on the simulation GPU node.
+# Usage: kubectl apply -f carla-server.yaml
+#        kubectl delete pod carla-server -n auto-e2e-training  (when done)
+apiVersion: v1
+kind: Pod
+metadata:
+  name: carla-server
+  namespace: auto-e2e-training
+  labels:
+    app: carla-server
+spec:
+  nodeSelector:
+    workload-type: simulation
+  tolerations:
+    - key: nvidia.com/gpu-sim
+      operator: Exists
+      effect: NoSchedule
+  containers:
+    - name: carla
+      image: carlasim/carla:0.9.15
+      command: ["/bin/bash", "-c"]
+      args:
+        - |
+          ./CarlaUE4.sh -RenderOffScreen -nosound -carla-rpc-port=2000 -quality-level=Low
+      ports:
+        - containerPort: 2000
+          name: rpc
+        - containerPort: 2001
+          name: streaming
+      env:
+        - name: SDL_VIDEODRIVER
+          value: "offscreen"
+      resources:
+        requests:
+          cpu: "4"
+          memory: "12Gi"
+          nvidia.com/gpu: "1"
+        limits:
+          nvidia.com/gpu: "1"
+---
+# Service for client pods to connect
+apiVersion: v1
+kind: Service
+metadata:
+  name: carla-server
+  namespace: auto-e2e-training
+spec:
+  selector:
+    app: carla-server
+  ports:
+    - name: rpc
+      port: 2000
+      targetPort: 2000
+    - name: streaming
+      port: 2001
+      targetPort: 2001
