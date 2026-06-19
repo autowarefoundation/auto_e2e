@@ -59,8 +59,8 @@ class NvidiaAVAdapter(IngestAdapter):
             return clip_dir
 
         # Use SDK to download single clip
-        from physical_ai_av import PhysicalAIAV
-        sdk = PhysicalAIAV()
+        from physical_ai_av import PhysicalAIAVDatasetInterface
+        sdk = PhysicalAIAVDatasetInterface()
         sdk.download(clip_uuids=[ref.episode_id], output_dir=str(clip_dir))
         return clip_dir
 
