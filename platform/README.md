@@ -256,7 +256,7 @@ tracking + Model Registry. UIs exposed via internal ALB → CloudFront → Cogni
 - [x] Kueue objects: ResourceFlavor/ClusterQueue/LocalQueue + 2 WorkloadPriorityClass
 - [x] MLflow (server-proxied S3 artifacts) + minimal MLflow logging in train.py
 - [x] Flyte (flyte-binary) + kfpytorch plugin; LaunchPlan enums from registries; sweep
-- [ ] Internal ALB → CloudFront + Cognito for Flyte/MLflow UIs
+- [x] Internal ALB → CloudFront + Cognito for Flyte/MLflow UIs
 - [x] Verify: UI launch → Kueue admit → PyTorchJob on g6e → MLflow run + artifact
 
 ### Phase 3: Data Pipeline (Flyte + LakeFS)
