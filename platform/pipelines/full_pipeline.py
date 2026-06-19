@@ -17,6 +17,7 @@ _REGION = os.environ.get("AWS_REGION", "us-west-2")
 _CLUSTER = os.environ.get("EKS_CLUSTER", "auto-e2e-platform")
 
 TRAINING_IMAGE = f"{_ACCOUNT_ID}.dkr.ecr.{_REGION}.amazonaws.com/auto-e2e/training:latest"
+DATA_PREP_IMAGE = f"{_ACCOUNT_ID}.dkr.ecr.{_REGION}.amazonaws.com/auto-e2e/data-prep:latest"
 TRAINING_RL_IMAGE = f"{_ACCOUNT_ID}.dkr.ecr.{_REGION}.amazonaws.com/auto-e2e/training-rl:latest"
 MLFLOW_URI = os.environ.get("MLFLOW_TRACKING_URI", "http://172.20.240.62:5000")
 DATASET_BUCKET = f"{_CLUSTER}-datasets-{_ACCOUNT_ID}"
@@ -47,7 +48,7 @@ def make_il_train_task(backbone: str, fusion_mode: str, epochs: int, lr: float, 
 
 # --- Evaluation Tasks ---
 
-@task(container_image=TRAINING_IMAGE,
+@task(container_image=DATA_PREP_IMAGE,
       requests=Resources(cpu="6", mem="40Gi", gpu="1"),
       limits=Resources(gpu="1"),
       environment={"MLFLOW_TRACKING_URI": MLFLOW_URI, "AWS_DEFAULT_REGION": _REGION},
@@ -62,7 +63,7 @@ def eval_open_loop(checkpoint_s3: str, val_shard_dir: str) -> dict:
     return {"ADE@3s": 1.5, "FDE@6.4s": 3.0}  # placeholder
 
 
-@task(container_image=TRAINING_IMAGE,
+@task(container_image=DATA_PREP_IMAGE,
       requests=Resources(cpu="4", mem="16Gi"),
       environment={"MLFLOW_TRACKING_URI": MLFLOW_URI})
 def eval_closed_loop(checkpoint_s3: str, scenarios: str = "S01,S02,S03") -> dict:
@@ -71,7 +72,7 @@ def eval_closed_loop(checkpoint_s3: str, scenarios: str = "S01,S02,S03") -> dict
     return {"route_completion": 0.95, "collisions": 0}  # placeholder
 
 
-@task(container_image=TRAINING_IMAGE,
+@task(container_image=DATA_PREP_IMAGE,
       requests=Resources(cpu="1", mem="1Gi"),
       environment={"MLFLOW_TRACKING_URI": MLFLOW_URI})
 def gate_check(metrics: dict, sim_results: dict) -> bool:
@@ -81,7 +82,7 @@ def gate_check(metrics: dict, sim_results: dict) -> bool:
     return ol_pass and cl_pass
 
 
-@task(container_image=TRAINING_IMAGE,
+@task(container_image=DATA_PREP_IMAGE,
       requests=Resources(cpu="1", mem="1Gi"),
       environment={"MLFLOW_TRACKING_URI": MLFLOW_URI})
 def log_to_mlflow(checkpoint_s3: str, metrics: dict, sim_results: dict, stage: str) -> str:
@@ -98,7 +99,7 @@ def log_to_mlflow(checkpoint_s3: str, metrics: dict, sim_results: dict, stage: s
         return run.info.run_id
 
 
-@task(container_image=TRAINING_IMAGE,
+@task(container_image=DATA_PREP_IMAGE,
       requests=Resources(cpu="1", mem="1Gi"),
       environment={"MLFLOW_TRACKING_URI": MLFLOW_URI})
 def promote_to_champion(checkpoint_s3: str, run_id: str) -> None:

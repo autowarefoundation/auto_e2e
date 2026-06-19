@@ -278,21 +278,21 @@ the moment the first UI-launched training run produces results to compare.)
 
 Goal: Every checkpoint is automatically evaluated with open-loop metrics.
 
-- [ ] Evaluation Dockerfile (model + metrics code)
-- [ ] Flyte evaluation workflow (load checkpoint → val set → ADE/FDE/Comfort)
+- [x] Evaluation Dockerfile (model + metrics code)
+- [x] Flyte evaluation workflow (load checkpoint → val set → ADE/FDE/Comfort)
 - [ ] KServe + Triton for GPU inference (batch eval)
-- [ ] Gate logic: metrics must improve over previous best to promote
+- [x] Gate logic: metrics must improve over previous best to promote
 - [ ] Verify: Flyte auto-evaluates after training, promotes to MLflow Staging
 
 ### Phase 5: Closed-Loop Simulation (CARLA)
 
 Goal: Models are tested in simulated driving scenarios before production.
 
-- [ ] CARLA Dockerfile (server, headless GPU)
-- [ ] Simulation NodePool (Karpenter, g5.xlarge, scale-to-zero)
-- [ ] Flyte simulation workflow (provision → run scenarios → collect)
+- [x] CARLA Dockerfile (server, headless GPU)
+- [x] Simulation NodePool (Karpenter, g5.xlarge, scale-to-zero)
+- [x] Flyte simulation workflow (provision → run scenarios → collect)
 - [ ] ScenarioRunner integration (parallel scenario execution)
-- [ ] Metrics: route completion, collision rate, comfort
+- [x] Metrics: route completion, collision rate, comfort
 - [ ] Verify: model runs closed-loop in CARLA, results feed back to MLflow
 
 ### Phase 6: CI/CD Integration

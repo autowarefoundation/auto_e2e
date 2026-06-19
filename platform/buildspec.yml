@@ -28,7 +28,8 @@ phases:
       - export AWS_REGION=$AWS_DEFAULT_REGION
       - export MLFLOW_TRACKING_URI=$(aws ssm get-parameter --name "/${EKS_CLUSTER}/mlflow-uri" --query Parameter.Value --output text 2>/dev/null || echo "http://mlflow.mlflow.svc.cluster.local:5000")
       - cd platform/pipelines
-      - pyflyte register training/ data_ingest/ evaluation/ --project auto-e2e --domain development --image ${ECR_URL}/auto-e2e/data-prep:latest 2>&1 || echo "WARN pyflyte register failed (Flyte may not be accessible from CodeBuild)"
+      - pyflyte register training/ data_ingest/ evaluation/ simulation/ --project auto-e2e --domain development --image ${ECR_URL}/auto-e2e/data-prep:latest 2>&1 || echo "WARN pyflyte register failed (Flyte may not be accessible from CodeBuild)"
+      - pyflyte register full_pipeline.py --project auto-e2e --domain development --image ${ECR_URL}/auto-e2e/data-prep:latest 2>&1 || true
       - echo "Done."
 
 cache:

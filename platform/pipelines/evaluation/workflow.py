@@ -13,12 +13,12 @@ import os
 _ACCOUNT_ID = os.environ.get("AWS_ACCOUNT_ID", "381491877296")
 _REGION = os.environ.get("AWS_REGION", "us-west-2")
 
-TRAINING_IMAGE = f"{_ACCOUNT_ID}.dkr.ecr.{_REGION}.amazonaws.com/auto-e2e/training:latest"
+DATA_PREP_IMAGE = f"{_ACCOUNT_ID}.dkr.ecr.{_REGION}.amazonaws.com/auto-e2e/data-prep:latest"
 MLFLOW_URI = os.environ.get("MLFLOW_TRACKING_URI", "http://172.20.240.62:5000")
 
 
 @task(
-    container_image=TRAINING_IMAGE,
+    container_image=DATA_PREP_IMAGE,
     requests=Resources(cpu="6", mem="40Gi", gpu="1"),
     limits=Resources(gpu="1"),
     environment={"MLFLOW_TRACKING_URI": MLFLOW_URI, "AWS_DEFAULT_REGION": "us-west-2"},
@@ -94,7 +94,7 @@ def run_eval(checkpoint_s3: str, val_shard_dir: str) -> dict:
 
 
 @task(
-    container_image=TRAINING_IMAGE,
+    container_image=DATA_PREP_IMAGE,
     requests=Resources(cpu="1", mem="1Gi"),
     environment={"MLFLOW_TRACKING_URI": MLFLOW_URI},
 )
