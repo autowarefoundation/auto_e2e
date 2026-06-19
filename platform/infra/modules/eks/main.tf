@@ -206,11 +206,46 @@ output "oidc_provider_url" {
 }
 
 # Managed Node Group for simulation (CARLA requires Vulkan — Bottlerocket doesn't have it)
-# AL2_x86_64_GPU AMI includes full NVIDIA driver with Vulkan ICD support.
+# AL2023_x86_64_NVIDIA AMI includes full NVIDIA driver with Vulkan ICD support.
+# Uses a SEPARATE node role (EC2_LINUX type access entry, not EC2 for Auto Mode).
+resource "aws_iam_role" "simulation_node" {
+  name = "${var.cluster_name}-sim-node-role"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Action = ["sts:AssumeRole"]
+      Effect = "Allow"
+      Principal = { Service = "ec2.amazonaws.com" }
+    }]
+  })
+}
+
+resource "aws_iam_role_policy_attachment" "sim_worker" {
+  role       = aws_iam_role.simulation_node.name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonEKSWorkerNodePolicy"
+}
+
+resource "aws_iam_role_policy_attachment" "sim_cni" {
+  role       = aws_iam_role.simulation_node.name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonEKS_CNI_Policy"
+}
+
+resource "aws_iam_role_policy_attachment" "sim_ecr" {
+  role       = aws_iam_role.simulation_node.name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly"
+}
+
+resource "aws_eks_access_entry" "simulation_node" {
+  cluster_name  = aws_eks_cluster.this.name
+  principal_arn = aws_iam_role.simulation_node.arn
+  type          = "EC2_LINUX"
+}
+
 resource "aws_eks_node_group" "simulation" {
   cluster_name    = aws_eks_cluster.this.name
   node_group_name = "simulation-gpu"
-  node_role_arn   = aws_iam_role.node.arn
+  node_role_arn   = aws_iam_role.simulation_node.arn
   subnet_ids      = [var.private_subnet_ids[1]]  # us-west-2b (ODCR AZ)
 
   ami_type       = "AL2023_x86_64_NVIDIA"
@@ -236,7 +271,25 @@ resource "aws_eks_node_group" "simulation" {
   tags = { Name = "${var.cluster_name}-simulation-gpu" }
 
   depends_on = [
-    aws_iam_role_policy_attachment.node_worker,
-    aws_iam_role_policy_attachment.node_ecr,
+    aws_iam_role_policy_attachment.sim_worker,
+    aws_iam_role_policy_attachment.sim_cni,
+    aws_iam_role_policy_attachment.sim_ecr,
+    aws_eks_access_entry.simulation_node,
   ]
+}
+
+# Additional policies needed for managed node groups (AL2023 needs full policies)
+resource "aws_iam_role_policy_attachment" "node_eks_worker" {
+  role       = aws_iam_role.node.name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonEKSWorkerNodePolicy"
+}
+
+resource "aws_iam_role_policy_attachment" "node_cni" {
+  role       = aws_iam_role.node.name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonEKS_CNI_Policy"
+}
+
+resource "aws_iam_role_policy_attachment" "node_ecr_readonly" {
+  role       = aws_iam_role.node.name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly"
 }
