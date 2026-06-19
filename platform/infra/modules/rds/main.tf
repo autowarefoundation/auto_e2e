@@ -53,6 +53,19 @@ resource "aws_security_group" "rds" {
   tags = { Name = "${var.cluster_name}-rds-sg" }
 }
 
+resource "aws_db_parameter_group" "this" {
+  name   = "${var.cluster_name}-pg16"
+  family = "postgres16"
+
+  # Flyte's stow library doesn't pass sslmode in connection string;
+  # disable force_ssl so non-SSL connections from within VPC are allowed.
+  parameter {
+    name         = "rds.force_ssl"
+    value        = "0"
+    apply_method = "immediate"
+  }
+}
+
 resource "aws_db_instance" "this" {
   identifier     = "${var.cluster_name}-pg"
   engine         = "postgres"
@@ -70,6 +83,7 @@ resource "aws_db_instance" "this" {
 
   db_subnet_group_name   = aws_db_subnet_group.this.name
   vpc_security_group_ids = [aws_security_group.rds.id]
+  parameter_group_name   = aws_db_parameter_group.this.name
 
   multi_az                = false
   publicly_accessible     = false
