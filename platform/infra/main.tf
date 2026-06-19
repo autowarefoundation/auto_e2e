@@ -142,6 +142,10 @@ output "cognito_user_pool_id" {
   value = module.ui_exposure.cognito_user_pool_id
 }
 
+output "cloudfront_url" {
+  value = module.ui_exposure.cloudfront_url
+}
+
 # HF_TOKEN → Secrets Manager → K8s Secret (for gated dataset access)
 resource "aws_secretsmanager_secret" "hf_token" {
   count                   = var.hf_token != "" ? 1 : 0
