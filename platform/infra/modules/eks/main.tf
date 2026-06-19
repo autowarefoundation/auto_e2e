@@ -213,7 +213,7 @@ resource "aws_eks_node_group" "simulation" {
   node_role_arn   = aws_iam_role.node.arn
   subnet_ids      = [var.private_subnet_ids[1]]  # us-west-2b (ODCR AZ)
 
-  ami_type       = "AL2_x86_64_GPU"
+  ami_type       = "AL2023_x86_64_NVIDIA"
   instance_types = ["g5.xlarge"]
   capacity_type  = "ON_DEMAND"
 
