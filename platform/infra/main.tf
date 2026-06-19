@@ -123,6 +123,23 @@ output "codebuild_project" {
   value = module.codebuild.project_name
 }
 
+# --- UI Exposure: CloudFront + Cognito ---
+
+module "ui_exposure" {
+  source = "./modules/ui-exposure"
+
+  cluster_name       = var.cluster_name
+  vpc_id             = module.vpc.vpc_id
+  private_subnet_ids = module.vpc.private_subnet_ids
+  environment        = var.environment
+
+  depends_on = [module.mlflow, module.flyte]
+}
+
+output "cloudfront_url" {
+  value = "https://${module.ui_exposure.cloudfront_domain}"
+}
+
 # HF_TOKEN → Secrets Manager → K8s Secret (for gated dataset access)
 resource "aws_secretsmanager_secret" "hf_token" {
   count                   = var.hf_token != "" ? 1 : 0

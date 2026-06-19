@@ -93,7 +93,29 @@ pyflyte register training/ data_ingest/ evaluation/ \
   --image "${ECR_URL}/auto-e2e/data-prep:latest" \
   || echo "WARNING: pyflyte register failed. Ensure flytekit is installed."
 
-echo "=== 9. Create HF_TOKEN K8s Secret (from Secrets Manager) ==="
+echo "=== 9. Register ALB Target Group Bindings (MLflow + Flyte) ==="
+MLFLOW_TG_ARN=$(terraform output -json 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin).get('mlflow_tg_arn',{}).get('value',''))" 2>/dev/null)
+FLYTE_TG_ARN=$(terraform output -json 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin).get('flyte_tg_arn',{}).get('value',''))" 2>/dev/null)
+
+if [ -n "$MLFLOW_TG_ARN" ]; then
+  MLFLOW_IP=$(kubectl get pod -n mlflow -l app.kubernetes.io/name=mlflow -o jsonpath='{.items[0].status.podIP}' 2>/dev/null)
+  if [ -n "$MLFLOW_IP" ]; then
+    aws elbv2 register-targets --target-group-arn "$MLFLOW_TG_ARN" \
+      --targets Id=$MLFLOW_IP,Port=5000 --profile "$PROFILE" --region "$REGION" 2>/dev/null
+    echo "  MLflow registered: $MLFLOW_IP:5000"
+  fi
+fi
+
+if [ -n "$FLYTE_TG_ARN" ]; then
+  FLYTE_IP=$(kubectl get pod -n flyte -l app.kubernetes.io/name=flyte-binary-console -o jsonpath='{.items[0].status.podIP}' 2>/dev/null)
+  if [ -n "$FLYTE_IP" ]; then
+    aws elbv2 register-targets --target-group-arn "$FLYTE_TG_ARN" \
+      --targets Id=$FLYTE_IP,Port=80 --profile "$PROFILE" --region "$REGION" 2>/dev/null
+    echo "  Flyte registered: $FLYTE_IP:80"
+  fi
+fi
+
+echo "=== 10. Create HF_TOKEN K8s Secret (from Secrets Manager) ==="
 HF_SECRET_ARN=$(aws secretsmanager list-secrets --profile "$PROFILE" --region "$REGION" \
   --query "SecretList[?contains(Name,'hf-token')].ARN" --output text 2>/dev/null)
 if [ -n "$HF_SECRET_ARN" ]; then
