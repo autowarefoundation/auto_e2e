@@ -122,3 +122,18 @@ module "codebuild" {
 output "codebuild_project" {
   value = module.codebuild.project_name
 }
+
+# HF_TOKEN → Secrets Manager → K8s Secret (for gated dataset access)
+resource "aws_secretsmanager_secret" "hf_token" {
+  count                   = var.hf_token != "" ? 1 : 0
+  name                    = "${var.cluster_name}/hf-token"
+  recovery_window_in_days = 7
+}
+
+resource "aws_secretsmanager_secret_version" "hf_token" {
+  count         = var.hf_token != "" ? 1 : 0
+  secret_id     = aws_secretsmanager_secret.hf_token[0].id
+  secret_string = var.hf_token
+}
+
+# K8s Secret is created by post-apply script (reads from Secrets Manager)

@@ -36,3 +36,10 @@ variable "odcr_id" {
   description = "On-Demand Capacity Reservation ID for the GPU node (set in secrets.auto.tfvars)"
   type        = string
 }
+
+variable "hf_token" {
+  description = "HuggingFace API token for gated dataset access (set in secrets.auto.tfvars)"
+  type        = string
+  sensitive   = true
+  default     = ""
+}
