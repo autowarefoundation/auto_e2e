@@ -58,7 +58,7 @@ spec:
   nodeSelector:
     workload-type: simulation
   tolerations:
-    - key: nvidia.com/gpu
+    - key: nvidia.com/gpu-sim
       operator: Exists
       effect: NoSchedule
   containers:
@@ -123,23 +123,63 @@ spec:
       requirements:
         - key: node.kubernetes.io/instance-type
           operator: In
-          values: ["g5.xlarge"]  # A10G 24GB — sufficient for CARLA headless
+          values: ["g5.xlarge"]  # A10G 24GB — CARLA needs 8-10GB VRAM
         - key: karpenter.sh/capacity-type
           operator: In
-          values: ["spot"]  # Spot OK for simulation (can retry)
+          values: ["on-demand"]  # ODCR guarantees capacity
+        - key: topology.kubernetes.io/zone
+          operator: In
+          values: ["us-west-2b"]  # Pinned to ODCR AZ
       taints:
-        - key: nvidia.com/gpu
+        - key: nvidia.com/gpu-sim
           effect: NoSchedule
   limits:
-    nvidia.com/gpu: "2"  # Max 2 concurrent sim servers
-  disruption:
-    consolidateAfter: 5m  # Scale to zero when idle
+    nvidia.com/gpu: "1"
 ```
 
-Key difference from training NodePool:
-- **Spot instances** OK (simulation is idempotent, can retry on interruption)
-- **Scale-to-zero** (no warm node — sim runs infrequently)
-- **g5.xlarge** (A10G, cheaper than g6e L40S, sufficient for CARLA rendering)
+**ODCR (On-Demand Capacity Reservation)**: g5.xlarge × 1 in us-west-2b.
+Same strategy as training GPU — ODCR guarantees capacity availability.
+
+**Warm node via do-not-disrupt** (same pattern as gpu-node-keeper):
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sim-node-keeper
+  namespace: default
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: sim-node-keeper}
+  template:
+    metadata:
+      labels: {app: sim-node-keeper}
+      annotations:
+        karpenter.sh/do-not-disrupt: "true"
+    spec:
+      tolerations:
+        - key: nvidia.com/gpu-sim
+          operator: Exists
+          effect: NoSchedule
+      nodeSelector:
+        workload-type: simulation
+      containers:
+        - name: pause
+          image: registry.k8s.io/pause:3.9
+          resources:
+            requests: {cpu: "10m", memory: "16Mi"}
+```
+
+**Taint/Toleration scheme** (separate from training GPU):
+- Training GPU: taint `nvidia.com/gpu:NoSchedule` → training pods tolerate
+- Simulation GPU: taint `nvidia.com/gpu-sim:NoSchedule` → CARLA pods tolerate
+- This prevents CARLA from landing on the training node and vice versa
+
+Key differences from training NodePool:
+- **Dedicated taint** (`nvidia.com/gpu-sim`) — CARLA never contends with training
+- **ODCR** — guaranteed capacity (g5 spot is risky; ODCR for reliable availability)
+- **Warm node** — CARLA startup is slow (30s+ for UE4 init); warm node avoids cold boot
+- **g5.xlarge** (A10G 24GB) — CARLA headless uses ~8-10 GB VRAM, plenty of headroom
 
 ## Closed-Loop Metrics
 
@@ -225,10 +265,12 @@ def closed_loop_eval(checkpoint_s3: str) -> bool:
 
 ## Cost Considerations
 
-- g5.xlarge spot: ~$0.40/hr (vs $1.01 on-demand). 70% savings.
-- Scale-to-zero: node only exists during simulation (~10 min per eval cycle).
-- 7 scenarios × ~60s each = ~7 min CARLA time. Total cost per eval: ~$0.05.
-- No warm node — acceptable since sim runs after training (which takes hours).
+- g5.xlarge ODCR (on-demand): ~$1.01/hr. Warm node costs apply 24/7.
+- Monthly warm node cost: ~$730/month (same as training g6e strategy).
+- Convert ODCR to Reserved Instance later for ~40% discount (~$440/month).
+- Alternative: scale-to-zero + spot (risky but $0.40/hr only when running).
+  ODCR chosen for reliability — same rationale as training node.
+- 7 scenarios × ~60s each = ~7 min CARLA time per eval cycle.
 
 ## Open Questions
 
