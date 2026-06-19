@@ -7,39 +7,68 @@ variable "rds_password" {
   sensitive = true
 }
 
+data "aws_caller_identity" "current" {}
+
 resource "helm_release" "flyte" {
-  name             = "flyte-backend"
+  name             = "flyte"
   repository       = "https://flyteorg.github.io/flyte"
-  chart            = "flyte-binary"
-  version          = "2.0.23"
+  chart            = "flyte-core"
+  version          = "1.16.7"
   namespace        = "flyte"
   create_namespace = true
   timeout          = 600
   wait             = false
 
   values = [
-    yamlencode({
-      flyte-core-components = {
-        admin = {
-          seedProjects = ["auto-e2e"]
-        }
-      }
-      configuration = {
-        externalConfigMap = "flyte-custom-config"
-        auth = {
-          enabled = false
-        }
-      }
-      deployment = {
-        resources = {
-          requests = { cpu = "500m", memory = "1Gi" }
-          limits   = { memory = "2Gi" }
-        }
-      }
-      serviceAccount = {
-        create = true
-        name   = "flyte-backend-flyte-binary"
-      }
-    })
+    file("${path.module}/../../../helm-values/flyte-core-eks.yaml"),
   ]
+
+  set_sensitive {
+    name  = "userSettings.dbPassword"
+    value = var.rds_password
+  }
+  set {
+    name  = "userSettings.rdsHost"
+    value = var.rds_host
+  }
+  set {
+    name  = "userSettings.bucketName"
+    value = var.artifacts_bucket
+  }
+  set {
+    name  = "userSettings.accountNumber"
+    value = data.aws_caller_identity.current.account_id
+  }
+  set {
+    name  = "userSettings.accountRegion"
+    value = var.region
+  }
+  set {
+    name  = "userSettings.certificateArn"
+    value = ""
+  }
+  set {
+    name  = "postgres.enabled"
+    value = "false"
+  }
+  set {
+    name  = "common.ingress.enabled"
+    value = "false"
+  }
+  set {
+    name  = "flyteadmin.serviceAccount.name"
+    value = "flyte-backend-flyte-binary"
+  }
+  set {
+    name  = "db.admin.database.username"
+    value = "pgadmin"
+  }
+  set {
+    name  = "db.datacatalog.database.username"
+    value = "pgadmin"
+  }
+  set {
+    name  = "db.scheduler.database.username"
+    value = "pgadmin"
+  }
 }
