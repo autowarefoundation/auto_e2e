@@ -1,0 +1,50 @@
+# Platform UI Ingress — EKS Auto Mode ALB Controller creates the ALB automatically.
+# Path routing: / → MLflow, /console → Flyte Console
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: platform-ui
+  namespace: mlflow
+  annotations:
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    alb.ingress.kubernetes.io/target-type: ip
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTP": 80}]'
+    alb.ingress.kubernetes.io/healthcheck-path: /health
+    alb.ingress.kubernetes.io/group.name: platform-ui
+spec:
+  ingressClassName: alb
+  rules:
+    - http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: mlflow
+                port:
+                  number: 5000
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: platform-ui-flyte
+  namespace: flyte
+  annotations:
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    alb.ingress.kubernetes.io/target-type: ip
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTP": 80}]'
+    alb.ingress.kubernetes.io/healthcheck-path: /
+    alb.ingress.kubernetes.io/healthcheck-port: "80"
+    alb.ingress.kubernetes.io/group.name: platform-ui
+spec:
+  ingressClassName: alb
+  rules:
+    - http:
+        paths:
+          - path: /console
+            pathType: Prefix
+            backend:
+              service:
+                name: flyte-backend-flyte-binary-console
+                port:
+                  number: 80

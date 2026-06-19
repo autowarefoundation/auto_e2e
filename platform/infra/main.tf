@@ -136,8 +136,8 @@ module "ui_exposure" {
   depends_on = [module.mlflow, module.flyte]
 }
 
-output "cloudfront_url" {
-  value = "https://${module.ui_exposure.cloudfront_domain}"
+output "cognito_user_pool_id" {
+  value = module.ui_exposure.cognito_user_pool_id
 }
 
 # HF_TOKEN → Secrets Manager → K8s Secret (for gated dataset access)
