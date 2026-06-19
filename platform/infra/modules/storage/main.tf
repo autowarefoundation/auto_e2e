@@ -12,7 +12,7 @@ variable "pod_identity_associations" {
   }))
   default = [
     { namespace = "auto-e2e-training", service_account = "training-sa" },
-    { namespace = "flyte", service_account = "flyte-backend-flyte-binary" },
+    { namespace = "flyte", service_account = "flyteadmin" },
     { namespace = "mlflow", service_account = "mlflow" },
   ]
 }

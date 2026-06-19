@@ -10,7 +10,7 @@ import os
 from typing import Optional
 
 from flytekit import conditional, dynamic, task, workflow, Resources
-from flytekit.core.raw_container_task import RawContainerTask
+from flytekit.core.container_task import ContainerTask
 
 _ACCOUNT_ID = os.environ.get("AWS_ACCOUNT_ID", "381491877296")
 _REGION = os.environ.get("AWS_REGION", "us-west-2")
@@ -24,10 +24,10 @@ DATASET_BUCKET = f"{_CLUSTER}-datasets-{_ACCOUNT_ID}"
 CHECKPOINT_BUCKET = f"{_CLUSTER}-checkpoints-{_ACCOUNT_ID}"
 
 
-# --- IL Training (RawContainerTask — no flytekit in training image) ---
+# --- IL Training (ContainerTask — no flytekit in training image) ---
 
 def make_il_train_task(backbone: str, fusion_mode: str, epochs: int, lr: float, dataset_format: str, shard_dir: str):
-    return RawContainerTask(
+    return ContainerTask(
         name=f"il-train-{backbone}-{fusion_mode}",
         image=TRAINING_IMAGE,
         command=[
@@ -113,10 +113,10 @@ def promote_to_champion(checkpoint_s3: str, run_id: str) -> None:
         print(f"Promoted version {latest.version} to 'champion'")
 
 
-# --- RL Training (RawContainerTask) ---
+# --- RL Training (ContainerTask) ---
 
 def make_rl_train_task(checkpoint_s3: str, total_timesteps: int = 100_000):
-    return RawContainerTask(
+    return ContainerTask(
         name="rl-train-ppo",
         image=TRAINING_RL_IMAGE,
         command=[

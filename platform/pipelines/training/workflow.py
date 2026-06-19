@@ -1,7 +1,7 @@
 """Flyte training workflows for AutoE2E.
 
 Provides:
-- train_one: RawContainerTask (PyTorchJob rendered by Flyte, no flytekit in training image)
+- train_one: ContainerTask (PyTorchJob rendered by Flyte, no flytekit in training image)
 - train_single: workflow wrapping one training run
 - sweep: @dynamic workflow iterating over backbone x fusion combos
 
@@ -15,7 +15,7 @@ from itertools import product
 from typing import List
 
 from flytekit import dynamic, workflow
-from flytekit.core.raw_container_task import RawContainerTask
+from flytekit.core.container_task import ContainerTask
 
 # ---------------------------------------------------------------------------
 # Dynamic enums from component registries
@@ -47,7 +47,7 @@ MLFLOW_URI = os.environ.get("MLFLOW_TRACKING_URI", "http://172.20.240.62:5000")
 
 
 # ---------------------------------------------------------------------------
-# RawContainerTask: training image has no flytekit dependency
+# ContainerTask: training image has no flytekit dependency
 # ---------------------------------------------------------------------------
 
 def make_train_task(
@@ -60,8 +60,8 @@ def make_train_task(
     dataset_format: str = "pre_extracted",
     shard_dir: str = "/data/shards",
     priority: str = "research-low",
-) -> RawContainerTask:
-    """Create a RawContainerTask for one training run.
+) -> ContainerTask:
+    """Create a ContainerTask for one training run.
 
     The training pod runs plain `python train.py` — no flytekit installed.
     Flyte propeller handles scheduling, monitoring, and output collection.
@@ -83,7 +83,7 @@ def make_train_task(
         "--register-model",
     ]
 
-    return RawContainerTask(
+    return ContainerTask(
         name=name,
         image=TRAINING_IMAGE,
         command=args,
