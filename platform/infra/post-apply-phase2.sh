@@ -16,6 +16,7 @@ aws eks update-kubeconfig --name "$CLUSTER" --region "$REGION" --profile "$PROFI
 
 echo "=== 2. Apply StorageClass (must be first — PVC charts need it) ==="
 kubectl apply -f ../k8s/storage-class.yaml
+kubectl apply -f ../k8s/ingress-class.yaml
 
 echo "=== 3. Apply Phase 2 namespaces + SA + placeholder Secrets ==="
 kubectl apply -f ../k8s/phase2-namespaces.yaml
