@@ -2,6 +2,38 @@ variable "cluster_name" { type = string }
 variable "vpc_id" { type = string }
 variable "private_subnet_ids" { type = list(string) }
 variable "environment" { type = string }
+variable "cluster_security_group_id" { type = string }
+
+# Allow ALB to reach pods on service ports
+resource "aws_security_group_rule" "alb_to_pods_mlflow" {
+  type                     = "ingress"
+  from_port                = 5000
+  to_port                  = 5000
+  protocol                 = "tcp"
+  security_group_id        = var.cluster_security_group_id
+  source_security_group_id = aws_security_group.alb.id
+  description              = "ALB to MLflow pods"
+}
+
+resource "aws_security_group_rule" "alb_to_pods_flyte" {
+  type                     = "ingress"
+  from_port                = 8088
+  to_port                  = 8088
+  protocol                 = "tcp"
+  security_group_id        = var.cluster_security_group_id
+  source_security_group_id = aws_security_group.alb.id
+  description              = "ALB to Flyte admin pods"
+}
+
+resource "aws_security_group_rule" "alb_to_pods_console" {
+  type                     = "ingress"
+  from_port                = 8080
+  to_port                  = 8080
+  protocol                 = "tcp"
+  security_group_id        = var.cluster_security_group_id
+  source_security_group_id = aws_security_group.alb.id
+  description              = "ALB to Flyte console pods"
+}
 
 data "aws_caller_identity" "current" {}
 
@@ -26,14 +58,14 @@ resource "aws_security_group" "alb" {
   name_prefix = "${var.cluster_name}-ui-alb-"
   vpc_id      = var.vpc_id
 
-  # CloudFront VPC Origin creates ENIs with its own SG.
-  # We allow all traffic from within VPC (VPC Origin ENIs are in private subnets)
+  # CloudFront VPC Origin creates ENIs with its own managed SG.
+  # Allow from VPC CIDR (covers VPC Origin ENIs in private subnets)
   ingress {
     from_port   = 80
     to_port     = 80
     protocol    = "tcp"
-    cidr_blocks = ["10.100.0.0/16"]  # VPC CIDR only
-    description = "CloudFront VPC Origin ENIs (private subnet)"
+    cidr_blocks = ["10.100.0.0/16"]
+    description = "VPC internal (CloudFront VPC Origin ENIs)"
   }
 
   egress {
