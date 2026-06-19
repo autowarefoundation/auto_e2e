@@ -258,6 +258,8 @@ resource "aws_eks_node_group" "simulation" {
     max_size     = 1
   }
 
+  disk_size = 100  # CARLA image is 9GB+ needs plenty of storage
+
   labels = {
     "workload-type" = "simulation"
   }
