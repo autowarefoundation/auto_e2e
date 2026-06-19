@@ -34,13 +34,16 @@ FusionMode = Enum("FusionMode", {
 })
 
 # ---------------------------------------------------------------------------
-# Constants
+# Constants — resolved from environment at registration time
 # ---------------------------------------------------------------------------
 
-TRAINING_IMAGE = (
-    "381491877296.dkr.ecr.us-west-2.amazonaws.com/auto-e2e/training:latest"
-)
-MLFLOW_URI = "http://172.20.240.62:5000"
+import os
+
+_ACCOUNT_ID = os.environ.get("AWS_ACCOUNT_ID", "381491877296")
+_REGION = os.environ.get("AWS_REGION", "us-west-2")
+
+TRAINING_IMAGE = f"{_ACCOUNT_ID}.dkr.ecr.{_REGION}.amazonaws.com/auto-e2e/training:latest"
+MLFLOW_URI = os.environ.get("MLFLOW_TRACKING_URI", "http://172.20.240.62:5000")
 
 
 # ---------------------------------------------------------------------------
