@@ -43,16 +43,40 @@ resource "aws_s3_bucket_versioning" "checkpoints" {
 # Pod Identity: IAM role whose trust principal is the EKS Pod Identity service.
 # No OIDC Provider, no per-SA annotations.  Associations below bind it to
 # specific (namespace, service_account) pairs — explicit by construction.
+variable "oidc_provider_arn" {
+  description = "EKS OIDC provider ARN for IRSA"
+  type        = string
+  default     = ""
+}
+
+variable "oidc_provider_url" {
+  description = "EKS OIDC provider URL (without https://)"
+  type        = string
+  default     = ""
+}
+
 resource "aws_iam_role" "s3_access" {
   name = "${var.cluster_name}-s3-access"
 
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
-    Statement = [{
-      Effect    = "Allow"
-      Principal = { Service = "pods.eks.amazonaws.com" }
-      Action    = ["sts:AssumeRole", "sts:TagSession"]
-    }]
+    Statement = concat(
+      [{
+        Effect    = "Allow"
+        Principal = { Service = "pods.eks.amazonaws.com" }
+        Action    = ["sts:AssumeRole", "sts:TagSession"]
+      }],
+      var.oidc_provider_arn != "" ? [{
+        Effect    = "Allow"
+        Principal = { Federated = var.oidc_provider_arn }
+        Action    = "sts:AssumeRoleWithWebIdentity"
+        Condition = {
+          StringLike = {
+            "${var.oidc_provider_url}:sub" = "system:serviceaccount:flyte:flyteadmin"
+          }
+        }
+      }] : []
+    )
   })
 }
 

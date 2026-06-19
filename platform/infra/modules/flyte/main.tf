@@ -57,7 +57,11 @@ resource "helm_release" "flyte" {
   }
   set {
     name  = "flyteadmin.serviceAccount.name"
-    value = "flyte-backend-flyte-binary"
+    value = "flyteadmin"
+  }
+  set {
+    name  = "flyteadmin.serviceAccount.annotations.eks\\.amazonaws\\.com/role-arn"
+    value = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:role/${var.cluster_name}-s3-access"
   }
   set {
     name  = "db.admin.database.username"
