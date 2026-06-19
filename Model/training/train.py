@@ -213,6 +213,7 @@ def run_training(args: argparse.Namespace) -> None:
         import mlflow
         mlflow.set_experiment(f"auto_e2e/{args.dataset or args.repo_id}")
         mlflow.start_run()
+        mlflow.set_tag("stage", "IL")
         mlflow.log_params({
             "backbone": args.backbone,
             "fusion_mode": args.fusion_mode,

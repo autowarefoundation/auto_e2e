@@ -18,6 +18,8 @@ phases:
       - docker push ${ECR_URL}/auto-e2e/training:latest
       - echo "=== Building data-prep image ==="
       - docker build -t ${ECR_URL}/auto-e2e/data-prep:latest -f platform/docker/data-prep/Dockerfile . && docker push ${ECR_URL}/auto-e2e/data-prep:latest || echo "WARN data-prep failed"
+      - echo "=== Building training-rl image ==="
+      - docker build -t ${ECR_URL}/auto-e2e/training-rl:latest -f platform/docker/training-rl/Dockerfile . && docker push ${ECR_URL}/auto-e2e/training-rl:latest || echo "WARN training-rl failed"
   post_build:
     commands:
       - echo "=== Registering Flyte workflows ==="

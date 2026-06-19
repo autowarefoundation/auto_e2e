@@ -1,7 +1,7 @@
 variable "environment" { type = string }
 
 locals {
-  repositories = ["auto-e2e/training", "auto-e2e/data-prep", "auto-e2e/eval"]
+  repositories = ["auto-e2e/training", "auto-e2e/data-prep", "auto-e2e/eval", "auto-e2e/training-rl"]
 }
 
 resource "aws_ecr_repository" "this" {
