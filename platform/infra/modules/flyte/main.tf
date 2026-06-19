@@ -7,6 +7,19 @@ variable "rds_password" {
   sensitive = true
 }
 
+variable "flyte_s3_access_key" {
+  description = "Static AWS access key for Flyte S3 (stow library doesn't support IRSA)"
+  type        = string
+  default     = ""
+}
+
+variable "flyte_s3_secret_key" {
+  description = "Static AWS secret key for Flyte S3"
+  type        = string
+  sensitive   = true
+  default     = ""
+}
+
 data "aws_caller_identity" "current" {}
 
 resource "helm_release" "flyte" {
@@ -74,5 +87,20 @@ resource "helm_release" "flyte" {
   set {
     name  = "db.scheduler.database.username"
     value = "pgadmin"
+  }
+
+  # Storage: custom config with stow + static S3 credentials
+  # (flyte-core chart template only supports 'iam' for type=s3)
+  set {
+    name  = "storage.type"
+    value = "s3"
+  }
+  set {
+    name  = "storage.bucketName"
+    value = var.artifacts_bucket
+  }
+  set_sensitive {
+    name  = "storage.custom.stow.config.secret_access_key"
+    value = var.flyte_s3_secret_key
   }
 }

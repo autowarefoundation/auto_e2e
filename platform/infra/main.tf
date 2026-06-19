@@ -83,13 +83,37 @@ module "mlflow" {
 module "flyte" {
   source = "./modules/flyte"
 
-  cluster_name     = var.cluster_name
-  artifacts_bucket = module.storage.bucket_names["artifacts"]
-  region           = var.region
-  rds_host         = module.rds.address
-  rds_password     = module.rds.master_password
+  cluster_name        = var.cluster_name
+  artifacts_bucket    = module.storage.bucket_names["artifacts"]
+  region              = var.region
+  rds_host            = module.rds.address
+  rds_password        = module.rds.master_password
+  flyte_s3_access_key = aws_iam_access_key.flyte_s3.id
+  flyte_s3_secret_key = aws_iam_access_key.flyte_s3.secret
 
   depends_on = [module.rds, module.storage, module.training_operator, module.kueue]
+}
+
+# IAM user for Flyte S3 access (stow library doesn't support IRSA/Pod Identity)
+resource "aws_iam_user" "flyte_s3" {
+  name = "${var.cluster_name}-flyte-s3"
+}
+
+resource "aws_iam_user_policy" "flyte_s3" {
+  name = "s3-access"
+  user = aws_iam_user.flyte_s3.name
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect   = "Allow"
+      Action   = "s3:*"
+      Resource = ["arn:aws:s3:::${module.storage.bucket_names["artifacts"]}", "arn:aws:s3:::${module.storage.bucket_names["artifacts"]}/*"]
+    }]
+  })
+}
+
+resource "aws_iam_access_key" "flyte_s3" {
+  user = aws_iam_user.flyte_s3.name
 }
 
 output "cluster_name" {
