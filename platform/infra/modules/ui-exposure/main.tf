@@ -41,6 +41,28 @@ locals {
   account_id = data.aws_caller_identity.current.account_id
 }
 
+# Lookup CloudFront VPC Origin managed security group (created after VPC Origin deploys)
+data "aws_security_group" "cf_vpc_origin" {
+  vpc_id = var.vpc_id
+  filter {
+    name   = "group-name"
+    values = ["CloudFront-VPCOrigins-Service-SG"]
+  }
+}
+
+# Separate rule to avoid cycle (CF SG only exists after VPC Origin is created)
+resource "aws_security_group_rule" "alb_from_cf_vpc_origin" {
+  type                     = "ingress"
+  from_port                = 80
+  to_port                  = 80
+  protocol                 = "tcp"
+  security_group_id        = aws_security_group.alb.id
+  source_security_group_id = data.aws_security_group.cf_vpc_origin.id
+  description              = "CloudFront VPC Origin managed SG"
+
+  depends_on = [aws_cloudfront_vpc_origin.alb]
+}
+
 # --- Internal ALB (private subnet, only CloudFront can reach it) ---
 
 resource "aws_lb" "internal" {
