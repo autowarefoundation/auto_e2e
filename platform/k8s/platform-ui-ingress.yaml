@@ -1,5 +1,6 @@
-# Platform UI Ingress — EKS Auto Mode ALB Controller creates the ALB automatically.
-# Path routing: / → MLflow, /console → Flyte Console
+# Platform UI Ingress — EKS Auto Mode ALB Controller creates ALB automatically.
+# Uses group.name to share a single ALB across namespaces.
+---
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
@@ -10,7 +11,9 @@ metadata:
     alb.ingress.kubernetes.io/target-type: ip
     alb.ingress.kubernetes.io/listen-ports: '[{"HTTP": 80}]'
     alb.ingress.kubernetes.io/healthcheck-path: /health
+    alb.ingress.kubernetes.io/healthcheck-port: "5000"
     alb.ingress.kubernetes.io/group.name: platform-ui
+    alb.ingress.kubernetes.io/group.order: "100"
 spec:
   ingressClassName: alb
   rules:
@@ -36,6 +39,7 @@ metadata:
     alb.ingress.kubernetes.io/healthcheck-path: /
     alb.ingress.kubernetes.io/healthcheck-port: "80"
     alb.ingress.kubernetes.io/group.name: platform-ui
+    alb.ingress.kubernetes.io/group.order: "10"
 spec:
   ingressClassName: alb
   rules:
