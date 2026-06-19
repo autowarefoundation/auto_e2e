@@ -20,7 +20,14 @@ from .shard_writer import ShardWriter
 
 logger = logging.getLogger(__name__)
 
-DATA_PREP_IMAGE = "{ACCOUNT_ID}.dkr.ecr.us-west-2.amazonaws.com/auto-e2e/data-prep:latest"
+import os
+
+_ACCOUNT_ID = os.environ.get("AWS_ACCOUNT_ID", "381491877296")
+_REGION = os.environ.get("AWS_REGION", "us-west-2")
+_CLUSTER_NAME = os.environ.get("EKS_CLUSTER", "auto-e2e-platform")
+
+DATA_PREP_IMAGE = f"{_ACCOUNT_ID}.dkr.ecr.{_REGION}.amazonaws.com/auto-e2e/data-prep:latest"
+DEFAULT_DATASET_BUCKET = f"{_CLUSTER_NAME}-datasets-{_ACCOUNT_ID}"
 
 
 @task(
@@ -133,7 +140,7 @@ def build_manifest(
 @dynamic
 def ingest_dataset(
     adapter_name: str = "l2d",
-    output_bucket: str = "auto-e2e-platform-datasets-381491877296",
+    output_bucket: str = DEFAULT_DATASET_BUCKET,
     dataset_name: str = "l2d",
     version: str = "v1.0",
     episode_limit: int = 0,
