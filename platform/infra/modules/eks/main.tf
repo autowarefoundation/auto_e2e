@@ -293,3 +293,9 @@ resource "aws_iam_role_policy_attachment" "node_ecr_readonly" {
   role       = aws_iam_role.node.name
   policy_arn = "arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly"
 }
+
+# VPC CNI addon — required for managed node groups (Auto Mode handles its own CNI)
+resource "aws_eks_addon" "vpc_cni" {
+  cluster_name = aws_eks_cluster.this.name
+  addon_name   = "vpc-cni"
+}
