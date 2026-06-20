@@ -1,5 +1,8 @@
 variable "cluster_name" { type = string }
 variable "environment" { type = string }
+variable "vpc_id" { type = string }
+variable "private_subnet_ids" { type = list(string) }
+variable "cluster_security_group_id" { type = string }
 
 data "aws_caller_identity" "current" {}
 data "aws_region" "current" {}
@@ -104,4 +107,92 @@ resource "aws_codebuild_project" "images" {
 
 output "project_name" {
   value = aws_codebuild_project.images.name
+}
+
+# --- Flyte Register (VPC内, flyteadminにアクセス可能) ---
+
+resource "aws_security_group" "flyte_register" {
+  name_prefix = "${var.cluster_name}-flyte-register-"
+  vpc_id      = var.vpc_id
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  tags = { Name = "${var.cluster_name}-flyte-register-sg" }
+}
+
+resource "aws_iam_role_policy" "flyte_register_vpc" {
+  name = "flyte-register-vpc"
+  role = aws_iam_role.codebuild.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect = "Allow"
+      Action = [
+        "ec2:CreateNetworkInterface",
+        "ec2:DescribeNetworkInterfaces",
+        "ec2:DeleteNetworkInterface",
+        "ec2:DescribeSubnets",
+        "ec2:DescribeSecurityGroups",
+        "ec2:DescribeDhcpOptions",
+        "ec2:DescribeVpcs",
+        "ec2:CreateNetworkInterfacePermission",
+      ]
+      Resource = "*"
+    }]
+  })
+}
+
+resource "aws_codebuild_project" "flyte_register" {
+  name         = "${var.cluster_name}-flyte-register"
+  service_role = aws_iam_role.codebuild.arn
+
+  artifacts { type = "NO_ARTIFACTS" }
+
+  environment {
+    compute_type                = "BUILD_GENERAL1_SMALL"
+    image                       = "aws/codebuild/amazonlinux-x86_64-standard:5.0"
+    type                        = "LINUX_CONTAINER"
+    image_pull_credentials_type = "CODEBUILD"
+  }
+
+  source {
+    type      = "S3"
+    location  = "${aws_s3_bucket.cache.bucket}/source.zip"
+    buildspec = "platform/buildspec-register.yml"
+  }
+
+  vpc_config {
+    vpc_id             = var.vpc_id
+    subnets            = var.private_subnet_ids
+    security_group_ids = [aws_security_group.flyte_register.id]
+  }
+
+  logs_config {
+    cloudwatch_logs {
+      group_name = "/codebuild/${var.cluster_name}-flyte-register"
+    }
+  }
+
+  tags = { Purpose = "flyte-workflow-register" }
+}
+
+output "flyte_register_project" {
+  value = aws_codebuild_project.flyte_register.name
+}
+
+# Allow CodeBuild flyte-register to reach flyteadmin (gRPC port 81)
+resource "aws_security_group_rule" "codebuild_to_flyteadmin" {
+  type                     = "ingress"
+  from_port                = 81
+  to_port                  = 81
+  protocol                 = "tcp"
+  security_group_id        = var.cluster_security_group_id
+  source_security_group_id = aws_security_group.flyte_register.id
+  description              = "CodeBuild flyte-register to flyteadmin gRPC"
 }
