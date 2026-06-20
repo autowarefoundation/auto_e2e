@@ -159,3 +159,55 @@ resource "helm_release" "flyte" {
     value = var.flyte_s3_secret_key
   }
 }
+
+# Post-apply: patch propeller + admin storage configmaps to use stow accesskey auth.
+# The flyte-core chart only renders `iam` auth for type=s3; the stow/minio-go S3
+# client (AWS SDK v1) does not support IRSA/Pod Identity, so static keys are required.
+# This runs on every apply and whenever the keys change (idempotent kubectl patch).
+resource "null_resource" "flyte_storage_accesskey_patch" {
+  triggers = {
+    access_key = var.flyte_s3_access_key
+    secret_sha = sha256(var.flyte_s3_secret_key)
+    bucket     = var.artifacts_bucket
+    region     = var.region
+  }
+
+  provisioner "local-exec" {
+    interpreter = ["/bin/bash", "-c"]
+    command     = <<-EOT
+      set -e
+      STORAGE_YAML='storage:
+        type: s3
+        container: "${var.artifacts_bucket}"
+        connection:
+          auth-type: accesskey
+          access-key: ${var.flyte_s3_access_key}
+          secret-key: ${var.flyte_s3_secret_key}
+          region: ${var.region}
+        enable-multicontainer: false
+        limits:
+          maxDownloadMBs: 10
+        cache:
+          max_size_mbs: 1024
+          target_gc_percent: 70'
+
+      for cm in flyte-propeller-config flyte-admin-base-config; do
+        kubectl get configmap $cm -n flyte -o json | python3 -c "
+import sys,json
+cm=json.load(sys.stdin)
+cm['data']['storage.yaml']='''$STORAGE_YAML'''
+if 'core.yaml' in cm['data'] and '<RAW_DATA_BUCKET_NAME>' in cm['data']['core.yaml']:
+    cm['data']['core.yaml']=cm['data']['core.yaml'].replace('s3://<RAW_DATA_BUCKET_NAME>/','s3://${var.artifacts_bucket}/raw-output/')
+for k in ['creationTimestamp','resourceVersion','uid','managedFields']:
+    cm.get('metadata',{}).pop(k,None)
+cm.get('metadata',{}).get('annotations',{}).pop('kubectl.kubernetes.io/last-applied-configuration',None)
+print(json.dumps(cm))
+" | kubectl replace -f -
+      done
+
+      kubectl rollout restart deployment/flytepropeller deployment/flyteadmin -n flyte
+    EOT
+  }
+
+  depends_on = [helm_release.flyte]
+}

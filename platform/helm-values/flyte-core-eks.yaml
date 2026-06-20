@@ -185,21 +185,14 @@ common:
 #
 
 storage:
-  # Custom stow config: static access key (stow/minio-go AWS SDK v1 lacks IRSA support)
-  type: custom
+  # -- Sets the storage type. Supported values are sandbox, s3, gcs and custom.
+  type: s3
+  # -- bucketName defines the storage bucket flyte will use. Required for all types except for sandbox.
   bucketName: "{{ .Values.userSettings.bucketName }}"
+  s3:
+    region: "{{ .Values.userSettings.accountRegion }}"
   cache:
     maxSizeMBs: 1024
-  custom:
-    container: "{{ .Values.userSettings.bucketName }}"
-    type: s3
-    stow:
-      kind: s3
-      config:
-        region: "{{ .Values.userSettings.accountRegion }}"
-        auth_type: accesskey
-        access_key_id: "{{ .Values.userSettings.s3AccessKey }}"
-        # secret_access_key injected via set_sensitive (storage.custom.stow.config.secret_access_key)
 
 db:
   datacatalog:
