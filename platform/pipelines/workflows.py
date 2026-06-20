@@ -52,7 +52,6 @@ EvalMetrics = NamedTuple("EvalMetrics", ade=float, fde=float, gate_pass=bool)
 @task(
     container_image=DATA_PREP_IMAGE,
     requests=Resources(cpu="2", mem="8Gi"),
-    environment={"HF_TOKEN": "{{.Inputs.hf_token}}"},
 )
 def data_ingest(
     dataset: Dataset = Dataset.L2D,
@@ -63,7 +62,7 @@ def data_ingest(
     import os, shutil
     from huggingface_hub import login
 
-    token = os.environ.get("HF_TOKEN", hf_token)
+    token = hf_token or os.environ.get("HF_TOKEN", "")
     if token:
         login(token=token)
 
