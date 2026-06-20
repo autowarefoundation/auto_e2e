@@ -151,25 +151,8 @@ output "codebuild_project" {
 
 # --- UI Exposure: CloudFront + Cognito ---
 
-module "ui_exposure" {
-  source = "./modules/ui-exposure"
 
-  cluster_name              = var.cluster_name
-  vpc_id                    = module.vpc.vpc_id
-  private_subnet_ids        = module.vpc.private_subnet_ids
-  environment               = var.environment
-  cluster_security_group_id = module.eks.cluster_security_group_id
 
-  depends_on = [module.mlflow, module.flyte]
-}
-
-output "cognito_user_pool_id" {
-  value = module.ui_exposure.cognito_user_pool_id
-}
-
-output "cloudfront_url" {
-  value = module.ui_exposure.cloudfront_url
-}
 
 # HF_TOKEN → Secrets Manager → K8s Secret (for gated dataset access)
 resource "aws_secretsmanager_secret" "hf_token" {
