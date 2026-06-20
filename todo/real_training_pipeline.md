@@ -512,3 +512,29 @@ The Flyte task imports and uses the exact same:
 - `compute_open_loop_metrics`, `gate_check` from `evaluation.metrics`
 
 These are NOT reimplemented inside the workflow. The workflow is the orchestration layer only.
+
+### 5. Separate Docker Image per Pipeline Stage
+
+Each task has its own Dockerfile and container image, even if dependencies overlap:
+
+```
+platform/docker/
+├── data-prep/Dockerfile       → data_ingest + data_processing tasks
+├── training/Dockerfile        → train_il task
+├── eval/Dockerfile            → evaluate task
+├── offline-rl/Dockerfile      → train_offline_rl task
+```
+
+ECR repositories (already exist):
+- `auto-e2e/data-prep`
+- `auto-e2e/training`
+- `auto-e2e/eval`
+- `auto-e2e/offline-rl`
+
+Rationale:
+- Different GPU/CPU requirements per stage (data-prep = CPU only, training = GPU)
+- Independent version pinning (e.g., training pins PyTorch CUDA, eval can be lighter)
+- Smaller blast radius for dependency changes
+- Clear ownership: each Dockerfile declares exactly what that stage needs
+
+All images COPY `Model/` for shared model code access. Each image installs only the Python packages required for its specific task.
