@@ -61,6 +61,14 @@ resource "helm_release" "flyte" {
     value = ""
   }
   set {
+    name  = "userSettings.rawDataBucketName"
+    value = var.artifacts_bucket
+  }
+  set {
+    name  = "userSettings.logGroup"
+    value = "/flyte/${var.cluster_name}"
+  }
+  set {
     name  = "postgres.enabled"
     value = "false"
   }

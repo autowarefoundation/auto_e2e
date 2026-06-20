@@ -136,6 +136,10 @@ resource "aws_security_group" "cluster" {
   }
 
   tags = { Name = "${var.cluster_name}-cluster-sg" }
+
+  lifecycle {
+    ignore_changes = [ingress]
+  }
 }
 
 # Pod Identity Agent addon

@@ -92,34 +92,37 @@ resource "aws_cognito_user" "admin" {
 
 # --- Lambda@Edge (must be us-east-1) ---
 
-resource "local_file" "lambda_source" {
-  content = templatefile("${path.module}/lambda/index.js.tpl", {
+locals {
+  lambda_source = templatefile("${path.module}/lambda/index.js.tpl", {
     region         = "us-east-1"
     user_pool_id   = aws_cognito_user_pool.this.id
     client_id      = aws_cognito_user_pool_client.this.id
     client_secret  = aws_cognito_user_pool_client.this.client_secret
     cognito_domain = "${aws_cognito_user_pool_domain.this.domain}.auth.us-east-1.amazoncognito.com"
   })
-  filename = "${path.module}/lambda/.build/index.js"
 }
 
 data "archive_file" "lambda" {
   type        = "zip"
-  source_dir  = "${path.module}/lambda/.build"
-  output_path = "${path.module}/lambda/.build/auth-edge.zip"
-  depends_on  = [local_file.lambda_source]
+  output_path = "${path.module}/lambda/auth-edge.zip"
+
+  source {
+    content  = local.lambda_source
+    filename = "index.js"
+  }
 }
 
+# Kept for backwards compat with state (no-op)
 resource "null_resource" "npm_install" {
   triggers = {
-    source = local_file.lambda_source.content
+    source = sha256(local.lambda_source)
   }
 
   provisioner "local-exec" {
     command = "true"
   }
 
-  depends_on = [local_file.lambda_source]
+  depends_on = []
 }
 
 resource "aws_iam_role" "lambda_edge" {
