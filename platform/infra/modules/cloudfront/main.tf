@@ -8,6 +8,12 @@ variable "services" {
 
 variable "cluster_name" { type = string }
 
+variable "lambda_edge_arn" {
+  description = "Lambda@Edge qualified ARN for viewer-request auth (optional)"
+  type        = string
+  default     = ""
+}
+
 resource "aws_cloudfront_vpc_origin" "this" {
   for_each = var.services
 
@@ -52,6 +58,15 @@ resource "aws_cloudfront_distribution" "this" {
     cache_policy_id          = "4135ea2d-6df8-44a3-9df3-4b5a84be39ad" # CachingDisabled
     origin_request_policy_id = "216adef6-5c7f-47e4-b989-5492eafa07d3" # AllViewer
     compress                 = true
+
+    dynamic "lambda_function_association" {
+      for_each = var.lambda_edge_arn != "" ? [1] : []
+      content {
+        event_type   = "viewer-request"
+        lambda_arn   = var.lambda_edge_arn
+        include_body = false
+      }
+    }
   }
 
   restrictions {
@@ -69,4 +84,12 @@ resource "aws_cloudfront_distribution" "this" {
 
 output "urls" {
   value = { for k, v in aws_cloudfront_distribution.this : k => "https://${v.domain_name}" }
+}
+
+output "distribution_ids" {
+  value = { for k, v in aws_cloudfront_distribution.this : k => v.id }
+}
+
+output "domain_names" {
+  value = { for k, v in aws_cloudfront_distribution.this : k => v.domain_name }
 }

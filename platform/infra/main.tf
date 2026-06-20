@@ -159,8 +159,23 @@ output "codebuild_project" {
 module "cloudfront" {
   source = "./modules/cloudfront"
 
-  cluster_name = var.cluster_name
-  services     = var.cloudfront_services
+  cluster_name    = var.cluster_name
+  services        = var.cloudfront_services
+  lambda_edge_arn = var.auth_user_password != "" ? module.auth_edge[0].lambda_arn : ""
+}
+
+module "auth_edge" {
+  count  = var.auth_user_password != "" ? 1 : 0
+  source = "./modules/auth-edge"
+
+  providers = {
+    aws.us_east_1 = aws.us_east_1
+  }
+
+  cluster_name  = var.cluster_name
+  user_email    = var.auth_user_email
+  user_password = var.auth_user_password
+  callback_urls = var.auth_callback_urls
 }
 
 output "ui_urls" {

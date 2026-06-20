@@ -14,6 +14,10 @@ terraform {
       source  = "hashicorp/helm"
       version = "~> 2.13"
     }
+    archive = {
+      source  = "hashicorp/archive"
+      version = "~> 2.4"
+    }
   }
 
   backend "s3" {
@@ -30,6 +34,20 @@ provider "aws" {
   region  = var.region
   profile = "autowarefoundation"
   # us-west-2: ODCR confirmed for g6e.4xlarge @ us-west-2b
+
+  default_tags {
+    tags = {
+      Project     = "auto-e2e-platform"
+      ManagedBy   = "terraform"
+      Environment = var.environment
+    }
+  }
+}
+
+provider "aws" {
+  alias   = "us_east_1"
+  region  = "us-east-1"
+  profile = "autowarefoundation"
 
   default_tags {
     tags = {

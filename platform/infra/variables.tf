@@ -53,3 +53,22 @@ variable "cloudfront_services" {
   }))
   default = {}
 }
+
+variable "auth_user_email" {
+  description = "Email for Cognito admin user"
+  type        = string
+  default     = "contributor@autoware.org"
+}
+
+variable "auth_user_password" {
+  description = "Password for Cognito admin user"
+  type        = string
+  sensitive   = true
+  default     = ""
+}
+
+variable "auth_callback_urls" {
+  description = "CloudFront callback URLs for Cognito (https://<cf-domain>/_callback). Set after CF is created."
+  type        = list(string)
+  default     = []
+}
