@@ -44,3 +44,12 @@ variable "hf_token" {
   default     = ""
 }
 
+
+variable "cloudfront_services" {
+  description = "Map of service name to NLB ARN/DNS for CloudFront VPC Origin. Set after NLB Services are created."
+  type = map(object({
+    nlb_arn = string
+    nlb_dns = string
+  }))
+  default = {}
+}

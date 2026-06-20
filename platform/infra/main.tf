@@ -149,7 +149,20 @@ output "codebuild_project" {
   value = module.codebuild.project_name
 }
 
-# --- UI Exposure: CloudFront + Cognito ---
+# --- UI Exposure: CloudFront + VPC Origin → Internal NLB (K8s managed) ---
+# NLB ARNs/DNS are passed as variables since K8s Service creates them.
+# After first deploy, run post-apply to create NLB Services, then set these vars.
+
+module "cloudfront" {
+  source = "./modules/cloudfront"
+
+  cluster_name = var.cluster_name
+  services     = var.cloudfront_services
+}
+
+output "ui_urls" {
+  value = module.cloudfront.urls
+}
 
 
 
