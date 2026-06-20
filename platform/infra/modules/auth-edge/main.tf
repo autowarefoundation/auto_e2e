@@ -153,7 +153,7 @@ resource "aws_lambda_function" "auth_edge" {
   filename         = data.archive_file.lambda.output_path
   source_code_hash = data.archive_file.lambda.output_base64sha256
   publish          = true # Lambda@Edge requires published version
-  timeout          = 5
+  timeout          = 30
   memory_size      = 128
 }
 
