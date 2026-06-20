@@ -5,22 +5,25 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /workspace
 
-# PyTorch CPU-only
+# PyTorch CPU-only + torchvision
 RUN pip install --no-cache-dir torch torchvision --index-url https://download.pytorch.org/whl/cpu
 
-# lerobot without hardware deps (evdev etc) — install --no-deps then add what we need
-RUN pip install --no-cache-dir lerobot==0.5.1 --no-deps && \
-    pip install --no-cache-dir datasets huggingface_hub safetensors pillow numpy av
-
-# flytekit + data pipeline deps
-RUN pip install --no-cache-dir "flytekit>=1.14,<2" boto3 pyarrow scipy webdataset
-
-# physical_ai_av (best-effort)
-RUN pip install --no-cache-dir physical_ai_av --no-deps 2>/dev/null || true
+# Data pipeline deps
+RUN pip install --no-cache-dir \
+    "flytekit>=1.14,<2" \
+    "lerobot>=0.5.1" \
+    huggingface_hub \
+    datasets \
+    webdataset \
+    Pillow \
+    numpy \
+    av \
+    timm \
+    scipy \
+    boto3
 
 COPY Model/ /workspace/Model/
 COPY platform/pipelines/ /workspace/platform/pipelines/
 
 ENV PYTHONPATH=/workspace/Model:/workspace
 ENV PYTHONUNBUFFERED=1
-

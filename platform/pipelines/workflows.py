@@ -1,20 +1,20 @@
-"""AutoE2E Flyte-native workflows.
+"""AutoE2E Flyte-native workflows — Real Training Pipeline.
 
-Design:
-  - Flyte tasks: data_ingest → train_il → evaluate → train_offline_rl → evaluate
-  - MLflow logging: ONLY in evaluate task (single point of truth)
-  - Each eval run contains ALL upstream info for full reproducibility:
-    data params, model params, training params, Flyte execution context, docker images, S3 paths
-  - 2 MLflow Experiments: "imitation-learning", "offline-rl"
-  - Model Registry: "auto-e2e-driving-policy"
+Architecture:
+  data_ingest → data_processing → train_il → evaluate
+                                      ↓
+                              train_offline_rl → evaluate
+
+MLflow: Only evaluate task logs. 2 experiments: imitation-learning, offline-rl.
 """
 import enum
-from flytekit import task, workflow, Resources
+from flytekit import task, workflow, Resources, Secret
 from flytekit.types.file import FlyteFile
 from flytekit.types.directory import FlyteDirectory
 from typing import NamedTuple
 
 import os as _os
+
 ECR_PREFIX = _os.environ.get("ECR_PREFIX", "381491877296.dkr.ecr.us-west-2.amazonaws.com")
 TRAINING_IMAGE = f"{ECR_PREFIX}/auto-e2e/training:latest"
 EVAL_IMAGE = f"{ECR_PREFIX}/auto-e2e/eval:latest"
@@ -42,46 +42,174 @@ class FusionMode(enum.Enum):
     BEV = "bev"
 
 
-# --- Metadata passed between tasks for reproducibility ---
 TrainOutput = NamedTuple("TrainOutput", checkpoint=FlyteFile, metadata=FlyteFile)
 EvalMetrics = NamedTuple("EvalMetrics", ade=float, fde=float, gate_pass=bool)
 
 
 # ============================================================
-# Task: Data Ingest
+# Task: Data Ingest (download raw from HuggingFace)
 # ============================================================
 @task(
     container_image=DATA_PREP_IMAGE,
     requests=Resources(cpu="2", mem="8Gi"),
-    environment={"AWS_DEFAULT_REGION": "us-west-2"},
+    environment={"HF_TOKEN": "{{.Inputs.hf_token}}"},
 )
 def data_ingest(
     dataset: Dataset = Dataset.L2D,
-    version_tag: str = "10hz-224px-v1",
-    hz: int = 10,
-    image_size: int = 224,
-    episodes: int = 5,
+    episodes: int = 3,
+    hf_token: str = "",
 ) -> FlyteDirectory:
-    """Download dataset → WebDataset shards."""
-    import os, tempfile, tarfile, json, io
+    """Download raw dataset from HuggingFace via lerobot."""
+    import os, shutil
+    from huggingface_hub import login
 
-    out_dir = tempfile.mkdtemp()
-    shard_path = os.path.join(out_dir, "train-000000.tar")
-    with tarfile.open(shard_path, "w") as tar:
-        meta = json.dumps({
-            "dataset": dataset.value, "version_tag": version_tag,
-            "hz": hz, "image_size": image_size, "episodes": episodes,
-        }).encode()
-        info = tarfile.TarInfo(name="000000.meta.json")
-        info.size = len(meta)
-        tar.addfile(info, io.BytesIO(meta))
+    token = os.environ.get("HF_TOKEN", hf_token)
+    if token:
+        login(token=token)
 
-    print(f"Ingested {dataset.value} ({episodes} ep, {hz}Hz, {image_size}px)")
+    from lerobot.datasets.lerobot_dataset import LeRobotDataset
+
+    ep_list = list(range(episodes)) if episodes > 0 else None
+    ds = LeRobotDataset(repo_id=dataset.value, episodes=ep_list)
+
+    # lerobot caches to ~/.cache/huggingface/lerobot/<repo>
+    # Copy the cache to output dir
+    cache_dir = ds.root
+    out_dir = "/tmp/raw_data"
+    if os.path.exists(out_dir):
+        shutil.rmtree(out_dir)
+    shutil.copytree(str(cache_dir), out_dir)
+
+    print(f"Ingested {dataset.value}: {len(ds)} frames, {episodes} episodes → {out_dir}")
     return FlyteDirectory(out_dir)
 
 
 # ============================================================
-# Task: IL Training (no MLflow here — just train + output metadata)
+# Task: Data Processing (Issue #30: pre-extract frames)
+# ============================================================
+@task(
+    container_image=DATA_PREP_IMAGE,
+    requests=Resources(cpu="4", mem="16Gi"),
+)
+def data_processing(
+    raw_data: FlyteDirectory,
+    dataset: Dataset = Dataset.L2D,
+    hz: int = 10,
+    image_size: int = 256,
+    episodes: int = 3,
+) -> FlyteDirectory:
+    """Pre-extract aligned frames + egomotion → WebDataset shards.
+
+    Solves Issue #30: no video decode at training time.
+    """
+    import os, io, json, tarfile, tempfile
+    import numpy as np
+    import torch
+    from PIL import Image
+    from torchvision import transforms
+
+    raw_path = raw_data.download()
+    print(f"Processing raw data from: {raw_path}")
+
+    # Load lerobot dataset from local cache
+    from lerobot.datasets.lerobot_dataset import LeRobotDataset
+    ep_list = list(range(episodes)) if episodes > 0 else None
+    ds = LeRobotDataset(repo_id=dataset.value, episodes=ep_list, root=raw_path)
+
+    from data_parsing.l2d.camera import CAMERA_NAMES
+    from data_parsing.l2d.egomotion import extract_egomotion, MIN_FRAMES, _HISTORY_TIMESTEPS, _FUTURE_TIMESTEPS
+
+    resize = transforms.Resize((image_size, image_size))
+    out_dir = tempfile.mkdtemp()
+    shard_idx = 0
+    sample_count = 0
+    samples_per_shard = 1000
+    current_tar = None
+    tar_path = None
+
+    def open_new_shard():
+        nonlocal current_tar, tar_path, shard_idx
+        if current_tar:
+            current_tar.close()
+        tar_path = os.path.join(out_dir, f"train-{shard_idx:06d}.tar")
+        current_tar = tarfile.open(tar_path, "w")
+        shard_idx += 1
+
+    open_new_shard()
+
+    # Process per episode
+    hf = ds.hf_dataset
+    ep_col = np.asarray(hf["episode_index"])
+
+    for ep_idx in sorted(set(ep_col.tolist())):
+        rows = np.where(ep_col == ep_idx)[0]
+        n_frames = len(rows)
+        if n_frames < MIN_FRAMES:
+            continue
+
+        # Get vehicle states for egomotion
+        vehicle_states = np.array([hf[int(r)]["observation.state.vehicle"] for r in rows], dtype=np.float32)
+
+        # Valid sample indices
+        for local_idx in range(_HISTORY_TIMESTEPS, n_frames - _FUTURE_TIMESTEPS - 1):
+            global_row = int(rows[local_idx])
+
+            # Extract egomotion
+            ego_history, traj_target = extract_egomotion(vehicle_states, sample_idx=local_idx)
+            ego_data = np.concatenate([ego_history.numpy(), traj_target.numpy()]).astype(np.float32)
+
+            # Extract camera frames
+            sample_key = f"ep{ep_idx:04d}_f{local_idx:06d}"
+            item = ds[global_row]
+
+            for cam_i, cam_name in enumerate(CAMERA_NAMES):
+                if cam_name in item:
+                    frame = item[cam_name]  # tensor (C,H,W) or PIL
+                    if isinstance(frame, torch.Tensor):
+                        frame = transforms.ToPILImage()(frame)
+                    frame = resize(frame)
+
+                    # Save as JPEG bytes
+                    buf = io.BytesIO()
+                    frame.save(buf, format="JPEG", quality=90)
+                    jpg_bytes = buf.getvalue()
+
+                    info = tarfile.TarInfo(name=f"{sample_key}.cam_{cam_i}.jpg")
+                    info.size = len(jpg_bytes)
+                    current_tar.addfile(info, io.BytesIO(jpg_bytes))
+
+            # Save egomotion
+            ego_bytes = ego_data.tobytes()
+            info = tarfile.TarInfo(name=f"{sample_key}.ego.npy")
+            info.size = len(ego_bytes)
+            current_tar.addfile(info, io.BytesIO(ego_bytes))
+
+            # Save meta
+            meta = json.dumps({"episode": ep_idx, "frame": local_idx, "dataset": dataset.value}).encode()
+            info = tarfile.TarInfo(name=f"{sample_key}.meta.json")
+            info.size = len(meta)
+            current_tar.addfile(info, io.BytesIO(meta))
+
+            sample_count += 1
+            if sample_count % samples_per_shard == 0:
+                open_new_shard()
+
+    if current_tar:
+        current_tar.close()
+
+    # Write manifest
+    manifest = {"total_samples": sample_count, "shards": shard_idx,
+                "hz": hz, "image_size": image_size, "dataset": dataset.value,
+                "episodes": episodes, "cameras": CAMERA_NAMES}
+    with open(os.path.join(out_dir, "manifest.json"), "w") as f:
+        json.dump(manifest, f)
+
+    print(f"Processed: {sample_count} samples → {shard_idx} shards")
+    return FlyteDirectory(out_dir)
+
+
+# ============================================================
+# Task: IL Training (real AutoE2E)
 # ============================================================
 @task(
     container_image=TRAINING_IMAGE,
@@ -93,57 +221,94 @@ def train_il(
     dataset: Dataset = Dataset.L2D,
     backbone: Backbone = Backbone.SWIN_V2_TINY,
     fusion_mode: FusionMode = FusionMode.CONCAT,
-    epochs: int = 10,
+    epochs: int = 3,
     batch_size: int = 4,
-    lr: float = 0.001,
-    weight_decay: float = 1e-4,
-    warmup_steps: int = 500,
+    lr: float = 1e-4,
+    weight_decay: float = 1e-2,
+    grad_clip: float = 1.0,
+    amp: bool = True,
 ) -> TrainOutput:
-    """IL Training. Returns checkpoint + metadata JSON for downstream logging."""
-    import os, torch, numpy as np, json
+    """Train AutoE2E model on pre-extracted WebDataset shards."""
+    import os, json, torch
+    import numpy as np
     from flytekit import current_context
 
-    shard_path = shards.download()
-    bb, fm = backbone.value, fusion_mode.value
-    ctx = current_context()
+    from model_components.auto_e2e import AutoE2E
+    from model_components.losses import TrajectoryImitationLoss
+    from data_parsing.pre_extracted import make_pre_extracted_loader
 
-    # Training
-    print(f"Training: {bb}-{fm} epochs={epochs} bs={batch_size} lr={lr}")
-    losses = []
+    shard_dir = shards.download()
+    ctx = current_context()
+    bb, fm = backbone.value, fusion_mode.value
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    print(f"Training: backbone={bb} fusion={fm} epochs={epochs} bs={batch_size} device={device}")
+
+    # Model
+    model = AutoE2E(
+        backbone=bb, num_views=7, embed_dim=256,
+        fusion_mode=fm, is_pretrained=True,
+    ).to(device)
+
+    # DataLoader
+    loader = make_pre_extracted_loader(shard_dir, batch_size=batch_size, num_workers=2)
+
+    # Optimizer + Loss
+    optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
+    loss_fn = TrajectoryImitationLoss(loss_type="smooth_l1")
+
+    # Training loop
+    model.train()
+    losses_per_epoch = []
+    scaler = torch.amp.GradScaler(enabled=amp)
+
     for epoch in range(epochs):
-        loss = 0.15 * np.exp(-0.3 * epoch) + 0.02 * np.random.randn()
-        losses.append(abs(loss))
+        epoch_losses = []
+        for batch in loader:
+            visual = batch["visual_tiles"].to(device)        # (B, 7, 3, H, W)
+            ego_hist = batch["egomotion_history"].to(device)  # (B, 256)
+            vis_hist = batch["visual_history"].to(device)     # (B, 896)
+            target = batch["trajectory_target"].to(device)    # (B, 128)
+
+            optimizer.zero_grad()
+            with torch.amp.autocast("cuda", enabled=amp):
+                pred, _, _ = model(visual, vis_hist, ego_hist)
+                loss = loss_fn(pred, target)
+
+            scaler.scale(loss).backward()
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+            scaler.step(optimizer)
+            scaler.update()
+
+            epoch_losses.append(loss.item())
+
+        avg_loss = np.mean(epoch_losses) if epoch_losses else 0.0
+        losses_per_epoch.append(float(avg_loss))
+        print(f"  Epoch {epoch+1}/{epochs} loss={avg_loss:.4f}")
 
     # Save checkpoint
     os.makedirs("/tmp/train", exist_ok=True)
     ckpt_path = "/tmp/train/best.pt"
-    torch.save({"backbone": bb, "fusion": fm, "epoch": epochs, "model_state_dict": {}}, ckpt_path)
+    torch.save({
+        "model_state_dict": model.state_dict(),
+        "config": {"backbone": bb, "fusion_mode": fm, "embed_dim": 256, "num_views": 7},
+        "epoch": epochs,
+    }, ckpt_path)
 
-    # Save metadata (all info needed for reproducibility)
+    # Metadata
     meta = {
-        "data": {
-            "dataset": dataset.value,
-            "shard_path": str(shard_path),
-        },
-        "model": {
-            "backbone": bb,
-            "fusion_mode": fm,
-        },
+        "data": {"dataset": dataset.value, "shard_dir": str(shard_dir)},
+        "model": {"backbone": bb, "fusion_mode": fm, "embed_dim": 256, "num_views": 7},
         "training": {
-            "epochs": epochs,
-            "batch_size": batch_size,
-            "lr": lr,
-            "weight_decay": weight_decay,
-            "warmup_steps": warmup_steps,
-            "optimizer": "AdamW",
-            "scheduler": "cosine",
-            "final_loss": losses[-1],
-            "losses": losses,
+            "epochs": epochs, "batch_size": batch_size, "lr": lr,
+            "weight_decay": weight_decay, "grad_clip": grad_clip, "amp": amp,
+            "optimizer": "AdamW", "final_loss": losses_per_epoch[-1] if losses_per_epoch else 0,
+            "losses_per_epoch": losses_per_epoch,
         },
         "context": {
             "flyte_execution_id": ctx.execution_id.name if ctx.execution_id else "local",
             "docker_image": TRAINING_IMAGE,
-            "checkpoint_path": ckpt_path,
         },
     }
     meta_path = "/tmp/train/metadata.json"
@@ -154,7 +319,7 @@ def train_il(
 
 
 # ============================================================
-# Task: Offline RL (no MLflow — outputs metadata)
+# Task: Offline RL
 # ============================================================
 @task(
     container_image=OFFLINE_RL_IMAGE,
@@ -165,50 +330,74 @@ def train_offline_rl(
     pretrained: FlyteFile,
     shards: FlyteDirectory,
     il_metadata: FlyteFile,
-    epochs: int = 5,
+    epochs: int = 3,
     tau: float = 0.7,
     beta: float = 3.0,
-    replay_buffer_size: int = 100000,
-    discount: float = 0.99,
 ) -> TrainOutput:
-    """Offline RL (IQL). Returns refined checkpoint + metadata."""
-    import os, torch, numpy as np, json
+    """Offline RL (IQL) refinement of IL checkpoint."""
+    import os, json, torch
+    import numpy as np
     from flytekit import current_context
 
     ckpt_path = pretrained.download()
-    shard_path = shards.download()
+    shard_dir = shards.download()
     il_meta = json.load(open(il_metadata.download()))
     ctx = current_context()
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     print(f"Offline RL: epochs={epochs} tau={tau} beta={beta}")
-    losses = {"q": [], "v": [], "policy": []}
+
+    # Load IL model
+    from model_components.auto_e2e import AutoE2E
+    from data_parsing.pre_extracted import make_pre_extracted_loader
+
+    ckpt = torch.load(ckpt_path, map_location=device)
+    config = ckpt["config"]
+    model = AutoE2E(**config).to(device)
+    model.load_state_dict(ckpt["model_state_dict"])
+
+    loader = make_pre_extracted_loader(shard_dir, batch_size=4, num_workers=2)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=3e-5, weight_decay=1e-3)
+
+    # Simplified IQL-style training
+    model.train()
+    losses_per_epoch = []
     for epoch in range(epochs):
-        losses["q"].append(abs(0.5 * np.exp(-0.4 * epoch) + 0.01 * np.random.randn()))
-        losses["v"].append(abs(0.3 * np.exp(-0.35 * epoch) + 0.01 * np.random.randn()))
-        losses["policy"].append(abs(0.2 * np.exp(-0.25 * epoch) + 0.005 * np.random.randn()))
+        epoch_losses = []
+        for batch in loader:
+            visual = batch["visual_tiles"].to(device)
+            ego_hist = batch["egomotion_history"].to(device)
+            vis_hist = batch["visual_history"].to(device)
+            target = batch["trajectory_target"].to(device)
+
+            optimizer.zero_grad()
+            pred, _, _ = model(visual, vis_hist, ego_hist)
+            # IQL advantage-weighted regression
+            with torch.no_grad():
+                baseline_pred, _, _ = model(visual, vis_hist, ego_hist)
+            advantage = -(pred - target).pow(2).mean(dim=-1) + (baseline_pred - target).pow(2).mean(dim=-1)
+            weights = torch.exp(beta * advantage).clamp(max=100.0)
+            loss = (weights * (pred - target).pow(2).mean(dim=-1)).mean()
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            optimizer.step()
+            epoch_losses.append(loss.item())
+
+        avg_loss = np.mean(epoch_losses) if epoch_losses else 0.0
+        losses_per_epoch.append(float(avg_loss))
+        print(f"  Epoch {epoch+1}/{epochs} loss={avg_loss:.4f}")
 
     os.makedirs("/tmp/rl", exist_ok=True)
     out_path = "/tmp/rl/policy_rl.pt"
-    torch.save({"method": "IQL", "epoch": epochs, "model_state_dict": {}}, out_path)
+    torch.save({"model_state_dict": model.state_dict(), "config": config, "epoch": epochs}, out_path)
 
     meta = {
-        "base_model": {
-            "il_metadata": il_meta,
-            "il_checkpoint_path": str(ckpt_path),
-        },
-        "rl": {
-            "method": "IQL",
-            "epochs": epochs,
-            "tau": tau,
-            "beta": beta,
-            "replay_buffer_size": replay_buffer_size,
-            "discount": discount,
-            "losses": losses,
-        },
+        "base_model": {"il_metadata": il_meta, "il_checkpoint": str(ckpt_path)},
+        "rl": {"method": "IQL", "epochs": epochs, "tau": tau, "beta": beta,
+                "losses_per_epoch": losses_per_epoch},
         "context": {
             "flyte_execution_id": ctx.execution_id.name if ctx.execution_id else "local",
             "docker_image": OFFLINE_RL_IMAGE,
-            "checkpoint_path": out_path,
         },
     }
     meta_path = "/tmp/rl/metadata.json"
@@ -223,7 +412,8 @@ def train_offline_rl(
 # ============================================================
 @task(
     container_image=EVAL_IMAGE,
-    requests=Resources(cpu="2", mem="4Gi"),
+    requests=Resources(cpu="2", mem="8Gi", gpu="1"),
+    limits=Resources(gpu="1"),
     environment={"MLFLOW_TRACKING_URI": MLFLOW_URI},
 )
 def evaluate(
@@ -232,138 +422,128 @@ def evaluate(
     train_metadata: FlyteFile,
     experiment_name: str = "imitation-learning",
 ) -> EvalMetrics:
-    """Evaluate model + log EVERYTHING to MLflow (single point of truth).
-
-    All upstream context (data, model, training, RL, Flyte exec, docker images)
-    is read from train_metadata and logged as params for full reproducibility.
-    """
-    import os, numpy as np, json, yaml, mlflow
+    """Evaluate + log everything to MLflow."""
+    import os, json, yaml, torch
+    import numpy as np, mlflow
     from flytekit import current_context
 
+    from model_components.auto_e2e import AutoE2E
+    from data_parsing.pre_extracted import make_pre_extracted_loader
+    from evaluation.metrics import integrate_trajectory, gate_check
+
     ckpt_path = checkpoint.download()
-    shard_path = shards.download()
+    shard_dir = shards.download()
     meta = json.load(open(train_metadata.download()))
     ctx = current_context()
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+    # Load model
+    ckpt = torch.load(ckpt_path, map_location=device)
+    config = ckpt["config"]
+    model = AutoE2E(**config).to(device)
+    model.load_state_dict(ckpt["model_state_dict"])
+    model.eval()
+
+    # Evaluate
+    loader = make_pre_extracted_loader(shard_dir, batch_size=8, num_workers=2, shuffle=0)
+    all_ade, all_fde = [], []
+
+    with torch.no_grad():
+        for batch in loader:
+            visual = batch["visual_tiles"].to(device)
+            ego_hist = batch["egomotion_history"].to(device)
+            vis_hist = batch["visual_history"].to(device)
+            target = batch["trajectory_target"]  # (B, 128) on CPU
+
+            pred, _, _ = model(visual, vis_hist, ego_hist)
+            pred = pred.cpu().numpy()  # (B, 128)
+            target_np = target.numpy()
+
+            for i in range(pred.shape[0]):
+                # Reshape: (64, 2) = [accel_x, curvature]
+                pred_signals = pred[i].reshape(64, 2)
+                gt_signals = target_np[i].reshape(64, 2)
+                # Get initial speed from egomotion history (first signal)
+                ego_np = batch["egomotion_history"][i].numpy()
+                v0 = float(ego_np[-4])  # last speed value in history
+
+                pred_traj = integrate_trajectory(pred_signals[:, 0], pred_signals[:, 1], v0)
+                gt_traj = integrate_trajectory(gt_signals[:, 0], gt_signals[:, 1], v0)
+
+                ade = float(np.mean(np.linalg.norm(pred_traj - gt_traj, axis=1)))
+                fde = float(np.linalg.norm(pred_traj[-1] - gt_traj[-1]))
+                all_ade.append(ade)
+                all_fde.append(fde)
+
+    avg_ade = float(np.mean(all_ade)) if all_ade else 99.0
+    avg_fde = float(np.mean(all_fde)) if all_fde else 99.0
+    passed = avg_ade < 2.0 and avg_fde < 4.0
+
+    # --- MLflow logging ---
     mlflow.set_tracking_uri(os.environ["MLFLOW_TRACKING_URI"])
     mlflow.set_experiment(experiment_name)
 
-    # Build run name from key params
-    backbone = meta.get("model", meta.get("base_model", {}).get("il_metadata", {})).get("backbone", "?")
-    fusion = meta.get("model", meta.get("base_model", {}).get("il_metadata", {})).get("fusion_mode", "?")
-    if "rl" in meta:
-        run_name = f"rl-{backbone}-{fusion}-tau{meta['rl']['tau']}"
-    else:
-        epochs = meta.get("training", {}).get("epochs", "?")
-        run_name = f"{backbone}-{fusion}-e{epochs}"
+    model_info = meta.get("model", meta.get("base_model", {}).get("il_metadata", {}).get("model", {}))
+    bb = model_info.get("backbone", "?")
+    fm = model_info.get("fusion_mode", "?")
+    training = meta.get("training", meta.get("base_model", {}).get("il_metadata", {}).get("training", {}))
+    run_name = f"{bb}-{fm}-e{training.get('epochs','?')}"
 
     with mlflow.start_run(run_name=run_name):
-        # --- Flatten all metadata into params ---
+        # Flatten params
         params = {}
-
-        # Data params
         data = meta.get("data", meta.get("base_model", {}).get("il_metadata", {}).get("data", {}))
         params["data/dataset"] = data.get("dataset", "?")
-        params["data/shard_path"] = data.get("shard_path", str(shard_path))
-
-        # Model params
-        model = meta.get("model", meta.get("base_model", {}).get("il_metadata", {}).get("model", {}))
-        params["model/backbone"] = model.get("backbone", "?")
-        params["model/fusion_mode"] = model.get("fusion_mode", "?")
-
-        # Training params (IL)
-        training = meta.get("training", meta.get("base_model", {}).get("il_metadata", {}).get("training", {}))
+        params["model/backbone"] = bb
+        params["model/fusion_mode"] = fm
         params["train/epochs"] = training.get("epochs", "?")
         params["train/batch_size"] = training.get("batch_size", "?")
         params["train/lr"] = training.get("lr", "?")
         params["train/weight_decay"] = training.get("weight_decay", "?")
-        params["train/warmup_steps"] = training.get("warmup_steps", "?")
-        params["train/optimizer"] = training.get("optimizer", "?")
-        params["train/scheduler"] = training.get("scheduler", "?")
+        params["train/amp"] = training.get("amp", "?")
         params["train/final_loss"] = training.get("final_loss", "?")
 
-        # RL params (if offline-rl)
+        # RL params
         if "rl" in meta:
             rl = meta["rl"]
-            params["rl/method"] = rl.get("method", "IQL")
-            params["rl/epochs"] = rl.get("epochs", "?")
+            params["rl/method"] = rl.get("method", "?")
             params["rl/tau"] = rl.get("tau", "?")
             params["rl/beta"] = rl.get("beta", "?")
-            params["rl/replay_buffer_size"] = rl.get("replay_buffer_size", "?")
-            params["rl/discount"] = rl.get("discount", "?")
-            # Base IL info
-            il_ctx = meta.get("base_model", {}).get("il_metadata", {}).get("context", {})
-            params["base/il_execution_id"] = il_ctx.get("flyte_execution_id", "?")
-            params["base/il_docker_image"] = il_ctx.get("docker_image", "?")
+            params["rl/epochs"] = rl.get("epochs", "?")
 
-        # Context / provenance
-        train_ctx = meta.get("context", meta.get("base_model", {}).get("il_metadata", {}).get("context", {}))
+        # Context
+        train_ctx = meta.get("context", {})
         params["ctx/train_execution_id"] = train_ctx.get("flyte_execution_id", "?")
         params["ctx/train_docker_image"] = train_ctx.get("docker_image", "?")
         params["ctx/eval_execution_id"] = ctx.execution_id.name if ctx.execution_id else "local"
         params["ctx/eval_docker_image"] = EVAL_IMAGE
-        params["ctx/checkpoint_path"] = str(ckpt_path)
 
-        # Git commit
-        try:
-            import subprocess
-            commit = subprocess.check_output(["git", "rev-parse", "HEAD"], stderr=subprocess.DEVNULL).decode().strip()
-            params["ctx/git_commit"] = commit
-        except Exception:
-            params["ctx/git_commit"] = "unavailable"
-
-        # Log all params (truncate values > 500 chars for MLflow limit)
         mlflow.log_params({k: str(v)[:500] for k, v in params.items()})
+        mlflow.set_tags({"pipeline": experiment_name, "backbone": bb, "fusion": fm})
 
-        # --- Tags ---
-        mlflow.set_tags({
-            "pipeline": experiment_name,
-            "backbone": params.get("model/backbone", "?"),
-            "fusion": params.get("model/fusion_mode", "?"),
-        })
-
-        # --- Log training loss curve as metrics ---
-        losses = training.get("losses", [])
-        for i, l in enumerate(losses):
+        # Training loss curve
+        for i, l in enumerate(training.get("losses_per_epoch", [])):
             mlflow.log_metric("train/loss", l, step=i)
-        if "rl" in meta:
-            for key in ["q", "v", "policy"]:
-                for i, l in enumerate(meta["rl"].get("losses", {}).get(key, [])):
-                    mlflow.log_metric(f"rl/{key}_loss", l, step=i)
 
-        # --- Evaluation ---
-        print(f"Evaluating: {ckpt_path}")
-        np.random.seed(hash(run_name) % 2**32)
-        T = 10
-        gt = np.cumsum(np.random.randn(T, 2) * 0.5, axis=0)
-        noise_scale = 0.2 if "rl" in meta else 0.25
-        pred = gt + np.random.randn(T, 2) * noise_scale
-        ade = float(np.mean(np.linalg.norm(pred - gt, axis=1)))
-        fde = float(np.linalg.norm(pred[-1] - gt[-1]))
-        gate_pass = ade < 2.0 and fde < 4.0
+        # Eval metrics
+        mlflow.log_metrics({"eval/ade": avg_ade, "eval/fde": avg_fde, "eval/gate_pass": 1.0 if passed else 0.0})
 
-        mlflow.log_metrics({"eval/ade": ade, "eval/fde": fde, "eval/gate_pass": 1.0 if gate_pass else 0.0})
-
-        # --- Artifacts ---
+        # Artifacts
         os.makedirs("/tmp/eval-artifacts", exist_ok=True)
-        # config.yaml for full reproducibility
-        config_path = "/tmp/eval-artifacts/config.yaml"
-        with open(config_path, "w") as f:
-            yaml.dump(meta, f, default_flow_style=False)
-        mlflow.log_artifact(config_path)
-        # checkpoint
+        with open("/tmp/eval-artifacts/config.yaml", "w") as f:
+            yaml.dump(meta, f)
+        mlflow.log_artifact("/tmp/eval-artifacts/config.yaml")
         mlflow.log_artifact(ckpt_path, artifact_path="model")
 
-        # --- Model Registry ---
+        # Model Registry
         model_uri = f"runs:/{mlflow.active_run().info.run_id}/model"
         try:
             mlflow.register_model(model_uri, "auto-e2e-driving-policy")
         except Exception as e:
-            print(f"Model registry: {e}")
+            print(f"Registry: {e}")
 
-        print(f"Result: ADE={ade:.3f} FDE={fde:.3f} Gate={'PASS' if gate_pass else 'FAIL'}")
-
-    return EvalMetrics(ade=ade, fde=fde, gate_pass=gate_pass)
+    print(f"Eval: ADE={avg_ade:.3f} FDE={avg_fde:.3f} Gate={'PASS' if passed else 'FAIL'}")
+    return EvalMetrics(ade=avg_ade, fde=avg_fde, gate_pass=passed)
 
 
 # ============================================================
@@ -372,14 +552,24 @@ def evaluate(
 @workflow
 def wf_data_ingest(
     dataset: Dataset = Dataset.L2D,
-    version_tag: str = "10hz-224px-v1",
-    hz: int = 10,
-    image_size: int = 224,
-    episodes: int = 5,
+    episodes: int = 3,
+    hf_token: str = "",
 ) -> FlyteDirectory:
-    """Data Ingest."""
-    return data_ingest(dataset=dataset, version_tag=version_tag,
-                       hz=hz, image_size=image_size, episodes=episodes)
+    """Download raw dataset from HuggingFace."""
+    return data_ingest(dataset=dataset, episodes=episodes, hf_token=hf_token)
+
+
+@workflow
+def wf_data_processing(
+    raw_data: FlyteDirectory,
+    dataset: Dataset = Dataset.L2D,
+    hz: int = 10,
+    image_size: int = 256,
+    episodes: int = 3,
+) -> FlyteDirectory:
+    """Pre-process raw data → WebDataset shards."""
+    return data_processing(raw_data=raw_data, dataset=dataset,
+                           hz=hz, image_size=image_size, episodes=episodes)
 
 
 @workflow
@@ -388,16 +578,13 @@ def wf_train_il(
     dataset: Dataset = Dataset.L2D,
     backbone: Backbone = Backbone.SWIN_V2_TINY,
     fusion_mode: FusionMode = FusionMode.CONCAT,
-    epochs: int = 10,
+    epochs: int = 3,
     batch_size: int = 4,
-    lr: float = 0.001,
-    weight_decay: float = 1e-4,
-    warmup_steps: int = 500,
+    lr: float = 1e-4,
 ) -> EvalMetrics:
     """IL Train → Evaluate (logs to MLflow 'imitation-learning')."""
     out = train_il(shards=shards, dataset=dataset, backbone=backbone,
-                   fusion_mode=fusion_mode, epochs=epochs, batch_size=batch_size,
-                   lr=lr, weight_decay=weight_decay, warmup_steps=warmup_steps)
+                   fusion_mode=fusion_mode, epochs=epochs, batch_size=batch_size, lr=lr)
     return evaluate(checkpoint=out.checkpoint, shards=shards,
                     train_metadata=out.metadata, experiment_name="imitation-learning")
 
@@ -407,17 +594,13 @@ def wf_train_offline_rl(
     pretrained: FlyteFile,
     shards: FlyteDirectory,
     il_metadata: FlyteFile,
-    epochs: int = 5,
+    epochs: int = 3,
     tau: float = 0.7,
     beta: float = 3.0,
-    replay_buffer_size: int = 100000,
-    discount: float = 0.99,
 ) -> EvalMetrics:
     """Offline RL → Evaluate (logs to MLflow 'offline-rl')."""
     out = train_offline_rl(pretrained=pretrained, shards=shards,
-                           il_metadata=il_metadata, epochs=epochs,
-                           tau=tau, beta=beta, replay_buffer_size=replay_buffer_size,
-                           discount=discount)
+                           il_metadata=il_metadata, epochs=epochs, tau=tau, beta=beta)
     return evaluate(checkpoint=out.checkpoint, shards=shards,
                     train_metadata=out.metadata, experiment_name="offline-rl")
 
@@ -425,26 +608,26 @@ def wf_train_offline_rl(
 @workflow
 def wf_full_pipeline(
     dataset: Dataset = Dataset.L2D,
-    version_tag: str = "10hz-224px-v1",
+    episodes: int = 3,
     backbone: Backbone = Backbone.SWIN_V2_TINY,
     fusion_mode: FusionMode = FusionMode.CONCAT,
-    epochs_il: int = 10,
-    epochs_rl: int = 5,
+    epochs_il: int = 3,
+    epochs_rl: int = 3,
     batch_size: int = 4,
-    lr: float = 0.001,
-    weight_decay: float = 1e-4,
+    lr: float = 1e-4,
     tau: float = 0.7,
     beta: float = 3.0,
+    hf_token: str = "",
 ) -> EvalMetrics:
-    """Full: Ingest → IL Train → Eval → Offline RL → Eval."""
-    shards = data_ingest(dataset=dataset, version_tag=version_tag)
+    """Full: Ingest → Process → IL Train+Eval → RL Train+Eval."""
+    raw = data_ingest(dataset=dataset, episodes=episodes, hf_token=hf_token)
+    shards = data_processing(raw_data=raw, dataset=dataset, episodes=episodes)
     il_out = train_il(shards=shards, dataset=dataset, backbone=backbone,
                       fusion_mode=fusion_mode, epochs=epochs_il,
-                      batch_size=batch_size, lr=lr, weight_decay=weight_decay)
+                      batch_size=batch_size, lr=lr)
     evaluate(checkpoint=il_out.checkpoint, shards=shards,
              train_metadata=il_out.metadata, experiment_name="imitation-learning")
     rl_out = train_offline_rl(pretrained=il_out.checkpoint, shards=shards,
-                              il_metadata=il_out.metadata, epochs=epochs_rl,
-                              tau=tau, beta=beta)
+                              il_metadata=il_out.metadata, epochs=epochs_rl, tau=tau, beta=beta)
     return evaluate(checkpoint=rl_out.checkpoint, shards=shards,
                     train_metadata=rl_out.metadata, experiment_name="offline-rl")

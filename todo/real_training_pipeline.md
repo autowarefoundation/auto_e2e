@@ -538,3 +538,13 @@ Rationale:
 - Clear ownership: each Dockerfile declares exactly what that stage needs
 
 All images COPY `Model/` for shared model code access. Each image installs only the Python packages required for its specific task.
+
+### 6. HuggingFace Authentication
+
+HF token is injected via environment variable `HF_TOKEN`. Never committed to git.
+
+- Flyte tasks: set via `environment={"HF_TOKEN": ...}` from K8s Secret
+- K8s Secret source: AWS Secrets Manager (`auto-e2e-platform/hf-token`)
+- Local: `export HF_TOKEN=<token>`
+
+The `data_ingest` task uses `huggingface_hub.login(token=os.environ["HF_TOKEN"])` before downloading.
