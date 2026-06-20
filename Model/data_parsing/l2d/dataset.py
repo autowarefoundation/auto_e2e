@@ -71,7 +71,12 @@ class L2DDataset(Dataset):
         backbone_name: str = "swinv2_tiny_window8_256",
         local_files_only: bool = False,
     ) -> None:
-        from lerobot.datasets.lerobot_dataset import LeRobotDataset
+        try:
+            from lerobot.datasets.lerobot_dataset import LeRobotDataset
+        except ModuleNotFoundError:
+            # lerobot-dataset (relaxed-deps standalone) exposes the same class
+            # under the `ledataset` namespace.
+            from ledataset.datasets.lerobot_dataset import LeRobotDataset
 
         self.repo_id = repo_id
         self._episodes = episodes

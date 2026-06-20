@@ -66,7 +66,10 @@ def data_ingest(
     if token:
         login(token=token)
 
-    from lerobot.datasets.lerobot_dataset import LeRobotDataset
+    try:
+        from lerobot.datasets.lerobot_dataset import LeRobotDataset
+    except ModuleNotFoundError:
+        from ledataset.datasets.lerobot_dataset import LeRobotDataset
 
     ep_list = list(range(episodes)) if episodes > 0 else None
     ds = LeRobotDataset(repo_id=dataset.value, episodes=ep_list)
@@ -111,7 +114,10 @@ def data_processing(
     print(f"Processing raw data from: {raw_path}")
 
     # Load lerobot dataset from local cache
-    from lerobot.datasets.lerobot_dataset import LeRobotDataset
+    try:
+        from lerobot.datasets.lerobot_dataset import LeRobotDataset
+    except ModuleNotFoundError:
+        from ledataset.datasets.lerobot_dataset import LeRobotDataset
     ep_list = list(range(episodes)) if episodes > 0 else None
     ds = LeRobotDataset(repo_id=dataset.value, episodes=ep_list, root=raw_path)
 
