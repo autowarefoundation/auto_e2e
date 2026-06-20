@@ -450,3 +450,65 @@ beta = 3.0
 ```
 
 Expected: ~5-10 min total on g6e.4xlarge (L40S GPU).
+
+---
+
+## Implementation Principles
+
+### 1. Flyte Native Only
+
+All task logic is written **directly inside `@task` decorated functions**. No subprocess calls to `train.py`. No `argparse`. The Flyte task IS the training script.
+
+```python
+@task(container_image=TRAINING_IMAGE, requests=Resources(gpu="1"))
+def train_il(shards: list[FlyteDirectory], backbone: Backbone, ...) -> TrainOutput:
+    # ALL training logic inline here
+    model = AutoE2E(backbone=backbone.value, ...)
+    loader = make_flyte_loader(shards)
+    for epoch in range(epochs):
+        for batch in loader:
+            ...
+```
+
+### 2. Custom DataLoader for Flyte (not reusing existing L2DDataset)
+
+The existing `L2DDataset` downloads from HuggingFace at training time — that's `data_ingest`'s job in Flyte.
+
+For Flyte execution:
+- `data_processing` outputs WebDataset shards to S3
+- `train_il` reads those shards via `make_pre_extracted_loader` (already exists in `pre_extracted.py`)
+- The loader expects: `{key}.cam_X.jpg` + `{key}.ego.npy` + `{key}.meta.json` in tar files
+
+The existing `pre_extracted.py` DataLoader is the starting point but may be modified to match the exact shard format produced by `data_processing`.
+
+### 3. Dual-Mode: Flyte vs Local Execution
+
+The model code (`AutoE2E`, `TrajectoryImitationLoss`, etc.) must work in both modes:
+
+```python
+def get_dataloader(shard_dirs: list[str] | None, args=None):
+    """Factory: Flyte mode uses shards, local mode uses L2DDataset."""
+    if shard_dirs:
+        # Flyte path: pre-extracted WebDataset shards
+        from data_parsing.pre_extracted import make_pre_extracted_loader
+        return make_pre_extracted_loader(shard_dirs, batch_size=args.batch_size)
+    else:
+        # Local path: direct HF download via L2DDataset (existing behavior)
+        from data_parsing.l2d import L2DDataset
+        dataset = L2DDataset(repo_id=args.repo_id, episodes=args.episodes)
+        return DataLoader(dataset, batch_size=args.batch_size, ...)
+```
+
+This means:
+- `train.py` (local CLI) continues to work: `python train.py --backbone swin_v2_tiny --epochs 3`
+- Flyte `train_il` task calls the same model/loss code but uses the WebDataset DataLoader
+- The `if` branch is determined by whether `shard_dirs` is provided (Flyte) or not (local)
+
+### 4. No Duplication of Model Logic
+
+The Flyte task imports and uses the exact same:
+- `AutoE2E` from `model_components.auto_e2e`
+- `TrajectoryImitationLoss` from `model_components.losses`
+- `compute_open_loop_metrics`, `gate_check` from `evaluation.metrics`
+
+These are NOT reimplemented inside the workflow. The workflow is the orchestration layer only.
