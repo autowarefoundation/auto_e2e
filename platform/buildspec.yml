@@ -3,7 +3,6 @@ version: 0.2
 env:
   variables:
     AWS_DEFAULT_REGION: us-west-2
-    EKS_CLUSTER: auto-e2e-platform
 
 phases:
   pre_build:
@@ -16,21 +15,18 @@ phases:
       - echo "=== Building training image ==="
       - docker build -t ${ECR_URL}/auto-e2e/training:latest -f platform/docker/training/Dockerfile .
       - docker push ${ECR_URL}/auto-e2e/training:latest
+
+      - echo "=== Building eval image ==="
+      - docker build -t ${ECR_URL}/auto-e2e/eval:latest -f platform/docker/eval/Dockerfile .
+      - docker push ${ECR_URL}/auto-e2e/eval:latest
+
+      - echo "=== Building offline-rl image ==="
+      - docker build -t ${ECR_URL}/auto-e2e/offline-rl:latest -f platform/docker/offline-rl/Dockerfile .
+      - docker push ${ECR_URL}/auto-e2e/offline-rl:latest
+
       - echo "=== Building data-prep image ==="
-      - docker build -t ${ECR_URL}/auto-e2e/data-prep:latest -f platform/docker/data-prep/Dockerfile . && docker push ${ECR_URL}/auto-e2e/data-prep:latest || echo "WARN data-prep failed"
-      - echo "=== Building training-rl image ==="
-      - docker build -t ${ECR_URL}/auto-e2e/training-rl:latest -f platform/docker/training-rl/Dockerfile . && docker push ${ECR_URL}/auto-e2e/training-rl:latest || echo "WARN training-rl failed"
-  post_build:
-    commands:
-      - echo "=== Registering Flyte workflows ==="
-      - pip install -q flytekit flytekitplugins-kfpytorch 2>/dev/null || true
-      - export AWS_ACCOUNT_ID=$ACCOUNT_ID
-      - export AWS_REGION=$AWS_DEFAULT_REGION
-      - export MLFLOW_TRACKING_URI=$(aws ssm get-parameter --name "/${EKS_CLUSTER}/mlflow-uri" --query Parameter.Value --output text 2>/dev/null || echo "http://mlflow.mlflow.svc.cluster.local:5000")
-      - cd platform/pipelines
-      - pyflyte register training/ data_ingest/ evaluation/ simulation/ --project auto-e2e --domain development --image ${ECR_URL}/auto-e2e/data-prep:latest 2>&1 || echo "WARN pyflyte register failed (Flyte may not be accessible from CodeBuild)"
-      - pyflyte register full_pipeline.py --project auto-e2e --domain development --image ${ECR_URL}/auto-e2e/data-prep:latest 2>&1 || true
-      - echo "Done."
+      - docker build -t ${ECR_URL}/auto-e2e/data-prep:latest -f platform/docker/data-prep/Dockerfile .
+      - docker push ${ECR_URL}/auto-e2e/data-prep:latest
 
 cache:
   paths:

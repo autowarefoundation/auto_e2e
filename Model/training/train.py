@@ -211,17 +211,62 @@ def run_training(args: argparse.Namespace) -> None:
     )
     if mlflow_active:
         import mlflow
-        mlflow.set_experiment(f"auto_e2e/{args.dataset or args.repo_id}")
-        mlflow.start_run()
-        mlflow.set_tag("stage", "IL")
+        import mlflow.pytorch
+        import subprocess
+
+        # Enable system metrics (GPU utilization, memory)
+        try:
+            mlflow.enable_system_metrics_logging()
+        except Exception:
+            pass  # Fails if psutil not available
+
+        # Autolog for PyTorch (epoch metrics auto-captured)
+        mlflow.pytorch.autolog(log_every_n_epoch=1, log_models=False)
+
+        mlflow.set_experiment("auto-e2e/il-training")
+
+        # Git info
+        git_commit = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            capture_output=True, text=True, cwd="/workspace"
+        ).stdout.strip() or "unknown"
+        git_branch = subprocess.run(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            capture_output=True, text=True, cwd="/workspace"
+        ).stdout.strip() or "unknown"
+
+        run_name = f"{args.backbone}-{args.fusion_mode}-e{args.epochs}"
+        mlflow.start_run(run_name=run_name)
+
+        # Tags
+        mlflow.set_tags({
+            "stage": "IL",
+            "mlflow.source.git.commit": git_commit,
+            "mlflow.source.git.branch": git_branch,
+        })
+
+        # Params (namespace separated, UI-friendly)
         mlflow.log_params({
-            "backbone": args.backbone,
-            "fusion_mode": args.fusion_mode,
-            "batch_size": args.batch_size,
-            "lr": args.lr,
-            "epochs": args.epochs,
-            "amp": args.amp,
-            "dataset": args.dataset or args.repo_id,
+            # Model architecture
+            "model/backbone": args.backbone,
+            "model/fusion_mode": args.fusion_mode,
+            "model/num_timesteps": args.num_timesteps,
+            "model/num_signals": args.num_signals,
+            # Training hyperparams
+            "train/epochs": args.epochs,
+            "train/batch_size": args.batch_size,
+            "train/lr": args.lr,
+            "train/weight_decay": args.weight_decay,
+            "train/optimizer": "AdamW",
+            "train/amp": args.amp,
+            "train/grad_clip": args.grad_clip,
+            "train/loss_type": args.loss_type,
+            # Data
+            "data/dataset": args.dataset or args.repo_id or "unknown",
+            "data/shard_dir": args.shard_dir or "",
+            "data/format": args.dataset_format,
+            # Reproducibility
+            "git_commit": git_commit,
         })
 
     print(f"device={device} | backbone={args.backbone} | fusion={args.fusion_mode} | "
@@ -320,11 +365,24 @@ def run_training(args: argparse.Namespace) -> None:
                 mlflow.log_artifact(ckpt)
 
     if mlflow_active:
-        if args.register_model and args.save_dir:
+        # Log final metrics
+        mlflow.log_metrics({
+            "final/train_loss": running / max(n, 1),
+            "final/total_epochs": epochs,
+        })
+        if device.type == "cuda":
+            mlflow.log_metric("final/gpu_peak_vram_gb", torch.cuda.max_memory_allocated(device) / 1e9)
+
+        # Register model in Model Registry
+        if args.save_dir:
+            best_ckpt = os.path.join(args.save_dir, f"epoch_{epochs-1}.pt")
+            if os.path.exists(best_ckpt):
+                mlflow.log_artifact(best_ckpt, artifact_path="checkpoints")
             mlflow.pytorch.log_model(
                 model, "model",
-                registered_model_name="auto_e2e",
+                registered_model_name="auto-e2e-driving-policy",
             )
+
         mlflow.end_run()
 
 
