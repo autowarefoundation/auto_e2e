@@ -1,9 +1,10 @@
 # MLflow community-charts/mlflow 1.8.5 values override
 resources:
   requests:
-    cpu: 200m
-    memory: 512Mi
+    cpu: "1"
+    memory: 1Gi
   limits:
+    cpu: "2"
     memory: 4Gi
 postgresql:
   enabled: false
