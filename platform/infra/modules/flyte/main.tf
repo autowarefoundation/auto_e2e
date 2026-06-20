@@ -20,7 +20,57 @@ variable "flyte_s3_secret_key" {
   default     = ""
 }
 
+variable "oidc_provider_arn" {
+  description = "EKS OIDC provider ARN for IRSA"
+  type        = string
+  default     = ""
+}
+
+variable "oidc_provider_url" {
+  description = "EKS OIDC provider URL (without https://)"
+  type        = string
+  default     = ""
+}
+
 data "aws_caller_identity" "current" {}
+
+# IAM role assumed by Flyte task pods (default SA in auto-e2e-* namespaces)
+# Created by cluster-resource-sync as the defaultIamRole annotation target.
+resource "aws_iam_role" "flyte_user" {
+  count = var.oidc_provider_url != "" ? 1 : 0
+  name  = "flyte-user-role"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect    = "Allow"
+      Principal = { Federated = var.oidc_provider_arn }
+      Action    = "sts:AssumeRoleWithWebIdentity"
+      Condition = {
+        StringLike = {
+          "${var.oidc_provider_url}:sub" = "system:serviceaccount:auto-e2e-*:default"
+        }
+      }
+    }]
+  })
+}
+
+resource "aws_iam_role_policy" "flyte_user_s3" {
+  count = var.oidc_provider_url != "" ? 1 : 0
+  name  = "s3-access"
+  role  = aws_iam_role.flyte_user[0].name
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect = "Allow"
+      Action = "s3:*"
+      Resource = [
+        "arn:aws:s3:::${var.artifacts_bucket}",
+        "arn:aws:s3:::${var.artifacts_bucket}/*",
+      ]
+    }]
+  })
+}
 
 resource "helm_release" "flyte" {
   name             = "flyte"
@@ -99,13 +149,10 @@ resource "helm_release" "flyte" {
 
   # Storage: custom config with stow + static S3 credentials
   # (flyte-core chart template only supports 'iam' for type=s3)
+  # storage.type=custom + stow accesskey config is defined in the values file.
   set {
-    name  = "storage.type"
-    value = "s3"
-  }
-  set {
-    name  = "storage.bucketName"
-    value = var.artifacts_bucket
+    name  = "userSettings.s3AccessKey"
+    value = var.flyte_s3_access_key
   }
   set_sensitive {
     name  = "storage.custom.stow.config.secret_access_key"

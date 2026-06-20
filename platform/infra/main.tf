@@ -90,6 +90,8 @@ module "flyte" {
   rds_password        = module.rds.master_password
   flyte_s3_access_key = aws_iam_access_key.flyte_s3.id
   flyte_s3_secret_key = aws_iam_access_key.flyte_s3.secret
+  oidc_provider_arn   = module.eks.oidc_provider_arn
+  oidc_provider_url   = module.eks.oidc_provider_url
 
   depends_on = [module.rds, module.storage, module.training_operator, module.kueue]
 }

@@ -185,14 +185,21 @@ common:
 #
 
 storage:
-  # -- Sets the storage type. Supported values are sandbox, s3, gcs and custom.
-  type: s3
-  # -- bucketName defines the storage bucket flyte will use. Required for all types except for sandbox.
+  # Custom stow config: static access key (stow/minio-go AWS SDK v1 lacks IRSA support)
+  type: custom
   bucketName: "{{ .Values.userSettings.bucketName }}"
-  s3:
-    region: "{{ .Values.userSettings.accountRegion }}"
   cache:
     maxSizeMBs: 1024
+  custom:
+    container: "{{ .Values.userSettings.bucketName }}"
+    type: s3
+    stow:
+      kind: s3
+      config:
+        region: "{{ .Values.userSettings.accountRegion }}"
+        auth_type: accesskey
+        access_key_id: "{{ .Values.userSettings.s3AccessKey }}"
+        # secret_access_key injected via set_sensitive (storage.custom.stow.config.secret_access_key)
 
 db:
   datacatalog:
@@ -237,10 +244,13 @@ configmap:
     task_resources:
       defaults:
         cpu: 1000m
-        memory: 1000Mi
+        memory: 2Gi
         storage: 1000Mi
       limits:
-        storage: 2000Mi
+        cpu: 8
+        gpu: 1
+        memory: 32Gi
+        storage: 10Gi
 
   core:
     propeller:
@@ -373,9 +383,9 @@ cluster_resource_manager:
                 value: "arn:aws:iam::{{ .Values.userSettings.accountNumber }}:role/flyte-user-role"
         - development:
             - projectQuotaCpu:
-                value: "4"
+                value: "32"
             - projectQuotaMemory:
-                value: "3000Mi"
+                value: "128Gi"
             - defaultIamRole:
                 value: "arn:aws:iam::{{ .Values.userSettings.accountNumber }}:role/flyte-user-role"
 

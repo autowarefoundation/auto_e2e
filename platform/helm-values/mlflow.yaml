@@ -11,5 +11,16 @@ postgresql:
 service:
   type: ClusterIP
   port: 5000
-# Disable gunicorn → use uvicorn (enables security middleware / CORS)
-gunicornOpts: ""
+
+# Server args (camelcase → kebabcase). No gunicornOpts → uvicorn (FastAPI) mode,
+# which enables the security middleware so CORS/allowed-hosts take effect.
+extraArgs:
+  corsAllowedOrigins: "*"
+
+extraFlags:
+  - serveArtifacts
+
+# Security middleware config (uvicorn mode) — allows CloudFront UI to call ajax-api
+extraEnvVars:
+  MLFLOW_SERVER_ALLOWED_HOSTS: "*"
+  MLFLOW_SERVER_CORS_ALLOWED_ORIGINS: "*"
