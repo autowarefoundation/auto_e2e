@@ -127,11 +127,6 @@ def train_il(
         ckpt_path = "/tmp/ckpt/best.pt"
         torch.save({"backbone": bb, "fusion": fm, "epochs": epochs}, ckpt_path)
         mlflow.log_artifact(ckpt_path)
-        mlflow.pytorch.log_model(
-            torch.nn.Linear(1, 1),  # placeholder
-            "model",
-            registered_model_name="auto-e2e-driving-policy",
-        )
 
     return FlyteFile(ckpt_path)
 
