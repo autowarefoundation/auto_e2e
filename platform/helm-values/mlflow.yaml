@@ -4,9 +4,11 @@ resources:
     cpu: 200m
     memory: 512Mi
   limits:
-    memory: 2Gi
+    memory: 4Gi
 postgresql:
   enabled: false
 service:
   type: ClusterIP
   port: 5000
+# Disable gunicorn → use uvicorn (enables security middleware / CORS)
+gunicornOpts: ""

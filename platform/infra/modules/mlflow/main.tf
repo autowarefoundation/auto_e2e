@@ -82,14 +82,13 @@ resource "helm_release" "mlflow" {
     value = "mlflow"
   }
 
-  # MLflow uvicorn mode: disable gunicorn (enables security middleware control)
-  # MLFLOW_SERVER_ALLOWED_HOSTS=* allows any Host header (CloudFront, ALB, etc)
-  set {
-    name  = "extraFlags[0]"
-    value = "serveArtifacts"
-  }
+  # MLflow uvicorn mode (no gunicorn): enables security middleware + CORS
   set {
     name  = "extraEnvVars.MLFLOW_SERVER_ALLOWED_HOSTS"
+    value = "*"
+  }
+  set {
+    name  = "extraEnvVars.MLFLOW_SERVER_CORS_ALLOWED_ORIGINS"
     value = "*"
   }
 
