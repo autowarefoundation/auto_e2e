@@ -261,6 +261,8 @@ def train_il(
     # Optimizer + Loss
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
     loss_fn = TrajectoryImitationLoss(loss_type="smooth_l1")
+    if hasattr(loss_fn, "to"):
+        loss_fn = loss_fn.to(device)
 
     # Training loop
     model.train()
