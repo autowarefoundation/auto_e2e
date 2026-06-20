@@ -1,6 +1,6 @@
-# Flyte Workflow パラメータリファレンス
+# Flyte Workflow Parameter Reference
 
-Flyte Console (`https://d1fk8c95f6ice9.cloudfront.net/console`) から各 workflow を Launch する際のパラメータ説明。
+Launch workflows from Flyte Console: https://d1fk8c95f6ice9.cloudfront.net/console
 
 Project: `auto-e2e` / Domain: `development`
 
@@ -8,108 +8,108 @@ Project: `auto-e2e` / Domain: `development`
 
 ## wf_data_ingest
 
-生データセットをダウンロードし、学習用 WebDataset shards に変換する。
+Downloads a raw dataset and converts it into WebDataset shards for training.
 
-| パラメータ | 型 | デフォルト | UI | 説明 |
-|-----------|-----|-----------|-----|------|
-| `dataset` | Enum | `L2D` | ドロップダウン | 取得元データセット。`L2D` = yaak-ai/L2D (HuggingFace)、`NVIDIA_PHYSICAL_AI` = nvidia/PhysicalAI |
-| `version_tag` | str | `10hz-224px-v1` | テキスト | 加工バージョンのタグ。同じデータを別設定で再処理する時に変える (例: `20hz-256px-v2`) |
-| `hz` | int | `10` | 数値 | エゴモーション/フレームのリサンプリング周波数 (Hz)。高いほどデータ量増 |
-| `image_size` | int | `224` | 数値 | カメラ画像のリサイズ先 (正方形 px)。モデル入力サイズに合わせる |
-| `episodes` | int | `5` | 数値 | 処理するエピソード数。全量なら `-1`、テストなら `1-5` |
+| Parameter | Type | Default | UI Control | Description |
+|-----------|------|---------|------------|-------------|
+| `dataset` | Enum | `L2D` | Dropdown | Source dataset. `L2D` = yaak-ai/L2D (HuggingFace), `NVIDIA_PHYSICAL_AI` = nvidia/PhysicalAI |
+| `version_tag` | str | `10hz-224px-v1` | Text | Processing version tag. Change when reprocessing with different settings (e.g., `20hz-256px-v2`) |
+| `hz` | int | `10` | Number | Resampling frequency for egomotion/frames (Hz). Higher = more data |
+| `image_size` | int | `224` | Number | Camera image resize target (square px). Must match model input size |
+| `episodes` | int | `5` | Number | Number of episodes to process. Use `-1` for all, `1-5` for testing |
 
-**出力**: `FlyteDirectory` (S3上の WebDataset shards ディレクトリ)
+**Output**: `FlyteDirectory` — S3 directory containing WebDataset `.tar` shards
 
 ---
 
 ## wf_train_il
 
-Imitation Learning (教師あり学習)。Expert demonstrations から運転 policy を学習する。
+Imitation Learning (supervised training). Learns a driving policy from expert demonstrations.
 
-| パラメータ | 型 | デフォルト | UI | 説明 |
-|-----------|-----|-----------|-----|------|
-| `shards` | FlyteDirectory | (必須) | URI入力 | `wf_data_ingest` の出力 URI。Flyte UI で前回実行の Outputs からコピー |
-| `backbone` | Enum | `SWIN_V2_TINY` | ドロップダウン | 画像エンコーダ。`SWIN_V2_TINY` (22M params, 良バランス)、`CONVNEXT_V2_TINY` (28M, 高精度)、`RESNET_50` (25M, 高速) |
-| `fusion_mode` | Enum | `CONCAT` | ドロップダウン | マルチカメラ特徴量統合方式。`CONCAT` (単純結合, 最速)、`CROSS_ATTN` (注意機構, 高精度)、`BEV` (Bird's Eye View, 空間理解) |
-| `epochs` | int | `10` | 数値 | 学習エポック数。少ないと underfitting、多いと overfitting |
-| `batch_size` | int | `4` | 数値 | ミニバッチサイズ。GPU メモリに依存 (g6e.4xlarge L40S 48GB なら 8-16 まで可) |
-| `lr` | float | `0.001` | 数値 | 学習率。大きいと発散、小さいと収束遅い。通常 `0.0001` - `0.001` |
+| Parameter | Type | Default | UI Control | Description |
+|-----------|------|---------|------------|-------------|
+| `shards` | FlyteDirectory | (required) | URI input | Output URI from `wf_data_ingest`. Copy from Flyte Console → previous execution → Outputs tab |
+| `backbone` | Enum | `SWIN_V2_TINY` | Dropdown | Image encoder. `SWIN_V2_TINY` (22M params, good balance), `CONVNEXT_V2_TINY` (28M, higher accuracy), `RESNET_50` (25M, fastest) |
+| `fusion_mode` | Enum | `CONCAT` | Dropdown | Multi-camera feature fusion. `CONCAT` (simple concatenation, fastest), `CROSS_ATTN` (attention mechanism, higher accuracy), `BEV` (Bird's Eye View, spatial understanding) |
+| `epochs` | int | `10` | Number | Training epochs. Too few = underfitting, too many = overfitting |
+| `batch_size` | int | `4` | Number | Mini-batch size. GPU memory dependent (g6e.4xlarge L40S 48GB supports up to 8-16) |
+| `lr` | float | `0.001` | Number | Learning rate. Too high = divergence, too low = slow convergence. Typical range: `0.0001` - `0.001` |
 
-**出力**: `FlyteFile` (best checkpoint `.pt`)。MLflow に params/metrics/model 自動記録。
+**Output**: `FlyteFile` — Best checkpoint (`.pt`). Automatically logged to MLflow (params, metrics, model registry).
 
 ---
 
 ## wf_evaluate
 
-学習済みモデルの Open-Loop 評価。予測軌道と正解軌道を比較。
+Open-loop evaluation. Compares predicted trajectories against ground truth.
 
-| パラメータ | 型 | デフォルト | UI | 説明 |
-|-----------|-----|-----------|-----|------|
-| `checkpoint` | FlyteFile | (必須) | URI入力 | `wf_train_il` の出力 URI (checkpoint ファイル) |
-| `shards` | FlyteDirectory | (必須) | URI入力 | 評価用データ。`wf_data_ingest` の出力 URI |
+| Parameter | Type | Default | UI Control | Description |
+|-----------|------|---------|------------|-------------|
+| `checkpoint` | FlyteFile | (required) | URI input | Output URI from `wf_train_il` (checkpoint file) |
+| `shards` | FlyteDirectory | (required) | URI input | Evaluation data. Output URI from `wf_data_ingest` |
 
-**出力**: `EvalMetrics` (NamedTuple)
-- `ade` (float): Average Displacement Error (m) — 全タイムステップの平均ずれ。小さいほど良い
-- `fde` (float): Final Displacement Error (m) — 最終地点のずれ。小さいほど良い
-- `gate_pass` (bool): ade < 2.0 かつ fde < 4.0 なら True
+**Output**: `EvalMetrics` (NamedTuple)
+- `ade` (float): Average Displacement Error (meters) — mean deviation across all timesteps. Lower is better.
+- `fde` (float): Final Displacement Error (meters) — deviation at final predicted point. Lower is better.
+- `gate_pass` (bool): `True` if ade < 2.0 AND fde < 4.0
 
-MLflow に metrics 自動記録。
+Metrics automatically logged to MLflow experiment `auto-e2e/evaluation`.
 
 ---
 
 ## wf_train_offline_rl
 
-Offline RL (IQL) で IL policy を改善。シミュレータ不要、recorded data のみ使用。
+Offline RL (IQL) to refine IL policy. No simulator needed — uses recorded data only.
 
-| パラメータ | 型 | デフォルト | UI | 説明 |
-|-----------|-----|-----------|-----|------|
-| `pretrained` | FlyteFile | (必須) | URI入力 | `wf_train_il` の出力 URI (IL checkpoint) |
-| `shards` | FlyteDirectory | (必須) | URI入力 | 学習データ。`wf_data_ingest` の出力 URI |
-| `epochs` | int | `5` | 数値 | RL 学習エポック数 |
-| `tau` | float | `0.7` | 数値 | IQL expectile parameter。高いほど保守的 (0.5=mean, 1.0=max)。通常 `0.7-0.9` |
-| `beta` | float | `3.0` | 数値 | Advantage weight temperature。高いほど expert に近い行動を重視。通常 `1.0-10.0` |
+| Parameter | Type | Default | UI Control | Description |
+|-----------|------|---------|------------|-------------|
+| `pretrained` | FlyteFile | (required) | URI input | Output URI from `wf_train_il` (IL checkpoint to refine) |
+| `shards` | FlyteDirectory | (required) | URI input | Training data. Output URI from `wf_data_ingest` |
+| `epochs` | int | `5` | Number | RL training epochs |
+| `tau` | float | `0.7` | Number | IQL expectile parameter. Higher = more conservative (0.5=mean, 1.0=max). Typical: `0.7-0.9` |
+| `beta` | float | `3.0` | Number | Advantage weight temperature. Higher = favor expert-like actions more. Typical: `1.0-10.0` |
 
-**出力**: `FlyteFile` (RL-refined checkpoint `.pt`)。MLflow に metrics 自動記録。
+**Output**: `FlyteFile` — RL-refined checkpoint (`.pt`). Logged to MLflow experiment `auto-e2e/offline-rl`.
 
 ---
 
 ## wf_full_pipeline
 
-上記4ステージを直列実行 (Ingest → IL Train → Eval → Offline RL)。
+Runs all 4 stages sequentially: Ingest → IL Training → Evaluation → Offline RL.
 
-| パラメータ | 型 | デフォルト | UI | 説明 |
-|-----------|-----|-----------|-----|------|
-| `dataset` | Enum | `L2D` | ドロップダウン | (wf_data_ingest と同じ) |
-| `version_tag` | str | `10hz-224px-v1` | テキスト | (wf_data_ingest と同じ) |
-| `backbone` | Enum | `SWIN_V2_TINY` | ドロップダウン | (wf_train_il と同じ) |
-| `fusion_mode` | Enum | `CONCAT` | ドロップダウン | (wf_train_il と同じ) |
-| `epochs_il` | int | `10` | 数値 | IL epochs |
-| `epochs_rl` | int | `5` | 数値 | RL epochs |
-| `batch_size` | int | `4` | 数値 | IL batch size |
-| `lr` | float | `0.001` | 数値 | IL learning rate |
+| Parameter | Type | Default | UI Control | Description |
+|-----------|------|---------|------------|-------------|
+| `dataset` | Enum | `L2D` | Dropdown | (same as wf_data_ingest) |
+| `version_tag` | str | `10hz-224px-v1` | Text | (same as wf_data_ingest) |
+| `backbone` | Enum | `SWIN_V2_TINY` | Dropdown | (same as wf_train_il) |
+| `fusion_mode` | Enum | `CONCAT` | Dropdown | (same as wf_train_il) |
+| `epochs_il` | int | `10` | Number | IL training epochs |
+| `epochs_rl` | int | `5` | Number | RL training epochs |
+| `batch_size` | int | `4` | Number | IL batch size |
+| `lr` | float | `0.001` | Number | IL learning rate |
 
-**出力**: `FlyteFile` (最終 RL-refined checkpoint)
+**Output**: `FlyteFile` — Final RL-refined checkpoint
 
 ---
 
-## 初回実行ガイド
+## How to Find FlyteDirectory / FlyteFile URIs
 
-### 最も簡単: `wf_full_pipeline` をデフォルトのまま Launch
+When a task needs the output of a previous task:
 
-すべてデフォルト値でOK。L2D データ取得 → 学習 → 評価 → RL まで自動実行。
+1. Go to Flyte Console → **Executions**
+2. Click the completed execution
+3. Click the task node → **Outputs** tab
+4. Copy the URI (format: `s3://auto-e2e-platform-artifacts-381491877296/...`)
+5. Paste into the new workflow's input field
 
-### 個別実行する場合の順序
+---
 
-1. `wf_data_ingest` → 出力 URI をメモ
-2. `wf_train_il` → `shards` に 1 の出力 URI を貼り付け → 出力 URI をメモ
-3. `wf_evaluate` → `checkpoint` に 2 の出力、`shards` に 1 の出力
-4. `wf_train_offline_rl` → `pretrained` に 2 の出力、`shards` に 1 の出力
+## First Run Guide
 
-### FlyteDirectory / FlyteFile URI の見つけ方
+**Easiest**: Launch `wf_full_pipeline` with all defaults. Everything runs end-to-end.
 
-Flyte Console → Executions → 該当実行をクリック → Outputs タブ → URI をコピー
-
-形式例:
-```
-s3://auto-e2e-platform-artifacts-381491877296/data/abc123/...
-```
+**Step by step**:
+1. Launch `wf_data_ingest` (dataset=`L2D`, all defaults) → wait for completion → copy output URI
+2. Launch `wf_train_il` (paste shards URI, select backbone/fusion, defaults for rest) → copy output URI
+3. Launch `wf_evaluate` (paste checkpoint + shards URIs)
+4. Launch `wf_train_offline_rl` (paste pretrained + shards URIs)
