@@ -4,6 +4,7 @@ All pipeline logic is inside @task functions.
 Data passes between tasks via S3 (Flyte auto-manages FlyteFile/FlyteDirectory).
 Each task runs in its own container image.
 """
+import enum
 from flytekit import task, workflow, Resources
 from flytekit.types.file import FlyteFile
 from flytekit.types.directory import FlyteDirectory
@@ -18,6 +19,24 @@ DATA_PREP_IMAGE = "auto-e2e/data-prep:latest"
 MLFLOW_URI = "http://mlflow.mlflow.svc.cluster.local:5000"
 
 
+# --- Enums for UI dropdowns ---
+class Dataset(enum.Enum):
+    L2D = "yaak-ai/L2D"
+    NVIDIA_PHYSICAL_AI = "nvidia/PhysicalAI"
+
+
+class Backbone(enum.Enum):
+    SWIN_V2_TINY = "swin_v2_tiny"
+    CONVNEXT_V2_TINY = "conv_next_v2_tiny"
+    RESNET_50 = "res_net_50"
+
+
+class FusionMode(enum.Enum):
+    CONCAT = "concat"
+    CROSS_ATTN = "cross_attn"
+    BEV = "bev"
+
+
 # ============================================================
 # Task: Data Ingest
 # ============================================================
@@ -27,7 +46,7 @@ MLFLOW_URI = "http://mlflow.mlflow.svc.cluster.local:5000"
     environment={"AWS_DEFAULT_REGION": "us-west-2"},
 )
 def data_ingest(
-    dataset_name: str = "yaak-ai/L2D",
+    dataset: Dataset = Dataset.L2D,
     version_tag: str = "10hz-224px-v1",
     hz: int = 10,
     image_size: int = 224,
@@ -35,6 +54,7 @@ def data_ingest(
 ) -> FlyteDirectory:
     """Download dataset, extract frames, produce WebDataset shards."""
     import os, tempfile
+    dataset_name = dataset.value
 
     out_dir = tempfile.mkdtemp()
     # TODO: actual ingest logic (HF download → adapter → WebDataset)
@@ -66,8 +86,8 @@ EvalMetrics = NamedTuple("EvalMetrics", ade=float, fde=float, gate_pass=bool)
 )
 def train_il(
     shards: FlyteDirectory,
-    backbone: str = "swin_v2_tiny",
-    fusion_mode: str = "concat",
+    backbone: Backbone = Backbone.SWIN_V2_TINY,
+    fusion_mode: FusionMode = FusionMode.CONCAT,
     epochs: int = 10,
     batch_size: int = 4,
     lr: float = 0.001,
@@ -79,13 +99,15 @@ def train_il(
     mlflow.set_experiment("auto-e2e/il-training")
 
     shard_path = shards.download()
-    print(f"Training: backbone={backbone} fusion={fusion_mode} epochs={epochs}")
+    bb = backbone.value
+    fm = fusion_mode.value
+    print(f"Training: backbone={bb} fusion={fm} epochs={epochs}")
     print(f"Shards: {shard_path}")
 
-    with mlflow.start_run(run_name=f"{backbone}-{fusion_mode}-e{epochs}"):
+    with mlflow.start_run(run_name=f"{bb}-{fm}-e{epochs}"):
         mlflow.log_params({
-            "model/backbone": backbone,
-            "model/fusion_mode": fusion_mode,
+            "model/backbone": bb,
+            "model/fusion_mode": fm,
             "train/epochs": epochs,
             "train/batch_size": batch_size,
             "train/lr": lr,
@@ -101,7 +123,7 @@ def train_il(
         # Save checkpoint
         os.makedirs("/tmp/ckpt", exist_ok=True)
         ckpt_path = "/tmp/ckpt/best.pt"
-        torch.save({"backbone": backbone, "fusion": fusion_mode, "epochs": epochs}, ckpt_path)
+        torch.save({"backbone": bb, "fusion": fm, "epochs": epochs}, ckpt_path)
         mlflow.log_artifact(ckpt_path)
         mlflow.pytorch.log_model(
             torch.nn.Linear(1, 1),  # placeholder
@@ -195,22 +217,22 @@ def train_offline_rl(
 # ============================================================
 @workflow
 def wf_data_ingest(
-    dataset_name: str = "yaak-ai/L2D",
+    dataset: Dataset = Dataset.L2D,
     version_tag: str = "10hz-224px-v1",
     hz: int = 10,
     image_size: int = 224,
     episodes: int = 5,
 ) -> FlyteDirectory:
     """Data Ingest pipeline."""
-    return data_ingest(dataset_name=dataset_name, version_tag=version_tag,
+    return data_ingest(dataset=dataset, version_tag=version_tag,
                        hz=hz, image_size=image_size, episodes=episodes)
 
 
 @workflow
 def wf_train_il(
     shards: FlyteDirectory,
-    backbone: str = "swin_v2_tiny",
-    fusion_mode: str = "concat",
+    backbone: Backbone = Backbone.SWIN_V2_TINY,
+    fusion_mode: FusionMode = FusionMode.CONCAT,
     epochs: int = 10,
     batch_size: int = 4,
     lr: float = 0.001,
@@ -244,17 +266,17 @@ def wf_train_offline_rl(
 
 @workflow
 def wf_full_pipeline(
-    dataset_name: str = "yaak-ai/L2D",
+    dataset: Dataset = Dataset.L2D,
     version_tag: str = "10hz-224px-v1",
-    backbone: str = "swin_v2_tiny",
-    fusion_mode: str = "concat",
+    backbone: Backbone = Backbone.SWIN_V2_TINY,
+    fusion_mode: FusionMode = FusionMode.CONCAT,
     epochs_il: int = 10,
     epochs_rl: int = 5,
     batch_size: int = 4,
     lr: float = 0.001,
 ) -> FlyteFile:
     """Full pipeline: Ingest → Train → Eval → Offline RL."""
-    shards = data_ingest(dataset_name=dataset_name, version_tag=version_tag)
+    shards = data_ingest(dataset=dataset, version_tag=version_tag)
     ckpt = train_il(shards=shards, backbone=backbone, fusion_mode=fusion_mode,
                     epochs=epochs_il, batch_size=batch_size, lr=lr)
     evaluate(checkpoint=ckpt, shards=shards)
