@@ -5,13 +5,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /workspace
 
-# PyTorch CPU-only + torchvision
-RUN pip install --no-cache-dir torch torchvision --index-url https://download.pytorch.org/whl/cpu
+# CPU-only torch first (lerobot-dataset omits torch, so ours stays)
+RUN pip install --no-cache-dir torch==2.4.1 torchvision==0.19.1 --index-url https://download.pytorch.org/whl/cpu
 
-# Data pipeline deps
+# lerobot-dataset = standalone LeRobotDataset with relaxed deps (no torch override)
 RUN pip install --no-cache-dir \
     "flytekit>=1.14,<2" \
-    "lerobot>=0.5.1" \
+    lerobot-dataset \
     huggingface_hub \
     datasets \
     webdataset \
