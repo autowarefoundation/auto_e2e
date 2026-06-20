@@ -256,7 +256,7 @@ def train_il(
     ).to(device)
 
     # DataLoader
-    loader = make_pre_extracted_loader(shard_dir, batch_size=batch_size, num_workers=2)
+    loader = make_pre_extracted_loader(shard_dir, batch_size=batch_size, num_workers=0)
 
     # Optimizer + Loss
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
@@ -363,7 +363,7 @@ def train_offline_rl(
     model = AutoE2E(**config).to(device)
     model.load_state_dict(ckpt["model_state_dict"])
 
-    loader = make_pre_extracted_loader(shard_dir, batch_size=4, num_workers=2)
+    loader = make_pre_extracted_loader(shard_dir, batch_size=4, num_workers=0)
     optimizer = torch.optim.AdamW(model.parameters(), lr=3e-5, weight_decay=1e-3)
 
     # Simplified IQL-style training
@@ -452,7 +452,7 @@ def evaluate(
     model.eval()
 
     # Evaluate
-    loader = make_pre_extracted_loader(shard_dir, batch_size=8, num_workers=2, shuffle=0)
+    loader = make_pre_extracted_loader(shard_dir, batch_size=8, num_workers=0, shuffle=0)
     all_ade, all_fde = [], []
 
     with torch.no_grad():
