@@ -159,9 +159,10 @@ output "codebuild_project" {
 module "cloudfront" {
   source = "./modules/cloudfront"
 
-  cluster_name    = var.cluster_name
-  services        = var.cloudfront_services
-  lambda_edge_arn = var.auth_user_password != "" ? module.auth_edge[0].lambda_arn : ""
+  cluster_name           = var.cluster_name
+  services               = var.cloudfront_services
+  lambda_edge_arn        = var.auth_user_password != "" ? module.auth_edge[0].lambda_arn : ""
+  auth_excluded_services = ["mlflow"]
 }
 
 module "auth_edge" {

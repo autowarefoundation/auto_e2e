@@ -22,6 +22,21 @@ exports.handler = async (event) => {
   const host = headers.host[0].value;
   const uri = request.uri;
   const qs = request.querystring || '';
+  const method = request.method;
+
+  // CORS preflight — respond directly
+  if (method === 'OPTIONS') {
+    return {
+      status: '204',
+      headers: {
+        'access-control-allow-origin': [{ value: `https://$${host}` }],
+        'access-control-allow-methods': [{ value: 'GET,POST,PUT,DELETE,OPTIONS' }],
+        'access-control-allow-headers': [{ value: 'Content-Type,Authorization,X-Requested-With,Accept' }],
+        'access-control-allow-credentials': [{ value: 'true' }],
+        'access-control-max-age': [{ value: '86400' }],
+      },
+    };
+  }
 
   // Check for callback with auth code
   if (qs.includes('code=')) {
@@ -42,6 +57,11 @@ exports.handler = async (event) => {
         };
       } catch (e) {
         console.error('Token exchange failed:', e.message);
+        return {
+          status: '200',
+          body: `Token exchange failed: $${e.message}`,
+          headers: { 'content-type': [{ value: 'text/plain' }] },
+        };
       }
     }
   }
