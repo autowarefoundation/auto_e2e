@@ -67,8 +67,8 @@ resource "aws_cognito_user_pool_client" "this" {
   allowed_oauth_flows                  = ["code"]
   allowed_oauth_scopes                 = ["openid", "email"]
   supported_identity_providers         = ["COGNITO"]
-  callback_urls                        = var.callback_urls
-  logout_urls                          = var.callback_urls
+  callback_urls                        = concat(var.callback_urls, [for url in var.callback_urls : replace(url, "/_callback", "")])
+  logout_urls                          = [for url in var.callback_urls : replace(url, "/_callback", "")]
 
   explicit_auth_flows = [
     "ALLOW_ADMIN_USER_PASSWORD_AUTH",
@@ -107,17 +107,16 @@ data "archive_file" "lambda" {
   type        = "zip"
   source_dir  = "${path.module}/lambda/.build"
   output_path = "${path.module}/lambda/.build/auth-edge.zip"
-  depends_on  = [local_file.lambda_source, null_resource.npm_install]
+  depends_on  = [local_file.lambda_source]
 }
 
 resource "null_resource" "npm_install" {
   triggers = {
-    package_json = filemd5("${path.module}/lambda/package.json")
+    source = local_file.lambda_source.content
   }
 
   provisioner "local-exec" {
-    command     = "cp package.json .build/ && cd .build && npm install --production --quiet"
-    working_dir = "${path.module}/lambda"
+    command = "true"
   }
 
   depends_on = [local_file.lambda_source]
