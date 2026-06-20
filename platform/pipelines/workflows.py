@@ -10,11 +10,13 @@ from flytekit.types.file import FlyteFile
 from flytekit.types.directory import FlyteDirectory
 from typing import NamedTuple
 
-# --- Image references (set at register time via --image flags) ---
-TRAINING_IMAGE = "auto-e2e/training:latest"
-EVAL_IMAGE = "auto-e2e/eval:latest"
-OFFLINE_RL_IMAGE = "auto-e2e/offline-rl:latest"
-DATA_PREP_IMAGE = "auto-e2e/data-prep:latest"
+# --- Image references (ECR_PREFIX injected at register time via env or defaults to current account) ---
+import os as _os
+ECR_PREFIX = _os.environ.get("ECR_PREFIX", "381491877296.dkr.ecr.us-west-2.amazonaws.com")
+TRAINING_IMAGE = f"{ECR_PREFIX}/auto-e2e/training:latest"
+EVAL_IMAGE = f"{ECR_PREFIX}/auto-e2e/eval:latest"
+OFFLINE_RL_IMAGE = f"{ECR_PREFIX}/auto-e2e/offline-rl:latest"
+DATA_PREP_IMAGE = f"{ECR_PREFIX}/auto-e2e/data-prep:latest"
 
 MLFLOW_URI = "http://mlflow.mlflow.svc.cluster.local:5000"
 

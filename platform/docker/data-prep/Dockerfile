@@ -24,4 +24,3 @@ COPY platform/pipelines/ /workspace/platform/pipelines/
 ENV PYTHONPATH=/workspace/Model:/workspace
 ENV PYTHONUNBUFFERED=1
 
-ENTRYPOINT ["python"]
