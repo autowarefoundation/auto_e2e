@@ -9,7 +9,7 @@ env:
 phases:
   install:
     commands:
-      - pip install -q flytekit
+      - pip install -q flytekit numpy torch --extra-index-url https://download.pytorch.org/whl/cpu
   build:
     commands:
       - ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
@@ -17,7 +17,7 @@ phases:
       - |
         cat > /tmp/flyte.yaml << EOF
         admin:
-          endpoint: dns:///flyteadmin.flyte.svc.cluster.local:81
+          endpoint: dns:///k8s-flyte-flyteadm-be92e7737c-cf0d1a0f3df10f77.elb.us-west-2.amazonaws.com:81
           insecure: true
         EOF
       - >
@@ -25,7 +25,4 @@ phases:
         --project $FLYTE_PROJECT
         --domain $FLYTE_DOMAIN
         --image ${ECR_URL}/auto-e2e/training:latest
-        --image data-prep=${ECR_URL}/auto-e2e/data-prep:latest
-        --image eval=${ECR_URL}/auto-e2e/eval:latest
-        --image offline-rl=${ECR_URL}/auto-e2e/offline-rl:latest
-        platform/pipelines/
+        platform/pipelines/workflows.py
