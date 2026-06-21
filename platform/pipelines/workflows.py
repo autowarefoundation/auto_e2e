@@ -51,7 +51,7 @@ EvalMetrics = NamedTuple("EvalMetrics", ade=float, fde=float, gate_pass=bool)
 # ============================================================
 @task(
     container_image=DATA_PREP_IMAGE,
-    requests=Resources(cpu="2", mem="8Gi"),
+    requests=Resources(cpu="2", mem="24Gi"),
 )
 def data_ingest(
     dataset: Dataset = Dataset.L2D,
