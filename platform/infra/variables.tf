@@ -55,9 +55,9 @@ variable "cloudfront_services" {
 }
 
 variable "auth_user_email" {
-  description = "Email for Cognito admin user"
+  description = "Email for Cognito admin user. Set in secrets.auto.tfvars (never in git)."
   type        = string
-  default     = "contributor@autoware.org"
+  default     = ""
 }
 
 variable "auth_user_password" {
