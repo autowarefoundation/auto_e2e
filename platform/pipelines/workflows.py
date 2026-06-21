@@ -11,7 +11,7 @@ import enum
 from flytekit import task, workflow, Resources, Secret
 from flytekit.types.file import FlyteFile
 from flytekit.types.directory import FlyteDirectory
-from typing import NamedTuple
+from typing import NamedTuple, List
 
 import os as _os
 
@@ -44,6 +44,32 @@ class FusionMode(enum.Enum):
 
 TrainOutput = NamedTuple("TrainOutput", checkpoint=FlyteFile, metadata=FlyteFile)
 EvalMetrics = NamedTuple("EvalMetrics", ade=float, fde=float, gate_pass=bool)
+
+
+def _select_shard_dir(shards, dataset) -> str:
+    """Download all shard FlyteDirectories and return the local path of the one
+    whose manifest matches `dataset`.
+
+    All datasets are passed in (each a separately-packed WebDataset), but only
+    the selected dataset is used for this run. Multi-dataset training of a single
+    model is tracked in issue #77 (requires dynamic-num_views BEV fusion).
+    """
+    import os, json
+    target = dataset.value
+    fallback = None
+    for sh in shards:
+        d = sh.download()
+        fallback = fallback or d
+        mpath = os.path.join(str(d), "manifest.json")
+        if os.path.exists(mpath):
+            try:
+                if json.load(open(mpath)).get("dataset") == target:
+                    print(f"Selected shards for dataset={target}: {d}")
+                    return d
+            except Exception:
+                pass
+    print(f"WARN: no shards matched dataset={target}; using first ({fallback})")
+    return fallback
 
 
 # ============================================================
@@ -229,7 +255,7 @@ def data_processing(
     limits=Resources(gpu="1"),
 )
 def train_il(
-    shards: FlyteDirectory,
+    shards: List[FlyteDirectory],
     dataset: Dataset = Dataset.L2D,
     backbone: Backbone = Backbone.SWIN_V2_TINY,
     fusion_mode: FusionMode = FusionMode.CONCAT,
@@ -240,7 +266,11 @@ def train_il(
     grad_clip: float = 1.0,
     amp: bool = True,
 ) -> TrainOutput:
-    """Train AutoE2E model on pre-extracted WebDataset shards."""
+    """Train AutoE2E model on pre-extracted WebDataset shards.
+
+    All datasets' shards are passed in; the one matching `dataset` is selected
+    (single-dataset training; multi-dataset tracked in #77).
+    """
     import os, json, torch
     import numpy as np
     from flytekit import current_context
@@ -249,7 +279,7 @@ def train_il(
     from model_components.losses import TrajectoryImitationLoss
     from data_parsing.pre_extracted import make_pre_extracted_loader
 
-    shard_dir = shards.download()
+    shard_dir = _select_shard_dir(shards, dataset)
     ctx = current_context()
     bb, fm = backbone.value, fusion_mode.value
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -347,8 +377,9 @@ def train_il(
 )
 def train_offline_rl(
     pretrained: FlyteFile,
-    shards: FlyteDirectory,
+    shards: List[FlyteDirectory],
     il_metadata: FlyteFile,
+    dataset: Dataset = Dataset.L2D,
     epochs: int = 3,
     tau: float = 0.7,
     beta: float = 3.0,
@@ -359,7 +390,7 @@ def train_offline_rl(
     from flytekit import current_context
 
     ckpt_path = pretrained.download()
-    shard_dir = shards.download()
+    shard_dir = _select_shard_dir(shards, dataset)
     il_meta = json.load(open(il_metadata.download()))
     ctx = current_context()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -437,8 +468,9 @@ def train_offline_rl(
 )
 def evaluate(
     checkpoint: FlyteFile,
-    shards: FlyteDirectory,
+    shards: List[FlyteDirectory],
     train_metadata: FlyteFile,
+    dataset: Dataset = Dataset.L2D,
     experiment_name: str = "imitation-learning",
 ) -> EvalMetrics:
     """Evaluate + log everything to MLflow."""
@@ -451,7 +483,7 @@ def evaluate(
     from evaluation.metrics import integrate_trajectory, gate_check
 
     ckpt_path = checkpoint.download()
-    shard_dir = shards.download()
+    shard_dir = _select_shard_dir(shards, dataset)
     meta = json.load(open(train_metadata.download()))
     ctx = current_context()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -593,7 +625,7 @@ def wf_data_processing(
 
 @workflow
 def wf_train_il(
-    shards: FlyteDirectory,
+    shards: List[FlyteDirectory],
     dataset: Dataset = Dataset.L2D,
     backbone: Backbone = Backbone.SWIN_V2_TINY,
     fusion_mode: FusionMode = FusionMode.CONCAT,
@@ -601,26 +633,27 @@ def wf_train_il(
     batch_size: int = 4,
     lr: float = 1e-4,
 ) -> EvalMetrics:
-    """IL Train → Evaluate (logs to MLflow 'imitation-learning')."""
+    """IL Train → Evaluate. All datasets' shards passed in; `dataset` selects one."""
     out = train_il(shards=shards, dataset=dataset, backbone=backbone,
                    fusion_mode=fusion_mode, epochs=epochs, batch_size=batch_size, lr=lr)
-    return evaluate(checkpoint=out.checkpoint, shards=shards,
+    return evaluate(checkpoint=out.checkpoint, shards=shards, dataset=dataset,
                     train_metadata=out.metadata, experiment_name="imitation-learning")
 
 
 @workflow
 def wf_train_offline_rl(
     pretrained: FlyteFile,
-    shards: FlyteDirectory,
+    shards: List[FlyteDirectory],
     il_metadata: FlyteFile,
+    dataset: Dataset = Dataset.L2D,
     epochs: int = 3,
     tau: float = 0.7,
     beta: float = 3.0,
 ) -> EvalMetrics:
-    """Offline RL → Evaluate (logs to MLflow 'offline-rl')."""
-    out = train_offline_rl(pretrained=pretrained, shards=shards,
+    """Offline RL → Evaluate. All datasets' shards passed in; `dataset` selects one."""
+    out = train_offline_rl(pretrained=pretrained, shards=shards, dataset=dataset,
                            il_metadata=il_metadata, epochs=epochs, tau=tau, beta=beta)
-    return evaluate(checkpoint=out.checkpoint, shards=shards,
+    return evaluate(checkpoint=out.checkpoint, shards=shards, dataset=dataset,
                     train_metadata=out.metadata, experiment_name="offline-rl")
 
 
@@ -638,15 +671,28 @@ def wf_full_pipeline(
     beta: float = 3.0,
     hf_token: str = "",
 ) -> EvalMetrics:
-    """Full: Ingest → Process → IL Train+Eval → RL Train+Eval."""
-    raw = data_ingest(dataset=dataset, episodes=episodes, hf_token=hf_token)
-    shards = data_processing(raw_data=raw, dataset=dataset, episodes=episodes)
-    il_out = train_il(shards=shards, dataset=dataset, backbone=backbone,
+    """Full: Ingest+Process ALL datasets (separately packed) → IL Train+Eval → RL Train+Eval.
+
+    Every dataset is ingested and processed into its own WebDataset shard dir, and
+    all shard dirs are passed to the train/eval tasks. The `dataset` argument selects
+    which one is actually used for this run (single-dataset training; multi-dataset
+    on one model tracked in #77).
+    """
+    # Ingest + process every dataset into separate WebDataset shard dirs
+    raw_l2d = data_ingest(dataset=Dataset.L2D, episodes=episodes, hf_token=hf_token)
+    shards_l2d = data_processing(raw_data=raw_l2d, dataset=Dataset.L2D, episodes=episodes)
+
+    raw_nv = data_ingest(dataset=Dataset.NVIDIA_PHYSICAL_AI, episodes=episodes, hf_token=hf_token)
+    shards_nv = data_processing(raw_data=raw_nv, dataset=Dataset.NVIDIA_PHYSICAL_AI, episodes=episodes)
+
+    all_shards = [shards_l2d, shards_nv]
+
+    il_out = train_il(shards=all_shards, dataset=dataset, backbone=backbone,
                       fusion_mode=fusion_mode, epochs=epochs_il,
                       batch_size=batch_size, lr=lr)
-    evaluate(checkpoint=il_out.checkpoint, shards=shards,
+    evaluate(checkpoint=il_out.checkpoint, shards=all_shards, dataset=dataset,
              train_metadata=il_out.metadata, experiment_name="imitation-learning")
-    rl_out = train_offline_rl(pretrained=il_out.checkpoint, shards=shards,
+    rl_out = train_offline_rl(pretrained=il_out.checkpoint, shards=all_shards, dataset=dataset,
                               il_metadata=il_out.metadata, epochs=epochs_rl, tau=tau, beta=beta)
-    return evaluate(checkpoint=rl_out.checkpoint, shards=shards,
+    return evaluate(checkpoint=rl_out.checkpoint, shards=all_shards, dataset=dataset,
                     train_metadata=rl_out.metadata, experiment_name="offline-rl")
