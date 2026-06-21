@@ -1,9 +1,26 @@
+import math
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from .base import BasePlanner
 
-class TrajectoryPlanner(nn.Module):
+
+def _validate_offset_scale(offset_scale):
+    if not isinstance(offset_scale, (int, float)) or isinstance(offset_scale, bool):
+        raise ValueError(
+            f"offset_scale must be a finite non-negative number, "
+            f"got {offset_scale!r}."
+        )
+    if not math.isfinite(offset_scale) or offset_scale < 0:
+        raise ValueError(
+            f"offset_scale must be a finite non-negative number, "
+            f"got {offset_scale!r}."
+        )
+
+
+class GRUPlanner(BasePlanner):
     """Autoregressive trajectory decoder with deformable cross-attention to BEV.
 
     Replaces the flatten-then-MLP DrivingPolicy. A single learnable ego query
@@ -27,13 +44,17 @@ class TrajectoryPlanner(nn.Module):
         self.embed_dim = embed_dim
         self.num_timesteps = num_timesteps
         self.num_signals = num_signals
+        self.trajectory_dim = num_timesteps * num_signals
         self.num_points = num_points
+        self.egomotion_dim = egomotion_dim
+        self.visual_history_dim = visual_history_dim
         # offset_scale bounds the per-point sampling offset around the predicted
         # reference point in normalized BEV coordinates. The default 0.1 means
         # offsets reach up to 10% of the BEV grid extent in each direction. The
         # reference point itself is sigmoid-bounded to [0, 1], so the head can
         # still attend anywhere on the grid — offset_scale only constrains the
         # local fan-out around that anchor.
+        _validate_offset_scale(offset_scale)
         self.offset_scale = offset_scale
 
         self.ego_query = nn.Embedding(1, embed_dim)
@@ -85,17 +106,36 @@ class TrajectoryPlanner(nn.Module):
         attended = (sampled * attn_w.unsqueeze(-1)).sum(dim=1)             # [B, C]
         return self.output_proj(attended)
 
-    def forward(self, bev_features, visual_history, egomotion_history):
-        """
+    def forward(self, bev_features, visual_history, egomotion_history,
+                **kwargs):
+        """Inference forward — produces a fully-formed trajectory.
+
+        The GRU rollout is identical for train and inference, so this is
+        also what ``compute_planner_loss`` invokes internally before
+        applying its imitation MSE.
+
         Args:
             bev_features: [B, embed_dim, H, W] — any spatial resolution.
             visual_history: [B, visual_history_dim].
             egomotion_history: [B, egomotion_dim].
+            **kwargs: ignored. Accepts extra inputs (e.g. ``mode``,
+                ``trajectory_target``) that other planners or callers might
+                pass so call sites can stay planner-agnostic.
 
         Returns:
             trajectory: [B, num_timesteps * num_signals]
             ego_hidden: [B, embed_dim] — final GRU hidden state.
         """
+        if visual_history.shape[-1] != self.visual_history_dim:
+            raise ValueError(
+                f"visual_history last dim must be {self.visual_history_dim}, "
+                f"got tensor of shape {tuple(visual_history.shape)}."
+            )
+        if egomotion_history.shape[-1] != self.egomotion_dim:
+            raise ValueError(
+                f"egomotion_history last dim must be {self.egomotion_dim}, "
+                f"got tensor of shape {tuple(egomotion_history.shape)}."
+            )
 
         # Initialize GRU hidden state from ego state + visual history: [1, B, C]
         h = (self.ego_state_proj(egomotion_history)
@@ -124,3 +164,26 @@ class TrajectoryPlanner(nn.Module):
         trajectory = torch.cat(waypoints, dim=1)                           # [B, T*S]
         ego_hidden = h.squeeze(0)                                          # [B, C]
         return trajectory, ego_hidden
+
+    def compute_planner_loss(self, bev_features, visual_history,
+                             egomotion_history, trajectory_target):
+        """Imitation MSE between the GRU rollout and ``trajectory_target``.
+
+        Returns ``(loss, ego_hidden)`` as required by ``BasePlanner``. The
+        loss is the planner's training objective; ``ego_hidden`` is the
+        same context vector ``forward()`` produces, so AutoE2E can still
+        feed FutureState in train mode without a second rollout.
+        """
+        B = bev_features.shape[0]
+        expected = (B, self.trajectory_dim)
+        if tuple(trajectory_target.shape) != expected:
+            raise ValueError(
+                f"trajectory_target must have shape {expected} "
+                f"(batch_size, num_timesteps * num_signals), got "
+                f"{tuple(trajectory_target.shape)}."
+            )
+        trajectory, ego_hidden = self(
+            bev_features, visual_history, egomotion_history,
+        )
+        loss = F.mse_loss(trajectory, trajectory_target)
+        return loss, ego_hidden

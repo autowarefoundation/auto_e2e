@@ -5,9 +5,13 @@ import torch.nn as nn
 class TrajectoryImitationLoss(nn.Module):
     """Primary task loss: imitation loss over predicted trajectory."""
 
-    def __init__(self, loss_type: str = "smooth_l1", temporal_decay: float = 1.0,
+    def __init__(self, loss_type: str = "smooth_l1", temporal_decay: float = 0.95,
                  num_timesteps: int = 64, num_signals: int = 2):
+        # temporal_decay defaults to 0.95 so near-future predictions are
+        # weighted more heavily than far-future ones; near-future accuracy
+        # is more safety-critical for planning.
         super().__init__()
+        self.loss_fn: nn.Module
         if loss_type == "smooth_l1":
             self.loss_fn = nn.SmoothL1Loss(reduction="none")
         elif loss_type == "mse":

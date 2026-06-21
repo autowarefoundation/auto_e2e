@@ -10,7 +10,7 @@ Downsamples to 10Hz and produces:
 
     trajectory_target  (128,) — 64 timesteps after the sample point x 2 signals
                                 [acceleration, curvature]
-                                Matches TrajectoryPlanner's per-timestep output.
+                                Matches the planner's per-timestep output.
 
 """
 
@@ -23,7 +23,7 @@ import pandas as pd
 import torch
 from physical_ai_av.egomotion import EgomotionState
 
-# Must match TrajectoryPlanner dimensions. Placing here for package export.
+# Must match the planner's dimensions. Placing here for package export.
 _HISTORY_TIMESTEPS = 64         # 6.4 s of past context at 10 Hz
 _FUTURE_TIMESTEPS = 64          # 6.4 s of future prediction at 10 Hz
 _NUM_HISTORY_SIGNALS = 4        # speed, acceleration, yaw_angle, curvature
@@ -111,7 +111,7 @@ def load_egomotion(
         trajectory_target: Float tensor of shape ``(128,)``.
     """
     if df is None:
-        df = _load_downsampled_df(data_root, clip_uuid)
+        df = _load_downsampled_df(Path(data_root), clip_uuid)
 
     if len(df) < MIN_ROWS:
         raise ValueError(

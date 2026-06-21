@@ -16,10 +16,13 @@ jobs:
           python-version: "3.12"
 
       - name: Install dependencies
-        run: pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu && pip install timm pytest ruff
+        run: make setup
 
       - name: Lint with ruff
-        run: ruff check
+        run: make lint
+
+      - name: Type-check with mypy
+        run: make typecheck
 
       - name: Run unit tests
-        run: cd Model/tests && python -m pytest test_auto_e2e.py -v -m "not integration"
+        run: make test
