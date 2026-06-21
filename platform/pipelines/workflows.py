@@ -267,14 +267,19 @@ def train_il(
 
     print(f"Training: backbone={bb} fusion={fm} epochs={epochs} bs={batch_size} device={device} datasets={len(shard_dirs)}")
 
-    # Model
-    model = AutoE2E(
-        backbone=bb, num_views=7, embed_dim=256,
-        fusion_mode=fm, is_pretrained=True,
-    ).to(device)
-
     # DataLoader
     loader = make_pre_extracted_loader(merged_dir, batch_size=batch_size, num_workers=0)
+
+    # Detect num_views from the data (L2D=7, NVIDIA=8) so the model matches.
+    _peek = next(iter(loader))
+    num_views = int(_peek["visual_tiles"].shape[1])
+    print(f"Detected num_views={num_views}")
+
+    # Model
+    model = AutoE2E(
+        backbone=bb, num_views=num_views, embed_dim=256,
+        fusion_mode=fm, is_pretrained=True,
+    ).to(device)
 
     # Optimizer + Loss
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
@@ -317,14 +322,14 @@ def train_il(
     ckpt_path = "/tmp/train/best.pt"
     torch.save({
         "model_state_dict": model.state_dict(),
-        "config": {"backbone": bb, "fusion_mode": fm, "embed_dim": 256, "num_views": 7},
+        "config": {"backbone": bb, "fusion_mode": fm, "embed_dim": 256, "num_views": num_views},
         "epoch": epochs,
     }, ckpt_path)
 
     # Metadata
     meta = {
         "data": {"dataset": dataset.value, "shard_dirs": [str(d) for d in shard_dirs]},
-        "model": {"backbone": bb, "fusion_mode": fm, "embed_dim": 256, "num_views": 7},
+        "model": {"backbone": bb, "fusion_mode": fm, "embed_dim": 256, "num_views": num_views},
         "training": {
             "epochs": epochs, "batch_size": batch_size, "lr": lr,
             "weight_decay": weight_decay, "grad_clip": grad_clip, "amp": amp,
