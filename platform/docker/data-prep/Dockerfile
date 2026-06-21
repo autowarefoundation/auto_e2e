@@ -12,6 +12,7 @@ RUN pip install --no-cache-dir torch==2.4.1 torchvision==0.19.1 --index-url http
 RUN pip install --no-cache-dir \
     "flytekit>=1.14,<2" \
     lerobot-dataset \
+    physical_ai_av \
     huggingface_hub \
     datasets \
     webdataset \

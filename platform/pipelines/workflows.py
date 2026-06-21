@@ -58,14 +58,40 @@ def data_ingest(
     episodes: int = 3,
     hf_token: str = "",
 ) -> FlyteDirectory:
-    """Download raw dataset from HuggingFace via lerobot."""
+    """Download raw dataset from HuggingFace (lerobot for L2D, physical_ai_av for NVIDIA)."""
     import os, shutil
     from huggingface_hub import login
 
     token = hf_token or os.environ.get("HF_TOKEN", "")
     if token:
         login(token=token)
+        os.environ["HF_TOKEN"] = token
 
+    out_dir = "/tmp/raw_data"
+    if os.path.exists(out_dir):
+        shutil.rmtree(out_dir)
+
+    if dataset == Dataset.NVIDIA_PHYSICAL_AI:
+        # NVIDIA PhysicalAI-AV: download via physical_ai_av SDK into parser layout
+        from physical_ai_av import PhysicalAIAVDatasetInterface
+        os.makedirs(out_dir, exist_ok=True)
+        ds = PhysicalAIAVDatasetInterface(
+            local_dir=os.path.join(out_dir, ".hf_cache"),
+            confirm_download_threshold_gb=float("inf"),
+        )
+        clip_ids = ds.clip_index.index.tolist()[:episodes]
+        cameras = [
+            "camera_front_wide_120fov", "camera_cross_left_120fov",
+            "camera_cross_right_120fov", "camera_rear_left_70fov",
+            "camera_rear_right_70fov", "camera_rear_tele_30fov",
+            "camera_front_tele_30fov",
+        ]
+        for clip_id in clip_ids:
+            ds.download_clip_features(clip_id, features=cameras + ["egomotion"])
+        print(f"Ingested {dataset.value}: {len(clip_ids)} clips → {out_dir}")
+        return FlyteDirectory(out_dir)
+
+    # L2D: lerobot
     try:
         from lerobot.datasets.lerobot_dataset import LeRobotDataset
     except ModuleNotFoundError:
@@ -73,13 +99,7 @@ def data_ingest(
 
     ep_list = list(range(episodes)) if episodes > 0 else None
     ds = LeRobotDataset(repo_id=dataset.value, episodes=ep_list)
-
-    # lerobot caches to ~/.cache/huggingface/lerobot/<repo>
-    # Copy the cache to output dir
     cache_dir = ds.root
-    out_dir = "/tmp/raw_data"
-    if os.path.exists(out_dir):
-        shutil.rmtree(out_dir)
     shutil.copytree(str(cache_dir), out_dir)
 
     print(f"Ingested {dataset.value}: {len(ds)} frames, {episodes} episodes → {out_dir}")
@@ -111,114 +131,84 @@ def data_processing(
     from torchvision import transforms
 
     raw_path = raw_data.download()
-    print(f"Processing raw data from: {raw_path}")
+    print(f"Processing raw data from: {raw_path} (dataset={dataset.value})")
 
-    # NVIDIA PhysicalAI-AV is NOT in LeRobot format (camera/lidar/radar/labels
-    # layout, needs the physical_ai_av adapter). Only L2D is LeRobot-native today.
-    if dataset != Dataset.L2D:
-        raise NotImplementedError(
-            f"data_processing currently supports L2D (LeRobot format) only. "
-            f"{dataset.value} needs a dedicated physical_ai_av adapter (see "
-            f"Model/data_parsing/nvidia_physical_ai). Tracked in real_training_pipeline.md."
-        )
-
-    # Load lerobot dataset from local cache
-    try:
-        from lerobot.datasets.lerobot_dataset import LeRobotDataset
-    except ModuleNotFoundError:
-        from ledataset.datasets.lerobot_dataset import LeRobotDataset
+    # Build the appropriate Dataset (both emit the same sample schema:
+    # visual_tiles (V,3,H,W), egomotion_history (256), trajectory_target (128)).
     ep_list = list(range(episodes)) if episodes > 0 else None
-    ds = LeRobotDataset(repo_id=dataset.value, episodes=ep_list, root=raw_path)
+    if dataset == Dataset.NVIDIA_PHYSICAL_AI:
+        from data_parsing.nvidia_physical_ai.dataset import NvidiaAVDataset
+        ds = NvidiaAVDataset(data_root=raw_path)
+        n_samples = len(ds)
+        idx_iter = range(n_samples)
+    else:
+        from data_parsing.l2d import L2DDataset
+        ds = L2DDataset(repo_id=dataset.value, episodes=ep_list)
+        n_samples = len(ds)
+        idx_iter = range(n_samples)
 
-    from data_parsing.l2d.camera import CAMERA_NAMES
-    from data_parsing.l2d.egomotion import extract_egomotion, MIN_FRAMES, _HISTORY_TIMESTEPS, _FUTURE_TIMESTEPS
-
+    to_pil = transforms.ToPILImage()
     resize = transforms.Resize((image_size, image_size))
     out_dir = tempfile.mkdtemp()
     shard_idx = 0
     sample_count = 0
     samples_per_shard = 1000
     current_tar = None
-    tar_path = None
 
     def open_new_shard():
-        nonlocal current_tar, tar_path, shard_idx
+        nonlocal current_tar, shard_idx
         if current_tar:
             current_tar.close()
-        tar_path = os.path.join(out_dir, f"train-{shard_idx:06d}.tar")
-        current_tar = tarfile.open(tar_path, "w")
+        current_tar = tarfile.open(os.path.join(out_dir, f"train-{shard_idx:06d}.tar"), "w")
         shard_idx += 1
 
     open_new_shard()
 
-    # Process per episode
-    hf = ds.hf_dataset
-    ep_col = np.asarray(hf["episode_index"])
+    for si in idx_iter:
+        sample = ds[si]
+        visual = sample["visual_tiles"]            # (V, 3, H, W) tensor
+        ego_hist = sample["egomotion_history"]     # (256,)
+        traj = sample["trajectory_target"]         # (128,)
+        ego_data = np.concatenate([
+            ego_hist.numpy() if torch.is_tensor(ego_hist) else np.asarray(ego_hist),
+            traj.numpy() if torch.is_tensor(traj) else np.asarray(traj),
+        ]).astype(np.float32)
 
-    for ep_idx in sorted(set(ep_col.tolist())):
-        rows = np.where(ep_col == ep_idx)[0]
-        n_frames = len(rows)
-        if n_frames < MIN_FRAMES:
-            continue
+        sample_key = f"s{si:08d}"
+        for cam_i in range(visual.shape[0]):
+            frame = to_pil(visual[cam_i].cpu().clamp(0, 1) if visual[cam_i].dtype.is_floating_point else visual[cam_i])
+            frame = resize(frame)
+            buf = io.BytesIO()
+            frame.save(buf, format="JPEG", quality=90)
+            jpg = buf.getvalue()
+            info = tarfile.TarInfo(name=f"{sample_key}.cam_{cam_i}.jpg")
+            info.size = len(jpg)
+            current_tar.addfile(info, io.BytesIO(jpg))
 
-        # Get vehicle states for egomotion
-        vehicle_states = np.array([hf[int(r)]["observation.state.vehicle"] for r in rows], dtype=np.float32)
+        eb = ego_data.tobytes()
+        info = tarfile.TarInfo(name=f"{sample_key}.ego.npy")
+        info.size = len(eb)
+        current_tar.addfile(info, io.BytesIO(eb))
 
-        # Valid sample indices
-        for local_idx in range(_HISTORY_TIMESTEPS, n_frames - _FUTURE_TIMESTEPS - 1):
-            global_row = int(rows[local_idx])
+        m = json.dumps({"idx": si, "dataset": dataset.value}).encode()
+        info = tarfile.TarInfo(name=f"{sample_key}.meta.json")
+        info.size = len(m)
+        current_tar.addfile(info, io.BytesIO(m))
 
-            # Extract egomotion
-            ego_history, traj_target = extract_egomotion(vehicle_states, sample_idx=local_idx)
-            ego_data = np.concatenate([ego_history.numpy(), traj_target.numpy()]).astype(np.float32)
-
-            # Extract camera frames
-            sample_key = f"ep{ep_idx:04d}_f{local_idx:06d}"
-            item = ds[global_row]
-
-            for cam_i, cam_name in enumerate(CAMERA_NAMES):
-                if cam_name in item:
-                    frame = item[cam_name]  # tensor (C,H,W) or PIL
-                    if isinstance(frame, torch.Tensor):
-                        frame = transforms.ToPILImage()(frame)
-                    frame = resize(frame)
-
-                    # Save as JPEG bytes
-                    buf = io.BytesIO()
-                    frame.save(buf, format="JPEG", quality=90)
-                    jpg_bytes = buf.getvalue()
-
-                    info = tarfile.TarInfo(name=f"{sample_key}.cam_{cam_i}.jpg")
-                    info.size = len(jpg_bytes)
-                    current_tar.addfile(info, io.BytesIO(jpg_bytes))
-
-            # Save egomotion
-            ego_bytes = ego_data.tobytes()
-            info = tarfile.TarInfo(name=f"{sample_key}.ego.npy")
-            info.size = len(ego_bytes)
-            current_tar.addfile(info, io.BytesIO(ego_bytes))
-
-            # Save meta
-            meta = json.dumps({"episode": ep_idx, "frame": local_idx, "dataset": dataset.value}).encode()
-            info = tarfile.TarInfo(name=f"{sample_key}.meta.json")
-            info.size = len(meta)
-            current_tar.addfile(info, io.BytesIO(meta))
-
-            sample_count += 1
-            if sample_count % samples_per_shard == 0:
-                open_new_shard()
+        sample_count += 1
+        if sample_count % samples_per_shard == 0:
+            open_new_shard()
 
     if current_tar:
         current_tar.close()
 
-    # Write manifest
     manifest = {"total_samples": sample_count, "shards": shard_idx,
                 "hz": hz, "image_size": image_size, "dataset": dataset.value,
-                "episodes": episodes, "cameras": CAMERA_NAMES}
+                "episodes": episodes, "num_views": int(visual.shape[0]) if sample_count else 0}
     with open(os.path.join(out_dir, "manifest.json"), "w") as f:
         json.dump(manifest, f)
 
-    print(f"Processed: {sample_count} samples → {shard_idx} shards")
+    print(f"Processed {dataset.value}: {sample_count} samples → {shard_idx} shards")
     return FlyteDirectory(out_dir)
 
 
