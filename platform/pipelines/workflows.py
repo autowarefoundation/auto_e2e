@@ -27,7 +27,7 @@ MLFLOW_URI = "http://mlflow.mlflow.svc.cluster.local:5000"
 # --- Enums ---
 class Dataset(enum.Enum):
     L2D = "yaak-ai/L2D"
-    NVIDIA_PHYSICAL_AI = "nvidia/PhysicalAI"
+    NVIDIA_PHYSICAL_AI = "nvidia/PhysicalAI-Autonomous-Vehicles"
 
 
 class Backbone(enum.Enum):
@@ -112,6 +112,15 @@ def data_processing(
 
     raw_path = raw_data.download()
     print(f"Processing raw data from: {raw_path}")
+
+    # NVIDIA PhysicalAI-AV is NOT in LeRobot format (camera/lidar/radar/labels
+    # layout, needs the physical_ai_av adapter). Only L2D is LeRobot-native today.
+    if dataset != Dataset.L2D:
+        raise NotImplementedError(
+            f"data_processing currently supports L2D (LeRobot format) only. "
+            f"{dataset.value} needs a dedicated physical_ai_av adapter (see "
+            f"Model/data_parsing/nvidia_physical_ai). Tracked in real_training_pipeline.md."
+        )
 
     # Load lerobot dataset from local cache
     try:

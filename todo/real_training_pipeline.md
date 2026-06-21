@@ -548,3 +548,22 @@ HF token is injected via environment variable `HF_TOKEN`. Never committed to git
 - Local: `export HF_TOKEN=<token>`
 
 The `data_ingest` task uses `huggingface_hub.login(token=os.environ["HF_TOKEN"])` before downloading.
+
+---
+
+## Known Limitations / Follow-ups
+
+### NVIDIA PhysicalAI-Autonomous-Vehicles dataset
+- repo_id: `nvidia/PhysicalAI-Autonomous-Vehicles` (NOT `nvidia/PhysicalAI`)
+- **NOT in LeRobot format** — uses camera/lidar/radar/labels/metadata layout
+- Requires `physical_ai_av` library + dedicated adapter (see `Model/data_parsing/nvidia_physical_ai/`)
+- `data_processing` currently raises NotImplementedError for non-L2D datasets
+- TODO: implement NVIDIA → BEV-feature WebDataset adapter so it produces the
+  same shard format (`cam_N.jpg` + `ego.npy` + `meta.json`) as L2D, enabling
+  true multi-dataset training via `wf_full_pipeline_all_datasets`
+
+### Multi-dataset mechanism (DONE)
+- `make_pre_extracted_loader` accepts a list of shard dirs
+- `train_il(shards, shards2)` merges multiple datasets
+- `wf_full_pipeline_all_datasets` ingests+processes datasets in parallel
+- Verified working with L2D; NVIDIA blocked only by the adapter above
