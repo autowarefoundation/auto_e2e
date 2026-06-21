@@ -70,30 +70,24 @@ def _decode_sample(sample: dict) -> dict:
 
 
 def make_pre_extracted_loader(
-    shard_dir,
+    shard_dir: str,
     batch_size: int = 8,
     num_workers: int = 4,
     split: str = "train",
     shuffle: int = 1000,
 ) -> wds.WebLoader:
-    """Create a WebDataset DataLoader reading from local shard cache(s).
+    """Create a WebDataset DataLoader reading from local EBS shard cache.
 
     Args:
-        shard_dir: Path (str) or list of paths to directories with .tar shards.
-            Multiple directories let a single training run consume shards from
-            several pre-processed datasets (e.g. L2D + NVIDIA PhysicalAI), all in
-            the same BEV-feature format.
+        shard_dir: Path to directory containing .tar shard files.
         batch_size: Batch size.
         num_workers: DataLoader workers.
         split: Unused currently (all tars in shard_dir are loaded).
         shuffle: Shuffle buffer size (0 to disable).
     """
-    shard_dirs = [shard_dir] if isinstance(shard_dir, (str, Path)) else list(shard_dir)
-    tarfiles = []
-    for d in shard_dirs:
-        tarfiles.extend(sorted(Path(d).glob("*.tar")))
+    tarfiles = sorted(Path(shard_dir).glob("*.tar"))
     if not tarfiles:
-        raise FileNotFoundError(f"No .tar shards found in {shard_dirs}")
+        raise FileNotFoundError(f"No .tar shards found in {shard_dir}")
 
     urls = [str(p) for p in tarfiles]
 

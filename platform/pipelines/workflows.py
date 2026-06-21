@@ -11,7 +11,7 @@ import enum
 from flytekit import task, workflow, Resources, Secret
 from flytekit.types.file import FlyteFile
 from flytekit.types.directory import FlyteDirectory
-from typing import NamedTuple, Optional
+from typing import NamedTuple
 
 import os as _os
 
@@ -175,11 +175,6 @@ def data_processing(
     for si in idx_iter:
         sample = ds[si]
         visual = sample["visual_tiles"]            # (V, 3, H, W) tensor
-        # Normalize view count across datasets (L2D=7, NVIDIA=8) so batches stack.
-        # NVIDIA's 8th view is the map tile; drop trailing views beyond TARGET_VIEWS.
-        TARGET_VIEWS = 7
-        if visual.shape[0] > TARGET_VIEWS:
-            visual = visual[:TARGET_VIEWS]
         ego_hist = sample["egomotion_history"]     # (256,)
         traj = sample["trajectory_target"]         # (128,)
         ego_data = np.concatenate([
@@ -235,7 +230,6 @@ def data_processing(
 )
 def train_il(
     shards: FlyteDirectory,
-    shards2: Optional[FlyteDirectory] = None,
     dataset: Dataset = Dataset.L2D,
     backbone: Backbone = Backbone.SWIN_V2_TINY,
     fusion_mode: FusionMode = FusionMode.CONCAT,
@@ -255,27 +249,17 @@ def train_il(
     from model_components.losses import TrajectoryImitationLoss
     from data_parsing.pre_extracted import make_pre_extracted_loader
 
-    _dirs = [shards.download()]
-    if shards2 is not None:
-        _dirs.append(shards2.download())
-    # Merge tars from all dataset dirs into one (image's loader expects a single dir)
-    import glob as _glob, shutil as _shutil
-    merged_dir = "/tmp/merged_shards"
-    os.makedirs(merged_dir, exist_ok=True)
-    for di, d in enumerate(_dirs):
-        for tar in _glob.glob(os.path.join(str(d), "*.tar")):
-            _shutil.copy(tar, os.path.join(merged_dir, f"ds{di}_{os.path.basename(tar)}"))
-    shard_dirs = _dirs
+    shard_dir = shards.download()
     ctx = current_context()
     bb, fm = backbone.value, fusion_mode.value
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    print(f"Training: backbone={bb} fusion={fm} epochs={epochs} bs={batch_size} device={device} datasets={len(shard_dirs)}")
+    print(f"Training: backbone={bb} fusion={fm} epochs={epochs} bs={batch_size} device={device}")
 
     # DataLoader
-    loader = make_pre_extracted_loader(merged_dir, batch_size=batch_size, num_workers=0)
+    loader = make_pre_extracted_loader(shard_dir, batch_size=batch_size, num_workers=0)
 
-    # Detect num_views from the data (L2D=7, NVIDIA=8) so the model matches.
+    # Detect num_views from the data so the model matches the dataset.
     _peek = next(iter(loader))
     num_views = int(_peek["visual_tiles"].shape[1])
     print(f"Detected num_views={num_views}")
@@ -333,7 +317,7 @@ def train_il(
 
     # Metadata
     meta = {
-        "data": {"dataset": dataset.value, "shard_dirs": [str(d) for d in shard_dirs]},
+        "data": {"dataset": dataset.value, "shard_dir": str(shard_dir)},
         "model": {"backbone": bb, "fusion_mode": fm, "embed_dim": 256, "num_views": num_views},
         "training": {
             "epochs": epochs, "batch_size": batch_size, "lr": lr,
@@ -665,41 +649,4 @@ def wf_full_pipeline(
     rl_out = train_offline_rl(pretrained=il_out.checkpoint, shards=shards,
                               il_metadata=il_out.metadata, epochs=epochs_rl, tau=tau, beta=beta)
     return evaluate(checkpoint=rl_out.checkpoint, shards=shards,
-                    train_metadata=rl_out.metadata, experiment_name="offline-rl")
-
-
-@workflow
-def wf_full_pipeline_all_datasets(
-    episodes: int = 3,
-    backbone: Backbone = Backbone.SWIN_V2_TINY,
-    fusion_mode: FusionMode = FusionMode.CONCAT,
-    epochs_il: int = 3,
-    epochs_rl: int = 3,
-    batch_size: int = 4,
-    lr: float = 1e-4,
-    tau: float = 0.7,
-    beta: float = 3.0,
-    hf_token: str = "",
-) -> EvalMetrics:
-    """Full pipeline using ALL datasets (L2D + NVIDIA PhysicalAI).
-
-    Both datasets are ingested + processed in parallel into the same BEV-feature
-    WebDataset format, then training consumes shards from both.
-    """
-    # Ingest + process both datasets in parallel
-    raw_l2d = data_ingest(dataset=Dataset.L2D, episodes=episodes, hf_token=hf_token)
-    shards_l2d = data_processing(raw_data=raw_l2d, dataset=Dataset.L2D, episodes=episodes)
-
-    raw_nv = data_ingest(dataset=Dataset.NVIDIA_PHYSICAL_AI, episodes=episodes, hf_token=hf_token)
-    shards_nv = data_processing(raw_data=raw_nv, dataset=Dataset.NVIDIA_PHYSICAL_AI, episodes=episodes)
-
-    # Train on both datasets
-    il_out = train_il(shards=shards_l2d, shards2=shards_nv, dataset=Dataset.L2D,
-                      backbone=backbone, fusion_mode=fusion_mode,
-                      epochs=epochs_il, batch_size=batch_size, lr=lr)
-    evaluate(checkpoint=il_out.checkpoint, shards=shards_l2d,
-             train_metadata=il_out.metadata, experiment_name="imitation-learning")
-    rl_out = train_offline_rl(pretrained=il_out.checkpoint, shards=shards_l2d,
-                              il_metadata=il_out.metadata, epochs=epochs_rl, tau=tau, beta=beta)
-    return evaluate(checkpoint=rl_out.checkpoint, shards=shards_l2d,
                     train_metadata=rl_out.metadata, experiment_name="offline-rl")
