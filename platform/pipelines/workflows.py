@@ -78,17 +78,27 @@ def _select_shard_dir(shards, dataset) -> str:
 @task(
     container_image=DATA_PREP_IMAGE,
     requests=Resources(cpu="2", mem="24Gi", ephemeral_storage="50Gi"),
+    secret_requests=[Secret(group="hf-token", key="HF_TOKEN",
+                            mount_requirement=Secret.MountType.ENV_VAR)],
 )
 def data_ingest(
     dataset: Dataset = Dataset.L2D,
     episodes: int = 3,
-    hf_token: str = "",
 ) -> FlyteDirectory:
-    """Download raw dataset from HuggingFace (lerobot for L2D, physical_ai_av for NVIDIA)."""
+    """Download raw dataset from HuggingFace (lerobot for L2D, physical_ai_av for NVIDIA).
+
+    HF token comes from the `hf-token` K8s Secret (injected as env var by Flyte),
+    never from a workflow input — so it is not visible in the Flyte/MLflow UI.
+    """
     import os, shutil
     from huggingface_hub import login
+    from flytekit import current_context
 
-    token = hf_token or os.environ.get("HF_TOKEN", "")
+    token = ""
+    try:
+        token = current_context().secrets.get("hf-token", "HF_TOKEN")
+    except Exception:
+        token = os.environ.get("HF_TOKEN", "")
     if token:
         login(token=token)
         os.environ["HF_TOKEN"] = token
@@ -604,10 +614,9 @@ def evaluate(
 def wf_data_ingest(
     dataset: Dataset = Dataset.L2D,
     episodes: int = 3,
-    hf_token: str = "",
 ) -> FlyteDirectory:
     """Download raw dataset from HuggingFace."""
-    return data_ingest(dataset=dataset, episodes=episodes, hf_token=hf_token)
+    return data_ingest(dataset=dataset, episodes=episodes)
 
 
 @workflow
@@ -669,7 +678,6 @@ def wf_full_pipeline(
     lr: float = 1e-4,
     tau: float = 0.7,
     beta: float = 3.0,
-    hf_token: str = "",
 ) -> EvalMetrics:
     """Full: Ingest+Process ALL datasets (separately packed) → IL Train+Eval → RL Train+Eval.
 
@@ -679,10 +687,10 @@ def wf_full_pipeline(
     on one model tracked in #77).
     """
     # Ingest + process every dataset into separate WebDataset shard dirs
-    raw_l2d = data_ingest(dataset=Dataset.L2D, episodes=episodes, hf_token=hf_token)
+    raw_l2d = data_ingest(dataset=Dataset.L2D, episodes=episodes)
     shards_l2d = data_processing(raw_data=raw_l2d, dataset=Dataset.L2D, episodes=episodes)
 
-    raw_nv = data_ingest(dataset=Dataset.NVIDIA_PHYSICAL_AI, episodes=episodes, hf_token=hf_token)
+    raw_nv = data_ingest(dataset=Dataset.NVIDIA_PHYSICAL_AI, episodes=episodes)
     shards_nv = data_processing(raw_data=raw_nv, dataset=Dataset.NVIDIA_PHYSICAL_AI, episodes=episodes)
 
     all_shards = [shards_l2d, shards_nv]
