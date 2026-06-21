@@ -72,22 +72,30 @@ def data_ingest(
         shutil.rmtree(out_dir)
 
     if dataset == Dataset.NVIDIA_PHYSICAL_AI:
-        # NVIDIA PhysicalAI-AV: download via physical_ai_av SDK into parser layout
+        # NVIDIA PhysicalAI-AV: download via physical_ai_av SDK + unpack into the
+        # parser layout (camera/<cam>/, labels/egomotion/) that NvidiaAVDataset reads.
+        import pathlib
         from physical_ai_av import PhysicalAIAVDatasetInterface
-        os.makedirs(out_dir, exist_ok=True)
+        from data_parsing.nvidia_physical_ai.download_dataset import (
+            CAMERAS, unpack_camera_zip, unpack_egomotion_zip,
+        )
+        out = pathlib.Path(out_dir)
+        out.mkdir(parents=True, exist_ok=True)
         ds = PhysicalAIAVDatasetInterface(
-            local_dir=os.path.join(out_dir, ".hf_cache"),
+            local_dir=str(out / ".hf_cache"),
             confirm_download_threshold_gb=float("inf"),
         )
         clip_ids = ds.clip_index.index.tolist()[:episodes]
-        cameras = [
-            "camera_front_wide_120fov", "camera_cross_left_120fov",
-            "camera_cross_right_120fov", "camera_rear_left_70fov",
-            "camera_rear_right_70fov", "camera_rear_tele_30fov",
-            "camera_front_tele_30fov",
-        ]
+        feats = CAMERAS + ["egomotion"]
         for clip_id in clip_ids:
-            ds.download_clip_features(clip_id, features=cameras + ["egomotion"])
+            ds.download_clip_features(clip_id, features=feats)
+            for cam in CAMERAS:
+                cf = ds.features.get_chunk_feature_filename(ds.get_clip_chunk(clip_id), cam)
+                with ds.open_file(cf, maybe_stream=True) as f:
+                    unpack_camera_zip(f.read(), clip_id, cam, out)
+            cf = ds.features.get_chunk_feature_filename(ds.get_clip_chunk(clip_id), "egomotion")
+            with ds.open_file(cf, maybe_stream=True) as f:
+                unpack_egomotion_zip(f.read(), clip_id, out)
         print(f"Ingested {dataset.value}: {len(clip_ids)} clips → {out_dir}")
         return FlyteDirectory(out_dir)
 
