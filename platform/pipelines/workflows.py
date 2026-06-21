@@ -175,6 +175,11 @@ def data_processing(
     for si in idx_iter:
         sample = ds[si]
         visual = sample["visual_tiles"]            # (V, 3, H, W) tensor
+        # Normalize view count across datasets (L2D=7, NVIDIA=8) so batches stack.
+        # NVIDIA's 8th view is the map tile; drop trailing views beyond TARGET_VIEWS.
+        TARGET_VIEWS = 7
+        if visual.shape[0] > TARGET_VIEWS:
+            visual = visual[:TARGET_VIEWS]
         ego_hist = sample["egomotion_history"]     # (256,)
         traj = sample["trajectory_target"]         # (128,)
         ego_data = np.concatenate([
