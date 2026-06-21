@@ -201,4 +201,19 @@ resource "aws_secretsmanager_secret_version" "hf_token" {
   secret_string = var.hf_token
 }
 
-# K8s Secret is created by post-apply script (reads from Secrets Manager)
+# K8s Secret consumed by Flyte tasks via secret_requests (Secret(group="hf-token",
+# key="HF_TOKEN")). Injected as env var by the Flyte pod webhook — never appears
+# as a workflow input, so it is not visible in the Flyte/MLflow UI.
+resource "kubernetes_secret" "hf_token" {
+  count = var.hf_token != "" ? 1 : 0
+  metadata {
+    name      = "hf-token"
+    namespace = "auto-e2e-development"
+  }
+  data = {
+    HF_TOKEN = var.hf_token
+  }
+  type = "Opaque"
+
+  depends_on = [module.flyte]
+}
