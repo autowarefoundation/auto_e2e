@@ -51,7 +51,7 @@ EvalMetrics = NamedTuple("EvalMetrics", ade=float, fde=float, gate_pass=bool)
 # ============================================================
 @task(
     container_image=DATA_PREP_IMAGE,
-    requests=Resources(cpu="2", mem="24Gi"),
+    requests=Resources(cpu="2", mem="24Gi", ephemeral_storage="50Gi"),
 )
 def data_ingest(
     dataset: Dataset = Dataset.L2D,
@@ -119,7 +119,7 @@ def data_ingest(
 # ============================================================
 @task(
     container_image=DATA_PREP_IMAGE,
-    requests=Resources(cpu="4", mem="16Gi"),
+    requests=Resources(cpu="4", mem="16Gi", ephemeral_storage="50Gi"),
 )
 def data_processing(
     raw_data: FlyteDirectory,
