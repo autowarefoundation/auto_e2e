@@ -11,7 +11,7 @@ import enum
 from flytekit import task, workflow, Resources, Secret
 from flytekit.types.file import FlyteFile
 from flytekit.types.directory import FlyteDirectory
-from typing import NamedTuple
+from typing import NamedTuple, Optional
 
 import os as _os
 
@@ -223,6 +223,7 @@ def data_processing(
 )
 def train_il(
     shards: FlyteDirectory,
+    shards2: Optional[FlyteDirectory] = None,
     dataset: Dataset = Dataset.L2D,
     backbone: Backbone = Backbone.SWIN_V2_TINY,
     fusion_mode: FusionMode = FusionMode.CONCAT,
@@ -242,12 +243,14 @@ def train_il(
     from model_components.losses import TrajectoryImitationLoss
     from data_parsing.pre_extracted import make_pre_extracted_loader
 
-    shard_dir = shards.download()
+    shard_dirs = [shards.download()]
+    if shards2 is not None:
+        shard_dirs.append(shards2.download())
     ctx = current_context()
     bb, fm = backbone.value, fusion_mode.value
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    print(f"Training: backbone={bb} fusion={fm} epochs={epochs} bs={batch_size} device={device}")
+    print(f"Training: backbone={bb} fusion={fm} epochs={epochs} bs={batch_size} device={device} datasets={len(shard_dirs)}")
 
     # Model
     model = AutoE2E(
@@ -256,7 +259,7 @@ def train_il(
     ).to(device)
 
     # DataLoader
-    loader = make_pre_extracted_loader(shard_dir, batch_size=batch_size, num_workers=0)
+    loader = make_pre_extracted_loader(shard_dirs, batch_size=batch_size, num_workers=0)
 
     # Optimizer + Loss
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
@@ -305,7 +308,7 @@ def train_il(
 
     # Metadata
     meta = {
-        "data": {"dataset": dataset.value, "shard_dir": str(shard_dir)},
+        "data": {"dataset": dataset.value, "shard_dirs": [str(d) for d in shard_dirs]},
         "model": {"backbone": bb, "fusion_mode": fm, "embed_dim": 256, "num_views": 7},
         "training": {
             "epochs": epochs, "batch_size": batch_size, "lr": lr,
@@ -637,4 +640,41 @@ def wf_full_pipeline(
     rl_out = train_offline_rl(pretrained=il_out.checkpoint, shards=shards,
                               il_metadata=il_out.metadata, epochs=epochs_rl, tau=tau, beta=beta)
     return evaluate(checkpoint=rl_out.checkpoint, shards=shards,
+                    train_metadata=rl_out.metadata, experiment_name="offline-rl")
+
+
+@workflow
+def wf_full_pipeline_all_datasets(
+    episodes: int = 3,
+    backbone: Backbone = Backbone.SWIN_V2_TINY,
+    fusion_mode: FusionMode = FusionMode.CONCAT,
+    epochs_il: int = 3,
+    epochs_rl: int = 3,
+    batch_size: int = 4,
+    lr: float = 1e-4,
+    tau: float = 0.7,
+    beta: float = 3.0,
+    hf_token: str = "",
+) -> EvalMetrics:
+    """Full pipeline using ALL datasets (L2D + NVIDIA PhysicalAI).
+
+    Both datasets are ingested + processed in parallel into the same BEV-feature
+    WebDataset format, then training consumes shards from both.
+    """
+    # Ingest + process both datasets in parallel
+    raw_l2d = data_ingest(dataset=Dataset.L2D, episodes=episodes, hf_token=hf_token)
+    shards_l2d = data_processing(raw_data=raw_l2d, dataset=Dataset.L2D, episodes=episodes)
+
+    raw_nv = data_ingest(dataset=Dataset.NVIDIA_PHYSICAL_AI, episodes=episodes, hf_token=hf_token)
+    shards_nv = data_processing(raw_data=raw_nv, dataset=Dataset.NVIDIA_PHYSICAL_AI, episodes=episodes)
+
+    # Train on both datasets
+    il_out = train_il(shards=shards_l2d, shards2=shards_nv, dataset=Dataset.L2D,
+                      backbone=backbone, fusion_mode=fusion_mode,
+                      epochs=epochs_il, batch_size=batch_size, lr=lr)
+    evaluate(checkpoint=il_out.checkpoint, shards=shards_l2d,
+             train_metadata=il_out.metadata, experiment_name="imitation-learning")
+    rl_out = train_offline_rl(pretrained=il_out.checkpoint, shards=shards_l2d,
+                              il_metadata=il_out.metadata, epochs=epochs_rl, tau=tau, beta=beta)
+    return evaluate(checkpoint=rl_out.checkpoint, shards=shards_l2d,
                     train_metadata=rl_out.metadata, experiment_name="offline-rl")
