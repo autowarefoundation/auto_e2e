@@ -4,7 +4,8 @@ A practical, screen-by-screen guide to the Flyte Console for the AutoE2E trainin
 platform. Organized by **what you want to do**, so you can jump straight to your use case.
 
 - **Flyte Console**: https://d1fk8c95f6ice9.cloudfront.net/console
-- **Login**: Cognito (`contributor@autoware.org`) — you will be redirected to a login page first
+- **Login**: Cognito-protected. Credentials are shared with **Core Contributors only** —
+  ask **Ryota Yamada** for access. You will be redirected to a Cognito login page first.
 - **Project**: `auto-e2e` · **Domain**: `development`
 
 > For task internals and parameters, see `flyte_workflow_parameters.md`.
@@ -15,7 +16,8 @@ platform. Organized by **what you want to do**, so you can jump straight to your
 ## 0. First time: logging in and finding the project
 
 1. Open https://d1fk8c95f6ice9.cloudfront.net/console
-2. You are redirected to the Cognito hosted login. Sign in.
+2. You are redirected to the Cognito hosted login. Sign in with the credentials
+   provided to Core Contributors (ask **Ryota Yamada** — they are never stored in git).
 3. You land on the Flyte Console home. Top-left, make sure the **Project** selector
    shows **`auto-e2e`** and the **Domain** selector shows **`development`**.
    (Other Flyte sample projects were archived, so `auto-e2e` should be the only one.)

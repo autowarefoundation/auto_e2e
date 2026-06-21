@@ -264,7 +264,8 @@ platform/
 - **Outbound**: NAT Gateway only
 - **ALB/NLB**: Internal only (not internet-facing)
 - **UI access**: CloudFront → VPC Origin → Internal ALB/NLB → Pod
-- **Auth**: Cognito User Pool (planned)
+- **Auth**: Cognito User Pool (deployed on Flyte Console via Lambda@Edge). Credentials
+  are shared with Core Contributors only — ask Ryota Yamada. Never stored in git.
 - **SG design**:
   -   - CloudFront VPC Origin ENI SG → ALB/NLB SG (port 80)
   -   - ALB/NLB SG → EKS Cluster SG (service ports)
