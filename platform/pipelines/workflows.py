@@ -470,20 +470,13 @@ def train_offline_rl(
 # ============================================================
 # Task: Evaluate (THE ONLY MLflow logging point)
 # ============================================================
-@task(
-    container_image=EVAL_IMAGE,
-    requests=Resources(cpu="2", mem="8Gi", gpu="1"),
-    limits=Resources(gpu="1"),
-    environment={"MLFLOW_TRACKING_URI": MLFLOW_URI},
-)
-def evaluate(
-    checkpoint: FlyteFile,
-    shards: List[FlyteDirectory],
-    train_metadata: FlyteFile,
-    dataset: Dataset = Dataset.L2D,
-    experiment_name: str = "imitation-learning",
-) -> EvalMetrics:
-    """Evaluate + log everything to MLflow."""
+def _run_evaluation(checkpoint, shards, train_metadata, dataset, experiment_name):
+    """Shared open-loop evaluation + MLflow logging logic.
+
+    Called by both evaluate_il_policy and evaluate_rl_policy. Kept as a plain
+    module-level function (not a @task) so the two evaluation tasks share one
+    implementation while appearing as distinct nodes in the Flyte UI.
+    """
     import os, json, yaml, torch
     import numpy as np, mlflow
     from flytekit import current_context
@@ -607,6 +600,47 @@ def evaluate(
     return EvalMetrics(ade=avg_ade, fde=avg_fde, gate_pass=passed)
 
 
+@task(
+    container_image=EVAL_IMAGE,
+    requests=Resources(cpu="2", mem="8Gi", gpu="1"),
+    limits=Resources(gpu="1"),
+    environment={"MLFLOW_TRACKING_URI": MLFLOW_URI},
+)
+def evaluate_il_policy(
+    checkpoint: FlyteFile,
+    shards: List[FlyteDirectory],
+    train_metadata: FlyteFile,
+    dataset: Dataset = Dataset.L2D,
+) -> EvalMetrics:
+    """Open-loop evaluation of the Imitation-Learning policy.
+
+    Logs ADE/FDE, params, artifacts to the MLflow `imitation-learning` experiment
+    and registers the checkpoint in the `auto-e2e-driving-policy` model registry.
+    """
+    return _run_evaluation(checkpoint, shards, train_metadata, dataset, "imitation-learning")
+
+
+@task(
+    container_image=EVAL_IMAGE,
+    requests=Resources(cpu="2", mem="8Gi", gpu="1"),
+    limits=Resources(gpu="1"),
+    environment={"MLFLOW_TRACKING_URI": MLFLOW_URI},
+)
+def evaluate_rl_policy(
+    checkpoint: FlyteFile,
+    shards: List[FlyteDirectory],
+    train_metadata: FlyteFile,
+    dataset: Dataset = Dataset.L2D,
+) -> EvalMetrics:
+    """Open-loop evaluation of the Offline-RL refined policy.
+
+    Logs ADE/FDE, params (incl. rl/*), artifacts to the MLflow `offline-rl`
+    experiment and registers the refined checkpoint in the model registry.
+    """
+    return _run_evaluation(checkpoint, shards, train_metadata, dataset, "offline-rl")
+
+
+
 # ============================================================
 # Workflows
 # ============================================================
@@ -645,8 +679,8 @@ def wf_train_il(
     """IL Train → Evaluate. All datasets' shards passed in; `dataset` selects one."""
     out = train_il(shards=shards, dataset=dataset, backbone=backbone,
                    fusion_mode=fusion_mode, epochs=epochs, batch_size=batch_size, lr=lr)
-    return evaluate(checkpoint=out.checkpoint, shards=shards, dataset=dataset,
-                    train_metadata=out.metadata, experiment_name="imitation-learning")
+    return evaluate_il_policy(checkpoint=out.checkpoint, shards=shards, dataset=dataset,
+                              train_metadata=out.metadata)
 
 
 @workflow
@@ -662,8 +696,8 @@ def wf_train_offline_rl(
     """Offline RL → Evaluate. All datasets' shards passed in; `dataset` selects one."""
     out = train_offline_rl(pretrained=pretrained, shards=shards, dataset=dataset,
                            il_metadata=il_metadata, epochs=epochs, tau=tau, beta=beta)
-    return evaluate(checkpoint=out.checkpoint, shards=shards, dataset=dataset,
-                    train_metadata=out.metadata, experiment_name="offline-rl")
+    return evaluate_rl_policy(checkpoint=out.checkpoint, shards=shards, dataset=dataset,
+                              train_metadata=out.metadata)
 
 
 @workflow
@@ -698,9 +732,9 @@ def wf_full_pipeline(
     il_out = train_il(shards=all_shards, dataset=dataset, backbone=backbone,
                       fusion_mode=fusion_mode, epochs=epochs_il,
                       batch_size=batch_size, lr=lr)
-    evaluate(checkpoint=il_out.checkpoint, shards=all_shards, dataset=dataset,
-             train_metadata=il_out.metadata, experiment_name="imitation-learning")
+    evaluate_il_policy(checkpoint=il_out.checkpoint, shards=all_shards, dataset=dataset,
+                       train_metadata=il_out.metadata)
     rl_out = train_offline_rl(pretrained=il_out.checkpoint, shards=all_shards, dataset=dataset,
                               il_metadata=il_out.metadata, epochs=epochs_rl, tau=tau, beta=beta)
-    return evaluate(checkpoint=rl_out.checkpoint, shards=all_shards, dataset=dataset,
-                    train_metadata=rl_out.metadata, experiment_name="offline-rl")
+    return evaluate_rl_policy(checkpoint=rl_out.checkpoint, shards=all_shards, dataset=dataset,
+                              train_metadata=rl_out.metadata)
