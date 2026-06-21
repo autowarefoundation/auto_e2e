@@ -3,6 +3,7 @@ __pycache__/
 ._*
 benchmark_results.json
 sync-to-ec2.sh
+ec2-sync-and-push.sh
 data/
 
 # Terraform
