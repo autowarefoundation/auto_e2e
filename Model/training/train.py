@@ -36,6 +36,7 @@ import argparse
 import os
 import sys
 import time
+from typing import Any, Iterable
 
 import torch
 from torch.utils.data import DataLoader
@@ -294,6 +295,7 @@ def run_training(args: argparse.Namespace) -> None:
     # its learnable pseudo_projection. Real L2D calibration is future work.
     camera_params = None
 
+    batches: Iterable[Any]
     if args.smoke_test:
         batches = [make_smoke_batch(args, device) for _ in range(args.smoke_steps)]
         epochs = 1
