@@ -252,9 +252,17 @@ def train_il(
     from model_components.losses import TrajectoryImitationLoss
     from data_parsing.pre_extracted import make_pre_extracted_loader
 
-    shard_dirs = [shards.download()]
+    _dirs = [shards.download()]
     if shards2 is not None:
-        shard_dirs.append(shards2.download())
+        _dirs.append(shards2.download())
+    # Merge tars from all dataset dirs into one (image's loader expects a single dir)
+    import glob as _glob, shutil as _shutil
+    merged_dir = "/tmp/merged_shards"
+    os.makedirs(merged_dir, exist_ok=True)
+    for di, d in enumerate(_dirs):
+        for tar in _glob.glob(os.path.join(str(d), "*.tar")):
+            _shutil.copy(tar, os.path.join(merged_dir, f"ds{di}_{os.path.basename(tar)}"))
+    shard_dirs = _dirs
     ctx = current_context()
     bb, fm = backbone.value, fusion_mode.value
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -268,7 +276,7 @@ def train_il(
     ).to(device)
 
     # DataLoader
-    loader = make_pre_extracted_loader(shard_dirs, batch_size=batch_size, num_workers=0)
+    loader = make_pre_extracted_loader(merged_dir, batch_size=batch_size, num_workers=0)
 
     # Optimizer + Loss
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
