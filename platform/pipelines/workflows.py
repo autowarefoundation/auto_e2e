@@ -54,7 +54,8 @@ def _select_shard_dir(shards, dataset) -> str:
     the selected dataset is used for this run. Multi-dataset training of a single
     model is tracked in issue #77 (requires dynamic-num_views BEV fusion).
     """
-    import os, json
+    import os
+    import json
     target = dataset.value
     fallback = None
     for sh in shards:
@@ -90,7 +91,8 @@ def data_ingest(
     HF token comes from the `hf-token` K8s Secret (injected as env var by Flyte),
     never from a workflow input — so it is not visible in the Flyte/MLflow UI.
     """
-    import os, shutil
+    import os
+    import shutil
     from huggingface_hub import login
     from flytekit import current_context
 
@@ -168,10 +170,13 @@ def data_processing(
 
     Solves Issue #30: no video decode at training time.
     """
-    import os, io, json, tarfile, tempfile
+    import os
+    import io
+    import json
+    import tarfile
+    import tempfile
     import numpy as np
     import torch
-    from PIL import Image
     from torchvision import transforms
 
     raw_path = raw_data.download()
@@ -281,7 +286,9 @@ def train_il(
     All datasets' shards are passed in; the one matching `dataset` is selected
     (single-dataset training; multi-dataset tracked in #77).
     """
-    import os, json, torch
+    import os
+    import json
+    import torch
     import numpy as np
     from flytekit import current_context
 
@@ -395,7 +402,9 @@ def train_offline_rl(
     beta: float = 3.0,
 ) -> TrainOutput:
     """Offline RL (IQL) refinement of IL checkpoint."""
-    import os, json, torch
+    import os
+    import json
+    import torch
     import numpy as np
     from flytekit import current_context
 
@@ -477,13 +486,17 @@ def _run_evaluation(checkpoint, shards, train_metadata, dataset, experiment_name
     module-level function (not a @task) so the two evaluation tasks share one
     implementation while appearing as distinct nodes in the Flyte UI.
     """
-    import os, json, yaml, torch
-    import numpy as np, mlflow
+    import os
+    import json
+    import yaml
+    import torch
+    import numpy as np
+    import mlflow
     from flytekit import current_context
 
     from model_components.auto_e2e import AutoE2E
     from data_parsing.pre_extracted import make_pre_extracted_loader
-    from evaluation.metrics import integrate_trajectory, gate_check
+    from evaluation.metrics import integrate_trajectory
 
     ckpt_path = checkpoint.download()
     shard_dir = _select_shard_dir(shards, dataset)
@@ -576,8 +589,8 @@ def _run_evaluation(checkpoint, shards, train_metadata, dataset, experiment_name
         mlflow.set_tags({"pipeline": experiment_name, "backbone": bb, "fusion": fm})
 
         # Training loss curve
-        for i, l in enumerate(training.get("losses_per_epoch", [])):
-            mlflow.log_metric("train/loss", l, step=i)
+        for i, loss_val in enumerate(training.get("losses_per_epoch", [])):
+            mlflow.log_metric("train/loss", loss_val, step=i)
 
         # Eval metrics
         mlflow.log_metrics({"eval/ade": avg_ade, "eval/fde": avg_fde, "eval/gate_pass": 1.0 if passed else 0.0})

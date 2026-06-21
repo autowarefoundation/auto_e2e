@@ -77,7 +77,7 @@ _RENDER_SIZE = 2048  # fixed internal resolution for rendering map
 
 
 
-def _get_rgb(line_type: str, subtype: str) -> tuple[int, int, int]:
+def _get_rgb(line_type: str, subtype: str | None) -> tuple[int, int, int]:
     return _RGB_TABLE.get((line_type, subtype)) \
         or _RGB_TABLE.get((line_type, None), _FALLBACK_RGB)
 

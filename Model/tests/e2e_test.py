@@ -160,7 +160,7 @@ def test_loss_decreases_on_real_data(name, build_fn, num_views):
     losses = _run_loss_trend(dataset, num_views, _device())
 
     # No NaN/Inf anywhere — the pipeline stays numerically sane on real data.
-    assert all(torch.isfinite(torch.tensor(l)) for l in losses), (
+    assert all(torch.isfinite(torch.tensor(x)) for x in losses), (
         f"{name}: non-finite loss encountered: {losses}"
     )
 

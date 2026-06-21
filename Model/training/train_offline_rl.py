@@ -7,7 +7,8 @@ conservative Q-function estimation.
 Usage:
   python train_offline_rl.py --shard-dir /data/shards --pretrained /ckpt/best.pt
 """
-import argparse, os, math
+import argparse
+import os
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -112,7 +113,9 @@ def build_dataloader(shard_dir, batch_size):
         raise FileNotFoundError(f"No .tar shards in {shard_dir}")
 
     def decode(sample):
-        import pickle, io, numpy as np
+        import pickle
+        import io
+        import numpy as np
         meta = pickle.loads(sample["meta.pkl"])
         imgs = []
         for cam in ["front", "left", "right"]:
