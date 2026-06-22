@@ -14,7 +14,32 @@ import torch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
+import torch.nn as nn
+
 from model_components.temporal_memory.one_hz_encoder import HistoryEncoder, OneHzHistoryEncoder
+
+
+class _MockBackbone(nn.Module):
+    """Minimal stand-in for Backbone (4 channels-first feature maps), so the
+    AutoE2E integration tests below don't load pretrained weights."""
+
+    def __init__(self, backbone="swin_v2_tiny", is_pretrained=True, **kwargs):
+        super().__init__()
+        self.backbone_channels = 1440
+        self._stages = nn.ModuleList([
+            nn.Sequential(nn.Conv2d(3, 96, 3, 1, 1), nn.AdaptiveAvgPool2d(64)),
+            nn.Sequential(nn.Conv2d(96, 192, 3, 1, 1), nn.AdaptiveAvgPool2d(32)),
+            nn.Sequential(nn.Conv2d(192, 384, 3, 1, 1), nn.AdaptiveAvgPool2d(16)),
+            nn.Sequential(nn.Conv2d(384, 768, 3, 1, 1), nn.AdaptiveAvgPool2d(8)),
+        ])
+
+    def forward(self, image):
+        outs, x = [], image
+        for stage in self._stages:
+            x = stage(x)
+            outs.append(x)
+        return outs
+
 
 B = 4
 INPUT_DIM = 64
@@ -154,3 +179,55 @@ def test_one_hz_history_encoder_pipeline():
     v_out, e_out = encoder(v_flat, e_flat)
     assert torch.allclose(v_flat, v_out)
     assert torch.allclose(e_flat, e_out)
+
+
+def test_autoe2e_consumes_one_hz_temporal_memory():
+    """End-to-end data flow: AutoE2E(temporal_memory_mode='one_hz') feeds the
+    [B, T, feat] history through TemporalMemory and the COMPRESSED context into
+    the planner, in both train and infer. Gradient must reach the memory."""
+    from unittest.mock import patch
+
+    from model_components.auto_e2e import AutoE2E
+
+    with patch("model_components.auto_e2e.Backbone", _MockBackbone):
+        model = AutoE2E(num_views=8, fusion_mode="concat",
+                        temporal_memory_mode="one_hz")
+
+    x = torch.randn(2, 8, 3, 256, 256)
+    map_input = torch.randn(2, 3, 256, 256)
+    vis = torch.randn(2, 20, 896)   # [B, T, visual_dim] — sequence form
+    ego = torch.randn(2, 20, 256)   # [B, T, egomotion_dim]
+    target = torch.randn(2, 128)
+
+    # Train: scalar loss + future; gradient flows back into TemporalMemory.
+    loss, ego_hidden, future = model(x, map_input, vis, ego,
+                                     mode="train", trajectory_target=target)
+    assert loss.ndim == 0 and torch.isfinite(loss)
+    assert ego_hidden.shape == (2, 256) and future is not None
+    loss.backward()
+    assert any(p.grad is not None for p in model.TemporalMemory.parameters()), \
+        "compressed temporal context must be consumed by the planner (grad must reach TemporalMemory)"
+
+    # Infer: 3-tuple with trajectory + None future.
+    traj, ego_hidden2, future2 = model(x, map_input, vis, ego, mode="infer")
+    assert traj.shape == (2, 128) and future2 is None
+
+
+def test_autoe2e_default_no_memory_passthrough():
+    """Default temporal_memory_mode='no_memory' keeps the flat [B, feat] path
+    working — default AutoE2E behaviour is unchanged."""
+    from unittest.mock import patch
+
+    from model_components.auto_e2e import AutoE2E
+    from model_components.temporal_memory import NoMemory
+
+    with patch("model_components.auto_e2e.Backbone", _MockBackbone):
+        model = AutoE2E(num_views=8, fusion_mode="concat")  # default no_memory
+    assert isinstance(model.TemporalMemory, NoMemory)
+
+    x = torch.randn(2, 8, 3, 256, 256)
+    map_input = torch.randn(2, 3, 256, 256)
+    vis = torch.randn(2, 896)       # flat history (default contract)
+    ego = torch.randn(2, 256)
+    traj, ego_hidden, future = model(x, map_input, vis, ego, mode="infer")
+    assert traj.shape == (2, 128) and ego_hidden.shape == (2, 256) and future is None
