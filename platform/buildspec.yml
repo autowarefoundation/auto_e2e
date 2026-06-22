@@ -1,0 +1,33 @@
+version: 0.2
+
+env:
+  variables:
+    AWS_DEFAULT_REGION: us-west-2
+
+phases:
+  pre_build:
+    commands:
+      - ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+      - ECR_URL="${ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com"
+      - aws ecr get-login-password --region $AWS_DEFAULT_REGION | docker login --username AWS --password-stdin $ECR_URL
+  build:
+    commands:
+      - echo "=== Building training image ==="
+      - docker build -t ${ECR_URL}/auto-e2e/training:latest -f platform/docker/training/Dockerfile .
+      - docker push ${ECR_URL}/auto-e2e/training:latest
+
+      - echo "=== Building eval image ==="
+      - docker build -t ${ECR_URL}/auto-e2e/eval:latest -f platform/docker/eval/Dockerfile .
+      - docker push ${ECR_URL}/auto-e2e/eval:latest
+
+      - echo "=== Building offline-rl image ==="
+      - docker build -t ${ECR_URL}/auto-e2e/offline-rl:latest -f platform/docker/offline-rl/Dockerfile .
+      - docker push ${ECR_URL}/auto-e2e/offline-rl:latest
+
+      - echo "=== Building data-prep image ==="
+      - docker build -t ${ECR_URL}/auto-e2e/data-prep:latest -f platform/docker/data-prep/Dockerfile .
+      - docker push ${ECR_URL}/auto-e2e/data-prep:latest
+
+cache:
+  paths:
+    - '/root/.cache/pip/**/*'

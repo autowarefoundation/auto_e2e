@@ -1,0 +1,26 @@
+# MLflow community-charts/mlflow 1.8.5 values override
+resources:
+  requests:
+    cpu: "1"
+    memory: 1Gi
+  limits:
+    cpu: "2"
+    memory: 4Gi
+postgresql:
+  enabled: false
+service:
+  type: ClusterIP
+  port: 5000
+
+# Server args (camelcase → kebabcase). No gunicornOpts → uvicorn (FastAPI) mode,
+# which enables the security middleware so CORS/allowed-hosts take effect.
+extraArgs:
+  corsAllowedOrigins: "*"
+
+extraFlags:
+  - serveArtifacts
+
+# Security middleware config (uvicorn mode) — allows CloudFront UI to call ajax-api
+extraEnvVars:
+  MLFLOW_SERVER_ALLOWED_HOSTS: "*"
+  MLFLOW_SERVER_CORS_ALLOWED_ORIGINS: "*"

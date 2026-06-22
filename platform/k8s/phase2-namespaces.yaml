@@ -1,0 +1,66 @@
+# Phase 2 namespaces, ServiceAccounts, and Secrets.
+# Apply BEFORE Helm installs. Secrets are placeholder — real values injected by
+# post-apply-phase2.sh after RDS is provisioned.
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: flyte
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: kueue-system
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: kubeflow
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: mlflow
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: auto-e2e-training
+  labels:
+    kubernetes.io/metadata.name: auto-e2e-training
+    kueue.x-k8s.io/default-queue: gpu-queue
+---
+# ServiceAccount for training pods (Pod Identity → s3-access role)
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: training-sa
+  namespace: auto-e2e-training
+---
+# Flyte DB credentials (populated by post-apply-phase2.sh)
+apiVersion: v1
+kind: Secret
+metadata:
+  name: flyte-db-pass
+  namespace: flyte
+type: Opaque
+stringData:
+  POSTGRES_HOST: "PLACEHOLDER"
+  POSTGRES_PORT: "5432"
+  POSTGRES_DB: "flyteadmin"
+  POSTGRES_USER: "pgadmin"
+  POSTGRES_PASSWORD: "PLACEHOLDER"
+---
+# MLflow DB credentials (populated by post-apply-phase2.sh)
+apiVersion: v1
+kind: Secret
+metadata:
+  name: mlflow-db-secret
+  namespace: mlflow
+type: Opaque
+stringData:
+  POSTGRES_HOST: "PLACEHOLDER"
+  POSTGRES_PORT: "5432"
+  POSTGRES_DB: "mlflow"
+  POSTGRES_USER: "pgadmin"
+  POSTGRES_PASSWORD: "PLACEHOLDER"

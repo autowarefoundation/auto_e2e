@@ -1,0 +1,9 @@
+# Kueue v0.18.1 Helm values override
+# Framework integrations are set via Terraform set{} blocks.
+controller:
+  manager:
+    replicas: 1
+    resources:
+      requests:
+        cpu: 100m
+        memory: 256Mi

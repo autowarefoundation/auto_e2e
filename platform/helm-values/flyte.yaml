@@ -1,0 +1,40 @@
+# Flyte Binary chart v2.0.23 values override
+# DB connection is forced via inline config override (merges AFTER base).
+
+flyte-core-components:
+  admin:
+    seedProjects:
+      - auto-e2e
+
+configuration:
+  auth:
+    enabled: false
+  inline:
+    database:
+      postgres:
+        host: PLACEHOLDER_RDS_HOST
+        port: 5432
+        dbname: flyteadmin
+        username: pgadmin
+        password: PLACEHOLDER_RDS_PASS
+        options: "sslmode=require"
+    tasks:
+      task-plugins:
+        enabled-plugins:
+          - container
+          - sidecar
+          - k8s-array
+          - pytorch
+        default-for-task-types:
+          container: container
+          sidecar: sidecar
+          container_array: k8s-array
+          pytorch: pytorch
+
+deployment:
+  resources:
+    requests:
+      cpu: 500m
+      memory: 1Gi
+    limits:
+      memory: 2Gi
