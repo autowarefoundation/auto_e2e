@@ -222,7 +222,7 @@ def generate_bev_map_tile(
             b_sub = _attr(bound, "subtype")
             color = _get_rgb(b_type, b_sub)
             if color == _FALLBACK_RGB:
-                color = _get_rgb("pedestrian_marking", None)
+                color = _get_rgb("pedestrian_marking", "")
             _cv_line(canvas, pts, ego, yaw, scale, rs, color, lw)
 
     # Pass 4: stop lines
