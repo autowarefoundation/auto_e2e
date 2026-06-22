@@ -18,6 +18,10 @@ class FeatureReconstructionLoss(nn.Module):
     ``"none"`` reduction that returns the per-timestep losses for logging.
     """
 
+    # Declares the registered buffer's type so mypy resolves it to Tensor
+    # (not Tensor | Module) when it is used in arithmetic below.
+    temporal_weights: torch.Tensor
+
     def __init__(self, num_future_steps: int = 4, temporal_weights=None,
                  reduction: str = "mean"):
         super().__init__()
@@ -69,16 +73,16 @@ class FeatureReconstructionLoss(nn.Module):
                 f"got {len(target_features)}"
             )
 
-        per_step = []
+        per_step_losses: list[torch.Tensor] = []
         for pred, target in zip(predicted_features, target_features):
             if pred.shape != target.shape:
                 raise ValueError(
                     f"Shape mismatch: predicted {tuple(pred.shape)} vs "
                     f"target {tuple(target.shape)}"
                 )
-            per_step.append(torch.mean((pred - target) ** 2))
+            per_step_losses.append(torch.mean((pred - target) ** 2))
 
-        per_step = torch.stack(per_step)  # [num_future_steps]
+        per_step = torch.stack(per_step_losses)  # [num_future_steps]
         weighted = per_step * self.temporal_weights
 
         if self.reduction == "none":
