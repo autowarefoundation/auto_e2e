@@ -218,7 +218,7 @@ def test_autoe2e_contract_untouched_with_manual_integration(device):
     trajectory, ego_hidden, future = out
     assert trajectory.shape == (2, 128)
     assert ego_hidden.shape == (2, 256)
-    assert future is not None
+    assert future is None  # infer mode returns no future visual features (contract)
 
     # Auxiliary head consumes ego_hidden; gradient reaches AutoE2E trunk.
     _, decision_logits = head(ego_hidden)
