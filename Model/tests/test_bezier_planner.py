@@ -164,6 +164,55 @@ def test_autoe2e_with_bezier_planner_end_to_end(device):
     assert future is None  # infer mode returns None for future visual features
 
 
+def test_autoe2e_with_bezier_planner_train_mode(device):
+    """Full forward pass in train mode: AutoE2E -> BezierPlanner.compute_planner_loss
+    returns a SCALAR loss, future features are produced, and gradients flow back
+    through the planner. This exercises the actual layers end-to-end."""
+    from unittest.mock import patch
+
+    from model_components.auto_e2e import AutoE2E
+
+    with patch("model_components.auto_e2e.Backbone", _MockBackbone):
+        model = AutoE2E(num_views=8, fusion_mode="concat",
+                        planner_mode="bezier").to(device)
+
+    x = torch.randn(2, 8, 3, 256, 256, device=device)
+    map_input = torch.randn(2, 3, 256, 256, device=device)
+    vis = torch.randn(2, 896, device=device)
+    ego = torch.randn(2, 256, device=device)
+    target = torch.randn(2, 128, device=device)
+
+    loss, ego_hidden, future = model(
+        x, map_input, vis, ego, mode="train", trajectory_target=target
+    )
+
+    assert loss.ndim == 0, "train mode must return a scalar planner loss"
+    assert torch.isfinite(loss) and loss.item() >= 0.0
+    assert ego_hidden.shape == (2, 256)
+    assert future is not None  # train mode produces future visual features
+
+    loss.backward()
+    assert any(p.grad is not None for p in model.TrajectoryPlanner.parameters()), \
+        "planner must receive gradient from compute_planner_loss"
+
+
+def test_compute_planner_loss_delegates_to_shared_loss(device):
+    """compute_planner_loss must use the shared TrajectoryImitationLoss
+    (losses/ module), not an inline loss, and honour the (loss, ego_hidden)
+    BasePlanner contract."""
+    from model_components.losses.trajectory_loss import TrajectoryImitationLoss
+
+    planner = BezierPlanner(embed_dim=EMBED_DIM).to(device)
+    assert isinstance(planner.trajectory_loss, TrajectoryImitationLoss)
+
+    bev, vis, ego = _make_inputs(2, device)
+    target = torch.randn(2, 128, device=device)
+    loss, ego_hidden = planner.compute_planner_loss(bev, vis, ego, target)
+    assert loss.ndim == 0 and torch.isfinite(loss)
+    assert ego_hidden.shape == (2, EMBED_DIM)
+    loss.backward()  # loss must be differentiable through the planner
+
+
 def test_autoe2e_default_planner_unchanged(device):
     """Default planner must remain the autoregressive TrajectoryPlanner."""
     from unittest.mock import patch

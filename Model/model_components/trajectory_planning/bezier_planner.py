@@ -2,9 +2,9 @@ import math
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
 from .base import BasePlanner
+from ..losses.trajectory_loss import TrajectoryImitationLoss
 
 
 class BezierPlanner(BasePlanner):
@@ -62,6 +62,12 @@ class BezierPlanner(BasePlanner):
 
         # Predict (num_controls x num_signals) Bezier control points.
         self.control_head = nn.Linear(embed_dim, num_controls * num_signals)
+
+        # Imitation loss is owned by the shared losses/ module (smooth_l1 +
+        # temporal decay), not reimplemented here. The planner only invokes it.
+        self.trajectory_loss = TrajectoryImitationLoss(
+            num_timesteps=num_timesteps, num_signals=num_signals,
+        )
 
         # Fixed Bernstein basis [num_timesteps, num_controls] (no scipy).
         self.register_buffer(
@@ -140,9 +146,16 @@ class BezierPlanner(BasePlanner):
 
     def compute_planner_loss(self, bev_features, visual_history,
                              egomotion_history, trajectory_target):
-        """Return (loss, ego_hidden)."""
-        trajectory, ego_hidden = self.forward(
+        """Return ``(loss, ego_hidden)`` as required by ``BasePlanner``.
+
+        The loss is NOT defined here: it delegates to the shared
+        ``TrajectoryImitationLoss`` in ``Model/model_components/losses`` so the
+        planner owns no loss logic of its own. ``ego_hidden`` is the same
+        context vector ``forward()`` produces, so ``AutoE2E`` can feed
+        ``FutureState`` in train mode without a second pass.
+        """
+        trajectory, ego_hidden = self(
             bev_features, visual_history, egomotion_history
         )
-        loss = F.mse_loss(trajectory, trajectory_target)
+        loss = self.trajectory_loss(trajectory, trajectory_target)
         return loss, ego_hidden
