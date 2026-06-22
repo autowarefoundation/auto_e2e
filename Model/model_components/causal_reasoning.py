@@ -50,7 +50,7 @@ class CausalReasoningModule(nn.Module):
             ``CAUSAL_CLASSES``).
     """
 
-    def __init__(self, embed_dim: int = 256, latent_dim: int = None,
+    def __init__(self, embed_dim: int = 256, latent_dim: int | None = None,
                  num_classes: int = NUM_CAUSAL_CLASSES):
         super().__init__()
         latent_dim = embed_dim if latent_dim is None else latent_dim
@@ -115,7 +115,7 @@ class CausalReasoningModule(nn.Module):
 def causal_consistency_loss(decision_logits: torch.Tensor,
                             labels: torch.Tensor,
                             label_smoothing: float = 0.0,
-                            class_weights: torch.Tensor = None,
+                            class_weights: torch.Tensor | None = None,
                             ) -> torch.Tensor:
     """Cross-entropy between predicted causal decisions and pseudo-labels.
 
