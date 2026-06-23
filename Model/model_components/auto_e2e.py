@@ -60,10 +60,10 @@ class AutoE2E(nn.Module):
             planner_loss: Used only when mode="train" during network training, otherwise set to None
         """
 
-        trajectory, ego_hidden, planner_loss = self.Reactive_E2E(camera_tiles, map_input, visual_history, egomotion_history,
+        trajectory = self.Reactive_E2E(camera_tiles, map_input, visual_history, egomotion_history,
         camera_params=camera_params, mode=mode, trajectory_target=trajectory_target, **kwargs)
 
-        return trajectory, ego_hidden, planner_loss
+        return trajectory
         
     
 

@@ -82,22 +82,10 @@ class ReactiveE2E(nn.Module):
         self.FutureState = FutureState(embed_dim=embed_dim, ego_hidden_dim=embed_dim)
 
     def forward(self, camera_tiles, map_input, visual_history, egomotion_history,
-                camera_params=None, mode="train", trajectory_target=None, **kwargs):
+                camera_params=None, **kwargs):
         """
-        Run the full autonomous-driving pipeline.
+        Run the reactive end-to-end autonomous-driving pipeline.
 
-        The first return value's meaning depends on ``mode`` but is uniform
-        across all planners (GRU, Flow Matching, ...):
-
-        * ``mode="train"``: returns ``(planner_loss, ego_hidden, future)``
-          where ``planner_loss`` is a SCALAR — not a trajectory. The
-          planner-specific objective (imitation MSE for GRU,
-          flow-matching velocity MSE for Flow Matching) is computed
-          inside the planner so a training loop never has to know which
-          decoder is active. ``trajectory_target`` is required.
-        * any other ``mode`` (e.g. ``"infer"``): returns
-          ``(trajectory, ego_hidden, None)`` where ``trajectory`` is
-          ``[B, num_timesteps * num_signals]``.
 
         Args:
             camera_tiles: (B, V, 3, H, W) — V camera images (V=7 by default).
@@ -110,7 +98,6 @@ class ReactiveE2E(nn.Module):
         Returns:
             trajectory: (B, num_timesteps * num_signals)
             ego_hidden: (B, embed_dim)
-            future_visual_features: list of 4 × (B, embed_dim, H, W), or None
         """
         B, V, C, H, W = camera_tiles.shape
 
@@ -128,21 +115,8 @@ class ReactiveE2E(nn.Module):
         # --- Temporal Memory ---
         visual_ctx, ego_ctx = self.TemporalMemory(visual_history, egomotion_history)
 
-        # --- Planner Loss (Train mode) ---
-        planner_loss = None
-        if mode == "train":
-            if trajectory_target is None:
-                raise ValueError(
-                    "AutoE2E.forward(mode='train') requires trajectory_target."
-                )
-            planner_loss, ego_hidden = self.TrajectoryPlanner.compute_planner_loss(
-                fused_features, visual_ctx, ego_ctx,
-                trajectory_target,
-            )
-            #future_visual_features = self.FutureState(fused_features, ego_hidden)
-            #return planner_loss, ego_hidden, future_visual_features
-
-        trajectory, ego_hidden = self.TrajectoryPlanner(
+        # --- Trajectory Prediction ---
+        trajectory = self.TrajectoryPlanner(
             fused_features, visual_ctx, ego_ctx, **kwargs,
         )
-        return trajectory, ego_hidden, planner_loss
+        return trajectory
