@@ -2,3 +2,12 @@ __pycache__/
 *.py[cod]
 ._*
 benchmark_results.json
+# Downloaded SDTagNet NLP encoder checkpoint (default download dir)
+checkpoints/
+# Generated OSM SD-map artifacts: caches, raw Overpass fetches, tokenized
+# shards, built road graphs, and visualization output.
+cache/
+*.osm.gz
+osm_bbox_*.xml.gz
+graph_*.pkl
+osm_map_vis.png

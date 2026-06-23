@@ -78,13 +78,17 @@ class MockBackbone(nn.Module):
 
 def _build_model_with_mock_backbone(num_views, fusion_mode, device,
                                     num_timesteps=64, map_fusion_mode="residual",
-                                    planner_mode="gru", planner_kwargs=None):
+                                    planner_mode="gru", planner_kwargs=None,
+                                    **model_kwargs):
     """Construct AutoE2E with the mock backbone injected.
 
     Patches Backbone at the module level during construction to avoid
     loading pretrained weights entirely. Forces BEV fusion to a small
     8x8 grid so tests stay fast and memory-light; the production default
     (450x300) is exercised by dedicated configuration tests.
+
+    Extra ``model_kwargs`` (e.g. ``map_type``, ``map_encoder_kwargs``) are
+    forwarded to ``AutoE2E`` for map-branch variants.
     """
     from unittest.mock import patch
     from model_components.auto_e2e import AutoE2E
@@ -100,6 +104,7 @@ def _build_model_with_mock_backbone(num_views, fusion_mode, device,
             planner_mode=planner_mode,
             planner_kwargs=planner_kwargs,
             map_fusion_mode=map_fusion_mode,
+            **model_kwargs,
         )
     return model.to(device)
 

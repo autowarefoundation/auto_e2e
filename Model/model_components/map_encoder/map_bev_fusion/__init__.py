@@ -1,9 +1,11 @@
 from .residual_fusion import ResidualMapFusion
 from .cross_attention_fusion import MapCrossAttentionFusion
+from .osm_cross_attn_fusion import OSMCrossAttnFusion
 
 MAP_FUSION_REGISTRY = {
     "residual": ResidualMapFusion,
     "cross_attn": MapCrossAttentionFusion,
+    "osm_cross_attn": OSMCrossAttnFusion,
 }
 
 

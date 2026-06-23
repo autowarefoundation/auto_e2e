@@ -63,8 +63,9 @@ def render_and_cache_tiles(
         output_dir: where rendered PNG tiles are written (`{clip_id}.png`).
         radius_m: render radius around each clip's centroid.
         image_size: output `(W, H)`.
-        network_cache_dir: if given, fetched graphs are persisted here keyed by
-            centroid so neighbouring clips share a cached download.
+        network_cache_dir: if given, fetched graphs and the shared raw-OSM XML
+            are persisted here (keyed by the clip's trajectory bbox) so
+            neighbouring clips and the OSM vector branch reuse downloads.
         skip_existing: do not re-render clips whose PNG already exists.
 
     Returns:
@@ -91,8 +92,11 @@ def render_and_cache_tiles(
         ego_lon = float(lons[-1])
         ego_heading = _heading_from_trace(lats, lons, ego_lat)
 
+        # Fetch sized to the whole trajectory + the render radius, so the route
+        # and the ±radius draw window are always covered (a centroid radius can
+        # miss long clips).
         graph = _load_or_fetch_network(
-            ego_lat, ego_lon, radius_m, net_cache
+            list(lats), list(lons), radius_m, net_cache
         )
         if graph is None:
             logger.warning("clip %s: failed to obtain road network; skipping", clip_id)
@@ -146,35 +150,108 @@ def _heading_from_trace(
     return math.atan2(dx, dy)
 
 
-def _load_or_fetch_network(
-    center_lat: float,
-    center_lon: float,
-    radius_m: int,
+def _graph_from_shared_osm(
+    lats: Sequence[float],
+    lons: Sequence[float],
+    margin_m: int,
     cache_dir: Path | None,
 ) -> nx.MultiDiGraph | None:
-    """Return a cached graph if available, otherwise fetch and cache it.
+    """Build the road graph from the shared raw-OSM cache (trace bbox + margin).
 
-    Centroids are quantized to ~100 m so nearby clips reuse the same download.
+    The SD-map (OSM vector) branch and this rendered-tile branch share a single
+    on-disk artifact: the raw Overpass OSM XML (see
+    ``data_parsing.osm_sd_map.overpass``). Both fetch the bounding box of the
+    clip's trajectory expanded by their own margin (here the render radius); the
+    shared cache reuses any already-fetched XML that covers the request, so one
+    download serves both. Returns ``None`` (caller falls back to a direct fetch)
+    if the shared path is unavailable for any reason.
     """
-    if cache_dir is not None:
-        key = f"{round(center_lat, 3)}_{round(center_lon, 3)}_{radius_m}.pkl"
-        cache_path = cache_dir / key
+    try:
+        import os
+        import tempfile
+
+        import osmnx as ox
+
+        from ..osm_sd_map.overpass import load_or_fetch_osm_for_trace
+    except Exception as exc:  # noqa: BLE001 — optional path; never break rendering
+        logger.debug("shared OSM path unavailable (%s); using direct fetch", exc)
+        return None
+
+    xml = load_or_fetch_osm_for_trace(lats, lons, margin_m, cache_dir)
+    if xml is None:
+        return None
+
+    tmp = tempfile.NamedTemporaryFile("w", suffix=".osm", delete=False, encoding="utf-8")
+    try:
+        tmp.write(xml)
+        tmp.close()
+        return ox.graph_from_xml(tmp.name, bidirectional=False, simplify=True, retain_all=True)
+    except Exception as exc:  # noqa: BLE001 — osmnx version/parse differences
+        logger.warning("graph_from_xml failed (%s); using direct fetch", exc)
+        return None
+    finally:
+        os.unlink(tmp.name)
+
+
+def _trace_centroid_radius(
+    lats: Sequence[float], lons: Sequence[float], margin_m: int
+) -> tuple[float, float, int]:
+    """Centroid + a radius that covers the whole trace plus ``margin_m``."""
+    clat = sum(lats) / len(lats)
+    clon = sum(lons) / len(lons)
+    deg_to_m = EARTH_RADIUS_M * math.pi / 180.0
+    cos_lat = math.cos(math.radians(clat))
+    max_d = 0.0
+    for la, lo in zip(lats, lons):
+        dx = (lo - clon) * cos_lat * deg_to_m
+        dy = (la - clat) * deg_to_m
+        max_d = max(max_d, math.hypot(dx, dy))
+    return clat, clon, int(max_d + margin_m)
+
+
+def _graph_cache_path(
+    lats: Sequence[float], lons: Sequence[float], margin_m: int, cache_dir: Path
+) -> Path | None:
+    """Pickle path for the built graph, keyed by the trace bbox."""
+    try:
+        from ..osm_sd_map.overpass import bbox_from_points
+    except Exception:  # noqa: BLE001
+        return None
+    s, w, n, e = bbox_from_points(lats, lons, margin_m)
+    return cache_dir / f"graph_{s:.4f}_{w:.4f}_{n:.4f}_{e:.4f}.pkl"
+
+
+def _load_or_fetch_network(
+    lats: Sequence[float],
+    lons: Sequence[float],
+    margin_m: int,
+    cache_dir: Path | None,
+) -> nx.MultiDiGraph | None:
+    """Return a cached graph if available, otherwise build/fetch and cache it.
+
+    The fetch is sized to the trajectory bounding box plus ``margin_m`` (the
+    render radius), so long clips are fully covered (a fixed centroid radius can
+    miss them). The graph is built from the shared raw-OSM cache when possible
+    (reused by the OSM vector branch via bbox containment); otherwise it falls
+    back to a direct osmnx fetch sized to cover the trace. The built graph is
+    memoized as a pickle keyed by the trace bbox.
+    """
+    cache_path = _graph_cache_path(lats, lons, margin_m, cache_dir) if cache_dir is not None else None
+    if cache_path is not None:
         cached = load_cached_network(cache_path)
         if cached is not None:
             return cached
-    else:
-        cache_path = None
 
-    try:
-        graph = fetch_road_network(center_lat, center_lon, radius_m=radius_m)
-    except Exception as exc:  # noqa: BLE001 — network/Overpass failures
-        logger.warning(
-            "fetch_road_network(%.4f, %.4f) failed: %s",
-            center_lat,
-            center_lon,
-            exc,
-        )
-        return None
+    graph = _graph_from_shared_osm(lats, lons, margin_m, cache_dir)
+    if graph is None:
+        clat, clon, radius = _trace_centroid_radius(lats, lons, margin_m)
+        try:
+            graph = fetch_road_network(clat, clon, radius_m=radius)
+        except Exception as exc:  # noqa: BLE001 — network/Overpass failures
+            logger.warning(
+                "fetch_road_network(%.4f, %.4f) failed: %s", clat, clon, exc
+            )
+            return None
 
     if cache_path is not None:
         cache_network(graph, cache_path)
