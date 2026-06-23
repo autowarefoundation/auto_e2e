@@ -4,7 +4,6 @@ from .flow_matching_planner import FlowMatchingPlanner
 from .bezier_planner import BezierPlanner
 
 PLANNER_REGISTRY = {
-    "gru": GRUPlanner,
     "flow_matching": FlowMatchingPlanner,
     "bezier": BezierPlanner,
 }
@@ -26,7 +25,6 @@ def build_planner(planner_mode, **kwargs):
 
 __all__ = [
     "BasePlanner",
-    "GRUPlanner",
     "FlowMatchingPlanner",
     "BezierPlanner",
     "PLANNER_REGISTRY",
