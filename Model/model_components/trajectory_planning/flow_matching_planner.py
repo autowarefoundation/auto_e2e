@@ -35,15 +35,7 @@ class FlowMatchingPlanner(BasePlanner):
     ``dx/dt = v_theta(x, t, c)`` from t=0 to t=1 with a fixed-step Euler
     solver (``num_inference_steps`` steps). The BEV map and the
     modulation conditioning are computed once per sample and reused
-    across all integration steps so the ODE call is cheap.
-
-    Outputs match the GRU planner contract: ``(trajectory, ego_hidden)``
-    where ``ego_hidden`` is a learned projection of pooled BEV plus
-    visual_history and ego state, and is consumed downstream by
-    FutureState. ``forward()`` always returns the integrated trajectory;
-    the flow-matching loss lives in ``compute_planner_loss`` so the raw
-    velocity tensor never escapes the planner — the caller cannot pair it
-    with the wrong target.
+    across all integration steps so the ODE call is cheap.    
     """
 
     def __init__(self, embed_dim=256, num_timesteps=64, num_signals=2,
@@ -105,12 +97,6 @@ class FlowMatchingPlanner(BasePlanner):
         # cross-attention to preserve spatial detail.
         self.ego_state_proj = nn.Linear(egomotion_dim, embed_dim)
         self.visual_history_proj = nn.Linear(visual_history_dim, embed_dim)
-
-        # ego_hidden is a single summary vector consumed by FutureState, so
-        # it can still pool BEV — its job is "scene gist", not waypoint
-        # placement.
-        self.bev_pool_proj = nn.Linear(embed_dim, embed_dim)
-        self.cond_to_ego_hidden = nn.Linear(embed_dim, embed_dim)
 
         self.time_mlp = nn.Sequential(
             nn.Linear(time_embed_dim, embed_dim),
@@ -210,9 +196,6 @@ class FlowMatchingPlanner(BasePlanner):
             + self.ego_state_proj(egomotion_history)
         )
 
-    def _ego_hidden(self, bev_features, mod_cond):
-        bev_pool = bev_features.mean(dim=(2, 3))
-        return self.cond_to_ego_hidden(self.bev_pool_proj(bev_pool) + mod_cond)
 
     def _sample_timesteps(self, batch_size, device, dtype):
         """Sample flow timesteps t in [0, 1).
@@ -309,12 +292,9 @@ class FlowMatchingPlanner(BasePlanner):
 
         Returns:
             trajectory: [B, trajectory_dim] — integrated from a noise sample.
-            ego_hidden: [B, embed_dim] — context vector consumed downstream
-                by FutureState.
         """
         self._validate_inputs(visual_history, egomotion_history)
         mod_cond = self._modulation_conditioning(visual_history, egomotion_history)
-        ego_hidden = self._ego_hidden(bev_features, mod_cond)
         # bev_seq is computed once and reused across every Euler step.
         bev_seq = self._project_bev(bev_features)
 
@@ -329,7 +309,7 @@ class FlowMatchingPlanner(BasePlanner):
                            device=bev_features.device, dtype=bev_features.dtype)
             v = self._v_theta(x, t, bev_seq, mod_cond)
             x = x + dt * v
-        return x, ego_hidden
+        return x
 
     def compute_planner_loss(self, bev_features, visual_history,
                              egomotion_history, trajectory_target):
@@ -340,7 +320,7 @@ class FlowMatchingPlanner(BasePlanner):
         The raw predicted velocity never leaves this method, so the caller
         cannot accidentally MSE it against a trajectory target.
 
-        Returns ``(loss, ego_hidden)`` as required by ``BasePlanner``.
+        Returns ``(loss)`` as required by ``BasePlanner``.
         """
         self._validate_inputs(visual_history, egomotion_history)
         B = bev_features.shape[0]
@@ -351,9 +331,8 @@ class FlowMatchingPlanner(BasePlanner):
         u_t, t, target_velocity = self.construct_training_data(trajectory_target)
 
         mod_cond = self._modulation_conditioning(visual_history, egomotion_history)
-        ego_hidden = self._ego_hidden(bev_features, mod_cond)
         bev_seq = self._project_bev(bev_features)
 
         velocity_pred = self._v_theta(u_t, t, bev_seq, mod_cond)
         loss = F.mse_loss(velocity_pred, target_velocity)
-        return loss, ego_hidden
+        return loss
