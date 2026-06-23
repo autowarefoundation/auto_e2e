@@ -25,9 +25,6 @@ class BezierPlanner(BasePlanner):
     to the acceleration/curvature *profiles*, which is exactly what reduces
     jerk and yields controller-friendly, physically feasible commands.
 
-    Output contract (matches ``TrajectoryPlanner``):
-        trajectory: [B, num_timesteps * num_signals]
-        ego_hidden: [B, embed_dim]   (consumed by FutureState)
     """
 
     def __init__(self, embed_dim=256, num_timesteps=64, num_signals=2,
@@ -105,7 +102,6 @@ class BezierPlanner(BasePlanner):
 
         Returns:
             trajectory: [B, num_timesteps * num_signals]
-            ego_hidden: [B, embed_dim]
         """
         if visual_history.shape[-1] != self.visual_history_dim:
             raise ValueError(
@@ -128,9 +124,9 @@ class BezierPlanner(BasePlanner):
             + self.visual_history_proj(visual_history)
             + self.bev_proj(bev_context)
         )
-        ego_hidden = self.context_mlp(context)                          # [B, C]
+        bezier_feature = self.context_mlp(context)                          # [B, C]
 
-        control_points = self.control_head(ego_hidden).view(
+        control_points = self.control_head(bezier_feature).view(
             B, self.num_controls, self.num_signals
         )                                                               # [B, C, S]
 
@@ -142,11 +138,11 @@ class BezierPlanner(BasePlanner):
         trajectory = trajectory.reshape(
             B, self.num_timesteps * self.num_signals
         )
-        return trajectory, ego_hidden
+        return trajectory
 
     def compute_planner_loss(self, bev_features, visual_history,
                              egomotion_history, trajectory_target):
-        """Return ``(loss, ego_hidden)`` as required by ``BasePlanner``.
+        """Return ``(loss)`` as required by ``BasePlanner``.
 
         The loss is NOT defined here: it delegates to the shared
         ``TrajectoryImitationLoss`` in ``Model/model_components/losses`` so the
@@ -154,8 +150,8 @@ class BezierPlanner(BasePlanner):
         context vector ``forward()`` produces, so ``AutoE2E`` can feed
         ``FutureState`` in train mode without a second pass.
         """
-        trajectory, ego_hidden = self(
+        trajectory = self(
             bev_features, visual_history, egomotion_history
         )
         loss = self.trajectory_loss(trajectory, trajectory_target)
-        return loss, ego_hidden
+        return loss
