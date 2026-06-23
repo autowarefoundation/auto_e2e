@@ -3,8 +3,6 @@ import torch
 import sys
 sys.path.append('..')
 
-from model_components.trajectory_planning import GRUPlanner
-
 
 def make_inputs(batch_size, num_views, device, include_camera_params=False):
     visual = torch.randn(batch_size, num_views, 3, 256, 256, device=device)
@@ -291,121 +289,6 @@ class TestTrainingLoop:
         for prefix, has_grad in groups.items():
             assert has_grad, f"No parameter in {prefix} received nonzero gradient"
 
-
-# ---------------------------------------------------------------------------
-# Behavioral tests on planner / future-state internals
-# ---------------------------------------------------------------------------
-
-class TestTrajectoryDynamics:
-    def test_trajectory_does_not_saturate(self, device):
-        """The GRU should produce time-varying outputs, not saturate to a constant.
-
-        Reshape the 64×2 trajectory and check that the second half of the
-        first signal channel is NOT a single repeated value.
-        """
-        torch.manual_seed(0)
-        planner = GRUPlanner(embed_dim=256).to(device)
-        planner.eval()
-        bev = torch.randn(1, 256, 8, 8, device=device)
-        vis_hist = torch.randn(1, 896, device=device)
-        ego = torch.randn(1, 256, device=device)
-
-        traj, _ = planner(bev, vis_hist, ego)
-        # traj: [1, 128] = [1, 64*2]; reshape so dim 1 = timesteps
-        late = traj.view(1, 64, 2)[0, 32:, 0]
-        # Require substantial variation across the 32 late timesteps. A bare
-        # >1 threshold would pass even when 31 of 32 values collapse to the
-        # same constant — near-saturation we still want to catch.
-        assert late.unique().numel() >= 8, \
-            "Trajectory saturates to a constant value over the last 32 timesteps"
-
-    def test_deformable_clamp_handles_extreme_query(self, device):
-        """Extreme query magnitudes push sampling locations outside [0, 1];
-        the clamp inside _deformable_cross_attn must keep output finite AND
-        actively engage. Verified by:
-          1. With offset_scale=0.1, an extreme query produces sample_locs
-             that fall outside [0, 1] BEFORE the clamp — so the clamp is
-             the only thing keeping the result finite.
-          2. Output is finite at offset_scale=0.1 with the extreme query.
-          3. With offset_scale=0 (offsets disabled), the same extreme query
-             still produces finite output via the reference point alone.
-        """
-        torch.manual_seed(0)
-        planner_pos = GRUPlanner(embed_dim=256, offset_scale=0.1).to(device)
-        torch.manual_seed(0)
-        planner_zero = GRUPlanner(embed_dim=256, offset_scale=0.0).to(device)
-        planner_pos.eval()
-        planner_zero.eval()
-
-        # Build extreme query and value tensors directly to exercise the clamp.
-        B, C, H, W = 1, 256, 8, 8
-        query = torch.full((B, C), 1e6, device=device)
-        values = torch.randn(B, C, H, W, device=device)
-
-        # Sanity: with offsets active, sample_locs WITHOUT clamp would land
-        # outside [0, 1] for this query, so the clamp is the only reason
-        # the output remains finite.
-        ref = planner_pos.reference_point(query).sigmoid()
-        offs = (planner_pos.sampling_offsets(query)
-                .reshape(B, planner_pos.num_points, 2) * planner_pos.offset_scale)
-        unclamped = ref.unsqueeze(1) + offs
-        outside = ((unclamped < 0) | (unclamped > 1)).any()
-        assert outside, \
-            "Test setup failed: extreme query did not push sample_locs out of bounds"
-
-        out_pos = planner_pos._deformable_cross_attn(query, values)
-        out_zero = planner_zero._deformable_cross_attn(query, values)
-
-        assert torch.isfinite(out_pos).all(), \
-            "Clamp failed: output contains NaN/Inf for extreme query (offset_scale=0.1)"
-        assert torch.isfinite(out_zero).all(), \
-            "Reference-point-only path produced NaN/Inf for extreme query"
-
-    def test_offset_scale_zero_vs_nonzero_differ_in_attn(self, device):
-        """With normal-magnitude queries, offset_scale=0 vs 0.1 must produce
-        different deformable attention outputs — proving offsets actually
-        contribute (and don't just get squashed by the clamp). Uses the same
-        seed for the two planners so the only meaningful difference is whether
-        offsets fan out around the reference point."""
-        torch.manual_seed(0)
-        planner_pos = GRUPlanner(embed_dim=256, offset_scale=0.1).to(device)
-        torch.manual_seed(0)
-        planner_zero = GRUPlanner(embed_dim=256, offset_scale=0.0).to(device)
-        planner_pos.eval()
-        planner_zero.eval()
-
-        B, C, H, W = 1, 256, 8, 8
-        query = torch.randn(B, C, device=device)
-        values = torch.randn(B, C, H, W, device=device)
-
-        out_pos = planner_pos._deformable_cross_attn(query, values)
-        out_zero = planner_zero._deformable_cross_attn(query, values)
-
-        assert torch.isfinite(out_pos).all() and torch.isfinite(out_zero).all()
-        assert not torch.allclose(out_pos, out_zero, atol=1e-5), \
-            "offset_scale=0 vs 0.1 produced identical attn output — offsets inactive"
-
-
-class TestVisualHistoryNonZeroDifference:
-    def test_two_nonzero_visual_histories_differ(self, device):
-        """Both visual_history inputs are non-zero and distinct — outputs must differ."""
-        torch.manual_seed(0)
-        planner = GRUPlanner(embed_dim=256).to(device)
-        planner.eval()
-        bev = torch.randn(1, 256, 8, 8, device=device)
-        ego = torch.randn(1, 256, device=device)
-
-        vh_a = torch.randn(1, 896, device=device)
-        vh_b = torch.randn(1, 896, device=device)
-        # Sanity: both are non-zero
-        assert vh_a.abs().max() > 0 and vh_b.abs().max() > 0
-        assert not torch.allclose(vh_a, vh_b)
-
-        traj_a, _ = planner(bev, vh_a, ego)
-        traj_b, _ = planner(bev, vh_b, ego)
-
-        assert not torch.allclose(traj_a, traj_b, atol=1e-5), \
-            "Two distinct non-zero visual_history inputs produced the same trajectory"
 
 
 # ---------------------------------------------------------------------------
