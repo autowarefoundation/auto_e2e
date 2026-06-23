@@ -5,7 +5,7 @@ from model_components.auto_e2e import AutoE2E
 
 def run_forward_pass(backbone, fusion_mode, planner_mode, device, embed_dim=8, batch_size=2, num_views=8):
     print(f"{'='*110}")
-    print(f"  backbone = '{backbone}' | fusion_mode = '{fusion_mode}' | planner_mode= '{planner_mode} | batch={batch_size} | views={num_views}")
+    print(f"  backbone = '{backbone}' | planner_mode= '{planner_mode} | batch={batch_size} | views={num_views}")
     print(f"{'='*110}\n")
 
     # Instantiate model
@@ -47,37 +47,21 @@ def main():
 
         # Run a forward pass in the network with all registered backbones, fusion modes and planners
         # SWIN-V2-TINY
-        run_forward_pass("swin_v2_tiny", "concat", "bezier", device)
-        run_forward_pass("swin_v2_tiny", "concat", "flow_matching", device)
-        run_forward_pass("swin_v2_tiny", "concat", "gru", device)
-        run_forward_pass("swin_v2_tiny", "cross_attn", "bezier", device)
-        run_forward_pass("swin_v2_tiny", "cross_attn", "flow_matching", device)
-        run_forward_pass("swin_v2_tiny", "cross_attn", "gru", device)
-        run_forward_pass("swin_v2_tiny", "bev", "bezier", device)
-        run_forward_pass("swin_v2_tiny", "bev", "flow_matching", device)
-        run_forward_pass("swin_v2_tiny", "bev", "gru", device)
+        run_forward_pass("swin_v2_tiny", "bezier", device)
+        run_forward_pass("swin_v2_tiny", "flow_matching", device)
+        run_forward_pass("swin_v2_tiny", "gru", device)
+      
 
         # CONVNEXT-V2-TINY
-        run_forward_pass("conv_next_v2_tiny", "concat", "bezier",device)
-        run_forward_pass("conv_next_v2_tiny", "concat", "flow_matching",device)
-        run_forward_pass("conv_next_v2_tiny", "concat", "gru",device)
-        run_forward_pass("conv_next_v2_tiny", "cross_attn", "bezier",device)
-        run_forward_pass("conv_next_v2_tiny", "cross_attn", "flow_matching",device)
-        run_forward_pass("conv_next_v2_tiny", "cross_attn", "gru",device)
-        run_forward_pass("conv_next_v2_tiny", "bev", "bezier",device)
-        run_forward_pass("conv_next_v2_tiny", "bev", "flow_matching",device)
-        run_forward_pass("conv_next_v2_tiny", "bev", "gru",device)
-
+        run_forward_pass("conv_next_v2_tiny", "bezier",device)
+        run_forward_pass("conv_next_v2_tiny", "flow_matching",device)
+        run_forward_pass("conv_next_v2_tiny",  "gru",device)
+        
         # RESNET-50
-        run_forward_pass("res_net_50", "concat", "bezier",device)
-        run_forward_pass("res_net_50", "concat", "flow_matching",device)
-        run_forward_pass("res_net_50", "concat", "gru",device)
-        run_forward_pass("res_net_50", "cross_attn", "bezier",device)
-        run_forward_pass("res_net_50", "cross_attn", "flow_matching",device)
-        run_forward_pass("res_net_50", "cross_attn", "gru",device)
-        run_forward_pass("res_net_50", "bev", "bezier",device)
-        run_forward_pass("res_net_50", "bev", "flow_matching",device)
-        run_forward_pass("res_net_50", "bev", "gru",device)
+        run_forward_pass("res_net_50", "bezier",device)
+        run_forward_pass("res_net_50", "flow_matching",device)
+        run_forward_pass("res_net_50", "gru",device)
+       
 
 
 if __name__ == "__main__":
