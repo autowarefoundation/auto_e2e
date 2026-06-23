@@ -134,15 +134,13 @@ def resolve_device(arg: str) -> torch.device:
 
 
 def build_model(args: argparse.Namespace, device: torch.device) -> AutoE2E:
-    view_fusion_kwargs = None
-    if args.fusion_mode == "bev":
-        view_fusion_kwargs = {"bev_h": args.bev_h, "bev_w": args.bev_w}
+        
+    view_fusion_kwargs = {"bev_h": args.bev_h, "bev_w": args.bev_w}
 
     model = AutoE2E(
         backbone=args.backbone,
         num_views=args.num_views,
         embed_dim=args.embed_dim,
-        fusion_mode=args.fusion_mode,
         is_pretrained=not args.no_pretrained,
         view_fusion_kwargs=view_fusion_kwargs,
         num_timesteps=args.num_timesteps,
