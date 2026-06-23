@@ -1,0 +1,57 @@
+{
+  "device": "cuda",
+  "torch": "2.12.0+cu130",
+  "history": {
+    "B": 1,
+    "T": 64,
+    "visual_dim": 896,
+    "ego_dim": 256
+  },
+  "rows": [
+    {
+      "memory": "no_memory",
+      "params": 0,
+      "latency_p50_ms": 0.016,
+      "latency_p99_ms": 0.029,
+      "jitter_ms": 0.013,
+      "visual_ctx_dim": [
+        1,
+        896
+      ],
+      "ego_ctx_dim": [
+        1,
+        256
+      ]
+    },
+    {
+      "memory": "one_hz",
+      "params": 21244032,
+      "latency_p50_ms": 1.563,
+      "latency_p99_ms": 2.218,
+      "jitter_ms": 0.655,
+      "visual_ctx_dim": [
+        1,
+        896
+      ],
+      "ego_ctx_dim": [
+        1,
+        256
+      ]
+    },
+    {
+      "memory": "bev_queue",
+      "params": 7486592,
+      "latency_p50_ms": 1.606,
+      "latency_p99_ms": 2.144,
+      "jitter_ms": 0.538,
+      "visual_ctx_dim": [
+        1,
+        896
+      ],
+      "ego_ctx_dim": [
+        1,
+        256
+      ]
+    }
+  ]
+}

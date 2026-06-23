@@ -1,10 +1,12 @@
 from .base import BaseTemporalMemory
 from .no_memory import NoMemory
 from .one_hz_encoder import OneHzHistoryEncoder
+from .bev_queue import BevQueueMemory
 
 TEMPORAL_MEMORY_REGISTRY = {
     "no_memory": NoMemory,
     "one_hz": OneHzHistoryEncoder,
+    "bev_queue": BevQueueMemory,
 }
 
 def build_temporal_memory(memory_mode: str, **kwargs):
@@ -19,6 +21,7 @@ __all__ = [
     "BaseTemporalMemory",
     "NoMemory",
     "OneHzHistoryEncoder",
+    "BevQueueMemory",
     "TEMPORAL_MEMORY_REGISTRY",
     "build_temporal_memory"
 ]
