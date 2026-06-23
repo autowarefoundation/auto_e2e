@@ -9,7 +9,7 @@ from .temporal_memory import build_temporal_memory
 
 class ReactiveE2E(nn.Module):
     def __init__(self, backbone="swin_v2_tiny", num_views=7, embed_dim=256,
-                 fusion_mode="bev", is_pretrained=True,
+                 is_pretrained=True,
                  image_feature_size=8, view_fusion_kwargs=None,
                  num_timesteps=64, num_signals=2, egomotion_dim=256,
                  visual_history_dim=896,
@@ -28,20 +28,16 @@ class ReactiveE2E(nn.Module):
             num_views=num_views,
             backbone_channels=self.Backbone.backbone_channels,
             embed_dim=embed_dim,
-            fusion_mode=fusion_mode,
+            fusion_mode="bev",
             image_feature_size=image_feature_size,
             view_fusion_kwargs=view_fusion_kwargs,
         )
 
-        # For BEV fusion mode the spatial size is bev_h × bev_w (potentially non-square).
-        # For concat/cross_attn it is image_feature_size × image_feature_size.
-        if fusion_mode == "bev":
-            vfk = view_fusion_kwargs or {"bev_h": 450, "bev_w": 300}
-            map_output_h = vfk["bev_h"]
-            map_output_w = vfk["bev_w"]
-        else:
-            map_output_h = image_feature_size
-            map_output_w = image_feature_size
+        # For BEV fusion mode the spatial size is bev_h × bev_w (potentially non-square).       
+        vfk = view_fusion_kwargs or {"bev_h": 450, "bev_w": 300}
+        map_output_h = vfk["bev_h"]
+        map_output_w = vfk["bev_w"]
+
  
         # Map encoder: encodes the BEV nav-map image into spatial map features
         self.MapEncoder = build_map_encoder(

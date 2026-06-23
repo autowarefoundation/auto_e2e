@@ -4,7 +4,7 @@ from .reactive_e2e import ReactiveE2E
 
 class AutoE2E(nn.Module):
     def __init__(self, backbone="swin_v2_tiny", num_views=7, embed_dim=256,
-                 fusion_mode="bev", is_pretrained=True,
+                 is_pretrained=True,
                  image_feature_size=8, view_fusion_kwargs=None,
                  num_timesteps=64, num_signals=2, egomotion_dim=256,
                  visual_history_dim=896,
@@ -18,7 +18,7 @@ class AutoE2E(nn.Module):
         # a rendered map image and egomotion history to predict a driving trajectory
         # to reach the near-horizon navigational goal
         self.Reactive_E2E = ReactiveE2E(backbone=backbone, num_views=num_views, embed_dim=embed_dim,
-                 fusion_mode=fusion_mode, is_pretrained=is_pretrained,
+                 is_pretrained=is_pretrained,
                  image_feature_size=image_feature_size, view_fusion_kwargs=view_fusion_kwargs,
                  num_timesteps=num_timesteps, num_signals=num_signals, egomotion_dim=egomotion_dim,
                  visual_history_dim=visual_history_dim,
