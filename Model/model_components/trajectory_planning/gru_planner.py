@@ -31,9 +31,7 @@ class GRUPlanner(BasePlanner):
     the BEV grid, so the BEV resolution can change without retraining the head.
 
     Outputs at each of ``num_timesteps`` steps the ``num_signals`` waypoint
-    components (default 2: acceleration and curvature). The final GRU hidden
-    state (``ego_hidden``, 256-dim) replaces the legacy 14-dim compressed
-    visual feature vector and is consumed downstream by FutureState.
+    components (default 2: acceleration and curvature).
     """
 
     def __init__(self, embed_dim=256, num_timesteps=64, num_signals=2,
@@ -124,7 +122,6 @@ class GRUPlanner(BasePlanner):
 
         Returns:
             trajectory: [B, num_timesteps * num_signals]
-            ego_hidden: [B, embed_dim] — final GRU hidden state.
         """
         if visual_history.shape[-1] != self.visual_history_dim:
             raise ValueError(
@@ -162,8 +159,7 @@ class GRUPlanner(BasePlanner):
             waypoints.append(self.waypoint_head(h.squeeze(0)))             # [B, num_signals]
 
         trajectory = torch.cat(waypoints, dim=1)                           # [B, T*S]
-        ego_hidden = h.squeeze(0)                                          # [B, C]
-        return trajectory, ego_hidden
+        return trajectory
 
     def compute_planner_loss(self, bev_features, visual_history,
                              egomotion_history, trajectory_target):
