@@ -1,10 +1,5 @@
 import torch.nn as nn
-from .backbone import Backbone
-from .feature_fusion import FeatureFusion
-from .trajectory_planning import build_planner
-from .future_state import FutureState
-from .map_encoder import build_map_encoder, build_map_bev_fusion
-from .temporal_memory import build_temporal_memory
+from .reactive_e2e import ReactiveE2E
 
 
 class AutoE2E(nn.Module):
@@ -16,70 +11,22 @@ class AutoE2E(nn.Module):
                  map_type="rasterized", map_in_channels=3,
                  map_fusion_mode="residual", map_fusion_kwargs=None,
                  temporal_memory_mode="no_memory", temporal_memory_kwargs=None,
-                 planner_mode="gru", planner_kwargs=None):
+                 planner_mode="bezier", planner_kwargs=None):
         super(AutoE2E, self).__init__()
 
-        # Camera backbone feature extractor
-        self.Backbone = Backbone(backbone=backbone, is_pretrained=is_pretrained)
+        # Reactive model which runs at 10Hz and processes multi-camera inputs
+        # a rendered map image and egomotion history to predict a driving trajectory
+        # to reach the near-horizon navigational goal
+        self.Reactive_E2E = ReactiveE2E(backbone=backbone, num_views=num_views, embed_dim=embed_dim,
+                 fusion_mode=fusion_mode, is_pretrained=is_pretrained,
+                 image_feature_size=image_feature_size, view_fusion_kwargs=view_fusion_kwargs,
+                 num_timesteps=num_timesteps, num_signals=num_signals, egomotion_dim=egomotion_dim,
+                 visual_history_dim=visual_history_dim,
+                 map_type=map_type, map_in_channels=map_in_channels,
+                 map_fusion_mode=map_fusion_mode, map_fusion_kwargs=map_fusion_kwargs,
+                 temporal_memory_mode=temporal_memory_mode, temporal_memory_kwargs=temporal_memory_kwargs,
+                 planner_mode=planner_mode, planner_kwargs=planner_kwargs)
 
-        # Multi-scale feature fusion with view unification.
-        # view_fusion_kwargs forwards bev_h/bev_w/pc_range/image_size to BEV fusion.
-        self.FeatureFusion = FeatureFusion(
-            num_views=num_views,
-            backbone_channels=self.Backbone.backbone_channels,
-            embed_dim=embed_dim,
-            fusion_mode=fusion_mode,
-            image_feature_size=image_feature_size,
-            view_fusion_kwargs=view_fusion_kwargs,
-        )
-
-        # For BEV fusion mode the spatial size is bev_h × bev_w (potentially non-square).
-        # For concat/cross_attn it is image_feature_size × image_feature_size.
-        if fusion_mode == "bev":
-            vfk = view_fusion_kwargs or {"bev_h": 450, "bev_w": 300}
-            map_output_h = vfk["bev_h"]
-            map_output_w = vfk["bev_w"]
-        else:
-            map_output_h = image_feature_size
-            map_output_w = image_feature_size
- 
-        # Map encoder: encodes the BEV nav-map image into spatial map features
-        self.MapEncoder = build_map_encoder(
-            map_type,
-            in_channels=map_in_channels,
-            embed_dim=embed_dim,
-            output_h=map_output_h,
-            output_w=map_output_w,
-        )
- 
-        # Map BEV fusion: combines image BEV features with map BEV features
-        self.MapBEVFusion = build_map_bev_fusion(
-            map_fusion_mode,
-            embed_dim=embed_dim,
-            **(map_fusion_kwargs or {}),
-        )
-
-        # Temporal Memory — compresses/fuses [B, T, feat] sequence histories into contexts
-        self.TemporalMemory = build_temporal_memory(
-            temporal_memory_mode,
-            visual_dim=visual_history_dim,
-            egomotion_dim=egomotion_dim,
-            **(temporal_memory_kwargs or {}),
-        )
-
-        # Trajectory decoder — swappable via planner_mode (gru, flow_matching).
-        self.TrajectoryPlanner = build_planner(
-            planner_mode,        
-            embed_dim=embed_dim,
-            num_timesteps=num_timesteps,
-            num_signals=num_signals,
-            egomotion_dim=egomotion_dim,
-            visual_history_dim=visual_history_dim,
-            **(planner_kwargs or {}),
-        )
-
-        # Future visual state prediction conditioned on planner ego_hidden
-        self.FutureState = FutureState(embed_dim=embed_dim, ego_hidden_dim=embed_dim)
 
     def forward(self, camera_tiles, map_input, visual_history, egomotion_history,
                 camera_params=None, mode="train", trajectory_target=None, **kwargs):
@@ -110,38 +57,13 @@ class AutoE2E(nn.Module):
         Returns:
             trajectory: (B, num_timesteps * num_signals)
             ego_hidden: (B, embed_dim)
-            future_visual_features: list of 4 × (B, embed_dim, H, W), or None
+            planner_loss: Used only when mode="train" during network training, otherwise set to None
         """
-        B, V, C, H, W = camera_tiles.shape
 
-        # --- Camera branch ---
-        x = camera_tiles.reshape(B * V, C, H, W)
-        features = self.Backbone(x)
-        image_bev = self.FeatureFusion(features, B, V, camera_params=camera_params)
+        trajectory, ego_hidden, planner_loss = self.Reactive_E2E(camera_tiles, map_input, visual_history, egomotion_history,
+        camera_params=camera_params, mode=mode, trajectory_target=trajectory_target, **kwargs)
 
-        # --- Map branch ---
-        map_bev = self.MapEncoder(map_input)
+        return trajectory, ego_hidden, planner_loss
+        
+    
 
-        # --- Fuse image BEV + map BEV ---
-        fused_features = self.MapBEVFusion(image_bev, map_bev)
-
-        # --- Temporal Memory ---
-        visual_ctx, ego_ctx = self.TemporalMemory(visual_history, egomotion_history)
-
-        if mode == "train":
-            if trajectory_target is None:
-                raise ValueError(
-                    "AutoE2E.forward(mode='train') requires trajectory_target."
-                )
-            planner_loss, ego_hidden = self.TrajectoryPlanner.compute_planner_loss(
-                fused_features, visual_ctx, ego_ctx,
-                trajectory_target,
-            )
-            future_visual_features = self.FutureState(fused_features, ego_hidden)
-            return planner_loss, ego_hidden, future_visual_features
-
-
-        trajectory, ego_hidden = self.TrajectoryPlanner(
-            fused_features, visual_ctx, ego_ctx, **kwargs,
-        )
-        return trajectory, ego_hidden, None
