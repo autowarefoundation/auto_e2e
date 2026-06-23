@@ -1,5 +1,4 @@
 from .base import BasePlanner
-from .gru_planner import GRUPlanner
 from .flow_matching_planner import FlowMatchingPlanner
 from .bezier_planner import BezierPlanner
 
