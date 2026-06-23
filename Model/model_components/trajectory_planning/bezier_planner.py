@@ -4,7 +4,6 @@ import torch
 import torch.nn as nn
 
 from .base import BasePlanner
-from ..losses.trajectory_loss import TrajectoryImitationLoss
 
 
 class BezierPlanner(BasePlanner):

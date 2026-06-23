@@ -60,8 +60,14 @@ class AutoE2E(nn.Module):
             planner_loss: Used only when mode="train" during network training, otherwise set to None
         """
 
+        ### Placeholder for self.World_Action_Model_E2E which processes a 1Hz or tunable 
+        ### stream of images and encodes it as a visual history vector which is fed as input
+        ### to the the Reactive_E2E module and outputs the future feature state which is used as
+        ### JEPA loss during training
+
         trajectory = self.Reactive_E2E(camera_tiles, map_input, visual_history, egomotion_history,
         camera_params=camera_params, mode=mode, trajectory_target=trajectory_target, **kwargs)
+
 
         return trajectory
         
