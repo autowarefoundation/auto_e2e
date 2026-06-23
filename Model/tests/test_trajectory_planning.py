@@ -4,6 +4,7 @@ import sys
 sys.path.append('..')
 
 from model_components.trajectory_planning import (
+    BezierPlanner,
     FlowMatchingPlanner,
     build_planner,
     PLANNER_REGISTRY,
@@ -27,7 +28,7 @@ def make_inputs(batch_size, num_views, device, include_camera_params=False):
 
 class TestPlannerRegistry:
     def test_all_modes_registered(self):
-        assert "gru" in PLANNER_REGISTRY
+        assert "bezier" in PLANNER_REGISTRY
         assert "flow_matching" in PLANNER_REGISTRY
 
     def test_invalid_mode_raises(self):
@@ -35,8 +36,8 @@ class TestPlannerRegistry:
             build_planner("nonexistent", embed_dim=256)
 
     def test_build_returns_correct_type(self):
-        gru = build_planner("gru", embed_dim=256)
-        assert isinstance(gru, GRUPlanner)
+        bezier = build_planner("bezier", embed_dim=256)
+        assert isinstance(bezier, BezierPlanner)
         fm = build_planner("flow_matching", embed_dim=256)
         assert isinstance(fm, FlowMatchingPlanner)
 
@@ -302,46 +303,6 @@ class TestFlowMatchingPlanner:
         with pytest.raises(ValueError, match="beta_scale"):
             FlowMatchingPlanner(beta_scale=1.5)
 
-
-class TestGRUPlannerBackcompat:
-    """The GRU planner moved into the trajectory_planning subpackage —
-    its public behavior must be unchanged."""
-
-    def test_shape_unchanged(self, device):
-        planner = GRUPlanner(embed_dim=256).to(device)
-        bev = torch.randn(2, 256, 8, 8, device=device)
-        vis_hist = torch.randn(2, 896, device=device)
-        ego = torch.randn(2, 256, device=device)
-        traj, ego_hidden = planner(bev, vis_hist, ego)
-        assert traj.shape == (2, 128)
-        assert ego_hidden.shape == (2, 256)
-
-    def test_mode_argument_accepted(self, device):
-        """forward must accept mode without changing GRU output."""
-        torch.manual_seed(0)
-        planner = GRUPlanner(embed_dim=256).to(device)
-        planner.eval()
-        bev = torch.randn(1, 256, 8, 8, device=device)
-        vis_hist = torch.randn(1, 896, device=device)
-        ego = torch.randn(1, 256, device=device)
-        traj_train, _ = planner(bev, vis_hist, ego, mode="train")
-        traj_infer, _ = planner(bev, vis_hist, ego, mode="infer")
-        assert torch.allclose(traj_train, traj_infer)
-
-    def test_extra_kwargs_ignored(self, device):
-        """forward must silently swallow flow-matching-only kwargs."""
-        planner = GRUPlanner(embed_dim=256).to(device)
-        planner.eval()
-        bev = torch.randn(1, 256, 8, 8, device=device)
-        vis_hist = torch.randn(1, 896, device=device)
-        ego = torch.randn(1, 256, device=device)
-        traj, _ = planner(
-            bev, vis_hist, ego,
-            trajectory_target=torch.randn(1, 128, device=device),
-            noisy_trajectory=torch.randn(1, 128, device=device),
-            flow_timestep=torch.tensor([0.5], device=device),
-        )
-        assert traj.shape == (1, 128)
 
 
 class TestAutoE2EWithFlowMatching:
