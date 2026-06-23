@@ -13,6 +13,7 @@ class AutoE2E(nn.Module):
                  num_timesteps=64, num_signals=2, egomotion_dim=256,
                  visual_history_dim=896,
                  map_type="rasterized", map_in_channels=3,
+                 map_encoder_kwargs=None,
                  map_fusion_mode="residual", map_fusion_kwargs=None,
                  planner_mode="gru", planner_kwargs=None):
         super(AutoE2E, self).__init__()
@@ -31,26 +32,43 @@ class AutoE2E(nn.Module):
             view_fusion_kwargs=view_fusion_kwargs,
         )
 
-        # For BEV fusion mode the spatial size is bev_h × bev_w (potentially non-square).
-        # For concat/cross_attn it is image_feature_size × image_feature_size.
-        if fusion_mode == "bev":
-            vfk = view_fusion_kwargs or {"bev_h": 450, "bev_w": 300}
-            map_output_h = vfk["bev_h"]
-            map_output_w = vfk["bev_w"]
+        # Two map-branch flavours:
+        #   * "rasterized": a rendered map image -> spatial map BEV features that
+        #     are fused with the image BEV (residual / cross_attn).
+        #   * "osm_vector": OSM vector elements -> a token sequence that the image
+        #     BEV cross-attends to (use map_fusion_mode="osm_cross_attn").
+        # The osm_vector path takes a ragged osm_map_data dict in place of the
+        # rendered map image and needs no fixed output grid size.
+        self._osm_vector_mode = map_type == "osm_vector"
+
+        if self._osm_vector_mode:
+            self.MapEncoder = build_map_encoder(
+                map_type,
+                embed_dim=embed_dim,
+                **(map_encoder_kwargs or {}),
+            )
         else:
-            map_output_h = image_feature_size
-            map_output_w = image_feature_size
- 
-        # Map encoder: encodes the BEV nav-map image into spatial map features
-        self.MapEncoder = build_map_encoder(
-            map_type,
-            in_channels=map_in_channels,
-            embed_dim=embed_dim,
-            output_h=map_output_h,
-            output_w=map_output_w,
-        )
- 
-        # Map BEV fusion: combines image BEV features with map BEV features
+            # For BEV fusion mode the spatial size is bev_h × bev_w (potentially
+            # non-square). For concat/cross_attn it is image_feature_size².
+            if fusion_mode == "bev":
+                vfk = view_fusion_kwargs or {"bev_h": 450, "bev_w": 300}
+                map_output_h = vfk["bev_h"]
+                map_output_w = vfk["bev_w"]
+            else:
+                map_output_h = image_feature_size
+                map_output_w = image_feature_size
+
+            # Map encoder: encodes the BEV nav-map image into spatial map features
+            self.MapEncoder = build_map_encoder(
+                map_type,
+                in_channels=map_in_channels,
+                embed_dim=embed_dim,
+                output_h=map_output_h,
+                output_w=map_output_w,
+                **(map_encoder_kwargs or {}),
+            )
+
+        # Map BEV fusion: combines image BEV features with map features
         self.MapBEVFusion = build_map_bev_fusion(
             map_fusion_mode,
             embed_dim=embed_dim,
@@ -110,10 +128,15 @@ class AutoE2E(nn.Module):
         image_bev = self.FeatureFusion(features, B, V, camera_params=camera_params)
 
         # --- Map branch ---
-        map_bev = self.MapEncoder(map_input)
-
-        # --- Fuse image BEV + map BEV ---
-        fused_features = self.MapBEVFusion(image_bev, map_bev)
+        # In osm_vector mode, map_input is the ragged osm_map_data dict and the
+        # encoder returns (tokens, key_padding_mask) which the BEV cross-attends
+        # to. Otherwise map_input is a rendered map image -> spatial map BEV.
+        if self._osm_vector_mode:
+            osm_tokens, osm_key_padding_mask = self.MapEncoder(map_input)
+            fused_features = self.MapBEVFusion(image_bev, osm_tokens, osm_key_padding_mask)
+        else:
+            map_bev = self.MapEncoder(map_input)
+            fused_features = self.MapBEVFusion(image_bev, map_bev)
 
         if mode == "train":
             if trajectory_target is None:

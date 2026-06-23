@@ -68,10 +68,17 @@ class L2DDataset(Dataset):
         episodes: list[int] | None = None,
         backbone_name: str = "swinv2_tiny_window8_256",
         local_files_only: bool = False,
+        osm_cache_dir: str | None = None,
     ) -> None:
         from lerobot.common.datasets.lerobot_dataset import LeRobotDataset
 
         self.repo_id = repo_id
+        # When set, per-episode tokenised OSM shards (built offline via
+        # data_parsing.osm_sd_map.cache.build_episode_osm_cache) are merged into
+        # each sample as osm_map_* keys for the OSM vector encoder. When None,
+        # samples are unchanged (existing behaviour).
+        self.osm_cache_dir = osm_cache_dir
+        self._osm_shard_cache: tuple[int | None, dict | None] = (None, None)
 
         self.lerobot_dataset = LeRobotDataset(
             repo_id=repo_id,
@@ -162,7 +169,7 @@ class L2DDataset(Dataset):
 
         visual_history = torch.zeros(_VISUAL_HISTORY_DIM, dtype=torch.float32)
 
-        return L2DSample(
+        sample = L2DSample(
             visual_tiles=visual_tiles,
             egomotion_history=egomotion_history,
             visual_history=visual_history,
@@ -170,3 +177,41 @@ class L2DDataset(Dataset):
             episode_index=ep_idx,
             frame_index=local_frame_idx,
         )
+
+        if self.osm_cache_dir is not None:
+            osm_sample = self._load_osm_sample(ep_idx, local_frame_idx)
+            if osm_sample is not None:
+                # Merge osm_map_* keys; collate_osm_batch groups them per batch.
+                sample.update(osm_sample)
+
+        return sample
+
+    def _load_osm_sample(self, ep_idx: int, local_frame_idx: int):
+        """Load one frame's tokenised OSM data from the per-episode shard cache."""
+        from data_parsing.osm_sd_map.cache import load_episode_osm_cache
+
+        cached_ep, shard = self._osm_shard_cache
+        if cached_ep != ep_idx:
+            shard = load_episode_osm_cache(self.osm_cache_dir, ep_idx)
+            self._osm_shard_cache = (ep_idx, shard)
+        if shard is None:
+            return None
+        return shard.get(local_frame_idx)
+
+    def episode_ego_poses(self, ep_idx: int) -> list[tuple[int, float, float, float]]:
+        """Per-valid-frame ``(local_frame_idx, lat, lon, heading)`` for OSM caching.
+
+        Feed the result to ``osm_sd_map.cache.build_episode_osm_cache``. Uses
+        the vehicle state columns ``[1]=heading, [3]=lat, [4]=lon``.
+        """
+        episode_data_index = self.lerobot_dataset.episode_data_index
+        ep_start = episode_data_index["from"][ep_idx].item()
+
+        poses = []
+        for sample_ep_idx, global_frame_idx in self._samples:
+            if sample_ep_idx != ep_idx:
+                continue
+            local_frame_idx = global_frame_idx - ep_start
+            state = self.lerobot_dataset[global_frame_idx]["observation.state.vehicle"].numpy()
+            poses.append((local_frame_idx, float(state[3]), float(state[4]), float(state[1])))
+        return poses

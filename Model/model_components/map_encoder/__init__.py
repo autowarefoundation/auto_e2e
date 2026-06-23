@@ -1,9 +1,11 @@
 import torch.nn as nn
 from .raster_map_encoder import RasterizedMapEncoder
+from .osm_vector import OSMVectorMapEncoder
 from .map_bev_fusion import MAP_FUSION_REGISTRY, build_map_bev_fusion
 
 MAP_ENCODER_REGISTRY = {
     "rasterized": RasterizedMapEncoder,
+    "osm_vector": OSMVectorMapEncoder,
 }
 
 
@@ -31,4 +33,5 @@ __all__ = [
     "build_map_encoder",
     "build_map_bev_fusion",
     "RasterizedMapEncoder",
+    "OSMVectorMapEncoder",
 ]

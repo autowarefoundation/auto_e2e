@@ -34,4 +34,20 @@ trajectory, ego_hidden, future_visual_features = model(
 **To learn the driving policy:**
 - Imitation Learning is used to penalize trajectory prediction as well as World Model Simulation based Reinforcement Learning
 
+## Map priors
+
+Two interchangeable map-branch flavours feed road-network priors into the BEV:
+
+- **`map_type="rasterized"`** (default): a rendered nav-map image is encoded to a
+  spatial map BEV and fused with the camera BEV (`map_fusion_mode="residual"` or
+  `"cross_attn"`). See [data_parsing/map_rendering](./data_parsing/map_rendering).
+- **`map_type="osm_vector"`**: OpenStreetMap SD-map elements are encoded as
+  **text-annotated vector tokens** (ported from
+  [SDTagNet](https://arxiv.org/abs/2506.08997)) and the camera BEV
+  cross-attends to them (`map_fusion_mode="osm_cross_attn"`). This keeps arbitrary
+  OSM semantics (lane counts, surface, turn restrictions, ...) without a fixed
+  class taxonomy. See [data_parsing/osm_sd_map](./data_parsing/osm_sd_map) for the
+  offline pipeline and [model_components/map_encoder/osm_vector](./model_components/map_encoder/osm_vector)
+  for the encoder. Both branches share one on-disk OSM cache.
+
 
