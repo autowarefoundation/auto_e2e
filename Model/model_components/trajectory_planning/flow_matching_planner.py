@@ -310,29 +310,3 @@ class FlowMatchingPlanner(BasePlanner):
             v = self._v_theta(x, t, bev_seq, mod_cond)
             x = x + dt * v
         return x
-
-    def compute_planner_loss(self, bev_features, visual_history,
-                             egomotion_history, trajectory_target):
-        """Flow-matching MSE between predicted and target conditional velocity.
-
-        Samples (u_t, t, target_velocity) from ``construct_training_data``
-        and computes ``F.mse_loss(v_theta(u_t, t, c), target_velocity)``.
-        The raw predicted velocity never leaves this method, so the caller
-        cannot accidentally MSE it against a trajectory target.
-
-        Returns ``(loss)`` as required by ``BasePlanner``.
-        """
-        self._validate_inputs(visual_history, egomotion_history)
-        B = bev_features.shape[0]
-        self._validate_trajectory_target(
-            trajectory_target, B, bev_features.device,
-        )
-
-        u_t, t, target_velocity = self.construct_training_data(trajectory_target)
-
-        mod_cond = self._modulation_conditioning(visual_history, egomotion_history)
-        bev_seq = self._project_bev(bev_features)
-
-        velocity_pred = self._v_theta(u_t, t, bev_seq, mod_cond)
-        loss = F.mse_loss(velocity_pred, target_velocity)
-        return loss

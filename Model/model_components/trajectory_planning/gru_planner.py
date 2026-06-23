@@ -161,25 +161,3 @@ class GRUPlanner(BasePlanner):
         trajectory = torch.cat(waypoints, dim=1)                           # [B, T*S]
         return trajectory
 
-    def compute_planner_loss(self, bev_features, visual_history,
-                             egomotion_history, trajectory_target):
-        """Imitation MSE between the GRU rollout and ``trajectory_target``.
-
-        Returns ``(loss, ego_hidden)`` as required by ``BasePlanner``. The
-        loss is the planner's training objective; ``ego_hidden`` is the
-        same context vector ``forward()`` produces, so AutoE2E can still
-        feed FutureState in train mode without a second rollout.
-        """
-        B = bev_features.shape[0]
-        expected = (B, self.trajectory_dim)
-        if tuple(trajectory_target.shape) != expected:
-            raise ValueError(
-                f"trajectory_target must have shape {expected} "
-                f"(batch_size, num_timesteps * num_signals), got "
-                f"{tuple(trajectory_target.shape)}."
-            )
-        trajectory, ego_hidden = self(
-            bev_features, visual_history, egomotion_history,
-        )
-        loss = F.mse_loss(trajectory, trajectory_target)
-        return loss, ego_hidden
