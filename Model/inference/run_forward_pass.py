@@ -49,19 +49,16 @@ def main():
         # SWIN-V2-TINY
         run_forward_pass("swin_v2_tiny", "bezier", device)
         run_forward_pass("swin_v2_tiny", "flow_matching", device)
-        run_forward_pass("swin_v2_tiny", "gru", device)
       
 
         # CONVNEXT-V2-TINY
         run_forward_pass("conv_next_v2_tiny", "bezier",device)
         run_forward_pass("conv_next_v2_tiny", "flow_matching",device)
-        run_forward_pass("conv_next_v2_tiny",  "gru",device)
         
         # RESNET-50
         run_forward_pass("res_net_50", "bezier",device)
         run_forward_pass("res_net_50", "flow_matching",device)
-        run_forward_pass("res_net_50", "gru",device)
-       
+      
 
 
 if __name__ == "__main__":
