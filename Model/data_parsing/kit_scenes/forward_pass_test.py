@@ -105,7 +105,6 @@ def test_bev_infer_mode(
     torch.cuda.empty_cache()
     model = AutoE2E(
         is_pretrained=pretrained_backbone,
-        fusion_mode="bev",
     ).to(device)
 
     t0 = time.time()
@@ -136,7 +135,6 @@ def test_bev_train_mode(
     torch.cuda.empty_cache()
     model = AutoE2E(
         is_pretrained=pretrained_backbone,
-        fusion_mode="bev",
     ).to(device)
 
     t0 = time.time()
