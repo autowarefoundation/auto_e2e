@@ -1,6 +1,6 @@
 # AutoE2E Flyte Pipeline — Tasks & Usage Guide
 
-Detailed reference for every Flyte task and workflow in `platform/pipelines/workflows.py`.
+Detailed reference for every Flyte task and workflow in `Platform/pipelines/workflows.py`.
 
 - **Flyte Console**: https://d1fk8c95f6ice9.cloudfront.net/console (Cognito auth)
 - **MLflow UI**: https://d33520viyb0smg.cloudfront.net/ (no auth)
