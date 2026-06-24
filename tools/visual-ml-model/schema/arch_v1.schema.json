@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://github.com/riita10069/visual-ml-model/schema/arch_v1.schema.json",
+  "$id": "https://github.com/autowarefoundation/auto_e2e/tools/visual-ml-model/schema/arch_v1.schema.json",
   "title": "VisualMLModel Architecture-Diagram IR v1.0",
   "description": "A GENERAL left-to-right node+edge graph that mimics a hand-drawn paper/README architecture figure: inputs on the LEFT, outputs/losses on the RIGHT, with branching, merging, dashed loss/auxiliary edges, and grouping banners (e.g. 'ONLY DURING TRAINING'). Unlike flow_v1 (an ordered LINEAR spine), this is an explicit directed graph laid out automatically into left-to-right layers. Rendered as a deterministic dependency-free inline SVG. NOTE: nodes/edges/groups are TOP-LEVEL (no 'graph' key) so this never collides with the ir_v1 structural validator.",
   "type": "object",
