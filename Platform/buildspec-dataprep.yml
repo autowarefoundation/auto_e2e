@@ -13,7 +13,7 @@ phases:
   build:
     commands:
       - echo "=== Building data-prep image ==="
-      - docker build -t ${ECR_URL}/auto-e2e/data-prep:latest -f platform/docker/data-prep/Dockerfile .
+      - docker build -t ${ECR_URL}/auto-e2e/data-prep:latest -f Platform/docker/data-prep/Dockerfile .
       - docker push ${ECR_URL}/auto-e2e/data-prep:latest
 
 cache:
