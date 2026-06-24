@@ -40,7 +40,8 @@ args as a JSON config — and you can **pick which registry variant** to draw.
 
 ```bash
 # Python 3.11+. No third-party Python dependencies (validator + renderer are stdlib only).
-git clone git@github.com:riita10069/visual-ml-model.git && cd visual-ml-model
+# This tool ships inside the auto_e2e repo:
+cd tools/visual-ml-model
 
 # The architecture-extraction step needs the `claude` CLI (Claude Code) on your PATH:
 claude --version
