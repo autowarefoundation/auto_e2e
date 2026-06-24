@@ -93,7 +93,7 @@ resource "aws_codebuild_project" "images" {
   source {
     type      = "S3"
     location  = "${aws_s3_bucket.cache.bucket}/source.zip"
-    buildspec = "platform/buildspec.yml"
+    buildspec = "Platform/buildspec.yml"
   }
 
   logs_config {
@@ -164,7 +164,7 @@ resource "aws_codebuild_project" "flyte_register" {
   source {
     type      = "S3"
     location  = "${aws_s3_bucket.cache.bucket}/source.zip"
-    buildspec = "platform/buildspec-register.yml"
+    buildspec = "Platform/buildspec-register.yml"
   }
 
   vpc_config {
