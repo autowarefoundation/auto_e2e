@@ -79,10 +79,10 @@ cd ../../..
 "$CONTAINER_CLI" build \
   --platform linux/amd64 \
   --output type=image,name="${ECR_URL}/auto-e2e/training:latest",push=true \
-  -f platform/docker/training/Dockerfile .
+  -f Platform/docker/training/Dockerfile .
 
 echo "=== 8. Register Flyte workflows ==="
-cd platform/pipelines
+cd Platform/pipelines
 pip install flytekit flytekitplugins-kfpytorch 2>/dev/null || true
 export AWS_ACCOUNT_ID="$ACCOUNT"
 export AWS_REGION="$REGION"
