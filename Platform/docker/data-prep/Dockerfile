@@ -24,7 +24,7 @@ RUN pip install --no-cache-dir \
     boto3
 
 COPY Model/ /workspace/Model/
-COPY platform/pipelines/ /workspace/platform/pipelines/
+COPY Platform/pipelines/ /workspace/Platform/pipelines/
 
 ENV PYTHONPATH=/workspace/Model:/workspace
 ENV PYTHONUNBUFFERED=1
