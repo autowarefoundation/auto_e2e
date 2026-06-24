@@ -26,4 +26,4 @@ phases:
         --project $FLYTE_PROJECT
         --domain $FLYTE_DOMAIN
         --image ${ECR_URL}/auto-e2e/training:latest
-        platform/pipelines/workflows.py
+        Platform/pipelines/workflows.py
