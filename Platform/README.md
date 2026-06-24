@@ -162,7 +162,7 @@ All stages log experiments/runs/artifacts to MLflow.
 
 ## Infrastructure (Terraform)
 
-All resources managed by Terraform under `platform/infra/`. No hardcoded account IDs.
+All resources managed by Terraform under `Platform/infra/`. No hardcoded account IDs.
 
 ### Modules
 
@@ -182,7 +182,7 @@ All resources managed by Terraform under `platform/infra/`. No hardcoded account
 ### Deploy
 
 ```bash
-cd platform/infra
+cd Platform/infra
 cp environments/dev/secrets.auto.tfvars.example environments/dev/secrets.auto.tfvars
 # Edit secrets.auto.tfvars with actual values
 
@@ -194,13 +194,13 @@ terraform apply -var-file=environments/dev/terraform.tfvars \
 aws eks update-kubeconfig --name auto-e2e-platform --region us-west-2 --profile autowarefoundation
 
 # GPU NodePool
-kubectl apply -f platform/k8s/gpu-nodepool.yaml
+kubectl apply -f Platform/k8s/gpu-nodepool.yaml
 
 # Kueue config
-kubectl apply -f platform/k8s/kueue-config.yaml
+kubectl apply -f Platform/k8s/kueue-config.yaml
 
 # Flyte S3 patch (required after every terraform apply)
-./platform/infra/post-apply-phase2.sh
+./Platform/infra/post-apply-phase2.sh
 ```
 
 ### Cross-Account Migration
@@ -216,7 +216,7 @@ kubectl apply -f platform/k8s/kueue-config.yaml
 ## Directory Structure
 
 ```
-platform/
+Platform/
 ├── infra/                          Terraform
 │   ├── modules/
 │   │   ├── vpc/
