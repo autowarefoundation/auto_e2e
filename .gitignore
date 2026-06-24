@@ -18,7 +18,7 @@ ec2-sync-and-push.sh
 # Committed template: *.tfvars.example. Real values stay local / in CI secrets.
 *.auto.tfvars
 secrets.auto.tfvars
-platform/infra/environments/*/secrets.auto.tfvars
+Platform/infra/environments/*/secrets.auto.tfvars
 
 # Environment file holding account IDs, ODCR IDs, profile names, etc.
 # Committed template: .env.example. Real values never committed.
