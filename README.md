@@ -87,6 +87,34 @@ To learn more about how to participate in this project, please read the [onboard
 
 </details>
 
+### NVIDIA GeForce RTX 4070 GPU 
+<details open>
+  <summary>Toggle view</summary>
+  
+| Backbone | Fusion Method | FPS | Average Latency [ms] | Worst-Case Latency [ms] | Latency Jitter [ms] | Peak VRAM Allocated [MB] | Peak VRAM Reserved [MB] |
+| -------- | ------------- | --- | --------------- | ------------------ | -------------- | ------------------- | ------------------ |
+| swin_v2_tiny | concat | 1 | 50.7 | 19.7 | 20.0 | 0.3 | 307 | 35.3M |
+| swin_v2_tiny | concat | 2 | 27.3 | 36.7 | 37.4 | 0.8 | 472 | 35.3M |
+| swin_v2_tiny | concat | 4 | 14.1 | 71.1 | 71.5 | 0.3 | 796 | 35.3M |
+| swin_v2_tiny | cross_attn | 1 | 49.7 | 20.1 | 20.5 | 0.4 | 310 | 35.3M |
+| swin_v2_tiny | cross_attn | 2 | 26.9 | 37.2 | 37.5 | 0.3 | 472 | 35.3M |
+| swin_v2_tiny | cross_attn | 4 | 14.1 | 71.1 | 71.4 | 0.3 | 796 | 35.3M |
+| swin_v2_tiny | bev | 1 | 9.3 | 107.1 | 107.5 | 0.5 | 1819 | 69.7M |
+| swin_v2_tiny | bev | 2 | 4.7 | 215.3 | 216.4 | 1.1 | 3353 | 69.7M |
+| swin_v2_tiny | bev | 4 | 2.3 | 427.0 | 429.6 | 2.7 | 6420 | 69.7M |
+| conv_next_v2_tiny | concat | 1 | 49.0 | 20.4 | 20.6 | 0.2 | 333 | 35.6M |
+| conv_next_v2_tiny | concat | 2 | 26.2 | 38.1 | 38.3 | 0.2 | 519 | 35.6M |
+| conv_next_v2_tiny | concat | 4 | 13.6 | 73.8 | 74.0 | 0.3 | 891 | 35.6M |
+| conv_next_v2_tiny | cross_attn | 1 | 48.6 | 20.6 | 20.6 | 0.1 | 332 | 35.6M |
+| conv_next_v2_tiny | cross_attn | 2 | 26.1 | 38.3 | 38.5 | 0.2 | 518 | 35.6M |
+| conv_next_v2_tiny | cross_attn | 4 | 13.5 | 74.1 | 74.3 | 0.2 | 890 | 35.6M |
+| conv_next_v2_tiny | bev | 1 | 9.3 | 107.1 | 107.5 | 0.3 | 1819 | 70.0M |
+| conv_next_v2_tiny | bev | 2 | 4.6 | 215.8 | 216.9 | 1.1 | 3350 | 70.0M |
+| conv_next_v2_tiny | bev | 4 | 2.3 | 429.9 | 431.2 | 1.2 | 6418 | 70.0M |
+
+</details>
+
+
 ### Add benchmarks for your own GPU .... 
 
 To obtain benchmarks for your GPU, simply run the [benchmarking script](https://github.com/autowarefoundation/auto_e2e/tree/main/Model/speed_benchmark). There, you can also read more about the meaning of benchmark parameters.
