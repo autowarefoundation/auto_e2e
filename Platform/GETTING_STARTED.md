@@ -26,7 +26,7 @@ This runs: Data Ingest → IL Training → Evaluation → Offline RL
 
 ### 1. Modify Model or Pipeline
 
-Edit `platform/pipelines/workflows.py`. Each `@task` contains the full logic:
+Edit `Platform/pipelines/workflows.py`. Each `@task` contains the full logic:
 
 ```python
 @task(container_image=TRAINING_IMAGE, requests=Resources(gpu="1"))
