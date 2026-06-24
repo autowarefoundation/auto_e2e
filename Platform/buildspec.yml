@@ -13,19 +13,19 @@ phases:
   build:
     commands:
       - echo "=== Building training image ==="
-      - docker build -t ${ECR_URL}/auto-e2e/training:latest -f platform/docker/training/Dockerfile .
+      - docker build -t ${ECR_URL}/auto-e2e/training:latest -f Platform/docker/training/Dockerfile .
       - docker push ${ECR_URL}/auto-e2e/training:latest
 
       - echo "=== Building eval image ==="
-      - docker build -t ${ECR_URL}/auto-e2e/eval:latest -f platform/docker/eval/Dockerfile .
+      - docker build -t ${ECR_URL}/auto-e2e/eval:latest -f Platform/docker/eval/Dockerfile .
       - docker push ${ECR_URL}/auto-e2e/eval:latest
 
       - echo "=== Building offline-rl image ==="
-      - docker build -t ${ECR_URL}/auto-e2e/offline-rl:latest -f platform/docker/offline-rl/Dockerfile .
+      - docker build -t ${ECR_URL}/auto-e2e/offline-rl:latest -f Platform/docker/offline-rl/Dockerfile .
       - docker push ${ECR_URL}/auto-e2e/offline-rl:latest
 
       - echo "=== Building data-prep image ==="
-      - docker build -t ${ECR_URL}/auto-e2e/data-prep:latest -f platform/docker/data-prep/Dockerfile .
+      - docker build -t ${ECR_URL}/auto-e2e/data-prep:latest -f Platform/docker/data-prep/Dockerfile .
       - docker push ${ECR_URL}/auto-e2e/data-prep:latest
 
 cache:
