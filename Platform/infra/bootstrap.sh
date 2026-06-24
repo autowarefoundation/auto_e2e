@@ -43,4 +43,4 @@ aws dynamodb create-table \
   --region "$REGION" \
   --profile "$PROFILE" 2>/dev/null || echo "Table already exists"
 
-echo "Done. Run: cd platform/infra && terraform init -var-file=environments/dev/terraform.tfvars"
+echo "Done. Run: cd Platform/infra && terraform init -var-file=environments/dev/terraform.tfvars"
