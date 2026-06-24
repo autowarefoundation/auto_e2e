@@ -1,0 +1,9 @@
+__pycache__/
+*.pyc
+.DS_Store
+chrome.log
+
+# generated figures (the .arch.json IR sources are kept; regenerate HTML/PNG with
+# `viz_ml arch`). docs/ keeps the curated screenshots.
+examples/**/*.html
+examples/**/*.png

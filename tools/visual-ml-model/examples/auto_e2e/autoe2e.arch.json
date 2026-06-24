@@ -1,0 +1,49 @@
+{
+  "arch_version": "1.0",
+  "model_name": "AutoE2E",
+  "arch_family": "multi-camera -> view fusion -> trajectory planner + future-state aux (camera-only end-to-end driving)",
+  "config_assumptions": { "num_views": 8, "embed_dim": 256, "fusion_mode": "concat", "num_timesteps": 64, "mode": "train" },
+  "global_confidence": 0.78,
+  "notes": "Hand-authored to mirror the official AutoE2E architecture figure. Loss/learning nodes inferred from the training-time outputs (confidence < 0.6) since the loss code lives outside the model module.",
+  "nodes": [
+    { "id": "cams", "title": "7 cameras + 1 Map Tile", "role": "input", "shape": "(8,3,224,224)", "desc": "8 surround-view camera frames (incl. a rendered map tile)" },
+    { "id": "ego", "title": "Egomotion history", "role": "input", "shape": "(256)", "desc": "6.4s past motion: speed, accel, yaw, yaw-rate at 10Hz" },
+    { "id": "vhist", "title": "Visual scene history", "role": "input", "shape": "(896)", "desc": "buffered compressed scene features over the past 6.4s" },
+    { "id": "backbone", "title": "Backbone — SwinV2-Tiny", "role": "backbone", "shape": "(8,768,7,7)", "desc": "extract multi-scale visual features per camera" },
+    { "id": "fusion", "title": "Feature Fusion", "role": "fusion", "shape": "(8,1440,7,7)", "desc": "combine multi-scale features into a single fused feature map" },
+    { "id": "concat", "title": "Concat inputs", "role": "merge_add", "shape": "(2328)", "desc": "flatten fused features + egomotion + visual history into one vector" },
+    { "id": "policy", "title": "Driving Policy", "role": "policy", "shape": "(B,256)", "desc": "decode the future trajectory from current visual features, past visual features and egomotion history" },
+    { "id": "traj", "title": "Future Trajectory Prediction", "role": "output", "shape": "(128)", "desc": "tuple of future acceleration + curvature over a 6.4s horizon at 10Hz" },
+    { "id": "compressed", "title": "Compressed Visual Scene Representation", "role": "buffer", "shape": "(14)", "desc": "a compact feature representation of the current visual scene" }
+,
+    { "id": "future", "title": "Future Visual State", "role": "future_state", "shape": "(8,1440,7,7)", "train_only": true, "desc": "predict the future feature state at 1.6s intervals over a 6.4s horizon (4 predictions)" },
+    { "id": "predfeat", "title": "Predicted future features", "role": "prediction", "shape": "4x(8,1440,7,7)", "train_only": true, "desc": "future visual feature at 1.6s / 3.2s / 4.8s / 6.4s" },
+    { "id": "truefeat", "title": "True future features", "role": "buffer", "shape": "4x(8,1440,7,7)", "train_only": true, "desc": "recorded relative future camera frames + map state at the 4 horizons (frozen SwinV2-Tiny)" },
+    { "id": "il", "title": "Imitation Learning", "role": "learning_method", "shape": null, "train_only": true, "desc": "ground-truth human driving" },
+    { "id": "rl", "title": "Reinforcement Learning", "role": "learning_method", "shape": null, "train_only": true, "desc": "world-model simulation" },
+    { "id": "featloss", "title": "Feature Loss", "role": "loss", "shape": null, "train_only": true },
+    { "id": "trajloss", "title": "Trajectory Loss", "role": "loss", "shape": null, "train_only": true }
+  ],
+  "edges": [
+    { "from": "cams", "to": "backbone", "kind": "dataflow" },
+    { "from": "backbone", "to": "fusion", "kind": "dataflow", "label": "multi-scale" },
+    { "from": "fusion", "to": "concat", "kind": "dataflow", "label": "fused (8,1440,7,7) -> 1176" },
+    { "from": "ego", "to": "concat", "kind": "dataflow" },
+    { "from": "vhist", "to": "concat", "kind": "dataflow" },
+    { "from": "concat", "to": "policy", "kind": "dataflow" },
+    { "from": "policy", "to": "traj", "kind": "dataflow" },
+    { "from": "policy", "to": "compressed", "kind": "dataflow" },
+    { "from": "compressed", "to": "vhist", "kind": "feedback", "label": "into scene-history buffer" },
+    { "from": "fusion", "to": "future", "kind": "skip", "label": "fused features" },
+    { "from": "policy", "to": "future", "kind": "feedback", "label": "ego_hidden" },
+    { "from": "future", "to": "predfeat", "kind": "dataflow" },
+    { "from": "predfeat", "to": "featloss", "kind": "loss" },
+    { "from": "truefeat", "to": "featloss", "kind": "loss", "label": "target" },
+    { "from": "traj", "to": "trajloss", "kind": "loss" },
+    { "from": "il", "to": "trajloss", "kind": "loss" },
+    { "from": "rl", "to": "trajloss", "kind": "loss" }
+  ],
+  "groups": [
+    { "id": "train", "label": "ONLY DURING TRAINING" }
+  ]
+}
