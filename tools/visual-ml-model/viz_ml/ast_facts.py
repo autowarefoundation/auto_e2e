@@ -183,7 +183,6 @@ def _extract_forward(cls: ast.ClassDef, source: str, facts: ClassFacts) -> None:
         elif isinstance(stmt, ast.Return) and stmt.value is not None:
             targets = ["<return>"]
 
-        value_node = getattr(stmt, "value", stmt)
         calls = _calls_in(stmt)
         # keep only self.* calls (the semantically meaningful submodule invocations) +
         # functional calls (F.*, torch.*) which the LLM may need
