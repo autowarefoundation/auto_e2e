@@ -515,12 +515,14 @@ def render_arch_svg(arch: dict[str, Any]) -> tuple[str, int, int, list[str]]:
 
     def out_port(nid, e):
         lst = sorted(out_edges.get(nid, []), key=lambda ee: y_top.get(ee["to"], 0))
-        k = lst.index(e); K = len(lst)
+        k = lst.index(e)
+        K = len(lst)
         return cx_right(nid), y_top[nid] + heights[nid] * (k + 1) / (K + 1)
 
     def in_port(nid, e):
         lst = sorted(in_edges.get(nid, []), key=lambda ee: y_top.get(ee["from"], 0))
-        k = lst.index(e); K = len(lst)
+        k = lst.index(e)
+        K = len(lst)
         return cx_left(nid), y_top[nid] + heights[nid] * (k + 1) / (K + 1)
 
     # ---- group banners (drawn first, behind everything) ----
@@ -668,7 +670,8 @@ def _legend(arch: dict[str, Any]) -> str:
     for n in arch.get("nodes", []):
         r = n.get("role", "other")
         if r not in seen:
-            seen.add(r); used_roles.append(r)
+            seen.add(r)
+            used_roles.append(r)
     rows = []
     for r in used_roles:
         _f, stroke = _node_color(r)
