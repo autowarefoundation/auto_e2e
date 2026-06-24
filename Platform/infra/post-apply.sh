@@ -39,10 +39,10 @@ cd ../../..
 "$CONTAINER_CLI" build \
   --platform linux/amd64 \
   --output type=image,name="${ECR_URL}/auto-e2e/training:latest",push=true \
-  -f platform/docker/training/Dockerfile .
+  -f Platform/docker/training/Dockerfile .
 
 echo "=== 6. Run GPU smoke test Pod ==="
-cd platform/k8s
+cd Platform/k8s
 sed "s|REPLACE_WITH_ECR_URL|${ECR_URL}|g" gpu-smoke-test.yaml | kubectl apply -f -
 kubectl wait --for=condition=Ready pod/train-smoke-test --timeout=300s 2>/dev/null || true
 kubectl logs -f train-smoke-test
