@@ -95,10 +95,13 @@ class AutoE2E(nn.Module):
         #   return trajectory  /  trajectory, future_state_pred   (infer / train)
         future_state_pred = None
         if self.World_Action_Model_E2E is not None:
-            visual_embedding, future_state_pred = self.World_Action_Model_E2E(
-                camera_tiles, self.visual_history_buffer.visual_history())
+            wam = self.World_Action_Model_E2E
+            # aggregate the FIFO into the visual_history (concat-FIFO default, or
+            # the opt-in temporal attention-pool); same 896 interface either way.
+            vh_prev = wam.aggregate_history(self.visual_history_buffer.visual_history())
+            visual_embedding, future_state_pred = wam(camera_tiles, vh_prev)
             self.visual_history_buffer.push(visual_embedding)
-            visual_history = self.visual_history_buffer.visual_history()
+            visual_history = wam.aggregate_history(self.visual_history_buffer.visual_history())
 
         trajectory = self.Reactive_E2E(camera_tiles, map_input, visual_history, egomotion_history,
         camera_params=camera_params, mode=mode, trajectory_target=trajectory_target, **kwargs)

@@ -10,8 +10,11 @@ computed separately via ``jepa_loss``.
 import torch
 import torch.nn as nn
 
+import pytest
+
 from model_components.world_action_model import (
     FrameEncoder,
+    HistoryAttentionPool,
     RollingHistoryBuffer,
     WorldActionModel,
 )
@@ -201,3 +204,77 @@ class TestAutoE2EWorldModelWiring:
         cam, mp, vh, ego = self._inputs(device)
         out = m(cam, mp, vh, ego, mode="infer")
         assert not (isinstance(out, tuple) and len(out) == 2 and isinstance(out[1], list))
+
+
+class TestHistoryAttentionPool:
+    """Opt-in temporal attention-pool (T3 reused) as the World Model history
+    aggregator — a drop-in for the concat-FIFO with the same 896 interface."""
+
+    def test_pool_shape_is_drop_in(self, device):
+        pool = HistoryAttentionPool(frame_embed_dim=224, history_len=4).to(device)
+        out = pool(torch.randn(2, 896, device=device))
+        assert out.shape == (2, 896)
+
+    def test_concat_aggregator_is_identity(self, device):
+        m = _wam(device)  # default history_aggregator="concat"
+        assert m.history_pool is None
+        x = torch.randn(2, 896, device=device)
+        assert torch.equal(m.aggregate_history(x), x)
+        assert m.aggregate_history(None) is None
+
+    def test_attention_aggregator_transforms_and_grads(self, device):
+        m = _wam(device, history_aggregator="attention")
+        assert m.history_pool is not None
+        x = torch.randn(2, 896, device=device)
+        agg = m.aggregate_history(x)
+        assert agg.shape == (2, 896)                       # drop-in
+        assert not torch.allclose(agg, x)                  # learned, not identity
+        agg.pow(2).mean().backward()
+        assert any(p.grad is not None for p in m.history_pool.parameters())
+
+    def test_attention_aggregator_feeds_future_predictor(self, device):
+        """The aggregated history is a valid visual_history for predict_future."""
+        m = _wam(device, history_aggregator="attention")
+        vh = m.aggregate_history(torch.randn(2, 896, device=device))
+        emb, future = m(_frame(2, device), visual_history=vh)
+        assert emb.shape == (2, 224) and len(future) == 4
+
+    def test_invalid_aggregator_raises(self, device):
+        with pytest.raises(ValueError, match="history_aggregator"):
+            _wam(device, history_aggregator="gru")
+
+
+class TestAutoE2EWorldModelAttentionPool:
+    """AutoE2E end-to-end with the opt-in attention-pool history aggregator."""
+
+    def _build(self, device):
+        from unittest.mock import patch
+        from model_components.auto_e2e import AutoE2E
+        with patch("model_components.reactive_e2e.Backbone", _MockBackbone4):
+            return AutoE2E(num_views=6, view_fusion_kwargs={"bev_h": 8, "bev_w": 8},
+                           enable_world_model=True,
+                           world_model_kwargs={"feature_channels": 768,
+                                               "history_aggregator": "attention"}).to(device)
+
+    def _inputs(self, device):
+        return (torch.randn(2, 6, 3, 256, 256, device=device),
+                torch.randn(2, 3, 256, 256, device=device),
+                torch.zeros(2, 896, device=device),
+                torch.randn(2, 256, device=device))
+
+    def test_pool_is_built(self, device):
+        m = self._build(device)
+        assert m.World_Action_Model_E2E.history_pool is not None
+
+    def test_infer_and_train_contract(self, device):
+        m = self._build(device)
+        cam, mp, vh, ego = self._inputs(device)
+        m.reset_visual_history()
+        traj = m(cam, mp, vh, ego, mode="infer")
+        traj0 = traj[0] if isinstance(traj, tuple) else traj
+        assert traj0.shape == (2, 128)
+        m.reset_visual_history()
+        m(cam, mp, vh, ego, mode="train", trajectory_target=torch.randn(2, 128, device=device))
+        out = m(cam, mp, vh, ego, mode="train", trajectory_target=torch.randn(2, 128, device=device))
+        assert isinstance(out, tuple) and len(out) == 2
+        assert out[1] is not None and len(out[1]) == 4

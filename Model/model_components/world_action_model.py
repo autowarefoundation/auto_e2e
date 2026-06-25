@@ -83,6 +83,42 @@ class RollingHistoryBuffer:
         return torch.cat(pad + self._buf, dim=1)
 
 
+class HistoryAttentionPool(nn.Module):
+    """Opt-in learnable temporal aggregator for the World Model history — the
+    "temporal attention-pool" alternative to the equal-weight concat-FIFO.
+
+    Adapted from the BEV-queue temporal self-attention (T3 / #87): a single
+    learnable query attends over the ``history_len`` frame embeddings plus
+    learned temporal positional embeddings (recency-aware), so frames are
+    weighted by relevance instead of equally. The pooled per-frame vector is
+    projected back to ``history_len * frame_embed_dim`` so it is a drop-in for
+    the concat-FIFO interface (same ``visual_history_dim`` output, e.g. 896).
+    """
+
+    def __init__(self, frame_embed_dim: int = 224, history_len: int = 4,
+                 num_heads: int = 4):
+        super().__init__()
+        self.history_len = history_len
+        self.frame_embed_dim = frame_embed_dim
+        self.temporal_pos = nn.Parameter(
+            torch.randn(1, history_len, frame_embed_dim) * 0.02)
+        self.query = nn.Parameter(torch.randn(1, 1, frame_embed_dim) * 0.02)
+        self.attn = nn.MultiheadAttention(
+            frame_embed_dim, num_heads, batch_first=True)
+        self.norm = nn.LayerNorm(frame_embed_dim)
+        self.out = nn.Linear(frame_embed_dim, history_len * frame_embed_dim)
+
+    def forward(self, history_concat: torch.Tensor) -> torch.Tensor:
+        """``[B, history_len*frame_embed_dim]`` -> ``[B, history_len*frame_embed_dim]``."""
+        B = history_concat.shape[0]
+        tokens = history_concat.reshape(B, self.history_len, self.frame_embed_dim)
+        tokens = tokens + self.temporal_pos                 # recency-aware
+        q = self.query.expand(B, -1, -1)
+        pooled, _ = self.attn(q, tokens, tokens)            # [B, 1, embed]
+        pooled = self.norm(pooled.squeeze(1))               # [B, embed]
+        return self.out(pooled)                             # [B, history_len*embed]
+
+
 class WorldActionModel(nn.Module):
     """Slow world-model branch: history -> visual_history (+ future JEPA in train).
 
@@ -98,12 +134,25 @@ class WorldActionModel(nn.Module):
 
     def __init__(self, backbone: nn.Module, feature_channels: int = 768,
                  frame_embed_dim: int = 224, history_len: int = 4,
-                 num_future_steps: int = 4, loss_type: str = "l1"):
+                 num_future_steps: int = 4, loss_type: str = "l1",
+                 history_aggregator: str = "concat"):
         super().__init__()
+        if history_aggregator not in ("concat", "attention"):
+            raise ValueError(
+                f"Unknown history_aggregator {history_aggregator!r}. "
+                "Available: 'concat' (default), 'attention'.")
         self.history_len = history_len
         self.num_future_steps = num_future_steps
         self.frame_embed_dim = frame_embed_dim
         self.visual_history_dim = history_len * frame_embed_dim  # 4*224 = 896
+
+        # History aggregator: how the FIFO of frame embeddings becomes the
+        # visual_history fed to the planner. "concat" = equal-weight FIFO
+        # (default, byte-identical to before); "attention" = the opt-in
+        # learnable temporal attention-pool (recency-aware), reused from T3.
+        self.history_pool = (
+            HistoryAttentionPool(frame_embed_dim, history_len)
+            if history_aggregator == "attention" else None)
 
         # Online per-frame encoder (shared backbone, trainable).
         self.encoder = FrameEncoder(backbone, feature_channels, frame_embed_dim)
@@ -123,6 +172,17 @@ class WorldActionModel(nn.Module):
         T = history_frames.shape[1]
         embs = [self.encoder(history_frames[:, t]) for t in range(T)]
         return torch.cat(embs, dim=1)
+
+    def aggregate_history(self, history_concat):
+        """Turn the FIFO of frame embeddings into the visual_history vector.
+
+        ``concat`` mode returns the concatenation unchanged; ``attention`` mode
+        runs the learnable temporal attention-pool. Same ``[B, visual_history_dim]``
+        output either way (drop-in). Passes ``None`` through (empty buffer).
+        """
+        if history_concat is None or self.history_pool is None:
+            return history_concat
+        return self.history_pool(history_concat)
 
     def predict_future(self, visual_history: torch.Tensor) -> list:
         """``visual_history [B, history_len*frame_embed_dim]`` -> list of
