@@ -254,8 +254,8 @@ class TestAutoE2EMapIntegration:
         vis_hist = torch.randn(2, 896, device=device)
         ego = torch.randn(2, 256, device=device)
 
-        traj_zero, _, _ = model(visual, map_zero, vis_hist, ego, mode="infer")
-        traj_rand, _, _ = model(visual, map_rand, vis_hist, ego, mode="infer")
+        traj_zero = model(visual, map_zero, vis_hist, ego, mode="infer")
+        traj_rand = model(visual, map_rand, vis_hist, ego, mode="infer")
 
         assert torch.allclose(traj_zero, traj_rand, atol=1e-5), \
             "With alpha=0, different map inputs should produce identical trajectories"
@@ -265,14 +265,14 @@ class TestAutoE2EMapIntegration:
         model = self._make_model(build_mock_model, device, map_fusion_mode="residual")
         model.eval()
         with torch.no_grad():
-            model.MapBEVFusion.alpha.fill_(1.0)
+            model.Reactive_E2E.MapBEVFusion.alpha.fill_(1.0)
 
         visual = torch.randn(2, 7, 3, 256, 256, device=device)
         vis_hist = torch.randn(2, 896, device=device)
         ego = torch.randn(2, 256, device=device)
 
-        traj_a, _, _ = model(visual, torch.randn(2, 3, _MAP_H, _MAP_W, device=device), vis_hist, ego, mode="infer")
-        traj_b, _, _ = model(visual, torch.randn(2, 3, _MAP_H, _MAP_W, device=device), vis_hist, ego, mode="infer")
+        traj_a = model(visual, torch.randn(2, 3, _MAP_H, _MAP_W, device=device), vis_hist, ego, mode="infer")
+        traj_b = model(visual, torch.randn(2, 3, _MAP_H, _MAP_W, device=device), vis_hist, ego, mode="infer")
 
         assert not torch.allclose(traj_a, traj_b, atol=1e-5), \
             "With alpha=1, different map inputs should produce different trajectories"
@@ -285,12 +285,11 @@ class TestAutoE2EMapIntegration:
         map_input = torch.randn(2, 3, _MAP_H, _MAP_W, device=device)
         vis_hist = torch.randn(2, 896, device=device)
         ego = torch.randn(2, 256, device=device)
-        target = torch.randn(2, 128, device=device)
 
-        loss, ego_hidden, future = model(visual, map_input, vis_hist, ego, mode="train", trajectory_target=target)
-        (loss + ego_hidden.sum() + sum(f.sum() for f in future)).backward()
+        traj = model(visual, map_input, vis_hist, ego, mode="train")
+        traj.pow(2).mean().backward()
 
-        no_grad = [n for n, p in model.MapEncoder.named_parameters()
+        no_grad = [n for n, p in model.Reactive_E2E.MapEncoder.named_parameters()
                    if p.requires_grad and p.grad is None]
         assert not no_grad, f"MapEncoder params without grad: {no_grad}"
 
@@ -299,38 +298,36 @@ class TestAutoE2EMapIntegration:
         model = self._make_model(build_mock_model, device, map_fusion_mode="residual")
         model.train()
         with torch.no_grad():
-            model.MapBEVFusion.alpha.fill_(0.1)
+            model.Reactive_E2E.MapBEVFusion.alpha.fill_(0.1)
 
         visual = torch.randn(2, 7, 3, 256, 256, device=device)
         map_input = torch.randn(2, 3, _MAP_H, _MAP_W, device=device)
         vis_hist = torch.randn(2, 896, device=device)
         ego = torch.randn(2, 256, device=device)
-        target = torch.randn(2, 128, device=device)
 
-        loss, ego_hidden, future = model(visual, map_input, vis_hist, ego, mode="train", trajectory_target=target)
-        (loss + ego_hidden.sum() + sum(f.sum() for f in future)).backward()
+        traj = model(visual, map_input, vis_hist, ego, mode="train")
+        traj.pow(2).mean().backward()
 
-
-        assert model.MapBEVFusion.alpha.grad is not None, "alpha has no gradient"
-        assert model.MapBEVFusion.alpha.grad.abs().max() > 0, "alpha gradient is all-zero"
+        alpha = model.Reactive_E2E.MapBEVFusion.alpha
+        assert alpha.grad is not None, "alpha has no gradient"
+        assert alpha.grad.abs().max() > 0, "alpha gradient is all-zero"
 
     def test_map_encoder_receives_gradients_when_alpha_nonzero(self, build_mock_model, device):
         """Only for residual fusion: MapEncoder parameters must receive gradients once alpha is non-zero."""
         model = self._make_model(build_mock_model, device, map_fusion_mode="residual")
         model.train()
         with torch.no_grad():
-            model.MapBEVFusion.alpha.fill_(0.1)
+            model.Reactive_E2E.MapBEVFusion.alpha.fill_(0.1)
 
         visual = torch.randn(2, 7, 3, 256, 256, device=device)
         map_input = torch.randn(2, 3, _MAP_H, _MAP_W, device=device)
         vis_hist = torch.randn(2, 896, device=device)
         ego = torch.randn(2, 256, device=device)
-        target = torch.randn(2, 128, device=device)
 
-        loss, ego_hidden, future = model(visual, map_input, vis_hist, ego, mode="train", trajectory_target=target)
-        (loss + ego_hidden.sum() + sum(f.sum() for f in future)).backward()
+        traj = model(visual, map_input, vis_hist, ego, mode="train")
+        traj.pow(2).mean().backward()
 
-        no_grad = [n for n, p in model.MapEncoder.named_parameters()
+        no_grad = [n for n, p in model.Reactive_E2E.MapEncoder.named_parameters()
                 if p.requires_grad and p.grad is None]
         assert not no_grad, f"MapEncoder params without grad after alpha=0.1: {no_grad}"
 
@@ -340,15 +337,14 @@ class TestAutoE2EMapIntegration:
         map_input = torch.randn(2, 3, _MAP_H, _MAP_W, device=device)
         vis_hist = torch.randn(2, 896, device=device)
         ego = torch.randn(2, 256, device=device)
-        traj, ego_hidden, _ = model(visual, map_input, vis_hist, ego, mode="infer")
+        traj = model(visual, map_input, vis_hist, ego, mode="infer")
         assert traj.shape == (2, 128)
-        assert ego_hidden.shape == (2, 256)
         assert torch.isfinite(traj).all()
 
     def test_map_encoder_attribute_exists(self, build_mock_model, device):
         model = self._make_model(build_mock_model, device)
-        assert hasattr(model, "MapEncoder"), "AutoE2E missing MapEncoder attribute"
-        assert hasattr(model, "MapBEVFusion"), "AutoE2E missing MapBEVFusion attribute"
+        assert hasattr(model.Reactive_E2E, "MapEncoder"), "Reactive_E2E missing MapEncoder attribute"
+        assert hasattr(model.Reactive_E2E, "MapBEVFusion"), "Reactive_E2E missing MapBEVFusion attribute"
 
     def test_invalid_map_fusion_mode_raises(self, build_mock_model, device):
         with pytest.raises(ValueError, match="Unknown map_fusion_mode"):
