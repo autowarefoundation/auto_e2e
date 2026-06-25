@@ -114,28 +114,49 @@ class WorldActionModel(nn.Module):
         embs = [self.encoder(history_frames[:, t]) for t in range(T)]
         return torch.cat(embs, dim=1)
 
-    def forward(self, history_frames: torch.Tensor,
-                future_frames: torch.Tensor | None = None):
-        """Encode the history; in training also predict the future + JEPA loss.
+    def predict_future(self, visual_history: torch.Tensor) -> list:
+        """``visual_history [B, history_len*frame_embed_dim]`` -> list of
+        ``num_future_steps`` predicted future embeddings ``[B, frame_embed_dim]``."""
+        out = self.future_predictor(visual_history)
+        return list(torch.chunk(out, self.num_future_steps, dim=1))
+
+    def forward(self, frame: torch.Tensor,
+                visual_history: torch.Tensor | None = None):
+        """Per-tick (online) call, matching the AutoE2E wiring agreed 24/06:
+
+            visual_embedding, future_state_pred = WorldActionModel(frame, visual_history)
 
         Args:
-            history_frames: ``[B, history_len, 3, H, W]`` past frames at 1 Hz.
-            future_frames: ``[B, num_future_steps, 3, H, W]`` future frames
-                (training only).
+            frame: ``[B, 3, H, W]`` (or ``[B, V, 3, H, W]`` collapsed) current
+                1 Hz multi-camera frame.
+            visual_history: ``[B, history_len*frame_embed_dim]`` current circular
+                buffer (the Encoded Visual History) used to predict the future;
+                ``None`` at the very first ticks / pure inference.
 
         Returns:
-            inference: ``visual_history`` ``[B, 896]``.
-            training:  ``(visual_history, predicted_future, jepa_loss)`` where
-                ``predicted_future`` is a list of ``num_future_steps`` tensors
-                ``[B, frame_embed_dim]`` and ``jepa_loss`` is a scalar.
+            ``(visual_embedding, future_state_pred)`` where
+            * ``visual_embedding`` ``[B, frame_embed_dim]`` is pushed to the
+              external :class:`RollingHistoryBuffer` (FIFO, size N) which forms
+              the Encoded Visual History fed to the reactive planner;
+            * ``future_state_pred`` is a list of ``num_future_steps``
+              ``[B, frame_embed_dim]`` (only needed in training; ``None`` if no
+              ``visual_history`` is given). The JEPA loss is computed separately
+              via :meth:`jepa_loss` (kept out of the model, in the training loop).
         """
-        visual_history = self.encode_history(history_frames)
-        if future_frames is None:
-            return visual_history
+        visual_embedding = self.encoder(frame)
+        future_state_pred = (self.predict_future(visual_history)
+                             if visual_history is not None else None)
+        return visual_embedding, future_state_pred
 
-        predicted = list(torch.chunk(
-            self.future_predictor(visual_history), self.num_future_steps, dim=1))
+    def jepa_loss(self, future_state_pred: list,
+                  future_frames: torch.Tensor) -> torch.Tensor:
+        """Future Feature Reconstruction Loss (JEPA, L1) vs the FROZEN target.
+
+        Args:
+            future_state_pred: list of ``num_future_steps`` ``[B, frame_embed_dim]``
+                from :meth:`forward` / :meth:`predict_future`.
+            future_frames: ``[B, num_future_steps, 3, H, W]`` actual future frames.
+        """
         future_obs = [future_frames[:, k] for k in range(self.num_future_steps)]
-        loss = compute_jepa_loss(predicted, future_obs, self.target,
+        return compute_jepa_loss(future_state_pred, future_obs, self.target,
                                  self.recon_loss, weight=1.0)
-        return visual_history, predicted, loss

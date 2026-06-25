@@ -1,9 +1,10 @@
 """Tests for the World Action Model (slow branch, WG 2026-06-24 agreement).
 
-Verifies the agreed contract: per-frame embedding -> rolling FIFO buffer ->
-visual_history (history_len*frame_embed_dim = 896), future prediction + JEPA
-loss in training (frozen target, stop-gradient), and inference returning only
-the history vector.
+Verifies the per-tick API Zain specified in auto_e2e.py (lines 67-76):
+``visual_embedding, future_state_pred = WorldActionModel(frame, visual_history)``,
+an external rolling FIFO buffer (size N=4) forming the Encoded Visual History
+(N*frame_embed_dim = 896), and the JEPA loss (frozen target, stop-gradient)
+computed separately via ``jepa_loss``.
 """
 
 import torch
@@ -33,54 +34,61 @@ def _wam(device, **kw):
                             num_future_steps=4, **kw).to(device)
 
 
-def _frames(B, n, device):
+def _frame(B, device):
+    return torch.randn(B, 3, 16, 16, device=device)
+
+
+def _window(B, n, device):
     return torch.randn(B, n, 3, 16, 16, device=device)
 
 
 def test_visual_history_dim_is_896(device):
     m = _wam(device)
     assert m.visual_history_dim == 896  # 4 * 224
-    vh = m(_frames(2, 4, device))        # inference: only the history vector
+    vh = m.encode_history(_window(2, 4, device))  # windowed encode -> [B, 896]
     assert vh.shape == (2, 896)
 
 
 def test_frame_encoder_shape(device):
     enc = FrameEncoder(_MockBackbone(), feature_channels=CH,
                        frame_embed_dim=224).to(device)
-    assert enc(torch.randn(2, 3, 16, 16, device=device)).shape == (2, 224)
+    assert enc(_frame(2, device)).shape == (2, 224)
 
 
-def test_training_returns_history_prediction_and_loss(device):
+def test_forward_per_tick_returns_embedding_and_future(device):
+    """Zain's API: visual_embedding, future_state_pred = WAM(frame, visual_history)."""
     m = _wam(device)
-    vh, predicted, loss = m(_frames(2, 4, device), future_frames=_frames(2, 4, device))
-    assert vh.shape == (2, 896)
-    assert len(predicted) == 4 and all(p.shape == (2, 224) for p in predicted)
+    vh = torch.randn(2, 896, device=device)              # current buffer state
+    emb, future = m(_frame(2, device), visual_history=vh)
+    assert emb.shape == (2, 224)                          # pushed to the buffer
+    assert len(future) == 4 and all(f.shape == (2, 224) for f in future)
+
+
+def test_forward_without_history_has_no_future(device):
+    """Inference / first ticks: no visual_history -> future_state_pred is None."""
+    m = _wam(device)
+    emb, future = m(_frame(2, device))
+    assert emb.shape == (2, 224) and future is None
+
+
+def test_jepa_loss_grad_to_online_not_target(device):
+    m = _wam(device)
+    vh = torch.randn(2, 896, device=device)
+    _emb, future = m(_frame(2, device), visual_history=vh)
+    loss = m.jepa_loss(future, _window(2, 4, device))    # vs frozen target
     assert loss.ndim == 0 and torch.isfinite(loss)
-
-
-def test_jepa_gradient_flows_to_online_not_target(device):
-    m = _wam(device)
-    _vh, _pred, loss = m(_frames(2, 4, device), future_frames=_frames(2, 4, device))
     loss.backward()
     assert any(p.grad is not None for p in m.future_predictor.parameters())
-    assert any(p.grad is not None for p in m.encoder.parameters()), \
-        "online encoder must receive gradient"
     assert all(p.grad is None for p in m.target.parameters()), \
         "frozen JEPA target must NOT receive gradient"
-
-
-def test_inference_returns_only_visual_history(device):
-    m = _wam(device)
-    out = m(_frames(1, 4, device))
-    assert isinstance(out, torch.Tensor) and out.shape == (1, 896)
 
 
 def test_configurable_horizons(device):
     m = WorldActionModel(_MockBackbone(), feature_channels=CH, frame_embed_dim=32,
                          history_len=3, num_future_steps=2).to(device)
-    vh, pred, _loss = m(_frames(2, 3, device), future_frames=_frames(2, 2, device))
-    assert vh.shape == (2, 96)  # 3 * 32
-    assert len(pred) == 2
+    assert m.visual_history_dim == 96  # 3 * 32
+    emb, future = m(_frame(2, device), visual_history=torch.randn(2, 96, device=device))
+    assert emb.shape == (2, 32) and len(future) == 2
 
 
 class TestRollingHistoryBuffer:
@@ -88,21 +96,31 @@ class TestRollingHistoryBuffer:
         buf = RollingHistoryBuffer(history_len=4)
         for _ in range(6):
             buf.push(torch.randn(2, 224, device=device))
-        vh = buf.visual_history()
-        assert vh.shape == (2, 896)  # 4 * 224, oldest dropped
+        assert buf.visual_history().shape == (2, 896)  # 4*224, oldest dropped
 
     def test_left_pads_before_full(self, device):
         buf = RollingHistoryBuffer(history_len=4)
         buf.push(torch.ones(1, 224, device=device))
         vh = buf.visual_history()
         assert vh.shape == (1, 896)
-        # first 3 slots zero-padded, last slot is the pushed frame
         assert torch.all(vh[:, : 3 * 224] == 0) and torch.all(vh[:, 3 * 224:] == 1)
 
     def test_fifo_order_first_in_first_out(self, device):
         buf = RollingHistoryBuffer(history_len=2)
-        buf.push(torch.full((1, 224), 1.0, device=device))
-        buf.push(torch.full((1, 224), 2.0, device=device))
-        buf.push(torch.full((1, 224), 3.0, device=device))  # evicts the "1"
+        for v in (1.0, 2.0, 3.0):
+            buf.push(torch.full((1, 224), v, device=device))  # 1.0 evicted
         vh = buf.visual_history()
         assert torch.all(vh[:, :224] == 2.0) and torch.all(vh[:, 224:] == 3.0)
+
+
+def test_online_loop_buffer_then_reactive_shape(device):
+    """End-to-end online pattern from Zain's auto_e2e wiring: per tick encode ->
+    push to buffer -> the buffer is the visual_history for the reactive planner."""
+    m = _wam(device)
+    buf = RollingHistoryBuffer(history_len=4)
+    vh = None
+    for _ in range(5):  # 5 ticks
+        emb, _future = m(_frame(1, device), visual_history=vh)
+        buf.push(emb)
+        vh = buf.visual_history()
+    assert vh.shape == (1, 896)  # ready to feed Reactive_E2E
