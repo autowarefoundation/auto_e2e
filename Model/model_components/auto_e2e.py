@@ -1,5 +1,6 @@
 import torch.nn as nn
 from .reactive_e2e import ReactiveE2E
+from .world_action_model import RollingHistoryBuffer, WorldActionModel
 
 
 class AutoE2E(nn.Module):
@@ -11,7 +12,8 @@ class AutoE2E(nn.Module):
                  map_type="rasterized", map_in_channels=3,
                  map_fusion_mode="residual", map_fusion_kwargs=None,
                  temporal_memory_mode="no_memory", temporal_memory_kwargs=None,
-                 planner_mode="bezier", planner_kwargs=None):
+                 planner_mode="bezier", planner_kwargs=None,
+                 enable_world_model=False, world_model_kwargs=None):
         super(AutoE2E, self).__init__()
 
         # Reactive model which runs at 10Hz and processes multi-camera inputs
@@ -26,6 +28,29 @@ class AutoE2E(nn.Module):
                  map_fusion_mode=map_fusion_mode, map_fusion_kwargs=map_fusion_kwargs,
                  temporal_memory_mode=temporal_memory_mode, temporal_memory_kwargs=temporal_memory_kwargs,
                  planner_mode=planner_mode, planner_kwargs=planner_kwargs)
+
+        # World Action Model (slow, ~1Hz): encodes the multi-camera history into
+        # the Encoded Visual History (fed to the reactive planner) and predicts
+        # future visual features (JEPA). Reuses the reactive backbone (one shared
+        # backbone; the JEPA target is a frozen copy of it). Opt-in (default OFF)
+        # so the reactive-only default is byte-identical.
+        self.World_Action_Model_E2E = None
+        self.visual_history_buffer = None
+        if enable_world_model:
+            wmk = dict(world_model_kwargs or {})
+            history_len = wmk.pop("history_len", 4)
+            self.World_Action_Model_E2E = WorldActionModel(
+                backbone=self.Reactive_E2E.Backbone,
+                frame_embed_dim=visual_history_dim // history_len,
+                history_len=history_len, **wmk,
+            )
+            self.visual_history_buffer = RollingHistoryBuffer(history_len=history_len)
+
+    def reset_visual_history(self):
+        """Clear the World Model's rolling buffer (call between sequences)."""
+        if self.visual_history_buffer is not None:
+            self.visual_history_buffer = RollingHistoryBuffer(
+                history_len=self.visual_history_buffer.history_len)
 
 
     def forward(self, camera_tiles, map_input, visual_history, egomotion_history,
@@ -60,15 +85,29 @@ class AutoE2E(nn.Module):
             planner_loss: Used only when mode="train" during network training, otherwise set to None
         """
 
-        ### Placeholder for self.World_Action_Model_E2E which processes a 1Hz or tunable 
-        ### stream of images and encodes it as a visual history vector which is fed as input
-        ### to the the Reactive_E2E module and outputs the future feature state which is used as
-        ### JEPA loss during training
+        # World Action Model (1Hz): encode the current multi-camera frame, push it
+        # to the circular buffer (size N=4) to form the Encoded Visual History fed
+        # to the reactive planner, and (in training) predict the future feature
+        # state for the JEPA loss. Realizes the wiring sketched in this file by
+        # @m-zain-khawaja (24/06):
+        #   visual_embedding, future_state_pred = self.World_Action_Model_E2E(inputs)
+        #   visual_history.push(visual_embedding)   # circular buffer size N (N=4)
+        #   return trajectory  /  trajectory, future_state_pred   (infer / train)
+        future_state_pred = None
+        if self.World_Action_Model_E2E is not None:
+            visual_embedding, future_state_pred = self.World_Action_Model_E2E(
+                camera_tiles, self.visual_history_buffer.visual_history())
+            self.visual_history_buffer.push(visual_embedding)
+            visual_history = self.visual_history_buffer.visual_history()
 
         trajectory = self.Reactive_E2E(camera_tiles, map_input, visual_history, egomotion_history,
         camera_params=camera_params, mode=mode, trajectory_target=trajectory_target, **kwargs)
 
-
+        # Inference: just the trajectory. Training with the World Model on: also
+        # return the predicted future state (the JEPA loss is computed in the
+        # training loop via WorldActionModel.jepa_loss).
+        if self.World_Action_Model_E2E is not None and mode == "train":
+            return trajectory, future_state_pred
         return trajectory
         
     

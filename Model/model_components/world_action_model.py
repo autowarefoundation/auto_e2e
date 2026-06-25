@@ -42,10 +42,20 @@ class FrameEncoder(nn.Module):
         self.proj = nn.Linear(feature_channels, frame_embed_dim)
 
     def forward(self, frame: torch.Tensor) -> torch.Tensor:
-        feats = self.backbone(frame)
-        x = feats[-1] if isinstance(feats, (list, tuple)) else feats  # [B, C, h, w]
-        x = x.mean(dim=(2, 3))                                        # GAP -> [B, C]
-        return self.proj(x)                                          # [B, embed]
+        """``[B, 3, H, W]`` or multi-view ``[B, V, 3, H, W]`` -> ``[B, embed]``.
+
+        For multi-view input each camera is encoded and the per-view embeddings
+        are mean-pooled into a single per-frame embedding.
+        """
+        if frame.dim() == 5:                       # [B, V, 3, H, W]
+            B, V = frame.shape[:2]
+            feats = self.backbone(frame.reshape(B * V, *frame.shape[2:]))
+            m = feats[-1] if isinstance(feats, (list, tuple)) else feats
+            m = m.mean(dim=(2, 3)).reshape(B, V, -1).mean(dim=1)  # GAP + pool views
+            return self.proj(m)                                  # [B, embed]
+        feats = self.backbone(frame)               # [B, 3, H, W]
+        m = feats[-1] if isinstance(feats, (list, tuple)) else feats
+        return self.proj(m.mean(dim=(2, 3)))                     # [B, embed]
 
 
 class RollingHistoryBuffer:

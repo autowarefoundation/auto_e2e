@@ -124,3 +124,80 @@ def test_online_loop_buffer_then_reactive_shape(device):
         buf.push(emb)
         vh = buf.visual_history()
     assert vh.shape == (1, 896)  # ready to feed Reactive_E2E
+
+
+class _MockBackbone4(nn.Module):
+    """4-stage mock matching the real backbone, for the full AutoE2E path."""
+
+    def __init__(self, backbone="swin_v2_tiny", is_pretrained=True, **kwargs):
+        super().__init__()
+        self.backbone_channels = 1440
+        self._st = nn.ModuleList([
+            nn.Sequential(nn.Conv2d(3, 96, 3, 1, 1), nn.AdaptiveAvgPool2d(64)),
+            nn.Sequential(nn.Conv2d(96, 192, 3, 1, 1), nn.AdaptiveAvgPool2d(32)),
+            nn.Sequential(nn.Conv2d(192, 384, 3, 1, 1), nn.AdaptiveAvgPool2d(16)),
+            nn.Sequential(nn.Conv2d(384, 768, 3, 1, 1), nn.AdaptiveAvgPool2d(8)),
+        ])
+
+    def forward(self, x):
+        outs, h = [], x
+        for s in self._st:
+            h = s(h)
+            outs.append(h)
+        return outs
+
+
+class TestAutoE2EWorldModelWiring:
+    """Zain's auto_e2e.py wiring (lines 67-76): WAM -> buffer -> reactive; return
+    trajectory (infer) / (trajectory, future_state_pred) (train)."""
+
+    def _build(self, device):
+        from unittest.mock import patch
+        from model_components.auto_e2e import AutoE2E
+        with patch("model_components.reactive_e2e.Backbone", _MockBackbone4):
+            return AutoE2E(num_views=6, view_fusion_kwargs={"bev_h": 8, "bev_w": 8},
+                           enable_world_model=True,
+                           world_model_kwargs={"feature_channels": 768}).to(device)
+
+    def _inputs(self, device):
+        return (torch.randn(2, 6, 3, 256, 256, device=device),  # camera_tiles
+                torch.randn(2, 3, 256, 256, device=device),      # map_input
+                torch.zeros(2, 896, device=device),              # legacy visual_history
+                torch.randn(2, 256, device=device))              # egomotion
+
+    def test_world_model_is_built(self, device):
+        m = self._build(device)
+        assert m.World_Action_Model_E2E is not None
+        assert m.visual_history_buffer is not None
+
+    def test_infer_returns_trajectory_only(self, device):
+        m = self._build(device)
+        m.reset_visual_history()
+        cam, mp, vh, ego = self._inputs(device)
+        out = m(cam, mp, vh, ego, mode="infer")
+        traj = out[0] if isinstance(out, tuple) else out
+        assert traj.shape == (2, 128) and torch.isfinite(traj).all()
+
+    def test_train_returns_trajectory_and_future_state(self, device):
+        m = self._build(device)
+        m.reset_visual_history()
+        cam, mp, vh, ego = self._inputs(device)
+        tgt = torch.randn(2, 128, device=device)
+        m(cam, mp, vh, ego, mode="train", trajectory_target=tgt)        # tick 1 fills buffer
+        out = m(cam, mp, vh, ego, mode="train", trajectory_target=tgt)  # tick 2
+        assert isinstance(out, tuple) and len(out) == 2
+        traj, future_state_pred = out
+        traj0 = traj[0] if isinstance(traj, tuple) else traj
+        assert traj0.shape == (2, 128)
+        assert future_state_pred is not None and len(future_state_pred) == 4
+
+    def test_default_world_model_off_unchanged(self, device):
+        """Default (no World Model) keeps the reactive-only behaviour."""
+        from unittest.mock import patch
+        from model_components.auto_e2e import AutoE2E
+        with patch("model_components.reactive_e2e.Backbone", _MockBackbone4):
+            m = AutoE2E(num_views=6, view_fusion_kwargs={"bev_h": 8, "bev_w": 8}).to(device)
+        assert m.World_Action_Model_E2E is None
+        cam, mp, vh, ego = self._inputs(device)
+        out = m(cam, mp, vh, ego, mode="infer")
+        assert not (isinstance(out, tuple) and len(out) == 2 and isinstance(out[1], list))
