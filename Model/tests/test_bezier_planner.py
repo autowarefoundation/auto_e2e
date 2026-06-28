@@ -1,11 +1,10 @@
-"""Unit tests for the optional Bezier trajectory planner.
+"""Unit tests for the Bezier trajectory planner.
 
-These tests exercise the planner in isolation (no backbone) and verify:
-  - the output contract matches TrajectoryPlanner (trajectory + ego_hidden),
-  - the Bezier expansion yields low-jerk control-signal profiles by
-    construction (much smoother than raw per-step regression),
-  - the registry resolves "bezier" and rejects unknown names,
-  - shapes are configurable and gradients flow to all parameters.
+Post-refactor (#88): the planner ``forward`` performs inference and returns
+ONLY the trajectory ``[B, num_timesteps*num_signals]`` (no ego_hidden), and the
+per-planner ``compute_planner_loss`` was removed — the training objective lives
+in the training loop. AutoE2E.forward returns the trajectory directly. Only the
+``bev`` view fusion and the ``bezier``/``flow_matching`` planners remain.
 """
 
 import pytest
@@ -17,6 +16,10 @@ from model_components.trajectory_planning import (
     BezierPlanner,
     build_planner,
 )
+
+EMBED_DIM = 256
+EGO_DIM = 256
+VIS_DIM = 896
 
 
 class _MockBackbone(nn.Module):
@@ -41,11 +44,6 @@ class _MockBackbone(nn.Module):
         return outs
 
 
-EMBED_DIM = 256
-EGO_DIM = 256
-VIS_DIM = 896
-
-
 def _make_inputs(batch_size, device, h=8, w=8):
     bev = torch.randn(batch_size, EMBED_DIM, h, w, device=device)
     visual_history = torch.randn(batch_size, VIS_DIM, device=device)
@@ -53,15 +51,24 @@ def _make_inputs(batch_size, device, h=8, w=8):
     return bev, visual_history, egomotion_history
 
 
+def _autoe2e_bezier(device):
+    """Build an AutoE2E with the mock backbone and the bezier planner."""
+    from unittest.mock import patch
+
+    from model_components.auto_e2e import AutoE2E
+    with patch("model_components.reactive_e2e.Backbone", _MockBackbone):
+        model = AutoE2E(num_views=8, view_fusion_kwargs={"bev_h": 8, "bev_w": 8},
+                        planner_mode="bezier").to(device)
+    return model
+
+
 def test_output_contract_shapes(device):
     planner = BezierPlanner(embed_dim=EMBED_DIM).to(device)
     bev, vis, ego = _make_inputs(4, device)
-    trajectory, ego_hidden = planner(bev, vis, ego)
+    trajectory = planner(bev, vis, ego)
     # 64 timesteps x 2 signals (accel, curvature)
     assert trajectory.shape == (4, 128)
-    assert ego_hidden.shape == (4, EMBED_DIM)
     assert torch.isfinite(trajectory).all()
-    assert torch.isfinite(ego_hidden).all()
 
 
 def test_is_base_planner_subclass():
@@ -72,7 +79,7 @@ def test_registry_builds_bezier(device):
     planner = build_planner("bezier", embed_dim=EMBED_DIM).to(device)
     assert isinstance(planner, BezierPlanner)
     bev, vis, ego = _make_inputs(2, device)
-    trajectory, ego_hidden = planner(bev, vis, ego)
+    trajectory = planner(bev, vis, ego)
     assert trajectory.shape == (2, 128)
 
 
@@ -86,7 +93,7 @@ def test_resolution_invariant_to_bev_size(device):
     planner = BezierPlanner(embed_dim=EMBED_DIM).to(device)
     for h, w in [(8, 8), (45, 30), (7, 7)]:
         bev, vis, ego = _make_inputs(2, device, h=h, w=w)
-        trajectory, _ = planner(bev, vis, ego)
+        trajectory = planner(bev, vis, ego)
         assert trajectory.shape == (2, 128)
 
 
@@ -95,7 +102,7 @@ def test_configurable_timesteps_and_signals(device):
         embed_dim=EMBED_DIM, num_timesteps=32, num_signals=3, num_controls=4
     ).to(device)
     bev, vis, ego = _make_inputs(2, device)
-    trajectory, _ = planner(bev, vis, ego)
+    trajectory = planner(bev, vis, ego)
     assert trajectory.shape == (2, 32 * 3)
 
 
@@ -122,7 +129,7 @@ def test_smoothness_lower_jerk_than_raw_regression(device):
     planner = BezierPlanner(embed_dim=EMBED_DIM, num_timesteps=64,
                             num_signals=2, num_controls=5).to(device)
     bev, vis, ego = _make_inputs(8, device)
-    trajectory, _ = planner(bev, vis, ego)
+    trajectory = planner(bev, vis, ego)
     traj = trajectory.view(8, 64, 2)
 
     # First-difference variance per signal channel (jerk proxy).
@@ -140,41 +147,26 @@ def test_smoothness_lower_jerk_than_raw_regression(device):
 
 
 def test_autoe2e_with_bezier_planner_end_to_end(device):
-    """AutoE2E must accept planner='bezier' and keep the (trajectory,
-    ego_hidden, future) 3-tuple contract intact."""
-    from unittest.mock import patch
-
-    from model_components.auto_e2e import AutoE2E
+    """AutoE2E must accept planner='bezier' and return the trajectory."""
     from model_components.trajectory_planning import BezierPlanner
 
-    with patch("model_components.auto_e2e.Backbone", _MockBackbone):
-        model = AutoE2E(num_views=8, fusion_mode="concat",
-                        planner_mode="bezier").to(device)
-
-    assert isinstance(model.TrajectoryPlanner, BezierPlanner)
+    model = _autoe2e_bezier(device)
+    assert isinstance(model.Reactive_E2E.TrajectoryPlanner, BezierPlanner)
 
     x = torch.randn(2, 8, 3, 256, 256, device=device)
     map_input = torch.randn(2, 3, 256, 256, device=device)
     vis = torch.randn(2, 896, device=device)
     ego = torch.randn(2, 256, device=device)
-    trajectory, ego_hidden, future = model(x, map_input, vis, ego, mode="infer")
+    trajectory = model(x, map_input, vis, ego, mode="infer")
 
     assert trajectory.shape == (2, 128)
-    assert ego_hidden.shape == (2, 256)
-    assert future is None  # infer mode returns None for future visual features
+    assert torch.isfinite(trajectory).all()
 
 
 def test_autoe2e_with_bezier_planner_train_mode(device):
-    """Full forward pass in train mode: AutoE2E -> BezierPlanner.compute_planner_loss
-    returns a SCALAR loss, future features are produced, and gradients flow back
-    through the planner. This exercises the actual layers end-to-end."""
-    from unittest.mock import patch
-
-    from model_components.auto_e2e import AutoE2E
-
-    with patch("model_components.auto_e2e.Backbone", _MockBackbone):
-        model = AutoE2E(num_views=8, fusion_mode="concat",
-                        planner_mode="bezier").to(device)
+    """Full forward pass in train mode returns the trajectory; an MSE on it must
+    backprop into the planner (exercises the actual layers end-to-end)."""
+    model = _autoe2e_bezier(device)
 
     x = torch.randn(2, 8, 3, 256, 256, device=device)
     map_input = torch.randn(2, 3, 256, 256, device=device)
@@ -182,54 +174,31 @@ def test_autoe2e_with_bezier_planner_train_mode(device):
     ego = torch.randn(2, 256, device=device)
     target = torch.randn(2, 128, device=device)
 
-    loss, ego_hidden, future = model(
-        x, map_input, vis, ego, mode="train", trajectory_target=target
-    )
+    trajectory = model(x, map_input, vis, ego, mode="train")
+    assert trajectory.shape == (2, 128)
 
-    assert loss.ndim == 0, "train mode must return a scalar planner loss"
-    assert torch.isfinite(loss) and loss.item() >= 0.0
-    assert ego_hidden.shape == (2, 256)
-    assert future is not None  # train mode produces future visual features
-
-    loss.backward()
-    assert any(p.grad is not None for p in model.TrajectoryPlanner.parameters()), \
-        "planner must receive gradient from compute_planner_loss"
+    (trajectory - target).pow(2).mean().backward()
+    assert any(p.grad is not None
+               for p in model.Reactive_E2E.TrajectoryPlanner.parameters()), \
+        "planner must receive gradient from a trajectory loss"
 
 
-def test_compute_planner_loss_delegates_to_shared_loss(device):
-    """compute_planner_loss must use the shared TrajectoryImitationLoss
-    (losses/ module), not an inline loss, and honour the (loss, ego_hidden)
-    BasePlanner contract."""
-    from model_components.losses.trajectory_loss import TrajectoryImitationLoss
-
-    planner = BezierPlanner(embed_dim=EMBED_DIM).to(device)
-    assert isinstance(planner.trajectory_loss, TrajectoryImitationLoss)
-
-    bev, vis, ego = _make_inputs(2, device)
-    target = torch.randn(2, 128, device=device)
-    loss, ego_hidden = planner.compute_planner_loss(bev, vis, ego, target)
-    assert loss.ndim == 0 and torch.isfinite(loss)
-    assert ego_hidden.shape == (2, EMBED_DIM)
-    loss.backward()  # loss must be differentiable through the planner
-
-
-def test_autoe2e_default_planner_unchanged(device):
-    """Default planner must remain the autoregressive TrajectoryPlanner."""
+def test_autoe2e_default_planner_is_bezier(device):
+    """The default planner is the Bezier planner (GRU was removed in #86)."""
     from unittest.mock import patch
 
     from model_components.auto_e2e import AutoE2E
-    from model_components.trajectory_planning import GRUPlanner as TrajectoryPlanner
-
-    with patch("model_components.auto_e2e.Backbone", _MockBackbone):
-        model = AutoE2E(num_views=8, fusion_mode="concat").to(device)
-    assert isinstance(model.TrajectoryPlanner, TrajectoryPlanner)
+    with patch("model_components.reactive_e2e.Backbone", _MockBackbone):
+        model = AutoE2E(num_views=8,
+                        view_fusion_kwargs={"bev_h": 8, "bev_w": 8}).to(device)
+    assert isinstance(model.Reactive_E2E.TrajectoryPlanner, BezierPlanner)
 
 
 def test_gradients_flow_to_all_parameters(device):
     planner = BezierPlanner(embed_dim=EMBED_DIM).to(device)
     bev, vis, ego = _make_inputs(2, device)
-    trajectory, ego_hidden = planner(bev, vis, ego)
-    (trajectory.pow(2).mean() + ego_hidden.pow(2).mean()).backward()
+    trajectory = planner(bev, vis, ego)
+    trajectory.pow(2).mean().backward()
     for name, p in planner.named_parameters():
         assert p.grad is not None, f"No gradient for {name}"
         assert torch.isfinite(p.grad).all(), f"Non-finite grad for {name}"

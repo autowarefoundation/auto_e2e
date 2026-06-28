@@ -7,7 +7,8 @@ from model_components.feature_fusion import FeatureFusion
 
 class TestFeatureFusionComponent:
     def test_output_shape(self, device):
-        fusion = FeatureFusion(num_views=8, fusion_mode="concat").to(device)
+        fusion = FeatureFusion(num_views=8, fusion_mode="bev",
+                               view_fusion_kwargs={"bev_h": 8, "bev_w": 8}).to(device)
         features = [
             torch.randn(16, 96, 64, 64, device=device),
             torch.randn(16, 192, 32, 32, device=device),
@@ -19,7 +20,8 @@ class TestFeatureFusionComponent:
 
     def test_view_reduction_changes_output(self, device):
         """Verify that view_reduce is not identity (actually mixes views)."""
-        fusion = FeatureFusion(num_views=8, fusion_mode="concat").to(device)
+        fusion = FeatureFusion(num_views=8, fusion_mode="bev",
+                               view_fusion_kwargs={"bev_h": 8, "bev_w": 8}).to(device)
         fusion.eval()
 
         features_a = [
@@ -43,7 +45,8 @@ class TestFeatureFusionWithSwinChannels:
         at their natural spatial resolutions and produce the expected fused shape."""
         backbone_channels = 96 + 192 + 384 + 768  # 1440
         fusion = FeatureFusion(
-            num_views=8, backbone_channels=backbone_channels, fusion_mode="concat",
+            num_views=8, backbone_channels=backbone_channels, fusion_mode="bev",
+            view_fusion_kwargs={"bev_h": 8, "bev_w": 8},
         ).to(device)
 
         # Per-stage Swin spatial dims for a 256x256 input

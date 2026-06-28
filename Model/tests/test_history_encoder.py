@@ -189,28 +189,27 @@ def test_autoe2e_consumes_one_hz_temporal_memory():
 
     from model_components.auto_e2e import AutoE2E
 
-    with patch("model_components.auto_e2e.Backbone", _MockBackbone):
-        model = AutoE2E(num_views=8, fusion_mode="concat",
+    with patch("model_components.reactive_e2e.Backbone", _MockBackbone):
+        model = AutoE2E(num_views=8, view_fusion_kwargs={"bev_h": 8, "bev_w": 8},
                         temporal_memory_mode="one_hz")
 
     x = torch.randn(2, 8, 3, 256, 256)
     map_input = torch.randn(2, 3, 256, 256)
     vis = torch.randn(2, 20, 896)   # [B, T, visual_dim] — sequence form
     ego = torch.randn(2, 20, 256)   # [B, T, egomotion_dim]
-    target = torch.randn(2, 128)
 
-    # Train: scalar loss + future; gradient flows back into TemporalMemory.
-    loss, ego_hidden, future = model(x, map_input, vis, ego,
-                                     mode="train", trajectory_target=target)
-    assert loss.ndim == 0 and torch.isfinite(loss)
-    assert ego_hidden.shape == (2, 256) and future is not None
-    loss.backward()
-    assert any(p.grad is not None for p in model.TemporalMemory.parameters()), \
+    # Train: forward returns the trajectory; an MSE on it must backprop into
+    # TemporalMemory (its compressed context is consumed by the planner).
+    traj = model(x, map_input, vis, ego, mode="train")
+    assert traj.shape == (2, 128) and torch.isfinite(traj).all()
+    traj.pow(2).mean().backward()
+    assert any(p.grad is not None
+               for p in model.Reactive_E2E.TemporalMemory.parameters()), \
         "compressed temporal context must be consumed by the planner (grad must reach TemporalMemory)"
 
-    # Infer: 3-tuple with trajectory + None future.
-    traj, ego_hidden2, future2 = model(x, map_input, vis, ego, mode="infer")
-    assert traj.shape == (2, 128) and future2 is None
+    # Infer: trajectory only.
+    traj2 = model(x, map_input, vis, ego, mode="infer")
+    assert traj2.shape == (2, 128)
 
 
 def test_autoe2e_default_no_memory_passthrough():
@@ -221,13 +220,14 @@ def test_autoe2e_default_no_memory_passthrough():
     from model_components.auto_e2e import AutoE2E
     from model_components.temporal_memory import NoMemory
 
-    with patch("model_components.auto_e2e.Backbone", _MockBackbone):
-        model = AutoE2E(num_views=8, fusion_mode="concat")  # default no_memory
-    assert isinstance(model.TemporalMemory, NoMemory)
+    with patch("model_components.reactive_e2e.Backbone", _MockBackbone):
+        model = AutoE2E(num_views=8,
+                        view_fusion_kwargs={"bev_h": 8, "bev_w": 8})  # default no_memory
+    assert isinstance(model.Reactive_E2E.TemporalMemory, NoMemory)
 
     x = torch.randn(2, 8, 3, 256, 256)
     map_input = torch.randn(2, 3, 256, 256)
     vis = torch.randn(2, 896)       # flat history (default contract)
     ego = torch.randn(2, 256)
-    traj, ego_hidden, future = model(x, map_input, vis, ego, mode="infer")
-    assert traj.shape == (2, 128) and ego_hidden.shape == (2, 256) and future is None
+    traj = model(x, map_input, vis, ego, mode="infer")
+    assert traj.shape == (2, 128)

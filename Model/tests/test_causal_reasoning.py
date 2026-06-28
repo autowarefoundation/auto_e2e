@@ -194,40 +194,34 @@ def test_class_weights_change_loss():
     assert not torch.isclose(plain, weighted)
 
 
-def test_autoe2e_contract_untouched_with_manual_integration(device):
-    """Manual cascade integration: run AutoE2E (mock backbone), feed
-    ego_hidden into the reasoning head. The AutoE2E 3-tuple contract is
-    untouched and gradients reach the trunk through the auxiliary loss."""
+def test_autoe2e_contract_and_reasoning_head(device):
+    """Post-refactor (#86/#88) AutoE2E.forward returns the trajectory only — the
+    planner's internal ego embedding is no longer surfaced. This verifies the
+    new contract, and exercises the (independent) CausalReasoningModule on a
+    256-d embedding so its auxiliary loss stays differentiable."""
     from unittest.mock import patch
 
     from model_components.auto_e2e import AutoE2E
 
-    with patch("model_components.auto_e2e.Backbone", _MockBackbone):
-        model = AutoE2E(num_views=8, fusion_mode="concat").to(device)
-    head = CausalReasoningModule(embed_dim=EMBED_DIM).to(device)
+    with patch("model_components.reactive_e2e.Backbone", _MockBackbone):
+        model = AutoE2E(num_views=8,
+                        view_fusion_kwargs={"bev_h": 8, "bev_w": 8}).to(device)
 
     x = torch.randn(2, 8, 3, 256, 256, device=device)
     map_input = torch.randn(2, 3, 256, 256, device=device)
     vis = torch.randn(2, 896, device=device)
     ego = torch.randn(2, 256, device=device)
-    # The signature is: forward(camera_tiles, map_input, visual_history, egomotion_history)
+    # forward(camera_tiles, map_input, visual_history, egomotion_history)
     out = model(x, map_input, vis, ego, mode="infer")
 
-    # Default contract: exactly a 3-tuple (trajectory, ego_hidden, future)
-    assert isinstance(out, tuple) and len(out) == 3
-    trajectory, ego_hidden, future = out
-    assert trajectory.shape == (2, 128)
-    assert ego_hidden.shape == (2, 256)
-    assert future is None  # infer mode returns no future visual features (contract)
+    # New contract: a single trajectory tensor [B, num_timesteps*num_signals].
+    assert torch.is_tensor(out) and out.shape == (2, 128)
 
-    # Auxiliary head consumes ego_hidden; gradient reaches AutoE2E trunk.
-    _, decision_logits = head(ego_hidden)
+    # The auxiliary reasoning head consumes a 256-d embedding; its consistency
+    # loss must remain differentiable wrt that embedding.
+    head = CausalReasoningModule(embed_dim=EMBED_DIM).to(device)
+    embedding = torch.randn(2, EMBED_DIM, device=device, requires_grad=True)
+    _, decision_logits = head(embedding)
     labels = torch.randint(0, 5, (2,), device=device)
     causal_consistency_loss(decision_logits, labels).backward()
-    trunk_grads = [
-        p.grad for p in model.TrajectoryPlanner.parameters()
-        if p.grad is not None
-    ]
-    assert len(trunk_grads) > 0, (
-        "Auxiliary loss must backpropagate into the shared trunk"
-    )
+    assert embedding.grad is not None and torch.isfinite(embedding.grad).all()

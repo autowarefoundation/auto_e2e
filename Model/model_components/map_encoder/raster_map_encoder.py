@@ -4,6 +4,8 @@ Takes a BEV-space RGB map image and produces a spatial feature map at the same r
 features, so the two can be fused directly.
 """
 
+from typing import Any
+
 import torch
 import torch.nn as nn
 import timm
@@ -40,8 +42,11 @@ class RasterizedMapEncoder(nn.Module):
             in_chans=in_channels,
         )
  
+        # timm's FeatureInfo is exposed via __getattr__ (typed Tensor | Module),
+        # so bind through Any to iterate it without a mypy union-attr error.
+        backbone: Any = self._backbone
         self._feature_channels = [
-            stage["num_chs"] for stage in self._backbone.feature_info
+            stage["num_chs"] for stage in backbone.feature_info
         ]
         backbone_channels = sum(self._feature_channels)
  

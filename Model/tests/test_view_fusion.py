@@ -40,8 +40,8 @@ class TestViewFusion:
         B, V, C, H, W = visual.shape
 
         def fused_features(x):
-            features = model.Backbone(x.reshape(B * V, C, H, W))
-            return model.FeatureFusion(features, B, V)
+            features = model.Reactive_E2E.Backbone(x.reshape(B * V, C, H, W))
+            return model.Reactive_E2E.FeatureFusion(features, B, V)
 
         fused_base = fused_features(visual)
 
@@ -71,8 +71,8 @@ class TestViewFusion:
         B, V, C, H, W = visual.shape
 
         def fused_features(x):
-            features = model.Backbone(x.reshape(B * V, C, H, W))
-            return model.FeatureFusion(features, B, V)
+            features = model.Reactive_E2E.Backbone(x.reshape(B * V, C, H, W))
+            return model.Reactive_E2E.FeatureFusion(features, B, V)
 
         fused_base = fused_features(visual)
 
@@ -113,8 +113,8 @@ class TestViewFusion:
         cam_params[..., 2, 3] = 1.0
 
         def fused_features(x):
-            features = model.Backbone(x.reshape(B * V, C, H, W))
-            return model.FeatureFusion(features, B, V, camera_params=cam_params)
+            features = model.Reactive_E2E.Backbone(x.reshape(B * V, C, H, W))
+            return model.Reactive_E2E.FeatureFusion(features, B, V, camera_params=cam_params)
 
         fused_base = fused_features(visual)
 
