@@ -704,14 +704,13 @@ def wf_train_il(
     shards: List[FlyteDirectory],
     dataset: Dataset = Dataset.L2D,
     backbone: Backbone = Backbone.SWIN_V2_TINY,
-    fusion_mode: FusionMode = FusionMode.CONCAT,
     epochs: int = 3,
     batch_size: int = 4,
     lr: float = 1e-4,
 ) -> EvalMetrics:
     """IL Train → Evaluate. All datasets' shards passed in; `dataset` selects one."""
     out = train_il(shards=shards, dataset=dataset, backbone=backbone,
-                   fusion_mode=fusion_mode, epochs=epochs, batch_size=batch_size, lr=lr)
+                   epochs=epochs, batch_size=batch_size, lr=lr)
     return evaluate_il_policy(checkpoint=out.checkpoint, shards=shards, dataset=dataset,
                               train_metadata=out.metadata)
 
@@ -738,7 +737,6 @@ def wf_full_pipeline(
     dataset: Dataset = Dataset.L2D,
     episodes: int = 3,
     backbone: Backbone = Backbone.SWIN_V2_TINY,
-    fusion_mode: FusionMode = FusionMode.CONCAT,
     epochs_il: int = 3,
     epochs_rl: int = 3,
     batch_size: int = 4,
@@ -763,8 +761,7 @@ def wf_full_pipeline(
     all_shards = [shards_l2d, shards_nv]
 
     il_out = train_il(shards=all_shards, dataset=dataset, backbone=backbone,
-                      fusion_mode=fusion_mode, epochs=epochs_il,
-                      batch_size=batch_size, lr=lr)
+                      epochs=epochs_il, batch_size=batch_size, lr=lr)
     evaluate_il_policy(checkpoint=il_out.checkpoint, shards=all_shards, dataset=dataset,
                        train_metadata=il_out.metadata)
     rl_out = train_offline_rl(pretrained=il_out.checkpoint, shards=all_shards, dataset=dataset,
