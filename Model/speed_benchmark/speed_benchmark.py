@@ -11,14 +11,17 @@ sys.path.append('..')
 from model_components.auto_e2e import AutoE2E
 
 
-def run_speed_benchmark(backbone, fusion_mode, device, batch_size=1, num_views=8):
-    
+def run_speed_benchmark(backbone, device, batch_size=1, num_views=8):
+
     print(f"{'='*80}")
-    print(f"  backbone = '{backbone}' | fusion_mode = '{fusion_mode}' | batch={batch_size} | views={num_views}")
+    print(f"  backbone = '{backbone}' | fusion = 'bev' | batch={batch_size} | views={num_views}")
     print(f"{'='*80}\n")
 
-    # Instantiate model
-    model = AutoE2E(backbone=backbone, num_views=num_views, fusion_mode=fusion_mode)
+    # Instantiate model. After the Reactive_E2E refactor the only multi-view
+    # fusion is BEV (concat / cross_attn and the fusion_mode knob were removed);
+    # the BEV grid size is configured via view_fusion_kwargs.
+    model = AutoE2E(backbone=backbone, num_views=num_views,
+                    view_fusion_kwargs={"bev_h": 8, "bev_w": 8})
     model = model.to(device)
     model.eval()
 
@@ -31,19 +34,21 @@ def run_speed_benchmark(backbone, fusion_mode, device, batch_size=1, num_views=8
     # Egomotion History Input: [batch, 256]
     egomotion_history = torch.randn(batch_size, 256).to(device)
 
-    # Camera parameters: [batch, num_views, 3, 4] projection matrices
-    # Only used by BEV fusion; None triggers learnable pseudo-projection
-    camera_params = None
-    if fusion_mode == "bev":
-        camera_params = torch.randn(batch_size, num_views, 3, 4).to(device)
+    # BEV nav-map image: [batch, 3, H, W]
+    map_input = torch.randn(batch_size, 3, 256, 256).to(device)
+
+    # Camera parameters: [batch, num_views, 3, 4] ego-to-pixel projection
+    # matrices used by BEV fusion (None would trigger the learnable
+    # pseudo-projection fallback; we feed real-shaped matrices here).
+    camera_params = torch.randn(batch_size, num_views, 3, 4).to(device)
 
     # 1. Warm-up Phase (GPU kernel compilation and cache warming)
     num_warmup = 30 if device.type == 'cuda' else 5
     print(f"Warming up ({num_warmup} iterations)...")
     with torch.no_grad():
         for _ in range(num_warmup):
-            _ = model(visual_tiles, visual_history, egomotion_history,
-                       camera_params=camera_params, mode="infer")
+            _ = model(visual_tiles, map_input, visual_history, egomotion_history,
+                      camera_params=camera_params, mode="infer")
 
     # 2. Benchmark Phase
     num_iters = 100 if device.type == 'cuda' else 10
@@ -58,7 +63,7 @@ def run_speed_benchmark(backbone, fusion_mode, device, batch_size=1, num_views=8
 
             start_time = time.perf_counter()
 
-            _ = model(visual_tiles, visual_history, egomotion_history,
+            _ = model(visual_tiles, map_input, visual_history, egomotion_history,
                       camera_params=camera_params, mode="infer")
 
             if device.type == 'cuda':
@@ -88,7 +93,7 @@ def run_speed_benchmark(backbone, fusion_mode, device, batch_size=1, num_views=8
 
     results = {
         "backbone": backbone,
-        "fusion_mode": fusion_mode,
+        "fusion_mode": "bev",
         "batch_size": batch_size,
         "num_views": num_views,
         "avg_fps": round(avg_fps, 2),
@@ -190,18 +195,17 @@ def main():
 
     all_results = []
 
-    # Test all registered backbones and fusion modes
+    # Test all registered backbones (BEV is the only fusion after the refactor)
     backbones = ["swin_v2_tiny", "conv_next_v2_tiny"]
-    fusion_modes = ["concat", "cross_attn", "bev"]
     batch_sizes = [1, 2, 4]
 
     for backbone in backbones:
-        for fusion_mode in fusion_modes:
-            for batch_size in batch_sizes:
-                torch.cuda.reset_peak_memory_stats() if torch.cuda.is_available() else None
-                result = run_speed_benchmark(backbone, fusion_mode, device, batch_size=batch_size)
-                all_results.append(result)
-                print()
+        for batch_size in batch_sizes:
+            if torch.cuda.is_available():
+                torch.cuda.reset_peak_memory_stats()
+            result = run_speed_benchmark(backbone, device, batch_size=batch_size)
+            all_results.append(result)
+            print()
 
     # Save structured results
     save_results_json(all_results, device)
