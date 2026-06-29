@@ -373,9 +373,11 @@ def train_il(
     # Save checkpoint
     os.makedirs("/tmp/train", exist_ok=True)
     ckpt_path = "/tmp/train/best.pt"
+    # `config` must be reconstruction kwargs for AutoE2E(**config); fusion_mode
+    # is no longer a constructor arg, so it lives only in metadata below.
     torch.save({
         "model_state_dict": model.state_dict(),
-        "config": {"backbone": bb, "fusion_mode": fm, "embed_dim": 256, "num_views": num_views},
+        "config": {"backbone": bb, "embed_dim": 256, "num_views": num_views},
         "epoch": epochs,
     }, ckpt_path)
 
