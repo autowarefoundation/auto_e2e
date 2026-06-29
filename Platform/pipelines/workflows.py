@@ -273,7 +273,6 @@ def train_il(
     shards: List[FlyteDirectory],
     dataset: Dataset = Dataset.L2D,
     backbone: Backbone = Backbone.SWIN_V2_TINY,
-    fusion_mode: FusionMode = FusionMode.CONCAT,
     epochs: int = 3,
     batch_size: int = 4,
     lr: float = 1e-4,
@@ -298,7 +297,7 @@ def train_il(
 
     shard_dir = _select_shard_dir(shards, dataset)
     ctx = current_context()
-    bb, fm = backbone.value, fusion_mode.value
+    bb, fm = backbone.value, FUSION_LABEL
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     print(f"Training: backbone={bb} fusion={fm} epochs={epochs} bs={batch_size} device={device}")
@@ -311,10 +310,11 @@ def train_il(
     num_views = int(_peek["visual_tiles"].shape[1])
     print(f"Detected num_views={num_views}")
 
-    # Model
+    # Model. fusion_mode is gone (BEV hardcoded inside ReactiveE2E); the model
+    # now also owns the map branch, so its forward requires a map_input tensor.
     model = AutoE2E(
         backbone=bb, num_views=num_views, embed_dim=256,
-        fusion_mode=fm, is_pretrained=True,
+        is_pretrained=True,
     ).to(device)
 
     # Optimizer + Loss
@@ -335,10 +335,15 @@ def train_il(
             ego_hist = batch["egomotion_history"].to(device)  # (B, 256)
             vis_hist = batch["visual_history"].to(device)     # (B, 896)
             target = batch["trajectory_target"].to(device)    # (B, 128)
+            # The shards carry no rendered nav-map yet (#77), but the refactored
+            # forward requires a map_input. Feed zeros: MapBEVFusion is a residual
+            # gate initialized at alpha=0, so a zero map contributes nothing early.
+            map_input = torch.zeros(visual.shape[0], 3, 256, 256, device=device)
 
             optimizer.zero_grad()
             with torch.amp.autocast("cuda", enabled=amp):
-                pred, _, _ = model(visual, vis_hist, ego_hist)
+                pred = model(visual, map_input, vis_hist, ego_hist, mode="train",
+                             trajectory_target=target)
                 loss = loss_fn(pred, target)
 
             scaler.scale(loss).backward()
