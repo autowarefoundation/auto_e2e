@@ -36,11 +36,11 @@ class Backbone(enum.Enum):
     RESNET_50 = "res_net_50"
 
 
-class FusionMode(enum.Enum):
-    CONCAT = "concat"
-    CROSS_ATTN = "cross_attn"
-    BEV = "bev"
-
+# NOTE: view fusion is no longer selectable. The reactive-refactor (PR #94)
+# removed concat/cross_attn and hardcoded BEV fusion inside ReactiveE2E, and
+# dropped the `fusion_mode` argument from AutoE2E.__init__. We keep the string
+# "bev" only as a metadata label so MLflow runs stay comparable with old runs.
+FUSION_LABEL = "bev"
 
 TrainOutput = NamedTuple("TrainOutput", checkpoint=FlyteFile, metadata=FlyteFile)
 EvalMetrics = NamedTuple("EvalMetrics", ade=float, fde=float, gate_pass=bool)
