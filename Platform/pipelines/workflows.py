@@ -46,6 +46,18 @@ TrainOutput = NamedTuple("TrainOutput", checkpoint=FlyteFile, metadata=FlyteFile
 EvalMetrics = NamedTuple("EvalMetrics", ade=float, fde=float, gate_pass=bool)
 
 
+def _model_kwargs(config: dict) -> dict:
+    """Filter a saved checkpoint `config` down to kwargs the current AutoE2E
+    accepts. The reactive refactor (PR #94) removed `fusion_mode`, but old
+    checkpoints (and our own metadata) may still carry it, which would make
+    `AutoE2E(**config)` raise. Drop any keys the constructor no longer takes.
+    """
+    import inspect
+    from model_components.auto_e2e import AutoE2E
+    valid = set(inspect.signature(AutoE2E.__init__).parameters) - {"self"}
+    return {k: v for k, v in config.items() if k in valid}
+
+
 def _select_shard_dir(shards, dataset) -> str:
     """Download all shard FlyteDirectories and return the local path of the one
     whose manifest matches `dataset`.
@@ -427,7 +439,7 @@ def train_offline_rl(
 
     ckpt = torch.load(ckpt_path, map_location=device)
     config = ckpt["config"]
-    model = AutoE2E(**config).to(device)
+    model = AutoE2E(**_model_kwargs(config)).to(device)
     model.load_state_dict(ckpt["model_state_dict"])
 
     loader = make_pre_extracted_loader(shard_dir, batch_size=4, num_workers=0)
@@ -443,12 +455,14 @@ def train_offline_rl(
             ego_hist = batch["egomotion_history"].to(device)
             vis_hist = batch["visual_history"].to(device)
             target = batch["trajectory_target"].to(device)
+            map_input = torch.zeros(visual.shape[0], 3, 256, 256, device=device)
 
             optimizer.zero_grad()
-            pred, _, _ = model(visual, vis_hist, ego_hist)
+            pred = model(visual, map_input, vis_hist, ego_hist, mode="train",
+                         trajectory_target=target)
             # IQL advantage-weighted regression
             with torch.no_grad():
-                baseline_pred, _, _ = model(visual, vis_hist, ego_hist)
+                baseline_pred = model(visual, map_input, vis_hist, ego_hist, mode="infer")
             advantage = -(pred - target).pow(2).mean(dim=-1) + (baseline_pred - target).pow(2).mean(dim=-1)
             weights = torch.exp(beta * advantage).clamp(max=100.0)
             loss = (weights * (pred - target).pow(2).mean(dim=-1)).mean()
