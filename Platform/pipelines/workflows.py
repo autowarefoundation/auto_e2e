@@ -526,7 +526,7 @@ def _run_evaluation(checkpoint, shards, train_metadata, dataset, experiment_name
     # Load model
     ckpt = torch.load(ckpt_path, map_location=device)
     config = ckpt["config"]
-    model = AutoE2E(**config).to(device)
+    model = AutoE2E(**_model_kwargs(config)).to(device)
     model.load_state_dict(ckpt["model_state_dict"])
     model.eval()
 
@@ -540,8 +540,9 @@ def _run_evaluation(checkpoint, shards, train_metadata, dataset, experiment_name
             ego_hist = batch["egomotion_history"].to(device)
             vis_hist = batch["visual_history"].to(device)
             target = batch["trajectory_target"]  # (B, 128) on CPU
+            map_input = torch.zeros(visual.shape[0], 3, 256, 256, device=device)
 
-            pred, _, _ = model(visual, vis_hist, ego_hist)
+            pred = model(visual, map_input, vis_hist, ego_hist, mode="infer")
             pred = pred.cpu().numpy()  # (B, 128)
             target_np = target.numpy()
 
