@@ -128,12 +128,15 @@ def gate_check(
 # (comfort) or no other-agent labels (off-road), which L2D lacks.
 # ---------------------------------------------------------------------------
 
-# nuPlan comfort thresholds (#66 §3).
+# nuPlan comfort bounds (the full set from nuplan-devkit `ego_is_comfortable`).
 COMFORT_THRESHOLDS = {
-    "lon_jerk": 4.13,    # m/s^3
-    "lat_accel": 4.89,   # m/s^2
-    "lat_jerk": 8.37,    # m/s^3
-    "yaw_rate": 0.95,    # rad/s
+    "lon_accel_max": 2.40,    # m/s^2   upper bound on longitudinal accel
+    "lon_accel_min": -4.05,   # m/s^2   lower bound (braking)
+    "lat_accel": 4.89,        # m/s^2   |lateral accel|
+    "yaw_rate": 0.95,         # rad/s   |yaw rate|
+    "yaw_accel": 1.93,        # rad/s^2 |yaw acceleration|
+    "lon_jerk": 4.13,         # m/s^3   |longitudinal jerk|
+    "mag_jerk": 8.37,         # m/s^3   |jerk magnitude| = sqrt(lon_jerk^2 + lat_jerk^2)
 }
 
 
@@ -144,46 +147,85 @@ def compute_comfort_metrics(
     dt: float = 0.1,
     thresholds: dict[str, float] = COMFORT_THRESHOLDS,
 ) -> dict[str, float]:
-    """Comfort metrics straight from the ``(a, κ)`` outputs (#66 §3).
+    """Comfort metrics from the ``(a, κ)`` outputs vs the nuPlan bounds (#66 §3).
 
-    These need no ground truth and are natural for an action-space model. With
-    the per-step speed ``v[t] = v0 + Σ a·dt`` (clamped ≥ 0):
-      * longitudinal jerk ``Δa/dt``
-      * lateral acceleration ``v² κ``
-      * lateral jerk ``Δa_lat/dt``
-      * yaw rate ``v κ``
-    Reports the batch-mean of each per-sample peak plus the **comfort violation
-    rate** (fraction of samples exceeding ANY nuPlan threshold).
+    Mirrors nuplan-devkit's ``ego_is_comfortable`` set — no ground truth needed.
+    With the per-step speed ``v[t] = v0 + Σ a·dt`` (clamped ≥ 0):
+      * longitudinal acceleration ``a``         — two-sided bound ``[min, max]``
+      * lateral acceleration      ``v² κ``       — ``|·|`` bound
+      * yaw rate                  ``v κ``        — ``|·|`` bound
+      * yaw acceleration          ``Δ(v κ)/dt``  — ``|·|`` bound
+      * longitudinal jerk         ``Δa/dt``      — ``|·|`` bound
+      * jerk magnitude            ``√(lon_jerk² + lat_jerk²)`` — bound (this is the
+        8.37 m/s³ threshold; *not* lateral jerk)
+
+    Reports the batch-mean of each per-sample peak, a per-metric violation rate,
+    and the overall ``comfort_violation_rate`` (fraction of samples exceeding ANY
+    bound).
 
     Args:
         pred_accel, pred_curv: ``(B, T)`` predicted action signals.
         initial_speed: ``(B,)`` speed at the prediction start.
     """
-    accel = np.asarray(pred_accel, dtype=np.float64)
-    curv = np.asarray(pred_curv, dtype=np.float64)
+    accel = np.asarray(pred_accel, dtype=np.float64)                 # (B, T)
+    curv = np.asarray(pred_curv, dtype=np.float64)                   # (B, T)
     v0 = np.asarray(initial_speed, dtype=np.float64)[:, None]
 
-    v = np.clip(v0 + np.cumsum(accel, axis=1) * dt, 0.0, None)   # (B, T)
-    lon_jerk = np.abs(np.diff(accel, axis=1)) / dt               # (B, T-1)
-    lat_accel = np.abs(v ** 2 * curv)                            # (B, T)
-    lat_jerk = np.abs(np.diff(v ** 2 * curv, axis=1)) / dt       # (B, T-1)
-    yaw_rate = np.abs(v * curv)                                  # (B, T)
+    v = np.clip(v0 + np.cumsum(accel, axis=1) * dt, 0.0, None)       # (B, T)
+    lat_accel = v ** 2 * curv                                        # (B, T)
+    yaw_rate = v * curv                                              # (B, T)
+    lon_jerk = np.diff(accel, axis=1) / dt                           # (B, T-1)
+    lat_jerk = np.diff(lat_accel, axis=1) / dt                       # (B, T-1)
+    yaw_accel = np.diff(yaw_rate, axis=1) / dt                       # (B, T-1)
+    mag_jerk = np.hypot(lon_jerk, lat_jerk)                          # (B, T-1)
 
-    peaks = {
-        "lon_jerk": lon_jerk.max(axis=1),
-        "lat_accel": lat_accel.max(axis=1),
-        "lat_jerk": lat_jerk.max(axis=1),
-        "yaw_rate": yaw_rate.max(axis=1),
-    }
-    violated = np.zeros(accel.shape[0], dtype=bool)
     out: dict[str, float] = {}
-    for name, peak in peaks.items():
+    violated = np.zeros(accel.shape[0], dtype=bool)
+
+    # Longitudinal acceleration: asymmetric two-sided bound.
+    lon_max, lon_min = accel.max(axis=1), accel.min(axis=1)
+    out["max_lon_accel"] = float(lon_max.mean())
+    out["min_lon_accel"] = float(lon_min.mean())
+    lon_exceed = (lon_max > thresholds["lon_accel_max"]) | (lon_min < thresholds["lon_accel_min"])
+    out["lon_accel_violation_rate"] = float(lon_exceed.mean())
+    violated |= lon_exceed
+
+    # Magnitude-bounded quantities.
+    abs_peaks = {
+        "lat_accel": np.abs(lat_accel).max(axis=1),
+        "yaw_rate": np.abs(yaw_rate).max(axis=1),
+        "yaw_accel": np.abs(yaw_accel).max(axis=1),
+        "lon_jerk": np.abs(lon_jerk).max(axis=1),
+        "mag_jerk": mag_jerk.max(axis=1),
+    }
+    for name, peak in abs_peaks.items():
         out[f"max_{name}"] = float(peak.mean())
         exceed = peak > thresholds[name]
         out[f"{name}_violation_rate"] = float(exceed.mean())
         violated |= exceed
+
     out["comfort_violation_rate"] = float(violated.mean())
     return out
+
+
+def _erode_drivable(mask: np.ndarray, iterations: int) -> np.ndarray:
+    """Shrink the drivable area by ``iterations`` pixels (4-neighbour erosion).
+
+    A cell stays drivable only if it and its 4 neighbours are drivable (cells
+    outside the grid count as non-drivable), so after ``k`` iterations any cell
+    within Manhattan distance ``k`` of the boundary is removed. Pure-numpy, no
+    scipy. Used to require a safety margin from the road edge.
+    """
+    eroded = np.asarray(mask, dtype=bool)
+    for _ in range(max(0, int(iterations))):
+        nb = eroded.copy()
+        nb[1:, :] &= eroded[:-1, :]      # up neighbour
+        nb[:-1, :] &= eroded[1:, :]      # down neighbour
+        nb[:, 1:] &= eroded[:, :-1]      # left neighbour
+        nb[:, :-1] &= eroded[:, 1:]      # right neighbour
+        nb[0, :] = nb[-1, :] = nb[:, 0] = nb[:, -1] = False   # border = off-road
+        eroded = nb
+    return eroded
 
 
 def offroad_rate(
@@ -191,11 +233,18 @@ def offroad_rate(
     drivable_mask: np.ndarray,
     meters_per_pixel: float,
     center_px: tuple[int, int] | None = None,
+    headings: np.ndarray | None = None,
+    ego_size: tuple[float, float] | None = None,
+    dilation_px: int = 0,
 ) -> float:
     """Off-road proxy for collision rate when agents are unlabelled (#66 §2).
 
     L2D has no other-agent annotations, so we use the BEV drivable mask: a
-    trajectory is off-road if any predicted pose falls on a non-drivable cell.
+    trajectory is off-road if it leaves the drivable area. By default this checks
+    the trajectory **centre** point (lightweight). For drivable-area *compliance*
+    the ego footprint matters — a corner can leave the road while the centre stays
+    inside — so pass ``ego_size`` to check the four footprint corners, and/or
+    ``dilation_px`` to require a safety margin from the boundary.
 
     Args:
         positions: ``(B, T, 2)`` integrated ``(x_forward, y_left)`` in metres.
@@ -204,21 +253,53 @@ def offroad_rate(
         center_px: ego pixel ``(row, col)``; defaults to the grid centre.
             Convention (matches the repo's BEV rendering): forward +x → up
             (decreasing row), left +y → left (decreasing col).
+        headings: optional ``(B, T)`` heading per pose (rad) to orient the
+            footprint. If ``None`` and ``ego_size`` is given, heading is taken
+            from the finite-difference travel direction.
+        ego_size: optional ``(length, width)`` in metres. When given, the four
+            footprint corners are checked instead of only the centre.
+        dilation_px: erode the drivable mask by this many pixels first (require a
+            margin from the boundary). 0 = off.
 
     Returns:
         Fraction of trajectories that leave the drivable area.
     """
-    H, W = drivable_mask.shape
+    mask = _erode_drivable(drivable_mask, dilation_px) if dilation_px > 0 \
+        else np.asarray(drivable_mask, dtype=bool)
+    H, W = mask.shape
     cr, cc = center_px if center_px is not None else (H // 2, W // 2)
-    B = positions.shape[0]
+    pos = np.asarray(positions, dtype=np.float64)
+    B, T, _ = pos.shape
+
+    if ego_size is None:
+        query = pos[:, :, None, :]                                   # (B, T, 1, 2)
+    else:
+        length, width = ego_size
+        corners = np.array([                                         # ego frame
+            [length / 2, width / 2], [length / 2, -width / 2],
+            [-length / 2, width / 2], [-length / 2, -width / 2],
+        ])                                                           # (4, 2)
+        if headings is not None:
+            theta = np.asarray(headings, dtype=np.float64)
+        elif T >= 2:
+            d = np.diff(pos, axis=1)
+            d = np.concatenate([d[:, :1, :], d], axis=1)             # (B, T, 2)
+            theta = np.arctan2(d[..., 1], d[..., 0])                 # (B, T)
+        else:
+            theta = np.zeros((B, T))
+        cos, sin = np.cos(theta), np.sin(theta)                      # (B, T)
+        cx, cy = corners[:, 0], corners[:, 1]                        # (4,)
+        qx = pos[..., 0:1] + cos[..., None] * cx - sin[..., None] * cy   # (B, T, 4)
+        qy = pos[..., 1:2] + sin[..., None] * cx + cos[..., None] * cy   # (B, T, 4)
+        query = np.stack([qx, qy], axis=-1)                          # (B, T, 4, 2)
+
     offroad = 0
     for i in range(B):
-        rows = np.round(cr - positions[i, :, 0] / meters_per_pixel).astype(int)
-        cols = np.round(cc - positions[i, :, 1] / meters_per_pixel).astype(int)
+        rows = np.round(cr - query[i, ..., 0] / meters_per_pixel).astype(int)
+        cols = np.round(cc - query[i, ..., 1] / meters_per_pixel).astype(int)
         inside = (rows >= 0) & (rows < H) & (cols >= 0) & (cols < W)
-        # Outside the grid counts as off-road; inside, check the mask.
-        on_road = inside.copy()
-        on_road[inside] = drivable_mask[rows[inside], cols[inside]]
+        on_road = inside.copy()                                      # OOB = off-road
+        on_road[inside] = mask[rows[inside], cols[inside]]
         if not on_road.all():
             offroad += 1
     return offroad / max(B, 1)
