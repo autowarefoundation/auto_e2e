@@ -17,8 +17,6 @@ spec:
       image: REPLACE_WITH_ECR_URL/auto-e2e/training:latest
       args:
         - "--smoke-test"
-        - "--fusion-mode"
-        - "concat"
         - "--batch-size"
         - "4"
         - "--amp"
