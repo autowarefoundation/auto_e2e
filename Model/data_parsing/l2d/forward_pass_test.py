@@ -3,7 +3,7 @@ Forward pass test for AutoE2E using the yaak-ai/L2D LeRobot dataset.
 
 Tests two modes:
 1. Synthetic: Creates fake tensors matching L2D shapes to verify the model
-   accepts num_views=7 and all dimensions align. Always runs.
+   accepts num_views=6 and all dimensions align. Always runs.
 2. Live: Loads actual L2D data via LeRobotDataset. Skipped if lerobot is
    not installed or the dataset is not cached locally.
 
@@ -27,7 +27,6 @@ from torch.utils.data import DataLoader
 _MODEL_DIR = pathlib.Path(__file__).parent.parent.parent.resolve()
 sys.path.insert(0, str(_MODEL_DIR))
 
-from data_parsing.l2d.camera import NUM_VIEWS  # noqa: E402
 from data_parsing.l2d.egomotion import (  # noqa: E402
     EGOMOTION_DIM,
     MIN_FRAMES,
