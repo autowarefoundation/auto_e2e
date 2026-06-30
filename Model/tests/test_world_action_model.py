@@ -63,8 +63,9 @@ def test_forward_per_tick_returns_embedding_and_future(device):
     m = _wam(device)
     vh = torch.randn(2, 896, device=device)              # current buffer state
     emb, future = m(_frame(2, device), visual_history=vh)
-    assert emb.shape == (2, 224)                          # pushed to the buffer
-    assert len(future) == 4 and all(f.shape == (2, 224) for f in future)
+    assert emb.shape == (2, 224)                          # pushed to the buffer (history)
+    # future prediction = backbone feature maps [B, C, hw, hw] (Zain's #85 review)
+    assert len(future) == 4 and all(f.shape == (2, CH, 8, 8) for f in future)
 
 
 def test_forward_without_history_has_no_future(device):

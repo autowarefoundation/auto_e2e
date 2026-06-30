@@ -7,8 +7,9 @@ Zain's answers to the 5 interface questions (24/06 transcript + miro):
 1. **Backbone:** one SHARED image backbone; the JEPA target is a **FROZEN copy**
    of it (not EMA) — `JepaTargetEncoder(mode="frozen")`.
 2. **Horizons:** `N_past = N_future`, default **4**, sampled at **1 Hz**.
-3. **Feature level:** a **per-frame embedding** (default **224**); the
-   reconstruction lives in that feature space.
+3. **Feature level:** the history uses a per-frame **224** embedding; the JEPA
+   **future prediction reconstructs the backbone feature maps** ``[B, C, 8, 8]``
+   (per @m-zain-khawaja's #85 review, 30/06) — not a pooled vector.
 4. **Visual history:** a rolling **FIFO buffer** of the last `history_len`
    embeddings → `history_len * frame_embed_dim = 4 * 224 = 896` (= the existing
    `visual_history_dim`), fed to the reactive planner.
@@ -119,6 +120,62 @@ class HistoryAttentionPool(nn.Module):
         return self.out(pooled)                             # [B, history_len*embed]
 
 
+class BackboneFeatureMap(nn.Module):
+    """One multi-camera frame -> the backbone's last **feature map** ``[B, C, hw, hw]``.
+
+    Unlike :class:`FrameEncoder` (which pools to a vector for the history), this
+    keeps the spatial feature map — it is the JEPA target the future predictor
+    reconstructs (per Zain's #85 review: reconstruct ``[B, backbone_channels, 8, 8]``).
+    Multi-view frames are mean-pooled over views; the map is adaptive-avg-pooled
+    to ``hw x hw`` so the target grid is fixed regardless of the backbone's native
+    resolution.
+    """
+
+    def __init__(self, backbone: nn.Module, feature_hw: int = 8):
+        super().__init__()
+        self.backbone = backbone
+        self.feature_hw = feature_hw
+
+    def forward(self, frame: torch.Tensor) -> torch.Tensor:
+        if frame.dim() == 5:                                   # [B, V, 3, H, W]
+            B, V = frame.shape[:2]
+            feats = self.backbone(frame.reshape(B * V, *frame.shape[2:]))
+            m = feats[-1] if isinstance(feats, (list, tuple)) else feats
+            m = m.reshape(B, V, *m.shape[1:]).mean(dim=1)      # [B, C, h, w]
+        else:                                                  # [B, 3, H, W]
+            feats = self.backbone(frame)
+            m = feats[-1] if isinstance(feats, (list, tuple)) else feats
+        if m.shape[-2:] != (self.feature_hw, self.feature_hw):
+            m = nn.functional.adaptive_avg_pool2d(m, (self.feature_hw, self.feature_hw))
+        return m                                               # [B, C, hw, hw]
+
+
+class FutureFeatureMapPredictor(nn.Module):
+    """Predict ``num_future_steps`` future backbone feature maps ``[B, C, hw, hw]``
+    from the Encoded Visual History ``[B, visual_history_dim]``.
+
+    Lightweight decoder: a shared linear seed -> ``[B, mid, hw, hw]`` followed by
+    one 1x1 conv head per future step (keeps params modest vs a direct
+    ``history_dim -> C*hw*hw`` linear).
+    """
+
+    def __init__(self, in_dim: int, channels: int, feature_hw: int,
+                 num_future_steps: int, mid: int = 128):
+        super().__init__()
+        self.channels, self.feature_hw, self.mid = channels, feature_hw, mid
+        self.num_future_steps = num_future_steps
+        self.seed = nn.Linear(in_dim, mid * feature_hw * feature_hw)
+        self.act = nn.GELU()
+        self.heads = nn.ModuleList(
+            [nn.Conv2d(mid, channels, kernel_size=1) for _ in range(num_future_steps)])
+
+    def forward(self, visual_history: torch.Tensor) -> list:
+        B = visual_history.shape[0]
+        seed = self.act(self.seed(visual_history))
+        seed = seed.reshape(B, self.mid, self.feature_hw, self.feature_hw)
+        return [head(seed) for head in self.heads]   # N x [B, C, hw, hw]
+
+
 class WorldActionModel(nn.Module):
     """Slow world-model branch: history -> visual_history (+ future JEPA in train).
 
@@ -135,7 +192,7 @@ class WorldActionModel(nn.Module):
     def __init__(self, backbone: nn.Module, feature_channels: int = 768,
                  frame_embed_dim: int = 224, history_len: int = 4,
                  num_future_steps: int = 4, loss_type: str = "l1",
-                 history_aggregator: str = "concat"):
+                 history_aggregator: str = "concat", feature_hw: int = 8):
         super().__init__()
         if history_aggregator not in ("concat", "attention"):
             raise ValueError(
@@ -144,6 +201,8 @@ class WorldActionModel(nn.Module):
         self.history_len = history_len
         self.num_future_steps = num_future_steps
         self.frame_embed_dim = frame_embed_dim
+        self.feature_channels = feature_channels
+        self.feature_hw = feature_hw
         self.visual_history_dim = history_len * frame_embed_dim  # 4*224 = 896
 
         # History aggregator: how the FIFO of frame embeddings becomes the
@@ -154,16 +213,16 @@ class WorldActionModel(nn.Module):
             HistoryAttentionPool(frame_embed_dim, history_len)
             if history_aggregator == "attention" else None)
 
-        # Online per-frame encoder (shared backbone, trainable).
+        # Online per-frame encoder (shared backbone, trainable) -> 224 history embedding.
         self.encoder = FrameEncoder(backbone, feature_channels, frame_embed_dim)
-        # JEPA target: a FROZEN, stop-gradient copy of the encoder (#1).
-        self.target = JepaTargetEncoder(self.encoder, mode="frozen")
-        # Future feature predictor: visual_history -> num_future_steps embeddings.
-        self.future_predictor = nn.Sequential(
-            nn.Linear(self.visual_history_dim, self.visual_history_dim),
-            nn.GELU(),
-            nn.Linear(self.visual_history_dim, num_future_steps * frame_embed_dim),
-        )
+        # JEPA target: a FROZEN, stop-gradient copy of the backbone FEATURE MAP
+        # extractor (#1). Per Zain's #85 review (30/06) the JEPA reconstructs the
+        # future backbone feature maps [B, C, hw, hw], not a pooled vector.
+        self.target = JepaTargetEncoder(
+            BackboneFeatureMap(backbone, feature_hw), mode="frozen")
+        # Future feature-map predictor: visual_history -> N x [B, C, hw, hw].
+        self.future_predictor = FutureFeatureMapPredictor(
+            self.visual_history_dim, feature_channels, feature_hw, num_future_steps)
         self.recon_loss = FeatureReconstructionLoss(
             num_future_steps=num_future_steps, loss_type=loss_type)
 
@@ -185,10 +244,9 @@ class WorldActionModel(nn.Module):
         return self.history_pool(history_concat)
 
     def predict_future(self, visual_history: torch.Tensor) -> list:
-        """``visual_history [B, history_len*frame_embed_dim]`` -> list of
-        ``num_future_steps`` predicted future embeddings ``[B, frame_embed_dim]``."""
-        out = self.future_predictor(visual_history)
-        return list(torch.chunk(out, self.num_future_steps, dim=1))
+        """``visual_history [B, visual_history_dim]`` -> list of ``num_future_steps``
+        predicted future backbone **feature maps** ``[B, feature_channels, hw, hw]``."""
+        return self.future_predictor(visual_history)
 
     def forward(self, frame: torch.Tensor,
                 visual_history: torch.Tensor | None = None):
@@ -208,10 +266,11 @@ class WorldActionModel(nn.Module):
             * ``visual_embedding`` ``[B, frame_embed_dim]`` is pushed to the
               external :class:`RollingHistoryBuffer` (FIFO, size N) which forms
               the Encoded Visual History fed to the reactive planner;
-            * ``future_state_pred`` is a list of ``num_future_steps``
-              ``[B, frame_embed_dim]`` (only needed in training; ``None`` if no
-              ``visual_history`` is given). The JEPA loss is computed separately
-              via :meth:`jepa_loss` (kept out of the model, in the training loop).
+            * ``future_state_pred`` is a list of ``num_future_steps`` future
+              backbone **feature maps** ``[B, feature_channels, hw, hw]`` (only
+              needed in training; ``None`` if no ``visual_history`` is given). The
+              JEPA loss is computed separately via :meth:`jepa_loss` (kept out of
+              the model, in the training loop).
         """
         visual_embedding = self.encoder(frame)
         future_state_pred = (self.predict_future(visual_history)
@@ -223,9 +282,11 @@ class WorldActionModel(nn.Module):
         """Future Feature Reconstruction Loss (JEPA, L1) vs the FROZEN target.
 
         Args:
-            future_state_pred: list of ``num_future_steps`` ``[B, frame_embed_dim]``
-                from :meth:`forward` / :meth:`predict_future`.
-            future_frames: ``[B, num_future_steps, 3, H, W]`` actual future frames.
+            future_state_pred: list of ``num_future_steps`` feature maps
+                ``[B, feature_channels, hw, hw]`` from :meth:`predict_future`.
+            future_frames: ``[B, num_future_steps, 3, H, W]`` (or
+                ``[B, num_future_steps, V, 3, H, W]``) actual future frames; the
+                frozen target maps each to ``[B, feature_channels, hw, hw]``.
         """
         future_obs = [future_frames[:, k] for k in range(self.num_future_steps)]
         return compute_jepa_loss(future_state_pred, future_obs, self.target,
