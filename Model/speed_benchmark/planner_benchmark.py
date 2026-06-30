@@ -1,4 +1,4 @@
-"""Swappable-planner benchmark harness — gru vs flow_matching vs bezier.
+"""Swappable-planner benchmark harness — flow_matching vs bezier.
 
 Compares the trajectory planners registered in ``PLANNER_REGISTRY`` under
 IDENTICAL conditions (same embed_dim / horizon / inputs / device), as requested
@@ -37,7 +37,10 @@ from model_components.trajectory_planning import PLANNER_REGISTRY, build_planner
 
 CONFIG = dict(embed_dim=256, num_timesteps=64, num_signals=2,
               egomotion_dim=256, visual_history_dim=896)
-PLANNERS = ["gru", "flow_matching", "bezier"]
+# gru was removed from PLANNER_REGISTRY in the Reactive_E2E refactor; the
+# remaining registered planners are flow_matching and bezier. (Any name not in
+# the registry is skipped gracefully in main().)
+PLANNERS = ["flow_matching", "bezier"]
 WARMUP, ITERS, BATCH, H, W = 10, 50, 1, 8, 8
 
 
@@ -74,7 +77,9 @@ def _bench_one(name, device):
             if device.type == "cuda":
                 torch.cuda.synchronize()
             times.append((time.perf_counter() - t0) * 1000.0)
-    jerk, dcurv = _smoothness(out[0])
+    # Planners return the trajectory tensor directly ([B, T*S]) — the old
+    # (trajectory, ...) tuple contract was removed in the Reactive_E2E refactor.
+    jerk, dcurv = _smoothness(out)
     times.sort()
     p50 = times[len(times) // 2]
     p99 = times[min(len(times) - 1, int(round(len(times) * 0.99)) - 1)]
