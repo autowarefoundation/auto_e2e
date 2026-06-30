@@ -16,10 +16,11 @@ Zain's answers to the 5 interface questions (24/06 transcript + miro):
 5. **Training:** in `train_il` with equal loss weight; **L1** in feature space.
    Future frames come from the 1 Hz stream of the dataloader.
 
-Forward returns the visual-history vector always; **in training** it also returns
-the future-feature prediction and the JEPA loss (so `AutoE2E.forward` can return
-`(trajectory, future_states, ego_hidden)` when training and just `trajectory`
-otherwise). Reuses the merged/queued building blocks (JepaTargetEncoder,
+The per-tick ``forward`` returns ``(visual_embedding, future_state_pred)``: the
+embedding is pushed to the rolling history (→ reactive planner), and
+``future_state_pred`` (the predicted future feature maps, training only) feeds the
+JEPA loss, which is computed separately via :meth:`jepa_loss` in the training
+loop. Reuses the merged building blocks (JepaTargetEncoder,
 FeatureReconstructionLoss).
 """
 
