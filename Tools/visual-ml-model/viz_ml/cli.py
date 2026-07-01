@@ -94,7 +94,7 @@ def cmd_arch(args) -> int:
         _eprint(f"[arch] using supplied arch IR: {args.arch}")
         title = args.title
     else:
-        from .extract import extract_arch, claude_available
+        from .extract import extract_arch, claude_available, DEFAULT_MODEL, DEFAULT_EFFORT
         cfg = load_config(args.config)
         bundle = resolve(args.source, args.target_class, cfg)
         if not claude_available():
@@ -105,8 +105,10 @@ def cmd_arch(args) -> int:
         if bundle.registry_options:
             act = ", ".join(sorted(bundle.active_variant_classes())) or "(none selected)"
             _eprint(f"[variants] active: {act}")
-        _eprint(f"[arch] invoking claude (model={args.model or 'default'}) ...")
-        arch = extract_arch(bundle, model=args.model, timeout=args.timeout)
+        eff = args.effort or DEFAULT_EFFORT
+        mdl = args.model or DEFAULT_MODEL
+        _eprint(f"[arch] invoking claude (model={mdl}, effort={eff}) ...")
+        arch = extract_arch(bundle, model=args.model, effort=args.effort, timeout=args.timeout)
         title = args.title or bundle.entry_class
 
     errors = validate_schema(arch, load_schema(_ARCH_SCHEMA)) + validate_arch_structure(arch)
@@ -155,8 +157,12 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--save-ir", dest="save_ir", default=None,
                     help="also write the (Claude-generated) arch IR JSON here")
     sp.add_argument("--title", default=None, help="figure title")
-    sp.add_argument("--model", default=None, help="claude model id")
-    sp.add_argument("--timeout", type=int, default=600, help="claude call timeout (s)")
+    sp.add_argument("--model", default=None,
+                    help="claude model id (default: claude-opus-4-8-v1 — strongest Opus)")
+    sp.add_argument("--effort", default=None, choices=["low", "medium", "high", "xhigh", "max"],
+                    help="reasoning effort level (default: max)")
+    sp.add_argument("--timeout", type=int, default=900,
+                    help="claude call timeout (s); max-effort over large bundles is slow")
     sp.set_defaults(func=cmd_arch)
 
     sp = sub.add_parser("variants", help="list registry/factory variants the model can select among")
