@@ -45,7 +45,8 @@ def _derive_signals(vehicle_states: np.ndarray) -> np.ndarray:
         Float32 array of shape (T, 4): [speed, acceleration_x, yaw_rate, curvature].
     """
     speed = vehicle_states[:, 0]/3.6 # km/h to m/s
-    heading = np.unwrap(vehicle_states[:, 1])
+    # L2D stores heading in degrees (CW compass). Convert to standard CCW radians.
+    heading = np.unwrap(np.deg2rad(-vehicle_states[:, 1]))
     accel_x = vehicle_states[:, 6]
 
     # yaw_rate = d(heading) / dt, with zero at boundaries

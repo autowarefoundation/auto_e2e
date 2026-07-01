@@ -11,7 +11,8 @@ class Visualization:
     def accel_and_curv_to_meters_trajectory(
             action_sequence: torch.Tensor,
             current_speed: float,
-            future_timesteps: int
+            future_timesteps: int,
+            initial_heading: float = 0.0
     ) -> torch.Tensor:
 
         # change the trajectory format
@@ -26,7 +27,7 @@ class Visualization:
         v = float(current_speed)
 
         # 1.2 Yaw angle is needed to derive 2D acceleration
-        yaw = 0.0
+        yaw = float(initial_heading)
 
         for i in range(future_timesteps):
             accel = action_sequence[i, 0].item()
@@ -52,14 +53,14 @@ class Visualization:
         return trajectory_px
 
     @staticmethod
-    def overlay_the_trajectory_with_map(trajectory_px: torch.Tensor, map_image: Image.Image) -> Image.Image:
+    def overlay_the_trajectory_with_map(trajectory_px: torch.Tensor, map_image: Image.Image, color: str = "#33FF33") -> Image.Image:
 
         pixel_points = [(x.item(), y.item()) for x, y in trajectory_px]
 
         map_with_trajectory = map_image.copy()
 
         draw = ImageDraw.Draw(map_with_trajectory)
-        draw.line(pixel_points, fill="#33FF33", width=3)
+        draw.line(pixel_points, fill=color, width=3)
         x0 = pixel_points[0][0]
         y0 = pixel_points[0][1]
         r = 5.0
@@ -73,6 +74,8 @@ class Visualization:
             current_speed: float,
             map_image: Image.Image,
             radius_m: float,
+            color: str = "#33FF33",
+            initial_heading: float = 0.0
     ) -> Image.Image:
         """
         Integrates predicted trajectory into metric coordinates and
@@ -90,7 +93,9 @@ class Visualization:
 
         # 1. Convert trajectory to [x y] in meters
 
-        trajectory_m = Visualization.accel_and_curv_to_meters_trajectory(action_sequence, current_speed, _FUTURE_TIMESTEPS)
+        trajectory_m = Visualization.accel_and_curv_to_meters_trajectory(
+            action_sequence, current_speed, _FUTURE_TIMESTEPS, initial_heading
+        )
 
         # 2. Convert meters to pixels
 
@@ -98,6 +103,6 @@ class Visualization:
 
         # 3. Overlay the trajectory onto the map tile
 
-        map_with_trajectory = Visualization.overlay_the_trajectory_with_map(trajectory_px, map_image)
+        map_with_trajectory = Visualization.overlay_the_trajectory_with_map(trajectory_px, map_image, color)
 
         return map_with_trajectory

@@ -21,25 +21,32 @@ import argparse
 def visualization_on_l2d(episodes: list[int]) -> Image.Image:
     result = forward_pass_for_visualization_test(episodes=episodes, batch_size=2, pretrained_backbone=False)
 
-    pred_trajectory, target_trajectory, map_image, current_speed = result
+    pred_trajectory, target_trajectory, map_image, current_speed, current_heading = result
     radius_m = 800.0  # Standard map metric boundary assumption
 
-    print(f"Rendering ground truth trajectory (speed: {current_speed:.2f} m/s)...")
-    gt_img = Visualization.render_trajectory_map_tile(
+    print(f"Rendering trajectories (speed: {current_speed:.2f} m/s)...")
+
+    # 1. Draw extracted ground truth (actual driven path) in white
+    combined_img = Visualization.render_trajectory_map_tile(
         action_sequence=target_trajectory,
         current_speed=current_speed,
         map_image=map_image,
-        radius_m=radius_m
+        radius_m=radius_m,
+        color="#FFFFFF",  # White for actual driven path
+        initial_heading=current_heading
     )
 
-    pred_img = Visualization.render_trajectory_map_tile(
+    # 2. Draw predicted path in green
+    combined_img = Visualization.render_trajectory_map_tile(
         action_sequence=pred_trajectory,
         current_speed=current_speed,
-        map_image=map_image,
-        radius_m=radius_m
+        map_image=combined_img,
+        radius_m=radius_m,
+        color="#33FF33",  # Green for prediction
+        initial_heading=current_heading
     )
 
-    return gt_img, pred_img
+    return combined_img
 
 def forward_pass_for_visualization_test(episodes: list[int], batch_size: int, pretrained_backbone: bool):
     """
@@ -71,40 +78,38 @@ def forward_pass_for_visualization_test(episodes: list[int], batch_size: int, pr
     batch = next(iter(loader))
 
     visual_tiles = batch["visual_tiles"].to(device)
+
+    camera_tiles = visual_tiles[:, :6]
+    map_input = visual_tiles[:, 6]
+
     visual_history = batch["visual_history"].to(device)
     egomotion_history = batch["egomotion_history"].to(device)
     trajectory_target = batch["trajectory_target"].to(device)
 
-    map_tensor = batch["visual_tiles"][-1, 6].cpu()
-
-    # Reverse standard ImageNet normalization
-    mean = torch.tensor([0.485, 0.456, 0.406]).view(3, 1, 1)
-    std = torch.tensor([0.229, 0.224, 0.225]).view(3, 1, 1)
-    unnormalized_map = (map_tensor * std) + mean
-
-    unnormalized_map = torch.clamp(unnormalized_map, 0.0, 1.0)
-
-    raw_map_image = F.to_pil_image(unnormalized_map)
+    raw_map_tensor = batch["raw_map"][-1].cpu()
+    raw_map_image = F.to_pil_image(raw_map_tensor)
 
     current_speed = egomotion_history[-1, 252].item()
+    current_heading = batch["current_heading"][-1].item() if "current_heading" in batch else 0.0
 
     model = AutoE2E(
-        num_views=NUM_VIEWS,
+        num_views=NUM_VIEWS - 1,
         is_pretrained=pretrained_backbone,
     ).to(device)
 
     model.eval()
 
     with torch.no_grad():
-        trajectory, compressed, future = model(
-            visual_tiles,
-            map_tensor=batch["visual_tiles"][-1, 6],
+        out = model(
+            camera_tiles=camera_tiles,
+            map_input=map_input,
             visual_history=visual_history,
             egomotion_history=egomotion_history,
             mode="infer"
         )
+        trajectory = out[0] if isinstance(out, tuple) else out
 
-    return trajectory[-1].cpu(), trajectory_target[-1].cpu(), raw_map_image, current_speed
+    return trajectory[-1].cpu(), trajectory_target[-1].cpu(), raw_map_image, current_speed, current_heading
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='L2D visualization test')
@@ -113,8 +118,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     if args.live:
-        ground_truth_image, prediction_image = visualization_on_l2d(args.episodes)
-        ground_truth_image.show()
-        prediction_image.show()
+        combined_image = visualization_on_l2d(args.episodes)
+        combined_image.save("visualization_result.png")
     else:
         print("Skipping. Run with --live to execute L2D visualization.")
