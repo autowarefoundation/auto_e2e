@@ -64,6 +64,7 @@ class L2DSample(TypedDict):
     # the 1 Hz multi-view past/future windows, each (N, 7, 3, H, W), oldest->newest.
     history_frames: NotRequired[torch.Tensor]
     future_frames: NotRequired[torch.Tensor]
+    raw_map: NotRequired[torch.Tensor]
 
 
 class L2DDataset(Dataset):
@@ -246,6 +247,7 @@ class L2DDataset(Dataset):
             trajectory_target=trajectory_target,
             episode_index=ep_idx,
             frame_index=sample_idx_in_episode,
+            raw_map=self.lerobot_dataset[row]["observation.images.map"],
         )
 
         # World Model (#16): the 1 Hz multi-view past/future windows for the JEPA

@@ -19,12 +19,12 @@ Parser for the L2D LeRobot dataset (v3.0), producing tensors directly consumable
 
 ### Egomotion history signals `(256,) = 64 × 4`
 
-| Index | Signal | Source |
-|-------|--------|--------|
-| 0 | Speed (m/s) | `observation.state.vehicle[0]` directly |
+| Index | Signal                | Source |
+|-------|-----------------------|--------|
+| 0 | Speed (km/h)          | `observation.state.vehicle[0]` directly |
 | 1 | Acceleration_x (m/s²) | `observation.state.vehicle[6]` directly |
-| 2 | Yaw rate (rad/s) | `diff(heading) / dt` |
-| 3 | Curvature (rad/m) | `yaw_rate / speed` (guarded) |
+| 2 | Yaw rate (rad/s)      | `diff(heading) / dt` |
+| 3 | Curvature (rad/m)     | `yaw_rate / speed` (guarded) |
 
 ### Trajectory target signals `(128,) = 64 × 2`
 
