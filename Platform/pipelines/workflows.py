@@ -770,3 +770,32 @@ def wf_full_pipeline(
                               il_metadata=il_out.metadata, epochs=epochs_rl, tau=tau, beta=beta)
     return evaluate_rl_policy(checkpoint=rl_out.checkpoint, shards=all_shards, dataset=dataset,
                               train_metadata=rl_out.metadata)
+
+
+@workflow
+def wf_ingest_train_eval(
+    dataset: Dataset = Dataset.L2D,
+    episodes: int = 3,
+    backbone: Backbone = Backbone.SWIN_V2_TINY,
+    epochs_il: int = 3,
+    batch_size: int = 4,
+    lr: float = 1e-4,
+) -> EvalMetrics:
+    """Ingest+Process ALL datasets → IL Train → IL Eval (no offline RL).
+
+    Same as wf_full_pipeline but stops after IL evaluation. Useful when you only
+    want a supervised checkpoint + open-loop metrics, or when the offline-RL step
+    is too memory-hungry to co-run at the current BEV resolution (#77).
+    """
+    raw_l2d = data_ingest(dataset=Dataset.L2D, episodes=episodes)
+    shards_l2d = data_processing(raw_data=raw_l2d, dataset=Dataset.L2D, episodes=episodes)
+
+    raw_nv = data_ingest(dataset=Dataset.NVIDIA_PHYSICAL_AI, episodes=episodes)
+    shards_nv = data_processing(raw_data=raw_nv, dataset=Dataset.NVIDIA_PHYSICAL_AI, episodes=episodes)
+
+    all_shards = [shards_l2d, shards_nv]
+
+    il_out = train_il(shards=all_shards, dataset=dataset, backbone=backbone,
+                      epochs=epochs_il, batch_size=batch_size, lr=lr)
+    return evaluate_il_policy(checkpoint=il_out.checkpoint, shards=all_shards, dataset=dataset,
+                              train_metadata=il_out.metadata)
