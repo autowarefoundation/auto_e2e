@@ -1,75 +1,57 @@
 import torch.nn as nn
-from .backbone import Backbone
-from .feature_fusion import FeatureFusion
-from .trajectory_planning import build_planner
-from .future_state import FutureState
-from .map_encoder import build_map_encoder, build_map_bev_fusion
+from .reactive_e2e import ReactiveE2E
+from .world_action_model import RollingHistoryBuffer, WorldActionModel
 
 
 class AutoE2E(nn.Module):
     def __init__(self, backbone="swin_v2_tiny", num_views=7, embed_dim=256,
-                 fusion_mode="bev", is_pretrained=True,
+                 is_pretrained=True,
                  image_feature_size=8, view_fusion_kwargs=None,
                  num_timesteps=64, num_signals=2, egomotion_dim=256,
                  visual_history_dim=896,
                  map_type="rasterized", map_in_channels=3,
                  map_fusion_mode="residual", map_fusion_kwargs=None,
-                 planner_mode="gru", planner_kwargs=None):
+                 temporal_memory_mode="no_memory", temporal_memory_kwargs=None,
+                 planner_mode="bezier", planner_kwargs=None,
+                 enable_world_model=False, world_model_kwargs=None):
         super(AutoE2E, self).__init__()
 
-        # Camera backbone feature extractor
-        self.Backbone = Backbone(backbone=backbone, is_pretrained=is_pretrained)
+        # Reactive model which runs at 10Hz and processes multi-camera inputs
+        # a rendered map image and egomotion history to predict a driving trajectory
+        # to reach the near-horizon navigational goal
+        self.Reactive_E2E = ReactiveE2E(backbone=backbone, num_views=num_views, embed_dim=embed_dim,
+                 is_pretrained=is_pretrained,
+                 image_feature_size=image_feature_size, view_fusion_kwargs=view_fusion_kwargs,
+                 num_timesteps=num_timesteps, num_signals=num_signals, egomotion_dim=egomotion_dim,
+                 visual_history_dim=visual_history_dim,
+                 map_type=map_type, map_in_channels=map_in_channels,
+                 map_fusion_mode=map_fusion_mode, map_fusion_kwargs=map_fusion_kwargs,
+                 temporal_memory_mode=temporal_memory_mode, temporal_memory_kwargs=temporal_memory_kwargs,
+                 planner_mode=planner_mode, planner_kwargs=planner_kwargs)
 
-        # Multi-scale feature fusion with view unification.
-        # view_fusion_kwargs forwards bev_h/bev_w/pc_range/image_size to BEV fusion.
-        self.FeatureFusion = FeatureFusion(
-            num_views=num_views,
-            backbone_channels=self.Backbone.backbone_channels,
-            embed_dim=embed_dim,
-            fusion_mode=fusion_mode,
-            image_feature_size=image_feature_size,
-            view_fusion_kwargs=view_fusion_kwargs,
-        )
+        # World Action Model (slow, ~1Hz): encodes the multi-camera history into
+        # the Encoded Visual History (fed to the reactive planner) and predicts
+        # future visual features (JEPA). Reuses the reactive backbone (one shared
+        # backbone; the JEPA target is a frozen copy of it). Opt-in (default OFF)
+        # so the reactive-only default is byte-identical.
+        self.World_Action_Model_E2E = None
+        self.visual_history_buffer = None
+        if enable_world_model:
+            wmk = dict(world_model_kwargs or {})
+            history_len = wmk.pop("history_len", 4)
+            self.World_Action_Model_E2E = WorldActionModel(
+                backbone=self.Reactive_E2E.Backbone,
+                frame_embed_dim=visual_history_dim // history_len,
+                history_len=history_len, **wmk,
+            )
+            self.visual_history_buffer = RollingHistoryBuffer(history_len=history_len)
 
-        # For BEV fusion mode the spatial size is bev_h × bev_w (potentially non-square).
-        # For concat/cross_attn it is image_feature_size × image_feature_size.
-        if fusion_mode == "bev":
-            vfk = view_fusion_kwargs or {"bev_h": 450, "bev_w": 300}
-            map_output_h = vfk["bev_h"]
-            map_output_w = vfk["bev_w"]
-        else:
-            map_output_h = image_feature_size
-            map_output_w = image_feature_size
- 
-        # Map encoder: encodes the BEV nav-map image into spatial map features
-        self.MapEncoder = build_map_encoder(
-            map_type,
-            in_channels=map_in_channels,
-            embed_dim=embed_dim,
-            output_h=map_output_h,
-            output_w=map_output_w,
-        )
- 
-        # Map BEV fusion: combines image BEV features with map BEV features
-        self.MapBEVFusion = build_map_bev_fusion(
-            map_fusion_mode,
-            embed_dim=embed_dim,
-            **(map_fusion_kwargs or {}),
-        )
+    def reset_visual_history(self):
+        """Clear the World Model's rolling buffer (call between sequences)."""
+        if self.visual_history_buffer is not None:
+            self.visual_history_buffer = RollingHistoryBuffer(
+                history_len=self.visual_history_buffer.history_len)
 
-        # Trajectory decoder — swappable via planner_mode (gru, flow_matching).
-        self.TrajectoryPlanner = build_planner(
-            planner_mode,        
-            embed_dim=embed_dim,
-            num_timesteps=num_timesteps,
-            num_signals=num_signals,
-            egomotion_dim=egomotion_dim,
-            visual_history_dim=visual_history_dim,
-            **(planner_kwargs or {}),
-        )
-
-        # Future visual state prediction conditioned on planner ego_hidden
-        self.FutureState = FutureState(embed_dim=embed_dim, ego_hidden_dim=embed_dim)
 
     def forward(self, camera_tiles, map_input, visual_history, egomotion_history,
                 camera_params=None, mode="train", trajectory_target=None, **kwargs):
@@ -92,43 +74,54 @@ class AutoE2E(nn.Module):
         Args:
             camera_tiles: (B, V, 3, H, W) — V camera images (V=7 by default).
             map_input: (B, 3, H_map, W_map) — BEV nav-map image.
-            visual_history: (B, visual_history_dim).
-            egomotion_history: (B, egomotion_dim).
+            visual_history: (B, T, visual_history_dim) or (B, visual_history_dim).
+            egomotion_history: (B, T, egomotion_dim) or (B, egomotion_dim).
             camera_params: Optional (B, V, 3, 4) ego-to-pixel projection matrices.
             mode: "train" to produce future_visual_features; anything else skips it.
 
         Returns:
             trajectory: (B, num_timesteps * num_signals)
             ego_hidden: (B, embed_dim)
-            future_visual_features: list of 4 × (B, embed_dim, H, W), or None
+            planner_loss: Used only when mode="train" during network training, otherwise set to None
         """
-        B, V, C, H, W = camera_tiles.shape
 
-        # --- Camera branch ---
-        x = camera_tiles.reshape(B * V, C, H, W)
-        features = self.Backbone(x)
-        image_bev = self.FeatureFusion(features, B, V, camera_params=camera_params)
+        # World Action Model (1Hz): encode the current multi-camera frame into the
+        # rolling Encoded Visual History fed to the reactive planner, and (in
+        # training) predict the future feature state for the JEPA loss.
+        #
+        # IMPORTANT — the rolling buffer here is **inference / rollout memory only**:
+        #   * pushed embeddings are DETACHED, so the buffer never carries an
+        #     autograd graph across forward steps (no cross-step BPTT / graph leak),
+        #   * it holds per-sequence state — call ``reset_visual_history()`` between
+        #     independent sequences (it is NOT safe to share across shuffled batches).
+        # Batched JEPA TRAINING does NOT use this buffer: it goes through the
+        # stateless, windowed and fully-differentiable path on ``WorldActionModel``
+        # (``encode_history`` -> ``aggregate_history`` -> ``predict_future`` ->
+        # ``jepa_loss``) driven from ``train_il`` (see #13).
+        future_state_pred = None
+        if self.World_Action_Model_E2E is not None:
+            wam = self.World_Action_Model_E2E
+            # Encode the current 1 Hz multi-view frame; push a detached copy so the
+            # planner's history is a pure rolling memory (no graph across steps).
+            visual_embedding, _ = wam(camera_tiles)
+            self.visual_history_buffer.push(visual_embedding.detach())
+            # The planner and the future prediction read the SAME history (post-push,
+            # i.e. including the current frame) so the JEPA context stays aligned
+            # with what the planner actually sees.
+            visual_history = wam.aggregate_history(
+                self.visual_history_buffer.visual_history())
+            if mode == "train":
+                future_state_pred = wam.predict_future(visual_history)
 
-        # --- Map branch ---
-        map_bev = self.MapEncoder(map_input)
+        trajectory = self.Reactive_E2E(camera_tiles, map_input, visual_history, egomotion_history,
+        camera_params=camera_params, mode=mode, trajectory_target=trajectory_target, **kwargs)
 
-        # --- Fuse image BEV + map BEV ---
-        fused_features = self.MapBEVFusion(image_bev, map_bev)
+        # Inference: just the trajectory. Training with the World Model on: also
+        # return the predicted future state (the differentiable JEPA loss itself is
+        # computed in the training loop via the windowed WorldActionModel path).
+        if self.World_Action_Model_E2E is not None and mode == "train":
+            return trajectory, future_state_pred
+        return trajectory
+        
+    
 
-        if mode == "train":
-            if trajectory_target is None:
-                raise ValueError(
-                    "AutoE2E.forward(mode='train') requires trajectory_target."
-                )
-            planner_loss, ego_hidden = self.TrajectoryPlanner.compute_planner_loss(
-                fused_features, visual_history, egomotion_history,
-                trajectory_target,
-            )
-            future_visual_features = self.FutureState(fused_features, ego_hidden)
-            return planner_loss, ego_hidden, future_visual_features
-
-
-        trajectory, ego_hidden = self.TrajectoryPlanner(
-            fused_features, visual_history, egomotion_history, **kwargs,
-        )
-        return trajectory, ego_hidden, None

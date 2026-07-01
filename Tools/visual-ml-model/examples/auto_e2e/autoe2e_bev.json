@@ -1,0 +1,11 @@
+{
+  "backbone": "swin_v2_tiny",
+  "num_views": 8,
+  "embed_dim": 256,
+  "fusion_mode": "bev",
+  "is_pretrained": true,
+  "image_feature_size": 8,
+  "num_timesteps": 64,
+  "num_signals": 2,
+  "egomotion_dim": 256
+}

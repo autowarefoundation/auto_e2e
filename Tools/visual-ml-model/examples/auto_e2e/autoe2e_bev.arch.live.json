@@ -1,0 +1,49 @@
+{
+  "arch_version": "1.0",
+  "model_name": "AutoE2E",
+  "arch_family": "multi-camera BEV → autoregressive trajectory planner + future-state self-supervision",
+  "config_assumptions": {
+    "backbone": "swin_v2_tiny",
+    "num_views": 8,
+    "embed_dim": 256,
+    "fusion_mode": "bev",
+    "image_feature_size": 8,
+    "num_timesteps": 64,
+    "num_signals": 2,
+    "egomotion_dim": 256,
+    "bev_h": 450,
+    "bev_w": 300
+  },
+  "global_confidence": 0.85,
+  "nodes": [
+    { "id": "input_cameras", "title": "Multi-View Cameras", "desc": "8 surround-view camera images", "shape": "(B,8,3,H,W)", "role": "input" },
+    { "id": "input_visual_history", "title": "Visual History", "desc": "Compressed frame-to-frame visual memory (64 frames x 14-dim)", "shape": "(B,896)", "role": "input" },
+    { "id": "input_egomotion", "title": "Egomotion History", "desc": "Past ego-vehicle motion encoding", "shape": "(B,256)", "role": "input" },
+    { "id": "input_camera_params", "title": "Camera Calibration", "desc": "Intrinsic @ extrinsic ego-to-pixel projection per view", "shape": "(B,8,3,4)", "role": "input" },
+    { "id": "backbone", "title": "Backbone — SwinV2-Tiny", "desc": "Pre-trained multi-scale feature extraction (4 stages, 1440 total channels)", "shape": null, "role": "backbone" },
+    { "id": "bev_fusion", "title": "BEV Feature Fusion", "desc": "Multi-scale pool to channel projection to BEV spatial cross-attention with learned 3D reference points", "shape": "(B,256,450,300)", "role": "fusion" },
+    { "id": "trajectory_planner", "title": "Trajectory Planner", "desc": "Autoregressive GRU decoder with deformable cross-attention to BEV grid (64 steps x 2 signals)", "shape": null, "role": "policy" },
+    { "id": "future_state", "title": "Future State Predictor", "desc": "Predicts 4 future BEV feature maps conditioned on planner intent (ego_hidden bias)", "shape": "(4x(B,256,450,300))", "role": "future_state", "train_only": true, "group": "train" },
+    { "id": "output_trajectory", "title": "Trajectory", "desc": "Planned acceleration + curvature over 64 timesteps", "shape": "(B,128)", "role": "output" },
+    { "id": "output_ego_hidden", "title": "Ego Hidden State", "desc": "Final GRU hidden state summarising planner intent", "shape": "(B,256)", "role": "output" },
+    { "id": "loss_trajectory", "title": "Trajectory Loss", "desc": "Supervision on predicted vs ground-truth waypoints (inferred)", "shape": null, "role": "loss", "train_only": true, "confidence": 0.5 },
+    { "id": "loss_feature", "title": "Feature Prediction Loss", "desc": "Self-supervised loss: predicted future BEV vs actual future BEV (inferred)", "shape": null, "role": "loss", "train_only": true, "confidence": 0.5 }
+  ],
+  "edges": [
+    { "from": "input_cameras", "to": "backbone", "kind": "dataflow", "label": "(B*8,3,H,W)" },
+    { "from": "backbone", "to": "bev_fusion", "kind": "dataflow", "label": "4 multi-scale feature maps" },
+    { "from": "input_camera_params", "to": "bev_fusion", "kind": "dataflow", "label": "ego-to-pixel projection" },
+    { "from": "bev_fusion", "to": "trajectory_planner", "kind": "dataflow", "label": "BEV grid (256,450,300)" },
+    { "from": "input_visual_history", "to": "trajectory_planner", "kind": "feedback", "label": "visual memory GRU h0" },
+    { "from": "input_egomotion", "to": "trajectory_planner", "kind": "feedback", "label": "ego history GRU h0" },
+    { "from": "trajectory_planner", "to": "output_trajectory", "kind": "dataflow", "label": null },
+    { "from": "trajectory_planner", "to": "output_ego_hidden", "kind": "dataflow", "label": null },
+    { "from": "trajectory_planner", "to": "future_state", "kind": "dataflow", "label": "ego_hidden" },
+    { "from": "bev_fusion", "to": "future_state", "kind": "skip", "label": "fused BEV (reuse)" },
+    { "from": "output_trajectory", "to": "loss_trajectory", "kind": "loss", "label": "predicted" },
+    { "from": "future_state", "to": "loss_feature", "kind": "loss", "label": "predicted future features" }
+  ],
+  "groups": [
+    { "id": "train", "label": "ONLY DURING TRAINING", "kind": "train_only_banner" }
+  ]
+}

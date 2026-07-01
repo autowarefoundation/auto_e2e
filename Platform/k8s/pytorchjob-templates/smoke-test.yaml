@@ -1,0 +1,54 @@
+# Single-GPU training PyTorchJob template with Kueue queue integration.
+# Submit: kubectl apply -f smoke-test.yaml
+# Monitor: kubectl get pytorchjob -n auto-e2e-training
+apiVersion: kubeflow.org/v1
+kind: PyTorchJob
+metadata:
+  name: smoke-test-phase2
+  namespace: auto-e2e-training
+  labels:
+    kueue.x-k8s.io/queue-name: gpu-queue
+    kueue.x-k8s.io/priority-class: research-low
+spec:
+  runPolicy:
+    cleanPodPolicy: None
+    suspend: true
+    ttlSecondsAfterFinished: 3600
+  pytorchReplicaSpecs:
+    Master:
+      replicas: 1
+      restartPolicy: OnFailure
+      template:
+        metadata:
+          annotations:
+            karpenter.sh/do-not-disrupt: "true"
+        spec:
+          serviceAccountName: training-sa
+          nodeSelector:
+            workload-type: gpu-training
+          tolerations:
+            - key: nvidia.com/gpu
+              operator: Exists
+              effect: NoSchedule
+          containers:
+            - name: pytorch
+              image: REPLACE_WITH_ECR_URL/auto-e2e/training:latest
+              imagePullPolicy: Always
+              args:
+                - "--smoke-test"
+                - "--fusion-mode"
+                - "concat"
+                - "--batch-size"
+                - "4"
+                - "--amp"
+                - "--no-pretrained"
+              env:
+                - name: MLFLOW_TRACKING_URI
+                  value: "http://mlflow.mlflow.svc.cluster.local:5000"
+              resources:
+                requests:
+                  cpu: "4"
+                  memory: "16Gi"
+                  nvidia.com/gpu: "1"
+                limits:
+                  nvidia.com/gpu: "1"

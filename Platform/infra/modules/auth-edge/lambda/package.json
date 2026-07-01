@@ -1,0 +1,7 @@
+{
+  "name": "auto-e2e-auth-edge",
+  "version": "1.0.0",
+  "dependencies": {
+    "cognito-at-edge": "^1.5.0"
+  }
+}

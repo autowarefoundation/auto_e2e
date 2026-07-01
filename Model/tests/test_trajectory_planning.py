@@ -4,7 +4,7 @@ import sys
 sys.path.append('..')
 
 from model_components.trajectory_planning import (
-    GRUPlanner,
+    BezierPlanner,
     FlowMatchingPlanner,
     build_planner,
     PLANNER_REGISTRY,
@@ -21,148 +21,6 @@ def make_inputs(batch_size, num_views, device, include_camera_params=False):
         return visual, map_input, visual_history, egomotion, camera_params
     return visual, map_input, visual_history, egomotion
 
-
-class TestGRUPlannerComponent:
-    def test_output_shapes(self, device):
-        planner = GRUPlanner(embed_dim=256).to(device)
-        bev = torch.randn(4, 256, 8, 8, device=device)
-        vis_hist = torch.randn(4, 896, device=device)
-        ego = torch.randn(4, 256, device=device)
-        traj, ego_hidden = planner(bev, vis_hist, ego)
-
-        assert traj.shape == (4, 128), "Expected 64 timesteps × 2 signals"
-        assert ego_hidden.shape == (4, 256), "ego_hidden must be 256-dim"
-
-    def test_works_with_arbitrary_bev_resolution(self, device):
-        """Deformable cross-attention via grid_sample should be size-agnostic."""
-        planner = GRUPlanner(embed_dim=256).to(device)
-        vis_hist = torch.randn(2, 896, device=device)
-        ego = torch.randn(2, 256, device=device)
-        for h, w in [(8, 8), (16, 32), (45, 30)]:
-            bev = torch.randn(2, 256, h, w, device=device)
-            traj, ego_hidden = planner(bev, vis_hist, ego)
-            assert traj.shape == (2, 128)
-            assert ego_hidden.shape == (2, 256)
-
-    def test_bev_features_influence_trajectory(self, device):
-        planner = GRUPlanner(embed_dim=256).to(device)
-        planner.eval()
-        vis_hist = torch.randn(1, 896, device=device)
-        ego = torch.randn(1, 256, device=device)
-
-        bev_a = torch.randn(1, 256, 8, 8, device=device)
-        bev_b = torch.randn(1, 256, 8, 8, device=device)
-
-        traj_a, _ = planner(bev_a, vis_hist, ego)
-        traj_b, _ = planner(bev_b, vis_hist, ego)
-
-        assert not torch.allclose(traj_a, traj_b, atol=1e-5), \
-            "Trajectory should depend on BEV features"
-
-    def test_egomotion_influences_trajectory(self, device):
-        planner = GRUPlanner(embed_dim=256).to(device)
-        planner.eval()
-        bev = torch.randn(1, 256, 8, 8, device=device)
-        vis_hist = torch.randn(1, 896, device=device)
-
-        traj_a, _ = planner(bev, vis_hist, torch.randn(1, 256, device=device))
-        traj_b, _ = planner(bev, vis_hist, torch.randn(1, 256, device=device))
-
-        assert not torch.allclose(traj_a, traj_b, atol=1e-5), \
-            "Trajectory should depend on egomotion history"
-
-    def test_visual_history_influences_trajectory(self, device):
-        planner = GRUPlanner(embed_dim=256).to(device)
-        planner.eval()
-        bev = torch.randn(1, 256, 8, 8, device=device)
-        ego = torch.randn(1, 256, device=device)
-
-        traj_a, _ = planner(bev, torch.randn(1, 896, device=device), ego)
-        traj_b, _ = planner(bev, torch.randn(1, 896, device=device), ego)
-
-        assert not torch.allclose(traj_a, traj_b, atol=1e-5), \
-            "Trajectory should depend on visual history"
-
-    def test_configurable_horizon(self, device):
-        planner = GRUPlanner(embed_dim=256, num_timesteps=32, num_signals=3).to(device)
-        bev = torch.randn(2, 256, 8, 8, device=device)
-        vis_hist = torch.randn(2, 896, device=device)
-        ego = torch.randn(2, 256, device=device)
-        traj, _ = planner(bev, vis_hist, ego)
-        assert traj.shape == (2, 32 * 3)
-
-    def test_gradients_flow(self, device):
-        planner = GRUPlanner(embed_dim=256, num_timesteps=4).to(device)
-        bev = torch.randn(1, 256, 8, 8, device=device, requires_grad=True)
-        vis_hist = torch.randn(1, 896, device=device, requires_grad=True)
-        ego = torch.randn(1, 256, device=device, requires_grad=True)
-        traj, ego_hidden = planner(bev, vis_hist, ego)
-        (traj.sum() + ego_hidden.sum()).backward()
-        assert bev.grad is not None and bev.grad.abs().max() > 0
-        assert vis_hist.grad is not None and vis_hist.grad.abs().max() > 0
-        assert ego.grad is not None and ego.grad.abs().max() > 0
-
-    def test_wrong_visual_history_dim_raises(self, device):
-        planner = GRUPlanner(embed_dim=256, visual_history_dim=896).to(device)
-        bev = torch.randn(1, 256, 8, 8, device=device)
-        bad_vis_hist = torch.randn(1, 1024, device=device)  # wrong last dim
-        ego = torch.randn(1, 256, device=device)
-        with pytest.raises(ValueError, match="visual_history last dim must be 896"):
-            planner(bev, bad_vis_hist, ego)
-
-    def test_wrong_egomotion_dim_raises(self, device):
-        planner = GRUPlanner(embed_dim=256, egomotion_dim=256).to(device)
-        bev = torch.randn(1, 256, 8, 8, device=device)
-        vis_hist = torch.randn(1, 896, device=device)
-        bad_ego = torch.randn(1, 128, device=device)  # wrong last dim
-        with pytest.raises(ValueError, match="egomotion_history last dim must be 256"):
-            planner(bev, vis_hist, bad_ego)
-
-    def test_offset_scale_negative_raises(self):
-        with pytest.raises(ValueError, match="offset_scale"):
-            GRUPlanner(embed_dim=256, offset_scale=-1.0)
-
-    def test_offset_scale_nan_raises(self):
-        with pytest.raises(ValueError, match="offset_scale"):
-            GRUPlanner(embed_dim=256, offset_scale=float("nan"))
-
-    def test_offset_scale_inf_raises(self):
-        with pytest.raises(ValueError, match="offset_scale"):
-            GRUPlanner(embed_dim=256, offset_scale=float("inf"))
-
-    def test_offset_scale_bool_raises(self):
-        # bool is an int subclass; the validator must reject it explicitly.
-        with pytest.raises(ValueError, match="offset_scale"):
-            GRUPlanner(embed_dim=256, offset_scale=True)
-
-    def test_offset_scale_non_numeric_raises(self):
-        with pytest.raises(ValueError, match="offset_scale"):
-            GRUPlanner(embed_dim=256, offset_scale="0.1")
-
-    def test_offset_scale_zero_vs_nonzero_differ(self, device):
-        """offset_scale=0 makes deformable attention sample only at the
-        reference point; output must still be valid but differ from the
-        nonzero default."""
-        torch.manual_seed(0)
-        planner_zero = GRUPlanner(embed_dim=256, offset_scale=0.0).to(device)
-        torch.manual_seed(0)
-        planner_pos = GRUPlanner(embed_dim=256, offset_scale=0.1).to(device)
-        planner_zero.eval()
-        planner_pos.eval()
-
-        bev = torch.randn(1, 256, 8, 8, device=device)
-        vis_hist = torch.randn(1, 896, device=device)
-        ego = torch.randn(1, 256, device=device)
-
-        traj_zero, _ = planner_zero(bev, vis_hist, ego)
-        traj_pos, _ = planner_pos(bev, vis_hist, ego)
-
-        assert torch.isfinite(traj_zero).all(), \
-            "offset_scale=0 (reference-point-only) must still produce finite output"
-        assert not torch.allclose(traj_zero, traj_pos, atol=1e-5), \
-            "offset_scale=0 and offset_scale=0.1 should produce different trajectories"
-
-
 # ---------------------------------------------------------------------------
 # Planner registry / Flow Matching planner / backcompat
 # ---------------------------------------------------------------------------
@@ -170,7 +28,7 @@ class TestGRUPlannerComponent:
 
 class TestPlannerRegistry:
     def test_all_modes_registered(self):
-        assert "gru" in PLANNER_REGISTRY
+        assert "bezier" in PLANNER_REGISTRY
         assert "flow_matching" in PLANNER_REGISTRY
 
     def test_invalid_mode_raises(self):
@@ -178,8 +36,8 @@ class TestPlannerRegistry:
             build_planner("nonexistent", embed_dim=256)
 
     def test_build_returns_correct_type(self):
-        gru = build_planner("gru", embed_dim=256)
-        assert isinstance(gru, GRUPlanner)
+        bezier = build_planner("bezier", embed_dim=256)
+        assert isinstance(bezier, BezierPlanner)
         fm = build_planner("flow_matching", embed_dim=256)
         assert isinstance(fm, FlowMatchingPlanner)
 
@@ -194,36 +52,14 @@ class TestFlowMatchingPlanner:
         assert target_velocity.shape == (4, 128)
         assert (t >= 0).all() and (t <= 1).all()
 
-    def test_compute_planner_loss_end_to_end(self, device):
-        """The canonical training-loop pattern must work:
-        compute_planner_loss returns a scalar loss + ego_hidden, and
-        backprop reaches the BEV input."""
-        planner = FlowMatchingPlanner(embed_dim=256).to(device)
-        planner.train()
-        bev = torch.randn(2, 256, 8, 8, device=device, requires_grad=True)
-        vis_hist = torch.randn(2, 896, device=device)
-        ego = torch.randn(2, 256, device=device)
-        target = torch.randn(2, 128, device=device)
-
-        loss, ego_hidden = planner.compute_planner_loss(
-            bev, vis_hist, ego, target,
-        )
-        assert loss.dim() == 0
-        assert ego_hidden.shape == (2, 256)
-        assert torch.isfinite(loss)
-
-        loss.backward()
-        assert bev.grad is not None and bev.grad.abs().max() > 0
-
     def test_inference_forward_returns_trajectory_shape(self, device):
         planner = FlowMatchingPlanner(embed_dim=256).to(device)
         planner.eval()
         bev = torch.randn(2, 256, 8, 8, device=device)
         vis_hist = torch.randn(2, 896, device=device)
         ego = torch.randn(2, 256, device=device)
-        traj, ego_hidden = planner(bev, vis_hist, ego)
+        traj = planner(bev, vis_hist, ego)
         assert traj.shape == (2, 128)
-        assert ego_hidden.shape == (2, 256)
 
     def test_inference_output_is_finite(self, device):
         planner = FlowMatchingPlanner(embed_dim=256, num_inference_steps=10).to(device)
@@ -231,7 +67,7 @@ class TestFlowMatchingPlanner:
         bev = torch.randn(1, 256, 8, 8, device=device)
         vis_hist = torch.randn(1, 896, device=device)
         ego = torch.randn(1, 256, device=device)
-        traj, _ = planner(bev, vis_hist, ego)
+        traj = planner(bev, vis_hist, ego)
         assert torch.isfinite(traj).all()
 
     def _v_theta(self, planner, bev, vis_hist, ego, u_t, t):
@@ -310,20 +146,19 @@ class TestFlowMatchingPlanner:
         torch.manual_seed(123)
         x0 = torch.randn(1, 128, device=device)
         torch.manual_seed(123)  # same seed — planner draws an identical x0 inside
-        traj, _ = planner(bev, vis_hist, ego)
+        traj = planner(bev, vis_hist, ego)
         assert not torch.allclose(traj, x0, atol=1e-3), \
             "Inference output equals the input noise — ODE did not advance"
 
     def test_gradient_flows(self, device):
+        """Gradients from the integrated trajectory must reach the BEV input
+        and the conditioning (visual_history, egomotion)."""
         planner = FlowMatchingPlanner(embed_dim=256).to(device)
         bev = torch.randn(1, 256, 8, 8, device=device, requires_grad=True)
         vis_hist = torch.randn(1, 896, device=device, requires_grad=True)
         ego = torch.randn(1, 256, device=device, requires_grad=True)
-        target = torch.randn(1, 128, device=device)
-        loss, ego_hidden = planner.compute_planner_loss(
-            bev, vis_hist, ego, target,
-        )
-        (loss + ego_hidden.sum()).backward()
+        traj = planner(bev, vis_hist, ego)
+        traj.pow(2).mean().backward()
         assert bev.grad is not None and bev.grad.abs().max() > 0
         assert vis_hist.grad is not None and vis_hist.grad.abs().max() > 0
         assert ego.grad is not None and ego.grad.abs().max() > 0
@@ -341,28 +176,14 @@ class TestFlowMatchingPlanner:
         gen_b = torch.Generator(device=device).manual_seed(42)
         gen_c = torch.Generator(device=device).manual_seed(7)
 
-        traj_a, _ = planner(bev, vis_hist, ego, generator=gen_a)
-        traj_b, _ = planner(bev, vis_hist, ego, generator=gen_b)
-        traj_c, _ = planner(bev, vis_hist, ego, generator=gen_c)
+        traj_a = planner(bev, vis_hist, ego, generator=gen_a)
+        traj_b = planner(bev, vis_hist, ego, generator=gen_b)
+        traj_c = planner(bev, vis_hist, ego, generator=gen_c)
 
         assert torch.equal(traj_a, traj_b), \
             "same generator seed must produce identical inference trajectories"
         assert not torch.allclose(traj_a, traj_c), \
             "different generator seeds must produce different trajectories"
-
-    def test_compute_planner_loss_wrong_target_shape_raises(self, device):
-        planner = FlowMatchingPlanner(embed_dim=256).to(device)
-        bev = torch.randn(2, 256, 8, 8, device=device)
-        vis_hist = torch.randn(2, 896, device=device)
-        ego = torch.randn(2, 256, device=device)
-        # Wrong batch dim
-        bad_target = torch.randn(3, 128, device=device)
-        with pytest.raises(ValueError, match="trajectory_target must have shape"):
-            planner.compute_planner_loss(bev, vis_hist, ego, bad_target)
-        # Wrong feature dim
-        bad_target2 = torch.randn(2, 64, device=device)
-        with pytest.raises(ValueError, match="trajectory_target must have shape"):
-            planner.compute_planner_loss(bev, vis_hist, ego, bad_target2)
 
     def test_construct_training_data_wrong_target_shape_propagates(self, device):
         """The internal _validate_flow_inputs guard must catch shape regressions
@@ -446,121 +267,63 @@ class TestFlowMatchingPlanner:
             FlowMatchingPlanner(beta_scale=1.5)
 
 
-class TestGRUPlannerBackcompat:
-    """The GRU planner moved into the trajectory_planning subpackage —
-    its public behavior must be unchanged."""
-
-    def test_shape_unchanged(self, device):
-        planner = GRUPlanner(embed_dim=256).to(device)
-        bev = torch.randn(2, 256, 8, 8, device=device)
-        vis_hist = torch.randn(2, 896, device=device)
-        ego = torch.randn(2, 256, device=device)
-        traj, ego_hidden = planner(bev, vis_hist, ego)
-        assert traj.shape == (2, 128)
-        assert ego_hidden.shape == (2, 256)
-
-    def test_mode_argument_accepted(self, device):
-        """forward must accept mode without changing GRU output."""
-        torch.manual_seed(0)
-        planner = GRUPlanner(embed_dim=256).to(device)
-        planner.eval()
-        bev = torch.randn(1, 256, 8, 8, device=device)
-        vis_hist = torch.randn(1, 896, device=device)
-        ego = torch.randn(1, 256, device=device)
-        traj_train, _ = planner(bev, vis_hist, ego, mode="train")
-        traj_infer, _ = planner(bev, vis_hist, ego, mode="infer")
-        assert torch.allclose(traj_train, traj_infer)
-
-    def test_extra_kwargs_ignored(self, device):
-        """forward must silently swallow flow-matching-only kwargs."""
-        planner = GRUPlanner(embed_dim=256).to(device)
-        planner.eval()
-        bev = torch.randn(1, 256, 8, 8, device=device)
-        vis_hist = torch.randn(1, 896, device=device)
-        ego = torch.randn(1, 256, device=device)
-        traj, _ = planner(
-            bev, vis_hist, ego,
-            trajectory_target=torch.randn(1, 128, device=device),
-            noisy_trajectory=torch.randn(1, 128, device=device),
-            flow_timestep=torch.tensor([0.5], device=device),
-        )
-        assert traj.shape == (1, 128)
-
 
 class TestAutoE2EWithFlowMatching:
     @staticmethod
     def _fm_model(build_mock_model, device):
         return build_mock_model(
-            num_views=8, fusion_mode="bev", device=device,
+            num_views=8, device=device,
             planner_mode="flow_matching",
             planner_kwargs={"num_inference_steps": 4},
         )
-
-    def test_train_mode_returns_scalar_loss(self, build_mock_model, device):
-        """Under the uniform Option-B contract, train mode must return a
-        scalar planner loss — NOT the raw flow-matching velocity tensor.
-        This documents that the velocity-vs-target footgun is gone."""
-        model = self._fm_model(build_mock_model, device)
-        model.train()
-        visual, map_input, vis_hist, ego = make_inputs(2, 8, device)
-        target = torch.randn(2, 128, device=device)
-        loss, ego_hidden, future = model(
-            visual, map_input, vis_hist, ego, mode="train", trajectory_target=target,
-        )
-        assert loss.dim() == 0, \
-            "FM train mode must expose a scalar loss, not a [B, T*S] velocity"
-        assert loss.requires_grad
-        assert ego_hidden.shape == (2, 256)
-        assert future is not None and len(future) == 4
 
     def test_infer_mode_returns_trajectory(self, build_mock_model, device):
         model = self._fm_model(build_mock_model, device)
         model.eval()
         visual, map_input, vis_hist, ego = make_inputs(1, 8, device)
-        traj, ego_hidden, future = model(visual, map_input, vis_hist, ego, mode="infer")
+        traj = model(visual, map_input, vis_hist, ego, mode="infer")
         assert traj.shape == (1, 128)
-        assert ego_hidden.shape == (1, 256)
-        assert future is None
         assert torch.isfinite(traj).all()
 
-    def test_backward_flows_through_planner_loss(self, build_mock_model, device):
+    def test_train_mode_also_returns_trajectory(self, build_mock_model, device):
+        """Post-refactor the planner forward always returns the trajectory; the
+        loss is the training loop's concern, not AutoE2E.forward's."""
+        model = self._fm_model(build_mock_model, device)
+        model.train()
+        visual, map_input, vis_hist, ego = make_inputs(2, 8, device)
+        traj = model(visual, map_input, vis_hist, ego, mode="train")
+        assert traj.shape == (2, 128)
+
+    def test_backward_flows_through_model(self, build_mock_model, device):
         model = self._fm_model(build_mock_model, device)
         model.train()
         visual, map_input, vis_hist, ego = make_inputs(2, 8, device)
         target = torch.randn(2, 128, device=device)
-        loss, ego_hidden, future = model(
-            visual, map_input, vis_hist, ego, mode="train", trajectory_target=target,
-        )
-        total = loss + ego_hidden.sum() + sum(f.sum() for f in future)
-        total.backward()
+        traj = model(visual, map_input, vis_hist, ego, mode="train")
+        (traj - target).pow(2).mean().backward()
         # At least one Backbone and one TrajectoryPlanner param must see grad.
         backbone_grad = any(
             p.grad is not None and p.grad.abs().max() > 0
-            for n, p in model.named_parameters() if n.startswith("Backbone.")
+            for n, p in model.named_parameters()
+            if n.startswith("Reactive_E2E.Backbone.")
         )
         planner_grad = any(
             p.grad is not None and p.grad.abs().max() > 0
             for n, p in model.named_parameters()
-            if n.startswith("TrajectoryPlanner.")
+            if n.startswith("Reactive_E2E.TrajectoryPlanner.")
         )
         assert backbone_grad and planner_grad
 
-    def test_train_mode_requires_target(self, build_mock_model, device):
-        model = self._fm_model(build_mock_model, device)
-        visual, map_input, vis_hist, ego = make_inputs(1, 8, device)
-        with pytest.raises(ValueError, match="trajectory_target"):
-            model(visual, map_input, vis_hist, ego, mode="train")
-
-    def test_gru_and_fm_interchangeable_at_inference(self, build_mock_model, device):
-        """GRU and FM both produce a [B, T*S] trajectory in inference mode —
-        callers can swap planners with no other code changes."""
-        gru_model = build_mock_model(num_views=8, fusion_mode="concat",
-                                     device=device)
+    def test_bezier_and_fm_interchangeable_at_inference(self, build_mock_model, device):
+        """Bezier and Flow Matching both produce a [B, T*S] trajectory in
+        inference mode — callers can swap planners with no other code changes."""
+        bezier_model = build_mock_model(num_views=8, device=device,
+                                        planner_mode="bezier")
         fm_model = self._fm_model(build_mock_model, device)
-        gru_model.eval()
+        bezier_model.eval()
         fm_model.eval()
 
         visual, map_input, vis_hist, ego = make_inputs(2, 8, device)
-        gru_traj, _, _ = gru_model(visual, map_input, vis_hist, ego, mode="infer")
-        fm_traj, _, _ = fm_model(visual, map_input, vis_hist, ego, mode="infer")
-        assert gru_traj.shape == fm_traj.shape == (2, 128)
+        bezier_traj = bezier_model(visual, map_input, vis_hist, ego, mode="infer")
+        fm_traj = fm_model(visual, map_input, vis_hist, ego, mode="infer")
+        assert bezier_traj.shape == fm_traj.shape == (2, 128)

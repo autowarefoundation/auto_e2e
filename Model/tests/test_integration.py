@@ -29,33 +29,20 @@ class TestFullBackboneIntegration:
     """
 
     def test_full_forward_pass(self, full_model, device):
-        """Smoke test: full model forward produces expected output shapes."""
+        """Smoke test: full model forward produces the expected trajectory shape."""
         visual, map_input, vis_hist, ego = make_inputs(1, 7, device)
-        target = torch.randn(1, 128, device=device)
-        loss, ego_hidden, future = full_model(
-             visual, map_input, vis_hist, ego,
-            mode="train", trajectory_target=target)
 
-        assert loss.dim() == 0
-        assert ego_hidden.shape == (1, 256)
-        assert len(future) == 4
-        for f in future:
-            assert f.shape == (1, 256, 8, 8)
-
-        traj, _, _ = full_model(visual, vis_hist, ego, mode="infer")
+        traj = full_model(visual, map_input, vis_hist, ego, mode="train")
         assert traj.shape == (1, 128)
+
+        traj2 = full_model(visual, map_input, vis_hist, ego, mode="infer")
+        assert traj2.shape == (1, 128)
 
     def test_full_forward_no_nan(self, full_model, device):
         """Full pipeline must not produce NaN with real backbone weights."""
         visual, map_input, vis_hist, ego = make_inputs(2, 7, device)
-        target = torch.randn(2, 128, device=device)
-        loss, ego_hidden, future = full_model(visual, map_input, vis_hist, ego,
-                                              mode="train", trajectory_target=target)
-
-        assert not torch.isnan(loss)
-        assert not torch.isnan(ego_hidden).any()
-        for f in future:
-            assert not torch.isnan(f).any()
+        traj = full_model(visual, map_input, vis_hist, ego, mode="train")
+        assert not torch.isnan(traj).any()
 
 
 @pytest.mark.integration
@@ -68,28 +55,56 @@ class TestResNet50Backbone:
         from model_components.auto_e2e import AutoE2E
         try:
             model = AutoE2E(
-                backbone="res_net_50", num_views=7, fusion_mode="concat",
+                backbone="res_net_50", num_views=7,
+                view_fusion_kwargs={"bev_h": 8, "bev_w": 8},
                 is_pretrained=False,
             ).to(device)
         except (FileNotFoundError, OSError) as e:
             pytest.skip(f"Backbone construction failed: {e}")
 
         # Dynamic backbone_channels = sum of all 5 ResNet50 stages = 3904
-        assert model.Backbone.backbone_channels == 64 + 256 + 512 + 1024 + 2048
+        assert model.Reactive_E2E.Backbone.backbone_channels == \
+            64 + 256 + 512 + 1024 + 2048
 
         visual, map_input, vis_hist, ego = make_inputs(1, 7, device)
-        target = torch.randn(1, 128, device=device)
-        loss, ego_hidden, future = model(
-            visual, map_input, vis_hist, ego, mode="train", trajectory_target=target)
 
-        assert loss.dim() == 0
-        assert ego_hidden.shape == (1, 256)
-        assert len(future) == 4
-        for f in future:
-            assert f.shape == (1, 256, 8, 8)
-        assert torch.isfinite(loss)
-        assert torch.isfinite(ego_hidden).all()
+        traj = model(visual, map_input, vis_hist, ego, mode="train")
+        assert traj.shape == (1, 128) and torch.isfinite(traj).all()
 
-        traj, _, _ = model(visual, vis_hist, ego, mode="infer")
-        assert traj.shape == (1, 128)
-        assert torch.isfinite(traj).all()
+        traj2 = model(visual, map_input, vis_hist, ego, mode="infer")
+        assert traj2.shape == (1, 128) and torch.isfinite(traj2).all()
+
+
+class TestRealArchitectureSmoke:
+    """Exercises the real timm backbone architectures with random weights
+    (is_pretrained=False, so no pretrained download), covering per-stage
+    channel discovery the mock backbone hardcodes — including ResNet50's
+    5 stages — and forward-signature regressions."""
+
+    EXPECTED_CHANNELS = {
+        "swin_v2_tiny": 96 + 192 + 384 + 768,
+        "conv_next_v2_tiny": 96 + 192 + 384 + 768,
+        "res_net_50": 64 + 256 + 512 + 1024 + 2048,
+    }
+
+    @pytest.mark.parametrize(
+        "backbone", ["swin_v2_tiny", "conv_next_v2_tiny", "res_net_50"]
+    )
+    def test_real_backbone_forward(self, backbone, device):
+        from model_components.auto_e2e import AutoE2E
+        model = AutoE2E(
+            backbone=backbone, num_views=7,
+            view_fusion_kwargs={"bev_h": 8, "bev_w": 8},
+            is_pretrained=False,
+        ).to(device)
+
+        assert model.Reactive_E2E.Backbone.backbone_channels == \
+            self.EXPECTED_CHANNELS[backbone]
+
+        visual, map_input, vis_hist, ego = make_inputs(1, 7, device)
+
+        traj = model(visual, map_input, vis_hist, ego, mode="train")
+        assert traj.shape == (1, 128) and torch.isfinite(traj).all()
+
+        traj2 = model(visual, map_input, vis_hist, ego, mode="infer")
+        assert traj2.shape == (1, 128) and torch.isfinite(traj2).all()

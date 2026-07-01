@@ -1,0 +1,29 @@
+version: 0.2
+
+env:
+  variables:
+    AWS_DEFAULT_REGION: us-west-2
+    FLYTE_PROJECT: auto-e2e
+    FLYTE_DOMAIN: development
+
+phases:
+  install:
+    commands:
+      - pip install -q flytekit numpy torch --extra-index-url https://download.pytorch.org/whl/cpu
+  build:
+    commands:
+      - ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+      - ECR_URL="${ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com"
+      - export ECR_PREFIX="${ECR_URL}"
+      - |
+        cat > /tmp/flyte.yaml << EOF
+        admin:
+          endpoint: dns:///k8s-flyte-flyteadm-be92e7737c-cf0d1a0f3df10f77.elb.us-west-2.amazonaws.com:81
+          insecure: true
+        EOF
+      - >
+        pyflyte --config /tmp/flyte.yaml register
+        --project $FLYTE_PROJECT
+        --domain $FLYTE_DOMAIN
+        --image ${ECR_URL}/auto-e2e/training:latest
+        Platform/pipelines/workflows.py

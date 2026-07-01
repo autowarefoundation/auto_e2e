@@ -1,13 +1,11 @@
 from .base import BasePlanner
-from .gru_planner import GRUPlanner
 from .flow_matching_planner import FlowMatchingPlanner
-
+from .bezier_planner import BezierPlanner
 
 PLANNER_REGISTRY = {
-    "gru": GRUPlanner,
     "flow_matching": FlowMatchingPlanner,
+    "bezier": BezierPlanner,
 }
-
 
 def build_planner(planner_mode, **kwargs):
     """Construct a planner by name.
@@ -24,11 +22,10 @@ def build_planner(planner_mode, **kwargs):
         )
     return PLANNER_REGISTRY[planner_mode](**kwargs)
 
-
 __all__ = [
     "BasePlanner",
-    "GRUPlanner",
     "FlowMatchingPlanner",
+    "BezierPlanner",
     "PLANNER_REGISTRY",
     "build_planner",
 ]

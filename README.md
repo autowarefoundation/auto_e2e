@@ -37,6 +37,10 @@ To learn more about how to participate in this project, please read the [onboard
 
 Requires **Python 3.12** (the pinned PyTorch build has no wheels for 3.13+).
 
+### Using `make` tool ###
+<details open>
+  <summary>Toggle view</summary>
+
 1. **Clone and install dependencies**
 
    ```bash
@@ -46,13 +50,31 @@ Requires **Python 3.12** (the pinned PyTorch build has no wheels for 3.13+).
    make setup TORCH_CHANNEL=cu118  # or a CUDA build (cu121, ... work too)
    ```
 
-   Plain `pip install -r requirements.txt` also works and uses the default PyPI torch wheels.
-
 2. **Verify the install** (optional)
 
    ```bash
    make test
    ```
+</details>
+
+### Using plain pip ###
+<details open>
+  <summary>Toggle view</summary>
+
+**Clone and install dependencies**
+
+```bash
+git clone https://github.com/autowarefoundation/auto_e2e.git
+cd auto_e2e
+pip install -r requirements.txt                      # CPU torch wheels
+pip install -r requirements.txt --extra-index-url https://download.pytorch.org/whl/cu118  # or a CUDA build (cu121, ... work too)
+```
+
+Without a `make` tool, you unfortunately cannot verify the install 
+using a `test` from the Makefile. It is highly recommended to install 
+the tool through a [package manager](https://chocolatey.org/).
+
+</details>
 
 ### Next steps
 - Explore the [Model](./Model/) folder for the model components, training and inference.
