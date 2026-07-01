@@ -8,6 +8,7 @@ Usage:
 """
 
 import sys
+import os
 sys.path.append('..')
 from visualization.trajectory_rendering import Visualization
 import torch
@@ -119,6 +120,8 @@ if __name__ == "__main__":
 
     if args.live:
         combined_image = visualization_on_l2d(args.episodes)
-        combined_image.save("visualization_result.png")
+        save_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "generated_images", "visualization_result_l2d.png")
+        os.makedirs(os.path.dirname(save_path), exist_ok=True)
+        combined_image.save(save_path)
     else:
         print("Skipping. Run with --live to execute L2D visualization.")
