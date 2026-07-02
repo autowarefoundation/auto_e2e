@@ -128,11 +128,23 @@ def _extract_json_object(text: str) -> dict[str, Any]:
     raise ValueError("unbalanced JSON object in model output")
 
 
-def _run_claude(user_prompt: str, system_prompt: str, model: str | None, timeout: int) -> str:
+# The architecture-reading task benefits from the strongest available model + reasoning
+# budget: Claude must read every collected class, follow the dependency graph, and cross-check
+# its own diagram against the code. Defaults chosen deliberately (override via CLI if needed).
+#   NOTE: use the bare full name `claude-opus-4-8-v1` — the `global.anthropic.` prefixed id
+#   silently falls back to an older Opus on this distribution.
+DEFAULT_MODEL = "claude-opus-4-8-v1"
+DEFAULT_EFFORT = "max"  # one of: low, medium, high, xhigh, max
+
+
+def _run_claude(user_prompt: str, system_prompt: str, model: str | None,
+                effort: str | None, timeout: int) -> str:
     cmd = ["claude", "-p", user_prompt, "--append-system-prompt", system_prompt,
            "--output-format", "text"]
     if model:
         cmd += ["--model", model]
+    if effort:
+        cmd += ["--effort", effort]
     proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, cwd=str(_HERE.parent))
     if proc.returncode != 0:
         raise RuntimeError(f"claude CLI failed (exit {proc.returncode}):\n{proc.stderr[:2000]}")
@@ -141,8 +153,13 @@ def _run_claude(user_prompt: str, system_prompt: str, model: str | None, timeout
     return proc.stdout
 
 
-def extract_arch(bundle: Bundle, model: str | None = None, timeout: int = 600) -> dict[str, Any]:
-    """Invoke Claude to produce the left-to-right architecture IR (arch_v1) for the bundle."""
+def extract_arch(bundle: Bundle, model: str | None = None, effort: str | None = None,
+                 timeout: int = 900) -> dict[str, Any]:
+    """Invoke Claude to produce the left-to-right architecture IR (arch_v1) for the bundle.
+
+    Defaults to the strongest model at max reasoning effort (see DEFAULT_MODEL/DEFAULT_EFFORT);
+    pass explicit values to override. A higher timeout accommodates max-effort reasoning over
+    large multi-file bundles."""
     if not claude_available():
         raise RuntimeError(
             "`claude` CLI not found on PATH. Either install it, or pass a pre-computed "
@@ -150,6 +167,7 @@ def extract_arch(bundle: Bundle, model: str | None = None, timeout: int = 600) -
         )
     system_prompt = _ARCH_PROMPT.read_text(encoding="utf-8")
     user_prompt = build_arch_prompt(bundle)
-    out = _run_claude(user_prompt, system_prompt, model, timeout)
+    out = _run_claude(user_prompt, system_prompt,
+                      model or DEFAULT_MODEL, effort or DEFAULT_EFFORT, timeout)
     return _extract_json_object(out)
 
