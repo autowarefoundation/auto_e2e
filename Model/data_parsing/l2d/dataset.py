@@ -64,6 +64,8 @@ class L2DSample(TypedDict):
     # the 1 Hz multi-view past/future windows, each (N, 7, 3, H, W), oldest->newest.
     history_frames: NotRequired[torch.Tensor]
     future_frames: NotRequired[torch.Tensor]
+    raw_map: NotRequired[torch.Tensor]
+    current_heading: NotRequired[float]
 
 
 class L2DDataset(Dataset):
@@ -246,6 +248,8 @@ class L2DDataset(Dataset):
             trajectory_target=trajectory_target,
             episode_index=ep_idx,
             frame_index=sample_idx_in_episode,
+            raw_map=self.lerobot_dataset[row]["observation.images.map"],
+            current_heading=float(np.deg2rad(-vehicle_states[sample_idx_in_episode, 1])),
         )
 
         # World Model (#16): the 1 Hz multi-view past/future windows for the JEPA
