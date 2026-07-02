@@ -48,7 +48,7 @@ git commit --signoff -m "bench: add <GPU> results"
 python generate_readme_table.py
 ```
 
-Copy the output into the main project README under the benchmark section.
+Copy the output into the BENCHMARKS.md file unders the ones that are already there. 
 
 ## CLI Options
 
