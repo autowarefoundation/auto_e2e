@@ -3,7 +3,8 @@ sys.path.append('..')
 from visualization.trajectory_rendering import Visualization, _DT, _FUTURE_TIMESTEPS
 import torch
 import pytest
-from PIL import Image
+import cv2
+import numpy as np
 from pathlib import Path
 import os
 
@@ -22,7 +23,7 @@ def test_visualization_with_dummy_data(tmp_path: Path):
     mock_radius = 800.0  # Just like in gps_to_map.py
 
     # 3. Create a clean mock map image, following L2D format
-    mock_map = Image.new("RGB", (640, 360), color="#111111")
+    mock_map = np.full((360, 640, 3), (17, 17, 17), dtype=np.uint8) # equivalent to #111111
     map_copy = mock_map.copy()
 
     print("Executing render_trajectory...")
@@ -36,14 +37,13 @@ def test_visualization_with_dummy_data(tmp_path: Path):
 
     # 4. Save and inspect the result
     output_path = tmp_path / "output.png"
-    result_img.save(output_path)
+    cv2.imwrite(str(output_path), result_img)
 
     assert result_img is not None, "Visualization function returned None"
-    assert isinstance(result_img, Image.Image), "Visualization function did not return an image"
-    assert result_img.size == mock_map.size, "Size does not match"
-    assert result_img.mode == mock_map.mode, "Mode does not match"
-    assert list(map_copy.getdata()) == list(mock_map.getdata()), "Original image mutated"
-    assert list(result_img.getdata()) != list(mock_map.getdata()), "Image file was not created in the target directory"
+    assert isinstance(result_img, np.ndarray), "Visualization function did not return a numpy array"
+    assert result_img.shape == mock_map.shape, "Shape does not match"
+    assert np.array_equal(map_copy, mock_map), "Original image mutated"
+    assert not np.array_equal(result_img, mock_map), "Image was not modified"
     assert os.path.isfile(output_path), "Image file was not created in the target directory"
 
 def test_accel_and_curv_to_meters_trajectory_straight_no_accel():
@@ -132,7 +132,7 @@ def test_meters_to_pixels_trajectory():
         [0.0, 10.0],
     ])
     radius_m = 20.0
-    map_image = Image.new("RGB", (400, 400))
+    map_image = np.zeros((400, 400, 3), dtype=np.uint8)
 
     trajectory_px = Visualization.meters_to_pixels_trajectory(trajectory_m, radius_m, map_image)
 
@@ -147,7 +147,7 @@ def test_meters_to_pixels_trajectory():
     assert trajectory_px[3, 0] == 200 and trajectory_px[3, 1] == 100 # 10m up
 
 def test_overlay_the_trajectory_with_map():
-    map_image = Image.new("RGB", (400, 400), color="black")
+    map_image = np.zeros((400, 400, 3), dtype=np.uint8)
     trajectory_px = torch.tensor([
         [200, 399], # Start at bottom center, slightly off edge
         [300, 399],
@@ -157,20 +157,20 @@ def test_overlay_the_trajectory_with_map():
     overlaid_image = Visualization.overlay_the_trajectory_with_map(trajectory_px, map_image)
 
     assert overlaid_image is not None
-    assert isinstance(overlaid_image, Image.Image)
-    assert overlaid_image.size == map_image.size
+    assert isinstance(overlaid_image, np.ndarray)
+    assert overlaid_image.shape == map_image.shape
 
     # Check if pixels are colored correctly
     # The trajectory should be a non-black color
     # We check points along the drawn line segments
-    p1 = (trajectory_px[0,0].item(), trajectory_px[0,1].item())
-    p2 = (trajectory_px[1,0].item(), trajectory_px[1,1].item())
-    p3 = (trajectory_px[2,0].item(), trajectory_px[2,1].item())
+    p1 = (trajectory_px[0,1].item(), trajectory_px[0,0].item()) # (y, x) for numpy
+    p2 = (trajectory_px[1,1].item(), trajectory_px[1,0].item())
+    p3 = (trajectory_px[2,1].item(), trajectory_px[2,0].item())
 
-    assert overlaid_image.getpixel(p1) != (0, 0, 0)
-    assert overlaid_image.getpixel(p2) != (0, 0, 0)
-    assert overlaid_image.getpixel(p3) != (0, 0, 0)
+    assert not np.array_equal(overlaid_image[p1], [0, 0, 0])
+    assert not np.array_equal(overlaid_image[p2], [0, 0, 0])
+    assert not np.array_equal(overlaid_image[p3], [0, 0, 0])
 
     # Check a point on the line between p1 and p2
     mid_p1_p2 = (int((p1[0]+p2[0])/2), int((p1[1]+p2[1])/2))
-    assert overlaid_image.getpixel(mid_p1_p2) != (0,0,0)
+    assert not np.array_equal(overlaid_image[mid_p1_p2], [0, 0, 0])

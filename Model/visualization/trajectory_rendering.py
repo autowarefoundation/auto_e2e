@@ -5,6 +5,8 @@ import math
 
 _DT = 0.1  # 10 Hz
 _FUTURE_TIMESTEPS = 64
+MAP_W = 640
+MAP_H = 360
 
 class Visualization:
 
@@ -13,7 +15,8 @@ class Visualization:
             action_sequence: torch.Tensor,
             current_speed: float,
             future_timesteps: int,
-            initial_heading: float = 0.0
+            initial_heading: float = 0.0,
+            radius_m: float = 800.0
     ) -> torch.Tensor:
 
         # change the trajectory format
@@ -54,40 +57,32 @@ class Visualization:
         return trajectory_px
 
     @staticmethod
-    def overlay_the_trajectory_with_map(trajectory_px: torch.Tensor, map_image: np.ndarray, color: str = "#33FF33", initial_heading: float = 0.0) -> np.ndarray:
-        # Parse hex color to BGR for OpenCV
-        if color.startswith("#"):
-            r = int(color[1:3], 16)
-            g = int(color[3:5], 16)
-            b = int(color[5:7], 16)
-            bgr_color = (b, g, r)
-        else:
-            bgr_color = (0, 255, 0) # Fallback to green
-        
+    def overlay_the_trajectory_with_map(
+            trajectory_px: torch.Tensor,
+            map_image: np.ndarray,
+            color: tuple = (0, 255, 0),
+            initial_heading: float = 0.0,
+            radius_m: float = 800.0
+    ) -> np.ndarray:
+        bgr_color = color
         black_color = (0, 0, 0)
 
-        target_w, target_h = 1280, 720
-        map_with_trajectory = cv2.resize(map_image, (target_w, target_h), interpolation=cv2.INTER_LINEAR)
-        
-        map_h, map_w = map_image.shape[:2]
-        scale_x = target_w / map_w
-        scale_y = target_h / map_h
+        map_with_trajectory = map_image.copy()
 
-        # Convert PyTorch tensor points to integer Numpy arrays
-        pixel_points = np.array([(x.item() * scale_x, y.item() * scale_y) for x, y in trajectory_px], np.int32)
+        # Convert PyTorch tensor points to float first to avoid quantization errors in angle math
+        pixel_points_float = [(x.item(), y.item()) for x, y in trajectory_px]
+        pixel_points = np.array(pixel_points_float, np.int32)
         pts = pixel_points.reshape((-1, 1, 2))
 
-        linewidth = 1
-        outline_width = 1
+        # Scaling based on zoom level (assuming base radius is 800.0)
+        zoom_scale = 800.0 / radius_m
+
+        linewidth = max(1, int(1 * zoom_scale))
+        outline_width = max(1, int(1 * zoom_scale))
 
         # Draw trajectory line with OpenCV (AA = Anti-Aliased for smooth edges)
         cv2.polylines(map_with_trajectory, [pts], isClosed=False, color=black_color, thickness=linewidth + outline_width * 2, lineType=cv2.LINE_AA)
         cv2.polylines(map_with_trajectory, [pts], isClosed=False, color=bgr_color, thickness=linewidth, lineType=cv2.LINE_AA)
-
-        # Draw endpoint ellipse/circle
-        xe, ye = pixel_points[-1]
-        cv2.circle(map_with_trajectory, (xe, ye), outline_width * 2, black_color, -1, cv2.LINE_AA)
-        cv2.circle(map_with_trajectory, (xe, ye), max(1, int(linewidth / 2)), bgr_color, -1, cv2.LINE_AA)
 
         # Agent marker: sleek arrowhead pointing in the initial heading
         dx = -math.sin(initial_heading)
@@ -96,8 +91,8 @@ class Visualization:
         ry = -math.sin(initial_heading)
 
         x0, y0 = pixel_points[0]
-        L = 8.0
-        W = 4.0
+        L = 8.0 * zoom_scale
+        W = 4.0 * zoom_scale
 
         tip = (int(x0 + L * dx), int(y0 + L * dy))
         left_back = (int(x0 - L * dx + W * rx), int(y0 - L * dy + W * ry))
@@ -106,19 +101,20 @@ class Visualization:
         poly_points = np.array([tip, right_back, left_back], np.int32).reshape((-1, 1, 2))
         
         # Draw thick black outline then filled color inside for the agent marker
-        cv2.fillPoly(map_with_trajectory, [poly_points], bgr_color, cv2.LINE_AA)
-        cv2.polylines(map_with_trajectory, [poly_points], isClosed=True, color=black_color, thickness=outline_width, lineType=cv2.LINE_AA)
+        agent_color = (126, 27, 232) #purple
+        cv2.fillPoly(map_with_trajectory, [poly_points], agent_color, cv2.LINE_8)
+        cv2.polylines(map_with_trajectory, [poly_points], isClosed=True, color=black_color, thickness=outline_width, lineType=cv2.LINE_8)
 
         return map_with_trajectory
 
     @staticmethod
     def render_trajectory_map_tile(
-            action_sequence: torch.Tensor,
-            current_speed: float,
-            map_image: np.ndarray,
-            radius_m: float,
-            color: str = "#33FF33",
-            initial_heading: float = 0.0
+        action_sequence: torch.Tensor,
+        current_speed: float,
+        map_image: np.ndarray,
+        radius_m: float,
+        color: tuple = (0, 255, 0),
+        initial_heading: float = 0.0
     ) -> np.ndarray:
         """
         Integrates predicted trajectory into metric coordinates and
@@ -146,6 +142,22 @@ class Visualization:
 
         # 3. Overlay the trajectory onto the map tile
 
-        map_with_trajectory = Visualization.overlay_the_trajectory_with_map(trajectory_px, map_image, color, initial_heading)
-
+        map_with_trajectory = Visualization.overlay_the_trajectory_with_map(trajectory_px, map_image, color, initial_heading, radius_m)
+        
         return map_with_trajectory
+
+    @staticmethod
+    def render_trajectory_on_a_grid(
+        action_sequence: torch.Tensor,
+        current_speed: float
+    ) -> np.ndarray:
+
+        # 1. Convert trajectory to [x y] in meters
+
+        trajectory_m = Visualization.accel_and_curv_to_meters_trajectory(
+            action_sequence, current_speed, _FUTURE_TIMESTEPS, initial_heading=0.0
+        )
+
+        
+
+        return np.array([0, 1])

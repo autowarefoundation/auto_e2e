@@ -19,7 +19,7 @@ from data_parsing.l2d.camera import NUM_VIEWS
 import argparse
 from torch.utils.data import DataLoader
 
-def visualization_on_l2d(episodes: list[int]) -> np.ndarray:
+def visualization_on_l2d(episodes: list[int], zoom_in: bool = False) -> np.ndarray:
     result = forward_pass_for_visualization_test(episodes=episodes, batch_size=2, pretrained_backbone=False)
     
     pred_trajectory, target_trajectory, map_image, current_speed, current_heading = result
@@ -27,23 +27,33 @@ def visualization_on_l2d(episodes: list[int]) -> np.ndarray:
 
     print(f"Rendering trajectories (speed: {current_speed:.2f} m/s)...")
 
-    # 1. Draw extracted ground truth (actual driven path) in Blue
+    if zoom_in:
+        h, w = map_image.shape[:2]
+        cropped_w, cropped_h = w // 8, h // 8
+        map_image = map_image[h//2 - cropped_h : h//2 + cropped_h, w//2 - cropped_w : w//2 + cropped_w]
+        # Since we cropped the central half of the map, the radius is halved.
+        radius_m = radius_m / 4.0
+
+    target_w, target_h = 1280, 720
+    map_image = cv2.resize(map_image, (target_w, target_h), interpolation=cv2.INTER_LINEAR)
+
+    # 1. Draw extracted ground truth (actual driven path)
     combined_img = Visualization.render_trajectory_map_tile(
         action_sequence=target_trajectory,
         current_speed=current_speed,
         map_image=map_image,
         radius_m=radius_m,
-        color="#00BFFF",  # Blue for actual driven path
+        color=(255, 108, 59),
         initial_heading=current_heading
     )
 
-    # 2. Draw predicted path in green
+    # 2. Draw predicted path
     combined_img = Visualization.render_trajectory_map_tile(
         action_sequence=pred_trajectory,
         current_speed=current_speed,
         map_image=combined_img,
         radius_m=radius_m,
-        color="#33FF33",  # Green for prediction
+        color=(164, 217, 52), 
         initial_heading=current_heading
     )
 
@@ -117,10 +127,13 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='L2D visualization test')
     parser.add_argument('--live', action='store_true', help='Run live L2D dataset visualization')
     parser.add_argument('--episodes', type=int, nargs='+', default=[0], help='List of episodes to load')
+    parser.add_argument(
+        "--zoom_in", action="store_true", help="Zoom in on the agent"
+    )
     args = parser.parse_args()
 
     if args.live:
-        combined_image = visualization_on_l2d(args.episodes)
+        combined_image = visualization_on_l2d(args.episodes, zoom_in=args.zoom_in)
         save_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "generated_images", "visualization_result_l2d.png")
         os.makedirs(os.path.dirname(save_path), exist_ok=True)
         cv2.imwrite(save_path, combined_image)
