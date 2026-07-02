@@ -1,5 +1,6 @@
 import torch
-from PIL import Image, ImageDraw
+import cv2
+import numpy as np
 import math
 
 _DT = 0.1  # 10 Hz
@@ -43,8 +44,8 @@ class Visualization:
         return trajectory_m
 
     @staticmethod
-    def meters_to_pixels_trajectory(trajectory_m: torch.Tensor, radius_m: float, map_image: Image.Image) -> torch.Tensor:
-        w, h = map_image.size
+    def meters_to_pixels_trajectory(trajectory_m: torch.Tensor, radius_m: float, map_image: np.ndarray) -> torch.Tensor:
+        h, w = map_image.shape[:2]
 
         trajectory_px = torch.zeros_like(trajectory_m)
         trajectory_px[:, 0] = ((trajectory_m[:, 0] + radius_m) / (2 * radius_m)) * w
@@ -53,18 +54,60 @@ class Visualization:
         return trajectory_px
 
     @staticmethod
-    def overlay_the_trajectory_with_map(trajectory_px: torch.Tensor, map_image: Image.Image, color: str = "#33FF33") -> Image.Image:
+    def overlay_the_trajectory_with_map(trajectory_px: torch.Tensor, map_image: np.ndarray, color: str = "#33FF33", initial_heading: float = 0.0) -> np.ndarray:
+        # Parse hex color to BGR for OpenCV
+        if color.startswith("#"):
+            r = int(color[1:3], 16)
+            g = int(color[3:5], 16)
+            b = int(color[5:7], 16)
+            bgr_color = (b, g, r)
+        else:
+            bgr_color = (0, 255, 0) # Fallback to green
+        
+        black_color = (0, 0, 0)
 
-        pixel_points = [(x.item(), y.item()) for x, y in trajectory_px]
+        target_w, target_h = 1280, 720
+        map_with_trajectory = cv2.resize(map_image, (target_w, target_h), interpolation=cv2.INTER_LINEAR)
+        
+        map_h, map_w = map_image.shape[:2]
+        scale_x = target_w / map_w
+        scale_y = target_h / map_h
 
-        map_with_trajectory = map_image.copy()
+        # Convert PyTorch tensor points to integer Numpy arrays
+        pixel_points = np.array([(x.item() * scale_x, y.item() * scale_y) for x, y in trajectory_px], np.int32)
+        pts = pixel_points.reshape((-1, 1, 2))
 
-        draw = ImageDraw.Draw(map_with_trajectory)
-        draw.line(pixel_points, fill=color, width=3)
-        x0 = pixel_points[0][0]
-        y0 = pixel_points[0][1]
-        r = 5.0
-        draw.ellipse([x0 - r, y0 - r, x0 + r, y0 + r], fill='red')
+        linewidth = 1
+        outline_width = 1
+
+        # Draw trajectory line with OpenCV (AA = Anti-Aliased for smooth edges)
+        cv2.polylines(map_with_trajectory, [pts], isClosed=False, color=black_color, thickness=linewidth + outline_width * 2, lineType=cv2.LINE_AA)
+        cv2.polylines(map_with_trajectory, [pts], isClosed=False, color=bgr_color, thickness=linewidth, lineType=cv2.LINE_AA)
+
+        # Draw endpoint ellipse/circle
+        xe, ye = pixel_points[-1]
+        cv2.circle(map_with_trajectory, (xe, ye), outline_width * 2, black_color, -1, cv2.LINE_AA)
+        cv2.circle(map_with_trajectory, (xe, ye), max(1, int(linewidth / 2)), bgr_color, -1, cv2.LINE_AA)
+
+        # Agent marker: sleek arrowhead pointing in the initial heading
+        dx = -math.sin(initial_heading)
+        dy = -math.cos(initial_heading)
+        rx = math.cos(initial_heading)
+        ry = -math.sin(initial_heading)
+
+        x0, y0 = pixel_points[0]
+        L = 8.0
+        W = 4.0
+
+        tip = (int(x0 + L * dx), int(y0 + L * dy))
+        left_back = (int(x0 - L * dx + W * rx), int(y0 - L * dy + W * ry))
+        right_back = (int(x0 - L * dx - W * rx), int(y0 - L * dy - W * ry))
+
+        poly_points = np.array([tip, right_back, left_back], np.int32).reshape((-1, 1, 2))
+        
+        # Draw thick black outline then filled color inside for the agent marker
+        cv2.fillPoly(map_with_trajectory, [poly_points], bgr_color, cv2.LINE_AA)
+        cv2.polylines(map_with_trajectory, [poly_points], isClosed=True, color=black_color, thickness=outline_width, lineType=cv2.LINE_AA)
 
         return map_with_trajectory
 
@@ -72,11 +115,11 @@ class Visualization:
     def render_trajectory_map_tile(
             action_sequence: torch.Tensor,
             current_speed: float,
-            map_image: Image.Image,
+            map_image: np.ndarray,
             radius_m: float,
             color: str = "#33FF33",
             initial_heading: float = 0.0
-    ) -> Image.Image:
+    ) -> np.ndarray:
         """
         Integrates predicted trajectory into metric coordinates and
         draws them onto the raw BEV map tile.
@@ -84,11 +127,11 @@ class Visualization:
         Args:
             action_sequence: (128, ) flattened (64, 2) tensor of predicted [acceleration, curvature].
             current_speed: Scalar float from the egomotion history.
-            map_image: A map tile, not normalized.
+            map_image: A map tile, not normalized (BGR numpy array).
             radius_m: The metric boundary of the map image.
 
         Returns:
-            A new PIL Image with the trajectory drawn on it.
+            A new Numpy array with the trajectory drawn on it.
         """
 
         # 1. Convert trajectory to [x y] in meters
@@ -103,6 +146,6 @@ class Visualization:
 
         # 3. Overlay the trajectory onto the map tile
 
-        map_with_trajectory = Visualization.overlay_the_trajectory_with_map(trajectory_px, map_image, color)
+        map_with_trajectory = Visualization.overlay_the_trajectory_with_map(trajectory_px, map_image, color, initial_heading)
 
         return map_with_trajectory

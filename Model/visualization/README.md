@@ -42,11 +42,7 @@ Uses PIL's `ImageDraw` module to render the trajectory as a continuous green lin
 
 ## Dependencies ##
 
-Core visualization logic only requires standard machine learning and image processing libraries:
-
-```text
-Pillow>=5.3.0
-```
+You would have all the required dependencies if you followed the [Autoware E2E installation instructions](https://github.com/autowarefoundation/auto_e2e).
 
 If you wish to run the live visualization script (`--live`) to test predictions using real dataset records, you will additionally need the [L2D dependencies](https://github.com/autowarefoundation/auto_e2e/tree/main/Model/data_parsing/l2d) 
 

@@ -13,27 +13,27 @@ sys.path.append('..')
 from visualization.trajectory_rendering import Visualization
 import torch
 from model_components.auto_e2e import AutoE2E
-from torch.utils.data import DataLoader
-import torchvision.transforms.functional as F
+import cv2
+import numpy as np
 from data_parsing.l2d.camera import NUM_VIEWS
-from PIL import Image
 import argparse
+from torch.utils.data import DataLoader
 
-def visualization_on_l2d(episodes: list[int]) -> Image.Image:
+def visualization_on_l2d(episodes: list[int]) -> np.ndarray:
     result = forward_pass_for_visualization_test(episodes=episodes, batch_size=2, pretrained_backbone=False)
-
+    
     pred_trajectory, target_trajectory, map_image, current_speed, current_heading = result
     radius_m = 800.0  # Standard map metric boundary assumption
 
     print(f"Rendering trajectories (speed: {current_speed:.2f} m/s)...")
 
-    # 1. Draw extracted ground truth (actual driven path) in white
+    # 1. Draw extracted ground truth (actual driven path) in Blue
     combined_img = Visualization.render_trajectory_map_tile(
         action_sequence=target_trajectory,
         current_speed=current_speed,
         map_image=map_image,
         radius_m=radius_m,
-        color="#FFFFFF",  # White for actual driven path
+        color="#00BFFF",  # Blue for actual driven path
         initial_heading=current_heading
     )
 
@@ -88,7 +88,8 @@ def forward_pass_for_visualization_test(episodes: list[int], batch_size: int, pr
     trajectory_target = batch["trajectory_target"].to(device)
 
     raw_map_tensor = batch["raw_map"][-1].cpu()
-    raw_map_image = F.to_pil_image(raw_map_tensor)
+    raw_map_array = (raw_map_tensor.permute(1, 2, 0).numpy() * 255).astype(np.uint8)
+    raw_map_image = cv2.cvtColor(raw_map_array, cv2.COLOR_RGB2BGR)
 
     current_speed = egomotion_history[-1, 252].item()
     current_heading = batch["current_heading"][-1].item() if "current_heading" in batch else 0.0
@@ -122,6 +123,6 @@ if __name__ == "__main__":
         combined_image = visualization_on_l2d(args.episodes)
         save_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "generated_images", "visualization_result_l2d.png")
         os.makedirs(os.path.dirname(save_path), exist_ok=True)
-        combined_image.save(save_path)
+        cv2.imwrite(save_path, combined_image)
     else:
         print("Skipping. Run with --live to execute L2D visualization.")
