@@ -1,6 +1,6 @@
 mypy==2.1.0
-numpy==2.4.6
+numpy==2.2.6
 pytest==9.0.3
 ruff==0.15.16
 timm==1.0.27
-torch==2.4.1
+torch==2.7.1

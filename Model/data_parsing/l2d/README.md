@@ -88,6 +88,5 @@ python forward_pass_test.py --live --episodes 0
 ## Additional dependencies
 
 ```
-lerobot            # LeRobot dataset SDK (pip install lerobot)
-timm               # backbone config and transforms
+lerobot==0.5.1            # LeRobot dataset SDK (pip install lerobot==0.5.1)
 ```
