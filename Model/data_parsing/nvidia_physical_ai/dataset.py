@@ -246,10 +246,12 @@ class NvidiaAVDataset(Dataset):
         """Build a native f-theta projection spec from saved calibration.
 
         Reads calibration/{intrinsics,extrinsics}.pkl (saved at ingest), builds
-        an FThetaProjection scaled to ``image_size`` for the camera slot order,
-        and serializes it for the shard manifest. Returns None when calibration
-        is absent, so the dataset falls back to the explicit pseudo path (never
-        a silent real-geometry claim). See Issue #77.
+        an FThetaProjection in the camera's NATIVE pixel frame for the camera
+        slot order, and serializes it for the shard manifest. ``image_size`` is
+        accepted for API symmetry but is irrelevant to f-theta: the operator
+        normalizes by the native (W, H), which is exact under any resize. Returns
+        None when calibration is absent, so the dataset falls back to the
+        explicit pseudo path (never a silent real-geometry claim). See #77.
         """
         import pickle
 
@@ -276,10 +278,7 @@ class NvidiaAVDataset(Dataset):
         with open(extr_path, "rb") as f:
             extrinsics = pickle.load(f)
 
-        proj = build_ftheta_projection(
-            intrinsics, extrinsics, self.camera_names,
-            target_wh=(image_size, image_size),
-        )
+        proj = build_ftheta_projection(intrinsics, extrinsics, self.camera_names)
         return proj.to_spec()
 
     def __len__(self) -> int:

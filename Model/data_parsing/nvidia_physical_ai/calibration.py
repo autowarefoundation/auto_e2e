@@ -26,6 +26,8 @@ Frame conventions (critical):
 
 from __future__ import annotations
 
+import math
+
 import numpy as np
 import torch
 
@@ -71,59 +73,65 @@ def _ego_to_camera_transform(sensor_pose, sensor_frame_is_optical: bool = True) 
     return R @ ego_to_sensor                                   # FLU sensor -> optical
 
 
-def _ftheta_pixel_scale(model, target_wh: tuple[int, int]) -> tuple[float, float, float]:
-    """Isotropic pixel scale from a camera's native size to target_wh.
+def _corner_max_theta(model) -> float | None:
+    """FOV bound (radians) = the incidence angle at the farthest image corner.
 
-    The f-theta radius polynomial (th2r) is isotropic in native pixels, so a
-    single scale is only exact under an isotropic (aspect-preserving) resize.
-    The shard packing resizes to a square target; if the camera is non-square
-    this is an approximation, so we scale by the mean of the two axis scales and
-    surface the anisotropy. Real-data geometry validation is required before
-    trusting f-theta projection quantitatively (see #77).
+    Uses the SDK's backward polynomial ``r2th`` (pixel radius -> theta) evaluated
+    at the corner radius from the principal point. This is a principled per-lens
+    FOV cutoff derived from the published calibration, so wide f-theta rays are
+    admitted up to the real lens FOV and no farther. Returns None if the model
+    exposes no usable ``r2th`` (then the operator falls back to the +Z
+    hemisphere, i.e. f-theta without an explicit FOV bound).
     """
-    import warnings
-
-    native_w, native_h = int(model.width), int(model.height)
-    tw, th = target_wh
-    sx, sy = tw / native_w, th / native_h
-    if abs(sx - sy) / max(sx, sy) > 1e-3:
-        warnings.warn(
-            f"Anisotropic resize ({native_w}x{native_h} -> {tw}x{th}) applied to an "
-            f"isotropic f-theta model; radius scaling uses the mean scale and is "
-            f"approximate. Validate on real data before quantitative use (#77).",
-            RuntimeWarning,
-            stacklevel=2,
-        )
-    return (sx + sy) / 2.0, sx, sy
+    r2th = getattr(model, "r2th", None)
+    if r2th is None:
+        return None
+    w, h = int(model.width), int(model.height)
+    cx, cy = float(model.principal_point[0]), float(model.principal_point[1])
+    # Farthest corner distance from the principal point, in native pixels.
+    corners = [(0.0, 0.0), (w, 0.0), (0.0, h), (w, h)]
+    r_max = max(((px - cx) ** 2 + (py - cy) ** 2) ** 0.5 for px, py in corners)
+    try:
+        theta = float(r2th(r_max))
+    except Exception:
+        return None
+    # A sane FOV bound is positive and within a hemisphere-plus; reject
+    # degenerate polynomial extrapolation.
+    if not (0.0 < theta < math.pi):
+        return None
+    return theta
 
 
 def build_ftheta_projection(
     intrinsics,
     extrinsics,
     camera_names,
-    target_wh: tuple[int, int] = (256, 256),
     polynomial_degree: int = 4,
     sensor_frame_is_optical: bool = True,
 ):
-    """Construct an :class:`FThetaProjection` scaled to the model-input frame.
+    """Construct a native-frame :class:`FThetaProjection` from SDK calibration.
 
-    The SDK's f-theta parameters are in native camera resolution; shards are
-    packed at ``target_wh``, and BEV fusion normalizes pixel coords by that
-    size. We therefore scale principal point and radius polynomial to
-    ``target_wh`` here so the projection matches the resized image.
+    The f-theta parameters stay in the camera's NATIVE pixel resolution; the
+    operator normalizes projected ``(u, v)`` per-axis by that native ``(W, H)``.
+    Under a plain resize to the model input this normalization is EXACT (the
+    model size cancels), so a non-square / anisotropic resize needs no radius
+    approximation — the isotropic radial polynomial is never mean-scaled.
+
+    A per-lens FOV bound ``max_theta`` is derived from the SDK's ``r2th`` at the
+    image corner, so wide f-theta rays are admitted up to the real lens FOV.
 
     Args:
         intrinsics: ``physical_ai_av.calibration.CameraIntrinsics``.
         extrinsics: ``physical_ai_av.calibration.SensorExtrinsics``.
         camera_names: ordered list of camera ids (slot order == visual_tiles).
-        target_wh: model-input (width, height); must match the shard image_size.
-        polynomial_degree: f-theta forward-polynomial degree (SDK default 4).
+        polynomial_degree: f-theta forward-polynomial degree floor (the SDK's may
+            be longer; the full polynomial is preserved).
         sensor_frame_is_optical: whether the SDK sensor frame is already the
             camera optical frame (see :func:`_ego_to_camera_transform`).
 
     Returns:
         FThetaProjection with batch dim 1 ([1, V, ...]); stored as a per-dataset
-        rig constant.
+        rig constant. ``max_theta`` is None if no lens exposes a usable r2th.
     """
     from model_components.view_fusion.projection import FThetaProjection
 
@@ -134,31 +142,41 @@ def build_ftheta_projection(
     t_camera_ego = np.zeros((1, V, 4, 4), dtype=np.float32)
     cx = np.zeros((1, V), dtype=np.float32)
     cy = np.zeros((1, V), dtype=np.float32)
+    image_wh = np.zeros((1, V, 2), dtype=np.float32)
 
-    # Gather each camera's scaled forward polynomial first; size fw_poly to the
-    # LONGEST so no coefficient is silently dropped (Horner handles any K). The
-    # polynomial_degree arg is only a floor — real SDK polynomials may be longer.
-    coefs = []
-    for name in camera_names:
-        model = intrinsics.camera_models[name]
-        r_scale, _, _ = _ftheta_pixel_scale(model, target_wh)
-        coefs.append(np.asarray(model.th2r.coef, dtype=np.float32) * r_scale)
+    # Native forward polynomials (no scaling); size fw_poly to the LONGEST so no
+    # coefficient is dropped. polynomial_degree is only a floor.
+    coefs = [np.asarray(intrinsics.camera_models[n].th2r.coef, dtype=np.float32)
+             for n in camera_names]
     K = max(polynomial_degree + 1, max(len(c) for c in coefs))
     fw_poly = np.zeros((1, V, K), dtype=np.float32)
 
+    max_thetas = []
+    any_bound = False
     for i, name in enumerate(camera_names):
         model = intrinsics.camera_models[name]
         pose = extrinsics.sensor_poses[name]
-        _, sx, sy = _ftheta_pixel_scale(model, target_wh)
         t_camera_ego[0, i] = _ego_to_camera_transform(pose, sensor_frame_is_optical)
         # np.polynomial.Polynomial.coef is ascending powers (matches our Horner).
         fw_poly[0, i, : len(coefs[i])] = coefs[i]
-        cx[0, i] = float(model.principal_point[0]) * sx
-        cy[0, i] = float(model.principal_point[1]) * sy
+        cx[0, i] = float(model.principal_point[0])   # native pixels, unscaled
+        cy[0, i] = float(model.principal_point[1])
+        image_wh[0, i, 0] = float(model.width)
+        image_wh[0, i, 1] = float(model.height)
+        mt = _corner_max_theta(model)
+        max_thetas.append(mt if mt is not None else float("inf"))
+        any_bound = any_bound or (mt is not None)
+
+    # Per-view FOV bound when at least one lens exposes r2th (lenses without one
+    # get +inf = unbounded); else None so the operator uses the +Z hemisphere
+    # fallback (f-theta without an explicit FOV bound).
+    max_theta = torch.tensor([max_thetas], dtype=torch.float32) if any_bound else None
 
     return FThetaProjection(
         t_camera_ego=torch.from_numpy(t_camera_ego),
         fw_poly=torch.from_numpy(fw_poly),
         cx=torch.from_numpy(cx),
         cy=torch.from_numpy(cy),
+        image_wh=torch.from_numpy(image_wh),
+        max_theta=max_theta,
     )
