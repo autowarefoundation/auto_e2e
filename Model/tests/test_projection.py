@@ -20,7 +20,7 @@ from model_components.view_fusion.projection import (
 
 def _homo(points):
     """[M, 3] ego points -> [M, 4] homogeneous."""
-    ones = torch.ones(points.shape[0], 1, dtype=points.dtype)
+    ones = torch.ones(points.shape[0], 1, dtype=points.dtype, device=points.device)
     return torch.cat([points, ones], dim=-1)
 
 
