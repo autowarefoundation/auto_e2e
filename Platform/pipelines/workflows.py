@@ -85,6 +85,22 @@ def _select_shard_dir(shards, dataset) -> str:
     return fallback
 
 
+def _batch_geometry(batch, device):
+    """Extract (map_input, camera_params, geometry_type) from a loader batch.
+
+    The pre-extracted loader emits map_input (real nav-map or zeros) and, when
+    the dataset shipped calibration, a [B, V, 3, 4] camera_params. If no
+    calibration is present we run the explicit pseudo geometry path — never
+    silently claiming real geometry. map_input always exists (zeros fallback).
+    """
+    import torch
+    map_input = batch["map_input"].to(device)
+    cam = batch.get("camera_params")
+    if cam is not None:
+        return map_input, cam.to(device), "pinhole"
+    return map_input, None, "pseudo"
+
+
 # ============================================================
 # Task: Data Ingest (download raw from HuggingFace)
 # ============================================================
@@ -372,19 +388,17 @@ def train_il(
     for epoch in range(epochs):
         epoch_losses = []
         for batch in loader:
-            visual = batch["visual_tiles"].to(device)        # (B, 7, 3, H, W)
+            visual = batch["visual_tiles"].to(device)        # (B, V, 3, H, W)
             ego_hist = batch["egomotion_history"].to(device)  # (B, 256)
             vis_hist = batch["visual_history"].to(device)     # (B, 896)
             target = batch["trajectory_target"].to(device)    # (B, 128)
-            # The shards carry no rendered nav-map yet (#77), but the refactored
-            # forward requires a map_input. Feed zeros: MapBEVFusion is a residual
-            # gate initialized at alpha=0, so a zero map contributes nothing early.
-            map_input = torch.zeros(visual.shape[0], 3, 256, 256, device=device)
+            map_input, camera_params, geom = _batch_geometry(batch, device)
 
             optimizer.zero_grad()
             with torch.amp.autocast("cuda", enabled=amp):
-                pred = model(visual, map_input, vis_hist, ego_hist, mode="train",
-                             trajectory_target=target)
+                pred = model(visual, map_input, vis_hist, ego_hist,
+                             camera_params=camera_params, geometry_type=geom,
+                             mode="train", trajectory_target=target)
                 loss = loss_fn(pred, target)
 
             scaler.scale(loss).backward()
