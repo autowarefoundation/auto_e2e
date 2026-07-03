@@ -257,6 +257,16 @@ class NvidiaAVDataset(Dataset):
         intr_path = calib_dir / "intrinsics.pkl"
         extr_path = calib_dir / "extrinsics.pkl"
         if not (intr_path.exists() and extr_path.exists()):
+            # No calibration on disk -> the pipeline runs the explicit pseudo
+            # path. Log it (WARNING) so a run never silently falls back to a
+            # learned prior while a reader assumes real f-theta geometry. The
+            # ingest step writes these pkls when calibration is downloaded.
+            logger.warning(
+                "NvidiaAVDataset.projection_spec: no calibration at %s "
+                "(intrinsics.pkl / extrinsics.pkl); using pseudo geometry. Run "
+                "data_ingest with camera_intrinsics/sensor_extrinsics for real "
+                "f-theta projection (#77).", calib_dir,
+            )
             return None
 
         from .calibration import build_ftheta_projection
