@@ -87,15 +87,15 @@ class TestViewFusion:
             assert not torch.allclose(fused_base, fused_mod, atol=1e-5), \
                 f"View {view_idx} has no influence on the fused feature map"
 
-    def test_views_contribute_to_fused_with_camera_params(self, build_mock_model, device):
-        """Every view must influence the fused feature map when REAL camera_params
-        are passed through the BEV projection path.
+    def test_views_contribute_to_fused_with_real_projection(self, build_mock_model, device):
+        """Every view must influence the fused feature map when a REAL pinhole
+        projection operator drives the BEV projection path.
 
-        The other view-contribution tests run only the camera_params=None branch,
-        which exercises the learnable pseudo_projection fallback rather than the
-        geometry-driven projection. Real deployments always pass a [B, V, 3, 4]
-        ego-to-pixel matrix; this test strengthens coverage by feeding one through
-        FeatureFusion and verifying each view still contributes.
+        The other view-contribution tests run only the pseudo path, which uses
+        the learnable prior rather than geometry-driven projection. Real
+        deployments pass a projection operator; this test strengthens coverage by
+        feeding a PinholeProjection through FeatureFusion and verifying each view
+        still contributes.
         """
         model = build_mock_model(num_views=4, fusion_mode="bev", device=device)
         model.eval()
@@ -115,10 +115,11 @@ class TestViewFusion:
         cam_params[..., 1, 1] = 1.0
         cam_params[..., 1, 3] = 128.0
         cam_params[..., 2, 3] = 1.0
+        projection = PinholeProjection(cam_params)
 
         def fused_features(x):
             features = model.Reactive_E2E.Backbone(x.reshape(B * V, C, H, W))
-            return model.Reactive_E2E.FeatureFusion(features, B, V, camera_params=cam_params)
+            return model.Reactive_E2E.FeatureFusion(features, B, V, projection=projection)
 
         fused_base = fused_features(visual)
 
@@ -128,7 +129,7 @@ class TestViewFusion:
             fused_mod = fused_features(visual_mod)
             assert not torch.allclose(fused_base, fused_mod, atol=1e-5), \
                 f"View {view_idx} has no influence on the fused feature map " \
-                f"under real camera_params projection"
+                f"under real projection"
 
 
 # ---------------------------------------------------------------------------
@@ -185,12 +186,12 @@ class TestBEVFusion:
         out = fusion(x, B=1, V=4)
         assert out.shape == (1, 256, 12, 20)
 
-    def test_output_shape_with_camera_params(self, device):
-        """BEV fusion should work with explicit camera projection matrices."""
+    def test_output_shape_with_pinhole_projection(self, device):
+        """BEV fusion should work with an explicit pinhole projection operator."""
         fusion = BEVViewFusion(num_views=8, embed_dim=256, bev_h=8, bev_w=8).to(device)
         x = torch.randn(16, 256, 8, 8, device=device)
-        cam_params = torch.randn(2, 8, 3, 4, device=device)
-        out = fusion(x, B=2, V=8, camera_params=cam_params)
+        proj = PinholeProjection(torch.randn(2, 8, 3, 4, device=device))
+        out = fusion(x, B=2, V=8, projection=proj)
         assert out.shape == (2, 256, 8, 8)
 
     def test_pseudo_projection_is_learned(self, device):
@@ -217,11 +218,11 @@ class TestBEVFusion:
         fusion.eval()
         x = torch.randn(4, 256, 8, 8, device=device)
 
-        cam_a = torch.randn(1, 4, 3, 4, device=device)
-        cam_b = torch.randn(1, 4, 3, 4, device=device)
+        cam_a = PinholeProjection(torch.randn(1, 4, 3, 4, device=device))
+        cam_b = PinholeProjection(torch.randn(1, 4, 3, 4, device=device))
 
-        out_a = fusion(x, B=1, V=4, camera_params=cam_a)
-        out_b = fusion(x, B=1, V=4, camera_params=cam_b)
+        out_a = fusion(x, B=1, V=4, projection=cam_a)
+        out_b = fusion(x, B=1, V=4, projection=cam_b)
 
         assert not torch.allclose(out_a, out_b, atol=1e-5), \
             "Different camera params produced identical output — projection has no effect"
@@ -310,7 +311,7 @@ class TestBEVFusion:
         cam[0, 0, 2, 2] = 1.0     # z passthrough (positive depth)
 
         x = torch.ones(1, 256, 8, 8, device=device)
-        out = fusion(x, B=1, V=1, camera_params=cam)
+        out = fusion(x, B=1, V=1, projection=PinholeProjection(cam))
 
         # ref_2d normalized = (fx*x/z + cx) / 224 >> 1, so all out of bounds
         # → mask = False everywhere → visible_count = 0 → has_observation = 0
@@ -373,7 +374,7 @@ class TestBEVFusion:
         cam_behind = torch.zeros(1, 1, 3, 4, device=device)
         cam_behind[0, 0, 2, 2] = -1.0
         cam_behind[0, 0, 2, 3] = -100.0
-        out = fusion(x, B=1, V=1, camera_params=cam_behind)
+        out = fusion(x, B=1, V=1, projection=PinholeProjection(cam_behind))
 
         # has_observation mask zeroes output after FFN
         assert out.abs().max() < 1e-6, \
@@ -410,7 +411,7 @@ class TestBEVFusionVDynamic:
         for V, cam in ((7, cam7), (6, cam7[:, :6])):
             fusion.zero_grad(set_to_none=True)
             x = torch.randn(V, 256, 8, 8, device=device)
-            out = fusion(x, B=1, V=V, camera_params=cam)
+            out = fusion(x, B=1, V=V, projection=PinholeProjection(cam))
             out.sum().backward()
             for name, p in (("bev_queries", fusion.bev_queries.weight),
                             ("value_proj", fusion.value_proj.weight),
@@ -432,26 +433,21 @@ class TestBEVFusionVDynamic:
 # ---------------------------------------------------------------------------
 
 class TestGeometryDeclaration:
-    def test_pseudo_label_rejects_real_camera_params(self, device):
+    def test_pseudo_label_contradicts_real_operator(self, device):
+        """geometry_type='pseudo' must not label a real (pinhole) operator."""
         fusion = BEVViewFusion(num_views=4, embed_dim=256, bev_h=8, bev_w=8).to(device)
         x = torch.randn(4, 256, 8, 8, device=device)
-        cam = torch.randn(1, 4, 3, 4, device=device)
-        with pytest.raises(ValueError, match="pseudo"):
-            fusion(x, B=1, V=4, camera_params=cam, geometry_type="pseudo")
+        proj = PinholeProjection(torch.randn(1, 4, 3, 4, device=device))
+        with pytest.raises(ValueError, match="contradicts"):
+            fusion(x, B=1, V=4, projection=proj, geometry_type="pseudo")
 
-    def test_real_label_without_calibration_raises(self, device):
+    def test_real_label_without_operator_raises(self, device):
+        """Claiming real geometry without a projection operator is rejected — the
+        pseudo path is never entered on behalf of a caller that meant real."""
         fusion = BEVViewFusion(num_views=4, embed_dim=256, bev_h=8, bev_w=8).to(device)
         x = torch.randn(4, 256, 8, 8, device=device)
-        with pytest.raises(ValueError, match="requires calibration"):
+        with pytest.raises(ValueError, match="requires a projection operator"):
             fusion(x, B=1, V=4, geometry_type="pinhole")
-
-    def test_camera_params_and_projection_mutually_exclusive(self, device):
-        fusion = BEVViewFusion(num_views=4, embed_dim=256, bev_h=8, bev_w=8).to(device)
-        x = torch.randn(4, 256, 8, 8, device=device)
-        cam = torch.randn(1, 4, 3, 4, device=device)
-        proj = PinholeProjection(cam)
-        with pytest.raises(ValueError, match="at most one"):
-            fusion(x, B=1, V=4, camera_params=cam, projection=proj)
 
     def test_projection_view_count_must_match_v(self, device):
         fusion = BEVViewFusion(num_views=4, embed_dim=256, bev_h=8, bev_w=8).to(device)
