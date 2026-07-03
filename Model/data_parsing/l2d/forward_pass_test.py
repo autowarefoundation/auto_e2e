@@ -3,7 +3,8 @@ Forward pass test for AutoE2E using the yaak-ai/L2D LeRobot dataset.
 
 Tests two modes:
 1. Synthetic: Creates fake tensors matching L2D shapes to verify the model
-   accepts num_views=7 and all dimensions align. Always runs.
+   accepts num_views=6 real cameras (+ a separate map_input) and all dimensions
+   align. Always runs.
 2. Live: Loads actual L2D data via LeRobotDataset. Skipped if lerobot is
    not installed or the dataset is not cached locally.
 
@@ -46,6 +47,7 @@ def test_synthetic_forward_pass(pretrained_backbone: bool = False) -> None:
     H, W = 256, 256
 
     visual_tiles = torch.randn(batch_size, NUM_VIEWS, 3, H, W, device=device)
+    map_input = torch.randn(batch_size, 3, H, W, device=device)
     visual_history = torch.zeros(batch_size, 896, device=device)
     egomotion_history = torch.randn(batch_size, EGOMOTION_DIM, device=device)
 
@@ -55,8 +57,8 @@ def test_synthetic_forward_pass(pretrained_backbone: bool = False) -> None:
     ).to(device)
 
     t0 = time.time()
-    trajectory, compressed, future = model(
-        visual_tiles, visual_history, egomotion_history
+    trajectory = model(
+        visual_tiles, map_input, visual_history, egomotion_history, mode="infer"
     )
     t_fwd = time.time() - t0
 
@@ -64,7 +66,6 @@ def test_synthetic_forward_pass(pretrained_backbone: bool = False) -> None:
         f"Expected ({batch_size}, {TRAJECTORY_DIM}), got {tuple(trajectory.shape)}"
     )
     print(f"[synthetic] trajectory: {tuple(trajectory.shape)}")
-    print(f"[synthetic] compressed: {tuple(compressed.shape)}")
     print(f"[synthetic] forward pass: {t_fwd:.2f}s")
     print("[synthetic] PASSED")
 
@@ -116,11 +117,13 @@ def test_live_dataset(episodes: list[int], batch_size: int, pretrained_backbone:
     batch = next(iter(loader))
 
     visual_tiles = batch["visual_tiles"].to(device)
+    map_input = batch["map_tile"].to(device)
     visual_history = batch["visual_history"].to(device)
     egomotion_history = batch["egomotion_history"].to(device)
     trajectory_target = batch["trajectory_target"].to(device)
 
     print(f"[live] visual_tiles: {tuple(visual_tiles.shape)}")
+    print(f"[live] map_tile: {tuple(map_input.shape)}")
     print(f"[live] egomotion_history: {tuple(egomotion_history.shape)}")
     print(f"[live] trajectory_target: {tuple(trajectory_target.shape)}")
 
@@ -129,8 +132,8 @@ def test_live_dataset(episodes: list[int], batch_size: int, pretrained_backbone:
         is_pretrained=pretrained_backbone,
     ).to(device)
 
-    trajectory, compressed, future = model(
-        visual_tiles, visual_history, egomotion_history
+    trajectory = model(
+        visual_tiles, map_input, visual_history, egomotion_history, mode="infer"
     )
     print(f"[live] trajectory output: {tuple(trajectory.shape)}")
     print("[live] PASSED")
