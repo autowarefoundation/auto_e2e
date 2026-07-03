@@ -29,6 +29,8 @@ Expected output structure
       camera/<cam_name>/<uuid>.<cam_name>.mp4
       camera/<cam_name>/<uuid>.<cam_name>.timestamps.parquet
       labels/egomotion/<uuid>.egomotion.parquet
+      calibration/<uuid>.camera_intrinsics.parquet   (if available)
+      calibration/<uuid>.sensor_extrinsics.parquet   (if available)
 """
 
 from __future__ import annotations

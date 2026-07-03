@@ -152,6 +152,11 @@ def data_ingest(
         )
         clip_ids = ds.clip_index.index.tolist()[:episodes]
         feats = CAMERAS + ["egomotion"]
+        # Real calibration: native f-theta intrinsics + sensor extrinsics. Enables
+        # geometrically-meaningful BEV projection (#77). The rig is shared across
+        # the subset, so we save calibration from the first clip that has it and
+        # fall back to pseudo geometry downstream if none does.
+        calib_saved = False
         for clip_id in clip_ids:
             ds.download_clip_features(clip_id, features=feats)
             for cam in CAMERAS:
@@ -161,6 +166,23 @@ def data_ingest(
             cf = ds.features.get_chunk_feature_filename(ds.get_clip_chunk(clip_id), "egomotion")
             with ds.open_file(cf, maybe_stream=True) as f:
                 unpack_egomotion_zip(f.read(), clip_id, out)
+            if not calib_saved:
+                try:
+                    import pickle
+                    ds.download_clip_features(
+                        clip_id, features=["camera_intrinsics", "sensor_extrinsics"])
+                    intr = ds.get_clip_feature(clip_id, "camera_intrinsics")
+                    extr = ds.get_clip_feature(clip_id, "sensor_extrinsics")
+                    calib_dir = out / "calibration"
+                    calib_dir.mkdir(parents=True, exist_ok=True)
+                    with open(calib_dir / "intrinsics.pkl", "wb") as f:
+                        pickle.dump(intr, f)
+                    with open(calib_dir / "extrinsics.pkl", "wb") as f:
+                        pickle.dump(extr, f)
+                    calib_saved = True
+                    print(f"Saved NVIDIA calibration from clip {clip_id}")
+                except Exception as e:
+                    print(f"WARN: no calibration for clip {clip_id}: {e}")
         print(f"Ingested {dataset.value}: {len(clip_ids)} clips → {out_dir}")
         return FlyteDirectory(out_dir)
 
