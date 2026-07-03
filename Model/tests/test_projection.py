@@ -4,6 +4,8 @@ These exercise the operators in isolation (no backbone, no fusion) so a geometry
 bug is localized to the projection math rather than the sampling loop.
 """
 
+import math
+
 import pytest
 import torch
 
@@ -68,6 +70,36 @@ class TestPinholeProjection:
     def test_rectified_pinhole_label_allowed(self):
         proj = PinholeProjection(torch.randn(1, 1, 3, 4), geometry_type=GEOMETRY_RECTIFIED_PINHOLE)
         assert proj.geometry_type == GEOMETRY_RECTIFIED_PINHOLE
+
+    def test_from_KT_matches_combined_matrix_with_rotation(self, device):
+        """from_KT(K, T) must equal PinholeProjection(K @ T[:3]) for a NON-trivial
+        rotation+translation, and project a known point to the hand-computed pixel
+        — catching a K/T order swap or a wrong T slice."""
+        # K: fx=fy=100, principal point (128,128).
+        K = torch.tensor([[[[100.0, 0.0, 128.0],
+                            [0.0, 100.0, 128.0],
+                            [0.0, 0.0, 1.0]]]], device=device)          # [1,1,3,3]
+        # T: 90 deg yaw about camera Z + translation, ego->camera.
+        c, s = 0.0, 1.0  # cos/sin(90deg)
+        T = torch.tensor([[[[c, -s, 0.0, 0.3],
+                            [s, c, 0.0, -0.2],
+                            [0.0, 0.0, 1.0, 2.0],
+                            [0.0, 0.0, 0.0, 1.0]]]], device=device)     # [1,1,4,4]
+        proj_kt = PinholeProjection.from_KT(K, T)
+        combined = torch.einsum("bvij,bvjk->bvik", K, T[:, :, :3, :])
+        proj_m = PinholeProjection(combined)
+        pt = _homo(torch.tensor([[0.5, -0.4, 3.0]], device=device))
+        r_kt = proj_kt.project_ego_to_image(pt, 256)
+        r_m = proj_m.project_ego_to_image(pt, 256)
+        assert torch.allclose(r_kt.uv_norm, r_m.uv_norm, atol=1e-5), \
+            "from_KT composition must equal the pre-combined matrix"
+        # Hand-computed expected pixel: cam = T @ [x,y,z,1]; uvd = K @ cam[:3].
+        cam = (T[0, 0] @ torch.tensor([0.5, -0.4, 3.0, 1.0], device=device))[:3]
+        uvd = K[0, 0] @ cam
+        u_exp = (uvd[0] / uvd[2]) / 256.0
+        v_exp = (uvd[1] / uvd[2]) / 256.0
+        assert torch.allclose(r_kt.uv_norm[0, 0, 0],
+                              torch.stack([u_exp, v_exp]), atol=1e-5)
 
 
 class TestPseudoProjection:
@@ -260,6 +292,19 @@ class TestFThetaProjection:
                               torch.tensor([0.5, 0.5], device=device), atol=1e-4), \
             "ego-FLU forward must project to the optical center after FLU->RDF"
 
+        # Pin down BOTH other axes so a sign flip on left/up cannot pass (the
+        # forward axis alone underconstrains R_EGO_FLU_TO_CAM_OPT). ego-LEFT
+        # (+Y) -> camera -X -> image left of center (u < 0.5); ego-UP (+Z) ->
+        # camera -Y -> image top (v < 0.5).
+        ego_left = _homo(torch.tensor([[5.0, 1.0, 0.0]], device=device))
+        res_left = proj.project_ego_to_image(ego_left, 256)
+        assert res_left.uv_norm[0, 0, 0, 0] < 0.5, \
+            "ego-left (+Y) must project left of center (camera X=right)"
+        ego_up = _homo(torch.tensor([[5.0, 0.0, 1.0]], device=device))
+        res_up = proj.project_ego_to_image(ego_up, 256)
+        assert res_up.uv_norm[0, 0, 0, 1] < 0.5, \
+            "ego-up (+Z) must project above center (camera Y=down)"
+
     def test_cpu_operator_projects_cuda_points(self, device):
         """A CPU operator must project CUDA points (params coerced to device)."""
         if device.type != "cuda":
@@ -313,14 +358,24 @@ class TestBuildFThetaFromCalibration:
         assert tuple(proj.image_wh.shape) == (1, 2, 2)
         assert float(proj.image_wh[0, 0, 0]) == 1920.0
         assert float(proj.image_wh[0, 0, 1]) == 1080.0
-        # max_theta derived from r2th at the corner radius (finite, sane FOV).
-        assert proj.max_theta is not None
+        # max_theta must EQUAL r2th at the exact corner radius (r=r_max/900), not
+        # just be "some sane angle" — a wrong r2th eval would still be < pi.
+        r_max = math.hypot(1920 / 2.0, 1080 / 2.0)   # corner from principal point
+        expected_mt = r_max / 900.0                   # r2th slope in _Model
         mt = proj.max_theta.reshape(-1)
-        assert (mt > 0).all() and (mt < 3.15).all()
-        # On-axis ego-forward projects to the principal point (0.5, 0.5) in the
-        # native frame regardless of the non-square aspect.
-        res = proj.project_ego_to_image(_homo(torch.tensor([[0.0, 0.0, 5.0]])), 256)
-        assert torch.allclose(res.uv_norm[0, 0, 0], torch.tensor([0.5, 0.5]), atol=1e-4)
+        assert mt[0].item() == pytest.approx(expected_mt, abs=1e-3)
+        # Off-center point: normalization must use the NATIVE (W,H) per axis, and
+        # the radius must be the UNSCALED native polynomial. Hand-compute both.
+        # Identity pose -> ego==optical here; use an optical-frame point.
+        pt = _homo(torch.tensor([[1.0, 0.5, 5.0]]))
+        res = proj.project_ego_to_image(pt, 256)
+        rho = math.hypot(1.0, 0.5)
+        theta = math.atan2(rho, 5.0)
+        r = 900.0 * theta                             # native pixels, unscaled
+        u_exp = (960.0 + r * (1.0 / rho)) / 1920.0    # per-axis native normalize
+        v_exp = (540.0 + r * (0.5 / rho)) / 1080.0
+        assert res.uv_norm[0, 0, 0, 0].item() == pytest.approx(u_exp, abs=1e-4)
+        assert res.uv_norm[0, 0, 0, 1].item() == pytest.approx(v_exp, abs=1e-4)
 
     def test_no_r2th_leaves_max_theta_none(self):
         pytest.importorskip("scipy")
@@ -330,3 +385,36 @@ class TestBuildFThetaFromCalibration:
         proj = build_ftheta_projection(
             self._Intr({"c": m}), self._Extr({"c": self._pose()}), ["c"])
         assert proj.max_theta is None  # falls back to +Z hemisphere
+
+    def test_mixed_rig_unbounded_lens_still_masks_behind_camera(self):
+        """A rig where one lens has r2th (finite bound) and another does not
+        (inf) must STILL mask behind-camera rays on the unbounded lens — the inf
+        bound must fall back to the +Z hemisphere gate, not accept everything."""
+        pytest.importorskip("scipy")
+        from data_parsing.nvidia_physical_ai.calibration import build_ftheta_projection
+        bounded = self._Model(1920, 1080)             # has r2th -> finite bound
+        unbounded = self._Model(1920, 1080)
+        del unbounded.r2th                            # inf bound
+        names = ["bounded", "unbounded"]
+        proj = build_ftheta_projection(
+            self._Intr({"bounded": bounded, "unbounded": unbounded}),
+            self._Extr({n: self._pose() for n in names}), names)
+        assert proj.max_theta is not None             # at least one lens is bounded
+        # Point directly BEHIND the rig (optical z<0, on-axis): must be masked on
+        # BOTH views, including the unbounded (inf) one.
+        behind = _homo(torch.tensor([[0.0, 0.0, -5.0]]))
+        res = proj.project_ego_to_image(behind, 256)
+        assert not res.valid_mask[0, 0, 0], "bounded lens must mask behind-camera"
+        assert not res.valid_mask[0, 1, 0], \
+            "unbounded (inf) lens must still mask behind-camera via z>0 fallback"
+
+    def test_radius_monotonic_over_fov(self):
+        """A calibrated forward polynomial must be radially monotonic over its FOV
+        so two incidence angles never alias to the same pixel radius. This is a
+        geometry contract that shape/sidedness tests do not catch."""
+        T = torch.eye(4).reshape(1, 1, 4, 4)
+        fw_poly = torch.tensor([0.0, 900.0])          # r = 900*theta (monotonic)
+        proj = FThetaProjection(T, fw_poly, cx=960.0, cy=540.0, image_wh=(1920.0, 1080.0))
+        thetas = torch.linspace(0.0, 1.2, 200)
+        r = proj._radius(thetas.reshape(1, 1, -1)).reshape(-1)
+        assert (r[1:] - r[:-1] >= 0).all(), "r(theta) must be non-decreasing over the FOV"
