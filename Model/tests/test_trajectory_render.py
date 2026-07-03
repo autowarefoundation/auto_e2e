@@ -20,7 +20,7 @@ def test_visualization_with_dummy_data(tmp_path: Path):
 
     # 2. Set baseline parameters
     mock_speed = 10.0  # Starting at 10 m/s (36 km/h)
-    mock_radius = 800.0  # Just like in gps_to_map.py
+    mock_resolution = 0.4  # Default resolution is 0.4 m/px
 
     # 3. Create a clean mock map image, following L2D format
     mock_map = np.full((360, 640, 3), (17, 17, 17), dtype=np.uint8) # equivalent to #111111
@@ -32,7 +32,7 @@ def test_visualization_with_dummy_data(tmp_path: Path):
         action_sequence=mock_actions,
         current_speed=mock_speed,
         map_image=mock_map,
-        radius_m=mock_radius
+        resolution_m_px=mock_resolution
     )
 
     # 4. Save and inspect the result
@@ -131,10 +131,10 @@ def test_meters_to_pixels_trajectory():
         [10.0, 10.0],
         [0.0, 10.0],
     ])
-    radius_m = 20.0
+    resolution_m_px = 0.1  # 10 pixels/meter -> 0.1 m/pixel
     map_image = np.zeros((400, 400, 3), dtype=np.uint8)
 
-    trajectory_px = Visualization.meters_to_pixels_trajectory(trajectory_m, radius_m, map_image)
+    trajectory_px = Visualization.meters_to_pixels_trajectory(trajectory_m, resolution_m_px, map_image)
 
     assert trajectory_px.shape == trajectory_m.shape
     # Check pixel coordinates
@@ -163,9 +163,9 @@ def test_overlay_the_trajectory_with_map():
     # Check if pixels are colored correctly
     # The trajectory should be a non-black color
     # We check points along the drawn line segments
-    p1 = (trajectory_px[0,1].item(), trajectory_px[0,0].item()) # (y, x) for numpy
-    p2 = (trajectory_px[1,1].item(), trajectory_px[1,0].item())
-    p3 = (trajectory_px[2,1].item(), trajectory_px[2,0].item())
+    p1 = (int(trajectory_px[0,1].item()), int(trajectory_px[0,0].item())) # (y, x) for numpy
+    p2 = (int(trajectory_px[1,1].item()), int(trajectory_px[1,0].item()))
+    p3 = (int(trajectory_px[2,1].item()), int(trajectory_px[2,0].item()))
 
     assert not np.array_equal(overlaid_image[p1], [0, 0, 0])
     assert not np.array_equal(overlaid_image[p2], [0, 0, 0])
@@ -174,3 +174,47 @@ def test_overlay_the_trajectory_with_map():
     # Check a point on the line between p1 and p2
     mid_p1_p2 = (int((p1[0]+p2[0])/2), int((p1[1]+p2[1])/2))
     assert not np.array_equal(overlaid_image[mid_p1_p2], [0, 0, 0])
+
+def test_generate_grid_with_prediction_only():
+    # 1. Create a dummy trajectory prediction in meters
+    prediction_m = torch.tensor([
+        [0.0, 0.0],
+        [1.0, 10.0],
+        [2.0, 20.0],
+    ])
+    
+    # 2. Run the function
+    grid_img = Visualization.generate_grid(prediction_m)
+    
+    # 3. Assertions
+    assert grid_img is not None, "generate_grid returned None"
+    assert isinstance(grid_img, np.ndarray), "generate_grid did not return a numpy array"
+    assert grid_img.shape == (1080, 480, 3), "Shape of grid image is incorrect"
+    # Basic check to ensure it's not all black or background
+    assert not np.all(grid_img == grid_img[0][0]), "Grid image appears to be empty"
+
+def test_generate_grid_with_prediction_and_actual():
+    # 1. Create dummy trajectories
+    prediction_m = torch.tensor([[0.0, 0.0], [1.0, 10.0], [2.0, 20.0]])
+    actual_m = torch.tensor([[0.0, 0.0], [0.5, 10.0], [1.0, 20.0]])
+    
+    # 2. Run the function
+    grid_img = Visualization.generate_grid(prediction_m, actual_trajectory_m=actual_m)
+    
+    # 3. Assertions
+    assert grid_img is not None
+    assert isinstance(grid_img, np.ndarray)
+    assert grid_img.shape == (1080, 480, 3)
+
+def test_render_trajectory_on_a_grid():
+    # 1. Create a dummy action sequence
+    action_sequence = torch.zeros(_FUTURE_TIMESTEPS * 2)
+    current_speed = 10.0
+    
+    # 2. Run the function
+    grid_img = Visualization.render_trajectory_on_a_grid(action_sequence, current_speed)
+    
+    # 3. Assertions
+    assert grid_img is not None, "render_trajectory_on_a_grid returned None"
+    assert isinstance(grid_img, np.ndarray), "render_trajectory_on_a_grid did not return a numpy array"
+    assert grid_img.shape == (1080, 480, 3), "Shape of grid image is incorrect"

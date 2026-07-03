@@ -77,7 +77,7 @@ class Visualization:
         # Scaling based on zoom level (assuming base resolution is 0.4 m/px when resized to 1280x720)
         zoom_scale = 0.4 / resolution_m_px
 
-        linewidth = 1
+        linewidth = int(1 * zoom_scale)
         outline_width = max(1, int(1 * zoom_scale))
 
         # Draw trajectory line with OpenCV (AA = Anti-Aliased for smooth edges)
