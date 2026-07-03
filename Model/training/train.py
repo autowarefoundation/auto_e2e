@@ -62,8 +62,9 @@ def parse_args() -> argparse.Namespace:
     # editing this file. Fusion is fixed to BEV (concat/cross_attn removed).
     p.add_argument("--backbone", default="swin_v2_tiny",
                    choices=sorted(BACKBONE_REGISTRY))
-    p.add_argument("--num-views", type=int, default=7,
-                   help="L2D ships 7 camera views (6 surround + 1 map render)")
+    p.add_argument("--num-views", type=int, default=6,
+                   help="Number of real cameras (L2D=6; the nav-map is a "
+                        "separate map branch input, not a camera view)")
     p.add_argument("--embed-dim", type=int, default=256)
     p.add_argument("--bev-h", type=int, default=450,
                    help="BEV grid height")
@@ -293,10 +294,6 @@ def run_training(args: argparse.Namespace) -> None:
     # currently inert; --enable-future-state has no effect until JEPA is wired.
     forward_mode = "train" if args.enable_future_state else "eval"
 
-    # camera_params stays None: BEV fusion falls back to its learnable
-    # pseudo_projection. Real L2D calibration is future work.
-    camera_params = None
-
     batches: Iterable[Any]
     if args.smoke_test:
         batches = [make_smoke_batch(args, device) for _ in range(args.smoke_steps)]
@@ -321,13 +318,19 @@ def run_training(args: argparse.Namespace) -> None:
             batch = move_batch(batch, device)
             optimizer.zero_grad(set_to_none=True)
 
-            # The model now owns a map branch and requires a map_input. Real
-            # datasets don't ship a rendered nav-map yet (#77), so fall back to
-            # zeros (MapBEVFusion is a residual gate at alpha=0 → no early effect).
+            # The model owns a map branch. Datasets now emit map_input (real
+            # nav-map for L2D, zeros for NVIDIA); fall back to zeros only if a
+            # batch lacks it (MapBEVFusion is a residual gate at alpha=0 → no
+            # early effect).
             visual_tiles = batch["visual_tiles"]
             map_input = batch.get("map_input")
             if map_input is None:
                 map_input = torch.zeros(visual_tiles.shape[0], 3, 256, 256, device=device)
+
+            # Geometry: use real camera_params when the loader supplied them,
+            # else the explicit pseudo path (never a silent real-geometry claim).
+            camera_params = batch.get("camera_params")
+            geometry_type = "pinhole" if camera_params is not None else "pseudo"
 
             with torch.autocast(device_type=device.type, dtype=torch.bfloat16,
                                 enabled=use_amp):
@@ -338,6 +341,7 @@ def run_training(args: argparse.Namespace) -> None:
                     batch["visual_history"],
                     batch["egomotion_history"],
                     camera_params=camera_params,
+                    geometry_type=geometry_type,
                     mode=forward_mode,
                     trajectory_target=batch["trajectory_target"],
                 )
