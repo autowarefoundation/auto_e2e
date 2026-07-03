@@ -9,15 +9,19 @@ Usage:
 
     loader = make_pre_extracted_loader("/data/shards", batch_size=8)
     for batch in loader:
-        # batch["visual_tiles"]       (B, 7, 3, 256, 256)
+        # batch["visual_tiles"]       (B, V, 3, 256, 256)  V real cameras
+        # batch["map_input"]          (B, 3, 256, 256)     nav-map (map branch)
         # batch["egomotion_history"]  (B, 256)
         # batch["visual_history"]     (B, 896)
         # batch["trajectory_target"]  (B, 128)
+        # batch["camera_params"]      (B, V, 3, 4)         if the manifest has calib
 """
 
 from __future__ import annotations
 
 import io
+import json
+import re
 from pathlib import Path
 
 import numpy as np
@@ -37,35 +41,89 @@ _TRANSFORM = transforms.Compose([
     transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
 ])
 
+# Camera frames are keyed "cam_<i>.jpg"; the nav-map is "map.jpg". The map MUST
+# NOT be picked up as a camera view — matching cam_ explicitly (not any ".jpg")
+# keeps V correct and stops the map being double-counted in the BEV projection.
+_CAM_KEY_RE = re.compile(r"^cam_\d+\.jpg$")
 
-def _decode_sample(sample: dict) -> dict:
-    """Decode a single WebDataset sample into training tensors."""
-    # WebDataset keys: "cam_0.jpg", "cam_1.jpg", ..., "ego.npy", "meta.json", "__key__"
-    cam_keys = sorted(k for k in sample if k.endswith(".jpg"))
-    frames = []
-    for key in cam_keys:
-        data = sample[key] if isinstance(sample[key], bytes) else sample[key]
-        img = Image.open(io.BytesIO(data))
-        frames.append(_TRANSFORM(img))
 
-    # Ego: raw bytes → numpy → split into history and future
-    ego_bytes = sample.get("ego.npy", b"")
-    if isinstance(ego_bytes, bytes) and len(ego_bytes) > 0:
-        ego = np.frombuffer(ego_bytes, dtype=np.float32).copy()
-    else:
-        ego = np.zeros(384, dtype=np.float32)
+def _decode_image(data) -> torch.Tensor:
+    img = Image.open(io.BytesIO(data)) if isinstance(data, bytes) else data
+    return _TRANSFORM(img)
 
-    # History: (64, 4) flattened = 256; Future: (64, 2) flattened = 128
-    history_size = _HISTORY_STEPS * _HISTORY_SIGNALS
-    ego_history = torch.from_numpy(ego[:history_size])
-    ego_future = torch.from_numpy(ego[history_size:])
 
-    return {
-        "visual_tiles": torch.stack(frames),
-        "egomotion_history": ego_history,
-        "visual_history": torch.zeros(_VISUAL_HISTORY_DIM),
-        "trajectory_target": ego_future,
-    }
+def _make_decoder(camera_params: torch.Tensor | None):
+    """Build a WebDataset sample decoder.
+
+    ``camera_params`` (a per-dataset ``[V, 3, 4]`` constant read once from the
+    manifest, or None) is attached to every sample so WebLoader auto-stacks it
+    to ``[B, V, 3, 4]``. It is a rig constant, hence stored per-dataset rather
+    than per-sample.
+    """
+
+    def _decode_sample(sample: dict) -> dict:
+        # Keys: "cam_0.jpg" ... "cam_{V-1}.jpg", optional "map.jpg",
+        # "ego.npy", "meta.json", "__key__".
+        cam_keys = sorted(
+            (k for k in sample if _CAM_KEY_RE.match(k)),
+            key=lambda k: int(k[len("cam_"):-len(".jpg")]),
+        )
+        frames = [_decode_image(sample[k]) for k in cam_keys]
+
+        # Map view -> map branch. Absent (legacy shards / NVIDIA zeros) -> zeros.
+        if "map.jpg" in sample:
+            map_input = _decode_image(sample["map.jpg"])
+        else:
+            ref = frames[0] if frames else torch.zeros(3, 256, 256)
+            map_input = torch.zeros_like(ref)
+
+        # Ego: raw bytes → numpy → split into history and future
+        ego_bytes = sample.get("ego.npy", b"")
+        if isinstance(ego_bytes, bytes) and len(ego_bytes) > 0:
+            ego = np.frombuffer(ego_bytes, dtype=np.float32).copy()
+        else:
+            ego = np.zeros(384, dtype=np.float32)
+
+        # History: (64, 4) flattened = 256; Future: (64, 2) flattened = 128
+        history_size = _HISTORY_STEPS * _HISTORY_SIGNALS
+        ego_history = torch.from_numpy(ego[:history_size])
+        ego_future = torch.from_numpy(ego[history_size:])
+
+        out = {
+            "visual_tiles": torch.stack(frames),
+            "map_input": map_input,
+            "egomotion_history": ego_history,
+            "visual_history": torch.zeros(_VISUAL_HISTORY_DIM),
+            "trajectory_target": ego_future,
+        }
+        if camera_params is not None:
+            out["camera_params"] = camera_params
+        return out
+
+    return _decode_sample
+
+
+def _load_manifest_camera_params(shard_dir: str) -> torch.Tensor | None:
+    """Read the per-dataset ``camera_params`` rig constant from manifest.json.
+
+    Returns a ``[V, 3, 4]`` float32 tensor, or None if the manifest is missing
+    or carries no calibration (pseudo-geometry datasets like L2D)."""
+    mpath = Path(shard_dir) / "manifest.json"
+    if not mpath.exists():
+        return None
+    try:
+        manifest = json.loads(mpath.read_text())
+    except (ValueError, OSError):
+        return None
+    cp = manifest.get("camera_params")
+    if cp is None:
+        return None
+    arr = np.asarray(cp, dtype=np.float32)
+    if arr.ndim != 3 or arr.shape[-2:] != (3, 4):
+        raise ValueError(
+            f"manifest camera_params must be [V, 3, 4], got shape {arr.shape}"
+        )
+    return torch.from_numpy(arr)
 
 
 def make_pre_extracted_loader(
@@ -90,10 +148,14 @@ def make_pre_extracted_loader(
 
     urls = [str(p) for p in tarfiles]
 
+    # Per-dataset calibration (rig constant) read once and broadcast per sample.
+    camera_params = _load_manifest_camera_params(shard_dir)
+    decode = _make_decoder(camera_params)
+
     dataset = wds.WebDataset(urls, shardshuffle=False, empty_check=False, nodesplitter=wds.split_by_worker)
     if shuffle > 0:
         dataset = dataset.shuffle(shuffle)
-    dataset = dataset.map(_decode_sample)
+    dataset = dataset.map(decode)
 
     loader = wds.WebLoader(dataset, batch_size=batch_size, num_workers=min(num_workers, len(tarfiles)))
     return loader
