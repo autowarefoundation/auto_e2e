@@ -387,16 +387,26 @@ class FThetaProjection:
     def _radius(self, theta: torch.Tensor) -> torch.Tensor:
         """Evaluate the forward polynomial r(theta) via Horner's method.
 
-        ``fw_poly`` is ascending-power coefficients; broadcast either as a shared
-        ``[K]`` vector or per-view ``[B, V, K]`` (unsqueezed to ``[B, V, 1, K]``).
+        ``fw_poly`` is ascending-power coefficients. Accepts a shared ``[K]``
+        vector, a per-view ``[V, K]``, or a batched ``[B, V, K]`` — all are
+        normalized to broadcast against ``theta`` ``[B, V, M]``, so the operator
+        is robust to however it was constructed (e.g. reloaded from a manifest).
+        A shared ``[K]`` is applied identically to every view/point.
         """
-        coeffs = self.fw_poly.to(device=theta.device, dtype=theta.dtype)
+        coeffs = torch.as_tensor(self.fw_poly, device=theta.device, dtype=theta.dtype)
         if coeffs.dim() == 1:
+            # shared [K] — plain Horner, broadcasts over all of theta.
             r = torch.zeros_like(theta)
             for c in reversed(coeffs.unbind(0)):
                 r = r * theta + c
             return r
-        # per-view [B, V, K] -> Horner over the last dim, broadcasting on M.
+        if coeffs.dim() == 2:
+            coeffs = coeffs.unsqueeze(0)   # [V, K] -> [1, V, K]
+        elif coeffs.dim() != 3:
+            raise ValueError(
+                f"fw_poly must be [K], [V, K] or [B, V, K], got {tuple(coeffs.shape)}"
+            )
+        # [B, V, K] -> Horner over the last dim, broadcasting on M via [B, V, 1, K].
         coeffs = coeffs.unsqueeze(2)  # [B, V, 1, K]
         r = torch.zeros_like(theta)
         for k in reversed(range(coeffs.shape[-1])):
@@ -434,14 +444,14 @@ class FThetaProjection:
         # FOV (max_theta) when known; otherwise fall back to the +Z hemisphere as
         # a safe default (we cannot validate arbitrary wide rays without a bound).
         if self.max_theta is not None:
-            max_theta = self.max_theta
-            if torch.is_tensor(max_theta):
-                max_theta = max_theta.to(device=theta.device, dtype=theta.dtype)
-                # A per-view [B, V] bound must broadcast against theta [B, V, M];
-                # add the M axis (mirrors the cx/cy unsqueeze above). A 0-dim
-                # scalar tensor broadcasts as-is.
-                if max_theta.dim() > 0:
-                    max_theta = max_theta.unsqueeze(-1)  # [B, V] -> [B, V, 1]
+            # Accept a Python scalar, a list (e.g. reloaded from a manifest), or a
+            # tensor. A per-view bound must broadcast against theta [B, V, M], so
+            # add the M axis (mirrors cx/cy); a scalar broadcasts as-is.
+            max_theta = torch.as_tensor(self.max_theta, device=theta.device, dtype=theta.dtype)
+            if max_theta.dim() == 1:
+                max_theta = max_theta.reshape(1, -1)   # [V] -> [1, V]
+            if max_theta.dim() > 0:
+                max_theta = max_theta.unsqueeze(-1)    # [B, V] -> [B, V, 1]
             mask = in_bounds & (theta <= max_theta)
         else:
             mask = in_bounds & (z > _DEPTH_EPS)
