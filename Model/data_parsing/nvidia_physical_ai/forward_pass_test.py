@@ -64,7 +64,8 @@ def main(dataset_root: str, clip_uuid: str, batch_size: int = 4, pretrained_back
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=0)
 
     batch = next(iter(loader))
-    visual_tiles = batch["visual_tiles"].to(device)           # (B, 8, 3, 256, 256)
+    visual_tiles = batch["visual_tiles"].to(device)           # (B, 7, 3, 256, 256)
+    map_input = batch["map_tile"].to(device)                  # (B, 3, 256, 256)
     visual_history = batch["visual_history"].to(device)       # (B, 896)
     egomotion_history = batch["egomotion_history"].to(device) # (B, 256)
     trajectory_target = batch["trajectory_target"].to(device) # (B, 128)
@@ -73,22 +74,22 @@ def main(dataset_root: str, clip_uuid: str, batch_size: int = 4, pretrained_back
     print(f"Dataset creation for {len(clip_uuids)} clips: {t_dataset:.2f}s")
 
     print(f"visual_tiles: {tuple(visual_tiles.shape)}")
+    print(f"map_tile: {tuple(map_input.shape)}")
     print(f"visual_history: {tuple(visual_history.shape)}")
     print(f"egomotion_history: {tuple(egomotion_history.shape)}")
     print(f"trajectory_target: {tuple(trajectory_target.shape)}")
 
     # --------------------
-    # forward pass
-    model = AutoE2E(is_pretrained=pretrained_backbone).to(device)
+    # forward pass. num_views comes from the data (7 real cameras); the map is a
+    # separate branch input.
+    model = AutoE2E(num_views=visual_tiles.shape[1], is_pretrained=pretrained_backbone).to(device)
 
     t0 = time.time()
-    trajectory_, ego_hidden_, future_ = model(visual_tiles, visual_history, egomotion_history)
+    trajectory_ = model(visual_tiles, map_input, visual_history, egomotion_history, mode="infer")
     t_forward = time.time() - t0
     print(f"Forward pass: {t_forward:.2f}s")
 
     print(f"trajectory output: {tuple(trajectory_.shape)}")
-    print(f"ego_hidden output: {tuple(ego_hidden_.shape)}")
-    print(f"future visual features: {[tuple(f.shape) for f in future_]}")
     # --------------------
 
     # TODO (training): wire in loss and backprop
