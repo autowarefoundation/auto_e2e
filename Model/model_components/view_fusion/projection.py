@@ -325,20 +325,36 @@ class FThetaProjection:
     where ``rho = sqrt(x_cam^2 + y_cam^2)``. Matches the SDK's
     ``FThetaCameraModel.ray2pixel``.
 
-    Parameters (all pre-scaled to the model-input image by the parser):
+    Native pixel frame (important): ``cx/cy`` and ``fw_poly`` are kept in the
+    camera's NATIVE pixel resolution ``image_wh = (W, H)``, NOT pre-scaled to the
+    model input. The projected ``(u, v)`` is normalized per-axis by the native
+    ``(W, H)`` — ``u_norm = u / W``, ``v_norm = v / H``. Under a plain
+    aspect-changing resize to the model input this is EXACT (``u_native / W`` ==
+    ``u_model / W_model``), so no anisotropic radius approximation is needed; the
+    f-theta radial polynomial (which is isotropic in native pixels) is never
+    scaled by a single mean factor.
+
+    Parameters:
         t_camera_ego: ``[B, V, 4, 4]`` ego->camera rigid transform.
         fw_poly: ``[K]`` or ``[B, V, K]`` forward polynomial coefficients
-            (ascending powers of theta), radius in pixels.
-        cx, cy: principal point in pixels, scalar or ``[B, V]``.
+            (ascending powers of theta), radius in NATIVE pixels.
+        cx, cy: principal point in NATIVE pixels, scalar or ``[B, V]``.
+        image_wh: native ``(W, H)`` the intrinsics are expressed in; used to
+            normalize ``(u, v)`` to ``[0, 1]``. Scalar ``(W, H)`` or per-view
+            ``([B,]V, 2)``. Required so normalization is exact regardless of the
+            model-input resize.
         max_theta: incidence-angle FOV cutoff (radians); the upper bound of the
             valid theta range. Points beyond it are masked (outside the lens).
+            When None, the operator falls back to the +Z hemisphere (z>0) — an
+            f-theta run WITHOUT a FOV bound (recorded in metadata).
         bw_poly: optional backward polynomial (radius -> theta) for inverse/remap
             (e.g. rectification); not used by the forward projection.
     """
 
     geometry_type = GEOMETRY_FTHETA
 
-    def __init__(self, t_camera_ego, fw_poly, cx, cy, max_theta=None, bw_poly=None):
+    def __init__(self, t_camera_ego, fw_poly, cx, cy, image_wh=(256.0, 256.0),
+                 max_theta=None, bw_poly=None):
         if t_camera_ego.dim() != 4 or t_camera_ego.shape[-2:] != (4, 4):
             raise ValueError(
                 f"FThetaProjection t_camera_ego must be [B, V, 4, 4], "
@@ -348,6 +364,7 @@ class FThetaProjection:
         self.fw_poly = fw_poly
         self.cx = cx
         self.cy = cy
+        self.image_wh = image_wh     # native (W, H) the intrinsics live in
         self.max_theta = max_theta   # upper bound of the valid theta range (FOV)
         self.bw_poly = bw_poly       # radius -> theta, for inverse/remap only
 
@@ -360,8 +377,8 @@ class FThetaProjection:
             return x.to(device) if torch.is_tensor(x) else x
         return FThetaProjection(
             self.t_camera_ego.to(device), _mv(self.fw_poly),
-            _mv(self.cx), _mv(self.cy), max_theta=_mv(self.max_theta),
-            bw_poly=_mv(self.bw_poly),
+            _mv(self.cx), _mv(self.cy), _mv(self.image_wh),
+            max_theta=_mv(self.max_theta), bw_poly=_mv(self.bw_poly),
         )
 
     def to_spec(self) -> dict:
@@ -386,6 +403,7 @@ class FThetaProjection:
             "fw_poly": _ser(self.fw_poly, 3),            # [B,V,K] -> [V,K]; [V,K]/[K] kept
             "cx": _ser(self.cx, 2),                      # [B,V] -> [V]; [V] kept
             "cy": _ser(self.cy, 2),
+            "image_wh": _ser(self.image_wh, 3),          # native (W,H): [B,V,2]->[V,2]; kept otherwise
             "max_theta": _ser(self.max_theta, 2),        # scalar/list, never a raw tensor
         }
 
@@ -421,22 +439,34 @@ class FThetaProjection:
     def project_ego_to_image(self, points_ego, image_transform) -> ProjectionResult:
         pts = _homogenize(points_ego)
         it = _as_image_transform(image_transform)
-        w, h = it.wh
         T = self.t_camera_ego.to(device=pts.device, dtype=pts.dtype)
         # camera-frame points: [B, V, M, 4] then drop homogeneous w.
         cam = torch.einsum("bvij,mj->bvmi", T, pts)[..., :3]
         x, y, z = cam[..., 0], cam[..., 1], cam[..., 2]
         rho = torch.sqrt(x * x + y * y).clamp(min=_DEPTH_EPS)
         theta = torch.atan2(rho, z)                     # incidence angle from +Z
-        r = self._radius(theta)                         # pixel radius
+        r = self._radius(theta)                         # pixel radius (NATIVE px)
         cx = torch.as_tensor(self.cx, device=cam.device, dtype=cam.dtype)
         cy = torch.as_tensor(self.cy, device=cam.device, dtype=cam.dtype)
         if cx.dim() > 0:
             cx = cx.unsqueeze(-1)  # [B, V] -> [B, V, 1] to broadcast on M
             cy = cy.unsqueeze(-1)
-        u = cx + r * (x / rho)
-        v = cy + r * (y / rho)
-        uv_norm = torch.stack([u / w, v / h], dim=-1)
+        u = cx + r * (x / rho)     # native pixel u
+        v = cy + r * (y / rho)     # native pixel v
+        # Normalize per-axis by the NATIVE (W, H) the intrinsics live in. Under a
+        # plain resize to the model input this is exact (model size cancels), so
+        # an anisotropic resize needs no radius approximation.
+        wh = torch.as_tensor(self.image_wh, device=cam.device, dtype=cam.dtype)
+        if wh.dim() >= 1 and wh.shape[-1] == 2 and wh.dim() > 0:
+            # scalar (2,) -> broadcast; per-view ([B,]V,2) -> add M axis
+            if wh.dim() == 1:
+                w_n, h_n = wh[0], wh[1]
+            else:
+                w_n = wh[..., 0].unsqueeze(-1)  # [.,V] -> [.,V,1]
+                h_n = wh[..., 1].unsqueeze(-1)
+        else:
+            raise ValueError(f"image_wh must end in (W, H) size-2, got {tuple(wh.shape)}")
+        uv_norm = torch.stack([u / w_n, v / h_n], dim=-1)
 
         depth = z                                       # optical-axis depth
         in_bounds = (
