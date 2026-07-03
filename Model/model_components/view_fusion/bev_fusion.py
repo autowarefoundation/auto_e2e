@@ -218,7 +218,7 @@ class BEVViewFusion(nn.Module):
         mask = result.valid_mask.reshape(Bp, V, N, num_z)
         return ref_2d, mask
 
-    def _resolve_projection(self, camera_params, projection, geometry_type, V):
+    def _resolve_projection(self, camera_params, projection, geometry_type, V, B):
         """Turn the (camera_params | projection | geometry_type) inputs into a
         single projection operator, enforcing honest geometry.
 
@@ -256,6 +256,11 @@ class BEVViewFusion(nn.Module):
             if camera_params.shape[1] != V:
                 raise ValueError(
                     f"camera_params view dim ({camera_params.shape[1]}) != runtime V ({V})."
+                )
+            if camera_params.shape[0] not in (1, B):
+                raise ValueError(
+                    f"camera_params batch dim ({camera_params.shape[0]}) must be 1 "
+                    f"(shared rig, broadcast) or B ({B})."
                 )
             if geometry_type == GEOMETRY_PSEUDO:
                 raise ValueError(
@@ -303,7 +308,7 @@ class BEVViewFusion(nn.Module):
         dtype = fused_per_view.dtype
 
         # --- 0. Resolve the projection operator (explicit, honest geometry) ---
-        proj_op = self._resolve_projection(camera_params, projection, geometry_type, V)
+        proj_op = self._resolve_projection(camera_params, projection, geometry_type, V, B)
 
         # --- 1. Prepare BEV queries ---
         queries = self.bev_queries.weight.unsqueeze(0).expand(B, -1, -1)  # [B, N, C]
