@@ -365,23 +365,28 @@ class FThetaProjection:
         )
 
     def to_spec(self) -> dict:
-        """Serialize to a JSON-able manifest spec (batch dim dropped)."""
-        def _l(x):
+        """Serialize to a JSON-able manifest spec (batch dim dropped).
+
+        Fields differ in their canonical *batched* rank, so a rank alone cannot
+        tell apart e.g. a per-view ``fw_poly [V, K]`` (keep whole) from a batched
+        ``cx [B, V]`` (drop batch). Drop the leading dim only when the field is
+        at its batched rank; otherwise keep it whole (a scalar becomes a float).
+        """
+        def _ser(x, batched_rank):
             if not torch.is_tensor(x):
                 return x
             if x.dim() == 0:
                 return x.item()
-            if x.dim() == 1:
-                # Shared vector (e.g. fw_poly [K]) — no batch dim to drop.
-                return x.detach().cpu().tolist()
-            return x[0].detach().cpu().tolist()  # [B, ...] -> drop batch dim
+            if x.dim() == batched_rank:
+                return x[0].detach().cpu().tolist()   # drop leading batch dim
+            return x.detach().cpu().tolist()          # unbatched — keep whole
         return {
             "type": self.geometry_type,
-            "t_camera_ego": self.t_camera_ego[0].detach().cpu().tolist(),  # [V,4,4]
-            "fw_poly": _l(self.fw_poly),                                   # [V,K] or [K]
-            "cx": _l(self.cx),                                             # [V]
-            "cy": _l(self.cy),                                             # [V]
-            "max_theta": _l(self.max_theta),  # scalar/list, never a raw tensor
+            "t_camera_ego": _ser(self.t_camera_ego, 4),  # [B,V,4,4] -> [V,4,4]
+            "fw_poly": _ser(self.fw_poly, 3),            # [B,V,K] -> [V,K]; [V,K]/[K] kept
+            "cx": _ser(self.cx, 2),                      # [B,V] -> [V]; [V] kept
+            "cy": _ser(self.cy, 2),
+            "max_theta": _ser(self.max_theta, 2),        # scalar/list, never a raw tensor
         }
 
     def _radius(self, theta: torch.Tensor) -> torch.Tensor:
