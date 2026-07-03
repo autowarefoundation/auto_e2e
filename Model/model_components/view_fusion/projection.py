@@ -126,6 +126,9 @@ class PinholeProjection:
     def num_views(self) -> int:
         return self.matrix.shape[1]
 
+    def to(self, device) -> "PinholeProjection":
+        return PinholeProjection(self.matrix.to(device), geometry_type=self.geometry_type)
+
     def project(self, points_ego_homo: torch.Tensor, image_size: float) -> ProjectionResult:
         """Project homogeneous ego points ``[M, 4]`` onto each camera.
 
@@ -225,6 +228,14 @@ class FThetaProjection:
     @property
     def num_views(self) -> int:
         return self.t_camera_ego.shape[1]
+
+    def to(self, device) -> "FThetaProjection":
+        def _mv(x):
+            return x.to(device) if torch.is_tensor(x) else x
+        return FThetaProjection(
+            self.t_camera_ego.to(device), _mv(self.fw_poly),
+            _mv(self.cx), _mv(self.cy), max_theta=self.max_theta,
+        )
 
     def _radius(self, theta: torch.Tensor) -> torch.Tensor:
         """Evaluate the forward polynomial r(theta) via Horner's method.
