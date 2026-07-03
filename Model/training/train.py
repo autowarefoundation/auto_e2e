@@ -294,6 +294,12 @@ def run_training(args: argparse.Namespace) -> None:
     # currently inert; --enable-future-state has no effect until JEPA is wired.
     forward_mode = "train" if args.enable_future_state else "eval"
 
+    # Geometry: pre-extracted loaders expose a per-dataset projection operator
+    # (.projection/.geometry_type); everything else (lerobot / smoke) runs the
+    # explicit pseudo path until real calibration is plumbed for that source.
+    projection = None
+    geometry_type = "pseudo"
+
     batches: Iterable[Any]
     if args.smoke_test:
         batches = [make_smoke_batch(args, device) for _ in range(args.smoke_steps)]
@@ -303,6 +309,11 @@ def run_training(args: argparse.Namespace) -> None:
         loader = build_dataloader(args)
         batches = loader
         epochs = args.epochs
+        projection = getattr(loader, "projection", None)
+        geometry_type = getattr(loader, "geometry_type", "pseudo")
+        if projection is not None:
+            projection = projection.to(device)
+        print(f"Geometry: {geometry_type} (projection={'real' if projection else 'pseudo'})")
         if hasattr(loader, 'dataset') and hasattr(loader.dataset, '__len__'):
             print(f"Dataset: {len(loader.dataset)} samples, {len(loader)} batches/epoch")
         else:
@@ -327,11 +338,6 @@ def run_training(args: argparse.Namespace) -> None:
             if map_input is None:
                 map_input = torch.zeros(visual_tiles.shape[0], 3, 256, 256, device=device)
 
-            # Geometry: use real camera_params when the loader supplied them,
-            # else the explicit pseudo path (never a silent real-geometry claim).
-            camera_params = batch.get("camera_params")
-            geometry_type = "pinhole" if camera_params is not None else "pseudo"
-
             with torch.autocast(device_type=device.type, dtype=torch.bfloat16,
                                 enabled=use_amp):
                 # forward returns ONLY the trajectory now (was a 3-tuple, PR #94).
@@ -340,7 +346,7 @@ def run_training(args: argparse.Namespace) -> None:
                     map_input,
                     batch["visual_history"],
                     batch["egomotion_history"],
-                    camera_params=camera_params,
+                    projection=projection,
                     geometry_type=geometry_type,
                     mode=forward_mode,
                     trajectory_target=batch["trajectory_target"],
