@@ -67,10 +67,12 @@ def _build_kit_scenes():
     return KitScenesDataset(data_root=data_root)
 
 
+# View counts are real cameras only; the nav-map is a separate map branch input
+# (not a camera view), so L2D=6, NVIDIA=7, KITScenes=7 (#77).
 DATASET_SPECS = [
-    pytest.param("l2d", _build_l2d, 7, id="l2d"),
-    pytest.param("nvidia_av", _build_nvidia, 8, id="nvidia_av"),
-    pytest.param("kit_scenes", _build_kit_scenes, 8, id="kit_scenes"),
+    pytest.param("l2d", _build_l2d, 6, id="l2d"),
+    pytest.param("nvidia_av", _build_nvidia, 7, id="nvidia_av"),
+    pytest.param("kit_scenes", _build_kit_scenes, 7, id="kit_scenes"),
 ]
 
 # Short loop sized to expose a trend without being a full training run.
@@ -109,10 +111,9 @@ def _run_loss_trend(dataset, num_views, device):
     )
 
     # Train from scratch (no pretrained download) so the test is self-contained
-    # and the loss has clear room to move.
+    # and the loss has clear room to move. Fusion is always BEV (PR #94).
     model = AutoE2E(
         num_views=num_views,
-        fusion_mode="concat",
         is_pretrained=False,
     ).to(device)
     model.train()
@@ -130,14 +131,15 @@ def _run_loss_trend(dataset, num_views, device):
             batch = next(data_iter)
 
         visual_tiles = batch["visual_tiles"].to(device)
+        map_input = batch["map_tile"].to(device)
         visual_history = batch["visual_history"].to(device)
         egomotion_history = batch["egomotion_history"].to(device)
         target = batch["trajectory_target"].to(device)
 
         optimizer.zero_grad(set_to_none=True)
-        trajectory, _ego, _future = model(
-            visual_tiles, visual_history, egomotion_history,
-            camera_params=None, mode="eval",
+        trajectory = model(
+            visual_tiles, map_input, visual_history, egomotion_history,
+            geometry_type="pseudo", mode="eval",
         )
         loss = loss_fn(trajectory, target)
         loss.backward()
