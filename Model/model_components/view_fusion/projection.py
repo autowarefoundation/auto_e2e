@@ -224,8 +224,10 @@ class PinholeProjection:
             raise ValueError(
                 f"T_camera_ego must be [B, V, 4, 4], got {tuple(T_camera_ego.shape)}"
             )
-        # matrix = K @ T[:, :, :3, :]  -> [B, V, 3, 4]
-        matrix = torch.einsum("bvij,bvjk->bvik", K, T_camera_ego[:, :, :3, :])
+        # matrix = K @ T[:, :, :3, :]  -> [B, V, 3, 4]. Coerce T to K's dtype/device
+        # first so mismatched inputs don't crash the einsum.
+        T3 = T_camera_ego[:, :, :3, :].to(dtype=K.dtype, device=K.device)
+        matrix = torch.einsum("bvij,bvjk->bvik", K, T3)
         return cls(matrix, geometry_type=geometry_type, K=K, T_camera_ego=T_camera_ego)
 
     @property
@@ -251,7 +253,7 @@ class PinholeProjection:
         """Project ego points ``[M, 3]`` (or homogeneous ``[M, 4]``) onto each
         camera. ``B, V`` come from the matrix — runtime ``V`` is derived here."""
         pts = _homogenize(points_ego)
-        proj = self.matrix.to(pts.dtype)
+        proj = self.matrix.to(device=pts.device, dtype=pts.dtype)
         # out[b, v, m, i] = sum_j proj[b, v, i, j] * points[m, j]
         projected = torch.einsum("bvij,mj->bvmi", proj, pts)
         return _finalize_linear(projected, image_transform, self.geometry_type)
@@ -292,7 +294,7 @@ class PseudoProjection:
         # across the real batch in the sampling loop (prior is batch- and
         # view-independent by construction).
         proj = self.matrix.reshape(3, 4).unsqueeze(0).unsqueeze(0)  # [1, 1, 3, 4]
-        proj = proj.expand(1, self.num_views, 3, 4).to(pts.dtype)
+        proj = proj.expand(1, self.num_views, 3, 4).to(device=pts.device, dtype=pts.dtype)
         projected = torch.einsum("bvij,mj->bvmi", proj, pts)  # [1, V, M, 3]
 
         depth = projected[..., 2]
@@ -365,14 +367,21 @@ class FThetaProjection:
     def to_spec(self) -> dict:
         """Serialize to a JSON-able manifest spec (batch dim dropped)."""
         def _l(x):
-            return x[0].detach().cpu().tolist() if torch.is_tensor(x) and x.dim() > 0 else x
+            if not torch.is_tensor(x):
+                return x
+            if x.dim() == 0:
+                return x.item()
+            if x.dim() == 1:
+                # Shared vector (e.g. fw_poly [K]) — no batch dim to drop.
+                return x.detach().cpu().tolist()
+            return x[0].detach().cpu().tolist()  # [B, ...] -> drop batch dim
         return {
             "type": self.geometry_type,
             "t_camera_ego": self.t_camera_ego[0].detach().cpu().tolist(),  # [V,4,4]
-            "fw_poly": _l(self.fw_poly),                                   # [V,K]
+            "fw_poly": _l(self.fw_poly),                                   # [V,K] or [K]
             "cx": _l(self.cx),                                             # [V]
             "cy": _l(self.cy),                                             # [V]
-            "max_theta": self.max_theta,
+            "max_theta": _l(self.max_theta),  # scalar/list, never a raw tensor
         }
 
     def _radius(self, theta: torch.Tensor) -> torch.Tensor:
@@ -381,7 +390,7 @@ class FThetaProjection:
         ``fw_poly`` is ascending-power coefficients; broadcast either as a shared
         ``[K]`` vector or per-view ``[B, V, K]`` (unsqueezed to ``[B, V, 1, K]``).
         """
-        coeffs = self.fw_poly.to(theta.dtype)
+        coeffs = self.fw_poly.to(device=theta.device, dtype=theta.dtype)
         if coeffs.dim() == 1:
             r = torch.zeros_like(theta)
             for c in reversed(coeffs.unbind(0)):
@@ -398,16 +407,16 @@ class FThetaProjection:
         pts = _homogenize(points_ego)
         it = _as_image_transform(image_transform)
         w, h = it.wh
-        T = self.t_camera_ego.to(pts.dtype)
+        T = self.t_camera_ego.to(device=pts.device, dtype=pts.dtype)
         # camera-frame points: [B, V, M, 4] then drop homogeneous w.
         cam = torch.einsum("bvij,mj->bvmi", T, pts)[..., :3]
         x, y, z = cam[..., 0], cam[..., 1], cam[..., 2]
         rho = torch.sqrt(x * x + y * y).clamp(min=_DEPTH_EPS)
         theta = torch.atan2(rho, z)                     # incidence angle from +Z
         r = self._radius(theta)                         # pixel radius
-        cx = self.cx if torch.is_tensor(self.cx) else torch.as_tensor(self.cx, device=cam.device, dtype=cam.dtype)
-        cy = self.cy if torch.is_tensor(self.cy) else torch.as_tensor(self.cy, device=cam.device, dtype=cam.dtype)
-        if torch.is_tensor(cx) and cx.dim() > 0:
+        cx = torch.as_tensor(self.cx, device=cam.device, dtype=cam.dtype)
+        cy = torch.as_tensor(self.cy, device=cam.device, dtype=cam.dtype)
+        if cx.dim() > 0:
             cx = cx.unsqueeze(-1)  # [B, V] -> [B, V, 1] to broadcast on M
             cy = cy.unsqueeze(-1)
         u = cx + r * (x / rho)
@@ -428,6 +437,11 @@ class FThetaProjection:
             max_theta = self.max_theta
             if torch.is_tensor(max_theta):
                 max_theta = max_theta.to(device=theta.device, dtype=theta.dtype)
+                # A per-view [B, V] bound must broadcast against theta [B, V, M];
+                # add the M axis (mirrors the cx/cy unsqueeze above). A 0-dim
+                # scalar tensor broadcasts as-is.
+                if max_theta.dim() > 0:
+                    max_theta = max_theta.unsqueeze(-1)  # [B, V] -> [B, V, 1]
             mask = in_bounds & (theta <= max_theta)
         else:
             mask = in_bounds & (z > _DEPTH_EPS)
