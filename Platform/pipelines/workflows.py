@@ -500,14 +500,17 @@ def train_offline_rl(
             ego_hist = batch["egomotion_history"].to(device)
             vis_hist = batch["visual_history"].to(device)
             target = batch["trajectory_target"].to(device)
-            map_input = torch.zeros(visual.shape[0], 3, 256, 256, device=device)
+            map_input, camera_params, geom = _batch_geometry(batch, device)
 
             optimizer.zero_grad()
-            pred = model(visual, map_input, vis_hist, ego_hist, mode="train",
-                         trajectory_target=target)
+            pred = model(visual, map_input, vis_hist, ego_hist,
+                         camera_params=camera_params, geometry_type=geom,
+                         mode="train", trajectory_target=target)
             # IQL advantage-weighted regression
             with torch.no_grad():
-                baseline_pred = model(visual, map_input, vis_hist, ego_hist, mode="infer")
+                baseline_pred = model(visual, map_input, vis_hist, ego_hist,
+                                      camera_params=camera_params, geometry_type=geom,
+                                      mode="infer")
             advantage = -(pred - target).pow(2).mean(dim=-1) + (baseline_pred - target).pow(2).mean(dim=-1)
             weights = torch.exp(beta * advantage).clamp(max=100.0)
             loss = (weights * (pred - target).pow(2).mean(dim=-1)).mean()
@@ -585,9 +588,10 @@ def _run_evaluation(checkpoint, shards, train_metadata, dataset, experiment_name
             ego_hist = batch["egomotion_history"].to(device)
             vis_hist = batch["visual_history"].to(device)
             target = batch["trajectory_target"]  # (B, 128) on CPU
-            map_input = torch.zeros(visual.shape[0], 3, 256, 256, device=device)
+            map_input, camera_params, geom = _batch_geometry(batch, device)
 
-            pred = model(visual, map_input, vis_hist, ego_hist, mode="infer")
+            pred = model(visual, map_input, vis_hist, ego_hist,
+                         camera_params=camera_params, geometry_type=geom, mode="infer")
             pred = pred.cpu().numpy()  # (B, 128)
             target_np = target.numpy()
 
