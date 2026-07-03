@@ -6,6 +6,10 @@ sys.path.append('..')
 from model_components.feature_fusion import FeatureFusion
 from model_components.view_fusion import build_view_fusion, FUSION_REGISTRY
 from model_components.view_fusion.bev_fusion import BEVViewFusion
+from model_components.view_fusion.projection import (
+    FThetaProjection,
+    PinholeProjection,
+)
 
 
 def make_inputs(batch_size, num_views, device, include_camera_params=False):
@@ -374,3 +378,107 @@ class TestBEVFusion:
         # has_observation mask zeroes output after FFN
         assert out.abs().max() < 1e-6, \
             "No visible camera should produce zero BEV features"
+
+
+# ---------------------------------------------------------------------------
+# Runtime-V-dynamic tests (Issue #77): one instance, any camera count
+# ---------------------------------------------------------------------------
+
+class TestBEVFusionVDynamic:
+    """A single BEVViewFusion instance must consume batches of any view count.
+
+    This is the core Issue #77 acceptance: one model, alternating V (e.g. L2D's
+    6 real cams and NVIDIA's 7), no re-instantiation, output always
+    [B, embed_dim, bev_h, bev_w], gradients flowing both times.
+    """
+
+    def test_alternating_view_counts_same_instance(self, device):
+        fusion = BEVViewFusion(num_views=6, embed_dim=256, bev_h=8, bev_w=8).to(device)
+        for V in (6, 7, 6, 8):
+            x = torch.randn(2 * V, 256, 8, 8, device=device)
+            out = fusion(x, B=2, V=V)
+            assert out.shape == (2, 256, 8, 8), f"wrong shape at V={V}"
+
+    def test_gradients_flow_for_both_view_counts(self, device):
+        """bev_queries / value_proj / output_proj must receive gradients at
+        every view count (the #77 gradient-flow criterion)."""
+        fusion = BEVViewFusion(num_views=6, embed_dim=256, bev_h=8, bev_w=8).to(device)
+        cam7 = torch.zeros(1, 7, 3, 4, device=device)
+        cam7[..., 0, 0] = 1.0; cam7[..., 0, 3] = 128.0
+        cam7[..., 1, 1] = 1.0; cam7[..., 1, 3] = 128.0
+        cam7[..., 2, 3] = 1.0
+        for V, cam in ((7, cam7), (6, cam7[:, :6])):
+            fusion.zero_grad(set_to_none=True)
+            x = torch.randn(V, 256, 8, 8, device=device)
+            out = fusion(x, B=1, V=V, camera_params=cam)
+            out.sum().backward()
+            for name, p in (("bev_queries", fusion.bev_queries.weight),
+                            ("value_proj", fusion.value_proj.weight),
+                            ("output_proj", fusion.output_proj.weight)):
+                assert p.grad is not None and p.grad.abs().max() > 0, \
+                    f"{name} got no gradient at V={V}"
+
+    def test_pseudo_path_view_count_agnostic(self, device):
+        """The calibration-free pseudo prior also runs any V on one instance."""
+        fusion = BEVViewFusion(num_views=8, embed_dim=256, bev_h=8, bev_w=8).to(device)
+        for V in (5, 6, 7, 8):
+            out = fusion(torch.randn(V, 256, 8, 8, device=device), B=1, V=V)
+            assert out.shape == (1, 256, 8, 8)
+            assert not torch.isnan(out).any()
+
+
+# ---------------------------------------------------------------------------
+# Honest-geometry contract (Issue #77): no silent pseudo, no false real claim
+# ---------------------------------------------------------------------------
+
+class TestGeometryDeclaration:
+    def test_pseudo_label_rejects_real_camera_params(self, device):
+        fusion = BEVViewFusion(num_views=4, embed_dim=256, bev_h=8, bev_w=8).to(device)
+        x = torch.randn(4, 256, 8, 8, device=device)
+        cam = torch.randn(1, 4, 3, 4, device=device)
+        with pytest.raises(ValueError, match="pseudo"):
+            fusion(x, B=1, V=4, camera_params=cam, geometry_type="pseudo")
+
+    def test_real_label_without_calibration_raises(self, device):
+        fusion = BEVViewFusion(num_views=4, embed_dim=256, bev_h=8, bev_w=8).to(device)
+        x = torch.randn(4, 256, 8, 8, device=device)
+        with pytest.raises(ValueError, match="requires calibration"):
+            fusion(x, B=1, V=4, geometry_type="pinhole")
+
+    def test_camera_params_and_projection_mutually_exclusive(self, device):
+        fusion = BEVViewFusion(num_views=4, embed_dim=256, bev_h=8, bev_w=8).to(device)
+        x = torch.randn(4, 256, 8, 8, device=device)
+        cam = torch.randn(1, 4, 3, 4, device=device)
+        proj = PinholeProjection(cam)
+        with pytest.raises(ValueError, match="at most one"):
+            fusion(x, B=1, V=4, camera_params=cam, projection=proj)
+
+    def test_projection_view_count_must_match_v(self, device):
+        fusion = BEVViewFusion(num_views=4, embed_dim=256, bev_h=8, bev_w=8).to(device)
+        x = torch.randn(4, 256, 8, 8, device=device)
+        proj = PinholeProjection(torch.randn(1, 5, 3, 4, device=device))  # 5 != 4
+        with pytest.raises(ValueError, match="num_views"):
+            fusion(x, B=1, V=4, projection=proj)
+
+    def test_unknown_geometry_type_raises(self, device):
+        fusion = BEVViewFusion(num_views=4, embed_dim=256, bev_h=8, bev_w=8).to(device)
+        x = torch.randn(4, 256, 8, 8, device=device)
+        with pytest.raises(ValueError, match="geometry_type"):
+            fusion(x, B=1, V=4, geometry_type="bogus")
+
+
+# ---------------------------------------------------------------------------
+# Native f-theta projection through the fusion module (no rectification)
+# ---------------------------------------------------------------------------
+
+class TestFThetaFusion:
+    def test_ftheta_projection_runs_end_to_end(self, device):
+        fusion = BEVViewFusion(num_views=3, embed_dim=256, bev_h=8, bev_w=8,
+                               image_size=256).to(device)
+        T = torch.eye(4, device=device).reshape(1, 1, 4, 4).expand(1, 3, 4, 4).contiguous()
+        fw_poly = torch.tensor([0.0, 200.0], device=device)
+        proj = FThetaProjection(T, fw_poly, cx=128.0, cy=128.0)
+        x = torch.randn(3, 256, 8, 8, device=device)
+        out = fusion(x, B=1, V=3, projection=proj, geometry_type="ftheta")
+        assert out.shape == (1, 256, 8, 8)
+        assert not torch.isnan(out).any()
