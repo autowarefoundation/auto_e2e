@@ -14,7 +14,8 @@ Usage
     )
 
     sample = dataset[0]
-    # sample["visual_tiles"]       (8, 3, 256, 256)
+    # sample["visual_tiles"]       (7, 3, 256, 256)  7 real cameras
+    # sample["map_tile"]           (3, 256, 256)     nav-map (zeros; map branch)
     # sample["visual_history"]     (896,)
     # sample["egomotion_history"]  (256,)
     # sample["trajectory_target"]  (128,)
@@ -34,7 +35,7 @@ import pandas as pd
 import torch
 from torch.utils.data import Dataset
 
-from .camera import CAMERA_NAMES, load_camera_frame
+from .camera import CAMERA_NAMES, load_camera_frame, make_map_tile
 from .egomotion import (
     _EGOMOTION_COLUMNS,
     MIN_ROWS,
@@ -55,7 +56,8 @@ _VISUAL_HISTORY_DIM = 896
 
 
 class ClipSample(TypedDict):
-    visual_tiles: torch.Tensor        # (8, 3, 256, 256)
+    visual_tiles: torch.Tensor        # (7, 3, 256, 256) — 7 real cameras
+    map_tile: torch.Tensor            # (3, 256, 256) — nav-map (zeros; map branch)
     visual_history: torch.Tensor      # (896,)
     egomotion_history: torch.Tensor   # (256,)
     trajectory_target: torch.Tensor   # (128,)
@@ -267,8 +269,14 @@ class NvidiaAVDataset(Dataset):
             df=self._egomotion_dfs[clip_uuid],
         )
 
+        # NVIDIA has no rendered nav-map; the map branch gets a zero tile shaped
+        # like one camera frame. Kept separate from visual_tiles so it never
+        # enters the camera BEV projection.
+        map_tile = make_map_tile(visual_tiles[0])
+
         return ClipSample(
             visual_tiles=visual_tiles,
+            map_tile=map_tile,
             visual_history=torch.zeros(_VISUAL_HISTORY_DIM),
             egomotion_history=egomotion_history,
             trajectory_target=trajectory_target,
