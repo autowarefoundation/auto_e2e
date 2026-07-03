@@ -178,3 +178,40 @@ class TestFThetaProjection:
         # project() must run (comparison theta <= max_theta on the same device).
         res = proj.project_ego_to_image(_homo(torch.tensor([[0.0, 0.0, 5.0]], device=device)), 256)
         assert res.uv_norm.shape == (1, 1, 1, 2)
+
+    def test_per_view_max_theta_broadcasts(self, device):
+        """A per-view [B, V] max_theta must broadcast against theta [B, V, M]."""
+        T = self._identity_transform(device, v=3)
+        fw_poly = torch.tensor([0.0, 20.0], device=device)
+        # Different FOV per camera; shape [B=1, V=3].
+        max_theta = torch.tensor([[0.1, 1.8, 1.8]], device=device)
+        proj = FThetaProjection(T, fw_poly, cx=128.0, cy=128.0, max_theta=max_theta)
+        pts = _homo(torch.tensor([[1.0, 0.0, -0.05]], device=device))  # wide ray
+        res = proj.project_ego_to_image(pts, 256)  # must not raise
+        assert res.valid_mask.shape == (1, 3, 1)
+        # cam 0 (max_theta 0.1) rejects the wide ray; cams 1,2 (1.8) admit it.
+        assert not res.valid_mask[0, 0, 0]
+        assert res.valid_mask[0, 1, 0] and res.valid_mask[0, 2, 0]
+
+    def test_to_spec_shared_poly_and_tensor_max_theta_json_able(self, device):
+        """to_spec must keep a shared [K] polynomial whole and emit a JSON-able
+        max_theta (not a raw tensor)."""
+        import json
+        T = self._identity_transform(device, v=2)
+        fw_poly = torch.tensor([0.0, 300.0, -5.0, 0.1], device=device)  # shared [K]
+        proj = FThetaProjection(T, fw_poly, cx=128.0, cy=128.0,
+                                max_theta=torch.tensor(1.5, device=device))
+        spec = proj.to_spec()
+        assert spec["fw_poly"] == [0.0, 300.0, -5.0, 0.1], "shared poly truncated"
+        json.dumps(spec)  # must not raise (tensor max_theta scalarized)
+
+    def test_cpu_operator_projects_cuda_points(self, device):
+        """A CPU operator must project CUDA points (params coerced to device)."""
+        if device.type != "cuda":
+            pytest.skip("needs CUDA")
+        T = torch.eye(4).reshape(1, 1, 4, 4)  # CPU
+        fw_poly = torch.tensor([0.0, 100.0])  # CPU
+        proj = FThetaProjection(T, fw_poly, cx=128.0, cy=128.0)  # all CPU
+        pts = _homo(torch.tensor([[0.0, 0.0, 5.0]], device=device))  # CUDA
+        res = proj.project_ego_to_image(pts, 256)  # must not raise
+        assert res.uv_norm.device.type == "cuda"
