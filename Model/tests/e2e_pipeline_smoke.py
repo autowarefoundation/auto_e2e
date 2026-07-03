@@ -58,20 +58,26 @@ def build_shards(dataset, out_dir, max_samples, image_size=256):
             def _write(member, frame):
                 f = to_pil(frame.cpu().clamp(0, 1) if frame.dtype.is_floating_point else frame.cpu())
                 f = resize(f)
-                b = io.BytesIO(); f.save(b, format="JPEG", quality=90); jpg = b.getvalue()
-                ti = tarfile.TarInfo(name=f"{key}.{member}"); ti.size = len(jpg)
+                b = io.BytesIO()
+                f.save(b, format="JPEG", quality=90)
+                jpg = b.getvalue()
+                ti = tarfile.TarInfo(name=f"{key}.{member}")
+                ti.size = len(jpg)
                 tar.addfile(ti, io.BytesIO(jpg))
 
             for cam_i in range(visual.shape[0]):
                 _write(f"cam_{cam_i}.jpg", visual[cam_i])
             if map_tile is not None:
-                _write("map.jpg", map_tile); has_map = True
+                _write("map.jpg", map_tile)
+                has_map = True
 
             eb = ego_data.tobytes()
-            ti = tarfile.TarInfo(name=f"{key}.ego.npy"); ti.size = len(eb)
+            ti = tarfile.TarInfo(name=f"{key}.ego.npy")
+            ti.size = len(eb)
             tar.addfile(ti, io.BytesIO(eb))
             m = json.dumps({"idx": si}).encode()
-            ti = tarfile.TarInfo(name=f"{key}.meta.json"); ti.size = len(m)
+            ti = tarfile.TarInfo(name=f"{key}.meta.json")
+            ti.size = len(m)
             tar.addfile(ti, io.BytesIO(m))
 
     manifest = {"total_samples": n, "shards": 1, "image_size": image_size,

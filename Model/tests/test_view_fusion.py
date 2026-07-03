@@ -405,8 +405,10 @@ class TestBEVFusionVDynamic:
         every view count (the #77 gradient-flow criterion)."""
         fusion = BEVViewFusion(num_views=6, embed_dim=256, bev_h=8, bev_w=8).to(device)
         cam7 = torch.zeros(1, 7, 3, 4, device=device)
-        cam7[..., 0, 0] = 1.0; cam7[..., 0, 3] = 128.0
-        cam7[..., 1, 1] = 1.0; cam7[..., 1, 3] = 128.0
+        cam7[..., 0, 0] = 1.0
+        cam7[..., 0, 3] = 128.0
+        cam7[..., 1, 1] = 1.0
+        cam7[..., 1, 3] = 128.0
         cam7[..., 2, 3] = 1.0
         for V, cam in ((7, cam7), (6, cam7[:, :6])):
             fusion.zero_grad(set_to_none=True)
