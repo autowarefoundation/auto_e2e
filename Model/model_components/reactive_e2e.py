@@ -78,20 +78,20 @@ class ReactiveE2E(nn.Module):
         self.FutureState = FutureState(embed_dim=embed_dim, ego_hidden_dim=embed_dim)
 
     def forward(self, camera_tiles, map_input, visual_history, egomotion_history,
-                camera_params=None, projection=None, geometry_type=None, **kwargs):
+                projection=None, geometry_type=None, image_transform=None, **kwargs):
         """
         Run the reactive end-to-end autonomous-driving pipeline.
 
 
         Args:
-            camera_tiles: (B, V, 3, H, W) — V camera images (V=7 by default).
+            camera_tiles: (B, V, 3, H, W) — V real camera images.
             map_input: (B, 3, H_map, W_map) — BEV nav-map image.
             visual_history: (B, T, visual_history_dim) or (B, visual_history_dim).
             egomotion_history: (B, T, egomotion_dim) or (B, egomotion_dim).
-            camera_params: Optional (B, V, 3, 4) ego-to-pixel pinhole matrices.
-            projection: Optional CameraProjectionModel operator (general geometry
-                ABI; e.g. FThetaProjection for native fisheye).
+            projection: Optional CameraProjectionModel operator — the geometry
+                ABI (Pinhole / FTheta / Pseudo). No [B,V,3,4] matrix argument.
             geometry_type: Optional explicit geometry label passed to BEV fusion.
+            image_transform: Optional ImageTransform for the model-input frame.
             mode: "train" to produce future_visual_features; anything else skips it.
 
         Returns:
@@ -105,9 +105,9 @@ class ReactiveE2E(nn.Module):
         features = self.Backbone(x)
         image_bev = self.FeatureFusion(
             features, B, V,
-            camera_params=camera_params,
             projection=projection,
             geometry_type=geometry_type,
+            image_transform=image_transform,
         )
 
         # --- Map branch ---
