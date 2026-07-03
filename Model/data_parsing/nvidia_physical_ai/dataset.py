@@ -242,6 +242,36 @@ class NvidiaAVDataset(Dataset):
             for sample_idx in range(min_idx, max_idx + 1)
         ]
 
+    def projection_spec(self, image_size: int = 256) -> dict | None:
+        """Build a native f-theta projection spec from saved calibration.
+
+        Reads calibration/{intrinsics,extrinsics}.pkl (saved at ingest), builds
+        an FThetaProjection scaled to ``image_size`` for the camera slot order,
+        and serializes it for the shard manifest. Returns None when calibration
+        is absent, so the dataset falls back to the explicit pseudo path (never
+        a silent real-geometry claim). See Issue #77.
+        """
+        import pickle
+
+        calib_dir = self.data_root / "calibration"
+        intr_path = calib_dir / "intrinsics.pkl"
+        extr_path = calib_dir / "extrinsics.pkl"
+        if not (intr_path.exists() and extr_path.exists()):
+            return None
+
+        from .calibration import build_ftheta_projection
+
+        with open(intr_path, "rb") as f:
+            intrinsics = pickle.load(f)
+        with open(extr_path, "rb") as f:
+            extrinsics = pickle.load(f)
+
+        proj = build_ftheta_projection(
+            intrinsics, extrinsics, self.camera_names,
+            target_wh=(image_size, image_size),
+        )
+        return proj.to_spec()
+
     def __len__(self) -> int:
         return len(self._samples)
 
