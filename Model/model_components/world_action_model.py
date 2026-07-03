@@ -35,11 +35,12 @@ logger = logging.getLogger(__name__)
 
 
 class ViewAttentionPool(nn.Module):
-    """Learnable multi-camera combiner: [B, V, C] -> [B, C].
+    """Default multi-camera fusion via cross-attention: ``[B, V, C] -> [B, C]``.
 
-    Opt-in replacement for the equal-weight mean over views: a single learned
-    query cross-attends over the V per-view tokens (+ camera-id embeddings),
-    so cameras are weighted by relevance instead of averaged.
+    A single learned query attends over the per-view tokens with learnable camera-
+    position embeddings, weighting cameras by relevance.
+    Used by default in ``FrameEncoder`` (``view_aggregator="attention"``); set
+    ``view_aggregator="mean"`` to revert to the equal-weight mean.
     """
 
     def __init__(self, embed_dim: int = 768, num_views: int = 7, num_heads: int = 4):
