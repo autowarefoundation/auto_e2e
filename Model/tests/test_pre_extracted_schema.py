@@ -124,6 +124,30 @@ class TestManifestProjection:
         res = proj.project_ego_to_image(pts, 256)  # must not raise
         assert res.uv_norm.shape == (1, V, 50, 2)
 
+    def test_ftheta_roundtrip_per_view_poly_not_collapsed(self, tmp_path):
+        """A per-view [V,K] fw_poly must survive to_spec -> load with EACH view's
+        polynomial preserved (codex review: to_spec was collapsing to view 0)."""
+        from model_components.view_fusion.projection import FThetaProjection
+
+        V = 2
+        T = torch.eye(4).reshape(1, 1, 4, 4).expand(1, V, 4, 4).contiguous()
+        # distinct per-view polynomials: view 1 has 2x the radius slope of view 0.
+        fw = torch.tensor([[0.0, 100.0], [0.0, 200.0]])  # [V, K], unbatched
+        built = FThetaProjection(T, fw, cx=128.0, cy=128.0)
+        spec = built.to_spec()
+        assert spec["fw_poly"] == [[0.0, 100.0], [0.0, 200.0]], "per-view poly collapsed"
+        (tmp_path / "manifest.json").write_text(json.dumps({
+            "geometry_type": "ftheta", "projection": spec,
+        }))
+        proj, _ = load_projection_from_manifest(str(tmp_path))
+        # An off-axis point must land at different radii on the two views.
+        pt = torch.tensor([[1.0, 0.0, 1.0, 1.0]])
+        res = proj.project_ego_to_image(pt, 256)
+        u0 = res.uv_norm[0, 0, 0, 0].item()
+        u1 = res.uv_norm[0, 1, 0, 0].item()
+        assert abs(u1 - 0.5) > abs(u0 - 0.5) + 1e-4, \
+            "view 1 (2x slope) should project farther from centre than view 0"
+
     def test_ftheta_roundtrip_per_view_max_theta(self, tmp_path):
         """A per-view max_theta serialized as a list must reload and project."""
         spec = {
