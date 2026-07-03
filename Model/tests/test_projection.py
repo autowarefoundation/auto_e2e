@@ -291,14 +291,20 @@ class TestFThetaProjection:
 
     def test_flu_ego_forward_maps_to_optical_center(self, device):
         """The convention boundary that actually matters: an ego-FLU point on the
-        +X (forward) axis, pushed through the FLU->RDF (R_EGO_FLU_TO_CAM_OPT)
-        transform, must land at the optical center with depth>0 — i.e. ego
-        forward == camera +Z. Uses the SDK axis matrix, not identity T."""
-        from data_parsing.nvidia_physical_ai.calibration import R_EGO_FLU_TO_CAM_OPT
+        +X (forward) axis, pushed through the FLU->RDF transform, must land at the
+        optical center with depth>0 — i.e. ego forward == camera +Z.
 
+        The FLU->RDF rotation (x_cam=-y_ego, y_cam=-z_ego, z_cam=x_ego) is encoded
+        INLINE here — independently of the source R_EGO_FLU_TO_CAM_OPT — so the
+        test both validates the operator against the convention and does not drag
+        in the dataset module's heavy deps (pandas/scipy) on CI.
+        """
         # t_camera_ego = FLU-ego -> camera-optical (RDF), no translation.
+        R = torch.tensor([[0.0, -1.0, 0.0],
+                          [0.0, 0.0, -1.0],
+                          [1.0, 0.0, 0.0]], dtype=torch.float32, device=device)
         T = torch.eye(4, device=device)
-        T[:3, :3] = torch.tensor(R_EGO_FLU_TO_CAM_OPT, dtype=torch.float32, device=device)
+        T[:3, :3] = R
         T = T.reshape(1, 1, 4, 4)
         # r(theta)=200*theta so an on-axis (theta=0) point lands exactly at (cx,cy).
         fw_poly = torch.tensor([0.0, 200.0], device=device)
@@ -368,6 +374,7 @@ class TestBuildFThetaFromCalibration:
 
     def test_native_wh_and_max_theta_from_r2th(self):
         pytest.importorskip("scipy")
+        pytest.importorskip("pandas")  # calibration import pulls the dataset pkg
         from data_parsing.nvidia_physical_ai.calibration import build_ftheta_projection
         # Non-square native frame: normalization must use native (W,H), not 256.
         names = ["cam_a", "cam_b"]
@@ -399,6 +406,7 @@ class TestBuildFThetaFromCalibration:
 
     def test_no_r2th_leaves_max_theta_none(self):
         pytest.importorskip("scipy")
+        pytest.importorskip("pandas")  # calibration import pulls the dataset pkg
         from data_parsing.nvidia_physical_ai.calibration import build_ftheta_projection
         m = self._Model(800, 600)
         del m.r2th  # lens without a backward polynomial -> no derivable FOV bound
@@ -411,6 +419,7 @@ class TestBuildFThetaFromCalibration:
         (inf) must STILL mask behind-camera rays on the unbounded lens — the inf
         bound must fall back to the +Z hemisphere gate, not accept everything."""
         pytest.importorskip("scipy")
+        pytest.importorskip("pandas")  # calibration import pulls the dataset pkg
         from data_parsing.nvidia_physical_ai.calibration import build_ftheta_projection
         bounded = self._Model(1920, 1080)             # has r2th -> finite bound
         unbounded = self._Model(1920, 1080)
