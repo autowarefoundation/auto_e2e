@@ -247,20 +247,40 @@ class TestFThetaProjection:
         json.dumps(spec)  # must not raise (tensor max_theta scalarized)
 
     def test_radius_accepts_shared_and_per_view_poly(self, device):
-        """_radius must handle a shared [K], per-view [V,K], and batched [B,V,K]
-        fw_poly identically for an on-axis point (round-2 review regression)."""
+        """_radius must handle shared [K], per-view [V,K] and batched [B,V,K]
+        fw_poly. Uses an OFF-axis point (theta>0) with DISTINCT per-view
+        coefficients so coefficient order / Horner / per-view broadcasting are
+        actually exercised (an on-axis theta=0 point would zero every term and
+        prove nothing)."""
         T = self._identity_transform(device, v=3)
-        pt = _homo(torch.tensor([[0.0, 0.0, 5.0]], device=device))  # on-axis
+        pt = _homo(torch.tensor([[1.0, 0.0, 5.0]], device=device))  # off-axis
+        rho, z = 1.0, 5.0
+        theta = math.atan2(rho, z)
+        # shared: every view uses r = 200*theta -> identical radius.
         shared = FThetaProjection(T, torch.tensor([0.0, 200.0], device=device),
                                   cx=128.0, cy=128.0)
-        per_view = FThetaProjection(T, torch.tensor([[0.0, 200.0]] * 3, device=device),
-                                    cx=128.0, cy=128.0)
-        batched = FThetaProjection(T, torch.tensor([[[0.0, 200.0]] * 3], device=device),
-                                   cx=128.0, cy=128.0)
-        outs = [p.project_ego_to_image(pt, 256).uv_norm for p in (shared, per_view, batched)]
-        for o in outs:
-            assert o.shape == (1, 3, 1, 2)
-            assert torch.allclose(o[0, 0, 0], torch.tensor([0.5, 0.5], device=device), atol=1e-4)
+        out_s = shared.project_ego_to_image(pt, 256).uv_norm
+        assert out_s.shape == (1, 3, 1, 2)
+        r_exp = 200.0 * theta
+        u_exp = (128.0 + r_exp * (1.0 / rho)) / 256.0
+        for v in range(3):
+            assert out_s[0, v, 0, 0].item() == pytest.approx(u_exp, abs=1e-4)
+
+        # per-view: distinct slopes 100/200/300 -> radii must differ per view and
+        # match each view's own polynomial (proves per-view broadcasting).
+        per_view = FThetaProjection(
+            T, torch.tensor([[0.0, 100.0], [0.0, 200.0], [0.0, 300.0]], device=device),
+            cx=128.0, cy=128.0)
+        out_p = per_view.project_ego_to_image(pt, 256).uv_norm
+        for v, slope in enumerate((100.0, 200.0, 300.0)):
+            u_v = (128.0 + slope * theta * (1.0 / rho)) / 256.0
+            assert out_p[0, v, 0, 0].item() == pytest.approx(u_v, abs=1e-4)
+        # batched [1,V,K] must equal the per-view result.
+        batched = FThetaProjection(
+            T, torch.tensor([[[0.0, 100.0], [0.0, 200.0], [0.0, 300.0]]], device=device),
+            cx=128.0, cy=128.0)
+        out_b = batched.project_ego_to_image(pt, 256).uv_norm
+        assert torch.allclose(out_b, out_p, atol=1e-5)
 
     def test_radius_rejects_bad_poly_rank(self, device):
         T = self._identity_transform(device)
