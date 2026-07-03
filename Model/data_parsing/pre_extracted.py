@@ -105,7 +105,8 @@ def load_projection_from_manifest(shard_dir: str):
          "projection": {"type": "pinhole", "matrix": [[...]]}}   # [V,3,4]
         {"geometry_type": "ftheta",
          "projection": {"type": "ftheta", "t_camera_ego": [...],  # [V,4,4]
-                        "fw_poly": [...], "cx": [...], "cy": [...]}}
+                        "fw_poly": [...], "cx": [...], "cy": [...],
+                        "image_wh": [...], "max_theta": ...}}  # native (W,H), FOV
 
     A dataset without calibration (pseudo geometry, e.g. L2D) returns
     ``(None, "pseudo")`` and the caller runs the explicit pseudo path. This is
@@ -118,12 +119,19 @@ def load_projection_from_manifest(shard_dir: str):
     )
 
     mpath = Path(shard_dir) / "manifest.json"
+    # Missing manifest -> pseudo (a legacy shard has no geometry). But a manifest
+    # that EXISTS and cannot be read must RAISE: silently degrading a calibrated
+    # run to pseudo geometry would corrupt experiments. Corrupt/unreadable is a
+    # hard error, not a fallback.
     if not mpath.exists():
         return None, "pseudo"
     try:
         manifest = json.loads(mpath.read_text())
-    except (ValueError, OSError):
-        return None, "pseudo"
+    except (ValueError, OSError) as e:
+        raise ValueError(
+            f"manifest.json at {mpath} exists but could not be parsed ({e}); "
+            f"refusing to silently fall back to pseudo geometry."
+        ) from e
 
     spec = manifest.get("projection")
     if spec is None:
@@ -153,6 +161,7 @@ def load_projection_from_manifest(shard_dir: str):
                 t_camera_ego=_t("t_camera_ego"),   # [1,V,4,4]
                 fw_poly=fw_poly,
                 cx=_t("cx"), cy=_t("cy"),          # [1,V]
+                image_wh=_t("image_wh"),           # [1,V,2] native (W,H)
                 max_theta=max_theta,
             ),
             "ftheta",
