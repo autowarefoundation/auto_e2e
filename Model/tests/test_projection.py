@@ -92,6 +92,17 @@ class TestPseudoProjection:
         res.uv_norm.sum().backward()
         assert shared.grad is not None and shared.grad.abs().max() > 0
 
+    def test_rejects_per_view_matrix(self, device):
+        # A [V,3,4] tensor is a misuse (the prior is view-independent) and would
+        # crash cryptically at reshape; reject it at construction.
+        with pytest.raises(ValueError, match=r"\[3, 4\]"):
+            PseudoProjection(torch.zeros(2, 3, 4, device=device), num_views=4)
+
+    def test_accepts_leading_one_matrix(self, device):
+        res = PseudoProjection(torch.randn(1, 3, 4, device=device), num_views=3).project(
+            _homo(torch.randn(4, 3, device=device)), 256)
+        assert res.uv_norm.shape == (1, 3, 4, 2)
+
 
 class TestFThetaProjection:
     def _identity_transform(self, device, v=1):
@@ -152,3 +163,18 @@ class TestFThetaProjection:
     def test_rejects_bad_transform_shape(self):
         with pytest.raises(ValueError, match="4, 4"):
             FThetaProjection(torch.randn(1, 1, 3, 4), torch.tensor([0.0, 1.0]), 1.0, 1.0)
+
+    def test_tensor_max_theta_moves_with_to_and_projects(self, device):
+        """A tensor max_theta must follow .to(device) and be usable in project()
+        without a device mismatch."""
+        T = self._identity_transform(device)
+        fw_poly = torch.tensor([0.0, 100.0], device=device)
+        # Construct on CPU with a CPU tensor max_theta, then move to device.
+        proj = FThetaProjection(
+            T.cpu(), fw_poly.cpu(), cx=128.0, cy=128.0,
+            max_theta=torch.tensor(1.0),
+        ).to(device)
+        assert proj.max_theta.device.type == device.type
+        # project() must run (comparison theta <= max_theta on the same device).
+        res = proj.project(_homo(torch.tensor([[0.0, 0.0, 5.0]], device=device)), 256)
+        assert res.uv_norm.shape == (1, 1, 1, 2)
