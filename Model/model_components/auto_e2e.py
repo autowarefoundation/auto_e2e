@@ -29,7 +29,8 @@ class AutoE2E(nn.Module):
 
 
     def forward(self, camera_tiles, map_input, visual_history, egomotion_history,
-                camera_params=None, mode="train", trajectory_target=None, **kwargs):
+                camera_params=None, projection=None, geometry_type=None,
+                mode="train", trajectory_target=None, **kwargs):
         """
         Run the full autonomous-driving pipeline.
 
@@ -51,7 +52,11 @@ class AutoE2E(nn.Module):
             map_input: (B, 3, H_map, W_map) — BEV nav-map image.
             visual_history: (B, T, visual_history_dim) or (B, visual_history_dim).
             egomotion_history: (B, T, egomotion_dim) or (B, egomotion_dim).
-            camera_params: Optional (B, V, 3, 4) ego-to-pixel projection matrices.
+            camera_params: Optional (B, V, 3, 4) ego-to-pixel pinhole matrices.
+            projection: Optional CameraProjectionModel operator (general geometry
+                ABI; e.g. FThetaProjection for native fisheye).
+            geometry_type: Optional explicit geometry label ("pinhole",
+                "rectified_pinhole", "ftheta", "pseudo") passed to BEV fusion.
             mode: "train" to produce future_visual_features; anything else skips it.
 
         Returns:
@@ -66,7 +71,8 @@ class AutoE2E(nn.Module):
         ### JEPA loss during training
 
         trajectory = self.Reactive_E2E(camera_tiles, map_input, visual_history, egomotion_history,
-        camera_params=camera_params, mode=mode, trajectory_target=trajectory_target, **kwargs)
+        camera_params=camera_params, projection=projection, geometry_type=geometry_type,
+        mode=mode, trajectory_target=trajectory_target, **kwargs)
 
 
         return trajectory
