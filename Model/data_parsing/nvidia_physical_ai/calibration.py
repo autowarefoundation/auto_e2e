@@ -41,18 +41,34 @@ R_EGO_FLU_TO_CAM_OPT = np.array(
 )
 
 
-def _ego_to_camera_transform(sensor_pose) -> np.ndarray:
-    """Compose the 4x4 ego(FLU)->camera-optical transform for one sensor.
+def _ego_to_camera_transform(sensor_pose, sensor_frame_is_optical: bool = True) -> np.ndarray:
+    """Compose the 4x4 ego->camera-optical transform for one sensor.
 
-    ``sensor_pose`` is the SDK's sensor->rig(ego) RigidTransform. We invert it to
-    get rig->sensor, then rotate rig(FLU) axes into the camera optical (RDF)
-    convention the FThetaCameraModel expects.
+    ``sensor_pose`` is the SDK's sensor->rig(ego) RigidTransform; ``inv`` of it is
+    ego->sensor. The subtlety is what the SDK's per-camera *sensor* frame is:
+
+    - ``sensor_frame_is_optical=True`` (DEFAULT): the camera's sensor frame IS
+      the optical frame the FThetaCameraModel expects (X=right, Y=down,
+      Z=forward). This is the standard AV convention where intrinsics and
+      extrinsics are shipped to compose directly, so ``inv(sensor_pose)`` already
+      maps ego->optical and NO extra axis rotation is applied. Applying one here
+      would double-rotate and systematically skew every projection.
+    - ``sensor_frame_is_optical=False``: the sensor frame is rig-aligned FLU
+      (X=forward, Y=left, Z=up), so we additionally rotate FLU->optical.
+
+    The SDK does not document which convention its ``sensor_extrinsics`` use and
+    ships no camera<->sensor rotation, so the default follows the direct-compose
+    convention. This MUST be validated on real data (project a known forward ego
+    point and confirm it lands near the forward camera's image centre, depth>0)
+    before the f-theta path is trusted quantitatively (see #77).
     """
     M = np.asarray(sensor_pose.as_matrix(), dtype=np.float64)  # sensor->ego, 4x4
     ego_to_sensor = np.linalg.inv(M)                           # ego->sensor
+    if sensor_frame_is_optical:
+        return ego_to_sensor                                   # already ego->optical
     R = np.eye(4, dtype=np.float64)
     R[:3, :3] = R_EGO_FLU_TO_CAM_OPT
-    return R @ ego_to_sensor                                   # ego->camera-optical
+    return R @ ego_to_sensor                                   # FLU sensor -> optical
 
 
 def _ftheta_pixel_scale(model, target_wh: tuple[int, int]) -> float:
@@ -87,6 +103,7 @@ def build_ftheta_projection(
     camera_names,
     target_wh: tuple[int, int] = (256, 256),
     polynomial_degree: int = 4,
+    sensor_frame_is_optical: bool = True,
 ):
     """Construct an :class:`FThetaProjection` scaled to the model-input frame.
 
@@ -101,12 +118,17 @@ def build_ftheta_projection(
         camera_names: ordered list of camera ids (slot order == visual_tiles).
         target_wh: model-input (width, height); must match the shard image_size.
         polynomial_degree: f-theta forward-polynomial degree (SDK default 4).
+        sensor_frame_is_optical: whether the SDK sensor frame is already the
+            camera optical frame (see :func:`_ego_to_camera_transform`).
 
     Returns:
         FThetaProjection with batch dim 1 ([1, V, ...]); stored as a per-dataset
         rig constant.
     """
     from model_components.view_fusion.projection import FThetaProjection
+
+    if not camera_names:
+        raise ValueError("camera_names must be non-empty to build a projection.")
 
     V = len(camera_names)
     t_camera_ego = np.zeros((1, V, 4, 4), dtype=np.float32)
@@ -128,7 +150,7 @@ def build_ftheta_projection(
         model = intrinsics.camera_models[name]
         pose = extrinsics.sensor_poses[name]
         _, sx, sy = _ftheta_pixel_scale(model, target_wh)
-        t_camera_ego[0, i] = _ego_to_camera_transform(pose)
+        t_camera_ego[0, i] = _ego_to_camera_transform(pose, sensor_frame_is_optical)
         # np.polynomial.Polynomial.coef is ascending powers (matches our Horner).
         fw_poly[0, i, : len(coefs[i])] = coefs[i]
         cx[0, i] = float(model.principal_point[0]) * sx
