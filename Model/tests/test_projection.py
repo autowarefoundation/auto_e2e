@@ -209,6 +209,29 @@ class TestFThetaProjection:
         assert spec["fw_poly"] == pytest.approx([0.0, 300.0, -5.0, 0.1], abs=1e-5)
         json.dumps(spec)  # must not raise (tensor max_theta scalarized)
 
+    def test_radius_accepts_shared_and_per_view_poly(self, device):
+        """_radius must handle a shared [K], per-view [V,K], and batched [B,V,K]
+        fw_poly identically for an on-axis point (round-2 review regression)."""
+        T = self._identity_transform(device, v=3)
+        pt = _homo(torch.tensor([[0.0, 0.0, 5.0]], device=device))  # on-axis
+        shared = FThetaProjection(T, torch.tensor([0.0, 200.0], device=device),
+                                  cx=128.0, cy=128.0)
+        per_view = FThetaProjection(T, torch.tensor([[0.0, 200.0]] * 3, device=device),
+                                    cx=128.0, cy=128.0)
+        batched = FThetaProjection(T, torch.tensor([[[0.0, 200.0]] * 3], device=device),
+                                   cx=128.0, cy=128.0)
+        outs = [p.project_ego_to_image(pt, 256).uv_norm for p in (shared, per_view, batched)]
+        for o in outs:
+            assert o.shape == (1, 3, 1, 2)
+            assert torch.allclose(o[0, 0, 0], torch.tensor([0.5, 0.5], device=device), atol=1e-4)
+
+    def test_radius_rejects_bad_poly_rank(self, device):
+        T = self._identity_transform(device)
+        bad = torch.zeros(1, 1, 1, 2, device=device)  # 4-D fw_poly
+        proj = FThetaProjection(T, bad, cx=128.0, cy=128.0)
+        with pytest.raises(ValueError, match="fw_poly"):
+            proj.project_ego_to_image(_homo(torch.tensor([[0.0, 0.0, 5.0]], device=device)), 256)
+
     def test_cpu_operator_projects_cuda_points(self, device):
         """A CPU operator must project CUDA points (params coerced to device)."""
         if device.type != "cuda":
