@@ -329,12 +329,15 @@ def run_training(args: argparse.Namespace) -> None:
             batch = move_batch(batch, device)
             optimizer.zero_grad(set_to_none=True)
 
-            # The model owns a map branch. Datasets now emit map_input (real
-            # nav-map for L2D, zeros for NVIDIA); fall back to zeros only if a
-            # batch lacks it (MapBEVFusion is a residual gate at alpha=0 → no
-            # early effect).
+            # The model owns a map branch. The pre-extracted loader emits
+            # "map_input"; the lerobot/on-the-fly datasets emit "map_tile" (real
+            # nav-map for L2D, zeros for NVIDIA). Accept either so the real map is
+            # never silently dropped; fall back to zeros only if a batch has
+            # neither (MapBEVFusion is a residual gate at alpha=0 → no early effect).
             visual_tiles = batch["visual_tiles"]
             map_input = batch.get("map_input")
+            if map_input is None:
+                map_input = batch.get("map_tile")
             if map_input is None:
                 map_input = torch.zeros(visual_tiles.shape[0], 3, 256, 256, device=device)
 
