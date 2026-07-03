@@ -110,19 +110,27 @@ def build_ftheta_projection(
 
     V = len(camera_names)
     t_camera_ego = np.zeros((1, V, 4, 4), dtype=np.float32)
-    fw_poly = np.zeros((1, V, polynomial_degree + 1), dtype=np.float32)
     cx = np.zeros((1, V), dtype=np.float32)
     cy = np.zeros((1, V), dtype=np.float32)
+
+    # Gather each camera's scaled forward polynomial first; size fw_poly to the
+    # LONGEST so no coefficient is silently dropped (Horner handles any K). The
+    # polynomial_degree arg is only a floor — real SDK polynomials may be longer.
+    coefs = []
+    for name in camera_names:
+        model = intrinsics.camera_models[name]
+        r_scale, _, _ = _ftheta_pixel_scale(model, target_wh)
+        coefs.append(np.asarray(model.th2r.coef, dtype=np.float32) * r_scale)
+    K = max(polynomial_degree + 1, max(len(c) for c in coefs))
+    fw_poly = np.zeros((1, V, K), dtype=np.float32)
 
     for i, name in enumerate(camera_names):
         model = intrinsics.camera_models[name]
         pose = extrinsics.sensor_poses[name]
-        r_scale, sx, sy = _ftheta_pixel_scale(model, target_wh)
+        _, sx, sy = _ftheta_pixel_scale(model, target_wh)
         t_camera_ego[0, i] = _ego_to_camera_transform(pose)
         # np.polynomial.Polynomial.coef is ascending powers (matches our Horner).
-        # Radius is in native pixels -> scale by the (mean) pixel scale.
-        coef = np.asarray(model.th2r.coef, dtype=np.float32) * r_scale
-        fw_poly[0, i, : min(len(coef), polynomial_degree + 1)] = coef[: polynomial_degree + 1]
+        fw_poly[0, i, : len(coefs[i])] = coefs[i]
         cx[0, i] = float(model.principal_point[0]) * sx
         cy[0, i] = float(model.principal_point[1]) * sy
 
