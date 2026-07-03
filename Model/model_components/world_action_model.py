@@ -24,11 +24,45 @@ loop. Reuses the merged building blocks (JepaTargetEncoder,
 FeatureReconstructionLoss).
 """
 
+import logging
 import torch
 import torch.nn as nn
 
 from .jepa_target_encoder import JepaTargetEncoder, compute_jepa_loss
 from .losses.feature_reconstruction_loss import FeatureReconstructionLoss
+
+logger = logging.getLogger(__name__)
+
+
+class ViewAttentionPool(nn.Module):
+    """Learnable multi-camera combiner: [B, V, C] -> [B, C].
+
+    Opt-in replacement for the equal-weight mean over views: a single learned
+    query cross-attends over the V per-view tokens (+ camera-id embeddings),
+    so cameras are weighted by relevance instead of averaged.
+    """
+
+    def __init__(self, embed_dim: int = 768, num_views: int = 7, num_heads: int = 4):
+        super().__init__()
+        self.view_embed = nn.Parameter(torch.randn(1, num_views, embed_dim) * 0.02)
+        self.query = nn.Parameter(torch.randn(1, 1, embed_dim) * 0.02)
+        self.attn = nn.MultiheadAttention(embed_dim, num_heads, batch_first=True)
+        self.norm = nn.LayerNorm(embed_dim)
+
+    def forward(self, view_tokens: torch.Tensor) -> torch.Tensor:
+        # view_tokens: [B, V, C]   (C = embed_dim = 768)
+        B, V, C = view_tokens.shape
+        # Handle dynamic view sizes by slicing or repeating positional embeddings
+        if V <= self.view_embed.shape[1]:
+            v_embed = self.view_embed[:, :V]
+        else:
+            extra = V - self.view_embed.shape[1]
+            v_embed = torch.cat([self.view_embed, self.view_embed[:, :extra]], dim=1)
+            
+        tok = view_tokens + v_embed
+        q = self.query.expand(B, -1, -1)
+        out, _ = self.attn(q, tok, tok)
+        return self.norm(out.squeeze(1))
 
 
 class FrameEncoder(nn.Module):
@@ -38,22 +72,43 @@ class FrameEncoder(nn.Module):
     """
 
     def __init__(self, backbone: nn.Module, feature_channels: int = 768,
-                 frame_embed_dim: int = 224):
+                 frame_embed_dim: int = 224, view_aggregator: str = "attention",
+                 num_views: int = 7):
         super().__init__()
         self.backbone = backbone
         self.proj = nn.Linear(feature_channels, frame_embed_dim)
+        if num_views == 1 and view_aggregator == "attention":
+            logger.warning(
+                "num_views is 1; falling back view_aggregator from 'attention' to 'mean' "
+                "to avoid unnecessary attention overhead."
+            )
+            view_aggregator = "mean"
+
+        self.view_aggregator = view_aggregator
+        
+        if view_aggregator not in ("mean", "attention"):
+            raise ValueError(f"Unknown view_aggregator {view_aggregator!r}. Available: 'mean', 'attention'.")
+            
+        if view_aggregator == "attention":
+            self.view_pool = ViewAttentionPool(embed_dim=feature_channels, num_views=num_views)
 
     def forward(self, frame: torch.Tensor) -> torch.Tensor:
         """``[B, 3, H, W]`` or multi-view ``[B, V, 3, H, W]`` -> ``[B, embed]``.
 
         For multi-view input each camera is encoded and the per-view embeddings
-        are mean-pooled into a single per-frame embedding.
+        are aggregated (via mean or attention) into a single per-frame embedding.
         """
         if frame.dim() == 5:                       # [B, V, 3, H, W]
             B, V = frame.shape[:2]
             feats = self.backbone(frame.reshape(B * V, *frame.shape[2:]))
             m = feats[-1] if isinstance(feats, (list, tuple)) else feats
-            m = m.mean(dim=(2, 3)).reshape(B, V, -1).mean(dim=1)  # GAP + pool views
+            m = m.mean(dim=(2, 3)).reshape(B, V, -1)             # [B, V, feature_channels]
+            
+            if self.view_aggregator == "attention":
+                m = self.view_pool(m)                            # [B, feature_channels]
+            else:
+                m = m.mean(dim=1)                                # [B, feature_channels]
+                
             return self.proj(m)                                  # [B, embed]
         feats = self.backbone(frame)               # [B, 3, H, W]
         m = feats[-1] if isinstance(feats, (list, tuple)) else feats
@@ -193,7 +248,8 @@ class WorldActionModel(nn.Module):
     def __init__(self, backbone: nn.Module, feature_channels: int = 768,
                  frame_embed_dim: int = 224, history_len: int = 4,
                  num_future_steps: int = 4, loss_type: str = "l1",
-                 history_aggregator: str = "concat", feature_hw: int = 8):
+                 history_aggregator: str = "concat", feature_hw: int = 8,
+                 view_aggregator: str = "attention", num_views: int = 7):
         super().__init__()
         if history_aggregator not in ("concat", "attention"):
             raise ValueError(
@@ -215,7 +271,10 @@ class WorldActionModel(nn.Module):
             if history_aggregator == "attention" else None)
 
         # Online per-frame encoder (shared backbone, trainable) -> 224 history embedding.
-        self.encoder = FrameEncoder(backbone, feature_channels, frame_embed_dim)
+        self.encoder = FrameEncoder(
+            backbone, feature_channels, frame_embed_dim,
+            view_aggregator=view_aggregator, num_views=num_views
+        )
         # JEPA target: a FROZEN, stop-gradient copy of the backbone FEATURE MAP
         # extractor (#1). Per Zain's #85 review (30/06) the JEPA reconstructs the
         # future backbone feature maps [B, C, hw, hw], not a pooled vector.
