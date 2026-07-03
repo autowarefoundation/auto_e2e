@@ -104,3 +104,38 @@ class TestManifestProjection:
         pts = torch.tensor([[0.0, 0.0, 5.0, 1.0]])
         res = proj.project_ego_to_image(pts, 256)
         assert res.uv_norm.shape == (1, V, 1, 2)
+
+    def test_ftheta_roundtrip_shared_poly_via_to_spec(self, tmp_path):
+        """A shared [K] fw_poly must survive to_spec -> manifest -> load and
+        project without a shape mismatch (round-2 review regression)."""
+        from model_components.view_fusion.projection import FThetaProjection
+
+        V = 2
+        T = torch.eye(4).reshape(1, 1, 4, 4).expand(1, V, 4, 4).contiguous()
+        # shared 1-D polynomial (not per-view)
+        built = FThetaProjection(T, torch.tensor([0.0, 200.0, -1.0]), cx=128.0, cy=128.0)
+        spec = built.to_spec()
+        (tmp_path / "manifest.json").write_text(json.dumps({
+            "geometry_type": "ftheta", "projection": spec,
+        }))
+        proj, geom = load_projection_from_manifest(str(tmp_path))
+        assert geom == "ftheta" and proj.num_views == V
+        pts = torch.randn(50, 4)
+        res = proj.project_ego_to_image(pts, 256)  # must not raise
+        assert res.uv_norm.shape == (1, V, 50, 2)
+
+    def test_ftheta_roundtrip_per_view_max_theta(self, tmp_path):
+        """A per-view max_theta serialized as a list must reload and project."""
+        spec = {
+            "type": "ftheta",
+            "t_camera_ego": torch.eye(4).reshape(1, 4, 4).expand(2, 4, 4).tolist(),
+            "fw_poly": [[0.0, 200.0]] * 2,
+            "cx": [128.0] * 2, "cy": [128.0] * 2,
+            "max_theta": [1.5, 1.8],  # per-view list
+        }
+        (tmp_path / "manifest.json").write_text(json.dumps({
+            "geometry_type": "ftheta", "projection": spec,
+        }))
+        proj, _ = load_projection_from_manifest(str(tmp_path))
+        res = proj.project_ego_to_image(torch.randn(10, 4), 256)  # must not raise
+        assert res.valid_mask.shape == (1, 2, 10)
