@@ -202,7 +202,11 @@ class TestFThetaProjection:
         proj = FThetaProjection(T, fw_poly, cx=128.0, cy=128.0,
                                 max_theta=torch.tensor(1.5, device=device))
         spec = proj.to_spec()
-        assert spec["fw_poly"] == [0.0, 300.0, -5.0, 0.1], "shared poly truncated"
+        # Full polynomial preserved (not truncated to the first coefficient).
+        # float32 round-trip, so compare approximately.
+        assert isinstance(spec["fw_poly"], list) and len(spec["fw_poly"]) == 4, \
+            "shared poly truncated"
+        assert spec["fw_poly"] == pytest.approx([0.0, 300.0, -5.0, 0.1], abs=1e-5)
         json.dumps(spec)  # must not raise (tensor max_theta scalarized)
 
     def test_cpu_operator_projects_cuda_points(self, device):
