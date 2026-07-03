@@ -241,7 +241,7 @@ class FThetaProjection:
             return x.to(device) if torch.is_tensor(x) else x
         return FThetaProjection(
             self.t_camera_ego.to(device), _mv(self.fw_poly),
-            _mv(self.cx), _mv(self.cy), max_theta=self.max_theta,
+            _mv(self.cx), _mv(self.cy), max_theta=_mv(self.max_theta),
         )
 
     def to_spec(self) -> dict:
@@ -305,7 +305,10 @@ class FThetaProjection:
         # FOV (max_theta) when known; otherwise fall back to the +Z hemisphere as
         # a safe default (we cannot validate arbitrary wide rays without a bound).
         if self.max_theta is not None:
-            mask = in_bounds & (theta <= self.max_theta)
+            max_theta = self.max_theta
+            if torch.is_tensor(max_theta):
+                max_theta = max_theta.to(device=theta.device, dtype=theta.dtype)
+            mask = in_bounds & (theta <= max_theta)
         else:
             mask = in_bounds & (z > _DEPTH_EPS)
         return ProjectionResult(uv_norm=uv_norm, valid_mask=mask, depth=depth)
