@@ -52,78 +52,100 @@ def _decode_image(data) -> torch.Tensor:
     return _TRANSFORM(img)
 
 
-def _make_decoder(camera_params: torch.Tensor | None):
-    """Build a WebDataset sample decoder.
+def _decode_sample(sample: dict) -> dict:
+    """Decode a WebDataset sample into training tensors (geometry-free).
 
-    ``camera_params`` (a per-dataset ``[V, 3, 4]`` constant read once from the
-    manifest, or None) is attached to every sample so WebLoader auto-stacks it
-    to ``[B, V, 3, 4]``. It is a rig constant, hence stored per-dataset rather
-    than per-sample.
+    Calibration is a per-dataset rig constant, not per-sample, so it is NOT
+    decoded here — it is reconstructed once by ``make_pre_extracted_loader`` and
+    exposed on the loader as ``.projection`` / ``.geometry_type``.
     """
+    # Keys: "cam_0.jpg" ... "cam_{V-1}.jpg", optional "map.jpg",
+    # "ego.npy", "meta.json", "__key__".
+    cam_keys = sorted(
+        (k for k in sample if _CAM_KEY_RE.match(k)),
+        key=lambda k: int(k[len("cam_"):-len(".jpg")]),
+    )
+    frames = [_decode_image(sample[k]) for k in cam_keys]
 
-    def _decode_sample(sample: dict) -> dict:
-        # Keys: "cam_0.jpg" ... "cam_{V-1}.jpg", optional "map.jpg",
-        # "ego.npy", "meta.json", "__key__".
-        cam_keys = sorted(
-            (k for k in sample if _CAM_KEY_RE.match(k)),
-            key=lambda k: int(k[len("cam_"):-len(".jpg")]),
-        )
-        frames = [_decode_image(sample[k]) for k in cam_keys]
+    # Map view -> map branch. Absent (legacy shards / NVIDIA zeros) -> zeros.
+    if "map.jpg" in sample:
+        map_input = _decode_image(sample["map.jpg"])
+    else:
+        ref = frames[0] if frames else torch.zeros(3, 256, 256)
+        map_input = torch.zeros_like(ref)
 
-        # Map view -> map branch. Absent (legacy shards / NVIDIA zeros) -> zeros.
-        if "map.jpg" in sample:
-            map_input = _decode_image(sample["map.jpg"])
-        else:
-            ref = frames[0] if frames else torch.zeros(3, 256, 256)
-            map_input = torch.zeros_like(ref)
+    # Ego: raw bytes → numpy → split into history and future
+    ego_bytes = sample.get("ego.npy", b"")
+    if isinstance(ego_bytes, bytes) and len(ego_bytes) > 0:
+        ego = np.frombuffer(ego_bytes, dtype=np.float32).copy()
+    else:
+        ego = np.zeros(384, dtype=np.float32)
 
-        # Ego: raw bytes → numpy → split into history and future
-        ego_bytes = sample.get("ego.npy", b"")
-        if isinstance(ego_bytes, bytes) and len(ego_bytes) > 0:
-            ego = np.frombuffer(ego_bytes, dtype=np.float32).copy()
-        else:
-            ego = np.zeros(384, dtype=np.float32)
+    # History: (64, 4) flattened = 256; Future: (64, 2) flattened = 128
+    history_size = _HISTORY_STEPS * _HISTORY_SIGNALS
+    ego_history = torch.from_numpy(ego[:history_size])
+    ego_future = torch.from_numpy(ego[history_size:])
 
-        # History: (64, 4) flattened = 256; Future: (64, 2) flattened = 128
-        history_size = _HISTORY_STEPS * _HISTORY_SIGNALS
-        ego_history = torch.from_numpy(ego[:history_size])
-        ego_future = torch.from_numpy(ego[history_size:])
-
-        out = {
-            "visual_tiles": torch.stack(frames),
-            "map_input": map_input,
-            "egomotion_history": ego_history,
-            "visual_history": torch.zeros(_VISUAL_HISTORY_DIM),
-            "trajectory_target": ego_future,
-        }
-        if camera_params is not None:
-            out["camera_params"] = camera_params
-        return out
-
-    return _decode_sample
+    return {
+        "visual_tiles": torch.stack(frames),
+        "map_input": map_input,
+        "egomotion_history": ego_history,
+        "visual_history": torch.zeros(_VISUAL_HISTORY_DIM),
+        "trajectory_target": ego_future,
+    }
 
 
-def _load_manifest_camera_params(shard_dir: str) -> torch.Tensor | None:
-    """Read the per-dataset ``camera_params`` rig constant from manifest.json.
+def load_projection_from_manifest(shard_dir: str):
+    """Reconstruct the per-dataset projection operator from manifest.json.
 
-    Returns a ``[V, 3, 4]`` float32 tensor, or None if the manifest is missing
-    or carries no calibration (pseudo-geometry datasets like L2D)."""
+    Returns ``(projection, geometry_type)``. A dataset with real calibration
+    stores an operator spec under ``projection`` in its manifest:
+
+        {"geometry_type": "pinhole",
+         "projection": {"type": "pinhole", "matrix": [[...]]}}   # [V,3,4]
+        {"geometry_type": "ftheta",
+         "projection": {"type": "ftheta", "t_camera_ego": [...],  # [V,4,4]
+                        "fw_poly": [...], "cx": [...], "cy": [...]}}
+
+    A dataset without calibration (pseudo geometry, e.g. L2D) returns
+    ``(None, "pseudo")`` and the caller runs the explicit pseudo path. This is
+    the single geometry-reconstruction point, keeping the pinhole/f-theta split
+    out of the training loop.
+    """
+    from model_components.view_fusion.projection import (
+        FThetaProjection,
+        PinholeProjection,
+    )
+
     mpath = Path(shard_dir) / "manifest.json"
     if not mpath.exists():
-        return None
+        return None, "pseudo"
     try:
         manifest = json.loads(mpath.read_text())
     except (ValueError, OSError):
-        return None
-    cp = manifest.get("camera_params")
-    if cp is None:
-        return None
-    arr = np.asarray(cp, dtype=np.float32)
-    if arr.ndim != 3 or arr.shape[-2:] != (3, 4):
-        raise ValueError(
-            f"manifest camera_params must be [V, 3, 4], got shape {arr.shape}"
+        return None, "pseudo"
+
+    spec = manifest.get("projection")
+    if spec is None:
+        return None, manifest.get("geometry_type", "pseudo")
+
+    kind = spec.get("type")
+    if kind in ("pinhole", "rectified_pinhole"):
+        matrix = torch.tensor(spec["matrix"], dtype=torch.float32).unsqueeze(0)  # [1,V,3,4]
+        return PinholeProjection(matrix, geometry_type=kind), kind
+    if kind == "ftheta":
+        def _t(key):
+            return torch.tensor(spec[key], dtype=torch.float32).unsqueeze(0)
+        return (
+            FThetaProjection(
+                t_camera_ego=_t("t_camera_ego"),   # [1,V,4,4]
+                fw_poly=_t("fw_poly"),             # [1,V,K]
+                cx=_t("cx"), cy=_t("cy"),          # [1,V]
+                max_theta=spec.get("max_theta"),
+            ),
+            "ftheta",
         )
-    return torch.from_numpy(arr)
+    raise ValueError(f"Unknown projection type in manifest: {kind!r}")
 
 
 def make_pre_extracted_loader(
@@ -141,6 +163,12 @@ def make_pre_extracted_loader(
         num_workers: DataLoader workers.
         split: Unused currently (all tars in shard_dir are loaded).
         shuffle: Shuffle buffer size (0 to disable).
+
+    The returned loader carries two extra attributes describing the dataset's
+    geometry (a rig constant, so it lives on the loader, not per batch):
+      - ``.projection``: a CameraProjectionModel operator, or None (pseudo).
+      - ``.geometry_type``: "pinhole" / "rectified_pinhole" / "ftheta" / "pseudo".
+    Pass these to the model's forward alongside each batch.
     """
     tarfiles = sorted(Path(shard_dir).glob("*.tar"))
     if not tarfiles:
@@ -148,14 +176,15 @@ def make_pre_extracted_loader(
 
     urls = [str(p) for p in tarfiles]
 
-    # Per-dataset calibration (rig constant) read once and broadcast per sample.
-    camera_params = _load_manifest_camera_params(shard_dir)
-    decode = _make_decoder(camera_params)
-
     dataset = wds.WebDataset(urls, shardshuffle=False, empty_check=False, nodesplitter=wds.split_by_worker)
     if shuffle > 0:
         dataset = dataset.shuffle(shuffle)
-    dataset = dataset.map(decode)
+    dataset = dataset.map(_decode_sample)
 
     loader = wds.WebLoader(dataset, batch_size=batch_size, num_workers=min(num_workers, len(tarfiles)))
+
+    # Per-dataset geometry, reconstructed once from the manifest.
+    projection, geometry_type = load_projection_from_manifest(shard_dir)
+    loader.projection = projection
+    loader.geometry_type = geometry_type
     return loader
