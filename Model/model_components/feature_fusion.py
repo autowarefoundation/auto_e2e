@@ -33,8 +33,8 @@ class FeatureFusion(nn.Module):
             fusion_mode, num_views, embed_dim, **(view_fusion_kwargs or {})
         )
 
-    def forward(self, features, B, V, camera_params=None,
-                projection=None, geometry_type=None):
+    def forward(self, features, B, V, projection=None, geometry_type=None,
+                image_transform=None):
         # features: list of 4 multi-scale feature maps from backbone (channels-first)
         for i in range(0, len(features)):
             features[i] = self.pool(features[i])
@@ -44,13 +44,13 @@ class FeatureFusion(nn.Module):
         fused_per_view = self.channel_proj(fused_per_view)
 
         # Unify across views. BEV fusion output spatial size is (bev_h, bev_w).
-        # Geometry (camera_params / projection operator / geometry_type) is
+        # Geometry (projection operator / geometry_type / image_transform) is
         # passed straight through — FeatureFusion does not interpret it.
         fused = self.view_fusion(
             fused_per_view, B, V,
-            camera_params=camera_params,
             projection=projection,
             geometry_type=geometry_type,
+            image_transform=image_transform,
         )
 
         return fused
