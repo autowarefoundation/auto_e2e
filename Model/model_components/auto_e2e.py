@@ -34,21 +34,15 @@ class AutoE2E(nn.Module):
         """
         Run the full autonomous-driving pipeline.
 
-        The first return value's meaning depends on ``mode`` but is uniform
-        across all planners (GRU, Flow Matching, ...):
-
-        * ``mode="train"``: returns ``(planner_loss, ego_hidden, future)``
-          where ``planner_loss`` is a SCALAR — not a trajectory. The
-          planner-specific objective (imitation MSE for GRU,
-          flow-matching velocity MSE for Flow Matching) is computed
-          inside the planner so a training loop never has to know which
-          decoder is active. ``trajectory_target`` is required.
-        * any other ``mode`` (e.g. ``"infer"``): returns
-          ``(trajectory, ego_hidden, None)`` where ``trajectory`` is
-          ``[B, num_timesteps * num_signals]``.
+        Returns a single trajectory tensor ``[B, num_timesteps * num_signals]``
+        (the pre-#94 3-tuple return was removed when the planner interface was
+        simplified). ``mode`` and ``trajectory_target`` are threaded through for
+        forward-compatibility with a future train-time planner objective but are
+        currently inert in the default planner.
 
         Args:
-            camera_tiles: (B, V, 3, H, W) — V camera images (V=7 by default).
+            camera_tiles: (B, V, 3, H, W) — V real camera images (the nav-map is
+                a separate map_input, not a camera view).
             map_input: (B, 3, H_map, W_map) — BEV nav-map image.
             visual_history: (B, T, visual_history_dim) or (B, visual_history_dim).
             egomotion_history: (B, T, egomotion_dim) or (B, egomotion_dim).
@@ -57,12 +51,10 @@ class AutoE2E(nn.Module):
                 ABI; e.g. FThetaProjection for native fisheye).
             geometry_type: Optional explicit geometry label ("pinhole",
                 "rectified_pinhole", "ftheta", "pseudo") passed to BEV fusion.
-            mode: "train" to produce future_visual_features; anything else skips it.
+            mode: threaded through to the planner (currently inert by default).
 
         Returns:
             trajectory: (B, num_timesteps * num_signals)
-            ego_hidden: (B, embed_dim)
-            planner_loss: Used only when mode="train" during network training, otherwise set to None
         """
 
         ### Placeholder for self.World_Action_Model_E2E which processes a 1Hz or tunable 
