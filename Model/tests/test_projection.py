@@ -86,7 +86,12 @@ class TestPseudoProjection:
         assert (res.uv_norm >= 0).all() and (res.uv_norm <= 1).all()
 
     def test_gradient_flows_to_shared_matrix(self, device):
-        shared = torch.randn(3, 4, device=device, requires_grad=True)
+        # Seed deterministically: the pseudo path passes coords through sigmoid,
+        # whose gradient vanishes where it saturates, so an unseeded random draw
+        # can make d(sum)/d(shared) round to ~0 and flake. A small matrix keeps
+        # projected values near 0 (sigmoid's high-gradient region).
+        torch.manual_seed(0)
+        shared = (torch.randn(3, 4, device=device) * 0.05).requires_grad_(True)
         res = PseudoProjection(shared, num_views=4).project_ego_to_image(
             _homo(torch.randn(5, 3, device=device)), 256)
         res.uv_norm.sum().backward()
