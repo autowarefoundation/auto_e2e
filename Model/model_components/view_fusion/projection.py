@@ -1,24 +1,31 @@
 """Differentiable camera projection operators for BEV view fusion.
 
-The BEV fusion module's contract with geometry is NOT a fixed ``[B, V, 3, 4]``
+The contract of ``BEVViewFusion`` with geometry is NOT a fixed ``[B, V, 3, 4]``
 matrix. It is a *projection operator*: something that maps ego-frame BEV
-reference points to sampling coordinates plus a visibility mask on each camera's
-model-input image plane. A pinhole ``K @ T`` matrix is only ONE such operator
-(the linear fast path). Fisheye (f-theta) cameras need a non-linear operator,
-and a calibration-free run needs a learnable pseudo operator. All three expose
-the same :meth:`project` so ``BEVViewFusion`` never branches on camera model.
+reference points to sampling coordinates on each camera's model-input image
+plane, plus a visibility mask. A pinhole ``K @ T`` matrix is only ONE such
+operator (its linear fast path). Fisheye (f-theta) cameras need a non-linear
+operator, and a calibration-free run needs a learnable pseudo operator. All
+expose the same :meth:`project_ego_to_image` so the fusion module never branches
+on camera model.
 
-Coordinate convention (shared with :class:`BEVViewFusion`): reference points are
-in the ego/vehicle frame, X=forward, Y=left, Z=up, in metres. :meth:`project`
-returns pixel coordinates normalized to ``[0, 1]`` by ``image_size`` (the
-model-input image is square, produced by the shard packing / backbone
-transform), a visibility ``mask`` (in front of camera AND within image bounds),
-and the per-point ``depth`` for diagnostics.
+Design (per the Issue #77 discussion):
+    - The public contract is :class:`CameraProjectionModel`, not ``K @ T``. A
+      pinhole matrix lives *inside* :class:`PinholeProjection` as a fast path.
+    - Native fisheye is a first-class :class:`FThetaProjection`; we do not force
+      it through a pinhole (which would lose FOV). Rectification, when wanted, is
+      expressed as an :class:`ImageTransform` + a ``rectified_pinhole`` operator,
+      not by pretending a fisheye is a pinhole.
+    - Projection is defined against the *model-input* image frame, so the image
+      side (resize/crop/pad/rectification) is part of the contract via
+      :class:`ImageTransform` — a projection that is correct on the raw image but
+      not on the resized tensor would sample the wrong pixels.
 
-``geometry_type`` is an explicit, honest label of what geometry produced the
-result — "pinhole", "rectified_pinhole", "ftheta", or "pseudo". A caller that
-wants the calibration-free path must ASK for "pseudo"; the fusion module never
-silently invents geometry.
+Coordinate convention: reference points are in the ego/vehicle frame,
+X=forward, Y=left, Z=up, in metres. :meth:`project_ego_to_image` returns pixel
+coordinates normalized to ``[0, 1]`` by the model-input width/height, a
+visibility mask, the per-point depth/range, and a metadata dict recording the
+geometry that produced the result.
 
 Reference:
     - BEVFormer (Li et al., ECCV 2022): spatial cross-attention. Its essence is
@@ -31,8 +38,8 @@ Reference:
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Optional
+from dataclasses import dataclass, field
+from typing import Optional, Protocol, runtime_checkable
 
 import torch
 
@@ -54,6 +61,47 @@ VALID_GEOMETRY_TYPES = (
 _DEPTH_EPS = 1e-5
 
 
+@dataclass(frozen=True)
+class ImageTransform:
+    """Describes the model-input image frame a projection must target.
+
+    A projection is only useful if its pixel coordinates match the tensor that
+    actually enters the backbone. If the raw image was resized/cropped/padded (or
+    rectified from a fisheye), the projection's ``uv`` must be expressed in that
+    final frame. This dataclass carries the information needed to normalize
+    projected pixels into ``[0, 1]`` for ``grid_sample`` and to record, honestly,
+    what image-side processing was applied.
+
+    Attributes:
+        model_input_size: ``(width, height)`` of the tensor fed to the backbone.
+            uv is normalized by this (per-axis), so non-square inputs are handled.
+        original_size: ``(width, height)`` of the raw image, if known (metadata).
+        rectification: label of any rectification applied to the raw image before
+            the backbone (e.g. "ftheta_to_pinhole"), or None. Metadata/honesty
+            only; the geometry itself lives in the projection operator.
+    """
+
+    model_input_size: tuple[int, int]
+    original_size: Optional[tuple[int, int]] = None
+    rectification: Optional[str] = None
+
+    @classmethod
+    def square(cls, size: int) -> "ImageTransform":
+        """Convenience for the common square model input (e.g. 256x256 shards)."""
+        return cls(model_input_size=(int(size), int(size)))
+
+    @property
+    def wh(self) -> tuple[float, float]:
+        return float(self.model_input_size[0]), float(self.model_input_size[1])
+
+
+def _as_image_transform(image_transform) -> ImageTransform:
+    """Coerce a bare int/float (square size) into an :class:`ImageTransform`."""
+    if isinstance(image_transform, ImageTransform):
+        return image_transform
+    return ImageTransform.square(int(image_transform))
+
+
 @dataclass
 class ProjectionResult:
     """Output of projecting ego-frame reference points onto camera images.
@@ -70,46 +118,88 @@ class ProjectionResult:
         valid_mask: ``[Bp, V, M]`` bool — True where the point is in front of the
             camera AND lands within the image bounds.
         depth: ``[Bp, V, M]`` per-point depth/range along the optical axis
-            (metres for calibrated cameras). Kept for diagnostics and possible
-            future depth supervision; not required by the sampler.
+            (metres for calibrated cameras). Diagnostics / future depth
+            supervision; not required by the sampler.
+        metadata: what geometry produced this result (geometry_type,
+            model_input_size, rectification). Recorded so experiment logs are
+            honest about pinhole vs f-theta vs pseudo.
     """
 
     uv_norm: torch.Tensor
     valid_mask: torch.Tensor
     depth: Optional[torch.Tensor] = None
+    metadata: dict = field(default_factory=dict)
 
 
-def _finalize_pinhole(projected: torch.Tensor, image_size: float) -> ProjectionResult:
-    """Perspective-divide, normalize by ``image_size`` and build the mask.
+@runtime_checkable
+class CameraProjectionModel(Protocol):
+    """The BEV-fusion geometry contract: ego points -> image sampling coords.
 
-    Shared by :class:`PinholeProjection` and :class:`FThetaProjection`'s
-    rectified fallback. ``projected`` is ``[Bp, V, M, 3]`` = ``[u*d, v*d, d]``.
+    Implementations (:class:`PinholeProjection`, :class:`FThetaProjection`,
+    :class:`PseudoProjection`) differ only in the camera model; the fusion module
+    treats them uniformly.
     """
+
+    geometry_type: str
+
+    @property
+    def num_views(self) -> int:
+        ...
+
+    def project_ego_to_image(
+        self, points_ego: torch.Tensor, image_transform
+    ) -> ProjectionResult:
+        ...
+
+
+def _homogenize(points_ego: torch.Tensor) -> torch.Tensor:
+    """``[M, 3]`` ego points -> ``[M, 4]`` homogeneous (append a ones column)."""
+    if points_ego.shape[-1] == 4:
+        return points_ego  # already homogeneous
+    ones = torch.ones(
+        *points_ego.shape[:-1], 1, device=points_ego.device, dtype=points_ego.dtype
+    )
+    return torch.cat([points_ego, ones], dim=-1)
+
+
+def _finalize_linear(projected, image_transform, geometry_type) -> ProjectionResult:
+    """Perspective-divide, per-axis normalize by model-input size, build mask.
+
+    Shared by the pinhole fast path. ``projected`` is ``[Bp, V, M, 3]`` =
+    ``[u*d, v*d, d]`` in the model-input pixel frame.
+    """
+    it = _as_image_transform(image_transform)
+    w, h = it.wh
     depth = projected[..., 2]                         # [Bp, V, M]
     valid_depth = depth > _DEPTH_EPS                  # in front of the camera
     depth_safe = depth.clamp(min=_DEPTH_EPS).unsqueeze(-1)  # avoid div-by-zero
     uv = projected[..., :2] / depth_safe              # pixel coords [Bp, V, M, 2]
-    uv_norm = uv / image_size
+    wh = torch.tensor([w, h], device=uv.device, dtype=uv.dtype)
+    uv_norm = uv / wh
     in_bounds = (
         (uv_norm[..., 0] >= 0) & (uv_norm[..., 0] <= 1)
         & (uv_norm[..., 1] >= 0) & (uv_norm[..., 1] <= 1)
     )
     mask = valid_depth & in_bounds
-    return ProjectionResult(uv_norm=uv_norm, valid_mask=mask, depth=depth)
+    meta = {"geometry_type": geometry_type, "model_input_size": it.model_input_size,
+            "rectification": it.rectification}
+    return ProjectionResult(uv_norm=uv_norm, valid_mask=mask, depth=depth, metadata=meta)
 
 
 class PinholeProjection:
     """Linear ego-to-pixel projection: the ``K @ T`` fast path.
 
-    Wraps a combined ``[B, V, 3, 4]`` ego-to-pixel matrix (intrinsic @ extrinsic,
-    already scaled to the model-input image size by the dataset parser). This is
-    the operator that reproduces the historical ``camera_params`` behaviour, now
-    named for what it is. For a fisheye camera rectified to a pinhole model, pass
-    ``geometry_type="rectified_pinhole"`` so metadata stays honest about the FOV
-    loss that rectification implies.
+    Construct either from a combined ego-to-pixel matrix (``matrix`` =
+    ``intrinsic @ extrinsic``, ``[B, V, 3, 4]``, already scaled to the
+    model-input image) or from separate intrinsics ``K`` ``[B, V, 3, 3]`` and an
+    ego->camera transform ``T_camera_ego`` ``[B, V, 4, 4]`` via :meth:`from_KT`.
+    Keeping K and T separable lets a rectified fisheye be expressed as
+    ``PinholeProjection.from_KT(K_rectified, T, geometry_type="rectified_pinhole")``
+    instead of pretending a fisheye is a pinhole.
     """
 
-    def __init__(self, matrix: torch.Tensor, geometry_type: str = GEOMETRY_PINHOLE):
+    def __init__(self, matrix, geometry_type: str = GEOMETRY_PINHOLE,
+                 K=None, T_camera_ego=None):
         if matrix.dim() != 4 or matrix.shape[-2:] != (3, 4):
             raise ValueError(
                 f"PinholeProjection matrix must be [B, V, 3, 4], got {tuple(matrix.shape)}"
@@ -119,15 +209,36 @@ class PinholeProjection:
                 f"PinholeProjection geometry_type must be 'pinhole' or "
                 f"'rectified_pinhole', got {geometry_type!r}"
             )
-        self.matrix = matrix
+        self.matrix = matrix              # [B, V, 3, 4] combined (used by project)
+        self.K = K                        # [B, V, 3, 3] or None (introspection)
+        self.T_camera_ego = T_camera_ego  # [B, V, 4, 4] or None
         self.geometry_type = geometry_type
+
+    @classmethod
+    def from_KT(cls, K, T_camera_ego, geometry_type: str = GEOMETRY_PINHOLE):
+        """Build from separate intrinsics ``K`` [B,V,3,3] and ego->camera
+        transform ``T_camera_ego`` [B,V,4,4]; keeps both for introspection."""
+        if K.dim() != 4 or K.shape[-2:] != (3, 3):
+            raise ValueError(f"K must be [B, V, 3, 3], got {tuple(K.shape)}")
+        if T_camera_ego.dim() != 4 or T_camera_ego.shape[-2:] != (4, 4):
+            raise ValueError(
+                f"T_camera_ego must be [B, V, 4, 4], got {tuple(T_camera_ego.shape)}"
+            )
+        # matrix = K @ T[:, :, :3, :]  -> [B, V, 3, 4]
+        matrix = torch.einsum("bvij,bvjk->bvik", K, T_camera_ego[:, :, :3, :])
+        return cls(matrix, geometry_type=geometry_type, K=K, T_camera_ego=T_camera_ego)
 
     @property
     def num_views(self) -> int:
         return self.matrix.shape[1]
 
     def to(self, device) -> "PinholeProjection":
-        return PinholeProjection(self.matrix.to(device), geometry_type=self.geometry_type)
+        def _mv(x):
+            return x.to(device) if torch.is_tensor(x) else x
+        return PinholeProjection(
+            self.matrix.to(device), geometry_type=self.geometry_type,
+            K=_mv(self.K), T_camera_ego=_mv(self.T_camera_ego),
+        )
 
     def to_spec(self) -> dict:
         """Serialize to a JSON-able manifest spec (batch dim dropped)."""
@@ -136,17 +247,14 @@ class PinholeProjection:
             "matrix": self.matrix[0].detach().cpu().tolist(),  # [V, 3, 4]
         }
 
-    def project(self, points_ego_homo: torch.Tensor, image_size: float) -> ProjectionResult:
-        """Project homogeneous ego points ``[M, 4]`` onto each camera.
-
-        Returns coords/mask shaped ``[B, V, M, ...]`` where ``B, V`` come from
-        the projection matrix — this is where runtime ``V`` is derived, not from
-        any construction-time ``num_views``.
-        """
-        proj = self.matrix.to(points_ego_homo.dtype)
+    def project_ego_to_image(self, points_ego, image_transform) -> ProjectionResult:
+        """Project ego points ``[M, 3]`` (or homogeneous ``[M, 4]``) onto each
+        camera. ``B, V`` come from the matrix — runtime ``V`` is derived here."""
+        pts = _homogenize(points_ego)
+        proj = self.matrix.to(pts.dtype)
         # out[b, v, m, i] = sum_j proj[b, v, i, j] * points[m, j]
-        projected = torch.einsum("bvij,mj->bvmi", proj, points_ego_homo)
-        return _finalize_pinhole(projected, image_size)
+        projected = torch.einsum("bvij,mj->bvmi", proj, pts)
+        return _finalize_linear(projected, image_transform, self.geometry_type)
 
 
 class PseudoProjection:
@@ -156,19 +264,17 @@ class PseudoProjection:
     module run without calibration. A single shared ``[3, 4]`` matrix is expanded
     to ``V`` views at projection time, so one instance serves any view count.
     Pixel coordinates are squashed with ``sigmoid`` (the raw matrix is unbounded)
-    rather than divided by ``image_size``.
+    rather than normalized by the model-input size.
 
-    The learnable tensor is owned by :class:`BEVViewFusion` (so it is a leaf on
-    the module and the optimizer sees it); this operator just wraps it per
-    forward. Callers must explicitly request ``geometry_type="pseudo"`` — the
-    fusion module does not fall into this path silently on behalf of a caller
-    that meant to pass real calibration.
+    The learnable tensor is owned by :class:`BEVViewFusion` (a leaf Parameter, so
+    the optimizer sees it); this operator wraps it per forward. Callers must
+    explicitly request the pseudo path — the fusion module never falls into it
+    silently on behalf of a caller that meant to pass real calibration.
     """
 
     geometry_type = GEOMETRY_PSEUDO
 
     def __init__(self, matrix: torch.Tensor, num_views: int):
-        # matrix: shared [3, 4] learnable prior (a leaf Parameter owned upstream).
         # Accept exactly [3, 4] or a leading-1 [1, 3, 4]; anything else (e.g. a
         # per-view [V, 3, 4]) is a misuse — the prior is view-independent — and
         # would silently mis-reshape, so reject it explicitly.
@@ -180,13 +286,14 @@ class PseudoProjection:
         self.matrix = matrix
         self.num_views = num_views
 
-    def project(self, points_ego_homo: torch.Tensor, image_size: float) -> ProjectionResult:
+    def project_ego_to_image(self, points_ego, image_transform) -> ProjectionResult:
+        pts = _homogenize(points_ego)
         # Expand the shared [3, 4] prior to [1, V, 3, 4]: batch dim 1 broadcasts
-        # across the real batch in the sampling loop (the prior is batch- and
+        # across the real batch in the sampling loop (prior is batch- and
         # view-independent by construction).
         proj = self.matrix.reshape(3, 4).unsqueeze(0).unsqueeze(0)  # [1, 1, 3, 4]
-        proj = proj.expand(1, self.num_views, 3, 4).to(points_ego_homo.dtype)
-        projected = torch.einsum("bvij,mj->bvmi", proj, points_ego_homo)  # [1, V, M, 3]
+        proj = proj.expand(1, self.num_views, 3, 4).to(pts.dtype)
+        projected = torch.einsum("bvij,mj->bvmi", proj, pts)  # [1, V, M, 3]
 
         depth = projected[..., 2]
         valid_depth = depth > _DEPTH_EPS
@@ -195,8 +302,11 @@ class PseudoProjection:
         # Unbounded pseudo outputs → sigmoid to keep coords in (0, 1). in-bounds
         # is then trivially satisfied, so the mask reduces to the depth check.
         uv_norm = uv.sigmoid()
-        mask = valid_depth
-        return ProjectionResult(uv_norm=uv_norm, valid_mask=mask, depth=depth)
+        it = _as_image_transform(image_transform)
+        meta = {"geometry_type": self.geometry_type,
+                "model_input_size": it.model_input_size, "rectification": None}
+        return ProjectionResult(uv_norm=uv_norm, valid_mask=valid_depth,
+                                depth=depth, metadata=meta)
 
 
 class FThetaProjection:
@@ -210,21 +320,23 @@ class FThetaProjection:
         r(theta) = c0 + c1*theta + c2*theta^2 + ...
         u = cx + r * (x_cam / rho),  v = cy + r * (y_cam / rho)
 
-    where ``rho = sqrt(x_cam^2 + y_cam^2)``. This matches the SDK's
-    ``FThetaCameraModel.ray2pixel`` family.
+    where ``rho = sqrt(x_cam^2 + y_cam^2)``. Matches the SDK's
+    ``FThetaCameraModel.ray2pixel``.
 
     Parameters (all pre-scaled to the model-input image by the parser):
         t_camera_ego: ``[B, V, 4, 4]`` ego->camera rigid transform.
         fw_poly: ``[K]`` or ``[B, V, K]`` forward polynomial coefficients
             (ascending powers of theta), radius in pixels.
         cx, cy: principal point in pixels, scalar or ``[B, V]``.
-        max_theta: optional incidence-angle cutoff (radians); points beyond it
-            are masked out (outside the lens FOV).
+        max_theta: incidence-angle FOV cutoff (radians); the upper bound of the
+            valid theta range. Points beyond it are masked (outside the lens).
+        bw_poly: optional backward polynomial (radius -> theta) for inverse/remap
+            (e.g. rectification); not used by the forward projection.
     """
 
     geometry_type = GEOMETRY_FTHETA
 
-    def __init__(self, t_camera_ego, fw_poly, cx, cy, max_theta=None):
+    def __init__(self, t_camera_ego, fw_poly, cx, cy, max_theta=None, bw_poly=None):
         if t_camera_ego.dim() != 4 or t_camera_ego.shape[-2:] != (4, 4):
             raise ValueError(
                 f"FThetaProjection t_camera_ego must be [B, V, 4, 4], "
@@ -234,7 +346,8 @@ class FThetaProjection:
         self.fw_poly = fw_poly
         self.cx = cx
         self.cy = cy
-        self.max_theta = max_theta
+        self.max_theta = max_theta   # upper bound of the valid theta range (FOV)
+        self.bw_poly = bw_poly       # radius -> theta, for inverse/remap only
 
     @property
     def num_views(self) -> int:
@@ -246,6 +359,7 @@ class FThetaProjection:
         return FThetaProjection(
             self.t_camera_ego.to(device), _mv(self.fw_poly),
             _mv(self.cx), _mv(self.cy), max_theta=_mv(self.max_theta),
+            bw_poly=_mv(self.bw_poly),
         )
 
     def to_spec(self) -> dict:
@@ -269,9 +383,8 @@ class FThetaProjection:
         """
         coeffs = self.fw_poly.to(theta.dtype)
         if coeffs.dim() == 1:
-            powers = coeffs  # [K]
             r = torch.zeros_like(theta)
-            for c in reversed(powers.unbind(0)):
+            for c in reversed(coeffs.unbind(0)):
                 r = r * theta + c
             return r
         # per-view [B, V, K] -> Horner over the last dim, broadcasting on M.
@@ -281,10 +394,13 @@ class FThetaProjection:
             r = r * theta + coeffs[..., k]
         return r
 
-    def project(self, points_ego_homo: torch.Tensor, image_size: float) -> ProjectionResult:
-        T = self.t_camera_ego.to(points_ego_homo.dtype)
+    def project_ego_to_image(self, points_ego, image_transform) -> ProjectionResult:
+        pts = _homogenize(points_ego)
+        it = _as_image_transform(image_transform)
+        w, h = it.wh
+        T = self.t_camera_ego.to(pts.dtype)
         # camera-frame points: [B, V, M, 4] then drop homogeneous w.
-        cam = torch.einsum("bvij,mj->bvmi", T, points_ego_homo)[..., :3]
+        cam = torch.einsum("bvij,mj->bvmi", T, pts)[..., :3]
         x, y, z = cam[..., 0], cam[..., 1], cam[..., 2]
         rho = torch.sqrt(x * x + y * y).clamp(min=_DEPTH_EPS)
         theta = torch.atan2(rho, z)                     # incidence angle from +Z
@@ -296,7 +412,7 @@ class FThetaProjection:
             cy = cy.unsqueeze(-1)
         u = cx + r * (x / rho)
         v = cy + r * (y / rho)
-        uv_norm = torch.stack([u, v], dim=-1) / image_size
+        uv_norm = torch.stack([u / w, v / h], dim=-1)
 
         depth = z                                       # optical-axis depth
         in_bounds = (
@@ -315,4 +431,6 @@ class FThetaProjection:
             mask = in_bounds & (theta <= max_theta)
         else:
             mask = in_bounds & (z > _DEPTH_EPS)
-        return ProjectionResult(uv_norm=uv_norm, valid_mask=mask, depth=depth)
+        meta = {"geometry_type": self.geometry_type,
+                "model_input_size": it.model_input_size, "rectification": it.rectification}
+        return ProjectionResult(uv_norm=uv_norm, valid_mask=mask, depth=depth, metadata=meta)
