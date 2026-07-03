@@ -85,20 +85,19 @@ def _select_shard_dir(shards, dataset) -> str:
     return fallback
 
 
-def _batch_geometry(batch, device):
-    """Extract (map_input, camera_params, geometry_type) from a loader batch.
+def _loader_projection(loader, device):
+    """Return the loader's per-dataset projection operator on ``device``.
 
-    The pre-extracted loader emits map_input (real nav-map or zeros) and, when
-    the dataset shipped calibration, a [B, V, 3, 4] camera_params. If no
-    calibration is present we run the explicit pseudo geometry path — never
-    silently claiming real geometry. map_input always exists (zeros fallback).
+    Geometry is a rig constant exposed on the loader (``.projection`` /
+    ``.geometry_type``) by make_pre_extracted_loader, not per batch. Datasets
+    without calibration expose ``projection=None`` + ``geometry_type='pseudo'``,
+    so we run the explicit pseudo path — never a silent real-geometry claim.
     """
-    import torch
-    map_input = batch["map_input"].to(device)
-    cam = batch.get("camera_params")
-    if cam is not None:
-        return map_input, cam.to(device), "pinhole"
-    return map_input, None, "pseudo"
+    projection = getattr(loader, "projection", None)
+    geometry_type = getattr(loader, "geometry_type", "pseudo")
+    if projection is not None:
+        projection = projection.to(device)
+    return projection, geometry_type
 
 
 # ============================================================
@@ -361,6 +360,8 @@ def train_il(
 
     # DataLoader
     loader = make_pre_extracted_loader(shard_dir, batch_size=batch_size, num_workers=0)
+    projection, geometry_type = _loader_projection(loader, device)
+    print(f"Geometry: {geometry_type} (projection={'real' if projection else 'pseudo'})")
 
     # Detect num_views from the data so the model matches the dataset.
     _peek = next(iter(loader))
@@ -392,12 +393,12 @@ def train_il(
             ego_hist = batch["egomotion_history"].to(device)  # (B, 256)
             vis_hist = batch["visual_history"].to(device)     # (B, 896)
             target = batch["trajectory_target"].to(device)    # (B, 128)
-            map_input, camera_params, geom = _batch_geometry(batch, device)
+            map_input = batch["map_input"].to(device)
 
             optimizer.zero_grad()
             with torch.amp.autocast("cuda", enabled=amp):
                 pred = model(visual, map_input, vis_hist, ego_hist,
-                             camera_params=camera_params, geometry_type=geom,
+                             projection=projection, geometry_type=geometry_type,
                              mode="train", trajectory_target=target)
                 loss = loss_fn(pred, target)
 
@@ -488,6 +489,7 @@ def train_offline_rl(
     model.load_state_dict(ckpt["model_state_dict"])
 
     loader = make_pre_extracted_loader(shard_dir, batch_size=4, num_workers=0)
+    projection, geometry_type = _loader_projection(loader, device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=3e-5, weight_decay=1e-3)
 
     # Simplified IQL-style training
@@ -500,16 +502,16 @@ def train_offline_rl(
             ego_hist = batch["egomotion_history"].to(device)
             vis_hist = batch["visual_history"].to(device)
             target = batch["trajectory_target"].to(device)
-            map_input, camera_params, geom = _batch_geometry(batch, device)
+            map_input = batch["map_input"].to(device)
 
             optimizer.zero_grad()
             pred = model(visual, map_input, vis_hist, ego_hist,
-                         camera_params=camera_params, geometry_type=geom,
+                         projection=projection, geometry_type=geometry_type,
                          mode="train", trajectory_target=target)
             # IQL advantage-weighted regression
             with torch.no_grad():
                 baseline_pred = model(visual, map_input, vis_hist, ego_hist,
-                                      camera_params=camera_params, geometry_type=geom,
+                                      projection=projection, geometry_type=geometry_type,
                                       mode="infer")
             advantage = -(pred - target).pow(2).mean(dim=-1) + (baseline_pred - target).pow(2).mean(dim=-1)
             weights = torch.exp(beta * advantage).clamp(max=100.0)
@@ -580,6 +582,7 @@ def _run_evaluation(checkpoint, shards, train_metadata, dataset, experiment_name
 
     # Evaluate
     loader = make_pre_extracted_loader(shard_dir, batch_size=8, num_workers=0, shuffle=0)
+    projection, geometry_type = _loader_projection(loader, device)
     all_ade, all_fde = [], []
 
     with torch.no_grad():
@@ -588,10 +591,10 @@ def _run_evaluation(checkpoint, shards, train_metadata, dataset, experiment_name
             ego_hist = batch["egomotion_history"].to(device)
             vis_hist = batch["visual_history"].to(device)
             target = batch["trajectory_target"]  # (B, 128) on CPU
-            map_input, camera_params, geom = _batch_geometry(batch, device)
+            map_input = batch["map_input"].to(device)
 
             pred = model(visual, map_input, vis_hist, ego_hist,
-                         camera_params=camera_params, geometry_type=geom, mode="infer")
+                         projection=projection, geometry_type=geometry_type, mode="infer")
             pred = pred.cpu().numpy()  # (B, 128)
             target_np = target.numpy()
 
