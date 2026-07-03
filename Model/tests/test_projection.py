@@ -132,6 +132,23 @@ class TestFThetaProjection:
         res = proj.project(_homo(torch.tensor([[0.0, 0.0, -5.0]], device=device)), 256)
         assert not res.valid_mask.any()
 
+    def test_wide_fov_admits_rays_beyond_hemisphere(self, device):
+        """With max_theta > 90 deg, a ray with z < 0 (theta > 90 deg) must be
+        admissible — the native fisheye must NOT be capped at a 180 deg FOV."""
+        T = self._identity_transform(device)
+        # small radius so the wide ray still lands inside the image bounds.
+        fw_poly = torch.tensor([0.0, 20.0], device=device)
+        # ~100 deg FOV half-angle; a ray at theta ~ 95 deg has z < 0.
+        proj = FThetaProjection(T, fw_poly, cx=128.0, cy=128.0, max_theta=1.8)
+        # x large, z slightly negative -> theta = atan2(rho, z) in (90, 180) deg.
+        res = proj.project(_homo(torch.tensor([[1.0, 0.0, -0.05]], device=device)), 256)
+        assert res.valid_mask.any(), \
+            "max_theta fisheye wrongly rejected a valid ray past the +Z hemisphere"
+        # and the same ray is rejected once it exceeds the FOV cap.
+        narrow = FThetaProjection(T, fw_poly, cx=128.0, cy=128.0, max_theta=1.0)
+        res2 = narrow.project(_homo(torch.tensor([[1.0, 0.0, -0.05]], device=device)), 256)
+        assert not res2.valid_mask.any(), "ray beyond max_theta should be masked"
+
     def test_rejects_bad_transform_shape(self):
         with pytest.raises(ValueError, match="4, 4"):
             FThetaProjection(torch.randn(1, 1, 3, 4), torch.tensor([0.0, 1.0]), 1.0, 1.0)
