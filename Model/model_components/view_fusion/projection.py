@@ -487,7 +487,13 @@ class FThetaProjection:
                 max_theta = max_theta.reshape(1, -1)   # [V] -> [1, V]
             if max_theta.dim() > 0:
                 max_theta = max_theta.unsqueeze(-1)    # [B, V] -> [B, V, 1]
-            mask = in_bounds & (theta <= max_theta)
+            # A non-finite (inf) per-view bound means "this lens has no FOV bound"
+            # — it must fall back to the +Z hemisphere gate, NOT accept everything
+            # (theta <= inf is always true, which would wrongly admit rays from
+            # BEHIND that lens in a mixed rig). Apply the angle gate per-view.
+            angle_ok = torch.where(torch.isfinite(max_theta),
+                                   theta <= max_theta, z > _DEPTH_EPS)
+            mask = in_bounds & angle_ok
         else:
             mask = in_bounds & (z > _DEPTH_EPS)
         meta = {"geometry_type": self.geometry_type,
