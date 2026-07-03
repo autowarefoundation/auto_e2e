@@ -169,9 +169,13 @@ class PseudoProjection:
 
     def __init__(self, matrix: torch.Tensor, num_views: int):
         # matrix: shared [3, 4] learnable prior (a leaf Parameter owned upstream).
-        if matrix.shape[-2:] != (3, 4):
+        # Accept exactly [3, 4] or a leading-1 [1, 3, 4]; anything else (e.g. a
+        # per-view [V, 3, 4]) is a misuse — the prior is view-independent — and
+        # would silently mis-reshape, so reject it explicitly.
+        if tuple(matrix.shape) not in ((3, 4), (1, 3, 4)):
             raise ValueError(
-                f"PseudoProjection matrix must end in [3, 4], got {tuple(matrix.shape)}"
+                f"PseudoProjection matrix must be [3, 4] or [1, 3, 4], "
+                f"got {tuple(matrix.shape)}"
             )
         self.matrix = matrix
         self.num_views = num_views
