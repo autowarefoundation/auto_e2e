@@ -7,6 +7,7 @@ import torch.nn.functional as F
 from .projection import (
     GEOMETRY_PSEUDO,
     VALID_GEOMETRY_TYPES,
+    ImageTransform,
     PinholeProjection,
     PseudoProjection,
 )
@@ -38,37 +39,23 @@ class BEVViewFusion(nn.Module):
     a functional BEV fusion module suitable for experimentation and as a
     foundation for a full BEVFormer-style implementation.
 
-    Camera Parameters Convention:
-        camera_params: [B, num_views, 3, 4] matrices that project
-        homogeneous 3D ego/vehicle-frame coordinates to 2D pixel coordinates.
+    Geometry contract:
+        Geometry is a projection OPERATOR (see ``projection.py``), not a fixed
+        ``[B, V, 3, 4]`` matrix. ``forward`` takes a ``projection``
+        (:class:`CameraProjectionModel`) that maps ego-frame BEV reference points
+        (X=forward, Y=left, Z=up, metres) to normalized sampling coordinates plus
+        a visibility mask on each camera's model-input image plane:
 
-        Expected to be: intrinsic @ extrinsic (ego-to-pixel)
-        - extrinsic: [3, 4] or [4, 4] ego/vehicle-frame-to-camera transform
-        - intrinsic: [3, 3] camera matrix (focal length, principal point)
-        - Combined: [3, 4] = intrinsic @ extrinsic[:3, :]
+        - :class:`PinholeProjection` — the linear ``K @ T`` fast path.
+        - :class:`FThetaProjection` — native fisheye (no rectification/FOV loss).
+        - :class:`PseudoProjection` — learnable calibration-free prior; NOT real
+          geometry. Requested explicitly via ``geometry_type="pseudo"``; the
+          module never falls into it on behalf of a caller that meant to pass
+          real calibration.
 
-        The BEV reference points are defined in ego/vehicle frame (centered
-        on the vehicle, X=forward, Y=left, Z=up). camera_params must
-        transform these ego-frame coordinates to pixel coordinates.
-
-        Output of projection: [u, v, depth] in pixel coordinates where
-        - u: horizontal pixel (0 to image_width)
-        - v: vertical pixel (0 to image_height)
-        - depth: distance along camera optical axis (positive = in front)
-
-        The module normalizes pixel coords to [0, 1] using the provided
-        image_size parameter (default: 256, matching square input resolution).
-
-        Geometry is supplied to ``forward`` as a projection operator (see
-        ``projection.py``): pass a ``[B, V, 3, 4]`` ``camera_params`` matrix
-        (wrapped as a :class:`PinholeProjection`), or a pre-built ``projection``
-        operator (e.g. :class:`FThetaProjection` for native fisheye), or request
-        the calibration-free path explicitly with ``geometry_type="pseudo"``.
-        The pseudo path uses a learnable ``pseudo_projection`` prior; it does NOT
-        learn true camera geometry — it is a fixed learned spatial prior for
-        sampling locations. For meaningful BEV projection, real calibration is
-        required, and the fusion module never falls into the pseudo path on
-        behalf of a caller that meant to pass real calibration.
+        There is no ``camera_params`` matrix argument on ``forward`` — a pinhole
+        matrix is constructed by the caller as ``PinholeProjection(matrix)`` (or
+        ``PinholeProjection.from_KT(K, T)``) and passed as the operator.
 
         The module is runtime-``V``-dynamic: one instance consumes batches of any
         camera count. ``num_views`` only sizes the default pseudo-prior expansion
@@ -92,6 +79,10 @@ class BEVViewFusion(nn.Module):
         self.num_points_in_pillar = num_points_in_pillar
         self.pc_range = pc_range
         self.image_size = image_size
+        # Model-input image frame the projection targets. A square shard/backbone
+        # input is the common case; a caller can override per forward with a
+        # non-square ImageTransform without changing the module.
+        self.image_transform = ImageTransform.square(image_size)
         _validate_offset_scale(offset_scale)
         self.offset_scale = offset_scale
 
@@ -101,7 +92,7 @@ class BEVViewFusion(nn.Module):
         # Fallback for testing/ablation when camera calibration is unavailable.
         # This is NOT a substitute for real camera geometry — it provides a
         # fixed learned spatial prior that allows the module to run without
-        # calibration data. For production use, pass real camera_params.
+        # calibration data. For production use, pass a real projection operator.
         #
         # A single shared [3, 4] prior, expanded to V views at projection time
         # (see PseudoProjection), so one instance serves ANY view count. Kept as
@@ -176,21 +167,17 @@ class BEVViewFusion(nn.Module):
         return ref_homo.reshape(-1, 4)                   # [N*num_z, 4]
 
     def _project_to_2d(self, reference_points_3d, camera_params=None):
-        """Project 3D reference points to normalized 2D coordinates on each camera.
+        """Project reference points to 2D — a test-only convenience wrapper.
 
-        Backward-compatible convenience wrapper: a ``[B, V, 3, 4]``
-        ``camera_params`` matrix is treated as a :class:`PinholeProjection`, and
-        ``None`` uses the learnable pseudo prior. New code should prefer passing
-        a projection operator via :meth:`_project_operator`.
-
-        Args:
-            reference_points_3d: [N, num_z, 3] normalized 3D points in [0, 1]
-            camera_params: [B, V, 3, 4] ego-to-pixel projection matrices.
-                If None, uses pseudo_projection fallback (testing/ablation only).
+        NOT part of the public ABI (the public geometry contract is a projection
+        operator, see :meth:`forward`). A ``[B, V, 3, 4]`` ``camera_params``
+        matrix is treated as a :class:`PinholeProjection`; ``None`` uses the
+        pseudo prior. Kept because several unit tests probe the projection math
+        directly with a raw matrix.
 
         Returns:
-            ref_2d: [B, V, N, num_z, 2] coordinates in [0, 1] range
-            mask: [B, V, N, num_z] visibility mask (depth > 0 AND 0 <= u,v <= 1)
+            ref_2d: [B, V, N, num_z, 2] normalized coords
+            mask: [B, V, N, num_z] visibility mask
         """
         if camera_params is not None:
             projection = PinholeProjection(camera_params)
@@ -198,47 +185,44 @@ class BEVViewFusion(nn.Module):
             projection = PseudoProjection(self.pseudo_projection, num_views=self.num_views)
         return self._project_operator(reference_points_3d, projection)
 
-    def _project_operator(self, reference_points_3d, projection):
+    def _project_operator(self, reference_points_3d, projection, image_transform=None):
         """Project reference points using a :class:`CameraProjectionModel`.
 
         ``V`` is derived from the operator (``projection.num_views``), never from
         the construction-time ``self.num_views`` — this is what makes the module
-        runtime-``V``-dynamic.
+        runtime-``V``-dynamic. Uses the module's default ``image_transform`` (the
+        model-input frame) unless one is supplied.
 
-        Returns ``(ref_2d, mask)`` reshaped to ``[Bp, V, N, num_z, ...]`` so the
-        sampling loop can index per view.
+        Returns ``(ref_2d, mask)`` reshaped to ``[Bp, V, N, num_z, ...]``.
         """
         N, num_z, _ = reference_points_3d.shape
         ref_homo = self._ego_reference_homo(reference_points_3d)  # [N*num_z, 4]
 
-        result = projection.project(ref_homo, self.image_size)
+        it = image_transform if image_transform is not None else self.image_transform
+        result = projection.project_ego_to_image(ref_homo, it)
         Bp, V = result.uv_norm.shape[0], result.uv_norm.shape[1]
 
         ref_2d = result.uv_norm.reshape(Bp, V, N, num_z, 2)
         mask = result.valid_mask.reshape(Bp, V, N, num_z)
         return ref_2d, mask
 
-    def _resolve_projection(self, camera_params, projection, geometry_type, V, B):
-        """Turn the (camera_params | projection | geometry_type) inputs into a
-        single projection operator, enforcing honest geometry.
+    def _resolve_projection(self, projection, geometry_type, V):
+        """Turn (projection | geometry_type) into a single projection operator,
+        enforcing honest geometry.
 
         Rules:
-          - `camera_params` and `projection` are mutually exclusive.
-          - a supplied operator/matrix must match the runtime view count V.
+          - a supplied operator must match the runtime view count V.
           - `geometry_type`, if given, must be a valid label and must agree with
-            the geometry actually supplied — you cannot label a pseudo run
-            "pinhole", and asking for "pseudo" while passing real calibration is
-            rejected. When no geometry is supplied at all, only "pseudo" (or
-            None) is allowed, so the calibration-free path is never entered on
-            behalf of a caller that meant to pass calibration.
+            the operator actually supplied — you cannot label a pseudo run
+            "pinhole". When no operator is supplied, only "pseudo" (or None) is
+            allowed, so the calibration-free path is never entered on behalf of a
+            caller that meant to pass real calibration.
         """
         if geometry_type is not None and geometry_type not in VALID_GEOMETRY_TYPES:
             raise ValueError(
                 f"Unknown geometry_type {geometry_type!r}; "
                 f"expected one of {VALID_GEOMETRY_TYPES}."
             )
-        if camera_params is not None and projection is not None:
-            raise ValueError("Pass at most one of camera_params or projection.")
 
         if projection is not None:
             if getattr(projection, "num_views", V) != V:
@@ -252,53 +236,34 @@ class BEVViewFusion(nn.Module):
                 )
             return projection
 
-        if camera_params is not None:
-            if camera_params.shape[1] != V:
-                raise ValueError(
-                    f"camera_params view dim ({camera_params.shape[1]}) != runtime V ({V})."
-                )
-            if camera_params.shape[0] not in (1, B):
-                raise ValueError(
-                    f"camera_params batch dim ({camera_params.shape[0]}) must be 1 "
-                    f"(shared rig, broadcast) or B ({B})."
-                )
-            if geometry_type == GEOMETRY_PSEUDO:
-                raise ValueError(
-                    "geometry_type='pseudo' but real camera_params were supplied; "
-                    "the pseudo path must not consume real calibration."
-                )
-            gt = geometry_type or "pinhole"
-            return PinholeProjection(camera_params, geometry_type=gt)
-
-        # No calibration supplied → calibration-free pseudo prior, but only if
-        # the caller did not claim real geometry.
+        # No operator supplied → calibration-free pseudo prior, but only if the
+        # caller did not claim real geometry.
         if geometry_type is not None and geometry_type != GEOMETRY_PSEUDO:
             raise ValueError(
-                f"geometry_type={geometry_type!r} requires calibration "
-                f"(camera_params or a projection operator), but none was given."
+                f"geometry_type={geometry_type!r} requires a projection operator, "
+                f"but none was given."
             )
         return PseudoProjection(self.pseudo_projection, num_views=V)
 
-    def forward(self, fused_per_view, B, V, camera_params=None,
-                projection=None, geometry_type=None):
+    def forward(self, fused_per_view, B, V, projection=None, geometry_type=None,
+                image_transform=None):
         """
         Args:
             fused_per_view: [B*V, C, H, W] multi-view image features
             B: batch size
             V: number of views (runtime; the module is V-dynamic)
-            camera_params: [B, V, 3, 4] ego-to-pixel pinhole matrices (intrinsic
-                @ extrinsic). Wrapped as a PinholeProjection. Mutually exclusive
-                with `projection`.
-            projection: a CameraProjectionModel (Pinhole / FTheta / Pseudo) to use
-                directly — the general geometry ABI. Its `num_views` must equal V.
+            projection: a CameraProjectionModel (Pinhole / FTheta / Pseudo) — the
+                general geometry ABI. Its `num_views` must equal V. This is the
+                public geometry contract; there is no `[B,V,3,4]` matrix argument
+                (a pinhole matrix lives inside PinholeProjection).
             geometry_type: optional explicit geometry label ("pinhole",
-                "rectified_pinhole", "ftheta", "pseudo"). If given it must be
-                consistent with the supplied geometry — the module never claims
-                real geometry without calibration, nor silently downgrades a
-                real-calibration request to the pseudo prior. When neither
-                `camera_params` nor `projection` is given, the calibration-free
-                pseudo prior is used (and `geometry_type`, if named, must be
-                "pseudo").
+                "rectified_pinhole", "ftheta", "pseudo"). Must be consistent with
+                the supplied operator; the module never claims real geometry
+                without an operator, nor silently downgrades to the pseudo prior.
+                When no `projection` is given, the pseudo prior is used (and
+                `geometry_type`, if named, must be "pseudo").
+            image_transform: optional ImageTransform describing the model-input
+                image frame; defaults to the module's square input.
 
         Returns:
             bev_features: [B, C, bev_h, bev_w] BEV representation
@@ -308,7 +273,7 @@ class BEVViewFusion(nn.Module):
         dtype = fused_per_view.dtype
 
         # --- 0. Resolve the projection operator (explicit, honest geometry) ---
-        proj_op = self._resolve_projection(camera_params, projection, geometry_type, V, B)
+        proj_op = self._resolve_projection(projection, geometry_type, V)
 
         # --- 1. Prepare BEV queries ---
         queries = self.bev_queries.weight.unsqueeze(0).expand(B, -1, -1)  # [B, N, C]
@@ -318,7 +283,7 @@ class BEVViewFusion(nn.Module):
         values = self.value_proj(feat)  # [B, V, H*W, C]
 
         # --- 3. Project 3D reference points to 2D ---
-        ref_2d, mask = self._project_operator(self.reference_points_3d, proj_op)
+        ref_2d, mask = self._project_operator(self.reference_points_3d, proj_op, image_transform)
         # ref_2d: [Bp, V, N, num_z, 2], mask: [Bp, V, N, num_z]
         # (Bp is B for calibrated cameras, 1 for the batch-independent pseudo
         #  prior — it broadcasts across the batch in the sampling loop below.)
