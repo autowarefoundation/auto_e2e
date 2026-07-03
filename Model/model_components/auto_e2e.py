@@ -39,10 +39,11 @@ class AutoE2E(nn.Module):
         if enable_world_model:
             wmk = dict(world_model_kwargs or {})
             history_len = wmk.pop("history_len", 4)
+            wmk.setdefault("view_aggregator", "attention")
             self.World_Action_Model_E2E = WorldActionModel(
                 backbone=self.Reactive_E2E.Backbone,
                 frame_embed_dim=visual_history_dim // history_len,
-                history_len=history_len, **wmk,
+                history_len=history_len, num_views=num_views, **wmk,
             )
             self.visual_history_buffer = RollingHistoryBuffer(history_len=history_len)
 
