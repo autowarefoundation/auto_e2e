@@ -129,6 +129,13 @@ class PinholeProjection:
     def to(self, device) -> "PinholeProjection":
         return PinholeProjection(self.matrix.to(device), geometry_type=self.geometry_type)
 
+    def to_spec(self) -> dict:
+        """Serialize to a JSON-able manifest spec (batch dim dropped)."""
+        return {
+            "type": self.geometry_type,
+            "matrix": self.matrix[0].detach().cpu().tolist(),  # [V, 3, 4]
+        }
+
     def project(self, points_ego_homo: torch.Tensor, image_size: float) -> ProjectionResult:
         """Project homogeneous ego points ``[M, 4]`` onto each camera.
 
@@ -236,6 +243,19 @@ class FThetaProjection:
             self.t_camera_ego.to(device), _mv(self.fw_poly),
             _mv(self.cx), _mv(self.cy), max_theta=self.max_theta,
         )
+
+    def to_spec(self) -> dict:
+        """Serialize to a JSON-able manifest spec (batch dim dropped)."""
+        def _l(x):
+            return x[0].detach().cpu().tolist() if torch.is_tensor(x) and x.dim() > 0 else x
+        return {
+            "type": self.geometry_type,
+            "t_camera_ego": self.t_camera_ego[0].detach().cpu().tolist(),  # [V,4,4]
+            "fw_poly": _l(self.fw_poly),                                   # [V,K]
+            "cx": _l(self.cx),                                             # [V]
+            "cy": _l(self.cy),                                             # [V]
+            "max_theta": self.max_theta,
+        }
 
     def _radius(self, theta: torch.Tensor) -> torch.Tensor:
         """Evaluate the forward polynomial r(theta) via Horner's method.
