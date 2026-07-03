@@ -1,4 +1,15 @@
 from .bev_fusion import BEVViewFusion
+from .projection import (
+    GEOMETRY_FTHETA,
+    GEOMETRY_PINHOLE,
+    GEOMETRY_PSEUDO,
+    GEOMETRY_RECTIFIED_PINHOLE,
+    VALID_GEOMETRY_TYPES,
+    FThetaProjection,
+    PinholeProjection,
+    ProjectionResult,
+    PseudoProjection,
+)
 
 FUSION_REGISTRY = {
     "bev": BEVViewFusion,
