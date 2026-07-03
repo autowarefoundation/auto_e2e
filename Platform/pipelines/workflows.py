@@ -298,15 +298,17 @@ def data_processing(
                 "num_views": int(visual.shape[0]) if sample_count else 0,
                 "has_map": bool(sample_count) and (map_tile is not None)}
 
-    # Per-dataset camera calibration (rig constant): scaled ego-to-pixel
-    # [V, 3, 4] matrices, stored once. NVIDIA/KITScenes provide real geometry;
+    # Per-dataset camera calibration (rig constant): a projection-operator spec
+    # stored once, scaled to image_size. NVIDIA/KITScenes provide real geometry;
     # L2D has no published intrinsics so it carries none (pseudo path). The
-    # dataset exposes this via a `camera_params` attribute when available.
-    cam_params = getattr(ds, "camera_params", None)
-    if cam_params is not None and sample_count:
-        cp = cam_params.cpu().numpy() if torch.is_tensor(cam_params) else np.asarray(cam_params)
-        manifest["camera_params"] = cp.astype(float).tolist()
-        manifest["geometry_type"] = getattr(ds, "geometry_type", "pinhole")
+    # dataset exposes a `projection_spec(image_size)` builder when available.
+    spec = None
+    build_spec = getattr(ds, "projection_spec", None)
+    if callable(build_spec) and sample_count:
+        spec = build_spec(image_size)
+    if spec is not None:
+        manifest["projection"] = spec
+        manifest["geometry_type"] = spec.get("type", "pinhole")
     else:
         manifest["geometry_type"] = "pseudo"
 
