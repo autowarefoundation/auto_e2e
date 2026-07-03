@@ -253,24 +253,26 @@ class TestFullPipelineRobustness:
         traj = model(visual, map_input, vis_hist, ego, mode="infer")
         assert torch.isfinite(traj).all(), "NaN/Inf in trajectory with zero inputs"
 
-    def test_camera_params_none_then_valid_switching(self, build_mock_model, device):
-        """A BEV-fusion model must accept both None and valid camera_params on the
-        same instance, producing finite and distinct outputs."""
+    def test_pseudo_then_real_projection_switching(self, build_mock_model, device):
+        """A BEV model must accept both the pseudo path and a real projection
+        operator on the same instance, producing finite and distinct outputs."""
+        from model_components.view_fusion import PinholeProjection
+
         model = build_mock_model(num_views=7, device=device)
         model.eval()
 
         visual, map_input, vis_hist, ego = make_inputs(1, 7, device)
 
-        traj_none = model(visual, map_input, vis_hist, ego, mode="infer",
-                          camera_params=None)
-        cam_params = torch.randn(1, 7, 3, 4, device=device)
-        traj_cam = model(visual, map_input, vis_hist, ego, mode="infer",
-                         camera_params=cam_params)
+        traj_pseudo = model(visual, map_input, vis_hist, ego, mode="infer",
+                            geometry_type="pseudo")
+        projection = PinholeProjection(torch.randn(1, 7, 3, 4, device=device))
+        traj_real = model(visual, map_input, vis_hist, ego, mode="infer",
+                          projection=projection)
 
-        assert torch.isfinite(traj_none).all(), "NaN/Inf with camera_params=None"
-        assert torch.isfinite(traj_cam).all(), "NaN/Inf with valid camera_params"
-        assert not torch.allclose(traj_none, traj_cam, atol=1e-5), \
-            "camera_params None vs valid produced identical outputs"
+        assert torch.isfinite(traj_pseudo).all(), "NaN/Inf on the pseudo path"
+        assert torch.isfinite(traj_real).all(), "NaN/Inf with a real projection"
+        assert not torch.allclose(traj_pseudo, traj_real, atol=1e-5), \
+            "pseudo vs real projection produced identical outputs"
 
     def test_batch_size_one_smoke(self, build_mock_model, device):
         """End-to-end forward must work at batch_size=1 with correct shape."""
