@@ -237,6 +237,29 @@ class TestFThetaProjection:
         with pytest.raises(ValueError, match="fw_poly"):
             proj.project_ego_to_image(_homo(torch.tensor([[0.0, 0.0, 5.0]], device=device)), 256)
 
+    def test_flu_ego_forward_maps_to_optical_center(self, device):
+        """The convention boundary that actually matters: an ego-FLU point on the
+        +X (forward) axis, pushed through the FLU->RDF (R_EGO_FLU_TO_CAM_OPT)
+        transform, must land at the optical center with depth>0 — i.e. ego
+        forward == camera +Z. Uses the SDK axis matrix, not identity T."""
+        from data_parsing.nvidia_physical_ai.calibration import R_EGO_FLU_TO_CAM_OPT
+
+        # t_camera_ego = FLU-ego -> camera-optical (RDF), no translation.
+        T = torch.eye(4, device=device)
+        T[:3, :3] = torch.tensor(R_EGO_FLU_TO_CAM_OPT, dtype=torch.float32, device=device)
+        T = T.reshape(1, 1, 4, 4)
+        # r(theta)=200*theta so an on-axis (theta=0) point lands exactly at (cx,cy).
+        fw_poly = torch.tensor([0.0, 200.0], device=device)
+        proj = FThetaProjection(T, fw_poly, cx=128.0, cy=128.0)
+        # ego-FLU point straight AHEAD: x=+5 (forward), y=0 (no left), z=0 (no up).
+        ego_forward = _homo(torch.tensor([[5.0, 0.0, 0.0]], device=device))
+        res = proj.project_ego_to_image(ego_forward, 256)
+        assert res.valid_mask[0, 0, 0], "ego-forward should be visible (depth>0)"
+        assert res.depth[0, 0, 0] > 0, "ego-forward must have positive camera depth"
+        assert torch.allclose(res.uv_norm[0, 0, 0],
+                              torch.tensor([0.5, 0.5], device=device), atol=1e-4), \
+            "ego-FLU forward must project to the optical center after FLU->RDF"
+
     def test_cpu_operator_projects_cuda_points(self, device):
         """A CPU operator must project CUDA points (params coerced to device)."""
         if device.type != "cuda":
@@ -247,3 +270,63 @@ class TestFThetaProjection:
         pts = _homo(torch.tensor([[0.0, 0.0, 5.0]], device=device))  # CUDA
         res = proj.project_ego_to_image(pts, 256)  # must not raise
         assert res.uv_norm.device.type == "cuda"
+
+
+class TestBuildFThetaFromCalibration:
+    """build_ftheta_projection wires native (W,H) and a real FOV bound (max_theta
+    from r2th) — points 1 & 4 of the reviewer's feedback."""
+
+    class _Model:
+        def __init__(self, w, h):
+            import numpy as np
+            self.width, self.height = w, h
+            self.principal_point = np.array([w / 2.0, h / 2.0])
+            # forward theta->radius and its inverse radius->theta, sized so the
+            # farthest image corner maps to a realistic FOV (< pi). For a 1920x1080
+            # frame the corner radius is ~1101 px; slope ~1/900 -> theta ~1.22 rad.
+            self.th2r = np.polynomial.Polynomial([0.0, 900.0])   # r = 900*theta
+            self.r2th = np.polynomial.Polynomial([0.0, 1 / 900.0])  # theta = r/900
+
+    class _Intr:
+        def __init__(self, models):
+            self.camera_models = models
+
+    class _Extr:
+        def __init__(self, poses):
+            self.sensor_poses = poses
+
+    def _pose(self):
+        import scipy.spatial.transform as spt
+        import numpy as np
+        return spt.RigidTransform.from_components(
+            rotation=spt.Rotation.identity(), translation=np.zeros(3))
+
+    def test_native_wh_and_max_theta_from_r2th(self):
+        pytest.importorskip("scipy")
+        from data_parsing.nvidia_physical_ai.calibration import build_ftheta_projection
+        # Non-square native frame: normalization must use native (W,H), not 256.
+        names = ["cam_a", "cam_b"]
+        models = {n: self._Model(1920, 1080) for n in names}
+        poses = {n: self._pose() for n in names}
+        proj = build_ftheta_projection(self._Intr(models), self._Extr(poses), names)
+        # image_wh carries the native size, per view.
+        assert tuple(proj.image_wh.shape) == (1, 2, 2)
+        assert float(proj.image_wh[0, 0, 0]) == 1920.0
+        assert float(proj.image_wh[0, 0, 1]) == 1080.0
+        # max_theta derived from r2th at the corner radius (finite, sane FOV).
+        assert proj.max_theta is not None
+        mt = proj.max_theta.reshape(-1)
+        assert (mt > 0).all() and (mt < 3.15).all()
+        # On-axis ego-forward projects to the principal point (0.5, 0.5) in the
+        # native frame regardless of the non-square aspect.
+        res = proj.project_ego_to_image(_homo(torch.tensor([[0.0, 0.0, 5.0]])), 256)
+        assert torch.allclose(res.uv_norm[0, 0, 0], torch.tensor([0.5, 0.5]), atol=1e-4)
+
+    def test_no_r2th_leaves_max_theta_none(self):
+        pytest.importorskip("scipy")
+        from data_parsing.nvidia_physical_ai.calibration import build_ftheta_projection
+        m = self._Model(800, 600)
+        del m.r2th  # lens without a backward polynomial -> no derivable FOV bound
+        proj = build_ftheta_projection(
+            self._Intr({"c": m}), self._Extr({"c": self._pose()}), ["c"])
+        assert proj.max_theta is None  # falls back to +Z hemisphere

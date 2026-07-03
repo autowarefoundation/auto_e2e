@@ -75,6 +75,13 @@ class TestManifestProjection:
         proj, geom = load_projection_from_manifest(str(tmp_path))
         assert proj is None and geom == "pseudo"
 
+    def test_corrupt_manifest_raises_not_pseudo(self, tmp_path):
+        """A present-but-unparseable manifest must RAISE, not silently degrade a
+        calibrated run to pseudo geometry (missing manifest is still pseudo)."""
+        (tmp_path / "manifest.json").write_text("{ this is not valid json ,,,")
+        with pytest.raises(ValueError, match="could not be parsed"):
+            load_projection_from_manifest(str(tmp_path))
+
     def test_pinhole_roundtrip(self, tmp_path):
         matrix = torch.randn(4, 3, 4)
         spec = {"type": "pinhole", "matrix": matrix.tolist()}
@@ -93,6 +100,7 @@ class TestManifestProjection:
             "fw_poly": [[0.0, 200.0]] * V,
             "cx": [128.0] * V,
             "cy": [128.0] * V,
+            "image_wh": [[256.0, 256.0]] * V,
             "max_theta": None,
         }
         (tmp_path / "manifest.json").write_text(json.dumps({
@@ -155,6 +163,7 @@ class TestManifestProjection:
             "t_camera_ego": torch.eye(4).reshape(1, 4, 4).expand(2, 4, 4).tolist(),
             "fw_poly": [[0.0, 200.0]] * 2,
             "cx": [128.0] * 2, "cy": [128.0] * 2,
+            "image_wh": [[256.0, 256.0]] * 2,
             "max_theta": [1.5, 1.8],  # per-view list
         }
         (tmp_path / "manifest.json").write_text(json.dumps({
