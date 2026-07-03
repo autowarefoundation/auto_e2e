@@ -295,12 +295,17 @@ class FThetaProjection:
         uv_norm = torch.stack([u, v], dim=-1) / image_size
 
         depth = z                                       # optical-axis depth
-        valid_depth = z > _DEPTH_EPS
         in_bounds = (
             (uv_norm[..., 0] >= 0) & (uv_norm[..., 0] <= 1)
             & (uv_norm[..., 1] >= 0) & (uv_norm[..., 1] <= 1)
         )
-        mask = valid_depth & in_bounds
+        # A fisheye sees rays beyond the +Z hemisphere (theta up to its real FOV,
+        # which can exceed 90°), so do NOT gate on z > 0 — that would reimpose a
+        # 180° ceiling and defeat the native f-theta operator. Gate on the lens
+        # FOV (max_theta) when known; otherwise fall back to the +Z hemisphere as
+        # a safe default (we cannot validate arbitrary wide rays without a bound).
         if self.max_theta is not None:
-            mask = mask & (theta <= self.max_theta)
+            mask = in_bounds & (theta <= self.max_theta)
+        else:
+            mask = in_bounds & (z > _DEPTH_EPS)
         return ProjectionResult(uv_norm=uv_norm, valid_mask=mask, depth=depth)
