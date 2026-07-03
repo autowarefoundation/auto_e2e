@@ -58,6 +58,43 @@ def test_frame_encoder_shape(device):
     assert enc(_frame(2, device)).shape == (2, 224)
 
 
+def test_frame_encoder_view_aggregators(device):
+    # test default (attention)
+    enc_attn = FrameEncoder(_MockBackbone(), feature_channels=CH,
+                            frame_embed_dim=224).to(device)
+    assert enc_attn.view_aggregator == "attention"
+    assert hasattr(enc_attn, "view_pool")
+    assert enc_attn(_window(2, 6, device)).shape == (2, 224)
+    
+    # test mean
+    enc_mean = FrameEncoder(_MockBackbone(), feature_channels=CH,
+                            frame_embed_dim=224, view_aggregator="mean").to(device)
+    assert enc_mean.view_aggregator == "mean"
+    assert not hasattr(enc_mean, "view_pool")
+    assert enc_mean(_window(2, 6, device)).shape == (2, 224)
+
+
+def test_world_action_model_view_aggregator(device, caplog):
+    m_mean = _wam(device, view_aggregator="mean")
+    assert m_mean.encoder.view_aggregator == "mean"
+    
+    m_attn = _wam(device, view_aggregator="attention")
+    assert m_attn.encoder.view_aggregator == "attention"
+    assert m_attn.encoder.view_pool.view_embed.shape[1] > 0
+
+    # test custom num_views configuration
+    m_attn_6 = _wam(device, view_aggregator="attention", num_views=6)
+    assert m_attn_6.encoder.view_pool.view_embed.shape[1] == 6
+
+    # test fallback warning when num_views=1 and view_aggregator="attention"
+    import logging
+    with caplog.at_level(logging.WARNING):
+        m_attn_1 = _wam(device, view_aggregator="attention", num_views=1)
+    assert any("num_views is 1" in record.message for record in caplog.records)
+    assert m_attn_1.encoder.view_aggregator == "mean"
+    assert not hasattr(m_attn_1.encoder, "view_pool")
+
+
 def test_forward_per_tick_returns_embedding_and_future(device):
     """Zain's API: visual_embedding, future_state_pred = WAM(frame, visual_history)."""
     m = _wam(device)
