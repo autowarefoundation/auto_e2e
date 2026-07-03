@@ -225,9 +225,22 @@ def data_processing(
 
     open_new_shard()
 
+    def _write_jpeg(sample_key, member, frame_tensor):
+        """Resize a (3,H,W) tensor to a JPEG and add it to the current shard."""
+        f = to_pil(frame_tensor.cpu().clamp(0, 1)
+                   if frame_tensor.dtype.is_floating_point else frame_tensor.cpu())
+        f = resize(f)
+        b = io.BytesIO()
+        f.save(b, format="JPEG", quality=90)
+        jpg = b.getvalue()
+        ti = tarfile.TarInfo(name=f"{sample_key}.{member}")
+        ti.size = len(jpg)
+        current_tar.addfile(ti, io.BytesIO(jpg))
+
     for si in idx_iter:
         sample = ds[si]
-        visual = sample["visual_tiles"]            # (V, 3, H, W) tensor
+        visual = sample["visual_tiles"]            # (V, 3, H, W) real cameras
+        map_tile = sample.get("map_tile")          # (3, H, W) nav-map, if any
         ego_hist = sample["egomotion_history"]     # (256,)
         traj = sample["trajectory_target"]         # (128,)
         ego_data = np.concatenate([
@@ -236,15 +249,14 @@ def data_processing(
         ]).astype(np.float32)
 
         sample_key = f"s{si:08d}"
+        # Real camera views: cam_<i>.jpg (these define V / num_views).
         for cam_i in range(visual.shape[0]):
-            frame = to_pil(visual[cam_i].cpu().clamp(0, 1) if visual[cam_i].dtype.is_floating_point else visual[cam_i])
-            frame = resize(frame)
-            buf = io.BytesIO()
-            frame.save(buf, format="JPEG", quality=90)
-            jpg = buf.getvalue()
-            info = tarfile.TarInfo(name=f"{sample_key}.cam_{cam_i}.jpg")
-            info.size = len(jpg)
-            current_tar.addfile(info, io.BytesIO(jpg))
+            _write_jpeg(sample_key, f"cam_{cam_i}.jpg", visual[cam_i])
+
+        # Nav-map view: map.jpg, kept as a DISTINCT key so the loader routes it
+        # to the map branch and never counts it as a camera.
+        if map_tile is not None:
+            _write_jpeg(sample_key, "map.jpg", map_tile)
 
         eb = ego_data.tobytes()
         info = tarfile.TarInfo(name=f"{sample_key}.ego.npy")
@@ -265,7 +277,24 @@ def data_processing(
 
     manifest = {"total_samples": sample_count, "shards": shard_idx,
                 "hz": hz, "image_size": image_size, "dataset": dataset.value,
-                "episodes": episodes, "num_views": int(visual.shape[0]) if sample_count else 0}
+                "episodes": episodes,
+                # num_views = real cameras only; the map view is stored under a
+                # separate map.jpg key and is NOT counted here (#77).
+                "num_views": int(visual.shape[0]) if sample_count else 0,
+                "has_map": bool(sample_count) and (map_tile is not None)}
+
+    # Per-dataset camera calibration (rig constant): scaled ego-to-pixel
+    # [V, 3, 4] matrices, stored once. NVIDIA/KITScenes provide real geometry;
+    # L2D has no published intrinsics so it carries none (pseudo path). The
+    # dataset exposes this via a `camera_params` attribute when available.
+    cam_params = getattr(ds, "camera_params", None)
+    if cam_params is not None and sample_count:
+        cp = cam_params.cpu().numpy() if torch.is_tensor(cam_params) else np.asarray(cam_params)
+        manifest["camera_params"] = cp.astype(float).tolist()
+        manifest["geometry_type"] = getattr(ds, "geometry_type", "pinhole")
+    else:
+        manifest["geometry_type"] = "pseudo"
+
     with open(os.path.join(out_dir, "manifest.json"), "w") as f:
         json.dump(manifest, f)
 
