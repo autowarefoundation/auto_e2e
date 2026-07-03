@@ -136,12 +136,24 @@ def load_projection_from_manifest(shard_dir: str):
     if kind == "ftheta":
         def _t(key):
             return torch.tensor(spec[key], dtype=torch.float32).unsqueeze(0)
+        # fw_poly may be serialized as a shared [K] (flat list) or per-view [V,K]
+        # (nested list) — to_spec keeps a shared vector whole. Reconstruct the
+        # matching shape so to_spec/load round-trip is exact: shared -> [K],
+        # per-view -> [1,V,K].
+        fw = spec["fw_poly"]
+        if fw and isinstance(fw[0], (list, tuple)):
+            fw_poly = torch.tensor(fw, dtype=torch.float32).unsqueeze(0)  # [1,V,K]
+        else:
+            fw_poly = torch.tensor(fw, dtype=torch.float32)               # [K] shared
+        max_theta = spec.get("max_theta")
+        if isinstance(max_theta, (list, tuple)):
+            max_theta = torch.tensor(max_theta, dtype=torch.float32)      # per-view
         return (
             FThetaProjection(
                 t_camera_ego=_t("t_camera_ego"),   # [1,V,4,4]
-                fw_poly=_t("fw_poly"),             # [1,V,K]
+                fw_poly=fw_poly,
                 cx=_t("cx"), cy=_t("cy"),          # [1,V]
-                max_theta=spec.get("max_theta"),
+                max_theta=max_theta,
             ),
             "ftheta",
         )
