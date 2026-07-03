@@ -29,14 +29,14 @@ class TestPinholeProjection:
         proj = PinholeProjection(torch.randn(2, 5, 3, 4, device=device))
         assert proj.num_views == 5
         pts = _homo(torch.randn(7, 3, device=device))
-        res = proj.project(pts, image_size=256)
+        res = proj.project_ego_to_image(pts, 256)
         assert isinstance(res, ProjectionResult)
         assert res.uv_norm.shape == (2, 5, 7, 2)
         assert res.valid_mask.shape == (2, 5, 7)
         assert res.depth.shape == (2, 5, 7)
 
     def test_center_projects_to_image_center(self, device):
-        # fx=fy=112, cx=cy=112, z passthrough, image_size=224.
+        # fx=fy=112, cx=cy=112, z passthrough, 224.
         # ego point on the optical axis (x=y=0, z=2) -> pixel (112,112) -> 0.5,0.5.
         cam = torch.zeros(1, 1, 3, 4, device=device)
         cam[0, 0, 0, 0] = 112.0
@@ -44,7 +44,7 @@ class TestPinholeProjection:
         cam[0, 0, 1, 1] = 112.0
         cam[0, 0, 1, 2] = 112.0
         cam[0, 0, 2, 2] = 1.0
-        res = PinholeProjection(cam).project(_homo(torch.tensor([[0.0, 0.0, 2.0]], device=device)), 224)
+        res = PinholeProjection(cam).project_ego_to_image(_homo(torch.tensor([[0.0, 0.0, 2.0]], device=device)), 224)
         assert res.valid_mask[0, 0, 0]
         assert torch.allclose(res.uv_norm[0, 0, 0], torch.tensor([0.5, 0.5], device=device), atol=1e-4)
 
@@ -54,7 +54,7 @@ class TestPinholeProjection:
         cam[0, 0, 1, 1] = 112.0
         cam[0, 0, 2, 2] = -1.0    # negate z -> depth < 0
         cam[0, 0, 2, 3] = -100.0
-        res = PinholeProjection(cam).project(_homo(torch.tensor([[0.0, 0.0, 2.0]], device=device)), 224)
+        res = PinholeProjection(cam).project_ego_to_image(_homo(torch.tensor([[0.0, 0.0, 2.0]], device=device)), 224)
         assert not res.valid_mask.any()
 
     def test_rejects_bad_shape(self):
@@ -74,20 +74,20 @@ class TestPseudoProjection:
     def test_view_count_agnostic(self, device):
         shared = torch.randn(3, 4, device=device)
         for v in (1, 4, 7, 8):
-            res = PseudoProjection(shared, num_views=v).project(
+            res = PseudoProjection(shared, num_views=v).project_ego_to_image(
                 _homo(torch.randn(5, 3, device=device)), 256)
             assert res.uv_norm.shape == (1, v, 5, 2)   # batch-independent prior
         assert PseudoProjection(shared, num_views=8).geometry_type == GEOMETRY_PSEUDO
 
     def test_coords_in_unit_range(self, device):
         # sigmoid keeps pseudo coords within (0, 1) even for unbounded matrices.
-        res = PseudoProjection(torch.randn(3, 4, device=device) * 100, num_views=3).project(
+        res = PseudoProjection(torch.randn(3, 4, device=device) * 100, num_views=3).project_ego_to_image(
             _homo(torch.randn(6, 3, device=device)), 256)
         assert (res.uv_norm >= 0).all() and (res.uv_norm <= 1).all()
 
     def test_gradient_flows_to_shared_matrix(self, device):
         shared = torch.randn(3, 4, device=device, requires_grad=True)
-        res = PseudoProjection(shared, num_views=4).project(
+        res = PseudoProjection(shared, num_views=4).project_ego_to_image(
             _homo(torch.randn(5, 3, device=device)), 256)
         res.uv_norm.sum().backward()
         assert shared.grad is not None and shared.grad.abs().max() > 0
@@ -99,7 +99,7 @@ class TestPseudoProjection:
             PseudoProjection(torch.zeros(2, 3, 4, device=device), num_views=4)
 
     def test_accepts_leading_one_matrix(self, device):
-        res = PseudoProjection(torch.randn(1, 3, 4, device=device), num_views=3).project(
+        res = PseudoProjection(torch.randn(1, 3, 4, device=device), num_views=3).project_ego_to_image(
             _homo(torch.randn(4, 3, device=device)), 256)
         assert res.uv_norm.shape == (1, 3, 4, 2)
 
@@ -116,7 +116,7 @@ class TestFThetaProjection:
         fw_poly = torch.tensor([0.0, 200.0], device=device)  # r = 200*theta
         proj = FThetaProjection(T, fw_poly, cx=128.0, cy=128.0)
         # ego point straight ahead along +Z (optical axis): x=y=0, z=5
-        res = proj.project(_homo(torch.tensor([[0.0, 0.0, 5.0]], device=device)), 256)
+        res = proj.project_ego_to_image(_homo(torch.tensor([[0.0, 0.0, 5.0]], device=device)), 256)
         assert res.valid_mask[0, 0, 0]
         assert torch.allclose(res.uv_norm[0, 0, 0], torch.tensor([0.5, 0.5], device=device), atol=1e-4)
 
@@ -125,7 +125,7 @@ class TestFThetaProjection:
         fw_poly = torch.tensor([0.0, 200.0], device=device)
         proj = FThetaProjection(T, fw_poly, cx=128.0, cy=128.0)
         # a point off-axis in +x should map to u > cx (right of centre)
-        res = proj.project(_homo(torch.tensor([[1.0, 0.0, 5.0]], device=device)), 256)
+        res = proj.project_ego_to_image(_homo(torch.tensor([[1.0, 0.0, 5.0]], device=device)), 256)
         assert res.uv_norm[0, 0, 0, 0] > 0.5
 
     def test_max_theta_masks_wide_rays(self, device):
@@ -133,14 +133,14 @@ class TestFThetaProjection:
         fw_poly = torch.tensor([0.0, 100.0], device=device)
         # a point nearly perpendicular to the axis has theta ~ pi/2; cap below it.
         proj = FThetaProjection(T, fw_poly, cx=128.0, cy=128.0, max_theta=0.1)
-        res = proj.project(_homo(torch.tensor([[10.0, 0.0, 0.5]], device=device)), 256)
+        res = proj.project_ego_to_image(_homo(torch.tensor([[10.0, 0.0, 0.5]], device=device)), 256)
         assert not res.valid_mask.any()
 
     def test_behind_camera_masked(self, device):
         T = self._identity_transform(device)
         fw_poly = torch.tensor([0.0, 100.0], device=device)
         proj = FThetaProjection(T, fw_poly, cx=128.0, cy=128.0)
-        res = proj.project(_homo(torch.tensor([[0.0, 0.0, -5.0]], device=device)), 256)
+        res = proj.project_ego_to_image(_homo(torch.tensor([[0.0, 0.0, -5.0]], device=device)), 256)
         assert not res.valid_mask.any()
 
     def test_wide_fov_admits_rays_beyond_hemisphere(self, device):
@@ -152,12 +152,12 @@ class TestFThetaProjection:
         # ~100 deg FOV half-angle; a ray at theta ~ 95 deg has z < 0.
         proj = FThetaProjection(T, fw_poly, cx=128.0, cy=128.0, max_theta=1.8)
         # x large, z slightly negative -> theta = atan2(rho, z) in (90, 180) deg.
-        res = proj.project(_homo(torch.tensor([[1.0, 0.0, -0.05]], device=device)), 256)
+        res = proj.project_ego_to_image(_homo(torch.tensor([[1.0, 0.0, -0.05]], device=device)), 256)
         assert res.valid_mask.any(), \
             "max_theta fisheye wrongly rejected a valid ray past the +Z hemisphere"
         # and the same ray is rejected once it exceeds the FOV cap.
         narrow = FThetaProjection(T, fw_poly, cx=128.0, cy=128.0, max_theta=1.0)
-        res2 = narrow.project(_homo(torch.tensor([[1.0, 0.0, -0.05]], device=device)), 256)
+        res2 = narrow.project_ego_to_image(_homo(torch.tensor([[1.0, 0.0, -0.05]], device=device)), 256)
         assert not res2.valid_mask.any(), "ray beyond max_theta should be masked"
 
     def test_rejects_bad_transform_shape(self):
@@ -176,5 +176,5 @@ class TestFThetaProjection:
         ).to(device)
         assert proj.max_theta.device.type == device.type
         # project() must run (comparison theta <= max_theta on the same device).
-        res = proj.project(_homo(torch.tensor([[0.0, 0.0, 5.0]], device=device)), 256)
+        res = proj.project_ego_to_image(_homo(torch.tensor([[0.0, 0.0, 5.0]], device=device)), 256)
         assert res.uv_norm.shape == (1, 1, 1, 2)

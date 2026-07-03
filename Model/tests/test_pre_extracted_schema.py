@@ -102,5 +102,5 @@ class TestManifestProjection:
         assert geom == "ftheta" and proj.num_views == V
         # projects an on-axis ego point to the principal point
         pts = torch.tensor([[0.0, 0.0, 5.0, 1.0]])
-        res = proj.project(pts, image_size=256)
+        res = proj.project_ego_to_image(pts, 256)
         assert res.uv_norm.shape == (1, V, 1, 2)
