@@ -6,18 +6,26 @@ Usage
 
     dataset = L2DDataset(repo_id="yaak-ai/L2D")
     sample = dataset[0]
-    # sample["visual_tiles"]       (6, 3, 256, 256)  6 real cameras
+    # sample["visual_tiles"]       (6, 3, 256, 256)  6 real cameras (10 Hz frame)
     # sample["map_tile"]           (3, 256, 256)     BEV nav-map (separate branch)
     # sample["egomotion_history"]  (256,)
     # sample["visual_history"]     (896,)
     # sample["trajectory_target"]  (128,)
     # sample["episode_index"]      int
     # sample["frame_index"]        int
+
+    # World Model training (#16, enables the JEPA loss #13): also emit the 1 Hz
+    # multi-view past/future windows.
+    dataset = L2DDataset(repo_id="yaak-ai/L2D", include_world_model_windows=True)
+    sample = dataset[0]
+    # sample["history_frames"]     (N, 6, 3, 256, 256)  past  @1 Hz, oldest->newest
+    # sample["future_frames"]      (N, 6, 3, 256, 256)  future @1 Hz (JEPA targets)
 """
 
 from __future__ import annotations
 
 import logging
+import sys
 from typing import TypedDict
 
 import timm
@@ -27,6 +35,11 @@ from torch.utils.data import Dataset
 
 import numpy as np
 
+if sys.version_info >= (3, 11):
+    from typing import NotRequired
+else:  # Python 3.10 (local dev venv); CI runs 3.12
+    from typing_extensions import NotRequired
+
 from .camera import CAMERA_NAMES, MAP_VIEW_NAME
 from .egomotion import (
     MIN_FRAMES,
@@ -34,6 +47,7 @@ from .egomotion import (
     _HISTORY_TIMESTEPS,
     extract_egomotion,
 )
+from .world_model_windows import build_windows, required_margins, stride_for_hz
 
 logger = logging.getLogger(__name__)
 
@@ -41,13 +55,17 @@ _VISUAL_HISTORY_DIM = 896
 
 
 class L2DSample(TypedDict):
-    visual_tiles: torch.Tensor       # (6, 3, H, W) — 6 real cameras
+    visual_tiles: torch.Tensor       # (6, 3, H, W) — 6 real cameras (10 Hz frame)
     map_tile: torch.Tensor           # (3, H, W) — BEV nav-map (map branch)
     egomotion_history: torch.Tensor  # (256,)
     visual_history: torch.Tensor     # (896,)
     trajectory_target: torch.Tensor  # (128,)
     episode_index: int
     frame_index: int
+    # Present only when include_world_model_windows=True (#16, enables JEPA #13):
+    # the 1 Hz multi-view past/future windows, each (N, 6, 3, H, W), oldest->newest.
+    history_frames: NotRequired[torch.Tensor]
+    future_frames: NotRequired[torch.Tensor]
 
 
 class L2DDataset(Dataset):
@@ -72,6 +90,10 @@ class L2DDataset(Dataset):
         episodes: list[int] | None = None,
         backbone_name: str = "swinv2_tiny_window8_256",
         local_files_only: bool = False,
+        include_world_model_windows: bool = False,
+        wm_num_frames: int = 4,
+        wm_hz: float = 1.0,
+        source_hz: float = 10.0,
     ) -> None:
         try:
             from lerobot.datasets.lerobot_dataset import LeRobotDataset
@@ -82,6 +104,13 @@ class L2DDataset(Dataset):
 
         self.repo_id = repo_id
         self._episodes = episodes
+
+        # World Model (#16): optionally emit the 1 Hz multi-view past/future
+        # windows that the JEPA loss (#13) needs. stride converts the source rate
+        # (L2D = 10 Hz) to the World Model rate (1 Hz) -> stride 10.
+        self._wm_enabled = include_world_model_windows
+        self._wm_num_frames = wm_num_frames
+        self._wm_stride = stride_for_hz(source_hz, wm_hz)
 
         # lerobot 0.5.x removed `local_files_only`; it now syncs from cache by
         # default and only re-fetches when `force_cache_sync=True`. We map the
@@ -136,14 +165,24 @@ class L2DDataset(Dataset):
         """
         samples = []
 
+        # A frame needs enough past/future for BOTH egomotion (64/64) and, when
+        # enabled, the World Model 1 Hz window. Take the max of the two margins.
+        past_margin = _HISTORY_TIMESTEPS
+        future_margin = _FUTURE_TIMESTEPS
+        if self._wm_enabled:
+            wm_past, wm_future = required_margins(self._wm_num_frames, self._wm_stride)
+            past_margin = max(past_margin, wm_past)
+            future_margin = max(future_margin, wm_future)
+        min_len = max(MIN_FRAMES, past_margin + future_margin + 1)
+
         for ep_idx, (ep_start, ep_end) in sorted(self._episode_ranges.items()):
             ep_len = ep_end - ep_start
 
-            if ep_len < MIN_FRAMES:
+            if ep_len < min_len:
                 continue
 
-            min_frame = _HISTORY_TIMESTEPS
-            max_frame = ep_len - _FUTURE_TIMESTEPS - 1
+            min_frame = past_margin
+            max_frame = ep_len - future_margin - 1
 
             for frame_idx in range(min_frame, max_frame + 1):
                 samples.append((ep_idx, ep_start + frame_idx))
@@ -168,6 +207,21 @@ class L2DDataset(Dataset):
         )
         return states
 
+    def _load_multiview_frame(self, row: int) -> torch.Tensor:
+        """Decode + preprocess the 7 camera views for one local row -> (7, 3, H, W).
+
+        Decodes video, so it is the expensive path; reused for the current frame
+        and (when enabled) every frame of the World Model 1 Hz windows.
+        """
+        item = self.lerobot_dataset[row]
+        tensors = []
+        for cam_name in CAMERA_NAMES:
+            frame = item[cam_name]  # CHW float [0,1]
+            frame = TF.resize(frame, list(self._input_size), antialias=True)
+            frame = TF.normalize(frame, self._mean.squeeze(), self._std.squeeze())
+            tensors.append(frame)
+        return torch.stack(tensors, dim=0)
+
     def __getitem__(self, idx: int) -> L2DSample:
         # row is the local index into hf_dataset / lerobot_dataset.
         ep_idx, row = self._samples[idx]
@@ -182,23 +236,23 @@ class L2DDataset(Dataset):
             vehicle_states, sample_idx=sample_idx_in_episode
         )
 
-        # Load camera frames for the current timestep (decodes video)
+        # Current 10 Hz multi-view frame: the 6 real cameras (CAMERA_NAMES) go to
+        # visual_tiles (BEV projection applies to these). The nav-map is loaded
+        # separately below — it is not a camera view.
+        visual_tiles = self._load_multiview_frame(row)
+
+        # BEV nav-map view -> map_tile (routed to the separate map branch).
         item = self.lerobot_dataset[row]
 
         def _prep(frame: torch.Tensor) -> torch.Tensor:
             frame = TF.resize(frame, list(self._input_size), antialias=True)
             return TF.normalize(frame, self._mean.squeeze(), self._std.squeeze())
 
-        # 6 real cameras -> visual_tiles (BEV projection applies to these).
-        tensors = [_prep(item[cam_name]) for cam_name in CAMERA_NAMES]
-        visual_tiles = torch.stack(tensors, dim=0)
-
-        # BEV nav-map view -> map_tile (routed to the separate map branch).
         map_tile = _prep(item[MAP_VIEW_NAME])
 
         visual_history = torch.zeros(_VISUAL_HISTORY_DIM, dtype=torch.float32)
 
-        return L2DSample(
+        sample = L2DSample(
             visual_tiles=visual_tiles,
             map_tile=map_tile,
             egomotion_history=egomotion_history,
@@ -207,3 +261,15 @@ class L2DDataset(Dataset):
             episode_index=ep_idx,
             frame_index=sample_idx_in_episode,
         )
+
+        # World Model (#16): the 1 Hz multi-view past/future windows for the JEPA
+        # loss (#13). The valid-index margins above guarantee the window fits.
+        if self._wm_enabled:
+            history_frames, future_frames = build_windows(
+                self._load_multiview_frame, row, ep_start, ep_end,
+                num_frames=self._wm_num_frames, stride=self._wm_stride,
+            )
+            sample["history_frames"] = history_frames
+            sample["future_frames"] = future_frames
+
+        return sample

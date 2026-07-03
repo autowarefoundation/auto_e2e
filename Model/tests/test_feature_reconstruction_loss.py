@@ -32,6 +32,30 @@ def _make_features(requires_grad=False, seed=None):
     )
 
 
+class TestLossType:
+    """loss_type l1/l2/smooth_l1 (V-JEPA uses L1; #13)."""
+
+    def test_invalid_loss_type_raises(self):
+        with pytest.raises(ValueError, match="loss_type"):
+            FeatureReconstructionLoss(loss_type="hinge")
+
+    def test_l1_matches_mean_abs(self):
+        torch.manual_seed(0)
+        target = _make_features(seed=1)
+        pred = _make_features(seed=2)
+        loss = FeatureReconstructionLoss(loss_type="l1")(pred, target)
+        expected = torch.stack([(p - t).abs().mean()
+                                for p, t in zip(pred, target)]).mean()
+        assert torch.allclose(loss, expected, atol=1e-6)
+
+    def test_all_loss_types_zero_when_equal(self):
+        target = _make_features()
+        pred = tuple(t.clone() for t in target)
+        for lt in ("l1", "l2", "smooth_l1"):
+            loss = FeatureReconstructionLoss(loss_type=lt)(pred, target)
+            assert loss.item() == pytest.approx(0.0, abs=1e-6)
+
+
 class TestFeatureReconstructionLoss:
     def test_zero_when_pred_equals_target(self):
         loss_fn = FeatureReconstructionLoss()

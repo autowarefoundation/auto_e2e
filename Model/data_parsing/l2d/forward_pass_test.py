@@ -28,7 +28,6 @@ from torch.utils.data import DataLoader
 _MODEL_DIR = pathlib.Path(__file__).parent.parent.parent.resolve()
 sys.path.insert(0, str(_MODEL_DIR))
 
-from data_parsing.l2d.camera import NUM_VIEWS  # noqa: E402
 from data_parsing.l2d.egomotion import (  # noqa: E402
     EGOMOTION_DIM,
     MIN_FRAMES,
@@ -46,20 +45,26 @@ def test_synthetic_forward_pass(pretrained_backbone: bool = False) -> None:
     batch_size = 2
     H, W = 256, 256
 
-    visual_tiles = torch.randn(batch_size, NUM_VIEWS, 3, H, W, device=device)
+    # 6 real cameras + a separate map_input (the nav-map is not a camera view).
+    camera_tiles = torch.randn(batch_size, 6, 3, H, W, device=device)
     map_input = torch.randn(batch_size, 3, H, W, device=device)
     visual_history = torch.zeros(batch_size, 896, device=device)
     egomotion_history = torch.randn(batch_size, EGOMOTION_DIM, device=device)
 
     model = AutoE2E(
-        num_views=NUM_VIEWS,
+        num_views=6,
         is_pretrained=pretrained_backbone,
     ).to(device)
 
     t0 = time.time()
-    trajectory = model(
-        visual_tiles, map_input, visual_history, egomotion_history, mode="infer"
-    )
+    with torch.inference_mode():
+        trajectory = model(
+            camera_tiles=camera_tiles,
+            map_input=map_input,
+            visual_history=visual_history,
+            egomotion_history=egomotion_history,
+            mode="infer",
+        )
     t_fwd = time.time() - t0
 
     assert trajectory.shape == (batch_size, TRAJECTORY_DIM), (
@@ -116,25 +121,32 @@ def test_live_dataset(episodes: list[int], batch_size: int, pretrained_backbone:
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=0)
     batch = next(iter(loader))
 
-    visual_tiles = batch["visual_tiles"].to(device)
+    # The dataset now emits 6 real cameras in visual_tiles and the nav-map
+    # separately as map_tile (it is not a camera view).
+    camera_tiles = batch["visual_tiles"].to(device)
     map_input = batch["map_tile"].to(device)
     visual_history = batch["visual_history"].to(device)
     egomotion_history = batch["egomotion_history"].to(device)
     trajectory_target = batch["trajectory_target"].to(device)
 
-    print(f"[live] visual_tiles: {tuple(visual_tiles.shape)}")
-    print(f"[live] map_tile: {tuple(map_input.shape)}")
+    print(f"[live] camera_tiles: {tuple(camera_tiles.shape)}")
+    print(f"[live] map_input: {tuple(map_input.shape)}")
     print(f"[live] egomotion_history: {tuple(egomotion_history.shape)}")
     print(f"[live] trajectory_target: {tuple(trajectory_target.shape)}")
 
     model = AutoE2E(
-        num_views=NUM_VIEWS,
+        num_views=6,
         is_pretrained=pretrained_backbone,
     ).to(device)
 
-    trajectory = model(
-        visual_tiles, map_input, visual_history, egomotion_history, mode="infer"
-    )
+    with torch.inference_mode():
+        trajectory = model(
+            camera_tiles=camera_tiles,
+            map_input=map_input,
+            visual_history=visual_history,
+            egomotion_history=egomotion_history,
+            mode="infer",
+        )
     print(f"[live] trajectory output: {tuple(trajectory.shape)}")
     print("[live] PASSED")
 

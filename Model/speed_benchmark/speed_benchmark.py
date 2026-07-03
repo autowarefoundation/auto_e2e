@@ -18,9 +18,11 @@ def run_speed_benchmark(backbone, device, batch_size=1, num_views=7):
     print(f"  backbone = '{backbone}' | fusion = 'bev' | batch={batch_size} | views={num_views}")
     print(f"{'='*80}\n")
 
-    # Instantiate model. Fusion is always BEV (PR #94); nav-map is a separate
-    # map_input branch, not a camera view.
-    model = AutoE2E(backbone=backbone, num_views=num_views)
+    # Instantiate model. Fusion is always BEV (concat / cross_attn and the
+    # fusion_mode knob were removed); nav-map is a separate map_input branch, not
+    # a camera view. Small BEV grid keeps the benchmark fast.
+    model = AutoE2E(backbone=backbone, num_views=num_views,
+                    view_fusion_kwargs={"bev_h": 8, "bev_w": 8})
     model = model.to(device)
     model.eval()
 
@@ -33,8 +35,8 @@ def run_speed_benchmark(backbone, device, batch_size=1, num_views=7):
     # Egomotion History Input: [batch, 256]
     egomotion_history = torch.randn(batch_size, 256).to(device)
 
-    # Geometry: a pinhole projection operator (represents the real-calibration
-    # path; there is no camera_params matrix argument on forward).
+    # Geometry: a pinhole projection operator (the real-calibration path; there
+    # is no camera_params matrix argument on forward).
     projection = PinholeProjection(torch.randn(batch_size, num_views, 3, 4).to(device))
 
     def _forward():
@@ -192,13 +194,14 @@ def main():
 
     all_results = []
 
-    # Test all registered backbones (fusion is always BEV since PR #94).
+    # Test all registered backbones (BEV is the only fusion after the refactor).
     backbones = ["swin_v2_tiny", "conv_next_v2_tiny"]
     batch_sizes = [1, 2, 4]
 
     for backbone in backbones:
         for batch_size in batch_sizes:
-            torch.cuda.reset_peak_memory_stats() if torch.cuda.is_available() else None
+            if torch.cuda.is_available():
+                torch.cuda.reset_peak_memory_stats()
             result = run_speed_benchmark(backbone, device, batch_size=batch_size)
             all_results.append(result)
             print()

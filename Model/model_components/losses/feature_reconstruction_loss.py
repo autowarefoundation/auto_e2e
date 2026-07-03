@@ -23,12 +23,18 @@ class FeatureReconstructionLoss(nn.Module):
     temporal_weights: torch.Tensor
 
     def __init__(self, num_future_steps: int = 4, temporal_weights=None,
-                 reduction: str = "mean"):
+                 reduction: str = "mean", loss_type: str = "l2"):
         super().__init__()
         if reduction not in ("mean", "none"):
             raise ValueError(f"Unsupported reduction: {reduction}")
+        # Distance used in feature space. V-JEPA switched from I-JEPA's L2 to
+        # L1 (Bardes et al. 2024, arXiv:2404.08471); both are offered here,
+        # plus a robust Huber variant. Default "l2" keeps the original MSE.
+        if loss_type not in ("l2", "l1", "smooth_l1"):
+            raise ValueError(f"Unsupported loss_type: {loss_type}")
         self.num_future_steps = num_future_steps
         self.reduction = reduction
+        self.loss_type = loss_type
 
         if temporal_weights is None:
             weights = torch.ones(num_future_steps)
@@ -80,7 +86,14 @@ class FeatureReconstructionLoss(nn.Module):
                     f"Shape mismatch: predicted {tuple(pred.shape)} vs "
                     f"target {tuple(target.shape)}"
                 )
-            per_step_losses.append(torch.mean((pred - target) ** 2))
+            if self.loss_type == "l1":
+                per_step_losses.append(torch.mean((pred - target).abs()))
+            elif self.loss_type == "smooth_l1":
+                per_step_losses.append(
+                    nn.functional.smooth_l1_loss(pred, target)
+                )
+            else:  # l2 (default, MSE)
+                per_step_losses.append(torch.mean((pred - target) ** 2))
 
         per_step = torch.stack(per_step_losses)  # [num_future_steps]
         weighted = per_step * self.temporal_weights

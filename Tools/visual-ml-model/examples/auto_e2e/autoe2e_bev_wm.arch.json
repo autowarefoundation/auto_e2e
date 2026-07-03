@@ -1,0 +1,247 @@
+{
+  "arch_version": "1.0",
+  "model_name": "AutoE2E",
+  "arch_family": "multi-camera BEV → residual map fusion → Bezier planner + World Action Model JEPA auxiliary",
+  "config_assumptions": {
+    "backbone": "swin_v2_tiny",
+    "num_views": 8,
+    "embed_dim": 256,
+    "fusion_mode": "bev",
+    "is_pretrained": true,
+    "image_feature_size": 8,
+    "num_timesteps": 64,
+    "num_signals": 2,
+    "egomotion_dim": 256,
+    "planner_mode": "bezier",
+    "enable_world_model": true,
+    "visual_history_dim": 896,
+    "history_len": 4,
+    "frame_embed_dim": 224
+  },
+  "global_confidence": 0.9,
+  "nodes": [
+    {
+      "id": "cameras",
+      "title": "Camera Tiles",
+      "desc": "8 surround-view camera images (RGB)",
+      "shape": "(B,8,3,H,W)",
+      "role": "input"
+    },
+    {
+      "id": "map_input",
+      "title": "BEV Nav Map",
+      "desc": "Rasterized navigation map image (256×256 RGB)",
+      "shape": "(B,3,256,256)",
+      "role": "input"
+    },
+    {
+      "id": "egomotion",
+      "title": "Egomotion History",
+      "desc": "Past ego-vehicle motion state vector",
+      "shape": "(B,256)",
+      "role": "input"
+    },
+    {
+      "id": "backbone",
+      "title": "Backbone — Swin V2 Tiny",
+      "desc": "Pretrained 4-stage multi-scale feature extractor (96→768ch), shared with World Model",
+      "shape": "(B*8,768,8,8)",
+      "role": "backbone",
+      "detail": "Returns 4 feature maps at stages [96,192,384,768] channels. The last stage (768ch, 8×8) is used by FrameEncoder; all stages (1440ch total after pool) feed BEV fusion. Channels-last output is auto-permuted.",
+      "confidence": 0.95
+    },
+    {
+      "id": "bev_fusion",
+      "title": "BEV View Fusion",
+      "desc": "Pool+concat multi-scale features, project to 256ch, BEV spatial cross-attention via 3D→2D projection",
+      "shape": "(B,256,450,300)",
+      "role": "fusion",
+      "detail": "Learnable BEV queries (450×300 grid) attend to multi-camera 8×8 value maps at geometry-guided reference points with pillar sampling offsets. Visibility-masked averaging across cameras (BEVFormer SCA formula).",
+      "confidence": 0.95
+    },
+    {
+      "id": "map_encoder",
+      "title": "Map Encoder — Rasterized",
+      "desc": "Swin V2 Tiny (random init) encodes nav-map to BEV-aligned spatial features",
+      "shape": "(B,256,450,300)",
+      "role": "backbone",
+      "detail": "Separate swinv2_tiny_window8_256 backbone (not pretrained), multi-scale pool to (450,300), 1×1 conv channel projection to 256.",
+      "confidence": 0.9
+    },
+    {
+      "id": "map_bev_fusion",
+      "title": "Map BEV Fusion — Residual",
+      "desc": "Per-channel gated addition: image_bev + alpha * map_bev (alpha init=0)",
+      "shape": "(B,256,450,300)",
+      "role": "merge_add",
+      "confidence": 0.95
+    },
+    {
+      "id": "world_model",
+      "title": "World Action Model",
+      "desc": "FrameEncoder (backbone→GAP→proj 224d) + rolling FIFO buffer (4 frames at 1Hz) + aggregation",
+      "shape": "(B,896)",
+      "role": "recurrent",
+      "detail": "Encodes current multi-view frame via shared backbone last-stage feature map → global average pool → linear proj to 224d. Detached embedding pushed to RollingHistoryBuffer; oldest→newest concatenation gives 4×224=896d visual_history for the planner.",
+      "confidence": 0.9
+    },
+    {
+      "id": "bezier_planner",
+      "title": "Bezier Planner",
+      "desc": "Context MLP (BEV+visual+ego → 256d) → 5 control points → fixed Bernstein basis expansion",
+      "shape": "(B,128)",
+      "role": "policy",
+      "detail": "Additive context: ego_state_proj(256→256) + visual_history_proj(896→256) + bev_proj(spatial_mean→256). Context MLP (256→256→256). control_head predicts 5×2 Bezier control points. Bernstein basis [64,5] expands to smooth 64-step (acc, curvature) profiles.",
+      "confidence": 0.95
+    },
+    {
+      "id": "trajectory_out",
+      "title": "Trajectory",
+      "desc": "64-step acceleration/curvature control profile (smooth by Bezier construction)",
+      "shape": "(B,128)",
+      "role": "output"
+    },
+    {
+      "id": "future_pred",
+      "title": "Future Feature Predictor",
+      "desc": "Linear seed → spatial reshape → 4 independent 1×1 Conv2d heads predicting future backbone feature maps",
+      "shape": "4×(B,768,8,8)",
+      "role": "prediction",
+      "train_only": true,
+      "group": "train",
+      "detail": "FutureFeatureMapPredictor: visual_history [B,896] → Linear → GELU → reshape [B,128,8,8] seed → 4 × Conv2d(128→768, 1×1) producing predicted future feature maps for JEPA.",
+      "confidence": 0.9
+    },
+    {
+      "id": "future_frames",
+      "title": "Future Frames",
+      "desc": "Ground-truth future camera observations at +1.6s intervals for JEPA target",
+      "shape": "(B,4,3,H,W)",
+      "role": "input",
+      "train_only": true,
+      "group": "train",
+      "confidence": 0.8
+    },
+    {
+      "id": "jepa_target",
+      "title": "JEPA Target Encoder",
+      "desc": "Frozen deep-copy of backbone feature-map extractor (stop-gradient, no EMA)",
+      "shape": "4×(B,768,8,8)",
+      "role": "prediction",
+      "train_only": true,
+      "group": "train",
+      "detail": "JepaTargetEncoder wraps BackboneFeatureMap(backbone, feature_hw=8) in mode='frozen'. Each future frame is independently encoded to a detached [B,768,8,8] target. Parameters never receive gradients.",
+      "confidence": 0.85
+    },
+    {
+      "id": "jepa_loss",
+      "title": "JEPA Reconstruction Loss",
+      "desc": "L1 feature-space distance between predicted and frozen-target future feature maps",
+      "shape": null,
+      "role": "loss",
+      "train_only": true,
+      "group": "train",
+      "detail": "FeatureReconstructionLoss with loss_type='l1', 4 future steps, uniform temporal weights. Computed via WorldActionModel.jepa_loss() in the training loop (not inside forward()).",
+      "confidence": 0.8
+    }
+  ],
+  "edges": [
+    {
+      "from": "cameras",
+      "to": "backbone",
+      "kind": "dataflow",
+      "label": "(B*8,3,H,W)"
+    },
+    {
+      "from": "backbone",
+      "to": "bev_fusion",
+      "kind": "dataflow",
+      "label": "multi-scale features"
+    },
+    {
+      "from": "backbone",
+      "to": "world_model",
+      "kind": "dataflow",
+      "label": "last-stage features"
+    },
+    {
+      "from": "map_input",
+      "to": "map_encoder",
+      "kind": "dataflow",
+      "label": null
+    },
+    {
+      "from": "bev_fusion",
+      "to": "map_bev_fusion",
+      "kind": "dataflow",
+      "label": "image BEV"
+    },
+    {
+      "from": "map_encoder",
+      "to": "map_bev_fusion",
+      "kind": "dataflow",
+      "label": "map BEV"
+    },
+    {
+      "from": "map_bev_fusion",
+      "to": "bezier_planner",
+      "kind": "dataflow",
+      "label": "fused BEV (spatial mean)"
+    },
+    {
+      "from": "world_model",
+      "to": "bezier_planner",
+      "kind": "dataflow",
+      "label": "visual_ctx (896)"
+    },
+    {
+      "from": "egomotion",
+      "to": "bezier_planner",
+      "kind": "dataflow",
+      "label": "ego_ctx (256)"
+    },
+    {
+      "from": "bezier_planner",
+      "to": "trajectory_out",
+      "kind": "dataflow",
+      "label": null
+    },
+    {
+      "from": "world_model",
+      "to": "world_model",
+      "kind": "feedback",
+      "label": "rolling history buffer (4-frame FIFO)"
+    },
+    {
+      "from": "world_model",
+      "to": "future_pred",
+      "kind": "dataflow",
+      "label": "visual_history (896)"
+    },
+    {
+      "from": "future_frames",
+      "to": "jepa_target",
+      "kind": "dataflow",
+      "label": null
+    },
+    {
+      "from": "future_pred",
+      "to": "jepa_loss",
+      "kind": "loss",
+      "label": "predicted features"
+    },
+    {
+      "from": "jepa_target",
+      "to": "jepa_loss",
+      "kind": "loss",
+      "label": "target features"
+    }
+  ],
+  "groups": [
+    {
+      "id": "train",
+      "label": "ONLY DURING TRAINING",
+      "kind": "train_only_banner"
+    }
+  ]
+}
