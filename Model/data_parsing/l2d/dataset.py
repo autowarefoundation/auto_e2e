@@ -6,7 +6,8 @@ Usage
 
     dataset = L2DDataset(repo_id="yaak-ai/L2D")
     sample = dataset[0]
-    # sample["visual_tiles"]       (7, 3, 256, 256)
+    # sample["visual_tiles"]       (6, 3, 256, 256)  6 real cameras
+    # sample["map_tile"]           (3, 256, 256)     BEV nav-map (separate branch)
     # sample["egomotion_history"]  (256,)
     # sample["visual_history"]     (896,)
     # sample["trajectory_target"]  (128,)
@@ -26,7 +27,7 @@ from torch.utils.data import Dataset
 
 import numpy as np
 
-from .camera import CAMERA_NAMES
+from .camera import CAMERA_NAMES, MAP_VIEW_NAME
 from .egomotion import (
     MIN_FRAMES,
     _FUTURE_TIMESTEPS,
@@ -40,7 +41,8 @@ _VISUAL_HISTORY_DIM = 896
 
 
 class L2DSample(TypedDict):
-    visual_tiles: torch.Tensor       # (7, 3, H, W)
+    visual_tiles: torch.Tensor       # (6, 3, H, W) — 6 real cameras
+    map_tile: torch.Tensor           # (3, H, W) — BEV nav-map (map branch)
     egomotion_history: torch.Tensor  # (256,)
     visual_history: torch.Tensor     # (896,)
     trajectory_target: torch.Tensor  # (128,)
@@ -182,19 +184,23 @@ class L2DDataset(Dataset):
 
         # Load camera frames for the current timestep (decodes video)
         item = self.lerobot_dataset[row]
-        tensors = []
-        for cam_name in CAMERA_NAMES:
-            frame = item[cam_name]  # CHW float [0,1]
-            frame = TF.resize(frame, list(self._input_size), antialias=True)
-            frame = TF.normalize(frame, self._mean.squeeze(), self._std.squeeze())
-            tensors.append(frame)
 
+        def _prep(frame: torch.Tensor) -> torch.Tensor:
+            frame = TF.resize(frame, list(self._input_size), antialias=True)
+            return TF.normalize(frame, self._mean.squeeze(), self._std.squeeze())
+
+        # 6 real cameras -> visual_tiles (BEV projection applies to these).
+        tensors = [_prep(item[cam_name]) for cam_name in CAMERA_NAMES]
         visual_tiles = torch.stack(tensors, dim=0)
+
+        # BEV nav-map view -> map_tile (routed to the separate map branch).
+        map_tile = _prep(item[MAP_VIEW_NAME])
 
         visual_history = torch.zeros(_VISUAL_HISTORY_DIM, dtype=torch.float32)
 
         return L2DSample(
             visual_tiles=visual_tiles,
+            map_tile=map_tile,
             egomotion_history=egomotion_history,
             visual_history=visual_history,
             trajectory_target=trajectory_target,
