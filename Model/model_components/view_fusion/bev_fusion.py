@@ -4,6 +4,13 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from .projection import (
+    GEOMETRY_PSEUDO,
+    VALID_GEOMETRY_TYPES,
+    PinholeProjection,
+    PseudoProjection,
+)
+
 
 def _validate_offset_scale(offset_scale):
     if not isinstance(offset_scale, (int, float)) or isinstance(offset_scale, bool):
@@ -52,11 +59,20 @@ class BEVViewFusion(nn.Module):
         The module normalizes pixel coords to [0, 1] using the provided
         image_size parameter (default: 256, matching square input resolution).
 
-        When camera_params is None, a learnable pseudo_projection is used
-        as a shape-testing and ablation fallback. This does NOT learn true
-        camera geometry — it acts as a fixed learned spatial prior for
-        sampling locations. For meaningful BEV projection, real camera
-        calibration is required.
+        Geometry is supplied to ``forward`` as a projection operator (see
+        ``projection.py``): pass a ``[B, V, 3, 4]`` ``camera_params`` matrix
+        (wrapped as a :class:`PinholeProjection`), or a pre-built ``projection``
+        operator (e.g. :class:`FThetaProjection` for native fisheye), or request
+        the calibration-free path explicitly with ``geometry_type="pseudo"``.
+        The pseudo path uses a learnable ``pseudo_projection`` prior; it does NOT
+        learn true camera geometry — it is a fixed learned spatial prior for
+        sampling locations. For meaningful BEV projection, real calibration is
+        required, and the fusion module never falls into the pseudo path on
+        behalf of a caller that meant to pass real calibration.
+
+        The module is runtime-``V``-dynamic: one instance consumes batches of any
+        camera count. ``num_views`` only sizes the default pseudo-prior expansion
+        and is not otherwise baked into any tensor shape.
 
     Reference:
         - BEVFormer (Li et al., ECCV 2022): spatial cross-attention
@@ -86,20 +102,24 @@ class BEVViewFusion(nn.Module):
         # This is NOT a substitute for real camera geometry — it provides a
         # fixed learned spatial prior that allows the module to run without
         # calibration data. For production use, pass real camera_params.
-        self.pseudo_projection = nn.Parameter(
-            torch.randn(num_views, 3, 4) * 0.01
-        )
+        #
+        # A single shared [3, 4] prior, expanded to V views at projection time
+        # (see PseudoProjection), so one instance serves ANY view count. Kept as
+        # the attribute name `pseudo_projection` and as a leaf Parameter so the
+        # optimizer trains it and gradient-flow expectations hold.
+        self.pseudo_projection = nn.Parameter(torch.randn(3, 4) * 0.01)
 
         # Sampling offsets predicted from BEV queries
         self.sampling_offsets = nn.Linear(embed_dim, num_points_in_pillar * 2)
 
-        # Attention weights over (num_views × num_points_in_pillar).
-        # Softmax is applied per-camera over pillar points (height-level relevance).
-        # Camera-level weighting uses visibility-based averaging, matching
-        # BEVFormer's SCA formula: output = (1/|V_hit|) * sum_{i in V_hit}(...)
-        self.attention_weights = nn.Linear(
-            embed_dim, num_views * num_points_in_pillar
-        )
+        # Attention weights over pillar points only (height-level relevance),
+        # shared across cameras and applied per-camera in the sampling loop.
+        # There is NO per-camera axis: camera-level weighting comes from
+        # visibility-based averaging (1/|V_hit|), matching BEVFormer's SCA, and a
+        # fixed per-camera-slot head is ill-defined once slots vary by dataset
+        # (L2D slot 3 != NVIDIA slot 3). Dropping the num_views factor is what
+        # makes the layer runtime-V-dynamic.
+        self.attention_weights = nn.Linear(embed_dim, num_points_in_pillar)
 
         # Value projection applied to image features
         self.value_proj = nn.Linear(embed_dim, embed_dim)
@@ -138,83 +158,142 @@ class BEVViewFusion(nn.Module):
 
         self.register_buffer('reference_points_3d', ref_3d)
 
-    def _project_to_2d(self, reference_points_3d, camera_params=None):
-        """Project 3D reference points to normalized 2D coordinates on each camera.
+    def _ego_reference_homo(self, reference_points_3d):
+        """Denormalize [0,1] reference points to ego metres and homogenize.
 
-        Args:
-            reference_points_3d: [N, num_z, 3] normalized 3D points in [0, 1]
-            camera_params: [B, num_views, 3, 4] ego-to-pixel projection matrices.
-                If None, uses pseudo_projection fallback (testing/ablation only).
-
-        Returns:
-            ref_2d: [B, num_views, N, num_z, 2] coordinates in [0, 1] range
-                    (normalized by image_size)
-            mask: [B, num_views, N, num_z] visibility mask
-                  True where: depth > 0 AND 0 <= u,v <= 1
+        Returns ``[N*num_z, 4]`` ego-frame homogeneous points (X=forward,
+        Y=left, Z=up), the input every projection operator expects.
         """
-        N, num_z, _ = reference_points_3d.shape
-
-        # Scale normalized [0,1] coords to ego/vehicle coordinates using pc_range
         pc_range = self.pc_range
         ref_world = reference_points_3d.clone()
         ref_world[..., 0] = ref_world[..., 0] * (pc_range[3] - pc_range[0]) + pc_range[0]
         ref_world[..., 1] = ref_world[..., 1] * (pc_range[4] - pc_range[1]) + pc_range[1]
         ref_world[..., 2] = ref_world[..., 2] * (pc_range[5] - pc_range[2]) + pc_range[2]
 
-        # Homogeneous coordinates: [N, num_z, 4]
         ones = torch.ones(*ref_world.shape[:-1], 1,
                           device=ref_world.device, dtype=ref_world.dtype)
-        ref_homo = torch.cat([ref_world, ones], dim=-1)
+        ref_homo = torch.cat([ref_world, ones], dim=-1)  # [N, num_z, 4]
+        return ref_homo.reshape(-1, 4)                   # [N*num_z, 4]
 
-        # Select projection matrices
+    def _project_to_2d(self, reference_points_3d, camera_params=None):
+        """Project 3D reference points to normalized 2D coordinates on each camera.
+
+        Backward-compatible convenience wrapper: a ``[B, V, 3, 4]``
+        ``camera_params`` matrix is treated as a :class:`PinholeProjection`, and
+        ``None`` uses the learnable pseudo prior. New code should prefer passing
+        a projection operator via :meth:`_project_operator`.
+
+        Args:
+            reference_points_3d: [N, num_z, 3] normalized 3D points in [0, 1]
+            camera_params: [B, V, 3, 4] ego-to-pixel projection matrices.
+                If None, uses pseudo_projection fallback (testing/ablation only).
+
+        Returns:
+            ref_2d: [B, V, N, num_z, 2] coordinates in [0, 1] range
+            mask: [B, V, N, num_z] visibility mask (depth > 0 AND 0 <= u,v <= 1)
+        """
         if camera_params is not None:
-            proj = camera_params  # [B, num_views, 3, 4]
+            projection = PinholeProjection(camera_params)
         else:
-            proj = self.pseudo_projection.unsqueeze(0)  # [1, num_views, 3, 4]
+            projection = PseudoProjection(self.pseudo_projection, num_views=self.num_views)
+        return self._project_operator(reference_points_3d, projection)
 
-        B = proj.shape[0]
+    def _project_operator(self, reference_points_3d, projection):
+        """Project reference points using a :class:`CameraProjectionModel`.
 
-        # Project: einsum 'bvij,nj->bvni'
-        ref_flat = ref_homo.reshape(N * num_z, 4)
-        projected = torch.einsum('bvij,nj->bvni', proj, ref_flat)  # [B, V, N*num_z, 3]
+        ``V`` is derived from the operator (``projection.num_views``), never from
+        the construction-time ``self.num_views`` — this is what makes the module
+        runtime-``V``-dynamic.
 
-        # Separate depth before perspective division
-        depth = projected[..., 2]  # [B, V, N*num_z]
-        valid_depth = depth > 1e-5  # Points in front of camera
+        Returns ``(ref_2d, mask)`` reshaped to ``[Bp, V, N, num_z, ...]`` so the
+        sampling loop can index per view.
+        """
+        N, num_z, _ = reference_points_3d.shape
+        ref_homo = self._ego_reference_homo(reference_points_3d)  # [N*num_z, 4]
 
-        # Perspective division (clamp only to avoid NaN, masked points are excluded)
-        depth_safe = depth.clamp(min=1e-5).unsqueeze(-1)  # [B, V, N*num_z, 1]
-        ref_2d = projected[..., :2] / depth_safe  # [B, V, N*num_z, 2] in pixel coords
+        result = projection.project(ref_homo, self.image_size)
+        Bp, V = result.uv_norm.shape[0], result.uv_norm.shape[1]
 
-        # Normalize pixel coordinates to [0, 1] using image size
-        if camera_params is not None:
-            ref_2d = ref_2d / self.image_size
-        else:
-            # pseudo_projection outputs are unbounded; use sigmoid as fallback
-            ref_2d = ref_2d.sigmoid()
-
-        # Reshape to [B, V, N, num_z, 2]
-        ref_2d = ref_2d.reshape(B, self.num_views, N, num_z, 2)
-        valid_depth = valid_depth.reshape(B, self.num_views, N, num_z)
-
-        # Visibility mask: in front of camera AND within image bounds [0, 1]
-        in_bounds = (ref_2d[..., 0] >= 0) & (ref_2d[..., 0] <= 1) & \
-                    (ref_2d[..., 1] >= 0) & (ref_2d[..., 1] <= 1)
-        mask = valid_depth & in_bounds
-
+        ref_2d = result.uv_norm.reshape(Bp, V, N, num_z, 2)
+        mask = result.valid_mask.reshape(Bp, V, N, num_z)
         return ref_2d, mask
 
-    def forward(self, fused_per_view, B, V, camera_params=None):
+    def _resolve_projection(self, camera_params, projection, geometry_type, V):
+        """Turn the (camera_params | projection | geometry_type) inputs into a
+        single projection operator, enforcing honest geometry.
+
+        Rules:
+          - `camera_params` and `projection` are mutually exclusive.
+          - a supplied operator/matrix must match the runtime view count V.
+          - `geometry_type`, if given, must be a valid label and must agree with
+            the geometry actually supplied — you cannot label a pseudo run
+            "pinhole", and asking for "pseudo" while passing real calibration is
+            rejected. When no geometry is supplied at all, only "pseudo" (or
+            None) is allowed, so the calibration-free path is never entered on
+            behalf of a caller that meant to pass calibration.
+        """
+        if geometry_type is not None and geometry_type not in VALID_GEOMETRY_TYPES:
+            raise ValueError(
+                f"Unknown geometry_type {geometry_type!r}; "
+                f"expected one of {VALID_GEOMETRY_TYPES}."
+            )
+        if camera_params is not None and projection is not None:
+            raise ValueError("Pass at most one of camera_params or projection.")
+
+        if projection is not None:
+            if getattr(projection, "num_views", V) != V:
+                raise ValueError(
+                    f"projection.num_views ({projection.num_views}) != runtime V ({V})."
+                )
+            if geometry_type is not None and geometry_type != projection.geometry_type:
+                raise ValueError(
+                    f"geometry_type={geometry_type!r} contradicts the supplied "
+                    f"{projection.geometry_type!r} projection operator."
+                )
+            return projection
+
+        if camera_params is not None:
+            if camera_params.shape[1] != V:
+                raise ValueError(
+                    f"camera_params view dim ({camera_params.shape[1]}) != runtime V ({V})."
+                )
+            if geometry_type == GEOMETRY_PSEUDO:
+                raise ValueError(
+                    "geometry_type='pseudo' but real camera_params were supplied; "
+                    "the pseudo path must not consume real calibration."
+                )
+            gt = geometry_type or "pinhole"
+            return PinholeProjection(camera_params, geometry_type=gt)
+
+        # No calibration supplied → calibration-free pseudo prior, but only if
+        # the caller did not claim real geometry.
+        if geometry_type is not None and geometry_type != GEOMETRY_PSEUDO:
+            raise ValueError(
+                f"geometry_type={geometry_type!r} requires calibration "
+                f"(camera_params or a projection operator), but none was given."
+            )
+        return PseudoProjection(self.pseudo_projection, num_views=V)
+
+    def forward(self, fused_per_view, B, V, camera_params=None,
+                projection=None, geometry_type=None):
         """
         Args:
             fused_per_view: [B*V, C, H, W] multi-view image features
             B: batch size
-            V: number of views
-            camera_params: [B, V, 3, 4] ego-to-pixel projection matrices.
-                Combined intrinsic @ extrinsic that maps homogeneous 3D
-                ego/vehicle-frame coordinates [x, y, z, 1] to pixel
-                coordinates [u, v, depth].
-                If None, pseudo_projection is used (testing/ablation only).
+            V: number of views (runtime; the module is V-dynamic)
+            camera_params: [B, V, 3, 4] ego-to-pixel pinhole matrices (intrinsic
+                @ extrinsic). Wrapped as a PinholeProjection. Mutually exclusive
+                with `projection`.
+            projection: a CameraProjectionModel (Pinhole / FTheta / Pseudo) to use
+                directly — the general geometry ABI. Its `num_views` must equal V.
+            geometry_type: optional explicit geometry label ("pinhole",
+                "rectified_pinhole", "ftheta", "pseudo"). If given it must be
+                consistent with the supplied geometry — the module never claims
+                real geometry without calibration, nor silently downgrades a
+                real-calibration request to the pseudo prior. When neither
+                `camera_params` nor `projection` is given, the calibration-free
+                pseudo prior is used (and `geometry_type`, if named, must be
+                "pseudo").
 
         Returns:
             bev_features: [B, C, bev_h, bev_w] BEV representation
@@ -222,6 +301,9 @@ class BEVViewFusion(nn.Module):
         C, H, W = fused_per_view.shape[1], fused_per_view.shape[2], fused_per_view.shape[3]
         N = self.bev_h * self.bev_w
         dtype = fused_per_view.dtype
+
+        # --- 0. Resolve the projection operator (explicit, honest geometry) ---
+        proj_op = self._resolve_projection(camera_params, projection, geometry_type, V)
 
         # --- 1. Prepare BEV queries ---
         queries = self.bev_queries.weight.unsqueeze(0).expand(B, -1, -1)  # [B, N, C]
@@ -231,20 +313,21 @@ class BEVViewFusion(nn.Module):
         values = self.value_proj(feat)  # [B, V, H*W, C]
 
         # --- 3. Project 3D reference points to 2D ---
-        ref_2d, mask = self._project_to_2d(self.reference_points_3d, camera_params)
-        # ref_2d: [B, V, N, num_z, 2], mask: [B, V, N, num_z]
+        ref_2d, mask = self._project_operator(self.reference_points_3d, proj_op)
+        # ref_2d: [Bp, V, N, num_z, 2], mask: [Bp, V, N, num_z]
+        # (Bp is B for calibrated cameras, 1 for the batch-independent pseudo
+        #  prior — it broadcasts across the batch in the sampling loop below.)
 
         # --- 4. Predict sampling offsets and attention weights from queries ---
         offsets = self.sampling_offsets(queries)  # [B, N, num_z * 2]
         offsets = offsets.reshape(B, N, self.num_points_in_pillar, 2)
         offsets = offsets * self.offset_scale  # Scale down for stability
 
-        # Attention weights: per-camera softmax over pillar points (height relevance).
-        # Camera-level weighting is handled by visibility-based averaging,
-        # matching BEVFormer's SCA: output = (1/|V_hit|) * sum_{i in V_hit}(...)
-        attn_weights = self.attention_weights(queries)  # [B, N, V * num_z]
-        attn_weights = attn_weights.reshape(B, N, V, self.num_points_in_pillar)
-        attn_weights = attn_weights.softmax(dim=-1)  # Per-camera over pillar points
+        # Attention weights over pillar points only (height relevance), shared
+        # across cameras (no per-camera axis — see __init__). Camera-level
+        # weighting is visibility-based averaging (1/|V_hit|), BEVFormer's SCA.
+        attn_weights = self.attention_weights(queries)  # [B, N, num_z]
+        attn_weights = attn_weights.softmax(dim=-1)      # over pillar points
 
         # --- 5. Sample features from each camera via grid_sample ---
         values_spatial = values.permute(0, 1, 3, 2).reshape(B * V, C, H, W)
@@ -253,13 +336,21 @@ class BEVViewFusion(nn.Module):
         visible_count = torch.zeros(B, N, 1, device=fused_per_view.device, dtype=dtype)
 
         for v_idx in range(V):
+            # Per-view projection. ref_2d/mask have batch dim Bp (B for real
+            # cameras, 1 for the pseudo prior); expand a size-1 batch to B so it
+            # broadcasts uniformly across the batch.
+            ref_2d_v = ref_2d[:, v_idx]   # [Bp, N, num_z, 2]
+            ref_mask = mask[:, v_idx]     # [Bp, N, num_z]
+            if ref_2d_v.shape[0] == 1 and B > 1:
+                ref_2d_v = ref_2d_v.expand(B, -1, -1, -1)
+                ref_mask = ref_mask.expand(B, -1, -1)
+
             # Sampling locations: reference + offset
-            sample_locs = ref_2d[:, v_idx] + offsets  # [B, N, num_z, 2]
+            sample_locs = ref_2d_v + offsets  # [B, N, num_z, 2]
 
             # Recompute visibility mask AFTER adding offsets
             sample_in_bounds = (sample_locs[..., 0] >= 0) & (sample_locs[..., 0] <= 1) & \
                                (sample_locs[..., 1] >= 0) & (sample_locs[..., 1] <= 1)
-            ref_mask = mask[:, v_idx]  # [B, N, num_z] (depth + original bounds)
             combined_mask = ref_mask & sample_in_bounds  # [B, N, num_z]
 
             # Convert [0, 1] to grid_sample's [-1, 1] range
@@ -272,10 +363,10 @@ class BEVViewFusion(nn.Module):
                 padding_mode='zeros', align_corners=False
             )  # [B, C, N, num_z]
 
-            # Apply per-point mask and re-normalize weights over valid points
+            # Apply per-point mask and re-normalize weights over valid points.
+            # attn_weights is camera-independent [B, N, num_z] (shared per view).
             point_mask = combined_mask.float()  # [B, N, num_z]
-            w = attn_weights[:, :, v_idx, :]  # [B, N, num_z]
-            w = w * point_mask
+            w = attn_weights * point_mask
             w = w / w.sum(dim=-1, keepdim=True).clamp(min=1e-8)  # Re-normalize
 
             # sampled: [B, C, N, num_z] → [B, N, num_z, C]
