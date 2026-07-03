@@ -71,7 +71,7 @@ def _ego_to_camera_transform(sensor_pose, sensor_frame_is_optical: bool = True) 
     return R @ ego_to_sensor                                   # FLU sensor -> optical
 
 
-def _ftheta_pixel_scale(model, target_wh: tuple[int, int]) -> float:
+def _ftheta_pixel_scale(model, target_wh: tuple[int, int]) -> tuple[float, float, float]:
     """Isotropic pixel scale from a camera's native size to target_wh.
 
     The f-theta radius polynomial (th2r) is isotropic in native pixels, so a
