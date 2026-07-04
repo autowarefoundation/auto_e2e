@@ -358,9 +358,10 @@ class Visualization:
         action_sequence_pred: torch.Tensor,
         current_speed: float,
         front_camera_image: np.ndarray,
-        K: np.ndarray,
-        R: np.ndarray,
-        t: np.ndarray
+        K: np.ndarray = None,
+        R: np.ndarray = None,
+        t: np.ndarray = None,
+        P: np.ndarray = None
     ) -> np.ndarray:
         """
         This function overlays the trajectory from 3D to the 2D camera view and 
@@ -375,7 +376,10 @@ class Visualization:
         )
 
         # 2. Project trajectories to Camera View
-        projection_matrix = Visualization.get_camera_projection_matrix(K, R, t)
+        if P is not None:
+            projection_matrix = P
+        else:
+            projection_matrix = Visualization.get_camera_projection_matrix(K, R, t)
         
         target_traj_2d = Visualization.project_BEV_to_CameraView(target_traj_m, projection_matrix)
         pred_traj_2d = Visualization.project_BEV_to_CameraView(pred_traj_m, projection_matrix)
