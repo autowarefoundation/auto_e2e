@@ -102,9 +102,9 @@ class NvidiaAVDataset(Dataset):
             _backbone = timm.create_model(backbone_name, pretrained=False)
             data_config = timm.data.resolve_model_data_config(_backbone)
             self.transform = timm.data.create_transform(**data_config, is_training=False)
+            del _backbone
         else:
             self.transform = None
-        del _backbone
 
         clips = clip_uuids if clip_uuids is not None else self._discover_clip_uuids()
         if not clips:
