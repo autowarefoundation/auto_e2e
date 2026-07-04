@@ -15,9 +15,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import torch
-from PIL import Image
 from physical_ai_av.video import SeekVideoReader
-from torchvision.transforms import Compose
 
 # Camera directories present in the NVIDIA PhysicalAI-Autonomous-Vehicles dataset.
 CAMERA_NAMES: list[str] = [
@@ -35,7 +33,7 @@ NUM_VIEWS = 7
 
 
 def make_map_tile(reference: torch.Tensor) -> torch.Tensor:
-    """Return a zero map tile matching the shape of a transformed camera frame.
+    """Return a zero map tile matching the shape/dtype of one raw camera frame.
 
     NVIDIA has no rendered nav-map, so the map branch receives zeros for now.
     Shaped like a single (3, H, W) frame for the model's map_input.
@@ -71,29 +69,27 @@ def load_camera_frame(
     data_root: Path | str,
     clip_uuid: str,
     egomotion_timestamp_us: int,
-    transform: Compose | None,
     camera_names: list[str] | None = None,
     camera_timestamps: dict[str, np.ndarray] | None = None,
 ) -> torch.Tensor:
-    """Load the camera frame aligned to an egomotion timestamp.
+    """Load the RAW camera frame aligned to an egomotion timestamp.
+
+    Returns the decoded frame as an unmodified uint8 CHW tensor — no resize,
+    crop or normalize. The dataset is a pre-extraction source: the shard packer
+    owns the single, explicit, geometry-aware resize and the loader owns the
+    single normalize, so the projection ABI targets a known frame (#77).
 
     Args:
         data_root: Root directory of the dataset subset.
         clip_uuid: UUID of the clip to load.
         egomotion_timestamp_us: Egomotion timestamp in microseconds at the
             desired sample point, read directly from the egomotion parquet.
-        transform: backbone preprocessing transform for the online-training path,
-            or ``None`` for the RAW path (pre-extraction). When None, the decoded
-            frame is returned as an unmodified uint8 CHW tensor — no resize, crop
-            or normalize — so the shard packing owns a single, explicit,
-            geometry-aware resize and the projection targets a known frame.
         camera_names: Ordered list of camera directory names to load.
             Defaults to ``CAMERA_NAMES``.
 
     Returns:
-        Tensor of shape (7, 3, H, W): 7 real camera views. Float (transformed) if
-        ``transform`` is given, else uint8 raw. The nav-map is not included here;
-        see ``make_map_tile``.
+        uint8 tensor of shape (7, 3, H, W): the 7 real camera views. The nav-map
+        is not included here; see ``make_map_tile``.
     """
     data_root = Path(data_root)
     camera_root = data_root / "camera"
@@ -134,12 +130,8 @@ def load_camera_frame(
         finally:
             reader.close()
 
-        if transform is None:
-            # RAW path: return the decoded frame as uint8 CHW, no preprocessing.
-            frame = torch.from_numpy(rgb_frames[0]).permute(2, 0, 1).contiguous()
-            camera_tensors.append(frame)
-        else:
-            pil_frame = Image.fromarray(rgb_frames[0])
-            camera_tensors.append(transform(pil_frame))  # (3, H, W)
+        # RAW uint8 CHW, no preprocessing (see module/function docstring).
+        frame = torch.from_numpy(rgb_frames[0]).permute(2, 0, 1).contiguous()
+        camera_tensors.append(frame)
 
-    return torch.stack(camera_tensors, dim=0)  # (7, 3, H, W)
+    return torch.stack(camera_tensors, dim=0)  # (7, 3, H, W) uint8
