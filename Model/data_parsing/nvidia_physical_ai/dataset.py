@@ -85,16 +85,25 @@ class NvidiaAVDataset(Dataset):
         backbone_name: str = "swinv2_tiny_window8_256",
         camera_names: list[str] | None = None,
         clip_uuids: list[str] | None = None,
+        apply_transform: bool = True,
     ) -> None:
         self.data_root = Path(data_root)
         self.camera_names = camera_names or CAMERA_NAMES
 
-        # Build the image transform from the backbone's own config so that
-        # preprocessing always matches what the backbone expects.
-        # create_model loads config only — no pretrained weights downloaded here.
-        _backbone = timm.create_model(backbone_name, pretrained=False)
-        data_config = timm.data.resolve_model_data_config(_backbone)
-        self.transform = timm.data.create_transform(**data_config, is_training=False)
+        # Two output modes:
+        #   apply_transform=True  (online training/debug): return backbone-ready
+        #       tensors via the timm transform (resize/crop/normalize).
+        #   apply_transform=False (pre-extraction): return RAW uint8 frames — no
+        #       resize/crop/normalize. The shard packer then owns a single,
+        #       explicit, geometry-aware resize, so the projection ABI targets a
+        #       known frame and there is no double-normalize. See #77.
+        # timm is only consulted for the online transform; the raw path skips it.
+        if apply_transform:
+            _backbone = timm.create_model(backbone_name, pretrained=False)
+            data_config = timm.data.resolve_model_data_config(_backbone)
+            self.transform = timm.data.create_transform(**data_config, is_training=False)
+        else:
+            self.transform = None
         del _backbone
 
         clips = clip_uuids if clip_uuids is not None else self._discover_clip_uuids()
