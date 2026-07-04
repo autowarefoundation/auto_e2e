@@ -6,20 +6,23 @@ Usage
 
     dataset = L2DDataset(repo_id="yaak-ai/L2D")
     sample = dataset[0]
-    # sample["visual_tiles"]       (6, 3, 256, 256)  6 real cameras (10 Hz frame)
-    # sample["map_tile"]           (3, 256, 256)     BEV nav-map (separate branch)
+    # sample["visual_tiles"]       (6, 3, H, W)  6 raw cameras (native, 10 Hz frame)
+    # sample["map_tile"]           (3, H, W)     BEV nav-map (raw; separate branch)
     # sample["egomotion_history"]  (256,)
     # sample["visual_history"]     (896,)
     # sample["trajectory_target"]  (128,)
     # sample["episode_index"]      int
     # sample["frame_index"]        int
 
+    # This is a pre-extraction source: frames are RAW (no resize/normalize). The
+    # shard packer resizes once; the pre-extracted loader normalizes once (#77).
+
     # World Model training (#16, enables the JEPA loss #13): also emit the 1 Hz
     # multi-view past/future windows.
     dataset = L2DDataset(repo_id="yaak-ai/L2D", include_world_model_windows=True)
     sample = dataset[0]
-    # sample["history_frames"]     (N, 6, 3, 256, 256)  past  @1 Hz, oldest->newest
-    # sample["future_frames"]      (N, 6, 3, 256, 256)  future @1 Hz (JEPA targets)
+    # sample["history_frames"]     (N, 6, 3, H, W)  past  @1 Hz, oldest->newest (raw)
+    # sample["future_frames"]      (N, 6, 3, H, W)  future @1 Hz (JEPA targets, raw)
 """
 
 from __future__ import annotations
@@ -28,9 +31,7 @@ import logging
 import sys
 from typing import TypedDict
 
-import timm
 import torch
-import torchvision.transforms.functional as TF
 from torch.utils.data import Dataset
 
 import numpy as np
@@ -74,11 +75,14 @@ class L2DDataset(Dataset):
     Each item is one valid frame from an episode, where sufficient past and
     future context exists for egomotion extraction.
 
+    Frames are returned RAW (lerobot's decoded CHW float in [0, 1]) — no resize
+    or normalize. This is a pre-extraction source; the shard packer owns the
+    single geometry-aware resize and the loader owns the single normalize (#77).
+
     Args:
         repo_id: HuggingFace repo ID for the dataset.
         episodes: Optional list of episode indices to load. If None, all
             episodes are used.
-        backbone_name: timm backbone for deriving image transforms.
         local_files_only: Accepted for backward compatibility; lerobot 0.5.x
             removed this option (it now reads from cache by default), so the
             flag is currently a no-op.
@@ -88,13 +92,11 @@ class L2DDataset(Dataset):
         self,
         repo_id: str = "yaak-ai/L2D",
         episodes: list[int] | None = None,
-        backbone_name: str = "swinv2_tiny_window8_256",
         local_files_only: bool = False,
         include_world_model_windows: bool = False,
         wm_num_frames: int = 4,
         wm_hz: float = 1.0,
         source_hz: float = 10.0,
-        apply_transform: bool = True,
     ) -> None:
         try:
             from lerobot.datasets.lerobot_dataset import LeRobotDataset
@@ -122,24 +124,11 @@ class L2DDataset(Dataset):
             episodes=episodes,
         )
 
-        # Output mode. apply_transform=True (online training/debug) resizes +
-        # normalizes to backbone-ready tensors. apply_transform=False
-        # (pre-extraction) returns RAW uint8 frames — no resize/normalize — so the
-        # shard packer owns one explicit geometry-aware resize and there is no
-        # double-normalize (see #77). timm is only consulted for the online path.
-        self._apply_transform = apply_transform
-        # Set in the transform branch, None in the raw branch — annotate as
-        # Optional so mypy accepts both (the raw path never reads them).
-        self._input_size: tuple[int, int] | None = None
-        self._mean: torch.Tensor | None = None
-        self._std: torch.Tensor | None = None
-        if apply_transform:
-            _backbone = timm.create_model(backbone_name, pretrained=False)
-            data_config = timm.data.resolve_model_data_config(_backbone)
-            self._input_size = data_config["input_size"][1:]  # (H, W)
-            self._mean = torch.tensor(data_config["mean"]).view(3, 1, 1)
-            self._std = torch.tensor(data_config["std"]).view(3, 1, 1)
-            del _backbone
+        # This is a pre-extraction source: __getitem__ returns RAW frames (lerobot
+        # yields CHW float in [0, 1]) — no resize/normalize, no timm/backbone
+        # dependency. The shard packer owns the single geometry-aware resize and
+        # the pre-extracted loader owns the single normalize, so the projection
+        # ABI targets a known frame and there is no double-normalize (#77).
 
         self._episode_ranges = self._episode_local_ranges()
         self._samples = self._build_sample_index()
@@ -220,29 +209,16 @@ class L2DDataset(Dataset):
         )
         return states
 
-    def _prep_frame(self, frame: torch.Tensor) -> torch.Tensor:
-        """Preprocess one decoded CHW frame.
-
-        Online mode (apply_transform): resize to the backbone input + normalize.
-        Raw mode (pre-extraction): return the frame UNMODIFIED (lerobot yields a
-        CHW float in [0,1]) — no resize/normalize — so the shard packer owns the
-        single geometry-aware resize and there is no double-normalize (#77).
-        """
-        if not self._apply_transform:
-            return frame
-        assert self._input_size is not None and self._mean is not None \
-            and self._std is not None  # set whenever _apply_transform is True
-        frame = TF.resize(frame, list(self._input_size), antialias=True)
-        return TF.normalize(frame, self._mean.squeeze(), self._std.squeeze())
-
     def _load_multiview_frame(self, row: int) -> torch.Tensor:
-        """Decode + preprocess the 6 camera views for one local row -> (6, 3, H, W).
+        """Decode the 6 RAW camera views for one local row -> (6, 3, H, W).
 
+        Returns lerobot's decoded CHW float frames UNMODIFIED (no resize/
+        normalize) — the shard packer owns the single geometry-aware resize.
         Decodes video, so it is the expensive path; reused for the current frame
         and (when enabled) every frame of the World Model 1 Hz windows.
         """
         item = self.lerobot_dataset[row]
-        tensors = [self._prep_frame(item[cam_name]) for cam_name in CAMERA_NAMES]
+        tensors = [item[cam_name] for cam_name in CAMERA_NAMES]
         return torch.stack(tensors, dim=0)
 
     def __getitem__(self, idx: int) -> L2DSample:
@@ -264,9 +240,10 @@ class L2DDataset(Dataset):
         # separately below — it is not a camera view.
         visual_tiles = self._load_multiview_frame(row)
 
-        # BEV nav-map view -> map_tile (routed to the separate map branch).
+        # BEV nav-map view -> map_tile (routed to the separate map branch). Raw,
+        # like the cameras — the shard packer resizes it.
         item = self.lerobot_dataset[row]
-        map_tile = self._prep_frame(item[MAP_VIEW_NAME])
+        map_tile = item[MAP_VIEW_NAME]
 
         visual_history = torch.zeros(_VISUAL_HISTORY_DIM, dtype=torch.float32)
 
