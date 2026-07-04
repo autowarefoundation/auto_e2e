@@ -168,7 +168,6 @@ class Visualization:
         grid_color = (66, 32, 23)      # Faint deep purple/blue #172042 (BGR)
         text_color = (230, 230, 240)   # Crisp light blue-white
         pred_color = (140, 255, 0)     # Neon Green/Cyan (BGR)
-        pred_glow_color = (50, 120, 0) # Darker neon green for glow
         hist_color = (255, 80, 120)    # Vibrant purple (BGR)
         ego_color = (255, 255, 255)    # Solid white
         
@@ -279,3 +278,130 @@ class Visualization:
         img[(margin_top+1):(margin_top+plot_h-1), (margin_left+1):(margin_left+plot_w-1)] = plot_canvas
         
         return img
+        
+    @staticmethod
+    def get_camera_projection_matrix(K: np.ndarray, R: np.ndarray, t: np.ndarray) -> np.ndarray:
+        """
+        Args:
+            K: Intrinsic matrix (3x3)
+            R: Rotation matrix (3x3)
+            t: Translation vector (3x1)
+
+        Returns:
+            Projection matrix
+        """
+        # Construct Extrinsic matrix [R | t] (3x4)
+        A = np.hstack((R, t))
+
+        projection_matrix = K @ A
+
+        return projection_matrix
+
+    @staticmethod
+    def project_BEV_to_CameraView(trajectory_m: torch.Tensor, projection_matrix: np.ndarray) -> np.ndarray:
+        """
+        The function transforms the trajectory from 3D to 2D using the projection matrix
+        """
+        N = trajectory_m.shape[0]
+        # Coordinates: x = right, y = down, z = front
+        # Assuming ground is at y = 1.5m relative to the camera
+        points_3d = np.ones((4, N), dtype=np.float32)
+        points_3d[0, :] = trajectory_m[:, 0].numpy()  # x: right
+        points_3d[1, :] = 1.5                         # y: down (ground)
+        points_3d[2, :] = trajectory_m[:, 1].numpy()  # z: front
+
+        # Project to 2D
+        points_2d_hom = projection_matrix @ points_3d # (3, 4) @ (4, N) = (3, N)
+
+        # Normalize by depth (z)
+        valid_mask = points_2d_hom[2, :] > 0.1
+        
+        points_2d = np.zeros((N, 2), dtype=np.float32)
+        points_2d[valid_mask, 0] = points_2d_hom[0, valid_mask] / points_2d_hom[2, valid_mask]
+        points_2d[valid_mask, 1] = points_2d_hom[1, valid_mask] / points_2d_hom[2, valid_mask]
+        
+        # Set invalid points behind camera to -1
+        points_2d[~valid_mask] = -1
+
+        return points_2d
+
+    @staticmethod
+    def render_trajectory_on_camera_view(
+        camera_image: np.ndarray,
+        trajectory_2d: np.ndarray,
+        color: tuple = (0, 255, 0),
+        thickness: int = 3
+    ) -> np.ndarray:
+        """
+        This function overlays the trajectory from 3D to the 2D camera view
+        """
+        img_with_traj = camera_image.copy()
+        
+        h, w = img_with_traj.shape[:2]
+        
+        valid_points = []
+        for i in range(trajectory_2d.shape[0]):
+            x, y = trajectory_2d[i]
+            if x >= 0 and x < w and y >= 0 and y < h:
+                valid_points.append([int(x), int(y)])
+                
+        if len(valid_points) > 1:
+            pts = np.array(valid_points, np.int32).reshape((-1, 1, 2))
+            cv2.polylines(img_with_traj, [pts], isClosed=False, color=(0, 0, 0), thickness=thickness+2, lineType=cv2.LINE_AA)
+            cv2.polylines(img_with_traj, [pts], isClosed=False, color=color, thickness=thickness, lineType=cv2.LINE_AA)
+            
+        return img_with_traj
+    
+    @staticmethod
+    def complete_front_camera_view_with_trajectory(
+        action_sequence_target: torch.Tensor,
+        action_sequence_pred: torch.Tensor,
+        current_speed: float,
+        front_camera_image: np.ndarray,
+        K: np.ndarray,
+        R: np.ndarray,
+        t: np.ndarray
+    ) -> np.ndarray:
+        """
+        This function overlays the trajectory from 3D to the 2D camera view and 
+        attaches the trajectory on a grid to the left of the image
+        """
+        # 1. Generate trajectories in BEV (meters)
+        target_traj_m = Visualization.accel_and_curv_to_meters_trajectory(
+            action_sequence_target, current_speed, _FUTURE_TIMESTEPS, initial_heading=0.0
+        )
+        pred_traj_m = Visualization.accel_and_curv_to_meters_trajectory(
+            action_sequence_pred, current_speed, _FUTURE_TIMESTEPS, initial_heading=0.0
+        )
+
+        # 2. Project trajectories to Camera View
+        projection_matrix = Visualization.get_camera_projection_matrix(K, R, t)
+        
+        target_traj_2d = Visualization.project_BEV_to_CameraView(target_traj_m, projection_matrix)
+        pred_traj_2d = Visualization.project_BEV_to_CameraView(pred_traj_m, projection_matrix)
+
+        # 3. Draw on camera image
+        # Target (Orange: 59, 108, 255 in BGR)
+        cam_with_traj = Visualization.render_trajectory_on_camera_view(
+            front_camera_image, target_traj_2d, color=(59, 108, 255), thickness=3
+        )
+        # Pred (Green: 52, 217, 164 in BGR)
+        cam_with_traj = Visualization.render_trajectory_on_camera_view(
+            cam_with_traj, pred_traj_2d, color=(52, 217, 164), thickness=4
+        )
+
+        # 4. Attach grid to the left
+        grid_img = Visualization.generate_grid(prediction_m=pred_traj_m, actual_trajectory_m=target_traj_m)
+
+        # Resize camera image height to match grid height (1080)
+        grid_h, grid_w = grid_img.shape[:2]
+        cam_h, cam_w = cam_with_traj.shape[:2]
+        
+        scale = grid_h / cam_h
+        new_cam_w = int(cam_w * scale)
+        cam_resized = cv2.resize(cam_with_traj, (new_cam_w, grid_h))
+
+        # Concatenate horizontally
+        combined = np.hstack((grid_img, cam_resized))
+
+        return combined

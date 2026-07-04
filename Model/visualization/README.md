@@ -26,7 +26,7 @@ to get a map tile.
 * `radius_m`: The metric boundary of the `map_image` in meters.
 
 Returns:
-* A new PIL Image with the trajectory drawn on it.
+* A new Image with the trajectory drawn on it.
 
 ## Helper functions ##
 
@@ -39,6 +39,9 @@ Converts the metric trajectory tensor into 2D image pixel coordinates $(U, V)$. 
 
 ### `overlay_the_trajectory_with_map`
 Uses PIL's `ImageDraw` module to render the trajectory as a continuous green line directly onto a copy of the BEV map image. It also draws a red circle at the trajectory's origin to indicate the ego vehicle's current position.
+
+The scale is assumed
+A projection matrix has to be derived for each dataset
 
 ## Dependencies ##
 

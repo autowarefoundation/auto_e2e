@@ -17,7 +17,7 @@ import cv2
 import numpy as np
 from data_parsing.l2d.camera import NUM_VIEWS
 import argparse
-from torch.utils.data import DataLoader
+import yaml
 
 def visualization_on_l2d(episodes: list[int], frame_index: int = 0, zoom_in: bool = False) -> tuple[np.ndarray, np.ndarray]:
     result = forward_pass_for_visualization_test(episodes=episodes, frame_index=frame_index, pretrained_backbone=False)
@@ -144,6 +144,37 @@ def forward_pass_for_visualization_test(
         trajectory = out[0] if isinstance(out, tuple) else out
 
     return trajectory[-1].cpu(), trajectory_target[-1].cpu(), raw_map_image, current_speed, current_heading
+
+def load_extrinsics(path_to_yaml: str, view_name: str = "observation.images.front_left") -> tuple[np.ndarray, np.ndarray]:
+        """
+        Parses the calibration YAML with camera extrinsics.
+        
+        Args:
+            path_to_yaml: Path to the calibration YAML file.
+            view_name: The camera view to extract the matrix for (e.g., "observation.images.front_left").
+        
+        Returns:
+            R and t
+        """
+   
+        with open(path_to_yaml, 'r') as f:
+            calib_data = yaml.safe_load(f)
+
+        try:
+            # Map view_name to YAML key format (e.g., "observation.images.front_left" -> "cam_front_left")
+            yaml_key = f"cam_{view_name.split('.')[-1]}"
+            
+            view_calib = calib_data[yaml_key] if yaml_key in calib_data else calib_data
+            
+            # Extract Extrinsic rotation (3x3) and translation (3x1)
+            R = np.array(view_calib['extrinsic_rotation_ref_cam_from_cam'], dtype=np.float32).reshape(3, 3)
+            t = np.array(view_calib['extrinsic_t_ref_cam_from_cam'], dtype=np.float32).reshape(3, 1)
+
+            return R, t
+            
+        except KeyError as e:
+            raise KeyError(f"Key {e} not found in YAML. Please check the structure of {path_to_yaml} and update the keys in this function.")
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='L2D visualization test')
