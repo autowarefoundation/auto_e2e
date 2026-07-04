@@ -23,7 +23,6 @@ import time
 
 import numpy as np
 import torch
-from torch.utils.data import DataLoader
 
 _MODEL_DIR = pathlib.Path(__file__).parent.parent.parent.resolve()
 sys.path.insert(0, str(_MODEL_DIR))
@@ -118,26 +117,35 @@ def test_live_dataset(episodes: list[int], batch_size: int, pretrained_backbone:
 
     print(f"[live] Valid samples: {len(dataset)}")
 
-    loader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=0)
+    # The dataset yields RAW frames now (no direct-to-model path). Run the real
+    # production path: raw frames -> WebDataset shards -> pre-extracted loader ->
+    # model (one resize in the packer, one normalize in the loader).
+    import tempfile
+    sys.path.insert(0, str(_MODEL_DIR / "tests"))
+    from e2e_pipeline_smoke import build_shards
+    from data_parsing.pre_extracted import make_pre_extracted_loader
+
+    out_dir = tempfile.mkdtemp()
+    build_shards(dataset, out_dir, max_samples=max(batch_size, 2))
+    loader = make_pre_extracted_loader(out_dir, batch_size=batch_size,
+                                       num_workers=0, shuffle=0)
+    projection = getattr(loader, "projection", None)
+    geometry_type = getattr(loader, "geometry_type", "pseudo")
+    if projection is not None:
+        projection = projection.to(device)
     batch = next(iter(loader))
 
-    # The dataset now emits 6 real cameras in visual_tiles and the nav-map
-    # separately as map_tile (it is not a camera view).
     camera_tiles = batch["visual_tiles"].to(device)
-    map_input = batch["map_tile"].to(device)
+    map_input = batch["map_input"].to(device)
     visual_history = batch["visual_history"].to(device)
     egomotion_history = batch["egomotion_history"].to(device)
-    trajectory_target = batch["trajectory_target"].to(device)
 
     print(f"[live] camera_tiles: {tuple(camera_tiles.shape)}")
     print(f"[live] map_input: {tuple(map_input.shape)}")
     print(f"[live] egomotion_history: {tuple(egomotion_history.shape)}")
-    print(f"[live] trajectory_target: {tuple(trajectory_target.shape)}")
 
-    model = AutoE2E(
-        num_views=6,
-        is_pretrained=pretrained_backbone,
-    ).to(device)
+    model = AutoE2E(num_views=camera_tiles.shape[1],
+                    is_pretrained=pretrained_backbone).to(device)
 
     with torch.inference_mode():
         trajectory = model(
@@ -145,6 +153,8 @@ def test_live_dataset(episodes: list[int], batch_size: int, pretrained_backbone:
             map_input=map_input,
             visual_history=visual_history,
             egomotion_history=egomotion_history,
+            projection=projection,
+            geometry_type=geometry_type,
             mode="infer",
         )
     print(f"[live] trajectory output: {tuple(trajectory.shape)}")
