@@ -94,6 +94,7 @@ class L2DDataset(Dataset):
         wm_num_frames: int = 4,
         wm_hz: float = 1.0,
         source_hz: float = 10.0,
+        apply_transform: bool = True,
     ) -> None:
         try:
             from lerobot.datasets.lerobot_dataset import LeRobotDataset
@@ -121,12 +122,23 @@ class L2DDataset(Dataset):
             episodes=episodes,
         )
 
-        _backbone = timm.create_model(backbone_name, pretrained=False)
-        data_config = timm.data.resolve_model_data_config(_backbone)
-        self._input_size = data_config["input_size"][1:]  # (H, W)
-        self._mean = torch.tensor(data_config["mean"]).view(3, 1, 1)
-        self._std = torch.tensor(data_config["std"]).view(3, 1, 1)
-        del _backbone
+        # Output mode. apply_transform=True (online training/debug) resizes +
+        # normalizes to backbone-ready tensors. apply_transform=False
+        # (pre-extraction) returns RAW uint8 frames — no resize/normalize — so the
+        # shard packer owns one explicit geometry-aware resize and there is no
+        # double-normalize (see #77). timm is only consulted for the online path.
+        self._apply_transform = apply_transform
+        if apply_transform:
+            _backbone = timm.create_model(backbone_name, pretrained=False)
+            data_config = timm.data.resolve_model_data_config(_backbone)
+            self._input_size = data_config["input_size"][1:]  # (H, W)
+            self._mean = torch.tensor(data_config["mean"]).view(3, 1, 1)
+            self._std = torch.tensor(data_config["std"]).view(3, 1, 1)
+            del _backbone
+        else:
+            self._input_size = None
+            self._mean = None
+            self._std = None
 
         self._episode_ranges = self._episode_local_ranges()
         self._samples = self._build_sample_index()
@@ -207,19 +219,27 @@ class L2DDataset(Dataset):
         )
         return states
 
+    def _prep_frame(self, frame: torch.Tensor) -> torch.Tensor:
+        """Preprocess one decoded CHW frame.
+
+        Online mode (apply_transform): resize to the backbone input + normalize.
+        Raw mode (pre-extraction): return the frame UNMODIFIED (lerobot yields a
+        CHW float in [0,1]) — no resize/normalize — so the shard packer owns the
+        single geometry-aware resize and there is no double-normalize (#77).
+        """
+        if not self._apply_transform:
+            return frame
+        frame = TF.resize(frame, list(self._input_size), antialias=True)
+        return TF.normalize(frame, self._mean.squeeze(), self._std.squeeze())
+
     def _load_multiview_frame(self, row: int) -> torch.Tensor:
-        """Decode + preprocess the 7 camera views for one local row -> (7, 3, H, W).
+        """Decode + preprocess the 6 camera views for one local row -> (6, 3, H, W).
 
         Decodes video, so it is the expensive path; reused for the current frame
         and (when enabled) every frame of the World Model 1 Hz windows.
         """
         item = self.lerobot_dataset[row]
-        tensors = []
-        for cam_name in CAMERA_NAMES:
-            frame = item[cam_name]  # CHW float [0,1]
-            frame = TF.resize(frame, list(self._input_size), antialias=True)
-            frame = TF.normalize(frame, self._mean.squeeze(), self._std.squeeze())
-            tensors.append(frame)
+        tensors = [self._prep_frame(item[cam_name]) for cam_name in CAMERA_NAMES]
         return torch.stack(tensors, dim=0)
 
     def __getitem__(self, idx: int) -> L2DSample:
@@ -243,12 +263,7 @@ class L2DDataset(Dataset):
 
         # BEV nav-map view -> map_tile (routed to the separate map branch).
         item = self.lerobot_dataset[row]
-
-        def _prep(frame: torch.Tensor) -> torch.Tensor:
-            frame = TF.resize(frame, list(self._input_size), antialias=True)
-            return TF.normalize(frame, self._mean.squeeze(), self._std.squeeze())
-
-        map_tile = _prep(item[MAP_VIEW_NAME])
+        map_tile = self._prep_frame(item[MAP_VIEW_NAME])
 
         visual_history = torch.zeros(_VISUAL_HISTORY_DIM, dtype=torch.float32)
 
