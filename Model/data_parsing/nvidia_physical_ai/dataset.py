@@ -14,8 +14,8 @@ Usage
     )
 
     sample = dataset[0]
-    # sample["visual_tiles"]       (7, 3, 256, 256)  7 real cameras
-    # sample["map_tile"]           (3, 256, 256)     nav-map (zeros; map branch)
+    # sample["visual_tiles"]       (7, 3, H, W) uint8  7 raw cameras (native res)
+    # sample["map_tile"]           (3, H, W) uint8     nav-map (zeros; map branch)
     # sample["visual_history"]     (896,)
     # sample["egomotion_history"]  (256,)
     # sample["trajectory_target"]  (128,)
@@ -29,7 +29,6 @@ import logging
 from pathlib import Path
 from typing import TypedDict
 
-import timm
 import numpy as np
 import pandas as pd
 import torch
@@ -56,8 +55,8 @@ _VISUAL_HISTORY_DIM = 896
 
 
 class ClipSample(TypedDict):
-    visual_tiles: torch.Tensor        # (7, 3, 256, 256) — 7 real cameras
-    map_tile: torch.Tensor            # (3, 256, 256) — nav-map (zeros; map branch)
+    visual_tiles: torch.Tensor        # (7, 3, H, W) uint8 — 7 raw cameras (native)
+    map_tile: torch.Tensor            # (3, H, W) uint8 — nav-map (zeros; map branch)
     visual_history: torch.Tensor      # (896,)
     egomotion_history: torch.Tensor   # (256,)
     trajectory_target: torch.Tensor   # (128,)
@@ -82,29 +81,17 @@ class NvidiaAVDataset(Dataset):
     def __init__(
         self,
         data_root: Path | str,
-        backbone_name: str = "swinv2_tiny_window8_256",
         camera_names: list[str] | None = None,
         clip_uuids: list[str] | None = None,
-        apply_transform: bool = True,
     ) -> None:
         self.data_root = Path(data_root)
         self.camera_names = camera_names or CAMERA_NAMES
 
-        # Two output modes:
-        #   apply_transform=True  (online training/debug): return backbone-ready
-        #       tensors via the timm transform (resize/crop/normalize).
-        #   apply_transform=False (pre-extraction): return RAW uint8 frames — no
-        #       resize/crop/normalize. The shard packer then owns a single,
-        #       explicit, geometry-aware resize, so the projection ABI targets a
-        #       known frame and there is no double-normalize. See #77.
-        # timm is only consulted for the online transform; the raw path skips it.
-        if apply_transform:
-            _backbone = timm.create_model(backbone_name, pretrained=False)
-            data_config = timm.data.resolve_model_data_config(_backbone)
-            self.transform = timm.data.create_transform(**data_config, is_training=False)
-            del _backbone
-        else:
-            self.transform = None
+        # This is a pre-extraction source: __getitem__ returns RAW uint8 frames
+        # (no resize/crop/normalize, no timm/backbone dependency). The shard
+        # packer owns the single geometry-aware resize and the pre-extracted
+        # loader owns the single normalize, so the projection ABI targets a known
+        # frame and there is no double-normalize (#77).
 
         clips = clip_uuids if clip_uuids is not None else self._discover_clip_uuids()
         if not clips:
@@ -305,7 +292,6 @@ class NvidiaAVDataset(Dataset):
             self.data_root,
             clip_uuid,
             egomotion_timestamp_us=egomotion_timestamp_us,
-            transform=self.transform,
             camera_names=self.camera_names,
             camera_timestamps=camera_timestamps,
         )
