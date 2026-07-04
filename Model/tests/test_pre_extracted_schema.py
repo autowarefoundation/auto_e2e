@@ -57,6 +57,29 @@ class TestDecodeSampleMapSplit:
         assert out["map_input"].shape == (3, 256, 256)
         assert out["map_input"].abs().max() == 0.0
 
+    def test_shard_pixels_normalized_exactly_once(self):
+        """The raw-frame -> JPEG -> loader path must apply ImageNet Normalize
+        EXACTLY ONCE. Regression for the double-normalize bug (#77): the old
+        pre-extraction normalized in the dataset, clamped, then normalized again
+        in the loader. Here the shard JPEG is a plain (unnormalized) image, so the
+        decoded tensor must equal Normalize(ToTensor(jpeg)) — and must NOT match a
+        twice-normalized tensor."""
+        from torchvision import transforms
+        mean = [0.485, 0.456, 0.406]
+        std = [0.229, 0.224, 0.225]
+        # A plain (unnormalized) shard image, as the corrected packer writes.
+        jpg = _jpeg_bytes((120, 60, 200))
+        out = _decode_sample({"cam_0.jpg": jpg, "ego.npy": _ego_bytes()})
+        decoded = out["visual_tiles"][0]
+
+        img = Image.open(io.BytesIO(jpg))
+        once = transforms.Normalize(mean, std)(transforms.ToTensor()(img))
+        assert torch.allclose(decoded, once, atol=1e-5), \
+            "loader must normalize the plain shard image exactly once"
+        twice = transforms.Normalize(mean, std)(once)
+        assert not torch.allclose(decoded, twice, atol=1e-3), \
+            "decoded tensor must NOT be double-normalized"
+
     def test_no_camera_params_key(self):
         """Geometry is a loader attribute now, never a per-sample tensor."""
         sample = {f"cam_{i}.jpg": _jpeg_bytes((i, 0, 0)) for i in range(6)}
