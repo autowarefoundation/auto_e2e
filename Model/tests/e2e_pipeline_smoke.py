@@ -106,10 +106,9 @@ def main():
 
     # 1. Dataset — must yield 7 real cams + a separate map_tile.
     clip_uuids = [args.clip_uuid] if args.clip_uuid else None
-    # Pre-extraction uses raw frames (apply_transform=False); the shard packer
-    # owns the single geometry-aware resize, the loader owns normalization.
-    ds = NvidiaAVDataset(data_root=args.data_root, clip_uuids=clip_uuids,
-                         apply_transform=False)
+    # The dataset is a raw pre-extraction source; the shard packer owns the
+    # single geometry-aware resize and the loader owns normalization.
+    ds = NvidiaAVDataset(data_root=args.data_root, clip_uuids=clip_uuids)
     s0 = ds[0]
     V = s0["visual_tiles"].shape[0]
     assert "map_tile" in s0, "dataset must emit a separate map_tile"
