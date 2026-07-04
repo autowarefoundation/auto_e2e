@@ -233,15 +233,21 @@ def data_processing(
 
     # Build the appropriate Dataset (both emit the same sample schema:
     # visual_tiles (V,3,H,W), egomotion_history (256), trajectory_target (128)).
+    # Pre-extraction uses apply_transform=False so the dataset returns RAW frames
+    # (no backbone resize/crop/normalize). The shard packer below owns the single,
+    # explicit, geometry-aware resize; the pre-extracted loader owns the single
+    # ToTensor+Normalize. This avoids the double-normalize / center-crop that a
+    # backbone-ready dataset would bake in, and keeps the projection ABI targeting
+    # a known (plain-resized) frame. See #77.
     ep_list = list(range(episodes)) if episodes > 0 else None
     if dataset == Dataset.NVIDIA_PHYSICAL_AI:
         from data_parsing.nvidia_physical_ai.dataset import NvidiaAVDataset
-        ds = NvidiaAVDataset(data_root=raw_path)
+        ds = NvidiaAVDataset(data_root=raw_path, apply_transform=False)
         n_samples = len(ds)
         idx_iter = range(n_samples)
     else:
         from data_parsing.l2d import L2DDataset
-        ds = L2DDataset(repo_id=dataset.value, episodes=ep_list)
+        ds = L2DDataset(repo_id=dataset.value, episodes=ep_list, apply_transform=False)
         n_samples = len(ds)
         idx_iter = range(n_samples)
 
@@ -263,10 +269,19 @@ def data_processing(
     open_new_shard()
 
     def _write_jpeg(sample_key, member, frame_tensor):
-        """Resize a (3,H,W) tensor to a JPEG and add it to the current shard."""
-        f = to_pil(frame_tensor.cpu().clamp(0, 1)
-                   if frame_tensor.dtype.is_floating_point else frame_tensor.cpu())
-        f = resize(f)
+        """Resize a RAW (3,H,W) frame to a JPEG and add it to the current shard.
+
+        Input is a raw frame from the dataset's apply_transform=False path:
+        uint8 [0,255] (NVIDIA) or float [0,1] (L2D lerobot). ToPILImage handles
+        both. The Resize here is the SINGLE, explicit, geometry-aware resize to
+        the shard/model-input size; no normalization happens here (the loader
+        does ToTensor+Normalize once). float frames are clamped to [0,1] purely
+        as a safety bound for ToPILImage's *255 scaling.
+        """
+        t = frame_tensor.cpu()
+        if t.dtype.is_floating_point:
+            t = t.clamp(0, 1)
+        f = resize(to_pil(t))
         b = io.BytesIO()
         f.save(b, format="JPEG", quality=90)
         jpg = b.getvalue()
