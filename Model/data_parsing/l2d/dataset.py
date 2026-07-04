@@ -128,6 +128,11 @@ class L2DDataset(Dataset):
         # shard packer owns one explicit geometry-aware resize and there is no
         # double-normalize (see #77). timm is only consulted for the online path.
         self._apply_transform = apply_transform
+        # Set in the transform branch, None in the raw branch — annotate as
+        # Optional so mypy accepts both (the raw path never reads them).
+        self._input_size: tuple[int, int] | None = None
+        self._mean: torch.Tensor | None = None
+        self._std: torch.Tensor | None = None
         if apply_transform:
             _backbone = timm.create_model(backbone_name, pretrained=False)
             data_config = timm.data.resolve_model_data_config(_backbone)
@@ -135,10 +140,6 @@ class L2DDataset(Dataset):
             self._mean = torch.tensor(data_config["mean"]).view(3, 1, 1)
             self._std = torch.tensor(data_config["std"]).view(3, 1, 1)
             del _backbone
-        else:
-            self._input_size = None
-            self._mean = None
-            self._std = None
 
         self._episode_ranges = self._episode_local_ranges()
         self._samples = self._build_sample_index()
@@ -229,6 +230,8 @@ class L2DDataset(Dataset):
         """
         if not self._apply_transform:
             return frame
+        assert self._input_size is not None and self._mean is not None \
+            and self._std is not None  # set whenever _apply_transform is True
         frame = TF.resize(frame, list(self._input_size), antialias=True)
         return TF.normalize(frame, self._mean.squeeze(), self._std.squeeze())
 
