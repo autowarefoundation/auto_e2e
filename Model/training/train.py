@@ -26,8 +26,8 @@ Examples
     # Smoke test: random tensors, no dataset download, reports peak VRAM.
     python train.py --smoke-test --bev-h 450 --bev-w 300 --batch-size 4 --amp
 
-    # Real training on L2D (requires the lerobot package + dataset access).
-    python train.py --batch-size 8 --epochs 10 --amp
+    # Real training on pre-extracted WebDataset shards.
+    python train.py --shard-dir /data/shards --batch-size 8 --epochs 10 --amp
 """
 
 from __future__ import annotations
@@ -39,7 +39,6 @@ import time
 from typing import Any, Iterable
 
 import torch
-from torch.utils.data import DataLoader
 
 # Make Model/ importable so data_parsing and model_components resolve regardless
 # of the current working directory (mirrors inference/run_forward_pass.py).
@@ -95,20 +94,12 @@ def parse_args() -> argparse.Namespace:
                    help="Mixed precision training in bf16")
     p.add_argument("--device", default="auto", help="auto | cuda | cpu")
 
-    # Data
-    p.add_argument("--repo-id", default="yaak-ai/L2D")
-    p.add_argument("--episodes", type=int, nargs="*", default=None,
-                   help="Subset of episode indices; default = all")
-    p.add_argument("--dataset-backbone-name", default="swinv2_tiny_window8_256",
-                   help="timm name used by L2DDataset to resolve image transforms")
-    p.add_argument("--local-files-only", action="store_true")
+    # Data. Training reads pre-extracted WebDataset shards only (the on-the-fly
+    # lerobot decode path was removed — datasets are raw pre-extraction sources
+    # now; build shards with the Flyte data_processing task or the CLI packer).
     p.add_argument("--num-workers", type=int, default=2)
-    p.add_argument("--dataset-format", default="lerobot",
-                   choices=["lerobot", "pre_extracted"],
-                   help="lerobot: on-the-fly decode (EC2 dev). "
-                        "pre_extracted: WebDataset shards on local disk (EKS prod).")
     p.add_argument("--shard-dir", default=None,
-                   help="Path to WebDataset shards (required for pre_extracted format)")
+                   help="Path to WebDataset shards (required unless --smoke-test)")
 
     # Loop / logging
     p.add_argument("--log-interval", type=int, default=10)
@@ -119,11 +110,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--register-model", action="store_true",
                    help="Register final checkpoint in MLflow Model Registry")
     p.add_argument("--dataset", default=None,
-                   help="Dataset name for MLflow tagging (defaults to --repo-id)")
+                   help="Dataset name for MLflow tagging")
 
     # Smoke test
     p.add_argument("--smoke-test", action="store_true",
-                   help="Train on random tensors (no lerobot/dataset). Reports peak VRAM.")
+                   help="Train on random tensors (no shards/dataset). Reports peak VRAM.")
     p.add_argument("--smoke-steps", type=int, default=5)
 
     return p.parse_args()
@@ -151,33 +142,19 @@ def build_model(args: argparse.Namespace, device: torch.device) -> AutoE2E:
     return model.to(device)
 
 
-def build_dataloader(args: argparse.Namespace) -> DataLoader:
-    if args.dataset_format == "pre_extracted":
-        from data_parsing.pre_extracted import make_pre_extracted_loader
-        if not args.shard_dir:
-            raise ValueError("--shard-dir required for pre_extracted format")
-        return make_pre_extracted_loader(
-            shard_dir=args.shard_dir,
-            batch_size=args.batch_size,
-            num_workers=args.num_workers,
-        )
+def build_dataloader(args: argparse.Namespace):
+    """Build the pre-extracted WebDataset loader (the only training data path).
 
-    # Default: lerobot on-the-fly decode
-    from data_parsing.l2d import L2DDataset
-
-    dataset = L2DDataset(
-        repo_id=args.repo_id,
-        episodes=args.episodes,
-        backbone_name=args.dataset_backbone_name,
-        local_files_only=args.local_files_only,
-    )
-    return DataLoader(
-        dataset,
+    The loader yields model-ready tensors (ToTensor+Normalize applied once) and
+    carries the per-dataset projection operator on .projection/.geometry_type.
+    """
+    from data_parsing.pre_extracted import make_pre_extracted_loader
+    if not args.shard_dir:
+        raise ValueError("--shard-dir is required (pre-extracted shards).")
+    return make_pre_extracted_loader(
+        shard_dir=args.shard_dir,
         batch_size=args.batch_size,
-        shuffle=True,
         num_workers=args.num_workers,
-        pin_memory=(args.device != "cpu"),
-        drop_last=True,
     )
 
 
@@ -264,9 +241,9 @@ def run_training(args: argparse.Namespace) -> None:
             "train/grad_clip": args.grad_clip,
             "train/loss_type": args.loss_type,
             # Data
-            "data/dataset": args.dataset or args.repo_id or "unknown",
+            "data/dataset": args.dataset or "unknown",
             "data/shard_dir": args.shard_dir or "",
-            "data/format": args.dataset_format,
+            "data/format": "pre_extracted",
             # Reproducibility
             "git_commit": git_commit,
         })
@@ -294,9 +271,8 @@ def run_training(args: argparse.Namespace) -> None:
     # currently inert; --enable-future-state has no effect until JEPA is wired.
     forward_mode = "train" if args.enable_future_state else "eval"
 
-    # Geometry: pre-extracted loaders expose a per-dataset projection operator
-    # (.projection/.geometry_type); everything else (lerobot / smoke) runs the
-    # explicit pseudo path until real calibration is plumbed for that source.
+    # Geometry: the pre-extracted loader exposes a per-dataset projection operator
+    # (.projection/.geometry_type); the smoke path runs the explicit pseudo path.
     projection = None
     geometry_type = "pseudo"
 
@@ -329,15 +305,11 @@ def run_training(args: argparse.Namespace) -> None:
             batch = move_batch(batch, device)
             optimizer.zero_grad(set_to_none=True)
 
-            # The model owns a map branch. The pre-extracted loader emits
-            # "map_input"; the lerobot/on-the-fly datasets emit "map_tile" (real
-            # nav-map for L2D, zeros for NVIDIA). Accept either so the real map is
-            # never silently dropped; fall back to zeros only if a batch has
-            # neither (MapBEVFusion is a residual gate at alpha=0 → no early effect).
+            # The model owns a map branch. The pre-extracted loader (and the
+            # smoke batch) emit "map_input"; fall back to zeros only if absent
+            # (MapBEVFusion is a residual gate at alpha=0 → no early effect).
             visual_tiles = batch["visual_tiles"]
             map_input = batch.get("map_input")
-            if map_input is None:
-                map_input = batch.get("map_tile")
             if map_input is None:
                 map_input = torch.zeros(visual_tiles.shape[0], 3, 256, 256, device=device)
 
