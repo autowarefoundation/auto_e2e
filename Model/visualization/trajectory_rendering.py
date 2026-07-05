@@ -2,6 +2,7 @@ import torch
 import cv2
 import numpy as np
 import math
+from typing import Optional
 
 _DT = 0.1  # 10 Hz
 _FUTURE_TIMESTEPS = 64
@@ -161,7 +162,7 @@ class Visualization:
         return grid_with_trajectory
 
     @staticmethod
-    def generate_grid(prediction_m: torch.Tensor, actual_trajectory_m: torch.Tensor = None) -> np.ndarray:
+    def generate_grid(prediction_m: torch.Tensor, actual_trajectory_m: Optional[torch.Tensor] = None) -> np.ndarray:
         # Configuration
         width, height = 480, 1080
         bg_color = (19, 12, 6)         # Very dark blue #060c13 (BGR)
@@ -245,19 +246,19 @@ class Visualization:
 
         # Draw Actual Trajectory
         if actual_trajectory_m is not None:
-            pts = []
+            pts_actual = []
             for i in range(actual_trajectory_m.shape[0]):
-                pts.append(to_px_local(float(actual_trajectory_m[i, 0]), float(actual_trajectory_m[i, 1])))
-            pts = np.array(pts, np.int32).reshape((-1, 1, 2))
-            cv2.polylines(plot_canvas, [pts], isClosed=False, color=hist_color, thickness=4, lineType=cv2.LINE_AA)
+                pts_actual.append(to_px_local(float(actual_trajectory_m[i, 0]), float(actual_trajectory_m[i, 1])))
+            pts_actual_arr = np.array(pts_actual, np.int32).reshape((-1, 1, 2))
+            cv2.polylines(plot_canvas, [pts_actual_arr], isClosed=False, color=hist_color, thickness=4, lineType=cv2.LINE_AA)
             
         # Draw Prediction
         if prediction_m is not None:
-            pts = []
+            pts_pred = []
             for i in range(prediction_m.shape[0]):
-                pts.append(to_px_local(float(prediction_m[i, 0]), float(prediction_m[i, 1])))
-            pts = np.array(pts, np.int32).reshape((-1, 1, 2))
-            cv2.polylines(plot_canvas, [pts], isClosed=False, color=pred_color, thickness=6, lineType=cv2.LINE_AA)
+                pts_pred.append(to_px_local(float(prediction_m[i, 0]), float(prediction_m[i, 1])))
+            pts_pred_arr = np.array(pts_pred, np.int32).reshape((-1, 1, 2))
+            cv2.polylines(plot_canvas, [pts_pred_arr], isClosed=False, color=pred_color, thickness=6, lineType=cv2.LINE_AA)
             
         # Draw Ego Vehicle (Filled triangle with outline)
         ego_px, ego_py = to_px_local(0, 0)
@@ -305,6 +306,7 @@ class Visualization:
         N = trajectory_m.shape[0]
         # Coordinates: x = right, y = down, z = front
         # Assuming ground is at y = 1.5m relative to the camera
+        # Later this might be changed so that it is derived from the extrinsics matrix
         points_3d = np.ones((4, N), dtype=np.float32)
         points_3d[0, :] = trajectory_m[:, 0].numpy()  # x: right
         points_3d[1, :] = 1.5                         # y: down (ground)
@@ -358,10 +360,10 @@ class Visualization:
         action_sequence_pred: torch.Tensor,
         current_speed: float,
         front_camera_image: np.ndarray,
-        K: np.ndarray = None,
-        R: np.ndarray = None,
-        t: np.ndarray = None,
-        P: np.ndarray = None
+        K: Optional[np.ndarray] = None,
+        R: Optional[np.ndarray] = None,
+        t: Optional[np.ndarray] = None,
+        P: Optional[np.ndarray] = None
     ) -> np.ndarray:
         """
         This function overlays the trajectory from 3D to the 2D camera view and 
@@ -379,6 +381,8 @@ class Visualization:
         if P is not None:
             projection_matrix = P
         else:
+            if K is None or R is None or t is None:
+                raise ValueError("Either P or (K, R, t) must be provided.")
             projection_matrix = Visualization.get_camera_projection_matrix(K, R, t)
         
         target_traj_2d = Visualization.project_BEV_to_CameraView(target_traj_m, projection_matrix)

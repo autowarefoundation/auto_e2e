@@ -218,3 +218,113 @@ def test_render_trajectory_on_a_grid():
     assert grid_img is not None, "render_trajectory_on_a_grid returned None"
     assert isinstance(grid_img, np.ndarray), "render_trajectory_on_a_grid did not return a numpy array"
     assert grid_img.shape == (1080, 480, 3), "Shape of grid image is incorrect"
+
+def test_get_camera_projection_matrix():
+    K = np.eye(3)
+    R = np.eye(3)
+    t = np.array([[1.0], [2.0], [3.0]])
+    
+    P = Visualization.get_camera_projection_matrix(K, R, t)
+    
+    assert P.shape == (3, 4)
+    expected_P = np.array([
+        [1.0, 0.0, 0.0, 1.0],
+        [0.0, 1.0, 0.0, 2.0],
+        [0.0, 0.0, 1.0, 3.0]
+    ])
+    assert np.allclose(P, expected_P)
+
+def test_project_BEV_to_CameraView():
+    # 3D points in BEV: (x, y) where x is lateral, y is longitudinal
+    trajectory_m = torch.tensor([
+        [0.0, 10.0],  # Valid point in front
+        [2.0, 20.0],  # Valid point in front
+        [0.0, -5.0],  # Invalid point behind camera
+        [0.0, 0.05]   # Invalid point too close/behind camera (z <= 0.1)
+    ])
+    
+    # Simple projection matrix P = [I | 0]
+    P = np.array([
+        [1.0, 0.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0, 0.0],
+        [0.0, 0.0, 1.0, 0.0]
+    ])
+    
+    points_2d = Visualization.project_BEV_to_CameraView(trajectory_m, P)
+    
+    assert points_2d.shape == (4, 2)
+    # Check valid points
+    # 3D point is [x, 1.5, z] -> [0.0, 1.5, 10.0] -> 2D is [0/10, 1.5/10] = [0.0, 0.15]
+    assert np.allclose(points_2d[0], [0.0, 0.15])
+    # 3D point [2.0, 1.5, 20.0] -> 2D is [2/20, 1.5/20] = [0.1, 0.075]
+    assert np.allclose(points_2d[1], [0.1, 0.075])
+    
+    # Check invalid points
+    assert np.allclose(points_2d[2], [-1.0, -1.0])
+    assert np.allclose(points_2d[3], [-1.0, -1.0])
+
+def test_render_trajectory_on_camera_view():
+    camera_image = np.zeros((400, 400, 3), dtype=np.uint8)
+    # Valid points within the image, and some outside
+    trajectory_2d = np.array([
+        [200, 200],  # Inside
+        [250, 250],  # Inside
+        [-10, -10],  # Outside
+        [500, 500]   # Outside
+    ])
+    
+    test_color = (123, 45, 67) # BGR
+    img_with_traj = Visualization.render_trajectory_on_camera_view(
+        camera_image, trajectory_2d, color=test_color, thickness=3
+    )
+    
+    assert img_with_traj.shape == (400, 400, 3)
+    
+    # Check that color is present in the image where the line is drawn
+    # The line from (200, 200) to (250, 250) should be drawn with `test_color`
+    color_matches = np.all(img_with_traj == test_color, axis=-1)
+    assert np.any(color_matches), "Expected color not found in the rendered image"
+    
+def test_complete_front_camera_view_with_trajectory():
+    action_sequence_target = torch.zeros(128)
+    action_sequence_target[0::2] = 0.5  # acceleration
+    action_sequence_target[1::2] = 0.1  # curvature (left turn)
+    action_sequence_pred = torch.zeros(128)
+    action_sequence_pred[0::2] = -0.5 # deceleration
+    action_sequence_pred[1::2] = -0.1 # curvature (right turn)
+    current_speed = 10.0
+    front_camera_image = np.zeros((400, 600, 3), dtype=np.uint8)
+    
+    # Simple dummy projection matrix to make projection work without math domain errors
+    # P must map [x, 1.5, z] to something reasonable
+    K = np.array([[500, 0, 300], [0, 500, 200], [0, 0, 1]])
+    R = np.eye(3)
+    t = np.zeros((3, 1))
+    
+    combined_img = Visualization.complete_front_camera_view_with_trajectory(
+        action_sequence_target,
+        action_sequence_pred,
+        current_speed,
+        front_camera_image,
+        K=K, R=R, t=t
+    )
+    
+    assert combined_img is not None
+    # Grid is 1080x480. Camera is resized to height 1080.
+    # scale = 1080 / 400 = 2.7
+    # new_cam_w = int(600 * 2.7) = 1620
+    # Expected combined width = 480 + 1620 = 2100
+    assert combined_img.shape == (1080, 2100, 3)
+    
+    # The camera image part is the right side: combined_img[:, 480:]
+    cam_part = combined_img[:, 480:]
+    
+    # Let's check for the presence of target color (59, 108, 255) and pred color (52, 217, 164)
+    target_color = (59, 108, 255)
+    pred_color = (52, 217, 164)
+    
+    target_matches = np.all(cam_part == target_color, axis=-1)
+    pred_matches = np.all(cam_part == pred_color, axis=-1)
+    
+    assert np.any(target_matches), "Target trajectory color not found in the combined image"
+    assert np.any(pred_matches), "Predicted trajectory color not found in the combined image"

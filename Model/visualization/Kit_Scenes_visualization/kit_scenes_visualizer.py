@@ -12,6 +12,7 @@ import torch
 import cv2
 import numpy as np
 import argparse
+from typing import Optional
 
 from visualization.trajectory_rendering import Visualization
 from model_components.auto_e2e import AutoE2E
@@ -19,7 +20,7 @@ from data_parsing.kit_scenes.camera import NUM_VIEWS
 from data_parsing.kit_scenes.map import generate_bev_map_tile
 
 
-def visualization_on_kit_scenes(scene_ids: list[str] = None, frame_index: int = 0, zoom_in: bool = False, dataset_root: str = None) -> tuple[np.ndarray, np.ndarray]:
+def visualization_on_kit_scenes(scene_ids: Optional[list[str]] = None, frame_index: int = 0, zoom_in: bool = False, dataset_root: Optional[str] = None) -> tuple[Optional[np.ndarray], Optional[np.ndarray]]:
     result = forward_pass_for_visualization_test(scene_ids=scene_ids, frame_index=frame_index, dataset_root=dataset_root, pretrained_backbone=False)
     
     if result is None:
@@ -28,7 +29,7 @@ def visualization_on_kit_scenes(scene_ids: list[str] = None, frame_index: int = 
         
     pred_trajectory, target_trajectory, map_image, raw_camera_image, current_speed, current_heading, P = result
     
-    resolution_m_px = 1 # Actual resolution depends on the zoom scale, we'll keep it as 1 to see how it looks.
+    resolution_m_px: float = 1.0 # Actual resolution depends on the zoom scale, we'll keep it as 1 to see how it looks.
     # The default generate_bev_map_tile size is 1024, radius is 60m. So 120m / 1024px = 0.117 m/px.
     resolution_m_px = 120.0 / 1024.0
 
@@ -79,7 +80,7 @@ def visualization_on_kit_scenes(scene_ids: list[str] = None, frame_index: int = 
 
 
 def forward_pass_for_visualization_test(
-    scene_ids: list[str] = None, frame_index: int = 0, dataset_root: str = None, pretrained_backbone: bool = False
+    scene_ids: Optional[list[str]] = None, frame_index: int = 0, dataset_root: Optional[str] = None, pretrained_backbone: bool = False
     ):
     """
     Run forward pass with real KIT Scenes data at a specific frame index.
@@ -180,7 +181,6 @@ if __name__ == "__main__":
     combined_image, camera_and_grid = visualization_on_kit_scenes(args.scene_ids, frame_index=args.frame, zoom_in=args.zoom_in, dataset_root=args.dataset_root)
     
     if combined_image is not None and camera_and_grid is not None:
-        # Save to the specific 'generated_images' directory as requested
         save_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "generated_images")
         os.makedirs(save_dir, exist_ok=True)
         
