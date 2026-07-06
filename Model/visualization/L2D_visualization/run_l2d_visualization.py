@@ -1,10 +1,10 @@
 """
 Usage:
     cd Model/visualization
-    python run_l2d_visualization.py
+    python L2D_visualization/run_l2d_visualization.py
 
     # With real data (requires lerobot + cached dataset):
-    python run_l2d_visualization.py --live --episodes 0
+    python L2D_visualization/run_l2d_visualization.py --live --episodes 0
 """
 
 import sys
@@ -19,10 +19,10 @@ from data_parsing.l2d.camera import NUM_VIEWS
 import argparse
 import yaml
 
-def visualization_on_l2d(episodes: list[int], frame_index: int = 0, zoom_in: bool = False) -> tuple[np.ndarray, np.ndarray]:
+def visualization_on_l2d(episodes: list[int], frame_index: int = 0, zoom_in: bool = False) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     result = forward_pass_for_visualization_test(episodes=episodes, frame_index=frame_index, pretrained_backbone=False)
     
-    pred_trajectory, target_trajectory, map_image, current_speed, current_heading = result
+    pred_trajectory, target_trajectory, map_image, front_image, current_speed, current_heading = result
     resolution_m_px = 1 # Actual resolution based on L2D map scale
 
     print(f"Rendering trajectories (speed: {current_speed:.2f} m/s)...")
@@ -38,6 +38,10 @@ def visualization_on_l2d(episodes: list[int], frame_index: int = 0, zoom_in: boo
     
     # Scale resolution based on resize ratio
     resolution_m_px = resolution_m_px * (current_w / target_w)
+    
+    # 0.5 Define color scheme
+    prediction_color = (140, 255, 0)
+    actual_trajectory_color = (255, 80, 120)
 
     # 1. Draw extracted ground truth (actual driven path)
     combined_img = Visualization.render_trajectory_map_tile(
@@ -45,7 +49,7 @@ def visualization_on_l2d(episodes: list[int], frame_index: int = 0, zoom_in: boo
         current_speed=current_speed,
         map_image=map_image,
         resolution_m_px=resolution_m_px,
-        color=(255, 108, 59),
+        color=actual_trajectory_color,
         initial_heading=current_heading
     )
 
@@ -55,7 +59,7 @@ def visualization_on_l2d(episodes: list[int], frame_index: int = 0, zoom_in: boo
         current_speed=current_speed,
         map_image=combined_img,
         resolution_m_px=resolution_m_px,
-        color=(164, 217, 52), 
+        color=prediction_color, 
         initial_heading=current_heading
     )
 
@@ -70,10 +74,49 @@ def visualization_on_l2d(episodes: list[int], frame_index: int = 0, zoom_in: boo
     
     grid_with_trajectory = Visualization.generate_grid(
         prediction_m=pred_trajectory_m,
-        actual_trajectory_m=target_trajectory_m
+        actual_trajectory_m=target_trajectory_m,
+        prediction_color=prediction_color,
+        actual_trajectory_color=actual_trajectory_color
     )
 
-    return combined_img, grid_with_trajectory
+    K = np.array([
+        [1000, 0, front_image.shape[1] / 2],
+        [0, 1000, front_image.shape[0] / 2],
+        [0, 0, 1]
+    ], dtype=np.float32)
+    R = np.eye(3, dtype=np.float32)
+    t = np.zeros((3, 1), dtype=np.float32)
+
+    cam_trajectory_view = front_image.copy()
+    
+    if target_trajectory is not None:
+        cam_trajectory_view = Visualization.complete_front_camera_view_with_trajectory(
+            action_sequence=target_trajectory,
+            current_speed=current_speed,
+            front_camera_image=cam_trajectory_view,
+            K=K,
+            R=R,
+            t=t,
+            color=actual_trajectory_color
+        )
+        
+    if pred_trajectory is not None:
+        cam_trajectory_view = Visualization.complete_front_camera_view_with_trajectory(
+            action_sequence=pred_trajectory,
+            current_speed=current_speed,
+            front_camera_image=cam_trajectory_view,
+            K=K,
+            R=R,
+            t=t,
+            color=prediction_color
+        )
+        
+    cam_trajectory_view = Visualization.concatenate_grid_and_camera(
+        grid_img=grid_with_trajectory,
+        cam_img=cam_trajectory_view
+    )
+
+    return combined_img, grid_with_trajectory, cam_trajectory_view
 
 def forward_pass_for_visualization_test(
     episodes: list[int], frame_index: int = 0, pretrained_backbone: bool = False
@@ -123,6 +166,11 @@ def forward_pass_for_visualization_test(
     raw_map_array = (raw_map_tensor.permute(1, 2, 0).numpy() * 255).astype(np.uint8)
     raw_map_image = cv2.cvtColor(raw_map_array, cv2.COLOR_RGB2BGR)
 
+    ep_idx, row = dataset._samples[frame_index]
+    raw_front_tensor = dataset.lerobot_dataset[row]["observation.images.front_left"].cpu()
+    raw_front_array = (raw_front_tensor.permute(1, 2, 0).numpy() * 255).astype(np.uint8)
+    raw_front_image = cv2.cvtColor(raw_front_array, cv2.COLOR_RGB2BGR)
+
     current_speed = egomotion_history[-1, 252].item()
     current_heading = batch["current_heading"][-1].item() if "current_heading" in batch else 0.0
 
@@ -143,7 +191,7 @@ def forward_pass_for_visualization_test(
         )
         trajectory = out[0] if isinstance(out, tuple) else out
 
-    return trajectory[-1].cpu(), trajectory_target[-1].cpu(), raw_map_image, current_speed, current_heading
+    return trajectory[-1].cpu(), trajectory_target[-1].cpu(), raw_map_image, raw_front_image, current_speed, current_heading
 
 def load_extrinsics(path_to_yaml: str, view_name: str = "observation.images.front_left") -> tuple[np.ndarray, np.ndarray]:
         """
@@ -161,7 +209,7 @@ def load_extrinsics(path_to_yaml: str, view_name: str = "observation.images.fron
             calib_data = yaml.safe_load(f)
 
         try:
-            # Map view_name to YAML key format (e.g., "observation.images.front_left" -> "cam_front_left")
+            # Map view_name to YAML key format
             yaml_key = f"cam_{view_name.split('.')[-1]}"
             
             view_calib = calib_data[yaml_key] if yaml_key in calib_data else calib_data
@@ -187,12 +235,14 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     if args.live:
-        combined_image, grid_with_trajectory = visualization_on_l2d(args.episodes, frame_index=args.frame, zoom_in=args.zoom_in)
+        combined_image, grid_with_trajectory, cam_trajectory_view = visualization_on_l2d(args.episodes, frame_index=args.frame, zoom_in=args.zoom_in)
         save_path_map = os.path.join(os.path.dirname(os.path.abspath(__file__)), "generated_images", "visualization_result_map.png")
         save_path_grid = os.path.join(os.path.dirname(os.path.abspath(__file__)), "generated_images", "visualization_result_grid.png")
+        save_path_cam = os.path.join(os.path.dirname(os.path.abspath(__file__)), "generated_images", "visualization_result_cam.png")
         os.makedirs(os.path.dirname(save_path_map), exist_ok=True)
         os.makedirs(os.path.dirname(save_path_grid), exist_ok=True)
         cv2.imwrite(save_path_map, combined_image)
         cv2.imwrite(save_path_grid, grid_with_trajectory)
+        cv2.imwrite(save_path_cam, cam_trajectory_view)
     else:
         print("Skipping. Run with --live to execute L2D visualization.")
