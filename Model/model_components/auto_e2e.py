@@ -1,4 +1,7 @@
+from typing import Any, Dict, Optional
+
 import torch.nn as nn
+
 from .reactive_e2e import ReactiveE2E
 from .world_action_model import RollingHistoryBuffer, WorldActionModel
 
@@ -13,7 +16,9 @@ class AutoE2E(nn.Module):
                  map_fusion_mode="residual", map_fusion_kwargs=None,
                  temporal_memory_mode="no_memory", temporal_memory_kwargs=None,
                  planner_mode="bezier", planner_kwargs=None,
-                 enable_world_model=False, world_model_kwargs=None):
+                 enable_world_model=False, world_model_kwargs=None,
+                 enable_reasoning_band=False,
+                 reasoning_kwargs: Optional[Dict[str, Any]] = None):
         super(AutoE2E, self).__init__()
 
         # Reactive model which runs at 10Hz and processes multi-camera inputs
@@ -34,8 +39,8 @@ class AutoE2E(nn.Module):
         # future visual features (JEPA). Reuses the reactive backbone (one shared
         # backbone; the JEPA target is a frozen copy of it). Opt-in (default OFF)
         # so the reactive-only default is byte-identical.
-        self.World_Action_Model_E2E = None
-        self.visual_history_buffer = None
+        self.World_Action_Model_E2E: Optional[WorldActionModel] = None
+        self.visual_history_buffer: Optional[RollingHistoryBuffer] = None
         if enable_world_model:
             wmk = dict(world_model_kwargs or {})
             history_len = wmk.pop("history_len", 4)
@@ -45,6 +50,20 @@ class AutoE2E(nn.Module):
                 history_len=history_len, **wmk,
             )
             self.visual_history_buffer = RollingHistoryBuffer(history_len=history_len)
+
+        # Reasoning Band (slow, ~1Hz): classifies the current (and in training,
+        # future) scenario across multi-label taxonomy groups, supervised by
+        # the student/teacher loss, and feeds the trajectory planner through a
+        # ZERO-INIT gate that modulates the visual history (#98/#103) — a
+        # strict no-op at initialisation, so with the gate untrained the
+        # reactive baseline is unchanged.  Opt-in (default OFF) so the
+        # reactive-only baseline is byte-for-byte unchanged when disabled.
+        self.Reasoning_Band: Optional[nn.Module] = None
+        if enable_reasoning_band:
+            from .reasoning.reasoning_band import ReasoningBand  # local import — lazy
+            rkw = dict(reasoning_kwargs or {})
+            rkw.setdefault("visual_history_dim", visual_history_dim)
+            self.Reasoning_Band = ReasoningBand(**rkw)
 
     def reset_visual_history(self):
         """Clear the World Model's rolling buffer (call between sequences)."""
@@ -104,21 +123,40 @@ class AutoE2E(nn.Module):
             # Encode the current 1 Hz multi-view frame; push a detached copy so the
             # planner's history is a pure rolling memory (no graph across steps).
             visual_embedding, _ = wam(camera_tiles)
-            self.visual_history_buffer.push(visual_embedding.detach())
+            self.visual_history_buffer.push(visual_embedding.detach())  # type: ignore[union-attr]
             # The planner and the future prediction read the SAME history (post-push,
             # i.e. including the current frame) so the JEPA context stays aligned
             # with what the planner actually sees.
             visual_history = wam.aggregate_history(
-                self.visual_history_buffer.visual_history())
+                self.visual_history_buffer.visual_history())  # type: ignore[union-attr]
             if mode == "train":
                 future_state_pred = wam.predict_future(visual_history)
+
+        # Reasoning Band (1Hz): classify the current scenario (and, in training,
+        # future horizons), then condition the planner through the band's
+        # zero-init gate: the planner receives the MODULATED visual history,
+        # which at initialisation is identical to the input (strict no-op) and
+        # only diverges as training moves the gate (#98/#103).
+        reasoning_pred = None
+        if self.Reasoning_Band is not None:
+            reasoning_pred = self.Reasoning_Band(visual_history, mode=mode)
+            visual_history = reasoning_pred.modulated_visual_history
 
         trajectory = self.Reactive_E2E(camera_tiles, map_input, visual_history, egomotion_history,
         camera_params=camera_params, mode=mode, trajectory_target=trajectory_target, **kwargs)
 
-        # Inference: just the trajectory. Training with the World Model on: also
-        # return the predicted future state (the differentiable JEPA loss itself is
-        # computed in the training loop via the windowed WorldActionModel path).
+        # Return contract:
+        #   * Reasoning band OFF, World Model OFF → same as before (scalar / trajectory).
+        #   * World Model ON, mode="train" → (trajectory, future_state_pred)       [existing]
+        #   * Reasoning Band ON, mode="train" → (trajectory, future_state_pred, reasoning_pred)
+        #   * Reasoning Band ON, mode!="train" → same as World-Model-only path
+        #
+        # The reasoning_pred follows the same pattern as future_state_pred: only
+        # returned in mode="train" (with the future horizons) for the training
+        # loop to compute the reasoning loss.  It is a ReasoningPrediction
+        # (per-group logits + per-horizon confidence + the modulated history).
+        if self.Reasoning_Band is not None and mode == "train":
+            return trajectory, future_state_pred, reasoning_pred
         if self.World_Action_Model_E2E is not None and mode == "train":
             return trajectory, future_state_pred
         return trajectory
