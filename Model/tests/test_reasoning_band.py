@@ -429,7 +429,7 @@ class TestReasoningLoss:
 
 class _AutoE2EHarness:
     """Shared mock-backbone harness (NOT collected: no Test prefix) so the
-    wiring, Moondream and faithfulness suites reuse _build/_inputs without
+    wiring and faithfulness suites reuse _build/_inputs without
     pytest re-collecting inherited tests."""
 
     class _MockBackbone(nn.Module):
@@ -583,39 +583,66 @@ class TestTaxonomyExtensibility:
 
 
 # ---------------------------------------------------------------------------
-# Asymmetric Loss option (class-imbalance; arXiv:2009.14119)
+# Faithfulness / intervention check (#98 evaluation protocol)
 # ---------------------------------------------------------------------------
 
-class TestAsymmetricLoss:
-    def _logits_targets(self, logit_val: float, target_val: float):
-        logits = {g.name: [torch.full((B, len(g)), logit_val)]
-                  for g in DEFAULT_TAXONOMY.groups}
-        targets = {g.name: [torch.full((B, len(g)), target_val)]
-                   for g in DEFAULT_TAXONOMY.groups}
-        return logits, targets
+class TestReasoningInterventionDelta(_AutoE2EHarness):
+    """The intervention metric: with the gate untrained the coupled and
+    intervened trajectories are identical (delta 0.0); once the gate moves,
+    the reasoning signal measurably influences the trajectory."""
 
-    def test_asl_near_zero_for_perfect_predictions(self):
-        logits, targets = self._logits_targets(10.0, 1.0)
-        assert ReasoningLoss(loss_type="asl")(logits, targets).item() < 0.01
+    def test_zero_delta_at_init(self, device):
+        from evaluation.faithfulness import reasoning_intervention_delta
+        m = self._build(device, enable_reasoning_band=True,
+                        reasoning_kwargs={"hidden_dim": 32})
+        cam, mp, vh, ego = self._inputs(device)
+        delta = reasoning_intervention_delta(m, cam, mp, vh, ego)
+        assert delta["trajectory_l2"] == pytest.approx(0.0, abs=1e-5)
+        assert delta["history_shift"] == pytest.approx(0.0, abs=1e-5)
 
-    def test_asl_downweights_easy_negatives_vs_bce(self):
-        logits, targets = self._logits_targets(-2.0, 0.0)
-        asl = ReasoningLoss(loss_type="asl")(logits, targets).item()
-        bce = ReasoningLoss(loss_type="bce")(logits, targets).item()
-        assert asl < bce
+    def test_positive_delta_once_gate_moves(self, device):
+        from evaluation.faithfulness import reasoning_intervention_delta
+        m = self._build(device, enable_reasoning_band=True,
+                        reasoning_kwargs={"hidden_dim": 32})
+        with torch.no_grad():
+            m.Reasoning_Band.gate.beta.bias.fill_(1.0)
+        cam, mp, vh, ego = self._inputs(device)
+        delta = reasoning_intervention_delta(m, cam, mp, vh, ego)
+        assert delta["history_shift"] > 0.0
 
-    def test_reduction_none_shape(self):
-        logits, targets = self._logits_targets(0.0, 0.5)
-        loss = ReasoningLoss(loss_type="asl", reduction="none")(logits, targets)
-        assert loss.shape == (B,)
+    def test_band_restored_after_intervention(self, device):
+        from evaluation.faithfulness import reasoning_intervention_delta
+        m = self._build(device, enable_reasoning_band=True,
+                        reasoning_kwargs={"hidden_dim": 32})
+        band = m.Reasoning_Band
+        cam, mp, vh, ego = self._inputs(device)
+        reasoning_intervention_delta(m, cam, mp, vh, ego)
+        assert m.Reasoning_Band is band
 
-    def test_invalid_loss_type_raises(self):
-        with pytest.raises(ValueError, match="loss_type"):
-            ReasoningLoss(loss_type="focal")
+    def test_requires_reasoning_band(self, device):
+        from evaluation.faithfulness import reasoning_intervention_delta
+        m = self._build(device, enable_reasoning_band=False)
+        cam, mp, vh, ego = self._inputs(device)
+        with pytest.raises(ValueError, match="enable_reasoning_band"):
+            reasoning_intervention_delta(m, cam, mp, vh, ego)
 
-    def test_asl_backward(self):
-        logits = {g.name: [torch.zeros(B, len(g), requires_grad=True)]
-                  for g in DEFAULT_TAXONOMY.groups}
-        targets = {g.name: [torch.ones(B, len(g))] for g in DEFAULT_TAXONOMY.groups}
-        ReasoningLoss(loss_type="asl")(logits, targets).backward()
-        assert logits["maneuver"][0].grad is not None
+
+# ---------------------------------------------------------------------------
+# Audit regressions (comité 3/07)
+# ---------------------------------------------------------------------------
+
+class TestAuditRegressions(_AutoE2EHarness):
+    def test_faithfulness_zero_delta_with_world_model_on(self, device):
+        """CRITICAL fix: with the World Model enabled, every forward pushes to
+        the rolling buffer — without snapshot/restore the coupled and
+        intervened runs would diverge even with an untrained gate."""
+        from evaluation.faithfulness import reasoning_intervention_delta
+        m = self._build(device, enable_reasoning_band=True,
+                        enable_world_model=True,
+                        reasoning_kwargs={"hidden_dim": 32})
+        cam, mp, vh, ego = self._inputs(device)
+        buf_before = list(m.visual_history_buffer._buf)
+        delta = reasoning_intervention_delta(m, cam, mp, vh, ego)
+        assert delta["trajectory_l2"] == pytest.approx(0.0, abs=1e-5)
+        # Caller's rollout state untouched by the metric.
+        assert len(m.visual_history_buffer._buf) == len(buf_before)

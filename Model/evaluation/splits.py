@@ -70,3 +70,38 @@ def geographic_holdout_split(
     if not train:
         raise ValueError("holdout_cities cover every episode — train split is empty")
     return train, val
+
+
+def long_tail_split(
+    sample_scenarios: Sequence[Sequence[str]],
+    long_tail_classes: Sequence[str],
+) -> tuple[list[int], list[int]]:
+    """Stratify evaluation samples into long-tail vs nominal subsets (#98).
+
+    Average open-loop metrics are dominated by ego status and nominal driving
+    (Li et al., CVPR 2024 — "Is Ego Status All You Need?"), so the reasoning
+    band must be measured on the long-tail subset, reported as the delta over
+    an ego-status-only baseline (e.g. :func:`hold_last_action_baseline`).
+
+    Like the other helpers here, this operates on caller-supplied labels — one
+    sequence of active scenario class names per evaluation sample (from teacher
+    labels, L2D metadata, or KITScenes annotations); it does not read datasets.
+
+    Args:
+        sample_scenarios: per-sample active scenario classes (index-aligned).
+        long_tail_classes: class names that define the long tail (e.g. the
+            ``edge_case`` taxonomy group, or KITScenes' rare categories).
+    Returns:
+        ``(long_tail_indices, nominal_indices)`` — a sample lands in the
+        long-tail subset when ANY of its classes is in ``long_tail_classes``.
+    Raises:
+        ValueError: if ``long_tail_classes`` is empty.
+    """
+    if not long_tail_classes:
+        raise ValueError("long_tail_classes must be non-empty")
+    rare = set(long_tail_classes)
+    long_tail: list[int] = []
+    nominal: list[int] = []
+    for i, classes in enumerate(sample_scenarios):
+        (long_tail if rare.intersection(classes) else nominal).append(i)
+    return long_tail, nominal
