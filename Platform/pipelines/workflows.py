@@ -36,14 +36,26 @@ class Backbone(enum.Enum):
     RESNET_50 = "res_net_50"
 
 
-class FusionMode(enum.Enum):
-    CONCAT = "concat"
-    CROSS_ATTN = "cross_attn"
-    BEV = "bev"
-
+# NOTE: view fusion is no longer selectable. The reactive-refactor (PR #94)
+# removed concat/cross_attn and hardcoded BEV fusion inside ReactiveE2E, and
+# dropped the `fusion_mode` argument from AutoE2E.__init__. We keep the string
+# "bev" only as a metadata label so MLflow runs stay comparable with old runs.
+FUSION_LABEL = "bev"
 
 TrainOutput = NamedTuple("TrainOutput", checkpoint=FlyteFile, metadata=FlyteFile)
 EvalMetrics = NamedTuple("EvalMetrics", ade=float, fde=float, gate_pass=bool)
+
+
+def _model_kwargs(config: dict) -> dict:
+    """Filter a saved checkpoint `config` down to kwargs the current AutoE2E
+    accepts. The reactive refactor (PR #94) removed `fusion_mode`, but old
+    checkpoints (and our own metadata) may still carry it, which would make
+    `AutoE2E(**config)` raise. Drop any keys the constructor no longer takes.
+    """
+    import inspect
+    from model_components.auto_e2e import AutoE2E
+    valid = set(inspect.signature(AutoE2E.__init__).parameters) - {"self"}
+    return {k: v for k, v in config.items() if k in valid}
 
 
 def _select_shard_dir(shards, dataset) -> str:
@@ -71,6 +83,21 @@ def _select_shard_dir(shards, dataset) -> str:
                 pass
     print(f"WARN: no shards matched dataset={target}; using first ({fallback})")
     return fallback
+
+
+def _loader_projection(loader, device):
+    """Return the loader's per-dataset projection operator on ``device``.
+
+    Geometry is a rig constant exposed on the loader (``.projection`` /
+    ``.geometry_type``) by make_pre_extracted_loader, not per batch. Datasets
+    without calibration expose ``projection=None`` + ``geometry_type='pseudo'``,
+    so we run the explicit pseudo path — never a silent real-geometry claim.
+    """
+    projection = getattr(loader, "projection", None)
+    geometry_type = getattr(loader, "geometry_type", "pseudo")
+    if projection is not None:
+        projection = projection.to(device)
+    return projection, geometry_type
 
 
 # ============================================================
@@ -125,6 +152,11 @@ def data_ingest(
         )
         clip_ids = ds.clip_index.index.tolist()[:episodes]
         feats = CAMERAS + ["egomotion"]
+        # Real calibration: native f-theta intrinsics + sensor extrinsics. Enables
+        # geometrically-meaningful BEV projection (#77). The rig is shared across
+        # the subset, so we save calibration from the first clip that has it and
+        # fall back to pseudo geometry downstream if none does.
+        calib_saved = False
         for clip_id in clip_ids:
             ds.download_clip_features(clip_id, features=feats)
             for cam in CAMERAS:
@@ -134,6 +166,23 @@ def data_ingest(
             cf = ds.features.get_chunk_feature_filename(ds.get_clip_chunk(clip_id), "egomotion")
             with ds.open_file(cf, maybe_stream=True) as f:
                 unpack_egomotion_zip(f.read(), clip_id, out)
+            if not calib_saved:
+                try:
+                    import pickle
+                    ds.download_clip_features(
+                        clip_id, features=["camera_intrinsics", "sensor_extrinsics"])
+                    intr = ds.get_clip_feature(clip_id, "camera_intrinsics")
+                    extr = ds.get_clip_feature(clip_id, "sensor_extrinsics")
+                    calib_dir = out / "calibration"
+                    calib_dir.mkdir(parents=True, exist_ok=True)
+                    with open(calib_dir / "intrinsics.pkl", "wb") as f:
+                        pickle.dump(intr, f)
+                    with open(calib_dir / "extrinsics.pkl", "wb") as f:
+                        pickle.dump(extr, f)
+                    calib_saved = True
+                    print(f"Saved NVIDIA calibration from clip {clip_id}")
+                except Exception as e:
+                    print(f"WARN: no calibration for clip {clip_id}: {e}")
         print(f"Ingested {dataset.value}: {len(clip_ids)} clips → {out_dir}")
         return FlyteDirectory(out_dir)
 
@@ -182,8 +231,13 @@ def data_processing(
     raw_path = raw_data.download()
     print(f"Processing raw data from: {raw_path} (dataset={dataset.value})")
 
-    # Build the appropriate Dataset (both emit the same sample schema:
-    # visual_tiles (V,3,H,W), egomotion_history (256), trajectory_target (128)).
+    # Build the appropriate Dataset. Both are RAW pre-extraction sources: they
+    # emit unmodified frames (no backbone resize/crop/normalize). The shard packer
+    # below owns the single, explicit, geometry-aware resize; the pre-extracted
+    # loader owns the single ToTensor+Normalize. This avoids any double-normalize /
+    # center-crop and keeps the projection ABI targeting a known (plain-resized)
+    # frame. Sample schema: visual_tiles (V,3,H,W), map_tile (3,H,W),
+    # egomotion_history (256), trajectory_target (128). See #77.
     ep_list = list(range(episodes)) if episodes > 0 else None
     if dataset == Dataset.NVIDIA_PHYSICAL_AI:
         from data_parsing.nvidia_physical_ai.dataset import NvidiaAVDataset
@@ -213,9 +267,31 @@ def data_processing(
 
     open_new_shard()
 
+    def _write_jpeg(sample_key, member, frame_tensor):
+        """Resize a RAW (3,H,W) frame to a JPEG and add it to the current shard.
+
+        Input is a raw frame from the (raw-only) dataset:
+        uint8 [0,255] (NVIDIA) or float [0,1] (L2D lerobot). ToPILImage handles
+        both. The Resize here is the SINGLE, explicit, geometry-aware resize to
+        the shard/model-input size; no normalization happens here (the loader
+        does ToTensor+Normalize once). float frames are clamped to [0,1] purely
+        as a safety bound for ToPILImage's *255 scaling.
+        """
+        t = frame_tensor.cpu()
+        if t.dtype.is_floating_point:
+            t = t.clamp(0, 1)
+        f = resize(to_pil(t))
+        b = io.BytesIO()
+        f.save(b, format="JPEG", quality=90)
+        jpg = b.getvalue()
+        ti = tarfile.TarInfo(name=f"{sample_key}.{member}")
+        ti.size = len(jpg)
+        current_tar.addfile(ti, io.BytesIO(jpg))
+
     for si in idx_iter:
         sample = ds[si]
-        visual = sample["visual_tiles"]            # (V, 3, H, W) tensor
+        visual = sample["visual_tiles"]            # (V, 3, H, W) real cameras
+        map_tile = sample.get("map_tile")          # (3, H, W) nav-map, if any
         ego_hist = sample["egomotion_history"]     # (256,)
         traj = sample["trajectory_target"]         # (128,)
         ego_data = np.concatenate([
@@ -224,15 +300,14 @@ def data_processing(
         ]).astype(np.float32)
 
         sample_key = f"s{si:08d}"
+        # Real camera views: cam_<i>.jpg (these define V / num_views).
         for cam_i in range(visual.shape[0]):
-            frame = to_pil(visual[cam_i].cpu().clamp(0, 1) if visual[cam_i].dtype.is_floating_point else visual[cam_i])
-            frame = resize(frame)
-            buf = io.BytesIO()
-            frame.save(buf, format="JPEG", quality=90)
-            jpg = buf.getvalue()
-            info = tarfile.TarInfo(name=f"{sample_key}.cam_{cam_i}.jpg")
-            info.size = len(jpg)
-            current_tar.addfile(info, io.BytesIO(jpg))
+            _write_jpeg(sample_key, f"cam_{cam_i}.jpg", visual[cam_i])
+
+        # Nav-map view: map.jpg, kept as a DISTINCT key so the loader routes it
+        # to the map branch and never counts it as a camera.
+        if map_tile is not None:
+            _write_jpeg(sample_key, "map.jpg", map_tile)
 
         eb = ego_data.tobytes()
         info = tarfile.TarInfo(name=f"{sample_key}.ego.npy")
@@ -253,7 +328,26 @@ def data_processing(
 
     manifest = {"total_samples": sample_count, "shards": shard_idx,
                 "hz": hz, "image_size": image_size, "dataset": dataset.value,
-                "episodes": episodes, "num_views": int(visual.shape[0]) if sample_count else 0}
+                "episodes": episodes,
+                # num_views = real cameras only; the map view is stored under a
+                # separate map.jpg key and is NOT counted here (#77).
+                "num_views": int(visual.shape[0]) if sample_count else 0,
+                "has_map": bool(sample_count) and (map_tile is not None)}
+
+    # Per-dataset camera calibration (rig constant): a projection-operator spec
+    # stored once, scaled to image_size. NVIDIA/KITScenes provide real geometry;
+    # L2D has no published intrinsics so it carries none (pseudo path). The
+    # dataset exposes a `projection_spec(image_size)` builder when available.
+    spec = None
+    build_spec = getattr(ds, "projection_spec", None)
+    if callable(build_spec) and sample_count:
+        spec = build_spec(image_size)
+    if spec is not None:
+        manifest["projection"] = spec
+        manifest["geometry_type"] = spec.get("type", "pinhole")
+    else:
+        manifest["geometry_type"] = "pseudo"
+
     with open(os.path.join(out_dir, "manifest.json"), "w") as f:
         json.dump(manifest, f)
 
@@ -273,7 +367,6 @@ def train_il(
     shards: List[FlyteDirectory],
     dataset: Dataset = Dataset.L2D,
     backbone: Backbone = Backbone.SWIN_V2_TINY,
-    fusion_mode: FusionMode = FusionMode.CONCAT,
     epochs: int = 3,
     batch_size: int = 4,
     lr: float = 1e-4,
@@ -298,23 +391,26 @@ def train_il(
 
     shard_dir = _select_shard_dir(shards, dataset)
     ctx = current_context()
-    bb, fm = backbone.value, fusion_mode.value
+    bb, fm = backbone.value, FUSION_LABEL
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     print(f"Training: backbone={bb} fusion={fm} epochs={epochs} bs={batch_size} device={device}")
 
     # DataLoader
     loader = make_pre_extracted_loader(shard_dir, batch_size=batch_size, num_workers=0)
+    projection, geometry_type = _loader_projection(loader, device)
+    print(f"Geometry: {geometry_type} (projection={'real' if projection else 'pseudo'})")
 
     # Detect num_views from the data so the model matches the dataset.
     _peek = next(iter(loader))
     num_views = int(_peek["visual_tiles"].shape[1])
     print(f"Detected num_views={num_views}")
 
-    # Model
+    # Model. fusion_mode is gone (BEV hardcoded inside ReactiveE2E); the model
+    # now also owns the map branch, so its forward requires a map_input tensor.
     model = AutoE2E(
         backbone=bb, num_views=num_views, embed_dim=256,
-        fusion_mode=fm, is_pretrained=True,
+        is_pretrained=True,
     ).to(device)
 
     # Optimizer + Loss
@@ -331,14 +427,17 @@ def train_il(
     for epoch in range(epochs):
         epoch_losses = []
         for batch in loader:
-            visual = batch["visual_tiles"].to(device)        # (B, 7, 3, H, W)
+            visual = batch["visual_tiles"].to(device)        # (B, V, 3, H, W)
             ego_hist = batch["egomotion_history"].to(device)  # (B, 256)
             vis_hist = batch["visual_history"].to(device)     # (B, 896)
             target = batch["trajectory_target"].to(device)    # (B, 128)
+            map_input = batch["map_input"].to(device)
 
             optimizer.zero_grad()
             with torch.amp.autocast("cuda", enabled=amp):
-                pred, _, _ = model(visual, vis_hist, ego_hist)
+                pred = model(visual, map_input, vis_hist, ego_hist,
+                             projection=projection, geometry_type=geometry_type,
+                             mode="train", trajectory_target=target)
                 loss = loss_fn(pred, target)
 
             scaler.scale(loss).backward()
@@ -356,9 +455,11 @@ def train_il(
     # Save checkpoint
     os.makedirs("/tmp/train", exist_ok=True)
     ckpt_path = "/tmp/train/best.pt"
+    # `config` must be reconstruction kwargs for AutoE2E(**config); fusion_mode
+    # is no longer a constructor arg, so it lives only in metadata below.
     torch.save({
         "model_state_dict": model.state_dict(),
-        "config": {"backbone": bb, "fusion_mode": fm, "embed_dim": 256, "num_views": num_views},
+        "config": {"backbone": bb, "embed_dim": 256, "num_views": num_views},
         "epoch": epochs,
     }, ckpt_path)
 
@@ -422,10 +523,11 @@ def train_offline_rl(
 
     ckpt = torch.load(ckpt_path, map_location=device)
     config = ckpt["config"]
-    model = AutoE2E(**config).to(device)
+    model = AutoE2E(**_model_kwargs(config)).to(device)
     model.load_state_dict(ckpt["model_state_dict"])
 
     loader = make_pre_extracted_loader(shard_dir, batch_size=4, num_workers=0)
+    projection, geometry_type = _loader_projection(loader, device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=3e-5, weight_decay=1e-3)
 
     # Simplified IQL-style training
@@ -438,12 +540,17 @@ def train_offline_rl(
             ego_hist = batch["egomotion_history"].to(device)
             vis_hist = batch["visual_history"].to(device)
             target = batch["trajectory_target"].to(device)
+            map_input = batch["map_input"].to(device)
 
             optimizer.zero_grad()
-            pred, _, _ = model(visual, vis_hist, ego_hist)
+            pred = model(visual, map_input, vis_hist, ego_hist,
+                         projection=projection, geometry_type=geometry_type,
+                         mode="train", trajectory_target=target)
             # IQL advantage-weighted regression
             with torch.no_grad():
-                baseline_pred, _, _ = model(visual, vis_hist, ego_hist)
+                baseline_pred = model(visual, map_input, vis_hist, ego_hist,
+                                      projection=projection, geometry_type=geometry_type,
+                                      mode="infer")
             advantage = -(pred - target).pow(2).mean(dim=-1) + (baseline_pred - target).pow(2).mean(dim=-1)
             weights = torch.exp(beta * advantage).clamp(max=100.0)
             loss = (weights * (pred - target).pow(2).mean(dim=-1)).mean()
@@ -507,12 +614,13 @@ def _run_evaluation(checkpoint, shards, train_metadata, dataset, experiment_name
     # Load model
     ckpt = torch.load(ckpt_path, map_location=device)
     config = ckpt["config"]
-    model = AutoE2E(**config).to(device)
+    model = AutoE2E(**_model_kwargs(config)).to(device)
     model.load_state_dict(ckpt["model_state_dict"])
     model.eval()
 
     # Evaluate
     loader = make_pre_extracted_loader(shard_dir, batch_size=8, num_workers=0, shuffle=0)
+    projection, geometry_type = _loader_projection(loader, device)
     all_ade, all_fde = [], []
 
     with torch.no_grad():
@@ -521,8 +629,10 @@ def _run_evaluation(checkpoint, shards, train_metadata, dataset, experiment_name
             ego_hist = batch["egomotion_history"].to(device)
             vis_hist = batch["visual_history"].to(device)
             target = batch["trajectory_target"]  # (B, 128) on CPU
+            map_input = batch["map_input"].to(device)
 
-            pred, _, _ = model(visual, vis_hist, ego_hist)
+            pred = model(visual, map_input, vis_hist, ego_hist,
+                         projection=projection, geometry_type=geometry_type, mode="infer")
             pred = pred.cpu().numpy()  # (B, 128)
             target_np = target.numpy()
 
@@ -684,14 +794,13 @@ def wf_train_il(
     shards: List[FlyteDirectory],
     dataset: Dataset = Dataset.L2D,
     backbone: Backbone = Backbone.SWIN_V2_TINY,
-    fusion_mode: FusionMode = FusionMode.CONCAT,
     epochs: int = 3,
     batch_size: int = 4,
     lr: float = 1e-4,
 ) -> EvalMetrics:
     """IL Train → Evaluate. All datasets' shards passed in; `dataset` selects one."""
     out = train_il(shards=shards, dataset=dataset, backbone=backbone,
-                   fusion_mode=fusion_mode, epochs=epochs, batch_size=batch_size, lr=lr)
+                   epochs=epochs, batch_size=batch_size, lr=lr)
     return evaluate_il_policy(checkpoint=out.checkpoint, shards=shards, dataset=dataset,
                               train_metadata=out.metadata)
 
@@ -718,7 +827,6 @@ def wf_full_pipeline(
     dataset: Dataset = Dataset.L2D,
     episodes: int = 3,
     backbone: Backbone = Backbone.SWIN_V2_TINY,
-    fusion_mode: FusionMode = FusionMode.CONCAT,
     epochs_il: int = 3,
     epochs_rl: int = 3,
     batch_size: int = 4,
@@ -743,11 +851,39 @@ def wf_full_pipeline(
     all_shards = [shards_l2d, shards_nv]
 
     il_out = train_il(shards=all_shards, dataset=dataset, backbone=backbone,
-                      fusion_mode=fusion_mode, epochs=epochs_il,
-                      batch_size=batch_size, lr=lr)
+                      epochs=epochs_il, batch_size=batch_size, lr=lr)
     evaluate_il_policy(checkpoint=il_out.checkpoint, shards=all_shards, dataset=dataset,
                        train_metadata=il_out.metadata)
     rl_out = train_offline_rl(pretrained=il_out.checkpoint, shards=all_shards, dataset=dataset,
                               il_metadata=il_out.metadata, epochs=epochs_rl, tau=tau, beta=beta)
     return evaluate_rl_policy(checkpoint=rl_out.checkpoint, shards=all_shards, dataset=dataset,
                               train_metadata=rl_out.metadata)
+
+
+@workflow
+def wf_ingest_train_eval(
+    dataset: Dataset = Dataset.L2D,
+    episodes: int = 3,
+    backbone: Backbone = Backbone.SWIN_V2_TINY,
+    epochs_il: int = 3,
+    batch_size: int = 4,
+    lr: float = 1e-4,
+) -> EvalMetrics:
+    """Ingest+Process ALL datasets → IL Train → IL Eval (no offline RL).
+
+    Same as wf_full_pipeline but stops after IL evaluation. Useful when you only
+    want a supervised checkpoint + open-loop metrics, or when the offline-RL step
+    is too memory-hungry to co-run at the current BEV resolution (#77).
+    """
+    raw_l2d = data_ingest(dataset=Dataset.L2D, episodes=episodes)
+    shards_l2d = data_processing(raw_data=raw_l2d, dataset=Dataset.L2D, episodes=episodes)
+
+    raw_nv = data_ingest(dataset=Dataset.NVIDIA_PHYSICAL_AI, episodes=episodes)
+    shards_nv = data_processing(raw_data=raw_nv, dataset=Dataset.NVIDIA_PHYSICAL_AI, episodes=episodes)
+
+    all_shards = [shards_l2d, shards_nv]
+
+    il_out = train_il(shards=all_shards, dataset=dataset, backbone=backbone,
+                      epochs=epochs_il, batch_size=batch_size, lr=lr)
+    return evaluate_il_policy(checkpoint=il_out.checkpoint, shards=all_shards, dataset=dataset,
+                              train_metadata=il_out.metadata)

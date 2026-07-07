@@ -54,7 +54,7 @@ aws codebuild start-build --project-name auto-e2e-platform-flyte-register \
 
 - Go to Flyte Console → `auto-e2e` → `development` → Workflows
 - Select the workflow (e.g., `wf_train_il`)
-- Fill parameters (dropdowns for backbone/fusion, numbers for hyperparams)
+- Fill parameters (dropdown for backbone, numbers for hyperparams)
 - Click **Launch**
 
 ### 4. Monitor Execution
@@ -131,7 +131,6 @@ Each training run records:
 | Parameter | Range | Impact |
 |-----------|-------|--------|
 | `backbone` | swin_v2_tiny → convnext_v2_tiny | Architecture capacity |
-| `fusion_mode` | concat → cross_attn → bev | Spatial understanding |
 | `lr` | 1e-4 to 1e-3 | Convergence speed |
 | `batch_size` | 4 to 16 | GPU utilization vs. generalization |
 | `epochs` | 10 to 50 | Underfitting vs. overfitting |

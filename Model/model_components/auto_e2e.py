@@ -55,35 +55,33 @@ class AutoE2E(nn.Module):
 
 
     def forward(self, camera_tiles, map_input, visual_history, egomotion_history,
-                camera_params=None, mode="train", trajectory_target=None, **kwargs):
+                projection=None, geometry_type=None, image_transform=None,
+                mode="train", trajectory_target=None, **kwargs):
         """
         Run the full autonomous-driving pipeline.
 
-        The first return value's meaning depends on ``mode`` but is uniform
-        across all planners (GRU, Flow Matching, ...):
-
-        * ``mode="train"``: returns ``(planner_loss, ego_hidden, future)``
-          where ``planner_loss`` is a SCALAR — not a trajectory. The
-          planner-specific objective (imitation MSE for GRU,
-          flow-matching velocity MSE for Flow Matching) is computed
-          inside the planner so a training loop never has to know which
-          decoder is active. ``trajectory_target`` is required.
-        * any other ``mode`` (e.g. ``"infer"``): returns
-          ``(trajectory, ego_hidden, None)`` where ``trajectory`` is
-          ``[B, num_timesteps * num_signals]``.
+        Returns a single trajectory tensor ``[B, num_timesteps * num_signals]``
+        (the pre-#94 3-tuple return was removed when the planner interface was
+        simplified). ``mode`` and ``trajectory_target`` are threaded through for
+        forward-compatibility with a future train-time planner objective but are
+        currently inert in the default planner.
 
         Args:
-            camera_tiles: (B, V, 3, H, W) — V camera images (V=7 by default).
+            camera_tiles: (B, V, 3, H, W) — V real camera images (the nav-map is
+                a separate map_input, not a camera view).
             map_input: (B, 3, H_map, W_map) — BEV nav-map image.
             visual_history: (B, T, visual_history_dim) or (B, visual_history_dim).
             egomotion_history: (B, T, egomotion_dim) or (B, egomotion_dim).
-            camera_params: Optional (B, V, 3, 4) ego-to-pixel projection matrices.
-            mode: "train" to produce future_visual_features; anything else skips it.
+            projection: Optional CameraProjectionModel operator — the geometry
+                ABI (Pinhole / FTheta / Pseudo). No [B,V,3,4] matrix argument;
+                construct PinholeProjection(matrix) if you have a pinhole matrix.
+            geometry_type: Optional explicit geometry label ("pinhole",
+                "rectified_pinhole", "ftheta", "pseudo") passed to BEV fusion.
+            image_transform: Optional ImageTransform for the model-input frame.
+            mode: threaded through to the planner (currently inert by default).
 
         Returns:
             trajectory: (B, num_timesteps * num_signals)
-            ego_hidden: (B, embed_dim)
-            planner_loss: Used only when mode="train" during network training, otherwise set to None
         """
 
         # World Action Model (1Hz): encode the current multi-camera frame into the
@@ -115,7 +113,8 @@ class AutoE2E(nn.Module):
                 future_state_pred = wam.predict_future(visual_history)
 
         trajectory = self.Reactive_E2E(camera_tiles, map_input, visual_history, egomotion_history,
-        camera_params=camera_params, mode=mode, trajectory_target=trajectory_target, **kwargs)
+        projection=projection, geometry_type=geometry_type, image_transform=image_transform,
+        mode=mode, trajectory_target=trajectory_target, **kwargs)
 
         # Inference: just the trajectory. Training with the World Model on: also
         # return the predicted future state (the differentiable JEPA loss itself is

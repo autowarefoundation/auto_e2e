@@ -14,7 +14,8 @@ Usage
     )
 
     sample = dataset[0]
-    # sample["visual_tiles"]       (8, 3, 256, 256)
+    # sample["visual_tiles"]       (7, 3, H, W) uint8  7 raw cameras (native res)
+    # sample["map_tile"]           (3, H, W) uint8     nav-map (zeros; map branch)
     # sample["visual_history"]     (896,)
     # sample["egomotion_history"]  (256,)
     # sample["trajectory_target"]  (128,)
@@ -28,13 +29,12 @@ import logging
 from pathlib import Path
 from typing import TypedDict
 
-import timm
 import numpy as np
 import pandas as pd
 import torch
 from torch.utils.data import Dataset
 
-from .camera import CAMERA_NAMES, load_camera_frame
+from .camera import CAMERA_NAMES, load_camera_frame, make_map_tile
 from .egomotion import (
     _EGOMOTION_COLUMNS,
     MIN_ROWS,
@@ -55,7 +55,8 @@ _VISUAL_HISTORY_DIM = 896
 
 
 class ClipSample(TypedDict):
-    visual_tiles: torch.Tensor        # (8, 3, 256, 256)
+    visual_tiles: torch.Tensor        # (7, 3, H, W) uint8 — 7 raw cameras (native)
+    map_tile: torch.Tensor            # (3, H, W) uint8 — nav-map (zeros; map branch)
     visual_history: torch.Tensor      # (896,)
     egomotion_history: torch.Tensor   # (256,)
     trajectory_target: torch.Tensor   # (128,)
@@ -80,20 +81,17 @@ class NvidiaAVDataset(Dataset):
     def __init__(
         self,
         data_root: Path | str,
-        backbone_name: str = "swinv2_tiny_window8_256",
         camera_names: list[str] | None = None,
         clip_uuids: list[str] | None = None,
     ) -> None:
         self.data_root = Path(data_root)
         self.camera_names = camera_names or CAMERA_NAMES
 
-        # Build the image transform from the backbone's own config so that
-        # preprocessing always matches what the backbone expects.
-        # create_model loads config only — no pretrained weights downloaded here.
-        _backbone = timm.create_model(backbone_name, pretrained=False)
-        data_config = timm.data.resolve_model_data_config(_backbone)
-        self.transform = timm.data.create_transform(**data_config, is_training=False)
-        del _backbone
+        # This is a pre-extraction source: __getitem__ returns RAW uint8 frames
+        # (no resize/crop/normalize, no timm/backbone dependency). The shard
+        # packer owns the single geometry-aware resize and the pre-extracted
+        # loader owns the single normalize, so the projection ABI targets a known
+        # frame and there is no double-normalize (#77).
 
         clips = clip_uuids if clip_uuids is not None else self._discover_clip_uuids()
         if not clips:
@@ -240,6 +238,45 @@ class NvidiaAVDataset(Dataset):
             for sample_idx in range(min_idx, max_idx + 1)
         ]
 
+    def projection_spec(self, image_size: int = 256) -> dict | None:
+        """Build a native f-theta projection spec from saved calibration.
+
+        Reads calibration/{intrinsics,extrinsics}.pkl (saved at ingest), builds
+        an FThetaProjection in the camera's NATIVE pixel frame for the camera
+        slot order, and serializes it for the shard manifest. ``image_size`` is
+        accepted for API symmetry but is irrelevant to f-theta: the operator
+        normalizes by the native (W, H), which is exact under any resize. Returns
+        None when calibration is absent, so the dataset falls back to the
+        explicit pseudo path (never a silent real-geometry claim). See #77.
+        """
+        import pickle
+
+        calib_dir = self.data_root / "calibration"
+        intr_path = calib_dir / "intrinsics.pkl"
+        extr_path = calib_dir / "extrinsics.pkl"
+        if not (intr_path.exists() and extr_path.exists()):
+            # No calibration on disk -> the pipeline runs the explicit pseudo
+            # path. Log it (WARNING) so a run never silently falls back to a
+            # learned prior while a reader assumes real f-theta geometry. The
+            # ingest step writes these pkls when calibration is downloaded.
+            logger.warning(
+                "NvidiaAVDataset.projection_spec: no calibration at %s "
+                "(intrinsics.pkl / extrinsics.pkl); using pseudo geometry. Run "
+                "data_ingest with camera_intrinsics/sensor_extrinsics for real "
+                "f-theta projection (#77).", calib_dir,
+            )
+            return None
+
+        from .calibration import build_ftheta_projection
+
+        with open(intr_path, "rb") as f:
+            intrinsics = pickle.load(f)
+        with open(extr_path, "rb") as f:
+            extrinsics = pickle.load(f)
+
+        proj = build_ftheta_projection(intrinsics, extrinsics, self.camera_names)
+        return proj.to_spec()
+
     def __len__(self) -> int:
         return len(self._samples)
 
@@ -255,7 +292,6 @@ class NvidiaAVDataset(Dataset):
             self.data_root,
             clip_uuid,
             egomotion_timestamp_us=egomotion_timestamp_us,
-            transform=self.transform,
             camera_names=self.camera_names,
             camera_timestamps=camera_timestamps,
         )
@@ -267,8 +303,14 @@ class NvidiaAVDataset(Dataset):
             df=self._egomotion_dfs[clip_uuid],
         )
 
+        # NVIDIA has no rendered nav-map; the map branch gets a zero tile shaped
+        # like one camera frame. Kept separate from visual_tiles so it never
+        # enters the camera BEV projection.
+        map_tile = make_map_tile(visual_tiles[0])
+
         return ClipSample(
             visual_tiles=visual_tiles,
+            map_tile=map_tile,
             visual_history=torch.zeros(_VISUAL_HISTORY_DIM),
             egomotion_history=egomotion_history,
             trajectory_target=trajectory_target,

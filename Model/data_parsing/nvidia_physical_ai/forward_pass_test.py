@@ -25,7 +25,6 @@ import sys
 import time
 
 import torch
-from torch.utils.data import DataLoader
 
 _MODEL_DIR = pathlib.Path(__file__).parent.parent.parent.resolve()
 sys.path.insert(0, str(_MODEL_DIR))
@@ -49,46 +48,52 @@ def main(dataset_root: str, clip_uuid: str, batch_size: int = 4, pretrained_back
         print(f"Discovered {len(clip_uuids)} clips")
 
     t0 = time.time()
-    dataset = NvidiaAVDataset(
-        data_root=dataset_root,
-        backbone_name="swinv2_tiny_window8_256",
-        clip_uuids=clip_uuids,
-    )
+    dataset = NvidiaAVDataset(data_root=dataset_root, clip_uuids=clip_uuids)
     print(f"Valid samples in clip: {len(dataset)}")
 
-    egomotion_mb = sum(df.memory_usage(deep=True).sum() for df in dataset._egomotion_dfs.values()) / (1024 ** 2)
-    timestamps_mb = sum(arr.nbytes for arr in dataset._camera_timestamps.values()) / (1024 ** 2)
-    print(f"Egomotion cache: {egomotion_mb:.1f} MB")
-    print(f"Timestamp cache: {timestamps_mb:.1f} MB")
+    # The dataset yields RAW frames now. Run the production path: raw frames ->
+    # WebDataset shards -> pre-extracted loader -> model.
+    import tempfile
+    sys.path.insert(0, str(_MODEL_DIR / "tests"))
+    from e2e_pipeline_smoke import build_shards
+    from data_parsing.pre_extracted import make_pre_extracted_loader
 
-    loader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=0)
+    out_dir = tempfile.mkdtemp()
+    build_shards(dataset, out_dir, max_samples=max(batch_size, 2))
+    loader = make_pre_extracted_loader(out_dir, batch_size=batch_size,
+                                       num_workers=0, shuffle=0)
+    projection = getattr(loader, "projection", None)
+    geometry_type = getattr(loader, "geometry_type", "pseudo")
+    if projection is not None:
+        projection = projection.to(device)
 
     batch = next(iter(loader))
-    visual_tiles = batch["visual_tiles"].to(device)           # (B, 8, 3, 256, 256)
+    visual_tiles = batch["visual_tiles"].to(device)           # (B, 7, 3, 256, 256)
+    map_input = batch["map_input"].to(device)                 # (B, 3, 256, 256)
     visual_history = batch["visual_history"].to(device)       # (B, 896)
     egomotion_history = batch["egomotion_history"].to(device) # (B, 256)
-    trajectory_target = batch["trajectory_target"].to(device) # (B, 128)
     t_dataset = time.time() - t0
 
-    print(f"Dataset creation for {len(clip_uuids)} clips: {t_dataset:.2f}s")
+    print(f"Dataset + shard round-trip for {len(clip_uuids)} clips: {t_dataset:.2f}s")
 
     print(f"visual_tiles: {tuple(visual_tiles.shape)}")
+    print(f"map_input: {tuple(map_input.shape)}")
     print(f"visual_history: {tuple(visual_history.shape)}")
     print(f"egomotion_history: {tuple(egomotion_history.shape)}")
-    print(f"trajectory_target: {tuple(trajectory_target.shape)}")
+    print(f"geometry: {geometry_type}")
 
     # --------------------
-    # forward pass
-    model = AutoE2E(is_pretrained=pretrained_backbone).to(device)
+    # forward pass. num_views comes from the data (7 real cameras); the map is a
+    # separate branch input.
+    model = AutoE2E(num_views=visual_tiles.shape[1], is_pretrained=pretrained_backbone).to(device)
 
     t0 = time.time()
-    trajectory_, ego_hidden_, future_ = model(visual_tiles, visual_history, egomotion_history)
+    trajectory_ = model(visual_tiles, map_input, visual_history, egomotion_history,
+                        projection=projection, geometry_type=geometry_type, mode="infer")
     t_forward = time.time() - t0
     print(f"Forward pass: {t_forward:.2f}s")
 
     print(f"trajectory output: {tuple(trajectory_.shape)}")
-    print(f"ego_hidden output: {tuple(ego_hidden_.shape)}")
-    print(f"future visual features: {[tuple(f.shape) for f in future_]}")
     # --------------------
 
     # TODO (training): wire in loss and backprop
