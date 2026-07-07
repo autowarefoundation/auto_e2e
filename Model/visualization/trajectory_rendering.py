@@ -187,7 +187,7 @@ class Visualization:
         current_speed: float,
         actual_action_sequence: Optional[torch.Tensor] = None,
         prediction_color: tuple = (140, 255, 0),
-        actual_trajectory_color: Optional[tuple] = (255, 80, 120)
+        actual_trajectory_color: tuple = (255, 80, 120)
     ) -> np.ndarray:
         """
         Renders predicted (and optionally actual) action sequences onto a standardized BEV grid visualization.
@@ -222,7 +222,7 @@ class Visualization:
         prediction_m: torch.Tensor, 
         actual_trajectory_m: Optional[torch.Tensor] = None,
         prediction_color: tuple = (140, 255, 0),
-        actual_trajectory_color: Optional[tuple] = (255, 80, 120)
+        actual_trajectory_color: tuple = (255, 80, 120)
         ) -> np.ndarray:
         """
         Generates a 2D plotting grid and draws the predicted and (optionally) actual trajectories.
@@ -524,8 +524,8 @@ class Visualization:
                 poly_pts.append(left_2d[i])
             for i in reversed(chunk):
                 poly_pts.append(right_2d[i])
-            poly_pts = np.array(poly_pts, dtype=np.int32)
-            cv2.fillPoly(mask_odd_even, [poly_pts], 1)
+            poly_pts_arr = np.array(poly_pts, dtype=np.int32)
+            cv2.fillPoly(mask_odd_even, [poly_pts_arr], 1)
             
             # The self-intersection hole is exactly where mask_solid has filled it but mask_odd_even left it blank!
             intersection_hole = ((mask_solid == 1) & (mask_odd_even == 0)).astype(np.float32)
