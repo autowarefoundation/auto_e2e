@@ -63,29 +63,24 @@ def visualization_on_l2d(episodes: list[int], frame_index: int = 0, zoom_in: boo
         initial_heading=current_heading
     )
 
-    # 3. Generate Grid and overlay trajectory
-    # We must convert the raw action sequence (accel/curv) into metric [x, y] coordinates first
-    pred_trajectory_m = Visualization.accel_and_curv_to_meters_trajectory(
-        pred_trajectory, current_speed, 64, initial_heading=0.0
-    )
-    target_trajectory_m = Visualization.accel_and_curv_to_meters_trajectory(
-        target_trajectory, current_speed, 64, initial_heading=0.0
-    )
-    
-    grid_with_trajectory = Visualization.generate_grid(
-        prediction_m=pred_trajectory_m,
-        actual_trajectory_m=target_trajectory_m,
+    # 3. Create Camera View with trajectory and Grid
+    grid_with_trajectory = Visualization.render_trajectory_on_a_grid(
+        action_sequence=pred_trajectory,
+        current_speed=current_speed,
+        actual_action_sequence=target_trajectory,
         prediction_color=prediction_color,
         actual_trajectory_color=actual_trajectory_color
     )
 
+    # Load Extrinsics
+    yaml_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'data_parsing', 'l2d', 'configs', 'extrinsic_RDF.yaml')
+    R, t = load_extrinsics(yaml_path, view_name="observation.images.front_left")
+    
     K = np.array([
         [1000, 0, front_image.shape[1] / 2],
         [0, 1000, front_image.shape[0] / 2],
         [0, 0, 1]
     ], dtype=np.float32)
-    R = np.eye(3, dtype=np.float32)
-    t = np.zeros((3, 1), dtype=np.float32)
 
     cam_trajectory_view = front_image.copy()
     
@@ -99,7 +94,7 @@ def visualization_on_l2d(episodes: list[int], frame_index: int = 0, zoom_in: boo
             t=t,
             color=actual_trajectory_color
         )
-        
+    
     if pred_trajectory is not None:
         cam_trajectory_view = Visualization.complete_front_camera_view_with_trajectory(
             action_sequence=pred_trajectory,

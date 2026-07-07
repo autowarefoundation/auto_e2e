@@ -47,13 +47,17 @@ def visualization_on_kit_scenes(scene_ids: Optional[list[str]] = None, frame_ind
         map_image = cv2.resize(map_image, (target_w, target_h), interpolation=cv2.INTER_LINEAR)
         resolution_m_px = resolution_m_px * (current_w / target_w)
 
+    # 0.5 Define color scheme
+    prediction_color = (140, 255, 0)
+    actual_trajectory_color = (255, 80, 120)
+
     # 1. Draw extracted ground truth (actual driven path) on map tile
     combined_img = Visualization.render_trajectory_map_tile(
         action_sequence=target_trajectory,
         current_speed=current_speed,
         map_image=map_image,
         resolution_m_px=resolution_m_px,
-        color=(255, 108, 59), # Orange target
+        color=actual_trajectory_color,
         initial_heading=current_heading
     )
 
@@ -63,17 +67,42 @@ def visualization_on_kit_scenes(scene_ids: Optional[list[str]] = None, frame_ind
         current_speed=current_speed,
         map_image=combined_img,
         resolution_m_px=resolution_m_px,
-        color=(164, 217, 52), # Green pred
+        color=prediction_color, 
         initial_heading=current_heading
     )
 
     # 3. Create Camera View with trajectory and Grid
-    camera_and_grid = Visualization.complete_front_camera_view_with_trajectory(
-        action_sequence_target=target_trajectory,
-        action_sequence_pred=pred_trajectory,
+    grid_with_trajectory = Visualization.render_trajectory_on_a_grid(
+        action_sequence=pred_trajectory,
         current_speed=current_speed,
-        front_camera_image=raw_camera_image,
-        P=P
+        actual_action_sequence=target_trajectory,
+        prediction_color=prediction_color,
+        actual_trajectory_color=actual_trajectory_color
+    )
+
+    cam_trajectory_view = raw_camera_image.copy()
+    
+    if target_trajectory is not None:
+        cam_trajectory_view = Visualization.complete_front_camera_view_with_trajectory(
+            action_sequence=target_trajectory,
+            current_speed=current_speed,
+            front_camera_image=cam_trajectory_view,
+            P=P,
+            color=actual_trajectory_color
+        )
+        
+    if pred_trajectory is not None:
+        cam_trajectory_view = Visualization.complete_front_camera_view_with_trajectory(
+            action_sequence=pred_trajectory,
+            current_speed=current_speed,
+            front_camera_image=cam_trajectory_view,
+            P=P,
+            color=prediction_color
+        )
+        
+    camera_and_grid = Visualization.concatenate_grid_and_camera(
+        grid_img=grid_with_trajectory,
+        cam_img=cam_trajectory_view
     )
 
     return combined_img, camera_and_grid

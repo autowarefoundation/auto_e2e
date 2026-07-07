@@ -184,24 +184,36 @@ class Visualization:
     @staticmethod
     def render_trajectory_on_a_grid(
         action_sequence: torch.Tensor,
-        current_speed: float
+        current_speed: float,
+        actual_action_sequence: Optional[torch.Tensor] = None,
+        prediction_color: tuple = (140, 255, 0),
+        actual_trajectory_color: Optional[tuple] = (255, 80, 120)
     ) -> np.ndarray:
         """
-        Renders a predicted action sequence onto a standardized BEV grid visualization.
+        Renders predicted (and optionally actual) action sequences onto a standardized BEV grid visualization.
 
         Args:
-            action_sequence (torch.Tensor): Flattened tensor of predicted [acceleration, curvature].
+            action_sequence (torch.Tensor): Predicted trajectory [acceleration, curvature].
             current_speed (float): Current speed of the ego vehicle.
+            actual_action_sequence (Optional[torch.Tensor]): Ground truth trajectory.
+            prediction_color (tuple): Color for predicted trajectory.
+            actual_trajectory_color (tuple): Color for actual trajectory.
 
         Returns:
-            np.ndarray: An image array of the grid visualization with the predicted trajectory.
+            np.ndarray: An image array of the grid visualization.
         """
-        # 1. Convert trajectory to [x y] in meters
-        trajectory_m = Visualization.accel_and_curv_to_meters_trajectory(
-            action_sequence, current_speed, _FUTURE_TIMESTEPS, initial_heading=0.0
+        pred_m = Visualization.accel_and_curv_to_meters_trajectory(action_sequence, current_speed, _FUTURE_TIMESTEPS, initial_heading=0.0)
+                
+        act_m = None
+        if actual_action_sequence is not None:
+            act_m = Visualization.accel_and_curv_to_meters_trajectory(actual_action_sequence, current_speed, _FUTURE_TIMESTEPS, initial_heading=0.0)
+
+        grid_with_trajectory = Visualization.generate_grid(
+            prediction_m=pred_m, 
+            actual_trajectory_m=act_m,
+            prediction_color=prediction_color,
+            actual_trajectory_color=actual_trajectory_color
         )
-        # 2. Generate Grid and overlay trajectory
-        grid_with_trajectory = Visualization.generate_grid(prediction_m=trajectory_m)
 
         return grid_with_trajectory
 
@@ -209,7 +221,7 @@ class Visualization:
     def generate_grid(
         prediction_m: torch.Tensor, 
         actual_trajectory_m: Optional[torch.Tensor] = None,
-        prediction_color: Optional[tuple] = (140, 255, 0),
+        prediction_color: tuple = (140, 255, 0),
         actual_trajectory_color: Optional[tuple] = (255, 80, 120)
         ) -> np.ndarray:
         """
@@ -305,19 +317,19 @@ class Visualization:
 
         # Draw Actual Trajectory
         if actual_trajectory_m is not None:
-            pts_actual = []
+            pts = []
             for i in range(actual_trajectory_m.shape[0]):
-                pts_actual.append(to_px_local(float(actual_trajectory_m[i, 0]), float(actual_trajectory_m[i, 1])))
-            pts_actual_arr = np.array(pts_actual, np.int32).reshape((-1, 1, 2))
-            cv2.polylines(plot_canvas, [pts_actual_arr], isClosed=False, color=actual_trajectory_color, thickness=4, lineType=cv2.LINE_AA)
+                pts.append(to_px_local(float(actual_trajectory_m[i, 0]), float(actual_trajectory_m[i, 1])))
+            pts_arr = np.array(pts, np.int32).reshape((-1, 1, 2))
+            cv2.polylines(plot_canvas, [pts_arr], isClosed=False, color=actual_trajectory_color, thickness=4, lineType=cv2.LINE_AA)
             
-        # Draw Prediction
+        # Draw Predicted Trajectory
         if prediction_m is not None:
-            pts_pred = []
+            pts = []
             for i in range(prediction_m.shape[0]):
-                pts_pred.append(to_px_local(float(prediction_m[i, 0]), float(prediction_m[i, 1])))
-            pts_pred_arr = np.array(pts_pred, np.int32).reshape((-1, 1, 2))
-            cv2.polylines(plot_canvas, [pts_pred_arr], isClosed=False, color=prediction_color, thickness=6, lineType=cv2.LINE_AA)
+                pts.append(to_px_local(float(prediction_m[i, 0]), float(prediction_m[i, 1])))
+            pts_arr = np.array(pts, np.int32).reshape((-1, 1, 2))
+            cv2.polylines(plot_canvas, [pts_arr], isClosed=False, color=prediction_color, thickness=6, lineType=cv2.LINE_AA)
             
         # Draw Ego Vehicle (Filled triangle with outline)
         ego_px, ego_py = to_px_local(0, 0)
