@@ -7,7 +7,8 @@ from .metrics import (
     offroad_rate,
 )
 from .baselines import constant_velocity_baseline, hold_last_action_baseline
-from .splits import episode_range_split, geographic_holdout_split
+from .splits import episode_range_split, geographic_holdout_split, long_tail_split
+from .faithfulness import reasoning_intervention_delta
 
 __all__ = [
     # existing (open-loop displacement metrics + gate)
@@ -24,4 +25,7 @@ __all__ = [
     # validation splits (#66 §4)
     "episode_range_split",
     "geographic_holdout_split",
+    # reasoning band evaluation (#98/#103)
+    "long_tail_split",
+    "reasoning_intervention_delta",
 ]
