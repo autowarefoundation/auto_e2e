@@ -59,12 +59,12 @@ class ReasoningCoupling(nn.Module):
         # Learned scalar gate, zero-init → no-op residual at initialisation.
         self.alpha = nn.Parameter(torch.zeros(()))
         # Projection whose last layer is zero-init (double guarantee of no-op).
+        proj_out = nn.Linear(embed_dim, embed_dim)
+        nn.init.zeros_(proj_out.weight)
+        nn.init.zeros_(proj_out.bias)
         self.reason_proj = nn.Sequential(
-            nn.Linear(embed_dim, embed_dim), nn.GELU(),
-            nn.Linear(embed_dim, embed_dim),
+            nn.Linear(embed_dim, embed_dim), nn.GELU(), proj_out,
         )
-        nn.init.zeros_(self.reason_proj[-1].weight)
-        nn.init.zeros_(self.reason_proj[-1].bias)
 
         if mode == "horizon_cross_attention":
             self.cross_attn = nn.MultiheadAttention(

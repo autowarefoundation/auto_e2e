@@ -141,7 +141,7 @@ def test_run_labeling_writes_jsonl_local(tmp_path):
     out = str(tmp_path / "out.jsonl")
     records = run_labeling(reqs, provider="mock", jsonl_path=out)
     assert len(records) == 4
-    lines = [l for l in open(out) if l.strip()]
+    lines = [ln for ln in open(out) if ln.strip()]
     assert len(lines) == 4 * NUM_HORIZONS  # one row per (sample, horizon)
 
 

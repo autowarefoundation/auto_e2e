@@ -151,13 +151,12 @@ class HorizonReasoningHead(nn.Module):
 
         # Optional training-only teacher-embedding alignment head.
         self.teacher_embedding_dim = teacher_embedding_dim
+        self.align_head: Optional[nn.Module] = None
         if teacher_embedding_dim is not None:
             self.align_head = nn.Sequential(
                 nn.Linear(hidden_dim, teacher_embedding_dim),
                 nn.LayerNorm(teacher_embedding_dim),
             )
-        else:
-            self.align_head = None
 
     def _context_tokens(
         self,

@@ -10,6 +10,8 @@ Pure-Python, no torch/GPU/network. Covers:
 
 from __future__ import annotations
 
+from typing import Any, Dict
+
 import pytest
 
 from data_processing.reasoning_label_generation.schema import (
@@ -25,7 +27,7 @@ from data_processing.reasoning_label_generation.validators import (
 
 
 def _horizon(sec: float, **overrides) -> ReasoningHorizonLabel:
-    base = dict(
+    base: Dict[str, Any] = dict(
         horizon_sec=sec,
         relation_to_ego="same_lane_ahead",
         hazard_event=["no_hazard"],
