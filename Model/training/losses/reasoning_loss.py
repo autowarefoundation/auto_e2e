@@ -154,3 +154,47 @@ class ReasoningLoss:
         # Sum across groups (each group contributes independently).
         total: torch.Tensor = torch.stack(group_losses).sum(dim=0)
         return self.weight * total
+
+
+def confidence_brier_loss(
+    confidence_logits: torch.Tensor,
+    target_confidence: torch.Tensor,
+    reduction: str = "mean",
+) -> torch.Tensor:
+    """Supervise the reasoning band's per-horizon confidence head (#110).
+
+    The band emits a per-horizon ``confidence`` (raw logits) but the core PR
+    (#108) does not yet give it a target — so on its own the output is
+    observability, not a trained signal. This is the proper-scoring-rule
+    supervision term from #110: the Brier (squared-error) loss between
+    ``sigmoid(confidence_logits)`` and a target in ``[0, 1]``.
+
+    A natural, label-free target is the cross-teacher **agreement fraction**
+    produced by
+    :class:`~model_components.reasoning.teachers.multi_teacher.MultiTeacher`
+    (high disagreement → low confidence), or a source-weighted label
+    confidence. Wiring this into ``train.py`` together with the planner
+    *consuming* confidence is tracked in #110; this function is the building
+    block that makes the head trainable rather than decorative.
+
+    Args:
+        confidence_logits: ``[B, num_horizons]`` raw confidence logits
+            (``ReasoningPrediction.confidence``).
+        target_confidence: ``[B, num_horizons]`` targets in ``[0, 1]``.
+        reduction: ``"mean"`` (scalar) or ``"none"`` (``[B, num_horizons]``).
+
+    Raises:
+        ValueError: on an unsupported ``reduction`` or a shape mismatch.
+    """
+    if reduction not in ("mean", "none"):
+        raise ValueError(
+            f"Unsupported reduction '{reduction}'. Choose 'mean' or 'none'."
+        )
+    if confidence_logits.shape != target_confidence.shape:
+        raise ValueError(
+            f"shape mismatch: confidence_logits {tuple(confidence_logits.shape)} "
+            f"vs target_confidence {tuple(target_confidence.shape)}."
+        )
+    pred = torch.sigmoid(confidence_logits)
+    squared_error = (pred - target_confidence.float()) ** 2
+    return squared_error.mean() if reduction == "mean" else squared_error

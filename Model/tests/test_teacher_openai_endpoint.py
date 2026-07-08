@@ -1,7 +1,7 @@
 """Tests for the OpenAI-compatible endpoint teacher backend (issue #98).
 
 Covers @riita10069's model-agnostic teacher endpoint: request construction,
-response parsing into taxonomy targets, the abstain-on-failure path, and
+per-frame and clip-horizons modes, the strict-vs-abstain failure policy, and
 registry reachability.  No network / GPU — the transport is a stub.
 """
 
@@ -40,7 +40,7 @@ class _RecordingTransport:
         return _openai_response(self.content)
 
 
-class TestOpenAIEndpointTeacher:
+class TestPerFrameMode:
     def test_label_shapes_and_active_labels(self):
         content = (
             '{"maneuver": ["turn_left"], '
@@ -63,7 +63,6 @@ class TestOpenAIEndpointTeacher:
         assert torch.allclose(
             out["edge_case"][2][:, edge.index("close_to_vru")], torch.ones(B)
         )
-        # a label not listed by the teacher stays 0
         assert out["maneuver"][0][:, man.index("turn_right")].sum().item() == 0.0
 
     def test_request_is_openai_compatible(self):
@@ -88,15 +87,78 @@ class TestOpenAIEndpointTeacher:
         image_part = next(p for p in content if p["type"] == "image_url")
         assert image_part["image_url"]["url"].startswith("data:image/png;base64,")
 
-    def test_abstain_on_transport_error(self):
+
+class TestFailurePolicy:
+    def test_strict_raises_on_transport_error(self):
         def boom(url: str, payload: Dict[str, Any], headers: Dict[str, str]):
             raise RuntimeError("endpoint down")
 
-        teacher = OpenAIEndpointTeacher(transport=boom)
+        teacher = OpenAIEndpointTeacher(transport=boom)  # strict=True default
+        with pytest.raises(RuntimeError, match="teacher endpoint call failed"):
+            teacher.label(_frames(1), num_future_horizons=0)
+
+    def test_strict_raises_on_empty_response(self):
+        # A malformed response (no choices) must not silently become 0-labels.
+        teacher = OpenAIEndpointTeacher(
+            transport=lambda url, payload, headers: {"choices": []}
+        )
+        with pytest.raises(RuntimeError, match="empty/malformed"):
+            teacher.label(_frames(1), num_future_horizons=0)
+
+    def test_abstain_when_not_strict(self):
+        def boom(url: str, payload: Dict[str, Any], headers: Dict[str, str]):
+            raise RuntimeError("endpoint down")
+
+        teacher = OpenAIEndpointTeacher(transport=boom, strict=False)
         out = teacher.label(_frames(1), num_future_horizons=0)
         for g in DEFAULT_TAXONOMY.groups:
             assert out[g.name][0].sum().item() == 0.0
 
+
+class TestClipHorizonsMode:
+    def test_clip_returns_all_horizons_from_one_request(self):
+        content = (
+            '{"horizons": ['
+            '{"maneuver": ["turn_left"], "edge_case": [], "weather_env": []}, '
+            '{"maneuver": [], "edge_case": ["give_way"], "weather_env": []}'
+            "]}"
+        )
+        transport = _RecordingTransport(content)
+        teacher = OpenAIEndpointTeacher(mode="clip_horizons", transport=transport)
+        out = teacher.label(_frames(2), num_future_horizons=1)  # 2 horizons
+
+        man = DEFAULT_TAXONOMY["maneuver"]
+        edge = DEFAULT_TAXONOMY["edge_case"]
+        assert torch.allclose(
+            out["maneuver"][0][:, man.index("turn_left")], torch.ones(B)
+        )
+        assert torch.allclose(
+            out["edge_case"][1][:, edge.index("give_way")], torch.ones(B)
+        )
+        # clip mode sends ONE request per sample, each carrying every frame.
+        assert len(transport.calls) == B
+        parts = transport.calls[0]["payload"]["messages"][0]["content"]
+        n_images = sum(1 for p in parts if p["type"] == "image_url")
+        assert n_images == 2  # both horizon frames in a single request
+
+    def test_clip_prompt_carries_extra_context(self):
+        content = '{"horizons": [{"maneuver": [], "edge_case": [], "weather_env": []}]}'
+        transport = _RecordingTransport(content)
+        teacher = OpenAIEndpointTeacher(
+            mode="clip_horizons",
+            transport=transport,
+            extra_context="ego: 30 km/h; route: turn right at intersection",
+        )
+        teacher.label(_frames(1), num_future_horizons=0)
+        text = transport.calls[0]["payload"]["messages"][0]["content"][0]["text"]
+        assert "route: turn right" in text
+
+    def test_invalid_mode_raises(self):
+        with pytest.raises(ValueError, match="Unsupported mode"):
+            OpenAIEndpointTeacher(mode="nope")
+
+
+class TestRegistryAndContract:
     def test_registered_in_registry(self):
         from model_components.reasoning.teachers import _TEACHER_REGISTRY
 

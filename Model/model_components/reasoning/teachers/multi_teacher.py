@@ -51,6 +51,19 @@ class MultiTeacher(VLMTeacher):
                     "All teachers must share the same taxonomy groups; got "
                     f"{t.taxonomy.group_names} vs {self.taxonomy.group_names}."
                 )
+            # Group names matching is not enough: agreement is computed
+            # index-by-index, so every teacher must use the SAME label tuple in
+            # the SAME order — otherwise index i means a different class per
+            # teacher and the fused target is semantically invalid.
+            for group in self.taxonomy.groups:
+                if t.taxonomy[group.name].labels != group.labels:
+                    raise ValueError(
+                        f"Teacher taxonomy mismatch in group '{group.name}': "
+                        "label tuples differ in content or order "
+                        f"({t.taxonomy[group.name].labels} vs {group.labels}). "
+                        "Agreement fusion requires identical label ordering so "
+                        "index i is the same class for every teacher."
+                    )
         self.teachers = list(teachers)
 
     def label(

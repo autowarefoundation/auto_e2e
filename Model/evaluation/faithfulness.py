@@ -15,7 +15,7 @@ not perturb the reactive baseline before training.
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import Any, Optional
 
 import torch
 
@@ -26,7 +26,9 @@ def reasoning_intervention_delta(
     map_input: torch.Tensor,
     visual_history: torch.Tensor,
     egomotion_history: torch.Tensor,
-    camera_params: Optional[torch.Tensor] = None,
+    projection: Optional[Any] = None,
+    geometry_type: Optional[str] = None,
+    image_transform: Optional[Any] = None,
 ) -> dict[str, float]:
     """Measure how much the reasoning band's coupling moves the trajectory.
 
@@ -36,15 +38,20 @@ def reasoning_intervention_delta(
 
     Args:
         model: an ``AutoE2E`` instance with ``enable_reasoning_band=True``.
-        camera_tiles / map_input / visual_history / egomotion_history /
-            camera_params: one evaluation batch, as in ``AutoE2E.forward``.
+        camera_tiles / map_input / visual_history / egomotion_history: one
+            evaluation batch, as in ``AutoE2E.forward``.
+        projection / geometry_type / image_transform: the current geometry ABI
+            forwarded to ``AutoE2E.forward`` (replaces the old ``camera_params``
+            argument).
 
     Returns:
         dict with:
         * ``trajectory_l2``: mean L2 distance between the coupled and
           intervened trajectories (0.0 while the gate is untrained).
-        * ``history_shift``: mean L2 between the modulated and raw visual
-          history (how hard the gate is actually steering the planner input).
+        * ``history_shift``: mean L2 between the modulated and the **effective**
+          visual history the band actually receives inside the model (with the
+          World Model on, that is the WAM-aggregated history, not the raw
+          caller input) — how hard the gate is steering the planner input.
 
     Raises:
         ValueError: if the model has no reasoning band to intervene on.
@@ -70,27 +77,55 @@ def reasoning_intervention_delta(
         if buffer is not None and saved_frames is not None:
             buffer._buf = list(saved_frames)
 
+    fwd_kwargs = dict(
+        projection=projection,
+        geometry_type=geometry_type,
+        image_transform=image_transform,
+        mode="infer",
+    )
+
+    # Capture the EFFECTIVE visual history the band receives inside the model.
+    # With the World Model enabled, AutoE2E replaces the caller's
+    # ``visual_history`` with the WAM-aggregated history before the band runs;
+    # measuring history_shift against the raw caller input would be wrong.
+    captured: dict[str, torch.Tensor] = {}
+
+    def _hook(_module: torch.nn.Module, inputs: Any, output: Any) -> None:
+        captured["effective"] = inputs[0].detach()
+        captured["modulated"] = output.modulated_visual_history.detach()
+
+    handle = band.register_forward_hook(_hook)
     try:
         with torch.no_grad():
             coupled = model(
                 camera_tiles, map_input, visual_history, egomotion_history,
-                camera_params=camera_params, mode="infer",
+                **fwd_kwargs,
             )
             _restore_buffer()
-            pred = band(visual_history, mode="infer")
-            # Intervention: bypass the band entirely (planner sees the raw
-            # visual history), then restore it.  setattr keeps mypy happy
-            # about temporarily nulling an nn.Module attribute.
+    finally:
+        handle.remove()
+
+    try:
+        with torch.no_grad():
+            # Intervention: bypass the band entirely (planner sees the effective
+            # visual history unmodulated), then restore it.  setattr keeps mypy
+            # happy about temporarily nulling an nn.Module attribute.
             setattr(model, "Reasoning_Band", None)
             intervened = model(
                 camera_tiles, map_input, visual_history, egomotion_history,
-                camera_params=camera_params, mode="infer",
+                **fwd_kwargs,
             )
     finally:
         model.Reasoning_Band = band
         _restore_buffer()
         if was_training:
             model.train()
+
+    if "modulated" not in captured:
+        raise RuntimeError(
+            "the reasoning band did not run during the coupled forward; "
+            "cannot compute history_shift."
+        )
 
     coupled_traj = coupled[0] if isinstance(coupled, tuple) else coupled
     intervened_traj = intervened[0] if isinstance(intervened, tuple) else intervened
@@ -99,7 +134,7 @@ def reasoning_intervention_delta(
         coupled_traj - intervened_traj, dim=-1
     ).mean()
     history_shift = torch.linalg.vector_norm(
-        pred.modulated_visual_history - visual_history, dim=-1
+        captured["modulated"] - captured["effective"], dim=-1
     ).mean()
 
     return {

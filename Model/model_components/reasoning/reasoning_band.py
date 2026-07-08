@@ -54,11 +54,22 @@ class ReasoningPrediction:
             other modes: 1 (current scenario only).
         confidence: ``[B, num_horizons]`` raw logits for the per-horizon
             confidence (issue #103, temporal-first).  Same horizon count as
-            ``logits``.
+            ``logits``.  NOTE: this output is **not supervised in the core PR** —
+            it is a trainable placeholder.  Supervise it with
+            :func:`~training.losses.reasoning_loss.confidence_brier_loss`
+            against a target (e.g. the cross-teacher agreement fraction); the
+            full supervise-and-consume-by-the-planner loop is tracked in #110.
         modulated_visual_history: ``[B, visual_history_dim]`` — the visual
             history after the zero-init gate.  Identical to the input at
             initialisation (strict no-op) so the reactive baseline is
             unchanged until training moves the gate.
+
+    Ablation surface: ``logits`` exposes **every** horizon (now, +1 … +4 s), so
+    a caller can build an all-horizon-pooled latent or a horizon-token planner
+    coupling on top of this output.  The band's own gate is the current-only
+    pooled baseline (option B); richer couplings (all-horizon pooled / horizon
+    cross-attention) are follow-ups that reuse this same output contract, so the
+    interface does not block them.
     """
 
     logits: ReasoningOutput

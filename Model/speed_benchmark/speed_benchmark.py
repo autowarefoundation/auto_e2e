@@ -29,8 +29,10 @@ def run_speed_benchmark(backbone, device, batch_size=1, num_views=7,
     # per-forward cost here is an upper bound on its real-time budget.
     extra_kwargs = {}
     if reasoning != "off":
-        extra_kwargs = dict(enable_reasoning_band=True,
-                            reasoning_kwargs={"backbone": reasoning})
+        # ReasoningBand takes no "backbone" argument (only visual_history_dim,
+        # hidden_dim, num_future_horizons, taxonomy); enable the band with its
+        # defaults. ``reasoning`` is kept purely as the result label/column.
+        extra_kwargs = dict(enable_reasoning_band=True)
     model = AutoE2E(backbone=backbone, num_views=num_views,
                     view_fusion_kwargs={"bev_h": 8, "bev_w": 8},
                     **extra_kwargs)
