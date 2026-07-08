@@ -21,7 +21,8 @@ RUN pip install --no-cache-dir \
     av \
     timm \
     scipy \
-    boto3
+    boto3 \
+    pyarrow
 
 COPY Model/ /workspace/Model/
 COPY Platform/pipelines/ /workspace/Platform/pipelines/
