@@ -104,6 +104,17 @@ class HorizonReasoningHead(nn.Module):
         teacher_embedding_dim: Optional[int] = None,
     ) -> None:
         super().__init__()
+        # The horizon count is a CROSS-CUTTING constant: the label schema
+        # (HORIZON_SECONDS), the tensorizer, and HorizonReasoningLoss all assume
+        # exactly 5 horizons (now,+1s,+2s,+3s,+4s). Sizing the head differently
+        # would crash the loss with a shape mismatch, so reject it here rather
+        # than advertise a knob the rest of the stack cannot honor.
+        if num_horizons != 5:
+            raise ValueError(
+                f"num_horizons must be 5 (fixed across schema/loss); got {num_horizons}. "
+                "Changing the horizon count requires updating HORIZON_SECONDS, the "
+                "target tensorizer, and HorizonReasoningLoss together."
+            )
         self.taxonomy = taxonomy if taxonomy is not None else DEFAULT_TAXONOMY
         self.hidden_dim = hidden_dim
         self.num_horizons = num_horizons
