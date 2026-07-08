@@ -149,3 +149,46 @@ def test_build_teacher_resolves_providers():
     assert isinstance(build_teacher("mock"), MockTeacher)
     with pytest.raises(ValueError, match="Unknown teacher provider"):
         build_teacher("nope")
+
+
+def test_record_shard_roundtrip_to_target_batch():
+    """record → reasoning.json → loader decode → ReasoningTargetBatch (#98).
+
+    Mirrors the shard data path: the data_processing task writes record_to_json;
+    the pre_extracted loader flattens record_to_target_tensors to reasoning__*
+    keys; target_batch_from_loader reassembles them. This proves the offline
+    label reaches training as a tensor batch without a sample_id join.
+    """
+    import json
+
+    import torch
+
+    from data_processing.reasoning_label_generation.targets import (
+        record_from_json,
+        record_to_json,
+        record_to_target_tensors,
+        target_batch_from_loader,
+    )
+
+    # Offline: teacher → record → JSON member.
+    records = [MockTeacher().label(_req(f"s_{i}")) for i in range(2)]
+    members = [json.dumps(record_to_json(r)).encode() for r in records]
+
+    # Loader: decode member → flatten to reasoning__* → default-collate to [B,..].
+    per_sample = [record_to_target_tensors(record_from_json(json.loads(m))) for m in members]
+    batch = {}
+    for key in per_sample[0]:
+        batch[f"reasoning__{key}"] = torch.stack([s[key] for s in per_sample], dim=0)
+
+    tb = target_batch_from_loader(batch)
+    assert tb is not None
+    assert tb.targets["cause"].shape[0] == 2
+    assert tb.targets["cause"].shape[1] == 5  # horizons
+    assert tb.source_weights.shape == (2, 5)
+
+
+def test_target_batch_from_loader_none_without_labels():
+    from data_processing.reasoning_label_generation.targets import (
+        target_batch_from_loader,
+    )
+    assert target_batch_from_loader({"visual_tiles": None}) is None
