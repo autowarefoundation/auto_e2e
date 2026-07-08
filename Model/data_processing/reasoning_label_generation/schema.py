@@ -21,7 +21,10 @@ Contract (validated in :mod:`.validators`):
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from typing import TYPE_CHECKING, Dict, List, Optional
+
+if TYPE_CHECKING:
+    import torch
 
 # The five horizons every successful record must carry, in seconds, in order.
 HORIZON_SECONDS: tuple[float, ...] = (0.0, 1.0, 2.0, 3.0, 4.0)
@@ -177,9 +180,9 @@ class ReasoningTargetBatch:
     """
 
     # group name -> [B, 5, C] (multi-label) or [B, 5] long (single-label)
-    targets: Dict[str, "object"]
-    confidence_targets: "object"          # [B, 5]
-    source_weights: "object"              # [B, 5]
-    teacher_embedding_targets: Optional["object"] = None  # [B, 5, D]
+    targets: Dict[str, "torch.Tensor"]
+    confidence_targets: "torch.Tensor"          # [B, 5]
+    source_weights: "torch.Tensor"              # [B, 5]
+    teacher_embedding_targets: Optional["torch.Tensor"] = None  # [B, 5, D]
 
     IGNORE_INDEX: int = -100
