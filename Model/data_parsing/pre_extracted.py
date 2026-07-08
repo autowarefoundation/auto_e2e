@@ -86,13 +86,42 @@ def _decode_sample(sample: dict) -> dict:
     ego_history = torch.from_numpy(ego[:history_size])
     ego_future = torch.from_numpy(ego[history_size:])
 
-    return {
+    out = {
         "visual_tiles": torch.stack(frames),
         "map_input": map_input,
         "egomotion_history": ego_history,
         "visual_history": torch.zeros(_VISUAL_HISTORY_DIM),
         "trajectory_target": ego_future,
     }
+
+    # Optional reasoning labels (#98): a per-sample "reasoning.json" member holds
+    # a serialized ReasoningLabelRecord (same shard key → auto-aligned with this
+    # sample's frames, no sample_id join). Decode it to per-sample target tensors
+    # for HorizonReasoningLoss, flattened to top-level "reasoning__*" keys so
+    # WebDataset's per-key default collation stacks them into [B, ...] batches.
+    # Absent on shards packed without a teacher — the loader stays
+    # reasoning-agnostic and training skips the reasoning loss.
+    if "reasoning.json" in sample:
+        for key, tensor in _decode_reasoning_targets(sample["reasoning.json"]).items():
+            out[f"reasoning__{key}"] = tensor
+
+    return out
+
+
+def _decode_reasoning_targets(data) -> dict:
+    """Decode the reasoning.json member into per-sample target tensors (#98).
+
+    Lazy imports the data_processing tensorizer so importing this loader never
+    pulls the label package unless a shard actually carries reasoning labels.
+    """
+    from data_processing.reasoning_label_generation.targets import (
+        record_from_json,
+        record_to_target_tensors,
+    )
+
+    payload = json.loads(data.decode() if isinstance(data, (bytes, bytearray)) else data)
+    record = record_from_json(payload)
+    return record_to_target_tensors(record)
 
 
 def load_projection_from_manifest(shard_dir: str):
