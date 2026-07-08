@@ -227,9 +227,10 @@ class TestAutoE2EWorldModelWiring:
         m(cam, mp, vh, ego, mode="train", trajectory_target=tgt)        # tick 1 fills buffer
         out = m(cam, mp, vh, ego, mode="train", trajectory_target=tgt)  # tick 2
         assert isinstance(out, tuple) and len(out) == 2
-        traj, future_state_pred = out
+        traj, aux = out
         traj0 = traj[0] if isinstance(traj, tuple) else traj
         assert traj0.shape == (2, 128)
+        future_state_pred = aux["future_state_pred"]
         assert future_state_pred is not None and len(future_state_pred) == 4
 
     def test_default_world_model_off_unchanged(self, device):
@@ -315,4 +316,4 @@ class TestAutoE2EWorldModelAttentionPool:
         m(cam, mp, vh, ego, mode="train", trajectory_target=torch.randn(2, 128, device=device))
         out = m(cam, mp, vh, ego, mode="train", trajectory_target=torch.randn(2, 128, device=device))
         assert isinstance(out, tuple) and len(out) == 2
-        assert out[1] is not None and len(out[1]) == 4
+        assert out[1]["future_state_pred"] is not None and len(out[1]["future_state_pred"]) == 4
