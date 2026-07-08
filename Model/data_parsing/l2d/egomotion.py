@@ -43,16 +43,24 @@ def _derive_signals(vehicle_states: np.ndarray) -> np.ndarray:
 
     Returns:
         Float32 array of shape (T, 4): [speed, acceleration_x, yaw_rate, curvature].
+
+    Units (verified against yaak-ai/L2D meta/stats.json): the raw ``speed`` is in
+    KM/H (max ~171.8 → 47.7 m/s) and ``heading`` is in DEGREES (range 0..360).
+    Downstream physics (``integrate_trajectory``) and the curvature formula
+    ``yaw_rate/speed`` both require SI units, so we convert speed → m/s and
+    heading → radians here. Without this the derived yaw_rate is ~57× too large
+    (deg vs rad) and speed ~3.6× too large, which makes the integrated ego
+    trajectory (and hence ADE/FDE) explode.
     """
-    speed = vehicle_states[:, 0]
-    heading = np.unwrap(vehicle_states[:, 1])
-    accel_x = vehicle_states[:, 6]
+    speed = vehicle_states[:, 0] / 3.6                    # km/h → m/s
+    heading = np.unwrap(np.radians(vehicle_states[:, 1]))  # degrees → radians
+    accel_x = vehicle_states[:, 6]                         # already m/s²
 
     # yaw_rate = d(heading) / dt, with zero at boundaries
     yaw_rate = np.zeros_like(heading)
     yaw_rate[1:] = np.diff(heading) / _DT
 
-    # curvature = yaw_rate / speed, guarding division by zero
+    # curvature = yaw_rate / speed (rad/m), guarding division by zero
     curvature = np.where(
         np.abs(speed) > _SPEED_EPS,
         yaw_rate / speed,
