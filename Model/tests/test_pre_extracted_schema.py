@@ -222,3 +222,41 @@ class TestDecodeWorldModelWindows:
         out = _decode_sample(sample)
         assert "history_frames" not in out
         assert "future_frames" not in out
+
+
+class TestMergedDatasetLoader:
+    """Round-robin interleaving of multiple single-dataset loaders (#77 merge)."""
+
+    def _fake_loader(self, batches, projection, geom):
+        class _L:
+            def __init__(self, b, p, g):
+                self._b, self.projection, self.geometry_type = b, p, g
+            def __iter__(self):
+                return iter(self._b)
+        return _L(batches, projection, geom)
+
+    def test_round_robin_interleaves_and_tags_geometry(self):
+        from data_parsing.pre_extracted import MergedDatasetLoader
+        a = self._fake_loader(["a0", "a1", "a2"], None, "pseudo")
+        b = self._fake_loader(["b0", "b1"], "PROJ", "ftheta")
+        merged = MergedDatasetLoader([a, b])
+        seen = list(merged)
+        # Each item carries its dataset's geometry.
+        assert ("a0", None, "pseudo") in seen
+        assert ("b0", "PROJ", "ftheta") in seen
+        # Interleaved (a0, b0, a1, b1, a2) not concatenated (a0,a1,a2,b0,b1).
+        order = [x[0] for x in seen]
+        assert order == ["a0", "b0", "a1", "b1", "a2"]
+        # All batches from both datasets appear exactly once.
+        assert sorted(order) == ["a0", "a1", "a2", "b0", "b1"]
+
+    def test_single_loader_degrades_cleanly(self):
+        from data_parsing.pre_extracted import MergedDatasetLoader
+        a = self._fake_loader(["x0", "x1"], None, "pseudo")
+        merged = MergedDatasetLoader([a])
+        assert [x[0] for x in merged] == ["x0", "x1"]
+
+    def test_empty_raises(self):
+        from data_parsing.pre_extracted import MergedDatasetLoader
+        with pytest.raises(ValueError, match="at least one"):
+            MergedDatasetLoader([])
