@@ -25,6 +25,8 @@ FeatureReconstructionLoss).
 """
 
 import logging
+from typing import Optional
+
 import torch
 import torch.nn as nn
 
@@ -255,7 +257,7 @@ class WorldActionModel(nn.Module):
 
     def __init__(self, backbone: nn.Module, feature_channels: int = 768,
                  frame_embed_dim: int = 224, history_len: int = 4,
-                 num_future_steps: int = 4, loss_type: str = "l1",
+                 num_future_steps: Optional[int] = None, loss_type: str = "l1",
                  history_aggregator: str = "concat", feature_hw: int = 8,
                  view_aggregator: str = "attention", num_views: int = 7):
         super().__init__()
@@ -263,6 +265,10 @@ class WorldActionModel(nn.Module):
             raise ValueError(
                 f"Unknown history_aggregator {history_aggregator!r}. "
                 "Available: 'concat' (default), 'attention'.")
+        # num_future_steps defaults to history_len (documented). A hardcoded 4
+        # would IndexError in jepa_loss when the packed future window differs.
+        if num_future_steps is None:
+            num_future_steps = history_len
         self.history_len = history_len
         self.num_future_steps = num_future_steps
         self.frame_embed_dim = frame_embed_dim

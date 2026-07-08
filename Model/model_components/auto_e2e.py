@@ -62,6 +62,21 @@ class AutoE2E(nn.Module):
                 "feature_channels",
                 self.Reactive_E2E.Backbone.feature_channels[-1],
             )
+            # frame_embed_dim * history_len MUST equal visual_history_dim, else the
+            # WM's aggregated history (history_len * frame_embed_dim) mismatches the
+            # planner's visual_history_dim (896) and the planner rejects it. Reject
+            # a non-dividing history_len rather than silently produce e.g. 895.
+            if visual_history_dim % history_len != 0:
+                raise ValueError(
+                    f"history_len ({history_len}) must divide visual_history_dim "
+                    f"({visual_history_dim}); got remainder "
+                    f"{visual_history_dim % history_len}. Pick a divisor of "
+                    f"{visual_history_dim} (e.g. 1,2,4,7,8)."
+                )
+            # num_future_steps defaults to history_len (its documented default);
+            # leaving it at a hardcoded 4 would IndexError in jepa_loss when the
+            # packed future window has a different length.
+            wmk.setdefault("num_future_steps", history_len)
             self.World_Action_Model_E2E = WorldActionModel(
                 backbone=self.Reactive_E2E.Backbone,
                 frame_embed_dim=visual_history_dim // history_len,
@@ -132,6 +147,13 @@ class AutoE2E(nn.Module):
                 # (or [B, T, 3, H, W]) oldest→newest, current frame last.
                 history_concat = wam.encode_history(history_frames)
                 visual_history = wam.aggregate_history(history_concat)
+                # The WM yields an AGGREGATED (2-D [B, dim]) visual history. Keep
+                # egomotion_history at the SAME rank so a downstream temporal
+                # memory (e.g. one_hz) that branches on rank does not return one
+                # 2-D and one 3-D context and break the planner. Collapse a
+                # sequence egomotion to its current (last) step.
+                if egomotion_history.ndim == 3:
+                    egomotion_history = egomotion_history[:, -1]
                 if mode == "train":
                     future_state_pred = wam.predict_future(visual_history)
             else:
