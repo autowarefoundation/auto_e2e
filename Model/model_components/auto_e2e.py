@@ -53,6 +53,15 @@ class AutoE2E(nn.Module):
             wmk = dict(world_model_kwargs or {})
             history_len = wmk.pop("history_len", 4)
             wmk.setdefault("view_aggregator", "attention")
+            # The JEPA operates on the backbone's LAST feature map, whose channel
+            # count is backbone-dependent (swin_v2_tiny=768, res_net_50=2048, ...).
+            # Derive it from the shared backbone instead of defaulting to 768,
+            # otherwise a non-768 backbone crashes in FrameEncoder.proj / the
+            # feature-reconstruction shape check.
+            wmk.setdefault(
+                "feature_channels",
+                self.Reactive_E2E.Backbone.feature_channels[-1],
+            )
             self.World_Action_Model_E2E = WorldActionModel(
                 backbone=self.Reactive_E2E.Backbone,
                 frame_embed_dim=visual_history_dim // history_len,
