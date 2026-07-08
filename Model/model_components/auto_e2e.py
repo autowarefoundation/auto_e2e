@@ -17,13 +17,18 @@ class AutoE2E(nn.Module):
                  temporal_memory_mode="no_memory", temporal_memory_kwargs=None,
                  planner_mode="bezier", planner_kwargs=None,
                  enable_world_model=False, world_model_kwargs=None,
-                 enable_reasoning_band=False,
+                 enable_reasoning=False, reasoning_mode="none",
                  reasoning_kwargs: Optional[Dict[str, Any]] = None):
         super(AutoE2E, self).__init__()
 
         # Reactive model which runs at 10Hz and processes multi-camera inputs
         # a rendered map image and egomotion history to predict a driving trajectory
-        # to reach the near-horizon navigational goal
+        # to reach the near-horizon navigational goal.
+        #
+        # The reasoning branch lives INSIDE ReactiveE2E (after TemporalMemory,
+        # where ego_ctx is available) rather than as a pre-ReactiveE2E history
+        # rewrite — so the head sees the effective visual/ego context and the
+        # planner coupling is a first-class planner argument (#98).
         self.Reactive_E2E = ReactiveE2E(backbone=backbone, num_views=num_views, embed_dim=embed_dim,
                  is_pretrained=is_pretrained,
                  image_feature_size=image_feature_size, view_fusion_kwargs=view_fusion_kwargs,
@@ -32,7 +37,10 @@ class AutoE2E(nn.Module):
                  map_type=map_type, map_in_channels=map_in_channels,
                  map_fusion_mode=map_fusion_mode, map_fusion_kwargs=map_fusion_kwargs,
                  temporal_memory_mode=temporal_memory_mode, temporal_memory_kwargs=temporal_memory_kwargs,
-                 planner_mode=planner_mode, planner_kwargs=planner_kwargs)
+                 planner_mode=planner_mode, planner_kwargs=planner_kwargs,
+                 enable_reasoning=enable_reasoning, reasoning_mode=reasoning_mode,
+                 reasoning_kwargs=reasoning_kwargs)
+        self.enable_reasoning = enable_reasoning
 
         # World Action Model (slow, ~1Hz): encodes the multi-camera history into
         # the Encoded Visual History (fed to the reactive planner) and predicts
@@ -52,20 +60,6 @@ class AutoE2E(nn.Module):
             )
             self.visual_history_buffer = RollingHistoryBuffer(history_len=history_len)
 
-        # Reasoning Band (slow, ~1Hz): classifies the current (and in training,
-        # future) scenario across multi-label taxonomy groups, supervised by
-        # the student/teacher loss, and feeds the trajectory planner through a
-        # ZERO-INIT gate that modulates the visual history (#98/#103) — a
-        # strict no-op at initialisation, so with the gate untrained the
-        # reactive baseline is unchanged.  Opt-in (default OFF) so the
-        # reactive-only baseline is byte-for-byte unchanged when disabled.
-        self.Reasoning_Band: Optional[nn.Module] = None
-        if enable_reasoning_band:
-            from .reasoning.reasoning_band import ReasoningBand  # local import — lazy
-            rkw = dict(reasoning_kwargs or {})
-            rkw.setdefault("visual_history_dim", visual_history_dim)
-            self.Reasoning_Band = ReasoningBand(**rkw)
-
     def reset_visual_history(self):
         """Clear the World Model's rolling buffer (call between sequences)."""
         if self.visual_history_buffer is not None:
@@ -79,11 +73,14 @@ class AutoE2E(nn.Module):
         """
         Run the full autonomous-driving pipeline.
 
-        Returns a single trajectory tensor ``[B, num_timesteps * num_signals]``
-        (the pre-#94 3-tuple return was removed when the planner interface was
-        simplified). ``mode`` and ``trajectory_target`` are threaded through for
-        forward-compatibility with a future train-time planner objective but are
-        currently inert in the default planner.
+        Return contract:
+            * Inference (``mode != "train"``), or train with both branches off →
+              a single trajectory tensor ``[B, num_timesteps * num_signals]``.
+            * Train mode with the World Model and/or the reasoning branch on →
+              ``(trajectory, aux_outputs)`` where ``aux_outputs`` is a dict with
+              ``"future_state_pred"`` (World Model) and/or ``"reasoning_pred"``
+              (HorizonReasoningPrediction). A dict avoids a positional-tuple
+              that grows with every optional branch (#98 Task 4.2).
 
         Args:
             camera_tiles: (B, V, 3, H, W) — V real camera images (the nav-map is
@@ -97,10 +94,10 @@ class AutoE2E(nn.Module):
             geometry_type: Optional explicit geometry label ("pinhole",
                 "rectified_pinhole", "ftheta", "pseudo") passed to BEV fusion.
             image_transform: Optional ImageTransform for the model-input frame.
-            mode: threaded through to the planner (currently inert by default).
+            mode: "train" also returns aux branch outputs for their losses.
 
         Returns:
-            trajectory: (B, num_timesteps * num_signals)
+            trajectory, or (trajectory, aux_outputs) in train mode with a branch on.
         """
 
         # World Action Model (1Hz): encode the current multi-camera frame into the
@@ -131,34 +128,30 @@ class AutoE2E(nn.Module):
             if mode == "train":
                 future_state_pred = wam.predict_future(visual_history)
 
-        # Reasoning Band (1Hz): classify the current scenario (and, in training,
-        # future horizons), then condition the planner through the band's
-        # zero-init gate: the planner receives the MODULATED visual history,
-        # which at initialisation is identical to the input (strict no-op) and
-        # only diverges as training moves the gate (#98/#103).
+        # The reasoning branch runs INSIDE ReactiveE2E (after TemporalMemory).
+        # In train mode with reasoning on, ReactiveE2E returns
+        # (trajectory, reasoning_pred); otherwise just the trajectory.
+        reactive_out = self.Reactive_E2E(
+            camera_tiles, map_input, visual_history, egomotion_history,
+            projection=projection, geometry_type=geometry_type,
+            image_transform=image_transform,
+            mode=mode, trajectory_target=trajectory_target, **kwargs,
+        )
         reasoning_pred = None
-        if self.Reasoning_Band is not None:
-            reasoning_pred = self.Reasoning_Band(visual_history, mode=mode)
-            visual_history = reasoning_pred.modulated_visual_history
+        if self.enable_reasoning and mode == "train":
+            trajectory, reasoning_pred = reactive_out
+        else:
+            trajectory = reactive_out
 
-        trajectory = self.Reactive_E2E(camera_tiles, map_input, visual_history, egomotion_history,
-        projection=projection, geometry_type=geometry_type, image_transform=image_transform,
-        mode=mode, trajectory_target=trajectory_target, **kwargs)
-
-        # Return contract:
-        #   * Reasoning band OFF, World Model OFF → same as before (scalar / trajectory).
-        #   * World Model ON, mode="train" → (trajectory, future_state_pred)       [existing]
-        #   * Reasoning Band ON, mode="train" → (trajectory, future_state_pred, reasoning_pred)
-        #   * Reasoning Band ON, mode!="train" → same as World-Model-only path
-        #
-        # The reasoning_pred follows the same pattern as future_state_pred: only
-        # returned in mode="train" (with the future horizons) for the training
-        # loop to compute the reasoning loss.  It is a ReasoningPrediction
-        # (per-group logits + per-horizon confidence + the modulated history).
-        if self.Reasoning_Band is not None and mode == "train":
-            return trajectory, future_state_pred, reasoning_pred
-        if self.World_Action_Model_E2E is not None and mode == "train":
-            return trajectory, future_state_pred
+        # Assemble aux outputs (dict, not a growing positional tuple).
+        if mode == "train" and (
+            self.World_Action_Model_E2E is not None or reasoning_pred is not None
+        ):
+            aux_outputs = {
+                "future_state_pred": future_state_pred,
+                "reasoning_pred": reasoning_pred,
+            }
+            return trajectory, aux_outputs
         return trajectory
         
     
