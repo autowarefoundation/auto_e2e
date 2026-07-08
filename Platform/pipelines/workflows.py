@@ -44,8 +44,10 @@ FUSION_LABEL = "bev"
 
 TrainOutput = NamedTuple("TrainOutput", checkpoint=FlyteFile, metadata=FlyteFile)
 EvalMetrics = NamedTuple("EvalMetrics", ade=float, fde=float, gate_pass=bool)
-# A ready-to-train dataset: WebDataset shards + a versioned reasoning-label
-# artifact (parquet/jsonl). Both are consumed directly by train_il.
+# A ready-to-train dataset: the WebDataset shards train_il consumes DIRECTLY
+# (reasoning supervision is read from in-shard reasoning.json members), plus a
+# SEPARATE versioned reasoning-label export (parquet/jsonl) for traceability —
+# the export is not a training input.
 CreateDatasetOutput = NamedTuple(
     "CreateDatasetOutput", shards=FlyteDirectory, reasoning_labels=FlyteDirectory)
 
@@ -666,9 +668,9 @@ def train_il(
 
     from model_components.auto_e2e import AutoE2E
     from model_components.losses import TrajectoryImitationLoss
-    from data_parsing.pre_extracted import (
-        _loader_download_dir, make_multi_dataset_loader,
-    )
+    from data_parsing.pre_extracted import make_multi_dataset_loader
+    # _loader_download_dir is a module-level helper in THIS file, not in
+    # pre_extracted — call it directly (importing it from there is an ImportError).
 
     ctx = current_context()
     bb, fm = backbone.value, FUSION_LABEL
@@ -685,28 +687,35 @@ def train_il(
     merged = make_multi_dataset_loader(shard_dirs, batch_size=batch_size, num_workers=0)
     print(f"Merged {len(shard_dirs)} dataset(s) into one training stream.")
 
-    # Peek the first batch (from the first dataset) to size num_views defaults
-    # and run the packing↔training consistency guard. Per-batch geometry is
-    # applied inside the loop, not from this peek.
+    # Peek the first batch to size num_views defaults.
     _peek, _peek_proj, _peek_geom = next(iter(merged))
     num_views = int(_peek["visual_tiles"].shape[1])
     print(f"Detected num_views={num_views} (first dataset); geometry={_peek_geom}")
 
-    # Consistency guard (packing ↔ training): a branch enabled here MUST have its
-    # data packed in the shards, otherwise it would run forward but never be
-    # supervised (silent no-op). Fail loudly instead. The reasoning branch needs
-    # per-sample labels (reasoning__* keys); the world model needs frame windows
-    # (history_frames). Checked on the peeked batch.
-    if enable_reasoning and "reasoning__source_weight" not in _peek:
-        raise ValueError(
-            "enable_reasoning=True but the shards carry no reasoning labels. "
-            "Re-pack with data_processing(reasoning_teacher=mock|cached|openai_compatible)."
-        )
-    if enable_world_model and "history_frames" not in _peek:
-        raise ValueError(
-            "enable_world_model=True but the shards carry no World-Model windows. "
-            "Re-pack with data_processing(world_model=True)."
-        )
+    # Consistency guard (packing ↔ training) across EVERY merged dataset. A batch
+    # missing an enabled branch's data trains that branch unsupervised (the loss
+    # is silently skipped per-batch), so verify EACH shard dir carries what the
+    # enabled branches need — not just the first peeked batch. World-Model
+    # windows are recorded in each manifest (has_world_model); reasoning labels
+    # are per-sample, so peek one batch per dataset loader.
+    for d in shard_dirs:
+        mpath = os.path.join(d, "manifest.json")
+        manifest = json.load(open(mpath)) if os.path.exists(mpath) else {}
+        dname = manifest.get("dataset", d)
+        if enable_world_model and not manifest.get("has_world_model", False):
+            raise ValueError(
+                f"enable_world_model=True but dataset '{dname}' ({d}) has no "
+                f"World-Model windows. Re-pack that dataset with world_model=True "
+                f"(NVIDIA has no window support yet — exclude it or disable WM)."
+            )
+        if enable_reasoning:
+            probe = make_multi_dataset_loader([d], batch_size=1, num_workers=0)
+            first, _, _ = next(iter(probe))
+            if "reasoning__source_weight" not in first:
+                raise ValueError(
+                    f"enable_reasoning=True but dataset '{dname}' ({d}) carries no "
+                    f"reasoning labels. Re-pack it with reasoning_teacher set."
+                )
 
     # Model. fusion_mode is gone (BEV hardcoded inside ReactiveE2E); the model
     # now also owns the map branch, so its forward requires a map_input tensor.
@@ -920,9 +929,14 @@ def train_offline_rl(
             map_input = batch["map_input"].to(device)
 
             optimizer.zero_grad()
+            # Offline RL regresses only the trajectory; run mode="infer" so the
+            # forward returns a bare trajectory tensor even when the checkpoint
+            # was trained with reasoning / world-model branches on (mode="train"
+            # would return a (trajectory, aux) tuple and break the arithmetic).
+            # The inference forward is still differentiable for the policy grad.
             pred = model(visual, map_input, vis_hist, ego_hist,
                          projection=projection, geometry_type=geometry_type,
-                         mode="train", trajectory_target=target)
+                         mode="infer")
             # IQL advantage-weighted regression
             with torch.no_grad():
                 baseline_pred = model(visual, map_input, vis_hist, ego_hist,
@@ -1174,6 +1188,21 @@ def wf_data_processing(
                            reasoning_teacher=reasoning_teacher, world_model=world_model)
 
 
+@task(container_image=DATA_PREP_IMAGE, requests=Resources(cpu="1", mem="1Gi"))
+def _no_labels() -> FlyteDirectory:
+    """Empty label artifact for the 'no teacher' branch of wf_create_dataset.
+
+    Flyte conditional branches must return the same type; this is the no-op
+    branch (no reasoning labels were generated), an empty directory.
+    """
+    import os
+    import tempfile
+    d = tempfile.mkdtemp()
+    with open(os.path.join(d, "NO_LABELS"), "w") as f:
+        f.write("reasoning_teacher=none; no labels exported.\n")
+    return FlyteDirectory(d)
+
+
 @workflow
 def wf_generate_reasoning_labels(
     shards: FlyteDirectory,
@@ -1194,26 +1223,38 @@ def wf_create_dataset(
     world_model: bool = False,
     reasoning_teacher: str = "none",
 ) -> CreateDatasetOutput:
-    """CreateDataset: raw → ready-to-train dataset (shards + reasoning labels).
+    """CreateDataset: raw → ready-to-train dataset (shards + versioned label export).
 
-    "Dataset" here means data already in a form training can consume directly:
-    the WebDataset shards (frames + ego + optional WM windows) PLUS, when a
-    teacher is given, a versioned reasoning-label artifact generated offline and
-    stored alongside. train_il consumes both without any further processing.
+    "Dataset" means data already in a form training consumes DIRECTLY: the
+    WebDataset shards (frames + ego + optional WM windows + per-sample
+    reasoning.json when a teacher is set). Training reads its reasoning
+    supervision from those in-shard members — the shards are the single source
+    of truth.
 
-    Chains: data_ingest → data_processing (packs shards, optionally WM windows) →
-    generate_reasoning_labels (offline teacher → parquet/jsonl artifact). With
-    reasoning_teacher="none" the label step is skipped and only shards are built.
+    ``generate_reasoning_labels`` here produces a SEPARATE versioned parquet/jsonl
+    EXPORT of the same labels for traceability/auditing (queryable, diffable
+    across runs); it is NOT a second training input and train_il does not read
+    it. It runs only when a real teacher is requested — with
+    reasoning_teacher="none" no labels are packed and no export is produced.
+
+    Chains: data_ingest → data_processing (shards, optional WM windows + labels)
+    → [teacher != none] generate_reasoning_labels (versioned audit export).
     """
+    from flytekit import conditional
+
     raw = data_ingest(dataset=dataset, episodes=episodes)
     shards = data_processing(
         raw_data=raw, dataset=dataset, episodes=episodes, image_size=image_size,
         reasoning_teacher=reasoning_teacher, world_model=world_model,
     )
-    labels = generate_reasoning_labels(
-        shards=shards, dataset=dataset,
-        teacher=reasoning_teacher if reasoning_teacher != "none" else "mock",
-        split="train",
+    # Only export a label artifact when a teacher actually labelled the shards.
+    labels = (
+        conditional("export_labels")
+        .if_(reasoning_teacher != "none")
+        .then(generate_reasoning_labels(shards=shards, dataset=dataset,
+                                        teacher=reasoning_teacher, split="train"))
+        .else_()
+        .then(_no_labels())
     )
     return CreateDatasetOutput(shards=shards, reasoning_labels=labels)
 
