@@ -214,10 +214,17 @@ def data_processing(
     hz: int = 10,
     image_size: int = 256,
     episodes: int = 3,
+    reasoning_teacher: str = "none",
 ) -> FlyteDirectory:
     """Pre-extract aligned frames + egomotion → WebDataset shards.
 
     Solves Issue #30: no video decode at training time.
+
+    When ``reasoning_teacher`` is not "none" (mock / cached / openai_compatible),
+    each sample also gets a per-sample ``reasoning.json`` member holding a
+    horizon-aware reasoning label (#98), generated OFFLINE here so training reads
+    frozen labels and never calls a teacher. The teacher is model-agnostic; a
+    real run points ``openai_compatible`` at e.g. the Cosmos3-Nano vLLM endpoint.
     """
     import os
     import io
@@ -249,6 +256,21 @@ def data_processing(
         ds = L2DDataset(repo_id=dataset.value, episodes=ep_list)
         n_samples = len(ds)
         idx_iter = range(n_samples)
+
+    # Offline reasoning teacher (#98): model-agnostic, train-only. "none" skips
+    # label generation entirely (shards carry no reasoning.json; training runs
+    # imitation-only). mock/cached need no GPU/network — contributor-friendly.
+    reasoning_client = None
+    _record_to_json = None
+    if reasoning_teacher != "none":
+        from data_processing.reasoning_label_generation.teacher_client import (
+            TeacherRequest, build_teacher,
+        )
+        from data_processing.reasoning_label_generation.targets import record_to_json
+        reasoning_client = build_teacher(reasoning_teacher)
+        _record_to_json = record_to_json
+        _TeacherRequest = TeacherRequest
+        print(f"Reasoning labels: teacher={reasoning_teacher}")
 
     to_pil = transforms.ToPILImage()
     resize = transforms.Resize((image_size, image_size))
@@ -319,6 +341,20 @@ def data_processing(
         info.size = len(m)
         current_tar.addfile(info, io.BytesIO(m))
 
+        # Per-sample reasoning label (#98), keyed to this sample so the loader
+        # auto-aligns it with the frames. Frames are passed to the teacher; the
+        # mock/cached backends ignore them, an endpoint backend uses them.
+        if reasoning_client is not None:
+            req = _TeacherRequest(
+                sample_id=sample_key, dataset_name=dataset.value,
+                frames=[visual[c] for c in range(visual.shape[0])],
+            )
+            record = reasoning_client.label(req)
+            rb = json.dumps(_record_to_json(record)).encode()
+            info = tarfile.TarInfo(name=f"{sample_key}.reasoning.json")
+            info.size = len(rb)
+            current_tar.addfile(info, io.BytesIO(rb))
+
         sample_count += 1
         if sample_count % samples_per_shard == 0:
             open_new_shard()
@@ -373,11 +409,22 @@ def train_il(
     weight_decay: float = 1e-2,
     grad_clip: float = 1.0,
     amp: bool = True,
+    enable_reasoning: bool = False,
+    reasoning_mode: str = "pooled_latent",
+    reasoning_loss_weight: float = 0.5,
 ) -> TrainOutput:
     """Train AutoE2E model on pre-extracted WebDataset shards.
 
     All datasets' shards are passed in; the one matching `dataset` is selected
     (single-dataset training; multi-dataset tracked in #77).
+
+    When ``enable_reasoning`` is set, the horizon-aware reasoning branch (#98) is
+    built with the given ``reasoning_mode`` (pooled_latent /
+    horizon_cross_attention) and, if the shards carry per-sample reasoning labels
+    (a ``reasoning.json`` member), its HorizonReasoningLoss is added to the
+    imitation loss. If reasoning is on but a batch has no labels, only the
+    trajectory loss is used for that batch (the branch still runs, zero-init so
+    it does not perturb the trajectory until trained).
     """
     import os
     import json
@@ -411,13 +458,28 @@ def train_il(
     model = AutoE2E(
         backbone=bb, num_views=num_views, embed_dim=256,
         is_pretrained=True,
+        enable_reasoning=enable_reasoning, reasoning_mode=reasoning_mode,
     ).to(device)
+    print(f"Reasoning: {'on' if enable_reasoning else 'off'}"
+          + (f" (mode={reasoning_mode})" if enable_reasoning else ""))
 
     # Optimizer + Loss
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
     loss_fn = TrajectoryImitationLoss(loss_type="smooth_l1")
     if hasattr(loss_fn, "to"):
         loss_fn = loss_fn.to(device)
+
+    # Reasoning loss (#98): computed outside the model on the aux reasoning_pred
+    # against the shard's per-sample labels. Built only when reasoning is on.
+    reasoning_loss_fn = None
+    target_batch_from_loader = None
+    if enable_reasoning:
+        from training.losses.horizon_reasoning_loss import HorizonReasoningLoss
+        from data_processing.reasoning_label_generation.targets import (
+            target_batch_from_loader as _tb_from_loader,
+        )
+        reasoning_loss_fn = HorizonReasoningLoss()
+        target_batch_from_loader = _tb_from_loader
 
     # Training loop
     model.train()
@@ -435,10 +497,28 @@ def train_il(
 
             optimizer.zero_grad()
             with torch.amp.autocast("cuda", enabled=amp):
-                pred = model(visual, map_input, vis_hist, ego_hist,
-                             projection=projection, geometry_type=geometry_type,
-                             mode="train", trajectory_target=target)
-                loss = loss_fn(pred, target)
+                out = model(visual, map_input, vis_hist, ego_hist,
+                            projection=projection, geometry_type=geometry_type,
+                            mode="train", trajectory_target=target)
+                # Train mode returns (trajectory, aux) when a branch (reasoning /
+                # world model) is on; otherwise just the trajectory tensor.
+                trajectory, aux = out if isinstance(out, tuple) else (out, {})
+                loss = loss_fn(trajectory, target)
+
+                # Add the reasoning loss when the branch is on AND this batch
+                # carries labels (shards packed with a teacher). The branch is
+                # zero-init, so with no labels the trajectory is unaffected.
+                reasoning_pred = aux.get("reasoning_pred")
+                if reasoning_loss_fn is not None and reasoning_pred is not None:
+                    tb = target_batch_from_loader(batch)
+                    if tb is not None:
+                        terms = reasoning_loss_fn(
+                            reasoning_pred,
+                            {g: t.to(device) for g, t in tb.targets.items()},
+                            source_weights=tb.source_weights.to(device),
+                            confidence_targets=tb.confidence_targets.to(device),
+                        )
+                        loss = loss + reasoning_loss_weight * terms["total"]
 
             scaler.scale(loss).backward()
             scaler.unscale_(optimizer)
