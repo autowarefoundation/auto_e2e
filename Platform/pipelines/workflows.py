@@ -207,6 +207,17 @@ def data_ingest(
 @task(
     container_image=DATA_PREP_IMAGE,
     requests=Resources(cpu="4", mem="16Gi", ephemeral_storage="50Gi"),
+    # The openai_compatible teacher endpoint (e.g. the Cosmos3-Nano vLLM ALB) is
+    # injected as env vars from a K8s Secret, so no concrete URL / account value
+    # is committed to git or shown in the Flyte UI. Optional: only consumed when
+    # reasoning_teacher="openai_compatible" (mock/cached ignore it). The Secret is
+    # created out-of-band; see .env.example COSMOS_TEACHER_*.
+    secret_requests=[
+        Secret(group="cosmos-teacher", key="COSMOS_TEACHER_BASE_URL",
+               mount_requirement=Secret.MountType.ENV_VAR),
+        Secret(group="cosmos-teacher", key="COSMOS_TEACHER_MODEL",
+               mount_requirement=Secret.MountType.ENV_VAR),
+    ],
 )
 def data_processing(
     raw_data: FlyteDirectory,
@@ -281,7 +292,35 @@ def data_processing(
             TeacherRequest, build_teacher,
         )
         from data_processing.reasoning_label_generation.targets import record_to_json
-        reasoning_client = build_teacher(reasoning_teacher)
+        # The teacher endpoint is model-agnostic and env/secret-driven so no
+        # concrete URL / account value is committed. For the openai_compatible
+        # backend (e.g. the Cosmos3-Nano vLLM ALB), resolve base_url / model /
+        # api_key from the Flyte secret context (falling back to env); the
+        # mock/cached backends need none of these.
+        teacher_kwargs = {}
+        if reasoning_teacher == "openai_compatible":
+            from flytekit import current_context
+
+            def _secret(key, default=None):
+                try:
+                    return current_context().secrets.get("cosmos-teacher", key)
+                except Exception:
+                    return os.environ.get(key, default)
+
+            base_url = _secret("COSMOS_TEACHER_BASE_URL")
+            if not base_url:
+                raise ValueError(
+                    "reasoning_teacher='openai_compatible' needs COSMOS_TEACHER_BASE_URL "
+                    "(cosmos-teacher K8s Secret / env); none found."
+                )
+            teacher_kwargs = {
+                "base_url": base_url,
+                "model": _secret("COSMOS_TEACHER_MODEL", "nvidia/Cosmos3-Nano"),
+            }
+            api_key = _secret("COSMOS_TEACHER_API_KEY")
+            if api_key:
+                teacher_kwargs["api_key"] = api_key
+        reasoning_client = build_teacher(reasoning_teacher, **teacher_kwargs)
         _record_to_json = record_to_json
         _TeacherRequest = TeacherRequest
         print(f"Reasoning labels: teacher={reasoning_teacher}")
