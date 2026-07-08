@@ -172,7 +172,11 @@ class _MockBackbone4(nn.Module):
 
     def __init__(self, backbone="swin_v2_tiny", is_pretrained=True, **kwargs):
         super().__init__()
-        self.backbone_channels = 1440
+        # Per-stage channels; the World Model derives its JEPA feature_channels
+        # from feature_channels[-1], so the mock must expose it like the real
+        # Backbone wrapper.
+        self.feature_channels = [96, 192, 384, 768]
+        self.backbone_channels = sum(self.feature_channels)
         self._st = nn.ModuleList([
             nn.Sequential(nn.Conv2d(3, 96, 3, 1, 1), nn.AdaptiveAvgPool2d(64)),
             nn.Sequential(nn.Conv2d(96, 192, 3, 1, 1), nn.AdaptiveAvgPool2d(32)),

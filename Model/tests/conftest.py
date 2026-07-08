@@ -70,7 +70,11 @@ class MockBackbone(nn.Module):
     def __init__(self, backbone="swin_v2_tiny", is_pretrained=True, **kwargs):
         super().__init__()
         self.backbone = MockBackboneModel()
-        self.backbone_channels = 1440
+        # Per-stage channels (matches MockBackboneModel's 4 stages). The World
+        # Model derives its JEPA feature_channels from feature_channels[-1], so
+        # the mock must expose it just like the real Backbone wrapper.
+        self.feature_channels = [96, 192, 384, 768]
+        self.backbone_channels = sum(self.feature_channels)
 
     def forward(self, image):
         return self.backbone(image)
