@@ -215,6 +215,7 @@ def data_processing(
     image_size: int = 256,
     episodes: int = 3,
     reasoning_teacher: str = "none",
+    world_model: bool = False,
 ) -> FlyteDirectory:
     """Pre-extract aligned frames + egomotion → WebDataset shards.
 
@@ -225,6 +226,13 @@ def data_processing(
     horizon-aware reasoning label (#98), generated OFFLINE here so training reads
     frozen labels and never calls a teacher. The teacher is model-agnostic; a
     real run points ``openai_compatible`` at e.g. the Cosmos3-Nano vLLM endpoint.
+
+    When ``world_model`` is set (L2D only for now), each sample also gets the 1 Hz
+    past/future multi-view windows for the JEPA loss (#13): members
+    ``hist_{t}_cam_{v}.jpg`` (oldest→newest, current last) and
+    ``fut_{f}_cam_{v}.jpg`` (the frozen JEPA targets). The window config
+    (num_frames/stride) matches the online dataset so shards and on-the-fly
+    windows are identical.
     """
     import os
     import io
@@ -249,11 +257,17 @@ def data_processing(
     if dataset == Dataset.NVIDIA_PHYSICAL_AI:
         from data_parsing.nvidia_physical_ai.dataset import NvidiaAVDataset
         ds = NvidiaAVDataset(data_root=raw_path)
+        if world_model:
+            print("world_model requested but NVIDIA has no window support yet; "
+                  "packing without JEPA windows.")
         n_samples = len(ds)
         idx_iter = range(n_samples)
     else:
         from data_parsing.l2d import L2DDataset
-        ds = L2DDataset(repo_id=dataset.value, episodes=ep_list)
+        # World-Model windows (#16/#13) are only produced when requested, so the
+        # imitation-only path stays cheap (no extra frame decode).
+        ds = L2DDataset(repo_id=dataset.value, episodes=ep_list,
+                        include_world_model_windows=world_model)
         n_samples = len(ds)
         idx_iter = range(n_samples)
 
@@ -331,6 +345,19 @@ def data_processing(
         if map_tile is not None:
             _write_jpeg(sample_key, "map.jpg", map_tile)
 
+        # World-Model windows (#13): past/future 1 Hz multi-view frames as
+        # hist_{t}_cam_{v}.jpg (oldest→newest, current last) and fut_{f}_cam_{v}.jpg
+        # (JEPA targets). Present only when include_world_model_windows was set.
+        history_win = sample.get("history_frames")   # (T, V, 3, H, W)
+        future_win = sample.get("future_frames")     # (F, V, 3, H, W)
+        if history_win is not None and future_win is not None:
+            for t in range(history_win.shape[0]):
+                for v in range(history_win.shape[1]):
+                    _write_jpeg(sample_key, f"hist_{t}_cam_{v}.jpg", history_win[t, v])
+            for fh in range(future_win.shape[0]):
+                for v in range(future_win.shape[1]):
+                    _write_jpeg(sample_key, f"fut_{fh}_cam_{v}.jpg", future_win[fh, v])
+
         eb = ego_data.tobytes()
         info = tarfile.TarInfo(name=f"{sample_key}.ego.npy")
         info.size = len(eb)
@@ -368,7 +395,10 @@ def data_processing(
                 # num_views = real cameras only; the map view is stored under a
                 # separate map.jpg key and is NOT counted here (#77).
                 "num_views": int(visual.shape[0]) if sample_count else 0,
-                "has_map": bool(sample_count) and (map_tile is not None)}
+                "has_map": bool(sample_count) and (map_tile is not None),
+                # World-Model windows present when packed (enables JEPA training).
+                "has_world_model": bool(sample_count) and world_model
+                and (sample.get("history_frames") is not None)}
 
     # Per-dataset camera calibration (rig constant): a projection-operator spec
     # stored once, scaled to image_size. NVIDIA/KITScenes provide real geometry;
@@ -412,6 +442,8 @@ def train_il(
     enable_reasoning: bool = False,
     reasoning_mode: str = "pooled_latent",
     reasoning_loss_weight: float = 0.5,
+    enable_world_model: bool = False,
+    jepa_loss_weight: float = 1.0,
 ) -> TrainOutput:
     """Train AutoE2E model on pre-extracted WebDataset shards.
 
@@ -425,6 +457,14 @@ def train_il(
     imitation loss. If reasoning is on but a batch has no labels, only the
     trajectory loss is used for that batch (the branch still runs, zero-init so
     it does not perturb the trajectory until trained).
+
+    When ``enable_world_model`` is set and the shards carry World-Model windows
+    (packed via data_processing(world_model=True)), the JEPA future-feature
+    reconstruction loss (#13) is added: the model runs the stateless windowed
+    path (encode_history → aggregate → predict_future), and jepa_loss compares
+    the prediction against the frozen target on the real future frames. The WM
+    also supplies the Encoded Visual History to the planner and reasoning branch
+    (otherwise visual_history is zeros).
     """
     import os
     import json
@@ -459,9 +499,11 @@ def train_il(
         backbone=bb, num_views=num_views, embed_dim=256,
         is_pretrained=True,
         enable_reasoning=enable_reasoning, reasoning_mode=reasoning_mode,
+        enable_world_model=enable_world_model,
     ).to(device)
     print(f"Reasoning: {'on' if enable_reasoning else 'off'}"
           + (f" (mode={reasoning_mode})" if enable_reasoning else ""))
+    print(f"World Model: {'on' if enable_world_model else 'off'}")
 
     # Optimizer + Loss
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
@@ -495,15 +537,35 @@ def train_il(
             target = batch["trajectory_target"].to(device)    # (B, 128)
             map_input = batch["map_input"].to(device)
 
+            # World-Model windows (#13): present only on world_model shards. The
+            # windowed path makes JEPA loss differentiable and also supplies the
+            # Encoded Visual History to the planner + reasoning branch.
+            history_frames = batch.get("history_frames")
+            future_frames = batch.get("future_frames")
+            if history_frames is not None:
+                history_frames = history_frames.to(device)
+            if future_frames is not None:
+                future_frames = future_frames.to(device)
+
             optimizer.zero_grad()
             with torch.amp.autocast("cuda", enabled=amp):
                 out = model(visual, map_input, vis_hist, ego_hist,
                             projection=projection, geometry_type=geometry_type,
-                            mode="train", trajectory_target=target)
+                            mode="train", trajectory_target=target,
+                            history_frames=history_frames, future_frames=future_frames)
                 # Train mode returns (trajectory, aux) when a branch (reasoning /
                 # world model) is on; otherwise just the trajectory tensor.
                 trajectory, aux = out if isinstance(out, tuple) else (out, {})
                 loss = loss_fn(trajectory, target)
+
+                # JEPA loss (#13): future-feature reconstruction, added when the
+                # WM ran the windowed path AND this batch carries future frames.
+                future_state_pred = aux.get("future_state_pred")
+                if (enable_world_model and future_state_pred is not None
+                        and future_frames is not None):
+                    jepa = model.World_Action_Model_E2E.jepa_loss(
+                        future_state_pred, future_frames)
+                    loss = loss + jepa_loss_weight * jepa
 
                 # Add the reasoning loss when the branch is on AND this batch
                 # carries labels (shards packed with a teacher). The branch is
@@ -536,10 +598,16 @@ def train_il(
     os.makedirs("/tmp/train", exist_ok=True)
     ckpt_path = "/tmp/train/best.pt"
     # `config` must be reconstruction kwargs for AutoE2E(**config); fusion_mode
-    # is no longer a constructor arg, so it lives only in metadata below.
+    # is no longer a constructor arg, so it lives only in metadata below. The
+    # branch flags MUST be recorded so a later stage (offline RL / eval) rebuilds
+    # the SAME architecture — otherwise load_state_dict fails on missing keys.
     torch.save({
         "model_state_dict": model.state_dict(),
-        "config": {"backbone": bb, "embed_dim": 256, "num_views": num_views},
+        "config": {
+            "backbone": bb, "embed_dim": 256, "num_views": num_views,
+            "enable_reasoning": enable_reasoning, "reasoning_mode": reasoning_mode,
+            "enable_world_model": enable_world_model,
+        },
         "epoch": epochs,
     }, ckpt_path)
 
