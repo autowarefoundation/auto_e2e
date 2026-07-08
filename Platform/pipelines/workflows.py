@@ -493,6 +493,22 @@ def train_il(
     num_views = int(_peek["visual_tiles"].shape[1])
     print(f"Detected num_views={num_views}")
 
+    # Consistency guard (packing ↔ training): a branch enabled here MUST have its
+    # data packed in the shards, otherwise it would run forward but never be
+    # supervised (silent no-op). Fail loudly instead. The reasoning branch needs
+    # per-sample labels (reasoning__* keys); the world model needs frame windows
+    # (history_frames). Checked on the peeked batch.
+    if enable_reasoning and "reasoning__source_weight" not in _peek:
+        raise ValueError(
+            "enable_reasoning=True but the shards carry no reasoning labels. "
+            "Re-pack with data_processing(reasoning_teacher=mock|cached|openai_compatible)."
+        )
+    if enable_world_model and "history_frames" not in _peek:
+        raise ValueError(
+            "enable_world_model=True but the shards carry no World-Model windows. "
+            "Re-pack with data_processing(world_model=True)."
+        )
+
     # Model. fusion_mode is gone (BEV hardcoded inside ReactiveE2E); the model
     # now also owns the map branch, so its forward requires a map_input tensor.
     model = AutoE2E(
@@ -931,10 +947,18 @@ def wf_data_processing(
     hz: int = 10,
     image_size: int = 256,
     episodes: int = 3,
+    reasoning_teacher: str = "none",
+    world_model: bool = False,
 ) -> FlyteDirectory:
-    """Pre-process raw data → WebDataset shards."""
+    """Pre-process raw data → WebDataset shards.
+
+    ``reasoning_teacher`` / ``world_model`` pack the extra per-sample members the
+    reasoning (#98) and JEPA (#13) branches need; they MUST match the branch
+    flags used at ``train_il`` time or that branch trains unsupervised.
+    """
     return data_processing(raw_data=raw_data, dataset=dataset,
-                           hz=hz, image_size=image_size, episodes=episodes)
+                           hz=hz, image_size=image_size, episodes=episodes,
+                           reasoning_teacher=reasoning_teacher, world_model=world_model)
 
 
 @workflow
@@ -945,10 +969,20 @@ def wf_train_il(
     epochs: int = 3,
     batch_size: int = 4,
     lr: float = 1e-4,
+    enable_reasoning: bool = False,
+    reasoning_mode: str = "pooled_latent",
+    enable_world_model: bool = False,
 ) -> EvalMetrics:
-    """IL Train → Evaluate. All datasets' shards passed in; `dataset` selects one."""
+    """IL Train → Evaluate. All datasets' shards passed in; `dataset` selects one.
+
+    The branch flags must match how the shards were packed (see
+    ``wf_data_processing``); train_il fails loudly if a branch is enabled but its
+    shard data is missing rather than training it unsupervised.
+    """
     out = train_il(shards=shards, dataset=dataset, backbone=backbone,
-                   epochs=epochs, batch_size=batch_size, lr=lr)
+                   epochs=epochs, batch_size=batch_size, lr=lr,
+                   enable_reasoning=enable_reasoning, reasoning_mode=reasoning_mode,
+                   enable_world_model=enable_world_model)
     return evaluate_il_policy(checkpoint=out.checkpoint, shards=shards, dataset=dataset,
                               train_metadata=out.metadata)
 
