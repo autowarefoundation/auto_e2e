@@ -44,6 +44,10 @@ FUSION_LABEL = "bev"
 
 TrainOutput = NamedTuple("TrainOutput", checkpoint=FlyteFile, metadata=FlyteFile)
 EvalMetrics = NamedTuple("EvalMetrics", ade=float, fde=float, gate_pass=bool)
+# A ready-to-train dataset: WebDataset shards + a versioned reasoning-label
+# artifact (parquet/jsonl). Both are consumed directly by train_il.
+CreateDatasetOutput = NamedTuple(
+    "CreateDatasetOutput", shards=FlyteDirectory, reasoning_labels=FlyteDirectory)
 
 
 def _model_kwargs(config: dict) -> dict:
@@ -457,6 +461,135 @@ def data_processing(
         json.dump(manifest, f)
 
     print(f"Processed {dataset.value}: {sample_count} samples → {shard_idx} shards")
+    return FlyteDirectory(out_dir)
+
+
+# ============================================================
+# Task: Reasoning label generation (offline teacher → versioned S3 artifact)
+# ============================================================
+@task(
+    container_image=DATA_PREP_IMAGE,
+    requests=Resources(cpu="4", mem="16Gi", ephemeral_storage="20Gi"),
+    # Model-agnostic teacher endpoint from a K8s Secret (Cosmos vLLM ALB, a Qwen
+    # server, ...); nothing about the backend is committed. Optional — only the
+    # openai_compatible provider reads it.
+    secret_requests=[
+        Secret(group="cosmos-teacher", key="COSMOS_TEACHER_BASE_URL",
+               mount_requirement=Secret.MountType.ENV_VAR),
+        Secret(group="cosmos-teacher", key="COSMOS_TEACHER_MODEL",
+               mount_requirement=Secret.MountType.ENV_VAR),
+    ],
+)
+def generate_reasoning_labels(
+    shards: FlyteDirectory,
+    dataset: Dataset = Dataset.L2D,
+    teacher: str = "mock",
+    split: str = "train",
+    prompt_version: str = "action_relevant_reasoning_v2",
+) -> FlyteDirectory:
+    """Generate reasoning labels OFFLINE and store them as a versioned artifact.
+
+    Reads the packed shards, decodes each sample's camera frames, calls the
+    (model-agnostic) teacher — mock / cached / openai_compatible (e.g. the
+    Cosmos3-Nano vLLM ALB, referenced only by URL/model from a Secret, never a
+    Cosmos import) — and writes JSONL (debug) + Parquet (training) under a
+    versioned layout, returning that directory as the label artifact.
+
+    The taxonomy is the action-relevant, compositional ontology (relation /
+    hazard / cause / longitudinal / lateral / tactical / rule); the Alpamayo
+    Chain-of-Causation work informs the label design but nothing depends on
+    Alpamayo or Cosmos weights (OpenMDW/non-Apache licenses stay out of the
+    artifact — only teacher OUTPUTS are used).
+
+    Returns:
+        FlyteDirectory with reasoning_labels_v2.parquet + .jsonl and a
+        provenance meta.json. Consumed by train_il as a frozen input.
+    """
+    import io
+    import json
+    import os
+    import tempfile
+
+    import numpy as np
+    import torch
+    import webdataset as wds
+    from PIL import Image
+
+    from data_processing.reasoning_label_generation.teacher_client import (
+        TeacherRequest, build_teacher,
+    )
+    from data_processing.reasoning_label_generation.parquet_writer import (
+        write_jsonl, write_parquet,
+    )
+    from data_processing.reasoning_label_generation.validators import validate_records
+
+    shard_dir = shards.download()
+    tarfiles = sorted(_p.name for _p in __import__("pathlib").Path(shard_dir).glob("*.tar"))
+    print(f"Reasoning labels: dataset={dataset.value} teacher={teacher} "
+          f"split={split} shards={len(tarfiles)}")
+
+    # Model-agnostic teacher; openai_compatible resolves its endpoint from the
+    # cosmos-teacher Secret / env (no committed URL, no Cosmos import).
+    teacher_kwargs = {}
+    if teacher == "openai_compatible":
+        from flytekit import current_context
+
+        def _secret(key, default=None):
+            try:
+                return current_context().secrets.get("cosmos-teacher", key)
+            except Exception:
+                return os.environ.get(key, default)
+
+        base_url = _secret("COSMOS_TEACHER_BASE_URL")
+        if not base_url:
+            raise ValueError("teacher='openai_compatible' needs COSMOS_TEACHER_BASE_URL.")
+        teacher_kwargs = {
+            "base_url": base_url,
+            "model": _secret("COSMOS_TEACHER_MODEL", "nvidia/Cosmos3-Nano"),
+            "prompt_version": prompt_version,
+        }
+        api_key = _secret("COSMOS_TEACHER_API_KEY")
+        if api_key:
+            teacher_kwargs["api_key"] = api_key
+    client = build_teacher(teacher, **teacher_kwargs)
+
+    # Decode each sample's current-frame cameras (the teacher's clip input) and
+    # label it. WebDataset groups tar members by key, so a sample's cam_* frames
+    # arrive together.
+    def _decode(sample):
+        cams = sorted(k for k in sample if k.startswith("cam_") and k.endswith(".jpg"))
+        frames = []
+        for k in cams:
+            img = Image.open(io.BytesIO(sample[k])).convert("RGB")
+            frames.append(torch.from_numpy(np.asarray(img)).permute(2, 0, 1).float() / 255.0)
+        return sample["__key__"], frames
+
+    urls = [str(__import__("pathlib").Path(shard_dir) / t) for t in tarfiles]
+    ds = wds.WebDataset(urls, shardshuffle=False, empty_check=False).map(_decode)
+
+    records = []
+    for key, frames in ds:
+        # clip_horizons expects a frame per horizon; reuse the current frame for
+        # each when only the current frame is packed (teacher sees the clip it has).
+        req = TeacherRequest(sample_id=key, dataset_name=dataset.value, frames=frames)
+        records.append(client.label(req))
+    print(f"Labelled {len(records)} samples")
+
+    validate_records(records)
+
+    out_dir = tempfile.mkdtemp()
+    layout = os.path.join(
+        out_dir, f"dataset={dataset.value}", f"split={split}",
+        "schema_version=reasoning_label_v2", f"teacher={teacher}",
+    )
+    os.makedirs(layout, exist_ok=True)
+    write_jsonl(records, os.path.join(layout, "reasoning_labels_v2.jsonl"))
+    write_parquet(records, os.path.join(layout, "reasoning_labels_v2.parquet"))
+    with open(os.path.join(out_dir, "meta.json"), "w") as f:
+        json.dump({"dataset": dataset.value, "split": split, "teacher": teacher,
+                   "prompt_version": prompt_version, "num_records": len(records),
+                   "num_abstained": sum(1 for r in records if r.abstained)}, f)
+    print(f"Wrote reasoning label artifact → {layout}")
     return FlyteDirectory(out_dir)
 
 
@@ -998,6 +1131,50 @@ def wf_data_processing(
     return data_processing(raw_data=raw_data, dataset=dataset,
                            hz=hz, image_size=image_size, episodes=episodes,
                            reasoning_teacher=reasoning_teacher, world_model=world_model)
+
+
+@workflow
+def wf_generate_reasoning_labels(
+    shards: FlyteDirectory,
+    dataset: Dataset = Dataset.L2D,
+    teacher: str = "mock",
+    split: str = "train",
+) -> FlyteDirectory:
+    """Offline reasoning-label generation → versioned S3 artifact (parquet+jsonl)."""
+    return generate_reasoning_labels(shards=shards, dataset=dataset,
+                                     teacher=teacher, split=split)
+
+
+@workflow
+def wf_create_dataset(
+    dataset: Dataset = Dataset.L2D,
+    episodes: int = 3,
+    image_size: int = 256,
+    world_model: bool = False,
+    reasoning_teacher: str = "none",
+) -> CreateDatasetOutput:
+    """CreateDataset: raw → ready-to-train dataset (shards + reasoning labels).
+
+    "Dataset" here means data already in a form training can consume directly:
+    the WebDataset shards (frames + ego + optional WM windows) PLUS, when a
+    teacher is given, a versioned reasoning-label artifact generated offline and
+    stored alongside. train_il consumes both without any further processing.
+
+    Chains: data_ingest → data_processing (packs shards, optionally WM windows) →
+    generate_reasoning_labels (offline teacher → parquet/jsonl artifact). With
+    reasoning_teacher="none" the label step is skipped and only shards are built.
+    """
+    raw = data_ingest(dataset=dataset, episodes=episodes)
+    shards = data_processing(
+        raw_data=raw, dataset=dataset, episodes=episodes, image_size=image_size,
+        reasoning_teacher=reasoning_teacher, world_model=world_model,
+    )
+    labels = generate_reasoning_labels(
+        shards=shards, dataset=dataset,
+        teacher=reasoning_teacher if reasoning_teacher != "none" else "mock",
+        split="train",
+    )
+    return CreateDatasetOutput(shards=shards, reasoning_labels=labels)
 
 
 @workflow
