@@ -177,11 +177,6 @@ def load_projection_from_manifest(shard_dir: str):
     the single geometry-reconstruction point, keeping the pinhole/f-theta split
     out of the training loop.
     """
-    from model_components.view_fusion.projection import (
-        FThetaProjection,
-        PinholeProjection,
-    )
-
     mpath = Path(shard_dir) / "manifest.json"
     # Missing manifest -> pseudo (a legacy shard has no geometry). But a manifest
     # that EXISTS and cannot be read must RAISE: silently degrading a calibrated
@@ -200,7 +195,23 @@ def load_projection_from_manifest(shard_dir: str):
     spec = manifest.get("projection")
     if spec is None:
         return None, manifest.get("geometry_type", "pseudo")
+    return projection_from_spec(spec)
 
+
+def projection_from_spec(spec):
+    """Reconstruct ``(projection, geometry_type)`` from a serialized spec dict.
+
+    Shared by the single-dataset manifest path and the per-sample calib.json
+    path (merged loader). ``spec`` is what ``CameraProjectionModel.to_spec()``
+    produced; ``None`` returns the pseudo path.
+    """
+    from model_components.view_fusion.projection import (
+        FThetaProjection,
+        PinholeProjection,
+    )
+
+    if spec is None:
+        return None, "pseudo"
     kind = spec.get("type")
     if kind in ("pinhole", "rectified_pinhole"):
         matrix = torch.tensor(spec["matrix"], dtype=torch.float32).unsqueeze(0)  # [1,V,3,4]
@@ -230,7 +241,7 @@ def load_projection_from_manifest(shard_dir: str):
             ),
             "ftheta",
         )
-    raise ValueError(f"Unknown projection type in manifest: {kind!r}")
+    raise ValueError(f"Unknown projection type in spec: {kind!r}")
 
 
 def make_pre_extracted_loader(
@@ -273,3 +284,63 @@ def make_pre_extracted_loader(
     loader.projection = projection
     loader.geometry_type = geometry_type
     return loader
+
+
+class MergedDatasetLoader:
+    """Round-robin over multiple single-dataset loaders (merged training).
+
+    Different datasets have different camera counts (L2D 6, NVIDIA 7) and
+    geometries (pseudo vs f-theta), which cannot be stacked into one batch. So
+    each dataset keeps its own WebDataset loader and we interleave BATCHES: every
+    batch is same-dataset (uniform num_views/geometry) and carries that dataset's
+    projection, while an epoch mixes all datasets. This is the merge point — one
+    ready-to-train stream over many datasets, per-sample/per-dataset geometry
+    preserved (self-describing calib.json in the shards, manifest per dir).
+
+    Each yielded item is ``(batch, projection, geometry_type)`` so the training
+    loop applies the right geometry to each (same-dataset) batch.
+    """
+
+    def __init__(self, loaders):
+        if not loaders:
+            raise ValueError("MergedDatasetLoader needs at least one loader.")
+        self.loaders = list(loaders)
+
+    def __iter__(self):
+        iterators = [iter(dl) for dl in self.loaders]
+        active = list(range(len(iterators)))
+        # Round-robin: pull one batch from each live loader in turn until all
+        # are exhausted, so datasets are interleaved rather than concatenated.
+        while active:
+            still: list[int] = []
+            for i in active:
+                try:
+                    batch = next(iterators[i])
+                except StopIteration:
+                    continue
+                dl = self.loaders[i]
+                yield batch, getattr(dl, "projection", None), getattr(dl, "geometry_type", "pseudo")
+                still.append(i)
+            active = still
+
+
+def make_multi_dataset_loader(
+    shard_dirs,
+    batch_size: int = 8,
+    num_workers: int = 4,
+    split: str = "train",
+    shuffle: int = 1000,
+) -> MergedDatasetLoader:
+    """Build a :class:`MergedDatasetLoader` over several shard directories.
+
+    Each directory is one dataset (its own manifest + geometry). Datasets are
+    merged by interleaving same-dataset batches (see MergedDatasetLoader). A
+    single directory degrades to a one-loader merge (identical to the single
+    dataset path, but yielding the ``(batch, projection, geometry_type)`` tuple).
+    """
+    loaders = [
+        make_pre_extracted_loader(d, batch_size=batch_size, num_workers=num_workers,
+                                  split=split, shuffle=shuffle)
+        for d in shard_dirs
+    ]
+    return MergedDatasetLoader(loaders)
