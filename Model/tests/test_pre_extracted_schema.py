@@ -195,3 +195,30 @@ class TestManifestProjection:
         proj, _ = load_projection_from_manifest(str(tmp_path))
         res = proj.project_ego_to_image(torch.randn(10, 4), 256)  # must not raise
         assert res.valid_mask.shape == (1, 2, 10)
+
+
+class TestDecodeWorldModelWindows:
+    """WM window members hist_/fut_ decode to [steps, V, 3, H, W] (#13)."""
+
+    def _window_sample(self, n_cams=6, T=4, F=4):
+        sample = {f"cam_{i}.jpg": _jpeg_bytes((i, 0, 0)) for i in range(n_cams)}
+        sample["ego.npy"] = _ego_bytes()
+        for t in range(T):
+            for v in range(n_cams):
+                sample[f"hist_{t}_cam_{v}.jpg"] = _jpeg_bytes((t, v, 0))
+        for f in range(F):
+            for v in range(n_cams):
+                sample[f"fut_{f}_cam_{v}.jpg"] = _jpeg_bytes((f, v, 1))
+        return sample
+
+    def test_windows_decoded_with_right_shape(self):
+        out = _decode_sample(self._window_sample(n_cams=6, T=4, F=4))
+        assert out["history_frames"].shape == (4, 6, 3, 256, 256)
+        assert out["future_frames"].shape == (4, 6, 3, 256, 256)
+
+    def test_windows_absent_when_not_packed(self):
+        sample = {f"cam_{i}.jpg": _jpeg_bytes((i, 0, 0)) for i in range(6)}
+        sample["ego.npy"] = _ego_bytes()
+        out = _decode_sample(sample)
+        assert "history_frames" not in out
+        assert "future_frames" not in out
