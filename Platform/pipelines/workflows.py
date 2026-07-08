@@ -89,6 +89,11 @@ def _select_shard_dir(shards, dataset) -> str:
     return fallback
 
 
+def _loader_download_dir(shard) -> str:
+    """Download one shard FlyteDirectory and return its local path (merged path)."""
+    return str(shard.download())
+
+
 def _loader_projection(loader, device):
     """Return the loader's per-dataset projection operator on ``device``.
 
@@ -329,6 +334,20 @@ def data_processing(
         _TeacherRequest = TeacherRequest
         print(f"Reasoning labels: teacher={reasoning_teacher}")
 
+    # Geometry is a per-dataset rig constant, computed once. It is written into
+    # EACH sample's calib.json (self-describing shards) so datasets can later be
+    # merged — a merged loader resolves geometry per sample/dataset rather than
+    # from a single manifest. geometry_type "pseudo" when no calibration exists.
+    projection_spec = None
+    build_spec = getattr(ds, "projection_spec", None)
+    if callable(build_spec) and n_samples:
+        projection_spec = build_spec(image_size)
+    sample_geometry_type = (projection_spec or {}).get("type", "pseudo")
+    calib_bytes = json.dumps(
+        {"dataset": dataset.value, "geometry_type": sample_geometry_type,
+         "projection": projection_spec}
+    ).encode()
+
     to_pil = transforms.ToPILImage()
     resize = transforms.Resize((image_size, image_size))
     out_dir = tempfile.mkdtemp()
@@ -411,6 +430,13 @@ def data_processing(
         info.size = len(m)
         current_tar.addfile(info, io.BytesIO(m))
 
+        # Per-sample calibration: the dataset's projection spec + geometry_type,
+        # so a merged loader can resolve geometry per sample without a single
+        # manifest (self-describing shards; the value is a per-dataset constant).
+        info = tarfile.TarInfo(name=f"{sample_key}.calib.json")
+        info.size = len(calib_bytes)
+        current_tar.addfile(info, io.BytesIO(calib_bytes))
+
         # Per-sample reasoning label (#98), keyed to this sample so the loader
         # auto-aligns it with the frames. Frames are passed to the teacher; the
         # mock/cached backends ignore them, an endpoint backend uses them.
@@ -443,17 +469,11 @@ def data_processing(
                 "has_world_model": bool(sample_count) and world_model
                 and (sample.get("history_frames") is not None)}
 
-    # Per-dataset camera calibration (rig constant): a projection-operator spec
-    # stored once, scaled to image_size. NVIDIA/KITScenes provide real geometry;
-    # L2D has no published intrinsics so it carries none (pseudo path). The
-    # dataset exposes a `projection_spec(image_size)` builder when available.
-    spec = None
-    build_spec = getattr(ds, "projection_spec", None)
-    if callable(build_spec) and sample_count:
-        spec = build_spec(image_size)
-    if spec is not None:
-        manifest["projection"] = spec
-        manifest["geometry_type"] = spec.get("type", "pinhole")
+    # Manifest also carries the projection spec (computed once above) for the
+    # single-dataset loader path; the merged loader uses per-sample calib.json.
+    if projection_spec is not None:
+        manifest["projection"] = projection_spec
+        manifest["geometry_type"] = projection_spec.get("type", "pinhole")
     else:
         manifest["geometry_type"] = "pseudo"
 
@@ -646,24 +666,31 @@ def train_il(
 
     from model_components.auto_e2e import AutoE2E
     from model_components.losses import TrajectoryImitationLoss
-    from data_parsing.pre_extracted import make_pre_extracted_loader
+    from data_parsing.pre_extracted import (
+        _loader_download_dir, make_multi_dataset_loader,
+    )
 
-    shard_dir = _select_shard_dir(shards, dataset)
     ctx = current_context()
     bb, fm = backbone.value, FUSION_LABEL
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     print(f"Training: backbone={bb} fusion={fm} epochs={epochs} bs={batch_size} device={device}")
 
-    # DataLoader
-    loader = make_pre_extracted_loader(shard_dir, batch_size=batch_size, num_workers=0)
-    projection, geometry_type = _loader_projection(loader, device)
-    print(f"Geometry: {geometry_type} (projection={'real' if projection else 'pseudo'})")
+    # MERGED DataLoader over ALL provided shard dirs. Each dataset keeps its own
+    # geometry/num_views; batches are same-dataset (uniform), interleaved across
+    # datasets, each carrying its projection — so L2D (6cam pseudo) and NVIDIA
+    # (7cam f-theta) train together. The model is runtime-V-dynamic (projection
+    # ABI, #77), so a single model consumes both. num_views only sizes defaults.
+    shard_dirs = [_loader_download_dir(s) for s in shards]
+    merged = make_multi_dataset_loader(shard_dirs, batch_size=batch_size, num_workers=0)
+    print(f"Merged {len(shard_dirs)} dataset(s) into one training stream.")
 
-    # Detect num_views from the data so the model matches the dataset.
-    _peek = next(iter(loader))
+    # Peek the first batch (from the first dataset) to size num_views defaults
+    # and run the packing↔training consistency guard. Per-batch geometry is
+    # applied inside the loop, not from this peek.
+    _peek, _peek_proj, _peek_geom = next(iter(merged))
     num_views = int(_peek["visual_tiles"].shape[1])
-    print(f"Detected num_views={num_views}")
+    print(f"Detected num_views={num_views} (first dataset); geometry={_peek_geom}")
 
     # Consistency guard (packing ↔ training): a branch enabled here MUST have its
     # data packed in the shards, otherwise it would run forward but never be
@@ -716,14 +743,27 @@ def train_il(
     losses_per_epoch = []
     scaler = torch.amp.GradScaler(enabled=amp)
 
+    _proj_cache = {}
     for epoch in range(epochs):
         epoch_losses = []
-        for batch in loader:
+        # Merged loader yields (batch, projection, geometry_type): each batch is
+        # same-dataset (uniform num_views/geometry) but datasets are interleaved,
+        # so the per-batch projection is applied to the batch it belongs to.
+        for batch, batch_proj, batch_geom in merged:
             visual = batch["visual_tiles"].to(device)        # (B, V, 3, H, W)
             ego_hist = batch["egomotion_history"].to(device)  # (B, 256)
             vis_hist = batch["visual_history"].to(device)     # (B, 896)
             target = batch["trajectory_target"].to(device)    # (B, 128)
             map_input = batch["map_input"].to(device)
+
+            # Per-batch geometry, moved to device once per operator (cached).
+            if batch_proj is not None:
+                key = id(batch_proj)
+                if key not in _proj_cache:
+                    _proj_cache[key] = batch_proj.to(device)
+                proj_dev = _proj_cache[key]
+            else:
+                proj_dev = None
 
             # World-Model windows (#13): present only on world_model shards. The
             # windowed path makes JEPA loss differentiable and also supplies the
@@ -738,7 +778,7 @@ def train_il(
             optimizer.zero_grad()
             with torch.amp.autocast("cuda", enabled=amp):
                 out = model(visual, map_input, vis_hist, ego_hist,
-                            projection=projection, geometry_type=geometry_type,
+                            projection=proj_dev, geometry_type=batch_geom,
                             mode="train", trajectory_target=target,
                             history_frames=history_frames, future_frames=future_frames)
                 # Train mode returns (trajectory, aux) when a branch (reasoning /
@@ -801,7 +841,8 @@ def train_il(
 
     # Metadata
     meta = {
-        "data": {"dataset": dataset.value, "shard_dir": str(shard_dir)},
+        "data": {"dataset": dataset.value, "shard_dirs": shard_dirs,
+                 "merged_datasets": len(shard_dirs)},
         "model": {"backbone": bb, "fusion_mode": fm, "embed_dim": 256, "num_views": num_views},
         "training": {
             "epochs": epochs, "batch_size": batch_size, "lr": lr,
