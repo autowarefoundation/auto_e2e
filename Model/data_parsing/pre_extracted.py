@@ -45,6 +45,9 @@ _TRANSFORM = transforms.Compose([
 # NOT be picked up as a camera view — matching cam_ explicitly (not any ".jpg")
 # keeps V correct and stops the map being double-counted in the BEV projection.
 _CAM_KEY_RE = re.compile(r"^cam_\d+\.jpg$")
+# World-Model window frames: hist_<t>_cam_<v>.jpg / fut_<f>_cam_<v>.jpg (#13).
+_HIST_KEY_RE = re.compile(r"^hist_(\d+)_cam_(\d+)\.jpg$")
+_FUT_KEY_RE = re.compile(r"^fut_(\d+)_cam_(\d+)\.jpg$")
 
 
 def _decode_image(data) -> torch.Tensor:
@@ -94,6 +97,17 @@ def _decode_sample(sample: dict) -> dict:
         "trajectory_target": ego_future,
     }
 
+    # Optional World-Model windows (#13): hist_<t>_cam_<v>.jpg / fut_<f>_cam_<v>.jpg
+    # decode to history_frames [T, V, 3, H, W] and future_frames [F, V, 3, H, W]
+    # (oldest→newest). Present only on shards packed with world_model=True; when
+    # absent, training runs without the JEPA loss.
+    hist = _decode_window(sample, _HIST_KEY_RE)
+    if hist is not None:
+        out["history_frames"] = hist
+    fut = _decode_window(sample, _FUT_KEY_RE)
+    if fut is not None:
+        out["future_frames"] = fut
+
     # Optional reasoning labels (#98): a per-sample "reasoning.json" member holds
     # a serialized ReasoningLabelRecord (same shard key → auto-aligned with this
     # sample's frames, no sample_id join). Decode it to per-sample target tensors
@@ -122,6 +136,27 @@ def _decode_reasoning_targets(data) -> dict:
     payload = json.loads(data.decode() if isinstance(data, (bytes, bytearray)) else data)
     record = record_from_json(payload)
     return record_to_target_tensors(record)
+
+
+def _decode_window(sample: dict, key_re) -> "torch.Tensor | None":
+    """Decode a World-Model window into ``[steps, V, 3, H, W]`` (oldest→newest).
+
+    Matches ``key_re`` (hist_/fut_) against the sample keys, groups by step and
+    view index, and stacks. Returns None if the window is absent (#13).
+    """
+    matches = [(m, k) for k in sample if (m := key_re.match(k))]
+    if not matches:
+        return None
+    steps = max(int(m.group(1)) for m, _ in matches) + 1
+    frame_steps = []
+    for t in range(steps):
+        view_frames = [
+            _decode_image(sample[k])
+            for m, k in sorted(matches, key=lambda mk: int(mk[0].group(2)))
+            if int(m.group(1)) == t
+        ]
+        frame_steps.append(torch.stack(view_frames))  # [V, 3, H, W]
+    return torch.stack(frame_steps)                    # [steps, V, 3, H, W]
 
 
 def load_projection_from_manifest(shard_dir: str):
