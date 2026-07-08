@@ -4,6 +4,7 @@ import torch
 import torch.nn as nn
 
 from .base import BasePlanner
+from .reasoning_coupling import ReasoningCoupling
 
 
 class FlowMatchingPlanner(BasePlanner):
@@ -40,7 +41,8 @@ class FlowMatchingPlanner(BasePlanner):
     def __init__(self, embed_dim=256, num_timesteps=64, num_signals=2,
                  egomotion_dim=256, visual_history_dim=896,
                  num_inference_steps=10, time_embed_dim=128, num_heads=4,
-                 timestep_sampler="beta", beta_alpha=1.5, beta_scale=0.999):
+                 timestep_sampler="beta", beta_alpha=1.5, beta_scale=0.999,
+                 reasoning_mode="none"):
         super().__init__()
 
         if num_inference_steps < 1:
@@ -96,6 +98,11 @@ class FlowMatchingPlanner(BasePlanner):
         # cross-attention to preserve spatial detail.
         self.ego_state_proj = nn.Linear(egomotion_dim, embed_dim)
         self.visual_history_proj = nn.Linear(visual_history_dim, embed_dim)
+
+        # Reasoning coupling (zero-init; no-op at init). The reasoning residual
+        # is added to the AdaLN conditioning vector, so it reaches every action
+        # token's modulation while being computed once per forward().
+        self.reasoning_coupling = ReasoningCoupling(embed_dim, mode=reasoning_mode)
 
         self.time_mlp = nn.Sequential(
             nn.Linear(time_embed_dim, embed_dim),
@@ -187,12 +194,22 @@ class FlowMatchingPlanner(BasePlanner):
         args = t.unsqueeze(-1) * freqs.unsqueeze(0)
         return torch.cat([torch.sin(args), torch.cos(args)], dim=-1)
 
-    def _modulation_conditioning(self, visual_history, egomotion_history):
+    def _modulation_conditioning(self, visual_history, egomotion_history,
+                                 reasoning_latent=None, reasoning_horizon_tokens=None):
         """Conditioning vector fed into AdaLN — excludes BEV (cross-attn) and
-        time (added per-step in the Euler loop)."""
-        return (
+        time (added per-step in the Euler loop).
+
+        The zero-init reasoning residual is added here (no-op at init), so it
+        modulates every action token while being computed once per forward().
+        """
+        base = (
             self.visual_history_proj(visual_history)
             + self.ego_state_proj(egomotion_history)
+        )
+        return self.reasoning_coupling(
+            base,
+            reasoning_latent=reasoning_latent,
+            horizon_tokens=reasoning_horizon_tokens,
         )
 
 
@@ -277,7 +294,8 @@ class FlowMatchingPlanner(BasePlanner):
         return velocity_seq.reshape(B, self.trajectory_dim)
 
     def forward(self, bev_features, visual_history, egomotion_history,
-                generator=None, **kwargs):
+                generator=None, reasoning_latent=None,
+                reasoning_horizon_tokens=None, **kwargs):
         """Inference: Euler-integrate ``dx/dt = v_theta(x, t, ...)`` over [0, 1].
 
         Args:
@@ -286,6 +304,10 @@ class FlowMatchingPlanner(BasePlanner):
             egomotion_history: [B, egomotion_dim].
             generator: optional ``torch.Generator`` used to seed the noise
                 prior so evaluation runs are reproducible.
+            reasoning_latent: optional [B, embed_dim] pooled reasoning latent
+                (reasoning_mode="pooled_latent").
+            reasoning_horizon_tokens: optional [B, 5, embed_dim] per-horizon
+                reasoning tokens (reasoning_mode="horizon_cross_attention").
             **kwargs: ignored. Accepts extra inputs other planners or
                 callers might pass so call sites can stay planner-agnostic.
 
@@ -293,7 +315,11 @@ class FlowMatchingPlanner(BasePlanner):
             trajectory: [B, trajectory_dim] — integrated from a noise sample.
         """
         self._validate_inputs(visual_history, egomotion_history)
-        mod_cond = self._modulation_conditioning(visual_history, egomotion_history)
+        mod_cond = self._modulation_conditioning(
+            visual_history, egomotion_history,
+            reasoning_latent=reasoning_latent,
+            reasoning_horizon_tokens=reasoning_horizon_tokens,
+        )
         # bev_seq is computed once and reused across every Euler step.
         bev_seq = self._project_bev(bev_features)
 
