@@ -1,5 +1,5 @@
 """Training loss modules for AutoE2E (kept outside the model per Zain's criterion)."""
 
-from .reasoning_loss import ReasoningLoss
+from .horizon_reasoning_loss import HorizonReasoningLoss
 
-__all__ = ["ReasoningLoss"]
+__all__ = ["HorizonReasoningLoss"]

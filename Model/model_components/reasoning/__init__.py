@@ -1,10 +1,24 @@
-"""Reasoning band — scenario classification head for AutoE2E (issue #98).
+"""Reasoning branch — horizon-aware, action-relevant reasoning head (issue #98).
 
-This package is opt-in (default OFF); importing it never pulls heavy
-dependencies (the Qwen2-VL backend uses a lazy import inside its module).
+Opt-in (default OFF). Runtime-safe: importing this package pulls NO teacher
+model or client — teacher supervision is generated offline (see
+``data_processing.reasoning_label_generation``) and consumed as frozen labels.
 """
 
-from .scenario_taxonomy import ScenarioTaxonomy, TaxonomyGroup
-from .reasoning_band import ReasoningBand
+from .horizon_reasoning_head import HorizonReasoningHead
+from .reasoning_taxonomy import (
+    DEFAULT_TAXONOMY,
+    LabelMode,
+    ReasoningTaxonomy,
+    TaxonomyGroup,
+)
+from .types import HorizonReasoningPrediction
 
-__all__ = ["ScenarioTaxonomy", "TaxonomyGroup", "ReasoningBand"]
+__all__ = [
+    "HorizonReasoningHead",
+    "HorizonReasoningPrediction",
+    "ReasoningTaxonomy",
+    "TaxonomyGroup",
+    "LabelMode",
+    "DEFAULT_TAXONOMY",
+]
