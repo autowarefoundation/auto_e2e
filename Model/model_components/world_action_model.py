@@ -43,9 +43,15 @@ class ViewAttentionPool(nn.Module):
     ``view_aggregator="mean"`` to revert to the equal-weight mean.
     """
 
-    def __init__(self, embed_dim: int = 768, num_views: int = 7, num_heads: int = 4):
+    def __init__(self, embed_dim: int = 768, num_views: int = 7, num_heads: int = 4,
+                 max_views: int = 16):
         super().__init__()
-        self.view_embed = nn.Parameter(torch.randn(1, num_views, embed_dim) * 0.02)
+        # Learn a DISTINCT positional embedding for up to max_views cameras, so a
+        # merged run mixing rigs (L2D 6, NVIDIA 7, ...) never reuses one camera's
+        # code for another. max_views is an upper bound covering any realistic
+        # rig; runtime V just slices the first V (V > max_views is rejected).
+        self.max_views = max(max_views, num_views)
+        self.view_embed = nn.Parameter(torch.randn(1, self.max_views, embed_dim) * 0.02)
         self.query = nn.Parameter(torch.randn(1, 1, embed_dim) * 0.02)
         self.attn = nn.MultiheadAttention(embed_dim, num_heads, batch_first=True)
         self.norm = nn.LayerNorm(embed_dim)
@@ -53,13 +59,14 @@ class ViewAttentionPool(nn.Module):
     def forward(self, view_tokens: torch.Tensor) -> torch.Tensor:
         # view_tokens: [B, V, C]   (C = embed_dim = 768)
         B, V, C = view_tokens.shape
-        # Handle dynamic view sizes by slicing or repeating positional embeddings
-        if V <= self.view_embed.shape[1]:
-            v_embed = self.view_embed[:, :V]
-        else:
-            extra = V - self.view_embed.shape[1]
-            v_embed = torch.cat([self.view_embed, self.view_embed[:, :extra]], dim=1)
-            
+        if V > self.max_views:
+            raise ValueError(
+                f"ViewAttentionPool got V={V} cameras but was built for at most "
+                f"max_views={self.max_views}; increase max_views."
+            )
+        # Slice the first V distinct positional embeddings — never wrap around
+        # (reusing camera 0's code for camera V-1 would corrupt view identity).
+        v_embed = self.view_embed[:, :V]
         tok = view_tokens + v_embed
         q = self.query.expand(B, -1, -1)
         out, _ = self.attn(q, tok, tok)

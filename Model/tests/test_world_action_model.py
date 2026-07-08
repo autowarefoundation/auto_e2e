@@ -82,9 +82,12 @@ def test_world_action_model_view_aggregator(device, caplog):
     assert m_attn.encoder.view_aggregator == "attention"
     assert m_attn.encoder.view_pool.view_embed.shape[1] > 0
 
-    # test custom num_views configuration
+    # view_embed is sized to an upper bound (max_views), NOT num_views, so a
+    # merged run mixing rigs (6cam + 7cam) never reuses one camera's positional
+    # code for another. It must be >= the requested num_views and cover it.
     m_attn_6 = _wam(device, view_aggregator="attention", num_views=6)
-    assert m_attn_6.encoder.view_pool.view_embed.shape[1] == 6
+    assert m_attn_6.encoder.view_pool.view_embed.shape[1] >= 6
+    assert m_attn_6.encoder.view_pool.max_views >= 6
 
     # test fallback warning when num_views=1 and view_aggregator="attention"
     import logging
