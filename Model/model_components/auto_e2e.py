@@ -69,7 +69,8 @@ class AutoE2E(nn.Module):
 
     def forward(self, camera_tiles, map_input, visual_history, egomotion_history,
                 projection=None, geometry_type=None, image_transform=None,
-                mode="train", trajectory_target=None, **kwargs):
+                mode="train", trajectory_target=None,
+                history_frames=None, future_frames=None, **kwargs):
         """
         Run the full autonomous-driving pipeline.
 
@@ -100,33 +101,39 @@ class AutoE2E(nn.Module):
             trajectory, or (trajectory, aux_outputs) in train mode with a branch on.
         """
 
-        # World Action Model (1Hz): encode the current multi-camera frame into the
-        # rolling Encoded Visual History fed to the reactive planner, and (in
-        # training) predict the future feature state for the JEPA loss.
+        # World Action Model (1 Hz): produce the Encoded Visual History fed to the
+        # reactive planner + reasoning branch, and (in training) the predicted
+        # future feature maps for the JEPA loss. Two mutually exclusive paths:
         #
-        # IMPORTANT — the rolling buffer here is **inference / rollout memory only**:
-        #   * pushed embeddings are DETACHED, so the buffer never carries an
-        #     autograd graph across forward steps (no cross-step BPTT / graph leak),
-        #   * it holds per-sequence state — call ``reset_visual_history()`` between
-        #     independent sequences (it is NOT safe to share across shuffled batches).
-        # Batched JEPA TRAINING does NOT use this buffer: it goes through the
-        # stateless, windowed and fully-differentiable path on ``WorldActionModel``
-        # (``encode_history`` -> ``aggregate_history`` -> ``predict_future`` ->
-        # ``jepa_loss``) driven from ``train_il`` (see #13).
+        #  A. WINDOWED TRAINING path (preferred when ``history_frames`` is given):
+        #     stateless and fully differentiable — encode the past window, pool it
+        #     into visual_history, predict the future. No rolling buffer, so it is
+        #     safe under shuffled batch training. This is the path train_il uses to
+        #     make JEPA loss actually flow (see #13); it replaces the caller's
+        #     visual_history so the planner is conditioned on the WM history.
+        #  B. ROLLING-BUFFER inference/rollout path (no window supplied): pushes a
+        #     DETACHED per-frame embedding into a per-sequence FIFO. Inference /
+        #     closed-loop only — NOT safe to share across shuffled batches; call
+        #     ``reset_visual_history()`` between independent sequences.
         future_state_pred = None
         if self.World_Action_Model_E2E is not None:
             wam = self.World_Action_Model_E2E
-            # Encode the current 1 Hz multi-view frame; push a detached copy so the
-            # planner's history is a pure rolling memory (no graph across steps).
-            visual_embedding, _ = wam(camera_tiles)
-            self.visual_history_buffer.push(visual_embedding.detach())  # type: ignore[union-attr]
-            # The planner and the future prediction read the SAME history (post-push,
-            # i.e. including the current frame) so the JEPA context stays aligned
-            # with what the planner actually sees.
-            visual_history = wam.aggregate_history(
-                self.visual_history_buffer.visual_history())  # type: ignore[union-attr]
-            if mode == "train":
-                future_state_pred = wam.predict_future(visual_history)
+            if history_frames is not None:
+                # A. Windowed, differentiable path. history_frames: [B, T, V, 3, H, W]
+                # (or [B, T, 3, H, W]) oldest→newest, current frame last.
+                history_concat = wam.encode_history(history_frames)
+                visual_history = wam.aggregate_history(history_concat)
+                if mode == "train":
+                    future_state_pred = wam.predict_future(visual_history)
+            else:
+                # B. Rolling-buffer path. Encode the current 1 Hz multi-view frame;
+                # push a detached copy so the planner's history is pure memory.
+                visual_embedding, _ = wam(camera_tiles)
+                self.visual_history_buffer.push(visual_embedding.detach())  # type: ignore[union-attr]
+                visual_history = wam.aggregate_history(
+                    self.visual_history_buffer.visual_history())  # type: ignore[union-attr]
+                if mode == "train":
+                    future_state_pred = wam.predict_future(visual_history)
 
         # The reasoning branch runs INSIDE ReactiveE2E (after TemporalMemory).
         # In train mode with reasoning on, ReactiveE2E returns
@@ -143,12 +150,16 @@ class AutoE2E(nn.Module):
         else:
             trajectory = reactive_out
 
-        # Assemble aux outputs (dict, not a growing positional tuple).
+        # Assemble aux outputs (dict, not a growing positional tuple). The WM
+        # keeps its future_frames alongside the prediction so the training loop
+        # can call jepa_loss(future_state_pred, future_frames) without re-plumbing
+        # the frames itself.
         if mode == "train" and (
             self.World_Action_Model_E2E is not None or reasoning_pred is not None
         ):
             aux_outputs = {
                 "future_state_pred": future_state_pred,
+                "future_frames": future_frames,
                 "reasoning_pred": reasoning_pred,
             }
             return trajectory, aux_outputs
