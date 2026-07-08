@@ -100,3 +100,44 @@ def test_bezier_none_mode_ignores_reasoning():
             reasoning_latent=latent, reasoning_horizon_tokens=tokens,
         )
     assert torch.allclose(base, with_inputs, atol=1e-7)
+
+
+def _open_gate(planner):
+    """Open the zero-init gate and de-zero the projection so the residual fires."""
+    planner.reasoning_coupling.alpha.fill_(1.0)
+    planner.reasoning_coupling.reason_proj[-1].weight.data.normal_()
+
+
+def test_flow_matching_horizon_cross_attn_active_after_gate():
+    torch.manual_seed(0)
+    planner = FlowMatchingPlanner(
+        reasoning_mode="horizon_cross_attention", num_inference_steps=3).eval()
+    bev, vis, ego, latent, tokens = _inputs(planner)
+    with torch.no_grad():
+        _open_gate(planner)
+        g1 = torch.Generator().manual_seed(7)
+        g2 = torch.Generator().manual_seed(7)
+        base = planner(bev, vis, ego, generator=g1)
+        coupled = planner(bev, vis, ego, generator=g2,
+                          reasoning_horizon_tokens=tokens)
+    assert not torch.allclose(base, coupled, atol=1e-5), \
+        "horizon cross-attention did not affect the flow-matching trajectory"
+
+
+def test_flow_matching_is_horizon_aware_not_pooled():
+    """Perturbing a SINGLE horizon token must move the trajectory — proof the
+    per-timestep action queries see individual horizons, not one pooled vector."""
+    torch.manual_seed(0)
+    planner = FlowMatchingPlanner(
+        reasoning_mode="horizon_cross_attention", num_inference_steps=3).eval()
+    bev, vis, ego, latent, tokens = _inputs(planner)
+    tokens_b = tokens.clone()
+    tokens_b[:, 1] = 0.0  # zero ONLY the +1s horizon token
+    with torch.no_grad():
+        _open_gate(planner)
+        g1 = torch.Generator().manual_seed(11)
+        g2 = torch.Generator().manual_seed(11)
+        a = planner(bev, vis, ego, generator=g1, reasoning_horizon_tokens=tokens)
+        b = planner(bev, vis, ego, generator=g2, reasoning_horizon_tokens=tokens_b)
+    assert not torch.allclose(a, b, atol=1e-5), \
+        "zeroing one horizon left the trajectory unchanged — timing info is lost"
