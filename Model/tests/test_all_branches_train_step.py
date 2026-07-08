@@ -135,3 +135,47 @@ def test_wm_supplies_visual_history_not_zeros(build_mock_model):
     # The reasoning head's visual_history input is the WM-derived one (non-zero),
     # not the zeros passed in as vis_hist.
     assert captured["vh"].abs().sum() > 0
+
+
+def test_world_model_feature_channels_derived_from_backbone(device=torch.device("cpu")):
+    """WM JEPA channels must follow the backbone's last stage, not a hardcoded
+    768 (regression: res_net_50's 2048-ch last map crashed the WM). Simulate a
+    non-768 backbone and confirm the WM builds + forwards + reconstructs without
+    a shape error."""
+    from unittest.mock import patch
+
+    import torch.nn as nn
+
+    class _Backbone2048(nn.Module):
+        # A backbone whose LAST stage is 2048 channels (like ResNet50).
+        def __init__(self, *a, **k):
+            super().__init__()
+            self.feature_channels = [256, 512, 1024, 2048]
+            self.backbone_channels = sum(self.feature_channels)
+            self.s0 = nn.Sequential(nn.Conv2d(3, 256, 3, padding=1), nn.AdaptiveAvgPool2d(64))
+            self.s1 = nn.Sequential(nn.Conv2d(256, 512, 3, padding=1), nn.AdaptiveAvgPool2d(32))
+            self.s2 = nn.Sequential(nn.Conv2d(512, 1024, 3, padding=1), nn.AdaptiveAvgPool2d(16))
+            self.s3 = nn.Sequential(nn.Conv2d(1024, 2048, 3, padding=1), nn.AdaptiveAvgPool2d(8))
+
+        def forward(self, x):
+            a = self.s0(x)
+            b = self.s1(a)
+            c = self.s2(b)
+            d = self.s3(c)
+            return [a, b, c, d]
+
+    with patch("model_components.reactive_e2e.Backbone", _Backbone2048):
+        from model_components.auto_e2e import AutoE2E
+        model = AutoE2E(num_views=V, view_fusion_kwargs={"bev_h": 8, "bev_w": 8},
+                        enable_world_model=True).to(device)
+
+    wam = model.World_Action_Model_E2E
+    assert wam.feature_channels == 2048, "WM did not derive channels from the backbone"
+    inp = _inputs()
+    _, aux = model(inp["visual"], inp["map_input"], inp["vis_hist"], inp["ego"],
+                   mode="train", trajectory_target=inp["target"],
+                   history_frames=inp["history_frames"], future_frames=inp["future_frames"])
+    # The reconstruction (predicted [B,2048,8,8] vs frozen-target [B,2048,8,8])
+    # must compose without a shape mismatch.
+    jepa = wam.jepa_loss(aux["future_state_pred"], aux["future_frames"])
+    assert torch.isfinite(jepa)
