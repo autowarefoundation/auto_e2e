@@ -43,8 +43,8 @@ def test_every_group_has_abstain_label():
     for name in tax.group_names():
         labels = tax.labels(name)
         assert any(
-            l.startswith("unknown") or l.startswith("no_") or l == "none"
-            for l in labels
+            lbl.startswith("unknown") or lbl.startswith("no_") or lbl == "none"
+            for lbl in labels
         ), f"group '{name}' lacks an abstain label"
 
 
@@ -67,7 +67,7 @@ def test_group_without_abstain_label_rejected():
 
 def test_extend_is_append_only_and_preserves_indices():
     tax = ReasoningTaxonomy()
-    before = {l: i for i, l in enumerate(tax.labels("cause"))}
+    before = {lbl: i for i, lbl in enumerate(tax.labels("cause"))}
     tax.extend("cause", ["debris_on_road"])
     # existing indices unchanged
     for label, idx in before.items():

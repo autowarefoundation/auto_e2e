@@ -12,7 +12,7 @@ cheap smoke of the training path before a real teacher is wired in.
 from __future__ import annotations
 
 import hashlib
-from typing import Optional
+from typing import Any, Optional
 
 from model_components.reasoning.reasoning_taxonomy import LabelMode, ReasoningTaxonomy
 
@@ -57,7 +57,7 @@ class MockTeacher(TeacherClient):
         horizons = []
         for i, sec in enumerate(HORIZON_SECONDS):
             seed = _seed(request.sample_id, i)
-            kwargs = {"horizon_sec": sec, "provenance": "teacher_gt"}
+            kwargs: dict[str, Any] = {"horizon_sec": sec, "provenance": "teacher_gt"}
             for gi, group in enumerate(_CORE_GROUPS):
                 labels = self.taxonomy.labels(group)
                 pick = labels[(seed + gi) % len(labels)]
