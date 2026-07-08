@@ -24,15 +24,14 @@ def run_speed_benchmark(backbone, device, batch_size=1, num_views=7,
     # fusion_mode knob were removed); nav-map is a separate map_input branch, not
     # a camera view. Small BEV grid keeps the benchmark fast.
     #
-    # ``reasoning`` optionally enables the Reasoning band (#98) so its inference
-    # cost is measured explicitly.  The band runs at 1 Hz in deployment, so the
-    # per-forward cost here is an upper bound on its real-time budget.
+    # ``reasoning`` optionally enables the reasoning branch (#98) so its inference
+    # cost is measured explicitly. The branch runs at 1 Hz in deployment, so the
+    # per-forward cost here is an upper bound on its real-time budget. The value
+    # is BOTH the result label and the planner coupling mode: "off" (disabled),
+    # "pooled_latent", or "horizon_cross_attention".
     extra_kwargs = {}
     if reasoning != "off":
-        # ReasoningBand takes no "backbone" argument (only visual_history_dim,
-        # hidden_dim, num_future_horizons, taxonomy); enable the band with its
-        # defaults. ``reasoning`` is kept purely as the result label/column.
-        extra_kwargs = dict(enable_reasoning_band=True)
+        extra_kwargs = dict(enable_reasoning=True, reasoning_mode=reasoning)
     model = AutoE2E(backbone=backbone, num_views=num_views,
                     view_fusion_kwargs={"bev_h": 8, "bev_w": 8},
                     **extra_kwargs)
@@ -106,7 +105,7 @@ def run_speed_benchmark(backbone, device, batch_size=1, num_views=7,
     results = {
         "backbone": backbone,
         "fusion_mode": "bev",
-        "reasoning_band": reasoning,
+        "reasoning": reasoning,
         "batch_size": batch_size,
         "num_views": num_views,
         "avg_fps": round(avg_fps, 2),
@@ -185,7 +184,7 @@ def print_markdown_table(all_results):
     print("|----------|-------------|-----------|-------|-----|--------------|----------|-----------|--------|")
     for r in all_results:
         params_m = r["total_params"] / 1_000_000
-        print(f"| {r['backbone']} | {r['fusion_mode']} | {r.get('reasoning_band', 'off')} | {r['batch_size']} | "
+        print(f"| {r['backbone']} | {r['fusion_mode']} | {r.get('reasoning', 'off')} | {r['batch_size']} | "
               f"{r['avg_fps']:.1f} | {r['avg_latency_ms']:.1f} | {r['p99_latency_ms']:.1f} | "
               f"{r['peak_vram_allocated_mb']:.0f} | {params_m:.1f}M |")
 
@@ -220,10 +219,10 @@ def main():
             all_results.append(result)
             print()
 
-    # Reasoning band (#98): measure the added cost of the branch explicitly,
-    # on the default backbone at batch 1 (its deployment operating point —
-    # the band runs at 1 Hz).
-    reasoning_variants = ["head_on_896"]
+    # Reasoning branch (#98): measure the added cost of each coupling mode
+    # explicitly, on the default backbone at batch 1 (its deployment operating
+    # point — the branch runs at 1 Hz).
+    reasoning_variants = ["pooled_latent", "horizon_cross_attention"]
     for reasoning in reasoning_variants:
         if torch.cuda.is_available():
             torch.cuda.reset_peak_memory_stats()
