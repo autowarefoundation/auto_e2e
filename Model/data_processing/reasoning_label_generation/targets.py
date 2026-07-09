@@ -162,3 +162,42 @@ def record_from_json(data: Dict[str, Any]) -> ReasoningLabelRecord:
     record_fields = {f.name for f in dataclasses.fields(ReasoningLabelRecord)}
     kwargs = {k: v for k, v in data.items() if k in record_fields and k != "horizons"}
     return ReasoningLabelRecord(horizons=horizons, **kwargs)
+
+
+# ---------------------------------------------------------------------------
+# Whole-record JSONL (one full record per line) — the JOIN interchange format.
+#
+# The parquet/jsonl in parquet_writer.py are FLATTENED to per-(sample,horizon)
+# rows for analytics/querying; reconstructing whole records from them is lossy
+# and awkward. For the label→shard JOIN we instead write one complete record per
+# line (record_to_json), which data_processing reads back into a
+# {sample_id: record} map to embed as the per-sample reasoning.json member.
+# ---------------------------------------------------------------------------
+
+def write_records_jsonl(records, path: str) -> str:
+    """Write one full ReasoningLabelRecord per line (JOIN interchange). Returns path."""
+    import json
+    import os
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    with open(path, "w") as f:
+        for r in records:
+            f.write(json.dumps(record_to_json(r)) + "\n")
+    return path
+
+
+def load_records_by_sample_id(path: str) -> Dict[str, ReasoningLabelRecord]:
+    """Read a whole-record JSONL (written by :func:`write_records_jsonl`) into a
+    ``{sample_id: ReasoningLabelRecord}`` map for the data_processing JOIN.
+
+    A later line for the same sample_id wins (idempotent re-writes are safe).
+    """
+    import json
+    out: Dict[str, ReasoningLabelRecord] = {}
+    with open(path) as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            rec = record_from_json(json.loads(line))
+            out[rec.sample_id] = rec
+    return out
