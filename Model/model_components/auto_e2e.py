@@ -163,6 +163,11 @@ class AutoE2E(nn.Module):
                 self.visual_history_buffer.push(visual_embedding.detach())  # type: ignore[union-attr]
                 visual_history = wam.aggregate_history(
                     self.visual_history_buffer.visual_history())  # type: ignore[union-attr]
+                # Same rank-collapse as path A: visual_history is now 2-D [B,dim],
+                # so a rank-branching temporal memory (one_hz) must not get a 3-D
+                # egomotion and a 2-D visual (mislabelled / broadcast crash).
+                if egomotion_history.ndim == 3:
+                    egomotion_history = egomotion_history[:, -1]
                 if mode == "train":
                     future_state_pred = wam.predict_future(visual_history)
 

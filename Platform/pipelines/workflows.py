@@ -882,6 +882,12 @@ def train_offline_rl(
     for epoch in range(epochs):
         epoch_losses = []
         for batch in loader:
+            # Reset the WM per-sequence rolling buffer per batch (see eval note):
+            # avoids cross-batch history leakage and ragged-batch cat crashes.
+            if hasattr(model, "reset_visual_history"):
+                model.reset_visual_history()
+            if hasattr(baseline_model, "reset_visual_history"):
+                baseline_model.reset_visual_history()
             visual = batch["visual_tiles"].to(device)
             ego_hist = batch["egomotion_history"].to(device)
             vis_hist = batch["visual_history"].to(device)
@@ -984,6 +990,11 @@ def _run_evaluation(checkpoint, shards, train_metadata, dataset, experiment_name
 
     with torch.no_grad():
         for batch in loader:
+            # WM rolling buffer is per-sequence state; reset per batch so batch N's
+            # planner history is not built from unrelated prior batches (leakage),
+            # and a ragged final batch cannot crash torch.cat over mixed batch dims.
+            if hasattr(model, "reset_visual_history"):
+                model.reset_visual_history()
             visual = batch["visual_tiles"].to(device)
             ego_hist = batch["egomotion_history"].to(device)
             vis_hist = batch["visual_history"].to(device)

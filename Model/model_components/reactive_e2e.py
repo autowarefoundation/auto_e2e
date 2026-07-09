@@ -2,7 +2,6 @@ import torch.nn as nn
 from .backbone import Backbone
 from .feature_fusion import FeatureFusion
 from .trajectory_planning import build_planner
-from .future_state import FutureState
 from .map_encoder import build_map_encoder, build_map_bev_fusion
 from .temporal_memory import build_temporal_memory
 from .reasoning.horizon_reasoning_head import HorizonReasoningHead
@@ -36,10 +35,13 @@ class ReactiveE2E(nn.Module):
             view_fusion_kwargs=view_fusion_kwargs,
         )
 
-        # For BEV fusion mode the spatial size is bev_h × bev_w (potentially non-square).       
-        vfk = view_fusion_kwargs or {"bev_h": 450, "bev_w": 300}
-        map_output_h = vfk["bev_h"]
-        map_output_w = vfk["bev_w"]
+        # For BEV fusion mode the spatial size is bev_h × bev_w (potentially non-square).
+        # Read each dim with a default so a PARTIAL view_fusion_kwargs (e.g. only
+        # pc_range) doesn't KeyError — the `or` only fires for None/empty, and the
+        # defaults must match BEVViewFusion's own (450×300).
+        vfk = view_fusion_kwargs or {}
+        map_output_h = vfk.get("bev_h", 450)
+        map_output_w = vfk.get("bev_w", 300)
 
  
         # Map encoder: encodes the BEV nav-map image into spatial map features
@@ -94,8 +96,10 @@ class ReactiveE2E(nn.Module):
             **(planner_kwargs or {}),
         )
 
-        # Future visual state prediction conditioned on planner ego_hidden
-        self.FutureState = FutureState(embed_dim=embed_dim, ego_hidden_dim=embed_dim)
+        # NOTE: future visual-state prediction now lives in the World Model
+        # branch (WorldActionModel.predict_future, JEPA). The old ReactiveE2E-owned
+        # FutureState module was instantiated here but NEVER called in forward — a
+        # gradient-dead parameter block — so it is removed. See auto_e2e.py.
 
     def forward(self, camera_tiles, map_input, visual_history, egomotion_history,
                 projection=None, geometry_type=None, image_transform=None,

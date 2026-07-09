@@ -235,14 +235,14 @@ class L2DDataset(Dataset):
             vehicle_states, sample_idx=sample_idx_in_episode
         )
 
-        # Current 10 Hz multi-view frame: the 6 real cameras (CAMERA_NAMES) go to
-        # visual_tiles (BEV projection applies to these). The nav-map is loaded
-        # separately below — it is not a camera view.
-        visual_tiles = self._load_multiview_frame(row)
-
-        # BEV nav-map view -> map_tile (routed to the separate map branch). Raw,
-        # like the cameras — the shard packer resizes it.
+        # Current 10 Hz multi-view frame: decode the row ONCE and take both the 6
+        # real cameras (-> visual_tiles, BEV projection applies to these) and the
+        # nav-map (-> map_tile, separate map branch) from the same decoded item.
+        # Decoding is the expensive path (~35s of video); the previous code called
+        # lerobot_dataset[row] twice per sample (once for cameras, once for the map)
+        # — a full 2× decode. Reuse the single decode here.
         item = self.lerobot_dataset[row]
+        visual_tiles = torch.stack([item[cam_name] for cam_name in CAMERA_NAMES], dim=0)
         map_tile = item[MAP_VIEW_NAME]
 
         visual_history = torch.zeros(_VISUAL_HISTORY_DIM, dtype=torch.float32)

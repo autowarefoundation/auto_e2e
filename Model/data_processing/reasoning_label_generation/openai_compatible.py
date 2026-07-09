@@ -89,6 +89,14 @@ class OpenAICompatibleTeacher(TeacherClient):
         transport: Optional[Transport] = None,
         endpoint_type: str = "vllm",
     ) -> None:
+        # Only clip_horizons is implemented here — _payload always builds the
+        # 5-horizon clip prompt. Reject per_frame rather than silently stamping
+        # request_mode="per_frame" into provenance while doing clip labelling.
+        if request_mode != "clip_horizons":
+            raise ValueError(
+                f"OpenAICompatibleTeacher only supports request_mode='clip_horizons'; "
+                f"got {request_mode!r}."
+            )
         super().__init__(
             provider="openai_compatible", model=model, prompt_version=prompt_version,
             request_mode=request_mode, taxonomy=taxonomy, strict=strict,
