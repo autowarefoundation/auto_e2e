@@ -57,13 +57,18 @@ class ReasoningCoupling(nn.Module):
             return
 
         # Learned scalar gate, zero-init → no-op residual at initialisation.
+        # ONLY alpha is zero-init (the ResidualMapFusion pattern). The projection
+        # keeps NORMAL init on purpose: if reason_proj's last layer were ALSO
+        # zeroed, then at init delta = reason_proj(x) = 0, so d(loss)/d(alpha) =
+        # delta = 0 and d(loss)/d(proj) = alpha·(…) = 0 — every coupling param
+        # would get exactly zero gradient forever and the branch would never
+        # train (a permanent zero fixed point). With alpha=0 but delta≠0 the
+        # output is still a strict no-op at init, yet alpha receives gradient and
+        # the coupling can learn.
         self.alpha = nn.Parameter(torch.zeros(()))
-        # Projection whose last layer is zero-init (double guarantee of no-op).
-        proj_out = nn.Linear(embed_dim, embed_dim)
-        nn.init.zeros_(proj_out.weight)
-        nn.init.zeros_(proj_out.bias)
         self.reason_proj = nn.Sequential(
-            nn.Linear(embed_dim, embed_dim), nn.GELU(), proj_out,
+            nn.Linear(embed_dim, embed_dim), nn.GELU(),
+            nn.Linear(embed_dim, embed_dim),
         )
 
         if mode == "horizon_cross_attention":

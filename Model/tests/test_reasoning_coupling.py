@@ -43,6 +43,23 @@ def test_coupling_modes_constant():
 
 
 @pytest.mark.parametrize("mode", ["pooled_latent", "horizon_cross_attention"])
+def test_alpha_receives_gradient_at_init(mode):
+    """Regression for the dead-zero-init bug: alpha must get a NON-ZERO gradient
+    at init, else the coupling is a permanent zero fixed point and never trains.
+    This requires reason_proj to be normal-init (delta != 0) while alpha=0."""
+    c = ReasoningCoupling(EMBED, mode=mode)
+    ctx = torch.randn(2, EMBED, requires_grad=True)
+    latent = torch.randn(2, EMBED)
+    tokens = torch.randn(2, HZ, EMBED)
+    out = c(ctx, reasoning_latent=latent, horizon_tokens=tokens)
+    # Strict no-op at init (alpha=0).
+    assert torch.allclose(out, ctx, atol=1e-6)
+    out.sum().backward()
+    # But alpha still gets a real gradient so training can open the gate.
+    assert c.alpha.grad is not None and float(c.alpha.grad.abs().sum()) > 0
+
+
+@pytest.mark.parametrize("mode", ["pooled_latent", "horizon_cross_attention"])
 def test_bezier_noop_at_init(mode):
     torch.manual_seed(0)
     planner = BezierPlanner(reasoning_mode=mode).eval()
