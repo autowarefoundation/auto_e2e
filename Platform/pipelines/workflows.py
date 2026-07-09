@@ -52,12 +52,11 @@ FUSION_LABEL = "bev"
 
 TrainOutput = NamedTuple("TrainOutput", checkpoint=FlyteFile, metadata=FlyteFile)
 EvalMetrics = NamedTuple("EvalMetrics", ade=float, fde=float, gate_pass=bool)
-# A ready-to-train dataset: the WebDataset shards train_il consumes DIRECTLY
-# (reasoning supervision is read from in-shard reasoning.json members), plus a
-# SEPARATE versioned reasoning-label export (parquet/jsonl) for traceability —
-# the export is not a training input.
-CreateDatasetOutput = NamedTuple(
-    "CreateDatasetOutput", shards=FlyteDirectory, reasoning_labels=FlyteDirectory)
+# wf_create_dataset returns just the ready-to-train WebDataset shards (train_il
+# reads reasoning supervision from in-shard reasoning.json members). The
+# versioned reasoning-label artifact persists independently in S3 (the
+# generate_reasoning_labels task output + the sample_id-keyed cache), so it is
+# not a workflow return value.
 
 
 def _model_kwargs(config: dict) -> dict:
@@ -1207,43 +1206,58 @@ def wf_data_processing(
     hz: int = 10,
     image_size: int = 256,
     episodes: int = 3,
-    reasoning_teacher: str = "none",
     world_model: bool = False,
+    reasoning_labels: Optional[FlyteDirectory] = None,
 ) -> FlyteDirectory:
     """Pre-process raw data → WebDataset shards.
 
-    ``reasoning_teacher`` / ``world_model`` pack the extra per-sample members the
-    reasoning (#98) and JEPA (#13) branches need; they MUST match the branch
-    flags used at ``train_il`` time or that branch trains unsupervised.
+    ``world_model`` packs the JEPA per-sample windows (#13). ``reasoning_labels``
+    (the generate_reasoning_labels artifact) is JOINed into reasoning.json (#98).
+    Both MUST match the branch flags used at ``train_il`` time or that branch
+    trains unsupervised.
     """
     return data_processing(raw_data=raw_data, dataset=dataset,
                            hz=hz, image_size=image_size, episodes=episodes,
-                           reasoning_teacher=reasoning_teacher, world_model=world_model)
-
-
-@task(container_image=DATA_PREP_IMAGE, requests=Resources(cpu="1", mem="1Gi"))
-def _no_labels() -> FlyteDirectory:
-    """Empty label artifact for the 'no teacher' branch of wf_create_dataset.
-
-    Flyte conditional branches must return the same type; this is the no-op
-    branch (no reasoning labels were generated), an empty directory.
-    """
-    import os
-    import tempfile
-    d = tempfile.mkdtemp()
-    with open(os.path.join(d, "NO_LABELS"), "w") as f:
-        f.write("reasoning_teacher=none; no labels exported.\n")
-    return FlyteDirectory(d)
+                           world_model=world_model, reasoning_labels=reasoning_labels)
 
 
 @workflow
 def wf_generate_reasoning_labels(
-    shards: FlyteDirectory,
+    raw_data: FlyteDirectory,
     dataset: Dataset = Dataset.L2D,
+    episodes: int = 3,
     split: str = "train",
+    teacher: str = "openai_compatible",
+    prompt_version: str = "action_relevant_reasoning_v2",
 ) -> FlyteDirectory:
-    """Export the shards' in-shard reasoning labels → versioned S3 artifact."""
-    return generate_reasoning_labels(shards=shards, dataset=dataset, split=split)
+    """Label raw samples with the offline teacher (S3-cached) → versioned artifact."""
+    return generate_reasoning_labels(
+        raw_data=raw_data, dataset=dataset, episodes=episodes, split=split,
+        teacher=teacher, prompt_version=prompt_version)
+
+
+@workflow
+def _pack_with_labels(
+    raw: FlyteDirectory,
+    dataset: Dataset,
+    episodes: int,
+    image_size: int,
+    world_model: bool,
+    teacher: str,
+    prompt_version: str,
+) -> FlyteDirectory:
+    """The 'with reasoning labels' branch of wf_create_dataset: label from raw
+    (teacher, S3-cached) → pack shards with the labels JOINed in.
+
+    A Flyte conditional branch is a single node, so the two-task label→pack chain
+    lives in this sub-workflow.
+    """
+    labels = generate_reasoning_labels(
+        raw_data=raw, dataset=dataset, episodes=episodes, split="train",
+        teacher=teacher, prompt_version=prompt_version)
+    return data_processing(
+        raw_data=raw, dataset=dataset, episodes=episodes, image_size=image_size,
+        world_model=world_model, reasoning_labels=labels)
 
 
 @workflow
@@ -1253,41 +1267,40 @@ def wf_create_dataset(
     image_size: int = 256,
     world_model: bool = False,
     reasoning_teacher: str = "none",
-) -> CreateDatasetOutput:
-    """CreateDataset: raw → ready-to-train dataset (shards + versioned label export).
+    prompt_version: str = "action_relevant_reasoning_v2",
+) -> FlyteDirectory:
+    """CreateDataset: raw → ready-to-train WebDataset shards.
 
     "Dataset" means data already in a form training consumes DIRECTLY: the
     WebDataset shards (frames + ego + optional WM windows + per-sample
-    reasoning.json when a teacher is set). Training reads its reasoning
-    supervision from those in-shard members — the shards are the single source
-    of truth.
+    reasoning.json when a teacher is set). train_il reads its reasoning
+    supervision from those in-shard members — the shards ARE the dataset.
 
-    ``generate_reasoning_labels`` here produces a SEPARATE versioned parquet/jsonl
-    EXPORT of the same labels for traceability/auditing (queryable, diffable
-    across runs); it is NOT a second training input and train_il does not read
-    it. It runs only when a real teacher is requested — with
-    reasoning_teacher="none" no labels are packed and no export is produced.
+    Reasoning labels are generated once by ``generate_reasoning_labels`` (the only
+    place the teacher is called; each sample S3-cached so re-packing never
+    re-bills it, #117) and JOINed into the shards by ``data_processing``. The
+    versioned label artifact persists independently in S3 (task output + cache),
+    so it need not be a workflow return value — the shards are the single output.
 
-    Chains: data_ingest → data_processing (shards, optional WM windows + labels)
-    → [teacher != none] generate_reasoning_labels (versioned audit export).
+    Chains: data_ingest → [teacher != none] generate_reasoning_labels →
+    data_processing (JOIN labels). With reasoning_teacher="none", no labels are
+    generated and the shards carry no reasoning.json (imitation-only).
     """
     from flytekit import conditional
 
     raw = data_ingest(dataset=dataset, episodes=episodes)
-    shards = data_processing(
-        raw_data=raw, dataset=dataset, episodes=episodes, image_size=image_size,
-        reasoning_teacher=reasoning_teacher, world_model=world_model,
-    )
-    # Export the shards' in-shard labels (single teacher pass in data_processing)
-    # to a versioned artifact — only when a teacher actually labelled them.
-    labels = (
-        conditional("export_labels")
+    return (
+        conditional("reasoning_labels")
         .if_(reasoning_teacher != "none")
-        .then(generate_reasoning_labels(shards=shards, dataset=dataset, split="train"))
+        .then(_pack_with_labels(
+            raw=raw, dataset=dataset, episodes=episodes, image_size=image_size,
+            world_model=world_model, teacher=reasoning_teacher,
+            prompt_version=prompt_version))
         .else_()
-        .then(_no_labels())
+        .then(data_processing(
+            raw_data=raw, dataset=dataset, episodes=episodes,
+            image_size=image_size, world_model=world_model))
     )
-    return CreateDatasetOutput(shards=shards, reasoning_labels=labels)
 
 
 @workflow
