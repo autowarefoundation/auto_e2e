@@ -639,7 +639,13 @@ def train_il(
     lr: float = 1e-4,
     weight_decay: float = 1e-2,
     grad_clip: float = 1.0,
-    amp: bool = True,
+    # AMP off by default: with fp16 autocast the GradScaler detected inf/nan grads
+    # every step (fp16 overflow somewhere in the BEV projection / Bezier basis /
+    # backbone path) and skipped optimizer.step() FOREVER — weights never updated,
+    # so the trajectory loss sat perfectly flat (~2.95) while fp32 learns in one
+    # step (verified: control_head grad norm ~6.6, loss 6.30->5.00). Keep fp32
+    # until the specific overflow op is isolated and kept in fp32 explicitly.
+    amp: bool = False,
     enable_reasoning: bool = False,
     reasoning_mode: str = "pooled_latent",
     # Small default: the reasoning branch is zero-init coupled (alpha=0), so it
@@ -1330,6 +1336,7 @@ def wf_train_il(
     epochs: int = 3,
     batch_size: int = 4,
     lr: float = 1e-4,
+    amp: bool = False,
     enable_reasoning: bool = False,
     reasoning_mode: str = "pooled_latent",
     enable_world_model: bool = False,
@@ -1338,10 +1345,11 @@ def wf_train_il(
 
     The branch flags must match how the shards were packed (see
     ``wf_data_processing``); train_il fails loudly if a branch is enabled but its
-    shard data is missing rather than training it unsupervised.
+    shard data is missing rather than training it unsupervised. ``amp`` defaults
+    off: fp16 autocast made the GradScaler skip every step (see train_il).
     """
     out = train_il(shards=shards, dataset=dataset, backbone=backbone,
-                   epochs=epochs, batch_size=batch_size, lr=lr,
+                   epochs=epochs, batch_size=batch_size, lr=lr, amp=amp,
                    enable_reasoning=enable_reasoning, reasoning_mode=reasoning_mode,
                    enable_world_model=enable_world_model)
     return evaluate_il_policy(checkpoint=out.checkpoint, shards=shards, dataset=dataset,
