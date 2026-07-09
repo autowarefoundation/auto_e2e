@@ -11,7 +11,7 @@ import enum
 from flytekit import task, workflow, Resources, Secret
 from flytekit.types.file import FlyteFile
 from flytekit.types.directory import FlyteDirectory
-from typing import NamedTuple, List
+from typing import NamedTuple, List, Optional
 
 import os as _os
 
@@ -226,17 +226,6 @@ def data_ingest(
 @task(
     container_image=DATA_PREP_IMAGE,
     requests=Resources(cpu="4", mem="16Gi", ephemeral_storage="50Gi"),
-    # The openai_compatible teacher endpoint (e.g. the Cosmos3-Nano vLLM ALB) is
-    # injected as env vars from a K8s Secret, so no concrete URL / account value
-    # is committed to git or shown in the Flyte UI. Optional: only consumed when
-    # reasoning_teacher="openai_compatible" (mock/cached ignore it). The Secret is
-    # created out-of-band; see .env.example COSMOS_TEACHER_*.
-    secret_requests=[
-        Secret(group="cosmos-teacher", key="COSMOS_TEACHER_BASE_URL",
-               mount_requirement=Secret.MountType.ENV_VAR),
-        Secret(group="cosmos-teacher", key="COSMOS_TEACHER_MODEL",
-               mount_requirement=Secret.MountType.ENV_VAR),
-    ],
 )
 def data_processing(
     raw_data: FlyteDirectory,
@@ -244,18 +233,19 @@ def data_processing(
     hz: int = 10,
     image_size: int = 256,
     episodes: int = 3,
-    reasoning_teacher: str = "none",
     world_model: bool = False,
+    reasoning_labels: Optional[FlyteDirectory] = None,
 ) -> FlyteDirectory:
     """Pre-extract aligned frames + egomotion → WebDataset shards.
 
     Solves Issue #30: no video decode at training time.
 
-    When ``reasoning_teacher`` is not "none" (mock / cached / openai_compatible),
-    each sample also gets a per-sample ``reasoning.json`` member holding a
-    horizon-aware reasoning label (#98), generated OFFLINE here so training reads
-    frozen labels and never calls a teacher. The teacher is model-agnostic; a
-    real run points ``openai_compatible`` at e.g. the Cosmos3-Nano vLLM endpoint.
+    Pure deterministic packing: this task calls NO external teacher. When
+    ``reasoning_labels`` is provided (the artifact from
+    ``generate_reasoning_labels``), each sample's frozen label is JOINed in by
+    ``sample_id`` and embedded as a per-sample ``reasoning.json`` member (#98),
+    the single source of truth train_il reads. Labels are generated (and
+    S3-cached) once, upstream; re-packing never re-bills the teacher (#117).
 
     When ``world_model`` is set (L2D only for now), each sample also gets the 1 Hz
     past/future multi-view windows for the JEPA loss (#13): members
@@ -301,48 +291,29 @@ def data_processing(
         n_samples = len(ds)
         idx_iter = range(n_samples)
 
-    # Offline reasoning teacher (#98): model-agnostic, train-only. "none" skips
-    # label generation entirely (shards carry no reasoning.json; training runs
-    # imitation-only). mock/cached need no GPU/network — contributor-friendly.
-    reasoning_client = None
+    # Reasoning labels (#98): JOINed in from the generate_reasoning_labels
+    # artifact by sample_id — NO teacher call here (this task is pure packing).
+    # None → shards carry no reasoning.json (training runs imitation-only). The
+    # artifact's whole-record records.jsonl is read into a {sample_id: record}
+    # map; each matching sample gets a frozen reasoning.json member.
+    labels_by_id = {}
     _record_to_json = None
-    if reasoning_teacher != "none":
-        from data_processing.reasoning_label_generation.teacher_client import (
-            TeacherRequest, build_teacher,
+    if reasoning_labels is not None:
+        from pathlib import Path
+        from data_processing.reasoning_label_generation.targets import (
+            load_records_by_sample_id, record_to_json,
         )
-        from data_processing.reasoning_label_generation.targets import record_to_json
-        # The teacher endpoint is model-agnostic and env/secret-driven so no
-        # concrete URL / account value is committed. For the openai_compatible
-        # backend (e.g. the Cosmos3-Nano vLLM ALB), resolve base_url / model /
-        # api_key from the Flyte secret context (falling back to env); the
-        # mock/cached backends need none of these.
-        teacher_kwargs = {}
-        if reasoning_teacher == "openai_compatible":
-            from flytekit import current_context
-
-            def _secret(key, default=None):
-                try:
-                    return current_context().secrets.get("cosmos-teacher", key)
-                except Exception:
-                    return os.environ.get(key, default)
-
-            base_url = _secret("COSMOS_TEACHER_BASE_URL")
-            if not base_url:
-                raise ValueError(
-                    "reasoning_teacher='openai_compatible' needs COSMOS_TEACHER_BASE_URL "
-                    "(cosmos-teacher K8s Secret / env); none found."
-                )
-            teacher_kwargs = {
-                "base_url": base_url,
-                "model": _secret("COSMOS_TEACHER_MODEL", "nvidia/Cosmos3-Nano"),
-            }
-            api_key = _secret("COSMOS_TEACHER_API_KEY")
-            if api_key:
-                teacher_kwargs["api_key"] = api_key
-        reasoning_client = build_teacher(reasoning_teacher, **teacher_kwargs)
-        _record_to_json = record_to_json
-        _TeacherRequest = TeacherRequest
-        print(f"Reasoning labels: teacher={reasoning_teacher}")
+        labels_dir = reasoning_labels.download()
+        records_files = sorted(Path(labels_dir).rglob("records.jsonl"))
+        if records_files:
+            for rf in records_files:
+                labels_by_id.update(load_records_by_sample_id(str(rf)))
+            _record_to_json = record_to_json
+            print(f"Reasoning labels JOIN: {len(labels_by_id)} records from "
+                  f"{[str(p) for p in records_files]}")
+        else:
+            print(f"WARN: reasoning_labels dir {labels_dir} has no records.jsonl; "
+                  "packing without reasoning.json (imitation-only).")
 
     # Geometry is a per-dataset rig constant, computed once. It is written into
     # EACH sample's calib.json (self-describing shards) so datasets can later be
@@ -447,19 +418,18 @@ def data_processing(
         info.size = len(calib_bytes)
         current_tar.addfile(info, io.BytesIO(calib_bytes))
 
-        # Per-sample reasoning label (#98), keyed to this sample so the loader
-        # auto-aligns it with the frames. Frames are passed to the teacher; the
-        # mock/cached backends ignore them, an endpoint backend uses them.
-        if reasoning_client is not None:
-            req = _TeacherRequest(
-                sample_id=sample_key, dataset_name=dataset.value,
-                frames=[visual[c] for c in range(visual.shape[0])],
-            )
-            record = reasoning_client.label(req)
-            rb = json.dumps(_record_to_json(record)).encode()
-            info = tarfile.TarInfo(name=f"{sample_key}.reasoning.json")
-            info.size = len(rb)
-            current_tar.addfile(info, io.BytesIO(rb))
+        # Per-sample reasoning label (#98): JOIN the frozen record by sample_id
+        # (produced + S3-cached upstream by generate_reasoning_labels). Keyed to
+        # this sample so the loader auto-aligns it with the frames. A sample with
+        # no matching label is packed without reasoning.json (trains imitation-
+        # only for that sample) rather than blocking the whole shard.
+        if _record_to_json is not None:
+            record = labels_by_id.get(sample_key)
+            if record is not None:
+                rb = json.dumps(_record_to_json(record)).encode()
+                info = tarfile.TarInfo(name=f"{sample_key}.reasoning.json")
+                info.size = len(rb)
+                current_tar.addfile(info, io.BytesIO(rb))
 
         sample_count += 1
         if sample_count % samples_per_shard == 0:
