@@ -593,7 +593,12 @@ def generate_reasoning_labels(
 
         records.append(cache.get_or_compute(sample_key, _compute))
     print(f"Labeled {len(records)} samples "
-          f"(cache hits={cache.hits}, misses/computed={cache.misses})")
+          f"(cache hits={cache.hits}, misses/computed={cache.misses}, "
+          f"cache_write_errors={cache.put_errors})")
+    if cache.put_errors:
+        print("WARN: label cache writes failed (see first WARN above); labels "
+              "were still generated + returned, but the teacher will be re-billed "
+              "next run until cache write access is granted.")
 
     out_dir = tempfile.mkdtemp()
     layout = os.path.join(
@@ -610,6 +615,7 @@ def generate_reasoning_labels(
         json.dump({"dataset": dataset.value, "split": split, "teacher": teacher,
                    "prompt_version": prompt_version, "num_records": len(records),
                    "cache_hits": cache.hits, "cache_misses": cache.misses,
+                   "cache_write_errors": cache.put_errors,
                    "num_abstained": sum(1 for r in records if r.abstained),
                    "source": "offline teacher (generate_reasoning_labels), S3-cached"}, f)
     print(f"Wrote reasoning label artifact → {layout}")
