@@ -134,8 +134,30 @@ eval metrics, `config.yaml` + checkpoint artifacts, and registers the model in
 Single task. Params: `dataset`, `episodes`. Output: raw `FlyteDirectory`.
 
 ### `wf_data_processing`
-Params: `raw_data` (URI from a prior ingest), `dataset`, `hz`, `image_size`, `episodes`.
-Output: WebDataset shards `FlyteDirectory`.
+Pure deterministic packing (no teacher call). Params: `raw_data` (URI from a prior
+ingest), `dataset`, `hz`, `image_size`, `episodes`, `world_model`,
+`reasoning_labels` (optional URI from `wf_generate_reasoning_labels`). When
+`reasoning_labels` is set, each sample's frozen label is JOINed in by `sample_id`
+and embedded as a `reasoning.json` shard member. Output: WebDataset shards
+`FlyteDirectory`.
+
+### `wf_generate_reasoning_labels`
+The single place the offline teacher (Cosmos) is called. Params: `raw_data`,
+`dataset`, `episodes`, `split`, `teacher` (`openai_compatible` / `mock` /
+`cached`), `prompt_version`. Enumerates samples from raw (same parser/episodes as
+`wf_data_processing`, so `sample_id` matches), calls the teacher only on a
+`LabelCache` miss (sample_id-keyed in `REASONING_LABELS_CACHE_BUCKET`, so re-packing
+never re-bills the endpoint, #98/#117), and writes a versioned label artifact
+(whole-record `records.jsonl` for the JOIN + flattened parquet/jsonl for
+analytics). Output: label `FlyteDirectory`.
+
+### `wf_create_dataset`
+`data_ingest → [reasoning_teacher != none] generate_reasoning_labels →
+data_processing (JOIN labels)`. Produces the ready-to-train shards in one shot.
+Params: `dataset`, `episodes`, `image_size`, `world_model`, `reasoning_teacher`,
+`prompt_version`. Output: WebDataset shards `FlyteDirectory` (the shards ARE the
+dataset; the label artifact persists independently via the generate task output +
+the cache, so it is not a separate return value).
 
 ### `wf_train_il`
 `train_il → evaluate_il_policy`. Params: `shards` (list), `dataset`, `backbone`, `epochs`, `batch_size`, `lr`. Logs to `imitation-learning`.
