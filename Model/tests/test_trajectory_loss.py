@@ -53,3 +53,28 @@ class TestTrajectoryImitationLoss:
     def test_invalid_loss_type_raises(self):
         with pytest.raises(ValueError, match="Unsupported loss_type"):
             TrajectoryImitationLoss(loss_type="l1")
+
+    def test_per_signal_normalization_gives_curvature_gradient(self):
+        # Regression for the flat-ADE bug: curvature (signal 1) is ~40x smaller
+        # than accel (signal 0). Without per-signal normalization, a small
+        # curvature error sits in SmoothL1's quadratic regime and produces a
+        # near-zero gradient, so the planner never learns curvature. After
+        # normalization, the per-element curvature gradient must be comparable
+        # in magnitude to the accel gradient for equal-in-std errors.
+        loss_fn = TrajectoryImitationLoss(signal_scales=(0.54, 0.014))
+        # A pred that is off by ~1 std on BOTH signals (accel +0.54, curv +0.014).
+        pred = torch.zeros(1, 128, requires_grad=True)
+        target = torch.zeros(1, 64, 2)
+        target[..., 0] = 0.54    # accel target
+        target[..., 1] = 0.014   # curvature target
+        loss = loss_fn(pred, target.view(1, 128))
+        loss.backward()
+        g = pred.grad.view(64, 2)
+        accel_g = g[:, 0].abs().mean().item()
+        curv_g = g[:, 1].abs().mean().item()
+        # Comparable within 2x (would be ~40x apart without normalization).
+        assert curv_g > 0.3 * accel_g, (accel_g, curv_g)
+
+    def test_signal_scales_length_mismatch_raises(self):
+        with pytest.raises(ValueError, match="signal_scales must have"):
+            TrajectoryImitationLoss(num_signals=2, signal_scales=(1.0,))
