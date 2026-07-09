@@ -84,6 +84,29 @@ def test_disabled_cache_never_touches_s3():
     assert calls["n"] == 2  # computed every time, no caching
 
 
+class _FailingPutS3(_StubS3):
+    """S3 stub whose put_object always fails (e.g. AccessDenied)."""
+
+    def put_object(self, Bucket, Key, Body):
+        raise RuntimeError("AccessDenied: s3:PutObject")
+
+
+def test_put_failure_is_best_effort_and_returns_record():
+    # A cache write failure must NOT abort labelling: get_or_compute still
+    # returns the freshly computed record; only put_errors is incremented.
+    cache = LabelCache("bkt", "l2d", "mock", "v2", s3_client=_FailingPutS3())
+    calls = {"n": 0}
+
+    def compute():
+        calls["n"] += 1
+        return _record("s3")
+
+    rec = cache.get_or_compute("s3", compute)
+    assert rec.sample_id == "s3"
+    assert calls["n"] == 1
+    assert cache.put_errors == 1
+
+
 def test_different_prefix_is_separate_cache():
     s3 = _StubS3()
     mock_cache = LabelCache("bkt", "l2d", "mock", "v2", s3_client=s3)
