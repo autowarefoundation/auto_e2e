@@ -888,7 +888,8 @@ def train_offline_rl(
     tau: float = 0.7,
     beta: float = 3.0,
 ) -> TrainOutput:
-    """Offline RL (IQL) refinement of IL checkpoint."""
+    """Offline RL refinement of the IL checkpoint via advantage-weighted regression
+    against a frozen IL prior (AWR — not full IQL; no learned value network)."""
     import os
     import json
     import torch
@@ -901,22 +902,33 @@ def train_offline_rl(
     ctx = current_context()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    print(f"Offline RL: epochs={epochs} tau={tau} beta={beta}")
+    print(f"Offline RL (AWR, frozen prior): epochs={epochs} beta={beta}")
 
     # Load IL model
     from model_components.auto_e2e import AutoE2E
     from data_parsing.pre_extracted import make_pre_extracted_loader
+
+    import copy
 
     ckpt = torch.load(ckpt_path, map_location=device)
     config = ckpt["config"]
     model = AutoE2E(**_model_kwargs(config)).to(device)
     model.load_state_dict(ckpt["model_state_dict"])
 
+    # FROZEN behavior prior = the IL checkpoint at t=0, kept fixed. The advantage
+    # must be measured against a policy that does NOT move with the one being
+    # trained; using the LIVE model for both terms makes advantage identically 0
+    # (a no-op that silently reduces to plain BC). This frozen prior gives a real
+    # signal: "does the fine-tuned policy beat the IL prior on this sample?".
+    baseline_model = copy.deepcopy(model).to(device).eval()
+    for p in baseline_model.parameters():
+        p.requires_grad_(False)
+
     loader = make_pre_extracted_loader(shard_dir, batch_size=4, num_workers=0)
     projection, geometry_type = _loader_projection(loader, device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=3e-5, weight_decay=1e-3)
 
-    # Simplified IQL-style training
+    # Advantage-weighted regression (AWR) against the frozen IL prior.
     model.train()
     losses_per_epoch = []
     for epoch in range(epochs):
@@ -937,12 +949,17 @@ def train_offline_rl(
             pred = model(visual, map_input, vis_hist, ego_hist,
                          projection=projection, geometry_type=geometry_type,
                          mode="infer")
-            # IQL advantage-weighted regression
+            # Advantage-weighted regression against the FROZEN IL prior. advantage
+            # > 0 where the trained policy is already closer to the logged action
+            # than the prior; exp(beta*advantage) up-weights those samples. Using
+            # the frozen prior (not the live model) makes the advantage real and
+            # non-zero, and makes beta actually do something.
             with torch.no_grad():
-                baseline_pred = model(visual, map_input, vis_hist, ego_hist,
-                                      projection=projection, geometry_type=geometry_type,
-                                      mode="infer")
-            advantage = -(pred - target).pow(2).mean(dim=-1) + (baseline_pred - target).pow(2).mean(dim=-1)
+                baseline_pred = baseline_model(visual, map_input, vis_hist, ego_hist,
+                                               projection=projection, geometry_type=geometry_type,
+                                               mode="infer")
+            advantage = -(pred.detach() - target).pow(2).mean(dim=-1) \
+                + (baseline_pred - target).pow(2).mean(dim=-1)
             weights = torch.exp(beta * advantage).clamp(max=100.0)
             loss = (weights * (pred - target).pow(2).mean(dim=-1)).mean()
             loss.backward()
@@ -960,7 +977,10 @@ def train_offline_rl(
 
     meta = {
         "base_model": {"il_metadata": il_meta, "il_checkpoint": str(ckpt_path)},
-        "rl": {"method": "IQL", "epochs": epochs, "tau": tau, "beta": beta,
+        # AWR against a frozen IL prior — NOT full IQL: there is no learned value
+        # / expectile network, so tau is not used (recorded as null for honesty;
+        # a true IQL value head is future work).
+        "rl": {"method": "awr_frozen_prior", "epochs": epochs, "tau": None, "beta": beta,
                 "losses_per_epoch": losses_per_epoch},
         "context": {
             "flyte_execution_id": ctx.execution_id.name if ctx.execution_id else "local",
