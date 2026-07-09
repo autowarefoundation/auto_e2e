@@ -61,6 +61,7 @@ class LabelCache:
         self._client = s3_client
         self.hits = 0
         self.misses = 0
+        self.put_errors = 0
 
     def _s3(self):
         if self._client is None:
@@ -87,11 +88,25 @@ class LabelCache:
             return None
 
     def put(self, sample_id: str, record: ReasoningLabelRecord) -> None:
-        """Persist ``record`` for ``sample_id`` (no-op if caching disabled)."""
+        """Persist ``record`` for ``sample_id`` (no-op if caching disabled).
+
+        Best-effort: a write failure (e.g. missing s3:PutObject) is logged and
+        swallowed, never raised. The cache is an optimization — losing it means
+        the teacher is re-billed next run, but it must not abort a labelling run
+        that already paid for the (expensive) teacher call and holds the record.
+        """
         if not self.bucket:
             return
         body = json.dumps(asdict(record)).encode("utf-8")
-        self._s3().put_object(Bucket=self.bucket, Key=self._key(sample_id), Body=body)
+        try:
+            self._s3().put_object(
+                Bucket=self.bucket, Key=self._key(sample_id), Body=body)
+        except Exception as e:  # noqa: BLE001 - cache write is non-critical
+            self.put_errors += 1
+            if self.put_errors == 1:  # warn once; don't spam per-sample
+                print(f"WARN: reasoning-label cache write failed "
+                      f"(bucket={self.bucket}): {e}. Continuing without caching; "
+                      "the teacher will be re-billed on the next run.")
 
     def get_or_compute(self, sample_id: str, compute) -> ReasoningLabelRecord:
         """Return the cached record, else call ``compute()`` and cache it.
