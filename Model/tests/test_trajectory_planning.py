@@ -405,3 +405,177 @@ class TestAutoE2EWithFlowMatching:
         bezier_traj = bezier_model(visual, map_input, vis_hist, ego, mode="infer")
         fm_traj = fm_model(visual, map_input, vis_hist, ego, mode="infer")
         assert bezier_traj.shape == fm_traj.shape == (2, 128)
+
+
+# ---------------------------------------------------------------------------
+# sample_k_trajectories — multi-path output (WG action item, related to #17)
+# ---------------------------------------------------------------------------
+
+class TestSampleKTrajectories:
+    """Tests for FlowMatchingPlanner.sample_k_trajectories().
+
+    Uses a tiny planner (embed_dim=16, 4-step T, 2-signal S) so every test
+    runs in <50 ms on CPU with no GPU required.  Follows the same fixture
+    and assertion style as TestFlowMatchingPlanner above.
+    """
+
+    @pytest.fixture
+    def planner(self, device):
+        return FlowMatchingPlanner(
+            embed_dim=16,
+            num_timesteps=4,
+            num_signals=2,
+            egomotion_dim=8,
+            visual_history_dim=32,
+            num_inference_steps=2,
+            time_embed_dim=8,
+            num_heads=2,
+        ).eval().to(device)
+
+    # ------------------------------------------------------------------
+    # Shape contract
+    # ------------------------------------------------------------------
+
+    def test_output_shape(self, planner, device):
+        """Returns exactly [B, K, trajectory_dim]."""
+        B, K = 2, 4
+        bev = torch.randn(B, 16, 4, 4, device=device)
+        vh  = torch.randn(B, 32, device=device)
+        em  = torch.randn(B, 8, device=device)
+        out = planner.sample_k_trajectories(bev, vh, em, num_samples=K)
+        assert out.shape == (B, K, planner.trajectory_dim), (
+            f"Expected ({B}, {K}, {planner.trajectory_dim}), got {tuple(out.shape)}"
+        )
+
+    def test_k1_shape(self, planner, device):
+        """num_samples=1 returns [B, 1, trajectory_dim], not [B, trajectory_dim]."""
+        B = 3
+        bev = torch.randn(B, 16, 4, 4, device=device)
+        vh  = torch.randn(B, 32, device=device)
+        em  = torch.randn(B, 8, device=device)
+        out = planner.sample_k_trajectories(bev, vh, em, num_samples=1)
+        assert out.shape == (B, 1, planner.trajectory_dim)
+
+    def test_large_k_shape(self, planner, device):
+        """K=16 scales linearly — output shape is still [B, 16, trajectory_dim]."""
+        B, K = 1, 16
+        out = planner.sample_k_trajectories(
+            torch.randn(B, 16, 4, 4, device=device),
+            torch.randn(B, 32, device=device),
+            torch.randn(B, 8, device=device),
+            num_samples=K,
+        )
+        assert out.shape == (B, K, planner.trajectory_dim)
+
+    def test_output_is_finite(self, planner, device):
+        """All returned values must be finite (no NaN/Inf from Euler steps)."""
+        out = planner.sample_k_trajectories(
+            torch.randn(1, 16, 4, 4, device=device),
+            torch.randn(1, 32, device=device),
+            torch.randn(1, 8, device=device),
+            num_samples=4,
+        )
+        assert torch.isfinite(out).all(), (
+            "sample_k_trajectories returned non-finite values"
+        )
+
+    def test_output_on_correct_device(self, planner, device):
+        """Output tensor must reside on the same device as the inputs."""
+        out = planner.sample_k_trajectories(
+            torch.randn(1, 16, 4, 4, device=device),
+            torch.randn(1, 32, device=device),
+            torch.randn(1, 8, device=device),
+            num_samples=3,
+        )
+        assert out.device.type == torch.device(device).type
+
+    # ------------------------------------------------------------------
+    # Independence guarantee
+    # ------------------------------------------------------------------
+
+    def test_samples_are_diverse(self, planner, device):
+        """K trajectories for the same scene must not all be identical.
+
+        If the K noise draws were broadcast rather than independently sampled,
+        all K outputs would be equal — this catches that regression.
+        """
+        B, K = 1, 8
+        out = planner.sample_k_trajectories(
+            torch.randn(B, 16, 4, 4, device=device),
+            torch.randn(B, 32, device=device),
+            torch.randn(B, 8, device=device),
+            num_samples=K,
+        )
+        assert not torch.allclose(out[0, 0], out[0, 1], atol=1e-6), (
+            "All K trajectories are identical — noise draws are not independent"
+        )
+
+    def test_different_scenes_yield_different_outputs(self, planner, device):
+        """Two scenes with different BEV/history must produce different K-banks."""
+        B, K = 2, 4
+        out = planner.sample_k_trajectories(
+            torch.randn(B, 16, 4, 4, device=device),
+            torch.randn(B, 32, device=device),
+            torch.randn(B, 8, device=device),
+            num_samples=K,
+        )
+        # Different BEV features → different trajectories across scenes.
+        assert not torch.allclose(out[0], out[1], atol=1e-3)
+
+    def test_k1_consistent_with_forward(self, planner, device):
+        """num_samples=1 and forward() must produce same-shape outputs.
+
+        Not asserting identical values (forward draws fresh noise each call),
+        but shapes and dtypes must match.
+        """
+        bev = torch.randn(2, 16, 4, 4, device=device)
+        vh  = torch.randn(2, 32, device=device)
+        em  = torch.randn(2, 8, device=device)
+        single = planner.forward(bev, vh, em)                    # [2, 8]
+        multi  = planner.sample_k_trajectories(bev, vh, em, num_samples=1)  # [2, 1, 8]
+        assert multi.shape == (2, 1, single.shape[-1])
+        assert multi.dtype == single.dtype
+
+    # ------------------------------------------------------------------
+    # Error handling
+    # ------------------------------------------------------------------
+
+    def test_invalid_num_samples_zero(self, planner, device):
+        """num_samples=0 must raise ValueError."""
+        with pytest.raises(ValueError, match="num_samples must be >= 1"):
+            planner.sample_k_trajectories(
+                torch.randn(1, 16, 4, 4, device=device),
+                torch.randn(1, 32, device=device),
+                torch.randn(1, 8, device=device),
+                num_samples=0,
+            )
+
+    def test_invalid_num_samples_negative(self, planner, device):
+        """Negative num_samples must raise ValueError."""
+        with pytest.raises(ValueError, match="num_samples must be >= 1"):
+            planner.sample_k_trajectories(
+                torch.randn(1, 16, 4, 4, device=device),
+                torch.randn(1, 32, device=device),
+                torch.randn(1, 8, device=device),
+                num_samples=-3,
+            )
+
+    def test_wrong_visual_history_dim_raises(self, planner, device):
+        """Mismatched visual_history dim propagates ValueError from forward()."""
+        with pytest.raises(ValueError, match="visual_history last dim"):
+            planner.sample_k_trajectories(
+                torch.randn(1, 16, 4, 4, device=device),
+                torch.randn(1, 999, device=device),  # wrong dim
+                torch.randn(1, 8, device=device),
+                num_samples=2,
+            )
+
+    def test_wrong_egomotion_dim_raises(self, planner, device):
+        """Mismatched egomotion_history dim propagates ValueError from forward()."""
+        with pytest.raises(ValueError, match="egomotion_history last dim"):
+            planner.sample_k_trajectories(
+                torch.randn(1, 16, 4, 4, device=device),
+                torch.randn(1, 32, device=device),
+                torch.randn(1, 999, device=device),  # wrong dim
+                num_samples=2,
+            )
