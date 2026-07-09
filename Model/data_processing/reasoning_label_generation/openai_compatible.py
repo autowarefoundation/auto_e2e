@@ -29,15 +29,29 @@ from .teacher_client import TeacherClient, TeacherRequest, register_teacher
 Transport = Callable[[str, Dict[str, Any], Dict[str, str]], Dict[str, Any]]
 
 
-def _tensor_to_data_url(img: Any) -> str:
-    """Encode a ``[3, H, W]`` image tensor as a base64 PNG ``data:`` URL."""
+def _tensor_to_data_url(img: Any, max_edge: int = 512) -> str:
+    """Encode a ``[3, H, W]`` image tensor as a base64 JPEG ``data:`` URL.
+
+    The teacher only needs the scene semantics, not raw sensor resolution. Raw
+    frames are large (L2D is 1920x1080 x N cams); sending them verbatim makes the
+    vision model process tens of thousands of image tokens per call, so a single
+    label takes many minutes. We downscale so the longest edge is ``max_edge`` and
+    use JPEG (not PNG) to keep the payload small — turning a ~14 MB, multi-minute
+    request into a small, sub-second one. ``max_edge<=0`` disables downscaling.
+    """
     from torchvision.transforms.functional import to_pil_image
 
     pil = to_pil_image(img.detach().cpu())
+    if max_edge and max(pil.size) > max_edge:
+        w, h = pil.size
+        scale = max_edge / float(max(w, h))
+        pil = pil.resize((max(1, int(w * scale)), max(1, int(h * scale))))
+    if pil.mode != "RGB":
+        pil = pil.convert("RGB")
     buf = io.BytesIO()
-    pil.save(buf, format="PNG")
+    pil.save(buf, format="JPEG", quality=90)
     b64 = base64.b64encode(buf.getvalue()).decode("ascii")
-    return f"data:image/png;base64,{b64}"
+    return f"data:image/jpeg;base64,{b64}"
 
 
 def _urllib_transport(timeout: float) -> Transport:
@@ -86,6 +100,7 @@ class OpenAICompatibleTeacher(TeacherClient):
         api_key: Optional[str] = None,
         timeout: float = 60.0,
         max_tokens: int = 4096,
+        max_image_edge: int = 512,
         transport: Optional[Transport] = None,
         endpoint_type: str = "vllm",
     ) -> None:
@@ -105,6 +120,7 @@ class OpenAICompatibleTeacher(TeacherClient):
         self.api_key = api_key
         self.timeout = timeout
         self.max_tokens = max_tokens
+        self.max_image_edge = max_image_edge
         self.endpoint_type = endpoint_type
         self._transport: Transport = transport or _urllib_transport(timeout)
 
@@ -123,7 +139,8 @@ class OpenAICompatibleTeacher(TeacherClient):
         content: List[Dict[str, Any]] = [{"type": "text", "text": prompt}]
         for img in request.frames:
             content.append(
-                {"type": "image_url", "image_url": {"url": _tensor_to_data_url(img)}}
+                {"type": "image_url",
+                 "image_url": {"url": _tensor_to_data_url(img, self.max_image_edge)}}
             )
         return {
             "model": self.model,
