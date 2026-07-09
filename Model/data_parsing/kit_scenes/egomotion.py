@@ -6,7 +6,7 @@ format, UTM frame) at the 10 Hz reference rate. The four model signals are
 therefore *derived* from the pose sequence by finite differencing:
 
     egomotion_history  (256,) — 64 timesteps before the sample point x 4 signals
-                                [speed, acceleration, yaw_angle, curvature]
+                                [speed, acceleration, yaw_rate, curvature]
 
     trajectory_target  (128,) — 64 timesteps after the sample point x 2 signals
                                 [acceleration, curvature]
@@ -23,7 +23,7 @@ from scipy.spatial.transform import Rotation
 
 _HISTORY_TIMESTEPS = 64         # 6.4 s of past context at 10 Hz
 _FUTURE_TIMESTEPS = 64          # 6.4 s of future prediction at 10 Hz
-_NUM_HISTORY_SIGNALS = 4        # speed, acceleration, yaw_angle, curvature
+_NUM_HISTORY_SIGNALS = 4        # speed, acceleration, yaw_rate, curvature
 _NUM_TARGET_SIGNALS = 2         # acceleration, curvature
 
 EGOMOTION_DIM = _HISTORY_TIMESTEPS * _NUM_HISTORY_SIGNALS   # 256
@@ -56,10 +56,10 @@ def poses_to_arrays(
 
     Returns:
         egomotion: Float32 array of shape (T, 4):
-            [speed, acceleration, yaw_angle, curvature].
+            [speed, acceleration, yaw_rate, curvature].
             - speed: ground-plane (XY) world velocity magnitude, m/s.
             - acceleration: time-derivative of speed (longitudinal), m/s^2.
-            - yaw_angle: heading about Z from the pose quaternion, rad.
+            - yaw_rate: d(yaw)/dt from the pose quaternion, rad/s (matches L2D/NVIDIA).
             - curvature: yaw_rate / speed, 1/m, with speed floored at
               _MIN_SPEED.
         translations_local: Float64 array of shape (T, 2): scene-local frame
@@ -82,8 +82,11 @@ def poses_to_arrays(
     speed_safe = np.where(speed < _MIN_SPEED, _MIN_SPEED, speed)
     curvature = yaw_rate / speed_safe                              # (T,)
 
+    # Channel 2 is YAW_RATE (rad/s), matching L2D and NVIDIA so the merged
+    # multi-dataset loader feeds one consistent physical quantity into the shared
+    # ego encoder (yaw_rate is already computed above for curvature).
     egomotion = np.stack(
-        [speed, acceleration, yaw_angle, curvature], axis=1
+        [speed, acceleration, yaw_rate, curvature], axis=1
     ).astype(np.float32)
 
     translations_local = translations[:, :2].astype(np.float64)     # (T, 2) easting, northing
