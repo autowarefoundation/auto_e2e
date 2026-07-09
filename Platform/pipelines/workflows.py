@@ -642,7 +642,13 @@ def train_il(
     amp: bool = True,
     enable_reasoning: bool = False,
     reasoning_mode: str = "pooled_latent",
-    reasoning_loss_weight: float = 0.5,
+    # Small default: the reasoning branch is zero-init coupled (alpha=0), so it
+    # does not move the trajectory yet, and its structured-CE term sits at a
+    # large near-constant floor (~ln(num_classes) per group) until real (non-mock)
+    # labels + a non-zero visual history are available. A large weight only adds
+    # a constant that masks the trajectory loss in the logged total. Keep it small
+    # until the reasoning branch is actually learnable.
+    reasoning_loss_weight: float = 0.05,
     enable_world_model: bool = False,
     jepa_loss_weight: float = 1.0,
 ) -> TrainOutput:
@@ -762,6 +768,7 @@ def train_il(
     _proj_cache = {}
     for epoch in range(epochs):
         epoch_losses = []
+        traj_losses = []
         # Merged loader yields (batch, projection, geometry_type): each batch is
         # same-dataset (uniform num_views/geometry) but datasets are interleaved,
         # so the per-batch projection is applied to the batch it belongs to.
@@ -800,7 +807,8 @@ def train_il(
                 # Train mode returns (trajectory, aux) when a branch (reasoning /
                 # world model) is on; otherwise just the trajectory tensor.
                 trajectory, aux = out if isinstance(out, tuple) else (out, {})
-                loss = loss_fn(trajectory, target)
+                traj_loss = loss_fn(trajectory, target)
+                loss = traj_loss
 
                 # JEPA loss (#13): future-feature reconstruction, added when the
                 # WM ran the windowed path AND this batch carries future frames.
@@ -833,10 +841,15 @@ def train_il(
             scaler.update()
 
             epoch_losses.append(loss.item())
+            traj_losses.append(traj_loss.item())
 
         avg_loss = np.mean(epoch_losses) if epoch_losses else 0.0
+        avg_traj = np.mean(traj_losses) if traj_losses else 0.0
         losses_per_epoch.append(float(avg_loss))
-        print(f"  Epoch {epoch+1}/{epochs} loss={avg_loss:.4f}")
+        # Log the trajectory sub-loss separately: the total also carries the
+        # reasoning/JEPA aux terms, so watching only the total hides whether the
+        # imitation objective (the one that drives ADE/FDE) is actually falling.
+        print(f"  Epoch {epoch+1}/{epochs} loss={avg_loss:.4f} traj_loss={avg_traj:.4f}")
 
     # Save checkpoint
     os.makedirs("/tmp/train", exist_ok=True)
