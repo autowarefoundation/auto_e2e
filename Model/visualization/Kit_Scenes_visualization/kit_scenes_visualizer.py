@@ -173,7 +173,7 @@ def forward_pass_for_visualization_test(
         raw_map_image = np.zeros((1024, 1024, 3), dtype=np.uint8)
 
     current_speed = egomotion_history[-1, 252].item()
-    current_heading = ego_yaw # radians
+    current_heading = 0.0 # Map tile is already ego-centric (yaw=0 points up)
 
     model = AutoE2E(
         num_views=NUM_VIEWS,
@@ -193,15 +193,36 @@ def forward_pass_for_visualization_test(
         )
         trajectory = out[0] if isinstance(out, tuple) else out
 
-    # The projection matrix for the front camera is at index 0 (since "camera_base_front_center" is first)
-    P = sample["camera_params"][0].numpy()
+    # Compute unscaled projection matrix for the raw high-res camera image
+    calib = loader.get_camera_calibration("camera_base_front_center")
+    K_raw = calib.intrinsic
+    T_ref_to_cam = np.linalg.inv(calib.extrinsic)
+    P_unscaled = K_raw @ T_ref_to_cam[:3, :]
+    
+    # visualization/trajectory_rendering.py assumes input points to P are in RDF (Right, Down, Forward)
+    # with a hardcoded Down = 1.5m.
+    # KIT Scenes reference frame is FLU (Forward, Left, Up).
+    # Since Z=0 is floating above the camera, the reference frame is likely on the roof (IMU).
+    # We can anchor the trajectory to the ground by finding the camera's Z height in the reference frame,
+    # and assuming the camera is ~1.5m above the ground.
+    camera_z_in_ref = calib.extrinsic[2, 3]
+    z_ground = camera_z_in_ref - 1.5
+    
+    T_RDF_to_FLU = np.array([
+        [ 0,  0,  1,  0],        # Forward = Z_RDF
+        [-1,  0,  0,  0],        # Left = -X_RDF
+        [ 0,  0,  0,  z_ground], # Up = ground level
+        [ 0,  0,  0,  1]
+    ], dtype=np.float32)
+    
+    P = (P_unscaled @ T_RDF_to_FLU).astype(np.float32)
     
     return trajectory[-1].cpu(), trajectory_target[-1].cpu(), raw_map_image, raw_cam_image, current_speed, current_heading, P
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='KIT Scenes visualization test')
-    parser.add_argument('--dataset_root', type=str, default=None, help='Path to KIT Scenes dataset root')
+    parser.add_argument('--dataset_root', type=str, default="/home/arseni/autoware/auto_e2e/Model/visualization/Kit_Scenes_visualization/", help='Path to KIT Scenes dataset root')
     parser.add_argument('--scene_ids', type=str, nargs='+', default=None, help='List of scene IDs to load')
     parser.add_argument('--frame', type=int, default=0, help='Which frame index to visualize')
     parser.add_argument("--zoom_in", action="store_true", help="Zoom in on the agent")
