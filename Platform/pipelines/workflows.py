@@ -496,77 +496,153 @@ def data_processing(
 
 # ============================================================
 # Task: Reasoning label generation (offline teacher → versioned S3 artifact)
+#
+# This is the SINGLE place the teacher (Cosmos) is ever called. It enumerates
+# samples straight from the raw dataset (same parser / episodes / order as
+# data_processing, so sample_id = s{si:08d} matches), asks the teacher for a
+# label ONLY on a cache miss (LabelCache, sample_id-keyed in S3), and writes a
+# versioned label artifact. data_processing later JOINs this artifact into the
+# shards by sample_id — it does NOT call the teacher (#98/#117).
 # ============================================================
 @task(
     container_image=DATA_PREP_IMAGE,
-    requests=Resources(cpu="4", mem="16Gi", ephemeral_storage="20Gi"),
+    requests=Resources(cpu="4", mem="16Gi", ephemeral_storage="50Gi"),
+    # The openai_compatible teacher endpoint (e.g. the Cosmos3-Nano vLLM ALB) is
+    # injected from a K8s Secret so no concrete URL / account value is committed
+    # to git or shown in the Flyte UI. Optional: only consumed when
+    # teacher="openai_compatible" (mock/cached ignore it).
+    secret_requests=[
+        Secret(group="cosmos-teacher", key="COSMOS_TEACHER_BASE_URL",
+               mount_requirement=Secret.MountType.ENV_VAR),
+        Secret(group="cosmos-teacher", key="COSMOS_TEACHER_MODEL",
+               mount_requirement=Secret.MountType.ENV_VAR),
+    ],
 )
 def generate_reasoning_labels(
-    shards: FlyteDirectory,
+    raw_data: FlyteDirectory,
     dataset: Dataset = Dataset.L2D,
+    episodes: int = 3,
     split: str = "train",
+    teacher: str = "openai_compatible",
+    prompt_version: str = "action_relevant_reasoning_v2",
+    cache_bucket: str = REASONING_LABELS_CACHE_BUCKET,
 ) -> FlyteDirectory:
-    """Export the shards' EXISTING reasoning labels to a versioned artifact.
+    """Label every sample with the offline teacher, caching each in S3, then
+    write a versioned label artifact for the data_processing JOIN.
 
-    The teacher is called EXACTLY ONCE, in data_processing, which embeds a
-    per-sample reasoning.json into each shard (the single source of truth that
-    train_il reads). This task does NOT call the teacher again — it reads those
-    in-shard reasoning.json members and writes them out as a versioned JSONL +
-    Parquet artifact for traceability/auditing (queryable, diffable across runs).
-    Re-labelling here would (a) hit the Cosmos endpoint a second time at
-    ~seconds/sample and (b) risk divergence from what training actually used.
+    The teacher is called at most ONCE per (dataset, teacher, prompt_version,
+    sample) over the dataset's lifetime: :class:`LabelCache` keys each sample in
+    ``s3://<cache_bucket>/reasoning_labels_cache/dataset=/teacher=/prompt_version=/{sample_id}.json``.
+    Re-packing the shards (e.g. a different ``image_size``) re-runs
+    data_processing but hits this cache, so Cosmos is never re-billed. Changing
+    teacher or prompt_version yields a fresh cache prefix (never a stale mix).
+
+    Enumeration mirrors data_processing exactly (same parser, ``episodes``, and
+    ``range(len(ds))`` order) so ``sample_id = s{si:08d}`` is the shared JOIN key.
+    We build the dataset WITHOUT world-model windows here — the teacher only
+    needs the camera frames and the sample_ids are identical either way.
 
     Returns:
-        FlyteDirectory with reasoning_labels_v2.parquet + .jsonl and a
-        provenance meta.json. NOT a training input (train_il reads the shards).
+        FlyteDirectory with a whole-record ``records.jsonl`` (the JOIN
+        interchange data_processing reads), the flattened
+        ``reasoning_labels_v2.{parquet,jsonl}`` analytics export, and a
+        provenance ``meta.json``.
     """
     import json
     import os
     import tempfile
-    from pathlib import Path
 
-    import webdataset as wds
-
+    from data_processing.reasoning_label_generation.teacher_client import (
+        TeacherRequest, build_teacher,
+    )
+    from data_processing.reasoning_label_generation.label_cache import LabelCache
     from data_processing.reasoning_label_generation.parquet_writer import (
         write_jsonl, write_parquet,
     )
-    from data_processing.reasoning_label_generation.targets import record_from_json
+    from data_processing.reasoning_label_generation.targets import write_records_jsonl
 
-    shard_dir = shards.download()
-    tarfiles = sorted(str(p) for p in Path(shard_dir).glob("*.tar"))
-    print(f"Exporting reasoning labels: dataset={dataset.value} split={split} "
-          f"shards={len(tarfiles)}")
+    raw_path = raw_data.download()
+    print(f"Generating reasoning labels: dataset={dataset.value} split={split} "
+          f"teacher={teacher} prompt={prompt_version} raw={raw_path}")
 
-    # Read the reasoning.json member each sample already carries (packed by the
-    # single teacher pass in data_processing). No teacher, no endpoint call.
-    def _decode(sample):
-        raw = sample.get("reasoning.json")
-        return sample["__key__"], raw
+    # Same parser + episodes + enumeration order as data_processing → matching
+    # sample_ids (the JOIN key). No WM windows: the teacher only sees cameras.
+    ep_list = list(range(episodes)) if episodes > 0 else None
+    if dataset == Dataset.NVIDIA_PHYSICAL_AI:
+        from data_parsing.nvidia_physical_ai.dataset import NvidiaAVDataset
+        ds = NvidiaAVDataset(data_root=raw_path)
+    else:
+        from data_parsing.l2d import L2DDataset
+        ds = L2DDataset(repo_id=dataset.value, episodes=ep_list,
+                        include_world_model_windows=False)
+    n_samples = len(ds)
 
-    ds = wds.WebDataset(tarfiles, shardshuffle=False, empty_check=False).map(_decode)
-    records, missing = [], 0
-    for _key, raw in ds:
-        if raw is None:
-            missing += 1
-            continue
-        payload = json.loads(raw.decode() if isinstance(raw, (bytes, bytearray)) else raw)
-        records.append(record_from_json(payload))
-    print(f"Read {len(records)} in-shard reasoning labels ({missing} samples had none)")
+    # openai_compatible resolves base_url/model/api_key from the Secret (env
+    # fallback); mock/cached need none of these.
+    teacher_kwargs = {}
+    if teacher == "openai_compatible":
+        from flytekit import current_context
+
+        def _secret(key, default=None):
+            try:
+                return current_context().secrets.get("cosmos-teacher", key)
+            except Exception:
+                return os.environ.get(key, default)
+
+        base_url = _secret("COSMOS_TEACHER_BASE_URL")
+        if not base_url:
+            raise ValueError(
+                "teacher='openai_compatible' needs COSMOS_TEACHER_BASE_URL "
+                "(cosmos-teacher K8s Secret / env); none found."
+            )
+        teacher_kwargs = {
+            "base_url": base_url,
+            "model": _secret("COSMOS_TEACHER_MODEL", "nvidia/Cosmos3-Nano"),
+        }
+        api_key = _secret("COSMOS_TEACHER_API_KEY")
+        if api_key:
+            teacher_kwargs["api_key"] = api_key
+    teacher_kwargs["prompt_version"] = prompt_version
+    client = build_teacher(teacher, **teacher_kwargs)
+
+    cache = LabelCache(cache_bucket or None, dataset.value, teacher, prompt_version)
+    print(f"Label cache: bucket={cache_bucket or '(disabled)'} "
+          f"prefix={cache._prefix}")
+
+    records = []
+    for si in range(n_samples):
+        sample = ds[si]
+        visual = sample["visual_tiles"]  # (V, 3, H, W) real cameras
+        sample_key = f"s{si:08d}"
+
+        def _compute(sk=sample_key, vis=visual):
+            req = TeacherRequest(
+                sample_id=sk, dataset_name=dataset.value,
+                frames=[vis[c] for c in range(vis.shape[0])],
+            )
+            return client.label(req)
+
+        records.append(cache.get_or_compute(sample_key, _compute))
+    print(f"Labeled {len(records)} samples "
+          f"(cache hits={cache.hits}, misses/computed={cache.misses})")
 
     out_dir = tempfile.mkdtemp()
-    teacher = records[0].teacher_provider if records else "none"
     layout = os.path.join(
         out_dir, f"dataset={dataset.value}", f"split={split}",
         "schema_version=reasoning_label_v2", f"teacher={teacher}",
     )
     os.makedirs(layout, exist_ok=True)
+    # records.jsonl = whole-record JOIN interchange data_processing reads back.
+    write_records_jsonl(records, os.path.join(layout, "records.jsonl"))
+    # Flattened analytics export (per-horizon rows) for querying/diffing.
     write_jsonl(records, os.path.join(layout, "reasoning_labels_v2.jsonl"))
     write_parquet(records, os.path.join(layout, "reasoning_labels_v2.parquet"))
     with open(os.path.join(out_dir, "meta.json"), "w") as f:
         json.dump({"dataset": dataset.value, "split": split, "teacher": teacher,
-                   "num_records": len(records), "samples_without_labels": missing,
+                   "prompt_version": prompt_version, "num_records": len(records),
+                   "cache_hits": cache.hits, "cache_misses": cache.misses,
                    "num_abstained": sum(1 for r in records if r.abstained),
-                   "source": "in-shard reasoning.json (single teacher pass in data_processing)"}, f)
+                   "source": "offline teacher (generate_reasoning_labels), S3-cached"}, f)
     print(f"Wrote reasoning label artifact → {layout}")
     return FlyteDirectory(out_dir)
 
