@@ -23,6 +23,14 @@ DATA_PREP_IMAGE = f"{ECR_PREFIX}/auto-e2e/data-prep:latest"
 
 MLFLOW_URI = "http://mlflow.mlflow.svc.cluster.local:5000"
 
+# S3 bucket for the persistent, sample_id-keyed reasoning-label cache (#98/#117).
+# The teacher (Cosmos) is called at most ONCE per (dataset, teacher, prompt, sample)
+# over the dataset's lifetime; re-packing hits the cache and never re-bills the
+# endpoint. Empty → caching disabled (always recompute). Externalized so no
+# account-specific bucket name is committed; set in .env / the task env.
+REASONING_LABELS_CACHE_BUCKET = _os.environ.get(
+    "REASONING_LABELS_CACHE_BUCKET", "auto-e2e-platform-datasets-381491877296")
+
 
 # --- Enums ---
 class Dataset(enum.Enum):
