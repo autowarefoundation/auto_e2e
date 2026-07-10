@@ -5,13 +5,16 @@ package service
 import (
 	"archive/tar"
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"path"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -233,6 +236,265 @@ func (s *S3Service) PresignShard(ctx context.Context, dataset, shard string) (st
 		return "", fmt.Errorf("presign %s: %w", key, err)
 	}
 	return req.URL, nil
+}
+
+// Ego layout constants: ego.npy is raw little-endian float32 packed with
+// numpy tobytes() (no npy header). 384 floats = 1536 bytes: the first 256
+// are history (64 steps x 4 signals: speed, accel, yaw_rate, curvature), the
+// last 128 are future (64 steps x 2 signals).
+const (
+	egoHistoryFloats = 256
+	egoFutureFloats  = 128
+	egoTotalFloats   = egoHistoryFloats + egoFutureFloats
+	egoNowSignals    = 4 // one history row: [speed, accel, yaw_rate, curvature]
+
+	// indexFps is the frame rate the ADAS player renders shards at.
+	indexFps = 10
+
+	// maxInlineMemberBytes caps how much of a small metadata member (meta.json,
+	// ego.npy) is buffered during a tar scan, guarding against oversized or
+	// corrupt members.
+	maxInlineMemberBytes = 1 << 20 // 1 MiB
+)
+
+// GetSampleDetail streams the shard tar once and assembles the detail view of
+// a single sample: its member list (for Cameras), raw meta.json bytes and the
+// decoded ego.npy history/future arrays.
+func (s *S3Service) GetSampleDetail(ctx context.Context, dataset, shard, sampleKey string) (*model.SampleDetail, error) {
+	key := shardPrefix(dataset) + shard
+	obj, err := s.client.GetObject(ctx, &s3.GetObjectInput{
+		Bucket: aws.String(s.bucket),
+		Key:    aws.String(key),
+	})
+	if err != nil {
+		if isS3NotFound(err) {
+			return nil, ErrNotFound
+		}
+		return nil, fmt.Errorf("get shard %s: %w", key, err)
+	}
+	defer obj.Body.Close()
+
+	detail := &model.SampleDetail{
+		Key:     sampleKey,
+		Cameras: []string{},
+	}
+	detail.EpisodeID, detail.FrameIdx = parseSampleKey(sampleKey)
+
+	found := false
+	tr := tar.NewReader(obj.Body)
+	for {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return nil, fmt.Errorf("read tar %s: %w", key, err)
+		}
+		if hdr.Typeflag != tar.TypeReg || sampleKeyOf(hdr.Name) != sampleKey {
+			continue
+		}
+		found = true
+		switch suffix := memberSuffixOf(hdr.Name); {
+		case strings.HasPrefix(suffix, "cam_") && strings.HasSuffix(suffix, ".jpg"):
+			detail.Cameras = append(detail.Cameras, strings.TrimSuffix(suffix, ".jpg"))
+		case suffix == "meta.json":
+			body, err := readMemberBytes(tr, hdr.Size)
+			if err != nil {
+				return nil, fmt.Errorf("read %s from %s: %w", hdr.Name, key, err)
+			}
+			detail.Meta = json.RawMessage(body)
+		case suffix == "ego.npy":
+			body, err := readMemberBytes(tr, hdr.Size)
+			if err != nil {
+				return nil, fmt.Errorf("read %s from %s: %w", hdr.Name, key, err)
+			}
+			floats := decodeFloat32LE(body)
+			if len(floats) >= egoTotalFloats {
+				detail.EgoHistory = floats[:egoHistoryFloats]
+				detail.EgoFuture = floats[egoHistoryFloats:egoTotalFloats]
+			} else if len(floats) >= egoHistoryFloats {
+				detail.EgoHistory = floats[:egoHistoryFloats]
+				detail.EgoFuture = floats[egoHistoryFloats:]
+			} else {
+				detail.EgoHistory = floats
+			}
+		}
+	}
+	if !found {
+		return nil, ErrNotFound
+	}
+	sort.Strings(detail.Cameras)
+	if detail.EgoHistory == nil {
+		detail.EgoHistory = []float32{}
+	}
+	if detail.EgoFuture == nil {
+		detail.EgoFuture = []float32{}
+	}
+	return detail, nil
+}
+
+// BuildShardIndex streams the shard tar once and builds the playback index
+// for the ADAS player: per-member byte ranges (tar DATA offsets, same
+// countingReader accounting as ListSamples) plus the current ego state per
+// sample, paired with a presigned URL for the whole tar so the client can
+// range-GET individual frames directly from S3.
+func (s *S3Service) BuildShardIndex(ctx context.Context, dataset, shard string) (*model.ShardIndex, error) {
+	key := shardPrefix(dataset) + shard
+	obj, err := s.client.GetObject(ctx, &s3.GetObjectInput{
+		Bucket: aws.String(s.bucket),
+		Key:    aws.String(key),
+	})
+	if err != nil {
+		if isS3NotFound(err) {
+			return nil, ErrNotFound
+		}
+		return nil, fmt.Errorf("get shard %s: %w", key, err)
+	}
+	defer obj.Body.Close()
+
+	cr := &countingReader{r: obj.Body}
+	tr := tar.NewReader(cr)
+
+	order := []string{}
+	byKey := map[string]*model.IndexSample{}
+	for {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return nil, fmt.Errorf("read tar %s: %w", key, err)
+		}
+		if hdr.Typeflag != tar.TypeReg {
+			continue
+		}
+		sk := sampleKeyOf(hdr.Name)
+		entry, ok := byKey[sk]
+		if !ok {
+			_, frameIdx := parseSampleKey(sk)
+			entry = &model.IndexSample{
+				Key:      sk,
+				FrameIdx: frameIdx,
+				Members:  map[string]model.MemberRange{},
+			}
+			byKey[sk] = entry
+			order = append(order, sk)
+		}
+		suffix := memberSuffixOf(hdr.Name)
+		entry.Members[suffix] = model.MemberRange{
+			Offset: cr.n, // header already consumed: n is at data start
+			Size:   hdr.Size,
+		}
+		switch suffix {
+		case "reasoning.json":
+			entry.HasReasoning = true
+		case "ego.npy":
+			body, err := readMemberBytes(tr, hdr.Size)
+			if err != nil {
+				return nil, fmt.Errorf("read %s from %s: %w", hdr.Name, key, err)
+			}
+			floats := decodeFloat32LE(body)
+			// EgoNow = last history row (row 63 of 64x4): floats[252:256].
+			if len(floats) >= egoHistoryFloats {
+				entry.EgoNow = floats[egoHistoryFloats-egoNowSignals : egoHistoryFloats]
+			}
+		}
+	}
+
+	url, err := s.PresignShard(ctx, dataset, shard)
+	if err != nil {
+		return nil, err
+	}
+
+	samples := make([]model.IndexSample, 0, len(order))
+	for _, sk := range order {
+		e := byKey[sk]
+		if e.EgoNow == nil {
+			e.EgoNow = []float32{}
+		}
+		samples = append(samples, *e)
+	}
+	return &model.ShardIndex{
+		PresignedTarURL: url,
+		ExpiresAt:       time.Now().Add(s.presignExpiry),
+		Fps:             indexFps,
+		Samples:         samples,
+	}, nil
+}
+
+// readMemberBytes buffers a tar member's content with a sanity cap so a
+// corrupt or oversized member cannot exhaust memory.
+func readMemberBytes(tr *tar.Reader, size int64) ([]byte, error) {
+	if size < 0 || size > maxInlineMemberBytes {
+		return nil, fmt.Errorf("member size %d exceeds %d byte cap", size, maxInlineMemberBytes)
+	}
+	return io.ReadAll(io.LimitReader(tr, size))
+}
+
+// decodeFloat32LE decodes raw little-endian float32 bytes (numpy tobytes(),
+// no npy header). Trailing bytes that do not form a full float are ignored.
+func decodeFloat32LE(b []byte) []float32 {
+	n := len(b) / 4
+	out := make([]float32, n)
+	for i := 0; i < n; i++ {
+		out[i] = math.Float32frombits(binary.LittleEndian.Uint32(b[i*4:]))
+	}
+	return out
+}
+
+// parseSampleKey extracts the episode id and frame index from a WebDataset
+// sample key. Handles both packer conventions:
+//   - "ep0_000064"        -> ("0", 64)          (L2D episode-prefixed)
+//   - "25cd4769_000064"   -> ("25cd4769", 64)   (nvidia hash-prefixed)
+//   - "s00000064"         -> ("", 64)           (flat s%08d global index)
+//
+// The flat s%08d form MUST yield distinct frame indices per sample, otherwise
+// the player keys every frame to 0 and collides (renders one frame for the
+// whole shard). Keys with neither an underscore nor the s<digits> shape yield
+// ("", 0).
+func parseSampleKey(key string) (episodeID string, frameIdx int) {
+	i := strings.LastIndexByte(key, '_')
+	if i < 0 {
+		// No underscore: accept the flat "s<digits>" index form.
+		if rest, ok := strings.CutPrefix(key, "s"); ok && isDigits(rest) {
+			if n, err := strconv.Atoi(rest); err == nil {
+				return "", n
+			}
+		}
+		return "", 0
+	}
+	if n, err := strconv.Atoi(key[i+1:]); err == nil {
+		frameIdx = n
+	}
+	episodeID = key[:i]
+	// L2D keys use an "ep<N>" episode prefix; nvidia keys are hex hashes
+	// (which cannot start with "ep": 'p' is not a hex digit).
+	if rest, ok := strings.CutPrefix(episodeID, "ep"); ok && isDigits(rest) {
+		episodeID = rest
+	}
+	return episodeID, frameIdx
+}
+
+func isDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, c := range s {
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// memberSuffixOf returns the member name after the sample key, e.g.
+// "ep0_000064.cam_0.jpg" -> "cam_0.jpg" (base name past the first dot).
+func memberSuffixOf(name string) string {
+	base := path.Base(name)
+	if i := strings.IndexByte(base, '.'); i > 0 {
+		return base[i+1:]
+	}
+	return ""
 }
 
 // ReasoningStats walks reasoning_labels_cache/ and counts label objects per
@@ -475,11 +737,13 @@ func paginate[T any](items []T, limit, offset, total int) ([]T, model.Page) {
 	if limit <= 0 {
 		limit = 50
 	}
-	end := offset + limit
+	// Clamp offset BEFORE computing end: a remotely-supplied offset near
+	// MaxInt would otherwise overflow end and panic on items[offset:end].
 	if offset > total {
 		offset = total
 	}
-	if end > total {
+	end := offset + limit
+	if end > total || end < offset { // end < offset catches int overflow
 		end = total
 	}
 	return items[offset:end], model.Page{
