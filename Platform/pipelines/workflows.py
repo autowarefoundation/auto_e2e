@@ -381,13 +381,11 @@ def data_processing(
     from data_processing.reasoning_label_generation import parallel_pack
 
     idx_list = list(idx_iter)
-    # Worker count is MEMORY-bound: a WM sample holds a full 1 Hz window
-    # (8 rows x V cams x 1080p ~ hundreds of MB decoded), so 16 WM workers OOM the
-    # 32Gi task. Cap WM packing at 6 workers; imitation-only samples are light so
-    # allow 16. (The deeper fix — decode the WM window in one delta_timestamps
-    # read — is tracked separately; this keeps the pack within memory now.)
-    max_workers_cap = 6 if world_model else 16
-    pack_workers = max(1, min(max_workers_cap, len(idx_list)))
+    # 16 pack workers. The WM window is now fetched in ONE delta_timestamps read
+    # (L2DDataset), so peak memory per worker is a single decoded window rather
+    # than ~9 re-decodes — 16 workers fit the 32Gi task (the old per-row decode
+    # OOM-killed 16 WM workers, hence the earlier 6-cap; no longer needed).
+    pack_workers = max(1, min(16, len(idx_list)))
     print(f"Packing {len(idx_list)} samples with {pack_workers} parallel processes "
           f"(world_model={world_model})...")
     ctx = mp.get_context("spawn")
