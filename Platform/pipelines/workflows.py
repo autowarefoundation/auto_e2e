@@ -485,10 +485,11 @@ def data_processing(
     # 16 vCPU so the process-parallel labeler decodes WM windows across all cores
     # (decode is the bottleneck; more cores → more concurrent teacher calls to the
     # scaled-out vLLM replicas). EKS Auto Mode / Karpenter provisions a fitting
-    # c/m/r node on demand. Large ephemeral storage holds tens of episodes of raw
-    # video + decoded windows.
-    requests=Resources(cpu="16", mem="48Gi", ephemeral_storage="400Gi"),
-    limits=Resources(cpu="16", mem="56Gi", ephemeral_storage="450Gi"),
+    # c/m/r node on demand. Memory kept ≤ the Flyte platform task cap (32Gi);
+    # decode frames are transient so 30Gi across 16 workers is ample. Large
+    # ephemeral storage holds tens of episodes of raw video + decoded windows.
+    requests=Resources(cpu="16", mem="30Gi", ephemeral_storage="400Gi"),
+    limits=Resources(cpu="16", mem="32Gi", ephemeral_storage="450Gi"),
     # The openai_compatible teacher endpoint (e.g. the Cosmos3-Nano vLLM ALB) is
     # injected from a K8s Secret so no concrete URL / account value is committed
     # to git or shown in the Flyte UI. Optional: only consumed when
