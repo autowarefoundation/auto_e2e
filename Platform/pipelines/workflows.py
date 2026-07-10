@@ -123,7 +123,11 @@ def _loader_projection(loader, device):
 # ============================================================
 @task(
     container_image=DATA_PREP_IMAGE,
-    requests=Resources(cpu="2", mem="24Gi", ephemeral_storage="50Gi"),
+    # Raw video is large: L2D is ~5-7 GB/episode of multi-cam mp4, so 10 episodes
+    # blew past the old 50Gi ephemeral limit (pod evicted mid-download). Size for
+    # tens of episodes; the request+limit both scale so the node reserves enough.
+    requests=Resources(cpu="2", mem="24Gi", ephemeral_storage="400Gi"),
+    limits=Resources(ephemeral_storage="450Gi"),
     secret_requests=[Secret(group="hf-token", key="HF_TOKEN",
                             mount_requirement=Secret.MountType.ENV_VAR)],
 )
@@ -224,7 +228,10 @@ def data_ingest(
 # ============================================================
 @task(
     container_image=DATA_PREP_IMAGE,
-    requests=Resources(cpu="4", mem="16Gi", ephemeral_storage="50Gi"),
+    # Downloads raw again + decodes frames (WM windows multiply the decode); size
+    # ephemeral storage for tens of episodes like data_ingest.
+    requests=Resources(cpu="4", mem="16Gi", ephemeral_storage="400Gi"),
+    limits=Resources(ephemeral_storage="450Gi"),
 )
 def data_processing(
     raw_data: FlyteDirectory,
@@ -475,7 +482,9 @@ def data_processing(
 # ============================================================
 @task(
     container_image=DATA_PREP_IMAGE,
-    requests=Resources(cpu="4", mem="16Gi", ephemeral_storage="50Gi"),
+    # Downloads raw + decodes WM windows on cache misses; size for tens of episodes.
+    requests=Resources(cpu="4", mem="16Gi", ephemeral_storage="400Gi"),
+    limits=Resources(ephemeral_storage="450Gi"),
     # The openai_compatible teacher endpoint (e.g. the Cosmos3-Nano vLLM ALB) is
     # injected from a K8s Secret so no concrete URL / account value is committed
     # to git or shown in the Flyte UI. Optional: only consumed when
