@@ -522,10 +522,11 @@ def generate_reasoning_labels(
     teacher: str = "openai_compatible",
     prompt_version: str = "action_relevant_reasoning_v3_temporal_front256",
     cache_bucket: str = REASONING_LABELS_CACHE_BUCKET,
-    # Process-parallel worker count. Slightly above the 16 vCPU so the ~12s teacher
-    # HTTP wait per sample overlaps with other workers' decode (decode is CPU-bound,
-    # teacher wait is I/O) and the scaled-out vLLM replicas stay busy.
-    label_workers: int = 24,
+    # Process-parallel worker count. Memory-bound, NOT cpu-bound: each worker holds
+    # its own dataset + decodes a 1080p WM window (~8x6 frames), so 24 workers
+    # OOM-killed the 32Gi task. 8 fits comfortably (~1.5-2GB each) and still gives
+    # ~8x the serial rate; the ~12s teacher HTTP wait overlaps decode across them.
+    label_workers: int = 8,
 ) -> FlyteDirectory:
     """Label each 1 Hz World-Model sample with a TEMPORAL front-camera clip, then
     write a versioned label artifact for the data_processing JOIN.
