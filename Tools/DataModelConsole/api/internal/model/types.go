@@ -1,7 +1,10 @@
 // Package model defines the JSON types exchanged by the console API.
 package model
 
-import "time"
+import (
+	"encoding/json"
+	"time"
+)
 
 // ErrorResponse is the uniform error envelope: {"error": "...", "code": "..."}.
 type ErrorResponse struct {
@@ -75,6 +78,44 @@ type SampleListResponse struct {
 	Shard   string   `json:"shard"`
 	Samples []Sample `json:"samples"`
 	Page    Page     `json:"page"`
+}
+
+// SampleDetail wraps GET .../shards/{shard}/samples/{key}: the parsed
+// identity, raw meta.json, camera list and decoded ego signal arrays of one
+// WebDataset sample.
+type SampleDetail struct {
+	Key        string          `json:"key"`
+	EpisodeID  string          `json:"episode_id"`  // parsed from key: "ep0_000064" -> "0"; nvidia "25cd4769_000064" -> "25cd4769"
+	FrameIdx   int             `json:"frame_idx"`   // parsed from key suffix -> 64
+	Meta       json.RawMessage `json:"meta"`        // raw meta.json bytes
+	Cameras    []string        `json:"cameras"`     // ["cam_0",...,"cam_6"] present for this sample
+	EgoHistory []float32       `json:"ego_history"` // 256 floats (64 steps x 4 signals)
+	EgoFuture  []float32       `json:"ego_future"`  // 128 floats (64 steps x 2 signals)
+}
+
+// ShardIndex wraps GET .../shards/{shard}/index: everything the ADAS player
+// needs to range-GET frames directly from S3 (presigned tar URL + per-member
+// byte ranges), built from a single tar scan.
+type ShardIndex struct {
+	PresignedTarURL string        `json:"presigned_tar_url"`
+	ExpiresAt       time.Time     `json:"expires_at"`
+	Fps             int           `json:"fps"` // 10
+	Samples         []IndexSample `json:"samples"`
+}
+
+// IndexSample is one playback frame in a ShardIndex.
+type IndexSample struct {
+	Key          string                 `json:"key"`
+	FrameIdx     int                    `json:"frame_idx"`
+	Members      map[string]MemberRange `json:"members"`       // "cam_0.jpg" -> {offset,size}
+	EgoNow       []float32              `json:"ego_now"`       // last history row: [speed, accel, yaw_rate, curvature] (4 floats)
+	HasReasoning bool                   `json:"has_reasoning"` // whether a reasoning.json member exists (Phase 1 shards have none, keep false)
+}
+
+// MemberRange is the byte range of a tar member's data within the shard tar.
+type MemberRange struct {
+	Offset int64 `json:"offset"`
+	Size   int64 `json:"size"`
 }
 
 // ReasoningStatsEntry is one dataset/teacher/prompt_version bucket with its
