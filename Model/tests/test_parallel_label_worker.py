@@ -18,10 +18,10 @@ def test_init_worker_positional_arg_mapping(monkeypatch):
     captured = {}
 
     class _FakeDS:
-        def __init__(self, repo_id, episodes, include_world_model_windows):
+        def __init__(self, repo_id, episodes, reasoning_clip_only):
             captured["repo_id"] = repo_id
             captured["episodes"] = episodes
-            captured["wm"] = include_world_model_windows
+            captured["clip_only"] = reasoning_clip_only
 
     def _fake_build_teacher(teacher, **kw):
         captured["teacher"] = teacher
@@ -44,13 +44,13 @@ def test_init_worker_positional_arg_mapping(monkeypatch):
         _FakeCache)
 
     # EXACT tuple workflows.py builds: (repo_id, episodes, dataset_name, teacher,
-    # teacher_kwargs, cache_bucket, prompt_version).
+    # teacher_kwargs, cache_bucket, prompt_version, raw_path). L2D path (not NVIDIA).
     pl.init_worker("yaak-ai/L2D", [0, 1, 2], "yaak-ai/L2D", "openai_compatible",
-                   {"base_url": "u", "strict": False}, "bkt", "promptX")
+                   {"base_url": "u", "strict": False}, "bkt", "promptX", None)
 
     assert captured["repo_id"] == "yaak-ai/L2D"
     assert captured["episodes"] == [0, 1, 2]
-    assert captured["wm"] is True
+    assert captured["clip_only"] is True                # front-clip mode
     assert captured["teacher"] == "openai_compatible"
     assert captured["cache_bucket"] == "bkt"
     assert captured["cache_dataset"] == "yaak-ai/L2D"   # dataset_name slot
@@ -77,10 +77,9 @@ def test_abstained_record_is_not_cached(monkeypatch):
                 teacher_error="malformed")
 
     class _DS:
-        def __getitem__(self, i):
+        def get_front_clip(self, i):
             import torch
-            f = torch.zeros(4, 6, 3, 8, 8)
-            return {"history_frames": f, "future_frames": f}
+            return [torch.zeros(3, 8, 8) for _ in range(5)]
 
     monkeypatch.setattr(pl, "_CACHE", _Cache())
     monkeypatch.setattr(pl, "_CLIENT", _Client())
