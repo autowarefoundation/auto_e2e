@@ -100,7 +100,10 @@ class OpenAICompatibleTeacher(TeacherClient):
         api_key: Optional[str] = None,
         timeout: float = 60.0,
         max_tokens: int = 4096,
-        max_image_edge: int = 512,
+        # 256px longest edge: front-only temporal clips (5 frames) keep the vision
+        # token budget small; 256 matches the reactive model input and is enough
+        # for scene-level driving semantics (NVIDIA's autolabeler runs ~320-448px).
+        max_image_edge: int = 256,
         transport: Optional[Transport] = None,
         endpoint_type: str = "vllm",
     ) -> None:
