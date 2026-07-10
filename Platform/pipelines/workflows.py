@@ -482,9 +482,13 @@ def data_processing(
 # ============================================================
 @task(
     container_image=DATA_PREP_IMAGE,
-    # Downloads raw + decodes WM windows on cache misses; size for tens of episodes.
-    requests=Resources(cpu="4", mem="16Gi", ephemeral_storage="400Gi"),
-    limits=Resources(ephemeral_storage="450Gi"),
+    # 16 vCPU so the process-parallel labeler decodes WM windows across all cores
+    # (decode is the bottleneck; more cores → more concurrent teacher calls to the
+    # scaled-out vLLM replicas). EKS Auto Mode / Karpenter provisions a fitting
+    # c/m/r node on demand. Large ephemeral storage holds tens of episodes of raw
+    # video + decoded windows.
+    requests=Resources(cpu="16", mem="48Gi", ephemeral_storage="400Gi"),
+    limits=Resources(cpu="16", mem="56Gi", ephemeral_storage="450Gi"),
     # The openai_compatible teacher endpoint (e.g. the Cosmos3-Nano vLLM ALB) is
     # injected from a K8s Secret so no concrete URL / account value is committed
     # to git or shown in the Flyte UI. Optional: only consumed when
@@ -504,7 +508,10 @@ def generate_reasoning_labels(
     teacher: str = "openai_compatible",
     prompt_version: str = "action_relevant_reasoning_v3_temporal_front256",
     cache_bucket: str = REASONING_LABELS_CACHE_BUCKET,
-    label_workers: int = 16,
+    # Process-parallel worker count. Slightly above the 16 vCPU so the ~12s teacher
+    # HTTP wait per sample overlaps with other workers' decode (decode is CPU-bound,
+    # teacher wait is I/O) and the scaled-out vLLM replicas stay busy.
+    label_workers: int = 24,
 ) -> FlyteDirectory:
     """Label each 1 Hz World-Model sample with a TEMPORAL front-camera clip, then
     write a versioned label artifact for the data_processing JOIN.
@@ -540,17 +547,13 @@ def generate_reasoning_labels(
     import os
     import tempfile
 
-    from data_processing.reasoning_label_generation.teacher_client import (
-        TeacherRequest, build_teacher,
-    )
-    from data_processing.reasoning_label_generation.label_cache import LabelCache
+    # Parent only needs the artifact writers; the teacher/dataset/cache/clip live
+    # in the per-process workers (see parallel_label). teacher_kwargs is still
+    # assembled here (from the Flyte secret context) and passed to the workers.
     from data_processing.reasoning_label_generation.parquet_writer import (
         write_jsonl, write_parquet,
     )
     from data_processing.reasoning_label_generation.targets import write_records_jsonl
-    from data_processing.reasoning_label_generation.clip_builder import (
-        build_temporal_front_clip,
-    )
 
     raw_path = raw_data.download()
     print(f"Generating reasoning labels: dataset={dataset.value} split={split} "
@@ -613,53 +616,47 @@ def generate_reasoning_labels(
     # whole 1000+-sample run. meta.json reports num_abstained so a systematically
     # high rate (bad prompt/model) is still visible.
     teacher_kwargs["strict"] = False
-    client = build_teacher(teacher, **teacher_kwargs)
 
-    cache = LabelCache(cache_bucket or None, dataset.value, teacher, prompt_version)
-    print(f"Label cache: bucket={cache_bucket or '(disabled)'} "
-          f"prefix={cache._prefix}")
+    # Free the parent's dataset handle: each worker process builds its own.
+    del ds
 
-    # Parallel labeling: the teacher call (~12 s) dominates and vLLM does
-    # continuous batching server-side, so firing many requests concurrently is
-    # far faster than the serial loop — a single GPU already benefits, and extra
-    # vLLM replicas scale it further. The per-sample work is:
-    #   1. cache.get(sample_id)  — S3 read, thread-safe, cheap
-    #   2. on MISS: decode ds[si] (NOT thread-safe → serialize with a lock) then
-    #      call the teacher (the slow, parallel-friendly part) and cache.put.
-    # Lazy decode means a fully-cached re-run does ZERO frame decoding.
-    import threading
-    from concurrent.futures import ThreadPoolExecutor
-
-    ds_lock = threading.Lock()
-    results = [None] * n_samples
-
-    def _label_one(si):
-        sample_key = f"s{si:08d}"
-        cached = cache.get(sample_key)
-        if cached is not None:
-            return si, cached
-        with ds_lock:                      # dataset access is not thread-safe
-            sample = ds[si]
-            clip = build_temporal_front_clip(
-                sample.get("history_frames"), sample.get("future_frames"))
-        rec = client.label(TeacherRequest(
-            sample_id=sample_key, dataset_name=dataset.value, frames=clip))
-        # Only cache SUCCESSFUL labels: caching an abstention would make a later
-        # re-run reuse the failure instead of re-asking the teacher for it.
-        if not rec.abstained:
-            cache.put(sample_key, rec)
-        return si, rec
+    # Process-parallel labeling (NOT threads): decode dominates and lerobot's
+    # reader is not thread-safe, so a ThreadPool had to serialize decode under a
+    # lock, leaving the scaled-out vLLM replicas idle. With processes, each worker
+    # owns an independent dataset + reader, so decode runs truly in parallel across
+    # CPU cores and the teacher calls overlap — finally using the extra GPUs. Only
+    # the sample index crosses the process boundary; frames never do. Spawn context
+    # (torch is imported) re-imports the worker module cleanly.
+    import multiprocessing as mp
+    from concurrent.futures import ProcessPoolExecutor
+    from functools import partial
+    from data_processing.reasoning_label_generation import parallel_label
+    from data_processing.reasoning_label_generation.targets import record_from_json
 
     workers = max(1, min(label_workers, n_samples))
-    print(f"Labeling {n_samples} samples with {workers} parallel workers...")
-    with ThreadPoolExecutor(max_workers=workers) as pool:
-        for si, rec in pool.map(_label_one, range(n_samples)):
-            results[si] = rec
+    print(f"Labeling {n_samples} samples with {workers} parallel PROCESSES "
+          f"(teacher={teacher}, cache_bucket={cache_bucket or '(disabled)'})...")
+    ctx = mp.get_context("spawn")
+    init_args = (dataset.value, ep_list, dataset.value, teacher, teacher_kwargs,
+                 cache_bucket or None, prompt_version)
+    results = [None] * n_samples
+    n_hit = n_computed = n_abstain = 0
+    with ProcessPoolExecutor(
+        max_workers=workers, mp_context=ctx,
+        initializer=parallel_label.init_worker, initargs=init_args,
+    ) as pool:
+        for si, rec_json, status in pool.map(parallel_label.label_sample,
+                                             range(n_samples)):
+            results[si] = record_from_json(rec_json)
+            if status == "hit":
+                n_hit += 1
+            elif status == "abstained":
+                n_abstain += 1
+            else:
+                n_computed += 1
     records = results
-    n_abstain = sum(1 for r in records if r.abstained)
     print(f"Labeled {len(records)} samples "
-          f"(cache hits={cache.hits}, misses/computed={cache.misses}, "
-          f"cache_write_errors={cache.put_errors}, abstained={n_abstain})")
+          f"(cache hits={n_hit}, computed={n_computed}, abstained={n_abstain})")
     # A few abstentions (malformed teacher JSON) are fine — they are masked out of
     # the reasoning loss. A HIGH rate means a systemic prompt/model problem, so
     # fail loudly rather than silently shipping a mostly-unlabeled dataset.
@@ -668,10 +665,6 @@ def generate_reasoning_labels(
             f"{n_abstain}/{len(records)} samples abstained (>50%) — the teacher "
             f"is failing systematically (prompt/model/endpoint), not just on a few "
             f"hard frames. Aborting so the problem is fixed rather than masked.")
-    if cache.put_errors:
-        print("WARN: label cache writes failed (see first WARN above); labels "
-              "were still generated + returned, but the teacher will be re-billed "
-              "next run until cache write access is granted.")
 
     out_dir = tempfile.mkdtemp()
     layout = os.path.join(
@@ -687,9 +680,8 @@ def generate_reasoning_labels(
     with open(os.path.join(out_dir, "meta.json"), "w") as f:
         json.dump({"dataset": dataset.value, "split": split, "teacher": teacher,
                    "prompt_version": prompt_version, "num_records": len(records),
-                   "cache_hits": cache.hits, "cache_misses": cache.misses,
-                   "cache_write_errors": cache.put_errors,
-                   "num_abstained": sum(1 for r in records if r.abstained),
+                   "cache_hits": n_hit, "computed": n_computed,
+                   "num_abstained": n_abstain,
                    "source": "offline teacher (generate_reasoning_labels), S3-cached"}, f)
     print(f"Wrote reasoning label artifact → {layout}")
     return FlyteDirectory(out_dir)
