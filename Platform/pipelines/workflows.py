@@ -799,9 +799,12 @@ def train_il(
     scaler = torch.amp.GradScaler(enabled=amp)
 
     _proj_cache = {}
+    _first_step = True  # gate the one-time gradient-flow probe below
     for epoch in range(epochs):
         epoch_losses = []
         traj_losses = []
+        jepa_vals = []
+        reason_vals = []
         # Merged loader yields (batch, projection, geometry_type): each batch is
         # same-dataset (uniform num_views/geometry) but datasets are interleaved,
         # so the per-batch projection is applied to the batch it belongs to.
@@ -845,16 +848,19 @@ def train_il(
 
                 # JEPA loss (#13): future-feature reconstruction, added when the
                 # WM ran the windowed path AND this batch carries future frames.
+                jepa_val = 0.0
                 future_state_pred = aux.get("future_state_pred")
                 if (enable_world_model and future_state_pred is not None
                         and future_frames is not None):
                     jepa = model.World_Action_Model_E2E.jepa_loss(
                         future_state_pred, future_frames)
                     loss = loss + jepa_loss_weight * jepa
+                    jepa_val = float(jepa.item())
 
                 # Add the reasoning loss when the branch is on AND this batch
                 # carries labels (shards packed with a teacher). The branch is
                 # zero-init, so with no labels the trajectory is unaffected.
+                reason_val = 0.0
                 reasoning_pred = aux.get("reasoning_pred")
                 if reasoning_loss_fn is not None and reasoning_pred is not None:
                     tb = target_batch_from_loader(batch)
@@ -866,23 +872,50 @@ def train_il(
                             confidence_targets=tb.confidence_targets.to(device),
                         )
                         loss = loss + reasoning_loss_weight * terms["total"]
+                        reason_val = float(terms["total"].item())
 
             scaler.scale(loss).backward()
             scaler.unscale_(optimizer)
+            # One-time gradient-flow probe (very first optimizer step): prove each
+            # enabled branch actually receives gradient (not just the trajectory
+            # head). We report the grad-norm of a parameter unique to each branch —
+            # a zero/None here means that branch is not training even though its
+            # loss is being added.
+            if _first_step:
+                def _branch_gn(substr):
+                    tot, n = 0.0, 0
+                    for nm, p in model.named_parameters():
+                        if substr in nm and p.grad is not None:
+                            tot += float(p.grad.norm().item()) ** 2
+                            n += 1
+                    return (tot ** 0.5, n)
+                planner_gn = _branch_gn("TrajectoryPlanner")
+                probe = f"grad-flow probe: planner={planner_gn}"
+                if enable_world_model:
+                    probe += f" world_model={_branch_gn('World_Action_Model')}"
+                if enable_reasoning:
+                    probe += f" reasoning={_branch_gn('Reasoning')}"
+                print(probe)
+                _first_step = False
             torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
             scaler.step(optimizer)
             scaler.update()
 
             epoch_losses.append(loss.item())
             traj_losses.append(traj_loss.item())
+            jepa_vals.append(jepa_val)
+            reason_vals.append(reason_val)
 
         avg_loss = np.mean(epoch_losses) if epoch_losses else 0.0
         avg_traj = np.mean(traj_losses) if traj_losses else 0.0
+        avg_jepa = np.mean(jepa_vals) if jepa_vals else 0.0
+        avg_reason = np.mean(reason_vals) if reason_vals else 0.0
         losses_per_epoch.append(float(avg_loss))
-        # Log the trajectory sub-loss separately: the total also carries the
-        # reasoning/JEPA aux terms, so watching only the total hides whether the
-        # imitation objective (the one that drives ADE/FDE) is actually falling.
-        print(f"  Epoch {epoch+1}/{epochs} loss={avg_loss:.4f} traj_loss={avg_traj:.4f}")
+        # Log each branch's sub-loss separately: the total carries traj + JEPA
+        # (world model) + reasoning aux terms, so per-branch values show whether
+        # EACH branch is actually being optimized (not just the trajectory head).
+        print(f"  Epoch {epoch+1}/{epochs} loss={avg_loss:.4f} "
+              f"traj_loss={avg_traj:.4f} jepa={avg_jepa:.4f} reason={avg_reason:.4f}")
 
     # Save checkpoint
     os.makedirs("/tmp/train", exist_ok=True)
