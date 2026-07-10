@@ -1,0 +1,29 @@
+version: 0.2
+
+env:
+  variables:
+    AWS_DEFAULT_REGION: us-west-2
+    ECR_REPO_PREFIX: 381491877296.dkr.ecr.us-west-2.amazonaws.com/auto-e2e
+
+phases:
+  pre_build:
+    commands:
+      - echo Logging into ECR...
+      - aws ecr get-login-password --region $AWS_DEFAULT_REGION | docker login --username AWS --password-stdin $ECR_REPO_PREFIX
+  build:
+    commands:
+      - echo Building console-api image...
+      - docker build -f Tools/DataModelConsole/deploy/docker/Dockerfile.api -t $ECR_REPO_PREFIX/console-api:latest Tools/DataModelConsole/
+      - echo Building console-web image...
+      - docker build -f Tools/DataModelConsole/deploy/docker/Dockerfile.web -t $ECR_REPO_PREFIX/console-web:latest Tools/DataModelConsole/
+  post_build:
+    commands:
+      - echo Pushing images...
+      - docker push $ECR_REPO_PREFIX/console-api:latest
+      - docker push $ECR_REPO_PREFIX/console-web:latest
+      - echo Build complete.
+
+cache:
+  paths:
+    - /root/.cache/go-build/**/*
+    - /root/go/pkg/mod/**/*
