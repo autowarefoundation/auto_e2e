@@ -29,3 +29,16 @@ def test_wm_margins_do_not_exceed_egomotion_margins():
     assert wm_future <= _FUTURE_TIMESTEPS, (
         f"WM future margin {wm_future} > egomotion {_FUTURE_TIMESTEPS}: same "
         "silent sample_id misalignment risk.")
+
+
+def test_nvidia_horizon_reach_within_future_margin():
+    """NVIDIA analogue: the front-clip horizon reach (wm_num_frames*wm_stride)
+    must stay within the egomotion future margin, or get_front_clip would run off
+    the end of the valid-sample window and the sample_id enumeration (which uses
+    those margins) would not match data_processing."""
+    from data_parsing.nvidia_physical_ai.egomotion import _FUTURE_TIMESTEPS
+    wm_num_frames, wm_stride = 4, 10   # NvidiaAVDataset defaults
+    reach = wm_num_frames * wm_stride
+    assert reach <= _FUTURE_TIMESTEPS, (
+        f"NVIDIA horizon reach {reach} > future margin {_FUTURE_TIMESTEPS}: "
+        "get_front_clip's furthest horizon leaves the valid window.")
