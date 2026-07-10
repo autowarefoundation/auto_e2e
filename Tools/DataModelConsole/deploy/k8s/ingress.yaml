@@ -1,0 +1,74 @@
+apiVersion: networking.k8s.io/v1
+kind: IngressClass
+metadata:
+  name: console-alb
+  namespace: console
+spec:
+  controller: eks.amazonaws.com/alb
+  parameters:
+    apiGroup: eks.amazonaws.com
+    kind: IngressClassParams
+    name: console-alb-params
+---
+apiVersion: eks.amazonaws.com/v1
+kind: IngressClassParams
+metadata:
+  name: console-alb-params
+  namespace: console
+spec:
+  scheme: internal
+  # SG ID from the terraform output (aws_security_group.console_alb, created
+  # with a name_prefix so it has a random suffix — a name reference would not
+  # resolve). apply.sh substitutes ${CONSOLE_ALB_SG_ID}. This SG is the thing
+  # that enforces "CloudFront origin-facing prefix list only" on the ALB.
+  securityGroups:
+    - ${CONSOLE_ALB_SG_ID}
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: console-ingress
+  namespace: console
+  annotations:
+    alb.ingress.kubernetes.io/scheme: internal
+    alb.ingress.kubernetes.io/target-type: ip
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTPS": 443}]'
+    alb.ingress.kubernetes.io/certificate-arn: ${ACM_CERT_ARN}
+    # Health check the API's readiness (S3 reachability), not liveness, so the
+    # ALB stops routing to a target that cannot serve data.
+    alb.ingress.kubernetes.io/healthcheck-path: /readyz
+    alb.ingress.kubernetes.io/group.name: console
+    alb.ingress.kubernetes.io/success-codes: "200"
+spec:
+  ingressClassName: console-alb
+  rules:
+    - http:
+        paths:
+          - path: /api
+            pathType: Prefix
+            backend:
+              service:
+                name: console-api
+                port:
+                  number: 8080
+          - path: /healthz
+            pathType: Exact
+            backend:
+              service:
+                name: console-api
+                port:
+                  number: 8080
+          - path: /readyz
+            pathType: Exact
+            backend:
+              service:
+                name: console-api
+                port:
+                  number: 8080
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: console-web
+                port:
+                  number: 3000
