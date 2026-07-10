@@ -58,3 +58,37 @@ def test_join_lookup_miss_returns_none():
         by_id = load_records_by_sample_id(path)
 
     assert by_id.get("s99999999") is None
+
+
+def test_roundtrip_preserves_v2_optional_fields_and_abstain():
+    """Audit G-D: whole-record JSON roundtrip keeps v2 optional fields + abstain."""
+    from data_processing.reasoning_label_generation.schema import (
+        ReasoningHorizonLabel, ReasoningLabelRecord, SCHEMA_VERSION)
+    from data_processing.reasoning_label_generation.targets import (
+        record_to_json, record_from_json)
+
+    h = ReasoningHorizonLabel(
+        horizon_sec=2.0, relation_to_ego="same_lane_ahead",
+        hazard_event=["cut_in_risk"], cause=["lead_vehicle"],
+        longitudinal_response="slow_down", confidence=0.8, provenance="teacher_gt",
+        global_scene_context=["urban"], time_to_conflict=1.5,
+        time_to_collision=3.0, time_to_stop_line=None)
+    rec = ReasoningLabelRecord(
+        schema_version=SCHEMA_VERSION, sample_id="s00000042", timestamp=1.0,
+        dataset_name="l2d", teacher_provider="openai_compatible",
+        teacher_model="cosmos", prompt_version="v3", request_mode="clip_horizons",
+        horizons=[h])
+    back = record_from_json(record_to_json(rec))
+    assert back.horizons[0].global_scene_context == ["urban"]
+    assert back.horizons[0].time_to_conflict == 1.5
+    assert back.horizons[0].time_to_stop_line is None
+    assert back.horizons[0].hazard_event == ["cut_in_risk"]
+
+    ab = ReasoningLabelRecord.abstain(
+        sample_id="s00000043", dataset_name="l2d",
+        teacher_provider="openai_compatible", teacher_model="cosmos",
+        prompt_version="v3", request_mode="clip_horizons",
+        teacher_error="unparseable")
+    ab_back = record_from_json(record_to_json(ab))
+    assert ab_back.abstained is True and ab_back.teacher_error == "unparseable"
+    assert ab_back.horizons == []

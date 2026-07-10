@@ -115,3 +115,12 @@ def test_different_prefix_is_separate_cache():
     # A different teacher's cache does not see the mock entry.
     assert cosmos_cache.get("s1") is None
     assert mock_cache.get("s1") is not None
+
+
+def test_get_never_returns_other_samples_record():
+    """Audit G-E: a cache lookup never returns a different sample's record."""
+    s3 = _StubS3()
+    cache = LabelCache("bkt", "l2d", "mock", "v2", s3_client=s3)
+    cache.put("s00000001", _record("s00000001"))
+    assert cache.get("s00000002") is None            # different key -> miss
+    assert cache.get("s00000001").sample_id == "s00000001"
