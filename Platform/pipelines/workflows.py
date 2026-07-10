@@ -495,6 +495,7 @@ def generate_reasoning_labels(
     teacher: str = "openai_compatible",
     prompt_version: str = "action_relevant_reasoning_v3_temporal_front256",
     cache_bucket: str = REASONING_LABELS_CACHE_BUCKET,
+    label_workers: int = 16,
 ) -> FlyteDirectory:
     """Label each 1 Hz World-Model sample with a TEMPORAL front-camera clip, then
     write a versioned label artifact for the data_processing JOIN.
@@ -603,22 +604,40 @@ def generate_reasoning_labels(
     print(f"Label cache: bucket={cache_bucket or '(disabled)'} "
           f"prefix={cache._prefix}")
 
-    records = []
-    for si in range(n_samples):
-        sample = ds[si]
+    # Parallel labeling: the teacher call (~12 s) dominates and vLLM does
+    # continuous batching server-side, so firing many requests concurrently is
+    # far faster than the serial loop — a single GPU already benefits, and extra
+    # vLLM replicas scale it further. The per-sample work is:
+    #   1. cache.get(sample_id)  — S3 read, thread-safe, cheap
+    #   2. on MISS: decode ds[si] (NOT thread-safe → serialize with a lock) then
+    #      call the teacher (the slow, parallel-friendly part) and cache.put.
+    # Lazy decode means a fully-cached re-run does ZERO frame decoding.
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    ds_lock = threading.Lock()
+    results = [None] * n_samples
+
+    def _label_one(si):
         sample_key = f"s{si:08d}"
-        # Temporal front-camera clip: one front frame per horizon (0/+1/+2/+3/+4 s)
-        # from the sample's 1 Hz World-Model window. This is what the teacher sees.
-        clip = build_temporal_front_clip(
-            sample.get("history_frames"), sample.get("future_frames"))
+        cached = cache.get(sample_key)
+        if cached is not None:
+            return si, cached
+        with ds_lock:                      # dataset access is not thread-safe
+            sample = ds[si]
+            clip = build_temporal_front_clip(
+                sample.get("history_frames"), sample.get("future_frames"))
+        rec = client.label(TeacherRequest(
+            sample_id=sample_key, dataset_name=dataset.value, frames=clip))
+        cache.put(sample_key, rec)
+        return si, rec
 
-        def _compute(sk=sample_key, frames=clip):
-            req = TeacherRequest(
-                sample_id=sk, dataset_name=dataset.value, frames=frames,
-            )
-            return client.label(req)
-
-        records.append(cache.get_or_compute(sample_key, _compute))
+    workers = max(1, min(label_workers, n_samples))
+    print(f"Labeling {n_samples} samples with {workers} parallel workers...")
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        for si, rec in pool.map(_label_one, range(n_samples)):
+            results[si] = rec
+    records = results
     print(f"Labeled {len(records)} samples "
           f"(cache hits={cache.hits}, misses/computed={cache.misses}, "
           f"cache_write_errors={cache.put_errors})")
