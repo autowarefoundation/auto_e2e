@@ -1,0 +1,8 @@
+# Required: Get these from existing infrastructure
+vpc_id               = "vpc-XXXXXXXXX"
+console_alb_arn      = "arn:aws:elasticloadbalancing:us-west-2:381491877296:loadbalancer/app/..."
+console_alb_dns      = "internal-k8s-console-XXXXX.us-west-2.elb.amazonaws.com"
+cognito_user_pool_id = "us-east-1_XXXXXXXXX"
+cognito_client_id    = "XXXXXXXXXXXXXXXXXXXXXXXXXX"
+auth_lambda_arn      = "arn:aws:lambda:us-east-1:381491877296:function:auto-e2e-platform-auth-edge:1"
+acm_cert_arn_us_east_1 = "arn:aws:acm:us-east-1:381491877296:certificate/XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX"
