@@ -533,18 +533,17 @@ def generate_reasoning_labels(
     write a versioned label artifact for the data_processing JOIN.
 
     Reasoning is a 1 Hz, temporal concern: the teacher is shown one FRONT-camera
-    frame per horizon (0 s current + 1/2/3/4 s future = the sample's 1 Hz
-    World-Model window) so it can reason about how the scene evolves (cut-ins,
-    stops, yields) instead of guessing from a single instant with many cameras.
-    Only World-Model samples are labelled — the reactive 10 Hz head takes no
-    reasoning loss, so per-frame 10 Hz labels would be wasted teacher calls.
+    frame per horizon (0 s current + 1/2/3/4 s future) so it can reason about how
+    the scene evolves (cut-ins, stops, yields) instead of guessing from a single
+    instant with many cameras. Both datasets expose ``get_front_clip(idx)`` in a
+    light-weight ``reasoning_clip_only`` mode that decodes ONLY those 5 front
+    frames (L2D via lerobot delta_timestamps; NVIDIA via a sparse front-camera
+    PyAV decode) — far cheaper than the full multi-view World-Model window.
 
-    Because ``len(L2DDataset)`` and the sample ordering DEPEND on
-    ``include_world_model_windows`` (WM needs bigger past/future margins), we build
-    the dataset WITH world-model windows here — identical to how data_processing
-    packs the WM shards — so ``sample_id = s{si:08d}`` is the shared JOIN key. This
-    task therefore REQUIRES a WM-capable dataset (L2D); NVIDIA has no window
-    support yet and is skipped with an empty artifact.
+    Sample enumeration matches ``data_processing`` exactly (same parser, same
+    ``episodes``/``raw_path``, same order) so ``sample_id = s{si:08d}`` is the
+    shared JOIN key. Both L2D and NVIDIA are labelled (NVIDIA is no longer
+    skipped): ``reasoning_clip_only`` does not change either dataset's sample set.
 
     The teacher is called at most ONCE per (dataset, teacher, prompt_version,
     sample): :class:`LabelCache` keys each sample in
