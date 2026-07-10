@@ -82,6 +82,65 @@ func (h *DatasetsHandler) ListSamples(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// GetSample handles GET /api/v1/datasets/{name}/shards/{shard}/samples/{key}.
+// One tar scan collects the member list, meta.json and the decoded ego.npy
+// history/future arrays for the sample detail page.
+func (h *DatasetsHandler) GetSample(w http.ResponseWriter, r *http.Request) {
+	name := chi.URLParam(r, "name")
+	shard := chi.URLParam(r, "shard")
+	key := chi.URLParam(r, "key")
+
+	if !h.s3.ValidDataset(name) {
+		writeError(w, http.StatusNotFound, model.CodeNotFound, "unknown dataset: "+name)
+		return
+	}
+	if !validShardName(shard) || key == "" || strings.ContainsAny(key, "/\\") || strings.Contains(key, "..") {
+		writeError(w, http.StatusBadRequest, model.CodeInvalidParam, "invalid shard/key")
+		return
+	}
+
+	detail, err := h.s3.GetSampleDetail(r.Context(), name, shard, key)
+	if err != nil {
+		if errors.Is(err, service.ErrNotFound) {
+			writeError(w, http.StatusNotFound, model.CodeNotFound, "sample not found: "+key)
+			return
+		}
+		slog.Error("get sample detail", "dataset", name, "shard", shard, "key", key, "error", err)
+		writeError(w, http.StatusBadGateway, model.CodeS3Error, "failed to read sample from shard")
+		return
+	}
+	writeJSON(w, http.StatusOK, detail)
+}
+
+// GetShardIndex handles GET /api/v1/datasets/{name}/shards/{shard}/index.
+// One tar scan produces per-member byte ranges plus a presigned tar URL so the
+// ADAS player can range-GET frames directly from S3.
+func (h *DatasetsHandler) GetShardIndex(w http.ResponseWriter, r *http.Request) {
+	name := chi.URLParam(r, "name")
+	shard := chi.URLParam(r, "shard")
+
+	if !h.s3.ValidDataset(name) {
+		writeError(w, http.StatusNotFound, model.CodeNotFound, "unknown dataset: "+name)
+		return
+	}
+	if !validShardName(shard) {
+		writeError(w, http.StatusBadRequest, model.CodeInvalidParam, "invalid shard name")
+		return
+	}
+
+	index, err := h.s3.BuildShardIndex(r.Context(), name, shard)
+	if err != nil {
+		if errors.Is(err, service.ErrNotFound) {
+			writeError(w, http.StatusNotFound, model.CodeNotFound, "shard not found: "+shard)
+			return
+		}
+		slog.Error("build shard index", "dataset", name, "shard", shard, "error", err)
+		writeError(w, http.StatusBadGateway, model.CodeS3Error, "failed to index shard")
+		return
+	}
+	writeJSON(w, http.StatusOK, index)
+}
+
 // GetImage handles
 // GET /api/v1/datasets/{name}/shards/{shard}/samples/{key}/image/{cam}.
 //
@@ -104,6 +163,13 @@ func (h *DatasetsHandler) GetImage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// SECURITY note: the default path below streams exactly one tar member,
+	// which is the least-privilege behavior. ?presign=true necessarily returns
+	// a URL for the WHOLE shard tar (S3 cannot presign a byte range); it is
+	// only acceptable because the caller already names the specific member
+	// (key/cam in the path) and the /index endpoint pairs the same tar URL
+	// with per-member byte ranges — tar URL + client-side range-GET is the
+	// intended pattern for the player (range enforced client-side).
 	if r.URL.Query().Get("presign") == "true" {
 		url, err := h.s3.PresignShard(r.Context(), name, shard)
 		if err != nil {
@@ -111,6 +177,11 @@ func (h *DatasetsHandler) GetImage(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadGateway, model.CodeS3Error, "failed to presign shard")
 			return
 		}
+		// Never cache the presigned URL: it expires in ~15 min, and the image
+		// cache behavior shares this path pattern. Without no-store CloudFront
+		// could serve an expired URL (or cross-serve JPEG/JSON) for up to
+		// default_ttl.
+		w.Header().Set("Cache-Control", "no-store")
 		writeJSON(w, http.StatusOK, map[string]string{
 			"url":    url,
 			"member": fmt.Sprintf("%s.%s.jpg", key, cam),
