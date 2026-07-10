@@ -1,0 +1,31 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: console-api
+  namespace: console
+  labels:
+    app: console-api
+spec:
+  type: ClusterIP
+  selector:
+    app: console-api
+  ports:
+    - port: 8080
+      targetPort: 8080
+      protocol: TCP
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: console-web
+  namespace: console
+  labels:
+    app: console-web
+spec:
+  type: ClusterIP
+  selector:
+    app: console-web
+  ports:
+    - port: 3000
+      targetPort: 3000
+      protocol: TCP
