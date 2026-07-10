@@ -21,18 +21,26 @@ parameter.
 </details>
 
 ## NVIDIA GeForce RTX 4050 Laptop GPU
+
 <details open>
   <summary>Toggle view</summary>
 
+> CUDA 12.6 | Driver 610.62 | PyTorch 2.7.1+cu126 | Commit `82cc8ae` | Resolution [256, 256]
 
-| Backbone | Fusion Method | FPS | Average Latency [ms] | Worst-Case Latency [ms] | Latency Jitter [ms] | Peak VRAM Allocated [MB] | Peak VRAM Reserved [MB] |
-| -------- | ------------- | --- | --------------- | ------------------ | -------------- | ------------------- | ------------------ |
-| SwinV2 Tiny | Feature Concat | 25.76 | 38.81 | 40.60 | 1.80 | 1067.52 | 1216.00 |
-| SwinV2 Tiny | Spatial Attention | 24.85 | 40.24 | 41.32 | 1.04 | 1069.18 | 1218.00 |
-| SwinV2 Tiny | BEV Fusion | 25.47 | 39.27 | 41.36 | 2.36 | 1069.18 | 1220.00 |
-| ConvNextV2 Tiny | Feature Concat | 25.92 | 38.58 | 39.27 | 0.74 | 1092.58 | 1268.00 |
-| ConvNextV2 Tiny | Spatial Attention | 23.06 | 43.37 | 52.16 | 9.03 | 1092.58 | 1268.00 |
-| ConvNextV2 Tiny | BEV Fusion | 21.70 | 46.09 | 77.30 | 33.68 | 1092.58 | 1268.00 |
+| Model | Backbone | Fusion Mode | Batch | FPS | Latency (ms) | p99 (ms) | Jitter (ms) | VRAM (MB) | Params |
+|----------|----------|-------------|-------|-----|--------------|----------|-------------|-----------|--------|
+| Reactive | swin_v2_tiny | bev | 1 | 20.0 | 50.0 | 72.4 | 25.2 | 417 | 62.8M |
+| Combined | swin_v2_tiny | bev | 1 | 12.2 | 82.0 | 86.4 | 4.7 | 556 | 98.3M |
+| Reactive | swin_v2_tiny | bev | 2 | 11.3 | 88.1 | 91.7 | 4.0 | 580 | 62.8M |
+| Combined | swin_v2_tiny | bev | 2 | 6.2 | 161.8 | 167.6 | 6.0 | 719 | 98.3M |
+| Reactive | swin_v2_tiny | bev | 4 | 5.6 | 178.0 | 181.8 | 4.0 | 905 | 62.8M |
+| Combined | swin_v2_tiny | bev | 4 | 3.0 | 331.4 | 335.6 | 4.2 | 1045 | 98.3M |
+| Reactive | conv_next_v2_tiny | bev | 1 | 19.6 | 50.9 | 68.7 | 19.8 | 443 | 63.1M |
+| Combined | conv_next_v2_tiny | bev | 1 | 11.3 | 88.8 | 94.1 | 6.3 | 579 | 98.8M |
+| Reactive | conv_next_v2_tiny | bev | 2 | 10.4 | 96.0 | 104.6 | 9.1 | 630 | 63.1M |
+| Combined | conv_next_v2_tiny | bev | 2 | 5.7 | 174.6 | 179.9 | 5.6 | 767 | 98.8M |
+| Reactive | conv_next_v2_tiny | bev | 4 | 5.3 | 188.7 | 192.0 | 3.5 | 1003 | 63.1M |
+| Combined | conv_next_v2_tiny | bev | 4 | 2.8 | 353.2 | 364.9 | 12.1 | 1140 | 98.8M |
 
 </details>
 
