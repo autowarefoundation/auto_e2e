@@ -14,7 +14,7 @@ The dataset is loaded through the [`kitscenes`](https://github.com/KIT-MRT/kitsc
 cd Model/data_parsing/kit_scenes
 git clone https://github.com/KIT-MRT/kitscenes.git && cd kitscenes
 pip install --upgrade pip
-pip install -e . --no-deps
+pip install -e ".[all]"
 ```
 
 ### Lanelet2
@@ -32,6 +32,14 @@ conda install -c robostack-staging ros-humble-lanelet2-python
 
 Without Lanelet2, map tiles fall back to zero tensors and the dataset still functions.
 
+### Data Download
+
+First, make sure you have the [Git LFS](https://git-lfs.github.com/) as it is necessary to properly load the dataset. You can install it using 
+```bash
+sudo apt install git-lfs
+```
+
+Then, to download the data, simply use [the official instruction](https://github.com/KIT-MRT/kitscenes#download).
 
 ## Model inputs produced
 

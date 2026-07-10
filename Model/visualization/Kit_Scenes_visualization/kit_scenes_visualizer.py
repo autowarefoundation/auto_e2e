@@ -200,7 +200,6 @@ def forward_pass_for_visualization_test(
     P_unscaled = K_raw @ T_ref_to_cam[:3, :]
     
     # visualization/trajectory_rendering.py assumes input points to P are in RDF (Right, Down, Forward)
-    # with a hardcoded Down = 1.5m.
     # KIT Scenes reference frame is FLU (Forward, Left, Up).
     # Since Z=0 is floating above the camera, the reference frame is likely on the roof (IMU).
     # We can anchor the trajectory to the ground by finding the camera's Z height in the reference frame,
@@ -222,13 +221,18 @@ def forward_pass_for_visualization_test(
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='KIT Scenes visualization test')
-    parser.add_argument('--dataset_root', type=str, default="/home/arseni/autoware/auto_e2e/Model/visualization/Kit_Scenes_visualization/", help='Path to KIT Scenes dataset root')
+    parser.add_argument('--dataset_root', type=str, default=None, help='Path to KIT Scenes dataset root. Defaults to $KITSCENES_ROOT if not provided.')
     parser.add_argument('--scene_ids', type=str, nargs='+', default=None, help='List of scene IDs to load')
     parser.add_argument('--frame', type=int, default=0, help='Which frame index to visualize')
     parser.add_argument("--zoom_in", action="store_true", help="Zoom in on the agent")
     args = parser.parse_args()
 
-    combined_image, camera_and_grid = visualization_on_kit_scenes(args.scene_ids, frame_index=args.frame, zoom_in=args.zoom_in, dataset_root=args.dataset_root)
+    dataset_root = args.dataset_root or os.environ.get("KITSCENES_ROOT")
+    if dataset_root is None:
+        raise ValueError("Dataset root must be provided via --dataset_root or KITSCENES_ROOT environment variable.")
+
+    combined_image, camera_and_grid = visualization_on_kit_scenes(args.scene_ids, frame_index=args.frame, zoom_in=args.zoom_in, dataset_root=dataset_root)
+
     
     if combined_image is not None and camera_and_grid is not None:
         save_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "generated_images")

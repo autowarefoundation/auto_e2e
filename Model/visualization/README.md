@@ -66,7 +66,7 @@ Projects and renders the 3D footprint of a trajectory onto a 2D front camera ima
 * `action_sequence`: The predicted `(128,)` trajectory tensor.
 * `current_speed`: The ego vehicle's current speed in m/s.
 * `front_camera_image`: The raw, unnormalized BGR camera image.
-* `P`: The 3x4 Camera Projection Matrix. If `P` is not provided, you must provide `K` (Intrinsics), `R` (Rotation), and `t` (Translation).
+* `P`: The 3x4 Camera Projection Matrix. If `P` is not provided, you must provide `K` (Intrinsics), `R` (Rotation), and `t` (Translation). It assumes input points to P are in RDF, so if a dataset uses different convention, it has to be converted to RDF.
 * `color`: The BGR color tuple for the semi-opaque footprint (e.g., `(52, 217, 164)`).
 
 **Example Usage:**
@@ -101,4 +101,6 @@ final_view = Visualization.concatenate_grid_and_camera(grid_image, cam_view)
 
 To use `Visualization` class, you would have all the required dependencies if you followed the [Autoware E2E installation instructions](https://github.com/autowarefoundation/auto_e2e). No extra packages are needed.
 
-If you wish to run the live visualization script (`--live`) on L2D dataset to test visualization using real records, you will additionally need the [L2D dependencies](https://github.com/autowarefoundation/auto_e2e/tree/main/Model/data_parsing/l2d) 
+If you wish to run the live visualization script (`--live`) on L2D dataset to test visualization using real records, you will additionally need the [L2D dependencies](https://github.com/autowarefoundation/auto_e2e/tree/main/Model/data_parsing/l2d).
+
+Similarly, to run the KIT Scenes visualization script (`Kit_Scenes_visualization/kit_scenes_visualizer.py`), you will need the [KIT Scenes dependencies](https://github.com/autowarefoundation/auto_e2e/tree/main/Model/data_parsing/kit_scenes) installed.

@@ -515,7 +515,7 @@ class Visualization:
                 idx1 = chunk[k]
                 idx2 = chunk[k+1]
                 quad = np.array([left_2d[idx1], left_2d[idx2], right_2d[idx2], right_2d[idx1]], dtype=np.int32)
-                cv2.fillPoly(mask_solid, [quad], 1)
+                cv2.fillPoly(mask_solid, [quad], (1,))
                 
             # Mask 2: perimeter polygon (has holes at self-intersections due to OpenCV odd-even fill rule)
             mask_odd_even = np.zeros((h, w), dtype=np.uint8)
@@ -525,7 +525,7 @@ class Visualization:
             for i in reversed(chunk):
                 poly_pts.append(right_2d[i])
             poly_pts_arr = np.array(poly_pts, dtype=np.int32)
-            cv2.fillPoly(mask_odd_even, [poly_pts_arr], 1)
+            cv2.fillPoly(mask_odd_even, [poly_pts_arr], (1,))
             
             # The self-intersection hole is exactly where mask_solid has filled it but mask_odd_even left it blank!
             intersection_hole = ((mask_solid == 1) & (mask_odd_even == 0)).astype(np.float32)

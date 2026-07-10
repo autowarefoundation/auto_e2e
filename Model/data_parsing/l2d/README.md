@@ -87,6 +87,14 @@ python forward_pass_test.py --live --episodes 0
 
 ## Additional dependencies
 
+The lerobot requires version of `numpy` and `opencv-python` that are different from our default ones. However, you can simply modify the environment using the following packages:
 ```
 lerobot==0.5.1            # LeRobot dataset SDK (pip install lerobot==0.5.1)
+numpy==2.2.6              
+opencv-python==4.13.0.92  
 ```
+Simple installation command:
+```bash
+pip install lerobot==0.5.1 numpy==2.2.6 opencv-python==4.13.0.92
+```
+Keep in mind that this makes the environment incompatible with KIT Scenes API. So if you wish to use the KIT Scenes dataset, make sure to return the environment to its [initial state](https://github.com/autowarefoundation/auto_e2e#getting-started).
