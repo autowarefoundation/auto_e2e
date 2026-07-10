@@ -1,0 +1,12 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: console-config
+  namespace: console
+data:
+  datasets-bucket: "auto-e2e-platform-datasets-381491877296"
+  artifacts-bucket: "auto-e2e-platform-artifacts-381491877296"
+  # The frontend is served same-origin (NEXT_PUBLIC_API_URL=/api) so CORS is
+  # not exercised on the primary path. Pin it to the CloudFront console origin
+  # for any cross-origin SDK/CLI use; apply.sh substitutes ${CONSOLE_ORIGIN}.
+  cors-origin: "${CONSOLE_ORIGIN}"
