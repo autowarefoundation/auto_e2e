@@ -53,17 +53,30 @@ func main() {
 	r.Use(slogRequestLogger)
 	r.Use(middleware.Recoverer)
 	r.Use(corsMiddleware(cfg.CORSOrigin))
-	r.Use(middleware.Timeout(120 * time.Second))
 
+	// Health endpoints are registered OUTSIDE the throttle/timeout stack: when
+	// 16 tar scans are in flight, kubelet and the ALB health check must still
+	// get an immediate answer, otherwise a throttled probe (429) would restart
+	// the pod / drain the target and amplify an overload into an outage.
 	r.Get("/healthz", healthH.Healthz)
 	r.Get("/readyz", healthH.Readyz)
 
 	r.Route("/api/v1", func(r chi.Router) {
+		// Backpressure scoped to the data API: full-tar scans are expensive, so
+		// bound concurrency (chi Throttle returns 429 on excess) instead of
+		// exhausting memory/S3 connections. Health checks above are exempt.
+		r.Use(middleware.Throttle(16))
+		// Must stay below CloudFront's origin_read_timeout (30s) so clients get
+		// a proper 504 from us instead of CloudFront timing out first.
+		r.Use(middleware.Timeout(25 * time.Second))
+
 		r.Get("/stats", statsH.Get)
 
 		r.Get("/datasets", datasetsH.List)
 		r.Get("/datasets/{name}/shards", datasetsH.ListShards)
+		r.Get("/datasets/{name}/shards/{shard}/index", datasetsH.GetShardIndex)
 		r.Get("/datasets/{name}/shards/{shard}/samples", datasetsH.ListSamples)
+		r.Get("/datasets/{name}/shards/{shard}/samples/{key}", datasetsH.GetSample)
 		r.Get("/datasets/{name}/shards/{shard}/samples/{key}/image/{cam}", datasetsH.GetImage)
 
 		r.Get("/reasoning-labels/stats", reasoningH.Stats)
@@ -82,6 +95,8 @@ func main() {
 		Addr:              ":" + cfg.Port,
 		Handler:           r,
 		ReadHeaderTimeout: 10 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       60 * time.Second,
 	}
 
 	go func() {
