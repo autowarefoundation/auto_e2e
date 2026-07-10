@@ -37,10 +37,17 @@ def init_worker(
     teacher_kwargs: Dict[str, Any],
     cache_bucket: Optional[str],
     prompt_version: str,
+    raw_path: Optional[str] = None,
 ) -> None:
-    """Build this process's dataset, teacher, and cache once (reused per sample)."""
+    """Build this process's dataset, teacher, and cache once (reused per sample).
+
+    The dataset is built in a light-weight FRONT-CLIP mode: it exposes
+    ``get_front_clip(idx) -> [5 x [3,H,W]]`` (front camera at the reasoning
+    horizons) so the worker never decodes the full multi-view WM window. L2D uses
+    lerobot delta_timestamps; NVIDIA uses a sparse front-camera PyAV decode. Both
+    keep the SAME sample enumeration as data_processing so sample_ids JOIN.
+    """
     global _DS, _CLIENT, _CACHE, _DATASET_NAME
-    from data_parsing.l2d import L2DDataset
     from .teacher_client import build_teacher
     from .label_cache import LabelCache
     from .schema import NUM_HORIZONS
@@ -48,9 +55,13 @@ def init_worker(
     global _NUM_HORIZONS
     _NUM_HORIZONS = NUM_HORIZONS
     _DATASET_NAME = dataset_name
-    # WITH world-model windows so enumeration / sample_id matches data_processing.
-    _DS = L2DDataset(repo_id=repo_id, episodes=episodes,
-                     include_world_model_windows=True)
+    if dataset_name == "nvidia/PhysicalAI-Autonomous-Vehicles":
+        from data_parsing.nvidia_physical_ai.dataset import NvidiaAVDataset
+        _DS = NvidiaAVDataset(data_root=raw_path, reasoning_clip_only=True)
+    else:
+        from data_parsing.l2d import L2DDataset
+        _DS = L2DDataset(repo_id=repo_id, episodes=episodes,
+                         reasoning_clip_only=True)
     _CLIENT = build_teacher(teacher, **teacher_kwargs)
     _CACHE = LabelCache(cache_bucket or None, dataset_name, teacher, prompt_version)
 
@@ -63,7 +74,6 @@ def label_sample(si: int) -> Tuple[int, Dict[str, Any], str]:
     record_to_json) so it pickles cleanly back to the parent.
     """
     from .teacher_client import TeacherRequest
-    from .clip_builder import build_temporal_front_clip
     from .targets import record_to_json
 
     sample_key = f"s{si:08d}"
@@ -71,9 +81,7 @@ def label_sample(si: int) -> Tuple[int, Dict[str, Any], str]:
     if cached is not None:
         return si, record_to_json(cached), "hit"
 
-    sample = _DS[si]
-    clip = build_temporal_front_clip(
-        sample.get("history_frames"), sample.get("future_frames"))
+    clip = _DS.get_front_clip(si)  # 5 front frames (0/1/2/3/4 s)
     rec = _CLIENT.label(TeacherRequest(
         sample_id=sample_key, dataset_name=_DATASET_NAME, frames=clip))
     # Only cache SUCCESSFUL labels so a re-run retries abstentions.

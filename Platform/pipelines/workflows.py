@@ -522,11 +522,12 @@ def generate_reasoning_labels(
     teacher: str = "openai_compatible",
     prompt_version: str = "action_relevant_reasoning_v3_temporal_front256",
     cache_bucket: str = REASONING_LABELS_CACHE_BUCKET,
-    # Process-parallel worker count. Memory-bound, NOT cpu-bound: each worker holds
-    # its own dataset + decodes a 1080p WM window (~8x6 frames), so 24 workers
-    # OOM-killed the 32Gi task. 8 fits comfortably (~1.5-2GB each) and still gives
-    # ~8x the serial rate; the ~12s teacher HTTP wait overlaps decode across them.
-    label_workers: int = 8,
+    # Process-parallel worker count. Front-clip mode decodes only 5 front frames
+    # per sample (not the ~48-frame WM window), so memory per worker is small and
+    # we can run many: 24 workers overlap the ~12s teacher HTTP wait and keep the
+    # 10 scaled-out vLLM replicas busy. (Was capped at 8 under the old WM-window
+    # decode which OOM-killed the 32Gi task at 24.)
+    label_workers: int = 24,
 ) -> FlyteDirectory:
     """Label each 1 Hz World-Model sample with a TEMPORAL front-camera clip, then
     write a versioned label artifact for the data_processing JOIN.
@@ -574,29 +575,17 @@ def generate_reasoning_labels(
     print(f"Generating reasoning labels: dataset={dataset.value} split={split} "
           f"teacher={teacher} prompt={prompt_version} raw={raw_path}")
 
-    # Reasoning labels require the 1 Hz World-Model temporal windows. NVIDIA has no
-    # window support yet → emit an empty artifact (data_processing packs it without
-    # reasoning.json, i.e. imitation-only) rather than mislabel single frames.
-    if dataset == Dataset.NVIDIA_PHYSICAL_AI:
-        print("NVIDIA has no World-Model windows yet; skipping reasoning labels "
-              "(empty artifact → imitation-only shards).")
-        out_dir = tempfile.mkdtemp()
-        layout = os.path.join(
-            out_dir, f"dataset={dataset.value}", f"split={split}",
-            "schema_version=reasoning_label_v2", f"teacher={teacher}")
-        os.makedirs(layout, exist_ok=True)
-        write_records_jsonl([], os.path.join(layout, "records.jsonl"))
-        with open(os.path.join(out_dir, "meta.json"), "w") as f:
-            json.dump({"dataset": dataset.value, "split": split, "teacher": teacher,
-                       "prompt_version": prompt_version, "num_records": 0,
-                       "source": "skipped: dataset has no World-Model windows"}, f)
-        return FlyteDirectory(out_dir)
-
-    # WITH WM windows so enumeration/sample_id matches data_processing(world_model=True).
+    # Sample count: build the dataset once (front-clip mode) just to get len().
+    # Enumeration matches data_processing (WM-window sample set) so sample_ids
+    # JOIN; workers rebuild their own front-clip dataset in init_worker.
     ep_list = list(range(episodes)) if episodes > 0 else None
-    from data_parsing.l2d import L2DDataset
-    ds = L2DDataset(repo_id=dataset.value, episodes=ep_list,
-                    include_world_model_windows=True)
+    if dataset == Dataset.NVIDIA_PHYSICAL_AI:
+        from data_parsing.nvidia_physical_ai.dataset import NvidiaAVDataset
+        ds = NvidiaAVDataset(data_root=raw_path, reasoning_clip_only=True)
+    else:
+        from data_parsing.l2d import L2DDataset
+        ds = L2DDataset(repo_id=dataset.value, episodes=ep_list,
+                        reasoning_clip_only=True)
     n_samples = len(ds)
 
     # openai_compatible resolves base_url/model/api_key from the Secret (env
@@ -652,8 +641,10 @@ def generate_reasoning_labels(
     print(f"Labeling {n_samples} samples with {workers} parallel PROCESSES "
           f"(teacher={teacher}, cache_bucket={cache_bucket or '(disabled)'})...")
     ctx = mp.get_context("spawn")
+    # Order MUST match parallel_label.init_worker(repo_id, episodes, dataset_name,
+    # teacher, teacher_kwargs, cache_bucket, prompt_version, raw_path).
     init_args = (dataset.value, ep_list, dataset.value, teacher, teacher_kwargs,
-                 cache_bucket or None, prompt_version)
+                 cache_bucket or None, prompt_version, raw_path)
     results = [None] * n_samples
     n_hit = n_computed = n_abstain = 0
     with ProcessPoolExecutor(
