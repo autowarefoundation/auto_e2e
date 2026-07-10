@@ -272,6 +272,19 @@ def data_processing(
     raw_path = raw_data.download()
     print(f"Processing raw data from: {raw_path} (dataset={dataset.value})")
 
+    # Enforce the sample_id JOIN invariant in CODE (not caller discipline):
+    # reasoning labels are generated over the World-Model enumeration
+    # (include_world_model_windows=True), and len(L2DDataset)/ordering depend on
+    # the WM flag. If reasoning labels are present we MUST enumerate the same
+    # sample set here, or every label would attach to the wrong frame. Today the
+    # WM margins happen to be ≤ the egomotion margins so the sets coincide even
+    # with WM off, but that is fragile arithmetic — force it on so a future window
+    # change can't silently mislabel. (NVIDIA has no WM windows and no labels.)
+    if reasoning_labels is not None and dataset != Dataset.NVIDIA_PHYSICAL_AI and not world_model:
+        print("reasoning_labels present → forcing world_model=True so packing "
+              "enumerates the same sample_ids the labels were generated over.")
+        world_model = True
+
     # Build the appropriate Dataset. Both are RAW pre-extraction sources: they
     # emit unmodified frames (no backbone resize/crop/normalize). The shard packer
     # below owns the single, explicit, geometry-aware resize; the pre-extracted
