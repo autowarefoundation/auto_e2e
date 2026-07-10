@@ -4,10 +4,32 @@
 import json
 import sys
 from pathlib import Path
+import torch
 
+
+def load_current_results(results_dir):
+    """Load JSON files that match the current GPU name."""
+    results_dir = Path(results_dir)
+    gpu_groups = {}
+    current_gpu_name = torch.cuda.get_device_name(0) if torch.cuda.is_available() else "N/A"
+
+    for filepath in sorted(results_dir.glob("*.json")):
+        with open(filepath) as f:
+            data = json.load(f)
+
+        gpu_name = data.get("gpu_name", "Unknown GPU")
+        
+        if gpu_name != current_gpu_name:
+            continue
+        
+        if gpu_name not in gpu_groups:
+            gpu_groups[gpu_name] = []
+        gpu_groups[gpu_name].append(data)
+
+    return gpu_groups
 
 def load_results(results_dir):
-    """Load all JSON result files, grouped by GPU name."""
+    """Load all JSON files and group them by GPU name."""
     results_dir = Path(results_dir)
     gpu_groups = {}
 
@@ -16,6 +38,7 @@ def load_results(results_dir):
             data = json.load(f)
 
         gpu_name = data.get("gpu_name", "Unknown GPU")
+        
         if gpu_name not in gpu_groups:
             gpu_groups[gpu_name] = []
         gpu_groups[gpu_name].append(data)
@@ -38,33 +61,38 @@ def format_metadata_line(data):
 def generate_markdown(gpu_groups):
     """Generate markdown benchmark section."""
     lines = []
-    lines.append("## Benchmark Results\n")
+    lines.append("Simply copy this \u2B07 to BENCHMARKS.md\n")
 
     for gpu_name, runs in gpu_groups.items():
-        lines.append(f"### {gpu_name}\n")
+        lines.append(f"## {gpu_name}\n")
+        lines.append("<details open>")
+        lines.append("  <summary>Toggle view</summary>")
+        lines.append("")
 
         latest = runs[-1]
         lines.append(f"> {format_metadata_line(latest)}\n")
 
         lines.append(
-            "| Backbone | Fusion Mode | Batch | FPS | Latency (ms) "
+            "| Model | Backbone | Fusion Mode | Batch | FPS | Latency (ms) "
             "| p99 (ms) | Jitter (ms) | VRAM (MB) | Params |"
         )
         lines.append(
-            "|----------|-------------|-------|-----|----------"
+            "|----------|----------|-------------|-------|-----|----------"
             "----|----------|-------------|-----------|--------|"
         )
 
         for r in latest["results"]:
             params_m = r["total_params"] / 1_000_000
             lines.append(
-                f"| {r['backbone']} | {r['fusion_mode']} | {r['batch_size']} | "
+                f"| {r['model_type']} | {r['backbone']} | "
+                f"{r['fusion_mode']} | {r['batch_size']} | "
                 f"{r['avg_fps']:.1f} | {r['avg_latency_ms']:.1f} | "
                 f"{r['p99_latency_ms']:.1f} | {r['jitter_ms']:.1f} | "
                 f"{r['peak_vram_allocated_mb']:.0f} | {params_m:.1f}M |"
             )
 
         lines.append("")
+        lines.append("</details>")
 
     return "\n".join(lines)
 
@@ -76,7 +104,7 @@ def main():
         print("Error: results/ directory not found.", file=sys.stderr)
         sys.exit(1)
 
-    gpu_groups = load_results(results_dir)
+    gpu_groups = load_current_results(results_dir)
 
     if not gpu_groups:
         print("Error: no JSON result files found in results/.", file=sys.stderr)
