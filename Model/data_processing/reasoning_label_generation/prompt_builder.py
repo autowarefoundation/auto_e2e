@@ -44,8 +44,15 @@ def build_clip_prompt(
 ) -> str:
     """Prompt asking for all five horizons of action-relevant labels in one JSON."""
     lines = [
-        f"Label a short driving clip of {NUM_HORIZONS} front-camera frames, "
-        "ordered from the current frame (horizon 0 s) to the +4 s future frame.",
+        f"You are given {NUM_HORIZONS} front-camera frames from ONE forward-facing "
+        "camera, sampled at 1 Hz and given in temporal order: frame 1 is the "
+        "current moment (horizon 0 s), frame 2 is +1 s, frame 3 is +2 s, frame 4 "
+        "is +3 s, frame 5 is +4 s.",
+        "Each frame shows what the scene ACTUALLY looks like at that horizon — use "
+        "the change between consecutive frames to reason about motion, other "
+        "agents' intent, cut-ins, stops, and how the situation evolves. Do NOT "
+        "copy the same labels across horizons unless the scene truly is unchanged; "
+        "reflect what each frame shows.",
         "For EACH horizon, choose labels from the categories below.",
         "Single-label groups take exactly one string; multi-label groups take a list.",
         "",
