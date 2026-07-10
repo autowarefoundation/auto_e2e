@@ -228,10 +228,12 @@ def data_ingest(
 # ============================================================
 @task(
     container_image=DATA_PREP_IMAGE,
-    # Downloads raw again + decodes frames (WM windows multiply the decode); size
-    # ephemeral storage for tens of episodes like data_ingest.
-    requests=Resources(cpu="4", mem="16Gi", ephemeral_storage="400Gi"),
-    limits=Resources(ephemeral_storage="450Gi"),
+    # 16 vCPU for the process-parallel pack workers (decode+JPEG across cores;
+    # WM windows = N history + N future x V cams dominate). Memory <= the Flyte
+    # task cap (32Gi); large ephemeral storage holds tens of episodes of raw
+    # video + decoded windows. Karpenter provisions a fitting node.
+    requests=Resources(cpu="16", mem="30Gi", ephemeral_storage="400Gi"),
+    limits=Resources(cpu="16", mem="32Gi", ephemeral_storage="450Gi"),
 )
 def data_processing(
     raw_data: FlyteDirectory,
@@ -265,9 +267,6 @@ def data_processing(
     import json
     import tarfile
     import tempfile
-    import numpy as np
-    import torch
-    from torchvision import transforms
 
     raw_path = raw_data.download()
     print(f"Processing raw data from: {raw_path} (dataset={dataset.value})")
@@ -348,8 +347,6 @@ def data_processing(
          "projection": projection_spec}
     ).encode()
 
-    to_pil = transforms.ToPILImage()
-    resize = transforms.Resize((image_size, image_size))
     out_dir = tempfile.mkdtemp()
     shard_idx = 0
     sample_count = 0
@@ -365,94 +362,56 @@ def data_processing(
 
     open_new_shard()
 
-    def _write_jpeg(sample_key, member, frame_tensor):
-        """Resize a RAW (3,H,W) frame to a JPEG and add it to the current shard.
+    # Decode+JPEG-encode happens in the pack workers (parallel_pack); the parent
+    # only appends the returned byte blobs to the current tar (single-threaded).
+    def _add_member(sample_key, suffix, blob):
+        ti = tarfile.TarInfo(name=f"{sample_key}.{suffix}")
+        ti.size = len(blob)
+        current_tar.addfile(ti, io.BytesIO(blob))
 
-        Input is a raw frame from the (raw-only) dataset:
-        uint8 [0,255] (NVIDIA) or float [0,1] (L2D lerobot). ToPILImage handles
-        both. The Resize here is the SINGLE, explicit, geometry-aware resize to
-        the shard/model-input size; no normalization happens here (the loader
-        does ToTensor+Normalize once). float frames are clamped to [0,1] purely
-        as a safety bound for ToPILImage's *255 scaling.
-        """
-        t = frame_tensor.cpu()
-        if t.dtype.is_floating_point:
-            t = t.clamp(0, 1)
-        f = resize(to_pil(t))
-        b = io.BytesIO()
-        f.save(b, format="JPEG", quality=90)
-        jpg = b.getvalue()
-        ti = tarfile.TarInfo(name=f"{sample_key}.{member}")
-        ti.size = len(jpg)
-        current_tar.addfile(ti, io.BytesIO(jpg))
+    # Process-parallel decode+encode: workers own their own dataset/reader and
+    # return per-sample JPEG/npy bytes; the parent (here) appends them to the tar
+    # in sample order. Decode is the bottleneck (esp. WM windows = N history + N
+    # future x V cams), so parallelizing it across CPU cores turns a ~1-hour
+    # single-core pack into minutes. tar writing stays single-threaded so the
+    # archive is valid. ProcessPoolExecutor.map preserves input order, so shard
+    # boundaries and sample_ids are identical to the serial packer.
+    import multiprocessing as mp
+    from concurrent.futures import ProcessPoolExecutor
+    from data_processing.reasoning_label_generation import parallel_pack
 
-    for si in idx_iter:
-        sample = ds[si]
-        visual = sample["visual_tiles"]            # (V, 3, H, W) real cameras
-        map_tile = sample.get("map_tile")          # (3, H, W) nav-map, if any
-        ego_hist = sample["egomotion_history"]     # (256,)
-        traj = sample["trajectory_target"]         # (128,)
-        ego_data = np.concatenate([
-            ego_hist.numpy() if torch.is_tensor(ego_hist) else np.asarray(ego_hist),
-            traj.numpy() if torch.is_tensor(traj) else np.asarray(traj),
-        ]).astype(np.float32)
-
-        sample_key = f"s{si:08d}"
-        # Real camera views: cam_<i>.jpg (these define V / num_views).
-        for cam_i in range(visual.shape[0]):
-            _write_jpeg(sample_key, f"cam_{cam_i}.jpg", visual[cam_i])
-
-        # Nav-map view: map.jpg, kept as a DISTINCT key so the loader routes it
-        # to the map branch and never counts it as a camera.
-        if map_tile is not None:
-            _write_jpeg(sample_key, "map.jpg", map_tile)
-
-        # World-Model windows (#13): past/future 1 Hz multi-view frames as
-        # hist_{t}_cam_{v}.jpg (oldest→newest, current last) and fut_{f}_cam_{v}.jpg
-        # (JEPA targets). Present only when include_world_model_windows was set.
-        history_win = sample.get("history_frames")   # (T, V, 3, H, W)
-        future_win = sample.get("future_frames")     # (F, V, 3, H, W)
-        if history_win is not None and future_win is not None:
-            for t in range(history_win.shape[0]):
-                for v in range(history_win.shape[1]):
-                    _write_jpeg(sample_key, f"hist_{t}_cam_{v}.jpg", history_win[t, v])
-            for fh in range(future_win.shape[0]):
-                for v in range(future_win.shape[1]):
-                    _write_jpeg(sample_key, f"fut_{fh}_cam_{v}.jpg", future_win[fh, v])
-
-        eb = ego_data.tobytes()
-        info = tarfile.TarInfo(name=f"{sample_key}.ego.npy")
-        info.size = len(eb)
-        current_tar.addfile(info, io.BytesIO(eb))
-
-        m = json.dumps({"idx": si, "dataset": dataset.value}).encode()
-        info = tarfile.TarInfo(name=f"{sample_key}.meta.json")
-        info.size = len(m)
-        current_tar.addfile(info, io.BytesIO(m))
-
-        # Per-sample calibration: the dataset's projection spec + geometry_type,
-        # so a merged loader can resolve geometry per sample without a single
-        # manifest (self-describing shards; the value is a per-dataset constant).
-        info = tarfile.TarInfo(name=f"{sample_key}.calib.json")
-        info.size = len(calib_bytes)
-        current_tar.addfile(info, io.BytesIO(calib_bytes))
-
-        # Per-sample reasoning label (#98): JOIN the frozen record by sample_id
-        # (produced + S3-cached upstream by generate_reasoning_labels). Keyed to
-        # this sample so the loader auto-aligns it with the frames. A sample with
-        # no matching label is packed without reasoning.json (trains imitation-
-        # only for that sample) rather than blocking the whole shard.
-        if _record_to_json is not None:
-            record = labels_by_id.get(sample_key)
-            if record is not None:
-                rb = json.dumps(_record_to_json(record)).encode()
-                info = tarfile.TarInfo(name=f"{sample_key}.reasoning.json")
-                info.size = len(rb)
-                current_tar.addfile(info, io.BytesIO(rb))
-
-        sample_count += 1
-        if sample_count % samples_per_shard == 0:
-            open_new_shard()
+    idx_list = list(idx_iter)
+    pack_workers = max(1, min(16, len(idx_list)))
+    print(f"Packing {len(idx_list)} samples with {pack_workers} parallel processes "
+          f"(world_model={world_model})...")
+    ctx = mp.get_context("spawn")
+    pack_init = (dataset.value, ep_list, raw_path, image_size, world_model, calib_bytes)
+    del ds  # workers build their own; free the parent's handle
+    num_views = 0
+    has_map = False
+    has_wm = False
+    with ProcessPoolExecutor(max_workers=pack_workers, mp_context=ctx,
+                             initializer=parallel_pack.init_pack_worker,
+                             initargs=pack_init) as pool:
+        for si, nviews, members in pool.map(parallel_pack.pack_sample, idx_list):
+            sample_key = f"s{si:08d}"
+            for suffix, blob in members.items():
+                _add_member(sample_key, suffix, blob)
+            num_views = nviews
+            has_map = has_map or ("map.jpg" in members)
+            has_wm = has_wm or any(k.startswith("hist_") for k in members)
+            # Per-sample reasoning label (#98): JOIN the frozen record by
+            # sample_id (produced + S3-cached upstream by
+            # generate_reasoning_labels). A sample with no matching label is
+            # packed without reasoning.json (imitation-only for that sample).
+            if _record_to_json is not None:
+                record = labels_by_id.get(sample_key)
+                if record is not None:
+                    _add_member(sample_key, "reasoning.json",
+                                json.dumps(_record_to_json(record)).encode())
+            sample_count += 1
+            if sample_count % samples_per_shard == 0:
+                open_new_shard()
 
     if current_tar:
         current_tar.close()
@@ -462,11 +421,10 @@ def data_processing(
                 "episodes": episodes,
                 # num_views = real cameras only; the map view is stored under a
                 # separate map.jpg key and is NOT counted here (#77).
-                "num_views": int(visual.shape[0]) if sample_count else 0,
-                "has_map": bool(sample_count) and (map_tile is not None),
+                "num_views": num_views if sample_count else 0,
+                "has_map": bool(sample_count) and has_map,
                 # World-Model windows present when packed (enables JEPA training).
-                "has_world_model": bool(sample_count) and world_model
-                and (sample.get("history_frames") is not None)}
+                "has_world_model": bool(sample_count) and has_wm}
 
     # Manifest also carries the projection spec (computed once above) for the
     # single-dataset loader path; the merged loader uses per-sample calib.json.
