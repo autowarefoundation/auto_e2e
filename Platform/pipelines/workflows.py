@@ -493,23 +493,32 @@ def generate_reasoning_labels(
     episodes: int = 3,
     split: str = "train",
     teacher: str = "openai_compatible",
-    prompt_version: str = "action_relevant_reasoning_v2",
+    prompt_version: str = "action_relevant_reasoning_v3_temporal_front256",
     cache_bucket: str = REASONING_LABELS_CACHE_BUCKET,
 ) -> FlyteDirectory:
-    """Label every sample with the offline teacher, caching each in S3, then
+    """Label each 1 Hz World-Model sample with a TEMPORAL front-camera clip, then
     write a versioned label artifact for the data_processing JOIN.
 
-    The teacher is called at most ONCE per (dataset, teacher, prompt_version,
-    sample) over the dataset's lifetime: :class:`LabelCache` keys each sample in
-    ``s3://<cache_bucket>/reasoning_labels_cache/dataset=/teacher=/prompt_version=/{sample_id}.json``.
-    Re-packing the shards (e.g. a different ``image_size``) re-runs
-    data_processing but hits this cache, so Cosmos is never re-billed. Changing
-    teacher or prompt_version yields a fresh cache prefix (never a stale mix).
+    Reasoning is a 1 Hz, temporal concern: the teacher is shown one FRONT-camera
+    frame per horizon (0 s current + 1/2/3/4 s future = the sample's 1 Hz
+    World-Model window) so it can reason about how the scene evolves (cut-ins,
+    stops, yields) instead of guessing from a single instant with many cameras.
+    Only World-Model samples are labelled — the reactive 10 Hz head takes no
+    reasoning loss, so per-frame 10 Hz labels would be wasted teacher calls.
 
-    Enumeration mirrors data_processing exactly (same parser, ``episodes``, and
-    ``range(len(ds))`` order) so ``sample_id = s{si:08d}`` is the shared JOIN key.
-    We build the dataset WITHOUT world-model windows here — the teacher only
-    needs the camera frames and the sample_ids are identical either way.
+    Because ``len(L2DDataset)`` and the sample ordering DEPEND on
+    ``include_world_model_windows`` (WM needs bigger past/future margins), we build
+    the dataset WITH world-model windows here — identical to how data_processing
+    packs the WM shards — so ``sample_id = s{si:08d}`` is the shared JOIN key. This
+    task therefore REQUIRES a WM-capable dataset (L2D); NVIDIA has no window
+    support yet and is skipped with an empty artifact.
+
+    The teacher is called at most ONCE per (dataset, teacher, prompt_version,
+    sample): :class:`LabelCache` keys each sample in
+    ``s3://<cache_bucket>/reasoning_labels_cache/dataset=/teacher=/prompt_version=/{sample_id}.json``.
+    Changing teacher or prompt_version yields a fresh cache prefix (never a stale
+    mix) — so the temporal-clip / front-only / 256px change ships under a new
+    prompt_version to avoid reusing the old multi-cam single-frame labels.
 
     Returns:
         FlyteDirectory with a whole-record ``records.jsonl`` (the JOIN
@@ -529,21 +538,37 @@ def generate_reasoning_labels(
         write_jsonl, write_parquet,
     )
     from data_processing.reasoning_label_generation.targets import write_records_jsonl
+    from data_processing.reasoning_label_generation.clip_builder import (
+        build_temporal_front_clip,
+    )
 
     raw_path = raw_data.download()
     print(f"Generating reasoning labels: dataset={dataset.value} split={split} "
           f"teacher={teacher} prompt={prompt_version} raw={raw_path}")
 
-    # Same parser + episodes + enumeration order as data_processing → matching
-    # sample_ids (the JOIN key). No WM windows: the teacher only sees cameras.
-    ep_list = list(range(episodes)) if episodes > 0 else None
+    # Reasoning labels require the 1 Hz World-Model temporal windows. NVIDIA has no
+    # window support yet → emit an empty artifact (data_processing packs it without
+    # reasoning.json, i.e. imitation-only) rather than mislabel single frames.
     if dataset == Dataset.NVIDIA_PHYSICAL_AI:
-        from data_parsing.nvidia_physical_ai.dataset import NvidiaAVDataset
-        ds = NvidiaAVDataset(data_root=raw_path)
-    else:
-        from data_parsing.l2d import L2DDataset
-        ds = L2DDataset(repo_id=dataset.value, episodes=ep_list,
-                        include_world_model_windows=False)
+        print("NVIDIA has no World-Model windows yet; skipping reasoning labels "
+              "(empty artifact → imitation-only shards).")
+        out_dir = tempfile.mkdtemp()
+        layout = os.path.join(
+            out_dir, f"dataset={dataset.value}", f"split={split}",
+            "schema_version=reasoning_label_v2", f"teacher={teacher}")
+        os.makedirs(layout, exist_ok=True)
+        write_records_jsonl([], os.path.join(layout, "records.jsonl"))
+        with open(os.path.join(out_dir, "meta.json"), "w") as f:
+            json.dump({"dataset": dataset.value, "split": split, "teacher": teacher,
+                       "prompt_version": prompt_version, "num_records": 0,
+                       "source": "skipped: dataset has no World-Model windows"}, f)
+        return FlyteDirectory(out_dir)
+
+    # WITH WM windows so enumeration/sample_id matches data_processing(world_model=True).
+    ep_list = list(range(episodes)) if episodes > 0 else None
+    from data_parsing.l2d import L2DDataset
+    ds = L2DDataset(repo_id=dataset.value, episodes=ep_list,
+                    include_world_model_windows=True)
     n_samples = len(ds)
 
     # openai_compatible resolves base_url/model/api_key from the Secret (env
@@ -581,13 +606,15 @@ def generate_reasoning_labels(
     records = []
     for si in range(n_samples):
         sample = ds[si]
-        visual = sample["visual_tiles"]  # (V, 3, H, W) real cameras
         sample_key = f"s{si:08d}"
+        # Temporal front-camera clip: one front frame per horizon (0/+1/+2/+3/+4 s)
+        # from the sample's 1 Hz World-Model window. This is what the teacher sees.
+        clip = build_temporal_front_clip(
+            sample.get("history_frames"), sample.get("future_frames"))
 
-        def _compute(sk=sample_key, vis=visual):
+        def _compute(sk=sample_key, frames=clip):
             req = TeacherRequest(
-                sample_id=sk, dataset_name=dataset.value,
-                frames=[vis[c] for c in range(vis.shape[0])],
+                sample_id=sk, dataset_name=dataset.value, frames=frames,
             )
             return client.label(req)
 
@@ -1253,7 +1280,7 @@ def wf_generate_reasoning_labels(
     episodes: int = 3,
     split: str = "train",
     teacher: str = "openai_compatible",
-    prompt_version: str = "action_relevant_reasoning_v2",
+    prompt_version: str = "action_relevant_reasoning_v3_temporal_front256",
 ) -> FlyteDirectory:
     """Label raw samples with the offline teacher (S3-cached) → versioned artifact."""
     return generate_reasoning_labels(
@@ -1276,13 +1303,20 @@ def _pack_with_labels(
 
     A Flyte conditional branch is a single node, so the two-task label→pack chain
     lives in this sub-workflow.
+
+    Reasoning labels are built from the 1 Hz World-Model window (temporal front
+    clip), and ``len(L2DDataset)`` / sample ordering depend on
+    ``include_world_model_windows``. So both generate and data_processing MUST run
+    with world_model=True for the ``sample_id`` JOIN to align — we force it on
+    here (the ``world_model`` arg is ignored on the labelled branch). Training can
+    still ignore the JEPA windows if enable_world_model is off.
     """
     labels = generate_reasoning_labels(
         raw_data=raw, dataset=dataset, episodes=episodes, split="train",
         teacher=teacher, prompt_version=prompt_version)
     return data_processing(
         raw_data=raw, dataset=dataset, episodes=episodes, image_size=image_size,
-        world_model=world_model, reasoning_labels=labels)
+        world_model=True, reasoning_labels=labels)
 
 
 @workflow
@@ -1292,7 +1326,7 @@ def wf_create_dataset(
     image_size: int = 256,
     world_model: bool = False,
     reasoning_teacher: str = "none",
-    prompt_version: str = "action_relevant_reasoning_v2",
+    prompt_version: str = "action_relevant_reasoning_v3_temporal_front256",
 ) -> FlyteDirectory:
     """CreateDataset: raw → ready-to-train WebDataset shards.
 
