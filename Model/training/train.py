@@ -13,21 +13,21 @@ left OFF by default here to save memory and compute. Pass
 ``--enable-future-state`` only to profile the worst-case memory of the full
 forward (e.g. BEV at full resolution); it does NOT add a loss term yet.
 
-The backbone, view-fusion mode, and BEV grid resolution are all constructor
-arguments. ``--backbone`` and ``--fusion-mode`` are validated against the
-component registries (so a newly registered module is selectable without
-touching this file), and ``--bev-h/--bev-w`` size the BEV grid. Mixed precision
-(``--amp``) runs in bf16, which the target GPUs (L40S/A10G/...) support natively
-— no GradScaler needed.
+The backbone and BEV grid resolution are constructor arguments. ``--backbone``
+is validated against the component registry (so a newly registered backbone is
+selectable without touching this file), and ``--bev-h/--bev-w`` size the BEV
+grid. View fusion is no longer selectable: the reactive refactor (PR #94)
+hardcoded BEV fusion inside the model and removed concat/cross_attn. Mixed
+precision (``--amp``) runs in bf16, which the target GPUs (L40S/A10G/...)
+support natively — no GradScaler needed.
 
 Examples
 --------
     # Smoke test: random tensors, no dataset download, reports peak VRAM.
-    python train.py --smoke-test --fusion-mode bev --bev-h 450 --bev-w 300 \
-        --batch-size 4 --amp
+    python train.py --smoke-test --bev-h 450 --bev-w 300 --batch-size 4 --amp
 
-    # Real training on L2D (requires the lerobot package + dataset access).
-    python train.py --fusion-mode concat --batch-size 8 --epochs 10 --amp
+    # Real training on pre-extracted WebDataset shards.
+    python train.py --shard-dir /data/shards --batch-size 8 --epochs 10 --amp
 """
 
 from __future__ import annotations
@@ -39,7 +39,6 @@ import time
 from typing import Any, Iterable
 
 import torch
-from torch.utils.data import DataLoader
 
 # Make Model/ importable so data_parsing and model_components resolve regardless
 # of the current working directory (mirrors inference/run_forward_pass.py).
@@ -48,26 +47,28 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."
 from model_components.auto_e2e import AutoE2E
 from model_components.losses import TrajectoryImitationLoss
 from model_components.backbones import BACKBONE_REGISTRY
-from model_components.view_fusion import FUSION_REGISTRY
+
+# View fusion is no longer selectable (BEV hardcoded in the model, PR #94). Kept
+# as a constant label for MLflow params so runs stay comparable with old ones.
+FUSION_LABEL = "bev"
 
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Minimal AutoE2E training loop")
 
-    # Model. backbone / fusion-mode choices are pulled live from the component
-    # registries, so adding an entry to BACKBONE_REGISTRY or FUSION_REGISTRY
-    # makes it selectable here without editing this file.
+    # Model. backbone choices are pulled live from the component registry, so
+    # adding an entry to BACKBONE_REGISTRY makes it selectable here without
+    # editing this file. Fusion is fixed to BEV (concat/cross_attn removed).
     p.add_argument("--backbone", default="swin_v2_tiny",
                    choices=sorted(BACKBONE_REGISTRY))
-    p.add_argument("--num-views", type=int, default=7,
-                   help="L2D ships 7 camera views (6 surround + 1 map render)")
+    p.add_argument("--num-views", type=int, default=6,
+                   help="Number of real cameras (L2D=6; the nav-map is a "
+                        "separate map branch input, not a camera view)")
     p.add_argument("--embed-dim", type=int, default=256)
-    p.add_argument("--fusion-mode", default="concat",
-                   choices=sorted(FUSION_REGISTRY))
     p.add_argument("--bev-h", type=int, default=450,
-                   help="BEV grid height (bev fusion only)")
+                   help="BEV grid height")
     p.add_argument("--bev-w", type=int, default=300,
-                   help="BEV grid width (bev fusion only)")
+                   help="BEV grid width")
     p.add_argument("--num-timesteps", type=int, default=64)
     p.add_argument("--num-signals", type=int, default=2)
     p.add_argument("--no-pretrained", action="store_true",
@@ -93,20 +94,12 @@ def parse_args() -> argparse.Namespace:
                    help="Mixed precision training in bf16")
     p.add_argument("--device", default="auto", help="auto | cuda | cpu")
 
-    # Data
-    p.add_argument("--repo-id", default="yaak-ai/L2D")
-    p.add_argument("--episodes", type=int, nargs="*", default=None,
-                   help="Subset of episode indices; default = all")
-    p.add_argument("--dataset-backbone-name", default="swinv2_tiny_window8_256",
-                   help="timm name used by L2DDataset to resolve image transforms")
-    p.add_argument("--local-files-only", action="store_true")
+    # Data. Training reads pre-extracted WebDataset shards only (the on-the-fly
+    # lerobot decode path was removed — datasets are raw pre-extraction sources
+    # now; build shards with the Flyte data_processing task or the CLI packer).
     p.add_argument("--num-workers", type=int, default=2)
-    p.add_argument("--dataset-format", default="lerobot",
-                   choices=["lerobot", "pre_extracted"],
-                   help="lerobot: on-the-fly decode (EC2 dev). "
-                        "pre_extracted: WebDataset shards on local disk (EKS prod).")
     p.add_argument("--shard-dir", default=None,
-                   help="Path to WebDataset shards (required for pre_extracted format)")
+                   help="Path to WebDataset shards (required unless --smoke-test)")
 
     # Loop / logging
     p.add_argument("--log-interval", type=int, default=10)
@@ -117,11 +110,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--register-model", action="store_true",
                    help="Register final checkpoint in MLflow Model Registry")
     p.add_argument("--dataset", default=None,
-                   help="Dataset name for MLflow tagging (defaults to --repo-id)")
+                   help="Dataset name for MLflow tagging")
 
     # Smoke test
     p.add_argument("--smoke-test", action="store_true",
-                   help="Train on random tensors (no lerobot/dataset). Reports peak VRAM.")
+                   help="Train on random tensors (no shards/dataset). Reports peak VRAM.")
     p.add_argument("--smoke-steps", type=int, default=5)
 
     return p.parse_args()
@@ -149,33 +142,19 @@ def build_model(args: argparse.Namespace, device: torch.device) -> AutoE2E:
     return model.to(device)
 
 
-def build_dataloader(args: argparse.Namespace) -> DataLoader:
-    if args.dataset_format == "pre_extracted":
-        from data_parsing.pre_extracted import make_pre_extracted_loader
-        if not args.shard_dir:
-            raise ValueError("--shard-dir required for pre_extracted format")
-        return make_pre_extracted_loader(
-            shard_dir=args.shard_dir,
-            batch_size=args.batch_size,
-            num_workers=args.num_workers,
-        )
+def build_dataloader(args: argparse.Namespace):
+    """Build the pre-extracted WebDataset loader (the only training data path).
 
-    # Default: lerobot on-the-fly decode
-    from data_parsing.l2d import L2DDataset
-
-    dataset = L2DDataset(
-        repo_id=args.repo_id,
-        episodes=args.episodes,
-        backbone_name=args.dataset_backbone_name,
-        local_files_only=args.local_files_only,
-    )
-    return DataLoader(
-        dataset,
+    The loader yields model-ready tensors (ToTensor+Normalize applied once) and
+    carries the per-dataset projection operator on .projection/.geometry_type.
+    """
+    from data_parsing.pre_extracted import make_pre_extracted_loader
+    if not args.shard_dir:
+        raise ValueError("--shard-dir is required (pre-extracted shards).")
+    return make_pre_extracted_loader(
+        shard_dir=args.shard_dir,
         batch_size=args.batch_size,
-        shuffle=True,
         num_workers=args.num_workers,
-        pin_memory=(args.device != "cpu"),
-        drop_last=True,
     )
 
 
@@ -184,6 +163,7 @@ def make_smoke_batch(args: argparse.Namespace, device: torch.device) -> dict:
     B, V = args.batch_size, args.num_views
     return {
         "visual_tiles": torch.randn(B, V, 3, 256, 256, device=device),
+        "map_input": torch.randn(B, 3, 256, 256, device=device),
         "visual_history": torch.randn(B, 896, device=device),
         "egomotion_history": torch.randn(B, 256, device=device),
         "trajectory_target": torch.randn(
@@ -234,7 +214,7 @@ def run_training(args: argparse.Namespace) -> None:
             capture_output=True, text=True, cwd="/workspace"
         ).stdout.strip() or "unknown"
 
-        run_name = f"{args.backbone}-{args.fusion_mode}-e{args.epochs}"
+        run_name = f"{args.backbone}-{FUSION_LABEL}-e{args.epochs}"
         mlflow.start_run(run_name=run_name)
 
         # Tags
@@ -248,7 +228,7 @@ def run_training(args: argparse.Namespace) -> None:
         mlflow.log_params({
             # Model architecture
             "model/backbone": args.backbone,
-            "model/fusion_mode": args.fusion_mode,
+            "model/fusion_mode": FUSION_LABEL,
             "model/num_timesteps": args.num_timesteps,
             "model/num_signals": args.num_signals,
             # Training hyperparams
@@ -261,17 +241,16 @@ def run_training(args: argparse.Namespace) -> None:
             "train/grad_clip": args.grad_clip,
             "train/loss_type": args.loss_type,
             # Data
-            "data/dataset": args.dataset or args.repo_id or "unknown",
+            "data/dataset": args.dataset or "unknown",
             "data/shard_dir": args.shard_dir or "",
-            "data/format": args.dataset_format,
+            "data/format": "pre_extracted",
             # Reproducibility
             "git_commit": git_commit,
         })
 
-    print(f"device={device} | backbone={args.backbone} | fusion={args.fusion_mode} | "
+    print(f"device={device} | backbone={args.backbone} | fusion={FUSION_LABEL} | "
           f"amp={'bf16' if use_amp else 'off'}")
-    if args.fusion_mode == "bev":
-        print(f"BEV grid = {args.bev_h}x{args.bev_w}")
+    print(f"BEV grid = {args.bev_h}x{args.bev_w}")
 
     model = build_model(args, device)
     model.train()
@@ -286,12 +265,16 @@ def run_training(args: argparse.Namespace) -> None:
         num_signals=args.num_signals,
     ).to(device)
 
-    # mode="train" activates FutureState; any other value skips it (see AutoE2E).
+    # NOTE: the reactive refactor (PR #94) stopped calling FutureState in the
+    # forward pass, so mode no longer toggles it (the JEPA path is not wired up
+    # yet — see #13). `mode` is still threaded through for forward-compat but is
+    # currently inert; --enable-future-state has no effect until JEPA is wired.
     forward_mode = "train" if args.enable_future_state else "eval"
 
-    # camera_params stays None: concat/cross_attn ignore it, and BEV falls back to
-    # its learnable pseudo_projection. Real L2D calibration is future work.
-    camera_params = None
+    # Geometry: the pre-extracted loader exposes a per-dataset projection operator
+    # (.projection/.geometry_type); the smoke path runs the explicit pseudo path.
+    projection = None
+    geometry_type = "pseudo"
 
     batches: Iterable[Any]
     if args.smoke_test:
@@ -302,6 +285,11 @@ def run_training(args: argparse.Namespace) -> None:
         loader = build_dataloader(args)
         batches = loader
         epochs = args.epochs
+        projection = getattr(loader, "projection", None)
+        geometry_type = getattr(loader, "geometry_type", "pseudo")
+        if projection is not None:
+            projection = projection.to(device)
+        print(f"Geometry: {geometry_type} (projection={'real' if projection else 'pseudo'})")
         if hasattr(loader, 'dataset') and hasattr(loader.dataset, '__len__'):
             print(f"Dataset: {len(loader.dataset)} samples, {len(loader)} batches/epoch")
         else:
@@ -317,14 +305,26 @@ def run_training(args: argparse.Namespace) -> None:
             batch = move_batch(batch, device)
             optimizer.zero_grad(set_to_none=True)
 
+            # The model owns a map branch. The pre-extracted loader (and the
+            # smoke batch) emit "map_input"; fall back to zeros only if absent
+            # (MapBEVFusion is a residual gate at alpha=0 → no early effect).
+            visual_tiles = batch["visual_tiles"]
+            map_input = batch.get("map_input")
+            if map_input is None:
+                map_input = torch.zeros(visual_tiles.shape[0], 3, 256, 256, device=device)
+
             with torch.autocast(device_type=device.type, dtype=torch.bfloat16,
                                 enabled=use_amp):
-                trajectory, _ego_hidden, _future = model(
-                    batch["visual_tiles"],
+                # forward returns ONLY the trajectory now (was a 3-tuple, PR #94).
+                trajectory = model(
+                    visual_tiles,
+                    map_input,
                     batch["visual_history"],
                     batch["egomotion_history"],
-                    camera_params=camera_params,
+                    projection=projection,
+                    geometry_type=geometry_type,
                     mode=forward_mode,
+                    trajectory_target=batch["trajectory_target"],
                 )
                 loss = loss_fn(trajectory, batch["trajectory_target"])
 

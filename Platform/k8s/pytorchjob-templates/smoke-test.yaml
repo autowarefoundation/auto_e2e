@@ -36,8 +36,6 @@ spec:
               imagePullPolicy: Always
               args:
                 - "--smoke-test"
-                - "--fusion-mode"
-                - "concat"
                 - "--batch-size"
                 - "4"
                 - "--amp"

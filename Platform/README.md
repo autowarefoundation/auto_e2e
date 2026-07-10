@@ -124,7 +124,7 @@ S3 Shards → PyTorchJob (Kueue managed) → GPU g6e.4xlarge → MLflow
 
 - **Kueue**: GPU quota management, priority-based admission
 - **Training Operator**: PyTorchJob CRD → Pod with `nvidia.com/gpu` request
-- **Model**: VisionPilot (SwinV2 Tiny + concat fusion)
+- **Model**: AutoE2E (SwinV2 Tiny + BEV fusion)
 - **Output**: Checkpoint (S3) + metrics (MLflow)
 - `runPolicy.suspend: true` enables Kueue admission control
 

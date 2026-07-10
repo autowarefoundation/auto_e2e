@@ -1,4 +1,32 @@
 from .bev_fusion import BEVViewFusion
+from .projection import (
+    GEOMETRY_FTHETA,
+    GEOMETRY_PINHOLE,
+    GEOMETRY_PSEUDO,
+    GEOMETRY_RECTIFIED_PINHOLE,
+    VALID_GEOMETRY_TYPES,
+    FThetaProjection,
+    PinholeProjection,
+    ProjectionResult,
+    PseudoProjection,
+)
+
+# Re-exported public API (projection operators + geometry labels). Declared in
+# __all__ so linters treat these imports as intentional re-exports, not unused.
+__all__ = [
+    "BEVViewFusion",
+    "FUSION_REGISTRY",
+    "build_view_fusion",
+    "ProjectionResult",
+    "PinholeProjection",
+    "PseudoProjection",
+    "FThetaProjection",
+    "GEOMETRY_PINHOLE",
+    "GEOMETRY_RECTIFIED_PINHOLE",
+    "GEOMETRY_FTHETA",
+    "GEOMETRY_PSEUDO",
+    "VALID_GEOMETRY_TYPES",
+]
 
 FUSION_REGISTRY = {
     "bev": BEVViewFusion,
