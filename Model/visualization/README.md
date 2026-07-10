@@ -8,7 +8,7 @@ This is implemented as a class. It contains 3 key functions:
 Function | `render_trajectory_map_tile` | `render_trajectory_on_a_grid` | `complete_front_camera_view_with_trajectory`
 -----|:----:|:---:|:---:
 View | Top-Down Map View | Grid View | Front Camera View
-Outputs | <img src="L2D_visualization/generated_images/visualization_result_map.png" alt="Top-Down Map View" height="100"> | <img src="L2D_visualization/generated_images/visualization_result_grid.png" alt="Grid View" height="100"> | <img src="L2D_visualization/generated_images/visualization_result_cam.png" alt="Front Camera View" height="100">
+Outputs | <img src="Kit_Scenes_visualization/generated_images/visualization_result_map.png" alt="Top-Down Map View" height="100"> | <img src="L2D_visualization/generated_images/visualization_result_grid.png" alt="Grid View" height="100"> | <img src="Kit_Scenes_visualization/generated_images/visualization_result_cam.png" alt="Front Camera View" height="100">
 Description | The top-down bird's eye view of the map tile with the drawn trajectory. | A 2D metric grid with the drawn trajectory. | A camera view with the perspective-correct 3D footprint trajectory drawn.
 
 All the visualization is done using OpenCV, which should *theoretically* allow for effective video generation.
