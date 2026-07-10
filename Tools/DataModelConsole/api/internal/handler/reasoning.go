@@ -50,8 +50,15 @@ func (h *ReasoningHandler) GetLabel(w http.ResponseWriter, r *http.Request) {
 
 	teacher := r.URL.Query().Get("teacher")
 	promptVersion := r.URL.Query().Get("prompt_version")
+	// These land in the S3 key template; reject path-traversal characters the
+	// same way dataset/sample_id are validated above.
+	if strings.ContainsAny(teacher, "/\\") || strings.Contains(teacher, "..") ||
+		strings.ContainsAny(promptVersion, "/\\") || strings.Contains(promptVersion, "..") {
+		writeError(w, http.StatusBadRequest, model.CodeInvalidParam, "invalid teacher or prompt_version")
+		return
+	}
 
-	body, key, err := h.s3.GetReasoningLabel(r.Context(), dataset, sampleID, teacher, promptVersion)
+	body, _, err := h.s3.GetReasoningLabel(r.Context(), dataset, sampleID, teacher, promptVersion)
 	if err != nil {
 		if errors.Is(err, service.ErrNotFound) {
 			writeError(w, http.StatusNotFound, model.CodeNotFound,
@@ -63,7 +70,7 @@ func (h *ReasoningHandler) GetLabel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Label files are JSON; pass through verbatim, exposing the source key.
-	w.Header().Set("X-S3-Key", key)
+	// Label files are JSON; pass through verbatim. The source S3 key is
+	// intentionally NOT exposed (bucket layout disclosure).
 	writeRawJSON(w, http.StatusOK, body)
 }

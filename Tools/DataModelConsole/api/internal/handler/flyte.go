@@ -33,8 +33,29 @@ func (h *FlyteHandler) Executions(w http.ResponseWriter, r *http.Request) {
 // Execution handles GET /api/v1/flyte/executions/{id}.
 func (h *FlyteHandler) Execution(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
+	// The id is interpolated into the upstream Flyte Admin path; reject
+	// anything that could escape the project/domain scope (path injection).
+	if !validFlyteExecutionID(id) {
+		writeError(w, http.StatusBadRequest, model.CodeInvalidParam, "invalid execution id")
+		return
+	}
 	res, err := h.svc.GetExecution(r.Context(), id)
 	h.relay(w, res, err, "flyte execution get")
+}
+
+// validFlyteExecutionID accepts only Flyte-generated execution names:
+// non-empty lowercase alphanumerics and hyphens. This excludes '/', '\\' and
+// ".." by construction, so the id cannot traverse the upstream URL path.
+func validFlyteExecutionID(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, c := range s {
+		if (c < 'a' || c > 'z') && (c < '0' || c > '9') && c != '-' {
+			return false
+		}
+	}
+	return true
 }
 
 // relay forwards the upstream JSON response, or a 502 on transport failure.

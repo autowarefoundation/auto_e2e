@@ -3,6 +3,7 @@ package handler
 import (
 	"log/slog"
 	"net/http"
+	"strings"
 
 	"github.com/go-chi/chi/v5"
 
@@ -30,6 +31,10 @@ func (h *MLflowHandler) Experiments(w http.ResponseWriter, r *http.Request) {
 // Runs handles GET /api/v1/mlflow/experiments/{id}/runs.
 func (h *MLflowHandler) Runs(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
+	if !safeUpstreamID(id) {
+		writeError(w, http.StatusBadRequest, model.CodeInvalidParam, "invalid experiment id")
+		return
+	}
 	res, err := h.svc.SearchRuns(r.Context(), id,
 		r.URL.Query().Get("max_results"), r.URL.Query().Get("page_token"))
 	h.relay(w, res, err, "mlflow runs search")
@@ -38,8 +43,19 @@ func (h *MLflowHandler) Runs(w http.ResponseWriter, r *http.Request) {
 // Run handles GET /api/v1/mlflow/runs/{id}.
 func (h *MLflowHandler) Run(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
+	if !safeUpstreamID(id) {
+		writeError(w, http.StatusBadRequest, model.CodeInvalidParam, "invalid run id")
+		return
+	}
 	res, err := h.svc.GetRun(r.Context(), id)
 	h.relay(w, res, err, "mlflow run get")
+}
+
+// safeUpstreamID rejects ids that could act as path components upstream
+// (defense in depth: MLflow ids currently travel as query/body values, but
+// keep them from ever traversing a URL path).
+func safeUpstreamID(s string) bool {
+	return s != "" && !strings.ContainsAny(s, "/\\") && !strings.Contains(s, "..")
 }
 
 // Models handles GET /api/v1/mlflow/models.
