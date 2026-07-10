@@ -607,6 +607,12 @@ def generate_reasoning_labels(
         if api_key:
             teacher_kwargs["api_key"] = api_key
     teacher_kwargs["prompt_version"] = prompt_version
+    # strict=False for bulk offline labeling: a single sample whose response the
+    # model returns malformed / with <5 horizons becomes an ABSTAINED record
+    # (masked out of the reasoning loss, R9) instead of raising and killing the
+    # whole 1000+-sample run. meta.json reports num_abstained so a systematically
+    # high rate (bad prompt/model) is still visible.
+    teacher_kwargs["strict"] = False
     client = build_teacher(teacher, **teacher_kwargs)
 
     cache = LabelCache(cache_bucket or None, dataset.value, teacher, prompt_version)
@@ -638,7 +644,10 @@ def generate_reasoning_labels(
                 sample.get("history_frames"), sample.get("future_frames"))
         rec = client.label(TeacherRequest(
             sample_id=sample_key, dataset_name=dataset.value, frames=clip))
-        cache.put(sample_key, rec)
+        # Only cache SUCCESSFUL labels: caching an abstention would make a later
+        # re-run reuse the failure instead of re-asking the teacher for it.
+        if not rec.abstained:
+            cache.put(sample_key, rec)
         return si, rec
 
     workers = max(1, min(label_workers, n_samples))
@@ -647,9 +656,18 @@ def generate_reasoning_labels(
         for si, rec in pool.map(_label_one, range(n_samples)):
             results[si] = rec
     records = results
+    n_abstain = sum(1 for r in records if r.abstained)
     print(f"Labeled {len(records)} samples "
           f"(cache hits={cache.hits}, misses/computed={cache.misses}, "
-          f"cache_write_errors={cache.put_errors})")
+          f"cache_write_errors={cache.put_errors}, abstained={n_abstain})")
+    # A few abstentions (malformed teacher JSON) are fine — they are masked out of
+    # the reasoning loss. A HIGH rate means a systemic prompt/model problem, so
+    # fail loudly rather than silently shipping a mostly-unlabeled dataset.
+    if records and n_abstain > 0.5 * len(records):
+        raise RuntimeError(
+            f"{n_abstain}/{len(records)} samples abstained (>50%) — the teacher "
+            f"is failing systematically (prompt/model/endpoint), not just on a few "
+            f"hard frames. Aborting so the problem is fixed rather than masked.")
     if cache.put_errors:
         print("WARN: label cache writes failed (see first WARN above); labels "
               "were still generated + returned, but the teacher will be re-billed "
