@@ -13,7 +13,7 @@ from model_components.auto_e2e import AutoE2E
 from model_components.view_fusion import PinholeProjection
 
 
-def run_speed_benchmark(backbone, device, batch_size=1, num_views=7):
+def run_speed_benchmark(backbone, device, batch_size=1, num_views=7, enable_world_model=False):
 
     model_type = "Combined" if enable_world_model else "Reactive"
     print(f"{'='*80}")
