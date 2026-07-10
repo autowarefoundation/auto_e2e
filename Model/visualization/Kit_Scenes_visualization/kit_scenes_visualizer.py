@@ -201,11 +201,9 @@ def forward_pass_for_visualization_test(
     
     # visualization/trajectory_rendering.py assumes input points to P are in RDF (Right, Down, Forward)
     # KIT Scenes reference frame is FLU (Forward, Left, Up).
-    # Since Z=0 is floating above the camera, the reference frame is likely on the roof (IMU).
-    # We can anchor the trajectory to the ground by finding the camera's Z height in the reference frame,
-    # and assuming the camera is ~1.5m above the ground.
-    camera_z_in_ref = calib.extrinsic[2, 3]
-    z_ground = camera_z_in_ref - 1.5
+    # The reference coordinate system is the top lidar, which is ~2.1m above the ground.
+    # Therefore, the ground level in the reference frame is at Z = -2.1.
+    z_ground = -2.1
     
     T_RDF_to_FLU = np.array([
         [ 0,  0,  1,  0],        # Forward = Z_RDF
@@ -239,7 +237,7 @@ if __name__ == "__main__":
         os.makedirs(save_dir, exist_ok=True)
         
         save_path_map = os.path.join(save_dir, "visualization_result_map.png")
-        save_path_grid = os.path.join(save_dir, "visualization_result_grid.png")
+        save_path_grid = os.path.join(save_dir, "visualization_result_cam.png")
         
         cv2.imwrite(save_path_map, combined_image)
         cv2.imwrite(save_path_grid, camera_and_grid)
