@@ -65,6 +65,42 @@ func TestSampleKeyOf(t *testing.T) {
 	}
 }
 
+func TestCacheDataset(t *testing.T) {
+	tests := []struct{ in, want string }{
+		{"nvidia_av", "nvidia_PhysicalAI-Autonomous-Vehicles"},
+		{"l2d", "yaak-ai_L2D"},
+		{"nvidia_PhysicalAI-Autonomous-Vehicles", "nvidia_PhysicalAI-Autonomous-Vehicles"}, // already a partition name
+		{"unknown", "unknown"},
+	}
+	for _, tt := range tests {
+		if got := cacheDataset(tt.in); got != tt.want {
+			t.Errorf("cacheDataset(%q) = %q, want %q", tt.in, got, tt.want)
+		}
+	}
+}
+
+func TestCacheSampleID(t *testing.T) {
+	tests := []struct {
+		in     string
+		want   string
+		wantOK bool
+	}{
+		{"25cd4769_000000", "s00000000", true}, // nvidia hash-prefixed -> flat index
+		{"25cd4769_000012", "s00000012", true},
+		{"ep0_000064", "s00000064", true}, // L2D episode-prefixed
+		{"s00000000", "s00000000", true},  // already flat: passthrough
+		{"s00000123", "s00000123", true},
+		{"totally_garbage", "", false}, // underscore, non-numeric suffix -> not a frame key
+		{"hello", "", false},           // no underscore, not s<digits> -> not a frame key
+	}
+	for _, tt := range tests {
+		got, ok := cacheSampleID(tt.in)
+		if got != tt.want || ok != tt.wantOK {
+			t.Errorf("cacheSampleID(%q) = (%q, %v), want (%q, %v)", tt.in, got, ok, tt.want, tt.wantOK)
+		}
+	}
+}
+
 func TestParseReasoningKey(t *testing.T) {
 	tests := []struct {
 		name        string
