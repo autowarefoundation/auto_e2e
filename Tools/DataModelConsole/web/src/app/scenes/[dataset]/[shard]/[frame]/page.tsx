@@ -144,6 +144,7 @@ function PlayerPageInner({
       ) : (
         <EpisodePlayer
           dataset={dataset}
+          shard={shard}
           index={data}
           initialState={initialState.current}
           onViewStateChange={onViewStateChange}
