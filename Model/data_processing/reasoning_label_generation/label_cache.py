@@ -79,13 +79,16 @@ class LabelCache:
         try:
             obj = self._s3().get_object(Bucket=self.bucket, Key=self._key(sample_id))
             payload = json.loads(obj["Body"].read().decode("utf-8"))
-            self.hits += 1
-            return record_from_json(payload)
+            record = record_from_json(payload)   # deserialize BEFORE counting a hit
         except Exception:
-            # Miss (NoSuchKey) or any read error → recompute; never serve a
-            # partial/corrupt cache entry.
+            # Miss (NoSuchKey) or any read/deserialize error → recompute; never
+            # serve a partial/corrupt cache entry. A deserialize failure (e.g. a
+            # schema change under an unchanged prompt_version) counts as ONE miss,
+            # not a hit+miss double-count, and is recomputed rather than swallowed.
             self.misses += 1
             return None
+        self.hits += 1
+        return record
 
     def put(self, sample_id: str, record: ReasoningLabelRecord) -> None:
         """Persist ``record`` for ``sample_id`` (no-op if caching disabled).
