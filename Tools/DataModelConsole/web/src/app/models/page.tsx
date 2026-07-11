@@ -1,6 +1,7 @@
 "use client";
 
-import { useState } from "react";
+import { Suspense, useCallback, useState } from "react";
+import { useSearchParams } from "next/navigation";
 import { Boxes } from "lucide-react";
 
 import { ErrorState } from "@/components/error-state";
@@ -26,11 +27,22 @@ import { listExperiments, listRuns } from "@/lib/api";
 import {
   formatDuration,
   formatEpochMillis,
+  formatMeters,
   formatMetric,
   formatNumber,
 } from "@/lib/format";
 
 const METRIC_COLUMNS = ["train/loss", "eval/ade", "eval/fde"] as const;
+
+// Human-readable expansions + meter-formatting for displacement-error metrics.
+const METRIC_META: Record<
+  (typeof METRIC_COLUMNS)[number],
+  { title: string; meters: boolean }
+> = {
+  "train/loss": { title: "Training loss", meters: false },
+  "eval/ade": { title: "Average Displacement Error (meters)", meters: true },
+  "eval/fde": { title: "Final Displacement Error (meters)", meters: true },
+};
 
 function RunsTable({ experimentId }: { experimentId: string }) {
   const { data, error, loading, reload } = useApi(
@@ -38,7 +50,7 @@ function RunsTable({ experimentId }: { experimentId: string }) {
     [experimentId],
   );
 
-  if (error) return <ErrorState error={error} onRetry={reload} />;
+  if (error) return <ErrorState error={error} onRetry={reload} service="MLflow" />;
   if (loading) {
     return (
       <div className="space-y-2">
@@ -58,7 +70,12 @@ function RunsTable({ experimentId }: { experimentId: string }) {
           <TableHead>Started</TableHead>
           <TableHead className="text-right">Duration</TableHead>
           {METRIC_COLUMNS.map((m) => (
-            <TableHead key={m} className="text-right font-mono text-[11px]">
+            <TableHead
+              key={m}
+              className="text-right font-mono text-[11px]"
+              title={METRIC_META[m].title}
+              aria-label={METRIC_META[m].title}
+            >
               {m}
             </TableHead>
           ))}
@@ -91,7 +108,9 @@ function RunsTable({ experimentId }: { experimentId: string }) {
             </TableCell>
             {METRIC_COLUMNS.map((m) => (
               <TableCell key={m} className="text-right font-mono text-xs">
-                {formatMetric(run.metrics?.[m])}
+                {METRIC_META[m].meters
+                  ? formatMeters(run.metrics?.[m])
+                  : formatMetric(run.metrics?.[m])}
               </TableCell>
             ))}
           </TableRow>
@@ -111,9 +130,22 @@ function RunsTable({ experimentId }: { experimentId: string }) {
   );
 }
 
-export default function ModelsPage() {
+function ModelsPageInner() {
   const { data, error, loading, reload } = useApi(listExperiments);
-  const [selected, setSelected] = useState<string | null>(null);
+  const searchParams = useSearchParams();
+  const [selected, setSelected] = useState<string | null>(
+    () => searchParams.get("experiment"),
+  );
+
+  // Mirror the selected experiment into ?experiment=<id> so the selection
+  // survives reload/back and is shareable. history.replaceState avoids a Next
+  // route transition (no data refetch on select).
+  const selectExperiment = useCallback((id: string) => {
+    setSelected(id);
+    const q = new URLSearchParams(window.location.search);
+    q.set("experiment", id);
+    window.history.replaceState(null, "", `/models?${q.toString()}`);
+  }, []);
 
   return (
     <div className="space-y-6">
@@ -125,7 +157,7 @@ export default function ModelsPage() {
       </div>
 
       {error ? (
-        <ErrorState error={error} onRetry={reload} />
+        <ErrorState error={error} onRetry={reload} service="MLflow" />
       ) : loading ? (
         <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
           {Array.from({ length: 2 }).map((_, i) => (
@@ -138,7 +170,7 @@ export default function ModelsPage() {
             <button
               key={exp.experiment_id}
               type="button"
-              onClick={() => setSelected(exp.experiment_id)}
+              onClick={() => selectExperiment(exp.experiment_id)}
               className="text-left"
             >
               <Card
@@ -188,5 +220,14 @@ export default function ModelsPage() {
         </Card>
       )}
     </div>
+  );
+}
+
+export default function ModelsPage() {
+  // useSearchParams (in ModelsPageInner) must be under a Suspense boundary.
+  return (
+    <Suspense fallback={<Skeleton className="h-96 w-full" />}>
+      <ModelsPageInner />
+    </Suspense>
   );
 }

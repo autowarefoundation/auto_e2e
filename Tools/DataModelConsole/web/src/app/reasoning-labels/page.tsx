@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Search } from "lucide-react";
 
 import { ErrorState } from "@/components/error-state";
@@ -23,7 +23,7 @@ import {
 } from "@/components/ui/table";
 import { useApi } from "@/hooks/use-api";
 import { getReasoningLabel, getReasoningLabelStats } from "@/lib/api";
-import { formatNumber } from "@/lib/format";
+import { formatNumber, friendlyDataset } from "@/lib/format";
 import type { ReasoningLabelRecord, ReasoningStatsEntry } from "@/types";
 
 // The API returns flat {entries:[{dataset,teacher,prompt_version,count}]};
@@ -49,11 +49,11 @@ function StatsTable({
 }) {
   const rows = Object.entries(entries).sort((a, b) => b[1] - a[1]);
   return (
-    <Card className="border-slate-800 bg-slate-950/50">
+    <Card className="min-w-0 border-slate-800 bg-slate-950/50">
       <CardHeader>
         <CardTitle className="text-sm">{title}</CardTitle>
       </CardHeader>
-      <CardContent>
+      <CardContent className="overflow-x-auto">
         <Table>
           <TableHeader>
             <TableRow>
@@ -64,8 +64,13 @@ function StatsTable({
           <TableBody>
             {rows.map(([k, v]) => (
               <TableRow key={k}>
-                <TableCell className="font-mono text-xs">{k}</TableCell>
-                <TableCell className="text-right font-mono text-xs">
+                <TableCell
+                  className="max-w-[180px] truncate font-mono text-xs"
+                  title={k}
+                >
+                  {k}
+                </TableCell>
+                <TableCell className="whitespace-nowrap text-right font-mono text-xs">
                   {formatNumber(v)}
                 </TableCell>
               </TableRow>
@@ -90,7 +95,7 @@ function StatsTable({
 export default function ReasoningLabelsPage() {
   const stats = useApi(getReasoningLabelStats);
 
-  const [dataset, setDataset] = useState("l2d");
+  const [dataset, setDataset] = useState("");
   const [sampleId, setSampleId] = useState("");
   const [label, setLabel] = useState<ReasoningLabelRecord | null>(null);
   const [searchError, setSearchError] = useState<Error | null>(null);
@@ -98,7 +103,7 @@ export default function ReasoningLabelsPage() {
 
   const entries = useMemo(() => stats.data?.entries ?? [], [stats.data]);
   const byDataset = useMemo(
-    () => groupCounts(entries, (e) => e.dataset),
+    () => groupCounts(entries, (e) => friendlyDataset(e.dataset)),
     [entries],
   );
   const byTeacher = useMemo(
@@ -109,6 +114,19 @@ export default function ReasoningLabelsPage() {
     () => groupCounts(entries, (e) => e.prompt_version),
     [entries],
   );
+
+  // Inspector dataset options come from the real cache partitions (so the
+  // dropdown matches what actually exists), defaulting to the first.
+  const datasetOptions = useMemo(
+    () => Array.from(new Set(entries.map((e) => e.dataset))),
+    [entries],
+  );
+  useEffect(() => {
+    if (datasetOptions.length && !datasetOptions.includes(dataset)) {
+      setDataset(datasetOptions[0]);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [datasetOptions]);
 
   async function onSearch(e: React.FormEvent) {
     e.preventDefault();
@@ -174,14 +192,17 @@ export default function ReasoningLabelsPage() {
               className="h-9 rounded-md border border-slate-700 bg-slate-900 px-3 text-sm"
               aria-label="Dataset"
             >
-              <option value="l2d">l2d</option>
-              <option value="nvidia_av">nvidia_av</option>
-              <option value="mock">mock</option>
+              {datasetOptions.length === 0 && <option value="">—</option>}
+              {datasetOptions.map((d) => (
+                <option key={d} value={d}>
+                  {friendlyDataset(d)}
+                </option>
+              ))}
             </select>
             <input
               value={sampleId}
               onChange={(e) => setSampleId(e.target.value)}
-              placeholder="sample_id (e.g. ep0_000064)"
+              placeholder="sample_id (e.g. s00000000)"
               className="h-9 w-72 rounded-md border border-slate-700 bg-slate-900 px-3 font-mono text-sm placeholder:text-slate-600"
             />
             <Button type="submit" size="sm" disabled={searching}>

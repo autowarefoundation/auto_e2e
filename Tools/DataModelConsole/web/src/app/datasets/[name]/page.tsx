@@ -1,9 +1,10 @@
 "use client";
 
 import Link from "next/link";
-import { use } from "react";
+import { use, useCallback, useEffect, useState } from "react";
 
 import { ErrorState } from "@/components/error-state";
+import { Button } from "@/components/ui/button";
 import {
   Card,
   CardContent,
@@ -22,6 +23,9 @@ import {
 import { useApi } from "@/hooks/use-api";
 import { listShards } from "@/lib/api";
 import { formatBytes, formatTimestamp } from "@/lib/format";
+import type { Shard } from "@/types";
+
+const PAGE_SIZE = 50;
 
 export default function DatasetDetailPage({
   params,
@@ -31,11 +35,38 @@ export default function DatasetDetailPage({
   const { name } = use(params);
   const dataset = decodeURIComponent(name);
   const { data, error, loading, reload } = useApi(
-    () => listShards(dataset),
+    () => listShards(dataset, 0, PAGE_SIZE),
     [dataset],
   );
 
-  const shards = data?.shards ?? [];
+  // Additional pages appended by "Load more" (the first page comes from useApi).
+  const [extra, setExtra] = useState<Shard[]>([]);
+  const [more, setMore] = useState(false);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [moreError, setMoreError] = useState<Error | null>(null);
+
+  // Reset appended state whenever the first page (dataset) reloads.
+  useEffect(() => {
+    setExtra([]);
+    setMore(data?.page?.more ?? false);
+    setMoreError(null);
+  }, [data]);
+
+  const shards = [...(data?.shards ?? []), ...extra];
+
+  const loadMore = useCallback(async () => {
+    setLoadingMore(true);
+    setMoreError(null);
+    try {
+      const res = await listShards(dataset, shards.length, PAGE_SIZE);
+      setExtra((prev) => [...prev, ...res.shards]);
+      setMore(res.page.more);
+    } catch (err) {
+      setMoreError(err instanceof Error ? err : new Error(String(err)));
+    } finally {
+      setLoadingMore(false);
+    }
+  }, [dataset, shards.length]);
 
   return (
     <div className="space-y-6">
@@ -114,6 +145,23 @@ export default function DatasetDetailPage({
                 )}
               </TableBody>
             </Table>
+          )}
+          {moreError && (
+            <div className="mt-3">
+              <ErrorState error={moreError} onRetry={loadMore} />
+            </div>
+          )}
+          {more && !loading && (
+            <div className="mt-3 flex justify-center">
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={loadMore}
+                disabled={loadingMore}
+              >
+                {loadingMore ? "Loading…" : "Load more"}
+              </Button>
+            </div>
           )}
         </CardContent>
       </Card>

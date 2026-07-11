@@ -1,8 +1,9 @@
 "use client";
 
 import Link from "next/link";
+import { ChevronRight } from "lucide-react";
 
-import { ErrorState } from "@/components/error-state";
+import { ErrorState, humanizeError } from "@/components/error-state";
 import { StatusBadge, flytePhaseTone } from "@/components/status-badge";
 import {
   Card,
@@ -23,7 +24,7 @@ import { useApi } from "@/hooks/use-api";
 import { getDashboardStats, listExecutions } from "@/lib/api";
 import {
   formatDuration,
-  formatMetric,
+  formatMeters,
   formatNumber,
   formatTimestamp,
 } from "@/lib/format";
@@ -32,16 +33,26 @@ function KpiCard({
   title,
   value,
   loading,
+  href,
+  subtitle,
 }: {
   title: string;
   value: string;
   loading: boolean;
+  href?: string;
+  subtitle?: string;
 }) {
-  return (
-    <Card className="border-slate-800 bg-slate-950/50">
+  const card = (
+    <Card
+      className={
+        "border-slate-800 bg-slate-950/50" +
+        (href ? " h-full cursor-pointer transition-colors hover:border-slate-500" : "")
+      }
+    >
       <CardHeader className="pb-2">
-        <CardTitle className="text-xs font-medium uppercase tracking-wider text-slate-400">
+        <CardTitle className="flex items-center justify-between text-xs font-medium uppercase tracking-wider text-slate-400">
           {title}
+          {href && <ChevronRight className="size-3.5 text-slate-600" />}
         </CardTitle>
       </CardHeader>
       <CardContent>
@@ -50,8 +61,18 @@ function KpiCard({
         ) : (
           <p className="font-mono text-2xl font-semibold">{value}</p>
         )}
+        {subtitle && (
+          <p className="mt-1 text-[10px] text-slate-500">{subtitle}</p>
+        )}
       </CardContent>
     </Card>
+  );
+  return href ? (
+    <Link href={href} className="block">
+      {card}
+    </Link>
+  ) : (
+    card
   );
 }
 
@@ -77,21 +98,28 @@ export default function HomePage() {
             title="Total Samples"
             value={formatNumber(stats.data?.total_samples)}
             loading={stats.loading}
+            href="/datasets"
+            subtitle="from pipeline manifest"
           />
           <KpiCard
             title="Reasoning Labels"
             value={formatNumber(stats.data?.reasoning_labels)}
             loading={stats.loading}
+            href="/reasoning-labels"
+            subtitle="teacher-generated label objects"
           />
           <KpiCard
             title="MLflow Runs"
             value={formatNumber(stats.data?.mlflow_runs)}
             loading={stats.loading}
+            href="/models"
           />
           <KpiCard
             title="Latest ADE"
-            value={formatMetric(stats.data?.latest_ade)}
+            value={formatMeters(stats.data?.latest_ade)}
             loading={stats.loading}
+            href="/models"
+            subtitle="Average Displacement Error"
           />
         </div>
       )}
@@ -102,7 +130,21 @@ export default function HomePage() {
         </CardHeader>
         <CardContent>
           {executions.error ? (
-            <ErrorState error={executions.error} onRetry={executions.reload} />
+            <Table>
+              <TableBody>
+                <TableRow>
+                  <TableCell className="text-center text-sm text-slate-500">
+                    {humanizeError(executions.error, "Flyte")}{" "}
+                    <button
+                      onClick={executions.reload}
+                      className="text-blue-500 hover:underline"
+                    >
+                      Retry
+                    </button>
+                  </TableCell>
+                </TableRow>
+              </TableBody>
+            </Table>
           ) : executions.loading ? (
             <div className="space-y-2">
               {Array.from({ length: 5 }).map((_, i) => (
