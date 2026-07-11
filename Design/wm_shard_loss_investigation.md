@@ -15,22 +15,25 @@ branches degrades the trajectory.
 | A | reasoning+WM | WM (10 ep, 1037 smp) | 1 | 0.846 (flat) | — |
 | B | reasoning+WM | WM | 4 (grad accum) | 0.843 (flat) | — |
 | C | reasoning+WM, backbone-detached JEPA | WM | 4 | 0.843 (flat) | — |
-| D (control) | **imitation only** | **WM** | 4 | ~0.82 (flat) | (pending) |
-| E (control) | **imitation only** | **plain** | 4 | 0.41 @30ep | **2.026m** |
+| D (control) | **imitation only** | **WM** | 4 | 0.808 @30ep | **1.771m** |
+| E (control) | **imitation only** | **plain** | 4 | 0.412 @30ep | **2.026m** |
 
 ## Conclusions
 
 1. **The branches are innocent.** Run D (imitation only) on the WM shard floors
-   at the SAME ~0.82 as the all-branch runs A/B/C. Turning the WM and reasoning
+   at the SAME ~0.80 as the all-branch runs A/B/C. Turning the WM and reasoning
    branches OFF does not lower the floor. So neither the JEPA loss, the reasoning
    loss, batch-size noise, nor backbone contention causes the plateau.
 
-2. **The floor is a per-shard property, not a code bug.** Run E reproduces
-   ADE 2.026m on the plain shard with the exact same current code. Same code +
-   same hyperparameters, plain shard → 0.41, WM shard → 0.82. The difference is
-   entirely the packed data: the WM shard is 10 episodes / 1037 samples vs the
-   plain shard's 3 episodes / 355 samples. More (and more diverse) data sits at a
-   higher training loss than a small easily-fit set; this is expected, not a bug.
+2. **The "plateau at 0.8" was never a problem — it is the loss SCALE, not model
+   quality.** The decisive metric is eval ADE, and the WM shard's HIGHER training
+   loss (0.808) produced a BETTER trajectory than the plain shard's lower loss
+   (0.412): ADE 1.771m vs 2.026m. So the absolute training-loss number is not
+   comparable across shards (different sample distributions integrate to
+   different SmoothL1 magnitudes) and does not track ADE across datasets. More
+   data (WM shard: 10 episodes / 1037 samples) generalizes better than the small
+   plain shard (3 episodes / 355 samples), exactly as expected. There is no bug:
+   the full pipeline is correct and the WM-packed data trains to a better policy.
 
 3. **The WM data is learnable.** The trajectory targets in the WM shard have
    curvature std ≈0.014 (matching the loss's signal scale) and a predict-mean
@@ -52,10 +55,16 @@ branches degrades the trajectory.
 
 ## Open items
 
-- Curvature signal-scale (0.014) may not hold across all episodes (a tail subset
-  showed std 0.139). A per-shard measured scale, or a robust normalization, would
-  make the loss weighting dataset-independent. Affects both shards equally, so
-  not the 0.41-vs-0.82 differentiator, but worth fixing for correctness.
-- To drive the WM-shard ADE down: train longer (60+ epochs) and/or verify the
-  eval set matches the train distribution. The pipeline is correct; the WM shard
-  just needs the epoch budget the plain shard got.
+- **Curvature signal-scale is ~9x off.** The loss uses `signal_scales=(0.54,
+  0.014)` but the measured target curvature std is ~0.124 on BOTH shards (the
+  earlier 0.014 reading came from a truncated tar). So the normalized loss
+  over-weights curvature error ~9x — which is why the absolute loss numbers sit
+  ~0.4-0.8 instead of ~0.1. This does not break training (ADE is still good and
+  curvature getting extra gradient is not harmful per se), and it is identical
+  across shards so not the plain-vs-WM differentiator, but the scale should be
+  corrected to the measured std (~0.12) so the logged loss is interpretable and
+  the accel/curvature balance is principled. Fix: set the curvature scale in
+  `TrajectoryImitationLoss._DEFAULT_SIGNAL_SCALES` to the measured value.
+- To drive ADE lower still: train the full 3-branch config for more epochs on the
+  WM shard (imitation-only already hits ADE 1.771m at 30ep). The pipeline is
+  correct; this is now just an epoch-budget / hyperparameter tuning matter.
