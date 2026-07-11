@@ -82,8 +82,13 @@ def pack_sample(si: int) -> Tuple[int, int, Dict[str, bytes]]:
     for cam_i in range(visual.shape[0]):
         members[f"cam_{cam_i}.jpg"] = _jpeg(visual[cam_i])
 
+    # Only write map.jpg for a REAL nav-map. NVIDIA has no map and hands a
+    # zeros_like placeholder; packing it would JPEG+ImageNet-normalize a black
+    # tile into a nonzero per-channel CONSTANT at load time, contaminating the
+    # shared map encoder (and wrongly flagging has_map=True). Skip all-zero tiles
+    # so the loader's zero-fallback fires and has_map stays False.
     map_tile = sample.get("map_tile")
-    if map_tile is not None:
+    if map_tile is not None and float(map_tile.abs().max()) > 0:
         members["map.jpg"] = _jpeg(map_tile)
 
     history_win = sample.get("history_frames")   # (T, V, 3, H, W)
