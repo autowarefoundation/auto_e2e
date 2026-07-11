@@ -18,7 +18,12 @@ import {
 } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useApi } from "@/hooks/use-api";
-import { ApiError, getReasoningLabel, getSample } from "@/lib/api";
+import {
+  ApiError,
+  getReasoningLabel,
+  getSample,
+  listSamples,
+} from "@/lib/api";
 
 const CAMERA_COUNT = 7; // cam_0..cam_6; last cell of the 2x4 mosaic = metadata
 
@@ -58,8 +63,27 @@ export default function SampleDetailPage({
     [dataset, sampleKey],
   );
 
-  const prevKey = useMemo(() => siblingKey(sampleKey, -1), [sampleKey]);
-  const nextKey = useMemo(() => siblingKey(sampleKey, +1), [sampleKey]);
+  // Bound forward/backward nav to the shard's actual sample list so "Next" is
+  // disabled on the last frame (no 404 dead-end) and nav is robust to
+  // non-contiguous keys. Falls back to sibling arithmetic while the list loads.
+  const samples = useApi(
+    () => listSamples(dataset, shardName),
+    [dataset, shardName],
+  );
+  const keys = useMemo(
+    () => (samples.data?.samples ?? []).map((s) => s.key),
+    [samples.data],
+  );
+  const idx = useMemo(() => keys.indexOf(sampleKey), [keys, sampleKey]);
+  const prevKey = useMemo(
+    () => (idx > 0 ? keys[idx - 1] : siblingKey(sampleKey, -1)),
+    [idx, keys, sampleKey],
+  );
+  const nextKey = useMemo(() => {
+    if (idx >= 0 && idx < keys.length - 1) return keys[idx + 1];
+    if (idx === keys.length - 1) return null;
+    return siblingKey(sampleKey, +1);
+  }, [idx, keys, sampleKey]);
 
   const sampleUrl = (k: string) =>
     `/datasets/${encodeURIComponent(dataset)}/shards/${encodeURIComponent(shardName)}/samples/${encodeURIComponent(k)}`;
