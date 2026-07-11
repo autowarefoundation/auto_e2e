@@ -154,8 +154,18 @@ class AutoE2E(nn.Module):
                 # sequence egomotion to its current (last) step.
                 if egomotion_history.ndim == 3:
                     egomotion_history = egomotion_history[:, -1]
+                # JEPA trains the WM through the NON-detached visual_history
+                # (predict_future must see gradients into the aggregator/encoder).
                 if mode == "train":
                     future_state_pred = wam.predict_future(visual_history)
+                # The planner reads a STOP-GRADIENT world-model representation:
+                # detach so the trajectory loss does not create a second,
+                # non-stationary gradient path into the WM (the WM is shaped by
+                # JEPA only). Standard world-model-conditioned-policy setup, and
+                # it matches the inference rolling-buffer path which also detaches
+                # (line ~171). Combined with the zero-init visual_history_proj this
+                # makes the WM branch a stable, strictly-additive planner input.
+                visual_history = visual_history.detach()
             else:
                 # B. Rolling-buffer path. Encode the current 1 Hz multi-view frame;
                 # push a detached copy so the planner's history is pure memory.
