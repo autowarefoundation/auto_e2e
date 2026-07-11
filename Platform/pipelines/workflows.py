@@ -595,7 +595,6 @@ def generate_reasoning_labels(
     # (torch is imported) re-imports the worker module cleanly.
     import multiprocessing as mp
     from concurrent.futures import ProcessPoolExecutor
-    from functools import partial
     from data_processing.reasoning_label_generation import parallel_label
     from data_processing.reasoning_label_generation.targets import record_from_json
 
