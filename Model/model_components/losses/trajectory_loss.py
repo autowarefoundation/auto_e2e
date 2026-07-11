@@ -13,14 +13,17 @@ class TrajectoryImitationLoss(nn.Module):
     signal_scales: torch.Tensor
 
     # Per-signal std of the trajectory target (accel_x m/s², curvature rad/m),
-    # measured on real L2D shards: accel std≈0.54, curvature std≈0.014 — ~40×
-    # apart. Without normalizing by these, SmoothL1(β=1) puts accel errors in the
-    # linear regime (grad≈1) but curvature errors in the quadratic regime
-    # (grad≈error≈0.01≈0), so the planner learns longitudinal accel and NEVER
-    # learns curvature → heading integrates wrong → large ADE/FDE. Dividing both
-    # signals by their std makes them ~unit-variance so curvature gets comparable
-    # gradient. Override via ``signal_scales`` if the target definition changes.
-    _DEFAULT_SIGNAL_SCALES = (0.54, 0.014)
+    # measured on real L2D shards: accel std≈0.79, curvature std≈0.12. Without
+    # normalizing by these, SmoothL1(β=1) puts accel errors in the linear regime
+    # (grad≈1) but curvature errors deep in the quadratic regime (grad≈error≈0),
+    # so the planner learns longitudinal accel and under-learns curvature →
+    # heading integrates wrong → large ADE/FDE. Dividing both signals by their std
+    # makes them ~unit-variance so curvature gets comparable gradient. NOTE: the
+    # previous curvature scale (0.014) was ~9× too small — it came from a truncated
+    # sample; the real per-target std measured across full L2D shards is ~0.12
+    # (accel ~0.79). Override via ``signal_scales`` if the target definition
+    # changes.
+    _DEFAULT_SIGNAL_SCALES = (0.79, 0.12)
 
     def __init__(self, loss_type: str = "smooth_l1", temporal_decay: float = 0.95,
                  num_timesteps: int = 64, num_signals: int = 2,
