@@ -17,6 +17,9 @@ export function humanizeError(error: Error, service?: string): string {
     if (error.status === 0) {
       return "Network error — the API could not be reached.";
     }
+    if (error.status === 404) {
+      return "Not found — this shard or sample does not exist. Check the name or pick one from the dataset.";
+    }
   }
   return "Failed to load data.";
 }

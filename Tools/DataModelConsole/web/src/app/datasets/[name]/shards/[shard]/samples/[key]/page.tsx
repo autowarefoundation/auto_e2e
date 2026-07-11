@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { use, useEffect, useMemo } from "react";
-import { ChevronLeft, ChevronRight, Play } from "lucide-react";
+import { ChevronLeft, ChevronRight, Loader2, Play } from "lucide-react";
 
 import { CameraImage } from "@/components/camera-image";
 import { EgoSignal } from "@/components/ego-signal";
@@ -24,8 +24,6 @@ import {
   getSample,
   listSamples,
 } from "@/lib/api";
-
-const CAMERA_COUNT = 7; // cam_0..cam_6; last cell of the 2x4 mosaic = metadata
 
 // Sample keys look like "ep0_000064": episode id + "_" + frame index
 // zero-padded to 6 digits. Sibling keys are frame +/- 1.
@@ -165,9 +163,17 @@ export default function SampleDetailPage({
         </div>
       </div>
 
-      {/* 7-camera mosaic: 2 rows x 4 cols, last cell = metadata */}
+      {loading && (
+        <p className="flex items-center gap-2 text-xs text-slate-500">
+          <Loader2 className="size-3.5 animate-spin" />
+          Scanning shard index — first open takes ~10s, then it is cached.
+        </p>
+      )}
+
+      {/* Camera mosaic: 2 rows x 4 cols, tile count follows the sample's real
+          camera list (L2D packs 6, NVIDIA 7); last cell = metadata */}
       <div className="grid grid-cols-2 gap-2 lg:grid-cols-4">
-        {Array.from({ length: CAMERA_COUNT }).map((_, cam) => (
+        {(data?.cameras ?? []).map((_, cam) => (
           <div
             key={cam}
             className="overflow-hidden rounded-md border border-slate-800"

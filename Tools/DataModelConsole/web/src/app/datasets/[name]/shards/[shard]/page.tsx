@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { use } from "react";
-import { Play } from "lucide-react";
+import { Loader2, Play } from "lucide-react";
 
 import { CameraImage } from "@/components/camera-image";
 import { ErrorState } from "@/components/error-state";
@@ -61,10 +61,16 @@ export default function ShardSamplesPage({
       {error ? (
         <ErrorState error={error} onRetry={reload} />
       ) : loading ? (
-        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-          {Array.from({ length: 8 }).map((_, i) => (
-            <Skeleton key={i} className="h-44 w-full" />
-          ))}
+        <div className="space-y-4">
+          <p className="flex items-center gap-2 text-xs text-slate-500">
+            <Loader2 className="size-3.5 animate-spin" />
+            Scanning shard index — first open takes ~10s, then it is cached.
+          </p>
+          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+            {Array.from({ length: 8 }).map((_, i) => (
+              <Skeleton key={i} className="h-44 w-full" />
+            ))}
+          </div>
         </div>
       ) : (
         <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">

@@ -93,6 +93,11 @@ export default function HomePage() {
       {stats.error ? (
         <ErrorState error={stats.error} onRetry={stats.reload} />
       ) : (
+        (() => {
+          // When MLflow is unreachable the API returns mlflow_available=false;
+          // surface that explicitly instead of a fabricated 0 runs / — ADE.
+          const mlflowDown = !!stats.data && !stats.data.mlflow_available;
+          return (
         <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
           <KpiCard
             title="Total Samples"
@@ -106,22 +111,29 @@ export default function HomePage() {
             value={formatNumber(stats.data?.reasoning_labels)}
             loading={stats.loading}
             href="/reasoning-labels"
-            subtitle="teacher-generated label objects"
+            subtitle="label objects across all teacher/prompt versions (a sample may be labelled more than once)"
           />
           <KpiCard
             title="MLflow Runs"
-            value={formatNumber(stats.data?.mlflow_runs)}
+            value={mlflowDown ? "—" : formatNumber(stats.data?.mlflow_runs)}
             loading={stats.loading}
             href="/models"
+            subtitle={mlflowDown ? "Unavailable — upstream unreachable" : undefined}
           />
           <KpiCard
             title="Latest ADE"
-            value={formatMeters(stats.data?.latest_ade)}
+            value={mlflowDown ? "—" : formatMeters(stats.data?.latest_ade)}
             loading={stats.loading}
             href="/models"
-            subtitle="Average Displacement Error"
+            subtitle={
+              mlflowDown
+                ? "Unavailable — upstream unreachable"
+                : "Average Displacement Error"
+            }
           />
         </div>
+          );
+        })()
       )}
 
       <Card className="border-slate-800 bg-slate-950/50">

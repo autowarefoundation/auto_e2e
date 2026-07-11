@@ -41,20 +41,33 @@ export function ReasoningTimeline({ label }: { label: ReasoningLabelRecord }) {
     (a, b) => a.horizon_sec - b.horizon_sec,
   );
 
+  // v2 producer writes teacher_model/teacher_provider and dataset_name; fall
+  // back to the v1 short fields so older labels still surface provenance.
+  const teacher = label.teacher_model ?? label.teacher_provider ?? label.teacher;
+  const dataset = label.dataset_name ?? label.dataset;
+
   return (
     <div className="space-y-4">
       <div className="flex flex-wrap items-center gap-2 text-xs text-slate-400">
         <span className="font-mono">{label.sample_id}</span>
-        {label.dataset && (
+        {dataset && (
           <>
             <Separator orientation="vertical" className="h-3" />
-            <span>dataset: {label.dataset}</span>
+            <span>dataset: {dataset}</span>
           </>
         )}
-        {label.teacher && (
+        {teacher && (
           <>
             <Separator orientation="vertical" className="h-3" />
-            <span>teacher: {label.teacher}</span>
+            <span>teacher: {teacher}</span>
+          </>
+        )}
+        {label.abstained && (
+          <>
+            <Separator orientation="vertical" className="h-3" />
+            <span className="text-amber-500">
+              abstained{label.teacher_error ? `: ${label.teacher_error}` : ""}
+            </span>
           </>
         )}
         {label.prompt_version && (

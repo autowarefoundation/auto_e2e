@@ -16,10 +16,11 @@ import {
   use,
   useCallback,
   useEffect,
+  useMemo,
   useRef,
   useState,
 } from "react";
-import { Check, Link2 } from "lucide-react";
+import { ChevronLeft, ChevronRight, Check, Link2, Loader2 } from "lucide-react";
 
 import {
   EpisodePlayer,
@@ -29,7 +30,7 @@ import { ErrorState } from "@/components/error-state";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useApi } from "@/hooks/use-api";
-import { getShardIndex } from "@/lib/api";
+import { getShardIndex, listShardsForEpisode } from "@/lib/api";
 
 function PlayerPageInner({
   dataset,
@@ -46,6 +47,26 @@ function PlayerPageInner({
     () => getShardIndex(dataset, shard),
     [dataset, shard],
   );
+
+  // Same-trip continuity: NVIDIA ships multiple name-sorted shards, so offer a
+  // link to the lexicographic neighbor shards (playback dead-ends at the last
+  // frame otherwise). A single-shard dataset (L2D) resolves to no neighbors, so
+  // no control renders — correctly a non-issue there.
+  const shardList = useApi(
+    () => listShardsForEpisode(dataset),
+    [dataset],
+  );
+  const { prevShard, nextShard } = useMemo(() => {
+    const names = (shardList.data ?? []).map((s) => s.name);
+    const i = names.indexOf(shard);
+    if (i < 0) return { prevShard: null, nextShard: null };
+    return {
+      prevShard: i > 0 ? names[i - 1] : null,
+      nextShard: i < names.length - 1 ? names[i + 1] : null,
+    };
+  }, [shardList.data, shard]);
+  const shardHref = (s: string) =>
+    `/scenes/${encodeURIComponent(dataset)}/${encodeURIComponent(s)}/0`;
 
   // Initial view state: path frame + query params (cam, mode, speed).
   const initialState = useRef<Partial<PlayerViewState>>({
@@ -143,20 +164,46 @@ function PlayerPageInner({
           </p>
           <h2 className="mt-1 font-mono text-lg font-semibold">{shard}</h2>
         </div>
-        <Button variant="outline" size="sm" onClick={copyLink}>
-          {copied ? (
-            <Check className="size-3.5 text-emerald-500" />
-          ) : (
-            <Link2 className="size-3.5" />
+        <div className="flex items-center gap-2">
+          {prevShard && (
+            <Link
+              href={shardHref(prevShard)}
+              className="inline-flex h-8 items-center gap-1 rounded-md border border-slate-700 bg-slate-900 px-2.5 text-xs text-slate-200 transition-colors hover:border-slate-500"
+              title={`Previous shard (${prevShard})`}
+            >
+              <ChevronLeft className="size-3.5" />
+              Prev shard
+            </Link>
           )}
-          {copied ? "Copied" : "Copy link"}
-        </Button>
+          {nextShard && (
+            <Link
+              href={shardHref(nextShard)}
+              className="inline-flex h-8 items-center gap-1 rounded-md border border-slate-700 bg-slate-900 px-2.5 text-xs text-slate-200 transition-colors hover:border-slate-500"
+              title={`Next shard (${nextShard})`}
+            >
+              Next shard
+              <ChevronRight className="size-3.5" />
+            </Link>
+          )}
+          <Button variant="outline" size="sm" onClick={copyLink}>
+            {copied ? (
+              <Check className="size-3.5 text-emerald-500" />
+            ) : (
+              <Link2 className="size-3.5" />
+            )}
+            {copied ? "Copied" : "Copy link"}
+          </Button>
+        </div>
       </div>
 
       {error ? (
         <ErrorState error={error} onRetry={reload} />
       ) : loading || !data ? (
         <div className="space-y-4">
+          <p className="flex items-center gap-2 text-xs text-slate-500">
+            <Loader2 className="size-3.5 animate-spin" />
+            Scanning shard index — first open takes ~10s, then it is cached.
+          </p>
           <div className="grid grid-cols-2 gap-2 lg:grid-cols-4">
             {Array.from({ length: 8 }).map((_, i) => (
               <Skeleton key={i} className="aspect-video w-full" />
