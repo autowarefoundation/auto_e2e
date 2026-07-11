@@ -16,6 +16,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -28,8 +29,13 @@ import (
 // ErrNotFound is returned when a requested S3 object / tar member is absent.
 var ErrNotFound = errors.New("not found")
 
-// datasetVersion is the only version published in Phase 1.
-const datasetVersion = "v1.0"
+// fallbackVersion is used when no vX.Y/ prefix with shards can be resolved.
+const fallbackVersion = "v1.0"
+
+// versionTTL bounds how long a resolved dataset version is cached; the
+// published version set changes rarely (a new pipeline run), so a few minutes
+// avoids a per-request ListObjects while still picking up new versions.
+const versionTTL = 2 * time.Minute
 
 // knownDatasets are the dataset prefixes exposed by the console.
 var knownDatasets = []string{"l2d", "nvidia_av"}
@@ -84,6 +90,24 @@ type S3Service struct {
 	presigner     *s3.PresignClient
 	bucket        string
 	presignExpiry time.Duration
+
+	// versionCache memoizes the resolved newest version per dataset (see
+	// resolveVersion). Guarded by versionMu.
+	versionMu    sync.Mutex
+	versionCache map[string]cachedVersion
+
+	// indexCache memoizes built shard indexes. A shard tar is immutable, so
+	// once scanned (an expensive full-object read for a multi-hundred-MB shard)
+	// the small JSON index is reused. Guarded by indexMu; keyed by
+	// "<dataset>/<version>/<shard>".
+	indexMu    sync.Mutex
+	indexCache map[string]*model.ShardIndex
+	indexSF    map[string]*sync.WaitGroup // single-flight in-progress builds
+}
+
+type cachedVersion struct {
+	version string
+	at      time.Time
 }
 
 // NewS3Service builds the S3 client from the default AWS credential chain
@@ -99,6 +123,9 @@ func NewS3Service(ctx context.Context, region, bucket string, presignExpiry time
 		presigner:     s3.NewPresignClient(client),
 		bucket:        bucket,
 		presignExpiry: presignExpiry,
+		versionCache:  make(map[string]cachedVersion),
+		indexCache:    make(map[string]*model.ShardIndex),
+		indexSF:       make(map[string]*sync.WaitGroup),
 	}, nil
 }
 
@@ -108,15 +135,16 @@ func (s *S3Service) Ping(ctx context.Context) error {
 	return err
 }
 
-// ListDatasets returns the known datasets. Phase 1 uses a static list matching
-// the ingest pipeline output prefixes.
-func (s *S3Service) ListDatasets() []model.Dataset {
+// ListDatasets returns the known datasets, each reporting the newest version
+// resolved from S3 (see resolveVersion).
+func (s *S3Service) ListDatasets(ctx context.Context) []model.Dataset {
 	out := make([]model.Dataset, 0, len(knownDatasets))
 	for _, name := range knownDatasets {
+		version := s.resolveVersion(ctx, name)
 		out = append(out, model.Dataset{
 			Name:    name,
-			Version: datasetVersion,
-			Prefix:  shardPrefix(name),
+			Version: version,
+			Prefix:  fmt.Sprintf("%s/%s/shards/", name, version),
 		})
 	}
 	return out
@@ -132,13 +160,124 @@ func (s *S3Service) ValidDataset(name string) bool {
 	return false
 }
 
-func shardPrefix(dataset string) string {
-	return fmt.Sprintf("%s/%s/shards/", dataset, datasetVersion)
+// resolveVersion returns the newest published version for a dataset: the
+// lexicographically-greatest "vX.Y/" prefix under "<dataset>/" that contains a
+// shards/ folder with at least one .tar. Result is cached for versionTTL.
+// Falls back to fallbackVersion when nothing resolves (or S3 errors), so the
+// console still serves the historical path.
+func (s *S3Service) resolveVersion(ctx context.Context, dataset string) string {
+	s.versionMu.Lock()
+	if c, ok := s.versionCache[dataset]; ok && time.Since(c.at) < versionTTL {
+		s.versionMu.Unlock()
+		return c.version
+	}
+	s.versionMu.Unlock()
+
+	version := s.discoverNewestVersion(ctx, dataset)
+
+	s.versionMu.Lock()
+	s.versionCache[dataset] = cachedVersion{version: version, at: nowFunc()}
+	s.versionMu.Unlock()
+	return version
+}
+
+// nowFunc is time.Now indirected so tests can avoid the clock; kept trivial.
+var nowFunc = time.Now
+
+// discoverNewestVersion lists "<dataset>/" version prefixes and returns the
+// newest that has a shards/*.tar. Uncached.
+func (s *S3Service) discoverNewestVersion(ctx context.Context, dataset string) string {
+	prefix := dataset + "/"
+	out, err := s.client.ListObjectsV2(ctx, &s3.ListObjectsV2Input{
+		Bucket:    aws.String(s.bucket),
+		Prefix:    aws.String(prefix),
+		Delimiter: aws.String("/"),
+	})
+	if err != nil {
+		slog.Warn("resolve version: list versions failed, using fallback",
+			"dataset", dataset, "error", err)
+		return fallbackVersion
+	}
+	versions := make([]string, 0, len(out.CommonPrefixes))
+	for _, cp := range out.CommonPrefixes {
+		// cp.Prefix is "<dataset>/vX.Y/"; extract "vX.Y".
+		v := strings.TrimSuffix(strings.TrimPrefix(aws.ToString(cp.Prefix), prefix), "/")
+		if isVersionDir(v) {
+			versions = append(versions, v)
+		}
+	}
+	// Newest first (version-aware, not raw lexical, so v10 > v9).
+	sort.Slice(versions, func(i, j int) bool { return versionLess(versions[j], versions[i]) })
+	for _, v := range versions {
+		if s.versionHasShards(ctx, dataset, v) {
+			return v
+		}
+	}
+	return fallbackVersion
+}
+
+// versionHasShards reports whether <dataset>/<version>/shards/ has a .tar.
+func (s *S3Service) versionHasShards(ctx context.Context, dataset, version string) bool {
+	out, err := s.client.ListObjectsV2(ctx, &s3.ListObjectsV2Input{
+		Bucket:  aws.String(s.bucket),
+		Prefix:  aws.String(fmt.Sprintf("%s/%s/shards/", dataset, version)),
+		MaxKeys: aws.Int32(50),
+	})
+	if err != nil {
+		return false
+	}
+	for _, obj := range out.Contents {
+		if strings.HasSuffix(aws.ToString(obj.Key), ".tar") {
+			return true
+		}
+	}
+	return false
+}
+
+// isVersionDir reports whether s looks like "vN" or "vN.M" (digits only).
+func isVersionDir(s string) bool {
+	if !strings.HasPrefix(s, "v") || len(s) < 2 {
+		return false
+	}
+	for _, part := range strings.Split(s[1:], ".") {
+		if part == "" || !isDigits(part) {
+			return false
+		}
+	}
+	return true
+}
+
+// versionLess compares "vN.M" version dirs numerically per component so that
+// v10 > v9 and v1.10 > v1.2. Non-version strings sort before versions.
+func versionLess(a, b string) bool {
+	pa, pb := versionParts(a), versionParts(b)
+	for i := 0; i < len(pa) && i < len(pb); i++ {
+		if pa[i] != pb[i] {
+			return pa[i] < pb[i]
+		}
+	}
+	return len(pa) < len(pb)
+}
+
+func versionParts(v string) []int {
+	v = strings.TrimPrefix(v, "v")
+	fields := strings.Split(v, ".")
+	out := make([]int, 0, len(fields))
+	for _, f := range fields {
+		n, _ := strconv.Atoi(f)
+		out = append(out, n)
+	}
+	return out
+}
+
+// shardPrefix resolves the newest version and returns its shards/ prefix.
+func (s *S3Service) shardPrefix(ctx context.Context, dataset string) string {
+	return fmt.Sprintf("%s/%s/shards/", dataset, s.resolveVersion(ctx, dataset))
 }
 
 // ListShards lists .tar objects under <dataset>/v1.0/shards/ with pagination.
 func (s *S3Service) ListShards(ctx context.Context, dataset string, limit, offset int) ([]model.Shard, model.Page, error) {
-	prefix := shardPrefix(dataset)
+	prefix := s.shardPrefix(ctx, dataset)
 	var all []model.Shard
 
 	p := s3.NewListObjectsV2Paginator(s.client, &s3.ListObjectsV2Input{
@@ -174,7 +313,7 @@ func (s *S3Service) ListShards(ctx context.Context, dataset string, limit, offse
 // content without buffering it) and groups members by WebDataset sample key
 // (member name up to the first dot).
 func (s *S3Service) ListSamples(ctx context.Context, dataset, shard string, limit, offset int) ([]model.Sample, model.Page, error) {
-	key := shardPrefix(dataset) + shard
+	key := s.shardPrefix(ctx, dataset) + shard
 	obj, err := s.client.GetObject(ctx, &s3.GetObjectInput{
 		Bucket: aws.String(s.bucket),
 		Key:    aws.String(key),
@@ -233,7 +372,7 @@ func (s *S3Service) ListSamples(ctx context.Context, dataset, shard string, limi
 //
 // memberName is matched as "<sampleKey>.<suffix>", e.g. ep0_000064.cam_0.jpg.
 func (s *S3Service) StreamTarMember(ctx context.Context, dataset, shard, memberName string) (io.Reader, io.Closer, int64, error) {
-	key := shardPrefix(dataset) + shard
+	key := s.shardPrefix(ctx, dataset) + shard
 	obj, err := s.client.GetObject(ctx, &s3.GetObjectInput{
 		Bucket: aws.String(s.bucket),
 		Key:    aws.String(key),
@@ -270,7 +409,7 @@ func (s *S3Service) StreamTarMemberRange(ctx context.Context, dataset, shard str
 	if offset < 0 || size <= 0 {
 		return nil, nil, 0, fmt.Errorf("invalid range offset=%d size=%d", offset, size)
 	}
-	key := shardPrefix(dataset) + shard
+	key := s.shardPrefix(ctx, dataset) + shard
 	rng := fmt.Sprintf("bytes=%d-%d", offset, offset+size-1)
 	obj, err := s.client.GetObject(ctx, &s3.GetObjectInput{
 		Bucket: aws.String(s.bucket),
@@ -316,7 +455,7 @@ const (
 // a single sample: its member list (for Cameras), raw meta.json bytes and the
 // decoded ego.npy history/future arrays.
 func (s *S3Service) GetSampleDetail(ctx context.Context, dataset, shard, sampleKey string) (*model.SampleDetail, error) {
-	key := shardPrefix(dataset) + shard
+	key := s.shardPrefix(ctx, dataset) + shard
 	obj, err := s.client.GetObject(ctx, &s3.GetObjectInput{
 		Bucket: aws.String(s.bucket),
 		Key:    aws.String(key),
@@ -388,13 +527,50 @@ func (s *S3Service) GetSampleDetail(ctx context.Context, dataset, shard, sampleK
 	return detail, nil
 }
 
-// BuildShardIndex streams the shard tar once and builds the playback index
-// for the ADAS player: per-member byte ranges (tar DATA offsets, same
+// BuildShardIndex returns the playback index for a shard, caching the result
+// (the tar is immutable) and single-flighting concurrent builds so a large
+// shard is scanned from S3 only once even under many simultaneous players.
+func (s *S3Service) BuildShardIndex(ctx context.Context, dataset, shard string) (*model.ShardIndex, error) {
+	cacheKey := fmt.Sprintf("%s/%s/%s", dataset, s.resolveVersion(ctx, dataset), shard)
+
+	for {
+		s.indexMu.Lock()
+		if idx, ok := s.indexCache[cacheKey]; ok {
+			s.indexMu.Unlock()
+			return idx, nil
+		}
+		if wg, building := s.indexSF[cacheKey]; building {
+			// Another request is building this index; wait and re-check cache.
+			s.indexMu.Unlock()
+			wg.Wait()
+			continue
+		}
+		// We own the build.
+		wg := &sync.WaitGroup{}
+		wg.Add(1)
+		s.indexSF[cacheKey] = wg
+		s.indexMu.Unlock()
+
+		idx, err := s.buildShardIndexUncached(ctx, dataset, shard)
+
+		s.indexMu.Lock()
+		delete(s.indexSF, cacheKey)
+		if err == nil {
+			s.indexCache[cacheKey] = idx
+		}
+		s.indexMu.Unlock()
+		wg.Done()
+		return idx, err
+	}
+}
+
+// buildShardIndexUncached streams the shard tar once and builds the playback
+// index for the ADAS player: per-member byte ranges (tar DATA offsets, same
 // countingReader accounting as ListSamples) plus the current ego state and
 // future plan per sample. Frames are fetched member-by-member through the
 // image endpoint, so no whole-shard presigned URL is emitted.
-func (s *S3Service) BuildShardIndex(ctx context.Context, dataset, shard string) (*model.ShardIndex, error) {
-	key := shardPrefix(dataset) + shard
+func (s *S3Service) buildShardIndexUncached(ctx context.Context, dataset, shard string) (*model.ShardIndex, error) {
+	key := s.shardPrefix(ctx, dataset) + shard
 	obj, err := s.client.GetObject(ctx, &s3.GetObjectInput{
 		Bucket: aws.String(s.bucket),
 		Key:    aws.String(key),
@@ -784,10 +960,12 @@ func (s *S3Service) TotalSamples(ctx context.Context) (int, error) {
 }
 
 func (s *S3Service) datasetSampleCount(ctx context.Context, dataset string) (int, error) {
-	// Preferred: pipeline manifest next to the shards.
+	// Preferred: pipeline manifest next to the shards (resolved version), then
+	// the manifest one level up from shards/.
+	version := s.resolveVersion(ctx, dataset)
 	for _, key := range []string{
-		shardPrefix(dataset) + "manifest.json",
-		fmt.Sprintf("%s/%s/manifest.json", dataset, datasetVersion),
+		fmt.Sprintf("%s/%s/shards/manifest.json", dataset, version),
+		fmt.Sprintf("%s/%s/manifest.json", dataset, version),
 	} {
 		body, err := s.getObjectBytes(ctx, key)
 		if err != nil {

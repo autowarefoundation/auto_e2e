@@ -26,7 +26,7 @@ func NewDatasetsHandler(s3 *service.S3Service) *DatasetsHandler {
 
 // List handles GET /api/v1/datasets.
 func (h *DatasetsHandler) List(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, model.DatasetListResponse{Datasets: h.s3.ListDatasets()})
+	writeJSON(w, http.StatusOK, model.DatasetListResponse{Datasets: h.s3.ListDatasets(r.Context())})
 }
 
 // ListShards handles GET /api/v1/datasets/{name}/shards.
