@@ -29,7 +29,7 @@ from __future__ import annotations
 
 import logging
 import sys
-from typing import TypedDict
+from typing import Any, TypedDict
 
 import torch
 from torch.utils.data import Dataset
@@ -48,7 +48,7 @@ from .egomotion import (
     _HISTORY_TIMESTEPS,
     extract_egomotion,
 )
-from .world_model_windows import build_windows, required_margins, stride_for_hz
+from .world_model_windows import required_margins, stride_for_hz
 
 logger = logging.getLogger(__name__)
 
@@ -154,7 +154,7 @@ class L2DDataset(Dataset):
         # default and only re-fetches when `force_cache_sync=True`. We map the
         # legacy flag onto that: local_files_only=True means "don't force a
         # remote sync", which is already the default, so it is simply not passed.
-        _kwargs = {"repo_id": repo_id, "episodes": episodes}
+        _kwargs: dict[str, Any] = {"repo_id": repo_id, "episodes": episodes}
         if delta_timestamps is not None:
             _kwargs["delta_timestamps"] = delta_timestamps
         self.lerobot_dataset = LeRobotDataset(**_kwargs)

@@ -20,12 +20,15 @@ import io
 import json
 from typing import Any, Dict, List, Optional, Tuple
 
-# Per-process globals (set by init_pack_worker in each child).
-_DS = None
-_RESIZE = None
-_TO_PIL = None
-_DATASET_VALUE = None
-_CALIB_BYTES = None
+# Per-process globals (set by init_pack_worker in each child). Typed Any: these
+# are deliberately dynamic per-worker state (the dataset class differs by dataset,
+# the transforms are torchvision objects) filled in init_pack_worker, so a
+# concrete static type would misrepresent them and trip mypy on every use.
+_DS: Any = None
+_RESIZE: Any = None
+_TO_PIL: Any = None
+_DATASET_VALUE: Any = None
+_CALIB_BYTES: Any = None
 
 
 def init_pack_worker(
