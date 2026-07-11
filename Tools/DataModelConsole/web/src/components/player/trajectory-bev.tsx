@@ -10,9 +10,15 @@
 
 import { useMemo } from "react";
 
-import { decodeEgo, integrateTrajectory } from "@/lib/ego";
+import {
+  clamp,
+  decodeEgo,
+  integrateTrajectory,
+  MAX_CURVATURE,
+  MIN_SPEED_FOR_HEADING,
+} from "@/lib/ego";
 import type { TrajectoryPoint } from "@/lib/ego";
-import type { IndexSample } from "@/types";
+import type { IndexSample, ReasoningLabelRecord } from "@/types";
 
 const SIZE = 300;
 const GRID_M = 10;
@@ -21,10 +27,15 @@ export function TrajectoryBEV({
   samples,
   frame,
   fps = 10,
+  reasoning,
 }: {
   samples: IndexSample[];
   frame: number;
   fps?: number;
+  // Reasoning label for the current frame (when loaded). Its horizons are
+  // pinned onto the plan path at the matching rollout step so the reasoning
+  // cards and the geometry line up in time.
+  reasoning?: ReasoningLabelRecord | null;
 }) {
   const traj = useMemo(() => {
     const now = samples[frame];
@@ -37,26 +48,31 @@ export function TrajectoryBEV({
     );
   }, [samples, frame]);
 
-  // Realized path: chain the chronological ego_now (speed + yaw_rate) of the
-  // frames from here to the end of the shard into an XY path. This is what the
-  // ego actually drove vs the plan; it is short when few frames remain, which
-  // is itself the honest signal about how much of the plan is verifiable.
+  // Realized path: chain the chronological ego_now (speed + curvature) of the
+  // frames from here forward into an XY path — what the ego actually drove.
+  // Clipped to the plan horizon (traj.length frames) so blue (plan) and amber
+  // (actual) cover the same window and are directly comparable; how much of the
+  // plan the remaining shard can actually verify is reported as text instead.
+  // Heading is integrated from curvature (channel 3, v*kappa = yaw_rate) which
+  // is dataset-agnostic and identical to integrateTrajectory; curvature is
+  // clamped and heading gated by speed to reject non-physical outlier spikes.
   const realized = useMemo(() => {
     const dt = 1 / (fps || 10);
+    const end = Math.min(samples.length, frame + traj.length);
     const pts: TrajectoryPoint[] = [];
     let x = 0;
     let y = 0;
     let theta = 0;
-    for (let i = frame; i < samples.length; i++) {
+    for (let i = frame; i < end; i++) {
       const v = samples[i].ego_now?.[0] ?? 0;
-      const yawRate = samples[i].ego_now?.[2] ?? 0;
-      theta += yawRate * dt;
+      const kappa = samples[i].ego_now?.[3] ?? 0;
+      if (v >= MIN_SPEED_FOR_HEADING) theta += v * clamp(kappa, MAX_CURVATURE) * dt;
       x += v * Math.cos(theta) * dt;
       y += v * Math.sin(theta) * dt;
       pts.push({ x, y, heading: theta });
     }
     return pts;
-  }, [samples, frame, fps]);
+  }, [samples, frame, fps, traj.length]);
 
   // Past trajectory: integrate the 256-float ego_history (64 steps x [speed,
   // accel, yaw_rate, curvature]) BACKWARDS from the ego marker, so the trailing
@@ -74,11 +90,13 @@ export function TrajectoryBEV({
     let theta = 0;
     for (let i = h.speed.length - 1; i >= 0; i--) {
       const v = h.speed[i] ?? 0;
-      const yawRate = h.yawRate[i] ?? 0;
-      // Reverse integration: undo one step of the unicycle model.
+      const kappa = h.curvature[i] ?? 0;
+      // Reverse integration: undo one step of the unicycle model. Integrate
+      // heading from curvature (v*kappa = yaw_rate, dataset-agnostic); clamp
+      // curvature and gate heading by speed to reject non-physical outliers.
       x -= v * Math.cos(theta) * dt;
       y -= v * Math.sin(theta) * dt;
-      theta -= yawRate * dt;
+      if (v >= MIN_SPEED_FOR_HEADING) theta -= v * clamp(kappa, MAX_CURVATURE) * dt;
       pts.push({ x, y, heading: theta });
     }
     return pts;
@@ -100,12 +118,14 @@ export function TrajectoryBEV({
         m = Math.max(m, Math.abs(p.x), Math.abs(p.y));
       }
     }
-    return m * 1.15;
+    // Robust ceiling: allow a real highway plan (v*6.4s ~100m+) on-canvas, but a
+    // lone non-physical outlier still can't blow the grid out past 150m.
+    return Math.min(Math.max(m * 1.15, 20), 150);
   }, [samples]);
 
   const scale = SIZE / 2 / extent;
   const cx = SIZE / 2;
-  const cy = SIZE * 0.7; // ego sits below center: more room ahead
+  const cy = SIZE * 0.82; // ego sits low: more room ahead for long plans
   // ego frame -> screen: up = +x (forward), left (+y) = screen left.
   const sx = (p: { x: number; y: number }) => cx - p.y * scale;
   const sy = (p: { x: number; y: number }) => cy - p.x * scale;
@@ -141,20 +161,47 @@ export function TrajectoryBEV({
     return out;
   }, [extent, scale, cx, cy]);
 
+  // Reasoning-horizon dots pinned onto the plan path: each horizon's t seconds
+  // maps to rollout step round(t * fps) of the 64-step plan (dt = 1/fps), so a
+  // t+2s horizon lands on the plan point 2s ahead. Skips horizons past the
+  // integrated plan length.
+  const horizonDots = useMemo(() => {
+    if (!reasoning?.horizons?.length || traj.length === 0) return [];
+    const out: { x: number; y: number; sec: number }[] = [];
+    for (const h of reasoning.horizons) {
+      const step = Math.round(h.horizon_sec * (fps || 10));
+      const p = traj[step];
+      if (!p) continue;
+      out.push({ x: sx(p), y: sy(p), sec: h.horizon_sec });
+    }
+    return out;
+    // sx/sy derive from scale/cx/cy; traj + reasoning + fps drive the result.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [reasoning, traj, fps, scale]);
+
   const speed = samples[frame]?.ego_now?.[0] ?? 0;
-  // How much of the 6.4s plan is covered by remaining frames (i.e. verifiable
-  // against the realized path). realized has one point per remaining frame.
+  // planSec is the plan horizon; the amber realized path is clipped to the same
+  // horizon so plan and actual are directly comparable. coveredSec is how much
+  // of that horizon the remaining frames actually verify (< planSec near the
+  // end of the shard).
   const planSec = traj.length / (fps || 10);
-  const actualSec = Math.max(0, realized.length - 1) / (fps || 10);
+  const coveredSec = realized.length / (fps || 10);
+  const partial = realized.length < traj.length;
 
   return (
     <div className="space-y-1">
       <div className="flex items-center justify-between font-mono text-[10px] text-slate-500">
         <span>
           BEV — <span className="text-slate-400">past</span> ·{" "}
-          <span className="text-blue-500">plan</span> {planSec.toFixed(1)}s /{" "}
-          <span className="text-amber-500">actual</span>{" "}
-          {actualSec.toFixed(1)}s
+          <span className="text-blue-500">plan</span> /{" "}
+          <span className="text-amber-500">actual</span> first{" "}
+          {planSec.toFixed(1)}s
+          {partial && (
+            <span className="text-slate-600">
+              {" "}
+              (only {coveredSec.toFixed(1)}s left in shard)
+            </span>
+          )}
         </span>
         <span>v = {speed.toFixed(1)} m/s</span>
       </div>
@@ -233,6 +280,29 @@ export function TrajectoryBEV({
             fill="#3b82f6"
           />
         )}
+
+        {/* reasoning horizons pinned onto the plan path (t+Ns dots) */}
+        {horizonDots.map((d) => (
+          <g key={d.sec}>
+            <circle
+              cx={d.x}
+              cy={d.y}
+              r="3.5"
+              fill="#a78bfa"
+              stroke="#0f172a"
+              strokeWidth="1"
+            />
+            <text
+              x={d.x + 5}
+              y={d.y + 3}
+              fill="#c4b5fd"
+              fontSize="8"
+              fontFamily="monospace"
+            >
+              +{d.sec}s
+            </text>
+          </g>
+        ))}
 
         {/* ego marker (triangle pointing forward/up) */}
         <polygon

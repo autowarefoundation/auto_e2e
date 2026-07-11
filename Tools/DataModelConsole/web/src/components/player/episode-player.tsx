@@ -37,6 +37,7 @@ import { Button } from "@/components/ui/button";
 import { usePlayback, MAX_SPEED, MIN_SPEED } from "@/hooks/use-playback";
 import { ApiError, getReasoningLabel } from "@/lib/api";
 import { FrameStore } from "@/lib/frame-store";
+import { MAX_YAW_RATE, MAX_CURVATURE } from "@/lib/ego";
 import type { ReasoningLabelRecord, ShardIndex } from "@/types";
 
 const SPEED_STEPS = [0.1, 0.25, 0.5, 1, 2, 4, 8, 16];
@@ -286,13 +287,16 @@ export function EpisodePlayer({
             samples={index.samples}
             frame={frame}
             fps={index.fps || 10}
+            reasoning={
+              reasoning?.key === sample?.key ? reasoning.label : null
+            }
           />
           <div className="rounded-md border border-slate-800 bg-slate-900/60 p-2 font-mono text-[10px] leading-relaxed text-slate-400">
             <p>
-              ep {sample?.episode_id || "-"} · trip frame{" "}
+              ep {sample?.episode_id || "-"} ·{" "}
               {sample && sample.trip_frame >= 0
-                ? sample.trip_frame
-                : (sample?.frame_idx ?? "-")}
+                ? `trip frame ${sample.trip_frame}`
+                : `frame ${sample?.frame_idx ?? "-"}`}
             </p>
             <p>key: {sample?.key ?? "-"}</p>
             <p>
@@ -300,8 +304,31 @@ export function EpisodePlayer({
               {sample?.ego_now?.[1]?.toFixed(2) ?? "-"} m/s^2
             </p>
             <p>
-              yaw_rate {sample?.ego_now?.[2]?.toFixed(3) ?? "-"} rad/s | kappa{" "}
-              {sample?.ego_now?.[3]?.toFixed(4) ?? "-"} 1/m
+              yaw_rate{" "}
+              <span
+                className={
+                  Math.abs(sample?.ego_now?.[2] ?? 0) > MAX_YAW_RATE
+                    ? "text-amber-500"
+                    : ""
+                }
+              >
+                {sample?.ego_now?.[2]?.toFixed(3) ?? "-"}
+              </span>{" "}
+              rad/s | kappa{" "}
+              <span
+                className={
+                  Math.abs(sample?.ego_now?.[3] ?? 0) > MAX_CURVATURE
+                    ? "text-amber-500"
+                    : ""
+                }
+              >
+                {sample?.ego_now?.[3]?.toFixed(4) ?? "-"}
+              </span>{" "}
+              1/m
+              {(Math.abs(sample?.ego_now?.[2] ?? 0) > MAX_YAW_RATE ||
+                Math.abs(sample?.ego_now?.[3] ?? 0) > MAX_CURVATURE) && (
+                <span className="text-amber-600"> · non-physical (clamped in BEV)</span>
+              )}
             </p>
           </div>
         </div>
@@ -356,6 +383,9 @@ export function EpisodePlayer({
         </Button>
         <span className="mx-1 h-4 w-px bg-slate-800" />
         <Gauge className="size-3.5 text-slate-500" />
+        {/* Always-visible readout: usePlayback clamps but accepts off-preset
+            speeds (e.g. ?speed=3), which would otherwise light no chip. */}
+        <span className="font-mono text-[10px] text-slate-400">{speed}x</span>
         {SPEED_STEPS.map((s) => (
           <button
             key={s}

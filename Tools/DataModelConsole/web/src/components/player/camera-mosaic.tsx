@@ -80,6 +80,10 @@ function CanvasTile({
     return () => {
       cancelled = true;
       clearTimeout(timeout);
+      // Release the connection slot for the frame we're leaving. frame is
+      // shared across every tile, so React tears down all tiles for the old
+      // frame together — abort only ever targets frames every tile is leaving.
+      store.abort(frame, cam);
     };
   }, [store, frame, cam]);
 
@@ -131,10 +135,9 @@ function EgoTile({ sample }: { sample?: IndexSample }) {
         🚗
       </span>
       <p className="text-slate-500">
-        trip frame{" "}
         {sample && sample.trip_frame >= 0
-          ? sample.trip_frame
-          : (sample?.frame_idx ?? "-")}
+          ? `trip frame ${sample.trip_frame}`
+          : `frame ${sample?.frame_idx ?? "-"}`}
       </p>
       <p>v {ego[0]?.toFixed(2) ?? "-"} m/s</p>
       <p>a {ego[1]?.toFixed(2) ?? "-"} m/s²</p>
@@ -187,7 +190,10 @@ export function CameraMosaic({
             <Grid3x3 className="size-4" />
           </button>
         </div>
-        <div className="grid grid-cols-7 gap-1.5">
+        <div
+          className="grid gap-1.5"
+          style={{ gridTemplateColumns: `repeat(${cams.length}, minmax(0,1fr))` }}
+        >
           {cams.map((cam, i) => (
             <CanvasTile
               key={cam}
