@@ -36,6 +36,13 @@ def test_nvidia_horizon_reach_within_future_margin():
     must stay within the egomotion future margin, or get_front_clip would run off
     the end of the valid-sample window and the sample_id enumeration (which uses
     those margins) would not match data_processing."""
+    # nvidia_physical_ai.egomotion imports pandas + physical_ai_av (NVIDIA-only
+    # optional deps not in the core requirements / CI env). Skip when unavailable,
+    # matching the other NVIDIA tests — this is a pure-constant invariant check, not
+    # something that should force heavyweight optional deps into the base test env.
+    import pytest
+    pytest.importorskip("pandas")
+    pytest.importorskip("physical_ai_av")
     from data_parsing.nvidia_physical_ai.egomotion import _FUTURE_TIMESTEPS
     wm_num_frames, wm_stride = 4, 10   # NvidiaAVDataset defaults
     reach = wm_num_frames * wm_stride
