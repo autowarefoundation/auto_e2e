@@ -1,5 +1,22 @@
 # WM-shard trajectory-loss floor investigation (2026-07-11)
 
+## Progress: closing the full-3-branch vs imitation gap (matched conditions)
+
+Same WM shard (10 ep / 1037 smp), same 30 epochs, same lr=5e-4, same fixed eval.
+
+| config | ADE | FDE | note |
+|---|---|---|---|
+| imitation-only | **1.771m** | 5.157m | baseline (eval unchanged old/new — no WM) |
+| full 3-branch, original | 2.409m | 6.627m | had the eval visual_history skew |
+| full 3-branch, + eval-skew fix (same ckpt) | 2.020m | 5.932m | eval now feeds WM windows |
+| full 3-branch, + zero-init proj + detach (retrained) | **1.860m** | **5.045m** | branches strictly additive |
+
+The three fixes took the full 3-branch model from 2.409m → 1.860m ADE. It now
+BEATS imitation on FDE (5.045 vs 5.157m) and is within 0.09m on ADE. The
+reasoning loss was still descending at epoch 30 (1.18→0.50), so the branches had
+not finished learning — more epochs are expected to let the (now strictly
+additive) branches pull ahead on ADE too.
+
 ## Follow-up: why the full 3-branch run's eval ADE (2.409m) is WORSE than imitation-only (1.771m)
 
 Same WM shard, same 30 epochs, same lr. RUN-IMIT (branches off, bs=4) → ADE
