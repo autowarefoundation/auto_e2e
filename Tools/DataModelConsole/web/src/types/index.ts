@@ -84,19 +84,23 @@ export interface MemberRange {
 
 // IndexSample is one frame entry of the shard index.
 // ego_now: [speed, accel, yaw_rate, curvature] at this frame.
+// ego_future: 128 floats = 64 steps x [accel, curvature] — the future plan.
 export interface IndexSample {
   key: string;
-  frame_idx: number;
+  episode_id: string;
+  frame_idx: number; // intra-shard playback ordinal (key suffix)
+  trip_frame: number; // trip-global frame index from meta.json (-1 if absent)
   members: Record<string, MemberRange>; // "cam_0.jpg" -> range
   ego_now: number[];
+  ego_history: number[]; // 256 floats = 64 steps x [speed, accel, yaw_rate, curvature]
+  ego_future: number[];
   has_reasoning: boolean;
 }
 
 // ShardIndex is GET .../shards/{shard}/index — everything the client needs
-// to play a shard as a 10Hz video via ranged GETs on the presigned tar.
+// to play a shard as a 10Hz video (frames fetched per-member via the image
+// endpoint).
 export interface ShardIndex {
-  presigned_tar_url: string;
-  expires_at: string; // RFC3339
   fps: number; // 10
   samples: IndexSample[];
 }

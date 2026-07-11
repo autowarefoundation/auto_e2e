@@ -15,7 +15,10 @@ import { getSampleImageUrl } from "@/lib/api";
 import type { IndexSample, ShardIndex } from "@/types";
 
 const DEFAULT_MAX_ENTRIES = 500;
-const MAX_INFLIGHT = 24;
+// Keep client concurrency at or below the server's image Throttle so prefetch
+// bursts don't get 429'd; the server allows 64 concurrent image GETs, but a
+// single player only needs a small look-ahead ring in flight at once.
+const MAX_INFLIGHT = 8;
 const PREFETCH_BEHIND = 4;
 
 export class FrameStore {
@@ -27,6 +30,9 @@ export class FrameStore {
   // so the first key is always the least recently used.
   private readonly cache = new Map<string, ImageBitmap>();
   private readonly inflight = new Map<string, Promise<ImageBitmap>>();
+  // One AbortController per in-flight fetch so destroy() can cancel pending
+  // network requests instead of leaving them to resolve into closed bitmaps.
+  private readonly controllers = new Map<string, AbortController>();
   private readonly maxEntries: number;
   private destroyed = false;
 
@@ -60,10 +66,6 @@ export class FrameStore {
     return this.index.samples[pos] ?? this.byFrame.get(pos);
   }
 
-  has(frameIdx: number, cam: string): boolean {
-    return this.cache.has(`${frameIdx}:${cam}`);
-  }
-
   // getFrame returns the decoded bitmap for (frame, cam), deduplicating
   // concurrent requests and populating the LRU cache.
   getFrame(frameIdx: number, cam: string): Promise<ImageBitmap> {
@@ -78,9 +80,12 @@ export class FrameStore {
     const pending = this.inflight.get(key);
     if (pending) return pending;
 
-    const p = this.fetchBitmap(frameIdx, cam)
+    const controller = new AbortController();
+    this.controllers.set(key, controller);
+    const p = this.fetchBitmap(frameIdx, cam, controller.signal)
       .then((bmp) => {
         this.inflight.delete(key);
+        this.controllers.delete(key);
         if (this.destroyed) {
           bmp.close();
           throw new Error("FrameStore destroyed");
@@ -90,6 +95,7 @@ export class FrameStore {
       })
       .catch((err: unknown) => {
         this.inflight.delete(key);
+        this.controllers.delete(key);
         throw err;
       });
     this.inflight.set(key, p);
@@ -133,6 +139,8 @@ export class FrameStore {
   // on arrival (see getFrame).
   destroy(): void {
     this.destroyed = true;
+    for (const controller of this.controllers.values()) controller.abort();
+    this.controllers.clear();
     for (const bmp of this.cache.values()) bmp.close();
     this.cache.clear();
     this.inflight.clear();
@@ -151,17 +159,26 @@ export class FrameStore {
   private async fetchBitmap(
     frameIdx: number,
     cam: string,
+    signal?: AbortSignal,
   ): Promise<ImageBitmap> {
     const sample = this.sampleAt(frameIdx);
     if (!sample) throw new Error(`no sample at frame ${frameIdx}`);
-    if (!sample.members[`${cam}.jpg`]) {
+    const range = sample.members[`${cam}.jpg`];
+    if (!range) {
       throw new Error(`no member ${cam}.jpg in ${sample.key}`);
     }
 
-    // cam is "cam_N"; the API endpoint takes the numeric index.
+    // cam is "cam_N"; the API endpoint takes the numeric index. Passing the
+    // known tar byte range lets the API serve it via a bounded S3 range GET.
     const camNum = Number(cam.replace(/^cam_/, ""));
-    const url = getSampleImageUrl(this.dataset, this.shard, sample.key, camNum);
-    const res = await fetch(url);
+    const url = getSampleImageUrl(
+      this.dataset,
+      this.shard,
+      sample.key,
+      camNum,
+      range,
+    );
+    const res = await fetch(url, { signal });
     if (!res.ok) {
       throw new Error(`image fetch failed: ${res.status} ${res.statusText}`);
     }
