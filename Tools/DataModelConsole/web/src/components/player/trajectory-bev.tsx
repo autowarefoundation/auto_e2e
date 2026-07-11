@@ -2,50 +2,106 @@
 
 // TrajectoryBEV: bird's-eye view of the ego future trajectory.
 //
-// The upcoming accel/curvature signals (the same channels stored in
-// ego_future, read here from the shard index's per-frame ego_now so playback
-// needs no extra fetches) are rolled out with the unicycle model into an XY
-// path in the ego frame: up = forward (+x), left = +y. Metric grid included.
+// The per-frame ego_future plan (128 floats = 64 steps x [accel, curvature])
+// is rolled out with the unicycle model into an XY path in the ego frame:
+// up = forward (+x), left = +y. Because the full 6.4s plan is stored on every
+// sample, the trajectory renders at full length regardless of how many frames
+// remain in the shard. Metric grid included.
 
 import { useMemo } from "react";
 
-import { integrateTrajectory } from "@/lib/ego";
+import { decodeEgo, integrateTrajectory } from "@/lib/ego";
+import type { TrajectoryPoint } from "@/lib/ego";
 import type { IndexSample } from "@/types";
 
 const SIZE = 300;
-const HORIZON_STEPS = 64; // 6.4s at 10Hz
 const GRID_M = 10;
 
 export function TrajectoryBEV({
   samples,
   frame,
+  fps = 10,
 }: {
   samples: IndexSample[];
   frame: number;
+  fps?: number;
 }) {
   const traj = useMemo(() => {
     const now = samples[frame];
-    if (!now) return [];
-    const v0 = now.ego_now?.[0] ?? 0;
-    const accel: number[] = [];
-    const curvature: number[] = [];
-    for (let i = 1; i <= HORIZON_STEPS; i++) {
-      const s = samples[frame + i];
-      if (!s) break;
-      accel.push(s.ego_now?.[1] ?? 0);
-      curvature.push(s.ego_now?.[3] ?? 0);
-    }
-    return integrateTrajectory(v0, accel, curvature);
+    if (!now?.ego_future?.length) return [];
+    const { future } = decodeEgo([], now.ego_future);
+    return integrateTrajectory(
+      now.ego_now?.[0] ?? 0,
+      future.accel,
+      future.curvature,
+    );
   }, [samples, frame]);
 
-  // Fit scale: at least 40m of forward view, expanded to cover the path.
+  // Realized path: chain the chronological ego_now (speed + yaw_rate) of the
+  // frames from here to the end of the shard into an XY path. This is what the
+  // ego actually drove vs the plan; it is short when few frames remain, which
+  // is itself the honest signal about how much of the plan is verifiable.
+  const realized = useMemo(() => {
+    const dt = 1 / (fps || 10);
+    const pts: TrajectoryPoint[] = [];
+    let x = 0;
+    let y = 0;
+    let theta = 0;
+    for (let i = frame; i < samples.length; i++) {
+      const v = samples[i].ego_now?.[0] ?? 0;
+      const yawRate = samples[i].ego_now?.[2] ?? 0;
+      theta += yawRate * dt;
+      x += v * Math.cos(theta) * dt;
+      y += v * Math.sin(theta) * dt;
+      pts.push({ x, y, heading: theta });
+    }
+    return pts;
+  }, [samples, frame, fps]);
+
+  // Past trajectory: integrate the 256-float ego_history (64 steps x [speed,
+  // accel, yaw_rate, curvature]) BACKWARDS from the ego marker, so the trailing
+  // driven path is visible mid-clip even without cross-shard stitching. We walk
+  // the history newest→oldest and step in reverse (subtract the per-step
+  // motion), which places recent history nearest the ego.
+  const history = useMemo(() => {
+    const now = samples[frame];
+    if (!now?.ego_history?.length) return [];
+    const { history: h } = decodeEgo(now.ego_history, []);
+    const dt = 1 / (fps || 10);
+    const pts: TrajectoryPoint[] = [];
+    let x = 0;
+    let y = 0;
+    let theta = 0;
+    for (let i = h.speed.length - 1; i >= 0; i--) {
+      const v = h.speed[i] ?? 0;
+      const yawRate = h.yawRate[i] ?? 0;
+      // Reverse integration: undo one step of the unicycle model.
+      x -= v * Math.cos(theta) * dt;
+      y -= v * Math.sin(theta) * dt;
+      theta -= yawRate * dt;
+      pts.push({ x, y, heading: theta });
+    }
+    return pts;
+  }, [samples, frame, fps]);
+
+  // Fit scale over ALL samples' plans so the metric window is stable across
+  // frames (only the plotted path moves, not the gridlines). At least 20m.
   const extent = useMemo(() => {
     let m = 20;
-    for (const p of traj) {
-      m = Math.max(m, Math.abs(p.x), Math.abs(p.y));
+    for (const s of samples) {
+      if (!s.ego_future?.length) continue;
+      const { future } = decodeEgo([], s.ego_future);
+      const rolled = integrateTrajectory(
+        s.ego_now?.[0] ?? 0,
+        future.accel,
+        future.curvature,
+      );
+      for (const p of rolled) {
+        m = Math.max(m, Math.abs(p.x), Math.abs(p.y));
+      }
     }
     return m * 1.15;
-  }, [traj]);
+  }, [samples]);
 
   const scale = SIZE / 2 / extent;
   const cx = SIZE / 2;
@@ -55,6 +111,14 @@ export function TrajectoryBEV({
   const sy = (p: { x: number; y: number }) => cy - p.x * scale;
 
   const path = traj
+    .map((p, i) => `${i === 0 ? "M" : "L"}${sx(p).toFixed(1)},${sy(p).toFixed(1)}`)
+    .join(" ");
+
+  const realizedPath = realized
+    .map((p, i) => `${i === 0 ? "M" : "L"}${sx(p).toFixed(1)},${sy(p).toFixed(1)}`)
+    .join(" ");
+
+  const historyPath = history
     .map((p, i) => `${i === 0 ? "M" : "L"}${sx(p).toFixed(1)},${sy(p).toFixed(1)}`)
     .join(" ");
 
@@ -78,11 +142,20 @@ export function TrajectoryBEV({
   }, [extent, scale, cx, cy]);
 
   const speed = samples[frame]?.ego_now?.[0] ?? 0;
+  // How much of the 6.4s plan is covered by remaining frames (i.e. verifiable
+  // against the realized path). realized has one point per remaining frame.
+  const planSec = traj.length / (fps || 10);
+  const actualSec = Math.max(0, realized.length - 1) / (fps || 10);
 
   return (
     <div className="space-y-1">
       <div className="flex items-center justify-between font-mono text-[10px] text-slate-500">
-        <span>BEV — future {(traj.length / 10).toFixed(1)}s</span>
+        <span>
+          BEV — <span className="text-slate-400">past</span> ·{" "}
+          <span className="text-blue-500">plan</span> {planSec.toFixed(1)}s /{" "}
+          <span className="text-amber-500">actual</span>{" "}
+          {actualSec.toFixed(1)}s
+        </span>
         <span>v = {speed.toFixed(1)} m/s</span>
       </div>
       <svg
@@ -115,7 +188,33 @@ export function TrajectoryBEV({
           </g>
         ))}
 
-        {/* trajectory */}
+        {/* past trajectory: dashed slate, trailing behind the ego */}
+        {historyPath && (
+          <path
+            d={historyPath}
+            fill="none"
+            stroke="#64748b"
+            strokeWidth="1.5"
+            strokeDasharray="2 3"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
+        )}
+
+        {/* realized (driven) path: dashed amber, under the plan */}
+        {realizedPath && (
+          <path
+            d={realizedPath}
+            fill="none"
+            stroke="#f59e0b"
+            strokeWidth="2"
+            strokeDasharray="4 3"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
+        )}
+
+        {/* planned trajectory */}
         {path && (
           <path
             d={path}

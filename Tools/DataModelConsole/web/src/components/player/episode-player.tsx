@@ -21,6 +21,7 @@ import {
 } from "react";
 import {
   Gauge,
+  Keyboard,
   Pause,
   Play,
   Rewind,
@@ -39,6 +40,8 @@ import { FrameStore } from "@/lib/frame-store";
 import type { ReasoningLabelRecord, ShardIndex } from "@/types";
 
 const SPEED_STEPS = [0.1, 0.25, 0.5, 1, 2, 4, 8, 16];
+
+type LabelState = { key: string; label: ReasoningLabelRecord } | null;
 
 export interface PlayerViewState {
   frame: number;
@@ -97,7 +100,7 @@ export function EpisodePlayer({
   const [mode, setMode] = useState<"grid" | "focus">(
     initialState?.mode ?? "grid",
   );
-  const [focusCam, setFocusCam] = useState(initialState?.cam ?? 0);
+  const [focusCam, setFocusCam] = useState(Math.max(0, initialState?.cam ?? 0));
   useEffect(() => {
     if (initialState?.speed) setSpeed(initialState.speed);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -115,23 +118,41 @@ export function EpisodePlayer({
     store.prefetch(frame, direction, playing ? speed : 1, visible);
   }, [store, frame, direction, speed, playing, mode, focusCam, cams]);
 
-  // Reasoning label for the current frame (debounced; 404 = no label).
+  // Reasoning label for the current frame (debounced; 404 = no label). The
+  // label is bound to the sample key it was fetched for so an in-flight
+  // response for a prior frame can never render on the current one, and a
+  // discrete status drives the panel (never hangs on 404/5xx, never shows a
+  // stale card for a frame that is still loading).
   const sample = index.samples[frame];
-  const [reasoning, setReasoning] = useState<ReasoningLabelRecord | null>(null);
+  const [reasoning, setReasoning] = useState<LabelState>(null);
+  const [labelStatus, setLabelStatus] = useState<
+    "idle" | "loading" | "ready" | "absent" | "error"
+  >("idle");
   useEffect(() => {
     if (!sample?.has_reasoning) {
       setReasoning(null);
+      setLabelStatus("idle");
       return;
     }
+    const key = sample.key;
+    setLabelStatus("loading"); // clear any stale card immediately
     let cancelled = false;
     const timer = setTimeout(() => {
-      getReasoningLabel(dataset, sample.key)
+      getReasoningLabel(dataset, key)
         .then((label) => {
-          if (!cancelled) setReasoning(label);
+          if (cancelled) return;
+          setReasoning({ key, label });
+          setLabelStatus("ready");
         })
         .catch((err: unknown) => {
-          if (!cancelled && err instanceof ApiError && err.status === 404) {
+          if (cancelled) return;
+          if (err instanceof ApiError && err.status === 404) {
             setReasoning(null);
+            setLabelStatus("absent");
+          } else {
+            console.warn("reasoning label fetch failed", err);
+            setReasoning(null);
+            setLabelStatus("error");
           }
         });
     }, 250);
@@ -150,13 +171,39 @@ export function EpisodePlayer({
     [cams.length],
   );
 
-  const onKeyDown = useCallback(
-    (e: React.KeyboardEvent) => {
+  const [showHelp, setShowHelp] = useState(false);
+
+  // One-time discoverability hint: shown until the user opens the help or
+  // explicitly dismisses it, persisted in localStorage so it appears once.
+  const HINT_KEY = "adas-player-shortcut-hint-dismissed";
+  const [showHint, setShowHint] = useState(false);
+  useEffect(() => {
+    try {
+      if (localStorage.getItem(HINT_KEY) !== "1") setShowHint(true);
+    } catch {
+      // localStorage may be unavailable (private mode); skip the hint.
+    }
+  }, []);
+  const dismissHint = useCallback(() => {
+    setShowHint(false);
+    try {
+      localStorage.setItem(HINT_KEY, "1");
+    } catch {
+      // ignore persistence failure
+    }
+  }, []);
+
+  // Bind shortcuts at the window level so they work regardless of which DOM
+  // node has focus (clicking a control no longer traps Space/arrows). The
+  // INPUT/TEXTAREA guard keeps typing intact; the BUTTON guard for Space stops
+  // the browser's native activation from double-firing alongside toggle().
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
       const t = e.target as HTMLElement | null;
       if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA")) return;
       switch (e.key) {
         case " ":
-          e.preventDefault();
+          e.preventDefault(); // also suppresses native BUTTON activation
           toggle();
           break;
         case "ArrowLeft":
@@ -184,8 +231,14 @@ export function EpisodePlayer({
           e.preventDefault();
           setMode((m) => (m === "grid" ? "focus" : "grid"));
           break;
+        case "?":
+          e.preventDefault();
+          setShowHelp((v) => !v);
+          dismissHint();
+          break;
         case "Escape":
           e.preventDefault();
+          setShowHelp(false);
           setMode("grid");
           break;
         default: {
@@ -196,14 +249,10 @@ export function EpisodePlayer({
           }
         }
       }
-    },
-    [toggle, step, setSpeed, speed, focusCamera],
-  );
-
-  // Focus the container on mount so keys work immediately.
-  useEffect(() => {
-    containerRef.current?.focus();
-  }, []);
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [toggle, step, setSpeed, speed, focusCamera, dismissHint]);
 
   if (!store || cams.length === 0) {
     return (
@@ -217,13 +266,14 @@ export function EpisodePlayer({
     <div
       ref={containerRef}
       tabIndex={0}
-      onKeyDown={onKeyDown}
       className="space-y-4 outline-none focus-visible:ring-1 focus-visible:ring-slate-600 rounded-lg"
-      aria-label="Episode player (keyboard: space, arrows, 1-7, f)"
+      aria-label="Episode player (keyboard: space, arrows, 1-7, f, ? for help)"
     >
       <div className="grid gap-4 xl:grid-cols-[1fr_300px]">
         <CameraMosaic
           store={store}
+          dataset={dataset}
+          sample={sample}
           frame={frame}
           cams={cams}
           mode={mode}
@@ -232,8 +282,18 @@ export function EpisodePlayer({
           onToggleFocus={() => setMode((m) => (m === "grid" ? "focus" : "grid"))}
         />
         <div className="space-y-3">
-          <TrajectoryBEV samples={index.samples} frame={frame} />
+          <TrajectoryBEV
+            samples={index.samples}
+            frame={frame}
+            fps={index.fps || 10}
+          />
           <div className="rounded-md border border-slate-800 bg-slate-900/60 p-2 font-mono text-[10px] leading-relaxed text-slate-400">
+            <p>
+              ep {sample?.episode_id || "-"} · trip frame{" "}
+              {sample && sample.trip_frame >= 0
+                ? sample.trip_frame
+                : (sample?.frame_idx ?? "-")}
+            </p>
             <p>key: {sample?.key ?? "-"}</p>
             <p>
               speed {sample?.ego_now?.[0]?.toFixed(2) ?? "-"} m/s | accel{" "}
@@ -260,6 +320,7 @@ export function EpisodePlayer({
           size="icon-sm"
           onClick={() => setFrame(0)}
           aria-label="Back to start"
+          title="Back to start"
         >
           <Rewind className="size-3.5" />
         </Button>
@@ -268,6 +329,7 @@ export function EpisodePlayer({
           size="icon-sm"
           onClick={() => step(-1)}
           aria-label="Step back one frame"
+          title="Step back one frame (← or ,)"
         >
           <StepBack className="size-3.5" />
         </Button>
@@ -275,6 +337,7 @@ export function EpisodePlayer({
           size="icon-sm"
           onClick={toggle}
           aria-label={playing ? "Pause" : "Play"}
+          title="Play/Pause (Space)"
         >
           {playing ? (
             <Pause className="size-3.5" />
@@ -287,6 +350,7 @@ export function EpisodePlayer({
           size="icon-sm"
           onClick={() => step(1)}
           aria-label="Step forward one frame"
+          title="Step forward one frame (→ or .)"
         >
           <StepForward className="size-3.5" />
         </Button>
@@ -296,6 +360,7 @@ export function EpisodePlayer({
           <button
             key={s}
             onClick={() => setSpeed(s)}
+            title={`Set speed ${s}x ([ / ] to change)`}
             className={`rounded px-1.5 py-0.5 font-mono text-[10px] transition-colors ${
               Math.abs(speed - s) < 1e-9
                 ? "bg-blue-600 text-white"
@@ -305,19 +370,85 @@ export function EpisodePlayer({
             {s}x
           </button>
         ))}
-        <span className="ml-auto font-mono text-[10px] text-slate-500">
-          keys: space, arrows, ,/., [/], 1-7, f, esc
-        </span>
+        <button
+          onClick={() => {
+            setShowHelp((v) => !v);
+            dismissHint();
+          }}
+          title="Keyboard shortcuts (?)"
+          aria-label="Keyboard shortcuts"
+          className="ml-auto flex items-center gap-1 rounded bg-slate-900 px-2 py-1 font-mono text-[11px] text-slate-400 transition-colors hover:text-slate-200"
+        >
+          <Keyboard className="size-3.5" />
+          Shortcuts (?)
+        </button>
       </div>
+
+      {showHint && (
+        <div className="flex items-center justify-between rounded-md border border-slate-800 bg-slate-900/60 px-3 py-1.5 text-[11px] text-slate-400">
+          <span>
+            Press <kbd className="rounded bg-slate-800 px-1">?</kbd> for keyboard
+            shortcuts.
+          </span>
+          <button
+            onClick={dismissHint}
+            className="font-mono text-slate-500 hover:text-slate-300"
+            aria-label="Dismiss hint"
+          >
+            dismiss
+          </button>
+        </div>
+      )}
+
+      {showHelp && (
+        <div className="rounded-lg border border-slate-700 bg-slate-950/80 p-4">
+          <div className="mb-2 flex items-center justify-between">
+            <p className="text-[10px] uppercase tracking-wider text-slate-500">
+              Keyboard shortcuts
+            </p>
+            <button
+              onClick={() => setShowHelp(false)}
+              className="font-mono text-[10px] text-slate-500 hover:text-slate-300"
+            >
+              close (esc)
+            </button>
+          </div>
+          <dl className="grid grid-cols-2 gap-x-6 gap-y-1 font-mono text-[11px] text-slate-400 sm:grid-cols-3">
+            {[
+              ["Space", "play / pause"],
+              ["← / ,", "step back one frame"],
+              ["→ / .", "step forward one frame"],
+              ["[ / -", "slower"],
+              ["] / +", "faster"],
+              ["1 - 7", "focus camera n"],
+              ["f", "toggle focus / grid"],
+              ["Esc", "back to grid"],
+              ["?", "toggle this help"],
+            ].map(([k, desc]) => (
+              <div key={k} className="flex items-baseline gap-2">
+                <kbd className="rounded bg-slate-800 px-1.5 py-0.5 text-slate-200">
+                  {k}
+                </kbd>
+                <span>{desc}</span>
+              </div>
+            ))}
+          </dl>
+        </div>
+      )}
 
       <div className="rounded-lg border border-slate-800 bg-slate-950/50 p-4">
         <p className="mb-3 text-[10px] uppercase tracking-wider text-slate-500">
           Reasoning label
         </p>
-        {sample?.has_reasoning && reasoning ? (
-          <ReasoningTimeline label={reasoning} />
-        ) : sample?.has_reasoning ? (
+        {labelStatus === "ready" && reasoning?.key === sample?.key ? (
+          <ReasoningTimeline label={reasoning.label} />
+        ) : labelStatus === "loading" ? (
           <p className="text-sm text-slate-500">Loading label…</p>
+        ) : labelStatus === "error" ? (
+          <p className="text-sm text-amber-500">
+            Could not load the label for this frame. It may retry on the next
+            step.
+          </p>
         ) : (
           <p className="text-sm text-slate-500">
             No reasoning label at this frame. Amber ticks on the timeline mark
