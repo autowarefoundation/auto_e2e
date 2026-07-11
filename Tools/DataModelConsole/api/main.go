@@ -62,33 +62,43 @@ func main() {
 	r.Get("/readyz", healthH.Readyz)
 
 	r.Route("/api/v1", func(r chi.Router) {
-		// Backpressure scoped to the data API: full-tar scans are expensive, so
-		// bound concurrency (chi Throttle returns 429 on excess) instead of
-		// exhausting memory/S3 connections. Health checks above are exempt.
-		r.Use(middleware.Throttle(16))
 		// Must stay below CloudFront's origin_read_timeout (30s) so clients get
 		// a proper 504 from us instead of CloudFront timing out first.
 		r.Use(middleware.Timeout(25 * time.Second))
 
-		r.Get("/stats", statsH.Get)
+		// Expensive endpoints (full-tar scans / upstream proxies): bound
+		// concurrency (chi Throttle returns 429 on excess) so they cannot
+		// exhaust memory/S3 connections. Health checks above are exempt.
+		r.Group(func(r chi.Router) {
+			r.Use(middleware.Throttle(16))
 
-		r.Get("/datasets", datasetsH.List)
-		r.Get("/datasets/{name}/shards", datasetsH.ListShards)
-		r.Get("/datasets/{name}/shards/{shard}/index", datasetsH.GetShardIndex)
-		r.Get("/datasets/{name}/shards/{shard}/samples", datasetsH.ListSamples)
-		r.Get("/datasets/{name}/shards/{shard}/samples/{key}", datasetsH.GetSample)
-		r.Get("/datasets/{name}/shards/{shard}/samples/{key}/image/{cam}", datasetsH.GetImage)
+			r.Get("/stats", statsH.Get)
 
-		r.Get("/reasoning-labels/stats", reasoningH.Stats)
-		r.Get("/reasoning-labels/{dataset}/{sample_id}", reasoningH.GetLabel)
+			r.Get("/datasets", datasetsH.List)
+			r.Get("/datasets/{name}/shards", datasetsH.ListShards)
+			r.Get("/datasets/{name}/shards/{shard}/index", datasetsH.GetShardIndex)
+			r.Get("/datasets/{name}/shards/{shard}/samples", datasetsH.ListSamples)
+			r.Get("/datasets/{name}/shards/{shard}/samples/{key}", datasetsH.GetSample)
 
-		r.Get("/mlflow/experiments", mlflowH.Experiments)
-		r.Get("/mlflow/experiments/{id}/runs", mlflowH.Runs)
-		r.Get("/mlflow/runs/{id}", mlflowH.Run)
-		r.Get("/mlflow/models", mlflowH.Models)
+			r.Get("/reasoning-labels/stats", reasoningH.Stats)
+			r.Get("/reasoning-labels/{dataset}/{sample_id}", reasoningH.GetLabel)
 
-		r.Get("/flyte/executions", flyteH.Executions)
-		r.Get("/flyte/executions/{id}", flyteH.Execution)
+			r.Get("/mlflow/experiments", mlflowH.Experiments)
+			r.Get("/mlflow/experiments/{id}/runs", mlflowH.Runs)
+			r.Get("/mlflow/runs/{id}", mlflowH.Run)
+			r.Get("/mlflow/models", mlflowH.Models)
+
+			r.Get("/flyte/executions", flyteH.Executions)
+			r.Get("/flyte/executions/{id}", flyteH.Execution)
+		})
+
+		// Image GETs are cheap bounded range reads and the player fires many in
+		// parallel per frame; a looser throttle keeps them from starving against
+		// the expensive tar-scan endpoints above (and vice versa).
+		r.Group(func(r chi.Router) {
+			r.Use(middleware.Throttle(64))
+			r.Get("/datasets/{name}/shards/{shard}/samples/{key}/image/{cam}", datasetsH.GetImage)
+		})
 	})
 
 	srv := &http.Server{
