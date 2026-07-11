@@ -1,5 +1,52 @@
 # WM-shard trajectory-loss floor investigation (2026-07-11)
 
+## Follow-up: why the full 3-branch run's eval ADE (2.409m) is WORSE than imitation-only (1.771m)
+
+Same WM shard, same 30 epochs, same lr. RUN-IMIT (branches off, bs=4) → ADE
+1.771m; RUN-FULL (reasoning+WM on, bs=1×accum4) → ADE 2.409m, despite RUN-FULL's
+train traj loss being ~10× LOWER (0.079 vs 0.808). Better train fit + worse eval
+= a train/eval input skew, not a worse model.
+
+**Root cause (CONFIRMED by 4-dimension adversarial code review): a train/eval
+`visual_history` mismatch that exists only when `enable_world_model=True`.**
+- Training passes `history_frames`, so the model runs the WINDOWED path A
+  (`auto_e2e.py:145-149`): the planner's `visual_history` is a DENSE [B,896]
+  vector from 4 WM-encoded real frames, fed (non-detached) through a default-init
+  `visual_history_proj` (`bezier_planner.py:53,127-131`) that learns to exploit
+  it → train traj loss 0.079.
+- Eval (`_run_evaluation`, `workflows.py:1170-1184`) NEVER passes
+  `history_frames` and calls `mode="infer"`. The checkpoint saved
+  `enable_world_model=True` (`workflows.py:973`), so the eval model still builds
+  the WM and takes rolling-buffer path B (`auto_e2e.py:159-172`), reset per batch
+  (`workflows.py:1175`) → `visual_history = [0,0,0,encoder(current)]`, 672/896
+  dims zero — out of the distribution the planner trained on. The planner's
+  learned reliance on the dense history collapses → higher ADE/FDE.
+- Imitation-only keeps `visual_history == zeros` at BOTH train and eval (WM off +
+  `pre_extracted.py:96`), so no skew — which is why it wins despite a higher
+  train loss.
+
+**Secondary (PARTIALLY_CONFIRMED):** `jepa_loss_weight=1.0` makes the JEPA term
+(~0.33) ~4× the traj term (~0.079) in the total, pulling shared WM modules toward
+the JEPA objective.
+
+**Fixes (priority order):**
+1. ESSENTIAL — remove the skew: pass `history_frames` into the model in
+   `_run_evaluation` so eval runs the same windowed path A as training (future
+   prediction is safely skipped by the `mode=="train"` guard at
+   `auto_e2e.py:157`).
+2. Defensive — zero-init `bezier_planner.visual_history_proj` so the WM input
+   starts as a no-op the planner learns to open (mirrors the reasoning zero-init
+   coupling).
+3. Defensive — `.detach()` the windowed `visual_history` at `auto_e2e.py:149`
+   (the inference path at :163 already detaches), cutting the second
+   non-stationary gradient path from the trajectory loss into the WM.
+
+The bs=4 vs bs=1×accum4 confound was REFUTED as the cause: the model is
+BatchNorm-free and grad accumulation is unit-tested identical to a full-batch
+step, so batching does not explain the gap.
+
+---
+
 ## Symptom
 
 Full 3-branch training (reasoning + world model) on the L2D WM-packed shard
