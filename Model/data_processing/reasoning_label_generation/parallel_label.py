@@ -21,11 +21,14 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, Tuple
 
-# Per-process globals, populated by init_worker in each child process.
-_DS = None
-_CLIENT = None
-_CACHE = None
-_DATASET_NAME = None
+# Per-process globals, populated by init_worker in each child process. Typed Any:
+# deliberately dynamic per-worker state (dataset class / teacher client / cache
+# differ per run) set in init_worker, so a concrete static type would misrepresent
+# them and trip mypy on every use.
+_DS: Any = None
+_CLIENT: Any = None
+_CACHE: Any = None
+_DATASET_NAME: Any = None
 _NUM_HORIZONS = 5
 
 
@@ -57,6 +60,10 @@ def init_worker(
     _DATASET_NAME = dataset_name
     if dataset_name == "nvidia/PhysicalAI-Autonomous-Vehicles":
         from data_parsing.nvidia_physical_ai.dataset import NvidiaAVDataset
+        # NVIDIA reads from a local raw path (no HF repo); raw_path is required.
+        if raw_path is None:
+            raise ValueError(
+                "raw_path is required for the NVIDIA dataset (no HF repo to pull).")
         _DS = NvidiaAVDataset(data_root=raw_path, reasoning_clip_only=True)
     else:
         from data_parsing.l2d import L2DDataset

@@ -1,3 +1,5 @@
+from typing import Optional
+
 import torch
 import torch.nn as nn
 
@@ -27,7 +29,7 @@ class TrajectoryImitationLoss(nn.Module):
 
     def __init__(self, loss_type: str = "smooth_l1", temporal_decay: float = 0.95,
                  num_timesteps: int = 64, num_signals: int = 2,
-                 signal_scales: tuple = None):
+                 signal_scales: Optional[tuple] = None):
         # temporal_decay defaults to 0.95 so near-future predictions are
         # weighted more heavily than far-future ones; near-future accuracy
         # is more safety-critical for planning.
