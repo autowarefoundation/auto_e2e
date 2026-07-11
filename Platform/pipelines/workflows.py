@@ -1180,8 +1180,26 @@ def _run_evaluation(checkpoint, shards, train_metadata, dataset, experiment_name
             target = batch["trajectory_target"]  # (B, 128) on CPU
             map_input = batch["map_input"].to(device)
 
+            # Train/eval consistency (#13): if the shard carries World-Model
+            # windows, feed them so eval runs the SAME windowed path the model
+            # trained on — the planner sees the DENSE WM-derived visual_history it
+            # learned to use, not the mostly-zero rolling-buffer vector. Without
+            # this, a WM-trained model is evaluated out-of-distribution (the
+            # planner's visual_history is 3/4 zeros) and ADE inflates. On shards
+            # without WM windows (imitation-only) batch.get returns None and the
+            # model takes its normal path — identical to before. Future prediction
+            # is gated on mode=="train", so mode="infer" safely skips it.
+            history_frames = batch.get("history_frames")
+            future_frames = batch.get("future_frames")
+            if history_frames is not None:
+                history_frames = history_frames.to(device)
+            if future_frames is not None:
+                future_frames = future_frames.to(device)
+
             pred = model(visual, map_input, vis_hist, ego_hist,
-                         projection=projection, geometry_type=geometry_type, mode="infer")
+                         projection=projection, geometry_type=geometry_type,
+                         history_frames=history_frames, future_frames=future_frames,
+                         mode="infer")
             pred = pred.cpu().numpy()  # (B, 128)
             target_np = target.numpy()
 
