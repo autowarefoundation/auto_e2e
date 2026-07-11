@@ -89,6 +89,18 @@ class TaxonomyGroup:
     def __len__(self) -> int:
         return len(self.labels)
 
+    @property
+    def abstain_label(self) -> str:
+        """The group's abstain label (unknown_*/no_*/none) — always exists per
+        the __post_init__ invariant. Used to backfill an empty MULTI-label group
+        with an explicit 'nothing here' instead of a false-negative all-zero row.
+        """
+        for lbl in self.labels:
+            if lbl.startswith("unknown") or lbl.startswith("no_") or lbl == "none":
+                return lbl
+        # Unreachable: __post_init__ guarantees one exists.
+        raise ValueError(f"group '{self.name}' has no abstain label")
+
     def index(self, label: str) -> int:
         """Return the stable index of *label* (raises ``KeyError`` if absent)."""
         try:

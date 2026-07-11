@@ -97,12 +97,26 @@ def _coerce_horizon(
         raw = entry.get(group)
         if taxonomy[group].mode is LabelMode.MULTI:
             values = raw if isinstance(raw, list) else []
-            kwargs[group] = [v for v in values if isinstance(v, str) and v in allowed]
+            kept = [v for v in values if isinstance(v, str) and v in allowed]
+            # If NOTHING valid survives (all out-of-vocab, or none given), backfill
+            # the group's explicit abstain label instead of leaving an empty list.
+            # An empty MULTI list tensorizes to an all-zero [C] row (every class,
+            # including the abstain class, = 0) which BCE/ASL trains as a hard
+            # false-negative ("no hazard AND every hazard false"). The abstain
+            # label is the correct "nothing active here" and is masked/handled
+            # consistently downstream (R9: never a silent all-zero row).
+            kwargs[group] = kept if kept else [taxonomy[group].abstain_label]
         else:
             kwargs[group] = raw if isinstance(raw, str) and raw in allowed else None
-    conf = entry.get("confidence", 0.0)
-    kwargs["confidence"] = float(conf) if isinstance(conf, (int, float)) else 0.0
-    kwargs["confidence"] = min(1.0, max(0.0, kwargs["confidence"]))
+    # Distinguish an explicit numeric confidence (kept, even 0.0) from a
+    # missing/non-numeric one. Defaulting a MISSING confidence to 0.0 would zero
+    # source_weight and silently drop the whole (otherwise valid) horizon from the
+    # loss; use a neutral 1.0 so a validated label is weighted by provenance.
+    conf = entry.get("confidence", None)
+    if isinstance(conf, (int, float)):
+        kwargs["confidence"] = min(1.0, max(0.0, float(conf)))
+    else:
+        kwargs["confidence"] = 1.0
     ev = entry.get("evidence")
     kwargs["evidence"] = ev if isinstance(ev, str) else None
     return ReasoningHorizonLabel(**kwargs)
