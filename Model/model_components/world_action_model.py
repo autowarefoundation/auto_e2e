@@ -79,13 +79,26 @@ class FrameEncoder(nn.Module):
     """One multi-camera frame ``[B, 3, H, W]`` -> embedding ``[B, frame_embed_dim]``.
 
     backbone -> last feature map -> global average pool -> linear projection.
+
+    ``detach_backbone`` (default True) stop-gradients the backbone feature map
+    before the WM's own projection. The World Model SHARES the trajectory
+    branch's backbone (AutoE2E passes the same instance); without this, the JEPA
+    future-reconstruction loss (weight 1.0) backprops through this encoder into
+    that shared backbone and reshapes it toward "predict future features" instead
+    of "features the planner regresses a trajectory from" — a representation
+    conflict that floors the trajectory loss at ~0.845 (vs 0.36 imitation-only),
+    invariant to batch size. Detaching here confines JEPA's gradient to the WM's
+    own proj / aggregator / future_predictor, so the shared backbone is governed
+    solely by the imitation loss. The JEPA TARGET is already a frozen deepcopy
+    (JepaTargetEncoder), so JEPA still has a stable learning signal.
     """
 
     def __init__(self, backbone: nn.Module, feature_channels: int = 768,
                  frame_embed_dim: int = 224, view_aggregator: str = "attention",
-                 num_views: int = 7):
+                 num_views: int = 7, detach_backbone: bool = True):
         super().__init__()
         self.backbone = backbone
+        self.detach_backbone = detach_backbone
         self.proj = nn.Linear(feature_channels, frame_embed_dim)
         if num_views == 1 and view_aggregator == "attention":
             logger.warning(
@@ -112,16 +125,20 @@ class FrameEncoder(nn.Module):
             B, V = frame.shape[:2]
             feats = self.backbone(frame.reshape(B * V, *frame.shape[2:]))
             m = feats[-1] if isinstance(feats, (list, tuple)) else feats
+            if self.detach_backbone:               # keep JEPA grad off the shared backbone
+                m = m.detach()
             m = m.mean(dim=(2, 3)).reshape(B, V, -1)             # [B, V, feature_channels]
-            
+
             if self.view_aggregator == "attention":
                 m = self.view_pool(m)                            # [B, feature_channels]
             else:
                 m = m.mean(dim=1)                                # [B, feature_channels]
-                
+
             return self.proj(m)                                  # [B, embed]
         feats = self.backbone(frame)               # [B, 3, H, W]
         m = feats[-1] if isinstance(feats, (list, tuple)) else feats
+        if self.detach_backbone:                   # keep JEPA grad off the shared backbone
+            m = m.detach()
         return self.proj(m.mean(dim=(2, 3)))                     # [B, embed]
 
 
