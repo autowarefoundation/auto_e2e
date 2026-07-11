@@ -62,21 +62,18 @@ func main() {
 	r.Get("/readyz", healthH.Readyz)
 
 	r.Route("/api/v1", func(r chi.Router) {
-		// Must stay below CloudFront's origin_read_timeout (30s) so clients get
-		// a proper 504 from us instead of CloudFront timing out first.
-		r.Use(middleware.Timeout(25 * time.Second))
-
-		// Expensive endpoints (full-tar scans / upstream proxies): bound
-		// concurrency (chi Throttle returns 429 on excess) so they cannot
-		// exhaust memory/S3 connections. Health checks above are exempt.
+		// Interactive endpoints: bound concurrency (chi Throttle returns 429 on
+		// excess) and cap latency at 25s (below CloudFront's 30s origin read
+		// timeout so clients get a proper error from us). Health checks above
+		// are exempt.
 		r.Group(func(r chi.Router) {
 			r.Use(middleware.Throttle(16))
+			r.Use(middleware.Timeout(25 * time.Second))
 
 			r.Get("/stats", statsH.Get)
 
 			r.Get("/datasets", datasetsH.List)
 			r.Get("/datasets/{name}/shards", datasetsH.ListShards)
-			r.Get("/datasets/{name}/shards/{shard}/index", datasetsH.GetShardIndex)
 			r.Get("/datasets/{name}/shards/{shard}/samples", datasetsH.ListSamples)
 			r.Get("/datasets/{name}/shards/{shard}/samples/{key}", datasetsH.GetSample)
 
@@ -92,6 +89,17 @@ func main() {
 			r.Get("/flyte/executions/{id}", flyteH.Execution)
 		})
 
+		// The shard index scans the entire tar once (a multi-hundred-MB / GB
+		// read for real shards), so it gets a longer timeout; the result is
+		// cached (single-flighted), so only the first request per shard pays it.
+		// The player shows a loading state while this warms. Lower throttle
+		// since each build is heavy.
+		r.Group(func(r chi.Router) {
+			r.Use(middleware.Throttle(4))
+			r.Use(middleware.Timeout(150 * time.Second))
+			r.Get("/datasets/{name}/shards/{shard}/index", datasetsH.GetShardIndex)
+		})
+
 		// Image GETs are cheap bounded range reads and the player fires many in
 		// parallel per frame; a looser throttle keeps them from starving against
 		// the expensive tar-scan endpoints above (and vice versa).
@@ -105,8 +113,10 @@ func main() {
 		Addr:              ":" + cfg.Port,
 		Handler:           r,
 		ReadHeaderTimeout: 10 * time.Second,
-		WriteTimeout:      30 * time.Second,
-		IdleTimeout:       60 * time.Second,
+		// WriteTimeout must exceed the longest handler timeout (the 150s shard
+		// index build) or the server would cut the response mid-build.
+		WriteTimeout: 160 * time.Second,
+		IdleTimeout:  60 * time.Second,
 	}
 
 	go func() {
