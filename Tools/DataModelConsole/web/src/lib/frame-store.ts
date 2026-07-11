@@ -1,12 +1,17 @@
 // FrameStore: random-access JPEG frame source over a WebDataset shard.
 //
-// A shard is a tar of per-frame JPEGs. The shard index gives a presigned URL
-// for the whole tar plus byte ranges per member, so any frame/camera can be
-// fetched with a single HTTP Range request and decoded to an ImageBitmap.
-// An LRU cache (bitmaps are GPU-resident, so bounded and close()d on
-// eviction) plus a direction-aware look-ahead ring makes 10Hz playback
-// smooth.
+// Each frame/camera is fetched through the console API's image endpoint
+// (getSampleImageUrl → /api/v1/.../image/cam_N), which is same-origin behind
+// CloudFront in production (so no browser CORS and no presigned S3 URL leaked
+// to the client) and CORS-allowed from the API in local dev. The API streams
+// exactly one tar member; CloudFront caches the immutable JPEGs. An LRU cache
+// (bitmaps are GPU-resident, so bounded and close()d on eviction) plus a
+// direction-aware look-ahead ring makes 10Hz playback smooth.
+//
+// The shard index is still used for frame ordering, per-frame ego_now, and
+// hazard markers; only the byte-range-against-presigned-tar fetch was dropped.
 
+import { getSampleImageUrl } from "@/lib/api";
 import type { IndexSample, ShardIndex } from "@/types";
 
 const DEFAULT_MAX_ENTRIES = 500;
@@ -15,6 +20,8 @@ const PREFETCH_BEHIND = 4;
 
 export class FrameStore {
   private readonly index: ShardIndex;
+  private readonly dataset: string;
+  private readonly shard: string;
   private readonly byFrame = new Map<number, IndexSample>();
   // Map iteration order = insertion order; entries are re-inserted on access
   // so the first key is always the least recently used.
@@ -23,8 +30,15 @@ export class FrameStore {
   private readonly maxEntries: number;
   private destroyed = false;
 
-  constructor(index: ShardIndex, maxEntries = DEFAULT_MAX_ENTRIES) {
+  constructor(
+    index: ShardIndex,
+    dataset: string,
+    shard: string,
+    maxEntries = DEFAULT_MAX_ENTRIES,
+  ) {
     this.index = index;
+    this.dataset = dataset;
+    this.shard = shard;
     this.maxEntries = maxEntries;
     for (const s of index.samples) this.byFrame.set(s.frame_idx, s);
   }
@@ -140,16 +154,16 @@ export class FrameStore {
   ): Promise<ImageBitmap> {
     const sample = this.sampleAt(frameIdx);
     if (!sample) throw new Error(`no sample at frame ${frameIdx}`);
-    const member = sample.members[`${cam}.jpg`];
-    if (!member) throw new Error(`no member ${cam}.jpg in ${sample.key}`);
+    if (!sample.members[`${cam}.jpg`]) {
+      throw new Error(`no member ${cam}.jpg in ${sample.key}`);
+    }
 
-    const res = await fetch(this.index.presigned_tar_url, {
-      headers: {
-        Range: `bytes=${member.offset}-${member.offset + member.size - 1}`,
-      },
-    });
+    // cam is "cam_N"; the API endpoint takes the numeric index.
+    const camNum = Number(cam.replace(/^cam_/, ""));
+    const url = getSampleImageUrl(this.dataset, this.shard, sample.key, camNum);
+    const res = await fetch(url);
     if (!res.ok) {
-      throw new Error(`range fetch failed: ${res.status} ${res.statusText}`);
+      throw new Error(`image fetch failed: ${res.status} ${res.statusText}`);
     }
     const blob = await res.blob();
     return createImageBitmap(blob);

@@ -56,11 +56,13 @@ function nextSpeed(current: number, dir: 1 | -1): number {
 
 export function EpisodePlayer({
   dataset,
+  shard,
   index,
   initialState,
   onViewStateChange,
 }: {
   dataset: string;
+  shard: string;
   index: ShardIndex;
   initialState?: Partial<PlayerViewState>;
   onViewStateChange?: (state: PlayerViewState) => void;
@@ -70,10 +72,10 @@ export function EpisodePlayer({
   // FrameStore lives for the lifetime of this index.
   const [store, setStore] = useState<FrameStore | null>(null);
   useEffect(() => {
-    const s = new FrameStore(index);
+    const s = new FrameStore(index, dataset, shard);
     setStore(s);
     return () => s.destroy();
-  }, [index]);
+  }, [index, dataset, shard]);
 
   const cams = useMemo(() => {
     const first = index.samples[0];
