@@ -11,7 +11,12 @@ import sys
 import os
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '..', 'Model')))
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
-from trajectory_visualization.trajectory_rendering import Visualization
+from trajectory_visualization.rendering import (
+    render_trajectory_map_tile,
+    render_trajectory_on_a_grid,
+    complete_front_camera_view_with_trajectory,
+    concatenate_grid_and_camera
+)
 import torch
 from model_components.auto_e2e import AutoE2E
 import cv2
@@ -45,7 +50,7 @@ def visualization_on_l2d(episodes: list[int], frame_index: int = 0, zoom_in: boo
     actual_trajectory_color = (255, 80, 120)
 
     # 1. Draw extracted ground truth (actual driven path)
-    combined_img = Visualization.render_trajectory_map_tile(
+    combined_img = render_trajectory_map_tile(
         action_sequence=target_trajectory,
         current_speed=current_speed,
         map_image=map_image,
@@ -55,7 +60,7 @@ def visualization_on_l2d(episodes: list[int], frame_index: int = 0, zoom_in: boo
     )
 
     # 2. Draw predicted path
-    combined_img = Visualization.render_trajectory_map_tile(
+    combined_img = render_trajectory_map_tile(
         action_sequence=pred_trajectory,
         current_speed=current_speed,
         map_image=combined_img,
@@ -65,7 +70,7 @@ def visualization_on_l2d(episodes: list[int], frame_index: int = 0, zoom_in: boo
     )
 
     # 3. Create Camera View with trajectory and Grid
-    grid_with_trajectory = Visualization.render_trajectory_on_a_grid(
+    grid_with_trajectory = render_trajectory_on_a_grid(
         action_sequence=pred_trajectory,
         current_speed=current_speed,
         actual_action_sequence=target_trajectory,
@@ -86,7 +91,7 @@ def visualization_on_l2d(episodes: list[int], frame_index: int = 0, zoom_in: boo
     cam_trajectory_view = front_image.copy()
     
     if target_trajectory is not None:
-        cam_trajectory_view = Visualization.complete_front_camera_view_with_trajectory(
+        cam_trajectory_view = complete_front_camera_view_with_trajectory(
             action_sequence=target_trajectory,
             current_speed=current_speed,
             front_camera_image=cam_trajectory_view,
@@ -97,7 +102,7 @@ def visualization_on_l2d(episodes: list[int], frame_index: int = 0, zoom_in: boo
         )
     
     if pred_trajectory is not None:
-        cam_trajectory_view = Visualization.complete_front_camera_view_with_trajectory(
+        cam_trajectory_view = complete_front_camera_view_with_trajectory(
             action_sequence=pred_trajectory,
             current_speed=current_speed,
             front_camera_image=cam_trajectory_view,
@@ -107,7 +112,7 @@ def visualization_on_l2d(episodes: list[int], frame_index: int = 0, zoom_in: boo
             color=prediction_color
         )
         
-    cam_trajectory_view = Visualization.concatenate_grid_and_camera(
+    cam_trajectory_view = concatenate_grid_and_camera(
         grid_img=grid_with_trajectory,
         cam_img=cam_trajectory_view
     )

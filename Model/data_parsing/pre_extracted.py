@@ -37,16 +37,22 @@ _TRANSFORM = transforms.Compose([
     transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
 ])
 
+from functools import partial
 
-def _decode_sample(sample: dict) -> dict:
+def _decode_sample(sample: dict, return_visualization_image: bool = False) -> dict:
     """Decode a single WebDataset sample into training tensors."""
     # WebDataset keys: "cam_0.jpg", "cam_1.jpg", ..., "ego.npy", "meta.json", "__key__"
     cam_keys = sorted(k for k in sample if k.endswith(".jpg"))
     frames = []
+    viz_frames = []
     for key in cam_keys:
         data = sample[key] if isinstance(sample[key], bytes) else sample[key]
         img = Image.open(io.BytesIO(data))
         frames.append(_TRANSFORM(img))
+        if return_visualization_image:
+            # Keep original image for visualization, convert RGB to BGR for OpenCV
+            viz_img = np.array(img)[..., ::-1].copy()
+            viz_frames.append(viz_img)
 
     # Ego: raw bytes → numpy → split into history and future
     ego_bytes = sample.get("ego.npy", b"")
@@ -60,12 +66,17 @@ def _decode_sample(sample: dict) -> dict:
     ego_history = torch.from_numpy(ego[:history_size])
     ego_future = torch.from_numpy(ego[history_size:])
 
-    return {
+    res = {
         "visual_tiles": torch.stack(frames),
         "egomotion_history": ego_history,
         "visual_history": torch.zeros(_VISUAL_HISTORY_DIM),
         "trajectory_target": ego_future,
     }
+    
+    if return_visualization_image:
+        res["visualization_image"] = torch.from_numpy(np.stack(viz_frames))
+
+    return res
 
 
 def make_pre_extracted_loader(
@@ -74,6 +85,7 @@ def make_pre_extracted_loader(
     num_workers: int = 4,
     split: str = "train",
     shuffle: int = 1000,
+    return_visualization_image: bool = False,
 ) -> wds.WebLoader:
     """Create a WebDataset DataLoader reading from local EBS shard cache.
 
@@ -83,6 +95,7 @@ def make_pre_extracted_loader(
         num_workers: DataLoader workers.
         split: Unused currently (all tars in shard_dir are loaded).
         shuffle: Shuffle buffer size (0 to disable).
+        return_visualization_image: Whether to include raw BGR images for visualization.
     """
     tarfiles = sorted(Path(shard_dir).glob("*.tar"))
     if not tarfiles:
@@ -93,7 +106,9 @@ def make_pre_extracted_loader(
     dataset = wds.WebDataset(urls, shardshuffle=False, empty_check=False, nodesplitter=wds.split_by_worker)
     if shuffle > 0:
         dataset = dataset.shuffle(shuffle)
-    dataset = dataset.map(_decode_sample)
+    
+    decode_fn = partial(_decode_sample, return_visualization_image=return_visualization_image)
+    dataset = dataset.map(decode_fn)
 
     loader = wds.WebLoader(dataset, batch_size=batch_size, num_workers=min(num_workers, len(tarfiles)))
     return loader

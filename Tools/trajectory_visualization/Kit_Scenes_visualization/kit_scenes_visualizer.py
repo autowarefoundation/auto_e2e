@@ -15,7 +15,12 @@ import numpy as np
 import argparse
 from typing import Optional
 
-from trajectory_visualization.trajectory_rendering import Visualization
+from trajectory_visualization.rendering import (
+    render_trajectory_map_tile,
+    render_trajectory_on_a_grid,
+    complete_front_camera_view_with_trajectory,
+    concatenate_grid_and_camera
+)
 from model_components.auto_e2e import AutoE2E
 from data_parsing.kit_scenes.camera import NUM_VIEWS
 from data_parsing.kit_scenes.map import generate_bev_map_tile
@@ -53,7 +58,7 @@ def visualization_on_kit_scenes(scene_ids: Optional[list[str]] = None, frame_ind
     actual_trajectory_color = (255, 80, 120)
 
     # 1. Draw extracted ground truth (actual driven path) on map tile
-    combined_img = Visualization.render_trajectory_map_tile(
+    combined_img = render_trajectory_map_tile(
         action_sequence=target_trajectory,
         current_speed=current_speed,
         map_image=map_image,
@@ -63,7 +68,7 @@ def visualization_on_kit_scenes(scene_ids: Optional[list[str]] = None, frame_ind
     )
 
     # 2. Draw predicted path on map tile
-    combined_img = Visualization.render_trajectory_map_tile(
+    combined_img = render_trajectory_map_tile(
         action_sequence=pred_trajectory,
         current_speed=current_speed,
         map_image=combined_img,
@@ -73,7 +78,7 @@ def visualization_on_kit_scenes(scene_ids: Optional[list[str]] = None, frame_ind
     )
 
     # 3. Create Camera View with trajectory and Grid
-    grid_with_trajectory = Visualization.render_trajectory_on_a_grid(
+    grid_with_trajectory = render_trajectory_on_a_grid(
         action_sequence=pred_trajectory,
         current_speed=current_speed,
         actual_action_sequence=target_trajectory,
@@ -84,7 +89,7 @@ def visualization_on_kit_scenes(scene_ids: Optional[list[str]] = None, frame_ind
     cam_trajectory_view = raw_camera_image.copy()
     
     if target_trajectory is not None:
-        cam_trajectory_view = Visualization.complete_front_camera_view_with_trajectory(
+        cam_trajectory_view = complete_front_camera_view_with_trajectory(
             action_sequence=target_trajectory,
             current_speed=current_speed,
             front_camera_image=cam_trajectory_view,
@@ -93,7 +98,7 @@ def visualization_on_kit_scenes(scene_ids: Optional[list[str]] = None, frame_ind
         )
         
     if pred_trajectory is not None:
-        cam_trajectory_view = Visualization.complete_front_camera_view_with_trajectory(
+        cam_trajectory_view = complete_front_camera_view_with_trajectory(
             action_sequence=pred_trajectory,
             current_speed=current_speed,
             front_camera_image=cam_trajectory_view,
@@ -101,7 +106,7 @@ def visualization_on_kit_scenes(scene_ids: Optional[list[str]] = None, frame_ind
             color=prediction_color
         )
         
-    camera_and_grid = Visualization.concatenate_grid_and_camera(
+    camera_and_grid = concatenate_grid_and_camera(
         grid_img=grid_with_trajectory,
         cam_img=cam_trajectory_view
     )

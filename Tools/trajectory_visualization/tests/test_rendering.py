@@ -1,13 +1,18 @@
 import os
 import sys
-current_dir = os.path.dirname(os.path.abspath(__file__))
-sys.path.append(os.path.abspath(os.path.join(current_dir, '..', '..', 'Tools')))
-from trajectory_visualization.trajectory_rendering import Visualization, _DT, _FUTURE_TIMESTEPS
 import torch
-import pytest
 import cv2
 import numpy as np
 from pathlib import Path
+
+current_dir = os.path.dirname(os.path.abspath(__file__))
+sys.path.append(os.path.abspath(os.path.join(current_dir, '..', '..', '..')))
+
+from Tools.trajectory_visualization import kinematics  # noqa: E402
+from Tools.trajectory_visualization import rendering  # noqa: E402
+
+_DT = 0.1
+_FUTURE_TIMESTEPS = 64
 
 def test_visualization_with_dummy_data(tmp_path: Path):
 
@@ -29,7 +34,7 @@ def test_visualization_with_dummy_data(tmp_path: Path):
 
     print("Executing render_trajectory...")
     # Run the visualization function
-    result_img = Visualization.render_trajectory_map_tile(
+    result_img = rendering.render_trajectory_map_tile(
         action_sequence=mock_actions,
         current_speed=mock_speed,
         map_image=mock_map,
@@ -47,83 +52,6 @@ def test_visualization_with_dummy_data(tmp_path: Path):
     assert not np.array_equal(result_img, mock_map), "Image was not modified"
     assert os.path.isfile(output_path), "Image file was not created in the target directory"
 
-def test_accel_and_curv_to_meters_trajectory_straight_no_accel():
-    # 1. Create a dummy action sequence for going straight with no acceleration
-    action_sequence = torch.zeros(_FUTURE_TIMESTEPS * 2)
-    current_speed = 10.0  # 10 m/s
-
-    # 2. Run the function
-    trajectory_m = Visualization.accel_and_curv_to_meters_trajectory(action_sequence, current_speed, _FUTURE_TIMESTEPS)
-
-    # 3. Assertions
-    assert trajectory_m.shape == (_FUTURE_TIMESTEPS + 1, 2), "Shape of trajectory tensor is incorrect"
-    # The car should move straight along the y-axis (forward)
-    # X should be 0, Y should increase based on speed
-    v = current_speed
-    for i in range(1, _FUTURE_TIMESTEPS + 1):
-        # Note: In the function, positive Y is up, positive X is right.
-        assert trajectory_m[i, 0].item() == pytest.approx(0.0), "X should be 0"
-        assert trajectory_m[i, 1].item() > trajectory_m[i-1, 1].item(), "Y should be increasing"
-        assert trajectory_m[i, 1].item() == pytest.approx(trajectory_m[i-1, 1].item() + v * _DT), "Integration is incorrect"
-
-def test_accel_and_curv_to_meters_trajectory_stationary():
-    # Edge case: 0 speed, 0 acceleration -> Car should remain at origin (0, 0)
-    action_sequence = torch.zeros(_FUTURE_TIMESTEPS * 2)
-    current_speed = 0.0
-
-    trajectory_m = Visualization.accel_and_curv_to_meters_trajectory(action_sequence, current_speed, _FUTURE_TIMESTEPS)
-
-    for i in range(_FUTURE_TIMESTEPS + 1):
-        assert trajectory_m[i, 0].item() == pytest.approx(0.0)
-        assert trajectory_m[i, 1].item() == pytest.approx(0.0)
-
-def test_accel_and_curv_to_meters_trajectory_constant_acceleration_from_standstill():
-    # Edge case: starting from 0 speed, but applying constant acceleration
-    action_sequence = torch.zeros(_FUTURE_TIMESTEPS * 2)
-    action_sequence[0::2] = 2.0  # Constant 2.0 m/s^2 acceleration (every even index is accel)
-    current_speed = 0.0
-
-    trajectory_m = Visualization.accel_and_curv_to_meters_trajectory(action_sequence, current_speed, _FUTURE_TIMESTEPS)
-
-    assert trajectory_m[0, 0].item() == pytest.approx(0.0)
-    assert trajectory_m[0, 1].item() == pytest.approx(0.0)
-    
-    # Check that distance covered in each timestep is strictly increasing
-    for i in range(2, _FUTURE_TIMESTEPS + 1):
-        dist_prev = trajectory_m[i-1, 1].item() - trajectory_m[i-2, 1].item()
-        dist_curr = trajectory_m[i, 1].item() - trajectory_m[i-1, 1].item()
-        
-        assert trajectory_m[i, 0].item() == pytest.approx(0.0), "X should be 0, no curvature applied"
-        assert dist_curr > dist_prev, "Distance per timestep should increase under constant acceleration"
-
-def test_accel_and_curv_to_meters_trajectory_turning():
-    # Edge case: turning left with constant speed
-    action_sequence = torch.zeros(_FUTURE_TIMESTEPS * 2)
-    action_sequence[1::2] = 0.1  # Constant positive curvature (left turn)
-    current_speed = 10.0
-
-    trajectory_m = Visualization.accel_and_curv_to_meters_trajectory(action_sequence, current_speed, _FUTURE_TIMESTEPS)
-
-    # After 64 timesteps, X should be negative (left of the starting Y-axis) and Y should be positive
-    assert trajectory_m[-1, 0].item() < -0.1, "Car should have turned left (negative X)"
-    assert trajectory_m[-1, 1].item() > 0.1, "Car should have moved forward (positive Y)"
-
-def test_accel_and_curv_to_meters_trajectory_extreme_spiral():
-    # Edge case: extreme spiral
-    # Constant acceleration and linearly increasing curvature.
-    action_sequence = torch.zeros(_FUTURE_TIMESTEPS * 2)
-    action_sequence[0::2] = 0.5  # Constant acceleration
-    action_sequence[1::2] = torch.linspace(0.5, 1.0, _FUTURE_TIMESTEPS)  # Increasing curvature
-    current_speed = 5.0
-
-    trajectory_m = Visualization.accel_and_curv_to_meters_trajectory(action_sequence, current_speed, _FUTURE_TIMESTEPS)
-
-    assert not torch.isnan(trajectory_m).any(), "Trajectory contains NaNs"
-    assert not torch.isinf(trajectory_m).any(), "Trajectory contains Infs"
-
-    # A tight spiral with these parameters will complete multiple full 360-degree rotations.
-    # This means the vehicle must travel "backwards" relative to its start at some point.
-    assert trajectory_m[:, 1].min().item() < -0.5, "Car did not loop backwards significantly"
 
 def test_meters_to_pixels_trajectory():
     trajectory_m = torch.tensor([
@@ -135,7 +63,7 @@ def test_meters_to_pixels_trajectory():
     resolution_m_px = 0.1  # 10 pixels/meter -> 0.1 m/pixel
     map_image = np.zeros((400, 400, 3), dtype=np.uint8)
 
-    trajectory_px = Visualization.meters_to_pixels_trajectory(trajectory_m, resolution_m_px, map_image)
+    trajectory_px = rendering.meters_to_pixels_trajectory(trajectory_m, resolution_m_px, map_image)
 
     assert trajectory_px.shape == trajectory_m.shape
     # Check pixel coordinates
@@ -155,7 +83,7 @@ def test_overlay_the_trajectory_with_map():
         [300, 300],
     ])
 
-    overlaid_image = Visualization.overlay_the_trajectory_with_map(trajectory_px, map_image)
+    overlaid_image = rendering.overlay_the_trajectory_with_map(trajectory_px, map_image)
 
     assert overlaid_image is not None
     assert isinstance(overlaid_image, np.ndarray)
@@ -185,7 +113,7 @@ def test_generate_grid_with_prediction_only():
     ])
     
     # 2. Run the function
-    grid_img = Visualization.generate_grid(prediction_m)
+    grid_img = rendering.generate_grid(prediction_m)
     
     # 3. Assertions
     assert grid_img is not None, "generate_grid returned None"
@@ -200,7 +128,7 @@ def test_generate_grid_with_prediction_and_actual():
     actual_m = torch.tensor([[0.0, 0.0], [0.5, 10.0], [1.0, 20.0]])
     
     # 2. Run the function
-    grid_img = Visualization.generate_grid(prediction_m, actual_trajectory_m=actual_m)
+    grid_img = rendering.generate_grid(prediction_m, actual_trajectory_m=actual_m)
     
     # 3. Assertions
     assert grid_img is not None
@@ -213,7 +141,7 @@ def test_render_trajectory_on_a_grid():
     current_speed = 10.0
     
     # 2. Run the function
-    grid_img = Visualization.render_trajectory_on_a_grid(action_sequence, current_speed)
+    grid_img = rendering.render_trajectory_on_a_grid(action_sequence, current_speed)
     
     # 3. Assertions
     assert grid_img is not None, "render_trajectory_on_a_grid returned None"
@@ -225,7 +153,7 @@ def test_get_camera_projection_matrix():
     R = np.eye(3)
     t = np.array([[1.0], [2.0], [3.0]])
     
-    P = Visualization.get_camera_projection_matrix(K, R, t)
+    P = rendering.get_camera_projection_matrix(K, R, t)
     
     assert P.shape == (3, 4)
     expected_P = np.array([
@@ -251,7 +179,7 @@ def test_project_BEV_to_CameraView():
         [0.0, 0.0, 1.0, 0.0]
     ])
     
-    points_2d = Visualization.project_BEV_to_CameraView(trajectory_m, P)
+    points_2d = rendering.project_BEV_to_CameraView(trajectory_m, P)
     
     assert points_2d.shape == (4, 2)
     # Check valid points
@@ -281,7 +209,7 @@ def test_render_trajectory_on_camera_view():
     ])
     
     test_color = (123, 45, 67) # BGR
-    img_with_traj = Visualization.render_trajectory_on_camera_view(
+    img_with_traj = rendering.render_trajectory_on_camera_view(
         camera_image, left_2d, right_2d, color=test_color, outline_thickness=3
     )
     
@@ -308,14 +236,14 @@ def test_complete_front_camera_view_with_trajectory():
     R = np.eye(3)
     t = np.zeros((3, 1))
     
-    cam_img = Visualization.complete_front_camera_view_with_trajectory(
+    cam_img = rendering.complete_front_camera_view_with_trajectory(
         action_sequence_target,
         current_speed,
         front_camera_image,
         K=K, R=R, t=t,
         color=(59, 108, 255)
     )
-    cam_img = Visualization.complete_front_camera_view_with_trajectory(
+    cam_img = rendering.complete_front_camera_view_with_trajectory(
         action_sequence_pred,
         current_speed,
         cam_img,
@@ -324,11 +252,11 @@ def test_complete_front_camera_view_with_trajectory():
     )
     
     # Generate dummy grid
-    pred_traj_m = Visualization.accel_and_curv_to_meters_trajectory(action_sequence_pred, current_speed, 64, initial_heading=0.0)
-    target_traj_m = Visualization.accel_and_curv_to_meters_trajectory(action_sequence_target, current_speed, 64, initial_heading=0.0)
-    grid_img = Visualization.generate_grid(prediction_m=pred_traj_m, actual_trajectory_m=target_traj_m)
+    pred_traj_m = kinematics.accel_and_curv_to_meters_trajectory(action_sequence_pred, current_speed, 64, initial_heading=0.0)
+    target_traj_m = kinematics.accel_and_curv_to_meters_trajectory(action_sequence_target, current_speed, 64, initial_heading=0.0)
+    grid_img = rendering.generate_grid(prediction_m=pred_traj_m, actual_trajectory_m=target_traj_m)
     
-    combined_img = Visualization.concatenate_grid_and_camera(grid_img, cam_img)
+    combined_img = rendering.concatenate_grid_and_camera(grid_img, cam_img)
     
     assert combined_img is not None
     # Grid is 1080x480. Camera (400, 600) is resized to height 1080 -> width = 600 * (1080/400) = 1620
