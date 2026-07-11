@@ -44,7 +44,7 @@ const L2D_RIG: Record<string, RigCam> = {
   cam_2: { label: "right-forward", row: 2, col: 3 },
   cam_3: { label: "left-backward", row: 3, col: 1 },
   cam_4: { label: "rear", row: 3, col: 2 },
-  cam_5: { label: "right-backward", row: 2, col: 2 },
+  cam_5: { label: "right-backward", row: 3, col: 3 },
   // cam_6 (map) only exists in stale Phase-1 shards; fresh shards pack map.jpg
   // separately. Placed off the ego cell if present.
   cam_6: { label: "map", row: 1, col: 1 },

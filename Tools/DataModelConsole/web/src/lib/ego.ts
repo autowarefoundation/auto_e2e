@@ -8,6 +8,19 @@
 export const EGO_STEPS = 64;
 export const EGO_DT = 0.1; // 10Hz
 
+// Physical bounds for integrating ego signals. Raw L2D ego.npy can carry
+// non-physical outlier yaw_rate/curvature spikes (e.g. -31 rad/s) that, left
+// unclamped, spin the integrated heading and blow the BEV extent out. Clamp to
+// vehicle-plausible limits and treat heading as undefined below a crawl speed.
+export const MAX_YAW_RATE = 1.5; // rad/s — vehicle-plausible bound
+export const MAX_CURVATURE = 0.5; // 1/m  — ~2m min turn radius
+export const MIN_SPEED_FOR_HEADING = 0.5; // m/s — kappa-based heading undefined at standstill
+// Yaw-rate integration is already bounded per-step by clamp(yawRate, MAX_YAW_RATE),
+// so it stays stable at a crawl; only gate out true standstill sensor noise.
+export const MIN_SPEED_FOR_YAW = 0.1; // m/s
+export const clamp = (v: number, lim: number) =>
+  Math.max(-lim, Math.min(lim, v));
+
 export interface EgoHistory {
   speed: number[]; // m/s
   accel: number[]; // m/s^2
@@ -78,7 +91,8 @@ export function integrateTrajectory(
   for (let i = 0; i < n; i++) {
     v += accel[i] * dt;
     if (v < 0) v = 0; // no reversing from braking overshoot
-    theta += v * curvature[i] * dt;
+    if (v >= MIN_SPEED_FOR_HEADING)
+      theta += v * clamp(curvature[i], MAX_CURVATURE) * dt;
     x += v * Math.cos(theta) * dt;
     y += v * Math.sin(theta) * dt;
     out[i] = { x, y, heading: theta };

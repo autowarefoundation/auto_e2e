@@ -127,9 +127,16 @@ export interface ReasoningHorizon {
 export interface ReasoningLabelRecord {
   schema_version?: string;
   sample_id: string;
+  // v1 kept short `dataset`/`teacher`; the v2 producer writes the fuller
+  // `dataset_name` / `teacher_model` / `teacher_provider` plus abstention.
   dataset?: string;
+  dataset_name?: string;
   teacher?: string;
+  teacher_model?: string;
+  teacher_provider?: string;
   prompt_version?: string;
+  abstained?: boolean;
+  teacher_error?: string | null;
   horizons: ReasoningHorizon[];
   created_at?: string;
 }
@@ -233,4 +240,7 @@ export interface DashboardStats {
   reasoning_labels: number;
   mlflow_runs: number;
   latest_ade: number | null;
+  // False means MLflow was unreachable, so mlflow_runs/latest_ade are unknown
+  // (not genuinely zero/null).
+  mlflow_available: boolean;
 }

@@ -35,6 +35,8 @@ export class FrameStore {
   private readonly controllers = new Map<string, AbortController>();
   private readonly maxEntries: number;
   private destroyed = false;
+  private active = 0;
+  private readonly waiters: Array<() => void> = [];
 
   constructor(
     index: ShardIndex,
@@ -66,6 +68,23 @@ export class FrameStore {
     return this.index.samples[pos] ?? this.byFrame.get(pos);
   }
 
+  // withSlot gates work behind a single global inflight budget shared by the
+  // draw-path getFrame and prefetch, so bursts never exceed the server's image
+  // Throttle (and the browser's per-host socket limit). It queues instead of
+  // firing, so a fast scrub can't unleash a connection storm.
+  private async withSlot<T>(fn: () => Promise<T>): Promise<T> {
+    if (this.active >= MAX_INFLIGHT) {
+      await new Promise<void>((res) => this.waiters.push(res));
+    }
+    this.active++;
+    try {
+      return await fn();
+    } finally {
+      this.active--;
+      this.waiters.shift()?.();
+    }
+  }
+
   // getFrame returns the decoded bitmap for (frame, cam), deduplicating
   // concurrent requests and populating the LRU cache.
   getFrame(frameIdx: number, cam: string): Promise<ImageBitmap> {
@@ -82,10 +101,16 @@ export class FrameStore {
 
     const controller = new AbortController();
     this.controllers.set(key, controller);
-    const p = this.fetchBitmap(frameIdx, cam, controller.signal)
+    const p = this.withSlot(() =>
+      this.fetchBitmap(frameIdx, cam, controller.signal),
+    )
       .then((bmp) => {
-        this.inflight.delete(key);
-        this.controllers.delete(key);
+        // Guard by identity: a superseded fetch must not delete a newer
+        // same-key fetch's tracking (that would break dedup and lose the new
+        // fetch's cancellation). Only clear entries still pointing at us.
+        if (this.inflight.get(key) === p) this.inflight.delete(key);
+        if (this.controllers.get(key) === controller)
+          this.controllers.delete(key);
         if (this.destroyed) {
           bmp.close();
           throw new Error("FrameStore destroyed");
@@ -94,8 +119,9 @@ export class FrameStore {
         return bmp;
       })
       .catch((err: unknown) => {
-        this.inflight.delete(key);
-        this.controllers.delete(key);
+        if (this.inflight.get(key) === p) this.inflight.delete(key);
+        if (this.controllers.get(key) === controller)
+          this.controllers.delete(key);
         throw err;
       });
     this.inflight.set(key, p);
@@ -135,6 +161,18 @@ export class FrameStore {
     }
   }
 
+  // abort releases the connection slot for a (frame,cam) that scrolled past
+  // instead of letting a superseded fetch run to completion. A queued-but-not-
+  // started fetch self-corrects: when its slot frees, fetchBitmap runs with an
+  // already-aborted signal and rejects immediately. The rejected fetch's own
+  // .catch also deletes these entries; a double-delete is harmless.
+  abort(frameIdx: number, cam: string): void {
+    const key = `${frameIdx}:${cam}`;
+    this.controllers.get(key)?.abort();
+    this.controllers.delete(key);
+    this.inflight.delete(key);
+  }
+
   // destroy closes every cached bitmap. Pending fetches close their bitmaps
   // on arrival (see getFrame).
   destroy(): void {
@@ -147,6 +185,14 @@ export class FrameStore {
   }
 
   private put(key: string, bmp: ImageBitmap): void {
+    // A re-request of a key already in cache (e.g. abort → prefetch-behind)
+    // would set() over the existing bitmap and orphan its GPU memory. Close
+    // and drop the prior bitmap before inserting the new one.
+    const prev = this.cache.get(key);
+    if (prev && prev !== bmp) {
+      prev.close();
+      this.cache.delete(key);
+    }
     while (this.cache.size >= this.maxEntries) {
       const oldest = this.cache.keys().next().value;
       if (oldest === undefined) break;
