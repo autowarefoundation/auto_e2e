@@ -13,7 +13,7 @@ import {
 
 import { cn } from "@/lib/utils";
 
-const NAV_ITEMS = [
+export const NAV_ITEMS = [
   { href: "/", label: "Home", icon: Home },
   { href: "/datasets", label: "Datasets", icon: Database },
   { href: "/reasoning-labels", label: "Reasoning Labels", icon: Brain },
@@ -21,6 +21,12 @@ const NAV_ITEMS = [
   { href: "/runs", label: "Runs", icon: Workflow },
   { href: "/scenes", label: "Scenes", icon: Clapperboard },
 ] as const;
+
+// navItemActive centralizes the active-route rule shared by the sidebar and
+// the mobile drawer: exact match for "/", prefix match otherwise.
+export function navItemActive(pathname: string, href: string): boolean {
+  return href === "/" ? pathname === "/" : pathname.startsWith(href);
+}
 
 export function Sidebar() {
   const pathname = usePathname();
@@ -34,8 +40,7 @@ export function Sidebar() {
       </div>
       <nav className="flex-1 space-y-1 p-3">
         {NAV_ITEMS.map(({ href, label, icon: Icon }) => {
-          const active =
-            href === "/" ? pathname === "/" : pathname.startsWith(href);
+          const active = navItemActive(pathname, href);
           return (
             <Link
               key={href}

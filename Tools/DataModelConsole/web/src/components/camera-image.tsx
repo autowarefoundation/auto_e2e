@@ -43,7 +43,7 @@ export function CameraImage({
         src={src}
         alt={`cam_${cam} of ${sampleKey}`}
         loading="lazy"
-        className="absolute inset-0 h-full w-full object-cover"
+        className="absolute inset-0 h-full w-full object-contain bg-slate-950"
         onError={() => setFailed(true)}
       />
     </div>
