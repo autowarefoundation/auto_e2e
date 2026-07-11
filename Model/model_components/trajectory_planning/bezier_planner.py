@@ -52,6 +52,18 @@ class BezierPlanner(BasePlanner):
         self.ego_state_proj = nn.Linear(egomotion_dim, embed_dim)
         self.visual_history_proj = nn.Linear(visual_history_dim, embed_dim)
         self.bev_proj = nn.Linear(embed_dim, embed_dim)
+        # Zero-init the visual-history projection so the World-Model-derived
+        # visual_history starts as a STRICT no-op and the planner learns to open
+        # it only as the WM matures — mirroring the reasoning branch's zero-init
+        # coupling (alpha=0). Rationale (#13): with the WM on, visual_history is a
+        # non-stationary WM output; a default-init projection makes the planner
+        # depend on that moving, partly-eval-unavailable signal from step 0, which
+        # empirically made the full 3-branch model slightly WORSE than the
+        # imitation baseline (visual_history=zeros). Zero-init makes the WM branch
+        # strictly additive: the planner is identical to the imitation baseline at
+        # init and can only improve as it learns to use a trained visual_history.
+        nn.init.zeros_(self.visual_history_proj.weight)
+        nn.init.zeros_(self.visual_history_proj.bias)
         self.context_mlp = nn.Sequential(
             nn.Linear(embed_dim, embed_dim),
             nn.GELU(),
