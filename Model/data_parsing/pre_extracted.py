@@ -115,9 +115,15 @@ def _decode_sample(sample: dict) -> dict:
     # WebDataset's per-key default collation stacks them into [B, ...] batches.
     # Absent on shards packed without a teacher — the loader stays
     # reasoning-agnostic and training skips the reasoning loss.
-    if "reasoning.json" in sample:
-        for key, tensor in _decode_reasoning_targets(sample["reasoning.json"]).items():
-            out[f"reasoning__{key}"] = tensor
+    # ALWAYS emit reasoning__* keys so a batch that mixes labeled + unlabeled
+    # samples collates (default_collate needs identical keys across a batch). An
+    # unlabeled sample gets a fully-MASKED target (abstained record → IGNORE_INDEX
+    # / zero source_weight), so it contributes nothing to the reasoning loss —
+    # never a false-negative all-zero row. Shards packed with a teacher carry
+    # reasoning.json; imitation-only samples don't, and both must batch together.
+    reasoning_data = sample.get("reasoning.json")
+    for key, tensor in _decode_reasoning_targets(reasoning_data).items():
+        out[f"reasoning__{key}"] = tensor
 
     return out
 
@@ -126,15 +132,25 @@ def _decode_reasoning_targets(data) -> dict:
     """Decode the reasoning.json member into per-sample target tensors (#98).
 
     Lazy imports the data_processing tensorizer so importing this loader never
-    pulls the label package unless a shard actually carries reasoning labels.
+    pulls the label package unless training touches reasoning. When ``data`` is
+    None (sample has no reasoning.json), return the tensors of an ABSTAINED
+    record — all IGNORE_INDEX / zero source_weight — so the sample batches with
+    labeled ones and is fully masked out of the reasoning loss (R9).
     """
+    from data_processing.reasoning_label_generation.schema import ReasoningLabelRecord
     from data_processing.reasoning_label_generation.targets import (
         record_from_json,
         record_to_target_tensors,
     )
 
-    payload = json.loads(data.decode() if isinstance(data, (bytes, bytearray)) else data)
-    record = record_from_json(payload)
+    if data is None:
+        record = ReasoningLabelRecord.abstain(
+            sample_id="", dataset_name="", teacher_provider="none",
+            teacher_model="none", prompt_version="none",
+            request_mode="clip_horizons", teacher_error="no reasoning.json")
+    else:
+        payload = json.loads(data.decode() if isinstance(data, (bytes, bytearray)) else data)
+        record = record_from_json(payload)
     return record_to_target_tensors(record)
 
 
