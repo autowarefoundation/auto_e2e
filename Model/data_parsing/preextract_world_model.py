@@ -1,10 +1,11 @@
 """Offline pre-extraction of the World Model 1 Hz multi-view windows (#16 / #30).
 
-The online ``L2DDataset(include_world_model_windows=True)`` builds the
-history/future windows by decoding video per frame (~tens of seconds per
-sample) — fine for correctness, far too slow for training. This module
-pre-extracts those windows **once, offline**, so training reads them at disk
-bandwidth (see ``data_parsing/pre_extracted.py``).
+``L2DDataset(include_world_model_windows=True)`` builds the history/future
+windows by decoding video per frame (~tens of seconds per sample) — fine for
+correctness, far too slow for training. This module pre-extracts those windows
+**once, offline**, so training reads them at disk bandwidth (see
+``data_parsing/pre_extracted.py``). Frames are raw (the dataset applies no
+transform); normalization happens once in the pre-extracted loader.
 
 Design — *content addressed* (avoids the ~2*N*V x blow-up):
   Windows overlap heavily under 10 Hz -> 1 Hz subsampling, so we do NOT store

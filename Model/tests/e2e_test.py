@@ -1,9 +1,11 @@
 """End-to-end training smoke test over every real dataset parser.
 
 For each dataset that can actually be loaded in the current environment, this
-builds AutoE2E, runs a short optimisation loop on real samples, and asserts that
-the trajectory imitation loss trends downward — i.e. the full pipeline
-(parser -> DataLoader -> model -> loss -> backward -> step) learns.
+runs the REAL production path — raw parser frames -> WebDataset shards ->
+pre-extracted loader -> AutoE2E -> loss -> backward -> step — and asserts the
+trajectory imitation loss trends downward. Datasets are raw pre-extraction
+sources (no direct-to-model path), so the shard round-trip is what training
+actually uses.
 
 Datasets whose data or parser are unavailable are skipped, not failed:
   - L2D            loads from the HuggingFace hub on demand (network needed).
@@ -67,10 +69,12 @@ def _build_kit_scenes():
     return KitScenesDataset(data_root=data_root)
 
 
+# View counts are real cameras only; the nav-map is a separate map branch input
+# (not a camera view), so L2D=6, NVIDIA=7, KITScenes=7 (#77).
 DATASET_SPECS = [
-    pytest.param("l2d", _build_l2d, 7, id="l2d"),
-    pytest.param("nvidia_av", _build_nvidia, 8, id="nvidia_av"),
-    pytest.param("kit_scenes", _build_kit_scenes, 8, id="kit_scenes"),
+    pytest.param("l2d", _build_l2d, 6, id="l2d"),
+    pytest.param("nvidia_av", _build_nvidia, 7, id="nvidia_av"),
+    pytest.param("kit_scenes", _build_kit_scenes, 7, id="kit_scenes"),
 ]
 
 # Short loop sized to expose a trend without being a full training run.
@@ -97,24 +101,27 @@ def _try_build(build_fn):
 
 
 def _run_loss_trend(dataset, num_views, device):
-    """Run a short training loop and return the list of per-step losses."""
-    from torch.utils.data import DataLoader
+    """Pack the raw dataset to shards, load via the pre-extracted loader, and run
+    a short training loop — the real production path — returning per-step losses."""
+    import tempfile
 
-    loader = DataLoader(
-        dataset,
-        batch_size=_BATCH_SIZE,
-        shuffle=True,
-        num_workers=2,
-        drop_last=True,
-    )
+    from data_parsing.pre_extracted import make_pre_extracted_loader
+    from e2e_pipeline_smoke import build_shards  # raw frame -> JPEG shard packer
+
+    # Raw parser frames -> WebDataset shards (one geometry-aware resize), then the
+    # pre-extracted loader (one ToTensor+Normalize) — exactly what training uses.
+    out_dir = tempfile.mkdtemp()
+    build_shards(dataset, out_dir, max_samples=max(_BATCH_SIZE * 3, 12))
+    loader = make_pre_extracted_loader(out_dir, batch_size=_BATCH_SIZE,
+                                       num_workers=0, shuffle=1000)
+    projection = getattr(loader, "projection", None)
+    geometry_type = getattr(loader, "geometry_type", "pseudo")
+    if projection is not None:
+        projection = projection.to(device)
 
     # Train from scratch (no pretrained download) so the test is self-contained
-    # and the loss has clear room to move.
-    model = AutoE2E(
-        num_views=num_views,
-        fusion_mode="concat",
-        is_pretrained=False,
-    ).to(device)
+    # and the loss has clear room to move. Fusion is always BEV (PR #94).
+    model = AutoE2E(num_views=num_views, is_pretrained=False).to(device)
     model.train()
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=_LR)
@@ -130,14 +137,15 @@ def _run_loss_trend(dataset, num_views, device):
             batch = next(data_iter)
 
         visual_tiles = batch["visual_tiles"].to(device)
+        map_input = batch["map_input"].to(device)
         visual_history = batch["visual_history"].to(device)
         egomotion_history = batch["egomotion_history"].to(device)
         target = batch["trajectory_target"].to(device)
 
         optimizer.zero_grad(set_to_none=True)
-        trajectory, _ego, _future = model(
-            visual_tiles, visual_history, egomotion_history,
-            camera_params=None, mode="eval",
+        trajectory = model(
+            visual_tiles, map_input, visual_history, egomotion_history,
+            projection=projection, geometry_type=geometry_type, mode="eval",
         )
         loss = loss_fn(trajectory, target)
         loss.backward()

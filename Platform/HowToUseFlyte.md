@@ -53,8 +53,11 @@ platform. Organized by **what you want to do**, so you can jump straight to your
    - **`dataset`** (dropdown): `yaak-ai/L2D` or `nvidia/PhysicalAI-Autonomous-Vehicles`
      — which processed dataset to actually train on.
    - **`backbone`** (dropdown): `swin_v2_tiny` / `conv_next_v2_tiny` / `res_net_50`
-   - **`fusion_mode`** (dropdown): `concat` / `cross_attn` / `bev`
    - **`epochs_il`**, **`epochs_rl`**, **`batch_size`**, **`lr`**, **`tau`**, **`beta`**, **`episodes`** — numbers, defaults are fine for a smoke run.
+
+   There is no `fusion_mode` input: BEV fusion is hardcoded in the model since
+   PR #94 (concat / cross_attn were removed). To run IL without the memory-hungry
+   offline-RL step, launch **`workflows.wf_ingest_train_eval`** instead.
    - **No `hf_token` field** — the HF token is injected from a Kubernetes Secret.
 4. Click **Launch**. You are taken to the new **execution** page.
 
@@ -105,7 +108,7 @@ platform. Organized by **what you want to do**, so you can jump straight to your
 2. **`shards`** is a **list of `FlyteDirectory`** — add one entry per dataset's
    processed shard dir (paste the URIs from Use case B). The task picks the one
    matching **`dataset`**.
-3. Set `backbone`, `fusion_mode`, `epochs`, `batch_size`, `lr`. Launch.
+3. Set `backbone`, `epochs`, `batch_size`, `lr`. Launch.
 4. Output: a `TrainOutput` with `checkpoint` and `metadata` FlyteFiles
    (grab their URIs from the Outputs panel).
 

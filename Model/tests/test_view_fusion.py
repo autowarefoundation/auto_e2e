@@ -6,6 +6,10 @@ sys.path.append('..')
 from model_components.feature_fusion import FeatureFusion
 from model_components.view_fusion import build_view_fusion, FUSION_REGISTRY
 from model_components.view_fusion.bev_fusion import BEVViewFusion
+from model_components.view_fusion.projection import (
+    FThetaProjection,
+    PinholeProjection,
+)
 
 
 def make_inputs(batch_size, num_views, device, include_camera_params=False):
@@ -83,15 +87,15 @@ class TestViewFusion:
             assert not torch.allclose(fused_base, fused_mod, atol=1e-5), \
                 f"View {view_idx} has no influence on the fused feature map"
 
-    def test_views_contribute_to_fused_with_camera_params(self, build_mock_model, device):
-        """Every view must influence the fused feature map when REAL camera_params
-        are passed through the BEV projection path.
+    def test_views_contribute_to_fused_with_real_projection(self, build_mock_model, device):
+        """Every view must influence the fused feature map when a REAL pinhole
+        projection operator drives the BEV projection path.
 
-        The other view-contribution tests run only the camera_params=None branch,
-        which exercises the learnable pseudo_projection fallback rather than the
-        geometry-driven projection. Real deployments always pass a [B, V, 3, 4]
-        ego-to-pixel matrix; this test strengthens coverage by feeding one through
-        FeatureFusion and verifying each view still contributes.
+        The other view-contribution tests run only the pseudo path, which uses
+        the learnable prior rather than geometry-driven projection. Real
+        deployments pass a projection operator; this test strengthens coverage by
+        feeding a PinholeProjection through FeatureFusion and verifying each view
+        still contributes.
         """
         model = build_mock_model(num_views=4, fusion_mode="bev", device=device)
         model.eval()
@@ -111,10 +115,11 @@ class TestViewFusion:
         cam_params[..., 1, 1] = 1.0
         cam_params[..., 1, 3] = 128.0
         cam_params[..., 2, 3] = 1.0
+        projection = PinholeProjection(cam_params)
 
         def fused_features(x):
             features = model.Reactive_E2E.Backbone(x.reshape(B * V, C, H, W))
-            return model.Reactive_E2E.FeatureFusion(features, B, V, camera_params=cam_params)
+            return model.Reactive_E2E.FeatureFusion(features, B, V, projection=projection)
 
         fused_base = fused_features(visual)
 
@@ -124,7 +129,7 @@ class TestViewFusion:
             fused_mod = fused_features(visual_mod)
             assert not torch.allclose(fused_base, fused_mod, atol=1e-5), \
                 f"View {view_idx} has no influence on the fused feature map " \
-                f"under real camera_params projection"
+                f"under real projection"
 
 
 # ---------------------------------------------------------------------------
@@ -181,12 +186,12 @@ class TestBEVFusion:
         out = fusion(x, B=1, V=4)
         assert out.shape == (1, 256, 12, 20)
 
-    def test_output_shape_with_camera_params(self, device):
-        """BEV fusion should work with explicit camera projection matrices."""
+    def test_output_shape_with_pinhole_projection(self, device):
+        """BEV fusion should work with an explicit pinhole projection operator."""
         fusion = BEVViewFusion(num_views=8, embed_dim=256, bev_h=8, bev_w=8).to(device)
         x = torch.randn(16, 256, 8, 8, device=device)
-        cam_params = torch.randn(2, 8, 3, 4, device=device)
-        out = fusion(x, B=2, V=8, camera_params=cam_params)
+        proj = PinholeProjection(torch.randn(2, 8, 3, 4, device=device))
+        out = fusion(x, B=2, V=8, projection=proj)
         assert out.shape == (2, 256, 8, 8)
 
     def test_pseudo_projection_is_learned(self, device):
@@ -213,11 +218,11 @@ class TestBEVFusion:
         fusion.eval()
         x = torch.randn(4, 256, 8, 8, device=device)
 
-        cam_a = torch.randn(1, 4, 3, 4, device=device)
-        cam_b = torch.randn(1, 4, 3, 4, device=device)
+        cam_a = PinholeProjection(torch.randn(1, 4, 3, 4, device=device))
+        cam_b = PinholeProjection(torch.randn(1, 4, 3, 4, device=device))
 
-        out_a = fusion(x, B=1, V=4, camera_params=cam_a)
-        out_b = fusion(x, B=1, V=4, camera_params=cam_b)
+        out_a = fusion(x, B=1, V=4, projection=cam_a)
+        out_b = fusion(x, B=1, V=4, projection=cam_b)
 
         assert not torch.allclose(out_a, out_b, atol=1e-5), \
             "Different camera params produced identical output — projection has no effect"
@@ -306,7 +311,7 @@ class TestBEVFusion:
         cam[0, 0, 2, 2] = 1.0     # z passthrough (positive depth)
 
         x = torch.ones(1, 256, 8, 8, device=device)
-        out = fusion(x, B=1, V=1, camera_params=cam)
+        out = fusion(x, B=1, V=1, projection=PinholeProjection(cam))
 
         # ref_2d normalized = (fx*x/z + cx) / 224 >> 1, so all out of bounds
         # → mask = False everywhere → visible_count = 0 → has_observation = 0
@@ -369,8 +374,109 @@ class TestBEVFusion:
         cam_behind = torch.zeros(1, 1, 3, 4, device=device)
         cam_behind[0, 0, 2, 2] = -1.0
         cam_behind[0, 0, 2, 3] = -100.0
-        out = fusion(x, B=1, V=1, camera_params=cam_behind)
+        out = fusion(x, B=1, V=1, projection=PinholeProjection(cam_behind))
 
         # has_observation mask zeroes output after FFN
         assert out.abs().max() < 1e-6, \
             "No visible camera should produce zero BEV features"
+
+
+# ---------------------------------------------------------------------------
+# Runtime-V-dynamic tests (Issue #77): one instance, any camera count
+# ---------------------------------------------------------------------------
+
+class TestBEVFusionVDynamic:
+    """A single BEVViewFusion instance must consume batches of any view count.
+
+    This is the core Issue #77 acceptance: one model, alternating V (e.g. L2D's
+    6 real cams and NVIDIA's 7), no re-instantiation, output always
+    [B, embed_dim, bev_h, bev_w], gradients flowing both times.
+    """
+
+    def test_alternating_view_counts_same_instance(self, device):
+        fusion = BEVViewFusion(num_views=6, embed_dim=256, bev_h=8, bev_w=8).to(device)
+        for V in (6, 7, 6, 8):
+            x = torch.randn(2 * V, 256, 8, 8, device=device)
+            out = fusion(x, B=2, V=V)
+            assert out.shape == (2, 256, 8, 8), f"wrong shape at V={V}"
+
+    def test_gradients_flow_for_both_view_counts(self, device):
+        """bev_queries / value_proj / output_proj must receive gradients at
+        every view count (the #77 gradient-flow criterion)."""
+        fusion = BEVViewFusion(num_views=6, embed_dim=256, bev_h=8, bev_w=8).to(device)
+        cam7 = torch.zeros(1, 7, 3, 4, device=device)
+        cam7[..., 0, 0] = 1.0
+        cam7[..., 0, 3] = 128.0
+        cam7[..., 1, 1] = 1.0
+        cam7[..., 1, 3] = 128.0
+        cam7[..., 2, 3] = 1.0
+        for V, cam in ((7, cam7), (6, cam7[:, :6])):
+            fusion.zero_grad(set_to_none=True)
+            x = torch.randn(V, 256, 8, 8, device=device)
+            out = fusion(x, B=1, V=V, projection=PinholeProjection(cam))
+            out.sum().backward()
+            for name, p in (("bev_queries", fusion.bev_queries.weight),
+                            ("value_proj", fusion.value_proj.weight),
+                            ("output_proj", fusion.output_proj.weight)):
+                assert p.grad is not None and p.grad.abs().max() > 0, \
+                    f"{name} got no gradient at V={V}"
+
+    def test_pseudo_path_view_count_agnostic(self, device):
+        """The calibration-free pseudo prior also runs any V on one instance."""
+        fusion = BEVViewFusion(num_views=8, embed_dim=256, bev_h=8, bev_w=8).to(device)
+        for V in (5, 6, 7, 8):
+            out = fusion(torch.randn(V, 256, 8, 8, device=device), B=1, V=V)
+            assert out.shape == (1, 256, 8, 8)
+            assert not torch.isnan(out).any()
+
+
+# ---------------------------------------------------------------------------
+# Honest-geometry contract (Issue #77): no silent pseudo, no false real claim
+# ---------------------------------------------------------------------------
+
+class TestGeometryDeclaration:
+    def test_pseudo_label_contradicts_real_operator(self, device):
+        """geometry_type='pseudo' must not label a real (pinhole) operator."""
+        fusion = BEVViewFusion(num_views=4, embed_dim=256, bev_h=8, bev_w=8).to(device)
+        x = torch.randn(4, 256, 8, 8, device=device)
+        proj = PinholeProjection(torch.randn(1, 4, 3, 4, device=device))
+        with pytest.raises(ValueError, match="contradicts"):
+            fusion(x, B=1, V=4, projection=proj, geometry_type="pseudo")
+
+    def test_real_label_without_operator_raises(self, device):
+        """Claiming real geometry without a projection operator is rejected — the
+        pseudo path is never entered on behalf of a caller that meant real."""
+        fusion = BEVViewFusion(num_views=4, embed_dim=256, bev_h=8, bev_w=8).to(device)
+        x = torch.randn(4, 256, 8, 8, device=device)
+        with pytest.raises(ValueError, match="requires a projection operator"):
+            fusion(x, B=1, V=4, geometry_type="pinhole")
+
+    def test_projection_view_count_must_match_v(self, device):
+        fusion = BEVViewFusion(num_views=4, embed_dim=256, bev_h=8, bev_w=8).to(device)
+        x = torch.randn(4, 256, 8, 8, device=device)
+        proj = PinholeProjection(torch.randn(1, 5, 3, 4, device=device))  # 5 != 4
+        with pytest.raises(ValueError, match="num_views"):
+            fusion(x, B=1, V=4, projection=proj)
+
+    def test_unknown_geometry_type_raises(self, device):
+        fusion = BEVViewFusion(num_views=4, embed_dim=256, bev_h=8, bev_w=8).to(device)
+        x = torch.randn(4, 256, 8, 8, device=device)
+        with pytest.raises(ValueError, match="geometry_type"):
+            fusion(x, B=1, V=4, geometry_type="bogus")
+
+
+# ---------------------------------------------------------------------------
+# Native f-theta projection through the fusion module (no rectification)
+# ---------------------------------------------------------------------------
+
+class TestFThetaFusion:
+    def test_ftheta_projection_runs_end_to_end(self, device):
+        fusion = BEVViewFusion(num_views=3, embed_dim=256, bev_h=8, bev_w=8,
+                               image_size=256).to(device)
+        T = torch.eye(4, device=device).reshape(1, 1, 4, 4).expand(1, 3, 4, 4).contiguous()
+        fw_poly = torch.tensor([0.0, 200.0], device=device)
+        proj = FThetaProjection(T, fw_poly, cx=128.0, cy=128.0)
+        x = torch.randn(3, 256, 8, 8, device=device)
+        out = fusion(x, B=1, V=3, projection=proj, geometry_type="ftheta")
+        assert out.shape == (1, 256, 8, 8)
+        assert not torch.isnan(out).any()
