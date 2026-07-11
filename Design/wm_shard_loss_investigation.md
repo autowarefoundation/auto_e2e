@@ -17,6 +17,12 @@ branches degrades the trajectory.
 | C | reasoning+WM, backbone-detached JEPA | WM | 4 | 0.843 (flat) | — |
 | D (control) | **imitation only** | **WM** | 4 | 0.808 @30ep | **1.771m** |
 | E (control) | **imitation only** | **plain** | 4 | 0.412 @30ep | **2.026m** |
+| F (final) | **reasoning + WM** (all fixes: grad-accum, backbone-detach, curvature scale) | WM | 4 | 0.438 @30ep (traj 0.079) | **2.409m / FDE 6.627m** |
+
+Run F is the definitive full 3-branch pipeline: all three branches trained and
+converged (traj 0.125→0.079, jepa 0.505→0.330, reason 1.189→0.588), ADE 2.409m —
+under the 3 m goal. With the corrected curvature scale the trajectory loss is now
+interpretable (traj_loss ~0.08 instead of ~0.8).
 
 ## Conclusions
 
