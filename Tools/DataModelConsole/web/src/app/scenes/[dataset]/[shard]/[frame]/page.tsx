@@ -3,11 +3,14 @@
 // ADAS player page: /scenes/{dataset}/{shard}/{frame}
 //
 // Hosts EpisodePlayer. View state (cam, mode, speed, frame) is mirrored into
-// URL query params (debounced router.replace) so any moment of any shard is
-// a shareable deep link. "Copy link" copies the canonical URL.
+// the URL (debounced history.replaceState) so any moment of any shard is a
+// shareable deep link. Using history.replaceState instead of router.replace
+// keeps the deep-link path (reload still works) but avoids a Next route
+// transition that would remount the player on every frame step. "Copy link"
+// copies the canonical URL.
 
 import Link from "next/link";
-import { useRouter, useSearchParams } from "next/navigation";
+import { useSearchParams } from "next/navigation";
 import {
   Suspense,
   use,
@@ -37,7 +40,6 @@ function PlayerPageInner({
   shard: string;
   frame: number;
 }) {
-  const router = useRouter();
   const searchParams = useSearchParams();
 
   const { data, error, loading, reload } = useApi(
@@ -48,7 +50,7 @@ function PlayerPageInner({
   // Initial view state: path frame + query params (cam, mode, speed).
   const initialState = useRef<Partial<PlayerViewState>>({
     frame,
-    cam: parseInt(searchParams.get("cam") ?? "0", 10) || 0,
+    cam: Math.max(0, parseInt(searchParams.get("cam") ?? "0", 10) || 0),
     mode: searchParams.get("mode") === "focus" ? "focus" : "grid",
     speed: parseFloat(searchParams.get("speed") ?? "1") || 1,
   });
@@ -64,18 +66,27 @@ function PlayerPageInner({
       syncTimerRef.current = setTimeout(() => {
         const s = viewStateRef.current;
         if (!s) return;
-        const q = new URLSearchParams();
+        // Seed from the current URL so params we don't manage aren't dropped,
+        // then overlay the player's view state.
+        const q = new URLSearchParams(window.location.search);
         if (s.cam !== 0) q.set("cam", String(s.cam));
+        else q.delete("cam");
         if (s.mode !== "grid") q.set("mode", s.mode);
+        else q.delete("mode");
         if (Math.abs(s.speed - 1) > 1e-9) q.set("speed", String(s.speed));
+        else q.delete("speed");
         const qs = q.toString();
-        router.replace(
+        // history.replaceState (not router.replace) updates the deep-link path
+        // without a Next route transition, so the player is not remounted on
+        // every frame step (FrameStore / view state persist).
+        window.history.replaceState(
+          null,
+          "",
           `/scenes/${encodeURIComponent(dataset)}/${encodeURIComponent(shard)}/${s.frame}${qs ? `?${qs}` : ""}`,
-          { scroll: false },
         );
       }, 500);
     },
-    [router, dataset, shard],
+    [dataset, shard],
   );
   useEffect(
     () => () => {
@@ -87,18 +98,30 @@ function PlayerPageInner({
   const [copied, setCopied] = useState(false);
   const copyLink = useCallback(() => {
     const s = viewStateRef.current;
-    const q = new URLSearchParams();
+    // Seed from the live URL first, then overlay the player's view state, so a
+    // copied link can never lose params the sync has not yet written.
+    const q = new URLSearchParams(window.location.search);
     if (s) {
       if (s.cam !== 0) q.set("cam", String(s.cam));
+      else q.delete("cam");
       if (s.mode !== "grid") q.set("mode", s.mode);
+      else q.delete("mode");
       if (Math.abs(s.speed - 1) > 1e-9) q.set("speed", String(s.speed));
+      else q.delete("speed");
     }
     const qs = q.toString();
     const url = `${window.location.origin}/scenes/${encodeURIComponent(dataset)}/${encodeURIComponent(shard)}/${s?.frame ?? frame}${qs ? `?${qs}` : ""}`;
-    void navigator.clipboard.writeText(url).then(() => {
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1500);
-    });
+    void navigator.clipboard
+      .writeText(url)
+      .then(() => {
+        setCopied(true);
+        setTimeout(() => setCopied(false), 1500);
+      })
+      .catch((err: unknown) => {
+        // Clipboard write can reject on non-https origins or when permission is
+        // denied; swallow it so it doesn't surface as an unhandled rejection.
+        console.warn("clipboard write failed", err);
+      });
   }, [dataset, shard, frame]);
 
   return (

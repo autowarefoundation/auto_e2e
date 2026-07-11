@@ -6,7 +6,7 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Clapperboard, Play } from "lucide-react";
 
 import { ErrorState } from "@/components/error-state";
@@ -19,7 +19,7 @@ import {
 } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useApi } from "@/hooks/use-api";
-import { listDatasets } from "@/lib/api";
+import { listDatasets, listShardsForEpisode } from "@/lib/api";
 
 export default function ScenesPage() {
   const { data, error, loading, reload } = useApi(listDatasets);
@@ -28,6 +28,23 @@ export default function ScenesPage() {
   const [dataset, setDataset] = useState("l2d");
   const [shard, setShard] = useState("");
   const [frame, setFrame] = useState("0");
+  const [shardOptions, setShardOptions] = useState<string[]>([]);
+
+  // Fetch the chosen dataset's shards so the shard field can suggest real
+  // values instead of relying on the user to type an exact tar name.
+  useEffect(() => {
+    let cancelled = false;
+    listShardsForEpisode(dataset)
+      .then((shards) => {
+        if (!cancelled) setShardOptions(shards.map((s) => s.name));
+      })
+      .catch(() => {
+        if (!cancelled) setShardOptions([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [dataset]);
 
   function onLocate(e: React.FormEvent) {
     e.preventDefault();
@@ -102,8 +119,14 @@ export default function ScenesPage() {
               value={shard}
               onChange={(e) => setShard(e.target.value)}
               placeholder="shard (e.g. train-000000.tar)"
+              list="scene-shard-options"
               className="h-9 w-64 rounded-md border border-slate-700 bg-slate-900 px-3 font-mono text-sm placeholder:text-slate-600"
             />
+            <datalist id="scene-shard-options">
+              {shardOptions.map((name) => (
+                <option key={name} value={name} />
+              ))}
+            </datalist>
             <input
               value={frame}
               onChange={(e) => setFrame(e.target.value)}
@@ -112,7 +135,7 @@ export default function ScenesPage() {
               className="h-9 w-32 rounded-md border border-slate-700 bg-slate-900 px-3 font-mono text-sm placeholder:text-slate-600"
               aria-label="Frame index"
             />
-            <Button type="submit" size="sm">
+            <Button type="submit" size="sm" disabled={!shard.trim()}>
               <Play className="size-3.5" />
               Open
             </Button>
