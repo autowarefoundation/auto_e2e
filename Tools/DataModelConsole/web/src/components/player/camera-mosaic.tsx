@@ -2,15 +2,17 @@
 
 // CameraMosaic: canvas tiles fed by a FrameStore.
 //
-// Grid mode: 2x4 mosaic of all cameras. Focus mode: one large camera plus a
-// filmstrip of the rest. Late frames are dropped — a tile only draws a
-// resolved bitmap if nothing newer has been drawn already.
+// Grid mode: a bird's-eye layout — each camera sits in the CSS-grid cell that
+// matches where it points (front on top, rear on the bottom, left cameras on
+// the left, right on the right), with the ego state in the center cell. Focus
+// mode: one large camera plus a filmstrip of the rest. Late frames are dropped
+// — a tile only draws a resolved bitmap if nothing newer has been drawn.
 
 import { useEffect, useRef, useState } from "react";
 import { Grid3x3, ImageOff, Loader2 } from "lucide-react";
 
 import type { FrameStore } from "@/lib/frame-store";
-import { camLabel } from "@/lib/rig";
+import { camLabel, gridDimensions, rigCam } from "@/lib/rig";
 import { cn } from "@/lib/utils";
 import type { IndexSample } from "@/types";
 
@@ -118,12 +120,16 @@ function CanvasTile({
   );
 }
 
-// EgoTile fills an empty mosaic cell with a compact ego-state readout so the
-// 2x4 grid has no dangling void when the camera count is odd.
+// EgoTile is the center cell of the bird's-eye grid: a compact ego-state
+// readout with a small car glyph, so the mosaic reads as "the vehicle, with
+// its cameras arranged around it."
 function EgoTile({ sample }: { sample?: IndexSample }) {
   const ego = sample?.ego_now ?? [];
   return (
-    <div className="flex aspect-video w-full flex-col justify-center gap-0.5 overflow-hidden rounded-md border border-slate-800 bg-slate-900/60 p-2 font-mono text-[9px] leading-tight text-slate-400">
+    <div className="flex aspect-video w-full flex-col items-center justify-center gap-0.5 overflow-hidden rounded-md border border-slate-700 bg-slate-800/40 p-2 font-mono text-[9px] leading-tight text-slate-400">
+      <span className="mb-0.5 text-base leading-none" aria-hidden>
+        🚗
+      </span>
       <p className="text-slate-500">
         trip frame{" "}
         {sample && sample.trip_frame >= 0
@@ -132,7 +138,6 @@ function EgoTile({ sample }: { sample?: IndexSample }) {
       </p>
       <p>v {ego[0]?.toFixed(2) ?? "-"} m/s</p>
       <p>a {ego[1]?.toFixed(2) ?? "-"} m/s²</p>
-      <p>κ {ego[3]?.toFixed(4) ?? "-"} 1/m</p>
     </div>
   );
 }
@@ -203,31 +208,52 @@ export function CameraMosaic({
     );
   }
 
-  // Grid: fill the trailing cells of a 4-wide grid with an ego/metadata tile
-  // so an odd camera count (e.g. 7) leaves no empty gap.
-  const trailing = cams.length % 4;
-  const fillers = trailing === 0 ? 0 : 4 - trailing;
+  // Grid: bird's-eye layout. Each camera is placed in the CSS-grid cell that
+  // matches where it points; the ego readout sits in the center. Cells with no
+  // camera stay empty so the spatial arrangement reads clearly.
+  const { rows, cols } = gridDimensions(dataset, cams);
+  const egoRow = Math.ceil(rows / 2);
+  const egoCol = Math.ceil(cols / 2);
+  // Detect a camera that would collide with the ego center cell; if one lands
+  // there (rare rigs), the ego tile still renders and the camera overlaps — so
+  // we only drop the ego tile into a cell no camera claims.
+  const claimed = new Set(
+    cams.map((cam, i) => {
+      const c = rigCam(dataset, cam, i);
+      return `${c.row}:${c.col}`;
+    }),
+  );
+  const egoInFreeCell = !claimed.has(`${egoRow}:${egoCol}`);
+
   return (
-    <div className="grid grid-cols-2 items-start gap-2 lg:grid-cols-4">
-      {cams.map((cam, i) => (
-        <CanvasTile
-          key={cam}
-          store={store}
-          frame={frame}
-          cam={cam}
-          label={camLabel(dataset, cam)}
-          ordinal={i + 1}
-          className="aspect-video w-full"
-          onClick={() => onSelectCam(i)}
-        />
-      ))}
-      {fillers > 0 && <EgoTile sample={sample} />}
-      {Array.from({ length: Math.max(0, fillers - 1) }).map((_, i) => (
-        <div
-          key={`gap-${i}`}
-          className="aspect-video w-full rounded-md border border-slate-800/50 bg-slate-900/30"
-        />
-      ))}
+    <div
+      className="grid gap-2"
+      style={{
+        gridTemplateColumns: `repeat(${cols}, minmax(0, 1fr))`,
+        gridTemplateRows: `repeat(${rows}, auto)`,
+      }}
+    >
+      {cams.map((cam, i) => {
+        const c = rigCam(dataset, cam, i);
+        return (
+          <div key={cam} style={{ gridRow: c.row, gridColumn: c.col }}>
+            <CanvasTile
+              store={store}
+              frame={frame}
+              cam={cam}
+              label={c.label}
+              ordinal={i + 1}
+              className="aspect-video w-full"
+              onClick={() => onSelectCam(i)}
+            />
+          </div>
+        );
+      })}
+      {egoInFreeCell && (
+        <div style={{ gridRow: egoRow, gridColumn: egoCol }}>
+          <EgoTile sample={sample} />
+        </div>
+      )}
     </div>
   );
 }
