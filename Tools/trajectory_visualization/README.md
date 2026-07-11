@@ -28,7 +28,7 @@ Overlays the trajectory directly onto a top-down BEV map tile.
 
 **Example Usage:**
 ```python
-from visualization.trajectory_rendering import Visualization
+from trajectory_visualization.trajectory_rendering import Visualization
 
 map_with_trajectory = Visualization.render_trajectory_map_tile(
     action_sequence=pred_trajectory,

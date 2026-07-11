@@ -9,8 +9,9 @@ Usage:
 
 import sys
 import os
-sys.path.append('..')
-from visualization.trajectory_rendering import Visualization
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '..', 'Model')))
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
+from trajectory_visualization.trajectory_rendering import Visualization
 import torch
 from model_components.auto_e2e import AutoE2E
 import cv2

@@ -6,6 +6,7 @@ Usage:
 
 import sys
 import os
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '..', 'Model')))
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
 
 import torch
@@ -14,7 +15,7 @@ import numpy as np
 import argparse
 from typing import Optional
 
-from visualization.trajectory_rendering import Visualization
+from trajectory_visualization.trajectory_rendering import Visualization
 from model_components.auto_e2e import AutoE2E
 from data_parsing.kit_scenes.camera import NUM_VIEWS
 from data_parsing.kit_scenes.map import generate_bev_map_tile
@@ -163,7 +164,7 @@ def forward_pass_for_visualization_test(
         scene_path=loader.scene_path,
         ego_x=float(ego_xy[0]),
         ego_y=float(ego_xy[1]),
-        ego_yaw=float(ego_yaw),
+        ego_yaw=ego_yaw,
         canvas_size=1024, # Render a higher-res map for visualization
         radius_meters=60.0
     )
@@ -199,7 +200,7 @@ def forward_pass_for_visualization_test(
     T_ref_to_cam = np.linalg.inv(calib.extrinsic)
     P_unscaled = K_raw @ T_ref_to_cam[:3, :]
     
-    # visualization/trajectory_rendering.py assumes input points to P are in RDF (Right, Down, Forward)
+    # trajectory_visualization/trajectory_rendering.py assumes input points to P are in RDF (Right, Down, Forward)
     # KIT Scenes reference frame is FLU (Forward, Left, Up).
     # The reference coordinate system is the top lidar, which is ~2.1m above the ground.
     # Therefore, the ground level in the reference frame is at Z = -2.1.

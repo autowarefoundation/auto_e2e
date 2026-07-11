@@ -1,12 +1,13 @@
+import os
 import sys
-sys.path.append('..')
-from visualization.trajectory_rendering import Visualization, _DT, _FUTURE_TIMESTEPS
+current_dir = os.path.dirname(os.path.abspath(__file__))
+sys.path.append(os.path.abspath(os.path.join(current_dir, '..', '..', 'Tools')))
+from trajectory_visualization.trajectory_rendering import Visualization, _DT, _FUTURE_TIMESTEPS
 import torch
 import pytest
 import cv2
 import numpy as np
 from pathlib import Path
-import os
 
 def test_visualization_with_dummy_data(tmp_path: Path):
 
