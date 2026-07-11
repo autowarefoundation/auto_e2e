@@ -54,3 +54,20 @@ func parsePagination(r *http.Request) (limit, offset int) {
 	}
 	return limit, offset
 }
+
+// parseRange reads the optional ?offset=&size= tar byte-range params used by
+// the image endpoint's fast path. Both must be present and valid (offset>=0,
+// size>0) for ok to be true; otherwise the caller falls back to a full scan.
+func parseRange(r *http.Request) (offset, size int64, ok bool) {
+	ov := r.URL.Query().Get("offset")
+	sv := r.URL.Query().Get("size")
+	if ov == "" || sv == "" {
+		return 0, 0, false
+	}
+	off, err1 := strconv.ParseInt(ov, 10, 64)
+	sz, err2 := strconv.ParseInt(sv, 10, 64)
+	if err1 != nil || err2 != nil || off < 0 || sz <= 0 {
+		return 0, 0, false
+	}
+	return off, sz, true
+}

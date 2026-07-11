@@ -94,22 +94,25 @@ type SampleDetail struct {
 }
 
 // ShardIndex wraps GET .../shards/{shard}/index: everything the ADAS player
-// needs to range-GET frames directly from S3 (presigned tar URL + per-member
-// byte ranges), built from a single tar scan.
+// needs to play a shard (per-member byte ranges + per-frame ego state/plan),
+// built from a single tar scan. Frames are fetched member-by-member through
+// the image endpoint, so no whole-shard presigned URL is emitted.
 type ShardIndex struct {
-	PresignedTarURL string        `json:"presigned_tar_url"`
-	ExpiresAt       time.Time     `json:"expires_at"`
-	Fps             int           `json:"fps"` // 10
-	Samples         []IndexSample `json:"samples"`
+	Fps     int           `json:"fps"` // 10
+	Samples []IndexSample `json:"samples"`
 }
 
 // IndexSample is one playback frame in a ShardIndex.
 type IndexSample struct {
 	Key          string                 `json:"key"`
-	FrameIdx     int                    `json:"frame_idx"`
+	EpisodeID    string                 `json:"episode_id"`    // parsed from key: episode-global identity
+	FrameIdx     int                    `json:"frame_idx"`     // intra-shard playback ordinal (key suffix)
+	TripFrame    int                    `json:"trip_frame"`    // trip-global frame index from meta.json (-1 if absent)
 	Members      map[string]MemberRange `json:"members"`       // "cam_0.jpg" -> {offset,size}
 	EgoNow       []float32              `json:"ego_now"`       // last history row: [speed, accel, yaw_rate, curvature] (4 floats)
-	HasReasoning bool                   `json:"has_reasoning"` // whether a reasoning.json member exists (Phase 1 shards have none, keep false)
+	EgoHistory   []float32              `json:"ego_history"`   // 256 floats = 64 steps x [speed, accel, yaw_rate, curvature] (past)
+	EgoFuture    []float32              `json:"ego_future"`    // 128 floats = 64 steps x [accel, curvature] (the future plan)
+	HasReasoning bool                   `json:"has_reasoning"` // whether an offline reasoning label exists for this sample
 }
 
 // MemberRange is the byte range of a tar member's data within the shard tar.

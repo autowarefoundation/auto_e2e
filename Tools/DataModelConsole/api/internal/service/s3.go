@@ -39,6 +39,45 @@ var knownDatasets = []string{"l2d", "nvidia_av"}
 // reasoning_labels_cache/dataset=<d>/teacher=<t>/prompt_version=<p>/<sample_id>.json
 const reasoningCachePrefix = "reasoning_labels_cache/"
 
+// reasoningDatasetAlias maps console dataset ids to the reasoning cache
+// partition names actually written by the pipeline. The console browses
+// datasets as "nvidia_av"/"l2d"; the label cache partitions them by their
+// source dataset name.
+var reasoningDatasetAlias = map[string]string{
+	"nvidia_av": "nvidia_PhysicalAI-Autonomous-Vehicles",
+	"l2d":       "yaak-ai_L2D",
+}
+
+// cacheDataset resolves a console dataset id to its reasoning cache partition
+// name. Passing a cache partition name through (e.g. from the Inspector) is a
+// no-op.
+func cacheDataset(d string) string {
+	if a, ok := reasoningDatasetAlias[d]; ok {
+		return a
+	}
+	return d
+}
+
+// cacheSampleID resolves a console sample key to the reasoning cache's flat
+// s%08d index. A console key ("25cd4769_000000" / "ep0_000000") maps by its
+// frame index; a key already in flat "s<digits>" form passes through.
+//
+// NOTE (single-shard assumption): s%08d(frameIdx) is exact only because
+// train-000000 is the first (and currently only) shard of each dataset, so the
+// per-shard frame index coincides with the dataset-global sample index. Revisit
+// when a second shard lands (the global index must then offset by prior shards'
+// sample counts).
+func cacheSampleID(sampleID string) (string, bool) {
+	if rest, ok := strings.CutPrefix(sampleID, "s"); ok && isDigits(rest) {
+		return sampleID, true
+	}
+	_, idx, ok := parseSampleKey(sampleID)
+	if !ok {
+		return "", false
+	}
+	return fmt.Sprintf("s%08d", idx), true
+}
+
 // S3Service provides read-only access to the datasets bucket.
 type S3Service struct {
 	client        *s3.Client
@@ -223,19 +262,35 @@ func (s *S3Service) StreamTarMember(ctx context.Context, dataset, shard, memberN
 	}
 }
 
-// PresignShard returns a short-lived presigned GET URL for the whole shard
-// tar. Combined with the Offset/SizeBytes from ListSamples, a client can
-// range-GET a single member.
-func (s *S3Service) PresignShard(ctx context.Context, dataset, shard string) (string, error) {
+// StreamTarMemberRange fetches exactly one tar member's raw bytes via an S3
+// byte-range GET, using the (offset, size) recorded in the shard index
+// (BuildShardIndex). This turns each image fetch from an O(shard) linear tar
+// scan into a bounded few-KB read. Caller must Close the returned closer.
+func (s *S3Service) StreamTarMemberRange(ctx context.Context, dataset, shard string, offset, size int64) (io.Reader, io.Closer, int64, error) {
+	if offset < 0 || size <= 0 {
+		return nil, nil, 0, fmt.Errorf("invalid range offset=%d size=%d", offset, size)
+	}
 	key := shardPrefix(dataset) + shard
-	req, err := s.presigner.PresignGetObject(ctx, &s3.GetObjectInput{
+	rng := fmt.Sprintf("bytes=%d-%d", offset, offset+size-1)
+	obj, err := s.client.GetObject(ctx, &s3.GetObjectInput{
 		Bucket: aws.String(s.bucket),
 		Key:    aws.String(key),
-	}, s3.WithPresignExpires(s.presignExpiry))
+		Range:  aws.String(rng),
+	})
 	if err != nil {
-		return "", fmt.Errorf("presign %s: %w", key, err)
+		if isS3NotFound(err) {
+			return nil, nil, 0, ErrNotFound
+		}
+		return nil, nil, 0, fmt.Errorf("get shard range %s %s: %w", key, rng, err)
 	}
-	return req.URL, nil
+	// Return the actual body length from the range GET, not the client-supplied
+	// size: a stale index must not advertise a Content-Length longer than the
+	// body (which would hang the client waiting for bytes that never arrive).
+	actual := aws.ToInt64(obj.ContentLength)
+	if actual <= 0 {
+		actual = size
+	}
+	return obj.Body, obj.Body, actual, nil
 }
 
 // Ego layout constants: ego.npy is raw little-endian float32 packed with
@@ -278,7 +333,7 @@ func (s *S3Service) GetSampleDetail(ctx context.Context, dataset, shard, sampleK
 		Key:     sampleKey,
 		Cameras: []string{},
 	}
-	detail.EpisodeID, detail.FrameIdx = parseSampleKey(sampleKey)
+	detail.EpisodeID, detail.FrameIdx, _ = parseSampleKey(sampleKey)
 
 	found := false
 	tr := tar.NewReader(obj.Body)
@@ -335,9 +390,9 @@ func (s *S3Service) GetSampleDetail(ctx context.Context, dataset, shard, sampleK
 
 // BuildShardIndex streams the shard tar once and builds the playback index
 // for the ADAS player: per-member byte ranges (tar DATA offsets, same
-// countingReader accounting as ListSamples) plus the current ego state per
-// sample, paired with a presigned URL for the whole tar so the client can
-// range-GET individual frames directly from S3.
+// countingReader accounting as ListSamples) plus the current ego state and
+// future plan per sample. Frames are fetched member-by-member through the
+// image endpoint, so no whole-shard presigned URL is emitted.
 func (s *S3Service) BuildShardIndex(ctx context.Context, dataset, shard string) (*model.ShardIndex, error) {
 	key := shardPrefix(dataset) + shard
 	obj, err := s.client.GetObject(ctx, &s3.GetObjectInput{
@@ -371,11 +426,13 @@ func (s *S3Service) BuildShardIndex(ctx context.Context, dataset, shard string) 
 		sk := sampleKeyOf(hdr.Name)
 		entry, ok := byKey[sk]
 		if !ok {
-			_, frameIdx := parseSampleKey(sk)
+			episodeID, frameIdx, _ := parseSampleKey(sk)
 			entry = &model.IndexSample{
-				Key:      sk,
-				FrameIdx: frameIdx,
-				Members:  map[string]model.MemberRange{},
+				Key:       sk,
+				EpisodeID: episodeID,
+				FrameIdx:  frameIdx,
+				TripFrame: -1, // set from meta.json below when present
+				Members:   map[string]model.MemberRange{},
 			}
 			byKey[sk] = entry
 			order = append(order, sk)
@@ -388,6 +445,16 @@ func (s *S3Service) BuildShardIndex(ctx context.Context, dataset, shard string) 
 		switch suffix {
 		case "reasoning.json":
 			entry.HasReasoning = true
+		case "meta.json":
+			body, err := readMemberBytes(tr, hdr.Size)
+			if err != nil {
+				return nil, fmt.Errorf("read %s from %s: %w", hdr.Name, key, err)
+			}
+			// The intra-shard playback ordinal (FrameIdx, key suffix) is not the
+			// trip-global frame; meta.json carries the true trip frame index.
+			if tf, ok := tripFrameFromMeta(body); ok {
+				entry.TripFrame = tf
+			}
 		case "ego.npy":
 			body, err := readMemberBytes(tr, hdr.Size)
 			if err != nil {
@@ -397,11 +464,25 @@ func (s *S3Service) BuildShardIndex(ctx context.Context, dataset, shard string) 
 			// EgoNow = last history row (row 63 of 64x4): floats[252:256].
 			if len(floats) >= egoHistoryFloats {
 				entry.EgoNow = floats[egoHistoryFloats-egoNowSignals : egoHistoryFloats]
+				// EgoHistory = the full 256-float past window (64 steps x
+				// [speed, accel, yaw_rate, curvature]); the BEV draws the
+				// trailing driven path from it, meaningful mid-clip without
+				// cross-shard stitching.
+				entry.EgoHistory = floats[:egoHistoryFloats]
+			}
+			// EgoFuture = the 128-float future plan (64 steps x [accel,
+			// curvature]); the BEV renders this directly instead of chaining
+			// the per-frame ego_now of subsequent samples.
+			if len(floats) >= egoTotalFloats {
+				entry.EgoFuture = floats[egoHistoryFloats:egoTotalFloats]
 			}
 		}
 	}
 
-	url, err := s.PresignShard(ctx, dataset, shard)
+	// Set HasReasoning by listing the aliased label partition once (cheap): the
+	// player's amber ticks / reasoning panel then light up even though Phase-1
+	// shards embed no reasoning.json member.
+	labelIDs, err := s.reasoningSampleIDs(ctx, dataset)
 	if err != nil {
 		return nil, err
 	}
@@ -412,14 +493,36 @@ func (s *S3Service) BuildShardIndex(ctx context.Context, dataset, shard string) 
 		if e.EgoNow == nil {
 			e.EgoNow = []float32{}
 		}
+		if e.EgoHistory == nil {
+			e.EgoHistory = []float32{}
+		}
+		if e.EgoFuture == nil {
+			e.EgoFuture = []float32{}
+		}
+		if id, ok := cacheSampleID(sk); ok {
+			if _, has := labelIDs[id]; has {
+				e.HasReasoning = true
+			}
+		}
 		samples = append(samples, *e)
 	}
 	return &model.ShardIndex{
-		PresignedTarURL: url,
-		ExpiresAt:       time.Now().Add(s.presignExpiry),
-		Fps:             indexFps,
-		Samples:         samples,
+		Fps:     indexFps,
+		Samples: samples,
 	}, nil
+}
+
+// tripFrameFromMeta extracts the trip-global frame index from a sample's
+// meta.json bytes. ok is false when the JSON is malformed or carries no
+// frame_idx, so the caller keeps TripFrame = -1 (absent).
+func tripFrameFromMeta(body []byte) (int, bool) {
+	var m struct {
+		FrameIdx *int `json:"frame_idx"`
+	}
+	if json.Unmarshal(body, &m) == nil && m.FrameIdx != nil {
+		return *m.FrameIdx, true
+	}
+	return 0, false
 }
 
 // readMemberBytes buffers a tar member's content with a sanity cap so a
@@ -450,21 +553,28 @@ func decodeFloat32LE(b []byte) []float32 {
 //
 // The flat s%08d form MUST yield distinct frame indices per sample, otherwise
 // the player keys every frame to 0 and collides (renders one frame for the
-// whole shard). Keys with neither an underscore nor the s<digits> shape yield
-// ("", 0).
-func parseSampleKey(key string) (episodeID string, frameIdx int) {
+// whole shard).
+//
+// ok reports whether the key carried a recognizable frame index: either an
+// "_<digits>" suffix or the flat "s<digits>" form. Keys with neither (e.g. a
+// garbage sample_id from the URL) return ok=false so callers can 404 instead
+// of silently defaulting to frame 0.
+func parseSampleKey(key string) (episodeID string, frameIdx int, ok bool) {
 	i := strings.LastIndexByte(key, '_')
 	if i < 0 {
 		// No underscore: accept the flat "s<digits>" index form.
 		if rest, ok := strings.CutPrefix(key, "s"); ok && isDigits(rest) {
 			if n, err := strconv.Atoi(rest); err == nil {
-				return "", n
+				return "", n, true
 			}
 		}
-		return "", 0
+		return "", 0, false
 	}
 	if n, err := strconv.Atoi(key[i+1:]); err == nil {
 		frameIdx = n
+	} else {
+		// An underscore with a non-numeric suffix is not a valid frame key.
+		return "", 0, false
 	}
 	episodeID = key[:i]
 	// L2D keys use an "ep<N>" episode prefix; nvidia keys are hex hashes
@@ -472,7 +582,7 @@ func parseSampleKey(key string) (episodeID string, frameIdx int) {
 	if rest, ok := strings.CutPrefix(episodeID, "ep"); ok && isDigits(rest) {
 		episodeID = rest
 	}
-	return episodeID, frameIdx
+	return episodeID, frameIdx, true
 }
 
 func isDigits(s string) bool {
@@ -554,11 +664,49 @@ func (s *S3Service) ReasoningStats(ctx context.Context) ([]model.ReasoningStatsE
 	return entries, total, nil
 }
 
+// reasoningSampleIDs lists every reasoning label present for a console dataset
+// and returns the set of flat s%08d sample ids (label object base names, minus
+// the .json suffix), aggregated across all teacher/prompt_version partitions.
+// Used by BuildShardIndex to set HasReasoning without depending on a
+// reasoning.json tar member (Phase-1 shards embed none).
+func (s *S3Service) reasoningSampleIDs(ctx context.Context, dataset string) (map[string]struct{}, error) {
+	prefix := fmt.Sprintf("%sdataset=%s/", reasoningCachePrefix, cacheDataset(dataset))
+	ids := map[string]struct{}{}
+	p := s3.NewListObjectsV2Paginator(s.client, &s3.ListObjectsV2Input{
+		Bucket: aws.String(s.bucket),
+		Prefix: aws.String(prefix),
+	})
+	for p.HasMorePages() {
+		page, err := p.NextPage(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("list reasoning sample ids for %s: %w", dataset, err)
+		}
+		for _, obj := range page.Contents {
+			key := aws.ToString(obj.Key)
+			if !strings.HasSuffix(key, ".json") {
+				continue
+			}
+			ids[strings.TrimSuffix(path.Base(key), ".json")] = struct{}{}
+		}
+	}
+	return ids, nil
+}
+
 // GetReasoningLabel fetches the raw JSON label for (dataset, sampleID). The
 // cache is partitioned by teacher/prompt_version, which the caller usually
 // does not know, so we list the dataset partition and pick the first (or the
 // requested teacher/promptVersion when provided) match.
 func (s *S3Service) GetReasoningLabel(ctx context.Context, dataset, sampleID, teacher, promptVersion string) ([]byte, string, error) {
+	// Console dataset ids / sample keys -> cache partition + flat s%08d id.
+	// An unparseable sample_id (no frame index) has no label: 404, don't
+	// silently resolve to s00000000 and serve frame 0's label.
+	dataset = cacheDataset(dataset)
+	resolvedID, ok := cacheSampleID(sampleID)
+	if !ok {
+		return nil, "", ErrNotFound
+	}
+	sampleID = resolvedID
+
 	// Fast path: fully-qualified key.
 	if teacher != "" && promptVersion != "" {
 		key := fmt.Sprintf("%sdataset=%s/teacher=%s/prompt_version=%s/%s.json",

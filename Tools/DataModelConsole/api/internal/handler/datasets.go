@@ -113,8 +113,8 @@ func (h *DatasetsHandler) GetSample(w http.ResponseWriter, r *http.Request) {
 }
 
 // GetShardIndex handles GET /api/v1/datasets/{name}/shards/{shard}/index.
-// One tar scan produces per-member byte ranges plus a presigned tar URL so the
-// ADAS player can range-GET frames directly from S3.
+// One tar scan produces per-member byte ranges plus per-frame ego state/plan
+// for the ADAS player.
 func (h *DatasetsHandler) GetShardIndex(w http.ResponseWriter, r *http.Request) {
 	name := chi.URLParam(r, "name")
 	shard := chi.URLParam(r, "shard")
@@ -145,9 +145,9 @@ func (h *DatasetsHandler) GetShardIndex(w http.ResponseWriter, r *http.Request) 
 // GET /api/v1/datasets/{name}/shards/{shard}/samples/{key}/image/{cam}.
 //
 // Phase 1: streams the tar from S3, locates the member {key}.{cam}.jpg and
-// pipes its bytes back with image/jpeg + Cache-Control. With
-// ?presign=true it instead returns a presigned URL for the whole tar so the
-// client can range-GET using the offsets from the samples listing.
+// pipes its bytes back with image/jpeg + Cache-Control. Streaming exactly one
+// tar member is the least-privilege behavior (no whole-shard URL leaks to the
+// client).
 func (h *DatasetsHandler) GetImage(w http.ResponseWriter, r *http.Request) {
 	name := chi.URLParam(r, "name")
 	shard := chi.URLParam(r, "shard")
@@ -163,35 +163,19 @@ func (h *DatasetsHandler) GetImage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// SECURITY note: the default path below streams exactly one tar member,
-	// which is the least-privilege behavior. ?presign=true necessarily returns
-	// a URL for the WHOLE shard tar (S3 cannot presign a byte range); it is
-	// only acceptable because the caller already names the specific member
-	// (key/cam in the path) and the /index endpoint pairs the same tar URL
-	// with per-member byte ranges — tar URL + client-side range-GET is the
-	// intended pattern for the player (range enforced client-side).
-	if r.URL.Query().Get("presign") == "true" {
-		url, err := h.s3.PresignShard(r.Context(), name, shard)
-		if err != nil {
-			slog.Error("presign shard", "dataset", name, "shard", shard, "error", err)
-			writeError(w, http.StatusBadGateway, model.CodeS3Error, "failed to presign shard")
-			return
-		}
-		// Never cache the presigned URL: it expires in ~15 min, and the image
-		// cache behavior shares this path pattern. Without no-store CloudFront
-		// could serve an expired URL (or cross-serve JPEG/JSON) for up to
-		// default_ttl.
-		w.Header().Set("Cache-Control", "no-store")
-		writeJSON(w, http.StatusOK, map[string]string{
-			"url":    url,
-			"member": fmt.Sprintf("%s.%s.jpg", key, cam),
-			"note":   "range-GET the tar using offset/size_bytes from the samples listing",
-		})
-		return
-	}
-
 	member := fmt.Sprintf("%s.%s.jpg", key, cam)
-	reader, closer, size, err := h.s3.StreamTarMember(r.Context(), name, shard, member)
+	// Fast path: the client already has the member's tar byte range from the
+	// shard index, so a bounded range GET avoids re-scanning the whole shard.
+	// Fall back to the linear scan when the params are absent or unparseable.
+	var reader io.Reader
+	var closer io.Closer
+	var size int64
+	var err error
+	if off, sz, ok := parseRange(r); ok {
+		reader, closer, size, err = h.s3.StreamTarMemberRange(r.Context(), name, shard, off, sz)
+	} else {
+		reader, closer, size, err = h.s3.StreamTarMember(r.Context(), name, shard, member)
+	}
 	if err != nil {
 		if errors.Is(err, service.ErrNotFound) {
 			writeError(w, http.StatusNotFound, model.CodeNotFound, "image not found: "+member)
