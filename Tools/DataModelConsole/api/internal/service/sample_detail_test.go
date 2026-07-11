@@ -12,22 +12,23 @@ func TestParseSampleKey(t *testing.T) {
 		key     string
 		wantEp  string
 		wantIdx int
+		wantOK  bool
 	}{
-		{"l2d ep prefix stripped", "ep0_000064", "0", 64},
-		{"l2d multi-digit episode", "ep12_000100", "12", 100},
-		{"nvidia hex hash kept verbatim", "25cd4769_000064", "25cd4769", 64},
-		{"pipeline flat s-index parses frame", "s00000064", "", 64},
-		{"pipeline flat s-index zero", "s00000000", "", 0},
-		{"non-numeric frame suffix", "ep0_abc", "0", 0},
-		{"ep prefix with non-digit rest kept whole", "epX_000001", "epX", 1},
-		{"bare non-s non-underscore key", "garbage", "", 0},
+		{"l2d ep prefix stripped", "ep0_000064", "0", 64, true},
+		{"l2d multi-digit episode", "ep12_000100", "12", 100, true},
+		{"nvidia hex hash kept verbatim", "25cd4769_000064", "25cd4769", 64, true},
+		{"pipeline flat s-index parses frame", "s00000064", "", 64, true},
+		{"pipeline flat s-index zero", "s00000000", "", 0, true},
+		{"non-numeric frame suffix is not a frame key", "ep0_abc", "", 0, false},
+		{"ep prefix with non-digit rest kept whole", "epX_000001", "epX", 1, true},
+		{"bare non-s non-underscore key", "garbage", "", 0, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			ep, idx := parseSampleKey(tt.key)
-			if ep != tt.wantEp || idx != tt.wantIdx {
-				t.Errorf("parseSampleKey(%q) = (%q, %d), want (%q, %d)",
-					tt.key, ep, idx, tt.wantEp, tt.wantIdx)
+			ep, idx, ok := parseSampleKey(tt.key)
+			if ep != tt.wantEp || idx != tt.wantIdx || ok != tt.wantOK {
+				t.Errorf("parseSampleKey(%q) = (%q, %d, %v), want (%q, %d, %v)",
+					tt.key, ep, idx, ok, tt.wantEp, tt.wantIdx, tt.wantOK)
 			}
 		})
 	}
@@ -55,6 +56,35 @@ func TestDecodeFloat32LE(t *testing.T) {
 	}
 	if got := decodeFloat32LE(nil); len(got) != 0 {
 		t.Errorf("nil buffer decoded %d floats, want 0", len(got))
+	}
+}
+
+// TestTripFrameFromMeta validates that BuildShardIndex reads the trip-global
+// frame index from meta.json (its frame_idx), which differs from the
+// intra-shard playback ordinal derived from the key suffix. A key like
+// "x_000000" gives FrameIdx 0 while its meta.json frame_idx may be 64.
+func TestTripFrameFromMeta(t *testing.T) {
+	tests := []struct {
+		name   string
+		body   string
+		want   int
+		wantOK bool
+	}{
+		{"trip frame present", `{"frame_idx": 64}`, 64, true},
+		{"trip frame zero present", `{"frame_idx": 0}`, 0, true},
+		{"other fields ignored", `{"episode": "abc", "frame_idx": 12, "t": 1.5}`, 12, true},
+		{"no frame_idx field", `{"episode": "abc"}`, 0, false},
+		{"malformed json", `not json`, 0, false},
+		{"empty body", ``, 0, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := tripFrameFromMeta([]byte(tt.body))
+			if got != tt.want || ok != tt.wantOK {
+				t.Errorf("tripFrameFromMeta(%q) = (%d, %v), want (%d, %v)",
+					tt.body, got, ok, tt.want, tt.wantOK)
+			}
+		})
 	}
 }
 
