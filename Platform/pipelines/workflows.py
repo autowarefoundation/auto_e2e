@@ -669,6 +669,14 @@ def train_il(
     backbone: Backbone = Backbone.SWIN_V2_TINY,
     epochs: int = 3,
     batch_size: int = 4,
+    # Effective batch size = batch_size * grad_accum_steps. The World-Model
+    # windows (T history + F future frames x V cams) blow up activation memory,
+    # forcing batch_size=1 on the L40S; but the trajectory loss needs a larger
+    # effective batch to descend past ~0.84 (the bs=1 per-sample SmoothL1 gradient
+    # is too noisy — the bs=4 imitation run reached 0.36). Accumulating grads over
+    # N micro-batches recovers the bs=4 signal at bs=1 memory: zero_grad at the
+    # window start, step once at the window end. Default 1 = plain per-batch step.
+    grad_accum_steps: int = 1,
     lr: float = 1e-4,
     weight_decay: float = 1e-2,
     grad_clip: float = 1.0,
@@ -806,11 +814,16 @@ def train_il(
 
     _proj_cache = {}
     _first_step = True  # gate the one-time gradient-flow probe below
+    accum = max(1, int(grad_accum_steps))
+    if accum > 1:
+        print(f"Gradient accumulation: {accum} micro-batches "
+              f"(effective batch size = {batch_size * accum})")
     for epoch in range(epochs):
         epoch_losses = []
         traj_losses = []
         jepa_vals = []
         reason_vals = []
+        micro_idx = 0  # position within the current accumulation window
         # Merged loader yields (batch, projection, geometry_type): each batch is
         # same-dataset (uniform num_views/geometry) but datasets are interleaved,
         # so the per-batch projection is applied to the batch it belongs to.
@@ -840,7 +853,9 @@ def train_il(
             if future_frames is not None:
                 future_frames = future_frames.to(device)
 
-            optimizer.zero_grad()
+            # Accumulation window: zero grads only at its start, step at its end.
+            if micro_idx == 0:
+                optimizer.zero_grad()
             with torch.amp.autocast("cuda", enabled=amp):
                 out = model(visual, map_input, vis_hist, ego_hist,
                             projection=proj_dev, geometry_type=batch_geom,
@@ -880,7 +895,23 @@ def train_il(
                         loss = loss + reasoning_loss_weight * terms["total"]
                         reason_val = float(terms["total"].item())
 
-            scaler.scale(loss).backward()
+            # Divide by accum so summed micro-batch grads equal the MEAN gradient
+            # of an effective batch of (batch_size * accum) — same scale as a plain
+            # step, so lr/grad_clip keep their meaning. Log the unscaled loss.
+            scaler.scale(loss / accum).backward()
+
+            epoch_losses.append(loss.item())
+            traj_losses.append(traj_loss.item())
+            jepa_vals.append(jepa_val)
+            reason_vals.append(reason_val)
+
+            # Step only at the end of an accumulation window (or plain step when
+            # accum==1). Grads persist across micro-batches until then.
+            micro_idx += 1
+            if micro_idx < accum:
+                continue
+            micro_idx = 0
+
             scaler.unscale_(optimizer)
             # One-time gradient-flow probe (very first optimizer step): prove each
             # enabled branch actually receives gradient (not just the trajectory
@@ -907,10 +938,14 @@ def train_il(
             scaler.step(optimizer)
             scaler.update()
 
-            epoch_losses.append(loss.item())
-            traj_losses.append(traj_loss.item())
-            jepa_vals.append(jepa_val)
-            reason_vals.append(reason_val)
+        # Flush a trailing partial accumulation window (epoch batch count not a
+        # multiple of accum) so its grads aren't silently dropped at epoch end.
+        if micro_idx > 0:
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+            scaler.step(optimizer)
+            scaler.update()
+            micro_idx = 0
 
         avg_loss = np.mean(epoch_losses) if epoch_losses else 0.0
         avg_traj = np.mean(traj_losses) if traj_losses else 0.0
@@ -1408,6 +1443,7 @@ def wf_train_il(
     backbone: Backbone = Backbone.SWIN_V2_TINY,
     epochs: int = 3,
     batch_size: int = 4,
+    grad_accum_steps: int = 1,
     lr: float = 1e-4,
     amp: bool = False,
     enable_reasoning: bool = False,
@@ -1420,9 +1456,12 @@ def wf_train_il(
     ``wf_data_processing``); train_il fails loudly if a branch is enabled but its
     shard data is missing rather than training it unsupervised. ``amp`` defaults
     off: fp16 autocast made the GradScaler skip every step (see train_il).
+    ``grad_accum_steps`` recovers a larger effective batch when the World-Model
+    windows force batch_size=1 (effective batch = batch_size * grad_accum_steps).
     """
     out = train_il(shards=shards, dataset=dataset, backbone=backbone,
-                   epochs=epochs, batch_size=batch_size, lr=lr, amp=amp,
+                   epochs=epochs, batch_size=batch_size,
+                   grad_accum_steps=grad_accum_steps, lr=lr, amp=amp,
                    enable_reasoning=enable_reasoning, reasoning_mode=reasoning_mode,
                    enable_world_model=enable_world_model)
     return evaluate_il_policy(checkpoint=out.checkpoint, shards=shards, dataset=dataset,
