@@ -74,8 +74,6 @@ func main() {
 
 			r.Get("/datasets", datasetsH.List)
 			r.Get("/datasets/{name}/shards", datasetsH.ListShards)
-			r.Get("/datasets/{name}/shards/{shard}/samples", datasetsH.ListSamples)
-			r.Get("/datasets/{name}/shards/{shard}/samples/{key}", datasetsH.GetSample)
 
 			r.Get("/reasoning-labels/stats", reasoningH.Stats)
 			r.Get("/reasoning-labels/{dataset}/{sample_id}", reasoningH.GetLabel)
@@ -98,6 +96,11 @@ func main() {
 			r.Use(middleware.Throttle(4))
 			r.Use(middleware.Timeout(150 * time.Second))
 			r.Get("/datasets/{name}/shards/{shard}/index", datasetsH.GetShardIndex)
+			// ListSamples/GetSample each do a full-tar scan identical in cost
+			// to the index build, so they belong in the heavy-scan group; in
+			// the 25s interactive group they 502 on cold load.
+			r.Get("/datasets/{name}/shards/{shard}/samples", datasetsH.ListSamples)
+			r.Get("/datasets/{name}/shards/{shard}/samples/{key}", datasetsH.GetSample)
 		})
 
 		// Image GETs are cheap bounded range reads and the player fires many in

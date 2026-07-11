@@ -43,6 +43,7 @@ func (h *StatsHandler) Get(w http.ResponseWriter, r *http.Request) {
 	} else {
 		resp.MLflowRuns = runs
 		resp.LatestADE = ade
+		resp.MLflowAvailable = true
 	}
 
 	writeJSON(w, http.StatusOK, resp)

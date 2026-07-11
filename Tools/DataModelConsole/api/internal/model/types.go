@@ -143,6 +143,10 @@ type StatsResponse struct {
 	ReasoningLabels int      `json:"reasoning_labels"`
 	MLflowRuns      int      `json:"mlflow_runs"`
 	LatestADE       *float64 `json:"latest_ade"`
+	// MLflowAvailable reports whether the MLflow-derived fields (MLflowRuns,
+	// LatestADE) were actually fetched. False (the default) means the tracking
+	// server was unreachable, so a zero run count is "unknown", not "no runs".
+	MLflowAvailable bool `json:"mlflow_available"`
 }
 
 // HealthResponse is returned by /healthz and /readyz.

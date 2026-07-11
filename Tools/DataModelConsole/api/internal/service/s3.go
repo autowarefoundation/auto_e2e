@@ -551,15 +551,25 @@ func (s *S3Service) BuildShardIndex(ctx context.Context, dataset, shard string) 
 		s.indexSF[cacheKey] = wg
 		s.indexMu.Unlock()
 
-		idx, err := s.buildShardIndexUncached(ctx, dataset, shard)
-
-		s.indexMu.Lock()
-		delete(s.indexSF, cacheKey)
-		if err == nil {
-			s.indexCache[cacheKey] = idx
-		}
-		s.indexMu.Unlock()
-		wg.Done()
+		var idx *model.ShardIndex
+		var err error
+		func() {
+			// Deferred cleanup so a panic in buildShardIndexUncached can't
+			// leave indexSF wedged (waiters would block forever). On panic idx
+			// stays nil (nothing bad cached), the single-flight slot is
+			// cleared, waiters wake and retry, and the panic still unwinds to
+			// middleware.Recoverer.
+			defer func() {
+				s.indexMu.Lock()
+				delete(s.indexSF, cacheKey)
+				if err == nil && idx != nil {
+					s.indexCache[cacheKey] = idx
+				}
+				s.indexMu.Unlock()
+				wg.Done()
+			}()
+			idx, err = s.buildShardIndexUncached(ctx, dataset, shard)
+		}()
 		return idx, err
 	}
 }
@@ -660,7 +670,11 @@ func (s *S3Service) buildShardIndexUncached(ctx context.Context, dataset, shard 
 	// shards embed no reasoning.json member.
 	labelIDs, err := s.reasoningSampleIDs(ctx, dataset)
 	if err != nil {
-		return nil, err
+		// A failed label listing must not fail the whole ~10s tar scan; serve
+		// the index without reasoning ticks (the nil-map lookup below is safe).
+		slog.Warn("reasoning label listing failed; serving index without reasoning ticks",
+			"dataset", dataset, "error", err)
+		labelIDs = nil
 	}
 
 	samples := make([]model.IndexSample, 0, len(order))
