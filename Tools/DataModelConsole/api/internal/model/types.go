@@ -249,18 +249,31 @@ type ComputeStatsResponse struct {
 	Stats         ReasoningStatsBlob `json:"stats"`
 }
 
-// SceneRef identifies one scene carrying a searched reasoning label.
+// SceneRef identifies one scene carrying a searched reasoning label. Shard is
+// the published shard (for the requested version) that actually contains this
+// sample, resolved server-side from the shard indexes; Available is false when
+// no published shard in this version holds the sample (its label exists but the
+// frame was not packed into this version's shards), so the UI links only real
+// samples instead of guessing a shard name that 404s.
 type SceneRef struct {
-	SampleID string `json:"sample_id"`
+	SampleID  string `json:"sample_id"`
+	Shard     string `json:"shard,omitempty"`
+	Available bool   `json:"available"`
 }
 
 // SceneSearchResponse wraps GET /api/v1/scenes/search: the scenes carrying a
-// given (field,value) reasoning label for a (dataset, prompt_version).
+// given (field,value) reasoning label for a (dataset, prompt_version). Total is
+// the number of matched sample ids returned; Available is how many of them are
+// present in the requested version's published shards (linkable). Truncated is
+// true when the label index held more matches than the requested limit.
 type SceneSearchResponse struct {
 	Dataset       string     `json:"dataset"`
 	PromptVersion string     `json:"prompt_version"`
+	Version       string     `json:"version,omitempty"`
 	Field         string     `json:"field"`
 	Value         string     `json:"value"`
 	Scenes        []SceneRef `json:"scenes"`
 	Total         int        `json:"total"`
+	Available     int        `json:"available"`
+	Truncated     bool       `json:"truncated"`
 }

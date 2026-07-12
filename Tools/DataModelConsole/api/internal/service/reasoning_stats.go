@@ -244,5 +244,49 @@ func (s *S3Service) SearchScenesByLabel(ctx context.Context, dataset, promptVers
 	return s.store.QueryScenesByLabel(ctx, dataset, promptVersion, field, value, limit)
 }
 
+// ResolveSampleShards maps each sample id to the published shard (for the given
+// version) that actually contains it, by consulting the shard indexes (cached,
+// so repeated calls are cheap). A sample id that no published shard holds maps
+// to "" — its reasoning label exists but the frame was not packed into this
+// version, so the UI must not synthesise a shard name that would 404. Returns a
+// map sampleID -> shard ("" when absent). Never errors on a single bad shard;
+// shards that fail to index are skipped (best-effort resolution).
+func (s *S3Service) ResolveSampleShards(ctx context.Context, dataset, version string, sampleIDs []string) map[string]string {
+	out := make(map[string]string, len(sampleIDs))
+	want := make(map[string]struct{}, len(sampleIDs))
+	for _, id := range sampleIDs {
+		want[id] = struct{}{}
+		out[id] = "" // default: not present in this version
+	}
+	if len(want) == 0 {
+		return out
+	}
+
+	// List this version's shards and probe each index for the wanted keys until
+	// all are resolved. Shard indexes are cached (single-flighted), so this is a
+	// map lookup after the first warm-up.
+	shards, _, err := s.ListShards(ctx, dataset, version, 100000, 0)
+	if err != nil {
+		return out
+	}
+	remaining := len(want)
+	for _, sh := range shards {
+		if remaining == 0 {
+			break
+		}
+		idx, err := s.BuildShardIndex(ctx, dataset, version, sh.Name)
+		if err != nil {
+			continue // best-effort: skip a shard that won't index
+		}
+		for _, smp := range idx.Samples {
+			if _, ok := want[smp.Key]; ok && out[smp.Key] == "" {
+				out[smp.Key] = sh.Name
+				remaining--
+			}
+		}
+	}
+	return out
+}
+
 // isStoreNotFound reports whether err is the store's not-found sentinel.
 func isStoreNotFound(err error) bool { return errors.Is(err, store.ErrNotFound) }

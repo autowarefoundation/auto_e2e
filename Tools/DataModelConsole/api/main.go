@@ -92,9 +92,6 @@ func main() {
 			r.Get("/reasoning-labels/prompt-versions", reasoningH.PromptVersions)
 			r.Get("/reasoning-labels/{dataset}/{sample_id}", reasoningH.GetLabel)
 
-			// Scene-by-label search is a single bounded DynamoDB Query, so it
-			// stays in the interactive (25s) group.
-			r.Get("/scenes/search", scenesH.Search)
 
 			r.Get("/mlflow/experiments", mlflowH.Experiments)
 			r.Get("/mlflow/experiments/{id}/runs", mlflowH.Runs)
@@ -128,6 +125,11 @@ func main() {
 			r.Get("/reasoning-labels/stats-detail", reasoningH.StatsDetail)
 			r.Get("/reasoning-labels/compute-stats", reasoningH.ComputeStats)
 			r.Post("/reasoning-labels/compute-stats", reasoningH.ComputeStats)
+
+			// Scene-by-label search resolves each hit's real shard by building
+			// the shard indexes (cached, but a cold build scans a whole tar), so
+			// it belongs in the heavy-scan group, not the 25s interactive one.
+			r.Get("/scenes/search", scenesH.Search)
 		})
 
 		// Image GETs are cheap bounded range reads and the player fires many in
