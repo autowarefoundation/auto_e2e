@@ -37,7 +37,7 @@ import { Button } from "@/components/ui/button";
 import { usePlayback, MAX_SPEED, MIN_SPEED } from "@/hooks/use-playback";
 import { ApiError, getReasoningLabel } from "@/lib/api";
 import { FrameStore } from "@/lib/frame-store";
-import { MAX_YAW_RATE, MAX_CURVATURE } from "@/lib/ego";
+import { MAX_YAW_RATE, MAX_CURVATURE, yawRateFrom } from "@/lib/ego";
 import type { ReasoningLabelRecord, ShardIndex } from "@/types";
 
 const SPEED_STEPS = [0.1, 0.25, 0.5, 1, 2, 4, 8, 16];
@@ -420,17 +420,32 @@ export function EpisodePlayer({
                 {sample?.ego_now?.[3]?.toFixed(4) ?? "-"}
               </span>{" "}
               1/m
-              {/* The BEV integrates heading from curvature (kappa, ch3) and
-                  clamps ONLY that, so the "clamped in BEV" note must gate on
-                  kappa. An out-of-range yaw_rate is flagged non-physical too,
-                  but without claiming the BEV clamped it. */}
-              {Math.abs(sample?.ego_now?.[3] ?? 0) > MAX_CURVATURE ? (
-                <span className="text-amber-600"> · non-physical (clamped in BEV)</span>
-              ) : (
-                Math.abs(sample?.ego_now?.[2] ?? 0) > MAX_YAW_RATE && (
-                  <span className="text-amber-600"> · yaw_rate non-physical</span>
-                )
-              )}
+              {/* The BEV integrates heading via yawRateFrom(speed, kappa),
+                  which clamps BOTH kappa and the resulting yaw rate v*kappa to
+                  MAX_YAW_RATE. So the "clamped in BEV" note fires whenever that
+                  actually saturates for this sample — either kappa out of range
+                  OR the in-range kappa still yielding an over-limit yaw rate at
+                  this speed. A raw yaw_rate channel spike (not what the BEV
+                  integrates) is flagged separately as non-physical. */}
+              {(() => {
+                const v = sample?.ego_now?.[0] ?? 0;
+                const kappa = sample?.ego_now?.[3] ?? 0;
+                const yaw = sample?.ego_now?.[2] ?? 0;
+                const bevClamped =
+                  Math.abs(kappa) > MAX_CURVATURE ||
+                  Math.abs(yawRateFrom(v, kappa)) >= MAX_YAW_RATE - 1e-9;
+                if (bevClamped) {
+                  return (
+                    <span className="text-amber-600"> · non-physical (clamped in BEV)</span>
+                  );
+                }
+                if (Math.abs(yaw) > MAX_YAW_RATE) {
+                  return (
+                    <span className="text-amber-600"> · yaw_rate non-physical</span>
+                  );
+                }
+                return null;
+              })()}
             </p>
           </div>
         </div>
