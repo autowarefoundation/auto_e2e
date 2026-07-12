@@ -88,6 +88,11 @@ class L2DDataset(Dataset):
         local_files_only: Accepted for backward compatibility; lerobot 0.5.x
             removed this option (it now reads from cache by default), so the
             flag is currently a no-op.
+        root: Optional local directory holding the already-materialized L2D data
+            (lerobot layout). When set, lerobot reads from it instead of the
+            shared HF cache — this is how the episode-range fan-out (#121 option
+            B) makes a partition's label/pack read the raw a partition's ingest
+            already downloaded, WITHOUT re-hitting HuggingFace in every pod.
     """
 
     def __init__(
@@ -100,6 +105,7 @@ class L2DDataset(Dataset):
         wm_hz: float = 1.0,
         source_hz: float = 10.0,
         reasoning_clip_only: bool = False,
+        root: str | None = None,
     ) -> None:
         try:
             from lerobot.datasets.lerobot_dataset import LeRobotDataset
@@ -157,6 +163,12 @@ class L2DDataset(Dataset):
         # legacy flag onto that: local_files_only=True means "don't force a
         # remote sync", which is already the default, so it is simply not passed.
         _kwargs: dict[str, Any] = {"repo_id": repo_id, "episodes": episodes}
+        if root is not None:
+            # Point lerobot at the partition's materialized raw dir so it loads
+            # from there instead of re-downloading to the shared HF cache (#121
+            # option B). lerobot reads <root>/data + <root>/meta; the FlyteDirectory
+            # a partition's ingest produced has exactly this layout.
+            _kwargs["root"] = root
         if delta_timestamps is not None:
             _kwargs["delta_timestamps"] = delta_timestamps
         self.lerobot_dataset = LeRobotDataset(**_kwargs)
