@@ -133,8 +133,6 @@ function SampleDetailInner({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [prevKey, nextKey, dataset, shardName]);
 
-  const frameIdx = data?.frame_idx;
-
   return (
     <div className="space-y-6">
       <div className="flex flex-wrap items-end justify-between gap-3">
@@ -183,7 +181,7 @@ function SampleDetailInner({
             <ChevronRight className="size-3.5" />
           </Button>
           <Link
-            href={`/scenes/${encodeURIComponent(dataset)}/${encodeURIComponent(shardName)}/${frameIdx ?? 0}${versionQuery}`}
+            href={`/scenes/${encodeURIComponent(dataset)}/${encodeURIComponent(shardName)}/${idx >= 0 ? idx : 0}${versionQuery}`}
             className="inline-flex h-7 items-center gap-1 rounded-md border border-slate-700 bg-slate-900 px-2.5 text-[0.8rem] text-slate-200 transition-colors hover:border-slate-500"
           >
             <Play className="size-3.5" />
