@@ -57,6 +57,13 @@ class _FakeDS:
     def __len__(self):
         return self.n
 
+    def sample_uid(self, si):
+        # Deterministic global-style uid (mirrors the real parsers' contract).
+        return f"l2d-v1-e000000-f{si:06d}"
+
+    def split_group_uid(self, si):
+        return "l2d-e000000"
+
     def _frame(self, seed):
         g = torch.Generator().manual_seed(seed)
         if self.float_frames:
@@ -119,7 +126,10 @@ def _serial_members(ds, si, dataset_value, calib_bytes, resize, to_pil):
         sample["trajectory_target"].numpy(),
     ]).astype(np.float32)
     members["ego.npy"] = ego.tobytes()
-    members["meta.json"] = json.dumps({"idx": si, "dataset": dataset_value}).encode()
+    members["meta.json"] = json.dumps({
+        "idx": si, "dataset": dataset_value,
+        "sample_uid": ds.sample_uid(si), "split_group_uid": ds.split_group_uid(si),
+    }).encode()
     members["calib.json"] = calib_bytes
     return members
 
@@ -145,9 +155,9 @@ def test_pack_sample_byte_identical_l2d_imitation():
     to_pil = transforms.ToPILImage()
 
     for si in range(len(ds)):
-        got_si, nviews, members = pp.pack_sample(si)
+        got_uid, nviews, members = pp.pack_sample(si)
         ref = _serial_members(ds, si, "yaak-ai/L2D", calib, resize, to_pil)
-        assert got_si == si
+        assert got_uid == ds.sample_uid(si)
         assert nviews == 6
         assert set(members) == set(ref)          # no reasoning.json from the worker
         assert "reasoning.json" not in members
@@ -203,7 +213,10 @@ def test_ego_npy_is_float32_history_then_target():
     assert arr.shape == (256 + 128,)
     np.testing.assert_array_equal(arr[:256], (np.arange(256) + 0).astype(np.float32))
     np.testing.assert_array_equal(arr[256:], (np.arange(128) - 0).astype(np.float32))
-    assert json.loads(members["meta.json"]) == {"idx": 0, "dataset": "yaak-ai/L2D"}
+    assert json.loads(members["meta.json"]) == {
+        "idx": 0, "dataset": "yaak-ai/L2D",
+        "sample_uid": ds.sample_uid(0), "split_group_uid": ds.split_group_uid(0),
+    }
     assert members["calib.json"] == calib
 
 
@@ -248,14 +261,21 @@ def test_manifest_flags_empty_input():
 
 
 # --------------------------------------------------------------------------
-# 3. Order + sample_id: pool.map preserves order; sample_key = s{si:08d}.
+# 3. Order + sample_uid (#121 §3.1): pack_sample returns the parser's GLOBAL uid
+#    (not a positional s{si}), and meta.json carries uid + split_group_uid.
 # --------------------------------------------------------------------------
-def test_sample_ids_are_zero_padded_and_ordered():
+def test_pack_returns_global_uid_and_meta():
     ds = _FakeDS(3, num_views=6, with_map=True, wm=False, float_frames=True)
     _install_worker_globals(ds, "yaak-ai/L2D", b"{}")
-    ids = []
+    uids = []
     for si in range(len(ds)):
-        got_si, _, members = pp.pack_sample(si)
-        ids.append(f"s{got_si:08d}")
-        assert json.loads(members["meta.json"])["idx"] == si
-    assert ids == ["s00000000", "s00000001", "s00000002"]
+        uid, _, members = pp.pack_sample(si)
+        uids.append(uid)
+        assert uid == ds.sample_uid(si)           # returns the parser's uid
+        meta = json.loads(members["meta.json"])
+        assert meta["idx"] == si
+        assert meta["sample_uid"] == uid
+        assert meta["split_group_uid"] == ds.split_group_uid(si)
+    # Distinct, in order, and in the new global format (no positional s0000…).
+    assert uids == [ds.sample_uid(i) for i in range(3)]
+    assert all(u.startswith("l2d-v1-") for u in uids)

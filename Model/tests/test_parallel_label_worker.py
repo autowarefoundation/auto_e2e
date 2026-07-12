@@ -81,6 +81,9 @@ def test_abstained_record_is_not_cached(monkeypatch):
             import torch
             return [torch.zeros(3, 8, 8) for _ in range(5)]
 
+        def sample_uid(self, i):
+            return f"l2d-v1-e000000-f{i:06d}"
+
     monkeypatch.setattr(pl, "_CACHE", _Cache())
     monkeypatch.setattr(pl, "_CLIENT", _Client())
     monkeypatch.setattr(pl, "_DS", _DS())
