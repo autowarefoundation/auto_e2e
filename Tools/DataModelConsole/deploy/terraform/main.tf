@@ -192,6 +192,40 @@ resource "aws_cloudfront_distribution" "console" {
     max_ttl     = 86400
   }
 
+  # Windowed shard blob (a contiguous byte range spanning several frames' camera
+  # members). Same properties as the image behavior: immutable content keyed by
+  # ?offset/&size (part of the cache key via query_string), edge-cached, and the
+  # SAME Lambda@Edge auth MUST be repeated here — CloudFront associations are
+  # per-behavior, so without this the /blob path would fall through to
+  # default_cache_behavior (cookies=all, default_ttl=0, and — critically — its
+  # own auth only) and lose edge caching. This behavior keeps /blob authed and
+  # cached exactly like /image.
+  ordered_cache_behavior {
+    path_pattern           = "/api/v1/datasets/*/blob"
+    allowed_methods        = ["GET", "HEAD"]
+    cached_methods         = ["GET", "HEAD"]
+    target_origin_id       = "console-alb"
+    viewer_protocol_policy = "redirect-to-https"
+
+    forwarded_values {
+      query_string = true
+      headers      = ["Authorization"]
+      cookies {
+        forward = "none"
+      }
+    }
+
+    lambda_function_association {
+      event_type   = "viewer-request"
+      lambda_arn   = var.auth_lambda_arn
+      include_body = false
+    }
+
+    min_ttl     = 0
+    default_ttl = 3600
+    max_ttl     = 86400
+  }
+
   restrictions {
     geo_restriction {
       restriction_type = "none"
