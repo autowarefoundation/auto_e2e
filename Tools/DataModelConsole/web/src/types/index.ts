@@ -221,22 +221,32 @@ export interface ReasoningStatsDetail {
   stats: ReasoningStatsBlob;
 }
 
-// SceneHit is one sample carrying a given (field=value) label. Only sample_id
-// is guaranteed; dataset/prompt_version echo the query when present.
+// SceneHit is one sample carrying a given (field=value) label. shard is the
+// published shard that actually holds the sample in the requested version (the
+// server resolves it from the shard indexes); available is false when the
+// label exists but no published shard in this version contains the frame, so
+// the UI links only real samples instead of a guessed shard that 404s.
 export interface SceneHit {
   sample_id: string;
+  shard?: string;
+  available: boolean;
   dataset?: string;
   prompt_version?: string;
 }
 
-// SceneSearchResult is GET /api/v1/scenes/search.
+// SceneSearchResult is GET /api/v1/scenes/search. total = returned hits;
+// available = how many are present in this version's shards (linkable);
+// truncated = the label index held more than the requested limit.
 export interface SceneSearchResult {
   dataset: string;
   prompt_version: string;
+  version?: string;
   field: string;
   value: string;
   scenes: SceneHit[];
   total: number;
+  available: number;
+  truncated: boolean;
 }
 
 // ---------------------------------------------------------------------------

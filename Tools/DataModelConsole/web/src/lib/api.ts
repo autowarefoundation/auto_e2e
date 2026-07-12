@@ -263,6 +263,7 @@ export function searchScenesByLabel(
   field: string,
   value: string,
   limit = 50,
+  version?: string,
 ): Promise<SceneSearchResult> {
   const q = new URLSearchParams({
     dataset,
@@ -271,6 +272,9 @@ export function searchScenesByLabel(
     value,
     limit: String(limit),
   });
+  // version scopes which published shards a scene can resolve into, so the
+  // drawer links to the shard that actually holds each sample.
+  if (version) q.set("version", version);
   return apiFetch<SceneSearchResult>(`/api/v1/scenes/search?${q.toString()}`);
 }
 
