@@ -114,11 +114,15 @@ export function TimelineScrubber({
   fps,
   frame,
   onSeek,
+  onScrubStart,
 }: {
   samples: IndexSample[];
   fps: number;
   frame: number;
   onSeek: (frame: number) => void;
+  // Fired when a drag begins so the player can pause; otherwise the playback
+  // clock keeps advancing under the held pointer, fighting the drag.
+  onScrubStart?: () => void;
 }) {
   const svgRef = useRef<SVGSVGElement>(null);
   const draggingRef = useRef(false);
@@ -297,6 +301,7 @@ export function TimelineScrubber({
         }}
         onPointerDown={(e) => {
           draggingRef.current = true;
+          onScrubStart?.(); // pause so the clock doesn't advance under the drag
           e.currentTarget.setPointerCapture(e.pointerId);
           seekFromPointer(e.clientX);
         }}
