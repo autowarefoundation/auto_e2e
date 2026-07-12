@@ -83,7 +83,6 @@ export function EpisodePlayer({
     return () => s.destroy();
   }, [index, dataset, shard, version]);
 
-  const fps = index.fps || 10;
   const cams = useMemo(() => {
     const first = index.samples[0];
     if (!first) return [];
@@ -93,13 +92,37 @@ export function EpisodePlayer({
       .sort();
   }, [index]);
 
+  // Buffer-readiness predicate for the buffer-gated clock: a frame is ready
+  // when every currently-visible camera has a decoded bitmap for it. Defined
+  // via refs the player keeps current (store + visibleCams) so the identity is
+  // stable and the playback hook never re-subscribes its rAF loop.
+  const storeRef = useRef<FrameStore | null>(null);
+  storeRef.current = store;
+  const visibleCamsRef = useRef<string[]>([]);
+  const frameReady = useCallback((f: number) => {
+    const s = storeRef.current;
+    const cams = visibleCamsRef.current;
+    if (!s || cams.length === 0) return true; // nothing to gate on yet
+    return s.cachedCount(f, 1, 1, cams) >= 1;
+  }, []);
+
   const playback = usePlayback(
     index.samples.length,
     index.fps || 10,
     initialState?.frame ?? 0,
+    frameReady,
   );
-  const { frame, playing, speed, direction, setFrame, toggle, step, setSpeed } =
-    playback;
+  const {
+    frame,
+    playing,
+    speed,
+    direction,
+    stalled,
+    setFrame,
+    toggle,
+    step,
+    setSpeed,
+  } = playback;
 
   const [mode, setMode] = useState<"grid" | "focus">(
     initialState?.mode ?? "grid",
@@ -119,6 +142,7 @@ export function EpisodePlayer({
     () => (mode === "focus" ? [cams[focusCam] ?? cams[0]].filter(Boolean) : cams),
     [mode, cams, focusCam],
   );
+  visibleCamsRef.current = visibleCams;
 
   // Prefetch a look-ahead ring for the visible cameras.
   useEffect(() => {
@@ -126,24 +150,12 @@ export function EpisodePlayer({
     store.prefetch(frame, direction, playing ? speed : 1, visibleCams);
   }, [store, frame, direction, speed, playing, visibleCams]);
 
-  // Buffering indicator: while playing, sample whether the next second of
-  // frames for the visible cameras is cached ahead of the playhead. Fetching
-  // 6 cameras/frame over the network cannot always sustain 10Hz, so rather
-  // than silently stuttering we surface a "buffering" chip when the look-ahead
-  // runs dry — the clock keeps running (drop-late) and the last frame stays on
-  // screen, so it still reads as video, just with an honest buffering hint.
-  const [buffering, setBuffering] = useState(false);
-  useEffect(() => {
-    if (!store || !playing) {
-      setBuffering(false);
-      return;
-    }
-    const need = Math.max(3, Math.round((fps || 10) * 0.6));
-    const id = setInterval(() => {
-      setBuffering(store.cachedCount(frame, direction, need, visibleCams) < 2);
-    }, 200);
-    return () => clearInterval(id);
-  }, [store, playing, frame, direction, visibleCams, fps]);
+  // Buffering indicator: the clock is buffer-gated (see usePlayback), so it
+  // reports `stalled` exactly when it is holding for the next frame to decode.
+  // The chip mirrors that directly — no polling, and it means what it says:
+  // the picture is not frozen behind a running counter, the clock is paused on
+  // the last drawn frame until the buffer catches up.
+  const buffering = playing && stalled;
 
   // Reasoning label for the current frame (debounced; 404 = no label). The
   // label is bound to the sample key it was fetched for so an in-flight
