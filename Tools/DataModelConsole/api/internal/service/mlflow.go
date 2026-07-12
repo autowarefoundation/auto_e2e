@@ -9,6 +9,8 @@ import (
 	"net/http"
 	"net/url"
 	"time"
+
+	"github.com/autowarefoundation/auto_e2e/tools/datamodelconsole/api/internal/model"
 )
 
 // UpstreamResult carries a proxied upstream response body + status.
@@ -179,17 +181,11 @@ func (m *MLflowService) RunStats(ctx context.Context) (totalRuns int, latestADE 
 	}
 
 	// 2. Page runs newest-first across all experiments (cap: 10 pages x 1000).
-	type runsPage struct {
-		Runs []struct {
-			Data struct {
-				Metrics []struct {
-					Key   string  `json:"key"`
-					Value float64 `json:"value"`
-				} `json:"metrics"`
-			} `json:"data"`
-		} `json:"runs"`
-		NextPageToken string `json:"next_page_token"`
-	}
+	// Reuse model.NormalizeMLflowRuns to fold the runs (its metric decode is
+	// lenient — MLflow serializes NaN/Infinity, and some metric values, as JSON
+	// STRINGS; a strict float64 decode here would fail the whole page and
+	// wrongly report MLflow as empty/unavailable). Only the page token is read
+	// separately.
 	token := ""
 	for page := 0; page < 10; page++ {
 		res, err := httpPostJSON(ctx, m.client, m.baseURL, "/api/2.0/mlflow/runs/search", map[string]any{
@@ -204,29 +200,28 @@ func (m *MLflowService) RunStats(ctx context.Context) (totalRuns int, latestADE 
 		if res.Status != http.StatusOK {
 			return 0, nil, fmt.Errorf("mlflow runs/search returned %d", res.Status)
 		}
-		var pg runsPage
-		if err := json.Unmarshal(res.Body, &pg); err != nil {
+		runs, err := model.NormalizeMLflowRuns(res.Body)
+		if err != nil {
 			return 0, nil, fmt.Errorf("decode runs: %w", err)
 		}
-		totalRuns += len(pg.Runs)
+		var pageToken struct {
+			NextPageToken string `json:"next_page_token"`
+		}
+		_ = json.Unmarshal(res.Body, &pageToken) // token absent => last page
+		totalRuns += len(runs)
 		if latestADE == nil {
-			for _, run := range pg.Runs {
-				for _, metric := range run.Data.Metrics {
-					if metric.Key == "eval/ade" {
-						v := metric.Value
-						latestADE = &v
-						break
-					}
-				}
-				if latestADE != nil {
+			for _, run := range runs {
+				if v, ok := run.Metrics["eval/ade"]; ok {
+					vv := v
+					latestADE = &vv
 					break
 				}
 			}
 		}
-		if pg.NextPageToken == "" || len(pg.Runs) == 0 {
+		if pageToken.NextPageToken == "" || len(runs) == 0 {
 			break
 		}
-		token = pg.NextPageToken
+		token = pageToken.NextPageToken
 	}
 	return totalRuns, latestADE, nil
 }
