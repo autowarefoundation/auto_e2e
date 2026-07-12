@@ -224,11 +224,23 @@ every downstream pod — the raw is fetched ONCE per partition, then reused by t
 partition's label + pack. Re-try stability is the priority: a failed label/pack
 re-reads the already-materialized partition raw (Flyte cache serves the same URI),
 rather than re-pulling from HF.
-- **L2D**: `data_ingest_range` builds `L2DDataset(repo_id, revision,
+- **L2D**: `data_ingest` (with `group_ids`) builds `L2DDataset(repo_id,
   episodes=partition_eps)` so lerobot pulls only that range from HF, then persists
-  it (hardlink copytree, §Phase-0 fix) as the partition's raw `FlyteDirectory`.
+  it (hardlink copytree, §Phase-0 fix) as the partition's raw `FlyteDirectory`. The
+  label/pack pods re-open it with `LeRobotDataset(root=<partition raw>, episodes=…)`,
+  which (verified against lerobot v0.5.0 source) takes the cached path and does NOT
+  re-hit HF: data is discovered by globbing the parquet that physically exist and
+  filtered by `episode_index.isin(episodes)`, and `episode_index` stays GLOBAL, so
+  a partition dir holding only its own episodes opens cleanly (no whole-repo meta
+  requirement, no off-by-one). INVARIANT (do not break): ingest MUST download the
+  videos too (`download_videos=True`, the default) and hardlink `videos/` — lerobot's
+  `_check_cached_episodes_sufficient` requires the requested episodes' video files
+  to exist on disk, else the offline label/pack pod would try a network re-download
+  and fail.
 - **NVIDIA**: downloads ONLY the partition's clips via the `physical_ai_av` SDK
-  (`workflows.py:200-225`) into the partition's raw dir.
+  (`workflows.py:200-225`) into the partition's raw dir. Label/pack DISCOVER clips
+  from that raw dir (sorted), so the packer and labeler enumerate the same order
+  (sample-index JOIN holds). (NVIDIA clip-uuid fan-out is Phase 4; L2D validated first.)
 
 New Flyte structure (`@dynamic` to size partitions at run time, then `map_task`):
 
