@@ -260,6 +260,10 @@ function SampleDetailInner({
         <CardContent>
           {reasoning.loading ? (
             <Skeleton className="h-32 w-full" />
+          ) : reasoning.error ? (
+            // A transient fetch error (non-404) must not masquerade as "no
+            // label"; show it with a retry so the user can recover.
+            <ErrorState error={reasoning.error} onRetry={reasoning.reload} />
           ) : reasoning.data ? (
             <ReasoningTimeline label={reasoning.data} />
           ) : (
