@@ -319,17 +319,16 @@ def data_processing(
     raw_path = raw_data.download()
     print(f"Processing raw data from: {raw_path} (dataset={dataset.value})")
 
-    # Enforce the sample_id JOIN invariant in CODE (not caller discipline):
-    # reasoning labels are generated over the World-Model enumeration
-    # (include_world_model_windows=True), and len(L2DDataset)/ordering depend on
-    # the WM flag. If reasoning labels are present we MUST enumerate the same
-    # sample set here, or every label would attach to the wrong frame. Today the
-    # WM margins happen to be ≤ the egomotion margins so the sets coincide even
-    # with WM off, but that is fragile arithmetic — force it on so a future window
-    # change can't silently mislabel. (NVIDIA has no WM windows and no labels.)
+    # Keep the pack enumeration aligned with the label enumeration for full label
+    # COVERAGE. With the global sample_uid (#121 §3.1) a mis-JOIN is no longer
+    # possible — the uid is (episode, frame), independent of list position — but
+    # the WM flag changes which frames are VALID (WM margins), so packing with a
+    # different WM setting than labeling would leave some packed frames unlabeled.
+    # Force WM on when labels are present so the packed set == the labeled set.
+    # (NVIDIA has no WM windows and no labels.)
     if reasoning_labels is not None and dataset != Dataset.NVIDIA_PHYSICAL_AI and not world_model:
         print("reasoning_labels present → forcing world_model=True so packing "
-              "enumerates the same sample_ids the labels were generated over.")
+              "enumerates the same sample set the labels were generated over.")
         world_model = True
 
     # Build the appropriate Dataset. Both are RAW pre-extraction sources: they
@@ -446,8 +445,10 @@ def data_processing(
     with ProcessPoolExecutor(max_workers=pack_workers, mp_context=ctx,
                              initializer=parallel_pack.init_pack_worker,
                              initargs=pack_init) as pool:
-        for si, nviews, members in pool.map(parallel_pack.pack_sample, idx_list):
-            sample_key = f"s{si:08d}"
+        for sample_key, nviews, members in pool.map(parallel_pack.pack_sample, idx_list):
+            # sample_key is the GLOBAL uid returned by the worker (#121 §3.1) — the
+            # same uid the labeler keyed on, so the reasoning.json JOIN below and
+            # the S3 label cache stay correct under episode-range sharding.
             for suffix, blob in members.items():
                 _add_member(sample_key, suffix, blob)
             num_views = nviews
@@ -498,9 +499,10 @@ def data_processing(
 # Task: Reasoning label generation (offline teacher → versioned S3 artifact)
 #
 # This is the SINGLE place the teacher (Cosmos) is ever called. It enumerates
-# samples straight from the raw dataset (same parser / episodes / order as
-# data_processing, so sample_id = s{si:08d} matches), asks the teacher for a
-# label ONLY on a cache miss (LabelCache, sample_id-keyed in S3), and writes a
+# samples straight from the raw dataset; each sample's GLOBAL uid
+# (parser.sample_uid, #121 §3.1) is the JOIN key to data_processing — stable
+# across episode-range shards. Asks the teacher for a
+# label ONLY on a cache miss (LabelCache, sample_uid-keyed in S3), and writes a
 # versioned label artifact. data_processing later JOINs this artifact into the
 # shards by sample_id — it does NOT call the teacher (#98/#117).
 # ============================================================
@@ -555,9 +557,9 @@ def generate_reasoning_labels(
     frames (L2D via lerobot delta_timestamps; NVIDIA via a sparse front-camera
     PyAV decode) — far cheaper than the full multi-view World-Model window.
 
-    Sample enumeration matches ``data_processing`` exactly (same parser, same
-    ``episodes``/``raw_path``, same order) so ``sample_id = s{si:08d}`` is the
-    shared JOIN key. Both L2D and NVIDIA are labelled (NVIDIA is no longer
+    Labels are keyed by the parser's GLOBAL ``sample_uid`` (#121 §3.1), so the
+    JOIN to ``data_processing`` holds even when labeling and packing run over
+    different episode-range shards. Both L2D and NVIDIA are labelled (NVIDIA is no longer
     skipped): ``reasoning_clip_only`` does not change either dataset's sample set.
 
     The teacher is called at most ONCE per (dataset, teacher, prompt_version,

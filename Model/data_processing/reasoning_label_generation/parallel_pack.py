@@ -67,18 +67,21 @@ def _jpeg(frame_tensor) -> bytes:
     return b.getvalue()
 
 
-def pack_sample(si: int) -> Tuple[int, int, Dict[str, bytes]]:
+def pack_sample(si: int) -> Tuple[str, int, Dict[str, bytes]]:
     """Decode + encode sample ``si`` into ``{member_suffix: bytes}``.
 
-    Returns ``(si, num_views, members)``. ``members`` keys are the per-sample
-    member suffixes (e.g. ``cam_0.jpg``, ``ego.npy``); the parent prefixes them
-    with ``s{si:08d}.`` and appends to the tar. ``reasoning.json`` is added by the
-    parent (labels live there). ``num_views`` lets the parent fill the manifest.
+    Returns ``(sample_uid, num_views, members)`` (#121 §3.1): the parent prefixes
+    each member with ``{sample_uid}.`` and JOINs reasoning.json by the SAME uid the
+    labeler used — so shard keys are partition-independent. ``num_views`` lets the
+    parent fill the manifest. ``meta.json`` carries the raw episode/clip identity +
+    ``split_group_uid`` (the train/val split unit) for downstream use.
     """
     import numpy as np
     import torch
 
     sample = _DS[si]
+    uid = _DS.sample_uid(si)
+    split_group = _DS.split_group_uid(si)
     members: Dict[str, bytes] = {}
 
     visual = sample["visual_tiles"]            # (V, 3, H, W)
@@ -111,7 +114,10 @@ def pack_sample(si: int) -> Tuple[int, int, Dict[str, bytes]]:
         traj.numpy() if torch.is_tensor(traj) else np.asarray(traj),
     ]).astype(np.float32)
     members["ego.npy"] = ego_data.tobytes()
-    members["meta.json"] = json.dumps({"idx": si, "dataset": _DATASET_VALUE}).encode()
+    members["meta.json"] = json.dumps({
+        "idx": si, "dataset": _DATASET_VALUE,
+        "sample_uid": uid, "split_group_uid": split_group,
+    }).encode()
     members["calib.json"] = _CALIB_BYTES
 
-    return si, int(visual.shape[0]), members
+    return uid, int(visual.shape[0]), members

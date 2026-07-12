@@ -83,7 +83,10 @@ def label_sample(si: int) -> Tuple[int, Dict[str, Any], str]:
     from .teacher_client import TeacherRequest
     from .targets import record_to_json
 
-    sample_key = f"s{si:08d}"
+    # Global, partition-independent uid (#121 §3.1): built from the sample's
+    # (episode/clip, frame) identity, NOT the positional index — so labels JOIN to
+    # packed shards and the S3 cache stays valid under episode-range sharding.
+    sample_key = _DS.sample_uid(si)
     cached = _CACHE.get(sample_key)
     if cached is not None:
         return si, record_to_json(cached), "hit"
