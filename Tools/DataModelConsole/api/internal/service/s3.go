@@ -30,6 +30,17 @@ import (
 // ErrNotFound is returned when a requested S3 object / tar member is absent.
 var ErrNotFound = errors.New("not found")
 
+// ErrRangeTooLarge is returned when a requested byte range exceeds MaxRangeBytes.
+var ErrRangeTooLarge = errors.New("requested range too large")
+
+// MaxRangeBytes bounds a single range GET against a shard. Both the per-image
+// endpoint and the windowed /blob endpoint stream through StreamTarMemberRange,
+// so enforcing the cap here (not only at the /blob handler) means a crafted
+// offset/size on EITHER endpoint cannot ask the origin to stream a whole
+// multi-hundred-MB / GB shard. A generous multi-frame camera window is well
+// under this; a single JPEG is KB.
+const MaxRangeBytes = 32 << 20 // 32 MiB
+
 // fallbackVersion is used when no vX.Y/ prefix with shards can be resolved.
 const fallbackVersion = "v1.0"
 
@@ -536,6 +547,14 @@ func (s *S3Service) StreamTarMemberRange(ctx context.Context, dataset, version, 
 	if offset < 0 || size <= 0 {
 		return nil, nil, 0, fmt.Errorf("invalid range offset=%d size=%d", offset, size)
 	}
+	if size > MaxRangeBytes {
+		return nil, nil, 0, ErrRangeTooLarge
+	}
+	// Guard the offset+size-1 arithmetic against int64 overflow before it forms
+	// the Range header (a huge offset near MaxInt64 would wrap to a negative end).
+	if offset > math.MaxInt64-size {
+		return nil, nil, 0, ErrNotFound
+	}
 	key := shardsPrefix(dataset, s.versionOrResolve(ctx, dataset, version)) + shard
 	rng := fmt.Sprintf("bytes=%d-%d", offset, offset+size-1)
 	obj, err := s.client.GetObject(ctx, &s3.GetObjectInput{
@@ -545,6 +564,11 @@ func (s *S3Service) StreamTarMemberRange(ctx context.Context, dataset, version, 
 	})
 	if err != nil {
 		if isS3NotFound(err) {
+			return nil, nil, 0, ErrNotFound
+		}
+		// A stale index whose offset now lies past EOF yields S3 416
+		// InvalidRange; surface it as not-found (a 4xx) rather than a 502.
+		if isS3InvalidRange(err) {
 			return nil, nil, 0, ErrNotFound
 		}
 		return nil, nil, 0, fmt.Errorf("get shard range %s %s: %w", key, rng, err)
@@ -1276,6 +1300,16 @@ func isS3NotFound(err error) bool {
 	if errors.As(err, &apiErr) {
 		code := apiErr.ErrorCode()
 		return code == "NoSuchKey" || code == "NotFound" || code == "NoSuchBucket"
+	}
+	return false
+}
+
+// isS3InvalidRange reports whether err is S3's 416 InvalidRange (a Range whose
+// start is at/after the object end — e.g. from a stale shard index offset).
+func isS3InvalidRange(err error) bool {
+	var apiErr interface{ ErrorCode() string }
+	if errors.As(err, &apiErr) {
+		return apiErr.ErrorCode() == "InvalidRange"
 	}
 	return false
 }

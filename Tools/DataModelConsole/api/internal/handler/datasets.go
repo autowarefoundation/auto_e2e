@@ -241,6 +241,11 @@ func (h *DatasetsHandler) GetImage(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, model.CodeNotFound, "image not found: "+member)
 			return
 		}
+		// A crafted offset/size must not stream a whole shard as image/jpeg.
+		if errors.Is(err, service.ErrRangeTooLarge) {
+			writeError(w, http.StatusBadRequest, model.CodeInvalidParam, "requested range too large")
+			return
+		}
 		slog.Error("stream tar member", "dataset", name, "shard", shard, "member", member, "error", err)
 		writeError(w, http.StatusBadGateway, model.CodeS3Error, "failed to read image from shard")
 		return
@@ -293,8 +298,9 @@ func (h *DatasetsHandler) GetBlob(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, model.CodeInvalidParam, "offset and size are required")
 		return
 	}
-	const maxBlobBytes = 32 << 20 // 32 MiB — a generous multi-frame window ceiling
-	if sz > maxBlobBytes {
+	// Reject an oversized span up front (avoids an S3 call); the service
+	// enforces the same MaxRangeBytes cap for any caller as a backstop.
+	if sz > service.MaxRangeBytes {
 		writeError(w, http.StatusBadRequest, model.CodeInvalidParam, "requested range too large")
 		return
 	}
@@ -303,6 +309,10 @@ func (h *DatasetsHandler) GetBlob(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		if errors.Is(err, service.ErrNotFound) {
 			writeError(w, http.StatusNotFound, model.CodeNotFound, "shard not found: "+shard)
+			return
+		}
+		if errors.Is(err, service.ErrRangeTooLarge) {
+			writeError(w, http.StatusBadRequest, model.CodeInvalidParam, "requested range too large")
 			return
 		}
 		slog.Error("stream shard blob", "dataset", name, "shard", shard, "offset", off, "size", sz, "error", err)
