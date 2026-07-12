@@ -13,7 +13,15 @@ hash split. These tests pin the invariants the fair comparison relies on:
 
 from __future__ import annotations
 
-from data_parsing.pre_extracted import _split_bucket, _split_keep
+import pytest
+
+# pre_extracted imports webdataset at module load; it is not in the core CI
+# requirements. Skip the whole module when webdataset is unavailable (matches the
+# NVIDIA-dep importorskip pattern elsewhere). The split logic itself is pure-python
+# hashing, but it lives in pre_extracted, so we guard the import.
+pytest.importorskip("webdataset")
+
+from data_parsing.pre_extracted import _split_bucket, _split_keep  # noqa: E402
 
 
 def _keys(n):
