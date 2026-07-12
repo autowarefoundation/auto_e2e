@@ -134,9 +134,14 @@ func main() {
 
 		// Image GETs are cheap bounded range reads and the player fires many in
 		// parallel per frame; a looser throttle keeps them from starving against
-		// the expensive tar-scan endpoints above (and vice versa).
+		// the expensive tar-scan endpoints above (and vice versa). A timeout
+		// bounds the linear-scan FALLBACK path (GetImage with no range params
+		// scans the whole tar for the member) so a member-not-found or a giant
+		// shard cannot tie up a connection indefinitely; a real range GET is
+		// milliseconds, so 30s is generous headroom.
 		r.Group(func(r chi.Router) {
 			r.Use(middleware.Throttle(64))
+			r.Use(middleware.Timeout(30 * time.Second))
 			r.Get("/datasets/{name}/shards/{shard}/samples/{key}/image/{cam}", datasetsH.GetImage)
 			// Windowed multi-member range read: the player fetches one
 			// contiguous span covering a whole window of frames and slices the
