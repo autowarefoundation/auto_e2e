@@ -83,6 +83,7 @@ export function EpisodePlayer({
     return () => s.destroy();
   }, [index, dataset, shard, version]);
 
+  const fps = index.fps || 10;
   const cams = useMemo(() => {
     const first = index.samples[0];
     if (!first) return [];
@@ -114,12 +115,35 @@ export function EpisodePlayer({
     onViewStateChange?.({ frame, cam: focusCam, mode, speed });
   }, [frame, focusCam, mode, speed, onViewStateChange]);
 
+  const visibleCams = useMemo(
+    () => (mode === "focus" ? [cams[focusCam] ?? cams[0]].filter(Boolean) : cams),
+    [mode, cams, focusCam],
+  );
+
   // Prefetch a look-ahead ring for the visible cameras.
   useEffect(() => {
     if (!store) return;
-    const visible = mode === "focus" ? [cams[focusCam] ?? cams[0]] : cams;
-    store.prefetch(frame, direction, playing ? speed : 1, visible);
-  }, [store, frame, direction, speed, playing, mode, focusCam, cams]);
+    store.prefetch(frame, direction, playing ? speed : 1, visibleCams);
+  }, [store, frame, direction, speed, playing, visibleCams]);
+
+  // Buffering indicator: while playing, sample whether the next second of
+  // frames for the visible cameras is cached ahead of the playhead. Fetching
+  // 6 cameras/frame over the network cannot always sustain 10Hz, so rather
+  // than silently stuttering we surface a "buffering" chip when the look-ahead
+  // runs dry — the clock keeps running (drop-late) and the last frame stays on
+  // screen, so it still reads as video, just with an honest buffering hint.
+  const [buffering, setBuffering] = useState(false);
+  useEffect(() => {
+    if (!store || !playing) {
+      setBuffering(false);
+      return;
+    }
+    const need = Math.max(3, Math.round((fps || 10) * 0.6));
+    const id = setInterval(() => {
+      setBuffering(store.cachedCount(frame, direction, need, visibleCams) < 2);
+    }, 200);
+    return () => clearInterval(id);
+  }, [store, playing, frame, direction, visibleCams, fps]);
 
   // Reasoning label for the current frame (debounced; 404 = no label). The
   // label is bound to the sample key it was fetched for so an in-flight
@@ -416,6 +440,15 @@ export function EpisodePlayer({
             {s}x
           </button>
         ))}
+        {buffering && (
+          <span
+            className="ml-auto flex items-center gap-1 rounded bg-amber-950/60 px-2 py-0.5 font-mono text-[10px] text-amber-400"
+            title="Fetching frames ahead of the playhead"
+          >
+            <span className="size-1.5 animate-pulse rounded-full bg-amber-400" />
+            buffering
+          </span>
+        )}
         <button
           onClick={() => {
             setShowHelp((v) => !v);
@@ -423,7 +456,7 @@ export function EpisodePlayer({
           }}
           title="Keyboard shortcuts (?)"
           aria-label="Keyboard shortcuts"
-          className="ml-auto flex items-center gap-1 rounded bg-slate-900 px-2 py-1 font-mono text-[11px] text-slate-400 transition-colors hover:text-slate-200"
+          className={`${buffering ? "" : "ml-auto"} flex items-center gap-1 rounded bg-slate-900 px-2 py-1 font-mono text-[11px] text-slate-400 transition-colors hover:text-slate-200`}
         >
           <Keyboard className="size-3.5" />
           Shortcuts (?)
