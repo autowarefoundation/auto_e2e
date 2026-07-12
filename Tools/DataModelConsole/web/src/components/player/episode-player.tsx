@@ -202,6 +202,20 @@ export function EpisodePlayer({
     function onKey(e: KeyboardEvent) {
       const t = e.target as HTMLElement | null;
       if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA")) return;
+      // The timeline scrubber (role="slider") owns Arrow/Home/End when focused
+      // and seeks itself; this window listener is a NATIVE listener, so the
+      // scrubber's React stopPropagation cannot suppress it — skip those keys
+      // here to avoid double-stepping the frame.
+      if (t && t.getAttribute("role") === "slider") {
+        if (
+          e.key === "ArrowLeft" ||
+          e.key === "ArrowRight" ||
+          e.key === "Home" ||
+          e.key === "End"
+        ) {
+          return;
+        }
+      }
       switch (e.key) {
         case " ":
           e.preventDefault(); // also suppresses native BUTTON activation
