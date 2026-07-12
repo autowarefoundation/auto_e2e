@@ -29,7 +29,6 @@ import {
   formatEpochMillis,
   formatMeters,
   formatMetric,
-  formatNumber,
 } from "@/lib/format";
 
 const METRIC_COLUMNS = ["train/loss", "eval/ade", "eval/fde"] as const;
@@ -185,11 +184,11 @@ function ModelsPageInner() {
                     {exp.name}
                   </CardTitle>
                 </CardHeader>
+                {/* No run count: MLflow's experiments/search does not return
+                    one, and a per-experiment runs/search per card would be N
+                    extra calls on load. Showing "0 runs" was simply wrong, so
+                    the card shows the id/stage only. */}
                 <CardContent className="flex items-center justify-between text-xs text-slate-400">
-                  <span>
-                    {formatNumber(exp.run_count)} run
-                    {exp.run_count === 1 ? "" : "s"}
-                  </span>
                   <span className="font-mono text-[10px]">
                     id {exp.experiment_id}
                   </span>
