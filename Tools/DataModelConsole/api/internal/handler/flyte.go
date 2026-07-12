@@ -57,7 +57,24 @@ func (h *FlyteHandler) Execution(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	res, err := h.svc.GetExecution(r.Context(), id)
-	h.relay(w, res, err, "flyte execution get")
+	if err != nil {
+		slog.Error("flyte execution get", "error", err)
+		writeError(w, http.StatusBadGateway, model.CodeUpstream, "flyte admin unreachable")
+		return
+	}
+	if res.Status != http.StatusOK {
+		writeRawJSON(w, res.Status, res.Body)
+		return
+	}
+	// The get-by-id endpoint returns an unwrapped Execution ({id,closure,spec}),
+	// so normalize it to the flat shape too (the list handler already does).
+	out, nerr := model.NormalizeFlyteExecution(res.Body)
+	if nerr != nil {
+		slog.Error("normalize flyte execution", "error", nerr)
+		writeError(w, http.StatusBadGateway, model.CodeUpstream, "unexpected flyte response")
+		return
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 // validFlyteExecutionID accepts only Flyte-generated execution names:
@@ -73,14 +90,4 @@ func validFlyteExecutionID(s string) bool {
 		}
 	}
 	return true
-}
-
-// relay forwards the upstream JSON response, or a 502 on transport failure.
-func (h *FlyteHandler) relay(w http.ResponseWriter, res *service.UpstreamResult, err error, op string) {
-	if err != nil {
-		slog.Error(op, "error", err)
-		writeError(w, http.StatusBadGateway, model.CodeUpstream, "flyte admin unreachable")
-		return
-	}
-	writeRawJSON(w, res.Status, res.Body)
 }
