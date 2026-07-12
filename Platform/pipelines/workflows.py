@@ -31,6 +31,30 @@ MLFLOW_URI = "http://mlflow.mlflow.svc.cluster.local:5000"
 REASONING_LABELS_CACHE_BUCKET = _os.environ.get(
     "REASONING_LABELS_CACHE_BUCKET", "auto-e2e-platform-datasets-381491877296")
 
+# Flyte cache versions (#121 §3.4a). The cache key is (task interface, input
+# literals, cache_version); the CODE-contract determinants (uid/parser/shard/
+# geometry schema) can't be captured by inputs, so they go here. Sourced from
+# Model/data_processing/contract_versions.py (the single place any of these is
+# bumped, §3.4c). Imported guarded: Model is on the path in the data-prep image
+# and on the dev box, but NOT necessarily when this module is first imported at
+# registration — the fallback keeps registration working (the real values load
+# in the pod where the tasks actually run and cache). Per-partition group_ids and
+# source_revision travel as task INPUTS, so ranges are independently cacheable.
+try:
+    from data_processing.contract_versions import (
+        UID_SCHEMA_VERSION as _UID_V, PARSER_VERSION as _PARSER_V,
+        SHARD_SCHEMA_VERSION as _SHARD_V, GEOMETRY_VERSION as _GEOM_V,
+    )
+except Exception:  # pragma: no cover - registration-time fallback only
+    _UID_V = _PARSER_V = _SHARD_V = _GEOM_V = "v1"
+
+# Each stage's cache_version folds in ONLY the contracts that actually determine
+# its output (§3.4a): ingest depends on the parser enumeration; labels also on
+# the uid format (the JOIN key); pack on the shard + geometry encoding.
+INGEST_CACHE_VERSION = f"ingest-{_PARSER_V}"
+LABEL_CACHE_VERSION = f"label-{_PARSER_V}-{_UID_V}"
+PACK_CACHE_VERSION = f"pack-{_PARSER_V}-{_UID_V}-{_SHARD_V}-{_GEOM_V}"
+
 
 def _large_shm_pod_template():
     """PodTemplate that mounts a large tmpfs at /dev/shm (#121 P0).
