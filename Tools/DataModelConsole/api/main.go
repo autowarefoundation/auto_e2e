@@ -136,6 +136,11 @@ func main() {
 		r.Group(func(r chi.Router) {
 			r.Use(middleware.Throttle(64))
 			r.Get("/datasets/{name}/shards/{shard}/samples/{key}/image/{cam}", datasetsH.GetImage)
+			// Windowed multi-member range read: the player fetches one
+			// contiguous span covering a whole window of frames and slices the
+			// JPEGs client-side, so it belongs with the image reads (bounded S3
+			// range GETs), not the full-tar scans above.
+			r.Get("/datasets/{name}/shards/{shard}/blob", datasetsH.GetBlob)
 		})
 	})
 

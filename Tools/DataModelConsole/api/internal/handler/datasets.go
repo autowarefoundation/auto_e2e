@@ -257,6 +257,70 @@ func (h *DatasetsHandler) GetImage(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// GetBlob handles GET /api/v1/datasets/{name}/shards/{shard}/blob?offset=&size=.
+//
+// It streams one CONTIGUOUS byte range of the shard tar — spanning several
+// consecutive members (e.g. all camera JPEGs of a window of frames) — in a
+// single S3 range GET. The client slices the individual JPEGs back out using
+// the per-member offsets it already holds from the shard index. This collapses
+// the ~6-GETs-per-frame image traffic into one request per playback window,
+// which is what makes 10Hz playback fill its buffer over a high-latency link
+// (each round trip is amortized across many frames instead of paid per image).
+//
+// The bytes are opaque here (tar headers + JPEG payloads interleaved), so the
+// response is application/octet-stream; only the client, holding the index,
+// knows where each member sits. maxBlobBytes caps a single span so a bad
+// offset/size pair cannot ask the origin to stream an unbounded read.
+func (h *DatasetsHandler) GetBlob(w http.ResponseWriter, r *http.Request) {
+	name := chi.URLParam(r, "name")
+	shard := chi.URLParam(r, "shard")
+
+	if !h.s3.ValidDataset(name) {
+		writeError(w, http.StatusNotFound, model.CodeNotFound, "unknown dataset: "+name)
+		return
+	}
+	if !validShardName(shard) {
+		writeError(w, http.StatusBadRequest, model.CodeInvalidParam, "invalid shard name")
+		return
+	}
+	version, ok := requestedVersion(r)
+	if !ok {
+		writeError(w, http.StatusBadRequest, model.CodeInvalidParam, "invalid version")
+		return
+	}
+	off, sz, rok := parseRange(r)
+	if !rok {
+		writeError(w, http.StatusBadRequest, model.CodeInvalidParam, "offset and size are required")
+		return
+	}
+	const maxBlobBytes = 32 << 20 // 32 MiB — a generous multi-frame window ceiling
+	if sz > maxBlobBytes {
+		writeError(w, http.StatusBadRequest, model.CodeInvalidParam, "requested range too large")
+		return
+	}
+
+	reader, closer, size, err := h.s3.StreamTarMemberRange(r.Context(), name, version, shard, off, sz)
+	if err != nil {
+		if errors.Is(err, service.ErrNotFound) {
+			writeError(w, http.StatusNotFound, model.CodeNotFound, "shard not found: "+shard)
+			return
+		}
+		slog.Error("stream shard blob", "dataset", name, "shard", shard, "offset", off, "size", sz, "error", err)
+		writeError(w, http.StatusBadGateway, model.CodeS3Error, "failed to read shard range")
+		return
+	}
+	defer closer.Close()
+
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("Content-Length", fmt.Sprintf("%d", size))
+	// Immutable shard bytes at a fixed offset — cache aggressively at the edge.
+	w.Header().Set("Cache-Control", "public, max-age=3600")
+	w.WriteHeader(http.StatusOK)
+	if _, err := io.Copy(w, reader); err != nil {
+		slog.Warn("copy shard blob", "shard", shard, "offset", off, "error", err)
+	}
+}
+
 // validShardName accepts plain .tar file names (no path traversal).
 func validShardName(s string) bool {
 	return strings.HasSuffix(s, ".tar") && !strings.ContainsAny(s, "/\\") && s != ".tar"
