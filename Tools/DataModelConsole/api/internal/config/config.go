@@ -23,6 +23,9 @@ type Config struct {
 	// FlyteProject / FlyteDomain scope the Flyte proxy queries.
 	FlyteProject string
 	FlyteDomain  string
+	// DynamoTable is the single-table DynamoDB cache backing shard indexes,
+	// precomputed reasoning stats, and the scene-by-label search index.
+	DynamoTable string
 }
 
 // Load reads configuration from the environment, applying defaults.
@@ -37,6 +40,7 @@ func Load() *Config {
 		CORSOrigin:      getenv("CORS_ORIGIN", "*"),
 		FlyteProject:    getenv("FLYTE_PROJECT", "auto-e2e"),
 		FlyteDomain:     getenv("FLYTE_DOMAIN", "development"),
+		DynamoTable:     getenv("DYNAMO_TABLE", "auto-e2e-console"),
 	}
 
 	expiry := getenv("PRESIGN_EXPIRY", "15m")

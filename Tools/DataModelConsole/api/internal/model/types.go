@@ -192,3 +192,75 @@ type HealthResponse struct {
 	Status string            `json:"status"`
 	Checks map[string]string `json:"checks,omitempty"`
 }
+
+// ---------------------------------------------------------------------------
+// Reasoning-label statistics (precomputed, cached in DynamoDB).
+//
+// These describe the ODD a (dataset x version x prompt_version) reasoning-label
+// set actually covers: the categorical distribution of each taxonomy axis
+// aggregated across ALL horizons of ALL labels, plus a confidence histogram.
+// The v2 context axes (weather, geo, road topology, ...) are NULL in the data,
+// so they are intentionally NOT represented here — only what exists.
+// ---------------------------------------------------------------------------
+
+// HistogramBucket is one bucket of a value-count histogram (confidence, speed).
+type HistogramBucket struct {
+	Bucket string `json:"bucket"`
+	Count  int    `json:"count"`
+}
+
+// ReasoningStatsBlob is the precomputed statistics for one
+// (dataset x version x prompt_version) reasoning-label set. ByField maps each
+// taxonomy axis name (relation_to_ego, hazard_event, cause, longitudinal_response,
+// lateral_response, tactical_response, rule_response) to its value->count map,
+// aggregated across every horizon of every label in the set.
+type ReasoningStatsBlob struct {
+	NLabels             int                       `json:"n_labels"`      // number of label objects aggregated
+	HorizonCount        int                       `json:"horizon_count"` // total horizon rows aggregated (n_labels x horizons/label)
+	ByField             map[string]map[string]int `json:"by_field"`
+	ConfidenceHistogram []HistogramBucket         `json:"confidence_histogram"`
+	// SpeedHistogram is populated only when ego speed is cheaply joinable;
+	// omitted otherwise (the reasoning cache carries no ego signal).
+	SpeedHistogram []HistogramBucket `json:"speed_histogram,omitempty"`
+}
+
+// ReasoningStatsDetailResponse wraps GET /api/v1/reasoning-labels/stats-detail.
+// Stats is the precomputed blob; ComputedAt is when it was materialised (RFC3339,
+// empty when just computed inline and not yet persisted).
+type ReasoningStatsDetailResponse struct {
+	Dataset       string             `json:"dataset"`
+	Version       string             `json:"version"`
+	PromptVersion string             `json:"prompt_version"`
+	Teacher       string             `json:"teacher,omitempty"`
+	ComputedAt    string             `json:"computed_at,omitempty"`
+	Cached        bool               `json:"cached"` // true when served from a DynamoDB hit
+	Stats         ReasoningStatsBlob `json:"stats"`
+}
+
+// ComputeStatsResponse wraps the force-(re)compute endpoint: it reports the
+// blob plus how many scene-by-label index rows were written.
+type ComputeStatsResponse struct {
+	Dataset       string             `json:"dataset"`
+	Version       string             `json:"version"`
+	PromptVersion string             `json:"prompt_version"`
+	Teacher       string             `json:"teacher,omitempty"`
+	ComputedAt    string             `json:"computed_at"`
+	SceneRows     int                `json:"scene_rows"` // scene-by-label index rows written
+	Stats         ReasoningStatsBlob `json:"stats"`
+}
+
+// SceneRef identifies one scene carrying a searched reasoning label.
+type SceneRef struct {
+	SampleID string `json:"sample_id"`
+}
+
+// SceneSearchResponse wraps GET /api/v1/scenes/search: the scenes carrying a
+// given (field,value) reasoning label for a (dataset, prompt_version).
+type SceneSearchResponse struct {
+	Dataset       string     `json:"dataset"`
+	PromptVersion string     `json:"prompt_version"`
+	Field         string     `json:"field"`
+	Value         string     `json:"value"`
+	Scenes        []SceneRef `json:"scenes"`
+	Total         int        `json:"total"`
+}

@@ -24,6 +24,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 
 	"github.com/autowarefoundation/auto_e2e/tools/datamodelconsole/api/internal/model"
+	"github.com/autowarefoundation/auto_e2e/tools/datamodelconsole/api/internal/store"
 )
 
 // ErrNotFound is returned when a requested S3 object / tar member is absent.
@@ -91,27 +92,27 @@ type S3Service struct {
 	bucket        string
 	presignExpiry time.Duration
 
+	// store is the DynamoDB-backed cache: the shard-index source of truth
+	// (read-through), plus precomputed stats and the scene-by-label index.
+	// May be nil in tests / a Dynamo-less deployment, in which case shard
+	// indexes are built fresh from S3 on every request (single-flighted).
+	store *store.DynamoStore
+
 	// versionCache memoizes the resolved newest version per dataset (see
 	// resolveVersion). Guarded by versionMu.
 	versionMu    sync.Mutex
 	versionCache map[string]cachedVersion
 
-	// indexCache memoizes built shard indexes. A shard tar is immutable, so
-	// once scanned (an expensive full-object read for a multi-hundred-MB shard)
-	// the small JSON index is reused. Guarded by indexMu; keyed by
-	// "<dataset>/<version>/<shard>". Bounded by indexCacheMax with FIFO
-	// eviction (indexOrder) so a long-lived process that browses many
-	// datasets/versions/shards cannot grow the map without limit.
-	indexMu    sync.Mutex
-	indexCache map[string]*model.ShardIndex
-	indexOrder []string                   // insertion order for FIFO eviction
-	indexSF    map[string]*sync.WaitGroup // single-flight in-progress builds
+	// indexSF single-flights concurrent shard-index builds so a large shard is
+	// scanned from S3 only once even under many simultaneous players. The built
+	// index is NOT held in an in-memory map: those indexes are multi-MB each (a
+	// nvidia shard index is ~5MB of JSON), so caching dozens of them was the OOM
+	// risk this backend removes — DynamoDB is now the cache/source of truth, so
+	// waiters re-read the freshly-written Dynamo item instead. Guarded by
+	// indexMu; keyed by "<dataset>/<version>/<shard>".
+	indexMu sync.Mutex
+	indexSF map[string]*sync.WaitGroup // single-flight in-progress builds
 }
-
-// indexCacheMax bounds the number of shard indexes held in memory. Each index
-// is a few hundred KB of JSON at most; a few dozen covers every shard the
-// console realistically browses in one session.
-const indexCacheMax = 64
 
 type cachedVersion struct {
 	version string
@@ -119,8 +120,10 @@ type cachedVersion struct {
 }
 
 // NewS3Service builds the S3 client from the default AWS credential chain
-// (Pod Identity in-cluster, profile/env locally).
-func NewS3Service(ctx context.Context, region, bucket string, presignExpiry time.Duration) (*S3Service, error) {
+// (Pod Identity in-cluster, profile/env locally). st is the DynamoDB-backed
+// cache used as the shard-index source of truth; it may be nil (tests /
+// Dynamo-less deployment), in which case indexes are always built from S3.
+func NewS3Service(ctx context.Context, region, bucket string, presignExpiry time.Duration, st *store.DynamoStore) (*S3Service, error) {
 	awsCfg, err := awsconfig.LoadDefaultConfig(ctx, awsconfig.WithRegion(region))
 	if err != nil {
 		return nil, fmt.Errorf("load aws config: %w", err)
@@ -131,8 +134,8 @@ func NewS3Service(ctx context.Context, region, bucket string, presignExpiry time
 		presigner:     s3.NewPresignClient(client),
 		bucket:        bucket,
 		presignExpiry: presignExpiry,
+		store:         st,
 		versionCache:  make(map[string]cachedVersion),
-		indexCache:    make(map[string]*model.ShardIndex),
 		indexSF:       make(map[string]*sync.WaitGroup),
 	}, nil
 }
@@ -651,21 +654,28 @@ func (s *S3Service) GetSampleDetail(ctx context.Context, dataset, version, shard
 	return detail, nil
 }
 
-// BuildShardIndex returns the playback index for a shard, caching the result
-// (the tar is immutable) and single-flighting concurrent builds so a large
-// shard is scanned from S3 only once even under many simultaneous players.
+// BuildShardIndex returns the playback index for a shard, read-through
+// DynamoDB: a Dynamo hit is returned directly; on a miss the index is built
+// from the (immutable) shard tar, written to Dynamo, and returned. Concurrent
+// builds are single-flighted so a large shard is scanned from S3 only once even
+// under many simultaneous players; waiters re-check Dynamo after the owner
+// finishes rather than sharing an in-memory copy (those indexes are multi-MB,
+// so holding them in a process map was the OOM risk this backend removes).
 func (s *S3Service) BuildShardIndex(ctx context.Context, dataset, version, shard string) (*model.ShardIndex, error) {
 	version = s.versionOrResolve(ctx, dataset, version)
 	cacheKey := fmt.Sprintf("%s/%s/%s", dataset, version, shard)
 
 	for {
-		s.indexMu.Lock()
-		if idx, ok := s.indexCache[cacheKey]; ok {
-			s.indexMu.Unlock()
+		// Dynamo is the source of truth: check it before (and after) taking the
+		// single-flight slot so a build by another request/replica is reused.
+		if idx, ok := s.shardIndexFromStore(ctx, dataset, version, shard); ok {
 			return idx, nil
 		}
+
+		s.indexMu.Lock()
 		if wg, building := s.indexSF[cacheKey]; building {
-			// Another request is building this index; wait and re-check cache.
+			// Another goroutine is building this index; wait, then re-check
+			// Dynamo (the owner will have written it).
 			s.indexMu.Unlock()
 			wg.Wait()
 			continue
@@ -679,33 +689,47 @@ func (s *S3Service) BuildShardIndex(ctx context.Context, dataset, version, shard
 		var idx *model.ShardIndex
 		var err error
 		func() {
-			// Deferred cleanup so a panic in buildShardIndexUncached can't
-			// leave indexSF wedged (waiters would block forever). On panic idx
-			// stays nil (nothing bad cached), the single-flight slot is
-			// cleared, waiters wake and retry, and the panic still unwinds to
-			// middleware.Recoverer.
+			// Deferred cleanup so a panic in buildShardIndexUncached can't leave
+			// indexSF wedged (waiters would block forever). On panic idx stays
+			// nil, the single-flight slot is cleared, waiters wake and retry,
+			// and the panic still unwinds to middleware.Recoverer.
 			defer func() {
 				s.indexMu.Lock()
 				delete(s.indexSF, cacheKey)
-				if err == nil && idx != nil {
-					if _, exists := s.indexCache[cacheKey]; !exists {
-						// FIFO-evict the oldest entry once at capacity.
-						for len(s.indexOrder) >= indexCacheMax {
-							oldest := s.indexOrder[0]
-							s.indexOrder = s.indexOrder[1:]
-							delete(s.indexCache, oldest)
-						}
-						s.indexOrder = append(s.indexOrder, cacheKey)
-					}
-					s.indexCache[cacheKey] = idx
-				}
 				s.indexMu.Unlock()
 				wg.Done()
 			}()
 			idx, err = s.buildShardIndexUncached(ctx, dataset, version, shard)
+			if err == nil && idx != nil && s.store != nil {
+				// Persist for this and future requests / replicas. A write
+				// failure must not fail the request: the index is already built,
+				// so log and serve it (the next request rebuilds + retries).
+				if perr := s.store.PutShardIndex(ctx, dataset, version, shard, idx); perr != nil {
+					slog.Warn("persist shard index to dynamo failed; serving without cache",
+						"dataset", dataset, "version", version, "shard", shard, "error", perr)
+				}
+			}
 		}()
 		return idx, err
 	}
+}
+
+// shardIndexFromStore reads a shard index from DynamoDB. ok is false on a miss,
+// on a read error (logged; treated as a miss so the build path still serves),
+// or when no store is configured.
+func (s *S3Service) shardIndexFromStore(ctx context.Context, dataset, version, shard string) (*model.ShardIndex, bool) {
+	if s.store == nil {
+		return nil, false
+	}
+	idx, err := s.store.GetShardIndex(ctx, dataset, version, shard)
+	if err != nil {
+		if !errors.Is(err, store.ErrNotFound) {
+			slog.Warn("read shard index from dynamo failed; will rebuild",
+				"dataset", dataset, "version", version, "shard", shard, "error", err)
+		}
+		return nil, false
+	}
+	return idx, true
 }
 
 // buildShardIndexUncached streams the shard tar once and builds the playback
