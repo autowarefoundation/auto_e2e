@@ -103,6 +103,23 @@ func TestNormalizeFlyteExecutions(t *testing.T) {
 	}
 }
 
+func TestNormalizeFlyteExecution_Single(t *testing.T) {
+	// The get-by-id endpoint returns the UNWRAPPED execution (no envelope).
+	body := []byte(`{"id":{"name":"exec9"},
+		"spec":{"launchPlan":{"name":"lp_train_il"}},
+		"closure":{"phase":"FAILED","createdAt":"2026-07-10T00:00:00Z","startedAt":"2026-07-10T00:00:03Z","duration":"12.0s","workflowId":{"name":"wf_train_il"}}}`)
+	e, err := NormalizeFlyteExecution(body)
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if e.ExecutionID != "exec9" || e.WorkflowName != "wf_train_il" || e.Phase != "FAILED" {
+		t.Errorf("exec = %+v", e)
+	}
+	if e.StartedAt != "2026-07-10T00:00:03Z" || e.DurationS != 12 {
+		t.Errorf("started=%q duration=%d", e.StartedAt, e.DurationS)
+	}
+}
+
 func TestNormalizeFlyteExecutions_Fallbacks(t *testing.T) {
 	// No startedAt / no workflowId.name => fall back to createdAt / launchPlan.
 	body := []byte(`{"executions":[

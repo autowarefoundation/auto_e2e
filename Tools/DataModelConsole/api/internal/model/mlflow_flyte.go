@@ -225,6 +225,17 @@ func NormalizeFlyteExecutions(body []byte) ([]FlyteExecution, error) {
 	return out, nil
 }
 
+// NormalizeFlyteExecution decodes a SINGLE Flyte Admin execution (the get-by-id
+// endpoint returns the unwrapped Execution message {id,closure,spec}, NOT the
+// {"executions":[...]} envelope) into the flat FlyteExecution shape.
+func NormalizeFlyteExecution(body []byte) (FlyteExecution, error) {
+	var raw rawFlyteExecution
+	if err := json.Unmarshal(body, &raw); err != nil {
+		return FlyteExecution{}, err
+	}
+	return raw.flatten(), nil
+}
+
 type rawFlyteExecution struct {
 	ID struct {
 		Name string `json:"name"`
