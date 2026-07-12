@@ -52,8 +52,12 @@ def init_pack_worker(
         _DS = NvidiaAVDataset(data_root=raw_path)
     else:
         from data_parsing.l2d import L2DDataset
+        # root=raw_path makes lerobot read the partition's materialized raw dir
+        # (populated by that partition's ingest) instead of re-downloading to the
+        # shared HF cache in this pod (#121 option B). raw_path is always provided
+        # to the packer (it's a required arg); None-safe via L2DDataset(root=None).
         _DS = L2DDataset(repo_id=dataset_value, episodes=episodes,
-                         include_world_model_windows=world_model)
+                         include_world_model_windows=world_model, root=raw_path)
 
 
 def _jpeg(frame_tensor) -> bytes:
