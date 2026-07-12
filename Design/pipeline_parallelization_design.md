@@ -371,6 +371,54 @@ retention flow rather than `rm`:
 - MUST use `--profile autowarefoundation` / us-west-2 and confirm each prefix;
   never touch the Cosmos account. All steps logged, never silent.
 
+### 3.4c Contract stability — what forces a re-run (and what must NOT)
+The whole point of caching is "ingest once, never again; pack rarely". That only
+holds if the CONTRACTS whose values enter the cache key are STABLE. This section
+is the single registry of every cache-invalidating knob; it exists so we do not
+accidentally churn a contract and silently re-run the whole corpus.
+
+Accepted re-runs (fine, per user): (i) extending the episode set (a NEW partition
+is a new cache key — only the new ranges run; old ranges stay cached); (ii) an
+ingest cache miss cascading to its own pack (the raw URI changes, so that pack
+re-runs). We do NOT engineer around these.
+
+The contracts that MUST stay stable (each is a single, centrally-defined constant,
+NOT ad-hoc strings scattered in code). A change to any one = intentional,
+reviewed, corpus-wide re-run of the stage(s) below it:
+
+| Contract | Defined in | Enters cache key of | Bump ONLY when… |
+|---|---|---|---|
+| `uid_schema_version` | one module constant | (nothing directly — it shapes uids/keys) | the sample_uid / split_group_uid FORMAT changes |
+| `DatasetSnapshot.source_revision` | resolved from HF at plan time | ingest, label, pack | the upstream dataset revision itself changes |
+| `parser_version` | one constant per parser | ingest, label, pack | the sample ENUMERATION or per-sample fields change |
+| `prompt_body_hash` + `prompt_version` | hash of the actual prompt text | label | the teacher prompt text changes |
+| `teacher_model_revision` | teacher config | label | the teacher model/endpoint version changes |
+| `shard_schema_version` | one constant | pack | the packed tar member layout changes |
+| `geometry_version` | one constant | pack | the calibration/projection encoding changes |
+| `world_model` (bool) | run input | pack | (a real config choice, expected) |
+
+Rules that keep this from drifting:
+- Each version is a NAMED constant in ONE place (e.g. `CONTRACT_VERSIONS` dict),
+  referenced by every task — never an inline literal. A grep shows all of them.
+- Bumping a version is a deliberate PR change with a one-line "why" — it is the
+  ONLY sanctioned way to invalidate cache, and reviewers can see the blast radius
+  (which stages re-run) from the table above.
+- **What must NOT invalidate the cache** (else "never again" breaks): the number
+  of episodes requested in a later run, the Flyte execution id, the wall-clock
+  time, pod resource limits (mem/cpu), `num_workers`, `label_workers`,
+  `map_concurrency`, or any log/print change. None of these are inputs to the
+  cached tasks, so they must NOT be added as task parameters that feed the key.
+  (Corollary: resource/worker tuning is a task-decorator/pod concern, kept OUT of
+  the cached input signature.)
+- Refactors that do not change output BYTES for a given input should NOT bump a
+  version. Correctness of "unchanged output" is checked by the per-uid semantic
+  test (§6), so a pure refactor can ship without a corpus re-run.
+
+Stability check to run before Phase 2 fan-out: enumerate the `CONTRACT_VERSIONS`,
+confirm each is a single constant, and confirm no runtime/tuning knob is in any
+cached task's input signature. This is the concrete guard that the contract we
+are locking now stays locked.
+
 ### 3.5 Open design questions — RESOLVED in review
 1. **Ingest↔pack coupling → SEPARATE (do NOT co-locate).** Keep ingest, label,
    pack as distinct Flyte tasks so each retries independently. Raw round-trips
@@ -459,6 +507,11 @@ Required tests:
 - teacher 429 → global in-flight stays ≤ the configured cap.
 - `set(pack_uids) == set(label_uids)` after pack.
 - 10-ep old vs new pipeline are SEMANTICALLY identical (per-uid, above).
+- **Contract stability (§3.4c):** every version is a single named constant in
+  `CONTRACT_VERSIONS` (no inline literals — assert by grep/import); NO
+  runtime/tuning knob (episodes count, num_workers, label_workers, map_concurrency,
+  resource limits, execution id) appears in any cached task's input signature — so
+  tuning never invalidates the cache and "ingest once, never again" holds.
 
 ---
 
