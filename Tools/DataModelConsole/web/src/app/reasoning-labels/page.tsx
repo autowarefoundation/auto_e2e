@@ -109,8 +109,13 @@ function AxisChart({
             style={{ background: hue }}
           />
           {title}
+          {/* `total` is the sum of this axis's per-value counts (occurrences),
+              NOT the horizon count: scalar axes skip blank horizons and the two
+              multi-label axes count several members per horizon, so it differs
+              from stats.horizon_count. Label it occurrences to match the per-bar
+              percentages (which use `total` as the denominator). */}
           <span className="text-[10px] font-normal text-slate-500">
-            {rows.length} values · {formatNumber(total)} horizons
+            {rows.length} values · {formatNumber(total)} occurrences
           </span>
         </CardTitle>
       </CardHeader>
