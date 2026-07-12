@@ -44,6 +44,9 @@ function PlayerPageInner({
   const searchParams = useSearchParams();
   // Pinned dataset version (from the detail page). Empty = API auto-newest.
   const version = searchParams.get("version") ?? "";
+  // Pinned reasoning prompt_version so the player shows labels from ONE run,
+  // not an arbitrary partition. Empty = API default (first partition found).
+  const promptVersion = searchParams.get("prompt_version") ?? "";
 
   const { data, error, loading, reload } = useApi(
     () => getShardIndex(dataset, shard, version || undefined),
@@ -224,6 +227,7 @@ function PlayerPageInner({
           initialState={initialState.current}
           onViewStateChange={onViewStateChange}
           version={version || undefined}
+          promptVersion={promptVersion || undefined}
         />
       )}
     </div>

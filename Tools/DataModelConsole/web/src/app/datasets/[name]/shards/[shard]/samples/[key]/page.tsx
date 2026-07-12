@@ -50,7 +50,14 @@ function SampleDetailInner({
   const router = useRouter();
   const searchParams = useSearchParams();
   const version = searchParams.get("version") ?? "";
-  const versionQuery = version ? `?version=${encodeURIComponent(version)}` : "";
+  const promptVersion = searchParams.get("prompt_version") ?? "";
+  const versionQuery = (() => {
+    const q = new URLSearchParams();
+    if (version) q.set("version", version);
+    if (promptVersion) q.set("prompt_version", promptVersion);
+    const s = q.toString();
+    return s ? `?${s}` : "";
+  })();
 
   const { data, error, loading, reload } = useApi(
     () => getSample(dataset, shardName, sampleKey, version || undefined),
@@ -58,13 +65,19 @@ function SampleDetailInner({
   );
 
   // Reasoning label is a separate endpoint; 404 simply means "no label".
+  // Pin prompt_version (from the URL) so the shown label matches the run the
+  // user was browsing, not an arbitrary partition.
   const reasoning = useApi(
     () =>
-      getReasoningLabel(dataset, sampleKey).catch((err: unknown) => {
+      getReasoningLabel(
+        dataset,
+        sampleKey,
+        promptVersion || undefined,
+      ).catch((err: unknown) => {
         if (err instanceof ApiError && err.status === 404) return null;
         throw err;
       }),
-    [dataset, sampleKey],
+    [dataset, sampleKey, promptVersion],
   );
 
   // Bound forward/backward nav to the shard's FULL, ordered sample list so

@@ -244,7 +244,15 @@ function SceneDrawer({
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose]);
 
-  const versionQuery = version ? `?version=${encodeURIComponent(version)}` : "";
+  // Carry both version and prompt_version downstream so the linked sample/player
+  // shows the SAME reasoning run the user was browsing (not an arbitrary one).
+  const linkQuery = (() => {
+    const q = new URLSearchParams();
+    if (version) q.set("version", version);
+    if (promptVersion) q.set("prompt_version", promptVersion);
+    const s = q.toString();
+    return s ? `?${s}` : "";
+  })();
   const scenes = data?.scenes ?? [];
 
   return (
@@ -317,7 +325,7 @@ function SceneDrawer({
                     </li>
                   );
                 }
-                const href = `/datasets/${encodeURIComponent(dataset)}/shards/${encodeURIComponent(s.shard)}/samples/${encodeURIComponent(s.sample_id)}${versionQuery}`;
+                const href = `/datasets/${encodeURIComponent(dataset)}/shards/${encodeURIComponent(s.shard)}/samples/${encodeURIComponent(s.sample_id)}${linkQuery}`;
                 return (
                   <li key={s.sample_id}>
                     <Link

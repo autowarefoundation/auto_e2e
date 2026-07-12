@@ -65,6 +65,7 @@ export function EpisodePlayer({
   initialState,
   onViewStateChange,
   version,
+  promptVersion,
 }: {
   dataset: string;
   shard: string;
@@ -72,6 +73,7 @@ export function EpisodePlayer({
   initialState?: Partial<PlayerViewState>;
   onViewStateChange?: (state: PlayerViewState) => void;
   version?: string;
+  promptVersion?: string;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
 
@@ -208,7 +210,7 @@ export function EpisodePlayer({
     setLabelStatus("loading"); // clear any stale card immediately
     let cancelled = false;
     const timer = setTimeout(() => {
-      getReasoningLabel(dataset, key)
+      getReasoningLabel(dataset, key, promptVersion)
         .then((label) => {
           if (cancelled) return;
           setReasoning({ key, label });
@@ -230,7 +232,7 @@ export function EpisodePlayer({
       cancelled = true;
       clearTimeout(timer);
     };
-  }, [dataset, sample?.key, sample?.has_reasoning, sample]);
+  }, [dataset, promptVersion, sample?.key, sample?.has_reasoning, sample]);
 
   const focusCamera = useCallback(
     (idx: number) => {

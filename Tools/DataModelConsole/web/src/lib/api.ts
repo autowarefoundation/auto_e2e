@@ -234,9 +234,15 @@ export async function getReasoningPromptVersions(
 export function getReasoningLabel(
   dataset: string,
   sampleId: string,
+  promptVersion?: string,
 ): Promise<ReasoningLabelRecord> {
+  // Pin the prompt_version so the player shows labels from ONE run, not an
+  // arbitrary partition when several prompt_versions exist for a sample.
+  const qs = promptVersion
+    ? `?prompt_version=${encodeURIComponent(promptVersion)}`
+    : "";
   return apiFetch<ReasoningLabelRecord>(
-    `/api/v1/reasoning-labels/${encodeURIComponent(dataset)}/${encodeURIComponent(sampleId)}`,
+    `/api/v1/reasoning-labels/${encodeURIComponent(dataset)}/${encodeURIComponent(sampleId)}${qs}`,
   );
 }
 
