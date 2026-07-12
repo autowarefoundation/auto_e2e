@@ -510,10 +510,13 @@ def data_processing(
     # (decode is the bottleneck; more cores → more concurrent teacher calls to the
     # scaled-out vLLM replicas). EKS Auto Mode / Karpenter provisions a fitting
     # c/m/r node on demand. Memory kept ≤ the Flyte platform task cap (32Gi);
-    # decode frames are transient so 30Gi across 16 workers is ample. Large
+    # decode frames are transient, but at 20+ episodes 24 concurrent front-clip
+    # decoders overran the 32Gi cap → OOMKilled at ~96/125. Raise the mem limit to
+    # 60Gi; the worker count is also lowered (see label_workers default) since the
+    # stage is bounded by the ~12s teacher HTTP call, not local CPU. Large
     # ephemeral storage holds tens of episodes of raw video + decoded windows.
-    requests=Resources(cpu="16", mem="30Gi", ephemeral_storage="400Gi"),
-    limits=Resources(cpu="16", mem="32Gi", ephemeral_storage="450Gi"),
+    requests=Resources(cpu="16", mem="32Gi", ephemeral_storage="400Gi"),
+    limits=Resources(cpu="16", mem="60Gi", ephemeral_storage="450Gi"),
     # The openai_compatible teacher endpoint (e.g. the Cosmos3-Nano vLLM ALB) is
     # injected from a K8s Secret so no concrete URL / account value is committed
     # to git or shown in the Flyte UI. Optional: only consumed when
@@ -534,11 +537,12 @@ def generate_reasoning_labels(
     prompt_version: str = "action_relevant_reasoning_v3_temporal_front256",
     cache_bucket: str = REASONING_LABELS_CACHE_BUCKET,
     # Process-parallel worker count. Front-clip mode decodes only 5 front frames
-    # per sample (not the ~48-frame WM window), so memory per worker is small and
-    # we can run many: 24 workers overlap the ~12s teacher HTTP wait and keep the
-    # 10 scaled-out vLLM replicas busy. (Was capped at 8 under the old WM-window
-    # decode which OOM-killed the 32Gi task at 24.)
-    label_workers: int = 24,
+    # per sample, but at 20+ episodes 24 concurrent decoders + their lerobot
+    # readers still OOM-killed the task at ~96/125. 12 workers still overlap the
+    # ~12s teacher HTTP wait well (the stage is latency-bound, not CPU-bound) and
+    # halve peak memory; combined with the raised 60Gi limit this clears the OOM.
+    # Cross-pod fan-out (Flyte map_task) is the real scale fix (#121).
+    label_workers: int = 12,
 ) -> FlyteDirectory:
     """Label each 1 Hz World-Model sample with a TEMPORAL front-camera clip, then
     write a versioned label artifact for the data_processing JOIN.
