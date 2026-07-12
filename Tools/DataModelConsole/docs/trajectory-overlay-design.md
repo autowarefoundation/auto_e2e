@@ -185,7 +185,7 @@ def wf_precompute_overlays(model_version: int, dataset: str, version: str,
    - **ONE per-sample camera-projection artifact** `proj.f32` per shard (model-independent; written once, reused by every model — see §5/§8).
 6. **Write artifacts FIRST, index LAST:** PUT S3 blobs, then `PutItem` the `PRED#…/META` (gzip payload, one call per shard, paralleling `PutShardIndex`/`PutStats`), `BatchWriteItem` the sparse `SCENELIST#` rows (chunks of 25 + `UnprocessedItems` retry, like `PutSceneLabels`), and finally flip `OVLSET#` `building→ready`.
 
-**Caching (flyte #4, infra #10).** `cache_version` is a **static string fixed at registration**; Flyte does not hash your source. A **build-time step MUST inject the git SHA / module hash** into `cache_version` (e.g. via env-substituted registration), or a planner/integration change silently serves stale overlays. Inputs are **scalars + `sample_keys_hash`** (never a `list[str]` of up to 1000 keys, never a `FlyteDirectory`) so the catalog key stays tight. `cache_serialize=True` prevents double-billing the single GPU on concurrent "compute" clicks. Since we store **raw control**, a later fix to the *integrator/yaw-sign/clamp* is a client change and does **not** bump `cache_version` at all.
+**Caching (flyte #4, infra #10).** `cache_version` is a **static string fixed at registration**; Flyte does not hash your source. A **build-time step MUST inject the git SHA / module hash** into `cache_version` (e.g. via env-substituted registration), or a planner/integration change silently serves stale overlays. Inputs are **scalars + `sample_keys_hash`** (never a `list[str]` of up to 1000 keys, never a `FlyteDirectory`) so the catalog key stays tight. `cache_serialize=True` prevents double-billing the single GPU if two ops-triggered runs collide (the Console does NOT trigger compute — ops-only, user decision round 2). Since we store **raw control**, a later fix to the *integrator/yaw-sign/clamp* is a client change and does **not** bump `cache_version` at all.
 
 **Determinism reproducibility (adas #13).** For byte-identical re-runs behind a `cache_version` bump, set `torch.use_deterministic_algorithms(True)` + `torch.backends.cudnn.deterministic=True; benchmark=False` in the task (Swin backbone atomics/autotune otherwise vary). If we accept "numerically-close, not bit-identical," document it and skip — but then don't claim byte-reproducibility.
 
@@ -302,17 +302,17 @@ pk = VER#{mlflow_version}   sk = META   attrs: run_id S
 ```
 Picker maps a chosen registry version → durable `run_id`.
 
-**(4) "Which models for this scene" list — sparse (P1).**
-Decision depends on **verifying `gsi1`** (adas #6, infra #2): the index exists only in a comment; its KeySchema/ProjectionType are unknown. **Action: pin down and IaC `gsi1` first** with `ProjectionType=INCLUDE(mlflow_version, model_name, eval_ade, split_role)` **before** relying on it. Until verified, use an explicit base-table item instead of the GSI:
+**(4) "Which models for this scene" list — via `gsi1` inverse index (P1).** (USER DECISION round 2: IaC `gsi1` and use it — the `SCENEMODELS#` base-table fallback is dropped.)
+
+**Prerequisite:** Terraform the table + `gsi1` first (currently created out-of-band, index in a comment only): key `gsi1pk` (HASH) + `gsi1sk` (RANGE), `ProjectionType=INCLUDE(mlflow_version, model_name, eval_ade, split_role, has_frames)`, sparse (only overlay rows write the GSI keys). Then write a per-(scene,model) edge row that populates gsi1 for the inverse lookup:
 ```
+# base: list scenes a model covers in a shard (P3 support)
 pk = SCENELIST#{run_id}#{dataset}#{version}#{shard}   sk = SCENE#{sampleID}
+# gsi1 inverse: scene → models (P1)
+gsi1pk = SCENE#{dataset}#{version}#{shard}#{sampleID}   gsi1sk = MODEL#{run_id}
+attrs (projected): mlflow_version N, model_name S, eval_ade N, split_role S, has_frames BOOL
 ```
-plus, for the scene→models direction, a sparse per-scene fanout row written only when `ready`:
-```
-pk = SCENEMODELS#{dataset}#{version}#{shard}#{sampleID}   sk = MODEL#{run_id}
-attrs: mlflow_version N, model_name S, eval_ade N, split_role S, has_frames BOOL
-```
-P1 = base Query `pk=SCENEMODELS#…` → returns exactly the models with a playable overlay (no client filtering). If/when `gsi1` is verified with adequate projection, collapse `SCENEMODELS#` into a GSI-inverse of `PRED#`/`SCENELIST#` to avoid the extra write; do **not** build on the GSI speculatively.
+P1 = `Query IndexName=gsi1, gsi1pk=SCENE#{ds}#{ver}#{shard}#{sampleID}` → exactly the models with a `ready` overlay for that scene, with the projected attrs the picker needs (no second GetItem, no client filtering). Because the edge is only written on `ready` and gsi1 is sparse, non-overlaid scenes cost nothing. This replaces the draft's speculative approach now that gsi1 is owned in IaC.
 
 **(5) Overlay-set status singleton (write-then-index gate; flyte #5):**
 ```
@@ -332,7 +332,7 @@ attrs: summary S (inline JSON: bbox, per-region counts, total),   # SMALL
 Full point sets / fine geohash bins would breach 400 KB (infra #11, cost #10) — store them in S3, keep only the summary inline.
 
 ### Hot-partition (adas #5, infra #12)
-`PRED#{run_id}#…#{shard}` spreads writes across shards naturally (the shard is in the pk), so bulk `PutItem` is **not** concentrated on one partition — this is a further reason to prefer the per-shard-blob shape over the draft's `MODEL#{ver}`-keyed per-scene edges (all of which hashed to one partition, ~1000 WCU ceiling regardless of sort key; sort-key pagination fixes reads, not writes). `SCENEMODELS#…#{sampleID}` also spreads by scene. On-demand + adaptive capacity absorbs the rest; size the burst for GSI write amplification if `gsi1` is later used (infra #12).
+`PRED#{run_id}#…#{shard}` spreads writes across shards naturally (the shard is in the pk), so bulk `PutItem` is **not** concentrated on one partition — this is a further reason to prefer the per-shard-blob shape over the draft's `MODEL#{ver}`-keyed per-scene edges (all of which hashed to one partition, ~1000 WCU ceiling regardless of sort key; sort-key pagination fixes reads, not writes). The `SCENELIST#…` edge rows (which also feed `gsi1`) spread by shard on the base table and by scene on `gsi1pk=SCENE#…#{sampleID}`. On-demand + adaptive capacity absorbs the rest; **size the burst for gsi1 write amplification** since gsi1 is now used for P1 (infra #12).
 
 ---
 
@@ -444,16 +444,16 @@ lat = lat0 + north/R·(180/π);  lon = lon0 + east/(R·cos(lat0))·(180/π)
 - L2D loader `gps_latlon` (new plumbing); decode-free `gps.npy` backfill into v2.0; per-episode path artifact; Go npy-decode for `has_gps`/`gps_now`; Map view; `GEO#` geo-stats page.
 
 **Phase 2 — vector overlays (Flyte GPU + Dynamo + API):**
-- `load_policy`/`predict_control` helper (no model edit needed); coarse per-shard task; `proj.f32` projection artifact; `PRED#`/`OVLSET#`/`SCENEMODELS#` items; new API endpoints; BEV + camera multi-model overlay/toggle/compare.
+- **IaC the table + `gsi1` first** (user decision); `load_policy`/`predict_control` helper (no model edit needed); coarse per-shard task; `proj.f32` projection artifact; `PRED#`/`OVLSET#`/`SCENELIST#`(+gsi1 inverse) items; new API endpoints (read-only; NO compute trigger — ops-only); BEV + camera + map multi-model overlay/toggle/compare.
 
 **Phase 3 — optional MP4 export (PR#74):**
 - Move `Tools/trajectory_visualization/runner.py` under `/Tools`; wrap to emit **one MP4 per scene**; expose as a "download clip," scoped + TTL'd. **Not required for the feature.**
 
 **Risks:**
 - **Yaw-sign mirror** (§10) — must be verified before any overlay is trusted; blocks Phase 2 acceptance.
-- **`gsi1` unverified** — do not build P1 on it; IaC + verify projection first, else use `SCENEMODELS#`.
+- **`gsi1` must be IaC'd + verified before P1** (user decision: use gsi1). Define `gsi1pk`/`gsi1sk` + `ProjectionType=INCLUDE(...)` in Terraform and confirm the live index matches before wiring P1; a `KEYS_ONLY` projection would force a second GetItem per model.
 - **Version-coordinate drift** (`v2.0` vs `v2.1`) — enforce one version; assert `sample_id` byte-stability across any repack.
-- **Single warm GPU** — a full-leaked-train × all-versions vector backfill is near-serial; scope which runs/sources before triggering (Open Question 3). Give a wall-clock estimate before backfilling.
+- **Single warm GPU** — backfill is near-serial. Scope is decided: **latest N versions × all three sources** (user decision round 2). Give a wall-clock estimate before triggering; ops launches it (not the UI).
 - **PR#74 output format** — the tool emits an MP4 + manifest and is absent from this checkout; its single-sample vs batched API and projection source are **unverified**. Phase 3 assumes MP4 output (aligns with its actual format), not a JPEG-sequence rewrite.
 - **Default `val_fraction=0`** — many models have no eval set; UI must say "train-leaked (no held-out eval)."
 - **TTL vs catalog** coherence (§6 rule) — deletion must purge S3 + catalog + flip status together.
@@ -470,7 +470,7 @@ lat = lat0 + north/R·(180/π);  lon = lon0 + east/(R·cos(lat0))·(180/π)
 | Baked frames | **Optional MP4 export only** | Baked as default deliverable | Storage math + flexibility both favor vectors; baking can't composite/toggle models; if exported, MP4 ≫ JPEG-sequence (cost-frontend #1,4,5). |
 | Model identity key | **`run_id`** (+`mlflow_version` attr, `VER#` alias) | `MODEL#{mlflow_version}` | Registry version is a moving pointer; `run_id` is durable/content-addressable (infra #4). |
 | Run metadata | **Single `MODEL#{run_id}/META` profile** | `eval_ade`/`model_name` on every edge | Run-level, not scene-level; per-edge copies are pure duplication + rewrite-all on change (infra #5). |
-| P1 "models for scene" | **`SCENEMODELS#` base item now; GSI later only if verified** | Build on `gsi1` immediately | `gsi1` exists only in a comment; KeySchema/Projection unknown; a `KEYS_ONLY` GSI silently un-indexes inline reads (adas #6, infra #2). |
+| P1 "models for scene" | **`gsi1` inverse index, IaC'd first (USER DECISION round 2)** | `SCENEMODELS#` base-table item | User chose to own `gsi1` in Terraform (`gsi1pk`/`gsi1sk`, `INCLUDE` projection) and query the inverse index for P1 — no extra base-table fan-out row. Prerequisite: IaC + verify projection before wiring P1 (a `KEYS_ONLY` GSI would force a 2nd GetItem). |
 | GPS precision | **float64** (or int32 ENU offset) | float32 | float32 → ~1–2 m jitter visible on the driven-path map (adas #8, cost #9). |
 | GPS for map | **Per-episode full-path artifact** | Per-sample 6.4 s future window | A future window can't draw a driven route (flyte #8). |
 | GPS backfill | **Full re-pack to v2.1 (USER DECISION 3)** | Decode-free in-place into v2.0 | User chose a clean versioned re-pack over the cheaper in-place append; cost = re-decode 7 cams/sample + move all of `PRED#`/`IDX#`/search to v2.1 + assert sample_id byte-stability (§4b, §consistency). The in-place option remains the cheaper fallback if the re-pack proves too slow. |
@@ -488,11 +488,13 @@ RESOLVED 2026-07-13 (see "Decisions locked" at top):
 - ~~Q4 GPS backfill mechanism?~~ → **Full re-pack to v2.1** (not in-place into v2.0).
 - ~~Q5 Predicted-trajectory-on-map?~~ → **YES, in scope** (§9-bis error budget added).
 
-STILL OPEN:
-1. **Seed policy:** single seed (badge "one sample") vs a 4-seed fan with median+envelope for FlowMatching. Fan ≈ 4× GPU + blob size; still cheap on storage.
-2. **Backfill scope on one GPU:** which model versions and which sources get precomputed? (All registered versions × leaked-train is near-serial on the single warm L40S — likely long. Recommend: latest N versions, all three sources for vectors.)
-3. **`gsi1` ownership:** may we IaC the table/GSI (currently created out-of-band) so P1 can use a verified inverse index instead of the `SCENEMODELS#` base item?
-4. **`POST …:compute` in the UI:** self-serve GPU-spend trigger vs ops-only? (Self-serve on a single warm GPU risks queueing/cost.)
+RESOLVED 2026-07-13 (round 2):
+- ~~Seed policy~~ → **Single seed (seed 0)** to start; blob carries the seed; UI badges "single sample (seed 0)". A 4-seed fan is a later option, no schema change.
+- ~~Backfill scope~~ → **Latest N versions × all three sources** (train-leaked / eval / reasoning-search). Give a wall-clock estimate before triggering; the single warm L40S makes this near-serial.
+- ~~`gsi1` ownership~~ → **IaC the table + gsi1** (Terraform, `gsi1pk`/`gsi1sk`, `ProjectionType=INCLUDE(mlflow_version, model_name, eval_ade, split_role)`); P1 uses the verified inverse index, so the `SCENEMODELS#` base-table fallback in §6(4) is DROPPED.
+- ~~`POST …:compute` in the UI~~ → **ops-only**. The Console is read-only over precomputed overlays; no self-serve GPU-spend trigger. Precompute is launched by ops via Flyte directly.
+
+(No open questions remain for the current design; implementation is deferred pending go-ahead.)
 
 ---
 
