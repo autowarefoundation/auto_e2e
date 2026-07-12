@@ -132,9 +132,16 @@ export function listSamples(
   dataset: string,
   shard: string,
   version?: string,
+  offset = 0,
+  limit = 0,
 ): Promise<SampleListResponse> {
+  const q = new URLSearchParams();
+  if (version) q.set("version", version);
+  if (offset > 0) q.set("offset", String(offset));
+  if (limit > 0) q.set("limit", String(limit));
+  const qs = q.toString();
   return apiFetch<SampleListResponse>(
-    `/api/v1/datasets/${encodeURIComponent(dataset)}/shards/${encodeURIComponent(shard)}/samples${versionParam(version, "?")}`,
+    `/api/v1/datasets/${encodeURIComponent(dataset)}/shards/${encodeURIComponent(shard)}/samples${qs ? `?${qs}` : ""}`,
   );
 }
 
