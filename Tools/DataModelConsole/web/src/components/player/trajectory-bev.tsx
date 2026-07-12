@@ -1,12 +1,18 @@
 "use client";
 
-// TrajectoryBEV: bird's-eye view of the ego future trajectory.
+// TrajectoryBEV: bird's-eye view of the ego trajectory.
 //
-// The per-frame ego_future plan (128 floats = 64 steps x [accel, curvature])
-// is rolled out with the unicycle model into an XY path in the ego frame:
-// up = forward (+x), left = +y. Because the full 6.4s plan is stored on every
-// sample, the trajectory renders at full length regardless of how many frames
-// remain in the shard. Metric grid included.
+// NOTE: both curves are recorded GROUND TRUTH, not a model prediction — there
+// is no planner in the console. The blue curve is the dataset's stored
+// ego_future for this frame (128 floats = 64 steps x [accel, curvature]) rolled
+// out with the unicycle model; the amber curve is the SAME drive reconstructed
+// from the ego_now speed+curvature of the following frames. They are two views
+// of the same logged motion (a self-consistency check), so the legend says
+// "recorded future" / "driven path", NOT "plan" / "actual".
+//
+// Path is in the ego frame: up = forward (+x), left = +y. The full 6.4s future
+// is stored on every sample, so it renders at full length regardless of how
+// many frames remain in the shard. Metric grid included.
 
 import { useMemo } from "react";
 
@@ -193,8 +199,8 @@ export function TrajectoryBEV({
       <div className="flex items-center justify-between font-mono text-[10px] text-slate-500">
         <span>
           BEV — <span className="text-slate-400">past</span> ·{" "}
-          <span className="text-blue-500">plan</span> /{" "}
-          <span className="text-amber-500">actual</span> first{" "}
+          <span className="text-blue-500">recorded future</span> /{" "}
+          <span className="text-amber-500">driven path</span> first{" "}
           {planSec.toFixed(1)}s
           {partial && (
             <span className="text-slate-600">
