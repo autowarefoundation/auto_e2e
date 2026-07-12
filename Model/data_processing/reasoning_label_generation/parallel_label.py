@@ -67,8 +67,11 @@ def init_worker(
         _DS = NvidiaAVDataset(data_root=raw_path, reasoning_clip_only=True)
     else:
         from data_parsing.l2d import L2DDataset
+        # root=raw_path (when provided) makes lerobot read the partition's
+        # already-materialized raw dir instead of re-downloading to the shared HF
+        # cache in this pod (#121 option B). None → legacy HF-cache path.
         _DS = L2DDataset(repo_id=repo_id, episodes=episodes,
-                         reasoning_clip_only=True)
+                         reasoning_clip_only=True, root=raw_path)
     _CLIENT = build_teacher(teacher, **teacher_kwargs)
     _CACHE = LabelCache(cache_bucket or None, dataset_name, teacher, prompt_version)
 
