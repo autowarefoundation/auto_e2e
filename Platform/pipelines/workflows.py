@@ -8,7 +8,7 @@ Architecture:
 MLflow: Only evaluate task logs. 2 experiments: imitation-learning, offline-rl.
 """
 import enum
-from flytekit import task, workflow, Resources, Secret
+from flytekit import task, workflow, dynamic, Resources, Secret
 from flytekit.types.file import FlyteFile
 from flytekit.types.directory import FlyteDirectory
 from typing import NamedTuple, List, Optional
@@ -1637,6 +1637,78 @@ def wf_create_dataset(
             raw_data=raw, dataset=dataset, episodes=episodes,
             image_size=image_size, world_model=world_model))
     )
+
+
+@dynamic(container_image=DATA_PREP_IMAGE)
+def wf_create_dataset_sharded(
+    dataset: Dataset = Dataset.L2D,
+    episodes: int = 20,
+    partition_size: int = 10,
+    image_size: int = 256,
+    world_model: bool = False,
+    reasoning_teacher: str = "none",
+    prompt_version: str = "action_relevant_reasoning_v3_temporal_front256",
+    max_partitions: int = 512,
+) -> List[FlyteDirectory]:
+    """CreateDataset, FANNED OUT over episode-range partitions (#121 option B).
+
+    The scale fix for wf_create_dataset: instead of one pod ingesting+labeling+
+    packing ALL episodes (which OOMs as episodes grow), split the episodes into
+    partitions and run an independent ingest→label→pack chain per partition, each
+    a separate Flyte node (so each retries independently and caches independently,
+    §3.4a). Returns the per-partition shard dirs as a ``List[FlyteDirectory]`` —
+    exactly what ``train_il(shards=...)`` / ``make_multi_dataset_loader`` already
+    consume (train sees one merged stream over all partitions).
+
+    Option B: each partition's ``data_ingest`` materializes ONLY its episodes as a
+    raw FlyteDirectory; that partition's label+pack read it (root=raw dir), so HF
+    is hit once per partition and downstream pods never re-fetch. Because the
+    ``sample_uid`` is (global episode, frame) — independent of the partition
+    boundary (§3.1) — partitions never collide and train/val split stays group-
+    clean across the whole fan-out.
+
+    This ``@dynamic`` builds the graph at run time: ``plan_partitions`` is plain
+    Python here (deterministic, so re-runs reproduce the same partitions → cache
+    hits). L2D episode indices are 0..episodes-1; NVIDIA clip-uuid fan-out needs
+    the SDK clip index and is added once the L2D path is validated (#121 Phase 4).
+    """
+    from data_processing.partition_plan import plan_partitions
+
+    if dataset == Dataset.NVIDIA_PHYSICAL_AI:
+        # NVIDIA clip uuids require the physical_ai_av SDK clip index to enumerate;
+        # the L2D episode-index fan-out is validated first (Design §5 Phase 2→4).
+        raise NotImplementedError(
+            "wf_create_dataset_sharded currently fans out L2D (episode indices). "
+            "NVIDIA clip-uuid fan-out is Phase 4.")
+
+    # L2D: episode indices are 0..episodes-1. Group ids are STRINGS (the task
+    # interface is List[str]) so the same signature serves NVIDIA clip uuids later.
+    episode_ids = [str(e) for e in range(episodes)]
+    plan = plan_partitions(episode_ids, partition_size=partition_size,
+                           max_partitions=max_partitions)
+    print(f"wf_create_dataset_sharded: {plan.summary()}")
+
+    shard_dirs: List[FlyteDirectory] = []
+    for p in plan.partitions:
+        gids = list(p.group_ids)
+        # 1) INGEST this partition's raw (materialized FlyteDirectory, option B).
+        raw = data_ingest(dataset=dataset, episodes=0, group_ids=gids)
+        # 2/3) LABEL (teacher, S3-cached) → PACK with labels JOINed, OR pack-only.
+        if reasoning_teacher != "none":
+            labels = generate_reasoning_labels(
+                raw_data=raw, dataset=dataset, episodes=0, split="train",
+                teacher=reasoning_teacher, prompt_version=prompt_version,
+                group_ids=gids)
+            # world_model forced on when labels present (packed set == labeled set).
+            shards = data_processing(
+                raw_data=raw, dataset=dataset, episodes=0, image_size=image_size,
+                world_model=True, reasoning_labels=labels, group_ids=gids)
+        else:
+            shards = data_processing(
+                raw_data=raw, dataset=dataset, episodes=0, image_size=image_size,
+                world_model=world_model, group_ids=gids)
+        shard_dirs.append(shards)
+    return shard_dirs
 
 
 @workflow
