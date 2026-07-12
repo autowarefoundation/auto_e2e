@@ -94,23 +94,22 @@ function SampleDetailInner({
     [samples.data],
   );
   const idx = useMemo(() => keys.indexOf(sampleKey), [keys, sampleKey]);
+  // siblingKey (frame +/- 1 arithmetic) is only a safe fallback WHILE the shard
+  // index is still loading. Once the fetch has settled (loaded or errored) with
+  // no keys, offering a sibling would point at a key that may not exist in this
+  // shard (e.g. s00000999 on train-000001 whose first key is s00001000 -> 404).
+  // So the sibling fallback is gated on samples.loading.
+  const indexLoading = samples.loading;
   const prevKey = useMemo(() => {
     if (idx > 0) return keys[idx - 1];
-    // True first frame of a loaded shard: disable Prev instead of walking to a
-    // frame-minus-one key that lives in another shard (siblingKey would 404 on
-    // a non-zero-indexed shard, e.g. train-000001 starting at s00001000).
-    // Mirror of the nextKey guard. siblingKey stays the still-loading fallback.
-    if (keys.length > 0 && idx === 0) return null;
-    return siblingKey(sampleKey, -1);
-  }, [idx, keys, sampleKey]);
+    if (keys.length > 0 && idx === 0) return null; // true first frame -> disable
+    return indexLoading ? siblingKey(sampleKey, -1) : null;
+  }, [idx, keys, sampleKey, indexLoading]);
   const nextKey = useMemo(() => {
     if (idx >= 0 && idx < keys.length - 1) return keys[idx + 1];
-    // Guard the empty-keys (still-loading) case: idx===-1 and keys.length-1===-1
-    // would wrongly match and return null, disabling Next during the index scan.
-    // Only treat idx as the true last frame when keys is actually populated.
-    if (keys.length > 0 && idx === keys.length - 1) return null;
-    return siblingKey(sampleKey, +1);
-  }, [idx, keys, sampleKey]);
+    if (keys.length > 0 && idx === keys.length - 1) return null; // true last -> disable
+    return indexLoading ? siblingKey(sampleKey, +1) : null;
+  }, [idx, keys, sampleKey, indexLoading]);
 
   const sampleUrl = (k: string) =>
     `/datasets/${encodeURIComponent(dataset)}/shards/${encodeURIComponent(shardName)}/samples/${encodeURIComponent(k)}${versionQuery}`;
