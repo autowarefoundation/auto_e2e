@@ -26,6 +26,27 @@ export interface DatasetListResponse {
   datasets: Dataset[];
 }
 
+// DatasetVersion summarises one packed shard-set version's WHOLE training
+// composition (GET /api/v1/datasets/{name}/versions). Manifest-derived counts
+// are zero when has_manifest is false (historical v1.0 without a manifest);
+// shards/size_bytes are always the real ListObjects tally.
+export interface DatasetVersion {
+  version: string; // e.g. "v2.0"
+  total_samples: number;
+  shards: number;
+  episodes: number;
+  num_views: number;
+  has_map: boolean;
+  has_world_model: boolean;
+  size_bytes: number;
+  has_manifest: boolean;
+}
+
+export interface DatasetVersionsResponse {
+  dataset: string;
+  versions: DatasetVersion[]; // newest-first
+}
+
 export interface Shard {
   name: string; // e.g. "train-000000.tar"
   key: string; // full S3 key
@@ -152,6 +173,19 @@ export interface ReasoningStatsEntry {
 export interface ReasoningLabelStats {
   entries: ReasoningStatsEntry[];
   total: number;
+}
+
+// ReasoningPromptVersion is one teacher/prompt_version partition of ONE
+// dataset's label cache (GET /api/v1/reasoning-labels/prompt-versions).
+export interface ReasoningPromptVersion {
+  teacher: string;
+  prompt_version: string;
+  count: number;
+}
+
+export interface ReasoningPromptVersionsResponse {
+  dataset: string;
+  prompt_versions: ReasoningPromptVersion[];
 }
 
 // ---------------------------------------------------------------------------

@@ -5,12 +5,14 @@ import type {
   DashboardStats,
   Dataset,
   DatasetListResponse,
+  DatasetVersionsResponse,
   FlyteExecution,
   MLflowExperiment,
   MLflowRegisteredModel,
   MLflowRun,
   ReasoningLabelRecord,
   ReasoningLabelStats,
+  ReasoningPromptVersionsResponse,
   SampleDetail,
   SampleListResponse,
   ShardIndex,
@@ -78,15 +80,35 @@ export async function listDatasets(): Promise<Dataset[]> {
   return res.datasets ?? [];
 }
 
+// listDatasetVersions returns every published version of a dataset (newest
+// first) with its whole-training composition, powering the version selector.
+export async function listDatasetVersions(
+  dataset: string,
+): Promise<DatasetVersionsResponse["versions"]> {
+  const res = await apiFetch<DatasetVersionsResponse>(
+    `/api/v1/datasets/${encodeURIComponent(dataset)}/versions`,
+  );
+  return res.versions ?? [];
+}
+
+// versionParam builds the "&version=" / "?version=" suffix for an optional
+// pinned dataset version. Empty/undefined means "let the API auto-resolve the
+// newest version" (the historical behavior), so nothing is appended.
+function versionParam(version: string | undefined, sep: "?" | "&"): string {
+  return version ? `${sep}version=${encodeURIComponent(version)}` : "";
+}
+
 export function listShards(
   dataset: string,
   offset = 0,
   limit = 50,
+  version?: string,
 ): Promise<ShardListResponse> {
   const q = new URLSearchParams({
     offset: String(offset),
     limit: String(limit),
   });
+  if (version) q.set("version", version);
   return apiFetch<ShardListResponse>(
     `/api/v1/datasets/${encodeURIComponent(dataset)}/shards?${q.toString()}`,
   );
@@ -98,17 +120,19 @@ export function listShards(
 // stitching is deferred until a second shard lands.
 export async function listShardsForEpisode(
   dataset: string,
+  version?: string,
 ): Promise<ShardListResponse["shards"]> {
-  const res = await listShards(dataset, 0, 200);
+  const res = await listShards(dataset, 0, 200, version);
   return [...(res.shards ?? [])].sort((a, b) => a.name.localeCompare(b.name));
 }
 
 export function listSamples(
   dataset: string,
   shard: string,
+  version?: string,
 ): Promise<SampleListResponse> {
   return apiFetch<SampleListResponse>(
-    `/api/v1/datasets/${encodeURIComponent(dataset)}/shards/${encodeURIComponent(shard)}/samples`,
+    `/api/v1/datasets/${encodeURIComponent(dataset)}/shards/${encodeURIComponent(shard)}/samples${versionParam(version, "?")}`,
   );
 }
 
@@ -116,9 +140,10 @@ export function getSample(
   dataset: string,
   shard: string,
   key: string,
+  version?: string,
 ): Promise<SampleDetail> {
   return apiFetch<SampleDetail>(
-    `/api/v1/datasets/${encodeURIComponent(dataset)}/shards/${encodeURIComponent(shard)}/samples/${encodeURIComponent(key)}`,
+    `/api/v1/datasets/${encodeURIComponent(dataset)}/shards/${encodeURIComponent(shard)}/samples/${encodeURIComponent(key)}${versionParam(version, "?")}`,
   );
 }
 
@@ -133,16 +158,17 @@ export function getSampleImageUrl(
   key: string,
   cam: number,
   range?: { offset: number; size: number },
+  version?: string,
 ): string {
   const base = `${BASE_URL}/api/v1/datasets/${encodeURIComponent(dataset)}/shards/${encodeURIComponent(shard)}/samples/${encodeURIComponent(key)}/image/cam_${cam}`;
+  const q = new URLSearchParams();
   if (range && range.size > 0) {
-    const q = new URLSearchParams({
-      offset: String(range.offset),
-      size: String(range.size),
-    });
-    return `${base}?${q.toString()}`;
+    q.set("offset", String(range.offset));
+    q.set("size", String(range.size));
   }
-  return base;
+  if (version) q.set("version", version);
+  const qs = q.toString();
+  return qs ? `${base}?${qs}` : base;
 }
 
 // getShardIndex fetches the playback index: per-frame member byte ranges +
@@ -150,9 +176,10 @@ export function getSampleImageUrl(
 export function getShardIndex(
   dataset: string,
   shard: string,
+  version?: string,
 ): Promise<ShardIndex> {
   return apiFetch<ShardIndex>(
-    `/api/v1/datasets/${encodeURIComponent(dataset)}/shards/${encodeURIComponent(shard)}/index`,
+    `/api/v1/datasets/${encodeURIComponent(dataset)}/shards/${encodeURIComponent(shard)}/index${versionParam(version, "?")}`,
   );
 }
 
@@ -162,6 +189,18 @@ export function getShardIndex(
 
 export function getReasoningLabelStats(): Promise<ReasoningLabelStats> {
   return apiFetch<ReasoningLabelStats>("/api/v1/reasoning-labels/stats");
+}
+
+// getReasoningPromptVersions lists ONE dataset's reasoning-label
+// teacher/prompt_version partitions with per-partition counts (the label
+// version axis shown on the dataset detail page).
+export async function getReasoningPromptVersions(
+  dataset: string,
+): Promise<ReasoningPromptVersionsResponse["prompt_versions"]> {
+  const res = await apiFetch<ReasoningPromptVersionsResponse>(
+    `/api/v1/reasoning-labels/prompt-versions?dataset=${encodeURIComponent(dataset)}`,
+  );
+  return res.prompt_versions ?? [];
 }
 
 export function getReasoningLabel(

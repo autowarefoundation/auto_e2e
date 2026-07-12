@@ -25,6 +25,10 @@ export class FrameStore {
   private readonly index: ShardIndex;
   private readonly dataset: string;
   private readonly shard: string;
+  // Optional pinned dataset version; threaded onto every image URL so the
+  // player renders the SAME version selected on the detail page (else the API
+  // auto-resolves the newest).
+  private readonly version?: string;
   private readonly byFrame = new Map<number, IndexSample>();
   // Map iteration order = insertion order; entries are re-inserted on access
   // so the first key is always the least recently used.
@@ -43,11 +47,13 @@ export class FrameStore {
     dataset: string,
     shard: string,
     maxEntries = DEFAULT_MAX_ENTRIES,
+    version?: string,
   ) {
     this.index = index;
     this.dataset = dataset;
     this.shard = shard;
     this.maxEntries = maxEntries;
+    this.version = version;
     for (const s of index.samples) this.byFrame.set(s.frame_idx, s);
   }
 
@@ -66,6 +72,21 @@ export class FrameStore {
   // only a fallback for callers that pass a semantic frame_idx.
   sampleAt(pos: number): IndexSample | undefined {
     return this.index.samples[pos] ?? this.byFrame.get(pos);
+  }
+
+  // cachedCount returns how many of the next `n` frames (from `frame`, in
+  // `dir`) already have ALL `cams` decoded in cache — used by the player to
+  // gate playback start on a filled look-ahead buffer so it visibly plays
+  // instead of stuttering while frames stream in.
+  cachedCount(frame: number, dir: 1 | -1, n: number, cams: string[]): number {
+    let ready = 0;
+    for (let i = 0; i < n; i++) {
+      const f = frame + i * dir;
+      if (f < 0 || f >= this.frameCount) break;
+      if (cams.every((c) => this.cache.has(`${f}:${c}`))) ready++;
+      else break; // contiguous run only — a gap stalls playback there
+    }
+    return ready;
   }
 
   // withSlot gates work behind a single global inflight budget shared by the
@@ -223,6 +244,7 @@ export class FrameStore {
       sample.key,
       camNum,
       range,
+      this.version,
     );
     const res = await fetch(url, { signal });
     if (!res.ok) {

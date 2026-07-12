@@ -14,15 +14,17 @@ export function CameraImage({
   sampleKey,
   cam,
   className,
+  version,
 }: {
   dataset: string;
   shard: string;
   sampleKey: string;
   cam: number;
   className?: string;
+  version?: string;
 }) {
   const [failed, setFailed] = useState(false);
-  const src = getSampleImageUrl(dataset, shard, sampleKey, cam);
+  const src = getSampleImageUrl(dataset, shard, sampleKey, cam, undefined, version);
 
   if (failed) {
     return (
