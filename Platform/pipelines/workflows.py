@@ -607,8 +607,13 @@ def data_processing(
     # the S3 cache stops re-billing Cosmos; the Flyte cache stops re-running the
     # decode+JOIN task at all. A changed prompt_version / teacher (in the key)
     # correctly misses. LABEL_CACHE_VERSION folds in the uid format (the JOIN key).
+    # EXCLUDE the tuning/placement knobs from the key (§3.4c): label_workers is
+    # pure parallelism (output-invariant) and cache_bucket is only WHERE the
+    # per-sample S3 cache lives (not WHAT is produced) — letting either invalidate
+    # the task cache would force a needless re-label (Cosmos re-bill) on a tweak.
     cache=True,
     cache_version=LABEL_CACHE_VERSION,
+    cache_ignore_input_vars=("label_workers", "cache_bucket"),
 )
 def generate_reasoning_labels(
     raw_data: FlyteDirectory,
