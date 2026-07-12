@@ -9,8 +9,8 @@
 # it does not overlap the training/Flyte node ranges). Combined with the
 # web-only podSelector on the API, this keeps arbitrary cluster pods (e.g.
 # Flyte-launched training jobs) from reaching console-api and pulling
-# presigned S3 URLs. The ALB SG (CloudFront prefix-list only) remains the
-# primary control; this is the secondary layer.
+# presigned S3 URLs. The ALB SG (HTTPS only from CloudFront's managed
+# VPC-origin ENIs) remains the primary control; this is the secondary layer.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:

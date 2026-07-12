@@ -19,8 +19,10 @@ spec:
   scheme: internal
   # SG ID from the terraform output (aws_security_group.console_alb, created
   # with a name_prefix so it has a random suffix — a name reference would not
-  # resolve). apply.sh substitutes ${CONSOLE_ALB_SG_ID}. This SG is the thing
-  # that enforces "CloudFront origin-facing prefix list only" on the ALB.
+  # resolve). apply.sh substitutes ${CONSOLE_ALB_SG_ID}. This SG is the gate on
+  # the ALB: it admits HTTPS only from CloudFront's managed VPC-origin ENIs
+  # (source = CloudFront-VPCOrigins-Service-SG), so nothing but CloudFront can
+  # reach the ALB.
   securityGroups:
     - ${CONSOLE_ALB_SG_ID}
 ---

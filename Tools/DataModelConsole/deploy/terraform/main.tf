@@ -63,30 +63,21 @@ variable "aws_region" {
 
 data "aws_caller_identity" "current" {}
 
-data "aws_ec2_managed_prefix_list" "cloudfront" {
-  name = "com.amazonaws.global.cloudfront.origin-facing"
-}
-
-# Security Group: ALB only accepts traffic from CloudFront
+# Security Group: the internal ALB only accepts traffic from CloudFront.
+#
+# IMPORTANT: this distribution uses a CloudFront VPC ORIGIN (see
+# aws_cloudfront_vpc_origin below), not a public custom origin. CloudFront does
+# NOT reach an internal ALB from its public edge IPs; it places an AWS-managed
+# elastic network interface INSIDE this VPC (attached to the service-managed
+# group "CloudFront-VPCOrigins-Service-SG") and connects from that ENI's private
+# VPC address. The public "com.amazonaws.global.cloudfront.origin-facing" prefix
+# list contains only public edge CIDRs, so sourcing ingress from it would drop
+# every VPC-origin connection and black-hole the whole console. The correct
+# source is the managed VPC-origins SG, looked up after the origin is created.
 resource "aws_security_group" "console_alb" {
   name_prefix = "${var.cluster_name}-console-alb-"
-  description = "Console ALB - CloudFront origin-facing only"
+  description = "Console ALB - CloudFront VPC origin only"
   vpc_id      = var.vpc_id
-
-  ingress {
-    description     = "HTTPS from CloudFront only"
-    from_port       = 443
-    to_port         = 443
-    protocol        = "tcp"
-    prefix_list_ids = [data.aws_ec2_managed_prefix_list.cloudfront.id]
-  }
-
-  egress {
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
 
   tags = {
     Name = "${var.cluster_name}-console-alb-sg"
@@ -95,6 +86,41 @@ resource "aws_security_group" "console_alb" {
   lifecycle {
     create_before_destroy = true
   }
+}
+
+# The service-managed SG AWS creates for CloudFront VPC origins. It only exists
+# once a VPC origin has been created in this VPC, so the lookup depends on the
+# origin resource and is deferred to apply time.
+data "aws_security_group" "cloudfront_vpc_origin" {
+  filter {
+    name   = "group-name"
+    values = ["CloudFront-VPCOrigins-Service-SG"]
+  }
+  filter {
+    name   = "vpc-id"
+    values = [var.vpc_id]
+  }
+  depends_on = [aws_cloudfront_vpc_origin.console]
+}
+
+# Ingress: HTTPS only, only from CloudFront's managed VPC-origin ENIs. Kept as a
+# standalone rule (not inline) so it can reference the managed SG; inline rules
+# and standalone rules must not be mixed on one SG (the provider would clobber
+# them), so egress is a standalone rule too.
+resource "aws_vpc_security_group_ingress_rule" "console_alb_from_cloudfront" {
+  security_group_id            = aws_security_group.console_alb.id
+  description                  = "HTTPS from CloudFront VPC-origin ENIs only"
+  from_port                    = 443
+  to_port                      = 443
+  ip_protocol                  = "tcp"
+  referenced_security_group_id = data.aws_security_group.cloudfront_vpc_origin.id
+}
+
+resource "aws_vpc_security_group_egress_rule" "console_alb_all" {
+  security_group_id = aws_security_group.console_alb.id
+  description       = "Allow all egress"
+  ip_protocol       = "-1"
+  cidr_ipv4         = "0.0.0.0/0"
 }
 
 # CloudFront VPC Origin
