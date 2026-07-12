@@ -160,8 +160,13 @@ def _loader_projection(loader, device):
     # Raw video is large: L2D is ~5-7 GB/episode of multi-cam mp4, so 10 episodes
     # blew past the old 50Gi ephemeral limit (pod evicted mid-download). Size for
     # tens of episodes; the request+limit both scale so the node reserves enough.
-    requests=Resources(cpu="2", mem="24Gi", ephemeral_storage="400Gi"),
-    limits=Resources(ephemeral_storage="450Gi"),
+    # mem needs an explicit LIMIT (not just a request): at 50 episodes the pod was
+    # OOMKilled (137) with only a request — without a limit the kernel reclaims it
+    # under node memory pressure. Raise to 48Gi and set the limit so the pod owns
+    # that memory. (The copytree below is also removed to avoid duplicating the
+    # raw tree.)
+    requests=Resources(cpu="2", mem="32Gi", ephemeral_storage="400Gi"),
+    limits=Resources(mem="48Gi", ephemeral_storage="450Gi"),
     secret_requests=[Secret(group="hf-token", key="HF_TOKEN",
                             mount_requirement=Secret.MountType.ENV_VAR)],
 )
@@ -251,7 +256,16 @@ def data_ingest(
     ep_list = list(range(episodes)) if episodes > 0 else None
     ds = LeRobotDataset(repo_id=dataset.value, episodes=ep_list)
     cache_dir = ds.root
-    shutil.copytree(str(cache_dir), out_dir)
+    # Hardlink the cache tree into out_dir instead of copytree: at tens of
+    # episodes the byte-for-byte copy doubles disk use and the copy churns the
+    # page cache, which (with the raw video already resident) pushed the pod over
+    # its memory limit → OOMKilled. Hardlinks share the same inodes (no data
+    # copied, no extra RAM), and FlyteDirectory uploads them normally. Falls back
+    # to a real copy only across filesystem boundaries (cross-device link error).
+    try:
+        shutil.copytree(str(cache_dir), out_dir, copy_function=os.link)
+    except OSError:
+        shutil.copytree(str(cache_dir), out_dir)
 
     print(f"Ingested {dataset.value}: {len(ds)} frames, {episodes} episodes → {out_dir}")
     return FlyteDirectory(out_dir)
