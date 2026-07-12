@@ -167,16 +167,20 @@ type SceneLabelRow struct {
 	SampleID string
 }
 
-// SceneLabelRows extracts the searchable (field,value) pairs of one label at
-// horizon 0 (pure; no AWS). Horizon 0 is the "now" state — the scene's present
-// condition — which is what a scene search means. Multi-label axes contribute
-// every member; blank values are skipped. Duplicate (field,value) pairs within
-// the label are de-duplicated so a repeated cause is written once.
+// SceneLabelRows extracts the searchable (field,value) pairs of one label over
+// ALL horizons (pure; no AWS), de-duplicated per (field,value) so a sample is
+// indexed once per value it carries anywhere in its horizon window.
+//
+// This MUST match the horizon window AggregateStats counts (every horizon): the
+// ODD bar charts are built from all 5 horizons, and each bar is click-through
+// to this scene index. Indexing only horizon 0 (the old behavior) meant a value
+// that appears only at a future horizon (+1s..+4s) rendered a nonzero, clickable
+// bar that opened an empty "No matching scenes" drawer. Multi-label axes
+// contribute every member; blank values are skipped.
 func SceneLabelRows(lbl ReasoningLabel) []SceneLabelRow {
 	if len(lbl.Horizons) == 0 || lbl.SampleID == "" {
 		return nil
 	}
-	h := lbl.Horizons[0]
 	seen := map[[2]string]struct{}{}
 	var rows []SceneLabelRow
 	add := func(field, value string) {
@@ -190,17 +194,19 @@ func SceneLabelRows(lbl ReasoningLabel) []SceneLabelRow {
 		seen[k] = struct{}{}
 		rows = append(rows, SceneLabelRow{Field: field, Value: value, SampleID: lbl.SampleID})
 	}
-	add(FieldRelationToEgo, h.RelationToEgo)
-	for _, v := range h.HazardEvent {
-		add(FieldHazardEvent, v)
+	for _, h := range lbl.Horizons {
+		add(FieldRelationToEgo, h.RelationToEgo)
+		for _, v := range h.HazardEvent {
+			add(FieldHazardEvent, v)
+		}
+		for _, v := range h.Cause {
+			add(FieldCause, v)
+		}
+		add(FieldLongitudinalResponse, h.LongitudinalResponse)
+		add(FieldLateralResponse, h.LateralResponse)
+		add(FieldTacticalResponse, h.TacticalResponse)
+		add(FieldRuleResponse, h.RuleResponse)
 	}
-	for _, v := range h.Cause {
-		add(FieldCause, v)
-	}
-	add(FieldLongitudinalResponse, h.LongitudinalResponse)
-	add(FieldLateralResponse, h.LateralResponse)
-	add(FieldTacticalResponse, h.TacticalResponse)
-	add(FieldRuleResponse, h.RuleResponse)
 	return rows
 }
 

@@ -134,25 +134,30 @@ func TestConfBucket_Boundaries(t *testing.T) {
 	}
 }
 
-func TestSceneLabelRows_Horizon0Only(t *testing.T) {
+func TestSceneLabelRows_AllHorizons(t *testing.T) {
+	// The scene index MUST cover every horizon so it matches AggregateStats
+	// (which counts all horizons): a value that appears only at a future horizon
+	// still renders a clickable bar, so it must be searchable. A value shared
+	// across horizons is de-duplicated to a single row.
 	lbl := ReasoningLabel{
 		SampleID: "s00000010",
 		Horizons: []LabelHorizon{
 			{RelationToEgo: "same_lane_ahead", HazardEvent: []string{"cut_in_risk", "collision_risk"}, Cause: []string{"cut_in_vehicle"}, LongitudinalResponse: "slow_down", LateralResponse: "turn_right", TacticalResponse: "wait", RuleResponse: "none", Confidence: 0.9},
-			// A different horizon-1 state must NOT contribute (search is "now").
+			// A distinct horizon-1 state MUST also contribute (the bar counts it).
 			{RelationToEgo: "crossing_path", HazardEvent: []string{"vru_collision_risk"}, Cause: []string{"pedestrian_crossing"}, LongitudinalResponse: "stop", LateralResponse: "keep_lane"},
 		},
 	}
 	rows := SceneLabelRows(lbl)
 
-	got := map[[2]string]bool{}
+	got := map[[2]string]int{}
 	for _, r := range rows {
 		if r.SampleID != "s00000010" {
 			t.Errorf("row sample id = %q, want s00000010", r.SampleID)
 		}
-		got[[2]string{r.Field, r.Value}] = true
+		got[[2]string{r.Field, r.Value}]++
 	}
 	want := [][2]string{
+		// horizon 0
 		{FieldRelationToEgo, "same_lane_ahead"},
 		{FieldHazardEvent, "cut_in_risk"},
 		{FieldHazardEvent, "collision_risk"},
@@ -161,15 +166,17 @@ func TestSceneLabelRows_Horizon0Only(t *testing.T) {
 		{FieldLateralResponse, "turn_right"},
 		{FieldTacticalResponse, "wait"},
 		{FieldRuleResponse, "none"},
+		// horizon 1 (future-only values must be present now)
+		{FieldRelationToEgo, "crossing_path"},
+		{FieldHazardEvent, "vru_collision_risk"},
+		{FieldCause, "pedestrian_crossing"},
+		{FieldLongitudinalResponse, "stop"},
+		{FieldLateralResponse, "keep_lane"},
 	}
 	for _, w := range want {
-		if !got[w] {
-			t.Errorf("missing scene row %v", w)
+		if got[w] != 1 {
+			t.Errorf("scene row %v: got %d, want exactly 1", w, got[w])
 		}
-	}
-	// Horizon-1-only values must be absent.
-	if got[[2]string{FieldRelationToEgo, "crossing_path"}] {
-		t.Errorf("horizon-1 relation_to_ego leaked into scene rows")
 	}
 	if len(rows) != len(want) {
 		t.Errorf("SceneLabelRows produced %d rows, want %d: %+v", len(rows), len(want), rows)
