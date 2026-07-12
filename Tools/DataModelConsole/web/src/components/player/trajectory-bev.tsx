@@ -167,16 +167,16 @@ export function TrajectoryBEV({
     return out;
   }, [extent, scale, cx, cy]);
 
-  // Reasoning-horizon dots pinned onto the plan path: each horizon's t seconds
-  // maps to rollout step round(t * fps) of the 64-step plan (dt = 1/fps), so a
-  // t+2s horizon lands on the plan point 2s ahead. Skips horizons past the
-  // integrated plan length.
+  // Reasoning-horizon dots pinned onto the plan path. traj[i] is the pose AFTER
+  // i+1 integration steps (traj[0] = pose at t=+dt), so a horizon at t seconds
+  // (step = round(t*fps)) sits at traj[step-1]; t=0 is the ego origin. Using
+  // traj[step] would place every dot one 10Hz step (+0.1s) too far ahead.
   const horizonDots = useMemo(() => {
-    if (!reasoning?.horizons?.length || traj.length === 0) return [];
+    if (!reasoning?.horizons?.length) return [];
     const out: { x: number; y: number; sec: number }[] = [];
     for (const h of reasoning.horizons) {
       const step = Math.round(h.horizon_sec * (fps || 10));
-      const p = traj[step];
+      const p = step === 0 ? { x: 0, y: 0 } : traj[step - 1];
       if (!p) continue;
       out.push({ x: sx(p), y: sy(p), sec: h.horizon_sec });
     }
