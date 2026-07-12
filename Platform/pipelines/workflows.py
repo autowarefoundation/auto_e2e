@@ -193,15 +193,29 @@ def _loader_projection(loader, device):
     limits=Resources(mem="48Gi", ephemeral_storage="450Gi"),
     secret_requests=[Secret(group="hf-token", key="HF_TOKEN",
                             mount_requirement=Secret.MountType.ENV_VAR)],
+    # "Ingest once, never again" (#121 §3.4a): cache on (dataset, group_ids,
+    # episodes, cache_version). A partition's raw is fetched from HF/SDK exactly
+    # once; a re-run of the same partition is a cache no-op, and its stable output
+    # URI lets the downstream label/pack cache hit too (FlyteDirectory hashes by
+    # URI). The HF token is a secret env, NOT an input, so it never enters the key.
+    cache=True,
+    cache_version=INGEST_CACHE_VERSION,
 )
 def data_ingest(
     dataset: Dataset = Dataset.L2D,
     episodes: int = 3,
+    group_ids: Optional[List[str]] = None,
 ) -> FlyteDirectory:
     """Download raw dataset from HuggingFace (lerobot for L2D, physical_ai_av for NVIDIA).
 
     HF token comes from the `hf-token` K8s Secret (injected as env var by Flyte),
     never from a workflow input — so it is not visible in the Flyte/MLflow UI.
+
+    ``group_ids`` (#121 option B) selects an EXPLICIT set of groups — L2D episode
+    indices (as strings) or NVIDIA clip uuids — so a fan-out partition materializes
+    ONLY its slice. When None, the legacy first-``episodes`` path is used. The ids
+    are GLOBAL (episode 12 is "12" in every partition), which is what keeps the
+    downstream ``sample_uid`` partition-independent (§3.1).
     """
     import os
     import shutil
@@ -235,7 +249,12 @@ def data_ingest(
             local_dir=str(out / ".hf_cache"),
             confirm_download_threshold_gb=float("inf"),
         )
-        clip_ids = ds.clip_index.index.tolist()[:episodes]
+        # Fan-out (option B): download EXACTLY this partition's clips (global clip
+        # uuids), not the first-N. None → legacy first-``episodes`` slice.
+        if group_ids is not None:
+            clip_ids = list(group_ids)
+        else:
+            clip_ids = ds.clip_index.index.tolist()[:episodes]
         feats = CAMERAS + ["egomotion"]
         # Real calibration: native f-theta intrinsics + sensor extrinsics. Enables
         # geometrically-meaningful BEV projection (#77). The rig is shared across
@@ -277,7 +296,13 @@ def data_ingest(
     except ModuleNotFoundError:
         from ledataset.datasets.lerobot_dataset import LeRobotDataset
 
-    ep_list = list(range(episodes)) if episodes > 0 else None
+    # Fan-out (option B): load EXACTLY this partition's episodes (global indices),
+    # not the first-N. group_ids are strings ("12") → int episode indices. None →
+    # legacy first-``episodes`` slice.
+    if group_ids is not None:
+        ep_list = [int(g) for g in group_ids]
+    else:
+        ep_list = list(range(episodes)) if episodes > 0 else None
     ds = LeRobotDataset(repo_id=dataset.value, episodes=ep_list)
     cache_dir = ds.root
     # Hardlink the cache tree into out_dir instead of copytree: at tens of
