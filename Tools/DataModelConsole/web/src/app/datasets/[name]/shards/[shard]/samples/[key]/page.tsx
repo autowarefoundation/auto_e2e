@@ -94,10 +94,15 @@ function SampleDetailInner({
     [samples.data],
   );
   const idx = useMemo(() => keys.indexOf(sampleKey), [keys, sampleKey]);
-  const prevKey = useMemo(
-    () => (idx > 0 ? keys[idx - 1] : siblingKey(sampleKey, -1)),
-    [idx, keys, sampleKey],
-  );
+  const prevKey = useMemo(() => {
+    if (idx > 0) return keys[idx - 1];
+    // True first frame of a loaded shard: disable Prev instead of walking to a
+    // frame-minus-one key that lives in another shard (siblingKey would 404 on
+    // a non-zero-indexed shard, e.g. train-000001 starting at s00001000).
+    // Mirror of the nextKey guard. siblingKey stays the still-loading fallback.
+    if (keys.length > 0 && idx === 0) return null;
+    return siblingKey(sampleKey, -1);
+  }, [idx, keys, sampleKey]);
   const nextKey = useMemo(() => {
     if (idx >= 0 && idx < keys.length - 1) return keys[idx + 1];
     // Guard the empty-keys (still-loading) case: idx===-1 and keys.length-1===-1
