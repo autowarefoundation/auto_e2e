@@ -58,6 +58,76 @@ func (h *ReasoningHandler) PromptVersions(w http.ResponseWriter, r *http.Request
 	writeJSON(w, http.StatusOK, model.ReasoningPromptVersionsResponse{Dataset: dataset, PromptVersions: entries})
 }
 
+// StatsDetail handles
+// GET /api/v1/reasoning-labels/stats-detail?dataset=&version=&prompt_version=&teacher=
+// — the precomputed ODD-coverage stats for one (dataset x version x
+// prompt_version) reasoning-label set. Read-through DynamoDB: a hit returns the
+// cached blob; a miss scans the labels from S3, aggregates, populates the
+// scene-by-label index, persists, and returns.
+func (h *ReasoningHandler) StatsDetail(w http.ResponseWriter, r *http.Request) {
+	dataset := r.URL.Query().Get("dataset")
+	promptVersion := r.URL.Query().Get("prompt_version")
+	teacher := r.URL.Query().Get("teacher")
+	if !validReasoningParam(dataset) || !validReasoningParam(promptVersion) {
+		writeError(w, http.StatusBadRequest, model.CodeInvalidParam, "missing or invalid dataset/prompt_version")
+		return
+	}
+	if teacher != "" && !validReasoningParam(teacher) {
+		writeError(w, http.StatusBadRequest, model.CodeInvalidParam, "invalid teacher")
+		return
+	}
+	version, ok := requestedVersion(r)
+	if !ok {
+		writeError(w, http.StatusBadRequest, model.CodeInvalidParam, "invalid version")
+		return
+	}
+
+	resp, err := h.s3.ReasoningStatsDetail(r.Context(), dataset, version, promptVersion, teacher)
+	if err != nil {
+		slog.Error("reasoning stats-detail", "dataset", dataset, "prompt_version", promptVersion, "error", err)
+		writeError(w, http.StatusBadGateway, model.CodeS3Error, "failed to compute reasoning stats")
+		return
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// ComputeStats handles
+// GET|POST /api/v1/reasoning-labels/compute-stats?dataset=&prompt_version=&teacher=
+// — force-(re)computes the stats blob AND repopulates the scene-by-label index.
+// Idempotent.
+func (h *ReasoningHandler) ComputeStats(w http.ResponseWriter, r *http.Request) {
+	dataset := r.URL.Query().Get("dataset")
+	promptVersion := r.URL.Query().Get("prompt_version")
+	teacher := r.URL.Query().Get("teacher")
+	if !validReasoningParam(dataset) || !validReasoningParam(promptVersion) {
+		writeError(w, http.StatusBadRequest, model.CodeInvalidParam, "missing or invalid dataset/prompt_version")
+		return
+	}
+	if teacher != "" && !validReasoningParam(teacher) {
+		writeError(w, http.StatusBadRequest, model.CodeInvalidParam, "invalid teacher")
+		return
+	}
+	version, ok := requestedVersion(r)
+	if !ok {
+		writeError(w, http.StatusBadRequest, model.CodeInvalidParam, "invalid version")
+		return
+	}
+
+	resp, err := h.s3.ComputeReasoningStats(r.Context(), dataset, version, promptVersion, teacher)
+	if err != nil {
+		slog.Error("reasoning compute-stats", "dataset", dataset, "prompt_version", promptVersion, "error", err)
+		writeError(w, http.StatusBadGateway, model.CodeS3Error, "failed to compute reasoning stats")
+		return
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// validReasoningParam rejects empty values and path-traversal characters for
+// values that land in an S3 key template or a DynamoDB key.
+func validReasoningParam(v string) bool {
+	return v != "" && !strings.ContainsAny(v, "/\\") && !strings.Contains(v, "..")
+}
+
 // GetLabel handles GET /api/v1/reasoning-labels/{dataset}/{sample_id}.
 // Optional ?teacher= and ?prompt_version= narrow the cache partition; without
 // them the first matching partition is returned.

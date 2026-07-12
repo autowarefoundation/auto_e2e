@@ -19,6 +19,7 @@ import (
 	"github.com/autowarefoundation/auto_e2e/tools/datamodelconsole/api/internal/config"
 	"github.com/autowarefoundation/auto_e2e/tools/datamodelconsole/api/internal/handler"
 	"github.com/autowarefoundation/auto_e2e/tools/datamodelconsole/api/internal/service"
+	"github.com/autowarefoundation/auto_e2e/tools/datamodelconsole/api/internal/store"
 )
 
 func main() {
@@ -32,7 +33,17 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	s3svc, err := service.NewS3Service(ctx, cfg.AWSRegion, cfg.DatasetsBucket, cfg.PresignExpiry)
+	// DynamoDB-backed cache: shard-index source of truth (read-through, no
+	// unbounded in-memory map), precomputed reasoning stats, scene-by-label
+	// index. A construction failure is fatal — the S3 service depends on it for
+	// the OOM-safe shard-index path.
+	dynStore, err := store.New(ctx, cfg.AWSRegion, cfg.DynamoTable)
+	if err != nil {
+		slog.Error("init dynamo store", "error", err)
+		os.Exit(1)
+	}
+
+	s3svc, err := service.NewS3Service(ctx, cfg.AWSRegion, cfg.DatasetsBucket, cfg.PresignExpiry, dynStore)
 	if err != nil {
 		slog.Error("init s3 service", "error", err)
 		os.Exit(1)
@@ -43,6 +54,7 @@ func main() {
 	healthH := handler.NewHealthHandler(s3svc)
 	datasetsH := handler.NewDatasetsHandler(s3svc)
 	reasoningH := handler.NewReasoningHandler(s3svc)
+	scenesH := handler.NewScenesHandler(s3svc)
 	mlflowH := handler.NewMLflowHandler(mlflowSvc)
 	flyteH := handler.NewFlyteHandler(flyteSvc)
 	statsH := handler.NewStatsHandler(s3svc, mlflowSvc)
@@ -80,6 +92,10 @@ func main() {
 			r.Get("/reasoning-labels/prompt-versions", reasoningH.PromptVersions)
 			r.Get("/reasoning-labels/{dataset}/{sample_id}", reasoningH.GetLabel)
 
+			// Scene-by-label search is a single bounded DynamoDB Query, so it
+			// stays in the interactive (25s) group.
+			r.Get("/scenes/search", scenesH.Search)
+
 			r.Get("/mlflow/experiments", mlflowH.Experiments)
 			r.Get("/mlflow/experiments/{id}/runs", mlflowH.Runs)
 			r.Get("/mlflow/runs/{id}", mlflowH.Run)
@@ -103,6 +119,15 @@ func main() {
 			// the 25s interactive group they 502 on cold load.
 			r.Get("/datasets/{name}/shards/{shard}/samples", datasetsH.ListSamples)
 			r.Get("/datasets/{name}/shards/{shard}/samples/{key}", datasetsH.GetSample)
+
+			// Reasoning stats: a Dynamo hit is instant, but a MISS scans up to a
+			// few thousand label objects from S3 (one GET each), so both the
+			// read-through detail endpoint and the force-compute endpoint live
+			// in the heavy-scan group. GET and POST both map to force-compute so
+			// the UI can trigger it either way (idempotent).
+			r.Get("/reasoning-labels/stats-detail", reasoningH.StatsDetail)
+			r.Get("/reasoning-labels/compute-stats", reasoningH.ComputeStats)
+			r.Post("/reasoning-labels/compute-stats", reasoningH.ComputeStats)
 		})
 
 		// Image GETs are cheap bounded range reads and the player fires many in
