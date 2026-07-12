@@ -1,42 +1,59 @@
 // FrameStore: random-access JPEG frame source over a WebDataset shard.
 //
-// Each frame/camera is fetched through the console API's image endpoint
-// (getSampleImageUrl → /api/v1/.../image/cam_N), which is same-origin behind
-// CloudFront in production (so no browser CORS and no presigned S3 URL leaked
-// to the client) and CORS-allowed from the API in local dev. The API streams
-// exactly one tar member; CloudFront caches the immutable JPEGs. An LRU cache
-// (bitmaps are GPU-resident, so bounded and close()d on eviction) plus a
-// direction-aware look-ahead ring makes 10Hz playback smooth.
+// Playback is gated by network round trips, not bandwidth: fetching each
+// camera JPEG as its own range GET means ~6 requests per frame, and over a
+// high-latency link (e.g. a browser far from the S3 region) the per-request
+// latency — not throughput — caps the fill rate well below 10Hz. Parallelizing
+// the tiny GETs makes it worse (TLS/slow-start contention).
 //
-// The shard index is still used for frame ordering, per-frame ego_now, and
-// hazard markers; only the byte-range-against-presigned-tar fetch was dropped.
+// So instead we fetch ONE contiguous byte range covering a whole WINDOW of
+// consecutive frames' camera members in a single request (the /blob endpoint),
+// then slice each JPEG out of the returned buffer using the per-member offsets
+// from the shard index and decode on demand. One round trip is amortized across
+// WINDOW_FRAMES × cameras, so the fill rate becomes bandwidth-bound (near real
+// time) rather than latency-bound. Decoded bitmaps are GPU-resident, so they
+// live in a bounded LRU and are close()d on eviction; the raw window buffers
+// are held in a small separate LRU just long enough to decode from.
 
-import { getSampleImageUrl } from "@/lib/api";
+import { getShardBlobUrl } from "@/lib/api";
 import type { IndexSample, ShardIndex } from "@/types";
 
 const DEFAULT_MAX_ENTRIES = 500;
-// Keep client concurrency at or below the server's image Throttle so prefetch
-// bursts don't get 429'd; the server allows 64 concurrent image GETs, but a
-// single player only needs a small look-ahead ring in flight at once.
-const MAX_INFLIGHT = 8;
-const PREFETCH_BEHIND = 4;
+// Frames per contiguous fetch window. Larger windows amortize more round trips
+// but delay the first draw and over-fetch on a scrub; 8 balances both.
+const WINDOW_FRAMES = 8;
+// Raw window buffers retained for slicing (each ~0.6-1MB). A few is enough to
+// decode the current and adjacent windows; bitmaps are the real cache.
+const MAX_BUFFERS = 4;
+// Concurrent window GETs. These are large reads, so a handful is plenty and
+// keeps us from re-introducing the many-tiny-connections contention.
+const MAX_INFLIGHT = 3;
+
+interface WindowBuffer {
+  buf: ArrayBuffer;
+  spanStart: number;
+}
 
 export class FrameStore {
   private readonly index: ShardIndex;
   private readonly dataset: string;
   private readonly shard: string;
-  // Optional pinned dataset version; threaded onto every image URL so the
-  // player renders the SAME version selected on the detail page (else the API
+  // Optional pinned dataset version; threaded onto every fetch so the player
+  // renders the SAME version selected on the detail page (else the API
   // auto-resolves the newest).
   private readonly version?: string;
+  private readonly cams: string[];
   private readonly byFrame = new Map<number, IndexSample>();
-  // Map iteration order = insertion order; entries are re-inserted on access
-  // so the first key is always the least recently used.
+  // Decoded bitmaps, keyed "frame:cam". Map iteration order = insertion order;
+  // entries are re-inserted on access so the first key is the LRU victim.
   private readonly cache = new Map<string, ImageBitmap>();
-  private readonly inflight = new Map<string, Promise<ImageBitmap>>();
-  // One AbortController per in-flight fetch so destroy() can cancel pending
-  // network requests instead of leaving them to resolve into closed bitmaps.
-  private readonly controllers = new Map<string, AbortController>();
+  private readonly bitmapInflight = new Map<string, Promise<ImageBitmap>>();
+  // Raw contiguous window buffers, keyed by window index, small LRU.
+  private readonly buffers = new Map<number, WindowBuffer>();
+  private readonly bufInflight = new Map<number, Promise<WindowBuffer>>();
+  // One AbortController per in-flight window fetch so destroy() cancels pending
+  // network requests instead of leaving them to resolve into a destroyed store.
+  private readonly controllers = new Map<number, AbortController>();
   private readonly maxEntries: number;
   private destroyed = false;
   private active = 0;
@@ -55,6 +72,14 @@ export class FrameStore {
     this.maxEntries = maxEntries;
     this.version = version;
     for (const s of index.samples) this.byFrame.set(s.frame_idx, s);
+    // Camera set is stable across the shard; take it from the first sample.
+    const first = index.samples[0];
+    this.cams = first
+      ? Object.keys(first.members)
+          .filter((m) => /^cam_\d+\.jpg$/.test(m))
+          .map((m) => m.replace(/\.jpg$/, ""))
+          .sort()
+      : [];
   }
 
   get frameCount(): number {
@@ -67,17 +92,16 @@ export class FrameStore {
 
   // sampleAt resolves a playback position to its index entry. The playback
   // clock produces a 0..N-1 sequential position, so array position is the
-  // authoritative lookup — this is robust even when sample keys carry a flat
-  // s%08d global index (all frame_idx could otherwise collide). byFrame is
-  // only a fallback for callers that pass a semantic frame_idx.
+  // authoritative lookup — robust even when sample keys carry a flat s%08d
+  // global index. byFrame is a fallback for callers passing a semantic frame_idx.
   sampleAt(pos: number): IndexSample | undefined {
     return this.index.samples[pos] ?? this.byFrame.get(pos);
   }
 
   // cachedCount returns how many of the next `n` frames (from `frame`, in
-  // `dir`) already have ALL `cams` decoded in cache — used by the player to
-  // gate playback start on a filled look-ahead buffer so it visibly plays
-  // instead of stuttering while frames stream in.
+  // `dir`) already have ALL `cams` decoded in cache — the player gates its
+  // playback clock on this so it advances only into drawable frames (smooth,
+  // never stuttering ahead of the buffer).
   cachedCount(frame: number, dir: 1 | -1, n: number, cams: string[]): number {
     let ready = 0;
     for (let i = 0; i < n; i++) {
@@ -89,10 +113,8 @@ export class FrameStore {
     return ready;
   }
 
-  // withSlot gates work behind a single global inflight budget shared by the
-  // draw-path getFrame and prefetch, so bursts never exceed the server's image
-  // Throttle (and the browser's per-host socket limit). It queues instead of
-  // firing, so a fast scrub can't unleash a connection storm.
+  // withSlot gates work behind a single global inflight budget so concurrent
+  // window fetches never exceed MAX_INFLIGHT (and queue instead of firing).
   private async withSlot<T>(fn: () => Promise<T>): Promise<T> {
     if (this.active >= MAX_INFLIGHT) {
       await new Promise<void>((res) => this.waiters.push(res));
@@ -106,32 +128,108 @@ export class FrameStore {
     }
   }
 
-  // getFrame returns the decoded bitmap for (frame, cam), deduplicating
-  // concurrent requests and populating the LRU cache.
+  private windowOf(frame: number): number {
+    return Math.floor(frame / WINDOW_FRAMES);
+  }
+
+  // windowSpan computes the contiguous byte range covering every camera member
+  // of every frame in the window, so any (frame, cam) in it can be sliced from
+  // a single fetched buffer.
+  private windowSpan(winIdx: number): { start: number; end: number } | null {
+    const lo = winIdx * WINDOW_FRAMES;
+    const hi = Math.min(this.frameCount, lo + WINDOW_FRAMES);
+    let start = Infinity;
+    let end = -Infinity;
+    for (let f = lo; f < hi; f++) {
+      const s = this.sampleAt(f);
+      if (!s) continue;
+      for (const cam of this.cams) {
+        const m = s.members[`${cam}.jpg`];
+        if (!m) continue;
+        start = Math.min(start, m.offset);
+        end = Math.max(end, m.offset + m.size);
+      }
+    }
+    if (start === Infinity) return null;
+    return { start, end };
+  }
+
+  // fetchBuffer fetches (once, deduplicated) the contiguous byte range for a
+  // window and caches it for slicing.
+  private fetchBuffer(winIdx: number): Promise<WindowBuffer> {
+    const existing = this.buffers.get(winIdx);
+    if (existing) return Promise.resolve(existing);
+    const pend = this.bufInflight.get(winIdx);
+    if (pend) return pend;
+    const span = this.windowSpan(winIdx);
+    if (!span) return Promise.reject(new Error(`empty window ${winIdx}`));
+
+    const controller = new AbortController();
+    this.controllers.set(winIdx, controller);
+    const p = this.withSlot(async () => {
+      const url = getShardBlobUrl(
+        this.dataset,
+        this.shard,
+        span.start,
+        span.end - span.start,
+        this.version,
+      );
+      const res = await fetch(url, { signal: controller.signal });
+      if (!res.ok) {
+        throw new Error(`blob fetch failed: ${res.status} ${res.statusText}`);
+      }
+      const buf = await res.arrayBuffer();
+      return { buf, spanStart: span.start };
+    })
+      .then((entry) => {
+        if (this.bufInflight.get(winIdx) === p) this.bufInflight.delete(winIdx);
+        if (this.controllers.get(winIdx) === controller)
+          this.controllers.delete(winIdx);
+        if (this.destroyed) throw new Error("FrameStore destroyed");
+        this.putBuffer(winIdx, entry);
+        return entry;
+      })
+      .catch((err: unknown) => {
+        if (this.bufInflight.get(winIdx) === p) this.bufInflight.delete(winIdx);
+        if (this.controllers.get(winIdx) === controller)
+          this.controllers.delete(winIdx);
+        throw err;
+      });
+    this.bufInflight.set(winIdx, p);
+    return p;
+  }
+
+  // getFrame returns the decoded bitmap for (frame, cam): fetches the enclosing
+  // window buffer (shared across all cameras/frames in it), slices out this
+  // member's JPEG and decodes it. Concurrent requests are deduplicated.
   getFrame(frameIdx: number, cam: string): Promise<ImageBitmap> {
     const key = `${frameIdx}:${cam}`;
     const hit = this.cache.get(key);
     if (hit) {
-      // bump recency
       this.cache.delete(key);
       this.cache.set(key, hit);
       return Promise.resolve(hit);
     }
-    const pending = this.inflight.get(key);
+    const pending = this.bitmapInflight.get(key);
     if (pending) return pending;
 
-    const controller = new AbortController();
-    this.controllers.set(key, controller);
-    const p = this.withSlot(() =>
-      this.fetchBitmap(frameIdx, cam, controller.signal),
-    )
-      .then((bmp) => {
-        // Guard by identity: a superseded fetch must not delete a newer
-        // same-key fetch's tracking (that would break dedup and lose the new
-        // fetch's cancellation). Only clear entries still pointing at us.
-        if (this.inflight.get(key) === p) this.inflight.delete(key);
-        if (this.controllers.get(key) === controller)
-          this.controllers.delete(key);
+    const winIdx = this.windowOf(frameIdx);
+    const p = this.fetchBuffer(winIdx)
+      .then(async (entry) => {
+        const sample = this.sampleAt(frameIdx);
+        const m = sample?.members[`${cam}.jpg`];
+        if (!sample || !m) {
+          throw new Error(`no member ${cam}.jpg at frame ${frameIdx}`);
+        }
+        const begin = m.offset - entry.spanStart;
+        if (begin < 0 || begin + m.size > entry.buf.byteLength) {
+          throw new Error(`member ${cam}.jpg out of window buffer range`);
+        }
+        const slice = entry.buf.slice(begin, begin + m.size);
+        const bmp = await createImageBitmap(
+          new Blob([slice], { type: "image/jpeg" }),
+        );
+        if (this.bitmapInflight.get(key) === p) this.bitmapInflight.delete(key);
         if (this.destroyed) {
           bmp.close();
           throw new Error("FrameStore destroyed");
@@ -140,17 +238,16 @@ export class FrameStore {
         return bmp;
       })
       .catch((err: unknown) => {
-        if (this.inflight.get(key) === p) this.inflight.delete(key);
-        if (this.controllers.get(key) === controller)
-          this.controllers.delete(key);
+        if (this.bitmapInflight.get(key) === p) this.bitmapInflight.delete(key);
         throw err;
       });
-    this.inflight.set(key, p);
+    this.bitmapInflight.set(key, p);
     return p;
   }
 
-  // prefetch warms the cache around the playhead: a look-ahead ring in the
-  // playback direction (longer at higher speed) plus a short tail behind.
+  // prefetch warms the buffers and decodes the visible cameras for a look-ahead
+  // run in the playback direction (longer at higher speed) plus a short tail
+  // behind, so the draw path and cachedCount find frames ready.
   prefetch(
     centerFrame: number,
     direction: 1 | -1,
@@ -159,56 +256,67 @@ export class FrameStore {
   ): void {
     if (this.destroyed || cams.length === 0) return;
     const ahead = Math.min(
-      48,
-      Math.max(8, Math.ceil(Math.max(speed, 0.1) * 12)),
+      WINDOW_FRAMES * 3,
+      Math.max(WINDOW_FRAMES * 2, Math.ceil(Math.max(speed, 0.1) * 12)),
     );
-    // Nearest frames first so imminent draws win the bandwidth.
-    const offsets: number[] = [];
-    for (let d = 1; d <= ahead; d++) offsets.push(d * direction);
-    for (let d = 1; d <= PREFETCH_BEHIND; d++) offsets.push(-d * direction);
-
-    for (const off of offsets) {
-      if (this.inflight.size >= MAX_INFLIGHT) return;
-      const f = centerFrame + off;
-      if (f < 0 || f >= this.frameCount) continue;
+    // Decode nearest frames first so imminent draws win the bandwidth. getFrame
+    // deduplicates and shares the underlying window fetches.
+    for (let d = 0; d <= ahead; d++) {
+      const f = centerFrame + d * direction;
+      if (f < 0 || f >= this.frameCount) break;
       for (const cam of cams) {
-        if (this.inflight.size >= MAX_INFLIGHT) return;
         const key = `${f}:${cam}`;
-        if (this.cache.has(key) || this.inflight.has(key)) continue;
+        if (this.cache.has(key) || this.bitmapInflight.has(key)) continue;
         void this.getFrame(f, cam).catch(() => {
           // Prefetch failures are non-fatal; the draw path retries on demand.
         });
       }
     }
+    // A small tail behind for scrub-back / reverse.
+    const behindWin = this.windowOf(centerFrame) - direction;
+    if (
+      behindWin >= 0 &&
+      behindWin * WINDOW_FRAMES < this.frameCount &&
+      !this.buffers.has(behindWin) &&
+      !this.bufInflight.has(behindWin)
+    ) {
+      void this.fetchBuffer(behindWin).catch(() => {});
+    }
   }
 
-  // abort releases the connection slot for a (frame,cam) that scrolled past
-  // instead of letting a superseded fetch run to completion. A queued-but-not-
-  // started fetch self-corrects: when its slot frees, fetchBitmap runs with an
-  // already-aborted signal and rejects immediately. The rejected fetch's own
-  // .catch also deletes these entries; a double-delete is harmless.
-  abort(frameIdx: number, cam: string): void {
-    const key = `${frameIdx}:${cam}`;
-    this.controllers.get(key)?.abort();
-    this.controllers.delete(key);
-    this.inflight.delete(key);
+  // abort is a no-op under windowed fetching: fetches are window-scoped and
+  // shared across every tile/frame in the window, so cancelling on one tile's
+  // unmount would strand the others. Superseded windows are cheap to let finish
+  // (they fill the cache for scrubbing); destroy() cancels everything.
+  abort(): void {
+    // intentionally empty — see doc comment
   }
 
-  // destroy closes every cached bitmap. Pending fetches close their bitmaps
-  // on arrival (see getFrame).
+  // destroy closes every cached bitmap and cancels pending fetches.
   destroy(): void {
     this.destroyed = true;
     for (const controller of this.controllers.values()) controller.abort();
     this.controllers.clear();
     for (const bmp of this.cache.values()) bmp.close();
     this.cache.clear();
-    this.inflight.clear();
+    this.bitmapInflight.clear();
+    this.buffers.clear();
+    this.bufInflight.clear();
+  }
+
+  private putBuffer(winIdx: number, entry: WindowBuffer): void {
+    this.buffers.delete(winIdx);
+    this.buffers.set(winIdx, entry);
+    while (this.buffers.size > MAX_BUFFERS) {
+      const oldest = this.buffers.keys().next().value;
+      if (oldest === undefined) break;
+      this.buffers.delete(oldest);
+    }
   }
 
   private put(key: string, bmp: ImageBitmap): void {
-    // A re-request of a key already in cache (e.g. abort → prefetch-behind)
-    // would set() over the existing bitmap and orphan its GPU memory. Close
-    // and drop the prior bitmap before inserting the new one.
+    // A re-request of a key already in cache would set() over the existing
+    // bitmap and orphan its GPU memory. Close and drop the prior one first.
     const prev = this.cache.get(key);
     if (prev && prev !== bmp) {
       prev.close();
@@ -221,36 +329,5 @@ export class FrameStore {
       this.cache.delete(oldest);
     }
     this.cache.set(key, bmp);
-  }
-
-  private async fetchBitmap(
-    frameIdx: number,
-    cam: string,
-    signal?: AbortSignal,
-  ): Promise<ImageBitmap> {
-    const sample = this.sampleAt(frameIdx);
-    if (!sample) throw new Error(`no sample at frame ${frameIdx}`);
-    const range = sample.members[`${cam}.jpg`];
-    if (!range) {
-      throw new Error(`no member ${cam}.jpg in ${sample.key}`);
-    }
-
-    // cam is "cam_N"; the API endpoint takes the numeric index. Passing the
-    // known tar byte range lets the API serve it via a bounded S3 range GET.
-    const camNum = Number(cam.replace(/^cam_/, ""));
-    const url = getSampleImageUrl(
-      this.dataset,
-      this.shard,
-      sample.key,
-      camNum,
-      range,
-      this.version,
-    );
-    const res = await fetch(url, { signal });
-    if (!res.ok) {
-      throw new Error(`image fetch failed: ${res.status} ${res.statusText}`);
-    }
-    const blob = await res.blob();
-    return createImageBitmap(blob);
   }
 }

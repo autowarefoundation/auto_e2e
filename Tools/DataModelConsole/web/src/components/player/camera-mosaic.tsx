@@ -80,10 +80,10 @@ function CanvasTile({
     return () => {
       cancelled = true;
       clearTimeout(timeout);
-      // Release the connection slot for the frame we're leaving. frame is
-      // shared across every tile, so React tears down all tiles for the old
-      // frame together — abort only ever targets frames every tile is leaving.
-      store.abort(frame, cam);
+      // No per-tile fetch cancellation: the FrameStore fetches whole windows
+      // shared across every camera/frame in them, so a window is never "owned"
+      // by one leaving tile. Superseded windows fill the cache for scrubbing;
+      // destroy() cancels anything still in flight.
     };
   }, [store, frame, cam]);
 
