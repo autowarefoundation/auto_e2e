@@ -578,6 +578,14 @@ def data_processing(
         Secret(group="cosmos-teacher", key="COSMOS_TEACHER_MODEL",
                mount_requirement=Secret.MountType.ENV_VAR),
     ],
+    # Cache on (raw URI, group_ids, teacher, prompt_version, cache_version) so a
+    # re-run of an unchanged partition is a no-op (#121 §3.4a). This is BELT over
+    # the per-sample S3 LabelCache (which already keys the teacher by sample_uid):
+    # the S3 cache stops re-billing Cosmos; the Flyte cache stops re-running the
+    # decode+JOIN task at all. A changed prompt_version / teacher (in the key)
+    # correctly misses. LABEL_CACHE_VERSION folds in the uid format (the JOIN key).
+    cache=True,
+    cache_version=LABEL_CACHE_VERSION,
 )
 def generate_reasoning_labels(
     raw_data: FlyteDirectory,
@@ -587,6 +595,7 @@ def generate_reasoning_labels(
     teacher: str = "openai_compatible",
     prompt_version: str = "action_relevant_reasoning_v3_temporal_front256",
     cache_bucket: str = REASONING_LABELS_CACHE_BUCKET,
+    group_ids: Optional[List[str]] = None,
     # Process-parallel worker count. Front-clip mode decodes only 5 front frames
     # per sample, but at 20+ episodes 24 concurrent decoders + their lerobot
     # readers still OOM-killed the task at ~96/125. 12 workers still overlap the
@@ -643,14 +652,23 @@ def generate_reasoning_labels(
     # Sample count: build the dataset once (front-clip mode) just to get len().
     # Enumeration matches data_processing (WM-window sample set) so sample_ids
     # JOIN; workers rebuild their own front-clip dataset in init_worker.
-    ep_list = list(range(episodes)) if episodes > 0 else None
+    # Fan-out (option B): group_ids selects this partition's groups (global L2D
+    # episode indices / NVIDIA clip uuids). None → legacy first-``episodes``.
+    ep_list = ([int(g) for g in group_ids] if group_ids is not None
+               else (list(range(episodes)) if episodes > 0 else None))
     if dataset == Dataset.NVIDIA_PHYSICAL_AI:
         from data_parsing.nvidia_physical_ai.dataset import NvidiaAVDataset
+        # NVIDIA: the partition's ingest materialized ONLY this partition's clips
+        # into raw_path, so DISCOVERY (sorted) yields exactly the partition set —
+        # and the worker (parallel_label.init_worker) also discovers from raw_path,
+        # so probe and workers enumerate in the SAME order (sample-index JOIN holds).
+        # Passing clip_uuids in partition order here would risk an order mismatch.
         ds = NvidiaAVDataset(data_root=raw_path, reasoning_clip_only=True)
     else:
         from data_parsing.l2d import L2DDataset
+        # root=raw_path: read the partition's materialized raw, don't re-hit HF.
         ds = L2DDataset(repo_id=dataset.value, episodes=ep_list,
-                        reasoning_clip_only=True)
+                        reasoning_clip_only=True, root=raw_path)
     n_samples = len(ds)
 
     # openai_compatible resolves base_url/model/api_key from the Secret (env
