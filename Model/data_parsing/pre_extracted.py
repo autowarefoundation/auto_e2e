@@ -261,26 +261,48 @@ def projection_from_spec(spec):
 
 
 def _split_bucket(key: str, buckets: int = 10) -> int:
-    """Deterministic bucket in [0, buckets) from a sample's stable ``__key__``.
+    """Deterministic bucket in [0, buckets) from a stable string.
 
     Uses a fixed hash (blake2b) — NOT Python's ``hash()``, which is salted per
     process, so train and eval workers (and reruns) would disagree on the split.
-    A per-sample hash split keeps train/val disjoint at the SAMPLE level and is
-    reproducible across the train task and the (separate) eval task.
+    Reproducible across the train task and the (separate) eval task.
     """
     import hashlib
     h = hashlib.blake2b(key.encode("utf-8"), digest_size=8).digest()
     return int.from_bytes(h, "big") % buckets
 
 
+def _split_group_of(sample) -> str:
+    """The train/val SPLIT key for a raw shard sample (#121 §3.1).
+
+    Hash the ``split_group_uid`` from the sample's ``meta.json`` (episode/clip
+    granularity) — NOT the per-frame ``__key__`` — so all frames of one episode
+    fall in the SAME bucket and never straddle train/val (adjacent frames are
+    strongly correlated → a per-frame split leaks). Falls back to ``__key__`` for
+    legacy shards whose meta.json predates split_group_uid.
+    """
+    import json
+    meta = sample.get("meta.json")
+    if meta is not None:
+        try:
+            g = json.loads(meta.decode() if isinstance(meta, (bytes, bytearray)) else meta)
+            grp = g.get("split_group_uid")
+            if grp:
+                return grp
+        except Exception:
+            pass
+    return sample.get("__key__", "")
+
+
 def _split_keep(split: str, val_fraction: float):
     """Return a predicate ``sample -> bool`` selecting the requested split.
 
     ``split="all"`` (default) keeps everything (backward-compatible, single-set
-    behaviour). ``"train"`` / ``"val"`` partition by a stable per-sample hash of
-    ``__key__`` into disjoint sets: ``val`` is the first ``round(val_fraction*10)``
-    of 10 buckets, ``train`` is the rest. So train and val NEVER share a sample,
-    and eval-on-val measures generalization, not memorization.
+    behaviour). ``"train"`` / ``"val"`` partition by a stable hash of the sample's
+    ``split_group_uid`` (episode/clip) into disjoint sets: ``val`` is the first
+    ``round(val_fraction*10)`` of 10 buckets, ``train`` is the rest. Splitting by
+    GROUP (not per-frame) keeps a whole episode/clip on one side, so eval-on-``val``
+    measures generalization to UNSEEN episodes, not memorization of neighbours.
     """
     if split == "all" or val_fraction <= 0.0:
         return lambda sample: True
@@ -288,7 +310,7 @@ def _split_keep(split: str, val_fraction: float):
     val_buckets = max(1, min(buckets - 1, round(val_fraction * buckets)))
 
     def keep(sample):
-        b = _split_bucket(sample.get("__key__", ""), buckets)
+        b = _split_bucket(_split_group_of(sample), buckets)
         in_val = b < val_buckets
         return in_val if split == "val" else (not in_val)
 
