@@ -1,6 +1,7 @@
 package model
 
 import (
+	"math"
 	"strconv"
 	"strings"
 )
@@ -19,6 +20,9 @@ func asInt64(raw []byte) int64 {
 	}
 	// Some values arrive as floats (e.g. "1.699e12"); parse then truncate.
 	if f, err := strconv.ParseFloat(s, 64); err == nil {
+		if math.IsNaN(f) || math.IsInf(f, 0) {
+			return 0
+		}
 		return int64(f)
 	}
 	return 0
@@ -30,6 +34,14 @@ func asFloat64(raw []byte) float64 {
 		return 0
 	}
 	if f, err := strconv.ParseFloat(s, 64); err == nil {
+		// MLflow serializes NaN/Infinity as JSON strings, so ParseFloat happily
+		// returns a non-finite float. But encoding/json CANNOT marshal NaN/Inf
+		// (it errors, and writeJSON has already sent a 200 header — the client
+		// gets an empty body). A non-finite metric carries no KPI meaning, so
+		// coerce it to 0 to keep the response encodable.
+		if math.IsNaN(f) || math.IsInf(f, 0) {
+			return 0
+		}
 		return f
 	}
 	return 0

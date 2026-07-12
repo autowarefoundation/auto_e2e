@@ -1,6 +1,9 @@
 package model
 
-import "testing"
+import (
+	"encoding/json"
+	"testing"
+)
 
 // Representative payloads mirror the real MLflow REST / Flyte Admin JSON shapes
 // (the in-cluster services are unreachable from a dev laptop, so these encode
@@ -58,6 +61,28 @@ func TestNormalizeMLflowRuns(t *testing.T) {
 	// Metric value as a STRING must coerce.
 	if r.Metrics["loss"] != 0.31 {
 		t.Errorf("metric loss = %v, want 0.31", r.Metrics["loss"])
+	}
+}
+
+func TestNormalizeMLflowRuns_NonFiniteMetricIsEncodable(t *testing.T) {
+	// MLflow serializes NaN/Infinity as JSON strings. The normalized run must be
+	// JSON-encodable (encoding/json cannot marshal NaN/Inf), so non-finite
+	// metric values coerce to 0.
+	body := []byte(`{"runs":[{"info":{"run_id":"r1"},
+		"data":{"metrics":[{"key":"loss","value":"NaN"},{"key":"grad","value":"Infinity"},{"key":"ade","value":2.0}]}}]}`)
+	runs, err := NormalizeMLflowRuns(body)
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	m := runs[0].Metrics
+	if m["loss"] != 0 || m["grad"] != 0 {
+		t.Errorf("non-finite metrics not zeroed: %+v", m)
+	}
+	if m["ade"] != 2.0 {
+		t.Errorf("finite metric changed: %v", m["ade"])
+	}
+	if _, err := json.Marshal(runs); err != nil {
+		t.Errorf("normalized runs must be JSON-encodable, got: %v", err)
 	}
 }
 
