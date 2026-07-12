@@ -17,11 +17,9 @@
 import { useMemo } from "react";
 
 import {
-  clamp,
   decodeEgo,
   integrateTrajectory,
-  MAX_CURVATURE,
-  MIN_SPEED_FOR_HEADING,
+  yawRateFrom,
 } from "@/lib/ego";
 import type { TrajectoryPoint } from "@/lib/ego";
 import type { IndexSample, ReasoningLabelRecord } from "@/types";
@@ -72,7 +70,7 @@ export function TrajectoryBEV({
     for (let i = frame; i < end; i++) {
       const v = samples[i].ego_now?.[0] ?? 0;
       const kappa = samples[i].ego_now?.[3] ?? 0;
-      if (v >= MIN_SPEED_FOR_HEADING) theta += v * clamp(kappa, MAX_CURVATURE) * dt;
+      theta += yawRateFrom(v, kappa) * dt;
       x += v * Math.cos(theta) * dt;
       y += v * Math.sin(theta) * dt;
       pts.push({ x, y, heading: theta });
@@ -102,7 +100,7 @@ export function TrajectoryBEV({
       // curvature and gate heading by speed to reject non-physical outliers.
       x -= v * Math.cos(theta) * dt;
       y -= v * Math.sin(theta) * dt;
-      if (v >= MIN_SPEED_FOR_HEADING) theta -= v * clamp(kappa, MAX_CURVATURE) * dt;
+      theta -= yawRateFrom(v, kappa) * dt;
       pts.push({ x, y, heading: theta });
     }
     return pts;

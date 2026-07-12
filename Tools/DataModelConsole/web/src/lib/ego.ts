@@ -21,6 +21,17 @@ export const MIN_SPEED_FOR_YAW = 0.1; // m/s
 export const clamp = (v: number, lim: number) =>
   Math.max(-lim, Math.min(lim, v));
 
+// yawRateFrom returns the physically-bounded yaw rate for a (speed, curvature)
+// pair: kappa is clamped to MAX_CURVATURE, then the resulting yaw rate v*kappa
+// is clamped to MAX_YAW_RATE. Clamping kappa alone is insufficient — at highway
+// speed a plausible kappa still yields a non-physical yaw rate. Below the
+// heading floor the heading is undefined, so the yaw rate is 0. Shared by every
+// path that integrates ego heading (plan, realized, history) so they agree.
+export function yawRateFrom(speed: number, curvature: number): number {
+  if (speed < MIN_SPEED_FOR_HEADING) return 0;
+  return clamp(speed * clamp(curvature, MAX_CURVATURE), MAX_YAW_RATE);
+}
+
 export interface EgoHistory {
   speed: number[]; // m/s
   accel: number[]; // m/s^2
@@ -91,8 +102,7 @@ export function integrateTrajectory(
   for (let i = 0; i < n; i++) {
     v += accel[i] * dt;
     if (v < 0) v = 0; // no reversing from braking overshoot
-    if (v >= MIN_SPEED_FOR_HEADING)
-      theta += v * clamp(curvature[i], MAX_CURVATURE) * dt;
+    theta += yawRateFrom(v, curvature[i]) * dt;
     x += v * Math.cos(theta) * dt;
     y += v * Math.sin(theta) * dt;
     out[i] = { x, y, heading: theta };
