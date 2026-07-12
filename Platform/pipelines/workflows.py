@@ -331,6 +331,14 @@ def data_ingest(
     # video + decoded windows. Karpenter provisions a fitting node.
     requests=Resources(cpu="16", mem="30Gi", ephemeral_storage="400Gi"),
     limits=Resources(cpu="16", mem="32Gi", ephemeral_storage="450Gi"),
+    # Cache on (raw URI, labels URI, group_ids, world_model, image_size,
+    # cache_version) so "processing is rarely needed" holds (#121 §3.4a): an
+    # unchanged partition re-uses its shards. Because the raw + labels inputs are
+    # FlyteDirectories hashed by URI, a cache-hit upstream keeps their URIs stable
+    # → this task hits too. PACK_CACHE_VERSION folds in the shard + geometry
+    # encoding, so a shard-layout change correctly re-packs.
+    cache=True,
+    cache_version=PACK_CACHE_VERSION,
 )
 def data_processing(
     raw_data: FlyteDirectory,
@@ -340,6 +348,7 @@ def data_processing(
     episodes: int = 3,
     world_model: bool = False,
     reasoning_labels: Optional[FlyteDirectory] = None,
+    group_ids: Optional[List[str]] = None,
 ) -> FlyteDirectory:
     """Pre-extract aligned frames + egomotion → WebDataset shards.
 
@@ -387,9 +396,15 @@ def data_processing(
     # center-crop and keeps the projection ABI targeting a known (plain-resized)
     # frame. Sample schema: visual_tiles (V,3,H,W), map_tile (3,H,W),
     # egomotion_history (256), trajectory_target (128). See #77.
-    ep_list = list(range(episodes)) if episodes > 0 else None
+    # Fan-out (option B): group_ids selects this partition's groups (global L2D
+    # episode indices / NVIDIA clip uuids). None → legacy first-``episodes``.
+    ep_list = ([int(g) for g in group_ids] if group_ids is not None
+               else (list(range(episodes)) if episodes > 0 else None))
     if dataset == Dataset.NVIDIA_PHYSICAL_AI:
         from data_parsing.nvidia_physical_ai.dataset import NvidiaAVDataset
+        # DISCOVERY from raw_path (the partition's ingest materialized only this
+        # partition's clips), so the packer enumerates exactly the partition set in
+        # the SAME order the labeler used → the reasoning.json JOIN by uid holds.
         ds = NvidiaAVDataset(data_root=raw_path)
         if world_model:
             print("world_model requested but NVIDIA has no window support yet; "
@@ -399,9 +414,10 @@ def data_processing(
     else:
         from data_parsing.l2d import L2DDataset
         # World-Model windows (#16/#13) are only produced when requested, so the
-        # imitation-only path stays cheap (no extra frame decode).
+        # imitation-only path stays cheap (no extra frame decode). root=raw_path:
+        # read the partition's materialized raw, don't re-hit HF.
         ds = L2DDataset(repo_id=dataset.value, episodes=ep_list,
-                        include_world_model_windows=world_model)
+                        include_world_model_windows=world_model, root=raw_path)
         n_samples = len(ds)
         idx_iter = range(n_samples)
 
