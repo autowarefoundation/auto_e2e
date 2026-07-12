@@ -20,7 +20,7 @@ AWS_ACCOUNT_ID="${AWS_ACCOUNT_ID:-$(aws sts get-caller-identity --query Account 
 ECR_PREFIX="${ECR_PREFIX:-${AWS_ACCOUNT_ID}.dkr.ecr.us-west-2.amazonaws.com}"
 
 : "${ACM_CERT_ARN:?Set ACM_CERT_ARN for the ALB HTTPS listener}"
-: "${CONSOLE_ALB_SG_ID:?Set CONSOLE_ALB_SG_ID (terraform output console_alb_sg_id)}"
+: "${CONSOLE_ALB_SG_ID:?Set CONSOLE_ALB_SG_ID (terraform output console_alb_sg_id; SG admits HTTPS only from the CloudFront managed VPC-origin ENIs)}"
 : "${CONSOLE_ORIGIN:?Set CONSOLE_ORIGIN (CloudFront console origin URL)}"
 # Private-subnet CIDRs where the internal ALB ENIs live (terraform
 # private-subnet outputs). NOT the whole VPC CIDR — under VPC CNI that would
@@ -52,4 +52,4 @@ done
 echo "Waiting for rollout..."
 kubectl -n console rollout status deployment/console-api --timeout=180s
 kubectl -n console rollout status deployment/console-web --timeout=180s
-echo "DataModelConsole deployed. ALB SG ${CONSOLE_ALB_SG_ID} restricts ingress to the CloudFront prefix list."
+echo "DataModelConsole deployed. ALB SG ${CONSOLE_ALB_SG_ID} restricts ingress to the CloudFront managed VPC-origin ENIs (CloudFront-VPCOrigins-Service-SG) only."
