@@ -13,8 +13,10 @@ import type {
   ReasoningLabelRecord,
   ReasoningLabelStats,
   ReasoningPromptVersionsResponse,
+  ReasoningStatsDetail,
   SampleDetail,
   SampleListResponse,
+  SceneSearchResult,
   ShardIndex,
   ShardListResponse,
 } from "@/types";
@@ -171,6 +173,25 @@ export function getSampleImageUrl(
   return qs ? `${base}?${qs}` : base;
 }
 
+// getShardBlobUrl builds the contiguous-range endpoint URL. The player fetches
+// one span covering a whole window of frames' camera members in a single GET
+// and slices the JPEGs out client-side (using the per-member offsets from the
+// shard index), amortizing one network round trip across many frames — the
+// difference between playback that fills its buffer at 10Hz and one that
+// starves on per-image latency.
+export function getShardBlobUrl(
+  dataset: string,
+  shard: string,
+  offset: number,
+  size: number,
+  version?: string,
+): string {
+  const base = `${BASE_URL}/api/v1/datasets/${encodeURIComponent(dataset)}/shards/${encodeURIComponent(shard)}/blob`;
+  const q = new URLSearchParams({ offset: String(offset), size: String(size) });
+  if (version) q.set("version", version);
+  return `${base}?${q.toString()}`;
+}
+
 // getShardIndex fetches the playback index: per-frame member byte ranges +
 // ego_now / ego_future signals (ADAS player data source).
 export function getShardIndex(
@@ -210,6 +231,47 @@ export function getReasoningLabel(
   return apiFetch<ReasoningLabelRecord>(
     `/api/v1/reasoning-labels/${encodeURIComponent(dataset)}/${encodeURIComponent(sampleId)}`,
   );
+}
+
+// getReasoningStatsDetail fetches the aggregated ODD / label composition for
+// one (dataset, version, prompt_version) partition: per-field value counts +
+// a confidence histogram over every horizon. The FIRST call for an uncomputed
+// partition triggers a cold S3 scan the API caches afterward — that can take
+// ~50s, so a generous 120s client timeout is used to avoid a false error.
+export function getReasoningStatsDetail(
+  dataset: string,
+  version: string,
+  promptVersion: string,
+): Promise<ReasoningStatsDetail> {
+  const q = new URLSearchParams({
+    dataset,
+    version,
+    prompt_version: promptVersion,
+  });
+  return apiFetch<ReasoningStatsDetail>(
+    `/api/v1/reasoning-labels/stats-detail?${q.toString()}`,
+    { signal: AbortSignal.timeout(120_000) },
+  );
+}
+
+// searchScenesByLabel lists sample_ids in a (dataset, prompt_version) partition
+// whose label carries field=value on any horizon (the drill-down behind a
+// clicked ODD bar).
+export function searchScenesByLabel(
+  dataset: string,
+  promptVersion: string,
+  field: string,
+  value: string,
+  limit = 50,
+): Promise<SceneSearchResult> {
+  const q = new URLSearchParams({
+    dataset,
+    prompt_version: promptVersion,
+    field,
+    value,
+    limit: String(limit),
+  });
+  return apiFetch<SceneSearchResult>(`/api/v1/scenes/search?${q.toString()}`);
 }
 
 // ---------------------------------------------------------------------------
