@@ -214,38 +214,51 @@ contiguous `(start_ep, end_ep)` (L2D) or a clip-uuid sublist (NVIDIA). Choose
 partition size so ONE pod comfortably handles it (e.g. 10 episodes ≈ the known-good
 single-pod size).
 
-New/changed Flyte structure (using `@dynamic` to compute partitions at run time,
-then `map_task` over them):
+**Ingest materializes raw PER PARTITION (option B, chosen 2026-07-13).** Each
+partition's `data_ingest` fetches ONLY that partition's raw data from source and
+saves it as its OWN `FlyteDirectory`; the label and pack pods for that partition
+read that partition's raw dir. This keeps every stage's memory/disk proportional
+to `partition` size (not the total corpus, so the whole-corpus ingest OOM is
+gone), and crucially avoids re-hitting HuggingFace / re-downloading from source in
+every downstream pod — the raw is fetched ONCE per partition, then reused by that
+partition's label + pack. Re-try stability is the priority: a failed label/pack
+re-reads the already-materialized partition raw (Flyte cache serves the same URI),
+rather than re-pulling from HF.
+- **L2D**: `data_ingest_range` builds `L2DDataset(repo_id, revision,
+  episodes=partition_eps)` so lerobot pulls only that range from HF, then persists
+  it (hardlink copytree, §Phase-0 fix) as the partition's raw `FlyteDirectory`.
+- **NVIDIA**: downloads ONLY the partition's clips via the `physical_ai_av` SDK
+  (`workflows.py:200-225`) into the partition's raw dir.
+
+New Flyte structure (`@dynamic` to size partitions at run time, then `map_task`):
 
 ```
 @dynamic
-def wf_create_dataset_sharded(dataset, episodes, partition_size, world_model, teacher, prompt):
-    partitions = make_partitions(dataset, episodes, partition_size)   # list[(start,end)] or list[list[clip]]
-    # 1) INGEST fan-out: each pod ingests only its range → its own raw FlyteDirectory
+def wf_create_dataset_sharded(dataset, episodes, target_cost, world_model, teacher, prompt):
+    partitions = plan_partitions(dataset, episodes, target_cost)   # list[PartitionSpec] (episode/clip ids)
+    # 1) INGEST fan-out: each pod fetches ONLY its partition's raw → its own FlyteDirectory
     raws = map_task(data_ingest_range)(partition=partitions, dataset=..., ...)
-    # 2) LABEL fan-out: each pod labels only its raw range → per-range records.jsonl
-    #    (writes to the SAME S3 cache; global sample_uid keeps keys correct)
-    label_dirs = map_task(generate_reasoning_labels_range)(raw=raws, partition=partitions, ...)
-    # 3) PACK fan-out: each pod packs only its raw range + joins its label range
-    #    → its OWN shard dir (train-*.tar). Emits K shard dirs.
-    shard_dirs = map_task(data_processing_range)(raw=raws, labels=label_dirs, partition=partitions, ...)
-    return shard_dirs   # List[FlyteDirectory] — train_il already consumes a list
+    # 2) LABEL fan-out: each pod reads its partition's raw, labels it
+    label_manifests = map_task(generate_reasoning_labels_range, concurrency=C)(
+        raw=raws, partition=partitions, ...)                       # → per-partition records.jsonl (+ S3 cache)
+    # 3) PACK fan-out: each pod reads its partition's raw + JOINs its labels → its OWN shards
+    shard_manifests = map_task(data_processing_range)(
+        raw=raws, labels=label_manifests, partition=partitions, ...)
+    return validate_and_publish_manifest(shard_manifests)          # DatasetManifest (train_il consumes it)
 ```
 
 Per-stage detail:
 
-**(1) `data_ingest_range(partition)`** — one pod per range, from the START
-(review pt 3/4: do NOT keep a single giant raw dir that every pack pod
-re-downloads). Each pod ingests ONLY its slice → per-range raw `FlyteDirectory`.
-- L2D: `LeRobotDataset(episodes=list(range(start,end)))` — lerobot fetches only
-  the requested episodes (`l2d/dataset.py:157`), so memory/disk scale with
-  `partition_size`, not total episodes → the 50-ep ingest OOM disappears.
-- Keep the hardlink (`os.link`) copytree fix. The pack pod for the same partition
-  downloads only its own small raw slice, not the whole corpus (K× blow-up
-  avoided).
+**(1) `data_ingest_range(partition)`** — one pod per partition. Fetches ONLY its
+partition's raw data from source (L2D: lerobot `episodes=partition_eps`; NVIDIA:
+SDK `partition_clips`) and persists it as the partition's raw `FlyteDirectory`
+(hardlink copytree). Memory/disk scale with `partition` size, so the whole-corpus
+ingest OOM is gone. Raw is fetched from source ONCE per partition here; downstream
+pods reuse this materialized raw (no HF re-hit).
 
 **(2) `generate_reasoning_labels_range(raw, partition)`** — one pod per range.
-- Builds the parser on its range only; labels with global `sample_uid`.
+- Reads its partition's raw dir (no source re-fetch), builds the front-clip parser
+  on that slice, labels with the global `sample_uid`.
 - Writes to the SAME S3 label cache prefix — cache hits across runs still work
   because the uid is global. Emits a per-range `records.jsonl`.
 - **Bounded global teacher concurrency (review pt 6).** Total in-flight calls =
@@ -263,9 +276,11 @@ re-downloads). Each pod ingests ONLY its slice → per-range raw `FlyteDirectory
   stays per-range.
 
 **(3) `data_processing_range(raw, labels, partition)`** — one pod per range.
-- Packs its range into its OWN shard files, JOINs only its range's labels by uid.
+- Reads its partition's raw dir (the same materialized raw the label stage used —
+  no source re-fetch), packs it into its OWN shard files, JOINs only its
+  partition's labels by uid.
 - WM worker cap (6) stays per-pod but now bounds a small range, not the whole set.
-- Emits a per-range shard `FlyteDirectory`.
+- Emits a per-partition shard `FlyteDirectory` + a `ShardPartitionManifest`.
 
 **Combine → a reducer that emits a `DatasetManifest` (review pt 7).** Instead of
 returning a bare `List[FlyteDirectory]` (which loses coverage/checksum/split
@@ -420,9 +435,15 @@ cached task's input signature. This is the concrete guard that the contract we
 are locking now stays locked.
 
 ### 3.5 Open design questions — RESOLVED in review
-1. **Ingest↔pack coupling → SEPARATE (do NOT co-locate).** Keep ingest, label,
-   pack as distinct Flyte tasks so each retries independently. Raw round-trips
-   through S3 per range; Flyte caching (§3.4a) makes the re-download cheap/skipped.
+1. **Ingest↔pack coupling → SEPARATE tasks + PER-PARTITION raw materialization
+   (option B, chosen 2026-07-13).** Keep ingest/label/pack as distinct tasks
+   (stage-level retry). Each partition's ingest fetches ONLY that partition's raw
+   from source and saves it as the partition's `FlyteDirectory`; that partition's
+   label + pack read it. Raw is pulled from HF/SDK ONCE per partition (not
+   re-fetched in every downstream pod), and a retry reads the already-materialized
+   partition raw (Flyte cache serves the same URI) rather than re-hitting HF —
+   re-try stability is the priority. Per-partition sizing keeps memory bounded, so
+   the whole-corpus ingest OOM is gone.
 2. **Eval multi-dir → eval over ALL shard dirs.** Change `_select_shard_dir` →
    consume the full `List[FlyteDirectory]` (the held-out `val` split already makes
    this a proper generalization measure across all partitions).
@@ -471,13 +492,15 @@ are locking now stays locked.
   make the JOIN EXACT (`set(pack)==set(label)`); UID-format validation. Verify the
   single-pod pipeline is unchanged by **semantic (per-uid) comparison, NOT tar
   byte-diff** (§6).
-- **Phase 2 — full fan-out (ingest+label+pack) + caching + teacher concurrency:**
-  `@dynamic` `plan_partitions` (cost-based, guarded) + `map_task` over ranges for
-  ALL THREE stages (ingest per-range from the start — no single giant raw dir);
-  add `cache=True` + `DatasetSnapshot`/prompt-hash/schema-version provenance
-  (§3.4a); bound teacher concurrency via `map_task(concurrency=)` + in-pod workers
-  + retry/backoff (§3.2-2). Validate on a 2-partition run first, then 20–50
-  episodes: no stage OOMs.
+- **Phase 2 — per-partition ingest + label/pack fan-out + caching + teacher
+  concurrency:** `@dynamic plan_partitions` (cost-based, guarded) → `map_task` over
+  partitions for ALL THREE stages: `data_ingest_range` materializes each
+  partition's raw `FlyteDirectory` (fetched once from source), then label + pack
+  read it. Add `cache=True` + `DatasetSnapshot`/prompt-hash/schema-version
+  provenance (§3.4a); bound teacher concurrency via `map_task(concurrency=)` +
+  in-pod workers + retry/backoff (§3.2-2). Validate on a 2-partition run first,
+  then 20–50 episodes: no stage OOMs; each partition's raw is fetched from HF/SDK
+  exactly once.
 - **Phase 3 — DatasetManifest reducer + group-level eval split + multi-dir
   train/eval:** add `validate_and_publish_manifest` (coverage/no-overlap/uid-dup/
   label==pack/checksum); `_select_shard_dir` → consume all shard dirs; eval on the
