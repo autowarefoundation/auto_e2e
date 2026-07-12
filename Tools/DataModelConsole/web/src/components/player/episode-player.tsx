@@ -133,6 +133,7 @@ export function EpisodePlayer({
     toggle,
     step,
     setSpeed,
+    pause,
   } = playback;
 
   const [mode, setMode] = useState<"grid" | "focus">(
@@ -440,6 +441,7 @@ export function EpisodePlayer({
         fps={index.fps || 10}
         frame={frame}
         onSeek={setFrame}
+        onScrubStart={pause}
       />
 
       <div className="flex flex-wrap items-center gap-2">
