@@ -161,9 +161,51 @@ Call sites to change:
 - Cache key `label_cache._key` already takes a `sample_id` string; feeding it the
   uid needs no signature change, but the KEY CONTENT changes → see migration 3.4.
 
-Consistency guard (`workflows.py:322-332`) currently asserts "same episodes ⇒
-same sample_ids"; with a global uid it becomes "the label set covers the pack
-set" — reframe as a uid-membership check, not positional-count equality.
+**`sample_uid` is a formal identity contract, not a string format** (review pt 2).
+Define a typed identity and derive the uid from it, so releases can't collide and
+malformed keys are caught at build time:
+
+```python
+@dataclass(frozen=True)
+class SampleIdentity:
+    dataset_namespace: str   # e.g. "yaak-ai/L2D@<revision>"
+    uid_schema_version: str  # "v1"
+    group_id: str            # episode index (L2D) / clip_uuid (NVIDIA) — the SPLIT unit
+    frame_id: int
+```
+- `sample_uid = f"l2d-v1-e{group_id}-f{frame_id:06d}"` (L2D),
+  `f"nv-v1-{clip_uuid}-{frame_id:06d}"` (NVIDIA). Include the `uid_schema_version`
+  so a future scheme change is a clean cache/JOIN break, not a silent mismatch.
+- Validate every uid at generation: `re.fullmatch(r"[A-Za-z0-9_-]+", uid)` and no
+  `.`/`/`. Store the raw `episode_index`/`clip_uuid`/`revision` in the sample's
+  `meta.json` (not only encoded in the tar key) for traceability.
+
+**`split_group_uid` — the eval-split unit (review pt 1, the most important fix).**
+A SEPARATE id at episode/clip granularity, NOT the per-frame uid:
+```python
+split_group_uid = f"l2d-e{episode_index:06d}"   # NVIDIA: f"nv-{clip_uuid}"
+split_bucket = blake2b(f"{split_seed}:{split_group_uid}") % 100
+```
+Rationale: L2D frames within an episode are strongly correlated; a per-frame
+`__key__` hash split (the current `pre_extracted._split_bucket`) puts adjacent
+frames of the SAME episode into both train and val → evaluation leak, which
+silently inflates held-out numbers. Splitting by episode/clip makes train/val
+disjoint at the group level. Required invariant + test:
+`assert train_group_uids.isdisjoint(val_group_uids)`. → This replaces the
+per-`__key__` split in `pre_extracted.py:_split_bucket`; the loader must split on
+a `split_group_uid` carried in each sample's meta (add it to the packed
+`meta.json`), not on `__key__`.
+
+**Strict JOIN (review pt 2).** The consistency guard (`workflows.py:322-332`)
+"label set covers pack set" is too weak. Require EXACT equality:
+```python
+assert len(pack_uids) == len(set(pack_uids))   # no dup uids in a shard
+assert len(label_uids) == len(set(label_uids))
+assert set(pack_uids) == set(label_uids)        # per partition
+```
+Abstain is an explicit label STATE (already modelled — `ReasoningLabelRecord`
+carries an abstain/error field), never a missing key, so a labelled partition has
+one record per packed sample.
 
 ### 3.2 Part B — Map-task fan-out per stage
 
@@ -192,45 +234,77 @@ def wf_create_dataset_sharded(dataset, episodes, partition_size, world_model, te
 
 Per-stage detail:
 
-**(1) `data_ingest_range(partition)`** — one pod per range.
-- L2D: `LeRobotDataset(episodes=list(range(start,end)))` — lerobot already fetches
-  only requested episodes (`l2d/dataset.py:157`), so a range pod downloads only its
-  slice. Memory/disk now scale with `partition_size`, not total episodes → the
-  50-ep ingest OOM disappears.
-- Keep the hardlink (`os.link`) copytree fix.
-- Returns a per-range `FlyteDirectory`. NOTE: raw is still uploaded to S3 per
-  range; the pack pod for the same range re-downloads only its slice.
-- Open question (3.5): can we skip the raw round-trip by co-locating ingest+pack
-  in one range task? (fewer moving parts, less S3 I/O).
+**(1) `data_ingest_range(partition)`** — one pod per range, from the START
+(review pt 3/4: do NOT keep a single giant raw dir that every pack pod
+re-downloads). Each pod ingests ONLY its slice → per-range raw `FlyteDirectory`.
+- L2D: `LeRobotDataset(episodes=list(range(start,end)))` — lerobot fetches only
+  the requested episodes (`l2d/dataset.py:157`), so memory/disk scale with
+  `partition_size`, not total episodes → the 50-ep ingest OOM disappears.
+- Keep the hardlink (`os.link`) copytree fix. The pack pod for the same partition
+  downloads only its own small raw slice, not the whole corpus (K× blow-up
+  avoided).
 
 **(2) `generate_reasoning_labels_range(raw, partition)`** — one pod per range.
 - Builds the parser on its range only; labels with global `sample_uid`.
-- Writes to the SAME S3 label cache prefix (unchanged) — cache hits across runs
-  still work because the uid is global. Emits a per-range `records.jsonl`.
-- `label_workers` per pod can stay modest (12) because each pod handles few
-  samples; total concurrency = (#pods × 12), which is how we actually parallelize
-  the ~12 s teacher calls across the 10 Cosmos replicas.
-- Robustness: add teacher retry/backoff (currently none, `openai_compatible.py`),
-  and the >50% abstain guard stays per-range.
+- Writes to the SAME S3 label cache prefix — cache hits across runs still work
+  because the uid is global. Emits a per-range `records.jsonl`.
+- **Bounded global teacher concurrency (review pt 6).** Total in-flight calls =
+  `map_concurrency × label_workers_per_pod` must stay ≤ what the Cosmos endpoint
+  (10 replicas) can serve without 429/tail-latency. Set BOTH:
+  `map_task(generate_reasoning_labels_range, concurrency=C)` caps concurrent pods,
+  and `label_workers_per_pod` caps in-pod parallelism. Start conservative
+  (`label_workers_per_pod=2`, `concurrency=5` → ≤10 in-flight ≈ 1/replica); tune
+  from measured endpoint batching. NOT "#pods × 12 unbounded" (that = 120 calls on
+  10 replicas → retry storm).
+- **Teacher retry (review pt 6):** retry only 429/5xx, honour `Retry-After`,
+  exponential backoff + jitter, max attempts + max elapsed, fail fast on 4xx.
+  Per-uid cache write is idempotent (`label_cache.put` overwrites the same key).
+  Currently `openai_compatible.py` has NO retry — add it. The >50% abstain guard
+  stays per-range.
 
 **(3) `data_processing_range(raw, labels, partition)`** — one pod per range.
 - Packs its range into its OWN shard files, JOINs only its range's labels by uid.
 - WM worker cap (6) stays per-pod but now bounds a small range, not the whole set.
 - Emits a per-range shard `FlyteDirectory`.
 
-**Combine:** `@dynamic` returns `List[FlyteDirectory]` (K shard dirs). `train_il`
-consumes the list unchanged. Eval likewise (may need `_select_shard_dir` →
-multi-dir; see 3.5).
+**Combine → a reducer that emits a `DatasetManifest` (review pt 7).** Instead of
+returning a bare `List[FlyteDirectory]` (which loses coverage/checksum/split
+stats), a final `validate_and_publish_manifest` reducer collects the per-partition
+manifests, validates them, and emits ONE `DatasetManifest`:
+```json
+{"dataset_snapshot": "...", "uid_schema_version": "v1", "shard_schema_version": "v3",
+ "partitions": [{"partition_id": "p-000", "shard_uris": ["s3://..."],
+                 "sample_count": 1834, "label_count": 1834, "sha256": "..."}],
+ "train_groups": 90000, "val_groups": 10000}
+```
+Reducer validations (fail the run if any break): partition coverage is exact (no
+missing/overlapping episodes), no group appears in >1 partition, no duplicate uids
+across shards, `label_uids == pack_uids` per partition, shard checksums/counts
+match. Always associate by `partition_id`, never map output order/list position.
+`train_il`/eval take the `DatasetManifest` (or its shard_uris) — the manifest is
+the formal artifact; the `List[FlyteDirectory]` train_il already accepts is the
+transport underneath.
 
 ### 3.3 Partitioning function
-`make_partitions(dataset, episodes, partition_size)`:
-- L2D: `[(i, min(i+partition_size, episodes)) for i in range(0, episodes, partition_size)]`.
-  With `episodes=0` (= all), first resolve the true episode count (HF meta:
-  100,000 for L2D — so "all" needs an explicit cap or a max-episodes arg; do NOT
-  silently fan out 10k pods).
-- NVIDIA: chunk the discovered clip-uuid list into sublists of `partition_size`.
-- Emit `log()` of partition count + size so a huge fan-out is visible, never
-  silent.
+`plan_partitions(snapshot, target_cost, max_partitions)` returns a deterministic
+`PartitionSpec` list. Start with fixed `partition_size=10` episodes for smoke
+tests, but the PRODUCTION plan is **cost-based, not episode-count-based**
+(review pt 5): L2D is ~100,000 episodes / ~19M frames (~190 frames/ep, uneven), so
+a fixed 10-ep unit would create ~10,000 partitions × 3 stages ≈ 30,000 mapped
+executions — crushing the Flyte control plane + Kubernetes scheduler and spawning
+huge numbers of tiny S3 objects. Instead accumulate consecutive episodes/clips
+into a partition until an estimated cost threshold is hit:
+```python
+estimated_cost = n_frames*decode_cost + n_wm_windows*wm_cost + est_bytes*io_cost
+# close the partition when running cost >= target_cost (tuned from measured
+# P95 pod memory / time / S3 transfer of the smoke runs)
+```
+- `episodes=0` (= all) MUST first resolve the true count and is guarded:
+  `assert n_partitions <= max_partitions` unless an explicit `allow_large_fanout`
+  override is set. NEVER silently fan out 10k pods.
+- `log()` the partition plan (count, sizes, est cost) so fan-out scale is visible.
+- The plan is deterministic given `(snapshot, target_cost)` so re-runs reproduce
+  identical partitions (required for Flyte cache hits).
 
 ### 3.4 Migration / backward-compat of the label cache
 Changing `sample_id` from `s{si:08d}` to the global uid changes every cache KEY,
@@ -246,18 +320,34 @@ Recommendation: **(a)** — the cache is an optimization, the teacher is cheap a
 this scale, and (a) avoids carrying a fragile remap. Bump the `prompt_version`?
 No — same prompt; just let the new keys populate.
 
-### 3.4a Flyte caching (skip unchanged ranges)
-Because the stages are kept separate (decision 2) and fan out per range, a re-run
-(e.g. after a downstream failure, or extending the episode set) should NOT redo
-work whose inputs didn't change. Add Flyte task caching:
-- `data_ingest` (per range): `@task(cache=True, cache_version="v1")`. A given
-  `(dataset, partition)` re-ingests only when the code/version changes. lerobot
-  already caches the HF download on disk; Flyte caching skips the whole task.
-- `generate_reasoning_labels` (per range): `cache=True`. Combined with the
-  per-sample S3 label cache, an unchanged range is a no-op (task cache hit) and
-  even a changed range only calls the teacher for uncached uids.
-- `data_processing` (per range): `cache=True`, `cache_version` bumped whenever the
-  shard schema changes.
+### 3.4a Flyte caching + provenance (skip unchanged ranges) (review pt 2)
+Stages are separate (decision 2) and fan out per range, so a re-run must NOT redo
+unchanged work. Add Flyte task caching — BUT a generic `cache_version="v1"` alone
+is insufficient: Flyte's cache key is (task interface, input literals,
+cache_version), and `FlyteDirectory` inputs hash by URI, so a code/spec change
+that doesn't change inputs would serve a STALE cached output. Thread an explicit
+provenance object through every stage as an input so the cache key reflects the
+real determinants:
+```python
+@dataclass(frozen=True)
+class DatasetSnapshot:
+    dataset: str            # "yaak-ai/L2D"
+    source_revision: str    # HF commit sha — pins the raw data
+    uid_schema_version: str # "v1"
+    parser_version: str     # bump on parser/enumeration change
+    metadata_digest: str    # hash of the resolved group-id list
+```
+Per stage, include the provenance that actually affects its output:
+- `data_ingest_range`: `DatasetSnapshot` (dataset + revision + group list). lerobot
+  also caches the HF download on disk; Flyte cache skips the whole task on re-run.
+- `generate_reasoning_labels_range`: `DatasetSnapshot` + `teacher_model_revision`
+  + `prompt_body_hash` + `prompt_version` + decode params. Combined with the
+  per-sample S3 label cache, an unchanged range is a task-cache no-op; a changed
+  prompt/model correctly misses. (This is why `prompt_version` alone was fragile.)
+- `data_processing_range`: `DatasetSnapshot` + `shard_schema_version` +
+  `world_model` flag + `geometry_version`.
+Bump the relevant field/version on ANY code change to that stage — version bump is
+the implementer's responsibility (Flyte won't detect a pure code change).
 Cache key = (task signature, input literals, cache_version). Since inputs are the
 partition + dataset + flags, ranges are independently cacheable. This is what
 makes "extend from 20 → 50 → all episodes" cheap: only the NEW ranges run.
@@ -265,17 +355,21 @@ Caveat: `FlyteDirectory` inputs hash by URI, so upstream re-runs that produce a
 new raw dir URI will invalidate downstream cache — acceptable, and why ingest
 caching (stable raw URI per range) matters most.
 
-### 3.4b S3 cleanup (decision 4)
-The cutover leaves unused S3 state that must be deleted:
-- Old positional-keyed reasoning-label cache prefix
-  (`reasoning_labels_cache/dataset=/teacher=/prompt_version=/s00000000.json` …) —
-  superseded by the global-uid keys. Delete after the new keys are populated.
-- Orphaned raw/shard `FlyteDirectory` outputs from superseded single-pod runs
-  under `s3://…-artifacts-…/` (e.g. the failed 50-ep ingest `raw`, partial
-  packs). Enumerate and delete the runs that the new pipeline replaces.
-- MUST use the correct account/profile (`--profile autowarefoundation`,
-  us-west-2) and confirm each prefix before `rm`; never touch the Cosmos account.
-Do the deletion as an explicit, logged step (list → confirm → delete), not silently.
+### 3.4b S3 cleanup — retention, not immediate delete (review pt 8)
+The cutover leaves unused S3 state (old positional label-cache prefix; orphaned
+raw/shard `FlyteDirectory` outputs from superseded single-pod runs, e.g. the
+failed 50-ep ingest `raw`, partial packs). Deleting Flyte-managed artifact
+prefixes outright can break past executions that still reference them, so use a
+retention flow rather than `rm`:
+1. Write a manifest of deletion candidates (list → save).
+2. Verify the NEW uid cache covers the same samples before retiring the old prefix.
+3. Tag legacy objects (e.g. `lifecycle=retire`) rather than deleting.
+4. Give a 14–30 day rollback window.
+5. Expire via an S3 Lifecycle rule on the tag/prefix (not a manual bulk delete).
+6. If the bucket is versioned, a DELETE only adds a delete-marker — also expire
+   NONCURRENT versions to actually reclaim space.
+- MUST use `--profile autowarefoundation` / us-west-2 and confirm each prefix;
+  never touch the Cosmos account. All steps logged, never silent.
 
 ### 3.5 Open design questions — RESOLVED in review
 1. **Ingest↔pack coupling → SEPARATE (do NOT co-locate).** Keep ingest, label,
@@ -310,42 +404,72 @@ Do the deletion as an explicit, logged step (list → confirm → delete), not s
   sane bound without an override.
 - **Cross-dataset merge fairness** (separate, tracked): weighted interleaver
   (already scoped) — not required for Milestone 1 (single dataset, many partitions).
-- **Non-determinism** from map-task ordering: shard dirs may complete in any
-  order, but WebDataset shuffles anyway and the held-out split is a per-sample
-  `__key__` hash (order-independent) — so no train/val leakage.
+- **Eval leakage** if the split is per-frame (fixed): split by `split_group_uid`
+  (episode/clip), NOT per-`__key__` — correlated intra-episode frames must not
+  straddle train/val (§3.1). Mitigation: `train_group_uids.isdisjoint(val_group_uids)`
+  test. Map-task ordering is otherwise safe: the group-hash split is
+  order-independent and associates by `partition_id`, not list position.
 
 ---
 
-## 5. Phased plan
+## 5. Phased plan (revised per review)
 - **Phase 0 (done):** P0 single-pod fixes — num_workers + /dev/shm + the webdataset
-  double-split data-loss fix + ingest hardlink + label mem. Lets moderate scale
-  run today and is independently correct.
-- **Phase 1 — global sample_id (no fan-out):** add `sample_uid` to the L2D +
-  NVIDIA parsers; swap the 3 call sites (`parallel_label.py:86`, pack worker
-  return, `workflows.py:450`); reframe the consistency guard (`workflows.py:322`)
-  to uid-membership; unit test for cross-subset uid stability + JOIN. Verify the
-  existing single-pod pipeline still produces identical shards (byte-diff the
-  reasoning.json JOIN on the 10-ep shard, modulo the new key strings).
-- **Phase 2 — Flyte caching + label/pack fan-out:** add `cache=True`/`cache_version`
-  to the three data-prep tasks (§3.4a); `@dynamic` computes partitions +
-  `map_task` over ranges for label + pack (ingest still single for now). Validate
-  on a 2-partition run first, then 20–50 episodes: no stage OOMs, K shard dirs
-  train correctly.
-- **Phase 3 — ingest fan-out + eval multi-dir + S3 cleanup + partition tuning:**
-  fan out ingest per range for full episode-count independence; eval over all
-  shard dirs (`_select_shard_dir` → plural); delete superseded S3 dirs + old
-  positional cache prefix (§3.4b); choose partition size.
-- **Phase 4 — full-scale run + (separate) DDP:** run ALL L2D episodes + all NVIDIA
-  clips through the sharded pipeline → train → held-out eval → report ADE/FDE. DDP
-  multi-GPU training (Kueue GPU quota→N, g6e→~10 nodes, find_unused_parameters,
-  split_by_node) only if single-GPU wall-clock becomes the bottleneck at that
-  data scale.
+  double-split data-loss fix + ingest hardlink + label mem. Independently correct.
+- **Phase 1 — data contracts + global sample_id (no fan-out):** add the four data
+  contracts — `SampleIdentity`/`sample_uid`, `split_group_uid`, and (stubs for)
+  `DatasetSnapshot`/`PartitionSpec`; swap the 3 uid call sites
+  (`parallel_label.py:86`, pack worker return, `workflows.py:450`); switch the
+  loader split from per-`__key__` to `split_group_uid` (`pre_extracted._split_bucket`);
+  make the JOIN EXACT (`set(pack)==set(label)`); UID-format validation. Verify the
+  single-pod pipeline is unchanged by **semantic (per-uid) comparison, NOT tar
+  byte-diff** (§6).
+- **Phase 2 — full fan-out (ingest+label+pack) + caching + teacher concurrency:**
+  `@dynamic` `plan_partitions` (cost-based, guarded) + `map_task` over ranges for
+  ALL THREE stages (ingest per-range from the start — no single giant raw dir);
+  add `cache=True` + `DatasetSnapshot`/prompt-hash/schema-version provenance
+  (§3.4a); bound teacher concurrency via `map_task(concurrency=)` + in-pod workers
+  + retry/backoff (§3.2-2). Validate on a 2-partition run first, then 20–50
+  episodes: no stage OOMs.
+- **Phase 3 — DatasetManifest reducer + group-level eval split + multi-dir
+  train/eval:** add `validate_and_publish_manifest` (coverage/no-overlap/uid-dup/
+  label==pack/checksum); `_select_shard_dir` → consume all shard dirs; eval on the
+  disjoint group-level `val`.
+- **Phase 4 — full-scale run + S3 retention cleanup:** run ALL L2D episodes + all
+  NVIDIA clips → train → held-out eval → report ADE/FDE; retire old S3 state via
+  the retention/Lifecycle flow (§3.4b).
+- **Phase 5 — (only if needed) DDP:** multi-GPU (Kueue GPU quota→N, g6e→~10 nodes,
+  `find_unused_parameters=True`, WebDataset `split_by_node`) only if single-GPU
+  wall-clock is the bottleneck at full data scale.
+
+## 6. Test plan (revised per review)
+Do NOT byte-diff tar shards (member order / mtime / impl differences make
+semantically-identical shards differ). Compare per-uid, semantically:
+```python
+assert old_rec.keys() == new_rec.keys()
+assert content_hash(old_rec["cam_0.jpg"]) == content_hash(new_rec["cam_0.jpg"])
+assert old_rec["reasoning.json"] == new_rec["reasoning.json"]
+```
+Required tests:
+- same physical frame from two DIFFERENT episode subsets → identical `sample_uid`.
+- every uid matches `[A-Za-z0-9_-]+`, no `.`/`/`.
+- `plan_partitions` deterministic; partitions cover all groups with no overlap/gap.
+- a group never appears in both train and val (`isdisjoint`).
+- changing `source_revision` / `prompt_body_hash` / `parser_version` → cache MISS.
+- forcing ONE partition to OOM retries only that partition (stage isolation).
+- teacher 429 → global in-flight stays ≤ the configured cap.
+- `set(pack_uids) == set(label_uids)` after pack.
+- 10-ep old vs new pipeline are SEMANTICALLY identical (per-uid, above).
 
 ---
 
-## 6. What we are NOT doing (and why)
+## 7. What we are NOT doing (and why)
 - Not raising single-pod memory further — that is the band-aid this design
   replaces.
 - Not DDP in this milestone — training is not the current bottleneck at 10–50
-  episodes; data-prep is. DDP is Phase 4.
+  episodes; data-prep is. DDP is Phase 5, only if needed.
+- Not a full `DatasetAdapter` protocol refactor — only 2 datasets (L2D + NVIDIA),
+  both already wired, so the `if dataset == …` branches are acceptable; the four
+  data CONTRACTS (SampleIdentity/split_group/DatasetSnapshot/DatasetManifest) give
+  the reproducibility benefit without the interface churn. Revisit if a 3rd
+  dataset is added.
 - Not changing the model or losses — this is purely a data-pipeline scaling design.
