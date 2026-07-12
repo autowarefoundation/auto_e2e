@@ -1,8 +1,8 @@
 "use client";
 
 import Link from "next/link";
-import { useRouter } from "next/navigation";
-import { use, useEffect, useMemo } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
+import { Suspense, use, useEffect, useMemo } from "react";
 import { ChevronLeft, ChevronRight, Loader2, Play } from "lucide-react";
 
 import { CameraImage } from "@/components/camera-image";
@@ -35,20 +35,23 @@ function siblingKey(key: string, delta: number): string | null {
   return `${m[1]}_${String(frame).padStart(6, "0")}`;
 }
 
-export default function SampleDetailPage({
-  params,
+function SampleDetailInner({
+  dataset,
+  shardName,
+  sampleKey,
 }: {
-  params: Promise<{ name: string; shard: string; key: string }>;
+  dataset: string;
+  shardName: string;
+  sampleKey: string;
 }) {
-  const { name, shard, key } = use(params);
-  const dataset = decodeURIComponent(name);
-  const shardName = decodeURIComponent(shard);
-  const sampleKey = decodeURIComponent(key);
   const router = useRouter();
+  const searchParams = useSearchParams();
+  const version = searchParams.get("version") ?? "";
+  const versionQuery = version ? `?version=${encodeURIComponent(version)}` : "";
 
   const { data, error, loading, reload } = useApi(
-    () => getSample(dataset, shardName, sampleKey),
-    [dataset, shardName, sampleKey],
+    () => getSample(dataset, shardName, sampleKey, version || undefined),
+    [dataset, shardName, sampleKey, version],
   );
 
   // Reasoning label is a separate endpoint; 404 simply means "no label".
@@ -65,8 +68,8 @@ export default function SampleDetailPage({
   // disabled on the last frame (no 404 dead-end) and nav is robust to
   // non-contiguous keys. Falls back to sibling arithmetic while the list loads.
   const samples = useApi(
-    () => listSamples(dataset, shardName),
-    [dataset, shardName],
+    () => listSamples(dataset, shardName, version || undefined),
+    [dataset, shardName, version],
   );
   const keys = useMemo(
     () => (samples.data?.samples ?? []).map((s) => s.key),
@@ -84,7 +87,7 @@ export default function SampleDetailPage({
   }, [idx, keys, sampleKey]);
 
   const sampleUrl = (k: string) =>
-    `/datasets/${encodeURIComponent(dataset)}/shards/${encodeURIComponent(shardName)}/samples/${encodeURIComponent(k)}`;
+    `/datasets/${encodeURIComponent(dataset)}/shards/${encodeURIComponent(shardName)}/samples/${encodeURIComponent(k)}${versionQuery}`;
 
   // Keyboard navigation: ArrowLeft/p = prev frame, ArrowRight/n = next frame.
   useEffect(() => {
@@ -116,14 +119,14 @@ export default function SampleDetailPage({
             </Link>{" "}
             /{" "}
             <Link
-              href={`/datasets/${encodeURIComponent(dataset)}`}
+              href={`/datasets/${encodeURIComponent(dataset)}${versionQuery}`}
               className="font-mono hover:text-slate-300"
             >
               {dataset}
             </Link>{" "}
             /{" "}
             <Link
-              href={`/datasets/${encodeURIComponent(dataset)}/shards/${encodeURIComponent(shardName)}`}
+              href={`/datasets/${encodeURIComponent(dataset)}/shards/${encodeURIComponent(shardName)}${versionQuery}`}
               className="font-mono hover:text-slate-300"
             >
               {shardName}
@@ -154,7 +157,7 @@ export default function SampleDetailPage({
             <ChevronRight className="size-3.5" />
           </Button>
           <Link
-            href={`/scenes/${encodeURIComponent(dataset)}/${encodeURIComponent(shardName)}/${frameIdx ?? 0}`}
+            href={`/scenes/${encodeURIComponent(dataset)}/${encodeURIComponent(shardName)}/${frameIdx ?? 0}${versionQuery}`}
             className="inline-flex h-7 items-center gap-1 rounded-md border border-slate-700 bg-slate-900 px-2.5 text-[0.8rem] text-slate-200 transition-colors hover:border-slate-500"
           >
             <Play className="size-3.5" />
@@ -184,6 +187,7 @@ export default function SampleDetailPage({
               sampleKey={sampleKey}
               cam={cam}
               className="aspect-video w-full"
+              version={version || undefined}
             />
             <p className="bg-slate-950 px-2 py-1 font-mono text-[10px] text-slate-400">
               cam_{cam}
@@ -248,5 +252,26 @@ export default function SampleDetailPage({
         </CardContent>
       </Card>
     </div>
+  );
+}
+
+export default function SampleDetailPage({
+  params,
+}: {
+  params: Promise<{ name: string; shard: string; key: string }>;
+}) {
+  const { name, shard, key } = use(params);
+  const dataset = decodeURIComponent(name);
+  const shardName = decodeURIComponent(shard);
+  const sampleKey = decodeURIComponent(key);
+
+  return (
+    <Suspense fallback={<Skeleton className="h-96 w-full" />}>
+      <SampleDetailInner
+        dataset={dataset}
+        shardName={shardName}
+        sampleKey={sampleKey}
+      />
+    </Suspense>
   );
 }

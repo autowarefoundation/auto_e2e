@@ -64,22 +64,24 @@ export function EpisodePlayer({
   index,
   initialState,
   onViewStateChange,
+  version,
 }: {
   dataset: string;
   shard: string;
   index: ShardIndex;
   initialState?: Partial<PlayerViewState>;
   onViewStateChange?: (state: PlayerViewState) => void;
+  version?: string;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
 
   // FrameStore lives for the lifetime of this index.
   const [store, setStore] = useState<FrameStore | null>(null);
   useEffect(() => {
-    const s = new FrameStore(index, dataset, shard);
+    const s = new FrameStore(index, dataset, shard, undefined, version);
     setStore(s);
     return () => s.destroy();
-  }, [index, dataset, shard]);
+  }, [index, dataset, shard, version]);
 
   const cams = useMemo(() => {
     const first = index.samples[0];

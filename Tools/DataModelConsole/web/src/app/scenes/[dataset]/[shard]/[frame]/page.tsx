@@ -42,10 +42,12 @@ function PlayerPageInner({
   frame: number;
 }) {
   const searchParams = useSearchParams();
+  // Pinned dataset version (from the detail page). Empty = API auto-newest.
+  const version = searchParams.get("version") ?? "";
 
   const { data, error, loading, reload } = useApi(
-    () => getShardIndex(dataset, shard),
-    [dataset, shard],
+    () => getShardIndex(dataset, shard, version || undefined),
+    [dataset, shard, version],
   );
 
   // Same-trip continuity: NVIDIA ships multiple name-sorted shards, so offer a
@@ -53,8 +55,8 @@ function PlayerPageInner({
   // frame otherwise). A single-shard dataset (L2D) resolves to no neighbors, so
   // no control renders — correctly a non-issue there.
   const shardList = useApi(
-    () => listShardsForEpisode(dataset),
-    [dataset],
+    () => listShardsForEpisode(dataset, version || undefined),
+    [dataset, version],
   );
   const { prevShard, nextShard } = useMemo(() => {
     const names = (shardList.data ?? []).map((s) => s.name);
@@ -65,8 +67,11 @@ function PlayerPageInner({
       nextShard: i < names.length - 1 ? names[i + 1] : null,
     };
   }, [shardList.data, shard]);
+  // Neighbor-shard links carry the pinned version so switching shards stays on
+  // the same dataset version.
+  const versionQuery = version ? `?version=${encodeURIComponent(version)}` : "";
   const shardHref = (s: string) =>
-    `/scenes/${encodeURIComponent(dataset)}/${encodeURIComponent(s)}/0`;
+    `/scenes/${encodeURIComponent(dataset)}/${encodeURIComponent(s)}/0${versionQuery}`;
 
   // Initial view state: path frame + query params (cam, mode, speed).
   const initialState = useRef<Partial<PlayerViewState>>({
@@ -155,7 +160,7 @@ function PlayerPageInner({
             </Link>{" "}
             /{" "}
             <Link
-              href={`/datasets/${encodeURIComponent(dataset)}`}
+              href={`/datasets/${encodeURIComponent(dataset)}${versionQuery}`}
               className="font-mono hover:text-slate-300"
             >
               {dataset}
@@ -218,6 +223,7 @@ function PlayerPageInner({
           index={data}
           initialState={initialState.current}
           onViewStateChange={onViewStateChange}
+          version={version || undefined}
         />
       )}
     </div>
