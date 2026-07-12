@@ -18,10 +18,11 @@ def test_init_worker_positional_arg_mapping(monkeypatch):
     captured = {}
 
     class _FakeDS:
-        def __init__(self, repo_id, episodes, reasoning_clip_only):
+        def __init__(self, repo_id, episodes, reasoning_clip_only, root=None):
             captured["repo_id"] = repo_id
             captured["episodes"] = episodes
             captured["clip_only"] = reasoning_clip_only
+            captured["root"] = root
 
     def _fake_build_teacher(teacher, **kw):
         captured["teacher"] = teacher
@@ -45,12 +46,15 @@ def test_init_worker_positional_arg_mapping(monkeypatch):
 
     # EXACT tuple workflows.py builds: (repo_id, episodes, dataset_name, teacher,
     # teacher_kwargs, cache_bucket, prompt_version, raw_path). L2D path (not NVIDIA).
-    pl.init_worker("yaak-ai/L2D", [0, 1, 2], "yaak-ai/L2D", "openai_compatible",
-                   {"base_url": "u", "strict": False}, "bkt", "promptX", None)
+    # raw_path="/part/raw" → the labeler must pass it as root= so lerobot reads the
+    # partition's materialized raw instead of re-hitting HF (#121 option B).
+    pl.init_worker("yaak-ai/L2D", [10, 11, 12], "yaak-ai/L2D", "openai_compatible",
+                   {"base_url": "u", "strict": False}, "bkt", "promptX", "/part/raw")
 
     assert captured["repo_id"] == "yaak-ai/L2D"
-    assert captured["episodes"] == [0, 1, 2]
+    assert captured["episodes"] == [10, 11, 12]         # this partition's global eps
     assert captured["clip_only"] is True                # front-clip mode
+    assert captured["root"] == "/part/raw"              # reads materialized raw, no HF re-hit
     assert captured["teacher"] == "openai_compatible"
     assert captured["cache_bucket"] == "bkt"
     assert captured["cache_dataset"] == "yaak-ai/L2D"   # dataset_name slot
