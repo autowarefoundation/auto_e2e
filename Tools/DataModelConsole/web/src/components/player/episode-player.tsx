@@ -150,12 +150,43 @@ export function EpisodePlayer({
     store.prefetch(frame, direction, playing ? speed : 1, visibleCams);
   }, [store, frame, direction, speed, playing, visibleCams]);
 
+  // Current-frame readiness: whether every visible camera has a decoded bitmap
+  // for the frame on screen. When paused and the user scrubs into an unbuffered
+  // frame, the mosaic keeps the previous frame (drop-late) with no indication;
+  // this flag drives a loading hint for that case too, not only mid-playback
+  // stalls. Probed on a short interval only while NOT ready (self-clearing, no
+  // steady-state cost) since the cache fills asynchronously.
+  const [currentReady, setCurrentReady] = useState(true);
+  useEffect(() => {
+    if (!store) return;
+    const check = () =>
+      setCurrentReady(store.cachedCount(frame, 1, 1, visibleCams) >= 1);
+    check();
+    const id = setInterval(check, 250);
+    return () => clearInterval(id);
+  }, [store, frame, visibleCams]);
+
   // Buffering indicator: the clock is buffer-gated (see usePlayback), so it
   // reports `stalled` exactly when it is holding for the next frame to decode.
-  // The chip mirrors that directly — no polling, and it means what it says:
-  // the picture is not frozen behind a running counter, the clock is paused on
+  // We also surface it when the frame currently on screen is not yet drawable
+  // (e.g. a paused scrub into an unbuffered frame), so the UI is never silently
+  // frozen. The picture is never behind a running counter — the clock holds on
   // the last drawn frame until the buffer catches up.
-  const buffering = playing && stalled;
+  const buffering = (playing && stalled) || !currentReady;
+
+  // Stall recovery: while the clock is held, `frame` is frozen, so the prefetch
+  // effect above (keyed on `frame`) never re-fires. If the window fetch for the
+  // gated frame failed transiently, nothing would ever re-request it and the
+  // player would wedge on "buffering" forever. Re-issue the look-ahead on an
+  // interval while stalled so a swallowed failure is retried; the clock resumes
+  // the instant the frame decodes. Only runs during a stall, so no steady-state cost.
+  useEffect(() => {
+    if (!store || !buffering) return;
+    const id = setInterval(() => {
+      store.prefetch(frame, direction, speed, visibleCams);
+    }, 500);
+    return () => clearInterval(id);
+  }, [store, buffering, frame, direction, speed, visibleCams]);
 
   // Reasoning label for the current frame (debounced; 404 = no label). The
   // label is bound to the sample key it was fetched for so an in-flight
@@ -452,27 +483,31 @@ export function EpisodePlayer({
             {s}x
           </button>
         ))}
-        {buffering && (
-          <span
-            className="ml-auto flex items-center gap-1 rounded bg-amber-950/60 px-2 py-0.5 font-mono text-[10px] text-amber-400"
-            title="Fetching frames ahead of the playhead"
+        {/* Group the buffering chip and Shortcuts button under one ml-auto so
+            the chip toggling does not reflow (shift) the Shortcuts button. */}
+        <div className="ml-auto flex items-center gap-2">
+          {buffering && (
+            <span
+              className="flex items-center gap-1 rounded bg-amber-950/60 px-2 py-0.5 font-mono text-[10px] text-amber-400"
+              title="Fetching frames ahead of the playhead"
+            >
+              <span className="size-1.5 animate-pulse rounded-full bg-amber-400" />
+              buffering
+            </span>
+          )}
+          <button
+            onClick={() => {
+              setShowHelp((v) => !v);
+              dismissHint();
+            }}
+            title="Keyboard shortcuts (?)"
+            aria-label="Keyboard shortcuts"
+            className="flex items-center gap-1 rounded bg-slate-900 px-2 py-1 font-mono text-[11px] text-slate-400 transition-colors hover:text-slate-200"
           >
-            <span className="size-1.5 animate-pulse rounded-full bg-amber-400" />
-            buffering
-          </span>
-        )}
-        <button
-          onClick={() => {
-            setShowHelp((v) => !v);
-            dismissHint();
-          }}
-          title="Keyboard shortcuts (?)"
-          aria-label="Keyboard shortcuts"
-          className={`${buffering ? "" : "ml-auto"} flex items-center gap-1 rounded bg-slate-900 px-2 py-1 font-mono text-[11px] text-slate-400 transition-colors hover:text-slate-200`}
-        >
-          <Keyboard className="size-3.5" />
-          Shortcuts (?)
-        </button>
+            <Keyboard className="size-3.5" />
+            Shortcuts (?)
+          </button>
+        </div>
       </div>
 
       {showHint && (
