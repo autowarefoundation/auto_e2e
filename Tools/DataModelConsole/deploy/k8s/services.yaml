@@ -5,6 +5,14 @@ metadata:
   namespace: console
   labels:
     app: console-api
+  annotations:
+    # Per-target-group health check: the API exposes /readyz (S3 reachability).
+    # Health-check settings MUST be per-Service, not on the Ingress: an
+    # Ingress-level healthcheck-path applies to EVERY target group, so /readyz
+    # would be probed against console-web too (which has no /readyz -> 404 ->
+    # web targets deregistered -> UI offline).
+    alb.ingress.kubernetes.io/healthcheck-path: /readyz
+    alb.ingress.kubernetes.io/success-codes: "200"
 spec:
   type: ClusterIP
   selector:
@@ -21,6 +29,11 @@ metadata:
   namespace: console
   labels:
     app: console-web
+  annotations:
+    # The Next.js web app serves "/" (200) but has no /readyz route, so its
+    # target group is health-checked at "/".
+    alb.ingress.kubernetes.io/healthcheck-path: /
+    alb.ingress.kubernetes.io/success-codes: "200"
 spec:
   type: ClusterIP
   selector:

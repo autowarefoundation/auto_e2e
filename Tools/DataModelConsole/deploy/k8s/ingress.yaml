@@ -36,11 +36,11 @@ metadata:
     alb.ingress.kubernetes.io/target-type: ip
     alb.ingress.kubernetes.io/listen-ports: '[{"HTTPS": 443}]'
     alb.ingress.kubernetes.io/certificate-arn: ${ACM_CERT_ARN}
-    # Health check the API's readiness (S3 reachability), not liveness, so the
-    # ALB stops routing to a target that cannot serve data.
-    alb.ingress.kubernetes.io/healthcheck-path: /readyz
     alb.ingress.kubernetes.io/group.name: console
-    alb.ingress.kubernetes.io/success-codes: "200"
+    # Health-check settings are per-Service (see services.yaml), NOT here: an
+    # Ingress-level healthcheck-path applies to every target group, which would
+    # probe console-web at the API's /readyz (404) and take the UI offline. The
+    # console-api Service checks /readyz, console-web checks /.
 spec:
   ingressClassName: console-alb
   rules:
