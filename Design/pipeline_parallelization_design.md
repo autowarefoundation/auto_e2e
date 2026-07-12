@@ -2,9 +2,9 @@
 
 Status: DECISIONS LOCKED (2026-07-13 review) — ready to implement Phase 1.
 Scope: make the AutoE2E data pipeline (ingest → reasoning-label → pack → train →
-eval) scale to ALL episodes of **L2D and KitScenes** by fanning each data-prep
+eval) scale to ALL episodes/clips of **L2D and NVIDIA** by fanning each data-prep
 stage out across many pods instead of one, so memory/time stop being a function
-of total episode count.
+of total episode count. KitScenes is OUT of scope.
 
 ### Decisions locked in review
 1. **GPU capacity is not a hard blocker** — g6e can scale to ~10 nodes each where
@@ -22,18 +22,12 @@ of total episode count.
    the old scheme (old positional cache prefix + orphaned shard/raw dirs from
    superseded runs) as part of the cutover.
 5. **Partition size = 10 episodes/pod to start.** Final target: **ALL episodes of
-   L2D AND KitScenes** (NVIDIA is not the second dataset — KitScenes is).
-6. **sample_uid scheme approved:** `l2d-e{episode}-f{frame}`, KitScenes
-   `kit-{scene_id}-f{frame}`, (NVIDIA `nv-{clip_uuid}-{idx}` kept for parity).
-
-### Added scope surfaced in review
-- **KitScenes is not wired into the pipeline yet.** `KitScenesDataset` exists
-  (`Model/data_parsing/kit_scenes/dataset.py`, identity `(scene_id, frame_idx)`,
-  `:64,70`), but the `Dataset` enum (`workflows.py:70-72`) and
-  `data_ingest`/`data_processing` only handle L2D + NVIDIA. Wiring KitScenes
-  (enum entry, ingest branch, parser build in label/pack, geometry) is a
-  prerequisite for "L2D + KitScenes all episodes" and is added to the plan
-  (Phase 2.5).
+   L2D AND all clips of NVIDIA.**
+6. **sample_uid scheme approved:** `l2d-e{episode}-f{frame}`,
+   `nv-{clip_uuid}-{idx}`.
+7. **KitScenes is OUT of scope** — only L2D + NVIDIA. Both are already wired into
+   the `Dataset` enum + `data_ingest`/`data_processing`, so no new dataset
+   plumbing is needed (unlike KitScenes, which would have required it).
 
 ---
 
@@ -140,15 +134,12 @@ already carries, stable no matter which episodes/clips a given pod loaded.
 Proposed scheme (add a `sample_uid(idx) -> str` method to each parser):
 - L2D: `l2d-e{episode_index:06d}-f{frame_index:06d}`
   (both fields exist: `l2d/dataset.py:319-320`).
-- KitScenes: `kit-{scene_id}-f{frame_idx:06d}`
-  (identity `(scene_id, frame_idx)`, `kit_scenes/dataset.py:64,70`).
 - NVIDIA: `nv-{clip_uuid}-{sample_idx:06d}`
-  (`nvidia_physical_ai/dataset.py:120`; kept for parity though NVIDIA is not a
-  target dataset for this milestone).
+  (`nvidia_physical_ai/dataset.py:120`).
 
 Constraint: the uid becomes the WebDataset `__key__` (the part of a tar member
-name before the first `.`), so it MUST contain no `.`. All three schemes use only
-`-`/hex, so they are safe. `scene_id`/`clip_uuid` are UUIDs (hex + `-`) — safe.
+name before the first `.`), so it MUST contain no `.`. Both schemes use only
+`-`/hex, so they are safe. `clip_uuid` is a UUID (hex + `-`) — safe.
 
 Rationale:
 - `episode_index` is the TRUE lerobot episode index (from the `episode_index`
@@ -294,7 +285,7 @@ Do the deletion as an explicit, logged step (list → confirm → delete), not s
    consume the full `List[FlyteDirectory]` (the held-out `val` split already makes
    this a proper generalization measure across all partitions).
 3. **Partition size → 10 episodes/pod to start**, tunable; final target is ALL
-   L2D + KitScenes episodes.
+   L2D episodes + all NVIDIA clips.
 4. **Kueue quota.** Data-prep pods are CPU/mem (not GPU). Confirm the CPU/mem
    ClusterQueue admits N concurrent map-task pods; raise if needed. GPU nodes can
    scale to ~10 (decision 1) for the later DDP phase.
@@ -329,8 +320,8 @@ Do the deletion as an explicit, logged step (list → confirm → delete), not s
 - **Phase 0 (done):** P0 single-pod fixes — num_workers + /dev/shm + the webdataset
   double-split data-loss fix + ingest hardlink + label mem. Lets moderate scale
   run today and is independently correct.
-- **Phase 1 — global sample_id (no fan-out):** add `sample_uid` to L2D + KitScenes
-  (+ NVIDIA) parsers; swap the 3 call sites (`parallel_label.py:86`, pack worker
+- **Phase 1 — global sample_id (no fan-out):** add `sample_uid` to the L2D +
+  NVIDIA parsers; swap the 3 call sites (`parallel_label.py:86`, pack worker
   return, `workflows.py:450`); reframe the consistency guard (`workflows.py:322`)
   to uid-membership; unit test for cross-subset uid stability + JOIN. Verify the
   existing single-pod pipeline still produces identical shards (byte-diff the
@@ -340,15 +331,12 @@ Do the deletion as an explicit, logged step (list → confirm → delete), not s
   `map_task` over ranges for label + pack (ingest still single for now). Validate
   on a 2-partition run first, then 20–50 episodes: no stage OOMs, K shard dirs
   train correctly.
-- **Phase 2.5 — wire KitScenes into the pipeline:** add the `Dataset` enum entry,
-  the `data_ingest` KitScenes branch, and the parser build in label/pack + its
-  geometry/calib. Then both L2D and KitScenes flow through the sharded pipeline.
 - **Phase 3 — ingest fan-out + eval multi-dir + S3 cleanup + partition tuning:**
   fan out ingest per range for full episode-count independence; eval over all
   shard dirs (`_select_shard_dir` → plural); delete superseded S3 dirs + old
   positional cache prefix (§3.4b); choose partition size.
-- **Phase 4 — full-scale run + (separate) DDP:** run ALL L2D + KitScenes episodes
-  through the sharded pipeline → train → held-out eval → report ADE/FDE. DDP
+- **Phase 4 — full-scale run + (separate) DDP:** run ALL L2D episodes + all NVIDIA
+  clips through the sharded pipeline → train → held-out eval → report ADE/FDE. DDP
   multi-GPU training (Kueue GPU quota→N, g6e→~10 nodes, find_unused_parameters,
   split_by_node) only if single-GPU wall-clock becomes the bottleneck at that
   data scale.
