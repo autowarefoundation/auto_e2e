@@ -704,6 +704,13 @@ def train_il(
     # (legacy in-sample behaviour). The split is a stable per-sample hash of
     # __key__, so train and eval never share a sample and both tasks agree.
     val_fraction: float = 0.0,
+    # Parallel JPEG decode (#121 P0). num_workers=0 decodes every sample (~55
+    # JPEGs/sample with WM windows) serially on the training process, stalling the
+    # GPU — the dominant per-epoch cost at scale. >0 spreads decode across worker
+    # processes (sharded over shards by split_by_worker), overlapping it with the
+    # GPU step. Effective parallelism is capped by shard count, so scale needs more
+    # (smaller) shards too.
+    num_workers: int = 0,
 ) -> TrainOutput:
     """Train AutoE2E model on pre-extracted WebDataset shards.
 
@@ -753,10 +760,12 @@ def train_il(
     # Train on the "train" split when a held-out fraction is requested (eval scores
     # the disjoint "val" split); val_fraction=0 keeps the legacy all-samples path.
     _split = "train" if val_fraction > 0.0 else "all"
-    merged = make_multi_dataset_loader(shard_dirs, batch_size=batch_size, num_workers=0,
+    merged = make_multi_dataset_loader(shard_dirs, batch_size=batch_size,
+                                       num_workers=num_workers,
+                                       pin_memory=(device.type == "cuda"),
                                        split=_split, val_fraction=val_fraction)
     print(f"Merged {len(shard_dirs)} dataset(s) into one training stream "
-          f"(split={_split}, val_fraction={val_fraction}).")
+          f"(split={_split}, val_fraction={val_fraction}, num_workers={num_workers}).")
 
     # Peek the first batch to size num_views defaults.
     _peek, _peek_proj, _peek_geom = next(iter(merged))
@@ -1181,7 +1190,8 @@ def _run_evaluation(checkpoint, shards, train_metadata, dataset, experiment_name
     # memorization. val_fraction=0 (legacy) → score all samples (in-sample).
     val_fraction = float(meta.get("training", {}).get("val_fraction", 0.0) or 0.0)
     eval_split = "val" if val_fraction > 0.0 else "all"
-    loader = make_pre_extracted_loader(shard_dir, batch_size=8, num_workers=0, shuffle=0,
+    loader = make_pre_extracted_loader(shard_dir, batch_size=8, num_workers=4, shuffle=0,
+                                       pin_memory=(device.type == "cuda"),
                                        split=eval_split, val_fraction=val_fraction)
     print(f"Eval split={eval_split} (val_fraction={val_fraction}) — "
           f"{'held-out generalization' if eval_split == 'val' else 'in-sample'}")
@@ -1489,6 +1499,7 @@ def wf_train_il(
     reasoning_mode: str = "pooled_latent",
     enable_world_model: bool = False,
     val_fraction: float = 0.0,
+    num_workers: int = 0,
 ) -> EvalMetrics:
     """IL Train → Evaluate. All datasets' shards passed in; `dataset` selects one.
 
@@ -1500,12 +1511,15 @@ def wf_train_il(
     windows force batch_size=1 (effective batch = batch_size * grad_accum_steps).
     ``val_fraction`` > 0 trains on a per-sample train split and evaluates on the
     disjoint held-out val split (generalization, not in-sample memorization).
+    ``num_workers`` > 0 parallelizes JPEG decode across worker processes (#121 P0)
+    — the dominant per-epoch cost once episodes scale up.
     """
     out = train_il(shards=shards, dataset=dataset, backbone=backbone,
                    epochs=epochs, batch_size=batch_size,
                    grad_accum_steps=grad_accum_steps, lr=lr, amp=amp,
                    enable_reasoning=enable_reasoning, reasoning_mode=reasoning_mode,
-                   enable_world_model=enable_world_model, val_fraction=val_fraction)
+                   enable_world_model=enable_world_model, val_fraction=val_fraction,
+                   num_workers=num_workers)
     return evaluate_il_policy(checkpoint=out.checkpoint, shards=shards, dataset=dataset,
                               train_metadata=out.metadata)
 

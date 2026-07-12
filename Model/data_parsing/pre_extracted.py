@@ -302,13 +302,20 @@ def make_pre_extracted_loader(
     split: str = "all",
     val_fraction: float = 0.0,
     shuffle: int = 1000,
+    pin_memory: bool = False,
+    prefetch_factor: int = 4,
 ) -> wds.WebLoader:
     """Create a WebDataset DataLoader reading from local EBS shard cache.
 
     Args:
         shard_dir: Path to directory containing .tar shard files.
         batch_size: Batch size.
-        num_workers: DataLoader workers.
+        num_workers: DataLoader workers. >0 decodes JPEGs in parallel worker
+            processes (the per-sample WM window is ~55 decodes; at num_workers=0
+            this is fully serial and the GPU stalls — #121 P0). Workers are
+            sharded over the .tar files via ``split_by_worker``, so effective
+            parallelism is capped by shard count — pack more, smaller shards to use
+            more workers.
         split: ``"all"`` (default, every sample), ``"train"``, or ``"val"``. With
             ``val_fraction`` > 0, ``train``/``val`` are a disjoint per-sample hash
             split (see ``_split_keep``) so eval-on-``val`` measures generalization
@@ -316,6 +323,9 @@ def make_pre_extracted_loader(
         val_fraction: fraction of samples held out for ``val`` (0 disables the
             split → ``"all"`` behaviour regardless of ``split``).
         shuffle: Shuffle buffer size (0 to disable).
+        pin_memory: pin host buffers for faster H2D copy (set True on GPU).
+        prefetch_factor: batches prefetched per worker (only used when
+            num_workers>0); overlaps decode with the GPU step.
 
     The returned loader carries two extra attributes describing the dataset's
     geometry (a rig constant, so it lives on the loader, not per batch):
@@ -339,7 +349,19 @@ def make_pre_extracted_loader(
         dataset = dataset.shuffle(shuffle)
     dataset = dataset.map(_decode_sample)
 
-    loader = wds.WebLoader(dataset, batch_size=batch_size, num_workers=min(num_workers, len(tarfiles)))
+    # split_by_worker shards the .tar list across workers, so more workers than
+    # shards is wasted; cap accordingly. persistent_workers keeps the decode pool
+    # warm across epochs (avoids re-spawn per epoch); prefetch_factor overlaps
+    # decode with the GPU step. These only apply when num_workers>0.
+    eff_workers = min(num_workers, len(tarfiles)) if num_workers > 0 else 0
+    loader_kwargs: dict = {"batch_size": batch_size, "num_workers": eff_workers}
+    if eff_workers > 0:
+        loader_kwargs.update(
+            persistent_workers=True,
+            prefetch_factor=prefetch_factor,
+            pin_memory=pin_memory,
+        )
+    loader = wds.WebLoader(dataset, **loader_kwargs)
 
     # Per-dataset geometry, reconstructed once from the manifest.
     projection, geometry_type = load_projection_from_manifest(shard_dir)
@@ -393,6 +415,8 @@ def make_multi_dataset_loader(
     split: str = "all",
     val_fraction: float = 0.0,
     shuffle: int = 1000,
+    pin_memory: bool = False,
+    prefetch_factor: int = 4,
 ) -> MergedDatasetLoader:
     """Build a :class:`MergedDatasetLoader` over several shard directories.
 
@@ -402,11 +426,13 @@ def make_multi_dataset_loader(
     dataset path, but yielding the ``(batch, projection, geometry_type)`` tuple).
 
     ``split`` / ``val_fraction`` select a disjoint per-sample train/val split
-    applied per dataset (see make_pre_extracted_loader).
+    applied per dataset (see make_pre_extracted_loader). ``num_workers`` /
+    ``pin_memory`` / ``prefetch_factor`` control parallel JPEG decode (#121 P0).
     """
     loaders = [
         make_pre_extracted_loader(d, batch_size=batch_size, num_workers=num_workers,
-                                  split=split, val_fraction=val_fraction, shuffle=shuffle)
+                                  split=split, val_fraction=val_fraction, shuffle=shuffle,
+                                  pin_memory=pin_memory, prefetch_factor=prefetch_factor)
         for d in shard_dirs
     ]
     return MergedDatasetLoader(loaders)
