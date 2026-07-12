@@ -264,7 +264,9 @@ export function TimelineScrubber({
           <span className="text-blue-500">speed</span> /{" "}
           <span className="text-emerald-500">accel</span> /{" "}
           <span className="text-violet-400">yaw</span> /{" "}
-          <span className="text-amber-500">labeled</span>
+          <span className="text-amber-500" title="Frames with a reasoning label in any run (not scoped to a selected prompt version)">
+            labeled (any run)
+          </span>
         </span>
       </div>
       <svg

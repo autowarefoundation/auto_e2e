@@ -617,8 +617,10 @@ export function EpisodePlayer({
           </p>
         ) : (
           <p className="text-sm text-slate-500">
-            No reasoning label at this frame. Amber ticks on the timeline mark
-            labelled frames.
+            No reasoning label at this frame
+            {promptVersion ? " for the selected prompt version" : ""}. Amber
+            ticks on the timeline mark frames labelled in any run, so a ticked
+            frame may still be unlabelled in this one.
           </p>
         )}
       </div>
