@@ -283,6 +283,18 @@ export function TimelineScrubber({
         onKeyDown={(e) => {
           // stopPropagation on the keys this slider owns so the player's
           // window-level Arrow handler doesn't also fire and double-step.
+          // Also pause on any of these seeks (like a pointer grab): the player's
+          // window Arrow handler pauses via step() but deliberately skips when
+          // the slider is focused, so without this a keyboard seek during
+          // playback leaves the clock running and it overruns the seek (jitter).
+          if (
+            e.key === "ArrowLeft" ||
+            e.key === "ArrowRight" ||
+            e.key === "Home" ||
+            e.key === "End"
+          ) {
+            onScrubStart?.();
+          }
           if (e.key === "ArrowLeft") {
             e.preventDefault();
             e.stopPropagation();
