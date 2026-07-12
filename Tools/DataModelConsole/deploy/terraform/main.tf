@@ -52,6 +52,17 @@ variable "artifacts_bucket_name" {
   default = "auto-e2e-platform-artifacts-381491877296"
 }
 
+variable "dynamo_table_name" {
+  default     = "auto-e2e-console"
+  description = "Single-table DynamoDB cache: shard indexes, precomputed reasoning stats, scene-by-label index"
+}
+
+variable "aws_region" {
+  default = "us-west-2"
+}
+
+data "aws_caller_identity" "current" {}
+
 data "aws_ec2_managed_prefix_list" "cloudfront" {
   name = "com.amazonaws.global.cloudfront.origin-facing"
 }
@@ -235,6 +246,34 @@ resource "aws_iam_role_policy" "console_api_s3_readonly" {
           "arn:aws:s3:::${var.datasets_bucket_name}/*",
           "arn:aws:s3:::${var.artifacts_bucket_name}",
           "arn:aws:s3:::${var.artifacts_bucket_name}/*"
+        ]
+      }
+    ]
+  })
+}
+
+# DynamoDB cache access (least-privilege): the single console table + its GSI.
+# GetItem/PutItem for shard indexes and precomputed stats; BatchWriteItem to
+# populate the scene-by-label index; Query on the table and gsi1 to read
+# scenes / stats back. No DeleteItem or table-admin actions.
+resource "aws_iam_role_policy" "console_api_dynamo" {
+  name = "dynamo-cache"
+  role = aws_iam_role.console_api.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "dynamodb:GetItem",
+          "dynamodb:PutItem",
+          "dynamodb:BatchWriteItem",
+          "dynamodb:Query"
+        ]
+        Resource = [
+          "arn:aws:dynamodb:${var.aws_region}:${data.aws_caller_identity.current.account_id}:table/${var.dynamo_table_name}",
+          "arn:aws:dynamodb:${var.aws_region}:${data.aws_caller_identity.current.account_id}:table/${var.dynamo_table_name}/index/gsi1"
         ]
       }
     ]
