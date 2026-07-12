@@ -27,6 +27,13 @@ const statsScanCap = 20000
 // returned (cached=false). teacher, when non-empty, pins the cache partition;
 // otherwise the first teacher partition carrying the promptVersion is used.
 func (s *S3Service) ReasoningStatsDetail(ctx context.Context, dataset, version, promptVersion, teacher string) (model.ReasoningStatsDetailResponse, error) {
+	// Resolve the version BEFORE touching the store, mirroring
+	// ComputeReasoningStats. Otherwise the read-through path stores/reads under
+	// an empty-version key while force-compute writes under the resolved
+	// version, so the two never share a cache entry (a permanent miss here).
+	if !isVersionDir(version) {
+		version = s.resolveVersion(ctx, dataset)
+	}
 	resp := model.ReasoningStatsDetailResponse{
 		Dataset:       dataset,
 		Version:       version,
