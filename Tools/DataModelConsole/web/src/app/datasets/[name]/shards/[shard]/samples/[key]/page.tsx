@@ -100,7 +100,10 @@ function SampleDetailInner({
   );
   const nextKey = useMemo(() => {
     if (idx >= 0 && idx < keys.length - 1) return keys[idx + 1];
-    if (idx === keys.length - 1) return null;
+    // Guard the empty-keys (still-loading) case: idx===-1 and keys.length-1===-1
+    // would wrongly match and return null, disabling Next during the index scan.
+    // Only treat idx as the true last frame when keys is actually populated.
+    if (keys.length > 0 && idx === keys.length - 1) return null;
     return siblingKey(sampleKey, +1);
   }, [idx, keys, sampleKey]);
 
