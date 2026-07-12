@@ -283,6 +283,11 @@ export function EpisodePlayer({
     function onKey(e: KeyboardEvent) {
       const t = e.target as HTMLElement | null;
       if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA")) return;
+      // Never hijack a browser/OS accelerator: if a command/control/alt
+      // modifier is held (e.g. Cmd+R reload, Ctrl+L address bar), let the
+      // browser handle it. Shift is allowed — none of our keys use it, and
+      // Shift+'?' is how '?' is typed on many layouts.
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
       // The timeline scrubber (role="slider") owns Arrow/Home/End when focused
       // and seeks itself; this window listener is a NATIVE listener, so the
       // scrubber's React stopPropagation cannot suppress it — skip those keys
