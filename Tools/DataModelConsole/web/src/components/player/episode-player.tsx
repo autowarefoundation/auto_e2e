@@ -52,10 +52,19 @@ export interface PlayerViewState {
 }
 
 function nextSpeed(current: number, dir: 1 | -1): number {
-  const idx = SPEED_STEPS.findIndex((s) => s >= current - 1e-9);
-  const i = idx === -1 ? SPEED_STEPS.length - 1 : idx;
-  const j = Math.min(SPEED_STEPS.length - 1, Math.max(0, i + dir));
-  return Math.min(MAX_SPEED, Math.max(MIN_SPEED, SPEED_STEPS[j]));
+  // Pick the nearest preset strictly in the requested direction. This is
+  // correct whether `current` is on a preset (steps to the neighbor) or off it
+  // (e.g. ?speed=3): "faster" from 3 gives 4, not 8. The old index+dir jumped
+  // past the immediately-higher preset for off-preset values.
+  if (dir === 1) {
+    const next = SPEED_STEPS.find((s) => s > current + 1e-9);
+    return Math.min(MAX_SPEED, next ?? current);
+  }
+  let prev = current;
+  for (const s of SPEED_STEPS) {
+    if (s < current - 1e-9) prev = s;
+  }
+  return Math.max(MIN_SPEED, prev);
 }
 
 export function EpisodePlayer({
@@ -410,9 +419,16 @@ export function EpisodePlayer({
                 {sample?.ego_now?.[3]?.toFixed(4) ?? "-"}
               </span>{" "}
               1/m
-              {(Math.abs(sample?.ego_now?.[2] ?? 0) > MAX_YAW_RATE ||
-                Math.abs(sample?.ego_now?.[3] ?? 0) > MAX_CURVATURE) && (
+              {/* The BEV integrates heading from curvature (kappa, ch3) and
+                  clamps ONLY that, so the "clamped in BEV" note must gate on
+                  kappa. An out-of-range yaw_rate is flagged non-physical too,
+                  but without claiming the BEV clamped it. */}
+              {Math.abs(sample?.ego_now?.[3] ?? 0) > MAX_CURVATURE ? (
                 <span className="text-amber-600"> · non-physical (clamped in BEV)</span>
+              ) : (
+                Math.abs(sample?.ego_now?.[2] ?? 0) > MAX_YAW_RATE && (
+                  <span className="text-amber-600"> · yaw_rate non-physical</span>
+                )
               )}
             </p>
           </div>
