@@ -303,14 +303,21 @@ def data_ingest(
         ep_list = [int(g) for g in group_ids]
     else:
         ep_list = list(range(episodes)) if episodes > 0 else None
+    # download_videos defaults True — DO NOT disable it. The label/pack pods
+    # re-open this dir with LeRobotDataset(root=…); lerobot's
+    # _check_cached_episodes_sufficient requires the requested episodes' video
+    # files to exist on disk, else the OFFLINE pod attempts a network re-download
+    # and fails (#121 option B invariant, verified against lerobot v0.5.0 source).
     ds = LeRobotDataset(repo_id=dataset.value, episodes=ep_list)
     cache_dir = ds.root
-    # Hardlink the cache tree into out_dir instead of copytree: at tens of
-    # episodes the byte-for-byte copy doubles disk use and the copy churns the
+    # Hardlink the WHOLE cache tree (data/ + meta/ + videos/) into out_dir instead
+    # of a byte copy: at tens of episodes the copy doubles disk use and churns the
     # page cache, which (with the raw video already resident) pushed the pod over
     # its memory limit → OOMKilled. Hardlinks share the same inodes (no data
-    # copied, no extra RAM), and FlyteDirectory uploads them normally. Falls back
-    # to a real copy only across filesystem boundaries (cross-device link error).
+    # copied, no extra RAM), and FlyteDirectory uploads them normally. Copying the
+    # full tree (incl. videos/) is what lets the downstream root= reopen stay
+    # offline (see the download_videos invariant above). Falls back to a real copy
+    # only across filesystem boundaries (cross-device link error).
     try:
         shutil.copytree(str(cache_dir), out_dir, copy_function=os.link)
     except OSError:
