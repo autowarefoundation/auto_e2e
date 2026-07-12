@@ -697,6 +697,13 @@ def train_il(
     reasoning_loss_weight: float = 0.05,
     enable_world_model: bool = False,
     jepa_loss_weight: float = 1.0,
+    # Held-out split: train on the (1 - val_fraction) majority of samples, so the
+    # separate eval task can score the disjoint val split and measure
+    # GENERALIZATION rather than training-set memorization (which structurally
+    # favours the lower-capacity imitation model). 0.0 = train on everything
+    # (legacy in-sample behaviour). The split is a stable per-sample hash of
+    # __key__, so train and eval never share a sample and both tasks agree.
+    val_fraction: float = 0.0,
 ) -> TrainOutput:
     """Train AutoE2E model on pre-extracted WebDataset shards.
 
@@ -743,8 +750,13 @@ def train_il(
     # (7cam f-theta) train together. The model is runtime-V-dynamic (projection
     # ABI, #77), so a single model consumes both. num_views only sizes defaults.
     shard_dirs = [_loader_download_dir(s) for s in shards]
-    merged = make_multi_dataset_loader(shard_dirs, batch_size=batch_size, num_workers=0)
-    print(f"Merged {len(shard_dirs)} dataset(s) into one training stream.")
+    # Train on the "train" split when a held-out fraction is requested (eval scores
+    # the disjoint "val" split); val_fraction=0 keeps the legacy all-samples path.
+    _split = "train" if val_fraction > 0.0 else "all"
+    merged = make_multi_dataset_loader(shard_dirs, batch_size=batch_size, num_workers=0,
+                                       split=_split, val_fraction=val_fraction)
+    print(f"Merged {len(shard_dirs)} dataset(s) into one training stream "
+          f"(split={_split}, val_fraction={val_fraction}).")
 
     # Peek the first batch to size num_views defaults.
     _peek, _peek_proj, _peek_geom = next(iter(merged))
@@ -984,6 +996,9 @@ def train_il(
             "weight_decay": weight_decay, "grad_clip": grad_clip, "amp": amp,
             "optimizer": "AdamW", "final_loss": losses_per_epoch[-1] if losses_per_epoch else 0,
             "losses_per_epoch": losses_per_epoch,
+            # Recorded so the (separate) eval task scores the SAME held-out split
+            # this run trained around — eval reads this to pick split="val".
+            "val_fraction": val_fraction,
         },
         "context": {
             "flyte_execution_id": ctx.execution_id.name if ctx.execution_id else "local",
@@ -1161,8 +1176,15 @@ def _run_evaluation(checkpoint, shards, train_metadata, dataset, experiment_name
     model.load_state_dict(ckpt["model_state_dict"])
     model.eval()
 
-    # Evaluate
-    loader = make_pre_extracted_loader(shard_dir, batch_size=8, num_workers=0, shuffle=0)
+    # Evaluate on the HELD-OUT split this checkpoint trained around (recorded in
+    # the train metadata), so ADE/FDE measure generalization, not training-set
+    # memorization. val_fraction=0 (legacy) → score all samples (in-sample).
+    val_fraction = float(meta.get("training", {}).get("val_fraction", 0.0) or 0.0)
+    eval_split = "val" if val_fraction > 0.0 else "all"
+    loader = make_pre_extracted_loader(shard_dir, batch_size=8, num_workers=0, shuffle=0,
+                                       split=eval_split, val_fraction=val_fraction)
+    print(f"Eval split={eval_split} (val_fraction={val_fraction}) — "
+          f"{'held-out generalization' if eval_split == 'val' else 'in-sample'}")
     projection, geometry_type = _loader_projection(loader, device)
     all_ade, all_fde = [], []
 
@@ -1466,6 +1488,7 @@ def wf_train_il(
     enable_reasoning: bool = False,
     reasoning_mode: str = "pooled_latent",
     enable_world_model: bool = False,
+    val_fraction: float = 0.0,
 ) -> EvalMetrics:
     """IL Train → Evaluate. All datasets' shards passed in; `dataset` selects one.
 
@@ -1475,12 +1498,14 @@ def wf_train_il(
     off: fp16 autocast made the GradScaler skip every step (see train_il).
     ``grad_accum_steps`` recovers a larger effective batch when the World-Model
     windows force batch_size=1 (effective batch = batch_size * grad_accum_steps).
+    ``val_fraction`` > 0 trains on a per-sample train split and evaluates on the
+    disjoint held-out val split (generalization, not in-sample memorization).
     """
     out = train_il(shards=shards, dataset=dataset, backbone=backbone,
                    epochs=epochs, batch_size=batch_size,
                    grad_accum_steps=grad_accum_steps, lr=lr, amp=amp,
                    enable_reasoning=enable_reasoning, reasoning_mode=reasoning_mode,
-                   enable_world_model=enable_world_model)
+                   enable_world_model=enable_world_model, val_fraction=val_fraction)
     return evaluate_il_policy(checkpoint=out.checkpoint, shards=shards, dataset=dataset,
                               train_metadata=out.metadata)
 
