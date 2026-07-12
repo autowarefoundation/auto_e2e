@@ -339,7 +339,16 @@ def make_pre_extracted_loader(
 
     urls = [str(p) for p in tarfiles]
 
-    dataset = wds.WebDataset(urls, shardshuffle=False, empty_check=False, nodesplitter=wds.split_by_worker)
+    # CRITICAL (webdataset 1.0.2): WebDataset has BOTH `nodesplitter` and
+    # `workersplitter`, and `workersplitter` DEFAULTS to split_by_worker. Passing
+    # nodesplitter=split_by_worker applies the worker split TWICE, so with
+    # num_workers=N each worker sees only 1/N of the shards → the loader silently
+    # drops (N-1)/N of the data (verified: 48 samples → 24 at nw=2, 12 at nw=4).
+    # Use single_node_only for the NODE slot (correct until multi-node DDP, which
+    # would set split_by_node here) and let the default workersplitter do the
+    # per-worker shard split exactly once.
+    dataset = wds.WebDataset(urls, shardshuffle=False, empty_check=False,
+                             nodesplitter=wds.single_node_only)
     # Split BEFORE decode (cheap: filters on __key__ only, skips image decode for
     # dropped samples). Keeps train/val disjoint at the sample level.
     keep = _split_keep(split, val_fraction)

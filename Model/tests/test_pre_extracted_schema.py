@@ -260,3 +260,45 @@ class TestMergedDatasetLoader:
         from data_parsing.pre_extracted import MergedDatasetLoader
         with pytest.raises(ValueError, match="at least one"):
             MergedDatasetLoader([])
+
+
+def _write_shards(dirpath, n_shards, per_shard):
+    """Write n_shards minimal valid .tar shards (per_shard samples each)."""
+    import tarfile
+    from pathlib import Path
+    Path(dirpath).mkdir(parents=True, exist_ok=True)
+    idx = 0
+    for s in range(n_shards):
+        with tarfile.open(f"{dirpath}/shard-{s:03d}.tar", "w") as t:
+            for _ in range(per_shard):
+                key = f"s{idx:06d}"
+                members = {f"{key}.cam_0.jpg": _jpeg_bytes((idx % 255, 0, 0)),
+                           f"{key}.ego.npy": _ego_bytes()}
+                for name, data in members.items():
+                    info = tarfile.TarInfo(name)
+                    info.size = len(data)
+                    t.addfile(info, io.BytesIO(data))
+                idx += 1
+    return idx
+
+
+class TestLoaderYieldsAllSamplesUnderWorkers:
+    """Regression: the loader must yield EVERY sample regardless of num_workers.
+
+    webdataset 1.0.2 auto-applies split_by_worker via the `workersplitter`
+    default; passing nodesplitter=split_by_worker too split the shard list TWICE,
+    so num_workers=N silently dropped (N-1)/N of the data (24/48 at nw=2, 12/48 at
+    nw=4). This pins that num_workers>0 sees the full dataset — the #121 P0
+    parallel-decode change and the eval loader (num_workers=4) both depend on it.
+    """
+
+    def test_no_samples_dropped_across_worker_counts(self, tmp_path):
+        total = _write_shards(tmp_path / "shards", n_shards=12, per_shard=4)  # 48
+        from data_parsing.pre_extracted import make_pre_extracted_loader
+        for nw in (0, 2, 4):
+            loader = make_pre_extracted_loader(str(tmp_path / "shards"),
+                                               batch_size=1, num_workers=nw, shuffle=0)
+            seen = sum(b["visual_tiles"].shape[0] for b in loader)
+            assert seen == total, (
+                f"num_workers={nw}: loader yielded {seen}/{total} samples — "
+                f"shards are being split more than once (double split_by_worker)")
