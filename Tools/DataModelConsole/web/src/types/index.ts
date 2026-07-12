@@ -189,6 +189,57 @@ export interface ReasoningPromptVersionsResponse {
 }
 
 // ---------------------------------------------------------------------------
+// Reasoning stats-detail (ODD / label composition)
+// ---------------------------------------------------------------------------
+
+// ConfidenceBucket is one bar of the teacher-confidence histogram.
+export interface ConfidenceBucket {
+  bucket: string; // e.g. "0.9-1.0"
+  count: number;
+}
+
+// ReasoningStatsBlob is the aggregated composition over every horizon of every
+// label in a (dataset, version, prompt_version) partition. by_field maps an
+// ODD axis (relation_to_ego, hazard_event, cause, longitudinal_response,
+// lateral_response, tactical_response, rule_response) to a value->count map.
+export interface ReasoningStatsBlob {
+  n_labels: number;
+  horizon_count: number;
+  by_field: Record<string, Record<string, number>>;
+  confidence_histogram: ConfidenceBucket[];
+}
+
+// ReasoningStatsDetail is GET /api/v1/reasoning-labels/stats-detail. The first
+// call for an uncomputed partition triggers a cold S3 scan (~50s); cached is
+// true once the result is memoized server-side.
+export interface ReasoningStatsDetail {
+  dataset: string;
+  version: string;
+  prompt_version: string;
+  computed_at: string; // RFC3339
+  cached: boolean;
+  stats: ReasoningStatsBlob;
+}
+
+// SceneHit is one sample carrying a given (field=value) label. Only sample_id
+// is guaranteed; dataset/prompt_version echo the query when present.
+export interface SceneHit {
+  sample_id: string;
+  dataset?: string;
+  prompt_version?: string;
+}
+
+// SceneSearchResult is GET /api/v1/scenes/search.
+export interface SceneSearchResult {
+  dataset: string;
+  prompt_version: string;
+  field: string;
+  value: string;
+  scenes: SceneHit[];
+  total: number;
+}
+
+// ---------------------------------------------------------------------------
 // MLflow (proxy)
 // ---------------------------------------------------------------------------
 
