@@ -22,17 +22,20 @@ import {
   ApiError,
   getReasoningLabel,
   getSample,
-  listSamples,
+  getShardIndex,
 } from "@/lib/api";
 
-// Sample keys look like "ep0_000064": episode id + "_" + frame index
-// zero-padded to 6 digits. Sibling keys are frame +/- 1.
+// Sample keys come in two forms: "ep0_000064" (episode id + "_" + 6-digit
+// frame) and "s00000139" (flat index, no underscore). Step the trailing number
+// by delta, preserving its zero-pad width, for either form. Used only as a
+// fallback while the full key list loads.
 function siblingKey(key: string, delta: number): string | null {
-  const m = key.match(/^(.*)_(\d{6})$/);
+  const m = key.match(/^(.*?)(\d+)$/);
   if (!m) return null;
+  const width = m[2].length;
   const frame = parseInt(m[2], 10) + delta;
   if (frame < 0) return null;
-  return `${m[1]}_${String(frame).padStart(6, "0")}`;
+  return `${m[1]}${String(frame).padStart(width, "0")}`;
 }
 
 function SampleDetailInner({
@@ -64,11 +67,13 @@ function SampleDetailInner({
     [dataset, sampleKey],
   );
 
-  // Bound forward/backward nav to the shard's actual sample list so "Next" is
-  // disabled on the last frame (no 404 dead-end) and nav is robust to
-  // non-contiguous keys. Falls back to sibling arithmetic while the list loads.
+  // Bound forward/backward nav to the shard's FULL, ordered sample list so
+  // "Next" is disabled on the true last frame (no 404 dead-end) and every
+  // interior frame steps correctly. Use the shard index (all keys in order,
+  // and cached) rather than listSamples (server-capped at 50, which stranded
+  // every sample past index 49). Falls back to sibling arithmetic while loading.
   const samples = useApi(
-    () => listSamples(dataset, shardName, version || undefined),
+    () => getShardIndex(dataset, shardName, version || undefined),
     [dataset, shardName, version],
   );
   const keys = useMemo(
