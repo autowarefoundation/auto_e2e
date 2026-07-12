@@ -120,6 +120,9 @@ function SampleDetailInner({
     function onKey(e: KeyboardEvent) {
       const t = e.target as HTMLElement | null;
       if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA")) return;
+      // Don't hijack browser/OS accelerators (e.g. Alt+Arrow = Back/Forward,
+      // Cmd/Ctrl+Arrow): only act on unmodified keys.
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
       if ((e.key === "ArrowLeft" || e.key === "p") && prevKey) {
         e.preventDefault();
         router.push(sampleUrl(prevKey));
