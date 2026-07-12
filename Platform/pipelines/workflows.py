@@ -739,6 +739,16 @@ def train_il(
     import numpy as np
     from flytekit import current_context
 
+    # DataLoader workers (num_workers>0) transport batches to the parent via shared
+    # memory (/dev/shm) by default; the Flyte pod's /dev/shm is tiny (~64MB), so
+    # WM-window batches overflow it → "Bus error / worker killed by signal"
+    # (#121 P0, documented in Platform/HowToUseFlyte.md). Switch torch's tensor
+    # sharing to the file_system strategy, which passes tensors via mmap'd temp
+    # files instead of /dev/shm — the standard fix for constrained-shm containers.
+    # No-op when num_workers=0.
+    if num_workers > 0:
+        torch.multiprocessing.set_sharing_strategy("file_system")
+
     from model_components.auto_e2e import AutoE2E
     from model_components.losses import TrajectoryImitationLoss
     from data_parsing.pre_extracted import make_multi_dataset_loader
@@ -1171,6 +1181,10 @@ def _run_evaluation(checkpoint, shards, train_metadata, dataset, experiment_name
     from model_components.auto_e2e import AutoE2E
     from data_parsing.pre_extracted import make_pre_extracted_loader
     from evaluation.metrics import integrate_trajectory
+
+    # Eval uses num_workers=4; use the file_system sharing strategy so the small
+    # pod /dev/shm doesn't bus-error on WM-window batches (same as train_il, #121).
+    torch.multiprocessing.set_sharing_strategy("file_system")
 
     ckpt_path = checkpoint.download()
     shard_dir = _select_shard_dir(shards, dataset)
