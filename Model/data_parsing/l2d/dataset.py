@@ -41,6 +41,8 @@ if sys.version_info >= (3, 11):
 else:  # Python 3.10 (local dev venv); CI runs 3.12
     from typing_extensions import NotRequired
 
+from data_processing.contract_versions import UID_SCHEMA_VERSION
+
 from .camera import CAMERA_NAMES, MAP_VIEW_NAME
 from .egomotion import (
     MIN_FRAMES,
@@ -228,6 +230,30 @@ class L2DDataset(Dataset):
 
     def __len__(self) -> int:
         return len(self._samples)
+
+    def sample_uid(self, idx: int) -> str:
+        """Global, partition-independent sample id (#121 §3.1).
+
+        Built from (episode_index, frame_index) — identity the sample already
+        carries — so the SAME physical frame gets the SAME uid regardless of which
+        episode subset a given pod loaded. This replaces the positional
+        ``f"s{si:08d}"`` that broke the label<->pack JOIN and the S3 label cache
+        under episode-range sharding. No `.`/`/` (safe as a WebDataset ``__key__``).
+        """
+        ep_idx, row = self._samples[idx]
+        ep_start, _ = self._episode_ranges[ep_idx]
+        frame_index = row - ep_start
+        return f"l2d-{UID_SCHEMA_VERSION}-e{ep_idx:06d}-f{frame_index:06d}"
+
+    def split_group_uid(self, idx: int) -> str:
+        """The train/val SPLIT unit (#121 §3.1): the whole EPISODE, not the frame.
+
+        L2D frames within an episode are strongly correlated, so a per-frame split
+        leaks correlated frames across train/val. Splitting on this episode-level
+        id keeps train and val disjoint at the episode level.
+        """
+        ep_idx, _ = self._samples[idx]
+        return f"l2d-e{ep_idx:06d}"
 
     def _get_vehicle_states_window(self, ep_start: int, ep_end: int) -> np.ndarray:
         """Load vehicle state vectors for one episode (local row range).
