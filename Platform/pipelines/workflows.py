@@ -32,6 +32,40 @@ REASONING_LABELS_CACHE_BUCKET = _os.environ.get(
     "REASONING_LABELS_CACHE_BUCKET", "auto-e2e-platform-datasets-381491877296")
 
 
+def _large_shm_pod_template():
+    """PodTemplate that mounts a large tmpfs at /dev/shm (#121 P0).
+
+    DataLoader workers (num_workers>0) transport batches to the parent through
+    shared memory; the default Kubernetes pod /dev/shm is only ~64MB, so
+    WM-window batches overflow it and workers die with "Bus error / worker killed
+    by signal". A `Memory`-backed emptyDir at /dev/shm gives the workers real
+    shared memory (sized from the pod's mem limit), which is the documented fix.
+    Built lazily so importing this module never requires the k8s client models.
+    """
+    from flytekit import PodTemplate
+    from kubernetes.client import (
+        V1PodSpec, V1Container, V1Volume, V1VolumeMount, V1EmptyDirVolumeSource,
+    )
+    return PodTemplate(
+        primary_container_name="primary",
+        pod_spec=V1PodSpec(
+            containers=[
+                V1Container(
+                    name="primary",
+                    volume_mounts=[V1VolumeMount(name="dshm", mount_path="/dev/shm")],
+                )
+            ],
+            volumes=[
+                V1Volume(
+                    name="dshm",
+                    empty_dir=V1EmptyDirVolumeSource(
+                        medium="Memory", size_limit="8Gi"),
+                )
+            ],
+        ),
+    )
+
+
 # --- Enums ---
 class Dataset(enum.Enum):
     L2D = "yaak-ai/L2D"
@@ -661,6 +695,7 @@ def generate_reasoning_labels(
     container_image=TRAINING_IMAGE,
     requests=Resources(cpu="4", mem="16Gi", gpu="1"),
     limits=Resources(gpu="1"),
+    pod_template=_large_shm_pod_template(),  # /dev/shm for DataLoader workers (#121 P0)
 )
 def train_il(
     shards: List[FlyteDirectory],
@@ -1340,6 +1375,7 @@ def _run_evaluation(checkpoint, shards, train_metadata, dataset, experiment_name
     requests=Resources(cpu="2", mem="8Gi", gpu="1"),
     limits=Resources(gpu="1"),
     environment={"MLFLOW_TRACKING_URI": MLFLOW_URI},
+    pod_template=_large_shm_pod_template(),  # /dev/shm for eval DataLoader workers (#121 P0)
 )
 def evaluate_il_policy(
     checkpoint: FlyteFile,
@@ -1360,6 +1396,7 @@ def evaluate_il_policy(
     requests=Resources(cpu="2", mem="8Gi", gpu="1"),
     limits=Resources(gpu="1"),
     environment={"MLFLOW_TRACKING_URI": MLFLOW_URI},
+    pod_template=_large_shm_pod_template(),  # /dev/shm for eval DataLoader workers (#121 P0)
 )
 def evaluate_rl_policy(
     checkpoint: FlyteFile,
