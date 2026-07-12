@@ -260,11 +260,47 @@ def projection_from_spec(spec):
     raise ValueError(f"Unknown projection type in spec: {kind!r}")
 
 
+def _split_bucket(key: str, buckets: int = 10) -> int:
+    """Deterministic bucket in [0, buckets) from a sample's stable ``__key__``.
+
+    Uses a fixed hash (blake2b) — NOT Python's ``hash()``, which is salted per
+    process, so train and eval workers (and reruns) would disagree on the split.
+    A per-sample hash split keeps train/val disjoint at the SAMPLE level and is
+    reproducible across the train task and the (separate) eval task.
+    """
+    import hashlib
+    h = hashlib.blake2b(key.encode("utf-8"), digest_size=8).digest()
+    return int.from_bytes(h, "big") % buckets
+
+
+def _split_keep(split: str, val_fraction: float):
+    """Return a predicate ``sample -> bool`` selecting the requested split.
+
+    ``split="all"`` (default) keeps everything (backward-compatible, single-set
+    behaviour). ``"train"`` / ``"val"`` partition by a stable per-sample hash of
+    ``__key__`` into disjoint sets: ``val`` is the first ``round(val_fraction*10)``
+    of 10 buckets, ``train`` is the rest. So train and val NEVER share a sample,
+    and eval-on-val measures generalization, not memorization.
+    """
+    if split == "all" or val_fraction <= 0.0:
+        return lambda sample: True
+    buckets = 10
+    val_buckets = max(1, min(buckets - 1, round(val_fraction * buckets)))
+
+    def keep(sample):
+        b = _split_bucket(sample.get("__key__", ""), buckets)
+        in_val = b < val_buckets
+        return in_val if split == "val" else (not in_val)
+
+    return keep
+
+
 def make_pre_extracted_loader(
     shard_dir: str,
     batch_size: int = 8,
     num_workers: int = 4,
-    split: str = "train",
+    split: str = "all",
+    val_fraction: float = 0.0,
     shuffle: int = 1000,
 ) -> wds.WebLoader:
     """Create a WebDataset DataLoader reading from local EBS shard cache.
@@ -273,7 +309,12 @@ def make_pre_extracted_loader(
         shard_dir: Path to directory containing .tar shard files.
         batch_size: Batch size.
         num_workers: DataLoader workers.
-        split: Unused currently (all tars in shard_dir are loaded).
+        split: ``"all"`` (default, every sample), ``"train"``, or ``"val"``. With
+            ``val_fraction`` > 0, ``train``/``val`` are a disjoint per-sample hash
+            split (see ``_split_keep``) so eval-on-``val`` measures generalization
+            rather than training-set memorization.
+        val_fraction: fraction of samples held out for ``val`` (0 disables the
+            split → ``"all"`` behaviour regardless of ``split``).
         shuffle: Shuffle buffer size (0 to disable).
 
     The returned loader carries two extra attributes describing the dataset's
@@ -289,6 +330,11 @@ def make_pre_extracted_loader(
     urls = [str(p) for p in tarfiles]
 
     dataset = wds.WebDataset(urls, shardshuffle=False, empty_check=False, nodesplitter=wds.split_by_worker)
+    # Split BEFORE decode (cheap: filters on __key__ only, skips image decode for
+    # dropped samples). Keeps train/val disjoint at the sample level.
+    keep = _split_keep(split, val_fraction)
+    if split != "all" and val_fraction > 0.0:
+        dataset = dataset.select(keep)
     if shuffle > 0:
         dataset = dataset.shuffle(shuffle)
     dataset = dataset.map(_decode_sample)
@@ -344,7 +390,8 @@ def make_multi_dataset_loader(
     shard_dirs,
     batch_size: int = 8,
     num_workers: int = 4,
-    split: str = "train",
+    split: str = "all",
+    val_fraction: float = 0.0,
     shuffle: int = 1000,
 ) -> MergedDatasetLoader:
     """Build a :class:`MergedDatasetLoader` over several shard directories.
@@ -353,10 +400,13 @@ def make_multi_dataset_loader(
     merged by interleaving same-dataset batches (see MergedDatasetLoader). A
     single directory degrades to a one-loader merge (identical to the single
     dataset path, but yielding the ``(batch, projection, geometry_type)`` tuple).
+
+    ``split`` / ``val_fraction`` select a disjoint per-sample train/val split
+    applied per dataset (see make_pre_extracted_loader).
     """
     loaders = [
         make_pre_extracted_loader(d, batch_size=batch_size, num_workers=num_workers,
-                                  split=split, shuffle=shuffle)
+                                  split=split, val_fraction=val_fraction, shuffle=shuffle)
         for d in shard_dirs
     ]
     return MergedDatasetLoader(loaders)
