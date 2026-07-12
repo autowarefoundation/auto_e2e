@@ -37,6 +37,27 @@ func (h *ReasoningHandler) Stats(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, model.ReasoningStatsResponse{Entries: entries, Total: total})
 }
 
+// PromptVersions handles
+// GET /api/v1/reasoning-labels/prompt-versions?dataset={name} — the
+// teacher/prompt_version partitions of ONE dataset's label cache with counts.
+func (h *ReasoningHandler) PromptVersions(w http.ResponseWriter, r *http.Request) {
+	dataset := r.URL.Query().Get("dataset")
+	if dataset == "" || strings.ContainsAny(dataset, "/\\") || strings.Contains(dataset, "..") {
+		writeError(w, http.StatusBadRequest, model.CodeInvalidParam, "missing or invalid dataset")
+		return
+	}
+	entries, err := h.s3.ReasoningPromptVersions(r.Context(), dataset)
+	if err != nil {
+		slog.Error("reasoning prompt versions", "dataset", dataset, "error", err)
+		writeError(w, http.StatusBadGateway, model.CodeS3Error, "failed to list reasoning prompt versions")
+		return
+	}
+	if entries == nil {
+		entries = []model.ReasoningPromptVersion{}
+	}
+	writeJSON(w, http.StatusOK, model.ReasoningPromptVersionsResponse{Dataset: dataset, PromptVersions: entries})
+}
+
 // GetLabel handles GET /api/v1/reasoning-labels/{dataset}/{sample_id}.
 // Optional ?teacher= and ?prompt_version= narrow the cache partition; without
 // them the first matching partition is returned.

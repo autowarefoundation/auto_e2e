@@ -29,6 +29,41 @@ func (h *DatasetsHandler) List(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, model.DatasetListResponse{Datasets: h.s3.ListDatasets(r.Context())})
 }
 
+// requestedVersion reads the optional ?version= override, validating it as a
+// well-formed version dir. Returns (version, ok=true) when present and valid,
+// ("", true) when absent (auto-resolve), and ("", false) when present but
+// malformed so the handler can 400 instead of silently auto-resolving.
+func requestedVersion(r *http.Request) (version string, ok bool) {
+	v := r.URL.Query().Get("version")
+	if v == "" {
+		return "", true // absent: auto-resolve downstream
+	}
+	if !service.ValidVersion(v) {
+		return "", false
+	}
+	return v, true
+}
+
+// ListVersions handles GET /api/v1/datasets/{name}/versions — every published
+// version of a dataset with its whole-training composition, newest-first.
+func (h *DatasetsHandler) ListVersions(w http.ResponseWriter, r *http.Request) {
+	name := chi.URLParam(r, "name")
+	if !h.s3.ValidDataset(name) {
+		writeError(w, http.StatusNotFound, model.CodeNotFound, "unknown dataset: "+name)
+		return
+	}
+	versions, err := h.s3.ListDatasetVersions(r.Context(), name)
+	if err != nil {
+		slog.Error("list dataset versions", "dataset", name, "error", err)
+		writeError(w, http.StatusBadGateway, model.CodeS3Error, "failed to list dataset versions")
+		return
+	}
+	if versions == nil {
+		versions = []model.DatasetVersion{}
+	}
+	writeJSON(w, http.StatusOK, model.DatasetVersionsResponse{Dataset: name, Versions: versions})
+}
+
 // ListShards handles GET /api/v1/datasets/{name}/shards.
 func (h *DatasetsHandler) ListShards(w http.ResponseWriter, r *http.Request) {
 	name := chi.URLParam(r, "name")
@@ -36,9 +71,14 @@ func (h *DatasetsHandler) ListShards(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, model.CodeNotFound, "unknown dataset: "+name)
 		return
 	}
+	version, ok := requestedVersion(r)
+	if !ok {
+		writeError(w, http.StatusBadRequest, model.CodeInvalidParam, "invalid version")
+		return
+	}
 	limit, offset := parsePagination(r)
 
-	shards, page, err := h.s3.ListShards(r.Context(), name, limit, offset)
+	shards, page, err := h.s3.ListShards(r.Context(), name, version, limit, offset)
 	if err != nil {
 		slog.Error("list shards", "dataset", name, "error", err)
 		writeError(w, http.StatusBadGateway, model.CodeS3Error, "failed to list shards")
@@ -62,9 +102,14 @@ func (h *DatasetsHandler) ListSamples(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, model.CodeInvalidParam, "invalid shard name")
 		return
 	}
+	version, ok := requestedVersion(r)
+	if !ok {
+		writeError(w, http.StatusBadRequest, model.CodeInvalidParam, "invalid version")
+		return
+	}
 	limit, offset := parsePagination(r)
 
-	samples, page, err := h.s3.ListSamples(r.Context(), name, shard, limit, offset)
+	samples, page, err := h.s3.ListSamples(r.Context(), name, version, shard, limit, offset)
 	if err != nil {
 		if errors.Is(err, service.ErrNotFound) {
 			writeError(w, http.StatusNotFound, model.CodeNotFound, "shard not found: "+shard)
@@ -98,8 +143,13 @@ func (h *DatasetsHandler) GetSample(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, model.CodeInvalidParam, "invalid shard/key")
 		return
 	}
+	version, ok := requestedVersion(r)
+	if !ok {
+		writeError(w, http.StatusBadRequest, model.CodeInvalidParam, "invalid version")
+		return
+	}
 
-	detail, err := h.s3.GetSampleDetail(r.Context(), name, shard, key)
+	detail, err := h.s3.GetSampleDetail(r.Context(), name, version, shard, key)
 	if err != nil {
 		if errors.Is(err, service.ErrNotFound) {
 			writeError(w, http.StatusNotFound, model.CodeNotFound, "sample not found: "+key)
@@ -127,8 +177,13 @@ func (h *DatasetsHandler) GetShardIndex(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusBadRequest, model.CodeInvalidParam, "invalid shard name")
 		return
 	}
+	version, ok := requestedVersion(r)
+	if !ok {
+		writeError(w, http.StatusBadRequest, model.CodeInvalidParam, "invalid version")
+		return
+	}
 
-	index, err := h.s3.BuildShardIndex(r.Context(), name, shard)
+	index, err := h.s3.BuildShardIndex(r.Context(), name, version, shard)
 	if err != nil {
 		if errors.Is(err, service.ErrNotFound) {
 			writeError(w, http.StatusNotFound, model.CodeNotFound, "shard not found: "+shard)
@@ -162,6 +217,11 @@ func (h *DatasetsHandler) GetImage(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, model.CodeInvalidParam, "invalid shard/key/cam")
 		return
 	}
+	version, ok := requestedVersion(r)
+	if !ok {
+		writeError(w, http.StatusBadRequest, model.CodeInvalidParam, "invalid version")
+		return
+	}
 
 	member := fmt.Sprintf("%s.%s.jpg", key, cam)
 	// Fast path: the client already has the member's tar byte range from the
@@ -171,10 +231,10 @@ func (h *DatasetsHandler) GetImage(w http.ResponseWriter, r *http.Request) {
 	var closer io.Closer
 	var size int64
 	var err error
-	if off, sz, ok := parseRange(r); ok {
-		reader, closer, size, err = h.s3.StreamTarMemberRange(r.Context(), name, shard, off, sz)
+	if off, sz, rok := parseRange(r); rok {
+		reader, closer, size, err = h.s3.StreamTarMemberRange(r.Context(), name, version, shard, off, sz)
 	} else {
-		reader, closer, size, err = h.s3.StreamTarMember(r.Context(), name, shard, member)
+		reader, closer, size, err = h.s3.StreamTarMember(r.Context(), name, version, shard, member)
 	}
 	if err != nil {
 		if errors.Is(err, service.ErrNotFound) {

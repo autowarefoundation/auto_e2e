@@ -73,9 +73,11 @@ func main() {
 			r.Get("/stats", statsH.Get)
 
 			r.Get("/datasets", datasetsH.List)
+			r.Get("/datasets/{name}/versions", datasetsH.ListVersions)
 			r.Get("/datasets/{name}/shards", datasetsH.ListShards)
 
 			r.Get("/reasoning-labels/stats", reasoningH.Stats)
+			r.Get("/reasoning-labels/prompt-versions", reasoningH.PromptVersions)
 			r.Get("/reasoning-labels/{dataset}/{sample_id}", reasoningH.GetLabel)
 
 			r.Get("/mlflow/experiments", mlflowH.Experiments)

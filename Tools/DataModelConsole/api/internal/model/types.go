@@ -43,6 +43,29 @@ type DatasetListResponse struct {
 	Datasets []Dataset `json:"datasets"`
 }
 
+// DatasetVersion is one packed shard-set version of a dataset (e.g. l2d/v2.0),
+// summarising the WHOLE training composition at that version. Fields sourced
+// from the version's shards/manifest.json; SizeBytes/Shards are computed from a
+// ListObjects sum so a manifest-less (historical v1.0) version still reports.
+type DatasetVersion struct {
+	Version       string `json:"version"`         // e.g. "v2.0"
+	TotalSamples  int    `json:"total_samples"`   // manifest total_samples (0 if no manifest)
+	Shards        int    `json:"shards"`          // count of .tar objects under shards/
+	Episodes      int    `json:"episodes"`        // manifest episodes
+	NumViews      int    `json:"num_views"`       // manifest num_views (cameras per sample)
+	HasMap        bool   `json:"has_map"`         // manifest has_map
+	HasWorldModel bool   `json:"has_world_model"` // manifest has_world_model
+	SizeBytes     int64  `json:"size_bytes"`      // sum of shard .tar object sizes
+	HasManifest   bool   `json:"has_manifest"`    // whether shards/manifest.json was present
+}
+
+// DatasetVersionsResponse wraps GET /api/v1/datasets/{name}/versions
+// (newest-first).
+type DatasetVersionsResponse struct {
+	Dataset  string           `json:"dataset"`
+	Versions []DatasetVersion `json:"versions"`
+}
+
 // Shard is one WebDataset .tar object.
 type Shard struct {
 	Name         string    `json:"name"` // e.g. train-000000.tar
@@ -134,6 +157,21 @@ type ReasoningStatsEntry struct {
 type ReasoningStatsResponse struct {
 	Entries []ReasoningStatsEntry `json:"entries"`
 	Total   int                   `json:"total"`
+}
+
+// ReasoningPromptVersion is one teacher/prompt_version partition of a single
+// dataset's reasoning-label cache with its label object count.
+type ReasoningPromptVersion struct {
+	Teacher       string `json:"teacher"`
+	PromptVersion string `json:"prompt_version"`
+	Count         int    `json:"count"`
+}
+
+// ReasoningPromptVersionsResponse wraps
+// GET /api/v1/reasoning-labels/prompt-versions?dataset={name}.
+type ReasoningPromptVersionsResponse struct {
+	Dataset        string                   `json:"dataset"`
+	PromptVersions []ReasoningPromptVersion `json:"prompt_versions"`
 }
 
 // StatsResponse wraps GET /api/v1/stats (dashboard KPI cards). MLflow-derived
