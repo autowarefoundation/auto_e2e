@@ -67,16 +67,6 @@ const AXES: { field: string; title: string; hue: string }[] = [
 
 const DATASETS_FALLBACK = ["l2d", "nvidia_av"];
 
-// The v2.0 packer block-allocates 1000 samples per shard: shard 0 holds
-// s00000000..s00000999, shard 1 s00001000.., etc. Derive the shard from the
-// numeric part of the sample_id so a scene hit links to its real detail page.
-function shardForSampleId(id: string): string {
-  const m = id.match(/(\d+)/);
-  const n = m ? parseInt(m[1], 10) : 0;
-  const block = Math.floor(n / 1000);
-  return `train-${String(block).padStart(6, "0")}.tar`;
-}
-
 function pctLabel(count: number, total: number): string {
   if (total <= 0) return "0%";
   const p = (count / total) * 100;
@@ -242,8 +232,8 @@ function SceneDrawer({
   onClose: () => void;
 }) {
   const { data, error, loading, reload } = useApi<SceneSearchResult>(
-    () => searchScenesByLabel(dataset, promptVersion, field, value, 200),
-    [dataset, promptVersion, field, value],
+    () => searchScenesByLabel(dataset, promptVersion, field, value, 200, version),
+    [dataset, version, promptVersion, field, value],
   );
 
   useEffect(() => {
@@ -279,7 +269,9 @@ function SceneDrawer({
             </p>
             <p className="mt-0.5 text-xs text-slate-500">
               {friendlyDataset(dataset)} {version} ·{" "}
-              {loading ? "…" : `${formatNumber(data?.total ?? 0)} scenes`}
+              {loading
+                ? "…"
+                : `${formatNumber(data?.available ?? 0)} of ${formatNumber(data?.total ?? 0)} in this version${data?.truncated ? " (first 200 shown)" : ""}`}
             </p>
           </div>
           <Button
@@ -305,8 +297,27 @@ function SceneDrawer({
           ) : (
             <ul className="space-y-1">
               {scenes.map((s) => {
-                const shard = shardForSampleId(s.sample_id);
-                const href = `/datasets/${encodeURIComponent(dataset)}/shards/${encodeURIComponent(shard)}/samples/${encodeURIComponent(s.sample_id)}${versionQuery}`;
+                // Link only samples the server resolved to a real shard in this
+                // version; an unavailable sample (label exists but frame not
+                // packed here) renders as a non-link with a hint, never a 404.
+                if (!s.available || !s.shard) {
+                  return (
+                    <li key={s.sample_id}>
+                      <div
+                        className="flex items-center justify-between gap-3 rounded-md border border-slate-800/60 bg-slate-900/20 px-3 py-1.5"
+                        title="This label exists but the frame is not packed into the selected dataset version"
+                      >
+                        <span className="font-mono text-xs text-slate-500">
+                          {s.sample_id}
+                        </span>
+                        <span className="font-mono text-[10px] text-slate-600">
+                          not in {version}
+                        </span>
+                      </div>
+                    </li>
+                  );
+                }
+                const href = `/datasets/${encodeURIComponent(dataset)}/shards/${encodeURIComponent(s.shard)}/samples/${encodeURIComponent(s.sample_id)}${versionQuery}`;
                 return (
                   <li key={s.sample_id}>
                     <Link
@@ -317,7 +328,7 @@ function SceneDrawer({
                         {s.sample_id}
                       </span>
                       <span className="font-mono text-[10px] text-slate-500">
-                        {shard}
+                        {s.shard}
                       </span>
                     </Link>
                   </li>
@@ -365,10 +376,16 @@ function ReasoningLabelsInner() {
     [dataset],
   );
 
-  const versionList = useMemo(
-    () => versionsApi.data ?? [],
-    [versionsApi.data],
-  );
+  // Only offer versions that actually packed samples: reasoning-label stats are
+  // keyed by prompt_version (not dataset version), so an empty version must not
+  // be selectable — it would attribute the full label set to a 0-sample version
+  // and scope scene availability to shards that do not exist. Fall back to the
+  // raw list if the tally is unavailable so the selector is never empty.
+  const versionList = useMemo(() => {
+    const all = versionsApi.data ?? [];
+    const nonEmpty = all.filter((v) => v.total_samples > 0);
+    return nonEmpty.length ? nonEmpty : all;
+  }, [versionsApi.data]);
   const version = useMemo(() => {
     if (versionList.length === 0) return "";
     return versionList.find((v) => v.version === urlVersion)?.version ??
