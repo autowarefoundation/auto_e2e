@@ -22,11 +22,21 @@ const DEFAULT_MAX_ENTRIES = 500;
 // Frames per contiguous fetch window. Larger windows amortize more round trips
 // but delay the first draw and over-fetch on a scrub; 8 balances both.
 const WINDOW_FRAMES = 8;
-// Raw window buffers retained for slicing (each ~0.6-1MB). A few is enough to
-// decode the current and adjacent windows; bitmaps are the real cache.
-const MAX_BUFFERS = 4;
+// How many windows AHEAD of the playhead to keep fetched. Measured (2026-07):
+// 3 concurrent window GETs sustain ~40fps aggregate, but the buffer starved at
+// ~2.3fps because fetches only fired on a frame change — when the buffer-gated
+// clock froze the frame, no refill was scheduled. Keeping this many windows
+// warm ahead of the playhead is the buffer-health-driven lookahead that keeps
+// MAX_INFLIGHT saturated during playback. Covers ~2s at 10Hz (24 frames).
+const LOOKAHEAD_WINDOWS = 3;
+// Raw window buffers retained for slicing (each ~0.6-1MB). Must exceed the
+// number of windows we keep in flight+decoded at once (current + LOOKAHEAD +
+// a little slack for scrub-back), else newly fetched buffers evict ones the
+// decoder still needs. current(1) + LOOKAHEAD(3) + slack(2) = 6.
+const MAX_BUFFERS = 6;
 // Concurrent window GETs. These are large reads, so a handful is plenty and
-// keeps us from re-introducing the many-tiny-connections contention.
+// keeps us from re-introducing the many-tiny-connections contention. Measured
+// sweet spot: aggregate throughput saturates at 3-4 and regresses beyond.
 const MAX_INFLIGHT = 3;
 
 interface WindowBuffer {
@@ -281,6 +291,26 @@ export class FrameStore {
       !this.bufInflight.has(behindWin)
     ) {
       void this.fetchBuffer(behindWin).catch(() => {});
+    }
+  }
+
+  // ensureLookahead proactively fetches the next LOOKAHEAD_WINDOWS window
+  // BUFFERS ahead of the playhead (raw byte-range GETs only — no JPEG decode),
+  // so MAX_INFLIGHT stays saturated even when the buffer-gated clock has frozen
+  // `frame` (which stops prefetch, keyed on frame, from re-firing). This is the
+  // buffer-health-driven refill: it should be called on a steady tick during
+  // playback, not only on frame change. Idempotent and cheap — it skips windows
+  // already buffered or in flight, and the withSlot gate bounds concurrency.
+  ensureLookahead(centerFrame: number, direction: 1 | -1): void {
+    if (this.destroyed) return;
+    const cur = this.windowOf(centerFrame);
+    for (let i = 0; i <= LOOKAHEAD_WINDOWS; i++) {
+      const w = cur + i * direction;
+      if (w < 0 || w * WINDOW_FRAMES >= this.frameCount) break;
+      if (this.buffers.has(w) || this.bufInflight.has(w)) continue;
+      void this.fetchBuffer(w).catch(() => {
+        // Non-fatal; the draw path / next tick retries.
+      });
     }
   }
 

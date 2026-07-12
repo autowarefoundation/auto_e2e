@@ -136,6 +136,13 @@ export function EpisodePlayer({
     pause,
   } = playback;
 
+  // Live playhead + speed for the lookahead tick's setInterval closure, which
+  // would otherwise capture a stale `frame`/`speed`.
+  const frameRef = useRef(frame);
+  frameRef.current = frame;
+  const speedRef = useRef(speed);
+  speedRef.current = speed;
+
   const [mode, setMode] = useState<"grid" | "focus">(
     initialState?.mode ?? "grid",
   );
@@ -161,6 +168,30 @@ export function EpisodePlayer({
     if (!store) return;
     store.prefetch(frame, direction, playing ? speed : 1, visibleCams);
   }, [store, frame, direction, speed, playing, visibleCams]);
+
+  // Buffer-health-driven refill: while playing, keep the next few window buffers
+  // fetched ahead of the playhead on a steady tick. The prefetch effect above
+  // fires only on `frame` change, but the buffer-gated clock FREEZES `frame`
+  // when the buffer starves — so without this the refill would never re-fire and
+  // playback stalls (measured: 2.3fps, buffer draining faster than it refilled).
+  // A steady tick keeps MAX_INFLIGHT window GETs saturated regardless of whether
+  // the clock is advancing. Runs only during playback (no steady-state cost).
+  useEffect(() => {
+    if (!store || !playing) return;
+    const tick = () => {
+      const f = frameRef.current;
+      // Fetch the next window buffers (cheap, no decode) AND decode the visible
+      // cameras ahead of the playhead (prefetch → getFrame). Buffer-only refill
+      // is not enough: the clock gates on DECODED frames, so an arrived-but-
+      // undecoded window still stalls it — the decode pressure must also be kept
+      // up on the live playhead, not just on frame-change.
+      store.ensureLookahead(f, direction);
+      store.prefetch(f, direction, speedRef.current, visibleCamsRef.current);
+    };
+    tick();
+    const id = setInterval(tick, 200);
+    return () => clearInterval(id);
+  }, [store, playing, direction]);
 
   // Current-frame readiness: whether every visible camera has a decoded bitmap
   // for the frame on screen. When paused and the user scrubs into an unbuffered
