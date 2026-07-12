@@ -596,7 +596,12 @@ function ReasoningLabelsInner() {
       </Card>
 
       {/* Header / provenance */}
-      {promptVersionsApi.error ? (
+      {versionsApi.error ? (
+        <ErrorState
+          error={versionsApi.error}
+          onRetry={versionsApi.reload}
+        />
+      ) : promptVersionsApi.error ? (
         <ErrorState
           error={promptVersionsApi.error}
           onRetry={promptVersionsApi.reload}
