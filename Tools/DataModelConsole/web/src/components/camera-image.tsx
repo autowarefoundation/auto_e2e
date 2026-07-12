@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { ImageOff } from "lucide-react";
 
 import { getSampleImageUrl } from "@/lib/api";
@@ -25,6 +25,10 @@ export function CameraImage({
 }) {
   const [failed, setFailed] = useState(false);
   const src = getSampleImageUrl(dataset, shard, sampleKey, cam, undefined, version);
+  // This component is reused as the user navigates samples (React keeps the
+  // instance, only props change), so a failure from one sample would otherwise
+  // stick to the next. Reset when the source changes so each frame starts fresh.
+  useEffect(() => setFailed(false), [src]);
 
   if (failed) {
     return (
