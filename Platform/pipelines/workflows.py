@@ -376,21 +376,21 @@ def data_ingest(
         print(f"Pre-fetch: {len(_data_paths)} parquet + {len(_video_paths)} video "
               f"= {len(_all_files)} unique files for {len(ep_list)} episodes")
         # Retry loop: snapshot_download is not always atomic under Hub 5xx.
-        # max_workers=2 (not 8): each parallel download holds a ~500MB video
-        # buffer plus HTTP TLS context in RAM; at 8 workers we OOMKilled at
-        # ~90% through 235 files on a 48Gi pod (at6v64bp9bmb9b2jpq6q). Two
-        # workers keeps peak memory bounded and is still faster than serial
-        # since the bottleneck is Hub server-side, not client concurrency.
-        # HF_HUB_ENABLE_HF_TRANSFER left unset → the Python client is used
-        # (the Rust hf_transfer aggressively pre-buffers whole files and has
-        # blown memory in prior runs).
+        # max_workers=4 balances speed vs memory: each parallel download holds
+        # a ~500MB video buffer + HTTP TLS context, so 4 workers ≈ 2-3 GB peak
+        # (well inside 64Gi). max_workers=8 OOMed a 48Gi pod
+        # (at6v64bp9bmb9b2jpq6q); max_workers=2 was slow enough on 100-ep
+        # partitions (~40 min just for ingest) that a 200-partition fan-out
+        # would take hours. HF_HUB_ENABLE_HF_TRANSFER left unset → the Python
+        # client is used (the Rust hf_transfer aggressively pre-buffers whole
+        # files and has blown memory in prior runs).
         _missing = list(_all_files)
         for attempt in range(3):
             snapshot_download(
                 repo_id=dataset.value, repo_type="dataset",
                 local_dir=str(_meta.root),
                 allow_patterns=_missing if attempt > 0 else _all_files,
-                max_workers=2,
+                max_workers=4,
             )
             # Verify EACH expected file is now on disk (both parquets AND videos).
             # Label/pack pods later do `LeRobotDataset(root=raw_path, episodes=…)`,
