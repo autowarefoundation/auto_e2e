@@ -75,6 +75,65 @@ def _jpeg(frame_tensor) -> bytes:
     return b.getvalue()
 
 
+def init_row_worker(
+    dataset_value: str,
+    episodes: Optional[List[int]],
+    raw_path: str,
+    image_size: int,
+) -> None:
+    """Build this process's PLAIN-mode dataset for row-level decode (#121 decode-dedup).
+
+    Plain mode (no WM delta_timestamps): ``lerobot_dataset[row]`` decodes ONE row's
+    videos (6 cams + map ≈ 7 frames) instead of a whole 8-step window (~49). The
+    single-row read is bit-identical to the window read at the same physical row
+    (verified in dataset.py / test_preextract_world_model), so pool bytes match the
+    per-sample window path exactly. Enumeration margins are identical with WM
+    on/off (egomotion 64/64 dominates), so local row indices agree with the
+    parent's WM-mode dataset.
+    """
+    global _DS, _RESIZE, _TO_PIL, _DATASET_VALUE
+    from torchvision import transforms
+    from data_parsing.l2d import L2DDataset
+
+    _DATASET_VALUE = dataset_value
+    _TO_PIL = transforms.ToPILImage()
+    _RESIZE = transforms.Resize((image_size, image_size))
+    _DS = L2DDataset(repo_id=dataset_value, episodes=episodes,
+                     include_world_model_windows=False, root=raw_path)
+
+
+def decode_row(task: Tuple[int, int]) -> Tuple[Tuple[int, int], Dict[str, bytes], Optional[bytes]]:
+    """Decode ONE physical row's cameras (+ map) → JPEG bytes (#121 decode-dedup).
+
+    ``task`` = (ep_idx, frame_index) — GLOBAL identity, so the worker resolves the
+    local row from its OWN _episode_ranges (robust across processes/partitions).
+    Returns ``((ep_idx, frame_index), {frame_id: jpeg per cam}, map_jpeg_or_None)``.
+
+    Each unique row is decoded exactly ONCE per partition — the parent maps this
+    over the UNION of all samples' window rows, killing the ~8x per-sample
+    re-decode. Map is skipped when all-zero (same rule as pack_sample). The
+    frame_id embeds episode + episode-local frame_index, so it can never
+    reference another episode/scene.
+    """
+    from data_parsing.l2d.dataset import CAMERA_NAMES, MAP_VIEW_NAME
+    from data_processing.contract_versions import UID_SCHEMA_VERSION
+
+    ep_idx, frame_index = task
+    ep_start, ep_end = _DS._episode_ranges[ep_idx]
+    local_row = ep_start + frame_index
+    if local_row >= ep_end:
+        raise IndexError(f"row {frame_index} outside episode {ep_idx}")
+    item = _DS.lerobot_dataset[local_row]
+    cams: Dict[str, bytes] = {}
+    for v, cam_name in enumerate(CAMERA_NAMES):
+        fid = f"l2d-{UID_SCHEMA_VERSION}-e{ep_idx:06d}-r{frame_index:06d}-c{v}"
+        cams[fid] = _jpeg(item[cam_name])
+    map_tile = item[MAP_VIEW_NAME]
+    mt = map_tile[0] if map_tile.ndim == 4 else map_tile
+    map_jpeg = _jpeg(mt) if float(mt.abs().max()) > 0 else None
+    return (ep_idx, frame_index), cams, map_jpeg
+
+
 def pack_sample(si: int) -> Tuple[str, int, Dict[str, bytes], Dict[str, bytes]]:
     """Decode + encode sample ``si`` into per-sample members + a frame-pool
     contribution (#121 §3.1, §3.4d dedup).
