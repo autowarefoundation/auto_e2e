@@ -267,6 +267,53 @@ class L2DDataset(Dataset):
         ep_idx, _ = self._samples[idx]
         return f"l2d-e{ep_idx:06d}"
 
+    def window_frame_ids(self, idx: int) -> dict:
+        """Per-(step,view) content-addressed frame ids for the WM window (#121 §3.4d).
+
+        For dedup packing: instead of storing each window frame as its own JPEG, a
+        sample stores this index and the packer keeps ONE JPEG per distinct
+        ``frame_id`` in a shared pool. Each id is ``l2d-{ver}-e{ep}-r{frame_index}-c{v}``
+        — GLOBAL (episode + episode-local frame_index + camera), so the SAME physical
+        frame gets the SAME id across samples AND across partitions, which is what
+        makes the pool dedup coherent.
+
+        The window rows are the current row + the stride-10 offsets used by the WM
+        window (history [-(N-1)*s .. 0], future [+s .. +N*s]); they are guaranteed
+        to stay inside the sample's own episode because ``_build_sample_index``
+        excludes edge frames (margins 64/64 ≥ WM reach), so NO id ever references a
+        neighbouring episode/scene (boundary-safety requirement). Raises if a
+        computed row would leave the episode (defence-in-depth; enumeration should
+        already prevent it).
+
+        Returns ``{"history": [[id per view] per step], "future": [[...] ...]}``,
+        oldest→newest, matching the ``history_frames``/``future_frames`` stack order.
+        """
+        ep_idx, row = self._samples[idx]
+        ep_start, ep_end = self._episode_ranges[ep_idx]
+        n = self._wm_num_frames
+        s = self._wm_stride
+        # Same offsets the window uses: history oldest→newest ending at 0, future +s..+N*s.
+        hist_offsets = [-(n - 1 - t) * s for t in range(n)]
+        fut_offsets = [(t + 1) * s for t in range(n)]
+
+        def _ids_for(offsets: list) -> list:
+            steps = []
+            for off in offsets:
+                r = row + off
+                if r < ep_start or r >= ep_end:
+                    raise IndexError(
+                        f"WM window row {r} (sample row {row}, offset {off}) leaves "
+                        f"episode {ep_idx} [{ep_start},{ep_end}) — enumeration should "
+                        f"have excluded this edge sample.")
+                frame_index = r - ep_start
+                steps.append([
+                    f"l2d-{UID_SCHEMA_VERSION}-e{ep_idx:06d}-r{frame_index:06d}-c{v}"
+                    for v in range(len(CAMERA_NAMES))
+                ])
+            return steps
+
+        return {"history": _ids_for(hist_offsets), "future": _ids_for(fut_offsets)}
+
     def _get_vehicle_states_window(self, ep_start: int, ep_end: int) -> np.ndarray:
         """Load vehicle state vectors for one episode (local row range).
 
