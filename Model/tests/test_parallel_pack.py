@@ -35,9 +35,34 @@ IMAGE_SIZE = 32
 _WM_STRIDE = 10
 
 
+from data_parsing.l2d.camera import CAMERA_NAMES as _L2D_CAM_NAMES  # type: ignore[misc]
+from data_parsing.l2d.camera import MAP_VIEW_NAME as _L2D_MAP_NAME  # type: ignore[misc]
+
+
+class _FakeLerobot:
+    """Fake lerobot_dataset: indexing by local row returns per-camera float tensors
+    keyed by the real L2D camera names. Used by decode_row worker tests.
+    """
+
+    def __init__(self, float_frames=True):
+        self.float_frames = float_frames
+
+    def __getitem__(self, row):
+        item = {}
+        for i, c in enumerate(_L2D_CAM_NAMES):
+            g = torch.Generator().manual_seed(row * 100 + i)
+            if self.float_frames:
+                item[c] = torch.rand(3, 20, 24, generator=g)
+            else:
+                item[c] = (torch.rand(3, 20, 24, generator=g) * 255).to(torch.uint8)
+        item[_L2D_MAP_NAME] = torch.zeros(3, 20, 24)
+        return item
+
+
 class _FakeDS:
     """Minimal raw pre-extraction source with a deterministic per-(episode,row,cam)
-    frame identity, so window_frame_ids and the pool dedup can be exercised.
+    frame identity, so window_frame_ids, window_rows, decode_row and the pool dedup
+    can be exercised.
 
     Each sample ``si`` is episode 0, row ``ROW0 + si`` (dense 10Hz). Its WM window
     references rows ``row + {-30,-20,-10,0,+10,+20,+30,+40}`` (stride 10), and the
@@ -47,6 +72,7 @@ class _FakeDS:
     """
 
     ROW0 = 100  # first sample's row; >= wm past reach so no clamp
+    EP0_START = 0
 
     def __init__(self, n, num_views=6, with_map=True, wm=False,
                  wm_frames=4, float_frames=True):
@@ -58,6 +84,11 @@ class _FakeDS:
         self.float_frames = float_frames
         self._wm_num_frames = wm_frames
         self._wm_stride = _WM_STRIDE
+        # Attributes used by decode_row worker
+        self._samples = [(0, self.ROW0 + i) for i in range(n)]
+        self._episode_ranges = {0: (self.EP0_START, self.EP0_START + self.ROW0 + n + 200)}
+        # Fake lerobot_dataset for decode_row
+        self.lerobot_dataset = _FakeLerobot(float_frames=float_frames)
 
     def __len__(self):
         return self.n
@@ -89,6 +120,21 @@ class _FakeDS:
             return [[f"l2d-v1-e000000-r{row + o:06d}-c{v}"
                      for v in range(self.num_views)] for o in offsets]
         return {"history": ids(hist_off), "future": ids(fut_off)}
+
+    def window_rows(self, si):
+        """Return (ep_idx, frame_index) for every window row (no decode)."""
+        row = self._row(si)
+        n, s = self.wm_frames, self._wm_stride
+        hist_off = [-(n - 1 - t) * s for t in range(n)]
+        fut_off = [(t + 1) * s for t in range(n)]
+        ep_start = self.EP0_START
+        return [(0, row + o - ep_start) for o in hist_off + fut_off]
+
+    def egomotion_for(self, si):
+        """Return (ego_history, trajectory) tensors without video decode."""
+        ego_h = torch.arange(256, dtype=torch.float32) + si
+        traj = torch.arange(128, dtype=torch.float32) - si
+        return ego_h, traj
 
     def __getitem__(self, si):
         row = self._row(si)
@@ -279,3 +325,80 @@ def test_ego_meta_uid_unchanged():
     }
     assert members["calib.json"] == calib
     assert uid == ds.sample_uid(0) and uid.startswith("l2d-v1-")
+
+
+# --------------------------------------------------------------------------
+# 7. Decode-dedup: row-level workers (#121 §3.4d decode fix)
+# --------------------------------------------------------------------------
+
+def _install_row_worker_globals(ds, calib_bytes):
+    """Set globals for decode_row worker (init_row_worker equivalent)."""
+    pp._DS = ds
+    pp._CALIB_BYTES = calib_bytes
+    pp._TO_PIL = transforms.ToPILImage()
+    pp._RESIZE = transforms.Resize((IMAGE_SIZE, IMAGE_SIZE))
+
+
+def test_decode_row_returns_correct_frame_ids():
+    """decode_row produces frame_ids keyed by global (ep,row,cam) identity."""
+    ds = _FakeDS(3, num_views=6, with_map=True, wm=True, float_frames=True)
+    _install_row_worker_globals(ds, b"{}")
+    # decode row frame_index=100 for episode 0
+    (ep_idx, fi), cam_jpegs, _ = pp.decode_row((0, 100))
+    assert ep_idx == 0 and fi == 100
+    assert len(cam_jpegs) == 6
+    for v in range(6):
+        fid = f"l2d-v1-e000000-r000100-c{v}"
+        assert fid in cam_jpegs, f"missing {fid}"
+
+
+def test_decode_row_bytes_match_pack_sample_pool():
+    """THE byte-equality guarantee: decode_row produces the SAME jpeg bytes as
+    pack_sample's pool for the same physical (row, cam)."""
+    ds = _FakeDS(1, num_views=6, with_map=True, wm=True, float_frames=True)
+    _install_row_worker_globals(ds, b"{}")
+
+    # Get pool bytes from pack_sample for si=0 (row=100, offset-0 = hist[-1]).
+    _install_worker_globals(ds, "yaak-ai/L2D", b"{}")
+    _, _, _, ps_pool = pp.pack_sample(0)
+
+    # Get bytes from decode_row for the same row (frame_index 100 = row 100).
+    _install_row_worker_globals(ds, b"{}")
+    _, dr_cams, _ = pp.decode_row((0, 100))
+
+    # Frame_id for hist[-1]=offset-0 in pack_sample pool matches decode_row.
+    for v in range(6):
+        fid = f"l2d-v1-e000000-r000100-c{v}"
+        assert fid in ps_pool, f"{fid} not in pack_sample pool"
+        assert fid in dr_cams, f"{fid} not in decode_row cams"
+        assert ps_pool[fid] == dr_cams[fid], (
+            f"byte mismatch for {fid}: pack_sample pool vs decode_row")
+
+
+def test_window_rows_covers_all_window_offsets():
+    """window_rows returns all 8 window offsets for a sample without decoding."""
+    ds = _FakeDS(5, wm=True, wm_frames=4)
+    rows = ds.window_rows(0)
+    assert len(rows) == 8   # 4 hist + 4 fut
+    # All in episode 0, no negative frame_index.
+    ep_start = ds.EP0_START
+    for ep_idx, fi in rows:
+        assert ep_idx == 0
+        assert fi >= 0, f"negative frame_index {fi} — crossed episode start"
+
+
+def test_decode_count_is_unique_rows_not_8x():
+    """Simulated decode count: union of window_rows across samples << n_samples × 8."""
+    n = 12  # 12 consecutive 10Hz samples, windows heavily overlap
+    ds = _FakeDS(n, wm=True, wm_frames=4)
+    all_rows = set()
+    for si in range(n):
+        for r in ds.window_rows(si):
+            all_rows.add(r)
+    naive_total = n * 8   # old path decoded 8 frames × n samples
+    assert len(all_rows) < naive_total, (
+        f"unique rows {len(all_rows)} should be less than naive {naive_total}")
+    # For a 12-sample dense window: rows span [100-30..100+11+40] = 71 to 151 = 81
+    # unique rows, vs 12×8=96 (still a win; for larger n the ratio is ~8x).
+    print(f"unique rows: {len(all_rows)} vs naive {naive_total} "
+          f"(dedup ratio {naive_total/len(all_rows):.1f}x)")
