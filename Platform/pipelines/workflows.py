@@ -684,20 +684,36 @@ def generate_reasoning_labels(
     # episode indices / NVIDIA clip uuids). None → legacy first-``episodes``.
     ep_list = ([int(g) for g in group_ids] if group_ids is not None
                else (list(range(episodes)) if episodes > 0 else None))
-    if dataset == Dataset.NVIDIA_PHYSICAL_AI:
-        from data_parsing.nvidia_physical_ai.dataset import NvidiaAVDataset
-        # NVIDIA: the partition's ingest materialized ONLY this partition's clips
-        # into raw_path, so DISCOVERY (sorted) yields exactly the partition set —
-        # and the worker (parallel_label.init_worker) also discovers from raw_path,
-        # so probe and workers enumerate in the SAME order (sample-index JOIN holds).
-        # Passing clip_uuids in partition order here would risk an order mismatch.
-        ds = NvidiaAVDataset(data_root=raw_path, reasoning_clip_only=True)
-    else:
-        from data_parsing.l2d import L2DDataset
-        # root=raw_path: read the partition's materialized raw, don't re-hit HF.
-        ds = L2DDataset(repo_id=dataset.value, episodes=ep_list,
-                        reasoning_clip_only=True, root=raw_path)
-    n_samples = len(ds)
+    # A fan-out partition can legitimately contain NO valid samples — e.g. a
+    # single short L2D episode with fewer than the egomotion margin (64+64+1)
+    # frames. The parser raises "No valid samples found" in that case; in the
+    # single-pod path that never happened because other episodes filled the set,
+    # but per-episode partitioning exposes it. Treat an empty partition as a
+    # SUCCESS that produces an empty label artifact (nothing to JOIN downstream) —
+    # NOT a failure that kills the whole @dynamic fan-out.
+    try:
+        if dataset == Dataset.NVIDIA_PHYSICAL_AI:
+            from data_parsing.nvidia_physical_ai.dataset import NvidiaAVDataset
+            # NVIDIA: the partition's ingest materialized ONLY this partition's
+            # clips into raw_path, so DISCOVERY (sorted) yields exactly the
+            # partition set — and the worker (parallel_label.init_worker) also
+            # discovers from raw_path, so probe and workers enumerate in the SAME
+            # order (sample-index JOIN holds). Passing clip_uuids in partition
+            # order here would risk an order mismatch.
+            ds = NvidiaAVDataset(data_root=raw_path, reasoning_clip_only=True)
+        else:
+            from data_parsing.l2d import L2DDataset
+            # root=raw_path: read the partition's materialized raw, don't re-hit HF.
+            ds = L2DDataset(repo_id=dataset.value, episodes=ep_list,
+                            reasoning_clip_only=True, root=raw_path)
+        n_samples = len(ds)
+    except ValueError as e:
+        if "No valid samples" not in str(e):
+            raise
+        print(f"Partition has no valid samples ({e}); writing an EMPTY label "
+              f"artifact (short episode/clip — nothing to label).")
+        ds = None
+        n_samples = 0
 
     # openai_compatible resolves base_url/model/api_key from the Secret (env
     # fallback); mock/cached need none of these.
@@ -735,42 +751,47 @@ def generate_reasoning_labels(
     # Free the parent's dataset handle: each worker process builds its own.
     del ds
 
-    # Process-parallel labeling (NOT threads): decode dominates and lerobot's
-    # reader is not thread-safe, so a ThreadPool had to serialize decode under a
-    # lock, leaving the scaled-out vLLM replicas idle. With processes, each worker
-    # owns an independent dataset + reader, so decode runs truly in parallel across
-    # CPU cores and the teacher calls overlap — finally using the extra GPUs. Only
-    # the sample index crosses the process boundary; frames never do. Spawn context
-    # (torch is imported) re-imports the worker module cleanly.
-    import multiprocessing as mp
-    from concurrent.futures import ProcessPoolExecutor
-    from data_processing.reasoning_label_generation import parallel_label
     from data_processing.reasoning_label_generation.targets import record_from_json
 
-    workers = max(1, min(label_workers, n_samples))
-    print(f"Labeling {n_samples} samples with {workers} parallel PROCESSES "
-          f"(teacher={teacher}, cache_bucket={cache_bucket or '(disabled)'})...")
-    ctx = mp.get_context("spawn")
-    # Order MUST match parallel_label.init_worker(repo_id, episodes, dataset_name,
-    # teacher, teacher_kwargs, cache_bucket, prompt_version, raw_path).
-    init_args = (dataset.value, ep_list, dataset.value, teacher, teacher_kwargs,
-                 cache_bucket or None, prompt_version, raw_path)
-    results = [None] * n_samples
     n_hit = n_computed = n_abstain = 0
-    with ProcessPoolExecutor(
-        max_workers=workers, mp_context=ctx,
-        initializer=parallel_label.init_worker, initargs=init_args,
-    ) as pool:
-        for si, rec_json, status in pool.map(parallel_label.label_sample,
-                                             range(n_samples)):
-            results[si] = record_from_json(rec_json)
-            if status == "hit":
-                n_hit += 1
-            elif status == "abstained":
-                n_abstain += 1
-            else:
-                n_computed += 1
-    records = results
+    if n_samples == 0:
+        # Empty partition (short episode/clip): no labeling, empty artifact.
+        records = []
+    else:
+        # Process-parallel labeling (NOT threads): decode dominates and lerobot's
+        # reader is not thread-safe, so a ThreadPool had to serialize decode under a
+        # lock, leaving the scaled-out vLLM replicas idle. With processes, each worker
+        # owns an independent dataset + reader, so decode runs truly in parallel across
+        # CPU cores and the teacher calls overlap — finally using the extra GPUs. Only
+        # the sample index crosses the process boundary; frames never do. Spawn context
+        # (torch is imported) re-imports the worker module cleanly.
+        import multiprocessing as mp
+        from concurrent.futures import ProcessPoolExecutor
+        from data_processing.reasoning_label_generation import parallel_label
+
+        workers = max(1, min(label_workers, n_samples))
+        print(f"Labeling {n_samples} samples with {workers} parallel PROCESSES "
+              f"(teacher={teacher}, cache_bucket={cache_bucket or '(disabled)'})...")
+        ctx = mp.get_context("spawn")
+        # Order MUST match parallel_label.init_worker(repo_id, episodes, dataset_name,
+        # teacher, teacher_kwargs, cache_bucket, prompt_version, raw_path).
+        init_args = (dataset.value, ep_list, dataset.value, teacher, teacher_kwargs,
+                     cache_bucket or None, prompt_version, raw_path)
+        results = [None] * n_samples
+        with ProcessPoolExecutor(
+            max_workers=workers, mp_context=ctx,
+            initializer=parallel_label.init_worker, initargs=init_args,
+        ) as pool:
+            for si, rec_json, status in pool.map(parallel_label.label_sample,
+                                                 range(n_samples)):
+                results[si] = record_from_json(rec_json)
+                if status == "hit":
+                    n_hit += 1
+                elif status == "abstained":
+                    n_abstain += 1
+                else:
+                    n_computed += 1
+        records = results
     print(f"Labeled {len(records)} samples "
           f"(cache hits={n_hit}, computed={n_computed}, abstained={n_abstain})")
     # A few abstentions (malformed teacher JSON) are fine — they are masked out of
