@@ -1,0 +1,70 @@
+version: 0.2
+
+# Full-scale end-to-end launcher: wf_sharded_full_run over ALL L2D episodes.
+# Gate check summary (all cleared 2026-07-13):
+#   * decode-dedup implemented + 16.42x speedup measured on GPU
+#   * byte-equality vs legacy pack verified (pool + cam_i.jpg)
+#   * complete adversarial review (2 rounds; 1 real bug fixed, 13 false alarms)
+#   * 76 unit tests pass on EC2 including end-to-end byte-equality
+#   * 10ep dedup fan-out SUCCEEDED (ac8c6tf8kbhpzn8pjg4h)
+#   * train_il one-step verified: traj/jepa/reason all finite, grad flow OK,
+#     optimizer.step OK on real dedup shard
+#
+# Override at start-build:
+#   EPISODES (0 = ALL L2D), PARTITION_SIZE (partition granularity),
+#   BACKBONE, EPOCHS, BATCH_SIZE, LR, VAL_FRACTION, NUM_WORKERS.
+
+env:
+  variables:
+    AWS_DEFAULT_REGION: us-west-2
+    FLYTE_PROJECT: auto-e2e
+    FLYTE_DOMAIN: development
+    # 0 = ALL episodes of L2D (currently ~100k). partition_size=100 → ~1000
+    # partitions of 100 episodes each — cost-manageable fan-out.
+    EPISODES: "0"
+    PARTITION_SIZE: "100"
+    REASONING_TEACHER: "openai_compatible"
+    BACKBONE: "swin_v2_tiny"
+    EPOCHS: "3"
+    # Small batch: WM windows are memory-heavy. grad_accum=4 for effective bs=4.
+    BATCH_SIZE: "1"
+    GRAD_ACCUM_STEPS: "4"
+    LR: "1e-4"
+    # 10% held-out val (episode-level group split).
+    VAL_FRACTION: "0.1"
+    NUM_WORKERS: "4"
+    # Guard against fan-out explosion; raise deliberately if a smaller
+    # partition_size becomes desirable.
+    MAX_PARTITIONS: "2000"
+
+phases:
+  install:
+    commands:
+      - pip install -q flytekit numpy torch kubernetes --extra-index-url https://download.pytorch.org/whl/cpu
+  build:
+    commands:
+      - |
+        cat > /tmp/flyte.yaml << EOF
+        admin:
+          endpoint: dns:///k8s-flyte-flyteadm-be92e7737c-cf0d1a0f3df10f77.elb.us-west-2.amazonaws.com:81
+          insecure: true
+        EOF
+      # Fires the execution on the cluster; this build exits when the workflow
+      # is REGISTERED (non-blocking wrt the workflow's actual runtime).
+      - >
+        pyflyte --config /tmp/flyte.yaml run --remote
+        --project $FLYTE_PROJECT
+        --domain $FLYTE_DOMAIN
+        Platform/pipelines/workflows.py wf_sharded_full_run
+        --dataset "yaak-ai/L2D"
+        --episodes $EPISODES
+        --partition_size $PARTITION_SIZE
+        --reasoning_teacher $REASONING_TEACHER
+        --max_partitions $MAX_PARTITIONS
+        --backbone $BACKBONE
+        --epochs $EPOCHS
+        --batch_size $BATCH_SIZE
+        --grad_accum_steps $GRAD_ACCUM_STEPS
+        --lr $LR
+        --val_fraction $VAL_FRACTION
+        --num_workers $NUM_WORKERS
