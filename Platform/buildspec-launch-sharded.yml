@@ -34,15 +34,15 @@ phases:
         EOF
       # --remote registers this file's entities then launches the workflow on the
       # cluster. Non-blocking: the execution runs on Flyte after this build exits.
-      # bool flags in pyflyte's click CLI are --flag / --no-flag, not "--flag false";
-      # world_model defaults False, so we just omit it (imitation-only shards) for
-      # this verification. dataset is the enum MEMBER NAME (L2D).
+      # pyflyte's click CLI takes the enum VALUE, not the member name — so
+      # --dataset "yaak-ai/L2D" (NOT L2D). bool flags are --flag / --no-flag, and
+      # world_model defaults False, so we omit it (imitation-only shards) here.
       - >
         pyflyte --config /tmp/flyte.yaml run --remote
         --project $FLYTE_PROJECT
         --domain $FLYTE_DOMAIN
         Platform/pipelines/workflows.py wf_create_dataset_sharded
-        --dataset L2D
+        --dataset "yaak-ai/L2D"
         --episodes $EPISODES
         --partition_size $PARTITION_SIZE
         --reasoning_teacher $REASONING_TEACHER
