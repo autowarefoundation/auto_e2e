@@ -267,6 +267,17 @@ class L2DDataset(Dataset):
         ep_idx, _ = self._samples[idx]
         return f"l2d-e{ep_idx:06d}"
 
+    def frame_index(self, idx: int) -> int:
+        """Episode-local frame index (0-based within the episode) for sample ``idx``.
+
+        Used to select the 1 Hz reasoning-label subset (label iff
+        ``frame_index % stride == 0``) — a STABLE function of the sample's identity,
+        so the labeled subset is partition-independent (#121 §3.4d).
+        """
+        ep_idx, row = self._samples[idx]
+        ep_start, _ = self._episode_ranges[ep_idx]
+        return row - ep_start
+
     def window_frame_ids(self, idx: int) -> dict:
         """Per-(step,view) content-addressed frame ids for the WM window (#121 §3.4d).
 
