@@ -29,10 +29,14 @@ spec:
             matchLabels:
               app: console-web
         # The internal ALB ENIs (target-type: ip forwards straight to pods).
+        # The cluster has THREE internal-elb subnets (one per AZ); the ALB may
+        # place an ENI in any of them, so all three CIDRs must be admitted.
         - ipBlock:
             cidr: ${ALB_SUBNET_CIDR_A}
         - ipBlock:
             cidr: ${ALB_SUBNET_CIDR_B}
+        - ipBlock:
+            cidr: ${ALB_SUBNET_CIDR_C}
       ports:
         - protocol: TCP
           port: 8080
@@ -54,6 +58,8 @@ spec:
             cidr: ${ALB_SUBNET_CIDR_A}
         - ipBlock:
             cidr: ${ALB_SUBNET_CIDR_B}
+        - ipBlock:
+            cidr: ${ALB_SUBNET_CIDR_C}
       ports:
         - protocol: TCP
           port: 3000

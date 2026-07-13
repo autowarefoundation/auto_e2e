@@ -26,22 +26,24 @@ ECR_PREFIX="${ECR_PREFIX:-${AWS_ACCOUNT_ID}.dkr.ecr.us-west-2.amazonaws.com}"
 # CloudFront origin is only known after infra Phase 2; default to empty on the
 # first apply. The frontend uses same-origin /api so CORS is not on the hot path.
 CONSOLE_ORIGIN="${CONSOLE_ORIGIN:-}"
-# Private-subnet CIDRs where the internal ALB ENIs live (terraform
-# private-subnet outputs). NOT the whole VPC CIDR — under VPC CNI that would
-# match every pod and make the NetworkPolicy a no-op.
-: "${ALB_SUBNET_CIDR_A:?Set ALB_SUBNET_CIDR_A (first private-subnet CIDR)}"
-: "${ALB_SUBNET_CIDR_B:?Set ALB_SUBNET_CIDR_B (second private-subnet CIDR)}"
+# Private-subnet (internal-elb) CIDRs where the internal ALB ENIs live. NOT the
+# whole VPC CIDR — under VPC CNI that would match every pod and make the
+# NetworkPolicy a no-op. The cluster has THREE internal-elb subnets (one per
+# AZ) and the ALB may land an ENI in any of them, so all three are required.
+: "${ALB_SUBNET_CIDR_A:?Set ALB_SUBNET_CIDR_A (first internal-elb subnet CIDR)}"
+: "${ALB_SUBNET_CIDR_B:?Set ALB_SUBNET_CIDR_B (second internal-elb subnet CIDR)}"
+: "${ALB_SUBNET_CIDR_C:?Set ALB_SUBNET_CIDR_C (third internal-elb subnet CIDR)}"
 
 export ECR_PREFIX CONSOLE_ALB_SG_ID CONSOLE_ORIGIN
-export ALB_SUBNET_CIDR_A ALB_SUBNET_CIDR_B
+export ALB_SUBNET_CIDR_A ALB_SUBNET_CIDR_B ALB_SUBNET_CIDR_C
 
 echo "Deploying DataModelConsole to EKS..."
 echo "  ECR_PREFIX:         ${ECR_PREFIX}"
 echo "  CONSOLE_ALB_SG_ID:  ${CONSOLE_ALB_SG_ID}"
 echo "  CONSOLE_ORIGIN:     ${CONSOLE_ORIGIN:-(unset; same-origin /api)}"
-echo "  ALB_SUBNET_CIDRs:   ${ALB_SUBNET_CIDR_A}, ${ALB_SUBNET_CIDR_B}"
+echo "  ALB_SUBNET_CIDRs:   ${ALB_SUBNET_CIDR_A}, ${ALB_SUBNET_CIDR_B}, ${ALB_SUBNET_CIDR_C}"
 
-SUBST_VARS='${ECR_PREFIX} ${CONSOLE_ALB_SG_ID} ${CONSOLE_ORIGIN} ${ALB_SUBNET_CIDR_A} ${ALB_SUBNET_CIDR_B}'
+SUBST_VARS='${ECR_PREFIX} ${CONSOLE_ALB_SG_ID} ${CONSOLE_ORIGIN} ${ALB_SUBNET_CIDR_A} ${ALB_SUBNET_CIDR_B} ${ALB_SUBNET_CIDR_C}'
 
 # Namespace first, then config/identity, then workloads, then network + policy.
 kubectl apply -f "${K8S_DIR}/namespace.yaml"
