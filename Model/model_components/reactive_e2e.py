@@ -77,10 +77,24 @@ class ReactiveE2E(nn.Module):
         self.enable_reasoning = enable_reasoning
         self.reasoning_mode = reasoning_mode if enable_reasoning else "none"
         self.ReasoningHead = None
+        # TWO INDEPENDENT SWITCHES, deliberately not one:
+        #   bev_context_dim  -> the head SEES the unpooled BEV (#121's fix).
+        #   reasoning_bev_detach -> whether the reasoning loss also RESHAPES the
+        #       shared BEV/backbone through that path.
+        # This repo has twice found that routing an auxiliary gradient into the
+        # shared trunk HURTS at low data (the JEPA floor -> detach_backbone; the
+        # non-zero-init visual_history_proj). Flipping both at once would make a
+        # result unattributable, so the gradient path is opt-in and OFF by default.
+        self.reasoning_bev_detach = True
         if enable_reasoning:
             rkw = dict(reasoning_kwargs or {})
             rkw.setdefault("visual_history_dim", visual_history_dim)
             rkw.setdefault("ego_context_dim", egomotion_dim)
+            self.reasoning_bev_detach = bool(rkw.pop("bev_detach", True))
+            # The BEV the head attends is the FUSED map+image BEV, so its channel
+            # count is embed_dim. Derive it rather than making the caller repeat it.
+            if rkw.get("bev_context_dim") is True:
+                rkw["bev_context_dim"] = embed_dim
             self.ReasoningHead = HorizonReasoningHead(**rkw)
 
         # Trajectory decoder — swappable via planner_mode (gru, flow_matching).
@@ -155,9 +169,20 @@ class ReactiveE2E(nn.Module):
         reasoning_latent = None
         reasoning_horizon_tokens = None
         if self.ReasoningHead is not None:
+            # fused_features is already computed above, so the BEV is sitting at
+            # the call site: no reordering needed. Detached by default -> the head
+            # SEES the spatial BEV without the reasoning loss reshaping the shared
+            # trunk (see the two-switch note in __init__).
+            bev_context = None
+            if self.ReasoningHead.bev_tokenizer is not None:
+                bev_context = (
+                    fused_features.detach() if self.reasoning_bev_detach
+                    else fused_features
+                )
             reasoning_pred = self.ReasoningHead(
                 visual_ctx, ego_ctx,
                 route_context=route_context, map_context=map_context,
+                bev_context=bev_context,
             )
             reasoning_latent = reasoning_pred.reasoning_latent
             reasoning_horizon_tokens = reasoning_pred.horizon_tokens

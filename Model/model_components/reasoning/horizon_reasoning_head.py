@@ -69,6 +69,54 @@ class AttentionPool(nn.Module):
         return pooled.squeeze(1)                   # [B, D]
 
 
+class BevContextTokenizer(nn.Module):
+    """Turn the unpooled BEV ``[B, C, H, W]`` into spatial context tokens.
+
+    Motivation (the #121 root cause): the head's inputs (``visual_history`` +
+    ``ego_context``) are a strict subset of the planner's, so by the
+    data-processing inequality its latent cannot carry trajectory information the
+    planner lacks — and the coupling correctly learns ``alpha ~ 0``. The one
+    signal the planner *discards* is the BEV's spatial structure: the bezier
+    planner reduces it with ``bev_features.mean(dim=(2, 3))``. Giving the head the
+    UNPOOLED BEV gives it *where* a hazard is, which the mean-pooled planner
+    context provably cannot reconstruct.
+
+    Attending the BEV cell-per-token is not viable (the default grid is 450x300 =
+    135k cells), so it is adaptively pooled to a coarse ``grid`` (default 16x16 =
+    256 tokens): cheap enough for a 1 Hz branch, but still *spatial* — unlike the
+    mean pool, it preserves location. ``grid`` is the natural ablation knob.
+
+    Args:
+        in_channels: BEV feature channels (the fused ``embed_dim``).
+        hidden_dim: decoder model dimension the tokens are projected to.
+        grid: coarse grid the BEV is pooled to, ``(h, w)``.
+    """
+
+    def __init__(
+        self,
+        in_channels: int,
+        hidden_dim: int,
+        grid: tuple = (16, 16),
+    ) -> None:
+        super().__init__()
+        self.grid = grid
+        self.pool = nn.AdaptiveAvgPool2d(grid)
+        self.proj = nn.Linear(in_channels, hidden_dim)
+        self.norm = nn.LayerNorm(hidden_dim)
+        # Learned 2-D position, flattened row-major like the tokens, so the
+        # decoder can tell cells apart. Without it the grid is a bag of cells and
+        # the whole point (location) is lost again.
+        self.pos_embed = nn.Parameter(
+            torch.randn(1, grid[0] * grid[1], hidden_dim) * 0.02
+        )
+
+    def forward(self, bev: torch.Tensor) -> torch.Tensor:
+        """``[B, C, H, W]`` -> ``[B, grid_h * grid_w, hidden_dim]``."""
+        pooled = self.pool(bev)                       # [B, C, gh, gw]
+        tokens = pooled.flatten(2).transpose(1, 2)    # [B, gh*gw, C]
+        return self.norm(self.proj(tokens) + self.pos_embed)
+
+
 class HorizonReasoningHead(nn.Module):
     """Predict action-relevant reasoning over five horizons from the 896 history.
 
@@ -80,13 +128,19 @@ class HorizonReasoningHead(nn.Module):
         num_layers / num_heads / dropout: horizon-decoder config.
         route_context_dim / map_context_dim: optional extra context sources;
             omit (None) to not build the corresponding token/projection.
+        bev_context_dim: if set, build a :class:`BevContextTokenizer` over the
+            fused BEV's channel count, so the horizon queries also attend the
+            UNPOOLED BEV grid (the #121 fix). None (default) keeps the head's
+            inputs exactly as they are today.
+        bev_grid: coarse grid the BEV is pooled to (ablation knob).
         taxonomy: label registry (defaults to :data:`DEFAULT_TAXONOMY`).
         teacher_embedding_dim: if set, build a training-only alignment head
             producing ``student_reasoning_embedding [B, 5, D]`` (default None).
 
     Forward:
         head(visual_history[B,896], ego_context[B,256],
-             route_context=None, map_context=None) -> HorizonReasoningPrediction
+             route_context=None, map_context=None,
+             bev_context=None) -> HorizonReasoningPrediction
     """
 
     def __init__(
@@ -100,6 +154,8 @@ class HorizonReasoningHead(nn.Module):
         dropout: float = 0.1,
         route_context_dim: Optional[int] = None,
         map_context_dim: Optional[int] = None,
+        bev_context_dim: Optional[int] = None,
+        bev_grid: tuple = (16, 16),
         taxonomy: Optional[ReasoningTaxonomy] = None,
         teacher_embedding_dim: Optional[int] = None,
     ) -> None:
@@ -129,6 +185,12 @@ class HorizonReasoningHead(nn.Module):
         self.map_proj = (
             _context_mlp(map_context_dim, hidden_dim)
             if map_context_dim is not None else None
+        )
+        # The BEV is the one SPATIAL source: the others are [B, D] vectors that
+        # each become a single token, while this becomes grid_h*grid_w tokens.
+        self.bev_tokenizer = (
+            BevContextTokenizer(bev_context_dim, hidden_dim, grid=bev_grid)
+            if bev_context_dim is not None else None
         )
 
         # Five learned horizon queries: now, +1s, +2s, +3s, +4s.
@@ -175,6 +237,7 @@ class HorizonReasoningHead(nn.Module):
         ego_context: torch.Tensor,
         route_context: Optional[torch.Tensor],
         map_context: Optional[torch.Tensor],
+        bev_context: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Stack the available per-source tokens into ``[B, N_context, hidden]``.
 
@@ -186,7 +249,15 @@ class HorizonReasoningHead(nn.Module):
             tokens.append(self.route_proj(route_context))
         if self.map_proj is not None and map_context is not None:
             tokens.append(self.map_proj(map_context))
-        return torch.stack(tokens, dim=1)  # [B, N_context, hidden]
+        context = torch.stack(tokens, dim=1)  # [B, N_vector, hidden]
+
+        # The BEV contributes a SEQUENCE of spatial tokens, not one vector token,
+        # so it is concatenated rather than stacked. The decoder interface is
+        # unchanged: only the context set grows.
+        if self.bev_tokenizer is not None and bev_context is not None:
+            bev_tokens = self.bev_tokenizer(bev_context)  # [B, gh*gw, hidden]
+            context = torch.cat([context, bev_tokens], dim=1)
+        return context
 
     def forward(
         self,
@@ -194,6 +265,7 @@ class HorizonReasoningHead(nn.Module):
         ego_context: torch.Tensor,
         route_context: Optional[torch.Tensor] = None,
         map_context: Optional[torch.Tensor] = None,
+        bev_context: Optional[torch.Tensor] = None,
     ) -> HorizonReasoningPrediction:
         """Run the reasoning head.
 
@@ -202,13 +274,15 @@ class HorizonReasoningHead(nn.Module):
             ego_context: ``[B, ego_context_dim]`` ego context from TemporalMemory.
             route_context / map_context: optional extra context (omitted if None
             or if the head was built without the corresponding projection).
+            bev_context: optional UNPOOLED BEV ``[B, C, H, W]``. Omitted if None
+            or if the head was built without ``bev_context_dim``.
 
         Returns:
             :class:`HorizonReasoningPrediction`.
         """
         B = visual_history.shape[0]
         context_tokens = self._context_tokens(
-            visual_history, ego_context, route_context, map_context
+            visual_history, ego_context, route_context, map_context, bev_context
         )  # [B, N_context, hidden]
 
         queries = self.horizon_queries.unsqueeze(0).expand(B, -1, -1)  # [B, 5, hidden]
