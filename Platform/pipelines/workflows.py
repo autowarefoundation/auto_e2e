@@ -382,16 +382,17 @@ def data_processing(
     raw_path = raw_data.download()
     print(f"Processing raw data from: {raw_path} (dataset={dataset.value})")
 
-    # Keep the pack enumeration aligned with the label enumeration for full label
-    # COVERAGE. With the global sample_uid (#121 §3.1) a mis-JOIN is no longer
-    # possible — the uid is (episode, frame), independent of list position — but
-    # the WM flag changes which frames are VALID (WM margins), so packing with a
-    # different WM setting than labeling would leave some packed frames unlabeled.
-    # Force WM on when labels are present so the packed set == the labeled set.
+    # Reasoning labels present ⇒ this is a full-loss run, and the JEPA/world-model
+    # loss needs the WM window (future frames) packed — so force WM on. Note the
+    # sample SET does NOT depend on the WM flag (egomotion margins 64/64 dominate
+    # the WM margins 30/40, so enumeration is identical), and the label set is now
+    # a 1 Hz SUBSET of the 10 Hz packed set by design (§3.4d): the ~9/10 unlabeled
+    # samples pack without reasoning.json and mask out of the reasoning loss, while
+    # still training reactive + JEPA. The global sample_uid keeps the JOIN correct.
     # (NVIDIA has no WM windows and no labels.)
     if reasoning_labels is not None and dataset != Dataset.NVIDIA_PHYSICAL_AI and not world_model:
-        print("reasoning_labels present → forcing world_model=True so packing "
-              "enumerates the same sample set the labels were generated over.")
+        print("reasoning_labels present → forcing world_model=True so the JEPA "
+              "loss has its WM window (future frames) packed.")
         world_model = True
 
     # Build the appropriate Dataset. Both are RAW pre-extraction sources: they
