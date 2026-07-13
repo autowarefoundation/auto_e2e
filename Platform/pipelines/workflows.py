@@ -211,14 +211,18 @@ def _loader_projection(loader, device):
     container_image=DATA_PREP_IMAGE,
     # Raw video is large: L2D is ~5-7 GB/episode of multi-cam mp4, so 10 episodes
     # blew past the old 50Gi ephemeral limit (pod evicted mid-download). Size for
-    # tens of episodes; the request+limit both scale so the node reserves enough.
+    # HUNDREDS of episodes per partition (#121 full-run): 500 eps × 6 cams × ~100
+    # video files/cam × 500 MB ≈ 300 GB p50, but heavy-tailed to ~500 GB p95.
+    # 800Gi ephemeral leaves ~30% headroom over p95 with room for the copytree
+    # hardlink tree (inode-only, no data copy). Node's EBS root must be ≥ 900Gi;
+    # Karpenter auto-mode provisions on demand.
     # mem needs an explicit LIMIT (not just a request): at 50 episodes the pod was
     # OOMKilled (137) with only a request — without a limit the kernel reclaims it
     # under node memory pressure. Raise to 48Gi and set the limit so the pod owns
-    # that memory. (The copytree below is also removed to avoid duplicating the
-    # raw tree.)
-    requests=Resources(cpu="2", mem="32Gi", ephemeral_storage="400Gi"),
-    limits=Resources(mem="48Gi", ephemeral_storage="450Gi"),
+    # that memory. cpu bumped to 4 so hf_transfer's ~3-4 parallel workers can
+    # saturate; download stays I/O-bound but at least isn't CPU-throttled.
+    requests=Resources(cpu="4", mem="32Gi", ephemeral_storage="700Gi"),
+    limits=Resources(mem="48Gi", ephemeral_storage="800Gi"),
     secret_requests=[Secret(group="hf-token", key="HF_TOKEN",
                             mount_requirement=Secret.MountType.ENV_VAR)],
     # "Ingest once, never again" (#121 §3.4a): cache on (dataset, group_ids,
