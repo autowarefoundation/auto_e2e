@@ -704,6 +704,20 @@ def train_il(
     # (legacy in-sample behaviour). The split is a stable per-sample hash of
     # __key__, so train and eval never share a sample and both tasks agree.
     val_fraction: float = 0.0,
+    # --- Spatial BEV context for the reasoning head (#121) ---
+    # Flat scalars rather than a reasoning_kwargs dict: these are the knobs a
+    # Flyte run is launched with from the CLI, and a dict parameter cannot be set
+    # there. TWO switches, deliberately not one:
+    #   reasoning_bev_input  -> the head SEES the unpooled BEV.
+    #   reasoning_bev_detach -> whether the reasoning loss also RESHAPES the
+    #                           shared trunk through that path.
+    # This repo has twice found auxiliary gradient into the shared backbone hurts
+    # at low data (the JEPA floor -> detach_backbone; the non-zero-init
+    # visual_history_proj). Flipping both at once makes a result unattributable,
+    # so see-but-don't-reshape is the default and the gradient path is opt-in.
+    reasoning_bev_input: bool = False,
+    reasoning_bev_grid: int = 16,
+    reasoning_bev_detach: bool = True,
 ) -> TrainOutput:
     """Train AutoE2E model on pre-extracted WebDataset shards.
 
@@ -790,14 +804,41 @@ def train_il(
 
     # Model. fusion_mode is gone (BEV hardcoded inside ReactiveE2E); the model
     # now also owns the map branch, so its forward requires a map_input tensor.
+    reasoning_kwargs: Optional[dict] = None
+    if enable_reasoning and reasoning_bev_input:
+        # bev_context_dim=True -> ReactiveE2E derives the channel count from the
+        # FUSED BEV (embed_dim), so the two cannot drift apart.
+        reasoning_kwargs = {
+            "bev_context_dim": True,
+            "bev_grid": (reasoning_bev_grid, reasoning_bev_grid),
+            "bev_detach": reasoning_bev_detach,
+        }
+
     model = AutoE2E(
         backbone=bb, num_views=num_views, embed_dim=256,
         is_pretrained=True,
         enable_reasoning=enable_reasoning, reasoning_mode=reasoning_mode,
+        reasoning_kwargs=reasoning_kwargs,
         enable_world_model=enable_world_model,
     ).to(device)
     print(f"Reasoning: {'on' if enable_reasoning else 'off'}"
           + (f" (mode={reasoning_mode})" if enable_reasoning else ""))
+    if enable_reasoning and reasoning_bev_input:
+        print(f"  spatial BEV context: {reasoning_bev_grid}x{reasoning_bev_grid} grid, "
+              f"gradient to shared trunk: {'OFF (see-only)' if reasoning_bev_detach else 'ON'}")
+        # Say the geometry out loud, from the shard manifests. The whole point of
+        # feeding the head the unpooled BEV is that it carries WHERE a hazard is.
+        # On a dataset without calibration the grid is a learned warp (a cell maps
+        # to nowhere), so a null result would be uninterpretable — we could not tell
+        # whether the idea is wrong or the BEV is meaningless. Better a loud line in
+        # the log than a silently worthless run.
+        from data_parsing.pre_extracted import load_projection_from_manifest
+        for sd in shard_dirs:
+            _, geom = load_projection_from_manifest(sd)
+            note = ("  <-- WARNING: pseudo geometry. The BEV grid is a learned warp, "
+                    "not a bird's-eye view; a null result here is not interpretable."
+                    if geom == "pseudo" else "")
+            print(f"  geometry[{os.path.basename(str(sd))}]: {geom!r}{note}")
     print(f"World Model: {'on' if enable_world_model else 'off'}")
 
     # Optimizer + Loss
