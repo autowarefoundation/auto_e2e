@@ -6,12 +6,15 @@ set -euo pipefail
 #
 # Requires: kubectl configured for the auto-e2e-platform cluster, and the
 # following resolvable from env or terraform output:
-#   ACM_CERT_ARN          HTTPS listener cert for the internal ALB
-#   CONSOLE_ALB_SG_ID      SG that restricts the ALB to the CloudFront prefix list
-#                          (terraform output console_alb_sg_id)
+#   CONSOLE_ALB_SG_ID      SG that restricts the ALB to CloudFront's managed
+#                          VPC-origin ENIs (terraform output console_alb_sg_id)
 #   CONSOLE_ORIGIN         CloudFront console origin, e.g. https://dXXXX.cloudfront.net
+#                          (known only after infra Phase 2; pass "" on the first
+#                          apply — CORS is off the same-origin /api path anyway)
 #   AWS_ACCOUNT_ID         auto-detected via STS if unset
-#   CONSOLE_S3_ROLE_ARN    informational only (S3 access is via Pod Identity)
+#
+# No ACM_CERT_ARN: the internal ALB listens on HTTP:80 (CloudFront terminates
+# viewer TLS and reaches the ALB over http-only through its VPC origin).
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 K8S_DIR="${SCRIPT_DIR}/k8s"
@@ -19,26 +22,26 @@ K8S_DIR="${SCRIPT_DIR}/k8s"
 AWS_ACCOUNT_ID="${AWS_ACCOUNT_ID:-$(aws sts get-caller-identity --query Account --output text)}"
 ECR_PREFIX="${ECR_PREFIX:-${AWS_ACCOUNT_ID}.dkr.ecr.us-west-2.amazonaws.com}"
 
-: "${ACM_CERT_ARN:?Set ACM_CERT_ARN for the ALB HTTPS listener}"
-: "${CONSOLE_ALB_SG_ID:?Set CONSOLE_ALB_SG_ID (terraform output console_alb_sg_id; SG admits HTTPS only from the CloudFront managed VPC-origin ENIs)}"
-: "${CONSOLE_ORIGIN:?Set CONSOLE_ORIGIN (CloudFront console origin URL)}"
+: "${CONSOLE_ALB_SG_ID:?Set CONSOLE_ALB_SG_ID (terraform output console_alb_sg_id; SG admits HTTP:80 only from the CloudFront managed VPC-origin ENIs)}"
+# CloudFront origin is only known after infra Phase 2; default to empty on the
+# first apply. The frontend uses same-origin /api so CORS is not on the hot path.
+CONSOLE_ORIGIN="${CONSOLE_ORIGIN:-}"
 # Private-subnet CIDRs where the internal ALB ENIs live (terraform
 # private-subnet outputs). NOT the whole VPC CIDR — under VPC CNI that would
 # match every pod and make the NetworkPolicy a no-op.
 : "${ALB_SUBNET_CIDR_A:?Set ALB_SUBNET_CIDR_A (first private-subnet CIDR)}"
 : "${ALB_SUBNET_CIDR_B:?Set ALB_SUBNET_CIDR_B (second private-subnet CIDR)}"
 
-export ECR_PREFIX ACM_CERT_ARN CONSOLE_ALB_SG_ID CONSOLE_ORIGIN
+export ECR_PREFIX CONSOLE_ALB_SG_ID CONSOLE_ORIGIN
 export ALB_SUBNET_CIDR_A ALB_SUBNET_CIDR_B
 
 echo "Deploying DataModelConsole to EKS..."
 echo "  ECR_PREFIX:         ${ECR_PREFIX}"
-echo "  ACM_CERT_ARN:       ${ACM_CERT_ARN}"
 echo "  CONSOLE_ALB_SG_ID:  ${CONSOLE_ALB_SG_ID}"
-echo "  CONSOLE_ORIGIN:     ${CONSOLE_ORIGIN}"
+echo "  CONSOLE_ORIGIN:     ${CONSOLE_ORIGIN:-(unset; same-origin /api)}"
 echo "  ALB_SUBNET_CIDRs:   ${ALB_SUBNET_CIDR_A}, ${ALB_SUBNET_CIDR_B}"
 
-SUBST_VARS='${ECR_PREFIX} ${ACM_CERT_ARN} ${CONSOLE_ALB_SG_ID} ${CONSOLE_ORIGIN} ${ALB_SUBNET_CIDR_A} ${ALB_SUBNET_CIDR_B}'
+SUBST_VARS='${ECR_PREFIX} ${CONSOLE_ALB_SG_ID} ${CONSOLE_ORIGIN} ${ALB_SUBNET_CIDR_A} ${ALB_SUBNET_CIDR_B}'
 
 # Namespace first, then config/identity, then workloads, then network + policy.
 kubectl apply -f "${K8S_DIR}/namespace.yaml"
