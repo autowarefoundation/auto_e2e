@@ -8,10 +8,14 @@ WM dataset. This module moves the DECODE + JPEG-encode into worker processes
 parent just appends those bytes to the shard tar (fast, single-threaded, so the
 tar stays valid). Only the small byte blobs cross the process boundary.
 
-The worker returns exactly the members the serial packer wrote, so the shard
-layout is byte-for-byte identical (cam_i.jpg, map.jpg, hist/fut_*.jpg, ego.npy,
-meta.json, calib.json, reasoning.json) — reasoning.json is JOINed in the parent
-(labels_by_id is not shipped to workers).
+Per-sample members: cam_i.jpg (reactive current frame), map.jpg, ego.npy,
+meta.json, calib.json, and — for WM shards — window_index.json (§3.4d). The WM
+window PIXELS are NOT per-sample anymore: the worker returns them in a separate
+``pool`` dict keyed by a GLOBAL frame_id, and the parent writes each frame_id to a
+shared ``pool/`` dir exactly ONCE, deduping the ~8x cross-sample frame overlap
+(10Hz samples × 1Hz stride-10 window). reasoning.json is JOINed in the parent
+(labels_by_id is not shipped to workers). The loader rebuilds identical
+history_frames/future_frames from window_index.json + the pool.
 """
 
 from __future__ import annotations
@@ -71,14 +75,23 @@ def _jpeg(frame_tensor) -> bytes:
     return b.getvalue()
 
 
-def pack_sample(si: int) -> Tuple[str, int, Dict[str, bytes]]:
-    """Decode + encode sample ``si`` into ``{member_suffix: bytes}``.
+def pack_sample(si: int) -> Tuple[str, int, Dict[str, bytes], Dict[str, bytes]]:
+    """Decode + encode sample ``si`` into per-sample members + a frame-pool
+    contribution (#121 §3.1, §3.4d dedup).
 
-    Returns ``(sample_uid, num_views, members)`` (#121 §3.1): the parent prefixes
-    each member with ``{sample_uid}.`` and JOINs reasoning.json by the SAME uid the
-    labeler used — so shard keys are partition-independent. ``num_views`` lets the
-    parent fill the manifest. ``meta.json`` carries the raw episode/clip identity +
-    ``split_group_uid`` (the train/val split unit) for downstream use.
+    Returns ``(sample_uid, num_views, members, pool)``:
+      * ``members`` = the sample's OWN members (prefixed ``{uid}.`` by the parent):
+        ``cam_i.jpg`` (reactive current frame), ``map.jpg``, ``ego.npy``,
+        ``meta.json``, ``calib.json``, and — for WM shards — ``window_index.json``
+        (the (step,view)→frame_id map, NOT the pixels).
+      * ``pool`` = ``{frame_id: jpeg_bytes}`` for THIS sample's WM window frames.
+        The parent writes each frame_id to the shared ``pool/`` dir ONCE (dedup
+        across the ~8 overlapping neighbour windows), so the same physical frame is
+        never re-encoded/stored. Empty for imitation-only (non-WM) samples.
+
+    The reasoning.json JOIN and split bucketing are unchanged (still keyed by uid /
+    meta.json). Boundary safety: frame_ids come from window_frame_ids, which is
+    clamped to the sample's own episode.
     """
     import numpy as np
     import torch
@@ -87,6 +100,7 @@ def pack_sample(si: int) -> Tuple[str, int, Dict[str, bytes]]:
     uid = _DS.sample_uid(si)
     split_group = _DS.split_group_uid(si)
     members: Dict[str, bytes] = {}
+    pool: Dict[str, bytes] = {}
 
     visual = sample["visual_tiles"]            # (V, 3, H, W)
     for cam_i in range(visual.shape[0]):
@@ -101,15 +115,22 @@ def pack_sample(si: int) -> Tuple[str, int, Dict[str, bytes]]:
     if map_tile is not None and float(map_tile.abs().max()) > 0:
         members["map.jpg"] = _jpeg(map_tile)
 
+    # World-Model window (#13/#3.4d): store the frames in the shared pool keyed by
+    # a GLOBAL frame_id, and record only the (step,view)→frame_id index per sample.
+    # Because consecutive 10Hz samples' 1Hz windows overlap 7/8, the pool collapses
+    # that duplication (parent dedups across samples). Same frame set as before, so
+    # the loader rebuilds identical history_frames/future_frames tensors.
     history_win = sample.get("history_frames")   # (T, V, 3, H, W)
     future_win = sample.get("future_frames")     # (F, V, 3, H, W)
     if history_win is not None and future_win is not None:
+        ids = _DS.window_frame_ids(si)           # {"history": [[id/view]/step], "future": [...]}
         for t in range(history_win.shape[0]):
             for v in range(history_win.shape[1]):
-                members[f"hist_{t}_cam_{v}.jpg"] = _jpeg(history_win[t, v])
+                pool[ids["history"][t][v]] = _jpeg(history_win[t, v])
         for fh in range(future_win.shape[0]):
             for v in range(future_win.shape[1]):
-                members[f"fut_{fh}_cam_{v}.jpg"] = _jpeg(future_win[fh, v])
+                pool[ids["future"][fh][v]] = _jpeg(future_win[fh, v])
+        members["window_index.json"] = json.dumps(ids).encode()
 
     ego_hist = sample["egomotion_history"]
     traj = sample["trajectory_target"]
@@ -124,4 +145,4 @@ def pack_sample(si: int) -> Tuple[str, int, Dict[str, bytes]]:
     }).encode()
     members["calib.json"] = _CALIB_BYTES
 
-    return uid, int(visual.shape[0]), members
+    return uid, int(visual.shape[0]), members, pool
