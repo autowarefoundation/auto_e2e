@@ -32,27 +32,38 @@ phases:
           -t ${ECR_URL}/auto-e2e/eval:latest
           -t ${ECR_URL}/auto-e2e/offline-rl:latest
           -f Platform/docker/training/Dockerfile .
-      # Push the three tags in parallel; ECR dedups blobs, so the transfer is
-      # paid once.
-      - echo "=== Pushing training/eval/offline-rl in parallel ==="
-      - docker push ${ECR_URL}/auto-e2e/training:latest &
-      - docker push ${ECR_URL}/auto-e2e/eval:latest &
-      - docker push ${ECR_URL}/auto-e2e/offline-rl:latest &
 
-      # ── Data-prep ── independent Dockerfile (~5GB: torch cpu + lerobot +
-      # flytekit + physical_ai_av). Build in PARALLEL with the training push;
-      # --cache-from turns Model/-only edits into a ~30s rebuild instead of
-      # re-installing every pip dep from scratch.
-      - echo "=== Building data-prep in parallel with training push ==="
+      # ── Data-prep ── independent Dockerfile (~5GB). Build BEFORE pushing so
+      # the whole build stage is done before we start any push (the previous
+      # parallel-with-push scheme raced with CodeBuild command boundaries and
+      # sometimes returned before data-prep finished). --cache-from turns
+      # Model/-only edits into a ~30s rebuild instead of full pip reinstall.
+      - echo "=== Building data-prep image ==="
       - DOCKER_BUILDKIT=1 docker build
           --cache-from ${ECR_URL}/auto-e2e/data-prep:latest
           --build-arg BUILDKIT_INLINE_CACHE=1
           -t ${ECR_URL}/auto-e2e/data-prep:latest
-          -f Platform/docker/data-prep/Dockerfile . &
-      # Wait for both the training pushes and the data-prep build.
-      - wait
-      - echo "=== Pushing data-prep ==="
-      - docker push ${ECR_URL}/auto-e2e/data-prep:latest
+          -f Platform/docker/data-prep/Dockerfile .
+
+      # ── Push ALL images in parallel now that every image is built. ECR dedups
+      # blobs so the training/eval/offline-rl push is paid once, and data-prep
+      # ships in parallel — much faster than the old sequential push.
+      - echo "=== Pushing all images in parallel ==="
+      - |
+        docker push ${ECR_URL}/auto-e2e/training:latest &
+        PID_T=$!
+        docker push ${ECR_URL}/auto-e2e/eval:latest &
+        PID_E=$!
+        docker push ${ECR_URL}/auto-e2e/offline-rl:latest &
+        PID_O=$!
+        docker push ${ECR_URL}/auto-e2e/data-prep:latest &
+        PID_D=$!
+        # wait -n was returning early on some CodeBuild agents; wait on each PID
+        # explicitly so a push failure is surfaced.
+        wait $PID_T && echo "training pushed" || exit 1
+        wait $PID_E && echo "eval pushed" || exit 1
+        wait $PID_O && echo "offline-rl pushed" || exit 1
+        wait $PID_D && echo "data-prep pushed" || exit 1
 
 cache:
   paths:
