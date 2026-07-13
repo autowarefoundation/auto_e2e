@@ -16,15 +16,10 @@ metadata:
   # IngressClassParams is CLUSTER-scoped too (api-resources: NAMESPACED=false).
   name: console-alb-params
 spec:
+  # EKS Auto Mode's IngressClassParams schema has NO securityGroups field (unlike
+  # the open-source AWS LBC's elbv2.k8s.aws/v1beta1). The custom ALB SG is
+  # attached via the Ingress annotation below instead. Only scheme lives here.
   scheme: internal
-  # SG ID from the terraform output (aws_security_group.console_alb, created
-  # with a name_prefix so it has a random suffix — a name reference would not
-  # resolve). apply.sh substitutes ${CONSOLE_ALB_SG_ID}. This SG is the gate on
-  # the ALB: it admits HTTPS only from CloudFront's managed VPC-origin ENIs
-  # (source = CloudFront-VPCOrigins-Service-SG), so nothing but CloudFront can
-  # reach the ALB.
-  securityGroups:
-    - ${CONSOLE_ALB_SG_ID}
 ---
 apiVersion: networking.k8s.io/v1
 kind: Ingress
@@ -37,10 +32,21 @@ metadata:
     # HTTP:80 only. The ALB is internal and never faces viewers — CloudFront
     # terminates viewer TLS with its default cert and reaches this ALB over
     # plain HTTP through a VPC origin (origin_protocol_policy = http-only). So
-    # no HTTPS listener / ACM cert on the ALB itself. The SG (admits :80 only
-    # from CloudFront's managed VPC-origin ENIs) is what keeps it private.
+    # no HTTPS listener / ACM cert on the ALB itself.
     alb.ingress.kubernetes.io/listen-ports: '[{"HTTP": 80}]'
-    alb.ingress.kubernetes.io/group.name: console
+    # Attach the console-dedicated frontend SG (terraform output
+    # console_alb_sg_id; apply.sh substitutes ${CONSOLE_ALB_SG_ID}). This is the
+    # gate on the ALB: it admits :80 only from CloudFront's managed VPC-origin
+    # ENIs (source = CloudFront-VPCOrigins-Service-SG), so nothing but CloudFront
+    # can reach the ALB. In EKS Auto Mode custom frontend SGs are set HERE, not
+    # in IngressClassParams.
+    alb.ingress.kubernetes.io/security-groups: ${CONSOLE_ALB_SG_ID}
+    # Specifying security-groups stops the controller from auto-managing the
+    # backend (ALB->pod) rules. This flag makes it attach a shared backend SG to
+    # the ALB and add the matching ingress rule on the cluster/node SG, so the
+    # ALB can still forward to the target pods. Without it, targets register but
+    # every request is black-holed at the pod SG.
+    alb.ingress.kubernetes.io/manage-backend-security-group-rules: "true"
     # Health-check settings are per-Service (see services.yaml), NOT here: an
     # Ingress-level healthcheck-path applies to every target group, which would
     # probe console-web at the API's /readyz (404) and take the UI offline. The
