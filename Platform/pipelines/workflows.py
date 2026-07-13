@@ -193,8 +193,18 @@ def data_ingest(
                     import pickle
                     ds.download_clip_features(
                         clip_id, features=["camera_intrinsics", "sensor_extrinsics"])
-                    intr = ds.get_clip_feature(clip_id, "camera_intrinsics")
-                    extr = ds.get_clip_feature(clip_id, "sensor_extrinsics")
+                    # maybe_stream=True, exactly as the camera/egomotion reads above.
+                    # get_clip_feature defaults to maybe_stream=False, which resolves
+                    # the chunk through the SDK's local cache; under the local_dir
+                    # layout data_ingest uses, that lookup misses and the SDK raises
+                    # "not found in cache; set maybe_stream=True". The except below
+                    # then swallows it into a WARN, projection_spec returns None, and
+                    # the run silently continues on geometry_type='pseudo' — a learned
+                    # prior — while every reader downstream assumes real f-theta.
+                    intr = ds.get_clip_feature(
+                        clip_id, "camera_intrinsics", maybe_stream=True)
+                    extr = ds.get_clip_feature(
+                        clip_id, "sensor_extrinsics", maybe_stream=True)
                     calib_dir = out / "calibration"
                     calib_dir.mkdir(parents=True, exist_ok=True)
                     with open(calib_dir / "intrinsics.pkl", "wb") as f:
@@ -205,6 +215,20 @@ def data_ingest(
                     print(f"Saved NVIDIA calibration from clip {clip_id}")
                 except Exception as e:
                     print(f"WARN: no calibration for clip {clip_id}: {e}")
+        # NVIDIA ships real calibration for every clip, so an empty calibration dir
+        # is a FAILURE, not an absence. Falling through to pseudo geometry here would
+        # be a silent invalidation: the BEV becomes a learned warp instead of a
+        # bird's-eye view, and nothing downstream can tell the difference. Fail loudly
+        # rather than train on a grid whose cells map to nowhere.
+        if dataset == Dataset.NVIDIA_PHYSICAL_AI and not calib_saved:
+            raise RuntimeError(
+                "NVIDIA ingest produced no calibration: every clip failed to yield "
+                "camera_intrinsics/sensor_extrinsics (see the WARN lines above). "
+                "Without it NvidiaAVDataset.projection_spec returns None and the run "
+                "falls back to geometry_type='pseudo' (a learned spatial prior, not "
+                "real geometry). Refusing to ingest a dataset whose one distinguishing "
+                "property — real f-theta calibration — silently did not arrive."
+            )
         print(f"Ingested {dataset.value}: {len(clip_ids)} clips → {out_dir}")
         return FlyteDirectory(out_dir)
 
