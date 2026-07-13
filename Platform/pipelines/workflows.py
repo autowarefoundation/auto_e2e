@@ -218,15 +218,15 @@ def _loader_projection(loader, device):
     # Karpenter auto-mode provisions on demand.
     # mem needs an explicit LIMIT (not just a request): at 50 episodes the pod was
     # OOMKilled (137) with only a request — without a limit the kernel reclaims it
-    # under node memory pressure. Raise to 96Gi limit: at partition_size=50 pods
-    # OOMKilled at ~90% through 235 files with 48Gi limit (at6v64bp9bmb9b2jpq6q),
-    # because snapshot_download's parallel workers each buffer a ~500MB video +
-    # TLS/HTTP context, plus Python's tqdm accumulates. 96Gi with max_workers=2
-    # (see pre-fetch call below) is comfortably clear of the ceiling.
+    # under node memory pressure. Raise to 64Gi limit (the Flyte platform max):
+    # at partition_size=50 pods OOMKilled at ~90% through 235 files with 48Gi
+    # limit (at6v64bp9bmb9b2jpq6q), because snapshot_download's parallel workers
+    # each buffer a ~500MB video + TLS/HTTP context, plus Python's tqdm
+    # accumulates. Pre-fetch max_workers=2 keeps peak below 64Gi.
     # cpu bumped to 4 so hf_transfer's ~3-4 parallel workers can
     # saturate; download stays I/O-bound but at least isn't CPU-throttled.
-    requests=Resources(cpu="4", mem="64Gi", ephemeral_storage="700Gi"),
-    limits=Resources(mem="96Gi", ephemeral_storage="800Gi"),
+    requests=Resources(cpu="4", mem="48Gi", ephemeral_storage="700Gi"),
+    limits=Resources(mem="64Gi", ephemeral_storage="800Gi"),
     secret_requests=[Secret(group="hf-token", key="HF_TOKEN",
                             mount_requirement=Secret.MountType.ENV_VAR)],
     # "Ingest once, never again" (#121 §3.4a): cache on (dataset, group_ids,
