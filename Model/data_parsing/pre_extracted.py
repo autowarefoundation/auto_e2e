@@ -19,6 +19,7 @@ Usage:
 
 from __future__ import annotations
 
+import functools
 import io
 import json
 import re
@@ -55,12 +56,40 @@ def _decode_image(data) -> torch.Tensor:
     return _TRANSFORM(img)
 
 
-def _decode_sample(sample: dict) -> dict:
+class _PoolAccessor:
+    """Path-based frame-pool reader (#121 §3.4d): ``frame_id -> jpeg bytes``.
+
+    Reads ``<pool_dir>/<frame_id>.jpg`` on demand. Path-based (not an open handle)
+    so it pickles cleanly to spawn DataLoader workers; the OS page cache shares the
+    bytes across workers/epochs. Returns None if the pool dir is absent (a shard
+    with no deduped windows), so the loader falls back to the legacy layout.
+    """
+
+    def __init__(self, pool_dir: str):
+        self.pool_dir = pool_dir
+
+    def __call__(self, frame_id: str) -> bytes:
+        with open(f"{self.pool_dir}/{frame_id}.jpg", "rb") as f:
+            return f.read()
+
+
+def _make_pool_accessor(shard_dir: str):
+    """Return a ``_PoolAccessor`` if ``<shard_dir>/pool/`` exists, else None."""
+    pool_dir = Path(shard_dir) / "pool"
+    return _PoolAccessor(str(pool_dir)) if pool_dir.is_dir() else None
+
+
+def _decode_sample(sample: dict, pool=None) -> dict:
     """Decode a WebDataset sample into training tensors (geometry-free).
 
     Calibration is a per-dataset rig constant, not per-sample, so it is NOT
     decoded here — it is reconstructed once by ``make_pre_extracted_loader`` and
     exposed on the loader as ``.projection`` / ``.geometry_type``.
+
+    ``pool`` is a frame-pool accessor (``frame_id -> jpeg bytes``) for shards packed
+    with the deduped WM window (#121 §3.4d): the sample carries a
+    ``window_index.json`` mapping (step,view)→frame_id and the pixels live in a
+    sibling ``pool/`` dir. None on shards without a pool (imitation-only / legacy).
     """
     # Keys: "cam_0.jpg" ... "cam_{V-1}.jpg", optional "map.jpg",
     # "ego.npy", "meta.json", "__key__".
@@ -97,16 +126,15 @@ def _decode_sample(sample: dict) -> dict:
         "trajectory_target": ego_future,
     }
 
-    # Optional World-Model windows (#13): hist_<t>_cam_<v>.jpg / fut_<f>_cam_<v>.jpg
-    # decode to history_frames [T, V, 3, H, W] and future_frames [F, V, 3, H, W]
-    # (oldest→newest). Present only on shards packed with world_model=True; when
-    # absent, training runs without the JEPA loss.
-    hist = _decode_window(sample, _HIST_KEY_RE)
-    if hist is not None:
-        out["history_frames"] = hist
-    fut = _decode_window(sample, _FUT_KEY_RE)
-    if fut is not None:
-        out["future_frames"] = fut
+    # Optional World-Model windows (#13/#3.4d): the sample carries window_index.json
+    # (a (step,view)→frame_id map); the frames themselves are in the sibling pool/.
+    # Rebuild history_frames [T, V, 3, H, W] and future_frames [F, V, 3, H, W]
+    # (oldest→newest) — IDENTICAL tensors to the old per-sample hist_/fut_ layout,
+    # just deduped in storage. Present only on WM shards; absent → no JEPA loss.
+    # (Legacy hist_/fut_ shards still decode via _decode_window_legacy for back-compat.)
+    windows = _decode_windows_from_pool(sample, pool)
+    if windows is not None:
+        out["history_frames"], out["future_frames"] = windows
 
     # Optional reasoning labels (#98): a per-sample "reasoning.json" member holds
     # a serialized ReasoningLabelRecord (same shard key → auto-aligned with this
@@ -154,25 +182,64 @@ def _decode_reasoning_targets(data) -> dict:
     return record_to_target_tensors(record)
 
 
-def _decode_window(sample: dict, key_re) -> "torch.Tensor | None":
-    """Decode a World-Model window into ``[steps, V, 3, H, W]`` (oldest→newest).
+def _decode_window_from_index(index_steps, pool) -> torch.Tensor:
+    """Decode one window (history or future) from a ``[[frame_id/view] /step]`` index.
 
-    Matches ``key_re`` (hist_/fut_) against the sample keys, groups by step and
-    view index, and stacks. Returns None if the window is absent (#13).
+    Looks each frame_id up in the pool accessor, decodes, and stacks into
+    ``[steps, V, 3, H, W]`` (oldest→newest) — the exact shape/order the model
+    consumes. Byte-identical to the old per-sample layout because the pool holds the
+    same JPEG bytes the packer produced.
     """
-    matches = [(m, k) for k in sample if (m := key_re.match(k))]
-    if not matches:
-        return None
-    steps = max(int(m.group(1)) for m, _ in matches) + 1
     frame_steps = []
-    for t in range(steps):
-        view_frames = [
-            _decode_image(sample[k])
-            for m, k in sorted(matches, key=lambda mk: int(mk[0].group(2)))
-            if int(m.group(1)) == t
-        ]
-        frame_steps.append(torch.stack(view_frames))  # [V, 3, H, W]
-    return torch.stack(frame_steps)                    # [steps, V, 3, H, W]
+    for view_ids in index_steps:                       # one list of frame_ids per step
+        view_frames = [_decode_image(pool(fid)) for fid in view_ids]
+        frame_steps.append(torch.stack(view_frames))   # [V, 3, H, W]
+    return torch.stack(frame_steps)                     # [steps, V, 3, H, W]
+
+
+def _decode_windows_from_pool(sample: dict, pool):
+    """Rebuild (history_frames, future_frames) from window_index.json + the pool.
+
+    Returns None when the sample has no window_index.json (imitation-only). Falls
+    back to the LEGACY per-sample hist_/fut_ member layout when a shard predates the
+    frame pool (so old shards still train). Requires a pool accessor when a
+    window_index.json is present.
+    """
+    idx_blob = sample.get("window_index.json")
+    if idx_blob is None:
+        return _decode_windows_legacy(sample)          # old hist_/fut_ layout or None
+    if pool is None:
+        raise ValueError(
+            "sample has window_index.json but the loader has no frame pool accessor; "
+            "the sibling pool/ dir must exist next to the shards (#121 §3.4d).")
+    index = json.loads(idx_blob.decode() if isinstance(idx_blob, (bytes, bytearray)) else idx_blob)
+    hist = _decode_window_from_index(index["history"], pool)
+    fut = _decode_window_from_index(index["future"], pool)
+    return hist, fut
+
+
+def _decode_windows_legacy(sample: dict):
+    """Legacy path: decode hist_<t>_cam_<v>.jpg / fut_<f>_cam_<v>.jpg members
+    (pre-#3.4d shards). Returns (history, future) or None if absent."""
+    def _one(key_re):
+        matches = [(m, k) for k in sample if (m := key_re.match(k))]
+        if not matches:
+            return None
+        steps = max(int(m.group(1)) for m, _ in matches) + 1
+        frame_steps = []
+        for t in range(steps):
+            view_frames = [
+                _decode_image(sample[k])
+                for m, k in sorted(matches, key=lambda mk: int(mk[0].group(2)))
+                if int(m.group(1)) == t
+            ]
+            frame_steps.append(torch.stack(view_frames))
+        return torch.stack(frame_steps)
+    hist = _one(_HIST_KEY_RE)
+    fut = _one(_FUT_KEY_RE)
+    if hist is None or fut is None:
+        return None
+    return hist, fut
 
 
 def load_projection_from_manifest(shard_dir: str):
@@ -378,7 +445,13 @@ def make_pre_extracted_loader(
         dataset = dataset.select(keep)
     if shuffle > 0:
         dataset = dataset.shuffle(shuffle)
-    dataset = dataset.map(_decode_sample)
+    # Frame-pool accessor for deduped WM windows (#121 §3.4d): a sibling pool/ dir
+    # next to the .tar shards, NOT part of `urls`, so split_by_worker never shards
+    # it away — every worker reaches any frame_id by path. Path-based + lazily read,
+    # so it pickles cleanly to spawn workers (no open handle crosses the boundary).
+    pool = _make_pool_accessor(shard_dir)
+    # functools.partial (NOT a lambda) so the map fn pickles to spawn workers.
+    dataset = dataset.map(functools.partial(_decode_sample, pool=pool))
 
     # split_by_worker shards the .tar list across workers, so more workers than
     # shards is wasted; cap accordingly. persistent_workers keeps the decode pool
