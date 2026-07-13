@@ -398,7 +398,132 @@ def test_decode_count_is_unique_rows_not_8x():
     naive_total = n * 8   # old path decoded 8 frames × n samples
     assert len(all_rows) < naive_total, (
         f"unique rows {len(all_rows)} should be less than naive {naive_total}")
-    # For a 12-sample dense window: rows span [100-30..100+11+40] = 71 to 151 = 81
-    # unique rows, vs 12×8=96 (still a win; for larger n the ratio is ~8x).
     print(f"unique rows: {len(all_rows)} vs naive {naive_total} "
           f"(dedup ratio {naive_total/len(all_rows):.1f}x)")
+
+
+# --------------------------------------------------------------------------
+# 8. End-to-end byte-equality: decode-dedup path produces IDENTICAL tensors
+#    to the legacy pack_sample path, when reconstructed by the loader.
+# --------------------------------------------------------------------------
+
+def _simulate_decode_dedup_shard(ds, dataset_value, calib_bytes):
+    """Simulate the decode-dedup Pass A + Pass B parent loop in-process.
+    Returns (sample_members_by_uid, pool_bytes_by_frame_id).
+    """
+    _install_worker_globals(ds, dataset_value, calib_bytes)
+    _install_row_worker_globals(ds, calib_bytes)
+
+    # Pass A: unique rows + decode
+    all_rows = set()
+    sample_cur_rows = {}
+    for si in range(len(ds)):
+        for r in ds.window_rows(si):
+            all_rows.add(r)
+        ep_idx_s, row_s = ds._samples[si]
+        ep_start_s, _ = ds._episode_ranges[ep_idx_s]
+        cur_fi = row_s - ep_start_s
+        sample_cur_rows[si] = (ep_idx_s, cur_fi)
+        all_rows.add((ep_idx_s, cur_fi))
+
+    row_map = {}
+    pool_bytes = {}
+    for row_key in sorted(all_rows):
+        key, cam_jpegs, map_jpeg = pp.decode_row(row_key)
+        row_map[key] = (cam_jpegs, map_jpeg)
+        for fid, blob in cam_jpegs.items():
+            pool_bytes[fid] = blob
+
+    # Pass B: assemble each sample's members from pool (no decode)
+    import numpy as np
+    sample_members = {}
+    for si in range(len(ds)):
+        uid = ds.sample_uid(si)
+        members = {}
+        ids = ds.window_frame_ids(si)
+        members["window_index.json"] = json.dumps(ids).encode()
+        cur_key = sample_cur_rows[si]
+        cur_cams, cur_map = row_map[cur_key]
+        for fid, blob in sorted(cur_cams.items(),
+                                key=lambda kv: int(kv[0].rsplit("-c", 1)[-1])):
+            cam_i = int(fid.rsplit("-c", 1)[-1])
+            members[f"cam_{cam_i}.jpg"] = blob
+        if cur_map is not None:
+            members["map.jpg"] = cur_map
+        ego_h, traj = ds.egomotion_for(si)
+        ego_data = np.concatenate([ego_h.numpy(), traj.numpy()]).astype(np.float32)
+        members["ego.npy"] = ego_data.tobytes()
+        members["meta.json"] = json.dumps({
+            "idx": si, "dataset": dataset_value,
+            "sample_uid": uid, "split_group_uid": ds.split_group_uid(si),
+        }).encode()
+        members["calib.json"] = calib_bytes
+        sample_members[uid] = members
+    return sample_members, pool_bytes
+
+
+def test_end_to_end_dedup_pack_byte_identical_to_legacy():
+    """THE ultimate byte-equality guarantee: the decode-dedup path produces the
+    SAME per-sample members and SAME pool jpeg bytes as the legacy pack_sample
+    path for the same physical frames. (For overlapping frames the pool bytes are
+    exactly what legacy pool would have contained.)
+    """
+    calib = json.dumps({"dataset": "yaak-ai/L2D", "geometry_type": "pseudo"}).encode()
+    ds = _FakeDS(3, num_views=6, with_map=True, wm=True, wm_frames=4, float_frames=True)
+
+    # Simulate decode-dedup
+    dd_members, dd_pool = _simulate_decode_dedup_shard(ds, "yaak-ai/L2D", calib)
+
+    # Compare per-sample cam_i.jpg + pool frame_ids to legacy pack_sample output
+    _install_worker_globals(ds, "yaak-ai/L2D", calib)
+    legacy_pool_all = {}
+    for si in range(len(ds)):
+        uid, _, legacy_members, legacy_pool = pp.pack_sample(si)
+        # cam_i, ego, meta, calib bytes must match
+        for cam_i in range(6):
+            k = f"cam_{cam_i}.jpg"
+            assert dd_members[uid][k] == legacy_members[k], f"cam mismatch {uid}/{k}"
+        assert dd_members[uid]["ego.npy"] == legacy_members["ego.npy"]
+        assert dd_members[uid]["meta.json"] == legacy_members["meta.json"]
+        # window_index.json byte-identical
+        assert dd_members[uid]["window_index.json"] == legacy_members["window_index.json"]
+        legacy_pool_all.update(legacy_pool)
+
+    # dd_pool ⊆ legacy_pool_all (dedup keeps fewer bytes, but each frame_id maps
+    # to identical jpeg bytes).
+    for fid, blob in dd_pool.items():
+        assert fid in legacy_pool_all, f"missing frame_id {fid} in legacy pool"
+        assert blob == legacy_pool_all[fid], f"pool byte mismatch for {fid}"
+
+
+def test_end_to_end_dedup_loader_produces_identical_tensors():
+    """Given a decode-dedup shard (members + pool), the loader (pre_extracted
+    _decode_sample) rebuilds history_frames/future_frames identical to what the
+    legacy shard would produce."""
+    from data_parsing.pre_extracted import _decode_sample
+
+    calib = json.dumps({"dataset": "yaak-ai/L2D", "geometry_type": "pseudo"}).encode()
+    ds = _FakeDS(2, num_views=6, with_map=True, wm=True, wm_frames=4, float_frames=True)
+
+    # Build dedup shard
+    dd_members, dd_pool = _simulate_decode_dedup_shard(ds, "yaak-ai/L2D", calib)
+
+    # Loader reads sample with pool accessor
+    pool_fn = lambda fid: dd_pool[fid]
+    uid = ds.sample_uid(0)
+    sample = dict(dd_members[uid])
+    sample["__key__"] = uid
+    out_dedup = _decode_sample(sample, pool=pool_fn)
+
+    # For comparison, run legacy pack_sample to get pool + rebuild with the loader
+    _install_worker_globals(ds, "yaak-ai/L2D", calib)
+    uid_lg, _, legacy_members, legacy_pool = pp.pack_sample(0)
+    sample_lg = dict(legacy_members)
+    sample_lg["__key__"] = uid_lg
+    pool_lg_fn = lambda fid: legacy_pool[fid]
+    out_legacy = _decode_sample(sample_lg, pool=pool_lg_fn)
+
+    # history/future must be tensor-equal
+    assert torch.equal(out_dedup["history_frames"], out_legacy["history_frames"])
+    assert torch.equal(out_dedup["future_frames"], out_legacy["future_frames"])
+    assert torch.equal(out_dedup["visual_tiles"], out_legacy["visual_tiles"])
