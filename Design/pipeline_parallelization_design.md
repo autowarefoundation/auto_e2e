@@ -483,27 +483,65 @@ Also note the label stage decodes a DIFFERENT frame set (front cam × 5 horizons
 than train (6 cams × 8 window steps), so "reuse the label-time JPEGs at train
 time" does not apply — they are not even a superset.
 
+**Per-loss Hz (locked with the user):** the sample enumeration stays **10 Hz**
+(one sample per source row) — the REACTIVE head needs the dense per-0.1 s
+trajectory targets, so we do NOT decimate pack/train samples. The WM window is
+**1 Hz** internally (stride-10 offsets), and dedup removes the resulting
+cross-sample frame duplication WITHOUT touching sample density. The Cosmos
+labeler is decimated to **1 Hz** separately (below) — reasoning is a 1 Hz concern.
+
 **Chosen: dedup at the ENCODE layer, keep train-time decode-free.** Each distinct
 `(episode,row,cam)` 256² frame is JPEG-encoded ONCE per shard into a
-content-addressed frame pool keyed by a stable `frame_id` (e.g. `e{ep}-r{row}-c{cam}`);
-each sample carries a tiny `window_index` mapping `(step,view) → frame_id` for its
-history and future. `cam_*.jpg / map.jpg / ego.npy / meta.json / calib.json /
-reasoning.json` stay byte-for-byte as today, so `sample_uid`, `split_group_uid`
-bucketing, and the reasoning JOIN are untouched. The loader (`pre_extracted.py`)
-gathers each referenced `frame_id` from the pool, decodes it ONCE (memoized per
-shard sample-group), and stacks into the SAME `history_frames [T,V,3,H,W]` /
-`future_frames [F,V,3,H,W]` tensors `auto_e2e.py` already consumes — so AutoE2E,
-all three losses, MergedDatasetLoader, and the JOIN are unchanged. Result: storage
-~8× → ~1.1× of imitation-only, zero train-time video decode, all three losses
-intact. Scope: two files (`parallel_pack.py`, `pre_extracted.py`).
+content-addressed frame pool keyed by a stable, dot-free `frame_id`
+(`e{ep}-r{row}-c{cam}`); each sample carries a tiny `window_index.json` mapping
+its history/future `(step,view) → frame_id`. `cam_*.jpg` (the reactive current
+frame) / `map.jpg / ego.npy / meta.json / calib.json / reasoning.json` stay
+byte-for-byte per sample, so `sample_uid`, `split_group_uid` bucketing, and the
+reasoning JOIN are untouched.
 
-**Boundary safety (unchanged, verified).** frame_ids are `(episode,row,cam)`, so a
-window never references another episode's frame. This already holds on the live
-path: enumeration excludes episode-edge frames (margins 64/64 ≥ WM reach 40), and
-lerobot's `_get_query_indices` clamps every delta to the current episode
-`[dataset_from_index, dataset_to_index)` — so no cross-clip teacher contamination.
-Within one L2D episode (a continuous 10 Hz clip) the +4 s target can still be a
-large-but-valid appearance change, which is the intended JEPA difficulty.
+**Pool lives as a sibling `pool/` DIRECTORY next to the `*.tar` shards, NOT inside
+them.** This is the load-bearing detail: the loader builds its stream from
+`glob("*.tar")` and WebDataset's `split_by_worker` shards THAT list across workers;
+a `pool/` dir does not match `*.tar`, so it is never part of the sharded stream and
+every worker reaches any `frame_id` by path regardless of which tar it owns.
+Putting the pool inside a shard would hit the exact `split_by_worker` invisibility
+that the double-split data-loss fix warns about (a sample's future frame can live in
+a tar a different worker holds). The loader (`pre_extracted.py`) replaces
+`_decode_window`'s hist_/fut_ regex with: parse `window_index.json` → look up each
+`frame_id` in `pool/` → `_decode_image` → stack into the SAME
+`history_frames [T,V,3,H,W]` / `future_frames [F,V,3,H,W]` tensors `auto_e2e.py`
+already consumes. AutoE2E, all three losses, MergedDatasetLoader, and the JOIN are
+unchanged. Result: storage ~8× → ~1.1× of imitation-only, zero train-time video
+decode, all three losses intact, 10 Hz density preserved. Scope: `parallel_pack.py`,
+the parent pack loop in `workflows.py`, and `pre_extracted.py`.
+
+**Cosmos labeling decimated to 1 Hz (separate from pack).** Reasoning horizons are
+0/1/2/3/4 s, so the teacher only needs the 1 Hz subset. The labeler enumerates a
+STABLE uid-derived subset (label iff `frame_index % 10 == 0`, a function of the
+sample's identity — NOT its positional index — so it is partition-independent), so
+Cosmos is called ~10× less. The packer still packs ALL 10 Hz samples; the 9/10
+without a matching `reasoning.json` decode to a fully-MASKED (abstained) reasoning
+target and contribute nothing to the reasoning loss (the masking path already
+exists and `data_processing` does not fail when most samples lack a label). Net:
+reactive + JEPA train on all 10 Hz samples; reasoning trains on the 1 Hz labeled
+subset; teacher cost drops ~10×.
+
+**Boundary safety — no cross-episode/scene reference, INCLUDING the reactive
+history (locked requirement).** Every backward/forward reach must stay inside the
+sample's own episode:
+- egomotion history/future: `extract_egomotion` slices a window taken from
+  `_get_vehicle_states_window(ep_start, ep_end)`, i.e. clamped to the episode.
+- WM window: enumeration excludes episode-edge frames (margins 64/64 ≥ WM reach 40)
+  and lerobot's `_get_query_indices` clamps every delta to the current episode
+  `[dataset_from_index, dataset_to_index)` — so no future/history frame crosses a
+  clip boundary.
+- dedup frame_ids are `(episode,row,cam)`, so a `window_index` can only reference
+  rows of the SAME episode — the pool never lets a window borrow a neighbour clip's
+  frame.
+A test asserts every `window_index` frame_id shares the sample's episode. Within one
+L2D episode (a continuous 10 Hz clip) the +4 s target can still be a large-but-valid
+appearance change — the intended JEPA difficulty, distinct from cross-clip
+contamination.
 
 **Must validate on GPU before full run:** (i) byte-equality — `history_frames`/
 `future_frames` rebuilt from a deduped shard equal the current WM-shard tensors for
