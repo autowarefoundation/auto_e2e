@@ -325,6 +325,43 @@ class L2DDataset(Dataset):
 
         return {"history": _ids_for(hist_offsets), "future": _ids_for(fut_offsets)}
 
+    def window_rows(self, idx: int) -> list[tuple[int, int]]:
+        """Every (ep_idx, episode-local frame_index) row this sample's WM window
+        references — WITHOUT decoding anything (#121 decode-dedup pass A).
+
+        The parent packer unions these across the partition to get the UNIQUE row
+        set, decodes each row exactly ONCE (row-level workers), and assembles
+        samples from the pool afterwards. Same offsets/clamping as
+        ``window_frame_ids`` (episode-bounded; raises on an edge sample), so a row
+        never references a neighbouring episode/scene.
+        """
+        ep_idx, row = self._samples[idx]
+        ep_start, ep_end = self._episode_ranges[ep_idx]
+        n, s = self._wm_num_frames, self._wm_stride
+        offsets = [-(n - 1 - t) * s for t in range(n)] + [(t + 1) * s for t in range(n)]
+        out = []
+        for off in offsets:
+            r = row + off
+            if r < ep_start or r >= ep_end:
+                raise IndexError(
+                    f"WM window row {r} (sample row {row}, offset {off}) leaves "
+                    f"episode {ep_idx} [{ep_start},{ep_end})")
+            out.append((ep_idx, r - ep_start))
+        return out
+
+    def egomotion_for(self, idx: int):
+        """(egomotion_history, trajectory_target) for sample ``idx`` with ZERO
+        video decode (#121 decode-dedup pass B).
+
+        Reads only the numeric vehicle-state table — exactly the computation
+        ``__getitem__`` performs before touching video — so the pack parent can
+        assemble ego.npy without triggering the expensive multi-cam decode.
+        """
+        ep_idx, row = self._samples[idx]
+        ep_start, ep_end = self._episode_ranges[ep_idx]
+        vehicle_states = self._get_vehicle_states_window(ep_start, ep_end)
+        return extract_egomotion(vehicle_states, sample_idx=row - ep_start)
+
     def _get_vehicle_states_window(self, ep_start: int, ep_end: int) -> np.ndarray:
         """Load vehicle state vectors for one episode (local row range).
 
