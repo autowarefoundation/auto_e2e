@@ -407,26 +407,37 @@ def data_processing(
     # episode indices / NVIDIA clip uuids). None → legacy first-``episodes``.
     ep_list = ([int(g) for g in group_ids] if group_ids is not None
                else (list(range(episodes)) if episodes > 0 else None))
-    if dataset == Dataset.NVIDIA_PHYSICAL_AI:
-        from data_parsing.nvidia_physical_ai.dataset import NvidiaAVDataset
-        # DISCOVERY from raw_path (the partition's ingest materialized only this
-        # partition's clips), so the packer enumerates exactly the partition set in
-        # the SAME order the labeler used → the reasoning.json JOIN by uid holds.
-        ds = NvidiaAVDataset(data_root=raw_path)
-        if world_model:
-            print("world_model requested but NVIDIA has no window support yet; "
-                  "packing without JEPA windows.")
+    # A fan-out partition can legitimately hold NO valid samples (a short episode/
+    # clip below the egomotion margin); the parser raises "No valid samples found".
+    # Treat that as SUCCESS producing an EMPTY shard dir (nothing to pack) rather
+    # than a failure that kills the @dynamic — matches the label task's guard.
+    try:
+        if dataset == Dataset.NVIDIA_PHYSICAL_AI:
+            from data_parsing.nvidia_physical_ai.dataset import NvidiaAVDataset
+            # DISCOVERY from raw_path (the partition's ingest materialized only this
+            # partition's clips), so the packer enumerates exactly the partition set
+            # in the SAME order the labeler used → the reasoning.json JOIN by uid holds.
+            ds = NvidiaAVDataset(data_root=raw_path)
+            if world_model:
+                print("world_model requested but NVIDIA has no window support yet; "
+                      "packing without JEPA windows.")
+        else:
+            from data_parsing.l2d import L2DDataset
+            # World-Model windows (#16/#13) are only produced when requested, so the
+            # imitation-only path stays cheap (no extra frame decode). root=raw_path:
+            # read the partition's materialized raw, don't re-hit HF.
+            ds = L2DDataset(repo_id=dataset.value, episodes=ep_list,
+                            include_world_model_windows=world_model, root=raw_path)
         n_samples = len(ds)
         idx_iter = range(n_samples)
-    else:
-        from data_parsing.l2d import L2DDataset
-        # World-Model windows (#16/#13) are only produced when requested, so the
-        # imitation-only path stays cheap (no extra frame decode). root=raw_path:
-        # read the partition's materialized raw, don't re-hit HF.
-        ds = L2DDataset(repo_id=dataset.value, episodes=ep_list,
-                        include_world_model_windows=world_model, root=raw_path)
-        n_samples = len(ds)
-        idx_iter = range(n_samples)
+    except ValueError as e:
+        if "No valid samples" not in str(e):
+            raise
+        print(f"Partition has no valid samples ({e}); writing an EMPTY shard dir "
+              f"(short episode/clip — nothing to pack).")
+        ds = None
+        n_samples = 0
+        idx_iter = range(0)
 
     # Reasoning labels (#98): JOINed in from the generate_reasoning_labels
     # artifact by sample_id — NO teacher call here (this task is pure packing).
