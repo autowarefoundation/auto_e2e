@@ -218,11 +218,15 @@ def _loader_projection(loader, device):
     # Karpenter auto-mode provisions on demand.
     # mem needs an explicit LIMIT (not just a request): at 50 episodes the pod was
     # OOMKilled (137) with only a request — without a limit the kernel reclaims it
-    # under node memory pressure. Raise to 48Gi and set the limit so the pod owns
-    # that memory. cpu bumped to 4 so hf_transfer's ~3-4 parallel workers can
+    # under node memory pressure. Raise to 96Gi limit: at partition_size=50 pods
+    # OOMKilled at ~90% through 235 files with 48Gi limit (at6v64bp9bmb9b2jpq6q),
+    # because snapshot_download's parallel workers each buffer a ~500MB video +
+    # TLS/HTTP context, plus Python's tqdm accumulates. 96Gi with max_workers=2
+    # (see pre-fetch call below) is comfortably clear of the ceiling.
+    # cpu bumped to 4 so hf_transfer's ~3-4 parallel workers can
     # saturate; download stays I/O-bound but at least isn't CPU-throttled.
-    requests=Resources(cpu="4", mem="32Gi", ephemeral_storage="700Gi"),
-    limits=Resources(mem="48Gi", ephemeral_storage="800Gi"),
+    requests=Resources(cpu="4", mem="64Gi", ephemeral_storage="700Gi"),
+    limits=Resources(mem="96Gi", ephemeral_storage="800Gi"),
     secret_requests=[Secret(group="hf-token", key="HF_TOKEN",
                             mount_requirement=Secret.MountType.ENV_VAR)],
     # "Ingest once, never again" (#121 §3.4a): cache on (dataset, group_ids,
@@ -372,13 +376,21 @@ def data_ingest(
         print(f"Pre-fetch: {len(_data_paths)} parquet + {len(_video_paths)} video "
               f"= {len(_all_files)} unique files for {len(ep_list)} episodes")
         # Retry loop: snapshot_download is not always atomic under Hub 5xx.
+        # max_workers=2 (not 8): each parallel download holds a ~500MB video
+        # buffer plus HTTP TLS context in RAM; at 8 workers we OOMKilled at
+        # ~90% through 235 files on a 48Gi pod (at6v64bp9bmb9b2jpq6q). Two
+        # workers keeps peak memory bounded and is still faster than serial
+        # since the bottleneck is Hub server-side, not client concurrency.
+        # HF_HUB_ENABLE_HF_TRANSFER left unset → the Python client is used
+        # (the Rust hf_transfer aggressively pre-buffers whole files and has
+        # blown memory in prior runs).
         _missing_parquets = _data_paths
         for attempt in range(3):
             snapshot_download(
                 repo_id=dataset.value, repo_type="dataset",
                 local_dir=str(_meta.root),
                 allow_patterns=_all_files,
-                max_workers=8,
+                max_workers=2,
             )
             # Verify EACH expected parquet is now on disk. If not, retry.
             _missing_parquets = [p for p in _data_paths
