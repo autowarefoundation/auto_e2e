@@ -1,8 +1,8 @@
 apiVersion: networking.k8s.io/v1
 kind: IngressClass
 metadata:
+  # IngressClass is CLUSTER-scoped — no namespace field (kubectl would drop it).
   name: console-alb
-  namespace: console
 spec:
   controller: eks.amazonaws.com/alb
   parameters:
@@ -13,8 +13,8 @@ spec:
 apiVersion: eks.amazonaws.com/v1
 kind: IngressClassParams
 metadata:
+  # IngressClassParams is CLUSTER-scoped too (api-resources: NAMESPACED=false).
   name: console-alb-params
-  namespace: console
 spec:
   scheme: internal
   # SG ID from the terraform output (aws_security_group.console_alb, created
