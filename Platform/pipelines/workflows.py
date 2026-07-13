@@ -517,71 +517,157 @@ def data_processing(
         ti.size = len(blob)
         current_tar.addfile(ti, io.BytesIO(blob))
 
-    # Process-parallel decode+encode: workers own their own dataset/reader and
-    # return per-sample JPEG/npy bytes; the parent (here) appends them to the tar
-    # in sample order. Decode is the bottleneck (esp. WM windows = N history + N
-    # future x V cams), so parallelizing it across CPU cores turns a ~1-hour
-    # single-core pack into minutes. tar writing stays single-threaded so the
-    # archive is valid. ProcessPoolExecutor.map preserves input order, so shard
-    # boundaries and sample_ids are identical to the serial packer.
     import multiprocessing as mp
     from concurrent.futures import ProcessPoolExecutor
     from data_processing.reasoning_label_generation import parallel_pack
 
     idx_list = list(idx_iter)
-    # Worker count is MEMORY-bound for WM: even with the single delta_timestamps
-    # read, each worker holds a full 1 Hz window ([~8, V, 3, 1080, 1920] ~300MB)
-    # plus lerobot/torch buffers, and 16 concurrent OOM-killed the 32Gi task. Cap
-    # WM packing at 6 (measured safe); imitation-only samples are light -> 16.
-    max_workers_cap = 6 if world_model else 16
-    pack_workers = max(1, min(max_workers_cap, len(idx_list)))
-    print(f"Packing {len(idx_list)} samples with {pack_workers} parallel processes "
-          f"(world_model={world_model})...")
     ctx = mp.get_context("spawn")
-    pack_init = (dataset.value, ep_list, raw_path, image_size, world_model, calib_bytes)
-    del ds  # workers build their own; free the parent's handle
     num_views = 0
     has_map = False
     has_wm = False
-    with ProcessPoolExecutor(max_workers=pack_workers, mp_context=ctx,
-                             initializer=parallel_pack.init_pack_worker,
-                             initargs=pack_init) as pool:
-        for sample_key, nviews, members, frame_pool in pool.map(
-                parallel_pack.pack_sample, idx_list):
-            # sample_key is the GLOBAL uid returned by the worker (#121 §3.1) — the
-            # same uid the labeler keyed on, so the reasoning.json JOIN below stays
-            # correct under episode-range sharding.
+
+    if world_model and dataset != Dataset.NVIDIA_PHYSICAL_AI and idx_list:
+        # ── DECODE-DEDUP path (L2D WM): decode each UNIQUE physical row once ──
+        # (#121 §3.4d) Previous approach decoded all 48 window frames per sample
+        # (6 workers × ~8 sample overlap = ~8x redundant decode). This two-pass
+        # approach decodes only the unique rows once per partition.
+        #
+        # Pass A: collect unique (ep_idx, frame_index) rows → row-level workers
+        # decode each exactly once → write to pool/.
+        #
+        # Pass B: assemble each sample's members (window_index, ego, meta, calib,
+        # reasoning JOIN) from the pool — zero video decode.
+        print(f"Packing {len(idx_list)} samples, decode-dedup mode "
+              f"(row-level workers, world_model=True)...")
+        row_init = (dataset.value, ep_list, raw_path, image_size)
+
+        # Pass A: unique rows. ds is still alive here (not yet deleted).
+        all_rows: set = set()
+        # Also collect the current-frame row for each sample (offset 0 = cam_*.jpg).
+        sample_cur_rows: dict = {}  # si → (ep_idx, fi) of the current frame
+        for si in idx_list:
+            try:
+                rows = ds.window_rows(si)
+                for row_t in rows:
+                    all_rows.add(row_t)
+                ep_idx_s, row_s = ds._samples[si]
+                ep_start_s, _ = ds._episode_ranges[ep_idx_s]
+                cur_fi = row_s - ep_start_s
+                sample_cur_rows[si] = (ep_idx_s, cur_fi)
+                all_rows.add((ep_idx_s, cur_fi))
+            except IndexError:
+                pass  # edge sample guard; treat as empty window
+
+        del ds  # free before spawning workers
+
+        # row_map: (ep_idx, fi) → {frame_id: blob} per cam + map_jpeg
+        row_map: dict = {}
+        row_workers = max(1, min(16, len(all_rows)))
+        with ProcessPoolExecutor(max_workers=row_workers, mp_context=ctx,
+                                 initializer=parallel_pack.init_row_worker,
+                                 initargs=row_init) as rpool:
+            for row_key, cam_jpegs, map_jpeg in rpool.map(
+                    parallel_pack.decode_row, sorted(all_rows)):
+                row_map[row_key] = (cam_jpegs, map_jpeg)
+                for fid, blob in cam_jpegs.items():
+                    _write_pool(fid, blob)
+                if map_jpeg is not None:
+                    has_map = True
+        num_views = len(next(iter(row_map.values()))[0]) if row_map else 0
+        print(f"Frame pool: {pool_frames_written} unique frames decoded "
+              f"(was ~{pool_frames_written * 8} with per-sample decode).")
+
+        # Pass B: assemble per-sample members — zero video decode.
+        # Plain-mode dataset for window_frame_ids() + egomotion_for() only.
+        from data_parsing.l2d import L2DDataset
+        import numpy as np
+        import torch
+        ds_asm = L2DDataset(repo_id=dataset.value, episodes=ep_list,
+                            include_world_model_windows=False, root=raw_path)
+
+        for si in idx_list:
+            uid = ds_asm.sample_uid(si)
+            split_group = ds_asm.split_group_uid(si)
+            members: dict = {}
+
+            # window_index — pool frame_ids, no decode.
+            try:
+                ids = ds_asm.window_frame_ids(si)
+                members["window_index.json"] = json.dumps(ids).encode()
+                has_wm = True
+            except (IndexError, AttributeError):
+                pass
+
+            # cam_*.jpg = current frame (offset 0). The current-frame bytes are in
+            # row_map[(ep_idx, cur_fi)][0] — the same jpegs already written to pool.
+            cur_key = sample_cur_rows.get(si)
+            if cur_key and cur_key in row_map:
+                cur_cams, cur_map = row_map[cur_key]
+                # cam_cams is {frame_id: bytes}; sort by cam index embedded in fid.
+                for fid, blob in sorted(cur_cams.items(),
+                                        key=lambda kv: int(kv[0].rsplit("-c", 1)[-1])):
+                    cam_i = int(fid.rsplit("-c", 1)[-1])
+                    members[f"cam_{cam_i}.jpg"] = blob
+                if cur_map is not None:
+                    members["map.jpg"] = cur_map
+
+            # ego + meta + calib (no video decode).
+            ego_hist, traj = ds_asm.egomotion_for(si)
+            ego_data = np.concatenate([
+                ego_hist.numpy() if torch.is_tensor(ego_hist) else np.asarray(ego_hist),
+                traj.numpy() if torch.is_tensor(traj) else np.asarray(traj),
+            ]).astype(np.float32)
+            members["ego.npy"] = ego_data.tobytes()
+            members["meta.json"] = json.dumps({
+                "idx": si, "dataset": dataset.value,
+                "sample_uid": uid, "split_group_uid": split_group,
+            }).encode()
+            members["calib.json"] = calib_bytes
+
             for suffix, blob in members.items():
-                _add_member(sample_key, suffix, blob)
-            # WM window frames go to the shared pool (deduped across samples), not
-            # into this sample's tar members (#121 §3.4d). frame_pool is empty for
-            # imitation-only / NVIDIA samples.
-            for frame_id, blob in frame_pool.items():
-                _write_pool(frame_id, blob)
-            num_views = nviews
-            has_map = has_map or ("map.jpg" in members)
-            # WM present ⇔ the sample carries a window_index.json (the pixels live
-            # in the pool now, so there are no hist_*/fut_* members to look for).
-            has_wm = has_wm or ("window_index.json" in members)
-            # Per-sample reasoning label (#98): JOIN the frozen record by
-            # sample_id (produced upstream by generate_reasoning_labels). A sample
-            # with no matching label is packed without reasoning.json (its
-            # reasoning target decodes as fully-masked at train time). With the
-            # labeler decimated to 1 Hz, ~9/10 of the 10 Hz samples land here.
+                _add_member(uid, suffix, blob)
             if _record_to_json is not None:
-                record = labels_by_id.get(sample_key)
+                record = labels_by_id.get(uid)
                 if record is not None:
-                    _add_member(sample_key, "reasoning.json",
+                    _add_member(uid, "reasoning.json",
                                 json.dumps(_record_to_json(record)).encode())
             sample_count += 1
             if sample_count % samples_per_shard == 0:
                 open_new_shard()
 
+    else:
+        # ── Legacy path (imitation-only L2D, NVIDIA, or empty partition) ──
+        # Per-sample full-window decode. For NVIDIA there are no WM windows.
+        max_workers_cap = 16  # imitation-only samples are light
+        pack_workers = max(1, min(max_workers_cap, len(idx_list)))
+        print(f"Packing {len(idx_list)} samples, legacy mode "
+              f"(world_model={world_model}, per-sample decode)...")
+        pack_init = (dataset.value, ep_list, raw_path, image_size, world_model, calib_bytes)
+        del ds
+        with ProcessPoolExecutor(max_workers=pack_workers, mp_context=ctx,
+                                 initializer=parallel_pack.init_pack_worker,
+                                 initargs=pack_init) as pool:
+            for sample_key, nviews, members, frame_pool in pool.map(
+                    parallel_pack.pack_sample, idx_list):
+                for suffix, blob in members.items():
+                    _add_member(sample_key, suffix, blob)
+                for frame_id, blob in frame_pool.items():
+                    _write_pool(frame_id, blob)
+                num_views = nviews
+                has_map = has_map or ("map.jpg" in members)
+                has_wm = has_wm or ("window_index.json" in members)
+                if _record_to_json is not None:
+                    record = labels_by_id.get(sample_key)
+                    if record is not None:
+                        _add_member(sample_key, "reasoning.json",
+                                    json.dumps(_record_to_json(record)).encode())
+                sample_count += 1
+                if sample_count % samples_per_shard == 0:
+                    open_new_shard()
+
     if current_tar:
         current_tar.close()
-    if has_wm:
-        print(f"Frame pool: {pool_frames_written} unique frames in {pool_dir} "
-              f"(deduped from the per-sample WM windows).")
 
     manifest = {"total_samples": sample_count, "shards": shard_idx,
                 "hz": hz, "image_size": image_size, "dataset": dataset.value,
