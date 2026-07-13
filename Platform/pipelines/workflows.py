@@ -370,10 +370,12 @@ def data_ingest(
     container_image=DATA_PREP_IMAGE,
     # 16 vCPU for the process-parallel pack workers (decode+JPEG across cores;
     # WM windows = N history + N future x V cams dominate). Memory <= the Flyte
-    # task cap (32Gi); large ephemeral storage holds tens of episodes of raw
+    # task cap (32Gi); large ephemeral storage holds HUNDREDS of episodes of raw
     # video + decoded windows. Karpenter provisions a fitting node.
-    requests=Resources(cpu="16", mem="30Gi", ephemeral_storage="400Gi"),
-    limits=Resources(cpu="16", mem="32Gi", ephemeral_storage="450Gi"),
+    # Ephemeral matched to data_ingest (500-ep partition needs ~500 GB p95 for
+    # the reopened raw + ~50 GB for the shard tarballs).
+    requests=Resources(cpu="16", mem="30Gi", ephemeral_storage="700Gi"),
+    limits=Resources(cpu="16", mem="32Gi", ephemeral_storage="800Gi"),
     # Cache on (raw URI, labels URI, group_ids, world_model, image_size,
     # cache_version) so "processing is rarely needed" holds (#121 §3.4a): an
     # unchanged partition re-uses its shards. Because the raw + labels inputs are
