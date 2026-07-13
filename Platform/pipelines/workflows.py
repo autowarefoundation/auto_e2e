@@ -154,6 +154,36 @@ def _select_shard_dir(shards, dataset) -> str:
     return fallback
 
 
+def _select_shard_dirs(shards, dataset) -> List[str]:
+    """Download ALL shard FlyteDirectories whose manifest matches `dataset`.
+
+    Sharded fan-out returns N per-partition dirs (one per partition), all with
+    the same ``dataset`` in their manifest. The eval task must consume ALL of
+    them so ADE/FDE reflects the whole held-out set, not partition 0 only
+    (Flyte-review B2 fix — the single-dir _select_shard_dir was silently
+    collapsing sharded eval to 1/N of val).
+    """
+    import os
+    import json
+    target = dataset.value
+    matched: List[str] = []
+    for sh in shards:
+        d = sh.download()
+        mpath = os.path.join(str(d), "manifest.json")
+        if os.path.exists(mpath):
+            try:
+                if json.load(open(mpath)).get("dataset") == target:
+                    matched.append(str(d))
+            except Exception:
+                pass
+    if not matched:
+        raise RuntimeError(
+            f"_select_shard_dirs: no shard dirs matched dataset={target} "
+            f"(had {len(shards)} shards)")
+    print(f"Selected {len(matched)} shard dirs for dataset={target}")
+    return matched
+
+
 def _loader_download_dir(shard) -> str:
     """Download one shard FlyteDirectory and return its local path (merged path)."""
     return str(shard.download())
@@ -1508,7 +1538,7 @@ def _run_evaluation(checkpoint, shards, train_metadata, dataset, experiment_name
     from flytekit import current_context
 
     from model_components.auto_e2e import AutoE2E
-    from data_parsing.pre_extracted import make_pre_extracted_loader
+    from data_parsing.pre_extracted import make_multi_dataset_loader
     from evaluation.metrics import integrate_trajectory
 
     # Eval uses num_workers=4; use the file_system sharing strategy so the small
@@ -1516,7 +1546,9 @@ def _run_evaluation(checkpoint, shards, train_metadata, dataset, experiment_name
     torch.multiprocessing.set_sharing_strategy("file_system")
 
     ckpt_path = checkpoint.download()
-    shard_dir = _select_shard_dir(shards, dataset)
+    # Sharded fan-out returns N per-partition dirs; eval over ALL of them so
+    # ADE/FDE covers the full held-out set, not partition 0 only (Flyte-review B2).
+    shard_dirs = _select_shard_dirs(shards, dataset)
     meta = json.load(open(train_metadata.download()))
     ctx = current_context()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -1533,16 +1565,20 @@ def _run_evaluation(checkpoint, shards, train_metadata, dataset, experiment_name
     # memorization. val_fraction=0 (legacy) → score all samples (in-sample).
     val_fraction = float(meta.get("training", {}).get("val_fraction", 0.0) or 0.0)
     eval_split = "val" if val_fraction > 0.0 else "all"
-    loader = make_pre_extracted_loader(shard_dir, batch_size=8, num_workers=4, shuffle=0,
+    loader = make_multi_dataset_loader(shard_dirs, batch_size=8, num_workers=4, shuffle=0,
                                        pin_memory=(device.type == "cuda"),
                                        split=eval_split, val_fraction=val_fraction)
-    print(f"Eval split={eval_split} (val_fraction={val_fraction}) — "
+    print(f"Eval split={eval_split} (val_fraction={val_fraction}, {len(shard_dirs)} partitions) — "
           f"{'held-out generalization' if eval_split == 'val' else 'in-sample'}")
-    projection, geometry_type = _loader_projection(loader, device)
     all_ade, all_fde = [], []
 
     with torch.no_grad():
-        for batch in loader:
+        # MergedDatasetLoader yields (batch, projection, geometry_type) per batch,
+        # so each partition's per-dataset geometry is preserved (a single rig for
+        # L2D, but the shape is future-proof for multi-dataset eval).
+        for batch, projection, geometry_type in loader:
+            if projection is not None:
+                projection = projection.to(device)
             # WM rolling buffer is per-sequence state; reset per batch so batch N's
             # planner history is not built from unrelated prior batches (leakage),
             # and a ragged final batch cannot crash torch.cat over mixed batch dims.
