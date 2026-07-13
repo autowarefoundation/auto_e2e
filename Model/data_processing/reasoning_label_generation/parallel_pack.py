@@ -87,9 +87,17 @@ def init_row_worker(
     videos (6 cams + map ≈ 7 frames) instead of a whole 8-step window (~49). The
     single-row read is bit-identical to the window read at the same physical row
     (verified in dataset.py / test_preextract_world_model), so pool bytes match the
-    per-sample window path exactly. Enumeration margins are identical with WM
-    on/off (egomotion 64/64 dominates), so local row indices agree with the
-    parent's WM-mode dataset.
+    per-sample window path exactly.
+
+    INVARIANT (load-bearing, pinned by test_reasoning_alignment_invariant.py):
+    the sample enumeration is IDENTICAL between WM-on and WM-off L2DDataset
+    instances, because the egomotion margins (64/64) strictly dominate the WM
+    margins (30/40) — so ``_build_sample_index`` produces the same ``_samples``
+    regardless of ``include_world_model_windows``, and this worker's plain-mode
+    L2DDataset._episode_ranges + local_row resolution agree exactly with the
+    parent's WM-mode dataset used to enumerate window rows in Pass A. If this
+    invariant is ever broken (e.g. wm_num_frames * stride > 64), Pass B assembly
+    would silently misalign uid ↔ row. The test guards against that.
     """
     global _DS, _RESIZE, _TO_PIL, _DATASET_VALUE
     from torchvision import transforms
