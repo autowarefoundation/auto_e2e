@@ -10,6 +10,7 @@ zero vector (a zero row is not a valid cosine target).
 
 from __future__ import annotations
 
+import pytest
 import torch
 
 from data_processing.reasoning_label_generation.schema import (
@@ -122,3 +123,64 @@ class TestEmbedRecords:
         emb, valid = embed_records([], HashingTextEncoder(dim=16))
         assert emb.shape == (0, NUM_HORIZONS, 16)
         assert valid.shape == (0, NUM_HORIZONS)
+
+
+# --- El cableado: lo que hace que los embeddings LLEGUEN a la loss -----------
+# Sin esto el módulo es un productor que nadie llama: HorizonReasoningLoss ya acepta
+# teacher_embedding_targets [B, 5, D], pero NADA en el pipeline los producía, así que
+# el término de alineación estaba inerte. `record_to_target_tensors` es el ÚLTIMO
+# sitio que todavía tiene el texto de `evidence` — el loader lo aplana a índices de
+# clase justo después y el texto se pierde.
+
+def test_tensorizer_is_byte_identical_without_an_encoder():
+    """Opt-in: sin encoder, la salida no cambia en absoluto."""
+    from data_processing.reasoning_label_generation.targets import (
+        record_to_target_tensors,
+    )
+
+    rec = _record(["a car ahead", "it slows", "brake", "stopped", "clear"])
+    out = record_to_target_tensors(rec)
+    assert "teacher_embedding" not in out
+    assert "teacher_embedding_valid" not in out
+
+
+def test_tensorizer_emits_the_embedding_the_loss_expects():
+    from data_processing.reasoning_label_generation.targets import (
+        collate_reasoning_targets,
+        record_to_target_tensors,
+    )
+    from data_processing.reasoning_label_generation.teacher_embedding import (
+        HashingTextEncoder,
+    )
+
+    enc = HashingTextEncoder(dim=32)
+    rec = _record(["a car ahead", "it slows", "brake", "stopped", "clear"])
+    out = record_to_target_tensors(rec, teacher_encoder=enc)
+    assert out["teacher_embedding"].shape == (5, 32)
+    assert out["teacher_embedding_valid"].shape == (5,)
+
+    batch = collate_reasoning_targets([out, out])
+    # Esto es lo que HorizonReasoningLoss consume: [B, 5, D].
+    assert batch.teacher_embedding_targets is not None
+    assert batch.teacher_embedding_targets.shape == (2, 5, 32)
+
+
+def test_a_mixed_batch_fails_loudly_instead_of_dropping_the_term():
+    """Media tanda con embeddings y media sin ellos no se puede apilar.
+
+    Tirar el término en silencio para TODO el batch sería peor que decirlo: el
+    entrenamiento seguiría, la loss de alineación no haría nada, y nadie se enteraría.
+    """
+    from data_processing.reasoning_label_generation.targets import (
+        collate_reasoning_targets,
+        record_to_target_tensors,
+    )
+    from data_processing.reasoning_label_generation.teacher_embedding import (
+        HashingTextEncoder,
+    )
+
+    rec = _record(["a car ahead", "it slows", "brake", "stopped", "clear"])
+    with_emb = record_to_target_tensors(rec, teacher_encoder=HashingTextEncoder(dim=8))
+    without = record_to_target_tensors(rec)
+    with pytest.raises(ValueError, match="mixed batch"):
+        collate_reasoning_targets([with_emb, without])

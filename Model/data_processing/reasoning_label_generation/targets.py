@@ -60,14 +60,28 @@ def _group_attr(horizon: ReasoningHorizonLabel, group: str) -> Any:
 
 
 def record_to_target_tensors(
-    record: ReasoningLabelRecord, taxonomy: ReasoningTaxonomy = DEFAULT_TAXONOMY
+    record: ReasoningLabelRecord,
+    taxonomy: ReasoningTaxonomy = DEFAULT_TAXONOMY,
+    teacher_encoder: Any = None,
 ) -> Dict[str, torch.Tensor]:
     """Tensorize one record into per-sample targets (no batch dim).
 
     Returns a flat dict:
         ``target__<group>``: ``[5, C]`` float (multi) or ``[5]`` long (single),
         ``confidence``:      ``[5]`` float,
-        ``source_weight``:   ``[5]`` float.
+        ``source_weight``:   ``[5]`` float,
+    and, when ``teacher_encoder`` is given:
+        ``teacher_embedding``:       ``[5, D]`` float,
+        ``teacher_embedding_valid``: ``[5]`` float (1 = usable, 0 = masked).
+
+    ``teacher_encoder`` closes a gap: ``HorizonReasoningLoss`` already accepts
+    ``teacher_embedding_targets [B, 5, D]`` for its alignment term, but **nothing
+    in the pipeline produced them**, so the term was inert. The record carries the
+    per-horizon ``evidence`` text the teacher wrote, and this is the one place that
+    still has it — the loader flattens records to class indices right after, and the
+    text is gone. Encoding it here is therefore the smallest wiring that makes the
+    alignment loss reachable at all. It is OPT-IN: with no encoder, the output is
+    byte-identical to today.
 
     An abstained record yields all-ignore single-label targets, all-zero
     multi-label targets, and zero source weights (fully masked, R9).
@@ -102,6 +116,13 @@ def record_to_target_tensors(
             weights[h_idx] = base * float(horizon.confidence)
     out["confidence"] = confidence
     out["source_weight"] = weights
+
+    if teacher_encoder is not None:
+        from .teacher_embedding import embed_record
+
+        emb, valid = embed_record(record, teacher_encoder)
+        out["teacher_embedding"] = emb                       # [5, D]
+        out["teacher_embedding_valid"] = valid.to(torch.float32)  # [5]
     return out
 
 
@@ -115,10 +136,22 @@ def collate_reasoning_targets(
         targets[group] = torch.stack([s[f"target__{group}"] for s in per_sample], dim=0)
     confidence = torch.stack([s["confidence"] for s in per_sample], dim=0)
     weights = torch.stack([s["source_weight"] for s in per_sample], dim=0)
+    # Only when EVERY sample carries one: a batch mixing embedded and non-embedded
+    # samples cannot be stacked, and silently dropping the term for the whole batch
+    # would be worse than saying so.
+    emb = None
+    if all("teacher_embedding" in s for s in per_sample):
+        emb = torch.stack([s["teacher_embedding"] for s in per_sample], dim=0)
+    elif any("teacher_embedding" in s for s in per_sample):
+        raise ValueError(
+            "some samples carry teacher_embedding and others do not; a mixed batch "
+            "cannot be stacked. Build the loader with the same encoder for all shards."
+        )
     return ReasoningTargetBatch(
         targets=targets,
         confidence_targets=confidence,
         source_weights=weights,
+        teacher_embedding_targets=emb,
     )
 
 
@@ -136,10 +169,14 @@ def target_batch_from_loader(
     if f"reasoning__target__{_CORE_GROUPS[0]}" not in batch:
         return None
     targets = {g: batch[f"reasoning__target__{g}"] for g in _CORE_GROUPS}
+    # Present only when the loader was built with a teacher encoder. Absent → the
+    # alignment term stays inert, exactly as today.
+    emb = batch.get("reasoning__teacher_embedding")
     return ReasoningTargetBatch(
         targets=targets,
         confidence_targets=batch["reasoning__confidence"],
         source_weights=batch["reasoning__source_weight"],
+        teacher_embedding_targets=emb,
     )
 
 
