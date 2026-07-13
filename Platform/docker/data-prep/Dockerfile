@@ -8,13 +8,18 @@ WORKDIR /workspace
 # CPU-only torch first (lerobot-dataset omits torch, so ours stays)
 RUN pip install --no-cache-dir torch==2.4.1 torchvision==0.19.1 --index-url https://download.pytorch.org/whl/cpu
 
-# lerobot-dataset = standalone LeRobotDataset with relaxed deps (no torch override)
-# boto3<1.36: unpinned boto3 makes pip backtrack for many minutes — it downloads
-# metadata for dozens of recent boto3 releases (1.43.x → …) trying to satisfy
-# flytekit 1.14's botocore/s3transfer ceiling. Capping boto3 lets the resolver
-# land immediately on a compatible 1.35.x. boto3 is used by label_cache.py (S3).
+# Install flytekit FIRST and PINNED, so its transitive deps (botocore/s3transfer,
+# adlfs, gcsfs, …) are resolved by ONE package's constraints. An unpinned
+# "flytekit>=1.14,<2" mixed with the rest let pip try the newest boto3/adlfs and
+# backtrack for many minutes (downloading metadata for dozens of releases in
+# descending order) before landing on a compatible set. Pinning flytekit to a
+# concrete 1.14.x makes the resolve deterministic and fast.
+RUN pip install --no-cache-dir "flytekit==1.14.9"
+
+# The rest: lerobot-dataset = standalone LeRobotDataset with relaxed deps (no
+# torch override). boto3 is used by label_cache.py (S3); it's already pulled in
+# compatible by flytekit above, but list it so the dependency is explicit.
 RUN pip install --no-cache-dir \
-    "flytekit>=1.14,<2" \
     kubernetes \
     lerobot-dataset \
     physical_ai_av \
@@ -26,7 +31,7 @@ RUN pip install --no-cache-dir \
     av \
     timm \
     scipy \
-    "boto3<1.36" \
+    boto3 \
     pyarrow
 
 COPY Model/ /workspace/Model/
