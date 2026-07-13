@@ -1802,6 +1802,56 @@ def wf_create_dataset_sharded(
     return shard_dirs
 
 
+@dynamic(container_image=TRAINING_IMAGE)
+def wf_sharded_full_run(
+    dataset: Dataset = Dataset.L2D,
+    episodes: int = 20,
+    partition_size: int = 10,
+    image_size: int = 256,
+    reasoning_teacher: str = "openai_compatible",
+    prompt_version: str = "action_relevant_reasoning_v3_temporal_front256",
+    max_partitions: int = 512,
+    backbone: Backbone = Backbone.SWIN_V2_TINY,
+    epochs: int = 3,
+    batch_size: int = 1,
+    grad_accum_steps: int = 4,
+    lr: float = 1e-4,
+    enable_reasoning: bool = True,
+    reasoning_mode: str = "pooled_latent",
+    enable_world_model: bool = True,
+    val_fraction: float = 0.1,
+    num_workers: int = 4,
+) -> EvalMetrics:
+    """End-to-end scaled run (#121): episode-sharded dataset fan-out → IL train
+    (all three losses) → held-out eval, in ONE execution.
+
+    Chains ``wf_create_dataset_sharded`` (option B fan-out producing per-partition
+    deduped WM shards with 1 Hz reasoning labels) straight into ``train_il`` over
+    the merged ``List[FlyteDirectory]`` and then ``evaluate_il_policy`` on the
+    disjoint held-out split. Defaults turn on BOTH the reasoning and world-model
+    branches (the full 3-branch objective) with WM-friendly batch_size=1 +
+    grad_accum, and a 10% group-level val split so ADE/FDE measure generalization.
+
+    This is the entry point for "train on ALL episodes": set episodes=0 (all) and a
+    cost-appropriate partition_size. Training is serial (single GPU); only the data
+    pipeline fans out.
+    """
+    shards = wf_create_dataset_sharded(
+        dataset=dataset, episodes=episodes, partition_size=partition_size,
+        image_size=image_size, world_model=True,
+        reasoning_teacher=reasoning_teacher, prompt_version=prompt_version,
+        max_partitions=max_partitions)
+    out = train_il(
+        shards=shards, dataset=dataset, backbone=backbone, epochs=epochs,
+        batch_size=batch_size, grad_accum_steps=grad_accum_steps, lr=lr,
+        enable_reasoning=enable_reasoning, reasoning_mode=reasoning_mode,
+        enable_world_model=enable_world_model, val_fraction=val_fraction,
+        num_workers=num_workers)
+    return evaluate_il_policy(
+        checkpoint=out.checkpoint, shards=shards, dataset=dataset,
+        train_metadata=out.metadata)
+
+
 @workflow
 def wf_train_il(
     shards: List[FlyteDirectory],
