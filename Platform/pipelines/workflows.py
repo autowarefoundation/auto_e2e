@@ -384,30 +384,40 @@ def data_ingest(
         # HF_HUB_ENABLE_HF_TRANSFER left unset → the Python client is used
         # (the Rust hf_transfer aggressively pre-buffers whole files and has
         # blown memory in prior runs).
-        _missing_parquets = _data_paths
+        _missing = list(_all_files)
         for attempt in range(3):
             snapshot_download(
                 repo_id=dataset.value, repo_type="dataset",
                 local_dir=str(_meta.root),
-                allow_patterns=_all_files,
+                allow_patterns=_missing if attempt > 0 else _all_files,
                 max_workers=2,
             )
-            # Verify EACH expected parquet is now on disk. If not, retry.
-            _missing_parquets = [p for p in _data_paths
-                                 if not (_meta.root / p).exists()]
-            if not _missing_parquets:
+            # Verify EACH expected file is now on disk (both parquets AND videos).
+            # Label/pack pods later do `LeRobotDataset(root=raw_path, episodes=…)`,
+            # and lerobot's `_check_cached_episodes_sufficient` checks video-file
+            # presence for the requested episodes — if ANY is missing, lerobot
+            # silently re-downloads from HF inside that pod, hitting the same
+            # partial-fetch risk in a place without our retry.  So we MUST land
+            # 100% of the file set here so downstream pods stay offline.
+            _missing = [p for p in _all_files
+                        if not (_meta.root / p).exists()]
+            if not _missing:
                 print(f"Pre-fetch attempt {attempt+1}: all "
-                      f"{len(_data_paths)} parquets present on disk")
+                      f"{len(_all_files)} files present on disk")
                 break
+            _mp = [p for p in _missing if p in set(_data_paths)]
             print(f"Pre-fetch attempt {attempt+1}: "
-                  f"{len(_missing_parquets)} parquets STILL missing "
-                  f"(first: {_missing_parquets[:2]}); retrying")
+                  f"{len(_missing)} files STILL missing "
+                  f"({len(_mp)} parquets + {len(_missing)-len(_mp)} videos, "
+                  f"first: {_missing[:2]}); retrying")
         else:
+            _mp = [p for p in _missing if p in set(_data_paths)]
             raise RuntimeError(
-                f"data_ingest: after 3 attempts, {len(_missing_parquets)} "
-                f"parquet files are still missing on disk "
-                f"(first missing: {_missing_parquets[:3]}). "
-                f"HF Hub may be transiently degraded — retry the task.")
+                f"data_ingest: after 3 attempts, {len(_missing)} files "
+                f"are still missing on disk ({len(_mp)} parquets + "
+                f"{len(_missing)-len(_mp)} videos; first missing: "
+                f"{_missing[:3]}). HF Hub may be transiently degraded — "
+                f"retry the task.")
     ds = LeRobotDataset(repo_id=dataset.value, episodes=ep_list)
     cache_dir = ds.root
     # Hardlink the WHOLE cache tree (data/ + meta/ + videos/) into out_dir instead
