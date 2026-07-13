@@ -22,7 +22,10 @@ K8S_DIR="${SCRIPT_DIR}/k8s"
 AWS_ACCOUNT_ID="${AWS_ACCOUNT_ID:-$(aws sts get-caller-identity --query Account --output text)}"
 ECR_PREFIX="${ECR_PREFIX:-${AWS_ACCOUNT_ID}.dkr.ecr.us-west-2.amazonaws.com}"
 
-: "${CONSOLE_ALB_SG_ID:?Set CONSOLE_ALB_SG_ID (terraform output console_alb_sg_id; SG admits HTTP:80 only from the CloudFront managed VPC-origin ENIs)}"
+# SG attached to the ALB via the Ingress security-groups annotation (Auto Mode
+# has no IngressClassParams.securityGroups). Admits HTTP:80 only from CloudFront's
+# managed VPC-origin ENIs.
+: "${CONSOLE_ALB_SG_ID:?Set CONSOLE_ALB_SG_ID (terraform output console_alb_sg_id)}"
 # CloudFront origin is only known after infra Phase 2; default to empty on the
 # first apply. The frontend uses same-origin /api so CORS is not on the hot path.
 CONSOLE_ORIGIN="${CONSOLE_ORIGIN:-}"
