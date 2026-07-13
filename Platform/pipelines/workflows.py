@@ -198,6 +198,10 @@ def _loader_projection(loader, device):
     # URI). The HF token is a secret env, NOT an input, so it never enters the key.
     cache=True,
     cache_version=INGEST_CACHE_VERSION,
+    # 100-partition fan-out: a single transient HF 503 or Karpenter provisioning
+    # blip would abort the WHOLE workflow without retries. 2 attempts cover
+    # ~all rate-limit / node-placement transients (Flyte-review H3 fix).
+    retries=2,
 )
 def data_ingest(
     dataset: Dataset = Dataset.L2D,
@@ -344,6 +348,9 @@ def data_ingest(
     # encoding, so a shard-layout change correctly re-packs.
     cache=True,
     cache_version=PACK_CACHE_VERSION,
+    # 100-partition fan-out: transient pack failures (OOM at bad seed, torn
+    # ProcessPool worker) shouldn't abort the whole workflow (Flyte-review H3).
+    retries=2,
 )
 def data_processing(
     raw_data: FlyteDirectory,
@@ -742,6 +749,10 @@ def data_processing(
     cache=True,
     cache_version=LABEL_CACHE_VERSION,
     cache_ignore_input_vars=("label_workers",),
+    # 100-partition fan-out: a single Cosmos vLLM 503 must not abort the whole
+    # workflow. The teacher call is idempotent (labels are computed, not stored),
+    # so a retry is safe (Flyte-review H3).
+    retries=2,
 )
 def generate_reasoning_labels(
     raw_data: FlyteDirectory,
