@@ -23,13 +23,11 @@ DATA_PREP_IMAGE = f"{ECR_PREFIX}/auto-e2e/data-prep:latest"
 
 MLFLOW_URI = "http://mlflow.mlflow.svc.cluster.local:5000"
 
-# S3 bucket for the persistent, sample_id-keyed reasoning-label cache (#98/#117).
-# The teacher (Cosmos) is called at most ONCE per (dataset, teacher, prompt, sample)
-# over the dataset's lifetime; re-packing hits the cache and never re-bills the
-# endpoint. Empty → caching disabled (always recompute). Externalized so no
-# account-specific bucket name is committed; set in .env / the task env.
-REASONING_LABELS_CACHE_BUCKET = _os.environ.get(
-    "REASONING_LABELS_CACHE_BUCKET", "auto-e2e-platform-datasets-381491877296")
+# The per-sample S3 label cache is REMOVED (#121 §3.4): at full L2D it was ~10M
+# tiny JSON objects (inode/quota/copy-rate blowup). The teacher is now called once
+# per (deterministic) partition and its records aggregate into one records.jsonl;
+# re-run protection is the Flyte task cache on the deterministic partition, so an
+# unchanged range never re-bills Cosmos.
 
 # Flyte cache versions (#121 §3.4a). The cache key is (task interface, input
 # literals, cache_version); the CODE-contract determinants (uid/parser/shard/
@@ -584,10 +582,11 @@ def data_processing(
 # This is the SINGLE place the teacher (Cosmos) is ever called. It enumerates
 # samples straight from the raw dataset; each sample's GLOBAL uid
 # (parser.sample_uid, #121 §3.1) is the JOIN key to data_processing — stable
-# across episode-range shards. Asks the teacher for a
-# label ONLY on a cache miss (LabelCache, sample_uid-keyed in S3), and writes a
-# versioned label artifact. data_processing later JOINs this artifact into the
-# shards by sample_id — it does NOT call the teacher (#98/#117).
+# across episode-range shards. It labels every sample of the partition and writes
+# ONE records.jsonl artifact (no per-sample S3 cache, §3.4); the Flyte task cache
+# on the deterministic partition prevents re-billing on a re-run. data_processing
+# later JOINs this artifact into the shards by sample_id — it does NOT call the
+# teacher (#98/#117).
 # ============================================================
 @task(
     container_image=DATA_PREP_IMAGE,
@@ -613,18 +612,15 @@ def data_processing(
                mount_requirement=Secret.MountType.ENV_VAR),
     ],
     # Cache on (raw URI, group_ids, teacher, prompt_version, cache_version) so a
-    # re-run of an unchanged partition is a no-op (#121 §3.4a). This is BELT over
-    # the per-sample S3 LabelCache (which already keys the teacher by sample_uid):
-    # the S3 cache stops re-billing Cosmos; the Flyte cache stops re-running the
-    # decode+JOIN task at all. A changed prompt_version / teacher (in the key)
-    # correctly misses. LABEL_CACHE_VERSION folds in the uid format (the JOIN key).
-    # EXCLUDE the tuning/placement knobs from the key (§3.4c): label_workers is
-    # pure parallelism (output-invariant) and cache_bucket is only WHERE the
-    # per-sample S3 cache lives (not WHAT is produced) — letting either invalidate
-    # the task cache would force a needless re-label (Cosmos re-bill) on a tweak.
+    # re-run of an unchanged partition is a no-op (#121 §3.4a) — this is now the
+    # SOLE re-label protection (the per-sample S3 cache is gone, §3.4): an unchanged
+    # partition never re-bills Cosmos, a changed prompt_version / teacher correctly
+    # misses. LABEL_CACHE_VERSION folds in the uid format (the JOIN key). EXCLUDE
+    # the tuning knob from the key (§3.4c): label_workers is pure parallelism
+    # (output-invariant), so a tweak must not force a corpus re-label.
     cache=True,
     cache_version=LABEL_CACHE_VERSION,
-    cache_ignore_input_vars=("label_workers", "cache_bucket"),
+    cache_ignore_input_vars=("label_workers",),
 )
 def generate_reasoning_labels(
     raw_data: FlyteDirectory,
@@ -633,7 +629,6 @@ def generate_reasoning_labels(
     split: str = "train",
     teacher: str = "openai_compatible",
     prompt_version: str = "action_relevant_reasoning_v3_temporal_front256",
-    cache_bucket: str = REASONING_LABELS_CACHE_BUCKET,
     group_ids: Optional[List[str]] = None,
     # Process-parallel worker count. Front-clip mode decodes only 5 front frames
     # per sample, but at 20+ episodes 24 concurrent decoders + their lerobot
@@ -659,12 +654,12 @@ def generate_reasoning_labels(
     different episode-range shards. Both L2D and NVIDIA are labelled (NVIDIA is no longer
     skipped): ``reasoning_clip_only`` does not change either dataset's sample set.
 
-    The teacher is called at most ONCE per (dataset, teacher, prompt_version,
-    sample): :class:`LabelCache` keys each sample in
-    ``s3://<cache_bucket>/reasoning_labels_cache/dataset=/teacher=/prompt_version=/{sample_id}.json``.
-    Changing teacher or prompt_version yields a fresh cache prefix (never a stale
-    mix) — so the temporal-clip / front-only / 256px change ships under a new
-    prompt_version to avoid reusing the old multi-cam single-frame labels.
+    There is NO per-sample S3 cache (#121 §3.4): the teacher is called once per
+    sample of this partition and all records aggregate into ONE ``records.jsonl``.
+    Re-label protection is the Flyte task cache on the deterministic partition —
+    an unchanged partition is a task-cache no-op (no Cosmos call); a changed
+    ``teacher`` / ``prompt_version`` (both in the cache key) correctly misses, so
+    the temporal-clip / front-only / 256px prompt change re-labels cleanly.
 
     Returns:
         FlyteDirectory with a whole-record ``records.jsonl`` (the JOIN
@@ -764,7 +759,7 @@ def generate_reasoning_labels(
 
     from data_processing.reasoning_label_generation.targets import record_from_json
 
-    n_hit = n_computed = n_abstain = 0
+    n_computed = n_abstain = 0
     if n_samples == 0:
         # Empty partition (short episode/clip): no labeling, empty artifact.
         records = []
@@ -782,12 +777,13 @@ def generate_reasoning_labels(
 
         workers = max(1, min(label_workers, n_samples))
         print(f"Labeling {n_samples} samples with {workers} parallel PROCESSES "
-              f"(teacher={teacher}, cache_bucket={cache_bucket or '(disabled)'})...")
+              f"(teacher={teacher})...")
         ctx = mp.get_context("spawn")
         # Order MUST match parallel_label.init_worker(repo_id, episodes, dataset_name,
-        # teacher, teacher_kwargs, cache_bucket, prompt_version, raw_path).
+        # teacher, teacher_kwargs, prompt_version, raw_path). No cache_bucket — the
+        # per-sample S3 cache is gone (§3.4).
         init_args = (dataset.value, ep_list, dataset.value, teacher, teacher_kwargs,
-                     cache_bucket or None, prompt_version, raw_path)
+                     prompt_version, raw_path)
         results = [None] * n_samples
         with ProcessPoolExecutor(
             max_workers=workers, mp_context=ctx,
@@ -796,15 +792,13 @@ def generate_reasoning_labels(
             for si, rec_json, status in pool.map(parallel_label.label_sample,
                                                  range(n_samples)):
                 results[si] = record_from_json(rec_json)
-                if status == "hit":
-                    n_hit += 1
-                elif status == "abstained":
+                if status == "abstained":
                     n_abstain += 1
                 else:
                     n_computed += 1
         records = results
     print(f"Labeled {len(records)} samples "
-          f"(cache hits={n_hit}, computed={n_computed}, abstained={n_abstain})")
+          f"(computed={n_computed}, abstained={n_abstain})")
     # A few abstentions (malformed teacher JSON) are fine — they are masked out of
     # the reasoning loss. A HIGH rate means a systemic prompt/model problem, so
     # fail loudly rather than silently shipping a mostly-unlabeled dataset.
@@ -828,9 +822,9 @@ def generate_reasoning_labels(
     with open(os.path.join(out_dir, "meta.json"), "w") as f:
         json.dump({"dataset": dataset.value, "split": split, "teacher": teacher,
                    "prompt_version": prompt_version, "num_records": len(records),
-                   "cache_hits": n_hit, "computed": n_computed,
-                   "num_abstained": n_abstain,
-                   "source": "offline teacher (generate_reasoning_labels), S3-cached"}, f)
+                   "computed": n_computed, "num_abstained": n_abstain,
+                   "source": "offline teacher (generate_reasoning_labels); "
+                             "records.jsonl artifact, Flyte task-cached per partition"}, f)
     print(f"Wrote reasoning label artifact → {layout}")
     return FlyteDirectory(out_dir)
 
