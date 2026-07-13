@@ -333,19 +333,31 @@ estimated_cost = n_frames*decode_cost + n_wm_windows*wm_cost + est_bytes*io_cost
 - The plan is deterministic given `(snapshot, target_cost)` so re-runs reproduce
   identical partitions (required for Flyte cache hits).
 
-### 3.4 Migration / backward-compat of the label cache
-Changing `sample_id` from `s{si:08d}` to the global uid changes every cache KEY,
-so the ~1000 already-cached L2D labels under the old positional keys become
-unreachable (cache miss → re-bill Cosmos for episodes 0–9).
-Options (decide in review):
-- (a) Accept the one-time re-label of the already-cached episodes (cheap: ~1000
-  samples ≈ minutes; simplest, cleanest going forward).
-- (b) Write a one-shot migration that re-keys existing cache objects from
-  positional → uid (needs the old→new mapping, which requires re-enumerating the
-  exact old episode set; brittle).
-Recommendation: **(a)** — the cache is an optimization, the teacher is cheap at
-this scale, and (a) avoids carrying a fragile remap. Bump the `prompt_version`?
-No — same prompt; just let the new keys populate.
+### 3.4 Label cache: DROP the per-sample S3 cache (decided 2026-07-13)
+The reasoning teacher was cached one-JSON-per-sample in
+`s3://…/reasoning_labels_cache/…/{sample_uid}.json` (#117). At full L2D
+(~100k episodes × ~100 valid samples/ep) that is **~10M tiny objects** — exactly
+the small-file failure mode that blows up S3 request-rate on any copy/list and
+exhausts inodes on the train node (per the wids/Turing writeup: transfer is
+throttled by per-file COPY requests, and object count is capped before inode
+exhaustion). The per-sample cache is therefore DROPPED.
+
+Its content is not lost: `generate_reasoning_labels` already writes a
+`records.jsonl` (one full `record_to_json(record)` per line — byte-for-byte the
+SAME payload the per-sample JSON stored, just concatenated) as the JOIN
+interchange for pack. So the partition's `records.jsonl` (a handful of files,
+one per partition) fully replaces the ~10M per-sample objects with NO information
+loss. `LabelCache` (put/get per sample) is removed from the labeling path.
+
+Re-label protection now comes from the STAGE cache, not per-sample objects: the
+partition set is deterministic (`plan_partitions`), so re-running an unchanged
+partition is a Flyte task-cache no-op (§3.4a) and never re-bills Cosmos. The
+only thing lost vs per-sample caching is CROSS-partition-boundary sample reuse
+(the same physical sample labeled under a different partition split) — which the
+option-B design never does (partitions are stable), so it is a non-cost.
+
+The old positional-keyed objects (`s{si:08d}.json`) and any per-sample uid
+objects already written are now dead; clean them up under §3.4b.
 
 ### 3.4a Flyte caching + provenance (skip unchanged ranges) (review pt 2)
 Stages are separate (decision 2) and fan out per range, so a re-run must NOT redo
@@ -368,9 +380,11 @@ Per stage, include the provenance that actually affects its output:
 - `data_ingest_range`: `DatasetSnapshot` (dataset + revision + group list). lerobot
   also caches the HF download on disk; Flyte cache skips the whole task on re-run.
 - `generate_reasoning_labels_range`: `DatasetSnapshot` + `teacher_model_revision`
-  + `prompt_body_hash` + `prompt_version` + decode params. Combined with the
-  per-sample S3 label cache, an unchanged range is a task-cache no-op; a changed
-  prompt/model correctly misses. (This is why `prompt_version` alone was fragile.)
+  + `prompt_body_hash` + `prompt_version` + decode params. The per-sample S3 label
+  cache is GONE (§3.4); re-label protection is now SOLELY the Flyte task cache —
+  an unchanged range is a task-cache no-op (no Cosmos call), a changed
+  prompt/model correctly misses. (This is why `prompt_version` alone was fragile —
+  it must ride in the cache key alongside the snapshot.)
 - `data_processing_range`: `DatasetSnapshot` + `shard_schema_version` +
   `world_model` flag + `geometry_version`.
 Bump the relevant field/version on ANY code change to that stage — version bump is
@@ -445,6 +459,58 @@ Stability check to run before Phase 2 fan-out: enumerate the `CONTRACT_VERSIONS`
 confirm each is a single constant, and confirm no runtime/tuning knob is in any
 cached task's input signature. This is the concrete guard that the contract we
 are locking now stays locked.
+
+### 3.4d World-Model pack: dedup frames (decided 2026-07-13)
+**Problem (measured).** With reasoning labels present, `data_processing` forces
+`world_model=True`, and a WM sample packs 55 image JPEGs: 6 current cams + 1 map +
+(4 history + 4 future) × 6 cams = 48 window frames. Samples are enumerated at
+10 Hz (every source row) but the window steps at 1 Hz (stride 10), so **every
+physical camera frame is JPEG-encoded and stored ~9×** across a shard (it lands in
+8 stride-10 window slots plus its own current-frame member). A WM shard is ~8× an
+imitation-only shard (~1.4 GB vs ~175 MB / 1000 samples). This duplication — not
+the decode location — is the storage+pack bottleneck.
+
+**Rejected: train-time seek / NVDEC.** Rebuilding the window by lerobot
+`delta_timestamps` seek at train time (or GPU NVDEC) removes the storage cost but
+reintroduces exactly what pre-extraction (#30) was built to avoid: the WM window
+is on the critical path for ALL THREE losses (it produces the planner+reasoning
+`visual_history` via `encode_history`, not just the JEPA target — auto_e2e.py:145-168),
+so every batch of every epoch re-pays ~48 multi-cam decodes. The per-worker ~300 MB
+video footprint OOM-killed 16 workers at 32 Gi during PACK; train_il requests only
+16 Gi. It also drags lerobot/PyAV + raw video + a live reasoning JOIN onto the
+train node (a large image/loader rebuild) for a recurring per-epoch compute cost.
+Also note the label stage decodes a DIFFERENT frame set (front cam × 5 horizons)
+than train (6 cams × 8 window steps), so "reuse the label-time JPEGs at train
+time" does not apply — they are not even a superset.
+
+**Chosen: dedup at the ENCODE layer, keep train-time decode-free.** Each distinct
+`(episode,row,cam)` 256² frame is JPEG-encoded ONCE per shard into a
+content-addressed frame pool keyed by a stable `frame_id` (e.g. `e{ep}-r{row}-c{cam}`);
+each sample carries a tiny `window_index` mapping `(step,view) → frame_id` for its
+history and future. `cam_*.jpg / map.jpg / ego.npy / meta.json / calib.json /
+reasoning.json` stay byte-for-byte as today, so `sample_uid`, `split_group_uid`
+bucketing, and the reasoning JOIN are untouched. The loader (`pre_extracted.py`)
+gathers each referenced `frame_id` from the pool, decodes it ONCE (memoized per
+shard sample-group), and stacks into the SAME `history_frames [T,V,3,H,W]` /
+`future_frames [F,V,3,H,W]` tensors `auto_e2e.py` already consumes — so AutoE2E,
+all three losses, MergedDatasetLoader, and the JOIN are unchanged. Result: storage
+~8× → ~1.1× of imitation-only, zero train-time video decode, all three losses
+intact. Scope: two files (`parallel_pack.py`, `pre_extracted.py`).
+
+**Boundary safety (unchanged, verified).** frame_ids are `(episode,row,cam)`, so a
+window never references another episode's frame. This already holds on the live
+path: enumeration excludes episode-edge frames (margins 64/64 ≥ WM reach 40), and
+lerobot's `_get_query_indices` clamps every delta to the current episode
+`[dataset_from_index, dataset_to_index)` — so no cross-clip teacher contamination.
+Within one L2D episode (a continuous 10 Hz clip) the +4 s target can still be a
+large-but-valid appearance change, which is the intended JEPA difficulty.
+
+**Must validate on GPU before full run:** (i) byte-equality — `history_frames`/
+`future_frames` rebuilt from a deduped shard equal the current WM-shard tensors for
+the same samples; (ii) a full-loss `train_il` step (WM+reasoning on) yields finite
+non-None traj/jepa/reason; (iii) measured deduped shard size ≈ imitation baseline;
+(iv) the pool key namespace does not leak into the camera-key regex (`num_views`
+unchanged in the manifest); (v) `num_workers>0` still hides the gather+decode.
 
 ### 3.5 Open design questions — RESOLVED in review
 1. **Ingest↔pack coupling → SEPARATE tasks + PER-PARTITION raw materialization
