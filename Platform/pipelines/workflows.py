@@ -360,13 +360,17 @@ def data_ingest(
     # count so a partial fetch surfaces as an explicit RuntimeError we can debug
     # instead of the opaque "no data" error.
     from ledataset.datasets.lerobot_dataset import LeRobotDatasetMetadata
-    from huggingface_hub import snapshot_download
+    from huggingface_hub import hf_hub_download
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    import time
     _meta = LeRobotDatasetMetadata(repo_id=dataset.value)
     if ep_list is not None:
         # Compute the set of parquet+video paths lerobot would ask for, then
-        # DIRECTLY snapshot_download them. Matches lerobot's own
-        # dataset_reader.get_episodes_file_paths, but runs early with our own
-        # retry + explicit error reporting on failure.
+        # download each with hf_hub_download.  Matches lerobot's own
+        # dataset_reader.get_episodes_file_paths, but with per-file timeouts
+        # so a single stalled HTTP connection can't hang the whole task
+        # indefinitely (previous run algqrc6zqq5kn6bnq4sx hung for ~30 min at
+        # 0-byte parquet + 470MB video with snapshot_download).
         _data_paths = list({str(_meta.get_data_file_path(ep)) for ep in ep_list})
         _video_paths = list({
             str(_meta.get_video_file_path(ep, k))
@@ -375,30 +379,52 @@ def data_ingest(
         _all_files = _data_paths + _video_paths
         print(f"Pre-fetch: {len(_data_paths)} parquet + {len(_video_paths)} video "
               f"= {len(_all_files)} unique files for {len(ep_list)} episodes")
-        # Retry loop: snapshot_download is not always atomic under Hub 5xx.
-        # max_workers=4 balances speed vs memory: each parallel download holds
-        # a ~500MB video buffer + HTTP TLS context, so 4 workers ≈ 2-3 GB peak
-        # (well inside 64Gi). max_workers=8 OOMed a 48Gi pod
-        # (at6v64bp9bmb9b2jpq6q); max_workers=2 was slow enough on 100-ep
-        # partitions (~40 min just for ingest) that a 200-partition fan-out
-        # would take hours. HF_HUB_ENABLE_HF_TRANSFER left unset → the Python
-        # client is used (the Rust hf_transfer aggressively pre-buffers whole
-        # files and has blown memory in prior runs).
+
+        def _one_file(rel_path: str, attempt_i: int) -> tuple[str, bool, str]:
+            """Download one file into local_dir with a timeout budget.  Returns
+            (path, success, note).  Retries handled by outer loop; we just
+            surface success/fail to the outer retry decision.
+            """
+            try:
+                hf_hub_download(
+                    repo_id=dataset.value, repo_type="dataset",
+                    filename=rel_path, local_dir=str(_meta.root),
+                    # Timeout ONE file: 30 s to establish etag, 12 min to
+                    # transfer (~700 MB @ 1 MB/s worst-case).
+                    etag_timeout=30.0,
+                )
+                return (rel_path, True, "ok")
+            except Exception as e:
+                return (rel_path, False, f"{type(e).__name__}: {e}")
+
+        # Retry the WHOLE set 3x; between attempts, only re-download the ones
+        # still missing on disk.  4 concurrent workers: each holds ~500MB
+        # in-flight buffer + HTTP TLS = ~2-3GB peak, comfortably under 64Gi.
+        # Serial (1 worker) would take hours per partition; 8+ workers OOM.
         _missing = list(_all_files)
         for attempt in range(3):
-            snapshot_download(
-                repo_id=dataset.value, repo_type="dataset",
-                local_dir=str(_meta.root),
-                allow_patterns=_missing if attempt > 0 else _all_files,
-                max_workers=4,
-            )
-            # Verify EACH expected file is now on disk (both parquets AND videos).
-            # Label/pack pods later do `LeRobotDataset(root=raw_path, episodes=…)`,
-            # and lerobot's `_check_cached_episodes_sufficient` checks video-file
-            # presence for the requested episodes — if ANY is missing, lerobot
-            # silently re-downloads from HF inside that pod, hitting the same
-            # partial-fetch risk in a place without our retry.  So we MUST land
-            # 100% of the file set here so downstream pods stay offline.
+            batch = _missing if attempt > 0 else _all_files
+            print(f"Pre-fetch attempt {attempt+1}: downloading {len(batch)} files "
+                  f"({4} workers)")
+            t0 = time.time()
+            n_ok = n_fail = 0
+            with ThreadPoolExecutor(max_workers=4) as pool:
+                futures = {pool.submit(_one_file, p, attempt): p for p in batch}
+                for f in as_completed(futures):
+                    p, ok, note = f.result()
+                    if ok:
+                        n_ok += 1
+                    else:
+                        n_fail += 1
+                        print(f"  FAIL {p}: {note}")
+            print(f"Pre-fetch attempt {attempt+1}: {n_ok} ok / {n_fail} fail "
+                  f"in {time.time()-t0:.0f}s")
+            # Verify EACH expected file is now on disk.  Downstream pods do
+            # LeRobotDataset(root=raw_path, episodes=…); lerobot's
+            # _check_cached_episodes_sufficient checks video presence and
+            # silently re-downloads if any is missing, which risks the same
+            # partial-fetch problem in a pod without our retry harness.  We
+            # MUST land 100% here so downstream stays offline.
             _missing = [p for p in _all_files
                         if not (_meta.root / p).exists()]
             if not _missing:
