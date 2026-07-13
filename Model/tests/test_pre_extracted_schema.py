@@ -223,6 +223,56 @@ class TestDecodeWorldModelWindows:
         assert "history_frames" not in out
         assert "future_frames" not in out
 
+    # --- deduped frame-pool path (#121 §3.4d) ---------------------------------
+    def _pool_sample_and_accessor(self, n_cams=6, T=4, F=4):
+        """A sample carrying window_index.json + a matching in-memory pool accessor.
+
+        Reuses the SAME jpeg bytes the legacy layout would embed, keyed by frame_id,
+        so the rebuilt tensors must equal the legacy hist_/fut_ decode.
+        """
+        sample = {f"cam_{i}.jpg": _jpeg_bytes((i, 0, 0)) for i in range(n_cams)}
+        sample["ego.npy"] = _ego_bytes()
+        pool_bytes = {}
+        hist_ids, fut_ids = [], []
+        for t in range(T):
+            step = []
+            for v in range(n_cams):
+                fid = f"l2d-v1-e000000-r{100 + t:06d}-c{v}"
+                pool_bytes[fid] = _jpeg_bytes((t, v, 0))
+                step.append(fid)
+            hist_ids.append(step)
+        for f in range(F):
+            step = []
+            for v in range(n_cams):
+                fid = f"l2d-v1-e000000-r{200 + f:06d}-c{v}"
+                pool_bytes[fid] = _jpeg_bytes((f, v, 1))
+                step.append(fid)
+            fut_ids.append(step)
+        sample["window_index.json"] = json.dumps(
+            {"history": hist_ids, "future": fut_ids}).encode()
+        return sample, (lambda fid: pool_bytes[fid])
+
+    def test_pool_window_decoded_with_right_shape(self):
+        sample, pool = self._pool_sample_and_accessor(n_cams=6, T=4, F=4)
+        out = _decode_sample(sample, pool=pool)
+        assert out["history_frames"].shape == (4, 6, 3, 256, 256)
+        assert out["future_frames"].shape == (4, 6, 3, 256, 256)
+
+    def test_pool_window_equals_legacy_layout(self):
+        """THE byte-equality guarantee: the pool path rebuilds the SAME tensors the
+        legacy hist_/fut_ layout would, for the same underlying jpeg bytes."""
+        legacy = self._window_sample(n_cams=6, T=4, F=4)
+        legacy_out = _decode_sample(legacy)
+        pool_sample, pool = self._pool_sample_and_accessor(n_cams=6, T=4, F=4)
+        pool_out = _decode_sample(pool_sample, pool=pool)
+        assert torch.equal(pool_out["history_frames"], legacy_out["history_frames"])
+        assert torch.equal(pool_out["future_frames"], legacy_out["future_frames"])
+
+    def test_pool_window_index_without_accessor_raises(self):
+        sample, _ = self._pool_sample_and_accessor()
+        with pytest.raises(ValueError, match="frame pool accessor"):
+            _decode_sample(sample, pool=None)
+
 
 class TestMergedDatasetLoader:
     """Round-robin interleaving of multiple single-dataset loaders (#77 merge)."""
