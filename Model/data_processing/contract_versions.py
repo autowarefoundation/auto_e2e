@@ -36,7 +36,10 @@ PARSER_VERSION = "v1"
 # Packed WebDataset shard member layout (cam_i.jpg / map.jpg / hist_*/fut_* /
 # ego.npy / meta.json / calib.json / reasoning.json). Bump if the member set,
 # names, or encoding change.
-SHARD_SCHEMA_VERSION = "v1"
+# v2 (dedup pack, #121 §3.4d): added `window_index.json` per-sample member and
+# a SIBLING `pool/{frame_id}.jpg` directory replacing legacy `hist_*/fut_*` tar
+# members. Loader now requires pool/ when window_index.json is present.
+SHARD_SCHEMA_VERSION = "v2"
 
 # Calibration / projection spec encoding written into calib.json. Bump if the
 # geometry serialization changes.
