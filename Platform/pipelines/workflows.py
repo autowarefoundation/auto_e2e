@@ -344,6 +344,58 @@ def data_ingest(
     # _check_cached_episodes_sufficient requires the requested episodes' video
     # files to exist on disk, else the OFFLINE pod attempts a network re-download
     # and fails (#121 option B invariant, verified against lerobot v0.5.0 source).
+    #
+    # At partition_size=500 a prior run (ah4nmxpw2jv2fklqcnkr) saw only 491 of 602
+    # expected files reach disk, followed by
+    # "Instruction 'train' corresponds to no data!" — the LeRobotDataset chain
+    # falls through the load_hf_dataset → download → load_hf_dataset retry loop
+    # (lerobot_dataset.py:742-754) but if snapshot_download silently under-fetches
+    # (e.g. transient Hub 5xx during multi-thread fetch), the second load has no
+    # parquet to read. This EXPLICIT pre-fetch below GUARANTEES the parquet files
+    # are on disk before LeRobotDataset touches its retry logic, and asserts the
+    # count so a partial fetch surfaces as an explicit RuntimeError we can debug
+    # instead of the opaque "no data" error.
+    from ledataset.datasets.lerobot_dataset import LeRobotDatasetMetadata
+    from huggingface_hub import snapshot_download
+    _meta = LeRobotDatasetMetadata(repo_id=dataset.value)
+    if ep_list is not None:
+        # Compute the set of parquet+video paths lerobot would ask for, then
+        # DIRECTLY snapshot_download them. Matches lerobot's own
+        # dataset_reader.get_episodes_file_paths, but runs early with our own
+        # retry + explicit error reporting on failure.
+        _data_paths = list({str(_meta.get_data_file_path(ep)) for ep in ep_list})
+        _video_paths = list({
+            str(_meta.get_video_file_path(ep, k))
+            for k in _meta.video_keys for ep in ep_list
+        })
+        _all_files = _data_paths + _video_paths
+        print(f"Pre-fetch: {len(_data_paths)} parquet + {len(_video_paths)} video "
+              f"= {len(_all_files)} unique files for {len(ep_list)} episodes")
+        # Retry loop: snapshot_download is not always atomic under Hub 5xx.
+        _missing_parquets = _data_paths
+        for attempt in range(3):
+            snapshot_download(
+                repo_id=dataset.value, repo_type="dataset",
+                local_dir=str(_meta.root),
+                allow_patterns=_all_files,
+                max_workers=8,
+            )
+            # Verify EACH expected parquet is now on disk. If not, retry.
+            _missing_parquets = [p for p in _data_paths
+                                 if not (_meta.root / p).exists()]
+            if not _missing_parquets:
+                print(f"Pre-fetch attempt {attempt+1}: all "
+                      f"{len(_data_paths)} parquets present on disk")
+                break
+            print(f"Pre-fetch attempt {attempt+1}: "
+                  f"{len(_missing_parquets)} parquets STILL missing "
+                  f"(first: {_missing_parquets[:2]}); retrying")
+        else:
+            raise RuntimeError(
+                f"data_ingest: after 3 attempts, {len(_missing_parquets)} "
+                f"parquet files are still missing on disk "
+                f"(first missing: {_missing_parquets[:3]}). "
+                f"HF Hub may be transiently degraded — retry the task.")
     ds = LeRobotDataset(repo_id=dataset.value, episodes=ep_list)
     cache_dir = ds.root
     # Hardlink the WHOLE cache tree (data/ + meta/ + videos/) into out_dir instead
