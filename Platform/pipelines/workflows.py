@@ -1872,9 +1872,31 @@ def wf_create_dataset_sharded(
             "wf_create_dataset_sharded currently fans out L2D (episode indices). "
             "NVIDIA clip-uuid fan-out is Phase 4.")
 
-    # L2D: episode indices are 0..episodes-1. Group ids are STRINGS (the task
-    # interface is List[str]) so the same signature serves NVIDIA clip uuids later.
-    episode_ids = [str(e) for e in range(episodes)]
+    # L2D: episode indices are 0..N-1. episodes=0 means "ALL" (Design §3.3):
+    # resolve the true count from LeRobotDatasetMetadata before partitioning, so
+    # the "train on ALL episodes" entry point does not silently no-op via range(0).
+    # Group ids are STRINGS (the task interface is List[str]) — same signature
+    # serves NVIDIA clip uuids later.
+    if episodes == 0:
+        try:
+            from lerobot.datasets.lerobot_dataset import LeRobotDatasetMetadata
+        except ModuleNotFoundError:
+            from ledataset.datasets.lerobot_dataset import LeRobotDatasetMetadata
+        import os
+        from huggingface_hub import login
+        try:
+            from flytekit import current_context
+            token = current_context().secrets.get("hf-token", "HF_TOKEN")
+        except Exception:
+            token = os.environ.get("HF_TOKEN", "")
+        if token:
+            login(token=token)
+        meta = LeRobotDatasetMetadata(repo_id=dataset.value)
+        total = int(meta.total_episodes)
+        print(f"wf_create_dataset_sharded: episodes=0 resolved to ALL {total} episodes")
+        episode_ids = [str(e) for e in range(total)]
+    else:
+        episode_ids = [str(e) for e in range(episodes)]
     plan = plan_partitions(episode_ids, partition_size=partition_size,
                            max_partitions=max_partitions)
     print(f"wf_create_dataset_sharded: {plan.summary()}")
