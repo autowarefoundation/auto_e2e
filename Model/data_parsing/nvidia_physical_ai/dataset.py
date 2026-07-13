@@ -335,6 +335,13 @@ class NvidiaAVDataset(Dataset):
         clip_uuid, _sample_idx, _ts = self._samples[idx]
         return f"nv-{clip_uuid}"
 
+    def frame_index(self, idx: int) -> int:
+        """Clip-local sample index for sample ``idx`` — used to pick the reasoning
+        1 Hz subset (label iff ``frame_index % stride == 0``), a stable per-sample
+        function so the labeled subset is partition-independent (#121 §3.4d)."""
+        _clip_uuid, sample_idx, _ts = self._samples[idx]
+        return sample_idx
+
     def __len__(self) -> int:
         return len(self._samples)
 
