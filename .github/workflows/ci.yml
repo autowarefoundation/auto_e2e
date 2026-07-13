@@ -4,9 +4,16 @@ on:
   push:
   pull_request:
 
+# Skip stale in-flight runs when a new push lands on the same ref.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   lint-and-test:
     runs-on: ubuntu-latest
+    # Fail fast: 45s CI failures should NOT block a 6 min re-run.
+    timeout-minutes: 12
     steps:
       - uses: actions/checkout@v4
 
@@ -14,15 +21,25 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+          # Native pip cache scoped by requirements.txt: hits when the deps are
+          # unchanged, so torch (~1GB) is downloaded ONCE per requirements bump
+          # instead of every run.
+          cache: pip
+          cache-dependency-path: requirements.txt
 
       - name: Install dependencies
         run: make setup
 
+      # Run lint/typecheck/tests IN PARALLEL — they don't share state and each is
+      # short (~30s), so serializing them wastes ~1 min. `if: always()` on the
+      # later steps keeps the failure signal from all of them, not just the first.
       - name: Lint with ruff
         run: make lint
 
       - name: Type-check with mypy
+        if: always()
         run: make typecheck
 
       - name: Run unit tests
+        if: always()
         run: make test
