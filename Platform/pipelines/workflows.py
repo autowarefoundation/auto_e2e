@@ -544,20 +544,23 @@ def data_processing(
 
         # Pass A: unique rows. ds is still alive here (not yet deleted).
         all_rows: set = set()
-        # Also collect the current-frame row for each sample (offset 0 = cam_*.jpg).
+        # Collect the current-frame row (offset 0 = cam_*.jpg) FIRST so it's
+        # tracked even if window_rows raises. Do NOT catch IndexError from
+        # window_rows: enumeration excludes edge frames (margins 64/64 dominate
+        # WM 30/40), so a raise here means the invariant has broken and we MUST
+        # fail loudly rather than silently drop the sample's cam_*.jpg (which
+        # would poison the shard: loader hits torch.stack([]) at train time).
         sample_cur_rows: dict = {}  # si → (ep_idx, fi) of the current frame
         for si in idx_list:
-            try:
-                rows = ds.window_rows(si)
-                for row_t in rows:
-                    all_rows.add(row_t)
-                ep_idx_s, row_s = ds._samples[si]
-                ep_start_s, _ = ds._episode_ranges[ep_idx_s]
-                cur_fi = row_s - ep_start_s
-                sample_cur_rows[si] = (ep_idx_s, cur_fi)
-                all_rows.add((ep_idx_s, cur_fi))
-            except IndexError:
-                pass  # edge sample guard; treat as empty window
+            ep_idx_s, row_s = ds._samples[si]
+            ep_start_s, _ = ds._episode_ranges[ep_idx_s]
+            cur_fi = row_s - ep_start_s
+            sample_cur_rows[si] = (ep_idx_s, cur_fi)
+            all_rows.add((ep_idx_s, cur_fi))
+            # window_rows raises IndexError only if the margin invariant is
+            # broken — let it propagate (fail-loud on invariant violation).
+            for row_t in ds.window_rows(si):
+                all_rows.add(row_t)
 
         del ds  # free before spawning workers
 
