@@ -763,8 +763,8 @@ def data_processing(
     # 60Gi; the worker count is also lowered (see label_workers default) since the
     # stage is bounded by the ~12s teacher HTTP call, not local CPU. Large
     # ephemeral storage holds tens of episodes of raw video + decoded windows.
-    requests=Resources(cpu="16", mem="32Gi", ephemeral_storage="400Gi"),
-    limits=Resources(cpu="16", mem="60Gi", ephemeral_storage="450Gi"),
+    requests=Resources(cpu="16", mem="32Gi", ephemeral_storage="700Gi"),
+    limits=Resources(cpu="16", mem="60Gi", ephemeral_storage="800Gi"),
     # The openai_compatible teacher endpoint (e.g. the Cosmos3-Nano vLLM ALB) is
     # injected from a K8s Secret so no concrete URL / account value is committed
     # to git or shown in the Flyte UI. Optional: only consumed when
