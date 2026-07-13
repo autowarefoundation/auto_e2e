@@ -9,6 +9,10 @@ WORKDIR /workspace
 RUN pip install --no-cache-dir torch==2.4.1 torchvision==0.19.1 --index-url https://download.pytorch.org/whl/cpu
 
 # lerobot-dataset = standalone LeRobotDataset with relaxed deps (no torch override)
+# boto3<1.36: unpinned boto3 makes pip backtrack for many minutes — it downloads
+# metadata for dozens of recent boto3 releases (1.43.x → …) trying to satisfy
+# flytekit 1.14's botocore/s3transfer ceiling. Capping boto3 lets the resolver
+# land immediately on a compatible 1.35.x. boto3 is used by label_cache.py (S3).
 RUN pip install --no-cache-dir \
     "flytekit>=1.14,<2" \
     kubernetes \
@@ -22,7 +26,7 @@ RUN pip install --no-cache-dir \
     av \
     timm \
     scipy \
-    boto3 \
+    "boto3<1.36" \
     pyarrow
 
 COPY Model/ /workspace/Model/
