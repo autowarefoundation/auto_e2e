@@ -481,6 +481,25 @@ def data_processing(
     samples_per_shard = 1000
     current_tar = None
 
+    # Shared frame pool (#121 §3.4d): WM window frames are content-addressed by a
+    # global frame_id and written ONCE here, deduping the ~8x cross-sample overlap
+    # (10Hz samples × 1Hz stride-10 window). The pool is a SIBLING pool/ DIRECTORY,
+    # NOT inside the .tar shards, so the loader's glob("*.tar") + split_by_worker
+    # never shards it away — every DataLoader worker reaches any frame_id by path.
+    pool_dir = os.path.join(out_dir, "pool")
+    os.makedirs(pool_dir, exist_ok=True)
+    seen_frame_ids: set = set()
+    pool_frames_written = 0
+
+    def _write_pool(frame_id, blob):
+        nonlocal pool_frames_written
+        if frame_id in seen_frame_ids:
+            return
+        seen_frame_ids.add(frame_id)
+        with open(os.path.join(pool_dir, f"{frame_id}.jpg"), "wb") as pf:
+            pf.write(blob)
+        pool_frames_written += 1
+
     def open_new_shard():
         nonlocal current_tar, shard_idx
         if current_tar:
@@ -526,19 +545,28 @@ def data_processing(
     with ProcessPoolExecutor(max_workers=pack_workers, mp_context=ctx,
                              initializer=parallel_pack.init_pack_worker,
                              initargs=pack_init) as pool:
-        for sample_key, nviews, members in pool.map(parallel_pack.pack_sample, idx_list):
+        for sample_key, nviews, members, frame_pool in pool.map(
+                parallel_pack.pack_sample, idx_list):
             # sample_key is the GLOBAL uid returned by the worker (#121 §3.1) — the
-            # same uid the labeler keyed on, so the reasoning.json JOIN below and
-            # the S3 label cache stay correct under episode-range sharding.
+            # same uid the labeler keyed on, so the reasoning.json JOIN below stays
+            # correct under episode-range sharding.
             for suffix, blob in members.items():
                 _add_member(sample_key, suffix, blob)
+            # WM window frames go to the shared pool (deduped across samples), not
+            # into this sample's tar members (#121 §3.4d). frame_pool is empty for
+            # imitation-only / NVIDIA samples.
+            for frame_id, blob in frame_pool.items():
+                _write_pool(frame_id, blob)
             num_views = nviews
             has_map = has_map or ("map.jpg" in members)
-            has_wm = has_wm or any(k.startswith("hist_") for k in members)
+            # WM present ⇔ the sample carries a window_index.json (the pixels live
+            # in the pool now, so there are no hist_*/fut_* members to look for).
+            has_wm = has_wm or ("window_index.json" in members)
             # Per-sample reasoning label (#98): JOIN the frozen record by
-            # sample_id (produced + S3-cached upstream by
-            # generate_reasoning_labels). A sample with no matching label is
-            # packed without reasoning.json (imitation-only for that sample).
+            # sample_id (produced upstream by generate_reasoning_labels). A sample
+            # with no matching label is packed without reasoning.json (its
+            # reasoning target decodes as fully-masked at train time). With the
+            # labeler decimated to 1 Hz, ~9/10 of the 10 Hz samples land here.
             if _record_to_json is not None:
                 record = labels_by_id.get(sample_key)
                 if record is not None:
@@ -550,6 +578,9 @@ def data_processing(
 
     if current_tar:
         current_tar.close()
+    if has_wm:
+        print(f"Frame pool: {pool_frames_written} unique frames in {pool_dir} "
+              f"(deduped from the per-sample WM windows).")
 
     manifest = {"total_samples": sample_count, "shards": shard_idx,
                 "hz": hz, "image_size": image_size, "dataset": dataset.value,
