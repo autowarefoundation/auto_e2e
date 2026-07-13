@@ -661,6 +661,14 @@ def generate_reasoning_labels(
     teacher: str = "openai_compatible",
     prompt_version: str = "action_relevant_reasoning_v3_temporal_front256",
     group_ids: Optional[List[str]] = None,
+    # Reasoning is a 1 Hz concern (horizons 0/1/2/3/4 s), so label only the 1 Hz
+    # subset (label iff frame_index % label_stride == 0) even though pack/train
+    # enumerate all 10 Hz samples (#121 §3.4d). L2D source is 10 Hz → stride 10 =
+    # 1 Hz labels, ~10x fewer Cosmos calls. The 9/10 unlabeled 10 Hz samples pack
+    # WITHOUT reasoning.json and decode as fully-masked reasoning targets (they
+    # still train reactive + JEPA). The subset is a STABLE function of frame_index,
+    # so it is partition-independent. stride=1 → label every sample (legacy).
+    label_stride: int = 10,
     # Process-parallel worker count. Front-clip mode decodes only 5 front frames
     # per sample, but at 20+ episodes 24 concurrent decoders + their lerobot
     # readers still OOM-killed the task at ~96/125. 12 workers still overlap the
@@ -744,6 +752,15 @@ def generate_reasoning_labels(
             ds = L2DDataset(repo_id=dataset.value, episodes=ep_list,
                             reasoning_clip_only=True, root=raw_path)
         n_samples = len(ds)
+        # 1 Hz label subset (#121 §3.4d): label only samples whose episode/clip-local
+        # frame_index is a multiple of label_stride. A STABLE per-sample predicate, so
+        # the labeled uid set is partition-independent (any partition covering this
+        # frame labels it or not identically). stride<=1 → label everything.
+        if label_stride > 1:
+            label_indices = [si for si in range(n_samples)
+                             if ds.frame_index(si) % label_stride == 0]
+        else:
+            label_indices = list(range(n_samples))
     except ValueError as e:
         if "No valid samples" not in str(e):
             raise
@@ -751,6 +768,7 @@ def generate_reasoning_labels(
               f"artifact (short episode/clip — nothing to label).")
         ds = None
         n_samples = 0
+        label_indices = []
 
     # openai_compatible resolves base_url/model/api_key from the Secret (env
     # fallback); mock/cached need none of these.
@@ -791,8 +809,8 @@ def generate_reasoning_labels(
     from data_processing.reasoning_label_generation.targets import record_from_json
 
     n_computed = n_abstain = 0
-    if n_samples == 0:
-        # Empty partition (short episode/clip): no labeling, empty artifact.
+    if not label_indices:
+        # Empty partition, or nothing selected by the stride: empty artifact.
         records = []
     else:
         # Process-parallel labeling (NOT threads): decode dominates and lerobot's
@@ -806,8 +824,9 @@ def generate_reasoning_labels(
         from concurrent.futures import ProcessPoolExecutor
         from data_processing.reasoning_label_generation import parallel_label
 
-        workers = max(1, min(label_workers, n_samples))
-        print(f"Labeling {n_samples} samples with {workers} parallel PROCESSES "
+        workers = max(1, min(label_workers, len(label_indices)))
+        print(f"Labeling {len(label_indices)}/{n_samples} samples (1Hz subset, "
+              f"stride={label_stride}) with {workers} parallel PROCESSES "
               f"(teacher={teacher})...")
         ctx = mp.get_context("spawn")
         # Order MUST match parallel_label.init_worker(repo_id, episodes, dataset_name,
@@ -815,19 +834,21 @@ def generate_reasoning_labels(
         # per-sample S3 cache is gone (§3.4).
         init_args = (dataset.value, ep_list, dataset.value, teacher, teacher_kwargs,
                      prompt_version, raw_path)
-        results = [None] * n_samples
+        # Only the 1 Hz subset is labeled; records.jsonl carries just those. The
+        # packer JOINs by uid, so the ~9/10 unlabeled 10 Hz samples get no
+        # reasoning.json and are masked out of the reasoning loss at train time.
+        records = []
         with ProcessPoolExecutor(
             max_workers=workers, mp_context=ctx,
             initializer=parallel_label.init_worker, initargs=init_args,
         ) as pool:
             for si, rec_json, status in pool.map(parallel_label.label_sample,
-                                                 range(n_samples)):
-                results[si] = record_from_json(rec_json)
+                                                 label_indices):
+                records.append(record_from_json(rec_json))
                 if status == "abstained":
                     n_abstain += 1
                 else:
                     n_computed += 1
-        records = results
     print(f"Labeled {len(records)} samples "
           f"(computed={n_computed}, abstained={n_abstain})")
     # A few abstentions (malformed teacher JSON) are fine — they are masked out of
