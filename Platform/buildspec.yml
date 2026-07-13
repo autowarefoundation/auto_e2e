@@ -3,6 +3,7 @@ version: 0.2
 env:
   variables:
     AWS_DEFAULT_REGION: us-west-2
+    DOCKER_BUILDKIT: "1"
 
 phases:
   pre_build:
@@ -10,22 +11,47 @@ phases:
       - ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
       - ECR_URL="${ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com"
       - aws ecr get-login-password --region $AWS_DEFAULT_REGION | docker login --username AWS --password-stdin $ECR_URL
+      # Pre-pull previous latests so BuildKit's --cache-from can reuse every
+      # layer whose input hasn't changed (torch/pip layers, ffmpeg apt layer,
+      # etc.). ||true so first-run misses don't fail. Runs in parallel.
+      - echo "=== Pre-pulling previous latests for layer cache ==="
+      - (docker pull ${ECR_URL}/auto-e2e/training:latest || true) &
+      - (docker pull ${ECR_URL}/auto-e2e/data-prep:latest || true) &
+      - wait
   build:
     commands:
-      - echo "=== Building training image ==="
-      - docker build -t ${ECR_URL}/auto-e2e/training:latest -f Platform/docker/training/Dockerfile .
-      - docker push ${ECR_URL}/auto-e2e/training:latest
+      # ── Training / eval / offline-rl ── SAME Dockerfile, so build ONCE and
+      # retag. Cuts 2 of 4 image builds (was ~3 min × 3 = ~9 min duplication).
+      # --cache-from pulls layer cache from ECR :latest → unchanged pip layers
+      # reuse across CodeBuild runs.
+      - echo "=== Building shared training image (training/eval/offline-rl) ==="
+      - DOCKER_BUILDKIT=1 docker build
+          --cache-from ${ECR_URL}/auto-e2e/training:latest
+          --build-arg BUILDKIT_INLINE_CACHE=1
+          -t ${ECR_URL}/auto-e2e/training:latest
+          -t ${ECR_URL}/auto-e2e/eval:latest
+          -t ${ECR_URL}/auto-e2e/offline-rl:latest
+          -f Platform/docker/training/Dockerfile .
+      # Push the three tags in parallel; ECR dedups blobs, so the transfer is
+      # paid once.
+      - echo "=== Pushing training/eval/offline-rl in parallel ==="
+      - docker push ${ECR_URL}/auto-e2e/training:latest &
+      - docker push ${ECR_URL}/auto-e2e/eval:latest &
+      - docker push ${ECR_URL}/auto-e2e/offline-rl:latest &
 
-      - echo "=== Building eval image ==="
-      - docker build -t ${ECR_URL}/auto-e2e/eval:latest -f Platform/docker/eval/Dockerfile .
-      - docker push ${ECR_URL}/auto-e2e/eval:latest
-
-      - echo "=== Building offline-rl image ==="
-      - docker build -t ${ECR_URL}/auto-e2e/offline-rl:latest -f Platform/docker/offline-rl/Dockerfile .
-      - docker push ${ECR_URL}/auto-e2e/offline-rl:latest
-
-      - echo "=== Building data-prep image ==="
-      - docker build -t ${ECR_URL}/auto-e2e/data-prep:latest -f Platform/docker/data-prep/Dockerfile .
+      # ── Data-prep ── independent Dockerfile (~5GB: torch cpu + lerobot +
+      # flytekit + physical_ai_av). Build in PARALLEL with the training push;
+      # --cache-from turns Model/-only edits into a ~30s rebuild instead of
+      # re-installing every pip dep from scratch.
+      - echo "=== Building data-prep in parallel with training push ==="
+      - DOCKER_BUILDKIT=1 docker build
+          --cache-from ${ECR_URL}/auto-e2e/data-prep:latest
+          --build-arg BUILDKIT_INLINE_CACHE=1
+          -t ${ECR_URL}/auto-e2e/data-prep:latest
+          -f Platform/docker/data-prep/Dockerfile . &
+      # Wait for both the training pushes and the data-prep build.
+      - wait
+      - echo "=== Pushing data-prep ==="
       - docker push ${ECR_URL}/auto-e2e/data-prep:latest
 
 cache:
