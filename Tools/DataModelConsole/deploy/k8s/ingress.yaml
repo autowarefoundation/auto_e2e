@@ -34,8 +34,12 @@ metadata:
   annotations:
     alb.ingress.kubernetes.io/scheme: internal
     alb.ingress.kubernetes.io/target-type: ip
-    alb.ingress.kubernetes.io/listen-ports: '[{"HTTPS": 443}]'
-    alb.ingress.kubernetes.io/certificate-arn: ${ACM_CERT_ARN}
+    # HTTP:80 only. The ALB is internal and never faces viewers — CloudFront
+    # terminates viewer TLS with its default cert and reaches this ALB over
+    # plain HTTP through a VPC origin (origin_protocol_policy = http-only). So
+    # no HTTPS listener / ACM cert on the ALB itself. The SG (admits :80 only
+    # from CloudFront's managed VPC-origin ENIs) is what keeps it private.
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTP": 80}]'
     alb.ingress.kubernetes.io/group.name: console
     # Health-check settings are per-Service (see services.yaml), NOT here: an
     # Ingress-level healthcheck-path applies to every target group, which would
