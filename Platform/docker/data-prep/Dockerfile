@@ -1,7 +1,7 @@
 FROM public.ecr.aws/docker/library/python:3.12-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ffmpeg git && rm -rf /var/lib/apt/lists/*
+    ffmpeg git git-lfs && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /workspace
 
@@ -20,8 +20,10 @@ RUN pip install --no-cache-dir "flytekit==1.14.9"
 # SDK commit keeps the official scene split and on-disk parser contract aligned
 # with the immutable dataset revision used by the Flyte cache key.
 ARG KITSCENES_SDK_REVISION=7765cdec5490894266070ab46e23724b58b3da42
-RUN git clone https://github.com/KIT-MRT/kitscenes.git /tmp/kitscenes \
-    && git -C /tmp/kitscenes checkout "${KITSCENES_SDK_REVISION}" \
+RUN git lfs install --system \
+    && GIT_LFS_SKIP_SMUDGE=1 git clone https://github.com/KIT-MRT/kitscenes.git /tmp/kitscenes \
+    && GIT_LFS_SKIP_SMUDGE=1 git -C /tmp/kitscenes checkout "${KITSCENES_SDK_REVISION}" \
+    && git -C /tmp/kitscenes lfs pull \
     && cd /tmp/kitscenes \
     && pip install --no-cache-dir ".[map]" \
     && rm -rf /tmp/kitscenes
