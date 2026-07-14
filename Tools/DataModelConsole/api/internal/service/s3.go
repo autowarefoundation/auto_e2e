@@ -5,7 +5,9 @@ package service
 import (
 	"archive/tar"
 	"context"
+	"crypto/sha256"
 	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -40,6 +42,11 @@ var ErrRangeTooLarge = errors.New("requested range too large")
 // multi-hundred-MB / GB shard. A generous multi-frame camera window is well
 // under this; a single JPEG is KB.
 const MaxRangeBytes = 32 << 20 // 32 MiB
+
+// MaxOverlayBytes bounds pointer-following artifact reads. A v1 overlay is
+// roughly 0.5 MiB per 1000 samples and seed; 16 MiB leaves ample fan-out room
+// while preventing a corrupt pointer from exhausting the API pod.
+const MaxOverlayBytes = 16 << 20
 
 // fallbackVersion is used when no vX.Y/ prefix with shards can be resolved.
 const fallbackVersion = "v1.0"
@@ -98,10 +105,11 @@ func cacheSampleID(sampleID string) (string, bool) {
 
 // S3Service provides read-only access to the datasets bucket.
 type S3Service struct {
-	client        *s3.Client
-	presigner     *s3.PresignClient
-	bucket        string
-	presignExpiry time.Duration
+	client          *s3.Client
+	presigner       *s3.PresignClient
+	bucket          string
+	artifactsBucket string
+	presignExpiry   time.Duration
 
 	// store is the DynamoDB-backed cache: the shard-index source of truth
 	// (read-through), plus precomputed stats and the scene-by-label index.
@@ -134,20 +142,25 @@ type cachedVersion struct {
 // (Pod Identity in-cluster, profile/env locally). st is the DynamoDB-backed
 // cache used as the shard-index source of truth; it may be nil (tests /
 // Dynamo-less deployment), in which case indexes are always built from S3.
-func NewS3Service(ctx context.Context, region, bucket string, presignExpiry time.Duration, st *store.DynamoStore) (*S3Service, error) {
+func NewS3Service(ctx context.Context, region, bucket string, presignExpiry time.Duration, st *store.DynamoStore, artifactsBucket ...string) (*S3Service, error) {
 	awsCfg, err := awsconfig.LoadDefaultConfig(ctx, awsconfig.WithRegion(region))
 	if err != nil {
 		return nil, fmt.Errorf("load aws config: %w", err)
 	}
 	client := s3.NewFromConfig(awsCfg)
+	artifactBucket := bucket
+	if len(artifactsBucket) > 0 && artifactsBucket[0] != "" {
+		artifactBucket = artifactsBucket[0]
+	}
 	return &S3Service{
-		client:        client,
-		presigner:     s3.NewPresignClient(client),
-		bucket:        bucket,
-		presignExpiry: presignExpiry,
-		store:         st,
-		versionCache:  make(map[string]cachedVersion),
-		indexSF:       make(map[string]*sync.WaitGroup),
+		client:          client,
+		presigner:       s3.NewPresignClient(client),
+		bucket:          bucket,
+		artifactsBucket: artifactBucket,
+		presignExpiry:   presignExpiry,
+		store:           st,
+		versionCache:    make(map[string]cachedVersion),
+		indexSF:         make(map[string]*sync.WaitGroup),
 	}, nil
 }
 
@@ -180,6 +193,169 @@ func (s *S3Service) ValidDataset(name string) bool {
 		}
 	}
 	return false
+}
+
+// ResolvedVersion returns the explicit version coordinate used by a request.
+func (s *S3Service) ResolvedVersion(ctx context.Context, dataset, requested string) string {
+	return s.versionOrResolve(ctx, dataset, requested)
+}
+
+// OverlayBody is a verified canonical binary overlay and its public metadata.
+type OverlayBody struct {
+	Descriptor model.OverlayDescriptor
+	Payload    []byte
+}
+
+// ListOverlayModels returns only completely published model overlays for one
+// immutable shard.
+func (s *S3Service) ListOverlayModels(ctx context.Context, dataset, version, shard string) ([]model.OverlayModel, string, error) {
+	if s.store == nil {
+		return nil, "", fmt.Errorf("overlay lookup requires a configured dynamo store")
+	}
+	version = s.versionOrResolve(ctx, dataset, version)
+	models, err := s.store.QueryReadyOverlayModels(ctx, dataset, version, shard)
+	return models, version, err
+}
+
+// GetOverlayBody follows a ready Dynamo pointer, constrains it to the canonical
+// model/dataset/version/shard prefix, and verifies size and digest before
+// exposing bytes to the browser.
+func (s *S3Service) GetOverlayBody(ctx context.Context, dataset, version, shard, modelArtifactID string) (*OverlayBody, string, error) {
+	if s.store == nil {
+		return nil, "", fmt.Errorf("overlay lookup requires a configured dynamo store")
+	}
+	version = s.versionOrResolve(ctx, dataset, version)
+	pointer, err := s.store.GetReadyOverlayPointer(
+		ctx, dataset, version, shard, modelArtifactID,
+	)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return nil, version, ErrNotFound
+		}
+		return nil, version, err
+	}
+	expectedPrefix := fmt.Sprintf(
+		"overlays/schema=%s/model=%s/dataset=%s/version=%s/shard=%s/",
+		pointer.OverlaySchema, modelArtifactID, dataset, version, shard,
+	)
+	if !strings.HasPrefix(pointer.S3Key, expectedPrefix) ||
+		path.Base(pointer.S3Key) != "overlay.bin.gz" {
+		return nil, version, fmt.Errorf("overlay pointer escapes canonical prefix")
+	}
+	if pointer.ByteSize > MaxOverlayBytes {
+		return nil, version, ErrRangeTooLarge
+	}
+	payload, err := s.getObjectBytesFromBucket(
+		ctx, s.artifactsBucket, pointer.S3Key, MaxOverlayBytes,
+	)
+	if err != nil {
+		return nil, version, err
+	}
+	if int64(len(payload)) != pointer.ByteSize {
+		return nil, version, fmt.Errorf(
+			"overlay size mismatch: pointer=%d body=%d",
+			pointer.ByteSize, len(payload),
+		)
+	}
+	digest := sha256.Sum256(payload)
+	if hex.EncodeToString(digest[:]) != pointer.SHA256 {
+		return nil, version, fmt.Errorf("overlay SHA-256 mismatch")
+	}
+	if len(payload) < 2 || payload[0] != 0x1f || payload[1] != 0x8b {
+		return nil, version, fmt.Errorf("overlay body is not gzip")
+	}
+	return &OverlayBody{
+		Descriptor: model.OverlayDescriptor{
+			ModelArtifactID: modelArtifactID,
+			OverlaySchema:   pointer.OverlaySchema,
+			SHA256:          pointer.SHA256,
+			ByteSize:        pointer.ByteSize,
+			SampleCount:     pointer.SampleCount,
+		},
+		Payload: payload,
+	}, version, nil
+}
+
+// GeoStats returns a small Dynamo summary and a same-origin heatmap URL. The
+// raw S3 key remains server-side.
+func (s *S3Service) GeoStats(ctx context.Context, dataset, version string) (*model.GeoStatsResponse, error) {
+	if s.store == nil {
+		return nil, fmt.Errorf("geo stats require a configured dynamo store")
+	}
+	version = s.versionOrResolve(ctx, dataset, version)
+	record, err := s.store.GetGeoRecord(ctx, dataset, version)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return nil, ErrNotFound
+		}
+		return nil, err
+	}
+	return &model.GeoStatsResponse{
+		Dataset: dataset,
+		Version: version,
+		Summary: json.RawMessage(record.Summary),
+		HeatmapURL: fmt.Sprintf(
+			"/api/v1/datasets/%s/geo/heatmap?version=%s",
+			dataset, version,
+		),
+		NSamples:   record.NSamples,
+		ComputedAt: record.ComputedAt,
+	}, nil
+}
+
+// GeoHeatmap returns the k-anonymized, endpoint-trimmed aggregate referenced by
+// Dynamo. It never derives an arbitrary S3 key from a request.
+func (s *S3Service) GeoHeatmap(ctx context.Context, dataset, version string) ([]byte, string, error) {
+	if s.store == nil {
+		return nil, "", fmt.Errorf("geo heatmap requires a configured dynamo store")
+	}
+	version = s.versionOrResolve(ctx, dataset, version)
+	record, err := s.store.GetGeoRecord(ctx, dataset, version)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return nil, version, ErrNotFound
+		}
+		return nil, version, err
+	}
+	expectedPrefix := fmt.Sprintf("%s/%s/geo/", dataset, version)
+	if !strings.HasPrefix(record.GeoJSONKey, expectedPrefix) {
+		return nil, version, fmt.Errorf("geo heatmap pointer escapes dataset prefix")
+	}
+	body, err := s.getObjectBytesFromBucket(
+		ctx, s.bucket, record.GeoJSONKey, MaxRangeBytes,
+	)
+	return body, version, err
+}
+
+// RigProjection returns the dataset-level projection artifact emitted by the
+// v2.1 repack.
+func (s *S3Service) RigProjection(ctx context.Context, dataset, version string) ([]byte, string, error) {
+	version = s.versionOrResolve(ctx, dataset, version)
+	key := fmt.Sprintf("%s/%s/rig/projection.json", dataset, version)
+	body, err := s.getObjectBytesFromBucket(ctx, s.bucket, key, 1<<20)
+	return body, version, err
+}
+
+// EpisodePath returns one exact route as packed little-endian float64 rows
+// [lat, lon, heading, timestamp]. Authorization is enforced by the handler.
+func (s *S3Service) EpisodePath(ctx context.Context, dataset, version, episode string) ([]byte, string, error) {
+	if episode == "" || len(episode) > 128 {
+		return nil, "", ErrNotFound
+	}
+	for _, char := range episode {
+		if (char < 'a' || char > 'z') &&
+			(char < 'A' || char > 'Z') &&
+			(char < '0' || char > '9') &&
+			char != '-' && char != '_' {
+			return nil, "", ErrNotFound
+		}
+	}
+	version = s.versionOrResolve(ctx, dataset, version)
+	key := fmt.Sprintf(
+		"%s/%s/geo/episode_paths/%s.f64", dataset, version, episode,
+	)
+	body, err := s.getObjectBytesFromBucket(ctx, s.bucket, key, MaxRangeBytes)
+	return body, version, err
 }
 
 // resolveVersion returns the newest published version for a dataset: the
@@ -753,6 +929,13 @@ func (s *S3Service) shardIndexFromStore(ctx context.Context, dataset, version, s
 		}
 		return nil, false
 	}
+	idx.Version = version
+	idx.Shard = shard
+	for i := range idx.Samples {
+		if idx.Samples[i].SampleUID == "" {
+			idx.Samples[i].SampleUID = idx.Samples[i].Key
+		}
+	}
 	return idx, true
 }
 
@@ -818,11 +1001,7 @@ func (s *S3Service) buildShardIndexUncached(ctx context.Context, dataset, versio
 			if err != nil {
 				return nil, fmt.Errorf("read %s from %s: %w", hdr.Name, key, err)
 			}
-			// The intra-shard playback ordinal (FrameIdx, key suffix) is not the
-			// trip-global frame; meta.json carries the true trip frame index.
-			if tf, ok := tripFrameFromMeta(body); ok {
-				entry.TripFrame = tf
-			}
+			applyPackedMeta(entry, body)
 		case "ego.npy":
 			body, err := readMemberBytes(tr, hdr.Size)
 			if err != nil {
@@ -844,24 +1023,25 @@ func (s *S3Service) buildShardIndexUncached(ctx context.Context, dataset, versio
 			if len(floats) >= egoTotalFloats {
 				entry.EgoFuture = floats[egoHistoryFloats:egoTotalFloats]
 			}
+		case "pose.npy":
+			body, err := readMemberBytes(tr, hdr.Size)
+			if err != nil {
+				return nil, fmt.Errorf("read %s from %s: %w", hdr.Name, key, err)
+			}
+			pose, err := decodeGeoPose(body)
+			if err != nil {
+				return nil, fmt.Errorf("decode %s from %s: %w", hdr.Name, key, err)
+			}
+			entry.PoseCurrent = pose
 		}
-	}
-
-	// Set HasReasoning by listing the aliased label partition once (cheap): the
-	// player's amber ticks / reasoning panel then light up even though Phase-1
-	// shards embed no reasoning.json member.
-	labelIDs, err := s.reasoningSampleIDs(ctx, dataset)
-	if err != nil {
-		// A failed label listing must not fail the whole ~10s tar scan; serve
-		// the index without reasoning ticks (the nil-map lookup below is safe).
-		slog.Warn("reasoning label listing failed; serving index without reasoning ticks",
-			"dataset", dataset, "error", err)
-		labelIDs = nil
 	}
 
 	samples := make([]model.IndexSample, 0, len(order))
 	for _, sk := range order {
 		e := byKey[sk]
+		if e.SampleUID == "" {
+			e.SampleUID = sk
+		}
 		if e.EgoNow == nil {
 			e.EgoNow = []float32{}
 		}
@@ -871,30 +1051,81 @@ func (s *S3Service) buildShardIndexUncached(ctx context.Context, dataset, versio
 		if e.EgoFuture == nil {
 			e.EgoFuture = []float32{}
 		}
-		if id, ok := cacheSampleID(sk); ok {
-			if _, has := labelIDs[id]; has {
-				e.HasReasoning = true
-			}
-		}
 		samples = append(samples, *e)
 	}
 	return &model.ShardIndex{
 		Fps:     indexFps,
+		Version: version,
+		Shard:   shard,
 		Samples: samples,
 	}, nil
 }
 
-// tripFrameFromMeta extracts the trip-global frame index from a sample's
-// meta.json bytes. ok is false when the JSON is malformed or carries no
-// frame_idx, so the caller keeps TripFrame = -1 (absent).
-func tripFrameFromMeta(body []byte) (int, bool) {
+// applyPackedMeta copies the v2.1 identity and split contract onto one index
+// entry. Malformed optional metadata leaves its zero/default values.
+func applyPackedMeta(entry *model.IndexSample, body []byte) {
 	var m struct {
-		FrameIdx *int `json:"frame_idx"`
+		FrameIdx      *int   `json:"frame_idx"`
+		SampleUID     string `json:"sample_uid"`
+		SplitGroupUID string `json:"split_group_uid"`
+		SplitBucket   *int   `json:"split_bucket"`
 	}
-	if json.Unmarshal(body, &m) == nil && m.FrameIdx != nil {
-		return *m.FrameIdx, true
+	if json.Unmarshal(body, &m) != nil {
+		return
 	}
-	return 0, false
+	if m.FrameIdx != nil {
+		entry.TripFrame = *m.FrameIdx
+	}
+	if m.SampleUID != "" {
+		entry.SampleUID = m.SampleUID
+	}
+	entry.SplitGroupUID = m.SplitGroupUID
+	if m.SplitBucket != nil {
+		entry.SplitBucket = *m.SplitBucket
+	}
+}
+
+func tripFrameFromMeta(body []byte) (int, bool) {
+	entry := model.IndexSample{TripFrame: -1}
+	applyPackedMeta(&entry, body)
+	if entry.TripFrame < 0 {
+		return 0, false
+	}
+	return entry.TripFrame, true
+}
+
+// decodeGeoPose decodes the fixed v1 pose layout:
+// latitude:f64, longitude:f64, heading:f64, timestamp:i64, accuracy:f32.
+func decodeGeoPose(body []byte) (*model.GeoPose, error) {
+	const poseBytes = 8 + 8 + 8 + 8 + 4
+	if len(body) != poseBytes {
+		return nil, fmt.Errorf("pose payload must be %d bytes, got %d", poseBytes, len(body))
+	}
+	latitude := math.Float64frombits(binary.LittleEndian.Uint64(body[0:8]))
+	longitude := math.Float64frombits(binary.LittleEndian.Uint64(body[8:16]))
+	heading := math.Float64frombits(binary.LittleEndian.Uint64(body[16:24]))
+	timestamp := int64(binary.LittleEndian.Uint64(body[24:32]))
+	accuracy := math.Float32frombits(binary.LittleEndian.Uint32(body[32:36]))
+	if !isFinite(latitude) || !isFinite(longitude) || !isFinite(heading) ||
+		latitude < -90 || latitude > 90 || longitude < -180 || longitude > 180 {
+		return nil, fmt.Errorf("pose contains invalid coordinates")
+	}
+	var accuracyPtr *float32
+	if !math.IsNaN(float64(accuracy)) && !math.IsInf(float64(accuracy), 0) {
+		accuracyCopy := accuracy
+		accuracyPtr = &accuracyCopy
+	}
+	return &model.GeoPose{
+		LatitudeDeg:           latitude,
+		LongitudeDeg:          longitude,
+		HeadingDegCWFromNorth: heading,
+		TimestampNS:           timestamp,
+		GPSAccuracyM:          accuracyPtr,
+	}, nil
+}
+
+func isFinite(value float64) bool {
+	return !math.IsNaN(value) && !math.IsInf(value, 0)
 }
 
 // readMemberBytes buffers a tar member's content with a sanity cap so a
@@ -918,7 +1149,9 @@ func decodeFloat32LE(b []byte) []float32 {
 }
 
 // parseSampleKey extracts the episode id and frame index from a WebDataset
-// sample key. Handles both packer conventions:
+// sample key. Handles current content-addressed ids and historical conventions:
+//   - "l2d-v1-e000012-f000064" -> ("12", 64)
+//   - "nv-v1-<uuid>-f000064"   -> ("<uuid>", 64)
 //   - "ep0_000064"        -> ("0", 64)          (L2D episode-prefixed)
 //   - "25cd4769_000064"   -> ("25cd4769", 64)   (nvidia hash-prefixed)
 //   - "s00000064"         -> ("", 64)           (flat s%08d global index)
@@ -932,6 +1165,35 @@ func decodeFloat32LE(b []byte) []float32 {
 // garbage sample_id from the URL) return ok=false so callers can 404 instead
 // of silently defaulting to frame 0.
 func parseSampleKey(key string) (episodeID string, frameIdx int, ok bool) {
+	if i := strings.LastIndex(key, "-f"); i > 0 {
+		framePart := key[i+2:]
+		if isDigits(framePart) {
+			frame, err := strconv.Atoi(framePart)
+			if err == nil {
+				identity := key[:i]
+				switch {
+				case strings.HasPrefix(identity, "l2d-"):
+					if e := strings.LastIndex(identity, "-e"); e >= 0 {
+						episode := strings.TrimLeft(identity[e+2:], "0")
+						if episode == "" {
+							episode = "0"
+						}
+						return episode, frame, true
+					}
+				case strings.HasPrefix(identity, "nv-"):
+					parts := strings.SplitN(identity, "-", 3)
+					if len(parts) == 3 {
+						return parts[2], frame, true
+					}
+				case strings.HasPrefix(identity, "kitscenes-"):
+					parts := strings.SplitN(identity, "-", 3)
+					if len(parts) == 3 {
+						return parts[2], frame, true
+					}
+				}
+			}
+		}
+	}
 	i := strings.LastIndexByte(key, '_')
 	if i < 0 {
 		// No underscore: accept the flat "s<digits>" index form.
@@ -1178,8 +1440,12 @@ func (s *S3Service) GetReasoningLabel(ctx context.Context, dataset, sampleID, te
 }
 
 func (s *S3Service) getObjectBytes(ctx context.Context, key string) ([]byte, error) {
+	return s.getObjectBytesFromBucket(ctx, s.bucket, key, 0)
+}
+
+func (s *S3Service) getObjectBytesFromBucket(ctx context.Context, bucket, key string, maxBytes int64) ([]byte, error) {
 	obj, err := s.client.GetObject(ctx, &s3.GetObjectInput{
-		Bucket: aws.String(s.bucket),
+		Bucket: aws.String(bucket),
 		Key:    aws.String(key),
 	})
 	if err != nil {
@@ -1189,7 +1455,21 @@ func (s *S3Service) getObjectBytes(ctx context.Context, key string) ([]byte, err
 		return nil, fmt.Errorf("get %s: %w", key, err)
 	}
 	defer obj.Body.Close()
-	return io.ReadAll(obj.Body)
+	if maxBytes > 0 && aws.ToInt64(obj.ContentLength) > maxBytes {
+		return nil, ErrRangeTooLarge
+	}
+	reader := io.Reader(obj.Body)
+	if maxBytes > 0 {
+		reader = io.LimitReader(obj.Body, maxBytes+1)
+	}
+	body, err := io.ReadAll(reader)
+	if err != nil {
+		return nil, err
+	}
+	if maxBytes > 0 && int64(len(body)) > maxBytes {
+		return nil, ErrRangeTooLarge
+	}
+	return body, nil
 }
 
 // TotalSamples returns the aggregate sample count across all known datasets.
