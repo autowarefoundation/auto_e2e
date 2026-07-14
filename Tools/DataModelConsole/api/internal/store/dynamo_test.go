@@ -187,6 +187,44 @@ func TestDynamoStore_SceneLabelsBatchAndQuery(t *testing.T) {
 	}
 }
 
+func TestDynamoStore_VersionedSceneLabelsAreIsolated(t *testing.T) {
+	s, _ := newTestStore()
+	ctx := context.Background()
+	legacy := []SceneLabelRow{{
+		Field: FieldLateralResponse, Value: "turn_left", SampleID: "s00000042",
+	}}
+	current := []SceneLabelRow{{
+		Field:    FieldLateralResponse,
+		Value:    "turn_left",
+		SampleID: "l2d-v1-e000003-f000042",
+	}}
+	if _, err := s.PutSceneLabels(ctx, "l2d", "pv3", legacy); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.PutSceneLabelsForVersion(
+		ctx, "l2d", "v2.1", "pv3", current,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	ids, err := s.QueryScenesByLabelForVersion(
+		ctx, "l2d", "v2.1", "pv3",
+		FieldLateralResponse, "turn_left", 0,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ids) != 1 || ids[0] != current[0].SampleID {
+		t.Fatalf("versioned scene ids = %v, want current sample_uid only", ids)
+	}
+	if _, err := s.QueryScenesByLabelForVersion(
+		ctx, "l2d", "", "pv3",
+		FieldLateralResponse, "turn_left", 0,
+	); err == nil {
+		t.Fatal("empty dataset version was accepted")
+	}
+}
+
 func TestDynamoStore_BatchWriteRetriesUnprocessed(t *testing.T) {
 	s, f := newTestStore()
 	f.forceUnprocessedOnce = true
