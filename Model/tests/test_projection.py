@@ -373,8 +373,11 @@ class TestBuildFThetaFromCalibration:
             rotation=spt.Rotation.identity(), translation=np.zeros(3))
 
     def test_native_wh_and_max_theta_from_r2th(self):
-        pytest.importorskip("scipy")
-        pytest.importorskip("pandas")  # calibration import pulls the dataset pkg
+        # RigidTransform landed in scipy 1.16 (needs Python >= 3.11). Without the
+        # minversion the guard passes on 1.15 and the test dies on AttributeError
+        # instead of skipping -- a red suite that means nothing.
+        pytest.importorskip("scipy", minversion="1.16")
+        pytest.importorskip("pandas")
         from data_parsing.nvidia_physical_ai.calibration import build_ftheta_projection
         # Non-square native frame: normalization must use native (W,H), not 256.
         names = ["cam_a", "cam_b"]
@@ -405,8 +408,11 @@ class TestBuildFThetaFromCalibration:
         assert res.uv_norm[0, 0, 0, 1].item() == pytest.approx(v_exp, abs=1e-4)
 
     def test_no_r2th_leaves_max_theta_none(self):
-        pytest.importorskip("scipy")
-        pytest.importorskip("pandas")  # calibration import pulls the dataset pkg
+        # RigidTransform landed in scipy 1.16 (needs Python >= 3.11). Without the
+        # minversion the guard passes on 1.15 and the test dies on AttributeError
+        # instead of skipping -- a red suite that means nothing.
+        pytest.importorskip("scipy", minversion="1.16")
+        pytest.importorskip("pandas")
         from data_parsing.nvidia_physical_ai.calibration import build_ftheta_projection
         m = self._Model(800, 600)
         del m.r2th  # lens without a backward polynomial -> no derivable FOV bound
@@ -418,8 +424,11 @@ class TestBuildFThetaFromCalibration:
         """A rig where one lens has r2th (finite bound) and another does not
         (inf) must STILL mask behind-camera rays on the unbounded lens — the inf
         bound must fall back to the +Z hemisphere gate, not accept everything."""
-        pytest.importorskip("scipy")
-        pytest.importorskip("pandas")  # calibration import pulls the dataset pkg
+        # RigidTransform landed in scipy 1.16 (needs Python >= 3.11). Without the
+        # minversion the guard passes on 1.15 and the test dies on AttributeError
+        # instead of skipping -- a red suite that means nothing.
+        pytest.importorskip("scipy", minversion="1.16")
+        pytest.importorskip("pandas")
         from data_parsing.nvidia_physical_ai.calibration import build_ftheta_projection
         bounded = self._Model(1920, 1080)             # has r2th -> finite bound
         unbounded = self._Model(1920, 1080)

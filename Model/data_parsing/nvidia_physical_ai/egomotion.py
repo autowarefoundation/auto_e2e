@@ -17,11 +17,14 @@ Downsamples to 10Hz and produces:
 from __future__ import annotations
 
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import numpy as np
 import pandas as pd
 import torch
-from physical_ai_av.egomotion import EgomotionState
+
+if TYPE_CHECKING:  # the SDK is a runtime dep of loading, not of importing (see below)
+    from physical_ai_av.egomotion import EgomotionState
 
 # Must match the planner's dimensions. Placing here for package export.
 _HISTORY_TIMESTEPS = 64         # 6.4 s of past context at 10 Hz
@@ -132,6 +135,13 @@ def load_egomotion(
 
     history_df = df.iloc[sample_idx - _HISTORY_TIMESTEPS:sample_idx].reset_index(drop=True)
     future_df = df.iloc[sample_idx + 1:sample_idx + 1 + _FUTURE_TIMESTEPS].reset_index(drop=True)
+
+    # Imported HERE, not at module scope. The NVIDIA SDK is a runtime dep of loading
+    # egomotion, but a module-scope import made it a dep of importing the package at
+    # all — which gated the pure-numpy FTheta calibration math in calibration.py that
+    # never touches the SDK, and (since the SDK needs Python >= 3.11) made that math
+    # untestable on 3.10 entirely. See camera.py for the same pattern.
+    from physical_ai_av.egomotion import EgomotionState
 
     history_signals = _to_history_signals(EgomotionState.from_egomotion_df(history_df))
     future_signals = _to_target_signals(EgomotionState.from_egomotion_df(future_df))

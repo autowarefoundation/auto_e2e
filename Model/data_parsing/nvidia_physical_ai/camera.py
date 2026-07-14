@@ -15,7 +15,6 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import torch
-from physical_ai_av.video import SeekVideoReader
 
 # Camera directories present in the NVIDIA PhysicalAI-Autonomous-Vehicles dataset.
 CAMERA_NAMES: list[str] = [
@@ -121,6 +120,14 @@ def load_camera_frame(
             timestamps_us = pd.read_parquet(timestamps_path)["timestamp"].to_numpy()
 
         frame_idx = _egomotion_ts_to_frame_idx(egomotion_timestamp_us, timestamps_us)
+
+        # Imported HERE, not at module scope. The NVIDIA SDK is a *runtime* dep of
+        # video decoding only, but an *import-time* dep of the whole package (this
+        # module is re-exported by __init__), so it also gated the pure-numpy FTheta
+        # calibration math in calibration.py — which never touches the SDK. That is
+        # why TestBuildFThetaFromCalibration cannot run without it. The SDK needs
+        # Python >= 3.11, so it also made the calibration path untestable on 3.10.
+        from physical_ai_av.video import SeekVideoReader
 
         video_data = io.BytesIO(video_path.read_bytes()) #TODO: major bottleneck for training - consider sampling images in a seperate data processing step.
         reader = SeekVideoReader(video_data=video_data)
