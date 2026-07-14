@@ -8,6 +8,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"sort"
+	"strings"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -26,6 +28,41 @@ type sceneItem struct {
 	SampleID      string `dynamodbav:"sample_id"`
 	Dataset       string `dynamodbav:"dataset"`
 	PromptVersion string `dynamodbav:"prompt_version"`
+}
+
+type overlayPointerItem struct {
+	S3Key               string  `dynamodbav:"s3_key"`
+	SHA256              string  `dynamodbav:"sha256"`
+	ByteSize            int64   `dynamodbav:"byte_size"`
+	SampleCount         int     `dynamodbav:"sample_count"`
+	OverlaySchema       string  `dynamodbav:"overlay_schema"`
+	Status              string  `dynamodbav:"status"`
+	RegisteredModelName string  `dynamodbav:"registered_model_name"`
+	ModelVersion        int     `dynamodbav:"model_version"`
+	RunID               string  `dynamodbav:"run_id"`
+	ModelName           string  `dynamodbav:"model_name"`
+	EvalADE             float64 `dynamodbav:"eval_ade"`
+	EvalFDE             float64 `dynamodbav:"eval_fde"`
+	ValFraction         float64 `dynamodbav:"val_fraction"`
+	SK                  string  `dynamodbav:"sk"`
+}
+
+// OverlayPointer is the validated S3 locator for one canonical shard body.
+type OverlayPointer struct {
+	ModelArtifactID string
+	S3Key           string
+	SHA256          string
+	ByteSize        int64
+	SampleCount     int
+	OverlaySchema   string
+}
+
+// GeoRecord is the serving metadata for one privacy-filtered geo artifact set.
+type GeoRecord struct {
+	Summary    string `dynamodbav:"summary"`
+	GeoJSONKey string `dynamodbav:"geojson_key"`
+	NSamples   int    `dynamodbav:"n_samples"`
+	ComputedAt string `dynamodbav:"computed_at"`
 }
 
 // ErrNotFound is returned when a requested item is absent from the table.
@@ -290,6 +327,157 @@ func (s *DynamoStore) QueryScenesByLabel(ctx context.Context, dataset, promptVer
 		}
 		startKey = out.LastEvaluatedKey
 	}
+}
+
+// QueryReadyOverlayModels returns models advertised for one shard only after
+// both the pointer and its whole overlay-set gate are ready.
+func (s *DynamoStore) QueryReadyOverlayModels(ctx context.Context, dataset, version, shard string) ([]model.OverlayModel, error) {
+	pk := ShardModelPK(dataset, version, shard)
+	var models []model.OverlayModel
+	var startKey map[string]ddbtypes.AttributeValue
+	for {
+		out, err := s.client.Query(ctx, &dynamodb.QueryInput{
+			TableName:              aws.String(s.table),
+			KeyConditionExpression: aws.String("pk = :pk AND begins_with(sk, :model)"),
+			ExpressionAttributeValues: map[string]ddbtypes.AttributeValue{
+				":pk":    &ddbtypes.AttributeValueMemberS{Value: pk},
+				":model": &ddbtypes.AttributeValueMemberS{Value: "MODEL#"},
+			},
+			ExclusiveStartKey: startKey,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("query overlay models: %w", err)
+		}
+		var items []overlayPointerItem
+		if err := attributevalue.UnmarshalListOfMaps(out.Items, &items); err != nil {
+			return nil, fmt.Errorf("decode overlay models: %w", err)
+		}
+		for _, item := range items {
+			modelArtifactID := strings.TrimPrefix(item.SK, "MODEL#")
+			if item.Status != "ready" || modelArtifactID == item.SK {
+				continue
+			}
+			ready, err := s.overlaySetReady(ctx, modelArtifactID, dataset, version)
+			if err != nil {
+				return nil, err
+			}
+			if !ready {
+				continue
+			}
+			models = append(models, model.OverlayModel{
+				ModelArtifactID:     modelArtifactID,
+				RegisteredModelName: item.RegisteredModelName,
+				ModelVersion:        item.ModelVersion,
+				RunID:               item.RunID,
+				ModelName:           item.ModelName,
+				EvalADE:             item.EvalADE,
+				EvalFDE:             item.EvalFDE,
+				ValFraction:         item.ValFraction,
+				OverlaySchema:       item.OverlaySchema,
+				SampleCount:         item.SampleCount,
+			})
+		}
+		if len(out.LastEvaluatedKey) == 0 {
+			break
+		}
+		startKey = out.LastEvaluatedKey
+	}
+	sort.Slice(models, func(i, j int) bool {
+		if models[i].ModelVersion != models[j].ModelVersion {
+			return models[i].ModelVersion > models[j].ModelVersion
+		}
+		return models[i].ModelArtifactID < models[j].ModelArtifactID
+	})
+	return models, nil
+}
+
+// GetReadyOverlayPointer resolves one pointer after enforcing the set-level
+// publication gate. A building set is intentionally indistinguishable from a
+// missing overlay to readers.
+func (s *DynamoStore) GetReadyOverlayPointer(ctx context.Context, dataset, version, shard, modelArtifactID string) (*OverlayPointer, error) {
+	out, err := s.client.GetItem(ctx, &dynamodb.GetItemInput{
+		TableName: aws.String(s.table),
+		Key: map[string]ddbtypes.AttributeValue{
+			"pk": &ddbtypes.AttributeValueMemberS{Value: ShardModelPK(dataset, version, shard)},
+			"sk": &ddbtypes.AttributeValueMemberS{Value: ModelSK(modelArtifactID)},
+		},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("get overlay pointer: %w", err)
+	}
+	if out.Item == nil {
+		return nil, ErrNotFound
+	}
+	var item overlayPointerItem
+	if err := attributevalue.UnmarshalMap(out.Item, &item); err != nil {
+		return nil, fmt.Errorf("decode overlay pointer: %w", err)
+	}
+	ready, err := s.overlaySetReady(ctx, modelArtifactID, dataset, version)
+	if err != nil {
+		return nil, err
+	}
+	if item.Status != "ready" || !ready {
+		return nil, ErrNotFound
+	}
+	if item.S3Key == "" || item.SHA256 == "" || item.ByteSize <= 0 || item.SampleCount <= 0 {
+		return nil, fmt.Errorf("overlay pointer is incomplete")
+	}
+	return &OverlayPointer{
+		ModelArtifactID: modelArtifactID,
+		S3Key:           item.S3Key,
+		SHA256:          item.SHA256,
+		ByteSize:        item.ByteSize,
+		SampleCount:     item.SampleCount,
+		OverlaySchema:   item.OverlaySchema,
+	}, nil
+}
+
+func (s *DynamoStore) overlaySetReady(ctx context.Context, modelArtifactID, dataset, version string) (bool, error) {
+	out, err := s.client.GetItem(ctx, &dynamodb.GetItemInput{
+		TableName: aws.String(s.table),
+		Key: map[string]ddbtypes.AttributeValue{
+			"pk": &ddbtypes.AttributeValueMemberS{Value: OverlaySetPK(modelArtifactID, dataset, version)},
+			"sk": &ddbtypes.AttributeValueMemberS{Value: metaSK},
+		},
+		ProjectionExpression:     aws.String("#status"),
+		ExpressionAttributeNames: map[string]string{"#status": "status"},
+	})
+	if err != nil {
+		return false, fmt.Errorf("get overlay-set status: %w", err)
+	}
+	if out.Item == nil {
+		return false, nil
+	}
+	status, err := stringAttr(out.Item, "status")
+	if err != nil {
+		return false, err
+	}
+	return status == "ready", nil
+}
+
+// GetGeoRecord returns the privacy-filtered summary and S3 heatmap pointer.
+func (s *DynamoStore) GetGeoRecord(ctx context.Context, dataset, version string) (*GeoRecord, error) {
+	out, err := s.client.GetItem(ctx, &dynamodb.GetItemInput{
+		TableName: aws.String(s.table),
+		Key: map[string]ddbtypes.AttributeValue{
+			"pk": &ddbtypes.AttributeValueMemberS{Value: GeoPK(dataset, version)},
+			"sk": &ddbtypes.AttributeValueMemberS{Value: metaSK},
+		},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("get geo stats: %w", err)
+	}
+	if out.Item == nil {
+		return nil, ErrNotFound
+	}
+	var record GeoRecord
+	if err := attributevalue.UnmarshalMap(out.Item, &record); err != nil {
+		return nil, fmt.Errorf("decode geo stats: %w", err)
+	}
+	if !json.Valid([]byte(record.Summary)) || record.GeoJSONKey == "" {
+		return nil, fmt.Errorf("geo stats item is incomplete")
+	}
+	return &record, nil
 }
 
 // ---------------------------------------------------------------------------
