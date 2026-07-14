@@ -5,6 +5,17 @@ import torch.nn as nn
 from .reactive_e2e import ReactiveE2E
 from .world_action_model import RollingHistoryBuffer, WorldActionModel
 
+# Geometry arguments from the pre-#77/#107 forward signature. They are no longer
+# parameters, so **kwargs would absorb them and forward on to the planner, which
+# also takes **kwargs — the value is dropped without a word and the run silently
+# falls back to geometry_type="pseudo", a LEARNED PRIOR, not real geometry. A
+# caller passing calibration gets a model that never receives it, and nothing in
+# the logs or the outputs says so. Reject them by name instead.
+_REMOVED_GEOMETRY_KWARGS = (
+    "camera_params", "camera_matrices", "calib", "calibration",
+    "intrinsics", "extrinsics", "projection_matrix",
+)
+
 
 class AutoE2E(nn.Module):
     def __init__(self, backbone="swin_v2_tiny", num_views=7, embed_dim=256,
@@ -123,7 +134,25 @@ class AutoE2E(nn.Module):
 
         Returns:
             trajectory, or (trajectory, aux_outputs) in train mode with a branch on.
+
+        Raises:
+            TypeError: if a removed geometry kwarg (e.g. ``camera_params``) is
+                passed. See ``_REMOVED_GEOMETRY_KWARGS``.
         """
+        removed = sorted(set(kwargs) & set(_REMOVED_GEOMETRY_KWARGS))
+        if removed:
+            raise TypeError(
+                f"{type(self).__name__}.forward() got removed geometry argument(s) "
+                f"{removed}. The [B,V,3,4] matrix argument was replaced by the "
+                f"projection ABI (#77/#107):\n\n"
+                f"    from model_components.view_fusion.projection import PinholeProjection\n"
+                f"    model(camera_tiles, map_input, visual_history, egomotion_history,\n"
+                f"          projection=PinholeProjection(camera_params),  # [B,V,3,4]\n"
+                f"          geometry_type='pinhole', mode=...)\n\n"
+                f"This is an error and not a warning because **kwargs would otherwise "
+                f"absorb the argument silently and the model would run on "
+                f"geometry_type='pseudo' — a learned spatial prior, not your calibration."
+            )
 
         # World Action Model (1 Hz): produce the Encoded Visual History fed to the
         # reactive planner + reasoning branch, and (in training) the predicted

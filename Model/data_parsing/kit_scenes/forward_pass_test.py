@@ -44,6 +44,7 @@ sys.path.insert(0, str(_MODEL_DIR))
 
 from data_parsing.kit_scenes import KitScenesDataset  # noqa: E402
 from model_components.auto_e2e import AutoE2E  # noqa: E402
+from model_components.view_fusion.projection import PinholeProjection  # noqa: E402
 
 
 def load_dataset(
@@ -94,6 +95,18 @@ def load_dataset(
     return dataset, batch_device
 
 
+def build_projection(batch: dict) -> PinholeProjection:
+    """Wrap KITScenes' (B, V, 3, 4) pinhole matrices as a projection operator.
+
+    KITScenes ships per-camera intrinsic @ extrinsic matrices already scaled to the
+    backbone's resize/crop transform, which is exactly what PinholeProjection
+    consumes — so the geometry needs no conversion, only wrapping. Passing the raw
+    matrix as `camera_params=` (the pre-#77/#107 signature) now raises TypeError;
+    before, `**kwargs` swallowed it and the model ran on `pseudo` geometry.
+    """
+    return PinholeProjection(batch["camera_params"])
+
+
 def test_bev_infer_mode(
     batch: dict,
     device: torch.device,
@@ -108,19 +121,19 @@ def test_bev_infer_mode(
     ).to(device)
 
     t0 = time.time()
-    trajectory, ego_hidden, _ = model(
+    trajectory = model(
         batch["visual_tiles"],
         batch["map_tile"],
         batch["visual_history"],
         batch["egomotion_history"],
-        camera_params=batch["camera_params"],
+        projection=build_projection(batch),
+        geometry_type="pinhole",
         mode="infer",
     )
     t_forward = time.time() - t0
 
     print(f"[bev_infer] Forward pass time: {t_forward:.2f}s")
-    print(f"[bev_infer] Trajectory shape: {trajectory.shape}")
-    print(f"[bev_infer] Ego Hidden shape: {tuple(ego_hidden.shape)}")
+    print(f"[bev_infer] Trajectory shape: {tuple(trajectory.shape)}")
     print("[bev_infer] PASSED")
 
 
@@ -129,30 +142,36 @@ def test_bev_train_mode(
     device: torch.device,
     pretrained_backbone: bool,
 ) -> None:
-    """Test forward pass with BEV fusion in training mode."""
+    """Test forward pass with BEV fusion + World Model in training mode."""
     print("[bev_train] Testing forward pass with BEV fusion in train mode")
 
     torch.cuda.empty_cache()
+    # enable_world_model=True is what makes mode="train" return the JEPA future
+    # state alongside the trajectory. forward returns the TRAJECTORY, not a loss:
+    # the planner objective is computed by the training loop, not inside forward.
     model = AutoE2E(
         is_pretrained=pretrained_backbone,
+        enable_world_model=True,
     ).to(device)
 
     t0 = time.time()
-    planner_loss, ego_hidden, future_visual_features = model(
+    trajectory, future_state_pred = model(
         batch["visual_tiles"],
         batch["map_tile"],
         batch["visual_history"],
         batch["egomotion_history"],
-        camera_params=batch["camera_params"],
+        projection=build_projection(batch),
+        geometry_type="pinhole",
         trajectory_target=batch["trajectory_target"],
         mode="train",
     )
     t_forward = time.time() - t0
 
     print(f"[bev_train] Forward pass time: {t_forward:.2f}s")
-    print(f"[bev_train] Planner loss: {planner_loss.item():.4f}")
-    print(f"[bev_train] Ego Hidden shape: {tuple(ego_hidden.shape)}")
-    print(f"[bev_train] Future Visual Features shapes: {[tuple(f.shape) for f in future_visual_features]}")
+    print(f"[bev_train] Trajectory shape: {tuple(trajectory.shape)}")
+    # predict_future returns a LIST of num_future_steps feature tensors, not a tensor.
+    print(f"[bev_train] Future state prediction: "
+          f"{[tuple(f.shape) for f in future_state_pred]}")
     print("[bev_train] PASSED")
 
 
