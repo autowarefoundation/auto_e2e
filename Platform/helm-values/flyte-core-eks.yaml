@@ -387,10 +387,9 @@ cluster_resource_manager:
             - defaultIamRole:
                 value: "arn:aws:iam::{{ .Values.userSettings.accountNumber }}:role/flyte-user-role"
         - development:
-            # 17-batch full-run (#121): each batch fans out 60 partitions ×
-            # (16 vCPU, 128Gi) pods = 960 vCPU, 7.7Ti memory concurrent.
-            # Set 83% of the EC2 Standard On-Demand vCPU quota (1152)
-            # and leave headroom for Karpenter overhead / gRPC control pods.
+            # KITScenes full run (#121): 60 one-scene pods x
+            # (15 vCPU, 64Gi) = 900 vCPU, 3.75Ti memory concurrent.
+            # Keep headroom under the 1152 Standard On-Demand vCPU quota.
             - projectQuotaCpu:
                 value: "1000"
             - projectQuotaMemory:
@@ -432,6 +431,8 @@ cluster_resource_manager:
           hard:
             limits.cpu: {{ projectQuotaCpu }}
             limits.memory: {{ projectQuotaMemory }}
+            requests.cpu: {{ projectQuotaCpu }}
+            requests.memory: {{ projectQuotaMemory }}
 
 
 
