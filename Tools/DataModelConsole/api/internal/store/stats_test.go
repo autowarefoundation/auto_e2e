@@ -9,7 +9,11 @@ import (
 // (nulls for every v2 context axis, which the console does not aggregate).
 const sampleLabelJSON = `{
   "schema_version": "reasoning_label_v2",
-  "sample_id": "s00000126",
+  "sample_id": "l2d-v1-e000003-f000126",
+  "dataset_name": "yaak-ai/L2D",
+  "teacher_provider": "openai_compatible",
+  "teacher_model": "nvidia/Cosmos3-Nano",
+  "prompt_version": "action_relevant_reasoning_v3_temporal_front256",
   "horizons": [
     {"horizon_sec": 0.0, "relation_to_ego": "same_lane_ahead", "hazard_event": ["no_hazard"], "cause": ["lead_vehicle"], "longitudinal_response": "slow_down", "lateral_response": "keep_lane", "tactical_response": "proceed_with_caution", "rule_response": "none", "confidence": 0.99, "global_scene_context": null, "road_topology": null},
     {"horizon_sec": 1.0, "relation_to_ego": "same_lane_ahead", "hazard_event": ["no_hazard"], "cause": ["lead_vehicle"], "longitudinal_response": "slow_down", "lateral_response": "keep_lane", "tactical_response": "proceed_with_caution", "rule_response": "none", "confidence": 0.95}
@@ -21,8 +25,13 @@ func TestParseReasoningLabel(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ParseReasoningLabel error: %v", err)
 	}
-	if lbl.SampleID != "s00000126" {
-		t.Errorf("SampleID = %q, want s00000126", lbl.SampleID)
+	if lbl.SampleID != "l2d-v1-e000003-f000126" {
+		t.Errorf("SampleID = %q", lbl.SampleID)
+	}
+	if lbl.TeacherProvider != "openai_compatible" ||
+		lbl.TeacherModel != "nvidia/Cosmos3-Nano" ||
+		lbl.PromptVersion != "action_relevant_reasoning_v3_temporal_front256" {
+		t.Errorf("provenance was not decoded: %+v", lbl)
 	}
 	if len(lbl.Horizons) != 2 {
 		t.Fatalf("Horizons len = %d, want 2", len(lbl.Horizons))
