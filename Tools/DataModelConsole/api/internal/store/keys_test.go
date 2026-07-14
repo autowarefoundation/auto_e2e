@@ -18,6 +18,17 @@ func TestStatsPK(t *testing.T) {
 	}
 }
 
+func TestEmbeddedStatsPK(t *testing.T) {
+	got := EmbeddedStatsPK(
+		"l2d", "v2.1",
+		"action_relevant_reasoning_v3_temporal_front256",
+	)
+	want := "STATSV2#l2d#v2.1#action_relevant_reasoning_v3_temporal_front256"
+	if got != want {
+		t.Errorf("EmbeddedStatsPK = %q, want %q", got, want)
+	}
+}
+
 func TestSceneLabelKeys(t *testing.T) {
 	pk := SceneLabelPK("l2d", "action_relevant_reasoning_v3_temporal_front256", "lateral_response", "turn_left")
 	wantPK := "LBL#l2d#action_relevant_reasoning_v3_temporal_front256#lateral_response#turn_left"
