@@ -31,7 +31,7 @@ UID_SCHEMA_VERSION = "v1"
 # Sample enumeration + per-sample field contract of the parsers
 # (_build_sample_index, egomotion extraction, WM window offsets). Bump if which
 # frames are valid, or the fields a sample carries, change.
-PARSER_VERSION = "v1"
+PARSER_VERSION = "v2"
 
 # Packed WebDataset shard member layout (cam_i.jpg / map.jpg / hist_*/fut_* /
 # ego.npy / meta.json / calib.json / reasoning.json). Bump if the member set,
@@ -39,7 +39,9 @@ PARSER_VERSION = "v1"
 # v2 (dedup pack, #121 §3.4d): added `window_index.json` per-sample member and
 # a SIBLING `pool/{frame_id}.jpg` directory replacing legacy `hist_*/fut_*` tar
 # members. Loader now requires pool/ when window_index.json is present.
-SHARD_SCHEMA_VERSION = "v2"
+# v3: added pose.npy (absolute lat/lon/heading/timestamp) and gps.npy (current +
+# 64 future lat/lon points) for datasets with geospatial source fields.
+SHARD_SCHEMA_VERSION = "v3"
 
 # Calibration / projection spec encoding written into calib.json. Bump if the
 # geometry serialization changes.
