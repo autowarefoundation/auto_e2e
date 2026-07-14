@@ -29,7 +29,7 @@ from __future__ import annotations
 
 import logging
 import sys
-from typing import Any, TypedDict
+from typing import Any, Iterator, TypedDict
 
 import torch
 from torch.utils.data import Dataset
@@ -65,6 +65,8 @@ class L2DSample(TypedDict):
     trajectory_target: torch.Tensor  # (128,)
     episode_index: int
     frame_index: int
+    pose_current: dict[str, float | int]
+    gps_future: np.ndarray           # (65, 2) float64: current + 64 future
     # Present only when include_world_model_windows=True (#16, enables JEPA #13):
     # the 1 Hz multi-view past/future windows, each (N, 6, 3, H, W), oldest->newest.
     history_frames: NotRequired[torch.Tensor]
@@ -311,7 +313,7 @@ class L2DDataset(Dataset):
         oldest→newest, matching the ``history_frames``/``future_frames`` stack order.
         """
         ep_idx, row = self._samples[idx]
-        ep_start, ep_end = self._episode_ranges[ep_idx]
+        ep_start, _ = self._episode_ranges[ep_idx]
         n = self._wm_num_frames
         s = self._wm_stride
         # Same offsets the window uses: history oldest→newest ending at 0, future +s..+N*s.
@@ -368,10 +370,30 @@ class L2DDataset(Dataset):
         ``__getitem__`` performs before touching video — so the pack parent can
         assemble ego.npy without triggering the expensive multi-cam decode.
         """
+        ego_history, trajectory_target, _, _ = self.numeric_for(idx)
+        return ego_history, trajectory_target
+
+    def geospatial_for(
+        self, idx: int,
+    ) -> tuple[dict[str, float | int], np.ndarray]:
+        """Return absolute current pose + current/future GPS without video decode."""
+        _, _, pose_current, gps_future = self.numeric_for(idx)
+        return pose_current, gps_future
+
+    def numeric_for(self, idx: int):
+        """Return every numeric sample field with one read and no video decode."""
         ep_idx, row = self._samples[idx]
         ep_start, ep_end = self._episode_ranges[ep_idx]
         vehicle_states = self._get_vehicle_states_window(ep_start, ep_end)
-        return extract_egomotion(vehicle_states, sample_idx=row - ep_start)
+        timestamps_ns = self._get_timestamps_window(ep_start, ep_end)
+        sample_idx = row - ep_start
+        ego_history, trajectory_target = extract_egomotion(
+            vehicle_states, sample_idx=sample_idx
+        )
+        pose_current, gps_future = self._extract_geospatial(
+            vehicle_states, timestamps_ns, sample_idx
+        )
+        return ego_history, trajectory_target, pose_current, gps_future
 
     def _get_vehicle_states_window(self, ep_start: int, ep_end: int) -> np.ndarray:
         """Load vehicle state vectors for one episode (local row range).
@@ -387,6 +409,89 @@ class L2DDataset(Dataset):
             col[ep_start:ep_end]["observation.state.vehicle"], dtype=np.float32
         )
         return states
+
+    def _get_timestamps_window(self, ep_start: int, ep_end: int) -> np.ndarray:
+        """Load raw nanosecond Unix timestamps for one episode."""
+        hf = self.lerobot_dataset.hf_dataset
+        col = hf.select_columns(["observation.state.timestamp"])
+        values = np.asarray(
+            col[ep_start:ep_end]["observation.state.timestamp"], dtype=np.int64
+        )
+        return values.reshape(-1)
+
+    @staticmethod
+    def _extract_geospatial(
+        vehicle_states: np.ndarray,
+        timestamps_ns: np.ndarray,
+        sample_idx: int,
+    ) -> tuple[dict[str, float | int], np.ndarray]:
+        """Extract map pose fields aligned to the egomotion sample index."""
+        end = sample_idx + _FUTURE_TIMESTEPS + 1
+        if end > len(vehicle_states) or sample_idx >= len(timestamps_ns):
+            raise IndexError(
+                f"geospatial window [{sample_idx}:{end}] exceeds episode rows "
+                f"{len(vehicle_states)}"
+            )
+        current = vehicle_states[sample_idx]
+        # The L2D source vector is float32. Casting here prevents further loss in
+        # storage but cannot recover precision absent from the source.
+        gps_future = np.asarray(
+            vehicle_states[sample_idx:end, 3:5], dtype=np.float64
+        )
+        pose_current: dict[str, float | int] = {
+            "latitude_deg": float(current[3]),
+            "longitude_deg": float(current[4]),
+            "heading_deg_cw_from_north": float(current[1]),
+            "timestamp_ns": int(timestamps_ns[sample_idx]),
+            # L2D exposes no GPS-accuracy channel.
+            "gps_accuracy_m": float("nan"),
+        }
+        return pose_current, gps_future
+
+    def episode_indices(self) -> list[int]:
+        """Return loaded source episode ids in stable order."""
+        return sorted(self._episode_ranges)
+
+    def episode_path(self, episode_index: int) -> np.ndarray:
+        """Return ``[lat, lon, heading, timestamp_ns]`` for the full episode.
+
+        The route artifact stores all columns as float64. Per-sample pose members
+        retain the nanosecond timestamp as exact int64.
+        """
+        ep_start, ep_end = self._episode_ranges[episode_index]
+        states = self._get_vehicle_states_window(ep_start, ep_end)
+        timestamps = self._get_timestamps_window(ep_start, ep_end)
+        path = np.empty((len(states), 4), dtype=np.float64)
+        path[:, 0] = states[:, 3]
+        path[:, 1] = states[:, 4]
+        path[:, 2] = states[:, 1]
+        path[:, 3] = timestamps
+        return path
+
+    def sample_pose_records(self) -> Iterator[dict[str, Any]]:
+        """Yield exact per-sample pose rows for the partition geo parquet."""
+        by_episode: dict[int, tuple[np.ndarray, np.ndarray]] = {}
+        for idx, (ep_idx, row) in enumerate(self._samples):
+            if ep_idx not in by_episode:
+                ep_start, ep_end = self._episode_ranges[ep_idx]
+                by_episode[ep_idx] = (
+                    self._get_vehicle_states_window(ep_start, ep_end),
+                    self._get_timestamps_window(ep_start, ep_end),
+                )
+            states, timestamps = by_episode[ep_idx]
+            ep_start, _ = self._episode_ranges[ep_idx]
+            frame_idx = row - ep_start
+            state = states[frame_idx]
+            yield {
+                "sample_uid": self.sample_uid(idx),
+                "episode_index": ep_idx,
+                "frame_index": frame_idx,
+                "latitude_deg": float(state[3]),
+                "longitude_deg": float(state[4]),
+                "heading_deg_cw_from_north": float(state[1]),
+                "timestamp_ns": int(timestamps[frame_idx]),
+                "gps_accuracy_m": None,
+            }
 
     def _load_multiview_frame(self, row: int) -> torch.Tensor:
         """Decode the 6 RAW camera views for one local row -> (6, 3, H, W).
@@ -419,16 +524,18 @@ class L2DDataset(Dataset):
     def __getitem__(self, idx: int) -> L2DSample:
         # row is the local index into hf_dataset / lerobot_dataset.
         ep_idx, row = self._samples[idx]
-        ep_start, ep_end = self._episode_ranges[ep_idx]
+        ep_start, _ = self._episode_ranges[ep_idx]
 
         # Offset of the current frame within its own episode.
         sample_idx_in_episode = row - ep_start
 
-        # Load vehicle states for egomotion (episode window, no video decode)
-        vehicle_states = self._get_vehicle_states_window(ep_start, ep_end)
-        egomotion_history, trajectory_target = extract_egomotion(
-            vehicle_states, sample_idx=sample_idx_in_episode
-        )
+        # Load all numeric signals in one table read (no video decode).
+        (
+            egomotion_history,
+            trajectory_target,
+            pose_current,
+            gps_future,
+        ) = self.numeric_for(idx)
 
         item = self.lerobot_dataset[row]
         visual_history = torch.zeros(_VISUAL_HISTORY_DIM, dtype=torch.float32)
@@ -462,6 +569,8 @@ class L2DDataset(Dataset):
             trajectory_target=trajectory_target,
             episode_index=ep_idx,
             frame_index=sample_idx_in_episode,
+            pose_current=pose_current,
+            gps_future=gps_future,
         )
         if self._wm_enabled:
             sample["history_frames"] = history_frames
