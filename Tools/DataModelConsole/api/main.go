@@ -55,7 +55,9 @@ func main() {
 	flyteSvc := service.NewFlyteService(cfg.FlyteURL, cfg.FlyteProject, cfg.FlyteDomain)
 
 	healthH := handler.NewHealthHandler(s3svc)
-	datasetsH := handler.NewDatasetsHandler(s3svc)
+	datasetsH := handler.NewDatasetsHandlerWithGeoAccess(
+		s3svc, cfg.ExactGeoEnabled, cfg.ExactGeoRequiredRole,
+	)
 	reasoningH := handler.NewReasoningHandler(s3svc)
 	scenesH := handler.NewScenesHandler(s3svc)
 	overlayH := handler.NewOverlayHandler(
