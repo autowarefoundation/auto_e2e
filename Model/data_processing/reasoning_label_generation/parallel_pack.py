@@ -9,7 +9,8 @@ parent just appends those bytes to the shard tar (fast, single-threaded, so the
 tar stays valid). Only the small byte blobs cross the process boundary.
 
 Per-sample members: cam_i.jpg (reactive current frame), map.jpg, ego.npy,
-meta.json, calib.json, and — for WM shards — window_index.json (§3.4d). The WM
+optional pose.npy/gps.npy, meta.json, calib.json, and — for WM shards —
+window_index.json (§3.4d). The WM
 window PIXELS are NOT per-sample anymore: the worker returns them in a separate
 ``pool`` dict keyed by a GLOBAL frame_id, and the parent writes each frame_id to a
 shared ``pool/`` dir exactly ONCE, deduping the ~8x cross-sample frame overlap
@@ -37,7 +38,7 @@ _CALIB_BYTES: Any = None
 
 def init_pack_worker(
     dataset_value: str,
-    episodes: Optional[List[int]],
+    episodes: Optional[List[int | str]],
     raw_path: str,
     image_size: int,
     world_model: bool,
@@ -54,6 +55,16 @@ def init_pack_worker(
     if dataset_value == "nvidia/PhysicalAI-Autonomous-Vehicles":
         from data_parsing.nvidia_physical_ai.dataset import NvidiaAVDataset
         _DS = NvidiaAVDataset(data_root=raw_path)
+    elif dataset_value == "KIT-MRT/KITScenes-Multimodal":
+        from data_parsing.kit_scenes import KitScenesDataset
+        scene_ids = [str(scene_id) for scene_id in episodes] if episodes else None
+        _DS = KitScenesDataset(
+            data_root=raw_path,
+            split="train",
+            scene_ids=scene_ids,
+            image_size=image_size,
+            include_world_model_windows=world_model,
+        )
     else:
         from data_parsing.l2d import L2DDataset
         # root=raw_path makes lerobot read the partition's materialized raw dir
@@ -77,7 +88,7 @@ def _jpeg(frame_tensor) -> bytes:
 
 def init_row_worker(
     dataset_value: str,
-    episodes: Optional[List[int]],
+    episodes: Optional[List[int | str]],
     raw_path: str,
     image_size: int,
 ) -> None:
@@ -101,16 +112,28 @@ def init_row_worker(
     """
     global _DS, _RESIZE, _TO_PIL, _DATASET_VALUE
     from torchvision import transforms
-    from data_parsing.l2d import L2DDataset
-
     _DATASET_VALUE = dataset_value
     _TO_PIL = transforms.ToPILImage()
     _RESIZE = transforms.Resize((image_size, image_size))
-    _DS = L2DDataset(repo_id=dataset_value, episodes=episodes,
-                     include_world_model_windows=False, root=raw_path)
+    if dataset_value == "KIT-MRT/KITScenes-Multimodal":
+        from data_parsing.kit_scenes import KitScenesDataset
+        scene_ids = [str(scene_id) for scene_id in episodes] if episodes else None
+        _DS = KitScenesDataset(
+            data_root=raw_path,
+            split="train",
+            scene_ids=scene_ids,
+            image_size=image_size,
+            include_world_model_windows=False,
+        )
+    else:
+        from data_parsing.l2d import L2DDataset
+        _DS = L2DDataset(repo_id=dataset_value, episodes=episodes,
+                         include_world_model_windows=False, root=raw_path)
 
 
-def decode_row(task: Tuple[int, int]) -> Tuple[Tuple[int, int], Dict[str, bytes], Optional[bytes]]:
+def decode_row(
+    task: tuple[Any, ...],
+) -> tuple[tuple[Any, int], Dict[str, bytes], Optional[bytes]]:
     """Decode ONE physical row's cameras (+ map) → JPEG bytes (#121 decode-dedup).
 
     ``task`` = (ep_idx, frame_index) — GLOBAL identity, so the worker resolves the
@@ -123,10 +146,36 @@ def decode_row(task: Tuple[int, int]) -> Tuple[Tuple[int, int], Dict[str, bytes]
     frame_id embeds episode + episode-local frame_index, so it can never
     reference another episode/scene.
     """
-    from data_parsing.l2d.dataset import CAMERA_NAMES, MAP_VIEW_NAME
     from data_processing.contract_versions import UID_SCHEMA_VERSION
 
-    ep_idx, frame_index = task
+    if len(task) == 2:
+        group_id, frame_index = task
+        include_map = True
+    elif len(task) == 3:
+        group_id, frame_index, include_map = task
+    else:
+        raise ValueError(f"decode_row expects 2 or 3 values, got {task!r}")
+
+    if _DATASET_VALUE == "KIT-MRT/KITScenes-Multimodal":
+        scene_id = str(group_id)
+        visual = _DS._load_multiview_frame(scene_id, frame_index)
+        cams = {
+            (
+                f"kitscenes-{UID_SCHEMA_VERSION}-{scene_id}-"
+                f"r{frame_index:06d}-c{view}"
+            ): _jpeg(visual[view])
+            for view in range(visual.shape[0])
+        }
+        map_jpeg = None
+        if include_map:
+            map_tile = _DS.map_for_row(scene_id, frame_index)
+            if float(map_tile.abs().max()) > 0:
+                map_jpeg = _jpeg(map_tile)
+        return (scene_id, frame_index), cams, map_jpeg
+
+    from data_parsing.l2d.dataset import CAMERA_NAMES, MAP_VIEW_NAME
+
+    ep_idx = int(group_id)
     ep_start, ep_end = _DS._episode_ranges[ep_idx]
     local_row = ep_start + frame_index
     if local_row >= ep_end:
@@ -136,9 +185,12 @@ def decode_row(task: Tuple[int, int]) -> Tuple[Tuple[int, int], Dict[str, bytes]
     for v, cam_name in enumerate(CAMERA_NAMES):
         fid = f"l2d-{UID_SCHEMA_VERSION}-e{ep_idx:06d}-r{frame_index:06d}-c{v}"
         cams[fid] = _jpeg(item[cam_name])
-    map_tile = item[MAP_VIEW_NAME]
-    mt = map_tile[0] if map_tile.ndim == 4 else map_tile
-    map_jpeg = _jpeg(mt) if float(mt.abs().max()) > 0 else None
+    map_jpeg = None
+    if include_map:
+        map_tile = item[MAP_VIEW_NAME]
+        mt = map_tile[0] if map_tile.ndim == 4 else map_tile
+        if float(mt.abs().max()) > 0:
+            map_jpeg = _jpeg(mt)
     return (ep_idx, frame_index), cams, map_jpeg
 
 
@@ -166,6 +218,7 @@ def pack_sample(si: int) -> Tuple[str, int, Dict[str, bytes], Dict[str, bytes]]:
     sample = _DS[si]
     uid = _DS.sample_uid(si)
     split_group = _DS.split_group_uid(si)
+    from data_processing.dataset_snapshot import split_bucket
     members: Dict[str, bytes] = {}
     pool: Dict[str, bytes] = {}
 
@@ -206,9 +259,13 @@ def pack_sample(si: int) -> Tuple[str, int, Dict[str, bytes], Dict[str, bytes]]:
         traj.numpy() if torch.is_tensor(traj) else np.asarray(traj),
     ]).astype(np.float32)
     members["ego.npy"] = ego_data.tobytes()
+    from data_processing.geospatial import geospatial_members
+    members.update(geospatial_members(sample))
     members["meta.json"] = json.dumps({
         "idx": si, "dataset": _DATASET_VALUE,
         "sample_uid": uid, "split_group_uid": split_group,
+        "split_bucket": split_bucket(split_group),
+        "frame_idx": _DS.frame_index(si),
     }).encode()
     members["calib.json"] = _CALIB_BYTES
 
