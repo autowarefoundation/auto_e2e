@@ -15,7 +15,13 @@ material, so these tests pin:
 from __future__ import annotations
 
 from data_processing.contract_versions import UID_SCHEMA_VERSION, PARSER_VERSION
-from data_processing.dataset_snapshot import DatasetSnapshot, group_metadata_digest
+from data_processing.dataset_snapshot import (
+    DatasetSnapshot,
+    group_metadata_digest,
+    published_shard_name,
+    shard_partition_id,
+    split_bucket,
+)
 
 
 def test_digest_is_order_independent():
@@ -33,6 +39,24 @@ def test_int_and_str_group_ids_never_collide():
 
 def test_different_group_set_changes_digest():
     assert group_metadata_digest([1, 2, 3]) != group_metadata_digest([1, 2, 3, 4])
+
+
+def test_split_bucket_matches_training_contract_vectors():
+    assert split_bucket("l2d-e000000") == 2
+    assert split_bucket("l2d-e000012") == 1
+    assert split_bucket("nv-25cd4769") == 5
+
+
+def test_published_shard_names_are_partition_unique_and_order_stable():
+    first = published_shard_name(["10", "11"], 0)
+    same = published_shard_name(["11", "10"], 0)
+    other = published_shard_name(["12", "13"], 0)
+
+    assert first == same
+    assert first != other
+    assert first.endswith("-train-000000.tar")
+    assert shard_partition_id(None) == ""
+    assert published_shard_name(None, 2) == "train-000002.tar"
 
 
 def test_build_defaults_versions_from_single_source():
