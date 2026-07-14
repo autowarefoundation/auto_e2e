@@ -75,22 +75,19 @@ def compute_camera_projection_matrices(
     for cam_name in camera_names:
         calib = loader.get_camera_calibration(cam_name)
  
-        if calib.image_size is None:
-            raise ValueError(
-                f"Camera {cam_name!r} has no resolution in calib.json. "
-                "KIT Scenes calibration files are expected to always include "
-                "a resolution field."
-            )
+        source_wh = calib.image_size
+        if source_wh is None:
+            source_wh = loader.get_camera_image_size(cam_name, frame_idx=0)
         if target_hw is not None:
             target_h, target_w = target_hw
-            source_w, source_h = calib.image_size
+            source_w, source_h = source_wh
             K_scaled = calib.intrinsic.copy().astype(np.float64)
             K_scaled[0, :] *= target_w / source_w
             K_scaled[1, :] *= target_h / source_h
         else:
             assert transform is not None
             K_scaled = scale_intrinsic(
-                calib.intrinsic, calib.image_size, transform
+                calib.intrinsic, source_wh, transform
             )
  
         # invert calib.extrinsic to get T_ref_to_cam.
