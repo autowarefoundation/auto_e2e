@@ -75,13 +75,14 @@ class _FakeDS:
     EP0_START = 0
 
     def __init__(self, n, num_views=6, with_map=True, wm=False,
-                 wm_frames=4, float_frames=True):
+                 wm_frames=4, float_frames=True, with_gps=False):
         self.n = n
         self.num_views = num_views
         self.with_map = with_map
         self.wm = wm
         self.wm_frames = wm_frames
         self.float_frames = float_frames
+        self.with_gps = with_gps
         self._wm_num_frames = wm_frames
         self._wm_stride = _WM_STRIDE
         # Attributes used by decode_row worker
@@ -101,6 +102,9 @@ class _FakeDS:
 
     def split_group_uid(self, si):
         return "l2d-e000000"
+
+    def frame_index(self, si):
+        return self._row(si)
 
     def _cam_frame(self, row, cam):
         """Frame CONTENT keyed by (row, cam) — identical across samples that share
@@ -136,6 +140,24 @@ class _FakeDS:
         traj = torch.arange(128, dtype=torch.float32) - si
         return ego_h, traj
 
+    def numeric_for(self, si):
+        ego_h, traj = self.egomotion_for(si)
+        if not self.with_gps:
+            return ego_h, traj, None, None
+        row = self._row(si)
+        pose = {
+            "latitude_deg": 49.0 + row / 100000,
+            "longitude_deg": 11.0 + row / 100000,
+            "heading_deg_cw_from_north": 90.0,
+            "timestamp_ns": 1_670_000_000_000_000_000 + row * 100_000_000,
+            "gps_accuracy_m": float("nan"),
+        }
+        gps = np.column_stack([
+            49.0 + np.arange(65) / 100000,
+            11.0 + np.arange(65) / 100000,
+        ])
+        return ego_h, traj, pose, gps
+
     def __getitem__(self, si):
         row = self._row(si)
         sample = {
@@ -158,6 +180,8 @@ class _FakeDS:
                 torch.stack([self._cam_frame(row + o, v)
                              for v in range(self.num_views)], dim=0)
                 for o in fut_off], dim=0)
+        if self.with_gps:
+            _, _, sample["pose_current"], sample["gps_future"] = self.numeric_for(si)
         return sample
 
 
@@ -322,9 +346,27 @@ def test_ego_meta_uid_unchanged():
     assert json.loads(members["meta.json"]) == {
         "idx": 0, "dataset": "yaak-ai/L2D",
         "sample_uid": uid, "split_group_uid": ds.split_group_uid(0),
+        "split_bucket": 2, "frame_idx": ds.frame_index(0),
     }
     assert members["calib.json"] == calib
     assert uid == ds.sample_uid(0) and uid.startswith("l2d-v1-")
+
+
+def test_pack_sample_adds_pose_and_gps_atomically():
+    from data_processing.geospatial import decode_gps_future, decode_pose
+
+    ds = _FakeDS(
+        1, num_views=6, with_map=True, wm=False,
+        float_frames=True, with_gps=True,
+    )
+    _install_worker_globals(ds, "yaak-ai/L2D", b"{}")
+    _, _, members, _ = pp.pack_sample(0)
+
+    assert set(("pose.npy", "gps.npy")).issubset(members)
+    pose = decode_pose(members["pose.npy"])
+    gps = decode_gps_future(members["gps.npy"])
+    assert pose["timestamp_ns"] == ds.numeric_for(0)[2]["timestamp_ns"]
+    np.testing.assert_array_equal(gps, ds.numeric_for(0)[3])
 
 
 # --------------------------------------------------------------------------
@@ -456,6 +498,7 @@ def _simulate_decode_dedup_shard(ds, dataset_value, calib_bytes):
         members["meta.json"] = json.dumps({
             "idx": si, "dataset": dataset_value,
             "sample_uid": uid, "split_group_uid": ds.split_group_uid(si),
+            "split_bucket": 2, "frame_idx": ds.frame_index(si),
         }).encode()
         members["calib.json"] = calib_bytes
         sample_members[uid] = members
