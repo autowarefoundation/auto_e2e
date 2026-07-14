@@ -16,6 +16,7 @@ ever enters a cached task's input signature.
 | PARSER_VERSION       | sample ENUMERATION or per-sample fields change         | ingest+label+pack|
 | SHARD_SCHEMA_VERSION | the packed tar member layout changes                   | pack            |
 | GEOMETRY_VERSION     | the calibration/projection encoding changes            | pack            |
+| REASONING_LABEL_POLICY_VERSION | the reasoning sample selection changes     | label + pack    |
 
 Source revision (HF commit), teacher model revision, and the prompt body hash are
 NOT constants here — they are resolved at run time (from HF / teacher config /
@@ -47,6 +48,11 @@ SHARD_SCHEMA_VERSION = "v3"
 # geometry serialization changes.
 GEOMETRY_VERSION = "v1"
 
+# Selection policy for the sparse reasoning-label subset. v2 adds the first
+# valid sample of every split group to the regular frame-index grid so even a
+# short scene receives supervision.
+REASONING_LABEL_POLICY_VERSION = "v2"
+
 
 def contract_versions() -> dict:
     """All contract versions as one dict — used in the DatasetSnapshot / cache key
@@ -56,4 +62,5 @@ def contract_versions() -> dict:
         "parser_version": PARSER_VERSION,
         "shard_schema_version": SHARD_SCHEMA_VERSION,
         "geometry_version": GEOMETRY_VERSION,
+        "reasoning_label_policy_version": REASONING_LABEL_POLICY_VERSION,
     }
