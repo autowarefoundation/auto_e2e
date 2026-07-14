@@ -119,7 +119,9 @@ func (s *S3Service) computeAndPersistStats(ctx context.Context, dataset, version
 		for _, lbl := range labels {
 			rows = append(rows, store.SceneLabelRows(lbl)...)
 		}
-		if n, werr := s.store.PutSceneLabels(ctx, dataset, promptVersion, rows); werr != nil {
+		if n, werr := s.store.PutSceneLabelsForVersion(
+			ctx, dataset, version, promptVersion, rows,
+		); werr != nil {
 			return model.ReasoningStatsBlob{}, "", 0, fmt.Errorf("populate scene-by-label index: %w", werr)
 		} else {
 			sceneRows = n
@@ -360,10 +362,27 @@ func reasoningTeacherMatches(label store.ReasoningLabel, requested string) bool 
 // SearchScenesByLabel returns the sample ids carrying a (field,value) reasoning
 // label for a (dataset, promptVersion), from the DynamoDB scene-by-label index.
 func (s *S3Service) SearchScenesByLabel(ctx context.Context, dataset, promptVersion, field, value string, limit int) ([]string, error) {
+	ids, _, err := s.SearchScenesByLabelAtVersion(
+		ctx, dataset, "", promptVersion, field, value, limit,
+	)
+	return ids, err
+}
+
+// SearchScenesByLabelAtVersion queries only the sample_uid index materialized
+// from the same immutable shard version used for playback.
+func (s *S3Service) SearchScenesByLabelAtVersion(
+	ctx context.Context,
+	dataset, version, promptVersion, field, value string,
+	limit int,
+) ([]string, string, error) {
 	if s.store == nil {
-		return nil, fmt.Errorf("scene search requires a configured dynamo store")
+		return nil, "", fmt.Errorf("scene search requires a configured dynamo store")
 	}
-	return s.store.QueryScenesByLabel(ctx, dataset, promptVersion, field, value, limit)
+	version = s.versionOrResolve(ctx, dataset, version)
+	ids, err := s.store.QueryScenesByLabelForVersion(
+		ctx, dataset, version, promptVersion, field, value, limit,
+	)
+	return ids, version, err
 }
 
 // ResolveSampleShards maps each sample id to the published shard (for the given
