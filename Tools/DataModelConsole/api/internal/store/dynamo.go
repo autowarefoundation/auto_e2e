@@ -180,7 +180,7 @@ func (s *DynamoStore) GetStats(ctx context.Context, dataset, version, promptVers
 	out, err := s.client.GetItem(ctx, &dynamodb.GetItemInput{
 		TableName: aws.String(s.table),
 		Key: map[string]ddbtypes.AttributeValue{
-			"pk": &ddbtypes.AttributeValueMemberS{Value: StatsPK(dataset, version, promptVersion)},
+			"pk": &ddbtypes.AttributeValueMemberS{Value: EmbeddedStatsPK(dataset, version, promptVersion)},
 			"sk": &ddbtypes.AttributeValueMemberS{Value: metaSK},
 		},
 	})
@@ -213,7 +213,7 @@ func (s *DynamoStore) PutStats(ctx context.Context, dataset, version, promptVers
 	_, err = s.client.PutItem(ctx, &dynamodb.PutItemInput{
 		TableName: aws.String(s.table),
 		Item: map[string]ddbtypes.AttributeValue{
-			"pk":          &ddbtypes.AttributeValueMemberS{Value: StatsPK(dataset, version, promptVersion)},
+			"pk":          &ddbtypes.AttributeValueMemberS{Value: EmbeddedStatsPK(dataset, version, promptVersion)},
 			"sk":          &ddbtypes.AttributeValueMemberS{Value: metaSK},
 			"payload":     &ddbtypes.AttributeValueMemberS{Value: string(payload)},
 			"computed_at": &ddbtypes.AttributeValueMemberS{Value: computedAt},
