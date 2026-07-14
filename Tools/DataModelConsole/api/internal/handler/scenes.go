@@ -69,7 +69,15 @@ func (h *ScenesHandler) Search(w http.ResponseWriter, r *http.Request) {
 
 	// Fetch one extra row so we can report truncation truthfully instead of
 	// silently capping at `limit`.
-	ids, err := h.s3.SearchScenesByLabel(r.Context(), dataset, promptVersion, field, value, limit+1)
+	ids, resolvedVersion, err := h.s3.SearchScenesByLabelAtVersion(
+		r.Context(),
+		dataset,
+		version,
+		promptVersion,
+		field,
+		value,
+		limit+1,
+	)
 	if err != nil {
 		slog.Error("scene search", "dataset", dataset, "field", field, "value", value, "error", err)
 		writeError(w, http.StatusBadGateway, model.CodeS3Error, "failed to search scenes by label")
@@ -83,7 +91,9 @@ func (h *ScenesHandler) Search(w http.ResponseWriter, r *http.Request) {
 	// Resolve each sample id to the shard that actually contains it in this
 	// version; ids not packed into any published shard are marked unavailable
 	// so the UI links only real samples (labels can outnumber packed frames).
-	shardByID := h.s3.ResolveSampleShards(r.Context(), dataset, version, ids)
+	shardByID := h.s3.ResolveSampleShards(
+		r.Context(), dataset, resolvedVersion, ids,
+	)
 
 	scenes := make([]model.SceneRef, 0, len(ids))
 	available := 0
@@ -98,7 +108,7 @@ func (h *ScenesHandler) Search(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, model.SceneSearchResponse{
 		Dataset:       dataset,
 		PromptVersion: promptVersion,
-		Version:       version,
+		Version:       resolvedVersion,
 		Field:         field,
 		Value:         value,
 		Scenes:        scenes,
