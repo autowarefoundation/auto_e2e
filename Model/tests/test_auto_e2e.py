@@ -283,3 +283,67 @@ class TestFullPipelineRobustness:
 
         assert traj.shape == (1, 128)
         assert torch.isfinite(traj).all()
+
+
+# ---------------------------------------------------------------------------
+# Removed geometry kwargs must fail loudly, not silently
+# ---------------------------------------------------------------------------
+
+class TestRemovedGeometryKwargs:
+    """A caller passing pre-#77/#107 geometry must get an error, not pseudo BEV.
+
+    ``forward`` takes ``**kwargs`` and hands them to the planner, which also takes
+    ``**kwargs``. So ``camera_params=<calibration>`` used to be absorbed at every
+    layer and dropped without a word, leaving the model on ``geometry_type="pseudo"``
+    — a learned prior. The run trains, converges and reports numbers; nothing says
+    the calibration was discarded. That is the failure this pins.
+    """
+
+    def test_camera_params_raises(self, build_mock_model, device):
+        model = build_mock_model(num_views=7, device=device)
+        model.eval()
+        visual, map_input, vis_hist, ego, camera_params = make_inputs(
+            2, 7, device, include_camera_params=True)
+
+        with pytest.raises(TypeError, match="camera_params"):
+            model(visual, map_input, vis_hist, ego,
+                  camera_params=camera_params, mode="infer")
+
+    @pytest.mark.parametrize(
+        "name", ["calib", "calibration", "intrinsics", "extrinsics",
+                 "projection_matrix", "camera_matrices"])
+    def test_other_removed_names_raise(self, build_mock_model, device, name):
+        model = build_mock_model(num_views=7, device=device)
+        model.eval()
+        visual, map_input, vis_hist, ego = make_inputs(2, 7, device)
+
+        with pytest.raises(TypeError, match=name):
+            model(visual, map_input, vis_hist, ego,
+                  mode="infer", **{name: torch.randn(2, 7, 3, 4, device=device)})
+
+    def test_error_names_the_replacement(self, build_mock_model, device):
+        """The message must be actionable: whoever hits it should not have to
+        go read the diff of #77 to find out what to pass instead."""
+        model = build_mock_model(num_views=7, device=device)
+        model.eval()
+        visual, map_input, vis_hist, ego, camera_params = make_inputs(
+            2, 7, device, include_camera_params=True)
+
+        with pytest.raises(TypeError) as exc:
+            model(visual, map_input, vis_hist, ego,
+                  camera_params=camera_params, mode="infer")
+
+        msg = str(exc.value)
+        assert "PinholeProjection" in msg
+        assert "projection=" in msg
+        assert "pseudo" in msg
+
+    def test_unrelated_kwargs_still_pass_through(self, build_mock_model, device):
+        """Only the geometry names are rejected — **kwargs stays open for the
+        planner, so this guard must not become a general kwargs whitelist."""
+        model = build_mock_model(num_views=7, device=device)
+        model.eval()
+        visual, map_input, vis_hist, ego = make_inputs(2, 7, device)
+        traj = model(visual, map_input, vis_hist, ego, mode="infer")
+
+        assert traj.shape == (2, 128)
