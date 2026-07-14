@@ -2015,6 +2015,13 @@ def wf_create_dataset(
 def wf_create_dataset_sharded(
     dataset: Dataset = Dataset.L2D,
     episodes: int = 20,
+    # Batch range (17-batch wrapper, #121 full-run). When start_ep >= 0 and
+    # end_ep > start_ep, the range [start_ep, end_ep) drives episode selection
+    # instead of the `episodes` count. Left at defaults (-1/-1) → legacy path.
+    # Downstream task-level caches key on group_ids, so shifting only the range
+    # does not re-run identical partitions.
+    start_ep: int = -1,
+    end_ep: int = -1,
     partition_size: int = 10,
     image_size: int = 256,
     world_model: bool = False,
@@ -2053,12 +2060,20 @@ def wf_create_dataset_sharded(
             "wf_create_dataset_sharded currently fans out L2D (episode indices). "
             "NVIDIA clip-uuid fan-out is Phase 4.")
 
-    # L2D: episode indices are 0..N-1. episodes=0 means "ALL" (Design §3.3):
-    # resolve the true count from LeRobotDatasetMetadata before partitioning, so
-    # the "train on ALL episodes" entry point does not silently no-op via range(0).
+    # L2D: episode indices are 0..N-1. Three modes:
+    #   (a) start_ep >= 0 and end_ep > start_ep → RANGE [start_ep, end_ep).
+    #       Used by the 17-batch wrapper (#121 full-run) to slice the 100k
+    #       episode space into non-overlapping chunks that each fit under the
+    #       Propeller gRPC 4MB event ceiling.
+    #   (b) episodes == 0 → ALL. Resolved via LeRobotDatasetMetadata.
+    #   (c) episodes > 0 → first-N (legacy).
     # Group ids are STRINGS (the task interface is List[str]) — same signature
     # serves NVIDIA clip uuids later.
-    if episodes == 0:
+    if start_ep >= 0 and end_ep > start_ep:
+        episode_ids = [str(e) for e in range(start_ep, end_ep)]
+        print(f"wf_create_dataset_sharded: RANGE [{start_ep}, {end_ep}) "
+              f"= {len(episode_ids)} episodes")
+    elif episodes == 0:
         try:
             from lerobot.datasets.lerobot_dataset import LeRobotDatasetMetadata
         except ModuleNotFoundError:
@@ -2072,7 +2087,7 @@ def wf_create_dataset_sharded(
             token = os.environ.get("HF_TOKEN", "")
         if token:
             login(token=token)
-        meta = LeRobotDatasetMetadata(repo_id=dataset.value)
+        meta = LeRobotDatasetMetadata(repo_id=dataset.value, revision="main")
         total = int(meta.total_episodes)
         print(f"wf_create_dataset_sharded: episodes=0 resolved to ALL {total} episodes")
         episode_ids = [str(e) for e in range(total)]
