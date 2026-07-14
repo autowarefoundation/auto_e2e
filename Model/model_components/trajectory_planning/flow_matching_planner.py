@@ -186,6 +186,25 @@ class FlowMatchingPlanner(BasePlanner):
                 f"got {trajectory_target.device} and {device}."
             )
 
+    def _validate_initial_noise(self, initial_noise, batch_size, device, dtype):
+        expected = (batch_size, self.trajectory_dim)
+        if tuple(initial_noise.shape) != expected:
+            raise ValueError(
+                f"initial_noise must have shape {expected} "
+                f"(batch_size, num_timesteps * num_signals), got "
+                f"{tuple(initial_noise.shape)}."
+            )
+        if initial_noise.device != device:
+            raise ValueError(
+                "initial_noise must be on the same device as bev_features, "
+                f"got {initial_noise.device} and {device}."
+            )
+        if initial_noise.dtype != dtype:
+            raise ValueError(
+                "initial_noise must have the same dtype as bev_features, "
+                f"got {initial_noise.dtype} and {dtype}."
+            )
+
     def _sinusoidal_time_embedding(self, t):
         """Map t in [0, 1] to a sinusoidal embedding of size time_embed_dim.
 
@@ -316,7 +335,7 @@ class FlowMatchingPlanner(BasePlanner):
         return velocity_seq.reshape(B, self.trajectory_dim)
 
     def forward(self, bev_features, visual_history, egomotion_history,
-                generator=None, reasoning_latent=None,
+                generator=None, initial_noise=None, reasoning_latent=None,
                 reasoning_horizon_tokens=None, **kwargs):
         """Inference: Euler-integrate ``dx/dt = v_theta(x, t, ...)`` over [0, 1].
 
@@ -325,7 +344,11 @@ class FlowMatchingPlanner(BasePlanner):
             visual_history: [B, visual_history_dim].
             egomotion_history: [B, egomotion_dim].
             generator: optional ``torch.Generator`` used to seed the noise
-                prior so evaluation runs are reproducible.
+                prior so evaluation runs are reproducible. Ignored when
+                ``initial_noise`` is provided.
+            initial_noise: optional [B, trajectory_dim] noise prior. Supplying
+                per-sample noise makes inference independent of batch order and
+                batch size; when omitted, noise is sampled with ``generator``.
             reasoning_latent: optional [B, embed_dim] pooled reasoning latent
                 (reasoning_mode="pooled_latent").
             reasoning_horizon_tokens: optional [B, 5, embed_dim] per-horizon
@@ -345,9 +368,17 @@ class FlowMatchingPlanner(BasePlanner):
         bev_seq = self._project_bev(bev_features)
 
         B = bev_features.shape[0]
-        x = torch.randn(B, self.trajectory_dim,
-                        device=bev_features.device, dtype=bev_features.dtype,
-                        generator=generator)
+        if initial_noise is not None:
+            self._validate_initial_noise(
+                initial_noise, B, bev_features.device, bev_features.dtype,
+            )
+            x = initial_noise
+        else:
+            x = torch.randn(
+                B, self.trajectory_dim,
+                device=bev_features.device, dtype=bev_features.dtype,
+                generator=generator,
+            )
         dt = 1.0 / self.num_inference_steps
         for step in range(self.num_inference_steps):
             t_val = step * dt
