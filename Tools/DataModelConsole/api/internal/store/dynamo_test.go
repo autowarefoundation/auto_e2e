@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/aws/aws-sdk-go-v2/feature/dynamodb/attributevalue"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	ddbtypes "github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 
@@ -204,6 +205,93 @@ func TestDynamoStore_BatchWriteRetriesUnprocessed(t *testing.T) {
 	}
 	if f.batchCalls != 2 {
 		t.Errorf("expected 2 batch calls (1 unprocessed + 1 retry), got %d", f.batchCalls)
+	}
+}
+
+func TestDynamoStore_OverlayReadinessGatesModelsAndBody(t *testing.T) {
+	s, f := newTestStore()
+	ctx := context.Background()
+	modelID := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	pointer := map[string]any{
+		"pk":                    ShardModelPK("l2d", "v2.1", "train-000001.tar"),
+		"sk":                    ModelSK(modelID),
+		"s3_key":                "overlays/schema=v1/body.gz",
+		"sha256":                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+		"byte_size":             1234,
+		"sample_count":          42,
+		"overlay_schema":        "v1",
+		"status":                "ready",
+		"registered_model_name": "auto-e2e-driving-policy",
+		"model_version":         30,
+		"run_id":                "run-30",
+		"model_name":            "swin_v2_tiny",
+		"eval_ade":              1.25,
+		"eval_fde":              2.5,
+		"val_fraction":          0.1,
+	}
+	pointerItem, err := attributevalue.MarshalMap(pointer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.items[keyOf(pointerItem)] = pointerItem
+
+	if models, err := s.QueryReadyOverlayModels(ctx, "l2d", "v2.1", "train-000001.tar"); err != nil || len(models) != 0 {
+		t.Fatalf("building/missing set must not advertise models: models=%v err=%v", models, err)
+	}
+	if _, err := s.GetReadyOverlayPointer(ctx, "l2d", "v2.1", "train-000001.tar", modelID); err != ErrNotFound {
+		t.Fatalf("building/missing set pointer error = %v, want ErrNotFound", err)
+	}
+
+	setItem, err := attributevalue.MarshalMap(map[string]any{
+		"pk":     OverlaySetPK(modelID, "l2d", "v2.1"),
+		"sk":     metaSK,
+		"status": "ready",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.items[keyOf(setItem)] = setItem
+
+	models, err := s.QueryReadyOverlayModels(ctx, "l2d", "v2.1", "train-000001.tar")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(models) != 1 || models[0].ModelArtifactID != modelID || models[0].ModelVersion != 30 {
+		t.Fatalf("ready models = %+v", models)
+	}
+	got, err := s.GetReadyOverlayPointer(ctx, "l2d", "v2.1", "train-000001.tar", modelID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.S3Key != pointer["s3_key"] || got.ByteSize != 1234 || got.SampleCount != 42 {
+		t.Errorf("overlay pointer = %+v", got)
+	}
+}
+
+func TestDynamoStore_GeoRecord(t *testing.T) {
+	s, f := newTestStore()
+	item, err := attributevalue.MarshalMap(map[string]any{
+		"pk":          GeoPK("l2d", "v2.1"),
+		"sk":          metaSK,
+		"summary":     `{"bbox":[11,48,12,49]}`,
+		"geojson_key": "l2d/v2.1/geo/heatmap.geojson.gz",
+		"n_samples":   123,
+		"computed_at": "2026-07-15T00:00:00Z",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.items[keyOf(item)] = item
+
+	got, err := s.GetGeoRecord(context.Background(), "l2d", "v2.1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.NSamples != 123 || got.GeoJSONKey != "l2d/v2.1/geo/heatmap.geojson.gz" {
+		t.Errorf("geo record = %+v", got)
+	}
+	if _, err := s.GetGeoRecord(context.Background(), "l2d", "v9"); err != ErrNotFound {
+		t.Errorf("missing geo record error = %v", err)
 	}
 }
 
