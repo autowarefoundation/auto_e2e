@@ -1241,33 +1241,35 @@ func memberSuffixOf(name string) string {
 	return ""
 }
 
-// ReasoningStats walks reasoning_labels_cache/ and counts label objects per
-// dataset/teacher/prompt_version partition.
+// ReasoningStats counts embedded labels in each dataset's newest immutable
+// shard version, grouped by provenance carried in reasoning.json.
 func (s *S3Service) ReasoningStats(ctx context.Context) ([]model.ReasoningStatsEntry, int, error) {
 	counts := map[[3]string]int{}
 	order := [][3]string{}
 
-	p := s3.NewListObjectsV2Paginator(s.client, &s3.ListObjectsV2Input{
-		Bucket: aws.String(s.bucket),
-		Prefix: aws.String(reasoningCachePrefix),
-	})
 	total := 0
-	for p.HasMorePages() {
-		page, err := p.NextPage(ctx)
+	for _, dataset := range knownDatasets {
+		locations, version, err := s.reasoningMemberLocations(
+			ctx, dataset, "", "",
+		)
 		if err != nil {
-			return nil, 0, fmt.Errorf("list reasoning labels: %w", err)
+			return nil, 0, fmt.Errorf(
+				"list embedded reasoning labels for %s: %w", dataset, err,
+			)
 		}
-		for _, obj := range page.Contents {
-			key := aws.ToString(obj.Key)
-			if !strings.HasSuffix(key, ".json") {
+		records, err := s.fetchEmbeddedReasoning(
+			ctx, dataset, version, locations,
+		)
+		if err != nil {
+			return nil, 0, err
+		}
+		for _, record := range records {
+			label := record.Label
+			teacher := reasoningTeacher(label)
+			if teacher == "" || label.PromptVersion == "" {
 				continue
 			}
-			ds, teacher, pv, ok := parseReasoningKey(key)
-			if !ok {
-				slog.Debug("skipping unparseable reasoning label key", "key", key)
-				continue
-			}
-			k := [3]string{ds, teacher, pv}
+			k := [3]string{dataset, teacher, label.PromptVersion}
 			if _, seen := counts[k]; !seen {
 				order = append(order, k)
 			}
@@ -1298,40 +1300,35 @@ func (s *S3Service) ReasoningStats(ctx context.Context) ([]model.ReasoningStatsE
 	return entries, total, nil
 }
 
-// ReasoningPromptVersions lists the teacher/prompt_version partitions of a
-// single console dataset's reasoning-label cache with per-partition counts,
-// sorted by (teacher, prompt_version). This is the per-dataset variant of
-// ReasoningStats: it scans only the dataset's cache partition instead of the
-// whole cache, so the dataset detail page can show its label-version axis.
+// ReasoningPromptVersions lists embedded label provenance for one dataset's
+// newest published version, sorted by (teacher, prompt_version).
 func (s *S3Service) ReasoningPromptVersions(ctx context.Context, dataset string) ([]model.ReasoningPromptVersion, error) {
-	prefix := fmt.Sprintf("%sdataset=%s/", reasoningCachePrefix, cacheDataset(dataset))
 	counts := map[[2]string]int{}
 	order := [][2]string{}
 
-	p := s3.NewListObjectsV2Paginator(s.client, &s3.ListObjectsV2Input{
-		Bucket: aws.String(s.bucket),
-		Prefix: aws.String(prefix),
-	})
-	for p.HasMorePages() {
-		page, err := p.NextPage(ctx)
-		if err != nil {
-			return nil, fmt.Errorf("list reasoning prompt versions for %s: %w", dataset, err)
+	locations, version, err := s.reasoningMemberLocations(
+		ctx, dataset, "", "",
+	)
+	if err != nil {
+		return nil, err
+	}
+	records, err := s.fetchEmbeddedReasoning(
+		ctx, dataset, version, locations,
+	)
+	if err != nil {
+		return nil, err
+	}
+	for _, record := range records {
+		label := record.Label
+		teacher := reasoningTeacher(label)
+		if teacher == "" || label.PromptVersion == "" {
+			continue
 		}
-		for _, obj := range page.Contents {
-			key := aws.ToString(obj.Key)
-			if !strings.HasSuffix(key, ".json") {
-				continue
-			}
-			_, teacher, pv, ok := parseReasoningKey(key)
-			if !ok {
-				continue
-			}
-			k := [2]string{teacher, pv}
-			if _, seen := counts[k]; !seen {
-				order = append(order, k)
-			}
-			counts[k]++
+		k := [2]string{teacher, label.PromptVersion}
+		if _, seen := counts[k]; !seen {
+			order = append(order, k)
 		}
+		counts[k]++
 	}
 
 	entries := make([]model.ReasoningPromptVersion, 0, len(order))
@@ -1351,90 +1348,59 @@ func (s *S3Service) ReasoningPromptVersions(ctx context.Context, dataset string)
 	return entries, nil
 }
 
-// reasoningSampleIDs lists every reasoning label present for a console dataset
-// and returns the set of flat s%08d sample ids (label object base names, minus
-// the .json suffix), aggregated across all teacher/prompt_version partitions.
-// Used by BuildShardIndex to set HasReasoning without depending on a
-// reasoning.json tar member (Phase-1 shards embed none).
+// reasoningSampleIDs returns canonical sample_uid values carrying an embedded
+// reasoning.json member in the newest dataset version.
 func (s *S3Service) reasoningSampleIDs(ctx context.Context, dataset string) (map[string]struct{}, error) {
-	prefix := fmt.Sprintf("%sdataset=%s/", reasoningCachePrefix, cacheDataset(dataset))
 	ids := map[string]struct{}{}
-	p := s3.NewListObjectsV2Paginator(s.client, &s3.ListObjectsV2Input{
-		Bucket: aws.String(s.bucket),
-		Prefix: aws.String(prefix),
-	})
-	for p.HasMorePages() {
-		page, err := p.NextPage(ctx)
-		if err != nil {
-			return nil, fmt.Errorf("list reasoning sample ids for %s: %w", dataset, err)
-		}
-		for _, obj := range page.Contents {
-			key := aws.ToString(obj.Key)
-			if !strings.HasSuffix(key, ".json") {
-				continue
-			}
-			ids[strings.TrimSuffix(path.Base(key), ".json")] = struct{}{}
-		}
+	locations, _, err := s.reasoningMemberLocations(ctx, dataset, "", "")
+	if err != nil {
+		return nil, err
+	}
+	for _, location := range locations {
+		ids[location.SampleUID] = struct{}{}
 	}
 	return ids, nil
 }
 
-// GetReasoningLabel fetches the raw JSON label for (dataset, sampleID). The
-// cache is partitioned by teacher/prompt_version, which the caller usually
-// does not know, so we list the dataset partition and pick the first (or the
-// requested teacher/promptVersion when provided) match.
+// GetReasoningLabel fetches the canonical embedded JSON label from the newest
+// published dataset version.
 func (s *S3Service) GetReasoningLabel(ctx context.Context, dataset, sampleID, teacher, promptVersion string) ([]byte, string, error) {
-	// Console dataset ids / sample keys -> cache partition + flat s%08d id.
-	// An unparseable sample_id (no frame index) has no label: 404, don't
-	// silently resolve to s00000000 and serve frame 0's label.
-	dataset = cacheDataset(dataset)
-	resolvedID, ok := cacheSampleID(sampleID)
-	if !ok {
-		return nil, "", ErrNotFound
+	return s.GetReasoningLabelAtVersion(
+		ctx, dataset, "", sampleID, teacher, promptVersion,
+	)
+}
+
+// GetReasoningLabelAtVersion fetches one reasoning.json member by sample_uid
+// and returns a logical source coordinate without disclosing the bucket.
+func (s *S3Service) GetReasoningLabelAtVersion(
+	ctx context.Context,
+	dataset, version, sampleID, teacher, promptVersion string,
+) ([]byte, string, error) {
+	locations, resolvedVersion, err := s.reasoningMemberLocations(
+		ctx, dataset, version, sampleID,
+	)
+	if err != nil {
+		return nil, "", err
 	}
-	sampleID = resolvedID
-
-	// Fast path: fully-qualified key.
-	if teacher != "" && promptVersion != "" {
-		key := fmt.Sprintf("%sdataset=%s/teacher=%s/prompt_version=%s/%s.json",
-			reasoningCachePrefix, dataset, teacher, promptVersion, sampleID)
-		body, err := s.getObjectBytes(ctx, key)
-		if err != nil {
-			return nil, "", err
-		}
-		return body, key, nil
+	records, err := s.fetchEmbeddedReasoning(
+		ctx, dataset, resolvedVersion, locations,
+	)
+	if err != nil {
+		return nil, "", err
 	}
-
-	// Discover partitions for the dataset, then probe each for the sample.
-	prefix := fmt.Sprintf("%sdataset=%s/", reasoningCachePrefix, dataset)
-	suffix := "/" + sampleID + ".json"
-
-	p := s3.NewListObjectsV2Paginator(s.client, &s3.ListObjectsV2Input{
-		Bucket: aws.String(s.bucket),
-		Prefix: aws.String(prefix),
-	})
-	for p.HasMorePages() {
-		page, err := p.NextPage(ctx)
-		if err != nil {
-			return nil, "", fmt.Errorf("list reasoning labels for %s: %w", dataset, err)
+	for _, record := range records {
+		label := record.Label
+		if promptVersion != "" && label.PromptVersion != promptVersion {
+			continue
 		}
-		for _, obj := range page.Contents {
-			key := aws.ToString(obj.Key)
-			if !strings.HasSuffix(key, suffix) {
-				continue
-			}
-			if teacher != "" && !strings.Contains(key, "/teacher="+teacher+"/") {
-				continue
-			}
-			if promptVersion != "" && !strings.Contains(key, "/prompt_version="+promptVersion+"/") {
-				continue
-			}
-			body, err := s.getObjectBytes(ctx, key)
-			if err != nil {
-				return nil, "", err
-			}
-			return body, key, nil
+		if !reasoningTeacherMatches(label, teacher) {
+			continue
 		}
+		source := fmt.Sprintf(
+			"%s/%s/%s/reasoning.json",
+			dataset, resolvedVersion, sampleID,
+		)
+		return record.Body, source, nil
 	}
 	return nil, "", ErrNotFound
 }
@@ -1526,24 +1492,20 @@ func (s *S3Service) datasetSampleCount(ctx context.Context, dataset string) (int
 	return spg.Total * page.Total, nil
 }
 
-// CountReasoningLabels returns the total number of label JSON objects under
-// reasoning_labels_cache/ without materialising per-partition stats.
+// CountReasoningLabels counts canonical embedded labels without fetching their
+// JSON bodies; shard indexes already carry HasReasoning and member ranges.
 func (s *S3Service) CountReasoningLabels(ctx context.Context) (int, error) {
 	total := 0
-	p := s3.NewListObjectsV2Paginator(s.client, &s3.ListObjectsV2Input{
-		Bucket: aws.String(s.bucket),
-		Prefix: aws.String(reasoningCachePrefix),
-	})
-	for p.HasMorePages() {
-		page, err := p.NextPage(ctx)
+	for _, dataset := range knownDatasets {
+		locations, _, err := s.reasoningMemberLocations(
+			ctx, dataset, "", "",
+		)
 		if err != nil {
-			return 0, fmt.Errorf("count reasoning labels: %w", err)
+			return 0, fmt.Errorf(
+				"count embedded reasoning labels for %s: %w", dataset, err,
+			)
 		}
-		for _, obj := range page.Contents {
-			if strings.HasSuffix(aws.ToString(obj.Key), ".json") {
-				total++
-			}
-		}
+		total += len(locations)
 	}
 	return total, nil
 }
