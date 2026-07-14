@@ -480,10 +480,22 @@ workflow execution**, not nine manual launches:
 
 The scheduler waves are internal `map_task` admission waves; operators do not
 launch the workflow nine or 107 times. At 60 data-prep pods, requested capacity is
-960 vCPU and 7.5 TiB (60 x 16 vCPU / 128 GiB), below the planned 1000-vCPU /
-8-TiB namespace quota and the 1152-vCPU EC2 quota. Label concurrency is lower
+900 vCPU and 3.75 TiB (60 x 15 vCPU / 64 GiB), below the planned 1000-vCPU /
+8-TiB namespace quota and the 1152-vCPU EC2 quota. Using 15 rather than 16 vCPU
+keeps a pod below the kube-reserved allocatable CPU of a 16-vCPU node, so
+Karpenter does not need to place every pod on a 32-vCPU instance. Each pod also
+requests 60 GiB ephemeral storage: the default EKS Auto Mode `NodeClass` exposes
+about 70 GiB allocatable from its 80-GiB volume, while the largest pinned scene
+briefly needs about 40.24 GiB during tar download plus extraction. Label
+concurrency is lower
 because the 10-replica Cosmos endpoint, not Kubernetes capacity, is its bound.
 Training runs exactly once on one GPU after the validated manifest is complete.
+
+The earlier L2D profile of 16 vCPU / 128 GiB / 800 GiB is not reused here. It
+cannot schedule on the live default `NodeClass`, and a 128-GiB request also
+crosses the allocatable-memory boundary of a nominal 128-GiB instance. Restoring
+that profile for future L2D work requires an IaC-managed data-prep `NodeClass`
+and `NodePool`; it is not a prerequisite for the one-scene KITScenes run.
 
 The L2D-specific 17-batch launcher is not the KitScenes entry point. If the
 installed Flyte version cannot execute the mapped-array design, the fallback is
