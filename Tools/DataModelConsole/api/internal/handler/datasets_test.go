@@ -3,6 +3,8 @@ package handler
 import (
 	"net/http/httptest"
 	"testing"
+
+	"github.com/autowarefoundation/auto_e2e/tools/datamodelconsole/api/internal/model"
 )
 
 func TestValidShardName(t *testing.T) {
@@ -95,5 +97,38 @@ func TestParsePagination(t *testing.T) {
 				t.Errorf("parsePagination(%q) offset = %d, want %d", tt.query, offset, tt.wantOffset)
 			}
 		})
+	}
+}
+
+func TestIndexWithoutExactGeoDoesNotMutateCachedIndex(t *testing.T) {
+	pose := &model.GeoPose{
+		LatitudeDeg:           35.6812,
+		LongitudeDeg:          139.7671,
+		HeadingDegCWFromNorth: 90,
+		TimestampNS:           42,
+	}
+	cached := &model.ShardIndex{
+		Fps:     10,
+		Version: "v2.1",
+		Shard:   "train-000000.tar",
+		Samples: []model.IndexSample{{
+			Key:         "l2d-v1-e000001-f000042",
+			SampleUID:   "l2d-v1-e000001-f000042",
+			PoseCurrent: pose,
+		}},
+	}
+
+	redacted := indexWithoutExactGeo(cached)
+	if redacted == cached {
+		t.Fatal("redaction returned the cached index pointer")
+	}
+	if redacted.Samples[0].PoseCurrent != nil {
+		t.Fatal("redacted index still contains exact pose")
+	}
+	if cached.Samples[0].PoseCurrent != pose {
+		t.Fatal("redaction mutated the cached index")
+	}
+	if redacted.Samples[0].SampleUID != cached.Samples[0].SampleUID {
+		t.Fatal("redaction changed non-sensitive sample fields")
 	}
 }
