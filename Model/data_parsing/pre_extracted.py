@@ -24,6 +24,7 @@ import io
 import json
 import re
 from pathlib import Path
+from typing import Sequence
 
 import numpy as np
 import torch
@@ -119,6 +120,9 @@ def _decode_sample(sample: dict, pool=None) -> dict:
     ego_future = torch.from_numpy(ego[history_size:])
 
     out = {
+        # Overlay inference derives noise from this stable identity. Keep it in
+        # every batch so predictions do not depend on batch position or size.
+        "sample_uid": sample.get("__key__", ""),
         "visual_tiles": torch.stack(frames),
         "map_input": map_input,
         "egomotion_history": ego_history,
@@ -334,9 +338,8 @@ def _split_bucket(key: str, buckets: int = 10) -> int:
     process, so train and eval workers (and reruns) would disagree on the split.
     Reproducible across the train task and the (separate) eval task.
     """
-    import hashlib
-    h = hashlib.blake2b(key.encode("utf-8"), digest_size=8).digest()
-    return int.from_bytes(h, "big") % buckets
+    from data_processing.dataset_snapshot import split_bucket
+    return split_bucket(key, buckets)
 
 
 def _split_group_of(sample) -> str:
@@ -393,6 +396,7 @@ def make_pre_extracted_loader(
     shuffle: int = 1000,
     pin_memory: bool = False,
     prefetch_factor: int = 4,
+    shard_files: Sequence[str | Path] | None = None,
 ) -> wds.WebLoader:
     """Create a WebDataset DataLoader reading from local EBS shard cache.
 
@@ -415,6 +419,8 @@ def make_pre_extracted_loader(
         pin_memory: pin host buffers for faster H2D copy (set True on GPU).
         prefetch_factor: batches prefetched per worker (only used when
             num_workers>0); overlaps decode with the GPU step.
+        shard_files: optional explicit subset of tar files. Overlay precompute
+            uses one file at a time so each output body is canonical per shard.
 
     The returned loader carries two extra attributes describing the dataset's
     geometry (a rig constant, so it lives on the loader, not per batch):
@@ -422,9 +428,22 @@ def make_pre_extracted_loader(
       - ``.geometry_type``: "pinhole" / "rectified_pinhole" / "ftheta" / "pseudo".
     Pass these to the model's forward alongside each batch.
     """
-    tarfiles = sorted(Path(shard_dir).glob("*.tar"))
+    tarfiles = (
+        sorted(Path(path) for path in shard_files)
+        if shard_files is not None
+        else sorted(Path(shard_dir).glob("*.tar"))
+    )
     if not tarfiles:
         raise FileNotFoundError(f"No .tar shards found in {shard_dir}")
+    shard_root = Path(shard_dir).resolve()
+    for path in tarfiles:
+        resolved = path.resolve()
+        if not resolved.is_file() or resolved.parent != shard_root:
+            raise ValueError(
+                f"shard file must be a direct .tar child of {shard_root}: {path}"
+            )
+        if resolved.suffix != ".tar":
+            raise ValueError(f"shard file must use .tar suffix: {path}")
 
     urls = [str(p) for p in tarfiles]
 
