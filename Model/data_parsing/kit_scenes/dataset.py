@@ -380,6 +380,26 @@ class KitScenesDataset(Dataset):
             image_size=self.image_size,
         )
 
+    def map_for_row(self, scene_id: str, frame_idx: int) -> torch.Tensor:
+        """Rasterize one raw uint8 map tile without loading camera images."""
+        if not self.rasterize_map_at_runtime:
+            return torch.zeros(
+                (3, self.image_size, self.image_size), dtype=torch.uint8
+            )
+        position = self._scene_positions_utm[scene_id][frame_idx]
+        bev_map = generate_bev_map_tile(
+            scene_path=self._sdk.get_sensor_loader(scene_id).scene_path,
+            ego_x=float(position[0]),
+            ego_y=float(position[1]),
+            ego_yaw=float(self._scene_yaws[scene_id][frame_idx]),
+            canvas_size=self.image_size,
+        )
+        if bev_map is None:
+            return torch.zeros(
+                (3, self.image_size, self.image_size), dtype=torch.uint8
+            )
+        return torch.from_numpy(bev_map.copy()).permute(2, 0, 1)
+
     def get_front_clip(self, idx: int) -> list[torch.Tensor]:
         """Return front frames at the fixed 0/1/2/3/4 second horizons."""
         if not self._reasoning_clip_only:
@@ -410,23 +430,7 @@ class KitScenesDataset(Dataset):
     def __getitem__(self, idx: int) -> KitScenesSample:
         scene_id, frame_idx = self._samples[idx]
         visual_tiles = self._load_multiview_frame(scene_id, frame_idx)
-        position = self._scene_positions_utm[scene_id][frame_idx]
-        yaw = float(self._scene_yaws[scene_id][frame_idx])
-
-        if self.rasterize_map_at_runtime:
-            bev_map = generate_bev_map_tile(
-                scene_path=self._sdk.get_sensor_loader(scene_id).scene_path,
-                ego_x=float(position[0]),
-                ego_y=float(position[1]),
-                ego_yaw=yaw,
-                canvas_size=self.image_size,
-            )
-        else:
-            bev_map = None
-        if bev_map is None:
-            map_tile = torch.zeros_like(visual_tiles[0])
-        else:
-            map_tile = torch.from_numpy(bev_map.copy()).permute(2, 0, 1)
+        map_tile = self.map_for_row(scene_id, frame_idx)
 
         (
             egomotion_history,
