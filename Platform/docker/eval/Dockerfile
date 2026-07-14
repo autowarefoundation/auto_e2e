@@ -9,7 +9,8 @@ RUN pip install --no-cache-dir \
     flytekit \
     kubernetes \
     pyyaml \
-    numpy
+    numpy \
+    boto3
 
 COPY Model/ /workspace/Model/
 COPY Platform/pipelines/ /workspace/Platform/pipelines/
