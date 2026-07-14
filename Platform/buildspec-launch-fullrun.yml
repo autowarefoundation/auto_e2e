@@ -1,17 +1,11 @@
 version: 0.2
 
-# Full-scale end-to-end launcher: wf_sharded_full_run over ALL L2D episodes.
-# Gate check summary (all cleared 2026-07-13):
-#   * decode-dedup implemented + 16.42x speedup measured on GPU
-#   * byte-equality vs legacy pack verified (pool + cam_i.jpg)
-#   * complete adversarial review (2 rounds; 1 real bug fixed, 13 false alarms)
-#   * 76 unit tests pass on EC2 including end-to-end byte-equality
-#   * 10ep dedup fan-out SUCCEEDED (ac8c6tf8kbhpzn8pjg4h)
-#   * train_il one-step verified: traj/jepa/reason all finite, grad flow OK,
-#     optimizer.step OK on real dedup shard
+# Full-scale end-to-end launcher: wf_sharded_full_run over KITScenes train.
+# The pinned v1.0.1 archive exposes 533 of the official 534 train scenes; the
+# workflow preflight permits only that known one-scene deficit.
 #
 # Override at start-build:
-#   EPISODES (0 = ALL L2D), PARTITION_SIZE (partition granularity),
+#   EPISODES (0 = all available KITScenes train scenes),
 #   BACKBONE, EPOCHS, BATCH_SIZE, LR, VAL_FRACTION, NUM_WORKERS.
 
 env:
@@ -19,10 +13,9 @@ env:
     AWS_DEFAULT_REGION: us-west-2
     FLYTE_PROJECT: auto-e2e
     FLYTE_DOMAIN: development
-    # 0 = ALL episodes of L2D (currently ~100k). partition_size=100 → ~1000
-    # partitions of 100 episodes each — cost-manageable fan-out.
+    # 0 = all 533 available scenes. KITScenes always uses one scene per pod.
     EPISODES: "0"
-    PARTITION_SIZE: "100"
+    PARTITION_SIZE: "1"
     REASONING_TEACHER: "openai_compatible"
     BACKBONE: "swin_v2_tiny"
     EPOCHS: "3"
@@ -33,9 +26,7 @@ env:
     # 10% held-out val (episode-level group split).
     VAL_FRACTION: "0.1"
     NUM_WORKERS: "4"
-    # Guard against fan-out explosion; raise deliberately if a smaller
-    # partition_size becomes desirable.
-    MAX_PARTITIONS: "2000"
+    MAX_PARTITIONS: "600"
 
 phases:
   install:
@@ -56,7 +47,7 @@ phases:
         --project $FLYTE_PROJECT
         --domain $FLYTE_DOMAIN
         Platform/pipelines/workflows.py wf_sharded_full_run
-        --dataset "yaak-ai/L2D"
+        --dataset "KIT-MRT/KITScenes-Multimodal"
         --episodes $EPISODES
         --partition_size $PARTITION_SIZE
         --reasoning_teacher $REASONING_TEACHER
