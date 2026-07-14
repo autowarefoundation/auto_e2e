@@ -44,3 +44,19 @@ func TestSceneLabelPK_DistinctPerField(t *testing.T) {
 		t.Errorf("distinct datasets collapsed to same pk: %q", a)
 	}
 }
+
+func TestOverlayAndGeoKeys(t *testing.T) {
+	modelID := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	if got := ShardModelPK("l2d", "v2.1", "train-000001.tar"); got != "SHARD#l2d#v2.1#train-000001.tar" {
+		t.Errorf("ShardModelPK = %q", got)
+	}
+	if got := ModelSK(modelID); got != "MODEL#"+modelID {
+		t.Errorf("ModelSK = %q", got)
+	}
+	if got := OverlaySetPK(modelID, "l2d", "v2.1"); got != "OVLSET#"+modelID+"#l2d#v2.1" {
+		t.Errorf("OverlaySetPK = %q", got)
+	}
+	if got := GeoPK("l2d", "v2.1"); got != "GEO#l2d#v2.1" {
+		t.Errorf("GeoPK = %q", got)
+	}
+}
