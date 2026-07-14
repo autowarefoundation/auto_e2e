@@ -2,8 +2,8 @@
 // shard playback indexes (read-through, replacing the OOM-prone in-memory
 // map), precomputed reasoning-label statistics, and a scene-by-label search
 // index. It follows a single-table design on table `auto-e2e-console`
-// (pk HASH, sk RANGE, GSI gsi1); every partition/sort key is constructed by
-// the pure functions in this file so the layout is testable without AWS.
+// (pk HASH, sk RANGE); every partition/sort key is constructed by the pure
+// functions in this file so the layout is testable without AWS.
 package store
 
 import "fmt"
@@ -41,4 +41,27 @@ func SceneLabelPK(dataset, promptVersion, field, value string) string {
 // metadata row that might share the partition.
 func SceneLabelSK(sampleID string) string {
 	return fmt.Sprintf("SCENE#%s", sampleID)
+}
+
+// ShardModelPK groups the canonical model overlays available for one immutable
+// dataset shard. Querying this base-table partition powers the model picker.
+func ShardModelPK(dataset, version, shard string) string {
+	return fmt.Sprintf("SHARD#%s#%s#%s", dataset, version, shard)
+}
+
+// ModelSK identifies one content-addressed checkpoint within ShardModelPK.
+func ModelSK(modelArtifactID string) string {
+	return fmt.Sprintf("MODEL#%s", modelArtifactID)
+}
+
+// OverlaySetPK identifies the write-then-publish gate for all shard overlays
+// produced from one model and immutable dataset version.
+func OverlaySetPK(modelArtifactID, dataset, version string) string {
+	return fmt.Sprintf("OVLSET#%s#%s#%s", modelArtifactID, dataset, version)
+}
+
+// GeoPK identifies the privacy-filtered geospatial summary for a dataset
+// version. Exact episode paths remain in access-controlled S3 objects.
+func GeoPK(dataset, version string) string {
+	return fmt.Sprintf("GEO#%s#%s", dataset, version)
 }
