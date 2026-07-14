@@ -11,7 +11,7 @@ from __future__ import annotations
 import logging
 import re
 from pathlib import Path
-from typing import TypedDict
+from typing import Any, Iterator, TypedDict
 
 import numpy as np
 import torch
@@ -310,6 +310,42 @@ class KitScenesDataset(Dataset):
     ) -> tuple[dict[str, float | int], np.ndarray]:
         _, _, pose_current, gps_future = self.numeric_for(idx)
         return pose_current, gps_future
+
+    def episode_indices(self) -> list[str]:
+        """Return loaded scene ids in stable source order."""
+        return list(self._scene_ids)
+
+    def episode_path(self, scene_id: str) -> np.ndarray:
+        """Return the full scene path as ``[lat, lon, heading, timestamp]``."""
+        if scene_id not in self._scene_latlon:
+            raise KeyError(f"unknown KITScenes scene {scene_id!r}")
+        latlon = self._scene_latlon[scene_id]
+        yaws = self._scene_yaws[scene_id]
+        timestamps = self._scene_timestamps_ns[scene_id]
+        path = np.empty((len(latlon), 4), dtype=np.float64)
+        path[:, :2] = latlon
+        path[:, 2] = (90.0 - np.degrees(yaws)) % 360.0
+        path[:, 3] = timestamps
+        return path
+
+    def sample_pose_records(self) -> Iterator[dict[str, Any]]:
+        """Yield exact pose rows for every packed sample in this partition."""
+        for idx, (scene_id, frame_idx) in enumerate(self._samples):
+            latlon = self._scene_latlon[scene_id]
+            yield {
+                "sample_uid": self.sample_uid(idx),
+                "episode_id": scene_id,
+                "frame_index": frame_idx,
+                "latitude_deg": float(latlon[frame_idx, 0]),
+                "longitude_deg": float(latlon[frame_idx, 1]),
+                "heading_deg_cw_from_north": _heading_cw_from_north(
+                    self._scene_yaws[scene_id][frame_idx]
+                ),
+                "timestamp_ns": int(
+                    self._scene_timestamps_ns[scene_id][frame_idx]
+                ),
+                "gps_accuracy_m": None,
+            }
 
     def numeric_for(
         self, idx: int
