@@ -59,50 +59,6 @@ const versionTTL = 2 * time.Minute
 // knownDatasets are the dataset prefixes exposed by the console.
 var knownDatasets = []string{"l2d", "nvidia_av"}
 
-// reasoningCachePrefix is the label cache layout written by
-// Platform/pipelines/workflows.py generate_reasoning_labels:
-// reasoning_labels_cache/dataset=<d>/teacher=<t>/prompt_version=<p>/<sample_id>.json
-const reasoningCachePrefix = "reasoning_labels_cache/"
-
-// reasoningDatasetAlias maps console dataset ids to the reasoning cache
-// partition names actually written by the pipeline. The console browses
-// datasets as "nvidia_av"/"l2d"; the label cache partitions them by their
-// source dataset name.
-var reasoningDatasetAlias = map[string]string{
-	"nvidia_av": "nvidia_PhysicalAI-Autonomous-Vehicles",
-	"l2d":       "yaak-ai_L2D",
-}
-
-// cacheDataset resolves a console dataset id to its reasoning cache partition
-// name. Passing a cache partition name through (e.g. from the Inspector) is a
-// no-op.
-func cacheDataset(d string) string {
-	if a, ok := reasoningDatasetAlias[d]; ok {
-		return a
-	}
-	return d
-}
-
-// cacheSampleID resolves a console sample key to the reasoning cache's flat
-// s%08d index. A console key ("25cd4769_000000" / "ep0_000000") maps by its
-// frame index; a key already in flat "s<digits>" form passes through.
-//
-// NOTE (single-shard assumption): s%08d(frameIdx) is exact only because
-// train-000000 is the first (and currently only) shard of each dataset, so the
-// per-shard frame index coincides with the dataset-global sample index. Revisit
-// when a second shard lands (the global index must then offset by prior shards'
-// sample counts).
-func cacheSampleID(sampleID string) (string, bool) {
-	if rest, ok := strings.CutPrefix(sampleID, "s"); ok && isDigits(rest) {
-		return sampleID, true
-	}
-	_, idx, ok := parseSampleKey(sampleID)
-	if !ok {
-		return "", false
-	}
-	return fmt.Sprintf("s%08d", idx), true
-}
-
 // S3Service provides read-only access to the datasets bucket.
 type S3Service struct {
 	client          *s3.Client
@@ -1518,23 +1474,6 @@ func sampleKeyOf(name string) string {
 		return base[:i]
 	}
 	return base
-}
-
-// parseReasoningKey extracts (dataset, teacher, prompt_version) from a cache
-// key like reasoning_labels_cache/dataset=l2d/teacher=mock/prompt_version=v3/x.json.
-func parseReasoningKey(key string) (dataset, teacher, promptVersion string, ok bool) {
-	rest := strings.TrimPrefix(key, reasoningCachePrefix)
-	parts := strings.Split(rest, "/")
-	if len(parts) < 4 {
-		return "", "", "", false
-	}
-	dataset, ok1 := strings.CutPrefix(parts[0], "dataset=")
-	teacher, ok2 := strings.CutPrefix(parts[1], "teacher=")
-	promptVersion, ok3 := strings.CutPrefix(parts[2], "prompt_version=")
-	if !ok1 || !ok2 || !ok3 {
-		return "", "", "", false
-	}
-	return dataset, teacher, promptVersion, true
 }
 
 func isS3NotFound(err error) bool {
