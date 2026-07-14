@@ -30,6 +30,13 @@ def _ego_bytes():
 
 
 class TestDecodeSampleMapSplit:
+    def test_sample_uid_is_preserved_for_overlay_inference(self):
+        sample = {"cam_0.jpg": _jpeg_bytes((0, 0, 0)),
+                  "ego.npy": _ego_bytes(),
+                  "__key__": "l2d-v1-e000012-f000064"}
+        out = _decode_sample(sample)
+        assert out["sample_uid"] == sample["__key__"]
+
     def test_map_not_counted_as_camera(self):
         """A sample with 6 cams + map.jpg -> visual_tiles (6,...), map separate."""
         sample = {f"cam_{i}.jpg": _jpeg_bytes((i * 10, 0, 0)) for i in range(6)}
@@ -352,3 +359,19 @@ class TestLoaderYieldsAllSamplesUnderWorkers:
             assert seen == total, (
                 f"num_workers={nw}: loader yielded {seen}/{total} samples — "
                 f"shards are being split more than once (double split_by_worker)")
+
+    def test_explicit_shard_subset_isolated_for_overlay_output(self, tmp_path):
+        shard_dir = tmp_path / "shards"
+        _write_shards(shard_dir, n_shards=2, per_shard=3)
+        from data_parsing.pre_extracted import make_pre_extracted_loader
+
+        selected = shard_dir / "shard-001.tar"
+        loader = make_pre_extracted_loader(
+            str(shard_dir),
+            batch_size=1,
+            num_workers=0,
+            shuffle=0,
+            shard_files=[selected],
+        )
+        keys = [batch["sample_uid"][0] for batch in loader]
+        assert keys == ["s000003", "s000004", "s000005"]
