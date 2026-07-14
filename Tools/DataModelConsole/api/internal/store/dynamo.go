@@ -235,6 +235,27 @@ func (s *DynamoStore) PutStats(ctx context.Context, dataset, version, promptVers
 // UnprocessedItems. Idempotent: re-writing the same (field,value,sample_id) is
 // a harmless overwrite. Returns the number of rows written.
 func (s *DynamoStore) PutSceneLabels(ctx context.Context, dataset, promptVersion string, rows []SceneLabelRow) (int, error) {
+	return s.putSceneLabels(ctx, dataset, "", promptVersion, rows)
+}
+
+// PutSceneLabelsForVersion writes sample_uid rows into the versioned LBLV2
+// namespace so legacy flat-id rows can never leak into current search.
+func (s *DynamoStore) PutSceneLabelsForVersion(
+	ctx context.Context,
+	dataset, version, promptVersion string,
+	rows []SceneLabelRow,
+) (int, error) {
+	if version == "" {
+		return 0, fmt.Errorf("dataset version is required for scene labels")
+	}
+	return s.putSceneLabels(ctx, dataset, version, promptVersion, rows)
+}
+
+func (s *DynamoStore) putSceneLabels(
+	ctx context.Context,
+	dataset, version, promptVersion string,
+	rows []SceneLabelRow,
+) (int, error) {
 	written := 0
 	for start := 0; start < len(rows); start += batchWriteMax {
 		end := start + batchWriteMax
@@ -243,15 +264,27 @@ func (s *DynamoStore) PutSceneLabels(ctx context.Context, dataset, promptVersion
 		}
 		reqs := make([]ddbtypes.WriteRequest, 0, end-start)
 		for _, row := range rows[start:end] {
+			pk := SceneLabelPK(
+				dataset, promptVersion, row.Field, row.Value,
+			)
+			if version != "" {
+				pk = SceneLabelVersionPK(
+					dataset, version, promptVersion, row.Field, row.Value,
+				)
+			}
+			item := map[string]ddbtypes.AttributeValue{
+				"pk":             &ddbtypes.AttributeValueMemberS{Value: pk},
+				"sk":             &ddbtypes.AttributeValueMemberS{Value: SceneLabelSK(row.SampleID)},
+				"sample_id":      &ddbtypes.AttributeValueMemberS{Value: row.SampleID},
+				"dataset":        &ddbtypes.AttributeValueMemberS{Value: dataset},
+				"prompt_version": &ddbtypes.AttributeValueMemberS{Value: promptVersion},
+			}
+			if version != "" {
+				item["version"] = &ddbtypes.AttributeValueMemberS{Value: version}
+			}
 			reqs = append(reqs, ddbtypes.WriteRequest{
 				PutRequest: &ddbtypes.PutRequest{
-					Item: map[string]ddbtypes.AttributeValue{
-						"pk":             &ddbtypes.AttributeValueMemberS{Value: SceneLabelPK(dataset, promptVersion, row.Field, row.Value)},
-						"sk":             &ddbtypes.AttributeValueMemberS{Value: SceneLabelSK(row.SampleID)},
-						"sample_id":      &ddbtypes.AttributeValueMemberS{Value: row.SampleID},
-						"dataset":        &ddbtypes.AttributeValueMemberS{Value: dataset},
-						"prompt_version": &ddbtypes.AttributeValueMemberS{Value: promptVersion},
-					},
+					Item: item,
 				},
 			})
 		}
@@ -290,7 +323,35 @@ func (s *DynamoStore) batchWriteWithRetry(ctx context.Context, reqs []ddbtypes.W
 // for a (dataset, promptVersion), paginating the DynamoDB Query and capping the
 // result at limit (limit<=0 means no cap).
 func (s *DynamoStore) QueryScenesByLabel(ctx context.Context, dataset, promptVersion, field, value string, limit int) ([]string, error) {
-	pk := SceneLabelPK(dataset, promptVersion, field, value)
+	return s.queryScenesByLabel(
+		ctx,
+		SceneLabelPK(dataset, promptVersion, field, value),
+		limit,
+	)
+}
+
+// QueryScenesByLabelForVersion reads only the sample_uid-based LBLV2 index for
+// one immutable dataset version.
+func (s *DynamoStore) QueryScenesByLabelForVersion(
+	ctx context.Context,
+	dataset, version, promptVersion, field, value string,
+	limit int,
+) ([]string, error) {
+	if version == "" {
+		return nil, fmt.Errorf("dataset version is required for scene search")
+	}
+	return s.queryScenesByLabel(
+		ctx,
+		SceneLabelVersionPK(dataset, version, promptVersion, field, value),
+		limit,
+	)
+}
+
+func (s *DynamoStore) queryScenesByLabel(
+	ctx context.Context,
+	pk string,
+	limit int,
+) ([]string, error) {
 	var ids []string
 	var startKey map[string]ddbtypes.AttributeValue
 	for {
