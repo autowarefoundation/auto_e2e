@@ -4,6 +4,8 @@ import (
 	"encoding/binary"
 	"math"
 	"testing"
+
+	"github.com/autowarefoundation/auto_e2e/tools/datamodelconsole/api/internal/model"
 )
 
 func TestParseSampleKey(t *testing.T) {
@@ -14,6 +16,9 @@ func TestParseSampleKey(t *testing.T) {
 		wantIdx int
 		wantOK  bool
 	}{
+		{"v2.1 l2d identity", "l2d-v1-e000012-f000064", "12", 64, true},
+		{"v2.1 nvidia identity", "nv-v1-fd1d1b6b-59bf-4292-8295-5028aa6aa5e3-f000007", "fd1d1b6b-59bf-4292-8295-5028aa6aa5e3", 7, true},
+		{"v2.1 kitscenes identity", "kitscenes-v1-scene-0042-f000123", "scene-0042", 123, true},
 		{"l2d ep prefix stripped", "ep0_000064", "0", 64, true},
 		{"l2d multi-digit episode", "ep12_000100", "12", 100, true},
 		{"nvidia hex hash kept verbatim", "25cd4769_000064", "25cd4769", 64, true},
@@ -31,6 +36,48 @@ func TestParseSampleKey(t *testing.T) {
 					tt.key, ep, idx, ok, tt.wantEp, tt.wantIdx, tt.wantOK)
 			}
 		})
+	}
+}
+
+func TestApplyPackedMeta(t *testing.T) {
+	entry := model.IndexSample{TripFrame: -1}
+	applyPackedMeta(&entry, []byte(`{
+		"frame_idx":64,
+		"sample_uid":"l2d-v1-e000012-f000064",
+		"split_group_uid":"l2d-e000012",
+		"split_bucket":7
+	}`))
+	if entry.TripFrame != 64 ||
+		entry.SampleUID != "l2d-v1-e000012-f000064" ||
+		entry.SplitGroupUID != "l2d-e000012" ||
+		entry.SplitBucket != 7 {
+		t.Fatalf("packed meta mismatch: %+v", entry)
+	}
+}
+
+func TestDecodeGeoPose(t *testing.T) {
+	body := make([]byte, 36)
+	binary.LittleEndian.PutUint64(body[0:8], math.Float64bits(49.123456789))
+	binary.LittleEndian.PutUint64(body[8:16], math.Float64bits(11.987654321))
+	binary.LittleEndian.PutUint64(body[16:24], math.Float64bits(271.25))
+	binary.LittleEndian.PutUint64(body[24:32], uint64(1_679_814_535_266_668_123))
+	binary.LittleEndian.PutUint32(body[32:36], math.Float32bits(float32(math.NaN())))
+
+	pose, err := decodeGeoPose(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pose.LatitudeDeg != 49.123456789 ||
+		pose.LongitudeDeg != 11.987654321 ||
+		pose.HeadingDegCWFromNorth != 271.25 ||
+		pose.TimestampNS != 1_679_814_535_266_668_123 {
+		t.Fatalf("pose mismatch: %+v", pose)
+	}
+	if pose.GPSAccuracyM != nil {
+		t.Errorf("NaN accuracy must serialize as absent, got %v", *pose.GPSAccuracyM)
+	}
+	if _, err := decodeGeoPose(body[:35]); err == nil {
+		t.Error("truncated pose was accepted")
 	}
 }
 
