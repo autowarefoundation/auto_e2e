@@ -42,7 +42,9 @@ PARSER_VERSION = "v2"
 # members. Loader now requires pool/ when window_index.json is present.
 # v3: added pose.npy (absolute lat/lon/heading/timestamp) and gps.npy (current +
 # 64 future lat/lon points) for datasets with geospatial source fields.
-SHARD_SCHEMA_VERSION = "v3"
+# v4: emits dataset-level geo paths, sample-pose parquet, and privacy-filtered
+# heatmaps for every GPS-capable parser, including KITScenes partitions.
+SHARD_SCHEMA_VERSION = "v4"
 
 # Calibration / projection spec encoding written into calib.json. Bump if the
 # geometry serialization changes.
