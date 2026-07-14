@@ -129,8 +129,7 @@ func validReasoningParam(v string) bool {
 }
 
 // GetLabel handles GET /api/v1/reasoning-labels/{dataset}/{sample_id}.
-// Optional ?teacher= and ?prompt_version= narrow the cache partition; without
-// them the first matching partition is returned.
+// Optional version, teacher, and prompt_version pin the immutable shard member.
 func (h *ReasoningHandler) GetLabel(w http.ResponseWriter, r *http.Request) {
 	dataset := chi.URLParam(r, "dataset")
 	sampleID := chi.URLParam(r, "sample_id")
@@ -148,8 +147,15 @@ func (h *ReasoningHandler) GetLabel(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, model.CodeInvalidParam, "invalid teacher or prompt_version")
 		return
 	}
+	version, ok := requestedVersion(r)
+	if !ok {
+		writeError(w, http.StatusBadRequest, model.CodeInvalidParam, "invalid version")
+		return
+	}
 
-	body, _, err := h.s3.GetReasoningLabel(r.Context(), dataset, sampleID, teacher, promptVersion)
+	body, _, err := h.s3.GetReasoningLabelAtVersion(
+		r.Context(), dataset, version, sampleID, teacher, promptVersion,
+	)
 	if err != nil {
 		if errors.Is(err, service.ErrNotFound) {
 			writeError(w, http.StatusNotFound, model.CodeNotFound,
