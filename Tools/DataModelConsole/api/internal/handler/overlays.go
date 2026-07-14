@@ -230,11 +230,17 @@ func (h *OverlayHandler) shardRequest(w http.ResponseWriter, r *http.Request) (s
 }
 
 func (h *OverlayHandler) exactGeoAuthorized(r *http.Request) bool {
-	if !h.exactGeoEnabled || h.exactGeoRequiredRole == "" {
+	return exactGeoAuthorized(
+		r, h.exactGeoEnabled, h.exactGeoRequiredRole,
+	)
+}
+
+func exactGeoAuthorized(r *http.Request, enabled bool, requiredRole string) bool {
+	if !enabled || requiredRole == "" {
 		return false
 	}
 	for _, role := range strings.Split(r.Header.Get("X-Console-Roles"), ",") {
-		if strings.TrimSpace(role) == h.exactGeoRequiredRole {
+		if strings.TrimSpace(role) == requiredRole {
 			return true
 		}
 	}
