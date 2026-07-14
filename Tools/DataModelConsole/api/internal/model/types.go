@@ -122,26 +122,86 @@ type SampleDetail struct {
 // the image endpoint, so no whole-shard presigned URL is emitted.
 type ShardIndex struct {
 	Fps     int           `json:"fps"` // 10
+	Version string        `json:"version"`
+	Shard   string        `json:"shard"`
 	Samples []IndexSample `json:"samples"`
 }
 
 // IndexSample is one playback frame in a ShardIndex.
 type IndexSample struct {
-	Key          string                 `json:"key"`
-	EpisodeID    string                 `json:"episode_id"`    // parsed from key: episode-global identity
-	FrameIdx     int                    `json:"frame_idx"`     // intra-shard playback ordinal (key suffix)
-	TripFrame    int                    `json:"trip_frame"`    // trip-global frame index from meta.json (-1 if absent)
-	Members      map[string]MemberRange `json:"members"`       // "cam_0.jpg" -> {offset,size}
-	EgoNow       []float32              `json:"ego_now"`       // last history row: [speed, accel, yaw_rate, curvature] (4 floats)
-	EgoHistory   []float32              `json:"ego_history"`   // 256 floats = 64 steps x [speed, accel, yaw_rate, curvature] (past)
-	EgoFuture    []float32              `json:"ego_future"`    // 128 floats = 64 steps x [accel, curvature] (the future plan)
-	HasReasoning bool                   `json:"has_reasoning"` // whether an offline reasoning label exists for this sample
+	Key           string                 `json:"key"`
+	SampleUID     string                 `json:"sample_uid"`
+	SplitGroupUID string                 `json:"split_group_uid"`
+	SplitBucket   int                    `json:"split_bucket"`
+	EpisodeID     string                 `json:"episode_id"`  // parsed from key: episode-global identity
+	FrameIdx      int                    `json:"frame_idx"`   // intra-shard playback ordinal (key suffix)
+	TripFrame     int                    `json:"trip_frame"`  // trip-global frame index from meta.json (-1 if absent)
+	Members       map[string]MemberRange `json:"members"`     // "cam_0.jpg" -> {offset,size}
+	EgoNow        []float32              `json:"ego_now"`     // last history row: [speed, accel, yaw_rate, curvature] (4 floats)
+	EgoHistory    []float32              `json:"ego_history"` // 256 floats = 64 steps x [speed, accel, yaw_rate, curvature] (past)
+	EgoFuture     []float32              `json:"ego_future"`  // 128 floats = 64 steps x [accel, curvature] (the future plan)
+	PoseCurrent   *GeoPose               `json:"pose_current,omitempty"`
+	HasReasoning  bool                   `json:"has_reasoning"` // whether an offline reasoning label exists for this sample
 }
 
 // MemberRange is the byte range of a tar member's data within the shard tar.
 type MemberRange struct {
 	Offset int64 `json:"offset"`
 	Size   int64 `json:"size"`
+}
+
+// GeoPose is the absolute pose packed in pose.npy. Heading is a compass
+// bearing in degrees clockwise from north.
+type GeoPose struct {
+	LatitudeDeg           float64  `json:"latitude_deg"`
+	LongitudeDeg          float64  `json:"longitude_deg"`
+	HeadingDegCWFromNorth float64  `json:"heading_deg_cw_from_north"`
+	TimestampNS           int64    `json:"timestamp_ns"`
+	GPSAccuracyM          *float32 `json:"gps_accuracy_m"`
+}
+
+// OverlayModel is one ready canonical overlay available for a shard.
+type OverlayModel struct {
+	ModelArtifactID     string  `json:"model_artifact_id"`
+	RegisteredModelName string  `json:"registered_model_name"`
+	ModelVersion        int     `json:"model_version"`
+	RunID               string  `json:"run_id"`
+	ModelName           string  `json:"model_name"`
+	EvalADE             float64 `json:"eval_ade"`
+	EvalFDE             float64 `json:"eval_fde"`
+	ValFraction         float64 `json:"val_fraction"`
+	OverlaySchema       string  `json:"overlay_schema"`
+	SampleCount         int     `json:"sample_count"`
+}
+
+// OverlayModelsResponse lists only models whose whole overlay set is ready.
+type OverlayModelsResponse struct {
+	Dataset string         `json:"dataset"`
+	Version string         `json:"version"`
+	Shard   string         `json:"shard"`
+	Models  []OverlayModel `json:"models"`
+}
+
+// OverlayDescriptor accompanies the binary response through HTTP headers and
+// is also useful to clients that need to inspect the selected artifact.
+type OverlayDescriptor struct {
+	ModelArtifactID string `json:"model_artifact_id"`
+	OverlaySchema   string `json:"overlay_schema"`
+	SHA256          string `json:"sha256"`
+	ByteSize        int64  `json:"byte_size"`
+	SampleCount     int    `json:"sample_count"`
+}
+
+// GeoStatsResponse is the privacy-filtered dataset-level ODD geography.
+// Summary is kept as JSON because its per-region dimensions may evolve without
+// changing the serving envelope.
+type GeoStatsResponse struct {
+	Dataset    string          `json:"dataset"`
+	Version    string          `json:"version"`
+	Summary    json.RawMessage `json:"summary"`
+	HeatmapURL string          `json:"heatmap_url"`
+	NSamples   int             `json:"n_samples"`
+	ComputedAt string          `json:"computed_at"`
 }
 
 // ReasoningStatsEntry is one dataset/teacher/prompt_version bucket with its
