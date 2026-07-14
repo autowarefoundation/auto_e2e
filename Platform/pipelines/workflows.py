@@ -225,8 +225,11 @@ def _loader_projection(loader, device):
     # accumulates. Pre-fetch max_workers=2 keeps peak below 64Gi.
     # cpu bumped to 4 so hf_transfer's ~3-4 parallel workers can
     # saturate; download stays I/O-bound but at least isn't CPU-throttled.
-    requests=Resources(cpu="4", mem="48Gi", ephemeral_storage="700Gi"),
-    limits=Resources(mem="64Gi", ephemeral_storage="800Gi"),
+    # requests == limits (Guaranteed QoS). Matches the raised platform cap
+    # (128Gi in flyte-core-eks.yaml). cpu 16 = same core count as pack/label
+    # for a homogeneous data-prep pod shape.
+    requests=Resources(cpu="16", mem="128Gi", ephemeral_storage="800Gi"),
+    limits=Resources(cpu="16", mem="128Gi", ephemeral_storage="800Gi"),
     secret_requests=[Secret(group="hf-token", key="HF_TOKEN",
                             mount_requirement=Secret.MountType.ENV_VAR)],
     # "Ingest once, never again" (#121 §3.4a): cache on (dataset, group_ids,
@@ -490,8 +493,9 @@ def data_ingest(
     # video + decoded windows. Karpenter provisions a fitting node.
     # Ephemeral matched to data_ingest (500-ep partition needs ~500 GB p95 for
     # the reopened raw + ~50 GB for the shard tarballs).
-    requests=Resources(cpu="16", mem="30Gi", ephemeral_storage="700Gi"),
-    limits=Resources(cpu="16", mem="32Gi", ephemeral_storage="800Gi"),
+    # requests == limits (Guaranteed QoS) at the raised 128Gi platform cap.
+    requests=Resources(cpu="16", mem="128Gi", ephemeral_storage="800Gi"),
+    limits=Resources(cpu="16", mem="128Gi", ephemeral_storage="800Gi"),
     # Cache on (raw URI, labels URI, group_ids, world_model, image_size,
     # cache_version) so "processing is rarely needed" holds (#121 §3.4a): an
     # unchanged partition re-uses its shards. Because the raw + labels inputs are
@@ -883,8 +887,12 @@ def data_processing(
     # 60Gi; the worker count is also lowered (see label_workers default) since the
     # stage is bounded by the ~12s teacher HTTP call, not local CPU. Large
     # ephemeral storage holds tens of episodes of raw video + decoded windows.
-    requests=Resources(cpu="16", mem="32Gi", ephemeral_storage="700Gi"),
-    limits=Resources(cpu="16", mem="60Gi", ephemeral_storage="800Gi"),
+    # At PS=100 with 6 in-pod lerobot workers, each worker holds ~10 GB of
+    # dataset state (13k row hf_dataset × 10 more eps than PS=50). 6×10 + ~8 GB
+    # overhead = 68 GB, so 60Gi kills us. 128Gi now matches the platform cap
+    # (raised in flyte-core-eks.yaml helm values) and leaves ~45% headroom.
+    requests=Resources(cpu="16", mem="128Gi", ephemeral_storage="800Gi"),
+    limits=Resources(cpu="16", mem="128Gi", ephemeral_storage="800Gi"),
     # The openai_compatible teacher endpoint (e.g. the Cosmos3-Nano vLLM ALB) is
     # injected from a K8s Secret so no concrete URL / account value is committed
     # to git or shown in the Flyte UI. Optional: only consumed when
@@ -1150,8 +1158,11 @@ def generate_reasoning_labels(
 # ============================================================
 @task(
     container_image=TRAINING_IMAGE,
+    # requests == limits (Guaranteed QoS). g6e.4xlarge has 16 vCPU / 44.7 GB
+    # GPU-attached mem; keep pod at 16 GB so multiple non-GPU sidecars can
+    # share the node if needed, but the whole GPU is reserved (gpu="1").
     requests=Resources(cpu="4", mem="16Gi", gpu="1"),
-    limits=Resources(gpu="1"),
+    limits=Resources(cpu="4", mem="16Gi", gpu="1"),
     pod_template=_large_shm_pod_template(),  # /dev/shm for DataLoader workers (#121 P0)
 )
 def train_il(
@@ -1528,8 +1539,9 @@ def train_il(
 # ============================================================
 @task(
     container_image=OFFLINE_RL_IMAGE,
+    # requests == limits (Guaranteed QoS).
     requests=Resources(cpu="4", mem="16Gi", gpu="1"),
-    limits=Resources(gpu="1"),
+    limits=Resources(cpu="4", mem="16Gi", gpu="1"),
 )
 def train_offline_rl(
     pretrained: FlyteFile,
@@ -1836,7 +1848,7 @@ def _run_evaluation(checkpoint, shards, train_metadata, dataset, experiment_name
 @task(
     container_image=EVAL_IMAGE,
     requests=Resources(cpu="2", mem="8Gi", gpu="1"),
-    limits=Resources(gpu="1"),
+    limits=Resources(cpu="2", mem="8Gi", gpu="1"),
     environment={"MLFLOW_TRACKING_URI": MLFLOW_URI},
     pod_template=_large_shm_pod_template(),  # /dev/shm for eval DataLoader workers (#121 P0)
 )
@@ -1857,7 +1869,7 @@ def evaluate_il_policy(
 @task(
     container_image=EVAL_IMAGE,
     requests=Resources(cpu="2", mem="8Gi", gpu="1"),
-    limits=Resources(gpu="1"),
+    limits=Resources(cpu="2", mem="8Gi", gpu="1"),
     environment={"MLFLOW_TRACKING_URI": MLFLOW_URI},
     pod_template=_large_shm_pod_template(),  # /dev/shm for eval DataLoader workers (#121 P0)
 )
