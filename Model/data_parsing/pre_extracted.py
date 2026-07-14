@@ -23,12 +23,15 @@ import io
 import json
 import re
 from pathlib import Path
+from functools import partial
 
 import numpy as np
 import torch
 import webdataset as wds
 from PIL import Image
 from torchvision import transforms
+
+
 
 _HISTORY_STEPS = 64
 _FUTURE_STEPS = 64

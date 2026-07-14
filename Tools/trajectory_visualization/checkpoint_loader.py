@@ -9,17 +9,18 @@ sys.path.append(os.path.join(os.path.dirname(__file__), '..', '..'))
 
 from Model.model_components.auto_e2e import AutoE2E
 
-def load_checkpoint(checkpoint_dir: str, device: torch.device) -> AutoE2E:
+def load_checkpoint(checkpoint_path: str, device: torch.device) -> AutoE2E:
     """
-    Reconstructs the AutoE2E model from a checkpoint directory.
+    Reconstructs the AutoE2E model from a checkpoint file.
     
     Args:
-        checkpoint_dir: Path to the directory containing config.yaml and the .pt checkpoint.
+        checkpoint_path: Path to the .pt checkpoint file. The directory must contain config.yaml.
         device: torch.device to load the model to.
         
     Returns:
         AutoE2E: The reconstructed model.
     """
+    checkpoint_dir = os.path.dirname(checkpoint_path)
     config_path = os.path.join(checkpoint_dir, 'config.yaml')
     if not os.path.exists(config_path):
         raise FileNotFoundError(f"Expected config.yaml in {checkpoint_dir}")
@@ -41,14 +42,7 @@ def load_checkpoint(checkpoint_dir: str, device: torch.device) -> AutoE2E:
         planner_mode=planner_mode
     )
     
-    # Find the state dict
-    pt_files = glob.glob(os.path.join(checkpoint_dir, '*.pt')) + glob.glob(os.path.join(checkpoint_dir, '*.pth'))
-    if not pt_files:
-        raise FileNotFoundError(f"No .pt or .pth file found in {checkpoint_dir}")
-    
-    state_dict_path = pt_files[0]
-    
-    state_dict = torch.load(state_dict_path, map_location=device)
+    state_dict = torch.load(checkpoint_path, map_location=device)
     # Handle if state dict is wrapped in 'state_dict' or 'model' key
     if 'state_dict' in state_dict:
         state_dict = state_dict['state_dict']

@@ -13,7 +13,6 @@ import torch
 import cv2
 import numpy as np
 import argparse
-from typing import Optional
 
 from trajectory_visualization.rendering import (
     render_trajectory_map_tile,
@@ -26,7 +25,7 @@ from data_parsing.kit_scenes.camera import NUM_VIEWS
 from data_parsing.kit_scenes.map import generate_bev_map_tile
 
 
-def visualization_on_kit_scenes(scene_ids: Optional[list[str]] = None, frame_index: int = 0, zoom_in: bool = False, dataset_root: Optional[str] = None) -> tuple[Optional[np.ndarray], Optional[np.ndarray]]:
+def visualization_on_kit_scenes(scene_ids: list[str] | None = None, frame_index: int = 0, zoom_in: bool = False, dataset_root: str | None = None) -> tuple[np.ndarray | None, np.ndarray | None]:
     result = forward_pass_for_visualization_test(scene_ids=scene_ids, frame_index=frame_index, dataset_root=dataset_root, pretrained_backbone=False)
     
     if result is None:
@@ -115,7 +114,7 @@ def visualization_on_kit_scenes(scene_ids: Optional[list[str]] = None, frame_ind
 
 
 def forward_pass_for_visualization_test(
-    scene_ids: Optional[list[str]] = None, frame_index: int = 0, dataset_root: Optional[str] = None, pretrained_backbone: bool = False
+    scene_ids: list[str] | None = None, frame_index: int = 0, dataset_root: str | None = None, pretrained_backbone: bool = False
     ):
     """
     Run forward pass with real KIT Scenes data at a specific frame index.

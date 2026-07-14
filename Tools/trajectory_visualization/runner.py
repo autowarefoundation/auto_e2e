@@ -9,12 +9,12 @@ from .manifest import ManifestWriter
 from .rendering import generate_grid, concatenate_grid_and_camera
 from .kinematics import accel_and_curv_to_meters_trajectory
 
-def run_visualization(checkpoint_dir: str, dataset_dir: str, output_dir: str, num_frames_to_render: int = 100):
+def run_visualization(checkpoint: str, dataset_dir: str, output_dir: str, episodes: list = None, max_frames_per_episode: int = 300):
     os.makedirs(output_dir, exist_ok=True)
     
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    print(f"Loading checkpoint from {checkpoint_dir}...")
-    model = load_checkpoint(checkpoint_dir, device)
+    print(f"Loading checkpoint from {checkpoint}...")
+    model = load_checkpoint(checkpoint, device)
     
     print(f"Loading dataset from {dataset_dir}...")
     data_iterator = get_dataset_iterator(dataset_dir)
@@ -25,6 +25,13 @@ def run_visualization(checkpoint_dir: str, dataset_dir: str, output_dir: str, nu
     thumbnail_path = os.path.join(output_dir, "thumbnail.jpg")
     
     video_writer = None
+    
+    num_frames_to_render = max_frames_per_episode
+    if episodes is not None:
+        num_frames_to_render = len(episodes) * max_frames_per_episode
+        print(f"Rendering {num_frames_to_render} frames based on {len(episodes)} episodes.")
+    else:
+        print(f"Rendering up to {num_frames_to_render} frames.")
     
     print("Running inference and rendering...")
     frames_processed = 0
@@ -90,7 +97,7 @@ def run_visualization(checkpoint_dir: str, dataset_dir: str, output_dir: str, nu
     manifest.add_video(video_path, frames_processed)
     
     # Optional: populate metadata
-    manifest.add_metadata("checkpoint", os.path.basename(checkpoint_dir))
+    manifest.add_metadata("checkpoint", os.path.basename(checkpoint))
     manifest.add_metadata("dataset", os.path.basename(dataset_dir))
     
     manifest.write()

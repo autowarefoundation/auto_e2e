@@ -1,12 +1,13 @@
 import yaml
 import torch
 import pytest
+import os
 from unittest.mock import patch, MagicMock
 
 from Tools.trajectory_visualization.checkpoint_loader import load_checkpoint
 
 @pytest.fixture
-def dummy_checkpoint_dir(tmp_path):
+def dummy_checkpoint_path(tmp_path):
     # Create a dummy config.yaml
     config_path = tmp_path / "config.yaml"
     config_data = {
@@ -30,11 +31,11 @@ def dummy_checkpoint_dir(tmp_path):
     }
     torch.save(dummy_state_dict, state_dict_path)
     
-    return str(tmp_path)
+    return str(state_dict_path)
 
 
 @patch("Tools.trajectory_visualization.checkpoint_loader.AutoE2E")
-def test_load_checkpoint_success(mock_autoe2e, dummy_checkpoint_dir):
+def test_load_checkpoint_success(mock_autoe2e, dummy_checkpoint_path):
     device = torch.device("cpu")
     
     # Configure the mock model
@@ -42,7 +43,7 @@ def test_load_checkpoint_success(mock_autoe2e, dummy_checkpoint_dir):
     mock_autoe2e.return_value = mock_model_instance
     
     # Run the function
-    model = load_checkpoint(dummy_checkpoint_dir, device)
+    model = load_checkpoint(dummy_checkpoint_path, device)
     
     # Verify AutoE2E was instantiated with the correct params from config.yaml
     mock_autoe2e.assert_called_once_with(
@@ -76,9 +77,10 @@ def test_load_checkpoint_success(mock_autoe2e, dummy_checkpoint_dir):
 
 def test_load_checkpoint_missing_config(tmp_path):
     device = torch.device("cpu")
-    # No config.yaml created
+    # No config.yaml created, but trying to load a .pt from tmp_path
+    pt_file = str(tmp_path / "model.pt")
     with pytest.raises(FileNotFoundError, match="Expected config.yaml in"):
-        load_checkpoint(str(tmp_path), device)
+        load_checkpoint(pt_file, device)
 
 
 @patch("Tools.trajectory_visualization.checkpoint_loader.AutoE2E")
@@ -90,5 +92,6 @@ def test_load_checkpoint_missing_weights(mock_autoe2e, tmp_path):
     with open(config_path, "w") as f:
         yaml.dump({}, f)
         
-    with pytest.raises(FileNotFoundError, match="No .pt or .pth file found in"):
-        load_checkpoint(str(tmp_path), device)
+    pt_file = str(tmp_path / "model.pt")
+    with pytest.raises(FileNotFoundError, match="No such file or directory"): # Since torch.load will fail
+        load_checkpoint(pt_file, device)

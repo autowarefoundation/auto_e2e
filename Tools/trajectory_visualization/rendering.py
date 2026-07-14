@@ -1,7 +1,6 @@
 import cv2
 import numpy as np
 import torch
-from typing import Optional
 
 def get_camera_projection_matrix(K: np.ndarray, R: np.ndarray, t: np.ndarray) -> np.ndarray:
     """
@@ -111,7 +110,7 @@ def render_trajectory_on_camera_view(
 
 def generate_grid(
     prediction_m: torch.Tensor, 
-    actual_trajectory_m: Optional[torch.Tensor] = None,
+    actual_trajectory_m: torch.Tensor | None = None,
     prediction_color: tuple = (140, 255, 0),
     actual_trajectory_color: tuple = (255, 80, 120)
     ) -> np.ndarray:
@@ -302,7 +301,7 @@ def render_trajectory_map_tile(
 def render_trajectory_on_a_grid(
     action_sequence: torch.Tensor,
     current_speed: float,
-    actual_action_sequence: Optional[torch.Tensor] = None,
+    actual_action_sequence: torch.Tensor | None = None,
     prediction_color: tuple = (140, 255, 0),
     actual_trajectory_color: tuple = (255, 80, 120)
 ) -> np.ndarray:
@@ -326,11 +325,11 @@ def complete_front_camera_view_with_trajectory(
     action_sequence: torch.Tensor,
     current_speed: float,
     front_camera_image: np.ndarray,
-    K: Optional[np.ndarray] = None,
-    R: Optional[np.ndarray] = None,
-    t: Optional[np.ndarray] = None,
-    P: Optional[np.ndarray] = None,
-    color: Optional[tuple] = None
+    K: np.ndarray | None = None,
+    R: np.ndarray | None = None,
+    t: np.ndarray | None = None,
+    P: np.ndarray | None = None,
+    color: tuple | None = None
 ) -> np.ndarray:
     from .kinematics import accel_and_curv_to_meters_trajectory, get_trajectory_boundaries_3d
     if color is None:
