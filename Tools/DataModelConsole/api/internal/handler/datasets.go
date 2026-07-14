@@ -16,12 +16,28 @@ import (
 
 // DatasetsHandler serves the S3-backed dataset browsing endpoints.
 type DatasetsHandler struct {
-	s3 *service.S3Service
+	s3                   *service.S3Service
+	exactGeoEnabled      bool
+	exactGeoRequiredRole string
 }
 
-// NewDatasetsHandler builds the datasets handler.
+// NewDatasetsHandler builds a datasets handler with exact GPS denied.
 func NewDatasetsHandler(s3 *service.S3Service) *DatasetsHandler {
 	return &DatasetsHandler{s3: s3}
+}
+
+// NewDatasetsHandlerWithGeoAccess builds a datasets handler with the supplied
+// exact-route policy. Authorization is still checked per request.
+func NewDatasetsHandlerWithGeoAccess(
+	s3 *service.S3Service,
+	exactGeoEnabled bool,
+	exactGeoRequiredRole string,
+) *DatasetsHandler {
+	return &DatasetsHandler{
+		s3:                   s3,
+		exactGeoEnabled:      exactGeoEnabled,
+		exactGeoRequiredRole: exactGeoRequiredRole,
+	}
 }
 
 // List handles GET /api/v1/datasets.
@@ -193,7 +209,21 @@ func (h *DatasetsHandler) GetShardIndex(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusBadGateway, model.CodeS3Error, "failed to index shard")
 		return
 	}
+	if !exactGeoAuthorized(
+		r, h.exactGeoEnabled, h.exactGeoRequiredRole,
+	) {
+		index = indexWithoutExactGeo(index)
+	}
 	writeJSON(w, http.StatusOK, index)
+}
+
+func indexWithoutExactGeo(index *model.ShardIndex) *model.ShardIndex {
+	redacted := *index
+	redacted.Samples = append([]model.IndexSample(nil), index.Samples...)
+	for i := range redacted.Samples {
+		redacted.Samples[i].PoseCurrent = nil
+	}
+	return &redacted
 }
 
 // GetImage handles
