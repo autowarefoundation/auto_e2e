@@ -363,7 +363,13 @@ def data_ingest(
     from huggingface_hub import hf_hub_download
     from concurrent.futures import ThreadPoolExecutor, as_completed
     import time
-    _meta = LeRobotDatasetMetadata(repo_id=dataset.value)
+    # revision="main" — lerobot 0.5.0 defaults to CODEBASE_VERSION="v3.0", but
+    # yaak-ai/L2D's v3.0 TAG points to a stale/broken snapshot (tasks.parquet
+    # is 1485 bytes / 1 row at v3.0 vs 135484 bytes / 4219 rows on main;
+    # episodes/data parquets are ~20% smaller too). Reading v3.0 causes
+    # downstream KeyError in _absolute_to_relative_idx and IndexError in
+    # iloc[task_idx]. Pin to main so we always get the live L2D revision.
+    _meta = LeRobotDatasetMetadata(repo_id=dataset.value, revision="main")
     if ep_list is not None:
         # Compute the set of parquet+video paths lerobot would ask for, then
         # download each with hf_hub_download.  Matches lerobot's own
@@ -388,6 +394,7 @@ def data_ingest(
             try:
                 hf_hub_download(
                     repo_id=dataset.value, repo_type="dataset",
+                    revision="main",  # same reason as LeRobotDatasetMetadata above
                     filename=rel_path, local_dir=str(_meta.root),
                     # Timeout ONE file: 30 s to establish etag, 12 min to
                     # transfer (~700 MB @ 1 MB/s worst-case).
