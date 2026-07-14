@@ -5,6 +5,7 @@ package config
 import (
 	"log/slog"
 	"os"
+	"strconv"
 	"time"
 )
 
@@ -26,6 +27,10 @@ type Config struct {
 	// DynamoTable is the single-table DynamoDB cache backing shard indexes,
 	// precomputed reasoning stats, and the scene-by-label search index.
 	DynamoTable string
+	// ExactGeoEnabled gates raw episode routes. It defaults false because the
+	// current CloudFront distribution has no authenticated viewer identity.
+	ExactGeoEnabled      bool
+	ExactGeoRequiredRole string
 }
 
 // Load reads configuration from the environment, applying defaults.
@@ -41,6 +46,10 @@ func Load() *Config {
 		FlyteProject:    getenv("FLYTE_PROJECT", "auto-e2e"),
 		FlyteDomain:     getenv("FLYTE_DOMAIN", "development"),
 		DynamoTable:     getenv("DYNAMO_TABLE", "auto-e2e-console"),
+		ExactGeoEnabled: getenvBool("EXACT_GEO_ENABLED", false),
+		ExactGeoRequiredRole: getenv(
+			"EXACT_GEO_REQUIRED_ROLE", "console-exact-geo",
+		),
 	}
 
 	expiry := getenv("PRESIGN_EXPIRY", "15m")
@@ -58,4 +67,18 @@ func getenv(key, def string) string {
 		return v
 	}
 	return def
+}
+
+func getenvBool(key string, def bool) bool {
+	value := os.Getenv(key)
+	if value == "" {
+		return def
+	}
+	parsed, err := strconv.ParseBool(value)
+	if err != nil {
+		slog.Warn("invalid boolean environment value, using default",
+			"key", key, "value", value, "default", def)
+		return def
+	}
+	return parsed
 }
