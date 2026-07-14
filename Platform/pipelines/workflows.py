@@ -8,7 +8,10 @@ Architecture:
 MLflow: Only evaluate task logs. 2 experiments: imitation-learning, offline-rl.
 """
 import enum
-from flytekit import task, workflow, dynamic, Resources, Secret, BatchSize
+import functools
+from flytekit import (
+    task, workflow, dynamic, map_task, Resources, Secret, BatchSize,
+)
 from flytekit.types.file import FlyteFile
 from flytekit.types.directory import FlyteDirectory
 from typing import Annotated, NamedTuple, List, Optional
@@ -22,6 +25,9 @@ OFFLINE_RL_IMAGE = f"{ECR_PREFIX}/auto-e2e/offline-rl:latest"
 DATA_PREP_IMAGE = f"{ECR_PREFIX}/auto-e2e/data-prep:latest"
 
 MLFLOW_URI = "http://mlflow.mlflow.svc.cluster.local:5000"
+DATASET_PACK_VERSION = "v2.1"
+L2D_SOURCE_REVISION = "main"
+KITSCENES_SOURCE_REVISION = "6fde0034446669e2ed7235e4c7fe323cd23d599d"
 
 # The per-sample S3 label cache is REMOVED (#121 §3.4): at full L2D it was ~10M
 # tiny JSON objects (inode/quota/copy-rate blowup). The teacher is now called once
@@ -91,6 +97,7 @@ def _large_shm_pod_template():
 # --- Enums ---
 class Dataset(enum.Enum):
     L2D = "yaak-ai/L2D"
+    KITSCENES = "KIT-MRT/KITScenes-Multimodal"
     NVIDIA_PHYSICAL_AI = "nvidia/PhysicalAI-Autonomous-Vehicles"
 
 
@@ -205,31 +212,163 @@ def _loader_projection(loader, device):
 
 
 # ============================================================
+# Task: Resolve the immutable fan-out inventory
+# ============================================================
+@task(
+    container_image=DATA_PREP_IMAGE,
+    requests=Resources(cpu="1", mem="2Gi", ephemeral_storage="10Gi"),
+    limits=Resources(cpu="1", mem="2Gi", ephemeral_storage="10Gi"),
+    secret_requests=[Secret(group="hf-token", key="HF_TOKEN",
+                            mount_requirement=Secret.MountType.ENV_VAR)],
+    cache=True,
+    cache_version=f"inventory-{_PARSER_V}",
+    retries=2,
+)
+def plan_fanout_partitions(
+    dataset: Dataset,
+    source_revision: str,
+    episodes: int,
+    start_ep: int,
+    end_ep: int,
+    partition_size: int,
+    max_partitions: int,
+    max_missing_scenes: int = 1,
+    split: str = "train",
+) -> List[List[str]]:
+    """Resolve source groups once and return deterministic mapped-task inputs.
+
+    KITScenes is intentionally one scene per partition. The pinned SDK's official
+    split is reconciled with the pinned Hugging Face archive manifest before any
+    large pod is launched. The v1.0.1 one-scene deficit is allowed only when it
+    stays within ``max_missing_scenes``; any second deficit or unexpected scene
+    fails the workflow at preflight.
+    """
+    import json
+    import os
+    import tempfile
+
+    from data_processing.partition_plan import plan_partitions
+
+    if episodes < 0:
+        raise ValueError(f"episodes must be >= 0, got {episodes}")
+    if start_ep >= 0 and end_ep <= start_ep:
+        raise ValueError(
+            f"end_ep must be greater than start_ep, got [{start_ep}, {end_ep})"
+        )
+
+    token = ""
+    try:
+        from flytekit import current_context
+        token = current_context().secrets.get("hf-token", "HF_TOKEN")
+    except Exception:
+        token = os.environ.get("HF_TOKEN", "")
+
+    if dataset == Dataset.KITSCENES:
+        if source_revision != KITSCENES_SOURCE_REVISION:
+            raise ValueError(
+                "KITScenes source_revision must match the audited pinned "
+                f"revision {KITSCENES_SOURCE_REVISION}, got {source_revision!r}"
+            )
+        if split != "train":
+            raise ValueError(
+                "The full training fan-out currently accepts only the official "
+                f"KITScenes train split, got {split!r}"
+            )
+        if partition_size != 1:
+            raise ValueError(
+                "KITScenes requires partition_size=1 because calibration and "
+                "map state are scene-scoped"
+            )
+        from data_parsing.kit_scenes.source import (
+            fetch_archive_manifest,
+            resolve_inventory,
+        )
+
+        with tempfile.TemporaryDirectory(prefix="kitscenes_inventory_") as tmp:
+            archives = fetch_archive_manifest(
+                tmp,
+                revision=source_revision,
+                token=token or None,
+            )
+        inventory = resolve_inventory(
+            archives,
+            split=split,
+            source_revision=source_revision,
+            max_missing_scenes=max_missing_scenes,
+        )
+        group_ids = list(inventory.selected_scene_ids)
+        print(
+            "KITScenes inventory preflight: "
+            + json.dumps(inventory.metadata(), sort_keys=True)
+        )
+    elif dataset == Dataset.L2D:
+        if source_revision != L2D_SOURCE_REVISION:
+            raise ValueError(
+                "L2D currently supports only revision='main' because the v3.0 "
+                f"tag is stale; got {source_revision!r}"
+            )
+        if episodes == 0 or start_ep >= 0:
+            try:
+                from lerobot.datasets.lerobot_dataset import LeRobotDatasetMetadata
+            except ModuleNotFoundError:
+                from ledataset.datasets.lerobot_dataset import LeRobotDatasetMetadata
+            from huggingface_hub import login
+
+            if token:
+                login(token=token)
+            meta = LeRobotDatasetMetadata(
+                repo_id=dataset.value,
+                revision=source_revision,
+            )
+            total = int(meta.total_episodes)
+        else:
+            total = episodes
+        group_ids = [str(index) for index in range(total)]
+    else:
+        raise NotImplementedError(
+            "NVIDIA PhysicalAI fan-out remains deferred; use the existing "
+            "single-dataset workflow for that source."
+        )
+
+    if start_ep >= 0:
+        if end_ep > len(group_ids):
+            raise ValueError(
+                f"requested range [{start_ep}, {end_ep}) exceeds the resolved "
+                f"{len(group_ids)} groups"
+            )
+        selected = group_ids[start_ep:end_ep]
+    elif episodes > 0:
+        if episodes > len(group_ids):
+            raise ValueError(
+                f"requested {episodes} groups but only {len(group_ids)} resolved"
+            )
+        selected = group_ids[:episodes]
+    else:
+        selected = group_ids
+
+    plan = plan_partitions(
+        selected,
+        partition_size=partition_size,
+        max_partitions=max_partitions,
+    )
+    print(f"Fan-out inventory: {plan.summary()}")
+    return [list(partition.group_ids) for partition in plan.partitions]
+
+
+# ============================================================
 # Task: Data Ingest (download raw from HuggingFace)
 # ============================================================
 @task(
     container_image=DATA_PREP_IMAGE,
-    # Raw video is large: L2D is ~5-7 GB/episode of multi-cam mp4, so 10 episodes
-    # blew past the old 50Gi ephemeral limit (pod evicted mid-download). Size for
-    # HUNDREDS of episodes per partition (#121 full-run): 500 eps × 6 cams × ~100
-    # video files/cam × 500 MB ≈ 300 GB p50, but heavy-tailed to ~500 GB p95.
-    # 800Gi ephemeral leaves ~30% headroom over p95 with room for the copytree
-    # hardlink tree (inode-only, no data copy). Node's EBS root must be ≥ 900Gi;
-    # Karpenter auto-mode provisions on demand.
-    # mem needs an explicit LIMIT (not just a request): at 50 episodes the pod was
-    # OOMKilled (137) with only a request — without a limit the kernel reclaims it
-    # under node memory pressure. Raise to 64Gi limit (the Flyte platform max):
-    # at partition_size=50 pods OOMKilled at ~90% through 235 files with 48Gi
-    # limit (at6v64bp9bmb9b2jpq6q), because snapshot_download's parallel workers
-    # each buffer a ~500MB video + TLS/HTTP context, plus Python's tqdm
-    # accumulates. Pre-fetch max_workers=2 keeps peak below 64Gi.
-    # cpu bumped to 4 so hf_transfer's ~3-4 parallel workers can
-    # saturate; download stays I/O-bound but at least isn't CPU-throttled.
-    # requests == limits (Guaranteed QoS). Matches the raised platform cap
-    # (128Gi in flyte-core-eks.yaml). cpu 16 = same core count as pack/label
-    # for a homogeneous data-prep pod shape.
-    requests=Resources(cpu="16", mem="128Gi", ephemeral_storage="800Gi"),
-    limits=Resources(cpu="16", mem="128Gi", ephemeral_storage="800Gi"),
+    # KITScenes production fan-out is one scene per pod. Its largest pinned
+    # archive is 20.12 GiB; download+extract briefly holds about twice that, so
+    # 60Gi fits the EKS Auto Mode default NodeClass (~70Gi allocatable disk).
+    # 15 vCPU stays below a 16-vCPU node's kube-reserved allocatable boundary;
+    # 64Gi memory fits comfortably on that node. Sixty pods request 900 vCPU.
+    # L2D's old multi-episode 128Gi/800Gi
+    # profile is intentionally deferred with that dataset's full run.
+    requests=Resources(cpu="15", mem="64Gi", ephemeral_storage="60Gi"),
+    limits=Resources(cpu="15", mem="64Gi", ephemeral_storage="60Gi"),
     secret_requests=[Secret(group="hf-token", key="HF_TOKEN",
                             mount_requirement=Secret.MountType.ENV_VAR)],
     # "Ingest once, never again" (#121 §3.4a): cache on (dataset, group_ids,
@@ -255,6 +394,7 @@ def _loader_projection(loader, device):
 )
 def data_ingest(
     dataset: Dataset = Dataset.L2D,
+    source_revision: str = L2D_SOURCE_REVISION,
     episodes: int = 3,
     group_ids: Optional[List[str]] = None,
 ) -> Annotated[FlyteDirectory, BatchSize(4)]:
@@ -286,6 +426,41 @@ def data_ingest(
     out_dir = "/tmp/raw_data"
     if os.path.exists(out_dir):
         shutil.rmtree(out_dir)
+
+    if dataset == Dataset.KITSCENES:
+        if source_revision != KITSCENES_SOURCE_REVISION:
+            raise ValueError(
+                "KITScenes ingest requires pinned source revision "
+                f"{KITSCENES_SOURCE_REVISION}, got {source_revision!r}"
+            )
+        from data_parsing.kit_scenes.source import (
+            PinnedKITScenesDownloader,
+            resolve_inventory,
+        )
+
+        downloader = PinnedKITScenesDownloader(
+            out_dir,
+            revision=source_revision,
+            token=token or None,
+        )
+        if group_ids is None:
+            inventory = resolve_inventory(
+                downloader.archives,
+                split="train",
+                source_revision=source_revision,
+                max_missing_scenes=1,
+            )
+            scene_ids = list(inventory.selected_scene_ids)
+            if episodes > 0:
+                scene_ids = scene_ids[:episodes]
+        else:
+            scene_ids = [str(scene_id) for scene_id in group_ids]
+        downloader.download(scene_ids, expected_split="train")
+        print(
+            f"Ingested {dataset.value}@{source_revision}: "
+            f"{len(scene_ids)} scenes -> {out_dir}"
+        )
+        return FlyteDirectory(out_dir)
 
     if dataset == Dataset.NVIDIA_PHYSICAL_AI:
         # NVIDIA PhysicalAI-AV: download via physical_ai_av SDK + unpack into the
@@ -381,7 +556,15 @@ def data_ingest(
     # episodes/data parquets are ~20% smaller too). Reading v3.0 causes
     # downstream KeyError in _absolute_to_relative_idx and IndexError in
     # iloc[task_idx]. Pin to main so we always get the live L2D revision.
-    _meta = LeRobotDatasetMetadata(repo_id=dataset.value, revision="main")
+    if source_revision != L2D_SOURCE_REVISION:
+        raise ValueError(
+            "L2D ingest supports revision='main' only because its v3.0 tag is "
+            f"stale; got {source_revision!r}"
+        )
+    _meta = LeRobotDatasetMetadata(
+        repo_id=dataset.value,
+        revision=source_revision,
+    )
     if ep_list is not None:
         # Compute the set of parquet+video paths lerobot would ask for, then
         # download each with hf_hub_download.  Matches lerobot's own
@@ -406,7 +589,7 @@ def data_ingest(
             try:
                 hf_hub_download(
                     repo_id=dataset.value, repo_type="dataset",
-                    revision="main",  # same reason as LeRobotDatasetMetadata above
+                    revision=source_revision,
                     filename=rel_path, local_dir=str(_meta.root),
                     # Timeout ONE file: 30 s to establish etag, 12 min to
                     # transfer (~700 MB @ 1 MB/s worst-case).
@@ -463,7 +646,11 @@ def data_ingest(
                 f"{len(_missing)-len(_mp)} videos; first missing: "
                 f"{_missing[:3]}). HF Hub may be transiently degraded — "
                 f"retry the task.")
-    ds = LeRobotDataset(repo_id=dataset.value, episodes=ep_list)
+    ds = LeRobotDataset(
+        repo_id=dataset.value,
+        episodes=ep_list,
+        revision=source_revision,
+    )
     cache_dir = ds.root
     # Hardlink the WHOLE cache tree (data/ + meta/ + videos/) into out_dir instead
     # of a byte copy: at tens of episodes the copy doubles disk use and churns the
@@ -487,15 +674,13 @@ def data_ingest(
 # ============================================================
 @task(
     container_image=DATA_PREP_IMAGE,
-    # 16 vCPU for the process-parallel pack workers (decode+JPEG across cores;
-    # WM windows = N history + N future x V cams dominate). Memory <= the Flyte
-    # task cap (32Gi); large ephemeral storage holds HUNDREDS of episodes of raw
-    # video + decoded windows. Karpenter provisions a fitting node.
-    # Ephemeral matched to data_ingest (500-ep partition needs ~500 GB p95 for
-    # the reopened raw + ~50 GB for the shard tarballs).
-    # requests == limits (Guaranteed QoS) at the raised 128Gi platform cap.
-    requests=Resources(cpu="16", mem="128Gi", ephemeral_storage="800Gi"),
-    limits=Resources(cpu="16", mem="128Gi", ephemeral_storage="800Gi"),
+    # Process-parallel pack workers use the pod's available cores for camera
+    # decode/JPEG. The deduplicated WM path decodes each physical row once.
+    # KITScenes one-scene partitions use the same schedulable Guaranteed profile
+    # as ingest. The raw scene plus deduplicated 256px camera pool stays below
+    # the default NodeClass's allocatable ephemeral storage.
+    requests=Resources(cpu="15", mem="64Gi", ephemeral_storage="60Gi"),
+    limits=Resources(cpu="15", mem="64Gi", ephemeral_storage="60Gi"),
     # Cache on (raw URI, labels URI, group_ids, world_model, image_size,
     # cache_version) so "processing is rarely needed" holds (#121 §3.4a): an
     # unchanged partition re-uses its shards. Because the raw + labels inputs are
@@ -515,6 +700,8 @@ def data_ingest(
 def data_processing(
     raw_data: FlyteDirectory,
     dataset: Dataset = Dataset.L2D,
+    source_revision: str = L2D_SOURCE_REVISION,
+    dataset_version: str = DATASET_PACK_VERSION,
     hz: int = 10,
     image_size: int = 256,
     episodes: int = 3,
@@ -571,8 +758,25 @@ def data_processing(
     # egomotion_history (256), trajectory_target (128). See #77.
     # Fan-out (option B): group_ids selects this partition's groups (global L2D
     # episode indices / NVIDIA clip uuids). None → legacy first-``episodes``.
-    ep_list = ([int(g) for g in group_ids] if group_ids is not None
-               else (list(range(episodes)) if episodes > 0 else None))
+    if dataset == Dataset.KITSCENES:
+        if source_revision != KITSCENES_SOURCE_REVISION:
+            raise ValueError(
+                "KITScenes pack requires pinned source revision "
+                f"{KITSCENES_SOURCE_REVISION}, got {source_revision!r}"
+            )
+        ep_list = (
+            [str(group_id) for group_id in group_ids]
+            if group_ids is not None
+            else None
+        )
+    else:
+        if dataset == Dataset.L2D and source_revision != L2D_SOURCE_REVISION:
+            raise ValueError(
+                "L2D pack supports revision='main' only because its v3.0 tag is "
+                f"stale; got {source_revision!r}"
+            )
+        ep_list = ([int(g) for g in group_ids] if group_ids is not None
+                   else (list(range(episodes)) if episodes > 0 else None))
     # A fan-out partition can legitimately hold NO valid samples (a short episode/
     # clip below the egomotion margin); the parser raises "No valid samples found".
     # Treat that as SUCCESS producing an EMPTY shard dir (nothing to pack) rather
@@ -587,6 +791,15 @@ def data_processing(
             if world_model:
                 print("world_model requested but NVIDIA has no window support yet; "
                       "packing without JEPA windows.")
+        elif dataset == Dataset.KITSCENES:
+            from data_parsing.kit_scenes import KitScenesDataset
+            ds = KitScenesDataset(
+                data_root=raw_path,
+                split="train",
+                scene_ids=ep_list,
+                image_size=image_size,
+                include_world_model_windows=world_model,
+            )
         else:
             from data_parsing.l2d import L2DDataset
             # World-Model windows (#16/#13) are only produced when requested, so the
@@ -644,7 +857,48 @@ def data_processing(
     ).encode()
 
     out_dir = tempfile.mkdtemp()
+
+    # v2.1 geo products are generated in the SAME full repack that writes the
+    # shards. They read only numeric parquet columns, so this adds no video
+    # decode. Each fan-out partition emits its own episode paths + sample-pose
+    # parquet; publication can merge the partition summaries without scanning
+    # the tar files or DynamoDB.
+    geo_summary = None
+    if ds is not None and dataset == Dataset.L2D:
+        from data_processing.geospatial import write_geo_artifacts
+        geo_summary = write_geo_artifacts(
+            ds,
+            out_dir,
+            dataset_name=dataset.value,
+            dataset_version=dataset_version,
+        )
+
+    # Projection/calibration is a rig constant. Keep the existing per-sample
+    # calib member for current loaders, and also publish the canonical rig-level
+    # artifact used by the console's camera overlay.
+    rig_dir = os.path.join(out_dir, "rig")
+    os.makedirs(rig_dir, exist_ok=True)
+    with open(os.path.join(rig_dir, "projection.json"), "w") as f:
+        json.dump({
+            "schema_version": "v1",
+            "dataset": dataset.value,
+            "geometry_type": sample_geometry_type,
+            "image_size": image_size,
+            "projection": projection_spec,
+        }, f, sort_keys=True)
+
+    # A sharded full run creates many independent pack tasks. A local name such
+    # as train-000000.tar collides as soon as their outputs are flattened into
+    # the published dataset version, so prefix it with the deterministic group
+    # set identity. Non-fan-out workflows retain the compact historical name.
+    from data_processing.dataset_snapshot import (
+        published_shard_name,
+        shard_partition_id,
+    )
+    partition_id = shard_partition_id(group_ids)
+
     shard_idx = 0
+    shard_names: list[str] = []
     sample_count = 0
     samples_per_shard = 1000
     current_tar = None
@@ -672,10 +926,10 @@ def data_processing(
         nonlocal current_tar, shard_idx
         if current_tar:
             current_tar.close()
-        current_tar = tarfile.open(os.path.join(out_dir, f"train-{shard_idx:06d}.tar"), "w")
+        shard_name = published_shard_name(group_ids, shard_idx)
+        current_tar = tarfile.open(os.path.join(out_dir, shard_name), "w")
+        shard_names.append(shard_name)
         shard_idx += 1
-
-    open_new_shard()
 
     # Decode+JPEG-encode happens in the pack workers (parallel_pack); the parent
     # only appends the returned byte blobs to the current tar (single-threaded).
@@ -695,12 +949,12 @@ def data_processing(
     has_wm = False
 
     if world_model and dataset != Dataset.NVIDIA_PHYSICAL_AI and idx_list:
-        # ── DECODE-DEDUP path (L2D WM): decode each UNIQUE physical row once ──
+        # ── DECODE-DEDUP path: decode each UNIQUE physical row once ──
         # (#121 §3.4d) Previous approach decoded all 48 window frames per sample
         # (6 workers × ~8 sample overlap = ~8x redundant decode). This two-pass
         # approach decodes only the unique rows once per partition.
         #
-        # Pass A: collect unique (ep_idx, frame_index) rows → row-level workers
+        # Pass A: collect unique (group_id, frame_index) rows -> row-level workers
         # decode each exactly once → write to pool/.
         #
         # Pass B: assemble each sample's members (window_index, ego, meta, calib,
@@ -717,13 +971,16 @@ def data_processing(
         # WM 30/40), so a raise here means the invariant has broken and we MUST
         # fail loudly rather than silently drop the sample's cam_*.jpg (which
         # would poison the shard: loader hits torch.stack([]) at train time).
-        sample_cur_rows: dict = {}  # si → (ep_idx, fi) of the current frame
+        sample_cur_rows: dict = {}  # si -> (episode/scene, frame) current row
         for si in idx_list:
-            ep_idx_s, row_s = ds._samples[si]
-            ep_start_s, _ = ds._episode_ranges[ep_idx_s]
-            cur_fi = row_s - ep_start_s
-            sample_cur_rows[si] = (ep_idx_s, cur_fi)
-            all_rows.add((ep_idx_s, cur_fi))
+            if dataset == Dataset.KITSCENES:
+                current_row = ds.row_identity(si)
+            else:
+                ep_idx_s, row_s = ds._samples[si]
+                ep_start_s, _ = ds._episode_ranges[ep_idx_s]
+                current_row = (ep_idx_s, row_s - ep_start_s)
+            sample_cur_rows[si] = current_row
+            all_rows.add(current_row)
             # window_rows raises IndexError only if the margin invariant is
             # broken — let it propagate (fail-loud on invariant violation).
             for row_t in ds.window_rows(si):
@@ -731,14 +988,22 @@ def data_processing(
 
         del ds  # free before spawning workers
 
-        # row_map: (ep_idx, fi) → {frame_id: blob} per cam + map_jpeg
+        # row_map: (group_id, frame) -> {frame_id: blob} per cam + map_jpeg.
+        # Only current rows need a map tile; history/future windows contain
+        # camera pixels only. This is particularly important for KITScenes,
+        # where every map tile runs a Lanelet2 query and rasterization.
         row_map: dict = {}
         row_workers = max(1, min(16, len(all_rows)))
+        current_rows = set(sample_cur_rows.values())
+        decode_tasks = [
+            (group_id, frame_index, (group_id, frame_index) in current_rows)
+            for group_id, frame_index in sorted(all_rows)
+        ]
         with ProcessPoolExecutor(max_workers=row_workers, mp_context=ctx,
                                  initializer=parallel_pack.init_row_worker,
                                  initargs=row_init) as rpool:
             for row_key, cam_jpegs, map_jpeg in rpool.map(
-                    parallel_pack.decode_row, sorted(all_rows)):
+                    parallel_pack.decode_row, decode_tasks):
                 row_map[row_key] = (cam_jpegs, map_jpeg)
                 for fid, blob in cam_jpegs.items():
                     _write_pool(fid, blob)
@@ -749,16 +1014,33 @@ def data_processing(
               f"(was ~{pool_frames_written * 8} with per-sample decode).")
 
         # Pass B: assemble per-sample members — zero video decode.
-        # Plain-mode dataset for window_frame_ids() + egomotion_for() only.
-        from data_parsing.l2d import L2DDataset
+        # Plain-mode dataset for window IDs and numeric members only.
         import numpy as np
         import torch
-        ds_asm = L2DDataset(repo_id=dataset.value, episodes=ep_list,
-                            include_world_model_windows=False, root=raw_path)
+        if dataset == Dataset.KITSCENES:
+            from data_parsing.kit_scenes import KitScenesDataset
+            ds_asm = KitScenesDataset(
+                data_root=raw_path,
+                split="train",
+                scene_ids=ep_list,
+                image_size=image_size,
+                include_world_model_windows=False,
+            )
+        else:
+            from data_parsing.l2d import L2DDataset
+            ds_asm = L2DDataset(
+                repo_id=dataset.value,
+                episodes=ep_list,
+                include_world_model_windows=False,
+                root=raw_path,
+            )
 
         for si in idx_list:
+            if sample_count % samples_per_shard == 0:
+                open_new_shard()
             uid = ds_asm.sample_uid(si)
             split_group = ds_asm.split_group_uid(si)
+            from data_processing.dataset_snapshot import split_bucket
             members: dict = {}
 
             # window_index — pool frame_ids, no decode.
@@ -783,15 +1065,22 @@ def data_processing(
                     members["map.jpg"] = cur_map
 
             # ego + meta + calib (no video decode).
-            ego_hist, traj = ds_asm.egomotion_for(si)
+            ego_hist, traj, pose_current, gps_future = ds_asm.numeric_for(si)
             ego_data = np.concatenate([
                 ego_hist.numpy() if torch.is_tensor(ego_hist) else np.asarray(ego_hist),
                 traj.numpy() if torch.is_tensor(traj) else np.asarray(traj),
             ]).astype(np.float32)
             members["ego.npy"] = ego_data.tobytes()
+            from data_processing.geospatial import geospatial_members
+            members.update(geospatial_members({
+                "pose_current": pose_current,
+                "gps_future": gps_future,
+            }))
             members["meta.json"] = json.dumps({
                 "idx": si, "dataset": dataset.value,
                 "sample_uid": uid, "split_group_uid": split_group,
+                "split_bucket": split_bucket(split_group),
+                "frame_idx": ds_asm.frame_index(si),
             }).encode()
             members["calib.json"] = calib_bytes
 
@@ -803,8 +1092,6 @@ def data_processing(
                     _add_member(uid, "reasoning.json",
                                 json.dumps(_record_to_json(record)).encode())
             sample_count += 1
-            if sample_count % samples_per_shard == 0:
-                open_new_shard()
 
     else:
         # ── Legacy path (imitation-only L2D, NVIDIA, or empty partition) ──
@@ -820,6 +1107,8 @@ def data_processing(
                                  initargs=pack_init) as pool:
             for sample_key, nviews, members, frame_pool in pool.map(
                     parallel_pack.pack_sample, idx_list):
+                if sample_count % samples_per_shard == 0:
+                    open_new_shard()
                 for suffix, blob in members.items():
                     _add_member(sample_key, suffix, blob)
                 for frame_id, blob in frame_pool.items():
@@ -833,21 +1122,43 @@ def data_processing(
                         _add_member(sample_key, "reasoning.json",
                                     json.dumps(_record_to_json(record)).encode())
                 sample_count += 1
-                if sample_count % samples_per_shard == 0:
-                    open_new_shard()
 
     if current_tar:
         current_tar.close()
 
+    from data_processing.contract_versions import contract_versions
+    from data_processing.geospatial import (
+        EPISODE_PATH_SCHEMA_VERSION,
+        GPS_SCHEMA_VERSION,
+        POSE_SCHEMA_VERSION,
+    )
+
     manifest = {"total_samples": sample_count, "shards": shard_idx,
+                "shard_names": shard_names,
+                "partition_id": partition_id or None,
                 "hz": hz, "image_size": image_size, "dataset": dataset.value,
+                "source_revision": source_revision,
+                "dataset_version": dataset_version,
                 "episodes": episodes,
+                "contracts": contract_versions(),
                 # num_views = real cameras only; the map view is stored under a
                 # separate map.jpg key and is NOT counted here (#77).
                 "num_views": num_views if sample_count else 0,
                 "has_map": bool(sample_count) and has_map,
                 # World-Model windows present when packed (enables JEPA training).
-                "has_world_model": bool(sample_count) and has_wm}
+                "has_world_model": bool(sample_count) and has_wm,
+                "has_gps": bool(sample_count) and dataset in (
+                    Dataset.L2D, Dataset.KITSCENES,
+                ),
+                "geospatial": {
+                    "pose_schema": POSE_SCHEMA_VERSION,
+                    "gps_schema": GPS_SCHEMA_VERSION,
+                    "episode_path_schema": EPISODE_PATH_SCHEMA_VERSION,
+                    "source_coordinate_dtype": "float32",
+                    "stored_coordinate_dtype": "float64",
+                    "timestamp_dtype": "int64_ns",
+                    "summary": geo_summary,
+                } if dataset in (Dataset.L2D, Dataset.KITSCENES) else None}
 
     # Manifest also carries the projection spec (computed once above) for the
     # single-dataset loader path; the merged loader uses per-sample calib.json.
@@ -878,21 +1189,12 @@ def data_processing(
 # ============================================================
 @task(
     container_image=DATA_PREP_IMAGE,
-    # 16 vCPU so the process-parallel labeler decodes WM windows across all cores
-    # (decode is the bottleneck; more cores → more concurrent teacher calls to the
-    # scaled-out vLLM replicas). EKS Auto Mode / Karpenter provisions a fitting
-    # c/m/r node on demand. Memory kept ≤ the Flyte platform task cap (32Gi);
-    # decode frames are transient, but at 20+ episodes 24 concurrent front-clip
-    # decoders overran the 32Gi cap → OOMKilled at ~96/125. Raise the mem limit to
-    # 60Gi; the worker count is also lowered (see label_workers default) since the
-    # stage is bounded by the ~12s teacher HTTP call, not local CPU. Large
-    # ephemeral storage holds tens of episodes of raw video + decoded windows.
-    # At PS=100 with 6 in-pod lerobot workers, each worker holds ~10 GB of
-    # dataset state (13k row hf_dataset × 10 more eps than PS=50). 6×10 + ~8 GB
-    # overhead = 68 GB, so 60Gi kills us. 128Gi now matches the platform cap
-    # (raised in flyte-core-eks.yaml helm values) and leaves ~45% headroom.
-    requests=Resources(cpu="16", mem="128Gi", ephemeral_storage="800Gi"),
-    limits=Resources(cpu="16", mem="128Gi", ephemeral_storage="800Gi"),
+    # Process-parallel front-clip decode overlaps the remote teacher calls.
+    # KITScenes uses two workers over one scene per pod, so 64Gi has ample decode
+    # headroom while keeping each pod schedulable on a 16-vCPU node. The 60Gi
+    # disk request holds the materialized scene throughout teacher calls.
+    requests=Resources(cpu="15", mem="64Gi", ephemeral_storage="60Gi"),
+    limits=Resources(cpu="15", mem="64Gi", ephemeral_storage="60Gi"),
     # The openai_compatible teacher endpoint (e.g. the Cosmos3-Nano vLLM ALB) is
     # injected from a K8s Secret so no concrete URL / account value is committed
     # to git or shown in the Flyte UI. Optional: only consumed when
@@ -923,6 +1225,7 @@ def data_processing(
 def generate_reasoning_labels(
     raw_data: FlyteDirectory,
     dataset: Dataset = Dataset.L2D,
+    source_revision: str = L2D_SOURCE_REVISION,
     episodes: int = 3,
     split: str = "train",
     teacher: str = "openai_compatible",
@@ -999,8 +1302,25 @@ def generate_reasoning_labels(
     # JOIN; workers rebuild their own front-clip dataset in init_worker.
     # Fan-out (option B): group_ids selects this partition's groups (global L2D
     # episode indices / NVIDIA clip uuids). None → legacy first-``episodes``.
-    ep_list = ([int(g) for g in group_ids] if group_ids is not None
-               else (list(range(episodes)) if episodes > 0 else None))
+    if dataset == Dataset.KITSCENES:
+        if source_revision != KITSCENES_SOURCE_REVISION:
+            raise ValueError(
+                "KITScenes labeling requires pinned source revision "
+                f"{KITSCENES_SOURCE_REVISION}, got {source_revision!r}"
+            )
+        ep_list = (
+            [str(group_id) for group_id in group_ids]
+            if group_ids is not None
+            else None
+        )
+    else:
+        if dataset == Dataset.L2D and source_revision != L2D_SOURCE_REVISION:
+            raise ValueError(
+                "L2D labeling supports revision='main' only because its v3.0 "
+                f"tag is stale; got {source_revision!r}"
+            )
+        ep_list = ([int(g) for g in group_ids] if group_ids is not None
+                   else (list(range(episodes)) if episodes > 0 else None))
     # A fan-out partition can legitimately contain NO valid samples — e.g. a
     # single short L2D episode with fewer than the egomotion margin (64+64+1)
     # frames. The parser raises "No valid samples found" in that case; in the
@@ -1018,6 +1338,14 @@ def generate_reasoning_labels(
             # order (sample-index JOIN holds). Passing clip_uuids in partition
             # order here would risk an order mismatch.
             ds = NvidiaAVDataset(data_root=raw_path, reasoning_clip_only=True)
+        elif dataset == Dataset.KITSCENES:
+            from data_parsing.kit_scenes import KitScenesDataset
+            ds = KitScenesDataset(
+                data_root=raw_path,
+                split=split,
+                scene_ids=ep_list,
+                reasoning_clip_only=True,
+            )
         else:
             from data_parsing.l2d import L2DDataset
             # root=raw_path: read the partition's materialized raw, don't re-hit HF.
@@ -1145,6 +1473,7 @@ def generate_reasoning_labels(
     write_parquet(records, os.path.join(layout, "reasoning_labels_v2.parquet"))
     with open(os.path.join(out_dir, "meta.json"), "w") as f:
         json.dump({"dataset": dataset.value, "split": split, "teacher": teacher,
+                   "source_revision": source_revision,
                    "prompt_version": prompt_version, "num_records": len(records),
                    "computed": n_computed, "num_abstained": n_abstain,
                    "source": "offline teacher (generate_reasoning_labels); "
@@ -1270,6 +1599,18 @@ def train_il(
     # (7cam f-theta) train together. The model is runtime-V-dynamic (projection
     # ABI, #77), so a single model consumes both. num_views only sizes defaults.
     shard_dirs = [_loader_download_dir(s) for s in shards]
+    dataset_versions = set()
+    for shard_dir in shard_dirs:
+        manifest_path = os.path.join(shard_dir, "manifest.json")
+        if os.path.exists(manifest_path):
+            version = json.load(open(manifest_path)).get("dataset_version")
+            if version:
+                dataset_versions.add(str(version))
+    if len(dataset_versions) > 1:
+        raise ValueError(
+            f"mixed dataset versions in one training run: {sorted(dataset_versions)}"
+        )
+    dataset_version = next(iter(dataset_versions), "unknown")
     # Train on the "train" split when a held-out fraction is requested (eval scores
     # the disjoint "val" split); val_fraction=0 keeps the legacy all-samples path.
     _split = "train" if val_fraction > 0.0 else "all"
@@ -1510,7 +1851,8 @@ def train_il(
 
     # Metadata
     meta = {
-        "data": {"dataset": dataset.value, "shard_dirs": shard_dirs,
+        "data": {"dataset": dataset.value, "dataset_version": dataset_version,
+                 "shard_dirs": shard_dirs,
                  "merged_datasets": len(shard_dirs)},
         "model": {"backbone": bb, "fusion_mode": fm, "embed_dim": 256, "num_views": num_views},
         "training": {
@@ -1691,6 +2033,8 @@ def _run_evaluation(checkpoint, shards, train_metadata, dataset, experiment_name
     torch.multiprocessing.set_sharing_strategy("file_system")
 
     ckpt_path = checkpoint.download()
+    from Platform.pipelines.inference import sha256_file
+    checkpoint_sha256 = sha256_file(ckpt_path)
     # Sharded fan-out returns N per-partition dirs; eval over ALL of them so
     # ADE/FDE covers the full held-out set, not partition 0 only (Flyte-review B2).
     shard_dirs = _select_shard_dirs(shards, dataset)
@@ -1793,6 +2137,7 @@ def _run_evaluation(checkpoint, shards, train_metadata, dataset, experiment_name
         params = {}
         data = meta.get("data", meta.get("base_model", {}).get("il_metadata", {}).get("data", {}))
         params["data/dataset"] = data.get("dataset", "?")
+        params["data/dataset_version"] = data.get("dataset_version", "?")
         params["model/backbone"] = bb
         params["model/fusion_mode"] = fm
         params["train/epochs"] = training.get("epochs", "?")
@@ -1801,6 +2146,8 @@ def _run_evaluation(checkpoint, shards, train_metadata, dataset, experiment_name
         params["train/weight_decay"] = training.get("weight_decay", "?")
         params["train/amp"] = training.get("amp", "?")
         params["train/final_loss"] = training.get("final_loss", "?")
+        params["train/val_fraction"] = training.get("val_fraction", 0.0)
+        params["model/checkpoint_sha256"] = checkpoint_sha256
 
         # RL params
         if "rl" in meta:
@@ -1818,7 +2165,12 @@ def _run_evaluation(checkpoint, shards, train_metadata, dataset, experiment_name
         params["ctx/eval_docker_image"] = EVAL_IMAGE
 
         mlflow.log_params({k: str(v)[:500] for k, v in params.items()})
-        mlflow.set_tags({"pipeline": experiment_name, "backbone": bb, "fusion": fm})
+        mlflow.set_tags({
+            "pipeline": experiment_name,
+            "backbone": bb,
+            "fusion": fm,
+            "checkpoint_sha256": checkpoint_sha256,
+        })
 
         # Training loss curve
         for i, loss_val in enumerate(training.get("losses_per_epoch", [])):
@@ -1837,7 +2189,15 @@ def _run_evaluation(checkpoint, shards, train_metadata, dataset, experiment_name
         # Model Registry
         model_uri = f"runs:/{mlflow.active_run().info.run_id}/model"
         try:
-            mlflow.register_model(model_uri, "auto-e2e-driving-policy")
+            registered = mlflow.register_model(
+                model_uri, "auto-e2e-driving-policy"
+            )
+            mlflow.tracking.MlflowClient().set_model_version_tag(
+                "auto-e2e-driving-policy",
+                registered.version,
+                "checkpoint_sha256",
+                checkpoint_sha256,
+            )
         except Exception as e:
             print(f"Registry: {e}")
 
@@ -1894,16 +2254,23 @@ def evaluate_rl_policy(
 @workflow
 def wf_data_ingest(
     dataset: Dataset = Dataset.L2D,
+    source_revision: str = L2D_SOURCE_REVISION,
     episodes: int = 3,
 ) -> FlyteDirectory:
     """Download raw dataset from HuggingFace."""
-    return data_ingest(dataset=dataset, episodes=episodes)
+    return data_ingest(
+        dataset=dataset,
+        source_revision=source_revision,
+        episodes=episodes,
+    )
 
 
 @workflow
 def wf_data_processing(
     raw_data: FlyteDirectory,
     dataset: Dataset = Dataset.L2D,
+    source_revision: str = L2D_SOURCE_REVISION,
+    dataset_version: str = DATASET_PACK_VERSION,
     hz: int = 10,
     image_size: int = 256,
     episodes: int = 3,
@@ -1918,6 +2285,8 @@ def wf_data_processing(
     trains unsupervised.
     """
     return data_processing(raw_data=raw_data, dataset=dataset,
+                           source_revision=source_revision,
+                           dataset_version=dataset_version,
                            hz=hz, image_size=image_size, episodes=episodes,
                            world_model=world_model, reasoning_labels=reasoning_labels)
 
@@ -1926,6 +2295,7 @@ def wf_data_processing(
 def wf_generate_reasoning_labels(
     raw_data: FlyteDirectory,
     dataset: Dataset = Dataset.L2D,
+    source_revision: str = L2D_SOURCE_REVISION,
     episodes: int = 3,
     split: str = "train",
     teacher: str = "openai_compatible",
@@ -1933,7 +2303,9 @@ def wf_generate_reasoning_labels(
 ) -> FlyteDirectory:
     """Label raw samples with the offline teacher (S3-cached) → versioned artifact."""
     return generate_reasoning_labels(
-        raw_data=raw_data, dataset=dataset, episodes=episodes, split=split,
+        raw_data=raw_data, dataset=dataset,
+        source_revision=source_revision,
+        episodes=episodes, split=split,
         teacher=teacher, prompt_version=prompt_version)
 
 
@@ -1941,6 +2313,8 @@ def wf_generate_reasoning_labels(
 def _pack_with_labels(
     raw: FlyteDirectory,
     dataset: Dataset,
+    source_revision: str,
+    dataset_version: str,
     episodes: int,
     image_size: int,
     world_model: bool,
@@ -1961,16 +2335,21 @@ def _pack_with_labels(
     still ignore the JEPA windows if enable_world_model is off.
     """
     labels = generate_reasoning_labels(
-        raw_data=raw, dataset=dataset, episodes=episodes, split="train",
+        raw_data=raw, dataset=dataset, source_revision=source_revision,
+        episodes=episodes, split="train",
         teacher=teacher, prompt_version=prompt_version)
     return data_processing(
-        raw_data=raw, dataset=dataset, episodes=episodes, image_size=image_size,
+        raw_data=raw, dataset=dataset, source_revision=source_revision,
+        dataset_version=dataset_version,
+        episodes=episodes, image_size=image_size,
         world_model=True, reasoning_labels=labels)
 
 
 @workflow
 def wf_create_dataset(
     dataset: Dataset = Dataset.L2D,
+    source_revision: str = L2D_SOURCE_REVISION,
+    dataset_version: str = DATASET_PACK_VERSION,
     episodes: int = 3,
     image_size: int = 256,
     world_model: bool = False,
@@ -1996,139 +2375,190 @@ def wf_create_dataset(
     """
     from flytekit import conditional
 
-    raw = data_ingest(dataset=dataset, episodes=episodes)
+    raw = data_ingest(
+        dataset=dataset,
+        source_revision=source_revision,
+        episodes=episodes,
+    )
     return (
         conditional("reasoning_labels")
         .if_(reasoning_teacher != "none")
         .then(_pack_with_labels(
-            raw=raw, dataset=dataset, episodes=episodes, image_size=image_size,
+            raw=raw, dataset=dataset, source_revision=source_revision,
+            episodes=episodes, image_size=image_size,
+            dataset_version=dataset_version,
             world_model=world_model, teacher=reasoning_teacher,
             prompt_version=prompt_version))
         .else_()
         .then(data_processing(
-            raw_data=raw, dataset=dataset, episodes=episodes,
+            raw_data=raw, dataset=dataset, source_revision=source_revision,
+            dataset_version=dataset_version,
+            episodes=episodes,
             image_size=image_size, world_model=world_model))
     )
 
 
 @dynamic(container_image=DATA_PREP_IMAGE)
+def _map_dataset_partitions(
+    partitions: List[List[str]],
+    dataset: Dataset,
+    source_revision: str,
+    dataset_version: str,
+    image_size: int,
+    world_model: bool,
+    reasoning_teacher: str,
+    prompt_version: str,
+    label_stride: int,
+    label_workers: int,
+    ingest_concurrency: int,
+    label_concurrency: int,
+    pack_concurrency: int,
+) -> List[FlyteDirectory]:
+    """Execute each data-prep stage as one bounded Flyte array node."""
+    for name, value in (
+        ("ingest_concurrency", ingest_concurrency),
+        ("label_concurrency", label_concurrency),
+        ("pack_concurrency", pack_concurrency),
+    ):
+        if value <= 0:
+            raise ValueError(f"{name} must be positive, got {value}")
+
+    ingest = map_task(
+        functools.partial(
+            data_ingest,
+            dataset=dataset,
+            source_revision=source_revision,
+            episodes=0,
+        ),
+        concurrency=ingest_concurrency,
+    )
+    raw_dirs = ingest(group_ids=partitions)
+
+    if reasoning_teacher != "none":
+        label = map_task(
+            functools.partial(
+                generate_reasoning_labels,
+                dataset=dataset,
+                source_revision=source_revision,
+                episodes=0,
+                split="train",
+                teacher=reasoning_teacher,
+                prompt_version=prompt_version,
+                label_stride=label_stride,
+                label_workers=label_workers,
+            ),
+            concurrency=label_concurrency,
+        )
+        label_dirs = label(raw_data=raw_dirs, group_ids=partitions)
+        pack = map_task(
+            functools.partial(
+                data_processing,
+                dataset=dataset,
+                source_revision=source_revision,
+                dataset_version=dataset_version,
+                hz=10,
+                image_size=image_size,
+                episodes=0,
+                world_model=True,
+            ),
+            concurrency=pack_concurrency,
+        )
+        return pack(
+            raw_data=raw_dirs,
+            reasoning_labels=label_dirs,
+            group_ids=partitions,
+        )
+
+    pack = map_task(
+        functools.partial(
+            data_processing,
+            dataset=dataset,
+            source_revision=source_revision,
+            dataset_version=dataset_version,
+            hz=10,
+            image_size=image_size,
+            episodes=0,
+            world_model=world_model,
+            reasoning_labels=None,
+        ),
+        concurrency=pack_concurrency,
+    )
+    return pack(raw_data=raw_dirs, group_ids=partitions)
+
+
+@workflow
 def wf_create_dataset_sharded(
-    dataset: Dataset = Dataset.L2D,
-    episodes: int = 20,
-    # Batch range (17-batch wrapper, #121 full-run). When start_ep >= 0 and
-    # end_ep > start_ep, the range [start_ep, end_ep) drives episode selection
-    # instead of the `episodes` count. Left at defaults (-1/-1) → legacy path.
-    # Downstream task-level caches key on group_ids, so shifting only the range
-    # does not re-run identical partitions.
+    dataset: Dataset = Dataset.KITSCENES,
+    source_revision: str = KITSCENES_SOURCE_REVISION,
+    dataset_version: str = DATASET_PACK_VERSION,
+    episodes: int = 10,
     start_ep: int = -1,
     end_ep: int = -1,
-    partition_size: int = 10,
+    partition_size: int = 1,
     image_size: int = 256,
     world_model: bool = False,
     reasoning_teacher: str = "none",
     prompt_version: str = "action_relevant_reasoning_v3_temporal_front256",
-    max_partitions: int = 512,
+    label_stride: int = 10,
+    label_workers: int = 2,
+    max_partitions: int = 600,
+    max_missing_scenes: int = 1,
+    ingest_concurrency: int = 60,
+    label_concurrency: int = 5,
+    pack_concurrency: int = 60,
 ) -> List[FlyteDirectory]:
-    """CreateDataset, FANNED OUT over episode-range partitions (#121 option B).
+    """Fan out immutable source groups through bounded ingest/label/pack arrays.
 
-    The scale fix for wf_create_dataset: instead of one pod ingesting+labeling+
-    packing ALL episodes (which OOMs as episodes grow), split the episodes into
-    partitions and run an independent ingest→label→pack chain per partition, each
-    a separate Flyte node (so each retries independently and caches independently,
-    §3.4a). Returns the per-partition shard dirs as a ``List[FlyteDirectory]`` —
-    exactly what ``train_il(shards=...)`` / ``make_multi_dataset_loader`` already
-    consume (train sees one merged stream over all partitions).
-
-    Option B: each partition's ``data_ingest`` materializes ONLY its episodes as a
-    raw FlyteDirectory; that partition's label+pack read it (root=raw dir), so HF
-    is hit once per partition and downstream pods never re-fetch. Because the
-    ``sample_uid`` is (global episode, frame) — independent of the partition
-    boundary (§3.1) — partitions never collide and train/val split stays group-
-    clean across the whole fan-out.
-
-    This ``@dynamic`` builds the graph at run time: ``plan_partitions`` is plain
-    Python here (deterministic, so re-runs reproduce the same partitions → cache
-    hits). L2D episode indices are 0..episodes-1; NVIDIA clip-uuid fan-out needs
-    the SDK clip index and is added once the L2D path is validated (#121 Phase 4).
+    KITScenes uses one scene per mapped pod. With ``episodes=0`` the preflight
+    resolves all available official train scenes (currently 533/534 at the
+    pinned v1.0.1 source revision), permits only the known one-scene deficit, and
+    then runs 60 ingest pods, 5 label pods, and 60 pack pods concurrently.
     """
-    from data_processing.partition_plan import plan_partitions
-
-    if dataset == Dataset.NVIDIA_PHYSICAL_AI:
-        # NVIDIA clip uuids require the physical_ai_av SDK clip index to enumerate;
-        # the L2D episode-index fan-out is validated first (Design §5 Phase 2→4).
-        raise NotImplementedError(
-            "wf_create_dataset_sharded currently fans out L2D (episode indices). "
-            "NVIDIA clip-uuid fan-out is Phase 4.")
-
-    # L2D: episode indices are 0..N-1. Three modes:
-    #   (a) start_ep >= 0 and end_ep > start_ep → RANGE [start_ep, end_ep).
-    #       Used by the 17-batch wrapper (#121 full-run) to slice the 100k
-    #       episode space into non-overlapping chunks that each fit under the
-    #       Propeller gRPC 4MB event ceiling.
-    #   (b) episodes == 0 → ALL. Resolved via LeRobotDatasetMetadata.
-    #   (c) episodes > 0 → first-N (legacy).
-    # Group ids are STRINGS (the task interface is List[str]) — same signature
-    # serves NVIDIA clip uuids later.
-    if start_ep >= 0 and end_ep > start_ep:
-        episode_ids = [str(e) for e in range(start_ep, end_ep)]
-        print(f"wf_create_dataset_sharded: RANGE [{start_ep}, {end_ep}) "
-              f"= {len(episode_ids)} episodes")
-    elif episodes == 0:
-        try:
-            from lerobot.datasets.lerobot_dataset import LeRobotDatasetMetadata
-        except ModuleNotFoundError:
-            from ledataset.datasets.lerobot_dataset import LeRobotDatasetMetadata
-        import os
-        from huggingface_hub import login
-        try:
-            from flytekit import current_context
-            token = current_context().secrets.get("hf-token", "HF_TOKEN")
-        except Exception:
-            token = os.environ.get("HF_TOKEN", "")
-        if token:
-            login(token=token)
-        meta = LeRobotDatasetMetadata(repo_id=dataset.value, revision="main")
-        total = int(meta.total_episodes)
-        print(f"wf_create_dataset_sharded: episodes=0 resolved to ALL {total} episodes")
-        episode_ids = [str(e) for e in range(total)]
-    else:
-        episode_ids = [str(e) for e in range(episodes)]
-    plan = plan_partitions(episode_ids, partition_size=partition_size,
-                           max_partitions=max_partitions)
-    print(f"wf_create_dataset_sharded: {plan.summary()}")
-
-    shard_dirs: List[FlyteDirectory] = []
-    for p in plan.partitions:
-        gids = list(p.group_ids)
-        # 1) INGEST this partition's raw (materialized FlyteDirectory, option B).
-        raw = data_ingest(dataset=dataset, episodes=0, group_ids=gids)
-        # 2/3) LABEL (teacher, S3-cached) → PACK with labels JOINed, OR pack-only.
-        if reasoning_teacher != "none":
-            labels = generate_reasoning_labels(
-                raw_data=raw, dataset=dataset, episodes=0, split="train",
-                teacher=reasoning_teacher, prompt_version=prompt_version,
-                group_ids=gids)
-            # world_model forced on when labels present (packed set == labeled set).
-            shards = data_processing(
-                raw_data=raw, dataset=dataset, episodes=0, image_size=image_size,
-                world_model=True, reasoning_labels=labels, group_ids=gids)
-        else:
-            shards = data_processing(
-                raw_data=raw, dataset=dataset, episodes=0, image_size=image_size,
-                world_model=world_model, group_ids=gids)
-        shard_dirs.append(shards)
-    return shard_dirs
+    partitions = plan_fanout_partitions(
+        dataset=dataset,
+        source_revision=source_revision,
+        episodes=episodes,
+        start_ep=start_ep,
+        end_ep=end_ep,
+        partition_size=partition_size,
+        max_partitions=max_partitions,
+        max_missing_scenes=max_missing_scenes,
+        split="train",
+    )
+    return _map_dataset_partitions(
+        partitions=partitions,
+        dataset=dataset,
+        source_revision=source_revision,
+        dataset_version=dataset_version,
+        image_size=image_size,
+        world_model=world_model,
+        reasoning_teacher=reasoning_teacher,
+        prompt_version=prompt_version,
+        label_stride=label_stride,
+        label_workers=label_workers,
+        ingest_concurrency=ingest_concurrency,
+        label_concurrency=label_concurrency,
+        pack_concurrency=pack_concurrency,
+    )
 
 
-@dynamic(container_image=TRAINING_IMAGE)
+@workflow
 def wf_sharded_full_run(
-    dataset: Dataset = Dataset.L2D,
-    episodes: int = 20,
-    partition_size: int = 10,
+    dataset: Dataset = Dataset.KITSCENES,
+    source_revision: str = KITSCENES_SOURCE_REVISION,
+    dataset_version: str = DATASET_PACK_VERSION,
+    episodes: int = 10,
+    partition_size: int = 1,
     image_size: int = 256,
     reasoning_teacher: str = "openai_compatible",
     prompt_version: str = "action_relevant_reasoning_v3_temporal_front256",
-    max_partitions: int = 512,
+    label_stride: int = 10,
+    label_workers: int = 2,
+    max_partitions: int = 600,
+    max_missing_scenes: int = 1,
+    ingest_concurrency: int = 60,
+    label_concurrency: int = 5,
+    pack_concurrency: int = 60,
     backbone: Backbone = Backbone.SWIN_V2_TINY,
     epochs: int = 3,
     batch_size: int = 1,
@@ -2155,10 +2585,17 @@ def wf_sharded_full_run(
     pipeline fans out.
     """
     shards = wf_create_dataset_sharded(
-        dataset=dataset, episodes=episodes, partition_size=partition_size,
+        dataset=dataset, source_revision=source_revision,
+        dataset_version=dataset_version,
+        episodes=episodes, partition_size=partition_size,
         image_size=image_size, world_model=True,
         reasoning_teacher=reasoning_teacher, prompt_version=prompt_version,
-        max_partitions=max_partitions)
+        label_stride=label_stride, label_workers=label_workers,
+        max_partitions=max_partitions,
+        max_missing_scenes=max_missing_scenes,
+        ingest_concurrency=ingest_concurrency,
+        label_concurrency=label_concurrency,
+        pack_concurrency=pack_concurrency)
     out = train_il(
         shards=shards, dataset=dataset, backbone=backbone, epochs=epochs,
         batch_size=batch_size, grad_accum_steps=grad_accum_steps, lr=lr,
@@ -2291,3 +2728,84 @@ def wf_ingest_train_eval(
                       epochs=epochs_il, batch_size=batch_size, lr=lr)
     return evaluate_il_policy(checkpoint=il_out.checkpoint, shards=all_shards, dataset=dataset,
                               train_metadata=il_out.metadata)
+
+
+@dynamic(container_image=EVAL_IMAGE)
+def wf_precompute_overlays(
+    shards: List[FlyteDirectory],
+    model_version: str,
+    dataset_manifest_digest: str,
+    preprocessing_contract_digest: str,
+    model_inference_code_digest: str,
+    container_image_digest: str,
+    artifacts_bucket: str,
+    registered_model_name: str = "auto-e2e-driving-policy",
+    dataset: str = "l2d",
+    dataset_version: str = DATASET_PACK_VERSION,
+    dynamo_table: str = "auto-e2e-console",
+    aws_region: str = "us-west-2",
+    base_seeds: List[int] = [0],
+    batch_size: int = 32,
+    num_workers: int = 4,
+    sampler: str = "model-default",
+) -> str:
+    """Ops-only canonical trajectory overlay precompute.
+
+    The Console never invokes this workflow. It resolves one immutable MLflow
+    model version, marks the overlay set ``building``, runs one coarse GPU task
+    per packed partition (loading the checkpoint once for every tar in that
+    partition), writes S3 bodies before Dynamo pointers, then publishes the
+    audit manifest and flips ``OVLSET`` to ``ready`` last.
+    """
+    from Platform.pipelines.overlay_tasks import (
+        finalize_overlay_set,
+        precompute_overlay_partition,
+        prepare_overlay_set,
+        resolve_overlay_model,
+    )
+
+    resolved = resolve_overlay_model(
+        registered_model_name=registered_model_name,
+        model_version=model_version,
+    )
+    gate = prepare_overlay_set(
+        resolved_metadata=resolved.metadata,
+        dataset=dataset,
+        dataset_version=dataset_version,
+        dataset_manifest_digest=dataset_manifest_digest,
+        artifacts_bucket=artifacts_bucket,
+        dynamo_table=dynamo_table,
+        aws_region=aws_region,
+        base_seeds=base_seeds,
+    )
+    results: List[FlyteFile] = []
+    for partition in shards:
+        results.append(precompute_overlay_partition(
+            checkpoint=resolved.checkpoint,
+            model_metadata=resolved.metadata,
+            prepare_gate=gate,
+            shard_dir=partition,
+            dataset=dataset,
+            dataset_version=dataset_version,
+            dataset_manifest_digest=dataset_manifest_digest,
+            preprocessing_contract_digest=preprocessing_contract_digest,
+            model_inference_code_digest=model_inference_code_digest,
+            container_image_digest=container_image_digest,
+            artifacts_bucket=artifacts_bucket,
+            dynamo_table=dynamo_table,
+            aws_region=aws_region,
+            base_seeds=base_seeds,
+            batch_size=batch_size,
+            num_workers=num_workers,
+            sampler=sampler,
+        ))
+    return finalize_overlay_set(
+        model_metadata=resolved.metadata,
+        partition_results=results,
+        dataset=dataset,
+        dataset_version=dataset_version,
+        dataset_manifest_digest=dataset_manifest_digest,
+        artifacts_bucket=artifacts_bucket,
+        dynamo_table=dynamo_table,
+        aws_region=aws_region,
+    )
