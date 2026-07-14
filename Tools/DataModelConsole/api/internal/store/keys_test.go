@@ -30,6 +30,20 @@ func TestSceneLabelKeys(t *testing.T) {
 	}
 }
 
+func TestSceneLabelVersionKey(t *testing.T) {
+	got := SceneLabelVersionPK(
+		"l2d",
+		"v2.1",
+		"action_relevant_reasoning_v3_temporal_front256",
+		"lateral_response",
+		"turn_left",
+	)
+	want := "LBLV2#l2d#v2.1#action_relevant_reasoning_v3_temporal_front256#lateral_response#turn_left"
+	if got != want {
+		t.Errorf("SceneLabelVersionPK = %q, want %q", got, want)
+	}
+}
+
 // TestSceneLabelPK_DistinctPerField guards the invariant that different
 // (field,value) pairs never collide into one partition (which would return
 // scenes for the wrong label on search).
