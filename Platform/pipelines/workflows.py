@@ -910,7 +910,7 @@ def data_processing(
     # parquet; publication can merge the partition summaries without scanning
     # the tar files or DynamoDB.
     geo_summary = None
-    if ds is not None and dataset == Dataset.L2D:
+    if ds is not None and dataset in (Dataset.L2D, Dataset.KITSCENES):
         from data_processing.geospatial import write_geo_artifacts
         geo_summary = write_geo_artifacts(
             ds,
