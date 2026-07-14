@@ -59,6 +59,37 @@ def group_metadata_digest(group_ids: Sequence[int | str]) -> str:
     return h.hexdigest()
 
 
+def split_bucket(split_group_uid: str, buckets: int = 10) -> int:
+    """Return the stable train/validation bucket for an episode or clip."""
+    if not split_group_uid:
+        raise ValueError("split_group_uid must not be empty")
+    if buckets < 2:
+        raise ValueError("buckets must be at least 2")
+    digest = hashlib.blake2b(
+        split_group_uid.encode("utf-8"), digest_size=8
+    ).digest()
+    return int.from_bytes(digest, "big") % buckets
+
+
+def shard_partition_id(group_ids: Sequence[int | str] | None) -> str:
+    """Stable publication prefix for one independently packed partition."""
+    if group_ids is None:
+        return ""
+    return f"part-{group_metadata_digest(group_ids)[:16]}"
+
+
+def published_shard_name(
+    group_ids: Sequence[int | str] | None,
+    shard_index: int,
+) -> str:
+    """Return a globally unique, deterministic tar name for publication."""
+    if shard_index < 0:
+        raise ValueError("shard_index must be non-negative")
+    partition_id = shard_partition_id(group_ids)
+    prefix = f"{partition_id}-" if partition_id else ""
+    return f"{prefix}train-{shard_index:06d}.tar"
+
+
 @dataclass(frozen=True)
 class DatasetSnapshot:
     """Immutable provenance of a dataset slice — the cache-key determinant (§3.4a).
