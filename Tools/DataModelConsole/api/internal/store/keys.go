@@ -25,6 +25,12 @@ func StatsPK(dataset, version, promptVersion string) string {
 	return fmt.Sprintf("STATS#%s#%s#%s", dataset, version, promptVersion)
 }
 
+// EmbeddedStatsPK identifies stats aggregated from in-shard reasoning.json
+// records, isolated from legacy per-sample-cache aggregates.
+func EmbeddedStatsPK(dataset, version, promptVersion string) string {
+	return fmt.Sprintf("STATSV2#%s#%s#%s", dataset, version, promptVersion)
+}
+
 // SceneLabelPK is the partition key that groups every scene carrying one
 // (field,value) reasoning label: LBL#{dataset}#{promptVersion}#{field}#{value}.
 // Querying this pk returns all scenes with that label (via SceneLabelSK sorts).
