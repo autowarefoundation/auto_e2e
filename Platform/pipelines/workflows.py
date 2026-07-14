@@ -933,8 +933,13 @@ def generate_reasoning_labels(
     # readers still OOM-killed the task at ~96/125. 12 workers still overlap the
     # ~12s teacher HTTP wait well (the stage is latency-bound, not CPU-bound) and
     # halve peak memory; combined with the raised 60Gi limit this clears the OOM.
-    # Cross-pod fan-out (Flyte map_task) is the real scale fix (#121).
-    label_workers: int = 12,
+    # 2026-07-14: at partition_size=50 (13k+ hf rows loaded via lerobot per worker),
+    # 12 workers OOM at 60Gi (run a88ch58g5xqgj4sc8r4n dn1-1 exit 137 right after
+    # "Labeling 705/7130 samples ..." print). Drop to 6 — lerobot memory scales
+    # ~linearly with loaded episode count, and teacher latency (~12s) leaves 6
+    # workers plenty of overlap. Cross-pod fan-out (Flyte map_task) is the real
+    # scale fix.
+    label_workers: int = 6,
 ) -> Annotated[FlyteDirectory, BatchSize(4)]:
     """Label each 1 Hz World-Model sample with a TEMPORAL front-camera clip, then
     write a versioned label artifact for the data_processing JOIN.
