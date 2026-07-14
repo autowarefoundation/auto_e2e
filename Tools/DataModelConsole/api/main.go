@@ -58,6 +58,9 @@ func main() {
 	datasetsH := handler.NewDatasetsHandler(s3svc)
 	reasoningH := handler.NewReasoningHandler(s3svc)
 	scenesH := handler.NewScenesHandler(s3svc)
+	overlayH := handler.NewOverlayHandler(
+		s3svc, cfg.ExactGeoEnabled, cfg.ExactGeoRequiredRole,
+	)
 	mlflowH := handler.NewMLflowHandler(mlflowSvc)
 	flyteH := handler.NewFlyteHandler(flyteSvc)
 	statsH := handler.NewStatsHandler(s3svc, mlflowSvc)
@@ -90,6 +93,15 @@ func main() {
 			r.Get("/datasets", datasetsH.List)
 			r.Get("/datasets/{name}/versions", datasetsH.ListVersions)
 			r.Get("/datasets/{name}/shards", datasetsH.ListShards)
+			r.Get("/datasets/{name}/rig-projection", overlayH.Rig)
+			r.Get("/datasets/{name}/geo-stats", overlayH.GeoStats)
+			r.Get("/datasets/{name}/geo/heatmap", overlayH.GeoHeatmap)
+			r.Get("/datasets/{name}/geo/episodes/{episode}", overlayH.EpisodePath)
+			r.Get("/datasets/{name}/shards/{shard}/overlay-models", overlayH.Models)
+			r.Get(
+				"/datasets/{name}/shards/{shard}/overlays/{model_id}",
+				overlayH.Body,
+			)
 
 			r.Get("/reasoning-labels/stats", reasoningH.Stats)
 			r.Get("/reasoning-labels/prompt-versions", reasoningH.PromptVersions)
