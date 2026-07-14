@@ -16,6 +16,16 @@ RUN pip install --no-cache-dir torch==2.4.1 torchvision==0.19.1 --index-url http
 # concrete 1.14.x makes the resolve deterministic and fast.
 RUN pip install --no-cache-dir "flytekit==1.14.9"
 
+# KITScenes API + the matching vendored Python 3.12 Lanelet2 wheel. Pinning the
+# SDK commit keeps the official scene split and on-disk parser contract aligned
+# with the immutable dataset revision used by the Flyte cache key.
+ARG KITSCENES_SDK_REVISION=7765cdec5490894266070ab46e23724b58b3da42
+RUN git clone https://github.com/KIT-MRT/kitscenes.git /tmp/kitscenes \
+    && git -C /tmp/kitscenes checkout "${KITSCENES_SDK_REVISION}" \
+    && cd /tmp/kitscenes \
+    && pip install --no-cache-dir ".[map]" \
+    && rm -rf /tmp/kitscenes
+
 # The rest: lerobot-dataset = standalone LeRobotDataset with relaxed deps (no
 # torch override). boto3 is used by label_cache.py (S3); it's already pulled in
 # compatible by flytekit above, but list it so the dependency is explicit.
@@ -27,10 +37,12 @@ RUN pip install --no-cache-dir \
     datasets \
     webdataset \
     Pillow \
-    numpy \
+    "numpy<2.0" \
+    "opencv-python-headless<4.10" \
     av \
     timm \
     scipy \
+    pyproj \
     boto3 \
     pyarrow
 
