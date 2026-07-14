@@ -28,25 +28,35 @@ RUN git lfs install --system \
     && pip install --no-cache-dir ".[map]" \
     && rm -rf /tmp/kitscenes
 
-# The rest: lerobot-dataset = standalone LeRobotDataset with relaxed deps (no
-# torch override). boto3 is used by label_cache.py (S3); it's already pulled in
-# compatible by flytekit above, but list it so the dependency is explicit.
+# KITScenes requires NumPy 1.x, while lerobot-dataset 0.5.0's package metadata
+# requires NumPy 2.x even though its dataset runtime remains NumPy 1-compatible.
+# Install its non-conflicting runtime dependencies explicitly, then install the
+# dataset-only wheel without letting pip replace the KITScenes ABI.
 RUN pip install --no-cache-dir \
     kubernetes \
-    lerobot-dataset \
     physical_ai_av \
-    huggingface_hub \
-    datasets \
+    "huggingface_hub>=1.0,<2.0" \
+    "datasets==4.8.5" \
+    "fsspec==2026.2.0" \
+    "s3fs==2026.2.0" \
+    "gcsfs==2026.2.0" \
     webdataset \
     Pillow \
     "numpy<2.0" \
     "opencv-python-headless<4.10" \
-    av \
+    "av>=15.0,<16.0" \
+    "accelerate>=1.10,<2.0" \
+    "deepdiff>=7.0,<9.0" \
+    "imageio[ffmpeg]>=2.34,<3.0" \
+    "jsonlines>=4.0,<5.0" \
+    "packaging>=24.2,<26.0" \
+    "termcolor>=2.4,<4.0" \
     timm \
     scipy \
     pyproj \
-    boto3 \
-    pyarrow
+    "boto3==1.43.0" \
+    pyarrow \
+    && pip install --no-cache-dir --no-deps "lerobot-dataset==0.5.0"
 
 COPY Model/ /workspace/Model/
 COPY Platform/pipelines/ /workspace/Platform/pipelines/
