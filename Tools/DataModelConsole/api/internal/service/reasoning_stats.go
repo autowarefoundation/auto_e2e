@@ -4,21 +4,21 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"path"
-	"strings"
+	"io"
 	"sync"
-
-	"github.com/aws/aws-sdk-go-v2/aws"
-	"github.com/aws/aws-sdk-go-v2/service/s3"
 
 	"github.com/autowarefoundation/auto_e2e/tools/datamodelconsole/api/internal/model"
 	"github.com/autowarefoundation/auto_e2e/tools/datamodelconsole/api/internal/store"
 )
 
-// statsScanCap bounds how many label objects a single stats computation reads
-// from S3, so a runaway partition cannot turn one request into an unbounded
-// scan. The current partitions are ~1k labels; this leaves ample headroom.
-const statsScanCap = 20000
+const (
+	// statsScanCap fails loudly instead of silently truncating a full-dataset
+	// aggregate if a corrupt index advertises an unreasonable label count.
+	statsScanCap = 100000
+	// reasoning.json is a compact five-horizon record. A larger member is not a
+	// valid label and must not consume an API pod's memory.
+	maxEmbeddedReasoningBytes = 1 << 20
+)
 
 // ReasoningStatsDetail returns the precomputed stats blob for a
 // (dataset, version, promptVersion), read-through DynamoDB: a hit is returned
@@ -105,7 +105,9 @@ func (s *S3Service) ComputeReasoningStats(ctx context.Context, dataset, version,
 // the shared body of the stats-detail miss path and the force-compute endpoint.
 // Returns the blob, the resolved teacher, and the count of scene rows written.
 func (s *S3Service) computeAndPersistStats(ctx context.Context, dataset, version, promptVersion, teacher string) (model.ReasoningStatsBlob, string, int, error) {
-	labels, resolvedTeacher, err := s.scanReasoningLabels(ctx, dataset, promptVersion, teacher)
+	labels, resolvedTeacher, err := s.scanReasoningLabels(
+		ctx, dataset, version, promptVersion, teacher,
+	)
 	if err != nil {
 		return model.ReasoningStatsBlob{}, "", 0, err
 	}
@@ -129,60 +131,76 @@ func (s *S3Service) computeAndPersistStats(ctx context.Context, dataset, version
 	return blob, resolvedTeacher, sceneRows, nil
 }
 
-// scanReasoningLabels reads (up to statsScanCap) reasoning-label objects for a
-// (dataset, promptVersion) from S3 and parses them. When teacher is empty the
-// first teacher partition carrying the promptVersion is used (there is one
-// teacher per prompt_version in practice); the resolved teacher is returned.
-func (s *S3Service) scanReasoningLabels(ctx context.Context, dataset, promptVersion, teacher string) ([]store.ReasoningLabel, string, error) {
-	partition := cacheDataset(dataset)
-	prefix := fmt.Sprintf("%sdataset=%s/", reasoningCachePrefix, partition)
-	resolvedTeacher := teacher
+// reasoningMemberLocation is a trusted byte range discovered from a canonical
+// v2.1 shard index. SampleUID is the join key carried by meta.json.
+type reasoningMemberLocation struct {
+	Shard     string
+	SampleUID string
+	Range     model.MemberRange
+}
 
-	var keys []string
-	p := s3.NewListObjectsV2Paginator(s.client, &s3.ListObjectsV2Input{
-		Bucket: aws.String(s.bucket),
-		Prefix: aws.String(prefix),
-	})
-	for p.HasMorePages() {
-		page, err := p.NextPage(ctx)
-		if err != nil {
-			return nil, "", fmt.Errorf("list reasoning labels for %s/%s: %w", dataset, promptVersion, err)
-		}
-		for _, obj := range page.Contents {
-			key := aws.ToString(obj.Key)
-			if !strings.HasSuffix(key, ".json") {
-				continue
-			}
-			_, t, pv, ok := parseReasoningKey(key)
-			if !ok || pv != promptVersion {
-				continue
-			}
-			if teacher != "" && t != teacher {
-				continue
-			}
-			if resolvedTeacher == "" {
-				resolvedTeacher = t
-			}
-			// Guard against mixing two teachers under one prompt_version: once a
-			// teacher is resolved, only that partition contributes.
-			if t != resolvedTeacher {
-				continue
-			}
-			keys = append(keys, key)
-			if len(keys) >= statsScanCap {
-				break
-			}
-		}
-		if len(keys) >= statsScanCap {
-			break
-		}
-	}
+type embeddedReasoningLabel struct {
+	Body  []byte
+	Label store.ReasoningLabel
+}
 
-	labels, err := s.fetchAndParseLabels(ctx, keys)
+// reasoningMemberLocations resolves embedded labels without consulting the
+// obsolete per-sample cache. targetSampleUID narrows the search for playback;
+// empty means every embedded record for stats/index materialization.
+func (s *S3Service) reasoningMemberLocations(
+	ctx context.Context,
+	dataset, version, targetSampleUID string,
+) ([]reasoningMemberLocation, string, error) {
+	version = s.versionOrResolve(ctx, dataset, version)
+	shards, _, err := s.ListShards(ctx, dataset, version, 100000, 0)
 	if err != nil {
-		return nil, "", err
+		return nil, version, err
 	}
-	return labels, resolvedTeacher, nil
+
+	locations := make([]reasoningMemberLocation, 0)
+	for _, shard := range shards {
+		index, err := s.BuildShardIndex(ctx, dataset, version, shard.Name)
+		if err != nil {
+			return nil, version, fmt.Errorf(
+				"index reasoning shard %s: %w", shard.Name, err,
+			)
+		}
+		for _, sample := range index.Samples {
+			sampleUID := sample.SampleUID
+			if sampleUID == "" {
+				sampleUID = sample.Key
+			}
+			if targetSampleUID != "" &&
+				targetSampleUID != sampleUID &&
+				targetSampleUID != sample.Key {
+				continue
+			}
+			member, ok := sample.Members["reasoning.json"]
+			if !ok || !sample.HasReasoning {
+				continue
+			}
+			if member.Size <= 0 || member.Size > maxEmbeddedReasoningBytes {
+				return nil, version, fmt.Errorf(
+					"invalid reasoning member size %d for %s",
+					member.Size, sampleUID,
+				)
+			}
+			locations = append(locations, reasoningMemberLocation{
+				Shard:     shard.Name,
+				SampleUID: sampleUID,
+				Range:     member,
+			})
+			if targetSampleUID != "" {
+				return locations, version, nil
+			}
+			if len(locations) > statsScanCap {
+				return nil, version, fmt.Errorf(
+					"reasoning label count exceeds cap %d", statsScanCap,
+				)
+			}
+		}
+	}
+	return locations, version, nil
 }
 
 // labelFetchConcurrency bounds parallel S3 GetObject calls when materialising a
@@ -191,33 +209,67 @@ func (s *S3Service) scanReasoningLabels(ctx context.Context, dataset, promptVers
 // without exhausting connections/file descriptors.
 const labelFetchConcurrency = 32
 
-// fetchAndParseLabels reads and parses each label object concurrently (bounded
-// pool). A single malformed label is skipped (a bad teacher output must not
-// blank the whole ODD view); any S3 error fails the scan. Order is not
-// preserved — the aggregation is order-independent.
-func (s *S3Service) fetchAndParseLabels(ctx context.Context, keys []string) ([]store.ReasoningLabel, error) {
+// fetchEmbeddedReasoning reads canonical tar members concurrently through
+// bounded S3 Range GETs. A malformed JSON record is skipped, while a sample-id
+// mismatch fails loudly because it means the shard join is corrupt.
+func (s *S3Service) fetchEmbeddedReasoning(
+	ctx context.Context,
+	dataset, version string,
+	locations []reasoningMemberLocation,
+) ([]embeddedReasoningLabel, error) {
 	type result struct {
-		lbl store.ReasoningLabel
-		ok  bool
-		err error
+		record embeddedReasoningLabel
+		ok     bool
+		err    error
 	}
-	results := make([]result, len(keys))
+	results := make([]result, len(locations))
 
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
 	sem := make(chan struct{}, labelFetchConcurrency)
 	var wg sync.WaitGroup
-	for i, key := range keys {
+	for i, location := range locations {
 		wg.Add(1)
 		sem <- struct{}{}
-		go func(i int, key string) {
+		go func(i int, location reasoningMemberLocation) {
 			defer wg.Done()
 			defer func() { <-sem }()
-			body, err := s.getObjectBytes(ctx, key)
+			reader, closer, _, err := s.StreamTarMemberRange(
+				ctx,
+				dataset,
+				version,
+				location.Shard,
+				location.Range.Offset,
+				location.Range.Size,
+			)
 			if err != nil {
-				results[i] = result{err: fmt.Errorf("read reasoning label %s: %w", path.Base(key), err)}
+				results[i] = result{err: fmt.Errorf(
+					"read reasoning label %s from %s: %w",
+					location.SampleUID, location.Shard, err,
+				)}
 				cancel() // stop siblings on the first hard error
+				return
+			}
+			body, readErr := io.ReadAll(io.LimitReader(
+				reader, maxEmbeddedReasoningBytes+1,
+			))
+			closeErr := closer.Close()
+			if readErr != nil {
+				results[i] = result{err: readErr}
+				cancel()
+				return
+			}
+			if closeErr != nil {
+				results[i] = result{err: closeErr}
+				cancel()
+				return
+			}
+			if len(body) > maxEmbeddedReasoningBytes {
+				results[i] = result{err: fmt.Errorf(
+					"reasoning label %s exceeds size cap", location.SampleUID,
+				)}
+				cancel()
 				return
 			}
 			lbl, perr := store.ParseReasoningLabel(body)
@@ -225,21 +277,84 @@ func (s *S3Service) fetchAndParseLabels(ctx context.Context, keys []string) ([]s
 				// Skip a malformed label (not a hard error).
 				return
 			}
-			results[i] = result{lbl: lbl, ok: true}
-		}(i, key)
+			if lbl.SampleID != location.SampleUID {
+				results[i] = result{err: fmt.Errorf(
+					"reasoning sample id mismatch: member=%s body=%s",
+					location.SampleUID, lbl.SampleID,
+				)}
+				cancel()
+				return
+			}
+			results[i] = result{
+				record: embeddedReasoningLabel{Body: body, Label: lbl},
+				ok:     true,
+			}
+		}(i, location)
 	}
 	wg.Wait()
 
-	labels := make([]store.ReasoningLabel, 0, len(keys))
+	records := make([]embeddedReasoningLabel, 0, len(locations))
 	for _, r := range results {
 		if r.err != nil {
 			return nil, r.err
 		}
 		if r.ok {
-			labels = append(labels, r.lbl)
+			records = append(records, r.record)
 		}
 	}
-	return labels, nil
+	return records, nil
+}
+
+// scanReasoningLabels reads embedded v2.1 labels and selects one explicit
+// prompt/teacher partition from provenance carried inside each JSON record.
+func (s *S3Service) scanReasoningLabels(
+	ctx context.Context,
+	dataset, version, promptVersion, teacher string,
+) ([]store.ReasoningLabel, string, error) {
+	locations, resolvedVersion, err := s.reasoningMemberLocations(
+		ctx, dataset, version, "",
+	)
+	if err != nil {
+		return nil, "", err
+	}
+	records, err := s.fetchEmbeddedReasoning(
+		ctx, dataset, resolvedVersion, locations,
+	)
+	if err != nil {
+		return nil, "", err
+	}
+
+	resolvedTeacher := teacher
+	labels := make([]store.ReasoningLabel, 0, len(records))
+	for _, record := range records {
+		label := record.Label
+		if label.PromptVersion != promptVersion ||
+			!reasoningTeacherMatches(label, teacher) {
+			continue
+		}
+		labelTeacher := reasoningTeacher(label)
+		if resolvedTeacher == "" {
+			resolvedTeacher = labelTeacher
+		}
+		if labelTeacher != resolvedTeacher {
+			continue
+		}
+		labels = append(labels, label)
+	}
+	return labels, resolvedTeacher, nil
+}
+
+func reasoningTeacher(label store.ReasoningLabel) string {
+	if label.TeacherProvider != "" {
+		return label.TeacherProvider
+	}
+	return label.TeacherModel
+}
+
+func reasoningTeacherMatches(label store.ReasoningLabel, requested string) bool {
+	return requested == "" ||
+		requested == label.TeacherProvider ||
+		requested == label.TeacherModel
 }
 
 // SearchScenesByLabel returns the sample ids carrying a (field,value) reasoning
@@ -286,9 +401,11 @@ func (s *S3Service) ResolveSampleShards(ctx context.Context, dataset, version st
 			continue // best-effort: skip a shard that won't index
 		}
 		for _, smp := range idx.Samples {
-			if _, ok := want[smp.Key]; ok && out[smp.Key] == "" {
-				out[smp.Key] = sh.Name
-				remaining--
+			for _, sampleID := range []string{smp.SampleUID, smp.Key} {
+				if _, ok := want[sampleID]; ok && out[sampleID] == "" {
+					out[sampleID] = sh.Name
+					remaining--
+				}
 			}
 		}
 	}
