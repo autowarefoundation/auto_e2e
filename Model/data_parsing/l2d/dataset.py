@@ -162,7 +162,18 @@ class L2DDataset(Dataset):
         # default and only re-fetches when `force_cache_sync=True`. We map the
         # legacy flag onto that: local_files_only=True means "don't force a
         # remote sync", which is already the default, so it is simply not passed.
-        _kwargs: dict[str, Any] = {"repo_id": repo_id, "episodes": episodes}
+        #
+        # revision="main" forces lerobot to fetch from the ACTIVE branch instead of
+        # the CODEBASE_VERSION tag (v3.0 for lerobot 0.5.0). The `v3.0` tag on
+        # yaak-ai/L2D points to a stale/broken snapshot (2026-07-14 audit:
+        # tasks.parquet is 1485 bytes / 1 row at v3.0 vs 135484 bytes / 4219 rows
+        # on main; data parquet 59MB vs 62MB). Reading v3.0 blows up in the label
+        # pod: iloc[task_idx].name → IndexError, and _absolute_to_relative_idx →
+        # KeyError, because meta.tasks + episodes.parquet on the tag are shorter
+        # than the actual dataset. Pin to main so we always get the live L2D
+        # revision — the entire pipeline was authored against main.
+        _kwargs: dict[str, Any] = {"repo_id": repo_id, "episodes": episodes,
+                                    "revision": "main"}
         if root is not None:
             # Point lerobot at the partition's materialized raw dir so it loads
             # from there instead of re-downloading to the shared HF cache (#121
