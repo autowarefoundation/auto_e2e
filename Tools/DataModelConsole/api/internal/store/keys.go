@@ -36,6 +36,15 @@ func SceneLabelPK(dataset, promptVersion, field, value string) string {
 	return fmt.Sprintf("LBL#%s#%s#%s#%s", dataset, promptVersion, field, value)
 }
 
+// SceneLabelVersionPK isolates the sample_uid-based index for one immutable
+// packed dataset version from legacy s%08d rows.
+func SceneLabelVersionPK(dataset, version, promptVersion, field, value string) string {
+	return fmt.Sprintf(
+		"LBLV2#%s#%s#%s#%s#%s",
+		dataset, version, promptVersion, field, value,
+	)
+}
+
 // SceneLabelSK is the sort key of one scene under a SceneLabelPK:
 // SCENE#{sampleID}. The SCENE# prefix keeps scene rows distinct from any future
 // metadata row that might share the partition.
