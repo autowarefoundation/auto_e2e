@@ -13,8 +13,14 @@ import (
 // decoded; the v2 context axes (weather, geo, road topology, actor_*, timing)
 // are ALL null in this dataset and are intentionally not modelled here.
 type ReasoningLabel struct {
-	SampleID string         `json:"sample_id"`
-	Horizons []LabelHorizon `json:"horizons"`
+	SchemaVersion   string         `json:"schema_version"`
+	SampleID        string         `json:"sample_id"`
+	DatasetName     string         `json:"dataset_name"`
+	TeacherProvider string         `json:"teacher_provider"`
+	TeacherModel    string         `json:"teacher_model"`
+	PromptVersion   string         `json:"prompt_version"`
+	Abstained       bool           `json:"abstained"`
+	Horizons        []LabelHorizon `json:"horizons"`
 }
 
 // LabelHorizon is one horizon (now/+1s/.../+4s) of a reasoning label. Single-
