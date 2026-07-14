@@ -43,7 +43,10 @@ func main() {
 		os.Exit(1)
 	}
 
-	s3svc, err := service.NewS3Service(ctx, cfg.AWSRegion, cfg.DatasetsBucket, cfg.PresignExpiry, dynStore)
+	s3svc, err := service.NewS3Service(
+		ctx, cfg.AWSRegion, cfg.DatasetsBucket, cfg.PresignExpiry, dynStore,
+		cfg.ArtifactsBucket,
+	)
 	if err != nil {
 		slog.Error("init s3 service", "error", err)
 		os.Exit(1)
@@ -91,7 +94,6 @@ func main() {
 			r.Get("/reasoning-labels/stats", reasoningH.Stats)
 			r.Get("/reasoning-labels/prompt-versions", reasoningH.PromptVersions)
 			r.Get("/reasoning-labels/{dataset}/{sample_id}", reasoningH.GetLabel)
-
 
 			r.Get("/mlflow/experiments", mlflowH.Experiments)
 			r.Get("/mlflow/experiments/{id}/runs", mlflowH.Runs)
