@@ -36,7 +36,7 @@ _NUM_HORIZONS = 5
 
 def init_worker(
     repo_id: str,
-    episodes: Optional[List[int]],
+    episodes: Optional[List[int | str]],
     dataset_name: str,
     teacher: str,
     teacher_kwargs: Dict[str, Any],
@@ -68,6 +68,19 @@ def init_worker(
             raise ValueError(
                 "raw_path is required for the NVIDIA dataset (no HF repo to pull).")
         _DS = NvidiaAVDataset(data_root=raw_path, reasoning_clip_only=True)
+    elif dataset_name == "KIT-MRT/KITScenes-Multimodal":
+        from data_parsing.kit_scenes import KitScenesDataset
+        if raw_path is None:
+            raise ValueError(
+                "raw_path is required for KITScenes (scene is already ingested)."
+            )
+        scene_ids = [str(scene_id) for scene_id in episodes] if episodes else None
+        _DS = KitScenesDataset(
+            data_root=raw_path,
+            split="train",
+            scene_ids=scene_ids,
+            reasoning_clip_only=True,
+        )
     else:
         from data_parsing.l2d import L2DDataset
         # root=raw_path (when provided) makes lerobot read the partition's
