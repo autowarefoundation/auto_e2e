@@ -8,10 +8,10 @@ Architecture:
 MLflow: Only evaluate task logs. 2 experiments: imitation-learning, offline-rl.
 """
 import enum
-from flytekit import task, workflow, dynamic, Resources, Secret
+from flytekit import task, workflow, dynamic, Resources, Secret, BatchSize
 from flytekit.types.file import FlyteFile
 from flytekit.types.directory import FlyteDirectory
-from typing import NamedTuple, List, Optional
+from typing import Annotated, NamedTuple, List, Optional
 
 import os as _os
 
@@ -240,12 +240,21 @@ def _loader_projection(loader, device):
     # blip would abort the WHOLE workflow without retries. 2 attempts cover
     # ~all rate-limit / node-placement transients (Flyte-review H3 fix).
     retries=2,
+    # Cut the multipart-upload chunk from the flytekit default 25 MiB to 8 MiB.
+    # After data_ingest returns FlyteDirectory("/tmp/raw_data"), flytekit calls
+    # fsspec/s3fs to upload the whole tree; s3fs holds one `chunksize` buffer +
+    # aiobotocore send buffer PER in-flight file. Combined with BatchSize(4) on
+    # the return type, peak upload RSS ≈ 4 × 8 MiB × (few multipart windows) ≈
+    # a few hundred MB, comfortably inside 64Gi. Prior run a9rzqr9mfg5g4c2j7dmt
+    # OOMKilled DURING this upload (127 GB / 264 files at PS=50, unbounded
+    # concurrency), so the fix targets exactly that path.
+    environment={"_F_P_WRITE_CHUNK_SIZE": "8388608"},
 )
 def data_ingest(
     dataset: Dataset = Dataset.L2D,
     episodes: int = 3,
     group_ids: Optional[List[str]] = None,
-) -> FlyteDirectory:
+) -> Annotated[FlyteDirectory, BatchSize(4)]:
     """Download raw dataset from HuggingFace (lerobot for L2D, physical_ai_av for NVIDIA).
 
     HF token comes from the `hf-token` K8s Secret (injected as env var by Flyte),
@@ -494,6 +503,10 @@ def data_ingest(
     # 100-partition fan-out: transient pack failures (OOM at bad seed, torn
     # ProcessPool worker) shouldn't abort the whole workflow (Flyte-review H3).
     retries=2,
+    # Same fsspec upload-chunk cap as data_ingest — pack output includes the
+    # sibling pool/ jpg tree plus the *.tar shards, so it can also hit tens of
+    # thousands of files. See data_ingest env comment for the mechanism.
+    environment={"_F_P_WRITE_CHUNK_SIZE": "8388608"},
 )
 def data_processing(
     raw_data: FlyteDirectory,
@@ -504,7 +517,7 @@ def data_processing(
     world_model: bool = False,
     reasoning_labels: Optional[FlyteDirectory] = None,
     group_ids: Optional[List[str]] = None,
-) -> FlyteDirectory:
+) -> Annotated[FlyteDirectory, BatchSize(4)]:
     """Pre-extract aligned frames + egomotion → WebDataset shards.
 
     Solves Issue #30: no video decode at training time.
@@ -896,6 +909,8 @@ def data_processing(
     # workflow. The teacher call is idempotent (labels are computed, not stored),
     # so a retry is safe (Flyte-review H3).
     retries=2,
+    # Same fsspec upload-chunk cap as data_ingest (see comment there).
+    environment={"_F_P_WRITE_CHUNK_SIZE": "8388608"},
 )
 def generate_reasoning_labels(
     raw_data: FlyteDirectory,
@@ -920,7 +935,7 @@ def generate_reasoning_labels(
     # halve peak memory; combined with the raised 60Gi limit this clears the OOM.
     # Cross-pod fan-out (Flyte map_task) is the real scale fix (#121).
     label_workers: int = 12,
-) -> FlyteDirectory:
+) -> Annotated[FlyteDirectory, BatchSize(4)]:
     """Label each 1 Hz World-Model sample with a TEMPORAL front-camera clip, then
     write a versioned label artifact for the data_processing JOIN.
 
