@@ -3,10 +3,16 @@ package service
 import (
 	"archive/tar"
 	"bytes"
+	"context"
+	"encoding/binary"
+	"errors"
 	"io"
 	"math"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/autowarefoundation/auto_e2e/tools/datamodelconsole/api/internal/model"
 )
 
 func TestSampleKeyOf(t *testing.T) {
@@ -263,6 +269,263 @@ func TestCountingReader_AccumulatesAcrossReads(t *testing.T) {
 	}
 	if cr.n != int64(len(src)) {
 		t.Fatalf("countingReader.n changed after EOF read: %d", cr.n)
+	}
+}
+
+func TestFullTarScanSemaphoreBoundsProcessWide(t *testing.T) {
+	acquired := make(chan func(), maxConcurrentFullTarScans+1)
+	errs := make(chan error, maxConcurrentFullTarScans+1)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	for range maxConcurrentFullTarScans + 1 {
+		go func() {
+			release, err := acquireFullTarScan(ctx)
+			if err != nil {
+				errs <- err
+				return
+			}
+			acquired <- release
+		}()
+	}
+
+	releases := make([]func(), 0, maxConcurrentFullTarScans+1)
+	for range maxConcurrentFullTarScans {
+		select {
+		case release := <-acquired:
+			releases = append(releases, release)
+		case err := <-errs:
+			t.Fatalf("acquire index-build slot: %v", err)
+		case <-time.After(time.Second):
+			t.Fatal("timed out acquiring allowed index-build slots")
+		}
+	}
+
+	select {
+	case release := <-acquired:
+		release()
+		t.Fatalf(
+			"more than %d full-tar scans acquired concurrently",
+			maxConcurrentFullTarScans,
+		)
+	case err := <-errs:
+		t.Fatalf("unexpected acquire error: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	releases[0]()
+	select {
+	case release := <-acquired:
+		releases = append(releases, release)
+	case err := <-errs:
+		t.Fatalf("queued acquire failed after release: %v", err)
+	case <-time.After(time.Second):
+		t.Fatal("queued shard build did not acquire the released slot")
+	}
+	for _, release := range releases[1:] {
+		release()
+	}
+}
+
+func TestBuildShardIndexWaiterHonorsContextCancellation(t *testing.T) {
+	service, _ := newPublicationTestService(t)
+	const shard = "scene-a-train-000000.tar"
+	service.indexSF["kitscenes/v2.1/"+shard] = &shardIndexBuild{
+		done: make(chan struct{}),
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := service.BuildShardIndex(
+		ctx,
+		"kitscenes",
+		"v2.1",
+		shard,
+	)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("BuildShardIndex error = %v, want context.Canceled", err)
+	}
+}
+
+type cachedShardIndexStore struct {
+	consoleStore
+	index    *model.ShardIndex
+	getCalls int
+}
+
+func (s *cachedShardIndexStore) GetShardIndex(
+	context.Context,
+	string,
+	string,
+	string,
+) (*model.ShardIndex, error) {
+	s.getCalls++
+	return s.index, nil
+}
+
+func TestListSamplesUsesCachedShardIndex(t *testing.T) {
+	service, client := newPublicationTestService(t)
+	const (
+		shard     = "scene-a-train-000000.tar"
+		sampleUID = "kitscenes-v1-scene-a-f000000"
+	)
+	cache := &cachedShardIndexStore{
+		index: &model.ShardIndex{
+			Fps:     indexFps,
+			Version: "v2.1",
+			Shard:   shard,
+			Samples: []model.IndexSample{{
+				Key:       sampleUID,
+				SampleUID: sampleUID,
+				Members: map[string]model.MemberRange{
+					"meta.json": {Offset: 1024, Size: 20},
+					"cam_0.jpg": {Offset: 512, Size: 4},
+				},
+			}},
+		},
+	}
+	service.store = cache
+
+	samples, page, err := service.ListSamples(
+		context.Background(),
+		"kitscenes",
+		"v2.1",
+		shard,
+		50,
+		0,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cache.getCalls != 1 {
+		t.Fatalf("shard index reads = %d, want 1", cache.getCalls)
+	}
+	shardKey := "kitscenes/v2.1/shards/" + shard
+	if client.getCalls[shardKey] != 0 {
+		t.Fatalf("cached sample list fetched shard %d times", client.getCalls[shardKey])
+	}
+	if page.Total != 1 || len(samples) != 1 {
+		t.Fatalf("samples/page = %+v / %+v", samples, page)
+	}
+	if len(samples[0].Members) != 2 ||
+		samples[0].Members[0].Name != sampleUID+".cam_0.jpg" ||
+		samples[0].Members[1].Name != sampleUID+".meta.json" {
+		t.Fatalf("member order/shape changed: %+v", samples[0].Members)
+	}
+}
+
+func TestSampleTarScansUseSharedProcessSemaphore(t *testing.T) {
+	service, client := newPublicationTestService(t)
+	if _, err := service.loadPublicationManifest(
+		context.Background(), "kitscenes", "v2.1",
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	releases := make([]func(), 0, maxConcurrentFullTarScans)
+	for range maxConcurrentFullTarScans {
+		release, err := acquireFullTarScan(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		releases = append(releases, release)
+	}
+	defer func() {
+		for _, release := range releases {
+			release()
+		}
+	}()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	const shard = "scene-a-train-000000.tar"
+	shardKey := "kitscenes/v2.1/shards/" + shard
+	before := client.getCalls[shardKey]
+	if _, _, err := service.ListSamples(
+		ctx, "kitscenes", "v2.1", shard, 50, 0,
+	); !errors.Is(err, context.Canceled) {
+		t.Fatalf("ListSamples saturated scan error = %v", err)
+	}
+	if _, err := service.GetSampleDetail(
+		ctx,
+		"kitscenes",
+		"v2.1",
+		shard,
+		"kitscenes-v1-scene-a-f000000",
+	); !errors.Is(err, context.Canceled) {
+		t.Fatalf("GetSampleDetail saturated scan error = %v", err)
+	}
+	if client.getCalls[shardKey] != before {
+		t.Fatal("sample scan reached S3 without acquiring the shared slot")
+	}
+}
+
+func TestDecodeEgoPayloadRejectsMalformedData(t *testing.T) {
+	valid := make([]byte, egoPayloadBytes)
+	if got, err := decodeEgoPayload(valid); err != nil ||
+		len(got) != egoTotalFloats {
+		t.Fatalf("valid ego payload = %d floats, %v", len(got), err)
+	}
+
+	withFloat := func(index int, value float32) []byte {
+		body := append([]byte(nil), valid...)
+		binary.LittleEndian.PutUint32(
+			body[index*4:],
+			math.Float32bits(value),
+		)
+		return body
+	}
+	tests := []struct {
+		name string
+		body []byte
+	}{
+		{name: "short", body: valid[:len(valid)-1]},
+		{name: "trailing byte", body: append(append([]byte(nil), valid...), 0)},
+		{name: "nan history", body: withFloat(0, float32(math.NaN()))},
+		{name: "positive infinity future", body: withFloat(300, float32(math.Inf(1)))},
+		{name: "negative infinity future", body: withFloat(383, float32(math.Inf(-1)))},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := decodeEgoPayload(test.body); err == nil {
+				t.Fatal("malformed ego payload was accepted")
+			}
+		})
+	}
+}
+
+func TestGetSampleDetailRejectsNonFiniteEgoPayload(t *testing.T) {
+	service, client := newPublicationTestService(t)
+	if _, err := service.loadPublicationManifest(
+		context.Background(), "kitscenes", "v2.1",
+	); err != nil {
+		t.Fatal(err)
+	}
+	const (
+		shard     = "scene-a-train-000000.tar"
+		sampleUID = "kitscenes-v1-scene-a-f000000"
+	)
+	ego := make([]byte, egoPayloadBytes)
+	binary.LittleEndian.PutUint32(
+		ego[(egoTotalFloats-1)*4:],
+		math.Float32bits(float32(math.NaN())),
+	)
+	shardKey := "kitscenes/v2.1/shards/" + shard
+	object := client.objects[shardKey]
+	object.body = encodeTestTar(t, []testTarMember{{
+		name: sampleUID + ".ego.npy",
+		body: ego,
+	}})
+	client.objects[shardKey] = object
+
+	if _, err := service.GetSampleDetail(
+		context.Background(),
+		"kitscenes",
+		"v2.1",
+		shard,
+		sampleUID,
+	); err == nil || !strings.Contains(err.Error(), "non-finite") {
+		t.Fatalf("non-finite detail payload error = %v", err)
 	}
 }
 
