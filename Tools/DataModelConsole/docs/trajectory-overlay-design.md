@@ -11,6 +11,9 @@ Implementation snapshot (2026-07-15):
   sharded dataset creation -> immutable publication -> GPU overlay precompute.
 - `Platform/buildspec-launch-overlay.yml` launches that workflow from the
   VPC-local CodeBuild project `auto-e2e-platform-overlay-launch`.
+- PR #74's offline report boundary is implemented as
+  `wf_export_trajectory_report`: it consumes the canonical AOVL plus its v2.1
+  shard and emits per-scene MP4, thumbnail, metrics, and a provenance manifest.
 - Production activation still requires the rollout sequence in section 11.
   Exact routes remain disabled until authenticated, non-spoofable role
   propagation is deployed.
@@ -649,6 +652,10 @@ any viewer-supplied value and injects an authenticated role.
   `wf_publish_and_precompute_overlays`,
   `wf_create_publish_and_precompute_overlays`, and the VPC-local
   `auto-e2e-platform-overlay-launch` CodeBuild project.
+- **Optional export:** PR #74's renderer/report concept is adapted to consume
+  canonical AOVL controls and `sample_uid` joins. The CPU-only
+  `wf_export_trajectory_report` returns a self-contained `FlyteDirectory`
+  without re-running checkpoint inference.
 
 ### Remaining production rollout
 
@@ -681,8 +688,11 @@ any viewer-supplied value and injects an authenticated role.
 **Phase 2 — canonical vector overlays (Flyte GPU + Dynamo + API):**
 - Add `initial_noise=` to `FlowMatchingPlanner.forward` (P0.1) + `load_policy`/`predict_control`/`noise_from` helpers; coarse per-shard task computing the **canonical, split-free** overlay over ALL samples; write binary `overlay.bin.gz` to S3 + SHARD×MODEL pointer + `OVLSET#` status; new API endpoints (read-only; NO compute trigger — ops-only); BEV + camera + map multi-model overlay/toggle/compare with display-mode toggle. **No `gsi1`/`SCENELIST#`** (P1.6).
 
-**Phase 3 — optional MP4 export (PR#74):**
-- Move `Tools/trajectory_visualization/runner.py` under `/Tools`; wrap to emit **one MP4 per scene**; expose as a "download clip," scoped + TTL'd. **Not required for the feature.**
+**Phase 3 — optional MP4 export (PR#74, implemented):**
+- `Tools/trajectory_visualization` reads the canonical AOVL and matching v2.1
+  shard, emits **one MP4 per scene** plus thumbnail/metrics/manifest, and is
+  wrapped by `wf_export_trajectory_report`. It deliberately does not reuse the
+  PR's legacy checkpoint inference, `v0=0`, or eval-only loader.
 
 **Risks:**
 - **Yaw-sign mirror + map ENU** (§10, §9-bis) — the corrected ENU formula is necessary-not-sufficient; must be verified JOINTLY (straight + left/right turn) before any overlay or map path is trusted; blocks Phase 2 acceptance.
