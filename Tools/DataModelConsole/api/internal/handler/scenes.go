@@ -26,17 +26,23 @@ func NewScenesHandler(s3 *service.S3Service) *ScenesHandler {
 const sceneSearchMaxLimit = 5000
 
 // Search handles
-// GET /api/v1/scenes/search?dataset=&prompt_version=&field=&value=&limit=
-// — the scenes (sample ids) carrying a specific (field,value) reasoning label.
+// GET /api/v1/scenes/search?dataset=&teacher=&prompt_version=&field=&value=&limit=
+// — the scenes (sample ids) carrying a specific (field,value) reasoning label
+// in one exact teacher partition.
 func (h *ScenesHandler) Search(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	dataset := q.Get("dataset")
+	teacher := q.Get("teacher")
 	promptVersion := q.Get("prompt_version")
 	field := q.Get("field")
 	value := q.Get("value")
 
 	if !validReasoningParam(dataset) || !validReasoningParam(promptVersion) {
 		writeError(w, http.StatusBadRequest, model.CodeInvalidParam, "missing or invalid dataset/prompt_version")
+		return
+	}
+	if !service.ValidReasoningTeacherID(teacher) {
+		writeError(w, http.StatusBadRequest, model.CodeInvalidParam, "missing or invalid teacher")
 		return
 	}
 	if !store.IsStatField(field) {
@@ -69,10 +75,11 @@ func (h *ScenesHandler) Search(w http.ResponseWriter, r *http.Request) {
 
 	// Fetch one extra row so we can report truncation truthfully instead of
 	// silently capping at `limit`.
-	ids, resolvedVersion, err := h.s3.SearchScenesByLabelAtVersion(
+	ids, resolvedVersion, err := h.s3.SearchScenesByLabelForTeacherAtVersion(
 		r.Context(),
 		dataset,
 		version,
+		teacher,
 		promptVersion,
 		field,
 		value,
@@ -107,6 +114,7 @@ func (h *ScenesHandler) Search(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, model.SceneSearchResponse{
 		Dataset:       dataset,
+		Teacher:       teacher,
 		PromptVersion: promptVersion,
 		Version:       resolvedVersion,
 		Field:         field,
