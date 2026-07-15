@@ -377,8 +377,13 @@ function DatasetDetailInner({ dataset }: { dataset: string }) {
               <TableBody>
                 {promptVersionList.map((pv) => (
                   <TableRow key={`${pv.teacher}/${pv.prompt_version}`}>
-                    <TableCell className="font-mono text-xs">
-                      {pv.teacher}
+                    <TableCell className="text-xs">
+                      <span className="block font-mono">
+                        {pv.teacher_model || "unknown model"}
+                      </span>
+                      <span className="block font-mono text-[10px] text-slate-500">
+                        {pv.teacher_provider || "unknown provider"}
+                      </span>
                     </TableCell>
                     <TableCell
                       className="max-w-[320px] truncate font-mono text-xs"
