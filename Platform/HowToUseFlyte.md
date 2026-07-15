@@ -204,18 +204,31 @@ export AWS_PROFILE=autowarefoundation
 export AWS_REGION=us-west-2
 ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
 CACHE_BUCKET="auto-e2e-platform-codebuild-cache-${ACCOUNT_ID}"
+IMAGE_TAG="trajectory-$(git rev-parse --short=12 HEAD)"
 
 git archive --format=zip --output=/tmp/auto-e2e-source.zip HEAD
 aws s3 cp /tmp/auto-e2e-source.zip "s3://${CACHE_BUCKET}/source.zip"
 
 aws codebuild start-build \
-  --project-name auto-e2e-platform-build-images
+  --project-name auto-e2e-platform-build-images \
+  --environment-variables-override \
+    "name=IMAGE_TAG,value=${IMAGE_TAG},type=PLAINTEXT"
 ```
 
-Wait for the image build to reach `SUCCEEDED`. The overlay launcher resolves
-the resulting `training`, `eval`, `offline-rl`, and `data-prep` images to ECR
-digests. It also recomputes the preprocessing and inference source digests
-inside the source bundle; Flyte tasks reject any mismatch at runtime.
+Wait for the image build to reach `SUCCEEDED`, then register the same tag:
+
+```bash
+aws codebuild start-build \
+  --project-name auto-e2e-platform-flyte-register \
+  --environment-variables-override \
+    "name=IMAGE_TAG,value=${IMAGE_TAG},type=PLAINTEXT"
+```
+
+The commit-derived tag keeps active workflows that still reference `latest`
+unchanged. Registration and launch resolve the selected `training`, `eval`,
+`offline-rl`, and `data-prep` tags to ECR digests. The launcher also recomputes
+the preprocessing and inference source digests inside the source bundle; Flyte
+tasks reject any mismatch at runtime.
 
 ### Launch the one-episode smoke
 
@@ -227,7 +240,8 @@ MODEL_VERSION=30  # Example only; replace with the version you selected.
 aws codebuild start-build \
   --project-name auto-e2e-platform-overlay-launch \
   --environment-variables-override \
-    "name=MODEL_VERSION,value=${MODEL_VERSION},type=PLAINTEXT"
+    "name=MODEL_VERSION,value=${MODEL_VERSION},type=PLAINTEXT" \
+    "name=IMAGE_TAG,value=${IMAGE_TAG},type=PLAINTEXT"
 ```
 
 The launcher defaults to `EPISODES=1`, `DATASET_VERSION=v2.1`, and
@@ -260,6 +274,7 @@ aws codebuild start-build \
   --project-name auto-e2e-platform-overlay-launch \
   --environment-variables-override \
     "name=MODEL_VERSION,value=${MODEL_VERSION},type=PLAINTEXT" \
+    "name=IMAGE_TAG,value=${IMAGE_TAG},type=PLAINTEXT" \
     "name=PUBLISHED_DATASET,value=kitscenes,type=PLAINTEXT" \
     "name=EPISODES,value=0,type=PLAINTEXT"
 ```
