@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from typing import Any, List, Mapping, NamedTuple, Sequence
 
 from flytekit import Resources, task
@@ -33,6 +34,8 @@ OVERLAY_CACHE_VERSION = (
     f"overlay-{OVERLAY_SCHEMA}-{INFERENCE_CONTRACT_VERSION}-"
     f"{NOISE_POLICY_VERSION}"
 )
+_MODEL_NAME_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
+_EXECUTION_ID_RE = re.compile(r"^a[a-z0-9]{19}$")
 
 
 def _large_shm_pod_template():
@@ -353,6 +356,96 @@ def _parse_gate(value: str) -> dict[str, str]:
     return gate
 
 
+def _resolve_model_version_for_execution(
+    client,
+    *,
+    registered_model_name: str,
+    train_execution_id: str,
+    expected_dataset: str,
+    expected_dataset_version: str,
+) -> str:
+    """Resolve one Full Run to a registry version using immutable lineage."""
+    if not _MODEL_NAME_RE.fullmatch(registered_model_name):
+        raise ValueError(f"invalid registered model name {registered_model_name!r}")
+    if not _EXECUTION_ID_RE.fullmatch(train_execution_id):
+        raise ValueError(f"invalid Flyte execution ID {train_execution_id!r}")
+
+    matches = []
+    versions = client.search_model_versions(
+        f"name='{registered_model_name}'"
+    )
+    for version in versions:
+        run = client.get_run(version.run_id)
+        params = run.data.params
+        if params.get("ctx/train_execution_id") != train_execution_id:
+            continue
+        dataset = params.get("data/dataset", "")
+        dataset_version = params.get("data/dataset_version", "")
+        if dataset != expected_dataset or dataset_version != expected_dataset_version:
+            raise ValueError(
+                "Full Run model has a different dataset coordinate: "
+                f"{dataset}/{dataset_version}"
+            )
+        try:
+            version_number = int(version.version)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"MLflow model version is not numeric: {version.version!r}"
+            ) from exc
+        version_tags = getattr(version, "tags", {}) or {}
+        run_tags = getattr(run.data, "tags", {}) or {}
+        digest = (
+            version_tags.get("checkpoint_sha256")
+            or run_tags.get("checkpoint_sha256")
+            or params.get("model/checkpoint_sha256")
+            or ""
+        )
+        matches.append((version_number, str(version.version), digest))
+
+    if not matches:
+        raise ValueError(
+            f"no {registered_model_name!r} model was produced by "
+            f"Full Run {train_execution_id}"
+        )
+    if len(matches) > 1:
+        digests = {digest for _, _, digest in matches if digest}
+        if len(digests) != 1 or any(not digest for _, _, digest in matches):
+            raise ValueError(
+                "multiple model versions claim the Full Run but their "
+                "checkpoint identity is ambiguous"
+            )
+    return max(matches)[1]
+
+
+@task(
+    container_image=EVAL_IMAGE,
+    requests=Resources(cpu="1", mem="2Gi"),
+    limits=Resources(cpu="1", mem="2Gi"),
+    environment={
+        **OVERLAY_TASK_ENV,
+        "MLFLOW_TRACKING_URI": MLFLOW_URI,
+    },
+)
+def resolve_overlay_model_version(
+    registered_model_name: str,
+    train_execution_id: str,
+    expected_dataset: str,
+    expected_dataset_version: str,
+) -> str:
+    """Find the model registered by one completed Full Run execution."""
+    import mlflow
+    from mlflow.tracking import MlflowClient
+
+    mlflow.set_tracking_uri(os.environ["MLFLOW_TRACKING_URI"])
+    return _resolve_model_version_for_execution(
+        MlflowClient(),
+        registered_model_name=registered_model_name,
+        train_execution_id=train_execution_id,
+        expected_dataset=expected_dataset,
+        expected_dataset_version=expected_dataset_version,
+    )
+
+
 @task(
     container_image=EVAL_IMAGE,
     requests=Resources(cpu="1", mem="2Gi"),
@@ -365,6 +458,7 @@ def _parse_gate(value: str) -> dict[str, str]:
 def resolve_overlay_model(
     registered_model_name: str,
     model_version: str,
+    expected_train_execution_id: str = "",
 ) -> ResolvedOverlayModel:
     """Resolve an immutable registry version and download its checkpoint."""
     import json
@@ -411,6 +505,15 @@ def resolve_overlay_model(
 
     params = run.data.params
     metrics = run.data.metrics
+    train_execution_id = params.get("ctx/train_execution_id", "")
+    if (
+        expected_train_execution_id
+        and train_execution_id != expected_train_execution_id
+    ):
+        raise ValueError(
+            "resolved model was not produced by the requested Full Run: "
+            f"{train_execution_id!r} != {expected_train_execution_id!r}"
+        )
     metadata = {
         "registered_model_name": registered_model_name,
         "model_version": str(registered.version),
@@ -424,7 +527,7 @@ def resolve_overlay_model(
         "eval_gate_pass": metrics.get("eval/gate_pass"),
         "dataset_source": params.get("data/dataset", ""),
         "dataset_version_source": params.get("data/dataset_version", ""),
-        "train_execution_id": params.get("ctx/train_execution_id", ""),
+        "train_execution_id": train_execution_id,
         "val_fraction": params.get("train/val_fraction", "0"),
         "resolved_at": _utc_now(),
     }
