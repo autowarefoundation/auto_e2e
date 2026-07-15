@@ -1,6 +1,19 @@
 import cv2
 import numpy as np
 import torch
+from dataclasses import dataclass
+
+@dataclass
+class MapGeometry:
+    meters_per_pixel_x: float
+    meters_per_pixel_y: float
+    ego_pixel_x: float
+    ego_pixel_y: float
+    rotation_rad: float
+
+    def __post_init__(self):
+        if self.meters_per_pixel_x <= 0 or self.meters_per_pixel_y <= 0:
+            raise ValueError(f"Invalid map geometry: resolution must be positive, got ({self.meters_per_pixel_x}, {self.meters_per_pixel_y})")
 
 def get_camera_projection_matrix(K: np.ndarray, R: np.ndarray, t: np.ndarray) -> np.ndarray:
     """
@@ -245,19 +258,26 @@ def concatenate_grid_and_camera(grid_img: np.ndarray, cam_img: np.ndarray) -> np
 
     return np.hstack((grid_img, cam_resized))
 
-def meters_to_pixels_trajectory(trajectory_m: torch.Tensor, resolution_m_px: float, map_image: np.ndarray) -> torch.Tensor:
-    h, w = map_image.shape[:2]
+def meters_to_pixels_trajectory(trajectory_m: torch.Tensor, geometry: MapGeometry) -> torch.Tensor:
+    import math
     trajectory_px = torch.zeros_like(trajectory_m)
-    trajectory_px[:, 0] = (w / 2) + (trajectory_m[:, 0] / resolution_m_px)
-    trajectory_px[:, 1] = (h / 2) - (trajectory_m[:, 1] / resolution_m_px)
+    
+    cos_theta = math.cos(geometry.rotation_rad)
+    sin_theta = math.sin(geometry.rotation_rad)
+    
+    x_rot = trajectory_m[:, 0] * cos_theta - trajectory_m[:, 1] * sin_theta
+    y_rot = trajectory_m[:, 0] * sin_theta + trajectory_m[:, 1] * cos_theta
+    
+    trajectory_px[:, 0] = geometry.ego_pixel_x + (x_rot / geometry.meters_per_pixel_x)
+    trajectory_px[:, 1] = geometry.ego_pixel_y - (y_rot / geometry.meters_per_pixel_y)
+    
     return trajectory_px
 
 def overlay_the_trajectory_with_map(
         trajectory_px: torch.Tensor,
         map_image: np.ndarray,
-        color: tuple = (0, 255, 0),
-        initial_heading: float = 0.0,
-        resolution_m_px: float = 0.4
+        geometry: MapGeometry,
+        color: tuple = (0, 255, 0)
 ) -> np.ndarray:
     import math
     bgr_color = color
@@ -268,17 +288,17 @@ def overlay_the_trajectory_with_map(
     pixel_points = np.array(pixel_points_float, np.int32)
     pts = pixel_points.reshape((-1, 1, 2))
 
-    zoom_scale = 0.4 / resolution_m_px
+    zoom_scale = 0.4 / geometry.meters_per_pixel_x
     linewidth = int(1 * zoom_scale)
     outline_width = max(1, int(1 * zoom_scale))
 
     cv2.polylines(map_with_trajectory, [pts], isClosed=False, color=black_color, thickness=linewidth + outline_width * 2, lineType=cv2.LINE_AA)
     cv2.polylines(map_with_trajectory, [pts], isClosed=False, color=bgr_color, thickness=linewidth, lineType=cv2.LINE_AA)
 
-    dx = -math.sin(initial_heading)
-    dy = -math.cos(initial_heading)
-    rx = math.cos(initial_heading)
-    ry = -math.sin(initial_heading)
+    dx = -math.sin(geometry.rotation_rad)
+    dy = -math.cos(geometry.rotation_rad)
+    rx = math.cos(geometry.rotation_rad)
+    ry = -math.sin(geometry.rotation_rad)
 
     x0, y0 = pixel_points[0]
     L = 8.0 * zoom_scale
@@ -299,12 +319,35 @@ def overlay_the_trajectory_with_map(
 def render_trajectory_map_tile(
     prediction_xy: torch.Tensor,
     map_image: np.ndarray,
-    resolution_m_px: float,
-    color: tuple = (0, 255, 0),
-    initial_heading: float = 0.0
+    geometry: MapGeometry,
+    target_xy: torch.Tensor | None = None,
+    color: tuple | None = None,
+    is_approximate: bool = False
 ) -> np.ndarray:
-    trajectory_px = meters_to_pixels_trajectory(prediction_xy, resolution_m_px, map_image)
-    map_with_trajectory = overlay_the_trajectory_with_map(trajectory_px, map_image, color, initial_heading, resolution_m_px)
+    trajectory_px = meters_to_pixels_trajectory(prediction_xy, geometry)
+    if color is None:
+        color = (0, 255, 0)
+    map_with_trajectory = overlay_the_trajectory_with_map(
+        trajectory_px, map_image, geometry, color
+    )
+    
+    if target_xy is not None:
+        target_pts_tensor = meters_to_pixels_trajectory(target_xy, geometry)
+        target_pts_float = [(x.item(), y.item()) for x, y in target_pts_tensor]
+        target_pts = np.array(target_pts_float, np.int32).reshape((-1, 1, 2))
+        cv2.polylines(map_with_trajectory, [target_pts], False, (255, 80, 120), 4, lineType=cv2.LINE_AA)
+
+    if is_approximate:
+        overlay = map_with_trajectory.copy()
+        watermark_text = "APPROXIMATE"
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        font_scale = 1.0
+        thickness = 2
+        text_size = cv2.getTextSize(watermark_text, font, font_scale, thickness)[0]
+        text_x = (map_with_trajectory.shape[1] - text_size[0]) // 2
+        text_y = (map_with_trajectory.shape[0] + text_size[1]) // 2
+        cv2.putText(overlay, watermark_text, (text_x, text_y), font, font_scale, (255, 255, 255), thickness, cv2.LINE_AA)
+        cv2.addWeighted(overlay, 0.4, map_with_trajectory, 0.6, 0, map_with_trajectory)
     return map_with_trajectory
 
 def render_trajectory_on_a_grid(
@@ -329,17 +372,30 @@ def complete_front_camera_view_with_trajectory(
     R: np.ndarray | None = None,
     t: np.ndarray | None = None,
     P: np.ndarray | None = None,
-    color: tuple | None = None
+    color: tuple | None = None,
+    is_approximate: bool = False
 ) -> np.ndarray:
     from .kinematics import get_trajectory_boundaries_3d
+    
+    if P is None and (K is None or R is None or t is None):
+        if not is_approximate:
+            raise ValueError("Camera rendering requires either a verified projection matrix (P) or synthetic calibration (K, R, t). Neither was provided. Set is_approximate=True to use default synthetic calibration.")
+        
+        h, w = front_camera_image.shape[:2]
+        K = np.array([[1000, 0, w/2], [0, 1000, h/2], [0, 0, 1]], dtype=np.float32)
+        R = np.eye(3, dtype=np.float32)
+        t = np.zeros((3, 1), dtype=np.float32)
+        
+    if P is None and not is_approximate:
+        raise ValueError("Using synthetic/separated calibration (K, R, t) instead of a verified projection matrix requires passing is_approximate=True.")
+        
     if color is None:
         color = (0, 255, 0)
 
     if P is not None:
         projection_matrix = P
     else:
-        if K is None or R is None or t is None:
-            raise ValueError("Either P or (K, R, t) must be provided.")
+        assert K is not None and R is not None and t is not None
         projection_matrix = get_camera_projection_matrix(K, R, t)
     
     left_m, right_m = get_trajectory_boundaries_3d(prediction_xy, width_m=1.8)
@@ -350,5 +406,19 @@ def complete_front_camera_view_with_trajectory(
     cam_with_traj = render_trajectory_on_camera_view(
         front_camera_image, left_2d, right_2d, color=color, outline_thickness=3
     )
+
+    if is_approximate:
+        overlay = cam_with_traj.copy()
+        watermark_text = "APPROXIMATE"
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        font_scale = 3.0
+        thickness = 8
+        text_size = cv2.getTextSize(watermark_text, font, font_scale, thickness)[0]
+        
+        text_x = (cam_with_traj.shape[1] - text_size[0]) // 2
+        text_y = (cam_with_traj.shape[0] + text_size[1]) // 2
+        
+        cv2.putText(overlay, watermark_text, (text_x, text_y), font, font_scale, (255, 255, 255), thickness, cv2.LINE_AA)
+        cv2.addWeighted(overlay, 0.4, cam_with_traj, 0.6, 0, cam_with_traj)
 
     return cam_with_traj

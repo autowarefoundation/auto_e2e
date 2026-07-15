@@ -4,7 +4,6 @@ Usage:
     python -m Kit_Scenes_visualization.kit_scenes_visualizer --scene_ids <uuid> --frame 0
 """
 
-import sys
 import os
 import torch
 import cv2
@@ -15,9 +14,10 @@ from Tools.trajectory_visualization.rendering import (
     render_trajectory_map_tile,
     render_trajectory_on_a_grid,
     complete_front_camera_view_with_trajectory,
-    concatenate_grid_and_camera
+    concatenate_grid_and_camera,
+    MapGeometry
 )
-from Tools.trajectory_visualization.kinematics import controls_to_metric_trajectory
+from Tools.trajectory_visualization.kinematics import controls_to_metric_trajectory, ModelOutputContract
 from Model.model_components.auto_e2e import AutoE2E
 from Model.data_parsing.kit_scenes.camera import NUM_VIEWS
 from Model.data_parsing.kit_scenes.map import generate_bev_map_tile
@@ -54,9 +54,28 @@ def visualization_on_kit_scenes(scene_ids: list[str] | None = None, frame_index:
     prediction_color = (140, 255, 0)
     actual_trajectory_color = (255, 80, 120)
 
+    contract = ModelOutputContract(
+        num_timesteps=pred_trajectory.shape[0] // 2,
+        num_signals=2,
+        sampling_interval_dt=0.1,
+        acceleration_unit="m/s^2",
+        curvature_unit="rad/m",
+        speed_unit="m/s",
+        coordinate_handedness="right-handed"
+    )
+
     # Precompute metric trajectories
-    pred_xy = controls_to_metric_trajectory(pred_trajectory, current_speed, dt=0.1)
-    target_xy = controls_to_metric_trajectory(target_trajectory, current_speed, dt=0.1) if target_trajectory is not None else None
+    pred_xy = controls_to_metric_trajectory(pred_trajectory, current_speed, contract=contract)
+    target_xy = controls_to_metric_trajectory(target_trajectory, current_speed, contract=contract) if target_trajectory is not None else None
+
+    h, w = map_image.shape[:2]
+    map_geometry = MapGeometry(
+        meters_per_pixel_x=resolution_m_px,
+        meters_per_pixel_y=resolution_m_px,
+        ego_pixel_x=w / 2.0,
+        ego_pixel_y=h / 2.0,
+        rotation_rad=current_heading
+    )
 
     # 1. Draw extracted ground truth (actual driven path) on map tile
     combined_img = map_image.copy()
@@ -64,18 +83,16 @@ def visualization_on_kit_scenes(scene_ids: list[str] | None = None, frame_index:
         combined_img = render_trajectory_map_tile(
             prediction_xy=target_xy,
             map_image=combined_img,
-            resolution_m_px=resolution_m_px,
-            color=actual_trajectory_color,
-            initial_heading=current_heading
+            geometry=map_geometry,
+            color=actual_trajectory_color
         )
 
     # 2. Draw predicted path on map tile
     combined_img = render_trajectory_map_tile(
         prediction_xy=pred_xy,
         map_image=combined_img,
-        resolution_m_px=resolution_m_px,
-        color=prediction_color, 
-        initial_heading=current_heading
+        geometry=map_geometry,
+        color=prediction_color
     )
 
     # 3. Create Camera View with trajectory and Grid

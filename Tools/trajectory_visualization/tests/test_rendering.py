@@ -14,6 +14,17 @@ from Tools.trajectory_visualization import rendering  # noqa: E402
 _DT = 0.1
 _FUTURE_TIMESTEPS = 64
 
+def get_dummy_contract():
+    return kinematics.ModelOutputContract(
+        num_timesteps=_FUTURE_TIMESTEPS,
+        num_signals=2,
+        sampling_interval_dt=_DT,
+        acceleration_unit="m/s^2",
+        curvature_unit="rad/m",
+        speed_unit="m/s",
+        coordinate_handedness="right-handed"
+    )
+
 def test_visualization_with_dummy_data(tmp_path: Path):
 
     # 1. Create a dummy action sequence (64 timesteps * 2 signals = 128 flat)
@@ -34,13 +45,20 @@ def test_visualization_with_dummy_data(tmp_path: Path):
 
     print("Executing render_trajectory...")
     # Generate trajectory first
-    prediction_xy = kinematics.controls_to_metric_trajectory(mock_actions, mock_speed, dt=0.1)
+    prediction_xy = kinematics.controls_to_metric_trajectory(mock_actions, mock_speed, contract=get_dummy_contract())
     
     # Run the visualization function
+    geometry = rendering.MapGeometry(
+        meters_per_pixel_x=mock_resolution,
+        meters_per_pixel_y=mock_resolution,
+        ego_pixel_x=mock_map.shape[1] / 2.0,
+        ego_pixel_y=mock_map.shape[0] / 2.0,
+        rotation_rad=0.0
+    )
     result_img = rendering.render_trajectory_map_tile(
         prediction_xy=prediction_xy,
         map_image=mock_map,
-        resolution_m_px=mock_resolution
+        geometry=geometry
     )
 
     # 4. Save and inspect the result
@@ -63,9 +81,15 @@ def test_meters_to_pixels_trajectory():
         [0.0, 10.0],
     ])
     resolution_m_px = 0.1  # 10 pixels/meter -> 0.1 m/pixel
-    map_image = np.zeros((400, 400, 3), dtype=np.uint8)
+    geometry = rendering.MapGeometry(
+        meters_per_pixel_x=resolution_m_px,
+        meters_per_pixel_y=resolution_m_px,
+        ego_pixel_x=200.0,
+        ego_pixel_y=200.0,
+        rotation_rad=0.0
+    )
 
-    trajectory_px = rendering.meters_to_pixels_trajectory(trajectory_m, resolution_m_px, map_image)
+    trajectory_px = rendering.meters_to_pixels_trajectory(trajectory_m, geometry)
 
     assert trajectory_px.shape == trajectory_m.shape
     # Check pixel coordinates
@@ -79,13 +103,20 @@ def test_meters_to_pixels_trajectory():
 
 def test_overlay_the_trajectory_with_map():
     map_image = np.zeros((400, 400, 3), dtype=np.uint8)
+    geometry = rendering.MapGeometry(
+        meters_per_pixel_x=0.1,
+        meters_per_pixel_y=0.1,
+        ego_pixel_x=200.0,
+        ego_pixel_y=200.0,
+        rotation_rad=0.0
+    )
     trajectory_px = torch.tensor([
         [200, 399], # Start at bottom center, slightly off edge
         [300, 399],
         [300, 300],
     ])
 
-    overlaid_image = rendering.overlay_the_trajectory_with_map(trajectory_px, map_image)
+    overlaid_image = rendering.overlay_the_trajectory_with_map(trajectory_px, map_image, geometry)
 
     assert overlaid_image is not None
     assert isinstance(overlaid_image, np.ndarray)
@@ -163,15 +194,13 @@ def test_generate_grid_clipping():
     plot_w = width - margin_left - margin_right
     plot_h = height - margin_top - margin_bottom
     
-    # Extract the four margins
-    top_margin = grid_img[0:margin_top, :]
+    # Extract the three margins
     bottom_margin = grid_img[margin_top + plot_h:, :]
     left_margin = grid_img[margin_top:margin_top + plot_h, 0:margin_left]
     right_margin = grid_img[margin_top:margin_top + plot_h, margin_left + plot_w:]
     
     # The top margin contains the legend which draws a circle with the prediction/actual color!
-    # So we must ignore the top margin, or at least just check bottom/left/right margins
-    # where no legend is drawn.
+    # So we must just check bottom/left/right margins where no legend is drawn.
     for margin, name in [(bottom_margin, "bottom"), (left_margin, "left"), (right_margin, "right")]:
         assert not np.any(np.all(margin == unique_pred_color, axis=-1)), f"Prediction color bled into {name} margin"
         assert not np.any(np.all(margin == unique_act_color, axis=-1)), f"Actual color bled into {name} margin"
@@ -182,7 +211,7 @@ def test_render_trajectory_on_a_grid():
     current_speed = 10.0
     
     # 2. Convert to metric and run the function
-    prediction_xy = kinematics.controls_to_metric_trajectory(action_sequence, current_speed, dt=0.1)
+    prediction_xy = kinematics.controls_to_metric_trajectory(action_sequence, current_speed, contract=get_dummy_contract())
     grid_img = rendering.render_trajectory_on_a_grid(prediction_xy=prediction_xy)
     
     # 3. Assertions
@@ -278,20 +307,23 @@ def test_complete_front_camera_view_with_trajectory():
     R = np.eye(3)
     t = np.zeros((3, 1))
     
-    pred_traj_m = kinematics.controls_to_metric_trajectory(action_sequence_pred, current_speed, dt=0.1)
-    target_traj_m = kinematics.controls_to_metric_trajectory(action_sequence_target, current_speed, dt=0.1)
+    # Convert to metric with dummy contract
+    pred_traj_m = kinematics.controls_to_metric_trajectory(action_sequence_pred, current_speed, contract=get_dummy_contract())
+    target_traj_m = kinematics.controls_to_metric_trajectory(action_sequence_target, current_speed, contract=get_dummy_contract())
     
     cam_img = rendering.complete_front_camera_view_with_trajectory(
         prediction_xy=target_traj_m,
         front_camera_image=front_camera_image,
         K=K, R=R, t=t,
-        color=(59, 108, 255)
+        color=(59, 108, 255),
+        is_approximate=True
     )
     cam_img = rendering.complete_front_camera_view_with_trajectory(
         prediction_xy=pred_traj_m,
         front_camera_image=cam_img,
         K=K, R=R, t=t,
-        color=(52, 217, 164)
+        color=(140, 255, 0),
+        is_approximate=True
     )
     
     grid_img = rendering.generate_grid(prediction_xy=pred_traj_m, target_xy=target_traj_m)

@@ -45,3 +45,30 @@ def test_get_dataset_iterator(mock_make_loader):
         shuffle=0,
         return_visualization_image=True
     )
+
+@patch("Tools.trajectory_visualization.dataset_reader.make_pre_extracted_loader")
+def test_get_dataset_iterator_scene_selection(mock_make_loader):
+    mock_loader_instance = MagicMock()
+    mock_make_loader.return_value = mock_loader_instance
+    
+    mock_iter = iter([
+        {"episode_index": [0], "frame_index": [0], "data": "e0f0"},
+        {"episode_index": [0], "frame_index": [1], "data": "e0f1"},
+        {"episode_index": [0], "frame_index": [2], "data": "e0f2"},
+        {"episode_index": [1], "frame_index": [0], "data": "e1f0"},
+        {"episode_index": [2], "frame_index": [0], "data": "e2f0"}
+    ])
+    mock_loader_instance.__iter__.return_value = mock_iter
+
+    scene_selection = [
+        {"episode_id": "0", "start_frame": 1, "end_frame": 2},
+        {"episode_id": "2"}
+    ]
+
+    iterator = get_dataset_iterator("/dummy", scene_selection=scene_selection)
+    batches = list(iterator)
+    
+    assert len(batches) == 3
+    assert batches[0]["data"] == "e0f1"
+    assert batches[1]["data"] == "e0f2"
+    assert batches[2]["data"] == "e2f0"

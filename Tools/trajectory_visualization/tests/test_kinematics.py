@@ -4,7 +4,8 @@ import numpy as np
 from Tools.trajectory_visualization.kinematics import (
     controls_to_metric_trajectory,
     get_cumulative_distances,
-    get_trajectory_boundaries_3d
+    get_trajectory_boundaries_3d,
+    ModelOutputContract
 )
 
 import pytest
@@ -12,13 +13,24 @@ import pytest
 _DT = 0.1
 _FUTURE_TIMESTEPS = 64
 
+def get_dummy_contract():
+    return ModelOutputContract(
+        num_timesteps=_FUTURE_TIMESTEPS,
+        num_signals=2,
+        sampling_interval_dt=_DT,
+        acceleration_unit="m/s^2",
+        curvature_unit="rad/m",
+        speed_unit="m/s",
+        coordinate_handedness="right-handed"
+    )
+
 def test_controls_to_metric_trajectory_straight_no_accel():
     # 1. Create a dummy action sequence for going straight with no acceleration
     action_sequence = torch.zeros(_FUTURE_TIMESTEPS * 2)
     current_speed = 10.0  # 10 m/s
 
     # 2. Run the function
-    trajectory_m = controls_to_metric_trajectory(action_sequence, current_speed, dt=_DT)
+    trajectory_m = controls_to_metric_trajectory(action_sequence, current_speed, contract=get_dummy_contract())
 
     # 3. Assertions
     assert trajectory_m.shape == (_FUTURE_TIMESTEPS + 1, 2), "Shape of trajectory tensor is incorrect"
@@ -36,7 +48,7 @@ def test_controls_to_metric_trajectory_stationary():
     action_sequence = torch.zeros(_FUTURE_TIMESTEPS * 2)
     current_speed = 0.0
 
-    trajectory_m = controls_to_metric_trajectory(action_sequence, current_speed, dt=_DT)
+    trajectory_m = controls_to_metric_trajectory(action_sequence, current_speed, contract=get_dummy_contract())
 
     for i in range(_FUTURE_TIMESTEPS + 1):
         assert trajectory_m[i, 0].item() == pytest.approx(0.0)
@@ -48,7 +60,7 @@ def test_controls_to_metric_trajectory_constant_acceleration_from_standstill():
     action_sequence[0::2] = 2.0  # Constant 2.0 m/s^2 acceleration (every even index is accel)
     current_speed = 0.0
 
-    trajectory_m = controls_to_metric_trajectory(action_sequence, current_speed, dt=_DT)
+    trajectory_m = controls_to_metric_trajectory(action_sequence, current_speed, contract=get_dummy_contract())
 
     assert trajectory_m[0, 0].item() == pytest.approx(0.0)
     assert trajectory_m[0, 1].item() == pytest.approx(0.0)
@@ -67,7 +79,7 @@ def test_controls_to_metric_trajectory_turning():
     action_sequence[1::2] = 0.1  # Constant positive curvature (left turn)
     current_speed = 10.0
 
-    trajectory_m = controls_to_metric_trajectory(action_sequence, current_speed, dt=_DT)
+    trajectory_m = controls_to_metric_trajectory(action_sequence, current_speed, contract=get_dummy_contract())
 
     # After 64 timesteps, X should be negative (left of the starting Y-axis) and Y should be positive
     assert trajectory_m[-1, 0].item() < -0.1, "Car should have turned left (negative X)"
@@ -81,7 +93,7 @@ def test_controls_to_metric_trajectory_extreme_spiral():
     action_sequence[1::2] = torch.linspace(0.5, 1.0, _FUTURE_TIMESTEPS)  # Increasing curvature
     current_speed = 5.0
 
-    trajectory_m = controls_to_metric_trajectory(action_sequence, current_speed, dt=_DT)
+    trajectory_m = controls_to_metric_trajectory(action_sequence, current_speed, contract=get_dummy_contract())
 
     assert not torch.isnan(trajectory_m).any(), "Trajectory contains NaNs"
     assert not torch.isinf(trajectory_m).any(), "Trajectory contains Infs"

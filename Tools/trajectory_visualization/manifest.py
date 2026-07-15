@@ -1,6 +1,6 @@
 import json
 import os
-from typing import Dict, Any, List
+from typing import Dict, Any
 
 class ManifestWriter:
     def __init__(self, output_dir: str, checkpoint_name: str, model_config: dict, dataset_name: str, dataset_version: str):

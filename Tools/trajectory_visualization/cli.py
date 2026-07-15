@@ -13,8 +13,8 @@ def main():
     parser.add_argument("--dataset-dir", type=str, required=True, help="Path to the processed evaluation dataset directory (.tar shards).")
     parser.add_argument("--output-dir", type=str, required=True, help="Path to write output videos and manifest.")
     parser.add_argument("--episodes", type=int, nargs='+', help="List of episode indices to process.")
+    parser.add_argument("--selection-manifest", type=str, help="Path to a JSON file explicitly specifying episodes and frame ranges to render.")
     parser.add_argument("--max-frames-per-episode", type=int, default=300, help="Number of frames to render per episode.")
-    parser.add_argument("--dt", type=float, default=0.1, help="Time delta per step for kinematics conversion.")
     
     args = parser.parse_args()
     
@@ -24,7 +24,7 @@ def main():
         output_dir=args.output_dir,
         episodes=args.episodes,
         max_frames_per_episode=args.max_frames_per_episode,
-        dt=args.dt
+        selection_manifest=args.selection_manifest
     )
 
 if __name__ == "__main__":

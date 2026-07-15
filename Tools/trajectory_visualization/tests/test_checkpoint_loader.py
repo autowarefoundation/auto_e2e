@@ -40,7 +40,7 @@ def test_load_checkpoint_success(mock_autoe2e, dummy_checkpoint_path):
     mock_autoe2e.return_value = mock_model_instance
     
     # Run the function
-    model = load_checkpoint(dummy_checkpoint_path, device)
+    model, config = load_checkpoint(dummy_checkpoint_path, device)
     
     # Verify AutoE2E was instantiated with the exact config from checkpoint
     mock_autoe2e.assert_called_once_with(

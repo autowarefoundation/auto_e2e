@@ -24,7 +24,7 @@ def test_cli_main(mock_run_visualization):
         output_dir="/path/to/out",
         episodes=[0, 1, 2],
         max_frames_per_episode=50,
-        dt=0.1
+        selection_manifest=None
     )
 
 @patch("Tools.trajectory_visualization.cli.run_visualization")
@@ -45,5 +45,5 @@ def test_cli_main_defaults(mock_run_visualization):
         output_dir="/path/to/out",
         episodes=None,
         max_frames_per_episode=300,
-        dt=0.1
+        selection_manifest=None
     )

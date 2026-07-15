@@ -7,7 +7,9 @@ sys.path.append(os.path.join(os.path.dirname(__file__), '..', '..'))
 
 from Model.model_components.auto_e2e import AutoE2E
 
-def load_checkpoint(checkpoint_path: str, device: torch.device) -> AutoE2E:
+from typing import Tuple
+
+def load_checkpoint(checkpoint_path: str, device: torch.device) -> Tuple[AutoE2E, dict]:
     """
     Reconstructs the AutoE2E model from a checkpoint file.
     
@@ -16,7 +18,7 @@ def load_checkpoint(checkpoint_path: str, device: torch.device) -> AutoE2E:
         device: torch.device to load the model to.
         
     Returns:
-        AutoE2E: The reconstructed model.
+        Tuple[AutoE2E, dict]: The reconstructed model and its configuration dict.
     """
     if not os.path.exists(checkpoint_path):
         raise FileNotFoundError(f"Checkpoint file not found: {checkpoint_path}")
@@ -51,4 +53,4 @@ def load_checkpoint(checkpoint_path: str, device: torch.device) -> AutoE2E:
     model.to(device)
     model.eval()
     
-    return model
+    return model, config

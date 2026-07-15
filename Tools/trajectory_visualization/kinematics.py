@@ -1,11 +1,43 @@
 import torch
 import numpy as np
 import math
+from dataclasses import dataclass
+
+@dataclass
+class ModelOutputContract:
+    num_timesteps: int
+    num_signals: int
+    sampling_interval_dt: float
+    acceleration_unit: str
+    curvature_unit: str
+    speed_unit: str
+    coordinate_handedness: str
+    
+    def __post_init__(self):
+        if self.sampling_interval_dt <= 0:
+            raise ValueError(f"Invalid sampling interval (dt): {self.sampling_interval_dt}. Must be > 0.")
+        if self.num_timesteps <= 0:
+            raise ValueError(f"Invalid num_timesteps: {self.num_timesteps}. Must be > 0.")
+    
+    @classmethod
+    def from_config_and_manifest(cls, model_config: dict, dataset_manifest: dict) -> 'ModelOutputContract':
+        try:
+            return cls(
+                num_timesteps=model_config["num_timesteps"],
+                num_signals=model_config["num_signals"],
+                sampling_interval_dt=dataset_manifest["dt"],
+                acceleration_unit=dataset_manifest["acceleration_unit"],
+                curvature_unit=dataset_manifest["curvature_unit"],
+                speed_unit=dataset_manifest["speed_unit"],
+                coordinate_handedness=dataset_manifest["coordinate_handedness"]
+            )
+        except KeyError as e:
+            raise KeyError(f"Model output contract validation failed. Missing required property: {e}")
 
 def controls_to_metric_trajectory(
         controls: torch.Tensor,
         initial_speed: float,
-        dt: float = 0.1,
+        contract: ModelOutputContract,
         initial_heading: float = 0.0
 ) -> torch.Tensor:
     """
@@ -14,14 +46,22 @@ def controls_to_metric_trajectory(
     Args:
         controls (torch.Tensor): Flattened or (T, 2) tensor of controls.
         initial_speed (float): Initial speed of the vehicle in m/s.
-        dt (float, optional): Time delta per step. Defaults to 0.1.
+        contract (ModelOutputContract): Explicit data contract detailing intervals and units.
         initial_heading (float, optional): Initial heading angle in radians. Defaults to 0.0.
 
     Returns:
         torch.Tensor: A tensor of shape (T + 1, 2) containing [x, y] coordinates in meters.
     """
     controls = controls.view(-1, 2)
+    
+    # Contract validation
+    if controls.shape[0] != contract.num_timesteps:
+        raise ValueError(f"Unsupported planner output: Expected {contract.num_timesteps} timesteps but got {controls.shape[0]}")
+    if controls.shape[1] != contract.num_signals:
+        raise ValueError(f"Unsupported planner output: Expected {contract.num_signals} signals but got {controls.shape[1]}")
+    
     future_timesteps = controls.shape[0]
+    dt = contract.sampling_interval_dt
     
     trajectory_m = torch.zeros((future_timesteps + 1, 2))
     trajectory_m[0, :] = 0

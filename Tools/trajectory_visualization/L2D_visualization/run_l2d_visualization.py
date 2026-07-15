@@ -7,16 +7,16 @@ Usage:
     python L2D_visualization/run_l2d_visualization.py --live --episodes 0
 """
 
-import sys
 import os
 
 from Tools.trajectory_visualization.rendering import (
     render_trajectory_map_tile,
     render_trajectory_on_a_grid,
     complete_front_camera_view_with_trajectory,
-    concatenate_grid_and_camera
+    concatenate_grid_and_camera,
+    MapGeometry
 )
-from Tools.trajectory_visualization.kinematics import controls_to_metric_trajectory
+from Tools.trajectory_visualization.kinematics import controls_to_metric_trajectory, ModelOutputContract
 import torch
 from Model.model_components.auto_e2e import AutoE2E
 import cv2
@@ -49,9 +49,28 @@ def visualization_on_l2d(episodes: list[int], frame_index: int = 0, zoom_in: boo
     prediction_color = (140, 255, 0)
     actual_trajectory_color = (255, 80, 120)
 
+    contract = ModelOutputContract(
+        num_timesteps=pred_trajectory.shape[0] // 2,
+        num_signals=2,
+        sampling_interval_dt=0.1,
+        acceleration_unit="m/s^2",
+        curvature_unit="rad/m",
+        speed_unit="m/s",
+        coordinate_handedness="right-handed"
+    )
+
     # Precompute metric trajectories
-    pred_xy = controls_to_metric_trajectory(pred_trajectory, current_speed, dt=0.1)
-    target_xy = controls_to_metric_trajectory(target_trajectory, current_speed, dt=0.1) if target_trajectory is not None else None
+    pred_xy = controls_to_metric_trajectory(pred_trajectory, current_speed, contract=contract)
+    target_xy = controls_to_metric_trajectory(target_trajectory, current_speed, contract=contract) if target_trajectory is not None else None
+
+    h, w = map_image.shape[:2]
+    map_geometry = MapGeometry(
+        meters_per_pixel_x=resolution_m_px,
+        meters_per_pixel_y=resolution_m_px,
+        ego_pixel_x=w / 2.0,
+        ego_pixel_y=h / 2.0,
+        rotation_rad=current_heading
+    )
 
     # 1. Draw extracted ground truth (actual driven path)
     combined_img = map_image.copy()
@@ -59,18 +78,17 @@ def visualization_on_l2d(episodes: list[int], frame_index: int = 0, zoom_in: boo
         combined_img = render_trajectory_map_tile(
             prediction_xy=target_xy,
             map_image=combined_img,
-            resolution_m_px=resolution_m_px,
-            color=actual_trajectory_color,
-            initial_heading=current_heading
+            geometry=map_geometry,
+            color=actual_trajectory_color
         )
 
     # 2. Draw predicted path
     combined_img = render_trajectory_map_tile(
         prediction_xy=pred_xy,
         map_image=combined_img,
-        resolution_m_px=resolution_m_px,
-        color=prediction_color, 
-        initial_heading=current_heading
+        geometry=map_geometry,
+        color=prediction_color,
+        is_approximate=True
     )
 
     # 3. Create Camera View with trajectory and Grid
@@ -85,32 +103,26 @@ def visualization_on_l2d(episodes: list[int], frame_index: int = 0, zoom_in: boo
     yaml_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'data_parsing', 'l2d', 'configs', 'extrinsic_RDF.yaml')
     R, t = load_extrinsics(yaml_path, view_name="observation.images.front_left")
     
-    K = np.array([
-        [1000, 0, front_image.shape[1] / 2],
-        [0, 1000, front_image.shape[0] / 2],
-        [0, 0, 1]
-    ], dtype=np.float32)
-
     cam_trajectory_view = front_image.copy()
     
     if target_xy is not None:
         cam_trajectory_view = complete_front_camera_view_with_trajectory(
             prediction_xy=target_xy,
             front_camera_image=cam_trajectory_view,
-            K=K,
             R=R,
             t=t,
-            color=actual_trajectory_color
+            color=actual_trajectory_color,
+            is_approximate=True
         )
     
     if pred_xy is not None:
         cam_trajectory_view = complete_front_camera_view_with_trajectory(
             prediction_xy=pred_xy,
             front_camera_image=cam_trajectory_view,
-            K=K,
             R=R,
             t=t,
-            color=prediction_color
+            color=prediction_color,
+            is_approximate=True
         )
         
     cam_trajectory_view = concatenate_grid_and_camera(
