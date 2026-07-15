@@ -29,30 +29,41 @@ test("player renders real camera pixels, advances, and focuses", async ({ page }
     responseErrors.push(`${response.status()} ${response.url()}`);
   });
 
-  await page.goto(SCENE, { waitUntil: "networkidle" });
-  // Let the FrameStore fetch + canvases paint.
-  await page.waitForTimeout(3500);
-
+  await page.goto(SCENE, { waitUntil: "domcontentloaded" });
+  await expect(
+    page.locator('[aria-label^="Episode player"]'),
+  ).toBeVisible({ timeout: 30_000 });
   // Every camera frame canvas must have non-blank pixels (real frame, not
   // black). The aria-hidden trajectory layer is intentionally transparent
   // until a model is selected, so it is not a frame-pixel assertion target.
-  const painted = await page.evaluate(() => {
-    const canvases = Array.from(
-      document.querySelectorAll("canvas:not([aria-hidden])"),
-    );
-    let ok = 0;
-    for (const c of canvases) {
-      const ctx = c.getContext("2d");
-      if (!ctx || c.width === 0) continue;
-      const { data } = ctx.getImageData(0, 0, c.width, c.height);
-      let sum = 0;
-      for (let i = 0; i < data.length; i += 4) sum += data[i] + data[i + 1] + data[i + 2];
-      if (sum / (data.length / 4) / 3 > 2) ok++;
-    }
-    return { total: canvases.length, ok };
-  });
-  expect(painted.total).toBeGreaterThanOrEqual(7);
-  expect(painted.ok).toBe(painted.total);
+  await expect
+    .poll(
+      () =>
+        page.evaluate(() => {
+          const canvases = Array.from(
+            document.querySelectorAll("canvas:not([aria-hidden])"),
+          );
+          let ok = 0;
+          for (const canvas of canvases) {
+            const context = canvas.getContext("2d");
+            if (!context || canvas.width === 0) continue;
+            const { data } = context.getImageData(
+              0,
+              0,
+              canvas.width,
+              canvas.height,
+            );
+            let sum = 0;
+            for (let offset = 0; offset < data.length; offset += 4) {
+              sum += data[offset] + data[offset + 1] + data[offset + 2];
+            }
+            if (sum / (data.length / 4) / 3 > 2) ok++;
+          }
+          return { total: canvases.length, ok };
+        }),
+      { timeout: 30_000 },
+    )
+    .toEqual({ total: 7, ok: 7 });
 
   // Playback advances the frame readout.
   const readout = () =>
@@ -88,7 +99,10 @@ test("player renders real camera pixels, advances, and focuses", async ({ page }
 test("playback fills its buffer near real time (windowed fetch)", async ({
   page,
 }) => {
-  await page.goto(SCENE, { waitUntil: "networkidle" });
+  await page.goto(SCENE, { waitUntil: "domcontentloaded" });
+  await expect(
+    page.locator('[aria-label^="Episode player"]'),
+  ).toBeVisible({ timeout: 30_000 });
   // Warm the first window so the first frame is decodable, then play.
   await page.waitForTimeout(3000);
   await page.locator('[aria-label^="Episode player"]').focus();
