@@ -8,12 +8,17 @@ from botocore.exceptions import ClientError
 pytest.importorskip("flytekit")
 
 from Platform.pipelines.overlay_tasks import (
+    OVERLAY_TASK_ENV,
     _gate_token,
     _parse_gate,
     _publish_overlay_set_ready,
     _put_dynamo_immutable,
     _put_s3_immutable,
 )
+
+
+def test_overlay_tasks_configure_deterministic_cublas_workspace():
+    assert OVERLAY_TASK_ENV["CUBLAS_WORKSPACE_CONFIG"] == ":4096:8"
 
 
 def _client_error(code: str, operation: str, status: int = 400) -> ClientError:
