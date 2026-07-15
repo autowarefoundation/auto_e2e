@@ -30,15 +30,50 @@ import {
 } from "lucide-react";
 
 import { CameraMosaic } from "@/components/player/camera-mosaic";
+import {
+  OverlaySelectionBar,
+  type OverlayLoadStatus,
+} from "@/components/player/overlay-selection-bar";
 import { TimelineScrubber } from "@/components/player/timeline-scrubber";
 import { TrajectoryBEV } from "@/components/player/trajectory-bev";
 import { ReasoningTimeline } from "@/components/reasoning-timeline";
 import { Button } from "@/components/ui/button";
 import { usePlayback, MAX_SPEED, MIN_SPEED } from "@/hooks/use-playback";
-import { ApiError, getReasoningLabel } from "@/lib/api";
+import {
+  ApiError,
+  getReasoningLabel,
+  getRigProjection,
+  getShardOverlay,
+  listShardOverlayModels,
+} from "@/lib/api";
 import { FrameStore } from "@/lib/frame-store";
-import { MAX_YAW_RATE, MAX_CURVATURE, yawRateFrom } from "@/lib/ego";
-import type { ReasoningLabelRecord, ShardIndex } from "@/types";
+import {
+  integrateInterleavedControl,
+  MAX_YAW_RATE,
+  MAX_CURVATURE,
+  trajectoryCurvatureSign,
+  yawRateFrom,
+} from "@/lib/ego";
+import type {
+  TrajectoryDisplayMode,
+  TrajectoryPoint,
+} from "@/lib/ego";
+import {
+  controlsForRow,
+  parseOverlay,
+  resolveOverlayRows,
+} from "@/lib/overlay";
+import type { OverlayArtifact } from "@/lib/overlay";
+import {
+  projectTrajectoriesToCameras,
+  projectTrajectoryToCameras,
+} from "@/lib/projection";
+import type {
+  OverlayModel,
+  ReasoningLabelRecord,
+  RigProjectionDocument,
+  ShardIndex,
+} from "@/types";
 
 const SPEED_STEPS = [0.1, 0.25, 0.5, 1, 2, 4, 8, 16];
 
@@ -49,6 +84,31 @@ export interface PlayerViewState {
   cam: number;
   mode: "grid" | "focus";
   speed: number;
+  model: string;
+  predictionMode: TrajectoryDisplayMode;
+}
+
+function median(values: number[]): number {
+  if (values.length === 0) return 0;
+  const sorted = [...values].sort((a, b) => a - b);
+  const middle = Math.floor(sorted.length / 2);
+  return sorted.length % 2
+    ? sorted[middle]
+    : (sorted[middle - 1] + sorted[middle]) / 2;
+}
+
+function medianTrajectory(paths: TrajectoryPoint[][]): TrajectoryPoint[] {
+  if (paths.length === 0) return [];
+  const steps = Math.min(...paths.map((path) => path.length));
+  const result = new Array<TrajectoryPoint>(steps);
+  for (let step = 0; step < steps; step++) {
+    result[step] = {
+      x: median(paths.map((path) => path[step].x)),
+      y: median(paths.map((path) => path[step].y)),
+      heading: median(paths.map((path) => path[step].heading)),
+    };
+  }
+  return result;
 }
 
 function nextSpeed(current: number, dir: 1 | -1): number {
@@ -103,6 +163,104 @@ export function EpisodePlayer({
       .sort();
   }, [index]);
 
+  const [overlayModels, setOverlayModels] = useState<OverlayModel[]>([]);
+  const [selectedModelID, setSelectedModelID] = useState(
+    initialState?.model ?? "",
+  );
+  const [predictionMode, setPredictionMode] =
+    useState<TrajectoryDisplayMode>(
+      initialState?.predictionMode ?? "raw",
+    );
+  const [overlayStatus, setOverlayStatus] =
+    useState<OverlayLoadStatus>("loading-models");
+  const [overlay, setOverlay] = useState<OverlayArtifact | null>(null);
+  const [overlayRows, setOverlayRows] = useState<Map<string, number>>(
+    new Map(),
+  );
+  const [rigProjection, setRigProjection] =
+    useState<RigProjectionDocument | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    setOverlayStatus("loading-models");
+    setOverlayModels([]);
+    setOverlay(null);
+    setOverlayRows(new Map());
+    listShardOverlayModels(dataset, shard, version)
+      .then((response) => {
+        if (cancelled) return;
+        const models = response.models ?? [];
+        setOverlayModels(models);
+        if (models.length === 0) {
+          setSelectedModelID("");
+          setOverlayStatus("no-models");
+          return;
+        }
+        setSelectedModelID((current) =>
+          models.some((model) => model.model_artifact_id === current)
+            ? current
+            : models[0].model_artifact_id,
+        );
+        setOverlayStatus("idle");
+      })
+      .catch((err: unknown) => {
+        if (cancelled) return;
+        console.warn("trajectory model listing failed", err);
+        setOverlayStatus("error");
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [dataset, shard, version]);
+
+  useEffect(() => {
+    let cancelled = false;
+    getRigProjection(dataset, version)
+      .then((projection) => {
+        if (!cancelled) setRigProjection(projection);
+      })
+      .catch((err: unknown) => {
+        if (cancelled) return;
+        if (!(err instanceof ApiError && err.status === 404)) {
+          console.warn("rig projection fetch failed", err);
+        }
+        setRigProjection(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [dataset, version]);
+
+  useEffect(() => {
+    if (!selectedModelID) return;
+    let cancelled = false;
+    setOverlayStatus("loading-overlay");
+    setOverlay(null);
+    setOverlayRows(new Map());
+    getShardOverlay(dataset, shard, selectedModelID, version)
+      .then((buffer) => {
+        const parsed = parseOverlay(buffer);
+        return resolveOverlayRows(
+          parsed,
+          index.samples.map((entry) => entry.sample_uid),
+        ).then((rows) => ({ parsed, rows }));
+      })
+      .then(({ parsed, rows }) => {
+        if (cancelled) return;
+        setOverlay(parsed);
+        setOverlayRows(rows);
+        setOverlayStatus("ready");
+      })
+      .catch((err: unknown) => {
+        if (cancelled) return;
+        console.warn("trajectory overlay fetch failed", err);
+        setOverlayStatus("error");
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [dataset, shard, selectedModelID, version, index.samples]);
+
   // Buffer-readiness predicate for the buffer-gated clock: a frame is ready
   // when every currently-visible camera has a decoded bitmap for it. Defined
   // via refs the player keeps current (store + visibleCams) so the identity is
@@ -154,8 +312,23 @@ export function EpisodePlayer({
 
   // Report view state upward (URL serialization is the page's job).
   useEffect(() => {
-    onViewStateChange?.({ frame, cam: focusCam, mode, speed });
-  }, [frame, focusCam, mode, speed, onViewStateChange]);
+    onViewStateChange?.({
+      frame,
+      cam: focusCam,
+      mode,
+      speed,
+      model: selectedModelID,
+      predictionMode,
+    });
+  }, [
+    frame,
+    focusCam,
+    mode,
+    speed,
+    selectedModelID,
+    predictionMode,
+    onViewStateChange,
+  ]);
 
   const visibleCams = useMemo(
     () => (mode === "focus" ? [cams[focusCam] ?? cams[0]].filter(Boolean) : cams),
@@ -237,6 +410,39 @@ export function EpisodePlayer({
   // discrete status drives the panel (never hangs on 404/5xx, never shows a
   // stale card for a frame that is still loading).
   const sample = index.samples[frame];
+  const curvatureSign = trajectoryCurvatureSign(dataset);
+  const predictionTrajectories = useMemo(() => {
+    if (!overlay || !sample) return [];
+    const row = overlayRows.get(sample.sample_uid);
+    if (row === undefined) return [];
+    const paths = new Array<TrajectoryPoint[]>(overlay.seedCount);
+    for (let seed = 0; seed < overlay.seedCount; seed++) {
+      paths[seed] = integrateInterleavedControl(
+        overlay.v0[row],
+        controlsForRow(overlay, row, seed),
+        0.1,
+        predictionMode,
+        curvatureSign,
+      );
+    }
+    return paths;
+  }, [overlay, overlayRows, sample, predictionMode, curvatureSign]);
+  const medianPrediction = useMemo(
+    () => medianTrajectory(predictionTrajectories),
+    [predictionTrajectories],
+  );
+  const predictionFan = useMemo(
+    () => (predictionTrajectories.length > 1 ? predictionTrajectories : []),
+    [predictionTrajectories],
+  );
+  const cameraPredictionPaths = useMemo(
+    () => projectTrajectoriesToCameras(rigProjection, predictionFan),
+    [rigProjection, predictionFan],
+  );
+  const cameraMedianPredictionPaths = useMemo(
+    () => projectTrajectoryToCameras(rigProjection, medianPrediction),
+    [rigProjection, medianPrediction],
+  );
   const [reasoning, setReasoning] = useState<LabelState>(null);
   const [labelStatus, setLabelStatus] = useState<
     "idle" | "loading" | "ready" | "absent" | "error"
@@ -401,6 +607,16 @@ export function EpisodePlayer({
       className="space-y-4 outline-none focus-visible:ring-1 focus-visible:ring-slate-600 rounded-lg"
       aria-label="Episode player (keyboard: space, arrows, 1-7, f, ? for help)"
     >
+      <OverlaySelectionBar
+        models={overlayModels}
+        selectedModelID={selectedModelID}
+        onSelectModel={setSelectedModelID}
+        displayMode={predictionMode}
+        onDisplayModeChange={setPredictionMode}
+        status={overlayStatus}
+        seedCount={overlay?.seedCount ?? 0}
+        splitBucket={sample?.split_bucket}
+      />
       <div className="grid gap-4 xl:grid-cols-[1fr_300px]">
         <CameraMosaic
           store={store}
@@ -412,6 +628,8 @@ export function EpisodePlayer({
           focusCam={focusCam}
           onSelectCam={focusCamera}
           onToggleFocus={() => setMode((m) => (m === "grid" ? "focus" : "grid"))}
+          predictionPaths={cameraPredictionPaths}
+          medianPredictionPaths={cameraMedianPredictionPaths}
         />
         <div className="space-y-3">
           <TrajectoryBEV
@@ -421,6 +639,9 @@ export function EpisodePlayer({
             reasoning={
               reasoning?.key === sample?.key ? reasoning.label : null
             }
+            predictionTrajectories={predictionFan}
+            medianPrediction={medianPrediction}
+            curvatureSign={curvatureSign}
           />
           <div className="rounded-md border border-slate-800 bg-slate-900/60 p-2 font-mono text-[10px] leading-relaxed text-slate-400">
             <p>
