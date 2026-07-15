@@ -13,10 +13,9 @@ Rendering mirrors ``kitscenes.visualization.ml_converter_vis_utils``:
 
 Coordinate frame
 ----------------
-Poses use absolute UTM 32N coordinates, while Lanelet2 returns map-local
-coordinates relative to ``maps/origin.json``. The rasterizer subtracts the
-scene map's absolute UTM origin before querying/drawing. Tiles are ego-centric:
-forward (+X) -> up, left (+Y) -> left.
+Poses and Lanelet2 geometry both use the scene-local frame anchored by
+``maps/origin.json``. The rasterizer passes pose translations directly to the
+map query. Tiles are ego-centric: forward (+X) -> up, left (+Y) -> left.
 
 Caching
 -------
@@ -179,8 +178,7 @@ def generate_bev_map_tile(
     rs = _RENDER_SIZE
     canvas = np.full((rs, rs, 3), 255, dtype=np.uint8)
     scale = rs / (radius_meters * 2.0)
-    ego_utm = np.array([ego_x, ego_y], dtype=np.float64)
-    ego = ego_utm - scene_map.utm_origin
+    ego = np.array([ego_x, ego_y], dtype=np.float64)
     yaw = float(ego_yaw)
     lw = max(1, round(linewidths * rs / 1000))  # scale line weight to render size; linewidths is in "units per 1000px"
 
