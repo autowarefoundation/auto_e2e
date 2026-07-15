@@ -50,10 +50,12 @@ function SampleDetailInner({
   const router = useRouter();
   const searchParams = useSearchParams();
   const version = searchParams.get("version") ?? "";
+  const teacher = searchParams.get("teacher") ?? "";
   const promptVersion = searchParams.get("prompt_version") ?? "";
   const versionQuery = (() => {
     const q = new URLSearchParams();
     if (version) q.set("version", version);
+    if (teacher) q.set("teacher", teacher);
     if (promptVersion) q.set("prompt_version", promptVersion);
     const s = q.toString();
     return s ? `?${s}` : "";
@@ -74,11 +76,12 @@ function SampleDetailInner({
         sampleKey,
         promptVersion || undefined,
         version || undefined,
+        teacher || undefined,
       ).catch((err: unknown) => {
         if (err instanceof ApiError && err.status === 404) return null;
         throw err;
       }),
-    [dataset, sampleKey, promptVersion, version],
+    [dataset, sampleKey, teacher, promptVersion, version],
   );
 
   // Bound forward/backward nav to the shard's FULL, ordered sample list so
