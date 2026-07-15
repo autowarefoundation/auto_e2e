@@ -115,6 +115,11 @@ func TestIndexWithoutExactGeoDoesNotMutateCachedIndex(t *testing.T) {
 			Key:         "l2d-v1-e000001-f000042",
 			SampleUID:   "l2d-v1-e000001-f000042",
 			PoseCurrent: pose,
+			Members: map[string]model.MemberRange{
+				"cam_0.jpg": {Offset: 512, Size: 128},
+				"pose.npy":  {Offset: 1024, Size: 36},
+				"gps.npy":   {Offset: 1536, Size: 1040},
+			},
 		}},
 	}
 
@@ -130,5 +135,68 @@ func TestIndexWithoutExactGeoDoesNotMutateCachedIndex(t *testing.T) {
 	}
 	if redacted.Samples[0].SampleUID != cached.Samples[0].SampleUID {
 		t.Fatal("redaction changed non-sensitive sample fields")
+	}
+	if _, ok := redacted.Samples[0].Members["pose.npy"]; ok {
+		t.Fatal("redacted index still contains pose member offset")
+	}
+	if _, ok := redacted.Samples[0].Members["gps.npy"]; ok {
+		t.Fatal("redacted index still contains GPS member offset")
+	}
+	if _, ok := redacted.Samples[0].Members["cam_0.jpg"]; !ok {
+		t.Fatal("redaction removed camera member")
+	}
+	if len(cached.Samples[0].Members) != 3 {
+		t.Fatal("redaction mutated cached member map")
+	}
+}
+
+func TestCameraMemberRangeRequiresMatchingSampleAndCamera(t *testing.T) {
+	index := &model.ShardIndex{Samples: []model.IndexSample{{
+		Key: "sample-a",
+		Members: map[string]model.MemberRange{
+			"cam_0.jpg": {Offset: 512, Size: 128},
+		},
+	}}}
+	got, ok := cameraMemberRange(index, "sample-a", "cam_0.jpg")
+	if !ok || got.Offset != 512 || got.Size != 128 {
+		t.Fatalf("camera range = %+v, %v", got, ok)
+	}
+	if _, ok := cameraMemberRange(index, "sample-b", "cam_0.jpg"); ok {
+		t.Fatal("matched a range from another sample")
+	}
+	if _, ok := cameraMemberRange(index, "sample-a", "cam_1.jpg"); ok {
+		t.Fatal("matched a range from another camera")
+	}
+}
+
+func TestRangeOverlapsExactGeo(t *testing.T) {
+	index := &model.ShardIndex{Samples: []model.IndexSample{{
+		Members: map[string]model.MemberRange{
+			"cam_0.jpg": {Offset: 512, Size: 128},
+			"pose.npy":  {Offset: 1024, Size: 36},
+			"gps.npy":   {Offset: 1536, Size: 1040},
+		},
+	}}}
+	tests := []struct {
+		name   string
+		offset int64
+		size   int64
+		want   bool
+	}{
+		{"camera only", 512, 128, false},
+		{"ends at pose", 896, 128, false},
+		{"starts at pose", 1024, 1, true},
+		{"spans pose", 900, 200, true},
+		{"starts at GPS", 1536, 1, true},
+		{"after GPS", 2576, 10, false},
+		{"invalid size", 0, 0, true},
+		{"overflow", int64(^uint64(0) >> 1), 2, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := rangeOverlapsExactGeo(index, tt.offset, tt.size); got != tt.want {
+				t.Fatalf("rangeOverlapsExactGeo(%d, %d) = %v, want %v", tt.offset, tt.size, got, tt.want)
+			}
+		})
 	}
 }
