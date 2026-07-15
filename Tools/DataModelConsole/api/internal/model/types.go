@@ -206,12 +206,15 @@ type GeoStatsResponse struct {
 }
 
 // ReasoningStatsEntry is one dataset/teacher/prompt_version bucket with its
-// label object count.
+// label object count. Teacher is an opaque URL-safe identity; the provider and
+// model fields are the human-readable provenance.
 type ReasoningStatsEntry struct {
-	Dataset       string `json:"dataset"`
-	Teacher       string `json:"teacher"`
-	PromptVersion string `json:"prompt_version"`
-	Count         int    `json:"count"`
+	Dataset         string `json:"dataset"`
+	Teacher         string `json:"teacher"`
+	TeacherProvider string `json:"teacher_provider"`
+	TeacherModel    string `json:"teacher_model"`
+	PromptVersion   string `json:"prompt_version"`
+	Count           int    `json:"count"`
 }
 
 // ReasoningStatsResponse wraps GET /api/v1/reasoning-labels/stats.
@@ -223,9 +226,11 @@ type ReasoningStatsResponse struct {
 // ReasoningPromptVersion is one teacher/prompt_version partition of a single
 // dataset's reasoning-label cache with its label object count.
 type ReasoningPromptVersion struct {
-	Teacher       string `json:"teacher"`
-	PromptVersion string `json:"prompt_version"`
-	Count         int    `json:"count"`
+	Teacher         string `json:"teacher"`
+	TeacherProvider string `json:"teacher_provider"`
+	TeacherModel    string `json:"teacher_model"`
+	PromptVersion   string `json:"prompt_version"`
+	Count           int    `json:"count"`
 }
 
 // ReasoningPromptVersionsResponse wraps
@@ -289,25 +294,29 @@ type ReasoningStatsBlob struct {
 // Stats is the precomputed blob; ComputedAt is when it was materialised (RFC3339,
 // empty when just computed inline and not yet persisted).
 type ReasoningStatsDetailResponse struct {
-	Dataset       string             `json:"dataset"`
-	Version       string             `json:"version"`
-	PromptVersion string             `json:"prompt_version"`
-	Teacher       string             `json:"teacher,omitempty"`
-	ComputedAt    string             `json:"computed_at,omitempty"`
-	Cached        bool               `json:"cached"` // true when served from a DynamoDB hit
-	Stats         ReasoningStatsBlob `json:"stats"`
+	Dataset         string             `json:"dataset"`
+	Version         string             `json:"version"`
+	PromptVersion   string             `json:"prompt_version"`
+	Teacher         string             `json:"teacher"`
+	TeacherProvider string             `json:"teacher_provider,omitempty"`
+	TeacherModel    string             `json:"teacher_model,omitempty"`
+	ComputedAt      string             `json:"computed_at,omitempty"`
+	Cached          bool               `json:"cached"` // true when served from a DynamoDB hit
+	Stats           ReasoningStatsBlob `json:"stats"`
 }
 
 // ComputeStatsResponse wraps the force-(re)compute endpoint: it reports the
 // blob plus how many scene-by-label index rows were written.
 type ComputeStatsResponse struct {
-	Dataset       string             `json:"dataset"`
-	Version       string             `json:"version"`
-	PromptVersion string             `json:"prompt_version"`
-	Teacher       string             `json:"teacher,omitempty"`
-	ComputedAt    string             `json:"computed_at"`
-	SceneRows     int                `json:"scene_rows"` // scene-by-label index rows written
-	Stats         ReasoningStatsBlob `json:"stats"`
+	Dataset         string             `json:"dataset"`
+	Version         string             `json:"version"`
+	PromptVersion   string             `json:"prompt_version"`
+	Teacher         string             `json:"teacher"`
+	TeacherProvider string             `json:"teacher_provider,omitempty"`
+	TeacherModel    string             `json:"teacher_model,omitempty"`
+	ComputedAt      string             `json:"computed_at"`
+	SceneRows       int                `json:"scene_rows"` // scene-by-label index rows written
+	Stats           ReasoningStatsBlob `json:"stats"`
 }
 
 // SceneRef identifies one scene carrying a searched reasoning label. Shard is
@@ -330,6 +339,7 @@ type SceneRef struct {
 type SceneSearchResponse struct {
 	Dataset       string     `json:"dataset"`
 	PromptVersion string     `json:"prompt_version"`
+	Teacher       string     `json:"teacher"`
 	Version       string     `json:"version,omitempty"`
 	Field         string     `json:"field"`
 	Value         string     `json:"value"`
