@@ -247,3 +247,54 @@ test("scene locator paginates through the complete shard publication", async ({
     ),
   ).toHaveCount(1);
 });
+
+test("reasoning label reads retain the selected dataset version", async ({
+  page,
+}) => {
+  let labelRequest = "";
+  await page.route("**/api/v1/**", (route) => {
+    const url = new URL(route.request().url());
+    if (
+      url.pathname ===
+      "/api/v1/datasets/review/shards/train-000000.tar/samples/sample"
+    ) {
+      return fulfillJSON(route, {
+        key: "sample",
+        episode_id: "episode",
+        frame_idx: 0,
+        meta: {},
+        cameras: [],
+        ego_history: [],
+        ego_future: [],
+      });
+    }
+    if (
+      url.pathname ===
+      "/api/v1/datasets/review/shards/train-000000.tar/index"
+    ) {
+      return fulfillJSON(route, {
+        fps: 10,
+        version: "v2.0",
+        shard: "train-000000.tar",
+        samples: [],
+      });
+    }
+    if (
+      url.pathname === "/api/v1/reasoning-labels/review/sample"
+    ) {
+      labelRequest = route.request().url();
+      return route.fulfill({ status: 404, body: "no label" });
+    }
+    return route.fulfill({ status: 404, body: "not mocked" });
+  });
+
+  await page.goto(
+    "/datasets/review/shards/train-000000.tar/samples/sample?version=v2.0&prompt_version=p1",
+  );
+  await expect(page.getByText("sample", { exact: true }).first()).toBeVisible();
+  await expect.poll(() => labelRequest).not.toBe("");
+
+  const query = new URL(labelRequest).searchParams;
+  expect(query.get("prompt_version")).toBe("p1");
+  expect(query.get("version")).toBe("v2.0");
+});
