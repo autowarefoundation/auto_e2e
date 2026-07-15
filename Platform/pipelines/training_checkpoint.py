@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import random
+import time
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -148,37 +149,42 @@ def upload_immutable_checkpoint(
         "checkpoint-schema": CHECKPOINT_SCHEMA_VERSION,
     }
 
-    try:
-        with checkpoint_path.open("rb") as stream:
-            s3_client.put_object(
-                Bucket=bucket,
-                Key=key,
-                Body=stream,
-                ContentType="application/octet-stream",
-                Metadata=metadata,
-                IfNoneMatch="*",
+    for attempt in range(4):
+        try:
+            with checkpoint_path.open("rb") as stream:
+                s3_client.put_object(
+                    Bucket=bucket,
+                    Key=key,
+                    Body=stream,
+                    ContentType="application/octet-stream",
+                    Metadata=metadata,
+                    IfNoneMatch="*",
+                )
+            created = True
+            break
+        except ClientError as error:
+            status = error.response.get("ResponseMetadata", {}).get(
+                "HTTPStatusCode"
             )
-        created = True
-    except ClientError as error:
-        status = error.response.get("ResponseMetadata", {}).get(
-            "HTTPStatusCode"
-        )
-        code = error.response.get("Error", {}).get("Code")
-        if status != 412 and code not in {
-            "PreconditionFailed",
-            "ConditionalRequestConflict",
-        }:
-            raise
-        existing = s3_client.head_object(Bucket=bucket, Key=key)
-        existing_digest = existing.get("Metadata", {}).get("sha256")
-        if (
-            int(existing.get("ContentLength", -1)) != size
-            or existing_digest != digest
-        ):
-            raise RuntimeError(
-                f"immutable checkpoint conflict at s3://{bucket}/{key}"
-            ) from error
-        created = False
+            code = error.response.get("Error", {}).get("Code")
+            if status == 409 or code == "ConditionalRequestConflict":
+                if attempt == 3:
+                    raise
+                time.sleep(0.05 * (2**attempt))
+                continue
+            if status != 412 and code != "PreconditionFailed":
+                raise
+            existing = s3_client.head_object(Bucket=bucket, Key=key)
+            existing_digest = existing.get("Metadata", {}).get("sha256")
+            if (
+                int(existing.get("ContentLength", -1)) != size
+                or existing_digest != digest
+            ):
+                raise RuntimeError(
+                    f"immutable checkpoint conflict at s3://{bucket}/{key}"
+                ) from error
+            created = False
+            break
 
     return {
         "uri": f"s3://{bucket}/{key}",
