@@ -113,6 +113,9 @@ func TestDecodePublicationManifestAcceptsCanonicalInventory(t *testing.T) {
 	if manifest.ShardByName["scene-b-train-000000.tar"].ByteSize != 456 {
 		t.Fatal("shard allowlist was not indexed")
 	}
+	if manifest.ShardByName["scene-b-train-000000.tar"].ETag != `"etag-b"` {
+		t.Fatal("shard ETag was not canonicalized for If-Match")
+	}
 	if !isLowerHexDigest(manifest.SHA256) {
 		t.Fatalf("manifest digest = %q", manifest.SHA256)
 	}
@@ -195,6 +198,13 @@ func TestDecodePublicationManifestRejectsInvalidGate(t *testing.T) {
 			},
 		},
 		{
+			name: "invalid shard etag",
+			mutate: func(value map[string]any) {
+				entries := value["shard_entries"].([]any)
+				entries[0].(map[string]any)["etag"] = "bad\netag"
+			},
+		},
+		{
 			name: "invalid rig",
 			mutate: func(value map[string]any) {
 				value["rig"].(map[string]any)["key"] = "kitscenes/v2.1/rig/other.json"
@@ -258,6 +268,7 @@ func TestValidPublishedShardNameMatchesWriterContract(t *testing.T) {
 
 type fakePublicationObject struct {
 	body         []byte
+	etag         string
 	metadata     map[string]string
 	lastModified time.Time
 }
@@ -281,6 +292,10 @@ func (f *fakePublicationS3) GetObject(
 	f.mu.Unlock()
 	if !ok {
 		return nil, &smithy.GenericAPIError{Code: "NoSuchKey"}
+	}
+	if input.IfMatch != nil &&
+		!sameS3ETag(aws.ToString(input.IfMatch), object.etag) {
+		return nil, &smithy.GenericAPIError{Code: "PreconditionFailed"}
 	}
 	body := object.body
 	contentRange := ""
@@ -331,6 +346,7 @@ func (f *fakePublicationS3) HeadObject(
 	}
 	return &s3.HeadObjectOutput{
 		ContentLength: aws.Int64(int64(len(object.body))),
+		ETag:          aws.String(object.etag),
 		LastModified:  aws.Time(object.lastModified),
 		Metadata:      object.metadata,
 	}, nil
@@ -387,6 +403,7 @@ func newPublicationTestService(
 	for _, entry := range manifest.ShardEntries {
 		objects[entry.Key] = fakePublicationObject{
 			body: bytes.Repeat([]byte{1}, int(entry.ByteSize)),
+			etag: entry.ETag,
 			metadata: map[string]string{
 				"source-identity": entry.ContentIdentity,
 			},
@@ -403,7 +420,7 @@ func newPublicationTestService(
 		bucket:           "datasets",
 		versionCache:     map[string]cachedVersion{},
 		publicationCache: map[string]*publicationManifest{},
-		indexSF:          map[string]*sync.WaitGroup{},
+		indexSF:          map[string]*shardIndexBuild{},
 	}
 	return service, client
 }
@@ -481,6 +498,15 @@ func TestLoadPublicationManifestRejectsS3InventoryMismatch(t *testing.T) {
 				key := "kitscenes/v2.1/shards/scene-a-train-000000.tar"
 				object := client.objects[key]
 				object.metadata["source-identity"] = strings.Repeat("f", 64)
+				client.objects[key] = object
+			},
+		},
+		{
+			name: "wrong destination etag",
+			mutate: func(client *fakePublicationS3) {
+				key := "kitscenes/v2.1/shards/scene-a-train-000000.tar"
+				object := client.objects[key]
+				object.etag = `"different-etag"`
 				client.objects[key] = object
 			},
 		},
@@ -602,10 +628,14 @@ func TestBuildShardIndexRejectsInvalidSampleContracts(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			service, client := newPublicationTestService(t)
 			key := "kitscenes/v2.1/shards/" + shard
-			client.objects[key] = fakePublicationObject{
-				body:     encodeTestTar(t, test.members),
-				metadata: map[string]string{},
+			if _, err := service.loadPublicationManifest(
+				context.Background(), "kitscenes", "v2.1",
+			); err != nil {
+				t.Fatal(err)
 			}
+			object := client.objects[key]
+			object.body = encodeTestTar(t, test.members)
+			client.objects[key] = object
 			index, err := service.buildShardIndexUncached(
 				context.Background(), "kitscenes", "v2.1", shard,
 			)
@@ -623,6 +653,53 @@ func TestBuildShardIndexRejectsInvalidSampleContracts(t *testing.T) {
 				t.Fatalf("index = %+v", index)
 			}
 		})
+	}
+}
+
+func TestBuildShardIndexPinsPublishedObjectETag(t *testing.T) {
+	service, client := newPublicationTestService(t)
+	const shard = "scene-a-train-000000.tar"
+	key := "kitscenes/v2.1/shards/" + shard
+	if _, err := service.loadPublicationManifest(
+		context.Background(), "kitscenes", "v2.1",
+	); err != nil {
+		t.Fatal(err)
+	}
+	object := client.objects[key]
+	object.etag = `"replacement-etag"`
+	client.objects[key] = object
+
+	if _, err := service.buildShardIndexUncached(
+		context.Background(), "kitscenes", "v2.1", shard,
+	); err == nil || !strings.Contains(err.Error(), "PreconditionFailed") {
+		t.Fatalf("replacement shard index error = %v", err)
+	}
+}
+
+func TestBuildShardIndexRejectsSampleOverflowDuringScan(t *testing.T) {
+	service, client := newPublicationTestService(t)
+	const shard = "scene-a-train-000000.tar"
+	key := "kitscenes/v2.1/shards/" + shard
+	if _, err := service.loadPublicationManifest(
+		context.Background(), "kitscenes", "v2.1",
+	); err != nil {
+		t.Fatal(err)
+	}
+	members := make([]testTarMember, maxShardIndexSamples+1)
+	for i := range members {
+		members[i] = testTarMember{
+			name: fmt.Sprintf("sample-%05d.cam_0.jpg", i),
+			body: []byte{1},
+		}
+	}
+	object := client.objects[key]
+	object.body = encodeTestTar(t, members)
+	client.objects[key] = object
+
+	if _, err := service.buildShardIndexUncached(
+		context.Background(), "kitscenes", "v2.1", shard,
+	); err == nil || !strings.Contains(err.Error(), "exceeds 4096 samples") {
+		t.Fatalf("sample overflow error = %v", err)
 	}
 }
 
