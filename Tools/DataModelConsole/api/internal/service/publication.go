@@ -2,17 +2,24 @@ package service
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
+	"strings"
+	"sync"
 	"time"
+
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
 )
 
 const (
 	publicationSchema           = "v1"
 	maxPublicationManifestBytes = 4 << 20
+	publicationHeadConcurrency  = 32
 )
 
 type publicationShardEntry struct {
@@ -209,4 +216,214 @@ func isLowerHexDigest(value string) bool {
 		}
 	}
 	return true
+}
+
+func (s *S3Service) loadPublicationManifest(
+	ctx context.Context,
+	dataset, version string,
+) (*publicationManifest, error) {
+	cacheKey := dataset + "/" + version
+	s.publicationMu.Lock()
+	defer s.publicationMu.Unlock()
+	if manifest := s.publicationCache[cacheKey]; manifest != nil {
+		return manifest, nil
+	}
+
+	manifestKey := shardsPrefix(dataset, version) + "manifest.json"
+	body, err := s.getObjectBytesFromBucket(
+		ctx, s.bucket, manifestKey, maxPublicationManifestBytes,
+	)
+	if err != nil {
+		return nil, err
+	}
+	manifest, err := decodePublicationManifest(body, dataset, version)
+	if err != nil {
+		return nil, err
+	}
+	head, err := s.client.HeadObject(ctx, &s3.HeadObjectInput{
+		Bucket: aws.String(s.bucket),
+		Key:    aws.String(manifestKey),
+	})
+	if err != nil {
+		if isS3NotFound(err) {
+			return nil, ErrNotFound
+		}
+		return nil, fmt.Errorf("head publication manifest: %w", err)
+	}
+	if aws.ToInt64(head.ContentLength) != int64(len(body)) ||
+		metadataValue(head.Metadata, "sha256") != manifest.SHA256 ||
+		metadataValue(head.Metadata, "publication-schema") != publicationSchema {
+		return nil, fmt.Errorf("publication manifest object identity mismatch")
+	}
+	if err := s.validatePublicationShards(ctx, manifest); err != nil {
+		return nil, err
+	}
+	if s.publicationCache == nil {
+		s.publicationCache = make(map[string]*publicationManifest)
+	}
+	s.publicationCache[cacheKey] = manifest
+	return manifest, nil
+}
+
+func (s *S3Service) validatePublicationShards(
+	ctx context.Context,
+	manifest *publicationManifest,
+) error {
+	objects := make(map[string]struct {
+		size         int64
+		lastModified time.Time
+	})
+	paginator := s3.NewListObjectsV2Paginator(
+		s.client,
+		&s3.ListObjectsV2Input{
+			Bucket: aws.String(s.bucket),
+			Prefix: aws.String(shardsPrefix(manifest.Dataset, manifest.Version)),
+		},
+	)
+	for paginator.HasMorePages() {
+		page, err := paginator.NextPage(ctx)
+		if err != nil {
+			return fmt.Errorf("list published shard inventory: %w", err)
+		}
+		for _, object := range page.Contents {
+			key := aws.ToString(object.Key)
+			if !strings.HasSuffix(key, ".tar") {
+				continue
+			}
+			if _, exists := objects[key]; exists {
+				return fmt.Errorf("duplicate S3 shard object %q", key)
+			}
+			objects[key] = struct {
+				size         int64
+				lastModified time.Time
+			}{
+				size:         aws.ToInt64(object.Size),
+				lastModified: aws.ToTime(object.LastModified),
+			}
+		}
+	}
+	if len(objects) != len(manifest.ShardEntries) {
+		return fmt.Errorf(
+			"published shard inventory count mismatch: manifest=%d s3=%d",
+			len(manifest.ShardEntries), len(objects),
+		)
+	}
+	for i := range manifest.ShardEntries {
+		entry := &manifest.ShardEntries[i]
+		object, ok := objects[entry.Key]
+		if !ok {
+			return fmt.Errorf("published shard %q is missing", entry.Name)
+		}
+		if object.size != entry.ByteSize {
+			return fmt.Errorf(
+				"published shard %q size mismatch: manifest=%d s3=%d",
+				entry.Name, entry.ByteSize, object.size,
+			)
+		}
+		entry.LastModified = object.lastModified
+	}
+
+	validationCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	results := make([]error, len(manifest.ShardEntries))
+	sem := make(chan struct{}, publicationHeadConcurrency)
+	var wg sync.WaitGroup
+	for i := range manifest.ShardEntries {
+		select {
+		case sem <- struct{}{}:
+		case <-validationCtx.Done():
+			results[i] = validationCtx.Err()
+			continue
+		}
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			entry := manifest.ShardEntries[i]
+			head, err := s.client.HeadObject(
+				validationCtx,
+				&s3.HeadObjectInput{
+					Bucket: aws.String(s.bucket),
+					Key:    aws.String(entry.Key),
+				},
+			)
+			if err != nil {
+				results[i] = fmt.Errorf(
+					"head published shard %q: %w", entry.Name, err,
+				)
+				cancel()
+				return
+			}
+			if aws.ToInt64(head.ContentLength) != entry.ByteSize ||
+				metadataValue(
+					head.Metadata, "source-identity",
+				) != entry.ContentIdentity {
+				results[i] = fmt.Errorf(
+					"published shard %q object identity mismatch", entry.Name,
+				)
+				cancel()
+			}
+		}(i)
+	}
+	wg.Wait()
+	for _, err := range results {
+		if err != nil {
+			return err
+		}
+	}
+	for _, entry := range manifest.ShardEntries {
+		manifest.ShardByName[entry.Name] = entry
+	}
+	return nil
+}
+
+func (s *S3Service) publishedVersion(
+	ctx context.Context,
+	dataset, requested string,
+) (string, error) {
+	if isVersionDir(requested) {
+		if requiresPublicationManifest(requested) {
+			if _, err := s.loadPublicationManifest(
+				ctx, dataset, requested,
+			); err != nil {
+				return "", err
+			}
+		} else if !s.versionHasShards(ctx, dataset, requested) {
+			return "", ErrNotFound
+		}
+		return requested, nil
+	}
+	version := s.resolveVersion(ctx, dataset)
+	if requiresPublicationManifest(version) {
+		if _, err := s.loadPublicationManifest(
+			ctx, dataset, version,
+		); err != nil {
+			return "", err
+		}
+	}
+	return version, nil
+}
+
+func (s *S3Service) publishedShard(
+	ctx context.Context,
+	dataset, version, shard string,
+) (publicationShardEntry, error) {
+	manifest, err := s.loadPublicationManifest(ctx, dataset, version)
+	if err != nil {
+		return publicationShardEntry{}, err
+	}
+	entry, ok := manifest.ShardByName[shard]
+	if !ok {
+		return publicationShardEntry{}, ErrNotFound
+	}
+	return entry, nil
+}
+
+func metadataValue(metadata map[string]string, key string) string {
+	for candidate, value := range metadata {
+		if strings.EqualFold(candidate, key) {
+			return value
+		}
+	}
+	return ""
 }
