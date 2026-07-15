@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"net/http"
 	"strings"
 
@@ -218,10 +219,21 @@ func (h *DatasetsHandler) GetShardIndex(w http.ResponseWriter, r *http.Request) 
 }
 
 func indexWithoutExactGeo(index *model.ShardIndex) *model.ShardIndex {
+	if index == nil {
+		return nil
+	}
 	redacted := *index
 	redacted.Samples = append([]model.IndexSample(nil), index.Samples...)
 	for i := range redacted.Samples {
 		redacted.Samples[i].PoseCurrent = nil
+		members := make(map[string]model.MemberRange, len(redacted.Samples[i].Members))
+		for name, member := range redacted.Samples[i].Members {
+			if name == "pose.npy" || name == "gps.npy" {
+				continue
+			}
+			members[name] = member
+		}
+		redacted.Samples[i].Members = members
 	}
 	return &redacted
 }
@@ -262,6 +274,17 @@ func (h *DatasetsHandler) GetImage(w http.ResponseWriter, r *http.Request) {
 	var size int64
 	var err error
 	if off, sz, rok := parseRange(r); rok {
+		index, indexErr := h.s3.BuildShardIndex(r.Context(), name, version, shard)
+		if indexErr != nil {
+			slog.Error("validate image range", "dataset", name, "shard", shard, "error", indexErr)
+			writeError(w, http.StatusBadGateway, model.CodeS3Error, "failed to validate image range")
+			return
+		}
+		expected, found := cameraMemberRange(index, key, cam+".jpg")
+		if !found || expected.Offset != off || expected.Size != sz {
+			writeError(w, http.StatusBadRequest, model.CodeInvalidParam, "range does not match requested camera member")
+			return
+		}
 		reader, closer, size, err = h.s3.StreamTarMemberRange(r.Context(), name, version, shard, off, sz)
 	} else {
 		reader, closer, size, err = h.s3.StreamTarMember(r.Context(), name, version, shard, member)
@@ -334,6 +357,20 @@ func (h *DatasetsHandler) GetBlob(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, model.CodeInvalidParam, "requested range too large")
 		return
 	}
+	if !exactGeoAuthorized(
+		r, h.exactGeoEnabled, h.exactGeoRequiredRole,
+	) {
+		index, indexErr := h.s3.BuildShardIndex(r.Context(), name, version, shard)
+		if indexErr != nil {
+			slog.Error("validate shard blob range", "dataset", name, "shard", shard, "error", indexErr)
+			writeError(w, http.StatusBadGateway, model.CodeS3Error, "failed to validate shard range")
+			return
+		}
+		if rangeOverlapsExactGeo(index, off, sz) {
+			writeError(w, http.StatusForbidden, model.CodeUnavailable, "range contains access-controlled GPS data")
+			return
+		}
+	}
 
 	reader, closer, size, err := h.s3.StreamTarMemberRange(r.Context(), name, version, shard, off, sz)
 	if err != nil {
@@ -359,6 +396,45 @@ func (h *DatasetsHandler) GetBlob(w http.ResponseWriter, r *http.Request) {
 	if _, err := io.Copy(w, reader); err != nil {
 		slog.Warn("copy shard blob", "shard", shard, "offset", off, "error", err)
 	}
+}
+
+func cameraMemberRange(
+	index *model.ShardIndex,
+	key, suffix string,
+) (model.MemberRange, bool) {
+	if index == nil {
+		return model.MemberRange{}, false
+	}
+	for _, sample := range index.Samples {
+		if sample.Key == key {
+			member, ok := sample.Members[suffix]
+			return member, ok
+		}
+	}
+	return model.MemberRange{}, false
+}
+
+func rangeOverlapsExactGeo(
+	index *model.ShardIndex,
+	offset, size int64,
+) bool {
+	if index == nil || size <= 0 || offset > math.MaxInt64-size {
+		return true
+	}
+	end := offset + size
+	for _, sample := range index.Samples {
+		for _, suffix := range []string{"pose.npy", "gps.npy"} {
+			member, ok := sample.Members[suffix]
+			if !ok {
+				continue
+			}
+			memberEnd := member.Offset + member.Size
+			if offset < memberEnd && member.Offset < end {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // validShardName accepts plain .tar file names (no path traversal).
