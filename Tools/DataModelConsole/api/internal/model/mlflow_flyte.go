@@ -14,6 +14,13 @@ import "encoding/json"
 // MLflow
 // ---------------------------------------------------------------------------
 
+// TokenPage is the normalized pagination envelope used for both MLflow and
+// Flyte list endpoints.
+type TokenPage[T any] struct {
+	Items         []T    `json:"items"`
+	NextPageToken string `json:"next_page_token,omitempty"`
+}
+
 // MLflowExperiment is the flat experiment shape the frontend expects.
 type MLflowExperiment struct {
 	ExperimentID   string `json:"experiment_id"`
@@ -57,6 +64,15 @@ type MLflowRegisteredModel struct {
 // last_update_time,...}]}) into the flat list. RunCount is not part of that
 // response (MLflow does not return it), so it stays 0.
 func NormalizeMLflowExperiments(body []byte) ([]MLflowExperiment, error) {
+	page, err := NormalizeMLflowExperimentsPage(body)
+	return page.Items, err
+}
+
+// NormalizeMLflowExperimentsPage preserves MLflow's pagination token while
+// flattening the experiment records.
+func NormalizeMLflowExperimentsPage(
+	body []byte,
+) (TokenPage[MLflowExperiment], error) {
 	var env struct {
 		Experiments []struct {
 			ExperimentID   string          `json:"experiment_id"`
@@ -65,9 +81,10 @@ func NormalizeMLflowExperiments(body []byte) ([]MLflowExperiment, error) {
 			LifecycleStage string          `json:"lifecycle_stage"`
 			LastUpdateTime json.RawMessage `json:"last_update_time"`
 		} `json:"experiments"`
+		NextPageToken string `json:"next_page_token"`
 	}
 	if err := json.Unmarshal(body, &env); err != nil {
-		return nil, err
+		return TokenPage[MLflowExperiment]{}, err
 	}
 	out := make([]MLflowExperiment, 0, len(env.Experiments))
 	for _, e := range env.Experiments {
@@ -79,7 +96,10 @@ func NormalizeMLflowExperiments(body []byte) ([]MLflowExperiment, error) {
 			LastUpdateTime: asInt64(e.LastUpdateTime),
 		})
 	}
-	return out, nil
+	return TokenPage[MLflowExperiment]{
+		Items:         out,
+		NextPageToken: env.NextPageToken,
+	}, nil
 }
 
 // NormalizeMLflowRuns decodes the upstream runs/search envelope
@@ -87,17 +107,30 @@ func NormalizeMLflowExperiments(body []byte) ([]MLflowExperiment, error) {
 // into the flat run list, folding params/metrics into maps (latest metric value
 // per key wins — the upstream lists newest first).
 func NormalizeMLflowRuns(body []byte) ([]MLflowRun, error) {
+	page, err := NormalizeMLflowRunsPage(body)
+	return page.Items, err
+}
+
+// NormalizeMLflowRunsPage preserves MLflow's pagination token while
+// flattening run records.
+func NormalizeMLflowRunsPage(
+	body []byte,
+) (TokenPage[MLflowRun], error) {
 	var env struct {
-		Runs []rawRun `json:"runs"`
+		Runs          []rawRun `json:"runs"`
+		NextPageToken string   `json:"next_page_token"`
 	}
 	if err := json.Unmarshal(body, &env); err != nil {
-		return nil, err
+		return TokenPage[MLflowRun]{}, err
 	}
 	out := make([]MLflowRun, 0, len(env.Runs))
 	for _, r := range env.Runs {
 		out = append(out, r.flatten())
 	}
-	return out, nil
+	return TokenPage[MLflowRun]{
+		Items:         out,
+		NextPageToken: env.NextPageToken,
+	}, nil
 }
 
 // NormalizeMLflowRun decodes the single-run get envelope ({"run":{...}}).
@@ -139,9 +172,14 @@ func (r rawRun) flatten() MLflowRun {
 		params[p.Key] = p.Value
 	}
 	metrics := map[string]float64{}
+	seenMetrics := map[string]struct{}{}
 	for _, m := range r.Data.Metrics {
-		if _, seen := metrics[m.Key]; !seen {
-			metrics[m.Key] = asFloat64(m.Value)
+		if _, seen := seenMetrics[m.Key]; seen {
+			continue
+		}
+		seenMetrics[m.Key] = struct{}{}
+		if value, ok := asFiniteFloat64(m.Value); ok {
+			metrics[m.Key] = value
 		}
 	}
 	// run_name lives under info in modern MLflow; fall back to the params tag.
@@ -165,6 +203,15 @@ func (r rawRun) flatten() MLflowRun {
 // ({"registered_models":[{name, latest_versions:[{version,current_stage,
 // run_id,status}]}]}) into the flat model list.
 func NormalizeMLflowModels(body []byte) ([]MLflowRegisteredModel, error) {
+	page, err := NormalizeMLflowModelsPage(body)
+	return page.Items, err
+}
+
+// NormalizeMLflowModelsPage preserves MLflow's pagination token while
+// flattening registered models.
+func NormalizeMLflowModelsPage(
+	body []byte,
+) (TokenPage[MLflowRegisteredModel], error) {
 	var env struct {
 		RegisteredModels []struct {
 			Name           string `json:"name"`
@@ -175,9 +222,10 @@ func NormalizeMLflowModels(body []byte) ([]MLflowRegisteredModel, error) {
 				Status       string `json:"status"`
 			} `json:"latest_versions"`
 		} `json:"registered_models"`
+		NextPageToken string `json:"next_page_token"`
 	}
 	if err := json.Unmarshal(body, &env); err != nil {
-		return nil, err
+		return TokenPage[MLflowRegisteredModel]{}, err
 	}
 	out := make([]MLflowRegisteredModel, 0, len(env.RegisteredModels))
 	for _, m := range env.RegisteredModels {
@@ -192,7 +240,10 @@ func NormalizeMLflowModels(body []byte) ([]MLflowRegisteredModel, error) {
 		}
 		out = append(out, MLflowRegisteredModel{Name: m.Name, LatestVersions: versions})
 	}
-	return out, nil
+	return TokenPage[MLflowRegisteredModel]{
+		Items:         out,
+		NextPageToken: env.NextPageToken,
+	}, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -212,17 +263,34 @@ type FlyteExecution struct {
 // ({"executions":[{id:{name}, closure:{phase, workflowId:{name}|created_at|
 // duration}, spec:{launchPlan:{name}}}]}) into the flat list.
 func NormalizeFlyteExecutions(body []byte) ([]FlyteExecution, error) {
+	page, err := NormalizeFlyteExecutionsPage(body)
+	return page.Items, err
+}
+
+// NormalizeFlyteExecutionsPage preserves Flyte Admin's continuation token.
+func NormalizeFlyteExecutionsPage(
+	body []byte,
+) (TokenPage[FlyteExecution], error) {
 	var env struct {
-		Executions []rawFlyteExecution `json:"executions"`
+		Executions    []rawFlyteExecution `json:"executions"`
+		Token         string              `json:"token"`
+		NextPageToken string              `json:"next_page_token"`
 	}
 	if err := json.Unmarshal(body, &env); err != nil {
-		return nil, err
+		return TokenPage[FlyteExecution]{}, err
 	}
 	out := make([]FlyteExecution, 0, len(env.Executions))
 	for _, e := range env.Executions {
 		out = append(out, e.flatten())
 	}
-	return out, nil
+	nextPageToken := env.NextPageToken
+	if nextPageToken == "" {
+		nextPageToken = env.Token
+	}
+	return TokenPage[FlyteExecution]{
+		Items:         out,
+		NextPageToken: nextPageToken,
+	}, nil
 }
 
 // NormalizeFlyteExecution decodes a SINGLE Flyte Admin execution (the get-by-id
