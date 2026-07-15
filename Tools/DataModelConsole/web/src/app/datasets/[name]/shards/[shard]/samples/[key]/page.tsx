@@ -73,11 +73,12 @@ function SampleDetailInner({
         dataset,
         sampleKey,
         promptVersion || undefined,
+        version || undefined,
       ).catch((err: unknown) => {
         if (err instanceof ApiError && err.status === 404) return null;
         throw err;
       }),
-    [dataset, sampleKey, promptVersion],
+    [dataset, sampleKey, promptVersion, version],
   );
 
   // Bound forward/backward nav to the shard's FULL, ordered sample list so
