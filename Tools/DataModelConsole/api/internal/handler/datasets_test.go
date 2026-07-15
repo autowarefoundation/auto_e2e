@@ -10,6 +10,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	internalauth "github.com/autowarefoundation/auto_e2e/tools/datamodelconsole/api/internal/auth"
 	"github.com/autowarefoundation/auto_e2e/tools/datamodelconsole/api/internal/model"
 	"github.com/autowarefoundation/auto_e2e/tools/datamodelconsole/api/internal/service"
 )
@@ -284,7 +285,6 @@ func TestGetBlobUsesResolvedIndexVersionForRangeRead(t *testing.T) {
 		"name", "l2d",
 		"shard", "train-000000.tar",
 	)
-	request.Header.Set("X-Console-Roles", "exact-geo")
 	response := httptest.NewRecorder()
 
 	handler.GetBlob(response, request)
@@ -455,6 +455,58 @@ func TestIndexWithoutExactGeoDoesNotMutateCachedIndex(t *testing.T) {
 	}
 	if len(cached.Samples[0].Members) != 3 {
 		t.Fatal("redaction mutated cached member map")
+	}
+}
+
+func TestExactGeoResponsesAreNotCacheable(t *testing.T) {
+	pose := &model.GeoPose{LatitudeDeg: 35, LongitudeDeg: 139}
+	s3 := newRangeService()
+	s3.index.Samples[0].PoseCurrent = pose
+	s3.index.Samples[0].Members["pose.npy"] = model.MemberRange{
+		Offset: 1024,
+		Size:   4,
+	}
+	handler := &DatasetsHandler{
+		s3:                   s3,
+		exactGeoEnabled:      true,
+		exactGeoRequiredRole: "exact-geo",
+	}
+	withPrincipal := func(request *http.Request) *http.Request {
+		return request.WithContext(internalauth.WithPrincipal(
+			request.Context(),
+			internalauth.Principal{
+				Subject: "user-1",
+				Roles:   []string{"exact-geo"},
+			},
+		))
+	}
+
+	indexRequest := withPrincipal(requestWithDatasetRoute(
+		"/api/v1/datasets/l2d/shards/train-000000.tar/index?version=v2.1",
+		"name", "l2d",
+		"shard", "train-000000.tar",
+	))
+	indexResponse := httptest.NewRecorder()
+	handler.GetShardIndex(indexResponse, indexRequest)
+	if indexResponse.Code != http.StatusOK {
+		t.Fatalf("index status = %d: %s", indexResponse.Code, indexResponse.Body.String())
+	}
+	if got := indexResponse.Header().Get("Cache-Control"); got != "private, no-store" {
+		t.Fatalf("index Cache-Control = %q", got)
+	}
+
+	blobRequest := withPrincipal(requestWithDatasetRoute(
+		"/api/v1/datasets/l2d/shards/train-000000.tar/blob?offset=1024&size=4&version=v2.1",
+		"name", "l2d",
+		"shard", "train-000000.tar",
+	))
+	blobResponse := httptest.NewRecorder()
+	handler.GetBlob(blobResponse, blobRequest)
+	if blobResponse.Code != http.StatusOK {
+		t.Fatalf("blob status = %d: %s", blobResponse.Code, blobResponse.Body.String())
+	}
+	if got := blobResponse.Header().Get("Cache-Control"); got != "private, no-store" {
+		t.Fatalf("blob Cache-Control = %q", got)
 	}
 }
 
