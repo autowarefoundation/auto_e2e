@@ -46,7 +46,7 @@ def _manifest():
     }
 
 
-def _validate(manifest, expected_digest=None):
+def _validate(manifest, expected_digest=None, **kwargs):
     return validate_recovery_manifest(
         manifest,
         expected_artifact_set_sha256=(
@@ -55,6 +55,7 @@ def _validate(manifest, expected_digest=None):
         expected_dataset=DATASET,
         expected_source_revision=REVISION,
         expected_scene_ids=SCENES,
+        **kwargs,
     )
 
 
@@ -121,6 +122,22 @@ def test_manifest_rejects_launch_digest_mismatch():
 
     with pytest.raises(ValueError, match="differs from the launch input"):
         _validate(manifest, expected_digest="f" * 64)
+
+
+def test_manifest_rejects_audited_label_and_empty_scene_drift():
+    manifest = _manifest()
+
+    with pytest.raises(ValueError, match="label total"):
+        _validate(manifest, expected_label_count=2)
+    with pytest.raises(ValueError, match="empty-scene count"):
+        _validate(manifest, expected_empty_scene_count=2)
+
+    entries = _validate(
+        manifest,
+        expected_label_count=1,
+        expected_empty_scene_count=1,
+    )
+    assert sum(entry["expected_label_count"] for entry in entries) == 1
 
 
 def test_manifest_rejects_official_scene_order_drift():
