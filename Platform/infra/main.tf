@@ -1,7 +1,7 @@
 locals {
   # VPC spans 3 AZs for EKS HA; GPU NodePool is pinned to ODCR AZ only
-  vpc_azs  = ["us-west-2a", "us-west-2b", "us-west-2c"]
-  gpu_azs  = var.gpu_azs
+  vpc_azs = ["us-west-2a", "us-west-2b", "us-west-2c"]
+  gpu_azs = var.gpu_azs
 }
 
 module "vpc" {
@@ -153,6 +153,10 @@ module "codebuild" {
 
 output "codebuild_project" {
   value = module.codebuild.project_name
+}
+
+output "overlay_launch_project" {
+  value = module.codebuild.overlay_launch_project
 }
 
 # --- UI Exposure: CloudFront + VPC Origin → Internal NLB (K8s managed) ---
