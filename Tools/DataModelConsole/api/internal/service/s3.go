@@ -571,18 +571,6 @@ func requiresPublicationManifest(version string) bool {
 // Exported so handlers can 400 on a garbage ?version= before it reaches S3.
 func ValidVersion(v string) bool { return isVersionDir(v) }
 
-// versionOrResolve returns requested when it is a well-formed version dir,
-// otherwise the auto-resolved newest version. This is the single seam the
-// per-request ?version= override flows through: an empty or malformed value
-// falls back to resolveVersion (the historical auto-newest behavior), a valid
-// value pins that exact version for the request.
-func (s *S3Service) versionOrResolve(ctx context.Context, dataset, requested string) string {
-	if isVersionDir(requested) {
-		return requested
-	}
-	return s.resolveVersion(ctx, dataset)
-}
-
 // sortVersionsNewestFirst sorts version dirs in place newest-first
 // (version-aware, not raw lexical, so v10 > v9 and v2.0 > v1.10).
 func sortVersionsNewestFirst(versions []string) {
