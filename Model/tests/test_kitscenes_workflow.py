@@ -192,6 +192,21 @@ def test_old_geometry_pack_cache_is_not_aliased():
     assert versions["pack"] == "pack-v2-v1-v4-v1"
 
 
+@pytest.mark.parametrize(
+    ("dataset", "row_count", "expected"),
+    (
+        (workflows.Dataset.KITSCENES, 1, 1),
+        (workflows.Dataset.KITSCENES, 2, 2),
+        (workflows.Dataset.KITSCENES, 10_000, 2),
+        (workflows.Dataset.L2D, 10_000, 16),
+    ),
+)
+def test_row_decode_workers_bound_kitscenes_memory(
+    dataset, row_count, expected
+):
+    assert workflows._row_decode_worker_count(dataset, row_count) == expected
+
+
 def test_future_contracts_get_new_cache_versions():
     assert workflows._cache_versions_for_contracts(
         uid="v1",
