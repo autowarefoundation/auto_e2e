@@ -1,7 +1,10 @@
 package handler
 
 import (
+	"bytes"
 	"context"
+	"io"
+	"net/http"
 	"net/http/httptest"
 	"testing"
 
@@ -10,6 +13,103 @@ import (
 	"github.com/autowarefoundation/auto_e2e/tools/datamodelconsole/api/internal/model"
 	"github.com/autowarefoundation/auto_e2e/tools/datamodelconsole/api/internal/service"
 )
+
+type rangeCall struct {
+	dataset string
+	version string
+	shard   string
+	offset  int64
+	size    int64
+}
+
+type fakeDatasetsService struct {
+	index       *model.ShardIndex
+	indexErr    error
+	body        []byte
+	buildCalls  []rangeCall
+	streamCalls []rangeCall
+}
+
+func (*fakeDatasetsService) ListDatasets(context.Context) []model.Dataset {
+	panic("unexpected ListDatasets call")
+}
+
+func (*fakeDatasetsService) ValidDataset(name string) bool {
+	return name == "l2d"
+}
+
+func (*fakeDatasetsService) ListDatasetVersions(context.Context, string) ([]model.DatasetVersion, error) {
+	panic("unexpected ListDatasetVersions call")
+}
+
+func (*fakeDatasetsService) ListShards(context.Context, string, string, int, int) ([]model.Shard, model.Page, error) {
+	panic("unexpected ListShards call")
+}
+
+func (*fakeDatasetsService) ListSamples(context.Context, string, string, string, int, int) ([]model.Sample, model.Page, error) {
+	panic("unexpected ListSamples call")
+}
+
+func (*fakeDatasetsService) GetSampleDetail(context.Context, string, string, string, string) (*model.SampleDetail, error) {
+	panic("unexpected GetSampleDetail call")
+}
+
+func (f *fakeDatasetsService) BuildShardIndex(
+	_ context.Context,
+	dataset, version, shard string,
+) (*model.ShardIndex, error) {
+	f.buildCalls = append(f.buildCalls, rangeCall{
+		dataset: dataset,
+		version: version,
+		shard:   shard,
+	})
+	return f.index, f.indexErr
+}
+
+func (f *fakeDatasetsService) StreamTarMemberRange(
+	_ context.Context,
+	dataset, version, shard string,
+	offset, size int64,
+) (io.Reader, io.Closer, int64, error) {
+	f.streamCalls = append(f.streamCalls, rangeCall{
+		dataset: dataset,
+		version: version,
+		shard:   shard,
+		offset:  offset,
+		size:    size,
+	})
+	reader := io.NopCloser(bytes.NewReader(f.body))
+	return reader, reader, int64(len(f.body)), nil
+}
+
+func newRangeService() *fakeDatasetsService {
+	return &fakeDatasetsService{
+		index: &model.ShardIndex{
+			Version: "v2.1",
+			Shard:   "train-000000.tar",
+			Samples: []model.IndexSample{{
+				Key: "sample",
+				Members: map[string]model.MemberRange{
+					"cam_0.jpg": {Offset: 512, Size: 4},
+				},
+			}},
+		},
+		body: []byte("data"),
+	}
+}
+
+func requestWithDatasetRoute(target string, params ...string) *http.Request {
+	request := httptest.NewRequest(http.MethodGet, target, nil)
+	routeContext := chi.NewRouteContext()
+	for i := 0; i < len(params); i += 2 {
+		routeContext.URLParams.Add(params[i], params[i+1])
+	}
+	return request.WithContext(context.WithValue(
+		request.Context(),
+		chi.RouteCtxKey,
+		routeContext,
+	))
+}
 
 func TestValidShardName(t *testing.T) {
 	tests := []struct {
@@ -144,6 +244,167 @@ func TestGetImageRequiresValidRangeBeforeS3Access(t *testing.T) {
 				t.Fatalf("status = %d, want 400", response.Code)
 			}
 		})
+	}
+}
+
+func TestGetImageUsesResolvedIndexVersionForRangeRead(t *testing.T) {
+	s3 := newRangeService()
+	handler := &DatasetsHandler{s3: s3}
+	request := requestWithDatasetRoute(
+		"/api/v1/datasets/l2d/shards/train-000000.tar/samples/sample/image/cam_0?offset=512&size=4",
+		"name", "l2d",
+		"shard", "train-000000.tar",
+		"key", "sample",
+		"cam", "cam_0",
+	)
+	response := httptest.NewRecorder()
+
+	handler.GetImage(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d: %s", response.Code, http.StatusOK, response.Body.String())
+	}
+	if len(s3.buildCalls) != 1 || s3.buildCalls[0].version != "" {
+		t.Fatalf("BuildShardIndex calls = %+v, want one auto-resolve call", s3.buildCalls)
+	}
+	if len(s3.streamCalls) != 1 || s3.streamCalls[0].version != "v2.1" {
+		t.Fatalf("StreamTarMemberRange calls = %+v, want resolved version v2.1", s3.streamCalls)
+	}
+}
+
+func TestGetBlobUsesResolvedIndexVersionForRangeRead(t *testing.T) {
+	s3 := newRangeService()
+	handler := &DatasetsHandler{
+		s3:                   s3,
+		exactGeoEnabled:      true,
+		exactGeoRequiredRole: "exact-geo",
+	}
+	request := requestWithDatasetRoute(
+		"/api/v1/datasets/l2d/shards/train-000000.tar/blob?offset=512&size=4",
+		"name", "l2d",
+		"shard", "train-000000.tar",
+	)
+	request.Header.Set("X-Console-Roles", "exact-geo")
+	response := httptest.NewRecorder()
+
+	handler.GetBlob(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d: %s", response.Code, http.StatusOK, response.Body.String())
+	}
+	if len(s3.buildCalls) != 1 || s3.buildCalls[0].version != "" {
+		t.Fatalf("BuildShardIndex calls = %+v, want one auto-resolve call", s3.buildCalls)
+	}
+	if len(s3.streamCalls) != 1 || s3.streamCalls[0].version != "v2.1" {
+		t.Fatalf("StreamTarMemberRange calls = %+v, want resolved version v2.1", s3.streamCalls)
+	}
+}
+
+func TestShardRangeHandlersMapMissingIndexToNotFound(t *testing.T) {
+	tests := []struct {
+		name   string
+		target string
+		params []string
+		handle func(*DatasetsHandler, http.ResponseWriter, *http.Request)
+	}{
+		{
+			name:   "image",
+			target: "/api/v1/datasets/l2d/shards/train-000000.tar/samples/sample/image/cam_0?offset=512&size=4",
+			params: []string{
+				"name", "l2d",
+				"shard", "train-000000.tar",
+				"key", "sample",
+				"cam", "cam_0",
+			},
+			handle: (*DatasetsHandler).GetImage,
+		},
+		{
+			name:   "blob",
+			target: "/api/v1/datasets/l2d/shards/train-000000.tar/blob?offset=512&size=4",
+			params: []string{
+				"name", "l2d",
+				"shard", "train-000000.tar",
+			},
+			handle: (*DatasetsHandler).GetBlob,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s3 := newRangeService()
+			s3.indexErr = service.ErrNotFound
+			handler := &DatasetsHandler{s3: s3}
+			request := requestWithDatasetRoute(tt.target, tt.params...)
+			response := httptest.NewRecorder()
+
+			tt.handle(handler, response, request)
+
+			if response.Code != http.StatusNotFound {
+				t.Fatalf("status = %d, want %d: %s", response.Code, http.StatusNotFound, response.Body.String())
+			}
+			if len(s3.streamCalls) != 0 {
+				t.Fatalf("range read followed missing index: %+v", s3.streamCalls)
+			}
+		})
+	}
+}
+
+func TestShardRangeCacheControlRequiresExplicitVersion(t *testing.T) {
+	endpoints := []struct {
+		name   string
+		target string
+		params []string
+		handle func(*DatasetsHandler, http.ResponseWriter, *http.Request)
+	}{
+		{
+			name:   "image",
+			target: "/api/v1/datasets/l2d/shards/train-000000.tar/samples/sample/image/cam_0?offset=512&size=4",
+			params: []string{
+				"name", "l2d",
+				"shard", "train-000000.tar",
+				"key", "sample",
+				"cam", "cam_0",
+			},
+			handle: (*DatasetsHandler).GetImage,
+		},
+		{
+			name:   "blob",
+			target: "/api/v1/datasets/l2d/shards/train-000000.tar/blob?offset=512&size=4",
+			params: []string{
+				"name", "l2d",
+				"shard", "train-000000.tar",
+			},
+			handle: (*DatasetsHandler).GetBlob,
+		},
+	}
+	versions := []struct {
+		name  string
+		query string
+		want  string
+	}{
+		{name: "auto-resolved", want: "no-store"},
+		{name: "explicit", query: "&version=v2.1", want: "public, max-age=3600"},
+	}
+	for _, endpoint := range endpoints {
+		for _, version := range versions {
+			t.Run(endpoint.name+"/"+version.name, func(t *testing.T) {
+				s3 := newRangeService()
+				handler := &DatasetsHandler{s3: s3}
+				request := requestWithDatasetRoute(
+					endpoint.target+version.query,
+					endpoint.params...,
+				)
+				response := httptest.NewRecorder()
+
+				endpoint.handle(handler, response, request)
+
+				if response.Code != http.StatusOK {
+					t.Fatalf("status = %d, want %d: %s", response.Code, http.StatusOK, response.Body.String())
+				}
+				if got := response.Header().Get("Cache-Control"); got != version.want {
+					t.Fatalf("Cache-Control = %q, want %q", got, version.want)
+				}
+			})
+		}
 	}
 }
 
