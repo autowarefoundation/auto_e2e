@@ -16,6 +16,7 @@ from data_parsing.kit_scenes.dataset import (
     KitScenesDataset,
     _heading_cw_from_north,
 )
+from data_parsing.kit_scenes import map as map_module
 
 
 def _dataset_stub(samples):
@@ -70,6 +71,37 @@ def test_heading_conversion_uses_absolute_yaw_not_yaw_rate():
     assert _heading_cw_from_north(0.0) == pytest.approx(90.0)
     assert _heading_cw_from_north(np.pi / 2) == pytest.approx(0.0)
     assert _heading_cw_from_north(np.pi) == pytest.approx(270.0)
+
+
+def test_map_rasterizer_queries_with_scene_local_pose(monkeypatch, tmp_path):
+    class _SceneMap:
+        utm_origin = np.array([456_789.0, 5_432_100.0])
+
+        def __init__(self):
+            self.query_centers = []
+
+        def get_lanelets_in_roi(self, center, radius):
+            self.query_centers.append(np.asarray(center).copy())
+            return []
+
+        def get_stop_lines(self):
+            return []
+
+    scene_map = _SceneMap()
+    monkeypatch.setattr(map_module, "_cached_scene_map", lambda _: scene_map)
+
+    tile = map_module.generate_bev_map_tile(
+        tmp_path,
+        ego_x=2917.7171,
+        ego_y=-3280.8901,
+        canvas_size=32,
+    )
+
+    np.testing.assert_allclose(
+        scene_map.query_centers,
+        [[2917.7171, -3280.8901]],
+    )
+    assert tile.shape == (32, 32, 3)
 
 
 class _CameraLoader:
