@@ -145,13 +145,14 @@ func TestCanonicalVersionsRequirePublicationManifest(t *testing.T) {
 // historical minimal form) must decode its zero value rather than erroring.
 func TestShardManifestUnmarshal(t *testing.T) {
 	full := `{"total_samples": 436, "shards": 1, "hz": 10, "image_size": 256,
-	          "dataset": "yaak-ai/L2D", "episodes": 5, "num_views": 6,
-	          "has_map": true, "has_world_model": false, "geometry_type": "pseudo"}`
+		          "dataset": "yaak-ai/L2D", "episodes": 5, "num_views": 6,
+		          "has_map": true, "has_world_model": false, "has_gps": true,
+		          "geometry_type": "pseudo"}`
 	var m shardManifest
 	if err := json.Unmarshal([]byte(full), &m); err != nil {
 		t.Fatalf("unmarshal full manifest: %v", err)
 	}
-	want := shardManifest{TotalSamples: 436, Shards: 1, Episodes: 5, NumViews: 6, HasMap: true, HasWorldModel: false}
+	want := shardManifest{TotalSamples: 436, Shards: 1, Episodes: 5, NumViews: 6, HasMap: true, HasWorldModel: false, HasGPS: true}
 	if !reflect.DeepEqual(m, want) {
 		t.Errorf("full manifest decoded to %+v, want %+v", m, want)
 	}
