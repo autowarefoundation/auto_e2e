@@ -57,7 +57,7 @@ const fallbackVersion = "v1.0"
 const versionTTL = 2 * time.Minute
 
 // knownDatasets are the dataset prefixes exposed by the console.
-var knownDatasets = []string{"l2d", "nvidia_av"}
+var knownDatasets = []string{"kitscenes", "l2d", "nvidia_av"}
 
 // S3Service provides read-only access to the datasets bucket.
 type S3Service struct {
