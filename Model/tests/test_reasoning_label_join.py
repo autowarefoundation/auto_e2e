@@ -10,6 +10,8 @@ from __future__ import annotations
 import os
 import tempfile
 
+import pytest
+
 from data_processing.reasoning_label_generation.mock_teacher import MockTeacher
 from data_processing.reasoning_label_generation.teacher_client import TeacherRequest
 from data_processing.reasoning_label_generation.targets import (
@@ -38,16 +40,22 @@ def test_records_jsonl_roundtrip_by_sample_id():
     assert r0.prompt_version == records[0].prompt_version
 
 
-def test_load_is_last_write_wins_and_skips_blank_lines():
+def test_load_rejects_duplicate_ids_and_skips_blank_lines():
     with tempfile.TemporaryDirectory() as d:
         path = os.path.join(d, "records.jsonl")
-        # Two lines for the same sample_id + a blank line: last wins, blank skipped.
+        # Two lines for one immutable JOIN key are ambiguous and must fail.
         write_records_jsonl([_record("s00000000"), _record("s00000000")], path)
         with open(path, "a") as f:
             f.write("\n")
-        by_id = load_records_by_sample_id(path)
+        with pytest.raises(ValueError, match="duplicate reasoning sample_id"):
+            load_records_by_sample_id(path)
 
-    assert list(by_id) == ["s00000000"]
+        # Blank lines remain harmless when the records are otherwise unique.
+        write_records_jsonl([_record("s00000000")], path)
+        with open(path, "a") as f:
+            f.write("\n")
+        by_id = load_records_by_sample_id(path)
+        assert list(by_id) == ["s00000000"]
 
 
 def test_join_lookup_miss_returns_none():
