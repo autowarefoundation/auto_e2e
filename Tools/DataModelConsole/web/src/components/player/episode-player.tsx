@@ -458,7 +458,7 @@ export function EpisodePlayer({
     setLabelStatus("loading"); // clear any stale card immediately
     let cancelled = false;
     const timer = setTimeout(() => {
-      getReasoningLabel(dataset, key, promptVersion)
+      getReasoningLabel(dataset, key, promptVersion, version)
         .then((label) => {
           if (cancelled) return;
           setReasoning({ key, label });
@@ -480,7 +480,14 @@ export function EpisodePlayer({
       cancelled = true;
       clearTimeout(timer);
     };
-  }, [dataset, promptVersion, sample?.key, sample?.has_reasoning, sample]);
+  }, [
+    dataset,
+    version,
+    promptVersion,
+    sample?.key,
+    sample?.has_reasoning,
+    sample,
+  ]);
 
   const focusCamera = useCallback(
     (idx: number) => {
