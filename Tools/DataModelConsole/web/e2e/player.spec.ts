@@ -99,13 +99,16 @@ test("player renders real camera pixels, advances, and focuses", async ({ page }
 test("playback fills its buffer near real time (windowed fetch)", async ({
   page,
 }) => {
+  test.setTimeout(90_000);
   await page.goto(SCENE, { waitUntil: "domcontentloaded" });
   await expect(
     page.locator('[aria-label^="Episode player"]'),
   ).toBeVisible({ timeout: 30_000 });
-  // Warm the first window so the first frame is decodable, then play.
-  await page.waitForTimeout(3000);
-  await page.locator('[aria-label^="Episode player"]').focus();
+  // The real S3 window fetch competes with the rest of the E2E suite. Start
+  // timing only after every visible camera for the current frame is decoded.
+  await expect(
+    page.locator('[title="Fetching frames ahead of the playhead"]'),
+  ).toBeHidden({ timeout: 45_000 });
 
   const valueNow = () =>
     page.evaluate(() => {
@@ -115,7 +118,10 @@ test("playback fills its buffer near real time (windowed fetch)", async ({
     });
 
   const start = await valueNow();
-  await page.keyboard.press("Space");
+  await page.getByRole("button", { name: "Play", exact: true }).click();
+  await expect(
+    page.getByRole("button", { name: "Pause", exact: true }),
+  ).toBeVisible();
   // Sample the playhead every 500ms for 5s; require monotonic, non-trivial
   // advance. Buffer-gating means it may briefly hold, but over 5s it should
   // cover many frames — well beyond the ~1 frame/2s of the old per-image path.
@@ -124,7 +130,7 @@ test("playback fills its buffer near real time (windowed fetch)", async ({
     await page.waitForTimeout(500);
     samples.push(await valueNow());
   }
-  await page.keyboard.press("Space");
+  await page.getByRole("button", { name: "Pause", exact: true }).click();
 
   const end = samples[samples.length - 1];
   const advanced = end - start;
