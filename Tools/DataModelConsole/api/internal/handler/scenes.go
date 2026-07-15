@@ -41,6 +41,10 @@ func (h *ScenesHandler) Search(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, model.CodeInvalidParam, "missing or invalid dataset/prompt_version")
 		return
 	}
+	if !h.s3.ValidDataset(dataset) {
+		writeError(w, http.StatusNotFound, model.CodeNotFound, "unknown dataset: "+dataset)
+		return
+	}
 	if !service.ValidReasoningTeacherID(teacher) {
 		writeError(w, http.StatusBadRequest, model.CodeInvalidParam, "missing or invalid teacher")
 		return
