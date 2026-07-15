@@ -127,7 +127,8 @@ func decodePublicationManifest(
 		map[string]publicationShardEntry, len(manifest.ShardEntries),
 	)
 	previousName := ""
-	for _, entry := range manifest.ShardEntries {
+	for i := range manifest.ShardEntries {
+		entry := &manifest.ShardEntries[i]
 		if !validPublishedShardName(entry.Name) {
 			return nil, fmt.Errorf("invalid published shard name %q", entry.Name)
 		}
@@ -144,12 +145,14 @@ func decodePublicationManifest(
 				entry.Name, entry.ByteSize,
 			)
 		}
-		if entry.ETag == "" || !isLowerHexDigest(entry.ContentIdentity) {
+		etag, ok := canonicalS3ETag(entry.ETag)
+		if !ok || !isLowerHexDigest(entry.ContentIdentity) {
 			return nil, fmt.Errorf(
 				"published shard %q has invalid content identity",
 				entry.Name,
 			)
 		}
+		entry.ETag = etag
 		if previousName != "" && entry.Name <= previousName {
 			return nil, fmt.Errorf(
 				"published shard entries are duplicate or unsorted at %q",
@@ -157,7 +160,7 @@ func decodePublicationManifest(
 			)
 		}
 		previousName = entry.Name
-		manifest.ShardByName[entry.Name] = entry
+		manifest.ShardByName[entry.Name] = *entry
 	}
 
 	expectedRigKey := fmt.Sprintf("%s/%s/rig/projection.json", dataset, version)
@@ -368,6 +371,7 @@ func (s *S3Service) validatePublicationShards(
 				return
 			}
 			if aws.ToInt64(head.ContentLength) != entry.ByteSize ||
+				!sameS3ETag(aws.ToString(head.ETag), entry.ETag) ||
 				metadataValue(
 					head.Metadata, "source-identity",
 				) != entry.ContentIdentity {
@@ -436,18 +440,28 @@ func (s *S3Service) publishedShardKey(
 	ctx context.Context,
 	dataset, requestedVersion, shard string,
 ) (string, string, int64, error) {
+	version, key, size, _, err := s.publishedShardObject(
+		ctx, dataset, requestedVersion, shard,
+	)
+	return version, key, size, err
+}
+
+func (s *S3Service) publishedShardObject(
+	ctx context.Context,
+	dataset, requestedVersion, shard string,
+) (string, string, int64, string, error) {
 	version, err := s.publishedVersion(ctx, dataset, requestedVersion)
 	if err != nil {
-		return "", "", 0, err
+		return "", "", 0, "", err
 	}
 	if requiresPublicationManifest(version) {
 		entry, err := s.publishedShard(ctx, dataset, version, shard)
 		if err != nil {
-			return "", "", 0, err
+			return "", "", 0, "", err
 		}
-		return version, entry.Key, entry.ByteSize, nil
+		return version, entry.Key, entry.ByteSize, entry.ETag, nil
 	}
-	return version, shardsPrefix(dataset, version) + shard, 0, nil
+	return version, shardsPrefix(dataset, version) + shard, 0, "", nil
 }
 
 func metadataValue(metadata map[string]string, key string) string {
@@ -457,4 +471,26 @@ func metadataValue(metadata map[string]string, key string) string {
 		}
 	}
 	return ""
+}
+
+func canonicalS3ETag(value string) (string, bool) {
+	value = strings.TrimSpace(value)
+	if len(value) >= 2 && value[0] == '"' && value[len(value)-1] == '"' {
+		value = value[1 : len(value)-1]
+	}
+	if value == "" {
+		return "", false
+	}
+	for _, char := range value {
+		if char == '"' || char < 0x20 || char == 0x7f {
+			return "", false
+		}
+	}
+	return `"` + value + `"`, true
+}
+
+func sameS3ETag(left, right string) bool {
+	leftCanonical, leftOK := canonicalS3ETag(left)
+	rightCanonical, rightOK := canonicalS3ETag(right)
+	return leftOK && rightOK && leftCanonical == rightCanonical
 }
