@@ -21,7 +21,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { useApi } from "@/hooks/use-api";
-import { getDashboardStats, listExecutions } from "@/lib/api";
+import { getDashboardStats, listExecutionsPage } from "@/lib/api";
 import {
   formatDuration,
   formatMeters,
@@ -78,7 +78,10 @@ function KpiCard({
 
 export default function HomePage() {
   const stats = useApi(getDashboardStats);
-  const executions = useApi(() => listExecutions(10));
+  const executions = useApi(async () => {
+    const page = await listExecutionsPage(10);
+    return page.items;
+  });
 
   return (
     <div className="space-y-6">
