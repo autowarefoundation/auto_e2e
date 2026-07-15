@@ -31,6 +31,41 @@ OVERLAY_CACHE_VERSION = (
     f"{NOISE_POLICY_VERSION}"
 )
 
+
+def _large_shm_pod_template():
+    """Mount enough shared memory for prefetched World-Model windows."""
+    from flytekit import PodTemplate
+    from kubernetes.client import (
+        V1Container,
+        V1EmptyDirVolumeSource,
+        V1PodSpec,
+        V1Volume,
+        V1VolumeMount,
+    )
+
+    return PodTemplate(
+        primary_container_name="primary",
+        pod_spec=V1PodSpec(
+            containers=[
+                V1Container(
+                    name="primary",
+                    volume_mounts=[
+                        V1VolumeMount(name="dshm", mount_path="/dev/shm")
+                    ],
+                )
+            ],
+            volumes=[
+                V1Volume(
+                    name="dshm",
+                    empty_dir=V1EmptyDirVolumeSource(
+                        medium="Memory", size_limit="8Gi"
+                    ),
+                )
+            ],
+        ),
+    )
+
+
 ResolvedOverlayModel = NamedTuple(
     "ResolvedOverlayModel",
     checkpoint=FlyteFile,
@@ -538,6 +573,7 @@ def prepare_overlay_set(
     cache=True,
     cache_version=OVERLAY_CACHE_VERSION,
     cache_serialize=True,
+    pod_template=_large_shm_pod_template(),
 )
 def precompute_overlay_partition(
     checkpoint: FlyteFile,
