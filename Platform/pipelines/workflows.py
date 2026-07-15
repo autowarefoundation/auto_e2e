@@ -141,6 +141,12 @@ FUSION_LABEL = "bev"
 
 TrainOutput = NamedTuple("TrainOutput", checkpoint=FlyteFile, metadata=FlyteFile)
 EvalMetrics = NamedTuple("EvalMetrics", ade=float, fde=float, gate_pass=bool)
+PublishedOverlayOutput = NamedTuple(
+    "PublishedOverlayOutput",
+    overlay_result=str,
+    manifest_key=str,
+    manifest_sha256=str,
+)
 # wf_create_dataset returns just the ready-to-train WebDataset shards (train_il
 # reads reasoning supervision from in-shard reasoning.json members). The
 # versioned reasoning-label artifact persists independently in S3 (the
@@ -2984,7 +2990,7 @@ def wf_publish_and_precompute_overlays(
     batch_size: int = 32,
     num_workers: int = 4,
     copy_workers: int = 16,
-) -> str:
+) -> PublishedOverlayOutput:
     """Publish one immutable snapshot, then precompute its model overlays.
 
     The dataset manifest digest is wired directly between Flyte nodes, so an
@@ -2999,7 +3005,7 @@ def wf_publish_and_precompute_overlays(
         aws_region=aws_region,
         copy_workers=copy_workers,
     )
-    return wf_precompute_overlays(
+    overlay_result = wf_precompute_overlays(
         shards=shards,
         model_version=model_version,
         dataset_manifest_digest=publication.manifest_sha256,
@@ -3017,6 +3023,11 @@ def wf_publish_and_precompute_overlays(
         batch_size=batch_size,
         num_workers=num_workers,
         sampler="model-default",
+    )
+    return PublishedOverlayOutput(
+        overlay_result=overlay_result,
+        manifest_key=publication.manifest_key,
+        manifest_sha256=publication.manifest_sha256,
     )
 
 
@@ -3039,7 +3050,7 @@ def wf_publish_full_run_overlays(
     batch_size: int = 32,
     num_workers: int = 4,
     copy_workers: int = 16,
-) -> str:
+) -> PublishedOverlayOutput:
     """Publish the labeled shards and model produced by one completed Full Run."""
     from Platform.pipelines.overlay_tasks import (
         resolve_overlay_model_version,
@@ -3105,7 +3116,7 @@ def wf_create_publish_and_precompute_overlays(
     batch_size: int = 32,
     num_workers: int = 4,
     copy_workers: int = 16,
-) -> str:
+) -> PublishedOverlayOutput:
     """Build, publish, and overlay one dataset without manual URI handoff."""
     shards = wf_create_dataset_sharded(
         dataset=dataset,
