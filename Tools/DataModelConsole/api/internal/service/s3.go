@@ -233,9 +233,12 @@ func isSmokeDataset(name string) bool {
 	return true
 }
 
-// ResolvedVersion returns the explicit version coordinate used by a request.
-func (s *S3Service) ResolvedVersion(ctx context.Context, dataset, requested string) string {
-	return s.versionOrResolve(ctx, dataset, requested)
+// ResolvedVersion returns a published version coordinate used by a request.
+func (s *S3Service) ResolvedVersion(
+	ctx context.Context,
+	dataset, requested string,
+) (string, error) {
+	return s.publishedVersion(ctx, dataset, requested)
 }
 
 // OverlayBody is a verified canonical binary overlay and its public metadata.
@@ -250,7 +253,16 @@ func (s *S3Service) ListOverlayModels(ctx context.Context, dataset, version, sha
 	if s.store == nil {
 		return nil, "", fmt.Errorf("overlay lookup requires a configured dynamo store")
 	}
-	version = s.versionOrResolve(ctx, dataset, version)
+	var err error
+	version, err = s.publishedVersion(ctx, dataset, version)
+	if err != nil {
+		return nil, "", err
+	}
+	if requiresPublicationManifest(version) {
+		if _, err := s.publishedShard(ctx, dataset, version, shard); err != nil {
+			return nil, version, err
+		}
+	}
 	models, err := s.store.QueryReadyOverlayModels(ctx, dataset, version, shard)
 	return models, version, err
 }
@@ -262,7 +274,16 @@ func (s *S3Service) GetOverlayBody(ctx context.Context, dataset, version, shard,
 	if s.store == nil {
 		return nil, "", fmt.Errorf("overlay lookup requires a configured dynamo store")
 	}
-	version = s.versionOrResolve(ctx, dataset, version)
+	var err error
+	version, err = s.publishedVersion(ctx, dataset, version)
+	if err != nil {
+		return nil, "", err
+	}
+	if requiresPublicationManifest(version) {
+		if _, err := s.publishedShard(ctx, dataset, version, shard); err != nil {
+			return nil, version, err
+		}
+	}
 	pointer, err := s.store.GetReadyOverlayPointer(
 		ctx, dataset, version, shard, modelArtifactID,
 	)
@@ -320,7 +341,11 @@ func (s *S3Service) GeoStats(ctx context.Context, dataset, version string) (*mod
 	if s.store == nil {
 		return nil, fmt.Errorf("geo stats require a configured dynamo store")
 	}
-	version = s.versionOrResolve(ctx, dataset, version)
+	var err error
+	version, err = s.publishedVersion(ctx, dataset, version)
+	if err != nil {
+		return nil, err
+	}
 	record, err := s.store.GetGeoRecord(ctx, dataset, version)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
@@ -347,7 +372,11 @@ func (s *S3Service) GeoHeatmap(ctx context.Context, dataset, version string) ([]
 	if s.store == nil {
 		return nil, "", fmt.Errorf("geo heatmap requires a configured dynamo store")
 	}
-	version = s.versionOrResolve(ctx, dataset, version)
+	var err error
+	version, err = s.publishedVersion(ctx, dataset, version)
+	if err != nil {
+		return nil, "", err
+	}
 	record, err := s.store.GetGeoRecord(ctx, dataset, version)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
@@ -355,22 +384,63 @@ func (s *S3Service) GeoHeatmap(ctx context.Context, dataset, version string) ([]
 		}
 		return nil, version, err
 	}
-	expectedPrefix := fmt.Sprintf("%s/%s/geo/", dataset, version)
-	if !strings.HasPrefix(record.GeoJSONKey, expectedPrefix) {
-		return nil, version, fmt.Errorf("geo heatmap pointer escapes dataset prefix")
+	expectedKey := fmt.Sprintf(
+		"%s/%s/geo/heatmap.geojson.gz", dataset, version,
+	)
+	if record.GeoJSONKey != expectedKey {
+		return nil, version, fmt.Errorf("geo heatmap pointer is not canonical")
 	}
 	body, err := s.getObjectBytesFromBucket(
 		ctx, s.bucket, record.GeoJSONKey, MaxRangeBytes,
 	)
+	if err != nil {
+		return nil, version, err
+	}
+	if requiresPublicationManifest(version) {
+		manifest, err := s.loadPublicationManifest(ctx, dataset, version)
+		if err != nil {
+			return nil, version, err
+		}
+		if manifest.GeoArtifacts == nil ||
+			manifest.GeoArtifacts.HeatmapKey != record.GeoJSONKey {
+			return nil, version, fmt.Errorf(
+				"geo heatmap pointer differs from publication",
+			)
+		}
+		digest := sha256.Sum256(body)
+		if hex.EncodeToString(digest[:]) !=
+			manifest.GeoArtifacts.HeatmapSHA256 {
+			return nil, version, fmt.Errorf("geo heatmap SHA-256 mismatch")
+		}
+	}
 	return body, version, err
 }
 
 // RigProjection returns the dataset-level projection artifact emitted by the
 // v2.1 repack.
 func (s *S3Service) RigProjection(ctx context.Context, dataset, version string) ([]byte, string, error) {
-	version = s.versionOrResolve(ctx, dataset, version)
+	var err error
+	version, err = s.publishedVersion(ctx, dataset, version)
+	if err != nil {
+		return nil, "", err
+	}
 	key := fmt.Sprintf("%s/%s/rig/projection.json", dataset, version)
+	expectedDigest := ""
+	if requiresPublicationManifest(version) {
+		manifest, err := s.loadPublicationManifest(ctx, dataset, version)
+		if err != nil {
+			return nil, version, err
+		}
+		key = manifest.Rig.Key
+		expectedDigest = manifest.Rig.SHA256
+	}
 	body, err := s.getObjectBytesFromBucket(ctx, s.bucket, key, 1<<20)
+	if err == nil && expectedDigest != "" {
+		digest := sha256.Sum256(body)
+		if hex.EncodeToString(digest[:]) != expectedDigest {
+			return nil, version, fmt.Errorf("rig projection SHA-256 mismatch")
+		}
+	}
 	return body, version, err
 }
 
@@ -388,7 +458,11 @@ func (s *S3Service) EpisodePath(ctx context.Context, dataset, version, episode s
 			return nil, "", ErrNotFound
 		}
 	}
-	version = s.versionOrResolve(ctx, dataset, version)
+	var err error
+	version, err = s.publishedVersion(ctx, dataset, version)
+	if err != nil {
+		return nil, "", err
+	}
 	stem := episodePathStem(dataset, episode)
 	key := fmt.Sprintf(
 		"%s/%s/geo/episode_paths/%s.f64", dataset, version, stem,
@@ -470,13 +544,8 @@ func (s *S3Service) discoverNewestVersion(ctx context.Context, dataset string) s
 // snapshots retain their historical tar-only discovery behavior.
 func (s *S3Service) versionHasShards(ctx context.Context, dataset, version string) bool {
 	if requiresPublicationManifest(version) {
-		_, err := s.client.HeadObject(ctx, &s3.HeadObjectInput{
-			Bucket: aws.String(s.bucket),
-			Key:    aws.String(shardsPrefix(dataset, version) + "manifest.json"),
-		})
-		if err != nil {
-			return false
-		}
+		_, err := s.loadPublicationManifest(ctx, dataset, version)
+		return err == nil
 	}
 	out, err := s.client.ListObjectsV2(ctx, &s3.ListObjectsV2Input{
 		Bucket:  aws.String(s.bucket),
@@ -574,7 +643,31 @@ func (s *S3Service) ListDatasetVersions(ctx context.Context, dataset string) ([]
 func (s *S3Service) datasetVersionSummary(ctx context.Context, dataset, version string) (model.DatasetVersion, error) {
 	dv := model.DatasetVersion{Version: version}
 
-	if body, err := s.getObjectBytes(ctx, shardsPrefix(dataset, version)+"manifest.json"); err == nil {
+	if requiresPublicationManifest(version) {
+		manifest, err := s.loadPublicationManifest(ctx, dataset, version)
+		if err != nil {
+			return model.DatasetVersion{}, err
+		}
+		dv.TotalSamples = manifest.TotalSamples
+		dv.Episodes = manifest.Episodes
+		dv.NumViews = manifest.NumViews
+		dv.HasMap = manifest.HasMap
+		dv.HasWorldModel = manifest.HasWorldModel
+		dv.HasGPS = manifest.HasGPS
+		dv.HasManifest = true
+		dv.Shards = len(manifest.ShardEntries)
+		for _, entry := range manifest.ShardEntries {
+			dv.SizeBytes += entry.ByteSize
+		}
+		return dv, nil
+	}
+
+	if body, err := s.getObjectBytesFromBucket(
+		ctx,
+		s.bucket,
+		shardsPrefix(dataset, version)+"manifest.json",
+		maxPublicationManifestBytes,
+	); err == nil {
 		var m shardManifest
 		if json.Unmarshal(body, &m) == nil {
 			dv.TotalSamples = m.TotalSamples
@@ -656,12 +749,37 @@ func shardsPrefix(dataset, version string) string {
 	return fmt.Sprintf("%s/%s/shards/", dataset, version)
 }
 
-// ListShards lists .tar objects under <dataset>/<version>/shards/ with
-// pagination. An empty version auto-resolves to the newest (versionOrResolve).
+// ListShards lists published shard entries with pagination. For v2.1+ the
+// final manifest is the only inventory; orphan objects under the prefix are
+// never advertised.
 func (s *S3Service) ListShards(ctx context.Context, dataset, version string, limit, offset int) ([]model.Shard, model.Page, error) {
-	prefix := shardsPrefix(dataset, s.versionOrResolve(ctx, dataset, version))
+	resolvedVersion, err := s.publishedVersion(ctx, dataset, version)
+	if err != nil {
+		return nil, model.Page{}, err
+	}
 	var all []model.Shard
+	if requiresPublicationManifest(resolvedVersion) {
+		manifest, err := s.loadPublicationManifest(
+			ctx, dataset, resolvedVersion,
+		)
+		if err != nil {
+			return nil, model.Page{}, err
+		}
+		all = make([]model.Shard, 0, len(manifest.ShardEntries))
+		for _, entry := range manifest.ShardEntries {
+			all = append(all, model.Shard{
+				Name:         entry.Name,
+				Key:          entry.Key,
+				SizeBytes:    entry.ByteSize,
+				LastModified: entry.LastModified,
+			})
+		}
+		total := len(all)
+		pageItems, pg := paginate(all, limit, offset, total)
+		return pageItems, pg, nil
+	}
 
+	prefix := shardsPrefix(dataset, resolvedVersion)
 	p := s3.NewListObjectsV2Paginator(s.client, &s3.ListObjectsV2Input{
 		Bucket: aws.String(s.bucket),
 		Prefix: aws.String(prefix),
@@ -695,7 +813,12 @@ func (s *S3Service) ListShards(ctx context.Context, dataset, version string, lim
 // content without buffering it) and groups members by WebDataset sample key
 // (member name up to the first dot).
 func (s *S3Service) ListSamples(ctx context.Context, dataset, version, shard string, limit, offset int) ([]model.Sample, model.Page, error) {
-	key := shardsPrefix(dataset, s.versionOrResolve(ctx, dataset, version)) + shard
+	_, key, _, err := s.publishedShardKey(
+		ctx, dataset, version, shard,
+	)
+	if err != nil {
+		return nil, model.Page{}, err
+	}
 	obj, err := s.client.GetObject(ctx, &s3.GetObjectInput{
 		Bucket: aws.String(s.bucket),
 		Key:    aws.String(key),
@@ -754,7 +877,12 @@ func (s *S3Service) ListSamples(ctx context.Context, dataset, version, shard str
 //
 // memberName is matched as "<sampleKey>.<suffix>", e.g. ep0_000064.cam_0.jpg.
 func (s *S3Service) StreamTarMember(ctx context.Context, dataset, version, shard, memberName string) (io.Reader, io.Closer, int64, error) {
-	key := shardsPrefix(dataset, s.versionOrResolve(ctx, dataset, version)) + shard
+	_, key, _, err := s.publishedShardKey(
+		ctx, dataset, version, shard,
+	)
+	if err != nil {
+		return nil, nil, 0, err
+	}
 	obj, err := s.client.GetObject(ctx, &s3.GetObjectInput{
 		Bucket: aws.String(s.bucket),
 		Key:    aws.String(key),
@@ -799,7 +927,15 @@ func (s *S3Service) StreamTarMemberRange(ctx context.Context, dataset, version, 
 	if offset > math.MaxInt64-size {
 		return nil, nil, 0, ErrNotFound
 	}
-	key := shardsPrefix(dataset, s.versionOrResolve(ctx, dataset, version)) + shard
+	_, key, shardSize, err := s.publishedShardKey(
+		ctx, dataset, version, shard,
+	)
+	if err != nil {
+		return nil, nil, 0, err
+	}
+	if shardSize > 0 && offset > shardSize-size {
+		return nil, nil, 0, ErrNotFound
+	}
 	rng := fmt.Sprintf("bytes=%d-%d", offset, offset+size-1)
 	obj, err := s.client.GetObject(ctx, &s3.GetObjectInput{
 		Bucket: aws.String(s.bucket),
@@ -821,8 +957,14 @@ func (s *S3Service) StreamTarMemberRange(ctx context.Context, dataset, version, 
 	// size: a stale index must not advertise a Content-Length longer than the
 	// body (which would hang the client waiting for bytes that never arrive).
 	actual := aws.ToInt64(obj.ContentLength)
-	if actual <= 0 {
-		actual = size
+	expectedContentRange := fmt.Sprintf(
+		"bytes %d-%d/%d", offset, offset+size-1, shardSize,
+	)
+	if actual != size ||
+		(shardSize > 0 &&
+			aws.ToString(obj.ContentRange) != expectedContentRange) {
+		obj.Body.Close()
+		return nil, nil, 0, ErrNotFound
 	}
 	return obj.Body, obj.Body, actual, nil
 }
@@ -850,7 +992,12 @@ const (
 // a single sample: its member list (for Cameras), raw meta.json bytes and the
 // decoded ego.npy history/future arrays.
 func (s *S3Service) GetSampleDetail(ctx context.Context, dataset, version, shard, sampleKey string) (*model.SampleDetail, error) {
-	key := shardsPrefix(dataset, s.versionOrResolve(ctx, dataset, version)) + shard
+	_, key, _, err := s.publishedShardKey(
+		ctx, dataset, version, shard,
+	)
+	if err != nil {
+		return nil, err
+	}
 	obj, err := s.client.GetObject(ctx, &s3.GetObjectInput{
 		Bucket: aws.String(s.bucket),
 		Key:    aws.String(key),
@@ -930,7 +1077,13 @@ func (s *S3Service) GetSampleDetail(ctx context.Context, dataset, version, shard
 // finishes rather than sharing an in-memory copy (those indexes are multi-MB,
 // so holding them in a process map was the OOM risk this backend removes).
 func (s *S3Service) BuildShardIndex(ctx context.Context, dataset, version, shard string) (*model.ShardIndex, error) {
-	version = s.versionOrResolve(ctx, dataset, version)
+	var err error
+	version, _, _, err = s.publishedShardKey(
+		ctx, dataset, version, shard,
+	)
+	if err != nil {
+		return nil, err
+	}
 	cacheKey := fmt.Sprintf("%s/%s/%s", dataset, version, shard)
 
 	for {
