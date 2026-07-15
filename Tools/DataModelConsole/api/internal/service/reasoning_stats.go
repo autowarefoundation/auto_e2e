@@ -240,8 +240,8 @@ func (s *S3Service) reasoningMemberLocations(
 const labelFetchConcurrency = 32
 
 // fetchEmbeddedReasoning reads canonical tar members concurrently through
-// bounded S3 Range GETs. A malformed JSON record is skipped, while a sample-id
-// mismatch fails loudly because it means the shard join is corrupt.
+// bounded S3 Range GETs. Malformed records and identity mismatches fail loudly
+// because silently dropping either would publish incomplete statistics.
 func (s *S3Service) fetchEmbeddedReasoning(
 	ctx context.Context,
 	dataset, version string,
@@ -304,13 +304,25 @@ func (s *S3Service) fetchEmbeddedReasoning(
 			}
 			lbl, perr := store.ParseReasoningLabel(body)
 			if perr != nil {
-				// Skip a malformed label (not a hard error).
+				results[i] = result{err: fmt.Errorf(
+					"decode reasoning label %s from %s: %w",
+					location.SampleUID, location.Shard, perr,
+				)}
+				cancel()
 				return
 			}
 			if lbl.SampleID != location.SampleUID {
 				results[i] = result{err: fmt.Errorf(
 					"reasoning sample id mismatch: member=%s body=%s",
 					location.SampleUID, lbl.SampleID,
+				)}
+				cancel()
+				return
+			}
+			if !reasoningDatasetMatches(dataset, lbl.DatasetName) {
+				results[i] = result{err: fmt.Errorf(
+					"reasoning dataset mismatch: publication=%s body=%s",
+					dataset, lbl.DatasetName,
 				)}
 				cancel()
 				return
@@ -333,6 +345,19 @@ func (s *S3Service) fetchEmbeddedReasoning(
 		}
 	}
 	return records, nil
+}
+
+func reasoningDatasetMatches(dataset, labelDataset string) bool {
+	switch {
+	case dataset == "l2d":
+		return labelDataset == "yaak-ai/L2D"
+	case dataset == "nvidia_av":
+		return labelDataset == "nvidia/PhysicalAI-Autonomous-Vehicles"
+	case dataset == "kitscenes" || isSmokeDataset(dataset):
+		return labelDataset == "KIT-MRT/KITScenes-Multimodal"
+	default:
+		return false
+	}
 }
 
 // scanReasoningLabels reads embedded v2.1 labels and selects one explicit
