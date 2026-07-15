@@ -82,6 +82,11 @@ function PlayerPageInner({
     cam: Math.max(0, parseInt(searchParams.get("cam") ?? "0", 10) || 0),
     mode: searchParams.get("mode") === "focus" ? "focus" : "grid",
     speed: parseFloat(searchParams.get("speed") ?? "1") || 1,
+    model: searchParams.get("model") ?? "",
+    predictionMode:
+      searchParams.get("prediction_mode") === "display-limited"
+        ? "display-limited"
+        : "raw",
   });
 
   // Debounced URL sync: keep the path's frame segment and query in step with
@@ -104,6 +109,13 @@ function PlayerPageInner({
         else q.delete("mode");
         if (Math.abs(s.speed - 1) > 1e-9) q.set("speed", String(s.speed));
         else q.delete("speed");
+        if (s.model) q.set("model", s.model);
+        else q.delete("model");
+        if (s.predictionMode !== "raw") {
+          q.set("prediction_mode", s.predictionMode);
+        } else {
+          q.delete("prediction_mode");
+        }
         const qs = q.toString();
         // history.replaceState (not router.replace) updates the deep-link path
         // without a Next route transition, so the player is not remounted on
@@ -137,6 +149,13 @@ function PlayerPageInner({
       else q.delete("mode");
       if (Math.abs(s.speed - 1) > 1e-9) q.set("speed", String(s.speed));
       else q.delete("speed");
+      if (s.model) q.set("model", s.model);
+      else q.delete("model");
+      if (s.predictionMode !== "raw") {
+        q.set("prediction_mode", s.predictionMode);
+      } else {
+        q.delete("prediction_mode");
+      }
     }
     const qs = q.toString();
     const url = `${window.location.origin}/scenes/${encodeURIComponent(dataset)}/${encodeURIComponent(shard)}/${s?.frame ?? frame}${qs ? `?${qs}` : ""}`;
