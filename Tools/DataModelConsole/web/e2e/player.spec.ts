@@ -10,18 +10,36 @@ const SCENE = "/scenes/nvidia_av/train-000000.tar/0";
 
 test("player renders real camera pixels, advances, and focuses", async ({ page }) => {
   const consoleErrors: string[] = [];
+  const responseErrors: string[] = [];
   page.on("console", (m) => {
-    if (m.type() === "error") consoleErrors.push(m.text());
+    if (
+      m.type() === "error" &&
+      !m.text().startsWith("Failed to load resource:")
+    ) {
+      consoleErrors.push(m.text());
+    }
   });
   page.on("pageerror", (e) => consoleErrors.push(`pageerror: ${e.message}`));
+  page.on("response", (response) => {
+    if (response.status() < 400) return;
+    const path = new URL(response.url()).pathname;
+    // Legacy v2.0 NVIDIA shards predate the v2.1 rig artifact. Its absence is
+    // expected here; every other failed resource remains a test failure.
+    if (response.status() === 404 && path.endsWith("/rig-projection")) return;
+    responseErrors.push(`${response.status()} ${response.url()}`);
+  });
 
   await page.goto(SCENE, { waitUntil: "networkidle" });
   // Let the FrameStore fetch + canvases paint.
   await page.waitForTimeout(3500);
 
-  // Every camera canvas must have non-blank pixels (real frame, not black).
+  // Every camera frame canvas must have non-blank pixels (real frame, not
+  // black). The aria-hidden trajectory layer is intentionally transparent
+  // until a model is selected, so it is not a frame-pixel assertion target.
   const painted = await page.evaluate(() => {
-    const canvases = Array.from(document.querySelectorAll("canvas"));
+    const canvases = Array.from(
+      document.querySelectorAll("canvas:not([aria-hidden])"),
+    );
     let ok = 0;
     for (const c of canvases) {
       const ctx = c.getContext("2d");
@@ -56,6 +74,10 @@ test("player renders real camera pixels, advances, and focuses", async ({ page }
   await page.keyboard.press("Escape");
 
   expect(consoleErrors, `console errors: ${consoleErrors.join("; ")}`).toHaveLength(0);
+  expect(
+    responseErrors,
+    `HTTP errors: ${responseErrors.join("; ")}`,
+  ).toHaveLength(0);
 });
 
 // Fill-rate regression: windowed contiguous fetch must let the buffer advance
