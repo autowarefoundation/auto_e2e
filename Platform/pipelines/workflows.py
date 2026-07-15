@@ -21,13 +21,25 @@ from .dataset_publication import DatasetPublication
 import os as _os
 
 ECR_PREFIX = _os.environ.get("ECR_PREFIX", "381491877296.dkr.ecr.us-west-2.amazonaws.com")
-TRAINING_IMAGE = f"{ECR_PREFIX}/auto-e2e/training:latest"
-EVAL_IMAGE = f"{ECR_PREFIX}/auto-e2e/eval:latest"
-OFFLINE_RL_IMAGE = f"{ECR_PREFIX}/auto-e2e/offline-rl:latest"
-DATA_PREP_IMAGE = f"{ECR_PREFIX}/auto-e2e/data-prep:latest"
+TRAINING_IMAGE = _os.environ.get(
+    "AUTO_E2E_TRAINING_IMAGE",
+    f"{ECR_PREFIX}/auto-e2e/training:latest",
+)
+EVAL_IMAGE = _os.environ.get(
+    "AUTO_E2E_EVAL_IMAGE",
+    f"{ECR_PREFIX}/auto-e2e/eval:latest",
+)
+OFFLINE_RL_IMAGE = _os.environ.get(
+    "AUTO_E2E_OFFLINE_RL_IMAGE",
+    f"{ECR_PREFIX}/auto-e2e/offline-rl:latest",
+)
+DATA_PREP_IMAGE = _os.environ.get(
+    "AUTO_E2E_DATA_PREP_IMAGE",
+    f"{ECR_PREFIX}/auto-e2e/data-prep:latest",
+)
 
 MLFLOW_URI = "http://mlflow.mlflow.svc.cluster.local:5000"
-DATASET_PACK_VERSION = "v2.1"
+DATASET_PACK_VERSION = "v2.2"
 L2D_SOURCE_REVISION = "main"
 KITSCENES_SOURCE_REVISION = "6fde0034446669e2ed7235e4c7fe323cd23d599d"
 
@@ -41,28 +53,62 @@ KITSCENES_SOURCE_REVISION = "6fde0034446669e2ed7235e4c7fe323cd23d599d"
 # literals, cache_version); the CODE-contract determinants (uid/parser/shard/
 # geometry schema) can't be captured by inputs, so they go here. Sourced from
 # Model/data_processing/contract_versions.py (the single place any of these is
-# bumped, §3.4c). Imported guarded: Model is on the path in the data-prep image
-# and on the dev box, but NOT necessarily when this module is first imported at
-# registration — the fallback keeps registration working (the real values load
-# in the pod where the tasks actually run and cache). Per-partition group_ids and
-# source_revision travel as task INPUTS, so ranges are independently cacheable.
-try:
-    from data_processing.contract_versions import (
-        UID_SCHEMA_VERSION as _UID_V, PARSER_VERSION as _PARSER_V,
-        SHARD_SCHEMA_VERSION as _SHARD_V, GEOMETRY_VERSION as _GEOM_V,
-        REASONING_LABEL_POLICY_VERSION as _LABEL_POLICY_V,
-    )
-except Exception:  # pragma: no cover - registration-time fallback only
-    _UID_V = _PARSER_V = _SHARD_V = _GEOM_V = "v1"
-    _LABEL_POLICY_V = "v1"
+# bumped, §3.4c). Registration must put Model/ on PYTHONPATH; an import failure
+# is fatal because guessing these values can silently reuse incompatible cache
+# entries. Per-partition group_ids and source_revision travel as task INPUTS, so
+# ranges are independently cacheable.
+from data_processing.contract_versions import (
+    GEOMETRY_VERSION as _GEOM_V,
+    PARSER_VERSION as _PARSER_V,
+    REASONING_LABEL_POLICY_VERSION as _LABEL_POLICY_V,
+    SHARD_SCHEMA_VERSION as _SHARD_V,
+    UID_SCHEMA_VERSION as _UID_V,
+)
 
 # Each stage's cache_version folds in ONLY the contracts that actually determine
 # its output (§3.4a): ingest depends on the parser enumeration; labels also on
 # the uid format (the JOIN key) and sparse-selection policy; pack on the shard
 # and geometry encoding.
-INGEST_CACHE_VERSION = f"ingest-{_PARSER_V}"
-LABEL_CACHE_VERSION = f"label-{_PARSER_V}-{_UID_V}-{_LABEL_POLICY_V}"
-PACK_CACHE_VERSION = f"pack-{_PARSER_V}-{_UID_V}-{_SHARD_V}-{_GEOM_V}"
+_DEPLOYED_CACHE_VERSION_ALIASES = {
+    # Registrations before contract imports became fail-closed serialized the
+    # fallback v1 strings even though these were the contracts in the task
+    # images. Preserve only the exact ingest/reasoning tuples so those expensive
+    # KITScenes caches remain reusable. Pack must follow geometry contract bumps;
+    # any other contract tuple falls through to a contract-derived cache version.
+    ("ingest", "v2"): "ingest-v1",
+    ("label", "v2", "v1", "v2"): "label-v1-v1-v1",
+}
+
+
+def _cache_versions_for_contracts(
+    *,
+    uid: str,
+    parser: str,
+    shard: str,
+    geometry: str,
+    label_policy: str,
+) -> dict[str, str]:
+    def resolve(stage: str, *contracts: str) -> str:
+        key = (stage, *contracts)
+        return _DEPLOYED_CACHE_VERSION_ALIASES.get(key, "-".join(key))
+
+    return {
+        "ingest": resolve("ingest", parser),
+        "label": resolve("label", parser, uid, label_policy),
+        "pack": resolve("pack", parser, uid, shard, geometry),
+    }
+
+
+_CACHE_VERSIONS = _cache_versions_for_contracts(
+    uid=_UID_V,
+    parser=_PARSER_V,
+    shard=_SHARD_V,
+    geometry=_GEOM_V,
+    label_policy=_LABEL_POLICY_V,
+)
+INGEST_CACHE_VERSION = _CACHE_VERSIONS["ingest"]
+LABEL_CACHE_VERSION = _CACHE_VERSIONS["label"]
+PACK_CACHE_VERSION = _CACHE_VERSIONS["pack"]
 
 
 def _data_prep_pod_template():
@@ -89,6 +135,7 @@ def _large_shm_pod_template():
         V1PodSpec, V1Container, V1Volume, V1VolumeMount, V1EmptyDirVolumeSource,
     )
     return PodTemplate(
+        annotations={"karpenter.sh/do-not-disrupt": "true"},
         primary_container_name="primary",
         pod_spec=V1PodSpec(
             containers=[
@@ -224,6 +271,42 @@ def _select_shard_dirs(shards, dataset) -> List[str]:
 def _loader_download_dir(shard) -> str:
     """Download one shard FlyteDirectory and return its local path (merged path)."""
     return str(shard.download())
+
+
+def _training_num_views_from_manifests(
+    manifests: dict[str, dict],
+    shard_dirs: List[str],
+) -> int:
+    """Validate partition camera counts without starting dataset loaders."""
+    dataset_views: dict[str, int] = {}
+    for shard_dir in shard_dirs:
+        manifest = manifests[shard_dir]
+        dataset_name = manifest.get("dataset")
+        if not isinstance(dataset_name, str) or not dataset_name:
+            raise ValueError(
+                f"packed shard manifest has no dataset name: {shard_dir}"
+            )
+        num_views = manifest.get("num_views")
+        if (
+            isinstance(num_views, bool)
+            or not isinstance(num_views, int)
+            or num_views <= 0
+        ):
+            raise ValueError(
+                f"packed shard manifest has invalid num_views={num_views!r}: "
+                f"{shard_dir}"
+            )
+        previous = dataset_views.setdefault(dataset_name, num_views)
+        if previous != num_views:
+            raise ValueError(
+                f"inconsistent num_views for dataset {dataset_name!r}: "
+                f"{previous} != {num_views} ({shard_dir})"
+            )
+    if not dataset_views:
+        raise ValueError("no non-empty shard manifests supplied")
+    # AutoE2E is runtime-V-dynamic. The construction value only sizes defaults,
+    # so use the largest validated rig when a multi-dataset run mixes view counts.
+    return max(dataset_views.values())
 
 
 def _loader_projection(loader, device):
@@ -1682,6 +1765,7 @@ def train_il(
             f"mixed dataset versions in one training run: {sorted(dataset_versions)}"
         )
     dataset_version = next(iter(dataset_versions), "unknown")
+    num_views = _training_num_views_from_manifests(manifests, shard_dirs)
     # Train on the "train" split when a held-out fraction is requested (eval scores
     # the disjoint "val" split); val_fraction=0 keeps the legacy all-samples path.
     _split = "train" if val_fraction > 0.0 else "all"
@@ -1691,12 +1775,8 @@ def train_il(
                                        split=_split, val_fraction=val_fraction)
     print(f"Merged {len(shard_dirs)} non-empty partition(s) into one training stream "
           f"(skipped_empty={skipped_empty}, split={_split}, "
-          f"val_fraction={val_fraction}, num_workers={num_workers}).")
-
-    # Peek the first batch to size num_views defaults.
-    _peek, _peek_proj, _peek_geom = next(iter(merged))
-    num_views = int(_peek["visual_tiles"].shape[1])
-    print(f"Detected num_views={num_views} (first dataset); geometry={_peek_geom}")
+          f"val_fraction={val_fraction}, num_workers={num_workers}, "
+          f"num_views={num_views}).")
 
     # Consistency guard (packing ↔ training) across every non-empty partition.
     # Sparse reasoning targets are masked on unlabeled samples, so probing a
@@ -2137,9 +2217,17 @@ def _run_evaluation(checkpoint, shards, train_metadata, dataset, experiment_name
     # memorization. val_fraction=0 (legacy) → score all samples (in-sample).
     val_fraction = float(meta.get("training", {}).get("val_fraction", 0.0) or 0.0)
     eval_split = "val" if val_fraction > 0.0 else "all"
-    loader = make_multi_dataset_loader(shard_dirs, batch_size=8, num_workers=4, shuffle=0,
-                                       pin_memory=(device.type == "cuda"),
-                                       split=eval_split, val_fraction=val_fraction)
+    loader = make_multi_dataset_loader(
+        shard_dirs,
+        batch_size=8,
+        num_workers=4,
+        shuffle=0,
+        pin_memory=(device.type == "cuda"),
+        split=eval_split,
+        val_fraction=val_fraction,
+        max_active_loaders=1,
+        prefetch_factor=1,
+    )
     print(f"Eval split={eval_split} (val_fraction={val_fraction}, {len(shard_dirs)} partitions) — "
           f"{'held-out generalization' if eval_split == 'val' else 'in-sample'}")
     all_ade, all_fde = [], []
@@ -2481,7 +2569,10 @@ def wf_create_dataset(
     )
 
 
-@dynamic(container_image=DATA_PREP_IMAGE)
+@dynamic(
+    container_image=DATA_PREP_IMAGE,
+    environment={"AUTO_E2E_DATA_PREP_IMAGE": DATA_PREP_IMAGE},
+)
 def _map_dataset_partitions(
     partitions: List[List[str]],
     dataset: Dataset,
