@@ -1,7 +1,8 @@
 version: 0.2
 
 # VPC-local launcher for the complete trajectory-overlay data path. The default
-# is a one-scene smoke run; set EPISODES=0 only after that execution succeeds.
+# is a one-scene smoke run under a separate immutable dataset coordinate. After
+# it succeeds, set PUBLISHED_DATASET=kitscenes and EPISODES=0 for production.
 env:
   variables:
     AWS_DEFAULT_REGION: us-west-2
@@ -10,7 +11,7 @@ env:
     MODEL_VERSION: ""
     DATASET: "KIT-MRT/KITScenes-Multimodal"
     SOURCE_REVISION: "6fde0034446669e2ed7235e4c7fe323cd23d599d"
-    PUBLISHED_DATASET: kitscenes
+    PUBLISHED_DATASET: kitscenes-smoke
     DATASET_VERSION: v2.1
     EPISODES: "1"
     PARTITION_SIZE: "1"
