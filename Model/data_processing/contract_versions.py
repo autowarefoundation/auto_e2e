@@ -46,9 +46,10 @@ PARSER_VERSION = "v2"
 # heatmaps for every GPS-capable parser, including KITScenes partitions.
 SHARD_SCHEMA_VERSION = "v4"
 
-# Calibration / projection spec encoding written into calib.json. Bump if the
-# geometry serialization changes.
-GEOMETRY_VERSION = "v1"
+# Calibration / projection spec encoding and raster-map coordinate semantics.
+# v2 queries KITScenes maps in the scene-local pose frame and applies the map
+# origin exactly once when publishing absolute geographic coordinates.
+GEOMETRY_VERSION = "v2"
 
 # Selection policy for the sparse reasoning-label subset. v2 adds the first
 # valid sample of every split group to the regular frame-index grid so even a
