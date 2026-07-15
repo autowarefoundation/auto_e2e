@@ -480,6 +480,7 @@ class TestMergedDatasetLoader:
             batch_size=1,
             num_workers=4,
             shuffle=1000,
+            shuffle_seed=700,
         )
 
         assert calls == []
@@ -487,6 +488,10 @@ class TestMergedDatasetLoader:
         assert next(iterator)[0] == "partition-0"
         assert len(calls) == 4
         assert all(kwargs["num_workers"] == 1 for _, kwargs in calls)
+        assert [
+            kwargs["shuffle_seed"] for _, kwargs in calls
+        ] == [700, 701, 702, 703]
+        assert merged.shuffle_seed == 700
         assert merged.max_active_loaders == 4
         iterator.close()
 
