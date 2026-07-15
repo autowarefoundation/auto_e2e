@@ -187,7 +187,7 @@ resource "helm_release" "flyte" {
   }
 }
 
-# Post-apply: patch propeller + admin storage configmaps to use stow accesskey auth.
+# Post-apply: patch Flyte control-plane storage configmaps to use accesskey auth.
 # The flyte-core chart only renders `iam` auth for type=s3; the stow/minio-go S3
 # client (AWS SDK v1) does not support IRSA/Pod Identity, so static keys are required.
 # This runs on every apply and whenever the keys change (idempotent kubectl patch).
@@ -218,7 +218,7 @@ resource "null_resource" "flyte_storage_accesskey_patch" {
           max_size_mbs: 1024
           target_gc_percent: 70'
 
-      for cm in flyte-propeller-config flyte-admin-base-config; do
+      for cm in flyte-propeller-config flyte-admin-base-config datacatalog-config; do
         kubectl get configmap $cm -n flyte -o json | python3 -c "
 import sys,json
 cm=json.load(sys.stdin)
@@ -232,7 +232,7 @@ print(json.dumps(cm))
 " | kubectl replace -f -
       done
 
-      kubectl rollout restart deployment/flytepropeller deployment/flyteadmin -n flyte
+      kubectl rollout restart deployment/flytepropeller deployment/flyteadmin deployment/datacatalog -n flyte
     EOT
   }
 
