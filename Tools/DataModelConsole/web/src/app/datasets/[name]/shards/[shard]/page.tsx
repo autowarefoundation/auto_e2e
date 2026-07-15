@@ -141,6 +141,9 @@ function ShardSamplesInner({
               (acc, m) => acc + m.size_bytes,
               0,
             );
+            const thumbnail = sample.members.find((member) =>
+              member.name.endsWith(".cam_0.jpg"),
+            );
             return (
               <Link
                 key={sample.key}
@@ -153,6 +156,14 @@ function ShardSamplesInner({
                     sampleKey={sample.key}
                     cam={0}
                     className="aspect-video w-full"
+                    range={
+                      thumbnail
+                        ? {
+                            offset: thumbnail.offset,
+                            size: thumbnail.size_bytes,
+                          }
+                        : undefined
+                    }
                     version={version || undefined}
                   />
                   <CardContent className="space-y-1.5 p-3">
