@@ -177,10 +177,11 @@ type OverlayModel struct {
 
 // OverlayModelsResponse lists only models whose whole overlay set is ready.
 type OverlayModelsResponse struct {
-	Dataset string         `json:"dataset"`
-	Version string         `json:"version"`
-	Shard   string         `json:"shard"`
-	Models  []OverlayModel `json:"models"`
+	Dataset       string         `json:"dataset"`
+	Version       string         `json:"version"`
+	Shard         string         `json:"shard"`
+	Models        []OverlayModel `json:"models"`
+	NextPageToken string         `json:"next_page_token,omitempty"`
 }
 
 // OverlayDescriptor accompanies the binary response through HTTP headers and
@@ -238,6 +239,41 @@ type ReasoningPromptVersion struct {
 type ReasoningPromptVersionsResponse struct {
 	Dataset        string                   `json:"dataset"`
 	PromptVersions []ReasoningPromptVersion `json:"prompt_versions"`
+}
+
+// ReasoningInventory is the atomic publication pointer for one immutable
+// dataset version. Generation selects a complete namespace whose stats, scene
+// rows, and sample lookups were all persisted before this item was replaced.
+type ReasoningInventory struct {
+	Generation            string                   `json:"generation"`
+	DatasetManifestSHA256 string                   `json:"dataset_manifest_sha256"`
+	PromptVersions        []ReasoningPromptVersion `json:"prompt_versions"`
+	Total                 int                      `json:"total"`
+	SceneRows             int                      `json:"scene_rows"`
+}
+
+// ReasoningSampleLookup is the generation-scoped DynamoDB pointer to one
+// embedded reasoning.json tar member. It is internal serving metadata and is
+// never serialized directly to the public API.
+type ReasoningSampleLookup struct {
+	SampleID string
+	Shard    string
+	Offset   int64
+	Size     int64
+}
+
+// ReasoningMaterializationResponse summarizes one trusted, all-partition
+// materialization run.
+type ReasoningMaterializationResponse struct {
+	Dataset               string `json:"dataset"`
+	Version               string `json:"version"`
+	Generation            string `json:"generation"`
+	DatasetManifestSHA256 string `json:"dataset_manifest_sha256"`
+	ComputedAt            string `json:"computed_at"`
+	Partitions            int    `json:"partitions"`
+	TotalRecords          int    `json:"total_records"`
+	SceneRows             int    `json:"scene_rows"`
+	Reused                bool   `json:"reused,omitempty"`
 }
 
 // StatsResponse wraps GET /api/v1/stats (dashboard KPI cards). MLflow-derived
@@ -307,26 +343,10 @@ type ReasoningStatsDetailResponse struct {
 	Stats           ReasoningStatsBlob `json:"stats"`
 }
 
-// ComputeStatsResponse wraps the force-(re)compute endpoint: it reports the
-// blob plus how many scene-by-label index rows were written.
-type ComputeStatsResponse struct {
-	Dataset         string             `json:"dataset"`
-	Version         string             `json:"version"`
-	PromptVersion   string             `json:"prompt_version"`
-	Teacher         string             `json:"teacher"`
-	TeacherProvider string             `json:"teacher_provider,omitempty"`
-	TeacherModel    string             `json:"teacher_model,omitempty"`
-	ComputedAt      string             `json:"computed_at"`
-	SceneRows       int                `json:"scene_rows"` // scene-by-label index rows written
-	Stats           ReasoningStatsBlob `json:"stats"`
-}
-
 // SceneRef identifies one scene carrying a searched reasoning label. Shard is
-// the published shard (for the requested version) that actually contains this
-// sample, resolved server-side from the shard indexes; Available is false when
-// no published shard in this version holds the sample (its label exists but the
-// frame was not packed into this version's shards), so the UI links only real
-// samples instead of guessing a shard name that 404s.
+// persisted with the generation-scoped label row during materialization, so
+// search does not scan shard indexes. Available remains part of the public
+// contract and is true for complete materialized rows.
 type SceneRef struct {
 	SampleID  string `json:"sample_id"`
 	Shard     string `json:"shard,omitempty"`
