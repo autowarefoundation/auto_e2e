@@ -103,6 +103,31 @@ def test_dataset_dynamic_propagates_the_pinned_data_prep_image():
     }
 
 
+def test_full_run_overlay_workflow_wires_exact_model_lineage():
+    resolver, publisher = workflows.wf_publish_full_run_overlays.nodes
+    assert resolver.flyte_entity.name.endswith(
+        "overlay_tasks.resolve_overlay_model_version"
+    )
+
+    resolver_bindings = {
+        binding.var: binding.binding.promise
+        for binding in resolver.bindings
+    }
+    assert resolver_bindings["train_execution_id"].var == (
+        "full_run_execution_id"
+    )
+
+    publisher_bindings = {
+        binding.var: binding.binding.promise
+        for binding in publisher.bindings
+    }
+    assert publisher_bindings["model_version"].node_id == resolver.id
+    assert publisher_bindings["expected_train_execution_id"].var == (
+        "full_run_execution_id"
+    )
+    assert publisher_bindings["shards"].var == "shards"
+
+
 def test_data_prep_tasks_serialize_karpenter_disruption_protection():
     settings = SerializationSettings(
         image_config=ImageConfig.auto_default_image(),
