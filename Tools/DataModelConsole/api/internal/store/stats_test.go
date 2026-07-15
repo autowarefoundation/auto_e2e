@@ -110,6 +110,20 @@ func TestParseReasoningLabelRejectsContractViolations(t *testing.T) {
 			},
 		},
 		{
+			name: "null confidence",
+			mutate: func(label map[string]any) {
+				horizons := label["horizons"].([]any)
+				horizons[0].(map[string]any)["confidence"] = nil
+			},
+		},
+		{
+			name: "missing confidence",
+			mutate: func(label map[string]any) {
+				horizons := label["horizons"].([]any)
+				delete(horizons[0].(map[string]any), "confidence")
+			},
+		},
+		{
 			name: "missing horizon provenance",
 			mutate: func(label map[string]any) {
 				horizons := label["horizons"].([]any)
@@ -143,6 +157,22 @@ func TestParseReasoningLabelRejectsContractViolations(t *testing.T) {
 	}
 	if _, err := ParseReasoningLabel([]byte(`{"schema_version":`)); err == nil {
 		t.Fatal("malformed reasoning JSON was accepted")
+	}
+
+	for _, confidence := range []float64{0, 1} {
+		var label map[string]any
+		if err := json.Unmarshal([]byte(sampleLabelJSON), &label); err != nil {
+			t.Fatal(err)
+		}
+		label["horizons"].([]any)[0].(map[string]any)["confidence"] =
+			confidence
+		body, err := json.Marshal(label)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := ParseReasoningLabel(body); err != nil {
+			t.Fatalf("boundary confidence %v was rejected: %v", confidence, err)
+		}
 	}
 }
 
