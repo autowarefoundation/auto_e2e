@@ -250,22 +250,26 @@ func TestDynamoStore_OverlayReadinessGatesModelsAndBody(t *testing.T) {
 	s, f := newTestStore()
 	ctx := context.Background()
 	modelID := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	datasetManifest := "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+	cacheIdentity := "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
 	pointer := map[string]any{
-		"pk":                    ShardModelPK("l2d", "v2.1", "train-000001.tar"),
-		"sk":                    ModelSK(modelID),
-		"s3_key":                "overlays/schema=v1/body.gz",
-		"sha256":                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-		"byte_size":             1234,
-		"sample_count":          42,
-		"overlay_schema":        "v1",
-		"status":                "ready",
-		"registered_model_name": "auto-e2e-driving-policy",
-		"model_version":         30,
-		"run_id":                "run-30",
-		"model_name":            "swin_v2_tiny",
-		"eval_ade":              1.25,
-		"eval_fde":              2.5,
-		"val_fraction":          0.1,
+		"pk":                      ShardModelPK("l2d", "v2.1", "train-000001.tar"),
+		"sk":                      ModelSK(modelID),
+		"s3_key":                  "overlays/schema=v1/body.gz",
+		"sha256":                  "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+		"byte_size":               1234,
+		"sample_count":            42,
+		"overlay_schema":          "v1",
+		"dataset_manifest_sha256": datasetManifest,
+		"cache_identity":          cacheIdentity,
+		"status":                  "ready",
+		"registered_model_name":   "auto-e2e-driving-policy",
+		"model_version":           30,
+		"run_id":                  "run-30",
+		"model_name":              "swin_v2_tiny",
+		"eval_ade":                1.25,
+		"eval_fde":                2.5,
+		"val_fraction":            0.1,
 	}
 	pointerItem, err := attributevalue.MarshalMap(pointer)
 	if err != nil {
@@ -281,9 +285,13 @@ func TestDynamoStore_OverlayReadinessGatesModelsAndBody(t *testing.T) {
 	}
 
 	setItem, err := attributevalue.MarshalMap(map[string]any{
-		"pk":     OverlaySetPK(modelID, "l2d", "v2.1"),
-		"sk":     metaSK,
-		"status": "ready",
+		"pk":                      OverlaySetPK(modelID, "l2d", "v2.1"),
+		"sk":                      metaSK,
+		"status":                  "ready",
+		"dataset_manifest_sha256": datasetManifest,
+		"request_identity":        "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+		"cache_identity":          cacheIdentity,
+		"manifest_key":            "overlays_manifest/model/manifest.json",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -303,6 +311,21 @@ func TestDynamoStore_OverlayReadinessGatesModelsAndBody(t *testing.T) {
 	}
 	if got.S3Key != pointer["s3_key"] || got.ByteSize != 1234 || got.SampleCount != 42 {
 		t.Errorf("overlay pointer = %+v", got)
+	}
+	if got.DatasetManifestSHA256 != datasetManifest || got.CacheIdentity != cacheIdentity {
+		t.Errorf("overlay pointer identity = %+v", got)
+	}
+
+	pointer["cache_identity"] = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+	pointerItem, err = attributevalue.MarshalMap(pointer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.items[keyOf(pointerItem)] = pointerItem
+	if _, err := s.GetReadyOverlayPointer(
+		ctx, "l2d", "v2.1", "train-000001.tar", modelID,
+	); err == nil {
+		t.Fatal("pointer/set cache identity mismatch was accepted")
 	}
 }
 
