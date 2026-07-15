@@ -1,5 +1,6 @@
 "use client";
 
+import { Dialog } from "@base-ui/react/dialog";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useEffect, useState } from "react";
@@ -18,16 +19,14 @@ export function Header() {
   }, [pathname]);
 
   return (
-    <>
+    <Dialog.Root open={open} onOpenChange={setOpen}>
       <header className="sticky top-0 z-30 flex h-14 items-center border-b border-slate-800 bg-slate-950/80 px-6 backdrop-blur">
-        <button
-          type="button"
-          onClick={() => setOpen(true)}
+        <Dialog.Trigger
           className="mr-3 -ml-2 rounded-md p-1.5 text-slate-400 hover:bg-slate-900 hover:text-slate-200 md:hidden"
           aria-label="Open navigation"
         >
           <Menu className="size-5" />
-        </button>
+        </Dialog.Trigger>
         <h1 className="text-sm font-semibold tracking-tight">
           DataModelConsole
         </h1>
@@ -36,30 +35,23 @@ export function Header() {
         </span>
       </header>
 
-      {/* Mobile navigation drawer, rendered as a sibling OUTSIDE <header>: the
-          header's backdrop-blur makes it the containing block for any fixed
-          descendant, so a drawer inside it would resolve `fixed inset-0`
-          against the 56px header instead of the viewport. */}
-      {open && (
-        <div className="fixed inset-0 z-50 md:hidden">
-          <div
-            className="absolute inset-0 bg-slate-950/70"
-            onClick={() => setOpen(false)}
-            aria-hidden
-          />
-          <nav className="absolute inset-y-0 left-0 flex w-64 flex-col border-r border-slate-800 bg-slate-950 p-3">
+      <Dialog.Portal>
+        <Dialog.Backdrop className="fixed inset-0 z-50 bg-slate-950/70 md:hidden" />
+        <Dialog.Popup
+          aria-modal="true"
+          className="fixed inset-y-0 left-0 z-50 flex w-64 flex-col border-r border-slate-800 bg-slate-950 p-3 md:hidden"
+        >
+          <nav aria-label="Primary navigation" className="flex min-h-0 flex-1 flex-col">
             <div className="mb-2 flex items-center justify-between px-1">
-              <span className="text-sm font-semibold tracking-tight">
+              <Dialog.Title className="text-sm font-semibold tracking-tight">
                 DataModelConsole
-              </span>
-              <button
-                type="button"
-                onClick={() => setOpen(false)}
+              </Dialog.Title>
+              <Dialog.Close
                 className="rounded-md p-1.5 text-slate-400 hover:bg-slate-900 hover:text-slate-200"
                 aria-label="Close navigation"
               >
                 <X className="size-5" />
-              </button>
+              </Dialog.Close>
             </div>
             <div className="space-y-1">
               {NAV_ITEMS.map(({ href, label, icon: Icon }) => {
@@ -68,6 +60,8 @@ export function Header() {
                   <Link
                     key={href}
                     href={href}
+                    aria-current={active ? "page" : undefined}
+                    onClick={() => setOpen(false)}
                     className={cn(
                       "flex items-center gap-2.5 rounded-md px-3 py-2 text-sm transition-colors",
                       active
@@ -82,8 +76,8 @@ export function Header() {
               })}
             </div>
           </nav>
-        </div>
-      )}
-    </>
+        </Dialog.Popup>
+      </Dialog.Portal>
+    </Dialog.Root>
   );
 }
