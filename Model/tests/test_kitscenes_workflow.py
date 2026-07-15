@@ -105,6 +105,11 @@ def test_dataset_dynamic_propagates_the_pinned_data_prep_image():
 
 def test_full_run_overlay_workflow_wires_exact_model_lineage():
     resolver, publisher = workflows.wf_publish_full_run_overlays.nodes
+    assert set(workflows.wf_publish_full_run_overlays.python_interface.outputs) == {
+        "overlay_result",
+        "manifest_key",
+        "manifest_sha256",
+    }
     assert resolver.flyte_entity.name.endswith(
         "overlay_tasks.resolve_overlay_model_version"
     )
