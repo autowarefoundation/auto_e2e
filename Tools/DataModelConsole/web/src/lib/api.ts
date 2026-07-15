@@ -323,9 +323,12 @@ export function getReasoningLabelStats(): Promise<ReasoningLabelStats> {
 // version axis shown on the dataset detail page).
 export async function getReasoningPromptVersions(
   dataset: string,
+  version?: string,
 ): Promise<ReasoningPromptVersionsResponse["prompt_versions"]> {
+  const query = new URLSearchParams({ dataset });
+  if (version) query.set("version", version);
   const res = await apiFetch<ReasoningPromptVersionsResponse>(
-    `/api/v1/reasoning-labels/prompt-versions?dataset=${encodeURIComponent(dataset)}`,
+    `/api/v1/reasoning-labels/prompt-versions?${query.toString()}`,
   );
   return res.prompt_versions ?? [];
 }
