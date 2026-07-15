@@ -78,6 +78,7 @@ def test_overlay_set_status_is_explicit():
         overlay_schema="v1",
         dataset_manifest_digest="b" * 64,
         request_identity="c" * 64,
+        artifacts_bucket="artifacts",
         created_at="2026-07-14T00:00:00Z",
         cache_identity="d" * 64,
         n_shards=2,
@@ -96,6 +97,7 @@ def test_overlay_set_status_is_explicit():
             overlay_schema="v1",
             dataset_manifest_digest="b" * 64,
             request_identity="c" * 64,
+            artifacts_bucket="artifacts",
             created_at="now",
         )
 
@@ -168,5 +170,6 @@ def test_overlay_identity_rejects_ambiguous_inputs():
             overlay_schema="v1",
             dataset_manifest_digest="b" * 64,
             request_identity="c" * 64,
+            artifacts_bucket="artifacts",
             created_at="now",
         )
