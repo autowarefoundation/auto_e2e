@@ -71,7 +71,8 @@ def init_pack_worker(
         # (populated by that partition's ingest) instead of re-downloading to the
         # shared HF cache in this pod (#121 option B). raw_path is always provided
         # to the packer (it's a required arg); None-safe via L2DDataset(root=None).
-        _DS = L2DDataset(repo_id=dataset_value, episodes=episodes,
+        episode_indices = [int(ep) for ep in episodes] if episodes else None
+        _DS = L2DDataset(repo_id=dataset_value, episodes=episode_indices,
                          include_world_model_windows=world_model, root=raw_path)
 
 
@@ -127,7 +128,8 @@ def init_row_worker(
         )
     else:
         from data_parsing.l2d import L2DDataset
-        _DS = L2DDataset(repo_id=dataset_value, episodes=episodes,
+        episode_indices = [int(ep) for ep in episodes] if episodes else None
+        _DS = L2DDataset(repo_id=dataset_value, episodes=episode_indices,
                          include_world_model_windows=False, root=raw_path)
 
 
@@ -159,7 +161,7 @@ def decode_row(
     if _DATASET_VALUE == "KIT-MRT/KITScenes-Multimodal":
         scene_id = str(group_id)
         visual = _DS._load_multiview_frame(scene_id, frame_index)
-        cams = {
+        kit_cams = {
             (
                 f"kitscenes-{UID_SCHEMA_VERSION}-{scene_id}-"
                 f"r{frame_index:06d}-c{view}"
@@ -171,7 +173,7 @@ def decode_row(
             map_tile = _DS.map_for_row(scene_id, frame_index)
             if float(map_tile.abs().max()) > 0:
                 map_jpeg = _jpeg(map_tile)
-        return (scene_id, frame_index), cams, map_jpeg
+        return (scene_id, frame_index), kit_cams, map_jpeg
 
     from data_parsing.l2d.dataset import CAMERA_NAMES, MAP_VIEW_NAME
 
