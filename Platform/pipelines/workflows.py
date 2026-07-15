@@ -2844,10 +2844,14 @@ def wf_precompute_overlays(
         dataset=dataset,
         dataset_version=dataset_version,
         dataset_manifest_digest=dataset_manifest_digest,
+        preprocessing_contract_digest=preprocessing_contract_digest,
+        model_inference_code_digest=model_inference_code_digest,
+        container_image_digest=container_image_digest,
         artifacts_bucket=artifacts_bucket,
         dynamo_table=dynamo_table,
         aws_region=aws_region,
         base_seeds=base_seeds,
+        sampler=sampler,
     )
     results: List[FlyteFile] = []
     for partition in shards:
@@ -2873,6 +2877,7 @@ def wf_precompute_overlays(
     return finalize_overlay_set(
         model_metadata=resolved.metadata,
         partition_results=results,
+        prepare_gate=gate,
         dataset=dataset,
         dataset_version=dataset_version,
         dataset_manifest_digest=dataset_manifest_digest,
@@ -2922,4 +2927,57 @@ def wf_publish_dataset_snapshot(
         datasets_bucket=datasets_bucket,
         dynamo_table=dynamo_table,
         aws_region=aws_region,
+    )
+
+
+@workflow
+def wf_publish_and_precompute_overlays(
+    shards: List[FlyteDirectory],
+    model_version: str,
+    preprocessing_contract_digest: str,
+    model_inference_code_digest: str,
+    container_image_digest: str,
+    datasets_bucket: str,
+    artifacts_bucket: str,
+    published_dataset: str = "kitscenes",
+    registered_model_name: str = "auto-e2e-driving-policy",
+    dataset_version: str = DATASET_PACK_VERSION,
+    dynamo_table: str = "auto-e2e-console",
+    aws_region: str = "us-west-2",
+    base_seeds: List[int] = [0],
+    batch_size: int = 32,
+    num_workers: int = 4,
+    copy_workers: int = 16,
+) -> str:
+    """Publish one immutable snapshot, then precompute its model overlays.
+
+    The dataset manifest digest is wired directly between Flyte nodes, so an
+    operator cannot accidentally launch inference against a different snapshot.
+    """
+    publication = wf_publish_dataset_snapshot(
+        shards=shards,
+        published_dataset=published_dataset,
+        datasets_bucket=datasets_bucket,
+        dataset_version=dataset_version,
+        dynamo_table=dynamo_table,
+        aws_region=aws_region,
+        copy_workers=copy_workers,
+    )
+    return wf_precompute_overlays(
+        shards=shards,
+        model_version=model_version,
+        dataset_manifest_digest=publication.manifest_sha256,
+        preprocessing_contract_digest=preprocessing_contract_digest,
+        model_inference_code_digest=model_inference_code_digest,
+        container_image_digest=container_image_digest,
+        artifacts_bucket=artifacts_bucket,
+        registered_model_name=registered_model_name,
+        dataset=published_dataset,
+        dataset_version=dataset_version,
+        dynamo_table=dynamo_table,
+        aws_region=aws_region,
+        base_seeds=base_seeds,
+        batch_size=batch_size,
+        num_workers=num_workers,
+        sampler="model-default",
     )
