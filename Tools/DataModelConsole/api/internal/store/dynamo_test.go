@@ -362,14 +362,18 @@ func TestDynamoStore_OverlayReadinessGatesModelsAndBody(t *testing.T) {
 	}
 	f.items[keyOf(setItem)] = setItem
 
-	models, err := s.QueryReadyOverlayModels(ctx, "l2d", "v2.1", "train-000001.tar")
+	models, err := s.QueryReadyOverlayModels(
+		ctx, "l2d", "v2.1", "train-000001.tar", datasetManifest,
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(models) != 1 || models[0].ModelArtifactID != modelID || models[0].ModelVersion != 30 {
 		t.Fatalf("ready models = %+v", models)
 	}
-	got, err := s.GetReadyOverlayPointer(ctx, "l2d", "v2.1", "train-000001.tar", modelID)
+	got, err := s.GetReadyOverlayPointer(
+		ctx, "l2d", "v2.1", "train-000001.tar", modelID, datasetManifest,
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -378,6 +382,24 @@ func TestDynamoStore_OverlayReadinessGatesModelsAndBody(t *testing.T) {
 	}
 	if got.DatasetManifestSHA256 != datasetManifest || got.CacheIdentity != cacheIdentity {
 		t.Errorf("overlay pointer identity = %+v", got)
+	}
+
+	staleManifest := "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+	models, err = s.QueryReadyOverlayModels(
+		ctx, "l2d", "v2.1", "train-000001.tar", staleManifest,
+	)
+	if err != nil || len(models) != 0 {
+		t.Fatalf("stale models must be hidden: models=%v err=%v", models, err)
+	}
+	if _, err := s.GetReadyOverlayPointer(
+		ctx, "l2d", "v2.1", "train-000001.tar", modelID, staleManifest,
+	); err != ErrNotFound {
+		t.Fatalf("stale overlay pointer error = %v, want ErrNotFound", err)
+	}
+	if _, err := s.QueryReadyOverlayModels(
+		ctx, "l2d", "v2.1", "train-000001.tar", "invalid",
+	); err == nil {
+		t.Fatal("invalid expected manifest digest was accepted")
 	}
 
 	pointer["cache_identity"] = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
@@ -413,8 +435,19 @@ func TestDynamoStore_GeoRecord(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.NSamples != 123 || got.GeoJSONKey != "l2d/v2.1/geo/heatmap.geojson.gz" {
+	if got.NSamples != 123 ||
+		got.GeoJSONKey != "l2d/v2.1/geo/heatmap.geojson.gz" ||
+		got.DatasetManifestSHA256 !=
+			"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc" {
 		t.Errorf("geo record = %+v", got)
+	}
+	item["dataset_manifest_sha256"] =
+		&ddbtypes.AttributeValueMemberS{Value: "invalid"}
+	f.items[keyOf(item)] = item
+	if _, err := s.GetGeoRecord(
+		context.Background(), "l2d", "v2.1",
+	); err == nil {
+		t.Fatal("invalid geo publication digest was accepted")
 	}
 	if _, err := s.GetGeoRecord(context.Background(), "l2d", "v9"); err != ErrNotFound {
 		t.Errorf("missing geo record error = %v", err)
