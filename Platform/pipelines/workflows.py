@@ -16,6 +16,8 @@ from flytekit.types.file import FlyteFile
 from flytekit.types.directory import FlyteDirectory
 from typing import Annotated, NamedTuple, List, Optional
 
+from Platform.pipelines.dataset_publication import DatasetPublication
+
 import os as _os
 
 ECR_PREFIX = _os.environ.get("ECR_PREFIX", "381491877296.dkr.ecr.us-west-2.amazonaws.com")
@@ -2875,6 +2877,49 @@ def wf_precompute_overlays(
         dataset_version=dataset_version,
         dataset_manifest_digest=dataset_manifest_digest,
         artifacts_bucket=artifacts_bucket,
+        dynamo_table=dynamo_table,
+        aws_region=aws_region,
+    )
+
+
+@dynamic(container_image=DATA_PREP_IMAGE)
+def wf_publish_dataset_snapshot(
+    shards: List[FlyteDirectory],
+    published_dataset: str,
+    datasets_bucket: str,
+    dataset_version: str = DATASET_PACK_VERSION,
+    dynamo_table: str = "auto-e2e-console",
+    aws_region: str = "us-west-2",
+    copy_workers: int = 16,
+) -> DatasetPublication:
+    """Publish packed partitions under one immutable Console dataset version.
+
+    This is an ops-only workflow. It copies shard, frame-pool, and exact-route
+    bodies from Flyte's artifact bucket with conditional S3 writes, merges the
+    rig and privacy-filtered geographic products, writes the canonical manifest
+    last, and only then updates the Console's ``GEO#`` pointer. The returned
+    manifest digest is the dataset identity required by ``wf_precompute_overlays``.
+    """
+    from Platform.pipelines.dataset_publication_tasks import (
+        finalize_dataset_publication,
+        publish_dataset_partition,
+    )
+
+    results: List[FlyteFile] = []
+    for partition in shards:
+        results.append(publish_dataset_partition(
+            shard_dir=partition,
+            published_dataset=published_dataset,
+            dataset_version=dataset_version,
+            datasets_bucket=datasets_bucket,
+            aws_region=aws_region,
+            copy_workers=copy_workers,
+        ))
+    return finalize_dataset_publication(
+        partition_results=results,
+        published_dataset=published_dataset,
+        dataset_version=dataset_version,
+        datasets_bucket=datasets_bucket,
         dynamo_table=dynamo_table,
         aws_region=aws_region,
     )
