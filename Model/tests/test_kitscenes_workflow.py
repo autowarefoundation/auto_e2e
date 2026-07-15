@@ -288,7 +288,11 @@ def test_dataset_dynamic_propagates_the_pinned_data_prep_image():
 
 @pytest.mark.parametrize(
     "buildspec_name",
-    ("buildspec-register.yml", "buildspec-launch-fullrun.yml"),
+    (
+        "buildspec-register.yml",
+        "buildspec-launch-fullrun.yml",
+        "buildspec-launch-recovery.yml",
+    ),
 )
 def test_remote_registration_buildspecs_pin_runtime_contracts(buildspec_name):
     buildspec = (_REPO_ROOT / "Platform" / buildspec_name).read_text()
@@ -308,6 +312,20 @@ def test_remote_registration_buildspecs_pin_runtime_contracts(buildspec_name):
     ):
         assert variable in buildspec
     assert '--image "${AUTO_E2E_TRAINING_IMAGE}"' in buildspec
+
+
+def test_recovery_launcher_requires_audited_artifacts_and_skips_source_stages():
+    buildspec = (
+        _REPO_ROOT / "Platform" / "buildspec-launch-recovery.yml"
+    ).read_text()
+
+    assert "shell: bash" in buildspec
+    assert 'test -n "${ARTIFACT_SET_SHA256}"' in buildspec
+    assert "--recovery_manifest" in buildspec
+    assert "--artifact_set_sha256" in buildspec
+    assert "wf_recovered_kitscenes_full_run" in buildspec
+    assert "wf_sharded_full_run" not in buildspec
+    assert "--reasoning_teacher" not in buildspec
 
 
 def test_reasoning_selection_bootstraps_short_scenes():
