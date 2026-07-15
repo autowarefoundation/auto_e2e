@@ -194,9 +194,18 @@ function DatasetDetailInner({ dataset }: { dataset: string }) {
   }, [dataset, shards.length, selectedVersion]);
 
   const promptVersions = useApi(
-    () => getReasoningPromptVersions(dataset),
-    [dataset],
+    async () => ({
+      version: selectedVersion,
+      prompts: selectedVersion
+        ? await getReasoningPromptVersions(dataset, selectedVersion)
+        : [],
+    }),
+    [dataset, selectedVersion],
   );
+  const promptVersionList =
+    promptVersions.data?.version === selectedVersion
+      ? promptVersions.data.prompts
+      : [];
 
   return (
     <div className="space-y-6">
@@ -366,7 +375,7 @@ function DatasetDetailInner({ dataset }: { dataset: string }) {
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {(promptVersions.data ?? []).map((pv) => (
+                {promptVersionList.map((pv) => (
                   <TableRow key={`${pv.teacher}/${pv.prompt_version}`}>
                     <TableCell className="font-mono text-xs">
                       {pv.teacher}
@@ -382,7 +391,7 @@ function DatasetDetailInner({ dataset }: { dataset: string }) {
                     </TableCell>
                   </TableRow>
                 ))}
-                {(promptVersions.data ?? []).length === 0 && (
+                {promptVersionList.length === 0 && (
                   <TableRow>
                     <TableCell
                       colSpan={3}
