@@ -74,6 +74,21 @@ def _is_precondition_failed(exc: Exception) -> bool:
     return _error_code(exc) in {"PreconditionFailed", "412"} or status == 412
 
 
+def _etag_header(value: object, object_uri: str) -> str:
+    raw = str(value or "").strip()
+    if raw.startswith('"') and raw.endswith('"') and len(raw) > 2:
+        opaque = raw[1:-1]
+    else:
+        opaque = raw
+    if (
+        not opaque
+        or '"' in opaque
+        or any(ord(char) < 0x20 or ord(char) == 0x7F for char in opaque)
+    ):
+        raise ValueError(f"object has an invalid ETag: {object_uri}")
+    return f'"{opaque}"'
+
+
 def _list_objects(s3, bucket: str, prefix: str) -> list[dict]:
     normalized = prefix.rstrip("/") + "/"
     paginator = s3.get_paginator("list_objects_v2")
@@ -86,10 +101,10 @@ def _list_objects(s3, bucket: str, prefix: str) -> list[dict]:
             relative = key[len(normalized):]
             if not relative or relative.startswith("/") or ".." in relative.split("/"):
                 raise ValueError(f"unsafe object under FlyteDirectory: {key!r}")
-            etag_header = str(item.get("ETag", ""))
-            etag = etag_header.strip('"')
-            if not etag:
-                raise ValueError(f"source object has no ETag: s3://{bucket}/{key}")
+            etag_header = _etag_header(
+                item.get("ETag"), f"s3://{bucket}/{key}"
+            )
+            etag = etag_header[1:-1]
             size = int(item["Size"])
             identity = _content_identity(etag, size)
             objects.append({
@@ -145,7 +160,7 @@ def _copy_immutable(
     *,
     destination_bucket: str,
     destination_key: str,
-) -> None:
+) -> str:
     from botocore.exceptions import ClientError
 
     if source["size"] > _MAX_COPY_OBJECT_BYTES:
@@ -159,7 +174,7 @@ def _copy_immutable(
         "publication-schema": PUBLICATION_SCHEMA,
     }
     try:
-        s3.copy_object(
+        response = s3.copy_object(
             Bucket=destination_bucket,
             Key=destination_key,
             CopySource={"Bucket": source["bucket"], "Key": source["key"]},
@@ -170,7 +185,10 @@ def _copy_immutable(
             ContentType=_content_type(destination_key),
             CacheControl="private, max-age=31536000, immutable",
         )
-        return
+        return _etag_header(
+            response.get("CopyObjectResult", {}).get("ETag"),
+            f"s3://{destination_bucket}/{destination_key}",
+        )
     except ClientError as exc:
         if not _is_precondition_failed(exc):
             raise
@@ -195,6 +213,10 @@ def _copy_immutable(
             "immutable dataset object already exists with different content: "
             f"s3://{destination_bucket}/{destination_key}"
         )
+    return _etag_header(
+        existing.get("ETag"),
+        f"s3://{destination_bucket}/{destination_key}",
+    )
 
 
 def _put_immutable(
@@ -451,7 +473,6 @@ def publish_dataset_partition(
                 "name": relative,
                 "key": destination_key,
                 "byte_size": source["size"],
-                "etag": source["etag"],
                 "content_identity": source["content_identity"],
             })
         elif relative.startswith("pool/"):
@@ -483,7 +504,7 @@ def publish_dataset_partition(
         raise ValueError("world-model partition has no sibling frame pool")
 
     with ThreadPoolExecutor(max_workers=copy_workers) as executor:
-        list(executor.map(
+        destination_etags = list(executor.map(
             lambda source: _copy_immutable(
                 s3,
                 source,
@@ -492,6 +513,12 @@ def publish_dataset_partition(
             ),
             copy_sources,
         ))
+    for source, destination_etag in zip(
+        copy_sources, destination_etags, strict=True
+    ):
+        source["destination_etag"] = destination_etag
+    for shard in shards:
+        shard["etag"] = by_relative[shard["name"]]["destination_etag"]
 
     pool_digest = hashlib.sha256()
     for source in pool_sources:
