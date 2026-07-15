@@ -8,13 +8,45 @@ import (
 
 func TestValidDatasetIncludesPublishedKITScenesAlias(t *testing.T) {
 	service := &S3Service{}
-	for _, dataset := range []string{"kitscenes", "l2d", "nvidia_av"} {
+	for _, dataset := range []string{
+		"kitscenes",
+		"l2d",
+		"nvidia_av",
+		"kitscenes-smoke-8aec8355b116",
+	} {
 		if !service.ValidDataset(dataset) {
 			t.Fatalf("ValidDataset(%q) = false", dataset)
 		}
 	}
-	if service.ValidDataset("KITScenes") {
-		t.Fatal("ValidDataset accepted a non-canonical alias")
+	for _, dataset := range []string{
+		"KITScenes",
+		"kitscenes-smoke-8aec8355b11",
+		"kitscenes-smoke-8aec8355b1160",
+		"kitscenes-smoke-8aec8355b11g",
+		"kitscenes-smoke-8AEC8355B116",
+		"kitscenes-smoke-../../",
+	} {
+		if service.ValidDataset(dataset) {
+			t.Fatalf("ValidDataset(%q) = true", dataset)
+		}
+	}
+}
+
+func TestSmokeDatasetNameFromPrefix(t *testing.T) {
+	valid := "kitscenes-smoke-8aec8355b116"
+	if got, ok := smokeDatasetNameFromPrefix(valid + "/"); !ok || got != valid {
+		t.Fatalf("smokeDatasetNameFromPrefix = (%q, %v), want (%q, true)", got, ok, valid)
+	}
+	for _, prefix := range []string{
+		valid,
+		valid + "/v2.1/",
+		"kitscenes/",
+		"kitscenes-smoke-8AEC8355B116/",
+		"kitscenes-smoke-../../",
+	} {
+		if got, ok := smokeDatasetNameFromPrefix(prefix); ok || got != "" {
+			t.Errorf("smokeDatasetNameFromPrefix(%q) = (%q, %v)", prefix, got, ok)
+		}
 	}
 }
 
