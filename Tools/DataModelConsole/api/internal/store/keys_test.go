@@ -29,6 +29,19 @@ func TestEmbeddedStatsPK(t *testing.T) {
 	}
 }
 
+func TestTeacherScopedEmbeddedStatsPK(t *testing.T) {
+	got := EmbeddedTeacherStatsPK(
+		"l2d",
+		"v2.1",
+		"b3BlbmFpX2NvbXBhdGlibGUAbnZpZGlhL0Nvc21vczMtTmFubw",
+		"action_relevant_reasoning_v3_temporal_front256",
+	)
+	want := "STATSV3#l2d#v2.1#b3BlbmFpX2NvbXBhdGlibGUAbnZpZGlhL0Nvc21vczMtTmFubw#action_relevant_reasoning_v3_temporal_front256"
+	if got != want {
+		t.Errorf("EmbeddedTeacherStatsPK = %q, want %q", got, want)
+	}
+}
+
 func TestSceneLabelKeys(t *testing.T) {
 	pk := SceneLabelPK("l2d", "action_relevant_reasoning_v3_temporal_front256", "lateral_response", "turn_left")
 	wantPK := "LBL#l2d#action_relevant_reasoning_v3_temporal_front256#lateral_response#turn_left"
@@ -52,6 +65,21 @@ func TestSceneLabelVersionKey(t *testing.T) {
 	want := "LBLV2#l2d#v2.1#action_relevant_reasoning_v3_temporal_front256#lateral_response#turn_left"
 	if got != want {
 		t.Errorf("SceneLabelVersionPK = %q, want %q", got, want)
+	}
+}
+
+func TestTeacherScopedSceneLabelVersionKey(t *testing.T) {
+	got := SceneLabelTeacherVersionPK(
+		"l2d",
+		"v2.1",
+		"b3BlbmFpX2NvbXBhdGlibGUAbnZpZGlhL0Nvc21vczMtTmFubw",
+		"action_relevant_reasoning_v3_temporal_front256",
+		"lateral_response",
+		"turn_left",
+	)
+	want := "LBLV3#l2d#v2.1#b3BlbmFpX2NvbXBhdGlibGUAbnZpZGlhL0Nvc21vczMtTmFubw#action_relevant_reasoning_v3_temporal_front256#lateral_response#turn_left"
+	if got != want {
+		t.Errorf("SceneLabelTeacherVersionPK = %q, want %q", got, want)
 	}
 }
 
