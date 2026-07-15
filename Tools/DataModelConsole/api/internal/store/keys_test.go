@@ -1,6 +1,11 @@
 package store
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
+
+const testReasoningGeneration = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 
 func TestShardIndexPK(t *testing.T) {
 	got := ShardIndexPK("l2d", "v2.0", "train-000000.tar")
@@ -30,15 +35,30 @@ func TestEmbeddedStatsPK(t *testing.T) {
 }
 
 func TestTeacherScopedEmbeddedStatsPK(t *testing.T) {
-	got := EmbeddedTeacherStatsPK(
+	got, err := EmbeddedTeacherStatsPK(
 		"l2d",
 		"v2.1",
+		testReasoningGeneration,
 		"b3BlbmFpX2NvbXBhdGlibGUAbnZpZGlhL0Nvc21vczMtTmFubw",
 		"action_relevant_reasoning_v3_temporal_front256",
 	)
-	want := "STATSV3#l2d#v2.1#b3BlbmFpX2NvbXBhdGlibGUAbnZpZGlhL0Nvc21vczMtTmFubw#action_relevant_reasoning_v3_temporal_front256"
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "STATSV5#l2d#v2.1#" + testReasoningGeneration + "#b3BlbmFpX2NvbXBhdGlibGUAbnZpZGlhL0Nvc21vczMtTmFubw#action_relevant_reasoning_v3_temporal_front256"
 	if got != want {
 		t.Errorf("EmbeddedTeacherStatsPK = %q, want %q", got, want)
+	}
+}
+
+func TestReasoningInventoryPK(t *testing.T) {
+	got, err := ReasoningInventoryPK("kitscenes", "v2.1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "RINV5#kitscenes#v2.1"
+	if got != want {
+		t.Errorf("ReasoningInventoryPK = %q, want %q", got, want)
 	}
 }
 
@@ -69,17 +89,78 @@ func TestSceneLabelVersionKey(t *testing.T) {
 }
 
 func TestTeacherScopedSceneLabelVersionKey(t *testing.T) {
-	got := SceneLabelTeacherVersionPK(
+	got, err := SceneLabelTeacherVersionPK(
 		"l2d",
 		"v2.1",
+		testReasoningGeneration,
 		"b3BlbmFpX2NvbXBhdGlibGUAbnZpZGlhL0Nvc21vczMtTmFubw",
 		"action_relevant_reasoning_v3_temporal_front256",
 		"lateral_response",
 		"turn_left",
 	)
-	want := "LBLV3#l2d#v2.1#b3BlbmFpX2NvbXBhdGlibGUAbnZpZGlhL0Nvc21vczMtTmFubw#action_relevant_reasoning_v3_temporal_front256#lateral_response#turn_left"
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "LBLV5#l2d#v2.1#" + testReasoningGeneration + "#b3BlbmFpX2NvbXBhdGlibGUAbnZpZGlhL0Nvc21vczMtTmFubw#action_relevant_reasoning_v3_temporal_front256#lateral_response#turn_left"
 	if got != want {
 		t.Errorf("SceneLabelTeacherVersionPK = %q, want %q", got, want)
+	}
+}
+
+func TestReasoningSampleLookupKeys(t *testing.T) {
+	pk, err := ReasoningSampleLookupPK(
+		"kitscenes",
+		"v2.1",
+		testReasoningGeneration,
+		"kitscenes-v1-scene-a-f000001",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "RLOOKUP#kitscenes#v2.1#" + testReasoningGeneration +
+		"#kitscenes-v1-scene-a-f000001"; pk != want {
+		t.Fatalf("ReasoningSampleLookupPK = %q, want %q", pk, want)
+	}
+}
+
+func TestReasoningKeysRejectInvalidComponents(t *testing.T) {
+	badGenerations := []string{
+		"",
+		"generation#injected",
+		strings.Repeat("A", 64),
+		strings.Repeat("a", 63),
+	}
+	for _, generation := range badGenerations {
+		if _, err := ReasoningSampleLookupPK(
+			"kitscenes", "v2.1", generation, "sample-a",
+		); err == nil {
+			t.Errorf("invalid generation %q was accepted", generation)
+		}
+	}
+	for _, component := range []string{"", "bad#value", "bad\x00value", " padded"} {
+		if _, err := ReasoningSampleLookupPK(
+			"kitscenes",
+			"v2.1",
+			testReasoningGeneration,
+			component,
+		); err == nil {
+			t.Errorf("invalid key component %q was accepted", component)
+		}
+	}
+	if _, err := ReasoningInventoryPK("kitscenes#other", "v2.1"); err == nil {
+		t.Fatal("delimiter injection in inventory key was accepted")
+	}
+	long := strings.Repeat("x", 512)
+	if _, err := SceneLabelTeacherVersionPK(
+		long,
+		long,
+		testReasoningGeneration,
+		long,
+		long,
+		long,
+		long,
+	); err == nil {
+		t.Fatal("oversized DynamoDB partition key was accepted")
 	}
 }
 
