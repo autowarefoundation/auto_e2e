@@ -306,6 +306,71 @@ func stringSet(values ...string) map[string]struct{} {
 	return set
 }
 
+// ReasoningStatsAccumulator incrementally aggregates parsed labels without
+// retaining the label slice or allocating a new histogram for every record.
+type ReasoningStatsAccumulator struct {
+	blob             model.ReasoningStatsBlob
+	confidenceCounts [10]int
+}
+
+// NewReasoningStatsAccumulator initializes all stable taxonomy fields.
+func NewReasoningStatsAccumulator() *ReasoningStatsAccumulator {
+	byField := make(map[string]map[string]int, len(StatFields))
+	for _, f := range StatFields {
+		byField[f] = map[string]int{}
+	}
+	return &ReasoningStatsAccumulator{
+		blob: model.ReasoningStatsBlob{ByField: byField},
+	}
+}
+
+// Add incorporates one parsed label.
+func (a *ReasoningStatsAccumulator) Add(label ReasoningLabel) {
+	a.blob.NRecords++
+	if label.Abstained {
+		a.blob.NAbstained++
+		return
+	}
+	a.blob.NLabels++
+	for _, horizon := range label.Horizons {
+		a.blob.HorizonCount++
+		addScalar(
+			a.blob.ByField[FieldRelationToEgo],
+			horizon.RelationToEgo,
+		)
+		addList(
+			a.blob.ByField[FieldHazardEvent],
+			horizon.HazardEvent,
+		)
+		addList(a.blob.ByField[FieldCause], horizon.Cause)
+		addScalar(
+			a.blob.ByField[FieldLongitudinalResponse],
+			horizon.LongitudinalResponse,
+		)
+		addScalar(
+			a.blob.ByField[FieldLateralResponse],
+			horizon.LateralResponse,
+		)
+		addScalar(
+			a.blob.ByField[FieldTacticalResponse],
+			horizon.TacticalResponse,
+		)
+		addScalar(
+			a.blob.ByField[FieldRuleResponse],
+			horizon.RuleResponse,
+		)
+		a.confidenceCounts[confBucket(horizon.Confidence)]++
+	}
+}
+
+// Snapshot returns the current aggregate. Callers must treat the returned
+// ByField maps as read-only while further Add calls are possible.
+func (a *ReasoningStatsAccumulator) Snapshot() model.ReasoningStatsBlob {
+	blob := a.blob
+	blob.ConfidenceHistogram = confHistogram(a.confidenceCounts[:])
+	return blob
+}
+
 // AggregateStats builds the precomputed stats blob from a slice of parsed
 // labels (pure; no AWS). Every horizon of every label contributes to by_field
 // and the confidence histogram, so the distribution answers "which ODD does
@@ -315,44 +380,11 @@ func stringSet(values ...string) map[string]struct{} {
 // taxonomy's own abstain labels (no_hazard, unknown_*, none) are real values
 // and ARE counted so an all-nominal set still reports its dominant class.
 func AggregateStats(labels []ReasoningLabel) model.ReasoningStatsBlob {
-	byField := map[string]map[string]int{}
-	for _, f := range StatFields {
-		byField[f] = map[string]int{}
+	accumulator := NewReasoningStatsAccumulator()
+	for _, label := range labels {
+		accumulator.Add(label)
 	}
-	// 10 fixed confidence buckets [0.0-0.1) .. [0.9-1.0]; the top bucket is
-	// closed so confidence==1.0 lands in "0.9-1.0" rather than overflowing.
-	confCounts := make([]int, 10)
-
-	nLabels := 0
-	nAbstained := 0
-	horizonCount := 0
-	for _, lbl := range labels {
-		if lbl.Abstained {
-			nAbstained++
-			continue
-		}
-		nLabels++
-		for _, h := range lbl.Horizons {
-			horizonCount++
-			addScalar(byField[FieldRelationToEgo], h.RelationToEgo)
-			addList(byField[FieldHazardEvent], h.HazardEvent)
-			addList(byField[FieldCause], h.Cause)
-			addScalar(byField[FieldLongitudinalResponse], h.LongitudinalResponse)
-			addScalar(byField[FieldLateralResponse], h.LateralResponse)
-			addScalar(byField[FieldTacticalResponse], h.TacticalResponse)
-			addScalar(byField[FieldRuleResponse], h.RuleResponse)
-			confCounts[confBucket(h.Confidence)]++
-		}
-	}
-
-	return model.ReasoningStatsBlob{
-		NRecords:            len(labels),
-		NLabels:             nLabels,
-		NAbstained:          nAbstained,
-		HorizonCount:        horizonCount,
-		ByField:             byField,
-		ConfidenceHistogram: confHistogram(confCounts),
-	}
+	return accumulator.Snapshot()
 }
 
 func addScalar(m map[string]int, v string) {
@@ -397,13 +429,13 @@ func confHistogram(counts []int) []model.HistogramBucket {
 }
 
 // SceneLabelRow is one (field,value)->sample_id pairing to persist in the
-// scene-by-label search index. It is derived from a single label's horizon-0
-// state plus every hazard/cause list member (also at horizon 0): those are the
-// labels a user searches "show me scenes that are X".
+// scene-by-label search index. Shard is attached by the materializer after the
+// pure label-to-row expansion so scene search never has to scan shard indexes.
 type SceneLabelRow struct {
 	Field    string
 	Value    string
 	SampleID string
+	Shard    string
 }
 
 // SceneLabelRows extracts the searchable (field,value) pairs of one label over
