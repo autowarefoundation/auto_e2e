@@ -4,9 +4,34 @@
 // known-black stale data.
 //
 // Run: (servers up) npx playwright test
-import { test, expect } from "@playwright/test";
+import { test, expect, type Page } from "@playwright/test";
 
 const SCENE = "/scenes/nvidia_av/train-000000.tar/0";
+
+async function cameraPaintState(page: Page) {
+  return page.evaluate(() => {
+    const canvases = Array.from(
+      document.querySelectorAll("canvas:not([aria-hidden])"),
+    );
+    let ok = 0;
+    for (const canvas of canvases) {
+      const context = canvas.getContext("2d");
+      if (!context || canvas.width === 0) continue;
+      const { data } = context.getImageData(
+        0,
+        0,
+        canvas.width,
+        canvas.height,
+      );
+      let sum = 0;
+      for (let offset = 0; offset < data.length; offset += 4) {
+        sum += data[offset] + data[offset + 1] + data[offset + 2];
+      }
+      if (sum / (data.length / 4) / 3 > 2) ok++;
+    }
+    return { total: canvases.length, ok };
+  });
+}
 
 test("player renders real camera pixels, advances, and focuses", async ({ page }) => {
   const consoleErrors: string[] = [];
@@ -38,29 +63,7 @@ test("player renders real camera pixels, advances, and focuses", async ({ page }
   // until a model is selected, so it is not a frame-pixel assertion target.
   await expect
     .poll(
-      () =>
-        page.evaluate(() => {
-          const canvases = Array.from(
-            document.querySelectorAll("canvas:not([aria-hidden])"),
-          );
-          let ok = 0;
-          for (const canvas of canvases) {
-            const context = canvas.getContext("2d");
-            if (!context || canvas.width === 0) continue;
-            const { data } = context.getImageData(
-              0,
-              0,
-              canvas.width,
-              canvas.height,
-            );
-            let sum = 0;
-            for (let offset = 0; offset < data.length; offset += 4) {
-              sum += data[offset] + data[offset + 1] + data[offset + 2];
-            }
-            if (sum / (data.length / 4) / 3 > 2) ok++;
-          }
-          return { total: canvases.length, ok };
-        }),
+      () => cameraPaintState(page),
       { timeout: 30_000 },
     )
     .toEqual({ total: 7, ok: 7 });
@@ -106,9 +109,14 @@ test("playback fills its buffer near real time (windowed fetch)", async ({
   ).toBeVisible({ timeout: 30_000 });
   // The real S3 window fetch competes with the rest of the E2E suite. Start
   // timing only after every visible camera for the current frame is decoded.
-  await expect(
-    page.locator('[title="Fetching frames ahead of the playhead"]'),
-  ).toBeHidden({ timeout: 45_000 });
+  // The buffering chip starts hidden before the first readiness probe, so its
+  // absence alone is not a sufficient signal.
+  await expect
+    .poll(
+      () => cameraPaintState(page),
+      { timeout: 45_000 },
+    )
+    .toEqual({ total: 7, ok: 7 });
 
   const valueNow = () =>
     page.evaluate(() => {
