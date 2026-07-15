@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -15,9 +16,20 @@ import (
 	"github.com/autowarefoundation/auto_e2e/tools/datamodelconsole/api/internal/service"
 )
 
+type datasetsService interface {
+	ListDatasets(context.Context) []model.Dataset
+	ValidDataset(string) bool
+	ListDatasetVersions(context.Context, string) ([]model.DatasetVersion, error)
+	ListShards(context.Context, string, string, int, int) ([]model.Shard, model.Page, error)
+	ListSamples(context.Context, string, string, string, int, int) ([]model.Sample, model.Page, error)
+	GetSampleDetail(context.Context, string, string, string, string) (*model.SampleDetail, error)
+	BuildShardIndex(context.Context, string, string, string) (*model.ShardIndex, error)
+	StreamTarMemberRange(context.Context, string, string, string, int64, int64) (io.Reader, io.Closer, int64, error)
+}
+
 // DatasetsHandler serves the S3-backed dataset browsing endpoints.
 type DatasetsHandler struct {
-	s3                   *service.S3Service
+	s3                   datasetsService
 	exactGeoEnabled      bool
 	exactGeoRequiredRole string
 }
@@ -271,6 +283,10 @@ func (h *DatasetsHandler) GetImage(w http.ResponseWriter, r *http.Request) {
 	}
 	index, indexErr := h.s3.BuildShardIndex(r.Context(), name, version, shard)
 	if indexErr != nil {
+		if errors.Is(indexErr, service.ErrNotFound) {
+			writeError(w, http.StatusNotFound, model.CodeNotFound, "shard not found: "+shard)
+			return
+		}
 		slog.Error("validate image range", "dataset", name, "shard", shard, "error", indexErr)
 		writeError(w, http.StatusBadGateway, model.CodeS3Error, "failed to validate image range")
 		return
@@ -281,7 +297,7 @@ func (h *DatasetsHandler) GetImage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	reader, closer, size, err := h.s3.StreamTarMemberRange(
-		r.Context(), name, version, shard, off, sz,
+		r.Context(), name, index.Version, shard, off, sz,
 	)
 	if err != nil {
 		if errors.Is(err, service.ErrNotFound) {
@@ -301,7 +317,7 @@ func (h *DatasetsHandler) GetImage(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "image/jpeg")
 	w.Header().Set("Content-Length", fmt.Sprintf("%d", size))
-	w.Header().Set("Cache-Control", "public, max-age=3600")
+	setShardRangeCacheControl(w, version)
 	w.WriteHeader(http.StatusOK)
 	if _, err := io.Copy(w, reader); err != nil {
 		// Headers already sent; just log (client likely disconnected).
@@ -351,22 +367,28 @@ func (h *DatasetsHandler) GetBlob(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, model.CodeInvalidParam, "requested range too large")
 		return
 	}
+	index, indexErr := h.s3.BuildShardIndex(r.Context(), name, version, shard)
+	if indexErr != nil {
+		if errors.Is(indexErr, service.ErrNotFound) {
+			writeError(w, http.StatusNotFound, model.CodeNotFound, "shard not found: "+shard)
+			return
+		}
+		slog.Error("validate shard blob range", "dataset", name, "shard", shard, "error", indexErr)
+		writeError(w, http.StatusBadGateway, model.CodeS3Error, "failed to validate shard range")
+		return
+	}
 	if !exactGeoAuthorized(
 		r, h.exactGeoEnabled, h.exactGeoRequiredRole,
 	) {
-		index, indexErr := h.s3.BuildShardIndex(r.Context(), name, version, shard)
-		if indexErr != nil {
-			slog.Error("validate shard blob range", "dataset", name, "shard", shard, "error", indexErr)
-			writeError(w, http.StatusBadGateway, model.CodeS3Error, "failed to validate shard range")
-			return
-		}
 		if rangeOverlapsExactGeo(index, off, sz) {
 			writeError(w, http.StatusForbidden, model.CodeUnavailable, "range contains access-controlled GPS data")
 			return
 		}
 	}
 
-	reader, closer, size, err := h.s3.StreamTarMemberRange(r.Context(), name, version, shard, off, sz)
+	reader, closer, size, err := h.s3.StreamTarMemberRange(
+		r.Context(), name, index.Version, shard, off, sz,
+	)
 	if err != nil {
 		if errors.Is(err, service.ErrNotFound) {
 			writeError(w, http.StatusNotFound, model.CodeNotFound, "shard not found: "+shard)
@@ -384,12 +406,20 @@ func (h *DatasetsHandler) GetBlob(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set("Content-Length", fmt.Sprintf("%d", size))
-	// Immutable shard bytes at a fixed offset — cache aggressively at the edge.
-	w.Header().Set("Cache-Control", "public, max-age=3600")
+	setShardRangeCacheControl(w, version)
 	w.WriteHeader(http.StatusOK)
 	if _, err := io.Copy(w, reader); err != nil {
 		slog.Warn("copy shard blob", "shard", shard, "offset", off, "error", err)
 	}
+}
+
+func setShardRangeCacheControl(w http.ResponseWriter, requestedVersion string) {
+	if requestedVersion == "" {
+		// The URL follows the newest publication, so its bytes can change.
+		w.Header().Set("Cache-Control", "no-store")
+		return
+	}
+	w.Header().Set("Cache-Control", "public, max-age=3600")
 }
 
 func cameraMemberRange(
