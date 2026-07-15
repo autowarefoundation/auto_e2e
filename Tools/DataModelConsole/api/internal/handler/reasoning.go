@@ -46,6 +46,10 @@ func (h *ReasoningHandler) PromptVersions(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusBadRequest, model.CodeInvalidParam, "missing or invalid dataset")
 		return
 	}
+	if !h.s3.ValidDataset(dataset) {
+		writeError(w, http.StatusNotFound, model.CodeNotFound, "unknown dataset: "+dataset)
+		return
+	}
 	version, ok := requestedVersion(r)
 	if !ok {
 		writeError(w, http.StatusBadRequest, model.CodeInvalidParam, "invalid version")
@@ -84,6 +88,10 @@ func (h *ReasoningHandler) StatsDetail(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, model.CodeInvalidParam, "missing or invalid dataset/prompt_version")
 		return
 	}
+	if !h.s3.ValidDataset(dataset) {
+		writeError(w, http.StatusNotFound, model.CodeNotFound, "unknown dataset: "+dataset)
+		return
+	}
 	if !service.ValidReasoningTeacherID(teacher) {
 		writeError(w, http.StatusBadRequest, model.CodeInvalidParam, "missing or invalid teacher")
 		return
@@ -117,6 +125,10 @@ func (h *ReasoningHandler) ComputeStats(w http.ResponseWriter, r *http.Request) 
 	teacher := r.URL.Query().Get("teacher")
 	if !validReasoningParam(dataset) || !validReasoningParam(promptVersion) {
 		writeError(w, http.StatusBadRequest, model.CodeInvalidParam, "missing or invalid dataset/prompt_version")
+		return
+	}
+	if !h.s3.ValidDataset(dataset) {
+		writeError(w, http.StatusNotFound, model.CodeNotFound, "unknown dataset: "+dataset)
 		return
 	}
 	if !service.ValidReasoningTeacherID(teacher) {
@@ -153,8 +165,13 @@ func validReasoningParam(v string) bool {
 func (h *ReasoningHandler) GetLabel(w http.ResponseWriter, r *http.Request) {
 	dataset := chi.URLParam(r, "dataset")
 	sampleID := chi.URLParam(r, "sample_id")
-	if strings.ContainsAny(dataset, "/\\") || strings.ContainsAny(sampleID, "/\\") {
+	if !validReasoningParam(dataset) ||
+		!validReasoningParam(sampleID) {
 		writeError(w, http.StatusBadRequest, model.CodeInvalidParam, "invalid dataset or sample_id")
+		return
+	}
+	if !h.s3.ValidDataset(dataset) {
+		writeError(w, http.StatusNotFound, model.CodeNotFound, "unknown dataset: "+dataset)
 		return
 	}
 
