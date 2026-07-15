@@ -12,6 +12,11 @@ export interface Page {
   more: boolean;
 }
 
+export interface TokenPage<T> {
+  items: T[];
+  next_page_token?: string;
+}
+
 // ---------------------------------------------------------------------------
 // Datasets
 // ---------------------------------------------------------------------------
@@ -163,6 +168,7 @@ export interface OverlayModelsResponse {
   version: string;
   shard: string;
   models: OverlayModel[];
+  next_page_token?: string;
 }
 
 export interface RigProjectionDocument {
