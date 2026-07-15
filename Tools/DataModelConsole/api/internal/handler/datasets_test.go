@@ -1,10 +1,14 @@
 package handler
 
 import (
+	"context"
 	"net/http/httptest"
 	"testing"
 
+	"github.com/go-chi/chi/v5"
+
 	"github.com/autowarefoundation/auto_e2e/tools/datamodelconsole/api/internal/model"
+	"github.com/autowarefoundation/auto_e2e/tools/datamodelconsole/api/internal/service"
 )
 
 func TestValidShardName(t *testing.T) {
@@ -95,6 +99,49 @@ func TestParsePagination(t *testing.T) {
 			}
 			if offset != tt.wantOffset {
 				t.Errorf("parsePagination(%q) offset = %d, want %d", tt.query, offset, tt.wantOffset)
+			}
+		})
+	}
+}
+
+func TestGetImageRequiresValidRangeBeforeS3Access(t *testing.T) {
+	handler := NewDatasetsHandler(&service.S3Service{})
+	tests := []struct {
+		name  string
+		query string
+	}{
+		{name: "range absent"},
+		{name: "offset only", query: "?offset=512"},
+		{name: "size only", query: "?size=128"},
+		{name: "malformed offset", query: "?offset=abc&size=128"},
+		{name: "negative offset", query: "?offset=-1&size=128"},
+		{name: "zero size", query: "?offset=512&size=0"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			request := httptest.NewRequest(
+				"GET",
+				"/api/v1/datasets/l2d/shards/train-000000.tar/samples/sample/image/cam_0"+tt.query,
+				nil,
+			)
+			routeContext := chi.NewRouteContext()
+			routeContext.URLParams.Add("name", "l2d")
+			routeContext.URLParams.Add("shard", "train-000000.tar")
+			routeContext.URLParams.Add("key", "sample")
+			routeContext.URLParams.Add("cam", "cam_0")
+			request = request.WithContext(
+				context.WithValue(
+					request.Context(),
+					chi.RouteCtxKey,
+					routeContext,
+				),
+			)
+			response := httptest.NewRecorder()
+
+			handler.GetImage(response, request)
+
+			if response.Code != 400 {
+				t.Fatalf("status = %d, want 400", response.Code)
 			}
 		})
 	}
