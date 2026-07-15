@@ -24,12 +24,28 @@ from Platform.pipelines.training_checkpoint import (
 
 
 class _FakeS3:
-    def __init__(self):
+    def __init__(self, conditional_conflicts=0):
         self.objects = {}
         self.versions = []
+        self.conditional_conflicts = conditional_conflicts
 
     def put_object(self, **kwargs):
         identity = (kwargs["Bucket"], kwargs["Key"])
+        if (
+            kwargs.get("IfNoneMatch") == "*"
+            and self.conditional_conflicts > 0
+        ):
+            self.conditional_conflicts -= 1
+            raise ClientError(
+                {
+                    "Error": {
+                        "Code": "ConditionalRequestConflict",
+                        "Message": "conditional write is still in flight",
+                    },
+                    "ResponseMetadata": {"HTTPStatusCode": 409},
+                },
+                "PutObject",
+            )
         if kwargs.get("IfNoneMatch") == "*" and identity in self.objects:
             raise ClientError(
                 {
@@ -208,6 +224,23 @@ def test_immutable_upload_rejects_different_retry(tmp_path):
             key="run/epoch-0001.pt",
             path=checkpoint,
         )
+
+
+def test_immutable_upload_retries_conditional_conflict(tmp_path):
+    s3 = _FakeS3(conditional_conflicts=2)
+    checkpoint = tmp_path / "epoch-0001.pt"
+    checkpoint.write_bytes(b"checkpoint-v1")
+
+    uploaded = upload_immutable_checkpoint(
+        s3,
+        bucket="checkpoints",
+        key="run/epoch-0001.pt",
+        path=checkpoint,
+    )
+
+    assert uploaded["created"] is True
+    assert s3.conditional_conflicts == 0
+    assert len(s3.objects) == 1
 
 
 def test_best_pointer_is_versioned_json():
