@@ -1,13 +1,14 @@
 version: 0.2
 
-# VPC-local launcher for the complete trajectory-overlay data path. The default
-# is a one-scene smoke run under a derived immutable dataset coordinate. After
-# it succeeds, set PUBLISHED_DATASET=kitscenes and EPISODES=0 for production.
+# VPC-local launcher for trajectory overlays. The default is a one-scene smoke
+# that creates its own dataset. Production sets FULL_RUN_EXECUTION_ID and reuses
+# that completed run's labeled shards and exact registered model.
 env:
   variables:
     AWS_DEFAULT_REGION: us-west-2
     FLYTE_PROJECT: auto-e2e
     FLYTE_DOMAIN: development
+    FULL_RUN_EXECUTION_ID: ""
     MODEL_VERSION: ""
     IMAGE_TAG: latest
     DATASET: "KIT-MRT/KITScenes-Multimodal"
@@ -29,8 +30,16 @@ phases:
       - pip install -q flytekit==1.14.9 numpy torch kubernetes --extra-index-url https://download.pytorch.org/whl/cpu
   pre_build:
     commands:
-      - test -n "${MODEL_VERSION}"
       - test -n "${IMAGE_TAG}"
+      - |
+        if [ -n "${FULL_RUN_EXECUTION_ID}" ]; then
+          test -z "${MODEL_VERSION}" || {
+            echo "MODEL_VERSION must be empty when FULL_RUN_EXECUTION_ID is set"
+            exit 1
+          }
+        else
+          test -n "${MODEL_VERSION}"
+        fi
       - ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
       - ECR_URL="${ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com"
       - export ECR_PREFIX="${ECR_URL}"
@@ -63,7 +72,13 @@ phases:
       - PREPROCESSING_DIGEST=$(python3 Platform/pipelines/reproducibility.py preprocessing)
       - INFERENCE_DIGEST=$(python3 Platform/pipelines/reproducibility.py inference)
       - |
-        if [ -z "${PUBLISHED_DATASET}" ]; then
+        if [ -n "${FULL_RUN_EXECUTION_ID}" ]; then
+          test -n "${PUBLISHED_DATASET}" || {
+            echo "PUBLISHED_DATASET is required for a Full Run publication"
+            exit 1
+          }
+          echo "Reusing Full Run ${FULL_RUN_EXECUTION_ID} for ${PUBLISHED_DATASET}/${DATASET_VERSION}"
+        elif [ -z "${PUBLISHED_DATASET}" ]; then
           test "${EPISODES}" != "0" || {
             echo "PUBLISHED_DATASET is required when EPISODES=0"
             exit 1
@@ -74,28 +89,57 @@ phases:
           export PUBLISHED_DATASET="kitscenes-smoke-${SMOKE_ID}"
         fi
         echo "Publishing immutable dataset coordinate ${PUBLISHED_DATASET}/${DATASET_VERSION}"
-      - >
-        pyflyte --config /tmp/flyte.yaml run --remote
-        --project "${FLYTE_PROJECT}"
-        --domain "${FLYTE_DOMAIN}"
-        --image "${AUTO_E2E_TRAINING_IMAGE}"
-        Platform/pipelines/workflows.py
-        wf_create_publish_and_precompute_overlays
-        --model_version "${MODEL_VERSION}"
-        --preprocessing_contract_digest "${PREPROCESSING_DIGEST}"
-        --model_inference_code_digest "${INFERENCE_DIGEST}"
-        --container_image_digest "${CONTAINER_IMAGE_DIGEST}"
-        --datasets_bucket "${DATASETS_BUCKET}"
-        --artifacts_bucket "${ARTIFACTS_BUCKET}"
-        --dataset "${DATASET}"
-        --source_revision "${SOURCE_REVISION}"
-        --published_dataset "${PUBLISHED_DATASET}"
-        --dataset_version "${DATASET_VERSION}"
-        --episodes "${EPISODES}"
-        --partition_size "${PARTITION_SIZE}"
-        --reasoning_teacher "${REASONING_TEACHER}"
-        --base_seeds "${BASE_SEEDS}"
-        --batch_size "${BATCH_SIZE}"
-        --num_workers "${NUM_WORKERS}"
-        --copy_workers "${COPY_WORKERS}"
-        --max_partitions "${MAX_PARTITIONS}"
+      - |
+        if [ -n "${FULL_RUN_EXECUTION_ID}" ]; then
+          python3 Platform/scripts/extract_full_run_overlay_inputs.py \
+            --config /tmp/flyte.yaml \
+            --project "${FLYTE_PROJECT}" \
+            --domain "${FLYTE_DOMAIN}" \
+            --execution-id "${FULL_RUN_EXECUTION_ID}" \
+            --expected-dataset "${DATASET}" \
+            --expected-dataset-version "${DATASET_VERSION}" \
+            --output /tmp/full-run-overlay-inputs.json
+          pyflyte --config /tmp/flyte.yaml run --remote \
+            --project "${FLYTE_PROJECT}" \
+            --domain "${FLYTE_DOMAIN}" \
+            --image "${AUTO_E2E_TRAINING_IMAGE}" \
+            Platform/pipelines/workflows.py \
+            wf_publish_full_run_overlays \
+            --inputs-file /tmp/full-run-overlay-inputs.json \
+            --preprocessing_contract_digest "${PREPROCESSING_DIGEST}" \
+            --model_inference_code_digest "${INFERENCE_DIGEST}" \
+            --container_image_digest "${CONTAINER_IMAGE_DIGEST}" \
+            --datasets_bucket "${DATASETS_BUCKET}" \
+            --artifacts_bucket "${ARTIFACTS_BUCKET}" \
+            --published_dataset "${PUBLISHED_DATASET}" \
+            --dataset_version "${DATASET_VERSION}" \
+            --base_seeds "${BASE_SEEDS}" \
+            --batch_size "${BATCH_SIZE}" \
+            --num_workers "${NUM_WORKERS}" \
+            --copy_workers "${COPY_WORKERS}"
+        else
+          pyflyte --config /tmp/flyte.yaml run --remote \
+            --project "${FLYTE_PROJECT}" \
+            --domain "${FLYTE_DOMAIN}" \
+            --image "${AUTO_E2E_TRAINING_IMAGE}" \
+            Platform/pipelines/workflows.py \
+            wf_create_publish_and_precompute_overlays \
+            --model_version "${MODEL_VERSION}" \
+            --preprocessing_contract_digest "${PREPROCESSING_DIGEST}" \
+            --model_inference_code_digest "${INFERENCE_DIGEST}" \
+            --container_image_digest "${CONTAINER_IMAGE_DIGEST}" \
+            --datasets_bucket "${DATASETS_BUCKET}" \
+            --artifacts_bucket "${ARTIFACTS_BUCKET}" \
+            --dataset "${DATASET}" \
+            --source_revision "${SOURCE_REVISION}" \
+            --published_dataset "${PUBLISHED_DATASET}" \
+            --dataset_version "${DATASET_VERSION}" \
+            --episodes "${EPISODES}" \
+            --partition_size "${PARTITION_SIZE}" \
+            --reasoning_teacher "${REASONING_TEACHER}" \
+            --base_seeds "${BASE_SEEDS}" \
+            --batch_size "${BATCH_SIZE}" \
+            --num_workers "${NUM_WORKERS}" \
+            --copy_workers "${COPY_WORKERS}" \
+            --max_partitions "${MAX_PARTITIONS}"
+        fi
