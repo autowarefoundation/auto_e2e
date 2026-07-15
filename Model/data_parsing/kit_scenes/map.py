@@ -26,7 +26,10 @@ parsed once per scene per process.
 from __future__ import annotations
 
 import functools
+import json
 import logging
+import tempfile
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 import cv2
@@ -88,8 +91,90 @@ def _attr(obj, key: str) -> str:
 
 @functools.lru_cache(maxsize=None)
 def _cached_scene_map(scene_path: Path):
-    from kitscenes.map_api import load_scene_map
-    return load_scene_map(scene_path)
+    from kitscenes.map_api import SceneMap, load_scene_map
+
+    scene_path = Path(scene_path)
+    map_path = _map_without_degenerate_lanelets(scene_path)
+    original_map_path = scene_path / "maps" / "map.osm"
+    if map_path == original_map_path:
+        return load_scene_map(scene_path)
+
+    origin_path = scene_path / "maps" / "origin.json"
+    if not origin_path.exists():
+        return load_scene_map(scene_path)
+    origin = json.loads(origin_path.read_text())
+    return SceneMap(
+        map_path,
+        origin_lat=float(origin["latitude"]),
+        origin_lon=float(origin["longitude"]),
+    )
+
+
+def _map_without_degenerate_lanelets(scene_path: Path) -> Path:
+    """Return a loadable map path with non-renderable lanelets removed.
+
+    Lanelet2's Python binding segfaults when computing ``centerline`` for a
+    lanelet whose left or right boundary has fewer than two points. Such a
+    primitive cannot contribute a line to the raster, so omit it from a
+    process-local map copy before Lanelet2 sees it. Valid maps retain their
+    original path and bytes.
+    """
+    map_path = scene_path / "maps" / "map.osm"
+    if not map_path.exists():
+        return map_path
+
+    tree = ET.parse(map_path)
+    root = tree.getroot()
+    way_point_counts = {
+        way.attrib["id"]: len(way.findall("nd"))
+        for way in root.findall("way")
+    }
+    invalid_relations = []
+
+    for relation in list(root.findall("relation")):
+        tags = {
+            tag.attrib.get("k"): tag.attrib.get("v")
+            for tag in relation.findall("tag")
+        }
+        if tags.get("type") != "lanelet":
+            continue
+
+        boundary_refs = {"left": [], "right": []}
+        for member in relation.findall("member"):
+            role = member.attrib.get("role")
+            if role in boundary_refs and member.attrib.get("type") == "way":
+                boundary_refs[role].append(member.attrib.get("ref", ""))
+
+        valid = all(
+            len(boundary_refs[role]) == 1
+            and way_point_counts.get(boundary_refs[role][0], 0) >= 2
+            for role in ("left", "right")
+        )
+        if not valid:
+            invalid_relations.append(relation)
+            root.remove(relation)
+
+    if not invalid_relations:
+        return map_path
+
+    with tempfile.NamedTemporaryFile(
+        prefix=f".auto_e2e_{scene_path.name}_",
+        suffix=".osm",
+        dir=map_path.parent,
+        delete=False,
+    ) as sanitized:
+        tree.write(sanitized, encoding="utf-8", xml_declaration=True)
+
+    invalid_ids = [
+        relation.attrib.get("id", "<unknown>")
+        for relation in invalid_relations
+    ]
+    logger.warning(
+        "Scene %s: omitted non-renderable lanelets %s",
+        scene_path.name,
+        invalid_ids,
+    )
+    return Path(sanitized.name)
 
 
 def _to_px(pts: np.ndarray, ego: np.ndarray, yaw: float, scale: float, rs: int) -> np.ndarray:
