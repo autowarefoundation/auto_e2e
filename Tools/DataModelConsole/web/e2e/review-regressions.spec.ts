@@ -200,3 +200,50 @@ test("sample thumbnails request only their bounded tar member ranges", async ({
   expect(requestURL.searchParams.get("offset")).toBe("512");
   expect(requestURL.searchParams.get("size")).toBe("128");
 });
+
+test("scene locator paginates through the complete shard publication", async ({
+  page,
+}) => {
+  const allShards = Array.from({ length: 533 }, (_, index) =>
+    shard(`train-${String(index).padStart(6, "0")}.tar`),
+  );
+  await page.route("**/api/v1/**", (route) => {
+    const url = new URL(route.request().url());
+    if (url.pathname === "/api/v1/datasets") {
+      return fulfillJSON(route, {
+        datasets: [
+          {
+            name: "l2d",
+            version: "v2.1",
+            prefix: "l2d/v2.1/shards/",
+          },
+        ],
+      });
+    }
+    if (url.pathname === "/api/v1/datasets/l2d/shards") {
+      const offset = Number(url.searchParams.get("offset") ?? "0");
+      const pageSize = 200;
+      const items = allShards.slice(offset, offset + pageSize);
+      return fulfillJSON(route, {
+        dataset: "l2d",
+        shards: items,
+        page: {
+          limit: pageSize,
+          offset,
+          total: allShards.length,
+          more: offset + items.length < allShards.length,
+        },
+      });
+    }
+    return route.fulfill({ status: 404, body: "not mocked" });
+  });
+
+  await page.goto("/scenes");
+  const options = page.locator("#scene-shard-options option");
+  await expect(options).toHaveCount(533);
+  await expect(
+    page.locator(
+      '#scene-shard-options option[value="train-000532.tar"]',
+    ),
+  ).toHaveCount(1);
+});
