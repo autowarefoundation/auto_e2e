@@ -21,6 +21,7 @@ env:
     NUM_WORKERS: "4"
     COPY_WORKERS: "16"
     MAX_PARTITIONS: "600"
+    MAX_PARALLELISM: "1"
 
 phases:
   install:
@@ -76,6 +77,7 @@ phases:
         pyflyte --config /tmp/flyte.yaml run --remote
         --project "${FLYTE_PROJECT}"
         --domain "${FLYTE_DOMAIN}"
+        --max-parallelism "${MAX_PARALLELISM}"
         --image "${AUTO_E2E_TRAINING_IMAGE}"
         Platform/pipelines/workflows.py
         wf_create_publish_and_precompute_overlays
