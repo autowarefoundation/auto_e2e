@@ -307,8 +307,14 @@ func (s *S3Service) EpisodePath(ctx context.Context, dataset, version, episode s
 		}
 	}
 	version = s.versionOrResolve(ctx, dataset, version)
+	stem := episode
+	if dataset == "l2d" {
+		if numeric, err := strconv.ParseUint(episode, 10, 64); err == nil {
+			stem = fmt.Sprintf("%06d", numeric)
+		}
+	}
 	key := fmt.Sprintf(
-		"%s/%s/geo/episode_paths/%s.f64", dataset, version, episode,
+		"%s/%s/geo/episode_paths/%s.f64", dataset, version, stem,
 	)
 	body, err := s.getObjectBytesFromBucket(ctx, s.bucket, key, MaxRangeBytes)
 	return body, version, err
