@@ -2,9 +2,11 @@ package service
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 	"sync"
 
 	"github.com/autowarefoundation/auto_e2e/tools/datamodelconsole/api/internal/model"
@@ -21,12 +23,16 @@ const (
 )
 
 // ReasoningStatsDetail returns the precomputed stats blob for a
-// (dataset, version, promptVersion), read-through DynamoDB: a hit is returned
-// directly (cached=true); on a miss the labels are scanned from S3, aggregated,
-// the scene-by-label index is populated, the blob is persisted, and it is
-// returned (cached=false). teacher, when non-empty, pins the cache partition;
-// otherwise the first teacher partition carrying the promptVersion is used.
+// (dataset, version, teacher, promptVersion), read-through DynamoDB: a hit is
+// returned directly (cached=true); on a miss the exact teacher partition is
+// scanned from S3, aggregated, indexed, persisted, and returned (cached=false).
 func (s *S3Service) ReasoningStatsDetail(ctx context.Context, dataset, version, promptVersion, teacher string) (model.ReasoningStatsDetailResponse, error) {
+	teacherProvider, teacherModel, ok := parseReasoningTeacherID(teacher)
+	if !ok {
+		return model.ReasoningStatsDetailResponse{}, fmt.Errorf(
+			"reasoning teacher identity is required",
+		)
+	}
 	// Resolve the version BEFORE touching the store, mirroring
 	// ComputeReasoningStats. Otherwise the read-through path stores/reads under
 	// an empty-version key while force-compute writes under the resolved
@@ -35,14 +41,18 @@ func (s *S3Service) ReasoningStatsDetail(ctx context.Context, dataset, version, 
 		version = s.resolveVersion(ctx, dataset)
 	}
 	resp := model.ReasoningStatsDetailResponse{
-		Dataset:       dataset,
-		Version:       version,
-		PromptVersion: promptVersion,
-		Teacher:       teacher,
+		Dataset:         dataset,
+		Version:         version,
+		PromptVersion:   promptVersion,
+		Teacher:         teacher,
+		TeacherProvider: teacherProvider,
+		TeacherModel:    teacherModel,
 	}
 
 	if s.store != nil {
-		if blob, computedAt, err := s.store.GetStats(ctx, dataset, version, promptVersion); err == nil {
+		if blob, computedAt, err := s.store.GetTeacherStats(
+			ctx, dataset, version, teacher, promptVersion,
+		); err == nil {
 			resp.Stats = blob
 			resp.ComputedAt = computedAt
 			resp.Cached = true
@@ -64,7 +74,9 @@ func (s *S3Service) ReasoningStatsDetail(ctx context.Context, dataset, version, 
 	// ComputedAt is set by the persist step (echoed via a fresh Get would be an
 	// extra round-trip); leave it to the freshly-written value.
 	if s.store != nil {
-		if _, computedAt, gerr := s.store.GetStats(ctx, dataset, version, promptVersion); gerr == nil {
+		if _, computedAt, gerr := s.store.GetTeacherStats(
+			ctx, dataset, version, teacher, promptVersion,
+		); gerr == nil {
 			resp.ComputedAt = computedAt
 		}
 	}
@@ -77,6 +89,12 @@ func (s *S3Service) ReasoningStatsDetail(ctx context.Context, dataset, version, 
 // key only (labels are not shard-versioned in S3); it defaults to the resolved
 // newest version when empty.
 func (s *S3Service) ComputeReasoningStats(ctx context.Context, dataset, version, promptVersion, teacher string) (model.ComputeStatsResponse, error) {
+	teacherProvider, teacherModel, ok := parseReasoningTeacherID(teacher)
+	if !ok {
+		return model.ComputeStatsResponse{}, fmt.Errorf(
+			"reasoning teacher identity is required",
+		)
+	}
 	if !isVersionDir(version) {
 		version = s.resolveVersion(ctx, dataset)
 	}
@@ -85,15 +103,19 @@ func (s *S3Service) ComputeReasoningStats(ctx context.Context, dataset, version,
 		return model.ComputeStatsResponse{}, err
 	}
 	resp := model.ComputeStatsResponse{
-		Dataset:       dataset,
-		Version:       version,
-		PromptVersion: promptVersion,
-		Teacher:       resolvedTeacher,
-		SceneRows:     sceneRows,
-		Stats:         blob,
+		Dataset:         dataset,
+		Version:         version,
+		PromptVersion:   promptVersion,
+		Teacher:         resolvedTeacher,
+		TeacherProvider: teacherProvider,
+		TeacherModel:    teacherModel,
+		SceneRows:       sceneRows,
+		Stats:           blob,
 	}
 	if s.store != nil {
-		if _, computedAt, gerr := s.store.GetStats(ctx, dataset, version, promptVersion); gerr == nil {
+		if _, computedAt, gerr := s.store.GetTeacherStats(
+			ctx, dataset, version, teacher, promptVersion,
+		); gerr == nil {
 			resp.ComputedAt = computedAt
 		}
 	}
@@ -119,14 +141,16 @@ func (s *S3Service) computeAndPersistStats(ctx context.Context, dataset, version
 		for _, lbl := range labels {
 			rows = append(rows, store.SceneLabelRows(lbl)...)
 		}
-		if n, werr := s.store.PutSceneLabelsForVersion(
-			ctx, dataset, version, promptVersion, rows,
+		if n, werr := s.store.PutSceneLabelsForTeacherVersion(
+			ctx, dataset, version, resolvedTeacher, promptVersion, rows,
 		); werr != nil {
 			return model.ReasoningStatsBlob{}, "", 0, fmt.Errorf("populate scene-by-label index: %w", werr)
 		} else {
 			sceneRows = n
 		}
-		if _, perr := s.store.PutStats(ctx, dataset, version, promptVersion, blob); perr != nil {
+		if _, perr := s.store.PutTeacherStats(
+			ctx, dataset, version, resolvedTeacher, promptVersion, blob,
+		); perr != nil {
 			return model.ReasoningStatsBlob{}, "", 0, fmt.Errorf("persist stats: %w", perr)
 		}
 	}
@@ -313,6 +337,9 @@ func (s *S3Service) scanReasoningLabels(
 	ctx context.Context,
 	dataset, version, promptVersion, teacher string,
 ) ([]store.ReasoningLabel, string, error) {
+	if _, _, ok := parseReasoningTeacherID(teacher); !ok {
+		return nil, "", fmt.Errorf("reasoning teacher identity is required")
+	}
 	locations, resolvedVersion, err := s.reasoningMemberLocations(
 		ctx, dataset, version, "",
 	)
@@ -326,7 +353,6 @@ func (s *S3Service) scanReasoningLabels(
 		return nil, "", err
 	}
 
-	resolvedTeacher := teacher
 	labels := make([]store.ReasoningLabel, 0, len(records))
 	for _, record := range records {
 		label := record.Label
@@ -334,29 +360,37 @@ func (s *S3Service) scanReasoningLabels(
 			!reasoningTeacherMatches(label, teacher) {
 			continue
 		}
-		labelTeacher := reasoningTeacher(label)
-		if resolvedTeacher == "" {
-			resolvedTeacher = labelTeacher
-		}
-		if labelTeacher != resolvedTeacher {
-			continue
-		}
 		labels = append(labels, label)
 	}
-	return labels, resolvedTeacher, nil
+	if len(labels) == 0 {
+		return nil, "", ErrNotFound
+	}
+	return labels, teacher, nil
 }
 
 func reasoningTeacher(label store.ReasoningLabel) string {
-	if label.TeacherProvider != "" {
-		return label.TeacherProvider
+	if label.TeacherProvider == "" && label.TeacherModel == "" {
+		return ""
 	}
-	return label.TeacherModel
+	identity := label.TeacherProvider + "\x00" + label.TeacherModel
+	return base64.RawURLEncoding.EncodeToString([]byte(identity))
+}
+
+func parseReasoningTeacherID(teacher string) (string, string, bool) {
+	raw, err := base64.RawURLEncoding.DecodeString(teacher)
+	if err != nil {
+		return "", "", false
+	}
+	provider, modelName, found := strings.Cut(string(raw), "\x00")
+	if !found || strings.Contains(modelName, "\x00") ||
+		(provider == "" && modelName == "") {
+		return "", "", false
+	}
+	return provider, modelName, true
 }
 
 func reasoningTeacherMatches(label store.ReasoningLabel, requested string) bool {
-	return requested == "" ||
-		requested == label.TeacherProvider ||
-		requested == label.TeacherModel
+	return requested == "" || requested == reasoningTeacher(label)
 }
 
 // SearchScenesByLabel returns the sample ids carrying a (field,value) reasoning
@@ -381,6 +415,26 @@ func (s *S3Service) SearchScenesByLabelAtVersion(
 	version = s.versionOrResolve(ctx, dataset, version)
 	ids, err := s.store.QueryScenesByLabelForVersion(
 		ctx, dataset, version, promptVersion, field, value, limit,
+	)
+	return ids, version, err
+}
+
+// SearchScenesByLabelForTeacherAtVersion reads the exact immutable
+// dataset/teacher/prompt partition materialized during stats computation.
+func (s *S3Service) SearchScenesByLabelForTeacherAtVersion(
+	ctx context.Context,
+	dataset, version, teacher, promptVersion, field, value string,
+	limit int,
+) ([]string, string, error) {
+	if s.store == nil {
+		return nil, "", fmt.Errorf("scene search requires a configured dynamo store")
+	}
+	if _, _, ok := parseReasoningTeacherID(teacher); !ok {
+		return nil, "", fmt.Errorf("scene search requires a teacher identity")
+	}
+	version = s.versionOrResolve(ctx, dataset, version)
+	ids, err := s.store.QueryScenesByLabelForTeacherVersion(
+		ctx, dataset, version, teacher, promptVersion, field, value, limit,
 	)
 	return ids, version, err
 }
