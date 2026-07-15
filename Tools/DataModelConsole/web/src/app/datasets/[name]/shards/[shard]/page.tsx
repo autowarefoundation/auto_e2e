@@ -2,7 +2,14 @@
 
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
-import { Suspense, use, useCallback, useEffect, useState } from "react";
+import {
+  Suspense,
+  use,
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+} from "react";
 import { Loader2, Play } from "lucide-react";
 
 import { CameraImage } from "@/components/camera-image";
@@ -40,17 +47,21 @@ function ShardSamplesInner({
   const [total, setTotal] = useState(0);
   const [loadingMore, setLoadingMore] = useState(false);
   const [moreError, setMoreError] = useState<Error | null>(null);
+  const pageGeneration = useRef(0);
 
   useEffect(() => {
+    pageGeneration.current++;
     setExtra([]);
     setMore(data?.page?.more ?? false);
     setTotal(data?.page?.total ?? 0);
+    setLoadingMore(false);
     setMoreError(null);
-  }, [data]);
+  }, [dataset, shardName, version, data]);
 
   const samples = [...(data?.samples ?? []), ...extra];
 
   const loadMore = useCallback(async () => {
+    const generation = ++pageGeneration.current;
     setLoadingMore(true);
     setMoreError(null);
     try {
@@ -61,12 +72,14 @@ function ShardSamplesInner({
         samples.length,
         PAGE_SIZE,
       );
+      if (generation !== pageGeneration.current) return;
       setExtra((prev) => [...prev, ...res.samples]);
       setMore(res.page.more);
     } catch (err) {
+      if (generation !== pageGeneration.current) return;
       setMoreError(err instanceof Error ? err : new Error(String(err)));
     } finally {
-      setLoadingMore(false);
+      if (generation === pageGeneration.current) setLoadingMore(false);
     }
   }, [dataset, shardName, version, samples.length]);
 
