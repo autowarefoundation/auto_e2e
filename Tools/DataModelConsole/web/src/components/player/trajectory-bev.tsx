@@ -216,7 +216,7 @@ export function TrajectoryBEV({
 
   return (
     <div className="space-y-1">
-      <div className="flex items-center justify-between font-mono text-[10px] text-slate-500">
+      <div className="flex flex-wrap items-center justify-between gap-x-2 gap-y-1 font-mono text-[10px] text-slate-400">
         <span>
           BEV — <span className="text-slate-400">past</span> ·{" "}
           <span className="text-blue-500">recorded future</span> /{" "}
@@ -230,7 +230,7 @@ export function TrajectoryBEV({
           first{" "}
           {planSec.toFixed(1)}s
           {partial && (
-            <span className="text-slate-600">
+            <span className="text-slate-400">
               {" "}
               (only {coveredSec.toFixed(1)}s left in shard)
             </span>
@@ -258,7 +258,7 @@ export function TrajectoryBEV({
               <text
                 x={4}
                 y={l.y1 - 2}
-                fill="#475569"
+                fill="#94a3b8"
                 fontSize="8"
                 fontFamily="monospace"
               >
@@ -273,7 +273,7 @@ export function TrajectoryBEV({
           <path
             d={historyPath}
             fill="none"
-            stroke="#64748b"
+            stroke="#94a3b8"
             strokeWidth="1.5"
             strokeDasharray="2 3"
             strokeLinecap="round"
