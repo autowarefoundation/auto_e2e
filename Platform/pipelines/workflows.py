@@ -21,10 +21,22 @@ from Platform.pipelines.dataset_publication import DatasetPublication
 import os as _os
 
 ECR_PREFIX = _os.environ.get("ECR_PREFIX", "381491877296.dkr.ecr.us-west-2.amazonaws.com")
-TRAINING_IMAGE = f"{ECR_PREFIX}/auto-e2e/training:latest"
-EVAL_IMAGE = f"{ECR_PREFIX}/auto-e2e/eval:latest"
-OFFLINE_RL_IMAGE = f"{ECR_PREFIX}/auto-e2e/offline-rl:latest"
-DATA_PREP_IMAGE = f"{ECR_PREFIX}/auto-e2e/data-prep:latest"
+TRAINING_IMAGE = _os.environ.get(
+    "AUTO_E2E_TRAINING_IMAGE",
+    f"{ECR_PREFIX}/auto-e2e/training:latest",
+)
+EVAL_IMAGE = _os.environ.get(
+    "AUTO_E2E_EVAL_IMAGE",
+    f"{ECR_PREFIX}/auto-e2e/eval:latest",
+)
+OFFLINE_RL_IMAGE = _os.environ.get(
+    "AUTO_E2E_OFFLINE_RL_IMAGE",
+    f"{ECR_PREFIX}/auto-e2e/offline-rl:latest",
+)
+DATA_PREP_IMAGE = _os.environ.get(
+    "AUTO_E2E_DATA_PREP_IMAGE",
+    f"{ECR_PREFIX}/auto-e2e/data-prep:latest",
+)
 
 MLFLOW_URI = "http://mlflow.mlflow.svc.cluster.local:5000"
 DATASET_PACK_VERSION = "v2.1"
@@ -2801,7 +2813,10 @@ def wf_ingest_train_eval(
                               train_metadata=il_out.metadata)
 
 
-@dynamic(container_image=EVAL_IMAGE)
+@dynamic(
+    container_image=EVAL_IMAGE,
+    environment={"AUTO_E2E_EVAL_IMAGE": EVAL_IMAGE},
+)
 def wf_precompute_overlays(
     shards: List[FlyteDirectory],
     model_version: str,
@@ -2887,7 +2902,10 @@ def wf_precompute_overlays(
     )
 
 
-@dynamic(container_image=DATA_PREP_IMAGE)
+@dynamic(
+    container_image=DATA_PREP_IMAGE,
+    environment={"AUTO_E2E_DATA_PREP_IMAGE": DATA_PREP_IMAGE},
+)
 def wf_publish_dataset_snapshot(
     shards: List[FlyteDirectory],
     published_dataset: str,
