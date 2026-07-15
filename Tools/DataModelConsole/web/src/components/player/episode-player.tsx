@@ -135,6 +135,7 @@ export function EpisodePlayer({
   initialState,
   onViewStateChange,
   version,
+  teacher,
   promptVersion,
 }: {
   dataset: string;
@@ -143,6 +144,7 @@ export function EpisodePlayer({
   initialState?: Partial<PlayerViewState>;
   onViewStateChange?: (state: PlayerViewState) => void;
   version?: string;
+  teacher?: string;
   promptVersion?: string;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -458,7 +460,7 @@ export function EpisodePlayer({
     setLabelStatus("loading"); // clear any stale card immediately
     let cancelled = false;
     const timer = setTimeout(() => {
-      getReasoningLabel(dataset, key, promptVersion, version)
+      getReasoningLabel(dataset, key, promptVersion, version, teacher)
         .then((label) => {
           if (cancelled) return;
           setReasoning({ key, label });
@@ -483,6 +485,7 @@ export function EpisodePlayer({
   }, [
     dataset,
     version,
+    teacher,
     promptVersion,
     sample?.key,
     sample?.has_reasoning,
@@ -887,7 +890,7 @@ export function EpisodePlayer({
         ) : (
           <p className="text-sm text-slate-500">
             No reasoning label at this frame
-            {promptVersion ? " for the selected prompt version" : ""}. Amber
+            {promptVersion ? " for the selected teacher and prompt version" : ""}. Amber
             ticks on the timeline mark frames labelled in any run, so a ticked
             frame may still be unlabelled in this one.
           </p>
