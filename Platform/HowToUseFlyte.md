@@ -296,6 +296,40 @@ The production coordinate is `kitscenes/v2.1`. Publication copies the existing
 labeled shard artifacts, then canonical overlay inference uses the Full Run
 checkpoint, and the ready gate is written last.
 
+### Materialize reasoning serving rows
+
+Wait for `wf_publish_full_run_overlays` itself, not only its CodeBuild launcher,
+to reach `SUCCEEDED`. Its named outputs are:
+
+- `overlay_result`: the ready canonical overlay set
+- `manifest_key`: the immutable publication manifest key
+- `manifest_sha256`: SHA-256 of the exact manifest bytes
+
+Use the latter two outputs to run the separately guarded Console Job. The Job
+uses the Console API Pod Identity because the Flyte and CodeBuild roles do not
+have the required DynamoDB `BatchWriteItem` permission.
+
+```bash
+source console-images.env
+export AWS_PROFILE=autowarefoundation
+export EXPECTED_AWS_ACCOUNT_ID=<PLATFORM_ACCOUNT_ID>
+export PUBLISHED_DATASET=kitscenes
+export DATASET_VERSION=v2.1
+export MANIFEST_KEY=<FLYTE_manifest_key_OUTPUT>
+export MANIFEST_SHA256=<FLYTE_manifest_sha256_OUTPUT>
+
+DRY_RUN=true \
+  Tools/DataModelConsole/deploy/run-reasoning-materialization.sh
+
+export CONFIRM_PRODUCTION_MATERIALIZATION=yes
+Tools/DataModelConsole/deploy/run-reasoning-materialization.sh
+```
+
+The launcher re-reads the manifest from S3 and verifies its digest before
+creating a `batch/v1 Job`. Monitor the generated Job to completion. A failed or
+interrupted run holds a 15-minute fencing lease; do not immediately start a
+second run. Normal `deploy/apply.sh` never launches this Job.
+
 ### Retry and immutability rules
 
 - Retrying the exact same model, source, image, seeds, and contract is
