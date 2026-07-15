@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import xml.etree.ElementTree as ET
 from types import SimpleNamespace
 
 import numpy as np
@@ -105,6 +106,75 @@ def test_map_rasterizer_queries_with_scene_local_pose(monkeypatch, tmp_path):
         [[2917.7171, -3280.8901]],
     )
     assert tile.shape == (32, 32, 3)
+
+
+def test_map_loader_omits_only_degenerate_lanelets(tmp_path):
+    scene_path = tmp_path / "scene"
+    maps_path = scene_path / "maps"
+    maps_path.mkdir(parents=True)
+    map_path = maps_path / "map.osm"
+    map_path.write_text(
+        """\
+<osm version="0.6">
+  <way id="valid-left"><nd ref="1"/><nd ref="2"/></way>
+  <way id="valid-right"><nd ref="3"/><nd ref="4"/></way>
+  <way id="degenerate-left"><nd ref="5"/></way>
+  <relation id="valid-lanelet">
+    <member type="way" ref="valid-left" role="left"/>
+    <member type="way" ref="valid-right" role="right"/>
+    <tag k="type" v="lanelet"/>
+  </relation>
+  <relation id="degenerate-lanelet">
+    <member type="way" ref="degenerate-left" role="left"/>
+    <member type="way" ref="valid-right" role="right"/>
+    <tag k="type" v="lanelet"/>
+  </relation>
+  <relation id="regulatory-element">
+    <tag k="type" v="regulatory_element"/>
+  </relation>
+</osm>
+"""
+    )
+
+    sanitized_path = map_module._map_without_degenerate_lanelets(scene_path)
+
+    assert sanitized_path != map_path
+    sanitized_ids = {
+        relation.attrib["id"]
+        for relation in ET.parse(sanitized_path).getroot().findall("relation")
+    }
+    assert sanitized_ids == {"valid-lanelet", "regulatory-element"}
+    original_ids = {
+        relation.attrib["id"]
+        for relation in ET.parse(map_path).getroot().findall("relation")
+    }
+    assert original_ids == {
+        "valid-lanelet",
+        "degenerate-lanelet",
+        "regulatory-element",
+    }
+
+
+def test_map_loader_preserves_valid_map_path(tmp_path):
+    scene_path = tmp_path / "scene"
+    maps_path = scene_path / "maps"
+    maps_path.mkdir(parents=True)
+    map_path = maps_path / "map.osm"
+    map_path.write_text(
+        """\
+<osm version="0.6">
+  <way id="left"><nd ref="1"/><nd ref="2"/></way>
+  <way id="right"><nd ref="3"/><nd ref="4"/></way>
+  <relation id="lanelet">
+    <member type="way" ref="left" role="left"/>
+    <member type="way" ref="right" role="right"/>
+    <tag k="type" v="lanelet"/>
+  </relation>
+</osm>
+"""
+    )
+
+    assert map_module._map_without_degenerate_lanelets(scene_path) == map_path
 
 
 def test_geographic_output_adds_map_origin_once(monkeypatch, tmp_path):
