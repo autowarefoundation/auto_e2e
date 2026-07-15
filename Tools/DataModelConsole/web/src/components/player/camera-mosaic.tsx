@@ -6,7 +6,7 @@
 // matches where it points (front on top, rear on the bottom, left cameras on
 // the left, right on the right), with the ego state in the center cell. Focus
 // mode: one large camera plus a filmstrip of the rest. Late frames are dropped
-// — a tile only draws a resolved bitmap if nothing newer has been drawn.
+// — and each tile paints an image and its trajectory overlay as one frame.
 
 import { useEffect, useRef, useState } from "react";
 import { Grid3x3, ImageOff, Loader2 } from "lucide-react";
@@ -20,6 +20,64 @@ import { camLabel, gridDimensions, rigCam } from "@/lib/rig";
 import { cn } from "@/lib/utils";
 import type { IndexSample } from "@/types";
 
+const FRAME_RETRY_MS = 500;
+const FRAME_RETRY_MAX_MS = 4_000;
+
+function paintFrame(
+  imageCanvas: HTMLCanvasElement,
+  overlayCanvas: HTMLCanvasElement,
+  bmp: ImageBitmap,
+  predictionPaths?: ScreenPoint[][],
+  medianPredictionPaths?: ScreenPoint[][],
+): boolean {
+  if (imageCanvas.width !== bmp.width || imageCanvas.height !== bmp.height) {
+    imageCanvas.width = bmp.width;
+    imageCanvas.height = bmp.height;
+  }
+  if (
+    overlayCanvas.width !== bmp.width ||
+    overlayCanvas.height !== bmp.height
+  ) {
+    overlayCanvas.width = bmp.width;
+    overlayCanvas.height = bmp.height;
+  }
+  const imageContext = imageCanvas.getContext("2d");
+  const overlayContext = overlayCanvas.getContext("2d");
+  if (!imageContext || !overlayContext) return false;
+
+  // Both canvases are updated in one task, so the browser cannot composite an
+  // image from one frame with trajectory paths from another.
+  imageContext.drawImage(bmp, 0, 0);
+  overlayContext.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
+
+  const stroke = (
+    paths: ScreenPoint[][] | undefined,
+    color: string,
+    width: number,
+  ) => {
+    if (!paths) return;
+    overlayContext.strokeStyle = color;
+    overlayContext.lineWidth = width;
+    overlayContext.lineCap = "round";
+    overlayContext.lineJoin = "round";
+    for (const path of paths) {
+      if (path.length < 2) continue;
+      overlayContext.beginPath();
+      path.forEach((point, index) => {
+        const x = point.u * overlayCanvas.width;
+        const y = point.v * overlayCanvas.height;
+        if (index === 0) overlayContext.moveTo(x, y);
+        else overlayContext.lineTo(x, y);
+      });
+      overlayContext.stroke();
+    }
+  };
+
+  stroke(predictionPaths, "rgba(52, 211, 153, 0.28)", 1.5);
+  stroke(medianPredictionPaths, "rgba(110, 231, 183, 0.95)", 2.5);
+  return true;
+}
+
 function CanvasTile({
   store,
   frame,
@@ -30,6 +88,7 @@ function CanvasTile({
   medianPredictionPaths,
   className,
   onClick,
+  selected = false,
 }: {
   store: FrameStore;
   frame: number;
@@ -39,7 +98,8 @@ function CanvasTile({
   predictionPaths?: ScreenPoint[][];
   medianPredictionPaths?: ScreenPoint[][];
   className?: string;
-  onClick?: () => void;
+  onClick: () => void;
+  selected?: boolean;
 }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const overlayRef = useRef<HTMLCanvasElement>(null);
@@ -56,97 +116,82 @@ function CanvasTile({
   useEffect(() => {
     const mySeq = ++seqRef.current;
     let cancelled = false;
+    let retryCount = 0;
+    let retryTimer: ReturnType<typeof setTimeout> | undefined;
+    const isCurrent = () => !cancelled && mySeq === seqRef.current;
     const timeout = setTimeout(() => {
-      if (!cancelled && drawnSeqRef.current < 0) setStatus("error");
+      if (isCurrent() && drawnSeqRef.current < 0) setStatus("error");
     }, 8000);
-    store
-      .getFrame(frame, cam)
-      .then((bmp) => {
-        if (cancelled && mySeq < seqRef.current) return;
-        // Drop-late: never overwrite a newer draw with an older frame.
-        if (mySeq < drawnSeqRef.current) return;
-        const canvas = canvasRef.current;
-        if (!canvas) return;
-        try {
-          if (canvas.width !== bmp.width || canvas.height !== bmp.height) {
-            canvas.width = bmp.width;
-            canvas.height = bmp.height;
+
+    function retry() {
+      if (!isCurrent()) return;
+      const delay = Math.min(
+        FRAME_RETRY_MAX_MS,
+        FRAME_RETRY_MS * 2 ** retryCount,
+      );
+      retryCount = Math.min(retryCount + 1, 3);
+      retryTimer = setTimeout(load, delay);
+    }
+    function load() {
+      retryTimer = undefined;
+      store.getFrame(frame, cam).then(
+        (bmp) => {
+          if (!isCurrent()) return;
+          const canvas = canvasRef.current;
+          const overlay = overlayRef.current;
+          if (!canvas || !overlay) return;
+          try {
+            if (
+              !paintFrame(
+                canvas,
+                overlay,
+                bmp,
+                predictionPaths,
+                medianPredictionPaths,
+              )
+            ) {
+              return;
+            }
+            drawnSeqRef.current = mySeq;
+            clearTimeout(timeout);
+            setStatus("drawn");
+          } catch {
+            // Bitmap may have been evicted/closed between resolve and draw.
+            retry();
           }
-          const ctx = canvas.getContext("2d");
-          if (!ctx) return;
-          ctx.drawImage(bmp, 0, 0);
-          drawnSeqRef.current = mySeq;
-          setStatus("drawn");
-        } catch {
-          // Bitmap may have been evicted/closed between resolve and draw.
-        }
-      })
-      .catch(() => {
-        // Fetch/decode failure: keep the previous frame on screen; only flag an
-        // error if nothing has ever drawn in this tile.
-        if (!cancelled && drawnSeqRef.current < 0) setStatus("error");
-      });
+        },
+        () => {
+          if (!isCurrent()) return;
+          // Keep the previous image/overlay pair on screen while retrying.
+          if (drawnSeqRef.current < 0) setStatus("error");
+          retry();
+        },
+      );
+    }
+    load();
+
     return () => {
       cancelled = true;
       clearTimeout(timeout);
+      if (retryTimer !== undefined) clearTimeout(retryTimer);
       // No per-tile fetch cancellation: the FrameStore fetches whole windows
       // shared across every camera/frame in them, so a window is never "owned"
       // by one leaving tile. Superseded windows fill the cache for scrubbing;
       // destroy() cancels anything still in flight.
     };
-  }, [store, frame, cam]);
-
-  useEffect(() => {
-    const imageCanvas = canvasRef.current;
-    const overlay = overlayRef.current;
-    if (!imageCanvas || !overlay || imageCanvas.width === 0) return;
-    if (
-      overlay.width !== imageCanvas.width ||
-      overlay.height !== imageCanvas.height
-    ) {
-      overlay.width = imageCanvas.width;
-      overlay.height = imageCanvas.height;
-    }
-    const ctx = overlay.getContext("2d");
-    if (!ctx) return;
-    ctx.clearRect(0, 0, overlay.width, overlay.height);
-
-    const stroke = (
-      paths: ScreenPoint[][] | undefined,
-      color: string,
-      width: number,
-    ) => {
-      if (!paths) return;
-      ctx.strokeStyle = color;
-      ctx.lineWidth = width;
-      ctx.lineCap = "round";
-      ctx.lineJoin = "round";
-      for (const path of paths) {
-        if (path.length < 2) continue;
-        ctx.beginPath();
-        path.forEach((point, index) => {
-          const x = point.u * overlay.width;
-          const y = point.v * overlay.height;
-          if (index === 0) ctx.moveTo(x, y);
-          else ctx.lineTo(x, y);
-        });
-        ctx.stroke();
-      }
-    };
-
-    stroke(predictionPaths, "rgba(52, 211, 153, 0.28)", 1.5);
-    stroke(medianPredictionPaths, "rgba(110, 231, 183, 0.95)", 2.5);
-  }, [predictionPaths, medianPredictionPaths, status]);
+  }, [store, frame, cam, predictionPaths, medianPredictionPaths]);
 
   return (
-    <div
+    <button
+      type="button"
       className={cn(
-        "relative overflow-hidden rounded-md border border-slate-800 bg-slate-900",
-        onClick && "cursor-pointer transition-colors hover:border-slate-500",
+        "relative block overflow-hidden rounded-md border border-slate-800 bg-slate-900 p-0 text-left transition-colors hover:border-slate-500 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-slate-300",
         className,
       )}
       onClick={onClick}
-      role={onClick ? "button" : undefined}
+      aria-label={`${label} camera`}
+      aria-pressed={selected}
+      aria-busy={status === "loading"}
     >
       <canvas
         ref={canvasRef}
@@ -158,17 +203,17 @@ function CanvasTile({
         aria-hidden
       />
       {status === "loading" && (
-        <div className="absolute inset-0 z-[2] flex items-center justify-center text-slate-600">
+        <div className="absolute inset-0 z-[2] flex items-center justify-center text-slate-400">
           <Loader2 className="size-4 animate-spin" />
         </div>
       )}
       {status === "error" && (
-        <div className="absolute inset-0 z-[2] flex flex-col items-center justify-center gap-1 text-slate-600">
+        <div className="absolute inset-0 z-[2] flex flex-col items-center justify-center gap-1 text-slate-400">
           <ImageOff className="size-4" />
           <span className="font-mono text-[8px]">no image</span>
         </div>
       )}
-      <span className="absolute bottom-0 left-0 z-[2] rounded-tr-md bg-slate-950/80 px-1.5 py-0.5 font-mono text-[9px] text-slate-300">
+      <span className="absolute bottom-0 left-0 z-[2] whitespace-nowrap rounded-tr-md bg-slate-950/80 px-1.5 py-0.5 font-mono text-[9px] text-slate-300">
         {label}
       </span>
       {ordinal !== undefined && ordinal >= 1 && ordinal <= 9 && (
@@ -176,7 +221,7 @@ function CanvasTile({
           {ordinal}
         </span>
       )}
-    </div>
+    </button>
   );
 }
 
@@ -190,7 +235,7 @@ function EgoTile({ sample }: { sample?: IndexSample }) {
       <span className="mb-0.5 text-base leading-none" aria-hidden>
         🚗
       </span>
-      <p className="text-slate-500">
+      <p className="text-slate-400">
         {sample && sample.trip_frame >= 0
           ? `trip frame ${sample.trip_frame}`
           : `frame ${sample?.frame_idx ?? "-"}`}
@@ -230,7 +275,7 @@ export function CameraMosaic({
     const focusedIdx = Math.min(Math.max(focusCam, 0), cams.length - 1);
     const focused = cams[focusedIdx];
     return (
-      <div className="space-y-2">
+      <div className="min-w-0 space-y-2">
         <div className="relative">
           <CanvasTile
             store={store}
@@ -241,6 +286,7 @@ export function CameraMosaic({
             medianPredictionPaths={medianPredictionPaths?.[focused]}
             className="aspect-video w-full"
             onClick={onToggleFocus}
+            selected
           />
           <button
             type="button"
@@ -253,8 +299,9 @@ export function CameraMosaic({
           </button>
         </div>
         <div
-          className="grid gap-1.5"
-          style={{ gridTemplateColumns: `repeat(${cams.length}, minmax(0,1fr))` }}
+          className="flex min-w-0 max-w-full gap-1.5 overflow-x-auto overscroll-x-contain pb-1"
+          role="group"
+          aria-label="Camera filmstrip"
         >
           {cams.map((cam, i) => (
             <CanvasTile
@@ -267,10 +314,11 @@ export function CameraMosaic({
               predictionPaths={predictionPaths?.[cam]}
               medianPredictionPaths={medianPredictionPaths?.[cam]}
               className={cn(
-                "aspect-video w-full",
+                "aspect-video min-w-28 basis-28 shrink-0 grow",
                 cam === focused && "ring-1 ring-blue-500",
               )}
               onClick={() => onSelectCam(i)}
+              selected={cam === focused}
             />
           ))}
         </div>
@@ -317,6 +365,7 @@ export function CameraMosaic({
               medianPredictionPaths={medianPredictionPaths?.[cam]}
               className="aspect-video w-full"
               onClick={() => onSelectCam(i)}
+              selected={false}
             />
           </div>
         );
