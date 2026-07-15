@@ -8,6 +8,7 @@ import {
   useCallback,
   useEffect,
   useMemo,
+  useRef,
   useState,
 } from "react";
 
@@ -158,16 +159,20 @@ function DatasetDetailInner({ dataset }: { dataset: string }) {
   const [more, setMore] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
   const [moreError, setMoreError] = useState<Error | null>(null);
+  const pageGeneration = useRef(0);
 
   useEffect(() => {
+    pageGeneration.current++;
     setExtra([]);
     setMore(shardsApi.data?.page?.more ?? false);
+    setLoadingMore(false);
     setMoreError(null);
-  }, [shardsApi.data]);
+  }, [dataset, selectedVersion, shardsApi.data]);
 
   const shards = [...(shardsApi.data?.shards ?? []), ...extra];
 
   const loadMore = useCallback(async () => {
+    const generation = ++pageGeneration.current;
     setLoadingMore(true);
     setMoreError(null);
     try {
@@ -177,12 +182,14 @@ function DatasetDetailInner({ dataset }: { dataset: string }) {
         PAGE_SIZE,
         selectedVersion || undefined,
       );
+      if (generation !== pageGeneration.current) return;
       setExtra((prev) => [...prev, ...res.shards]);
       setMore(res.page.more);
     } catch (err) {
+      if (generation !== pageGeneration.current) return;
       setMoreError(err instanceof Error ? err : new Error(String(err)));
     } finally {
-      setLoadingMore(false);
+      if (generation === pageGeneration.current) setLoadingMore(false);
     }
   }, [dataset, shards.length, selectedVersion]);
 
