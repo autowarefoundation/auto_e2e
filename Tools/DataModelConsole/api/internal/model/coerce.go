@@ -28,23 +28,16 @@ func asInt64(raw []byte) int64 {
 	return 0
 }
 
-func asFloat64(raw []byte) float64 {
+func asFiniteFloat64(raw []byte) (float64, bool) {
 	s := strings.Trim(string(raw), `"`)
 	if s == "" || s == "null" {
-		return 0
+		return 0, false
 	}
-	if f, err := strconv.ParseFloat(s, 64); err == nil {
-		// MLflow serializes NaN/Infinity as JSON strings, so ParseFloat happily
-		// returns a non-finite float. But encoding/json CANNOT marshal NaN/Inf
-		// (it errors, and writeJSON has already sent a 200 header — the client
-		// gets an empty body). A non-finite metric carries no KPI meaning, so
-		// coerce it to 0 to keep the response encodable.
-		if math.IsNaN(f) || math.IsInf(f, 0) {
-			return 0
-		}
-		return f
+	f, err := strconv.ParseFloat(s, 64)
+	if err != nil || math.IsNaN(f) || math.IsInf(f, 0) {
+		return 0, false
 	}
-	return 0
+	return f, true
 }
 
 // parseDurationSeconds parses a Flyte protobuf-JSON duration string ("123.4s")
