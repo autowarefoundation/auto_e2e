@@ -56,8 +56,10 @@ const fallbackVersion = "v1.0"
 // avoids a per-request ListObjects while still picking up new versions.
 const versionTTL = 2 * time.Minute
 
-// knownDatasets are the dataset prefixes exposed by the console.
+// knownDatasets are the canonical dataset prefixes exposed by the console.
 var knownDatasets = []string{"kitscenes", "l2d", "nvidia_av"}
+
+const kitScenesSmokePrefix = "kitscenes-smoke-"
 
 // S3Service provides read-only access to the datasets bucket.
 type S3Service struct {
@@ -126,12 +128,19 @@ func (s *S3Service) Ping(ctx context.Context) error {
 	return err
 }
 
-// ListDatasets returns the known datasets, each reporting the newest version
-// resolved from S3 (see resolveVersion).
+// ListDatasets returns canonical and published KITScenes smoke datasets, each
+// reporting the newest version resolved from S3 (see resolveVersion).
 func (s *S3Service) ListDatasets(ctx context.Context) []model.Dataset {
-	out := make([]model.Dataset, 0, len(knownDatasets))
-	for _, name := range knownDatasets {
+	names := append([]string(nil), knownDatasets...)
+	names = append(names, s.discoverSmokeDatasetNames(ctx)...)
+	out := make([]model.Dataset, 0, len(names))
+	for _, name := range names {
 		version := s.resolveVersion(ctx, name)
+		// Smoke snapshots are always canonical v2.1+ publications. A fallback
+		// means their manifest gate has not completed, so do not advertise them.
+		if isSmokeDataset(name) && version == fallbackVersion {
+			continue
+		}
 		out = append(out, model.Dataset{
 			Name:    name,
 			Version: version,
@@ -148,7 +157,50 @@ func (s *S3Service) ValidDataset(name string) bool {
 			return true
 		}
 	}
-	return false
+	return isSmokeDataset(name)
+}
+
+func (s *S3Service) discoverSmokeDatasetNames(ctx context.Context) []string {
+	paginator := s3.NewListObjectsV2Paginator(s.client, &s3.ListObjectsV2Input{
+		Bucket:    aws.String(s.bucket),
+		Delimiter: aws.String("/"),
+	})
+	var names []string
+	for paginator.HasMorePages() {
+		page, err := paginator.NextPage(ctx)
+		if err != nil {
+			slog.Warn("list smoke datasets failed", "error", err)
+			return names
+		}
+		for _, prefix := range page.CommonPrefixes {
+			if name, ok := smokeDatasetNameFromPrefix(aws.ToString(prefix.Prefix)); ok {
+				names = append(names, name)
+			}
+		}
+	}
+	sort.Strings(names)
+	return names
+}
+
+func smokeDatasetNameFromPrefix(prefix string) (string, bool) {
+	name, ok := strings.CutSuffix(prefix, "/")
+	if !ok || strings.Contains(name, "/") || !isSmokeDataset(name) {
+		return "", false
+	}
+	return name, true
+}
+
+func isSmokeDataset(name string) bool {
+	digest, ok := strings.CutPrefix(name, kitScenesSmokePrefix)
+	if !ok || len(digest) != 12 {
+		return false
+	}
+	for _, char := range digest {
+		if (char < '0' || char > '9') && (char < 'a' || char > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 // ResolvedVersion returns the explicit version coordinate used by a request.
