@@ -14,6 +14,10 @@ Implementation snapshot (2026-07-15):
 - PR #74's offline report boundary is implemented as
   `wf_export_trajectory_report`: it consumes the canonical AOVL plus its v2.1
   shard and emits per-scene MP4, thumbnail, metrics, and a provenance manifest.
+- The publication workflow exposes the immutable manifest key and digest.
+  Reasoning stats, direct sample lookups, and scene-search rows are populated
+  by an explicit digest-pinned `batch/v1 Job` after that workflow succeeds;
+  normal Console deployment never starts this scan.
 - Production activation still requires the rollout sequence in section 11.
   Exact routes remain disabled until authenticated, non-spoofable role
   propagation is deployed.
@@ -668,11 +672,14 @@ a principal established by signature-validating authentication middleware.
    playback, then estimate the full-run duration and cost.
 5. Launch `EPISODES=0` only after the smoke succeeds; monitor the Flyte
    execution to the ready gate.
-6. Roll out Console API/web images and verify desktop/mobile layout, browser
+6. Build the digest-pinned Console API image, then use the successful
+   workflow's `manifest_key` and `manifest_sha256` outputs to run the guarded
+   reasoning-materialization Job to completion.
+7. Roll out Console API/web images and verify desktop/mobile layout, browser
    console, canvas pixels, model switching, and privacy-filtered geo output.
-7. Validate straight, left-turn, and right-turn map placement before treating
+8. Validate straight, left-turn, and right-turn map placement before treating
    geographic predictions as trustworthy.
-8. Keep exact geography disabled until authenticated edge role propagation is
+9. Keep exact geography disabled until authenticated edge role propagation is
    implemented and verified.
 
 ### Original phase breakdown
