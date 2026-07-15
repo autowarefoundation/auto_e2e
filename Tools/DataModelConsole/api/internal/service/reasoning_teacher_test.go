@@ -1,6 +1,7 @@
 package service
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/autowarefoundation/auto_e2e/tools/datamodelconsole/api/internal/store"
@@ -71,6 +72,17 @@ func TestParseReasoningTeacherIDRejectsAmbiguousValues(t *testing.T) {
 				"parseReasoningTeacherID(%q) = (%q, %q, true)",
 				teacher, provider, modelName,
 			)
+		}
+	}
+}
+
+func TestValidReasoningTeacherIDAppliesDynamoKeyLimits(t *testing.T) {
+	for _, label := range []store.ReasoningLabel{
+		{TeacherProvider: "provider#suffix", TeacherModel: "model"},
+		{TeacherProvider: strings.Repeat("p", 513), TeacherModel: "model"},
+	} {
+		if teacher := reasoningTeacher(label); ValidReasoningTeacherID(teacher) {
+			t.Errorf("ValidReasoningTeacherID(%q) = true", teacher)
 		}
 	}
 }
