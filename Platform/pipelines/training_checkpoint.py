@@ -60,6 +60,27 @@ def metric_pair_is_better(
     return abs(ade - best_ade) <= tolerance and fde < best_fde - tolerance
 
 
+def rescale_partial_accumulation_gradients(
+    parameters,
+    *,
+    accumulation_steps: int,
+    partial_count: int,
+) -> None:
+    """Convert a partial window's 1/N-scaled gradients to its own mean."""
+    if accumulation_steps <= 0:
+        raise ValueError("accumulation_steps must be positive")
+    if not 0 < partial_count <= accumulation_steps:
+        raise ValueError(
+            "partial_count must be between 1 and accumulation_steps"
+        )
+    factor = accumulation_steps / partial_count
+    if factor == 1.0:
+        return
+    for parameter in parameters:
+        if parameter.grad is not None:
+            parameter.grad.mul_(factor)
+
+
 def capture_rng_state() -> dict[str, Any]:
     import numpy as np
     import torch
