@@ -2,13 +2,8 @@
 
 // TrajectoryBEV: bird's-eye view of the ego trajectory.
 //
-// NOTE: both curves are recorded GROUND TRUTH, not a model prediction — there
-// is no planner in the console. The blue curve is the dataset's stored
-// ego_future for this frame (128 floats = 64 steps x [accel, curvature]) rolled
-// out with the unicycle model; the amber curve is the SAME drive reconstructed
-// from the ego_now speed+curvature of the following frames. They are two views
-// of the same logged motion (a self-consistency check), so the legend says
-// "recorded future" / "driven path", NOT "plan" / "actual".
+// The blue and amber curves are recorded data. Optional emerald curves are a
+// selected model's raw-control rollout from the canonical shard overlay.
 //
 // Path is in the ego frame: up = forward (+x), left = +y. The full 6.4s future
 // is stored on every sample, so it renders at full length regardless of how
@@ -32,6 +27,9 @@ export function TrajectoryBEV({
   frame,
   fps = 10,
   reasoning,
+  predictionTrajectories = [],
+  medianPrediction = [],
+  curvatureSign = 1,
 }: {
   samples: IndexSample[];
   frame: number;
@@ -40,6 +38,9 @@ export function TrajectoryBEV({
   // pinned onto the plan path at the matching rollout step so the reasoning
   // cards and the geometry line up in time.
   reasoning?: ReasoningLabelRecord | null;
+  predictionTrajectories?: TrajectoryPoint[][];
+  medianPrediction?: TrajectoryPoint[];
+  curvatureSign?: 1 | -1;
 }) {
   const traj = useMemo(() => {
     const now = samples[frame];
@@ -49,8 +50,11 @@ export function TrajectoryBEV({
       now.ego_now?.[0] ?? 0,
       future.accel,
       future.curvature,
+      0.1,
+      "raw",
+      curvatureSign,
     );
-  }, [samples, frame]);
+  }, [samples, frame, curvatureSign]);
 
   // Realized path: chain the chronological ego_now (speed + curvature) of the
   // frames from here forward into an XY path — what the ego actually drove.
@@ -70,13 +74,13 @@ export function TrajectoryBEV({
     for (let i = frame; i < end; i++) {
       const v = samples[i].ego_now?.[0] ?? 0;
       const kappa = samples[i].ego_now?.[3] ?? 0;
-      theta += yawRateFrom(v, kappa) * dt;
+      theta += curvatureSign * yawRateFrom(v, kappa) * dt;
       x += v * Math.cos(theta) * dt;
       y += v * Math.sin(theta) * dt;
       pts.push({ x, y, heading: theta });
     }
     return pts;
-  }, [samples, frame, fps, traj.length]);
+  }, [samples, frame, fps, traj.length, curvatureSign]);
 
   // Past trajectory: integrate the 256-float ego_history (64 steps x [speed,
   // accel, yaw_rate, curvature]) BACKWARDS from the ego marker, so the trailing
@@ -100,11 +104,11 @@ export function TrajectoryBEV({
       // curvature and gate heading by speed to reject non-physical outliers.
       x -= v * Math.cos(theta) * dt;
       y -= v * Math.sin(theta) * dt;
-      theta -= yawRateFrom(v, kappa) * dt;
+      theta -= curvatureSign * yawRateFrom(v, kappa) * dt;
       pts.push({ x, y, heading: theta });
     }
     return pts;
-  }, [samples, frame, fps]);
+  }, [samples, frame, fps, curvatureSign]);
 
   // Fit scale over ALL samples' plans so the metric window is stable across
   // frames (only the plotted path moves, not the gridlines). At least 20m.
@@ -117,7 +121,15 @@ export function TrajectoryBEV({
         s.ego_now?.[0] ?? 0,
         future.accel,
         future.curvature,
+        0.1,
+        "raw",
+        curvatureSign,
       );
+      for (const p of rolled) {
+        m = Math.max(m, Math.abs(p.x), Math.abs(p.y));
+      }
+    }
+    for (const rolled of [...predictionTrajectories, medianPrediction]) {
       for (const p of rolled) {
         m = Math.max(m, Math.abs(p.x), Math.abs(p.y));
       }
@@ -125,7 +137,7 @@ export function TrajectoryBEV({
     // Robust ceiling: allow a real highway plan (v*6.4s ~100m+) on-canvas, but a
     // lone non-physical outlier still can't blow the grid out past 150m.
     return Math.min(Math.max(m * 1.15, 20), 150);
-  }, [samples]);
+  }, [samples, predictionTrajectories, medianPrediction, curvatureSign]);
 
   const scale = SIZE / 2 / extent;
   const cx = SIZE / 2;
@@ -145,6 +157,16 @@ export function TrajectoryBEV({
   const historyPath = history
     .map((p, i) => `${i === 0 ? "M" : "L"}${sx(p).toFixed(1)},${sy(p).toFixed(1)}`)
     .join(" ");
+
+  const toPath = (points: TrajectoryPoint[]) =>
+    points
+      .map(
+        (p, i) =>
+          `${i === 0 ? "M" : "L"}${sx(p).toFixed(1)},${sy(p).toFixed(1)}`,
+      )
+      .join(" ");
+  const predictionPaths = predictionTrajectories.map(toPath);
+  const medianPredictionPath = toPath(medianPrediction);
 
   const gridLines = useMemo(() => {
     const out: { x1: number; y1: number; x2: number; y2: number; label?: string }[] =
@@ -198,7 +220,14 @@ export function TrajectoryBEV({
         <span>
           BEV — <span className="text-slate-400">past</span> ·{" "}
           <span className="text-blue-500">recorded future</span> /{" "}
-          <span className="text-amber-500">driven path</span> first{" "}
+          <span className="text-amber-500">driven path</span>
+          {medianPredictionPath && (
+            <>
+              {" "}
+              / <span className="text-emerald-400">model prediction</span>
+            </>
+          )}{" "}
+          first{" "}
           {planSec.toFixed(1)}s
           {partial && (
             <span className="text-slate-600">
@@ -282,6 +311,41 @@ export function TrajectoryBEV({
             cy={sy(traj[traj.length - 1])}
             r="3"
             fill="#3b82f6"
+          />
+        )}
+
+        {/* model seed fan and coordinate-wise median */}
+        {predictionPaths.map(
+          (predictionPath, index) =>
+            predictionPath && (
+              <path
+                key={index}
+                d={predictionPath}
+                fill="none"
+                stroke="#34d399"
+                strokeOpacity="0.28"
+                strokeWidth="1.25"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              />
+            ),
+        )}
+        {medianPredictionPath && (
+          <path
+            d={medianPredictionPath}
+            fill="none"
+            stroke="#6ee7b7"
+            strokeWidth="2.5"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
+        )}
+        {medianPrediction.length > 0 && (
+          <circle
+            cx={sx(medianPrediction[medianPrediction.length - 1])}
+            cy={sy(medianPrediction[medianPrediction.length - 1])}
+            r="3"
+            fill="#6ee7b7"
           />
         )}
 
