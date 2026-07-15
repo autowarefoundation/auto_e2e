@@ -1,6 +1,4 @@
 import os
-import glob
-import yaml
 import torch
 import sys
 
@@ -14,41 +12,33 @@ def load_checkpoint(checkpoint_path: str, device: torch.device) -> AutoE2E:
     Reconstructs the AutoE2E model from a checkpoint file.
     
     Args:
-        checkpoint_path: Path to the .pt checkpoint file. The directory must contain config.yaml.
+        checkpoint_path: Path to the .pt checkpoint file containing config and model_state_dict.
         device: torch.device to load the model to.
         
     Returns:
         AutoE2E: The reconstructed model.
     """
-    checkpoint_dir = os.path.dirname(checkpoint_path)
-    config_path = os.path.join(checkpoint_dir, 'config.yaml')
-    if not os.path.exists(config_path):
-        raise FileNotFoundError(f"Expected config.yaml in {checkpoint_dir}")
+    if not os.path.exists(checkpoint_path):
+        raise FileNotFoundError(f"Checkpoint file not found: {checkpoint_path}")
         
-    with open(config_path, 'r') as f:
-        config = yaml.safe_load(f)
-        
-    # Extract params with defaults based on AutoE2E initialization
-    backbone = config.get('backbone', 'swin_v2_tiny')
-    planner_mode = config.get('planner_mode', 'bezier')
-    embed_dim = config.get('embed_dim', 8)
-    num_views = config.get('num_views', 8)
+    checkpoint = torch.load(checkpoint_path, map_location=device)
     
-    # Initialize the model
-    model = AutoE2E(
-        backbone=backbone,
-        num_views=num_views,
-        embed_dim=embed_dim,
-        planner_mode=planner_mode
-    )
-    
-    state_dict = torch.load(checkpoint_path, map_location=device)
-    # Handle if state dict is wrapped in 'state_dict' or 'model' key
-    if 'state_dict' in state_dict:
-        state_dict = state_dict['state_dict']
-    elif 'model' in state_dict:
-        state_dict = state_dict['model']
+    if "config" not in checkpoint:
+        raise ValueError(f"Checkpoint at {checkpoint_path} is missing the required 'config' key.")
+    if "model_state_dict" not in checkpoint:
+        raise ValueError(f"Checkpoint at {checkpoint_path} is missing the required 'model_state_dict' key.")
         
+    config = checkpoint["config"]
+    
+    try:
+        # Initialize the model with the exact config from the checkpoint.
+        # This will fail explicitly if required configurations are missing or incompatible.
+        model = AutoE2E(**config)
+    except TypeError as e:
+        raise ValueError(f"Failed to initialize AutoE2E with the provided config: {e}") from e
+    
+    state_dict = checkpoint["model_state_dict"]
+    
     # Handle DataParallel/DDP module prefix if present
     clean_state_dict = {}
     for k, v in state_dict.items():
@@ -57,7 +47,7 @@ def load_checkpoint(checkpoint_path: str, device: torch.device) -> AutoE2E:
         else:
             clean_state_dict[k] = v
             
-    model.load_state_dict(clean_state_dict)
+    model.load_state_dict(clean_state_dict, strict=True)
     model.to(device)
     model.eval()
     

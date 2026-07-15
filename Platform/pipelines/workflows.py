@@ -314,7 +314,12 @@ def data_processing(
         info.size = len(eb)
         current_tar.addfile(info, io.BytesIO(eb))
 
-        m = json.dumps({"idx": si, "dataset": dataset.value}).encode()
+        m = json.dumps({
+            "idx": si, 
+            "dataset": dataset.value,
+            "episode_index": str(sample.get("clip_uuid", sample.get("episode_index", "0"))),
+            "frame_index": int(sample.get("sample_idx", sample.get("frame_index", si))),
+        }).encode()
         info = tarfile.TarInfo(name=f"{sample_key}.meta.json")
         info.size = len(m)
         current_tar.addfile(info, io.BytesIO(m))

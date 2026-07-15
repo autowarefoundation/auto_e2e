@@ -11,23 +11,37 @@ def test_get_dataset_iterator(mock_make_loader):
     # Setup mock iterator
     mock_loader_instance = MagicMock()
     mock_make_loader.return_value = mock_loader_instance
-    mock_iter = iter([1, 2, 3])
-    mock_loader_instance.__iter__.return_value = mock_iter
+    mock_loader_instance.projection = "dummy_projection"
+    mock_loader_instance.geometry_type = "dummy_geometry"
     
+    mock_iter = iter([
+        {"episode_index": [0], "frame_index": [2], "data": "c"},
+        {"episode_index": [0], "frame_index": [1], "data": "b"},
+        {"episode_index": [0], "frame_index": [0], "data": "a"},
+        {"episode_index": [1], "frame_index": [0], "data": "d"}
+    ])
+    mock_loader_instance.__iter__.return_value = mock_iter
+
     dataset_dir = "/dummy/path"
     iterator = get_dataset_iterator(dataset_dir)
     
-    # Verify make_pre_extracted_loader was called with correct arguments
+    batches = list(iterator)
+    assert len(batches) == 4
+    # Check sorting within episode 0
+    assert batches[0]["data"] == "a"
+    assert batches[1]["data"] == "b"
+    assert batches[2]["data"] == "c"
+    
+    # Check that projection properties are attached
+    assert getattr(iterator, "projection", None) == "dummy_projection"
+    assert getattr(iterator, "geometry_type", None) == "dummy_geometry"
+    
+    # Check that it called make_loader correctly
     mock_make_loader.assert_called_once_with(
-        shard_dir=dataset_dir,
+        shard_dir="/dummy/path",
         batch_size=1,
-        num_workers=1,
+        num_workers=0,
         split="eval",
         shuffle=0,
         return_visualization_image=True
     )
-    
-    # Verify iterator works as expected
-    assert next(iterator) == 1
-    assert next(iterator) == 2
-    assert next(iterator) == 3

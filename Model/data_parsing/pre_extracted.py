@@ -97,6 +97,14 @@ def _decode_sample(sample: dict, return_visualization_image: bool = False) -> di
     history_size = _HISTORY_STEPS * _HISTORY_SIGNALS
     ego_history = torch.from_numpy(ego[:history_size])
     ego_future = torch.from_numpy(ego[history_size:])
+    
+    meta = {}
+    meta_bytes = sample.get("meta.json", b"{}")
+    if meta_bytes:
+        try:
+            meta = json.loads(meta_bytes.decode("utf-8"))
+        except Exception:
+            pass
 
     res = {
         "visual_tiles": torch.stack(frames),
@@ -104,6 +112,9 @@ def _decode_sample(sample: dict, return_visualization_image: bool = False) -> di
         "egomotion_history": ego_history,
         "visual_history": torch.zeros(_VISUAL_HISTORY_DIM),
         "trajectory_target": ego_future,
+        "episode_index": meta.get("episode_index", "0"),
+        "frame_index": meta.get("frame_index", 0),
+        "dataset_name": meta.get("dataset", "unknown"),
     }
     
     if return_visualization_image:

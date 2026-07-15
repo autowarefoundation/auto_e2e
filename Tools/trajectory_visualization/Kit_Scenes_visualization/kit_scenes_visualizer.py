@@ -6,7 +6,7 @@ Usage:
 
 import sys
 import os
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '..', 'Model')))
+
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
 
 import torch
@@ -20,9 +20,9 @@ from trajectory_visualization.rendering import (
     complete_front_camera_view_with_trajectory,
     concatenate_grid_and_camera
 )
-from model_components.auto_e2e import AutoE2E
-from data_parsing.kit_scenes.camera import NUM_VIEWS
-from data_parsing.kit_scenes.map import generate_bev_map_tile
+from Model.model_components.auto_e2e import AutoE2E
+from Model.data_parsing.kit_scenes.camera import NUM_VIEWS
+from Model.data_parsing.kit_scenes.map import generate_bev_map_tile
 
 
 def visualization_on_kit_scenes(scene_ids: list[str] | None = None, frame_index: int = 0, zoom_in: bool = False, dataset_root: str | None = None) -> tuple[np.ndarray | None, np.ndarray | None]:
@@ -120,7 +120,7 @@ def forward_pass_for_visualization_test(
     Run forward pass with real KIT Scenes data at a specific frame index.
     """
     try:
-        from data_parsing.kit_scenes import KitScenesDataset
+        from Model.data_parsing.kit_scenes import KitScenesDataset
     except ImportError as e:
         print(f"[live] SKIPPED: {e}")
         return None

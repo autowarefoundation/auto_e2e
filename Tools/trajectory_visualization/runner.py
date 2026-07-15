@@ -1,7 +1,6 @@
 import os
 import cv2
 import torch
-from tqdm import tqdm
 
 from .checkpoint_loader import load_checkpoint
 from .dataset_reader import get_dataset_iterator
@@ -9,7 +8,7 @@ from .manifest import ManifestWriter
 from .rendering import generate_grid, concatenate_grid_and_camera
 from .kinematics import accel_and_curv_to_meters_trajectory
 
-def run_visualization(checkpoint: str, dataset_dir: str, output_dir: str, episodes: list = None, max_frames_per_episode: int = 300):
+def run_visualization(checkpoint: str, dataset_dir: str, output_dir: str, episodes: list[str] | None = None, max_frames_per_episode: int = 300):
     os.makedirs(output_dir, exist_ok=True)
     
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -17,7 +16,7 @@ def run_visualization(checkpoint: str, dataset_dir: str, output_dir: str, episod
     model = load_checkpoint(checkpoint, device)
     
     print(f"Loading dataset from {dataset_dir}...")
-    data_iterator = get_dataset_iterator(dataset_dir)
+    data_iterator = get_dataset_iterator(dataset_dir, episodes_to_render=episodes)
     
     manifest = ManifestWriter(output_dir)
     
@@ -26,19 +25,21 @@ def run_visualization(checkpoint: str, dataset_dir: str, output_dir: str, episod
     
     video_writer = None
     
-    num_frames_to_render = max_frames_per_episode
-    if episodes is not None:
-        num_frames_to_render = len(episodes) * max_frames_per_episode
-        print(f"Rendering {num_frames_to_render} frames based on {len(episodes)} episodes.")
-    else:
-        print(f"Rendering up to {num_frames_to_render} frames.")
-    
     print("Running inference and rendering...")
     frames_processed = 0
+    current_episode = None
+    frames_in_current_episode = 0
+    
     with torch.no_grad():
-        for batch in tqdm(data_iterator, total=num_frames_to_render):
-            if frames_processed >= num_frames_to_render:
-                break
+        for batch in data_iterator:
+            ep_id = batch.get("episode_index", [0])[0] if isinstance(batch.get("episode_index"), list) else batch.get("episode_index", 0)
+            
+            if ep_id != current_episode:
+                current_episode = ep_id
+                frames_in_current_episode = 0
+                
+            if frames_in_current_episode >= max_frames_per_episode:
+                continue # Skip remaining frames in this episode
                 
             visual_tiles = batch["visual_tiles"].to(device)
             visual_history = batch["visual_history"].to(device)
@@ -90,6 +91,7 @@ def run_visualization(checkpoint: str, dataset_dir: str, output_dir: str, episod
                 manifest.add_thumbnail(thumbnail_path)
             
             frames_processed += 1
+            frames_in_current_episode += 1
             
     if video_writer is not None:
         video_writer.release()

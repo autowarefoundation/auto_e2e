@@ -9,7 +9,7 @@ Usage:
 
 import sys
 import os
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '..', 'Model')))
+
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
 from trajectory_visualization.rendering import (
     render_trajectory_map_tile,
@@ -18,10 +18,10 @@ from trajectory_visualization.rendering import (
     concatenate_grid_and_camera
 )
 import torch
-from model_components.auto_e2e import AutoE2E
+from Model.model_components.auto_e2e import AutoE2E
 import cv2
 import numpy as np
-from data_parsing.l2d.camera import NUM_VIEWS
+from Model.data_parsing.l2d.camera import NUM_VIEWS
 import argparse
 import yaml
 
@@ -126,7 +126,7 @@ def forward_pass_for_visualization_test(
     Run forward pass with real L2D data at a specific frame index.
     """
     try:
-        from data_parsing.l2d import L2DDataset
+        from Model.data_parsing.l2d import L2DDataset
     except ImportError as e:
         print(f"[live] SKIPPED: {e}")
         return
