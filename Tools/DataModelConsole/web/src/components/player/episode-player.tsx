@@ -77,6 +77,31 @@ import type {
 } from "@/types";
 
 const SPEED_STEPS = [0.1, 0.25, 0.5, 1, 2, 4, 8, 16];
+const SPACE_OWNING_ELEMENTS = [
+  "a[href]",
+  "button",
+  "input",
+  "select",
+  "textarea",
+  "summary",
+  "audio[controls]",
+  "video[controls]",
+  '[contenteditable]:not([contenteditable="false"])',
+  '[role="button"]',
+  '[role="checkbox"]',
+  '[role="combobox"]',
+  '[role="link"]',
+  '[role="menuitem"]',
+  '[role="option"]',
+  '[role="radio"]',
+  '[role="searchbox"]',
+  '[role="slider"]',
+  '[role="spinbutton"]',
+  '[role="switch"]',
+  '[role="tab"]',
+  '[role="textbox"]',
+  '[role="treeitem"]',
+].join(",");
 
 type LabelState = { key: string; label: ReasoningLabelRecord } | null;
 
@@ -523,14 +548,19 @@ export function EpisodePlayer({
     }
   }, []);
 
-  // Bind shortcuts at the window level so they work regardless of which DOM
-  // node has focus (clicking a control no longer traps Space/arrows). The
-  // INPUT/TEXTAREA guard keeps typing intact; the BUTTON guard for Space stops
-  // the browser's native activation from double-firing alongside toggle().
+  // Bind shortcuts at the window level so they work outside the player too.
+  // Text-entry controls retain every key, while semantic interactive elements
+  // retain Space for their native activation instead of also toggling playback.
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
       const t = e.target as HTMLElement | null;
-      if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA")) return;
+      if (
+        t?.closest(
+          'input, select, textarea, [contenteditable]:not([contenteditable="false"])',
+        )
+      ) {
+        return;
+      }
       // Never hijack a browser/OS accelerator: if a command/control/alt
       // modifier is held (e.g. Cmd+R reload, Ctrl+L address bar), let the
       // browser handle it. Shift is allowed — none of our keys use it, and
@@ -552,7 +582,8 @@ export function EpisodePlayer({
       }
       switch (e.key) {
         case " ":
-          e.preventDefault(); // also suppresses native BUTTON activation
+          if (t?.closest(SPACE_OWNING_ELEMENTS)) return;
+          e.preventDefault();
           toggle();
           break;
         case "ArrowLeft":
@@ -605,7 +636,11 @@ export function EpisodePlayer({
 
   if (!store || cams.length === 0) {
     return (
-      <p className="text-sm text-slate-500">
+      <p
+        role="status"
+        aria-live="polite"
+        className="text-sm text-slate-500"
+      >
         Empty shard index — nothing to play.
       </p>
     );
@@ -800,6 +835,8 @@ export function EpisodePlayer({
         <div className="ml-auto flex items-center gap-2">
           {buffering && (
             <span
+              role="status"
+              aria-live="polite"
               className="flex items-center gap-1 rounded bg-amber-950/60 px-2 py-0.5 font-mono text-[10px] text-amber-400"
               title="Fetching frames ahead of the playhead"
             >
@@ -881,14 +918,24 @@ export function EpisodePlayer({
         {labelStatus === "ready" && reasoning?.key === sample?.key ? (
           <ReasoningTimeline label={reasoning.label} />
         ) : labelStatus === "loading" ? (
-          <p className="text-sm text-slate-500">Loading label…</p>
+          <p
+            role="status"
+            aria-live="polite"
+            className="text-sm text-slate-500"
+          >
+            Loading label…
+          </p>
         ) : labelStatus === "error" ? (
-          <p className="text-sm text-amber-500">
+          <p role="alert" className="text-sm text-amber-500">
             Could not load the label for this frame. It may retry on the next
             step.
           </p>
         ) : (
-          <p className="text-sm text-slate-500">
+          <p
+            role="status"
+            aria-live="polite"
+            className="text-sm text-slate-500"
+          >
             No reasoning label at this frame
             {promptVersion ? " for the selected teacher and prompt version" : ""}. Amber
             ticks on the timeline mark frames labelled in any run, so a ticked
