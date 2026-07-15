@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"time"
 )
 
 const (
@@ -15,11 +16,12 @@ const (
 )
 
 type publicationShardEntry struct {
-	Name            string `json:"name"`
-	Key             string `json:"key"`
-	ByteSize        int64  `json:"byte_size"`
-	ETag            string `json:"etag"`
-	ContentIdentity string `json:"content_identity"`
+	Name            string    `json:"name"`
+	Key             string    `json:"key"`
+	ByteSize        int64     `json:"byte_size"`
+	ETag            string    `json:"etag"`
+	ContentIdentity string    `json:"content_identity"`
+	LastModified    time.Time `json:"-"`
 }
 
 type publicationArtifact struct {
