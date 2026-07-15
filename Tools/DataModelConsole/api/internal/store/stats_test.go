@@ -14,9 +14,14 @@ const sampleLabelJSON = `{
   "teacher_provider": "openai_compatible",
   "teacher_model": "nvidia/Cosmos3-Nano",
   "prompt_version": "action_relevant_reasoning_v3_temporal_front256",
+  "request_mode": "temporal_front_clip",
+  "provenance": "teacher_gt",
   "horizons": [
-    {"horizon_sec": 0.0, "relation_to_ego": "same_lane_ahead", "hazard_event": ["no_hazard"], "cause": ["lead_vehicle"], "longitudinal_response": "slow_down", "lateral_response": "keep_lane", "tactical_response": "proceed_with_caution", "rule_response": "none", "confidence": 0.99, "global_scene_context": null, "road_topology": null},
-    {"horizon_sec": 1.0, "relation_to_ego": "same_lane_ahead", "hazard_event": ["no_hazard"], "cause": ["lead_vehicle"], "longitudinal_response": "slow_down", "lateral_response": "keep_lane", "tactical_response": "proceed_with_caution", "rule_response": "none", "confidence": 0.95}
+    {"horizon_sec": 0.0, "relation_to_ego": "same_lane_ahead", "hazard_event": ["no_hazard"], "cause": ["lead_vehicle"], "longitudinal_response": "slow_down", "lateral_response": "keep_lane", "tactical_response": "proceed_with_caution", "rule_response": "none", "confidence": 0.99, "provenance": "teacher_gt", "global_scene_context": null, "road_topology": null},
+    {"horizon_sec": 1.0, "relation_to_ego": "same_lane_ahead", "hazard_event": ["no_hazard"], "cause": ["lead_vehicle"], "longitudinal_response": "slow_down", "lateral_response": "keep_lane", "tactical_response": "proceed_with_caution", "rule_response": "none", "confidence": 0.95, "provenance": "teacher_gt"},
+    {"horizon_sec": 2.0, "relation_to_ego": "same_lane_ahead", "hazard_event": ["no_hazard"], "cause": ["lead_vehicle"], "longitudinal_response": "slow_down", "lateral_response": "keep_lane", "tactical_response": "proceed_with_caution", "rule_response": "none", "confidence": 0.90, "provenance": "teacher_gt"},
+    {"horizon_sec": 3.0, "relation_to_ego": "same_lane_ahead", "hazard_event": ["no_hazard"], "cause": ["lead_vehicle"], "longitudinal_response": "slow_down", "lateral_response": "keep_lane", "tactical_response": "proceed_with_caution", "rule_response": "none", "confidence": 0.85, "provenance": "teacher_gt"},
+    {"horizon_sec": 4.0, "relation_to_ego": "same_lane_ahead", "hazard_event": ["no_hazard"], "cause": ["lead_vehicle"], "longitudinal_response": "slow_down", "lateral_response": "keep_lane", "tactical_response": "proceed_with_caution", "rule_response": "none", "confidence": 0.80, "provenance": "teacher_gt"}
   ]
 }`
 
@@ -33,8 +38,8 @@ func TestParseReasoningLabel(t *testing.T) {
 		lbl.PromptVersion != "action_relevant_reasoning_v3_temporal_front256" {
 		t.Errorf("provenance was not decoded: %+v", lbl)
 	}
-	if len(lbl.Horizons) != 2 {
-		t.Fatalf("Horizons len = %d, want 2", len(lbl.Horizons))
+	if len(lbl.Horizons) != 5 {
+		t.Fatalf("Horizons len = %d, want 5", len(lbl.Horizons))
 	}
 	h := lbl.Horizons[0]
 	if h.RelationToEgo != "same_lane_ahead" || h.LongitudinalResponse != "slow_down" {
