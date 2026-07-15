@@ -12,6 +12,9 @@
 // L2D (l2d/camera.py): 6 surround cameras (map is packed separately)
 //   0 front_left, 1 left_forward, 2 right_forward,
 //   3 left_backward, 4 rear, 5 right_backward
+// KITScenes (kit_scenes/camera.py): 7 cameras
+//   0 base_front_center, 1 ring_front, 2 ring_front_left,
+//   3 ring_front_right, 4 ring_rear, 5 ring_rear_left, 6 ring_rear_right
 
 export interface RigCam {
   label: string;
@@ -50,9 +53,22 @@ const L2D_RIG: Record<string, RigCam> = {
   cam_6: { label: "map", row: 1, col: 1 },
 };
 
+// Four columns keep both forward-facing cameras visible without occupying the
+// ego cell. The surround ring still reads left-to-right around the vehicle.
+const KITSCENES_RIG: Record<string, RigCam> = {
+  cam_0: { label: "front-center", row: 1, col: 2 },
+  cam_1: { label: "ring-front", row: 1, col: 3 },
+  cam_2: { label: "front-left", row: 1, col: 1 },
+  cam_3: { label: "front-right", row: 1, col: 4 },
+  cam_4: { label: "rear", row: 3, col: 2 },
+  cam_5: { label: "rear-left", row: 3, col: 1 },
+  cam_6: { label: "rear-right", row: 3, col: 4 },
+};
+
 const RIGS: Record<string, Record<string, RigCam>> = {
   nvidia_av: NVIDIA_RIG,
   l2d: L2D_RIG,
+  kitscenes: KITSCENES_RIG,
 };
 
 // rigCam returns the rig position + grid cell for a "cam_N" identifier.
