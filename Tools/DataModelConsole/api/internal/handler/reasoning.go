@@ -10,6 +10,7 @@ import (
 
 	"github.com/autowarefoundation/auto_e2e/tools/datamodelconsole/api/internal/model"
 	"github.com/autowarefoundation/auto_e2e/tools/datamodelconsole/api/internal/service"
+	"github.com/autowarefoundation/auto_e2e/tools/datamodelconsole/api/internal/store"
 )
 
 // ReasoningHandler serves the reasoning label cache endpoints.
@@ -22,13 +23,43 @@ func NewReasoningHandler(s3 *service.S3Service) *ReasoningHandler {
 	return &ReasoningHandler{s3: s3}
 }
 
+func writeReasoningAvailabilityError(
+	w http.ResponseWriter,
+	err error,
+) bool {
+	switch {
+	case errors.Is(err, service.ErrReasoningUnavailable):
+		w.Header().Set("Retry-After", "60")
+		writeError(
+			w,
+			http.StatusServiceUnavailable,
+			model.CodeUnavailable,
+			"reasoning inventory is not materialized",
+		)
+		return true
+	case errors.Is(err, service.ErrReasoningIntegrity):
+		writeError(
+			w,
+			http.StatusBadGateway,
+			model.CodeS3Error,
+			"reasoning publication failed integrity validation",
+		)
+		return true
+	default:
+		return false
+	}
+}
+
 // Stats handles GET /api/v1/reasoning-labels/stats — counts label objects
 // per dataset/teacher/prompt_version partition.
 func (h *ReasoningHandler) Stats(w http.ResponseWriter, r *http.Request) {
 	entries, total, err := h.s3.ReasoningStats(r.Context())
 	if err != nil {
+		if writeReasoningAvailabilityError(w, err) {
+			return
+		}
 		slog.Error("reasoning stats", "error", err)
-		writeError(w, http.StatusBadGateway, model.CodeS3Error, "failed to aggregate reasoning label stats")
+		writeError(w, http.StatusBadGateway, model.CodeS3Error, "failed to read reasoning label stats")
 		return
 	}
 	if entries == nil {
@@ -42,7 +73,7 @@ func (h *ReasoningHandler) Stats(w http.ResponseWriter, r *http.Request) {
 // the teacher/prompt_version partitions of one immutable dataset version.
 func (h *ReasoningHandler) PromptVersions(w http.ResponseWriter, r *http.Request) {
 	dataset := r.URL.Query().Get("dataset")
-	if dataset == "" || strings.ContainsAny(dataset, "/\\") || strings.Contains(dataset, "..") {
+	if !validReasoningParam(dataset) {
 		writeError(w, http.StatusBadRequest, model.CodeInvalidParam, "missing or invalid dataset")
 		return
 	}
@@ -59,6 +90,18 @@ func (h *ReasoningHandler) PromptVersions(w http.ResponseWriter, r *http.Request
 		r.Context(), dataset, version,
 	)
 	if err != nil {
+		if writeReasoningAvailabilityError(w, err) {
+			return
+		}
+		if errors.Is(err, service.ErrNotFound) {
+			writeError(
+				w,
+				http.StatusNotFound,
+				model.CodeNotFound,
+				"dataset version not found",
+			)
+			return
+		}
 		slog.Error(
 			"reasoning prompt versions",
 			"dataset", dataset,
@@ -77,9 +120,8 @@ func (h *ReasoningHandler) PromptVersions(w http.ResponseWriter, r *http.Request
 // StatsDetail handles
 // GET /api/v1/reasoning-labels/stats-detail?dataset=&version=&prompt_version=&teacher=
 // — the precomputed ODD-coverage stats for one (dataset x version x
-// teacher x prompt_version) reasoning-label set. Read-through DynamoDB: a hit
-// returns the cached blob; a miss scans the exact label partition from S3,
-// aggregates, populates the scene-by-label index, persists, and returns.
+// teacher x prompt_version) reasoning-label set. Reads are cache-only; the
+// trusted materializer publishes the inventory after stats and scene rows.
 func (h *ReasoningHandler) StatsDetail(w http.ResponseWriter, r *http.Request) {
 	dataset := r.URL.Query().Get("dataset")
 	promptVersion := r.URL.Query().Get("prompt_version")
@@ -104,21 +146,26 @@ func (h *ReasoningHandler) StatsDetail(w http.ResponseWriter, r *http.Request) {
 
 	resp, err := h.s3.ReasoningStatsDetail(r.Context(), dataset, version, promptVersion, teacher)
 	if err != nil {
+		if writeReasoningAvailabilityError(w, err) {
+			return
+		}
 		if errors.Is(err, service.ErrNotFound) {
 			writeError(w, http.StatusNotFound, model.CodeNotFound, "reasoning label partition not found")
 			return
 		}
 		slog.Error("reasoning stats-detail", "dataset", dataset, "prompt_version", promptVersion, "error", err)
-		writeError(w, http.StatusBadGateway, model.CodeS3Error, "failed to compute reasoning stats")
+		writeError(w, http.StatusBadGateway, model.CodeS3Error, "failed to read reasoning stats")
 		return
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
 
-// validReasoningParam rejects empty values and path-traversal characters for
-// values that land in an S3 key template or a DynamoDB key.
+// validReasoningParam applies both S3 path and DynamoDB key constraints at the
+// HTTP boundary so malformed client input never becomes an upstream error.
 func validReasoningParam(v string) bool {
-	return v != "" && !strings.ContainsAny(v, "/\\") && !strings.Contains(v, "..")
+	return store.ValidReasoningKeyComponent(v) &&
+		!strings.ContainsAny(v, "/\\") &&
+		!strings.Contains(v, "..")
 }
 
 // GetLabel handles GET /api/v1/reasoning-labels/{dataset}/{sample_id}.
@@ -140,7 +187,7 @@ func (h *ReasoningHandler) GetLabel(w http.ResponseWriter, r *http.Request) {
 	promptVersion := r.URL.Query().Get("prompt_version")
 	// These land in the S3 key template; reject path-traversal characters the
 	// same way dataset/sample_id are validated above.
-	if strings.ContainsAny(promptVersion, "/\\") || strings.Contains(promptVersion, "..") ||
+	if (promptVersion != "" && !validReasoningParam(promptVersion)) ||
 		(teacher != "" && !service.ValidReasoningTeacherID(teacher)) ||
 		(promptVersion != "" && teacher == "") {
 		writeError(w, http.StatusBadRequest, model.CodeInvalidParam, "invalid teacher or prompt_version")
@@ -156,6 +203,9 @@ func (h *ReasoningHandler) GetLabel(w http.ResponseWriter, r *http.Request) {
 		r.Context(), dataset, version, sampleID, teacher, promptVersion,
 	)
 	if err != nil {
+		if writeReasoningAvailabilityError(w, err) {
+			return
+		}
 		if errors.Is(err, service.ErrNotFound) {
 			writeError(w, http.StatusNotFound, model.CodeNotFound,
 				"reasoning label not found for "+dataset+"/"+sampleID)
