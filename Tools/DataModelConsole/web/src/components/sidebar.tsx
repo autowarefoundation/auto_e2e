@@ -8,6 +8,7 @@ import {
   Clapperboard,
   Database,
   Home,
+  MapPinned,
   Workflow,
 } from "lucide-react";
 
@@ -20,6 +21,7 @@ export const NAV_ITEMS = [
   { href: "/models", label: "Models", icon: Boxes },
   { href: "/runs", label: "Runs", icon: Workflow },
   { href: "/scenes", label: "Scenes", icon: Clapperboard },
+  { href: "/geo", label: "Geo Coverage", icon: MapPinned },
 ] as const;
 
 // navItemActive centralizes the active-route rule shared by the sidebar and
