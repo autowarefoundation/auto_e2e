@@ -7,9 +7,12 @@ import type {
   DatasetListResponse,
   DatasetVersionsResponse,
   FlyteExecution,
+  GeoJSONFeatureCollection,
+  GeoStats,
   MLflowExperiment,
   MLflowRegisteredModel,
   MLflowRun,
+  OverlayModelsResponse,
   ReasoningLabelRecord,
   ReasoningLabelStats,
   ReasoningPromptVersionsResponse,
@@ -19,6 +22,7 @@ import type {
   SceneSearchResult,
   ShardIndex,
   ShardListResponse,
+  RigProjectionDocument,
 } from "@/types";
 
 // Same-origin by default (ALB routes /api -> Go API). Local dev overrides via
@@ -63,6 +67,28 @@ async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
     throw new ApiError(res.status, url, `API ${res.status}: ${detail}`);
   }
   return (await res.json()) as T;
+}
+
+async function apiFetchResponse(
+  path: string,
+  accept: string,
+): Promise<Response> {
+  const url = `${BASE_URL}${path}`;
+  let res: Response;
+  try {
+    res = await fetch(url, { headers: { Accept: accept } });
+  } catch (err) {
+    throw new ApiError(
+      0,
+      url,
+      `Network error: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+  if (!res.ok) {
+    const detail = (await res.text().catch(() => res.statusText)).slice(0, 500);
+    throw new ApiError(res.status, url, `API ${res.status}: ${detail}`);
+  }
+  return res;
 }
 
 // ---------------------------------------------------------------------------
@@ -209,6 +235,69 @@ export function getShardIndex(
   return apiFetch<ShardIndex>(
     `/api/v1/datasets/${encodeURIComponent(dataset)}/shards/${encodeURIComponent(shard)}/index${versionParam(version, "?")}`,
   );
+}
+
+// ---------------------------------------------------------------------------
+// Model trajectory overlays and geographic products
+// ---------------------------------------------------------------------------
+
+export function listShardOverlayModels(
+  dataset: string,
+  shard: string,
+  version?: string,
+): Promise<OverlayModelsResponse> {
+  return apiFetch<OverlayModelsResponse>(
+    `/api/v1/datasets/${encodeURIComponent(dataset)}/shards/${encodeURIComponent(shard)}/overlay-models${versionParam(version, "?")}`,
+  );
+}
+
+export async function getShardOverlay(
+  dataset: string,
+  shard: string,
+  modelArtifactId: string,
+  version?: string,
+): Promise<ArrayBuffer> {
+  const response = await apiFetchResponse(
+    `/api/v1/datasets/${encodeURIComponent(dataset)}/shards/${encodeURIComponent(shard)}/overlays/${encodeURIComponent(modelArtifactId)}${versionParam(version, "?")}`,
+    "application/vnd.auto-e2e.overlay",
+  );
+  return response.arrayBuffer();
+}
+
+export function getRigProjection(
+  dataset: string,
+  version?: string,
+): Promise<RigProjectionDocument> {
+  return apiFetch<RigProjectionDocument>(
+    `/api/v1/datasets/${encodeURIComponent(dataset)}/rig-projection${versionParam(version, "?")}`,
+  );
+}
+
+export function getGeoStats(
+  dataset: string,
+  version?: string,
+): Promise<GeoStats> {
+  return apiFetch<GeoStats>(
+    `/api/v1/datasets/${encodeURIComponent(dataset)}/geo-stats${versionParam(version, "?")}`,
+  );
+}
+
+export function getGeoHeatmap(
+  heatmapURL: string,
+): Promise<GeoJSONFeatureCollection> {
+  return apiFetch<GeoJSONFeatureCollection>(heatmapURL);
+}
+
+export async function getEpisodeGPSPath(
+  dataset: string,
+  episode: string,
+  version?: string,
+): Promise<ArrayBuffer> {
+  const response = await apiFetchResponse(
+    `/api/v1/datasets/${encodeURIComponent(dataset)}/geo/episodes/${encodeURIComponent(episode)}${versionParam(version, "?")}`,
+    "application/octet-stream",
+  );
+  return response.arrayBuffer();
 }
 
 // ---------------------------------------------------------------------------
