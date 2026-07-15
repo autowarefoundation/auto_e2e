@@ -64,19 +64,31 @@ func TestNormalizeMLflowRuns(t *testing.T) {
 	}
 }
 
-func TestNormalizeMLflowRuns_NonFiniteMetricIsEncodable(t *testing.T) {
-	// MLflow serializes NaN/Infinity as JSON strings. The normalized run must be
-	// JSON-encodable (encoding/json cannot marshal NaN/Inf), so non-finite
-	// metric values coerce to 0.
+func TestNormalizeMLflowRuns_InvalidMetricsAreOmitted(t *testing.T) {
+	// MLflow serializes NaN/Infinity as JSON strings. Invalid metrics must be
+	// absent rather than becoming plausible zero-valued observations.
 	body := []byte(`{"runs":[{"info":{"run_id":"r1"},
-		"data":{"metrics":[{"key":"loss","value":"NaN"},{"key":"grad","value":"Infinity"},{"key":"ade","value":2.0}]}}]}`)
+		"data":{"metrics":[
+			{"key":"loss","value":"NaN"},
+			{"key":"grad","value":"Infinity"},
+			{"key":"negative_inf","value":"-Infinity"},
+			{"key":"malformed","value":"not-a-number"},
+			{"key":"missing","value":null},
+			{"key":"zero","value":0},
+			{"key":"ade","value":2.0}
+		]}}]}`)
 	runs, err := NormalizeMLflowRuns(body)
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
 	m := runs[0].Metrics
-	if m["loss"] != 0 || m["grad"] != 0 {
-		t.Errorf("non-finite metrics not zeroed: %+v", m)
+	for _, key := range []string{"loss", "grad", "negative_inf", "malformed", "missing"} {
+		if _, ok := m[key]; ok {
+			t.Errorf("invalid metric %q was retained: %+v", key, m)
+		}
+	}
+	if value, ok := m["zero"]; !ok || value != 0 {
+		t.Errorf("finite zero metric = (%v, %v), want (0, true)", value, ok)
 	}
 	if m["ade"] != 2.0 {
 		t.Errorf("finite metric changed: %v", m["ade"])
@@ -164,5 +176,32 @@ func TestNormalizeFlyteExecutions_Fallbacks(t *testing.T) {
 	}
 	if e.DurationS != 0 {
 		t.Errorf("duration_s = %d, want 0 (absent)", e.DurationS)
+	}
+}
+
+func TestListNormalizersPreservePaginationTokens(t *testing.T) {
+	experiments, err := NormalizeMLflowExperimentsPage([]byte(
+		`{"experiments":[],"next_page_token":"experiments-p2"}`,
+	))
+	if err != nil || experiments.NextPageToken != "experiments-p2" {
+		t.Fatalf("experiments page = %+v, %v", experiments, err)
+	}
+	runs, err := NormalizeMLflowRunsPage([]byte(
+		`{"runs":[],"next_page_token":"runs-p2"}`,
+	))
+	if err != nil || runs.NextPageToken != "runs-p2" {
+		t.Fatalf("runs page = %+v, %v", runs, err)
+	}
+	models, err := NormalizeMLflowModelsPage([]byte(
+		`{"registered_models":[],"next_page_token":"models-p2"}`,
+	))
+	if err != nil || models.NextPageToken != "models-p2" {
+		t.Fatalf("models page = %+v, %v", models, err)
+	}
+	executions, err := NormalizeFlyteExecutionsPage([]byte(
+		`{"executions":[],"token":"flyte-p2"}`,
+	))
+	if err != nil || executions.NextPageToken != "flyte-p2" {
+		t.Fatalf("executions page = %+v, %v", executions, err)
 	}
 }
