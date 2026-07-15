@@ -120,6 +120,25 @@ func TestShardsPrefix(t *testing.T) {
 	}
 }
 
+func TestCanonicalVersionsRequirePublicationManifest(t *testing.T) {
+	cases := map[string]bool{
+		"v1.0":  false,
+		"v2.0":  false,
+		"v2.1":  true,
+		"v2.2":  true,
+		"v3.0":  true,
+		"v10.0": true,
+	}
+	for version, want := range cases {
+		if got := requiresPublicationManifest(version); got != want {
+			t.Errorf(
+				"requiresPublicationManifest(%q) = %v, want %v",
+				version, got, want,
+			)
+		}
+	}
+}
+
 // TestShardManifestUnmarshal pins the manifest decode ListDatasetVersions
 // depends on: the pipeline-written shards/manifest.json shape must map onto
 // DatasetVersion's composition fields, and a manifest missing a field (the
