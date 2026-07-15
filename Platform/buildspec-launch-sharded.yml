@@ -22,9 +22,10 @@ env:
 phases:
   install:
     commands:
-      - pip install -q flytekit numpy torch kubernetes --extra-index-url https://download.pytorch.org/whl/cpu
+      - pip install -q flytekit==1.14.9 numpy torch kubernetes --extra-index-url https://download.pytorch.org/whl/cpu
   build:
     commands:
+      - export PYTHONPATH="${CODEBUILD_SRC_DIR}/Model:${CODEBUILD_SRC_DIR}:${PYTHONPATH:-}"
       - |
         cat > /tmp/flyte.yaml << EOF
         admin:
