@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 from botocore.exceptions import ClientError
 
@@ -14,6 +16,7 @@ from Platform.pipelines.overlay_tasks import (
     _publish_overlay_set_ready,
     _put_dynamo_immutable,
     _put_s3_immutable,
+    _resolve_model_version_for_execution,
 )
 
 
@@ -185,3 +188,108 @@ def test_gate_token_keeps_the_winning_creation_time_and_ready_state():
     assert gate["status"] == "ready"
     assert gate["created_at"] == "2026-07-15T00:00:00Z"
     assert gate["request_identity"] == "a" * 64
+
+
+class _MLflowClient:
+    def __init__(self, versions, runs):
+        self.versions = versions
+        self.runs = runs
+
+    def search_model_versions(self, query):
+        assert query == "name='auto-e2e-driving-policy'"
+        return self.versions
+
+    def get_run(self, run_id):
+        return self.runs[run_id]
+
+
+def _model_version(version, run_id, digest):
+    return SimpleNamespace(
+        version=str(version),
+        run_id=run_id,
+        tags={"checkpoint_sha256": digest} if digest else {},
+    )
+
+
+def _run(execution_id, *, dataset_version="v2.1"):
+    return SimpleNamespace(
+        data=SimpleNamespace(
+            params={
+                "ctx/train_execution_id": execution_id,
+                "data/dataset": "KIT-MRT/KITScenes-Multimodal",
+                "data/dataset_version": dataset_version,
+            },
+            tags={},
+        )
+    )
+
+
+def _resolve(client):
+    return _resolve_model_version_for_execution(
+        client,
+        registered_model_name="auto-e2e-driving-policy",
+        train_execution_id="a1234567890123456789",
+        expected_dataset="KIT-MRT/KITScenes-Multimodal",
+        expected_dataset_version="v2.1",
+    )
+
+
+def test_full_run_model_resolution_uses_exact_execution_lineage():
+    client = _MLflowClient(
+        [
+            _model_version(40, "other", "b" * 64),
+            _model_version(41, "target", "a" * 64),
+        ],
+        {
+            "other": _run("a0000000000000000000"),
+            "target": _run("a1234567890123456789"),
+        },
+    )
+
+    assert _resolve(client) == "41"
+
+
+def test_full_run_model_resolution_dedupes_identical_re_evaluation():
+    client = _MLflowClient(
+        [
+            _model_version(41, "first", "a" * 64),
+            _model_version(43, "retry", "a" * 64),
+        ],
+        {
+            "first": _run("a1234567890123456789"),
+            "retry": _run("a1234567890123456789"),
+        },
+    )
+
+    assert _resolve(client) == "43"
+
+
+def test_full_run_model_resolution_rejects_ambiguous_checkpoints():
+    client = _MLflowClient(
+        [
+            _model_version(41, "first", "a" * 64),
+            _model_version(43, "retry", "b" * 64),
+        ],
+        {
+            "first": _run("a1234567890123456789"),
+            "retry": _run("a1234567890123456789"),
+        },
+    )
+
+    with pytest.raises(ValueError, match="checkpoint identity is ambiguous"):
+        _resolve(client)
+
+
+def test_full_run_model_resolution_checks_dataset_version():
+    client = _MLflowClient(
+        [_model_version(41, "target", "a" * 64)],
+        {
+            "target": _run(
+                "a1234567890123456789",
+                dataset_version="v2.0",
+            )
+        },
+    )
+
+    with pytest.raises(ValueError, match="different dataset coordinate"):
+        _resolve(client)
