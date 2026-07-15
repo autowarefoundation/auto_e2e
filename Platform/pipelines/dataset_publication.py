@@ -11,6 +11,7 @@ from typing import Any, Mapping, NamedTuple, Sequence
 
 
 PUBLICATION_SCHEMA = "v1"
+MAX_REASONING_LABELS = 100_000
 _DATASET_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
 _VERSION_RE = re.compile(r"^v[0-9]+(?:\.[0-9]+)*$")
 
@@ -269,6 +270,7 @@ def merge_partition_results(
     shard_names: set[str] = set()
     shards = []
     partitions = []
+    reasoning_label_count = 0
     for result in results:
         source_manifest = result["manifest"]
         partition_id = str(source_manifest.get("partition_id") or "")
@@ -292,14 +294,24 @@ def merge_partition_results(
             shard_names.add(name)
             shards.append(dict(shard))
 
+        partition_reasoning_count = int(
+            source_manifest.get("reasoning_label_count", 0)
+        )
+        if partition_reasoning_count < 0:
+            raise ValueError("reasoning label count must not be negative")
+        reasoning_label_count += partition_reasoning_count
+        if reasoning_label_count > MAX_REASONING_LABELS:
+            raise ValueError(
+                "reasoning label count exceeds materialization limit "
+                f"{MAX_REASONING_LABELS}"
+            )
+
         partitions.append({
             "partition_id": partition_id or None,
             "source_uri": result["source_uri"],
             "source_manifest_sha256": result["source_manifest_sha256"],
             "sample_count": int(source_manifest["total_samples"]),
-            "reasoning_label_count": int(
-                source_manifest.get("reasoning_label_count", 0)
-            ),
+            "reasoning_label_count": partition_reasoning_count,
             "shard_count": expected_shards,
             "pool": result["pool"],
         })
@@ -330,10 +342,7 @@ def merge_partition_results(
         "total_samples": sum(
             int(result["manifest"]["total_samples"]) for result in results
         ),
-        "reasoning_label_count": sum(
-            int(result["manifest"].get("reasoning_label_count", 0))
-            for result in results
-        ),
+        "reasoning_label_count": reasoning_label_count,
         "shards": len(shards),
         "shard_count": len(shards),
         "shard_entries": shards,
