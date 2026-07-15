@@ -38,17 +38,29 @@ func (h *ReasoningHandler) Stats(w http.ResponseWriter, r *http.Request) {
 }
 
 // PromptVersions handles
-// GET /api/v1/reasoning-labels/prompt-versions?dataset={name} — the
-// teacher/prompt_version partitions of ONE dataset's label cache with counts.
+// GET /api/v1/reasoning-labels/prompt-versions?dataset={name}&version={v} —
+// the teacher/prompt_version partitions of one immutable dataset version.
 func (h *ReasoningHandler) PromptVersions(w http.ResponseWriter, r *http.Request) {
 	dataset := r.URL.Query().Get("dataset")
 	if dataset == "" || strings.ContainsAny(dataset, "/\\") || strings.Contains(dataset, "..") {
 		writeError(w, http.StatusBadRequest, model.CodeInvalidParam, "missing or invalid dataset")
 		return
 	}
-	entries, err := h.s3.ReasoningPromptVersions(r.Context(), dataset)
+	version, ok := requestedVersion(r)
+	if !ok {
+		writeError(w, http.StatusBadRequest, model.CodeInvalidParam, "invalid version")
+		return
+	}
+	entries, err := h.s3.ReasoningPromptVersionsAtVersion(
+		r.Context(), dataset, version,
+	)
 	if err != nil {
-		slog.Error("reasoning prompt versions", "dataset", dataset, "error", err)
+		slog.Error(
+			"reasoning prompt versions",
+			"dataset", dataset,
+			"version", version,
+			"error", err,
+		)
 		writeError(w, http.StatusBadGateway, model.CodeS3Error, "failed to list reasoning prompt versions")
 		return
 	}
