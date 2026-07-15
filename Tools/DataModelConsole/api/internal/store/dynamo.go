@@ -189,10 +189,35 @@ func (s *DynamoStore) PutShardIndex(ctx context.Context, dataset, version, shard
 
 // GetStats returns a cached stats blob and its computed_at, or ErrNotFound.
 func (s *DynamoStore) GetStats(ctx context.Context, dataset, version, promptVersion string) (model.ReasoningStatsBlob, string, error) {
+	return s.getStats(
+		ctx, EmbeddedStatsPK(dataset, version, promptVersion),
+	)
+}
+
+// GetTeacherStats returns only the exact provider/model/prompt partition.
+func (s *DynamoStore) GetTeacherStats(
+	ctx context.Context,
+	dataset, version, teacherID, promptVersion string,
+) (model.ReasoningStatsBlob, string, error) {
+	if teacherID == "" {
+		return model.ReasoningStatsBlob{}, "", fmt.Errorf(
+			"teacher identity is required for stats",
+		)
+	}
+	return s.getStats(
+		ctx,
+		EmbeddedTeacherStatsPK(dataset, version, teacherID, promptVersion),
+	)
+}
+
+func (s *DynamoStore) getStats(
+	ctx context.Context,
+	pk string,
+) (model.ReasoningStatsBlob, string, error) {
 	out, err := s.client.GetItem(ctx, &dynamodb.GetItemInput{
 		TableName: aws.String(s.table),
 		Key: map[string]ddbtypes.AttributeValue{
-			"pk": &ddbtypes.AttributeValueMemberS{Value: EmbeddedStatsPK(dataset, version, promptVersion)},
+			"pk": &ddbtypes.AttributeValueMemberS{Value: pk},
 			"sk": &ddbtypes.AttributeValueMemberS{Value: metaSK},
 		},
 	})
@@ -217,20 +242,51 @@ func (s *DynamoStore) GetStats(ctx context.Context, dataset, version, promptVers
 // PutStats stores a stats blob with computed_at and n_labels. Returns the
 // computed_at timestamp it wrote so the caller can echo it in the response.
 func (s *DynamoStore) PutStats(ctx context.Context, dataset, version, promptVersion string, blob model.ReasoningStatsBlob) (string, error) {
+	return s.putStats(
+		ctx, EmbeddedStatsPK(dataset, version, promptVersion), "", blob,
+	)
+}
+
+// PutTeacherStats persists one exact provider/model/prompt aggregate.
+func (s *DynamoStore) PutTeacherStats(
+	ctx context.Context,
+	dataset, version, teacherID, promptVersion string,
+	blob model.ReasoningStatsBlob,
+) (string, error) {
+	if teacherID == "" {
+		return "", fmt.Errorf("teacher identity is required for stats")
+	}
+	return s.putStats(
+		ctx,
+		EmbeddedTeacherStatsPK(dataset, version, teacherID, promptVersion),
+		teacherID,
+		blob,
+	)
+}
+
+func (s *DynamoStore) putStats(
+	ctx context.Context,
+	pk, teacherID string,
+	blob model.ReasoningStatsBlob,
+) (string, error) {
 	payload, err := json.Marshal(blob)
 	if err != nil {
 		return "", fmt.Errorf("encode stats: %w", err)
 	}
 	computedAt := nowRFC3339()
+	item := map[string]ddbtypes.AttributeValue{
+		"pk":          &ddbtypes.AttributeValueMemberS{Value: pk},
+		"sk":          &ddbtypes.AttributeValueMemberS{Value: metaSK},
+		"payload":     &ddbtypes.AttributeValueMemberS{Value: string(payload)},
+		"computed_at": &ddbtypes.AttributeValueMemberS{Value: computedAt},
+		"n_labels":    &ddbtypes.AttributeValueMemberN{Value: fmt.Sprintf("%d", blob.NLabels)},
+	}
+	if teacherID != "" {
+		item["teacher_id"] = &ddbtypes.AttributeValueMemberS{Value: teacherID}
+	}
 	_, err = s.client.PutItem(ctx, &dynamodb.PutItemInput{
 		TableName: aws.String(s.table),
-		Item: map[string]ddbtypes.AttributeValue{
-			"pk":          &ddbtypes.AttributeValueMemberS{Value: EmbeddedStatsPK(dataset, version, promptVersion)},
-			"sk":          &ddbtypes.AttributeValueMemberS{Value: metaSK},
-			"payload":     &ddbtypes.AttributeValueMemberS{Value: string(payload)},
-			"computed_at": &ddbtypes.AttributeValueMemberS{Value: computedAt},
-			"n_labels":    &ddbtypes.AttributeValueMemberN{Value: fmt.Sprintf("%d", blob.NLabels)},
-		},
+		Item:      item,
 	})
 	if err != nil {
 		return "", fmt.Errorf("put stats: %w", err)
@@ -247,7 +303,7 @@ func (s *DynamoStore) PutStats(ctx context.Context, dataset, version, promptVers
 // UnprocessedItems. Idempotent: re-writing the same (field,value,sample_id) is
 // a harmless overwrite. Returns the number of rows written.
 func (s *DynamoStore) PutSceneLabels(ctx context.Context, dataset, promptVersion string, rows []SceneLabelRow) (int, error) {
-	return s.putSceneLabels(ctx, dataset, "", promptVersion, rows)
+	return s.putSceneLabels(ctx, dataset, "", "", promptVersion, rows)
 }
 
 // PutSceneLabelsForVersion writes sample_uid rows into the versioned LBLV2
@@ -260,12 +316,30 @@ func (s *DynamoStore) PutSceneLabelsForVersion(
 	if version == "" {
 		return 0, fmt.Errorf("dataset version is required for scene labels")
 	}
-	return s.putSceneLabels(ctx, dataset, version, promptVersion, rows)
+	return s.putSceneLabels(
+		ctx, dataset, version, "", promptVersion, rows,
+	)
+}
+
+// PutSceneLabelsForTeacherVersion writes one exact provider/model partition.
+func (s *DynamoStore) PutSceneLabelsForTeacherVersion(
+	ctx context.Context,
+	dataset, version, teacherID, promptVersion string,
+	rows []SceneLabelRow,
+) (int, error) {
+	if version == "" || teacherID == "" {
+		return 0, fmt.Errorf(
+			"dataset version and teacher identity are required for scene labels",
+		)
+	}
+	return s.putSceneLabels(
+		ctx, dataset, version, teacherID, promptVersion, rows,
+	)
 }
 
 func (s *DynamoStore) putSceneLabels(
 	ctx context.Context,
-	dataset, version, promptVersion string,
+	dataset, version, teacherID, promptVersion string,
 	rows []SceneLabelRow,
 ) (int, error) {
 	written := 0
@@ -280,9 +354,17 @@ func (s *DynamoStore) putSceneLabels(
 				dataset, promptVersion, row.Field, row.Value,
 			)
 			if version != "" {
-				pk = SceneLabelVersionPK(
-					dataset, version, promptVersion, row.Field, row.Value,
-				)
+				if teacherID == "" {
+					pk = SceneLabelVersionPK(
+						dataset, version, promptVersion,
+						row.Field, row.Value,
+					)
+				} else {
+					pk = SceneLabelTeacherVersionPK(
+						dataset, version, teacherID, promptVersion,
+						row.Field, row.Value,
+					)
+				}
 			}
 			item := map[string]ddbtypes.AttributeValue{
 				"pk":             &ddbtypes.AttributeValueMemberS{Value: pk},
@@ -293,6 +375,9 @@ func (s *DynamoStore) putSceneLabels(
 			}
 			if version != "" {
 				item["version"] = &ddbtypes.AttributeValueMemberS{Value: version}
+			}
+			if teacherID != "" {
+				item["teacher_id"] = &ddbtypes.AttributeValueMemberS{Value: teacherID}
 			}
 			reqs = append(reqs, ddbtypes.WriteRequest{
 				PutRequest: &ddbtypes.PutRequest{
@@ -355,6 +440,26 @@ func (s *DynamoStore) QueryScenesByLabelForVersion(
 	return s.queryScenesByLabel(
 		ctx,
 		SceneLabelVersionPK(dataset, version, promptVersion, field, value),
+		limit,
+	)
+}
+
+// QueryScenesByLabelForTeacherVersion reads only one exact teacher partition.
+func (s *DynamoStore) QueryScenesByLabelForTeacherVersion(
+	ctx context.Context,
+	dataset, version, teacherID, promptVersion, field, value string,
+	limit int,
+) ([]string, error) {
+	if version == "" || teacherID == "" {
+		return nil, fmt.Errorf(
+			"dataset version and teacher identity are required for scene search",
+		)
+	}
+	return s.queryScenesByLabel(
+		ctx,
+		SceneLabelTeacherVersionPK(
+			dataset, version, teacherID, promptVersion, field, value,
+		),
 		limit,
 	)
 }
