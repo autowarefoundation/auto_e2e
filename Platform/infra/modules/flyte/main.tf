@@ -96,6 +96,13 @@ resource "aws_iam_role_policy" "flyte_user_s3" {
         },
         {
           Effect = "Allow"
+          Action = ["s3:ListBucket"]
+          Resource = [
+            "arn:aws:s3:::${var.datasets_bucket}",
+          ]
+        },
+        {
+          Effect = "Allow"
           Action = ["dynamodb:GetItem", "dynamodb:PutItem"]
           Resource = [
             "arn:aws:dynamodb:${var.region}:${data.aws_caller_identity.current.account_id}:table/${var.console_dynamo_table_name}",
