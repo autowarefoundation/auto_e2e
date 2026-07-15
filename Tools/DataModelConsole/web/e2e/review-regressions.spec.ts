@@ -298,3 +298,68 @@ test("reasoning label reads retain the selected dataset version", async ({
   expect(query.get("prompt_version")).toBe("p1");
   expect(query.get("version")).toBe("v2.0");
 });
+
+test("reasoning prompt discovery follows the selected dataset version", async ({
+  page,
+}) => {
+  const promptRequests: Array<string | null> = [];
+  await page.route("**/api/v1/**", (route) => {
+    const url = new URL(route.request().url());
+    if (url.pathname === "/api/v1/datasets") {
+      return fulfillJSON(route, {
+        datasets: [
+          {
+            name: "review",
+            version: "v2.1",
+            prefix: "review/v2.1/shards/",
+          },
+        ],
+      });
+    }
+    if (url.pathname === "/api/v1/datasets/review/versions") {
+      return fulfillJSON(route, {
+        dataset: "review",
+        versions: [version("v2.1"), version("v2.0")],
+      });
+    }
+    if (url.pathname === "/api/v1/reasoning-labels/prompt-versions") {
+      const selectedVersion = url.searchParams.get("version");
+      promptRequests.push(selectedVersion);
+      const prompt =
+        selectedVersion === "v2.0" ? "prompt-old" : "prompt-new";
+      return fulfillJSON(route, {
+        dataset: "review",
+        prompt_versions: [
+          { teacher: "teacher", prompt_version: prompt, count: 2 },
+        ],
+      });
+    }
+    if (url.pathname === "/api/v1/reasoning-labels/stats-detail") {
+      const selectedVersion = url.searchParams.get("version") ?? "";
+      return fulfillJSON(route, {
+        dataset: "review",
+        version: selectedVersion,
+        prompt_version: url.searchParams.get("prompt_version"),
+        computed_at: "2026-07-15T00:00:00Z",
+        cached: true,
+        stats: {
+          n_labels: 2,
+          horizon_count: 10,
+          by_field: {},
+          confidence_histogram: [],
+        },
+      });
+    }
+    return route.fulfill({ status: 404, body: "not mocked" });
+  });
+
+  await page.goto(
+    "/reasoning-labels?dataset=review&version=v2.0&prompt_version=prompt-old",
+  );
+  await expect(page.locator("#rl-prompt")).toHaveValue("prompt-old");
+  expect(promptRequests).toContain("v2.0");
+
+  await page.locator("#rl-version").selectOption("v2.1");
+  await expect(page.locator("#rl-prompt")).toHaveValue("prompt-new");
+  expect(promptRequests).toContain("v2.1");
+});
