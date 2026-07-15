@@ -71,10 +71,11 @@ type OverlayPointer struct {
 
 // GeoRecord is the serving metadata for one privacy-filtered geo artifact set.
 type GeoRecord struct {
-	Summary    string `dynamodbav:"summary"`
-	GeoJSONKey string `dynamodbav:"geojson_key"`
-	NSamples   int    `dynamodbav:"n_samples"`
-	ComputedAt string `dynamodbav:"computed_at"`
+	Summary               string `dynamodbav:"summary"`
+	GeoJSONKey            string `dynamodbav:"geojson_key"`
+	NSamples              int    `dynamodbav:"n_samples"`
+	ComputedAt            string `dynamodbav:"computed_at"`
+	DatasetManifestSHA256 string `dynamodbav:"dataset_manifest_sha256"`
 }
 
 // ErrNotFound is returned when a requested item is absent from the table.
@@ -509,7 +510,15 @@ func (s *DynamoStore) queryScenesByLabel(
 
 // QueryReadyOverlayModels returns models advertised for one shard only after
 // both the pointer and its whole overlay-set gate are ready.
-func (s *DynamoStore) QueryReadyOverlayModels(ctx context.Context, dataset, version, shard string) ([]model.OverlayModel, error) {
+func (s *DynamoStore) QueryReadyOverlayModels(
+	ctx context.Context,
+	dataset, version, shard string,
+	expectedDatasetManifestSHA256 ...string,
+) ([]model.OverlayModel, error) {
+	expectedDigest, err := optionalSHA256(expectedDatasetManifestSHA256)
+	if err != nil {
+		return nil, err
+	}
 	pk := ShardModelPK(dataset, version, shard)
 	var models []model.OverlayModel
 	var startKey map[string]ddbtypes.AttributeValue
@@ -544,10 +553,11 @@ func (s *DynamoStore) QueryReadyOverlayModels(ctx context.Context, dataset, vers
 			}
 			if item.DatasetManifestSHA256 != set.DatasetManifestSHA256 ||
 				item.CacheIdentity != set.CacheIdentity {
-				return nil, fmt.Errorf(
-					"overlay pointer identity differs from ready set for model %s",
-					modelArtifactID,
-				)
+				continue
+			}
+			if expectedDigest != "" &&
+				set.DatasetManifestSHA256 != expectedDigest {
+				continue
 			}
 			models = append(models, model.OverlayModel{
 				ModelArtifactID:     modelArtifactID,
@@ -579,7 +589,15 @@ func (s *DynamoStore) QueryReadyOverlayModels(ctx context.Context, dataset, vers
 // GetReadyOverlayPointer resolves one pointer after enforcing the set-level
 // publication gate. A building set is intentionally indistinguishable from a
 // missing overlay to readers.
-func (s *DynamoStore) GetReadyOverlayPointer(ctx context.Context, dataset, version, shard, modelArtifactID string) (*OverlayPointer, error) {
+func (s *DynamoStore) GetReadyOverlayPointer(
+	ctx context.Context,
+	dataset, version, shard, modelArtifactID string,
+	expectedDatasetManifestSHA256 ...string,
+) (*OverlayPointer, error) {
+	expectedDigest, err := optionalSHA256(expectedDatasetManifestSHA256)
+	if err != nil {
+		return nil, err
+	}
 	out, err := s.client.GetItem(ctx, &dynamodb.GetItemInput{
 		TableName: aws.String(s.table),
 		Key: map[string]ddbtypes.AttributeValue{
@@ -607,6 +625,10 @@ func (s *DynamoStore) GetReadyOverlayPointer(ctx context.Context, dataset, versi
 	if item.DatasetManifestSHA256 != set.DatasetManifestSHA256 ||
 		item.CacheIdentity != set.CacheIdentity {
 		return nil, fmt.Errorf("overlay pointer identity differs from ready set")
+	}
+	if expectedDigest != "" &&
+		set.DatasetManifestSHA256 != expectedDigest {
+		return nil, ErrNotFound
 	}
 	if item.S3Key == "" || item.SHA256 == "" || item.ByteSize <= 0 || item.SampleCount <= 0 {
 		return nil, fmt.Errorf("overlay pointer is incomplete")
@@ -680,12 +702,41 @@ func (s *DynamoStore) GetGeoRecord(ctx context.Context, dataset, version string)
 	if !json.Valid([]byte(record.Summary)) || record.GeoJSONKey == "" {
 		return nil, fmt.Errorf("geo stats item is incomplete")
 	}
+	if !validSHA256(record.DatasetManifestSHA256) {
+		return nil, fmt.Errorf("geo stats item has invalid dataset manifest digest")
+	}
 	return &record, nil
 }
 
 // ---------------------------------------------------------------------------
 // helpers
 // ---------------------------------------------------------------------------
+
+func optionalSHA256(values []string) (string, error) {
+	if len(values) > 1 {
+		return "", fmt.Errorf("expected at most one dataset manifest digest")
+	}
+	if len(values) == 0 || values[0] == "" {
+		return "", nil
+	}
+	if !validSHA256(values[0]) {
+		return "", fmt.Errorf("invalid dataset manifest digest")
+	}
+	return values[0], nil
+}
+
+func validSHA256(value string) bool {
+	if len(value) != 64 {
+		return false
+	}
+	for _, char := range value {
+		if (char < '0' || char > '9') &&
+			(char < 'a' || char > 'f') {
+			return false
+		}
+	}
+	return true
+}
 
 func stringAttr(item map[string]ddbtypes.AttributeValue, name string) (string, error) {
 	av, ok := item[name]
