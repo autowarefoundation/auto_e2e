@@ -55,6 +55,7 @@ type DatasetVersion struct {
 	NumViews      int    `json:"num_views"`       // manifest num_views (cameras per sample)
 	HasMap        bool   `json:"has_map"`         // manifest has_map
 	HasWorldModel bool   `json:"has_world_model"` // manifest has_world_model
+	HasGPS        bool   `json:"has_gps"`         // v2.1 pose.npy/gps.npy members
 	SizeBytes     int64  `json:"size_bytes"`      // sum of shard .tar object sizes
 	HasManifest   bool   `json:"has_manifest"`    // whether shards/manifest.json was present
 }
