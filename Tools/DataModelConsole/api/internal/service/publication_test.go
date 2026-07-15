@@ -1,6 +1,7 @@
 package service
 
 import (
+	"archive/tar"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -16,6 +17,34 @@ import (
 	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/aws/smithy-go"
 )
+
+type testTarMember struct {
+	name string
+	body []byte
+}
+
+func encodeTestTar(t *testing.T, members []testTarMember) []byte {
+	t.Helper()
+	var body bytes.Buffer
+	writer := tar.NewWriter(&body)
+	for _, member := range members {
+		if err := writer.WriteHeader(&tar.Header{
+			Name:     member.name,
+			Mode:     0o644,
+			Size:     int64(len(member.body)),
+			Typeflag: tar.TypeReg,
+		}); err != nil {
+			t.Fatalf("write tar header %q: %v", member.name, err)
+		}
+		if _, err := writer.Write(member.body); err != nil {
+			t.Fatalf("write tar member %q: %v", member.name, err)
+		}
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close tar: %v", err)
+	}
+	return body.Bytes()
+}
 
 func validPublicationValue() map[string]any {
 	digest := strings.Repeat("a", 64)
@@ -497,6 +526,103 @@ func TestPublishedShardKeyRejectsOrphanName(t *testing.T) {
 		"orphan.tar",
 	); err != ErrNotFound {
 		t.Fatalf("orphan shard error = %v, want ErrNotFound", err)
+	}
+}
+
+func TestBuildShardIndexRejectsInvalidSampleContracts(t *testing.T) {
+	const (
+		shard     = "scene-a-train-000000.tar"
+		sampleUID = "kitscenes-v1-scene-a-f000000"
+	)
+	validMeta := []byte(`{
+		"frame_idx": 0,
+		"sample_uid": "kitscenes-v1-scene-a-f000000",
+		"split_group_uid": "kitscenes-scene-a",
+		"split_bucket": 4
+	}`)
+	tests := []struct {
+		name    string
+		members []testTarMember
+		wantErr bool
+	}{
+		{
+			name: "valid",
+			members: []testTarMember{
+				{name: sampleUID + ".cam_0.jpg", body: []byte("jpeg")},
+				{name: sampleUID + ".meta.json", body: validMeta},
+			},
+		},
+		{
+			name: "duplicate suffix",
+			members: []testTarMember{
+				{name: sampleUID + ".cam_0.jpg", body: []byte("first")},
+				{name: sampleUID + ".cam_0.jpg", body: []byte("second")},
+				{name: sampleUID + ".meta.json", body: validMeta},
+			},
+			wantErr: true,
+		},
+		{
+			name: "missing meta",
+			members: []testTarMember{
+				{name: sampleUID + ".cam_0.jpg", body: []byte("jpeg")},
+			},
+			wantErr: true,
+		},
+		{
+			name: "malformed meta",
+			members: []testTarMember{
+				{name: sampleUID + ".meta.json", body: []byte(`{"frame_idx":`)},
+			},
+			wantErr: true,
+		},
+		{
+			name: "sample uid mismatch",
+			members: []testTarMember{
+				{
+					name: sampleUID + ".meta.json",
+					body: []byte(`{
+						"frame_idx": 0,
+						"sample_uid": "kitscenes-v1-other-f000000",
+						"split_group_uid": "kitscenes-scene-a",
+						"split_bucket": 4
+					}`),
+				},
+			},
+			wantErr: true,
+		},
+		{
+			name: "nested member path",
+			members: []testTarMember{
+				{name: "nested/" + sampleUID + ".meta.json", body: validMeta},
+			},
+			wantErr: true,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			service, client := newPublicationTestService(t)
+			key := "kitscenes/v2.1/shards/" + shard
+			client.objects[key] = fakePublicationObject{
+				body:     encodeTestTar(t, test.members),
+				metadata: map[string]string{},
+			}
+			index, err := service.buildShardIndexUncached(
+				context.Background(), "kitscenes", "v2.1", shard,
+			)
+			if test.wantErr {
+				if err == nil {
+					t.Fatalf("invalid tar produced index %+v", index)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(index.Samples) != 1 ||
+				index.Samples[0].SampleUID != sampleUID {
+				t.Fatalf("index = %+v", index)
+			}
+		})
 	}
 }
 
