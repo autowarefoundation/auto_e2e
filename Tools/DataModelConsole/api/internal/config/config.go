@@ -27,8 +27,8 @@ type Config struct {
 	// DynamoTable is the single-table DynamoDB cache backing shard indexes,
 	// precomputed reasoning stats, and the scene-by-label search index.
 	DynamoTable string
-	// ExactGeoEnabled gates raw episode routes. It defaults false because the
-	// current CloudFront distribution has no authenticated viewer identity.
+	// ExactGeoEnabled gates raw episode routes. Authentication middleware must
+	// also attach a verified principal; viewer-supplied headers are ignored.
 	ExactGeoEnabled      bool
 	ExactGeoRequiredRole string
 }
