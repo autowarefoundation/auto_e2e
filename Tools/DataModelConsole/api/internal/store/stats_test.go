@@ -218,8 +218,11 @@ func TestAggregateStats_AcrossHorizons(t *testing.T) {
 
 	blob := AggregateStats(labels)
 
-	if blob.NLabels != 2 {
-		t.Errorf("NLabels = %d, want 2", blob.NLabels)
+	if blob.NRecords != 2 || blob.NLabels != 2 || blob.NAbstained != 0 {
+		t.Errorf(
+			"record counts = (%d total, %d labels, %d abstained), want (2, 2, 0)",
+			blob.NRecords, blob.NLabels, blob.NAbstained,
+		)
 	}
 	if blob.HorizonCount != 3 {
 		t.Errorf("HorizonCount = %d, want 3 (2 + 1)", blob.HorizonCount)
@@ -259,6 +262,40 @@ func TestAggregateStats_AcrossHorizons(t *testing.T) {
 	}
 	if len(blob.ConfidenceHistogram) != 10 {
 		t.Errorf("confidence histogram len = %d, want 10 fixed buckets", len(blob.ConfidenceHistogram))
+	}
+}
+
+func TestAggregateStatsSeparatesExplicitAbstentions(t *testing.T) {
+	labels := []ReasoningLabel{
+		{
+			SampleID: "success",
+			Horizons: []LabelHorizon{{
+				RelationToEgo: "outside_path",
+				HazardEvent:   []string{"no_hazard"},
+				Confidence:    0.8,
+			}},
+		},
+		{
+			SampleID:     "abstained",
+			Abstained:    true,
+			TeacherError: "timeout",
+		},
+	}
+	blob := AggregateStats(labels)
+	if blob.NRecords != 2 ||
+		blob.NLabels != 1 ||
+		blob.NAbstained != 1 ||
+		blob.HorizonCount != 1 {
+		t.Fatalf("abstention counts = %+v", blob)
+	}
+	if rows := SceneLabelRows(ReasoningLabel{
+		SampleID:  "abstained",
+		Abstained: true,
+		Horizons: []LabelHorizon{{
+			RelationToEgo: "outside_path",
+		}},
+	}); rows != nil {
+		t.Fatalf("abstained label produced scene rows: %+v", rows)
 	}
 }
 
