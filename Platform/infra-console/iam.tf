@@ -7,18 +7,25 @@
 data "aws_caller_identity" "current" {}
 
 variable "datasets_bucket_name" {
-  type    = string
-  default = "auto-e2e-platform-datasets-381491877296"
+  type        = string
+  default     = null
+  description = "Optional override; defaults to the Platform datasets bucket in expected_aws_account_id"
 }
 
 variable "artifacts_bucket_name" {
-  type    = string
-  default = "auto-e2e-platform-artifacts-381491877296"
+  type        = string
+  default     = null
+  description = "Optional override; defaults to the Platform artifacts bucket in expected_aws_account_id"
 }
 
 variable "dynamo_table_name" {
   type    = string
   default = "auto-e2e-console"
+}
+
+locals {
+  datasets_bucket_name  = coalesce(var.datasets_bucket_name, "${var.cluster_name}-datasets-${var.expected_aws_account_id}")
+  artifacts_bucket_name = coalesce(var.artifacts_bucket_name, "${var.cluster_name}-artifacts-${var.expected_aws_account_id}")
 }
 
 resource "aws_iam_role" "console_api" {
@@ -34,6 +41,10 @@ resource "aws_iam_role" "console_api" {
   })
 
   tags = { Service = "DataModelConsole" }
+
+  lifecycle {
+    prevent_destroy = true
+  }
 }
 
 resource "aws_iam_role_policy" "console_api_s3_readonly" {
@@ -46,10 +57,10 @@ resource "aws_iam_role_policy" "console_api_s3_readonly" {
       Effect = "Allow"
       Action = ["s3:GetObject", "s3:ListBucket", "s3:GetBucketLocation"]
       Resource = [
-        "arn:aws:s3:::${var.datasets_bucket_name}",
-        "arn:aws:s3:::${var.datasets_bucket_name}/*",
-        "arn:aws:s3:::${var.artifacts_bucket_name}",
-        "arn:aws:s3:::${var.artifacts_bucket_name}/*",
+        "arn:aws:s3:::${local.datasets_bucket_name}",
+        "arn:aws:s3:::${local.datasets_bucket_name}/*",
+        "arn:aws:s3:::${local.artifacts_bucket_name}",
+        "arn:aws:s3:::${local.artifacts_bucket_name}/*",
       ]
     }]
   })
@@ -79,6 +90,10 @@ resource "aws_eks_pod_identity_association" "console_api" {
   namespace       = "console"
   service_account = "console-api"
   role_arn        = aws_iam_role.console_api.arn
+
+  lifecycle {
+    prevent_destroy = true
+  }
 }
 
 output "console_api_role_arn" {
