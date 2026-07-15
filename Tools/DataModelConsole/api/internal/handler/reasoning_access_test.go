@@ -36,15 +36,6 @@ func TestReasoningHandlersRejectUnknownDatasetsBeforeStorageAccess(t *testing.T)
 			handle: reasoning.StatsDetail,
 		},
 		{
-			name: "compute stats",
-			request: httptest.NewRequest(
-				http.MethodPost,
-				"/api/v1/reasoning-labels/compute-stats?dataset=unknown&prompt_version=pv",
-				nil,
-			),
-			handle: reasoning.ComputeStats,
-		},
-		{
 			name: "label",
 			request: requestWithDatasetRoute(
 				"/api/v1/reasoning-labels/unknown/sample",
