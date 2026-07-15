@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { LocateFixed, ZoomIn, ZoomOut } from "lucide-react";
 
 import { geoToWorldPixel, worldPixelToGeo } from "@/lib/geo";
@@ -8,11 +8,13 @@ import type { GeoPoint, WorldPixel } from "@/lib/geo";
 import { cn } from "@/lib/utils";
 
 const TILE_SIZE = 256;
+const KEYBOARD_PAN_PX = 64;
 
 export interface MapPath {
   id: string;
   points: GeoPoint[];
   color: string;
+  label?: string;
   width?: number;
   opacity?: number;
   dash?: string;
@@ -58,6 +60,7 @@ export function SlippyMap({
   ariaLabel: string;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
+  const instructionsId = useId();
   const [size, setSize] = useState({ width: 960, height: 480 });
   const [viewCenter, setViewCenter] = useState(center);
   const [zoom, setZoom] = useState(
@@ -154,15 +157,45 @@ export function SlippyMap({
     );
   };
 
+  const panView = (deltaX: number, deltaY: number) => {
+    setViewCenter((current) => {
+      const pixel = geoToWorldPixel(current, zoom);
+      return worldPixelToGeo(
+        {
+          x: pixel.x + deltaX,
+          y: Math.max(0, Math.min(worldSize, pixel.y + deltaY)),
+        },
+        zoom,
+      );
+    });
+  };
+
   return (
     <div
       ref={containerRef}
       className={cn(
-        "relative min-h-72 w-full touch-none overflow-hidden border border-slate-800 bg-slate-900",
+        "relative min-h-72 w-full touch-none overflow-hidden border border-slate-800 bg-slate-900 outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-slate-300",
         className,
       )}
-      role="img"
+      role="region"
+      tabIndex={0}
       aria-label={ariaLabel}
+      aria-describedby={instructionsId}
+      aria-keyshortcuts="ArrowUp ArrowDown ArrowLeft ArrowRight"
+      onKeyDown={(event) => {
+        if (event.target !== event.currentTarget) return;
+        const delta = {
+          ArrowUp: [0, -KEYBOARD_PAN_PX],
+          ArrowDown: [0, KEYBOARD_PAN_PX],
+          ArrowLeft: [-KEYBOARD_PAN_PX, 0],
+          ArrowRight: [KEYBOARD_PAN_PX, 0],
+        }[event.key];
+        if (!delta) return;
+        event.preventDefault();
+        event.stopPropagation();
+        event.nativeEvent.stopImmediatePropagation();
+        panView(delta[0], delta[1]);
+      }}
       onPointerDown={(event) => {
         if (event.button !== 0) return;
         event.currentTarget.setPointerCapture(event.pointerId);
@@ -301,6 +334,31 @@ export function SlippyMap({
         >
           OpenStreetMap contributors
         </a>
+      </div>
+
+      <div className="sr-only">
+        <p id={instructionsId}>Use the arrow keys to pan the map.</p>
+        {paths.length > 0 && (
+          <ul aria-label="Map paths">
+            {paths.map((path) => (
+              <li key={path.id}>
+                {(path.label ?? path.id).replaceAll(/[-_]/g, " ")} path,{" "}
+                {path.points.length} points
+              </li>
+            ))}
+          </ul>
+        )}
+        {markers.length > 0 && (
+          <ul aria-label="Map markers">
+            {markers.map((marker) => (
+              <li key={marker.id}>
+                {marker.label ?? marker.id.replaceAll(/[-_]/g, " ")},
+                latitude {marker.point.latitude.toFixed(5)}, longitude{" "}
+                {marker.point.longitude.toFixed(5)}
+              </li>
+            ))}
+          </ul>
+        )}
       </div>
     </div>
   );
