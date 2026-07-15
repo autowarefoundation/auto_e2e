@@ -323,8 +323,6 @@ def _parse_gate(value: str) -> dict[str, str]:
         **OVERLAY_TASK_ENV,
         "MLFLOW_TRACKING_URI": MLFLOW_URI,
     },
-    cache=True,
-    cache_version="overlay-model-resolution-v1",
 )
 def resolve_overlay_model(
     registered_model_name: str,
