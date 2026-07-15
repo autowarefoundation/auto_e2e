@@ -20,8 +20,12 @@ from Platform.pipelines.overlay import OVERLAY_SCHEMA
 ECR_PREFIX = os.environ.get(
     "ECR_PREFIX", "381491877296.dkr.ecr.us-west-2.amazonaws.com"
 )
-EVAL_IMAGE = f"{ECR_PREFIX}/auto-e2e/eval:latest"
+EVAL_IMAGE = os.environ.get(
+    "AUTO_E2E_EVAL_IMAGE",
+    f"{ECR_PREFIX}/auto-e2e/eval:latest",
+)
 MLFLOW_URI = "http://mlflow.mlflow.svc.cluster.local:5000"
+OVERLAY_TASK_ENV = {"AUTO_E2E_TASK_IMAGE": EVAL_IMAGE}
 OVERLAY_CACHE_VERSION = (
     f"overlay-{OVERLAY_SCHEMA}-{INFERENCE_CONTRACT_VERSION}-"
     f"{NOISE_POLICY_VERSION}"
@@ -44,6 +48,21 @@ def _required(value: str, name: str) -> str:
     if not value:
         raise ValueError(f"{name} must be provided")
     return value
+
+
+def _validate_runtime_contract(
+    preprocessing_contract_digest: str,
+    model_inference_code_digest: str,
+    container_image_digest: str,
+) -> str:
+    from Platform.pipelines.reproducibility import validate_runtime_contract
+
+    return validate_runtime_contract(
+        preprocessing_digest=preprocessing_contract_digest,
+        inference_code_digest=model_inference_code_digest,
+        container_image_digest=container_image_digest,
+        task_image=os.environ.get("AUTO_E2E_TASK_IMAGE", EVAL_IMAGE),
+    )
 
 
 def _error_code(exc: Exception) -> str:
@@ -300,7 +319,10 @@ def _parse_gate(value: str) -> dict[str, str]:
     container_image=EVAL_IMAGE,
     requests=Resources(cpu="1", mem="2Gi"),
     limits=Resources(cpu="1", mem="2Gi"),
-    environment={"MLFLOW_TRACKING_URI": MLFLOW_URI},
+    environment={
+        **OVERLAY_TASK_ENV,
+        "MLFLOW_TRACKING_URI": MLFLOW_URI,
+    },
     cache=True,
     cache_version="overlay-model-resolution-v1",
 )
@@ -382,6 +404,7 @@ def resolve_overlay_model(
     container_image=EVAL_IMAGE,
     requests=Resources(cpu="1", mem="2Gi"),
     limits=Resources(cpu="1", mem="2Gi"),
+    environment=OVERLAY_TASK_ENV,
 )
 def prepare_overlay_set(
     resolved_metadata: FlyteFile,
@@ -428,6 +451,11 @@ def prepare_overlay_set(
         raise ValueError(
             "only sampler='model-default' is implemented by policy inference"
         )
+    container_image_digest = _validate_runtime_contract(
+        preprocessing_contract_digest,
+        model_inference_code_digest,
+        container_image_digest,
+    )
     metadata = json.loads(Path(resolved_metadata.download()).read_text())
     model_artifact_id = metadata["checkpoint_sha256"]
     request_identity = overlay_request_identity(
@@ -511,6 +539,7 @@ def prepare_overlay_set(
     container_image=EVAL_IMAGE,
     requests=Resources(cpu="4", mem="16Gi", gpu="1"),
     limits=Resources(cpu="4", mem="16Gi", gpu="1"),
+    environment=OVERLAY_TASK_ENV,
     cache=True,
     cache_version=OVERLAY_CACHE_VERSION,
     cache_serialize=True,
@@ -553,7 +582,6 @@ def precompute_overlay_partition(
         planner_is_deterministic,
     )
     from Platform.pipelines.overlay_store import (
-        canonical_container_digest,
         overlay_cache_identity,
         overlay_pointer_item,
         overlay_request_identity,
@@ -573,6 +601,11 @@ def precompute_overlay_partition(
         raise ValueError(
             "only sampler='model-default' is implemented by policy inference"
         )
+    container_image_digest = _validate_runtime_contract(
+        preprocessing_contract_digest,
+        model_inference_code_digest,
+        container_image_digest,
+    )
 
     torch.use_deterministic_algorithms(True)
     if torch.backends.cudnn.is_available():
@@ -634,9 +667,6 @@ def precompute_overlay_partition(
         [int(base_seeds[0])]
         if deterministic_planner
         else [int(seed) for seed in base_seeds]
-    )
-    container_image_digest = canonical_container_digest(
-        container_image_digest
     )
 
     local_dir = Path(shard_dir.download()).resolve()
@@ -821,6 +851,7 @@ def precompute_overlay_partition(
     container_image=EVAL_IMAGE,
     requests=Resources(cpu="1", mem="2Gi"),
     limits=Resources(cpu="1", mem="2Gi"),
+    environment=OVERLAY_TASK_ENV,
 )
 def finalize_overlay_set(
     model_metadata: FlyteFile,
@@ -894,6 +925,11 @@ def finalize_overlay_set(
         "gpu_model",
     )
     reference = {field: results[0].get(field) for field in result_fields}
+    _validate_runtime_contract(
+        reference["preprocessing_contract_digest"],
+        reference["model_inference_code_digest"],
+        reference["container_image_digest"],
+    )
     for index, result in enumerate(results):
         mismatches = [
             field
