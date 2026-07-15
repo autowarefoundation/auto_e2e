@@ -615,7 +615,7 @@ export function EpisodePlayer({
         displayMode={predictionMode}
         onDisplayModeChange={setPredictionMode}
         status={overlayStatus}
-        seedCount={overlay?.seedCount ?? 0}
+        baseSeeds={overlay?.baseSeeds ?? []}
         splitBucket={sample?.split_bucket}
       />
       <div className="grid gap-4 xl:grid-cols-[1fr_300px]">
