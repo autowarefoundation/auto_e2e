@@ -436,6 +436,7 @@ type shardManifest struct {
 	NumViews      int  `json:"num_views"`
 	HasMap        bool `json:"has_map"`
 	HasWorldModel bool `json:"has_world_model"`
+	HasGPS        bool `json:"has_gps"`
 }
 
 // ListDatasetVersions lists every published version under <dataset>/ that has
@@ -487,6 +488,7 @@ func (s *S3Service) datasetVersionSummary(ctx context.Context, dataset, version 
 			dv.NumViews = m.NumViews
 			dv.HasMap = m.HasMap
 			dv.HasWorldModel = m.HasWorldModel
+			dv.HasGPS = m.HasGPS
 			dv.HasManifest = true
 		}
 	} else if !errors.Is(err, ErrNotFound) {
