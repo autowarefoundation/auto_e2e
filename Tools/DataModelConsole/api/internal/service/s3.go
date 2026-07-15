@@ -307,17 +307,23 @@ func (s *S3Service) EpisodePath(ctx context.Context, dataset, version, episode s
 		}
 	}
 	version = s.versionOrResolve(ctx, dataset, version)
-	stem := episode
-	if dataset == "l2d" {
-		if numeric, err := strconv.ParseUint(episode, 10, 64); err == nil {
-			stem = fmt.Sprintf("%06d", numeric)
-		}
-	}
+	stem := episodePathStem(dataset, episode)
 	key := fmt.Sprintf(
 		"%s/%s/geo/episode_paths/%s.f64", dataset, version, stem,
 	)
 	body, err := s.getObjectBytesFromBucket(ctx, s.bucket, key, MaxRangeBytes)
 	return body, version, err
+}
+
+func episodePathStem(dataset, episode string) string {
+	if dataset != "l2d" {
+		return episode
+	}
+	numeric, err := strconv.ParseUint(episode, 10, 64)
+	if err != nil {
+		return episode
+	}
+	return fmt.Sprintf("%06d", numeric)
 }
 
 // resolveVersion returns the newest published version for a dataset: the
