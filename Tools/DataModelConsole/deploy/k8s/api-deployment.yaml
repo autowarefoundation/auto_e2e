@@ -59,8 +59,8 @@ spec:
                 configMapKeyRef:
                   name: console-config
                   key: cors-origin
-            # Exact GPS remains closed until viewer authentication injects a
-            # trusted X-Console-Roles header at the edge.
+            # Exact GPS remains closed until API authentication verifies the
+            # viewer and attaches a trusted request principal.
             - name: EXACT_GEO_ENABLED
               value: "false"
             - name: EXACT_GEO_REQUIRED_ROLE
