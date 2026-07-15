@@ -9,6 +9,7 @@ import pytest
 pytest.importorskip("flytekit")
 
 from flytekit import map_task
+from flytekit.configuration import ImageConfig, SerializationSettings
 
 from Platform.pipelines import workflows
 from data_parsing.kit_scenes.source import InventoryResolution, SceneArchive
@@ -100,6 +101,34 @@ def test_dataset_dynamic_propagates_the_pinned_data_prep_image():
     assert workflows._map_dataset_partitions.environment == {
         "AUTO_E2E_DATA_PREP_IMAGE": workflows.DATA_PREP_IMAGE,
     }
+
+
+def test_data_prep_tasks_serialize_karpenter_disruption_protection():
+    settings = SerializationSettings(
+        image_config=ImageConfig.auto_default_image(),
+        project="auto-e2e",
+        domain="development",
+        version="test",
+    )
+    expected = {"karpenter.sh/do-not-disrupt": "true"}
+
+    for task in (
+        workflows.data_ingest,
+        workflows.generate_reasoning_labels,
+        workflows.data_processing,
+    ):
+        assert task.get_k8s_pod(settings).metadata.annotations == expected
+
+    mapped = map_task(
+        functools.partial(
+            workflows.data_ingest,
+            dataset=workflows.Dataset.KITSCENES,
+            source_revision=workflows.KITSCENES_SOURCE_REVISION,
+            episodes=0,
+        ),
+        concurrency=60,
+    )
+    assert mapped.get_k8s_pod(settings).metadata.annotations == expected
 
 
 def test_reasoning_selection_bootstraps_short_scenes():

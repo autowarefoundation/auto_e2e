@@ -77,6 +77,15 @@ LABEL_CACHE_VERSION = f"label-{_PARSER_V}-{_UID_V}-{_LABEL_POLICY_V}"
 PACK_CACHE_VERSION = f"pack-{_PARSER_V}-{_UID_V}-{_SHARD_V}-{_GEOM_V}"
 
 
+def _data_prep_pod_template():
+    """Protect active data-prep pods from voluntary Karpenter disruption."""
+    from flytekit import PodTemplate
+
+    return PodTemplate(
+        annotations={"karpenter.sh/do-not-disrupt": "true"},
+    )
+
+
 def _large_shm_pod_template():
     """PodTemplate that mounts a large tmpfs at /dev/shm (#121 P0).
 
@@ -420,6 +429,7 @@ def plan_fanout_partitions(
 # ============================================================
 @task(
     container_image=DATA_PREP_IMAGE,
+    pod_template=_data_prep_pod_template(),
     # KITScenes production fan-out is one scene per pod. Its largest pinned
     # archive is 20.12 GiB; download+extract briefly holds about twice that, so
     # 60Gi fits the EKS Auto Mode default NodeClass (~70Gi allocatable disk).
@@ -734,6 +744,7 @@ def data_ingest(
 # ============================================================
 @task(
     container_image=DATA_PREP_IMAGE,
+    pod_template=_data_prep_pod_template(),
     # Process-parallel pack workers use the pod's available cores for camera
     # decode/JPEG. The deduplicated WM path decodes each physical row once.
     # KITScenes one-scene partitions use the same schedulable Guaranteed profile
@@ -1254,6 +1265,7 @@ def data_processing(
 # ============================================================
 @task(
     container_image=DATA_PREP_IMAGE,
+    pod_template=_data_prep_pod_template(),
     # Process-parallel front-clip decode overlaps the remote teacher calls.
     # KITScenes uses two workers over one scene per pod, so 64Gi has ample decode
     # headroom while keeping each pod schedulable on a 16-vCPU node. The 60Gi
