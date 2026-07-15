@@ -12,6 +12,8 @@ from urllib.parse import urlparse
 
 RECOVERY_MANIFEST_SCHEMA = "kitscenes_recovery_manifest_v1"
 KNOWN_MISSING_TRAIN_SCENE = "0aef5c74-debd-67ee-c41a-72bb6c82b221"
+AUDITED_LABEL_COUNT = 4_598
+AUDITED_EMPTY_SCENE_COUNT = 129
 _SCENE_ID_RE = re.compile(
     r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-"
     r"[0-9a-f]{4}-[0-9a-f]{12}$"
@@ -61,6 +63,8 @@ def validate_recovery_manifest(
     expected_dataset: str,
     expected_source_revision: str,
     expected_scene_ids: Sequence[str],
+    expected_label_count: int | None = None,
+    expected_empty_scene_count: int | None = None,
 ) -> list[dict[str, Any]]:
     """Validate a recovery manifest before constructing mapped pack nodes."""
     if manifest.get("schema_version") != RECOVERY_MANIFEST_SCHEMA:
@@ -143,6 +147,30 @@ def validate_recovery_manifest(
                 )
             seen.add(value)
         normalized.append(entry)
+
+    actual_label_count = sum(
+        entry["expected_label_count"] for entry in normalized
+    )
+    actual_empty_scene_count = sum(
+        entry["expected_label_count"] == 0 for entry in normalized
+    )
+    if (
+        expected_label_count is not None
+        and actual_label_count != expected_label_count
+    ):
+        raise ValueError(
+            "recovery label total differs from the audited artifact set: "
+            f"expected={expected_label_count} actual={actual_label_count}"
+        )
+    if (
+        expected_empty_scene_count is not None
+        and actual_empty_scene_count != expected_empty_scene_count
+    ):
+        raise ValueError(
+            "recovery empty-scene count differs from the audited artifact set: "
+            f"expected={expected_empty_scene_count} "
+            f"actual={actual_empty_scene_count}"
+        )
 
     expected = list(expected_scene_ids)
     actual = [entry["scene_id"] for entry in normalized]
