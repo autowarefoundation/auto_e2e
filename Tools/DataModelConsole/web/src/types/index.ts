@@ -38,6 +38,7 @@ export interface DatasetVersion {
   num_views: number;
   has_map: boolean;
   has_world_model: boolean;
+  has_gps: boolean;
   size_bytes: number;
   has_manifest: boolean;
 }
@@ -108,6 +109,9 @@ export interface MemberRange {
 // ego_future: 128 floats = 64 steps x [accel, curvature] — the future plan.
 export interface IndexSample {
   key: string;
+  sample_uid: string;
+  split_group_uid: string;
+  split_bucket: number;
   episode_id: string;
   frame_idx: number; // intra-shard playback ordinal (key suffix)
   trip_frame: number; // trip-global frame index from meta.json (-1 if absent)
@@ -115,7 +119,16 @@ export interface IndexSample {
   ego_now: number[];
   ego_history: number[]; // 256 floats = 64 steps x [speed, accel, yaw_rate, curvature]
   ego_future: number[];
+  pose_current?: GeoPose;
   has_reasoning: boolean;
+}
+
+export interface GeoPose {
+  latitude_deg: number;
+  longitude_deg: number;
+  heading_deg_cw_from_north: number;
+  timestamp_ns: string;
+  gps_accuracy_m: number | null;
 }
 
 // ShardIndex is GET .../shards/{shard}/index — everything the client needs
@@ -123,7 +136,80 @@ export interface IndexSample {
 // endpoint).
 export interface ShardIndex {
   fps: number; // 10
+  version: string;
+  shard: string;
   samples: IndexSample[];
+}
+
+// ---------------------------------------------------------------------------
+// Model trajectory overlays and geographic products
+// ---------------------------------------------------------------------------
+
+export interface OverlayModel {
+  model_artifact_id: string;
+  registered_model_name: string;
+  model_version: number;
+  run_id: string;
+  model_name: string;
+  eval_ade: number;
+  eval_fde: number;
+  val_fraction: number;
+  overlay_schema: string;
+  sample_count: number;
+}
+
+export interface OverlayModelsResponse {
+  dataset: string;
+  version: string;
+  shard: string;
+  models: OverlayModel[];
+}
+
+export interface RigProjectionDocument {
+  schema_version: string;
+  dataset: string;
+  geometry_type: "pinhole" | "rectified_pinhole" | "ftheta" | "pseudo";
+  image_size?: number | [number, number];
+  projection: Record<string, unknown> | null;
+}
+
+export interface GeoSummary {
+  schema_version?: string;
+  bbox: [number, number, number, number] | null;
+  episode_count: number;
+  path_point_count: number;
+  sample_pose_count: number;
+  privacy?: {
+    k_anonymity: number;
+    endpoint_exclusion_frames: number;
+    heatmap_grid_degrees: number;
+  };
+}
+
+export interface GeoStats {
+  dataset: string;
+  version: string;
+  summary: GeoSummary;
+  heatmap_url?: string;
+  n_samples: number;
+  computed_at?: string;
+}
+
+export interface GeoJSONPointFeature {
+  type: "Feature";
+  geometry: {
+    type: "Point";
+    coordinates: [number, number];
+  };
+  properties: {
+    sample_count: number;
+    episode_count: number;
+  };
+}
+
+export interface GeoJSONFeatureCollection {
+  type: "FeatureCollection";
+  features: GeoJSONPointFeature[];
 }
 
 // ---------------------------------------------------------------------------
