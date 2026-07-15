@@ -44,22 +44,26 @@ function PlayerPageInner({
   const searchParams = useSearchParams();
   // Pinned dataset version (from the detail page). Empty = API auto-newest.
   const version = searchParams.get("version") ?? "";
-  // Pinned reasoning prompt_version so the player shows labels from ONE run,
-  // not an arbitrary partition. Empty = API default (first partition found).
+  // Pinned reasoning provenance so the player shows labels from one exact run.
+  const teacher = searchParams.get("teacher") ?? "";
   const promptVersion = searchParams.get("prompt_version") ?? "";
 
   const { data, error, loading, reload } = useApi(
     () => getShardIndex(dataset, shard, version || undefined),
     [dataset, shard, version],
   );
+  // An auto-resolved index is still an immutable snapshot. Pin every
+  // downstream read to the version returned with that index so a later
+  // publication cannot mix old byte ranges with new shard/overlay/rig bodies.
+  const effectiveVersion = version || data?.version || "";
 
   // Same-trip continuity: NVIDIA ships multiple name-sorted shards, so offer a
   // link to the lexicographic neighbor shards (playback dead-ends at the last
   // frame otherwise). A single-shard dataset (L2D) resolves to no neighbors, so
   // no control renders — correctly a non-issue there.
   const shardList = useApi(
-    () => listShardsForEpisode(dataset, version || undefined),
-    [dataset, version],
+    () => listShardsForEpisode(dataset, effectiveVersion || undefined),
+    [dataset, effectiveVersion],
   );
   const { prevShard, nextShard } = useMemo(() => {
     const names = (shardList.data ?? []).map((s) => s.name);
@@ -70,11 +74,16 @@ function PlayerPageInner({
       nextShard: i < names.length - 1 ? names[i + 1] : null,
     };
   }, [shardList.data, shard]);
-  // Neighbor-shard links carry the pinned version so switching shards stays on
-  // the same dataset version.
-  const versionQuery = version ? `?version=${encodeURIComponent(version)}` : "";
+  // Neighbor-shard links retain model, reasoning, camera, and display state as
+  // well as the immutable version.
+  const viewQuery = new URLSearchParams(searchParams.toString());
+  if (effectiveVersion) viewQuery.set("version", effectiveVersion);
+  const viewQueryString = viewQuery.toString();
+  const versionQuery = effectiveVersion
+    ? `?version=${encodeURIComponent(effectiveVersion)}`
+    : "";
   const shardHref = (s: string) =>
-    `/scenes/${encodeURIComponent(dataset)}/${encodeURIComponent(s)}/0${versionQuery}`;
+    `/scenes/${encodeURIComponent(dataset)}/${encodeURIComponent(s)}/0${viewQueryString ? `?${viewQueryString}` : ""}`;
 
   // Initial view state: path frame + query params (cam, mode, speed).
   const initialState = useRef<Partial<PlayerViewState>>({
@@ -103,6 +112,7 @@ function PlayerPageInner({
         // Seed from the current URL so params we don't manage aren't dropped,
         // then overlay the player's view state.
         const q = new URLSearchParams(window.location.search);
+        if (effectiveVersion) q.set("version", effectiveVersion);
         if (s.cam !== 0) q.set("cam", String(s.cam));
         else q.delete("cam");
         if (s.mode !== "grid") q.set("mode", s.mode);
@@ -127,7 +137,7 @@ function PlayerPageInner({
         );
       }, 500);
     },
-    [dataset, shard],
+    [dataset, shard, effectiveVersion],
   );
   useEffect(
     () => () => {
@@ -142,6 +152,7 @@ function PlayerPageInner({
     // Seed from the live URL first, then overlay the player's view state, so a
     // copied link can never lose params the sync has not yet written.
     const q = new URLSearchParams(window.location.search);
+    if (effectiveVersion) q.set("version", effectiveVersion);
     if (s) {
       if (s.cam !== 0) q.set("cam", String(s.cam));
       else q.delete("cam");
@@ -170,7 +181,7 @@ function PlayerPageInner({
         // denied; swallow it so it doesn't surface as an unhandled rejection.
         console.warn("clipboard write failed", err);
       });
-  }, [dataset, shard, frame]);
+  }, [dataset, shard, frame, effectiveVersion]);
 
   return (
     <div className="space-y-4">
@@ -245,7 +256,8 @@ function PlayerPageInner({
           index={data}
           initialState={initialState.current}
           onViewStateChange={onViewStateChange}
-          version={version || undefined}
+          version={effectiveVersion || undefined}
+          teacher={teacher || undefined}
           promptVersion={promptVersion || undefined}
         />
       )}
