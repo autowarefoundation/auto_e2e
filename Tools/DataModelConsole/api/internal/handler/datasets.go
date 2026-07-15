@@ -222,9 +222,11 @@ func (h *DatasetsHandler) GetShardIndex(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusBadGateway, model.CodeS3Error, "failed to index shard")
 		return
 	}
-	if !exactGeoAuthorized(
+	if exactGeoAuthorized(
 		r, h.exactGeoEnabled, h.exactGeoRequiredRole,
 	) {
+		w.Header().Set("Cache-Control", "private, no-store")
+	} else {
 		index = indexWithoutExactGeo(index)
 	}
 	writeJSON(w, http.StatusOK, index)
@@ -377,13 +379,12 @@ func (h *DatasetsHandler) GetBlob(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadGateway, model.CodeS3Error, "failed to validate shard range")
 		return
 	}
-	if !exactGeoAuthorized(
+	exactGeoRange := rangeOverlapsExactGeo(index, off, sz)
+	if exactGeoRange && !exactGeoAuthorized(
 		r, h.exactGeoEnabled, h.exactGeoRequiredRole,
 	) {
-		if rangeOverlapsExactGeo(index, off, sz) {
-			writeError(w, http.StatusForbidden, model.CodeUnavailable, "range contains access-controlled GPS data")
-			return
-		}
+		writeError(w, http.StatusForbidden, model.CodeUnavailable, "range contains access-controlled GPS data")
+		return
 	}
 
 	reader, closer, size, err := h.s3.StreamTarMemberRange(
@@ -406,7 +407,11 @@ func (h *DatasetsHandler) GetBlob(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set("Content-Length", fmt.Sprintf("%d", size))
-	setShardRangeCacheControl(w, version)
+	if exactGeoRange {
+		w.Header().Set("Cache-Control", "private, no-store")
+	} else {
+		setShardRangeCacheControl(w, version)
+	}
 	w.WriteHeader(http.StatusOK)
 	if _, err := io.Copy(w, reader); err != nil {
 		slog.Warn("copy shard blob", "shard", shard, "offset", off, "error", err)
