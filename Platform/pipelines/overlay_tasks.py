@@ -484,9 +484,6 @@ def prepare_overlay_set(
         identity_fields=(
             "pk",
             "sk",
-            "registered_model_name",
-            "model_version",
-            "run_id",
         ),
     )
     version_item = model_version_item(model_artifact_id, metadata)
