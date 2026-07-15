@@ -44,7 +44,7 @@ from .egomotion import (
     pose_yaws,
     poses_to_arrays,
 )
-from .map import generate_bev_map_tile
+from .map import _cached_scene_map, generate_bev_map_tile
 
 logger = logging.getLogger(__name__)
 
@@ -76,6 +76,23 @@ def _utm32_to_wgs84(xy: np.ndarray) -> np.ndarray:
     )
     longitude, latitude = transformer.transform(xy[:, 0], xy[:, 1])
     return np.column_stack([latitude, longitude]).astype(np.float64)
+
+
+def _local_xy_to_absolute_utm(
+    scene_path: Path, positions_local: np.ndarray
+) -> np.ndarray:
+    """Shift scene-local pose XY into absolute UTM zone 32N coordinates."""
+    scene_map = _cached_scene_map(scene_path)
+    if scene_map is None:
+        raise ValueError(
+            f"KITScenes scene {scene_path.name!r} has no loadable map origin"
+        )
+    origin = np.asarray(scene_map.utm_origin, dtype=np.float64)
+    if origin.shape != (2,):
+        raise ValueError(
+            f"KITScenes map origin must have shape (2,), got {origin.shape}"
+        )
+    return np.asarray(positions_local, dtype=np.float64) + origin
 
 
 def _heading_cw_from_north(yaw_rad: float) -> float:
@@ -149,7 +166,7 @@ class KitScenesDataset(Dataset):
             )
 
         self._scene_egomotion: dict[str, np.ndarray] = {}
-        self._scene_positions_utm: dict[str, np.ndarray] = {}
+        self._scene_positions_local: dict[str, np.ndarray] = {}
         self._scene_latlon: dict[str, np.ndarray] = {}
         self._scene_yaws: dict[str, np.ndarray] = {}
         self._scene_timestamps_ns: dict[str, np.ndarray] = {}
@@ -209,14 +226,17 @@ class KitScenesDataset(Dataset):
             )
             return []
 
-        egomotion, positions_utm = poses_to_arrays(poses[:usable])
+        egomotion, positions_local = poses_to_arrays(poses[:usable])
+        positions_utm = _local_xy_to_absolute_utm(
+            loader.scene_path, positions_local
+        )
         yaws = pose_yaws(poses[:usable])
         timestamps_ns = np.asarray(
             [pose.timestamp_ns for pose in poses[:usable]], dtype=np.int64
         )
 
         self._scene_egomotion[scene_id] = egomotion
-        self._scene_positions_utm[scene_id] = positions_utm
+        self._scene_positions_local[scene_id] = positions_local
         self._scene_latlon[scene_id] = _utm32_to_wgs84(positions_utm)
         self._scene_yaws[scene_id] = yaws
         self._scene_timestamps_ns[scene_id] = timestamps_ns
@@ -422,7 +442,7 @@ class KitScenesDataset(Dataset):
             return torch.zeros(
                 (3, self.image_size, self.image_size), dtype=torch.uint8
             )
-        position = self._scene_positions_utm[scene_id][frame_idx]
+        position = self._scene_positions_local[scene_id][frame_idx]
         bev_map = generate_bev_map_tile(
             scene_path=self._sdk.get_sensor_loader(scene_id).scene_path,
             ego_x=float(position[0]),
