@@ -338,8 +338,10 @@ export function getReasoningLabel(
   sampleId: string,
   promptVersion?: string,
   version?: string,
+  teacher?: string,
 ): Promise<ReasoningLabelRecord> {
   const query = new URLSearchParams();
+  if (teacher) query.set("teacher", teacher);
   if (promptVersion) query.set("prompt_version", promptVersion);
   if (version) query.set("version", version);
   const qs = query.toString();
@@ -357,12 +359,10 @@ export function getReasoningStatsDetail(
   dataset: string,
   version: string,
   promptVersion: string,
+  teacher?: string,
 ): Promise<ReasoningStatsDetail> {
-  const q = new URLSearchParams({
-    dataset,
-    version,
-    prompt_version: promptVersion,
-  });
+  const q = new URLSearchParams({ dataset, version, prompt_version: promptVersion });
+  if (teacher) q.set("teacher", teacher);
   return apiFetch<ReasoningStatsDetail>(
     `/api/v1/reasoning-labels/stats-detail?${q.toString()}`,
     { signal: AbortSignal.timeout(120_000) },
@@ -379,6 +379,7 @@ export function searchScenesByLabel(
   value: string,
   limit = 50,
   version?: string,
+  teacher?: string,
 ): Promise<SceneSearchResult> {
   const q = new URLSearchParams({
     dataset,
@@ -390,6 +391,7 @@ export function searchScenesByLabel(
   // version scopes which published shards a scene can resolve into, so the
   // drawer links to the shard that actually holds each sample.
   if (version) q.set("version", version);
+  if (teacher) q.set("teacher", teacher);
   return apiFetch<SceneSearchResult>(`/api/v1/scenes/search?${q.toString()}`);
 }
 
