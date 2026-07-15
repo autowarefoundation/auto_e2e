@@ -308,6 +308,11 @@ def merge_partition_results(
     geo_summary, heatmap = _merge_geo(
         results, dataset=dataset, version=version
     )
+    episode_count = (
+        int(geo_summary["episode_count"])
+        if geo_summary is not None
+        else sum(int(result["manifest"].get("episodes", 0)) for result in results)
+    )
     prefix = dataset_prefix(dataset, version)
     rig_payload = canonical_json_bytes(rig, pretty=True)
     manifest = {
@@ -329,8 +334,10 @@ def merge_partition_results(
             int(result["manifest"].get("reasoning_label_count", 0))
             for result in results
         ),
-        "shards": shards,
+        "shards": len(shards),
         "shard_count": len(shards),
+        "shard_entries": shards,
+        "episodes": episode_count,
         "has_map": any(
             bool(result["manifest"].get("has_map", False)) for result in nonempty
         ),
