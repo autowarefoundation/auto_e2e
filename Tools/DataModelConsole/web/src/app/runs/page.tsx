@@ -1,9 +1,11 @@
 "use client";
 
 import Link from "next/link";
+import { ChevronDown, Loader2 } from "lucide-react";
 
 import { ErrorState } from "@/components/error-state";
 import { StatusBadge, flytePhaseTone } from "@/components/status-badge";
+import { Button } from "@/components/ui/button";
 import {
   Card,
   CardContent,
@@ -19,12 +21,24 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { useApi } from "@/hooks/use-api";
-import { listExecutions } from "@/lib/api";
+import { useTokenPages } from "@/hooks/use-token-pages";
+import { listExecutionsPage } from "@/lib/api";
 import { formatDuration, formatTimestamp } from "@/lib/format";
 
 export default function RunsPage() {
-  const { data, error, loading, reload } = useApi(() => listExecutions(50));
+  const {
+    items: executions,
+    error,
+    loading,
+    loadingMore,
+    hasMore,
+    loadMore,
+    reload,
+  } = useTokenPages(
+    (token) => listExecutionsPage(50, token),
+    [],
+    (execution) => execution.execution_id,
+  );
 
   return (
     <div className="space-y-6">
@@ -40,8 +54,8 @@ export default function RunsPage() {
           <CardTitle className="text-sm">Executions</CardTitle>
         </CardHeader>
         <CardContent>
-          {error ? (
-            <ErrorState error={error} onRetry={reload} />
+          {error && executions.length === 0 ? (
+            <ErrorState error={error} onRetry={reload} service="Flyte" />
           ) : loading ? (
             <div className="space-y-2">
               {Array.from({ length: 8 }).map((_, i) => (
@@ -49,56 +63,81 @@ export default function RunsPage() {
               ))}
             </div>
           ) : (
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>Execution</TableHead>
-                  <TableHead>Workflow</TableHead>
-                  <TableHead>Status</TableHead>
-                  <TableHead>Started</TableHead>
-                  <TableHead className="text-right">Duration</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {(data ?? []).map((e) => (
-                  <TableRow key={e.execution_id}>
-                    <TableCell>
-                      <Link
-                        href={`/runs/${encodeURIComponent(e.execution_id)}`}
-                        className="font-mono text-xs text-blue-500 hover:underline"
-                      >
-                        {e.execution_id}
-                      </Link>
-                    </TableCell>
-                    <TableCell className="font-mono text-xs">
-                      {e.workflow_name}
-                    </TableCell>
-                    <TableCell>
-                      <StatusBadge
-                        label={e.phase}
-                        tone={flytePhaseTone(e.phase)}
-                      />
-                    </TableCell>
-                    <TableCell className="text-xs text-slate-400">
-                      {formatTimestamp(e.started_at)}
-                    </TableCell>
-                    <TableCell className="text-right font-mono text-xs">
-                      {formatDuration(e.duration_s)}
-                    </TableCell>
-                  </TableRow>
-                ))}
-                {(data ?? []).length === 0 && (
+            <div className="space-y-3">
+              <Table>
+                <TableHeader>
                   <TableRow>
-                    <TableCell
-                      colSpan={5}
-                      className="text-center text-sm text-slate-500"
-                    >
-                      No executions found
-                    </TableCell>
+                    <TableHead>Execution</TableHead>
+                    <TableHead>Workflow</TableHead>
+                    <TableHead>Status</TableHead>
+                    <TableHead>Started</TableHead>
+                    <TableHead className="text-right">Duration</TableHead>
                   </TableRow>
-                )}
-              </TableBody>
-            </Table>
+                </TableHeader>
+                <TableBody>
+                  {executions.map((execution) => (
+                    <TableRow key={execution.execution_id}>
+                      <TableCell>
+                        <Link
+                          href={`/runs/${encodeURIComponent(execution.execution_id)}`}
+                          className="font-mono text-xs text-blue-500 hover:underline"
+                        >
+                          {execution.execution_id}
+                        </Link>
+                      </TableCell>
+                      <TableCell className="font-mono text-xs">
+                        {execution.workflow_name}
+                      </TableCell>
+                      <TableCell>
+                        <StatusBadge
+                          label={execution.phase}
+                          tone={flytePhaseTone(execution.phase)}
+                        />
+                      </TableCell>
+                      <TableCell className="text-xs text-slate-400">
+                        {formatTimestamp(execution.started_at)}
+                      </TableCell>
+                      <TableCell className="text-right font-mono text-xs">
+                        {formatDuration(execution.duration_s)}
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                  {executions.length === 0 && (
+                    <TableRow>
+                      <TableCell
+                        colSpan={5}
+                        className="text-center text-sm text-slate-500"
+                      >
+                        No executions found
+                      </TableCell>
+                    </TableRow>
+                  )}
+                </TableBody>
+              </Table>
+              {error && (
+                <ErrorState
+                  error={error}
+                  onRetry={hasMore ? loadMore : reload}
+                  service="Flyte"
+                />
+              )}
+              {hasMore && (
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={loadMore}
+                  disabled={loadingMore}
+                >
+                  {loadingMore ? (
+                    <Loader2 className="size-3.5 animate-spin" />
+                  ) : (
+                    <ChevronDown className="size-3.5" />
+                  )}
+                  Load more executions
+                </Button>
+              )}
+            </div>
           )}
         </CardContent>
       </Card>
