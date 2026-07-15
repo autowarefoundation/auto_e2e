@@ -3,6 +3,7 @@ package handler
 import (
 	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/go-chi/chi/v5"
@@ -10,6 +11,8 @@ import (
 	"github.com/autowarefoundation/auto_e2e/tools/datamodelconsole/api/internal/model"
 	"github.com/autowarefoundation/auto_e2e/tools/datamodelconsole/api/internal/service"
 )
+
+const maxMLflowResults = 1000
 
 // MLflowHandler exposes the read-only MLflow proxy endpoints.
 type MLflowHandler struct {
@@ -24,8 +27,13 @@ func NewMLflowHandler(svc *service.MLflowService) *MLflowHandler {
 // Experiments handles GET /api/v1/mlflow/experiments. The raw MLflow response
 // is {"experiments":[...]}; the frontend consumes a flat array, so normalize.
 func (h *MLflowHandler) Experiments(w http.ResponseWriter, r *http.Request) {
+	maxResults, ok := parseMLflowMaxResults(r)
+	if !ok {
+		writeError(w, http.StatusBadRequest, model.CodeInvalidParam, "max_results must be an integer between 1 and 1000")
+		return
+	}
 	res, err := h.svc.SearchExperiments(r.Context(),
-		r.URL.Query().Get("max_results"), r.URL.Query().Get("page_token"))
+		maxResults, r.URL.Query().Get("page_token"))
 	if err != nil {
 		slog.Error("mlflow experiments search", "error", err)
 		writeError(w, http.StatusBadGateway, model.CodeUpstream, "mlflow unreachable")
@@ -35,7 +43,7 @@ func (h *MLflowHandler) Experiments(w http.ResponseWriter, r *http.Request) {
 		writeRawJSON(w, res.Status, res.Body)
 		return
 	}
-	out, nerr := model.NormalizeMLflowExperiments(res.Body)
+	out, nerr := model.NormalizeMLflowExperimentsPage(res.Body)
 	if nerr != nil {
 		slog.Error("normalize mlflow experiments", "error", nerr)
 		writeError(w, http.StatusBadGateway, model.CodeUpstream, "unexpected mlflow response")
@@ -52,8 +60,13 @@ func (h *MLflowHandler) Runs(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, model.CodeInvalidParam, "invalid experiment id")
 		return
 	}
+	maxResults, ok := parseMLflowMaxResults(r)
+	if !ok {
+		writeError(w, http.StatusBadRequest, model.CodeInvalidParam, "max_results must be an integer between 1 and 1000")
+		return
+	}
 	res, err := h.svc.SearchRuns(r.Context(), id,
-		r.URL.Query().Get("max_results"), r.URL.Query().Get("page_token"))
+		maxResults, r.URL.Query().Get("page_token"))
 	if err != nil {
 		slog.Error("mlflow runs search", "error", err)
 		writeError(w, http.StatusBadGateway, model.CodeUpstream, "mlflow unreachable")
@@ -63,7 +76,7 @@ func (h *MLflowHandler) Runs(w http.ResponseWriter, r *http.Request) {
 		writeRawJSON(w, res.Status, res.Body)
 		return
 	}
-	out, nerr := model.NormalizeMLflowRuns(res.Body)
+	out, nerr := model.NormalizeMLflowRunsPage(res.Body)
 	if nerr != nil {
 		slog.Error("normalize mlflow runs", "error", nerr)
 		writeError(w, http.StatusBadGateway, model.CodeUpstream, "unexpected mlflow response")
@@ -108,8 +121,13 @@ func safeUpstreamID(s string) bool {
 // Models handles GET /api/v1/mlflow/models, normalizing the
 // {"registered_models":[...]} envelope into the flat model list.
 func (h *MLflowHandler) Models(w http.ResponseWriter, r *http.Request) {
+	maxResults, ok := parseMLflowMaxResults(r)
+	if !ok {
+		writeError(w, http.StatusBadRequest, model.CodeInvalidParam, "max_results must be an integer between 1 and 1000")
+		return
+	}
 	res, err := h.svc.SearchRegisteredModels(r.Context(),
-		r.URL.Query().Get("max_results"), r.URL.Query().Get("page_token"))
+		maxResults, r.URL.Query().Get("page_token"))
 	if err != nil {
 		slog.Error("mlflow registered models search", "error", err)
 		writeError(w, http.StatusBadGateway, model.CodeUpstream, "mlflow unreachable")
@@ -119,11 +137,26 @@ func (h *MLflowHandler) Models(w http.ResponseWriter, r *http.Request) {
 		writeRawJSON(w, res.Status, res.Body)
 		return
 	}
-	out, nerr := model.NormalizeMLflowModels(res.Body)
+	out, nerr := model.NormalizeMLflowModelsPage(res.Body)
 	if nerr != nil {
 		slog.Error("normalize mlflow models", "error", nerr)
 		writeError(w, http.StatusBadGateway, model.CodeUpstream, "unexpected mlflow response")
 		return
 	}
 	writeJSON(w, http.StatusOK, out)
+}
+
+func parseMLflowMaxResults(r *http.Request) (int, bool) {
+	values, present := r.URL.Query()["max_results"]
+	if !present {
+		return 0, true
+	}
+	if len(values) != 1 {
+		return 0, false
+	}
+	value, err := strconv.Atoi(values[0])
+	if err != nil || value <= 0 || value > maxMLflowResults {
+		return 0, false
+	}
+	return value, true
 }
