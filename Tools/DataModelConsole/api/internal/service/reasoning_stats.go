@@ -400,32 +400,6 @@ func reasoningTeacherMatches(label store.ReasoningLabel, requested string) bool 
 	return requested == "" || requested == reasoningTeacher(label)
 }
 
-// SearchScenesByLabel returns the sample ids carrying a (field,value) reasoning
-// label for a (dataset, promptVersion), from the DynamoDB scene-by-label index.
-func (s *S3Service) SearchScenesByLabel(ctx context.Context, dataset, promptVersion, field, value string, limit int) ([]string, error) {
-	ids, _, err := s.SearchScenesByLabelAtVersion(
-		ctx, dataset, "", promptVersion, field, value, limit,
-	)
-	return ids, err
-}
-
-// SearchScenesByLabelAtVersion queries only the sample_uid index materialized
-// from the same immutable shard version used for playback.
-func (s *S3Service) SearchScenesByLabelAtVersion(
-	ctx context.Context,
-	dataset, version, promptVersion, field, value string,
-	limit int,
-) ([]string, string, error) {
-	if s.store == nil {
-		return nil, "", fmt.Errorf("scene search requires a configured dynamo store")
-	}
-	version = s.versionOrResolve(ctx, dataset, version)
-	ids, err := s.store.QueryScenesByLabelForVersion(
-		ctx, dataset, version, promptVersion, field, value, limit,
-	)
-	return ids, version, err
-}
-
 // SearchScenesByLabelForTeacherAtVersion reads the exact immutable
 // dataset/teacher/prompt partition materialized during stats computation.
 func (s *S3Service) SearchScenesByLabelForTeacherAtVersion(
