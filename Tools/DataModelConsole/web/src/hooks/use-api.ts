@@ -16,6 +16,7 @@ export interface UseApiResult<T> {
 export function useApi<T>(
   fetcher: () => Promise<T>,
   deps: readonly unknown[] = [],
+  enabled = true,
 ): UseApiResult<T> {
   const [data, setData] = useState<T | null>(null);
   const [error, setError] = useState<Error | null>(null);
@@ -25,6 +26,12 @@ export function useApi<T>(
   fetcherRef.current = fetcher;
 
   useEffect(() => {
+    if (!enabled) {
+      setData(null);
+      setError(null);
+      setLoading(false);
+      return;
+    }
     let cancelled = false;
     setLoading(true);
     setError(null);
@@ -46,7 +53,7 @@ export function useApi<T>(
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [...deps, generation]);
+  }, [...deps, enabled, generation]);
 
   const reload = useCallback(() => setGeneration((g) => g + 1), []);
 
