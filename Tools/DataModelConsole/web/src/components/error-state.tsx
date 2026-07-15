@@ -34,7 +34,10 @@ export function ErrorState({
   service?: string;
 }) {
   return (
-    <div className="flex flex-col items-center gap-3 rounded-lg border border-red-500/30 bg-red-500/5 p-8 text-center">
+    <div
+      role="alert"
+      className="flex flex-col items-center gap-3 rounded-lg border border-red-500/30 bg-red-500/5 p-8 text-center"
+    >
       <AlertTriangle className="size-6 text-red-500" />
       <p className="text-sm text-slate-300">{humanizeError(error, service)}</p>
       <details className="max-w-lg text-left">
