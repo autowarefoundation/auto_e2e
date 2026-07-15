@@ -33,10 +33,12 @@ def test_visualization_with_dummy_data(tmp_path: Path):
     map_copy = mock_map.copy()
 
     print("Executing render_trajectory...")
+    # Generate trajectory first
+    prediction_xy = kinematics.controls_to_metric_trajectory(mock_actions, mock_speed, dt=0.1)
+    
     # Run the visualization function
     result_img = rendering.render_trajectory_map_tile(
-        action_sequence=mock_actions,
-        current_speed=mock_speed,
+        prediction_xy=prediction_xy,
         map_image=mock_map,
         resolution_m_px=mock_resolution
     )
@@ -113,7 +115,7 @@ def test_generate_grid_with_prediction_only():
     ])
     
     # 2. Run the function
-    grid_img = rendering.generate_grid(prediction_m)
+    grid_img = rendering.generate_grid(prediction_xy=prediction_m)
     
     # 3. Assertions
     assert grid_img is not None, "generate_grid returned None"
@@ -128,20 +130,60 @@ def test_generate_grid_with_prediction_and_actual():
     actual_m = torch.tensor([[0.0, 0.0], [0.5, 10.0], [1.0, 20.0]])
     
     # 2. Run the function
-    grid_img = rendering.generate_grid(prediction_m, actual_trajectory_m=actual_m)
+    grid_img = rendering.generate_grid(prediction_xy=prediction_m, target_xy=actual_m)
     
     # 3. Assertions
     assert grid_img is not None
     assert isinstance(grid_img, np.ndarray)
     assert grid_img.shape == (1080, 480, 3)
 
+def test_generate_grid_clipping():
+    # 1. Create a trajectory that goes WAY out of bounds
+    prediction_m = torch.tensor([[0.0, 0.0], [500.0, 500.0], [-500.0, -500.0]])
+    actual_m = torch.tensor([[0.0, 0.0], [1000.0, -1000.0], [-1000.0, 1000.0]])
+    
+    # 2. Run the function with unique colors
+    unique_pred_color = (1, 2, 3)
+    unique_act_color = (4, 5, 6)
+    grid_img = rendering.generate_grid(
+        prediction_xy=prediction_m, 
+        target_xy=actual_m,
+        prediction_color=unique_pred_color,
+        actual_trajectory_color=unique_act_color
+    )
+    
+    # 3. Assertions
+    margin_left, margin_right = 50, 20
+    margin_top, margin_bottom = 60, 50
+    width, height = 480, 1080
+    
+    # The plot area is:
+    # x: margin_left to width - margin_right
+    # y: margin_top to height - margin_bottom
+    plot_w = width - margin_left - margin_right
+    plot_h = height - margin_top - margin_bottom
+    
+    # Extract the four margins
+    top_margin = grid_img[0:margin_top, :]
+    bottom_margin = grid_img[margin_top + plot_h:, :]
+    left_margin = grid_img[margin_top:margin_top + plot_h, 0:margin_left]
+    right_margin = grid_img[margin_top:margin_top + plot_h, margin_left + plot_w:]
+    
+    # The top margin contains the legend which draws a circle with the prediction/actual color!
+    # So we must ignore the top margin, or at least just check bottom/left/right margins
+    # where no legend is drawn.
+    for margin, name in [(bottom_margin, "bottom"), (left_margin, "left"), (right_margin, "right")]:
+        assert not np.any(np.all(margin == unique_pred_color, axis=-1)), f"Prediction color bled into {name} margin"
+        assert not np.any(np.all(margin == unique_act_color, axis=-1)), f"Actual color bled into {name} margin"
+
 def test_render_trajectory_on_a_grid():
     # 1. Create a dummy action sequence
     action_sequence = torch.zeros(_FUTURE_TIMESTEPS * 2)
     current_speed = 10.0
     
-    # 2. Run the function
-    grid_img = rendering.render_trajectory_on_a_grid(action_sequence, current_speed)
+    # 2. Convert to metric and run the function
+    prediction_xy = kinematics.controls_to_metric_trajectory(action_sequence, current_speed, dt=0.1)
+    grid_img = rendering.render_trajectory_on_a_grid(prediction_xy=prediction_xy)
     
     # 3. Assertions
     assert grid_img is not None, "render_trajectory_on_a_grid returned None"
@@ -236,25 +278,23 @@ def test_complete_front_camera_view_with_trajectory():
     R = np.eye(3)
     t = np.zeros((3, 1))
     
+    pred_traj_m = kinematics.controls_to_metric_trajectory(action_sequence_pred, current_speed, dt=0.1)
+    target_traj_m = kinematics.controls_to_metric_trajectory(action_sequence_target, current_speed, dt=0.1)
+    
     cam_img = rendering.complete_front_camera_view_with_trajectory(
-        action_sequence_target,
-        current_speed,
-        front_camera_image,
+        prediction_xy=target_traj_m,
+        front_camera_image=front_camera_image,
         K=K, R=R, t=t,
         color=(59, 108, 255)
     )
     cam_img = rendering.complete_front_camera_view_with_trajectory(
-        action_sequence_pred,
-        current_speed,
-        cam_img,
+        prediction_xy=pred_traj_m,
+        front_camera_image=cam_img,
         K=K, R=R, t=t,
         color=(52, 217, 164)
     )
     
-    # Generate dummy grid
-    pred_traj_m = kinematics.accel_and_curv_to_meters_trajectory(action_sequence_pred, current_speed, 64, initial_heading=0.0)
-    target_traj_m = kinematics.accel_and_curv_to_meters_trajectory(action_sequence_target, current_speed, 64, initial_heading=0.0)
-    grid_img = rendering.generate_grid(prediction_m=pred_traj_m, actual_trajectory_m=target_traj_m)
+    grid_img = rendering.generate_grid(prediction_xy=pred_traj_m, target_xy=target_traj_m)
     
     combined_img = rendering.concatenate_grid_and_camera(grid_img, cam_img)
     

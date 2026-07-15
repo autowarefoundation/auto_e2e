@@ -109,8 +109,8 @@ def render_trajectory_on_camera_view(
     return img_with_traj
 
 def generate_grid(
-    prediction_m: torch.Tensor, 
-    actual_trajectory_m: torch.Tensor | None = None,
+    prediction_xy: torch.Tensor, 
+    target_xy: torch.Tensor | None = None,
     prediction_color: tuple = (140, 255, 0),
     actual_trajectory_color: tuple = (255, 80, 120)
     ) -> np.ndarray:
@@ -156,7 +156,7 @@ def generate_grid(
         text_size = cv2.getTextSize(text, font, font_scale, thickness)[0]
         cv2.putText(img, text, (margin_left - text_size[0] - 5, py + 5), font, font_scale, text_color, thickness, cv2.LINE_AA)
         
-    cv2.rectangle(img, (margin_left, margin_top), (margin_left + plot_w, margin_top + plot_h), text_color, 1, cv2.LINE_AA)
+    cv2.rectangle(img, (margin_left, margin_top), (margin_left + plot_w, margin_top + plot_h), text_color, 1, cv2.LINE_8)
     
     x_label = "Lateral (m)"
     x_label_size = cv2.getTextSize(x_label, font, 0.5, 1)[0]
@@ -177,28 +177,44 @@ def generate_grid(
     title = "Trajectory Prediction"
     title_size = cv2.getTextSize(title, font_title, 0.6, 1)[0]
     start_x_title = margin_left + plot_w//2 - title_size[0]//2
-    cv2.putText(img, title, (start_x_title, margin_top - 20), font_title, 0.6, (115, 229, 0), 1, cv2.LINE_AA)
+    cv2.putText(img, title, (start_x_title, margin_top - 35), font_title, 0.6, (115, 229, 0), 1, cv2.LINE_AA)
     
-    plot_canvas = img[(margin_top+1):(margin_top+plot_h-1), (margin_left+1):(margin_left+plot_w-1)].copy()
+    # Draw Legend
+    # 1. Prediction (Left)
+    pred_text = "Prediction"
+    cv2.circle(img, (margin_left + 15, margin_top - 14), 6, prediction_color, -1, cv2.LINE_AA)
+    cv2.putText(img, pred_text, (margin_left + 30, margin_top - 10), font, 0.5, prediction_color, 1, cv2.LINE_AA)
+    
+    # 2. Target / Ground Truth (Right)
+    if target_xy is not None:
+        tgt_text = "Ground Truth"
+        tgt_size = cv2.getTextSize(tgt_text, font, 0.5, 1)[0]
+        tgt_x = margin_left + plot_w - 30 - tgt_size[0]
+        cv2.putText(img, tgt_text, (tgt_x, margin_top - 10), font, 0.5, actual_trajectory_color, 1, cv2.LINE_AA)
+        cv2.circle(img, (margin_left + plot_w - 15, margin_top - 14), 6, actual_trajectory_color, -1, cv2.LINE_AA)
+    
+    plot_area = img[margin_top:margin_top+plot_h, margin_left:margin_left+plot_w]
     
     def to_px_local(x_m, y_m):
         px = (x_m - x_min) / (x_max - x_min) * plot_w
         py = plot_h - (y_m - y_min) / (y_max - y_min) * plot_h
         return int(px), int(py)
 
-    if actual_trajectory_m is not None:
+    if target_xy is not None:
         pts = []
-        for i in range(actual_trajectory_m.shape[0]):
-            pts.append(to_px_local(float(actual_trajectory_m[i, 0]), float(actual_trajectory_m[i, 1])))
-        pts_arr = np.array(pts, np.int32).reshape((-1, 1, 2))
-        cv2.polylines(plot_canvas, [pts_arr], isClosed=False, color=actual_trajectory_color, thickness=4, lineType=cv2.LINE_AA)
-        
-    if prediction_m is not None:
+        for i in range(target_xy.shape[0]):
+            pts.append(to_px_local(float(target_xy[i, 0]), float(target_xy[i, 1])))
+        if len(pts) > 1:
+            pts_arr = np.array(pts, dtype=np.int32)
+            cv2.polylines(plot_area, [pts_arr], isClosed=False, color=actual_trajectory_color, thickness=3, lineType=cv2.LINE_AA)
+
+    if prediction_xy is not None:
         pts = []
-        for i in range(prediction_m.shape[0]):
-            pts.append(to_px_local(float(prediction_m[i, 0]), float(prediction_m[i, 1])))
-        pts_arr = np.array(pts, np.int32).reshape((-1, 1, 2))
-        cv2.polylines(plot_canvas, [pts_arr], isClosed=False, color=prediction_color, thickness=6, lineType=cv2.LINE_AA)
+        for i in range(prediction_xy.shape[0]):
+            pts.append(to_px_local(float(prediction_xy[i, 0]), float(prediction_xy[i, 1])))
+        if len(pts) > 1:
+            pts_arr = np.array(pts, dtype=np.int32)
+            cv2.polylines(plot_area, [pts_arr], isClosed=False, color=prediction_color, thickness=3, lineType=cv2.LINE_AA)
         
     ego_px, ego_py = to_px_local(0, 0)
     px_per_m_x = plot_w / (x_max - x_min)
@@ -211,10 +227,8 @@ def generate_grid(
     right_base = (int(ego_px + ego_w / 2), int(ego_py + ego_h / 3))
     triangle_pts = np.array([tip, right_base, left_base], np.int32).reshape((-1, 1, 2))
     
-    cv2.fillPoly(plot_canvas, [triangle_pts], ego_color, cv2.LINE_AA)
-    cv2.polylines(plot_canvas, [triangle_pts], isClosed=True, color=(0, 0, 0), thickness=1, lineType=cv2.LINE_AA)
-    
-    img[(margin_top+1):(margin_top+plot_h-1), (margin_left+1):(margin_left+plot_w-1)] = plot_canvas
+    cv2.fillPoly(plot_area, [triangle_pts], ego_color, cv2.LINE_AA)
+    cv2.polylines(plot_area, [triangle_pts], isClosed=True, color=(0, 0, 0), thickness=1, lineType=cv2.LINE_AA)
     
     return img
 
@@ -283,38 +297,25 @@ def overlay_the_trajectory_with_map(
     return map_with_trajectory
 
 def render_trajectory_map_tile(
-    action_sequence: torch.Tensor,
-    current_speed: float,
+    prediction_xy: torch.Tensor,
     map_image: np.ndarray,
     resolution_m_px: float,
     color: tuple = (0, 255, 0),
     initial_heading: float = 0.0
 ) -> np.ndarray:
-    from .kinematics import accel_and_curv_to_meters_trajectory
-    trajectory_m = accel_and_curv_to_meters_trajectory(
-        action_sequence, current_speed, 64, initial_heading
-    )
-    trajectory_px = meters_to_pixels_trajectory(trajectory_m, resolution_m_px, map_image)
+    trajectory_px = meters_to_pixels_trajectory(prediction_xy, resolution_m_px, map_image)
     map_with_trajectory = overlay_the_trajectory_with_map(trajectory_px, map_image, color, initial_heading, resolution_m_px)
     return map_with_trajectory
 
 def render_trajectory_on_a_grid(
-    action_sequence: torch.Tensor,
-    current_speed: float,
-    actual_action_sequence: torch.Tensor | None = None,
+    prediction_xy: torch.Tensor,
+    target_xy: torch.Tensor | None = None,
     prediction_color: tuple = (140, 255, 0),
     actual_trajectory_color: tuple = (255, 80, 120)
 ) -> np.ndarray:
-    from .kinematics import accel_and_curv_to_meters_trajectory
-    pred_m = accel_and_curv_to_meters_trajectory(action_sequence, current_speed, 64, initial_heading=0.0)
-            
-    act_m = None
-    if actual_action_sequence is not None:
-        act_m = accel_and_curv_to_meters_trajectory(actual_action_sequence, current_speed, 64, initial_heading=0.0)
-
     grid_with_trajectory = generate_grid(
-        prediction_m=pred_m, 
-        actual_trajectory_m=act_m,
+        prediction_xy=prediction_xy, 
+        target_xy=target_xy,
         prediction_color=prediction_color,
         actual_trajectory_color=actual_trajectory_color
     )
@@ -322,8 +323,7 @@ def render_trajectory_on_a_grid(
     return grid_with_trajectory
 
 def complete_front_camera_view_with_trajectory(
-    action_sequence: torch.Tensor,
-    current_speed: float,
+    prediction_xy: torch.Tensor,
     front_camera_image: np.ndarray,
     K: np.ndarray | None = None,
     R: np.ndarray | None = None,
@@ -331,13 +331,9 @@ def complete_front_camera_view_with_trajectory(
     P: np.ndarray | None = None,
     color: tuple | None = None
 ) -> np.ndarray:
-    from .kinematics import accel_and_curv_to_meters_trajectory, get_trajectory_boundaries_3d
+    from .kinematics import get_trajectory_boundaries_3d
     if color is None:
         color = (0, 255, 0)
-        
-    traj_m = accel_and_curv_to_meters_trajectory(
-        action_sequence, current_speed, 64, initial_heading=0.0
-    )
 
     if P is not None:
         projection_matrix = P
@@ -346,7 +342,7 @@ def complete_front_camera_view_with_trajectory(
             raise ValueError("Either P or (K, R, t) must be provided.")
         projection_matrix = get_camera_projection_matrix(K, R, t)
     
-    left_m, right_m = get_trajectory_boundaries_3d(traj_m, width_m=1.8)
+    left_m, right_m = get_trajectory_boundaries_3d(prediction_xy, width_m=1.8)
 
     left_2d = project_BEV_to_CameraView(left_m, projection_matrix)
     right_2d = project_BEV_to_CameraView(right_m, projection_matrix)

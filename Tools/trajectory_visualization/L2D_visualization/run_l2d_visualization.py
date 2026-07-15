@@ -10,13 +10,13 @@ Usage:
 import sys
 import os
 
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
-from trajectory_visualization.rendering import (
+from Tools.trajectory_visualization.rendering import (
     render_trajectory_map_tile,
     render_trajectory_on_a_grid,
     complete_front_camera_view_with_trajectory,
     concatenate_grid_and_camera
 )
+from Tools.trajectory_visualization.kinematics import controls_to_metric_trajectory
 import torch
 from Model.model_components.auto_e2e import AutoE2E
 import cv2
@@ -49,20 +49,24 @@ def visualization_on_l2d(episodes: list[int], frame_index: int = 0, zoom_in: boo
     prediction_color = (140, 255, 0)
     actual_trajectory_color = (255, 80, 120)
 
+    # Precompute metric trajectories
+    pred_xy = controls_to_metric_trajectory(pred_trajectory, current_speed, dt=0.1)
+    target_xy = controls_to_metric_trajectory(target_trajectory, current_speed, dt=0.1) if target_trajectory is not None else None
+
     # 1. Draw extracted ground truth (actual driven path)
-    combined_img = render_trajectory_map_tile(
-        action_sequence=target_trajectory,
-        current_speed=current_speed,
-        map_image=map_image,
-        resolution_m_px=resolution_m_px,
-        color=actual_trajectory_color,
-        initial_heading=current_heading
-    )
+    combined_img = map_image.copy()
+    if target_xy is not None:
+        combined_img = render_trajectory_map_tile(
+            prediction_xy=target_xy,
+            map_image=combined_img,
+            resolution_m_px=resolution_m_px,
+            color=actual_trajectory_color,
+            initial_heading=current_heading
+        )
 
     # 2. Draw predicted path
     combined_img = render_trajectory_map_tile(
-        action_sequence=pred_trajectory,
-        current_speed=current_speed,
+        prediction_xy=pred_xy,
         map_image=combined_img,
         resolution_m_px=resolution_m_px,
         color=prediction_color, 
@@ -71,9 +75,8 @@ def visualization_on_l2d(episodes: list[int], frame_index: int = 0, zoom_in: boo
 
     # 3. Create Camera View with trajectory and Grid
     grid_with_trajectory = render_trajectory_on_a_grid(
-        action_sequence=pred_trajectory,
-        current_speed=current_speed,
-        actual_action_sequence=target_trajectory,
+        prediction_xy=pred_xy,
+        target_xy=target_xy,
         prediction_color=prediction_color,
         actual_trajectory_color=actual_trajectory_color
     )
@@ -90,10 +93,9 @@ def visualization_on_l2d(episodes: list[int], frame_index: int = 0, zoom_in: boo
 
     cam_trajectory_view = front_image.copy()
     
-    if target_trajectory is not None:
+    if target_xy is not None:
         cam_trajectory_view = complete_front_camera_view_with_trajectory(
-            action_sequence=target_trajectory,
-            current_speed=current_speed,
+            prediction_xy=target_xy,
             front_camera_image=cam_trajectory_view,
             K=K,
             R=R,
@@ -101,10 +103,9 @@ def visualization_on_l2d(episodes: list[int], frame_index: int = 0, zoom_in: boo
             color=actual_trajectory_color
         )
     
-    if pred_trajectory is not None:
+    if pred_xy is not None:
         cam_trajectory_view = complete_front_camera_view_with_trajectory(
-            action_sequence=pred_trajectory,
-            current_speed=current_speed,
+            prediction_xy=pred_xy,
             front_camera_image=cam_trajectory_view,
             K=K,
             R=R,

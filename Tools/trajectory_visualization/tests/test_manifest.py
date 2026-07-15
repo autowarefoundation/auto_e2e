@@ -6,13 +6,17 @@ from Tools.trajectory_visualization.manifest import ManifestWriter
 
 def test_manifest_writer():
     with tempfile.TemporaryDirectory() as temp_dir:
-        writer = ManifestWriter(temp_dir)
+        writer = ManifestWriter(
+            output_dir=temp_dir,
+            checkpoint_name="best.pt",
+            model_config={"layers": 4},
+            dataset_name="yaak-ai/L2D",
+            dataset_version="v1"
+        )
         
         # Test adding items
-        writer.add_video("/test/path/video.mp4", 100)
-        writer.add_thumbnail("/test/path/thumb.jpg")
-        writer.add_metric("accuracy", 0.95)
-        writer.add_metadata("model", "test_model")
+        writer.add_episode(episode_id=42, start_frame=100, end_frame=399)
+        writer.add_episode(episode_id=108, start_frame=0, end_frame=150)
         
         # Write to file
         writer.write()
@@ -24,15 +28,19 @@ def test_manifest_writer():
         with open(manifest_path, 'r') as f:
             data = json.load(f)
             
-        assert "videos" in data
-        assert len(data["videos"]) == 1
-        assert data["videos"][0]["num_frames"] == 100
+        assert data["schema_version"] == 1
+        assert data["checkpoint"]["name"] == "best.pt"
+        assert data["checkpoint"]["model_config"] == {"layers": 4}
+        assert data["dataset"]["name"] == "yaak-ai/L2D"
         
-        assert "thumbnails" in data
-        assert len(data["thumbnails"]) == 1
+        assert "episodes" in data
+        assert len(data["episodes"]) == 2
         
-        assert "metrics" in data
-        assert data["metrics"]["accuracy"] == 0.95
-        
-        assert "metadata" in data
-        assert data["metadata"]["model"] == "test_model"
+        ep42 = data["episodes"][0]
+        assert ep42["episode_id"] == 42
+        assert ep42["start_frame"] == 100
+        assert ep42["end_frame"] == 399
+        assert ep42["video"] == "episodes/episode-000042/video.mp4"
+        assert ep42["thumbnail"] == "episodes/episode-000042/thumbnail.jpg"
+        assert ep42["metrics"] == "episodes/episode-000042/metrics.json"
+

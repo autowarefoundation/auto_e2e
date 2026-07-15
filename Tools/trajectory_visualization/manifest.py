@@ -1,32 +1,36 @@
 import json
 import os
-from typing import Dict, Any
+from typing import Dict, Any, List
 
 class ManifestWriter:
-    def __init__(self, output_dir: str):
+    def __init__(self, output_dir: str, checkpoint_name: str, model_config: dict, dataset_name: str, dataset_version: str):
         self.output_dir = output_dir
         self.manifest_path = os.path.join(output_dir, "manifest.json")
         self.data: Dict[str, Any] = {
-            "videos": [],
-            "thumbnails": [],
-            "metrics": {},
-            "metadata": {}
+            "schema_version": 1,
+            "checkpoint": {
+                "name": checkpoint_name,
+                "model_config": model_config
+            },
+            "dataset": {
+                "name": dataset_name,
+                "version": dataset_version
+            },
+            "episodes": []
         }
 
-    def add_video(self, video_path: str, num_frames: int):
-        self.data["videos"].append({
-            "path": os.path.relpath(video_path, self.output_dir),
-            "num_frames": num_frames
-        })
-
-    def add_thumbnail(self, thumbnail_path: str):
-        self.data["thumbnails"].append(os.path.relpath(thumbnail_path, self.output_dir))
-
-    def add_metric(self, key: str, value: Any):
-        self.data["metrics"][key] = value
+    def add_episode(self, episode_id: int, start_frame: int, end_frame: int):
+        # Format episode directory name
+        ep_dir = f"episode-{episode_id:06d}"
         
-    def add_metadata(self, key: str, value: Any):
-        self.data["metadata"][key] = value
+        self.data["episodes"].append({
+            "episode_id": episode_id,
+            "start_frame": start_frame,
+            "end_frame": end_frame,
+            "video": f"episodes/{ep_dir}/video.mp4",
+            "thumbnail": f"episodes/{ep_dir}/thumbnail.jpg",
+            "metrics": f"episodes/{ep_dir}/metrics.json"
+        })
 
     def write(self):
         with open(self.manifest_path, 'w') as f:

@@ -1,42 +1,78 @@
 import os
 import cv2
 import torch
+import json
 
 from .checkpoint_loader import load_checkpoint
 from .dataset_reader import get_dataset_iterator
 from .manifest import ManifestWriter
 from .rendering import generate_grid, concatenate_grid_and_camera
-from .kinematics import accel_and_curv_to_meters_trajectory
+from .kinematics import controls_to_metric_trajectory
 
-def run_visualization(checkpoint: str, dataset_dir: str, output_dir: str, episodes: list[str] | None = None, max_frames_per_episode: int = 300):
+def run_visualization(checkpoint: str, dataset_dir: str, output_dir: str, episodes: list[str] | None = None, max_frames_per_episode: int = 300, dt: float = 0.1):
     os.makedirs(output_dir, exist_ok=True)
     
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Loading checkpoint from {checkpoint}...")
     model = load_checkpoint(checkpoint, device)
     
+    # Extract config for manifest
+    checkpoint_data = torch.load(checkpoint, map_location='cpu')
+    model_config = checkpoint_data.get("config", {})
+    
     print(f"Loading dataset from {dataset_dir}...")
     data_iterator = get_dataset_iterator(dataset_dir, episodes_to_render=episodes)
     
-    manifest = ManifestWriter(output_dir)
+    # For now, hardcode or guess dataset details. 
+    # In a real setup, we might read dataset metadata.json
+    dataset_name = os.path.basename(dataset_dir.strip('/'))
+    dataset_version = "latest"
     
-    video_path = os.path.join(output_dir, "trajectory_video.mp4")
-    thumbnail_path = os.path.join(output_dir, "thumbnail.jpg")
+    manifest = ManifestWriter(
+        output_dir=output_dir,
+        checkpoint_name=os.path.basename(checkpoint),
+        model_config=model_config,
+        dataset_name=dataset_name,
+        dataset_version=dataset_version
+    )
+    
+    # Save a run-summary.json
+    with open(os.path.join(output_dir, "run-summary.json"), "w") as f:
+        json.dump({"status": "in_progress"}, f)
     
     video_writer = None
     
     print("Running inference and rendering...")
-    frames_processed = 0
     current_episode = None
     frames_in_current_episode = 0
+    ep_start_frame = 0
+    ep_dir_path = ""
+    frames_dir = ""
     
     with torch.no_grad():
         for batch in data_iterator:
             ep_id = batch.get("episode_index", [0])[0] if isinstance(batch.get("episode_index"), list) else batch.get("episode_index", 0)
             
             if ep_id != current_episode:
+                # Close previous episode
+                if current_episode is not None:
+                    if video_writer is not None:
+                        video_writer.release()
+                        video_writer = None
+                    manifest.add_episode(current_episode, ep_start_frame, ep_start_frame + frames_in_current_episode - 1)
+                
+                # Setup new episode
                 current_episode = ep_id
                 frames_in_current_episode = 0
+                ep_start_frame = batch.get("frame_index", [0])[0] if isinstance(batch.get("frame_index"), list) else batch.get("frame_index", 0)
+                
+                ep_dir_path = os.path.join(output_dir, "episodes", f"episode-{ep_id:06d}")
+                frames_dir = os.path.join(ep_dir_path, "frames")
+                os.makedirs(frames_dir, exist_ok=True)
+                
+                # Write empty metrics.json
+                with open(os.path.join(ep_dir_path, "metrics.json"), "w") as f:
+                    json.dump({}, f)
                 
             if frames_in_current_episode >= max_frames_per_episode:
                 continue # Skip remaining frames in this episode
@@ -65,10 +101,10 @@ def run_visualization(checkpoint: str, dataset_dir: str, output_dir: str, episod
             # Current speed (placeholder, since it's not strictly extracted)
             current_speed = 0.0
             
-            pred_m = accel_and_curv_to_meters_trajectory(pred_seq, current_speed, 64)
-            act_m = accel_and_curv_to_meters_trajectory(target_seq, current_speed, 64)
+            pred_xy = controls_to_metric_trajectory(pred_seq, current_speed, dt=dt)
+            act_xy = controls_to_metric_trajectory(target_seq, current_speed, dt=dt)
             
-            grid_img = generate_grid(prediction_m=pred_m, actual_trajectory_m=act_m)
+            grid_img = generate_grid(prediction_xy=pred_xy, target_xy=act_xy)
             
             # Extract front camera image from unnormalized visualization representations
             viz_images = batch["visualization_image"] # (Batch, NumCams, H, W, 3)
@@ -81,26 +117,29 @@ def run_visualization(checkpoint: str, dataset_dir: str, output_dir: str, episod
             if video_writer is None:
                 h, w = final_frame.shape[:2]
                 fourcc = cv2.VideoWriter.fourcc(*'mp4v')
-                video_writer = cv2.VideoWriter(video_path, fourcc, 10.0, (w, h))
+                video_writer = cv2.VideoWriter(os.path.join(ep_dir_path, "video.mp4"), fourcc, 10.0, (w, h))
             
             video_writer.write(final_frame)
+            
+            # Save frame image
+            cv2.imwrite(os.path.join(frames_dir, f"{frames_in_current_episode:06d}.jpg"), final_frame)
      
             # Save first frame as thumbnail
-            if frames_processed == 0:
-                cv2.imwrite(thumbnail_path, final_frame)
-                manifest.add_thumbnail(thumbnail_path)
+            if frames_in_current_episode == 0:
+                cv2.imwrite(os.path.join(ep_dir_path, "thumbnail.jpg"), final_frame)
             
-            frames_processed += 1
             frames_in_current_episode += 1
             
-    if video_writer is not None:
-        video_writer.release()
+    # Cleanup last episode
+    if current_episode is not None:
+        if video_writer is not None:
+            video_writer.release()
+        manifest.add_episode(current_episode, ep_start_frame, ep_start_frame + frames_in_current_episode - 1)
         
-    manifest.add_video(video_path, frames_processed)
-    
-    # Optional: populate metadata
-    manifest.add_metadata("checkpoint", os.path.basename(checkpoint))
-    manifest.add_metadata("dataset", os.path.basename(dataset_dir))
-    
     manifest.write()
+    
+    # Update run-summary.json
+    with open(os.path.join(output_dir, "run-summary.json"), "w") as f:
+        json.dump({"status": "completed", "episodes_processed": len(manifest.data["episodes"])}, f)
+        
     print(f"Artifacts saved to {output_dir}")

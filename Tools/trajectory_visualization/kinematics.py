@@ -2,36 +2,36 @@ import torch
 import numpy as np
 import math
 
-def accel_and_curv_to_meters_trajectory(
-        action_sequence: torch.Tensor,
-        current_speed: float,
-        future_timesteps: int,
-        initial_heading: float = 0.0,
-        dt: float = 0.1
+def controls_to_metric_trajectory(
+        controls: torch.Tensor,
+        initial_speed: float,
+        dt: float = 0.1,
+        initial_heading: float = 0.0
 ) -> torch.Tensor:
     """
-    Converts an action sequence of acceleration and curvature into a 2D trajectory in meters.
+    Converts an action sequence of vehicle controls [acceleration, curvature] into a 2D trajectory in meters.
 
     Args:
-        action_sequence (torch.Tensor): Flattened tensor of [acceleration, curvature] actions.
-        current_speed (float): Initial speed of the vehicle in m/s.
-        future_timesteps (int): Number of timesteps to predict.
-        initial_heading (float, optional): Initial heading angle in radians. Defaults to 0.0.
+        controls (torch.Tensor): Flattened or (T, 2) tensor of controls.
+        initial_speed (float): Initial speed of the vehicle in m/s.
         dt (float, optional): Time delta per step. Defaults to 0.1.
+        initial_heading (float, optional): Initial heading angle in radians. Defaults to 0.0.
 
     Returns:
-        torch.Tensor: A tensor of shape (future_timesteps + 1, 2) containing [x, y] coordinates in meters.
+        torch.Tensor: A tensor of shape (T + 1, 2) containing [x, y] coordinates in meters.
     """
-    action_sequence = torch.reshape(action_sequence, (future_timesteps, 2))
+    controls = controls.view(-1, 2)
+    future_timesteps = controls.shape[0]
+    
     trajectory_m = torch.zeros((future_timesteps + 1, 2))
     trajectory_m[0, :] = 0
 
-    v = current_speed
+    v = initial_speed
     yaw = initial_heading
 
     for i in range(future_timesteps):
-        accel = action_sequence[i, 0].item()
-        curv = action_sequence[i, 1].item()
+        accel = controls[i, 0].item()
+        curv = controls[i, 1].item()
 
         v = v + (accel * dt)
         yaw = yaw + (v * curv * dt)
