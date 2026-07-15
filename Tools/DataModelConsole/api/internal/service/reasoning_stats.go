@@ -389,6 +389,13 @@ func parseReasoningTeacherID(teacher string) (string, string, bool) {
 	return provider, modelName, true
 }
 
+// ValidReasoningTeacherID reports whether teacher is the canonical opaque
+// provider/model identity accepted by stats, scene search, and label reads.
+func ValidReasoningTeacherID(teacher string) bool {
+	_, _, ok := parseReasoningTeacherID(teacher)
+	return ok
+}
+
 func reasoningTeacherMatches(label store.ReasoningLabel, requested string) bool {
 	return requested == "" || requested == reasoningTeacher(label)
 }
