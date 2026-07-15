@@ -6,6 +6,18 @@ import (
 	"testing"
 )
 
+func TestValidDatasetIncludesPublishedKITScenesAlias(t *testing.T) {
+	service := &S3Service{}
+	for _, dataset := range []string{"kitscenes", "l2d", "nvidia_av"} {
+		if !service.ValidDataset(dataset) {
+			t.Fatalf("ValidDataset(%q) = false", dataset)
+		}
+	}
+	if service.ValidDataset("KITScenes") {
+		t.Fatal("ValidDataset accepted a non-canonical alias")
+	}
+}
+
 func TestIsVersionDir(t *testing.T) {
 	cases := map[string]bool{
 		"v1":       true,
