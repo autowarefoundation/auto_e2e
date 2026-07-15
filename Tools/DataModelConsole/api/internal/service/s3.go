@@ -1282,8 +1282,8 @@ func memberSuffixOf(name string) string {
 // ReasoningStats counts embedded labels in each dataset's newest immutable
 // shard version, grouped by provenance carried in reasoning.json.
 func (s *S3Service) ReasoningStats(ctx context.Context) ([]model.ReasoningStatsEntry, int, error) {
-	counts := map[[3]string]int{}
-	order := [][3]string{}
+	counts := map[[5]string]int{}
+	order := [][5]string{}
 
 	total := 0
 	for _, dataset := range knownDatasets {
@@ -1307,7 +1307,13 @@ func (s *S3Service) ReasoningStats(ctx context.Context) ([]model.ReasoningStatsE
 			if teacher == "" || label.PromptVersion == "" {
 				continue
 			}
-			k := [3]string{dataset, teacher, label.PromptVersion}
+			k := [5]string{
+				dataset,
+				teacher,
+				label.TeacherProvider,
+				label.TeacherModel,
+				label.PromptVersion,
+			}
 			if _, seen := counts[k]; !seen {
 				order = append(order, k)
 			}
@@ -1319,10 +1325,12 @@ func (s *S3Service) ReasoningStats(ctx context.Context) ([]model.ReasoningStatsE
 	entries := make([]model.ReasoningStatsEntry, 0, len(order))
 	for _, k := range order {
 		entries = append(entries, model.ReasoningStatsEntry{
-			Dataset:       k[0],
-			Teacher:       k[1],
-			PromptVersion: k[2],
-			Count:         counts[k],
+			Dataset:         k[0],
+			Teacher:         k[1],
+			TeacherProvider: k[2],
+			TeacherModel:    k[3],
+			PromptVersion:   k[4],
+			Count:           counts[k],
 		})
 	}
 	sort.Slice(entries, func(i, j int) bool {
@@ -1330,8 +1338,11 @@ func (s *S3Service) ReasoningStats(ctx context.Context) ([]model.ReasoningStatsE
 		if a.Dataset != b.Dataset {
 			return a.Dataset < b.Dataset
 		}
-		if a.Teacher != b.Teacher {
-			return a.Teacher < b.Teacher
+		if a.TeacherProvider != b.TeacherProvider {
+			return a.TeacherProvider < b.TeacherProvider
+		}
+		if a.TeacherModel != b.TeacherModel {
+			return a.TeacherModel < b.TeacherModel
 		}
 		return a.PromptVersion < b.PromptVersion
 	})
@@ -1345,14 +1356,14 @@ func (s *S3Service) ReasoningPromptVersions(ctx context.Context, dataset string)
 }
 
 // ReasoningPromptVersionsAtVersion lists embedded label provenance for one
-// immutable dataset version, sorted by (teacher, prompt_version). An empty
-// version preserves the newest-version behavior for internal callers.
+// immutable dataset version, sorted by (provider, model, prompt_version). An
+// empty version preserves the newest-version behavior for internal callers.
 func (s *S3Service) ReasoningPromptVersionsAtVersion(
 	ctx context.Context,
 	dataset, version string,
 ) ([]model.ReasoningPromptVersion, error) {
-	counts := map[[2]string]int{}
-	order := [][2]string{}
+	counts := map[[4]string]int{}
+	order := [][4]string{}
 
 	locations, version, err := s.reasoningMemberLocations(
 		ctx, dataset, version, "",
@@ -1372,7 +1383,12 @@ func (s *S3Service) ReasoningPromptVersionsAtVersion(
 		if teacher == "" || label.PromptVersion == "" {
 			continue
 		}
-		k := [2]string{teacher, label.PromptVersion}
+		k := [4]string{
+			teacher,
+			label.TeacherProvider,
+			label.TeacherModel,
+			label.PromptVersion,
+		}
 		if _, seen := counts[k]; !seen {
 			order = append(order, k)
 		}
@@ -1382,14 +1398,19 @@ func (s *S3Service) ReasoningPromptVersionsAtVersion(
 	entries := make([]model.ReasoningPromptVersion, 0, len(order))
 	for _, k := range order {
 		entries = append(entries, model.ReasoningPromptVersion{
-			Teacher:       k[0],
-			PromptVersion: k[1],
-			Count:         counts[k],
+			Teacher:         k[0],
+			TeacherProvider: k[1],
+			TeacherModel:    k[2],
+			PromptVersion:   k[3],
+			Count:           counts[k],
 		})
 	}
 	sort.Slice(entries, func(i, j int) bool {
-		if entries[i].Teacher != entries[j].Teacher {
-			return entries[i].Teacher < entries[j].Teacher
+		if entries[i].TeacherProvider != entries[j].TeacherProvider {
+			return entries[i].TeacherProvider < entries[j].TeacherProvider
+		}
+		if entries[i].TeacherModel != entries[j].TeacherModel {
+			return entries[i].TeacherModel < entries[j].TeacherModel
 		}
 		return entries[i].PromptVersion < entries[j].PromptVersion
 	})
