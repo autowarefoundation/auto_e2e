@@ -94,6 +94,8 @@ function SampleDetailInner({
     [samples.data],
   );
   const idx = useMemo(() => keys.indexOf(sampleKey), [keys, sampleKey]);
+  const indexedSample =
+    idx >= 0 ? samples.data?.samples[idx] : undefined;
   // siblingKey (frame +/- 1 arithmetic) is only a safe fallback WHILE the shard
   // index is still loading. Once the fetch has settled (loaded or errored) with
   // no keys, offering a sibling would point at a key that may not exist in this
@@ -213,6 +215,7 @@ function SampleDetailInner({
               sampleKey={sampleKey}
               cam={cam}
               className="aspect-video w-full"
+              range={indexedSample?.members[`cam_${cam}.jpg`]}
               version={version || undefined}
             />
             <p className="bg-slate-950 px-2 py-1 font-mono text-[10px] text-slate-400">
