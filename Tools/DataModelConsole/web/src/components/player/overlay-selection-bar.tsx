@@ -38,7 +38,7 @@ export function OverlaySelectionBar({
   displayMode,
   onDisplayModeChange,
   status,
-  seedCount,
+  baseSeeds,
   splitBucket,
 }: {
   models: OverlayModel[];
@@ -47,7 +47,7 @@ export function OverlaySelectionBar({
   displayMode: TrajectoryDisplayMode;
   onDisplayModeChange: (mode: TrajectoryDisplayMode) => void;
   status: OverlayLoadStatus;
-  seedCount: number;
+  baseSeeds: bigint[];
   splitBucket?: number;
 }) {
   const selected = models.find(
@@ -80,6 +80,11 @@ export function OverlaySelectionBar({
       ) : status === "no-models" ? (
         <span className="text-xs text-slate-500">
           No precomputed trajectory overlay for this shard
+        </span>
+      ) : status === "error" && models.length === 0 ? (
+        <span className="flex items-center gap-1.5 text-xs text-amber-500">
+          <AlertTriangle className="size-3.5" />
+          Trajectory model catalog unavailable
         </span>
       ) : (
         <>
@@ -134,7 +139,9 @@ export function OverlaySelectionBar({
           )}
           {status === "ready" && (
             <span className="font-mono text-[10px] text-emerald-400">
-              {seedCount === 1 ? "1 seed" : `${seedCount} seeds | median`}
+              {baseSeeds.length === 1
+                ? `single sample (base_seed ${baseSeeds[0].toString()})`
+                : `${baseSeeds.length} seeds | median`}
             </span>
           )}
         </>
