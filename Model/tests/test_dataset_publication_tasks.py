@@ -12,6 +12,7 @@ from botocore.exceptions import ClientError
 pytest.importorskip("flytekit")
 
 from Platform.pipelines.dataset_publication_tasks import (
+    _assert_compatible_or_absent,
     _content_identity,
     _copy_immutable,
     _geo_inventory,
@@ -38,6 +39,7 @@ class _S3:
         self.copy_calls = []
         self.put_calls = []
         self.head = None
+        self.head_error = None
         self.objects = {}
         self.fail_copy = False
         self.fail_put = False
@@ -53,6 +55,8 @@ class _S3:
             raise _precondition_failed()
 
     def head_object(self, **kwargs):
+        if self.head_error is not None:
+            raise self.head_error
         assert self.head is not None
         return self.head
 
@@ -146,6 +150,42 @@ def test_metadata_put_retry_is_content_addressed():
         payload=payload,
         content_type="application/json",
     ) == digest
+
+
+def test_manifest_preflight_rejects_conflict_before_pointer_write():
+    s3 = _S3()
+    s3.head = {
+        "ContentLength": 10,
+        "Metadata": {"sha256": "expected"},
+    }
+    _assert_compatible_or_absent(
+        s3,
+        bucket="datasets",
+        key="l2d/v2.1/shards/manifest.json",
+        byte_size=10,
+        sha256="expected",
+    )
+
+    with pytest.raises(RuntimeError, match="manifest"):
+        _assert_compatible_or_absent(
+            s3,
+            bucket="datasets",
+            key="l2d/v2.1/shards/manifest.json",
+            byte_size=10,
+            sha256="different",
+        )
+
+    s3.head_error = ClientError(
+        {"Error": {"Code": "404"}},
+        "HeadObject",
+    )
+    _assert_compatible_or_absent(
+        s3,
+        bucket="datasets",
+        key="l2d/v2.1/shards/manifest.json",
+        byte_size=10,
+        sha256="new",
+    )
 
 
 def test_geo_inventory_keeps_unsuppressed_cells_for_global_reducer():
