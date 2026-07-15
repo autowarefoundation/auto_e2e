@@ -31,6 +31,17 @@ func EmbeddedStatsPK(dataset, version, promptVersion string) string {
 	return fmt.Sprintf("STATSV2#%s#%s#%s", dataset, version, promptVersion)
 }
 
+// EmbeddedTeacherStatsPK identifies one exact provider/model/prompt partition.
+// teacherID is the URL-safe, delimiter-free identity emitted by the service.
+func EmbeddedTeacherStatsPK(
+	dataset, version, teacherID, promptVersion string,
+) string {
+	return fmt.Sprintf(
+		"STATSV3#%s#%s#%s#%s",
+		dataset, version, teacherID, promptVersion,
+	)
+}
+
 // SceneLabelPK is the partition key that groups every scene carrying one
 // (field,value) reasoning label: LBL#{dataset}#{promptVersion}#{field}#{value}.
 // Querying this pk returns all scenes with that label (via SceneLabelSK sorts).
@@ -48,6 +59,17 @@ func SceneLabelVersionPK(dataset, version, promptVersion, field, value string) s
 	return fmt.Sprintf(
 		"LBLV2#%s#%s#%s#%s#%s",
 		dataset, version, promptVersion, field, value,
+	)
+}
+
+// SceneLabelTeacherVersionPK isolates a searchable label partition by exact
+// provider/model identity as well as immutable dataset and prompt versions.
+func SceneLabelTeacherVersionPK(
+	dataset, version, teacherID, promptVersion, field, value string,
+) string {
+	return fmt.Sprintf(
+		"LBLV3#%s#%s#%s#%s#%s#%s",
+		dataset, version, teacherID, promptVersion, field, value,
 	)
 }
 
