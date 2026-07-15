@@ -1338,14 +1338,24 @@ func (s *S3Service) ReasoningStats(ctx context.Context) ([]model.ReasoningStatsE
 	return entries, total, nil
 }
 
-// ReasoningPromptVersions lists embedded label provenance for one dataset's
-// newest published version, sorted by (teacher, prompt_version).
+// ReasoningPromptVersions lists embedded label provenance for a dataset's
+// newest published version.
 func (s *S3Service) ReasoningPromptVersions(ctx context.Context, dataset string) ([]model.ReasoningPromptVersion, error) {
+	return s.ReasoningPromptVersionsAtVersion(ctx, dataset, "")
+}
+
+// ReasoningPromptVersionsAtVersion lists embedded label provenance for one
+// immutable dataset version, sorted by (teacher, prompt_version). An empty
+// version preserves the newest-version behavior for internal callers.
+func (s *S3Service) ReasoningPromptVersionsAtVersion(
+	ctx context.Context,
+	dataset, version string,
+) ([]model.ReasoningPromptVersion, error) {
 	counts := map[[2]string]int{}
 	order := [][2]string{}
 
 	locations, version, err := s.reasoningMemberLocations(
-		ctx, dataset, "", "",
+		ctx, dataset, version, "",
 	)
 	if err != nil {
 		return nil, err
