@@ -252,6 +252,8 @@ export interface ReasoningLabelRecord {
 export interface ReasoningStatsEntry {
   dataset: string;
   teacher: string;
+  teacher_provider: string;
+  teacher_model: string;
   prompt_version: string;
   count: number;
 }
@@ -265,6 +267,8 @@ export interface ReasoningLabelStats {
 // dataset's label cache (GET /api/v1/reasoning-labels/prompt-versions).
 export interface ReasoningPromptVersion {
   teacher: string;
+  teacher_provider: string;
+  teacher_model: string;
   prompt_version: string;
   count: number;
 }
@@ -302,6 +306,9 @@ export interface ReasoningStatsDetail {
   dataset: string;
   version: string;
   prompt_version: string;
+  teacher: string;
+  teacher_provider?: string;
+  teacher_model?: string;
   computed_at: string; // RFC3339
   cached: boolean;
   stats: ReasoningStatsBlob;
@@ -317,6 +324,7 @@ export interface SceneHit {
   shard?: string;
   available: boolean;
   dataset?: string;
+  teacher?: string;
   prompt_version?: string;
 }
 
@@ -325,6 +333,7 @@ export interface SceneHit {
 // truncated = the label index held more than the requested limit.
 export interface SceneSearchResult {
   dataset: string;
+  teacher: string;
   prompt_version: string;
   version?: string;
   field: string;
