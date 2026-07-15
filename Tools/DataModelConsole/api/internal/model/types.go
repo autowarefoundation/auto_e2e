@@ -281,8 +281,10 @@ type HistogramBucket struct {
 // lateral_response, tactical_response, rule_response) to its value->count map,
 // aggregated across every horizon of every label in the set.
 type ReasoningStatsBlob struct {
-	NLabels             int                       `json:"n_labels"`      // number of label objects aggregated
-	HorizonCount        int                       `json:"horizon_count"` // total horizon rows aggregated (n_labels x horizons/label)
+	NRecords            int                       `json:"n_records"`     // all valid records, including explicit abstentions
+	NLabels             int                       `json:"n_labels"`      // successful records contributing coverage
+	NAbstained          int                       `json:"n_abstained"`   // explicit teacher-error records
+	HorizonCount        int                       `json:"horizon_count"` // total rows from successful records
 	ByField             map[string]map[string]int `json:"by_field"`
 	ConfidenceHistogram []HistogramBucket         `json:"confidence_histogram"`
 	// SpeedHistogram is populated only when ego speed is cheaply joinable;
