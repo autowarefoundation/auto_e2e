@@ -13,6 +13,10 @@ const PIXEL = Buffer.from(
   "iVBORw0KGgoAAAANSUhEUgAAAEAAAAAkAQMAAAADwq7RAAAAIGNIUk0AAHomAACAhAAA+gAAAIDoAAB1MAAA6mAAADqYAAAXcJy6UTwAAAAGUExURTNBVf///753ZLcAAAABYktHRAH/Ai3eAAAAB3RJTUUH6gcPAQU1u04EUwAAAA1JREFUGNNjYBgFlAIAAUQAAS6fR94AAAAldEVYdGRhdGU6Y3JlYXRlADIwMjYtMDctMTVUMDE6MDU6NTMrMDA6MDCLG6dUAAAAJXRFWHRkYXRlOm1vZGlmeQAyMDI2LTA3LTE1VDAxOjA1OjUzKzAwOjAw+kYf6AAAACh0RVh0ZGF0ZTp0aW1lc3RhbXAAMjAyNi0wNy0xNVQwMTowNTo1MyswMDowMK1TPjcAAAAASUVORK5CYII=",
   "base64",
 );
+const NEXT_PIXEL = Buffer.from(
+  "iVBORw0KGgoAAAANSUhEUgAAAEAAAAAkAQMAAAADwq7RAAAAIGNIUk0AAHomAACAhAAA+gAAAIDoAAB1MAAA6mAAADqYAAAXcJy6UTwAAAAGUExURdwmJv///wv9ac8AAAABYktHRAH/Ai3eAAAAB3RJTUUH6gcPDxE6D8HjnQAAAA1JREFUGNNjYBgFlAIAAUQAAS6fR94AAAAldEVYdGRhdGU6YXRlADIwMjYtMDctMTVUMTU6MTc6NTgrMDA6MDAR0XezAAAAJXRFWHRkYXRlOm1vZGlmeQAyMDI2LTA3LTE1VDE1OjE3OjU4KzAwOjAwYIzPDwAAACh0RVh0ZGF0ZTp0aW1lc3RhbXAAMjAyNi0wNy0xNVQxNToxNzo1OCswMDowMDeZ7tAAAAAASUVORK5CYII=",
+  "base64",
+);
 
 function uidHash(uid: string): bigint {
   return createHash("sha256").update(uid).digest().readBigUInt64LE(0);
@@ -97,6 +101,8 @@ test("trajectory overlays and geographic views honor production contracts", asyn
 }, testInfo) => {
   let blobRequests = 0;
   let directImageRequests = 0;
+  let frameOneImageAttempts = 0;
+  let frameOneImagesAvailable = false;
   const consoleErrors: string[] = [];
   page.on("console", (message) => {
     if (message.type() === "error") consoleErrors.push(message.text());
@@ -285,6 +291,21 @@ test("trajectory overlays and geographic views honor production contracts", asyn
     }
     if (path.includes("/image/cam_")) {
       directImageRequests++;
+      if (path.includes(`/samples/${SAMPLE_KEYS[1]}/`)) {
+        frameOneImageAttempts++;
+        if (!frameOneImagesAvailable) {
+          return route.fulfill({
+            status: 200,
+            contentType: "image/png",
+            body: Buffer.from("not an image"),
+          });
+        }
+        return route.fulfill({
+          status: 200,
+          contentType: "image/png",
+          body: NEXT_PIXEL,
+        });
+      }
       return route.fulfill({
         status: 200,
         contentType: "image/png",
@@ -328,6 +349,47 @@ test("trajectory overlays and geographic views honor production contracts", asyn
       }).length,
     );
   expect(overlayPixels).toBeGreaterThan(0);
+
+  const imageCanvas = page.locator("canvas:not([aria-hidden])").first();
+  const overlayCanvas = page.locator("canvas[aria-hidden='true']").first();
+  const cameraPixel = () =>
+    imageCanvas.evaluate((canvas) =>
+      Array.from(
+        (canvas as HTMLCanvasElement)
+          .getContext("2d")!
+          .getImageData(0, 0, 1, 1).data,
+      ),
+    );
+  const overlaySnapshot = () =>
+    overlayCanvas.evaluate((canvas) =>
+      (canvas as HTMLCanvasElement).toDataURL(),
+    );
+
+  await expect.poll(cameraPixel).toEqual([51, 65, 85, 255]);
+  const initialOverlay = await overlaySnapshot();
+  const attemptsBeforeSeek = frameOneImageAttempts;
+  const timeline = page.getByRole("slider", { name: "Timeline" });
+  await timeline.focus();
+  await page.keyboard.press("ArrowRight");
+  await expect(timeline).toHaveAttribute("aria-valuenow", "1");
+  await expect
+    .poll(() => frameOneImageAttempts)
+    .toBeGreaterThan(attemptsBeforeSeek);
+  await page.waitForTimeout(100);
+
+  // While frame 1 is unavailable, retain frame 0 as an atomic image/overlay
+  // pair instead of painting frame 1's paths over frame 0's image.
+  expect(await cameraPixel()).toEqual([51, 65, 85, 255]);
+  expect(await overlaySnapshot()).toBe(initialOverlay);
+
+  frameOneImagesAvailable = true;
+  await expect
+    .poll(cameraPixel, { timeout: 5_000 })
+    .toEqual([220, 38, 38, 255]);
+  await expect
+    .poll(overlaySnapshot, { timeout: 5_000 })
+    .not.toBe(initialOverlay);
+
   await page.screenshot({
     path: testInfo.outputPath("scene-overlay-desktop.png"),
     fullPage: true,
