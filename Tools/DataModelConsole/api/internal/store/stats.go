@@ -3,7 +3,9 @@ package store
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"sort"
+	"strings"
 
 	"github.com/autowarefoundation/auto_e2e/tools/datamodelconsole/api/internal/model"
 )
@@ -19,13 +21,17 @@ type ReasoningLabel struct {
 	TeacherProvider string         `json:"teacher_provider"`
 	TeacherModel    string         `json:"teacher_model"`
 	PromptVersion   string         `json:"prompt_version"`
+	RequestMode     string         `json:"request_mode"`
+	Provenance      string         `json:"provenance"`
 	Abstained       bool           `json:"abstained"`
+	TeacherError    string         `json:"teacher_error"`
 	Horizons        []LabelHorizon `json:"horizons"`
 }
 
 // LabelHorizon is one horizon (now/+1s/.../+4s) of a reasoning label. Single-
 // label axes are scalars; hazard_event and cause are multi-label lists.
 type LabelHorizon struct {
+	HorizonSec           *float64 `json:"horizon_sec"`
 	RelationToEgo        string   `json:"relation_to_ego"`
 	HazardEvent          []string `json:"hazard_event"`
 	Cause                []string `json:"cause"`
@@ -34,6 +40,75 @@ type LabelHorizon struct {
 	TacticalResponse     string   `json:"tactical_response"`
 	RuleResponse         string   `json:"rule_response"`
 	Confidence           float64  `json:"confidence"`
+	Provenance           string   `json:"provenance"`
+}
+
+const reasoningLabelSchema = "reasoning_label_v2"
+
+var validReasoningProvenance = stringSet(
+	"audited_gt",
+	"direct_gt",
+	"derived_gt",
+	"teacher_gt",
+	"weak_gt",
+	"counterfactual_gt",
+	"teacher_error",
+)
+
+var reasoningTaxonomy = map[string]map[string]struct{}{
+	FieldRelationToEgo: stringSet(
+		"same_lane_ahead", "same_lane_behind", "left_adjacent",
+		"right_adjacent", "crossing_path", "about_to_cross_path",
+		"merging_into_ego_path", "cutting_into_ego_path",
+		"oncoming_conflict", "intersection_conflict",
+		"blocking_current_lane", "blocking_target_lane", "blocking_route",
+		"occluded_near_path", "outside_path", "behind_ego",
+		"unknown_relation",
+	),
+	FieldHazardEvent: stringSet(
+		"no_hazard", "collision_risk", "vru_collision_risk",
+		"cut_in_risk", "merge_conflict_risk",
+		"right_of_way_violation_risk", "red_light_violation_risk",
+		"blocked_route_risk", "occlusion_risk", "low_friction_risk",
+		"emergency_vehicle_risk", "unknown_hazard",
+	),
+	FieldCause: stringSet(
+		"lead_vehicle", "slow_lead_vehicle", "stopped_lead_vehicle",
+		"cut_in_vehicle", "cross_traffic", "oncoming_vehicle",
+		"pedestrian_crossing", "pedestrian_about_to_cross", "vru_conflict",
+		"red_light", "yellow_light", "stop_sign", "yield_sign",
+		"human_direction", "route_turn", "route_merge",
+		"route_lane_change", "lane_ending", "object_blocking_path",
+		"blocked_lane", "road_closed", "construction_blocking_path",
+		"occlusion", "poor_visibility", "slippery_road",
+		"uncertainty_high", "unknown_cause",
+	),
+	FieldLongitudinalResponse: stringSet(
+		"keep_speed", "accelerate", "coast", "slow_down", "prepare_stop",
+		"stop", "stay_stopped", "creep", "yield", "follow_lead_vehicle",
+		"increase_gap", "emergency_brake", "unknown_longitudinal",
+	),
+	FieldLateralResponse: stringSet(
+		"keep_lane", "nudge_left", "nudge_right", "shift_left_within_lane",
+		"shift_right_within_lane", "lane_change_left", "lane_change_right",
+		"avoid_left", "avoid_right", "return_to_lane", "pull_over",
+		"reverse", "unknown_lateral",
+	),
+	FieldTacticalResponse: stringSet(
+		"proceed", "proceed_with_caution", "wait", "wait_for_gap",
+		"wait_for_actor", "wait_for_signal", "creep_for_visibility",
+		"negotiate_merge", "negotiate_unprotected_turn",
+		"yield_then_proceed", "stop_then_proceed", "reroute_or_wait",
+		"unknown_tactical",
+	),
+	FieldRuleResponse: stringSet(
+		"none", "wait_for_green", "stop_at_stop_line",
+		"stop_before_crosswalk", "yield_to_vru", "yield_to_oncoming",
+		"yield_to_cross_traffic", "yield_to_emergency_vehicle",
+		"obey_human_direction", "respect_speed_limit",
+		"slow_for_school_zone", "slow_for_construction_zone",
+		"do_not_enter", "do_not_turn", "unknown_rule",
+	),
 }
 
 // statFields is the fixed set of categorical taxonomy axes aggregated into
@@ -72,14 +147,144 @@ func IsStatField(f string) bool {
 	return false
 }
 
-// ParseReasoningLabel decodes one reasoning-label JSON body into a
-// ReasoningLabel (pure; no AWS). Unknown/null fields decode to zero values.
+// ParseReasoningLabel decodes and validates one reasoning-label JSON body.
+// Optional context fields remain forward-compatible, while the current
+// identity, horizon, provenance, taxonomy, and confidence contracts are strict.
 func ParseReasoningLabel(body []byte) (ReasoningLabel, error) {
 	var lbl ReasoningLabel
 	if err := json.Unmarshal(body, &lbl); err != nil {
 		return ReasoningLabel{}, fmt.Errorf("decode reasoning label: %w", err)
 	}
+	if err := validateReasoningLabel(lbl); err != nil {
+		return ReasoningLabel{}, err
+	}
 	return lbl, nil
+}
+
+func validateReasoningLabel(label ReasoningLabel) error {
+	if label.SchemaVersion != reasoningLabelSchema {
+		return fmt.Errorf(
+			"reasoning label schema is %q, want %q",
+			label.SchemaVersion, reasoningLabelSchema,
+		)
+	}
+	for name, value := range map[string]string{
+		"sample_id":        label.SampleID,
+		"dataset_name":     label.DatasetName,
+		"teacher_provider": label.TeacherProvider,
+		"teacher_model":    label.TeacherModel,
+		"prompt_version":   label.PromptVersion,
+		"request_mode":     label.RequestMode,
+		"provenance":       label.Provenance,
+	} {
+		if strings.TrimSpace(value) == "" {
+			return fmt.Errorf("reasoning label %s is required", name)
+		}
+	}
+	if _, ok := validReasoningProvenance[label.Provenance]; !ok {
+		return fmt.Errorf(
+			"reasoning label has invalid provenance %q", label.Provenance,
+		)
+	}
+	if label.Abstained {
+		if strings.TrimSpace(label.TeacherError) == "" ||
+			len(label.Horizons) != 0 ||
+			label.Provenance != "teacher_error" {
+			return fmt.Errorf("abstained reasoning label is inconsistent")
+		}
+		return nil
+	}
+	if label.TeacherError != "" || label.Provenance == "teacher_error" {
+		return fmt.Errorf("successful reasoning label has teacher error provenance")
+	}
+	if len(label.Horizons) != 5 {
+		return fmt.Errorf(
+			"reasoning label has %d horizons, want 5", len(label.Horizons),
+		)
+	}
+	for i, horizon := range label.Horizons {
+		if horizon.HorizonSec == nil || *horizon.HorizonSec != float64(i) {
+			return fmt.Errorf(
+				"reasoning horizon %d has invalid horizon_sec", i,
+			)
+		}
+		if _, ok := validReasoningProvenance[horizon.Provenance]; !ok ||
+			horizon.Provenance == "teacher_error" {
+			return fmt.Errorf(
+				"reasoning horizon %d has invalid provenance %q",
+				i, horizon.Provenance,
+			)
+		}
+		if math.IsNaN(horizon.Confidence) ||
+			math.IsInf(horizon.Confidence, 0) ||
+			horizon.Confidence < 0 ||
+			horizon.Confidence > 1 {
+			return fmt.Errorf(
+				"reasoning horizon %d has invalid confidence %v",
+				i, horizon.Confidence,
+			)
+		}
+		if err := validateTaxonomyValue(
+			FieldRelationToEgo, horizon.RelationToEgo,
+		); err != nil {
+			return fmt.Errorf("reasoning horizon %d: %w", i, err)
+		}
+		if err := validateTaxonomyValues(
+			FieldHazardEvent, horizon.HazardEvent,
+		); err != nil {
+			return fmt.Errorf("reasoning horizon %d: %w", i, err)
+		}
+		if err := validateTaxonomyValues(
+			FieldCause, horizon.Cause,
+		); err != nil {
+			return fmt.Errorf("reasoning horizon %d: %w", i, err)
+		}
+		for field, value := range map[string]string{
+			FieldLongitudinalResponse: horizon.LongitudinalResponse,
+			FieldLateralResponse:      horizon.LateralResponse,
+			FieldTacticalResponse:     horizon.TacticalResponse,
+			FieldRuleResponse:         horizon.RuleResponse,
+		} {
+			if err := validateTaxonomyValue(field, value); err != nil {
+				return fmt.Errorf("reasoning horizon %d: %w", i, err)
+			}
+		}
+	}
+	return nil
+}
+
+func validateTaxonomyValue(field, value string) error {
+	// The Python contract permits a null single-label value as a per-axis
+	// abstention. JSON null decodes to the empty string here.
+	if value == "" {
+		return nil
+	}
+	if _, ok := reasoningTaxonomy[field][value]; !ok {
+		return fmt.Errorf("unknown %s label %q", field, value)
+	}
+	return nil
+}
+
+func validateTaxonomyValues(field string, values []string) error {
+	seen := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		if _, ok := reasoningTaxonomy[field][value]; !ok {
+			return fmt.Errorf("unknown %s label %q", field, value)
+		}
+		if _, duplicate := seen[value]; duplicate {
+			return fmt.Errorf("duplicate %s label %q", field, value)
+		}
+		seen[value] = struct{}{}
+	}
+	return nil
+}
+
+func stringSet(values ...string) map[string]struct{} {
+	set := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		set[value] = struct{}{}
+	}
+	return set
 }
 
 // AggregateStats builds the precomputed stats blob from a slice of parsed
