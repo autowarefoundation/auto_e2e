@@ -31,9 +31,27 @@ env:
 phases:
   install:
     commands:
-      - pip install -q flytekit numpy torch kubernetes --extra-index-url https://download.pytorch.org/whl/cpu
+      - pip install -q flytekit==1.14.9 numpy torch kubernetes --extra-index-url https://download.pytorch.org/whl/cpu
   build:
     commands:
+      - ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+      - ECR_URL="${ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com"
+      - export ECR_PREFIX="${ECR_URL}"
+      - |
+        image_ref() {
+          REPOSITORY="$1"
+          DIGEST=$(aws ecr describe-images \
+            --repository-name "auto-e2e/${REPOSITORY}" \
+            --image-ids imageTag=latest \
+            --query 'imageDetails[0].imageDigest' \
+            --output text)
+          test -n "${DIGEST}" && test "${DIGEST}" != "None"
+          printf '%s/auto-e2e/%s@%s' "${ECR_URL}" "${REPOSITORY}" "${DIGEST}"
+        }
+        export AUTO_E2E_TRAINING_IMAGE=$(image_ref training)
+        export AUTO_E2E_EVAL_IMAGE=$(image_ref eval)
+        export AUTO_E2E_OFFLINE_RL_IMAGE=$(image_ref offline-rl)
+        export AUTO_E2E_DATA_PREP_IMAGE=$(image_ref data-prep)
       - |
         cat > /tmp/flyte.yaml << EOF
         admin:
@@ -46,6 +64,7 @@ phases:
         pyflyte --config /tmp/flyte.yaml run --remote
         --project $FLYTE_PROJECT
         --domain $FLYTE_DOMAIN
+        --image "${AUTO_E2E_TRAINING_IMAGE}"
         Platform/pipelines/workflows.py wf_sharded_full_run
         --dataset "KIT-MRT/KITScenes-Multimodal"
         --episodes $EPISODES
