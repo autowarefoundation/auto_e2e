@@ -53,13 +53,16 @@ type publicationManifest struct {
 	Version       string `json:"version"`
 
 	TotalSamples int `json:"total_samples"`
-	Shards       int `json:"shards"`
-	ShardCount   int `json:"shard_count"`
-	Episodes     int `json:"episodes"`
-	NumViews     int `json:"num_views"`
+	// ReasoningLabelCount includes successful and explicit-abstention records.
+	ReasoningLabelCount int `json:"reasoning_label_count"`
+	Shards              int `json:"shards"`
+	ShardCount          int `json:"shard_count"`
+	Episodes            int `json:"episodes"`
+	NumViews            int `json:"num_views"`
 
 	HasMap        bool `json:"has_map"`
 	HasWorldModel bool `json:"has_world_model"`
+	HasReasoning  bool `json:"has_reasoning_labels"`
 	HasGPS        bool `json:"has_gps"`
 
 	ShardEntries []publicationShardEntry  `json:"shard_entries"`
@@ -100,6 +103,16 @@ func decodePublicationManifest(
 	}
 	if manifest.TotalSamples <= 0 {
 		return nil, fmt.Errorf("publication has no samples")
+	}
+	if manifest.ReasoningLabelCount < 0 ||
+		manifest.ReasoningLabelCount > manifest.TotalSamples ||
+		manifest.HasReasoning != (manifest.ReasoningLabelCount > 0) {
+		return nil, fmt.Errorf(
+			"publication reasoning counts disagree: has_reasoning=%v count=%d samples=%d",
+			manifest.HasReasoning,
+			manifest.ReasoningLabelCount,
+			manifest.TotalSamples,
+		)
 	}
 	if manifest.Shards <= 0 ||
 		manifest.Shards != manifest.ShardCount ||
