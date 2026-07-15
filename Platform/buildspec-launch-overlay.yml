@@ -1,7 +1,7 @@
 version: 0.2
 
 # VPC-local launcher for the complete trajectory-overlay data path. The default
-# is a one-scene smoke run under a separate immutable dataset coordinate. After
+# is a one-scene smoke run under a derived immutable dataset coordinate. After
 # it succeeds, set PUBLISHED_DATASET=kitscenes and EPISODES=0 for production.
 env:
   variables:
@@ -11,7 +11,7 @@ env:
     MODEL_VERSION: ""
     DATASET: "KIT-MRT/KITScenes-Multimodal"
     SOURCE_REVISION: "6fde0034446669e2ed7235e4c7fe323cd23d599d"
-    PUBLISHED_DATASET: kitscenes-smoke
+    PUBLISHED_DATASET: ""
     DATASET_VERSION: v2.1
     EPISODES: "1"
     PARTITION_SIZE: "1"
@@ -60,6 +60,18 @@ phases:
         EOF
       - PREPROCESSING_DIGEST=$(python3 Platform/pipelines/reproducibility.py preprocessing)
       - INFERENCE_DIGEST=$(python3 Platform/pipelines/reproducibility.py inference)
+      - |
+        if [ -z "${PUBLISHED_DATASET}" ]; then
+          test "${EPISODES}" != "0" || {
+            echo "PUBLISHED_DATASET is required when EPISODES=0"
+            exit 1
+          }
+          SMOKE_ID=$(printf '%s' \
+            "${PREPROCESSING_DIGEST}:${INFERENCE_DIGEST}:${CONTAINER_IMAGE_DIGEST}:${SOURCE_REVISION}:${EPISODES}" \
+            | sha256sum | cut -c1-12)
+          export PUBLISHED_DATASET="kitscenes-smoke-${SMOKE_ID}"
+        fi
+        echo "Publishing immutable dataset coordinate ${PUBLISHED_DATASET}/${DATASET_VERSION}"
       - >
         pyflyte --config /tmp/flyte.yaml run --remote
         --project "${FLYTE_PROJECT}"
