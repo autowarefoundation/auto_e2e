@@ -160,6 +160,56 @@ test("dataset pagination ignores a response from the previously selected version
   await expect(page.getByText("v22-late.tar")).toHaveCount(0);
 });
 
+test("dataset shards wait for version resolution and version history is navigable", async ({
+  page,
+}) => {
+  let releaseVersions!: () => void;
+  const versionsGate = new Promise<void>((resolve) => {
+    releaseVersions = resolve;
+  });
+  const shardVersions: Array<string | null> = [];
+
+  await page.route("**/api/v1/**", async (route) => {
+    const url = new URL(route.request().url());
+    if (url.pathname === "/api/v1/datasets/review/versions") {
+      await versionsGate;
+      return fulfillJSON(route, {
+        dataset: "review",
+        versions: [version("v2.2"), version("v2.1")],
+      });
+    }
+    if (url.pathname === "/api/v1/datasets/review/shards") {
+      const selectedVersion = url.searchParams.get("version");
+      shardVersions.push(selectedVersion);
+      return fulfillJSON(route, {
+        dataset: "review",
+        shards: [shard(`${selectedVersion}.tar`)],
+        page: { limit: 50, offset: 0, total: 1, more: false },
+      });
+    }
+    if (url.pathname === "/api/v1/reasoning-labels/prompt-versions") {
+      return fulfillJSON(route, { prompt_versions: [] });
+    }
+    return route.fulfill({ status: 404, body: "not mocked" });
+  });
+
+  await page.goto("/datasets/review?version=v2.1");
+  await page.waitForTimeout(100);
+  expect(shardVersions).toEqual([]);
+
+  releaseVersions();
+  await expect(page.getByText("v2.1.tar")).toBeVisible();
+  expect(shardVersions).toEqual(["v2.1"]);
+
+  await page.getByLabel("Dataset version").selectOption("v2.2");
+  await expect(page.getByText("v2.2.tar")).toBeVisible();
+  await expect(page).toHaveURL(/version=v2\.2$/);
+
+  await page.goBack();
+  await expect(page).toHaveURL(/version=v2\.1$/);
+  await expect(page.getByText("v2.1.tar")).toBeVisible();
+});
+
 test("sample pagination ignores a response from the previously selected version", async ({
   page,
 }) => {
@@ -218,6 +268,12 @@ test("scene locator paginates through the complete shard publication", async ({
             prefix: "l2d/v2.1/shards/",
           },
         ],
+      });
+    }
+    if (url.pathname === "/api/v1/datasets/l2d/versions") {
+      return fulfillJSON(route, {
+        dataset: "l2d",
+        versions: [version("v2.1")],
       });
     }
     if (url.pathname === "/api/v1/datasets/l2d/shards") {
