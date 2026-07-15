@@ -18,7 +18,10 @@ from Platform.pipelines.dataset_publication import (
 ECR_PREFIX = os.environ.get(
     "ECR_PREFIX", "381491877296.dkr.ecr.us-west-2.amazonaws.com"
 )
-DATA_PREP_IMAGE = f"{ECR_PREFIX}/auto-e2e/data-prep:latest"
+DATA_PREP_IMAGE = os.environ.get(
+    "AUTO_E2E_DATA_PREP_IMAGE",
+    f"{ECR_PREFIX}/auto-e2e/data-prep:latest",
+)
 _MAX_COPY_OBJECT_BYTES = 5 * 1024**3
 
 
