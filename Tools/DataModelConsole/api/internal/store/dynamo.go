@@ -31,30 +31,42 @@ type sceneItem struct {
 }
 
 type overlayPointerItem struct {
-	S3Key               string  `dynamodbav:"s3_key"`
-	SHA256              string  `dynamodbav:"sha256"`
-	ByteSize            int64   `dynamodbav:"byte_size"`
-	SampleCount         int     `dynamodbav:"sample_count"`
-	OverlaySchema       string  `dynamodbav:"overlay_schema"`
-	Status              string  `dynamodbav:"status"`
-	RegisteredModelName string  `dynamodbav:"registered_model_name"`
-	ModelVersion        int     `dynamodbav:"model_version"`
-	RunID               string  `dynamodbav:"run_id"`
-	ModelName           string  `dynamodbav:"model_name"`
-	EvalADE             float64 `dynamodbav:"eval_ade"`
-	EvalFDE             float64 `dynamodbav:"eval_fde"`
-	ValFraction         float64 `dynamodbav:"val_fraction"`
-	SK                  string  `dynamodbav:"sk"`
+	S3Key                 string  `dynamodbav:"s3_key"`
+	SHA256                string  `dynamodbav:"sha256"`
+	ByteSize              int64   `dynamodbav:"byte_size"`
+	SampleCount           int     `dynamodbav:"sample_count"`
+	OverlaySchema         string  `dynamodbav:"overlay_schema"`
+	DatasetManifestSHA256 string  `dynamodbav:"dataset_manifest_sha256"`
+	CacheIdentity         string  `dynamodbav:"cache_identity"`
+	Status                string  `dynamodbav:"status"`
+	RegisteredModelName   string  `dynamodbav:"registered_model_name"`
+	ModelVersion          int     `dynamodbav:"model_version"`
+	RunID                 string  `dynamodbav:"run_id"`
+	ModelName             string  `dynamodbav:"model_name"`
+	EvalADE               float64 `dynamodbav:"eval_ade"`
+	EvalFDE               float64 `dynamodbav:"eval_fde"`
+	ValFraction           float64 `dynamodbav:"val_fraction"`
+	SK                    string  `dynamodbav:"sk"`
+}
+
+type overlaySetItem struct {
+	Status                string `dynamodbav:"status"`
+	DatasetManifestSHA256 string `dynamodbav:"dataset_manifest_sha256"`
+	RequestIdentity       string `dynamodbav:"request_identity"`
+	CacheIdentity         string `dynamodbav:"cache_identity"`
+	ManifestKey           string `dynamodbav:"manifest_key"`
 }
 
 // OverlayPointer is the validated S3 locator for one canonical shard body.
 type OverlayPointer struct {
-	ModelArtifactID string
-	S3Key           string
-	SHA256          string
-	ByteSize        int64
-	SampleCount     int
-	OverlaySchema   string
+	ModelArtifactID       string
+	S3Key                 string
+	SHA256                string
+	ByteSize              int64
+	SampleCount           int
+	OverlaySchema         string
+	DatasetManifestSHA256 string
+	CacheIdentity         string
 }
 
 // GeoRecord is the serving metadata for one privacy-filtered geo artifact set.
@@ -418,12 +430,19 @@ func (s *DynamoStore) QueryReadyOverlayModels(ctx context.Context, dataset, vers
 			if item.Status != "ready" || modelArtifactID == item.SK {
 				continue
 			}
-			ready, err := s.overlaySetReady(ctx, modelArtifactID, dataset, version)
+			set, err := s.readyOverlaySet(ctx, modelArtifactID, dataset, version)
 			if err != nil {
 				return nil, err
 			}
-			if !ready {
+			if set == nil {
 				continue
+			}
+			if item.DatasetManifestSHA256 != set.DatasetManifestSHA256 ||
+				item.CacheIdentity != set.CacheIdentity {
+				return nil, fmt.Errorf(
+					"overlay pointer identity differs from ready set for model %s",
+					modelArtifactID,
+				)
 			}
 			models = append(models, model.OverlayModel{
 				ModelArtifactID:     modelArtifactID,
@@ -473,47 +492,65 @@ func (s *DynamoStore) GetReadyOverlayPointer(ctx context.Context, dataset, versi
 	if err := attributevalue.UnmarshalMap(out.Item, &item); err != nil {
 		return nil, fmt.Errorf("decode overlay pointer: %w", err)
 	}
-	ready, err := s.overlaySetReady(ctx, modelArtifactID, dataset, version)
+	set, err := s.readyOverlaySet(ctx, modelArtifactID, dataset, version)
 	if err != nil {
 		return nil, err
 	}
-	if item.Status != "ready" || !ready {
+	if item.Status != "ready" || set == nil {
 		return nil, ErrNotFound
+	}
+	if item.DatasetManifestSHA256 != set.DatasetManifestSHA256 ||
+		item.CacheIdentity != set.CacheIdentity {
+		return nil, fmt.Errorf("overlay pointer identity differs from ready set")
 	}
 	if item.S3Key == "" || item.SHA256 == "" || item.ByteSize <= 0 || item.SampleCount <= 0 {
 		return nil, fmt.Errorf("overlay pointer is incomplete")
 	}
 	return &OverlayPointer{
-		ModelArtifactID: modelArtifactID,
-		S3Key:           item.S3Key,
-		SHA256:          item.SHA256,
-		ByteSize:        item.ByteSize,
-		SampleCount:     item.SampleCount,
-		OverlaySchema:   item.OverlaySchema,
+		ModelArtifactID:       modelArtifactID,
+		S3Key:                 item.S3Key,
+		SHA256:                item.SHA256,
+		ByteSize:              item.ByteSize,
+		SampleCount:           item.SampleCount,
+		OverlaySchema:         item.OverlaySchema,
+		DatasetManifestSHA256: item.DatasetManifestSHA256,
+		CacheIdentity:         item.CacheIdentity,
 	}, nil
 }
 
-func (s *DynamoStore) overlaySetReady(ctx context.Context, modelArtifactID, dataset, version string) (bool, error) {
+func (s *DynamoStore) readyOverlaySet(ctx context.Context, modelArtifactID, dataset, version string) (*overlaySetItem, error) {
 	out, err := s.client.GetItem(ctx, &dynamodb.GetItemInput{
 		TableName: aws.String(s.table),
 		Key: map[string]ddbtypes.AttributeValue{
 			"pk": &ddbtypes.AttributeValueMemberS{Value: OverlaySetPK(modelArtifactID, dataset, version)},
 			"sk": &ddbtypes.AttributeValueMemberS{Value: metaSK},
 		},
-		ProjectionExpression:     aws.String("#status"),
+		ProjectionExpression: aws.String(
+			"#status, dataset_manifest_sha256, request_identity, " +
+				"cache_identity, manifest_key",
+		),
 		ExpressionAttributeNames: map[string]string{"#status": "status"},
 	})
 	if err != nil {
-		return false, fmt.Errorf("get overlay-set status: %w", err)
+		return nil, fmt.Errorf("get overlay-set status: %w", err)
 	}
 	if out.Item == nil {
-		return false, nil
+		return nil, nil
 	}
-	status, err := stringAttr(out.Item, "status")
-	if err != nil {
-		return false, err
+	var item overlaySetItem
+	if err := attributevalue.UnmarshalMap(out.Item, &item); err != nil {
+		return nil, fmt.Errorf("decode overlay-set status: %w", err)
 	}
-	return status == "ready", nil
+	if item.Status != "ready" {
+		return nil, nil
+	}
+	if len(item.DatasetManifestSHA256) != 64 ||
+		len(item.RequestIdentity) != 64 ||
+		len(item.CacheIdentity) != 64 ||
+		item.ManifestKey == "" {
+		return nil, fmt.Errorf("ready overlay set is incomplete")
+	}
+	return &item, nil
 }
 
 // GetGeoRecord returns the privacy-filtered summary and S3 heatmap pointer.
