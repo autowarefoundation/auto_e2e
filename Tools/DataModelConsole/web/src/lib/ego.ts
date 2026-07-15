@@ -84,14 +84,25 @@ export interface TrajectoryPoint {
   heading: number; // rad
 }
 
+export type TrajectoryDisplayMode = "raw" | "display-limited";
+
+// L2D derives positive curvature from increasing compass heading, which is a
+// physical right turn. The renderer's +y axis is left, so the display rollout
+// must invert that source convention. Other parsers use math-positive yaw.
+export function trajectoryCurvatureSign(dataset: string): 1 | -1 {
+  return dataset === "l2d" || dataset === "yaak-ai/L2D" ? -1 : 1;
+}
+
 // integrateTrajectory rolls the (accel, curvature) future out with a
 // unicycle model from initial speed v0, in the ego frame (+x forward):
 //   v += a*dt; theta += v*kappa*dt; x += v*cos(theta)*dt; y += v*sin(theta)*dt
 export function integrateTrajectory(
   v0: number,
-  accel: number[],
-  curvature: number[],
+  accel: ArrayLike<number>,
+  curvature: ArrayLike<number>,
   dt = EGO_DT,
+  displayMode: TrajectoryDisplayMode = "raw",
+  curvatureSign: 1 | -1 = 1,
 ): TrajectoryPoint[] {
   const n = Math.min(accel.length, curvature.length);
   const out: TrajectoryPoint[] = new Array(n);
@@ -102,7 +113,40 @@ export function integrateTrajectory(
   for (let i = 0; i < n; i++) {
     v += accel[i] * dt;
     if (v < 0) v = 0; // no reversing from braking overshoot
-    theta += yawRateFrom(v, curvature[i]) * dt;
+    const yawRate =
+      displayMode === "display-limited"
+        ? yawRateFrom(v, curvature[i])
+        : v * curvature[i];
+    theta += curvatureSign * yawRate * dt;
+    x += v * Math.cos(theta) * dt;
+    y += v * Math.sin(theta) * dt;
+    out[i] = { x, y, heading: theta };
+  }
+  return out;
+}
+
+// controls is [accel_0, curvature_0, accel_1, curvature_1, ...].
+export function integrateInterleavedControl(
+  v0: number,
+  controls: ArrayLike<number>,
+  dt = EGO_DT,
+  displayMode: TrajectoryDisplayMode = "raw",
+  curvatureSign: 1 | -1 = 1,
+): TrajectoryPoint[] {
+  const steps = Math.floor(controls.length / 2);
+  const out = new Array<TrajectoryPoint>(steps);
+  let v = v0;
+  let theta = 0;
+  let x = 0;
+  let y = 0;
+  for (let i = 0; i < steps; i++) {
+    v = Math.max(0, v + controls[i * 2] * dt);
+    const curvature = controls[i * 2 + 1];
+    const yawRate =
+      displayMode === "display-limited"
+        ? yawRateFrom(v, curvature)
+        : v * curvature;
+    theta += curvatureSign * yawRate * dt;
     x += v * Math.cos(theta) * dt;
     y += v * Math.sin(theta) * dt;
     out[i] = { x, y, heading: theta };
