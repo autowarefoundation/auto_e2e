@@ -14,6 +14,7 @@ export function CameraImage({
   sampleKey,
   cam,
   className,
+  range,
   version,
 }: {
   dataset: string;
@@ -21,16 +22,19 @@ export function CameraImage({
   sampleKey: string;
   cam: number;
   className?: string;
+  range?: { offset: number; size: number };
   version?: string;
 }) {
   const [failed, setFailed] = useState(false);
-  const src = getSampleImageUrl(dataset, shard, sampleKey, cam, undefined, version);
+  const src = range
+    ? getSampleImageUrl(dataset, shard, sampleKey, cam, range, version)
+    : "";
   // This component is reused as the user navigates samples (React keeps the
   // instance, only props change), so a failure from one sample would otherwise
   // stick to the next. Reset when the source changes so each frame starts fresh.
   useEffect(() => setFailed(false), [src]);
 
-  if (failed) {
+  if (!range || failed) {
     return (
       <div
         className={`flex items-center justify-center bg-slate-900 text-slate-600 ${className ?? "aspect-video w-full"}`}
