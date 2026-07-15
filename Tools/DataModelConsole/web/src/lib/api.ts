@@ -268,7 +268,10 @@ export async function listShardOverlayModels(
     | Pick<OverlayModelsResponse, "dataset" | "version" | "shard">
     | undefined;
 
-  for (let page = 0; page < MAX_OVERLAY_MODEL_PAGES; page++) {
+  // DynamoDB may return a LastEvaluatedKey when a page exactly reaches Limit,
+  // even if no item follows it. Permit one empty terminal probe after the
+  // bounded data pages, but never accept a 21st page containing models.
+  for (let page = 0; page <= MAX_OVERLAY_MODEL_PAGES; page++) {
     if (pageToken) {
       if (seenPageTokens.has(pageToken)) {
         throw new Error("overlay model pagination token entered a cycle");
@@ -306,6 +309,27 @@ export async function listShardOverlayModels(
       response.shard !== coordinates.shard
     ) {
       throw new Error("overlay model pagination changed coordinates");
+    }
+
+    if (page === MAX_OVERLAY_MODEL_PAGES) {
+      if (
+        (response.models?.length ?? 0) !== 0 ||
+        response.next_page_token
+      ) {
+        throw new Error(
+          `overlay model pagination exceeded ${MAX_OVERLAY_MODEL_PAGES} pages`,
+        );
+      }
+      return {
+        ...coordinates,
+        models: [...modelsByID.values()].sort((a, b) => {
+          const versionOrder = b.model_version - a.model_version;
+          if (versionOrder !== 0) return versionOrder;
+          if (a.model_artifact_id < b.model_artifact_id) return -1;
+          if (a.model_artifact_id > b.model_artifact_id) return 1;
+          return 0;
+        }),
+      };
     }
 
     for (const model of response.models ?? []) {
