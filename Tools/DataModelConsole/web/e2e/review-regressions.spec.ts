@@ -54,6 +54,7 @@ async function installCatalogRoutes(
     releaseDelayed = resolve;
   });
   let delayedRequested = false;
+  const imageRequests: string[] = [];
 
   await page.route("**/api/v1/**", async (route) => {
     const url = new URL(route.request().url());
@@ -129,6 +130,7 @@ async function installCatalogRoutes(
       });
     }
     if (path.includes("/image/")) {
+      imageRequests.push(route.request().url());
       return route.fulfill({ status: 404 });
     }
     return route.fulfill({ status: 404, body: "not mocked" });
@@ -137,6 +139,7 @@ async function installCatalogRoutes(
   return {
     release: () => releaseDelayed?.(),
     requested: () => delayedRequested,
+    imageRequests: () => [...imageRequests],
   };
 }
 
@@ -181,4 +184,19 @@ test("sample pagination ignores a response from the previously selected version"
   delayed.release();
   await page.waitForTimeout(100);
   await expect(page.getByText("v22-late", { exact: true })).toHaveCount(0);
+});
+
+test("sample thumbnails request only their bounded tar member ranges", async ({
+  page,
+}) => {
+  const routes = await installCatalogRoutes(page, "/samples");
+  await page.goto(
+    "/datasets/review/shards/train-000000.tar?version=v2.1",
+  );
+  await expect(page.getByText("v21-only", { exact: true })).toBeVisible();
+  await expect.poll(() => routes.imageRequests().length).toBe(1);
+
+  const requestURL = new URL(routes.imageRequests()[0]);
+  expect(requestURL.searchParams.get("offset")).toBe("512");
+  expect(requestURL.searchParams.get("size")).toBe("128");
 });
