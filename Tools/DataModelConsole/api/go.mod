@@ -1,6 +1,6 @@
 module github.com/autowarefoundation/auto_e2e/tools/datamodelconsole/api
 
-go 1.24
+go 1.25.12
 
 require (
 	github.com/aws/aws-sdk-go-v2 v1.42.1
@@ -8,6 +8,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/feature/dynamodb/attributevalue v1.20.51
 	github.com/aws/aws-sdk-go-v2/service/dynamodb v1.60.0
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.105.0
+	github.com/aws/smithy-go v1.27.3
 	github.com/go-chi/chi/v5 v5.3.1
 )
 
@@ -28,5 +29,4 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/sso v1.32.0 // indirect
 	github.com/aws/aws-sdk-go-v2/service/ssooidc v1.37.0 // indirect
 	github.com/aws/aws-sdk-go-v2/service/sts v1.44.0 // indirect
-	github.com/aws/smithy-go v1.27.3 // indirect
 )
