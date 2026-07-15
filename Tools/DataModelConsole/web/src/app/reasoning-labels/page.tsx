@@ -384,10 +384,6 @@ function ReasoningLabelsInner() {
     () => listDatasetVersions(dataset),
     [dataset],
   );
-  const promptVersionsApi = useApi(
-    () => getReasoningPromptVersions(dataset),
-    [dataset],
-  );
 
   // Only offer versions that actually packed samples: reasoning-label stats are
   // keyed by prompt_version (not dataset version), so an empty version must not
@@ -404,12 +400,26 @@ function ReasoningLabelsInner() {
     return versionList.find((v) => v.version === urlVersion)?.version ??
       versionList[0].version;
   }, [versionList, urlVersion]);
+  const promptVersionsApi = useApi(
+    async () => ({
+      version,
+      prompts: version
+        ? await getReasoningPromptVersions(dataset, version)
+        : [],
+    }),
+    [dataset, version],
+  );
 
   // Prompt versions, sorted by count desc so the default is the richest label
   // set (the one worth inspecting first).
   const promptVersions = useMemo(
-    () => [...(promptVersionsApi.data ?? [])].sort((a, b) => b.count - a.count),
-    [promptVersionsApi.data],
+    () =>
+      promptVersionsApi.data?.version === version
+        ? [...promptVersionsApi.data.prompts].sort(
+            (a, b) => b.count - a.count,
+          )
+        : [],
+    [promptVersionsApi.data, version],
   );
   const promptVersion = useMemo(() => {
     if (promptVersions.length === 0) return "";
