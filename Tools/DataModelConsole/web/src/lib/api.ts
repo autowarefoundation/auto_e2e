@@ -12,11 +12,13 @@ import type {
   MLflowExperiment,
   MLflowRegisteredModel,
   MLflowRun,
+  OverlayModel,
   OverlayModelsResponse,
   ReasoningLabelRecord,
   ReasoningLabelStats,
   ReasoningPromptVersionsResponse,
   ReasoningStatsDetail,
+  TokenPage,
   SampleDetail,
   SampleListResponse,
   SceneSearchResult,
@@ -251,13 +253,84 @@ export function getShardIndex(
 // Model trajectory overlays and geographic products
 // ---------------------------------------------------------------------------
 
-export function listShardOverlayModels(
+const OVERLAY_MODELS_PAGE_LIMIT = 100;
+const MAX_OVERLAY_MODEL_PAGES = 20;
+
+export async function listShardOverlayModels(
   dataset: string,
   shard: string,
   version?: string,
 ): Promise<OverlayModelsResponse> {
-  return apiFetch<OverlayModelsResponse>(
-    `/api/v1/datasets/${encodeURIComponent(dataset)}/shards/${encodeURIComponent(shard)}/overlay-models${versionParam(version, "?")}`,
+  const modelsByID = new Map<string, OverlayModel>();
+  const seenPageTokens = new Set<string>();
+  let pageToken = "";
+  let coordinates:
+    | Pick<OverlayModelsResponse, "dataset" | "version" | "shard">
+    | undefined;
+
+  for (let page = 0; page < MAX_OVERLAY_MODEL_PAGES; page++) {
+    if (pageToken) {
+      if (seenPageTokens.has(pageToken)) {
+        throw new Error("overlay model pagination token entered a cycle");
+      }
+      seenPageTokens.add(pageToken);
+    }
+
+    const query = new URLSearchParams({
+      limit: String(OVERLAY_MODELS_PAGE_LIMIT),
+    });
+    const requestedVersion = version ?? coordinates?.version;
+    if (requestedVersion) query.set("version", requestedVersion);
+    if (pageToken) query.set("page_token", pageToken);
+
+    const response = await apiFetch<OverlayModelsResponse>(
+      `/api/v1/datasets/${encodeURIComponent(dataset)}/shards/${encodeURIComponent(shard)}/overlay-models?${query.toString()}`,
+    );
+    if (
+      response.dataset !== dataset ||
+      response.shard !== shard ||
+      !response.version ||
+      (requestedVersion && response.version !== requestedVersion)
+    ) {
+      throw new Error("overlay model pagination returned invalid coordinates");
+    }
+    if (!coordinates) {
+      coordinates = {
+        dataset: response.dataset,
+        version: response.version,
+        shard: response.shard,
+      };
+    } else if (
+      response.dataset !== coordinates.dataset ||
+      response.version !== coordinates.version ||
+      response.shard !== coordinates.shard
+    ) {
+      throw new Error("overlay model pagination changed coordinates");
+    }
+
+    for (const model of response.models ?? []) {
+      if (!modelsByID.has(model.model_artifact_id)) {
+        modelsByID.set(model.model_artifact_id, model);
+      }
+    }
+
+    pageToken = response.next_page_token ?? "";
+    if (!pageToken) {
+      return {
+        ...coordinates,
+        models: [...modelsByID.values()].sort((a, b) => {
+          const versionOrder = b.model_version - a.model_version;
+          if (versionOrder !== 0) return versionOrder;
+          if (a.model_artifact_id < b.model_artifact_id) return -1;
+          if (a.model_artifact_id > b.model_artifact_id) return 1;
+          return 0;
+        }),
+      };
+    }
+  }
+
+  throw new Error(
+    `overlay model pagination exceeded ${MAX_OVERLAY_MODEL_PAGES} pages`,
   );
 }
 
@@ -352,9 +425,8 @@ export function getReasoningLabel(
 
 // getReasoningStatsDetail fetches the aggregated ODD / label composition for
 // one (dataset, version, prompt_version) partition: per-field value counts +
-// a confidence histogram over every horizon. The FIRST call for an uncomputed
-// partition triggers a cold S3 scan the API caches afterward — that can take
-// ~50s, so a generous 120s client timeout is used to avoid a false error.
+// a confidence histogram over every horizon. Reads are served from the
+// materialized DynamoDB index and never trigger a browser-driven S3 scan.
 export function getReasoningStatsDetail(
   dataset: string,
   version: string,
@@ -365,7 +437,6 @@ export function getReasoningStatsDetail(
   if (teacher) q.set("teacher", teacher);
   return apiFetch<ReasoningStatsDetail>(
     `/api/v1/reasoning-labels/stats-detail?${q.toString()}`,
-    { signal: AbortSignal.timeout(120_000) },
   );
 }
 
@@ -399,14 +470,27 @@ export function searchScenesByLabel(
 // MLflow proxy
 // ---------------------------------------------------------------------------
 
-export function listExperiments(): Promise<MLflowExperiment[]> {
-  return apiFetch<MLflowExperiment[]>("/api/v1/mlflow/experiments");
+export function listExperimentsPage(
+  pageToken = "",
+  maxResults = 100,
+): Promise<TokenPage<MLflowExperiment>> {
+  const query = new URLSearchParams({ max_results: String(maxResults) });
+  if (pageToken) query.set("page_token", pageToken);
+  return apiFetch<TokenPage<MLflowExperiment> | MLflowExperiment[]>(
+    `/api/v1/mlflow/experiments?${query.toString()}`,
+  ).then(normalizeTokenPage);
 }
 
-export function listRuns(experimentId: string): Promise<MLflowRun[]> {
-  return apiFetch<MLflowRun[]>(
-    `/api/v1/mlflow/experiments/${encodeURIComponent(experimentId)}/runs`,
-  );
+export function listRunsPage(
+  experimentId: string,
+  pageToken = "",
+  maxResults = 100,
+): Promise<TokenPage<MLflowRun>> {
+  const query = new URLSearchParams({ max_results: String(maxResults) });
+  if (pageToken) query.set("page_token", pageToken);
+  return apiFetch<TokenPage<MLflowRun> | MLflowRun[]>(
+    `/api/v1/mlflow/experiments/${encodeURIComponent(experimentId)}/runs?${query.toString()}`,
+  ).then(normalizeTokenPage);
 }
 
 export function getRun(runId: string): Promise<MLflowRun> {
@@ -415,16 +499,42 @@ export function getRun(runId: string): Promise<MLflowRun> {
   );
 }
 
-export function listRegisteredModels(): Promise<MLflowRegisteredModel[]> {
-  return apiFetch<MLflowRegisteredModel[]>("/api/v1/mlflow/models");
+export function listRegisteredModelsPage(
+  pageToken = "",
+  maxResults = 100,
+): Promise<TokenPage<MLflowRegisteredModel>> {
+  const query = new URLSearchParams({ max_results: String(maxResults) });
+  if (pageToken) query.set("page_token", pageToken);
+  return apiFetch<
+    TokenPage<MLflowRegisteredModel> | MLflowRegisteredModel[]
+  >(
+    `/api/v1/mlflow/models?${query.toString()}`,
+  ).then(normalizeTokenPage);
 }
 
 // ---------------------------------------------------------------------------
 // Flyte proxy
 // ---------------------------------------------------------------------------
 
-export function listExecutions(limit = 50): Promise<FlyteExecution[]> {
-  return apiFetch<FlyteExecution[]>(`/api/v1/flyte/executions?limit=${limit}`);
+export function listExecutionsPage(
+  limit = 50,
+  pageToken = "",
+): Promise<TokenPage<FlyteExecution>> {
+  const query = new URLSearchParams({ limit: String(limit) });
+  if (pageToken) query.set("token", pageToken);
+  return apiFetch<TokenPage<FlyteExecution> | FlyteExecution[]>(
+    `/api/v1/flyte/executions?${query.toString()}`,
+  ).then(normalizeTokenPage);
+}
+
+function normalizeTokenPage<T>(response: TokenPage<T> | T[]): TokenPage<T> {
+  if (Array.isArray(response)) {
+    return { items: response };
+  }
+  if (!response || !Array.isArray(response.items)) {
+    throw new Error("Invalid paginated API response.");
+  }
+  return response;
 }
 
 export function getExecution(executionId: string): Promise<FlyteExecution> {
