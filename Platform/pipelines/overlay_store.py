@@ -223,6 +223,7 @@ def overlay_set_item(
     overlay_schema: str,
     dataset_manifest_digest: str,
     request_identity: str,
+    artifacts_bucket: str,
     created_at: str,
     cache_identity: str = "",
     n_shards: int = 0,
@@ -231,6 +232,8 @@ def overlay_set_item(
 ) -> dict[str, Any]:
     if status not in {"building", "ready", "deleted"}:
         raise ValueError(f"invalid overlay-set status {status!r}")
+    if not artifacts_bucket:
+        raise ValueError("artifacts_bucket must be provided")
     dataset_manifest_digest = _sha256_hex(
         dataset_manifest_digest, "dataset_manifest_digest"
     )
@@ -251,5 +254,6 @@ def overlay_set_item(
         "dataset_manifest_sha256": dataset_manifest_digest,
         "request_identity": request_identity,
         "cache_identity": cache_identity,
+        "artifacts_bucket": artifacts_bucket,
         "created_at": created_at,
     }
