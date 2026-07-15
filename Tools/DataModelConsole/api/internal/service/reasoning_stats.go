@@ -177,7 +177,11 @@ func (s *S3Service) reasoningMemberLocations(
 	ctx context.Context,
 	dataset, version, targetSampleUID string,
 ) ([]reasoningMemberLocation, string, error) {
-	version = s.versionOrResolve(ctx, dataset, version)
+	var err error
+	version, err = s.publishedVersion(ctx, dataset, version)
+	if err != nil {
+		return nil, "", err
+	}
 	shards, _, err := s.ListShards(ctx, dataset, version, 100000, 0)
 	if err != nil {
 		return nil, version, err
@@ -413,7 +417,11 @@ func (s *S3Service) SearchScenesByLabelForTeacherAtVersion(
 	if _, _, ok := parseReasoningTeacherID(teacher); !ok {
 		return nil, "", fmt.Errorf("scene search requires a teacher identity")
 	}
-	version = s.versionOrResolve(ctx, dataset, version)
+	var err error
+	version, err = s.publishedVersion(ctx, dataset, version)
+	if err != nil {
+		return nil, "", err
+	}
 	ids, err := s.store.QueryScenesByLabelForTeacherVersion(
 		ctx, dataset, version, teacher, promptVersion, field, value, limit,
 	)
