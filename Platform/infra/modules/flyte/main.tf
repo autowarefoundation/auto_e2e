@@ -117,6 +117,13 @@ resource "aws_iam_role_policy" "flyte_user_s3" {
             "arn:aws:s3:::${var.checkpoints_bucket}/*",
           ]
         },
+        {
+          Effect = "Allow"
+          Action = ["s3:ListBucket"]
+          Resource = [
+            "arn:aws:s3:::${var.checkpoints_bucket}",
+          ]
+        },
       ] : []
     )
   })
