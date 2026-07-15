@@ -193,7 +193,7 @@ func validateGeoArtifacts(
 func validPublishedShardName(name string) bool {
 	return len(name) > len(".tar") &&
 		name[len(name)-len(".tar"):] == ".tar" &&
-		name != ".tar" &&
+		name != ".tar" && name != "..tar" &&
 		!bytes.ContainsAny([]byte(name), `/\`)
 }
 
