@@ -142,16 +142,26 @@ export function listShards(
   );
 }
 
-// listShardsForEpisode returns a dataset's shards name-sorted (playback order).
-// Groundwork for same-trip continuity (auto-advance to the next shard at
-// end-of-shard); today each dataset has a single shard, so live FrameStore
-// stitching is deferred until a second shard lands.
+// listShardsForEpisode returns every dataset shard name-sorted (playback
+// order). Publications can exceed one API page (KITScenes has 533 shards), so
+// follow the offset continuation until the server reports no more results.
 export async function listShardsForEpisode(
   dataset: string,
   version?: string,
 ): Promise<ShardListResponse["shards"]> {
-  const res = await listShards(dataset, 0, 200, version);
-  return [...(res.shards ?? [])].sort((a, b) => a.name.localeCompare(b.name));
+  const shards: ShardListResponse["shards"] = [];
+  let offset = 0;
+  while (true) {
+    const res = await listShards(dataset, offset, 1000, version);
+    const page = res.shards ?? [];
+    shards.push(...page);
+    if (!res.page.more) break;
+    if (page.length === 0) {
+      throw new Error("shard pagination made no progress");
+    }
+    offset = res.page.offset + page.length;
+  }
+  return shards.sort((a, b) => a.name.localeCompare(b.name));
 }
 
 export function listSamples(
