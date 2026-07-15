@@ -33,6 +33,20 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
+	if len(os.Args) > 1 {
+		if os.Args[1] != "materialize-reasoning" {
+			slog.Error("unknown console-api command", "command", os.Args[1])
+			os.Exit(2)
+		}
+		if err := runReasoningMaterializer(
+			ctx, cfg, os.Args[2:], os.Stdout,
+		); err != nil {
+			slog.Error("reasoning materialization failed", "error", err)
+			os.Exit(1)
+		}
+		return
+	}
+
 	// DynamoDB-backed cache: shard-index source of truth (read-through, no
 	// unbounded in-memory map), precomputed reasoning stats, scene-by-label
 	// index. A construction failure is fatal — the S3 service depends on it for
@@ -69,7 +83,6 @@ func main() {
 
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID)
-	r.Use(middleware.RealIP)
 	r.Use(slogRequestLogger)
 	r.Use(middleware.Recoverer)
 	r.Use(corsMiddleware(cfg.CORSOrigin))
