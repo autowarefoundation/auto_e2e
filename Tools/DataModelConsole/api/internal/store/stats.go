@@ -323,8 +323,15 @@ func AggregateStats(labels []ReasoningLabel) model.ReasoningStatsBlob {
 	// closed so confidence==1.0 lands in "0.9-1.0" rather than overflowing.
 	confCounts := make([]int, 10)
 
+	nLabels := 0
+	nAbstained := 0
 	horizonCount := 0
 	for _, lbl := range labels {
+		if lbl.Abstained {
+			nAbstained++
+			continue
+		}
+		nLabels++
 		for _, h := range lbl.Horizons {
 			horizonCount++
 			addScalar(byField[FieldRelationToEgo], h.RelationToEgo)
@@ -339,7 +346,9 @@ func AggregateStats(labels []ReasoningLabel) model.ReasoningStatsBlob {
 	}
 
 	return model.ReasoningStatsBlob{
-		NLabels:             len(labels),
+		NRecords:            len(labels),
+		NLabels:             nLabels,
+		NAbstained:          nAbstained,
 		HorizonCount:        horizonCount,
 		ByField:             byField,
 		ConfidenceHistogram: confHistogram(confCounts),
@@ -408,7 +417,7 @@ type SceneLabelRow struct {
 // bar that opened an empty "No matching scenes" drawer. Multi-label axes
 // contribute every member; blank values are skipped.
 func SceneLabelRows(lbl ReasoningLabel) []SceneLabelRow {
-	if len(lbl.Horizons) == 0 || lbl.SampleID == "" {
+	if lbl.Abstained || len(lbl.Horizons) == 0 || lbl.SampleID == "" {
 		return nil
 	}
 	seen := map[[2]string]struct{}{}
