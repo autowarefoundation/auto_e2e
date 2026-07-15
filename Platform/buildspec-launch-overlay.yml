@@ -1,0 +1,86 @@
+version: 0.2
+
+# VPC-local launcher for the complete trajectory-overlay data path. The default
+# is a one-scene smoke run; set EPISODES=0 only after that execution succeeds.
+env:
+  variables:
+    AWS_DEFAULT_REGION: us-west-2
+    FLYTE_PROJECT: auto-e2e
+    FLYTE_DOMAIN: development
+    MODEL_VERSION: ""
+    DATASET: "KIT-MRT/KITScenes-Multimodal"
+    SOURCE_REVISION: "6fde0034446669e2ed7235e4c7fe323cd23d599d"
+    PUBLISHED_DATASET: kitscenes
+    DATASET_VERSION: v2.1
+    EPISODES: "1"
+    PARTITION_SIZE: "1"
+    REASONING_TEACHER: openai_compatible
+    BASE_SEEDS: "[0]"
+    BATCH_SIZE: "32"
+    NUM_WORKERS: "4"
+    COPY_WORKERS: "16"
+    MAX_PARTITIONS: "600"
+
+phases:
+  install:
+    commands:
+      - pip install -q flytekit==1.14.9 numpy torch kubernetes --extra-index-url https://download.pytorch.org/whl/cpu
+  pre_build:
+    commands:
+      - test -n "${MODEL_VERSION}"
+      - ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+      - ECR_URL="${ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com"
+      - export ECR_PREFIX="${ECR_URL}"
+      - export DATASETS_BUCKET="auto-e2e-platform-datasets-${ACCOUNT_ID}"
+      - export ARTIFACTS_BUCKET="auto-e2e-platform-artifacts-${ACCOUNT_ID}"
+      - |
+        image_ref() {
+          REPOSITORY="$1"
+          DIGEST=$(aws ecr describe-images \
+            --repository-name "auto-e2e/${REPOSITORY}" \
+            --image-ids imageTag=latest \
+            --query 'imageDetails[0].imageDigest' \
+            --output text)
+          test -n "${DIGEST}" && test "${DIGEST}" != "None"
+          printf '%s/auto-e2e/%s@%s' "${ECR_URL}" "${REPOSITORY}" "${DIGEST}"
+        }
+        export AUTO_E2E_TRAINING_IMAGE=$(image_ref training)
+        export AUTO_E2E_EVAL_IMAGE=$(image_ref eval)
+        export AUTO_E2E_OFFLINE_RL_IMAGE=$(image_ref offline-rl)
+        export AUTO_E2E_DATA_PREP_IMAGE=$(image_ref data-prep)
+        export CONTAINER_IMAGE_DIGEST="${AUTO_E2E_EVAL_IMAGE##*@}"
+  build:
+    commands:
+      - |
+        cat > /tmp/flyte.yaml << EOF
+        admin:
+          endpoint: dns:///k8s-flyte-flyteadm-be92e7737c-cf0d1a0f3df10f77.elb.us-west-2.amazonaws.com:81
+          insecure: true
+        EOF
+      - PREPROCESSING_DIGEST=$(python3 Platform/pipelines/reproducibility.py preprocessing)
+      - INFERENCE_DIGEST=$(python3 Platform/pipelines/reproducibility.py inference)
+      - >
+        pyflyte --config /tmp/flyte.yaml run --remote
+        --project "${FLYTE_PROJECT}"
+        --domain "${FLYTE_DOMAIN}"
+        --image "${AUTO_E2E_TRAINING_IMAGE}"
+        Platform/pipelines/workflows.py
+        wf_create_publish_and_precompute_overlays
+        --model_version "${MODEL_VERSION}"
+        --preprocessing_contract_digest "${PREPROCESSING_DIGEST}"
+        --model_inference_code_digest "${INFERENCE_DIGEST}"
+        --container_image_digest "${CONTAINER_IMAGE_DIGEST}"
+        --datasets_bucket "${DATASETS_BUCKET}"
+        --artifacts_bucket "${ARTIFACTS_BUCKET}"
+        --dataset "${DATASET}"
+        --source_revision "${SOURCE_REVISION}"
+        --published_dataset "${PUBLISHED_DATASET}"
+        --dataset_version "${DATASET_VERSION}"
+        --episodes "${EPISODES}"
+        --partition_size "${PARTITION_SIZE}"
+        --reasoning_teacher "${REASONING_TEACHER}"
+        --base_seeds "${BASE_SEEDS}"
+        --batch_size "${BATCH_SIZE}"
+        --num_workers "${NUM_WORKERS}"
+        --copy_workers "${COPY_WORKERS}"
+        --max_partitions "${MAX_PARTITIONS}"
