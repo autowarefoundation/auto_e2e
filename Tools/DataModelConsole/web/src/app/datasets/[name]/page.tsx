@@ -111,7 +111,10 @@ function DatasetDetailInner({ dataset }: { dataset: string }) {
   const urlVersion = searchParams.get("version") ?? "";
 
   const versions = useApi(
-    () => listDatasetVersions(dataset),
+    async () => ({
+      dataset,
+      items: await listDatasetVersions(dataset),
+    }),
     [dataset],
   );
 
@@ -119,7 +122,11 @@ function DatasetDetailInner({ dataset }: { dataset: string }) {
   // dataset, otherwise the newest (versions are returned newest-first). Empty
   // until the version list loads (the API then auto-resolves newest for the
   // first shard fetch, so nothing renders stale).
-  const versionList = useMemo(() => versions.data ?? [], [versions.data]);
+  const versionList = useMemo(
+    () =>
+      versions.data?.dataset === dataset ? versions.data.items : [],
+    [dataset, versions.data],
+  );
   const selected = useMemo<DatasetVersion | null>(() => {
     if (versionList.length === 0) return null;
     return (
@@ -142,7 +149,7 @@ function DatasetDetailInner({ dataset }: { dataset: string }) {
 
   const onSelectVersion = useCallback(
     (v: string) => {
-      router.replace(`${pathname}?version=${encodeURIComponent(v)}`, {
+      router.push(`${pathname}?version=${encodeURIComponent(v)}`, {
         scroll: false,
       });
     },
@@ -152,9 +159,24 @@ function DatasetDetailInner({ dataset }: { dataset: string }) {
   // Shards for the selected version. Keyed on selectedVersion so a version
   // switch refetches; the first page comes from useApi, extra pages append.
   const shardsApi = useApi(
-    () => listShards(dataset, 0, PAGE_SIZE, selectedVersion || undefined),
+    async () => ({
+      dataset,
+      version: selectedVersion,
+      response: await listShards(
+        dataset,
+        0,
+        PAGE_SIZE,
+        selectedVersion,
+      ),
+    }),
     [dataset, selectedVersion],
+    Boolean(selectedVersion) && !versions.loading && !versions.error,
   );
+  const shardPage =
+    shardsApi.data?.dataset === dataset &&
+    shardsApi.data.version === selectedVersion
+      ? shardsApi.data.response
+      : null;
   const [extra, setExtra] = useState<Shard[]>([]);
   const [more, setMore] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
@@ -164,12 +186,12 @@ function DatasetDetailInner({ dataset }: { dataset: string }) {
   useEffect(() => {
     pageGeneration.current++;
     setExtra([]);
-    setMore(shardsApi.data?.page?.more ?? false);
+    setMore(shardPage?.page?.more ?? false);
     setLoadingMore(false);
     setMoreError(null);
-  }, [dataset, selectedVersion, shardsApi.data]);
+  }, [dataset, selectedVersion, shardPage]);
 
-  const shards = [...(shardsApi.data?.shards ?? []), ...extra];
+  const shards = [...(shardPage?.shards ?? []), ...extra];
 
   const loadMore = useCallback(async () => {
     const generation = ++pageGeneration.current;
@@ -262,8 +284,8 @@ function DatasetDetailInner({ dataset }: { dataset: string }) {
         <CardHeader>
           <CardTitle className="text-sm">
             Shards
-            {shardsApi.data?.page
-              ? ` (${shardsApi.data.page.total} total)`
+            {shardPage?.page
+              ? ` (${shardPage.page.total} total)`
               : ""}
           </CardTitle>
         </CardHeader>
