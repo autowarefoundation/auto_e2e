@@ -1,6 +1,7 @@
 package store
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"math"
@@ -41,6 +42,24 @@ type LabelHorizon struct {
 	RuleResponse         string   `json:"rule_response"`
 	Confidence           float64  `json:"confidence"`
 	Provenance           string   `json:"provenance"`
+}
+
+func (horizon *LabelHorizon) UnmarshalJSON(body []byte) error {
+	type plainHorizon LabelHorizon
+	var decoded plainHorizon
+	if err := json.Unmarshal(body, &decoded); err != nil {
+		return err
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(body, &fields); err != nil {
+		return err
+	}
+	confidence, exists := fields["confidence"]
+	if !exists || bytes.Equal(bytes.TrimSpace(confidence), []byte("null")) {
+		return fmt.Errorf("reasoning horizon confidence is required")
+	}
+	*horizon = LabelHorizon(decoded)
+	return nil
 }
 
 const reasoningLabelSchema = "reasoning_label_v2"
