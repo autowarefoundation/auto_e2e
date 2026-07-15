@@ -3074,3 +3074,29 @@ def wf_create_publish_and_precompute_overlays(
         num_workers=num_workers,
         copy_workers=copy_workers,
     )
+
+
+@workflow
+def wf_export_trajectory_report(
+    shard: FlyteFile,
+    overlay: FlyteFile,
+    scene_uids: List[str] = [],
+    seed_index: int = 0,
+    camera_index: int = 0,
+    max_frames_per_scene: int = 300,
+    fps: float = 10.0,
+) -> FlyteDirectory:
+    """Render a canonical shard overlay as per-scene MP4 artifacts."""
+    from Platform.pipelines.trajectory_visualization_tasks import (
+        export_trajectory_report,
+    )
+
+    return export_trajectory_report(
+        shard=shard,
+        overlay=overlay,
+        scene_uids=scene_uids,
+        seed_index=seed_index,
+        camera_index=camera_index,
+        max_frames_per_scene=max_frames_per_scene,
+        fps=fps,
+    )
