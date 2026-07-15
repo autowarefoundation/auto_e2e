@@ -1,10 +1,10 @@
 package handler
 
 import (
+	"errors"
 	"log/slog"
 	"net/http"
 	"strconv"
-	"strings"
 
 	"github.com/autowarefoundation/auto_e2e/tools/datamodelconsole/api/internal/model"
 	"github.com/autowarefoundation/auto_e2e/tools/datamodelconsole/api/internal/service"
@@ -53,9 +53,8 @@ func (h *ScenesHandler) Search(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, model.CodeInvalidParam, "unknown field; must be a reasoning taxonomy axis")
 		return
 	}
-	// value is a categorical label; reject traversal characters that would leak
-	// into the DynamoDB key. An empty value is a client error (nothing to find).
-	if value == "" || strings.ContainsAny(value, "/\\") || strings.Contains(value, "..") {
+	// value is a categorical label embedded in a DynamoDB key.
+	if !validReasoningParam(value) {
 		writeError(w, http.StatusBadRequest, model.CodeInvalidParam, "missing or invalid value")
 		return
 	}
@@ -79,7 +78,7 @@ func (h *ScenesHandler) Search(w http.ResponseWriter, r *http.Request) {
 
 	// Fetch one extra row so we can report truncation truthfully instead of
 	// silently capping at `limit`.
-	ids, resolvedVersion, err := h.s3.SearchScenesByLabelForTeacherAtVersion(
+	scenes, resolvedVersion, err := h.s3.SearchScenesByLabelForTeacherAtVersion(
 		r.Context(),
 		dataset,
 		version,
@@ -90,31 +89,32 @@ func (h *ScenesHandler) Search(w http.ResponseWriter, r *http.Request) {
 		limit+1,
 	)
 	if err != nil {
+		if writeReasoningAvailabilityError(w, err) {
+			return
+		}
+		if errors.Is(err, service.ErrNotFound) {
+			writeError(
+				w,
+				http.StatusNotFound,
+				model.CodeNotFound,
+				"reasoning label partition not found",
+			)
+			return
+		}
 		slog.Error("scene search", "dataset", dataset, "field", field, "value", value, "error", err)
 		writeError(w, http.StatusBadGateway, model.CodeS3Error, "failed to search scenes by label")
 		return
 	}
-	truncated := len(ids) > limit
+	truncated := len(scenes) > limit
 	if truncated {
-		ids = ids[:limit]
+		scenes = scenes[:limit]
 	}
 
-	// Resolve each sample id to the shard that actually contains it in this
-	// version; ids not packed into any published shard are marked unavailable
-	// so the UI links only real samples (labels can outnumber packed frames).
-	shardByID := h.s3.ResolveSampleShards(
-		r.Context(), dataset, resolvedVersion, ids,
-	)
-
-	scenes := make([]model.SceneRef, 0, len(ids))
 	available := 0
-	for _, id := range ids {
-		sh := shardByID[id]
-		ok := sh != ""
-		if ok {
+	for _, scene := range scenes {
+		if scene.Available {
 			available++
 		}
-		scenes = append(scenes, model.SceneRef{SampleID: id, Shard: sh, Available: ok})
 	}
 	writeJSON(w, http.StatusOK, model.SceneSearchResponse{
 		Dataset:       dataset,
