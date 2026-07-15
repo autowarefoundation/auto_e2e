@@ -10,6 +10,8 @@ platform. Organized by **what you want to do**, so you can jump straight to your
 
 > For task internals and parameters, see `flyte_workflow_parameters.md`.
 > This document focuses on **navigating the UI**.
+> The trajectory-overlay production path is ops-only and uses a VPC-local
+> CodeBuild launcher; see Use case G.
 
 ---
 
@@ -182,6 +184,103 @@ Flyte shows **execution status**; **MLflow** shows **metrics**. Use both.
 
 ---
 
+## Use case G — "I want to publish v2.1 and precompute Console overlays"
+
+**You are**: a platform operator publishing an immutable dataset snapshot and
+precomputing one registered model's canonical trajectory overlays.
+
+**Workflow**: `wf_create_publish_and_precompute_overlays`
+
+The DataModelConsole never invokes this workflow. Launch it through the
+VPC-local CodeBuild project so Flyte registration and every task image use ECR
+digests rather than mutable tags.
+
+### Prepare the tested source and images
+
+Run these commands from the tested feature-branch checkout:
+
+```bash
+export AWS_PROFILE=autowarefoundation
+export AWS_REGION=us-west-2
+ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+CACHE_BUCKET="auto-e2e-platform-codebuild-cache-${ACCOUNT_ID}"
+
+git archive --format=zip --output=/tmp/auto-e2e-source.zip HEAD
+aws s3 cp /tmp/auto-e2e-source.zip "s3://${CACHE_BUCKET}/source.zip"
+
+aws codebuild start-build \
+  --project-name auto-e2e-platform-build-images
+```
+
+Wait for the image build to reach `SUCCEEDED`. The overlay launcher resolves
+the resulting `training`, `eval`, `offline-rl`, and `data-prep` images to ECR
+digests. It also recomputes the preprocessing and inference source digests
+inside the source bundle; Flyte tasks reject any mismatch at runtime.
+
+### Launch the one-episode smoke
+
+Choose an immutable numeric version from the MLflow registered model
+`auto-e2e-driving-policy`; do not use a moving alias.
+
+```bash
+MODEL_VERSION=30  # Example only; replace with the version you selected.
+aws codebuild start-build \
+  --project-name auto-e2e-platform-overlay-launch \
+  --environment-variables-override \
+    "name=MODEL_VERSION,value=${MODEL_VERSION},type=PLAINTEXT"
+```
+
+The launcher defaults to `EPISODES=1`, `DATASET_VERSION=v2.1`, and
+`BASE_SEEDS=[0]`. It derives a `kitscenes-smoke-<digest>` publication name from
+the data contract, inference code, image, source revision, and smoke size. This
+keeps the smoke snapshot separate from the write-once production coordinate.
+
+CodeBuild prints the remote Flyte execution. In Flyte Console, open
+**Executions** and inspect the newest
+`wf_create_publish_and_precompute_overlays` run. The high-level order is:
+
+```text
+wf_create_dataset_sharded
+  -> wf_publish_dataset_snapshot
+  -> wf_precompute_overlays
+  -> overlay manifest
+  -> OVLSET building-to-ready gate
+```
+
+Treat the smoke as successful only when the Flyte execution succeeds and the
+Console can read the published model overlay. A CodeBuild `SUCCEEDED` status
+only confirms that the remote execution was submitted.
+
+### Launch the full immutable publication
+
+After reviewing smoke duration, GPU utilization, storage, and estimated cost:
+
+```bash
+aws codebuild start-build \
+  --project-name auto-e2e-platform-overlay-launch \
+  --environment-variables-override \
+    "name=MODEL_VERSION,value=${MODEL_VERSION},type=PLAINTEXT" \
+    "name=PUBLISHED_DATASET,value=kitscenes,type=PLAINTEXT" \
+    "name=EPISODES,value=0,type=PLAINTEXT"
+```
+
+`EPISODES=0` is rejected unless `PUBLISHED_DATASET` is explicit. The production
+coordinate is `kitscenes/v2.1`.
+
+### Retry and immutability rules
+
+- Retrying the exact same model, source, image, seeds, and contract is
+  idempotent. Existing compatible S3 objects and DynamoDB records are reused.
+- A conflicting body or identity at the same model/dataset/version/schema
+  coordinate fails; it is never overwritten.
+- Do not change `BASE_SEEDS`, the model artifact, or inference contract after a
+  coordinate is ready. Publish a new dataset/schema coordinate for an
+  intentional canonical-result change.
+- The ready gate is written last. A failed or `building` set is not advertised
+  by the Console, and retrying a ready set never moves it back to `building`.
+
+---
+
 ## Reading the DAG of `wf_full_pipeline`
 
 ```
@@ -227,6 +326,10 @@ n1 data_processing(L2D)    n3 data_processing(NVIDIA) ← run in parallel
 | Preprocess raw → shards | `wf_data_processing` | `raw_data` URI, optional `reasoning_labels` |
 | Generate reasoning labels (teacher, cached) | `wf_generate_reasoning_labels` | `raw_data` URI, `teacher` |
 | Raw → ready-to-train dataset | `wf_create_dataset` | `dataset`, `episodes`, `reasoning_teacher` |
+| Sharded build → v2.1 publish → overlays | `wf_create_publish_and_precompute_overlays` | ops-only CodeBuild launch, `model_version` |
+| Publish existing shards → overlays | `wf_publish_and_precompute_overlays` | `shards`, immutable model/runtime identities |
+| Publish existing shards only | `wf_publish_dataset_snapshot` | `shards`, `published_dataset`, `dataset_version` |
+| Precompute an already identified snapshot | `wf_precompute_overlays` | `shards`, model version, dataset manifest digest |
 | Train IL from existing shards | `wf_train_il` | `shards` list, `dataset` |
 | Refine with Offline RL | `wf_train_offline_rl` | `pretrained`, `il_metadata`, `shards` |
 | See metrics | (MLflow, not Flyte) | experiment `imitation-learning` / `offline-rl` |
