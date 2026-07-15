@@ -195,6 +195,19 @@ def test_merge_rejects_gps_snapshot_without_geo_products():
         merge_partition_results([result], dataset="l2d", version="v2.1")
 
 
+def test_merge_rejects_unmaterializable_reasoning_label_count():
+    result = _result(
+        "part-a", shard="part-a-train-000000.tar", episode_count=1
+    )
+    result["manifest"]["reasoning_label_count"] = 100_001
+    with pytest.raises(ValueError, match="materialization limit"):
+        merge_partition_results([result], dataset="l2d", version="v2.1")
+
+    result["manifest"]["reasoning_label_count"] = -1
+    with pytest.raises(ValueError, match="must not be negative"):
+        merge_partition_results([result], dataset="l2d", version="v2.1")
+
+
 def test_geo_pointer_is_small_and_manifest_scoped():
     item = geo_pointer_item(
         "l2d",
