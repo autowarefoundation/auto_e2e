@@ -15,7 +15,7 @@
 // live in a bounded LRU and are close()d on eviction; the raw window buffers
 // are held in a small separate LRU just long enough to decode from.
 
-import { getShardBlobUrl } from "@/lib/api";
+import { getSampleImageUrl, getShardBlobUrl } from "@/lib/api";
 import type { IndexSample, ShardIndex } from "@/types";
 
 const DEFAULT_MAX_ENTRIES = 500;
@@ -44,6 +44,8 @@ interface WindowBuffer {
   spanStart: number;
 }
 
+class BlobRangeUnavailableError extends Error {}
+
 export class FrameStore {
   private readonly index: ShardIndex;
   private readonly dataset: string;
@@ -64,7 +66,11 @@ export class FrameStore {
   // One AbortController per in-flight window fetch so destroy() cancels pending
   // network requests instead of leaving them to resolve into a destroyed store.
   private readonly controllers = new Map<number, AbortController>();
+  private readonly directControllers = new Map<string, AbortController>();
   private readonly maxEntries: number;
+  // A v2.1 span can include private pose/GPS members between camera JPEGs.
+  // After the API rejects one, use validated per-camera ranges for this store.
+  private blobRangesDisabled = false;
   private destroyed = false;
   private active = 0;
   private readonly waiters: Array<() => void> = [];
@@ -167,6 +173,9 @@ export class FrameStore {
   // fetchBuffer fetches (once, deduplicated) the contiguous byte range for a
   // window and caches it for slicing.
   private fetchBuffer(winIdx: number): Promise<WindowBuffer> {
+    if (this.blobRangesDisabled) {
+      return Promise.reject(new BlobRangeUnavailableError());
+    }
     const existing = this.buffers.get(winIdx);
     if (existing) return Promise.resolve(existing);
     const pend = this.bufInflight.get(winIdx);
@@ -177,6 +186,9 @@ export class FrameStore {
     const controller = new AbortController();
     this.controllers.set(winIdx, controller);
     const p = this.withSlot(async () => {
+      if (this.blobRangesDisabled) {
+        throw new BlobRangeUnavailableError();
+      }
       const url = getShardBlobUrl(
         this.dataset,
         this.shard,
@@ -185,6 +197,11 @@ export class FrameStore {
         this.version,
       );
       const res = await fetch(url, { signal: controller.signal });
+      if (res.status === 403) {
+        this.blobRangesDisabled = true;
+        this.buffers.clear();
+        throw new BlobRangeUnavailableError();
+      }
       if (!res.ok) {
         throw new Error(`blob fetch failed: ${res.status} ${res.statusText}`);
       }
@@ -209,10 +226,53 @@ export class FrameStore {
     return p;
   }
 
+  private async fetchDirectBitmap(
+    frameIdx: number,
+    cam: string,
+    key: string,
+  ): Promise<ImageBitmap> {
+    const sample = this.sampleAt(frameIdx);
+    const member = sample?.members[`${cam}.jpg`];
+    const match = /^cam_(\d+)$/.exec(cam);
+    if (!sample || !member || !match) {
+      throw new Error(`no member ${cam}.jpg at frame ${frameIdx}`);
+    }
+
+    const controller = new AbortController();
+    this.directControllers.set(key, controller);
+    try {
+      return await this.withSlot(async () => {
+        if (this.destroyed) throw new Error("FrameStore destroyed");
+        const url = getSampleImageUrl(
+          this.dataset,
+          this.shard,
+          sample.key,
+          Number(match[1]),
+          member,
+          this.version,
+        );
+        const res = await fetch(url, { signal: controller.signal });
+        if (!res.ok) {
+          throw new Error(
+            `camera fetch failed: ${res.status} ${res.statusText}`,
+          );
+        }
+        return createImageBitmap(await res.blob());
+      });
+    } finally {
+      if (this.directControllers.get(key) === controller) {
+        this.directControllers.delete(key);
+      }
+    }
+  }
+
   // getFrame returns the decoded bitmap for (frame, cam): fetches the enclosing
   // window buffer (shared across all cameras/frames in it), slices out this
   // member's JPEG and decodes it. Concurrent requests are deduplicated.
   getFrame(frameIdx: number, cam: string): Promise<ImageBitmap> {
+    if (this.destroyed) {
+      return Promise.reject(new Error("FrameStore destroyed"));
+    }
     const key = `${frameIdx}:${cam}`;
     const hit = this.cache.get(key);
     if (hit) {
@@ -224,8 +284,12 @@ export class FrameStore {
     if (pending) return pending;
 
     const winIdx = this.windowOf(frameIdx);
-    const p = this.fetchBuffer(winIdx)
-      .then(async (entry) => {
+    const loadBitmap = async (): Promise<ImageBitmap> => {
+      if (this.blobRangesDisabled) {
+        return this.fetchDirectBitmap(frameIdx, cam, key);
+      }
+      try {
+        const entry = await this.fetchBuffer(winIdx);
         const sample = this.sampleAt(frameIdx);
         const m = sample?.members[`${cam}.jpg`];
         if (!sample || !m) {
@@ -236,9 +300,21 @@ export class FrameStore {
           throw new Error(`member ${cam}.jpg out of window buffer range`);
         }
         const slice = entry.buf.slice(begin, begin + m.size);
-        const bmp = await createImageBitmap(
+        return await createImageBitmap(
           new Blob([slice], { type: "image/jpeg" }),
         );
+      } catch (err) {
+        if (
+          err instanceof BlobRangeUnavailableError ||
+          this.blobRangesDisabled
+        ) {
+          return this.fetchDirectBitmap(frameIdx, cam, key);
+        }
+        throw err;
+      }
+    };
+    const p = loadBitmap()
+      .then((bmp) => {
         if (this.bitmapInflight.get(key) === p) this.bitmapInflight.delete(key);
         if (this.destroyed) {
           bmp.close();
@@ -285,6 +361,7 @@ export class FrameStore {
     // A small tail behind for scrub-back / reverse.
     const behindWin = this.windowOf(centerFrame) - direction;
     if (
+      !this.blobRangesDisabled &&
       behindWin >= 0 &&
       behindWin * WINDOW_FRAMES < this.frameCount &&
       !this.buffers.has(behindWin) &&
@@ -302,7 +379,7 @@ export class FrameStore {
   // playback, not only on frame change. Idempotent and cheap — it skips windows
   // already buffered or in flight, and the withSlot gate bounds concurrency.
   ensureLookahead(centerFrame: number, direction: 1 | -1): void {
-    if (this.destroyed) return;
+    if (this.destroyed || this.blobRangesDisabled) return;
     const cur = this.windowOf(centerFrame);
     for (let i = 0; i <= LOOKAHEAD_WINDOWS; i++) {
       const w = cur + i * direction;
@@ -327,6 +404,8 @@ export class FrameStore {
     this.destroyed = true;
     for (const controller of this.controllers.values()) controller.abort();
     this.controllers.clear();
+    for (const controller of this.directControllers.values()) controller.abort();
+    this.directControllers.clear();
     for (const bmp of this.cache.values()) bmp.close();
     this.cache.clear();
     this.bitmapInflight.clear();
