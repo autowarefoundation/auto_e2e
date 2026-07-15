@@ -2481,7 +2481,10 @@ def wf_create_dataset(
     )
 
 
-@dynamic(container_image=DATA_PREP_IMAGE)
+@dynamic(
+    container_image=DATA_PREP_IMAGE,
+    environment={"AUTO_E2E_DATA_PREP_IMAGE": DATA_PREP_IMAGE},
+)
 def _map_dataset_partitions(
     partitions: List[List[str]],
     dataset: Dataset,
