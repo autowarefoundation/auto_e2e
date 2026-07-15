@@ -1,8 +1,19 @@
 # Design Doc — AutoE2E DataModelConsole: Per-Model Trajectory Overlays + GPS Map / ODD Geo-Stats
 
-Status: Design (Research Phase — breaking schema changes permitted per project CLAUDE.md)
+Status: Implemented on `feat/trajectory-overlay-console`; production rollout pending
 Owning code: `Tools/DataModelConsole` (Go API + Next.js) and `Platform/pipelines/workflows.py` (Flyte)
 Author: design pass grounded in `docs/.traj_brief.json` + source read of `Model/model_components/*`, `Model/evaluation/metrics.py`, `Model/data_parsing/l2d/egomotion.py`, packer, and the console store; revised against four adversarial reviews (adas, infra-dynamo, flyte-feasibility, cost-storage-frontend) and a second-round external review (verdicts P0.1–P0.5, P1.6–P1.15).
+
+Implementation snapshot (2026-07-15):
+- v2.1 geospatial packing/publication, canonical AOVL overlays, Console API, and
+  the BEV/camera/map UI are implemented.
+- `wf_create_publish_and_precompute_overlays` owns the complete data path:
+  sharded dataset creation -> immutable publication -> GPU overlay precompute.
+- `Platform/buildspec-launch-overlay.yml` launches that workflow from the
+  VPC-local CodeBuild project `auto-e2e-platform-overlay-launch`.
+- Production activation still requires the rollout sequence in section 11.
+  Exact routes remain disabled until authenticated, non-spoofable role
+  propagation is deployed.
 
 ---
 
@@ -17,7 +28,9 @@ These OVERRIDE any contradicting recommendation later in this doc; the body belo
 1. **Playback representation = VECTOR-FIRST (accepted as recommended).** Store raw `(64,2)` control + `v0`, draw client-side; baking demoted to optional MP4 export. (§7, §0.3–4)
 2. **Predicted trajectory ON the geographic (GPS) map = IN SCOPE** — REVERSES the doc's default (was "out of scope / driven-path only"). Requires an explicit error budget: yaw-sign convention (§10), lat/lon float precision, ego-heading→map-bearing conversion, and pseudo-geometry. See §9-bis (predicted-on-map). (Open Question 5 resolved: YES.)
 3. **GPS packing = FULL RE-PACK to a new dataset version `v2.1`** — REVERSES the doc's preferred "decode-free in-place backfill into v2.0". Consequence (MANDATORY): overlays, the playback index (`IDX#`), and label-search resolution (`ResolveSampleShards`) MUST ALL move to `v2.1`. Sample identity is now the content-addressed `sample_uid` (P1.7); `legacy_sample_id = s{si:08d}` is retained via a migration manifest so keys don't silently shift. (§4b, §consistency, Open Question 4 resolved: v2.1.)
-4. **Commit this doc; DEFER implementation** until an explicit go-ahead. (Open Question: commit-only.)
+4. **Implementation go-ahead was received after this design pass.** The
+   implementation status and remaining production gates are recorded in
+   sections 2 and 11.
 
 ---
 
@@ -51,7 +64,38 @@ Also in scope (new requirement):
 
 ---
 
-## 2. Current-State Summary
+## 2. Implementation Status and Pre-Implementation Baseline
+
+### Implemented contract
+- Packed samples use stable `sample_uid` and `split_group_uid`; v2.1 shards
+  carry portable pose/GPS members, rig projection, embedded reasoning labels,
+  and dataset-level privacy-filtered geo products.
+- Dataset publication copies every body with an S3 conditional write, writes a
+  hidden publication lock, and writes `shards/manifest.json` last as the public
+  readiness gate. `wf_publish_and_precompute_overlays` passes that manifest's
+  SHA-256 directly to overlay precompute.
+- Overlay request identity includes checkpoint bytes, dataset manifest,
+  preprocessing contract, inference source, task image digest, sampler,
+  seeds, and schema versions. The checkpoint-derived inference-step count is
+  added to the cache identity.
+- Overlay bodies and manifests use `If-None-Match: *`. DynamoDB model,
+  pointer, and initial `OVLSET` records use create-only conditions. The final
+  `building -> ready` transition is conditional on the request and dataset
+  identity. A compatible retry reuses existing objects; a conflicting retry
+  fails instead of replacing them.
+- The preparation token carries the immutable request coordinate through every
+  Flyte child task. An already-`ready` set stays ready during retries and is
+  never reset to `building`.
+- Console readers require pointer and ready-gate agreement on dataset manifest
+  and cache identity before exposing an overlay. They then constrain the S3 key
+  to the canonical schema/model/dataset/version/shard prefix and verify body
+  size, SHA-256, and gzip framing.
+- Registration and launch resolve every task image to an ECR digest. Tasks
+  recompute the preprocessing/inference digests from their running source and
+  reject launcher values or an image digest that do not describe that runtime.
+
+The facts and gaps below describe the baseline used to derive the design. They
+are retained for rationale; the gap list is no longer the rollout checklist.
 
 ### Verified facts (source-read)
 - **Forward contract:** `AutoE2E(...)(camera_tiles, map_input, visual_history, egomotion_history, projection=…, geometry_type=…, mode="infer", **kwargs)` returns a bare `[B,128]` = `(64,2)` = `[accel_x (m/s²), curvature (1/m)]` control at 10 Hz over 6.4 s — **NOT XY**. `mode="infer"` returns the bare tensor (no aux dict). Reasoning branch does not change the output shape.
@@ -70,7 +114,7 @@ Also in scope (new requirement):
 - **Packer** (`parallel_pack.pack_sample`): writes `ego.npy = concat(ego_history[256], trajectory_target[128])` float32, `cam_i.jpg`, optional `map.jpg`, WM windows, `meta.json`, `calib.json`. `sample_key = f"s{si:08d}"`, 1000 samples/shard, `train-{idx:06d}.tar`. GPS and absolute heading never enter the sample dict.
 - **`gps_to_map.py`** renders GPS waypoints on an ego-centric OSM/`osmnx` BEV tile (L2D palette), with equirectangular lat/lon→m helper.
 
-### Concrete GAPS (revised)
+### Original gaps (resolved by this implementation)
 1. No standalone single-sample inference / overlay entry point (only `_run_evaluation`, batched, discards integrated XY).
 2. No Flyte-free checkpoint-load helper (and no `sha256(best.pt)` computed at registration).
 3. **Per-sample noise plumbing missing** — `initial_noise=` kwarg on `FlowMatchingPlanner.forward` needed for batch-invariant recompute (P0.1); the fixed-seed convention (base_seed, hash inputs) is also undefined.
@@ -88,16 +132,18 @@ Also in scope (new requirement):
 
 ```
                      ┌──────────────────────── Flyte (GPU, us-west-2, ONE warm L40S) ─────────────────────┐
- MLflow registry     │  wf_precompute_overlays(model_version, dataset, version=v2.1, base_seed=0)          │
+ MLflow registry     │  wf_create_publish_and_precompute_overlays(model_version, ..., version=v2.1)       │
+                     │    wf_create_dataset_sharded -> wf_publish_dataset_snapshot                         │
+                     │      manifest SHA-256 wired directly -> wf_precompute_overlays                      │
  auto-e2e-driving-   │    resolve MODELVER → {run_id, artifact_uri}; GET best.pt ONCE; sha256 → model_artifact_id │
    policy ──────────►│    coarse @task per shard  (amortize 509 MiB load; NOT map over tiny units)         │
  config.yaml ───────►│      load_policy() ─►                                                                │
    (val_fraction)    │        predict batched over ALL samples in shard (train∪eval=all; search⊂all)        │
  v2.1 shards ───────►│          initial_noise from hash64(model_artifact_id,ds_manifest,sample_uid,seed)    │
    (datasets bucket) │          ─► [128] control  (NO integration; store RAW)                               │
-                     │      write ONE binary overlay.bin.gz per (model, shard)  ──► S3                       │
-                     │      write S3 pointer + projected model attrs ──► Dynamo (SHARD×MODEL item)           │
-                     │      write artifacts FIRST → flip OVLSET# status building→ready LAST                  │
+                     │      conditional write ONE overlay.bin.gz per (model, shard) ──► S3                  │
+                     │      create-only pointer + projected model attrs ──► Dynamo (SHARD×MODEL item)        │
+                     │      write manifest FIRST → conditional OVLSET building→ready LAST                    │
                      │  data_processing v2.1 REPACK (MOD): pack pose_current; episode GPS path;              │
                      │      rig projection params (per-rig CONSTANT, confirmed by PR#74); geo/* stats        │
                      └──────┬───────────────────────────────────────────────────┬──────────────────────────┘
@@ -190,8 +236,8 @@ class OverlayShardJob:
     num_steps: int = 10
     overlay_schema: str = "v1"  # overlay BINARY schema (P1.11)
 
-@task(requests=Resources(gpu="1", mem="24Gi"), cache=True,
-      cache_version="{OVERLAY_CACHE_IDENTITY}",   # narrow identity, NOT repo git SHA (P1.11)
+@task(requests=Resources(gpu="1", mem="16Gi"), cache=True,
+      cache_version=OVERLAY_CACHE_VERSION,
       cache_serialize=True)
 def precompute_overlay_shard(job: OverlayShardJob) -> OverlayShardResult: ...
 
@@ -204,19 +250,37 @@ Note the absence of any `source`/`split`/`prompt_version`/`field`/`value` inputs
 **Inside the task:**
 1. Workflow resolves the registry coordinate once: `MODELVER#{registered_model_name}#{model_version}` → `{run_id, artifact_uri, checkpoint_sha256}`; download `best.pt` once; `load_policy` also (re)computes `sha256` and asserts it equals `checkpoint_sha256`. Read `val_fraction` from `config.yaml` **only** to inform display-time filtering metadata (not to gate compute).
 2. Build `make_pre_extracted_loader` over the **whole** shard (all samples; identical decode path for all downstream sources).
-3. **Idempotency/resume:** HEAD the target `overlay.bin.gz`; skip if present and `sha256`+`overlay_schema` match.
+3. **Idempotency/resume:** HEAD the target `overlay.bin.gz`; skip only when all
+   object identity metadata matches. Otherwise fail. A missing body is created
+   with `If-None-Match: *`, so concurrent retries cannot overwrite each other.
 4. `predict_control` in **batches** (start `batch_size=32`, halve on OOM), overlapping CPU decode with GPU forward. Per-sample `initial_noise` (from `sample_uid`) means an OOM-triggered batch-size halving does **not** change any sample's noise.
 5. Emit per shard:
    - **ONE binary `overlay.bin.gz`** (§6 layout) covering all samples: directory `sample_uid → offset`, `controls float32[N, seeds, 64, 2]`, `v0 float32[N]`.
-6. **Write artifacts FIRST, index LAST:** PUT the S3 `overlay.bin.gz`, then `PutItem` the `SHARD#{ds}#{ver}#{shard}` / `MODEL#{model_artifact_id}` POINTER item (s3_key/sha256/byte_size/sample_count/overlay_schema/status/created_at + projected model attrs), and finally flip `OVLSET#{model_artifact_id}#{ds}#{ver}` `building→ready`. No `SCENELIST#`/`gsi1` writes (P1.6).
+6. **Write artifacts FIRST, readiness LAST:** conditionally create the S3
+   `overlay.bin.gz`, conditionally create the
+   `SHARD#{ds}#{ver}#{shard}` / `MODEL#{model_artifact_id}` pointer, then
+   conditionally create the immutable audit manifest. Finally transition
+   `OVLSET#{model_artifact_id}#{ds}#{ver}` from `building` to `ready`, guarded
+   by request identity, dataset manifest, and artifact bucket. A retry of an
+   already-ready identical set is a no-op; it never writes `building` over
+   `ready`. No `SCENELIST#`/`gsi1` writes (P1.6).
 
-**Caching (flyte #4, infra #10, P1.11).** `cache_version` is a **narrow content identity**, NOT the repo-wide git SHA (which would invalidate the GPU cache on an unrelated Next.js change). Compute it as:
+**Caching (flyte #4, infra #10, P1.11).** Flyte's static
+`OVERLAY_CACHE_VERSION` versions the AOVL/inference/noise contracts, while task
+inputs and the publication-layer `request_identity`/`cache_identity` carry the
+runtime content identity. They are deliberately narrower than the repo-wide
+git SHA. The runtime cache identity is:
 ```
 cache_identity = hash(model_artifact_sha256, dataset_manifest_digest, preprocessing_contract_digest,
                       model_inference_code_digest, sampler, num_steps,
                       noise_policy_version, overlay_binary_schema)
 ```
-Inputs to the task are **scalars only** (no `list[str]` of keys, no `FlyteDirectory`) so the catalog key stays tight. `cache_serialize=True` prevents double-billing the single GPU if two ops-triggered runs collide (the Console does NOT trigger compute — ops-only). Since we store **raw control**, a later fix to the integrator / yaw-sign / display mode is a client change and does **not** bump `cache_identity`.
+The current coarse task receives one partition `FlyteDirectory` plus scalar
+identity inputs and the resolved checkpoint. `cache_serialize=True` prevents
+duplicate execution for an identical Flyte cache key; conditional S3/Dynamo
+writes provide the authoritative cross-execution race guard. Since we store
+**raw control**, a later fix to the integrator / yaw-sign / display mode is a
+client change and does **not** bump `cache_identity`.
 
 **Reproducibility, two-tier (P1.10).** Drop any "byte-identical" claim. Instead:
 - **Same-environment reproducibility (identical):** pin `container_image_digest`, `gpu_model`, `cuda`, `cudnn`, `torch`; with per-sample batch-independent noise this yields identical outputs.
@@ -379,6 +443,8 @@ attrs (POINTER ONLY — no overlay body):
   byte_size      N   <bytes>
   sample_count   N   1000
   overlay_schema S   "v1"
+  dataset_manifest_sha256 S
+  cache_identity S
   status         S   "ready"
   created_at     S   <iso8601>
   # small projected model attrs for the picker (avoid a 2nd GetItem):
@@ -407,9 +473,18 @@ Picker maps a chosen (registered model, version number) → `run_id` + `artifact
 ```
 pk = OVLSET#{model_artifact_id}#{dataset}#{version}   sk = META
 attrs: status S ("building"|"ready"|"deleted"), n_shards N, n_samples N, seeds L,
-       manifest_key S, overlay_schema S, created_at S
+       manifest_key S, overlay_schema S, dataset_manifest_sha256 S,
+       request_identity S, cache_identity S, artifacts_bucket S, created_at S
 ```
-The Go API checks `status=ready` before advertising. **TTL/lifecycle coherence (flyte #5):** never TTL a `ready` overlay while its Flyte catalog entry still reports "cached" (→ "advertised but bytes 404"). Retiring an overlay MUST (a) flip `OVLSET#`/the SHARD×MODEL pointers to `deleted`, (b) delete S3 objects via lifecycle/explicit delete, and (c) purge the Flyte Datacatalog entry (or bump `overlay_schema`). Never TTL just the pointer.
+The Go API checks `status=ready` and pointer/gate identity agreement before
+advertising. The writer creates `building` only when the key is absent and
+conditionally publishes `ready`; an identical retry preserves the original
+`created_at`, while a conflicting request fails. **TTL/lifecycle coherence
+(flyte #5):** never TTL a `ready` overlay while its Flyte catalog entry still
+reports "cached" (→ "advertised but bytes 404"). Retiring an overlay MUST (a)
+flip `OVLSET#`/the SHARD×MODEL pointers to `deleted`, (b) delete S3 objects via
+lifecycle/explicit delete, and (c) purge the Flyte Datacatalog entry (or bump
+`overlay_schema`). Never TTL just the pointer.
 
 **(5) ODD geo-stats — serving summary + pointer only (§9, P1.14):**
 ```
@@ -508,6 +583,13 @@ Exact GPS traces are personal-location data; the ODD map and any per-episode rou
 - **Auditing:** log dataset-export and screen-access to exact routes.
 - **Map-tile ToS:** document the tile provider's Terms of Service + required attribution (MapLibre/OSM); keep attribution visible.
 
+Current production gate: privacy-filtered heatmaps are available without exact
+coordinates, but exact sample poses, tar ranges containing exact pose/GPS
+members, and episode paths are denied while `EXACT_GEO_ENABLED=false`. Do not
+enable it behind the current unauthenticated CloudFront distribution:
+`X-Console-Roles` is only safe after a signature-validating edge layer removes
+any viewer-supplied value and injects an authenticated role.
+
 ---
 
 ## 10. Determinism, Coordinate Contract, Versioning, Cache-Invalidation
@@ -550,7 +632,43 @@ Exact GPS traces are personal-location data; the ODD map and any per-episode rou
 
 ---
 
-## 11. Phasing, Risks
+## 11. Implementation and Rollout
+
+### Completed implementation
+
+- **Phase 0:** immutable MLflow checkpoint resolution, model picker, AOVL parser,
+  shared trajectory math, raw/display-limited rendering contract, and golden
+  tests.
+- **Phase 1:** v2.1 stable identities, portable pose/GPS members, episode paths,
+  rig projection, geo aggregation, embedded reasoning-label migration,
+  immutable dataset publication, and Console v2.1 search/index support.
+- **Phase 2:** per-sample deterministic noise, canonical GPU overlay
+  precompute, write-once S3/Dynamo publication, ready-gated API endpoints, and
+  BEV/camera/map overlays.
+- **Operations:** digest-pinned registration, runtime contract digest checks,
+  `wf_publish_and_precompute_overlays`,
+  `wf_create_publish_and_precompute_overlays`, and the VPC-local
+  `auto-e2e-platform-overlay-launch` CodeBuild project.
+
+### Remaining production rollout
+
+1. Run local Python, Go, frontend, Playwright, and Terraform validation.
+2. On the configured GPU EC2 host, import/serialize with FlyteKit 1.14.9 and run
+   model/GPU tests.
+3. Apply the reviewed Platform Terraform plan, build images, and register
+   digest-pinned workflows.
+4. Launch `EPISODES=1`, validate manifest/pointer/gate ordering and Console
+   playback, then estimate the full-run duration and cost.
+5. Launch `EPISODES=0` only after the smoke succeeds; monitor the Flyte
+   execution to the ready gate.
+6. Roll out Console API/web images and verify desktop/mobile layout, browser
+   console, canvas pixels, model switching, and privacy-filtered geo output.
+7. Validate straight, left-turn, and right-turn map placement before treating
+   geographic predictions as trustworthy.
+8. Keep exact geography disabled until authenticated edge role propagation is
+   implemented and verified.
+
+### Original phase breakdown
 
 **Phase 0 — console-only linkage (no Flyte):**
 - Fix `MLflowModelVersion` to keep `source`; add `model-versions/search` proxy; compute + store `model_artifact_id = sha256(best.pt)`; write `MODELVER#`/`MODEL#` seeds; surface `val_fraction` from `config.yaml`.
@@ -605,11 +723,26 @@ Exact GPS traces are personal-location data; the ODD map and any per-episode rou
 
 ---
 
-## 13. Open items to flag to the user (do NOT bury)
+## 13. Resolved Decisions and Remaining Gates
 
-These four require an explicit user call before/at implementation:
+The implementation go-ahead resolved the four original design questions:
 
-1. **P0.1 nuance — "zero model change for determinism" is corrected.** Stored overlays ARE deterministic-as-stored; the real gap is **recompute batch-invariance + cross-run reproducibility**, fixed by a small `initial_noise=` model edit. The fix is worth doing, but the earlier "no model change" framing was wrong. Confirm the model edit is acceptable.
-2. **P0.4 — corrected ENU formula is necessary but NOT sufficient.** It composes with the L2D yaw-sign mirror (§10) and the heading source; map placement must be validated **jointly** (a straight + a known left/right turn). Trusting the corrected formula alone gives false confidence.
-3. **P1.6 SUPERSEDES the round-2 `gsi1` decision.** With canonical per-shard overlays, P1 is a base-table `SHARD#…` query and `gsi1`/`SCENELIST#` are no longer needed for P1. **Confirm dropping `gsi1` for P1**; whether to still provision `gsi1` for future inverse lookups is deferred to the user.
-4. **P1.7 `sample_uid` migration blast radius.** Adopting `sample_uid` touches the SHIPPED reasoning-label cache (`reasoning_labels_cache/.../{sample_id}.json`) and the live `LBL#…/SCENE#{sampleID}` index (both keyed by `s{si:08d}`). This is a bigger migration than the review implies. Recommendation: adopt `sample_uid` for robustness, but confirm **adopt-now vs defer**, and scope the reasoning-subsystem re-key as its own work item.
+1. `initial_noise=` was added and is covered by batch-order/batch-size
+   reproducibility tests.
+2. The corrected ENU transform is implemented, but straight/left/right
+   real-data validation remains a production acceptance gate.
+3. P1 uses the base `SHARD#...` query. No overlay `gsi1` or `SCENELIST#`
+   fanout was added.
+4. v2.1 adopts stable `sample_uid`; embedded reasoning labels, stats, and scene
+   indexes are versioned and joined by that identity. Legacy per-sample cache
+   assumptions were removed from the Console path.
+
+Two operational decisions remain intentionally conservative:
+
+- A canonical `(model artifact, dataset, version, overlay schema)` coordinate
+  is write-once. A different seed set, runtime contract, or inference-step
+  count at that same coordinate is a conflict, not an overwrite. Publish a new
+  dataset/schema coordinate when intentionally changing the canonical result.
+- Exact geography stays off until the edge authenticates viewers and replaces
+  `X-Console-Roles`; the current unauthenticated distribution cannot safely
+  authorize raw routes.
