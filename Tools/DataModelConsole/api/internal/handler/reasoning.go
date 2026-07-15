@@ -115,45 +115,6 @@ func (h *ReasoningHandler) StatsDetail(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, resp)
 }
 
-// ComputeStats handles
-// GET|POST /api/v1/reasoning-labels/compute-stats?dataset=&prompt_version=&teacher=
-// — force-(re)computes the stats blob AND repopulates the scene-by-label index.
-// Idempotent.
-func (h *ReasoningHandler) ComputeStats(w http.ResponseWriter, r *http.Request) {
-	dataset := r.URL.Query().Get("dataset")
-	promptVersion := r.URL.Query().Get("prompt_version")
-	teacher := r.URL.Query().Get("teacher")
-	if !validReasoningParam(dataset) || !validReasoningParam(promptVersion) {
-		writeError(w, http.StatusBadRequest, model.CodeInvalidParam, "missing or invalid dataset/prompt_version")
-		return
-	}
-	if !h.s3.ValidDataset(dataset) {
-		writeError(w, http.StatusNotFound, model.CodeNotFound, "unknown dataset: "+dataset)
-		return
-	}
-	if !service.ValidReasoningTeacherID(teacher) {
-		writeError(w, http.StatusBadRequest, model.CodeInvalidParam, "missing or invalid teacher")
-		return
-	}
-	version, ok := requestedVersion(r)
-	if !ok {
-		writeError(w, http.StatusBadRequest, model.CodeInvalidParam, "invalid version")
-		return
-	}
-
-	resp, err := h.s3.ComputeReasoningStats(r.Context(), dataset, version, promptVersion, teacher)
-	if err != nil {
-		if errors.Is(err, service.ErrNotFound) {
-			writeError(w, http.StatusNotFound, model.CodeNotFound, "reasoning label partition not found")
-			return
-		}
-		slog.Error("reasoning compute-stats", "dataset", dataset, "prompt_version", promptVersion, "error", err)
-		writeError(w, http.StatusBadGateway, model.CodeS3Error, "failed to compute reasoning stats")
-		return
-	}
-	writeJSON(w, http.StatusOK, resp)
-}
-
 // validReasoningParam rejects empty values and path-traversal characters for
 // values that land in an S3 key template or a DynamoDB key.
 func validReasoningParam(v string) bool {
