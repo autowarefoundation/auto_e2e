@@ -1,0 +1,68 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  generateName: console-reasoning-materialization-
+  namespace: console
+  labels:
+    app.kubernetes.io/name: console-reasoning-materializer
+    app.kubernetes.io/component: data-index
+  annotations:
+    auto-e2e.autoware.org/dataset: "${PUBLISHED_DATASET}"
+    auto-e2e.autoware.org/dataset-version: "${DATASET_VERSION}"
+    auto-e2e.autoware.org/manifest-sha256: "${MANIFEST_SHA256}"
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 43200
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: console-reasoning-materializer
+        app.kubernetes.io/component: data-index
+    spec:
+      serviceAccountName: console-api
+      restartPolicy: Never
+      terminationGracePeriodSeconds: 60
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: materializer
+          image: ${CONSOLE_API_IMAGE}
+          args:
+            - materialize-reasoning
+            - --dataset
+            - "${PUBLISHED_DATASET}"
+            - --version
+            - "${DATASET_VERSION}"
+            - --manifest-sha256
+            - "${MANIFEST_SHA256}"
+          env:
+            - name: AWS_REGION
+              value: "us-west-2"
+            - name: DATASETS_BUCKET
+              valueFrom:
+                configMapKeyRef:
+                  name: console-config
+                  key: datasets-bucket
+            - name: ARTIFACTS_BUCKET
+              valueFrom:
+                configMapKeyRef:
+                  name: console-config
+                  key: artifacts-bucket
+            - name: DYNAMO_TABLE
+              value: "auto-e2e-console"
+            - name: GOMEMLIMIT
+              value: "1700MiB"
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "512Mi"
+            limits:
+              cpu: "2"
+              memory: "2Gi"
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
