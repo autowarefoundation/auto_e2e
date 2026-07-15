@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import os
-from typing import List, NamedTuple
+from typing import Any, List, Mapping, NamedTuple, Sequence
 
 from flytekit import Resources, task
 from flytekit.types.directory import FlyteDirectory
@@ -43,6 +44,256 @@ def _required(value: str, name: str) -> str:
     if not value:
         raise ValueError(f"{name} must be provided")
     return value
+
+
+def _error_code(exc: Exception) -> str:
+    response = getattr(exc, "response", {})
+    return str(response.get("Error", {}).get("Code", ""))
+
+
+def _is_not_found(exc: Exception) -> bool:
+    return _error_code(exc) in {"404", "NoSuchKey", "NotFound"}
+
+
+def _is_precondition_failed(exc: Exception) -> bool:
+    response = getattr(exc, "response", {})
+    status = response.get("ResponseMetadata", {}).get("HTTPStatusCode")
+    return _error_code(exc) in {"PreconditionFailed", "412"} or status == 412
+
+
+def _is_conditional_check_failed(exc: Exception) -> bool:
+    return _error_code(exc) == "ConditionalCheckFailedException"
+
+
+def _assert_s3_compatible(
+    head: Mapping[str, Any],
+    *,
+    key: str,
+    expected_metadata: Mapping[str, str],
+    byte_size: int | None = None,
+) -> None:
+    metadata = head.get("Metadata", {})
+    mismatches = [
+        name
+        for name, value in expected_metadata.items()
+        if metadata.get(name) != value
+    ]
+    if byte_size is not None and int(head.get("ContentLength", -1)) != byte_size:
+        mismatches.append("content-length")
+    if mismatches:
+        raise RuntimeError(
+            "immutable overlay object exists with a different identity "
+            f"({', '.join(sorted(mismatches))}): {key}"
+        )
+
+
+def _head_s3_compatible(
+    s3,
+    *,
+    bucket: str,
+    key: str,
+    expected_metadata: Mapping[str, str],
+) -> Mapping[str, Any] | None:
+    from botocore.exceptions import ClientError
+
+    try:
+        head = s3.head_object(Bucket=bucket, Key=key)
+    except ClientError as exc:
+        if _is_not_found(exc):
+            return None
+        raise
+    _assert_s3_compatible(
+        head, key=key, expected_metadata=expected_metadata
+    )
+    return head
+
+
+def _put_s3_immutable(
+    s3,
+    *,
+    bucket: str,
+    key: str,
+    payload: bytes,
+    metadata: Mapping[str, str],
+    content_type: str,
+    content_encoding: str | None = None,
+) -> None:
+    from botocore.exceptions import ClientError
+
+    request: dict[str, Any] = {
+        "Bucket": bucket,
+        "Key": key,
+        "Body": payload,
+        "IfNoneMatch": "*",
+        "ContentType": content_type,
+        "CacheControl": "private, max-age=31536000, immutable",
+        "Metadata": dict(metadata),
+    }
+    if content_encoding:
+        request["ContentEncoding"] = content_encoding
+    try:
+        s3.put_object(**request)
+        return
+    except ClientError as exc:
+        if not _is_precondition_failed(exc):
+            raise
+
+    try:
+        head = s3.head_object(Bucket=bucket, Key=key)
+    except ClientError as exc:
+        if _is_not_found(exc):
+            raise RuntimeError(
+                f"conditional overlay put failed but object disappeared: {key}"
+            ) from exc
+        raise
+    _assert_s3_compatible(
+        head,
+        key=key,
+        expected_metadata=metadata,
+        byte_size=len(payload),
+    )
+
+
+def _get_dynamo_item(table, item: Mapping[str, Any]) -> dict[str, Any]:
+    response = table.get_item(
+        Key={"pk": item["pk"], "sk": item["sk"]},
+        ConsistentRead=True,
+    )
+    existing = response.get("Item")
+    if not existing:
+        raise RuntimeError(
+            "conditional DynamoDB write failed but the item disappeared: "
+            f"{item['pk']} / {item['sk']}"
+        )
+    return existing
+
+
+def _put_dynamo_immutable(
+    table,
+    item: Mapping[str, Any],
+    *,
+    identity_fields: Sequence[str],
+) -> dict[str, Any]:
+    from botocore.exceptions import ClientError
+
+    try:
+        table.put_item(
+            Item=dict(item),
+            ConditionExpression=(
+                "attribute_not_exists(pk) AND attribute_not_exists(sk)"
+            ),
+        )
+        return dict(item)
+    except ClientError as exc:
+        if not _is_conditional_check_failed(exc):
+            raise
+
+    existing = _get_dynamo_item(table, item)
+    mismatches = [
+        field
+        for field in identity_fields
+        if existing.get(field) != item.get(field)
+    ]
+    if mismatches:
+        raise RuntimeError(
+            "immutable DynamoDB item exists with a different identity "
+            f"({', '.join(sorted(mismatches))}): "
+            f"{item['pk']} / {item['sk']}"
+        )
+    return existing
+
+
+def _publish_overlay_set_ready(table, item: Mapping[str, Any]) -> None:
+    from botocore.exceptions import ClientError
+
+    try:
+        table.put_item(
+            Item=dict(item),
+            ConditionExpression=(
+                "#status = :building "
+                "AND request_identity = :request_identity "
+                "AND dataset_manifest_sha256 = :dataset_manifest "
+                "AND artifacts_bucket = :artifacts_bucket"
+            ),
+            ExpressionAttributeNames={"#status": "status"},
+            ExpressionAttributeValues={
+                ":building": "building",
+                ":request_identity": item["request_identity"],
+                ":dataset_manifest": item["dataset_manifest_sha256"],
+                ":artifacts_bucket": item["artifacts_bucket"],
+            },
+        )
+        return
+    except ClientError as exc:
+        if not _is_conditional_check_failed(exc):
+            raise
+
+    existing = _get_dynamo_item(table, item)
+    fields = (
+        "status",
+        "request_identity",
+        "cache_identity",
+        "dataset_manifest_sha256",
+        "artifacts_bucket",
+        "overlay_schema",
+        "seeds",
+        "n_shards",
+        "n_samples",
+        "manifest_key",
+        "created_at",
+    )
+    mismatches = [
+        field
+        for field in fields
+        if existing.get(field) != item.get(field)
+    ]
+    if mismatches:
+        raise RuntimeError(
+            "ready overlay set is immutable and differs in "
+            f"{', '.join(sorted(mismatches))}: {item['pk']}"
+        )
+
+
+def _gate_token(item: Mapping[str, Any], model_artifact_id: str) -> str:
+    return json.dumps(
+        {
+            "artifacts_bucket": item["artifacts_bucket"],
+            "created_at": item["created_at"],
+            "dataset_manifest_sha256": item[
+                "dataset_manifest_sha256"
+            ],
+            "model_artifact_id": model_artifact_id,
+            "overlay_schema": item["overlay_schema"],
+            "request_identity": item["request_identity"],
+            "status": item["status"],
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def _parse_gate(value: str) -> dict[str, str]:
+    try:
+        gate = json.loads(value)
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise ValueError("invalid overlay-set gate token") from exc
+    required = {
+        "artifacts_bucket",
+        "created_at",
+        "dataset_manifest_sha256",
+        "model_artifact_id",
+        "overlay_schema",
+        "request_identity",
+        "status",
+    }
+    if not isinstance(gate, dict) or any(
+        not isinstance(gate.get(name), str) or not gate[name]
+        for name in required
+    ):
+        raise ValueError("overlay-set gate token is incomplete")
+    if gate["status"] not in {"building", "ready"}:
+        raise ValueError("overlay-set gate is not writable")
+    return gate
 
 
 @task(
@@ -137,50 +388,123 @@ def prepare_overlay_set(
     dataset: str,
     dataset_version: str,
     dataset_manifest_digest: str,
+    preprocessing_contract_digest: str,
+    model_inference_code_digest: str,
+    container_image_digest: str,
     artifacts_bucket: str,
     dynamo_table: str,
     aws_region: str,
     base_seeds: List[int],
+    sampler: str,
 ) -> str:
-    """Write model coordinates and mark the overlay set as building."""
-    import json
+    """Write model coordinates and create or resume one compatible set."""
     from pathlib import Path
 
     import boto3
 
+    from Platform.pipelines.inference import (
+        INFERENCE_CONTRACT_VERSION,
+        NOISE_POLICY_VERSION,
+    )
     from Platform.pipelines.overlay_store import (
         model_profile_item,
         model_version_item,
+        overlay_request_identity,
         overlay_set_item,
     )
 
-    _required(dataset_manifest_digest, "dataset_manifest_digest")
-    _required(artifacts_bucket, "artifacts_bucket")
+    for name, value in (
+        ("dataset", dataset),
+        ("dataset_version", dataset_version),
+        ("dataset_manifest_digest", dataset_manifest_digest),
+        ("preprocessing_contract_digest", preprocessing_contract_digest),
+        ("model_inference_code_digest", model_inference_code_digest),
+        ("container_image_digest", container_image_digest),
+        ("artifacts_bucket", artifacts_bucket),
+        ("dynamo_table", dynamo_table),
+    ):
+        _required(value, name)
+    if sampler != "model-default":
+        raise ValueError(
+            "only sampler='model-default' is implemented by policy inference"
+        )
     metadata = json.loads(Path(resolved_metadata.download()).read_text())
-    metadata.update({
-        "dataset": dataset,
-        "dataset_version": dataset_version,
-        "dataset_manifest_digest": dataset_manifest_digest,
-        "artifacts_bucket": artifacts_bucket,
-    })
+    model_artifact_id = metadata["checkpoint_sha256"]
+    request_identity = overlay_request_identity(
+        model_artifact_id=model_artifact_id,
+        dataset_manifest_digest=dataset_manifest_digest,
+        preprocessing_contract_digest=preprocessing_contract_digest,
+        model_inference_code_digest=model_inference_code_digest,
+        container_image_digest=container_image_digest,
+        sampler=sampler,
+        base_seeds=base_seeds,
+        overlay_schema=OVERLAY_SCHEMA,
+        inference_contract_version=INFERENCE_CONTRACT_VERSION,
+        noise_policy_version=NOISE_POLICY_VERSION,
+    )
     created_at = _utc_now()
     table = boto3.resource("dynamodb", region_name=aws_region).Table(dynamo_table)
-    model_artifact_id = metadata["checkpoint_sha256"]
-    table.put_item(Item=model_profile_item(
-        model_artifact_id, metadata, created_at=created_at
-    ))
-    table.put_item(Item=model_version_item(model_artifact_id, metadata))
-    table.put_item(Item=overlay_set_item(
+    profile_metadata = dict(metadata)
+    profile_metadata.update({
+        "dataset": metadata.get("dataset_source", ""),
+        "dataset_version": metadata.get("dataset_version_source", ""),
+    })
+    profile = model_profile_item(
+        model_artifact_id, profile_metadata, created_at=created_at
+    )
+    _put_dynamo_immutable(
+        table,
+        profile,
+        identity_fields=(
+            "pk",
+            "sk",
+            "registered_model_name",
+            "model_version",
+            "run_id",
+        ),
+    )
+    version_item = model_version_item(model_artifact_id, metadata)
+    _put_dynamo_immutable(
+        table,
+        version_item,
+        identity_fields=(
+            "pk",
+            "sk",
+            "run_id",
+            "artifact_uri",
+            "checkpoint_sha256",
+        ),
+    )
+    set_item = overlay_set_item(
         model_artifact_id,
         dataset,
         dataset_version,
         status="building",
         seeds=base_seeds,
         overlay_schema=OVERLAY_SCHEMA,
+        dataset_manifest_digest=dataset_manifest_digest,
+        request_identity=request_identity,
+        artifacts_bucket=artifacts_bucket,
         created_at=created_at,
-    ))
-
-    return model_artifact_id
+    )
+    existing = _put_dynamo_immutable(
+        table,
+        set_item,
+        identity_fields=(
+            "pk",
+            "sk",
+            "dataset_manifest_sha256",
+            "request_identity",
+            "artifacts_bucket",
+            "overlay_schema",
+            "seeds",
+        ),
+    )
+    if existing.get("status") not in {"building", "ready"}:
+        raise RuntimeError(
+            f"overlay set cannot resume from status {existing.get('status')!r}"
+        )
+    return _gate_token(existing, model_artifact_id)
 
 
 @task(
@@ -217,7 +541,6 @@ def precompute_overlay_partition(
 
     import boto3
     import torch
-    from botocore.exceptions import ClientError
 
     from data_parsing.pre_extracted import make_pre_extracted_loader
     from Platform.pipelines.inference import load_policy
@@ -229,7 +552,12 @@ def precompute_overlay_partition(
         infer_loader_controls,
         planner_is_deterministic,
     )
-    from Platform.pipelines.overlay_store import overlay_pointer_item
+    from Platform.pipelines.overlay_store import (
+        canonical_container_digest,
+        overlay_cache_identity,
+        overlay_pointer_item,
+        overlay_request_identity,
+    )
 
     for name, value in (
         ("dataset_manifest_digest", dataset_manifest_digest),
@@ -241,6 +569,10 @@ def precompute_overlay_partition(
         _required(value, name)
     if batch_size < 1:
         raise ValueError("batch_size must be positive")
+    if sampler != "model-default":
+        raise ValueError(
+            "only sampler='model-default' is implemented by policy inference"
+        )
 
     torch.use_deterministic_algorithms(True)
     if torch.backends.cudnn.is_available():
@@ -256,13 +588,56 @@ def precompute_overlay_partition(
         raise ValueError(
             "downloaded checkpoint differs from resolved model metadata"
         )
-    if prepare_gate != model_artifact_id:
-        raise ValueError("overlay-set preparation identity differs from checkpoint")
+    gate = _parse_gate(prepare_gate)
+    request_identity = overlay_request_identity(
+        model_artifact_id=model_artifact_id,
+        dataset_manifest_digest=dataset_manifest_digest,
+        preprocessing_contract_digest=preprocessing_contract_digest,
+        model_inference_code_digest=model_inference_code_digest,
+        container_image_digest=container_image_digest,
+        sampler=sampler,
+        base_seeds=base_seeds,
+        overlay_schema=OVERLAY_SCHEMA,
+        inference_contract_version=INFERENCE_CONTRACT_VERSION,
+        noise_policy_version=NOISE_POLICY_VERSION,
+    )
+    expected_gate = {
+        "artifacts_bucket": artifacts_bucket,
+        "dataset_manifest_sha256": dataset_manifest_digest,
+        "model_artifact_id": model_artifact_id,
+        "overlay_schema": OVERLAY_SCHEMA,
+        "request_identity": request_identity,
+    }
+    mismatches = [
+        field
+        for field, value in expected_gate.items()
+        if gate.get(field) != value
+    ]
+    if mismatches:
+        raise ValueError(
+            "overlay-set preparation identity differs in "
+            + ", ".join(sorted(mismatches))
+        )
     metadata.update({
         "dataset": dataset,
         "dataset_version": dataset_version,
     })
     deterministic_planner = planner_is_deterministic(model)
+    planner = model.Reactive_E2E.TrajectoryPlanner
+    num_inference_steps = int(
+        getattr(planner, "num_inference_steps", 1)
+    )
+    cache_identity = overlay_cache_identity(
+        request_identity, num_inference_steps
+    )
+    actual_seeds = (
+        [int(base_seeds[0])]
+        if deterministic_planner
+        else [int(seed) for seed in base_seeds]
+    )
+    container_image_digest = canonical_container_digest(
+        container_image_digest
+    )
 
     local_dir = Path(shard_dir.download()).resolve()
     tarfiles = sorted(local_dir.glob("*.tar"))
@@ -279,31 +654,33 @@ def precompute_overlay_partition(
         key = overlay_s3_key(
             model_artifact_id, dataset, dataset_version, shard_name
         )
-        try:
-            head = s3.head_object(Bucket=artifacts_bucket, Key=key)
-        except ClientError as exc:
-            code = exc.response.get("Error", {}).get("Code", "")
-            if code not in {"404", "NoSuchKey", "NotFound"}:
-                raise
-            head = None
+        object_identity = {
+            "base-seeds": ",".join(map(str, actual_seeds)),
+            "cache-identity": cache_identity,
+            "dataset-manifest-digest": dataset_manifest_digest,
+            "model-artifact-id": model_artifact_id,
+            "overlay-schema": OVERLAY_SCHEMA,
+            "request-identity": request_identity,
+            "seed-count": str(len(actual_seeds)),
+        }
+        head = _head_s3_compatible(
+            s3,
+            bucket=artifacts_bucket,
+            key=key,
+            expected_metadata=object_identity,
+        )
 
         if head is not None:
             object_metadata = head.get("Metadata", {})
-            identity = {
-                "model-artifact-id": model_artifact_id,
-                "dataset-manifest-digest": dataset_manifest_digest,
-                "overlay-schema": OVERLAY_SCHEMA,
-            }
-            if any(object_metadata.get(k) != v for k, v in identity.items()):
+            artifact_sha = str(object_metadata.get("sha256", ""))
+            if len(artifact_sha) != 64:
+                raise RuntimeError(f"overlay object has no valid SHA-256: {key}")
+            sample_count = int(object_metadata.get("sample-count", "0"))
+            if sample_count < 1:
                 raise RuntimeError(
-                    f"immutable overlay key exists with different identity: {key}"
+                    f"overlay object has no positive sample count: {key}"
                 )
-            artifact_sha = object_metadata["sha256"]
-            sample_count = int(object_metadata["sample-count"])
             byte_size = int(head["ContentLength"])
-            actual_seeds = [
-                int(value) for value in object_metadata["base-seeds"].split(",")
-            ]
         else:
             current_batch_size = batch_size
             while True:
@@ -326,7 +703,11 @@ def precompute_overlay_partition(
                             device=device,
                         )
                     )
-                    actual_seeds = list(actual_seeds_tuple)
+                    inferred_seeds = list(actual_seeds_tuple)
+                    if inferred_seeds != actual_seeds:
+                        raise RuntimeError(
+                            "planner seed normalization changed during inference"
+                        )
                     break
                 except torch.cuda.OutOfMemoryError:
                     if current_batch_size == 1:
@@ -349,28 +730,23 @@ def precompute_overlay_partition(
             artifact_sha = artifact.sha256
             sample_count = artifact.sample_count
             byte_size = artifact.byte_size
-            s3.upload_file(
-                str(artifact.path),
-                artifacts_bucket,
-                key,
-                ExtraArgs={
-                    "ContentType": "application/octet-stream",
-                    "ContentEncoding": "gzip",
-                    "CacheControl": "private, max-age=31536000, immutable",
-                    "Metadata": {
-                        "sha256": artifact.sha256,
-                        "sample-count": str(artifact.sample_count),
-                        "seed-count": str(artifact.seed_count),
-                        "base-seeds": ",".join(map(str, actual_seeds)),
-                        "overlay-schema": OVERLAY_SCHEMA,
-                        "model-artifact-id": model_artifact_id,
-                        "dataset-manifest-digest": dataset_manifest_digest,
-                    },
-                },
+            object_metadata = {
+                **object_identity,
+                "sha256": artifact.sha256,
+                "sample-count": str(artifact.sample_count),
+            }
+            _put_s3_immutable(
+                s3,
+                bucket=artifacts_bucket,
+                key=key,
+                payload=artifact.path.read_bytes(),
+                metadata=object_metadata,
+                content_type="application/octet-stream",
+                content_encoding="gzip",
             )
 
-        created_at = _utc_now()
-        table.put_item(Item=overlay_pointer_item(
+        created_at = gate["created_at"]
+        pointer = overlay_pointer_item(
             dataset=dataset,
             version=dataset_version,
             shard=shard_name,
@@ -380,9 +756,27 @@ def precompute_overlay_partition(
             byte_size=byte_size,
             sample_count=sample_count,
             overlay_schema=OVERLAY_SCHEMA,
+            dataset_manifest_digest=dataset_manifest_digest,
+            cache_identity=cache_identity,
             created_at=created_at,
             model_metadata=metadata,
-        ))
+        )
+        _put_dynamo_immutable(
+            table,
+            pointer,
+            identity_fields=(
+                "pk",
+                "sk",
+                "s3_key",
+                "sha256",
+                "byte_size",
+                "sample_count",
+                "overlay_schema",
+                "dataset_manifest_sha256",
+                "cache_identity",
+                "status",
+            ),
+        )
         entries.append({
             "shard": shard_name,
             "s3_key": key,
@@ -393,7 +787,6 @@ def precompute_overlay_partition(
             "created_at": created_at,
         })
 
-    planner = model.Reactive_E2E.TrajectoryPlanner
     result = {
         "model_artifact_id": model_artifact_id,
         "dataset": dataset,
@@ -402,10 +795,10 @@ def precompute_overlay_partition(
         "preprocessing_contract_digest": preprocessing_contract_digest,
         "model_inference_code_digest": model_inference_code_digest,
         "container_image_digest": container_image_digest,
+        "request_identity": request_identity,
+        "cache_identity": cache_identity,
         "sampler": sampler,
-        "num_inference_steps": int(
-            getattr(planner, "num_inference_steps", 1)
-        ),
+        "num_inference_steps": num_inference_steps,
         "inference_contract_version": INFERENCE_CONTRACT_VERSION,
         "noise_policy_version": NOISE_POLICY_VERSION,
         "overlay_schema": OVERLAY_SCHEMA,
@@ -432,6 +825,7 @@ def precompute_overlay_partition(
 def finalize_overlay_set(
     model_metadata: FlyteFile,
     partition_results: List[FlyteFile],
+    prepare_gate: str,
     dataset: str,
     dataset_version: str,
     dataset_manifest_digest: str,
@@ -439,7 +833,7 @@ def finalize_overlay_set(
     dynamo_table: str,
     aws_region: str,
 ) -> str:
-    """Write the audit manifest and flip the set to ready last."""
+    """Write the immutable audit manifest and flip the set to ready last."""
     import hashlib
     import json
     from pathlib import Path
@@ -449,6 +843,7 @@ def finalize_overlay_set(
     from Platform.pipelines.overlay_store import overlay_set_item
 
     metadata = json.loads(Path(model_metadata.download()).read_text())
+    gate = _parse_gate(prepare_gate)
     results = [
         json.loads(Path(result.download()).read_text())
         for result in partition_results
@@ -461,6 +856,73 @@ def finalize_overlay_set(
         raise ValueError("duplicate shard names across overlay partitions")
 
     model_artifact_id = metadata["checkpoint_sha256"]
+    expected_gate = {
+        "artifacts_bucket": artifacts_bucket,
+        "dataset_manifest_sha256": dataset_manifest_digest,
+        "model_artifact_id": model_artifact_id,
+        "overlay_schema": OVERLAY_SCHEMA,
+    }
+    gate_mismatches = [
+        field
+        for field, value in expected_gate.items()
+        if gate.get(field) != value
+    ]
+    if gate_mismatches:
+        raise ValueError(
+            "overlay finalizer gate differs in "
+            + ", ".join(sorted(gate_mismatches))
+        )
+
+    result_fields = (
+        "model_artifact_id",
+        "dataset",
+        "dataset_version",
+        "dataset_manifest_digest",
+        "preprocessing_contract_digest",
+        "model_inference_code_digest",
+        "container_image_digest",
+        "request_identity",
+        "cache_identity",
+        "sampler",
+        "num_inference_steps",
+        "inference_contract_version",
+        "noise_policy_version",
+        "overlay_schema",
+        "torch_version",
+        "cuda_version",
+        "cudnn_version",
+        "gpu_model",
+    )
+    reference = {field: results[0].get(field) for field in result_fields}
+    for index, result in enumerate(results):
+        mismatches = [
+            field
+            for field in result_fields
+            if result.get(field) != reference[field]
+        ]
+        if mismatches:
+            raise ValueError(
+                f"overlay partition {index} differs in "
+                + ", ".join(sorted(mismatches))
+            )
+    expected_result = {
+        "model_artifact_id": model_artifact_id,
+        "dataset": dataset,
+        "dataset_version": dataset_version,
+        "dataset_manifest_digest": dataset_manifest_digest,
+        "request_identity": gate["request_identity"],
+        "overlay_schema": OVERLAY_SCHEMA,
+    }
+    mismatches = [
+        field
+        for field, value in expected_result.items()
+        if reference.get(field) != value
+    ]
+    if mismatches:
+        raise ValueError(
+            "overlay result identity differs in "
+            + ", ".join(sorted(mismatches))
+        )
     actual_seed_sets = {tuple(entry["seeds"]) for entry in entries}
     if len(actual_seed_sets) != 1:
         raise ValueError("overlay partitions used inconsistent seed sets")
@@ -472,7 +934,7 @@ def finalize_overlay_set(
         ).encode()
     ).hexdigest()
     environment = results[0]
-    created_at = _utc_now()
+    created_at = gate["created_at"]
     manifest = {
         "schema_version": "v1",
         "status": "ready",
@@ -483,6 +945,8 @@ def finalize_overlay_set(
         "dataset": dataset,
         "version": dataset_version,
         "dataset_manifest_sha256": dataset_manifest_digest,
+        "request_identity": environment["request_identity"],
+        "cache_identity": environment["cache_identity"],
         "n_shards": len(entries),
         "n_samples": sum(entry["sample_count"] for entry in entries),
         "seeds": seeds,
@@ -513,25 +977,43 @@ def finalize_overlay_set(
         f"dataset={dataset}/version={dataset_version}/manifest.json"
     )
     s3 = boto3.client("s3", region_name=aws_region)
-    s3.put_object(
-        Bucket=artifacts_bucket,
-        Key=manifest_key,
-        Body=json.dumps(manifest, indent=2, sort_keys=True).encode(),
-        ContentType="application/json",
-        CacheControl="private, max-age=31536000, immutable",
+    manifest_payload = json.dumps(
+        manifest, indent=2, sort_keys=True
+    ).encode()
+    manifest_sha256 = hashlib.sha256(manifest_payload).hexdigest()
+    _put_s3_immutable(
+        s3,
+        bucket=artifacts_bucket,
+        key=manifest_key,
+        payload=manifest_payload,
+        metadata={
+            "cache-identity": environment["cache_identity"],
+            "dataset-manifest-digest": dataset_manifest_digest,
+            "manifest-sha256": manifest_sha256,
+            "model-artifact-id": model_artifact_id,
+            "output-sha256": output_sha256,
+            "overlay-schema": OVERLAY_SCHEMA,
+            "request-identity": environment["request_identity"],
+        },
+        content_type="application/json",
     )
 
     table = boto3.resource("dynamodb", region_name=aws_region).Table(dynamo_table)
-    table.put_item(Item=overlay_set_item(
+    ready_item = overlay_set_item(
         model_artifact_id,
         dataset,
         dataset_version,
         status="ready",
         seeds=seeds,
         overlay_schema=OVERLAY_SCHEMA,
+        dataset_manifest_digest=dataset_manifest_digest,
+        request_identity=environment["request_identity"],
+        cache_identity=environment["cache_identity"],
+        artifacts_bucket=artifacts_bucket,
         created_at=created_at,
         n_shards=len(entries),
         n_samples=manifest["n_samples"],
         manifest_key=manifest_key,
-    ))
+    )
+    _publish_overlay_set_ready(table, ready_item)
     return manifest_key
