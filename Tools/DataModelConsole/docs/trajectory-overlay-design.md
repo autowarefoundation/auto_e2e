@@ -590,8 +590,8 @@ Current production gate: privacy-filtered heatmaps are available without exact
 coordinates, but exact sample poses, tar ranges containing exact pose/GPS
 members, and episode paths are denied while `EXACT_GEO_ENABLED=false`. Do not
 enable it behind the current unauthenticated CloudFront distribution:
-`X-Console-Roles` is only safe after a signature-validating edge layer removes
-any viewer-supplied value and injects an authenticated role.
+viewer-supplied role headers are ignored, and the API only accepts roles from
+a principal established by signature-validating authentication middleware.
 
 ---
 
@@ -753,6 +753,6 @@ Two operational decisions remain intentionally conservative:
   is write-once. A different seed set, runtime contract, or inference-step
   count at that same coordinate is a conflict, not an overwrite. Publish a new
   dataset/schema coordinate when intentionally changing the canonical result.
-- Exact geography stays off until the edge authenticates viewers and replaces
-  `X-Console-Roles`; the current unauthenticated distribution cannot safely
-  authorize raw routes.
+- Exact geography stays off until authentication verifies viewers and supplies
+  the API's trusted principal context; the current unauthenticated distribution
+  cannot safely authorize raw routes.
