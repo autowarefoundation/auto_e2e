@@ -248,7 +248,7 @@ export function TimelineScrubber({
 
   return (
     <div className="space-y-1">
-      <div className="flex items-center justify-between font-mono text-[10px] text-slate-500">
+      <div className="flex flex-wrap items-center justify-between gap-x-2 gap-y-1 font-mono text-[10px] text-slate-400">
         <span>
           frame {Math.min(frame, lastFrame)}/{lastFrame} — t={t.toFixed(1)}s
           {tripFrame !== undefined && tripFrame >= 0 && (
@@ -410,13 +410,13 @@ export function TimelineScrubber({
               y1={H - AXIS_H}
               x2={tick.x}
               y2={H - AXIS_H + 4}
-              stroke="#475569"
+              stroke="#94a3b8"
               strokeWidth="1"
             />
             <text
               x={Math.min(tick.x + 3, W - 24)}
               y={H - 4}
-              fill="#64748b"
+              fill="#94a3b8"
               fontSize="10"
               fontFamily="monospace"
             >
