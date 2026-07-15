@@ -9,6 +9,7 @@ env:
     FLYTE_PROJECT: auto-e2e
     FLYTE_DOMAIN: development
     MODEL_VERSION: ""
+    IMAGE_TAG: latest
     DATASET: "KIT-MRT/KITScenes-Multimodal"
     SOURCE_REVISION: "6fde0034446669e2ed7235e4c7fe323cd23d599d"
     PUBLISHED_DATASET: ""
@@ -29,6 +30,7 @@ phases:
   pre_build:
     commands:
       - test -n "${MODEL_VERSION}"
+      - test -n "${IMAGE_TAG}"
       - ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
       - ECR_URL="${ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com"
       - export ECR_PREFIX="${ECR_URL}"
@@ -39,7 +41,7 @@ phases:
           REPOSITORY="$1"
           DIGEST=$(aws ecr describe-images \
             --repository-name "auto-e2e/${REPOSITORY}" \
-            --image-ids imageTag=latest \
+            --image-ids imageTag="${IMAGE_TAG}" \
             --query 'imageDetails[0].imageDigest' \
             --output text)
           test -n "${DIGEST}" && test "${DIGEST}" != "None"
