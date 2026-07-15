@@ -169,6 +169,14 @@ class Backbone(enum.Enum):
     RESNET_50 = "res_net_50"
 
 
+def _row_decode_worker_count(dataset: Dataset, row_count: int) -> int:
+    """Bound row decoders by each parser's per-process memory footprint."""
+    # Each KITScenes child reparses the scene's Lanelet2 map and calibration.
+    # Large scenes exceeded the 64 GiB pod limit with the generic 16-worker cap.
+    max_workers = 2 if dataset == Dataset.KITSCENES else 16
+    return max(1, min(max_workers, row_count))
+
+
 # NOTE: view fusion is no longer selectable. The reactive-refactor (PR #94)
 # removed concat/cross_attn and hardcoded BEV fusion inside ReactiveE2E, and
 # dropped the `fusion_mode` argument from AutoE2E.__init__. We keep the string
@@ -1411,7 +1419,7 @@ def data_processing(
         # camera pixels only. This is particularly important for KITScenes,
         # where every map tile runs a Lanelet2 query and rasterization.
         row_map: dict = {}
-        row_workers = max(1, min(16, len(all_rows)))
+        row_workers = _row_decode_worker_count(dataset, len(all_rows))
         current_rows = set(sample_cur_rows.values())
         decode_tasks = [
             (group_id, frame_index, (group_id, frame_index) in current_rows)
