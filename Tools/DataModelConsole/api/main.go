@@ -107,6 +107,7 @@ func main() {
 
 			r.Get("/reasoning-labels/stats", reasoningH.Stats)
 			r.Get("/reasoning-labels/prompt-versions", reasoningH.PromptVersions)
+			r.Get("/reasoning-labels/stats-detail", reasoningH.StatsDetail)
 			r.Get("/reasoning-labels/{dataset}/{sample_id}", reasoningH.GetLabel)
 
 			r.Get("/mlflow/experiments", mlflowH.Experiments)
@@ -132,15 +133,6 @@ func main() {
 			// the 25s interactive group they 502 on cold load.
 			r.Get("/datasets/{name}/shards/{shard}/samples", datasetsH.ListSamples)
 			r.Get("/datasets/{name}/shards/{shard}/samples/{key}", datasetsH.GetSample)
-
-			// Reasoning stats: a Dynamo hit is instant, but a MISS scans up to a
-			// few thousand label objects from S3 (one GET each), so both the
-			// read-through detail endpoint and the force-compute endpoint live
-			// in the heavy-scan group. GET and POST both map to force-compute so
-			// the UI can trigger it either way (idempotent).
-			r.Get("/reasoning-labels/stats-detail", reasoningH.StatsDetail)
-			r.Get("/reasoning-labels/compute-stats", reasoningH.ComputeStats)
-			r.Post("/reasoning-labels/compute-stats", reasoningH.ComputeStats)
 
 			// Scene-by-label search resolves each hit's real shard by building
 			// the shard indexes (cached, but a cold build scans a whole tar), so
