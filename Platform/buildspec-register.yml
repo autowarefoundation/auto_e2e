@@ -5,6 +5,7 @@ env:
     AWS_DEFAULT_REGION: us-west-2
     FLYTE_PROJECT: auto-e2e
     FLYTE_DOMAIN: development
+    IMAGE_TAG: latest
 
 phases:
   install:
@@ -16,13 +17,14 @@ phases:
     commands:
       - ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
       - ECR_URL="${ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com"
+      - test -n "${IMAGE_TAG}"
       - export ECR_PREFIX="${ECR_URL}"
       - |
         image_ref() {
           REPOSITORY="$1"
           DIGEST=$(aws ecr describe-images \
             --repository-name "auto-e2e/${REPOSITORY}" \
-            --image-ids imageTag=latest \
+            --image-ids imageTag="${IMAGE_TAG}" \
             --query 'imageDetails[0].imageDigest' \
             --output text)
           test -n "${DIGEST}" && test "${DIGEST}" != "None"
