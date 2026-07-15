@@ -419,6 +419,24 @@ func (s *S3Service) publishedShard(
 	return entry, nil
 }
 
+func (s *S3Service) publishedShardKey(
+	ctx context.Context,
+	dataset, requestedVersion, shard string,
+) (string, string, int64, error) {
+	version, err := s.publishedVersion(ctx, dataset, requestedVersion)
+	if err != nil {
+		return "", "", 0, err
+	}
+	if requiresPublicationManifest(version) {
+		entry, err := s.publishedShard(ctx, dataset, version, shard)
+		if err != nil {
+			return "", "", 0, err
+		}
+		return version, entry.Key, entry.ByteSize, nil
+	}
+	return version, shardsPrefix(dataset, version) + shard, 0, nil
+}
+
 func metadataValue(metadata map[string]string, key string) string {
 	for candidate, value := range metadata {
 		if strings.EqualFold(candidate, key) {
