@@ -1,6 +1,13 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
+import {
+  Suspense,
+  useCallback,
+  useEffect,
+  useMemo,
+  useState,
+} from "react";
 import { Loader2, MapPinned, ShieldCheck } from "lucide-react";
 
 import {
@@ -23,22 +30,63 @@ import type {
   GeoStats,
 } from "@/types";
 
+interface VersionCatalogState {
+  dataset: string;
+  items: DatasetVersion[];
+  loading: boolean;
+  error: Error | null;
+}
+
 interface GeoPageState {
+  dataset: string;
+  version: string;
   stats: GeoStats | null;
   heatmap: GeoJSONFeatureCollection | null;
   loading: boolean;
   error: Error | null;
 }
 
-export default function GeoPage() {
+function toError(error: unknown): Error {
+  return error instanceof Error ? error : new Error(String(error));
+}
+
+function LoadingState({ label }: { label: string }) {
+  return (
+    <div className="space-y-4">
+      <p className="flex items-center gap-2 text-xs text-slate-500">
+        <Loader2 className="size-3.5 animate-spin" />
+        {label}
+      </p>
+      <Skeleton className="h-20 w-full" />
+      <Skeleton className="h-[520px] w-full" />
+    </div>
+  );
+}
+
+function GeoPageInner() {
+  const router = useRouter();
+  const pathname = usePathname();
+  const searchParams = useSearchParams();
+  const searchParamsString = searchParams.toString();
+  const urlDataset = searchParams.get("dataset") ?? "";
+  const urlVersion = searchParams.get("version") ?? "";
+
   const [datasets, setDatasets] = useState<Dataset[]>([]);
-  const [versions, setVersions] = useState<DatasetVersion[]>([]);
-  const [dataset, setDataset] = useState("");
-  const [version, setVersion] = useState("");
   const [catalogLoading, setCatalogLoading] = useState(true);
   const [catalogError, setCatalogError] = useState<Error | null>(null);
-  const [reloadToken, setReloadToken] = useState(0);
+  const [catalogReload, setCatalogReload] = useState(0);
+  const [versionCatalog, setVersionCatalog] =
+    useState<VersionCatalogState>({
+      dataset: "",
+      items: [],
+      loading: false,
+      error: null,
+    });
+  const [versionsReload, setVersionsReload] = useState(0);
+  const [geoReload, setGeoReload] = useState(0);
   const [geo, setGeo] = useState<GeoPageState>({
+    dataset: "",
+    version: "",
     stats: null,
     heatmap: null,
     loading: false,
@@ -53,102 +101,211 @@ export default function GeoPage() {
       .then((items) => {
         if (cancelled) return;
         setDatasets(items);
-        setDataset((current) =>
-          items.some((item) => item.name === current)
-            ? current
-            : (items.find((item) => item.name === "l2d")?.name ??
-              items[0]?.name ??
-              ""),
-        );
         setCatalogLoading(false);
       })
       .catch((err: unknown) => {
         if (cancelled) return;
-        setCatalogError(
-          err instanceof Error ? err : new Error(String(err)),
-        );
+        setDatasets([]);
+        setCatalogError(toError(err));
         setCatalogLoading(false);
       });
     return () => {
       cancelled = true;
     };
-  }, [reloadToken]);
+  }, [catalogReload]);
+
+  const dataset = useMemo(() => {
+    if (catalogLoading || catalogError || datasets.length === 0) return "";
+    return (
+      datasets.find((item) => item.name === urlDataset)?.name ??
+      datasets.find((item) => item.name === "l2d")?.name ??
+      datasets[0].name
+    );
+  }, [catalogError, catalogLoading, datasets, urlDataset]);
 
   useEffect(() => {
     if (!dataset) {
-      setVersions([]);
-      setVersion("");
+      setVersionCatalog({
+        dataset: "",
+        items: [],
+        loading: false,
+        error: null,
+      });
       return;
     }
     let cancelled = false;
+    setVersionCatalog({
+      dataset,
+      items: [],
+      loading: true,
+      error: null,
+    });
     listDatasetVersions(dataset)
       .then((items) => {
         if (cancelled) return;
-        setVersions(items);
-        setVersion((current) =>
-          items.some((item) => item.version === current && item.has_gps)
-            ? current
-            : (items.find((item) => item.has_gps)?.version ?? ""),
-        );
+        setVersionCatalog({
+          dataset,
+          items,
+          loading: false,
+          error: null,
+        });
       })
       .catch((err: unknown) => {
         if (cancelled) return;
-        setVersions([]);
-        setVersion("");
-        setGeo({
-          stats: null,
-          heatmap: null,
+        setVersionCatalog({
+          dataset,
+          items: [],
           loading: false,
-          error: err instanceof Error ? err : new Error(String(err)),
+          error: toError(err),
         });
       });
     return () => {
       cancelled = true;
     };
-  }, [dataset]);
+  }, [dataset, versionsReload]);
+
+  const hasCurrentVersionCatalog = versionCatalog.dataset === dataset;
+  const versionsLoading =
+    dataset !== "" &&
+    (!hasCurrentVersionCatalog || versionCatalog.loading);
+  const versionsError = hasCurrentVersionCatalog
+    ? versionCatalog.error
+    : null;
+  const versions = useMemo(
+    () =>
+      hasCurrentVersionCatalog &&
+      !versionCatalog.loading &&
+      !versionCatalog.error
+        ? versionCatalog.items.filter((item) => item.has_gps)
+        : [],
+    [hasCurrentVersionCatalog, versionCatalog],
+  );
+  const version = useMemo(
+    () =>
+      versions.find((item) => item.version === urlVersion)?.version ??
+      versions[0]?.version ??
+      "",
+    [urlVersion, versions],
+  );
+
+  useEffect(() => {
+    if (
+      catalogLoading ||
+      catalogError ||
+      !dataset ||
+      versionsLoading ||
+      versionsError
+    ) {
+      return;
+    }
+
+    const query = new URLSearchParams(searchParamsString);
+    let changed = false;
+    if (query.get("dataset") !== dataset) {
+      query.set("dataset", dataset);
+      changed = true;
+    }
+    if (version) {
+      if (query.get("version") !== version) {
+        query.set("version", version);
+        changed = true;
+      }
+    } else if (query.has("version")) {
+      query.delete("version");
+      changed = true;
+    }
+    if (changed) {
+      router.replace(`${pathname}?${query.toString()}`, { scroll: false });
+    }
+  }, [
+    catalogError,
+    catalogLoading,
+    dataset,
+    pathname,
+    router,
+    searchParamsString,
+    version,
+    versionsError,
+    versionsLoading,
+  ]);
+
+  const navigateSelection = useCallback(
+    (nextDataset: string, nextVersion: string | null) => {
+      const query = new URLSearchParams(searchParamsString);
+      query.set("dataset", nextDataset);
+      if (nextVersion) {
+        query.set("version", nextVersion);
+      } else {
+        query.delete("version");
+      }
+      router.push(`${pathname}?${query.toString()}`, { scroll: false });
+    },
+    [pathname, router, searchParamsString],
+  );
 
   useEffect(() => {
     if (!dataset || !version) {
-      setGeo({ stats: null, heatmap: null, loading: false, error: null });
       return;
     }
     let cancelled = false;
-    setGeo({ stats: null, heatmap: null, loading: true, error: null });
-    getGeoStats(dataset, version)
-      .then(async (stats) => {
+    setGeo({
+      dataset,
+      version,
+      stats: null,
+      heatmap: null,
+      loading: true,
+      error: null,
+    });
+    void (async () => {
+      try {
+        const stats = await getGeoStats(dataset, version);
+        if (cancelled) return;
         const heatmap = stats.heatmap_url
           ? await getGeoHeatmap(stats.heatmap_url)
           : { type: "FeatureCollection" as const, features: [] };
-        if (!cancelled) {
-          setGeo({ stats, heatmap, loading: false, error: null });
-        }
-      })
-      .catch((err: unknown) => {
         if (cancelled) return;
         setGeo({
+          dataset,
+          version,
+          stats,
+          heatmap,
+          loading: false,
+          error: null,
+        });
+      } catch (err: unknown) {
+        if (cancelled) return;
+        setGeo({
+          dataset,
+          version,
           stats: null,
           heatmap: null,
           loading: false,
-          error: err instanceof Error ? err : new Error(String(err)),
+          error: toError(err),
         });
-      });
+      }
+    })();
     return () => {
       cancelled = true;
     };
-  }, [dataset, version, reloadToken]);
+  }, [dataset, geoReload, version]);
+
+  const activeGeo =
+    geo.dataset === dataset && geo.version === version ? geo : null;
+  const geoLoading =
+    version !== "" && (!activeGeo || activeGeo.loading);
 
   const mapView = useMemo(() => {
-    const bbox = geo.stats?.summary.bbox;
+    const bbox = activeGeo?.stats?.summary.bbox;
     return bbox
       ? fitGeoBounds(bbox, 960, 520, 5, 14)
       : {
           center: { latitude: 0, longitude: 0 },
           zoom: 5,
         };
-  }, [geo.stats]);
+  }, [activeGeo?.stats]);
 
   const markers = useMemo<MapMarker[]>(() => {
-    const features = geo.heatmap?.features ?? [];
+    const features = activeGeo?.heatmap?.features ?? [];
     let maxCount = 1;
     for (const feature of features) {
       maxCount = Math.max(maxCount, feature.properties.sample_count);
@@ -165,7 +322,7 @@ export default function GeoPage() {
       opacity: 0.35,
       label: `${feature.properties.sample_count.toLocaleString()} samples | ${feature.properties.episode_count} episodes`,
     }));
-  }, [geo.heatmap]);
+  }, [activeGeo?.heatmap]);
 
   return (
     <div className="space-y-6">
@@ -186,8 +343,10 @@ export default function GeoPage() {
           <select
             id="geo-dataset"
             value={dataset}
-            onChange={(event) => setDataset(event.target.value)}
-            disabled={catalogLoading}
+            onChange={(event) =>
+              navigateSelection(event.target.value, null)
+            }
+            disabled={catalogLoading || catalogError !== null}
             className="h-9 rounded-md border border-slate-700 bg-slate-950 px-3 text-sm text-slate-200"
           >
             {datasets.map((item) => (
@@ -202,17 +361,21 @@ export default function GeoPage() {
           <select
             id="geo-version"
             value={version}
-            onChange={(event) => setVersion(event.target.value)}
-            disabled={versions.every((item) => !item.has_gps)}
+            onChange={(event) =>
+              navigateSelection(dataset, event.target.value)
+            }
+            disabled={
+              versionsLoading ||
+              versionsError !== null ||
+              versions.length === 0
+            }
             className="h-9 rounded-md border border-slate-700 bg-slate-950 px-3 font-mono text-sm text-slate-200"
           >
-            {versions
-              .filter((item) => item.has_gps)
-              .map((item) => (
-                <option key={item.version} value={item.version}>
-                  {item.version}
-                </option>
-              ))}
+            {versions.map((item) => (
+              <option key={item.version} value={item.version}>
+                {item.version}
+              </option>
+            ))}
           </select>
         </div>
       </div>
@@ -220,38 +383,43 @@ export default function GeoPage() {
       {catalogError ? (
         <ErrorState
           error={catalogError}
-          onRetry={() => setReloadToken((value) => value + 1)}
+          onRetry={() => setCatalogReload((value) => value + 1)}
         />
-      ) : catalogLoading || geo.loading ? (
-        <div className="space-y-4">
-          <p className="flex items-center gap-2 text-xs text-slate-500">
-            <Loader2 className="size-3.5 animate-spin" />
-            Loading aggregate geospatial statistics
-          </p>
-          <Skeleton className="h-20 w-full" />
-          <Skeleton className="h-[520px] w-full" />
-        </div>
+      ) : catalogLoading ? (
+        <LoadingState label="Loading datasets" />
+      ) : versionsError ? (
+        <ErrorState
+          error={versionsError}
+          onRetry={() => setVersionsReload((value) => value + 1)}
+        />
+      ) : versionsLoading ? (
+        <LoadingState label="Loading dataset versions" />
       ) : !version ? (
         <p className="border-y border-slate-800 py-8 text-sm text-slate-500">
           This dataset has no published GPS-enabled version.
         </p>
-      ) : geo.error ? (
+      ) : activeGeo?.error ? (
         <ErrorState
-          error={geo.error}
-          onRetry={() => setReloadToken((value) => value + 1)}
+          error={activeGeo.error}
+          onRetry={() => setGeoReload((value) => value + 1)}
         />
-      ) : geo.stats ? (
+      ) : geoLoading ? (
+        <LoadingState label="Loading aggregate geospatial statistics" />
+      ) : activeGeo?.stats ? (
         <>
           <div className="grid border-y border-slate-800 sm:grid-cols-3">
             {[
               [
                 "Samples",
-                geo.stats.summary.sample_pose_count.toLocaleString(),
+                activeGeo.stats.summary.sample_pose_count.toLocaleString(),
               ],
-              ["Episodes", geo.stats.summary.episode_count.toLocaleString()],
+              [
+                "Episodes",
+                activeGeo.stats.summary.episode_count.toLocaleString(),
+              ],
               [
                 "Route points",
-                geo.stats.summary.path_point_count.toLocaleString(),
+                activeGeo.stats.summary.path_point_count.toLocaleString(),
               ],
             ].map(([label, value]) => (
               <div
@@ -267,7 +435,10 @@ export default function GeoPage() {
           <section className="space-y-2">
             <div className="flex flex-wrap items-center gap-3 text-xs text-slate-500">
               <span className="text-slate-300">k-anonymous coverage cells</span>
-              <span>k &gt;= {geo.stats.summary.privacy?.k_anonymity ?? "-"}</span>
+              <span>
+                k &gt;={" "}
+                {activeGeo.stats.summary.privacy?.k_anonymity ?? "-"}
+              </span>
               <span>{markers.length.toLocaleString()} published cells</span>
               <span className="ml-auto flex items-center gap-1 text-emerald-400">
                 <ShieldCheck className="size-3.5" />
@@ -288,5 +459,13 @@ export default function GeoPage() {
         </>
       ) : null}
     </div>
+  );
+}
+
+export default function GeoPage() {
+  return (
+    <Suspense fallback={<LoadingState label="Loading geographic coverage" />}>
+      <GeoPageInner />
+    </Suspense>
   );
 }
