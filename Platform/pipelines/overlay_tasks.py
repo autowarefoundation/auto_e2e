@@ -25,7 +25,10 @@ EVAL_IMAGE = os.environ.get(
     f"{ECR_PREFIX}/auto-e2e/eval:latest",
 )
 MLFLOW_URI = "http://mlflow.mlflow.svc.cluster.local:5000"
-OVERLAY_TASK_ENV = {"AUTO_E2E_TASK_IMAGE": EVAL_IMAGE}
+OVERLAY_TASK_ENV = {
+    "AUTO_E2E_TASK_IMAGE": EVAL_IMAGE,
+    "CUBLAS_WORKSPACE_CONFIG": ":4096:8",
+}
 OVERLAY_CACHE_VERSION = (
     f"overlay-{OVERLAY_SCHEMA}-{INFERENCE_CONTRACT_VERSION}-"
     f"{NOISE_POLICY_VERSION}"
