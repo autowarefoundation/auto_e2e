@@ -146,7 +146,14 @@ def test_merge_applies_k_anonymity_across_all_partitions():
     )
 
     assert manifest["total_samples"] == 20
+    assert manifest["shards"] == 2
     assert manifest["shard_count"] == 2
+    assert [entry["name"] for entry in manifest["shard_entries"]] == [
+        "part-a-train-000000.tar",
+        "part-b-train-000000.tar",
+    ]
+    assert manifest["episodes"] == 5
+    assert manifest["has_gps"] is True
     assert manifest["reasoning_label_count"] == 2
     assert manifest["geo"]["episode_count"] == 5
     assert manifest["geo"]["sample_pose_count"] == 20
