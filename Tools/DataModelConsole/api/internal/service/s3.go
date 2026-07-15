@@ -61,9 +61,32 @@ var knownDatasets = []string{"kitscenes", "l2d", "nvidia_av"}
 
 const kitScenesSmokePrefix = "kitscenes-smoke-"
 
+type s3API interface {
+	GetObject(
+		context.Context,
+		*s3.GetObjectInput,
+		...func(*s3.Options),
+	) (*s3.GetObjectOutput, error)
+	HeadBucket(
+		context.Context,
+		*s3.HeadBucketInput,
+		...func(*s3.Options),
+	) (*s3.HeadBucketOutput, error)
+	HeadObject(
+		context.Context,
+		*s3.HeadObjectInput,
+		...func(*s3.Options),
+	) (*s3.HeadObjectOutput, error)
+	ListObjectsV2(
+		context.Context,
+		*s3.ListObjectsV2Input,
+		...func(*s3.Options),
+	) (*s3.ListObjectsV2Output, error)
+}
+
 // S3Service provides read-only access to the datasets bucket.
 type S3Service struct {
-	client          *s3.Client
+	client          s3API
 	presigner       *s3.PresignClient
 	bucket          string
 	artifactsBucket string
@@ -79,6 +102,12 @@ type S3Service struct {
 	// resolveVersion). Guarded by versionMu.
 	versionMu    sync.Mutex
 	versionCache map[string]cachedVersion
+
+	// publicationCache contains only fully validated immutable v2.1+
+	// manifests. Failures are never cached, so a publication becomes visible
+	// immediately after its final manifest write succeeds.
+	publicationMu    sync.Mutex
+	publicationCache map[string]*publicationManifest
 
 	// indexSF single-flights concurrent shard-index builds so a large shard is
 	// scanned from S3 only once even under many simultaneous players. The built
@@ -111,14 +140,15 @@ func NewS3Service(ctx context.Context, region, bucket string, presignExpiry time
 		artifactBucket = artifactsBucket[0]
 	}
 	return &S3Service{
-		client:          client,
-		presigner:       s3.NewPresignClient(client),
-		bucket:          bucket,
-		artifactsBucket: artifactBucket,
-		presignExpiry:   presignExpiry,
-		store:           st,
-		versionCache:    make(map[string]cachedVersion),
-		indexSF:         make(map[string]*sync.WaitGroup),
+		client:           client,
+		presigner:        s3.NewPresignClient(client),
+		bucket:           bucket,
+		artifactsBucket:  artifactBucket,
+		presignExpiry:    presignExpiry,
+		store:            st,
+		versionCache:     make(map[string]cachedVersion),
+		publicationCache: make(map[string]*publicationManifest),
+		indexSF:          make(map[string]*sync.WaitGroup),
 	}, nil
 }
 
