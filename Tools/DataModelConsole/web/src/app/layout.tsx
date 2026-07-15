@@ -31,10 +31,22 @@ export default function RootLayout({
       <body
         className={`${geistSans.variable} ${geistMono.variable} bg-slate-900 text-slate-50 antialiased`}
       >
+        <a
+          href="#main-content"
+          className="sr-only z-[60] rounded-md bg-slate-50 px-3 py-2 text-sm font-medium text-slate-950 focus:not-sr-only focus:fixed focus:top-3 focus:left-3"
+        >
+          Skip to main content
+        </a>
         <Sidebar />
         <div className="md:pl-56">
           <Header />
-          <main className="mx-auto max-w-7xl p-6">{children}</main>
+          <main
+            id="main-content"
+            tabIndex={-1}
+            className="mx-auto max-w-7xl p-6"
+          >
+            {children}
+          </main>
         </div>
       </body>
     </html>
