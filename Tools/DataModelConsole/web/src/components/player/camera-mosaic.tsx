@@ -12,6 +12,10 @@ import { useEffect, useRef, useState } from "react";
 import { Grid3x3, ImageOff, Loader2 } from "lucide-react";
 
 import type { FrameStore } from "@/lib/frame-store";
+import type {
+  CameraProjectionPaths,
+  ScreenPoint,
+} from "@/lib/projection";
 import { camLabel, gridDimensions, rigCam } from "@/lib/rig";
 import { cn } from "@/lib/utils";
 import type { IndexSample } from "@/types";
@@ -22,6 +26,8 @@ function CanvasTile({
   cam,
   label,
   ordinal,
+  predictionPaths,
+  medianPredictionPaths,
   className,
   onClick,
 }: {
@@ -30,10 +36,13 @@ function CanvasTile({
   cam: string;
   label: string;
   ordinal?: number; // 1-based badge matching the "1-7" focus shortcut
+  predictionPaths?: ScreenPoint[][];
+  medianPredictionPaths?: ScreenPoint[][];
   className?: string;
   onClick?: () => void;
 }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const overlayRef = useRef<HTMLCanvasElement>(null);
   const drawnSeqRef = useRef(-1);
   const seqRef = useRef(0);
   // Overlay state: show a spinner until the first bitmap draws; if nothing has
@@ -87,6 +96,48 @@ function CanvasTile({
     };
   }, [store, frame, cam]);
 
+  useEffect(() => {
+    const imageCanvas = canvasRef.current;
+    const overlay = overlayRef.current;
+    if (!imageCanvas || !overlay || imageCanvas.width === 0) return;
+    if (
+      overlay.width !== imageCanvas.width ||
+      overlay.height !== imageCanvas.height
+    ) {
+      overlay.width = imageCanvas.width;
+      overlay.height = imageCanvas.height;
+    }
+    const ctx = overlay.getContext("2d");
+    if (!ctx) return;
+    ctx.clearRect(0, 0, overlay.width, overlay.height);
+
+    const stroke = (
+      paths: ScreenPoint[][] | undefined,
+      color: string,
+      width: number,
+    ) => {
+      if (!paths) return;
+      ctx.strokeStyle = color;
+      ctx.lineWidth = width;
+      ctx.lineCap = "round";
+      ctx.lineJoin = "round";
+      for (const path of paths) {
+        if (path.length < 2) continue;
+        ctx.beginPath();
+        path.forEach((point, index) => {
+          const x = point.u * overlay.width;
+          const y = point.v * overlay.height;
+          if (index === 0) ctx.moveTo(x, y);
+          else ctx.lineTo(x, y);
+        });
+        ctx.stroke();
+      }
+    };
+
+    stroke(predictionPaths, "rgba(52, 211, 153, 0.28)", 1.5);
+    stroke(medianPredictionPaths, "rgba(110, 231, 183, 0.95)", 2.5);
+  }, [predictionPaths, medianPredictionPaths, status]);
+
   return (
     <div
       className={cn(
@@ -101,22 +152,27 @@ function CanvasTile({
         ref={canvasRef}
         className="absolute inset-0 h-full w-full object-contain bg-slate-950"
       />
+      <canvas
+        ref={overlayRef}
+        className="pointer-events-none absolute inset-0 z-[1] h-full w-full object-contain"
+        aria-hidden
+      />
       {status === "loading" && (
-        <div className="absolute inset-0 flex items-center justify-center text-slate-600">
+        <div className="absolute inset-0 z-[2] flex items-center justify-center text-slate-600">
           <Loader2 className="size-4 animate-spin" />
         </div>
       )}
       {status === "error" && (
-        <div className="absolute inset-0 flex flex-col items-center justify-center gap-1 text-slate-600">
+        <div className="absolute inset-0 z-[2] flex flex-col items-center justify-center gap-1 text-slate-600">
           <ImageOff className="size-4" />
           <span className="font-mono text-[8px]">no image</span>
         </div>
       )}
-      <span className="absolute bottom-0 left-0 rounded-tr-md bg-slate-950/80 px-1.5 py-0.5 font-mono text-[9px] text-slate-300">
+      <span className="absolute bottom-0 left-0 z-[2] rounded-tr-md bg-slate-950/80 px-1.5 py-0.5 font-mono text-[9px] text-slate-300">
         {label}
       </span>
       {ordinal !== undefined && ordinal >= 1 && ordinal <= 9 && (
-        <span className="absolute right-1 top-1 flex size-4 items-center justify-center rounded bg-slate-950/80 font-mono text-[9px] text-slate-400">
+        <span className="absolute right-1 top-1 z-[2] flex size-4 items-center justify-center rounded bg-slate-950/80 font-mono text-[9px] text-slate-400">
           {ordinal}
         </span>
       )}
@@ -155,6 +211,8 @@ export function CameraMosaic({
   focusCam,
   onSelectCam,
   onToggleFocus,
+  predictionPaths,
+  medianPredictionPaths,
 }: {
   store: FrameStore;
   dataset: string;
@@ -165,6 +223,8 @@ export function CameraMosaic({
   focusCam: number; // index into cams
   onSelectCam: (idx: number) => void;
   onToggleFocus: () => void;
+  predictionPaths?: CameraProjectionPaths;
+  medianPredictionPaths?: CameraProjectionPaths;
 }) {
   if (mode === "focus") {
     const focusedIdx = Math.min(Math.max(focusCam, 0), cams.length - 1);
@@ -177,6 +237,8 @@ export function CameraMosaic({
             frame={frame}
             cam={focused}
             label={camLabel(dataset, focused)}
+            predictionPaths={predictionPaths?.[focused]}
+            medianPredictionPaths={medianPredictionPaths?.[focused]}
             className="aspect-video w-full"
             onClick={onToggleFocus}
           />
@@ -202,6 +264,8 @@ export function CameraMosaic({
               cam={cam}
               label={camLabel(dataset, cam)}
               ordinal={i + 1}
+              predictionPaths={predictionPaths?.[cam]}
+              medianPredictionPaths={medianPredictionPaths?.[cam]}
               className={cn(
                 "aspect-video w-full",
                 cam === focused && "ring-1 ring-blue-500",
@@ -249,6 +313,8 @@ export function CameraMosaic({
               cam={cam}
               label={c.label}
               ordinal={i + 1}
+              predictionPaths={predictionPaths?.[cam]}
+              medianPredictionPaths={medianPredictionPaths?.[cam]}
               className="aspect-video w-full"
               onClick={() => onSelectCam(i)}
             />
