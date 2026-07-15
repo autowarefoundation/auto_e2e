@@ -157,7 +157,7 @@ type GeoPose struct {
 	LatitudeDeg           float64  `json:"latitude_deg"`
 	LongitudeDeg          float64  `json:"longitude_deg"`
 	HeadingDegCWFromNorth float64  `json:"heading_deg_cw_from_north"`
-	TimestampNS           int64    `json:"timestamp_ns"`
+	TimestampNS           int64    `json:"timestamp_ns,string"`
 	GPSAccuracyM          *float32 `json:"gps_accuracy_m"`
 }
 
