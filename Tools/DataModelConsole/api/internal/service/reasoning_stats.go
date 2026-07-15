@@ -22,10 +22,9 @@ const (
 	maxEmbeddedReasoningBytes = 1 << 20
 )
 
-// ReasoningStatsDetail returns the precomputed stats blob for a
-// (dataset, version, teacher, promptVersion), read-through DynamoDB: a hit is
-// returned directly (cached=true); on a miss the exact teacher partition is
-// scanned from S3, aggregated, indexed, persisted, and returned (cached=false).
+// ReasoningStatsDetail returns one precomputed stats blob. Interactive reads
+// are cache-only: materialization is an explicit pipeline/admin responsibility,
+// never an unauthenticated browser-triggered S3 scan plus DynamoDB write.
 func (s *S3Service) ReasoningStatsDetail(ctx context.Context, dataset, version, promptVersion, teacher string) (model.ReasoningStatsDetailResponse, error) {
 	teacherProvider, teacherModel, ok := parseReasoningTeacherID(teacher)
 	if !ok {
@@ -33,12 +32,10 @@ func (s *S3Service) ReasoningStatsDetail(ctx context.Context, dataset, version, 
 			"reasoning teacher identity is required",
 		)
 	}
-	// Resolve the version BEFORE touching the store, mirroring
-	// ComputeReasoningStats. Otherwise the read-through path stores/reads under
-	// an empty-version key while force-compute writes under the resolved
-	// version, so the two never share a cache entry (a permanent miss here).
-	if !isVersionDir(version) {
-		version = s.resolveVersion(ctx, dataset)
+	var err error
+	version, err = s.publishedVersion(ctx, dataset, version)
+	if err != nil {
+		return model.ReasoningStatsDetailResponse{}, err
 	}
 	resp := model.ReasoningStatsDetailResponse{
 		Dataset:         dataset,
@@ -49,37 +46,23 @@ func (s *S3Service) ReasoningStatsDetail(ctx context.Context, dataset, version, 
 		TeacherModel:    teacherModel,
 	}
 
-	if s.store != nil {
-		if blob, computedAt, err := s.store.GetTeacherStats(
-			ctx, dataset, version, teacher, promptVersion,
-		); err == nil {
-			resp.Stats = blob
-			resp.ComputedAt = computedAt
-			resp.Cached = true
-			return resp, nil
-		} else if !isStoreNotFound(err) {
-			// A Dynamo read error must not fail the endpoint; fall through to
-			// recompute from S3 (logged by the caller on the recompute path).
-			resp.Cached = false
-		}
+	if s.store == nil {
+		return model.ReasoningStatsDetailResponse{}, fmt.Errorf(
+			"reasoning stats require a configured dynamo store",
+		)
 	}
-
-	blob, resolvedTeacher, _, err := s.computeAndPersistStats(ctx, dataset, version, promptVersion, teacher)
+	blob, computedAt, err := s.store.GetTeacherStats(
+		ctx, dataset, version, teacher, promptVersion,
+	)
 	if err != nil {
+		if isStoreNotFound(err) {
+			return model.ReasoningStatsDetailResponse{}, ErrNotFound
+		}
 		return model.ReasoningStatsDetailResponse{}, err
 	}
 	resp.Stats = blob
-	resp.Teacher = resolvedTeacher
-	resp.Cached = false
-	// ComputedAt is set by the persist step (echoed via a fresh Get would be an
-	// extra round-trip); leave it to the freshly-written value.
-	if s.store != nil {
-		if _, computedAt, gerr := s.store.GetTeacherStats(
-			ctx, dataset, version, teacher, promptVersion,
-		); gerr == nil {
-			resp.ComputedAt = computedAt
-		}
-	}
+	resp.ComputedAt = computedAt
+	resp.Cached = true
 	return resp, nil
 }
 
@@ -95,8 +78,10 @@ func (s *S3Service) ComputeReasoningStats(ctx context.Context, dataset, version,
 			"reasoning teacher identity is required",
 		)
 	}
-	if !isVersionDir(version) {
-		version = s.resolveVersion(ctx, dataset)
+	var err error
+	version, err = s.publishedVersion(ctx, dataset, version)
+	if err != nil {
+		return model.ComputeStatsResponse{}, err
 	}
 	blob, resolvedTeacher, sceneRows, err := s.computeAndPersistStats(ctx, dataset, version, promptVersion, teacher)
 	if err != nil {
