@@ -1,6 +1,7 @@
 package store
 
 import (
+	"encoding/json"
 	"reflect"
 	"testing"
 )
@@ -53,6 +54,118 @@ func TestParseReasoningLabel(t *testing.T) {
 	}
 	if h.Confidence != 0.99 {
 		t.Errorf("Confidence = %v, want 0.99", h.Confidence)
+	}
+}
+
+func TestParseReasoningLabelRejectsContractViolations(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(map[string]any)
+	}{
+		{
+			name: "wrong schema",
+			mutate: func(label map[string]any) {
+				label["schema_version"] = "reasoning_label_v1"
+			},
+		},
+		{
+			name: "missing teacher provenance",
+			mutate: func(label map[string]any) {
+				delete(label, "teacher_model")
+			},
+		},
+		{
+			name: "four horizons",
+			mutate: func(label map[string]any) {
+				label["horizons"] = label["horizons"].([]any)[:4]
+			},
+		},
+		{
+			name: "unordered horizon",
+			mutate: func(label map[string]any) {
+				horizons := label["horizons"].([]any)
+				horizons[2].(map[string]any)["horizon_sec"] = 3.0
+			},
+		},
+		{
+			name: "unknown taxonomy label",
+			mutate: func(label map[string]any) {
+				horizons := label["horizons"].([]any)
+				horizons[0].(map[string]any)["lateral_response"] = "turn_left"
+			},
+		},
+		{
+			name: "duplicate multi label",
+			mutate: func(label map[string]any) {
+				horizons := label["horizons"].([]any)
+				horizons[0].(map[string]any)["hazard_event"] =
+					[]any{"no_hazard", "no_hazard"}
+			},
+		},
+		{
+			name: "confidence above one",
+			mutate: func(label map[string]any) {
+				horizons := label["horizons"].([]any)
+				horizons[0].(map[string]any)["confidence"] = 1.1
+			},
+		},
+		{
+			name: "missing horizon provenance",
+			mutate: func(label map[string]any) {
+				horizons := label["horizons"].([]any)
+				delete(horizons[0].(map[string]any), "provenance")
+			},
+		},
+		{
+			name: "inconsistent abstention",
+			mutate: func(label map[string]any) {
+				label["abstained"] = true
+				label["provenance"] = "teacher_error"
+				label["teacher_error"] = "timeout"
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var label map[string]any
+			if err := json.Unmarshal([]byte(sampleLabelJSON), &label); err != nil {
+				t.Fatal(err)
+			}
+			test.mutate(label)
+			body, err := json.Marshal(label)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := ParseReasoningLabel(body); err == nil {
+				t.Fatal("invalid reasoning label was accepted")
+			}
+		})
+	}
+	if _, err := ParseReasoningLabel([]byte(`{"schema_version":`)); err == nil {
+		t.Fatal("malformed reasoning JSON was accepted")
+	}
+}
+
+func TestParseReasoningLabelAcceptsExplicitAbstention(t *testing.T) {
+	body := []byte(`{
+		"schema_version": "reasoning_label_v2",
+		"sample_id": "l2d-v1-e000003-f000126",
+		"dataset_name": "yaak-ai/L2D",
+		"teacher_provider": "openai_compatible",
+		"teacher_model": "nvidia/Cosmos3-Nano",
+		"prompt_version": "action_relevant_reasoning_v3_temporal_front256",
+		"request_mode": "temporal_front_clip",
+		"provenance": "teacher_error",
+		"abstained": true,
+		"teacher_error": "timeout",
+		"horizons": []
+	}`)
+	label, err := ParseReasoningLabel(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !label.Abstained || label.TeacherError != "timeout" {
+		t.Fatalf("abstained label = %+v", label)
 	}
 }
 
