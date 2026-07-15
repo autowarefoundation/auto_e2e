@@ -36,13 +36,19 @@ test("scene drawer links resolve to real shards; unpacked scenes marked unavaila
   console.log("first scene href:", href);
   expect(href).toContain("/shards/train-000000.tar/");
 
-  // Verify that clicking it lands on a real sample-detail page (not a 404 body).
+  // Verify the linked key exists in the canonical shard index. Fetching the
+  // sample-detail endpoint here would repeat a cold full-tar scan even though
+  // scene resolution has already identified the shard.
   const resp = await page.request.get(
     (process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8080") +
-      "/api/v1/datasets/l2d/shards/train-000000.tar/samples/s00000000?version=v2.0",
+      "/api/v1/datasets/l2d/shards/train-000000.tar/index?version=v2.0",
   );
-  console.log("sample-detail status:", resp.status());
+  console.log("shard-index status:", resp.status());
   expect(resp.status()).toBe(200);
+  const index = (await resp.json()) as { samples?: Array<{ key: string }> };
+  expect(index.samples?.some((sample) => sample.key === "s00000000")).toBe(
+    true,
+  );
 
   // The header should report available-of-total (l2d: 413 of 999 for keep_lane).
   const header = await dialog.locator("text=/in this version/").first().textContent();
