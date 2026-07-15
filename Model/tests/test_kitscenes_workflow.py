@@ -93,6 +93,15 @@ def test_ingest_map_binds_scalars_and_maps_only_group_ids():
     }
 
 
+def test_dataset_dynamic_propagates_the_pinned_data_prep_image():
+    assert workflows._map_dataset_partitions.container_image == (
+        workflows.DATA_PREP_IMAGE
+    )
+    assert workflows._map_dataset_partitions.environment == {
+        "AUTO_E2E_DATA_PREP_IMAGE": workflows.DATA_PREP_IMAGE,
+    }
+
+
 def test_reasoning_selection_bootstraps_short_scenes():
     dataset = _ReasoningSelectionDataset([
         ("scene-a", 64),
