@@ -15,7 +15,10 @@ from data_parsing.kit_scenes.camera import (
 from data_parsing.kit_scenes.dataset import (
     KitScenesDataset,
     _heading_cw_from_north,
+    _local_xy_to_absolute_utm,
+    _utm32_to_wgs84,
 )
+from data_parsing.kit_scenes import dataset as dataset_module
 from data_parsing.kit_scenes import map as map_module
 
 
@@ -102,6 +105,41 @@ def test_map_rasterizer_queries_with_scene_local_pose(monkeypatch, tmp_path):
         [[2917.7171, -3280.8901]],
     )
     assert tile.shape == (32, 32, 3)
+
+
+def test_geographic_output_adds_map_origin_once(monkeypatch, tmp_path):
+    origin_utm = np.array([456114.5958622605, 5427629.2039247155])
+    monkeypatch.setattr(
+        dataset_module,
+        "_cached_scene_map",
+        lambda _: SimpleNamespace(utm_origin=origin_utm),
+    )
+    positions_local = np.array([
+        [0.0, 0.0],
+        [2917.7171, -3280.8901],
+    ])
+
+    positions_utm = _local_xy_to_absolute_utm(tmp_path, positions_local)
+    np.testing.assert_allclose(
+        positions_utm,
+        positions_local + origin_utm,
+    )
+    np.testing.assert_allclose(
+        _utm32_to_wgs84(positions_utm),
+        [
+            [49.0, 8.4],
+            [48.97068824389647, 8.440219548828917],
+        ],
+        rtol=0.0,
+        atol=1e-10,
+    )
+
+
+def test_geographic_output_requires_map_origin(monkeypatch, tmp_path):
+    monkeypatch.setattr(dataset_module, "_cached_scene_map", lambda _: None)
+
+    with pytest.raises(ValueError, match="no loadable map origin"):
+        _local_xy_to_absolute_utm(tmp_path, np.zeros((1, 2)))
 
 
 class _CameraLoader:
