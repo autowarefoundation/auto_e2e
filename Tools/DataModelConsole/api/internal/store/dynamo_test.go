@@ -396,12 +396,13 @@ func TestDynamoStore_OverlayReadinessGatesModelsAndBody(t *testing.T) {
 func TestDynamoStore_GeoRecord(t *testing.T) {
 	s, f := newTestStore()
 	item, err := attributevalue.MarshalMap(map[string]any{
-		"pk":          GeoPK("l2d", "v2.1"),
-		"sk":          metaSK,
-		"summary":     `{"bbox":[11,48,12,49]}`,
-		"geojson_key": "l2d/v2.1/geo/heatmap.geojson.gz",
-		"n_samples":   123,
-		"computed_at": "2026-07-15T00:00:00Z",
+		"pk":                      GeoPK("l2d", "v2.1"),
+		"sk":                      metaSK,
+		"summary":                 `{"bbox":[11,48,12,49]}`,
+		"geojson_key":             "l2d/v2.1/geo/heatmap.geojson.gz",
+		"n_samples":               123,
+		"computed_at":             "2026-07-15T00:00:00Z",
+		"dataset_manifest_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
 	})
 	if err != nil {
 		t.Fatal(err)
