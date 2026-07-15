@@ -73,9 +73,9 @@ func (h *ReasoningHandler) PromptVersions(w http.ResponseWriter, r *http.Request
 // StatsDetail handles
 // GET /api/v1/reasoning-labels/stats-detail?dataset=&version=&prompt_version=&teacher=
 // — the precomputed ODD-coverage stats for one (dataset x version x
-// prompt_version) reasoning-label set. Read-through DynamoDB: a hit returns the
-// cached blob; a miss scans the labels from S3, aggregates, populates the
-// scene-by-label index, persists, and returns.
+// teacher x prompt_version) reasoning-label set. Read-through DynamoDB: a hit
+// returns the cached blob; a miss scans the exact label partition from S3,
+// aggregates, populates the scene-by-label index, persists, and returns.
 func (h *ReasoningHandler) StatsDetail(w http.ResponseWriter, r *http.Request) {
 	dataset := r.URL.Query().Get("dataset")
 	promptVersion := r.URL.Query().Get("prompt_version")
@@ -84,8 +84,8 @@ func (h *ReasoningHandler) StatsDetail(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, model.CodeInvalidParam, "missing or invalid dataset/prompt_version")
 		return
 	}
-	if teacher != "" && !validReasoningParam(teacher) {
-		writeError(w, http.StatusBadRequest, model.CodeInvalidParam, "invalid teacher")
+	if !service.ValidReasoningTeacherID(teacher) {
+		writeError(w, http.StatusBadRequest, model.CodeInvalidParam, "missing or invalid teacher")
 		return
 	}
 	version, ok := requestedVersion(r)
@@ -96,6 +96,10 @@ func (h *ReasoningHandler) StatsDetail(w http.ResponseWriter, r *http.Request) {
 
 	resp, err := h.s3.ReasoningStatsDetail(r.Context(), dataset, version, promptVersion, teacher)
 	if err != nil {
+		if errors.Is(err, service.ErrNotFound) {
+			writeError(w, http.StatusNotFound, model.CodeNotFound, "reasoning label partition not found")
+			return
+		}
 		slog.Error("reasoning stats-detail", "dataset", dataset, "prompt_version", promptVersion, "error", err)
 		writeError(w, http.StatusBadGateway, model.CodeS3Error, "failed to compute reasoning stats")
 		return
@@ -115,8 +119,8 @@ func (h *ReasoningHandler) ComputeStats(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusBadRequest, model.CodeInvalidParam, "missing or invalid dataset/prompt_version")
 		return
 	}
-	if teacher != "" && !validReasoningParam(teacher) {
-		writeError(w, http.StatusBadRequest, model.CodeInvalidParam, "invalid teacher")
+	if !service.ValidReasoningTeacherID(teacher) {
+		writeError(w, http.StatusBadRequest, model.CodeInvalidParam, "missing or invalid teacher")
 		return
 	}
 	version, ok := requestedVersion(r)
@@ -127,6 +131,10 @@ func (h *ReasoningHandler) ComputeStats(w http.ResponseWriter, r *http.Request) 
 
 	resp, err := h.s3.ComputeReasoningStats(r.Context(), dataset, version, promptVersion, teacher)
 	if err != nil {
+		if errors.Is(err, service.ErrNotFound) {
+			writeError(w, http.StatusNotFound, model.CodeNotFound, "reasoning label partition not found")
+			return
+		}
 		slog.Error("reasoning compute-stats", "dataset", dataset, "prompt_version", promptVersion, "error", err)
 		writeError(w, http.StatusBadGateway, model.CodeS3Error, "failed to compute reasoning stats")
 		return
@@ -154,8 +162,9 @@ func (h *ReasoningHandler) GetLabel(w http.ResponseWriter, r *http.Request) {
 	promptVersion := r.URL.Query().Get("prompt_version")
 	// These land in the S3 key template; reject path-traversal characters the
 	// same way dataset/sample_id are validated above.
-	if strings.ContainsAny(teacher, "/\\") || strings.Contains(teacher, "..") ||
-		strings.ContainsAny(promptVersion, "/\\") || strings.Contains(promptVersion, "..") {
+	if strings.ContainsAny(promptVersion, "/\\") || strings.Contains(promptVersion, "..") ||
+		(teacher != "" && !service.ValidReasoningTeacherID(teacher)) ||
+		(promptVersion != "" && teacher == "") {
 		writeError(w, http.StatusBadRequest, model.CodeInvalidParam, "invalid teacher or prompt_version")
 		return
 	}
