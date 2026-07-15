@@ -33,6 +33,14 @@ import (
 // ErrNotFound is returned when a requested S3 object / tar member is absent.
 var ErrNotFound = errors.New("not found")
 
+// ErrReasoningUnavailable means a published dataset has not had its reasoning
+// serving inventory materialized yet.
+var ErrReasoningUnavailable = errors.New("reasoning inventory unavailable")
+
+// ErrReasoningIntegrity means a materialized reasoning inventory points to
+// serving data that is missing, stale, or invalid.
+var ErrReasoningIntegrity = errors.New("reasoning publication integrity failure")
+
 // ErrRangeTooLarge is returned when a requested byte range exceeds MaxRangeBytes.
 var ErrRangeTooLarge = errors.New("requested range too large")
 
@@ -48,6 +56,13 @@ const MaxRangeBytes = 32 << 20 // 32 MiB
 // roughly 0.5 MiB per 1000 samples and seed; 16 MiB leaves ample fan-out room
 // while preventing a corrupt pointer from exhausting the API pod.
 const MaxOverlayBytes = 16 << 20
+
+// maxConcurrentFullTarScans bounds full-shard streams across index, listing,
+// detail, and legacy member reads. A package-global semaphore makes the limit
+// process-wide even if more than one S3Service is constructed.
+const maxConcurrentFullTarScans = 4
+
+var fullTarScanSem = make(chan struct{}, maxConcurrentFullTarScans)
 
 // fallbackVersion is used when no vX.Y/ prefix with shards can be resolved.
 const fallbackVersion = "v1.0"
@@ -85,6 +100,63 @@ type s3API interface {
 	) (*s3.ListObjectsV2Output, error)
 }
 
+type consoleStore interface {
+	GetShardIndex(
+		context.Context, string, string, string,
+	) (*model.ShardIndex, error)
+	PutShardIndex(
+		context.Context, string, string, string, *model.ShardIndex,
+	) error
+	GetTeacherStats(
+		context.Context, string, string, string, string, string,
+	) (model.ReasoningStatsBlob, string, error)
+	PutTeacherStats(
+		context.Context, string, string, string, string, string,
+		model.ReasoningStatsBlob,
+	) (string, error)
+	GetReasoningInventory(
+		context.Context, string, string,
+	) (model.ReasoningInventory, string, error)
+	BeginReasoningMaterialization(
+		context.Context, string, string, string, int64, int64,
+	) error
+	RenewReasoningMaterialization(
+		context.Context, string, string, string, int64, int64,
+	) error
+	ReleaseReasoningMaterialization(
+		context.Context, string, string, string,
+	) error
+	PutReasoningInventory(
+		context.Context, string, string, string, int64,
+		model.ReasoningInventory,
+	) (string, error)
+	PutReasoningSampleLookups(
+		context.Context, string, string, string,
+		[]model.ReasoningSampleLookup,
+	) (int, error)
+	GetReasoningSampleLookup(
+		context.Context, string, string, string, string,
+	) (model.ReasoningSampleLookup, error)
+	PutReasoningSceneLabels(
+		context.Context, string, string, string, string, string,
+		[]store.SceneLabelRow,
+	) (int, error)
+	QueryReasoningScenes(
+		context.Context,
+		string, string, string, string, string, string, string,
+		int,
+	) ([]model.SceneRef, error)
+	QueryReadyOverlayModels(
+		context.Context, string, string, string, int, string, ...string,
+	) ([]model.OverlayModel, string, error)
+	GetReadyOverlayPointer(
+		context.Context, string, string, string, string, ...string,
+	) (*store.OverlayPointer, error)
+	GetGeoRecord(
+		context.Context, string, string,
+	) (*store.GeoRecord, error)
+}
+
 // S3Service provides read-only access to the datasets bucket.
 type S3Service struct {
 	client          s3API
@@ -97,7 +169,7 @@ type S3Service struct {
 	// (read-through), plus precomputed stats and the scene-by-label index.
 	// May be nil in tests / a Dynamo-less deployment, in which case shard
 	// indexes are built fresh from S3 on every request (single-flighted).
-	store *store.DynamoStore
+	store consoleStore
 
 	// versionCache memoizes the resolved newest version per dataset (see
 	// resolveVersion). Guarded by versionMu.
@@ -118,7 +190,11 @@ type S3Service struct {
 	// waiters re-read the freshly-written Dynamo item instead. Guarded by
 	// indexMu; keyed by "<dataset>/<version>/<shard>".
 	indexMu sync.Mutex
-	indexSF map[string]*sync.WaitGroup // single-flight in-progress builds
+	indexSF map[string]*shardIndexBuild // single-flight in-progress builds
+}
+
+type shardIndexBuild struct {
+	done chan struct{}
 }
 
 type cachedVersion struct {
@@ -149,7 +225,7 @@ func NewS3Service(ctx context.Context, region, bucket string, presignExpiry time
 		store:            st,
 		versionCache:     make(map[string]cachedVersion),
 		publicationCache: make(map[string]*publicationManifest),
-		indexSF:          make(map[string]*sync.WaitGroup),
+		indexSF:          make(map[string]*shardIndexBuild),
 	}, nil
 }
 
@@ -248,32 +324,45 @@ type OverlayBody struct {
 	Payload    []byte
 }
 
-// ListOverlayModels returns only completely published model overlays for one
-// immutable shard.
-func (s *S3Service) ListOverlayModels(ctx context.Context, dataset, version, shard string) ([]model.OverlayModel, string, error) {
+// ListOverlayModels returns one bounded page of completely published model
+// overlays for an immutable shard.
+func (s *S3Service) ListOverlayModels(
+	ctx context.Context,
+	dataset, version, shard string,
+	limit int,
+	pageToken string,
+) ([]model.OverlayModel, string, string, error) {
 	if s.store == nil {
-		return nil, "", fmt.Errorf("overlay lookup requires a configured dynamo store")
+		return nil, "", "", fmt.Errorf(
+			"overlay lookup requires a configured dynamo store",
+		)
 	}
 	var err error
 	expectedManifestDigest := ""
 	version, err = s.publishedVersion(ctx, dataset, version)
 	if err != nil {
-		return nil, "", err
+		return nil, "", "", err
 	}
 	if requiresPublicationManifest(version) {
 		if _, err := s.publishedShard(ctx, dataset, version, shard); err != nil {
-			return nil, version, err
+			return nil, version, "", err
 		}
 		manifest, err := s.loadPublicationManifest(ctx, dataset, version)
 		if err != nil {
-			return nil, version, err
+			return nil, version, "", err
 		}
 		expectedManifestDigest = manifest.SHA256
 	}
-	models, err := s.store.QueryReadyOverlayModels(
-		ctx, dataset, version, shard, expectedManifestDigest,
+	models, nextPageToken, err := s.store.QueryReadyOverlayModels(
+		ctx,
+		dataset,
+		version,
+		shard,
+		limit,
+		pageToken,
+		expectedManifestDigest,
 	)
-	return models, version, err
+	return models, version, nextPageToken, err
 }
 
 // GetOverlayBody follows a ready Dynamo pointer, constrains it to the canonical
@@ -832,65 +921,42 @@ func (s *S3Service) ListShards(ctx context.Context, dataset, version string, lim
 	return pageItems, pg, nil
 }
 
-// ListSamples streams the tar from S3 reading headers only (tar.Next skips
-// content without buffering it) and groups members by WebDataset sample key
-// (member name up to the first dot).
+// ListSamples uses the shard index as the canonical member inventory. A cache
+// hit avoids opening the shard; a miss follows the same single-flighted,
+// process-bounded tar scan as the playback index endpoint.
 func (s *S3Service) ListSamples(ctx context.Context, dataset, version, shard string, limit, offset int) ([]model.Sample, model.Page, error) {
-	_, key, _, err := s.publishedShardKey(
-		ctx, dataset, version, shard,
-	)
+	index, err := s.BuildShardIndex(ctx, dataset, version, shard)
 	if err != nil {
 		return nil, model.Page{}, err
 	}
-	obj, err := s.client.GetObject(ctx, &s3.GetObjectInput{
-		Bucket: aws.String(s.bucket),
-		Key:    aws.String(key),
-	})
-	if err != nil {
-		if isS3NotFound(err) {
-			return nil, model.Page{}, ErrNotFound
-		}
-		return nil, model.Page{}, fmt.Errorf("get shard %s: %w", key, err)
-	}
-	defer obj.Body.Close()
-
-	// Counting reader lets us record each member's data offset so future
-	// range-GET extraction (Phase 2 tar index) is possible from this listing.
-	cr := &countingReader{r: obj.Body}
-	tr := tar.NewReader(cr)
-
-	order := []string{}
-	groups := map[string][]model.TarMember{}
-	for {
-		hdr, err := tr.Next()
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			return nil, model.Page{}, fmt.Errorf("read tar %s: %w", key, err)
-		}
-		if hdr.Typeflag != tar.TypeReg {
-			continue
-		}
-		sampleKey := sampleKeyOf(hdr.Name)
-		if _, ok := groups[sampleKey]; !ok {
-			order = append(order, sampleKey)
-		}
-		groups[sampleKey] = append(groups[sampleKey], model.TarMember{
-			Name:      hdr.Name,
-			SizeBytes: hdr.Size,
-			Offset:    cr.n, // header already consumed: n is at data start
-		})
-	}
-
-	samples := make([]model.Sample, 0, len(order))
-	for _, k := range order {
-		samples = append(samples, model.Sample{Key: k, Members: groups[k]})
-	}
-
+	samples := samplesFromShardIndex(index)
 	total := len(samples)
 	pageItems, pg := paginate(samples, limit, offset, total)
 	return pageItems, pg, nil
+}
+
+func samplesFromShardIndex(index *model.ShardIndex) []model.Sample {
+	samples := make([]model.Sample, 0, len(index.Samples))
+	for _, indexed := range index.Samples {
+		members := make([]model.TarMember, 0, len(indexed.Members))
+		for suffix, member := range indexed.Members {
+			members = append(members, model.TarMember{
+				Name:      indexed.Key + "." + suffix,
+				SizeBytes: member.Size,
+				Offset:    member.Offset,
+			})
+		}
+		// Map iteration is unordered. Data offsets recover the original tar
+		// member order and therefore preserve the list endpoint's response.
+		sort.Slice(members, func(i, j int) bool {
+			return members[i].Offset < members[j].Offset
+		})
+		samples = append(samples, model.Sample{
+			Key:     indexed.Key,
+			Members: members,
+		})
+	}
+	return samples
 }
 
 // StreamTarMember streams the tar from S3 until the requested member is found
@@ -900,38 +966,72 @@ func (s *S3Service) ListSamples(ctx context.Context, dataset, version, shard str
 //
 // memberName is matched as "<sampleKey>.<suffix>", e.g. ep0_000064.cam_0.jpg.
 func (s *S3Service) StreamTarMember(ctx context.Context, dataset, version, shard, memberName string) (io.Reader, io.Closer, int64, error) {
-	_, key, _, err := s.publishedShardKey(
+	_, key, _, etag, err := s.publishedShardObject(
 		ctx, dataset, version, shard,
 	)
 	if err != nil {
 		return nil, nil, 0, err
 	}
-	obj, err := s.client.GetObject(ctx, &s3.GetObjectInput{
-		Bucket: aws.String(s.bucket),
-		Key:    aws.String(key),
-	})
+	release, err := acquireFullTarScan(ctx)
 	if err != nil {
+		return nil, nil, 0, err
+	}
+	obj, err := s.client.GetObject(
+		ctx, shardGetObjectInput(s.bucket, key, etag),
+	)
+	if err != nil {
+		release()
 		if isS3NotFound(err) {
 			return nil, nil, 0, ErrNotFound
 		}
 		return nil, nil, 0, fmt.Errorf("get shard %s: %w", key, err)
+	}
+	closer := &scanReadCloser{
+		Closer:  obj.Body,
+		release: release,
 	}
 
 	tr := tar.NewReader(obj.Body)
 	for {
 		hdr, err := tr.Next()
 		if err == io.EOF {
-			obj.Body.Close()
+			closer.Close()
 			return nil, nil, 0, ErrNotFound
 		}
 		if err != nil {
-			obj.Body.Close()
+			closer.Close()
 			return nil, nil, 0, fmt.Errorf("read tar %s: %w", key, err)
 		}
 		if hdr.Typeflag == tar.TypeReg && hdr.Name == memberName {
-			return tr, obj.Body, hdr.Size, nil
+			return tr, closer, hdr.Size, nil
 		}
 	}
+}
+
+type scanReadCloser struct {
+	io.Closer
+	release  func()
+	once     sync.Once
+	closeErr error
+}
+
+func (c *scanReadCloser) Close() error {
+	c.once.Do(func() {
+		defer c.release()
+		c.closeErr = c.Closer.Close()
+	})
+	return c.closeErr
+}
+
+func shardGetObjectInput(bucket, key, etag string) *s3.GetObjectInput {
+	input := &s3.GetObjectInput{
+		Bucket: aws.String(bucket),
+		Key:    aws.String(key),
+	}
+	if etag != "" {
+		input.IfMatch = aws.String(etag)
+	}
+	return input
 }
 
 // StreamTarMemberRange fetches exactly one tar member's raw bytes via an S3
@@ -950,7 +1050,7 @@ func (s *S3Service) StreamTarMemberRange(ctx context.Context, dataset, version, 
 	if offset > math.MaxInt64-size {
 		return nil, nil, 0, ErrNotFound
 	}
-	_, key, shardSize, err := s.publishedShardKey(
+	_, key, shardSize, etag, err := s.publishedShardObject(
 		ctx, dataset, version, shard,
 	)
 	if err != nil {
@@ -960,11 +1060,9 @@ func (s *S3Service) StreamTarMemberRange(ctx context.Context, dataset, version, 
 		return nil, nil, 0, ErrNotFound
 	}
 	rng := fmt.Sprintf("bytes=%d-%d", offset, offset+size-1)
-	obj, err := s.client.GetObject(ctx, &s3.GetObjectInput{
-		Bucket: aws.String(s.bucket),
-		Key:    aws.String(key),
-		Range:  aws.String(rng),
-	})
+	input := shardGetObjectInput(s.bucket, key, etag)
+	input.Range = aws.String(rng)
+	obj, err := s.client.GetObject(ctx, input)
 	if err != nil {
 		if isS3NotFound(err) {
 			return nil, nil, 0, ErrNotFound
@@ -1000,6 +1098,7 @@ const (
 	egoHistoryFloats = 256
 	egoFutureFloats  = 128
 	egoTotalFloats   = egoHistoryFloats + egoFutureFloats
+	egoPayloadBytes  = egoTotalFloats * 4
 	egoNowSignals    = 4 // one history row: [speed, accel, yaw_rate, curvature]
 
 	// indexFps is the frame rate the ADAS player renders shards at.
@@ -1009,22 +1108,33 @@ const (
 	// ego.npy) is buffered during a tar scan, guarding against oversized or
 	// corrupt members.
 	maxInlineMemberBytes = 1 << 20 // 1 MiB
+
+	// Bound index construction before maps, metadata arrays, and the final JSON
+	// encoding can exhaust an API pod. Production shards currently hold about
+	// 1,000 samples and fewer than 16 members per sample.
+	maxShardIndexSamples  = 4 << 10
+	maxShardIndexMembers  = 64 << 10
+	maxTarMemberNameBytes = 1 << 10
 )
 
 // GetSampleDetail streams the shard tar once and assembles the detail view of
 // a single sample: its member list (for Cameras), raw meta.json bytes and the
 // decoded ego.npy history/future arrays.
 func (s *S3Service) GetSampleDetail(ctx context.Context, dataset, version, shard, sampleKey string) (*model.SampleDetail, error) {
-	_, key, _, err := s.publishedShardKey(
+	_, key, _, etag, err := s.publishedShardObject(
 		ctx, dataset, version, shard,
 	)
 	if err != nil {
 		return nil, err
 	}
-	obj, err := s.client.GetObject(ctx, &s3.GetObjectInput{
-		Bucket: aws.String(s.bucket),
-		Key:    aws.String(key),
-	})
+	release, err := acquireFullTarScan(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+	obj, err := s.client.GetObject(
+		ctx, shardGetObjectInput(s.bucket, key, etag),
+	)
 	if err != nil {
 		if isS3NotFound(err) {
 			return nil, ErrNotFound
@@ -1067,16 +1177,14 @@ func (s *S3Service) GetSampleDetail(ctx context.Context, dataset, version, shard
 			if err != nil {
 				return nil, fmt.Errorf("read %s from %s: %w", hdr.Name, key, err)
 			}
-			floats := decodeFloat32LE(body)
-			if len(floats) >= egoTotalFloats {
-				detail.EgoHistory = floats[:egoHistoryFloats]
-				detail.EgoFuture = floats[egoHistoryFloats:egoTotalFloats]
-			} else if len(floats) >= egoHistoryFloats {
-				detail.EgoHistory = floats[:egoHistoryFloats]
-				detail.EgoFuture = floats[egoHistoryFloats:]
-			} else {
-				detail.EgoHistory = floats
+			floats, err := decodeEgoPayload(body)
+			if err != nil {
+				return nil, fmt.Errorf(
+					"decode %s from %s: %w", hdr.Name, key, err,
+				)
 			}
+			detail.EgoHistory = floats[:egoHistoryFloats]
+			detail.EgoFuture = floats[egoHistoryFloats:]
 		}
 	}
 	if !found {
@@ -1117,17 +1225,20 @@ func (s *S3Service) BuildShardIndex(ctx context.Context, dataset, version, shard
 		}
 
 		s.indexMu.Lock()
-		if wg, building := s.indexSF[cacheKey]; building {
+		if build, building := s.indexSF[cacheKey]; building {
 			// Another goroutine is building this index; wait, then re-check
 			// Dynamo (the owner will have written it).
 			s.indexMu.Unlock()
-			wg.Wait()
-			continue
+			select {
+			case <-build.done:
+				continue
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
 		}
 		// We own the build.
-		wg := &sync.WaitGroup{}
-		wg.Add(1)
-		s.indexSF[cacheKey] = wg
+		build := &shardIndexBuild{done: make(chan struct{})}
+		s.indexSF[cacheKey] = build
 		s.indexMu.Unlock()
 
 		var idx *model.ShardIndex
@@ -1140,9 +1251,15 @@ func (s *S3Service) BuildShardIndex(ctx context.Context, dataset, version, shard
 			defer func() {
 				s.indexMu.Lock()
 				delete(s.indexSF, cacheKey)
+				close(build.done)
 				s.indexMu.Unlock()
-				wg.Done()
 			}()
+			release, acquireErr := acquireFullTarScan(ctx)
+			if acquireErr != nil {
+				err = acquireErr
+				return
+			}
+			defer release()
 			idx, err = s.buildShardIndexUncached(ctx, dataset, version, shard)
 			if err == nil && idx != nil && s.store != nil {
 				// Persist for this and future requests / replicas. A write
@@ -1155,6 +1272,15 @@ func (s *S3Service) BuildShardIndex(ctx context.Context, dataset, version, shard
 			}
 		}()
 		return idx, err
+	}
+}
+
+func acquireFullTarScan(ctx context.Context) (func(), error) {
+	select {
+	case fullTarScanSem <- struct{}{}:
+		return func() { <-fullTarScanSem }, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
 	}
 }
 
@@ -1173,16 +1299,35 @@ func (s *S3Service) shardIndexFromStore(ctx context.Context, dataset, version, s
 		}
 		return nil, false
 	}
-	idx.Version = version
-	idx.Shard = shard
-	for i := range idx.Samples {
-		if idx.Samples[i].SampleUID == "" {
+	if idx == nil {
+		slog.Warn(
+			"read nil shard index from dynamo; will rebuild",
+			"dataset", dataset,
+			"version", version,
+			"shard", shard,
+		)
+		return nil, false
+	}
+	normalized := *idx
+	normalized.Version = version
+	normalized.Shard = shard
+	samplesCopied := false
+	for i := range normalized.Samples {
+		if normalized.Samples[i].SampleUID == "" {
 			if requiresPublicationManifest(version) {
 				return nil, false
 			}
-			idx.Samples[i].SampleUID = idx.Samples[i].Key
+			if !samplesCopied {
+				normalized.Samples = append(
+					[]model.IndexSample(nil),
+					normalized.Samples...,
+				)
+				samplesCopied = true
+			}
+			normalized.Samples[i].SampleUID = normalized.Samples[i].Key
 		}
 	}
+	idx = &normalized
 	if err := validateShardIndex(idx); err != nil {
 		slog.Warn(
 			"cached shard index failed validation; will rebuild",
@@ -1246,11 +1391,15 @@ func validateShardIndex(idx *model.ShardIndex) error {
 // future plan per sample. Frames are fetched member-by-member through the
 // image endpoint, so no whole-shard presigned URL is emitted.
 func (s *S3Service) buildShardIndexUncached(ctx context.Context, dataset, version, shard string) (*model.ShardIndex, error) {
-	key := shardsPrefix(dataset, version) + shard
-	obj, err := s.client.GetObject(ctx, &s3.GetObjectInput{
-		Bucket: aws.String(s.bucket),
-		Key:    aws.String(key),
-	})
+	resolvedVersion, key, _, etag, err := s.publishedShardObject(
+		ctx, dataset, version, shard,
+	)
+	if err != nil {
+		return nil, err
+	}
+	obj, err := s.client.GetObject(
+		ctx, shardGetObjectInput(s.bucket, key, etag),
+	)
 	if err != nil {
 		if isS3NotFound(err) {
 			return nil, ErrNotFound
@@ -1265,6 +1414,7 @@ func (s *S3Service) buildShardIndexUncached(ctx context.Context, dataset, versio
 	order := []string{}
 	byKey := map[string]*model.IndexSample{}
 	metaSeen := map[string]bool{}
+	memberCount := 0
 	for {
 		hdr, err := tr.Next()
 		if err == io.EOF {
@@ -1275,6 +1425,19 @@ func (s *S3Service) buildShardIndexUncached(ctx context.Context, dataset, versio
 		}
 		if hdr.Typeflag != tar.TypeReg {
 			continue
+		}
+		if len(hdr.Name) > maxTarMemberNameBytes {
+			return nil, fmt.Errorf(
+				"tar member name exceeds %d bytes in %s",
+				maxTarMemberNameBytes, key,
+			)
+		}
+		memberCount++
+		if memberCount > maxShardIndexMembers {
+			return nil, fmt.Errorf(
+				"shard %s exceeds %d regular members",
+				key, maxShardIndexMembers,
+			)
 		}
 		sk := sampleKeyOf(hdr.Name)
 		suffix := memberSuffixOf(hdr.Name)
@@ -1287,6 +1450,12 @@ func (s *S3Service) buildShardIndexUncached(ctx context.Context, dataset, versio
 		}
 		entry, ok := byKey[sk]
 		if !ok {
+			if len(byKey) >= maxShardIndexSamples {
+				return nil, fmt.Errorf(
+					"shard %s exceeds %d samples",
+					key, maxShardIndexSamples,
+				)
+			}
 			episodeID, frameIdx, _ := parseSampleKey(sk)
 			entry = &model.IndexSample{
 				Key:       sk,
@@ -1317,7 +1486,7 @@ func (s *S3Service) buildShardIndexUncached(ctx context.Context, dataset, versio
 				return nil, fmt.Errorf("read %s from %s: %w", hdr.Name, key, err)
 			}
 			if err := applyPackedMeta(
-				entry, body, requiresPublicationManifest(version),
+				entry, body, requiresPublicationManifest(resolvedVersion),
 			); err != nil {
 				return nil, fmt.Errorf(
 					"decode %s from %s: %w", hdr.Name, key, err,
@@ -1329,22 +1498,23 @@ func (s *S3Service) buildShardIndexUncached(ctx context.Context, dataset, versio
 			if err != nil {
 				return nil, fmt.Errorf("read %s from %s: %w", hdr.Name, key, err)
 			}
-			floats := decodeFloat32LE(body)
-			// EgoNow = last history row (row 63 of 64x4): floats[252:256].
-			if len(floats) >= egoHistoryFloats {
-				entry.EgoNow = floats[egoHistoryFloats-egoNowSignals : egoHistoryFloats]
-				// EgoHistory = the full 256-float past window (64 steps x
-				// [speed, accel, yaw_rate, curvature]); the BEV draws the
-				// trailing driven path from it, meaningful mid-clip without
-				// cross-shard stitching.
-				entry.EgoHistory = floats[:egoHistoryFloats]
+			floats, err := decodeEgoPayload(body)
+			if err != nil {
+				return nil, fmt.Errorf(
+					"decode %s from %s: %w", hdr.Name, key, err,
+				)
 			}
+			// EgoNow = last history row (row 63 of 64x4): floats[252:256].
+			entry.EgoNow = floats[egoHistoryFloats-egoNowSignals : egoHistoryFloats]
+			// EgoHistory = the full 256-float past window (64 steps x
+			// [speed, accel, yaw_rate, curvature]); the BEV draws the
+			// trailing driven path from it, meaningful mid-clip without
+			// cross-shard stitching.
+			entry.EgoHistory = floats[:egoHistoryFloats]
 			// EgoFuture = the 128-float future plan (64 steps x [accel,
 			// curvature]); the BEV renders this directly instead of chaining
 			// the per-frame ego_now of subsequent samples.
-			if len(floats) >= egoTotalFloats {
-				entry.EgoFuture = floats[egoHistoryFloats:egoTotalFloats]
-			}
+			entry.EgoFuture = floats[egoHistoryFloats:]
 		case "pose.npy":
 			body, err := readMemberBytes(tr, hdr.Size)
 			if err != nil {
@@ -1361,7 +1531,7 @@ func (s *S3Service) buildShardIndexUncached(ctx context.Context, dataset, versio
 	samples := make([]model.IndexSample, 0, len(order))
 	for _, sk := range order {
 		e := byKey[sk]
-		if requiresPublicationManifest(version) && !metaSeen[sk] {
+		if requiresPublicationManifest(resolvedVersion) && !metaSeen[sk] {
 			return nil, fmt.Errorf(
 				"sample %q in %s has no meta.json", sk, key,
 			)
@@ -1382,7 +1552,7 @@ func (s *S3Service) buildShardIndexUncached(ctx context.Context, dataset, versio
 	}
 	idx := &model.ShardIndex{
 		Fps:     indexFps,
-		Version: version,
+		Version: resolvedVersion,
 		Shard:   shard,
 		Samples: samples,
 	}
@@ -1517,6 +1687,26 @@ func decodeFloat32LE(b []byte) []float32 {
 	return out
 }
 
+func decodeEgoPayload(b []byte) ([]float32, error) {
+	if len(b) != egoPayloadBytes {
+		return nil, fmt.Errorf(
+			"ego payload must be %d bytes, got %d",
+			egoPayloadBytes,
+			len(b),
+		)
+	}
+	floats := decodeFloat32LE(b)
+	for i, value := range floats {
+		if !isFinite(float64(value)) {
+			return nil, fmt.Errorf(
+				"ego payload contains non-finite float at index %d",
+				i,
+			)
+		}
+	}
+	return floats, nil
+}
+
 // parseSampleKey extracts the episode id and frame index from a WebDataset
 // sample key. Handles current content-addressed ids and historical conventions:
 //   - "l2d-v1-e000012-f000064" -> ("12", 64)
@@ -1610,59 +1800,37 @@ func memberSuffixOf(name string) string {
 	return ""
 }
 
-// ReasoningStats counts embedded labels in each dataset's newest immutable
-// shard version, grouped by provenance carried in reasoning.json.
+// ReasoningStats reads materialized discovery inventories only. Interactive
+// requests never scan reasoning.json bodies.
 func (s *S3Service) ReasoningStats(ctx context.Context) ([]model.ReasoningStatsEntry, int, error) {
-	counts := map[[5]string]int{}
-	order := [][5]string{}
-
+	entries := make([]model.ReasoningStatsEntry, 0)
 	total := 0
+	foundInventory := false
 	for _, dataset := range knownDatasets {
-		locations, version, err := s.reasoningMemberLocations(
-			ctx, dataset, "", "",
-		)
+		inventory, _, _, err := s.reasoningInventory(ctx, dataset, "")
 		if err != nil {
-			return nil, 0, fmt.Errorf(
-				"list embedded reasoning labels for %s: %w", dataset, err,
-			)
-		}
-		records, err := s.fetchEmbeddedReasoning(
-			ctx, dataset, version, locations,
-		)
-		if err != nil {
-			return nil, 0, err
-		}
-		for _, record := range records {
-			label := record.Label
-			teacher := reasoningTeacher(label)
-			if teacher == "" || label.PromptVersion == "" {
+			if errors.Is(err, ErrReasoningUnavailable) {
 				continue
 			}
-			k := [5]string{
-				dataset,
-				teacher,
-				label.TeacherProvider,
-				label.TeacherModel,
-				label.PromptVersion,
-			}
-			if _, seen := counts[k]; !seen {
-				order = append(order, k)
-			}
-			counts[k]++
-			total++
+			return nil, 0, fmt.Errorf(
+				"read reasoning inventory for %s: %w", dataset, err,
+			)
 		}
+		foundInventory = true
+		for _, partition := range inventory.PromptVersions {
+			entries = append(entries, model.ReasoningStatsEntry{
+				Dataset:         dataset,
+				Teacher:         partition.Teacher,
+				TeacherProvider: partition.TeacherProvider,
+				TeacherModel:    partition.TeacherModel,
+				PromptVersion:   partition.PromptVersion,
+				Count:           partition.Count,
+			})
+		}
+		total += inventory.Total
 	}
-
-	entries := make([]model.ReasoningStatsEntry, 0, len(order))
-	for _, k := range order {
-		entries = append(entries, model.ReasoningStatsEntry{
-			Dataset:         k[0],
-			Teacher:         k[1],
-			TeacherProvider: k[2],
-			TeacherModel:    k[3],
-			PromptVersion:   k[4],
-			Count:           counts[k],
-		})
+	if !foundInventory {
+		return nil, 0, ErrReasoningUnavailable
 	}
 	sort.Slice(entries, func(i, j int) bool {
 		a, b := entries[i], entries[j]
@@ -1680,86 +1848,28 @@ func (s *S3Service) ReasoningStats(ctx context.Context) ([]model.ReasoningStatsE
 	return entries, total, nil
 }
 
-// ReasoningPromptVersions lists embedded label provenance for a dataset's
-// newest published version.
+// ReasoningPromptVersions lists materialized provenance for a dataset's newest
+// published version.
 func (s *S3Service) ReasoningPromptVersions(ctx context.Context, dataset string) ([]model.ReasoningPromptVersion, error) {
 	return s.ReasoningPromptVersionsAtVersion(ctx, dataset, "")
 }
 
-// ReasoningPromptVersionsAtVersion lists embedded label provenance for one
-// immutable dataset version, sorted by (provider, model, prompt_version). An
-// empty version preserves the newest-version behavior for internal callers.
+// ReasoningPromptVersionsAtVersion lists the cache-only inventory for one
+// immutable dataset version. An empty version resolves to the newest
+// publication.
 func (s *S3Service) ReasoningPromptVersionsAtVersion(
 	ctx context.Context,
 	dataset, version string,
 ) ([]model.ReasoningPromptVersion, error) {
-	counts := map[[4]string]int{}
-	order := [][4]string{}
-
-	locations, version, err := s.reasoningMemberLocations(
-		ctx, dataset, version, "",
-	)
+	inventory, _, _, err := s.reasoningInventory(ctx, dataset, version)
 	if err != nil {
 		return nil, err
 	}
-	records, err := s.fetchEmbeddedReasoning(
-		ctx, dataset, version, locations,
+	entries := append(
+		[]model.ReasoningPromptVersion(nil),
+		inventory.PromptVersions...,
 	)
-	if err != nil {
-		return nil, err
-	}
-	for _, record := range records {
-		label := record.Label
-		teacher := reasoningTeacher(label)
-		if teacher == "" || label.PromptVersion == "" {
-			continue
-		}
-		k := [4]string{
-			teacher,
-			label.TeacherProvider,
-			label.TeacherModel,
-			label.PromptVersion,
-		}
-		if _, seen := counts[k]; !seen {
-			order = append(order, k)
-		}
-		counts[k]++
-	}
-
-	entries := make([]model.ReasoningPromptVersion, 0, len(order))
-	for _, k := range order {
-		entries = append(entries, model.ReasoningPromptVersion{
-			Teacher:         k[0],
-			TeacherProvider: k[1],
-			TeacherModel:    k[2],
-			PromptVersion:   k[3],
-			Count:           counts[k],
-		})
-	}
-	sort.Slice(entries, func(i, j int) bool {
-		if entries[i].TeacherProvider != entries[j].TeacherProvider {
-			return entries[i].TeacherProvider < entries[j].TeacherProvider
-		}
-		if entries[i].TeacherModel != entries[j].TeacherModel {
-			return entries[i].TeacherModel < entries[j].TeacherModel
-		}
-		return entries[i].PromptVersion < entries[j].PromptVersion
-	})
 	return entries, nil
-}
-
-// reasoningSampleIDs returns canonical sample_uid values carrying an embedded
-// reasoning.json member in the newest dataset version.
-func (s *S3Service) reasoningSampleIDs(ctx context.Context, dataset string) (map[string]struct{}, error) {
-	ids := map[string]struct{}{}
-	locations, _, err := s.reasoningMemberLocations(ctx, dataset, "", "")
-	if err != nil {
-		return nil, err
-	}
-	for _, location := range locations {
-		ids[location.SampleUID] = struct{}{}
-	}
-	return ids, nil
 }
 
 // GetReasoningLabel fetches the canonical embedded JSON label from the newest
@@ -1776,33 +1886,74 @@ func (s *S3Service) GetReasoningLabelAtVersion(
 	ctx context.Context,
 	dataset, version, sampleID, teacher, promptVersion string,
 ) ([]byte, string, error) {
-	locations, resolvedVersion, err := s.reasoningMemberLocations(
-		ctx, dataset, version, sampleID,
+	inventory, resolvedVersion, _, err := s.reasoningInventory(
+		ctx, dataset, version,
 	)
 	if err != nil {
 		return nil, "", err
+	}
+	lookup, err := s.store.GetReasoningSampleLookup(
+		ctx,
+		dataset,
+		resolvedVersion,
+		inventory.Generation,
+		sampleID,
+	)
+	if err != nil {
+		if isStoreNotFound(err) {
+			return nil, "", ErrNotFound
+		}
+		return nil, "", err
+	}
+	if lookup.SampleID != sampleID ||
+		lookup.Offset < 0 ||
+		lookup.Size <= 0 ||
+		lookup.Size > maxEmbeddedReasoningBytes {
+		return nil, "", fmt.Errorf(
+			"%w: invalid reasoning sample lookup",
+			ErrReasoningIntegrity,
+		)
 	}
 	records, err := s.fetchEmbeddedReasoning(
-		ctx, dataset, resolvedVersion, locations,
+		ctx,
+		dataset,
+		resolvedVersion,
+		[]reasoningMemberLocation{{
+			Shard:     lookup.Shard,
+			SampleUID: lookup.SampleID,
+			Range: model.MemberRange{
+				Offset: lookup.Offset,
+				Size:   lookup.Size,
+			},
+		}},
 	)
 	if err != nil {
-		return nil, "", err
-	}
-	for _, record := range records {
-		label := record.Label
-		if promptVersion != "" && label.PromptVersion != promptVersion {
-			continue
-		}
-		if !reasoningTeacherMatches(label, teacher) {
-			continue
-		}
-		source := fmt.Sprintf(
-			"%s/%s/%s/reasoning.json",
-			dataset, resolvedVersion, sampleID,
+		return nil, "", fmt.Errorf(
+			"%w: fetch embedded reasoning label: %v",
+			ErrReasoningIntegrity,
+			err,
 		)
-		return record.Body, source, nil
 	}
-	return nil, "", ErrNotFound
+	if len(records) != 1 {
+		return nil, "", fmt.Errorf(
+			"%w: reasoning lookup returned %d records",
+			ErrReasoningIntegrity,
+			len(records),
+		)
+	}
+	record := records[0]
+	if promptVersion != "" &&
+		record.Label.PromptVersion != promptVersion {
+		return nil, "", ErrNotFound
+	}
+	if !reasoningTeacherMatches(record.Label, teacher) {
+		return nil, "", ErrNotFound
+	}
+	source := fmt.Sprintf(
+		"%s/%s/%s/reasoning.json",
+		dataset, resolvedVersion, sampleID,
+	)
+	return record.Body, source, nil
 }
 
 func (s *S3Service) getObjectBytes(ctx context.Context, key string) ([]byte, error) {
@@ -1892,20 +2043,51 @@ func (s *S3Service) datasetSampleCount(ctx context.Context, dataset string) (int
 	return spg.Total * page.Total, nil
 }
 
-// CountReasoningLabels counts canonical embedded labels without fetching their
-// JSON bodies; shard indexes already carry HasReasoning and member ranges.
+// CountReasoningLabels reads only small publication manifests. It never warms
+// shard indexes or fetches reasoning.json bodies from an interactive request.
 func (s *S3Service) CountReasoningLabels(ctx context.Context) (int, error) {
 	total := 0
 	for _, dataset := range knownDatasets {
-		locations, _, err := s.reasoningMemberLocations(
-			ctx, dataset, "", "",
+		version, err := s.publishedVersion(ctx, dataset, "")
+		if err != nil {
+			return 0, fmt.Errorf(
+				"resolve reasoning publication for %s: %w", dataset, err,
+			)
+		}
+		if requiresPublicationManifest(version) {
+			manifest, err := s.loadPublicationManifest(
+				ctx, dataset, version,
+			)
+			if err != nil {
+				return 0, err
+			}
+			total += manifest.ReasoningLabelCount
+			continue
+		}
+		body, err := s.getObjectBytesFromBucket(
+			ctx,
+			s.bucket,
+			fmt.Sprintf(
+				"%s/%s/shards/manifest.json", dataset, version,
+			),
+			maxPublicationManifestBytes,
 		)
 		if err != nil {
 			return 0, fmt.Errorf(
-				"count embedded reasoning labels for %s: %w", dataset, err,
+				"read reasoning count for %s/%s: %w",
+				dataset, version, err,
 			)
 		}
-		total += len(locations)
+		var manifest struct {
+			ReasoningLabelCount int `json:"reasoning_label_count"`
+		}
+		if err := json.Unmarshal(body, &manifest); err != nil ||
+			manifest.ReasoningLabelCount < 0 {
+			return 0, fmt.Errorf(
+				"decode reasoning count for %s/%s", dataset, version,
+			)
+		}
+		total += manifest.ReasoningLabelCount
 	}
 	return total, nil
 }
