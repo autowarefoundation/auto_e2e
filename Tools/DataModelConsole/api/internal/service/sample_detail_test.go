@@ -39,6 +39,32 @@ func TestParseSampleKey(t *testing.T) {
 	}
 }
 
+func TestEpisodePathStem(t *testing.T) {
+	tests := []struct {
+		dataset string
+		episode string
+		want    string
+	}{
+		{"l2d", "0", "000000"},
+		{"l2d", "12", "000012"},
+		{"l2d", "000012", "000012"},
+		{"l2d", "named-episode", "named-episode"},
+		{"nvidia_av", "25cd4769", "25cd4769"},
+		{"kitscenes", "scene-0042", "scene-0042"},
+	}
+	for _, tt := range tests {
+		if got := episodePathStem(tt.dataset, tt.episode); got != tt.want {
+			t.Errorf(
+				"episodePathStem(%q, %q) = %q, want %q",
+				tt.dataset,
+				tt.episode,
+				got,
+				tt.want,
+			)
+		}
+	}
+}
+
 func TestApplyPackedMeta(t *testing.T) {
 	entry := model.IndexSample{TripFrame: -1}
 	applyPackedMeta(&entry, []byte(`{
