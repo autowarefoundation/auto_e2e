@@ -7,10 +7,10 @@ import (
 	"log/slog"
 	"net/http"
 	"strconv"
-	"strings"
 
 	"github.com/go-chi/chi/v5"
 
+	internalauth "github.com/autowarefoundation/auto_e2e/tools/datamodelconsole/api/internal/auth"
 	"github.com/autowarefoundation/auto_e2e/tools/datamodelconsole/api/internal/model"
 	"github.com/autowarefoundation/auto_e2e/tools/datamodelconsole/api/internal/service"
 )
@@ -23,8 +23,8 @@ type OverlayHandler struct {
 }
 
 // NewOverlayHandler builds the overlay/geo handler. Exact routes remain closed
-// unless deployment configuration and a trusted edge-injected role both allow
-// them.
+// unless deployment configuration and verified authentication middleware both
+// allow them.
 func NewOverlayHandler(
 	s3 *service.S3Service,
 	exactGeoEnabled bool,
@@ -43,8 +43,18 @@ func (h *OverlayHandler) Models(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	models, resolvedVersion, err := h.s3.ListOverlayModels(
-		r.Context(), dataset, version, shard,
+	limit, pageToken, ok := parseOverlayModelsPage(r)
+	if !ok {
+		writeError(
+			w,
+			http.StatusBadRequest,
+			model.CodeInvalidParam,
+			"invalid overlay model pagination",
+		)
+		return
+	}
+	models, resolvedVersion, nextPageToken, err := h.s3.ListOverlayModels(
+		r.Context(), dataset, version, shard, limit, pageToken,
 	)
 	if err != nil {
 		slog.Error("list overlay models", "dataset", dataset, "shard", shard, "error", err)
@@ -55,11 +65,30 @@ func (h *OverlayHandler) Models(w http.ResponseWriter, r *http.Request) {
 		models = []model.OverlayModel{}
 	}
 	writeJSON(w, http.StatusOK, model.OverlayModelsResponse{
-		Dataset: dataset,
-		Version: resolvedVersion,
-		Shard:   shard,
-		Models:  models,
+		Dataset:       dataset,
+		Version:       resolvedVersion,
+		Shard:         shard,
+		Models:        models,
+		NextPageToken: nextPageToken,
 	})
+}
+
+func parseOverlayModelsPage(r *http.Request) (int, string, bool) {
+	const maxPageSize = 100
+
+	limit := maxPageSize
+	if raw := r.URL.Query().Get("limit"); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil || parsed < 1 || parsed > maxPageSize {
+			return 0, "", false
+		}
+		limit = parsed
+	}
+	pageToken := r.URL.Query().Get("page_token")
+	if pageToken != "" && !validArtifactID(pageToken) {
+		return 0, "", false
+	}
+	return limit, pageToken, true
 }
 
 // Body handles GET /datasets/{name}/shards/{shard}/overlays/{model_id}.
@@ -89,7 +118,7 @@ func (h *OverlayHandler) Body(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/vnd.auto-e2e.overlay")
 	w.Header().Set("Content-Encoding", "gzip")
 	w.Header().Set("Content-Length", strconv.FormatInt(d.ByteSize, 10))
-	w.Header().Set("Cache-Control", "private, max-age=31536000, immutable")
+	setOverlayCacheControl(w, version)
 	w.Header().Set("ETag", fmt.Sprintf("%q", d.SHA256))
 	w.Header().Set("X-Overlay-Schema", d.OverlaySchema)
 	w.Header().Set("X-Overlay-SHA256", d.SHA256)
@@ -98,6 +127,14 @@ func (h *OverlayHandler) Body(w http.ResponseWriter, r *http.Request) {
 	if _, err := w.Write(body.Payload); err != nil {
 		slog.Warn("write overlay response", "model_id", modelID, "error", err)
 	}
+}
+
+func setOverlayCacheControl(w http.ResponseWriter, requestedVersion string) {
+	if requestedVersion == "" {
+		w.Header().Set("Cache-Control", "no-store")
+		return
+	}
+	w.Header().Set("Cache-Control", "private, max-age=31536000, immutable")
 }
 
 // Rig handles GET /datasets/{name}/rig-projection.
@@ -120,8 +157,16 @@ func (h *OverlayHandler) Rig(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadGateway, model.CodeS3Error, "invalid rig projection artifact")
 		return
 	}
-	w.Header().Set("Cache-Control", "private, max-age=31536000, immutable")
+	setRigCacheControl(w, version)
 	writeRawJSON(w, http.StatusOK, body)
+}
+
+func setRigCacheControl(w http.ResponseWriter, requestedVersion string) {
+	if requestedVersion == "" {
+		w.Header().Set("Cache-Control", "no-store")
+		return
+	}
+	w.Header().Set("Cache-Control", "private, max-age=31536000, immutable")
 }
 
 // GeoStats handles GET /datasets/{name}/geo-stats.
@@ -172,7 +217,7 @@ func (h *OverlayHandler) GeoHeatmap(w http.ResponseWriter, r *http.Request) {
 }
 
 // EpisodePath handles GET /datasets/{name}/geo/episodes/{episode}. Exact route
-// access is disabled by default and requires a trusted edge-injected role.
+// access is disabled by default and requires a verified request principal.
 func (h *OverlayHandler) EpisodePath(w http.ResponseWriter, r *http.Request) {
 	dataset, version, ok := h.datasetRequest(w, r)
 	if !ok {
@@ -236,15 +281,7 @@ func (h *OverlayHandler) exactGeoAuthorized(r *http.Request) bool {
 }
 
 func exactGeoAuthorized(r *http.Request, enabled bool, requiredRole string) bool {
-	if !enabled || requiredRole == "" {
-		return false
-	}
-	for _, role := range strings.Split(r.Header.Get("X-Console-Roles"), ",") {
-		if strings.TrimSpace(role) == requiredRole {
-			return true
-		}
-	}
-	return false
+	return enabled && internalauth.HasRole(r.Context(), requiredRole)
 }
 
 func validArtifactID(value string) bool {
