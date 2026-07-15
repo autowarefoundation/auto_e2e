@@ -240,6 +240,32 @@ def _put_immutable(
     return digest
 
 
+def _assert_compatible_or_absent(
+    s3,
+    *,
+    bucket: str,
+    key: str,
+    byte_size: int,
+    sha256: str,
+) -> None:
+    from botocore.exceptions import ClientError
+
+    try:
+        existing = s3.head_object(Bucket=bucket, Key=key)
+    except ClientError as exc:
+        if _is_not_found(exc):
+            return
+        raise
+    if (
+        int(existing["ContentLength"]) != byte_size
+        or existing.get("Metadata", {}).get("sha256") != sha256
+    ):
+        raise RuntimeError(
+            "immutable dataset manifest already exists with different content: "
+            f"s3://{bucket}/{key}"
+        )
+
+
 def _geo_inventory(s3, objects_by_relative: dict[str, dict]) -> dict | None:
     import json
     import math
@@ -632,15 +658,27 @@ def finalize_dataset_publication(
             "heatmap_sha256": sha256_bytes(heatmap_payload),
         }
 
-    # This is the publication gate. Readers must require this manifest before
-    # advertising the version; every body and auxiliary artifact exists first.
     manifest_payload = canonical_json_bytes(manifest, pretty=True)
     manifest_key = f"{prefix}/shards/manifest.json"
-    manifest_sha256 = _put_immutable(
+    manifest_sha256 = sha256_bytes(manifest_payload)
+    _assert_compatible_or_absent(
         s3,
         bucket=datasets_bucket,
         key=manifest_key,
-        payload=manifest_payload,
+        byte_size=len(manifest_payload),
+        sha256=manifest_sha256,
+    )
+    # A hidden write-once lock serializes concurrent finalizers without making
+    # the dataset visible. A retry with the same manifest is idempotent; a
+    # different partition set can never replace this immutable version.
+    _put_immutable(
+        s3,
+        bucket=datasets_bucket,
+        key=f"{prefix}/shards/.publication-lock.json",
+        payload=canonical_json_bytes({
+            "schema_version": PUBLICATION_SCHEMA,
+            "manifest_sha256": manifest_sha256,
+        }, pretty=True),
         content_type="application/json",
     )
 
@@ -660,6 +698,19 @@ def finalize_dataset_publication(
             "dynamodb", region_name=aws_region
         ).Table(dynamo_table)
         table.put_item(Item=item)
+
+    # This is the public gate and MUST remain the final write. Console readers
+    # require it before advertising v2.1+; all S3 bodies and Dynamo pointers
+    # already exist when the conditional put succeeds.
+    written_sha256 = _put_immutable(
+        s3,
+        bucket=datasets_bucket,
+        key=manifest_key,
+        payload=manifest_payload,
+        content_type="application/json",
+    )
+    if written_sha256 != manifest_sha256:
+        raise RuntimeError("manifest digest changed during publication")
 
     return DatasetPublication(
         manifest_key=manifest_key,
