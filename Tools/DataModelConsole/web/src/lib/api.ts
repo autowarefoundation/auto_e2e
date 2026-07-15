@@ -334,14 +334,14 @@ export function getReasoningLabel(
   dataset: string,
   sampleId: string,
   promptVersion?: string,
+  version?: string,
 ): Promise<ReasoningLabelRecord> {
-  // Pin the prompt_version so the player shows labels from ONE run, not an
-  // arbitrary partition when several prompt_versions exist for a sample.
-  const qs = promptVersion
-    ? `?prompt_version=${encodeURIComponent(promptVersion)}`
-    : "";
+  const query = new URLSearchParams();
+  if (promptVersion) query.set("prompt_version", promptVersion);
+  if (version) query.set("version", version);
+  const qs = query.toString();
   return apiFetch<ReasoningLabelRecord>(
-    `/api/v1/reasoning-labels/${encodeURIComponent(dataset)}/${encodeURIComponent(sampleId)}${qs}`,
+    `/api/v1/reasoning-labels/${encodeURIComponent(dataset)}/${encodeURIComponent(sampleId)}${qs ? `?${qs}` : ""}`,
   );
 }
 
