@@ -251,6 +251,7 @@ test("scene locator paginates through the complete shard publication", async ({
 test("reasoning label reads retain the selected dataset version", async ({
   page,
 }) => {
+  const teacher = "cHJvdmlkZXIAbW9kZWw";
   let labelRequest = "";
   await page.route("**/api/v1/**", (route) => {
     const url = new URL(route.request().url());
@@ -289,7 +290,7 @@ test("reasoning label reads retain the selected dataset version", async ({
   });
 
   await page.goto(
-    "/datasets/review/shards/train-000000.tar/samples/sample?version=v2.0&prompt_version=p1",
+    `/datasets/review/shards/train-000000.tar/samples/sample?version=v2.0&teacher=${teacher}&prompt_version=p1`,
   );
   await expect(page.getByText("sample", { exact: true }).first()).toBeVisible();
   await expect.poll(() => labelRequest).not.toBe("");
@@ -297,12 +298,16 @@ test("reasoning label reads retain the selected dataset version", async ({
   const query = new URL(labelRequest).searchParams;
   expect(query.get("prompt_version")).toBe("p1");
   expect(query.get("version")).toBe("v2.0");
+  expect(query.get("teacher")).toBe(teacher);
 });
 
 test("reasoning prompt discovery follows the selected dataset version", async ({
   page,
 }) => {
+  const teacherOld = "cHJvdmlkZXIAbW9kZWwtb2xk";
+  const teacherNew = "cHJvdmlkZXIAbW9kZWwtbmV3";
   const promptRequests: Array<string | null> = [];
+  const statsTeachers: Array<string | null> = [];
   await page.route("**/api/v1/**", (route) => {
     const url = new URL(route.request().url());
     if (url.pathname === "/api/v1/datasets") {
@@ -327,18 +332,32 @@ test("reasoning prompt discovery follows the selected dataset version", async ({
       promptRequests.push(selectedVersion);
       const prompt =
         selectedVersion === "v2.0" ? "prompt-old" : "prompt-new";
+      const teacher =
+        selectedVersion === "v2.0" ? teacherOld : teacherNew;
       return fulfillJSON(route, {
         dataset: "review",
         prompt_versions: [
-          { teacher: "teacher", prompt_version: prompt, count: 2 },
+          {
+            teacher,
+            teacher_provider: "provider",
+            teacher_model:
+              selectedVersion === "v2.0" ? "model-old" : "model-new",
+            prompt_version: prompt,
+            count: 2,
+          },
         ],
       });
     }
     if (url.pathname === "/api/v1/reasoning-labels/stats-detail") {
       const selectedVersion = url.searchParams.get("version") ?? "";
+      statsTeachers.push(url.searchParams.get("teacher"));
       return fulfillJSON(route, {
         dataset: "review",
         version: selectedVersion,
+        teacher: url.searchParams.get("teacher"),
+        teacher_provider: "provider",
+        teacher_model:
+          selectedVersion === "v2.0" ? "model-old" : "model-new",
         prompt_version: url.searchParams.get("prompt_version"),
         computed_at: "2026-07-15T00:00:00Z",
         cached: true,
@@ -354,12 +373,18 @@ test("reasoning prompt discovery follows the selected dataset version", async ({
   });
 
   await page.goto(
-    "/reasoning-labels?dataset=review&version=v2.0&prompt_version=prompt-old",
+    `/reasoning-labels?dataset=review&version=v2.0&teacher=${teacherOld}&prompt_version=prompt-old`,
   );
-  await expect(page.locator("#rl-prompt")).toHaveValue("prompt-old");
+  await expect(page.locator("#rl-prompt")).toHaveValue(
+    JSON.stringify([teacherOld, "prompt-old"]),
+  );
   expect(promptRequests).toContain("v2.0");
+  await expect.poll(() => statsTeachers).toContain(teacherOld);
 
   await page.locator("#rl-version").selectOption("v2.1");
-  await expect(page.locator("#rl-prompt")).toHaveValue("prompt-new");
+  await expect(page.locator("#rl-prompt")).toHaveValue(
+    JSON.stringify([teacherNew, "prompt-new"]),
+  );
   expect(promptRequests).toContain("v2.1");
+  await expect.poll(() => statsTeachers).toContain(teacherNew);
 });
