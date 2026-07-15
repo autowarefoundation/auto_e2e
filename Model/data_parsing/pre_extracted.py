@@ -396,6 +396,7 @@ def make_pre_extracted_loader(
     split: str = "all",
     val_fraction: float = 0.0,
     shuffle: int = 1000,
+    shuffle_seed: int | None = None,
     pin_memory: bool = False,
     prefetch_factor: int = 4,
     shard_files: Sequence[str | Path] | None = None,
@@ -418,6 +419,7 @@ def make_pre_extracted_loader(
         val_fraction: fraction of samples held out for ``val`` (0 disables the
             split → ``"all"`` behaviour regardless of ``split``).
         shuffle: Shuffle buffer size (0 to disable).
+        shuffle_seed: optional deterministic seed for the shuffle buffer.
         pin_memory: pin host buffers for faster H2D copy (set True on GPU).
         prefetch_factor: batches prefetched per worker (only used when
             num_workers>0); overlaps decode with the GPU step.
@@ -465,7 +467,7 @@ def make_pre_extracted_loader(
     if split != "all" and val_fraction > 0.0:
         dataset = dataset.select(keep)
     if shuffle > 0:
-        dataset = dataset.shuffle(shuffle)
+        dataset = dataset.shuffle(shuffle, seed=shuffle_seed)
     # Frame-pool accessor for deduped WM windows (#121 §3.4d): a sibling pool/ dir
     # next to the .tar shards, NOT part of `urls`, so split_by_worker never shards
     # it away — every worker reaches any frame_id by path. Path-based + lazily read,
@@ -623,6 +625,7 @@ def make_multi_dataset_loader(
     split: str = "all",
     val_fraction: float = 0.0,
     shuffle: int = 1000,
+    shuffle_seed: int | None = None,
     pin_memory: bool = False,
     prefetch_factor: int = 4,
     max_active_loaders: int | None = None,
@@ -664,14 +667,18 @@ def make_multi_dataset_loader(
             split=split,
             val_fraction=val_fraction,
             shuffle=shuffle,
+            shuffle_seed=(
+                None if shuffle_seed is None else shuffle_seed + index
+            ),
             pin_memory=pin_memory,
             prefetch_factor=prefetch_factor,
         )
-        for d in shard_dirs
+        for index, d in enumerate(shard_dirs)
     ]
     merged = MergedDatasetLoader(
         loader_factories=factories,
         max_active_loaders=active_limit,
     )
     merged.num_workers = num_workers
+    merged.shuffle_seed = shuffle_seed
     return merged
