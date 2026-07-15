@@ -315,8 +315,8 @@ func (s *S3Service) EpisodePath(ctx context.Context, dataset, version, episode s
 }
 
 // resolveVersion returns the newest published version for a dataset: the
-// lexicographically-greatest "vX.Y/" prefix under "<dataset>/" that contains a
-// shards/ folder with at least one .tar. Result is cached for versionTTL.
+// lexicographically-greatest "vX.Y/" prefix under "<dataset>/" that passes the
+// versionHasShards publication gate. Result is cached for versionTTL.
 // Falls back to fallbackVersion when nothing resolves (or S3 errors), so the
 // console still serves the historical path.
 func (s *S3Service) resolveVersion(ctx context.Context, dataset string) string {
@@ -339,7 +339,7 @@ func (s *S3Service) resolveVersion(ctx context.Context, dataset string) string {
 var nowFunc = time.Now
 
 // discoverNewestVersion lists "<dataset>/" version prefixes and returns the
-// newest that has a shards/*.tar. Uncached.
+// newest that has passed the shard publication gate. Uncached.
 func (s *S3Service) discoverNewestVersion(ctx context.Context, dataset string) string {
 	prefix := dataset + "/"
 	out, err := s.client.ListObjectsV2(ctx, &s3.ListObjectsV2Input{
@@ -371,7 +371,19 @@ func (s *S3Service) discoverNewestVersion(ctx context.Context, dataset string) s
 }
 
 // versionHasShards reports whether <dataset>/<version>/shards/ has a .tar.
+// Canonical v2.1+ publication writes manifest.json last, so those versions stay
+// invisible while partition copies are incomplete. Older, already-published
+// snapshots retain their historical tar-only discovery behavior.
 func (s *S3Service) versionHasShards(ctx context.Context, dataset, version string) bool {
+	if requiresPublicationManifest(version) {
+		_, err := s.client.HeadObject(ctx, &s3.HeadObjectInput{
+			Bucket: aws.String(s.bucket),
+			Key:    aws.String(shardsPrefix(dataset, version) + "manifest.json"),
+		})
+		if err != nil {
+			return false
+		}
+	}
 	out, err := s.client.ListObjectsV2(ctx, &s3.ListObjectsV2Input{
 		Bucket:  aws.String(s.bucket),
 		Prefix:  aws.String(fmt.Sprintf("%s/%s/shards/", dataset, version)),
@@ -386,6 +398,10 @@ func (s *S3Service) versionHasShards(ctx context.Context, dataset, version strin
 		}
 	}
 	return false
+}
+
+func requiresPublicationManifest(version string) bool {
+	return !versionLess(version, "v2.1")
 }
 
 // ValidVersion reports whether v is a well-formed version dir ("vN"/"vN.M").
