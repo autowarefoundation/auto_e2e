@@ -1,11 +1,12 @@
 "use client";
 
-import { Suspense, useCallback, useState } from "react";
-import { useSearchParams } from "next/navigation";
-import { Boxes } from "lucide-react";
+import { Suspense, useCallback, useEffect } from "react";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
+import { Boxes, ChevronDown, Loader2 } from "lucide-react";
 
 import { ErrorState } from "@/components/error-state";
 import { StatusBadge, mlflowStatusTone } from "@/components/status-badge";
+import { Button } from "@/components/ui/button";
 import {
   Card,
   CardContent,
@@ -22,8 +23,8 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { cn } from "@/lib/utils";
-import { useApi } from "@/hooks/use-api";
-import { listExperiments, listRuns } from "@/lib/api";
+import { useTokenPages } from "@/hooks/use-token-pages";
+import { listExperimentsPage, listRunsPage } from "@/lib/api";
 import {
   formatDuration,
   formatEpochMillis,
@@ -44,12 +45,23 @@ const METRIC_META: Record<
 };
 
 function RunsTable({ experimentId }: { experimentId: string }) {
-  const { data, error, loading, reload } = useApi(
-    () => listRuns(experimentId),
+  const {
+    items: runs,
+    error,
+    loading,
+    loadingMore,
+    hasMore,
+    loadMore,
+    reload,
+  } = useTokenPages(
+    (token) => listRunsPage(experimentId, token),
     [experimentId],
+    (run) => run.run_id,
   );
 
-  if (error) return <ErrorState error={error} onRetry={reload} service="MLflow" />;
+  if (error && runs.length === 0) {
+    return <ErrorState error={error} onRetry={reload} service="MLflow" />;
+  }
   if (loading) {
     return (
       <div className="space-y-2">
@@ -61,90 +73,161 @@ function RunsTable({ experimentId }: { experimentId: string }) {
   }
 
   return (
-    <Table>
-      <TableHeader>
-        <TableRow>
-          <TableHead>Run</TableHead>
-          <TableHead>Status</TableHead>
-          <TableHead>Started</TableHead>
-          <TableHead className="text-right">Duration</TableHead>
-          {METRIC_COLUMNS.map((m) => (
-            <TableHead
-              key={m}
-              className="text-right font-mono text-[11px]"
-              title={METRIC_META[m].title}
-              aria-label={METRIC_META[m].title}
-            >
-              {m}
-            </TableHead>
-          ))}
-        </TableRow>
-      </TableHeader>
-      <TableBody>
-        {(data ?? []).map((run) => (
-          <TableRow key={run.run_id}>
-            <TableCell>
-              <div className="flex flex-col">
-                <span className="text-xs">{run.run_name || run.run_id}</span>
-                <span className="font-mono text-[10px] text-slate-500">
-                  {run.run_id}
-                </span>
-              </div>
-            </TableCell>
-            <TableCell>
-              <StatusBadge
-                label={run.status}
-                tone={mlflowStatusTone(run.status)}
-              />
-            </TableCell>
-            <TableCell className="text-xs text-slate-400">
-              {formatEpochMillis(run.start_time)}
-            </TableCell>
-            <TableCell className="text-right font-mono text-xs">
-              {run.end_time > 0
-                ? formatDuration((run.end_time - run.start_time) / 1000)
-                : "-"}
-            </TableCell>
+    <div className="space-y-3">
+      <Table>
+        <TableHeader>
+          <TableRow>
+            <TableHead>Run</TableHead>
+            <TableHead>Status</TableHead>
+            <TableHead>Started</TableHead>
+            <TableHead className="text-right">Duration</TableHead>
             {METRIC_COLUMNS.map((m) => (
-              <TableCell key={m} className="text-right font-mono text-xs">
-                {METRIC_META[m].meters
-                  ? formatMeters(run.metrics?.[m])
-                  : formatMetric(run.metrics?.[m])}
-              </TableCell>
+              <TableHead
+                key={m}
+                className="text-right font-mono text-[11px]"
+                title={METRIC_META[m].title}
+                aria-label={METRIC_META[m].title}
+              >
+                {m}
+              </TableHead>
             ))}
           </TableRow>
-        ))}
-        {(data ?? []).length === 0 && (
-          <TableRow>
-            <TableCell
-              colSpan={4 + METRIC_COLUMNS.length}
-              className="text-center text-sm text-slate-500"
-            >
-              No runs found
-            </TableCell>
-          </TableRow>
-        )}
-      </TableBody>
-    </Table>
+        </TableHeader>
+        <TableBody>
+          {runs.map((run) => (
+            <TableRow key={run.run_id}>
+              <TableCell>
+                <div className="flex flex-col">
+                  <span className="text-xs">{run.run_name || run.run_id}</span>
+                  <span className="font-mono text-[10px] text-slate-500">
+                    {run.run_id}
+                  </span>
+                </div>
+              </TableCell>
+              <TableCell>
+                <StatusBadge
+                  label={run.status}
+                  tone={mlflowStatusTone(run.status)}
+                />
+              </TableCell>
+              <TableCell className="text-xs text-slate-400">
+                {formatEpochMillis(run.start_time)}
+              </TableCell>
+              <TableCell className="text-right font-mono text-xs">
+                {run.end_time > 0
+                  ? formatDuration((run.end_time - run.start_time) / 1000)
+                  : "-"}
+              </TableCell>
+              {METRIC_COLUMNS.map((m) => (
+                <TableCell key={m} className="text-right font-mono text-xs">
+                  {METRIC_META[m].meters
+                    ? formatMeters(run.metrics?.[m])
+                    : formatMetric(run.metrics?.[m])}
+                </TableCell>
+              ))}
+            </TableRow>
+          ))}
+          {runs.length === 0 && (
+            <TableRow>
+              <TableCell
+                colSpan={4 + METRIC_COLUMNS.length}
+                className="text-center text-sm text-slate-500"
+              >
+                No runs found
+              </TableCell>
+            </TableRow>
+          )}
+        </TableBody>
+      </Table>
+      {error && (
+        <ErrorState
+          error={error}
+          onRetry={hasMore ? loadMore : reload}
+          service="MLflow"
+        />
+      )}
+      {hasMore && (
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          onClick={loadMore}
+          disabled={loadingMore}
+        >
+          {loadingMore ? (
+            <Loader2 className="size-3.5 animate-spin" />
+          ) : (
+            <ChevronDown className="size-3.5" />
+          )}
+          Load more runs
+        </Button>
+      )}
+    </div>
   );
 }
 
 function ModelsPageInner() {
-  const { data, error, loading, reload } = useApi(listExperiments);
-  const searchParams = useSearchParams();
-  const [selected, setSelected] = useState<string | null>(
-    () => searchParams.get("experiment"),
+  const {
+    items: data,
+    error,
+    loading,
+    loadingMore,
+    hasMore,
+    loadMore,
+    reload,
+  } = useTokenPages(
+    (token) => listExperimentsPage(token),
+    [],
+    (experiment) => experiment.experiment_id,
   );
+  const router = useRouter();
+  const pathname = usePathname();
+  const searchParams = useSearchParams();
+  const urlExperiment = searchParams.get("experiment") ?? "";
+  const selected =
+    data.find((exp) => exp.experiment_id === urlExperiment)
+      ?.experiment_id ?? null;
+  const defaultExperiment = data[0]?.experiment_id ?? null;
 
-  // Mirror the selected experiment into ?experiment=<id> so the selection
-  // survives reload/back and is shareable. history.replaceState avoids a Next
-  // route transition (no data refetch on select).
-  const selectExperiment = useCallback((id: string) => {
-    setSelected(id);
-    const q = new URLSearchParams(window.location.search);
-    q.set("experiment", id);
-    window.history.replaceState(null, "", `/models?${q.toString()}`);
-  }, []);
+  // Resolve shared links to experiments beyond the first page before deciding
+  // that the URL selection is invalid.
+  useEffect(() => {
+    if (loading || error || selected || !defaultExperiment) return;
+
+    if (urlExperiment && hasMore) {
+      if (!loadingMore) loadMore();
+      return;
+    }
+
+    const q = new URLSearchParams(searchParams.toString());
+    q.set("experiment", defaultExperiment);
+    router.replace(`${pathname}?${q.toString()}`, { scroll: false });
+  }, [
+    defaultExperiment,
+    error,
+    hasMore,
+    loadMore,
+    loading,
+    loadingMore,
+    pathname,
+    router,
+    searchParams,
+    selected,
+    urlExperiment,
+  ]);
+
+  // User choices are navigation: push each one so Back and Forward restore the
+  // URL-derived selection and trigger the matching runs request.
+  const selectExperiment = useCallback(
+    (id: string) => {
+      if (id === selected) return;
+
+      const q = new URLSearchParams(searchParams.toString());
+      q.set("experiment", id);
+      router.push(`${pathname}?${q.toString()}`, { scroll: false });
+    },
+    [pathname, router, searchParams, selected],
+  );
 
   return (
     <div className="space-y-6">
@@ -155,7 +238,7 @@ function ModelsPageInner() {
         </p>
       </div>
 
-      {error ? (
+      {error && data.length === 0 ? (
         <ErrorState error={error} onRetry={reload} service="MLflow" />
       ) : loading ? (
         <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
@@ -165,11 +248,12 @@ function ModelsPageInner() {
         </div>
       ) : (
         <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-          {(data ?? []).map((exp) => (
+          {data.map((exp) => (
             <button
               key={exp.experiment_id}
               type="button"
               onClick={() => selectExperiment(exp.experiment_id)}
+              aria-pressed={selected === exp.experiment_id}
               className="text-left"
             >
               <Card
@@ -196,10 +280,33 @@ function ModelsPageInner() {
               </Card>
             </button>
           ))}
-          {(data ?? []).length === 0 && (
+          {data.length === 0 && (
             <p className="text-sm text-slate-500">No experiments found.</p>
           )}
         </div>
+      )}
+      {error && data.length > 0 && (
+        <ErrorState
+          error={error}
+          onRetry={hasMore ? loadMore : reload}
+          service="MLflow"
+        />
+      )}
+      {hasMore && (
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          onClick={loadMore}
+          disabled={loadingMore}
+        >
+          {loadingMore ? (
+            <Loader2 className="size-3.5 animate-spin" />
+          ) : (
+            <ChevronDown className="size-3.5" />
+          )}
+          Load more experiments
+        </Button>
       )}
 
       {selected && (
@@ -208,13 +315,13 @@ function ModelsPageInner() {
             <CardTitle className="text-sm">
               Runs —{" "}
               <span className="font-mono">
-                {data?.find((e) => e.experiment_id === selected)?.name ??
+                {data.find((e) => e.experiment_id === selected)?.name ??
                   selected}
               </span>
             </CardTitle>
           </CardHeader>
           <CardContent>
-            <RunsTable experimentId={selected} />
+            <RunsTable key={selected} experimentId={selected} />
           </CardContent>
         </Card>
       )}
