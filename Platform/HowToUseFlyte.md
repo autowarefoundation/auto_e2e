@@ -189,9 +189,12 @@ Flyte shows **execution status**; **MLflow** shows **metrics**. Use both.
 **You are**: a platform operator publishing an immutable dataset snapshot and
 precomputing one registered model's canonical trajectory overlays.
 
-**Workflow**: `wf_create_publish_and_precompute_overlays`
+**Workflows**:
 
-The DataModelConsole never invokes this workflow. Launch it through the
+- Smoke: `wf_create_publish_and_precompute_overlays`
+- Production after training: `wf_publish_full_run_overlays`
+
+The DataModelConsole never invokes these workflows. Launch them through the
 VPC-local CodeBuild project so Flyte registration and every task image use ECR
 digests rather than mutable tags.
 
@@ -265,22 +268,33 @@ Treat the smoke as successful only when the Flyte execution succeeds and the
 Console can read the published model overlay. A CodeBuild `SUCCEEDED` status
 only confirms that the remote execution was submitted.
 
-### Launch the full immutable publication
+### Publish a completed Full Run
 
-After reviewing smoke duration, GPU utilization, storage, and estimated cost:
+Wait for `wf_sharded_full_run` to reach `SUCCEEDED`, then pass that execution ID.
+Do not pass `MODEL_VERSION`: the production workflow resolves the exact MLflow
+model whose `ctx/train_execution_id` matches the Full Run.
 
 ```bash
+FULL_RUN_EXECUTION_ID=<SUCCEEDED_FLYTE_EXECUTION_ID>
 aws codebuild start-build \
   --project-name auto-e2e-platform-overlay-launch \
   --environment-variables-override \
-    "name=MODEL_VERSION,value=${MODEL_VERSION},type=PLAINTEXT" \
+    "name=FULL_RUN_EXECUTION_ID,value=${FULL_RUN_EXECUTION_ID},type=PLAINTEXT" \
     "name=IMAGE_TAG,value=${IMAGE_TAG},type=PLAINTEXT" \
-    "name=PUBLISHED_DATASET,value=kitscenes,type=PLAINTEXT" \
-    "name=EPISODES,value=0,type=PLAINTEXT"
+    "name=PUBLISHED_DATASET,value=kitscenes,type=PLAINTEXT"
 ```
 
-`EPISODES=0` is rejected unless `PUBLISHED_DATASET` is explicit. The production
-coordinate is `kitscenes/v2.1`.
+The launcher fails closed unless the execution is the successful
+`wf_sharded_full_run` for KITScenes `v2.1`, used `episodes=0`, generated reasoning
+labels, and trained with reasoning and world-model branches enabled. It reads the
+nested `wf_create_dataset_sharded` `List[FlyteDirectory]` output directly from
+Flyte Admin, so it does not ingest, relabel, or repack the corpus. Inside Flyte,
+the model resolver checks the source dataset/version and the Full Run execution
+ID again before publication.
+
+The production coordinate is `kitscenes/v2.1`. Publication copies the existing
+labeled shard artifacts, then canonical overlay inference uses the Full Run
+checkpoint, and the ready gate is written last.
 
 ### Retry and immutability rules
 
@@ -357,12 +371,13 @@ n1 data_processing(L2D)    n3 data_processing(NVIDIA) ← run in parallel
 
 | Goal | Workflow | Key inputs |
 |------|----------|------------|
-| Full run, one command | `wf_full_pipeline` | `dataset`, hyperparams |
+| Sharded Full Run, one command | `wf_sharded_full_run` | `dataset`, fan-out, training hyperparams |
 | Download raw data only | `wf_data_ingest` | `dataset`, `episodes` |
 | Preprocess raw → shards | `wf_data_processing` | `raw_data` URI, optional `reasoning_labels` |
 | Generate reasoning labels (teacher, cached) | `wf_generate_reasoning_labels` | `raw_data` URI, `teacher` |
 | Raw → ready-to-train dataset | `wf_create_dataset` | `dataset`, `episodes`, `reasoning_teacher` |
-| Sharded build → v2.1 publish → overlays | `wf_create_publish_and_precompute_overlays` | ops-only CodeBuild launch, `model_version` |
+| Smoke build → v2.1 publish → overlays | `wf_create_publish_and_precompute_overlays` | ops-only CodeBuild launch, `model_version` |
+| Completed Full Run → v2.1 publish → overlays | `wf_publish_full_run_overlays` | extracted `shards`, `full_run_execution_id` |
 | Publish existing shards → overlays | `wf_publish_and_precompute_overlays` | `shards`, immutable model/runtime identities |
 | Publish existing shards only | `wf_publish_dataset_snapshot` | `shards`, `published_dataset`, `dataset_version` |
 | Precompute an already identified snapshot | `wf_precompute_overlays` | `shards`, model version, dataset manifest digest |
