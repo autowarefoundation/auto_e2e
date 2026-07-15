@@ -34,6 +34,7 @@ import {
   OverlaySelectionBar,
   type OverlayLoadStatus,
 } from "@/components/player/overlay-selection-bar";
+import { SceneMap } from "@/components/player/scene-map";
 import { TimelineScrubber } from "@/components/player/timeline-scrubber";
 import { TrajectoryBEV } from "@/components/player/trajectory-bev";
 import { ReasoningTimeline } from "@/components/reasoning-timeline";
@@ -707,6 +708,15 @@ export function EpisodePlayer({
           </div>
         </div>
       </div>
+
+      <SceneMap
+        dataset={dataset}
+        version={version}
+        sample={sample}
+        predictionTrajectories={predictionFan}
+        medianPrediction={medianPrediction}
+        curvatureSign={curvatureSign}
+      />
 
       <TimelineScrubber
         samples={index.samples}
