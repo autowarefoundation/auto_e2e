@@ -241,10 +241,8 @@ func indexWithoutExactGeo(index *model.ShardIndex) *model.ShardIndex {
 // GetImage handles
 // GET /api/v1/datasets/{name}/shards/{shard}/samples/{key}/image/{cam}.
 //
-// Phase 1: streams the tar from S3, locates the member {key}.{cam}.jpg and
-// pipes its bytes back with image/jpeg + Cache-Control. Streaming exactly one
-// tar member is the least-privilege behavior (no whole-shard URL leaks to the
-// client).
+// The caller must provide the member's exact tar byte range from the validated
+// shard index. The endpoint never falls back to scanning the full shard.
 func (h *DatasetsHandler) GetImage(w http.ResponseWriter, r *http.Request) {
 	name := chi.URLParam(r, "name")
 	shard := chi.URLParam(r, "shard")
@@ -266,29 +264,25 @@ func (h *DatasetsHandler) GetImage(w http.ResponseWriter, r *http.Request) {
 	}
 
 	member := fmt.Sprintf("%s.%s.jpg", key, cam)
-	// Fast path: the client already has the member's tar byte range from the
-	// shard index, so a bounded range GET avoids re-scanning the whole shard.
-	// Fall back to the linear scan when the params are absent or unparseable.
-	var reader io.Reader
-	var closer io.Closer
-	var size int64
-	var err error
-	if off, sz, rok := parseRange(r); rok {
-		index, indexErr := h.s3.BuildShardIndex(r.Context(), name, version, shard)
-		if indexErr != nil {
-			slog.Error("validate image range", "dataset", name, "shard", shard, "error", indexErr)
-			writeError(w, http.StatusBadGateway, model.CodeS3Error, "failed to validate image range")
-			return
-		}
-		expected, found := cameraMemberRange(index, key, cam+".jpg")
-		if !found || expected.Offset != off || expected.Size != sz {
-			writeError(w, http.StatusBadRequest, model.CodeInvalidParam, "range does not match requested camera member")
-			return
-		}
-		reader, closer, size, err = h.s3.StreamTarMemberRange(r.Context(), name, version, shard, off, sz)
-	} else {
-		reader, closer, size, err = h.s3.StreamTarMember(r.Context(), name, version, shard, member)
+	off, sz, rok := parseRange(r)
+	if !rok {
+		writeError(w, http.StatusBadRequest, model.CodeInvalidParam, "valid offset and size are required")
+		return
 	}
+	index, indexErr := h.s3.BuildShardIndex(r.Context(), name, version, shard)
+	if indexErr != nil {
+		slog.Error("validate image range", "dataset", name, "shard", shard, "error", indexErr)
+		writeError(w, http.StatusBadGateway, model.CodeS3Error, "failed to validate image range")
+		return
+	}
+	expected, found := cameraMemberRange(index, key, cam+".jpg")
+	if !found || expected.Offset != off || expected.Size != sz {
+		writeError(w, http.StatusBadRequest, model.CodeInvalidParam, "range does not match requested camera member")
+		return
+	}
+	reader, closer, size, err := h.s3.StreamTarMemberRange(
+		r.Context(), name, version, shard, off, sz,
+	)
 	if err != nil {
 		if errors.Is(err, service.ErrNotFound) {
 			writeError(w, http.StatusNotFound, model.CodeNotFound, "image not found: "+member)
