@@ -7,10 +7,9 @@ This is the sole Terraform root that owns the production Console resources.
 `Tools/DataModelConsole/deploy/terraform` is retired and can only detach legacy
 local state without destroying AWS resources.
 
-Scope for the current goal: get the **current dashboard reachable, CloudFront-only**.
-No Cognito / Lambda@Edge / ACM — CloudFront serves HTTPS with its default
-`*.cloudfront.net` cert; the internal ALB is plain HTTP. The trajectory-overlay
-work is deferred.
+CloudFront serves HTTPS with its default `*.cloudfront.net` cert; the internal
+ALB is plain HTTP. Exact geography remains disabled until authenticated role
+propagation is implemented.
 
 ## What it creates
 
@@ -21,6 +20,8 @@ work is deferred.
   from public edge IPs.
 - `aws_iam_role.console_api` + Pod Identity association — S3 read-only
   (datasets + artifacts) and DynamoDB (`auto-e2e-console` + `gsi1`) for the API.
+  The explicit post-publication reasoning-materialization Job reuses this
+  identity; it does not require a second role or a Terraform change.
 
 ## Why two phases
 
