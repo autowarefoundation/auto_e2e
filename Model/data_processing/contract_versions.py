@@ -16,6 +16,7 @@ ever enters a cached task's input signature.
 | PARSER_VERSION       | sample ENUMERATION or per-sample fields change         | ingest+label+pack|
 | SHARD_SCHEMA_VERSION | the packed tar member layout changes                   | pack            |
 | GEOMETRY_VERSION     | the calibration/projection encoding changes            | pack            |
+| REASONING_LABEL_POLICY_VERSION | the reasoning sample selection changes     | label + pack    |
 
 Source revision (HF commit), teacher model revision, and the prompt body hash are
 NOT constants here — they are resolved at run time (from HF / teacher config /
@@ -41,11 +42,18 @@ PARSER_VERSION = "v2"
 # members. Loader now requires pool/ when window_index.json is present.
 # v3: added pose.npy (absolute lat/lon/heading/timestamp) and gps.npy (current +
 # 64 future lat/lon points) for datasets with geospatial source fields.
-SHARD_SCHEMA_VERSION = "v3"
+# v4: emits dataset-level geo paths, sample-pose parquet, and privacy-filtered
+# heatmaps for every GPS-capable parser, including KITScenes partitions.
+SHARD_SCHEMA_VERSION = "v4"
 
 # Calibration / projection spec encoding written into calib.json. Bump if the
 # geometry serialization changes.
 GEOMETRY_VERSION = "v1"
+
+# Selection policy for the sparse reasoning-label subset. v2 adds the first
+# valid sample of every split group to the regular frame-index grid so even a
+# short scene receives supervision.
+REASONING_LABEL_POLICY_VERSION = "v2"
 
 
 def contract_versions() -> dict:
@@ -56,4 +64,5 @@ def contract_versions() -> dict:
         "parser_version": PARSER_VERSION,
         "shard_schema_version": SHARD_SCHEMA_VERSION,
         "geometry_version": GEOMETRY_VERSION,
+        "reasoning_label_policy_version": REASONING_LABEL_POLICY_VERSION,
     }

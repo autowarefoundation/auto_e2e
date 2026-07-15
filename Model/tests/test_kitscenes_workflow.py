@@ -14,6 +14,20 @@ from Platform.pipelines import workflows
 from data_parsing.kit_scenes.source import InventoryResolution, SceneArchive
 
 
+class _ReasoningSelectionDataset:
+    def __init__(self, samples):
+        self.samples = samples
+
+    def __len__(self):
+        return len(self.samples)
+
+    def frame_index(self, sample_index):
+        return self.samples[sample_index][1]
+
+    def split_group_uid(self, sample_index):
+        return self.samples[sample_index][0]
+
+
 def test_inventory_preflight_emits_one_scene_per_partition(monkeypatch):
     scene_ids = ("scene-a", "scene-c")
     inventory = InventoryResolution(
@@ -77,3 +91,41 @@ def test_ingest_map_binds_scalars_and_maps_only_group_ids():
         "episodes",
         "group_ids",
     }
+
+
+def test_reasoning_selection_bootstraps_short_scenes():
+    dataset = _ReasoningSelectionDataset([
+        ("scene-a", 64),
+        ("scene-a", 65),
+        ("scene-b", 64),
+        ("scene-b", 70),
+        ("scene-b", 71),
+    ])
+
+    assert workflows._reasoning_label_indices(dataset, 10) == [0, 2, 3]
+    assert workflows._reasoning_label_indices(dataset, 1) == list(range(5))
+
+
+def test_shard_selection_skips_empty_partitions(tmp_path):
+    class _Shard:
+        def __init__(self, path):
+            self.path = path
+
+        def download(self):
+            return str(self.path)
+
+    shards = []
+    for name, total_samples in (("empty", 0), ("nonempty", 2)):
+        shard_dir = tmp_path / name
+        shard_dir.mkdir()
+        (shard_dir / "manifest.json").write_text(
+            '{"dataset":"KIT-MRT/KITScenes-Multimodal",'
+            f'"total_samples":{total_samples}}}'
+        )
+        shards.append(_Shard(shard_dir))
+
+    selected = workflows._select_shard_dirs(
+        shards, workflows.Dataset.KITSCENES
+    )
+
+    assert selected == [str(tmp_path / "nonempty")]

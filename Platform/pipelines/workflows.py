@@ -16,6 +16,8 @@ from flytekit.types.file import FlyteFile
 from flytekit.types.directory import FlyteDirectory
 from typing import Annotated, NamedTuple, List, Optional
 
+from Platform.pipelines.dataset_publication import DatasetPublication
+
 import os as _os
 
 ECR_PREFIX = _os.environ.get("ECR_PREFIX", "381491877296.dkr.ecr.us-west-2.amazonaws.com")
@@ -48,15 +50,18 @@ try:
     from data_processing.contract_versions import (
         UID_SCHEMA_VERSION as _UID_V, PARSER_VERSION as _PARSER_V,
         SHARD_SCHEMA_VERSION as _SHARD_V, GEOMETRY_VERSION as _GEOM_V,
+        REASONING_LABEL_POLICY_VERSION as _LABEL_POLICY_V,
     )
 except Exception:  # pragma: no cover - registration-time fallback only
     _UID_V = _PARSER_V = _SHARD_V = _GEOM_V = "v1"
+    _LABEL_POLICY_V = "v1"
 
 # Each stage's cache_version folds in ONLY the contracts that actually determine
 # its output (§3.4a): ingest depends on the parser enumeration; labels also on
-# the uid format (the JOIN key); pack on the shard + geometry encoding.
+# the uid format (the JOIN key) and sparse-selection policy; pack on the shard
+# and geometry encoding.
 INGEST_CACHE_VERSION = f"ingest-{_PARSER_V}"
-LABEL_CACHE_VERSION = f"label-{_PARSER_V}-{_UID_V}"
+LABEL_CACHE_VERSION = f"label-{_PARSER_V}-{_UID_V}-{_LABEL_POLICY_V}"
 PACK_CACHE_VERSION = f"pack-{_PARSER_V}-{_UID_V}-{_SHARD_V}-{_GEOM_V}"
 
 
@@ -148,15 +153,22 @@ def _select_shard_dir(shards, dataset) -> str:
     fallback = None
     for sh in shards:
         d = sh.download()
-        fallback = fallback or d
         mpath = os.path.join(str(d), "manifest.json")
         if os.path.exists(mpath):
             try:
-                if json.load(open(mpath)).get("dataset") == target:
+                manifest = json.load(open(mpath))
+                if int(manifest.get("total_samples", 0)) <= 0:
+                    continue
+                fallback = fallback or d
+                if manifest.get("dataset") == target:
                     print(f"Selected shards for dataset={target}: {d}")
                     return d
             except Exception:
                 pass
+    if fallback is None:
+        raise RuntimeError(
+            f"_select_shard_dir: no non-empty shard dir matched dataset={target}"
+        )
     print(f"WARN: no shards matched dataset={target}; using first ({fallback})")
     return fallback
 
@@ -174,12 +186,18 @@ def _select_shard_dirs(shards, dataset) -> List[str]:
     import json
     target = dataset.value
     matched: List[str] = []
+    skipped_empty = 0
     for sh in shards:
         d = sh.download()
         mpath = os.path.join(str(d), "manifest.json")
         if os.path.exists(mpath):
             try:
-                if json.load(open(mpath)).get("dataset") == target:
+                manifest = json.load(open(mpath))
+                if manifest.get("dataset") != target:
+                    continue
+                if int(manifest.get("total_samples", 0)) <= 0:
+                    skipped_empty += 1
+                else:
                     matched.append(str(d))
             except Exception:
                 pass
@@ -187,7 +205,10 @@ def _select_shard_dirs(shards, dataset) -> List[str]:
         raise RuntimeError(
             f"_select_shard_dirs: no shard dirs matched dataset={target} "
             f"(had {len(shards)} shards)")
-    print(f"Selected {len(matched)} shard dirs for dataset={target}")
+    print(
+        f"Selected {len(matched)} non-empty shard dirs for dataset={target}; "
+        f"skipped_empty={skipped_empty}"
+    )
     return matched
 
 
@@ -209,6 +230,33 @@ def _loader_projection(loader, device):
     if projection is not None:
         projection = projection.to(device)
     return projection, geometry_type
+
+
+def _reasoning_label_indices(ds, label_stride: int) -> List[int]:
+    """Select a stable sparse label set with supervision in every split group.
+
+    The regular frame-index grid remains partition-independent. Its union with
+    each group's earliest valid sample covers short scenes whose entire valid
+    span falls between grid points. The extra sample costs at most one teacher
+    call per scene/episode and prevents a non-empty shard with zero supervision.
+    """
+    if label_stride <= 1:
+        return list(range(len(ds)))
+
+    selected: set[int] = set()
+    first_by_group: dict[str, tuple[int, int]] = {}
+    for sample_index in range(len(ds)):
+        frame_index = int(ds.frame_index(sample_index))
+        group_id = str(ds.split_group_uid(sample_index))
+        first = first_by_group.get(group_id)
+        candidate = (frame_index, sample_index)
+        if first is None or candidate < first:
+            first_by_group[group_id] = candidate
+        if frame_index % label_stride == 0:
+            selected.add(sample_index)
+
+    selected.update(sample_index for _, sample_index in first_by_group.values())
+    return sorted(selected)
 
 
 # ============================================================
@@ -864,7 +912,7 @@ def data_processing(
     # parquet; publication can merge the partition summaries without scanning
     # the tar files or DynamoDB.
     geo_summary = None
-    if ds is not None and dataset == Dataset.L2D:
+    if ds is not None and dataset in (Dataset.L2D, Dataset.KITSCENES):
         from data_processing.geospatial import write_geo_artifacts
         geo_summary = write_geo_artifacts(
             ds,
@@ -900,6 +948,7 @@ def data_processing(
     shard_idx = 0
     shard_names: list[str] = []
     sample_count = 0
+    reasoning_label_count = 0
     samples_per_shard = 1000
     current_tar = None
 
@@ -1091,6 +1140,7 @@ def data_processing(
                 if record is not None:
                     _add_member(uid, "reasoning.json",
                                 json.dumps(_record_to_json(record)).encode())
+                    reasoning_label_count += 1
             sample_count += 1
 
     else:
@@ -1121,6 +1171,7 @@ def data_processing(
                     if record is not None:
                         _add_member(sample_key, "reasoning.json",
                                     json.dumps(_record_to_json(record)).encode())
+                        reasoning_label_count += 1
                 sample_count += 1
 
     if current_tar:
@@ -1147,6 +1198,8 @@ def data_processing(
                 "has_map": bool(sample_count) and has_map,
                 # World-Model windows present when packed (enables JEPA training).
                 "has_world_model": bool(sample_count) and has_wm,
+                "has_reasoning_labels": reasoning_label_count > 0,
+                "reasoning_label_count": reasoning_label_count,
                 "has_gps": bool(sample_count) and dataset in (
                     Dataset.L2D, Dataset.KITSCENES,
                 ),
@@ -1209,9 +1262,10 @@ def data_processing(
     # re-run of an unchanged partition is a no-op (#121 §3.4a) — this is now the
     # SOLE re-label protection (the per-sample S3 cache is gone, §3.4): an unchanged
     # partition never re-bills Cosmos, a changed prompt_version / teacher correctly
-    # misses. LABEL_CACHE_VERSION folds in the uid format (the JOIN key). EXCLUDE
-    # the tuning knob from the key (§3.4c): label_workers is pure parallelism
-    # (output-invariant), so a tweak must not force a corpus re-label.
+    # misses. LABEL_CACHE_VERSION folds in the uid format (the JOIN key) and
+    # sparse-selection policy. EXCLUDE the tuning knob from the key (§3.4c):
+    # label_workers is pure parallelism (output-invariant), so a tweak must not
+    # force a corpus re-label.
     cache=True,
     cache_version=LABEL_CACHE_VERSION,
     cache_ignore_input_vars=("label_workers",),
@@ -1231,13 +1285,13 @@ def generate_reasoning_labels(
     teacher: str = "openai_compatible",
     prompt_version: str = "action_relevant_reasoning_v3_temporal_front256",
     group_ids: Optional[List[str]] = None,
-    # Reasoning is a 1 Hz concern (horizons 0/1/2/3/4 s), so label only the 1 Hz
-    # subset (label iff frame_index % label_stride == 0) even though pack/train
-    # enumerate all 10 Hz samples (#121 §3.4d). L2D source is 10 Hz → stride 10 =
-    # 1 Hz labels, ~10x fewer Cosmos calls. The 9/10 unlabeled 10 Hz samples pack
-    # WITHOUT reasoning.json and decode as fully-masked reasoning targets (they
-    # still train reactive + JEPA). The subset is a STABLE function of frame_index,
-    # so it is partition-independent. stride=1 → label every sample (legacy).
+    # Reasoning is a 1 Hz concern (horizons 0/1/2/3/4 s), so label the stable
+    # frame_index % label_stride grid plus the first valid sample of every split
+    # group. The one-sample bootstrap covers short scenes that fall entirely
+    # between grid points while preserving partition independence. L2D and
+    # KITScenes are 10 Hz, so stride 10 remains approximately 1 Hz and cuts
+    # Cosmos calls by about 10x. Unlabeled samples decode as fully-masked targets.
+    # stride=1 labels every sample.
     label_stride: int = 10,
     # Process-parallel worker count. Front-clip mode decodes only 5 front frames
     # per sample, but at 20+ episodes 24 concurrent decoders + their lerobot
@@ -1352,15 +1406,7 @@ def generate_reasoning_labels(
             ds = L2DDataset(repo_id=dataset.value, episodes=ep_list,
                             reasoning_clip_only=True, root=raw_path)
         n_samples = len(ds)
-        # 1 Hz label subset (#121 §3.4d): label only samples whose episode/clip-local
-        # frame_index is a multiple of label_stride. A STABLE per-sample predicate, so
-        # the labeled uid set is partition-independent (any partition covering this
-        # frame labels it or not identically). stride<=1 → label everything.
-        if label_stride > 1:
-            label_indices = [si for si in range(n_samples)
-                             if ds.frame_index(si) % label_stride == 0]
-        else:
-            label_indices = list(range(n_samples))
+        label_indices = _reasoning_label_indices(ds, label_stride)
     except ValueError as e:
         if "No valid samples" not in str(e):
             raise
@@ -1425,7 +1471,7 @@ def generate_reasoning_labels(
         from data_processing.reasoning_label_generation import parallel_label
 
         workers = max(1, min(label_workers, len(label_indices)))
-        print(f"Labeling {len(label_indices)}/{n_samples} samples (1Hz subset, "
+        print(f"Labeling {len(label_indices)}/{n_samples} samples (sparse subset, "
               f"stride={label_stride}) with {workers} parallel PROCESSES "
               f"(teacher={teacher})...")
         ctx = mp.get_context("spawn")
@@ -1475,6 +1521,7 @@ def generate_reasoning_labels(
         json.dump({"dataset": dataset.value, "split": split, "teacher": teacher,
                    "source_revision": source_revision,
                    "prompt_version": prompt_version, "num_records": len(records),
+                   "label_policy_version": _LABEL_POLICY_V,
                    "computed": n_computed, "num_abstained": n_abstain,
                    "source": "offline teacher (generate_reasoning_labels); "
                              "records.jsonl artifact, Flyte task-cached per partition"}, f)
@@ -1598,14 +1645,26 @@ def train_il(
     # datasets, each carrying its projection — so L2D (6cam pseudo) and NVIDIA
     # (7cam f-theta) train together. The model is runtime-V-dynamic (projection
     # ABI, #77), so a single model consumes both. num_views only sizes defaults.
-    shard_dirs = [_loader_download_dir(s) for s in shards]
+    all_shard_dirs = [_loader_download_dir(s) for s in shards]
+    shard_dirs = []
+    manifests = {}
     dataset_versions = set()
-    for shard_dir in shard_dirs:
+    skipped_empty = 0
+    for shard_dir in all_shard_dirs:
         manifest_path = os.path.join(shard_dir, "manifest.json")
-        if os.path.exists(manifest_path):
-            version = json.load(open(manifest_path)).get("dataset_version")
-            if version:
-                dataset_versions.add(str(version))
+        if not os.path.exists(manifest_path):
+            raise FileNotFoundError(f"packed shard manifest is missing: {manifest_path}")
+        manifest = json.load(open(manifest_path))
+        manifests[shard_dir] = manifest
+        version = manifest.get("dataset_version")
+        if version:
+            dataset_versions.add(str(version))
+        if int(manifest.get("total_samples", 0)) <= 0:
+            skipped_empty += 1
+        else:
+            shard_dirs.append(shard_dir)
+    if not shard_dirs:
+        raise ValueError("all packed shard partitions are empty; nothing to train")
     if len(dataset_versions) > 1:
         raise ValueError(
             f"mixed dataset versions in one training run: {sorted(dataset_versions)}"
@@ -1618,23 +1677,23 @@ def train_il(
                                        num_workers=num_workers,
                                        pin_memory=(device.type == "cuda"),
                                        split=_split, val_fraction=val_fraction)
-    print(f"Merged {len(shard_dirs)} dataset(s) into one training stream "
-          f"(split={_split}, val_fraction={val_fraction}, num_workers={num_workers}).")
+    print(f"Merged {len(shard_dirs)} non-empty partition(s) into one training stream "
+          f"(skipped_empty={skipped_empty}, split={_split}, "
+          f"val_fraction={val_fraction}, num_workers={num_workers}).")
 
     # Peek the first batch to size num_views defaults.
     _peek, _peek_proj, _peek_geom = next(iter(merged))
     num_views = int(_peek["visual_tiles"].shape[1])
     print(f"Detected num_views={num_views} (first dataset); geometry={_peek_geom}")
 
-    # Consistency guard (packing ↔ training) across EVERY merged dataset. A batch
-    # missing an enabled branch's data trains that branch unsupervised (the loss
-    # is silently skipped per-batch), so verify EACH shard dir carries what the
-    # enabled branches need — not just the first peeked batch. World-Model
-    # windows are recorded in each manifest (has_world_model); reasoning labels
-    # are per-sample, so peek one batch per dataset loader.
+    # Consistency guard (packing ↔ training) across every non-empty partition.
+    # Sparse reasoning targets are masked on unlabeled samples, so probing a
+    # random first batch cannot distinguish an intentionally unlabeled sample
+    # from a wholly unsupervised shard. The pack manifest records the exact join
+    # count; validate that deterministic aggregate instead.
+    total_reasoning_labels = 0
     for d in shard_dirs:
-        mpath = os.path.join(d, "manifest.json")
-        manifest = json.load(open(mpath)) if os.path.exists(mpath) else {}
+        manifest = manifests[d]
         dname = manifest.get("dataset", d)
         if enable_world_model and not manifest.get("has_world_model", False):
             raise ValueError(
@@ -1643,13 +1702,25 @@ def train_il(
                 f"(NVIDIA has no window support yet — exclude it or disable WM)."
             )
         if enable_reasoning:
-            probe = make_multi_dataset_loader([d], batch_size=1, num_workers=0)
-            first, _, _ = next(iter(probe))
-            if "reasoning__source_weight" not in first:
+            label_count = int(manifest.get("reasoning_label_count", 0))
+            has_labels = bool(manifest.get("has_reasoning_labels", False))
+            if has_labels != (label_count > 0):
+                raise ValueError(
+                    f"reasoning manifest flags disagree for dataset '{dname}' "
+                    f"({d}): has_reasoning_labels={has_labels}, "
+                    f"reasoning_label_count={label_count}"
+                )
+            if label_count <= 0:
                 raise ValueError(
                     f"enable_reasoning=True but dataset '{dname}' ({d}) carries no "
                     f"reasoning labels. Re-pack it with reasoning_teacher set."
                 )
+            total_reasoning_labels += label_count
+    if enable_reasoning:
+        print(
+            f"Reasoning supervision: {total_reasoning_labels} joined labels "
+            f"across {len(shard_dirs)} non-empty partitions"
+        )
 
     # Model. fusion_mode is gone (BEV hardcoded inside ReactiveE2E); the model
     # now also owns the map branch, so its forward requires a map_input tensor.
@@ -2806,6 +2877,49 @@ def wf_precompute_overlays(
         dataset_version=dataset_version,
         dataset_manifest_digest=dataset_manifest_digest,
         artifacts_bucket=artifacts_bucket,
+        dynamo_table=dynamo_table,
+        aws_region=aws_region,
+    )
+
+
+@dynamic(container_image=DATA_PREP_IMAGE)
+def wf_publish_dataset_snapshot(
+    shards: List[FlyteDirectory],
+    published_dataset: str,
+    datasets_bucket: str,
+    dataset_version: str = DATASET_PACK_VERSION,
+    dynamo_table: str = "auto-e2e-console",
+    aws_region: str = "us-west-2",
+    copy_workers: int = 16,
+) -> DatasetPublication:
+    """Publish packed partitions under one immutable Console dataset version.
+
+    This is an ops-only workflow. It copies shard, frame-pool, and exact-route
+    bodies from Flyte's artifact bucket with conditional S3 writes, merges the
+    rig and privacy-filtered geographic products, writes the canonical manifest
+    last, and only then updates the Console's ``GEO#`` pointer. The returned
+    manifest digest is the dataset identity required by ``wf_precompute_overlays``.
+    """
+    from Platform.pipelines.dataset_publication_tasks import (
+        finalize_dataset_publication,
+        publish_dataset_partition,
+    )
+
+    results: List[FlyteFile] = []
+    for partition in shards:
+        results.append(publish_dataset_partition(
+            shard_dir=partition,
+            published_dataset=published_dataset,
+            dataset_version=dataset_version,
+            datasets_bucket=datasets_bucket,
+            aws_region=aws_region,
+            copy_workers=copy_workers,
+        ))
+    return finalize_dataset_publication(
+        partition_results=results,
+        published_dataset=published_dataset,
+        dataset_version=dataset_version,
+        datasets_bucket=datasets_bucket,
         dynamo_table=dynamo_table,
         aws_region=aws_region,
     )

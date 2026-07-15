@@ -11,6 +11,7 @@ from __future__ import annotations
 import gzip
 import json
 import math
+import re
 import struct
 from pathlib import Path
 from typing import Any, Mapping
@@ -27,6 +28,7 @@ EPISODE_PATH_SCHEMA_VERSION = "v1"
 _POSE_STRUCT = struct.Struct("<dddqf")
 POSE_BINARY_SIZE = _POSE_STRUCT.size
 GPS_FUTURE_POINTS = 65
+_EPISODE_ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 
 
 def encode_pose(pose: Mapping[str, Any]) -> bytes:
@@ -99,6 +101,19 @@ def _valid_coordinate(lat: float, lon: float) -> bool:
     )
 
 
+def episode_artifact_stem(episode_id: Any) -> str:
+    """Return a path-safe stable filename stem for an episode or scene id."""
+    if isinstance(episode_id, (int, np.integer)):
+        value = int(episode_id)
+        if value < 0:
+            raise ValueError(f"episode id must be non-negative, got {value}")
+        return f"{value:06d}"
+    value = str(episode_id)
+    if not _EPISODE_ID_RE.fullmatch(value):
+        raise ValueError(f"unsafe episode id {value!r}")
+    return value
+
+
 def write_geo_artifacts(
     dataset: Any,
     output_dir: str | Path,
@@ -126,6 +141,7 @@ def write_geo_artifacts(
     grid_deg = 0.01
 
     for episode_index in dataset.episode_indices():
+        episode_stem = episode_artifact_stem(episode_index)
         path = np.asarray(dataset.episode_path(episode_index), dtype="<f8")
         if path.ndim != 2 or path.shape[1] != 4:
             raise ValueError(
@@ -144,7 +160,7 @@ def write_geo_artifacts(
         published_path = np.asarray(valid_rows[start:end], dtype="<f8")
         if published_path.size:
             published_path = published_path.reshape(-1, 4)
-            (paths_dir / f"{int(episode_index):06d}.f64").write_bytes(
+            (paths_dir / f"{episode_stem}.f64").write_bytes(
                 np.ascontiguousarray(published_path).tobytes()
             )
             path_point_count += int(published_path.shape[0])
@@ -155,7 +171,7 @@ def write_geo_artifacts(
                 cell, {"sample_count": 0, "episodes": set()}
             )
             stats["sample_count"] += 1
-            stats["episodes"].add(int(episode_index))
+            stats["episodes"].add(episode_stem)
 
     records = list(dataset.sample_pose_records())
     parquet_path = root / "sample_pose.parquet"
@@ -168,7 +184,7 @@ def write_geo_artifacts(
     features = []
     published_cells = []
     for (lat_cell, lon_cell), stats in sorted(cell_stats.items()):
-        episode_ids: set[int] = stats["episodes"]
+        episode_ids: set[str] = stats["episodes"]
         if len(episode_ids) < k_anonymity:
             continue
         published_cells.append((lat_cell, lon_cell))

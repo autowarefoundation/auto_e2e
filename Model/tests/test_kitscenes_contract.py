@@ -146,3 +146,34 @@ def test_numeric_contract_emits_current_plus_64_gps_points():
     assert pose["latitude_deg"] == pytest.approx(gps[0, 0])
     assert pose["longitude_deg"] == pytest.approx(gps[0, 1])
     assert pose["heading_deg_cw_from_north"] == pytest.approx(90.0)
+
+
+def test_dataset_geo_iterators_preserve_scene_and_sample_identity():
+    scene = "fd1d1b6b-59bf-4292-8295-5028aa6aa5e3"
+    dataset = _dataset_stub([(scene, 1), (scene, 2)])
+    dataset._scene_ids = [scene]
+    dataset._scene_latlon = {
+        scene: np.array([
+            [49.0, 8.0],
+            [49.0001, 8.0001],
+            [49.0002, 8.0002],
+        ])
+    }
+    dataset._scene_yaws = {
+        scene: np.array([0.0, np.pi / 2, np.pi], dtype=np.float64)
+    }
+    dataset._scene_timestamps_ns = {
+        scene: np.array([10, 20, 30], dtype=np.int64)
+    }
+
+    assert dataset.episode_indices() == [scene]
+    path = dataset.episode_path(scene)
+    np.testing.assert_array_equal(path[:, :2], dataset._scene_latlon[scene])
+    np.testing.assert_allclose(path[:, 2], [90.0, 0.0, 270.0])
+
+    records = list(dataset.sample_pose_records())
+    assert [record["episode_id"] for record in records] == [scene, scene]
+    assert records[0]["sample_uid"] == (
+        f"kitscenes-v1-{scene}-f000001"
+    )
+    assert records[1]["timestamp_ns"] == 30

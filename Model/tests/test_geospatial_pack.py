@@ -17,6 +17,7 @@ from data_processing.geospatial import (
     decode_pose,
     encode_gps_future,
     encode_pose,
+    episode_artifact_stem,
     geospatial_members,
     write_geo_artifacts,
 )
@@ -68,6 +69,15 @@ def test_geospatial_members_are_atomic():
 
     with pytest.raises(ValueError, match="present together"):
         geospatial_members({"pose_current": _pose()})
+
+
+def test_episode_artifact_stem_preserves_numeric_and_scene_ids():
+    assert episode_artifact_stem(12) == "000012"
+    assert episode_artifact_stem(
+        "fd1d1b6b-59bf-4292-8295-5028aa6aa5e3"
+    ) == "fd1d1b6b-59bf-4292-8295-5028aa6aa5e3"
+    with pytest.raises(ValueError, match="unsafe"):
+        episode_artifact_stem("../escape")
 
 
 def test_l2d_geospatial_alignment_uses_current_plus_64_future():
