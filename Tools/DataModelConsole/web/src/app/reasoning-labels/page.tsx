@@ -224,6 +224,7 @@ function ConfidenceHistogram({
 function SceneDrawer({
   dataset,
   version,
+  teacher,
   promptVersion,
   field,
   value,
@@ -231,14 +232,24 @@ function SceneDrawer({
 }: {
   dataset: string;
   version: string;
+  teacher: string;
   promptVersion: string;
   field: string;
   value: string;
   onClose: () => void;
 }) {
   const { data, error, loading, reload } = useApi<SceneSearchResult>(
-    () => searchScenesByLabel(dataset, promptVersion, field, value, 200, version),
-    [dataset, version, promptVersion, field, value],
+    () =>
+      searchScenesByLabel(
+        dataset,
+        promptVersion,
+        field,
+        value,
+        200,
+        version,
+        teacher,
+      ),
+    [dataset, version, teacher, promptVersion, field, value],
   );
 
   useEffect(() => {
@@ -249,11 +260,12 @@ function SceneDrawer({
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose]);
 
-  // Carry both version and prompt_version downstream so the linked sample/player
-  // shows the SAME reasoning run the user was browsing (not an arbitrary one).
+  // Carry the complete immutable reasoning partition downstream so the linked
+  // sample/player cannot select a different teacher that reused the prompt.
   const linkQuery = (() => {
     const q = new URLSearchParams();
     if (version) q.set("version", version);
+    if (teacher) q.set("teacher", teacher);
     if (promptVersion) q.set("prompt_version", promptVersion);
     const s = q.toString();
     return s ? `?${s}` : "";
@@ -365,6 +377,7 @@ function ReasoningLabelsInner() {
 
   const urlDataset = searchParams.get("dataset") ?? "";
   const urlVersion = searchParams.get("version") ?? "";
+  const urlTeacher = searchParams.get("teacher") ?? "";
   const urlPromptVersion = searchParams.get("prompt_version") ?? "";
 
   // Dataset options come from the API (l2d / nvidia_av), with a static fallback.
@@ -421,24 +434,33 @@ function ReasoningLabelsInner() {
         : [],
     [promptVersionsApi.data, version],
   );
-  const promptVersion = useMemo(() => {
-    if (promptVersions.length === 0) return "";
-    return promptVersions.find((p) => p.prompt_version === urlPromptVersion)
-      ?.prompt_version ?? promptVersions[0].prompt_version;
-  }, [promptVersions, urlPromptVersion]);
+  const selectedPrompt = useMemo(() => {
+    if (promptVersions.length === 0) return null;
+    return (
+      promptVersions.find(
+        (p) =>
+          p.teacher === urlTeacher &&
+          p.prompt_version === urlPromptVersion,
+      ) ?? promptVersions[0]
+    );
+  }, [promptVersions, urlPromptVersion, urlTeacher]);
+  const teacher = selectedPrompt?.teacher ?? "";
+  const promptVersion = selectedPrompt?.prompt_version ?? "";
 
-  // Canonicalize the URL to the resolved (dataset, version, prompt_version)
-  // once all three are known, so selections persist and deep links are stable.
+  // Canonicalize the URL to the resolved immutable dataset/teacher/prompt
+  // partition so selections persist and deep links are unambiguous.
   useEffect(() => {
-    if (!dataset || !version || !promptVersion) return;
+    if (!dataset || !version || !teacher || !promptVersion) return;
     if (
       urlDataset !== dataset ||
       urlVersion !== version ||
+      urlTeacher !== teacher ||
       urlPromptVersion !== promptVersion
     ) {
       const q = new URLSearchParams({
         dataset,
         version,
+        teacher,
         prompt_version: promptVersion,
       });
       router.replace(`${pathname}?${q.toString()}`, { scroll: false });
@@ -446,9 +468,11 @@ function ReasoningLabelsInner() {
   }, [
     dataset,
     version,
+    teacher,
     promptVersion,
     urlDataset,
     urlVersion,
+    urlTeacher,
     urlPromptVersion,
     pathname,
     router,
@@ -458,9 +482,10 @@ function ReasoningLabelsInner() {
     (patch: Record<string, string>) => {
       const q = new URLSearchParams(searchParams.toString());
       for (const [k, v] of Object.entries(patch)) q.set(k, v);
-      // Changing dataset invalidates version/prompt_version; let them re-resolve.
+      // Changing dataset invalidates the complete reasoning partition.
       if ("dataset" in patch) {
         q.delete("version");
+        q.delete("teacher");
         q.delete("prompt_version");
       }
       router.replace(`${pathname}?${q.toString()}`, { scroll: false });
@@ -477,12 +502,12 @@ function ReasoningLabelsInner() {
   const [reloadGen, setReloadGen] = useState(0);
 
   useEffect(() => {
-    if (!dataset || !version || !promptVersion) return;
+    if (!dataset || !version || !teacher || !promptVersion) return;
     let cancelled = false;
     setStatsLoading(true);
     setStatsError(null);
     setStats(null);
-    getReasoningStatsDetail(dataset, version, promptVersion)
+    getReasoningStatsDetail(dataset, version, promptVersion, teacher)
       .then((d) => {
         if (!cancelled) {
           setStats(d);
@@ -498,7 +523,7 @@ function ReasoningLabelsInner() {
     return () => {
       cancelled = true;
     };
-  }, [dataset, version, promptVersion, reloadGen]);
+  }, [dataset, version, teacher, promptVersion, reloadGen]);
 
   const [drawer, setDrawer] = useState<{ field: string; value: string } | null>(
     null,
@@ -506,7 +531,7 @@ function ReasoningLabelsInner() {
   // Close the drawer whenever the partition under it changes.
   useEffect(() => {
     setDrawer(null);
-  }, [dataset, version, promptVersion]);
+  }, [dataset, version, teacher, promptVersion]);
 
   const byField = useMemo(
     () => stats?.stats.by_field ?? {},
@@ -586,12 +611,28 @@ function ReasoningLabelsInner() {
               htmlFor="rl-prompt"
               className="text-[10px] uppercase tracking-wider text-slate-500"
             >
-              Prompt version (reasoning labels)
+              Teacher / prompt version
             </label>
             <select
               id="rl-prompt"
-              value={promptVersion}
-              onChange={(e) => setParam({ prompt_version: e.target.value })}
+              value={
+                selectedPrompt
+                  ? JSON.stringify([
+                      selectedPrompt.teacher,
+                      selectedPrompt.prompt_version,
+                    ])
+                  : ""
+              }
+              onChange={(e) => {
+                const [nextTeacher, nextPrompt] = JSON.parse(e.target.value) as [
+                  string,
+                  string,
+                ];
+                setParam({
+                  teacher: nextTeacher,
+                  prompt_version: nextPrompt,
+                });
+              }}
               disabled={
                 promptVersionsApi.loading || promptVersions.length === 0
               }
@@ -601,7 +642,11 @@ function ReasoningLabelsInner() {
                 <option value="">no reasoning labels</option>
               )}
               {promptVersions.map((p) => (
-                <option key={p.prompt_version} value={p.prompt_version}>
+                <option
+                  key={`${p.teacher}/${p.prompt_version}`}
+                  value={JSON.stringify([p.teacher, p.prompt_version])}
+                >
+                  {p.teacher_model || p.teacher_provider || "unknown teacher"} ·{" "}
                   {p.prompt_version} · {formatNumber(p.count)} labels
                 </option>
               ))}
@@ -669,6 +714,13 @@ function ReasoningLabelsInner() {
                 </p>
                 <p className="truncate text-sm text-slate-300">
                   {friendlyDataset(stats.dataset)} {stats.version} ·{" "}
+                  <span className="font-mono">
+                    {stats.teacher_model ||
+                      stats.teacher_provider ||
+                      selectedPrompt?.teacher_model ||
+                      selectedPrompt?.teacher_provider}
+                  </span>{" "}
+                  ·{" "}
                   <span className="font-mono">{stats.prompt_version}</span>
                 </p>
               </div>
@@ -727,6 +779,7 @@ function ReasoningLabelsInner() {
         <SceneDrawer
           dataset={dataset}
           version={version}
+          teacher={teacher}
           promptVersion={promptVersion}
           field={drawer.field}
           value={drawer.value}
