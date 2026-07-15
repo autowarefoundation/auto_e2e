@@ -140,6 +140,70 @@ func TestDynamoStore_StatsRoundTrip(t *testing.T) {
 	}
 }
 
+func TestDynamoStore_TeacherStatsAndScenesAreIsolated(t *testing.T) {
+	s, _ := newTestStore()
+	ctx := context.Background()
+	const (
+		teacherA = "dGVhY2hlci1hAG1vZGVsLTE"
+		teacherB = "dGVhY2hlci1iAG1vZGVsLTI"
+	)
+	blobA := model.ReasoningStatsBlob{NLabels: 1}
+	blobB := model.ReasoningStatsBlob{NLabels: 2}
+	if _, err := s.PutTeacherStats(
+		ctx, "l2d", "v2.1", teacherA, "pv3", blobA,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.PutTeacherStats(
+		ctx, "l2d", "v2.1", teacherB, "pv3", blobB,
+	); err != nil {
+		t.Fatal(err)
+	}
+	gotA, _, err := s.GetTeacherStats(
+		ctx, "l2d", "v2.1", teacherA, "pv3",
+	)
+	if err != nil || gotA.NLabels != 1 {
+		t.Fatalf("teacher A stats = %+v, %v", gotA, err)
+	}
+	gotB, _, err := s.GetTeacherStats(
+		ctx, "l2d", "v2.1", teacherB, "pv3",
+	)
+	if err != nil || gotB.NLabels != 2 {
+		t.Fatalf("teacher B stats = %+v, %v", gotB, err)
+	}
+
+	rowsA := []SceneLabelRow{{
+		Field: FieldCause, Value: "lead_vehicle", SampleID: "sample-a",
+	}}
+	rowsB := []SceneLabelRow{{
+		Field: FieldCause, Value: "lead_vehicle", SampleID: "sample-b",
+	}}
+	if _, err := s.PutSceneLabelsForTeacherVersion(
+		ctx, "l2d", "v2.1", teacherA, "pv3", rowsA,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.PutSceneLabelsForTeacherVersion(
+		ctx, "l2d", "v2.1", teacherB, "pv3", rowsB,
+	); err != nil {
+		t.Fatal(err)
+	}
+	idsA, err := s.QueryScenesByLabelForTeacherVersion(
+		ctx, "l2d", "v2.1", teacherA, "pv3",
+		FieldCause, "lead_vehicle", 0,
+	)
+	if err != nil || len(idsA) != 1 || idsA[0] != "sample-a" {
+		t.Fatalf("teacher A scenes = %v, %v", idsA, err)
+	}
+	idsB, err := s.QueryScenesByLabelForTeacherVersion(
+		ctx, "l2d", "v2.1", teacherB, "pv3",
+		FieldCause, "lead_vehicle", 0,
+	)
+	if err != nil || len(idsB) != 1 || idsB[0] != "sample-b" {
+		t.Fatalf("teacher B scenes = %v, %v", idsB, err)
+	}
+}
+
 func TestDynamoStore_SceneLabelsBatchAndQuery(t *testing.T) {
 	s, f := newTestStore()
 	ctx := context.Background()
