@@ -4,6 +4,7 @@ package service
 
 import (
 	"archive/tar"
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/binary"
@@ -1176,10 +1177,67 @@ func (s *S3Service) shardIndexFromStore(ctx context.Context, dataset, version, s
 	idx.Shard = shard
 	for i := range idx.Samples {
 		if idx.Samples[i].SampleUID == "" {
+			if requiresPublicationManifest(version) {
+				return nil, false
+			}
 			idx.Samples[i].SampleUID = idx.Samples[i].Key
 		}
 	}
+	if err := validateShardIndex(idx); err != nil {
+		slog.Warn(
+			"cached shard index failed validation; will rebuild",
+			"dataset", dataset,
+			"version", version,
+			"shard", shard,
+			"error", err,
+		)
+		return nil, false
+	}
 	return idx, true
+}
+
+func validateShardIndex(idx *model.ShardIndex) error {
+	if idx == nil || idx.Version == "" || idx.Shard == "" {
+		return fmt.Errorf("shard index identity is incomplete")
+	}
+	strictMeta := requiresPublicationManifest(idx.Version)
+	keys := make(map[string]struct{}, len(idx.Samples))
+	sampleUIDs := make(map[string]string, len(idx.Samples))
+	for _, sample := range idx.Samples {
+		if sample.Key == "" || sample.SampleUID == "" {
+			return fmt.Errorf("shard index has an empty sample identity")
+		}
+		if _, exists := keys[sample.Key]; exists {
+			return fmt.Errorf("duplicate sample key %q", sample.Key)
+		}
+		keys[sample.Key] = struct{}{}
+		if previousKey, exists := sampleUIDs[sample.SampleUID]; exists {
+			return fmt.Errorf(
+				"duplicate sample_uid %q for %q and %q",
+				sample.SampleUID, previousKey, sample.Key,
+			)
+		}
+		sampleUIDs[sample.SampleUID] = sample.Key
+		if strictMeta && sample.SampleUID != sample.Key {
+			return fmt.Errorf(
+				"sample key %q differs from sample_uid %q",
+				sample.Key, sample.SampleUID,
+			)
+		}
+		if strictMeta {
+			if _, exists := sample.Members["meta.json"]; !exists {
+				return fmt.Errorf("sample %q has no meta.json", sample.Key)
+			}
+		}
+		for suffix, member := range sample.Members {
+			if suffix == "" || member.Offset < 0 || member.Size <= 0 {
+				return fmt.Errorf(
+					"sample %q has invalid member %q", sample.Key, suffix,
+				)
+			}
+		}
+	}
+	return nil
 }
 
 // buildShardIndexUncached streams the shard tar once and builds the playback
@@ -1206,6 +1264,7 @@ func (s *S3Service) buildShardIndexUncached(ctx context.Context, dataset, versio
 
 	order := []string{}
 	byKey := map[string]*model.IndexSample{}
+	metaSeen := map[string]bool{}
 	for {
 		hdr, err := tr.Next()
 		if err == io.EOF {
@@ -1218,6 +1277,14 @@ func (s *S3Service) buildShardIndexUncached(ctx context.Context, dataset, versio
 			continue
 		}
 		sk := sampleKeyOf(hdr.Name)
+		suffix := memberSuffixOf(hdr.Name)
+		if sk == "" || suffix == "" ||
+			hdr.Name != path.Base(hdr.Name) ||
+			hdr.Name != sk+"."+suffix {
+			return nil, fmt.Errorf(
+				"non-canonical tar member %q in %s", hdr.Name, key,
+			)
+		}
 		entry, ok := byKey[sk]
 		if !ok {
 			episodeID, frameIdx, _ := parseSampleKey(sk)
@@ -1231,7 +1298,12 @@ func (s *S3Service) buildShardIndexUncached(ctx context.Context, dataset, versio
 			byKey[sk] = entry
 			order = append(order, sk)
 		}
-		suffix := memberSuffixOf(hdr.Name)
+		if _, exists := entry.Members[suffix]; exists {
+			return nil, fmt.Errorf(
+				"duplicate member suffix %q for sample %q in %s",
+				suffix, sk, key,
+			)
+		}
 		entry.Members[suffix] = model.MemberRange{
 			Offset: cr.n, // header already consumed: n is at data start
 			Size:   hdr.Size,
@@ -1244,7 +1316,14 @@ func (s *S3Service) buildShardIndexUncached(ctx context.Context, dataset, versio
 			if err != nil {
 				return nil, fmt.Errorf("read %s from %s: %w", hdr.Name, key, err)
 			}
-			applyPackedMeta(entry, body)
+			if err := applyPackedMeta(
+				entry, body, requiresPublicationManifest(version),
+			); err != nil {
+				return nil, fmt.Errorf(
+					"decode %s from %s: %w", hdr.Name, key, err,
+				)
+			}
+			metaSeen[sk] = true
 		case "ego.npy":
 			body, err := readMemberBytes(tr, hdr.Size)
 			if err != nil {
@@ -1282,6 +1361,11 @@ func (s *S3Service) buildShardIndexUncached(ctx context.Context, dataset, versio
 	samples := make([]model.IndexSample, 0, len(order))
 	for _, sk := range order {
 		e := byKey[sk]
+		if requiresPublicationManifest(version) && !metaSeen[sk] {
+			return nil, fmt.Errorf(
+				"sample %q in %s has no meta.json", sk, key,
+			)
+		}
 		if e.SampleUID == "" {
 			e.SampleUID = sk
 		}
@@ -1296,25 +1380,48 @@ func (s *S3Service) buildShardIndexUncached(ctx context.Context, dataset, versio
 		}
 		samples = append(samples, *e)
 	}
-	return &model.ShardIndex{
+	idx := &model.ShardIndex{
 		Fps:     indexFps,
 		Version: version,
 		Shard:   shard,
 		Samples: samples,
-	}, nil
+	}
+	if err := validateShardIndex(idx); err != nil {
+		return nil, fmt.Errorf("validate shard index %s: %w", key, err)
+	}
+	return idx, nil
 }
 
 // applyPackedMeta copies the v2.1 identity and split contract onto one index
-// entry. Malformed optional metadata leaves its zero/default values.
-func applyPackedMeta(entry *model.IndexSample, body []byte) {
+// entry. Strict mode requires the complete current identity contract.
+func applyPackedMeta(
+	entry *model.IndexSample,
+	body []byte,
+	strict ...bool,
+) error {
 	var m struct {
 		FrameIdx      *int   `json:"frame_idx"`
 		SampleUID     string `json:"sample_uid"`
 		SplitGroupUID string `json:"split_group_uid"`
 		SplitBucket   *int   `json:"split_bucket"`
 	}
-	if json.Unmarshal(body, &m) != nil {
-		return
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	if err := decoder.Decode(&m); err != nil {
+		return fmt.Errorf("decode meta JSON: %w", err)
+	}
+	var extra json.RawMessage
+	if err := decoder.Decode(&extra); err != io.EOF {
+		if err == nil {
+			return fmt.Errorf("meta JSON contains multiple values")
+		}
+		return fmt.Errorf("decode trailing meta JSON: %w", err)
+	}
+	if m.FrameIdx != nil && *m.FrameIdx < 0 {
+		return fmt.Errorf("frame_idx must be non-negative")
+	}
+	if m.SplitBucket != nil &&
+		(*m.SplitBucket < 0 || *m.SplitBucket >= 10) {
+		return fmt.Errorf("split_bucket must be in [0, 10)")
 	}
 	if m.FrameIdx != nil {
 		entry.TripFrame = *m.FrameIdx
@@ -1326,6 +1433,18 @@ func applyPackedMeta(entry *model.IndexSample, body []byte) {
 	if m.SplitBucket != nil {
 		entry.SplitBucket = *m.SplitBucket
 	}
+	if entry.Key != "" && m.SampleUID != "" && m.SampleUID != entry.Key {
+		return fmt.Errorf(
+			"sample_uid %q differs from tar key %q",
+			m.SampleUID, entry.Key,
+		)
+	}
+	if len(strict) > 0 && strict[0] &&
+		(m.FrameIdx == nil || m.SampleUID == "" ||
+			m.SplitGroupUID == "" || m.SplitBucket == nil) {
+		return fmt.Errorf("meta JSON is missing the v2.1 identity contract")
+	}
+	return nil
 }
 
 func tripFrameFromMeta(body []byte) (int, bool) {
@@ -1377,7 +1496,14 @@ func readMemberBytes(tr *tar.Reader, size int64) ([]byte, error) {
 	if size < 0 || size > maxInlineMemberBytes {
 		return nil, fmt.Errorf("member size %d exceeds %d byte cap", size, maxInlineMemberBytes)
 	}
-	return io.ReadAll(io.LimitReader(tr, size))
+	body, err := io.ReadAll(io.LimitReader(tr, size))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(body)) != size {
+		return nil, io.ErrUnexpectedEOF
+	}
+	return body, nil
 }
 
 // decodeFloat32LE decodes raw little-endian float32 bytes (numpy tobytes(),
