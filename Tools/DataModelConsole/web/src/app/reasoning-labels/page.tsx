@@ -1,5 +1,6 @@
 "use client";
 
+import { Dialog } from "@base-ui/react/dialog";
 import Link from "next/link";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import {
@@ -102,7 +103,7 @@ function AxisChart({
   return (
     <Card className="min-w-0 border-slate-800 bg-slate-950/50">
       <CardHeader className="pb-2">
-        <CardTitle className="flex items-center gap-2 text-sm">
+        <CardTitle className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-sm">
           <span
             aria-hidden
             className="inline-block size-2.5 shrink-0 rounded-[3px]"
@@ -128,17 +129,17 @@ function AxisChart({
               type="button"
               onClick={() => onSelect(value)}
               title={`${value}: ${formatNumber(count)} (${pctLabel(count, total)}) — click to list scenes`}
-              className={`group flex w-full items-center gap-3 rounded-md px-1.5 py-1 text-left transition-colors hover:bg-slate-900/70 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-500 ${
+              className={`group flex w-full items-center gap-1.5 rounded-md px-1.5 py-1 text-left transition-colors hover:bg-slate-900/70 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-500 sm:gap-3 ${
                 isActive ? "bg-slate-900/70 ring-1 ring-slate-600" : ""
               }`}
             >
               <span
-                className="w-36 shrink-0 truncate text-right font-mono text-[11px] text-slate-300"
+                className="w-20 shrink-0 truncate text-right font-mono text-[11px] text-slate-300 sm:w-36"
                 title={value}
               >
                 {value}
               </span>
-              <span className="relative h-4 min-w-0 flex-1 overflow-hidden rounded-[4px] bg-slate-800/40">
+              <span className="relative h-4 min-w-6 flex-1 overflow-hidden rounded-[4px] bg-slate-800/40">
                 <span
                   className="absolute inset-y-0 left-0 rounded-r-[4px]"
                   style={{
@@ -147,9 +148,10 @@ function AxisChart({
                   }}
                 />
               </span>
-              <span className="w-[5.5rem] shrink-0 text-right font-mono text-[11px] tabular-nums text-slate-400">
+              <span className="w-16 shrink-0 text-right font-mono text-[11px] tabular-nums text-slate-400 sm:w-[5.5rem]">
                 {formatNumber(count)}
                 <span className="ml-1 text-slate-600">
+                  {" "}
                   {pctLabel(count, total)}
                 </span>
               </span>
@@ -157,7 +159,13 @@ function AxisChart({
           );
         })}
         {rows.length === 0 && (
-          <p className="py-2 text-center text-xs text-slate-500">No values</p>
+          <p
+            role="status"
+            aria-live="polite"
+            className="py-2 text-center text-xs text-slate-500"
+          >
+            No values
+          </p>
         )}
       </CardContent>
     </Card>
@@ -252,14 +260,6 @@ function SceneDrawer({
     [dataset, version, teacher, promptVersion, field, value],
   );
 
-  useEffect(() => {
-    function onKey(e: KeyboardEvent) {
-      if (e.key === "Escape") onClose();
-    }
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
-
   // Carry the complete immutable reasoning partition downstream so the linked
   // sample/player cannot select a different teacher that reused the prompt.
   const linkQuery = (() => {
@@ -273,97 +273,113 @@ function SceneDrawer({
   const scenes = data?.scenes ?? [];
 
   return (
-    <div className="fixed inset-0 z-50 flex justify-end">
-      <div
-        className="absolute inset-0 bg-black/60"
-        onClick={onClose}
-        aria-hidden
-      />
-      <div
-        role="dialog"
-        aria-label={`Scenes with ${field} = ${value}`}
-        className="relative z-10 flex h-full w-full max-w-md flex-col border-l border-slate-800 bg-slate-950 shadow-xl"
-      >
-        <div className="flex items-start justify-between gap-3 border-b border-slate-800 p-4">
-          <div className="min-w-0">
-            <p className="text-[10px] uppercase tracking-wider text-slate-500">
-              Scenes · {field}
-            </p>
-            <p className="truncate font-mono text-sm text-slate-200" title={value}>
-              {value}
-            </p>
-            <p className="mt-0.5 text-xs text-slate-500">
-              {friendlyDataset(dataset)} {version} ·{" "}
-              {loading
-                ? "…"
-                : `${formatNumber(data?.available ?? 0)} of ${formatNumber(data?.total ?? 0)} in this version${data?.truncated ? " (first 200 shown)" : ""}`}
-            </p>
-          </div>
-          <Button
-            variant="ghost"
-            size="icon-sm"
-            onClick={onClose}
-            aria-label="Close"
-          >
-            <X className="size-4" />
-          </Button>
-        </div>
-        <div className="min-h-0 flex-1 overflow-y-auto p-4">
-          {error ? (
-            <ErrorState error={error} onRetry={reload} />
-          ) : loading ? (
-            <div className="space-y-2">
-              {Array.from({ length: 8 }).map((_, i) => (
-                <Skeleton key={i} className="h-8 w-full" />
-              ))}
+    <Dialog.Root
+      open
+      onOpenChange={(nextOpen) => {
+        if (!nextOpen) onClose();
+      }}
+    >
+      <Dialog.Portal>
+        <Dialog.Backdrop className="fixed inset-0 z-50 bg-black/60" />
+        <Dialog.Popup
+          aria-modal="true"
+          className="fixed inset-y-0 right-0 z-50 flex w-full max-w-md flex-col border-l border-slate-800 bg-slate-950 shadow-xl"
+        >
+          <div className="flex items-start justify-between gap-3 border-b border-slate-800 p-4">
+            <div className="min-w-0">
+              <Dialog.Title className="text-[10px] uppercase tracking-wider text-slate-500">
+                Scenes · {field}
+                <span className="sr-only"> = {value}</span>
+              </Dialog.Title>
+              <p
+                className="truncate font-mono text-sm text-slate-200"
+                title={value}
+              >
+                {value}
+              </p>
+              <p className="mt-0.5 text-xs text-slate-500">
+                {friendlyDataset(dataset)} {version} ·{" "}
+                {loading
+                  ? "…"
+                  : `${formatNumber(data?.available ?? 0)} of ${formatNumber(data?.total ?? 0)} in this version${data?.truncated ? " (first 200 shown)" : ""}`}
+              </p>
             </div>
-          ) : scenes.length === 0 ? (
-            <p className="text-sm text-slate-500">No matching scenes.</p>
-          ) : (
-            <ul className="space-y-1">
-              {scenes.map((s) => {
-                // Link only samples the server resolved to a real shard in this
-                // version; an unavailable sample (label exists but frame not
-                // packed here) renders as a non-link with a hint, never a 404.
-                if (!s.available || !s.shard) {
+            <Dialog.Close
+              render={<Button variant="ghost" size="icon-sm" />}
+              aria-label="Close"
+            >
+              <X className="size-4" />
+            </Dialog.Close>
+          </div>
+          <div className="min-h-0 flex-1 overflow-y-auto p-4">
+            {error ? (
+              <ErrorState error={error} onRetry={reload} />
+            ) : loading ? (
+              <div
+                role="status"
+                aria-live="polite"
+                aria-busy="true"
+                aria-label="Loading matching scenes"
+                className="space-y-2"
+              >
+                {Array.from({ length: 8 }).map((_, i) => (
+                  <Skeleton key={i} className="h-8 w-full" />
+                ))}
+              </div>
+            ) : scenes.length === 0 ? (
+              <p
+                role="status"
+                aria-live="polite"
+                className="text-sm text-slate-500"
+              >
+                No matching scenes.
+              </p>
+            ) : (
+              <ul className="space-y-1">
+                {scenes.map((s) => {
+                  // Link only samples the server resolved to a real shard in this
+                  // version; an unavailable sample (label exists but frame not
+                  // packed here) renders as a non-link with a hint, never a 404.
+                  if (!s.available || !s.shard) {
+                    return (
+                      <li key={s.sample_id}>
+                        <div
+                          className="flex items-center justify-between gap-3 rounded-md border border-slate-800/60 bg-slate-900/20 px-3 py-1.5"
+                          title="This label exists but the frame is not packed into the selected dataset version"
+                        >
+                          <span className="font-mono text-xs text-slate-500">
+                            {s.sample_id}
+                          </span>
+                          <span className="font-mono text-[10px] text-slate-600">
+                            not in {version}
+                          </span>
+                        </div>
+                      </li>
+                    );
+                  }
+                  const href = `/datasets/${encodeURIComponent(dataset)}/shards/${encodeURIComponent(s.shard)}/samples/${encodeURIComponent(s.sample_id)}${linkQuery}`;
                   return (
                     <li key={s.sample_id}>
-                      <div
-                        className="flex items-center justify-between gap-3 rounded-md border border-slate-800/60 bg-slate-900/20 px-3 py-1.5"
-                        title="This label exists but the frame is not packed into the selected dataset version"
+                      <Link
+                        href={href}
+                        className="flex items-center justify-between gap-3 rounded-md border border-slate-800 bg-slate-900/40 px-3 py-1.5 transition-colors hover:border-slate-600 hover:bg-slate-900"
                       >
-                        <span className="font-mono text-xs text-slate-500">
+                        <span className="font-mono text-xs text-blue-400">
                           {s.sample_id}
                         </span>
-                        <span className="font-mono text-[10px] text-slate-600">
-                          not in {version}
+                        <span className="font-mono text-[10px] text-slate-500">
+                          {s.shard}
                         </span>
-                      </div>
+                      </Link>
                     </li>
                   );
-                }
-                const href = `/datasets/${encodeURIComponent(dataset)}/shards/${encodeURIComponent(s.shard)}/samples/${encodeURIComponent(s.sample_id)}${linkQuery}`;
-                return (
-                  <li key={s.sample_id}>
-                    <Link
-                      href={href}
-                      className="flex items-center justify-between gap-3 rounded-md border border-slate-800 bg-slate-900/40 px-3 py-1.5 transition-colors hover:border-slate-600 hover:bg-slate-900"
-                    >
-                      <span className="font-mono text-xs text-blue-400">
-                        {s.sample_id}
-                      </span>
-                      <span className="font-mono text-[10px] text-slate-500">
-                        {s.shard}
-                      </span>
-                    </Link>
-                  </li>
-                );
-              })}
-            </ul>
-          )}
-        </div>
-      </div>
-    </div>
+                })}
+              </ul>
+            )}
+          </div>
+        </Dialog.Popup>
+      </Dialog.Portal>
+    </Dialog.Root>
   );
 }
 
@@ -493,9 +509,8 @@ function ReasoningLabelsInner() {
     [pathname, router, searchParams],
   );
 
-  // Stats-detail: a manual fetch (not useApi) so we can gate on all three
-  // selectors being resolved and keep the "computing…" state honest through a
-  // cold ~50s S3 scan.
+  // Stats-detail: a manual fetch so it is gated on the complete immutable
+  // dataset/teacher/prompt coordinate.
   const [stats, setStats] = useState<ReasoningStatsDetail | null>(null);
   const [statsLoading, setStatsLoading] = useState(false);
   const [statsError, setStatsError] = useState<Error | null>(null);
@@ -667,7 +682,11 @@ function ReasoningLabelsInner() {
           onRetry={promptVersionsApi.reload}
         />
       ) : promptVersions.length === 0 && !promptVersionsApi.loading ? (
-        <p className="text-sm text-slate-500">
+        <p
+          role="status"
+          aria-live="polite"
+          className="text-sm text-slate-500"
+        >
           No reasoning labels for {friendlyDataset(dataset)}.
         </p>
       ) : statsError ? (
@@ -676,7 +695,12 @@ function ReasoningLabelsInner() {
           onRetry={() => setReloadGen((g) => g + 1)}
         />
       ) : statsLoading ? (
-        <Card className="border-slate-800 bg-slate-950/50">
+        <Card
+          role="status"
+          aria-live="polite"
+          aria-busy="true"
+          className="border-slate-800 bg-slate-950/50"
+        >
           <CardContent className="flex items-center gap-3 py-8 text-sm text-slate-300">
             <Loader2 className="size-5 animate-spin text-blue-400" />
             <div>
@@ -792,7 +816,11 @@ function ReasoningLabelsInner() {
 
 export default function ReasoningLabelsPage() {
   return (
-    <Suspense fallback={<Skeleton className="h-96 w-full" />}>
+    <Suspense
+      fallback={
+        <Skeleton label="Loading reasoning labels" className="h-96 w-full" />
+      }
+    >
       <ReasoningLabelsInner />
     </Suspense>
   );
