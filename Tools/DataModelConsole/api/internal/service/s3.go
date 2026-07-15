@@ -254,6 +254,7 @@ func (s *S3Service) ListOverlayModels(ctx context.Context, dataset, version, sha
 		return nil, "", fmt.Errorf("overlay lookup requires a configured dynamo store")
 	}
 	var err error
+	expectedManifestDigest := ""
 	version, err = s.publishedVersion(ctx, dataset, version)
 	if err != nil {
 		return nil, "", err
@@ -262,8 +263,15 @@ func (s *S3Service) ListOverlayModels(ctx context.Context, dataset, version, sha
 		if _, err := s.publishedShard(ctx, dataset, version, shard); err != nil {
 			return nil, version, err
 		}
+		manifest, err := s.loadPublicationManifest(ctx, dataset, version)
+		if err != nil {
+			return nil, version, err
+		}
+		expectedManifestDigest = manifest.SHA256
 	}
-	models, err := s.store.QueryReadyOverlayModels(ctx, dataset, version, shard)
+	models, err := s.store.QueryReadyOverlayModels(
+		ctx, dataset, version, shard, expectedManifestDigest,
+	)
 	return models, version, err
 }
 
@@ -275,6 +283,7 @@ func (s *S3Service) GetOverlayBody(ctx context.Context, dataset, version, shard,
 		return nil, "", fmt.Errorf("overlay lookup requires a configured dynamo store")
 	}
 	var err error
+	expectedManifestDigest := ""
 	version, err = s.publishedVersion(ctx, dataset, version)
 	if err != nil {
 		return nil, "", err
@@ -283,9 +292,15 @@ func (s *S3Service) GetOverlayBody(ctx context.Context, dataset, version, shard,
 		if _, err := s.publishedShard(ctx, dataset, version, shard); err != nil {
 			return nil, version, err
 		}
+		manifest, err := s.loadPublicationManifest(ctx, dataset, version)
+		if err != nil {
+			return nil, version, err
+		}
+		expectedManifestDigest = manifest.SHA256
 	}
 	pointer, err := s.store.GetReadyOverlayPointer(
 		ctx, dataset, version, shard, modelArtifactID,
+		expectedManifestDigest,
 	)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
@@ -346,12 +361,24 @@ func (s *S3Service) GeoStats(ctx context.Context, dataset, version string) (*mod
 	if err != nil {
 		return nil, err
 	}
+	expectedManifestDigest := ""
+	if requiresPublicationManifest(version) {
+		manifest, err := s.loadPublicationManifest(ctx, dataset, version)
+		if err != nil {
+			return nil, err
+		}
+		expectedManifestDigest = manifest.SHA256
+	}
 	record, err := s.store.GetGeoRecord(ctx, dataset, version)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			return nil, ErrNotFound
 		}
 		return nil, err
+	}
+	if expectedManifestDigest != "" &&
+		record.DatasetManifestSHA256 != expectedManifestDigest {
+		return nil, ErrNotFound
 	}
 	return &model.GeoStatsResponse{
 		Dataset: dataset,
@@ -377,12 +404,23 @@ func (s *S3Service) GeoHeatmap(ctx context.Context, dataset, version string) ([]
 	if err != nil {
 		return nil, "", err
 	}
+	var manifest *publicationManifest
+	if requiresPublicationManifest(version) {
+		manifest, err = s.loadPublicationManifest(ctx, dataset, version)
+		if err != nil {
+			return nil, version, err
+		}
+	}
 	record, err := s.store.GetGeoRecord(ctx, dataset, version)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			return nil, version, ErrNotFound
 		}
 		return nil, version, err
+	}
+	if manifest != nil &&
+		record.DatasetManifestSHA256 != manifest.SHA256 {
+		return nil, version, ErrNotFound
 	}
 	expectedKey := fmt.Sprintf(
 		"%s/%s/geo/heatmap.geojson.gz", dataset, version,
@@ -396,11 +434,7 @@ func (s *S3Service) GeoHeatmap(ctx context.Context, dataset, version string) ([]
 	if err != nil {
 		return nil, version, err
 	}
-	if requiresPublicationManifest(version) {
-		manifest, err := s.loadPublicationManifest(ctx, dataset, version)
-		if err != nil {
-			return nil, version, err
-		}
+	if manifest != nil {
 		if manifest.GeoArtifacts == nil ||
 			manifest.GeoArtifacts.HeatmapKey != record.GeoJSONKey {
 			return nil, version, fmt.Errorf(
