@@ -16,7 +16,7 @@ from flytekit.types.file import FlyteFile
 from flytekit.types.directory import FlyteDirectory
 from typing import Annotated, NamedTuple, List, Optional
 
-from Platform.pipelines.dataset_publication import DatasetPublication
+from .dataset_publication import DatasetPublication
 
 import os as _os
 
