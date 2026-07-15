@@ -8,6 +8,7 @@ import {
 const SHARD = "train-000000.tar";
 const SCENE_URL = `/scenes/catalog/${SHARD}/0?version=v2.1`;
 const PAGE_TOKEN = "f".repeat(64);
+const MAX_DATA_PAGES = 20;
 const PIXEL = Buffer.from(
   "iVBORw0KGgoAAAANSUhEUgAAAEAAAAAkAQMAAAADwq7RAAAAIGNIUk0AAHomAACAhAAA+gAAAIDoAAB1MAAA6mAAADqYAAAXcJy6UTwAAAAGUExURTNBVf///753ZLcAAAABYktHRAH/Ai3eAAAAB3RJTUUH6gcPAQU1u04EUwAAAA1JREFUGNNjYBgFlAIAAUQAAS6fR94AAAAASUVORK5CYII=",
   "base64",
@@ -183,4 +184,42 @@ test("overlay catalog rejects a token cycle without another request", async ({
 
   await page.waitForTimeout(200);
   expect(tokens).toEqual([null, "cycle-token"]);
+});
+
+test("overlay catalog permits one empty terminal probe after 20 pages", async ({
+  page,
+}) => {
+  const tokens: Array<string | null> = [];
+  const tokenForPage = (pageNumber: number) =>
+    pageNumber.toString(16).padStart(64, "0");
+
+  await installSceneRoutes(page, (route, url) => {
+    const token = url.searchParams.get("page_token");
+    tokens.push(token);
+    const pageNumber = token === null ? 0 : Number.parseInt(token, 16);
+    if (pageNumber === MAX_DATA_PAGES) {
+      return fulfillJSON(route, {
+        dataset: "catalog",
+        version: "v2.1",
+        shard: SHARD,
+        models: [],
+      });
+    }
+    return fulfillJSON(route, {
+      dataset: "catalog",
+      version: "v2.1",
+      shard: SHARD,
+      models: [model(tokenForPage(pageNumber + 1), pageNumber + 1)],
+      next_page_token: tokenForPage(pageNumber + 1),
+    });
+  });
+
+  await page.goto(SCENE_URL);
+
+  const select = page.locator("#trajectory-model");
+  await expect(select.locator("option")).toHaveCount(MAX_DATA_PAGES);
+  await expect(select).toHaveValue(tokenForPage(MAX_DATA_PAGES));
+  expect(tokens).toHaveLength(MAX_DATA_PAGES + 1);
+  expect(tokens[0]).toBeNull();
+  expect(tokens.at(-1)).toBe(tokenForPage(MAX_DATA_PAGES));
 });
