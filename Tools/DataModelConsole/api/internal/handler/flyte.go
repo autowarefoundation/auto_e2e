@@ -3,11 +3,17 @@ package handler
 import (
 	"log/slog"
 	"net/http"
+	"strconv"
 
 	"github.com/go-chi/chi/v5"
 
 	"github.com/autowarefoundation/auto_e2e/tools/datamodelconsole/api/internal/model"
 	"github.com/autowarefoundation/auto_e2e/tools/datamodelconsole/api/internal/service"
+)
+
+const (
+	defaultFlyteLimit = 25
+	maxFlyteLimit     = 1000
 )
 
 // FlyteHandler exposes the read-only Flyte Admin proxy endpoints.
@@ -24,11 +30,14 @@ func NewFlyteHandler(svc *service.FlyteService) *FlyteHandler {
 // Flyte Admin {"executions":[{id,closure,spec}]} shape into the flat list the
 // frontend consumes (a raw pass-through rendered blank/crashed).
 func (h *FlyteHandler) Executions(w http.ResponseWriter, r *http.Request) {
-	limit := r.URL.Query().Get("limit")
-	if limit == "" {
-		limit = "25"
+	limit, ok := parseFlyteLimit(r)
+	if !ok {
+		writeError(w, http.StatusBadRequest, model.CodeInvalidParam, "limit must be an integer between 1 and 1000")
+		return
 	}
-	res, err := h.svc.ListExecutions(r.Context(), limit, r.URL.Query().Get("token"))
+	res, err := h.svc.ListExecutions(
+		r.Context(), strconv.Itoa(limit), r.URL.Query().Get("token"),
+	)
 	if err != nil {
 		slog.Error("flyte executions list", "error", err)
 		writeError(w, http.StatusBadGateway, model.CodeUpstream, "flyte admin unreachable")
@@ -38,7 +47,7 @@ func (h *FlyteHandler) Executions(w http.ResponseWriter, r *http.Request) {
 		writeRawJSON(w, res.Status, res.Body)
 		return
 	}
-	out, nerr := model.NormalizeFlyteExecutions(res.Body)
+	out, nerr := model.NormalizeFlyteExecutionsPage(res.Body)
 	if nerr != nil {
 		slog.Error("normalize flyte executions", "error", nerr)
 		writeError(w, http.StatusBadGateway, model.CodeUpstream, "unexpected flyte response")
@@ -90,4 +99,19 @@ func validFlyteExecutionID(s string) bool {
 		}
 	}
 	return true
+}
+
+func parseFlyteLimit(r *http.Request) (int, bool) {
+	values, present := r.URL.Query()["limit"]
+	if !present {
+		return defaultFlyteLimit, true
+	}
+	if len(values) != 1 {
+		return 0, false
+	}
+	value, err := strconv.Atoi(values[0])
+	if err != nil || value <= 0 || value > maxFlyteLimit {
+		return 0, false
+	}
+	return value, true
 }
