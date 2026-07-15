@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"strings"
 	"sync"
@@ -252,9 +253,28 @@ func (f *fakePublicationS3) GetObject(
 	if !ok {
 		return nil, &smithy.GenericAPIError{Code: "NoSuchKey"}
 	}
+	body := object.body
+	contentRange := ""
+	if input.Range != nil {
+		var start, end int64
+		if _, err := fmt.Sscanf(
+			aws.ToString(input.Range), "bytes=%d-%d", &start, &end,
+		); err != nil || start < 0 || end < start ||
+			start >= int64(len(body)) {
+			return nil, &smithy.GenericAPIError{Code: "InvalidRange"}
+		}
+		if end >= int64(len(body)) {
+			end = int64(len(body)) - 1
+		}
+		body = body[start : end+1]
+		contentRange = fmt.Sprintf(
+			"bytes %d-%d/%d", start, end, len(object.body),
+		)
+	}
 	return &s3.GetObjectOutput{
-		Body:          io.NopCloser(bytes.NewReader(object.body)),
-		ContentLength: aws.Int64(int64(len(object.body))),
+		Body:          io.NopCloser(bytes.NewReader(body)),
+		ContentLength: aws.Int64(int64(len(body))),
+		ContentRange:  aws.String(contentRange),
 		Metadata:      object.metadata,
 	}, nil
 }
@@ -465,5 +485,48 @@ func TestPublishedVersionRejectsMissingExplicitManifest(t *testing.T) {
 		context.Background(), "kitscenes", "v2.1",
 	); err == nil {
 		t.Fatal("explicit unpublished version was accepted")
+	}
+}
+
+func TestPublishedShardKeyRejectsOrphanName(t *testing.T) {
+	service, _ := newPublicationTestService(t)
+	if _, _, _, err := service.publishedShardKey(
+		context.Background(),
+		"kitscenes",
+		"v2.1",
+		"orphan.tar",
+	); err != ErrNotFound {
+		t.Fatalf("orphan shard error = %v, want ErrNotFound", err)
+	}
+}
+
+func TestStreamTarMemberRangeEnforcesPublishedShardBounds(t *testing.T) {
+	service, client := newPublicationTestService(t)
+	ctx := context.Background()
+	const shard = "scene-a-train-000000.tar"
+	key := "kitscenes/v2.1/shards/" + shard
+
+	reader, closer, size, err := service.StreamTarMemberRange(
+		ctx, "kitscenes", "v2.1", shard, 120, 3,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, readErr := io.ReadAll(reader)
+	closeErr := closer.Close()
+	if readErr != nil || closeErr != nil {
+		t.Fatalf("read range = %v, close = %v", readErr, closeErr)
+	}
+	if size != 3 || len(body) != 3 {
+		t.Fatalf("range size = %d body=%d, want 3", size, len(body))
+	}
+	before := client.getCalls[key]
+	if _, _, _, err := service.StreamTarMemberRange(
+		ctx, "kitscenes", "v2.1", shard, 120, 4,
+	); err != ErrNotFound {
+		t.Fatalf("past-EOF range error = %v, want ErrNotFound", err)
+	}
+	if client.getCalls[key] != before {
+		t.Fatal("past-EOF range reached S3 despite manifest size")
 	}
 }
