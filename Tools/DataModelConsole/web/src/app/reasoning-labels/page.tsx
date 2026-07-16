@@ -66,7 +66,7 @@ const AXES: { field: string; title: string; hue: string }[] = [
   { field: "rule_response", title: "Rule response", hue: HUE.magenta },
 ];
 
-const DATASETS_FALLBACK = ["l2d", "nvidia_av"];
+const DATASETS_FALLBACK = ["kitscenes"];
 
 function pctLabel(count: number, total: number): string {
   if (total <= 0) return "0%";
@@ -396,7 +396,7 @@ function ReasoningLabelsInner() {
   const urlTeacher = searchParams.get("teacher") ?? "";
   const urlPromptVersion = searchParams.get("prompt_version") ?? "";
 
-  // Dataset options come from the API (l2d / nvidia_av), with a static fallback.
+  // Dataset options come from the production catalog, with its canonical fallback.
   const datasetsApi = useApi(listDatasets);
   const datasetNames = useMemo(() => {
     const names = (datasetsApi.data ?? []).map((d) => d.name);
