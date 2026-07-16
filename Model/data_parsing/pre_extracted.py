@@ -137,6 +137,31 @@ def _decode_sample(
         "trajectory_target": ego_future,
     }
 
+    pose_data = sample.get("pose.npy")
+    gps_data = sample.get("gps.npy")
+    if (pose_data is None) != (gps_data is None):
+        raise ValueError(
+            "pose.npy and gps.npy must either both be present or both be absent"
+        )
+    if pose_data is not None:
+        from data_processing.geospatial import (
+            decode_gps_future,
+            decode_pose,
+        )
+
+        pose = decode_pose(pose_data)
+        out["pose_current"] = torch.tensor(
+            [
+                pose["latitude_deg"],
+                pose["longitude_deg"],
+                pose["heading_deg_cw_from_north"],
+            ],
+            dtype=torch.float64,
+        )
+        out["gps_future"] = torch.from_numpy(
+            decode_gps_future(gps_data)
+        )
+
     # Optional World-Model windows (#13/#3.4d): the sample carries window_index.json
     # (a (step,view)→frame_id map); the frames themselves are in the sibling pool/.
     # Rebuild history_frames [T, V, 3, H, W] and future_frames [F, V, 3, H, W]
