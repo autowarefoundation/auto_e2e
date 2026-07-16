@@ -179,13 +179,17 @@ def camera_projection_status(
     camera_index: int,
 ) -> str:
     spec = calibration.get("projection")
-    if not isinstance(spec, dict):
-        return "unsupported"
     geometry_type = str(
-        spec.get("type", calibration.get("geometry_type", "pseudo"))
+        (
+            spec.get("type", calibration.get("geometry_type", "pseudo"))
+            if isinstance(spec, dict)
+            else calibration.get("geometry_type", "pseudo")
+        )
     )
     if geometry_type == "pseudo":
         return "unsupported_pseudo_geometry"
+    if not isinstance(spec, dict):
+        return "unsupported"
     field = "t_camera_ego" if geometry_type == "ftheta" else "matrix"
     values = spec.get(field)
     if not isinstance(values, list) or camera_index >= len(values):
