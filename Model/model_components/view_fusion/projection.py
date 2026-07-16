@@ -173,9 +173,15 @@ def _finalize_linear(projected, image_transform, geometry_type) -> ProjectionRes
     depth = projected[..., 2]                         # [Bp, V, M]
     valid_depth = depth > _DEPTH_EPS                  # in front of the camera
     depth_safe = depth.clamp(min=_DEPTH_EPS).unsqueeze(-1)  # avoid div-by-zero
-    uv = projected[..., :2] / depth_safe              # pixel coords [Bp, V, M, 2]
-    wh = torch.tensor([w, h], device=uv.device, dtype=uv.dtype)
-    uv_norm = uv / wh
+    # fp32 perspective divide AND normalize: under fp16 autocast a near-_DEPTH_EPS
+    # depth makes the divide (and its 1/d² backward) overflow to inf → nan grads
+    # that freeze AMP training. The unbounded pixel coord numerator/depth can also
+    # exceed fp16 max BEFORE the /wh normalize, so we must NOT cast back to fp16
+    # until AFTER normalizing (a normalized coord is O(1) and fp16-safe). Keep the
+    # whole geometry divide+normalize in fp32, then cast the bounded result.
+    uv_f = projected[..., :2].float() / depth_safe.float()
+    wh = torch.tensor([w, h], device=uv_f.device, dtype=torch.float32)
+    uv_norm = (uv_f / wh).to(projected.dtype)
     in_bounds = (
         (uv_norm[..., 0] >= 0) & (uv_norm[..., 0] <= 1)
         & (uv_norm[..., 1] >= 0) & (uv_norm[..., 1] <= 1)
@@ -300,10 +306,15 @@ class PseudoProjection:
         depth = projected[..., 2]
         valid_depth = depth > _DEPTH_EPS
         depth_safe = depth.clamp(min=_DEPTH_EPS).unsqueeze(-1)
-        uv = projected[..., :2] / depth_safe
+        # Do the perspective divide + sigmoid in fp32: under fp16 autocast the
+        # divide by a near-_DEPTH_EPS depth overflows to inf and sigmoid saturates
+        # (grad 0), so backward computes 0*inf = nan. That nan is scale-invariant,
+        # so the AMP GradScaler skips optimizer.step() on EVERY iteration and the
+        # whole net never trains (perfectly flat loss). Geometry math must be fp32.
+        uv = projected[..., :2].float() / depth_safe.float()
         # Unbounded pseudo outputs → sigmoid to keep coords in (0, 1). in-bounds
         # is then trivially satisfied, so the mask reduces to the depth check.
-        uv_norm = uv.sigmoid()
+        uv_norm = uv.sigmoid().to(projected.dtype)
         it = _as_image_transform(image_transform)
         meta = {"geometry_type": self.geometry_type,
                 "model_input_size": it.model_input_size, "rectification": None}

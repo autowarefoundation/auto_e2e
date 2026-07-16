@@ -6,7 +6,7 @@ The parquet contains 100Hz egomotion with columns:
 Downsamples to 10Hz and produces:
 
     egomotion_history  (256,) — 64 timesteps before the sample point x 4 signals
-                                [speed, acceleration, yaw_angle, curvature]
+                                [speed, acceleration, yaw_rate, curvature]
 
     trajectory_target  (128,) — 64 timesteps after the sample point x 2 signals
                                 [acceleration, curvature]
@@ -26,7 +26,7 @@ from physical_ai_av.egomotion import EgomotionState
 # Must match the planner's dimensions. Placing here for package export.
 _HISTORY_TIMESTEPS = 64         # 6.4 s of past context at 10 Hz
 _FUTURE_TIMESTEPS = 64          # 6.4 s of future prediction at 10 Hz
-_NUM_HISTORY_SIGNALS = 4        # speed, acceleration, yaw_angle, curvature
+_NUM_HISTORY_SIGNALS = 4        # speed, acceleration, yaw_rate, curvature
 _NUM_TARGET_SIGNALS = 2         # acceleration, curvature
 
 EGOMOTION_DIM = _HISTORY_TIMESTEPS * _NUM_HISTORY_SIGNALS   # 256
@@ -48,15 +48,25 @@ def _to_history_signals(state: EgomotionState) -> np.ndarray:
     """Extract the 4 history signals from an EgomotionState.
 
     Returns:
-        Float32 array of shape (T, 4): [speed, acceleration, yaw_angle, curvature].
+        Float32 array of shape (T, 4): [speed, acceleration, yaw_rate, curvature].
+
+    Channel 2 is YAW_RATE (rad/s), matching the L2D parser. The SDK gives an
+    absolute yaw ANGLE (from the pose quaternion); emitting it here would put a
+    different physical quantity in the same input slot as L2D's yaw_rate, and the
+    merged multi-dataset loader feeds both into one shared ego encoder — so a
+    single weight column would see absolute angle for NVIDIA and angular rate for
+    L2D, corrupting the ego conditioning. Difference the (unwrapped) yaw angle
+    over dt so both datasets agree.
     """
     vx = state.velocity[:, 0]
     vy = state.velocity[:, 1]
     speed = np.sqrt(vx ** 2 + vy ** 2)
     acceleration = state.acceleration[:, 0]
-    yaw_angle = state.pose.rotation.as_euler("ZYX")[:, 0]
+    yaw_angle = np.unwrap(state.pose.rotation.as_euler("ZYX")[:, 0])
+    yaw_rate = np.zeros_like(yaw_angle)
+    yaw_rate[1:] = np.diff(yaw_angle) * _TARGET_HZ  # d(yaw)/dt at 10 Hz (dt=0.1s)
     curvature = state.curvature[:, 0]
-    return np.stack([speed, acceleration, yaw_angle, curvature], axis=1).astype(np.float32)
+    return np.stack([speed, acceleration, yaw_rate, curvature], axis=1).astype(np.float32)
 
 
 def _to_target_signals(state: EgomotionState) -> np.ndarray:

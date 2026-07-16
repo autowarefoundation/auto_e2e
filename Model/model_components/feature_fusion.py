@@ -12,7 +12,7 @@ class FeatureFusion(nn.Module):
     """
 
     def __init__(self, num_views=8, backbone_channels=1440, embed_dim=256,
-                 fusion_mode="concat", image_feature_size=8, view_fusion_kwargs=None):
+                 fusion_mode="bev", image_feature_size=8, view_fusion_kwargs=None):
         super(FeatureFusion, self).__init__()
 
         # Per-view pooled image-feature resolution (used as values for view fusion).

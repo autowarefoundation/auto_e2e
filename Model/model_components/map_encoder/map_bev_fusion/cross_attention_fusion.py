@@ -61,13 +61,29 @@ class MapCrossAttentionFusion(nn.Module):
         """
         B, C, H, W = image_bev.shape
 
+        # Dense cross-attention is O((H*W)^2). At the production BEV grid
+        # (450x300 = 135k tokens) the score matrix is ~1e11 elems → instant OOM.
+        # This fusion mode is only viable at small grids (tests use 8x8); guard
+        # loudly rather than let it OOM mid-run. Use map_fusion_mode="residual"
+        # (the default) at production resolution.
+        n_tokens = H * W
+        if n_tokens > 4096:
+            raise ValueError(
+                f"cross_attention map fusion is O(N^2) and infeasible at "
+                f"{H}x{W}={n_tokens} tokens (score matrix ~{n_tokens**2:.1e} "
+                f"elems → OOM). Use map_fusion_mode='residual' at this BEV "
+                f"resolution, or downsample the grid before this fusion."
+            )
+
         # Flatten spatial dims: (B, H*W, C)
         q = image_bev.permute(0, 2, 3, 1).reshape(B, H * W, C)
         kv = map_bev.permute(0, 2, 3, 1).reshape(B, H * W, C)
 
-        # Pre-norm cross-attention with residual
+        # Pre-norm cross-attention with residual. need_weights=False avoids
+        # materializing the full [B,heads,N,N] score tensor.
         kv_norm = self.norm_kv(kv)
-        attn_out, _ = self.cross_attn(self.norm_query(q), kv_norm, kv_norm)
+        attn_out, _ = self.cross_attn(self.norm_query(q), kv_norm, kv_norm,
+                                      need_weights=False)
         q = q + attn_out
 
         # FFN with residual
