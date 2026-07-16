@@ -94,17 +94,24 @@ def _write_publication_manifests(
     seeds: list[int] | None = None,
 ) -> tuple[Path, Path]:
     seeds = seeds or [0]
+    rig_sha256 = "5" * 64
     dataset_manifest = {
-        "schema_version": "v1",
+        "schema_version": "v2",
         "status": "ready",
-        "dataset": "yaak-ai/L2D",
+        "dataset": "l2d",
+        "source_dataset": "yaak-ai/L2D",
         "version": "v2.1",
         "total_samples": sample_count,
+        "rig_count": 1,
         "shard_entries": [{
             "name": shard.name,
             "key": f"l2d/v2.1/shards/{shard.name}",
             "byte_size": shard.stat().st_size,
             "content_identity": "1" * 64,
+            "rig": {
+                "key": f"l2d/v2.1/rig/{rig_sha256}.json",
+                "sha256": rig_sha256,
+            },
         }],
     }
     dataset_path = root / "dataset-manifest.json"
@@ -123,7 +130,7 @@ def _write_publication_manifests(
         "model_version": 7,
         "run_id": "run-123",
         "model_artifact_sha256": "2" * 64,
-        "dataset": "yaak-ai/L2D",
+        "dataset": "l2d",
         "version": "v2.1",
         "dataset_manifest_sha256": dataset_sha256,
         "request_identity": "3" * 64,
@@ -418,6 +425,52 @@ def test_report_rejects_changed_dataset_manifest(tmp_path):
     ))
 
     with pytest.raises(ValueError, match="manifest digests differ"):
+        generate_report(
+            shard_path=shard,
+            overlay_path=overlay,
+            output_dir=tmp_path / "report",
+            dataset_manifest_path=dataset_manifest,
+            overlay_manifest_path=overlay_manifest,
+        )
+
+
+def test_report_rejects_noncanonical_shard_rig(tmp_path):
+    sample_uid = "l2d-v1-e000001-f000064"
+    shard = tmp_path / "train-000000.tar"
+    _write_shard(shard, [sample_uid])
+    overlay = tmp_path / "overlay.bin.gz"
+    write_overlay(
+        overlay,
+        [sample_uid],
+        np.zeros((1, 1, 64, 2), dtype=np.float32),
+        np.array([8.0], dtype=np.float32),
+    )
+    dataset_manifest, overlay_manifest = _write_publication_manifests(
+        tmp_path,
+        shard=shard,
+        overlay=overlay,
+        sample_count=1,
+    )
+    dataset_document = json.loads(dataset_manifest.read_text())
+    dataset_document["shard_entries"][0]["rig"]["key"] = (
+        "l2d/v2.1/rig/other.json"
+    )
+    dataset_manifest.write_text(json.dumps(
+        dataset_document,
+        indent=2,
+        sort_keys=True,
+    ))
+    overlay_document = json.loads(overlay_manifest.read_text())
+    overlay_document["dataset_manifest_sha256"] = hashlib.sha256(
+        dataset_manifest.read_bytes()
+    ).hexdigest()
+    overlay_manifest.write_text(json.dumps(
+        overlay_document,
+        indent=2,
+        sort_keys=True,
+    ))
+
+    with pytest.raises(ValueError, match="rig key is not canonical"):
         generate_report(
             shard_path=shard,
             overlay_path=overlay,
