@@ -17,18 +17,19 @@ import (
 )
 
 const (
-	publicationSchema           = "v1"
+	publicationSchema           = "v2"
 	maxPublicationManifestBytes = 4 << 20
 	publicationHeadConcurrency  = 32
 )
 
 type publicationShardEntry struct {
-	Name            string    `json:"name"`
-	Key             string    `json:"key"`
-	ByteSize        int64     `json:"byte_size"`
-	ETag            string    `json:"etag"`
-	ContentIdentity string    `json:"content_identity"`
-	LastModified    time.Time `json:"-"`
+	Name            string              `json:"name"`
+	Key             string              `json:"key"`
+	ByteSize        int64               `json:"byte_size"`
+	ETag            string              `json:"etag"`
+	ContentIdentity string              `json:"content_identity"`
+	Rig             publicationArtifact `json:"rig"`
+	LastModified    time.Time           `json:"-"`
 }
 
 type publicationArtifact struct {
@@ -57,6 +58,7 @@ type publicationManifest struct {
 	ReasoningLabelCount int `json:"reasoning_label_count"`
 	Shards              int `json:"shards"`
 	ShardCount          int `json:"shard_count"`
+	RigCount            int `json:"rig_count"`
 	Episodes            int `json:"episodes"`
 	NumViews            int `json:"num_views"`
 
@@ -66,7 +68,7 @@ type publicationManifest struct {
 	HasGPS        bool `json:"has_gps"`
 
 	ShardEntries []publicationShardEntry  `json:"shard_entries"`
-	Rig          publicationArtifact      `json:"rig"`
+	Rig          publicationArtifact      `json:"-"`
 	GeoArtifacts *publicationGeoArtifacts `json:"geo_artifacts"`
 
 	SHA256      string                           `json:"-"`
@@ -126,6 +128,7 @@ func decodePublicationManifest(
 	manifest.ShardByName = make(
 		map[string]publicationShardEntry, len(manifest.ShardEntries),
 	)
+	rigs := make(map[string]struct{})
 	previousName := ""
 	for i := range manifest.ShardEntries {
 		entry := &manifest.ShardEntries[i]
@@ -153,6 +156,20 @@ func decodePublicationManifest(
 			)
 		}
 		entry.ETag = etag
+		expectedRigKey := fmt.Sprintf(
+			"%s/%s/rig/%s.json",
+			dataset,
+			version,
+			entry.Rig.SHA256,
+		)
+		if !isLowerHexDigest(entry.Rig.SHA256) ||
+			entry.Rig.Key != expectedRigKey {
+			return nil, fmt.Errorf(
+				"published shard %q has invalid rig artifact",
+				entry.Name,
+			)
+		}
+		rigs[entry.Rig.Key] = struct{}{}
 		if previousName != "" && entry.Name <= previousName {
 			return nil, fmt.Errorf(
 				"published shard entries are duplicate or unsorted at %q",
@@ -162,11 +179,12 @@ func decodePublicationManifest(
 		previousName = entry.Name
 		manifest.ShardByName[entry.Name] = *entry
 	}
-
-	expectedRigKey := fmt.Sprintf("%s/%s/rig/projection.json", dataset, version)
-	if manifest.Rig.Key != expectedRigKey ||
-		!isLowerHexDigest(manifest.Rig.SHA256) {
-		return nil, fmt.Errorf("publication rig artifact is invalid")
+	if manifest.RigCount <= 0 || manifest.RigCount != len(rigs) {
+		return nil, fmt.Errorf(
+			"publication rig count disagrees: rig_count=%d entries=%d",
+			manifest.RigCount,
+			len(rigs),
+		)
 	}
 	if manifest.HasGPS {
 		if err := validateGeoArtifacts(
@@ -390,6 +408,35 @@ func (s *S3Service) validatePublicationShards(
 	}
 	for _, entry := range manifest.ShardEntries {
 		manifest.ShardByName[entry.Name] = entry
+	}
+	rigs := make(map[string]struct{}, manifest.RigCount)
+	for _, entry := range manifest.ShardEntries {
+		if _, ok := rigs[entry.Rig.Key]; ok {
+			continue
+		}
+		head, err := s.client.HeadObject(
+			ctx,
+			&s3.HeadObjectInput{
+				Bucket: aws.String(s.bucket),
+				Key:    aws.String(entry.Rig.Key),
+			},
+		)
+		if err != nil {
+			return fmt.Errorf(
+				"head published rig %q: %w", entry.Rig.Key, err,
+			)
+		}
+		if aws.ToInt64(head.ContentLength) <= 0 ||
+			metadataValue(head.Metadata, "sha256") != entry.Rig.SHA256 ||
+			metadataValue(
+				head.Metadata, "publication-schema",
+			) != publicationSchema {
+			return fmt.Errorf(
+				"published rig %q object identity mismatch",
+				entry.Rig.Key,
+			)
+		}
+		rigs[entry.Rig.Key] = struct{}{}
 	}
 	return nil
 }
