@@ -446,6 +446,30 @@ def test_recovery_launcher_requires_audited_artifacts_and_skips_source_stages():
     assert "--reasoning_teacher" not in buildspec
 
 
+def test_overlay_launcher_guards_selected_recovery_checkpoints():
+    buildspec = (
+        _REPO_ROOT / "Platform" / "buildspec-launch-overlay.yml"
+    ).read_text()
+
+    assert "DATASET_VERSION: v2.2" in buildspec
+    for variable in (
+        "SELECTED_MLFLOW_RUN_ID",
+        "SELECTED_CHECKPOINT_URI",
+        "SELECTED_CHECKPOINT_SHA256",
+        "SELECTED_CHECKPOINT_EPOCH",
+    ):
+        assert variable in buildspec
+    assert "--allow-running-recovery" in buildspec
+    assert "wf_publish_selected_checkpoint_overlays" in buildspec
+    assert '--mlflow_run_id "${SELECTED_MLFLOW_RUN_ID}"' in buildspec
+    assert '--checkpoint_uri "${SELECTED_CHECKPOINT_URI}"' in buildspec
+    assert (
+        '--checkpoint_sha256 "${SELECTED_CHECKPOINT_SHA256}"'
+        in buildspec
+    )
+    assert '--checkpoint_epoch "${SELECTED_CHECKPOINT_EPOCH}"' in buildspec
+
+
 def test_reasoning_selection_bootstraps_short_scenes():
     dataset = _ReasoningSelectionDataset([
         ("scene-a", 64),
