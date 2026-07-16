@@ -178,7 +178,7 @@ def test_report_uses_explicit_scene_frame_selection(tmp_path):
         "schema_version": 1,
         "scenes": [{
             "scene_uid": "l2d-v1-e000001",
-            "start_frame": 65,
+            "start_frame": 64,
             "end_frame": 65,
         }],
     }))
@@ -195,14 +195,15 @@ def test_report_uses_explicit_scene_frame_selection(tmp_path):
         overlay_path=overlay,
         output_dir=output,
         scene_selections=load_scene_selections(selection),
+        max_frames_per_scene=1,
         video_writer=fake_video_writer,
     )
 
-    assert len(rendered) == 1
-    assert manifest["scenes"][0]["sample_uids"] == [sample_uids[1]]
+    assert len(rendered) == 2
+    assert manifest["scenes"][0]["sample_uids"] == sample_uids[:2]
     assert manifest["render"]["scene_selection"] == [{
         "scene_uid": "l2d-v1-e000001",
-        "start_frame": 65,
+        "start_frame": 64,
         "end_frame": 65,
     }]
 
