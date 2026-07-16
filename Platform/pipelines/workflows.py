@@ -3195,7 +3195,10 @@ def evaluate_rl_policy(
     container_image=EVAL_IMAGE,
     requests=Resources(cpu="4", mem="16Gi", gpu="1"),
     limits=Resources(cpu="4", mem="16Gi", gpu="1"),
-    environment={"MLFLOW_TRACKING_URI": MLFLOW_URI},
+    environment={
+        "MLFLOW_TRACKING_URI": MLFLOW_URI,
+        "AUTO_E2E_EVAL_IMAGE": EVAL_IMAGE,
+    },
     pod_template=_large_shm_pod_template(),
 )
 def evaluate_kitscenes_benchmark_checkpoint(
