@@ -185,6 +185,15 @@ FUSION_LABEL = "bev"
 
 TrainOutput = NamedTuple("TrainOutput", checkpoint=FlyteFile, metadata=FlyteFile)
 EvalMetrics = NamedTuple("EvalMetrics", ade=float, fde=float, gate_pass=bool)
+KITScenesBenchmarkOutput = NamedTuple(
+    "KITScenesBenchmarkOutput",
+    ade_3s=float,
+    fde_3s=float,
+    ade_5s=float,
+    fde_5s=float,
+    predictions=FlyteFile,
+    report=FlyteFile,
+)
 # wf_create_dataset returns just the ready-to-train WebDataset shards (train_il
 # reads reasoning supervision from in-shard reasoning.json members). The
 # versioned reasoning-label artifact persists independently in S3 (the
@@ -3182,10 +3191,614 @@ def evaluate_rl_policy(
     return _run_evaluation(checkpoint, shards, train_metadata, dataset, "offline-rl")
 
 
+@task(
+    container_image=EVAL_IMAGE,
+    requests=Resources(cpu="4", mem="16Gi", gpu="1"),
+    limits=Resources(cpu="4", mem="16Gi", gpu="1"),
+    environment={"MLFLOW_TRACKING_URI": MLFLOW_URI},
+    pod_template=_large_shm_pod_template(),
+)
+def evaluate_kitscenes_benchmark_checkpoint(
+    checkpoint: FlyteFile,
+    benchmark_shards: List[FlyteDirectory],
+    benchmark_manifest: FlyteFile,
+    expected_manifest_sha256: str = "",
+    mlflow_run_id: str = "",
+    batch_size: int = 4,
+) -> KITScenesBenchmarkOutput:
+    """Score one immutable checkpoint against one fixed KITScenes manifest.
+
+    This task is intentionally independent of training and data preparation.
+    It computes the released displacement metrics and emits canonical trajectory
+    predictions for future authority-side safety scoring. Unreleased
+    drivable-surface, collision, centerline, and MMS metrics are not estimated.
+    """
+    import hashlib
+    import json
+    import os
+    import re
+    from pathlib import Path
+
+    import mlflow
+    import numpy as np
+    import torch
+    from flytekit import current_context
+
+    from data_parsing.pre_extracted import make_multi_dataset_loader
+    from evaluation.kitscenes_benchmark import (
+        EVALUATOR_VERSION,
+        PROTOCOL_ID,
+        compute_displacement_metrics,
+        limit_egomotion_history,
+        load_benchmark_manifest,
+        sample_uid_digest,
+        wgs84_trajectory_to_ego_xy,
+    )
+    from model_components.auto_e2e import AutoE2E
+    from Platform.pipelines.training_checkpoint import (
+        sha256_file,
+        stable_digest,
+    )
+
+    if not benchmark_shards:
+        raise ValueError("benchmark_shards must not be empty")
+    if not 0 < batch_size <= 8:
+        raise ValueError("benchmark batch_size must be between 1 and 8")
+    if expected_manifest_sha256 and not re.fullmatch(
+        r"[0-9a-f]{64}", expected_manifest_sha256
+    ):
+        raise ValueError(
+            "expected_manifest_sha256 must be a lowercase SHA-256"
+        )
+
+    manifest_path = str(benchmark_manifest.download())
+    manifest, manifest_sha256 = load_benchmark_manifest(manifest_path)
+    if (
+        expected_manifest_sha256
+        and manifest_sha256 != expected_manifest_sha256
+    ):
+        raise ValueError(
+            "benchmark manifest digest mismatch: "
+            f"expected={expected_manifest_sha256} "
+            f"actual={manifest_sha256}"
+        )
+    if manifest.protocol_status == "official" and not expected_manifest_sha256:
+        raise ValueError(
+            "official benchmark evaluation requires a pinned expected "
+            "manifest SHA-256"
+        )
+    if "map" not in manifest.input_track.lower():
+        raise ValueError(
+            "this AutoE2E evaluator consumes a raster map; input_track must "
+            "declare map use rather than silently substituting a camera-only "
+            "benchmark track"
+        )
+
+    checkpoint_uri = str(
+        getattr(checkpoint, "remote_source", "") or checkpoint
+    )
+    checkpoint_path = str(checkpoint.download())
+    checkpoint_sha256 = sha256_file(checkpoint_path)
+    payload = torch.load(
+        checkpoint_path,
+        map_location="cpu",
+        weights_only=False,
+    )
+    required_checkpoint_fields = {
+        "model_state_dict",
+        "config",
+        "epoch",
+    }
+    missing_checkpoint_fields = required_checkpoint_fields - set(payload)
+    if missing_checkpoint_fields:
+        raise ValueError(
+            "benchmark checkpoint is missing required fields: "
+            f"{sorted(missing_checkpoint_fields)}"
+        )
+    if not isinstance(payload["config"], dict):
+        raise ValueError("benchmark checkpoint config must be an object")
+    config = dict(payload["config"])
+    epoch = int(payload["epoch"])
+    if epoch <= 0:
+        raise ValueError(
+            f"benchmark checkpoint epoch must be positive, got {epoch}"
+        )
+    training_state = payload.get("training_state", {})
+    if training_state is None:
+        training_state = {}
+    if not isinstance(training_state, dict):
+        raise ValueError("checkpoint training_state must be an object")
+    checkpoint_run_id = str(training_state.get("run_id", ""))
+    run_id = str(mlflow_run_id or checkpoint_run_id)
+    if not run_id or not re.fullmatch(r"[A-Za-z0-9_-]+", run_id):
+        raise ValueError(
+            "checkpoint has no valid MLflow run ID; pass mlflow_run_id "
+            "explicitly for a trusted legacy checkpoint"
+        )
+    mlflow.set_tracking_uri(os.environ["MLFLOW_TRACKING_URI"])
+    mlflow_client = mlflow.tracking.MlflowClient()
+    mlflow_client.get_run(run_id)
+
+    shard_dirs: list[str] = []
+    shard_identities: list[dict] = []
+    dataset_versions: set[str] = set()
+    contract_digests: set[str] = set()
+    for shard in benchmark_shards:
+        shard_uri = str(
+            getattr(shard, "remote_source", "") or shard
+        )
+        shard_dir = str(shard.download())
+        packed_manifest_path = Path(shard_dir) / "manifest.json"
+        if not packed_manifest_path.is_file():
+            raise FileNotFoundError(
+                "packed benchmark manifest is missing: "
+                f"{packed_manifest_path}"
+            )
+        try:
+            packed_manifest_bytes = packed_manifest_path.read_bytes()
+            packed_manifest = json.loads(packed_manifest_bytes)
+        except (OSError, json.JSONDecodeError) as error:
+            raise ValueError(
+                f"invalid packed benchmark manifest {packed_manifest_path}"
+            ) from error
+        if not isinstance(packed_manifest, dict):
+            raise ValueError(
+                f"packed benchmark manifest is not an object: {shard_dir}"
+            )
+        if packed_manifest.get("dataset") != Dataset.KITSCENES.value:
+            raise ValueError(
+                "benchmark shard belongs to another dataset: "
+                f"{packed_manifest.get('dataset')!r}"
+            )
+        if packed_manifest.get("source_revision") != manifest.dataset_revision:
+            raise ValueError(
+                "benchmark shard source revision differs from the fixed "
+                f"manifest: shard={packed_manifest.get('source_revision')!r} "
+                f"manifest={manifest.dataset_revision!r}"
+            )
+        if int(packed_manifest.get("hz", 0)) != manifest.frequency_hz:
+            raise ValueError(
+                "benchmark shard frequency differs from the protocol: "
+                f"{packed_manifest.get('hz')!r}"
+            )
+        dataset_version = str(
+            packed_manifest.get("dataset_version", "")
+        )
+        if not dataset_version:
+            raise ValueError(
+                f"benchmark shard has no dataset_version: {shard_dir}"
+            )
+        dataset_versions.add(dataset_version)
+        contracts = packed_manifest.get("contracts")
+        contract_digests.add(stable_digest(contracts))
+        total_samples = int(packed_manifest.get("total_samples", 0))
+        if total_samples < 0:
+            raise ValueError(
+                f"benchmark shard has negative sample count: {shard_dir}"
+            )
+        shard_identities.append({
+            "contracts": contracts,
+            "dataset": packed_manifest.get("dataset"),
+            "dataset_version": dataset_version,
+            "hz": int(packed_manifest.get("hz", 0)),
+            "manifest_sha256": hashlib.sha256(
+                packed_manifest_bytes
+            ).hexdigest(),
+            "num_views": int(packed_manifest.get("num_views", 0)),
+            "partition_id": packed_manifest.get("partition_id"),
+            "shard_names": list(
+                packed_manifest.get("shard_names", [])
+            ),
+            "source_revision": packed_manifest.get("source_revision"),
+            "total_samples": total_samples,
+            "uri": shard_uri,
+        })
+        if total_samples > 0:
+            if int(packed_manifest.get("num_views", 0)) <= 0:
+                raise ValueError(
+                    f"benchmark shard has no camera views: {shard_dir}"
+                )
+            if not bool(packed_manifest.get("has_map", False)):
+                raise ValueError(
+                    "map-conditioned benchmark shard has no raster map: "
+                    f"{shard_dir}"
+                )
+            if not bool(packed_manifest.get("has_gps", False)):
+                raise ValueError(
+                    "benchmark shard has no pose-grounded trajectory: "
+                    f"{shard_dir}"
+                )
+            if (
+                config.get("enable_world_model", False)
+                and not bool(
+                    packed_manifest.get("has_world_model", False)
+                )
+            ):
+                raise ValueError(
+                    "world-model checkpoint requires benchmark history "
+                    f"windows: {shard_dir}"
+                )
+            shard_dirs.append(shard_dir)
+
+    if not shard_dirs:
+        raise ValueError("all benchmark shard partitions are empty")
+    if len(dataset_versions) != 1:
+        raise ValueError(
+            "benchmark shards mix dataset versions: "
+            f"{sorted(dataset_versions)}"
+        )
+    if len(contract_digests) != 1:
+        raise ValueError("benchmark shards mix packing contracts")
+    shard_identities.sort(
+        key=lambda item: (
+            str(item["partition_id"]),
+            str(item["shard_names"]),
+        )
+    )
+    shard_manifest_digest = stable_digest(shard_identities)
+
+    model_kwargs = _model_kwargs(config)
+    model_kwargs["is_pretrained"] = False
+    model = AutoE2E(**model_kwargs)
+    model.load_state_dict(payload["model_state_dict"])
+    del payload
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model = model.to(device)
+    model.eval()
+    torch.backends.cudnn.benchmark = False
+    if hasattr(torch.backends.cudnn, "deterministic"):
+        torch.backends.cudnn.deterministic = True
+    torch.multiprocessing.set_sharing_strategy("file_system")
+
+    loader = make_multi_dataset_loader(
+        shard_dirs,
+        batch_size=batch_size,
+        num_workers=1,
+        split="all",
+        val_fraction=0.0,
+        shuffle=0,
+        pin_memory=(device.type == "cuda"),
+        prefetch_factor=1,
+        max_active_loaders=1,
+        sample_uids=manifest.sample_uids,
+        decode_future_frames=False,
+    )
+    projection_cache = _ProjectionDeviceCache(device)
+    observed_uids: list[str] = []
+    predicted_batches: list[np.ndarray] = []
+    current_pose_batches: list[np.ndarray] = []
+    gps_batches: list[np.ndarray] = []
+    speed_batches: list[np.ndarray] = []
+
+    with torch.no_grad():
+        for batch, projection, geometry_type in loader:
+            batch_uids = batch.get("sample_uid", [])
+            if isinstance(batch_uids, str):
+                batch_uids = [batch_uids]
+            batch_uids = [str(uid) for uid in batch_uids]
+            if not batch_uids:
+                raise ValueError("benchmark batch lost its sample UIDs")
+            batch_count = len(batch_uids)
+            observed_uids.extend(batch_uids)
+
+            history = batch["egomotion_history"]
+            if tuple(history.shape) != (batch_count, 64 * 4):
+                raise ValueError(
+                    "benchmark egomotion history has unexpected shape "
+                    f"{tuple(history.shape)}"
+                )
+            initial_speeds = (
+                history.reshape(batch_count, 64, 4)[:, -1, 0]
+                .numpy()
+                .astype(np.float64)
+            )
+            current_pose = batch.get("pose_current")
+            gps_future = batch.get("gps_future")
+            if (
+                current_pose is None
+                or tuple(current_pose.shape) != (batch_count, 3)
+            ):
+                raise ValueError(
+                    "benchmark current pose has unexpected shape "
+                    f"{getattr(current_pose, 'shape', None)}"
+                )
+            if (
+                gps_future is None
+                or tuple(gps_future.shape) != (batch_count, 65, 2)
+            ):
+                raise ValueError(
+                    "benchmark GPS trajectory has unexpected shape "
+                    f"{getattr(gps_future, 'shape', None)}"
+                )
+            limited_history = limit_egomotion_history(
+                history,
+                observation_steps=manifest.observation_steps,
+            )
+
+            history_frames = batch.get("history_frames")
+            if batch.get("future_frames") is not None:
+                raise RuntimeError(
+                    "benchmark loader exposed future camera frames"
+                )
+            if config.get("enable_world_model", False):
+                if history_frames is None:
+                    raise ValueError(
+                        "world-model checkpoint requires packed benchmark "
+                        "history frames"
+                    )
+                if history_frames.ndim != 6 or history_frames.shape[1] != 4:
+                    raise ValueError(
+                        "KITScenes protocol expects four 1 Hz world-model "
+                        "history frames, got "
+                        f"{tuple(history_frames.shape)}"
+                    )
+                history_frames = history_frames.to(device)
+            else:
+                history_frames = None
+
+            stable_noise = []
+            for uid in batch_uids:
+                seed_bytes = hashlib.sha256(
+                    f"{PROTOCOL_ID}:{uid}".encode("ascii")
+                ).digest()[:8]
+                generator = torch.Generator(device="cpu")
+                generator.manual_seed(
+                    int.from_bytes(seed_bytes, "big") % (2**63 - 1)
+                )
+                stable_noise.append(
+                    torch.randn(128, generator=generator)
+                )
+            initial_noise = torch.stack(stable_noise).to(device)
+
+            if hasattr(model, "reset_visual_history"):
+                model.reset_visual_history()
+            prediction = model(
+                batch["visual_tiles"].to(device),
+                batch["map_input"].to(device),
+                batch["visual_history"].to(device),
+                limited_history.to(device),
+                projection=projection_cache.get(projection),
+                geometry_type=geometry_type,
+                history_frames=history_frames,
+                mode="infer",
+                initial_noise=initial_noise,
+            )
+            if not torch.is_tensor(prediction):
+                raise TypeError(
+                    "benchmark inference must return one trajectory tensor"
+                )
+            if tuple(prediction.shape) != (batch_count, 64 * 2):
+                raise ValueError(
+                    "benchmark prediction has unexpected shape "
+                    f"{tuple(prediction.shape)}"
+                )
+            predicted_batches.append(
+                prediction.detach().cpu().numpy().reshape(
+                    batch_count, 64, 2
+                )
+            )
+            current_pose_batches.append(current_pose.numpy())
+            gps_batches.append(gps_future.numpy())
+            speed_batches.append(initial_speeds)
+
+    if hasattr(model, "reset_visual_history"):
+        model.reset_visual_history()
+    if len(observed_uids) != len(set(observed_uids)):
+        raise ValueError("benchmark shards contain duplicate sample UIDs")
+    expected_uids = set(manifest.sample_uids)
+    actual_uids = set(observed_uids)
+    if actual_uids != expected_uids:
+        raise ValueError(
+            "benchmark observed UID set differs from the fixed manifest: "
+            f"missing={sorted(expected_uids - actual_uids)[:5]} "
+            f"unexpected={sorted(actual_uids - expected_uids)[:5]}"
+        )
+    observed_uid_digest = sample_uid_digest(observed_uids)
+    expected_uid_digest = sample_uid_digest(manifest.sample_uids)
+    if observed_uid_digest != expected_uid_digest:
+        raise ValueError("benchmark sample UID digest mismatch")
+
+    predicted_controls = np.concatenate(predicted_batches, axis=0)
+    current_poses = np.concatenate(current_pose_batches, axis=0)
+    gps_future = np.concatenate(gps_batches, axis=0)
+    target_xy = wgs84_trajectory_to_ego_xy(
+        gps_future,
+        current_poses,
+    )
+    initial_speeds = np.concatenate(speed_batches, axis=0)
+    metrics, predicted_xy = compute_displacement_metrics(
+        predicted_controls,
+        target_xy,
+        initial_speeds,
+        frequency_hz=manifest.frequency_hz,
+        horizons_seconds=manifest.horizons_seconds,
+    )
+
+    output_dir = Path("/tmp/kitscenes-benchmark")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    predictions_path = output_dir / "predictions.jsonl"
+    report_path = output_dir / "metrics.json"
+    logged_manifest_path = output_dir / "manifest.json"
+    logged_manifest_path.write_bytes(Path(manifest_path).read_bytes())
+
+    prediction_records = []
+    for index, uid in enumerate(observed_uids):
+        prediction_records.append({
+            "acceleration_curvature": predicted_controls[
+                index, :max(manifest.horizon_steps)
+            ].tolist(),
+            "frequency_hz": manifest.frequency_hz,
+            "horizon_steps": max(manifest.horizon_steps),
+            "sample_uid": uid,
+            "schema_version": "kitscenes_e2e_prediction_v1",
+            "trajectory_xy_m": predicted_xy[index].tolist(),
+        })
+    prediction_records.sort(key=lambda record: record["sample_uid"])
+    with predictions_path.open("w", encoding="ascii") as stream:
+        for record in prediction_records:
+            stream.write(json.dumps(
+                record,
+                allow_nan=False,
+                ensure_ascii=True,
+                separators=(",", ":"),
+                sort_keys=True,
+            ))
+            stream.write("\n")
+    predictions_sha256 = sha256_file(predictions_path)
+
+    ctx = current_context()
+    report = {
+        "artifacts": {
+            "predictions_sha256": predictions_sha256,
+        },
+        "benchmark": {
+            "authority": manifest.authority,
+            "benchmark_id": manifest.benchmark_id,
+            "dataset_revision": manifest.dataset_revision,
+            "history_adapter": manifest.history_adapter,
+            "input_track": manifest.input_track,
+            "manifest_sha256": manifest_sha256,
+            "protocol_id": PROTOCOL_ID,
+            "protocol_source": manifest.protocol_source,
+            "protocol_status": manifest.protocol_status,
+            "release_id": manifest.release_id,
+            "sample_count": len(observed_uids),
+            "sample_uid_digest": observed_uid_digest,
+            "sdk_revision": manifest.sdk_revision,
+            "source_splits": list(manifest.source_splits),
+        },
+        "checkpoint": {
+            "epoch": epoch,
+            "mlflow_run_id": run_id,
+            "recorded_mlflow_run_id": checkpoint_run_id or None,
+            "sha256": checkpoint_sha256,
+            "uri": checkpoint_uri,
+        },
+        "dataset": {
+            "dataset_version": next(iter(dataset_versions)),
+            "packed_manifest_digest": shard_manifest_digest,
+            "partition_count": len(shard_identities),
+            "partitions": shard_identities,
+        },
+        "evaluator": {
+            "docker_image": EVAL_IMAGE,
+            "flyte_execution_id": (
+                ctx.execution_id.name if ctx.execution_id else "local"
+            ),
+            "prediction_noise": "sha256(protocol_id:sample_uid)",
+            "prediction_trajectory": "integrated_acceleration_curvature",
+            "target_trajectory": "packed_gps_to_utm32_ego_frame",
+            "version": EVALUATOR_VERSION,
+        },
+        "model_inputs": {
+            "camera_views": True,
+            "egomotion_history_seconds": manifest.past_seconds,
+            "raster_map": True,
+            "world_model_history_frames": (
+                4 if config.get("enable_world_model", False) else 0
+            ),
+        },
+        "metric_availability": {
+            "ade_3s": "computed",
+            "ade_5s": "computed",
+            "centerline_distance": "authority_assets_required",
+            "collision_free_rate": "authority_assets_required",
+            "drivable_surface_survival": "authority_assets_required",
+            "fde_3s": "computed",
+            "fde_5s": "computed",
+            "mms": "authority_assets_required",
+        },
+        "metrics": metrics,
+        "schema_version": "kitscenes_e2e_benchmark_report_v1",
+    }
+    report_path.write_text(
+        json.dumps(
+            report,
+            allow_nan=False,
+            ensure_ascii=True,
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="ascii",
+    )
+
+    metric_prefix = (
+        f"benchmark/kitscenes/{manifest.protocol_status}"
+    )
+    artifact_path = (
+        f"benchmark/kitscenes/{manifest.benchmark_id}/"
+        f"{manifest_sha256[:12]}"
+    )
+    with mlflow.start_run(run_id=run_id):
+        mlflow.log_metrics(
+            {
+                f"{metric_prefix}/{name}": value
+                for name, value in metrics.items()
+            },
+            step=epoch,
+        )
+        mlflow.set_tags({
+            "benchmark/kitscenes/authority": manifest.authority,
+            "benchmark/kitscenes/checkpoint_sha256": checkpoint_sha256,
+            "benchmark/kitscenes/input_track": manifest.input_track,
+            "benchmark/kitscenes/manifest_sha256": manifest_sha256,
+            "benchmark/kitscenes/protocol_source": (
+                manifest.protocol_source
+            ),
+            "benchmark/kitscenes/protocol_status": (
+                manifest.protocol_status
+            ),
+            "benchmark/kitscenes/release_id": manifest.release_id,
+            "benchmark/kitscenes/sample_uid_digest": (
+                observed_uid_digest
+            ),
+            "benchmark/kitscenes/source_splits": ",".join(
+                manifest.source_splits
+            ),
+        })
+        mlflow.log_artifacts(str(output_dir), artifact_path=artifact_path)
+
+    print(
+        "KITScenes benchmark: "
+        f"status={manifest.protocol_status} epoch={epoch} "
+        f"samples={len(observed_uids)} metrics={metrics}"
+    )
+    return KITScenesBenchmarkOutput(
+        ade_3s=metrics["ade_3s"],
+        fde_3s=metrics["fde_3s"],
+        ade_5s=metrics["ade_5s"],
+        fde_5s=metrics["fde_5s"],
+        predictions=FlyteFile(str(predictions_path)),
+        report=FlyteFile(str(report_path)),
+    )
+
+
 
 # ============================================================
 # Workflows
 # ============================================================
+@workflow
+def wf_evaluate_kitscenes_benchmark(
+    checkpoint: FlyteFile,
+    benchmark_shards: List[FlyteDirectory],
+    benchmark_manifest: FlyteFile,
+    expected_manifest_sha256: str = "",
+    mlflow_run_id: str = "",
+    batch_size: int = 4,
+) -> KITScenesBenchmarkOutput:
+    """Retrospectively score one checkpoint without invoking training."""
+    return evaluate_kitscenes_benchmark_checkpoint(
+        checkpoint=checkpoint,
+        benchmark_shards=benchmark_shards,
+        benchmark_manifest=benchmark_manifest,
+        expected_manifest_sha256=expected_manifest_sha256,
+        mlflow_run_id=mlflow_run_id,
+        batch_size=batch_size,
+    )
+
+
 @workflow
 def wf_data_ingest(
     dataset: Dataset = Dataset.L2D,
