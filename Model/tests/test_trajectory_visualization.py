@@ -218,6 +218,58 @@ def test_selection_manifest_rejects_legacy_episode_identity(tmp_path):
         load_scene_selections(selection)
 
 
+def test_report_rejects_overlay_rows_outside_the_shard(tmp_path):
+    sample_uid = "l2d-v1-e000001-f000064"
+    shard = tmp_path / "train-000000.tar"
+    _write_shard(shard, [sample_uid])
+    overlay = tmp_path / "overlay.bin.gz"
+    write_overlay(
+        overlay,
+        [sample_uid, "l2d-v1-e000001-f000065"],
+        np.zeros((2, 1, 64, 2), dtype=np.float32),
+        np.array([8.0, 9.0], dtype=np.float32),
+    )
+
+    with pytest.raises(ValueError, match="exactly match"):
+        generate_report(
+            shard_path=shard,
+            overlay_path=overlay,
+            output_dir=tmp_path / "report",
+        )
+
+
+def test_report_rejects_overlay_speed_mismatched_with_shard(tmp_path):
+    sample_uid = "l2d-v1-e000001-f000064"
+    shard = tmp_path / "train-000000.tar"
+    _write_shard(shard, [sample_uid])
+    overlay = tmp_path / "overlay.bin.gz"
+    write_overlay(
+        overlay,
+        [sample_uid],
+        np.zeros((1, 1, 64, 2), dtype=np.float32),
+        np.array([99.0], dtype=np.float32),
+    )
+
+    with pytest.raises(ValueError, match="disagrees with shard history"):
+        generate_report(
+            shard_path=shard,
+            overlay_path=overlay,
+            output_dir=tmp_path / "report",
+        )
+
+
+def test_shard_reader_rejects_non_integer_frame_index(tmp_path):
+    shard = tmp_path / "train-000000.tar"
+    _write_shard(
+        shard,
+        ["l2d-v1-e000001-f000064"],
+        frame_indices=[64.5],
+    )
+
+    with pytest.raises(ValueError, match="invalid frame_idx"):
+        read_shard_samples(shard)
+
+
 def test_shard_reader_rejects_missing_selected_camera(tmp_path):
     shard = tmp_path / "train-000000.tar"
     _write_shard(shard, ["l2d-v1-e000001-f000064"])
