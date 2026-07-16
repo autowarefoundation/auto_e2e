@@ -146,6 +146,10 @@ def test_report_joins_aovl_by_uid_and_writes_scene_artifacts(tmp_path):
         AOVL_V1_CONTROL_CONTRACT.manifest()
     )
     assert manifest["render"]["panel_order"] == ["camera", "metric_bev"]
+    assert (
+        manifest["render"]["camera_projection_status"]
+        == "unsupported_pseudo_geometry"
+    )
     assert manifest["scene_count"] == 1
     assert manifest["frame_count"] == 2
     scene = manifest["scenes"][0]
