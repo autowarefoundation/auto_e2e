@@ -103,6 +103,7 @@ test("trajectory overlays and geographic views honor production contracts", asyn
   let directImageRequests = 0;
   let frameOneImageAttempts = 0;
   let frameOneImagesAvailable = false;
+  let rigRequestPath = "";
   const consoleErrors: string[] = [];
   page.on("console", (message) => {
     if (message.type() === "error") consoleErrors.push(message.text());
@@ -263,6 +264,7 @@ test("trajectory overlays and geographic views honor production contracts", asyn
       });
     }
     if (path.endsWith("/rig-projection")) {
+      rigRequestPath = path;
       return json({
         schema_version: "v1",
         dataset: "kitscenes",
@@ -323,6 +325,9 @@ test("trajectory overlays and geographic views honor production contracts", asyn
   await expect(page.getByText("3 seeds | median")).toBeVisible();
   await expect(page.getByText("episode/clip hold-out")).toBeVisible();
   await expect(page.getByText("Scene map")).toBeVisible();
+  expect(rigRequestPath).toBe(
+    "/api/v1/datasets/kitscenes/shards/train-000000.tar/rig-projection",
+  );
   await expect(
     page.locator('svg path[stroke="#6ee7b7"]').first(),
   ).toHaveAttribute("d", /^M/);
