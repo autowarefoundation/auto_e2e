@@ -21,6 +21,7 @@ from Tools.trajectory_visualization.kinematics import (
 )
 from Tools.trajectory_visualization.rendering import render_frame
 from Tools.trajectory_visualization.report import (
+    _write_mp4,
     generate_report,
     load_scene_selections,
 )
@@ -167,6 +168,30 @@ def test_report_integrator_matches_evaluation_reference():
     mirrored = integrate_controls(controls, 7.5, curvature_sign=-1)
     np.testing.assert_allclose(mirrored[:, 0], expected[:, 0])
     np.testing.assert_allclose(mirrored[:, 1], -expected[:, 1])
+
+
+def test_report_mp4_writer_round_trip(tmp_path):
+    imageio = pytest.importorskip("imageio.v2")
+    pytest.importorskip("imageio_ffmpeg")
+    output = tmp_path / "video.mp4"
+    frames = [
+        Image.new("RGB", (1280, 720), "#ff0000"),
+        Image.new("RGB", (1280, 720), "#00ff00"),
+    ]
+
+    _write_mp4(output, frames, 10.0)
+
+    reader = imageio.get_reader(output)
+    try:
+        decoded = [reader.get_data(index) for index in range(2)]
+        metadata = reader.get_meta_data()
+    finally:
+        reader.close()
+    assert [frame.shape for frame in decoded] == [
+        (720, 1280, 3),
+        (720, 1280, 3),
+    ]
+    assert metadata["fps"] == pytest.approx(10.0)
 
 
 def test_report_joins_aovl_by_uid_and_writes_scene_artifacts(tmp_path):
