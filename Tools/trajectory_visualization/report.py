@@ -27,6 +27,7 @@ from Tools.trajectory_visualization.kinematics import (
     integrate_controls,
 )
 from Tools.trajectory_visualization.rendering import (
+    camera_projection_status,
     render_frame,
     trajectory_extent,
 )
@@ -324,6 +325,18 @@ def generate_report(
             f"seed_index {seed_index} is outside "
             f"[0, {len(overlay.base_seeds)})"
         )
+    projection_statuses = {
+        camera_projection_status(
+            sample.calibration,
+            camera_index=camera_index,
+        )
+        for sample in samples
+    }
+    projection_status = (
+        next(iter(projection_statuses))
+        if len(projection_statuses) == 1
+        else "mixed"
+    )
     base_seed = overlay.base_seeds[seed_index]
     writer = video_writer or _write_mp4
 
@@ -421,6 +434,7 @@ def generate_report(
                 next(iter(datasets))
             ),
             "panel_order": ["camera", "metric_bev"],
+            "camera_projection_status": projection_status,
             "scene_selection": (
                 [selection.manifest() for selection in selections]
                 if selections
