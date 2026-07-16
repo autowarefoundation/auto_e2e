@@ -6,7 +6,10 @@ import argparse
 import json
 from collections.abc import Sequence
 
-from Tools.trajectory_visualization.report import generate_report
+from Tools.trajectory_visualization.report import (
+    generate_report,
+    load_scene_selections,
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -27,11 +30,16 @@ def build_parser() -> argparse.ArgumentParser:
         required=True,
         help="Empty destination directory",
     )
-    parser.add_argument(
+    selection = parser.add_mutually_exclusive_group()
+    selection.add_argument(
         "--scene",
         action="append",
         dest="scenes",
         help="Render only this scene_uid; may be repeated",
+    )
+    selection.add_argument(
+        "--selection-manifest",
+        help="JSON scene/frame selection manifest",
     )
     parser.add_argument("--seed-index", type=int, default=0)
     parser.add_argument("--camera-index", type=int, default=0)
@@ -42,6 +50,11 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    scene_selections = (
+        load_scene_selections(args.selection_manifest)
+        if args.selection_manifest
+        else None
+    )
     manifest = generate_report(
         shard_path=args.shard,
         overlay_path=args.overlay,
@@ -49,6 +62,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         seed_index=args.seed_index,
         camera_index=args.camera_index,
         scene_uids=args.scenes,
+        scene_selections=scene_selections,
         max_frames_per_scene=args.max_frames_per_scene,
         fps=args.fps,
     )
