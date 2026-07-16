@@ -138,6 +138,70 @@ def test_full_run_overlay_workflow_wires_exact_model_lineage():
     assert publisher_bindings["shards"].var == "shards"
 
 
+def test_selected_checkpoint_overlay_workflow_wires_exact_epoch_lineage():
+    registrar, publisher = (
+        workflows.wf_publish_selected_checkpoint_overlays.nodes
+    )
+    interface = (
+        workflows.wf_publish_selected_checkpoint_overlays.python_interface
+    )
+    assert set(interface.outputs) == {
+        "overlay_result",
+        "manifest_key",
+        "manifest_sha256",
+    }
+    assert registrar.flyte_entity.name.endswith(
+        "overlay_tasks.register_selected_overlay_checkpoint"
+    )
+
+    registrar_bindings = {
+        binding.var: binding.binding.promise
+        for binding in registrar.bindings
+    }
+    assert registrar_bindings["run_id"].var == "mlflow_run_id"
+    assert registrar_bindings["checkpoint_uri"].var == "checkpoint_uri"
+    assert registrar_bindings["checkpoint_sha256"].var == (
+        "checkpoint_sha256"
+    )
+    assert registrar_bindings["checkpoint_epoch"].var == "checkpoint_epoch"
+    assert registrar_bindings["train_execution_id"].var == (
+        "full_run_execution_id"
+    )
+
+    publisher_bindings = {
+        binding.var: binding.binding.promise
+        for binding in publisher.bindings
+    }
+    assert publisher_bindings["model_version"].node_id == registrar.id
+    assert publisher_bindings["expected_train_execution_id"].var == (
+        "full_run_execution_id"
+    )
+    assert publisher_bindings["shards"].var == "shards"
+
+
+def test_overlay_precompute_loads_one_checkpoint_for_the_fullset():
+    tree = ast.parse(Path(workflows.__file__).read_text())
+    function = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "wf_precompute_overlays"
+    )
+    calls = [
+        call
+        for call in ast.walk(function)
+        if isinstance(call, ast.Call)
+        and isinstance(call.func, ast.Name)
+        and call.func.id == "precompute_overlay_partition"
+    ]
+
+    assert len(calls) == 1
+    keywords = {keyword.arg: keyword.value for keyword in calls[0].keywords}
+    assert isinstance(keywords["shard_dirs"], ast.Name)
+    assert keywords["shard_dirs"].id == "shards"
+    assert not any(isinstance(node, ast.For) for node in ast.walk(function))
+
+
 def test_data_prep_tasks_serialize_karpenter_disruption_protection():
     settings = SerializationSettings(
         image_config=ImageConfig.auto_default_image(),
