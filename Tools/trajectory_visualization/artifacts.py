@@ -166,12 +166,13 @@ def read_shard_samples(
             )
         if not scene_uid or not dataset:
             raise ValueError(f"sample {key!r} has no scene or dataset identity")
-        try:
-            frame_idx = int(metadata["frame_idx"])
-        except (KeyError, TypeError, ValueError) as exc:
-            raise ValueError(f"sample {key!r} has invalid frame_idx") from exc
-        if frame_idx < 0:
-            raise ValueError(f"sample {key!r} has negative frame_idx")
+        frame_idx = metadata.get("frame_idx")
+        if (
+            isinstance(frame_idx, bool)
+            or not isinstance(frame_idx, int)
+            or frame_idx < 0
+        ):
+            raise ValueError(f"sample {key!r} has invalid frame_idx")
         position = (scene_uid, frame_idx)
         if position in seen_positions:
             raise ValueError(
