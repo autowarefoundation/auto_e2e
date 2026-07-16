@@ -119,7 +119,7 @@ def test_report_joins_aovl_by_uid_and_writes_scene_artifacts(tmp_path):
         overlay,
         list(reversed(sample_uids)),
         controls,
-        np.array([9.0, 8.0], dtype=np.float32),
+        np.array([8.0, 9.0], dtype=np.float32),
     )
 
     rendered_sizes = []
@@ -171,7 +171,7 @@ def test_report_uses_explicit_scene_frame_selection(tmp_path):
         overlay,
         sample_uids,
         np.zeros((3, 1, 64, 2), dtype=np.float32),
-        np.full(3, 8.0, dtype=np.float32),
+        np.array([8.0, 9.0, 10.0], dtype=np.float32),
     )
     selection = tmp_path / "selection.json"
     selection.write_text(json.dumps({
