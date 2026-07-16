@@ -215,6 +215,7 @@ def test_report_joins_aovl_by_uid_and_writes_scene_artifacts(tmp_path):
     )
 
     assert rendered_sizes == [(1280, 720), (1280, 720)]
+    assert manifest["schema_version"] == 2
     assert manifest["dataset"] == "yaak-ai/L2D"
     assert manifest["render"]["curvature_sign"] == -1
     assert manifest["render"]["base_seed"] == 0
