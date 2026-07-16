@@ -254,6 +254,18 @@ def test_validate_recovery_inputs_rejects_unpinned_artifacts(
         )
 
 
+def test_validate_recovery_inputs_uses_flytefile_remote_source():
+    manifest = SimpleNamespace(
+        remote_source="s3://checkpoints/recovery/manifest.json",
+        path="/tmp/flyte/local/manifest.json",
+    )
+
+    validate_recovery_inputs(
+        _recovery_inputs(recovery_manifest=manifest),
+        expected_dataset_version="v2.2",
+    )
+
+
 def test_extract_shard_uris_rejects_duplicate_directories():
     with pytest.raises(ValueError, match="duplicate"):
         extract_shard_uris(
