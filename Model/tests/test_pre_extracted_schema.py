@@ -94,6 +94,49 @@ class TestDecodeSampleMapSplit:
         out = _decode_sample(sample)
         assert "camera_params" not in out
 
+    def test_geospatial_members_decode_for_benchmark_ground_truth(self):
+        from data_processing.geospatial import geospatial_members
+
+        gps = np.column_stack([
+            np.linspace(49.0, 49.0001, 65),
+            np.linspace(8.0, 8.0002, 65),
+        ])
+        sample = {
+            "cam_0.jpg": _jpeg_bytes((0, 0, 0)),
+            "ego.npy": _ego_bytes(),
+            **geospatial_members({
+                "pose_current": {
+                    "latitude_deg": gps[0, 0],
+                    "longitude_deg": gps[0, 1],
+                    "heading_deg_cw_from_north": 42.0,
+                    "timestamp_ns": 123,
+                    "gps_accuracy_m": float("nan"),
+                },
+                "gps_future": gps,
+            }),
+        }
+
+        out = _decode_sample(sample)
+
+        assert out["pose_current"].dtype == torch.float64
+        assert out["pose_current"].tolist() == pytest.approx(
+            [49.0, 8.0, 42.0]
+        )
+        assert out["gps_future"].dtype == torch.float64
+        assert out["gps_future"].shape == (65, 2)
+        assert np.array_equal(out["gps_future"].numpy(), gps)
+
+    @pytest.mark.parametrize("member", ["pose.npy", "gps.npy"])
+    def test_partial_geospatial_members_are_rejected(self, member):
+        sample = {
+            "cam_0.jpg": _jpeg_bytes((0, 0, 0)),
+            "ego.npy": _ego_bytes(),
+            member: b"invalid",
+        }
+
+        with pytest.raises(ValueError, match="must either both be present"):
+            _decode_sample(sample)
+
 
 class TestManifestProjection:
     def test_pseudo_when_no_manifest(self, tmp_path):
