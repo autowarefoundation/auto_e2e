@@ -366,6 +366,76 @@ def test_report_rejects_overlay_speed_mismatched_with_shard(tmp_path):
         )
 
 
+def test_report_rejects_changed_dataset_manifest(tmp_path):
+    sample_uid = "l2d-v1-e000001-f000064"
+    shard = tmp_path / "train-000000.tar"
+    _write_shard(shard, [sample_uid])
+    overlay = tmp_path / "overlay.bin.gz"
+    write_overlay(
+        overlay,
+        [sample_uid],
+        np.zeros((1, 1, 64, 2), dtype=np.float32),
+        np.array([8.0], dtype=np.float32),
+    )
+    dataset_manifest, overlay_manifest = _write_publication_manifests(
+        tmp_path,
+        shard=shard,
+        overlay=overlay,
+        sample_count=1,
+    )
+    document = json.loads(dataset_manifest.read_text())
+    document["total_samples"] = 2
+    dataset_manifest.write_text(json.dumps(
+        document,
+        indent=2,
+        sort_keys=True,
+    ))
+
+    with pytest.raises(ValueError, match="manifest digests differ"):
+        generate_report(
+            shard_path=shard,
+            overlay_path=overlay,
+            output_dir=tmp_path / "report",
+            dataset_manifest_path=dataset_manifest,
+            overlay_manifest_path=overlay_manifest,
+        )
+
+
+def test_report_rejects_overlay_body_digest_mismatch(tmp_path):
+    sample_uid = "l2d-v1-e000001-f000064"
+    shard = tmp_path / "train-000000.tar"
+    _write_shard(shard, [sample_uid])
+    overlay = tmp_path / "overlay.bin.gz"
+    write_overlay(
+        overlay,
+        [sample_uid],
+        np.zeros((1, 1, 64, 2), dtype=np.float32),
+        np.array([8.0], dtype=np.float32),
+    )
+    dataset_manifest, overlay_manifest = _write_publication_manifests(
+        tmp_path,
+        shard=shard,
+        overlay=overlay,
+        sample_count=1,
+    )
+    document = json.loads(overlay_manifest.read_text())
+    document["shards"][0]["sha256"] = "f" * 64
+    overlay_manifest.write_text(json.dumps(
+        document,
+        indent=2,
+        sort_keys=True,
+    ))
+
+    with pytest.raises(ValueError, match="local overlay SHA-256"):
+        generate_report(
+            shard_path=shard,
+            overlay_path=overlay,
+            output_dir=tmp_path / "report",
+            dataset_manifest_path=dataset_manifest,
+            overlay_manifest_path=overlay_manifest,
+        )
+
+
 def test_shard_reader_rejects_non_integer_frame_index(tmp_path):
     shard = tmp_path / "train-000000.tar"
     _write_shard(
