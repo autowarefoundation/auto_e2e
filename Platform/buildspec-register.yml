@@ -41,21 +41,6 @@ phases:
         export AUTO_E2E_TRAINING_IMAGE AUTO_E2E_EVAL_IMAGE
         export AUTO_E2E_OFFLINE_RL_IMAGE AUTO_E2E_DATA_PREP_IMAGE
       - |
-        image_ref() {
-          REPOSITORY="$1"
-          DIGEST=$(aws ecr describe-images \
-            --repository-name "auto-e2e/${REPOSITORY}" \
-            --image-ids imageTag="${IMAGE_TAG}" \
-            --query 'imageDetails[0].imageDigest' \
-            --output text)
-          test -n "${DIGEST}" && test "${DIGEST}" != "None"
-          printf '%s/auto-e2e/%s@%s' "${ECR_URL}" "${REPOSITORY}" "${DIGEST}"
-        }
-        export AUTO_E2E_TRAINING_IMAGE=$(image_ref training)
-        export AUTO_E2E_EVAL_IMAGE=$(image_ref eval)
-        export AUTO_E2E_OFFLINE_RL_IMAGE=$(image_ref offline-rl)
-        export AUTO_E2E_DATA_PREP_IMAGE=$(image_ref data-prep)
-      - |
         cat > /tmp/flyte.yaml << EOF
         admin:
           endpoint: dns:///k8s-flyte-flyteadm-be92e7737c-cf0d1a0f3df10f77.elb.us-west-2.amazonaws.com:81
