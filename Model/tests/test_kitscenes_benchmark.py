@@ -19,6 +19,7 @@ from evaluation.kitscenes_benchmark import (
     load_benchmark_manifest,
     parse_benchmark_manifest,
     sample_uid_digest,
+    wgs84_trajectory_to_ego_xy,
 )
 
 
@@ -65,7 +66,7 @@ def test_manifest_parses_fixed_protocol_and_byte_digest(tmp_path):
     assert manifest.observation_steps == 40
     assert manifest.horizon_steps == (30, 50)
     assert digest == hashlib.sha256(raw).hexdigest()
-    assert EVALUATOR_VERSION == "kitscenes_control_displacement_v1"
+    assert EVALUATOR_VERSION == "kitscenes_pose_displacement_v1"
 
 
 @pytest.mark.parametrize(
@@ -165,6 +166,53 @@ def test_history_adapter_masks_only_context_older_than_four_seconds():
     assert torch.count_nonzero(limited[:, :24]) == 0
     assert torch.equal(limited[:, 24:], original.reshape(2, 64, 4)[:, 24:])
     assert torch.equal(history, original)
+
+
+def test_wgs84_trajectory_is_rotated_into_current_ego_frame():
+    pyproj = pytest.importorskip("pyproj")
+    to_wgs84 = pyproj.Transformer.from_crs(
+        "EPSG:32632", "EPSG:4326", always_xy=True
+    )
+    steps = np.arange(65, dtype=np.float64)
+    utm_paths = np.stack([
+        np.column_stack([
+            np.full(65, 450_000.0),
+            5_420_000.0 + steps,
+        ]),
+        np.column_stack([
+            450_000.0 + steps,
+            np.full(65, 5_420_000.0),
+        ]),
+    ])
+    gps = []
+    for path in utm_paths:
+        longitude, latitude = to_wgs84.transform(path[:, 0], path[:, 1])
+        gps.append(np.column_stack([latitude, longitude]))
+    gps = np.asarray(gps)
+    current_pose = np.column_stack([
+        gps[:, 0, 0],
+        gps[:, 0, 1],
+        np.array([0.0, 90.0]),
+    ])
+
+    xy = wgs84_trajectory_to_ego_xy(gps, current_pose)
+
+    assert xy.shape == (2, 64, 2)
+    assert xy[:, :, 0] == pytest.approx(
+        np.tile(np.arange(1, 65), (2, 1)), abs=1e-5
+    )
+    assert xy[:, :, 1] == pytest.approx(
+        np.zeros((2, 64)), abs=1e-5
+    )
+
+
+def test_wgs84_trajectory_rejects_mismatched_current_pose():
+    gps = np.zeros((1, 65, 2), dtype=np.float64)
+    pose = np.zeros((1, 3), dtype=np.float64)
+    pose[0, 0] = 1.0
+
+    with pytest.raises(ValueError, match="does not match"):
+        wgs84_trajectory_to_ego_xy(gps, pose)
 
 
 def test_displacement_metrics_pin_three_and_five_second_horizons():
