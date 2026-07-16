@@ -452,6 +452,10 @@ def test_overlay_launcher_guards_selected_recovery_checkpoints():
     ).read_text()
 
     assert "DATASET_VERSION: v2.2" in buildspec
+    assert (
+        'PYTHONPATH="${CODEBUILD_SRC_DIR}/Model:${CODEBUILD_SRC_DIR}:'
+        '${PYTHONPATH:-}"'
+    ) in buildspec
     for variable in (
         "SELECTED_MLFLOW_RUN_ID",
         "SELECTED_CHECKPOINT_URI",
