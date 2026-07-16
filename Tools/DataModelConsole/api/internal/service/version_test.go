@@ -1,26 +1,24 @@
 package service
 
 import (
+	"context"
 	"encoding/json"
 	"reflect"
 	"testing"
+	"time"
 )
 
-func TestValidDatasetIncludesPublishedKITScenesAlias(t *testing.T) {
+func TestValidDatasetAllowsOnlyCanonicalKITScenes(t *testing.T) {
 	service := &S3Service{}
-	for _, dataset := range []string{
-		"kitscenes",
-		"l2d",
-		"nvidia_av",
-		"kitscenes-smoke-8aec8355b116",
-	} {
-		if !service.ValidDataset(dataset) {
-			t.Fatalf("ValidDataset(%q) = false", dataset)
-		}
+	if !service.ValidDataset("kitscenes") {
+		t.Fatal(`ValidDataset("kitscenes") = false`)
 	}
 	for _, dataset := range []string{
 		"KITScenes",
+		"l2d",
+		"nvidia_av",
 		"kitscenes-smoke-8aec8355b11",
+		"kitscenes-smoke-8aec8355b116",
 		"kitscenes-smoke-8aec8355b1160",
 		"kitscenes-smoke-8aec8355b11g",
 		"kitscenes-smoke-8AEC8355B116",
@@ -29,6 +27,42 @@ func TestValidDatasetIncludesPublishedKITScenesAlias(t *testing.T) {
 		if service.ValidDataset(dataset) {
 			t.Fatalf("ValidDataset(%q) = true", dataset)
 		}
+	}
+}
+
+func TestListDatasetsReturnsOnlyPublishedKITScenes(t *testing.T) {
+	service := &S3Service{
+		versionCache: map[string]cachedVersion{
+			"kitscenes": {
+				version: "v2.2",
+				at:      time.Now(),
+			},
+		},
+	}
+
+	datasets := service.ListDatasets(context.Background())
+	if len(datasets) != 1 {
+		t.Fatalf("ListDatasets length = %d, want 1", len(datasets))
+	}
+	got := datasets[0]
+	if got.Name != "kitscenes" || got.Version != "v2.2" ||
+		got.Prefix != "kitscenes/v2.2/shards/" {
+		t.Fatalf("ListDatasets = %+v", datasets)
+	}
+}
+
+func TestListDatasetsOmitsUnpublishedKITScenes(t *testing.T) {
+	service := &S3Service{
+		versionCache: map[string]cachedVersion{
+			"kitscenes": {
+				version: fallbackVersion,
+				at:      time.Now(),
+			},
+		},
+	}
+
+	if datasets := service.ListDatasets(context.Background()); len(datasets) != 0 {
+		t.Fatalf("ListDatasets = %+v, want empty", datasets)
 	}
 }
 
