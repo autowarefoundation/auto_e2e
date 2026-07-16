@@ -12,10 +12,12 @@ pytest.importorskip("flytekit")
 from Platform.pipelines.overlay_tasks import (
     OVERLAY_TASK_ENV,
     _gate_token,
+    _metric_at_epoch,
     _parse_gate,
     _publish_overlay_set_ready,
     _put_dynamo_immutable,
     _put_s3_immutable,
+    _register_selected_checkpoint_version,
     _resolve_model_version_for_execution,
 )
 
@@ -203,22 +205,28 @@ class _MLflowClient:
         return self.runs[run_id]
 
 
-def _model_version(version, run_id, digest):
+def _model_version(version, run_id, digest, **tags):
     return SimpleNamespace(
         version=str(version),
         run_id=run_id,
-        tags={"checkpoint_sha256": digest} if digest else {},
+        source=tags.pop("source", ""),
+        tags={
+            **({"checkpoint_sha256": digest} if digest else {}),
+            **tags,
+        },
     )
 
 
-def _run(execution_id, *, dataset_version="v2.1"):
+def _run(execution_id="", *, dataset_version="v2.1"):
+    params = {
+        "data/dataset": "KIT-MRT/KITScenes-Multimodal",
+        "data/dataset_version": dataset_version,
+    }
+    if execution_id:
+        params["ctx/train_execution_id"] = execution_id
     return SimpleNamespace(
         data=SimpleNamespace(
-            params={
-                "ctx/train_execution_id": execution_id,
-                "data/dataset": "KIT-MRT/KITScenes-Multimodal",
-                "data/dataset_version": dataset_version,
-            },
+            params=params,
             tags={},
         )
     )
@@ -247,6 +255,24 @@ def test_full_run_model_resolution_uses_exact_execution_lineage():
     )
 
     assert _resolve(client) == "41"
+
+
+def test_full_run_model_resolution_prefers_version_lineage_tags():
+    client = _MLflowClient(
+        [
+            _model_version(
+                44,
+                "target",
+                "a" * 64,
+                train_execution_id="a1234567890123456789",
+                dataset="KIT-MRT/KITScenes-Multimodal",
+                dataset_version="v2.1",
+            ),
+        ],
+        {"target": _run()},
+    )
+
+    assert _resolve(client) == "44"
 
 
 def test_full_run_model_resolution_dedupes_identical_re_evaluation():
@@ -293,3 +319,145 @@ def test_full_run_model_resolution_checks_dataset_version():
 
     with pytest.raises(ValueError, match="different dataset coordinate"):
         _resolve(client)
+
+
+class _SelectedCheckpointClient:
+    def __init__(self, versions=()):
+        self.versions = list(versions)
+        self.created_versions = []
+        self.tags = {}
+
+    def get_registered_model(self, name):
+        assert name == "auto-e2e-driving-policy"
+        return SimpleNamespace(name=name)
+
+    def search_model_versions(self, query):
+        assert query == "name='auto-e2e-driving-policy'"
+        return self.versions
+
+    def create_model_version(self, *, name, source, run_id):
+        version = SimpleNamespace(
+            version="44",
+            source=source,
+            run_id=run_id,
+            tags={},
+        )
+        self.created_versions.append(version)
+        self.versions.append(version)
+        return version
+
+    def set_model_version_tag(self, name, version, key, value):
+        assert name == "auto-e2e-driving-policy"
+        assert version == "44"
+        self.tags[key] = value
+
+
+def _register_selected(client):
+    return _register_selected_checkpoint_version(
+        client,
+        registered_model_name="auto-e2e-driving-policy",
+        run_id="1" * 32,
+        checkpoint_uri=(
+            "s3://checkpoints/imitation-learning/"
+            f"{'1' * 32}/epoch-0004.pt"
+        ),
+        checkpoint_sha256="a" * 64,
+        checkpoint_epoch=4,
+        train_execution_id="a1234567890123456789",
+        dataset="KIT-MRT/KITScenes-Multimodal",
+        dataset_version="v2.2",
+        validation_ade=9.689568680297887,
+        validation_fde=29.656355911506907,
+    )
+
+
+def test_selected_checkpoint_registration_records_exact_provenance():
+    client = _SelectedCheckpointClient()
+
+    assert _register_selected(client) == "44"
+    assert len(client.created_versions) == 1
+    assert client.tags == {
+        "checkpoint_epoch": "4",
+        "checkpoint_s3_uri": (
+            "s3://checkpoints/imitation-learning/"
+            f"{'1' * 32}/epoch-0004.pt"
+        ),
+        "checkpoint_sha256": "a" * 64,
+        "train_execution_id": "a1234567890123456789",
+        "dataset": "KIT-MRT/KITScenes-Multimodal",
+        "dataset_version": "v2.2",
+        "checkpoint_role": "selected-overlay",
+        "validation_ade": "9.689568680297887",
+        "validation_fde": "29.656355911506907",
+    }
+
+
+def test_selected_checkpoint_registration_reuses_and_preserves_roles():
+    source = (
+        "s3://checkpoints/imitation-learning/"
+        f"{'1' * 32}/epoch-0004.pt"
+    )
+    version = _model_version(
+        44,
+        "1" * 32,
+        "a" * 64,
+        source=source,
+        checkpoint_epoch="4",
+        checkpoint_s3_uri=source,
+        train_execution_id="a1234567890123456789",
+        dataset="KIT-MRT/KITScenes-Multimodal",
+        dataset_version="v2.2",
+        checkpoint_role="best",
+    )
+    client = _SelectedCheckpointClient([version])
+
+    assert _register_selected(client) == "44"
+    assert client.created_versions == []
+    assert client.tags["checkpoint_role"] == "best,selected-overlay"
+
+
+def test_selected_checkpoint_registration_rejects_source_reassignment():
+    source = (
+        "s3://checkpoints/imitation-learning/"
+        f"{'1' * 32}/epoch-0004.pt"
+    )
+    client = _SelectedCheckpointClient([
+        _model_version(
+            44,
+            "2" * 32,
+            "a" * 64,
+            source=source,
+        )
+    ])
+
+    with pytest.raises(RuntimeError, match="different MLflow run"):
+        _register_selected(client)
+
+
+def test_metric_at_epoch_uses_latest_finite_retry():
+    client = SimpleNamespace(
+        get_metric_history=lambda run_id, key: [
+            SimpleNamespace(step=3, value=1.0, timestamp=1),
+            SimpleNamespace(step=4, value=9.7, timestamp=2),
+            SimpleNamespace(step=4, value=9.6, timestamp=3),
+        ]
+    )
+
+    assert _metric_at_epoch(
+        client,
+        run_id="1" * 32,
+        metric_key="val/ade",
+        epoch=4,
+    ) == 9.6
+
+
+def test_metric_at_epoch_rejects_missing_epoch():
+    client = SimpleNamespace(get_metric_history=lambda run_id, key: [])
+
+    with pytest.raises(ValueError, match="has no 'val/ade' at epoch 4"):
+        _metric_at_epoch(
+            client,
+            run_id="1" * 32,
+            metric_key="val/ade",
+            epoch=4,
+        )
