@@ -444,9 +444,10 @@ func TestIndexWithoutExactGeoDoesNotMutateCachedIndex(t *testing.T) {
 		TimestampNS:           42,
 	}
 	cached := &model.ShardIndex{
-		Fps:     10,
-		Version: "v2.1",
-		Shard:   "train-000000.tar",
+		Fps:               10,
+		Version:           "v2.1",
+		Shard:             "train-000000.tar",
+		BlobRangesAllowed: true,
 		Samples: []model.IndexSample{{
 			Key:         "l2d-v1-e000001-f000042",
 			SampleUID:   "l2d-v1-e000001-f000042",
@@ -466,6 +467,12 @@ func TestIndexWithoutExactGeoDoesNotMutateCachedIndex(t *testing.T) {
 	if redacted.Samples[0].PoseCurrent != nil {
 		t.Fatal("redacted index still contains exact pose")
 	}
+	if redacted.BlobRangesAllowed {
+		t.Fatal("redacted index still permits ranges spanning exact geo")
+	}
+	if !cached.BlobRangesAllowed {
+		t.Fatal("redaction mutated cached blob range capability")
+	}
 	if cached.Samples[0].PoseCurrent != pose {
 		t.Fatal("redaction mutated the cached index")
 	}
@@ -483,6 +490,15 @@ func TestIndexWithoutExactGeoDoesNotMutateCachedIndex(t *testing.T) {
 	}
 	if len(cached.Samples[0].Members) != 3 {
 		t.Fatal("redaction mutated cached member map")
+	}
+
+	publicOnly := &model.ShardIndex{Samples: []model.IndexSample{{
+		Members: map[string]model.MemberRange{
+			"cam_0.jpg": {Offset: 512, Size: 128},
+		},
+	}}}
+	if !indexWithoutExactGeo(publicOnly).BlobRangesAllowed {
+		t.Fatal("redaction disabled ranges for a shard without exact geo")
 	}
 }
 
