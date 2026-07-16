@@ -31,6 +31,7 @@ class ShardSample:
     frame_idx: int
     dataset: str
     camera_jpeg: bytes
+    initial_speed: float
     target_controls: np.ndarray
     calibration: Mapping[str, Any]
 
@@ -59,6 +60,18 @@ class OverlayReader:
         if row is None:
             raise KeyError(f"overlay has no row for sample_uid {sample_uid!r}")
         return self.decoded.controls[row, seed_index], float(self.decoded.v0[row])
+
+    def validate_sample_uids(self, sample_uids: list[str]) -> None:
+        expected = {sample_uid_hash(sample_uid) for sample_uid in sample_uids}
+        if len(expected) != len(sample_uids):
+            raise ValueError("shard sample_uid values are not hash-unique")
+        actual = set(self.rows_by_hash)
+        if expected != actual:
+            raise ValueError(
+                "overlay directory does not exactly match the shard samples: "
+                f"{len(expected - actual)} missing, "
+                f"{len(actual - expected)} unexpected"
+            )
 
 
 def load_overlay(path: str | Path) -> OverlayReader:
@@ -172,12 +185,15 @@ def read_shard_samples(
                 f"sample {key!r} ego payload has {ego.size} floats, "
                 f"expected {_EGO_FLOATS}"
             )
+        if not np.isfinite(ego).all():
+            raise ValueError(f"sample {key!r} ego payload is not finite")
         samples.append(ShardSample(
             sample_uid=sample_uid,
             scene_uid=scene_uid,
             frame_idx=frame_idx,
             dataset=dataset,
             camera_jpeg=record["camera"],
+            initial_speed=float(ego[_TARGET_OFFSET - 4]),
             target_controls=ego[_TARGET_OFFSET:].reshape(64, 2).copy(),
             calibration=calibration,
         ))
