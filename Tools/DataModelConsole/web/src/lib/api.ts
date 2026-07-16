@@ -380,6 +380,16 @@ export function getRigProjection(
   );
 }
 
+export function getShardRigProjection(
+  dataset: string,
+  shard: string,
+  version?: string,
+): Promise<RigProjectionDocument> {
+  return apiFetch<RigProjectionDocument>(
+    `/api/v1/datasets/${encodeURIComponent(dataset)}/shards/${encodeURIComponent(shard)}/rig-projection${versionParam(version, "?")}`,
+  );
+}
+
 export function getGeoStats(
   dataset: string,
   version?: string,
