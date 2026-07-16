@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import os
-from typing import List
+from typing import List, Optional
 
 from flytekit import Resources, task
 from flytekit.types.directory import FlyteDirectory
@@ -21,12 +21,13 @@ DATA_PREP_IMAGE = os.environ.get(
     requests=Resources(cpu="2", mem="4Gi"),
     limits=Resources(cpu="2", mem="4Gi"),
     cache=True,
-    cache_version="trajectory-report-v1",
+    cache_version="trajectory-report-v2",
     cache_serialize=True,
 )
 def export_trajectory_report(
     shard: FlyteFile,
     overlay: FlyteFile,
+    selection_manifest: Optional[FlyteFile] = None,
     scene_uids: List[str] = [],
     seed_index: int = 0,
     camera_index: int = 0,
@@ -37,14 +38,23 @@ def export_trajectory_report(
     import tempfile
     from pathlib import Path
 
-    from Tools.trajectory_visualization.report import generate_report
+    from Tools.trajectory_visualization.report import (
+        generate_report,
+        load_scene_selections,
+    )
 
     output = Path(tempfile.mkdtemp(prefix="trajectory-export-")) / "report"
+    scene_selections = (
+        load_scene_selections(selection_manifest.download())
+        if selection_manifest is not None
+        else None
+    )
     manifest = generate_report(
         shard_path=shard.download(),
         overlay_path=overlay.download(),
         output_dir=output,
         scene_uids=scene_uids or None,
+        scene_selections=scene_selections,
         seed_index=seed_index,
         camera_index=camera_index,
         max_frames_per_scene=max_frames_per_scene,
