@@ -3858,9 +3858,9 @@ def wf_precompute_overlays(
     """Ops-only canonical trajectory overlay precompute.
 
     The Console never invokes this workflow. It resolves one immutable MLflow
-    model version, marks the overlay set ``building``, runs one coarse GPU task
-    per packed partition (loading the checkpoint once for every tar in that
-    partition), writes S3 bodies before Dynamo pointers, then publishes the
+    model version, marks the overlay set ``building``, then runs one resumable
+    GPU task over every packed partition so the checkpoint is loaded once for
+    the FullSet. It writes S3 bodies before Dynamo pointers, then publishes the
     audit manifest and flips ``OVLSET`` to ``ready`` last.
     """
     from Platform.pipelines.overlay_tasks import (
@@ -3889,30 +3889,28 @@ def wf_precompute_overlays(
         base_seeds=base_seeds,
         sampler=sampler,
     )
-    results: List[FlyteFile] = []
-    for partition in shards:
-        results.append(precompute_overlay_partition(
-            checkpoint=resolved.checkpoint,
-            model_metadata=resolved.metadata,
-            prepare_gate=gate,
-            shard_dir=partition,
-            dataset=dataset,
-            dataset_version=dataset_version,
-            dataset_manifest_digest=dataset_manifest_digest,
-            preprocessing_contract_digest=preprocessing_contract_digest,
-            model_inference_code_digest=model_inference_code_digest,
-            container_image_digest=container_image_digest,
-            artifacts_bucket=artifacts_bucket,
-            dynamo_table=dynamo_table,
-            aws_region=aws_region,
-            base_seeds=base_seeds,
-            batch_size=batch_size,
-            num_workers=num_workers,
-            sampler=sampler,
-        ))
+    result = precompute_overlay_partition(
+        checkpoint=resolved.checkpoint,
+        model_metadata=resolved.metadata,
+        prepare_gate=gate,
+        shard_dirs=shards,
+        dataset=dataset,
+        dataset_version=dataset_version,
+        dataset_manifest_digest=dataset_manifest_digest,
+        preprocessing_contract_digest=preprocessing_contract_digest,
+        model_inference_code_digest=model_inference_code_digest,
+        container_image_digest=container_image_digest,
+        artifacts_bucket=artifacts_bucket,
+        dynamo_table=dynamo_table,
+        aws_region=aws_region,
+        base_seeds=base_seeds,
+        batch_size=batch_size,
+        num_workers=num_workers,
+        sampler=sampler,
+    )
     return finalize_overlay_set(
         model_metadata=resolved.metadata,
-        partition_results=results,
+        partition_results=[result],
         prepare_gate=gate,
         dataset=dataset,
         dataset_version=dataset_version,
@@ -4056,6 +4054,66 @@ def wf_publish_full_run_overlays(
 
     model_version = resolve_overlay_model_version(
         registered_model_name=registered_model_name,
+        train_execution_id=full_run_execution_id,
+        expected_dataset=source_dataset,
+        expected_dataset_version=dataset_version,
+    )
+    return wf_publish_and_precompute_overlays(
+        shards=shards,
+        model_version=model_version,
+        preprocessing_contract_digest=preprocessing_contract_digest,
+        model_inference_code_digest=model_inference_code_digest,
+        container_image_digest=container_image_digest,
+        datasets_bucket=datasets_bucket,
+        artifacts_bucket=artifacts_bucket,
+        expected_train_execution_id=full_run_execution_id,
+        published_dataset=published_dataset,
+        registered_model_name=registered_model_name,
+        dataset_version=dataset_version,
+        dynamo_table=dynamo_table,
+        aws_region=aws_region,
+        base_seeds=base_seeds,
+        batch_size=batch_size,
+        num_workers=num_workers,
+        copy_workers=copy_workers,
+    )
+
+
+@workflow
+def wf_publish_selected_checkpoint_overlays(
+    shards: List[FlyteDirectory],
+    full_run_execution_id: str,
+    mlflow_run_id: str,
+    checkpoint_uri: str,
+    checkpoint_sha256: str,
+    checkpoint_epoch: int,
+    preprocessing_contract_digest: str,
+    model_inference_code_digest: str,
+    container_image_digest: str,
+    datasets_bucket: str,
+    artifacts_bucket: str,
+    published_dataset: str = "kitscenes",
+    registered_model_name: str = "auto-e2e-driving-policy",
+    source_dataset: str = Dataset.KITSCENES.value,
+    dataset_version: str = DATASET_PACK_VERSION,
+    dynamo_table: str = "auto-e2e-console",
+    aws_region: str = "us-west-2",
+    base_seeds: List[int] = [0],
+    batch_size: int = 32,
+    num_workers: int = 4,
+    copy_workers: int = 16,
+) -> PublishedOverlayOutput:
+    """Publish a verified checkpoint while its parent Training still runs."""
+    from Platform.pipelines.overlay_tasks import (
+        register_selected_overlay_checkpoint,
+    )
+
+    model_version = register_selected_overlay_checkpoint(
+        registered_model_name=registered_model_name,
+        run_id=mlflow_run_id,
+        checkpoint_uri=checkpoint_uri,
+        checkpoint_sha256=checkpoint_sha256,
+        checkpoint_epoch=checkpoint_epoch,
         train_execution_id=full_run_execution_id,
         expected_dataset=source_dataset,
         expected_dataset_version=dataset_version,
