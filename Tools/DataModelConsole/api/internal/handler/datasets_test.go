@@ -222,11 +222,11 @@ func TestGetImageRequiresValidRangeBeforeS3Access(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			request := httptest.NewRequest(
 				"GET",
-				"/api/v1/datasets/l2d/shards/train-000000.tar/samples/sample/image/cam_0"+tt.query,
+				"/api/v1/datasets/kitscenes/shards/train-000000.tar/samples/sample/image/cam_0"+tt.query,
 				nil,
 			)
 			routeContext := chi.NewRouteContext()
-			routeContext.URLParams.Add("name", "l2d")
+			routeContext.URLParams.Add("name", "kitscenes")
 			routeContext.URLParams.Add("shard", "train-000000.tar")
 			routeContext.URLParams.Add("key", "sample")
 			routeContext.URLParams.Add("cam", "cam_0")
