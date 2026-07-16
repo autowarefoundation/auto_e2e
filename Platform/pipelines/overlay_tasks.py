@@ -36,6 +36,8 @@ OVERLAY_CACHE_VERSION = (
 )
 _MODEL_NAME_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 _EXECUTION_ID_RE = re.compile(r"^a[a-z0-9]{19}$")
+_RUN_ID_RE = re.compile(r"^[0-9a-f]{32}$")
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
 def _large_shm_pod_template():
@@ -356,6 +358,281 @@ def _parse_gate(value: str) -> dict[str, str]:
     return gate
 
 
+def _version_tags(version: Any) -> Mapping[str, str]:
+    return getattr(version, "tags", {}) or {}
+
+
+def _version_provenance(
+    version: Any,
+    run: Any,
+) -> tuple[str, str, str]:
+    """Resolve immutable lineage tags before legacy run parameters."""
+    tags = _version_tags(version)
+    params = run.data.params
+    return (
+        str(
+            tags.get("train_execution_id")
+            or params.get("ctx/train_execution_id", "")
+        ),
+        str(tags.get("dataset") or params.get("data/dataset", "")),
+        str(
+            tags.get("dataset_version")
+            or params.get("data/dataset_version", "")
+        ),
+    )
+
+
+def _metric_at_epoch(
+    client,
+    *,
+    run_id: str,
+    metric_key: str,
+    epoch: int,
+) -> float:
+    import math
+
+    values = [
+        metric
+        for metric in client.get_metric_history(run_id, metric_key)
+        if int(metric.step) == epoch
+    ]
+    if not values:
+        raise ValueError(
+            f"MLflow run {run_id} has no {metric_key!r} at epoch {epoch}"
+        )
+    values.sort(key=lambda metric: int(getattr(metric, "timestamp", 0)))
+    value = float(values[-1].value)
+    if not math.isfinite(value):
+        raise ValueError(
+            f"MLflow run {run_id} has non-finite {metric_key!r} "
+            f"at epoch {epoch}"
+        )
+    return value
+
+
+def _register_selected_checkpoint_version(
+    client,
+    *,
+    registered_model_name: str,
+    run_id: str,
+    checkpoint_uri: str,
+    checkpoint_sha256: str,
+    checkpoint_epoch: int,
+    train_execution_id: str,
+    dataset: str,
+    dataset_version: str,
+    validation_ade: float,
+    validation_fde: float,
+) -> str:
+    """Create or reuse one registry coordinate for an operator selection."""
+    try:
+        client.get_registered_model(registered_model_name)
+    except Exception:
+        try:
+            client.create_registered_model(registered_model_name)
+        except Exception:
+            client.get_registered_model(registered_model_name)
+
+    expected_identity = {
+        "checkpoint_epoch": str(checkpoint_epoch),
+        "checkpoint_s3_uri": checkpoint_uri,
+        "checkpoint_sha256": checkpoint_sha256,
+        "train_execution_id": train_execution_id,
+        "dataset": dataset,
+        "dataset_version": dataset_version,
+    }
+    matching = []
+    for version in client.search_model_versions(
+        f"name='{registered_model_name}'"
+    ):
+        if str(version.source or "") != checkpoint_uri:
+            continue
+        if str(version.run_id) != run_id:
+            raise RuntimeError(
+                "checkpoint source is already registered to a different "
+                f"MLflow run: {version.run_id}"
+            )
+        tags = _version_tags(version)
+        conflicts = [
+            key
+            for key, value in expected_identity.items()
+            if tags.get(key) not in (None, value)
+        ]
+        if conflicts:
+            raise RuntimeError(
+                "registered checkpoint has conflicting provenance tags: "
+                + ", ".join(sorted(conflicts))
+            )
+        matching.append(version)
+
+    if len(matching) > 1:
+        raise RuntimeError(
+            "checkpoint source has multiple MLflow model versions"
+        )
+    if matching:
+        version = str(matching[0].version)
+        roles = set(
+            filter(None, _version_tags(matching[0]).get(
+                "checkpoint_role", ""
+            ).split(","))
+        )
+    else:
+        registered = client.create_model_version(
+            name=registered_model_name,
+            source=checkpoint_uri,
+            run_id=run_id,
+        )
+        version = str(registered.version)
+        roles = set()
+
+    roles.add("selected-overlay")
+    tags = {
+        **expected_identity,
+        "checkpoint_role": ",".join(sorted(roles)),
+        "validation_ade": str(validation_ade),
+        "validation_fde": str(validation_fde),
+    }
+    for key, value in tags.items():
+        client.set_model_version_tag(
+            registered_model_name, version, key, value
+        )
+    return version
+
+
+@task(
+    container_image=EVAL_IMAGE,
+    requests=Resources(cpu="1", mem="2Gi"),
+    limits=Resources(cpu="1", mem="2Gi"),
+    environment={
+        **OVERLAY_TASK_ENV,
+        "MLFLOW_TRACKING_URI": MLFLOW_URI,
+    },
+)
+def register_selected_overlay_checkpoint(
+    registered_model_name: str,
+    run_id: str,
+    checkpoint_uri: str,
+    checkpoint_sha256: str,
+    checkpoint_epoch: int,
+    train_execution_id: str,
+    expected_dataset: str,
+    expected_dataset_version: str,
+) -> str:
+    """Verify and register an immutable in-progress Training checkpoint."""
+    import tempfile
+    from pathlib import Path
+    from urllib.parse import urlparse
+
+    import boto3
+    import mlflow
+    from mlflow.tracking import MlflowClient
+
+    from Platform.pipelines.inference import sha256_file
+    from Platform.pipelines.training_checkpoint import (
+        CHECKPOINT_SCHEMA_VERSION,
+        checkpoint_key,
+    )
+
+    if not _MODEL_NAME_RE.fullmatch(registered_model_name):
+        raise ValueError(
+            f"invalid registered model name {registered_model_name!r}"
+        )
+    if not _RUN_ID_RE.fullmatch(run_id):
+        raise ValueError(f"invalid MLflow run ID {run_id!r}")
+    if not _EXECUTION_ID_RE.fullmatch(train_execution_id):
+        raise ValueError(f"invalid Flyte execution ID {train_execution_id!r}")
+    if not _SHA256_RE.fullmatch(checkpoint_sha256):
+        raise ValueError("checkpoint_sha256 must be lowercase SHA-256")
+    if checkpoint_epoch <= 0:
+        raise ValueError("checkpoint_epoch must be positive")
+    for name, value in (
+        ("expected_dataset", expected_dataset),
+        ("expected_dataset_version", expected_dataset_version),
+    ):
+        _required(value, name)
+
+    parsed = urlparse(checkpoint_uri)
+    expected_key = checkpoint_key(run_id, checkpoint_epoch)
+    if (
+        parsed.scheme != "s3"
+        or not parsed.netloc
+        or parsed.params
+        or parsed.query
+        or parsed.fragment
+        or parsed.path.lstrip("/") != expected_key
+    ):
+        raise ValueError(
+            "checkpoint_uri is not the canonical immutable checkpoint key "
+            f"for run {run_id} epoch {checkpoint_epoch}"
+        )
+
+    s3 = boto3.client("s3")
+    head = s3.head_object(Bucket=parsed.netloc, Key=expected_key)
+    metadata = head.get("Metadata", {})
+    if metadata.get("checkpoint-schema") != CHECKPOINT_SCHEMA_VERSION:
+        raise ValueError("checkpoint S3 object has an unsupported schema")
+    if metadata.get("sha256") != checkpoint_sha256:
+        raise ValueError(
+            "checkpoint SHA-256 differs from immutable S3 metadata"
+        )
+    if int(head.get("ContentLength", 0)) <= 0:
+        raise ValueError("checkpoint S3 object is empty")
+
+    output_dir = Path(tempfile.mkdtemp(prefix="selected-overlay-model-"))
+    checkpoint_path = output_dir / f"epoch-{checkpoint_epoch:04d}.pt"
+    s3.download_file(parsed.netloc, expected_key, str(checkpoint_path))
+    actual_sha256 = sha256_file(checkpoint_path)
+    if actual_sha256 != checkpoint_sha256:
+        raise ValueError(
+            "downloaded checkpoint SHA-256 differs from the selected digest: "
+            f"{actual_sha256} != {checkpoint_sha256}"
+        )
+    if checkpoint_path.stat().st_size != int(head["ContentLength"]):
+        raise ValueError(
+            "downloaded checkpoint size differs from immutable S3 metadata"
+        )
+
+    mlflow.set_tracking_uri(os.environ["MLFLOW_TRACKING_URI"])
+    client = MlflowClient()
+    run = client.get_run(run_id)
+    params = run.data.params
+    dataset = str(params.get("data/dataset", ""))
+    dataset_version = str(params.get("data/dataset_version", ""))
+    if (
+        dataset != expected_dataset
+        or dataset_version != expected_dataset_version
+    ):
+        raise ValueError(
+            "selected checkpoint has a different dataset coordinate: "
+            f"{dataset}/{dataset_version}"
+        )
+    validation_ade = _metric_at_epoch(
+        client,
+        run_id=run_id,
+        metric_key="val/ade",
+        epoch=checkpoint_epoch,
+    )
+    validation_fde = _metric_at_epoch(
+        client,
+        run_id=run_id,
+        metric_key="val/fde",
+        epoch=checkpoint_epoch,
+    )
+    return _register_selected_checkpoint_version(
+        client,
+        registered_model_name=registered_model_name,
+        run_id=run_id,
+        checkpoint_uri=checkpoint_uri,
+        checkpoint_sha256=checkpoint_sha256,
+        checkpoint_epoch=checkpoint_epoch,
+        train_execution_id=train_execution_id,
+        dataset=dataset,
+        dataset_version=dataset_version,
+        validation_ade=validation_ade,
+        validation_fde=validation_fde,
+    )
+
+
 def _resolve_model_version_for_execution(
     client,
     *,
@@ -376,11 +653,11 @@ def _resolve_model_version_for_execution(
     )
     for version in versions:
         run = client.get_run(version.run_id)
-        params = run.data.params
-        if params.get("ctx/train_execution_id") != train_execution_id:
+        version_execution, dataset, dataset_version = _version_provenance(
+            version, run
+        )
+        if version_execution != train_execution_id:
             continue
-        dataset = params.get("data/dataset", "")
-        dataset_version = params.get("data/dataset_version", "")
         if dataset != expected_dataset or dataset_version != expected_dataset_version:
             raise ValueError(
                 "Full Run model has a different dataset coordinate: "
@@ -392,8 +669,9 @@ def _resolve_model_version_for_execution(
             raise ValueError(
                 f"MLflow model version is not numeric: {version.version!r}"
             ) from exc
-        version_tags = getattr(version, "tags", {}) or {}
+        version_tags = _version_tags(version)
         run_tags = getattr(run.data, "tags", {}) or {}
+        params = run.data.params
         digest = (
             version_tags.get("checkpoint_sha256")
             or run_tags.get("checkpoint_sha256")
@@ -492,8 +770,9 @@ def resolve_overlay_model(
         )
     checkpoint_sha256 = sha256_file(checkpoint_path)
 
+    version_tags = _version_tags(registered)
     advertised = (
-        registered.tags.get("checkpoint_sha256")
+        version_tags.get("checkpoint_sha256")
         or run.data.tags.get("checkpoint_sha256")
         or run.data.params.get("model/checkpoint_sha256")
     )
@@ -505,7 +784,9 @@ def resolve_overlay_model(
 
     params = run.data.params
     metrics = run.data.metrics
-    train_execution_id = params.get("ctx/train_execution_id", "")
+    train_execution_id, source_dataset, source_dataset_version = (
+        _version_provenance(registered, run)
+    )
     if (
         expected_train_execution_id
         and train_execution_id != expected_train_execution_id
@@ -522,11 +803,15 @@ def resolve_overlay_model(
         "checkpoint_uri": checkpoint_uri,
         "checkpoint_sha256": checkpoint_sha256,
         "model_name": params.get("model/backbone", registered_model_name),
-        "eval_ade": metrics.get("eval/ade"),
-        "eval_fde": metrics.get("eval/fde"),
+        "eval_ade": version_tags.get(
+            "validation_ade", metrics.get("eval/ade")
+        ),
+        "eval_fde": version_tags.get(
+            "validation_fde", metrics.get("eval/fde")
+        ),
         "eval_gate_pass": metrics.get("eval/gate_pass"),
-        "dataset_source": params.get("data/dataset", ""),
-        "dataset_version_source": params.get("data/dataset_version", ""),
+        "dataset_source": source_dataset,
+        "dataset_version_source": source_dataset_version,
         "train_execution_id": train_execution_id,
         "val_fraction": params.get("train/val_fraction", "0"),
         "resolved_at": _utc_now(),
