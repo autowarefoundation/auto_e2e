@@ -36,7 +36,7 @@ from Tools.trajectory_visualization.rendering import (
 )
 
 
-REPORT_SCHEMA_VERSION = 1
+REPORT_SCHEMA_VERSION = 2
 _SAFE_SEGMENT = re.compile(r"^[A-Za-z0-9_-]+$")
 _MAX_SELECTION_BYTES = 1024 * 1024
 VideoWriter = Callable[[Path, Iterable[Image.Image], float], None]
