@@ -82,3 +82,31 @@ def test_intervention_does_not_leak_buffer_state(build_mock_model, device):
     d1 = reasoning_intervention_delta(model, *inp)
     d2 = reasoning_intervention_delta(model, *inp)
     assert d1["trajectory_l2"] == pytest.approx(d2["trajectory_l2"], abs=1e-6)
+
+
+def test_intervention_delta_responds_to_live_coupling(build_mock_model, device):
+    # Positive control (Design/horizon_reasoning_architecture.md §9.3): every test
+    # above pins the ZERO side, so an instrument that always read zero would pass
+    # the whole suite. Force the zero-init coupling open and require the delta to
+    # register — and to grow with the coupling strength.
+    model = build_mock_model(
+        num_views=NUM_VIEWS, device=device,
+        enable_reasoning=True, reasoning_mode="pooled_latent",
+    )
+    alphas = [(n, p) for n, p in model.named_parameters()
+              if n.endswith("reasoning_coupling.alpha")]
+    # Exactly one: MapBEVFusion has its own unrelated `alpha` that must not match.
+    assert len(alphas) == 1, [n for n, _ in alphas]
+    _, alpha = alphas[0]
+    inp = _inputs(device=device)
+
+    with torch.no_grad():
+        alpha.fill_(0.1)
+    d_small = reasoning_intervention_delta(model, *inp)["trajectory_l2"]
+    with torch.no_grad():
+        alpha.fill_(1.0)
+    d_large = reasoning_intervention_delta(model, *inp)["trajectory_l2"]
+
+    # Same tolerance the zero-at-init tests use: a live coupling must clear it.
+    assert d_small > 1e-5
+    assert d_large > d_small
