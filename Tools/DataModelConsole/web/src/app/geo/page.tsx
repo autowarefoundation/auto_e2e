@@ -118,7 +118,7 @@ function GeoPageInner() {
     if (catalogLoading || catalogError || datasets.length === 0) return "";
     return (
       datasets.find((item) => item.name === urlDataset)?.name ??
-      datasets.find((item) => item.name === "l2d")?.name ??
+      datasets.find((item) => item.name === "kitscenes")?.name ??
       datasets[0].name
     );
   }, [catalogError, catalogLoading, datasets, urlDataset]);
