@@ -508,13 +508,6 @@ func (s *S3Service) GeoHeatmap(ctx context.Context, dataset, version string) ([]
 	return body, version, err
 }
 
-func (s *S3Service) RigProjection(
-	_ context.Context,
-	_, _ string,
-) ([]byte, string, error) {
-	return nil, "", ErrNotFound
-}
-
 // ShardRigProjection returns the projection artifact bound to one immutable shard.
 func (s *S3Service) ShardRigProjection(
 	ctx context.Context,
