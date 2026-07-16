@@ -54,7 +54,7 @@ spec:
       requirements:
         - key: node.kubernetes.io/instance-type
           operator: In
-          values: ["g6e.2xlarge", "g6e.4xlarge", "g6e.8xlarge", "g6e.12xlarge"]
+          values: ["g6e.2xlarge", "g6e.4xlarge", "g6e.8xlarge", "g6e.12xlarge", "g6e.24xlarge"]
         - key: kubernetes.io/arch
           operator: In
           values: ["amd64"]
@@ -68,7 +68,7 @@ spec:
         - key: nvidia.com/gpu
           effect: NoSchedule
   limits:
-    cpu: "48"
-    memory: 384Gi
+    cpu: "96"
+    memory: 768Gi
     nodes: "1"
     nvidia.com/gpu: "4"
