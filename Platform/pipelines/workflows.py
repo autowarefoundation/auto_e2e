@@ -3162,6 +3162,7 @@ def wf_create_publish_and_precompute_overlays(
 def wf_export_trajectory_report(
     shard: FlyteFile,
     overlay: FlyteFile,
+    selection_manifest: Optional[FlyteFile] = None,
     scene_uids: List[str] = [],
     seed_index: int = 0,
     camera_index: int = 0,
@@ -3176,6 +3177,7 @@ def wf_export_trajectory_report(
     return export_trajectory_report(
         shard=shard,
         overlay=overlay,
+        selection_manifest=selection_manifest,
         scene_uids=scene_uids,
         seed_index=seed_index,
         camera_index=camera_index,
