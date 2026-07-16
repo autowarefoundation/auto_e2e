@@ -13,6 +13,8 @@ hash split. These tests pin the invariants the fair comparison relies on:
 
 from __future__ import annotations
 
+import pickle
+
 import pytest
 
 # pre_extracted imports webdataset at module load; it is not in the core CI
@@ -21,7 +23,11 @@ import pytest
 # hashing, but it lives in pre_extracted, so we guard the import.
 pytest.importorskip("webdataset")
 
-from data_parsing.pre_extracted import _split_bucket, _split_keep  # noqa: E402
+from data_parsing.pre_extracted import (  # noqa: E402
+    _SampleUidFilter,
+    _split_bucket,
+    _split_keep,
+)
 
 import json
 
@@ -97,3 +103,18 @@ def test_legacy_shard_without_split_group_falls_back_to_key():
     val_keep = _split_keep("val", 0.2)
     legacy = {"__key__": "s00000001", "meta.json": json.dumps({"idx": 1}).encode()}
     assert train_keep(legacy) != val_keep(legacy)  # placed on exactly one side
+
+
+def test_explicit_benchmark_manifest_filters_by_sample_uid():
+    keep = _SampleUidFilter(frozenset({"sample-a", "sample-c"}))
+
+    assert keep({"__key__": "sample-a"}) is True
+    assert keep({"__key__": "sample-b"}) is False
+    assert keep({}) is False
+
+
+def test_explicit_benchmark_filter_is_picklable_for_loader_workers():
+    keep = _SampleUidFilter(frozenset({"sample-a"}))
+    restored = pickle.loads(pickle.dumps(keep))
+
+    assert restored({"__key__": "sample-a"}) is True
