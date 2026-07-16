@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 import tarfile
@@ -83,6 +84,73 @@ def _write_shard(
             )
 
 
+def _write_publication_manifests(
+    root: Path,
+    *,
+    shard: Path,
+    overlay: Path,
+    sample_count: int,
+    seeds: list[int] | None = None,
+) -> tuple[Path, Path]:
+    seeds = seeds or [0]
+    dataset_manifest = {
+        "schema_version": "v1",
+        "status": "ready",
+        "dataset": "yaak-ai/L2D",
+        "version": "v2.1",
+        "total_samples": sample_count,
+        "shard_entries": [{
+            "name": shard.name,
+            "key": f"l2d/v2.1/shards/{shard.name}",
+            "byte_size": shard.stat().st_size,
+            "content_identity": "1" * 64,
+        }],
+    }
+    dataset_path = root / "dataset-manifest.json"
+    dataset_path.write_text(json.dumps(
+        dataset_manifest,
+        indent=2,
+        sort_keys=True,
+    ))
+    dataset_sha256 = hashlib.sha256(dataset_path.read_bytes()).hexdigest()
+
+    overlay_payload = overlay.read_bytes()
+    overlay_manifest = {
+        "schema_version": "v1",
+        "status": "ready",
+        "registered_model_name": "AutoE2E",
+        "model_version": 7,
+        "run_id": "run-123",
+        "model_artifact_sha256": "2" * 64,
+        "dataset": "yaak-ai/L2D",
+        "version": "v2.1",
+        "dataset_manifest_sha256": dataset_sha256,
+        "request_identity": "3" * 64,
+        "cache_identity": "4" * 64,
+        "seeds": seeds,
+        "sampler": "model-default",
+        "num_inference_steps": 1,
+        "inference_contract_version": "v1",
+        "noise_policy_version": "v1",
+        "overlay_binary_schema": "v1",
+        "shards": [{
+            "shard": shard.name,
+            "s3_key": "overlays/example/overlay.bin.gz",
+            "sha256": hashlib.sha256(overlay_payload).hexdigest(),
+            "byte_size": len(overlay_payload),
+            "sample_count": sample_count,
+            "seeds": seeds,
+        }],
+    }
+    overlay_path = root / "overlay-manifest.json"
+    overlay_path.write_text(json.dumps(
+        overlay_manifest,
+        indent=2,
+        sort_keys=True,
+    ))
+    return dataset_path, overlay_path
+
+
 def test_report_integrator_matches_evaluation_reference():
     controls = np.zeros((64, 2), dtype=np.float32)
     controls[:, 0] = 0.25
@@ -121,6 +189,12 @@ def test_report_joins_aovl_by_uid_and_writes_scene_artifacts(tmp_path):
         controls,
         np.array([8.0, 9.0], dtype=np.float32),
     )
+    dataset_manifest, overlay_manifest = _write_publication_manifests(
+        tmp_path,
+        shard=shard,
+        overlay=overlay,
+        sample_count=2,
+    )
 
     rendered_sizes = []
 
@@ -135,6 +209,8 @@ def test_report_joins_aovl_by_uid_and_writes_scene_artifacts(tmp_path):
         shard_path=shard,
         overlay_path=overlay,
         output_dir=output,
+        dataset_manifest_path=dataset_manifest,
+        overlay_manifest_path=overlay_manifest,
         video_writer=fake_video_writer,
     )
 
@@ -150,6 +226,9 @@ def test_report_joins_aovl_by_uid_and_writes_scene_artifacts(tmp_path):
         manifest["render"]["camera_projection_status"]
         == "unsupported_pseudo_geometry"
     )
+    assert manifest["publication"]["model"]["artifact_sha256"] == "2" * 64
+    assert manifest["publication"]["dataset"]["version"] == "v2.1"
+    assert manifest["publication"]["overlay"]["request_identity"] == "3" * 64
     assert manifest["scene_count"] == 1
     assert manifest["frame_count"] == 2
     scene = manifest["scenes"][0]
@@ -177,6 +256,12 @@ def test_report_uses_explicit_scene_frame_selection(tmp_path):
         np.zeros((3, 1, 64, 2), dtype=np.float32),
         np.array([8.0, 9.0, 10.0], dtype=np.float32),
     )
+    dataset_manifest, overlay_manifest = _write_publication_manifests(
+        tmp_path,
+        shard=shard,
+        overlay=overlay,
+        sample_count=3,
+    )
     selection = tmp_path / "selection.json"
     selection.write_text(json.dumps({
         "schema_version": 1,
@@ -198,6 +283,8 @@ def test_report_uses_explicit_scene_frame_selection(tmp_path):
         shard_path=shard,
         overlay_path=overlay,
         output_dir=output,
+        dataset_manifest_path=dataset_manifest,
+        overlay_manifest_path=overlay_manifest,
         scene_selections=load_scene_selections(selection),
         max_frames_per_scene=1,
         video_writer=fake_video_writer,
@@ -234,12 +321,20 @@ def test_report_rejects_overlay_rows_outside_the_shard(tmp_path):
         np.zeros((2, 1, 64, 2), dtype=np.float32),
         np.array([8.0, 9.0], dtype=np.float32),
     )
+    dataset_manifest, overlay_manifest = _write_publication_manifests(
+        tmp_path,
+        shard=shard,
+        overlay=overlay,
+        sample_count=2,
+    )
 
     with pytest.raises(ValueError, match="exactly match"):
         generate_report(
             shard_path=shard,
             overlay_path=overlay,
             output_dir=tmp_path / "report",
+            dataset_manifest_path=dataset_manifest,
+            overlay_manifest_path=overlay_manifest,
         )
 
 
@@ -254,12 +349,20 @@ def test_report_rejects_overlay_speed_mismatched_with_shard(tmp_path):
         np.zeros((1, 1, 64, 2), dtype=np.float32),
         np.array([99.0], dtype=np.float32),
     )
+    dataset_manifest, overlay_manifest = _write_publication_manifests(
+        tmp_path,
+        shard=shard,
+        overlay=overlay,
+        sample_count=1,
+    )
 
     with pytest.raises(ValueError, match="disagrees with shard history"):
         generate_report(
             shard_path=shard,
             overlay_path=overlay,
             output_dir=tmp_path / "report",
+            dataset_manifest_path=dataset_manifest,
+            overlay_manifest_path=overlay_manifest,
         )
 
 
