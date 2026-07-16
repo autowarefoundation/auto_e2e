@@ -10,11 +10,15 @@ env:
     FLYTE_DOMAIN: development
     FULL_RUN_EXECUTION_ID: ""
     MODEL_VERSION: ""
+    SELECTED_MLFLOW_RUN_ID: ""
+    SELECTED_CHECKPOINT_URI: ""
+    SELECTED_CHECKPOINT_SHA256: ""
+    SELECTED_CHECKPOINT_EPOCH: ""
     IMAGE_TAG: latest
     DATASET: "KIT-MRT/KITScenes-Multimodal"
     SOURCE_REVISION: "6fde0034446669e2ed7235e4c7fe323cd23d599d"
     PUBLISHED_DATASET: ""
-    DATASET_VERSION: v2.1
+    DATASET_VERSION: v2.2
     EPISODES: "1"
     PARTITION_SIZE: "1"
     REASONING_TEACHER: openai_compatible
@@ -32,6 +36,17 @@ phases:
     commands:
       - test -n "${IMAGE_TAG}"
       - |
+        SELECTED_VALUES="${SELECTED_MLFLOW_RUN_ID}${SELECTED_CHECKPOINT_URI}${SELECTED_CHECKPOINT_SHA256}${SELECTED_CHECKPOINT_EPOCH}"
+        if [ -n "${SELECTED_VALUES}" ]; then
+          test -n "${FULL_RUN_EXECUTION_ID}"
+          test -n "${SELECTED_MLFLOW_RUN_ID}"
+          test -n "${SELECTED_CHECKPOINT_URI}"
+          test -n "${SELECTED_CHECKPOINT_SHA256}"
+          test -n "${SELECTED_CHECKPOINT_EPOCH}"
+          printf '%s' "${SELECTED_MLFLOW_RUN_ID}" | grep -Eq '^[0-9a-f]{32}$'
+          printf '%s' "${SELECTED_CHECKPOINT_SHA256}" | grep -Eq '^[0-9a-f]{64}$'
+          printf '%s' "${SELECTED_CHECKPOINT_EPOCH}" | grep -Eq '^[1-9][0-9]*$'
+        fi
         if [ -n "${FULL_RUN_EXECUTION_ID}" ]; then
           test -z "${MODEL_VERSION}" || {
             echo "MODEL_VERSION must be empty when FULL_RUN_EXECUTION_ID is set"
@@ -91,6 +106,10 @@ phases:
         echo "Publishing immutable dataset coordinate ${PUBLISHED_DATASET}/${DATASET_VERSION}"
       - |
         if [ -n "${FULL_RUN_EXECUTION_ID}" ]; then
+          RECOVERY_FLAG=""
+          if [ -n "${SELECTED_CHECKPOINT_URI}" ]; then
+            RECOVERY_FLAG="--allow-running-recovery"
+          fi
           python3 Platform/scripts/extract_full_run_overlay_inputs.py \
             --config /tmp/flyte.yaml \
             --project "${FLYTE_PROJECT}" \
@@ -98,25 +117,51 @@ phases:
             --execution-id "${FULL_RUN_EXECUTION_ID}" \
             --expected-dataset "${DATASET}" \
             --expected-dataset-version "${DATASET_VERSION}" \
+            ${RECOVERY_FLAG} \
             --output /tmp/full-run-overlay-inputs.json
-          pyflyte --config /tmp/flyte.yaml run --remote \
-            --project "${FLYTE_PROJECT}" \
-            --domain "${FLYTE_DOMAIN}" \
-            --image "${AUTO_E2E_TRAINING_IMAGE}" \
-            Platform/pipelines/workflows.py \
-            wf_publish_full_run_overlays \
-            --inputs-file /tmp/full-run-overlay-inputs.json \
-            --preprocessing_contract_digest "${PREPROCESSING_DIGEST}" \
-            --model_inference_code_digest "${INFERENCE_DIGEST}" \
-            --container_image_digest "${CONTAINER_IMAGE_DIGEST}" \
-            --datasets_bucket "${DATASETS_BUCKET}" \
-            --artifacts_bucket "${ARTIFACTS_BUCKET}" \
-            --published_dataset "${PUBLISHED_DATASET}" \
-            --dataset_version "${DATASET_VERSION}" \
-            --base_seeds "${BASE_SEEDS}" \
-            --batch_size "${BATCH_SIZE}" \
-            --num_workers "${NUM_WORKERS}" \
-            --copy_workers "${COPY_WORKERS}"
+          if [ -n "${SELECTED_CHECKPOINT_URI}" ]; then
+            pyflyte --config /tmp/flyte.yaml run --remote \
+              --project "${FLYTE_PROJECT}" \
+              --domain "${FLYTE_DOMAIN}" \
+              --image "${AUTO_E2E_TRAINING_IMAGE}" \
+              Platform/pipelines/workflows.py \
+              wf_publish_selected_checkpoint_overlays \
+              --inputs-file /tmp/full-run-overlay-inputs.json \
+              --mlflow_run_id "${SELECTED_MLFLOW_RUN_ID}" \
+              --checkpoint_uri "${SELECTED_CHECKPOINT_URI}" \
+              --checkpoint_sha256 "${SELECTED_CHECKPOINT_SHA256}" \
+              --checkpoint_epoch "${SELECTED_CHECKPOINT_EPOCH}" \
+              --preprocessing_contract_digest "${PREPROCESSING_DIGEST}" \
+              --model_inference_code_digest "${INFERENCE_DIGEST}" \
+              --container_image_digest "${CONTAINER_IMAGE_DIGEST}" \
+              --datasets_bucket "${DATASETS_BUCKET}" \
+              --artifacts_bucket "${ARTIFACTS_BUCKET}" \
+              --published_dataset "${PUBLISHED_DATASET}" \
+              --dataset_version "${DATASET_VERSION}" \
+              --base_seeds "${BASE_SEEDS}" \
+              --batch_size "${BATCH_SIZE}" \
+              --num_workers "${NUM_WORKERS}" \
+              --copy_workers "${COPY_WORKERS}"
+          else
+            pyflyte --config /tmp/flyte.yaml run --remote \
+              --project "${FLYTE_PROJECT}" \
+              --domain "${FLYTE_DOMAIN}" \
+              --image "${AUTO_E2E_TRAINING_IMAGE}" \
+              Platform/pipelines/workflows.py \
+              wf_publish_full_run_overlays \
+              --inputs-file /tmp/full-run-overlay-inputs.json \
+              --preprocessing_contract_digest "${PREPROCESSING_DIGEST}" \
+              --model_inference_code_digest "${INFERENCE_DIGEST}" \
+              --container_image_digest "${CONTAINER_IMAGE_DIGEST}" \
+              --datasets_bucket "${DATASETS_BUCKET}" \
+              --artifacts_bucket "${ARTIFACTS_BUCKET}" \
+              --published_dataset "${PUBLISHED_DATASET}" \
+              --dataset_version "${DATASET_VERSION}" \
+              --base_seeds "${BASE_SEEDS}" \
+              --batch_size "${BATCH_SIZE}" \
+              --num_workers "${NUM_WORKERS}" \
+              --copy_workers "${COPY_WORKERS}"
+          fi
         else
           pyflyte --config /tmp/flyte.yaml run --remote \
             --project "${FLYTE_PROJECT}" \
