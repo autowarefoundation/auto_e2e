@@ -175,6 +175,16 @@ def _prepare_frames(
             sample.sample_uid,
             seed_index,
         )
+        if not np.isclose(
+            v0,
+            sample.initial_speed,
+            rtol=1e-6,
+            atol=1e-5,
+        ):
+            raise ValueError(
+                f"overlay v0 {v0} disagrees with shard history speed "
+                f"{sample.initial_speed} for {sample.sample_uid!r}"
+            )
         sign = curvature_sign_for_dataset(sample.dataset)
         prepared.append(PreparedFrame(
             sample=sample,
@@ -273,6 +283,9 @@ def generate_report(
 
     samples = read_shard_samples(shard_path, camera_index=camera_index)
     overlay = load_overlay(overlay_path)
+    overlay.validate_sample_uids([
+        sample.sample_uid for sample in samples
+    ])
     if requested_scenes:
         available_scenes = {sample.scene_uid for sample in samples}
         missing_scenes = requested_scenes.difference(available_scenes)
@@ -401,6 +414,7 @@ def generate_report(
             "seed_index": seed_index,
             "base_seed": base_seed,
             "control_contract": AOVL_V1_CONTROL_CONTRACT.manifest(),
+            "v0_source": "overlay_verified_against_shard_history",
             "curvature_sign": curvature_sign_for_dataset(
                 next(iter(datasets))
             ),
