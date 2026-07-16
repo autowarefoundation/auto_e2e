@@ -144,6 +144,7 @@ def _decode_sample(
             "pose.npy and gps.npy must either both be present or both be absent"
         )
     if pose_data is not None:
+        assert gps_data is not None
         from data_processing.geospatial import (
             decode_gps_future,
             decode_pose,
