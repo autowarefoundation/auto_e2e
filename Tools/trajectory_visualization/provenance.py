@@ -78,14 +78,14 @@ def validate_report_provenance(
         overlay_manifest_path,
         "overlay",
     )
-    for label, manifest in (
-        ("dataset", dataset_manifest),
-        ("overlay", overlay_manifest),
-    ):
-        if manifest.get("schema_version") != "v1":
-            raise ValueError(f"{label} manifest must use schema_version v1")
-        if manifest.get("status") != "ready":
-            raise ValueError(f"{label} manifest is not ready")
+    if dataset_manifest.get("schema_version") != "v2":
+        raise ValueError("dataset manifest must use schema_version v2")
+    if overlay_manifest.get("schema_version") != "v1":
+        raise ValueError("overlay manifest must use schema_version v1")
+    if dataset_manifest.get("status") != "ready":
+        raise ValueError("dataset manifest is not ready")
+    if overlay_manifest.get("status") != "ready":
+        raise ValueError("overlay manifest is not ready")
 
     expected_dataset_digest = _sha256(
         overlay_manifest.get("dataset_manifest_sha256"),
@@ -114,6 +114,13 @@ def validate_report_provenance(
         value=shard.name,
         label="dataset shard",
     )
+    rig = shard_entry.get("rig")
+    if not isinstance(rig, dict):
+        raise ValueError("dataset shard has no rig artifact")
+    rig_sha256 = _sha256(rig.get("sha256"), "dataset shard rig sha256")
+    expected_rig_key = f"{dataset}/{version}/rig/{rig_sha256}.json"
+    if rig.get("key") != expected_rig_key:
+        raise ValueError("dataset shard rig key is not canonical")
     overlay_entry = _single_entry(
         overlay_manifest.get("shards"),
         key="shard",
@@ -186,6 +193,8 @@ def validate_report_provenance(
                 shard_entry.get("content_identity"),
                 "shard_content_identity",
             ),
+            "rig_key": expected_rig_key,
+            "rig_sha256": rig_sha256,
             "local_shard_sha256": _sha256(
                 shard_sha256,
                 "local shard sha256",
