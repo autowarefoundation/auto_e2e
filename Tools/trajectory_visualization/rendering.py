@@ -24,47 +24,6 @@ MUTED_COLOR = (148, 163, 184)
 _DEPTH_EPS = 1e-5
 
 
-def curvature_sign_for_dataset(dataset: str) -> int:
-    """Match the browser's L2D compass-heading correction."""
-    return -1 if dataset in {"l2d", "yaak-ai/L2D"} else 1
-
-
-def integrate_controls(
-    controls: np.ndarray,
-    v0: float,
-    *,
-    curvature_sign: int = 1,
-    dt: float = 0.1,
-) -> np.ndarray:
-    """Integrate ``[acceleration, curvature]`` into ``[x_forward, y_left]``."""
-    values = np.asarray(controls)
-    if values.shape != (64, 2):
-        raise ValueError(f"controls must have shape (64, 2), got {values.shape}")
-    if not np.issubdtype(values.dtype, np.floating):
-        raise TypeError("controls must be floating point")
-    if not np.isfinite(values).all() or not math.isfinite(v0):
-        raise ValueError("controls and v0 must be finite")
-    if curvature_sign not in {-1, 1}:
-        raise ValueError("curvature_sign must be -1 or 1")
-    if dt <= 0:
-        raise ValueError("dt must be positive")
-
-    points = np.empty((64, 2), dtype=np.float64)
-    speed = float(v0)
-    heading = 0.0
-    x_forward = 0.0
-    y_left = 0.0
-    for index, (acceleration, curvature) in enumerate(values):
-        speed = max(0.0, speed + float(acceleration) * dt)
-        heading += (
-            curvature_sign * float(curvature) * speed * dt
-        )
-        x_forward += speed * math.cos(heading) * dt
-        y_left += speed * math.sin(heading) * dt
-        points[index] = (x_forward, y_left)
-    return points
-
-
 def trajectory_extent(
     trajectories: Iterable[np.ndarray],
     *,
