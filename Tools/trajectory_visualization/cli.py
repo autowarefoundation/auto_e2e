@@ -26,6 +26,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="Local canonical overlay.bin.gz",
     )
     parser.add_argument(
+        "--dataset-manifest",
+        required=True,
+        help="Local immutable dataset publication manifest",
+    )
+    parser.add_argument(
+        "--overlay-manifest",
+        required=True,
+        help="Local immutable overlay-set manifest",
+    )
+    parser.add_argument(
         "--output-dir",
         required=True,
         help="Empty destination directory",
@@ -59,6 +69,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         shard_path=args.shard,
         overlay_path=args.overlay,
         output_dir=args.output_dir,
+        dataset_manifest_path=args.dataset_manifest,
+        overlay_manifest_path=args.overlay_manifest,
         seed_index=args.seed_index,
         camera_index=args.camera_index,
         scene_uids=args.scenes,
