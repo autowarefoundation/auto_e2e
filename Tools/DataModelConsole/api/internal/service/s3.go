@@ -1280,6 +1280,7 @@ func (s *S3Service) shardIndexFromStore(ctx context.Context, dataset, version, s
 	normalized := *idx
 	normalized.Version = version
 	normalized.Shard = shard
+	normalized.BlobRangesAllowed = true
 	samplesCopied := false
 	for i := range normalized.Samples {
 		if normalized.Samples[i].SampleUID == "" {
@@ -1520,10 +1521,11 @@ func (s *S3Service) buildShardIndexUncached(ctx context.Context, dataset, versio
 		samples = append(samples, *e)
 	}
 	idx := &model.ShardIndex{
-		Fps:     indexFps,
-		Version: resolvedVersion,
-		Shard:   shard,
-		Samples: samples,
+		Fps:               indexFps,
+		Version:           resolvedVersion,
+		Shard:             shard,
+		BlobRangesAllowed: true,
+		Samples:           samples,
 	}
 	if err := validateShardIndex(idx); err != nil {
 		return nil, fmt.Errorf("validate shard index %s: %w", key, err)
