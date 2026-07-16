@@ -10,6 +10,18 @@ from .rendering import generate_grid, concatenate_grid_and_camera
 from .kinematics import controls_to_metric_trajectory, ModelOutputContract
 
 def run_visualization(checkpoint: str, dataset_dir: str, output_dir: str, episodes: list[str] | None = None, max_frames_per_episode: int = 300, selection_manifest: str | None = None):
+    """
+    Main entry point for batch trajectory visualization.
+    Loads a checkpoint, reads a dataset, runs inference, and writes a directory of videos and a manifest.
+    
+    Args:
+        checkpoint (str): Path to the model checkpoint .pt file.
+        dataset_dir (str): Path to the processed evaluation dataset directory (.tar shards).
+        output_dir (str): Directory where the output videos and manifest will be saved.
+        episodes (list[str] | None): Optional explicit list of episode indices to process.
+        max_frames_per_episode (int): Maximum number of frames to render per episode (default 300).
+        selection_manifest (str | None): Optional path to a JSON file detailing specific scenes/frames to process.
+    """
     os.makedirs(output_dir, exist_ok=True)
     
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -69,7 +81,8 @@ def run_visualization(checkpoint: str, dataset_dir: str, output_dir: str, episod
     
     with torch.no_grad():
         for batch in data_iterator:
-            ep_id = batch.get("episode_index", [0])[0] if isinstance(batch.get("episode_index"), list) else batch.get("episode_index", 0)
+            raw_ep = batch["episode_index"][0]
+            ep_id = int(raw_ep.item() if hasattr(raw_ep, "item") else raw_ep)
             
             if ep_id != current_episode:
                 # Close previous episode
@@ -82,7 +95,8 @@ def run_visualization(checkpoint: str, dataset_dir: str, output_dir: str, episod
                 # Setup new episode
                 current_episode = ep_id
                 frames_in_current_episode = 0
-                ep_start_frame = batch.get("frame_index", [0])[0] if isinstance(batch.get("frame_index"), list) else batch.get("frame_index", 0)
+                raw_frame = batch.get("frame_index", [0])[0] if isinstance(batch.get("frame_index"), list) else batch.get("frame_index", 0)
+                ep_start_frame = int(raw_frame.item() if hasattr(raw_frame, "item") else raw_frame)
                 
                 ep_dir_path = os.path.join(output_dir, "episodes", f"episode-{ep_id:06d}")
                 frames_dir = os.path.join(ep_dir_path, "frames")
@@ -97,10 +111,14 @@ def run_visualization(checkpoint: str, dataset_dir: str, output_dir: str, episod
             egomotion_history = batch["egomotion_history"].to(device)
             trajectory_target = batch["trajectory_target"].to(device)
             
+            map_input = batch.get("map_input")
+            if map_input is not None:
+                map_input = map_input.to(device)
+            
             # Forward pass
             output = model(
                 camera_tiles=visual_tiles,
-                map_input=None,
+                map_input=map_input,
                 visual_history=visual_history,
                 egomotion_history=egomotion_history,
                 mode="infer"

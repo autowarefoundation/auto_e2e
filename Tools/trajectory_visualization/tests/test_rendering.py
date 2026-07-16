@@ -180,7 +180,7 @@ def test_generate_grid_clipping():
         prediction_xy=prediction_m, 
         target_xy=actual_m,
         prediction_color=unique_pred_color,
-        actual_trajectory_color=unique_act_color
+        target_color=unique_act_color
     )
     
     # 3. Assertions
@@ -312,17 +312,17 @@ def test_complete_front_camera_view_with_trajectory():
     target_traj_m = kinematics.controls_to_metric_trajectory(action_sequence_target, current_speed, contract=get_dummy_contract())
     
     cam_img = rendering.complete_front_camera_view_with_trajectory(
-        prediction_xy=target_traj_m,
         front_camera_image=front_camera_image,
+        prediction_xy=target_traj_m,
         K=K, R=R, t=t,
-        color=(59, 108, 255),
+        prediction_color=(59, 108, 255),
         is_approximate=True
     )
     cam_img = rendering.complete_front_camera_view_with_trajectory(
         prediction_xy=pred_traj_m,
         front_camera_image=cam_img,
         K=K, R=R, t=t,
-        color=(140, 255, 0),
+        prediction_color=(140, 255, 0),
         is_approximate=True
     )
     

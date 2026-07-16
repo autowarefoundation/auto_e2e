@@ -8,6 +8,12 @@ sys.path.append(os.path.join(os.path.dirname(__file__), '..', '..'))
 from Tools.trajectory_visualization.runner import run_visualization
 
 def main():
+    """
+    Entry point for the command-line interface of the trajectory visualization tool.
+    
+    Parses CLI arguments such as checkpoint paths, dataset paths, and output directories,
+    and then invokes the main `run_visualization` pipeline.
+    """
     parser = argparse.ArgumentParser(description="Trajectory Visualization Tool")
     parser.add_argument("--checkpoint", type=str, required=True, help="Path to model checkpoint .pt file.")
     parser.add_argument("--dataset-dir", type=str, required=True, help="Path to the processed evaluation dataset directory (.tar shards).")

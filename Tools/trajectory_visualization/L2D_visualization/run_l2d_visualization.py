@@ -26,6 +26,17 @@ import argparse
 import yaml
 
 def visualization_on_l2d(episodes: list[int], frame_index: int = 0, zoom_in: bool = False) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Renders the trajectory visualization for a specific L2D dataset frame.
+    
+    Args:
+        episodes (list[int]): List of episode IDs to load.
+        frame_index (int): Frame index within the dataset to visualize.
+        zoom_in (bool): If True, zooms into the center of the map tile.
+        
+    Returns:
+        tuple[np.ndarray, np.ndarray, np.ndarray]: The rendered map image, grid image, and camera view image.
+    """
     result = forward_pass_for_visualization_test(episodes=episodes, frame_index=frame_index, pretrained_backbone=False)
     
     pred_trajectory, target_trajectory, map_image, front_image, current_speed, current_heading = result
@@ -72,22 +83,15 @@ def visualization_on_l2d(episodes: list[int], frame_index: int = 0, zoom_in: boo
         rotation_rad=current_heading
     )
 
-    # 1. Draw extracted ground truth (actual driven path)
+    # 1. Draw extracted ground truth and predicted path
     combined_img = map_image.copy()
-    if target_xy is not None:
-        combined_img = render_trajectory_map_tile(
-            prediction_xy=target_xy,
-            map_image=combined_img,
-            geometry=map_geometry,
-            color=actual_trajectory_color
-        )
-
-    # 2. Draw predicted path
     combined_img = render_trajectory_map_tile(
         prediction_xy=pred_xy,
         map_image=combined_img,
         geometry=map_geometry,
-        color=prediction_color,
+        target_xy=target_xy,
+        prediction_color=prediction_color,
+        target_color=actual_trajectory_color,
         is_approximate=True
     )
 
@@ -96,7 +100,7 @@ def visualization_on_l2d(episodes: list[int], frame_index: int = 0, zoom_in: boo
         prediction_xy=pred_xy,
         target_xy=target_xy,
         prediction_color=prediction_color,
-        actual_trajectory_color=actual_trajectory_color
+        target_color=actual_trajectory_color
     )
 
     # Load Extrinsics
@@ -105,25 +109,16 @@ def visualization_on_l2d(episodes: list[int], frame_index: int = 0, zoom_in: boo
     
     cam_trajectory_view = front_image.copy()
     
-    if target_xy is not None:
-        cam_trajectory_view = complete_front_camera_view_with_trajectory(
-            prediction_xy=target_xy,
-            front_camera_image=cam_trajectory_view,
-            R=R,
-            t=t,
-            color=actual_trajectory_color,
-            is_approximate=True
-        )
-    
-    if pred_xy is not None:
-        cam_trajectory_view = complete_front_camera_view_with_trajectory(
-            prediction_xy=pred_xy,
-            front_camera_image=cam_trajectory_view,
-            R=R,
-            t=t,
-            color=prediction_color,
-            is_approximate=True
-        )
+    cam_trajectory_view = complete_front_camera_view_with_trajectory(
+        prediction_xy=pred_xy,
+        front_camera_image=cam_trajectory_view,
+        R=R,
+        t=t,
+        prediction_color=prediction_color,
+        target_xy=target_xy,
+        target_color=actual_trajectory_color,
+        is_approximate=True
+    )
         
     cam_trajectory_view = concatenate_grid_and_camera(
         grid_img=grid_with_trajectory,
@@ -137,6 +132,15 @@ def forward_pass_for_visualization_test(
     ):
     """
     Run forward pass with real L2D data at a specific frame index.
+    
+    Args:
+        episodes (list[int]): List of episode IDs to load.
+        frame_index (int): Frame index to evaluate.
+        pretrained_backbone (bool): Whether to use a pretrained backbone model.
+        
+    Returns:
+        tuple or None: A tuple containing (pred_trajectory, target_trajectory, raw_map_image, 
+                       raw_front_image, current_speed, current_heading) or None on failure.
     """
     try:
         from Model.data_parsing.l2d import L2DDataset

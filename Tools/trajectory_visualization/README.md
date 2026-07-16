@@ -15,19 +15,55 @@ The tool is modularized into several components:
 
 ## Usage
 
-You can run the tool directly from the command line:
+### 1. WebDataset E2E Pipeline (cli.py)
+
+You can run the core tool directly from the command line against WebDataset `.tar` shards output by the data parsing stage:
 
 ```bash
-python Tools/trajectory_visualization/cli.py \
-    --checkpoint_dir /path/to/checkpoint/ \
-    --dataset_dir /path/to/dataset/ \
-    --output_dir /path/to/output/ \
-    --num_frames 100
+PYTHONPATH=. python Tools/trajectory_visualization/cli.py \
+    --checkpoint /path/to/model_weights.pt \
+    --dataset-dir /path/to/dataset/ \
+    --output-dir /path/to/output/ \
+    --max-frames-per-episode 300
 ```
+
+Other available options:
+- `--episodes 1 2 3`: List of specific episode indices to process.
+- `--selection-manifest eval-selection.json`: Path to a JSON file explicitly specifying episodes and frame ranges for scene selection.
+
+### 2. Raw KIT Scenes Visualization
+
+If you want to test visualization of predictions directly on raw KIT Scenes validation data without extracting it to WebDataset format, you can use the specialized `generate_kitscenes_video.py` script:
+
+```bash
+PYTHONPATH=. python Tools/trajectory_visualization/Kit_Scenes_visualization/generate_kitscenes_video.py \
+    --scene_ids c34c778f-ad8c-0aa9-7e1a-c86a73f887c7 \
+    --dataset_root /path/to/Kit_Scenes_visualization/data \
+    --num_frames 30
+```
+Also, you can refer to the script as an example for the usage of the trajectory visualization tools.
+
+*Note: This script requires `ffmpeg` with `libx264` codec to be available in your system path.*
+
+### 3. Raw L2D Visualization
+
+> LeRobot is incompatible with the dependencies of the project, so unexpected errors might occur
+
+If you want to test visualization of predictions directly on raw L2D data (e.g. from HuggingFace `yaak-ai/L2D`), you can use the specialized `run_l2d_visualization.py` script:
+
+```bash
+PYTHONPATH=. python Tools/trajectory_visualization/L2D_visualization/run_l2d_visualization.py \
+    --live \
+    --episodes 0 \
+    --frame 0
+```
+This script will output individual frame images (`visualization_result_map.png`, `_grid.png`, `_cam.png`) inside the `generated_images/` subfolder.
+
+*Note: This script requires `lerobot` dependencies to fetch and parse the dataset.*
 
 ### Flyte Integration
 
-The tool is designed so that a later Flyte task can call it directly with downloaded `FlyteFile` and `FlyteDirectory` inputs. The generated output directory can then be logged through MLflow:
+The tool is designed so that a later Flyte task can call `cli.py` directly with downloaded `FlyteFile` and `FlyteDirectory` inputs. The generated output directory can then be logged through MLflow:
 
 ```python
 mlflow.log_artifacts(output_dir, artifact_path="trajectory_visualization")

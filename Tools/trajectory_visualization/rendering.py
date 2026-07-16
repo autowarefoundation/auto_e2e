@@ -5,6 +5,16 @@ from dataclasses import dataclass
 
 @dataclass
 class MapGeometry:
+    """
+    Data class representing the geometry and properties of the top-down Map view.
+    
+    Args:
+        meters_per_pixel_x (float): Resolution along the x-axis in meters per pixel.
+        meters_per_pixel_y (float): Resolution along the y-axis in meters per pixel.
+        ego_pixel_x (float): The x-coordinate (in pixels) of the ego vehicle on the map.
+        ego_pixel_y (float): The y-coordinate (in pixels) of the ego vehicle on the map.
+        rotation_rad (float): The rotation of the map in radians.
+    """
     meters_per_pixel_x: float
     meters_per_pixel_y: float
     ego_pixel_x: float
@@ -18,6 +28,14 @@ class MapGeometry:
 def get_camera_projection_matrix(K: np.ndarray, R: np.ndarray, t: np.ndarray) -> np.ndarray:
     """
     Computes the full 3x4 camera projection matrix P = K[R|t].
+
+    Args:
+        K (np.ndarray): 3x3 intrinsic camera matrix.
+        R (np.ndarray): 3x3 rotation matrix from world to camera frame.
+        t (np.ndarray): 3x1 translation vector from world to camera frame.
+
+    Returns:
+        np.ndarray: The 3x4 camera projection matrix.
     """
     A = np.hstack((R, t))
     projection_matrix = K @ A
@@ -26,6 +44,14 @@ def get_camera_projection_matrix(K: np.ndarray, R: np.ndarray, t: np.ndarray) ->
 def project_BEV_to_CameraView(trajectory_m: torch.Tensor, projection_matrix: np.ndarray) -> np.ndarray:
     """
     Projects 3D ground coordinates from the BEV frame into the 2D camera view.
+    
+    Args:
+        trajectory_m (torch.Tensor): Tensor of shape (N, 2) containing X, Z ground plane coordinates in meters.
+        projection_matrix (np.ndarray): 3x4 camera projection matrix.
+        
+    Returns:
+        np.ndarray: Array of shape (N, 2) containing the projected 2D (u, v) pixel coordinates.
+                    Points projected behind the camera or with z <= 0.1 are set to [-1, -1].
     """
     N = trajectory_m.shape[0]
     points_3d = np.ones((4, N), dtype=np.float32)
@@ -53,7 +79,17 @@ def render_trajectory_on_camera_view(
     outline_thickness: int = 2,
 ) -> np.ndarray:
     """
-    Overlays a perspective-correct 3D trajectory onto a 2D camera view.
+    Overlays a perspective-correct 3D trajectory ribbon onto a 2D camera view.
+    
+    Args:
+        camera_image (np.ndarray): The 2D front camera image array (H, W, 3).
+        left_2d (np.ndarray): The projected 2D coordinates of the left boundary of the trajectory.
+        right_2d (np.ndarray): The projected 2D coordinates of the right boundary of the trajectory.
+        color (tuple): The RGB/BGR color tuple for the trajectory ribbon. Defaults to green.
+        outline_thickness (int): Thickness of the drawn outline for the trajectory edges.
+        
+    Returns:
+        np.ndarray: The new camera image array with the trajectory ribbon drawn over it.
     """
     img_with_traj = camera_image.copy()
     h, w = img_with_traj.shape[:2]
@@ -122,14 +158,27 @@ def render_trajectory_on_camera_view(
     return img_with_traj
 
 def generate_grid(
-    prediction_xy: torch.Tensor, 
+    prediction_xy: torch.Tensor | None = None, 
     target_xy: torch.Tensor | None = None,
-    prediction_color: tuple = (140, 255, 0),
-    actual_trajectory_color: tuple = (255, 80, 120)
+    prediction_color: tuple | None = (140, 255, 0),
+    target_color: tuple | None = (255, 80, 120)
     ) -> np.ndarray:
     """
     Generates a 2D plotting grid and draws the predicted and (optionally) actual trajectories.
+    
+    Args:
+        prediction_xy (torch.Tensor | None): Tensor of shape (N, 2) representing the predicted trajectory in meters.
+        target_xy (torch.Tensor | None): Tensor of shape (M, 2) representing the target ground truth trajectory in meters.
+        prediction_color (tuple | None): Color of the prediction trajectory line. Defaults to light green.
+        target_color (tuple | None): Color of the target trajectory line. Defaults to pinkish red.
+        
+    Returns:
+        np.ndarray: The resulting 1080x480 grid image containing the plotted trajectories.
     """
+    if prediction_color is None:
+        prediction_color = (140, 255, 0)
+    if target_color is None:
+        target_color = (255, 80, 120)
     width, height = 480, 1080
     bg_color = (19, 12, 6)
     grid_color = (66, 32, 23)
@@ -157,14 +206,14 @@ def generate_grid(
     
     for x_tick in range(int(x_min), int(x_max) + 1, 10):
         px, py = to_px(x_tick, y_min)
-        cv2.line(img, (px, margin_top), (px, margin_top + plot_h), grid_color, 1, cv2.LINE_AA)
+        cv2.line(img, (px, margin_top), (px, margin_top + plot_h), grid_color, 2, cv2.LINE_8)
         text = str(x_tick)
         text_size = cv2.getTextSize(text, font, font_scale, thickness)[0]
         cv2.putText(img, text, (px - text_size[0]//2, margin_top + plot_h + 15), font, font_scale, text_color, thickness, cv2.LINE_AA)
         
     for y_tick in range(0, int(y_max) + 1, 20):
         px, py = to_px(x_min, y_tick)
-        cv2.line(img, (margin_left, py), (margin_left + plot_w, py), grid_color, 1, cv2.LINE_AA)
+        cv2.line(img, (margin_left, py), (margin_left + plot_w, py), grid_color, 2, cv2.LINE_8)
         text = str(y_tick)
         text_size = cv2.getTextSize(text, font, font_scale, thickness)[0]
         cv2.putText(img, text, (margin_left - text_size[0] - 5, py + 5), font, font_scale, text_color, thickness, cv2.LINE_AA)
@@ -194,17 +243,18 @@ def generate_grid(
     
     # Draw Legend
     # 1. Prediction (Left)
-    pred_text = "Prediction"
-    cv2.circle(img, (margin_left + 15, margin_top - 14), 6, prediction_color, -1, cv2.LINE_AA)
-    cv2.putText(img, pred_text, (margin_left + 30, margin_top - 10), font, 0.5, prediction_color, 1, cv2.LINE_AA)
+    if prediction_xy is not None:
+        pred_text = "Prediction"
+        cv2.circle(img, (margin_left + 15, margin_top - 14), 6, prediction_color, -1, cv2.LINE_AA)
+        cv2.putText(img, pred_text, (margin_left + 30, margin_top - 10), font, 0.5, prediction_color, 1, cv2.LINE_AA)
     
     # 2. Target / Ground Truth (Right)
     if target_xy is not None:
         tgt_text = "Ground Truth"
         tgt_size = cv2.getTextSize(tgt_text, font, 0.5, 1)[0]
         tgt_x = margin_left + plot_w - 30 - tgt_size[0]
-        cv2.putText(img, tgt_text, (tgt_x, margin_top - 10), font, 0.5, actual_trajectory_color, 1, cv2.LINE_AA)
-        cv2.circle(img, (margin_left + plot_w - 15, margin_top - 14), 6, actual_trajectory_color, -1, cv2.LINE_AA)
+        cv2.putText(img, tgt_text, (tgt_x, margin_top - 10), font, 0.5, target_color, 1, cv2.LINE_AA)
+        cv2.circle(img, (margin_left + plot_w - 15, margin_top - 14), 6, target_color, -1, cv2.LINE_AA)
     
     plot_area = img[margin_top:margin_top+plot_h, margin_left:margin_left+plot_w]
     
@@ -219,7 +269,7 @@ def generate_grid(
             pts.append(to_px_local(float(target_xy[i, 0]), float(target_xy[i, 1])))
         if len(pts) > 1:
             pts_arr = np.array(pts, dtype=np.int32)
-            cv2.polylines(plot_area, [pts_arr], isClosed=False, color=actual_trajectory_color, thickness=3, lineType=cv2.LINE_AA)
+            cv2.polylines(plot_area, [pts_arr], isClosed=False, color=target_color, thickness=3, lineType=cv2.LINE_AA)
 
     if prediction_xy is not None:
         pts = []
@@ -247,7 +297,14 @@ def generate_grid(
 
 def concatenate_grid_and_camera(grid_img: np.ndarray, cam_img: np.ndarray) -> np.ndarray:
     """
-    Horizontally concatenates the BEV grid image and the camera view.
+    Horizontally concatenates the BEV grid image and the camera view, scaling the camera view to match heights.
+    
+    Args:
+        grid_img (np.ndarray): The generated 2D grid image (typically 1080px high).
+        cam_img (np.ndarray): The perspective front camera image to be concatenated.
+        
+    Returns:
+        np.ndarray: A single wider image horizontally concatenating both inputs.
     """
     grid_h, grid_w = grid_img.shape[:2]
     cam_h, cam_w = cam_img.shape[:2]
@@ -259,6 +316,16 @@ def concatenate_grid_and_camera(grid_img: np.ndarray, cam_img: np.ndarray) -> np
     return np.hstack((grid_img, cam_resized))
 
 def meters_to_pixels_trajectory(trajectory_m: torch.Tensor, geometry: MapGeometry) -> torch.Tensor:
+    """
+    Converts a trajectory from metric coordinates (meters) to map pixel coordinates based on the map geometry.
+    
+    Args:
+        trajectory_m (torch.Tensor): Tensor of shape (N, 2) representing the metric (X, Y) trajectory.
+        geometry (MapGeometry): MapGeometry object defining the map resolution and ego origin.
+        
+    Returns:
+        torch.Tensor: Tensor of shape (N, 2) representing the transformed (X, Y) pixel coordinates on the map tile.
+    """
     import math
     trajectory_px = torch.zeros_like(trajectory_m)
     
@@ -279,7 +346,18 @@ def overlay_the_trajectory_with_map(
         geometry: MapGeometry,
         color: tuple = (0, 255, 0)
 ) -> np.ndarray:
-    import math
+    """
+    Overlays a trajectory line onto the map tile, drawing both an inner line and a black outline.
+    
+    Args:
+        trajectory_px (torch.Tensor): Tensor of shape (N, 2) containing the pixel coordinates of the trajectory.
+        map_image (np.ndarray): The 2D map image tile array.
+        geometry (MapGeometry): Map geometry used to determine dynamic zoom/line thickness scaling.
+        color (tuple): The color of the inner trajectory line. Defaults to green.
+        
+    Returns:
+        np.ndarray: The map image with the thick bordered trajectory overlaid.
+    """
     bgr_color = color
     black_color = (0, 0, 0)
     map_with_trajectory = map_image.copy()
@@ -294,13 +372,63 @@ def overlay_the_trajectory_with_map(
 
     cv2.polylines(map_with_trajectory, [pts], isClosed=False, color=black_color, thickness=linewidth + outline_width * 2, lineType=cv2.LINE_AA)
     cv2.polylines(map_with_trajectory, [pts], isClosed=False, color=bgr_color, thickness=linewidth, lineType=cv2.LINE_AA)
+    return map_with_trajectory
 
+def render_trajectory_map_tile(
+    map_image: np.ndarray,
+    geometry: MapGeometry,
+    prediction_xy: torch.Tensor | None = None,
+    target_xy: torch.Tensor | None = None,
+    prediction_color: tuple | None = (0, 255, 0),
+    target_color: tuple | None = (255, 80, 120),
+    is_approximate: bool = False
+) -> np.ndarray:
+    """
+    Draws the complete map tile view including the ego vehicle triangle, prediction trajectory, and target trajectory.
+    
+    Args:
+        map_image (np.ndarray): The base map image array.
+        geometry (MapGeometry): The map geometric metadata.
+        prediction_xy (torch.Tensor | None): The predicted trajectory (N, 2) in meters.
+        target_xy (torch.Tensor | None): The target ground truth trajectory (M, 2) in meters.
+        prediction_color (tuple | None): Color of the prediction line. Defaults to green.
+        target_color (tuple | None): Color of the target line. Defaults to pinkish red.
+        is_approximate (bool): If True, overlays an 'APPROXIMATE' watermark text over the map.
+        
+    Returns:
+        np.ndarray: The completed map tile rendering.
+    """
+    if prediction_color is None:
+        prediction_color = (0, 255, 0)
+    if target_color is None:
+        target_color = (255, 80, 120)
+    map_with_trajectory = map_image.copy()
+    if prediction_xy is not None:
+        trajectory_px = meters_to_pixels_trajectory(prediction_xy, geometry)
+        map_with_trajectory = overlay_the_trajectory_with_map(
+            trajectory_px, map_with_trajectory, geometry, prediction_color
+        )
+    
+    if target_xy is not None:
+        target_pts_tensor = meters_to_pixels_trajectory(target_xy, geometry)
+        target_pts_float = [(x.item(), y.item()) for x, y in target_pts_tensor]
+        target_pts = np.array(target_pts_float, np.int32).reshape((-1, 1, 2))
+        
+        zoom_scale = 0.4 / geometry.meters_per_pixel_x
+        linewidth = int(1 * zoom_scale)
+        outline_width = max(1, int(1 * zoom_scale))
+        
+        cv2.polylines(map_with_trajectory, [target_pts], False, (0, 0, 0), linewidth + outline_width * 2, lineType=cv2.LINE_AA)
+        cv2.polylines(map_with_trajectory, [target_pts], False, target_color, linewidth, lineType=cv2.LINE_AA)
+
+    import math
     dx = -math.sin(geometry.rotation_rad)
     dy = -math.cos(geometry.rotation_rad)
     rx = math.cos(geometry.rotation_rad)
     ry = -math.sin(geometry.rotation_rad)
 
-    x0, y0 = pixel_points[0]
+    x0, y0 = geometry.ego_pixel_x, geometry.ego_pixel_y
+    zoom_scale = 0.4 / geometry.meters_per_pixel_x
     L = 8.0 * zoom_scale
     W = 4.0 * zoom_scale
 
@@ -311,31 +439,9 @@ def overlay_the_trajectory_with_map(
     poly_points = np.array([tip, right_back, left_back], np.int32).reshape((-1, 1, 2))
     
     agent_color = (126, 27, 232)
+    outline_width = max(1, int(1 * zoom_scale))
     cv2.fillPoly(map_with_trajectory, [poly_points], agent_color, cv2.LINE_8)
-    cv2.polylines(map_with_trajectory, [poly_points], isClosed=True, color=black_color, thickness=outline_width, lineType=cv2.LINE_8)
-
-    return map_with_trajectory
-
-def render_trajectory_map_tile(
-    prediction_xy: torch.Tensor,
-    map_image: np.ndarray,
-    geometry: MapGeometry,
-    target_xy: torch.Tensor | None = None,
-    color: tuple | None = None,
-    is_approximate: bool = False
-) -> np.ndarray:
-    trajectory_px = meters_to_pixels_trajectory(prediction_xy, geometry)
-    if color is None:
-        color = (0, 255, 0)
-    map_with_trajectory = overlay_the_trajectory_with_map(
-        trajectory_px, map_image, geometry, color
-    )
-    
-    if target_xy is not None:
-        target_pts_tensor = meters_to_pixels_trajectory(target_xy, geometry)
-        target_pts_float = [(x.item(), y.item()) for x, y in target_pts_tensor]
-        target_pts = np.array(target_pts_float, np.int32).reshape((-1, 1, 2))
-        cv2.polylines(map_with_trajectory, [target_pts], False, (255, 80, 120), 4, lineType=cv2.LINE_AA)
+    cv2.polylines(map_with_trajectory, [poly_points], isClosed=True, color=(0, 0, 0), thickness=outline_width, lineType=cv2.LINE_8)
 
     if is_approximate:
         overlay = map_with_trajectory.copy()
@@ -351,30 +457,70 @@ def render_trajectory_map_tile(
     return map_with_trajectory
 
 def render_trajectory_on_a_grid(
-    prediction_xy: torch.Tensor,
+    prediction_xy: torch.Tensor | None = None,
     target_xy: torch.Tensor | None = None,
-    prediction_color: tuple = (140, 255, 0),
-    actual_trajectory_color: tuple = (255, 80, 120)
+    prediction_color: tuple | None = (140, 255, 0),
+    target_color: tuple | None = (255, 80, 120)
 ) -> np.ndarray:
+    """
+    High-level wrapper to generate the 2D grid plot representing the trajectories.
+    
+    Args:
+        prediction_xy (torch.Tensor | None): Predicted trajectory points in meters.
+        target_xy (torch.Tensor | None): Target trajectory points in meters.
+        prediction_color (tuple | None): Color of the prediction line. Defaults to light green.
+        target_color (tuple | None): Color of the target line. Defaults to pinkish red.
+        
+    Returns:
+        np.ndarray: The generated 2D grid image rendering.
+    """
+    if prediction_color is None:
+        prediction_color = (140, 255, 0)
+    if target_color is None:
+        target_color = (255, 80, 120)
     grid_with_trajectory = generate_grid(
         prediction_xy=prediction_xy, 
         target_xy=target_xy,
         prediction_color=prediction_color,
-        actual_trajectory_color=actual_trajectory_color
+        target_color=target_color
     )
 
     return grid_with_trajectory
 
 def complete_front_camera_view_with_trajectory(
-    prediction_xy: torch.Tensor,
     front_camera_image: np.ndarray,
+    prediction_xy: torch.Tensor | None = None,
     K: np.ndarray | None = None,
     R: np.ndarray | None = None,
     t: np.ndarray | None = None,
     P: np.ndarray | None = None,
-    color: tuple | None = None,
+    prediction_color: tuple | None = (0, 255, 0),
+    target_xy: torch.Tensor | None = None,
+    target_color: tuple | None = (255, 80, 120),
     is_approximate: bool = False
 ) -> np.ndarray:
+    """
+    Renders the complete front camera view, projecting the 3D metric trajectories onto the 2D image plane.
+    
+    Args:
+        front_camera_image (np.ndarray): The raw 2D front camera image.
+        prediction_xy (torch.Tensor | None): Predicted trajectory points in meters (X, Y).
+        K (np.ndarray | None): Intrinsic camera matrix (3x3).
+        R (np.ndarray | None): Rotation matrix (3x3).
+        t (np.ndarray | None): Translation vector (3x1).
+        P (np.ndarray | None): Full pre-computed projection matrix (3x4).
+        prediction_color (tuple | None): Color of the prediction ribbon. Defaults to green.
+        target_xy (torch.Tensor | None): Target trajectory points in meters (X, Y).
+        target_color (tuple | None): Color of the target ribbon. Defaults to pinkish red.
+        is_approximate (bool): If True, falls back to a synthetic camera model if no calibration is provided.
+        
+    Returns:
+        np.ndarray: The final 3D projected perspective front camera image rendering.
+    """
+    if prediction_color is None:
+        prediction_color = (0, 255, 0)
+    if target_color is None:
+        target_color = (255, 80, 120)
     from .kinematics import get_trajectory_boundaries_3d
     
     if P is None and (K is None or R is None or t is None):
@@ -388,9 +534,6 @@ def complete_front_camera_view_with_trajectory(
         
     if P is None and not is_approximate:
         raise ValueError("Using synthetic/separated calibration (K, R, t) instead of a verified projection matrix requires passing is_approximate=True.")
-        
-    if color is None:
-        color = (0, 255, 0)
 
     if P is not None:
         projection_matrix = P
@@ -398,14 +541,25 @@ def complete_front_camera_view_with_trajectory(
         assert K is not None and R is not None and t is not None
         projection_matrix = get_camera_projection_matrix(K, R, t)
     
-    left_m, right_m = get_trajectory_boundaries_3d(prediction_xy, width_m=1.8)
+    cam_with_traj = front_camera_image.copy()
 
-    left_2d = project_BEV_to_CameraView(left_m, projection_matrix)
-    right_2d = project_BEV_to_CameraView(right_m, projection_matrix)
+    if target_xy is not None:
+        t_left_m, t_right_m = get_trajectory_boundaries_3d(target_xy, width_m=1.8)
+        t_left_2d = project_BEV_to_CameraView(t_left_m, projection_matrix)
+        t_right_2d = project_BEV_to_CameraView(t_right_m, projection_matrix)
+        cam_with_traj = render_trajectory_on_camera_view(
+            cam_with_traj, t_left_2d, t_right_2d, color=target_color, outline_thickness=3
+        )
 
-    cam_with_traj = render_trajectory_on_camera_view(
-        front_camera_image, left_2d, right_2d, color=color, outline_thickness=3
-    )
+    if prediction_xy is not None:
+        left_m, right_m = get_trajectory_boundaries_3d(prediction_xy, width_m=1.8)
+
+        left_2d = project_BEV_to_CameraView(left_m, projection_matrix)
+        right_2d = project_BEV_to_CameraView(right_m, projection_matrix)
+
+        cam_with_traj = render_trajectory_on_camera_view(
+            cam_with_traj, left_2d, right_2d, color=prediction_color, outline_thickness=3
+        )
 
     if is_approximate:
         overlay = cam_with_traj.copy()

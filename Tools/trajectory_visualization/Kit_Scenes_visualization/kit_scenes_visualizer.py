@@ -1,9 +1,3 @@
-"""
-Usage:
-    cd Model/visualization
-    python -m Kit_Scenes_visualization.kit_scenes_visualizer --scene_ids <uuid> --frame 0
-"""
-
 import os
 import torch
 import cv2
@@ -24,6 +18,18 @@ from Model.data_parsing.kit_scenes.map import generate_bev_map_tile
 
 
 def visualization_on_kit_scenes(scene_ids: list[str] | None = None, frame_index: int = 0, zoom_in: bool = False, dataset_root: str | None = None) -> tuple[np.ndarray | None, np.ndarray | None]:
+    """
+    Renders the trajectory visualization for a specific KIT Scenes frame.
+    
+    Args:
+        scene_ids (list[str] | None): List of scene IDs to load.
+        frame_index (int): Frame index within the scene to visualize.
+        zoom_in (bool): If True, zooms into the center of the map tile.
+        dataset_root (str | None): Path to the KIT Scenes dataset root.
+        
+    Returns:
+        tuple[np.ndarray | None, np.ndarray | None]: The rendered combined map image and the camera/grid image.
+    """
     result = forward_pass_for_visualization_test(scene_ids=scene_ids, frame_index=frame_index, dataset_root=dataset_root, pretrained_backbone=False)
     
     if result is None:
@@ -50,7 +56,7 @@ def visualization_on_kit_scenes(scene_ids: list[str] | None = None, frame_index:
         map_image = cv2.resize(map_image, (target_w, target_h), interpolation=cv2.INTER_LINEAR)
         resolution_m_px = resolution_m_px * (current_w / target_w)
 
-    # 0.5 Define color scheme
+    # Define color scheme
     prediction_color = (140, 255, 0)
     actual_trajectory_color = (255, 80, 120)
 
@@ -77,49 +83,36 @@ def visualization_on_kit_scenes(scene_ids: list[str] | None = None, frame_index:
         rotation_rad=current_heading
     )
 
-    # 1. Draw extracted ground truth (actual driven path) on map tile
+    # Draw extracted ground truth and predicted path on map tile
     combined_img = map_image.copy()
-    if target_xy is not None:
-        combined_img = render_trajectory_map_tile(
-            prediction_xy=target_xy,
-            map_image=combined_img,
-            geometry=map_geometry,
-            color=actual_trajectory_color
-        )
-
-    # 2. Draw predicted path on map tile
     combined_img = render_trajectory_map_tile(
         prediction_xy=pred_xy,
         map_image=combined_img,
         geometry=map_geometry,
-        color=prediction_color
+        target_xy=target_xy,
+        prediction_color=prediction_color,
+        target_color=actual_trajectory_color,
+        is_approximate=False
     )
 
-    # 3. Create Camera View with trajectory and Grid
+    # Create Camera View with trajectory and Grid
     grid_with_trajectory = render_trajectory_on_a_grid(
         prediction_xy=pred_xy,
         target_xy=target_xy,
         prediction_color=prediction_color,
-        actual_trajectory_color=actual_trajectory_color
+        target_color=actual_trajectory_color
     )
 
     cam_trajectory_view = raw_camera_image.copy()
     
-    if target_xy is not None:
-        cam_trajectory_view = complete_front_camera_view_with_trajectory(
-            prediction_xy=target_xy,
-            front_camera_image=cam_trajectory_view,
-            P=P,
-            color=actual_trajectory_color
-        )
-        
-    if pred_xy is not None:
-        cam_trajectory_view = complete_front_camera_view_with_trajectory(
-            prediction_xy=pred_xy,
-            front_camera_image=cam_trajectory_view,
-            P=P,
-            color=prediction_color
-        )
+    cam_trajectory_view = complete_front_camera_view_with_trajectory(
+        prediction_xy=pred_xy,
+        front_camera_image=cam_trajectory_view,
+        P=P,
+        prediction_color=prediction_color,
+        target_xy=target_xy,
+        target_color=actual_trajectory_color
+    )
         
     camera_and_grid = concatenate_grid_and_camera(
         grid_img=grid_with_trajectory,
@@ -134,6 +127,16 @@ def forward_pass_for_visualization_test(
     ):
     """
     Run forward pass with real KIT Scenes data at a specific frame index.
+    
+    Args:
+        scene_ids (list[str] | None): List of scene IDs to load.
+        frame_index (int): Frame index to evaluate.
+        dataset_root (str | None): Path to the KIT Scenes dataset root.
+        pretrained_backbone (bool): Whether to use a pretrained backbone model.
+        
+    Returns:
+        tuple or None: A tuple containing (pred_trajectory, target_trajectory, raw_map_image, 
+                       raw_front_image, current_speed, current_heading, P) or None on failure.
     """
     try:
         from Model.data_parsing.kit_scenes import KitScenesDataset

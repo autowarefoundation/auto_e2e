@@ -10,7 +10,18 @@ from Model.data_parsing.pre_extracted import make_pre_extracted_loader
 import json
 
 def get_dataset_manifest(dataset_dir: str) -> dict:
-    """Reads the dataset manifest. Fails strictly if missing."""
+    """
+    Reads the dataset manifest JSON file and returns its contents.
+    
+    Args:
+        dataset_dir (str): Path to the dataset directory containing the manifest.json file.
+        
+    Returns:
+        dict: The loaded manifest data.
+        
+    Raises:
+        FileNotFoundError: If the manifest.json is strictly missing.
+    """
     manifest_path = os.path.join(dataset_dir, "manifest.json")
     if not os.path.exists(manifest_path):
         raise FileNotFoundError(f"Dataset manifest is missing: {manifest_path}. The tool cannot derive contract properties.")
@@ -19,17 +30,18 @@ def get_dataset_manifest(dataset_dir: str) -> dict:
 
 def get_dataset_iterator(dataset_dir: str, scene_selection: list[dict] | None = None, global_max_frames: int | None = None):
     """
-    Initializes a WebDataset reader for the trajectory visualization.
-    It reads the pre-extracted data sequentially, grouping by episode, and 
-    explicitly sorting by frame index to guarantee the temporal sequence.
+    Initializes a WebDataset reader for trajectory visualization.
+    
+    Reads the pre-extracted data sequentially, grouping by episode, and explicitly sorting by 
+    frame index to guarantee the temporal sequence needed for video rendering.
     
     Args:
-        dataset_dir: Path to directory containing .tar shard files.
-        scene_selection: Optional list of dicts specifying episodes and frame ranges to render.
-        global_max_frames: Optional max frames per episode to fallback to if scene_selection is not provided.
+        dataset_dir (str): Path to directory containing .tar shard files.
+        scene_selection (list[dict] | None): Optional list of dicts specifying episodes and frame ranges to render.
+        global_max_frames (int | None): Optional max frames per episode to fallback to if scene_selection is not provided.
         
     Returns:
-        iterator: An iterator yielding batches (of size 1) from the dataset in chronological order.
+        iterator: An iterator yielding single-item batches from the dataset in exact chronological order.
     """
     loader = make_pre_extracted_loader(
         shard_dir=dataset_dir,

@@ -141,7 +141,7 @@ def load_projection_from_manifest(shard_dir: str):
     the single geometry-reconstruction point, keeping the pinhole/f-theta split
     out of the training loop.
     """
-    from model_components.view_fusion.projection import (
+    from Model.model_components.view_fusion.projection import (
         FThetaProjection,
         PinholeProjection,
     )
