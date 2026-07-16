@@ -51,6 +51,16 @@ def test_training_workflows_do_not_invoke_benchmark_task():
         }
 
 
+def test_benchmark_task_records_its_resolved_runtime_image():
+    task = workflows.evaluate_kitscenes_benchmark_checkpoint
+
+    assert task.container_image == workflows.EVAL_IMAGE
+    assert task.environment == {
+        "MLFLOW_TRACKING_URI": workflows.MLFLOW_URI,
+        "AUTO_E2E_EVAL_IMAGE": workflows.EVAL_IMAGE,
+    }
+
+
 def test_benchmark_task_filters_uids_and_never_decodes_future_images():
     source = inspect.getsource(
         workflows.evaluate_kitscenes_benchmark_checkpoint.task_function
