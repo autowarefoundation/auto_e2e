@@ -389,6 +389,16 @@ def _split_keep(split: str, val_fraction: float):
     return keep
 
 
+@dataclass(frozen=True)
+class _SampleUidFilter:
+    """Picklable raw-WebDataset filter for an explicit benchmark manifest."""
+
+    allowed: frozenset[str]
+
+    def __call__(self, sample) -> bool:
+        return str(sample.get("__key__", "")) in self.allowed
+
+
 def make_pre_extracted_loader(
     shard_dir: str,
     batch_size: int = 8,
@@ -400,6 +410,7 @@ def make_pre_extracted_loader(
     pin_memory: bool = False,
     prefetch_factor: int = 4,
     shard_files: Sequence[str | Path] | None = None,
+    sample_uids: Sequence[str] | None = None,
 ) -> wds.WebLoader:
     """Create a WebDataset DataLoader reading from local EBS shard cache.
 
@@ -425,6 +436,9 @@ def make_pre_extracted_loader(
             num_workers>0); overlaps decode with the GPU step.
         shard_files: optional explicit subset of tar files. Overlay precompute
             uses one file at a time so each output body is canonical per shard.
+        sample_uids: optional exact sample allowlist. Filtering happens before
+            image decode so a fixed benchmark manifest does not decode unrelated
+            samples from the same source scenes.
 
     The returned loader carries two extra attributes describing the dataset's
     geometry (a rig constant, so it lives on the loader, not per batch):
@@ -461,6 +475,14 @@ def make_pre_extracted_loader(
     # per-worker shard split exactly once.
     dataset = wds.WebDataset(urls, shardshuffle=False, empty_check=False,
                              nodesplitter=wds.single_node_only)
+    if sample_uids is not None:
+        requested = [str(uid) for uid in sample_uids]
+        allowed = frozenset(requested)
+        if not allowed:
+            raise ValueError("sample_uids must not be empty")
+        if len(allowed) != len(requested):
+            raise ValueError("sample_uids contains duplicates")
+        dataset = dataset.select(_SampleUidFilter(allowed))
     # Split BEFORE decode (cheap: filters on __key__ only, skips image decode for
     # dropped samples). Keeps train/val disjoint at the sample level.
     keep = _split_keep(split, val_fraction)
@@ -629,6 +651,7 @@ def make_multi_dataset_loader(
     pin_memory: bool = False,
     prefetch_factor: int = 4,
     max_active_loaders: int | None = None,
+    sample_uids: Sequence[str] | None = None,
 ) -> MergedDatasetLoader:
     """Build a :class:`MergedDatasetLoader` over several shard directories.
 
@@ -672,6 +695,7 @@ def make_multi_dataset_loader(
             ),
             pin_memory=pin_memory,
             prefetch_factor=prefetch_factor,
+            sample_uids=sample_uids,
         )
         for index, d in enumerate(shard_dirs)
     ]
