@@ -21,6 +21,9 @@ _NODE_SUCCEEDED = 3
 
 
 def _plain_value(value: Any) -> Any:
+    remote_source = getattr(value, "remote_source", None)
+    if remote_source:
+        return remote_source
     return getattr(value, "value", value)
 
 
