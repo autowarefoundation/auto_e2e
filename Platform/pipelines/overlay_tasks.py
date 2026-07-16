@@ -1108,9 +1108,11 @@ def precompute_overlay_partition(
         try:
             tarfiles = sorted(local_dir.glob("*.tar"))
             if not tarfiles:
-                raise FileNotFoundError(
-                    f"no tar shards in partition {local_dir}"
+                print(
+                    "Skipping packed partition with no trajectory samples: "
+                    f"{local_dir}"
                 )
+                continue
 
             for tar_path in tarfiles:
                 shard_name = tar_path.name
@@ -1271,6 +1273,8 @@ def precompute_overlay_partition(
             if remove_local_dir:
                 shutil.rmtree(local_dir)
 
+    if not entries:
+        raise ValueError("no trajectory samples found in any shard directory")
     result = {
         "model_artifact_id": model_artifact_id,
         "dataset": dataset,
