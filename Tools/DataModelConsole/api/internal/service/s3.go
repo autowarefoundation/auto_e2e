@@ -508,28 +508,36 @@ func (s *S3Service) GeoHeatmap(ctx context.Context, dataset, version string) ([]
 	return body, version, err
 }
 
-// RigProjection returns the dataset-level projection artifact emitted by the
-// v2.1 repack.
-func (s *S3Service) RigProjection(ctx context.Context, dataset, version string) ([]byte, string, error) {
+func (s *S3Service) RigProjection(
+	_ context.Context,
+	_, _ string,
+) ([]byte, string, error) {
+	return nil, "", ErrNotFound
+}
+
+// ShardRigProjection returns the projection artifact bound to one immutable shard.
+func (s *S3Service) ShardRigProjection(
+	ctx context.Context,
+	dataset, version, shard string,
+) ([]byte, string, error) {
 	var err error
 	version, err = s.publishedVersion(ctx, dataset, version)
 	if err != nil {
 		return nil, "", err
 	}
-	key := fmt.Sprintf("%s/%s/rig/projection.json", dataset, version)
-	expectedDigest := ""
-	if requiresPublicationManifest(version) {
-		manifest, err := s.loadPublicationManifest(ctx, dataset, version)
-		if err != nil {
-			return nil, version, err
-		}
-		key = manifest.Rig.Key
-		expectedDigest = manifest.Rig.SHA256
+	if !requiresPublicationManifest(version) {
+		return nil, version, ErrNotFound
 	}
-	body, err := s.getObjectBytesFromBucket(ctx, s.bucket, key, 1<<20)
-	if err == nil && expectedDigest != "" {
+	entry, err := s.publishedShard(ctx, dataset, version, shard)
+	if err != nil {
+		return nil, version, err
+	}
+	body, err := s.getObjectBytesFromBucket(
+		ctx, s.bucket, entry.Rig.Key, 1<<20,
+	)
+	if err == nil {
 		digest := sha256.Sum256(body)
-		if hex.EncodeToString(digest[:]) != expectedDigest {
+		if hex.EncodeToString(digest[:]) != entry.Rig.SHA256 {
 			return nil, version, fmt.Errorf("rig projection SHA-256 mismatch")
 		}
 	}
