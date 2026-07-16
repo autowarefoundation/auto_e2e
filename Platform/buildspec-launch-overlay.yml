@@ -58,6 +58,7 @@ phases:
       - ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
       - ECR_URL="${ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com"
       - export ECR_PREFIX="${ECR_URL}"
+      - export PYTHONPATH="${CODEBUILD_SRC_DIR}/Model:${CODEBUILD_SRC_DIR}:${PYTHONPATH:-}"
       - export DATASETS_BUCKET="auto-e2e-platform-datasets-${ACCOUNT_ID}"
       - export ARTIFACTS_BUCKET="auto-e2e-platform-artifacts-${ACCOUNT_ID}"
       - |
