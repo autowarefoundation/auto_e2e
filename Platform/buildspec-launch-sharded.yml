@@ -18,6 +18,7 @@ env:
     EPISODES: "10"
     PARTITION_SIZE: "1"
     REASONING_TEACHER: "openai_compatible"
+    IMAGE_TAG: latest
 
 phases:
   install:
@@ -28,21 +29,27 @@ phases:
       - ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
       - ECR_URL="${ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com"
       - export ECR_PREFIX="${ECR_URL}"
+      - export PYTHONPATH="${CODEBUILD_SRC_DIR}/Model:${CODEBUILD_SRC_DIR}:${PYTHONPATH:-}"
       - |
         image_ref() {
           REPOSITORY="$1"
-          DIGEST=$(aws ecr describe-images \
+          DIGEST=$(aws ecr batch-get-image \
             --repository-name "auto-e2e/${REPOSITORY}" \
-            --image-ids imageTag=latest \
-            --query 'imageDetails[0].imageDigest' \
+            --image-ids imageTag="${IMAGE_TAG}" \
+            --query 'images[0].imageId.imageDigest' \
             --output text)
-          test -n "${DIGEST}" && test "${DIGEST}" != "None"
+          if [ -z "${DIGEST}" ] || [ "${DIGEST}" = "None" ]; then
+            echo "No digest found for auto-e2e/${REPOSITORY}:${IMAGE_TAG}" >&2
+            return 1
+          fi
           printf '%s/auto-e2e/%s@%s' "${ECR_URL}" "${REPOSITORY}" "${DIGEST}"
         }
-        export AUTO_E2E_TRAINING_IMAGE=$(image_ref training)
-        export AUTO_E2E_EVAL_IMAGE=$(image_ref eval)
-        export AUTO_E2E_OFFLINE_RL_IMAGE=$(image_ref offline-rl)
-        export AUTO_E2E_DATA_PREP_IMAGE=$(image_ref data-prep)
+        AUTO_E2E_TRAINING_IMAGE="$(image_ref training)" || exit 1
+        AUTO_E2E_EVAL_IMAGE="$(image_ref eval)" || exit 1
+        AUTO_E2E_OFFLINE_RL_IMAGE="$(image_ref offline-rl)" || exit 1
+        AUTO_E2E_DATA_PREP_IMAGE="$(image_ref data-prep)" || exit 1
+        export AUTO_E2E_TRAINING_IMAGE AUTO_E2E_EVAL_IMAGE
+        export AUTO_E2E_OFFLINE_RL_IMAGE AUTO_E2E_DATA_PREP_IMAGE
       - |
         cat > /tmp/flyte.yaml << EOF
         admin:

@@ -292,6 +292,60 @@ class TestMergedDatasetLoader:
                 return iter(self._b)
         return _L(batches, projection, geom)
 
+    class _Lifecycle:
+        def __init__(self):
+            self.created = []
+            self.opened = []
+            self.closed = []
+            self.loader_closed = []
+            self.active = 0
+            self.peak_active = 0
+
+        def factory(self, label, batches, *, fail=False):
+            lifecycle = self
+
+            class _Iterator:
+                def __init__(self):
+                    self._batches = iter(batches)
+                    self._fail = fail
+                    self._closed = False
+                    lifecycle.opened.append(label)
+                    lifecycle.active += 1
+                    lifecycle.peak_active = max(
+                        lifecycle.peak_active, lifecycle.active
+                    )
+
+                def __iter__(self):
+                    return self
+
+                def __next__(self):
+                    if self._fail:
+                        self._fail = False
+                        raise RuntimeError(f"failed {label}")
+                    return next(self._batches)
+
+                def close(self):
+                    if not self._closed:
+                        self._closed = True
+                        lifecycle.closed.append(label)
+                        lifecycle.active -= 1
+
+            class _Loader:
+                projection = None
+                geometry_type = "pseudo"
+
+                def __iter__(self):
+                    return _Iterator()
+
+                def close(self):
+                    lifecycle.loader_closed.append(label)
+
+            def create():
+                lifecycle.created.append(label)
+                return _Loader()
+
+            return create
+
     def test_round_robin_interleaves_and_tags_geometry(self):
         from data_parsing.pre_extracted import MergedDatasetLoader
         a = self._fake_loader(["a0", "a1", "a2"], None, "pseudo")
@@ -317,6 +371,158 @@ class TestMergedDatasetLoader:
         from data_parsing.pre_extracted import MergedDatasetLoader
         with pytest.raises(ValueError, match="at least one"):
             MergedDatasetLoader([])
+
+    def test_404_factories_are_lazy_and_active_window_is_bounded(self):
+        from data_parsing.pre_extracted import MergedDatasetLoader
+
+        lifecycle = self._Lifecycle()
+        factories = [
+            lifecycle.factory(i, [i])
+            for i in range(404)
+        ]
+        merged = MergedDatasetLoader(
+            loader_factories=factories,
+            max_active_loaders=4,
+        )
+
+        assert lifecycle.created == []
+        seen = [item[0] for item in merged]
+
+        assert seen == list(range(404))
+        assert lifecycle.created == list(range(404))
+        assert lifecycle.peak_active == 4
+        assert lifecycle.active == 0
+        assert sorted(lifecycle.closed) == list(range(404))
+        assert sorted(lifecycle.loader_closed) == list(range(404))
+
+    def test_early_close_releases_every_active_child(self):
+        from data_parsing.pre_extracted import MergedDatasetLoader
+
+        lifecycle = self._Lifecycle()
+        merged = MergedDatasetLoader(
+            loader_factories=[
+                lifecycle.factory(i, [f"{i}-0", f"{i}-1"])
+                for i in range(404)
+            ],
+            max_active_loaders=4,
+        )
+
+        iterator = iter(merged)
+        assert next(iterator)[0] == "0-0"
+        assert lifecycle.created == [0, 1, 2, 3]
+        iterator.close()
+
+        assert lifecycle.active == 0
+        assert sorted(lifecycle.closed) == [0, 1, 2, 3]
+        assert sorted(lifecycle.loader_closed) == [0, 1, 2, 3]
+        assert lifecycle.created == [0, 1, 2, 3]
+
+    def test_each_epoch_recreates_children_after_complete_cleanup(self):
+        from data_parsing.pre_extracted import MergedDatasetLoader
+
+        lifecycle = self._Lifecycle()
+        merged = MergedDatasetLoader(
+            loader_factories=[
+                lifecycle.factory("a", ["a0", "a1"]),
+                lifecycle.factory("b", ["b0"]),
+            ],
+            max_active_loaders=2,
+        )
+
+        expected = ["a0", "b0", "a1"]
+        assert [item[0] for item in merged] == expected
+        assert lifecycle.active == 0
+        assert [item[0] for item in merged] == expected
+
+        assert lifecycle.created == ["a", "b", "a", "b"]
+        assert lifecycle.closed == ["b", "a", "b", "a"]
+        assert lifecycle.loader_closed == ["b", "a", "b", "a"]
+        assert lifecycle.peak_active == 2
+        assert lifecycle.active == 0
+
+    def test_child_exception_releases_failed_and_other_active_children(self):
+        from data_parsing.pre_extracted import MergedDatasetLoader
+
+        lifecycle = self._Lifecycle()
+        factories = [lifecycle.factory(0, [], fail=True)]
+        factories.extend(
+            lifecycle.factory(i, [i])
+            for i in range(1, 404)
+        )
+        merged = MergedDatasetLoader(
+            loader_factories=factories,
+            max_active_loaders=4,
+        )
+
+        with pytest.raises(RuntimeError, match="failed 0"):
+            next(iter(merged))
+
+        assert lifecycle.created == [0, 1, 2, 3]
+        assert lifecycle.active == 0
+        assert sorted(lifecycle.closed) == [0, 1, 2, 3]
+        assert sorted(lifecycle.loader_closed) == [0, 1, 2, 3]
+
+    def test_multi_loader_uses_global_worker_budget_and_lazy_factories(
+            self, monkeypatch):
+        import data_parsing.pre_extracted as pre_extracted
+
+        calls = []
+
+        def fake_loader(shard_dir, **kwargs):
+            calls.append((shard_dir, kwargs))
+            return self._fake_loader([shard_dir], None, "pseudo")
+
+        monkeypatch.setattr(
+            pre_extracted, "make_pre_extracted_loader", fake_loader
+        )
+        merged = pre_extracted.make_multi_dataset_loader(
+            [f"partition-{i}" for i in range(404)],
+            batch_size=1,
+            num_workers=4,
+            shuffle=1000,
+            shuffle_seed=700,
+        )
+
+        assert calls == []
+        iterator = iter(merged)
+        assert next(iterator)[0] == "partition-0"
+        assert len(calls) == 4
+        assert all(kwargs["num_workers"] == 1 for _, kwargs in calls)
+        assert [
+            kwargs["shuffle_seed"] for _, kwargs in calls
+        ] == [700, 701, 702, 703]
+        assert merged.shuffle_seed == 700
+        assert merged.max_active_loaders == 4
+        iterator.close()
+
+    def test_multi_loader_exposes_safe_eval_active_window(self, monkeypatch):
+        import data_parsing.pre_extracted as pre_extracted
+
+        calls = []
+
+        def fake_loader(shard_dir, **kwargs):
+            calls.append((shard_dir, kwargs))
+            return self._fake_loader([shard_dir], None, "pseudo")
+
+        monkeypatch.setattr(
+            pre_extracted, "make_pre_extracted_loader", fake_loader
+        )
+        merged = pre_extracted.make_multi_dataset_loader(
+            [f"partition-{i}" for i in range(404)],
+            batch_size=8,
+            num_workers=4,
+            shuffle=0,
+            prefetch_factor=1,
+            max_active_loaders=1,
+        )
+
+        iterator = iter(merged)
+        assert next(iterator)[0] == "partition-0"
+        assert len(calls) == 1
+        assert calls[0][1]["num_workers"] == 1
+        assert calls[0][1]["prefetch_factor"] == 1
+        assert merged.max_active_loaders == 1
+        iterator.close()
 
 
 def _write_shards(dirpath, n_shards, per_shard):
@@ -359,6 +565,55 @@ class TestLoaderYieldsAllSamplesUnderWorkers:
             assert seen == total, (
                 f"num_workers={nw}: loader yielded {seen}/{total} samples — "
                 f"shards are being split more than once (double split_by_worker)")
+
+    def test_partition_loader_workers_are_not_persistent(self, tmp_path):
+        shard_dir = tmp_path / "shards"
+        _write_shards(shard_dir, n_shards=2, per_shard=1)
+        from data_parsing.pre_extracted import make_pre_extracted_loader
+
+        loader = make_pre_extracted_loader(
+            str(shard_dir),
+            batch_size=1,
+            num_workers=2,
+            shuffle=0,
+        )
+        torch_loader = loader.pipeline[0]
+        assert torch_loader.num_workers == 2
+        assert torch_loader.persistent_workers is False
+        loader.close()
+
+    def test_merged_early_close_stops_all_active_workers(self, tmp_path):
+        import multiprocessing as mp
+
+        from data_parsing.pre_extracted import make_multi_dataset_loader
+
+        shard_dirs = []
+        for index in range(8):
+            shard_dir = tmp_path / f"partition-{index}"
+            _write_shards(shard_dir, n_shards=1, per_shard=2)
+            shard_dirs.append(str(shard_dir))
+
+        existing_pids = {child.pid for child in mp.active_children()}
+        loader = make_multi_dataset_loader(
+            shard_dirs,
+            batch_size=1,
+            num_workers=1,
+            shuffle=0,
+        )
+        iterator = iter(loader)
+        next(iterator)
+        workers = [
+            child
+            for child in mp.active_children()
+            if child.pid not in existing_pids
+        ]
+
+        iterator.close()
+        for worker in workers:
+            worker.join(timeout=5)
+
+        assert len(workers) == 1
+        assert all(not worker.is_alive() for worker in workers)
 
     def test_explicit_shard_subset_isolated_for_overlay_output(self, tmp_path):
         shard_dir = tmp_path / "shards"

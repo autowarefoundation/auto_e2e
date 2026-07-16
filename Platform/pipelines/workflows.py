@@ -5,7 +5,8 @@ Architecture:
                                       ↓
                               train_offline_rl → evaluate
 
-MLflow: Only evaluate task logs. 2 experiments: imitation-learning, offline-rl.
+MLflow: Training logs epoch metrics; evaluation logs final metrics and registry
+entries. Two experiments: imitation-learning and offline-rl.
 """
 import enum
 import functools
@@ -39,7 +40,7 @@ DATA_PREP_IMAGE = _os.environ.get(
 )
 
 MLFLOW_URI = "http://mlflow.mlflow.svc.cluster.local:5000"
-DATASET_PACK_VERSION = "v2.1"
+DATASET_PACK_VERSION = "v2.2"
 L2D_SOURCE_REVISION = "main"
 KITSCENES_SOURCE_REVISION = "6fde0034446669e2ed7235e4c7fe323cd23d599d"
 
@@ -53,28 +54,62 @@ KITSCENES_SOURCE_REVISION = "6fde0034446669e2ed7235e4c7fe323cd23d599d"
 # literals, cache_version); the CODE-contract determinants (uid/parser/shard/
 # geometry schema) can't be captured by inputs, so they go here. Sourced from
 # Model/data_processing/contract_versions.py (the single place any of these is
-# bumped, §3.4c). Imported guarded: Model is on the path in the data-prep image
-# and on the dev box, but NOT necessarily when this module is first imported at
-# registration — the fallback keeps registration working (the real values load
-# in the pod where the tasks actually run and cache). Per-partition group_ids and
-# source_revision travel as task INPUTS, so ranges are independently cacheable.
-try:
-    from data_processing.contract_versions import (
-        UID_SCHEMA_VERSION as _UID_V, PARSER_VERSION as _PARSER_V,
-        SHARD_SCHEMA_VERSION as _SHARD_V, GEOMETRY_VERSION as _GEOM_V,
-        REASONING_LABEL_POLICY_VERSION as _LABEL_POLICY_V,
-    )
-except Exception:  # pragma: no cover - registration-time fallback only
-    _UID_V = _PARSER_V = _SHARD_V = _GEOM_V = "v1"
-    _LABEL_POLICY_V = "v1"
+# bumped, §3.4c). Registration must put Model/ on PYTHONPATH; an import failure
+# is fatal because guessing these values can silently reuse incompatible cache
+# entries. Per-partition group_ids and source_revision travel as task INPUTS, so
+# ranges are independently cacheable.
+from data_processing.contract_versions import (
+    GEOMETRY_VERSION as _GEOM_V,
+    PARSER_VERSION as _PARSER_V,
+    REASONING_LABEL_POLICY_VERSION as _LABEL_POLICY_V,
+    SHARD_SCHEMA_VERSION as _SHARD_V,
+    UID_SCHEMA_VERSION as _UID_V,
+)
 
 # Each stage's cache_version folds in ONLY the contracts that actually determine
 # its output (§3.4a): ingest depends on the parser enumeration; labels also on
 # the uid format (the JOIN key) and sparse-selection policy; pack on the shard
 # and geometry encoding.
-INGEST_CACHE_VERSION = f"ingest-{_PARSER_V}"
-LABEL_CACHE_VERSION = f"label-{_PARSER_V}-{_UID_V}-{_LABEL_POLICY_V}"
-PACK_CACHE_VERSION = f"pack-{_PARSER_V}-{_UID_V}-{_SHARD_V}-{_GEOM_V}"
+_DEPLOYED_CACHE_VERSION_ALIASES = {
+    # Registrations before contract imports became fail-closed serialized the
+    # fallback v1 strings even though these were the contracts in the task
+    # images. Preserve only the exact ingest/reasoning tuples so those expensive
+    # KITScenes caches remain reusable. Pack must follow geometry contract bumps;
+    # any other contract tuple falls through to a contract-derived cache version.
+    ("ingest", "v2"): "ingest-v1",
+    ("label", "v2", "v1", "v2"): "label-v1-v1-v1",
+}
+
+
+def _cache_versions_for_contracts(
+    *,
+    uid: str,
+    parser: str,
+    shard: str,
+    geometry: str,
+    label_policy: str,
+) -> dict[str, str]:
+    def resolve(stage: str, *contracts: str) -> str:
+        key = (stage, *contracts)
+        return _DEPLOYED_CACHE_VERSION_ALIASES.get(key, "-".join(key))
+
+    return {
+        "ingest": resolve("ingest", parser),
+        "label": resolve("label", parser, uid, label_policy),
+        "pack": resolve("pack", parser, uid, shard, geometry),
+    }
+
+
+_CACHE_VERSIONS = _cache_versions_for_contracts(
+    uid=_UID_V,
+    parser=_PARSER_V,
+    shard=_SHARD_V,
+    geometry=_GEOM_V,
+    label_policy=_LABEL_POLICY_V,
+)
+INGEST_CACHE_VERSION = _CACHE_VERSIONS["ingest"]
+LABEL_CACHE_VERSION = _CACHE_VERSIONS["label"]
+PACK_CACHE_VERSION = _CACHE_VERSIONS["pack"]
 
 
 def _data_prep_pod_template():
@@ -101,6 +136,7 @@ def _large_shm_pod_template():
         V1PodSpec, V1Container, V1Volume, V1VolumeMount, V1EmptyDirVolumeSource,
     )
     return PodTemplate(
+        annotations={"karpenter.sh/do-not-disrupt": "true"},
         primary_container_name="primary",
         pod_spec=V1PodSpec(
             containers=[
@@ -131,6 +167,14 @@ class Backbone(enum.Enum):
     SWIN_V2_TINY = "swin_v2_tiny"
     CONVNEXT_V2_TINY = "conv_next_v2_tiny"
     RESNET_50 = "res_net_50"
+
+
+def _row_decode_worker_count(dataset: Dataset, row_count: int) -> int:
+    """Bound row decoders by each parser's per-process memory footprint."""
+    # Each KITScenes child reparses the scene's Lanelet2 map and calibration.
+    # Large scenes exceeded the 64 GiB pod limit with the generic 16-worker cap.
+    max_workers = 2 if dataset == Dataset.KITSCENES else 16
+    return max(1, min(max_workers, row_count))
 
 
 # NOTE: view fusion is no longer selectable. The reactive-refactor (PR #94)
@@ -242,6 +286,280 @@ def _select_shard_dirs(shards, dataset) -> List[str]:
 def _loader_download_dir(shard) -> str:
     """Download one shard FlyteDirectory and return its local path (merged path)."""
     return str(shard.download())
+
+
+def _training_num_views_from_manifests(
+    manifests: dict[str, dict],
+    shard_dirs: List[str],
+) -> int:
+    """Validate partition camera counts without starting dataset loaders."""
+    dataset_views: dict[str, int] = {}
+    for shard_dir in shard_dirs:
+        manifest = manifests[shard_dir]
+        dataset_name = manifest.get("dataset")
+        if not isinstance(dataset_name, str) or not dataset_name:
+            raise ValueError(
+                f"packed shard manifest has no dataset name: {shard_dir}"
+            )
+        num_views = manifest.get("num_views")
+        if (
+            isinstance(num_views, bool)
+            or not isinstance(num_views, int)
+            or num_views <= 0
+        ):
+            raise ValueError(
+                f"packed shard manifest has invalid num_views={num_views!r}: "
+                f"{shard_dir}"
+            )
+        previous = dataset_views.setdefault(dataset_name, num_views)
+        if previous != num_views:
+            raise ValueError(
+                f"inconsistent num_views for dataset {dataset_name!r}: "
+                f"{previous} != {num_views} ({shard_dir})"
+            )
+    if not dataset_views:
+        raise ValueError("no non-empty shard manifests supplied")
+    # AutoE2E is runtime-V-dynamic. The construction value only sizes defaults,
+    # so use the largest validated rig when a multi-dataset run mixes view counts.
+    return max(dataset_views.values())
+
+
+def _checkpoint_bucket_name(sts_client=None) -> str:
+    """Resolve checkpoint storage without embedding an AWS account ID."""
+    configured = _os.environ.get("AUTO_E2E_CHECKPOINT_BUCKET", "").strip()
+    if configured:
+        return configured
+    if sts_client is None:
+        import boto3
+
+        sts_client = boto3.client("sts")
+    account_id = sts_client.get_caller_identity()["Account"]
+    cluster_name = _os.environ.get(
+        "AUTO_E2E_CLUSTER_NAME", "auto-e2e-platform"
+    )
+    return f"{cluster_name}-checkpoints-{account_id}"
+
+
+def _resumed_checkpoint_record(payload: dict, path: str) -> dict:
+    """Rebuild the current immutable-checkpoint record from saved state."""
+    import os
+
+    from Platform.pipelines.training_checkpoint import sha256_file
+
+    epoch = int(payload["epoch"])
+    state = dict(payload["training_state"])
+    history = list(state.get("metric_history", []))
+    if not history or int(history[-1].get("epoch", -1)) != epoch:
+        raise ValueError(
+            "resume checkpoint metric history does not end at its saved epoch"
+        )
+    checkpoint_uri = str(state.get("current_checkpoint_uri", ""))
+    if not checkpoint_uri.startswith("s3://"):
+        raise ValueError(
+            "resume checkpoint has no immutable current checkpoint URI"
+        )
+    return {
+        "epoch": epoch,
+        "ade": float(history[-1]["val_ade"]),
+        "fde": float(history[-1]["val_fde"]),
+        "uri": checkpoint_uri,
+        "sha256": sha256_file(path),
+        "size": os.path.getsize(path),
+    }
+
+
+def _resume_terminal_state(
+    *,
+    completed_epoch: int,
+    bad_epochs: int,
+    requested_epochs: int,
+    patience: int,
+) -> tuple[bool, bool]:
+    """Return ``(terminal, stopped_early)`` for a resumable checkpoint."""
+    if bad_epochs < 0:
+        raise ValueError("resume checkpoint has negative bad_epochs")
+    if completed_epoch > requested_epochs:
+        raise ValueError(
+            f"resume checkpoint completed epoch {completed_epoch}, beyond "
+            f"requested total epochs={requested_epochs}"
+        )
+    stopped_early = bad_epochs >= patience
+    return completed_epoch == requested_epochs or stopped_early, stopped_early
+
+
+def _evaluate_open_loop(model, loader, device) -> dict:
+    """Evaluate one fixed loader and return finite ADE/FDE plus its UID digest."""
+    import hashlib
+    import numpy as np
+    import torch
+
+    from evaluation.metrics import integrate_trajectory
+
+    was_training = model.training
+    all_ade: list[float] = []
+    all_fde: list[float] = []
+    sample_uids: list[str] = []
+    model.eval()
+    try:
+        with torch.no_grad():
+            for batch, projection, geometry_type in loader:
+                if projection is not None:
+                    projection = projection.to(device)
+                if hasattr(model, "reset_visual_history"):
+                    model.reset_visual_history()
+
+                visual = batch["visual_tiles"].to(device)
+                ego_hist = batch["egomotion_history"].to(device)
+                vis_hist = batch["visual_history"].to(device)
+                target = batch["trajectory_target"]
+                map_input = batch["map_input"].to(device)
+                history_frames = batch.get("history_frames")
+                future_frames = batch.get("future_frames")
+                if history_frames is not None:
+                    history_frames = history_frames.to(device)
+                if future_frames is not None:
+                    future_frames = future_frames.to(device)
+
+                pred = model(
+                    visual,
+                    map_input,
+                    vis_hist,
+                    ego_hist,
+                    projection=projection,
+                    geometry_type=geometry_type,
+                    history_frames=history_frames,
+                    future_frames=future_frames,
+                    mode="infer",
+                )
+                pred_np = pred.cpu().numpy()
+                target_np = target.numpy()
+                batch_uids = batch.get("sample_uid", [])
+                if isinstance(batch_uids, str):
+                    batch_uids = [batch_uids]
+                sample_uids.extend(str(uid) for uid in batch_uids)
+
+                for sample_index in range(pred_np.shape[0]):
+                    pred_signals = pred_np[sample_index].reshape(64, 2)
+                    target_signals = target_np[sample_index].reshape(64, 2)
+                    ego_np = batch["egomotion_history"][
+                        sample_index
+                    ].numpy()
+                    v0 = float(ego_np[-4])
+                    pred_traj = integrate_trajectory(
+                        pred_signals[:, 0], pred_signals[:, 1], v0
+                    )
+                    target_traj = integrate_trajectory(
+                        target_signals[:, 0], target_signals[:, 1], v0
+                    )
+                    errors = np.linalg.norm(
+                        pred_traj - target_traj, axis=1
+                    )
+                    all_ade.append(float(errors.mean()))
+                    all_fde.append(float(errors[-1]))
+    finally:
+        model.train(was_training)
+        if hasattr(model, "reset_visual_history"):
+            model.reset_visual_history()
+
+    if not all_ade or len(sample_uids) != len(all_ade):
+        raise ValueError(
+            "validation produced no samples or lost sample identities: "
+            f"metrics={len(all_ade)} sample_uids={len(sample_uids)}"
+        )
+    if any(not uid for uid in sample_uids):
+        raise ValueError("validation contains an empty sample UID")
+    if len(set(sample_uids)) != len(sample_uids):
+        raise ValueError("validation contains duplicate sample UIDs")
+    ade = float(np.mean(all_ade))
+    fde = float(np.mean(all_fde))
+    if not np.isfinite(ade) or not np.isfinite(fde):
+        raise ValueError(f"non-finite validation metrics: ADE={ade}, FDE={fde}")
+    uid_digest = hashlib.sha256(
+        "\n".join(sorted(sample_uids)).encode("utf-8")
+    ).hexdigest()
+    return {
+        "ade": ade,
+        "fde": fde,
+        "sample_count": len(all_ade),
+        "sample_uid_digest": uid_digest,
+    }
+
+
+def _register_checkpoint_version(
+    client,
+    *,
+    run_id: str,
+    roles: List[str],
+    epoch: int,
+    checkpoint_uri: str,
+    checkpoint_sha256: str,
+    ade: float,
+    fde: float,
+) -> str:
+    """Register one immutable checkpoint idempotently for an MLflow run."""
+    model_name = "auto-e2e-driving-policy"
+    normalized_roles = sorted(set(roles))
+    if not normalized_roles or not set(normalized_roles) <= {"best", "final"}:
+        raise ValueError(f"invalid checkpoint roles: {roles}")
+
+    try:
+        client.get_registered_model(model_name)
+    except Exception:
+        try:
+            client.create_registered_model(model_name)
+        except Exception:
+            # A concurrent retry may have created it after the first read.
+            client.get_registered_model(model_name)
+
+    for existing in client.search_model_versions(f"name='{model_name}'"):
+        if (
+            existing.run_id == run_id
+            and str(existing.source or "") == checkpoint_uri
+        ):
+            version = str(existing.version)
+            break
+    else:
+        registered = client.create_model_version(
+            name=model_name,
+            source=checkpoint_uri,
+            run_id=run_id,
+        )
+        version = str(registered.version)
+
+    tags = {
+        "checkpoint_role": ",".join(normalized_roles),
+        "checkpoint_epoch": str(epoch),
+        "checkpoint_s3_uri": checkpoint_uri,
+        "checkpoint_sha256": checkpoint_sha256,
+        "validation_ade": str(ade),
+        "validation_fde": str(fde),
+    }
+    for key, value in tags.items():
+        client.set_model_version_tag(model_name, version, key, value)
+    return version
+
+
+class _ProjectionDeviceCache:
+    """Cache device projections only while their source calibration is alive."""
+
+    def __init__(self, device):
+        import weakref
+
+        self._device = device
+        self._values = weakref.WeakKeyDictionary()
+
+    def get(self, projection):
+        if projection is None:
+            return None
+        try:
+            return self._values[projection]
+        except KeyError:
+            device_projection = projection.to(self._device)
+            self._values[projection] = device_projection
+            return device_projection
+
+    def __len__(self):
+        return len(self._values)
 
 
 def _loader_projection(loader, device):
@@ -785,6 +1103,7 @@ def data_processing(
     world_model: bool = False,
     reasoning_labels: Optional[FlyteDirectory] = None,
     group_ids: Optional[List[str]] = None,
+    expected_reasoning_label_count: Optional[int] = None,
 ) -> Annotated[FlyteDirectory, BatchSize(4)]:
     """Pre-extract aligned frames + egomotion → WebDataset shards.
 
@@ -809,6 +1128,16 @@ def data_processing(
     import json
     import tarfile
     import tempfile
+
+    if expected_reasoning_label_count is not None:
+        if expected_reasoning_label_count < 0:
+            raise ValueError(
+                "expected_reasoning_label_count must be non-negative"
+            )
+        if reasoning_labels is None:
+            raise ValueError(
+                "expected_reasoning_label_count requires reasoning_labels"
+            )
 
     raw_path = raw_data.download()
     print(f"Processing raw data from: {raw_path} (dataset={dataset.value})")
@@ -909,15 +1238,39 @@ def data_processing(
         )
         labels_dir = reasoning_labels.download()
         records_files = sorted(Path(labels_dir).rglob("records.jsonl"))
+        if (
+            expected_reasoning_label_count is not None
+            and len(records_files) != 1
+        ):
+            raise ValueError(
+                "strict reasoning JOIN requires exactly one records.jsonl, "
+                f"found {len(records_files)} in {labels_dir}"
+            )
         if records_files:
             for rf in records_files:
-                labels_by_id.update(load_records_by_sample_id(str(rf)))
+                loaded = load_records_by_sample_id(str(rf))
+                duplicate_ids = set(labels_by_id).intersection(loaded)
+                if duplicate_ids:
+                    raise ValueError(
+                        "duplicate reasoning sample IDs across artifacts: "
+                        f"{sorted(duplicate_ids)[:3]}"
+                    )
+                labels_by_id.update(loaded)
             _record_to_json = record_to_json
             print(f"Reasoning labels JOIN: {len(labels_by_id)} records from "
                   f"{[str(p) for p in records_files]}")
         else:
             print(f"WARN: reasoning_labels dir {labels_dir} has no records.jsonl; "
                   "packing without reasoning.json (imitation-only).")
+        if (
+            expected_reasoning_label_count is not None
+            and len(labels_by_id) != expected_reasoning_label_count
+        ):
+            raise ValueError(
+                "reasoning label artifact count differs from the recovery "
+                f"manifest: expected={expected_reasoning_label_count} "
+                f"loaded={len(labels_by_id)}"
+            )
 
     # Geometry is a per-dataset rig constant, computed once. It is written into
     # EACH sample's calib.json (self-describing shards) so datasets can later be
@@ -978,6 +1331,7 @@ def data_processing(
     shard_names: list[str] = []
     sample_count = 0
     reasoning_label_count = 0
+    joined_reasoning_ids: set[str] = set()
     samples_per_shard = 1000
     current_tar = None
 
@@ -1071,7 +1425,7 @@ def data_processing(
         # camera pixels only. This is particularly important for KITScenes,
         # where every map tile runs a Lanelet2 query and rasterization.
         row_map: dict = {}
-        row_workers = max(1, min(16, len(all_rows)))
+        row_workers = _row_decode_worker_count(dataset, len(all_rows))
         current_rows = set(sample_cur_rows.values())
         decode_tasks = [
             (group_id, frame_index, (group_id, frame_index) in current_rows)
@@ -1170,6 +1524,7 @@ def data_processing(
                     _add_member(uid, "reasoning.json",
                                 json.dumps(_record_to_json(record)).encode())
                     reasoning_label_count += 1
+                    joined_reasoning_ids.add(uid)
             sample_count += 1
 
     else:
@@ -1201,10 +1556,30 @@ def data_processing(
                         _add_member(sample_key, "reasoning.json",
                                     json.dumps(_record_to_json(record)).encode())
                         reasoning_label_count += 1
+                        joined_reasoning_ids.add(sample_key)
                 sample_count += 1
 
     if current_tar:
         current_tar.close()
+
+    if expected_reasoning_label_count is not None:
+        unjoined_ids = set(labels_by_id) - joined_reasoning_ids
+        if unjoined_ids:
+            raise ValueError(
+                "reasoning labels did not join a packed sample: "
+                f"{sorted(unjoined_ids)[:3]}"
+            )
+        if reasoning_label_count != expected_reasoning_label_count:
+            raise ValueError(
+                "packed reasoning JOIN count differs from the recovery "
+                f"manifest: expected={expected_reasoning_label_count} "
+                f"joined={reasoning_label_count}"
+            )
+        if expected_reasoning_label_count == 0 and sample_count > 0:
+            raise ValueError(
+                "a zero-label recovery partition produced "
+                f"{sample_count} samples; refusing unsupervised packing"
+            )
 
     from data_processing.contract_versions import contract_versions
     from data_processing.geospatial import (
@@ -1570,6 +1945,7 @@ def generate_reasoning_labels(
     requests=Resources(cpu="4", mem="16Gi", gpu="1"),
     limits=Resources(cpu="4", mem="16Gi", gpu="1"),
     pod_template=_large_shm_pod_template(),  # /dev/shm for DataLoader workers (#121 P0)
+    environment={"MLFLOW_TRACKING_URI": MLFLOW_URI},
 )
 def train_il(
     shards: List[FlyteDirectory],
@@ -1606,13 +1982,13 @@ def train_il(
     reasoning_loss_weight: float = 0.05,
     enable_world_model: bool = False,
     jepa_loss_weight: float = 1.0,
-    # Held-out split: train on the (1 - val_fraction) majority of samples, so the
+    # Held-out split: train on the (1 - val_fraction) majority of scene groups, so the
     # separate eval task can score the disjoint val split and measure
     # GENERALIZATION rather than training-set memorization (which structurally
     # favours the lower-capacity imitation model). 0.0 = train on everything
-    # (legacy in-sample behaviour). The split is a stable per-sample hash of
-    # __key__, so train and eval never share a sample and both tasks agree.
-    val_fraction: float = 0.0,
+    # (legacy in-sample behaviour). The split is a stable hash of
+    # split_group_uid, so train and eval never share a scene and both tasks agree.
+    val_fraction: float = 0.1,
     # Parallel JPEG decode (#121 P0). num_workers=0 decodes every sample (~55
     # JPEGs/sample with WM windows) serially on the training process, stalling the
     # GPU — the dominant per-epoch cost at scale. >0 spreads decode across worker
@@ -1620,6 +1996,8 @@ def train_il(
     # GPU step. Effective parallelism is capped by shard count, so scale needs more
     # (smaller) shards too.
     num_workers: int = 0,
+    resume_from: Optional[FlyteFile] = None,
+    early_stopping_patience: int = 3,
 ) -> TrainOutput:
     """Train AutoE2E model on pre-extracted WebDataset shards.
 
@@ -1646,7 +2024,20 @@ def train_il(
     import json
     import torch
     import numpy as np
+    import mlflow
+    import boto3
     from flytekit import current_context
+
+    if not 0.0 < val_fraction < 1.0:
+        raise ValueError(
+            f"val_fraction must be between 0 and 1, got {val_fraction}"
+        )
+    if not 3 <= early_stopping_patience <= 5:
+        raise ValueError(
+            "early_stopping_patience must be between 3 and 5"
+        )
+    if epochs <= 0:
+        raise ValueError(f"epochs must be positive, got {epochs}")
 
     # DataLoader workers (num_workers>0) transport batches to the parent via shared
     # memory (/dev/shm) by default; the Flyte pod's /dev/shm is tiny (~64MB), so
@@ -1700,21 +2091,51 @@ def train_il(
             f"mixed dataset versions in one training run: {sorted(dataset_versions)}"
         )
     dataset_version = next(iter(dataset_versions), "unknown")
-    # Train on the "train" split when a held-out fraction is requested (eval scores
-    # the disjoint "val" split); val_fraction=0 keeps the legacy all-samples path.
-    _split = "train" if val_fraction > 0.0 else "all"
-    merged = make_multi_dataset_loader(shard_dirs, batch_size=batch_size,
-                                       num_workers=num_workers,
-                                       pin_memory=(device.type == "cuda"),
-                                       split=_split, val_fraction=val_fraction)
-    print(f"Merged {len(shard_dirs)} non-empty partition(s) into one training stream "
-          f"(skipped_empty={skipped_empty}, split={_split}, "
-          f"val_fraction={val_fraction}, num_workers={num_workers}).")
+    num_views = _training_num_views_from_manifests(manifests, shard_dirs)
 
-    # Peek the first batch to size num_views defaults.
-    _peek, _peek_proj, _peek_geom = next(iter(merged))
-    num_views = int(_peek["visual_tiles"].shape[1])
-    print(f"Detected num_views={num_views} (first dataset); geometry={_peek_geom}")
+    from Platform.pipelines.training_checkpoint import stable_digest
+
+    data_identity = []
+    for manifest in manifests.values():
+        data_identity.append({
+            "dataset": manifest.get("dataset"),
+            "source_revision": manifest.get("source_revision"),
+            "dataset_version": manifest.get("dataset_version"),
+            "partition_id": manifest.get("partition_id"),
+            "total_samples": int(manifest.get("total_samples", 0)),
+            "shard_names": list(manifest.get("shard_names", [])),
+            "contracts": manifest.get("contracts"),
+            "num_views": int(manifest.get("num_views", 0)),
+            "has_world_model": bool(
+                manifest.get("has_world_model", False)
+            ),
+            "reasoning_label_count": int(
+                manifest.get("reasoning_label_count", 0)
+            ),
+        })
+    data_identity.sort(
+        key=lambda item: (
+            str(item["partition_id"]),
+            str(item["dataset"]),
+        )
+    )
+    data_fingerprint = stable_digest(data_identity)
+
+    validation_loader = make_multi_dataset_loader(
+        shard_dirs,
+        batch_size=8,
+        num_workers=min(num_workers, 1),
+        shuffle=0,
+        pin_memory=(device.type == "cuda"),
+        split="val",
+        val_fraction=val_fraction,
+        max_active_loaders=1,
+        prefetch_factor=1,
+    )
+    print(f"Merged {len(shard_dirs)} non-empty partition(s) into one training stream "
+          f"(skipped_empty={skipped_empty}, split=train, "
+          f"val_fraction={val_fraction}, num_workers={num_workers}, "
+          f"num_views={num_views}, data_fingerprint={data_fingerprint}).")
 
     # Consistency guard (packing ↔ training) across every non-empty partition.
     # Sparse reasoning targets are masked on unlabeled samples, so probing a
@@ -1764,8 +2185,16 @@ def train_il(
           + (f" (mode={reasoning_mode})" if enable_reasoning else ""))
     print(f"World Model: {'on' if enable_world_model else 'off'}")
 
-    # Optimizer + Loss
-    optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
+    # Optimizer + scheduler + loss.
+    optimizer = torch.optim.AdamW(
+        model.parameters(), lr=lr, weight_decay=weight_decay
+    )
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer,
+        mode="min",
+        factor=0.5,
+        patience=1,
+    )
     loss_fn = TrajectoryImitationLoss(loss_type="smooth_l1")
     if hasattr(loss_fn, "to"):
         loss_fn = loss_fn.to(device)
@@ -1782,18 +2211,188 @@ def train_il(
         reasoning_loss_fn = HorizonReasoningLoss()
         target_batch_from_loader = _tb_from_loader
 
+    scaler = torch.amp.GradScaler(enabled=amp)
+    checkpoint_config = {
+        "backbone": bb,
+        "embed_dim": 256,
+        "num_views": num_views,
+        # Checkpoints contain the complete backbone. Reconstruction must not
+        # download pretrained weights before loading that state.
+        "is_pretrained": False,
+        "enable_reasoning": enable_reasoning,
+        "reasoning_mode": reasoning_mode,
+        "enable_world_model": enable_world_model,
+        "optimizer": "AdamW",
+        "lr": lr,
+        "weight_decay": weight_decay,
+        "grad_clip": grad_clip,
+        "amp": amp,
+        "batch_size": batch_size,
+        "grad_accum_steps": grad_accum_steps,
+        "reasoning_loss_weight": reasoning_loss_weight,
+        "jepa_loss_weight": jepa_loss_weight,
+        "val_fraction": val_fraction,
+        "early_stopping_patience": early_stopping_patience,
+        "scheduler": {
+            "name": "ReduceLROnPlateau",
+            "mode": "min",
+            "factor": 0.5,
+            "patience": 1,
+        },
+    }
+
+    from Platform.pipelines.training_checkpoint import (
+        CHECKPOINT_SCHEMA_VERSION,
+        capture_rng_state,
+        checkpoint_key,
+        metric_pair_is_better,
+        rescale_partial_accumulation_gradients,
+        restore_rng_state,
+        sha256_file,
+        update_best_pointer,
+        upload_immutable_checkpoint,
+        validate_resume_payload,
+    )
+
+    checkpoint_bucket = _checkpoint_bucket_name()
+    s3_client = boto3.client("s3")
+    metric_history: list[dict] = []
+    best_checkpoint = None
+    final_checkpoint = None
+    bad_epochs = 0
+    expected_validation_digest = None
+    validation_sample_count = None
+    start_epoch = 1
+    best_local_path = None
+    resumed = resume_from is not None
+    terminal_resume = False
+    stopped_early = False
+
+    mlflow.set_tracking_uri(os.environ["MLFLOW_TRACKING_URI"])
+    mlflow.set_experiment("imitation-learning")
+    if resumed:
+        resume_path = resume_from.download()
+        # RNG tensors must stay on CPU for torch.set_rng_state. Checkpoints are
+        # trusted pipeline artifacts and include NumPy RNG state, so opt out of
+        # the PyTorch 2.6+ weights-only default explicitly.
+        resume_payload = torch.load(
+            resume_path,
+            map_location="cpu",
+            weights_only=False,
+        )
+        validate_resume_payload(
+            resume_payload,
+            expected_config=checkpoint_config,
+            expected_data_fingerprint=data_fingerprint,
+        )
+        model.load_state_dict(resume_payload["model_state_dict"])
+        optimizer.load_state_dict(resume_payload["optimizer_state_dict"])
+        scheduler.load_state_dict(resume_payload["scheduler_state_dict"])
+        scaler.load_state_dict(resume_payload["scaler_state_dict"])
+        state = dict(resume_payload["training_state"])
+        run_id = str(state.get("run_id", ""))
+        if not run_id:
+            raise ValueError("resume checkpoint has no MLflow run ID")
+        completed_epoch = int(resume_payload["epoch"])
+        start_epoch = completed_epoch + 1
+        metric_history = list(state.get("metric_history", []))
+        resumed_checkpoint = _resumed_checkpoint_record(
+            resume_payload, resume_path
+        )
+        metric_history[-1].setdefault(
+            "checkpoint_uri", resumed_checkpoint["uri"]
+        )
+        metric_history[-1].setdefault(
+            "checkpoint_sha256", resumed_checkpoint["sha256"]
+        )
+        final_checkpoint = resumed_checkpoint
+        saved_best = state.get("best")
+        best_checkpoint = dict(saved_best) if saved_best is not None else None
+        bad_epochs = int(state.get("bad_epochs", 0))
+        expected_validation_digest = state.get(
+            "validation_sample_uid_digest"
+        )
+        validation_sample_count = state.get("validation_sample_count")
+        if (
+            best_checkpoint is not None
+            and int(best_checkpoint["epoch"]) == completed_epoch
+        ):
+            best_local_path = resume_path
+            saved_digest = best_checkpoint.get("sha256")
+            if saved_digest not in (None, resumed_checkpoint["sha256"]):
+                raise ValueError(
+                    "resume checkpoint bytes differ from its saved best digest"
+                )
+            best_checkpoint = dict(resumed_checkpoint)
+        if best_checkpoint is None:
+            raise ValueError("resume checkpoint has no selected best checkpoint")
+        terminal_resume, stopped_early = _resume_terminal_state(
+            completed_epoch=completed_epoch,
+            bad_epochs=bad_epochs,
+            requested_epochs=epochs,
+            patience=early_stopping_patience,
+        )
+        update_best_pointer(
+            s3_client,
+            bucket=checkpoint_bucket,
+            run_id=run_id,
+            epoch=int(best_checkpoint["epoch"]),
+            checkpoint_uri=str(best_checkpoint["uri"]),
+            checkpoint_sha256=str(best_checkpoint["sha256"]),
+            ade=float(best_checkpoint["ade"]),
+            fde=float(best_checkpoint["fde"]),
+        )
+        restore_rng_state(resume_payload["rng_state"])
+        print(
+            f"Resuming MLflow run {run_id} at epoch {start_epoch}; "
+            f"bad_epochs={bad_epochs} terminal={terminal_resume}"
+        )
+    else:
+        run_name = f"{bb}-{fm}-e{epochs}"
+        with mlflow.start_run(run_name=run_name) as run:
+            run_id = run.info.run_id
+            mlflow.log_params({
+                "data/dataset": dataset.value,
+                "data/dataset_version": dataset_version,
+                "data/fingerprint": data_fingerprint,
+                "model/backbone": bb,
+                "model/fusion_mode": fm,
+                "model/num_views": num_views,
+                "train/batch_size": batch_size,
+                "train/grad_accum_steps": grad_accum_steps,
+                "train/lr": lr,
+                "train/weight_decay": weight_decay,
+                "train/amp": amp,
+                "train/val_fraction": val_fraction,
+                "train/early_stopping_patience": early_stopping_patience,
+            })
+
     # Training loop
     model.train()
-    losses_per_epoch = []
-    scaler = torch.amp.GradScaler(enabled=amp)
+    losses_per_epoch = [
+        float(entry["train_loss"]) for entry in metric_history
+    ]
 
-    _proj_cache = {}
-    _first_step = True  # gate the one-time gradient-flow probe below
+    _proj_cache = _ProjectionDeviceCache(device)
+    _first_step = not resumed
     accum = max(1, int(grad_accum_steps))
     if accum > 1:
         print(f"Gradient accumulation: {accum} micro-batches "
               f"(effective batch size = {batch_size * accum})")
-    for epoch in range(epochs):
+    os.makedirs("/tmp/train", exist_ok=True)
+    epoch_range = range(0) if terminal_resume else range(
+        start_epoch, epochs + 1
+    )
+    for epoch in epoch_range:
+        merged = make_multi_dataset_loader(
+            shard_dirs,
+            batch_size=batch_size,
+            num_workers=num_workers,
+            pin_memory=(device.type == "cuda"),
+            split="train",
+            val_fraction=val_fraction,
+            shuffle_seed=1729 + epoch * 1_000_003,
+        )
         epoch_losses = []
         traj_losses = []
         jepa_vals = []
@@ -1809,14 +2408,9 @@ def train_il(
             target = batch["trajectory_target"].to(device)    # (B, 128)
             map_input = batch["map_input"].to(device)
 
-            # Per-batch geometry, moved to device once per operator (cached).
-            if batch_proj is not None:
-                key = id(batch_proj)
-                if key not in _proj_cache:
-                    _proj_cache[key] = batch_proj.to(device)
-                proj_dev = _proj_cache[key]
-            else:
-                proj_dev = None
+            # A weak object-key cache cannot alias a newly opened scene when
+            # Python reuses the identity of a projection from a retired loader.
+            proj_dev = _proj_cache.get(batch_proj)
 
             # World-Model windows (#13): present only on world_model shards. The
             # windowed path makes JEPA loss differentiable and also supplies the
@@ -1917,53 +2511,267 @@ def train_il(
         # multiple of accum) so its grads aren't silently dropped at epoch end.
         if micro_idx > 0:
             scaler.unscale_(optimizer)
+            rescale_partial_accumulation_gradients(
+                model.parameters(),
+                accumulation_steps=accum,
+                partial_count=micro_idx,
+            )
             torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
             scaler.step(optimizer)
             scaler.update()
             micro_idx = 0
 
-        avg_loss = np.mean(epoch_losses) if epoch_losses else 0.0
-        avg_traj = np.mean(traj_losses) if traj_losses else 0.0
-        avg_jepa = np.mean(jepa_vals) if jepa_vals else 0.0
-        avg_reason = np.mean(reason_vals) if reason_vals else 0.0
-        losses_per_epoch.append(float(avg_loss))
-        # Log each branch's sub-loss separately: the total carries traj + JEPA
-        # (world model) + reasoning aux terms, so per-branch values show whether
-        # EACH branch is actually being optimized (not just the trajectory head).
-        print(f"  Epoch {epoch+1}/{epochs} loss={avg_loss:.4f} "
-              f"traj_loss={avg_traj:.4f} jepa={avg_jepa:.4f} reason={avg_reason:.4f}")
+        if not epoch_losses:
+            raise ValueError(
+                "the internal train split produced no batches"
+            )
+        avg_loss = float(np.mean(epoch_losses))
+        avg_traj = float(np.mean(traj_losses))
+        avg_jepa = float(np.mean(jepa_vals))
+        avg_reason = float(np.mean(reason_vals))
+        if not all(
+            np.isfinite(value)
+            for value in (avg_loss, avg_traj, avg_jepa, avg_reason)
+        ):
+            raise ValueError(
+                "non-finite training metrics at epoch "
+                f"{epoch}: loss={avg_loss} traj={avg_traj} "
+                f"jepa={avg_jepa} reason={avg_reason}"
+            )
 
-    # Save checkpoint
-    os.makedirs("/tmp/train", exist_ok=True)
-    ckpt_path = "/tmp/train/best.pt"
-    # `config` must be reconstruction kwargs for AutoE2E(**config); fusion_mode
-    # is no longer a constructor arg, so it lives only in metadata below. The
-    # branch flags MUST be recorded so a later stage (offline RL / eval) rebuilds
-    # the SAME architecture — otherwise load_state_dict fails on missing keys.
-    torch.save({
-        "model_state_dict": model.state_dict(),
-        "config": {
-            "backbone": bb, "embed_dim": 256, "num_views": num_views,
-            "enable_reasoning": enable_reasoning, "reasoning_mode": reasoning_mode,
-            "enable_world_model": enable_world_model,
-        },
-        "epoch": epochs,
-    }, ckpt_path)
+        validation = _evaluate_open_loop(
+            model, validation_loader, device
+        )
+        validation_digest = validation["sample_uid_digest"]
+        if expected_validation_digest is None:
+            expected_validation_digest = validation_digest
+            validation_sample_count = validation["sample_count"]
+        elif (
+            validation_digest != expected_validation_digest
+            or validation["sample_count"] != validation_sample_count
+        ):
+            raise ValueError(
+                "internal validation sample set changed between epochs: "
+                f"expected_digest={expected_validation_digest} "
+                f"actual_digest={validation_digest} "
+                f"expected_count={validation_sample_count} "
+                f"actual_count={validation['sample_count']}"
+            )
 
-    # Metadata
+        improved = (
+            best_checkpoint is None
+            or metric_pair_is_better(
+                validation["ade"],
+                validation["fde"],
+                float(best_checkpoint["ade"]),
+                float(best_checkpoint["fde"]),
+            )
+        )
+        next_bad_epochs = 0 if improved else bad_epochs + 1
+        key = checkpoint_key(run_id, epoch)
+        checkpoint_uri = f"s3://{checkpoint_bucket}/{key}"
+        candidate_best = (
+            {
+                "epoch": epoch,
+                "ade": validation["ade"],
+                "fde": validation["fde"],
+                "uri": checkpoint_uri,
+                "sha256": None,
+            }
+            if improved
+            else dict(best_checkpoint)
+        )
+        history_entry = {
+            "epoch": epoch,
+            "train_loss": avg_loss,
+            "trajectory_loss": avg_traj,
+            "jepa_loss": avg_jepa,
+            "reasoning_loss": avg_reason,
+            "val_ade": validation["ade"],
+            "val_fde": validation["fde"],
+            "validation_sample_count": validation["sample_count"],
+            "validation_sample_uid_digest": validation_digest,
+            "improved": improved,
+        }
+        metric_history.append(history_entry)
+        losses_per_epoch.append(avg_loss)
+        scheduler.step(validation["ade"])
+        current_lr = float(optimizer.param_groups[0]["lr"])
+
+        # The same MLflow run is reopened for each epoch. A failed metric write
+        # aborts before checkpointing, so resume cannot silently skip a metric.
+        with mlflow.start_run(run_id=run_id):
+            mlflow.log_metrics(
+                {
+                    "train/loss": avg_loss,
+                    "train/trajectory_loss": avg_traj,
+                    "train/jepa_loss": avg_jepa,
+                    "train/reasoning_loss": avg_reason,
+                    "train/lr": current_lr,
+                    "val/ade": validation["ade"],
+                    "val/fde": validation["fde"],
+                },
+                step=epoch,
+            )
+
+        checkpoint_path = f"/tmp/train/epoch-{epoch:04d}.pt"
+        torch.save(
+            {
+                "schema_version": CHECKPOINT_SCHEMA_VERSION,
+                "model_state_dict": model.state_dict(),
+                "optimizer_state_dict": optimizer.state_dict(),
+                "scheduler_state_dict": scheduler.state_dict(),
+                "scaler_state_dict": scaler.state_dict(),
+                "rng_state": capture_rng_state(),
+                "epoch": epoch,
+                "config": checkpoint_config,
+                "training_state": {
+                    "run_id": run_id,
+                    "best": candidate_best,
+                    "bad_epochs": next_bad_epochs,
+                    "metric_history": metric_history,
+                    "validation_sample_uid_digest": (
+                        expected_validation_digest
+                    ),
+                    "validation_sample_count": validation_sample_count,
+                    "current_checkpoint_uri": checkpoint_uri,
+                    "early_stopping_patience": (
+                        early_stopping_patience
+                    ),
+                },
+                "data_fingerprint": data_fingerprint,
+            },
+            checkpoint_path,
+        )
+        uploaded = upload_immutable_checkpoint(
+            s3_client,
+            bucket=checkpoint_bucket,
+            key=key,
+            path=checkpoint_path,
+        )
+        checkpoint_info = {
+            "epoch": epoch,
+            "ade": validation["ade"],
+            "fde": validation["fde"],
+            "uri": uploaded["uri"],
+            "sha256": uploaded["sha256"],
+            "size": uploaded["size"],
+        }
+        history_entry["checkpoint_uri"] = uploaded["uri"]
+        history_entry["checkpoint_sha256"] = uploaded["sha256"]
+        previous_best_local_path = best_local_path
+        if improved:
+            best_checkpoint = checkpoint_info
+            best_local_path = checkpoint_path
+            update_best_pointer(
+                s3_client,
+                bucket=checkpoint_bucket,
+                run_id=run_id,
+                epoch=epoch,
+                checkpoint_uri=uploaded["uri"],
+                checkpoint_sha256=uploaded["sha256"],
+                ade=validation["ade"],
+                fde=validation["fde"],
+            )
+            if (
+                previous_best_local_path
+                and previous_best_local_path != best_local_path
+                and os.path.abspath(previous_best_local_path).startswith(
+                    "/tmp/train/"
+                )
+            ):
+                os.remove(previous_best_local_path)
+        else:
+            os.remove(checkpoint_path)
+        bad_epochs = next_bad_epochs
+        final_checkpoint = checkpoint_info
+
+        print(
+            f"  Epoch {epoch}/{epochs} loss={avg_loss:.4f} "
+            f"traj={avg_traj:.4f} jepa={avg_jepa:.4f} "
+            f"reason={avg_reason:.4f} val_ADE={validation['ade']:.4f} "
+            f"val_FDE={validation['fde']:.4f} improved={improved} "
+            f"bad_epochs={bad_epochs} checkpoint={uploaded['uri']}"
+        )
+        if bad_epochs >= early_stopping_patience:
+            stopped_early = True
+            print(
+                f"Early stopping after epoch {epoch}: no validation "
+                f"improvement for {bad_epochs} epochs"
+            )
+            break
+
+    if best_checkpoint is None or final_checkpoint is None:
+        raise RuntimeError("training completed without a best/final checkpoint")
+
+    if best_local_path is None:
+        from urllib.parse import urlparse
+
+        parsed = urlparse(best_checkpoint["uri"])
+        best_local_path = (
+            f"/tmp/train/best-epoch-{int(best_checkpoint['epoch']):04d}.pt"
+        )
+        s3_client.download_file(
+            parsed.netloc,
+            parsed.path.lstrip("/"),
+            best_local_path,
+        )
+    best_digest = sha256_file(best_local_path)
+    if best_digest != best_checkpoint["sha256"]:
+        raise RuntimeError(
+            "local best checkpoint differs from its immutable S3 object: "
+            f"expected={best_checkpoint['sha256']} actual={best_digest}"
+        )
+
     meta = {
-        "data": {"dataset": dataset.value, "dataset_version": dataset_version,
-                 "shard_dirs": shard_dirs,
-                 "merged_datasets": len(shard_dirs)},
-        "model": {"backbone": bb, "fusion_mode": fm, "embed_dim": 256, "num_views": num_views},
+        "data": {
+            "dataset": dataset.value,
+            "dataset_version": dataset_version,
+            "data_fingerprint": data_fingerprint,
+            "packed_partitions": len(manifests),
+            "non_empty_partitions": len(shard_dirs),
+            "empty_partitions": skipped_empty,
+        },
+        "model": {
+            "backbone": bb,
+            "fusion_mode": fm,
+            "embed_dim": 256,
+            "num_views": num_views,
+        },
         "training": {
-            "epochs": epochs, "batch_size": batch_size, "lr": lr,
-            "weight_decay": weight_decay, "grad_clip": grad_clip, "amp": amp,
-            "optimizer": "AdamW", "final_loss": losses_per_epoch[-1] if losses_per_epoch else 0,
+            "epochs": epochs,
+            "epochs_completed": int(final_checkpoint["epoch"]),
+            "stopped_early": stopped_early,
+            "early_stopping_patience": early_stopping_patience,
+            "batch_size": batch_size,
+            "grad_accum_steps": grad_accum_steps,
+            "lr": lr,
+            "weight_decay": weight_decay,
+            "grad_clip": grad_clip,
+            "amp": amp,
+            "optimizer": "AdamW",
+            "scheduler": "ReduceLROnPlateau",
+            "final_loss": losses_per_epoch[-1],
             "losses_per_epoch": losses_per_epoch,
-            # Recorded so the (separate) eval task scores the SAME held-out split
-            # this run trained around — eval reads this to pick split="val".
             "val_fraction": val_fraction,
+            "metric_history": metric_history,
+        },
+        "validation": {
+            "sample_count": validation_sample_count,
+            "sample_uid_digest": expected_validation_digest,
+            "split": "internal_scene_holdout",
+        },
+        "tracking": {
+            "mlflow_experiment": "imitation-learning",
+            "mlflow_run_id": run_id,
+        },
+        "checkpoints": {
+            "best": best_checkpoint,
+            "final": final_checkpoint,
+            "best_pointer_uri": (
+                f"s3://{checkpoint_bucket}/imitation-learning/"
+                f"{run_id}/best.json"
+            ),
         },
         "context": {
             "flyte_execution_id": ctx.execution_id.name if ctx.execution_id else "local",
@@ -1972,9 +2780,23 @@ def train_il(
     }
     meta_path = "/tmp/train/metadata.json"
     with open(meta_path, "w") as f:
-        json.dump(meta, f, indent=2)
+        json.dump(meta, f, indent=2, sort_keys=True)
 
-    return TrainOutput(checkpoint=FlyteFile(ckpt_path), metadata=FlyteFile(meta_path))
+    with mlflow.start_run(run_id=run_id):
+        mlflow.set_tags({
+            "pipeline": "imitation-learning",
+            "backbone": bb,
+            "fusion": fm,
+            "best_checkpoint_sha256": best_checkpoint["sha256"],
+            "final_checkpoint_sha256": final_checkpoint["sha256"],
+            "validation_sample_uid_digest": expected_validation_digest,
+        })
+        mlflow.log_artifact(meta_path, artifact_path="training")
+
+    return TrainOutput(
+        checkpoint=FlyteFile(best_local_path),
+        metadata=FlyteFile(meta_path),
+    )
 
 
 # ============================================================
@@ -2017,7 +2839,11 @@ def train_offline_rl(
 
     import copy
 
-    ckpt = torch.load(ckpt_path, map_location=device)
+    ckpt = torch.load(
+        ckpt_path,
+        map_location=device,
+        weights_only=False,
+    )
     config = ckpt["config"]
     model = AutoE2E(**_model_kwargs(config)).to(device)
     model.load_state_dict(ckpt["model_state_dict"])
@@ -2121,13 +2947,11 @@ def _run_evaluation(checkpoint, shards, train_metadata, dataset, experiment_name
     import json
     import yaml
     import torch
-    import numpy as np
     import mlflow
     from flytekit import current_context
 
     from model_components.auto_e2e import AutoE2E
     from data_parsing.pre_extracted import make_multi_dataset_loader
-    from evaluation.metrics import integrate_trajectory
 
     # Eval uses num_workers=4; use the file_system sharing strategy so the small
     # pod /dev/shm doesn't bus-error on WM-window batches (same as train_il, #121).
@@ -2140,11 +2964,22 @@ def _run_evaluation(checkpoint, shards, train_metadata, dataset, experiment_name
     # ADE/FDE covers the full held-out set, not partition 0 only (Flyte-review B2).
     shard_dirs = _select_shard_dirs(shards, dataset)
     meta = json.load(open(train_metadata.download()))
+    saved_best = meta.get("checkpoints", {}).get("best", {})
+    saved_best_digest = saved_best.get("sha256")
+    if saved_best_digest and saved_best_digest != checkpoint_sha256:
+        raise ValueError(
+            "evaluated checkpoint differs from training's selected best: "
+            f"expected={saved_best_digest} actual={checkpoint_sha256}"
+        )
     ctx = current_context()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     # Load model
-    ckpt = torch.load(ckpt_path, map_location=device)
+    ckpt = torch.load(
+        ckpt_path,
+        map_location=device,
+        weights_only=False,
+    )
     config = ckpt["config"]
     model = AutoE2E(**_model_kwargs(config)).to(device)
     model.load_state_dict(ckpt["model_state_dict"])
@@ -2155,72 +2990,29 @@ def _run_evaluation(checkpoint, shards, train_metadata, dataset, experiment_name
     # memorization. val_fraction=0 (legacy) → score all samples (in-sample).
     val_fraction = float(meta.get("training", {}).get("val_fraction", 0.0) or 0.0)
     eval_split = "val" if val_fraction > 0.0 else "all"
-    loader = make_multi_dataset_loader(shard_dirs, batch_size=8, num_workers=4, shuffle=0,
-                                       pin_memory=(device.type == "cuda"),
-                                       split=eval_split, val_fraction=val_fraction)
+    loader = make_multi_dataset_loader(
+        shard_dirs,
+        batch_size=8,
+        num_workers=4,
+        shuffle=0,
+        pin_memory=(device.type == "cuda"),
+        split=eval_split,
+        val_fraction=val_fraction,
+        max_active_loaders=1,
+        prefetch_factor=1,
+    )
     print(f"Eval split={eval_split} (val_fraction={val_fraction}, {len(shard_dirs)} partitions) — "
           f"{'held-out generalization' if eval_split == 'val' else 'in-sample'}")
-    all_ade, all_fde = [], []
-
-    with torch.no_grad():
-        # MergedDatasetLoader yields (batch, projection, geometry_type) per batch,
-        # so each partition's per-dataset geometry is preserved (a single rig for
-        # L2D, but the shape is future-proof for multi-dataset eval).
-        for batch, projection, geometry_type in loader:
-            if projection is not None:
-                projection = projection.to(device)
-            # WM rolling buffer is per-sequence state; reset per batch so batch N's
-            # planner history is not built from unrelated prior batches (leakage),
-            # and a ragged final batch cannot crash torch.cat over mixed batch dims.
-            if hasattr(model, "reset_visual_history"):
-                model.reset_visual_history()
-            visual = batch["visual_tiles"].to(device)
-            ego_hist = batch["egomotion_history"].to(device)
-            vis_hist = batch["visual_history"].to(device)
-            target = batch["trajectory_target"]  # (B, 128) on CPU
-            map_input = batch["map_input"].to(device)
-
-            # Train/eval consistency (#13): if the shard carries World-Model
-            # windows, feed them so eval runs the SAME windowed path the model
-            # trained on — the planner sees the DENSE WM-derived visual_history it
-            # learned to use, not the mostly-zero rolling-buffer vector. Without
-            # this, a WM-trained model is evaluated out-of-distribution (the
-            # planner's visual_history is 3/4 zeros) and ADE inflates. On shards
-            # without WM windows (imitation-only) batch.get returns None and the
-            # model takes its normal path — identical to before. Future prediction
-            # is gated on mode=="train", so mode="infer" safely skips it.
-            history_frames = batch.get("history_frames")
-            future_frames = batch.get("future_frames")
-            if history_frames is not None:
-                history_frames = history_frames.to(device)
-            if future_frames is not None:
-                future_frames = future_frames.to(device)
-
-            pred = model(visual, map_input, vis_hist, ego_hist,
-                         projection=projection, geometry_type=geometry_type,
-                         history_frames=history_frames, future_frames=future_frames,
-                         mode="infer")
-            pred = pred.cpu().numpy()  # (B, 128)
-            target_np = target.numpy()
-
-            for i in range(pred.shape[0]):
-                # Reshape: (64, 2) = [accel_x, curvature]
-                pred_signals = pred[i].reshape(64, 2)
-                gt_signals = target_np[i].reshape(64, 2)
-                # Get initial speed from egomotion history (first signal)
-                ego_np = batch["egomotion_history"][i].numpy()
-                v0 = float(ego_np[-4])  # last speed value in history
-
-                pred_traj = integrate_trajectory(pred_signals[:, 0], pred_signals[:, 1], v0)
-                gt_traj = integrate_trajectory(gt_signals[:, 0], gt_signals[:, 1], v0)
-
-                ade = float(np.mean(np.linalg.norm(pred_traj - gt_traj, axis=1)))
-                fde = float(np.linalg.norm(pred_traj[-1] - gt_traj[-1]))
-                all_ade.append(ade)
-                all_fde.append(fde)
-
-    avg_ade = float(np.mean(all_ade)) if all_ade else 99.0
-    avg_fde = float(np.mean(all_fde)) if all_fde else 99.0
+    evaluation = _evaluate_open_loop(model, loader, device)
+    expected_digest = meta.get("validation", {}).get("sample_uid_digest")
+    if expected_digest and evaluation["sample_uid_digest"] != expected_digest:
+        raise ValueError(
+            "standalone evaluation used a different internal validation set: "
+            f"expected={expected_digest} "
+            f"actual={evaluation['sample_uid_digest']}"
+        )
+    avg_ade = evaluation["ade"]
+    avg_fde = evaluation["fde"]
     passed = avg_ade < 2.0 and avg_fde < 4.0
 
     # --- MLflow logging ---
@@ -2232,8 +3024,15 @@ def _run_evaluation(checkpoint, shards, train_metadata, dataset, experiment_name
     fm = model_info.get("fusion_mode", "?")
     training = meta.get("training", meta.get("base_model", {}).get("il_metadata", {}).get("training", {}))
     run_name = f"{bb}-{fm}-e{training.get('epochs','?')}"
+    existing_run_id = meta.get("tracking", {}).get("mlflow_run_id")
+    run_context = (
+        mlflow.start_run(run_id=existing_run_id)
+        if existing_run_id
+        else mlflow.start_run(run_name=run_name)
+    )
 
-    with mlflow.start_run(run_name=run_name):
+    with run_context as active_run:
+        run_id = active_run.info.run_id
         # Flatten params
         params = {}
         data = meta.get("data", meta.get("base_model", {}).get("il_metadata", {}).get("data", {}))
@@ -2262,20 +3061,28 @@ def _run_evaluation(checkpoint, shards, train_metadata, dataset, experiment_name
         train_ctx = meta.get("context", {})
         params["ctx/train_execution_id"] = train_ctx.get("flyte_execution_id", "?")
         params["ctx/train_docker_image"] = train_ctx.get("docker_image", "?")
-        params["ctx/eval_execution_id"] = ctx.execution_id.name if ctx.execution_id else "local"
-        params["ctx/eval_docker_image"] = EVAL_IMAGE
 
-        mlflow.log_params({k: str(v)[:500] for k, v in params.items()})
+        # IL training already owns this run's immutable params. Re-logging
+        # mutable results after a resumed continuation makes MLflow reject the
+        # new value. Legacy/RL evaluation creates a fresh run and logs once.
+        if not existing_run_id:
+            mlflow.log_params({
+                k: str(v)[:500] for k, v in params.items()
+            })
         mlflow.set_tags({
             "pipeline": experiment_name,
             "backbone": bb,
             "fusion": fm,
             "checkpoint_sha256": checkpoint_sha256,
+            "ctx/eval_execution_id": (
+                ctx.execution_id.name if ctx.execution_id else "local"
+            ),
+            "ctx/eval_docker_image": EVAL_IMAGE,
+            "train/epochs_completed": str(
+                training.get("epochs_completed", training.get("epochs", "?"))
+            ),
+            "train/final_loss": str(training.get("final_loss", "?")),
         })
-
-        # Training loss curve
-        for i, loss_val in enumerate(training.get("losses_per_epoch", [])):
-            mlflow.log_metric("train/loss", loss_val, step=i)
 
         # Eval metrics
         mlflow.log_metrics({"eval/ade": avg_ade, "eval/fde": avg_fde, "eval/gate_pass": 1.0 if passed else 0.0})
@@ -2285,22 +3092,55 @@ def _run_evaluation(checkpoint, shards, train_metadata, dataset, experiment_name
         with open("/tmp/eval-artifacts/config.yaml", "w") as f:
             yaml.dump(meta, f)
         mlflow.log_artifact("/tmp/eval-artifacts/config.yaml")
-        mlflow.log_artifact(ckpt_path, artifact_path="model")
 
-        # Model Registry
-        model_uri = f"runs:/{mlflow.active_run().info.run_id}/model"
-        try:
-            registered = mlflow.register_model(
-                model_uri, "auto-e2e-driving-policy"
+        # Register only immutable best/final checkpoints. Retry of the eval
+        # task reuses the same run/source pair and therefore the same versions.
+        saved_checkpoints = meta.get("checkpoints", {})
+        grouped: dict[str, dict] = {}
+        for role in ("best", "final"):
+            record = saved_checkpoints.get(role)
+            if not record:
+                continue
+            uri = str(record["uri"])
+            grouped.setdefault(
+                uri,
+                {"record": record, "roles": []},
+            )["roles"].append(role)
+
+        if not grouped:
+            # Legacy/offline-RL path: retain one explicitly-final model source.
+            mlflow.log_artifact(ckpt_path, artifact_path="model/final")
+            fallback_uri = (
+                f"runs:/{run_id}/model/final/{os.path.basename(ckpt_path)}"
             )
-            mlflow.tracking.MlflowClient().set_model_version_tag(
-                "auto-e2e-driving-policy",
-                registered.version,
-                "checkpoint_sha256",
-                checkpoint_sha256,
+            grouped[fallback_uri] = {
+                "roles": ["final"],
+                "record": {
+                    "epoch": int(ckpt.get("epoch", 0)),
+                    "uri": fallback_uri,
+                    "sha256": checkpoint_sha256,
+                    "ade": avg_ade,
+                    "fde": avg_fde,
+                },
+            }
+
+        client = mlflow.tracking.MlflowClient()
+        for uri, item in grouped.items():
+            record = item["record"]
+            version = _register_checkpoint_version(
+                client,
+                run_id=run_id,
+                roles=item["roles"],
+                epoch=int(record["epoch"]),
+                checkpoint_uri=uri,
+                checkpoint_sha256=str(record["sha256"]),
+                ade=float(record["ade"]),
+                fde=float(record["fde"]),
             )
-        except Exception as e:
-            print(f"Registry: {e}")
+            print(
+                f"Registry version {version}: roles={item['roles']} "
+                f"checkpoint={uri}"
+            )
 
     print(f"Eval: ADE={avg_ade:.3f} FDE={avg_fde:.3f} Gate={'PASS' if passed else 'FAIL'}")
     return EvalMetrics(ade=avg_ade, fde=avg_fde, gate_pass=passed)
@@ -2564,6 +3404,7 @@ def _map_dataset_partitions(
                 image_size=image_size,
                 episodes=0,
                 world_model=True,
+                expected_reasoning_label_count=None,
             ),
             concurrency=pack_concurrency,
         )
@@ -2584,10 +3425,111 @@ def _map_dataset_partitions(
             episodes=0,
             world_model=world_model,
             reasoning_labels=None,
+            expected_reasoning_label_count=None,
         ),
         concurrency=pack_concurrency,
     )
     return pack(raw_data=raw_dirs, group_ids=partitions)
+
+
+@dynamic(
+    container_image=DATA_PREP_IMAGE,
+    environment={"AUTO_E2E_DATA_PREP_IMAGE": DATA_PREP_IMAGE},
+)
+def _map_recovered_kitscenes_artifacts(
+    recovery_manifest: FlyteFile,
+    artifact_set_sha256: str,
+    dataset_version: str,
+    image_size: int,
+    pack_concurrency: int,
+) -> List[FlyteDirectory]:
+    """Map only pack tasks over an audited raw/label artifact set."""
+    if pack_concurrency <= 0:
+        raise ValueError(
+            f"pack_concurrency must be positive, got {pack_concurrency}"
+        )
+
+    from data_parsing.kit_scenes.source import sdk_split_scene_ids
+    from Platform.pipelines.kitscenes_recovery import (
+        AUDITED_EMPTY_SCENE_COUNT,
+        AUDITED_LABEL_COUNT,
+        KNOWN_MISSING_TRAIN_SCENE,
+        load_recovery_manifest,
+    )
+
+    official_train = sdk_split_scene_ids("train")
+    expected_scenes = [
+        scene_id
+        for scene_id in official_train
+        if scene_id != KNOWN_MISSING_TRAIN_SCENE
+    ]
+    if (
+        len(official_train) != 534
+        or len(expected_scenes) != 533
+        or KNOWN_MISSING_TRAIN_SCENE not in official_train
+    ):
+        raise ValueError(
+            "pinned KITScenes train inventory no longer has the audited "
+            "534-scene/one-missing contract"
+        )
+
+    entries = load_recovery_manifest(
+        recovery_manifest.download(),
+        expected_artifact_set_sha256=artifact_set_sha256,
+        expected_dataset=Dataset.KITSCENES.value,
+        expected_source_revision=KITSCENES_SOURCE_REVISION,
+        expected_scene_ids=expected_scenes,
+        expected_label_count=AUDITED_LABEL_COUNT,
+        expected_empty_scene_count=AUDITED_EMPTY_SCENE_COUNT,
+    )
+    raw_dirs = [
+        FlyteDirectory(entry["raw_uri"]) for entry in entries
+    ]
+    label_dirs = [
+        FlyteDirectory(entry["label_uri"]) for entry in entries
+    ]
+    partitions = [[entry["scene_id"]] for entry in entries]
+    expected_label_counts = [
+        entry["expected_label_count"] for entry in entries
+    ]
+
+    pack = map_task(
+        functools.partial(
+            data_processing,
+            dataset=Dataset.KITSCENES,
+            source_revision=KITSCENES_SOURCE_REVISION,
+            dataset_version=dataset_version,
+            hz=10,
+            image_size=image_size,
+            episodes=0,
+            world_model=True,
+        ),
+        concurrency=pack_concurrency,
+    )
+    return pack(
+        raw_data=raw_dirs,
+        reasoning_labels=label_dirs,
+        group_ids=partitions,
+        expected_reasoning_label_count=expected_label_counts,
+    )
+
+
+@workflow
+def wf_repack_existing_kitscenes(
+    recovery_manifest: FlyteFile,
+    artifact_set_sha256: str,
+    dataset_version: str = DATASET_PACK_VERSION,
+    image_size: int = 256,
+    pack_concurrency: int = 60,
+) -> List[FlyteDirectory]:
+    """Repack audited raw/Cosmos artifacts without ingest or teacher calls."""
+    return _map_recovered_kitscenes_artifacts(
+        recovery_manifest=recovery_manifest,
+        artifact_set_sha256=artifact_set_sha256,
+        dataset_version=dataset_version,
+        image_size=image_size,
+        pack_concurrency=pack_concurrency,
+    )
 
 
 @workflow
@@ -2664,7 +3606,7 @@ def wf_sharded_full_run(
     label_concurrency: int = 5,
     pack_concurrency: int = 60,
     backbone: Backbone = Backbone.SWIN_V2_TINY,
-    epochs: int = 3,
+    epochs: int = 10,
     batch_size: int = 1,
     grad_accum_steps: int = 4,
     lr: float = 1e-4,
@@ -2673,6 +3615,8 @@ def wf_sharded_full_run(
     enable_world_model: bool = True,
     val_fraction: float = 0.1,
     num_workers: int = 4,
+    resume_from: Optional[FlyteFile] = None,
+    early_stopping_patience: int = 3,
 ) -> EvalMetrics:
     """End-to-end scaled run (#121): episode-sharded dataset fan-out → IL train
     (all three losses) → held-out eval, in ONE execution.
@@ -2705,10 +3649,61 @@ def wf_sharded_full_run(
         batch_size=batch_size, grad_accum_steps=grad_accum_steps, lr=lr,
         enable_reasoning=enable_reasoning, reasoning_mode=reasoning_mode,
         enable_world_model=enable_world_model, val_fraction=val_fraction,
-        num_workers=num_workers)
+        num_workers=num_workers, resume_from=resume_from,
+        early_stopping_patience=early_stopping_patience)
     return evaluate_il_policy(
         checkpoint=out.checkpoint, shards=shards, dataset=dataset,
         train_metadata=out.metadata)
+
+
+@workflow
+def wf_recovered_kitscenes_full_run(
+    recovery_manifest: FlyteFile,
+    artifact_set_sha256: str,
+    dataset_version: str = DATASET_PACK_VERSION,
+    image_size: int = 256,
+    pack_concurrency: int = 60,
+    backbone: Backbone = Backbone.SWIN_V2_TINY,
+    epochs: int = 10,
+    batch_size: int = 1,
+    grad_accum_steps: int = 4,
+    lr: float = 1e-4,
+    reasoning_mode: str = "pooled_latent",
+    val_fraction: float = 0.1,
+    num_workers: int = 4,
+    resume_from: Optional[FlyteFile] = None,
+    early_stopping_patience: int = 3,
+) -> EvalMetrics:
+    """Repack audited artifacts, then train/evaluate without ingest or Cosmos."""
+    shards = wf_repack_existing_kitscenes(
+        recovery_manifest=recovery_manifest,
+        artifact_set_sha256=artifact_set_sha256,
+        dataset_version=dataset_version,
+        image_size=image_size,
+        pack_concurrency=pack_concurrency,
+    )
+    out = train_il(
+        shards=shards,
+        dataset=Dataset.KITSCENES,
+        backbone=backbone,
+        epochs=epochs,
+        batch_size=batch_size,
+        grad_accum_steps=grad_accum_steps,
+        lr=lr,
+        enable_reasoning=True,
+        reasoning_mode=reasoning_mode,
+        enable_world_model=True,
+        val_fraction=val_fraction,
+        num_workers=num_workers,
+        resume_from=resume_from,
+        early_stopping_patience=early_stopping_patience,
+    )
+    return evaluate_il_policy(
+        checkpoint=out.checkpoint,
+        shards=shards,
+        dataset=Dataset.KITSCENES,
+        train_metadata=out.metadata,
+    )
 
 
 @workflow
@@ -2724,8 +3719,10 @@ def wf_train_il(
     enable_reasoning: bool = False,
     reasoning_mode: str = "pooled_latent",
     enable_world_model: bool = False,
-    val_fraction: float = 0.0,
+    val_fraction: float = 0.1,
     num_workers: int = 0,
+    resume_from: Optional[FlyteFile] = None,
+    early_stopping_patience: int = 3,
 ) -> EvalMetrics:
     """IL Train → Evaluate. All datasets' shards passed in; `dataset` selects one.
 
@@ -2745,7 +3742,8 @@ def wf_train_il(
                    grad_accum_steps=grad_accum_steps, lr=lr, amp=amp,
                    enable_reasoning=enable_reasoning, reasoning_mode=reasoning_mode,
                    enable_world_model=enable_world_model, val_fraction=val_fraction,
-                   num_workers=num_workers)
+                   num_workers=num_workers, resume_from=resume_from,
+                   early_stopping_patience=early_stopping_patience)
     return evaluate_il_policy(checkpoint=out.checkpoint, shards=shards, dataset=dataset,
                               train_metadata=out.metadata)
 

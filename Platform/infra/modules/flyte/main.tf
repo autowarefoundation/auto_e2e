@@ -4,6 +4,11 @@ variable "datasets_bucket" {
   description = "Datasets bucket; Flyte publishes immutable packed snapshots here."
   type        = string
 }
+variable "checkpoints_bucket" {
+  description = "Versioned bucket for immutable training checkpoints."
+  type        = string
+  default     = ""
+}
 variable "console_dynamo_table_name" {
   description = "Console table receiving overlay and geographic publication pointers."
   type        = string
@@ -70,39 +75,57 @@ resource "aws_iam_role_policy" "flyte_user_s3" {
   role  = aws_iam_role.flyte_user[0].name
   policy = jsonencode({
     Version = "2012-10-17"
-    Statement = [
-      {
-        Effect = "Allow"
-        Action = "s3:*"
-        Resource = [
-          "arn:aws:s3:::${var.artifacts_bucket}",
-          "arn:aws:s3:::${var.artifacts_bucket}/*",
-        ]
-      },
-      # Packed snapshot publication uses conditional object writes and
-      # server-side copies. It never deletes or mutates an existing version.
-      {
-        Effect = "Allow"
-        Action = ["s3:GetObject", "s3:PutObject"]
-        Resource = [
-          "arn:aws:s3:::${var.datasets_bucket}/*",
-        ]
-      },
-      {
-        Effect = "Allow"
-        Action = ["s3:ListBucket"]
-        Resource = [
-          "arn:aws:s3:::${var.datasets_bucket}",
-        ]
-      },
-      {
-        Effect = "Allow"
-        Action = ["dynamodb:GetItem", "dynamodb:PutItem"]
-        Resource = [
-          "arn:aws:dynamodb:${var.region}:${data.aws_caller_identity.current.account_id}:table/${var.console_dynamo_table_name}",
-        ]
-      },
-    ]
+    Statement = concat(
+      [
+        {
+          Effect = "Allow"
+          Action = "s3:*"
+          Resource = [
+            "arn:aws:s3:::${var.artifacts_bucket}",
+            "arn:aws:s3:::${var.artifacts_bucket}/*",
+          ]
+        },
+        # Packed snapshot publication uses conditional object writes and
+        # server-side copies. It never deletes or mutates an existing version.
+        {
+          Effect = "Allow"
+          Action = ["s3:GetObject", "s3:PutObject"]
+          Resource = [
+            "arn:aws:s3:::${var.datasets_bucket}/*",
+          ]
+        },
+        {
+          Effect = "Allow"
+          Action = ["s3:ListBucket"]
+          Resource = [
+            "arn:aws:s3:::${var.datasets_bucket}",
+          ]
+        },
+        {
+          Effect = "Allow"
+          Action = ["dynamodb:GetItem", "dynamodb:PutItem"]
+          Resource = [
+            "arn:aws:dynamodb:${var.region}:${data.aws_caller_identity.current.account_id}:table/${var.console_dynamo_table_name}",
+          ]
+        },
+      ],
+      var.checkpoints_bucket != "" ? [
+        {
+          Effect = "Allow"
+          Action = ["s3:GetObject", "s3:PutObject"]
+          Resource = [
+            "arn:aws:s3:::${var.checkpoints_bucket}/*",
+          ]
+        },
+        {
+          Effect = "Allow"
+          Action = ["s3:ListBucket"]
+          Resource = [
+            "arn:aws:s3:::${var.checkpoints_bucket}",
+          ]
+        },
+      ] : []
+    )
   })
 }
 

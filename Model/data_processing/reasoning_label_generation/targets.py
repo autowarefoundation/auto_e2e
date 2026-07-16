@@ -189,15 +189,22 @@ def load_records_by_sample_id(path: str) -> Dict[str, ReasoningLabelRecord]:
     """Read a whole-record JSONL (written by :func:`write_records_jsonl`) into a
     ``{sample_id: ReasoningLabelRecord}`` map for the data_processing JOIN.
 
-    A later line for the same sample_id wins (idempotent re-writes are safe).
+    Duplicate sample IDs are rejected. A JOIN artifact is immutable and each
+    generated label must map to exactly one packed sample; last-write-wins would
+    hide corrupt enumeration or concatenated artifacts.
     """
     import json
     out: Dict[str, ReasoningLabelRecord] = {}
     with open(path) as f:
-        for line in f:
+        for line_number, line in enumerate(f, start=1):
             line = line.strip()
             if not line:
                 continue
             rec = record_from_json(json.loads(line))
+            if rec.sample_id in out:
+                raise ValueError(
+                    f"duplicate reasoning sample_id {rec.sample_id!r} "
+                    f"in {path} at line {line_number}"
+                )
             out[rec.sample_id] = rec
     return out

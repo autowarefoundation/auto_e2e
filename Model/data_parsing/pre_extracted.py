@@ -23,6 +23,8 @@ import functools
 import io
 import json
 import re
+from collections import deque
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
 
@@ -394,6 +396,7 @@ def make_pre_extracted_loader(
     split: str = "all",
     val_fraction: float = 0.0,
     shuffle: int = 1000,
+    shuffle_seed: int | None = None,
     pin_memory: bool = False,
     prefetch_factor: int = 4,
     shard_files: Sequence[str | Path] | None = None,
@@ -416,6 +419,7 @@ def make_pre_extracted_loader(
         val_fraction: fraction of samples held out for ``val`` (0 disables the
             split → ``"all"`` behaviour regardless of ``split``).
         shuffle: Shuffle buffer size (0 to disable).
+        shuffle_seed: optional deterministic seed for the shuffle buffer.
         pin_memory: pin host buffers for faster H2D copy (set True on GPU).
         prefetch_factor: batches prefetched per worker (only used when
             num_workers>0); overlaps decode with the GPU step.
@@ -463,7 +467,7 @@ def make_pre_extracted_loader(
     if split != "all" and val_fraction > 0.0:
         dataset = dataset.select(keep)
     if shuffle > 0:
-        dataset = dataset.shuffle(shuffle)
+        dataset = dataset.shuffle(shuffle, seed=shuffle_seed)
     # Frame-pool accessor for deduped WM windows (#121 §3.4d): a sibling pool/ dir
     # next to the .tar shards, NOT part of `urls`, so split_by_worker never shards
     # it away — every worker reaches any frame_id by path. Path-based + lazily read,
@@ -473,14 +477,14 @@ def make_pre_extracted_loader(
     dataset = dataset.map(functools.partial(_decode_sample, pool=pool))
 
     # split_by_worker shards the .tar list across workers, so more workers than
-    # shards is wasted; cap accordingly. persistent_workers keeps the decode pool
-    # warm across epochs (avoids re-spawn per epoch); prefetch_factor overlaps
-    # decode with the GPU step. These only apply when num_workers>0.
+    # shards is wasted; cap accordingly. Partition-scoped loaders are retired as
+    # soon as that partition is exhausted, so workers MUST NOT persist beyond the
+    # iterator lifetime. prefetch_factor overlaps decode with the GPU step.
     eff_workers = min(num_workers, len(tarfiles)) if num_workers > 0 else 0
     loader_kwargs: dict = {"batch_size": batch_size, "num_workers": eff_workers}
     if eff_workers > 0:
         loader_kwargs.update(
-            persistent_workers=True,
+            persistent_workers=False,
             prefetch_factor=prefetch_factor,
             pin_memory=pin_memory,
         )
@@ -493,42 +497,125 @@ def make_pre_extracted_loader(
     return loader
 
 
+@dataclass
+class _ActiveLoader:
+    loader: object
+    iterator: object
+    owned: bool
+    closed: bool = False
+
+    def close(self):
+        """Release an active child iterator and its owned loader exactly once."""
+        if self.closed:
+            return
+        self.closed = True
+        iterator_close = getattr(self.iterator, "close", None)
+        try:
+            if iterator_close is not None:
+                iterator_close()
+        finally:
+            if self.owned:
+                loader_close = getattr(self.loader, "close", None)
+                if loader_close is not None:
+                    loader_close()
+
+
 class MergedDatasetLoader:
-    """Round-robin over multiple single-dataset loaders (merged training).
+    """Bounded round-robin over multiple single-dataset loaders.
 
     Different datasets have different camera counts (L2D 6, NVIDIA 7) and
     geometries (pseudo vs f-theta), which cannot be stacked into one batch. So
-    each dataset keeps its own WebDataset loader and we interleave BATCHES: every
-    batch is same-dataset (uniform num_views/geometry) and carries that dataset's
-    projection, while an epoch mixes all datasets. This is the merge point — one
-    ready-to-train stream over many datasets, per-sample/per-dataset geometry
-    preserved (self-describing calib.json in the shards, manifest per dir).
+    every batch remains same-dataset (uniform num_views/geometry) and carries that
+    dataset's projection.
+
+    Only ``max_active_loaders`` child iterators exist at once. Within that window
+    batches retain the original round-robin ordering; when a child is exhausted
+    it is closed before the next pending child is opened. Loader factories are
+    invoked lazily and recreated per epoch, which bounds worker, prefetch, shuffle,
+    and pin-memory state even when the input contains hundreds of partitions.
 
     Each yielded item is ``(batch, projection, geometry_type)`` so the training
     loop applies the right geometry to each (same-dataset) batch.
     """
 
-    def __init__(self, loaders):
-        if not loaders:
+    def __init__(self, loaders=None, *, loader_factories=None, max_active_loaders: int = 4):
+        if loaders is not None and loader_factories is not None:
+            raise ValueError("pass loaders or loader_factories, not both")
+        if loaders is None and loader_factories is None:
             raise ValueError("MergedDatasetLoader needs at least one loader.")
-        self.loaders = list(loaders)
+        if max_active_loaders <= 0:
+            raise ValueError("max_active_loaders must be positive")
+
+        if loader_factories is not None:
+            sources = list(loader_factories)
+            owned = True
+            self.loaders = []
+        else:
+            sources = list(loaders)
+            owned = False
+            self.loaders = sources
+        if not sources:
+            raise ValueError("MergedDatasetLoader needs at least one loader.")
+        self._sources = [(source, owned) for source in sources]
+        self.max_active_loaders = min(max_active_loaders, len(sources))
+
+    @staticmethod
+    def _open(source, owned: bool) -> _ActiveLoader:
+        loader = source() if owned else source
+        try:
+            iterator = iter(loader)
+        except BaseException:
+            if owned:
+                loader_close = getattr(loader, "close", None)
+                if loader_close is not None:
+                    loader_close()
+            raise
+        return _ActiveLoader(loader=loader, iterator=iterator, owned=owned)
 
     def __iter__(self):
-        iterators = [iter(dl) for dl in self.loaders]
-        active = list(range(len(iterators)))
-        # Round-robin: pull one batch from each live loader in turn until all
-        # are exhausted, so datasets are interleaved rather than concatenated.
-        while active:
-            still: list[int] = []
-            for i in active:
+        pending = iter(self._sources)
+        active: deque[_ActiveLoader] = deque()
+
+        def fill_active():
+            while len(active) < self.max_active_loaders:
                 try:
-                    batch = next(iterators[i])
+                    source, owned = next(pending)
                 except StopIteration:
+                    return
+                active.append(self._open(source, owned))
+
+        try:
+            fill_active()
+            while active:
+                child = active.popleft()
+                try:
+                    batch = next(child.iterator)
+                except StopIteration:
+                    child.close()
+                    fill_active()
                     continue
-                dl = self.loaders[i]
-                yield batch, getattr(dl, "projection", None), getattr(dl, "geometry_type", "pseudo")
-                still.append(i)
-            active = still
+                except BaseException:
+                    child.close()
+                    raise
+
+                # Requeue before yielding so generator.close() also reaches this
+                # child when the consumer stops after the current batch.
+                active.append(child)
+                yield (
+                    batch,
+                    getattr(child.loader, "projection", None),
+                    getattr(child.loader, "geometry_type", "pseudo"),
+                )
+        finally:
+            close_error = None
+            while active:
+                try:
+                    active.popleft().close()
+                except BaseException as error:
+                    if close_error is None:
+                        close_error = error
+            if close_error is not None:
+                raise close_error
 
 
 def make_multi_dataset_loader(
@@ -538,24 +625,60 @@ def make_multi_dataset_loader(
     split: str = "all",
     val_fraction: float = 0.0,
     shuffle: int = 1000,
+    shuffle_seed: int | None = None,
     pin_memory: bool = False,
     prefetch_factor: int = 4,
+    max_active_loaders: int | None = None,
 ) -> MergedDatasetLoader:
     """Build a :class:`MergedDatasetLoader` over several shard directories.
 
     Each directory is one dataset (its own manifest + geometry). Datasets are
-    merged by interleaving same-dataset batches (see MergedDatasetLoader). A
-    single directory degrades to a one-loader merge (identical to the single
-    dataset path, but yielding the ``(batch, projection, geometry_type)`` tuple).
+    merged through a bounded active window (see MergedDatasetLoader). A single
+    directory degrades to a one-loader merge (identical to the single dataset
+    path, but yielding the ``(batch, projection, geometry_type)`` tuple).
 
     ``split`` / ``val_fraction`` select a disjoint per-sample train/val split
-    applied per dataset (see make_pre_extracted_loader). ``num_workers`` /
-    ``pin_memory`` / ``prefetch_factor`` control parallel JPEG decode (#121 P0).
+    applied per dataset (see make_pre_extracted_loader). ``num_workers`` is a
+    GLOBAL worker budget: each active partition gets one worker, and no more than
+    four partition loaders are active. Evaluation can use
+    ``max_active_loaders=1`` together with a small
+    ``prefetch_factor`` to bound its larger batches.
     """
-    loaders = [
-        make_pre_extracted_loader(d, batch_size=batch_size, num_workers=num_workers,
-                                  split=split, val_fraction=val_fraction, shuffle=shuffle,
-                                  pin_memory=pin_memory, prefetch_factor=prefetch_factor)
-        for d in shard_dirs
+    if num_workers < 0:
+        raise ValueError("num_workers must be non-negative")
+    if max_active_loaders is not None and max_active_loaders <= 0:
+        raise ValueError("max_active_loaders must be positive")
+
+    shard_dirs = list(shard_dirs)
+    child_workers = 1 if num_workers > 0 else 0
+    default_active = min(4, num_workers) if num_workers > 0 else 1
+    active_limit = default_active if max_active_loaders is None else max_active_loaders
+    if num_workers > 0:
+        active_limit = min(active_limit, num_workers, 4)
+    else:
+        active_limit = 1
+
+    factories = [
+        functools.partial(
+            make_pre_extracted_loader,
+            d,
+            batch_size=batch_size,
+            num_workers=child_workers,
+            split=split,
+            val_fraction=val_fraction,
+            shuffle=shuffle,
+            shuffle_seed=(
+                None if shuffle_seed is None else shuffle_seed + index
+            ),
+            pin_memory=pin_memory,
+            prefetch_factor=prefetch_factor,
+        )
+        for index, d in enumerate(shard_dirs)
     ]
-    return MergedDatasetLoader(loaders)
+    merged = MergedDatasetLoader(
+        loader_factories=factories,
+        max_active_loaders=active_limit,
+    )
+    merged.num_workers = num_workers
+    merged.shuffle_seed = shuffle_seed
+    return merged

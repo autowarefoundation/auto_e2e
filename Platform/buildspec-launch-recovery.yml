@@ -1,32 +1,31 @@
 version: 0.2
 
-# Full-scale end-to-end launcher: wf_sharded_full_run over KITScenes train.
-# The pinned v1.0.1 archive exposes 533 of the official 534 train scenes; the
-# workflow preflight permits only that known one-scene deficit.
+# Repack the audited KITScenes raw/Cosmos artifacts, then train and evaluate.
+# This workflow never runs source ingest or the Cosmos teacher.
 #
-# Override at start-build:
-#   EPISODES (0 = all available KITScenes train scenes),
-#   BACKBONE, EPOCHS, BATCH_SIZE, LR, VAL_FRACTION, NUM_WORKERS, IMAGE_TAG.
+# Required start-build overrides:
+#   ARTIFACT_SET_SHA256
+# Optional:
+#   RECOVERY_MANIFEST_URI, IMAGE_TAG, EPOCHS, RESUME_FROM
 
 env:
+  shell: bash
   variables:
     AWS_DEFAULT_REGION: us-west-2
     FLYTE_PROJECT: auto-e2e
     FLYTE_DOMAIN: development
-    # 0 = all 533 available scenes. KITScenes always uses one scene per pod.
-    EPISODES: "0"
-    PARTITION_SIZE: "1"
-    REASONING_TEACHER: "openai_compatible"
+    ARTIFACT_SET_SHA256: ""
+    RECOVERY_MANIFEST_URI: ""
+    PACK_CONCURRENCY: "60"
     BACKBONE: "swin_v2_tiny"
-    EPOCHS: "3"
-    # Small batch: WM windows are memory-heavy. grad_accum=4 for effective bs=4.
+    EPOCHS: "10"
     BATCH_SIZE: "1"
     GRAD_ACCUM_STEPS: "4"
     LR: "1e-4"
-    # 10% held-out val (episode-level group split).
     VAL_FRACTION: "0.1"
     NUM_WORKERS: "4"
-    MAX_PARTITIONS: "600"
+    EARLY_STOPPING_PATIENCE: "3"
+    RESUME_FROM: ""
     IMAGE_TAG: latest
 
 phases:
@@ -39,6 +38,12 @@ phases:
       - ECR_URL="${ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com"
       - export ECR_PREFIX="${ECR_URL}"
       - export PYTHONPATH="${CODEBUILD_SRC_DIR}/Model:${CODEBUILD_SRC_DIR}:${PYTHONPATH:-}"
+      - test -n "${ARTIFACT_SET_SHA256}"
+      - |
+        if [ -z "${RECOVERY_MANIFEST_URI}" ]; then
+          RECOVERY_MANIFEST_URI="s3://auto-e2e-platform-checkpoints-${ACCOUNT_ID}/recovery-manifests/${ARTIFACT_SET_SHA256}.json"
+        fi
+        export RECOVERY_MANIFEST_URI
       - |
         image_ref() {
           REPOSITORY="$1"
@@ -51,7 +56,8 @@ phases:
             echo "No digest found for auto-e2e/${REPOSITORY}:${IMAGE_TAG}" >&2
             return 1
           fi
-          printf '%s/auto-e2e/%s@%s' "${ECR_URL}" "${REPOSITORY}" "${DIGEST}"
+          printf '%s/auto-e2e/%s@%s' \
+            "${ECR_URL}" "${REPOSITORY}" "${DIGEST}"
         }
         AUTO_E2E_TRAINING_IMAGE="$(image_ref training)" || exit 1
         AUTO_E2E_EVAL_IMAGE="$(image_ref eval)" || exit 1
@@ -65,23 +71,27 @@ phases:
           endpoint: dns:///k8s-flyte-flyteadm-be92e7737c-cf0d1a0f3df10f77.elb.us-west-2.amazonaws.com:81
           insecure: true
         EOF
-      # Fires the execution on the cluster; this build exits when the workflow
-      # is REGISTERED (non-blocking wrt the workflow's actual runtime).
-      - >
-        pyflyte --config /tmp/flyte.yaml run --remote
-        --project $FLYTE_PROJECT
-        --domain $FLYTE_DOMAIN
-        --image "${AUTO_E2E_TRAINING_IMAGE}"
-        Platform/pipelines/workflows.py wf_sharded_full_run
-        --dataset "KIT-MRT/KITScenes-Multimodal"
-        --episodes $EPISODES
-        --partition_size $PARTITION_SIZE
-        --reasoning_teacher $REASONING_TEACHER
-        --max_partitions $MAX_PARTITIONS
-        --backbone $BACKBONE
-        --epochs $EPOCHS
-        --batch_size $BATCH_SIZE
-        --grad_accum_steps $GRAD_ACCUM_STEPS
-        --lr $LR
-        --val_fraction $VAL_FRACTION
-        --num_workers $NUM_WORKERS
+      - |
+        RUN_ARGS=(
+          --recovery_manifest "${RECOVERY_MANIFEST_URI}"
+          --artifact_set_sha256 "${ARTIFACT_SET_SHA256}"
+          --pack_concurrency "${PACK_CONCURRENCY}"
+          --backbone "${BACKBONE}"
+          --epochs "${EPOCHS}"
+          --batch_size "${BATCH_SIZE}"
+          --grad_accum_steps "${GRAD_ACCUM_STEPS}"
+          --lr "${LR}"
+          --val_fraction "${VAL_FRACTION}"
+          --num_workers "${NUM_WORKERS}"
+          --early_stopping_patience "${EARLY_STOPPING_PATIENCE}"
+        )
+        if [ -n "${RESUME_FROM}" ]; then
+          RUN_ARGS+=(--resume_from "${RESUME_FROM}")
+        fi
+        pyflyte --config /tmp/flyte.yaml run --remote \
+          --project "${FLYTE_PROJECT}" \
+          --domain "${FLYTE_DOMAIN}" \
+          --image "${AUTO_E2E_TRAINING_IMAGE}" \
+          Platform/pipelines/workflows.py \
+          wf_recovered_kitscenes_full_run \
+          "${RUN_ARGS[@]}"
