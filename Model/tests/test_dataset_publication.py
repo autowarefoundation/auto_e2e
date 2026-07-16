@@ -8,11 +8,13 @@ import json
 import pytest
 
 from Platform.pipelines.dataset_publication import (
+    PUBLICATION_SCHEMA,
     episode_path_key,
     geo_pointer_item,
     gzip_json_bytes,
     merge_partition_results,
     pool_key,
+    rig_key,
     shard_key,
 )
 
@@ -25,7 +27,7 @@ def _result(
     samples: int = 10,
 ) -> dict:
     return {
-        "schema_version": "v1",
+        "schema_version": PUBLICATION_SCHEMA,
         "source_uri": f"s3://flyte/{partition_id}",
         "source_manifest_sha256": partition_id * 8,
         "dataset_version": "v2.1",
@@ -45,7 +47,7 @@ def _result(
             "hz": 10,
             "image_size": 256,
             "num_views": 6,
-            "geometry_type": "pseudo",
+            "geometry_type": "pinhole",
             "has_map": True,
             "has_world_model": True,
             "has_reasoning_labels": True,
@@ -54,9 +56,16 @@ def _result(
         "rig": {
             "schema_version": "v1",
             "dataset": "yaak-ai/L2D",
-            "geometry_type": "pseudo",
+            "geometry_type": "pinhole",
             "image_size": 256,
-            "projection": None,
+            "projection": {
+                "type": "pinhole",
+                "matrix": [[
+                    [128.0, 0.0, 0.0, 0.0],
+                    [0.0, 128.0, 0.0, 0.0],
+                    [0.0, 0.0, 1.0, 0.0],
+                ]],
+            },
         },
         "shards": [{
             "name": shard,
@@ -118,6 +127,9 @@ def test_publication_keys_are_version_scoped_and_traversal_safe():
     assert pool_key("l2d", "v2.1", "pool/frame.jpg") == (
         "l2d/v2.1/pool/frame.jpg"
     )
+    assert rig_key("l2d", "v2.1", "a" * 64) == (
+        f"l2d/v2.1/rig/{'a' * 64}.json"
+    )
     assert episode_path_key("l2d", "v2.1", "000012.f64") == (
         "l2d/v2.1/geo/episode_paths/000012.f64"
     )
@@ -125,10 +137,12 @@ def test_publication_keys_are_version_scoped_and_traversal_safe():
         shard_key("l2d", "v2.1", "../escape.tar")
     with pytest.raises(ValueError):
         pool_key("l2d", "v2.1", "pool/../escape.jpg")
+    with pytest.raises(ValueError):
+        rig_key("l2d", "v2.1", "../projection")
 
 
 def test_merge_applies_k_anonymity_across_all_partitions():
-    manifest, rig, heatmap = merge_partition_results(
+    manifest, rigs, heatmap = merge_partition_results(
         [
             _result(
                 "part-a",
@@ -148,6 +162,7 @@ def test_merge_applies_k_anonymity_across_all_partitions():
     assert manifest["total_samples"] == 20
     assert manifest["shards"] == 2
     assert manifest["shard_count"] == 2
+    assert manifest["rig_count"] == 1
     assert [entry["name"] for entry in manifest["shard_entries"]] == [
         "part-a-train-000000.tar",
         "part-b-train-000000.tar",
@@ -158,13 +173,41 @@ def test_merge_applies_k_anonymity_across_all_partitions():
     assert manifest["geo"]["episode_count"] == 5
     assert manifest["geo"]["sample_pose_count"] == 20
     assert manifest["geo"]["bbox"] == [11.0, 49.0, 11.01, 49.01]
-    assert rig["geometry_type"] == "pseudo"
+    assert len(rigs) == 1
+    rig_digest, rig = next(iter(rigs.items()))
+    assert rig["geometry_type"] == "pinhole"
+    assert {
+        entry["rig"]["sha256"] for entry in manifest["shard_entries"]
+    } == {rig_digest}
+    assert manifest["shard_entries"][0]["rig"]["key"] == (
+        f"l2d/v2.1/rig/{rig_digest}.json"
+    )
     assert heatmap is not None
     assert len(heatmap["features"]) == 1
     assert heatmap["features"][0]["properties"]["episode_count"] == 5
 
 
-def test_merge_rejects_inconsistent_rig_and_duplicate_shards():
+def test_merge_scopes_different_rigs_to_their_shards():
+    first = _result(
+        "part-a", shard="part-a-train-000000.tar", episode_count=3
+    )
+    second = _result(
+        "part-b", shard="part-b-train-000000.tar", episode_count=2
+    )
+    second["rig"]["projection"]["matrix"][0][0][0] = 129.0
+
+    manifest, rigs, _ = merge_partition_results(
+        [first, second], dataset="l2d", version="v2.1"
+    )
+
+    assert manifest["rig_count"] == 2
+    assert len(rigs) == 2
+    assert len({
+        entry["rig"]["key"] for entry in manifest["shard_entries"]
+    }) == 2
+
+
+def test_merge_rejects_invalid_rig_and_duplicate_shards():
     first = _result(
         "part-a", shard="part-a-train-000000.tar", episode_count=3
     )
