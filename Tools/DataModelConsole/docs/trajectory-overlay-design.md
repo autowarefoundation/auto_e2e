@@ -19,6 +19,10 @@ Implementation snapshot (2026-07-16):
   Reasoning stats, direct sample lookups, and scene-search rows are populated
   by an explicit digest-pinned `batch/v1 Job` after that workflow succeeds;
   normal Console deployment never starts this scan.
+- Production KITScenes v2.2 receipts contain 404 non-empty scene shards across
+  three calibrated pinhole rigs; 129 empty partitions carry a pseudo rig but
+  publish no shard. Publication schema v2 stores each unique projection at
+  `rig/{sha256}.json` and binds every `shard_entry` to its exact rig.
 - Production activation still requires the rollout sequence in section 11.
   Exact routes remain disabled until authenticated, non-spoofable role
   propagation is deployed.
@@ -47,7 +51,7 @@ These OVERRIDE any contradicting recommendation later in this doc; the body belo
 1. **Store the RAW control prediction, not integrated XY.** Overlays persist `(64,2) [accel_x, curvature] + v0` — exactly the `ego_future` representation the index already carries — and the client integrates it with the *same* reference integrator used for the GT plan (PY↔TS golden-tested). This keeps any future fix to `integrate_trajectory` / the yaw-sign a **pure render change with zero GPU recompute**, and shrinks the payload. The client **defaults to raw prediction** (no GT-style clamping); a "display-limited" mode is a separate, labeled toggle (P1.9). (adas #2, #9)
 2. **Overlays are CANONICAL per `(model_artifact_id, dataset_version, shard)`.** ONE inference over **ALL** samples in a shard (train ∪ eval = all samples; search ⊂ all). **train / eval / search are display-time FILTERS, not separate compute or storage.** `split`/`source` appears in **no** physical artifact — not in the S3 key, not in the Dynamo key, not in the manifest. This removes redundant inference, the overwrite bug (train→eval→search subsets used to clobber each other), per-source manifests, and makes a scene belonging to multiple splits a non-issue. (P0.2 — the single most important change)
 3. **S3 is the sole overlay body; DynamoDB is a pointer only.** The overlay body is one **binary** `overlay.bin.gz` per (model, shard) in S3 (§6 layout). DynamoDB stores only `s3_key / sha256 / byte_size / sample_count / overlay_schema / status / created_at`. There is **no gzip-JSON overlay item in Dynamo** — that both risked the hard 400 KB item cap (gzip ratio is content/seed-count dependent, esp. seed fans) and contradicted the frontend plan (`arrayBuffer → Float32Array`, no `JSON.parse`). One S3 GET per (model, shard) → held in memory → smooth scrubbing. (P0.3)
-4. **Camera projection is a v2.1-repack artifact and a per-RIG CONSTANT — not per-sample, not per-model.** For a fixed camera rig, ego-frame-XY→camera-pixels depends only on the rig's fixed intrinsics/extrinsics, not on ego pose or model weights. PR#74's `project_BEV_to_CameraView` confirms this with a fixed `P = K[R|t]` input. It is generated **inside the v2.1 repack** (which already holds pose/calibration), NOT in the per-model overlay task. Store **rig params once** and drop any per-sample `proj.f32`. (P1.12, cost-frontend #2)
+4. **Camera projection is a v2.1-repack artifact and a per-RIG CONSTANT — not per-sample, not per-model.** For a fixed camera rig, ego-frame-XY→camera-pixels depends only on the rig's fixed intrinsics/extrinsics, not on ego pose or model weights. PR#74's `project_BEV_to_CameraView` confirms this with a fixed `P = K[R|t]` input. It is generated **inside the v2.1 repack** (which already holds pose/calibration), NOT in the per-model overlay task. Store each unique rig once by content digest, bind each shard to its rig, and drop any per-sample `proj.f32`. (P1.12, cost-frontend #2)
 5. **Overlay identity is `model_artifact_id = sha256(best.pt bytes)`** — content-addressable, dedupes identical checkpoints, detects content change. The registry coordinate `MODELVER#{registered_model_name}#{model_version} → {run_id, artifact_uri, checkpoint_sha256}` resolves a picked registry version to the artifact. `run_id` is kept only as a **provenance attribute** (it is a lineage id, NOT content-addressable). MLflow version *numbers* are immutable; it is *aliases* (e.g. "latest"/"champion") that move. (P1.8)
 6. **A small model-side change IS required for determinism (corrects the earlier claim).** Per-batch `generator=` does **not** give per-sample-stable noise: `torch.randn(B,dim,generator=gen)` draws in batch order, so batch size / sample order / OOM-triggered batch-size halving / retry re-splits all shift a given sample's noise. FIX: add `initial_noise=` to `FlowMatchingPlanner.forward` (falls back to `torch.randn` when unset) and feed per-sample noise `z0 = noise_from(hash64(model_artifact_id, dataset_manifest_digest, sample_uid, base_seed))`. **Nuance:** a stored overlay is deterministic *as stored*; this fix buys batch-invariance on **recompute** and cross-run reproducibility, not correctness of an already-written blob. (P0.1)
 
@@ -76,8 +80,9 @@ Also in scope (new requirement):
 
 ### Implemented contract
 - Packed samples use stable `sample_uid` and `split_group_uid`; v2.1 shards
-  carry portable pose/GPS members, rig projection, embedded reasoning labels,
-  and dataset-level privacy-filtered geo products.
+  carry portable pose/GPS members, a shard-bound content-addressed rig
+  projection, embedded reasoning labels, and dataset-level privacy-filtered
+  geo products.
 - Dataset publication copies every body with an S3 conditional write, writes a
   hidden publication lock, and writes `shards/manifest.json` last as the public
   readiness gate. `wf_publish_and_precompute_overlays` passes that manifest's
@@ -164,7 +169,7 @@ are retained for rationale; the gap list is no longer the rollout checklist.
    S3 datasets bucket (v2.1 repack):                          OVLSET#{artifact_id}#{ds}#v2.1 / META (status)
      shards …/pose.npy  (per-sample pose_current)             GEO#{ds}#v2.1 / META               (summary + S3 ptr)
      geo/episode_paths/*, geo/sample_pose.parquet,
-     geo/summary.json, geo/heatmap.fgb, rig/projection.json
+     geo/summary.json, geo/heatmap.fgb, rig/{rig_sha256}.json
                             │                                 (NO overlay body in Dynamo; NO split in any key)
                             └────────────────► Go API (READ-ONLY++) ◄───────────────────────────┘
                                   new endpoints: models-for-shard, overlay-pointer (per model+shard),
@@ -340,7 +345,7 @@ if gps_fut is not None:
 ```
 NVIDIA has no GPS ⇒ members simply absent (`ShardIndex.has_gps=False`).
 
-**Camera-projection is a v2.1-repack RIG artifact and a CONSTANT (P1.12).** Move projection generation OUT of the per-model overlay task (race/duplication-prone, wrong responsibility) INTO the v2.1 repack, which already holds pose/calibration. For a fixed camera rig, ego-frame-trajectory→camera-pixels depends only on the rig's fixed intrinsics/extrinsics, NOT on ego pose. PR#74's implementation takes one fixed `P = K[R|t]` matrix and confirms that no sample state enters the projection. Store rig params ONCE (`rig/projection.json` per dataset/rig) and **drop the per-sample `proj.f32` entirely**.
+**Camera-projection is a v2.1-repack RIG artifact and a CONSTANT (P1.12).** Move projection generation OUT of the per-model overlay task (race/duplication-prone, wrong responsibility) INTO the v2.1 repack, which already holds pose/calibration. For a fixed camera rig, ego-frame-trajectory→camera-pixels depends only on the rig's fixed intrinsics/extrinsics, NOT on ego pose. PR#74's implementation takes one fixed `P = K[R|t]` matrix and confirms that no sample state enters the projection. Store each unique rig at `rig/{sha256}.json`, put its `{key, sha256}` descriptor on every `shard_entry`, and **drop the per-sample `proj.f32` entirely**. A dataset-wide `rig/projection.json` is invalid when scenes were recorded with different calibrated rigs.
 
 **Geo stats emitted during the repack (P1.14).** The repack already scans GPS, so emit in the same pass (no round-trip through DynamoDB for the heavy data):
 ```
@@ -401,9 +406,10 @@ overlays_manifest/schema=v1/model={model_artifact_id}/dataset={l2d}/version={v2.
       output_sha256, created_at, status:"ready" }
 ```
 
-**Rig projection (per dataset/rig, CONSTANT — P1.12):**
+**Rig projection (content-addressed per rig, shard-bound — P1.12):**
 ```
-rig/projection.json                 # intrinsics/extrinsics per camera; written by the v2.1 repack.
+rig/{rig_sha256}.json               # intrinsics/extrinsics per camera; one object per unique rig.
+shards/manifest.json                # each shard_entry carries rig {key, sha256}.
                                      # PR#74 confirms no per-sample proj.f32 is required.
 ```
 
@@ -513,13 +519,13 @@ Heavy geo data (point sets, heatmap, parquet) is produced by the v2.1 repack int
 **Recommendation: VECTOR-FIRST for all three sources and both views. Demote PR#74 baking to an optional offline export.** The user leaned pre-rendered; here is the honest math and the reason the lean does not survive it.
 
 **Storage (cost-frontend #1, canonical/split-free numbers):**
-- **Vectors (canonical, split-free):** `(64,2)` float32 + `v0` ≈ 520 B/sample/model in the binary body. Because there is **one** overlay per (model, shard) covering all samples (not one per split), 50 k samples × 10 models ≈ **~260 MB total** across S3, plus the rig projection stored once for the whole dataset.
+- **Vectors (canonical, split-free):** `(64,2)` float32 + `v0` ≈ 520 B/sample/model in the binary body. Because there is **one** overlay per (model, shard) covering all samples (not one per split), 50 k samples × 10 models ≈ **~260 MB total** across S3, plus one small object per unique rig.
 - **Baked (front-camera only):**
   - If playback = consecutive samples (matching the existing engine): **1 baked JPEG/sample/model** → 50 shards × 1000 × ~60 KB ≈ **~3 GB/model** → ~30 GB @ 10 models.
   - If each sample is a 64-step future clip: **64 frames/sample** → **~190 GB/model** → **~1.9 TB @ 10 models**, and it abandons the windowed `/blob` engine.
   The draft's "10 models × 1 k scenes × 20 MB = 200 GB" matches neither layout nor real shard counts.
 
-**The decisive fact (cost-frontend #2, adas #3, flyte #7, P1.12):** baking's *only* claimed advantage was camera projection under L2D `geometry_type='pseudo'`. But calibrated projection is a function of the **fixed camera rig**, not model weights, and PR#74 confirms it is a **per-rig constant**. Store rig params once (§5), and the client draws *any* model's polyline in camera space. Baking therefore buys nothing that vectors + a rig projection don't, at ~3–4 orders more storage. And under pseudo-geometry the projection is a heuristic approximation **either way** — baking just freezes the same error into un-auditable pixels.
+**The decisive fact (cost-frontend #2, adas #3, flyte #7, P1.12):** baking's *only* claimed advantage was camera projection under L2D `geometry_type='pseudo'`. But calibrated projection is a function of the **fixed camera rig**, not model weights, and PR#74 confirms it is a **per-rig constant**. Store each rig once and resolve it through the active shard (§5), and the client draws *any* model's polyline in camera space. Baking therefore buys nothing that vectors + a rig projection don't, at ~3–4 orders more storage. And under pseudo-geometry the projection is a heuristic approximation **either way** — baking just freezes the same error into un-auditable pixels.
 
 **Flexibility:** vectors toggle/compare 2–3 models on one canvas at ~0.5 KB each; baked frames make multi-model comparison physically impossible (can't composite two videos) and make a single toggle a multi-MB re-download (cost-frontend #5). The feature centers on *picking* (and comparing) models — vector-first is the correct default.
 
@@ -541,7 +547,7 @@ This honors the user's intent (heavy Flyte precompute, "smooth playback") while 
 - **Two-layer canvas:** static frame layer (existing `<img>`/bitmap) + one transparent overlay `<canvas>`. Toggling/adding a model = `clearRect` + re-stroke the thin top layer only.
 - **Client integrates raw control → XY** with the **reference Python integrator ported to TS, guarded by PY↔TS golden tests** (P1.9). The client **DEFAULTS to raw prediction** (no clamping). A **"display-limited" mode** is an explicit, labeled toggle that applies GT-style processing for visualization only — it is NOT the default and the label states it post-processes/hides model error. There is **no "clamp parity" claim**: the 0.5 m/s floor / ±0.5 rad/m clamp are GT *derivation* properties, not integrator behavior, so applying them to a prediction is display post-processing, not "identical treatment." For any eval-metric comparison, use the exact eval-code processing path (not the display toggle).
 - **BEV view:** well-defined `meters_per_pixel` map (`metrics.py::offroad_rate` convention: forward `+x`→up/decreasing row, left `+y`→left/decreasing col). Metrically sound.
-- **Camera view:** draw the integrated polyline through the **rig projection** (`rig/projection.json`, likely constant — P1.12). Under pseudo-geometry this is approximate but **auditable and correctable** (unlike baked pixels), and identical for every model.
+- **Camera view:** draw the integrated polyline through the active shard's **rig projection** (`rig/{sha256}.json` via `/datasets/{name}/shards/{shard}/rig-projection` — P1.12). Under pseudo-geometry this is approximate but **auditable and correctable** (unlike baked pixels), and identical for every model using that shard.
 - **Binary payload:** `fetch(url).then(r=>r.arrayBuffer())` → parse the `AOVL` header → `Float32Array` `subarray` views over `controls`/`v0` (zero-copy, no `JSON.parse`, no per-frame GC). Directory maps `sample_uid → row`.
 - **Frame-locked sync (cost-frontend #7):** there is **no `<video>` element** — playback is a manual JPEG-swap loop over tar byte-ranges, so `requestVideoFrameCallback` does **not** apply. The overlay is indexed by the same integer sample ordinal (→ `sample_uid`) that drives the image swap; the draw is triggered off the frame-advance step, not a wall-clock rAF, so image and overlay cannot drift under buffering stalls. `OffscreenCanvas`/worker only if profiling shows multi-cam main-thread jank.
 - **Seed labeling (adas #4):** if `seed_count=1`, badge "single sample (base_seed 0)"; if a fan, draw median + envelope.
@@ -635,7 +641,7 @@ a principal established by signature-validating authentication middleware.
 - Manifest records: `container_image_digest, torch/cuda/cudnn versions, gpu_model, model_artifact_sha256, dataset_manifest_sha256, inference_contract_version, noise_policy_version, output_sha256`.
 
 ### Storage-cost summary
-- Vectors (canonical, all sources/views): **~260 MB S3 body** total + pointers in Dynamo + one rig projection — trivial.
+- Vectors (canonical, all sources/views): **~260 MB S3 body** total + pointers in Dynamo + one small object per unique rig — trivial.
 - Optional MP4 export: bounded by scope + S3 lifecycle TTL; never on the playback path.
 
 ---
@@ -706,7 +712,7 @@ a principal established by signature-validating authentication middleware.
 **Risks:**
 - **Yaw-sign mirror + map ENU** (§10, §9-bis) — the corrected ENU formula is necessary-not-sufficient; must be verified JOINTLY (straight + left/right turn) before any overlay or map path is trusted; blocks Phase 2 acceptance.
 - **`sample_uid` migration blast radius** (P1.7) — the shipped reasoning-label cache + `LBL#` index are keyed by `s{si:08d}`; adopting `sample_uid` is a scoped migration, not free. Confirm adopt-now vs defer with the user.
-- **Rig projection contract (resolved).** PR#74 `project_BEV_to_CameraView` consumes only a fixed `P = K[R|t]`; the implementation therefore publishes one per-rig artifact and no per-sample projection.
+- **Rig projection contract (resolved).** PR#74 `project_BEV_to_CameraView` consumes only a fixed `P = K[R|t]`; publication schema v2 therefore writes one content-addressed artifact per unique rig, binds it to each shard, and stores no per-sample projection. KITScenes v2.2 production receipts prove a dataset-wide singleton is incorrect.
 - **Version-coordinate drift** — enforce one version (`v2.1`) across `SHARD#`/`IDX#`/search; v2.1 immutable + manifest-digest pinned.
 - **Single warm GPU** — backfill is near-serial. Scope: **latest N model versions × all samples per shard** (canonical). Give a wall-clock estimate before triggering; ops launches it (not the UI).
 - **PR#74 optional export boundary.** It emits one MP4 + manifest per invocation, but its `[right, forward]` integrator, `v0=0` placeholder, eval-only loader, and legacy checkpoint schema do not satisfy the canonical overlay contract. Reuse the MP4/manifest concept only after adapting it to AOVL controls and `sample_uid`; do not merge its inference path into Phase 2.
@@ -727,7 +733,7 @@ a principal established by signature-validating authentication middleware.
 | P1 "models for scene" | **`SHARD#{ds}#{ver}#{shard}` / `MODEL#{artifact_id}` base-table query** | scene×model `gsi1` inverse index + `SCENELIST#` fanout | Canonical per-shard overlays collapse model↔scene to model↔SHARD (~500 items vs 500k edges). **SUPERSEDES the round-2 gsi1 decision; gsi1 for future inverse lookups is deferred to the user** (P1.6). |
 | Determinism / noise | **`initial_noise=` kwarg + per-sample `hash64(model_artifact_id, ds_manifest, sample_uid, base_seed)`** | Rely on per-batch `generator=` ("zero model change") | `randn(B,dim,gen)` draws in batch order → not batch-invariant on recompute/retry. Small model edit is required; corrects the earlier "zero model change" claim (P0.1). |
 | Sample identity | **`sample_uid = hash(dataset, episode_id, frame_idx|ts_ns)`** (+`legacy_sample_id` + migration manifest) | Fragile global `s{si:08d}` enumeration | A 1-item repack shift re-points every downstream scene; content-addressed uid is stable. FLAG: reasoning-cache + `LBL#` re-key is its own work item (P1.7). |
-| Camera projection | **v2.1-repack RIG artifact, a per-rig CONSTANT (`rig/projection.json`)** | Per-sample `proj.f32` in the overlay task; baked per-model frames | PR#74 confirms projection uses fixed `P = K[R|t]`; ego pose and model weights do not enter it. Generating it in the overlay task is race/duplication-prone, so no per-sample projection is stored (P1.12, cost-frontend #2). |
+| Camera projection | **v2.1-repack RIG artifact, content-addressed at `rig/{sha256}.json` and bound from each shard** | One dataset-wide rig; per-sample `proj.f32`; baked per-model frames | PR#74 confirms projection uses fixed `P = K[R|t]`; ego pose and model weights do not enter it. KITScenes has multiple calibrated rigs, so the shard selects the correct per-rig constant without duplicating it per sample or model (P1.12, cost-frontend #2). |
 | Render/clamp contract | **Raw prediction default + explicit "display-limited" toggle; PY↔TS golden integrator** | "Clamp parity" (clamp pred to match GT) | The floor/clamp live in GT *derivation*, not the integrator; clamping predictions hides model error rather than treating them identically (P1.9). |
 | Reproducibility | **Two-tier (same-env identical / cross-env numerically close)** | "Byte-identical re-runs" | Cross-env cuDNN/driver differences preclude bitwise guarantees; record full env + digests instead (P1.10). |
 | Cache identity | **Narrow `hash(model sha, ds_manifest, preprocess, infer-code, sampler, steps, noise_policy, binary_schema)`** | Repo-wide git SHA | Git SHA invalidates the GPU cache on unrelated (e.g. Next.js) changes (P1.11). |
