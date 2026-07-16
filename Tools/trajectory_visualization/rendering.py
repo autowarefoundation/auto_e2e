@@ -173,6 +173,26 @@ def project_trajectory(
     return [path for path in paths if len(path) >= 2]
 
 
+def camera_projection_status(
+    calibration: Mapping[str, Any],
+    *,
+    camera_index: int,
+) -> str:
+    spec = calibration.get("projection")
+    if not isinstance(spec, dict):
+        return "unsupported"
+    geometry_type = str(
+        spec.get("type", calibration.get("geometry_type", "pseudo"))
+    )
+    if geometry_type == "pseudo":
+        return "unsupported_pseudo_geometry"
+    field = "t_camera_ego" if geometry_type == "ftheta" else "matrix"
+    values = spec.get(field)
+    if not isinstance(values, list) or camera_index >= len(values):
+        return "unsupported"
+    return "calibrated"
+
+
 def _draw_camera_path(
     draw: ImageDraw.ImageDraw,
     paths: Sequence[Sequence[tuple[float, float]]],
@@ -330,7 +350,17 @@ def render_frame(
     )
     draw.text(
         (24, 88),
-        f"camera {camera_index}",
+        (
+            f"camera {camera_index}"
+            if camera_projection_status(
+                sample.calibration,
+                camera_index=camera_index,
+            ) == "calibrated"
+            else (
+                f"camera {camera_index} "
+                "(trajectory unavailable: uncalibrated geometry)"
+            )
+        ),
         fill=MUTED_COLOR,
         font=font,
     )
