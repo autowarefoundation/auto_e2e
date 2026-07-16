@@ -354,14 +354,18 @@ does not load the model checkpoint or run inference again.
 1. Copy one published shard URI from the dataset manifest.
 2. Copy its matching `overlay.bin.gz` URI from the overlay manifest or DynamoDB
    pointer.
-3. In Flyte Console, launch `wf_export_trajectory_report`.
-4. Set `shard` and `overlay` to those immutable S3 URIs. Optionally set
-   `scene_uids`, `seed_index`, `camera_index`, and `max_frames_per_scene`.
-5. Download the returned `FlyteDirectory`, which contains per-scene MP4 files,
+3. Keep the immutable dataset-manifest and overlay-manifest S3 URIs used to
+   resolve those two objects.
+4. In Flyte Console, launch `wf_export_trajectory_report`.
+5. Set `shard`, `overlay`, `dataset_manifest`, and `overlay_manifest` to those
+   four immutable S3 URIs. Optionally set `selection_manifest`, `scene_uids`,
+   `seed_index`, `camera_index`, and `max_frames_per_scene`.
+6. Download the returned `FlyteDirectory`, which contains per-scene MP4 files,
    thumbnails, metrics, and `manifest.json`.
 
-The task joins predictions by `sample_uid` and rejects a shard/overlay mismatch.
-It is cached by immutable input URI and report schema.
+The task joins predictions by `sample_uid`; verifies dataset/model/request
+lineage, AOVL digest, sample count, seeds, and `v0`; and rejects mismatched
+inputs. It is cached by immutable input URI and report schema.
 
 ---
 
@@ -415,7 +419,7 @@ n1 data_processing(L2D)    n3 data_processing(NVIDIA) ← run in parallel
 | Publish existing shards → overlays | `wf_publish_and_precompute_overlays` | `shards`, immutable model/runtime identities |
 | Publish existing shards only | `wf_publish_dataset_snapshot` | `shards`, `published_dataset`, `dataset_version` |
 | Precompute an already identified snapshot | `wf_precompute_overlays` | `shards`, model version, dataset manifest digest |
-| Export an overlay shard as MP4 | `wf_export_trajectory_report` | matching immutable `shard` and `overlay` URIs |
+| Export an overlay shard as MP4 | `wf_export_trajectory_report` | matching immutable `shard`, `overlay`, dataset-manifest, and overlay-manifest URIs |
 | Train IL from existing shards | `wf_train_il` | `shards` list, `dataset` |
 | Refine with Offline RL | `wf_train_offline_rl` | `pretrained`, `il_metadata`, `shards` |
 | See metrics | (MLflow, not Flyte) | experiment `imitation-learning` / `offline-rl` |
