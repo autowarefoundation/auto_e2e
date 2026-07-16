@@ -26,6 +26,9 @@ from Tools.trajectory_visualization.kinematics import (
     curvature_sign_for_dataset,
     integrate_controls,
 )
+from Tools.trajectory_visualization.provenance import (
+    validate_report_provenance,
+)
 from Tools.trajectory_visualization.rendering import (
     camera_projection_status,
     render_frame,
@@ -247,6 +250,8 @@ def generate_report(
     shard_path: str | Path,
     overlay_path: str | Path,
     output_dir: str | Path,
+    dataset_manifest_path: str | Path | None = None,
+    overlay_manifest_path: str | Path | None = None,
     seed_index: int = 0,
     camera_index: int = 0,
     scene_uids: Sequence[str] | None = None,
@@ -262,6 +267,11 @@ def generate_report(
         raise ValueError("fps must be positive")
     if scene_uids and scene_selections:
         raise ValueError("scene_uids and scene_selections are mutually exclusive")
+    if (dataset_manifest_path is None) != (overlay_manifest_path is None):
+        raise ValueError(
+            "dataset_manifest_path and overlay_manifest_path must be "
+            "provided together"
+        )
     selections = tuple(scene_selections or ())
     selected_uids = (
         [selection.scene_uid for selection in selections]
@@ -287,6 +297,24 @@ def generate_report(
     overlay.validate_sample_uids([
         sample.sample_uid for sample in samples
     ])
+    shard_sha256 = _sha256_file(shard_path)
+    publication = (
+        validate_report_provenance(
+            dataset_manifest_path=dataset_manifest_path,
+            overlay_manifest_path=overlay_manifest_path,
+            shard_path=shard_path,
+            shard_sha256=shard_sha256,
+            overlay_path=overlay_path,
+            overlay_sha256=overlay.sha256,
+            sample_count=len(samples),
+            base_seeds=overlay.base_seeds,
+        )
+        if (
+            dataset_manifest_path is not None
+            and overlay_manifest_path is not None
+        )
+        else None
+    )
     if requested_scenes:
         available_scenes = {sample.scene_uid for sample in samples}
         missing_scenes = requested_scenes.difference(available_scenes)
@@ -419,10 +447,11 @@ def generate_report(
         "dataset": next(iter(datasets)),
         "source": {
             "shard_name": Path(shard_path).name,
-            "shard_sha256": _sha256_file(shard_path),
+            "shard_sha256": shard_sha256,
             "overlay_name": Path(overlay_path).name,
             "overlay_sha256": overlay.sha256,
         },
+        "publication": publication,
         "render": {
             "camera_index": camera_index,
             "fps": fps,
