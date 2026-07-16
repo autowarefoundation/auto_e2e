@@ -122,10 +122,11 @@ type SampleDetail struct {
 // built from a single tar scan. Frames are fetched member-by-member through
 // the image endpoint, so no whole-shard presigned URL is emitted.
 type ShardIndex struct {
-	Fps     int           `json:"fps"` // 10
-	Version string        `json:"version"`
-	Shard   string        `json:"shard"`
-	Samples []IndexSample `json:"samples"`
+	Fps               int           `json:"fps"` // 10
+	Version           string        `json:"version"`
+	Shard             string        `json:"shard"`
+	BlobRangesAllowed bool          `json:"blob_ranges_allowed"`
+	Samples           []IndexSample `json:"samples"`
 }
 
 // IndexSample is one playback frame in a ShardIndex.
