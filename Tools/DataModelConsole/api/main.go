@@ -108,7 +108,7 @@ func main() {
 			r.Get("/datasets", datasetsH.List)
 			r.Get("/datasets/{name}/versions", datasetsH.ListVersions)
 			r.Get("/datasets/{name}/shards", datasetsH.ListShards)
-			r.Get("/datasets/{name}/rig-projection", overlayH.Rig)
+			r.Get("/datasets/{name}/shards/{shard}/rig-projection", overlayH.Rig)
 			r.Get("/datasets/{name}/geo-stats", overlayH.GeoStats)
 			r.Get("/datasets/{name}/geo/heatmap", overlayH.GeoHeatmap)
 			r.Get("/datasets/{name}/geo/episodes/{episode}", overlayH.EpisodePath)
