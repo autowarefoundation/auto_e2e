@@ -337,7 +337,9 @@ def generate_report(
         scene_samples = sorted(
             grouped[scene_uid],
             key=lambda sample: (sample.frame_idx, sample.sample_uid),
-        )[:max_frames_per_scene]
+        )
+        if not selections:
+            scene_samples = scene_samples[:max_frames_per_scene]
         prepared = _prepare_frames(
             scene_samples,
             overlay,
