@@ -19,6 +19,7 @@ from Platform.pipelines.overlay_tasks import (
     _put_s3_immutable,
     _register_selected_checkpoint_version,
     _resolve_model_version_for_execution,
+    _validate_selected_checkpoint_payload,
 )
 
 
@@ -366,6 +367,8 @@ def _register_selected(client):
         train_execution_id="a1234567890123456789",
         dataset="KIT-MRT/KITScenes-Multimodal",
         dataset_version="v2.2",
+        checkpoint_schema="il_checkpoint_v2",
+        data_fingerprint="f" * 64,
         validation_ade=9.689568680297887,
         validation_fde=29.656355911506907,
     )
@@ -386,6 +389,8 @@ def test_selected_checkpoint_registration_records_exact_provenance():
         "train_execution_id": "a1234567890123456789",
         "dataset": "KIT-MRT/KITScenes-Multimodal",
         "dataset_version": "v2.2",
+        "checkpoint_schema": "il_checkpoint_v2",
+        "data_fingerprint": "f" * 64,
         "checkpoint_role": "selected-overlay",
         "validation_ade": "9.689568680297887",
         "validation_fde": "29.656355911506907",
@@ -434,6 +439,26 @@ def test_selected_checkpoint_registration_rejects_source_reassignment():
         _register_selected(client)
 
 
+def test_selected_checkpoint_registration_rejects_a_second_selected_epoch():
+    source = (
+        "s3://checkpoints/imitation-learning/"
+        f"{'1' * 32}/epoch-0003.pt"
+    )
+    client = _SelectedCheckpointClient([
+        _model_version(
+            43,
+            "1" * 32,
+            "b" * 64,
+            source=source,
+            checkpoint_role="selected-overlay",
+            train_execution_id="a1234567890123456789",
+        )
+    ])
+
+    with pytest.raises(RuntimeError, match="different selected-overlay"):
+        _register_selected(client)
+
+
 def test_metric_at_epoch_uses_latest_finite_retry():
     client = SimpleNamespace(
         get_metric_history=lambda run_id, key: [
@@ -461,3 +486,106 @@ def test_metric_at_epoch_rejects_missing_epoch():
             metric_key="val/ade",
             epoch=4,
         )
+
+
+def _selected_checkpoint_payload():
+    return {
+        "schema_version": "il_checkpoint_v2",
+        "epoch": 4,
+        "data_fingerprint": "f" * 64,
+        "training_state": {
+            "run_id": "1" * 32,
+            "current_checkpoint_uri": (
+                "s3://checkpoints/imitation-learning/"
+                f"{'1' * 32}/epoch-0004.pt"
+            ),
+            "metric_history": [
+                {
+                    "epoch": epoch,
+                    "val_ade": 9.689568680297887
+                    if epoch == 4 else 20.0 - epoch,
+                    "val_fde": 29.656355911506907
+                    if epoch == 4 else 40.0 - epoch,
+                }
+                for epoch in range(1, 5)
+            ],
+        },
+    }
+
+
+def _validate_payload(payload):
+    return _validate_selected_checkpoint_payload(
+        payload,
+        checkpoint_schema="il_checkpoint_v2",
+        checkpoint_epoch=4,
+        checkpoint_uri=(
+            "s3://checkpoints/imitation-learning/"
+            f"{'1' * 32}/epoch-0004.pt"
+        ),
+        run_id="1" * 32,
+        data_fingerprint="f" * 64,
+        validation_ade=9.689568680297887,
+        validation_fde=29.656355911506907,
+    )
+
+
+def test_selected_checkpoint_payload_accepts_exact_epoch_provenance():
+    _validate_payload(_selected_checkpoint_payload())
+
+
+@pytest.mark.parametrize(
+    ("mutate", "message"),
+    [
+        (
+            lambda payload: payload.update(schema_version="legacy"),
+            "unsupported schema",
+        ),
+        (
+            lambda payload: payload.update(epoch=3),
+            "epoch differs",
+        ),
+        (
+            lambda payload: payload.update(data_fingerprint="e" * 64),
+            "fingerprint differs",
+        ),
+        (
+            lambda payload: payload["training_state"].update(
+                run_id="2" * 32
+            ),
+            "different MLflow run",
+        ),
+        (
+            lambda payload: payload["training_state"].update(
+                current_checkpoint_uri="s3://checkpoints/other.pt"
+            ),
+            "self URI differs",
+        ),
+        (
+            lambda payload: payload["training_state"][
+                "metric_history"
+            ].pop(1),
+            "not contiguous",
+        ),
+        (
+            lambda payload: payload["training_state"][
+                "metric_history"
+            ][-1].update(val_ade=10.0),
+            "val_ade differs",
+        ),
+        (
+            lambda payload: payload["training_state"][
+                "metric_history"
+            ][-1].update(val_fde=30.0),
+            "val_fde differs",
+        ),
+    ],
+)
+def test_selected_checkpoint_payload_rejects_provenance_drift(
+    mutate,
+    message,
+):
+    payload = _selected_checkpoint_payload()
+    mutate(payload)
+
+    with pytest.raises(ValueError, match=message):
+        _validate_payload(payload)
