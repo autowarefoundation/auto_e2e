@@ -128,6 +128,14 @@ def test_benchmark_metrics_use_checkpoint_epoch_and_existing_run():
     assert run_keywords["run_id"].id == "run_id"
 
 
+def test_benchmark_artifacts_are_checkpoint_scoped():
+    source = inspect.getsource(
+        workflows.evaluate_kitscenes_benchmark_checkpoint.task_function
+    )
+
+    assert 'f"checkpoint-{checkpoint_sha256[:12]}"' in source
+
+
 def test_benchmark_task_emits_only_released_displacement_metrics():
     source = inspect.getsource(
         workflows.evaluate_kitscenes_benchmark_checkpoint.task_function
