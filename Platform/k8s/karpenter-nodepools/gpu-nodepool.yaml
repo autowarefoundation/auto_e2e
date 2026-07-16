@@ -56,19 +56,8 @@ spec:
         - key: node.kubernetes.io/instance-type
           operator: In
           values:
-            # Full three-branch training exceeds the 24 GB GPUs in G5/G6/GR6.
-            # Keep burst capacity at L40S-class VRAM or larger.
-            - g6e.2xlarge
+            # Pinned to the active burst ODCR.
             - g6e.4xlarge
-            - g6e.8xlarge
-            - g6e.12xlarge
-            - g6e.16xlarge
-            - g6e.24xlarge
-            - g7e.2xlarge
-            - g7e.4xlarge
-            - g7e.8xlarge
-            - g7e.12xlarge
-            - g7e.24xlarge
         - key: kubernetes.io/arch
           operator: In
           values: ["amd64"]
@@ -77,7 +66,7 @@ spec:
           values: ["on-demand"]
         - key: topology.kubernetes.io/zone
           operator: In
-          values: ["us-west-2a", "us-west-2b", "us-west-2c"]
+          values: ["us-west-2c"]
       taints:
         - key: nvidia.com/gpu
           effect: NoSchedule
