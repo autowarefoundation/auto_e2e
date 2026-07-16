@@ -10,10 +10,11 @@ import re
 from typing import Any, Mapping, NamedTuple, Sequence
 
 
-PUBLICATION_SCHEMA = "v1"
+PUBLICATION_SCHEMA = "v2"
 MAX_REASONING_LABELS = 100_000
 _DATASET_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
 _VERSION_RE = re.compile(r"^v[0-9]+(?:\.[0-9]+)*$")
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
 class DatasetPublication(NamedTuple):
@@ -56,6 +57,12 @@ def pool_key(dataset: str, version: str, relative_key: str) -> str:
     ):
         raise ValueError(f"invalid pool key {relative_key!r}")
     return f"{dataset_prefix(dataset, version)}/{relative_key}"
+
+
+def rig_key(dataset: str, version: str, digest: str) -> str:
+    if not _SHA256_RE.fullmatch(digest):
+        raise ValueError(f"invalid rig digest {digest!r}")
+    return f"{dataset_prefix(dataset, version)}/rig/{digest}.json"
 
 
 def episode_path_key(
@@ -225,7 +232,11 @@ def merge_partition_results(
     *,
     dataset: str,
     version: str,
-) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any] | None]:
+) -> tuple[
+    dict[str, Any],
+    dict[str, dict[str, Any]],
+    dict[str, Any] | None,
+]:
     """Validate partition receipts and build the canonical manifest and geo set."""
     if not partition_results:
         raise ValueError("dataset publication has no partition results")
@@ -264,11 +275,11 @@ def merge_partition_results(
     geometry_type = _single_value(
         nonempty, ("manifest", "geometry_type"), "geometry type"
     )
-    rig = _single_value(nonempty, ("rig",), "rig projection")
 
     partition_ids: set[str] = set()
     shard_names: set[str] = set()
     shards = []
+    rigs: dict[str, dict[str, Any]] = {}
     partitions = []
     reasoning_label_count = 0
     for result in results:
@@ -287,12 +298,41 @@ def merge_partition_results(
         result_names = sorted(str(shard["name"]) for shard in result["shards"])
         if result_names != sorted(source_manifest.get("shard_names", [])):
             raise ValueError(f"partition {partition_id!r} shard names differ")
+
+        rig_artifact = None
+        if int(source_manifest["total_samples"]):
+            rig = result["rig"]
+            if (
+                rig.get("schema_version") != "v1"
+                or rig.get("dataset") != source_dataset
+                or rig.get("image_size") != image_size
+                or rig.get("geometry_type") != geometry_type
+            ):
+                raise ValueError(
+                    f"partition {partition_id!r} rig contract differs"
+                )
+            rig_payload = canonical_json_bytes(rig, pretty=True)
+            rig_digest = sha256_bytes(rig_payload)
+            existing_rig = rigs.setdefault(rig_digest, dict(rig))
+            if canonical_json_bytes(existing_rig, pretty=True) != rig_payload:
+                raise ValueError("rig SHA-256 collision")
+            rig_artifact = {
+                "key": rig_key(dataset, version, rig_digest),
+                "sha256": rig_digest,
+            }
+
         for shard in result["shards"]:
             name = str(shard["name"])
             if name in shard_names:
                 raise ValueError(f"duplicate published shard {name}")
+            if rig_artifact is None:
+                raise ValueError(
+                    f"empty partition {partition_id!r} contains a shard"
+                )
             shard_names.add(name)
-            shards.append(dict(shard))
+            published_shard = dict(shard)
+            published_shard["rig"] = rig_artifact
+            shards.append(published_shard)
 
         partition_reasoning_count = int(
             source_manifest.get("reasoning_label_count", 0)
@@ -325,8 +365,6 @@ def merge_partition_results(
         if geo_summary is not None
         else sum(int(result["manifest"].get("episodes", 0)) for result in results)
     )
-    prefix = dataset_prefix(dataset, version)
-    rig_payload = canonical_json_bytes(rig, pretty=True)
     manifest = {
         "schema_version": PUBLICATION_SCHEMA,
         "status": "ready",
@@ -346,6 +384,7 @@ def merge_partition_results(
         "shards": len(shards),
         "shard_count": len(shards),
         "shard_entries": shards,
+        "rig_count": len(rigs),
         "episodes": episode_count,
         "has_map": any(
             bool(result["manifest"].get("has_map", False)) for result in nonempty
@@ -360,13 +399,9 @@ def merge_partition_results(
         ),
         "has_gps": geo_summary is not None,
         "partitions": partitions,
-        "rig": {
-            "key": f"{prefix}/rig/projection.json",
-            "sha256": sha256_bytes(rig_payload),
-        },
         "geo": geo_summary,
     }
-    return manifest, rig, heatmap
+    return manifest, dict(sorted(rigs.items())), heatmap
 
 
 def gzip_json_bytes(value: Any) -> bytes:
