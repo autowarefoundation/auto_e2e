@@ -362,23 +362,39 @@ def _version_tags(version: Any) -> Mapping[str, str]:
     return getattr(version, "tags", {}) or {}
 
 
+def _tagged_version_provenance(
+    version: Any,
+) -> tuple[str, str, str] | None:
+    tags = _version_tags(version)
+    keys = ("train_execution_id", "dataset", "dataset_version")
+    present = [key for key in keys if tags.get(key)]
+    if not present:
+        return None
+    if len(present) != len(keys):
+        raise ValueError(
+            "MLflow model version has incomplete lineage tags: "
+            + ", ".join(sorted(present))
+        )
+    return (
+        str(tags["train_execution_id"]),
+        str(tags["dataset"]),
+        str(tags["dataset_version"]),
+    )
+
+
 def _version_provenance(
     version: Any,
     run: Any,
 ) -> tuple[str, str, str]:
     """Resolve immutable lineage tags before legacy run parameters."""
-    tags = _version_tags(version)
+    tagged = _tagged_version_provenance(version)
+    if tagged is not None:
+        return tagged
     params = run.data.params
     return (
-        str(
-            tags.get("train_execution_id")
-            or params.get("ctx/train_execution_id", "")
-        ),
-        str(tags.get("dataset") or params.get("data/dataset", "")),
-        str(
-            tags.get("dataset_version")
-            or params.get("data/dataset_version", "")
-        ),
+        str(params.get("ctx/train_execution_id", "")),
+        str(params.get("data/dataset", "")),
+        str(params.get("data/dataset_version", "")),
     )
 
 
@@ -761,15 +777,27 @@ def _resolve_model_version_for_execution(
     if not _EXECUTION_ID_RE.fullmatch(train_execution_id):
         raise ValueError(f"invalid Flyte execution ID {train_execution_id!r}")
 
-    matches = []
+    tagged_matches = []
+    legacy_matches = []
     versions = client.search_model_versions(
         f"name='{registered_model_name}'"
     )
     for version in versions:
         run = client.get_run(version.run_id)
-        version_execution, dataset, dataset_version = _version_provenance(
-            version, run
-        )
+        tagged = _tagged_version_provenance(version)
+        if tagged is not None:
+            version_execution, dataset, dataset_version = tagged
+            candidates = tagged_matches
+        else:
+            params = run.data.params
+            version_execution = str(
+                params.get("ctx/train_execution_id", "")
+            )
+            dataset = str(params.get("data/dataset", ""))
+            dataset_version = str(
+                params.get("data/dataset_version", "")
+            )
+            candidates = legacy_matches
         if version_execution != train_execution_id:
             continue
         if dataset != expected_dataset or dataset_version != expected_dataset_version:
@@ -792,16 +820,27 @@ def _resolve_model_version_for_execution(
             or params.get("model/checkpoint_sha256")
             or ""
         )
-        matches.append((version_number, str(version.version), digest))
+        roles = set(
+            filter(None, version_tags.get("checkpoint_role", "").split(","))
+        )
+        candidates.append(
+            (version_number, str(version.version), digest, roles)
+        )
 
+    matches = tagged_matches or legacy_matches
+    selected = [
+        match for match in matches if "selected-overlay" in match[3]
+    ]
+    if selected:
+        matches = selected
     if not matches:
         raise ValueError(
             f"no {registered_model_name!r} model was produced by "
             f"Full Run {train_execution_id}"
         )
     if len(matches) > 1:
-        digests = {digest for _, _, digest in matches if digest}
-        if len(digests) != 1 or any(not digest for _, _, digest in matches):
+        digests = {match[2] for match in matches if match[2]}
+        if len(digests) != 1 or any(not match[2] for match in matches):
             raise ValueError(
                 "multiple model versions claim the Full Run but their "
                 "checkpoint identity is ambiguous"
