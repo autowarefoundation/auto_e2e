@@ -29,7 +29,7 @@ from evaluation.metrics import integrate_trajectory
 
 MANIFEST_SCHEMA_VERSION = "kitscenes_e2e_benchmark_manifest_v1"
 PROTOCOL_ID = "kitscenes_multimodal_e2e_v1"
-EVALUATOR_VERSION = "kitscenes_control_displacement_v1"
+EVALUATOR_VERSION = "kitscenes_pose_displacement_v1"
 PAPER_PROTOCOL_SOURCE = "https://arxiv.org/html/2606.02956#A8.SS4"
 
 _PROTOCOL_STATUSES = {
@@ -293,17 +293,66 @@ def limit_egomotion_history(
     return limited.reshape(history.shape[0], 64 * 4)
 
 
+def wgs84_trajectory_to_ego_xy(
+    gps_future: np.ndarray,
+    current_pose: np.ndarray,
+) -> np.ndarray:
+    """Convert packed KITScenes poses to future ego-frame XY in metres."""
+    from pyproj import Transformer
+
+    gps = np.asarray(gps_future, dtype=np.float64)
+    pose = np.asarray(current_pose, dtype=np.float64)
+    if gps.ndim != 3 or gps.shape[1:] != (65, 2):
+        raise ValueError("gps_future must have shape [B,65,2]")
+    if pose.shape != (gps.shape[0], 3):
+        raise ValueError("current_pose must have shape [B,3]")
+    if not np.isfinite(gps).all() or not np.isfinite(pose).all():
+        raise ValueError("benchmark poses contain non-finite values")
+    if (
+        np.any(gps[:, :, 0] < -90.0)
+        or np.any(gps[:, :, 0] > 90.0)
+        or np.any(gps[:, :, 1] < -180.0)
+        or np.any(gps[:, :, 1] > 180.0)
+    ):
+        raise ValueError("benchmark GPS coordinates are out of range")
+    if not np.allclose(gps[:, 0, :], pose[:, :2], atol=1e-10, rtol=0.0):
+        raise ValueError(
+            "current pose does not match the first packed GPS point"
+        )
+
+    flattened = gps.reshape(-1, 2)
+    transformer = Transformer.from_crs(
+        "EPSG:4326", "EPSG:32632", always_xy=True
+    )
+    east, north = transformer.transform(
+        flattened[:, 1], flattened[:, 0]
+    )
+    utm = np.column_stack([east, north]).reshape(gps.shape)
+    offsets = utm - utm[:, :1, :]
+
+    heading = np.radians(pose[:, 2])[:, None]
+    forward = (
+        offsets[:, :, 0] * np.sin(heading)
+        + offsets[:, :, 1] * np.cos(heading)
+    )
+    left = (
+        -offsets[:, :, 0] * np.cos(heading)
+        + offsets[:, :, 1] * np.sin(heading)
+    )
+    return np.stack([forward, left], axis=2)[:, 1:, :]
+
+
 def compute_displacement_metrics(
     predicted_controls: np.ndarray,
-    target_controls: np.ndarray,
+    target_xy: np.ndarray,
     initial_speeds: np.ndarray,
     *,
     frequency_hz: int = 10,
     horizons_seconds: Sequence[int] = (3, 5),
 ) -> tuple[dict[str, float], np.ndarray]:
-    """Compute KITScenes ADE/FDE horizons and return predicted XY trajectories."""
+    """Compute pose-grounded KITScenes ADE/FDE and predicted XY trajectories."""
     predicted = np.asarray(predicted_controls, dtype=np.float64)
-    target = np.asarray(target_controls, dtype=np.float64)
+    target = np.asarray(target_xy, dtype=np.float64)
     speeds = np.asarray(initial_speeds, dtype=np.float64)
     if (
         predicted.ndim != 3
@@ -311,14 +360,16 @@ def compute_displacement_metrics(
         or target.shape != predicted.shape
     ):
         raise ValueError(
-            "predicted_controls and target_controls must share shape [B,T,2]"
+            "predicted_controls and target_xy must share shape [B,T,2]"
         )
     if speeds.shape != (predicted.shape[0],):
         raise ValueError("initial_speeds must have shape [B]")
     if predicted.shape[0] == 0:
         raise ValueError("benchmark batch must not be empty")
     if not np.isfinite(predicted).all() or not np.isfinite(target).all():
-        raise ValueError("benchmark controls contain non-finite values")
+        raise ValueError(
+            "benchmark controls or target poses contain non-finite values"
+        )
     if not np.isfinite(speeds).all():
         raise ValueError("benchmark initial speeds contain non-finite values")
     if np.any(speeds < 0):
@@ -336,7 +387,6 @@ def compute_displacement_metrics(
     predicted_xy = np.empty(
         (predicted.shape[0], max_steps, 2), dtype=np.float64
     )
-    target_xy = np.empty_like(predicted_xy)
     for index in range(predicted.shape[0]):
         predicted_xy[index] = integrate_trajectory(
             predicted[index, :max_steps, 0],
@@ -344,14 +394,8 @@ def compute_displacement_metrics(
             float(speeds[index]),
             dt=1.0 / frequency_hz,
         )
-        target_xy[index] = integrate_trajectory(
-            target[index, :max_steps, 0],
-            target[index, :max_steps, 1],
-            float(speeds[index]),
-            dt=1.0 / frequency_hz,
-        )
 
-    errors = np.linalg.norm(predicted_xy - target_xy, axis=2)
+    errors = np.linalg.norm(predicted_xy - target[:, :max_steps, :], axis=2)
     metrics: dict[str, float] = {}
     for seconds, steps in zip(horizons_seconds, horizon_steps):
         metrics[f"ade_{seconds}s"] = float(errors[:, :steps].mean())
