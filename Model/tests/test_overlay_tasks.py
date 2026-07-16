@@ -276,6 +276,78 @@ def test_full_run_model_resolution_prefers_version_lineage_tags():
     assert _resolve(client) == "44"
 
 
+def test_full_run_model_resolution_ignores_legacy_when_tags_match():
+    client = _MLflowClient(
+        [
+            _model_version(41, "legacy", "b" * 64),
+            _model_version(
+                44,
+                "selected",
+                "a" * 64,
+                train_execution_id="a1234567890123456789",
+                dataset="KIT-MRT/KITScenes-Multimodal",
+                dataset_version="v2.1",
+                checkpoint_role="selected-overlay",
+            ),
+        ],
+        {
+            "legacy": _run("a1234567890123456789"),
+            "selected": _run(),
+        },
+    )
+
+    assert _resolve(client) == "44"
+
+
+def test_full_run_model_resolution_prefers_selected_tagged_checkpoint():
+    tags = {
+        "train_execution_id": "a1234567890123456789",
+        "dataset": "KIT-MRT/KITScenes-Multimodal",
+        "dataset_version": "v2.1",
+    }
+    client = _MLflowClient(
+        [
+            _model_version(
+                44,
+                "best",
+                "b" * 64,
+                checkpoint_role="best",
+                **tags,
+            ),
+            _model_version(
+                43,
+                "selected",
+                "a" * 64,
+                checkpoint_role="selected-overlay",
+                **tags,
+            ),
+        ],
+        {
+            "best": _run(),
+            "selected": _run(),
+        },
+    )
+
+    assert _resolve(client) == "43"
+
+
+def test_full_run_model_resolution_rejects_partial_lineage_tags():
+    client = _MLflowClient(
+        [
+            _model_version(
+                44,
+                "partial",
+                "a" * 64,
+                train_execution_id="a1234567890123456789",
+            ),
+        ],
+        {"partial": _run()},
+    )
+
+    with pytest.raises(ValueError, match="incomplete lineage tags"):
+        _resolve(client)
+
+
 def test_full_run_model_resolution_dedupes_identical_re_evaluation():
     client = _MLflowClient(
         [
