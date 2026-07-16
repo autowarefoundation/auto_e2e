@@ -243,6 +243,7 @@ export function EpisodePlayer({
 
   useEffect(() => {
     let cancelled = false;
+    setRigProjection(null);
     getShardRigProjection(dataset, shard, version)
       .then((projection) => {
         if (!cancelled) setRigProjection(projection);
