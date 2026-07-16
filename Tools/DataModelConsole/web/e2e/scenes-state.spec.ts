@@ -39,13 +39,9 @@ test("Scene locator pins KITScenes version and ignores stale shards", async ({
     shard(
       `train-${String(index).padStart(6, "0")}.tar`,
       "kitscenes",
-      "v2.1",
+      "v2.2",
     ),
   );
-  let releaseL2D!: () => void;
-  const l2dGate = new Promise<void>((resolve) => {
-    releaseL2D = resolve;
-  });
   let l2dRequested = false;
   const shardRequests: Array<{ dataset: string; version: string | null }> = [];
 
@@ -61,8 +57,8 @@ test("Scene locator pins KITScenes version and ignores stale shards", async ({
           },
           {
             name: "kitscenes",
-            version: "v2.1",
-            prefix: "kitscenes/v2.1/shards/",
+            version: "v2.2",
+            prefix: "kitscenes/v2.2/shards/",
           },
         ],
       });
@@ -77,8 +73,8 @@ test("Scene locator pins KITScenes version and ignores stale shards", async ({
       return fulfillJSON(route, {
         dataset: "kitscenes",
         versions: [
+          datasetVersion("v2.2"),
           datasetVersion("v2.1"),
-          datasetVersion("v2.0"),
         ],
       });
     }
@@ -92,7 +88,6 @@ test("Scene locator pins KITScenes version and ignores stale shards", async ({
       shardRequests.push({ dataset, version });
       if (dataset === "l2d") {
         l2dRequested = true;
-        await l2dGate;
         return fulfillJSON(route, {
           dataset,
           shards: [shard("l2d-stale.tar", "l2d", "v2.0")],
@@ -115,19 +110,19 @@ test("Scene locator pins KITScenes version and ignores stale shards", async ({
   });
 
   await page.goto("/scenes");
-  await expect.poll(() => l2dRequested).toBe(true);
-  await page.getByLabel("Dataset", { exact: true }).selectOption("kitscenes");
-  await expect(page.getByLabel("Dataset version")).toHaveValue("v2.1");
+  await expect(page.getByLabel("Dataset", { exact: true })).toHaveValue(
+    "kitscenes",
+  );
+  await expect(page.getByLabel("Dataset version")).toHaveValue("v2.2");
 
   const options = page.locator("#scene-shard-options option");
   await expect(options).toHaveCount(533);
   expect(shardRequests).toContainEqual({
     dataset: "kitscenes",
-    version: "v2.1",
+    version: "v2.2",
   });
-
-  releaseL2D();
   await page.waitForTimeout(100);
+  expect(l2dRequested).toBe(false);
   await expect(
     page.locator('#scene-shard-options option[value="l2d-stale.tar"]'),
   ).toHaveCount(0);
@@ -143,12 +138,12 @@ test("Scene locator pins KITScenes version and ignores stale shards", async ({
   await expect(page.getByLabel("Dataset", { exact: true })).toHaveValue(
     "kitscenes",
   );
-  await expect(page.getByLabel("Dataset version")).toHaveValue("v2.1");
+  await expect(page.getByLabel("Dataset version")).toHaveValue("v2.2");
   await expect(page.getByLabel("Shard")).toHaveValue("train-000532.tar");
   await expect(page.getByLabel("Frame index")).toHaveValue("64");
   await page.getByRole("button", { name: "Open", exact: true }).click();
   await expect(page).toHaveURL(
-    /\/scenes\/kitscenes\/train-000532\.tar\/64\?version=v2\.1$/,
+    /\/scenes\/kitscenes\/train-000532\.tar\/64\?version=v2\.2$/,
   );
 });
 
@@ -162,8 +157,8 @@ test("Scene locator restores a historical version with Back and Forward", async 
         datasets: [
           {
             name: "kitscenes",
-            version: "v2.1",
-            prefix: "kitscenes/v2.1/shards/",
+            version: "v2.2",
+            prefix: "kitscenes/v2.2/shards/",
           },
         ],
       });
@@ -172,8 +167,8 @@ test("Scene locator restores a historical version with Back and Forward", async 
       return fulfillJSON(route, {
         dataset: "kitscenes",
         versions: [
+          datasetVersion("v2.2"),
           datasetVersion("v2.1"),
-          datasetVersion("v2.0"),
         ],
       });
     }
@@ -188,16 +183,16 @@ test("Scene locator restores a historical version with Back and Forward", async 
     return route.fulfill({ status: 404, body: "not mocked" });
   });
 
-  await page.goto("/scenes?dataset=kitscenes&version=v2.0");
-  await expect(page.getByLabel("Dataset version")).toHaveValue("v2.0");
+  await page.goto("/scenes?dataset=kitscenes&version=v2.1");
+  await expect(page.getByLabel("Dataset version")).toHaveValue("v2.1");
   await expect(
-    page.locator('#scene-shard-options option[value="v2.0.tar"]'),
+    page.locator('#scene-shard-options option[value="v2.1.tar"]'),
   ).toHaveCount(1);
 
-  await page.getByLabel("Dataset version").selectOption("v2.1");
-  await expect(page).toHaveURL(/version=v2\.1/);
+  await page.getByLabel("Dataset version").selectOption("v2.2");
+  await expect(page).toHaveURL(/version=v2\.2/);
   await page.goBack();
-  await expect(page.getByLabel("Dataset version")).toHaveValue("v2.0");
-  await page.goForward();
   await expect(page.getByLabel("Dataset version")).toHaveValue("v2.1");
+  await page.goForward();
+  await expect(page.getByLabel("Dataset version")).toHaveValue("v2.2");
 });
