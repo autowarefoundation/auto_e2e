@@ -115,8 +115,8 @@ def test_full_run_overlay_workflow_wires_exact_model_lineage():
         "manifest_key",
         "manifest_sha256",
     }
-    assert resolver.flyte_entity.name.endswith(
-        "overlay_tasks.resolve_overlay_model_version"
+    assert resolver.flyte_entity.name == (
+        "Platform.pipelines.overlay_tasks.resolve_overlay_model_version"
     )
 
     resolver_bindings = {
@@ -150,8 +150,8 @@ def test_selected_checkpoint_overlay_workflow_wires_exact_epoch_lineage():
         "manifest_key",
         "manifest_sha256",
     }
-    assert registrar.flyte_entity.name.endswith(
-        "overlay_tasks.register_selected_overlay_checkpoint"
+    assert registrar.flyte_entity.name == (
+        "Platform.pipelines.overlay_tasks.register_selected_overlay_checkpoint"
     )
 
     registrar_bindings = {
