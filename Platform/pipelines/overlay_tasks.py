@@ -93,6 +93,31 @@ def _required(value: str, name: str) -> str:
     return value
 
 
+def _validate_empty_overlay_partition(local_dir: str) -> None:
+    from pathlib import Path
+
+    manifest_path = Path(local_dir) / "manifest.json"
+    if not manifest_path.is_file():
+        raise FileNotFoundError(
+            f"packed partition has no tar shards or manifest: {local_dir}"
+        )
+    try:
+        manifest = json.loads(manifest_path.read_text())
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(
+            f"packed partition has an invalid manifest: {local_dir}"
+        ) from exc
+    if (
+        manifest.get("total_samples") != 0
+        or manifest.get("shards") != 0
+        or manifest.get("shard_names") != []
+    ):
+        raise FileNotFoundError(
+            "packed partition manifest advertises samples but has no tar "
+            f"shards: {local_dir}"
+        )
+
+
 def _validate_runtime_contract(
     preprocessing_contract_digest: str,
     model_inference_code_digest: str,
@@ -1261,6 +1286,7 @@ def precompute_overlay_partition(
         try:
             tarfiles = sorted(local_dir.glob("*.tar"))
             if not tarfiles:
+                _validate_empty_overlay_partition(str(local_dir))
                 print(
                     "Skipping packed partition with no trajectory samples: "
                     f"{local_dir}"
