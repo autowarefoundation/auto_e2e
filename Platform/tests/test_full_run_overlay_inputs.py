@@ -8,6 +8,7 @@ from Platform.scripts.extract_full_run_overlay_inputs import (
     build_overlay_inputs,
     extract_shard_uris,
     validate_full_run_inputs,
+    validate_recovery_inputs,
 )
 
 
@@ -38,6 +39,16 @@ def _literal_map(*uris):
             )
         }
     )
+
+
+def _recovery_inputs(**overrides):
+    values = {
+        "recovery_manifest": "s3://checkpoints/recovery/manifest.json",
+        "artifact_set_sha256": "a" * 64,
+        "dataset_version": "v2.2",
+    }
+    values.update(overrides)
+    return values
 
 
 class _Client:
@@ -99,6 +110,24 @@ def _remote(*uris, phase=4, node_phase=3, inputs=None):
     return _Remote(execution, node, _literal_map(*uris))
 
 
+def _recovery_remote(*uris, phase=2, node_phase=3, inputs=None):
+    remote = _remote(
+        *uris,
+        phase=phase,
+        node_phase=node_phase,
+        inputs=inputs or _recovery_inputs(),
+    )
+    remote.execution.flyte_workflow.id.name = (
+        "pipelines.workflows.wf_recovered_kitscenes_full_run"
+    )
+    compiled_node = remote.execution.flyte_workflow.flyte_nodes[0]
+    compiled_node.flyte_entity.name = (
+        "pipelines.workflows.wf_repack_existing_kitscenes"
+    )
+    compiled_node.metadata.name = "wf_repack_existing_kitscenes"
+    return remote
+
+
 def test_build_overlay_inputs_extracts_the_dataset_subworkflow_output():
     remote = _remote("s3://artifacts/partition-a", "s3://artifacts/partition-b")
 
@@ -116,6 +145,58 @@ def test_build_overlay_inputs_extracts_the_dataset_subworkflow_output():
             "s3://artifacts/partition-b",
         ],
     }
+
+
+def test_build_overlay_inputs_extracts_a_completed_running_recovery_repack():
+    remote = _recovery_remote(
+        "s3://artifacts/partition-a",
+        "s3://artifacts/partition-b",
+    )
+
+    result = build_overlay_inputs(
+        remote,
+        execution_id="a1234567890123456789",
+        expected_dataset="KIT-MRT/KITScenes-Multimodal",
+        expected_dataset_version="v2.2",
+        allow_running_recovery=True,
+    )
+
+    assert result == {
+        "full_run_execution_id": "a1234567890123456789",
+        "shards": [
+            "s3://artifacts/partition-a",
+            "s3://artifacts/partition-b",
+        ],
+    }
+
+
+def test_running_recovery_requires_explicit_opt_in():
+    remote = _recovery_remote("s3://artifacts/partition-a")
+
+    with pytest.raises(ValueError, match="is not SUCCEEDED"):
+        build_overlay_inputs(
+            remote,
+            execution_id="a1234567890123456789",
+            expected_dataset="KIT-MRT/KITScenes-Multimodal",
+            expected_dataset_version="v2.2",
+        )
+    assert remote.client.list_calls == 0
+
+
+def test_running_recovery_requires_a_completed_repack_node():
+    remote = _recovery_remote(
+        "s3://artifacts/partition-a",
+        node_phase=2,
+    )
+
+    with pytest.raises(ValueError, match="dataset node .* is not SUCCEEDED"):
+        build_overlay_inputs(
+            remote,
+            execution_id="a1234567890123456789",
+            expected_dataset="KIT-MRT/KITScenes-Multimodal",
+            expected_dataset_version="v2.2",
+            allow_running_recovery=True,
+        )
 
 
 @pytest.mark.parametrize(
@@ -152,6 +233,25 @@ def test_build_overlay_inputs_rejects_an_incomplete_execution():
             expected_dataset_version="v2.1",
         )
     assert remote.client.list_calls == 0
+
+
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        ({"dataset_version": "v2.1"}, "expected 'v2.2'"),
+        ({"artifact_set_sha256": "bad"}, "not a lowercase SHA-256"),
+        ({"recovery_manifest": "/tmp/manifest.json"}, "not an immutable S3"),
+    ],
+)
+def test_validate_recovery_inputs_rejects_unpinned_artifacts(
+    overrides,
+    message,
+):
+    with pytest.raises(ValueError, match=message):
+        validate_recovery_inputs(
+            _recovery_inputs(**overrides),
+            expected_dataset_version="v2.2",
+        )
 
 
 def test_extract_shard_uris_rejects_duplicate_directories():
