@@ -209,6 +209,7 @@ test("trajectory overlays and geographic views honor production contracts", asyn
         fps: 10,
         version: "v2.1",
         shard: "train-000000.tar",
+        blob_ranges_allowed: false,
         samples: SAMPLE_UIDS.map((sampleUID, index) => ({
           key: SAMPLE_KEYS[index],
           sample_uid: sampleUID,
@@ -332,7 +333,7 @@ test("trajectory overlays and geographic views honor production contracts", asyn
     page.locator('svg path[stroke="#6ee7b7"]').first(),
   ).toHaveAttribute("d", /^M/);
   await expect.poll(() => directImageRequests).toBeGreaterThan(0);
-  expect(blobRequests).toBeGreaterThan(0);
+  expect(blobRequests).toBe(0);
 
   const overlayPixels = await page
     .locator("canvas[aria-hidden='true']")
@@ -430,12 +431,5 @@ test("trajectory overlays and geographic views honor production contracts", asyn
     fullPage: true,
   });
 
-  const expectedRangeDenials = consoleErrors.filter((message) =>
-    message.includes("status of 403"),
-  );
-  const unexpectedErrors = consoleErrors.filter(
-    (message) => !message.includes("status of 403"),
-  );
-  expect(expectedRangeDenials.length).toBeGreaterThan(0);
-  expect(unexpectedErrors, unexpectedErrors.join("\n")).toHaveLength(0);
+  expect(consoleErrors, consoleErrors.join("\n")).toHaveLength(0);
 });
