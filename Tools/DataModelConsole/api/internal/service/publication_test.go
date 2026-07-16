@@ -4,6 +4,7 @@ import (
 	"archive/tar"
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -48,14 +49,17 @@ func encodeTestTar(t *testing.T, members []testTarMember) []byte {
 
 func validPublicationValue() map[string]any {
 	digest := strings.Repeat("a", 64)
+	firstRig, _ := validRigFixture()
+	secondRig, _ := validRigFixture()
 	return map[string]any{
-		"schema_version":  "v1",
+		"schema_version":  publicationSchema,
 		"status":          "ready",
 		"dataset":         "kitscenes",
 		"version":         "v2.1",
 		"total_samples":   20,
 		"shards":          2,
 		"shard_count":     2,
+		"rig_count":       1,
 		"episodes":        2,
 		"num_views":       7,
 		"has_map":         true,
@@ -68,6 +72,7 @@ func validPublicationValue() map[string]any {
 				"byte_size":        123,
 				"etag":             "etag-a",
 				"content_identity": digest,
+				"rig":              firstRig,
 			},
 			map[string]any{
 				"name":             "scene-b-train-000000.tar",
@@ -75,11 +80,8 @@ func validPublicationValue() map[string]any {
 				"byte_size":        456,
 				"etag":             "etag-b",
 				"content_identity": strings.Repeat("b", 64),
+				"rig":              secondRig,
 			},
-		},
-		"rig": map[string]any{
-			"key":    "kitscenes/v2.1/rig/projection.json",
-			"sha256": digest,
 		},
 		"geo_artifacts": map[string]any{
 			"summary_key":     "kitscenes/v2.1/geo/summary.json",
@@ -88,6 +90,15 @@ func validPublicationValue() map[string]any {
 			"heatmap_sha256":  strings.Repeat("c", 64),
 		},
 	}
+}
+
+func validRigFixture() (map[string]any, []byte) {
+	body := []byte(`{"dataset":"kitscenes","geometry_type":"pinhole","projection":{"type":"pinhole"},"schema_version":"v1"}`)
+	digest := fmt.Sprintf("%x", sha256.Sum256(body))
+	return map[string]any{
+		"key":    fmt.Sprintf("kitscenes/v2.1/rig/%s.json", digest),
+		"sha256": digest,
+	}, body
 }
 
 func encodePublication(t *testing.T, value map[string]any) []byte {
@@ -129,7 +140,7 @@ func TestDecodePublicationManifestRejectsInvalidGate(t *testing.T) {
 		{
 			name: "unsupported schema",
 			mutate: func(value map[string]any) {
-				value["schema_version"] = "v2"
+				value["schema_version"] = "v1"
 			},
 		},
 		{
@@ -207,7 +218,15 @@ func TestDecodePublicationManifestRejectsInvalidGate(t *testing.T) {
 		{
 			name: "invalid rig",
 			mutate: func(value map[string]any) {
-				value["rig"].(map[string]any)["key"] = "kitscenes/v2.1/rig/other.json"
+				entries := value["shard_entries"].([]any)
+				entries[0].(map[string]any)["rig"].(map[string]any)["key"] =
+					"kitscenes/v2.1/rig/other.json"
+			},
+		},
+		{
+			name: "rig count mismatch",
+			mutate: func(value map[string]any) {
+				value["rig_count"] = 2
 			},
 		},
 		{
@@ -410,6 +429,16 @@ func newPublicationTestService(
 			lastModified: now,
 		}
 	}
+	rig, rigBody := validRigFixture()
+	rigKey := rig["key"].(string)
+	objects[rigKey] = fakePublicationObject{
+		body: rigBody,
+		metadata: map[string]string{
+			"sha256":             rig["sha256"].(string),
+			"publication-schema": publicationSchema,
+		},
+		lastModified: now,
+	}
 	client := &fakePublicationS3{
 		objects:   objects,
 		getCalls:  map[string]int{},
@@ -456,6 +485,14 @@ func TestLoadPublicationManifestValidatesAndCachesInventory(t *testing.T) {
 		if entry.LastModified.IsZero() {
 			t.Fatalf("shard %s lost LastModified", entry.Name)
 		}
+	}
+	rig, _ := validRigFixture()
+	rigKey := rig["key"].(string)
+	if client.headCalls[rigKey] != 1 {
+		t.Fatalf(
+			"rig %s HEAD calls = %d, want 1",
+			rigKey, client.headCalls[rigKey],
+		)
 	}
 }
 
@@ -519,6 +556,23 @@ func TestLoadPublicationManifestRejectsS3InventoryMismatch(t *testing.T) {
 				client.objects[key] = object
 			},
 		},
+		{
+			name: "missing rig",
+			mutate: func(client *fakePublicationS3) {
+				rig, _ := validRigFixture()
+				delete(client.objects, rig["key"].(string))
+			},
+		},
+		{
+			name: "wrong rig digest",
+			mutate: func(client *fakePublicationS3) {
+				rig, _ := validRigFixture()
+				key := rig["key"].(string)
+				object := client.objects[key]
+				object.metadata["sha256"] = strings.Repeat("0", 64)
+				client.objects[key] = object
+			},
+		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -530,6 +584,27 @@ func TestLoadPublicationManifestRejectsS3InventoryMismatch(t *testing.T) {
 				t.Fatal("invalid S3 publication inventory was accepted")
 			}
 		})
+	}
+}
+
+func TestShardRigProjectionUsesManifestBinding(t *testing.T) {
+	service, client := newPublicationTestService(t)
+	body, version, err := service.ShardRigProjection(
+		context.Background(),
+		"kitscenes",
+		"v2.1",
+		"scene-a-train-000000.tar",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, wantBody := validRigFixture()
+	if version != "v2.1" || !bytes.Equal(body, wantBody) {
+		t.Fatalf("rig projection = version %q body %q", version, body)
+	}
+	rig, _ := validRigFixture()
+	if client.getCalls[rig["key"].(string)] != 1 {
+		t.Fatal("manifest-bound rig was not fetched exactly once")
 	}
 }
 
