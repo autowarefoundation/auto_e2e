@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -19,12 +20,50 @@ from Platform.pipelines.overlay_tasks import (
     _put_s3_immutable,
     _register_selected_checkpoint_version,
     _resolve_model_version_for_execution,
+    _validate_empty_overlay_partition,
     _validate_selected_checkpoint_payload,
 )
 
 
 def test_overlay_tasks_configure_deterministic_cublas_workspace():
     assert OVERLAY_TASK_ENV["CUBLAS_WORKSPACE_CONFIG"] == ":4096:8"
+
+
+def test_empty_overlay_partition_requires_an_explicit_empty_manifest(tmp_path):
+    (tmp_path / "manifest.json").write_text(json.dumps({
+        "total_samples": 0,
+        "shards": 0,
+        "shard_names": [],
+    }))
+
+    _validate_empty_overlay_partition(str(tmp_path))
+
+
+@pytest.mark.parametrize(
+    "manifest",
+    [
+        {"total_samples": 1, "shards": 0, "shard_names": []},
+        {"total_samples": 0, "shards": 1, "shard_names": []},
+        {
+            "total_samples": 0,
+            "shards": 0,
+            "shard_names": ["missing.tar"],
+        },
+    ],
+)
+def test_empty_overlay_partition_rejects_missing_advertised_shards(
+    tmp_path,
+    manifest,
+):
+    (tmp_path / "manifest.json").write_text(json.dumps(manifest))
+
+    with pytest.raises(FileNotFoundError, match="advertises samples"):
+        _validate_empty_overlay_partition(str(tmp_path))
+
+
+def test_empty_overlay_partition_requires_a_manifest(tmp_path):
+    with pytest.raises(FileNotFoundError, match="no tar shards or manifest"):
+        _validate_empty_overlay_partition(str(tmp_path))
 
 
 def _client_error(code: str, operation: str, status: int = 400) -> ClientError:
