@@ -371,15 +371,6 @@ export async function getShardOverlay(
   return response.arrayBuffer();
 }
 
-export function getRigProjection(
-  dataset: string,
-  version?: string,
-): Promise<RigProjectionDocument> {
-  return apiFetch<RigProjectionDocument>(
-    `/api/v1/datasets/${encodeURIComponent(dataset)}/rig-projection${versionParam(version, "?")}`,
-  );
-}
-
 export function getShardRigProjection(
   dataset: string,
   shard: string,
