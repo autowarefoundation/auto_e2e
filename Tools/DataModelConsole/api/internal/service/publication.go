@@ -68,7 +68,6 @@ type publicationManifest struct {
 	HasGPS        bool `json:"has_gps"`
 
 	ShardEntries []publicationShardEntry  `json:"shard_entries"`
-	Rig          publicationArtifact      `json:"-"`
 	GeoArtifacts *publicationGeoArtifacts `json:"geo_artifacts"`
 
 	SHA256      string                           `json:"-"`
