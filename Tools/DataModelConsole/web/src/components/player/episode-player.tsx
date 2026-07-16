@@ -43,7 +43,7 @@ import { usePlayback, MAX_SPEED, MIN_SPEED } from "@/hooks/use-playback";
 import {
   ApiError,
   getReasoningLabel,
-  getRigProjection,
+  getShardRigProjection,
   getShardOverlay,
   listShardOverlayModels,
 } from "@/lib/api";
@@ -243,7 +243,7 @@ export function EpisodePlayer({
 
   useEffect(() => {
     let cancelled = false;
-    getRigProjection(dataset, version)
+    getShardRigProjection(dataset, shard, version)
       .then((projection) => {
         if (!cancelled) setRigProjection(projection);
       })
@@ -257,7 +257,7 @@ export function EpisodePlayer({
     return () => {
       cancelled = true;
     };
-  }, [dataset, version]);
+  }, [dataset, shard, version]);
 
   useEffect(() => {
     if (!selectedModelID) return;
