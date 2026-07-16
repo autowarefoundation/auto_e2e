@@ -27,6 +27,8 @@ DATA_PREP_IMAGE = os.environ.get(
 def export_trajectory_report(
     shard: FlyteFile,
     overlay: FlyteFile,
+    dataset_manifest: FlyteFile,
+    overlay_manifest: FlyteFile,
     selection_manifest: Optional[FlyteFile] = None,
     scene_uids: List[str] = [],
     seed_index: int = 0,
@@ -53,6 +55,8 @@ def export_trajectory_report(
         shard_path=shard.download(),
         overlay_path=overlay.download(),
         output_dir=output,
+        dataset_manifest_path=dataset_manifest.download(),
+        overlay_manifest_path=overlay_manifest.download(),
         scene_uids=scene_uids or None,
         scene_selections=scene_selections,
         seed_index=seed_index,
