@@ -237,12 +237,14 @@ func indexWithoutExactGeo(index *model.ShardIndex) *model.ShardIndex {
 		return nil
 	}
 	redacted := *index
+	redacted.BlobRangesAllowed = true
 	redacted.Samples = append([]model.IndexSample(nil), index.Samples...)
 	for i := range redacted.Samples {
 		redacted.Samples[i].PoseCurrent = nil
 		members := make(map[string]model.MemberRange, len(redacted.Samples[i].Members))
 		for name, member := range redacted.Samples[i].Members {
 			if name == "pose.npy" || name == "gps.npy" {
+				redacted.BlobRangesAllowed = false
 				continue
 			}
 			members[name] = member
