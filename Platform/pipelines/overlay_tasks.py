@@ -32,7 +32,7 @@ OVERLAY_TASK_ENV = {
 }
 OVERLAY_CACHE_VERSION = (
     f"overlay-{OVERLAY_SCHEMA}-{INFERENCE_CONTRACT_VERSION}-"
-    f"{NOISE_POLICY_VERSION}"
+    f"{NOISE_POLICY_VERSION}-fullset-v1"
 )
 _MODEL_NAME_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 _EXECUTION_ID_RE = re.compile(r"^a[a-z0-9]{19}$")
@@ -970,7 +970,7 @@ def precompute_overlay_partition(
     checkpoint: FlyteFile,
     model_metadata: FlyteFile,
     prepare_gate: str,
-    shard_dir: FlyteDirectory,
+    shard_dirs: List[FlyteDirectory],
     dataset: str,
     dataset_version: str,
     dataset_manifest_digest: str,
@@ -985,8 +985,9 @@ def precompute_overlay_partition(
     num_workers: int = 4,
     sampler: str = "model-default",
 ) -> FlyteFile:
-    """Load one checkpoint once and write every tar overlay in one partition."""
+    """Load one checkpoint once and write every FullSet shard overlay."""
     import json
+    import shutil
     import tempfile
     from pathlib import Path
 
@@ -1019,6 +1020,8 @@ def precompute_overlay_partition(
         _required(value, name)
     if batch_size < 1:
         raise ValueError("batch_size must be positive")
+    if not shard_dirs:
+        raise ValueError("shard_dirs must not be empty")
     if sampler != "model-default":
         raise ValueError(
             "only sampler='model-default' is implemented by policy inference"
@@ -1091,153 +1094,182 @@ def precompute_overlay_partition(
         else [int(seed) for seed in base_seeds]
     )
 
-    local_dir = Path(shard_dir.download()).resolve()
-    tarfiles = sorted(local_dir.glob("*.tar"))
-    if not tarfiles:
-        raise FileNotFoundError(f"no tar shards in partition {local_dir}")
-
     s3 = boto3.client("s3", region_name=aws_region)
     table = boto3.resource("dynamodb", region_name=aws_region).Table(dynamo_table)
     output_dir = Path(tempfile.mkdtemp(prefix="overlay-partition-"))
     entries = []
+    seen_shards = set()
 
-    for tar_path in tarfiles:
-        shard_name = tar_path.name
-        key = overlay_s3_key(
-            model_artifact_id, dataset, dataset_version, shard_name
+    for shard_dir in shard_dirs:
+        remove_local_dir = bool(
+            getattr(shard_dir, "remote_source", None)
         )
-        object_identity = {
-            "base-seeds": ",".join(map(str, actual_seeds)),
-            "cache-identity": cache_identity,
-            "dataset-manifest-digest": dataset_manifest_digest,
-            "model-artifact-id": model_artifact_id,
-            "overlay-schema": OVERLAY_SCHEMA,
-            "request-identity": request_identity,
-            "seed-count": str(len(actual_seeds)),
-        }
-        head = _head_s3_compatible(
-            s3,
-            bucket=artifacts_bucket,
-            key=key,
-            expected_metadata=object_identity,
-        )
-
-        if head is not None:
-            object_metadata = head.get("Metadata", {})
-            artifact_sha = str(object_metadata.get("sha256", ""))
-            if len(artifact_sha) != 64:
-                raise RuntimeError(f"overlay object has no valid SHA-256: {key}")
-            sample_count = int(object_metadata.get("sample-count", "0"))
-            if sample_count < 1:
-                raise RuntimeError(
-                    f"overlay object has no positive sample count: {key}"
+        local_dir = Path(shard_dir.download()).resolve()
+        try:
+            tarfiles = sorted(local_dir.glob("*.tar"))
+            if not tarfiles:
+                raise FileNotFoundError(
+                    f"no tar shards in partition {local_dir}"
                 )
-            byte_size = int(head["ContentLength"])
-        else:
-            current_batch_size = batch_size
-            while True:
-                try:
-                    loader = make_pre_extracted_loader(
-                        str(local_dir),
-                        batch_size=current_batch_size,
-                        num_workers=num_workers,
-                        shuffle=0,
-                        pin_memory=(device.type == "cuda"),
-                        shard_files=[tar_path],
+
+            for tar_path in tarfiles:
+                shard_name = tar_path.name
+                if shard_name in seen_shards:
+                    raise ValueError(
+                        f"duplicate shard name across partitions: {shard_name}"
                     )
-                    sample_uids, controls, v0, actual_seeds_tuple = (
-                        infer_loader_controls(
-                            model,
-                            loader,
-                            model_artifact_id=model_artifact_id,
-                            dataset_manifest_digest=dataset_manifest_digest,
-                            base_seeds=base_seeds,
-                            device=device,
-                        )
-                    )
-                    inferred_seeds = list(actual_seeds_tuple)
-                    if inferred_seeds != actual_seeds:
+                seen_shards.add(shard_name)
+                key = overlay_s3_key(
+                    model_artifact_id, dataset, dataset_version, shard_name
+                )
+                object_identity = {
+                    "base-seeds": ",".join(map(str, actual_seeds)),
+                    "cache-identity": cache_identity,
+                    "dataset-manifest-digest": dataset_manifest_digest,
+                    "model-artifact-id": model_artifact_id,
+                    "overlay-schema": OVERLAY_SCHEMA,
+                    "request-identity": request_identity,
+                    "seed-count": str(len(actual_seeds)),
+                }
+                head = _head_s3_compatible(
+                    s3,
+                    bucket=artifacts_bucket,
+                    key=key,
+                    expected_metadata=object_identity,
+                )
+
+                if head is not None:
+                    object_metadata = head.get("Metadata", {})
+                    artifact_sha = str(object_metadata.get("sha256", ""))
+                    if len(artifact_sha) != 64:
                         raise RuntimeError(
-                            "planner seed normalization changed during inference"
+                            f"overlay object has no valid SHA-256: {key}"
                         )
-                    break
-                except torch.cuda.OutOfMemoryError:
-                    if current_batch_size == 1:
-                        raise
-                    current_batch_size = max(1, current_batch_size // 2)
-                    torch.cuda.empty_cache()
-                    print(
-                        f"OOM on {shard_name}; retrying with "
-                        f"batch_size={current_batch_size}"
+                    sample_count = int(
+                        object_metadata.get("sample-count", "0")
+                    )
+                    if sample_count < 1:
+                        raise RuntimeError(
+                            "overlay object has no positive sample count: "
+                            f"{key}"
+                        )
+                    byte_size = int(head["ContentLength"])
+                else:
+                    current_batch_size = batch_size
+                    while True:
+                        try:
+                            loader = make_pre_extracted_loader(
+                                str(local_dir),
+                                batch_size=current_batch_size,
+                                num_workers=num_workers,
+                                shuffle=0,
+                                pin_memory=(device.type == "cuda"),
+                                shard_files=[tar_path],
+                            )
+                            (
+                                sample_uids,
+                                controls,
+                                v0,
+                                actual_seeds_tuple,
+                            ) = infer_loader_controls(
+                                model,
+                                loader,
+                                model_artifact_id=model_artifact_id,
+                                dataset_manifest_digest=(
+                                    dataset_manifest_digest
+                                ),
+                                base_seeds=base_seeds,
+                                device=device,
+                            )
+                            inferred_seeds = list(actual_seeds_tuple)
+                            if inferred_seeds != actual_seeds:
+                                raise RuntimeError(
+                                    "planner seed normalization changed "
+                                    "during inference"
+                                )
+                            break
+                        except torch.cuda.OutOfMemoryError:
+                            if current_batch_size == 1:
+                                raise
+                            current_batch_size = max(
+                                1, current_batch_size // 2
+                            )
+                            torch.cuda.empty_cache()
+                            print(
+                                f"OOM on {shard_name}; retrying with "
+                                f"batch_size={current_batch_size}"
+                            )
+
+                    artifact = write_overlay(
+                        output_dir / "overlay.bin.gz",
+                        sample_uids,
+                        controls,
+                        v0,
+                        base_seeds=actual_seeds,
+                        deterministic_planner=deterministic_planner,
+                    )
+                    artifact_sha = artifact.sha256
+                    sample_count = artifact.sample_count
+                    byte_size = artifact.byte_size
+                    object_metadata = {
+                        **object_identity,
+                        "sha256": artifact.sha256,
+                        "sample-count": str(artifact.sample_count),
+                    }
+                    _put_s3_immutable(
+                        s3,
+                        bucket=artifacts_bucket,
+                        key=key,
+                        payload=artifact.path.read_bytes(),
+                        metadata=object_metadata,
+                        content_type="application/octet-stream",
+                        content_encoding="gzip",
                     )
 
-            artifact = write_overlay(
-                output_dir / "overlay.bin.gz",
-                sample_uids,
-                controls,
-                v0,
-                base_seeds=actual_seeds,
-                deterministic_planner=deterministic_planner,
-            )
-            artifact_sha = artifact.sha256
-            sample_count = artifact.sample_count
-            byte_size = artifact.byte_size
-            object_metadata = {
-                **object_identity,
-                "sha256": artifact.sha256,
-                "sample-count": str(artifact.sample_count),
-            }
-            _put_s3_immutable(
-                s3,
-                bucket=artifacts_bucket,
-                key=key,
-                payload=artifact.path.read_bytes(),
-                metadata=object_metadata,
-                content_type="application/octet-stream",
-                content_encoding="gzip",
-            )
-
-        created_at = gate["created_at"]
-        pointer = overlay_pointer_item(
-            dataset=dataset,
-            version=dataset_version,
-            shard=shard_name,
-            model_artifact_id=model_artifact_id,
-            s3_key=key,
-            sha256=artifact_sha,
-            byte_size=byte_size,
-            sample_count=sample_count,
-            overlay_schema=OVERLAY_SCHEMA,
-            dataset_manifest_digest=dataset_manifest_digest,
-            cache_identity=cache_identity,
-            created_at=created_at,
-            model_metadata=metadata,
-        )
-        _put_dynamo_immutable(
-            table,
-            pointer,
-            identity_fields=(
-                "pk",
-                "sk",
-                "s3_key",
-                "sha256",
-                "byte_size",
-                "sample_count",
-                "overlay_schema",
-                "dataset_manifest_sha256",
-                "cache_identity",
-                "status",
-            ),
-        )
-        entries.append({
-            "shard": shard_name,
-            "s3_key": key,
-            "sha256": artifact_sha,
-            "byte_size": byte_size,
-            "sample_count": sample_count,
-            "seeds": actual_seeds,
-            "created_at": created_at,
-        })
+                created_at = gate["created_at"]
+                pointer = overlay_pointer_item(
+                    dataset=dataset,
+                    version=dataset_version,
+                    shard=shard_name,
+                    model_artifact_id=model_artifact_id,
+                    s3_key=key,
+                    sha256=artifact_sha,
+                    byte_size=byte_size,
+                    sample_count=sample_count,
+                    overlay_schema=OVERLAY_SCHEMA,
+                    dataset_manifest_digest=dataset_manifest_digest,
+                    cache_identity=cache_identity,
+                    created_at=created_at,
+                    model_metadata=metadata,
+                )
+                _put_dynamo_immutable(
+                    table,
+                    pointer,
+                    identity_fields=(
+                        "pk",
+                        "sk",
+                        "s3_key",
+                        "sha256",
+                        "byte_size",
+                        "sample_count",
+                        "overlay_schema",
+                        "dataset_manifest_sha256",
+                        "cache_identity",
+                        "status",
+                    ),
+                )
+                entries.append({
+                    "shard": shard_name,
+                    "s3_key": key,
+                    "sha256": artifact_sha,
+                    "byte_size": byte_size,
+                    "sample_count": sample_count,
+                    "seeds": actual_seeds,
+                    "created_at": created_at,
+                })
+        finally:
+            if remove_local_dir:
+                shutil.rmtree(local_dir)
 
     result = {
         "model_artifact_id": model_artifact_id,
