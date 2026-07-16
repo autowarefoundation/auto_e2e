@@ -410,6 +410,69 @@ def _metric_at_epoch(
     return value
 
 
+def _validate_selected_checkpoint_payload(
+    payload: Mapping[str, Any],
+    *,
+    checkpoint_schema: str,
+    checkpoint_epoch: int,
+    checkpoint_uri: str,
+    run_id: str,
+    data_fingerprint: str,
+    validation_ade: float,
+    validation_fde: float,
+) -> None:
+    import math
+
+    if payload.get("schema_version") != checkpoint_schema:
+        raise ValueError("checkpoint payload has an unsupported schema")
+    if int(payload.get("epoch", 0)) != checkpoint_epoch:
+        raise ValueError(
+            "checkpoint payload epoch differs from the selected epoch"
+        )
+    if payload.get("data_fingerprint") != data_fingerprint:
+        raise ValueError(
+            "checkpoint payload data fingerprint differs from MLflow"
+        )
+
+    training_state = payload.get("training_state")
+    if not isinstance(training_state, Mapping):
+        raise ValueError("checkpoint payload has no training state")
+    if training_state.get("run_id") != run_id:
+        raise ValueError("checkpoint payload belongs to a different MLflow run")
+    if training_state.get("current_checkpoint_uri") != checkpoint_uri:
+        raise ValueError("checkpoint payload self URI differs from its S3 key")
+
+    history = training_state.get("metric_history")
+    if not isinstance(history, Sequence) or not history:
+        raise ValueError("checkpoint payload has no metric history")
+    epochs = []
+    for entry in history:
+        if not isinstance(entry, Mapping):
+            raise ValueError("checkpoint metric history contains an invalid row")
+        epochs.append(int(entry.get("epoch", 0)))
+    if epochs != list(range(1, checkpoint_epoch + 1)):
+        raise ValueError(
+            "checkpoint metric history is not contiguous through the "
+            "selected epoch"
+        )
+
+    latest = history[-1]
+    for key, expected in (
+        ("val_ade", validation_ade),
+        ("val_fde", validation_fde),
+    ):
+        actual = float(latest.get(key, float("nan")))
+        if not math.isfinite(actual) or not math.isclose(
+            actual,
+            expected,
+            rel_tol=1e-9,
+            abs_tol=1e-9,
+        ):
+            raise ValueError(
+                f"checkpoint payload {key} differs from MLflow epoch metrics"
+            )
+
+
 def _register_selected_checkpoint_version(
     client,
     *,
@@ -421,6 +484,8 @@ def _register_selected_checkpoint_version(
     train_execution_id: str,
     dataset: str,
     dataset_version: str,
+    checkpoint_schema: str,
+    data_fingerprint: str,
     validation_ade: float,
     validation_fde: float,
 ) -> str:
@@ -440,11 +505,26 @@ def _register_selected_checkpoint_version(
         "train_execution_id": train_execution_id,
         "dataset": dataset,
         "dataset_version": dataset_version,
+        "checkpoint_schema": checkpoint_schema,
+        "data_fingerprint": data_fingerprint,
+        "validation_ade": str(validation_ade),
+        "validation_fde": str(validation_fde),
     }
     matching = []
     for version in client.search_model_versions(
         f"name='{registered_model_name}'"
     ):
+        tags = _version_tags(version)
+        roles = set(filter(None, tags.get("checkpoint_role", "").split(",")))
+        if (
+            str(tags.get("train_execution_id", "")) == train_execution_id
+            and "selected-overlay" in roles
+            and str(version.source or "") != checkpoint_uri
+        ):
+            raise RuntimeError(
+                "Flyte execution already has a different selected-overlay "
+                "checkpoint"
+            )
         if str(version.source or "") != checkpoint_uri:
             continue
         if str(version.run_id) != run_id:
@@ -452,7 +532,6 @@ def _register_selected_checkpoint_version(
                 "checkpoint source is already registered to a different "
                 f"MLflow run: {version.run_id}"
             )
-        tags = _version_tags(version)
         conflicts = [
             key
             for key, value in expected_identity.items()
@@ -489,8 +568,6 @@ def _register_selected_checkpoint_version(
     tags = {
         **expected_identity,
         "checkpoint_role": ",".join(sorted(roles)),
-        "validation_ade": str(validation_ade),
-        "validation_fde": str(validation_fde),
     }
     for key, value in tags.items():
         client.set_model_version_tag(
@@ -501,8 +578,8 @@ def _register_selected_checkpoint_version(
 
 @task(
     container_image=EVAL_IMAGE,
-    requests=Resources(cpu="1", mem="2Gi"),
-    limits=Resources(cpu="1", mem="2Gi"),
+    requests=Resources(cpu="1", mem="4Gi"),
+    limits=Resources(cpu="1", mem="4Gi"),
     environment={
         **OVERLAY_TASK_ENV,
         "MLFLOW_TRACKING_URI": MLFLOW_URI,
@@ -566,6 +643,13 @@ def register_selected_overlay_checkpoint(
             f"for run {run_id} epoch {checkpoint_epoch}"
         )
 
+    account_id = boto3.client("sts").get_caller_identity()["Account"]
+    expected_bucket = f"auto-e2e-platform-checkpoints-{account_id}"
+    if parsed.netloc != expected_bucket:
+        raise ValueError(
+            "checkpoint_uri is outside the trusted Platform checkpoint bucket"
+        )
+
     s3 = boto3.client("s3")
     head = s3.head_object(Bucket=parsed.netloc, Key=expected_key)
     metadata = head.get("Metadata", {})
@@ -598,6 +682,7 @@ def register_selected_overlay_checkpoint(
     params = run.data.params
     dataset = str(params.get("data/dataset", ""))
     dataset_version = str(params.get("data/dataset_version", ""))
+    data_fingerprint = str(params.get("data/fingerprint", ""))
     if (
         dataset != expected_dataset
         or dataset_version != expected_dataset_version
@@ -605,6 +690,10 @@ def register_selected_overlay_checkpoint(
         raise ValueError(
             "selected checkpoint has a different dataset coordinate: "
             f"{dataset}/{dataset_version}"
+        )
+    if not _SHA256_RE.fullmatch(data_fingerprint):
+        raise ValueError(
+            "selected checkpoint MLflow run has no valid data fingerprint"
         )
     validation_ade = _metric_at_epoch(
         client,
@@ -618,6 +707,29 @@ def register_selected_overlay_checkpoint(
         metric_key="val/fde",
         epoch=checkpoint_epoch,
     )
+
+    import torch
+
+    payload = torch.load(
+        checkpoint_path,
+        map_location="cpu",
+        weights_only=False,
+        mmap=True,
+    )
+    if not isinstance(payload, Mapping):
+        raise ValueError("checkpoint payload is not a mapping")
+    _validate_selected_checkpoint_payload(
+        payload,
+        checkpoint_schema=CHECKPOINT_SCHEMA_VERSION,
+        checkpoint_epoch=checkpoint_epoch,
+        checkpoint_uri=checkpoint_uri,
+        run_id=run_id,
+        data_fingerprint=data_fingerprint,
+        validation_ade=validation_ade,
+        validation_fde=validation_fde,
+    )
+    del payload
+
     return _register_selected_checkpoint_version(
         client,
         registered_model_name=registered_model_name,
@@ -628,6 +740,8 @@ def register_selected_overlay_checkpoint(
         train_execution_id=train_execution_id,
         dataset=dataset,
         dataset_version=dataset_version,
+        checkpoint_schema=CHECKPOINT_SCHEMA_VERSION,
+        data_fingerprint=data_fingerprint,
         validation_ade=validation_ade,
         validation_fde=validation_fde,
     )
