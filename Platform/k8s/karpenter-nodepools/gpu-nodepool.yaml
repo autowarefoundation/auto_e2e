@@ -68,6 +68,7 @@ spec:
             - g7e.4xlarge
             - g7e.8xlarge
             - g7e.12xlarge
+            - g7e.24xlarge
         - key: kubernetes.io/arch
           operator: In
           values: ["amd64"]
@@ -82,6 +83,6 @@ spec:
           effect: NoSchedule
   limits:
     cpu: "96"
-    memory: 768Gi
+    memory: 1Ti
     nodes: "1"
     nvidia.com/gpu: "4"
