@@ -12,10 +12,15 @@ report/
         └── video.mp4
 ```
 
-Each video follows packed `frame_idx` order and shows the selected camera next
-to a metric BEV. Prediction and recorded-future controls use the same
-`v0`, coordinate convention, and integrator as the Console. The manifest pins
-the shard and overlay SHA-256 digests, AOVL seed, sample UIDs, and ADE/FDE.
+Each video follows packed `frame_idx` order. The left panel is the selected
+camera and the right panel is a synthetic metric BEV; the BEV is not a camera
+frame or a geographic map tile. `manifest.json` records this fixed
+`panel_order` as `["camera", "metric_bev"]`.
+
+Prediction and recorded-future controls use the same `v0`, coordinate
+convention, and integrator as the Console. The manifest pins the shard and
+overlay SHA-256 digests, AOVL seed, sample UIDs, ADE/FDE, and the explicit AOVL
+control contract (64 acceleration/curvature steps at 10 Hz).
 
 The implementation incorporates the standalone report boundary proposed in
 PR #74. Its old checkpoint inference and dataset-specific live loaders are not
@@ -38,6 +43,25 @@ PYTHONPATH=Model:. python -m Tools.trajectory_visualization \
 ```
 
 Use repeated `--scene <scene_uid>` arguments to export selected scenes only.
+For fixed frame ranges, pass `--selection-manifest` instead:
+
+```json
+{
+  "schema_version": 1,
+  "scenes": [
+    {
+      "scene_uid": "kitscenes-v1-c0123456789abcdef",
+      "start_frame": 120,
+      "end_frame": 240
+    }
+  ]
+}
+```
+
+`--scene` and `--selection-manifest` are mutually exclusive. Selection uses
+canonical `scene_uid` and inclusive frame bounds; legacy `episode_id` fields
+are rejected.
+
 The output directory must be empty to prevent reports from different immutable
 inputs being mixed.
 
