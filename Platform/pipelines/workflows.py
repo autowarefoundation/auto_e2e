@@ -3732,7 +3732,8 @@ def evaluate_kitscenes_benchmark_checkpoint(
     )
     artifact_path = (
         f"benchmark/kitscenes/{manifest.benchmark_id}/"
-        f"{manifest_sha256[:12]}"
+        f"{manifest_sha256[:12]}/"
+        f"checkpoint-{checkpoint_sha256[:12]}"
     )
     with mlflow.start_run(run_id=run_id):
         mlflow.log_metrics(
