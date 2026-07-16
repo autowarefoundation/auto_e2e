@@ -54,7 +54,33 @@ spec:
       requirements:
         - key: node.kubernetes.io/instance-type
           operator: In
-          values: ["g6e.2xlarge", "g6e.4xlarge", "g6e.8xlarge", "g6e.12xlarge", "g6e.24xlarge"]
+          values:
+            - g5.2xlarge
+            - g5.4xlarge
+            - g5.8xlarge
+            - g5.12xlarge
+            - g5.16xlarge
+            - g5.24xlarge
+            - g6.2xlarge
+            - g6.4xlarge
+            - g6.8xlarge
+            - g6.12xlarge
+            - g6.16xlarge
+            - g6.24xlarge
+            - gr6.4xlarge
+            - gr6.8xlarge
+            - g6e.2xlarge
+            - g6e.4xlarge
+            - g6e.8xlarge
+            - g6e.12xlarge
+            - g6e.16xlarge
+            - g6e.24xlarge
+            - g7.2xlarge
+            - g7.4xlarge
+            - g7.8xlarge
+            - g7.12xlarge
+            - g7.24xlarge
+            - g7e.2xlarge
         - key: kubernetes.io/arch
           operator: In
           values: ["amd64"]
