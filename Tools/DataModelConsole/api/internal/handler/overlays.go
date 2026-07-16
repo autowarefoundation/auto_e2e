@@ -137,19 +137,26 @@ func setOverlayCacheControl(w http.ResponseWriter, requestedVersion string) {
 	w.Header().Set("Cache-Control", "private, max-age=31536000, immutable")
 }
 
-// Rig handles GET /datasets/{name}/rig-projection.
+// Rig handles GET /datasets/{name}/shards/{shard}/rig-projection.
 func (h *OverlayHandler) Rig(w http.ResponseWriter, r *http.Request) {
-	dataset, version, ok := h.datasetRequest(w, r)
+	dataset, shard, version, ok := h.shardRequest(w, r)
 	if !ok {
 		return
 	}
-	body, _, err := h.s3.RigProjection(r.Context(), dataset, version)
+	body, _, err := h.s3.ShardRigProjection(
+		r.Context(), dataset, version, shard,
+	)
 	if err != nil {
 		if errors.Is(err, service.ErrNotFound) {
 			writeError(w, http.StatusNotFound, model.CodeNotFound, "rig projection not found")
 			return
 		}
-		slog.Error("read rig projection", "dataset", dataset, "error", err)
+		slog.Error(
+			"read rig projection",
+			"dataset", dataset,
+			"shard", shard,
+			"error", err,
+		)
 		writeError(w, http.StatusBadGateway, model.CodeS3Error, "failed to read rig projection")
 		return
 	}
