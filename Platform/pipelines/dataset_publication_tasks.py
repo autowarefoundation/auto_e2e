@@ -622,6 +622,7 @@ def finalize_dataset_publication(
         geo_pointer_item,
         gzip_json_bytes,
         merge_partition_results,
+        rig_key,
         sha256_bytes,
     )
 
@@ -630,7 +631,7 @@ def finalize_dataset_publication(
         json.loads(Path(result.download()).read_text())
         for result in partition_results
     ]
-    manifest, rig, heatmap = merge_partition_results(
+    manifest, rigs, heatmap = merge_partition_results(
         results,
         dataset=published_dataset,
         version=dataset_version,
@@ -638,14 +639,17 @@ def finalize_dataset_publication(
     prefix = dataset_prefix(published_dataset, dataset_version)
     s3 = boto3.client("s3", region_name=aws_region)
 
-    rig_payload = canonical_json_bytes(rig, pretty=True)
-    _put_immutable(
-        s3,
-        bucket=datasets_bucket,
-        key=f"{prefix}/rig/projection.json",
-        payload=rig_payload,
-        content_type="application/json",
-    )
+    for rig_digest, rig in rigs.items():
+        rig_payload = canonical_json_bytes(rig, pretty=True)
+        if sha256_bytes(rig_payload) != rig_digest:
+            raise RuntimeError("rig digest changed during publication")
+        _put_immutable(
+            s3,
+            bucket=datasets_bucket,
+            key=rig_key(published_dataset, dataset_version, rig_digest),
+            payload=rig_payload,
+            content_type="application/json",
+        )
 
     geo_summary = manifest.get("geo")
     if geo_summary is not None:
