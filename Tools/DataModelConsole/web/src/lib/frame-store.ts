@@ -87,6 +87,7 @@ export class FrameStore {
     this.shard = shard;
     this.maxEntries = maxEntries;
     this.version = version;
+    this.blobRangesDisabled = index.blob_ranges_allowed === false;
     for (const s of index.samples) this.byFrame.set(s.frame_idx, s);
     // Camera set is stable across the shard; take it from the first sample.
     const first = index.samples[0];
