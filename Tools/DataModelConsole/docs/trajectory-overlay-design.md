@@ -4,7 +4,7 @@ Status: Implemented on `feat/trajectory-overlay-console`; production rollout pen
 Owning code: `Tools/DataModelConsole` (Go API + Next.js) and `Platform/pipelines/workflows.py` (Flyte)
 Author: design pass grounded in `docs/.traj_brief.json` + source read of `Model/model_components/*`, `Model/evaluation/metrics.py`, `Model/data_parsing/l2d/egomotion.py`, packer, and the console store; revised against four adversarial reviews (adas, infra-dynamo, flyte-feasibility, cost-storage-frontend) and a second-round external review (verdicts P0.1–P0.5, P1.6–P1.15).
 
-Implementation snapshot (2026-07-15):
+Implementation snapshot (2026-07-16):
 - v2.1 geospatial packing/publication, canonical AOVL overlays, Console API, and
   the BEV/camera/map UI are implemented.
 - `wf_create_publish_and_precompute_overlays` owns the complete data path:
@@ -12,8 +12,9 @@ Implementation snapshot (2026-07-15):
 - `Platform/buildspec-launch-overlay.yml` launches that workflow from the
   VPC-local CodeBuild project `auto-e2e-platform-overlay-launch`.
 - PR #74's offline report boundary is implemented as
-  `wf_export_trajectory_report`: it consumes the canonical AOVL plus its v2.1
-  shard and emits per-scene MP4, thumbnail, metrics, and a provenance manifest.
+  `wf_export_trajectory_report`: it consumes the canonical AOVL, its v2.1
+  shard, and both immutable publication manifests; it emits per-scene MP4,
+  thumbnail, metrics, and verified model/dataset provenance.
 - The publication workflow exposes the immutable manifest key and digest.
   Reasoning stats, direct sample lookups, and scene-search rows are populated
   by an explicit digest-pinned `batch/v1 Job` after that workflow succeeds;
@@ -697,9 +698,10 @@ a principal established by signature-validating authentication middleware.
 
 **Phase 3 — optional MP4 export (PR#74, implemented):**
 - `Tools/trajectory_visualization` reads the canonical AOVL and matching v2.1
-  shard, emits **one MP4 per scene** plus thumbnail/metrics/manifest, and is
-  wrapped by `wf_export_trajectory_report`. It deliberately does not reuse the
-  PR's legacy checkpoint inference, `v0=0`, or eval-only loader.
+  shard, verifies both immutable publication manifests, emits **one MP4 per
+  scene** plus thumbnail/metrics/manifest, and is wrapped by
+  `wf_export_trajectory_report`. It deliberately does not reuse the PR's legacy
+  checkpoint inference, `v0=0`, synthetic calibration, or eval-only loader.
 
 **Risks:**
 - **Yaw-sign mirror + map ENU** (§10, §9-bis) — the corrected ENU formula is necessary-not-sufficient; must be verified JOINTLY (straight + left/right turn) before any overlay or map path is trusted; blocks Phase 2 acceptance.
