@@ -248,6 +248,34 @@ func TestGetImageRequiresValidRangeBeforeS3Access(t *testing.T) {
 	}
 }
 
+func TestDatasetHandlersRejectHiddenDatasetsBeforeStorageAccess(t *testing.T) {
+	handler := NewDatasetsHandler(&service.S3Service{})
+	for _, dataset := range []string{
+		"l2d",
+		"nvidia_av",
+		"kitscenes-smoke-8aec8355b116",
+	} {
+		t.Run(dataset, func(t *testing.T) {
+			request := requestWithDatasetRoute(
+				"/api/v1/datasets/"+dataset+"/versions",
+				"name", dataset,
+			)
+			response := httptest.NewRecorder()
+
+			handler.ListVersions(response, request)
+
+			if response.Code != http.StatusNotFound {
+				t.Fatalf(
+					"status = %d, want %d: %s",
+					response.Code,
+					http.StatusNotFound,
+					response.Body.String(),
+				)
+			}
+		})
+	}
+}
+
 func TestGetImageUsesResolvedIndexVersionForRangeRead(t *testing.T) {
 	s3 := newRangeService()
 	handler := &DatasetsHandler{s3: s3}
