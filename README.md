@@ -76,6 +76,10 @@ the tool through a [package manager](https://chocolatey.org/).
 
 </details>
 
+### Documentation
+
+Review our academic paper, access our knowledge base and read through our work on safety verification in our documentation pages, alongside more information about the AutoE2E model at [https://autowarefoundation.github.io/auto_e2e/](https://autowarefoundation.github.io/auto_e2e/)
+
 ### Next steps
 - Explore the [Model](./Model/) folder for the model components, training and inference.
 - Follow the [Trial Guide](./TRIAL.md) to run the inference test on AWS EC2.
