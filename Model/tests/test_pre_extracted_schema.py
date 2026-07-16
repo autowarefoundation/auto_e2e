@@ -265,6 +265,33 @@ class TestDecodeWorldModelWindows:
         assert out["history_frames"].shape == (4, 6, 3, 256, 256)
         assert out["future_frames"].shape == (4, 6, 3, 256, 256)
 
+    def test_history_only_mode_never_reads_future_frame_pool(self):
+        sample, pool = self._pool_sample_and_accessor(
+            n_cams=6, T=4, F=4
+        )
+        index = json.loads(sample["window_index.json"])
+        future_ids = {
+            frame_id
+            for step in index["future"]
+            for frame_id in step
+        }
+        accessed = []
+
+        def tracked_pool(frame_id):
+            accessed.append(frame_id)
+            return pool(frame_id)
+
+        out = _decode_sample(
+            sample,
+            pool=tracked_pool,
+            decode_future_frames=False,
+        )
+
+        assert out["history_frames"].shape == (4, 6, 3, 256, 256)
+        assert "future_frames" not in out
+        assert accessed
+        assert future_ids.isdisjoint(accessed)
+
     def test_pool_window_equals_legacy_layout(self):
         """THE byte-equality guarantee: the pool path rebuilds the SAME tensors the
         legacy hist_/fut_ layout would, for the same underlying jpeg bytes."""
