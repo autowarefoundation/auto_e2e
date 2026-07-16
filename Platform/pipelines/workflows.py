@@ -18,6 +18,10 @@ from flytekit.types.directory import FlyteDirectory
 from typing import Annotated, NamedTuple, List, Optional
 
 from Platform.pipelines.dataset_publication import DatasetPublication
+from Platform.pipelines.overlay_tasks import (
+    register_selected_overlay_checkpoint,
+    resolve_overlay_model_version,
+)
 
 import os as _os
 
@@ -4048,10 +4052,6 @@ def wf_publish_full_run_overlays(
     copy_workers: int = 16,
 ) -> PublishedOverlayOutput:
     """Publish the labeled shards and model produced by one completed Full Run."""
-    from Platform.pipelines.overlay_tasks import (
-        resolve_overlay_model_version,
-    )
-
     model_version = resolve_overlay_model_version(
         registered_model_name=registered_model_name,
         train_execution_id=full_run_execution_id,
@@ -4104,10 +4104,6 @@ def wf_publish_selected_checkpoint_overlays(
     copy_workers: int = 16,
 ) -> PublishedOverlayOutput:
     """Publish a verified checkpoint while its parent Training still runs."""
-    from Platform.pipelines.overlay_tasks import (
-        register_selected_overlay_checkpoint,
-    )
-
     model_version = register_selected_overlay_checkpoint(
         registered_model_name=registered_model_name,
         run_id=mlflow_run_id,
