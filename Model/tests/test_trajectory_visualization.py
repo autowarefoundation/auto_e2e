@@ -8,16 +8,21 @@ import tarfile
 from pathlib import Path
 
 import numpy as np
+import pytest
 from PIL import Image
 
 from evaluation.metrics import integrate_trajectory
 from Platform.pipelines.overlay import write_overlay
 from Tools.trajectory_visualization.artifacts import read_shard_samples
-from Tools.trajectory_visualization.rendering import (
+from Tools.trajectory_visualization.kinematics import (
+    AOVL_V1_CONTROL_CONTRACT,
     integrate_controls,
-    render_frame,
 )
-from Tools.trajectory_visualization.report import generate_report
+from Tools.trajectory_visualization.rendering import render_frame
+from Tools.trajectory_visualization.report import (
+    generate_report,
+    load_scene_selections,
+)
 
 
 def _tar_member(
@@ -36,8 +41,19 @@ def _jpeg(color: str) -> bytes:
     return output.getvalue()
 
 
-def _write_shard(path: Path, sample_uids: list[str]) -> None:
-    calibration = json.dumps({
+def _write_shard(
+    path: Path,
+    sample_uids: list[str],
+    *,
+    frame_indices: list[int] | None = None,
+    calibration: dict | None = None,
+    camera_color: str = "#334155",
+) -> None:
+    if frame_indices is None:
+        frame_indices = [64 + index for index in range(len(sample_uids))]
+    if len(frame_indices) != len(sample_uids):
+        raise ValueError("frame_indices must align with sample_uids")
+    calibration_bytes = json.dumps(calibration or {
         "dataset": "yaak-ai/L2D",
         "geometry_type": "pseudo",
         "projection": None,
@@ -48,7 +64,7 @@ def _write_shard(path: Path, sample_uids: list[str]) -> None:
                 "dataset": "yaak-ai/L2D",
                 "sample_uid": sample_uid,
                 "split_group_uid": "l2d-v1-e000001",
-                "frame_idx": 64 + index,
+                "frame_idx": frame_indices[index],
             }).encode()
             ego = np.zeros(64 * 4 + 64 * 2, dtype="<f4")
             ego[63 * 4] = 8.0 + index
@@ -58,12 +74,12 @@ def _write_shard(path: Path, sample_uids: list[str]) -> None:
             _tar_member(
                 archive,
                 f"{sample_uid}.cam_0.jpg",
-                _jpeg("#334155"),
+                _jpeg(camera_color),
             )
             _tar_member(
                 archive,
                 f"{sample_uid}.calib.json",
-                calibration,
+                calibration_bytes,
             )
 
 
@@ -91,7 +107,11 @@ def test_report_joins_aovl_by_uid_and_writes_scene_artifacts(tmp_path):
         "l2d-v1-e000001-f000065",
     ]
     shard = tmp_path / "train-000000.tar"
-    _write_shard(shard, sample_uids)
+    _write_shard(
+        shard,
+        list(reversed(sample_uids)),
+        frame_indices=[65, 64],
+    )
     overlay = tmp_path / "overlay.bin.gz"
     controls = np.zeros((2, 1, 64, 2), dtype=np.float32)
     controls[1, 0, :, 1] = 0.02
@@ -122,6 +142,10 @@ def test_report_joins_aovl_by_uid_and_writes_scene_artifacts(tmp_path):
     assert manifest["dataset"] == "yaak-ai/L2D"
     assert manifest["render"]["curvature_sign"] == -1
     assert manifest["render"]["base_seed"] == 0
+    assert manifest["render"]["control_contract"] == (
+        AOVL_V1_CONTROL_CONTRACT.manifest()
+    )
+    assert manifest["render"]["panel_order"] == ["camera", "metric_bev"]
     assert manifest["scene_count"] == 1
     assert manifest["frame_count"] == 2
     scene = manifest["scenes"][0]
@@ -132,6 +156,66 @@ def test_report_joins_aovl_by_uid_and_writes_scene_artifacts(tmp_path):
     assert (output / scene["video"]).read_bytes() == b"synthetic-mp4"
     assert (output / scene["thumbnail"]).stat().st_size > 0
     assert json.loads((output / "manifest.json").read_text()) == manifest
+
+
+def test_report_uses_explicit_scene_frame_selection(tmp_path):
+    sample_uids = [
+        "l2d-v1-e000001-f000064",
+        "l2d-v1-e000001-f000065",
+        "l2d-v1-e000001-f000066",
+    ]
+    shard = tmp_path / "train-000000.tar"
+    _write_shard(shard, sample_uids)
+    overlay = tmp_path / "overlay.bin.gz"
+    write_overlay(
+        overlay,
+        sample_uids,
+        np.zeros((3, 1, 64, 2), dtype=np.float32),
+        np.full(3, 8.0, dtype=np.float32),
+    )
+    selection = tmp_path / "selection.json"
+    selection.write_text(json.dumps({
+        "schema_version": 1,
+        "scenes": [{
+            "scene_uid": "l2d-v1-e000001",
+            "start_frame": 65,
+            "end_frame": 65,
+        }],
+    }))
+
+    rendered = []
+
+    def fake_video_writer(path, frames, fps):
+        rendered.extend(frames)
+        path.write_bytes(b"synthetic-mp4")
+
+    output = tmp_path / "report"
+    manifest = generate_report(
+        shard_path=shard,
+        overlay_path=overlay,
+        output_dir=output,
+        scene_selections=load_scene_selections(selection),
+        video_writer=fake_video_writer,
+    )
+
+    assert len(rendered) == 1
+    assert manifest["scenes"][0]["sample_uids"] == [sample_uids[1]]
+    assert manifest["render"]["scene_selection"] == [{
+        "scene_uid": "l2d-v1-e000001",
+        "start_frame": 65,
+        "end_frame": 65,
+    }]
+
+
+def test_selection_manifest_rejects_legacy_episode_identity(tmp_path):
+    selection = tmp_path / "selection.json"
+    selection.write_text(json.dumps({
+        "schema_version": 1,
+        "scenes": [{"episode_id": "legacy-episode"}],
+    }))
+
+    with pytest.raises(ValueError, match="unknown fields"):
+        load_scene_selections(selection)
 
 
 def test_shard_reader_rejects_missing_selected_camera(tmp_path):
@@ -146,10 +230,26 @@ def test_shard_reader_rejects_missing_selected_camera(tmp_path):
         raise AssertionError("missing camera must fail report generation")
 
 
-def test_render_frame_changes_camera_and_preserves_fixed_dimensions(tmp_path):
+def test_render_frame_keeps_camera_and_bev_panels_in_declared_order(tmp_path):
     sample_uid = "l2d-v1-e000001-f000064"
     shard = tmp_path / "train-000000.tar"
-    _write_shard(shard, [sample_uid])
+    _write_shard(
+        shard,
+        [sample_uid],
+        camera_color="#ff0000",
+        calibration={
+            "dataset": "yaak-ai/L2D",
+            "geometry_type": "pinhole",
+            "projection": {
+                "type": "pinhole",
+                "matrix": [[
+                    [32.0, -50.0, 0.0, 0.0],
+                    [32.0, 0.0, 0.0, 64.0],
+                    [1.0, 0.0, 0.0, 0.0],
+                ]],
+            },
+        },
+    )
     sample = read_shard_samples(shard)[0]
     controls = np.zeros((64, 2), dtype=np.float32)
     target = integrate_controls(controls, 8.0, curvature_sign=-1)
@@ -168,5 +268,9 @@ def test_render_frame_changes_camera_and_preserves_fixed_dimensions(tmp_path):
 
     assert rendered.size == (1280, 720)
     pixels = np.asarray(rendered)
-    assert pixels.mean() > 2
+    camera_panel = pixels[136:696, 24:584]
+    bev_panel = pixels[136:696, 696:1256]
+    assert camera_panel[..., 0].mean() > 200
+    assert camera_panel[..., 1].mean() < 30
+    assert bev_panel[..., 0].mean() < 80
     assert np.any(np.all(pixels == (52, 211, 153), axis=2))
