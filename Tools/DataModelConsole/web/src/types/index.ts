@@ -143,6 +143,7 @@ export interface ShardIndex {
   fps: number; // 10
   version: string;
   shard: string;
+  blob_ranges_allowed: boolean;
   samples: IndexSample[];
 }
 
