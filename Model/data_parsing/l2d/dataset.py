@@ -313,7 +313,7 @@ class L2DDataset(Dataset):
         oldest→newest, matching the ``history_frames``/``future_frames`` stack order.
         """
         ep_idx, row = self._samples[idx]
-        ep_start, _ = self._episode_ranges[ep_idx]
+        ep_start, ep_end = self._episode_ranges[ep_idx]
         n = self._wm_num_frames
         s = self._wm_stride
         # Same offsets the window uses: history oldest→newest ending at 0, future +s..+N*s.
