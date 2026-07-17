@@ -252,6 +252,12 @@ def precompute_overlay_partition(
     checkpoint_path = checkpoint.download()
     metadata = json.loads(Path(model_metadata.download()).read_text())
     model, config, model_artifact_id = load_policy(checkpoint_path, device)
+    from training.dataset_policy import training_policy_from_config
+
+    training_policy = training_policy_from_config(
+        config,
+        str(metadata.get("dataset_source", "")),
+    )
     if model_artifact_id != metadata["checkpoint_sha256"]:
         raise ValueError(
             "downloaded checkpoint differs from resolved model metadata"
@@ -315,6 +321,7 @@ def precompute_overlay_partition(
                         shuffle=0,
                         pin_memory=(device.type == "cuda"),
                         shard_files=[tar_path],
+                        decode_future_frames=False,
                     )
                     sample_uids, controls, v0, actual_seeds_tuple = (
                         infer_loader_controls(
@@ -324,6 +331,7 @@ def precompute_overlay_partition(
                             dataset_manifest_digest=dataset_manifest_digest,
                             base_seeds=base_seeds,
                             device=device,
+                            training_policy=training_policy,
                         )
                     )
                     actual_seeds = list(actual_seeds_tuple)
