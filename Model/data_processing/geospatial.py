@@ -104,14 +104,14 @@ def _valid_coordinate(lat: float, lon: float) -> bool:
 def episode_artifact_stem(episode_id: Any) -> str:
     """Return a path-safe stable filename stem for an episode or scene id."""
     if isinstance(episode_id, (int, np.integer)):
-        value = int(episode_id)
-        if value < 0:
-            raise ValueError(f"episode id must be non-negative, got {value}")
-        return f"{value:06d}"
-    value = str(episode_id)
-    if not _EPISODE_ID_RE.fullmatch(value):
-        raise ValueError(f"unsafe episode id {value!r}")
-    return value
+        numeric_id = int(episode_id)
+        if numeric_id < 0:
+            raise ValueError(f"episode id must be non-negative, got {numeric_id}")
+        return f"{numeric_id:06d}"
+    string_id = str(episode_id)
+    if not _EPISODE_ID_RE.fullmatch(string_id):
+        raise ValueError(f"unsafe episode id {string_id!r}")
+    return string_id
 
 
 def write_geo_artifacts(
