@@ -58,7 +58,7 @@ KITSCENES_SOURCE_REVISION = "6fde0034446669e2ed7235e4c7fe323cd23d599d"
 # is fatal because guessing these values can silently reuse incompatible cache
 # entries. Per-partition group_ids and source_revision travel as task INPUTS, so
 # ranges are independently cacheable.
-from data_processing.contract_versions import (
+from data_processing.contract_versions import (  # noqa: E402
     GEOMETRY_VERSION as _GEOM_V,
     PARSER_VERSION as _PARSER_V,
     REASONING_LABEL_POLICY_VERSION as _LABEL_POLICY_V,
@@ -327,6 +327,82 @@ def _training_num_views_from_manifests(
     return max(dataset_views.values())
 
 
+def _training_source_revision(
+    manifests: dict[str, dict],
+    *,
+    require_single: bool,
+) -> str:
+    """Return one packed revision when the dataset contract requires it."""
+    revisions = [
+        manifest.get("source_revision")
+        for manifest in manifests.values()
+    ]
+    normalized = {
+        str(revision)
+        for revision in revisions
+        if isinstance(revision, str) and revision
+    }
+    if require_single and (
+        len(normalized) != 1
+        or not all(
+            isinstance(revision, str) and revision
+            for revision in revisions
+        )
+    ):
+        raise ValueError(
+            "training requires one explicit packed source revision, got "
+            f"{sorted(normalized)}"
+        )
+    return next(iter(normalized)) if len(normalized) == 1 else ""
+
+
+def _validate_evaluation_shard_provenance(
+    shard_dirs: List[str],
+    *,
+    dataset_name: str,
+    source_revision: str,
+    dataset_version: str,
+    contract_digest: str,
+) -> None:
+    """Require evaluation shards to match the checkpoint's packed corpus."""
+    import json
+    import os
+
+    from Platform.pipelines.training_checkpoint import stable_digest
+
+    expected = {
+        "dataset": dataset_name,
+        "source_revision": source_revision,
+        "dataset_version": dataset_version,
+        "contract_digest": contract_digest,
+    }
+    if any(not isinstance(value, str) or not value for value in expected.values()):
+        raise ValueError(
+            "checkpoint validation contract has incomplete shard provenance"
+        )
+
+    for shard_dir in shard_dirs:
+        manifest_path = os.path.join(shard_dir, "manifest.json")
+        try:
+            with open(manifest_path) as stream:
+                manifest = json.load(stream)
+        except (OSError, ValueError) as error:
+            raise ValueError(
+                f"could not read evaluation shard manifest {manifest_path}"
+            ) from error
+        actual = {
+            "dataset": manifest.get("dataset"),
+            "source_revision": manifest.get("source_revision"),
+            "dataset_version": manifest.get("dataset_version"),
+            "contract_digest": stable_digest(manifest.get("contracts")),
+        }
+        if actual != expected:
+            raise ValueError(
+                "evaluation shard provenance differs from the checkpoint: "
+                f"expected={expected} actual={actual}"
+            )
+
+
 def _checkpoint_bucket_name(sts_client=None) -> str:
     """Resolve checkpoint storage without embedding an AWS account ID."""
     configured = _os.environ.get("AUTO_E2E_CHECKPOINT_BUCKET", "").strip()
@@ -390,13 +466,22 @@ def _resume_terminal_state(
     return completed_epoch == requested_epochs or stopped_early, stopped_early
 
 
-def _evaluate_open_loop(model, loader, device) -> dict:
+def _evaluate_open_loop(
+    model,
+    loader,
+    device,
+    training_policy=None,
+) -> dict:
     """Evaluate one fixed loader and return finite ADE/FDE plus its UID digest."""
     import hashlib
     import numpy as np
     import torch
 
     from evaluation.metrics import integrate_trajectory
+    from training.dataset_policy import (
+        AUTO_E2E_TIMESTEPS,
+        adapt_egomotion_history,
+    )
 
     was_training = model.training
     all_ade: list[float] = []
@@ -412,7 +497,13 @@ def _evaluate_open_loop(model, loader, device) -> dict:
                     model.reset_visual_history()
 
                 visual = batch["visual_tiles"].to(device)
-                ego_hist = batch["egomotion_history"].to(device)
+                raw_ego_hist = batch["egomotion_history"]
+                ego_hist = raw_ego_hist.to(device)
+                if training_policy is not None:
+                    ego_hist = adapt_egomotion_history(
+                        ego_hist,
+                        training_policy,
+                    )
                 vis_hist = batch["visual_history"].to(device)
                 target = batch["trajectory_target"]
                 map_input = batch["map_input"].to(device)
@@ -442,9 +533,13 @@ def _evaluate_open_loop(model, loader, device) -> dict:
                 sample_uids.extend(str(uid) for uid in batch_uids)
 
                 for sample_index in range(pred_np.shape[0]):
-                    pred_signals = pred_np[sample_index].reshape(64, 2)
-                    target_signals = target_np[sample_index].reshape(64, 2)
-                    ego_np = batch["egomotion_history"][
+                    pred_signals = pred_np[sample_index].reshape(
+                        AUTO_E2E_TIMESTEPS, 2
+                    )
+                    target_signals = target_np[sample_index].reshape(
+                        AUTO_E2E_TIMESTEPS, 2
+                    )
+                    ego_np = raw_ego_hist[
                         sample_index
                     ].numpy()
                     v0 = float(ego_np[-4])
@@ -483,6 +578,7 @@ def _evaluate_open_loop(model, loader, device) -> dict:
     return {
         "ade": ade,
         "fde": fde,
+        "evaluation_steps": AUTO_E2E_TIMESTEPS,
         "sample_count": len(all_ade),
         "sample_uid_digest": uid_digest,
     }
@@ -1989,8 +2085,8 @@ def train_il(
     # separate eval task can score the disjoint val split and measure
     # GENERALIZATION rather than training-set memorization (which structurally
     # favours the lower-capacity imitation model). 0.0 = train on everything
-    # (legacy in-sample behaviour). The split is a stable hash of
-    # split_group_uid, so train and eval never share a scene and both tasks agree.
+    # (legacy in-sample behaviour). KITScenes uses a frozen audited scene
+    # manifest; L2D/NVIDIA retain stable split_group_uid hash buckets.
     val_fraction: float = 0.1,
     # Parallel JPEG decode (#121 P0). num_workers=0 decodes every sample (~55
     # JPEGs/sample with WM windows) serially on the training process, stalling the
@@ -2054,13 +2150,25 @@ def train_il(
 
     from model_components.auto_e2e import AutoE2E
     from model_components.losses import TrajectoryImitationLoss
-    from data_parsing.pre_extracted import make_multi_dataset_loader
+    from training.dataset_policy import (
+        AUTO_E2E_TIMESTEPS,
+        adapt_egomotion_history,
+        group_uid_digest,
+        training_policy_for_dataset,
+        validation_group_uids as select_validation_group_uids,
+        validation_sample_identity,
+    )
+    from data_parsing.pre_extracted import (
+        discover_split_inventory,
+        make_multi_dataset_loader,
+    )
     # _loader_download_dir is a module-level helper in THIS file, not in
     # pre_extracted — call it directly (importing it from there is an ImportError).
 
     ctx = current_context()
     bb, fm = backbone.value, FUSION_LABEL
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    training_policy = training_policy_for_dataset(dataset.value)
 
     print(f"Training: backbone={bb} fusion={fm} epochs={epochs} bs={batch_size} device={device}")
 
@@ -2069,7 +2177,17 @@ def train_il(
     # datasets, each carrying its projection — so L2D (6cam pseudo) and NVIDIA
     # (7cam f-theta) train together. The model is runtime-V-dynamic (projection
     # ABI, #77), so a single model consumes both. num_views only sizes defaults.
-    all_shard_dirs = [_loader_download_dir(s) for s in shards]
+    all_shard_dirs = []
+    shard_artifact_uris = {}
+    for shard in shards:
+        artifact_uri = str(
+            getattr(shard, "remote_source", "")
+            or getattr(shard, "path", "")
+            or shard
+        )
+        shard_dir = _loader_download_dir(shard)
+        all_shard_dirs.append(shard_dir)
+        shard_artifact_uris[shard_dir] = artifact_uri
     shard_dirs = []
     manifests = {}
     dataset_versions = set()
@@ -2094,14 +2212,52 @@ def train_il(
             f"mixed dataset versions in one training run: {sorted(dataset_versions)}"
         )
     dataset_version = next(iter(dataset_versions), "unknown")
+    packed_source_revision = _training_source_revision(
+        manifests,
+        require_single=(
+            training_policy.validation_strategy == "exact_group_fraction"
+        ),
+    )
+    all_shard_dirs.sort(
+        key=lambda shard_dir: (
+            str(manifests[shard_dir].get("partition_id", "")),
+            shard_artifact_uris[shard_dir],
+        )
+    )
+    shard_dirs.sort(
+        key=lambda shard_dir: (
+            str(manifests[shard_dir].get("partition_id", "")),
+            shard_artifact_uris[shard_dir],
+        )
+    )
     num_views = _training_num_views_from_manifests(manifests, shard_dirs)
 
     from Platform.pipelines.training_checkpoint import stable_digest
 
+    contract_digests = {
+        stable_digest(manifest.get("contracts"))
+        for manifest in manifests.values()
+    }
+    if (
+        training_policy.validation_strategy == "exact_group_fraction"
+        and len(contract_digests) != 1
+    ):
+        raise ValueError(
+            "exact validation splitting requires one packed contract digest, "
+            f"got {sorted(contract_digests)}"
+        )
+    packed_contract_digest = (
+        next(iter(contract_digests))
+        if len(contract_digests) == 1
+        else ""
+    )
+
     data_identity = []
-    for manifest in manifests.values():
+    for shard_dir in all_shard_dirs:
+        manifest = manifests[shard_dir]
         data_identity.append({
             "dataset": manifest.get("dataset"),
+            "artifact_uri": shard_artifact_uris[shard_dir],
             "source_revision": manifest.get("source_revision"),
             "dataset_version": manifest.get("dataset_version"),
             "partition_id": manifest.get("partition_id"),
@@ -2122,7 +2278,133 @@ def train_il(
             str(item["dataset"]),
         )
     )
-    data_fingerprint = stable_digest(data_identity)
+    split_inventory = None
+    available_split_groups: tuple[str, ...] = ()
+    if training_policy.validation_strategy == "exact_group_fraction":
+        split_inventory = discover_split_inventory(shard_dirs)
+        available_split_groups = split_inventory.group_uids
+        expected_sample_count = sum(
+            int(manifests[shard_dir].get("total_samples", 0))
+            for shard_dir in shard_dirs
+        )
+        if split_inventory.sample_count != expected_sample_count:
+            raise ValueError(
+                "packed sample metadata coverage differs from manifests: "
+                f"expected={expected_sample_count} "
+                f"actual={split_inventory.sample_count}"
+            )
+    fixed_validation_groups = select_validation_group_uids(
+        available_split_groups,
+        val_fraction=val_fraction,
+        policy=training_policy,
+        source_revision=packed_source_revision,
+        packed_dataset_version=dataset_version,
+        packed_contract_digest=packed_contract_digest,
+        packed_partition_count=len(manifests),
+        empty_partition_count=skipped_empty,
+        packed_sample_count=(
+            split_inventory.sample_count
+            if split_inventory is not None
+            else None
+        ),
+        packed_sample_uid_digest=(
+            split_inventory.sample_uid_digest
+            if split_inventory is not None
+            else None
+        ),
+    )
+    available_group_digest = (
+        group_uid_digest(available_split_groups)
+        if fixed_validation_groups is not None
+        else None
+    )
+    validation_group_digest = (
+        group_uid_digest(fixed_validation_groups)
+        if fixed_validation_groups is not None
+        else None
+    )
+    frozen_validation_sample_count = None
+    frozen_validation_sample_digest = None
+    if fixed_validation_groups is not None:
+        (
+            frozen_validation_sample_count,
+            frozen_validation_sample_digest,
+        ) = validation_sample_identity(training_policy)
+        if split_inventory is None:
+            raise RuntimeError(
+                "exact validation splitting has no packed sample inventory"
+            )
+        (
+            actual_validation_sample_count,
+            actual_validation_sample_digest,
+        ) = split_inventory.sample_identity_for_groups(
+            fixed_validation_groups
+        )
+        if (
+            actual_validation_sample_count
+            != frozen_validation_sample_count
+            or actual_validation_sample_digest
+            != frozen_validation_sample_digest
+        ):
+            raise ValueError(
+                "packed validation sample identity differs from the frozen "
+                "split: "
+                f"expected_count={frozen_validation_sample_count} "
+                f"actual_count={actual_validation_sample_count} "
+                f"expected_digest={frozen_validation_sample_digest} "
+                f"actual_digest={actual_validation_sample_digest}"
+            )
+    data_coverage = {
+        "available_group_uid_digest": available_group_digest,
+        "available_group_count": (
+            len(available_split_groups)
+            if fixed_validation_groups is not None
+            else None
+        ),
+        "sample_uid_digest": (
+            split_inventory.sample_uid_digest
+            if split_inventory is not None
+            else None
+        ),
+        "sample_count": (
+            split_inventory.sample_count
+            if split_inventory is not None
+            else None
+        ),
+    }
+    data_fingerprint = stable_digest({
+        "partitions": data_identity,
+        "coverage": data_coverage,
+    })
+    validation_split_contract = {
+        "strategy": training_policy.validation_strategy,
+        "split_id": training_policy.validation_split_id,
+        "val_fraction": val_fraction,
+        "source_revision": packed_source_revision or None,
+        "dataset_version": dataset_version,
+        "packed_contract_digest": packed_contract_digest or None,
+        "available_group_count": (
+            len(available_split_groups)
+            if fixed_validation_groups is not None
+            else None
+        ),
+        "available_group_uid_digest": available_group_digest,
+        "validation_group_count": (
+            len(fixed_validation_groups)
+            if fixed_validation_groups is not None
+            else None
+        ),
+        "validation_group_uids": (
+            list(fixed_validation_groups)
+            if fixed_validation_groups is not None
+            else None
+        ),
+        "validation_group_uid_digest": validation_group_digest,
+        "packed_sample_count": data_coverage["sample_count"],
+        "packed_sample_uid_digest": data_coverage["sample_uid_digest"],
+        "validation_sample_count": frozen_validation_sample_count,
+        "validation_sample_uid_digest": frozen_validation_sample_digest,
+    }
 
     validation_loader = make_multi_dataset_loader(
         shard_dirs,
@@ -2132,13 +2414,22 @@ def train_il(
         pin_memory=(device.type == "cuda"),
         split="val",
         val_fraction=val_fraction,
+        validation_group_uids=fixed_validation_groups,
         max_active_loaders=1,
         prefetch_factor=1,
+        decode_future_frames=False,
     )
     print(f"Merged {len(shard_dirs)} non-empty partition(s) into one training stream "
           f"(skipped_empty={skipped_empty}, split=train, "
           f"val_fraction={val_fraction}, num_workers={num_workers}, "
           f"num_views={num_views}, data_fingerprint={data_fingerprint}).")
+    print(
+        "Validation split: "
+        f"strategy={training_policy.validation_strategy} "
+        f"split_id={training_policy.validation_split_id} "
+        f"groups={validation_split_contract['validation_group_count']} "
+        f"group_digest={validation_group_digest}"
+    )
 
     # Consistency guard (packing ↔ training) across every non-empty partition.
     # Sparse reasoning targets are masked on unlabeled samples, so probing a
@@ -2198,9 +2489,20 @@ def train_il(
         factor=0.5,
         patience=1,
     )
-    loss_fn = TrajectoryImitationLoss(loss_type="smooth_l1")
+    loss_fn = TrajectoryImitationLoss(
+        loss_type="smooth_l1",
+        temporal_decay=training_policy.temporal_decay,
+        signal_scales=training_policy.signal_scales,
+    )
     if hasattr(loss_fn, "to"):
         loss_fn = loss_fn.to(device)
+    print(
+        "Dataset training policy: "
+        f"auto_e2e_timesteps={AUTO_E2E_TIMESTEPS} "
+        f"temporal_decay={training_policy.temporal_decay:.4g} "
+        f"acceleration_scale={training_policy.signal_scales[0]:.4g} "
+        f"curvature_scale={training_policy.signal_scales[1]:.4g}"
+    )
 
     # Reasoning loss (#98): computed outside the model on the aux reasoning_pred
     # against the shard's per-sample labels. Built only when reasoning is on.
@@ -2232,9 +2534,12 @@ def train_il(
         "amp": amp,
         "batch_size": batch_size,
         "grad_accum_steps": grad_accum_steps,
+        "num_workers": num_workers,
         "reasoning_loss_weight": reasoning_loss_weight,
         "jepa_loss_weight": jepa_loss_weight,
+        "trajectory_training_policy": training_policy.metadata(),
         "val_fraction": val_fraction,
+        "validation_split": validation_split_contract,
         "early_stopping_patience": early_stopping_patience,
         "scheduler": {
             "name": "ReduceLROnPlateau",
@@ -2263,8 +2568,8 @@ def train_il(
     best_checkpoint = None
     final_checkpoint = None
     bad_epochs = 0
-    expected_validation_digest = None
-    validation_sample_count = None
+    expected_validation_digest = frozen_validation_sample_digest
+    validation_sample_count = frozen_validation_sample_count
     start_epoch = 1
     best_local_path = None
     resumed = resume_from is not None
@@ -2312,10 +2617,25 @@ def train_il(
         saved_best = state.get("best")
         best_checkpoint = dict(saved_best) if saved_best is not None else None
         bad_epochs = int(state.get("bad_epochs", 0))
-        expected_validation_digest = state.get(
+        saved_validation_digest = state.get(
             "validation_sample_uid_digest"
         )
-        validation_sample_count = state.get("validation_sample_count")
+        saved_validation_count = state.get("validation_sample_count")
+        if (
+            frozen_validation_sample_digest is not None
+            and (
+                saved_validation_digest
+                != frozen_validation_sample_digest
+                or saved_validation_count
+                != frozen_validation_sample_count
+            )
+        ):
+            raise ValueError(
+                "resume checkpoint validation sample identity differs from "
+                "the frozen split"
+            )
+        expected_validation_digest = saved_validation_digest
+        validation_sample_count = saved_validation_count
         if (
             best_checkpoint is not None
             and int(best_checkpoint["epoch"]) == completed_epoch
@@ -2363,10 +2683,35 @@ def train_il(
                 "model/num_views": num_views,
                 "train/batch_size": batch_size,
                 "train/grad_accum_steps": grad_accum_steps,
+                "train/num_workers": num_workers,
                 "train/lr": lr,
                 "train/weight_decay": weight_decay,
                 "train/amp": amp,
+                "train/acceleration_signal_scale": (
+                    training_policy.signal_scales[0]
+                ),
+                "train/curvature_signal_scale": (
+                    training_policy.signal_scales[1]
+                ),
+                "model/trajectory_timesteps": AUTO_E2E_TIMESTEPS,
+                "train/temporal_decay": (
+                    training_policy.temporal_decay
+                ),
                 "train/val_fraction": val_fraction,
+                "train/validation_strategy": (
+                    training_policy.validation_strategy
+                ),
+                "train/validation_split_id": (
+                    training_policy.validation_split_id
+                ),
+                "train/validation_group_count": (
+                    len(fixed_validation_groups)
+                    if fixed_validation_groups is not None
+                    else -1
+                ),
+                "train/validation_group_uid_digest": (
+                    validation_group_digest or "hash_buckets"
+                ),
                 "train/early_stopping_patience": early_stopping_patience,
             })
 
@@ -2394,6 +2739,7 @@ def train_il(
             pin_memory=(device.type == "cuda"),
             split="train",
             val_fraction=val_fraction,
+            validation_group_uids=fixed_validation_groups,
             shuffle_seed=1729 + epoch * 1_000_003,
         )
         epoch_losses = []
@@ -2406,7 +2752,10 @@ def train_il(
         # so the per-batch projection is applied to the batch it belongs to.
         for batch, batch_proj, batch_geom in merged:
             visual = batch["visual_tiles"].to(device)        # (B, V, 3, H, W)
-            ego_hist = batch["egomotion_history"].to(device)  # (B, 256)
+            ego_hist = adapt_egomotion_history(
+                batch["egomotion_history"].to(device),
+                training_policy,
+            )
             vis_hist = batch["visual_history"].to(device)     # (B, 896)
             target = batch["trajectory_target"].to(device)    # (B, 128)
             map_input = batch["map_input"].to(device)
@@ -2543,7 +2892,10 @@ def train_il(
             )
 
         validation = _evaluate_open_loop(
-            model, validation_loader, device
+            model,
+            validation_loader,
+            device,
+            training_policy=training_policy,
         )
         validation_digest = validation["sample_uid_digest"]
         if expected_validation_digest is None:
@@ -2637,6 +2989,7 @@ def train_il(
                         expected_validation_digest
                     ),
                     "validation_sample_count": validation_sample_count,
+                    "validation_split": validation_split_contract,
                     "current_checkpoint_uri": checkpoint_uri,
                     "early_stopping_patience": (
                         early_stopping_patience
@@ -2734,6 +3087,7 @@ def train_il(
             "packed_partitions": len(manifests),
             "non_empty_partitions": len(shard_dirs),
             "empty_partitions": skipped_empty,
+            "coverage": data_coverage,
         },
         "model": {
             "backbone": bb,
@@ -2748,21 +3102,26 @@ def train_il(
             "early_stopping_patience": early_stopping_patience,
             "batch_size": batch_size,
             "grad_accum_steps": grad_accum_steps,
+            "num_workers": num_workers,
             "lr": lr,
             "weight_decay": weight_decay,
             "grad_clip": grad_clip,
             "amp": amp,
             "optimizer": "AdamW",
             "scheduler": "ReduceLROnPlateau",
+            "trajectory_training_policy": training_policy.metadata(),
             "final_loss": losses_per_epoch[-1],
             "losses_per_epoch": losses_per_epoch,
             "val_fraction": val_fraction,
+            "validation_split": validation_split_contract,
             "metric_history": metric_history,
         },
         "validation": {
             "sample_count": validation_sample_count,
             "sample_uid_digest": expected_validation_digest,
             "split": "internal_scene_holdout",
+            "evaluation_steps": AUTO_E2E_TIMESTEPS,
+            **validation_split_contract,
         },
         "tracking": {
             "mlflow_experiment": "imitation-learning",
@@ -2793,6 +3152,11 @@ def train_il(
             "best_checkpoint_sha256": best_checkpoint["sha256"],
             "final_checkpoint_sha256": final_checkpoint["sha256"],
             "validation_sample_uid_digest": expected_validation_digest,
+            "validation_strategy": training_policy.validation_strategy,
+            "validation_split_id": training_policy.validation_split_id,
+            "validation_group_uid_digest": (
+                validation_group_digest or "hash_buckets"
+            ),
         })
         mlflow.log_artifact(meta_path, artifact_path="training")
 
@@ -2829,7 +3193,6 @@ def train_offline_rl(
     from flytekit import current_context
 
     ckpt_path = pretrained.download()
-    shard_dir = _select_shard_dir(shards, dataset)
     il_meta = json.load(open(il_metadata.download()))
     ctx = current_context()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -2848,6 +3211,21 @@ def train_offline_rl(
         weights_only=False,
     )
     config = ckpt["config"]
+    from training.dataset_policy import (
+        adapt_egomotion_history,
+        training_policy_from_config,
+    )
+
+    training_policy = training_policy_from_config(
+        config,
+        dataset.value,
+    )
+    if training_policy.validation_strategy == "exact_group_fraction":
+        raise ValueError(
+            "offline RL does not yet support the frozen KITScenes train/holdout "
+            "partition; refusing to train on one shard or leak validation scenes"
+        )
+    shard_dir = _select_shard_dir(shards, dataset)
     model = AutoE2E(**_model_kwargs(config)).to(device)
     model.load_state_dict(ckpt["model_state_dict"])
 
@@ -2877,7 +3255,10 @@ def train_offline_rl(
             if hasattr(baseline_model, "reset_visual_history"):
                 baseline_model.reset_visual_history()
             visual = batch["visual_tiles"].to(device)
-            ego_hist = batch["egomotion_history"].to(device)
+            ego_hist = adapt_egomotion_history(
+                batch["egomotion_history"].to(device),
+                training_policy,
+            )
             vis_hist = batch["visual_history"].to(device)
             target = batch["trajectory_target"].to(device)
             map_input = batch["map_input"].to(device)
@@ -2984,14 +3365,109 @@ def _run_evaluation(checkpoint, shards, train_metadata, dataset, experiment_name
         weights_only=False,
     )
     config = ckpt["config"]
+    from training.dataset_policy import (
+        AUTO_E2E_TIMESTEPS,
+        training_policy_from_config,
+    )
+
+    training_policy = training_policy_from_config(
+        config,
+        dataset.value,
+    )
     model = AutoE2E(**_model_kwargs(config)).to(device)
     model.load_state_dict(ckpt["model_state_dict"])
     model.eval()
 
-    # Evaluate on the HELD-OUT split this checkpoint trained around (recorded in
-    # the train metadata), so ADE/FDE measure generalization, not training-set
-    # memorization. val_fraction=0 (legacy) → score all samples (in-sample).
-    val_fraction = float(meta.get("training", {}).get("val_fraction", 0.0) or 0.0)
+    # Evaluate on the exact HELD-OUT split this checkpoint trained around.
+    # KITScenes records a frozen scene manifest; L2D/NVIDIA retain their legacy
+    # deterministic group buckets.
+    base_il_metadata = (
+        meta.get("base_model", {}).get("il_metadata", {})
+    )
+    training_metadata = meta.get(
+        "training",
+        base_il_metadata.get("training", {}),
+    )
+    validation_metadata = meta.get(
+        "validation",
+        base_il_metadata.get("validation", {}),
+    )
+    val_fraction = float(
+        training_metadata.get("val_fraction", 0.0) or 0.0
+    )
+    fixed_validation_groups = None
+    if training_policy.validation_strategy == "exact_group_fraction":
+        checkpoint_validation = config.get("validation_split")
+        if not isinstance(checkpoint_validation, dict):
+            raise ValueError(
+                "checkpoint has no exact validation_split contract"
+            )
+        mismatched_keys = [
+            key
+            for key, value in checkpoint_validation.items()
+            if validation_metadata.get(key) != value
+        ]
+        if mismatched_keys:
+            raise ValueError(
+                "training metadata differs from the checkpoint validation "
+                f"contract: {sorted(mismatched_keys)}"
+            )
+        strategy = validation_metadata.get("strategy")
+        split_id = validation_metadata.get("split_id")
+        if strategy != training_policy.validation_strategy:
+            raise ValueError(
+                "training metadata has no exact validation-group contract: "
+                f"expected={training_policy.validation_strategy!r} "
+                f"actual={strategy!r}"
+            )
+        if split_id != training_policy.validation_split_id:
+            raise ValueError(
+                "validation split ID differs from the checkpoint policy: "
+                f"expected={training_policy.validation_split_id!r} "
+                f"actual={split_id!r}"
+            )
+        raw_groups = checkpoint_validation.get("validation_group_uids")
+        if not isinstance(raw_groups, list) or not raw_groups:
+            raise ValueError(
+                "exact validation metadata has no validation_group_uids"
+            )
+        fixed_validation_groups = tuple(str(uid) for uid in raw_groups)
+        if (
+            list(fixed_validation_groups)
+            != sorted(set(fixed_validation_groups))
+            or any(not uid for uid in fixed_validation_groups)
+        ):
+            raise ValueError(
+                "validation_group_uids must be sorted, unique, and non-empty"
+            )
+        from Platform.pipelines.training_checkpoint import stable_digest
+
+        actual_group_digest = stable_digest(
+            list(fixed_validation_groups)
+        )
+        expected_group_digest = validation_metadata.get(
+            "validation_group_uid_digest"
+        )
+        if actual_group_digest != expected_group_digest:
+            raise ValueError(
+                "validation group manifest digest mismatch: "
+                f"expected={expected_group_digest} "
+                f"actual={actual_group_digest}"
+            )
+        _validate_evaluation_shard_provenance(
+            shard_dirs,
+            dataset_name=dataset.value,
+            source_revision=str(
+                checkpoint_validation.get("source_revision", "")
+            ),
+            dataset_version=str(
+                checkpoint_validation.get("dataset_version", "")
+            ),
+            contract_digest=str(
+                checkpoint_validation.get("packed_contract_digest", "")
+            ),
+        )
+
     eval_split = "val" if val_fraction > 0.0 else "all"
     loader = make_multi_dataset_loader(
         shard_dirs,
@@ -3001,13 +3477,21 @@ def _run_evaluation(checkpoint, shards, train_metadata, dataset, experiment_name
         pin_memory=(device.type == "cuda"),
         split=eval_split,
         val_fraction=val_fraction,
+        validation_group_uids=fixed_validation_groups,
         max_active_loaders=1,
         prefetch_factor=1,
+        decode_future_frames=False,
     )
-    print(f"Eval split={eval_split} (val_fraction={val_fraction}, {len(shard_dirs)} partitions) — "
+    print(f"Eval split={eval_split} (strategy={training_policy.validation_strategy}, "
+          f"val_fraction={val_fraction}, {len(shard_dirs)} partitions) — "
           f"{'held-out generalization' if eval_split == 'val' else 'in-sample'}")
-    evaluation = _evaluate_open_loop(model, loader, device)
-    expected_digest = meta.get("validation", {}).get("sample_uid_digest")
+    evaluation = _evaluate_open_loop(
+        model,
+        loader,
+        device,
+        training_policy=training_policy,
+    )
+    expected_digest = validation_metadata.get("sample_uid_digest")
     if expected_digest and evaluation["sample_uid_digest"] != expected_digest:
         raise ValueError(
             "standalone evaluation used a different internal validation set: "
@@ -3049,7 +3533,20 @@ def _run_evaluation(checkpoint, shards, train_metadata, dataset, experiment_name
         params["train/weight_decay"] = training.get("weight_decay", "?")
         params["train/amp"] = training.get("amp", "?")
         params["train/final_loss"] = training.get("final_loss", "?")
+        params["model/trajectory_timesteps"] = AUTO_E2E_TIMESTEPS
         params["train/val_fraction"] = training.get("val_fraction", 0.0)
+        params["train/validation_strategy"] = (
+            training_policy.validation_strategy
+        )
+        params["train/validation_split_id"] = (
+            training_policy.validation_split_id
+        )
+        params["train/validation_group_uid_digest"] = (
+            validation_metadata.get(
+                "validation_group_uid_digest",
+                "hash_buckets",
+            )
+        )
         params["model/checkpoint_sha256"] = checkpoint_sha256
 
         # RL params
@@ -3242,6 +3739,10 @@ def evaluate_kitscenes_benchmark_checkpoint(
         sha256_file,
         stable_digest,
     )
+    from training.dataset_policy import (
+        adapt_egomotion_history,
+        training_policy_from_config,
+    )
 
     if not benchmark_shards:
         raise ValueError("benchmark_shards must not be empty")
@@ -3301,6 +3802,10 @@ def evaluate_kitscenes_benchmark_checkpoint(
     if not isinstance(payload["config"], dict):
         raise ValueError("benchmark checkpoint config must be an object")
     config = dict(payload["config"])
+    training_policy = training_policy_from_config(
+        config,
+        Dataset.KITSCENES.value,
+    )
     epoch = int(payload["epoch"])
     if epoch <= 0:
         raise ValueError(
@@ -3514,8 +4019,12 @@ def evaluate_kitscenes_benchmark_checkpoint(
                     "benchmark GPS trajectory has unexpected shape "
                     f"{getattr(gps_future, 'shape', None)}"
                 )
-            limited_history = limit_egomotion_history(
+            policy_history = adapt_egomotion_history(
                 history,
+                training_policy,
+            )
+            limited_history = limit_egomotion_history(
+                policy_history,
                 observation_steps=manifest.observation_steps,
             )
 
@@ -4343,8 +4852,9 @@ def wf_train_il(
     off: fp16 autocast made the GradScaler skip every step (see train_il).
     ``grad_accum_steps`` recovers a larger effective batch when the World-Model
     windows force batch_size=1 (effective batch = batch_size * grad_accum_steps).
-    ``val_fraction`` > 0 trains on a per-sample train split and evaluates on the
+    ``val_fraction`` > 0 trains on a group-level train split and evaluates on the
     disjoint held-out val split (generalization, not in-sample memorization).
+    KITScenes pins that split to an audited scene manifest.
     ``num_workers`` > 0 parallelizes JPEG decode across worker processes (#121 P0)
     — the dominant per-epoch cost once episodes scale up.
     """
