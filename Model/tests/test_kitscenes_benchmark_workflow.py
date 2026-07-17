@@ -68,6 +68,8 @@ def test_benchmark_task_filters_uids_and_never_decodes_future_images():
 
     assert "sample_uids=manifest.sample_uids" in source
     assert "decode_future_frames=False" in source
+    assert "training_policy_from_config(" in source
+    assert "adapt_egomotion_history(" in source
     assert "limit_egomotion_history(" in source
     assert 'batch.get("future_frames")' in source
     assert 'packed_manifest.get("has_map", False)' in source
