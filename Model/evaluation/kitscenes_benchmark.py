@@ -281,7 +281,7 @@ def limit_egomotion_history(
     *,
     observation_steps: int,
 ) -> torch.Tensor:
-    """Mask context older than the protocol window without changing model ABI."""
+    """Mask context older than the benchmark window without changing the ABI."""
     if history.ndim != 2 or history.shape[1] != 64 * 4:
         raise ValueError(
             "egomotion history must have shape [batch, 256]"
