@@ -20,6 +20,7 @@ Usage:
 from __future__ import annotations
 
 import functools
+import hashlib
 import io
 import json
 import re
@@ -398,7 +399,7 @@ def _split_bucket(key: str, buckets: int = 10) -> int:
     return split_bucket(key, buckets)
 
 
-def _split_group_of(sample) -> str:
+def _split_group_of(sample, *, required: bool = False) -> str:
     """The train/val SPLIT key for a raw shard sample (#121 §3.1).
 
     Hash the ``split_group_uid`` from the sample's ``meta.json`` (episode/clip
@@ -414,13 +415,39 @@ def _split_group_of(sample) -> str:
             g = json.loads(meta.decode() if isinstance(meta, (bytes, bytearray)) else meta)
             grp = g.get("split_group_uid")
             if grp:
-                return grp
-        except Exception:
-            pass
+                return str(grp)
+        except Exception as error:
+            if required:
+                raise ValueError(
+                    "sample meta.json is invalid; an explicit group split "
+                    "cannot fall back to the sample UID"
+                ) from error
+    if required:
+        raise ValueError(
+            "sample meta.json has no split_group_uid; an explicit group split "
+            "cannot fall back to the sample UID"
+        )
     return sample.get("__key__", "")
 
 
-def _split_keep(split: str, val_fraction: float):
+@dataclass(frozen=True)
+class _ExplicitSplitGroupFilter:
+    """Picklable selector for a frozen validation-group manifest."""
+
+    validation_groups: frozenset[str]
+    keep_validation: bool
+
+    def __call__(self, sample) -> bool:
+        group_uid = _split_group_of(sample, required=True)
+        in_validation = group_uid in self.validation_groups
+        return in_validation if self.keep_validation else not in_validation
+
+
+def _split_keep(
+    split: str,
+    val_fraction: float,
+    validation_group_uids: Sequence[str] | None = None,
+):
     """Return a predicate ``sample -> bool`` selecting the requested split.
 
     ``split="all"`` (default) keeps everything (backward-compatible, single-set
@@ -429,8 +456,29 @@ def _split_keep(split: str, val_fraction: float):
     ``round(val_fraction*10)`` of 10 buckets, ``train`` is the rest. Splitting by
     GROUP (not per-frame) keeps a whole episode/clip on one side, so eval-on-``val``
     measures generalization to UNSEEN episodes, not memorization of neighbours.
+    A supplied ``validation_group_uids`` manifest replaces hash bucketing with
+    exact membership and requires every sample to carry an explicit group UID.
     """
-    if split == "all" or val_fraction <= 0.0:
+    if split not in {"all", "train", "val"}:
+        raise ValueError(f"unsupported split {split!r}")
+    if split == "all":
+        return lambda sample: True
+    if validation_group_uids is not None:
+        requested = [str(uid) for uid in validation_group_uids]
+        validation_groups = frozenset(requested)
+        if not validation_groups:
+            raise ValueError("validation_group_uids must not be empty")
+        if len(validation_groups) != len(requested):
+            raise ValueError("validation_group_uids contains duplicates")
+        if any(not uid for uid in validation_groups):
+            raise ValueError(
+                "validation_group_uids must contain non-empty values"
+            )
+        return _ExplicitSplitGroupFilter(
+            validation_groups=validation_groups,
+            keep_validation=(split == "val"),
+        )
+    if val_fraction <= 0.0:
         return lambda sample: True
     buckets = 10
     val_buckets = max(1, min(buckets - 1, round(val_fraction * buckets)))
@@ -441,6 +489,142 @@ def _split_keep(split: str, val_fraction: float):
         return in_val if split == "val" else (not in_val)
 
     return keep
+
+
+@dataclass(frozen=True)
+class PackedSplitInventory:
+    """Identity coverage discovered from packed sample metadata."""
+
+    group_uids: tuple[str, ...]
+    sample_count: int
+    sample_uid_digest: str
+    sample_uids_by_group: tuple[tuple[str, tuple[str, ...]], ...]
+
+    def sample_identity_for_groups(
+        self,
+        group_uids: Sequence[str],
+    ) -> tuple[int, str]:
+        """Return the sample count and UID digest for exact group membership."""
+        requested = frozenset(str(uid) for uid in group_uids)
+        if not requested:
+            raise ValueError("at least one split group is required")
+        inventory = dict(self.sample_uids_by_group)
+        missing = requested - set(inventory)
+        if missing:
+            raise ValueError(
+                f"split groups are absent from packed inventory: {sorted(missing)}"
+            )
+        sample_uids = sorted(
+            sample_uid
+            for group_uid in requested
+            for sample_uid in inventory[group_uid]
+        )
+        return (
+            len(sample_uids),
+            hashlib.sha256(
+                "\n".join(sample_uids).encode("utf-8")
+            ).hexdigest(),
+        )
+
+
+def discover_split_inventory(
+    shard_dirs: Sequence[str | Path],
+) -> PackedSplitInventory:
+    """Read exact group and sample identities from packed shard metadata.
+
+    This is a one-time training-startup scan over tar headers and ``meta.json``
+    members only; camera/map payloads are never decoded. Exact KITScenes
+    holdouts use this inventory so their scene count is deterministic rather
+    than an approximate hash-bucket fraction.
+    """
+    import tarfile
+
+    roots = [Path(shard_dir) for shard_dir in shard_dirs]
+    if not roots:
+        raise ValueError("at least one shard directory is required")
+
+    group_uids: set[str] = set()
+    sample_uids: set[str] = set()
+    sample_uids_by_group: dict[str, list[str]] = {}
+    for root in roots:
+        tarfiles = sorted(root.glob("*.tar"))
+        if not tarfiles:
+            raise FileNotFoundError(f"No .tar shards found in {root}")
+        for tar_path in tarfiles:
+            with tarfile.open(tar_path, "r:*") as archive:
+                for member in archive:
+                    if not (
+                        member.isfile()
+                        and member.name.endswith(".meta.json")
+                    ):
+                        continue
+                    extracted = archive.extractfile(member)
+                    if extracted is None:
+                        raise ValueError(
+                            f"could not read {member.name} from {tar_path}"
+                        )
+                    try:
+                        metadata = json.load(extracted)
+                    except (OSError, UnicodeError, ValueError) as error:
+                        raise ValueError(
+                            f"invalid {member.name} in {tar_path}"
+                        ) from error
+                    group_uid = metadata.get("split_group_uid")
+                    if not isinstance(group_uid, str) or not group_uid:
+                        raise ValueError(
+                            f"{member.name} in {tar_path} has no valid "
+                            "split_group_uid"
+                        )
+                    sample_uid = metadata.get("sample_uid")
+                    member_uid = member.name.removesuffix(".meta.json")
+                    if (
+                        not isinstance(sample_uid, str)
+                        or not sample_uid
+                        or sample_uid != member_uid
+                    ):
+                        raise ValueError(
+                            f"{member.name} in {tar_path} has a mismatched "
+                            "sample_uid"
+                        )
+                    if sample_uid in sample_uids:
+                        raise ValueError(
+                            f"duplicate sample_uid {sample_uid!r} in packed "
+                            "shards"
+                        )
+                    group_uids.add(group_uid)
+                    sample_uids.add(sample_uid)
+                    sample_uids_by_group.setdefault(
+                        group_uid, []
+                    ).append(sample_uid)
+
+    if not sample_uids or len(group_uids) < 2:
+        raise ValueError(
+            "exact validation splitting requires metadata for at least two "
+            "split groups"
+        )
+    return PackedSplitInventory(
+        group_uids=tuple(sorted(group_uids)),
+        sample_count=len(sample_uids),
+        sample_uid_digest=hashlib.sha256(
+            "\n".join(sorted(sample_uids)).encode("utf-8")
+        ).hexdigest(),
+        sample_uids_by_group=tuple(
+            (
+                group_uid,
+                tuple(sorted(group_sample_uids)),
+            )
+            for group_uid, group_sample_uids in sorted(
+                sample_uids_by_group.items()
+            )
+        ),
+    )
+
+
+def discover_split_group_uids(
+    shard_dirs: Sequence[str | Path],
+) -> tuple[str, ...]:
+    """Return only the group component of :func:`discover_split_inventory`."""
+    return discover_split_inventory(shard_dirs).group_uids
 
 
 @dataclass(frozen=True)
@@ -465,6 +649,7 @@ def make_pre_extracted_loader(
     prefetch_factor: int = 4,
     shard_files: Sequence[str | Path] | None = None,
     sample_uids: Sequence[str] | None = None,
+    validation_group_uids: Sequence[str] | None = None,
     decode_future_frames: bool = True,
 ) -> wds.WebLoader:
     """Create a WebDataset DataLoader reading from local EBS shard cache.
@@ -479,10 +664,9 @@ def make_pre_extracted_loader(
             parallelism is capped by shard count — pack more, smaller shards to use
             more workers.
         split: ``"all"`` (default, every sample), ``"train"``, or ``"val"``. With
-            ``val_fraction`` > 0, ``train``/``val`` are a disjoint per-sample hash
-            split (see ``_split_keep``) so eval-on-``val`` measures generalization
-            rather than training-set memorization.
-        val_fraction: fraction of samples held out for ``val`` (0 disables the
+            ``val_fraction`` > 0, ``train``/``val`` are disjoint at
+            ``split_group_uid`` granularity (see ``_split_keep``).
+        val_fraction: fraction of groups held out for ``val`` (0 disables the
             split → ``"all"`` behaviour regardless of ``split``).
         shuffle: Shuffle buffer size (0 to disable).
         shuffle_seed: optional deterministic seed for the shuffle buffer.
@@ -494,6 +678,9 @@ def make_pre_extracted_loader(
         sample_uids: optional exact sample allowlist. Filtering happens before
             image decode so a fixed benchmark manifest does not decode unrelated
             samples from the same source scenes.
+        validation_group_uids: optional frozen group-level validation manifest.
+            When supplied with ``split="train"`` or ``"val"``, membership in
+            this exact set replaces approximate hash bucketing.
         decode_future_frames: decode World-Model target images. Benchmark
             inference disables this so future camera frames cannot enter its
             input batch; training keeps the default because JEPA needs them.
@@ -541,10 +728,15 @@ def make_pre_extracted_loader(
         if len(allowed) != len(requested):
             raise ValueError("sample_uids contains duplicates")
         dataset = dataset.select(_SampleUidFilter(allowed))
-    # Split BEFORE decode (cheap: filters on __key__ only, skips image decode for
-    # dropped samples). Keeps train/val disjoint at the sample level.
-    keep = _split_keep(split, val_fraction)
-    if split != "all" and val_fraction > 0.0:
+    # Split BEFORE decode so dropped groups never incur image decoding.
+    keep = _split_keep(
+        split,
+        val_fraction,
+        validation_group_uids=validation_group_uids,
+    )
+    if split != "all" and (
+        val_fraction > 0.0 or validation_group_uids is not None
+    ):
         dataset = dataset.select(keep)
     if shuffle > 0:
         dataset = dataset.shuffle(shuffle, seed=shuffle_seed)
@@ -621,6 +813,9 @@ class MergedDatasetLoader:
     Each yielded item is ``(batch, projection, geometry_type)`` so the training
     loop applies the right geometry to each (same-dataset) batch.
     """
+
+    num_workers: int
+    shuffle_seed: int | None
 
     def __init__(self, loaders=None, *, loader_factories=None, max_active_loaders: int = 4):
         if loaders is not None and loader_factories is not None:
@@ -714,6 +909,7 @@ def make_multi_dataset_loader(
     prefetch_factor: int = 4,
     max_active_loaders: int | None = None,
     sample_uids: Sequence[str] | None = None,
+    validation_group_uids: Sequence[str] | None = None,
     decode_future_frames: bool = True,
 ) -> MergedDatasetLoader:
     """Build a :class:`MergedDatasetLoader` over several shard directories.
@@ -723,7 +919,7 @@ def make_multi_dataset_loader(
     directory degrades to a one-loader merge (identical to the single dataset
     path, but yielding the ``(batch, projection, geometry_type)`` tuple).
 
-    ``split`` / ``val_fraction`` select a disjoint per-sample train/val split
+    ``split`` / ``val_fraction`` select a disjoint group-level train/val split
     applied per dataset (see make_pre_extracted_loader). ``num_workers`` is a
     GLOBAL worker budget: each active partition gets one worker, and no more than
     four partition loaders are active. Evaluation can use
@@ -759,6 +955,7 @@ def make_multi_dataset_loader(
             pin_memory=pin_memory,
             prefetch_factor=prefetch_factor,
             sample_uids=sample_uids,
+            validation_group_uids=validation_group_uids,
             decode_future_frames=decode_future_frames,
         )
         for index, d in enumerate(shard_dirs)
