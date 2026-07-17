@@ -11,7 +11,9 @@ const SCENE = "/scenes/nvidia_av/train-000000.tar/0";
 async function cameraPaintState(page: Page) {
   return page.evaluate(() => {
     const canvases = Array.from(
-      document.querySelectorAll("canvas:not([aria-hidden])"),
+      document.querySelectorAll<HTMLCanvasElement>(
+        "canvas:not([aria-hidden])",
+      ),
     );
     let ok = 0;
     for (const canvas of canvases) {
