@@ -17,6 +17,13 @@ from flytekit.types.file import FlyteFile
 from flytekit.types.directory import FlyteDirectory
 from typing import Annotated, NamedTuple, List, Optional
 
+from data_processing.contract_versions import (
+    GEOMETRY_VERSION as _GEOM_V,
+    PARSER_VERSION as _PARSER_V,
+    REASONING_LABEL_POLICY_VERSION as _LABEL_POLICY_V,
+    SHARD_SCHEMA_VERSION as _SHARD_V,
+    UID_SCHEMA_VERSION as _UID_V,
+)
 from Platform.pipelines.dataset_publication import DatasetPublication
 from Platform.pipelines.overlay_tasks import (
     register_selected_overlay_checkpoint,
@@ -62,13 +69,6 @@ KITSCENES_SOURCE_REVISION = "6fde0034446669e2ed7235e4c7fe323cd23d599d"
 # is fatal because guessing these values can silently reuse incompatible cache
 # entries. Per-partition group_ids and source_revision travel as task INPUTS, so
 # ranges are independently cacheable.
-from data_processing.contract_versions import (
-    GEOMETRY_VERSION as _GEOM_V,
-    PARSER_VERSION as _PARSER_V,
-    REASONING_LABEL_POLICY_VERSION as _LABEL_POLICY_V,
-    SHARD_SCHEMA_VERSION as _SHARD_V,
-    UID_SCHEMA_VERSION as _UID_V,
-)
 
 # Each stage's cache_version folds in ONLY the contracts that actually determine
 # its output (§3.4a): ingest depends on the parser enumeration; labels also on
