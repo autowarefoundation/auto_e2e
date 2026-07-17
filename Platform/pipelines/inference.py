@@ -12,7 +12,7 @@ import torch
 
 
 NOISE_POLICY_VERSION = "v1"
-INFERENCE_CONTRACT_VERSION = "v1"
+INFERENCE_CONTRACT_VERSION = "v2"
 
 
 def sha256_file(path: str | Path, chunk_size: int = 8 << 20) -> str:
