@@ -1,0 +1,30 @@
+name: Publish Documentation
+on:
+  push:
+    branches:
+      - main  # Triggers deployment whenever you push to main
+
+permissions:
+  contents: write # Needed to write the built documentation to the gh-pages branch
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-python-version: '3.x'
+
+      # Install mkdocs and the popular Material theme
+      - name: Install dependencies
+        run: |
+          pip install mkdocs mkdocs-material
+
+      # Build and push the generated HTML files to the gh-pages branch
+      - name: Deploy to GitHub Pages
+        run: |
+          mkdocs gh-deploy --force
