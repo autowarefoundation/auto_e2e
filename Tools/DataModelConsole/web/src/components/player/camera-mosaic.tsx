@@ -14,7 +14,9 @@ import { Grid3x3, ImageOff, Loader2 } from "lucide-react";
 import type { FrameStore } from "@/lib/frame-store";
 import type {
   CameraProjectionPaths,
+  CameraProjectionRibbons,
   ScreenPoint,
+  ScreenRibbon,
 } from "@/lib/projection";
 import { camLabel, gridDimensions, rigCam } from "@/lib/rig";
 import { cn } from "@/lib/utils";
@@ -28,7 +30,8 @@ function paintFrame(
   overlayCanvas: HTMLCanvasElement,
   bmp: ImageBitmap,
   predictionPaths?: ScreenPoint[][],
-  medianPredictionPaths?: ScreenPoint[][],
+  predictionRibbons?: ScreenRibbon[],
+  groundTruthRibbons?: ScreenRibbon[],
 ): boolean {
   if (imageCanvas.width !== bmp.width || imageCanvas.height !== bmp.height) {
     imageCanvas.width = bmp.width;
@@ -50,7 +53,7 @@ function paintFrame(
   imageContext.drawImage(bmp, 0, 0);
   overlayContext.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
 
-  const stroke = (
+  const strokePaths = (
     paths: ScreenPoint[][] | undefined,
     color: string,
     width: number,
@@ -73,8 +76,76 @@ function paintFrame(
     }
   };
 
-  stroke(predictionPaths, "rgba(52, 211, 153, 0.28)", 1.5);
-  stroke(medianPredictionPaths, "rgba(110, 231, 183, 0.95)", 2.5);
+  const strokePoints = (
+    points: ScreenPoint[],
+    color: string,
+    width: number,
+  ) => {
+    if (points.length < 2) return;
+    overlayContext.beginPath();
+    points.forEach((point, index) => {
+      const x = point.u * overlayCanvas.width;
+      const y = point.v * overlayCanvas.height;
+      if (index === 0) overlayContext.moveTo(x, y);
+      else overlayContext.lineTo(x, y);
+    });
+    overlayContext.strokeStyle = color;
+    overlayContext.lineWidth = width;
+    overlayContext.lineCap = "round";
+    overlayContext.lineJoin = "round";
+    overlayContext.stroke();
+  };
+
+  const paintRibbons = (
+    ribbons: ScreenRibbon[] | undefined,
+    fill: string,
+    outline: string,
+  ) => {
+    if (!ribbons) return;
+    for (const ribbon of ribbons) {
+      if (ribbon.left.length < 2 || ribbon.right.length < 2) continue;
+      overlayContext.beginPath();
+      ribbon.left.forEach((point, index) => {
+        const x = point.u * overlayCanvas.width;
+        const y = point.v * overlayCanvas.height;
+        if (index === 0) overlayContext.moveTo(x, y);
+        else overlayContext.lineTo(x, y);
+      });
+      for (let index = ribbon.right.length - 1; index >= 0; index--) {
+        const point = ribbon.right[index];
+        overlayContext.lineTo(
+          point.u * overlayCanvas.width,
+          point.v * overlayCanvas.height,
+        );
+      }
+      overlayContext.closePath();
+      overlayContext.fillStyle = fill;
+      overlayContext.fill("evenodd");
+
+      const boundaries = [
+        ribbon.left,
+        ribbon.right,
+        [ribbon.left[0], ribbon.right[0]],
+        [ribbon.left.at(-1)!, ribbon.right.at(-1)!],
+      ];
+      for (const boundary of boundaries) {
+        strokePoints(boundary, "rgba(2, 6, 23, 0.78)", 4);
+        strokePoints(boundary, outline, 2);
+      }
+    }
+  };
+
+  strokePaths(predictionPaths, "rgba(52, 211, 153, 0.2)", 1.25);
+  paintRibbons(
+    groundTruthRibbons,
+    "rgba(139, 92, 246, 0.3)",
+    "rgba(196, 181, 253, 0.98)",
+  );
+  paintRibbons(
+    predictionRibbons,
+    "rgba(34, 197, 94, 0.3)",
+    "rgba(110, 231, 183, 0.98)",
+  );
   return true;
 }
 
@@ -85,7 +156,8 @@ function CanvasTile({
   label,
   ordinal,
   predictionPaths,
-  medianPredictionPaths,
+  predictionRibbons,
+  groundTruthRibbons,
   className,
   onClick,
   selected = false,
@@ -96,7 +168,8 @@ function CanvasTile({
   label: string;
   ordinal?: number; // 1-based badge matching the "1-7" focus shortcut
   predictionPaths?: ScreenPoint[][];
-  medianPredictionPaths?: ScreenPoint[][];
+  predictionRibbons?: ScreenRibbon[];
+  groundTruthRibbons?: ScreenRibbon[];
   className?: string;
   onClick: () => void;
   selected?: boolean;
@@ -147,7 +220,8 @@ function CanvasTile({
                 overlay,
                 bmp,
                 predictionPaths,
-                medianPredictionPaths,
+                predictionRibbons,
+                groundTruthRibbons,
               )
             ) {
               return;
@@ -179,7 +253,14 @@ function CanvasTile({
       // by one leaving tile. Superseded windows fill the cache for scrubbing;
       // destroy() cancels anything still in flight.
     };
-  }, [store, frame, cam, predictionPaths, medianPredictionPaths]);
+  }, [
+    store,
+    frame,
+    cam,
+    predictionPaths,
+    predictionRibbons,
+    groundTruthRibbons,
+  ]);
 
   return (
     <button
@@ -225,6 +306,35 @@ function CanvasTile({
   );
 }
 
+function TrajectoryLegend({
+  prediction,
+  groundTruth,
+}: {
+  prediction: boolean;
+  groundTruth: boolean;
+}) {
+  if (!prediction && !groundTruth) return null;
+  return (
+    <div
+      className="mb-1 flex justify-end gap-3 font-mono text-[10px] text-slate-400"
+      aria-label="Camera trajectory legend"
+    >
+      {groundTruth && (
+        <span className="inline-flex items-center gap-1.5">
+          <span className="h-0.5 w-5 bg-violet-400" aria-hidden />
+          Ground truth
+        </span>
+      )}
+      {prediction && (
+        <span className="inline-flex items-center gap-1.5">
+          <span className="h-0.5 w-5 bg-emerald-400" aria-hidden />
+          Prediction
+        </span>
+      )}
+    </div>
+  );
+}
+
 // EgoTile is the center cell of the bird's-eye grid: a compact ego-state
 // readout with a small car glyph, so the mosaic reads as "the vehicle, with
 // its cameras arranged around it."
@@ -257,7 +367,8 @@ export function CameraMosaic({
   onSelectCam,
   onToggleFocus,
   predictionPaths,
-  medianPredictionPaths,
+  predictionRibbons,
+  groundTruthRibbons,
 }: {
   store: FrameStore;
   dataset: string;
@@ -269,13 +380,24 @@ export function CameraMosaic({
   onSelectCam: (idx: number) => void;
   onToggleFocus: () => void;
   predictionPaths?: CameraProjectionPaths;
-  medianPredictionPaths?: CameraProjectionPaths;
+  predictionRibbons?: CameraProjectionRibbons;
+  groundTruthRibbons?: CameraProjectionRibbons;
 }) {
+  const hasPrediction = Object.values(predictionRibbons ?? {}).some(
+    (ribbons) => ribbons.length > 0,
+  );
+  const hasGroundTruth = Object.values(groundTruthRibbons ?? {}).some(
+    (ribbons) => ribbons.length > 0,
+  );
   if (mode === "focus") {
     const focusedIdx = Math.min(Math.max(focusCam, 0), cams.length - 1);
     const focused = cams[focusedIdx];
     return (
-      <div className="min-w-0 space-y-2">
+      <div className="min-w-0">
+        <TrajectoryLegend
+          prediction={hasPrediction}
+          groundTruth={hasGroundTruth}
+        />
         <div className="relative">
           <CanvasTile
             store={store}
@@ -283,7 +405,8 @@ export function CameraMosaic({
             cam={focused}
             label={camLabel(dataset, focused)}
             predictionPaths={predictionPaths?.[focused]}
-            medianPredictionPaths={medianPredictionPaths?.[focused]}
+            predictionRibbons={predictionRibbons?.[focused]}
+            groundTruthRibbons={groundTruthRibbons?.[focused]}
             className="aspect-video w-full"
             onClick={onToggleFocus}
             selected
@@ -299,7 +422,7 @@ export function CameraMosaic({
           </button>
         </div>
         <div
-          className="flex min-w-0 max-w-full gap-1.5 overflow-x-auto overscroll-x-contain pb-1"
+          className="mt-2 flex min-w-0 max-w-full gap-1.5 overflow-x-auto overscroll-x-contain pb-1"
           role="group"
           aria-label="Camera filmstrip"
         >
@@ -312,7 +435,8 @@ export function CameraMosaic({
               label={camLabel(dataset, cam)}
               ordinal={i + 1}
               predictionPaths={predictionPaths?.[cam]}
-              medianPredictionPaths={medianPredictionPaths?.[cam]}
+              predictionRibbons={predictionRibbons?.[cam]}
+              groundTruthRibbons={groundTruthRibbons?.[cam]}
               className={cn(
                 "aspect-video min-w-28 basis-28 shrink-0 grow",
                 cam === focused && "ring-1 ring-blue-500",
@@ -344,37 +468,44 @@ export function CameraMosaic({
   const egoInFreeCell = !claimed.has(`${egoRow}:${egoCol}`);
 
   return (
-    <div
-      className="grid gap-2"
-      style={{
-        gridTemplateColumns: `repeat(${cols}, minmax(0, 1fr))`,
-        gridTemplateRows: `repeat(${rows}, auto)`,
-      }}
-    >
-      {cams.map((cam, i) => {
-        const c = rigCam(dataset, cam, i);
-        return (
-          <div key={cam} style={{ gridRow: c.row, gridColumn: c.col }}>
-            <CanvasTile
-              store={store}
-              frame={frame}
-              cam={cam}
-              label={c.label}
-              ordinal={i + 1}
-              predictionPaths={predictionPaths?.[cam]}
-              medianPredictionPaths={medianPredictionPaths?.[cam]}
-              className="aspect-video w-full"
-              onClick={() => onSelectCam(i)}
-              selected={false}
-            />
+    <div className="min-w-0">
+      <TrajectoryLegend
+        prediction={hasPrediction}
+        groundTruth={hasGroundTruth}
+      />
+      <div
+        className="grid gap-2"
+        style={{
+          gridTemplateColumns: `repeat(${cols}, minmax(0, 1fr))`,
+          gridTemplateRows: `repeat(${rows}, auto)`,
+        }}
+      >
+        {cams.map((cam, i) => {
+          const c = rigCam(dataset, cam, i);
+          return (
+            <div key={cam} style={{ gridRow: c.row, gridColumn: c.col }}>
+              <CanvasTile
+                store={store}
+                frame={frame}
+                cam={cam}
+                label={c.label}
+                ordinal={i + 1}
+                predictionPaths={predictionPaths?.[cam]}
+                predictionRibbons={predictionRibbons?.[cam]}
+                groundTruthRibbons={groundTruthRibbons?.[cam]}
+                className="aspect-video w-full"
+                onClick={() => onSelectCam(i)}
+                selected={false}
+              />
+            </div>
+          );
+        })}
+        {egoInFreeCell && (
+          <div style={{ gridRow: egoRow, gridColumn: egoCol }}>
+            <EgoTile sample={sample} />
           </div>
-        );
-      })}
-      {egoInFreeCell && (
-        <div style={{ gridRow: egoRow, gridColumn: egoCol }}>
-          <EgoTile sample={sample} />
-        </div>
-      )}
+        )}
+      </div>
     </div>
   );
 }
