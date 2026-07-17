@@ -139,7 +139,7 @@ def _map_without_degenerate_lanelets(scene_path: Path) -> Path:
         if tags.get("type") != "lanelet":
             continue
 
-        boundary_refs = {"left": [], "right": []}
+        boundary_refs: dict[str, list[str]] = {"left": [], "right": []}
         for member in relation.findall("member"):
             role = member.attrib.get("role")
             if role in boundary_refs and member.attrib.get("type") == "way":
