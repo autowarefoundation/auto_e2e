@@ -12,6 +12,8 @@ from training.dataset_policy import (
     AUTO_E2E_TIMESTEPS,
     KITSCENES_TRAINING_POLICY,
     L2D_TRAINING_POLICY,
+    SUBSET_EXACT_GROUP_STRATEGY,
+    VALIDATION_SCOPE_SUBSET,
     adapt_egomotion_history,
     group_uid_digest,
     training_policy_from_config,
@@ -246,6 +248,117 @@ class TestTrajectoryImitationLoss:
                     "d169a7ac79a30586e213e6b1f4ac4377"
                     "c038bd4edbeef39895e526160a00e286"
                 ),
+            )
+
+    def test_kitscenes_subset_holdout_is_order_invariant_and_exact(self):
+        policy = training_policy_for_dataset(
+            "KIT-MRT/KITScenes-Multimodal",
+            validation_scope=VALIDATION_SCOPE_SUBSET,
+        )
+        payload = dataset_policy._load_validation_manifest(policy)
+        groups = [
+            f"kitscenes-smoke-scene-{index:03d}"
+            for index in range(15)
+        ]
+        provenance = {
+            "source_revision": payload["source_revision"],
+            "packed_dataset_version": payload["dataset_version"],
+            "packed_contract_digest": payload["packed_contract_digest"],
+            "packed_partition_count": 15,
+            "empty_partition_count": 0,
+            "packed_sample_count": 150,
+            "packed_sample_uid_digest": "a" * 64,
+        }
+
+        selected = validation_group_uids(
+            groups,
+            val_fraction=0.1,
+            policy=policy,
+            **provenance,
+        )
+        reordered = validation_group_uids(
+            list(reversed(groups)),
+            val_fraction=0.1,
+            policy=policy,
+            **provenance,
+        )
+
+        assert policy.validation_strategy == SUBSET_EXACT_GROUP_STRATEGY
+        assert selected == reordered
+        assert selected == tuple(sorted(selected))
+        assert len(selected) == 2
+
+    def test_kitscenes_subset_scope_rejects_full_corpus(self):
+        policy = training_policy_for_dataset(
+            "KIT-MRT/KITScenes-Multimodal",
+            validation_scope=VALIDATION_SCOPE_SUBSET,
+        )
+        payload = dataset_policy._load_validation_manifest(policy)
+        groups = [
+            f"kitscenes-scene-{index:03d}"
+            for index in range(
+                payload["available_scene_count"]
+                - payload["excluded_empty_scene_count"]
+            )
+        ]
+
+        with pytest.raises(ValueError, match="proper partition subset"):
+            validation_group_uids(
+                groups,
+                val_fraction=0.1,
+                policy=policy,
+                source_revision=payload["source_revision"],
+                packed_dataset_version=payload["dataset_version"],
+                packed_contract_digest=payload["packed_contract_digest"],
+                packed_partition_count=payload["available_scene_count"],
+                empty_partition_count=payload[
+                    "excluded_empty_scene_count"
+                ],
+                packed_sample_count=payload["eligible_sample_count"],
+                packed_sample_uid_digest=payload[
+                    "eligible_sample_uid_digest"
+                ],
+            )
+
+    @pytest.mark.parametrize(
+        ("field", "invalid_value", "message"),
+        (
+            ("source_revision", "wrong-revision", "source revision"),
+            ("packed_dataset_version", "v0", "dataset version"),
+            ("packed_contract_digest", "wrong-contract", "contract digest"),
+        ),
+    )
+    def test_kitscenes_subset_rejects_unpinned_provenance(
+        self,
+        field,
+        invalid_value,
+        message,
+    ):
+        policy = training_policy_for_dataset(
+            "KIT-MRT/KITScenes-Multimodal",
+            validation_scope=VALIDATION_SCOPE_SUBSET,
+        )
+        payload = dataset_policy._load_validation_manifest(policy)
+        provenance = {
+            "source_revision": payload["source_revision"],
+            "packed_dataset_version": payload["dataset_version"],
+            "packed_contract_digest": payload["packed_contract_digest"],
+            "packed_partition_count": 10,
+            "empty_partition_count": 0,
+            "packed_sample_count": 100,
+            "packed_sample_uid_digest": "a" * 64,
+        }
+        provenance[field] = invalid_value
+
+        with pytest.raises(ValueError, match=message):
+            validation_group_uids(
+                [
+                    f"kitscenes-smoke-scene-{index:03d}"
+                    for index in range(10)
+                ],
+                val_fraction=0.1,
+                policy=policy,
+                **provenance,
             )
 
     def test_committed_kitscenes_holdout_manifest_is_self_consistent(self):
