@@ -49,7 +49,9 @@ import {
 } from "@/lib/api";
 import { FrameStore } from "@/lib/frame-store";
 import {
+  decodeEgo,
   integrateInterleavedControl,
+  integrateTrajectory,
   MAX_YAW_RATE,
   MAX_CURVATURE,
   trajectoryCurvatureSign,
@@ -67,7 +69,7 @@ import {
 import type { OverlayArtifact } from "@/lib/overlay";
 import {
   projectTrajectoriesToCameras,
-  projectTrajectoryToCameras,
+  projectTrajectoryRibbonToCameras,
 } from "@/lib/projection";
 import type {
   OverlayModel,
@@ -464,13 +466,30 @@ export function EpisodePlayer({
     () => (predictionTrajectories.length > 1 ? predictionTrajectories : []),
     [predictionTrajectories],
   );
+  const groundTruthTrajectory = useMemo(() => {
+    if (!sample?.ego_future?.length) return [];
+    const { future } = decodeEgo([], sample.ego_future);
+    return integrateTrajectory(
+      sample.ego_now?.[0] ?? 0,
+      future.accel,
+      future.curvature,
+      0.1,
+      "raw",
+      curvatureSign,
+    );
+  }, [sample, curvatureSign]);
   const cameraPredictionPaths = useMemo(
     () => projectTrajectoriesToCameras(rigProjection, predictionFan),
     [rigProjection, predictionFan],
   );
-  const cameraMedianPredictionPaths = useMemo(
-    () => projectTrajectoryToCameras(rigProjection, medianPrediction),
+  const cameraPredictionRibbons = useMemo(
+    () => projectTrajectoryRibbonToCameras(rigProjection, medianPrediction),
     [rigProjection, medianPrediction],
+  );
+  const cameraGroundTruthRibbons = useMemo(
+    () =>
+      projectTrajectoryRibbonToCameras(rigProjection, groundTruthTrajectory),
+    [rigProjection, groundTruthTrajectory],
   );
   const [reasoning, setReasoning] = useState<LabelState>(null);
   const [labelStatus, setLabelStatus] = useState<
@@ -676,7 +695,8 @@ export function EpisodePlayer({
           onSelectCam={focusCamera}
           onToggleFocus={() => setMode((m) => (m === "grid" ? "focus" : "grid"))}
           predictionPaths={cameraPredictionPaths}
-          medianPredictionPaths={cameraMedianPredictionPaths}
+          predictionRibbons={cameraPredictionRibbons}
+          groundTruthRibbons={cameraGroundTruthRibbons}
         />
         <div className="space-y-3">
           <TrajectoryBEV
