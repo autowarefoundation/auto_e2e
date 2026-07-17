@@ -66,6 +66,7 @@ def compute_camera_projection_matrices(
     if (transform is None) == (image_size is None):
         raise ValueError("provide exactly one of transform or image_size")
 
+    target_hw: tuple[int, int] | None
     if isinstance(image_size, int):
         target_hw = (image_size, image_size)
     else:
