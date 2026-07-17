@@ -18,18 +18,12 @@ Not a pytest — this is a runtime check on real video. Fails LOUD on any drift.
 from __future__ import annotations
 
 import argparse
-import io
 import json
-import os
 import time
 
-import numpy as np
-import torch
 from torchvision import transforms
 
 from data_parsing.l2d import L2DDataset
-from data_parsing.l2d.camera import CAMERA_NAMES, MAP_VIEW_NAME
-from data_processing.contract_versions import UID_SCHEMA_VERSION
 import data_processing.reasoning_label_generation.parallel_pack as pp
 
 
@@ -143,7 +137,7 @@ def main():
             if blob != legacy_cam:
                 raise SystemExit(
                     f"BYTE MISMATCH: sample {si} cam_{cam_i}.jpg differs")
-    print(f"  ✓ all cam_i.jpg bytes match legacy")
+    print("  ✓ all cam_i.jpg bytes match legacy")
 
     print("\n✓✓✓ All checks passed. Decode-dedup is byte-equivalent to legacy.")
     print(f"    speedup on {n_samples} samples: {speedup:.2f}x")
