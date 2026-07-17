@@ -29,14 +29,12 @@ import numpy as np
 import torch
 from torchvision import transforms
 
+from data_parsing.l2d.camera import CAMERA_NAMES as _L2D_CAM_NAMES  # type: ignore[misc]
+from data_parsing.l2d.camera import MAP_VIEW_NAME as _L2D_MAP_NAME  # type: ignore[misc]
 import data_processing.reasoning_label_generation.parallel_pack as pp
 
 IMAGE_SIZE = 32
 _WM_STRIDE = 10
-
-
-from data_parsing.l2d.camera import CAMERA_NAMES as _L2D_CAM_NAMES  # type: ignore[misc]
-from data_parsing.l2d.camera import MAP_VIEW_NAME as _L2D_MAP_NAME  # type: ignore[misc]
 
 
 class _FakeLerobot:
@@ -423,7 +421,6 @@ def test_window_rows_covers_all_window_offsets():
     rows = ds.window_rows(0)
     assert len(rows) == 8   # 4 hist + 4 fut
     # All in episode 0, no negative frame_index.
-    ep_start = ds.EP0_START
     for ep_idx, fi in rows:
         assert ep_idx == 0
         assert fi >= 0, f"negative frame_index {fi} — crossed episode start"
@@ -552,7 +549,9 @@ def test_end_to_end_dedup_loader_produces_identical_tensors():
     dd_members, dd_pool = _simulate_decode_dedup_shard(ds, "yaak-ai/L2D", calib)
 
     # Loader reads sample with pool accessor
-    pool_fn = lambda fid: dd_pool[fid]
+    def pool_fn(fid):
+        return dd_pool[fid]
+
     uid = ds.sample_uid(0)
     sample = dict(dd_members[uid])
     sample["__key__"] = uid
@@ -563,7 +562,10 @@ def test_end_to_end_dedup_loader_produces_identical_tensors():
     uid_lg, _, legacy_members, legacy_pool = pp.pack_sample(0)
     sample_lg = dict(legacy_members)
     sample_lg["__key__"] = uid_lg
-    pool_lg_fn = lambda fid: legacy_pool[fid]
+
+    def pool_lg_fn(fid):
+        return legacy_pool[fid]
+
     out_legacy = _decode_sample(sample_lg, pool=pool_lg_fn)
 
     # history/future must be tensor-equal
