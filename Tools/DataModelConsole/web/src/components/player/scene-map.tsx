@@ -95,7 +95,7 @@ export function SceneMap({
     paths.push({
       id: "recorded-future",
       points: egoTrajectoryToGeo(origin, heading, recordedFuture),
-      color: "#3b82f6",
+      color: "#8b5cf6",
       width: 2,
       opacity: 0.9,
     });
@@ -126,7 +126,7 @@ export function SceneMap({
         {episodePath.length > 1 && (
           <span className="text-amber-500">driven route</span>
         )}
-        <span className="text-blue-500">recorded future</span>
+        <span className="text-violet-400">recorded future</span>
         {medianPrediction.length > 1 && (
           <span className="text-emerald-400">model prediction</span>
         )}
