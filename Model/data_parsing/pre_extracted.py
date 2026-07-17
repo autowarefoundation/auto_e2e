@@ -538,7 +538,15 @@ class MergedDatasetLoader:
     loop applies the right geometry to each (same-dataset) batch.
     """
 
-    def __init__(self, loaders=None, *, loader_factories=None, max_active_loaders: int = 4):
+    def __init__(
+        self,
+        loaders=None,
+        *,
+        loader_factories=None,
+        max_active_loaders: int = 4,
+        num_workers: int = 0,
+        shuffle_seed: int | None = None,
+    ):
         if loaders is not None and loader_factories is not None:
             raise ValueError("pass loaders or loader_factories, not both")
         if loaders is None and loader_factories is None:
@@ -558,6 +566,8 @@ class MergedDatasetLoader:
             raise ValueError("MergedDatasetLoader needs at least one loader.")
         self._sources = [(source, owned) for source in sources]
         self.max_active_loaders = min(max_active_loaders, len(sources))
+        self.num_workers = num_workers
+        self.shuffle_seed = shuffle_seed
 
     @staticmethod
     def _open(source, owned: bool) -> _ActiveLoader:
@@ -678,7 +688,7 @@ def make_multi_dataset_loader(
     merged = MergedDatasetLoader(
         loader_factories=factories,
         max_active_loaders=active_limit,
+        num_workers=num_workers,
+        shuffle_seed=shuffle_seed,
     )
-    merged.num_workers = num_workers
-    merged.shuffle_seed = shuffle_seed
     return merged
