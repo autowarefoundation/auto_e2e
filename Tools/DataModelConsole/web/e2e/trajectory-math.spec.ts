@@ -6,8 +6,18 @@ import {
   trajectoryCurvatureSign,
 } from "../src/lib/ego";
 import { egoTrajectoryToGeo } from "../src/lib/geo";
-import { projectTrajectoryToCameras } from "../src/lib/projection";
+import {
+  projectTrajectoryRibbonToCameras,
+  projectTrajectoryToCameras,
+  trajectoryGroundZMeters,
+} from "../src/lib/projection";
 import type { RigProjectionDocument } from "../src/types";
+
+const KITSCENES_FRONT_MATRIX = [
+  [128.75527954101562, -131.19908142089844, 1.0061875581741333, -52.390167236328125],
+  [127.52409362792969, -0.9081462025642395, -249.18359375, -149.383544921875],
+  [0.9999749660491943, 0.0070677390322089195, 0.0003683842078316957, -0.4213404357433319],
+];
 
 test("raw TypeScript rollout matches the Python evaluation integrator", () => {
   const points = integrateInterleavedControl(
@@ -91,6 +101,33 @@ test("pinhole rig projects ego points into normalized camera pixels", () => {
   expect(result.cam_0[0][0].v).toBeCloseTo(180 / 256, 12);
   expect(result.cam_0[0][1].u).toBeCloseTo(28 / 256, 12);
   expect(result.cam_0[0][1].v).toBeCloseTo(100 / 256, 12);
+});
+
+test("production KITScenes calibration projects ribbons onto the ground", () => {
+  const rig: RigProjectionDocument = {
+    schema_version: "v1",
+    dataset: "KIT-MRT/KITScenes-Multimodal",
+    geometry_type: "pinhole",
+    image_size: 256,
+    projection: {
+      type: "pinhole",
+      matrix: [KITSCENES_FRONT_MATRIX],
+    },
+  };
+  const trajectory = [
+    { x: 5, y: 0, heading: 0 },
+    { x: 10, y: 0, heading: 0 },
+  ];
+
+  expect(trajectoryGroundZMeters(rig)).toBe(-2.1);
+  const center = projectTrajectoryToCameras(rig, trajectory).cam_0[0];
+  expect(center[0].v * 256).toBeCloseTo(220.99, 1);
+  expect(center[1].v * 256).toBeCloseTo(172.2, 1);
+
+  const ribbon = projectTrajectoryRibbonToCameras(rig, trajectory).cam_0[0];
+  expect(ribbon.left).toHaveLength(2);
+  expect(ribbon.right).toHaveLength(2);
+  expect(ribbon.left[0].u).toBeLessThan(ribbon.right[0].u);
 });
 
 test("f-theta rig preserves the ego-FLU to optical-axis convention", () => {
