@@ -80,6 +80,10 @@ def main():
     # Model
     from model_components.auto_e2e import AutoE2E
     from model_components.losses import TrajectoryImitationLoss
+    from training.dataset_policy import (
+        adapt_egomotion_history,
+        training_policy_for_dataset,
+    )
     from training.losses.horizon_reasoning_loss import HorizonReasoningLoss
 
     num_views = int(batch["visual_tiles"].shape[1])
@@ -92,9 +96,12 @@ def main():
     print(f"Model built: num_views={num_views}, WM+reasoning ON")
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4, weight_decay=1e-2)
-    traj_loss_fn = TrajectoryImitationLoss(loss_type="smooth_l1").to(device) \
-        if hasattr(TrajectoryImitationLoss(loss_type="smooth_l1"), "to") \
-        else TrajectoryImitationLoss(loss_type="smooth_l1")
+    policy = training_policy_for_dataset(str(manifest["dataset"]))
+    traj_loss_fn = TrajectoryImitationLoss(
+        loss_type="smooth_l1",
+        temporal_decay=policy.temporal_decay,
+        signal_scales=policy.signal_scales,
+    ).to(device)
     reasoning_loss_fn = HorizonReasoningLoss()
     from data_processing.reasoning_label_generation.targets import (
         target_batch_from_loader as tbf,
@@ -102,7 +109,10 @@ def main():
 
     # Move batch to device
     visual = batch["visual_tiles"].to(device)
-    ego_hist = batch["egomotion_history"].to(device)
+    ego_hist = adapt_egomotion_history(
+        batch["egomotion_history"].to(device),
+        policy,
+    )
     vis_hist = batch["visual_history"].to(device)
     target = batch["trajectory_target"].to(device)
     map_input = batch["map_input"].to(device)
