@@ -2,7 +2,7 @@
 
 // TrajectoryBEV: bird's-eye view of the ego trajectory.
 //
-// The blue and amber curves are recorded data. Optional emerald curves are a
+// The violet and amber curves are recorded data. Optional emerald curves are a
 // selected model's raw-control rollout from the canonical shard overlay.
 //
 // Path is in the ego frame: up = forward (+x), left = +y. The full 6.4s future
@@ -219,7 +219,7 @@ export function TrajectoryBEV({
       <div className="flex flex-wrap items-center justify-between gap-x-2 gap-y-1 font-mono text-[10px] text-slate-400">
         <span>
           BEV — <span className="text-slate-400">past</span> ·{" "}
-          <span className="text-blue-500">recorded future</span> /{" "}
+          <span className="text-violet-400">recorded future</span> /{" "}
           <span className="text-amber-500">driven path</span>
           {medianPredictionPath && (
             <>
@@ -299,7 +299,7 @@ export function TrajectoryBEV({
           <path
             d={path}
             fill="none"
-            stroke="#3b82f6"
+            stroke="#8b5cf6"
             strokeWidth="2"
             strokeLinecap="round"
             strokeLinejoin="round"
@@ -310,7 +310,7 @@ export function TrajectoryBEV({
             cx={sx(traj[traj.length - 1])}
             cy={sy(traj[traj.length - 1])}
             r="3"
-            fill="#3b82f6"
+            fill="#8b5cf6"
           />
         )}
 
