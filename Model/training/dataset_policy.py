@@ -6,7 +6,7 @@ properties that must not silently inherit values measured on L2D.
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 import hashlib
 import json
 from pathlib import Path
@@ -23,6 +23,9 @@ ACCELERATION_INDEX = 1
 L2D_DATASET_NAME = "yaak-ai/L2D"
 NVIDIA_DATASET_NAME = "nvidia/PhysicalAI-Autonomous-Vehicles"
 KITSCENES_DATASET_NAME = "KIT-MRT/KITScenes-Multimodal"
+VALIDATION_SCOPE_FULL = "full"
+VALIDATION_SCOPE_SUBSET = "subset"
+SUBSET_EXACT_GROUP_STRATEGY = "subset_exact_group_fraction"
 
 
 @dataclass(frozen=True)
@@ -48,6 +51,7 @@ class DatasetTrainingPolicy:
         if self.validation_strategy not in {
             "hash_buckets",
             "exact_group_fraction",
+            SUBSET_EXACT_GROUP_STRATEGY,
         }:
             raise ValueError(
                 f"unsupported validation_strategy {self.validation_strategy!r}"
@@ -55,14 +59,15 @@ class DatasetTrainingPolicy:
         if not self.validation_split_id:
             raise ValueError("validation_split_id must not be empty")
         if (
-            self.validation_strategy == "exact_group_fraction"
+            self.validation_strategy
+            in {"exact_group_fraction", SUBSET_EXACT_GROUP_STRATEGY}
             and (
                 not self.validation_manifest
                 or not self.validation_manifest_schema
             )
         ):
             raise ValueError(
-                "exact_group_fraction requires a validation manifest and schema"
+                "exact group validation requires a manifest and schema"
             )
 
     def metadata(self) -> dict[str, object]:
@@ -129,14 +134,33 @@ _LEGACY_POLICIES = {
 }
 
 
-def training_policy_for_dataset(dataset_name: str) -> DatasetTrainingPolicy:
+def training_policy_for_dataset(
+    dataset_name: str,
+    *,
+    validation_scope: str = VALIDATION_SCOPE_FULL,
+) -> DatasetTrainingPolicy:
     """Return an explicit policy; unknown datasets must be audited first."""
     try:
-        return _POLICIES[dataset_name]
+        policy = _POLICIES[dataset_name]
     except KeyError as error:
         raise ValueError(
             f"no training policy is defined for dataset {dataset_name!r}"
         ) from error
+    if validation_scope == VALIDATION_SCOPE_FULL:
+        return policy
+    if validation_scope != VALIDATION_SCOPE_SUBSET:
+        raise ValueError(
+            f"unsupported validation scope {validation_scope!r}"
+        )
+    if dataset_name != KITSCENES_DATASET_NAME:
+        raise ValueError(
+            "subset validation scope is defined only for KITScenes"
+        )
+    return replace(
+        policy,
+        validation_strategy=SUBSET_EXACT_GROUP_STRATEGY,
+        validation_split_id="kitscenes_smoke_subset_v1",
+    )
 
 
 def training_policy_from_config(
@@ -177,6 +201,15 @@ def _load_validation_manifest(
     if not isinstance(payload, dict):
         raise ValueError("validation manifest must be a JSON object")
     return payload
+
+
+def _validation_manifest_split_id(
+    policy: DatasetTrainingPolicy,
+) -> str:
+    """Return the corpus manifest ID used to validate an exact split policy."""
+    if policy.validation_strategy == SUBSET_EXACT_GROUP_STRATEGY:
+        return KITSCENES_TRAINING_POLICY.validation_split_id
+    return policy.validation_split_id
 
 
 def _manifest_count(payload: Mapping[str, object], key: str) -> int:
@@ -286,7 +319,7 @@ def validation_group_uids(
         raise ValueError(
             "validation manifest dataset does not match training policy"
         )
-    if payload.get("split_id") != policy.validation_split_id:
+    if payload.get("split_id") != _validation_manifest_split_id(policy):
         raise ValueError(
             "validation manifest split ID does not match training policy"
         )
@@ -307,6 +340,75 @@ def validation_group_uids(
         raise ValueError(
             "requested val_fraction differs from the frozen validation manifest"
         )
+    if policy.validation_strategy == SUBSET_EXACT_GROUP_STRATEGY:
+        full_partition_count = _manifest_count(
+            payload,
+            "available_scene_count",
+        )
+        if (
+            not isinstance(packed_partition_count, int)
+            or isinstance(packed_partition_count, bool)
+            or not 0 < packed_partition_count < full_partition_count
+        ):
+            raise ValueError(
+                "KITScenes subset validation requires a proper partition "
+                "subset of the frozen corpus"
+            )
+        if (
+            not isinstance(empty_partition_count, int)
+            or isinstance(empty_partition_count, bool)
+            or not 0 <= empty_partition_count < packed_partition_count
+        ):
+            raise ValueError(
+                "KITScenes subset empty-partition count is invalid"
+            )
+        if len(normalized) != (
+            packed_partition_count - empty_partition_count
+        ):
+            raise ValueError(
+                "KITScenes subset group count differs from its non-empty "
+                "partition count"
+            )
+        if (
+            not isinstance(packed_sample_count, int)
+            or isinstance(packed_sample_count, bool)
+            or packed_sample_count <= 0
+        ):
+            raise ValueError(
+                "KITScenes subset sample count must be positive"
+            )
+        if (
+            not isinstance(packed_sample_uid_digest, str)
+            or len(packed_sample_uid_digest) != 64
+            or any(
+                character not in "0123456789abcdef"
+                for character in packed_sample_uid_digest
+            )
+        ):
+            raise ValueError(
+                "KITScenes subset sample UID digest must be a lowercase SHA-256"
+            )
+
+        validation_count = max(
+            1,
+            min(
+                len(normalized) - 1,
+                round(val_fraction * len(normalized)),
+            ),
+        )
+        ranked = sorted(
+            normalized,
+            key=lambda uid: (
+                hashlib.sha256(
+                    (
+                        f"{policy.validation_split_id}\0{uid}"
+                    ).encode("utf-8")
+                ).digest(),
+                uid,
+            ),
+        )
+        return tuple(sorted(ranked[:validation_count]))
+
     if packed_partition_count != (
         _manifest_count(payload, "available_scene_count")
     ):
