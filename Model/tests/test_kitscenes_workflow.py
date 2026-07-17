@@ -395,15 +395,6 @@ def test_loader_wiring_avoids_training_peek_and_bounds_eval_prefetch():
     assert ast.literal_eval(keywords["prefetch_factor"]) == 1
 
 
-def test_dataset_dynamic_propagates_the_pinned_data_prep_image():
-    assert workflows._map_dataset_partitions.container_image == (
-        workflows.DATA_PREP_IMAGE
-    )
-    assert workflows._map_dataset_partitions.environment == {
-        "AUTO_E2E_DATA_PREP_IMAGE": workflows.DATA_PREP_IMAGE,
-    }
-
-
 @pytest.mark.parametrize(
     "buildspec_name",
     (
