@@ -2088,6 +2088,10 @@ def train_il(
     # (legacy in-sample behaviour). KITScenes uses a frozen audited scene
     # manifest; L2D/NVIDIA retain stable split_group_uid hash buckets.
     val_fraction: float = 0.1,
+    # Full KITScenes runs must match the frozen corpus manifest. Smoke runs may
+    # explicitly select "subset", which pins the same corpus provenance while
+    # deriving an exact deterministic holdout from the packed scene inventory.
+    validation_scope: str = "full",
     # Parallel JPEG decode (#121 P0). num_workers=0 decodes every sample (~55
     # JPEGs/sample with WM windows) serially on the training process, stalling the
     # GPU — the dominant per-epoch cost at scale. >0 spreads decode across worker
@@ -2168,7 +2172,13 @@ def train_il(
     ctx = current_context()
     bb, fm = backbone.value, FUSION_LABEL
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    training_policy = training_policy_for_dataset(dataset.value)
+    training_policy = training_policy_for_dataset(
+        dataset.value,
+        validation_scope=validation_scope,
+    )
+    uses_exact_validation = (
+        training_policy.validation_strategy != "hash_buckets"
+    )
 
     print(f"Training: backbone={bb} fusion={fm} epochs={epochs} bs={batch_size} device={device}")
 
@@ -2214,9 +2224,7 @@ def train_il(
     dataset_version = next(iter(dataset_versions), "unknown")
     packed_source_revision = _training_source_revision(
         manifests,
-        require_single=(
-            training_policy.validation_strategy == "exact_group_fraction"
-        ),
+        require_single=uses_exact_validation,
     )
     all_shard_dirs.sort(
         key=lambda shard_dir: (
@@ -2238,10 +2246,7 @@ def train_il(
         stable_digest(manifest.get("contracts"))
         for manifest in manifests.values()
     }
-    if (
-        training_policy.validation_strategy == "exact_group_fraction"
-        and len(contract_digests) != 1
-    ):
+    if uses_exact_validation and len(contract_digests) != 1:
         raise ValueError(
             "exact validation splitting requires one packed contract digest, "
             f"got {sorted(contract_digests)}"
@@ -2280,7 +2285,7 @@ def train_il(
     )
     split_inventory = None
     available_split_groups: tuple[str, ...] = ()
-    if training_policy.validation_strategy == "exact_group_fraction":
+    if uses_exact_validation:
         split_inventory = discover_split_inventory(shard_dirs)
         available_split_groups = split_inventory.group_uids
         expected_sample_count = sum(
@@ -2323,13 +2328,9 @@ def train_il(
         if fixed_validation_groups is not None
         else None
     )
-    frozen_validation_sample_count = None
-    frozen_validation_sample_digest = None
+    selected_validation_sample_count = None
+    selected_validation_sample_digest = None
     if fixed_validation_groups is not None:
-        (
-            frozen_validation_sample_count,
-            frozen_validation_sample_digest,
-        ) = validation_sample_identity(training_policy)
         if split_inventory is None:
             raise RuntimeError(
                 "exact validation splitting has no packed sample inventory"
@@ -2340,20 +2341,32 @@ def train_il(
         ) = split_inventory.sample_identity_for_groups(
             fixed_validation_groups
         )
-        if (
-            actual_validation_sample_count
-            != frozen_validation_sample_count
-            or actual_validation_sample_digest
-            != frozen_validation_sample_digest
-        ):
-            raise ValueError(
-                "packed validation sample identity differs from the frozen "
-                "split: "
-                f"expected_count={frozen_validation_sample_count} "
-                f"actual_count={actual_validation_sample_count} "
-                f"expected_digest={frozen_validation_sample_digest} "
-                f"actual_digest={actual_validation_sample_digest}"
-            )
+        if training_policy.validation_strategy == "exact_group_fraction":
+            (
+                frozen_validation_sample_count,
+                frozen_validation_sample_digest,
+            ) = validation_sample_identity(training_policy)
+            if (
+                actual_validation_sample_count
+                != frozen_validation_sample_count
+                or actual_validation_sample_digest
+                != frozen_validation_sample_digest
+            ):
+                raise ValueError(
+                    "packed validation sample identity differs from the frozen "
+                    "split: "
+                    f"expected_count={frozen_validation_sample_count} "
+                    f"actual_count={actual_validation_sample_count} "
+                    f"expected_digest={frozen_validation_sample_digest} "
+                    f"actual_digest={actual_validation_sample_digest}"
+                )
+        (
+            selected_validation_sample_count,
+            selected_validation_sample_digest,
+        ) = (
+            actual_validation_sample_count,
+            actual_validation_sample_digest,
+        )
     data_coverage = {
         "available_group_uid_digest": available_group_digest,
         "available_group_count": (
@@ -2402,8 +2415,8 @@ def train_il(
         "validation_group_uid_digest": validation_group_digest,
         "packed_sample_count": data_coverage["sample_count"],
         "packed_sample_uid_digest": data_coverage["sample_uid_digest"],
-        "validation_sample_count": frozen_validation_sample_count,
-        "validation_sample_uid_digest": frozen_validation_sample_digest,
+        "validation_sample_count": selected_validation_sample_count,
+        "validation_sample_uid_digest": selected_validation_sample_digest,
     }
 
     validation_loader = make_multi_dataset_loader(
@@ -2539,6 +2552,7 @@ def train_il(
         "jepa_loss_weight": jepa_loss_weight,
         "trajectory_training_policy": training_policy.metadata(),
         "val_fraction": val_fraction,
+        "validation_scope": validation_scope,
         "validation_split": validation_split_contract,
         "early_stopping_patience": early_stopping_patience,
         "scheduler": {
@@ -2568,8 +2582,8 @@ def train_il(
     best_checkpoint = None
     final_checkpoint = None
     bad_epochs = 0
-    expected_validation_digest = frozen_validation_sample_digest
-    validation_sample_count = frozen_validation_sample_count
+    expected_validation_digest = selected_validation_sample_digest
+    validation_sample_count = selected_validation_sample_count
     start_epoch = 1
     best_local_path = None
     resumed = resume_from is not None
@@ -2622,17 +2636,17 @@ def train_il(
         )
         saved_validation_count = state.get("validation_sample_count")
         if (
-            frozen_validation_sample_digest is not None
+            selected_validation_sample_digest is not None
             and (
                 saved_validation_digest
-                != frozen_validation_sample_digest
+                != selected_validation_sample_digest
                 or saved_validation_count
-                != frozen_validation_sample_count
+                != selected_validation_sample_count
             )
         ):
             raise ValueError(
                 "resume checkpoint validation sample identity differs from "
-                "the frozen split"
+                "the selected split"
             )
         expected_validation_digest = saved_validation_digest
         validation_sample_count = saved_validation_count
@@ -2698,6 +2712,7 @@ def train_il(
                     training_policy.temporal_decay
                 ),
                 "train/val_fraction": val_fraction,
+                "train/validation_scope": validation_scope,
                 "train/validation_strategy": (
                     training_policy.validation_strategy
                 ),
@@ -3113,6 +3128,7 @@ def train_il(
             "final_loss": losses_per_epoch[-1],
             "losses_per_epoch": losses_per_epoch,
             "val_fraction": val_fraction,
+            "validation_scope": validation_scope,
             "validation_split": validation_split_contract,
             "metric_history": metric_history,
         },
@@ -3220,9 +3236,9 @@ def train_offline_rl(
         config,
         dataset.value,
     )
-    if training_policy.validation_strategy == "exact_group_fraction":
+    if training_policy.validation_strategy != "hash_buckets":
         raise ValueError(
-            "offline RL does not yet support the frozen KITScenes train/holdout "
+            "offline RL does not yet support an exact KITScenes train/holdout "
             "partition; refusing to train on one shard or leak validation scenes"
         )
     shard_dir = _select_shard_dir(shards, dataset)
@@ -3396,7 +3412,7 @@ def _run_evaluation(checkpoint, shards, train_metadata, dataset, experiment_name
         training_metadata.get("val_fraction", 0.0) or 0.0
     )
     fixed_validation_groups = None
-    if training_policy.validation_strategy == "exact_group_fraction":
+    if training_policy.validation_strategy != "hash_buckets":
         checkpoint_validation = config.get("validation_split")
         if not isinstance(checkpoint_validation, dict):
             raise ValueError(
@@ -4734,6 +4750,7 @@ def wf_sharded_full_run(
     reasoning_mode: str = "pooled_latent",
     enable_world_model: bool = True,
     val_fraction: float = 0.1,
+    validation_scope: str = "full",
     num_workers: int = 4,
     resume_from: Optional[FlyteFile] = None,
     early_stopping_patience: int = 3,
@@ -4769,6 +4786,7 @@ def wf_sharded_full_run(
         batch_size=batch_size, grad_accum_steps=grad_accum_steps, lr=lr,
         enable_reasoning=enable_reasoning, reasoning_mode=reasoning_mode,
         enable_world_model=enable_world_model, val_fraction=val_fraction,
+        validation_scope=validation_scope,
         num_workers=num_workers, resume_from=resume_from,
         early_stopping_patience=early_stopping_patience)
     return evaluate_il_policy(
@@ -4840,6 +4858,7 @@ def wf_train_il(
     reasoning_mode: str = "pooled_latent",
     enable_world_model: bool = False,
     val_fraction: float = 0.1,
+    validation_scope: str = "full",
     num_workers: int = 0,
     resume_from: Optional[FlyteFile] = None,
     early_stopping_patience: int = 3,
@@ -4854,7 +4873,8 @@ def wf_train_il(
     windows force batch_size=1 (effective batch = batch_size * grad_accum_steps).
     ``val_fraction`` > 0 trains on a group-level train split and evaluates on the
     disjoint held-out val split (generalization, not in-sample memorization).
-    KITScenes pins that split to an audited scene manifest.
+    KITScenes pins full runs to an audited scene manifest; ``validation_scope``
+    may explicitly select a deterministic subset split for smoke runs.
     ``num_workers`` > 0 parallelizes JPEG decode across worker processes (#121 P0)
     — the dominant per-epoch cost once episodes scale up.
     """
@@ -4863,6 +4883,7 @@ def wf_train_il(
                    grad_accum_steps=grad_accum_steps, lr=lr, amp=amp,
                    enable_reasoning=enable_reasoning, reasoning_mode=reasoning_mode,
                    enable_world_model=enable_world_model, val_fraction=val_fraction,
+                   validation_scope=validation_scope,
                    num_workers=num_workers, resume_from=resume_from,
                    early_stopping_patience=early_stopping_patience)
     return evaluate_il_policy(checkpoint=out.checkpoint, shards=shards, dataset=dataset,
