@@ -9,6 +9,26 @@ const SAMPLE_UIDS = [
   "kitscenes-v1-scene-0042-f000066",
 ];
 const SAMPLE_KEYS = ["s00000064", "s00000065", "s00000066"];
+const KITSCENES_FRONT_MATRIX = [
+  [
+    128.75527954101562,
+    -131.19908142089844,
+    1.0061875581741333,
+    -52.390167236328125,
+  ],
+  [
+    127.52409362792969,
+    -0.9081462025642395,
+    -249.18359375,
+    -149.383544921875,
+  ],
+  [
+    0.9999749660491943,
+    0.0070677390322089195,
+    0.0003683842078316957,
+    -0.4213404357433319,
+  ],
+];
 const PIXEL = Buffer.from(
   "iVBORw0KGgoAAAANSUhEUgAAAEAAAAAkAQMAAAADwq7RAAAAIGNIUk0AAHomAACAhAAA+gAAAIDoAAB1MAAA6mAAADqYAAAXcJy6UTwAAAAGUExURTNBVf///753ZLcAAAABYktHRAH/Ai3eAAAAB3RJTUUH6gcPAQU1u04EUwAAAA1JREFUGNNjYBgFlAIAAUQAAS6fR94AAAAldEVYdGRhdGU6Y3JlYXRlADIwMjYtMDctMTVUMDE6MDU6NTMrMDA6MDCLG6dUAAAAJXRFWHRkYXRlOm1vZGlmeQAyMDI2LTA3LTE1VDAxOjA1OjUzKzAwOjAw+kYf6AAAACh0RVh0ZGF0ZTp0aW1lc3RhbXAAMjAyNi0wNy0xNVQwMTowNTo1MyswMDowMK1TPjcAAAAASUVORK5CYII=",
   "base64",
@@ -93,7 +113,7 @@ function egoHistory(speed: number): number[] {
 }
 
 function egoFuture(): number[] {
-  return Array.from({ length: 64 }, () => [0.05, 0]).flat();
+  return Array.from({ length: 64 }, () => [0.05, 0.01]).flat();
 }
 
 test("trajectory overlays and geographic views honor production contracts", async ({
@@ -273,11 +293,7 @@ test("trajectory overlays and geographic views honor production contracts", asyn
         image_size: 256,
         projection: {
           type: "pinhole",
-          matrix: [0, 1].map(() => [
-            [0, -8, 0, 128],
-            [-4, 0, 0, 230],
-            [0, 0, 0, 1],
-          ]),
+          matrix: [KITSCENES_FRONT_MATRIX, KITSCENES_FRONT_MATRIX],
         },
       });
     }
@@ -332,29 +348,54 @@ test("trajectory overlays and geographic views honor production contracts", asyn
   await expect(
     page.locator('svg path[stroke="#6ee7b7"]').first(),
   ).toHaveAttribute("d", /^M/);
+  await expect(page.getByLabel("Camera trajectory legend")).toContainText(
+    "Ground truth",
+  );
+  await expect(page.getByLabel("Camera trajectory legend")).toContainText(
+    "Prediction",
+  );
   await expect.poll(() => directImageRequests).toBeGreaterThan(0);
   expect(blobRequests).toBe(0);
 
   const overlayPixels = await page
     .locator("canvas[aria-hidden='true']")
-    .evaluateAll((canvases) =>
-      canvases.filter((canvas) => {
-        if (canvas.width === 0 || canvas.height === 0) return false;
+    .evaluateAll((elements) => {
+      let nonEmptyCanvases = 0;
+      let groundTruthPixels = 0;
+      let predictionPixels = 0;
+      for (const element of elements) {
+        const canvas = element as HTMLCanvasElement;
+        if (canvas.width === 0 || canvas.height === 0) continue;
         const context = canvas.getContext("2d");
-        if (!context) return false;
+        if (!context) continue;
         const data = context.getImageData(
           0,
           0,
           canvas.width,
           canvas.height,
         ).data;
-        for (let offset = 3; offset < data.length; offset += 4) {
-          if (data[offset] > 0) return true;
+        let nonEmpty = false;
+        for (let offset = 0; offset < data.length; offset += 4) {
+          const red = data[offset];
+          const green = data[offset + 1];
+          const blue = data[offset + 2];
+          const alpha = data[offset + 3];
+          if (alpha === 0) continue;
+          nonEmpty = true;
+          if (green > red * 1.2 && green > blue * 1.2) {
+            predictionPixels++;
+          }
+          if (blue > red * 1.2 && blue > green * 1.2) {
+            groundTruthPixels++;
+          }
         }
-        return false;
-      }).length,
-    );
-  expect(overlayPixels).toBeGreaterThan(0);
+        if (nonEmpty) nonEmptyCanvases++;
+      }
+      return { nonEmptyCanvases, groundTruthPixels, predictionPixels };
+    });
+  expect(overlayPixels.nonEmptyCanvases).toBeGreaterThan(0);
+  expect(overlayPixels.groundTruthPixels).toBeGreaterThan(0);
+  expect(overlayPixels.predictionPixels).toBeGreaterThan(0);
 
   const imageCanvas = page.locator("canvas:not([aria-hidden])").first();
   const overlayCanvas = page.locator("canvas[aria-hidden='true']").first();
