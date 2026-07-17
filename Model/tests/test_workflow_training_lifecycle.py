@@ -6,6 +6,7 @@ import ast
 import gc
 import hashlib
 import inspect
+import json
 import weakref
 from types import SimpleNamespace
 
@@ -32,6 +33,7 @@ class _MetricModel:
     def __init__(self):
         self.training = True
         self.reset_count = 0
+        self.last_egomotion_history = None
 
     def eval(self):
         self.training = False
@@ -43,6 +45,7 @@ class _MetricModel:
         self.reset_count += 1
 
     def __call__(self, visual, *args, **kwargs):
+        self.last_egomotion_history = args[2]
         return torch.zeros((visual.shape[0], 128), dtype=torch.float32)
 
 
@@ -84,6 +87,7 @@ def test_epoch_evaluation_restores_mode_and_hashes_fixed_uids():
     assert metrics == {
         "ade": 0.0,
         "fde": 0.0,
+        "evaluation_steps": 64,
         "sample_count": 2,
         "sample_uid_digest": expected_digest,
     }
@@ -127,6 +131,137 @@ def test_training_projection_cache_cannot_alias_404_scene_calibrations():
     assert "_ProjectionDeviceCache(device)" in training_source
     assert "_proj_cache.get(batch_proj)" in training_source
     assert "id(batch_proj)" not in training_source
+
+
+def test_exact_split_alone_requires_one_explicit_source_revision():
+    same_revision = {
+        "a": {"source_revision": "revision-a"},
+        "b": {"source_revision": "revision-a"},
+    }
+    mixed_revisions = {
+        "a": {"source_revision": "revision-a"},
+        "b": {"source_revision": "revision-b"},
+    }
+
+    assert workflows._training_source_revision(
+        same_revision,
+        require_single=True,
+    ) == "revision-a"
+    assert workflows._training_source_revision(
+        mixed_revisions,
+        require_single=False,
+    ) == ""
+    with pytest.raises(ValueError, match="one explicit packed"):
+        workflows._training_source_revision(
+            mixed_revisions,
+            require_single=True,
+        )
+    with pytest.raises(ValueError, match="one explicit packed"):
+        workflows._training_source_revision(
+            {"a": {}, "b": {"source_revision": "revision-a"}},
+            require_single=True,
+        )
+
+
+def test_exact_evaluation_rejects_packed_provenance_drift(tmp_path):
+    from Platform.pipelines.training_checkpoint import stable_digest
+
+    contracts = {"geometry": "v2", "shard": "v2"}
+    shard_dir = tmp_path / "partition"
+    shard_dir.mkdir()
+    manifest_path = shard_dir / "manifest.json"
+    manifest = {
+        "dataset": "KIT-MRT/KITScenes-Multimodal",
+        "source_revision": "revision-a",
+        "dataset_version": "v2.2",
+        "contracts": contracts,
+    }
+    manifest_path.write_text(json.dumps(manifest))
+
+    kwargs = {
+        "dataset_name": "KIT-MRT/KITScenes-Multimodal",
+        "source_revision": "revision-a",
+        "dataset_version": "v2.2",
+        "contract_digest": stable_digest(contracts),
+    }
+    workflows._validate_evaluation_shard_provenance(
+        [str(shard_dir)],
+        **kwargs,
+    )
+
+    manifest["contracts"]["geometry"] = "v3"
+    manifest_path.write_text(json.dumps(manifest))
+    with pytest.raises(ValueError, match="provenance differs"):
+        workflows._validate_evaluation_shard_provenance(
+            [str(shard_dir)],
+            **kwargs,
+        )
+
+
+def test_training_wires_dataset_specific_trajectory_policy():
+    training_source = inspect.getsource(workflows.train_il.task_function)
+
+    assert "training_policy_for_dataset" in training_source
+    assert "dataset.value" in training_source
+    assert "signal_scales=training_policy.signal_scales" in training_source
+    assert "temporal_decay=training_policy.temporal_decay" in training_source
+    assert "supervised_timesteps" not in training_source
+    assert "AUTO_E2E_TIMESTEPS" in training_source
+    assert "adapt_egomotion_history" in training_source
+    assert "discover_split_inventory" in training_source
+    assert "select_validation_group_uids" in training_source
+    assert "validation_group_uids=fixed_validation_groups" in (
+        training_source
+    )
+    assert "decode_future_frames=False" in training_source
+    assert '"trajectory_training_policy": training_policy.metadata()' in (
+        training_source
+    )
+    assert '"validation_split": validation_split_contract' in (
+        training_source
+    )
+
+    evaluation_source = inspect.getsource(workflows._run_evaluation)
+    assert "validation_group_uids=fixed_validation_groups" in (
+        evaluation_source
+    )
+    assert "decode_future_frames=False" in evaluation_source
+    assert "validation group manifest digest mismatch" in evaluation_source
+    assert "checkpoint has no exact validation_split contract" in (
+        evaluation_source
+    )
+
+    offline_rl_source = inspect.getsource(
+        workflows.train_offline_rl.task_function
+    )
+    assert "refusing to train on one shard" in offline_rl_source
+
+
+def test_kitscenes_epoch_evaluation_preserves_auto_e2e_horizon():
+    from training.dataset_policy import KITSCENES_TRAINING_POLICY
+
+    model = _MetricModel()
+    batch = _validation_batch(["sample-a"])
+    history = batch["egomotion_history"].reshape(1, 64, 4)
+    history[:, :, :] = 1.0
+    history[:, -1, 0] = 2.0
+    target = batch["trajectory_target"].reshape(1, 64, 2)
+    target[:, 50:, :] = 100.0
+
+    metrics = workflows._evaluate_open_loop(
+        model,
+        [(batch, None, "pseudo")],
+        torch.device("cpu"),
+        training_policy=KITSCENES_TRAINING_POLICY,
+    )
+
+    assert metrics["ade"] > 0.0
+    assert metrics["fde"] > 0.0
+    assert metrics["evaluation_steps"] == 64
+    adapted = model.last_egomotion_history.reshape(1, 64, 4)
+    assert torch.count_nonzero(adapted[:, :24]) == 24 * 4
+    assert adapted[0, -1, 0].item() == 2.0
+    assert adapted[0, -1, 1].item() == 0.0
 
 
 def test_terminal_resume_state_allows_finalization():
