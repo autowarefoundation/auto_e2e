@@ -99,3 +99,42 @@ Up to **~76 FPS** (SwinV2-Tiny, feature-concat fusion, RTX 5080, batch 1). Full 
 inference benchmarks covering latency, jitter and VRAM across backbones, fusion modes and
 batch sizes live in [BENCHMARKS.md](./Model/speed_benchmark/BENCHMARKS.md). Run the
 [benchmarking script](./Model/speed_benchmark) to add results for your own GPU.
+### NVIDIA GeForce RTX 5080
+
+> CUDA 12.8 | Driver 580.95.05 | PyTorch 2.7.1+cu128 | Commit `ead2171` | Resolution [256, 256]
+
+| Backbone | Fusion Mode | Batch | FPS | Latency (ms) | p99 (ms) | Jitter (ms) | VRAM (MB) | Params |
+|----------|-------------|-------|-----|--------------|----------|-------------|-----------|--------|
+| swin_v2_tiny | bev | 1 | 55.9 | 17.9 | 18.9 | 0.9 | 375 | 56.8M |
+| swin_v2_tiny | bev | 2 | 30.6 | 32.7 | 34.7 | 1.4 | 520 | 56.8M |
+| swin_v2_tiny | bev | 4 | 15.2 | 66.0 | 68.8 | 1.2 | 803 | 56.8M |
+| conv_next_v2_tiny | bev | 1 | 57.4 | 17.4 | 18.4 | 0.8 | 396 | 57.1M |
+| conv_next_v2_tiny | bev | 2 | 29.8 | 33.5 | 35.0 | 0.8 | 561 | 57.1M |
+| conv_next_v2_tiny | bev | 4 | 14.7 | 67.9 | 70.5 | 1.0 | 887 | 57.1M |
+| swin_v2_tiny | bev | 1 | 53.6 | 18.7 | 19.7 | 0.8 | 386 | 59.4M |
+| swin_v2_tiny | bev | 1 | 53.1 | 18.8 | 20.7 | 1.7 | 388 | 59.6M |
+
+### NVIDIA RTX A6000
+
+> CUDA 11.8 | Driver 580.159.03 | PyTorch 2.4.1+cu118 | Commit `9015914` | Resolution [256, 256]
+
+| Backbone | Fusion Mode | Batch | FPS | Latency (ms) | p99 (ms) | Jitter (ms) | VRAM (MB) | Params |
+|----------|-------------|-------|-----|--------------|----------|-------------|-----------|--------|
+| swin_v2_tiny | concat | 1 | 28.2 | 35.4 | 35.9 | 0.6 | 307 | 35.3M |
+| swin_v2_tiny | concat | 2 | 27.4 | 36.5 | 37.7 | 1.3 | 472 | 35.3M |
+| swin_v2_tiny | concat | 4 | 15.3 | 65.2 | 66.4 | 1.2 | 796 | 35.3M |
+| swin_v2_tiny | cross_attn | 1 | 27.9 | 35.8 | 36.5 | 0.7 | 310 | 35.3M |
+| swin_v2_tiny | cross_attn | 2 | 27.4 | 36.5 | 37.9 | 1.4 | 472 | 35.3M |
+| swin_v2_tiny | cross_attn | 4 | 15.2 | 65.9 | 71.6 | 6.1 | 796 | 35.3M |
+| swin_v2_tiny | bev | 1 | 10.6 | 94.1 | 95.4 | 1.4 | 1819 | 69.7M |
+| swin_v2_tiny | bev | 2 | 5.4 | 184.5 | 188.4 | 4.3 | 3353 | 69.7M |
+| swin_v2_tiny | bev | 4 | 2.8 | 360.2 | 380.2 | 21.3 | 6420 | 69.7M |
+| conv_next_v2_tiny | concat | 1 | 32.0 | 31.2 | 36.7 | 5.7 | 333 | 35.6M |
+| conv_next_v2_tiny | concat | 2 | 27.9 | 35.8 | 37.9 | 2.3 | 519 | 35.6M |
+| conv_next_v2_tiny | concat | 4 | 15.6 | 64.2 | 67.0 | 2.8 | 891 | 35.6M |
+| conv_next_v2_tiny | cross_attn | 1 | 31.6 | 31.6 | 33.4 | 2.0 | 332 | 35.6M |
+| conv_next_v2_tiny | cross_attn | 2 | 27.8 | 35.9 | 37.6 | 1.9 | 518 | 35.6M |
+| conv_next_v2_tiny | cross_attn | 4 | 15.5 | 64.5 | 67.2 | 2.6 | 890 | 35.6M |
+| conv_next_v2_tiny | bev | 1 | 10.7 | 93.9 | 94.2 | 0.3 | 1819 | 70.0M |
+| conv_next_v2_tiny | bev | 2 | 5.5 | 182.1 | 183.2 | 1.2 | 3350 | 70.0M |
+| conv_next_v2_tiny | bev | 4 | 2.8 | 355.7 | 356.8 | 1.1 | 6418 | 70.0M |
