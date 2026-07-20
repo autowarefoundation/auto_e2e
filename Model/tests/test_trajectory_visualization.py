@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import hashlib
 import io
 import json
@@ -182,15 +183,30 @@ def test_report_integrator_matches_evaluation_reference():
 
 
 def test_export_workflow_uses_stable_module_task_resolver():
-    from flytekit.core.python_auto_container import default_task_resolver
-
-    from Platform.pipelines.workflows import wf_export_trajectory_report
-
-    export_task = wf_export_trajectory_report.nodes[0].flyte_entity
-    assert export_task.task_resolver is default_task_resolver
-    assert export_task.name == (
-        "Platform.pipelines.trajectory_visualization_tasks."
-        "export_trajectory_report"
+    source = (
+        Path(__file__).parents[2] / "Platform/pipelines/workflows.py"
+    ).read_text()
+    module = ast.parse(source)
+    assert any(
+        isinstance(node, ast.ImportFrom)
+        and node.module == (
+            "Platform.pipelines.trajectory_visualization_tasks"
+        )
+        and any(
+            alias.name == "export_trajectory_report"
+            for alias in node.names
+        )
+        for node in module.body
+    )
+    workflow = next(
+        node
+        for node in module.body
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "wf_export_trajectory_report"
+    )
+    assert not any(
+        isinstance(node, (ast.Import, ast.ImportFrom))
+        for node in ast.walk(workflow)
     )
 
 
