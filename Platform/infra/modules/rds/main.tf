@@ -68,8 +68,10 @@ resource "aws_db_parameter_group" "this" {
 
 resource "aws_db_instance" "this" {
   identifier     = "${var.cluster_name}-pg"
-  engine         = "postgres"
-  engine_version = "16.9"
+  engine = "postgres"
+  # Track the auto-applied minor version (AWS upgraded 16.9 → 16.13). Pinning the
+  # old value would make every plan attempt an invalid downgrade.
+  engine_version = "16.13"
   instance_class = "db.r6g.large"
 
   allocated_storage     = 100

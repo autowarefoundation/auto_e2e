@@ -85,6 +85,7 @@ module "flyte" {
 
   cluster_name        = var.cluster_name
   artifacts_bucket    = module.storage.bucket_names["artifacts"]
+  datasets_bucket     = module.storage.bucket_names["datasets"]
   region              = var.region
   rds_host            = module.rds.address
   rds_password        = module.rds.master_password

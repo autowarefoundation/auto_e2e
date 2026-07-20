@@ -4,6 +4,7 @@ import torch
 import torch.nn as nn
 
 from .base import BasePlanner
+from .reasoning_coupling import ReasoningCoupling
 
 
 class BezierPlanner(BasePlanner):
@@ -27,7 +28,8 @@ class BezierPlanner(BasePlanner):
     """
 
     def __init__(self, embed_dim=256, num_timesteps=64, num_signals=2,
-                 num_controls=5, egomotion_dim=256, visual_history_dim=896):
+                 num_controls=5, egomotion_dim=256, visual_history_dim=896,
+                 reasoning_mode="none"):
         super().__init__()
         if num_controls < 2:
             raise ValueError(
@@ -50,11 +52,27 @@ class BezierPlanner(BasePlanner):
         self.ego_state_proj = nn.Linear(egomotion_dim, embed_dim)
         self.visual_history_proj = nn.Linear(visual_history_dim, embed_dim)
         self.bev_proj = nn.Linear(embed_dim, embed_dim)
+        # Zero-init the visual-history projection so the World-Model-derived
+        # visual_history starts as a STRICT no-op and the planner learns to open
+        # it only as the WM matures — mirroring the reasoning branch's zero-init
+        # coupling (alpha=0). Rationale (#13): with the WM on, visual_history is a
+        # non-stationary WM output; a default-init projection makes the planner
+        # depend on that moving, partly-eval-unavailable signal from step 0, which
+        # empirically made the full 3-branch model slightly WORSE than the
+        # imitation baseline (visual_history=zeros). Zero-init makes the WM branch
+        # strictly additive: the planner is identical to the imitation baseline at
+        # init and can only improve as it learns to use a trained visual_history.
+        nn.init.zeros_(self.visual_history_proj.weight)
+        nn.init.zeros_(self.visual_history_proj.bias)
         self.context_mlp = nn.Sequential(
             nn.Linear(embed_dim, embed_dim),
             nn.GELU(),
             nn.Linear(embed_dim, embed_dim),
         )
+
+        # Reasoning coupling (zero-init; no-op at init). Injects the reasoning
+        # branch into the planner context before the control head.
+        self.reasoning_coupling = ReasoningCoupling(embed_dim, mode=reasoning_mode)
 
         # Predict (num_controls x num_signals) Bezier control points.
         self.control_head = nn.Linear(embed_dim, num_controls * num_signals)
@@ -87,12 +105,17 @@ class BezierPlanner(BasePlanner):
         return basis
 
     def forward(self, bev_features, visual_history, egomotion_history,
+                reasoning_latent=None, reasoning_horizon_tokens=None,
                 **kwargs):
         """
         Args:
             bev_features: [B, embed_dim, H, W] — any spatial resolution.
             visual_history: [B, visual_history_dim].
             egomotion_history: [B, egomotion_dim].
+            reasoning_latent: optional [B, embed_dim] pooled reasoning latent
+                (used by reasoning_mode="pooled_latent").
+            reasoning_horizon_tokens: optional [B, 5, embed_dim] per-horizon
+                reasoning tokens (used by reasoning_mode="horizon_cross_attention").
 
         Returns:
             trajectory: [B, num_timesteps * num_signals]
@@ -117,6 +140,12 @@ class BezierPlanner(BasePlanner):
             self.ego_state_proj(egomotion_history)
             + self.visual_history_proj(visual_history)
             + self.bev_proj(bev_context)
+        )
+        # Zero-init reasoning residual (no-op at init; see ReasoningCoupling).
+        context = self.reasoning_coupling(
+            context,
+            reasoning_latent=reasoning_latent,
+            horizon_tokens=reasoning_horizon_tokens,
         )
         bezier_feature = self.context_mlp(context)                          # [B, C]
 

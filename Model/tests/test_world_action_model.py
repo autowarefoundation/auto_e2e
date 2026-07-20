@@ -82,9 +82,12 @@ def test_world_action_model_view_aggregator(device, caplog):
     assert m_attn.encoder.view_aggregator == "attention"
     assert m_attn.encoder.view_pool.view_embed.shape[1] > 0
 
-    # test custom num_views configuration
+    # view_embed is sized to an upper bound (max_views), NOT num_views, so a
+    # merged run mixing rigs (6cam + 7cam) never reuses one camera's positional
+    # code for another. It must be >= the requested num_views and cover it.
     m_attn_6 = _wam(device, view_aggregator="attention", num_views=6)
-    assert m_attn_6.encoder.view_pool.view_embed.shape[1] == 6
+    assert m_attn_6.encoder.view_pool.view_embed.shape[1] >= 6
+    assert m_attn_6.encoder.view_pool.max_views >= 6
 
     # test fallback warning when num_views=1 and view_aggregator="attention"
     import logging
@@ -172,7 +175,11 @@ class _MockBackbone4(nn.Module):
 
     def __init__(self, backbone="swin_v2_tiny", is_pretrained=True, **kwargs):
         super().__init__()
-        self.backbone_channels = 1440
+        # Per-stage channels; the World Model derives its JEPA feature_channels
+        # from feature_channels[-1], so the mock must expose it like the real
+        # Backbone wrapper.
+        self.feature_channels = [96, 192, 384, 768]
+        self.backbone_channels = sum(self.feature_channels)
         self._st = nn.ModuleList([
             nn.Sequential(nn.Conv2d(3, 96, 3, 1, 1), nn.AdaptiveAvgPool2d(64)),
             nn.Sequential(nn.Conv2d(96, 192, 3, 1, 1), nn.AdaptiveAvgPool2d(32)),
@@ -227,9 +234,10 @@ class TestAutoE2EWorldModelWiring:
         m(cam, mp, vh, ego, mode="train", trajectory_target=tgt)        # tick 1 fills buffer
         out = m(cam, mp, vh, ego, mode="train", trajectory_target=tgt)  # tick 2
         assert isinstance(out, tuple) and len(out) == 2
-        traj, future_state_pred = out
+        traj, aux = out
         traj0 = traj[0] if isinstance(traj, tuple) else traj
         assert traj0.shape == (2, 128)
+        future_state_pred = aux["future_state_pred"]
         assert future_state_pred is not None and len(future_state_pred) == 4
 
     def test_default_world_model_off_unchanged(self, device):
@@ -315,4 +323,4 @@ class TestAutoE2EWorldModelAttentionPool:
         m(cam, mp, vh, ego, mode="train", trajectory_target=torch.randn(2, 128, device=device))
         out = m(cam, mp, vh, ego, mode="train", trajectory_target=torch.randn(2, 128, device=device))
         assert isinstance(out, tuple) and len(out) == 2
-        assert out[1] is not None and len(out[1]) == 4
+        assert out[1]["future_state_pred"] is not None and len(out[1]["future_state_pred"]) == 4

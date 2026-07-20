@@ -14,7 +14,7 @@ def build_map_encoder(map_type: str, **kwargs) -> nn.Module:
         map_type: One of the keys in ``MAP_ENCODER_REGISTRY``
             (currently only ``"rasterized"``).
         **kwargs: Forwarded to the selected encoder constructor
-            (``embed_dim``, ``output_size``, ``in_channels``).
+            (``embed_dim``, ``output_h``, ``output_w``, ``in_channels``).
 
     """
     if map_type not in MAP_ENCODER_REGISTRY:

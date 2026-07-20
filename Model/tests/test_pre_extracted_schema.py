@@ -195,3 +195,68 @@ class TestManifestProjection:
         proj, _ = load_projection_from_manifest(str(tmp_path))
         res = proj.project_ego_to_image(torch.randn(10, 4), 256)  # must not raise
         assert res.valid_mask.shape == (1, 2, 10)
+
+
+class TestDecodeWorldModelWindows:
+    """WM window members hist_/fut_ decode to [steps, V, 3, H, W] (#13)."""
+
+    def _window_sample(self, n_cams=6, T=4, F=4):
+        sample = {f"cam_{i}.jpg": _jpeg_bytes((i, 0, 0)) for i in range(n_cams)}
+        sample["ego.npy"] = _ego_bytes()
+        for t in range(T):
+            for v in range(n_cams):
+                sample[f"hist_{t}_cam_{v}.jpg"] = _jpeg_bytes((t, v, 0))
+        for f in range(F):
+            for v in range(n_cams):
+                sample[f"fut_{f}_cam_{v}.jpg"] = _jpeg_bytes((f, v, 1))
+        return sample
+
+    def test_windows_decoded_with_right_shape(self):
+        out = _decode_sample(self._window_sample(n_cams=6, T=4, F=4))
+        assert out["history_frames"].shape == (4, 6, 3, 256, 256)
+        assert out["future_frames"].shape == (4, 6, 3, 256, 256)
+
+    def test_windows_absent_when_not_packed(self):
+        sample = {f"cam_{i}.jpg": _jpeg_bytes((i, 0, 0)) for i in range(6)}
+        sample["ego.npy"] = _ego_bytes()
+        out = _decode_sample(sample)
+        assert "history_frames" not in out
+        assert "future_frames" not in out
+
+
+class TestMergedDatasetLoader:
+    """Round-robin interleaving of multiple single-dataset loaders (#77 merge)."""
+
+    def _fake_loader(self, batches, projection, geom):
+        class _L:
+            def __init__(self, b, p, g):
+                self._b, self.projection, self.geometry_type = b, p, g
+            def __iter__(self):
+                return iter(self._b)
+        return _L(batches, projection, geom)
+
+    def test_round_robin_interleaves_and_tags_geometry(self):
+        from data_parsing.pre_extracted import MergedDatasetLoader
+        a = self._fake_loader(["a0", "a1", "a2"], None, "pseudo")
+        b = self._fake_loader(["b0", "b1"], "PROJ", "ftheta")
+        merged = MergedDatasetLoader([a, b])
+        seen = list(merged)
+        # Each item carries its dataset's geometry.
+        assert ("a0", None, "pseudo") in seen
+        assert ("b0", "PROJ", "ftheta") in seen
+        # Interleaved (a0, b0, a1, b1, a2) not concatenated (a0,a1,a2,b0,b1).
+        order = [x[0] for x in seen]
+        assert order == ["a0", "b0", "a1", "b1", "a2"]
+        # All batches from both datasets appear exactly once.
+        assert sorted(order) == ["a0", "a1", "a2", "b0", "b1"]
+
+    def test_single_loader_degrades_cleanly(self):
+        from data_parsing.pre_extracted import MergedDatasetLoader
+        a = self._fake_loader(["x0", "x1"], None, "pseudo")
+        merged = MergedDatasetLoader([a])
+        assert [x[0] for x in merged] == ["x0", "x1"]
+
+    def test_empty_raises(self):
+        from data_parsing.pre_extracted import MergedDatasetLoader
+        with pytest.raises(ValueError, match="at least one"):
+            MergedDatasetLoader([])

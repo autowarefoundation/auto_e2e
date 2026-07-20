@@ -25,6 +25,8 @@ FeatureReconstructionLoss).
 """
 
 import logging
+from typing import Optional
+
 import torch
 import torch.nn as nn
 
@@ -43,9 +45,15 @@ class ViewAttentionPool(nn.Module):
     ``view_aggregator="mean"`` to revert to the equal-weight mean.
     """
 
-    def __init__(self, embed_dim: int = 768, num_views: int = 7, num_heads: int = 4):
+    def __init__(self, embed_dim: int = 768, num_views: int = 7, num_heads: int = 4,
+                 max_views: int = 16):
         super().__init__()
-        self.view_embed = nn.Parameter(torch.randn(1, num_views, embed_dim) * 0.02)
+        # Learn a DISTINCT positional embedding for up to max_views cameras, so a
+        # merged run mixing rigs (L2D 6, NVIDIA 7, ...) never reuses one camera's
+        # code for another. max_views is an upper bound covering any realistic
+        # rig; runtime V just slices the first V (V > max_views is rejected).
+        self.max_views = max(max_views, num_views)
+        self.view_embed = nn.Parameter(torch.randn(1, self.max_views, embed_dim) * 0.02)
         self.query = nn.Parameter(torch.randn(1, 1, embed_dim) * 0.02)
         self.attn = nn.MultiheadAttention(embed_dim, num_heads, batch_first=True)
         self.norm = nn.LayerNorm(embed_dim)
@@ -53,13 +61,14 @@ class ViewAttentionPool(nn.Module):
     def forward(self, view_tokens: torch.Tensor) -> torch.Tensor:
         # view_tokens: [B, V, C]   (C = embed_dim = 768)
         B, V, C = view_tokens.shape
-        # Handle dynamic view sizes by slicing or repeating positional embeddings
-        if V <= self.view_embed.shape[1]:
-            v_embed = self.view_embed[:, :V]
-        else:
-            extra = V - self.view_embed.shape[1]
-            v_embed = torch.cat([self.view_embed, self.view_embed[:, :extra]], dim=1)
-            
+        if V > self.max_views:
+            raise ValueError(
+                f"ViewAttentionPool got V={V} cameras but was built for at most "
+                f"max_views={self.max_views}; increase max_views."
+            )
+        # Slice the first V distinct positional embeddings — never wrap around
+        # (reusing camera 0's code for camera V-1 would corrupt view identity).
+        v_embed = self.view_embed[:, :V]
         tok = view_tokens + v_embed
         q = self.query.expand(B, -1, -1)
         out, _ = self.attn(q, tok, tok)
@@ -70,13 +79,26 @@ class FrameEncoder(nn.Module):
     """One multi-camera frame ``[B, 3, H, W]`` -> embedding ``[B, frame_embed_dim]``.
 
     backbone -> last feature map -> global average pool -> linear projection.
+
+    ``detach_backbone`` (default True) stop-gradients the backbone feature map
+    before the WM's own projection. The World Model SHARES the trajectory
+    branch's backbone (AutoE2E passes the same instance); without this, the JEPA
+    future-reconstruction loss (weight 1.0) backprops through this encoder into
+    that shared backbone and reshapes it toward "predict future features" instead
+    of "features the planner regresses a trajectory from" — a representation
+    conflict that floors the trajectory loss at ~0.845 (vs 0.36 imitation-only),
+    invariant to batch size. Detaching here confines JEPA's gradient to the WM's
+    own proj / aggregator / future_predictor, so the shared backbone is governed
+    solely by the imitation loss. The JEPA TARGET is already a frozen deepcopy
+    (JepaTargetEncoder), so JEPA still has a stable learning signal.
     """
 
     def __init__(self, backbone: nn.Module, feature_channels: int = 768,
                  frame_embed_dim: int = 224, view_aggregator: str = "attention",
-                 num_views: int = 7):
+                 num_views: int = 7, detach_backbone: bool = True):
         super().__init__()
         self.backbone = backbone
+        self.detach_backbone = detach_backbone
         self.proj = nn.Linear(feature_channels, frame_embed_dim)
         if num_views == 1 and view_aggregator == "attention":
             logger.warning(
@@ -103,16 +125,20 @@ class FrameEncoder(nn.Module):
             B, V = frame.shape[:2]
             feats = self.backbone(frame.reshape(B * V, *frame.shape[2:]))
             m = feats[-1] if isinstance(feats, (list, tuple)) else feats
+            if self.detach_backbone:               # keep JEPA grad off the shared backbone
+                m = m.detach()
             m = m.mean(dim=(2, 3)).reshape(B, V, -1)             # [B, V, feature_channels]
-            
+
             if self.view_aggregator == "attention":
                 m = self.view_pool(m)                            # [B, feature_channels]
             else:
                 m = m.mean(dim=1)                                # [B, feature_channels]
-                
+
             return self.proj(m)                                  # [B, embed]
         feats = self.backbone(frame)               # [B, 3, H, W]
         m = feats[-1] if isinstance(feats, (list, tuple)) else feats
+        if self.detach_backbone:                   # keep JEPA grad off the shared backbone
+            m = m.detach()
         return self.proj(m.mean(dim=(2, 3)))                     # [B, embed]
 
 
@@ -248,7 +274,7 @@ class WorldActionModel(nn.Module):
 
     def __init__(self, backbone: nn.Module, feature_channels: int = 768,
                  frame_embed_dim: int = 224, history_len: int = 4,
-                 num_future_steps: int = 4, loss_type: str = "l1",
+                 num_future_steps: Optional[int] = None, loss_type: str = "l1",
                  history_aggregator: str = "concat", feature_hw: int = 8,
                  view_aggregator: str = "attention", num_views: int = 7):
         super().__init__()
@@ -256,6 +282,10 @@ class WorldActionModel(nn.Module):
             raise ValueError(
                 f"Unknown history_aggregator {history_aggregator!r}. "
                 "Available: 'concat' (default), 'attention'.")
+        # num_future_steps defaults to history_len (documented). A hardcoded 4
+        # would IndexError in jepa_loss when the packed future window differs.
+        if num_future_steps is None:
+            num_future_steps = history_len
         self.history_len = history_len
         self.num_future_steps = num_future_steps
         self.frame_embed_dim = frame_embed_dim

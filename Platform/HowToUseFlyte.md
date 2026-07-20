@@ -224,7 +224,9 @@ n1 data_processing(L2D)    n3 data_processing(NVIDIA) ← run in parallel
 |------|----------|------------|
 | Full run, one command | `wf_full_pipeline` | `dataset`, hyperparams |
 | Download raw data only | `wf_data_ingest` | `dataset`, `episodes` |
-| Preprocess raw → shards | `wf_data_processing` | `raw_data` URI |
+| Preprocess raw → shards | `wf_data_processing` | `raw_data` URI, optional `reasoning_labels` |
+| Generate reasoning labels (teacher, cached) | `wf_generate_reasoning_labels` | `raw_data` URI, `teacher` |
+| Raw → ready-to-train dataset | `wf_create_dataset` | `dataset`, `episodes`, `reasoning_teacher` |
 | Train IL from existing shards | `wf_train_il` | `shards` list, `dataset` |
 | Refine with Offline RL | `wf_train_offline_rl` | `pretrained`, `il_metadata`, `shards` |
 | See metrics | (MLflow, not Flyte) | experiment `imitation-learning` / `offline-rl` |

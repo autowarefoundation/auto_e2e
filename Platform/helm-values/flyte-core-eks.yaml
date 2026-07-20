@@ -239,11 +239,16 @@ configmap:
         cpu: 1000m
         memory: 2Gi
         storage: 1000Mi
+      # Raised so the process-parallel reasoning labeler can request 16 vCPU
+      # (decode is CPU-bound; more cores → more concurrent teacher calls) and
+      # data tasks can hold tens of episodes of raw video on ephemeral storage.
+      # EKS Auto Mode / Karpenter provisions fitting nodes; account vCPU quota
+      # (1152) has ample headroom.
       limits:
-        cpu: 8
+        cpu: 32
         gpu: 1
-        memory: 32Gi
-        storage: 100Gi
+        memory: 64Gi
+        storage: 500Gi
 
   core:
     propeller:
