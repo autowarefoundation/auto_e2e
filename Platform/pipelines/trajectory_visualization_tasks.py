@@ -21,7 +21,7 @@ DATA_PREP_IMAGE = os.environ.get(
     requests=Resources(cpu="2", mem="4Gi"),
     limits=Resources(cpu="2", mem="4Gi"),
     cache=True,
-    cache_version="trajectory-report-v2",
+    cache_version="trajectory-report-v3-ground-plane",
     cache_serialize=True,
 )
 def export_trajectory_report(
