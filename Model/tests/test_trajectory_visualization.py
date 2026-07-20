@@ -19,7 +19,11 @@ from Tools.trajectory_visualization.kinematics import (
     AOVL_V1_CONTROL_CONTRACT,
     integrate_controls,
 )
-from Tools.trajectory_visualization.rendering import render_frame
+from Tools.trajectory_visualization.rendering import (
+    project_trajectory,
+    render_frame,
+    trajectory_ground_z_m,
+)
 from Tools.trajectory_visualization.report import (
     _write_mp4,
     generate_report,
@@ -537,6 +541,35 @@ def test_shard_reader_rejects_missing_selected_camera(tmp_path):
         assert "missing report members" in str(exc)
     else:
         raise AssertionError("missing camera must fail report generation")
+
+
+def test_camera_projection_uses_published_ground_plane():
+    trajectory = np.array([[10.0, 0.0], [20.0, 0.0]])
+    calibration = {
+        "dataset": "KIT-MRT/KITScenes-Multimodal",
+        "geometry_type": "pinhole",
+        "projection": {
+            "type": "pinhole",
+            "ground_z_m": -2.0,
+            "matrix": [[
+                [50.0, 0.0, 0.0, 0.0],
+                [50.0, 0.0, -20.0, 0.0],
+                [1.0, 0.0, 0.0, 0.0],
+            ]],
+        },
+    }
+
+    paths = project_trajectory(
+        calibration,
+        trajectory,
+        camera_index=0,
+        image_wh=(100, 100),
+    )
+
+    assert trajectory_ground_z_m(calibration) == -2.0
+    np.testing.assert_allclose(paths[0], [[0.5, 0.54], [0.5, 0.52]])
+    del calibration["projection"]["ground_z_m"]
+    assert trajectory_ground_z_m(calibration) == -2.1
 
 
 def test_render_frame_keeps_camera_and_bev_panels_in_declared_order(tmp_path):
