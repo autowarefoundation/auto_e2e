@@ -181,6 +181,19 @@ def test_report_integrator_matches_evaluation_reference():
     np.testing.assert_allclose(mirrored[:, 1], -expected[:, 1])
 
 
+def test_export_workflow_uses_stable_module_task_resolver():
+    from flytekit.core.python_auto_container import default_task_resolver
+
+    from Platform.pipelines.workflows import wf_export_trajectory_report
+
+    export_task = wf_export_trajectory_report.nodes[0].flyte_entity
+    assert export_task.task_resolver is default_task_resolver
+    assert export_task.name == (
+        "Platform.pipelines.trajectory_visualization_tasks."
+        "export_trajectory_report"
+    )
+
+
 def test_report_mp4_writer_round_trip(tmp_path):
     imageio = pytest.importorskip("imageio.v2")
     pytest.importorskip("imageio_ffmpeg")
