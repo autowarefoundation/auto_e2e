@@ -29,6 +29,9 @@ from Platform.pipelines.overlay_tasks import (
     register_selected_overlay_checkpoint,
     resolve_overlay_model_version,
 )
+from Platform.pipelines.trajectory_visualization_tasks import (
+    export_trajectory_report,
+)
 
 import os as _os
 
@@ -5372,10 +5375,6 @@ def wf_export_trajectory_report(
     fps: float = 10.0,
 ) -> FlyteDirectory:
     """Render a canonical shard overlay as per-scene MP4 artifacts."""
-    from Platform.pipelines.trajectory_visualization_tasks import (
-        export_trajectory_report,
-    )
-
     return export_trajectory_report(
         shard=shard,
         overlay=overlay,
