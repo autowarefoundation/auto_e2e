@@ -6,10 +6,15 @@ RUN pip install --no-cache-dir \
     timm==1.0.27 \
     mlflow-skinny==2.22.0 \
     webdataset \
-    flytekit==1.14.9 \
+    flytekit==1.16.24 \
+    fsspec==2026.6.0 \
+    s3fs==2026.6.0 \
+    gcsfs==2026.7.0 \
+    adlfs==2026.5.0 \
     kubernetes \
     pyyaml \
     numpy \
+    pyproj \
     boto3==1.43.0
 
 COPY Model/ /workspace/Model/

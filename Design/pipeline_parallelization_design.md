@@ -918,10 +918,12 @@ KITScenes benchmark:
   fixed official scene/window manifest;
 - it integrates all 64 predicted control steps (about 6.4 seconds) and reports one
   ADE/FDE pair, rather than exact 30-step/3-second and 50-step/5-second horizons;
-- the KitScenes parser feeds 64 ego-history steps (6.4 seconds), while the
-  benchmark permits only 4 seconds of past observation. A benchmark adapter must
-  crop or left-pad/mask to the model's fixed tensor width without reading
-  pre-window data, and training must use the same rule;
+- the KitScenes parser and AutoE2E training contract use 64 ego-history steps
+  (6.4 seconds), while the benchmark permits only 4 seconds of past observation.
+  A benchmark-only adapter must left-pad/mask to the model's fixed tensor width
+  without reading pre-window data. Training and internal validation retain the
+  AutoE2E 64-step contract; this horizon predates the L2D parser and is not a
+  dataset-specific assumption;
 - it does not compute drivable-surface survival, collision-free rate, centerline
   distance, or MMS;
 - no published benchmark manifest/evaluator currently exposes the exact

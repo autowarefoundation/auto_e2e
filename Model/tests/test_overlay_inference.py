@@ -1,4 +1,5 @@
 import hashlib
+import inspect
 
 import numpy as np
 import pytest
@@ -12,6 +13,7 @@ from Platform.pipelines.inference import (
     stable_seed64,
 )
 from Platform.pipelines.overlay_precompute import infer_loader_controls
+from training.dataset_policy import KITSCENES_TRAINING_POLICY
 
 
 def test_sha256_file_streams_expected_digest(tmp_path):
@@ -58,6 +60,7 @@ class _NoiseEchoPolicy(torch.nn.Module):
         self.anchor = torch.nn.Parameter(torch.zeros(()))
         self.Reactive_E2E = _FakeReactive()
         self.reset_count = 0
+        self.last_egomotion_history = None
 
     def reset_visual_history(self):
         self.reset_count += 1
@@ -72,6 +75,7 @@ class _NoiseEchoPolicy(torch.nn.Module):
         initial_noise,
         **kwargs,
     ):
+        self.last_egomotion_history = egomotion_history.detach().clone()
         return initial_noise + self.anchor
 
 
@@ -150,6 +154,44 @@ def test_infer_loader_controls_emits_seed_fan_and_v0():
     np.testing.assert_array_equal(v0, [3.0, 4.0, 5.0])
     assert seeds == (0, 1)
     assert not np.array_equal(controls[:, 0], controls[:, 1])
+
+
+def test_overlay_inference_applies_checkpoint_data_sanitization():
+    model = _NoiseEchoPolicy().eval()
+    batch = _batch(1)
+    batch["sample_uid"] = ["kitscenes-v1-scene-a-f000064"]
+    history = batch["egomotion_history"].reshape(1, 64, 4)
+    history[:] = 1.0
+    history[:, -1, 0] = 3.0
+
+    class Loader(list):
+        projection = None
+        geometry_type = "pinhole"
+
+    _, _, v0, _ = infer_loader_controls(
+        model,
+        Loader([batch]),
+        model_artifact_id="model-sha",
+        dataset_manifest_digest="manifest-sha",
+        device="cpu",
+        training_policy=KITSCENES_TRAINING_POLICY,
+    )
+
+    adapted = model.last_egomotion_history.reshape(1, 64, 4)
+    assert torch.count_nonzero(adapted[:, :24]) == 24 * 4
+    assert adapted[0, -1, 0].item() == 3.0
+    assert adapted[0, -1, 1].item() == 0.0
+    np.testing.assert_array_equal(v0, [3.0])
+
+
+def test_overlay_task_never_decodes_future_images():
+    pytest.importorskip("flytekit")
+    from Platform.pipelines.overlay_tasks import precompute_overlay_partition
+
+    source = inspect.getsource(
+        precompute_overlay_partition.task_function
+    )
+    assert "decode_future_frames=False" in source
 
 
 def test_load_policy_filters_config_and_returns_checkpoint_identity(

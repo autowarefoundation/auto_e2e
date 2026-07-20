@@ -41,6 +41,7 @@ def infer_loader_controls(
     dataset_manifest_digest: str,
     base_seeds: Sequence[int] = (0,),
     device: str | torch.device,
+    training_policy: Any = None,
 ) -> tuple[list[str], np.ndarray, np.ndarray, tuple[int, ...]]:
     """Infer every sample from one loader and return ``uids, controls, v0``.
 
@@ -64,6 +65,13 @@ def infer_loader_controls(
     for raw_batch in loader:
         sample_uids = [str(uid) for uid in raw_batch["sample_uid"]]
         batch = batch_to_device(raw_batch, device)
+        if training_policy is not None:
+            from training.dataset_policy import adapt_egomotion_history
+
+            batch["egomotion_history"] = adapt_egomotion_history(
+                batch["egomotion_history"],
+                training_policy,
+            )
         per_seed = [
             predict_control(
                 model,

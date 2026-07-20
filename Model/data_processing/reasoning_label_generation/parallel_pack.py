@@ -71,8 +71,12 @@ def init_pack_worker(
         # (populated by that partition's ingest) instead of re-downloading to the
         # shared HF cache in this pod (#121 option B). raw_path is always provided
         # to the packer (it's a required arg); None-safe via L2DDataset(root=None).
-        episode_indices = [int(ep) for ep in episodes] if episodes else None
-        _DS = L2DDataset(repo_id=dataset_value, episodes=episode_indices,
+        l2d_episodes = (
+            [int(episode) for episode in episodes]
+            if episodes is not None
+            else None
+        )
+        _DS = L2DDataset(repo_id=dataset_value, episodes=l2d_episodes,
                          include_world_model_windows=world_model, root=raw_path)
 
 
@@ -128,8 +132,12 @@ def init_row_worker(
         )
     else:
         from data_parsing.l2d import L2DDataset
-        episode_indices = [int(ep) for ep in episodes] if episodes else None
-        _DS = L2DDataset(repo_id=dataset_value, episodes=episode_indices,
+        l2d_episodes = (
+            [int(episode) for episode in episodes]
+            if episodes is not None
+            else None
+        )
+        _DS = L2DDataset(repo_id=dataset_value, episodes=l2d_episodes,
                          include_world_model_windows=False, root=raw_path)
 
 
@@ -161,7 +169,7 @@ def decode_row(
     if _DATASET_VALUE == "KIT-MRT/KITScenes-Multimodal":
         scene_id = str(group_id)
         visual = _DS._load_multiview_frame(scene_id, frame_index)
-        kit_cams = {
+        kitscenes_cams = {
             (
                 f"kitscenes-{UID_SCHEMA_VERSION}-{scene_id}-"
                 f"r{frame_index:06d}-c{view}"
@@ -173,7 +181,7 @@ def decode_row(
             map_tile = _DS.map_for_row(scene_id, frame_index)
             if float(map_tile.abs().max()) > 0:
                 map_jpeg = _jpeg(map_tile)
-        return (scene_id, frame_index), kit_cams, map_jpeg
+        return (scene_id, frame_index), kitscenes_cams, map_jpeg
 
     from data_parsing.l2d.dataset import CAMERA_NAMES, MAP_VIEW_NAME
 
@@ -183,17 +191,17 @@ def decode_row(
     if local_row >= ep_end:
         raise IndexError(f"row {frame_index} outside episode {ep_idx}")
     item = _DS.lerobot_dataset[local_row]
-    cams: Dict[str, bytes] = {}
+    l2d_cams: Dict[str, bytes] = {}
     for v, cam_name in enumerate(CAMERA_NAMES):
         fid = f"l2d-{UID_SCHEMA_VERSION}-e{ep_idx:06d}-r{frame_index:06d}-c{v}"
-        cams[fid] = _jpeg(item[cam_name])
+        l2d_cams[fid] = _jpeg(item[cam_name])
     map_jpeg = None
     if include_map:
         map_tile = item[MAP_VIEW_NAME]
         mt = map_tile[0] if map_tile.ndim == 4 else map_tile
         if float(mt.abs().max()) > 0:
             map_jpeg = _jpeg(mt)
-    return (ep_idx, frame_index), cams, map_jpeg
+    return (ep_idx, frame_index), l2d_cams, map_jpeg
 
 
 def pack_sample(si: int) -> Tuple[str, int, Dict[str, bytes], Dict[str, bytes]]:

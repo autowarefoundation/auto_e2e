@@ -86,8 +86,12 @@ def init_worker(
         # root=raw_path (when provided) makes lerobot read the partition's
         # already-materialized raw dir instead of re-downloading to the shared HF
         # cache in this pod (#121 option B). None → legacy HF-cache path.
-        episode_indices = [int(ep) for ep in episodes] if episodes else None
-        _DS = L2DDataset(repo_id=repo_id, episodes=episode_indices,
+        l2d_episodes = (
+            [int(episode) for episode in episodes]
+            if episodes is not None
+            else None
+        )
+        _DS = L2DDataset(repo_id=repo_id, episodes=l2d_episodes,
                          reasoning_clip_only=True, root=raw_path)
     _CLIENT = build_teacher(teacher, **teacher_kwargs)
 

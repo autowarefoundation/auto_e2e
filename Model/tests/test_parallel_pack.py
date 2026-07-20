@@ -578,6 +578,7 @@ def test_end_to_end_dedup_loader_produces_identical_tensors():
     uid_lg, _, legacy_members, legacy_pool = pp.pack_sample(0)
     sample_lg = dict(legacy_members)
     sample_lg["__key__"] = uid_lg
+
     def pool_lg_fn(fid):
         return legacy_pool[fid]
 
