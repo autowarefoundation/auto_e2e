@@ -31,6 +31,7 @@ from data_parsing.nvidia_physical_ai.dataset import NvidiaAVDataset
 from data_parsing.pre_extracted import make_pre_extracted_loader
 from model_components.auto_e2e import AutoE2E
 from model_components.losses import TrajectoryImitationLoss
+from training.dataset_policy import NVIDIA_TRAINING_POLICY
 
 
 def build_shards(dataset, out_dir, max_samples, image_size=256):
@@ -140,7 +141,11 @@ def main():
     # 4. Model forward + loss + backward through the projection ABI.
     model = AutoE2E(backbone="swin_v2_tiny", num_views=V, is_pretrained=False).to(device)
     model.train()
-    loss_fn = TrajectoryImitationLoss(loss_type="smooth_l1").to(device)
+    loss_fn = TrajectoryImitationLoss(
+        loss_type="smooth_l1",
+        temporal_decay=NVIDIA_TRAINING_POLICY.temporal_decay,
+        signal_scales=NVIDIA_TRAINING_POLICY.signal_scales,
+    ).to(device)
     opt = torch.optim.AdamW(model.parameters(), lr=1e-4)
 
     visual = batch["visual_tiles"].to(device)

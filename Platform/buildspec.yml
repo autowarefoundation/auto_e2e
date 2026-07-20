@@ -3,30 +3,69 @@ version: 0.2
 env:
   variables:
     AWS_DEFAULT_REGION: us-west-2
+    DOCKER_BUILDKIT: "1"
+    IMAGE_TAG: latest
 
 phases:
   pre_build:
     commands:
       - ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
       - ECR_URL="${ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com"
+      - test -n "${IMAGE_TAG}"
       - aws ecr get-login-password --region $AWS_DEFAULT_REGION | docker login --username AWS --password-stdin $ECR_URL
+      # Pre-pull previous latests so BuildKit's --cache-from can reuse every
+      # layer whose input hasn't changed (torch/pip layers, ffmpeg apt layer,
+      # etc.). ||true so first-run misses don't fail. Runs in parallel.
+      - echo "=== Pre-pulling previous latests for layer cache ==="
+      - (docker pull ${ECR_URL}/auto-e2e/training:latest || true) &
+      - (docker pull ${ECR_URL}/auto-e2e/data-prep:latest || true) &
+      - wait
   build:
     commands:
-      - echo "=== Building training image ==="
-      - docker build -t ${ECR_URL}/auto-e2e/training:latest -f Platform/docker/training/Dockerfile .
-      - docker push ${ECR_URL}/auto-e2e/training:latest
+      # ── Training / eval / offline-rl ── SAME Dockerfile, so build ONCE and
+      # retag. Cuts 2 of 4 image builds (was ~3 min × 3 = ~9 min duplication).
+      # --cache-from pulls layer cache from ECR :latest → unchanged pip layers
+      # reuse across CodeBuild runs.
+      - echo "=== Building shared training image (training/eval/offline-rl) ==="
+      - DOCKER_BUILDKIT=1 docker build
+          --cache-from ${ECR_URL}/auto-e2e/training:latest
+          --build-arg BUILDKIT_INLINE_CACHE=1
+          -t ${ECR_URL}/auto-e2e/training:${IMAGE_TAG}
+          -t ${ECR_URL}/auto-e2e/eval:${IMAGE_TAG}
+          -t ${ECR_URL}/auto-e2e/offline-rl:${IMAGE_TAG}
+          -f Platform/docker/training/Dockerfile .
 
-      - echo "=== Building eval image ==="
-      - docker build -t ${ECR_URL}/auto-e2e/eval:latest -f Platform/docker/eval/Dockerfile .
-      - docker push ${ECR_URL}/auto-e2e/eval:latest
-
-      - echo "=== Building offline-rl image ==="
-      - docker build -t ${ECR_URL}/auto-e2e/offline-rl:latest -f Platform/docker/offline-rl/Dockerfile .
-      - docker push ${ECR_URL}/auto-e2e/offline-rl:latest
-
+      # ── Data-prep ── independent Dockerfile (~5GB). Build BEFORE pushing so
+      # the whole build stage is done before we start any push (the previous
+      # parallel-with-push scheme raced with CodeBuild command boundaries and
+      # sometimes returned before data-prep finished). --cache-from turns
+      # Model/-only edits into a ~30s rebuild instead of full pip reinstall.
       - echo "=== Building data-prep image ==="
-      - docker build -t ${ECR_URL}/auto-e2e/data-prep:latest -f Platform/docker/data-prep/Dockerfile .
-      - docker push ${ECR_URL}/auto-e2e/data-prep:latest
+      - DOCKER_BUILDKIT=1 docker build
+          --cache-from ${ECR_URL}/auto-e2e/data-prep:latest
+          --build-arg BUILDKIT_INLINE_CACHE=1
+          -t ${ECR_URL}/auto-e2e/data-prep:${IMAGE_TAG}
+          -f Platform/docker/data-prep/Dockerfile .
+
+      # ── Push ALL images in parallel now that every image is built. ECR dedups
+      # blobs so the training/eval/offline-rl push is paid once, and data-prep
+      # ships in parallel — much faster than the old sequential push.
+      - echo "=== Pushing all images in parallel ==="
+      - |
+        docker push ${ECR_URL}/auto-e2e/training:${IMAGE_TAG} &
+        PID_T=$!
+        docker push ${ECR_URL}/auto-e2e/eval:${IMAGE_TAG} &
+        PID_E=$!
+        docker push ${ECR_URL}/auto-e2e/offline-rl:${IMAGE_TAG} &
+        PID_O=$!
+        docker push ${ECR_URL}/auto-e2e/data-prep:${IMAGE_TAG} &
+        PID_D=$!
+        # wait -n was returning early on some CodeBuild agents; wait on each PID
+        # explicitly so a push failure is surfaced.
+        wait $PID_T && echo "training pushed" || exit 1
+        wait $PID_E && echo "eval pushed" || exit 1
+        wait $PID_O && echo "offline-rl pushed" || exit 1
+        wait $PID_D && echo "data-prep pushed" || exit 1
 
 cache:
   paths:

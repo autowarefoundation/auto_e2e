@@ -7,8 +7,10 @@ RUN pip install --no-cache-dir \
     mlflow-skinny==2.22.0 \
     webdataset \
     flytekit \
+    kubernetes \
     pyyaml \
-    numpy
+    numpy \
+    boto3
 
 COPY Model/ /workspace/Model/
 COPY Platform/pipelines/ /workspace/Platform/pipelines/

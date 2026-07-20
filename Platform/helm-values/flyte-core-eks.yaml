@@ -247,7 +247,14 @@ configmap:
       limits:
         cpu: 32
         gpu: 1
-        memory: 64Gi
+        # Raised 64→128Gi so PS=100 partition_size label pods fit (each of the
+        # 6 in-pod lerobot workers loads ~10 GB of dataset state; 6×10 + 8 GB
+        # framework overhead ≈ 68 GB, then a further 45% headroom for eviction
+        # margin gets to 128 Gi). Prior 64Gi cap caused the label task at
+        # partition_size=50 to OOMKill (a88ch58g5xqgj4sc8r4n) even after we
+        # halved label_workers to 6. Karpenter picks r6i.4xlarge (128GB, 16vCPU)
+        # or similar to fit.
+        memory: 128Gi
         storage: 500Gi
 
   core:
@@ -380,10 +387,13 @@ cluster_resource_manager:
             - defaultIamRole:
                 value: "arn:aws:iam::{{ .Values.userSettings.accountNumber }}:role/flyte-user-role"
         - development:
+            # KITScenes full run (#121): 60 one-scene pods x
+            # (15 vCPU, 64Gi) = 900 vCPU, 3.75Ti memory concurrent.
+            # Keep headroom under the 1152 Standard On-Demand vCPU quota.
             - projectQuotaCpu:
-                value: "32"
+                value: "1000"
             - projectQuotaMemory:
-                value: "128Gi"
+                value: "8Ti"
             - defaultIamRole:
                 value: "arn:aws:iam::{{ .Values.userSettings.accountNumber }}:role/flyte-user-role"
 
@@ -421,6 +431,8 @@ cluster_resource_manager:
           hard:
             limits.cpu: {{ projectQuotaCpu }}
             limits.memory: {{ projectQuotaMemory }}
+            requests.cpu: {{ projectQuotaCpu }}
+            requests.memory: {{ projectQuotaMemory }}
 
 
 

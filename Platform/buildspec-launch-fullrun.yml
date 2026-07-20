@@ -1,0 +1,91 @@
+version: 0.2
+
+# Full-scale end-to-end launcher: wf_sharded_full_run over KITScenes train.
+# The pinned v1.0.1 archive exposes 533 of the official 534 train scenes; the
+# workflow preflight permits only that known one-scene deficit.
+#
+# Override at start-build:
+#   EPISODES (0 = all available KITScenes train scenes),
+#   BACKBONE, EPOCHS, BATCH_SIZE, LR, VAL_FRACTION, VALIDATION_SCOPE,
+#   NUM_WORKERS, IMAGE_TAG.
+
+env:
+  variables:
+    AWS_DEFAULT_REGION: us-west-2
+    FLYTE_PROJECT: auto-e2e
+    FLYTE_DOMAIN: development
+    # 0 = all 533 available scenes. KITScenes always uses one scene per pod.
+    EPISODES: "0"
+    PARTITION_SIZE: "1"
+    REASONING_TEACHER: "openai_compatible"
+    BACKBONE: "swin_v2_tiny"
+    EPOCHS: "3"
+    # Small batch: WM windows are memory-heavy. grad_accum=4 for effective bs=4.
+    BATCH_SIZE: "1"
+    GRAD_ACCUM_STEPS: "4"
+    LR: "1e-4"
+    # 10% held-out val (episode-level group split).
+    VAL_FRACTION: "0.1"
+    # Full is fail-closed against the frozen 533-partition corpus manifest.
+    VALIDATION_SCOPE: "full"
+    NUM_WORKERS: "4"
+    MAX_PARTITIONS: "600"
+    IMAGE_TAG: latest
+
+phases:
+  install:
+    commands:
+      - pip install -q flytekit==1.14.9 numpy torch kubernetes --extra-index-url https://download.pytorch.org/whl/cpu
+  build:
+    commands:
+      - ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+      - ECR_URL="${ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com"
+      - export ECR_PREFIX="${ECR_URL}"
+      - export PYTHONPATH="${CODEBUILD_SRC_DIR}/Model:${CODEBUILD_SRC_DIR}:${PYTHONPATH:-}"
+      - |
+        image_ref() {
+          REPOSITORY="$1"
+          DIGEST=$(aws ecr batch-get-image \
+            --repository-name "auto-e2e/${REPOSITORY}" \
+            --image-ids imageTag="${IMAGE_TAG}" \
+            --query 'images[0].imageId.imageDigest' \
+            --output text)
+          if [ -z "${DIGEST}" ] || [ "${DIGEST}" = "None" ]; then
+            echo "No digest found for auto-e2e/${REPOSITORY}:${IMAGE_TAG}" >&2
+            return 1
+          fi
+          printf '%s/auto-e2e/%s@%s' "${ECR_URL}" "${REPOSITORY}" "${DIGEST}"
+        }
+        AUTO_E2E_TRAINING_IMAGE="$(image_ref training)" || exit 1
+        AUTO_E2E_EVAL_IMAGE="$(image_ref eval)" || exit 1
+        AUTO_E2E_OFFLINE_RL_IMAGE="$(image_ref offline-rl)" || exit 1
+        AUTO_E2E_DATA_PREP_IMAGE="$(image_ref data-prep)" || exit 1
+        export AUTO_E2E_TRAINING_IMAGE AUTO_E2E_EVAL_IMAGE
+        export AUTO_E2E_OFFLINE_RL_IMAGE AUTO_E2E_DATA_PREP_IMAGE
+      - |
+        cat > /tmp/flyte.yaml << EOF
+        admin:
+          endpoint: dns:///k8s-flyte-flyteadm-be92e7737c-cf0d1a0f3df10f77.elb.us-west-2.amazonaws.com:81
+          insecure: true
+        EOF
+      # Fires the execution on the cluster; this build exits when the workflow
+      # is REGISTERED (non-blocking wrt the workflow's actual runtime).
+      - >
+        pyflyte --config /tmp/flyte.yaml run --remote
+        --project $FLYTE_PROJECT
+        --domain $FLYTE_DOMAIN
+        --image "${AUTO_E2E_TRAINING_IMAGE}"
+        Platform/pipelines/workflows.py wf_sharded_full_run
+        --dataset "KIT-MRT/KITScenes-Multimodal"
+        --episodes $EPISODES
+        --partition_size $PARTITION_SIZE
+        --reasoning_teacher $REASONING_TEACHER
+        --max_partitions $MAX_PARTITIONS
+        --backbone $BACKBONE
+        --epochs $EPOCHS
+        --batch_size $BATCH_SIZE
+        --grad_accum_steps $GRAD_ACCUM_STEPS
+        --lr $LR
+        --val_fraction $VAL_FRACTION
+        --validation_scope $VALIDATION_SCOPE
+        --num_workers $NUM_WORKERS

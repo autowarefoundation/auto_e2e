@@ -185,6 +185,65 @@ class TestFlowMatchingPlanner:
         assert not torch.allclose(traj_a, traj_c), \
             "different generator seeds must produce different trajectories"
 
+    def test_initial_noise_is_independent_of_rng_state(self, device):
+        planner = FlowMatchingPlanner(embed_dim=256, num_inference_steps=4).to(device)
+        planner.eval()
+        bev = torch.randn(2, 256, 8, 8, device=device)
+        vis_hist = torch.randn(2, 896, device=device)
+        ego = torch.randn(2, 256, device=device)
+        initial_noise = torch.randn(2, 128, device=device)
+
+        torch.manual_seed(1)
+        traj_a = planner(
+            bev, vis_hist, ego, initial_noise=initial_noise,
+        )
+        torch.manual_seed(999)
+        traj_b = planner(
+            bev, vis_hist, ego, initial_noise=initial_noise,
+        )
+
+        assert torch.equal(traj_a, traj_b)
+
+    def test_initial_noise_is_batch_order_invariant(self, device):
+        planner = FlowMatchingPlanner(embed_dim=256, num_inference_steps=4).to(device)
+        planner.eval()
+        bev = torch.randn(3, 256, 8, 8, device=device)
+        vis_hist = torch.randn(3, 896, device=device)
+        ego = torch.randn(3, 256, device=device)
+        initial_noise = torch.randn(3, 128, device=device)
+        order = torch.tensor([2, 0, 1], device=device)
+
+        original = planner(
+            bev, vis_hist, ego, initial_noise=initial_noise,
+        )
+        reordered = planner(
+            bev[order],
+            vis_hist[order],
+            ego[order],
+            initial_noise=initial_noise[order],
+        )
+
+        assert torch.allclose(original[order], reordered, atol=1e-6, rtol=1e-6)
+
+    def test_initial_noise_validation(self, device):
+        planner = FlowMatchingPlanner(embed_dim=256).to(device)
+        bev = torch.randn(2, 256, 8, 8, device=device)
+        vis_hist = torch.randn(2, 896, device=device)
+        ego = torch.randn(2, 256, device=device)
+
+        with pytest.raises(ValueError, match="initial_noise must have shape"):
+            planner(
+                bev, vis_hist, ego,
+                initial_noise=torch.randn(2, 64, device=device),
+            )
+        with pytest.raises(ValueError, match="same dtype"):
+            planner(
+                bev, vis_hist, ego,
+                initial_noise=torch.randn(
+                    2, 128, device=device, dtype=torch.float64,
+                ),
+            )
+
     def test_construct_training_data_wrong_target_shape_propagates(self, device):
         """The internal _validate_flow_inputs guard must catch shape regressions
         even when the user only calls construct_training_data."""
@@ -293,6 +352,25 @@ class TestAutoE2EWithFlowMatching:
         visual, map_input, vis_hist, ego = make_inputs(2, 8, device)
         traj = model(visual, map_input, vis_hist, ego, mode="train")
         assert traj.shape == (2, 128)
+
+    def test_initial_noise_threads_through_model(self, build_mock_model, device):
+        model = self._fm_model(build_mock_model, device)
+        model.eval()
+        visual, map_input, vis_hist, ego = make_inputs(1, 8, device)
+        initial_noise = torch.randn(1, 128, device=device)
+
+        torch.manual_seed(1)
+        traj_a = model(
+            visual, map_input, vis_hist, ego,
+            mode="infer", initial_noise=initial_noise,
+        )
+        torch.manual_seed(999)
+        traj_b = model(
+            visual, map_input, vis_hist, ego,
+            mode="infer", initial_noise=initial_noise,
+        )
+
+        assert torch.equal(traj_a, traj_b)
 
     def test_backward_flows_through_model(self, build_mock_model, device):
         model = self._fm_model(build_mock_model, device)
