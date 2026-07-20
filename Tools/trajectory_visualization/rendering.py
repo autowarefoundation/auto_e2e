@@ -22,6 +22,7 @@ GRID_COLOR = (51, 65, 85)
 TEXT_COLOR = (226, 232, 240)
 MUTED_COLOR = (148, 163, 184)
 _DEPTH_EPS = 1e-5
+_KITSCENES_GROUND_Z_M = -2.1
 
 
 def trajectory_extent(
@@ -83,6 +84,7 @@ def _pinhole_point(
     spec: Mapping[str, Any],
     view: int,
     point: np.ndarray,
+    ground_z: float,
     image_wh: tuple[int, int],
 ) -> tuple[float, float] | None:
     matrices = spec.get("matrix")
@@ -91,7 +93,7 @@ def _pinhole_point(
     matrix = np.asarray(matrices[view], dtype=np.float64)
     if matrix.shape != (3, 4):
         return None
-    projected = matrix @ np.array([point[0], point[1], 0.0, 1.0])
+    projected = matrix @ np.array([point[0], point[1], ground_z, 1.0])
     depth = float(projected[2])
     if not math.isfinite(depth) or depth <= _DEPTH_EPS:
         return None
@@ -104,6 +106,7 @@ def _ftheta_point(
     spec: Mapping[str, Any],
     view: int,
     point: np.ndarray,
+    ground_z: float,
 ) -> tuple[float, float] | None:
     transforms = spec.get("t_camera_ego")
     if not isinstance(transforms, list) or view >= len(transforms):
@@ -112,7 +115,7 @@ def _ftheta_point(
     if transform.shape != (4, 4):
         return None
     x_value, y_value, z_value, _ = (
-        transform @ np.array([point[0], point[1], 0.0, 1.0])
+        transform @ np.array([point[0], point[1], ground_z, 1.0])
     )
     rho = max(math.hypot(x_value, y_value), _DEPTH_EPS)
     theta = math.atan2(rho, z_value)
@@ -137,6 +140,22 @@ def _ftheta_point(
     return (u, v) if 0 <= u <= 1 and 0 <= v <= 1 else None
 
 
+def trajectory_ground_z_m(calibration: Mapping[str, Any]) -> float:
+    """Return the ground plane used by the browser projection contract."""
+    spec = calibration.get("projection")
+    if isinstance(spec, dict):
+        value = spec.get("ground_z_m")
+        try:
+            ground_z = float(value)
+        except (TypeError, ValueError):
+            pass
+        else:
+            if math.isfinite(ground_z):
+                return ground_z
+    dataset = str(calibration.get("dataset", "")).lower()
+    return _KITSCENES_GROUND_Z_M if "kitscenes" in dataset else 0.0
+
+
 def project_trajectory(
     calibration: Mapping[str, Any],
     trajectory: np.ndarray,
@@ -153,15 +172,17 @@ def project_trajectory(
     if geometry_type == "pseudo":
         return []
 
+    ground_z = trajectory_ground_z_m(calibration)
     paths: list[list[tuple[float, float]]] = [[]]
     for point in trajectory:
         projected = (
-            _ftheta_point(spec, camera_index, point)
+            _ftheta_point(spec, camera_index, point, ground_z)
             if geometry_type == "ftheta"
             else _pinhole_point(
                 spec,
                 camera_index,
                 point,
+                ground_z,
                 image_wh,
             )
         )
