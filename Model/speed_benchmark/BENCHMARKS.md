@@ -149,18 +149,18 @@ parameter.
 <details open>
   <summary>Toggle view</summary>
 
-> CUDA 12.8 | Driver 610.43.02 | PyTorch 2.7.1+cu128 | Commit `ead2171` | Resolution [256, 256]
+> CUDA 12.8 | Driver 590.48.01 | PyTorch 2.7.1+cu128 | Commit `ead2171` | Resolution [256, 256]
 
 | Backbone | Fusion Mode | Reasoning | Batch | FPS | Latency (ms) | p99 (ms) | Jitter (ms) | VRAM (MB) | Params |
 |----------|-------------|-----------|-------|-----|--------------|----------|-------------|-----------|--------|
-| swin_v2_tiny | bev | off | 1 | 32.9 | 30.4 | 30.9 | 0.5 | 375 | 56.8M |
-| swin_v2_tiny | bev | off | 2 | 22.9 | 43.7 | 46.3 | 2.6 | 520 | 56.8M |
-| swin_v2_tiny | bev | off | 4 | 14.1 | 70.8 | 71.3 | 0.7 | 803 | 56.8M |
-| conv_next_v2_tiny | bev | off | 1 | 33.1 | 30.2 | 31.2 | 1.2 | 396 | 57.1M |
-| conv_next_v2_tiny | bev | off | 2 | 23.0 | 43.6 | 45.1 | 1.7 | 561 | 57.1M |
-| conv_next_v2_tiny | bev | off | 4 | 14.3 | 69.7 | 72.8 | 3.2 | 887 | 57.1M |
-| swin_v2_tiny | bev | pooled_latent | 1 | 30.3 | 33.0 | 38.1 | 5.4 | 386 | 59.4M |
-| swin_v2_tiny | bev | horizon_cross_attention | 1 | 30.3 | 33.0 | 34.0 | 1.1 | 388 | 59.6M |
+| swin_v2_tiny | bev | off | 1 | 88.2 | 11.3 | 12.9 | 1.7 | 375 | 56.8M |
+| swin_v2_tiny | bev | off | 2 | 58.4 | 17.1 | 18.2 | 1.2 | 520 | 56.8M |
+| swin_v2_tiny | bev | off | 4 | 30.4 | 32.9 | 33.7 | 0.9 | 803 | 56.8M |
+| conv_next_v2_tiny | bev | off | 1 | 95.6 | 10.5 | 11.8 | 1.4 | 396 | 57.1M |
+| conv_next_v2_tiny | bev | off | 2 | 58.7 | 17.0 | 17.9 | 1.0 | 561 | 57.1M |
+| conv_next_v2_tiny | bev | off | 4 | 30.0 | 33.4 | 34.0 | 0.8 | 887 | 57.1M |
+| swin_v2_tiny | bev | pooled_latent | 1 | 84.2 | 11.9 | 12.8 | 1.0 | 386 | 59.4M |
+| swin_v2_tiny | bev | horizon_cross_attention | 1 | 83.5 | 12.0 | 12.8 | 0.9 | 388 | 59.6M |
 
 </details>
 
