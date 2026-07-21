@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git *)",
+      "Skill(claude-api)",
+      "Bash(COPYFILE_DISABLE=1 tar czf /tmp/oss-maintainer.tar.gz --exclude='.git' .)",
+      "Read(//Users/riita/.finch/**)",
+      "Bash(GIT_AUTHOR_DATE=2026-06-18T10:00:00+09:00 GIT_COMMITTER_DATE=2026-06-18T10:00:00+09:00 git commit --signoff -m 'refactor\\(infra/eks\\): replace OIDC Provider with Pod Identity Agent addon *)",
+      "Bash(GIT_AUTHOR_DATE=2026-06-18T10:15:00+09:00 GIT_COMMITTER_DATE=2026-06-18T10:15:00+09:00 git commit --signoff -m 'refactor\\(infra/storage\\): migrate S3 IAM role to Pod Identity *)",
+      "Bash(GIT_AUTHOR_DATE=2026-06-18T10:20:00+09:00 GIT_COMMITTER_DATE=2026-06-18T10:20:00+09:00 git commit --signoff -m 'refactor\\(infra\\): remove oidc_provider_arn/url wiring from root module *)",
+      "Bash(GIT_AUTHOR_DATE=2026-06-18T10:35:00+09:00 GIT_COMMITTER_DATE=2026-06-18T10:35:00+09:00 git commit --signoff -m 'docs\\(phase2\\): replace IRSA with Pod Identity throughout design doc *)",
+      "Bash(GIT_AUTHOR_DATE=2026-06-18T10:40:00+09:00 GIT_COMMITTER_DATE=2026-06-18T10:40:00+09:00 git commit --signoff -m 'docs\\(readme\\): replace IRSA references with Pod Identity *)"
+    ]
+  }
+}
