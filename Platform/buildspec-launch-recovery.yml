@@ -1,0 +1,97 @@
+version: 0.2
+
+# Repack the audited KITScenes raw/Cosmos artifacts, then train and evaluate.
+# This workflow never runs source ingest or the Cosmos teacher.
+#
+# Required start-build overrides:
+#   ARTIFACT_SET_SHA256
+# Optional:
+#   RECOVERY_MANIFEST_URI, IMAGE_TAG, EPOCHS, RESUME_FROM
+
+env:
+  shell: bash
+  variables:
+    AWS_DEFAULT_REGION: us-west-2
+    FLYTE_PROJECT: auto-e2e
+    FLYTE_DOMAIN: development
+    ARTIFACT_SET_SHA256: ""
+    RECOVERY_MANIFEST_URI: ""
+    PACK_CONCURRENCY: "60"
+    BACKBONE: "swin_v2_tiny"
+    EPOCHS: "10"
+    BATCH_SIZE: "1"
+    GRAD_ACCUM_STEPS: "4"
+    LR: "1e-4"
+    VAL_FRACTION: "0.1"
+    NUM_WORKERS: "4"
+    EARLY_STOPPING_PATIENCE: "3"
+    RESUME_FROM: ""
+    IMAGE_TAG: latest
+
+phases:
+  install:
+    commands:
+      - pip install -q flytekit==1.14.9 numpy torch kubernetes --extra-index-url https://download.pytorch.org/whl/cpu
+  build:
+    commands:
+      - ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+      - ECR_URL="${ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com"
+      - export ECR_PREFIX="${ECR_URL}"
+      - export PYTHONPATH="${CODEBUILD_SRC_DIR}/Model:${CODEBUILD_SRC_DIR}:${PYTHONPATH:-}"
+      - test -n "${ARTIFACT_SET_SHA256}"
+      - |
+        if [ -z "${RECOVERY_MANIFEST_URI}" ]; then
+          RECOVERY_MANIFEST_URI="s3://auto-e2e-platform-checkpoints-${ACCOUNT_ID}/recovery-manifests/${ARTIFACT_SET_SHA256}.json"
+        fi
+        export RECOVERY_MANIFEST_URI
+      - |
+        image_ref() {
+          REPOSITORY="$1"
+          DIGEST=$(aws ecr batch-get-image \
+            --repository-name "auto-e2e/${REPOSITORY}" \
+            --image-ids imageTag="${IMAGE_TAG}" \
+            --query 'images[0].imageId.imageDigest' \
+            --output text)
+          if [ -z "${DIGEST}" ] || [ "${DIGEST}" = "None" ]; then
+            echo "No digest found for auto-e2e/${REPOSITORY}:${IMAGE_TAG}" >&2
+            return 1
+          fi
+          printf '%s/auto-e2e/%s@%s' \
+            "${ECR_URL}" "${REPOSITORY}" "${DIGEST}"
+        }
+        AUTO_E2E_TRAINING_IMAGE="$(image_ref training)" || exit 1
+        AUTO_E2E_EVAL_IMAGE="$(image_ref eval)" || exit 1
+        AUTO_E2E_OFFLINE_RL_IMAGE="$(image_ref offline-rl)" || exit 1
+        AUTO_E2E_DATA_PREP_IMAGE="$(image_ref data-prep)" || exit 1
+        export AUTO_E2E_TRAINING_IMAGE AUTO_E2E_EVAL_IMAGE
+        export AUTO_E2E_OFFLINE_RL_IMAGE AUTO_E2E_DATA_PREP_IMAGE
+      - |
+        cat > /tmp/flyte.yaml << EOF
+        admin:
+          endpoint: dns:///k8s-flyte-flyteadm-be92e7737c-cf0d1a0f3df10f77.elb.us-west-2.amazonaws.com:81
+          insecure: true
+        EOF
+      - |
+        RUN_ARGS=(
+          --recovery_manifest "${RECOVERY_MANIFEST_URI}"
+          --artifact_set_sha256 "${ARTIFACT_SET_SHA256}"
+          --pack_concurrency "${PACK_CONCURRENCY}"
+          --backbone "${BACKBONE}"
+          --epochs "${EPOCHS}"
+          --batch_size "${BATCH_SIZE}"
+          --grad_accum_steps "${GRAD_ACCUM_STEPS}"
+          --lr "${LR}"
+          --val_fraction "${VAL_FRACTION}"
+          --num_workers "${NUM_WORKERS}"
+          --early_stopping_patience "${EARLY_STOPPING_PATIENCE}"
+        )
+        if [ -n "${RESUME_FROM}" ]; then
+          RUN_ARGS+=(--resume_from "${RESUME_FROM}")
+        fi
+        pyflyte --config /tmp/flyte.yaml run --remote \
+          --project "${FLYTE_PROJECT}" \
+          --domain "${FLYTE_DOMAIN}" \
+          --image "${AUTO_E2E_TRAINING_IMAGE}" \
+          Platform/pipelines/workflows.py \
+          wf_recovered_kitscenes_full_run \
+          "${RUN_ARGS[@]}"

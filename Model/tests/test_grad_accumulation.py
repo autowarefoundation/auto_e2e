@@ -20,6 +20,10 @@ import copy
 import torch
 import torch.nn as nn
 
+from Platform.pipelines.training_checkpoint import (
+    rescale_partial_accumulation_gradients,
+)
+
 
 def _tiny_model():
     torch.manual_seed(0)
@@ -69,14 +73,18 @@ def test_accum_matches_full_batch_step():
 
 
 def test_partial_trailing_window_is_flushed():
-    """A trailing partial window (batch count not a multiple of accum) must still
-    step — train_il flushes it at epoch end so those grads aren't dropped."""
+    """A trailing partial window must equal its own mean-reduced full batch."""
     N, accum = 3, 4  # 3 micro-batches, window of 4 -> one partial window
     x, y = _data(N)
     loss_fn = nn.SmoothL1Loss()
 
+    ref = _tiny_model()
+    opt_ref = torch.optim.AdamW(ref.parameters(), lr=1e-3)
+    opt_ref.zero_grad()
+    loss_fn(ref(x), y).backward()
+    opt_ref.step()
+
     model = _tiny_model()
-    before = [p.detach().clone() for p in model.parameters()]
     opt = torch.optim.AdamW(model.parameters(), lr=1e-3)
 
     micro_idx = 0
@@ -90,9 +98,14 @@ def test_partial_trailing_window_is_flushed():
             micro_idx = 0
     # Flush the trailing partial window (the train_il epoch-end guard).
     if micro_idx > 0:
+        rescale_partial_accumulation_gradients(
+            model.parameters(),
+            accumulation_steps=accum,
+            partial_count=micro_idx,
+        )
         opt.step()
 
-    after = list(model.parameters())
-    assert any(not torch.allclose(b, a) for b, a in zip(before, after)), (
-        "trailing partial window was dropped — weights never updated"
-    )
+    for expected, actual in zip(ref.parameters(), model.parameters()):
+        assert torch.allclose(expected, actual, atol=1e-6), (
+            "partial accumulation did not use the partial-window mean"
+        )
