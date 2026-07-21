@@ -126,6 +126,25 @@ parameter.
 
 </details>
 
+## NVIDIA GeForce RTX 5080 GPU (PyTorch 2.7.1 re-run)
+<details open>
+  <summary>Toggle view</summary>
+
+> CUDA 12.8 | Driver 580.95.05 | PyTorch 2.7.1+cu128 | Commit `ead2171` | Resolution [256, 256]
+
+| Backbone | Fusion Mode | Reasoning | Batch | FPS | Latency (ms) | p99 (ms) | Jitter (ms) | VRAM (MB) | Params |
+|----------|-------------|-----------|-------|-----|--------------|----------|-------------|-----------|--------|
+| swin_v2_tiny | bev | off | 1 | 55.9 | 17.9 | 18.9 | 0.9 | 375 | 56.8M |
+| swin_v2_tiny | bev | off | 2 | 30.6 | 32.7 | 34.7 | 1.4 | 520 | 56.8M |
+| swin_v2_tiny | bev | off | 4 | 15.2 | 66.0 | 68.8 | 1.2 | 803 | 56.8M |
+| conv_next_v2_tiny | bev | off | 1 | 57.4 | 17.4 | 18.4 | 0.8 | 396 | 57.1M |
+| conv_next_v2_tiny | bev | off | 2 | 29.8 | 33.5 | 35.0 | 0.8 | 561 | 57.1M |
+| conv_next_v2_tiny | bev | off | 4 | 14.7 | 67.9 | 70.5 | 1.0 | 887 | 57.1M |
+| swin_v2_tiny | bev | pooled_latent | 1 | 53.6 | 18.7 | 19.7 | 0.8 | 386 | 59.4M |
+| swin_v2_tiny | bev | horizon_cross_attention | 1 | 53.1 | 18.8 | 20.7 | 1.7 | 388 | 59.6M |
+
+</details>
+
 ## Add benchmarks for your own GPU
 
 To obtain benchmarks for your GPU, simply run the
