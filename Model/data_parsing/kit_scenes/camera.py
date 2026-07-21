@@ -4,7 +4,7 @@ KIT Scenes stores per-frame JPEGs on disk (not videos), already at the 10 Hz
 reference timeline, so a single ``frame_idx`` indexes every camera and the ego
 poses alike. The ``kitscenes`` SDK's ``SensorDataLoader`` decodes a frame to an
 RGB ``np.ndarray``; this module resizes/normalises it for the AutoE2E backbone
-and stacks the 7 camera views into the tensor the model expects.
+and stacks the 6 camera views into the tensor the model expects.
 
 Camera projection matrices are computed from KITScenes calibration files, with
 intrinsics scaled to match the backbone's actual resize/crop transform.
@@ -22,12 +22,26 @@ from torchvision.transforms import Compose
 from ..calibration import scale_intrinsic
 
 # Camera directories used as visual tiles for the KIT Scenes dataset.
-# Order: hi-res front, then the 6 surround ring cameras. The 2-camera stereo
-# pair (camera_base_front_left_rect/_right_rect) is intentionally dropped; it
-# duplicates forward coverage already given by the ring front camera.
+# Order: long-range front, then the 5 remaining surround ring cameras.
+#
+# Which camera is which (from the calibration published in the SDK's
+# notebooks/04_calibration_and_multimodal.ipynb; HFOV = 2*atan(W / 2*focal)):
+#
+#   camera_base_front_center       5856x3104   18.2 MPix   88.2 deg  <- long-range
+#   camera_ring_*                  3504x2272    8.0 MPix   87.1 deg
+#   camera_base_front_*_rect       2272x3488    7.9 MPix   63.3 deg  <- stereo pair
+#
+# Those three groups match the sensor suite in the dataset paper (arXiv:2606.02956):
+# one long-range 88.4 deg camera, six 87.1 deg surround cameras and a tilted 63.3 deg
+# stereo pair. So camera_base_front_center is the long-range imager, at 2.3x the
+# pixel count of the ring cameras over essentially the same field of view.
+#
+# camera_ring_front is dropped (#146): it points the same way as the long-range
+# camera and covers the same 87 deg, so it is the redundant one of the two. The
+# stereo pair stays out — at 63.3 deg it trades field of view for baseline, and it
+# is not the long-range imager.
 CAMERA_NAMES: list[str] = [
     "camera_base_front_center",
-    "camera_ring_front",
     "camera_ring_front_left",
     "camera_ring_front_right",
     "camera_ring_rear",
@@ -35,8 +49,8 @@ CAMERA_NAMES: list[str] = [
     "camera_ring_rear_right",
 ]
 
-# Total views fed to the model = 7 cameras.
-NUM_VIEWS = 7
+# Total views fed to the model = 6 cameras.
+NUM_VIEWS = 6
 
 def compute_camera_projection_matrices(
     loader: SensorDataLoader,
@@ -119,8 +133,7 @@ def load_camera_frame(
             ``(H, W)``. Images are resized but not normalized.
 
     Returns:
-        Float tensor of shape (7, 3, H, W):
-        7 camera views.
+        Float tensor of shape ``(len(camera_names), 3, H, W)``.
     """
     if camera_names is None:
         camera_names = CAMERA_NAMES
@@ -146,4 +159,4 @@ def load_camera_frame(
         array = np.asarray(image, dtype=np.uint8).copy()
         camera_tensors.append(torch.from_numpy(array).permute(2, 0, 1))
 
-    return torch.stack(camera_tensors, dim=0)  # (7, 3, H, W)
+    return torch.stack(camera_tensors, dim=0)  # (V, 3, H, W)

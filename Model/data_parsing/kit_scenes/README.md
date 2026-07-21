@@ -35,15 +35,15 @@ Without Lanelet2, map tiles fall back to zero tensors and the dataset still func
 
 ## Model inputs produced
 
-- `visual_tiles` `(7, 3, H, W)` — 7 camera frames
+- `visual_tiles` `(6, 3, H, W)` — 6 camera frames
 - `map_tile` `(3, H, W)` — BEV map tile (rasterization of Lanelet2 HD map)
 - `egomotion_history` `(256,)` — fixed model ABI: 64 past timesteps × 4 signals at 10 Hz
 - `visual_history` `(896,)` — zero-initialised placeholder; populated during sequential inference
 - `trajectory_target` `(128,)` — fixed model ABI: 64 future timesteps × 2 signals
-- `camera_params` `(7, 3, 4)` — projection matrices `P = K_scaled @ T_ref_to_cam` for the 7 camera views, computed from KITScenes calibration and scaled to match the backbone's resize/crop transform. 
+- `camera_params` `(6, 3, 4)` — projection matrices `P = K_scaled @ T_ref_to_cam` for the 6 camera views, computed from KITScenes calibration and scaled to match the backbone's resize/crop transform. 
 
 
-The 7 camera views are the hi-res front camera plus the 6 surround ring cameras (`CAMERA_NAMES` in `camera.py`). The stereo front pair is dropped as it duplicates forward coverage.
+The 6 camera views are the long-range front camera (`camera_base_front_center`) plus 5 surround ring cameras (`CAMERA_NAMES` in `camera.py`). `camera_ring_front` is dropped as it duplicates the long-range camera's forward coverage (#146), and the stereo front pair stays out: at 63.3 deg HFOV it trades field of view for baseline.
 
 ### Egomotion history signals `(256,) = 64 × 4`
 
@@ -112,7 +112,7 @@ for batch in loader:
     visual_history = batch["visual_history"].to(device)       # (B, 896)
     egomotion_history = batch["egomotion_history"].to(device) # (B, 256)
     trajectory_target = batch["trajectory_target"].to(device) # (B, 128)
-    camera_params = batch["camera_params"].to(device)         # (B, 7, 3, 4)
+    camera_params = batch["camera_params"].to(device)         # (B, 6, 3, 4)
 
     planner_loss, ego_hidden, future_visual_features = model(
         visual_tiles,
