@@ -107,6 +107,25 @@ parameter.
 
 </details>
 
+## NVIDIA GeForce RTX 4070 Laptop GPU
+<details open>
+  <summary>Toggle view</summary>
+
+> CUDA 12.8 | Driver 595.71.05 | PyTorch 2.7.1+cu128 | Commit `ead2171` | Resolution [256, 256]
+
+| Backbone | Fusion Mode | Reasoning | Batch | FPS | Latency (ms) | p99 (ms) | Jitter (ms) | VRAM (MB) | Params |
+|----------|-------------|-----------|-------|-----|--------------|----------|-------------|-----------|--------|
+| swin_v2_tiny | bev | off | 1 | 24.6 | 40.6 | 43.5 | 3.0 | 375 | 56.8M |
+| swin_v2_tiny | bev | off | 2 | 13.0 | 76.8 | 80.5 | 4.0 | 520 | 56.8M |
+| swin_v2_tiny | bev | off | 4 | 6.3 | 157.8 | 160.0 | 2.1 | 803 | 56.8M |
+| conv_next_v2_tiny | bev | off | 1 | 25.8 | 38.8 | 41.9 | 3.1 | 396 | 57.1M |
+| conv_next_v2_tiny | bev | off | 2 | 13.0 | 77.1 | 80.3 | 3.3 | 561 | 57.1M |
+| conv_next_v2_tiny | bev | off | 4 | 6.4 | 157.0 | 160.3 | 3.2 | 887 | 57.1M |
+| swin_v2_tiny | bev | pooled_latent | 1 | 24.6 | 40.7 | 43.4 | 3.0 | 386 | 59.4M |
+| swin_v2_tiny | bev | horizon_cross_attention | 1 | 24.6 | 40.7 | 43.8 | 3.5 | 388 | 59.6M |
+
+</details>
+
 ## Add benchmarks for your own GPU
 
 To obtain benchmarks for your GPU, simply run the
