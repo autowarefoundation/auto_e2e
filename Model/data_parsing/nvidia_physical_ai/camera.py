@@ -9,7 +9,6 @@ map branch. Hence ``NUM_VIEWS = 7``.
 
 from __future__ import annotations
 
-import io
 from pathlib import Path
 
 import numpy as np
@@ -107,12 +106,15 @@ def load_front_clip(
          for ts in egomotion_timestamps_us],
         dtype=np.int64,
     )
-    video_data = io.BytesIO(video_path.read_bytes())
-    reader = SeekVideoReader(video_data=video_data)
-    try:
-        rgb_frames = reader.decode_images_from_frame_indices(frame_indices)
-    finally:
-        reader.close()
+    # Same fix as load_camera_frame (#116): a plain buffered file handle keeps
+    # PyAV's decoding lazy and seek-based instead of eagerly materializing the
+    # full encoded clip in memory before decoding.
+    with open(video_path, "rb") as video_data:
+        reader = SeekVideoReader(video_data=video_data)
+        try:
+            rgb_frames = reader.decode_images_from_frame_indices(frame_indices)
+        finally:
+            reader.close()
     # RAW uint8 CHW per frame, no preprocessing.
     return [torch.from_numpy(rgb_frames[i]).permute(2, 0, 1).contiguous()
             for i in range(len(frame_indices))]
@@ -175,13 +177,26 @@ def load_camera_frame(
 
         frame_idx = _egomotion_ts_to_frame_idx(egomotion_timestamp_us, timestamps_us)
 
-        video_data = io.BytesIO(video_path.read_bytes()) #TODO: major bottleneck for training - consider sampling images in a seperate data processing step.
-        reader = SeekVideoReader(video_data=video_data)
-        try:
-            indices = np.array([frame_idx], dtype=np.int64)
-            rgb_frames = reader.decode_images_from_frame_indices(indices)
-        finally:
-            reader.close()
+        # Fix for #116: SeekVideoReader wraps PyAV's av.open(), which accepts
+        # any read+seekable file-like object and performs lazy, seek-based
+        # reads internally (container.seek() + demux only the packets needed
+        # around the target frame's keyframe — see SeekVideoReader's own
+        # docstrings: keyframe indexing "is not costly as we are not decoding
+        # anything from the container"). The previous
+        # `io.BytesIO(video_path.read_bytes())` defeated that entirely by
+        # eagerly materializing the FULL encoded clip in memory before a
+        # single frame was requested, once per camera per __getitem__ call
+        # (7 cameras x full-clip read, every sample). A plain buffered file
+        # handle satisfies the same `.seek()` + read interface PyAV needs,
+        # so decoding stays lazy: only the bytes needed to reach the target
+        # frame's keyframe and decode forward are actually read from disk.
+        with open(video_path, "rb") as video_data:
+            reader = SeekVideoReader(video_data=video_data)
+            try:
+                indices = np.array([frame_idx], dtype=np.int64)
+                rgb_frames = reader.decode_images_from_frame_indices(indices)
+            finally:
+                reader.close()
 
         # RAW uint8 CHW, no preprocessing (see module/function docstring).
         frame = torch.from_numpy(rgb_frames[0]).permute(2, 0, 1).contiguous()

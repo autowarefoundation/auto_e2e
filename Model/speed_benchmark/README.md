@@ -35,20 +35,17 @@ python speed_benchmark.py --seed 42
 
 Results are saved to `results/<gpu_name>_<timestamp>.json`.
 
-### 2. Commit the JSON result
+### 2. Generate the BENCHMARKS.md table
+
+Copy the terminal output into the `BENCHMARKS.md` file
+
+### 3. Commit the JSON result and BENCHMARKS.md table
 
 ```bash
 git add results/*.json
+git add BENCHMARKS.md
 git commit --signoff -m "bench: add <GPU> results"
 ```
-
-### 3. Generate the README table
-
-```bash
-python generate_readme_table.py
-```
-
-Copy the output into the main project README under the benchmark section.
 
 ## CLI Options
 
