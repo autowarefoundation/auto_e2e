@@ -99,6 +99,109 @@ def test_ingest_map_binds_scalars_and_maps_only_group_ids():
     }
 
 
+def test_dataset_dynamic_propagates_the_pinned_data_prep_image():
+    assert workflows._map_dataset_partitions.container_image == (
+        workflows.DATA_PREP_IMAGE
+    )
+    assert workflows._map_dataset_partitions.environment == {
+        "AUTO_E2E_DATA_PREP_IMAGE": workflows.DATA_PREP_IMAGE,
+    }
+
+
+def test_full_run_overlay_workflow_wires_exact_model_lineage():
+    resolver, publisher = workflows.wf_publish_full_run_overlays.nodes
+    assert set(workflows.wf_publish_full_run_overlays.python_interface.outputs) == {
+        "overlay_result",
+        "manifest_key",
+        "manifest_sha256",
+    }
+    assert resolver.flyte_entity.name == (
+        "Platform.pipelines.overlay_tasks.resolve_overlay_model_version"
+    )
+
+    resolver_bindings = {
+        binding.var: binding.binding.promise
+        for binding in resolver.bindings
+    }
+    assert resolver_bindings["train_execution_id"].var == (
+        "full_run_execution_id"
+    )
+
+    publisher_bindings = {
+        binding.var: binding.binding.promise
+        for binding in publisher.bindings
+    }
+    assert publisher_bindings["model_version"].node_id == resolver.id
+    assert publisher_bindings["expected_train_execution_id"].var == (
+        "full_run_execution_id"
+    )
+    assert publisher_bindings["shards"].var == "shards"
+
+
+def test_selected_checkpoint_overlay_workflow_wires_exact_epoch_lineage():
+    registrar, publisher = (
+        workflows.wf_publish_selected_checkpoint_overlays.nodes
+    )
+    interface = (
+        workflows.wf_publish_selected_checkpoint_overlays.python_interface
+    )
+    assert set(interface.outputs) == {
+        "overlay_result",
+        "manifest_key",
+        "manifest_sha256",
+    }
+    assert registrar.flyte_entity.name == (
+        "Platform.pipelines.overlay_tasks.register_selected_overlay_checkpoint"
+    )
+
+    registrar_bindings = {
+        binding.var: binding.binding.promise
+        for binding in registrar.bindings
+    }
+    assert registrar_bindings["run_id"].var == "mlflow_run_id"
+    assert registrar_bindings["checkpoint_uri"].var == "checkpoint_uri"
+    assert registrar_bindings["checkpoint_sha256"].var == (
+        "checkpoint_sha256"
+    )
+    assert registrar_bindings["checkpoint_epoch"].var == "checkpoint_epoch"
+    assert registrar_bindings["train_execution_id"].var == (
+        "full_run_execution_id"
+    )
+
+    publisher_bindings = {
+        binding.var: binding.binding.promise
+        for binding in publisher.bindings
+    }
+    assert publisher_bindings["model_version"].node_id == registrar.id
+    assert publisher_bindings["expected_train_execution_id"].var == (
+        "full_run_execution_id"
+    )
+    assert publisher_bindings["shards"].var == "shards"
+
+
+def test_overlay_precompute_loads_one_checkpoint_for_the_fullset():
+    tree = ast.parse(Path(workflows.__file__).read_text())
+    function = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "wf_precompute_overlays"
+    )
+    calls = [
+        call
+        for call in ast.walk(function)
+        if isinstance(call, ast.Call)
+        and isinstance(call.func, ast.Name)
+        and call.func.id == "precompute_overlay_partition"
+    ]
+
+    assert len(calls) == 1
+    keywords = {keyword.arg: keyword.value for keyword in calls[0].keywords}
+    assert isinstance(keywords["shard_dirs"], ast.Name)
+    assert keywords["shard_dirs"].id == "shards"
+    assert not any(isinstance(node, ast.For) for node in ast.walk(function))
+
+
 def test_data_prep_tasks_serialize_karpenter_disruption_protection():
     settings = SerializationSettings(
         image_config=ImageConfig.auto_default_image(),
@@ -292,15 +395,6 @@ def test_loader_wiring_avoids_training_peek_and_bounds_eval_prefetch():
     assert ast.literal_eval(keywords["prefetch_factor"]) == 1
 
 
-def test_dataset_dynamic_propagates_the_pinned_data_prep_image():
-    assert workflows._map_dataset_partitions.container_image == (
-        workflows.DATA_PREP_IMAGE
-    )
-    assert workflows._map_dataset_partitions.environment == {
-        "AUTO_E2E_DATA_PREP_IMAGE": workflows.DATA_PREP_IMAGE,
-    }
-
-
 @pytest.mark.parametrize(
     "buildspec_name",
     (
@@ -341,6 +435,34 @@ def test_recovery_launcher_requires_audited_artifacts_and_skips_source_stages():
     assert "wf_recovered_kitscenes_full_run" in buildspec
     assert "wf_sharded_full_run" not in buildspec
     assert "--reasoning_teacher" not in buildspec
+
+
+def test_overlay_launcher_guards_selected_recovery_checkpoints():
+    buildspec = (
+        _REPO_ROOT / "Platform" / "buildspec-launch-overlay.yml"
+    ).read_text()
+
+    assert "DATASET_VERSION: v2.2" in buildspec
+    assert (
+        'PYTHONPATH="${CODEBUILD_SRC_DIR}/Model:${CODEBUILD_SRC_DIR}:'
+        '${PYTHONPATH:-}"'
+    ) in buildspec
+    for variable in (
+        "SELECTED_MLFLOW_RUN_ID",
+        "SELECTED_CHECKPOINT_URI",
+        "SELECTED_CHECKPOINT_SHA256",
+        "SELECTED_CHECKPOINT_EPOCH",
+    ):
+        assert variable in buildspec
+    assert "--allow-running-recovery" in buildspec
+    assert "wf_publish_selected_checkpoint_overlays" in buildspec
+    assert '--mlflow_run_id "${SELECTED_MLFLOW_RUN_ID}"' in buildspec
+    assert '--checkpoint_uri "${SELECTED_CHECKPOINT_URI}"' in buildspec
+    assert (
+        '--checkpoint_sha256 "${SELECTED_CHECKPOINT_SHA256}"'
+        in buildspec
+    )
+    assert '--checkpoint_epoch "${SELECTED_CHECKPOINT_EPOCH}"' in buildspec
 
 
 def test_reasoning_selection_bootstraps_short_scenes():

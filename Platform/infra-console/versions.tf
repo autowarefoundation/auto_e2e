@@ -17,11 +17,14 @@ terraform {
     bucket         = "auto-e2e-platform-tfstate"
     key            = "infra-console/terraform.tfstate"
     region         = "us-east-1"
+    profile        = "autowarefoundation"
     dynamodb_table = "auto-e2e-platform-tflock"
     encrypt        = true
   }
 }
 
 provider "aws" {
-  region = var.aws_region
+  profile             = "autowarefoundation"
+  region              = var.aws_region
+  allowed_account_ids = [var.expected_aws_account_id]
 }

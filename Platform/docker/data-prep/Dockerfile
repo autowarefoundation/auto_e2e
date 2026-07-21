@@ -60,6 +60,7 @@ RUN pip install --no-cache-dir \
 
 COPY Model/ /workspace/Model/
 COPY Platform/pipelines/ /workspace/Platform/pipelines/
+COPY Tools/trajectory_visualization/ /workspace/Tools/trajectory_visualization/
 
 ENV PYTHONPATH=/workspace/Model:/workspace
 ENV PYTHONUNBUFFERED=1

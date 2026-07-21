@@ -1,0 +1,111 @@
+version: 0.2
+
+env:
+  shell: bash
+  variables:
+    AWS_DEFAULT_REGION: us-west-2
+
+phases:
+  pre_build:
+    commands:
+      - |
+        set -euo pipefail
+
+        AWS_ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
+        SOURCE_REVISION="${CODEBUILD_RESOLVED_SOURCE_VERSION:?CODEBUILD_RESOLVED_SOURCE_VERSION is required}"
+        BUILD_NUMBER="${CODEBUILD_BUILD_NUMBER:?CODEBUILD_BUILD_NUMBER is required}"
+
+        [[ "${AWS_ACCOUNT_ID}" =~ ^[0-9]{12}$ ]] || {
+          echo "Invalid AWS account ID from STS" >&2
+          exit 1
+        }
+        [[ "${SOURCE_REVISION}" =~ ^([0-9a-f]{40}|[0-9a-f]{64})$ ]] || {
+          echo "Resolved source version must be a full Git commit hash" >&2
+          exit 1
+        }
+        [[ "${BUILD_NUMBER}" =~ ^[0-9]+$ ]] || {
+          echo "CodeBuild build number must be numeric" >&2
+          exit 1
+        }
+
+        IMAGE_TAG="${SOURCE_REVISION}-${BUILD_NUMBER}"
+        ECR_REGISTRY="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com"
+        ECR_REPO_PREFIX="${ECR_REGISTRY}/auto-e2e"
+        API_TAGGED_IMAGE="${ECR_REPO_PREFIX}/console-api:${IMAGE_TAG}"
+        WEB_TAGGED_IMAGE="${ECR_REPO_PREFIX}/console-web:${IMAGE_TAG}"
+
+        cat >/tmp/console-build.env <<EOF
+        export IMAGE_TAG=${IMAGE_TAG}
+        export ECR_REGISTRY=${ECR_REGISTRY}
+        export ECR_REPO_PREFIX=${ECR_REPO_PREFIX}
+        export API_TAGGED_IMAGE=${API_TAGGED_IMAGE}
+        export WEB_TAGGED_IMAGE=${WEB_TAGGED_IMAGE}
+        EOF
+
+        echo "Logging into ECR..."
+        aws ecr get-login-password --region "${AWS_DEFAULT_REGION}" |
+          docker login --username AWS --password-stdin "${ECR_REGISTRY}"
+  build:
+    commands:
+      - |
+        set -euo pipefail
+        source /tmp/console-build.env
+
+        echo "Building console-api image..."
+        docker build \
+          -f Tools/DataModelConsole/deploy/docker/Dockerfile.api \
+          -t "${API_TAGGED_IMAGE}" \
+          Tools/DataModelConsole/
+
+        echo "Building console-web image..."
+        docker build \
+          -f Tools/DataModelConsole/deploy/docker/Dockerfile.web \
+          -t "${WEB_TAGGED_IMAGE}" \
+          Tools/DataModelConsole/
+  post_build:
+    commands:
+      - |
+        set -euo pipefail
+        source /tmp/console-build.env
+
+        echo "Pushing images..."
+        docker push "${API_TAGGED_IMAGE}"
+        docker push "${WEB_TAGGED_IMAGE}"
+
+        resolve_digest() {
+          local repository_name="$1"
+
+          aws ecr describe-images \
+            --region "${AWS_DEFAULT_REGION}" \
+            --repository-name "auto-e2e/${repository_name}" \
+            --image-ids "imageTag=${IMAGE_TAG}" \
+            --query 'imageDetails[0].imageDigest' \
+            --output text
+        }
+
+        API_DIGEST="$(resolve_digest console-api)"
+        WEB_DIGEST="$(resolve_digest console-web)"
+        for digest in "${API_DIGEST}" "${WEB_DIGEST}"; do
+          [[ "${digest}" =~ ^sha256:[0-9a-f]{64}$ ]] || {
+            echo "ECR returned an invalid image digest: ${digest}" >&2
+            exit 1
+          }
+        done
+
+        CONSOLE_API_IMAGE="${ECR_REPO_PREFIX}/console-api@${API_DIGEST}"
+        CONSOLE_WEB_IMAGE="${ECR_REPO_PREFIX}/console-web@${WEB_DIGEST}"
+        printf 'export CONSOLE_API_IMAGE=%q\n' "${CONSOLE_API_IMAGE}" \
+          >console-images.env
+        printf 'export CONSOLE_WEB_IMAGE=%q\n' "${CONSOLE_WEB_IMAGE}" \
+          >>console-images.env
+
+        echo "Build complete: digest-pinned image variables are in console-images.env."
+
+cache:
+  paths:
+    - /root/.cache/go-build/**/*
+    - /root/go/pkg/mod/**/*
+
+artifacts:
+  files:
+    - console-images.env

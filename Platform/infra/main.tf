@@ -156,6 +156,10 @@ output "codebuild_project" {
   value = module.codebuild.project_name
 }
 
+output "overlay_launch_project" {
+  value = module.codebuild.overlay_launch_project
+}
+
 # --- UI Exposure: CloudFront + VPC Origin → Internal NLB (K8s managed) ---
 # NLB ARNs/DNS are passed as variables since K8s Service creates them.
 # After first deploy, run post-apply to create NLB Services, then set these vars.

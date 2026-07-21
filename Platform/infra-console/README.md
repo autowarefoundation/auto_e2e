@@ -3,11 +3,13 @@
 DataModelConsole-dedicated infrastructure, kept in **isolated terraform state**
 (`infra-console/terraform.tfstate`, separate from the main Platform root) so a
 console apply can never plan a change to existing EKS / RDS / Flyte / MLflow.
+This is the sole Terraform root that owns the production Console resources.
+`Tools/DataModelConsole/deploy/terraform` is retired and can only detach legacy
+local state without destroying AWS resources.
 
-Scope for the current goal: get the **current dashboard reachable, CloudFront-only**.
-No Cognito / Lambda@Edge / ACM — CloudFront serves HTTPS with its default
-`*.cloudfront.net` cert; the internal ALB is plain HTTP. The trajectory-overlay
-work is deferred.
+CloudFront serves HTTPS with its default `*.cloudfront.net` cert; the internal
+ALB is plain HTTP. Exact geography remains disabled until authenticated role
+propagation is implemented.
 
 ## What it creates
 
@@ -18,23 +20,38 @@ work is deferred.
   from public edge IPs.
 - `aws_iam_role.console_api` + Pod Identity association — S3 read-only
   (datasets + artifacts) and DynamoDB (`auto-e2e-console` + `gsi1`) for the API.
+  The explicit post-publication reasoning-materialization Job reuses this
+  identity; it does not require a second role or a Terraform change.
 
 ## Why two phases
 
 The managed `CloudFront-VPCOrigins-Service-SG` (the source the ALB SG must trust)
 does not exist until a VPC origin is created, and the VPC origin needs the ALB
 ARN, and the ALB is created by the k8s Ingress controller — which needs the SG
-id. Chicken-and-egg, so we split on `alb_arn`:
+id. Chicken-and-egg, so `deployment_phase` must be explicitly set on every
+plan/apply. A no-argument apply cannot silently return to bootstrap. Once the
+locked resources exist, `prevent_destroy` also blocks a mistaken downgrade.
 
-### Phase 1 — SG + IAM (before k8s)
+Set the account-specific values from the ignored repository `.env` or shell,
+never in a tracked tfvars file:
 
 ```bash
 cd Platform/infra-console
 export AWS_PROFILE=autowarefoundation
+export TF_VAR_expected_aws_account_id="<ACCOUNT_ID>"
+export TF_VAR_vpc_id="<VPC_ID>"
 terraform init
-terraform apply            # alb_arn defaults to "" → SG (VPC-CIDR bootstrap rule) + IAM only
+```
+
+### Phase 1 — SG + IAM (before k8s)
+
+```bash
+terraform apply -var='deployment_phase=bootstrap'
 terraform output -raw console_alb_sg_id
 ```
+
+Bootstrap is only for initial ALB creation. It temporarily admits HTTP from the
+VPC CIDR because the CloudFront VPC-origin service SG does not exist yet.
 
 ### Deploy k8s (creates the internal ALB)
 
@@ -54,9 +71,20 @@ ALB_DNS=$(kubectl -n console get ingress console-ingress \
 ALB_ARN=$(aws elbv2 describe-load-balancers --region us-west-2 \
   --query "LoadBalancers[?DNSName=='${ALB_DNS}'].LoadBalancerArn" --output text)
 
-terraform apply -var="alb_arn=${ALB_ARN}" -var="alb_dns=${ALB_DNS}"
+terraform apply \
+  -var='deployment_phase=locked' \
+  -var="alb_arn=${ALB_ARN}" \
+  -var="alb_dns=${ALB_DNS}"
 terraform output -raw cloudfront_url
 ```
 
 Phase 2 also swaps the SG's bootstrap VPC-CIDR rule for the CloudFront-only rule,
 so the end state is: nothing but CloudFront's VPC-origin ENIs can reach the ALB.
+Every later plan/apply must continue to pass `deployment_phase=locked` and the
+same ALB ARN/DNS, either explicitly or through an ignored local
+`*.auto.tfvars` file.
+
+The ALB SG, CloudFront-only ingress rule, VPC origin, distribution, Console API
+IAM role, and Pod Identity association use `prevent_destroy`. Removing that
+protection is a deliberate migration requiring a reviewed code change; do not
+use bootstrap or `terraform destroy` as an update path.

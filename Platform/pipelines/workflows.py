@@ -17,7 +17,21 @@ from flytekit.types.file import FlyteFile
 from flytekit.types.directory import FlyteDirectory
 from typing import Annotated, NamedTuple, List, Optional
 
-from .dataset_publication import DatasetPublication
+from data_processing.contract_versions import (
+    GEOMETRY_VERSION as _GEOM_V,
+    PARSER_VERSION as _PARSER_V,
+    REASONING_LABEL_POLICY_VERSION as _LABEL_POLICY_V,
+    SHARD_SCHEMA_VERSION as _SHARD_V,
+    UID_SCHEMA_VERSION as _UID_V,
+)
+from Platform.pipelines.dataset_publication import DatasetPublication
+from Platform.pipelines.overlay_tasks import (
+    register_selected_overlay_checkpoint,
+    resolve_overlay_model_version,
+)
+from Platform.pipelines.trajectory_visualization_tasks import (
+    export_trajectory_report,
+)
 
 import os as _os
 
@@ -58,13 +72,6 @@ KITSCENES_SOURCE_REVISION = "6fde0034446669e2ed7235e4c7fe323cd23d599d"
 # is fatal because guessing these values can silently reuse incompatible cache
 # entries. Per-partition group_ids and source_revision travel as task INPUTS, so
 # ranges are independently cacheable.
-from data_processing.contract_versions import (  # noqa: E402
-    GEOMETRY_VERSION as _GEOM_V,
-    PARSER_VERSION as _PARSER_V,
-    REASONING_LABEL_POLICY_VERSION as _LABEL_POLICY_V,
-    SHARD_SCHEMA_VERSION as _SHARD_V,
-    UID_SCHEMA_VERSION as _UID_V,
-)
 
 # Each stage's cache_version folds in ONLY the contracts that actually determine
 # its output (§3.4a): ingest depends on the parser enumeration; labels also on
@@ -185,6 +192,12 @@ FUSION_LABEL = "bev"
 
 TrainOutput = NamedTuple("TrainOutput", checkpoint=FlyteFile, metadata=FlyteFile)
 EvalMetrics = NamedTuple("EvalMetrics", ade=float, fde=float, gate_pass=bool)
+PublishedOverlayOutput = NamedTuple(
+    "PublishedOverlayOutput",
+    overlay_result=str,
+    manifest_key=str,
+    manifest_sha256=str,
+)
 KITScenesBenchmarkOutput = NamedTuple(
     "KITScenesBenchmarkOutput",
     ade_3s=float,
@@ -4974,7 +4987,10 @@ def wf_ingest_train_eval(
                               train_metadata=il_out.metadata)
 
 
-@dynamic(container_image=EVAL_IMAGE)
+@dynamic(
+    container_image=EVAL_IMAGE,
+    environment={"AUTO_E2E_EVAL_IMAGE": EVAL_IMAGE},
+)
 def wf_precompute_overlays(
     shards: List[FlyteDirectory],
     model_version: str,
@@ -4983,6 +4999,7 @@ def wf_precompute_overlays(
     model_inference_code_digest: str,
     container_image_digest: str,
     artifacts_bucket: str,
+    expected_train_execution_id: str = "",
     registered_model_name: str = "auto-e2e-driving-policy",
     dataset: str = "l2d",
     dataset_version: str = DATASET_PACK_VERSION,
@@ -4996,9 +5013,9 @@ def wf_precompute_overlays(
     """Ops-only canonical trajectory overlay precompute.
 
     The Console never invokes this workflow. It resolves one immutable MLflow
-    model version, marks the overlay set ``building``, runs one coarse GPU task
-    per packed partition (loading the checkpoint once for every tar in that
-    partition), writes S3 bodies before Dynamo pointers, then publishes the
+    model version, marks the overlay set ``building``, then runs one resumable
+    GPU task over every packed partition so the checkpoint is loaded once for
+    the FullSet. It writes S3 bodies before Dynamo pointers, then publishes the
     audit manifest and flips ``OVLSET`` to ``ready`` last.
     """
     from Platform.pipelines.overlay_tasks import (
@@ -5011,41 +5028,45 @@ def wf_precompute_overlays(
     resolved = resolve_overlay_model(
         registered_model_name=registered_model_name,
         model_version=model_version,
+        expected_train_execution_id=expected_train_execution_id,
     )
     gate = prepare_overlay_set(
         resolved_metadata=resolved.metadata,
         dataset=dataset,
         dataset_version=dataset_version,
         dataset_manifest_digest=dataset_manifest_digest,
+        preprocessing_contract_digest=preprocessing_contract_digest,
+        model_inference_code_digest=model_inference_code_digest,
+        container_image_digest=container_image_digest,
         artifacts_bucket=artifacts_bucket,
         dynamo_table=dynamo_table,
         aws_region=aws_region,
         base_seeds=base_seeds,
+        sampler=sampler,
     )
-    results: List[FlyteFile] = []
-    for partition in shards:
-        results.append(precompute_overlay_partition(
-            checkpoint=resolved.checkpoint,
-            model_metadata=resolved.metadata,
-            prepare_gate=gate,
-            shard_dir=partition,
-            dataset=dataset,
-            dataset_version=dataset_version,
-            dataset_manifest_digest=dataset_manifest_digest,
-            preprocessing_contract_digest=preprocessing_contract_digest,
-            model_inference_code_digest=model_inference_code_digest,
-            container_image_digest=container_image_digest,
-            artifacts_bucket=artifacts_bucket,
-            dynamo_table=dynamo_table,
-            aws_region=aws_region,
-            base_seeds=base_seeds,
-            batch_size=batch_size,
-            num_workers=num_workers,
-            sampler=sampler,
-        ))
+    result = precompute_overlay_partition(
+        checkpoint=resolved.checkpoint,
+        model_metadata=resolved.metadata,
+        prepare_gate=gate,
+        shard_dirs=shards,
+        dataset=dataset,
+        dataset_version=dataset_version,
+        dataset_manifest_digest=dataset_manifest_digest,
+        preprocessing_contract_digest=preprocessing_contract_digest,
+        model_inference_code_digest=model_inference_code_digest,
+        container_image_digest=container_image_digest,
+        artifacts_bucket=artifacts_bucket,
+        dynamo_table=dynamo_table,
+        aws_region=aws_region,
+        base_seeds=base_seeds,
+        batch_size=batch_size,
+        num_workers=num_workers,
+        sampler=sampler,
+    )
     return finalize_overlay_set(
         model_metadata=resolved.metadata,
-        partition_results=results,
+        partition_results=[result],
+        prepare_gate=gate,
         dataset=dataset,
         dataset_version=dataset_version,
         dataset_manifest_digest=dataset_manifest_digest,
@@ -5055,7 +5076,10 @@ def wf_precompute_overlays(
     )
 
 
-@dynamic(container_image=DATA_PREP_IMAGE)
+@dynamic(
+    container_image=DATA_PREP_IMAGE,
+    environment={"AUTO_E2E_DATA_PREP_IMAGE": DATA_PREP_IMAGE},
+)
 def wf_publish_dataset_snapshot(
     shards: List[FlyteDirectory],
     published_dataset: str,
@@ -5095,4 +5119,271 @@ def wf_publish_dataset_snapshot(
         datasets_bucket=datasets_bucket,
         dynamo_table=dynamo_table,
         aws_region=aws_region,
+    )
+
+
+@workflow
+def wf_publish_and_precompute_overlays(
+    shards: List[FlyteDirectory],
+    model_version: str,
+    preprocessing_contract_digest: str,
+    model_inference_code_digest: str,
+    container_image_digest: str,
+    datasets_bucket: str,
+    artifacts_bucket: str,
+    expected_train_execution_id: str = "",
+    published_dataset: str = "kitscenes",
+    registered_model_name: str = "auto-e2e-driving-policy",
+    dataset_version: str = DATASET_PACK_VERSION,
+    dynamo_table: str = "auto-e2e-console",
+    aws_region: str = "us-west-2",
+    base_seeds: List[int] = [0],
+    batch_size: int = 32,
+    num_workers: int = 4,
+    copy_workers: int = 16,
+) -> PublishedOverlayOutput:
+    """Publish one immutable snapshot, then precompute its model overlays.
+
+    The dataset manifest digest is wired directly between Flyte nodes, so an
+    operator cannot accidentally launch inference against a different snapshot.
+    """
+    publication = wf_publish_dataset_snapshot(
+        shards=shards,
+        published_dataset=published_dataset,
+        datasets_bucket=datasets_bucket,
+        dataset_version=dataset_version,
+        dynamo_table=dynamo_table,
+        aws_region=aws_region,
+        copy_workers=copy_workers,
+    )
+    overlay_result = wf_precompute_overlays(
+        shards=shards,
+        model_version=model_version,
+        dataset_manifest_digest=publication.manifest_sha256,
+        preprocessing_contract_digest=preprocessing_contract_digest,
+        model_inference_code_digest=model_inference_code_digest,
+        container_image_digest=container_image_digest,
+        artifacts_bucket=artifacts_bucket,
+        expected_train_execution_id=expected_train_execution_id,
+        registered_model_name=registered_model_name,
+        dataset=published_dataset,
+        dataset_version=dataset_version,
+        dynamo_table=dynamo_table,
+        aws_region=aws_region,
+        base_seeds=base_seeds,
+        batch_size=batch_size,
+        num_workers=num_workers,
+        sampler="model-default",
+    )
+    return PublishedOverlayOutput(
+        overlay_result=overlay_result,
+        manifest_key=publication.manifest_key,
+        manifest_sha256=publication.manifest_sha256,
+    )
+
+
+@workflow
+def wf_publish_full_run_overlays(
+    shards: List[FlyteDirectory],
+    full_run_execution_id: str,
+    preprocessing_contract_digest: str,
+    model_inference_code_digest: str,
+    container_image_digest: str,
+    datasets_bucket: str,
+    artifacts_bucket: str,
+    published_dataset: str = "kitscenes",
+    registered_model_name: str = "auto-e2e-driving-policy",
+    source_dataset: str = Dataset.KITSCENES.value,
+    dataset_version: str = DATASET_PACK_VERSION,
+    dynamo_table: str = "auto-e2e-console",
+    aws_region: str = "us-west-2",
+    base_seeds: List[int] = [0],
+    batch_size: int = 32,
+    num_workers: int = 4,
+    copy_workers: int = 16,
+) -> PublishedOverlayOutput:
+    """Publish the labeled shards and model produced by one completed Full Run."""
+    model_version = resolve_overlay_model_version(
+        registered_model_name=registered_model_name,
+        train_execution_id=full_run_execution_id,
+        expected_dataset=source_dataset,
+        expected_dataset_version=dataset_version,
+    )
+    return wf_publish_and_precompute_overlays(
+        shards=shards,
+        model_version=model_version,
+        preprocessing_contract_digest=preprocessing_contract_digest,
+        model_inference_code_digest=model_inference_code_digest,
+        container_image_digest=container_image_digest,
+        datasets_bucket=datasets_bucket,
+        artifacts_bucket=artifacts_bucket,
+        expected_train_execution_id=full_run_execution_id,
+        published_dataset=published_dataset,
+        registered_model_name=registered_model_name,
+        dataset_version=dataset_version,
+        dynamo_table=dynamo_table,
+        aws_region=aws_region,
+        base_seeds=base_seeds,
+        batch_size=batch_size,
+        num_workers=num_workers,
+        copy_workers=copy_workers,
+    )
+
+
+@workflow
+def wf_publish_selected_checkpoint_overlays(
+    shards: List[FlyteDirectory],
+    full_run_execution_id: str,
+    mlflow_run_id: str,
+    checkpoint_uri: str,
+    checkpoint_sha256: str,
+    checkpoint_epoch: int,
+    preprocessing_contract_digest: str,
+    model_inference_code_digest: str,
+    container_image_digest: str,
+    datasets_bucket: str,
+    artifacts_bucket: str,
+    published_dataset: str = "kitscenes",
+    registered_model_name: str = "auto-e2e-driving-policy",
+    source_dataset: str = Dataset.KITSCENES.value,
+    dataset_version: str = DATASET_PACK_VERSION,
+    dynamo_table: str = "auto-e2e-console",
+    aws_region: str = "us-west-2",
+    base_seeds: List[int] = [0],
+    batch_size: int = 32,
+    num_workers: int = 4,
+    copy_workers: int = 16,
+) -> PublishedOverlayOutput:
+    """Publish a verified checkpoint while its parent Training still runs."""
+    model_version = register_selected_overlay_checkpoint(
+        registered_model_name=registered_model_name,
+        run_id=mlflow_run_id,
+        checkpoint_uri=checkpoint_uri,
+        checkpoint_sha256=checkpoint_sha256,
+        checkpoint_epoch=checkpoint_epoch,
+        train_execution_id=full_run_execution_id,
+        expected_dataset=source_dataset,
+        expected_dataset_version=dataset_version,
+    )
+    return wf_publish_and_precompute_overlays(
+        shards=shards,
+        model_version=model_version,
+        preprocessing_contract_digest=preprocessing_contract_digest,
+        model_inference_code_digest=model_inference_code_digest,
+        container_image_digest=container_image_digest,
+        datasets_bucket=datasets_bucket,
+        artifacts_bucket=artifacts_bucket,
+        expected_train_execution_id=full_run_execution_id,
+        published_dataset=published_dataset,
+        registered_model_name=registered_model_name,
+        dataset_version=dataset_version,
+        dynamo_table=dynamo_table,
+        aws_region=aws_region,
+        base_seeds=base_seeds,
+        batch_size=batch_size,
+        num_workers=num_workers,
+        copy_workers=copy_workers,
+    )
+
+
+@workflow
+def wf_create_publish_and_precompute_overlays(
+    model_version: str,
+    preprocessing_contract_digest: str,
+    model_inference_code_digest: str,
+    container_image_digest: str,
+    datasets_bucket: str,
+    artifacts_bucket: str,
+    dataset: Dataset = Dataset.KITSCENES,
+    source_revision: str = KITSCENES_SOURCE_REVISION,
+    published_dataset: str = "kitscenes",
+    dataset_version: str = DATASET_PACK_VERSION,
+    episodes: int = 0,
+    start_ep: int = -1,
+    end_ep: int = -1,
+    partition_size: int = 1,
+    image_size: int = 256,
+    reasoning_teacher: str = "openai_compatible",
+    prompt_version: str = "action_relevant_reasoning_v3_temporal_front256",
+    label_stride: int = 10,
+    label_workers: int = 2,
+    max_partitions: int = 600,
+    max_missing_scenes: int = 1,
+    ingest_concurrency: int = 60,
+    label_concurrency: int = 5,
+    pack_concurrency: int = 60,
+    registered_model_name: str = "auto-e2e-driving-policy",
+    dynamo_table: str = "auto-e2e-console",
+    aws_region: str = "us-west-2",
+    base_seeds: List[int] = [0],
+    batch_size: int = 32,
+    num_workers: int = 4,
+    copy_workers: int = 16,
+) -> PublishedOverlayOutput:
+    """Build, publish, and overlay one dataset without manual URI handoff."""
+    shards = wf_create_dataset_sharded(
+        dataset=dataset,
+        source_revision=source_revision,
+        dataset_version=dataset_version,
+        episodes=episodes,
+        start_ep=start_ep,
+        end_ep=end_ep,
+        partition_size=partition_size,
+        image_size=image_size,
+        world_model=True,
+        reasoning_teacher=reasoning_teacher,
+        prompt_version=prompt_version,
+        label_stride=label_stride,
+        label_workers=label_workers,
+        max_partitions=max_partitions,
+        max_missing_scenes=max_missing_scenes,
+        ingest_concurrency=ingest_concurrency,
+        label_concurrency=label_concurrency,
+        pack_concurrency=pack_concurrency,
+    )
+    return wf_publish_and_precompute_overlays(
+        shards=shards,
+        model_version=model_version,
+        preprocessing_contract_digest=preprocessing_contract_digest,
+        model_inference_code_digest=model_inference_code_digest,
+        container_image_digest=container_image_digest,
+        datasets_bucket=datasets_bucket,
+        artifacts_bucket=artifacts_bucket,
+        published_dataset=published_dataset,
+        registered_model_name=registered_model_name,
+        dataset_version=dataset_version,
+        dynamo_table=dynamo_table,
+        aws_region=aws_region,
+        base_seeds=base_seeds,
+        batch_size=batch_size,
+        num_workers=num_workers,
+        copy_workers=copy_workers,
+    )
+
+
+@workflow
+def wf_export_trajectory_report(
+    shard: FlyteFile,
+    overlay: FlyteFile,
+    dataset_manifest: FlyteFile,
+    overlay_manifest: FlyteFile,
+    selection_manifest: Optional[FlyteFile] = None,
+    scene_uids: List[str] = [],
+    seed_index: int = 0,
+    camera_index: int = 0,
+    max_frames_per_scene: int = 300,
+    fps: float = 10.0,
+) -> FlyteDirectory:
+    """Render a canonical shard overlay as per-scene MP4 artifacts."""
+    return export_trajectory_report(
+        shard=shard,
+        overlay=overlay,
+        dataset_manifest=dataset_manifest,
+        overlay_manifest=overlay_manifest,
+        selection_manifest=selection_manifest,
+        scene_uids=scene_uids,
+        seed_index=seed_index,
+        camera_index=camera_index,
+        max_frames_per_scene=max_frames_per_scene,
+        fps=fps,
     )

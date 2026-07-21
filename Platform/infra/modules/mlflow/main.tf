@@ -8,14 +8,14 @@ variable "rds_password" {
 }
 
 resource "helm_release" "mlflow" {
-  name             = "mlflow"
-  repository       = "https://community-charts.github.io/helm-charts"
-  chart            = "mlflow"
-  version          = "1.8.5"
-  namespace        = "mlflow"
-  create_namespace = true
-  timeout          = 600
-  wait             = false
+  name                       = "mlflow"
+  repository                 = "https://community-charts.github.io/helm-charts"
+  chart                      = "mlflow"
+  version                    = "1.8.5"
+  namespace                  = "mlflow"
+  create_namespace           = true
+  timeout                    = 600
+  wait                       = false
   disable_openapi_validation = true
 
   values = [file("${path.module}/../../../helm-values/mlflow.yaml")]

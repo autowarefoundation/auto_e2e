@@ -18,7 +18,10 @@ from Platform.pipelines.dataset_publication import (
 ECR_PREFIX = os.environ.get(
     "ECR_PREFIX", "381491877296.dkr.ecr.us-west-2.amazonaws.com"
 )
-DATA_PREP_IMAGE = f"{ECR_PREFIX}/auto-e2e/data-prep:latest"
+DATA_PREP_IMAGE = os.environ.get(
+    "AUTO_E2E_DATA_PREP_IMAGE",
+    f"{ECR_PREFIX}/auto-e2e/data-prep:latest",
+)
 _MAX_COPY_OBJECT_BYTES = 5 * 1024**3
 
 
@@ -71,6 +74,21 @@ def _is_precondition_failed(exc: Exception) -> bool:
     return _error_code(exc) in {"PreconditionFailed", "412"} or status == 412
 
 
+def _etag_header(value: object, object_uri: str) -> str:
+    raw = str(value or "").strip()
+    if raw.startswith('"') and raw.endswith('"') and len(raw) > 2:
+        opaque = raw[1:-1]
+    else:
+        opaque = raw
+    if (
+        not opaque
+        or '"' in opaque
+        or any(ord(char) < 0x20 or ord(char) == 0x7F for char in opaque)
+    ):
+        raise ValueError(f"object has an invalid ETag: {object_uri}")
+    return f'"{opaque}"'
+
+
 def _list_objects(s3, bucket: str, prefix: str) -> list[dict]:
     normalized = prefix.rstrip("/") + "/"
     paginator = s3.get_paginator("list_objects_v2")
@@ -83,10 +101,10 @@ def _list_objects(s3, bucket: str, prefix: str) -> list[dict]:
             relative = key[len(normalized):]
             if not relative or relative.startswith("/") or ".." in relative.split("/"):
                 raise ValueError(f"unsafe object under FlyteDirectory: {key!r}")
-            etag_header = str(item.get("ETag", ""))
-            etag = etag_header.strip('"')
-            if not etag:
-                raise ValueError(f"source object has no ETag: s3://{bucket}/{key}")
+            etag_header = _etag_header(
+                item.get("ETag"), f"s3://{bucket}/{key}"
+            )
+            etag = etag_header[1:-1]
             size = int(item["Size"])
             identity = _content_identity(etag, size)
             objects.append({
@@ -142,7 +160,7 @@ def _copy_immutable(
     *,
     destination_bucket: str,
     destination_key: str,
-) -> None:
+) -> str:
     from botocore.exceptions import ClientError
 
     if source["size"] > _MAX_COPY_OBJECT_BYTES:
@@ -156,7 +174,7 @@ def _copy_immutable(
         "publication-schema": PUBLICATION_SCHEMA,
     }
     try:
-        s3.copy_object(
+        response = s3.copy_object(
             Bucket=destination_bucket,
             Key=destination_key,
             CopySource={"Bucket": source["bucket"], "Key": source["key"]},
@@ -167,7 +185,10 @@ def _copy_immutable(
             ContentType=_content_type(destination_key),
             CacheControl="private, max-age=31536000, immutable",
         )
-        return
+        return _etag_header(
+            response.get("CopyObjectResult", {}).get("ETag"),
+            f"s3://{destination_bucket}/{destination_key}",
+        )
     except ClientError as exc:
         if not _is_precondition_failed(exc):
             raise
@@ -192,6 +213,10 @@ def _copy_immutable(
             "immutable dataset object already exists with different content: "
             f"s3://{destination_bucket}/{destination_key}"
         )
+    return _etag_header(
+        existing.get("ETag"),
+        f"s3://{destination_bucket}/{destination_key}",
+    )
 
 
 def _put_immutable(
@@ -448,7 +473,6 @@ def publish_dataset_partition(
                 "name": relative,
                 "key": destination_key,
                 "byte_size": source["size"],
-                "etag": source["etag"],
                 "content_identity": source["content_identity"],
             })
         elif relative.startswith("pool/"):
@@ -480,7 +504,7 @@ def publish_dataset_partition(
         raise ValueError("world-model partition has no sibling frame pool")
 
     with ThreadPoolExecutor(max_workers=copy_workers) as executor:
-        list(executor.map(
+        destination_etags = list(executor.map(
             lambda source: _copy_immutable(
                 s3,
                 source,
@@ -489,6 +513,12 @@ def publish_dataset_partition(
             ),
             copy_sources,
         ))
+    for source, destination_etag in zip(
+        copy_sources, destination_etags, strict=True
+    ):
+        source["destination_etag"] = destination_etag
+    for shard in shards:
+        shard["etag"] = by_relative[shard["name"]]["destination_etag"]
 
     pool_digest = hashlib.sha256()
     for source in pool_sources:
@@ -592,6 +622,7 @@ def finalize_dataset_publication(
         geo_pointer_item,
         gzip_json_bytes,
         merge_partition_results,
+        rig_key,
         sha256_bytes,
     )
 
@@ -600,7 +631,7 @@ def finalize_dataset_publication(
         json.loads(Path(result.download()).read_text())
         for result in partition_results
     ]
-    manifest, rig, heatmap = merge_partition_results(
+    manifest, rigs, heatmap = merge_partition_results(
         results,
         dataset=published_dataset,
         version=dataset_version,
@@ -608,14 +639,17 @@ def finalize_dataset_publication(
     prefix = dataset_prefix(published_dataset, dataset_version)
     s3 = boto3.client("s3", region_name=aws_region)
 
-    rig_payload = canonical_json_bytes(rig, pretty=True)
-    _put_immutable(
-        s3,
-        bucket=datasets_bucket,
-        key=f"{prefix}/rig/projection.json",
-        payload=rig_payload,
-        content_type="application/json",
-    )
+    for rig_digest, rig in rigs.items():
+        rig_payload = canonical_json_bytes(rig, pretty=True)
+        if sha256_bytes(rig_payload) != rig_digest:
+            raise RuntimeError("rig digest changed during publication")
+        _put_immutable(
+            s3,
+            bucket=datasets_bucket,
+            key=rig_key(published_dataset, dataset_version, rig_digest),
+            payload=rig_payload,
+            content_type="application/json",
+        )
 
     geo_summary = manifest.get("geo")
     if geo_summary is not None:

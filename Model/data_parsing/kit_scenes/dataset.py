@@ -49,6 +49,7 @@ from .map import _cached_scene_map, generate_bev_map_tile
 logger = logging.getLogger(__name__)
 
 _VISUAL_HISTORY_DIM = 896
+_TRAJECTORY_GROUND_Z_M = -2.1
 _UID_SAFE = re.compile(r"^[A-Za-z0-9_-]+$")
 
 
@@ -424,7 +425,12 @@ class KitScenesDataset(Dataset):
                 "KITScenes partition contains scenes with different calibration; "
                 "pack one scene per partition"
             )
-        return {"type": "pinhole", "matrix": reference.tolist()}
+        return {
+            "type": "pinhole",
+            "matrix": reference.tolist(),
+            "reference_frame": "top_lidar_flu",
+            "ground_z_m": _TRAJECTORY_GROUND_Z_M,
+        }
 
     def _load_multiview_frame(
         self, scene_id: str, frame_idx: int

@@ -31,6 +31,7 @@ from torchvision import transforms
 
 from data_parsing.l2d.camera import CAMERA_NAMES as _L2D_CAM_NAMES  # type: ignore[misc]
 from data_parsing.l2d.camera import MAP_VIEW_NAME as _L2D_MAP_NAME  # type: ignore[misc]
+from data_parsing.l2d.dataset import L2DDataset
 import data_processing.reasoning_label_generation.parallel_pack as pp
 
 IMAGE_SIZE = 32
@@ -424,6 +425,21 @@ def test_window_rows_covers_all_window_offsets():
     for ep_idx, fi in rows:
         assert ep_idx == 0
         assert fi >= 0, f"negative frame_index {fi} — crossed episode start"
+
+
+def test_l2d_window_frame_ids_uses_episode_bounds():
+    """The real L2D helper keeps both bounds for its defensive range check."""
+    ds = object.__new__(L2DDataset)
+    ds._samples = [(0, 100)]
+    ds._episode_ranges = {0: (0, 200)}
+    ds._wm_num_frames = 4
+    ds._wm_stride = 10
+
+    index = ds.window_frame_ids(0)
+
+    assert len(index["history"]) == 4
+    assert len(index["future"]) == 4
+    assert index["future"][-1][0] == "l2d-v1-e000000-r000140-c0"
 
 
 def test_decode_count_is_unique_rows_not_8x():

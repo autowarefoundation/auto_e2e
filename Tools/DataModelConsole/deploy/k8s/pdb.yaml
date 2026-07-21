@@ -1,0 +1,21 @@
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: console-api
+  namespace: console
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: console-api
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: console-web
+  namespace: console
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: console-web

@@ -48,6 +48,7 @@ class _S3:
         self.copy_calls.append(kwargs)
         if self.fail_copy:
             raise _precondition_failed()
+        return {"CopyObjectResult": {"ETag": '"destination-etag"'}}
 
     def put_object(self, **kwargs):
         self.put_calls.append(kwargs)
@@ -85,7 +86,7 @@ def _source() -> dict:
 def test_copy_uses_destination_and_source_preconditions():
     s3 = _S3()
     source = _source()
-    _copy_immutable(
+    destination_etag = _copy_immutable(
         s3,
         source,
         destination_bucket="datasets",
@@ -98,6 +99,7 @@ def test_copy_uses_destination_and_source_preconditions():
     assert request["Metadata"]["source-identity"] == (
         source["content_identity"]
     )
+    assert destination_etag == '"destination-etag"'
 
 
 def test_copy_retry_accepts_only_identical_existing_object():
@@ -106,14 +108,16 @@ def test_copy_retry_accepts_only_identical_existing_object():
     source = _source()
     s3.head = {
         "ContentLength": source["size"],
+        "ETag": '"existing-destination-etag"',
         "Metadata": {"source-identity": source["content_identity"]},
     }
-    _copy_immutable(
+    destination_etag = _copy_immutable(
         s3,
         source,
         destination_bucket="datasets",
         destination_key="l2d/v2.1/shards/train.tar",
     )
+    assert destination_etag == '"existing-destination-etag"'
 
     s3.head["Metadata"]["source-identity"] = "different"
     with pytest.raises(RuntimeError, match="different content"):

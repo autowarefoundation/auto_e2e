@@ -6,11 +6,11 @@ RUN pip install --no-cache-dir \
     timm==1.0.27 \
     mlflow-skinny==2.22.0 \
     webdataset \
-    flytekit \
+    flytekit==1.14.9 \
     kubernetes \
     pyyaml \
     numpy \
-    boto3
+    boto3==1.43.0
 
 COPY Model/ /workspace/Model/
 COPY Platform/pipelines/ /workspace/Platform/pipelines/

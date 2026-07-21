@@ -262,6 +262,21 @@ def test_camera_pipeline_resizes_without_normalizing_and_scales_intrinsics():
     assert projection[0, 1, 2] == pytest.approx(16.0)
 
 
+def test_projection_spec_describes_top_lidar_ground_plane():
+    scene = "fd1d1b6b-59bf-4292-8295-5028aa6aa5e3"
+    dataset = _dataset_stub([(scene, 64)])
+    dataset._scene_ids = [scene]
+    dataset.image_size = 256
+    dataset._scene_camera_params = {
+        scene: torch.zeros((2, 3, 4), dtype=torch.float32)
+    }
+
+    spec = dataset.projection_spec()
+
+    assert spec["reference_frame"] == "top_lidar_flu"
+    assert spec["ground_z_m"] == pytest.approx(-2.1)
+
+
 def test_numeric_contract_emits_current_plus_64_gps_points():
     scene = "fd1d1b6b-59bf-4292-8295-5028aa6aa5e3"
     dataset = _dataset_stub([(scene, 64)])
