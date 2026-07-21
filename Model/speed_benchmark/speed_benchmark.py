@@ -1,3 +1,4 @@
+import generate_readme_table
 import argparse
 import subprocess
 import torch
@@ -13,10 +14,11 @@ from model_components.view_fusion import PinholeProjection
 
 
 def run_speed_benchmark(backbone, device, batch_size=1, num_views=7,
-                        reasoning="off"):
+                        reasoning="off", enable_world_model=False):
 
+    model_type = "Combined" if enable_world_model else "Reactive"
     print(f"{'='*80}")
-    print(f"  backbone = '{backbone}' | fusion = 'bev' | batch={batch_size} "
+    print(f"  backbone = '{backbone}' | model = '{model_type}' | batch={batch_size} "
           f"| views={num_views} | reasoning = '{reasoning}'")
     print(f"{'='*80}\n")
 
@@ -29,11 +31,16 @@ def run_speed_benchmark(backbone, device, batch_size=1, num_views=7,
     # per-forward cost here is an upper bound on its real-time budget. The value
     # is BOTH the result label and the planner coupling mode: "off" (disabled),
     # "pooled_latent", or "horizon_cross_attention".
+    #
+    # ``enable_world_model`` measures the Combined (reactive + world model)
+    # forward cost (#102): the WM updates the recurrent visual history each
+    # step, so it is reset before warm-up and before timing.
     extra_kwargs = {}
     if reasoning != "off":
         extra_kwargs = dict(enable_reasoning=True, reasoning_mode=reasoning)
     model = AutoE2E(backbone=backbone, num_views=num_views,
                     view_fusion_kwargs={"bev_h": 8, "bev_w": 8},
+                    enable_world_model=enable_world_model,
                     **extra_kwargs)
     model = model.to(device)
     model.eval()
@@ -58,15 +65,22 @@ def run_speed_benchmark(backbone, device, batch_size=1, num_views=7,
     # 1. Warm-up Phase (GPU kernel compilation and cache warming)
     num_warmup = 30 if device.type == 'cuda' else 5
     print(f"Warming up ({num_warmup} iterations)...")
+    
+    if enable_world_model:
+        model.reset_visual_history()
+
     with torch.no_grad():
         for _ in range(num_warmup):
             _ = _forward()
 
-    # 2. Benchmark Phase
+    # 2. Benchmark Model
     num_iters = 100 if device.type == 'cuda' else 10
-    print(f"Benchmarking ({num_iters} iterations)...")
+    print(f"Benchmarking {model_type} Model ({num_iters} iterations)...")
 
     latencies = []
+
+    if enable_world_model:
+        model.reset_visual_history()
 
     with torch.no_grad():
         for _ in range(num_iters):
@@ -103,6 +117,7 @@ def run_speed_benchmark(backbone, device, batch_size=1, num_views=7,
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
 
     results = {
+        "model_type": model_type,
         "backbone": backbone,
         "fusion_mode": "bev",
         "reasoning": reasoning,
@@ -177,18 +192,6 @@ def save_results_json(all_results, device, input_resolution=(256, 256)):
     print(f"\nResults saved to {filepath}")
 
 
-def print_markdown_table(all_results):
-    """Print results as a Markdown table for easy pasting into README."""
-    print("\n## Benchmark Results\n")
-    print("| Backbone | Fusion Mode | Reasoning | Batch | FPS | Latency (ms) | p99 (ms) | VRAM (MB) | Params |")
-    print("|----------|-------------|-----------|-------|-----|--------------|----------|-----------|--------|")
-    for r in all_results:
-        params_m = r["total_params"] / 1_000_000
-        print(f"| {r['backbone']} | {r['fusion_mode']} | {r.get('reasoning', 'off')} | {r['batch_size']} | "
-              f"{r['avg_fps']:.1f} | {r['avg_latency_ms']:.1f} | {r['p99_latency_ms']:.1f} | "
-              f"{r['peak_vram_allocated_mb']:.0f} | {params_m:.1f}M |")
-
-
 def parse_args():
     parser = argparse.ArgumentParser(description="AutoE2E speed benchmark")
     parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility")
@@ -213,11 +216,12 @@ def main():
 
     for backbone in backbones:
         for batch_size in batch_sizes:
-            if torch.cuda.is_available():
-                torch.cuda.reset_peak_memory_stats()
-            result = run_speed_benchmark(backbone, device, batch_size=batch_size)
-            all_results.append(result)
-            print()
+            for enable_world_model in [False, True]:
+                if torch.cuda.is_available():
+                    torch.cuda.reset_peak_memory_stats()
+                result = run_speed_benchmark(backbone, device, batch_size=batch_size, enable_world_model=enable_world_model)
+                all_results.append(result)
+                print()
 
     # Reasoning branch (#98): measure the added cost of each coupling mode
     # explicitly, on the default backbone at batch 1 (its deployment operating
@@ -234,9 +238,11 @@ def main():
     # Save structured results
     save_results_json(all_results, device)
 
-    # Print Markdown table for README
-    print_markdown_table(all_results)
-
+    # Generate and print the updated markdown table
+    print("\n" + "="*80)
+    print("Markdown Table for BENCHMARKS.md:")
+    print("="*80 + "\n")
+    generate_readme_table.main()
 
 if __name__ == "__main__":
     main()
