@@ -34,6 +34,8 @@ import pandas as pd
 import torch
 from torch.utils.data import Dataset
 
+from data_processing.contract_versions import UID_SCHEMA_VERSION
+
 from .camera import CAMERA_NAMES, load_camera_frame, make_map_tile
 from .egomotion import (
     _EGOMOTION_COLUMNS,
@@ -315,6 +317,30 @@ class NvidiaAVDataset(Dataset):
         return load_front_clip(
             self.data_root, clip_uuid, ts_us,
             front_cam=self._front_cam, camera_timestamps_us=cam_ts)
+
+    def sample_uid(self, idx: int) -> str:
+        """Global, partition-independent sample id (#121 §3.1).
+
+        Built from (clip_uuid, sample_idx) — stable regardless of which clips a
+        pod loaded — so the label<->pack JOIN and S3 cache survive clip-range
+        sharding. No `.`/`/` (safe as a WebDataset ``__key__``); clip_uuid is a
+        UUID (hex + `-`).
+        """
+        clip_uuid, sample_idx, _ts = self._samples[idx]
+        return f"nv-{UID_SCHEMA_VERSION}-{clip_uuid}-f{sample_idx:06d}"
+
+    def split_group_uid(self, idx: int) -> str:
+        """Train/val split unit (#121 §3.1): the whole CLIP (frames within a clip
+        are correlated, so they must not straddle train/val)."""
+        clip_uuid, _sample_idx, _ts = self._samples[idx]
+        return f"nv-{clip_uuid}"
+
+    def frame_index(self, idx: int) -> int:
+        """Clip-local sample index for sample ``idx`` — used to pick the reasoning
+        1 Hz subset (label iff ``frame_index % stride == 0``), a stable per-sample
+        function so the labeled subset is partition-independent (#121 §3.4d)."""
+        _clip_uuid, sample_idx, _ts = self._samples[idx]
+        return sample_idx
 
     def __len__(self) -> int:
         return len(self._samples)

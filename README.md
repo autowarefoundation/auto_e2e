@@ -26,6 +26,16 @@
 
 </div>
 
+## DataModelConsole dashboard
+
+The read-only [DataModelConsole production dashboard](https://d2itskdqq39tx1.cloudfront.net/)
+brings AutoE2E datasets, model results and pipeline state into one workspace. Use it to:
+
+- inspect published dataset versions, shards, samples and geographic coverage;
+- play synchronized seven-camera scenes with ego-state and map context;
+- compare ground-truth and model-predicted trajectories in camera and bird's-eye views;
+- explore reasoning labels, MLflow models and Flyte executions.
+
 ## Free and fully open-source End-to-End AI model
 **AutoE2E is an open-source End-to-End AI model** which enables autonomous driving across highways, arterial roads and city streets using cameras-only, and without reliance on HD-maps. 
 

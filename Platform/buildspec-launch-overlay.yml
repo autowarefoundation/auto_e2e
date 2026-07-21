@@ -1,0 +1,191 @@
+version: 0.2
+
+# VPC-local launcher for trajectory overlays. The default is a one-scene smoke
+# that creates its own dataset. Production sets FULL_RUN_EXECUTION_ID and reuses
+# that completed run's labeled shards and exact registered model.
+env:
+  variables:
+    AWS_DEFAULT_REGION: us-west-2
+    FLYTE_PROJECT: auto-e2e
+    FLYTE_DOMAIN: development
+    FULL_RUN_EXECUTION_ID: ""
+    MODEL_VERSION: ""
+    SELECTED_MLFLOW_RUN_ID: ""
+    SELECTED_CHECKPOINT_URI: ""
+    SELECTED_CHECKPOINT_SHA256: ""
+    SELECTED_CHECKPOINT_EPOCH: ""
+    IMAGE_TAG: latest
+    DATASET: "KIT-MRT/KITScenes-Multimodal"
+    SOURCE_REVISION: "6fde0034446669e2ed7235e4c7fe323cd23d599d"
+    PUBLISHED_DATASET: ""
+    DATASET_VERSION: v2.2
+    EPISODES: "1"
+    PARTITION_SIZE: "1"
+    REASONING_TEACHER: openai_compatible
+    BASE_SEEDS: "[0]"
+    BATCH_SIZE: "32"
+    NUM_WORKERS: "4"
+    COPY_WORKERS: "16"
+    MAX_PARTITIONS: "600"
+
+phases:
+  install:
+    commands:
+      - pip install -q flytekit==1.14.9 numpy torch kubernetes --extra-index-url https://download.pytorch.org/whl/cpu
+  pre_build:
+    commands:
+      - test -n "${IMAGE_TAG}"
+      - |
+        SELECTED_VALUES="${SELECTED_MLFLOW_RUN_ID}${SELECTED_CHECKPOINT_URI}${SELECTED_CHECKPOINT_SHA256}${SELECTED_CHECKPOINT_EPOCH}"
+        if [ -n "${SELECTED_VALUES}" ]; then
+          test -n "${FULL_RUN_EXECUTION_ID}"
+          test -n "${SELECTED_MLFLOW_RUN_ID}"
+          test -n "${SELECTED_CHECKPOINT_URI}"
+          test -n "${SELECTED_CHECKPOINT_SHA256}"
+          test -n "${SELECTED_CHECKPOINT_EPOCH}"
+          printf '%s' "${SELECTED_MLFLOW_RUN_ID}" | grep -Eq '^[0-9a-f]{32}$'
+          printf '%s' "${SELECTED_CHECKPOINT_SHA256}" | grep -Eq '^[0-9a-f]{64}$'
+          printf '%s' "${SELECTED_CHECKPOINT_EPOCH}" | grep -Eq '^[1-9][0-9]*$'
+        fi
+        if [ -n "${FULL_RUN_EXECUTION_ID}" ]; then
+          test -z "${MODEL_VERSION}" || {
+            echo "MODEL_VERSION must be empty when FULL_RUN_EXECUTION_ID is set"
+            exit 1
+          }
+        else
+          test -n "${MODEL_VERSION}"
+        fi
+      - ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+      - ECR_URL="${ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com"
+      - export ECR_PREFIX="${ECR_URL}"
+      - export PYTHONPATH="${CODEBUILD_SRC_DIR}/Model:${CODEBUILD_SRC_DIR}:${PYTHONPATH:-}"
+      - export DATASETS_BUCKET="auto-e2e-platform-datasets-${ACCOUNT_ID}"
+      - export ARTIFACTS_BUCKET="auto-e2e-platform-artifacts-${ACCOUNT_ID}"
+      - |
+        image_ref() {
+          REPOSITORY="$1"
+          DIGEST=$(aws ecr describe-images \
+            --repository-name "auto-e2e/${REPOSITORY}" \
+            --image-ids imageTag="${IMAGE_TAG}" \
+            --query 'imageDetails[0].imageDigest' \
+            --output text)
+          test -n "${DIGEST}" && test "${DIGEST}" != "None"
+          printf '%s/auto-e2e/%s@%s' "${ECR_URL}" "${REPOSITORY}" "${DIGEST}"
+        }
+        export AUTO_E2E_TRAINING_IMAGE=$(image_ref training)
+        export AUTO_E2E_EVAL_IMAGE=$(image_ref eval)
+        export AUTO_E2E_OFFLINE_RL_IMAGE=$(image_ref offline-rl)
+        export AUTO_E2E_DATA_PREP_IMAGE=$(image_ref data-prep)
+        export CONTAINER_IMAGE_DIGEST="${AUTO_E2E_EVAL_IMAGE##*@}"
+  build:
+    commands:
+      - |
+        cat > /tmp/flyte.yaml << EOF
+        admin:
+          endpoint: dns:///k8s-flyte-flyteadm-be92e7737c-cf0d1a0f3df10f77.elb.us-west-2.amazonaws.com:81
+          insecure: true
+        EOF
+      - PREPROCESSING_DIGEST=$(python3 Platform/pipelines/reproducibility.py preprocessing)
+      - INFERENCE_DIGEST=$(python3 Platform/pipelines/reproducibility.py inference)
+      - |
+        if [ -n "${FULL_RUN_EXECUTION_ID}" ]; then
+          test -n "${PUBLISHED_DATASET}" || {
+            echo "PUBLISHED_DATASET is required for a Full Run publication"
+            exit 1
+          }
+          echo "Reusing Full Run ${FULL_RUN_EXECUTION_ID} for ${PUBLISHED_DATASET}/${DATASET_VERSION}"
+        elif [ -z "${PUBLISHED_DATASET}" ]; then
+          test "${EPISODES}" != "0" || {
+            echo "PUBLISHED_DATASET is required when EPISODES=0"
+            exit 1
+          }
+          SMOKE_ID=$(printf '%s' \
+            "${PREPROCESSING_DIGEST}:${INFERENCE_DIGEST}:${CONTAINER_IMAGE_DIGEST}:${SOURCE_REVISION}:${EPISODES}" \
+            | sha256sum | cut -c1-12)
+          export PUBLISHED_DATASET="kitscenes-smoke-${SMOKE_ID}"
+        fi
+        echo "Publishing immutable dataset coordinate ${PUBLISHED_DATASET}/${DATASET_VERSION}"
+      - |
+        if [ -n "${FULL_RUN_EXECUTION_ID}" ]; then
+          RECOVERY_FLAG=""
+          if [ -n "${SELECTED_CHECKPOINT_URI}" ]; then
+            RECOVERY_FLAG="--allow-running-recovery"
+          fi
+          python3 Platform/scripts/extract_full_run_overlay_inputs.py \
+            --config /tmp/flyte.yaml \
+            --project "${FLYTE_PROJECT}" \
+            --domain "${FLYTE_DOMAIN}" \
+            --execution-id "${FULL_RUN_EXECUTION_ID}" \
+            --expected-dataset "${DATASET}" \
+            --expected-dataset-version "${DATASET_VERSION}" \
+            ${RECOVERY_FLAG} \
+            --output /tmp/full-run-overlay-inputs.json
+          if [ -n "${SELECTED_CHECKPOINT_URI}" ]; then
+            pyflyte --config /tmp/flyte.yaml run --remote \
+              --project "${FLYTE_PROJECT}" \
+              --domain "${FLYTE_DOMAIN}" \
+              --image "${AUTO_E2E_TRAINING_IMAGE}" \
+              Platform/pipelines/workflows.py \
+              wf_publish_selected_checkpoint_overlays \
+              --inputs-file /tmp/full-run-overlay-inputs.json \
+              --mlflow_run_id "${SELECTED_MLFLOW_RUN_ID}" \
+              --checkpoint_uri "${SELECTED_CHECKPOINT_URI}" \
+              --checkpoint_sha256 "${SELECTED_CHECKPOINT_SHA256}" \
+              --checkpoint_epoch "${SELECTED_CHECKPOINT_EPOCH}" \
+              --preprocessing_contract_digest "${PREPROCESSING_DIGEST}" \
+              --model_inference_code_digest "${INFERENCE_DIGEST}" \
+              --container_image_digest "${CONTAINER_IMAGE_DIGEST}" \
+              --datasets_bucket "${DATASETS_BUCKET}" \
+              --artifacts_bucket "${ARTIFACTS_BUCKET}" \
+              --published_dataset "${PUBLISHED_DATASET}" \
+              --dataset_version "${DATASET_VERSION}" \
+              --base_seeds "${BASE_SEEDS}" \
+              --batch_size "${BATCH_SIZE}" \
+              --num_workers "${NUM_WORKERS}" \
+              --copy_workers "${COPY_WORKERS}"
+          else
+            pyflyte --config /tmp/flyte.yaml run --remote \
+              --project "${FLYTE_PROJECT}" \
+              --domain "${FLYTE_DOMAIN}" \
+              --image "${AUTO_E2E_TRAINING_IMAGE}" \
+              Platform/pipelines/workflows.py \
+              wf_publish_full_run_overlays \
+              --inputs-file /tmp/full-run-overlay-inputs.json \
+              --preprocessing_contract_digest "${PREPROCESSING_DIGEST}" \
+              --model_inference_code_digest "${INFERENCE_DIGEST}" \
+              --container_image_digest "${CONTAINER_IMAGE_DIGEST}" \
+              --datasets_bucket "${DATASETS_BUCKET}" \
+              --artifacts_bucket "${ARTIFACTS_BUCKET}" \
+              --published_dataset "${PUBLISHED_DATASET}" \
+              --dataset_version "${DATASET_VERSION}" \
+              --base_seeds "${BASE_SEEDS}" \
+              --batch_size "${BATCH_SIZE}" \
+              --num_workers "${NUM_WORKERS}" \
+              --copy_workers "${COPY_WORKERS}"
+          fi
+        else
+          pyflyte --config /tmp/flyte.yaml run --remote \
+            --project "${FLYTE_PROJECT}" \
+            --domain "${FLYTE_DOMAIN}" \
+            --image "${AUTO_E2E_TRAINING_IMAGE}" \
+            Platform/pipelines/workflows.py \
+            wf_create_publish_and_precompute_overlays \
+            --model_version "${MODEL_VERSION}" \
+            --preprocessing_contract_digest "${PREPROCESSING_DIGEST}" \
+            --model_inference_code_digest "${INFERENCE_DIGEST}" \
+            --container_image_digest "${CONTAINER_IMAGE_DIGEST}" \
+            --datasets_bucket "${DATASETS_BUCKET}" \
+            --artifacts_bucket "${ARTIFACTS_BUCKET}" \
+            --dataset "${DATASET}" \
+            --source_revision "${SOURCE_REVISION}" \
+            --published_dataset "${PUBLISHED_DATASET}" \
+            --dataset_version "${DATASET_VERSION}" \
+            --episodes "${EPISODES}" \
+            --partition_size "${PARTITION_SIZE}" \
+            --reasoning_teacher "${REASONING_TEACHER}" \
+            --base_seeds "${BASE_SEEDS}" \
+            --batch_size "${BATCH_SIZE}" \
+            --num_workers "${NUM_WORKERS}" \
+            --copy_workers "${COPY_WORKERS}" \
+            --max_partitions "${MAX_PARTITIONS}"
+        fi

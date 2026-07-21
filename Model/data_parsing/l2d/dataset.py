@@ -29,7 +29,7 @@ from __future__ import annotations
 
 import logging
 import sys
-from typing import Any, TypedDict
+from typing import Any, Iterator, TypedDict
 
 import torch
 from torch.utils.data import Dataset
@@ -40,6 +40,8 @@ if sys.version_info >= (3, 11):
     from typing import NotRequired
 else:  # Python 3.10 (local dev venv); CI runs 3.12
     from typing_extensions import NotRequired
+
+from data_processing.contract_versions import UID_SCHEMA_VERSION
 
 from .camera import CAMERA_NAMES, MAP_VIEW_NAME
 from .egomotion import (
@@ -63,6 +65,8 @@ class L2DSample(TypedDict):
     trajectory_target: torch.Tensor  # (128,)
     episode_index: int
     frame_index: int
+    pose_current: dict[str, float | int]
+    gps_future: np.ndarray           # (65, 2) float64: current + 64 future
     # Present only when include_world_model_windows=True (#16, enables JEPA #13):
     # the 1 Hz multi-view past/future windows, each (N, 6, 3, H, W), oldest->newest.
     history_frames: NotRequired[torch.Tensor]
@@ -86,6 +90,11 @@ class L2DDataset(Dataset):
         local_files_only: Accepted for backward compatibility; lerobot 0.5.x
             removed this option (it now reads from cache by default), so the
             flag is currently a no-op.
+        root: Optional local directory holding the already-materialized L2D data
+            (lerobot layout). When set, lerobot reads from it instead of the
+            shared HF cache — this is how the episode-range fan-out (#121 option
+            B) makes a partition's label/pack read the raw a partition's ingest
+            already downloaded, WITHOUT re-hitting HuggingFace in every pod.
     """
 
     def __init__(
@@ -98,6 +107,7 @@ class L2DDataset(Dataset):
         wm_hz: float = 1.0,
         source_hz: float = 10.0,
         reasoning_clip_only: bool = False,
+        root: str | None = None,
     ) -> None:
         try:
             from lerobot.datasets.lerobot_dataset import LeRobotDataset
@@ -154,7 +164,24 @@ class L2DDataset(Dataset):
         # default and only re-fetches when `force_cache_sync=True`. We map the
         # legacy flag onto that: local_files_only=True means "don't force a
         # remote sync", which is already the default, so it is simply not passed.
-        _kwargs: dict[str, Any] = {"repo_id": repo_id, "episodes": episodes}
+        #
+        # revision="main" forces lerobot to fetch from the ACTIVE branch instead of
+        # the CODEBASE_VERSION tag (v3.0 for lerobot 0.5.0). The `v3.0` tag on
+        # yaak-ai/L2D points to a stale/broken snapshot (2026-07-14 audit:
+        # tasks.parquet is 1485 bytes / 1 row at v3.0 vs 135484 bytes / 4219 rows
+        # on main; data parquet 59MB vs 62MB). Reading v3.0 blows up in the label
+        # pod: iloc[task_idx].name → IndexError, and _absolute_to_relative_idx →
+        # KeyError, because meta.tasks + episodes.parquet on the tag are shorter
+        # than the actual dataset. Pin to main so we always get the live L2D
+        # revision — the entire pipeline was authored against main.
+        _kwargs: dict[str, Any] = {"repo_id": repo_id, "episodes": episodes,
+                                    "revision": "main"}
+        if root is not None:
+            # Point lerobot at the partition's materialized raw dir so it loads
+            # from there instead of re-downloading to the shared HF cache (#121
+            # option B). lerobot reads <root>/data + <root>/meta; the FlyteDirectory
+            # a partition's ingest produced has exactly this layout.
+            _kwargs["root"] = root
         if delta_timestamps is not None:
             _kwargs["delta_timestamps"] = delta_timestamps
         self.lerobot_dataset = LeRobotDataset(**_kwargs)
@@ -229,6 +256,145 @@ class L2DDataset(Dataset):
     def __len__(self) -> int:
         return len(self._samples)
 
+    def sample_uid(self, idx: int) -> str:
+        """Global, partition-independent sample id (#121 §3.1).
+
+        Built from (episode_index, frame_index) — identity the sample already
+        carries — so the SAME physical frame gets the SAME uid regardless of which
+        episode subset a given pod loaded. This replaces the positional
+        ``f"s{si:08d}"`` that broke the label<->pack JOIN and the S3 label cache
+        under episode-range sharding. No `.`/`/` (safe as a WebDataset ``__key__``).
+        """
+        ep_idx, row = self._samples[idx]
+        ep_start, _ = self._episode_ranges[ep_idx]
+        frame_index = row - ep_start
+        return f"l2d-{UID_SCHEMA_VERSION}-e{ep_idx:06d}-f{frame_index:06d}"
+
+    def split_group_uid(self, idx: int) -> str:
+        """The train/val SPLIT unit (#121 §3.1): the whole EPISODE, not the frame.
+
+        L2D frames within an episode are strongly correlated, so a per-frame split
+        leaks correlated frames across train/val. Splitting on this episode-level
+        id keeps train and val disjoint at the episode level.
+        """
+        ep_idx, _ = self._samples[idx]
+        return f"l2d-e{ep_idx:06d}"
+
+    def frame_index(self, idx: int) -> int:
+        """Episode-local frame index (0-based within the episode) for sample ``idx``.
+
+        Used to select the 1 Hz reasoning-label subset (label iff
+        ``frame_index % stride == 0``) — a STABLE function of the sample's identity,
+        so the labeled subset is partition-independent (#121 §3.4d).
+        """
+        ep_idx, row = self._samples[idx]
+        ep_start, _ = self._episode_ranges[ep_idx]
+        return row - ep_start
+
+    def window_frame_ids(self, idx: int) -> dict:
+        """Per-(step,view) content-addressed frame ids for the WM window (#121 §3.4d).
+
+        For dedup packing: instead of storing each window frame as its own JPEG, a
+        sample stores this index and the packer keeps ONE JPEG per distinct
+        ``frame_id`` in a shared pool. Each id is ``l2d-{ver}-e{ep}-r{frame_index}-c{v}``
+        — GLOBAL (episode + episode-local frame_index + camera), so the SAME physical
+        frame gets the SAME id across samples AND across partitions, which is what
+        makes the pool dedup coherent.
+
+        The window rows are the current row + the stride-10 offsets used by the WM
+        window (history [-(N-1)*s .. 0], future [+s .. +N*s]); they are guaranteed
+        to stay inside the sample's own episode because ``_build_sample_index``
+        excludes edge frames (margins 64/64 ≥ WM reach), so NO id ever references a
+        neighbouring episode/scene (boundary-safety requirement). Raises if a
+        computed row would leave the episode (defence-in-depth; enumeration should
+        already prevent it).
+
+        Returns ``{"history": [[id per view] per step], "future": [[...] ...]}``,
+        oldest→newest, matching the ``history_frames``/``future_frames`` stack order.
+        """
+        ep_idx, row = self._samples[idx]
+        ep_start, ep_end = self._episode_ranges[ep_idx]
+        n = self._wm_num_frames
+        s = self._wm_stride
+        # Same offsets the window uses: history oldest→newest ending at 0, future +s..+N*s.
+        hist_offsets = [-(n - 1 - t) * s for t in range(n)]
+        fut_offsets = [(t + 1) * s for t in range(n)]
+
+        def _ids_for(offsets: list) -> list:
+            steps = []
+            for off in offsets:
+                r = row + off
+                if r < ep_start or r >= ep_end:
+                    raise IndexError(
+                        f"WM window row {r} (sample row {row}, offset {off}) leaves "
+                        f"episode {ep_idx} [{ep_start},{ep_end}) — enumeration should "
+                        f"have excluded this edge sample.")
+                frame_index = r - ep_start
+                steps.append([
+                    f"l2d-{UID_SCHEMA_VERSION}-e{ep_idx:06d}-r{frame_index:06d}-c{v}"
+                    for v in range(len(CAMERA_NAMES))
+                ])
+            return steps
+
+        return {"history": _ids_for(hist_offsets), "future": _ids_for(fut_offsets)}
+
+    def window_rows(self, idx: int) -> list[tuple[int, int]]:
+        """Every (ep_idx, episode-local frame_index) row this sample's WM window
+        references — WITHOUT decoding anything (#121 decode-dedup pass A).
+
+        The parent packer unions these across the partition to get the UNIQUE row
+        set, decodes each row exactly ONCE (row-level workers), and assembles
+        samples from the pool afterwards. Same offsets/clamping as
+        ``window_frame_ids`` (episode-bounded; raises on an edge sample), so a row
+        never references a neighbouring episode/scene.
+        """
+        ep_idx, row = self._samples[idx]
+        ep_start, ep_end = self._episode_ranges[ep_idx]
+        n, s = self._wm_num_frames, self._wm_stride
+        offsets = [-(n - 1 - t) * s for t in range(n)] + [(t + 1) * s for t in range(n)]
+        out = []
+        for off in offsets:
+            r = row + off
+            if r < ep_start or r >= ep_end:
+                raise IndexError(
+                    f"WM window row {r} (sample row {row}, offset {off}) leaves "
+                    f"episode {ep_idx} [{ep_start},{ep_end})")
+            out.append((ep_idx, r - ep_start))
+        return out
+
+    def egomotion_for(self, idx: int):
+        """(egomotion_history, trajectory_target) for sample ``idx`` with ZERO
+        video decode (#121 decode-dedup pass B).
+
+        Reads only the numeric vehicle-state table — exactly the computation
+        ``__getitem__`` performs before touching video — so the pack parent can
+        assemble ego.npy without triggering the expensive multi-cam decode.
+        """
+        ego_history, trajectory_target, _, _ = self.numeric_for(idx)
+        return ego_history, trajectory_target
+
+    def geospatial_for(
+        self, idx: int,
+    ) -> tuple[dict[str, float | int], np.ndarray]:
+        """Return absolute current pose + current/future GPS without video decode."""
+        _, _, pose_current, gps_future = self.numeric_for(idx)
+        return pose_current, gps_future
+
+    def numeric_for(self, idx: int):
+        """Return every numeric sample field with one read and no video decode."""
+        ep_idx, row = self._samples[idx]
+        ep_start, ep_end = self._episode_ranges[ep_idx]
+        vehicle_states = self._get_vehicle_states_window(ep_start, ep_end)
+        timestamps_ns = self._get_timestamps_window(ep_start, ep_end)
+        sample_idx = row - ep_start
+        ego_history, trajectory_target = extract_egomotion(
+            vehicle_states, sample_idx=sample_idx
+        )
+        pose_current, gps_future = self._extract_geospatial(
+            vehicle_states, timestamps_ns, sample_idx
+        )
+        return ego_history, trajectory_target, pose_current, gps_future
+
     def _get_vehicle_states_window(self, ep_start: int, ep_end: int) -> np.ndarray:
         """Load vehicle state vectors for one episode (local row range).
 
@@ -243,6 +409,89 @@ class L2DDataset(Dataset):
             col[ep_start:ep_end]["observation.state.vehicle"], dtype=np.float32
         )
         return states
+
+    def _get_timestamps_window(self, ep_start: int, ep_end: int) -> np.ndarray:
+        """Load raw nanosecond Unix timestamps for one episode."""
+        hf = self.lerobot_dataset.hf_dataset
+        col = hf.select_columns(["observation.state.timestamp"])
+        values = np.asarray(
+            col[ep_start:ep_end]["observation.state.timestamp"], dtype=np.int64
+        )
+        return values.reshape(-1)
+
+    @staticmethod
+    def _extract_geospatial(
+        vehicle_states: np.ndarray,
+        timestamps_ns: np.ndarray,
+        sample_idx: int,
+    ) -> tuple[dict[str, float | int], np.ndarray]:
+        """Extract map pose fields aligned to the egomotion sample index."""
+        end = sample_idx + _FUTURE_TIMESTEPS + 1
+        if end > len(vehicle_states) or sample_idx >= len(timestamps_ns):
+            raise IndexError(
+                f"geospatial window [{sample_idx}:{end}] exceeds episode rows "
+                f"{len(vehicle_states)}"
+            )
+        current = vehicle_states[sample_idx]
+        # The L2D source vector is float32. Casting here prevents further loss in
+        # storage but cannot recover precision absent from the source.
+        gps_future = np.asarray(
+            vehicle_states[sample_idx:end, 3:5], dtype=np.float64
+        )
+        pose_current: dict[str, float | int] = {
+            "latitude_deg": float(current[3]),
+            "longitude_deg": float(current[4]),
+            "heading_deg_cw_from_north": float(current[1]),
+            "timestamp_ns": int(timestamps_ns[sample_idx]),
+            # L2D exposes no GPS-accuracy channel.
+            "gps_accuracy_m": float("nan"),
+        }
+        return pose_current, gps_future
+
+    def episode_indices(self) -> list[int]:
+        """Return loaded source episode ids in stable order."""
+        return sorted(self._episode_ranges)
+
+    def episode_path(self, episode_index: int) -> np.ndarray:
+        """Return ``[lat, lon, heading, timestamp_ns]`` for the full episode.
+
+        The route artifact stores all columns as float64. Per-sample pose members
+        retain the nanosecond timestamp as exact int64.
+        """
+        ep_start, ep_end = self._episode_ranges[episode_index]
+        states = self._get_vehicle_states_window(ep_start, ep_end)
+        timestamps = self._get_timestamps_window(ep_start, ep_end)
+        path = np.empty((len(states), 4), dtype=np.float64)
+        path[:, 0] = states[:, 3]
+        path[:, 1] = states[:, 4]
+        path[:, 2] = states[:, 1]
+        path[:, 3] = timestamps
+        return path
+
+    def sample_pose_records(self) -> Iterator[dict[str, Any]]:
+        """Yield exact per-sample pose rows for the partition geo parquet."""
+        by_episode: dict[int, tuple[np.ndarray, np.ndarray]] = {}
+        for idx, (ep_idx, row) in enumerate(self._samples):
+            if ep_idx not in by_episode:
+                ep_start, ep_end = self._episode_ranges[ep_idx]
+                by_episode[ep_idx] = (
+                    self._get_vehicle_states_window(ep_start, ep_end),
+                    self._get_timestamps_window(ep_start, ep_end),
+                )
+            states, timestamps = by_episode[ep_idx]
+            ep_start, _ = self._episode_ranges[ep_idx]
+            frame_idx = row - ep_start
+            state = states[frame_idx]
+            yield {
+                "sample_uid": self.sample_uid(idx),
+                "episode_index": ep_idx,
+                "frame_index": frame_idx,
+                "latitude_deg": float(state[3]),
+                "longitude_deg": float(state[4]),
+                "heading_deg_cw_from_north": float(state[1]),
+                "timestamp_ns": int(timestamps[frame_idx]),
+                "gps_accuracy_m": None,
+            }
 
     def _load_multiview_frame(self, row: int) -> torch.Tensor:
         """Decode the 6 RAW camera views for one local row -> (6, 3, H, W).
@@ -275,16 +524,18 @@ class L2DDataset(Dataset):
     def __getitem__(self, idx: int) -> L2DSample:
         # row is the local index into hf_dataset / lerobot_dataset.
         ep_idx, row = self._samples[idx]
-        ep_start, ep_end = self._episode_ranges[ep_idx]
+        ep_start, _ = self._episode_ranges[ep_idx]
 
         # Offset of the current frame within its own episode.
         sample_idx_in_episode = row - ep_start
 
-        # Load vehicle states for egomotion (episode window, no video decode)
-        vehicle_states = self._get_vehicle_states_window(ep_start, ep_end)
-        egomotion_history, trajectory_target = extract_egomotion(
-            vehicle_states, sample_idx=sample_idx_in_episode
-        )
+        # Load all numeric signals in one table read (no video decode).
+        (
+            egomotion_history,
+            trajectory_target,
+            pose_current,
+            gps_future,
+        ) = self.numeric_for(idx)
 
         item = self.lerobot_dataset[row]
         visual_history = torch.zeros(_VISUAL_HISTORY_DIM, dtype=torch.float32)
@@ -318,6 +569,8 @@ class L2DDataset(Dataset):
             trajectory_target=trajectory_target,
             episode_index=ep_idx,
             frame_index=sample_idx_in_episode,
+            pose_current=pose_current,
+            gps_future=gps_future,
         )
         if self._wm_enabled:
             sample["history_frames"] = history_frames
