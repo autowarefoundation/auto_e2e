@@ -37,9 +37,9 @@ Without Lanelet2, map tiles fall back to zero tensors and the dataset still func
 
 - `visual_tiles` `(7, 3, H, W)` — 7 camera frames
 - `map_tile` `(3, H, W)` — BEV map tile (rasterization of Lanelet2 HD map)
-- `egomotion_history` `(256,)` — 64 past timesteps × 4 signals at 10 Hz
+- `egomotion_history` `(256,)` — fixed model ABI: 64 past timesteps × 4 signals at 10 Hz
 - `visual_history` `(896,)` — zero-initialised placeholder; populated during sequential inference
-- `trajectory_target` `(128,)` — 64 future timesteps × 2 signals (supervision target)
+- `trajectory_target` `(128,)` — fixed model ABI: 64 future timesteps × 2 signals
 - `camera_params` `(7, 3, 4)` — projection matrices `P = K_scaled @ T_ref_to_cam` for the 7 camera views, computed from KITScenes calibration and scaled to match the backbone's resize/crop transform. 
 
 
@@ -51,7 +51,7 @@ All four are derived from `poses.txt` (TUM format) by finite differencing on the
 
 - `[0]` Speed (m/s) — `‖d/dt translation_xy‖`
 - `[1]` Acceleration (m/s^2) — `d/dt speed`
-- `[2]` Yaw angle (rad) — quaternion → ZYX Euler, Z component
+- `[2]` Yaw rate (rad/s) — time derivative of unwrapped quaternion yaw
 - `[3]` Curvature (1/m) — `yaw_rate / speed`, with speed floored at 0.1 m/s
 
 ### Trajectory target signals `(128,) = 64 × 2`
@@ -64,6 +64,23 @@ All four are derived from `poses.txt` (TUM format) by finite differencing on the
 A sample is a `(scene_id, frame_idx)` pair, where `frame_idx` indexes the 10 Hz reference timeline. A `frame_idx` is valid when there are 64 frames behind it (history window) and 64 ahead (target window), within the span covered by *both* the ego poses and the camera frames. The current frame is excluded from both windows — history is `[idx-64, idx-1]`, target is `[idx+1, idx+64]`. A scene with `N` usable reference frames therefore yields `N − 128` valid samples.
 
 All valid pairs are enumerated at construction time, and per-scene derived arrays (egomotion, scene-local positions, camera projection matrices) are cached then. `__getitem__` does I/O only.
+
+The 64/64 layout is the AutoE2E model and training contract, not an L2D-derived
+KITScenes override. Training and internal model selection retain all 64 history
+and target rows. `training.dataset_policy.KITSCENES_TRAINING_POLICY` changes only
+corpus-specific behavior: target signal scales, the frozen scene holdout, and
+masking the latest history acceleration stored in v2 shards because its centered
+finite-difference stencil reads one post-anchor pose. The separate KITScenes
+benchmark evaluator applies the protocol's four-second observation window and
+reports the required 30-row and 50-row metrics without changing training.
+
+Internal model selection uses the frozen scene manifest at
+`training/splits/kitscenes_train_dev_v1.json`. Training verifies the packed
+partition count, empty-scene count, source revision, v2.2 pack contract,
+eligible scene digest, and complete sample UID digest before using its 40
+validation scenes (3,820 samples). The remaining 364 scenes contain 38,847
+training samples. A partial or different artifact set does not silently
+generate a replacement holdout.
 
 
 ## Usage

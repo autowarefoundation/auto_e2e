@@ -43,6 +43,12 @@ _TARGET_IDX = [_ACCELERATION_IDX, _CURVATURE_IDX]
 _MIN_SPEED = 0.1
 
 
+def pose_yaws(poses: tuple[EgoPose, ...]) -> np.ndarray:
+    """Return absolute Z-up yaw angles from pose quaternions in radians."""
+    quats = np.array([p.rotation for p in poses], dtype=np.float64)
+    return Rotation.from_quat(quats).as_euler("ZYX")[:, 0]
+
+
 def poses_to_arrays(
     poses: tuple[EgoPose, ...],
 ) -> tuple[np.ndarray, np.ndarray]:
@@ -69,15 +75,12 @@ def poses_to_arrays(
     """
     t_s = np.array([p.timestamp_ns for p in poses], dtype=np.float64) / 1e9
     translations = np.array([p.translation for p in poses], dtype=np.float64)  # (T, 3)
-    quats = np.array([p.rotation for p in poses], dtype=np.float64)             # (T, 4) xyzw
-
     velocity_xy = np.gradient(translations[:, :2], t_s, axis=0)  # (T, 2)
     speed = np.linalg.norm(velocity_xy, axis=1)                   # (T,)
 
     acceleration = np.gradient(speed, t_s)                        # (T,)
 
-    yaw_angle = Rotation.from_quat(quats).as_euler("ZYX")[:, 0]   # (T,)
-
+    yaw_angle = pose_yaws(poses)
     yaw_rate = np.gradient(np.unwrap(yaw_angle), t_s)             # (T,)
     speed_safe = np.where(speed < _MIN_SPEED, _MIN_SPEED, speed)
     curvature = yaw_rate / speed_safe                              # (T,)

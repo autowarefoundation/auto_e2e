@@ -5,7 +5,7 @@ import torch.nn as nn
 
 
 class TrajectoryImitationLoss(nn.Module):
-    """Primary task loss: imitation loss over predicted trajectory."""
+    """Dataset-neutral imitation loss over predicted control trajectories."""
 
     # Class-level annotations so mypy resolves these to their real types
     # instead of nn.Module's ``__getattr__ -> Tensor | Module`` fallback
@@ -14,25 +14,18 @@ class TrajectoryImitationLoss(nn.Module):
     temporal_weights: torch.Tensor
     signal_scales: torch.Tensor
 
-    # Per-signal std of the trajectory target (accel_x m/s², curvature rad/m),
-    # measured on real L2D shards: accel std≈0.79, curvature std≈0.12. Without
-    # normalizing by these, SmoothL1(β=1) puts accel errors in the linear regime
-    # (grad≈1) but curvature errors deep in the quadratic regime (grad≈error≈0),
-    # so the planner learns longitudinal accel and under-learns curvature →
-    # heading integrates wrong → large ADE/FDE. Dividing both signals by their std
-    # makes them ~unit-variance so curvature gets comparable gradient. NOTE: the
-    # previous curvature scale (0.014) was ~9× too small — it came from a truncated
-    # sample; the real per-target std measured across full L2D shards is ~0.12
-    # (accel ~0.79). Override via ``signal_scales`` if the target definition
-    # changes.
-    _DEFAULT_SIGNAL_SCALES = (0.79, 0.12)
+    # Neutral defaults keep this reusable. Production training must pass the
+    # explicit dataset policy rather than inheriting values measured on L2D.
+    _DEFAULT_SIGNAL_SCALES = (1.0, 1.0)
 
-    def __init__(self, loss_type: str = "smooth_l1", temporal_decay: float = 0.95,
-                 num_timesteps: int = 64, num_signals: int = 2,
-                 signal_scales: Optional[tuple] = None):
-        # temporal_decay defaults to 0.95 so near-future predictions are
-        # weighted more heavily than far-future ones; near-future accuracy
-        # is more safety-critical for planning.
+    def __init__(
+        self,
+        loss_type: str = "smooth_l1",
+        temporal_decay: float = 0.95,
+        num_timesteps: int = 64,
+        num_signals: int = 2,
+        signal_scales: Optional[tuple] = None,
+    ):
         super().__init__()
         if loss_type == "smooth_l1":
             self.loss_fn = nn.SmoothL1Loss(reduction="none")
@@ -43,6 +36,8 @@ class TrajectoryImitationLoss(nn.Module):
 
         self.num_timesteps = num_timesteps
         self.num_signals = num_signals
+        if not 0.0 < temporal_decay <= 1.0:
+            raise ValueError("temporal_decay must be in (0, 1]")
 
         if temporal_decay == 1.0:
             weights = torch.ones(num_timesteps)
@@ -64,8 +59,8 @@ class TrajectoryImitationLoss(nn.Module):
         pred = trajectory_pred.view(B, self.num_timesteps, self.num_signals)
         target = trajectory_target.view(B, self.num_timesteps, self.num_signals)
 
-        # Normalize each signal to ~unit variance so SmoothL1 gives accel and
-        # curvature comparable gradient (see _DEFAULT_SIGNAL_SCALES rationale).
+        # Dataset-specific scales make acceleration and curvature contribute
+        # comparable gradients despite their different physical units.
         scales = self.signal_scales.view(1, 1, self.num_signals)
         pred = pred / scales
         target = target / scales

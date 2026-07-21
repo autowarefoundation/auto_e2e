@@ -20,6 +20,15 @@ extraArgs:
 extraFlags:
   - serveArtifacts
 
+# MUST be false: the chart template (deployment.yaml:324) auto-injects
+# `--gunicorn-opts='--log-level=info'` when log.enabled is true. That flag is
+# incompatible with the security middleware (--cors-allowed-origins) in
+# MLflow 3.13, which raises "Security middleware parameters are only supported
+# with the default uvicorn server" and exits code 2 at startup. Setting this
+# false leaves us on uvicorn — the mode the CORS/allowed-hosts settings need.
+log:
+  enabled: false
+
 # Security middleware config (uvicorn mode) — allows CloudFront UI to call ajax-api
 extraEnvVars:
   MLFLOW_SERVER_ALLOWED_HOSTS: "*"

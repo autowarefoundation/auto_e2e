@@ -1,0 +1,71 @@
+version: 0.2
+
+# One-shot launcher for the #121 KITScenes scene fan-out verification.
+# Runs INSIDE the VPC (CodeBuild), so it can reach the VPC-internal flyteadmin ELB
+# that a laptop cannot. It registers the current workflows.py and launches
+# wf_create_dataset_sharded remotely; the actual ingest/label/pack pods run on the
+# cluster (this build just fires the execution and returns).
+#
+# Override the fan-out shape with env vars at start-build time:
+#   EPISODES (default 10; 0 = all 533 available train scenes),
+#   REASONING_TEACHER (default openai_compatible).
+
+env:
+  variables:
+    AWS_DEFAULT_REGION: us-west-2
+    FLYTE_PROJECT: auto-e2e
+    FLYTE_DOMAIN: development
+    EPISODES: "10"
+    PARTITION_SIZE: "1"
+    REASONING_TEACHER: "openai_compatible"
+    IMAGE_TAG: latest
+
+phases:
+  install:
+    commands:
+      - pip install -q flytekit==1.14.9 numpy torch kubernetes --extra-index-url https://download.pytorch.org/whl/cpu
+  build:
+    commands:
+      - ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+      - ECR_URL="${ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com"
+      - export ECR_PREFIX="${ECR_URL}"
+      - export PYTHONPATH="${CODEBUILD_SRC_DIR}/Model:${CODEBUILD_SRC_DIR}:${PYTHONPATH:-}"
+      - |
+        image_ref() {
+          REPOSITORY="$1"
+          DIGEST=$(aws ecr batch-get-image \
+            --repository-name "auto-e2e/${REPOSITORY}" \
+            --image-ids imageTag="${IMAGE_TAG}" \
+            --query 'images[0].imageId.imageDigest' \
+            --output text)
+          if [ -z "${DIGEST}" ] || [ "${DIGEST}" = "None" ]; then
+            echo "No digest found for auto-e2e/${REPOSITORY}:${IMAGE_TAG}" >&2
+            return 1
+          fi
+          printf '%s/auto-e2e/%s@%s' "${ECR_URL}" "${REPOSITORY}" "${DIGEST}"
+        }
+        AUTO_E2E_TRAINING_IMAGE="$(image_ref training)" || exit 1
+        AUTO_E2E_EVAL_IMAGE="$(image_ref eval)" || exit 1
+        AUTO_E2E_OFFLINE_RL_IMAGE="$(image_ref offline-rl)" || exit 1
+        AUTO_E2E_DATA_PREP_IMAGE="$(image_ref data-prep)" || exit 1
+        export AUTO_E2E_TRAINING_IMAGE AUTO_E2E_EVAL_IMAGE
+        export AUTO_E2E_OFFLINE_RL_IMAGE AUTO_E2E_DATA_PREP_IMAGE
+      - |
+        cat > /tmp/flyte.yaml << EOF
+        admin:
+          endpoint: dns:///k8s-flyte-flyteadm-be92e7737c-cf0d1a0f3df10f77.elb.us-west-2.amazonaws.com:81
+          insecure: true
+        EOF
+      # --remote registers this file's entities then launches the workflow on the
+      # cluster. Non-blocking: the execution runs on Flyte after this build exits.
+      # pyflyte's click CLI takes the enum value, not the member name.
+      - >
+        pyflyte --config /tmp/flyte.yaml run --remote
+        --project $FLYTE_PROJECT
+        --domain $FLYTE_DOMAIN
+        --image "${AUTO_E2E_TRAINING_IMAGE}"
+        Platform/pipelines/workflows.py wf_create_dataset_sharded
+        --dataset "KIT-MRT/KITScenes-Multimodal"
+        --episodes $EPISODES
+        --partition_size $PARTITION_SIZE
+        --reasoning_teacher $REASONING_TEACHER

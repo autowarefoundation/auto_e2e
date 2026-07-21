@@ -30,6 +30,13 @@ def _ego_bytes():
 
 
 class TestDecodeSampleMapSplit:
+    def test_sample_uid_is_preserved_for_overlay_inference(self):
+        sample = {"cam_0.jpg": _jpeg_bytes((0, 0, 0)),
+                  "ego.npy": _ego_bytes(),
+                  "__key__": "l2d-v1-e000012-f000064"}
+        out = _decode_sample(sample)
+        assert out["sample_uid"] == sample["__key__"]
+
     def test_map_not_counted_as_camera(self):
         """A sample with 6 cams + map.jpg -> visual_tiles (6,...), map separate."""
         sample = {f"cam_{i}.jpg": _jpeg_bytes((i * 10, 0, 0)) for i in range(6)}
@@ -86,6 +93,49 @@ class TestDecodeSampleMapSplit:
         sample["ego.npy"] = _ego_bytes()
         out = _decode_sample(sample)
         assert "camera_params" not in out
+
+    def test_geospatial_members_decode_for_benchmark_ground_truth(self):
+        from data_processing.geospatial import geospatial_members
+
+        gps = np.column_stack([
+            np.linspace(49.0, 49.0001, 65),
+            np.linspace(8.0, 8.0002, 65),
+        ])
+        sample = {
+            "cam_0.jpg": _jpeg_bytes((0, 0, 0)),
+            "ego.npy": _ego_bytes(),
+            **geospatial_members({
+                "pose_current": {
+                    "latitude_deg": gps[0, 0],
+                    "longitude_deg": gps[0, 1],
+                    "heading_deg_cw_from_north": 42.0,
+                    "timestamp_ns": 123,
+                    "gps_accuracy_m": float("nan"),
+                },
+                "gps_future": gps,
+            }),
+        }
+
+        out = _decode_sample(sample)
+
+        assert out["pose_current"].dtype == torch.float64
+        assert out["pose_current"].tolist() == pytest.approx(
+            [49.0, 8.0, 42.0]
+        )
+        assert out["gps_future"].dtype == torch.float64
+        assert out["gps_future"].shape == (65, 2)
+        assert np.array_equal(out["gps_future"].numpy(), gps)
+
+    @pytest.mark.parametrize("member", ["pose.npy", "gps.npy"])
+    def test_partial_geospatial_members_are_rejected(self, member):
+        sample = {
+            "cam_0.jpg": _jpeg_bytes((0, 0, 0)),
+            "ego.npy": _ego_bytes(),
+            member: b"invalid",
+        }
+
+        with pytest.raises(ValueError, match="must either both be present"):
+            _decode_sample(sample)
 
 
 class TestManifestProjection:
@@ -223,6 +273,83 @@ class TestDecodeWorldModelWindows:
         assert "history_frames" not in out
         assert "future_frames" not in out
 
+    # --- deduped frame-pool path (#121 §3.4d) ---------------------------------
+    def _pool_sample_and_accessor(self, n_cams=6, T=4, F=4):
+        """A sample carrying window_index.json + a matching in-memory pool accessor.
+
+        Reuses the SAME jpeg bytes the legacy layout would embed, keyed by frame_id,
+        so the rebuilt tensors must equal the legacy hist_/fut_ decode.
+        """
+        sample = {f"cam_{i}.jpg": _jpeg_bytes((i, 0, 0)) for i in range(n_cams)}
+        sample["ego.npy"] = _ego_bytes()
+        pool_bytes = {}
+        hist_ids, fut_ids = [], []
+        for t in range(T):
+            step = []
+            for v in range(n_cams):
+                fid = f"l2d-v1-e000000-r{100 + t:06d}-c{v}"
+                pool_bytes[fid] = _jpeg_bytes((t, v, 0))
+                step.append(fid)
+            hist_ids.append(step)
+        for f in range(F):
+            step = []
+            for v in range(n_cams):
+                fid = f"l2d-v1-e000000-r{200 + f:06d}-c{v}"
+                pool_bytes[fid] = _jpeg_bytes((f, v, 1))
+                step.append(fid)
+            fut_ids.append(step)
+        sample["window_index.json"] = json.dumps(
+            {"history": hist_ids, "future": fut_ids}).encode()
+        return sample, (lambda fid: pool_bytes[fid])
+
+    def test_pool_window_decoded_with_right_shape(self):
+        sample, pool = self._pool_sample_and_accessor(n_cams=6, T=4, F=4)
+        out = _decode_sample(sample, pool=pool)
+        assert out["history_frames"].shape == (4, 6, 3, 256, 256)
+        assert out["future_frames"].shape == (4, 6, 3, 256, 256)
+
+    def test_history_only_mode_never_reads_future_frame_pool(self):
+        sample, pool = self._pool_sample_and_accessor(
+            n_cams=6, T=4, F=4
+        )
+        index = json.loads(sample["window_index.json"])
+        future_ids = {
+            frame_id
+            for step in index["future"]
+            for frame_id in step
+        }
+        accessed = []
+
+        def tracked_pool(frame_id):
+            accessed.append(frame_id)
+            return pool(frame_id)
+
+        out = _decode_sample(
+            sample,
+            pool=tracked_pool,
+            decode_future_frames=False,
+        )
+
+        assert out["history_frames"].shape == (4, 6, 3, 256, 256)
+        assert "future_frames" not in out
+        assert accessed
+        assert future_ids.isdisjoint(accessed)
+
+    def test_pool_window_equals_legacy_layout(self):
+        """THE byte-equality guarantee: the pool path rebuilds the SAME tensors the
+        legacy hist_/fut_ layout would, for the same underlying jpeg bytes."""
+        legacy = self._window_sample(n_cams=6, T=4, F=4)
+        legacy_out = _decode_sample(legacy)
+        pool_sample, pool = self._pool_sample_and_accessor(n_cams=6, T=4, F=4)
+        pool_out = _decode_sample(pool_sample, pool=pool)
+        assert torch.equal(pool_out["history_frames"], legacy_out["history_frames"])
+        assert torch.equal(pool_out["future_frames"], legacy_out["future_frames"])
+
+    def test_pool_window_index_without_accessor_raises(self):
+        sample, _ = self._pool_sample_and_accessor()
+        with pytest.raises(ValueError, match="frame pool accessor"):
+            _decode_sample(sample, pool=None)
+
 
 class TestMergedDatasetLoader:
     """Round-robin interleaving of multiple single-dataset loaders (#77 merge)."""
@@ -234,6 +361,60 @@ class TestMergedDatasetLoader:
             def __iter__(self):
                 return iter(self._b)
         return _L(batches, projection, geom)
+
+    class _Lifecycle:
+        def __init__(self):
+            self.created = []
+            self.opened = []
+            self.closed = []
+            self.loader_closed = []
+            self.active = 0
+            self.peak_active = 0
+
+        def factory(self, label, batches, *, fail=False):
+            lifecycle = self
+
+            class _Iterator:
+                def __init__(self):
+                    self._batches = iter(batches)
+                    self._fail = fail
+                    self._closed = False
+                    lifecycle.opened.append(label)
+                    lifecycle.active += 1
+                    lifecycle.peak_active = max(
+                        lifecycle.peak_active, lifecycle.active
+                    )
+
+                def __iter__(self):
+                    return self
+
+                def __next__(self):
+                    if self._fail:
+                        self._fail = False
+                        raise RuntimeError(f"failed {label}")
+                    return next(self._batches)
+
+                def close(self):
+                    if not self._closed:
+                        self._closed = True
+                        lifecycle.closed.append(label)
+                        lifecycle.active -= 1
+
+            class _Loader:
+                projection = None
+                geometry_type = "pseudo"
+
+                def __iter__(self):
+                    return _Iterator()
+
+                def close(self):
+                    lifecycle.loader_closed.append(label)
+
+            def create():
+                lifecycle.created.append(label)
+                return _Loader()
+
+            return create
 
     def test_round_robin_interleaves_and_tags_geometry(self):
         from data_parsing.pre_extracted import MergedDatasetLoader
@@ -260,3 +441,262 @@ class TestMergedDatasetLoader:
         from data_parsing.pre_extracted import MergedDatasetLoader
         with pytest.raises(ValueError, match="at least one"):
             MergedDatasetLoader([])
+
+    def test_404_factories_are_lazy_and_active_window_is_bounded(self):
+        from data_parsing.pre_extracted import MergedDatasetLoader
+
+        lifecycle = self._Lifecycle()
+        factories = [
+            lifecycle.factory(i, [i])
+            for i in range(404)
+        ]
+        merged = MergedDatasetLoader(
+            loader_factories=factories,
+            max_active_loaders=4,
+        )
+
+        assert lifecycle.created == []
+        seen = [item[0] for item in merged]
+
+        assert seen == list(range(404))
+        assert lifecycle.created == list(range(404))
+        assert lifecycle.peak_active == 4
+        assert lifecycle.active == 0
+        assert sorted(lifecycle.closed) == list(range(404))
+        assert sorted(lifecycle.loader_closed) == list(range(404))
+
+    def test_early_close_releases_every_active_child(self):
+        from data_parsing.pre_extracted import MergedDatasetLoader
+
+        lifecycle = self._Lifecycle()
+        merged = MergedDatasetLoader(
+            loader_factories=[
+                lifecycle.factory(i, [f"{i}-0", f"{i}-1"])
+                for i in range(404)
+            ],
+            max_active_loaders=4,
+        )
+
+        iterator = iter(merged)
+        assert next(iterator)[0] == "0-0"
+        assert lifecycle.created == [0, 1, 2, 3]
+        iterator.close()
+
+        assert lifecycle.active == 0
+        assert sorted(lifecycle.closed) == [0, 1, 2, 3]
+        assert sorted(lifecycle.loader_closed) == [0, 1, 2, 3]
+        assert lifecycle.created == [0, 1, 2, 3]
+
+    def test_each_epoch_recreates_children_after_complete_cleanup(self):
+        from data_parsing.pre_extracted import MergedDatasetLoader
+
+        lifecycle = self._Lifecycle()
+        merged = MergedDatasetLoader(
+            loader_factories=[
+                lifecycle.factory("a", ["a0", "a1"]),
+                lifecycle.factory("b", ["b0"]),
+            ],
+            max_active_loaders=2,
+        )
+
+        expected = ["a0", "b0", "a1"]
+        assert [item[0] for item in merged] == expected
+        assert lifecycle.active == 0
+        assert [item[0] for item in merged] == expected
+
+        assert lifecycle.created == ["a", "b", "a", "b"]
+        assert lifecycle.closed == ["b", "a", "b", "a"]
+        assert lifecycle.loader_closed == ["b", "a", "b", "a"]
+        assert lifecycle.peak_active == 2
+        assert lifecycle.active == 0
+
+    def test_child_exception_releases_failed_and_other_active_children(self):
+        from data_parsing.pre_extracted import MergedDatasetLoader
+
+        lifecycle = self._Lifecycle()
+        factories = [lifecycle.factory(0, [], fail=True)]
+        factories.extend(
+            lifecycle.factory(i, [i])
+            for i in range(1, 404)
+        )
+        merged = MergedDatasetLoader(
+            loader_factories=factories,
+            max_active_loaders=4,
+        )
+
+        with pytest.raises(RuntimeError, match="failed 0"):
+            next(iter(merged))
+
+        assert lifecycle.created == [0, 1, 2, 3]
+        assert lifecycle.active == 0
+        assert sorted(lifecycle.closed) == [0, 1, 2, 3]
+        assert sorted(lifecycle.loader_closed) == [0, 1, 2, 3]
+
+    def test_multi_loader_uses_global_worker_budget_and_lazy_factories(
+            self, monkeypatch):
+        import data_parsing.pre_extracted as pre_extracted
+
+        calls = []
+
+        def fake_loader(shard_dir, **kwargs):
+            calls.append((shard_dir, kwargs))
+            return self._fake_loader([shard_dir], None, "pseudo")
+
+        monkeypatch.setattr(
+            pre_extracted, "make_pre_extracted_loader", fake_loader
+        )
+        merged = pre_extracted.make_multi_dataset_loader(
+            [f"partition-{i}" for i in range(404)],
+            batch_size=1,
+            num_workers=4,
+            shuffle=1000,
+            shuffle_seed=700,
+        )
+
+        assert calls == []
+        iterator = iter(merged)
+        assert next(iterator)[0] == "partition-0"
+        assert len(calls) == 4
+        assert all(kwargs["num_workers"] == 1 for _, kwargs in calls)
+        assert [
+            kwargs["shuffle_seed"] for _, kwargs in calls
+        ] == [700, 701, 702, 703]
+        assert merged.shuffle_seed == 700
+        assert merged.max_active_loaders == 4
+        iterator.close()
+
+    def test_multi_loader_exposes_safe_eval_active_window(self, monkeypatch):
+        import data_parsing.pre_extracted as pre_extracted
+
+        calls = []
+
+        def fake_loader(shard_dir, **kwargs):
+            calls.append((shard_dir, kwargs))
+            return self._fake_loader([shard_dir], None, "pseudo")
+
+        monkeypatch.setattr(
+            pre_extracted, "make_pre_extracted_loader", fake_loader
+        )
+        merged = pre_extracted.make_multi_dataset_loader(
+            [f"partition-{i}" for i in range(404)],
+            batch_size=8,
+            num_workers=4,
+            shuffle=0,
+            prefetch_factor=1,
+            max_active_loaders=1,
+        )
+
+        iterator = iter(merged)
+        assert next(iterator)[0] == "partition-0"
+        assert len(calls) == 1
+        assert calls[0][1]["num_workers"] == 1
+        assert calls[0][1]["prefetch_factor"] == 1
+        assert merged.max_active_loaders == 1
+        iterator.close()
+
+
+def _write_shards(dirpath, n_shards, per_shard):
+    """Write n_shards minimal valid .tar shards (per_shard samples each)."""
+    import tarfile
+    from pathlib import Path
+    Path(dirpath).mkdir(parents=True, exist_ok=True)
+    idx = 0
+    for s in range(n_shards):
+        with tarfile.open(f"{dirpath}/shard-{s:03d}.tar", "w") as t:
+            for _ in range(per_shard):
+                key = f"s{idx:06d}"
+                members = {f"{key}.cam_0.jpg": _jpeg_bytes((idx % 255, 0, 0)),
+                           f"{key}.ego.npy": _ego_bytes()}
+                for name, data in members.items():
+                    info = tarfile.TarInfo(name)
+                    info.size = len(data)
+                    t.addfile(info, io.BytesIO(data))
+                idx += 1
+    return idx
+
+
+class TestLoaderYieldsAllSamplesUnderWorkers:
+    """Regression: the loader must yield EVERY sample regardless of num_workers.
+
+    webdataset 1.0.2 auto-applies split_by_worker via the `workersplitter`
+    default; passing nodesplitter=split_by_worker too split the shard list TWICE,
+    so num_workers=N silently dropped (N-1)/N of the data (24/48 at nw=2, 12/48 at
+    nw=4). This pins that num_workers>0 sees the full dataset — the #121 P0
+    parallel-decode change and the eval loader (num_workers=4) both depend on it.
+    """
+
+    def test_no_samples_dropped_across_worker_counts(self, tmp_path):
+        total = _write_shards(tmp_path / "shards", n_shards=12, per_shard=4)  # 48
+        from data_parsing.pre_extracted import make_pre_extracted_loader
+        for nw in (0, 2, 4):
+            loader = make_pre_extracted_loader(str(tmp_path / "shards"),
+                                               batch_size=1, num_workers=nw, shuffle=0)
+            seen = sum(b["visual_tiles"].shape[0] for b in loader)
+            assert seen == total, (
+                f"num_workers={nw}: loader yielded {seen}/{total} samples — "
+                f"shards are being split more than once (double split_by_worker)")
+
+    def test_partition_loader_workers_are_not_persistent(self, tmp_path):
+        shard_dir = tmp_path / "shards"
+        _write_shards(shard_dir, n_shards=2, per_shard=1)
+        from data_parsing.pre_extracted import make_pre_extracted_loader
+
+        loader = make_pre_extracted_loader(
+            str(shard_dir),
+            batch_size=1,
+            num_workers=2,
+            shuffle=0,
+        )
+        torch_loader = loader.pipeline[0]
+        assert torch_loader.num_workers == 2
+        assert torch_loader.persistent_workers is False
+        loader.close()
+
+    def test_merged_early_close_stops_all_active_workers(self, tmp_path):
+        import multiprocessing as mp
+
+        from data_parsing.pre_extracted import make_multi_dataset_loader
+
+        shard_dirs = []
+        for index in range(8):
+            shard_dir = tmp_path / f"partition-{index}"
+            _write_shards(shard_dir, n_shards=1, per_shard=2)
+            shard_dirs.append(str(shard_dir))
+
+        existing_pids = {child.pid for child in mp.active_children()}
+        loader = make_multi_dataset_loader(
+            shard_dirs,
+            batch_size=1,
+            num_workers=1,
+            shuffle=0,
+        )
+        iterator = iter(loader)
+        next(iterator)
+        workers = [
+            child
+            for child in mp.active_children()
+            if child.pid not in existing_pids
+        ]
+
+        iterator.close()
+        for worker in workers:
+            worker.join(timeout=5)
+
+        assert len(workers) == 1
+        assert all(not worker.is_alive() for worker in workers)
+
+    def test_explicit_shard_subset_isolated_for_overlay_output(self, tmp_path):
+        shard_dir = tmp_path / "shards"
+        _write_shards(shard_dir, n_shards=2, per_shard=3)
+        from data_parsing.pre_extracted import make_pre_extracted_loader
+
+        selected = shard_dir / "shard-001.tar"
+        loader = make_pre_extracted_loader(
+            str(shard_dir),
+            batch_size=1,
+            num_workers=0,
+            shuffle=0,
+            shard_files=[selected],
+        )
+        keys = [batch["sample_uid"][0] for batch in loader]
+        assert keys == ["s000003", "s000004", "s000005"]
