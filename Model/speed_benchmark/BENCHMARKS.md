@@ -107,6 +107,25 @@ parameter.
 
 </details>
 
+## NVIDIA GeForce RTX 5090
+<details open>
+  <summary>Toggle view</summary>
+
+> CUDA 12.8 | Driver 590.48.01 | PyTorch 2.7.1+cu128 | Commit `ead2171` | Resolution [256, 256]
+
+| Backbone | Fusion Mode | Reasoning | Batch | FPS | Latency (ms) | p99 (ms) | Jitter (ms) | VRAM (MB) | Params |
+|----------|-------------|-----------|-------|-----|--------------|----------|-------------|-----------|--------|
+| swin_v2_tiny | bev | off | 1 | 88.2 | 11.3 | 12.9 | 1.7 | 375 | 56.8M |
+| swin_v2_tiny | bev | off | 2 | 58.4 | 17.1 | 18.2 | 1.2 | 520 | 56.8M |
+| swin_v2_tiny | bev | off | 4 | 30.4 | 32.9 | 33.7 | 0.9 | 803 | 56.8M |
+| conv_next_v2_tiny | bev | off | 1 | 95.6 | 10.5 | 11.8 | 1.4 | 396 | 57.1M |
+| conv_next_v2_tiny | bev | off | 2 | 58.7 | 17.0 | 17.9 | 1.0 | 561 | 57.1M |
+| conv_next_v2_tiny | bev | off | 4 | 30.0 | 33.4 | 34.0 | 0.8 | 887 | 57.1M |
+| swin_v2_tiny | bev | pooled_latent | 1 | 84.2 | 11.9 | 12.8 | 1.0 | 386 | 59.4M |
+| swin_v2_tiny | bev | horizon_cross_attention | 1 | 83.5 | 12.0 | 12.8 | 0.9 | 388 | 59.6M |
+
+</details>
+
 ## Add benchmarks for your own GPU
 
 To obtain benchmarks for your GPU, simply run the
