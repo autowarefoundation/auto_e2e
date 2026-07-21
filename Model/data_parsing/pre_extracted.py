@@ -19,10 +19,15 @@ Usage:
 
 from __future__ import annotations
 
+import functools
+import hashlib
 import io
 import json
 import re
+from collections import deque
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Sequence
 
 import numpy as np
 import torch
@@ -45,6 +50,9 @@ _TRANSFORM = transforms.Compose([
 # NOT be picked up as a camera view — matching cam_ explicitly (not any ".jpg")
 # keeps V correct and stops the map being double-counted in the BEV projection.
 _CAM_KEY_RE = re.compile(r"^cam_\d+\.jpg$")
+# World-Model window frames: hist_<t>_cam_<v>.jpg / fut_<f>_cam_<v>.jpg (#13).
+_HIST_KEY_RE = re.compile(r"^hist_(\d+)_cam_(\d+)\.jpg$")
+_FUT_KEY_RE = re.compile(r"^fut_(\d+)_cam_(\d+)\.jpg$")
 
 
 def _decode_image(data) -> torch.Tensor:
@@ -52,12 +60,45 @@ def _decode_image(data) -> torch.Tensor:
     return _TRANSFORM(img)
 
 
-def _decode_sample(sample: dict) -> dict:
+class _PoolAccessor:
+    """Path-based frame-pool reader (#121 §3.4d): ``frame_id -> jpeg bytes``.
+
+    Reads ``<pool_dir>/<frame_id>.jpg`` on demand. Path-based (not an open handle)
+    so it pickles cleanly to spawn DataLoader workers; the OS page cache shares the
+    bytes across workers/epochs. Returns None if the pool dir is absent (a shard
+    with no deduped windows), so the loader falls back to the legacy layout.
+    """
+
+    def __init__(self, pool_dir: str):
+        self.pool_dir = pool_dir
+
+    def __call__(self, frame_id: str) -> bytes:
+        with open(f"{self.pool_dir}/{frame_id}.jpg", "rb") as f:
+            return f.read()
+
+
+def _make_pool_accessor(shard_dir: str):
+    """Return a ``_PoolAccessor`` if ``<shard_dir>/pool/`` exists, else None."""
+    pool_dir = Path(shard_dir) / "pool"
+    return _PoolAccessor(str(pool_dir)) if pool_dir.is_dir() else None
+
+
+def _decode_sample(
+    sample: dict,
+    pool=None,
+    *,
+    decode_future_frames: bool = True,
+) -> dict:
     """Decode a WebDataset sample into training tensors (geometry-free).
 
     Calibration is a per-dataset rig constant, not per-sample, so it is NOT
     decoded here — it is reconstructed once by ``make_pre_extracted_loader`` and
     exposed on the loader as ``.projection`` / ``.geometry_type``.
+
+    ``pool`` is a frame-pool accessor (``frame_id -> jpeg bytes``) for shards packed
+    with the deduped WM window (#121 §3.4d): the sample carries a
+    ``window_index.json`` mapping (step,view)→frame_id and the pixels live in a
+    sibling ``pool/`` dir. None on shards without a pool (imitation-only / legacy).
     """
     # Keys: "cam_0.jpg" ... "cam_{V-1}.jpg", optional "map.jpg",
     # "ego.npy", "meta.json", "__key__".
@@ -86,13 +127,180 @@ def _decode_sample(sample: dict) -> dict:
     ego_history = torch.from_numpy(ego[:history_size])
     ego_future = torch.from_numpy(ego[history_size:])
 
-    return {
+    out = {
+        # Overlay inference derives noise from this stable identity. Keep it in
+        # every batch so predictions do not depend on batch position or size.
+        "sample_uid": sample.get("__key__", ""),
         "visual_tiles": torch.stack(frames),
         "map_input": map_input,
         "egomotion_history": ego_history,
         "visual_history": torch.zeros(_VISUAL_HISTORY_DIM),
         "trajectory_target": ego_future,
     }
+
+    pose_data = sample.get("pose.npy")
+    gps_data = sample.get("gps.npy")
+    if (pose_data is None) != (gps_data is None):
+        raise ValueError(
+            "pose.npy and gps.npy must either both be present or both be absent"
+        )
+    if pose_data is not None:
+        assert gps_data is not None
+        from data_processing.geospatial import (
+            decode_gps_future,
+            decode_pose,
+        )
+
+        pose = decode_pose(pose_data)
+        out["pose_current"] = torch.tensor(
+            [
+                pose["latitude_deg"],
+                pose["longitude_deg"],
+                pose["heading_deg_cw_from_north"],
+            ],
+            dtype=torch.float64,
+        )
+        out["gps_future"] = torch.from_numpy(
+            decode_gps_future(gps_data)
+        )
+
+    # Optional World-Model windows (#13/#3.4d): the sample carries window_index.json
+    # (a (step,view)→frame_id map); the frames themselves are in the sibling pool/.
+    # Rebuild history_frames [T, V, 3, H, W] and future_frames [F, V, 3, H, W]
+    # (oldest→newest) — IDENTICAL tensors to the old per-sample hist_/fut_ layout,
+    # just deduped in storage. Present only on WM shards; absent → no JEPA loss.
+    # (Legacy hist_/fut_ shards still decode via _decode_window_legacy for back-compat.)
+    windows = _decode_windows_from_pool(
+        sample,
+        pool,
+        decode_future_frames=decode_future_frames,
+    )
+    if windows is not None:
+        history_frames, future_frames = windows
+        out["history_frames"] = history_frames
+        if future_frames is not None:
+            out["future_frames"] = future_frames
+
+    # Optional reasoning labels (#98): a per-sample "reasoning.json" member holds
+    # a serialized ReasoningLabelRecord (same shard key → auto-aligned with this
+    # sample's frames, no sample_id join). Decode it to per-sample target tensors
+    # for HorizonReasoningLoss, flattened to top-level "reasoning__*" keys so
+    # WebDataset's per-key default collation stacks them into [B, ...] batches.
+    # Absent on shards packed without a teacher — the loader stays
+    # reasoning-agnostic and training skips the reasoning loss.
+    # ALWAYS emit reasoning__* keys so a batch that mixes labeled + unlabeled
+    # samples collates (default_collate needs identical keys across a batch). An
+    # unlabeled sample gets a fully-MASKED target (abstained record → IGNORE_INDEX
+    # / zero source_weight), so it contributes nothing to the reasoning loss —
+    # never a false-negative all-zero row. Shards packed with a teacher carry
+    # reasoning.json; imitation-only samples don't, and both must batch together.
+    reasoning_data = sample.get("reasoning.json")
+    for key, tensor in _decode_reasoning_targets(reasoning_data).items():
+        out[f"reasoning__{key}"] = tensor
+
+    return out
+
+
+def _decode_reasoning_targets(data) -> dict:
+    """Decode the reasoning.json member into per-sample target tensors (#98).
+
+    Lazy imports the data_processing tensorizer so importing this loader never
+    pulls the label package unless training touches reasoning. When ``data`` is
+    None (sample has no reasoning.json), return the tensors of an ABSTAINED
+    record — all IGNORE_INDEX / zero source_weight — so the sample batches with
+    labeled ones and is fully masked out of the reasoning loss (R9).
+    """
+    from data_processing.reasoning_label_generation.schema import ReasoningLabelRecord
+    from data_processing.reasoning_label_generation.targets import (
+        record_from_json,
+        record_to_target_tensors,
+    )
+
+    if data is None:
+        record = ReasoningLabelRecord.abstain(
+            sample_id="", dataset_name="", teacher_provider="none",
+            teacher_model="none", prompt_version="none",
+            request_mode="clip_horizons", teacher_error="no reasoning.json")
+    else:
+        payload = json.loads(data.decode() if isinstance(data, (bytes, bytearray)) else data)
+        record = record_from_json(payload)
+    return record_to_target_tensors(record)
+
+
+def _decode_window_from_index(index_steps, pool) -> torch.Tensor:
+    """Decode one window (history or future) from a ``[[frame_id/view] /step]`` index.
+
+    Looks each frame_id up in the pool accessor, decodes, and stacks into
+    ``[steps, V, 3, H, W]`` (oldest→newest) — the exact shape/order the model
+    consumes. Byte-identical to the old per-sample layout because the pool holds the
+    same JPEG bytes the packer produced.
+    """
+    frame_steps = []
+    for view_ids in index_steps:                       # one list of frame_ids per step
+        view_frames = [_decode_image(pool(fid)) for fid in view_ids]
+        frame_steps.append(torch.stack(view_frames))   # [V, 3, H, W]
+    return torch.stack(frame_steps)                     # [steps, V, 3, H, W]
+
+
+def _decode_windows_from_pool(
+    sample: dict,
+    pool,
+    *,
+    decode_future_frames: bool = True,
+):
+    """Rebuild (history_frames, future_frames) from window_index.json + the pool.
+
+    Returns None when the sample has no window_index.json (imitation-only). Falls
+    back to the LEGACY per-sample hist_/fut_ member layout when a shard predates the
+    frame pool (so old shards still train). Requires a pool accessor when a
+    window_index.json is present.
+    """
+    idx_blob = sample.get("window_index.json")
+    if idx_blob is None:
+        return _decode_windows_legacy(
+            sample,
+            decode_future_frames=decode_future_frames,
+        )
+    if pool is None:
+        raise ValueError(
+            "sample has window_index.json but the loader has no frame pool accessor; "
+            "the sibling pool/ dir must exist next to the shards (#121 §3.4d).")
+    index = json.loads(idx_blob.decode() if isinstance(idx_blob, (bytes, bytearray)) else idx_blob)
+    hist = _decode_window_from_index(index["history"], pool)
+    fut = (
+        _decode_window_from_index(index["future"], pool)
+        if decode_future_frames
+        else None
+    )
+    return hist, fut
+
+
+def _decode_windows_legacy(
+    sample: dict,
+    *,
+    decode_future_frames: bool = True,
+):
+    """Legacy path: decode hist_<t>_cam_<v>.jpg / fut_<f>_cam_<v>.jpg members
+    (pre-#3.4d shards). Returns (history, future) or None if absent."""
+    def _one(key_re):
+        matches = [(m, k) for k in sample if (m := key_re.match(k))]
+        if not matches:
+            return None
+        steps = max(int(m.group(1)) for m, _ in matches) + 1
+        frame_steps = []
+        for t in range(steps):
+            view_frames = [
+                _decode_image(sample[k])
+                for m, k in sorted(matches, key=lambda mk: int(mk[0].group(2)))
+                if int(m.group(1)) == t
+            ]
+            frame_steps.append(torch.stack(view_frames))
+        return torch.stack(frame_steps)
+    hist = _one(_HIST_KEY_RE)
+    fut = _one(_FUT_KEY_RE) if decode_future_frames else None
+    if hist is None or (decode_future_frames and fut is None):
+        return None
+    return hist, fut
 
 
 def load_projection_from_manifest(shard_dir: str):
@@ -113,11 +321,6 @@ def load_projection_from_manifest(shard_dir: str):
     the single geometry-reconstruction point, keeping the pinhole/f-theta split
     out of the training loop.
     """
-    from model_components.view_fusion.projection import (
-        FThetaProjection,
-        PinholeProjection,
-    )
-
     mpath = Path(shard_dir) / "manifest.json"
     # Missing manifest -> pseudo (a legacy shard has no geometry). But a manifest
     # that EXISTS and cannot be read must RAISE: silently degrading a calibrated
@@ -136,7 +339,23 @@ def load_projection_from_manifest(shard_dir: str):
     spec = manifest.get("projection")
     if spec is None:
         return None, manifest.get("geometry_type", "pseudo")
+    return projection_from_spec(spec)
 
+
+def projection_from_spec(spec):
+    """Reconstruct ``(projection, geometry_type)`` from a serialized spec dict.
+
+    Shared by the single-dataset manifest path and the per-sample calib.json
+    path (merged loader). ``spec`` is what ``CameraProjectionModel.to_spec()``
+    produced; ``None`` returns the pseudo path.
+    """
+    from model_components.view_fusion.projection import (
+        FThetaProjection,
+        PinholeProjection,
+    )
+
+    if spec is None:
+        return None, "pseudo"
     kind = spec.get("type")
     if kind in ("pinhole", "rectified_pinhole"):
         matrix = torch.tensor(spec["matrix"], dtype=torch.float32).unsqueeze(0)  # [1,V,3,4]
@@ -166,24 +385,305 @@ def load_projection_from_manifest(shard_dir: str):
             ),
             "ftheta",
         )
-    raise ValueError(f"Unknown projection type in manifest: {kind!r}")
+    raise ValueError(f"Unknown projection type in spec: {kind!r}")
+
+
+def _split_bucket(key: str, buckets: int = 10) -> int:
+    """Deterministic bucket in [0, buckets) from a stable string.
+
+    Uses a fixed hash (blake2b) — NOT Python's ``hash()``, which is salted per
+    process, so train and eval workers (and reruns) would disagree on the split.
+    Reproducible across the train task and the (separate) eval task.
+    """
+    from data_processing.dataset_snapshot import split_bucket
+    return split_bucket(key, buckets)
+
+
+def _split_group_of(sample, *, required: bool = False) -> str:
+    """The train/val SPLIT key for a raw shard sample (#121 §3.1).
+
+    Hash the ``split_group_uid`` from the sample's ``meta.json`` (episode/clip
+    granularity) — NOT the per-frame ``__key__`` — so all frames of one episode
+    fall in the SAME bucket and never straddle train/val (adjacent frames are
+    strongly correlated → a per-frame split leaks). Falls back to ``__key__`` for
+    legacy shards whose meta.json predates split_group_uid.
+    """
+    import json
+    meta = sample.get("meta.json")
+    if meta is not None:
+        try:
+            g = json.loads(meta.decode() if isinstance(meta, (bytes, bytearray)) else meta)
+            grp = g.get("split_group_uid")
+            if grp:
+                return str(grp)
+        except Exception as error:
+            if required:
+                raise ValueError(
+                    "sample meta.json is invalid; an explicit group split "
+                    "cannot fall back to the sample UID"
+                ) from error
+    if required:
+        raise ValueError(
+            "sample meta.json has no split_group_uid; an explicit group split "
+            "cannot fall back to the sample UID"
+        )
+    return sample.get("__key__", "")
+
+
+@dataclass(frozen=True)
+class _ExplicitSplitGroupFilter:
+    """Picklable selector for a frozen validation-group manifest."""
+
+    validation_groups: frozenset[str]
+    keep_validation: bool
+
+    def __call__(self, sample) -> bool:
+        group_uid = _split_group_of(sample, required=True)
+        in_validation = group_uid in self.validation_groups
+        return in_validation if self.keep_validation else not in_validation
+
+
+def _split_keep(
+    split: str,
+    val_fraction: float,
+    validation_group_uids: Sequence[str] | None = None,
+):
+    """Return a predicate ``sample -> bool`` selecting the requested split.
+
+    ``split="all"`` (default) keeps everything (backward-compatible, single-set
+    behaviour). ``"train"`` / ``"val"`` partition by a stable hash of the sample's
+    ``split_group_uid`` (episode/clip) into disjoint sets: ``val`` is the first
+    ``round(val_fraction*10)`` of 10 buckets, ``train`` is the rest. Splitting by
+    GROUP (not per-frame) keeps a whole episode/clip on one side, so eval-on-``val``
+    measures generalization to UNSEEN episodes, not memorization of neighbours.
+    A supplied ``validation_group_uids`` manifest replaces hash bucketing with
+    exact membership and requires every sample to carry an explicit group UID.
+    """
+    if split not in {"all", "train", "val"}:
+        raise ValueError(f"unsupported split {split!r}")
+    if split == "all":
+        return lambda sample: True
+    if validation_group_uids is not None:
+        requested = [str(uid) for uid in validation_group_uids]
+        validation_groups = frozenset(requested)
+        if not validation_groups:
+            raise ValueError("validation_group_uids must not be empty")
+        if len(validation_groups) != len(requested):
+            raise ValueError("validation_group_uids contains duplicates")
+        if any(not uid for uid in validation_groups):
+            raise ValueError(
+                "validation_group_uids must contain non-empty values"
+            )
+        return _ExplicitSplitGroupFilter(
+            validation_groups=validation_groups,
+            keep_validation=(split == "val"),
+        )
+    if val_fraction <= 0.0:
+        return lambda sample: True
+    buckets = 10
+    val_buckets = max(1, min(buckets - 1, round(val_fraction * buckets)))
+
+    def keep(sample):
+        b = _split_bucket(_split_group_of(sample), buckets)
+        in_val = b < val_buckets
+        return in_val if split == "val" else (not in_val)
+
+    return keep
+
+
+@dataclass(frozen=True)
+class PackedSplitInventory:
+    """Identity coverage discovered from packed sample metadata."""
+
+    group_uids: tuple[str, ...]
+    sample_count: int
+    sample_uid_digest: str
+    sample_uids_by_group: tuple[tuple[str, tuple[str, ...]], ...]
+
+    def sample_identity_for_groups(
+        self,
+        group_uids: Sequence[str],
+    ) -> tuple[int, str]:
+        """Return the sample count and UID digest for exact group membership."""
+        requested = frozenset(str(uid) for uid in group_uids)
+        if not requested:
+            raise ValueError("at least one split group is required")
+        inventory = dict(self.sample_uids_by_group)
+        missing = requested - set(inventory)
+        if missing:
+            raise ValueError(
+                f"split groups are absent from packed inventory: {sorted(missing)}"
+            )
+        sample_uids = sorted(
+            sample_uid
+            for group_uid in requested
+            for sample_uid in inventory[group_uid]
+        )
+        return (
+            len(sample_uids),
+            hashlib.sha256(
+                "\n".join(sample_uids).encode("utf-8")
+            ).hexdigest(),
+        )
+
+
+def discover_split_inventory(
+    shard_dirs: Sequence[str | Path],
+) -> PackedSplitInventory:
+    """Read exact group and sample identities from packed shard metadata.
+
+    This is a one-time training-startup scan over tar headers and ``meta.json``
+    members only; camera/map payloads are never decoded. Exact KITScenes
+    holdouts use this inventory so their scene count is deterministic rather
+    than an approximate hash-bucket fraction.
+    """
+    import tarfile
+
+    roots = [Path(shard_dir) for shard_dir in shard_dirs]
+    if not roots:
+        raise ValueError("at least one shard directory is required")
+
+    group_uids: set[str] = set()
+    sample_uids: set[str] = set()
+    sample_uids_by_group: dict[str, list[str]] = {}
+    for root in roots:
+        tarfiles = sorted(root.glob("*.tar"))
+        if not tarfiles:
+            raise FileNotFoundError(f"No .tar shards found in {root}")
+        for tar_path in tarfiles:
+            with tarfile.open(tar_path, "r:*") as archive:
+                for member in archive:
+                    if not (
+                        member.isfile()
+                        and member.name.endswith(".meta.json")
+                    ):
+                        continue
+                    extracted = archive.extractfile(member)
+                    if extracted is None:
+                        raise ValueError(
+                            f"could not read {member.name} from {tar_path}"
+                        )
+                    try:
+                        metadata = json.load(extracted)
+                    except (OSError, UnicodeError, ValueError) as error:
+                        raise ValueError(
+                            f"invalid {member.name} in {tar_path}"
+                        ) from error
+                    group_uid = metadata.get("split_group_uid")
+                    if not isinstance(group_uid, str) or not group_uid:
+                        raise ValueError(
+                            f"{member.name} in {tar_path} has no valid "
+                            "split_group_uid"
+                        )
+                    sample_uid = metadata.get("sample_uid")
+                    member_uid = member.name.removesuffix(".meta.json")
+                    if (
+                        not isinstance(sample_uid, str)
+                        or not sample_uid
+                        or sample_uid != member_uid
+                    ):
+                        raise ValueError(
+                            f"{member.name} in {tar_path} has a mismatched "
+                            "sample_uid"
+                        )
+                    if sample_uid in sample_uids:
+                        raise ValueError(
+                            f"duplicate sample_uid {sample_uid!r} in packed "
+                            "shards"
+                        )
+                    group_uids.add(group_uid)
+                    sample_uids.add(sample_uid)
+                    sample_uids_by_group.setdefault(
+                        group_uid, []
+                    ).append(sample_uid)
+
+    if not sample_uids or len(group_uids) < 2:
+        raise ValueError(
+            "exact validation splitting requires metadata for at least two "
+            "split groups"
+        )
+    return PackedSplitInventory(
+        group_uids=tuple(sorted(group_uids)),
+        sample_count=len(sample_uids),
+        sample_uid_digest=hashlib.sha256(
+            "\n".join(sorted(sample_uids)).encode("utf-8")
+        ).hexdigest(),
+        sample_uids_by_group=tuple(
+            (
+                group_uid,
+                tuple(sorted(group_sample_uids)),
+            )
+            for group_uid, group_sample_uids in sorted(
+                sample_uids_by_group.items()
+            )
+        ),
+    )
+
+
+def discover_split_group_uids(
+    shard_dirs: Sequence[str | Path],
+) -> tuple[str, ...]:
+    """Return only the group component of :func:`discover_split_inventory`."""
+    return discover_split_inventory(shard_dirs).group_uids
+
+
+@dataclass(frozen=True)
+class _SampleUidFilter:
+    """Picklable raw-WebDataset filter for an explicit benchmark manifest."""
+
+    allowed: frozenset[str]
+
+    def __call__(self, sample) -> bool:
+        return str(sample.get("__key__", "")) in self.allowed
 
 
 def make_pre_extracted_loader(
     shard_dir: str,
     batch_size: int = 8,
     num_workers: int = 4,
-    split: str = "train",
+    split: str = "all",
+    val_fraction: float = 0.0,
     shuffle: int = 1000,
+    shuffle_seed: int | None = None,
+    pin_memory: bool = False,
+    prefetch_factor: int = 4,
+    shard_files: Sequence[str | Path] | None = None,
+    sample_uids: Sequence[str] | None = None,
+    validation_group_uids: Sequence[str] | None = None,
+    decode_future_frames: bool = True,
 ) -> wds.WebLoader:
     """Create a WebDataset DataLoader reading from local EBS shard cache.
 
     Args:
         shard_dir: Path to directory containing .tar shard files.
         batch_size: Batch size.
-        num_workers: DataLoader workers.
-        split: Unused currently (all tars in shard_dir are loaded).
+        num_workers: DataLoader workers. >0 decodes JPEGs in parallel worker
+            processes (the per-sample WM window is ~55 decodes; at num_workers=0
+            this is fully serial and the GPU stalls — #121 P0). Workers are
+            sharded over the .tar files via ``split_by_worker``, so effective
+            parallelism is capped by shard count — pack more, smaller shards to use
+            more workers.
+        split: ``"all"`` (default, every sample), ``"train"``, or ``"val"``. With
+            ``val_fraction`` > 0, ``train``/``val`` are disjoint at
+            ``split_group_uid`` granularity (see ``_split_keep``).
+        val_fraction: fraction of groups held out for ``val`` (0 disables the
+            split → ``"all"`` behaviour regardless of ``split``).
         shuffle: Shuffle buffer size (0 to disable).
+        shuffle_seed: optional deterministic seed for the shuffle buffer.
+        pin_memory: pin host buffers for faster H2D copy (set True on GPU).
+        prefetch_factor: batches prefetched per worker (only used when
+            num_workers>0); overlaps decode with the GPU step.
+        shard_files: optional explicit subset of tar files. Overlay precompute
+            uses one file at a time so each output body is canonical per shard.
+        sample_uids: optional exact sample allowlist. Filtering happens before
+            image decode so a fixed benchmark manifest does not decode unrelated
+            samples from the same source scenes.
+        validation_group_uids: optional frozen group-level validation manifest.
+            When supplied with ``split="train"`` or ``"val"``, membership in
+            this exact set replaces approximate hash bucketing.
+        decode_future_frames: decode World-Model target images. Benchmark
+            inference disables this so future camera frames cannot enter its
+            input batch; training keeps the default because JEPA needs them.
 
     The returned loader carries two extra attributes describing the dataset's
     geometry (a rig constant, so it lives on the loader, not per batch):
@@ -191,21 +691,286 @@ def make_pre_extracted_loader(
       - ``.geometry_type``: "pinhole" / "rectified_pinhole" / "ftheta" / "pseudo".
     Pass these to the model's forward alongside each batch.
     """
-    tarfiles = sorted(Path(shard_dir).glob("*.tar"))
+    tarfiles = (
+        sorted(Path(path) for path in shard_files)
+        if shard_files is not None
+        else sorted(Path(shard_dir).glob("*.tar"))
+    )
     if not tarfiles:
         raise FileNotFoundError(f"No .tar shards found in {shard_dir}")
+    shard_root = Path(shard_dir).resolve()
+    for path in tarfiles:
+        resolved = path.resolve()
+        if not resolved.is_file() or resolved.parent != shard_root:
+            raise ValueError(
+                f"shard file must be a direct .tar child of {shard_root}: {path}"
+            )
+        if resolved.suffix != ".tar":
+            raise ValueError(f"shard file must use .tar suffix: {path}")
 
     urls = [str(p) for p in tarfiles]
 
-    dataset = wds.WebDataset(urls, shardshuffle=False, empty_check=False, nodesplitter=wds.split_by_worker)
+    # CRITICAL (webdataset 1.0.2): WebDataset has BOTH `nodesplitter` and
+    # `workersplitter`, and `workersplitter` DEFAULTS to split_by_worker. Passing
+    # nodesplitter=split_by_worker applies the worker split TWICE, so with
+    # num_workers=N each worker sees only 1/N of the shards → the loader silently
+    # drops (N-1)/N of the data (verified: 48 samples → 24 at nw=2, 12 at nw=4).
+    # Use single_node_only for the NODE slot (correct until multi-node DDP, which
+    # would set split_by_node here) and let the default workersplitter do the
+    # per-worker shard split exactly once.
+    dataset = wds.WebDataset(urls, shardshuffle=False, empty_check=False,
+                             nodesplitter=wds.single_node_only)
+    if sample_uids is not None:
+        requested = [str(uid) for uid in sample_uids]
+        allowed = frozenset(requested)
+        if not allowed:
+            raise ValueError("sample_uids must not be empty")
+        if len(allowed) != len(requested):
+            raise ValueError("sample_uids contains duplicates")
+        dataset = dataset.select(_SampleUidFilter(allowed))
+    # Split BEFORE decode so dropped groups never incur image decoding.
+    keep = _split_keep(
+        split,
+        val_fraction,
+        validation_group_uids=validation_group_uids,
+    )
+    if split != "all" and (
+        val_fraction > 0.0 or validation_group_uids is not None
+    ):
+        dataset = dataset.select(keep)
     if shuffle > 0:
-        dataset = dataset.shuffle(shuffle)
-    dataset = dataset.map(_decode_sample)
+        dataset = dataset.shuffle(shuffle, seed=shuffle_seed)
+    # Frame-pool accessor for deduped WM windows (#121 §3.4d): a sibling pool/ dir
+    # next to the .tar shards, NOT part of `urls`, so split_by_worker never shards
+    # it away — every worker reaches any frame_id by path. Path-based + lazily read,
+    # so it pickles cleanly to spawn workers (no open handle crosses the boundary).
+    pool = _make_pool_accessor(shard_dir)
+    # functools.partial (NOT a lambda) so the map fn pickles to spawn workers.
+    dataset = dataset.map(functools.partial(
+        _decode_sample,
+        pool=pool,
+        decode_future_frames=decode_future_frames,
+    ))
 
-    loader = wds.WebLoader(dataset, batch_size=batch_size, num_workers=min(num_workers, len(tarfiles)))
+    # split_by_worker shards the .tar list across workers, so more workers than
+    # shards is wasted; cap accordingly. Partition-scoped loaders are retired as
+    # soon as that partition is exhausted, so workers MUST NOT persist beyond the
+    # iterator lifetime. prefetch_factor overlaps decode with the GPU step.
+    eff_workers = min(num_workers, len(tarfiles)) if num_workers > 0 else 0
+    loader_kwargs: dict = {"batch_size": batch_size, "num_workers": eff_workers}
+    if eff_workers > 0:
+        loader_kwargs.update(
+            persistent_workers=False,
+            prefetch_factor=prefetch_factor,
+            pin_memory=pin_memory,
+        )
+    loader = wds.WebLoader(dataset, **loader_kwargs)
 
     # Per-dataset geometry, reconstructed once from the manifest.
     projection, geometry_type = load_projection_from_manifest(shard_dir)
     loader.projection = projection
     loader.geometry_type = geometry_type
     return loader
+
+
+@dataclass
+class _ActiveLoader:
+    loader: object
+    iterator: object
+    owned: bool
+    closed: bool = False
+
+    def close(self):
+        """Release an active child iterator and its owned loader exactly once."""
+        if self.closed:
+            return
+        self.closed = True
+        iterator_close = getattr(self.iterator, "close", None)
+        try:
+            if iterator_close is not None:
+                iterator_close()
+        finally:
+            if self.owned:
+                loader_close = getattr(self.loader, "close", None)
+                if loader_close is not None:
+                    loader_close()
+
+
+class MergedDatasetLoader:
+    """Bounded round-robin over multiple single-dataset loaders.
+
+    Different datasets have different camera counts (L2D 6, NVIDIA 7) and
+    geometries (pseudo vs f-theta), which cannot be stacked into one batch. So
+    every batch remains same-dataset (uniform num_views/geometry) and carries that
+    dataset's projection.
+
+    Only ``max_active_loaders`` child iterators exist at once. Within that window
+    batches retain the original round-robin ordering; when a child is exhausted
+    it is closed before the next pending child is opened. Loader factories are
+    invoked lazily and recreated per epoch, which bounds worker, prefetch, shuffle,
+    and pin-memory state even when the input contains hundreds of partitions.
+
+    Each yielded item is ``(batch, projection, geometry_type)`` so the training
+    loop applies the right geometry to each (same-dataset) batch.
+    """
+
+    def __init__(
+        self,
+        loaders=None,
+        *,
+        loader_factories=None,
+        max_active_loaders: int = 4,
+        num_workers: int = 0,
+        shuffle_seed: int | None = None,
+    ):
+        if loaders is not None and loader_factories is not None:
+            raise ValueError("pass loaders or loader_factories, not both")
+        if loaders is None and loader_factories is None:
+            raise ValueError("MergedDatasetLoader needs at least one loader.")
+        if max_active_loaders <= 0:
+            raise ValueError("max_active_loaders must be positive")
+
+        if loader_factories is not None:
+            sources = list(loader_factories)
+            owned = True
+            self.loaders = []
+        else:
+            sources = list(loaders)
+            owned = False
+            self.loaders = sources
+        if not sources:
+            raise ValueError("MergedDatasetLoader needs at least one loader.")
+        self._sources = [(source, owned) for source in sources]
+        self.max_active_loaders = min(max_active_loaders, len(sources))
+        self.num_workers = num_workers
+        self.shuffle_seed = shuffle_seed
+
+    @staticmethod
+    def _open(source, owned: bool) -> _ActiveLoader:
+        loader = source() if owned else source
+        try:
+            iterator = iter(loader)
+        except BaseException:
+            if owned:
+                loader_close = getattr(loader, "close", None)
+                if loader_close is not None:
+                    loader_close()
+            raise
+        return _ActiveLoader(loader=loader, iterator=iterator, owned=owned)
+
+    def __iter__(self):
+        pending = iter(self._sources)
+        active: deque[_ActiveLoader] = deque()
+
+        def fill_active():
+            while len(active) < self.max_active_loaders:
+                try:
+                    source, owned = next(pending)
+                except StopIteration:
+                    return
+                active.append(self._open(source, owned))
+
+        try:
+            fill_active()
+            while active:
+                child = active.popleft()
+                try:
+                    batch = next(child.iterator)
+                except StopIteration:
+                    child.close()
+                    fill_active()
+                    continue
+                except BaseException:
+                    child.close()
+                    raise
+
+                # Requeue before yielding so generator.close() also reaches this
+                # child when the consumer stops after the current batch.
+                active.append(child)
+                yield (
+                    batch,
+                    getattr(child.loader, "projection", None),
+                    getattr(child.loader, "geometry_type", "pseudo"),
+                )
+        finally:
+            close_error = None
+            while active:
+                try:
+                    active.popleft().close()
+                except BaseException as error:
+                    if close_error is None:
+                        close_error = error
+            if close_error is not None:
+                raise close_error
+
+
+def make_multi_dataset_loader(
+    shard_dirs,
+    batch_size: int = 8,
+    num_workers: int = 4,
+    split: str = "all",
+    val_fraction: float = 0.0,
+    shuffle: int = 1000,
+    shuffle_seed: int | None = None,
+    pin_memory: bool = False,
+    prefetch_factor: int = 4,
+    max_active_loaders: int | None = None,
+    sample_uids: Sequence[str] | None = None,
+    validation_group_uids: Sequence[str] | None = None,
+    decode_future_frames: bool = True,
+) -> MergedDatasetLoader:
+    """Build a :class:`MergedDatasetLoader` over several shard directories.
+
+    Each directory is one dataset (its own manifest + geometry). Datasets are
+    merged through a bounded active window (see MergedDatasetLoader). A single
+    directory degrades to a one-loader merge (identical to the single dataset
+    path, but yielding the ``(batch, projection, geometry_type)`` tuple).
+
+    ``split`` / ``val_fraction`` select a disjoint group-level train/val split
+    applied per dataset (see make_pre_extracted_loader). ``num_workers`` is a
+    GLOBAL worker budget: each active partition gets one worker, and no more than
+    four partition loaders are active. Evaluation can use
+    ``max_active_loaders=1`` together with a small
+    ``prefetch_factor`` to bound its larger batches.
+    """
+    if num_workers < 0:
+        raise ValueError("num_workers must be non-negative")
+    if max_active_loaders is not None and max_active_loaders <= 0:
+        raise ValueError("max_active_loaders must be positive")
+
+    shard_dirs = list(shard_dirs)
+    child_workers = 1 if num_workers > 0 else 0
+    default_active = min(4, num_workers) if num_workers > 0 else 1
+    active_limit = default_active if max_active_loaders is None else max_active_loaders
+    if num_workers > 0:
+        active_limit = min(active_limit, num_workers, 4)
+    else:
+        active_limit = 1
+
+    factories = [
+        functools.partial(
+            make_pre_extracted_loader,
+            d,
+            batch_size=batch_size,
+            num_workers=child_workers,
+            split=split,
+            val_fraction=val_fraction,
+            shuffle=shuffle,
+            shuffle_seed=(
+                None if shuffle_seed is None else shuffle_seed + index
+            ),
+            pin_memory=pin_memory,
+            prefetch_factor=prefetch_factor,
+            sample_uids=sample_uids,
+            validation_group_uids=validation_group_uids,
+            decode_future_frames=decode_future_frames,
+        )
+        for index, d in enumerate(shard_dirs)
+    ]
+    merged = MergedDatasetLoader(
+        loader_factories=factories,
+        max_active_loaders=active_limit,
+        num_workers=num_workers,
+        shuffle_seed=shuffle_seed,
+    )
+    return merged

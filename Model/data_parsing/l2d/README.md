@@ -21,10 +21,15 @@ Parser for the L2D LeRobot dataset (v3.0), producing tensors directly consumable
 
 | Index | Signal | Source |
 |-------|--------|--------|
-| 0 | Speed (m/s) | `observation.state.vehicle[0]` directly |
+| 0 | Speed (m/s) | `observation.state.vehicle[0]` (raw km/h) ÷ 3.6 |
 | 1 | Acceleration_x (m/s²) | `observation.state.vehicle[6]` directly |
-| 2 | Yaw rate (rad/s) | `diff(heading) / dt` |
+| 2 | Yaw rate (rad/s) | `diff(radians(heading)) / dt` |
 | 3 | Curvature (rad/m) | `yaw_rate / speed` (guarded) |
+
+> Units: the raw L2D `speed` is km/h and `heading` is degrees (verified against
+> `meta/stats.json`: speed max ~171.8, heading range 0..360). Both are converted
+> to SI (m/s, radians) in `_derive_signals` so the integrated ego trajectory and
+> the curvature formula are physically correct.
 
 ### Trajectory target signals `(128,) = 64 × 2`
 

@@ -39,6 +39,7 @@ resource "aws_iam_role_policy" "codebuild" {
           "ecr:BatchCheckLayerAvailability",
           "ecr:GetDownloadUrlForLayer",
           "ecr:BatchGetImage",
+          "ecr:DescribeImages",
           "ecr:PutImage",
           "ecr:InitiateLayerUpload",
           "ecr:UploadLayerPart",
@@ -184,6 +185,46 @@ resource "aws_codebuild_project" "flyte_register" {
 
 output "flyte_register_project" {
   value = aws_codebuild_project.flyte_register.name
+}
+
+# --- Trajectory overlay launch (VPC-local Flyte client) ---
+
+resource "aws_codebuild_project" "overlay_launch" {
+  name         = "${var.cluster_name}-overlay-launch"
+  service_role = aws_iam_role.codebuild.arn
+
+  artifacts { type = "NO_ARTIFACTS" }
+
+  environment {
+    compute_type                = "BUILD_GENERAL1_SMALL"
+    image                       = "aws/codebuild/amazonlinux-x86_64-standard:5.0"
+    type                        = "LINUX_CONTAINER"
+    image_pull_credentials_type = "CODEBUILD"
+  }
+
+  source {
+    type      = "S3"
+    location  = "${aws_s3_bucket.cache.bucket}/source.zip"
+    buildspec = "Platform/buildspec-launch-overlay.yml"
+  }
+
+  vpc_config {
+    vpc_id             = var.vpc_id
+    subnets            = var.private_subnet_ids
+    security_group_ids = [aws_security_group.flyte_register.id]
+  }
+
+  logs_config {
+    cloudwatch_logs {
+      group_name = "/codebuild/${var.cluster_name}-overlay-launch"
+    }
+  }
+
+  tags = { Purpose = "trajectory-overlay-launch" }
+}
+
+output "overlay_launch_project" {
+  value = aws_codebuild_project.overlay_launch.name
 }
 
 # Allow CodeBuild flyte-register to reach flyteadmin (gRPC port 81)

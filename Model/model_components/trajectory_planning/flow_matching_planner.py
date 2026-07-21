@@ -4,6 +4,7 @@ import torch
 import torch.nn as nn
 
 from .base import BasePlanner
+from .reasoning_coupling import ReasoningCoupling
 
 
 class FlowMatchingPlanner(BasePlanner):
@@ -40,7 +41,8 @@ class FlowMatchingPlanner(BasePlanner):
     def __init__(self, embed_dim=256, num_timesteps=64, num_signals=2,
                  egomotion_dim=256, visual_history_dim=896,
                  num_inference_steps=10, time_embed_dim=128, num_heads=4,
-                 timestep_sampler="beta", beta_alpha=1.5, beta_scale=0.999):
+                 timestep_sampler="beta", beta_alpha=1.5, beta_scale=0.999,
+                 reasoning_mode="none"):
         super().__init__()
 
         if num_inference_steps < 1:
@@ -96,6 +98,20 @@ class FlowMatchingPlanner(BasePlanner):
         # cross-attention to preserve spatial detail.
         self.ego_state_proj = nn.Linear(egomotion_dim, embed_dim)
         self.visual_history_proj = nn.Linear(visual_history_dim, embed_dim)
+
+        # Reasoning coupling (zero-init; no-op at init). Two injection points by
+        # mode:
+        #   * "pooled_latent": add the reasoning residual to the AdaLN
+        #     conditioning vector (mod_cond), reaching every action token's
+        #     modulation, computed once per forward().
+        #   * "horizon_cross_attention": let each per-timestep ACTION QUERY
+        #     attend the 5 horizon tokens inside _v_theta, so a future timestep
+        #     can look at the now/1s/2s/3s/4s reasoning directly — preserving
+        #     *when* a hazard matters (the whole point of horizon tokens). A
+        #     single vector mod_cond cannot express that, so this mode does NOT
+        #     touch mod_cond.
+        self.reasoning_mode = reasoning_mode
+        self.reasoning_coupling = ReasoningCoupling(embed_dim, mode=reasoning_mode)
 
         self.time_mlp = nn.Sequential(
             nn.Linear(time_embed_dim, embed_dim),
@@ -170,6 +186,25 @@ class FlowMatchingPlanner(BasePlanner):
                 f"got {trajectory_target.device} and {device}."
             )
 
+    def _validate_initial_noise(self, initial_noise, batch_size, device, dtype):
+        expected = (batch_size, self.trajectory_dim)
+        if tuple(initial_noise.shape) != expected:
+            raise ValueError(
+                f"initial_noise must have shape {expected} "
+                f"(batch_size, num_timesteps * num_signals), got "
+                f"{tuple(initial_noise.shape)}."
+            )
+        if initial_noise.device != device:
+            raise ValueError(
+                "initial_noise must be on the same device as bev_features, "
+                f"got {initial_noise.device} and {device}."
+            )
+        if initial_noise.dtype != dtype:
+            raise ValueError(
+                "initial_noise must have the same dtype as bev_features, "
+                f"got {initial_noise.dtype} and {dtype}."
+            )
+
     def _sinusoidal_time_embedding(self, t):
         """Map t in [0, 1] to a sinusoidal embedding of size time_embed_dim.
 
@@ -187,13 +222,23 @@ class FlowMatchingPlanner(BasePlanner):
         args = t.unsqueeze(-1) * freqs.unsqueeze(0)
         return torch.cat([torch.sin(args), torch.cos(args)], dim=-1)
 
-    def _modulation_conditioning(self, visual_history, egomotion_history):
+    def _modulation_conditioning(self, visual_history, egomotion_history,
+                                 reasoning_latent=None):
         """Conditioning vector fed into AdaLN — excludes BEV (cross-attn) and
-        time (added per-step in the Euler loop)."""
-        return (
+        time (added per-step in the Euler loop).
+
+        In "pooled_latent" mode the zero-init reasoning residual is added here
+        (no-op at init), modulating every action token, computed once per
+        forward(). In "horizon_cross_attention" mode the reasoning enters at the
+        action queries inside _v_theta instead, so nothing is added here.
+        """
+        base = (
             self.visual_history_proj(visual_history)
             + self.ego_state_proj(egomotion_history)
         )
+        # Only the pooled path uses mod_cond; horizon tokens are routed to _v_theta.
+        latent = reasoning_latent if self.reasoning_mode == "pooled_latent" else None
+        return self.reasoning_coupling(base, reasoning_latent=latent)
 
 
     def _sample_timesteps(self, batch_size, device, dtype):
@@ -245,7 +290,7 @@ class FlowMatchingPlanner(BasePlanner):
         bev_seq = bev_features.flatten(2).transpose(1, 2)
         return self.bev_kv_proj(bev_seq)
 
-    def _v_theta(self, u_t, t, bev_seq, mod_cond):
+    def _v_theta(self, u_t, t, bev_seq, mod_cond, horizon_tokens=None):
         """Conditional velocity network with BEV cross-attention + AdaLN.
 
         Args:
@@ -255,6 +300,10 @@ class FlowMatchingPlanner(BasePlanner):
                 by ``_project_bev``. Precomputed once per forward() to avoid
                 re-flattening and re-projecting on every Euler step.
             mod_cond: [B, embed_dim] — visual_history + egomotion conditioning.
+            horizon_tokens: optional [B, 5, embed_dim] reasoning tokens. In
+                "horizon_cross_attention" mode each action query attends these
+                (zero-init, no-op until trained) so timestep-t actions can look
+                at the now/1s/2s/3s/4s reasoning; ignored in other modes.
 
         Returns:
             velocity: [B, trajectory_dim]
@@ -264,6 +313,15 @@ class FlowMatchingPlanner(BasePlanner):
         # Action queries: one token per future timestep.
         u_t_seq = u_t.reshape(B, self.num_timesteps, self.num_signals)
         queries = self.action_proj(u_t_seq)                      # [B, T, C]
+
+        # Horizon-aware reasoning: action queries attend the 5 horizon tokens.
+        # Zero-init residual (no-op at init); only fires in cross-attention mode
+        # with horizon_tokens present. Preserves per-timestep timing information
+        # a single pooled vector would lose.
+        if self.reasoning_mode == "horizon_cross_attention" and horizon_tokens is not None:
+            queries = self.reasoning_coupling(
+                queries, horizon_tokens=horizon_tokens, query=queries
+            )
 
         attended, _ = self.cross_attn(queries, bev_seq, bev_seq) # [B, T, C]
 
@@ -277,7 +335,8 @@ class FlowMatchingPlanner(BasePlanner):
         return velocity_seq.reshape(B, self.trajectory_dim)
 
     def forward(self, bev_features, visual_history, egomotion_history,
-                generator=None, **kwargs):
+                generator=None, initial_noise=None, reasoning_latent=None,
+                reasoning_horizon_tokens=None, **kwargs):
         """Inference: Euler-integrate ``dx/dt = v_theta(x, t, ...)`` over [0, 1].
 
         Args:
@@ -285,7 +344,15 @@ class FlowMatchingPlanner(BasePlanner):
             visual_history: [B, visual_history_dim].
             egomotion_history: [B, egomotion_dim].
             generator: optional ``torch.Generator`` used to seed the noise
-                prior so evaluation runs are reproducible.
+                prior so evaluation runs are reproducible. Ignored when
+                ``initial_noise`` is provided.
+            initial_noise: optional [B, trajectory_dim] noise prior. Supplying
+                per-sample noise makes inference independent of batch order and
+                batch size; when omitted, noise is sampled with ``generator``.
+            reasoning_latent: optional [B, embed_dim] pooled reasoning latent
+                (reasoning_mode="pooled_latent").
+            reasoning_horizon_tokens: optional [B, 5, embed_dim] per-horizon
+                reasoning tokens (reasoning_mode="horizon_cross_attention").
             **kwargs: ignored. Accepts extra inputs other planners or
                 callers might pass so call sites can stay planner-agnostic.
 
@@ -293,19 +360,31 @@ class FlowMatchingPlanner(BasePlanner):
             trajectory: [B, trajectory_dim] — integrated from a noise sample.
         """
         self._validate_inputs(visual_history, egomotion_history)
-        mod_cond = self._modulation_conditioning(visual_history, egomotion_history)
+        mod_cond = self._modulation_conditioning(
+            visual_history, egomotion_history,
+            reasoning_latent=reasoning_latent,
+        )
         # bev_seq is computed once and reused across every Euler step.
         bev_seq = self._project_bev(bev_features)
 
         B = bev_features.shape[0]
-        x = torch.randn(B, self.trajectory_dim,
-                        device=bev_features.device, dtype=bev_features.dtype,
-                        generator=generator)
+        if initial_noise is not None:
+            self._validate_initial_noise(
+                initial_noise, B, bev_features.device, bev_features.dtype,
+            )
+            x = initial_noise
+        else:
+            x = torch.randn(
+                B, self.trajectory_dim,
+                device=bev_features.device, dtype=bev_features.dtype,
+                generator=generator,
+            )
         dt = 1.0 / self.num_inference_steps
         for step in range(self.num_inference_steps):
             t_val = step * dt
             t = torch.full((B,), t_val,
                            device=bev_features.device, dtype=bev_features.dtype)
-            v = self._v_theta(x, t, bev_seq, mod_cond)
+            v = self._v_theta(x, t, bev_seq, mod_cond,
+                              horizon_tokens=reasoning_horizon_tokens)
             x = x + dt * v
         return x

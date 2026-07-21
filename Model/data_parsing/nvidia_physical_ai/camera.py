@@ -64,6 +64,59 @@ def _egomotion_ts_to_frame_idx(
     """
     return int(np.argmin(np.abs(camera_timestamps_us - egomotion_timestamp_us)))
 
+def load_front_clip(
+    data_root: Path | str,
+    clip_uuid: str,
+    egomotion_timestamps_us: list[int],
+    front_cam: str | None = None,
+    camera_timestamps_us: np.ndarray | None = None,
+) -> list[torch.Tensor]:
+    """Decode ONLY the front camera at a list of egomotion timestamps (a clip).
+
+    For offline reasoning labeling the teacher needs a temporal FRONT-camera
+    clip (one frame per horizon), not all 7 cameras. This opens the front video
+    ONCE and decodes exactly the requested frames (one per timestamp), so a
+    5-horizon clip is a single-camera, 5-frame decode instead of 7-cam per frame.
+
+    Args:
+        data_root / clip_uuid: locate the video.
+        egomotion_timestamps_us: one egomotion timestamp per horizon (0/1/2/…s).
+        front_cam: front camera dir name (defaults to CAMERA_NAMES[0]).
+        camera_timestamps_us: pre-loaded front-cam timestamp array (optional).
+
+    Returns:
+        list of RAW uint8 ``[3, H, W]`` front frames, one per input timestamp.
+    """
+    data_root = Path(data_root)
+    front_cam = front_cam or CAMERA_NAMES[0]
+    cam_dir = data_root / "camera" / front_cam
+    video_path = cam_dir / f"{clip_uuid}.{front_cam}.mp4"
+    if not video_path.exists():
+        raise FileNotFoundError(f"Front camera video not found: {video_path}")
+
+    if camera_timestamps_us is None:
+        timestamps_path = cam_dir / f"{clip_uuid}.{front_cam}.timestamps.parquet"
+        if not timestamps_path.exists():
+            raise FileNotFoundError(
+                f"Front camera timestamps parquet not found: {timestamps_path}.")
+        camera_timestamps_us = pd.read_parquet(timestamps_path)["timestamp"].to_numpy()
+
+    frame_indices = np.array(
+        [_egomotion_ts_to_frame_idx(ts, camera_timestamps_us)
+         for ts in egomotion_timestamps_us],
+        dtype=np.int64,
+    )
+    video_data = io.BytesIO(video_path.read_bytes())
+    reader = SeekVideoReader(video_data=video_data)
+    try:
+        rgb_frames = reader.decode_images_from_frame_indices(frame_indices)
+    finally:
+        reader.close()
+    # RAW uint8 CHW per frame, no preprocessing.
+    return [torch.from_numpy(rgb_frames[i]).permute(2, 0, 1).contiguous()
+            for i in range(len(frame_indices))]
+
+
 def load_camera_frame(
     data_root: Path | str,
     clip_uuid: str,
