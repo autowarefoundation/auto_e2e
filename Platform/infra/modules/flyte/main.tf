@@ -1,8 +1,18 @@
 variable "cluster_name" { type = string }
 variable "artifacts_bucket" { type = string }
 variable "datasets_bucket" {
-  description = "Datasets bucket; Flyte tasks read/write the reasoning-label cache here (#98/#117)."
+  description = "Datasets bucket; Flyte publishes immutable packed snapshots here."
   type        = string
+}
+variable "checkpoints_bucket" {
+  description = "Versioned bucket for immutable training checkpoints."
+  type        = string
+  default     = ""
+}
+variable "console_dynamo_table_name" {
+  description = "Console table receiving overlay and geographic publication pointers."
+  type        = string
+  default     = "auto-e2e-console"
 }
 variable "region" { type = string }
 variable "rds_host" { type = string }
@@ -65,35 +75,57 @@ resource "aws_iam_role_policy" "flyte_user_s3" {
   role  = aws_iam_role.flyte_user[0].name
   policy = jsonencode({
     Version = "2012-10-17"
-    Statement = [
-      {
-        Effect = "Allow"
-        Action = "s3:*"
-        Resource = [
-          "arn:aws:s3:::${var.artifacts_bucket}",
-          "arn:aws:s3:::${var.artifacts_bucket}/*",
-        ]
-      },
-      # Reasoning-label cache (#98/#117): generate_reasoning_labels reads/writes
-      # per-sample labels under reasoning_labels_cache/ so the teacher is billed
-      # once per sample. Scoped to that prefix (+ ListBucket on it) rather than
-      # the whole datasets bucket — least privilege.
-      {
-        Effect = "Allow"
-        Action = ["s3:GetObject", "s3:PutObject"]
-        Resource = [
-          "arn:aws:s3:::${var.datasets_bucket}/reasoning_labels_cache/*",
-        ]
-      },
-      {
-        Effect   = "Allow"
-        Action   = ["s3:ListBucket"]
-        Resource = ["arn:aws:s3:::${var.datasets_bucket}"]
-        Condition = {
-          StringLike = { "s3:prefix" = ["reasoning_labels_cache/*"] }
-        }
-      },
-    ]
+    Statement = concat(
+      [
+        {
+          Effect = "Allow"
+          Action = "s3:*"
+          Resource = [
+            "arn:aws:s3:::${var.artifacts_bucket}",
+            "arn:aws:s3:::${var.artifacts_bucket}/*",
+          ]
+        },
+        # Packed snapshot publication uses conditional object writes and
+        # server-side copies. It never deletes or mutates an existing version.
+        {
+          Effect = "Allow"
+          Action = ["s3:GetObject", "s3:PutObject"]
+          Resource = [
+            "arn:aws:s3:::${var.datasets_bucket}/*",
+          ]
+        },
+        {
+          Effect = "Allow"
+          Action = ["s3:ListBucket"]
+          Resource = [
+            "arn:aws:s3:::${var.datasets_bucket}",
+          ]
+        },
+        {
+          Effect = "Allow"
+          Action = ["dynamodb:GetItem", "dynamodb:PutItem"]
+          Resource = [
+            "arn:aws:dynamodb:${var.region}:${data.aws_caller_identity.current.account_id}:table/${var.console_dynamo_table_name}",
+          ]
+        },
+      ],
+      var.checkpoints_bucket != "" ? [
+        {
+          Effect = "Allow"
+          Action = ["s3:GetObject", "s3:PutObject"]
+          Resource = [
+            "arn:aws:s3:::${var.checkpoints_bucket}/*",
+          ]
+        },
+        {
+          Effect = "Allow"
+          Action = ["s3:ListBucket"]
+          Resource = [
+            "arn:aws:s3:::${var.checkpoints_bucket}",
+          ]
+        },
+      ] : []
+    )
   })
 }
 
@@ -185,7 +217,7 @@ resource "helm_release" "flyte" {
   }
 }
 
-# Post-apply: patch propeller + admin storage configmaps to use stow accesskey auth.
+# Post-apply: patch Flyte control-plane storage configmaps to use accesskey auth.
 # The flyte-core chart only renders `iam` auth for type=s3; the stow/minio-go S3
 # client (AWS SDK v1) does not support IRSA/Pod Identity, so static keys are required.
 # This runs on every apply and whenever the keys change (idempotent kubectl patch).
@@ -216,7 +248,7 @@ resource "null_resource" "flyte_storage_accesskey_patch" {
           max_size_mbs: 1024
           target_gc_percent: 70'
 
-      for cm in flyte-propeller-config flyte-admin-base-config; do
+      for cm in flyte-propeller-config flyte-admin-base-config datacatalog-config; do
         kubectl get configmap $cm -n flyte -o json | python3 -c "
 import sys,json
 cm=json.load(sys.stdin)
@@ -230,7 +262,7 @@ print(json.dumps(cm))
 " | kubectl replace -f -
       done
 
-      kubectl rollout restart deployment/flytepropeller deployment/flyteadmin -n flyte
+      kubectl rollout restart deployment/flytepropeller deployment/flyteadmin deployment/datacatalog -n flyte
     EOT
   }
 

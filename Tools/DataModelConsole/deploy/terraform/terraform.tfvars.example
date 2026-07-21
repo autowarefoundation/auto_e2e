@@ -1,0 +1,4 @@
+# This root is retired. Platform/infra-console owns the infrastructure.
+# Use this only after verifying the canonical state owns every resource; the
+# legacy apply then removes addresses from local state without AWS destruction.
+acknowledge_state_detach = true

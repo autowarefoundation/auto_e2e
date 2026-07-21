@@ -92,6 +92,19 @@ parameter.
 | conv_next_v2_tiny | bev | 2 | 5.5 | 182.1 | 183.2 | 1.2 | 3350 | 70.0M |
 | conv_next_v2_tiny | bev | 4 | 2.8 | 355.7 | 356.8 | 1.1 | 6418 | 70.0M |
 
+### NVIDIA GeForce RTX 4070
+
+> CUDA 11.8 | Driver 575.57.08 | PyTorch 2.4.1+cu118 | Commit `f5647a2` | Resolution [256, 256]
+
+| Backbone | Fusion Mode | Batch | FPS | Latency (ms) | p99 (ms) | Jitter (ms) | VRAM (MB) | Params |
+|----------|-------------|-------|-----|--------------|----------|-------------|-----------|--------|
+| swin_v2_tiny | bev | 1 | 54.1 | 18.5 | 18.8 | 0.2 | 417 | 62.8M |
+| swin_v2_tiny | bev | 2 | 27.2 | 36.8 | 37.1 | 0.4 | 580 | 62.8M |
+| swin_v2_tiny | bev | 4 | 13.6 | 73.6 | 73.8 | 0.2 | 905 | 62.8M |
+| conv_next_v2_tiny | bev | 1 | 53.1 | 18.8 | 18.9 | 0.1 | 443 | 63.1M |
+| conv_next_v2_tiny | bev | 2 | 26.3 | 38.0 | 38.1 | 0.2 | 630 | 63.1M |
+| conv_next_v2_tiny | bev | 4 | 13.1 | 76.4 | 76.6 | 0.2 | 1003 | 63.1M |
+
 </details>
 
 ## Add benchmarks for your own GPU

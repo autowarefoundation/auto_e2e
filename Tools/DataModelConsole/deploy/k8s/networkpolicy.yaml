@@ -1,0 +1,65 @@
+# Restrict who can reach the console pods. Edge auth is enforced at
+# CloudFront; these policies are defense-in-depth for the in-cluster path.
+#
+# IMPORTANT: under the AWS VPC CNI (EKS Auto Mode) pod IPs are allocated FROM
+# the VPC CIDR, so an ipBlock of the whole VPC would match every pod and admit
+# nothing useful. We therefore scope ingress to the PRIVATE SUBNET CIDRs where
+# the internal ALB's ENIs live (${ALB_SUBNET_CIDRS}, substituted by apply.sh
+# from the terraform private-subnet output — NOT the whole VPC, and chosen so
+# it does not overlap the training/Flyte node ranges). Combined with the
+# web-only podSelector on the API, this keeps arbitrary cluster pods (e.g.
+# Flyte-launched training jobs) from reaching console-api and pulling
+# presigned S3 URLs. The ALB SG (HTTPS only from CloudFront's managed
+# VPC-origin ENIs) remains the primary control; this is the secondary layer.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: console-api-ingress
+  namespace: console
+spec:
+  podSelector:
+    matchLabels:
+      app: console-api
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        # The web frontend (server components / same-origin proxy).
+        - podSelector:
+            matchLabels:
+              app: console-web
+        # The internal ALB ENIs (target-type: ip forwards straight to pods).
+        # The cluster has THREE internal-elb subnets (one per AZ); the ALB may
+        # place an ENI in any of them, so all three CIDRs must be admitted.
+        - ipBlock:
+            cidr: ${ALB_SUBNET_CIDR_A}
+        - ipBlock:
+            cidr: ${ALB_SUBNET_CIDR_B}
+        - ipBlock:
+            cidr: ${ALB_SUBNET_CIDR_C}
+      ports:
+        - protocol: TCP
+          port: 8080
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: console-web-ingress
+  namespace: console
+spec:
+  podSelector:
+    matchLabels:
+      app: console-web
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - ipBlock:
+            cidr: ${ALB_SUBNET_CIDR_A}
+        - ipBlock:
+            cidr: ${ALB_SUBNET_CIDR_B}
+        - ipBlock:
+            cidr: ${ALB_SUBNET_CIDR_C}
+      ports:
+        - protocol: TCP
+          port: 3000

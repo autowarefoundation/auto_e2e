@@ -1,0 +1,13 @@
+FROM golang:1.25.12-alpine3.23@sha256:cc985ef6f9c3bf9ece7488129c9abe0a150388ccdfa428d886fc709dca0b230a AS builder
+
+WORKDIR /build
+COPY api/go.mod api/go.sum ./
+RUN go mod download
+
+COPY api/ .
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o /console-api .
+
+FROM gcr.io/distroless/static-debian12:nonroot@sha256:aef9602f8710ec12bde19d593fed1f76c708531bb7aba205110f1029786ead7b
+COPY --from=builder /console-api /console-api
+EXPOSE 8080
+ENTRYPOINT ["/console-api"]
