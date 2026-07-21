@@ -15,6 +15,7 @@ import torch
 from data_parsing.nvidia_physical_ai.camera import (
     CAMERA_NAMES,
     load_camera_frame,
+    load_front_clip,
     make_map_tile,
 )
 
@@ -189,6 +190,55 @@ class TestLoadCameraFrameCorrectness:
                 egomotion_timestamp_us=0,
                 camera_names=[d["cam_name"]],
                 camera_timestamps=d["camera_timestamps"],
+            )
+
+
+class TestLoadFrontClipMemory:
+    """Same #116 guard for load_front_clip (the reasoning-teacher clip path)."""
+
+    def test_does_not_read_full_file_into_memory(self, synthetic_clip_dir):
+        d = synthetic_clip_dir
+        original_read_bytes = Path.read_bytes
+        call_count = {"n": 0}
+
+        def spy_read_bytes(self):
+            call_count["n"] += 1
+            return original_read_bytes(self)
+
+        with patch.object(Path, "read_bytes", spy_read_bytes):
+            load_front_clip(
+                data_root=d["data_root"],
+                clip_uuid=d["clip_uuid"],
+                egomotion_timestamps_us=[0, 500_000, 1_000_000],
+                front_cam=d["cam_name"],
+                camera_timestamps_us=d["camera_timestamps"][d["cam_name"]],
+            )
+
+        assert call_count["n"] == 0, (
+            "load_front_clip called Path.read_bytes() — this reads the "
+            "ENTIRE mp4 into memory to decode a handful of frames "
+            "(regression of #116)."
+        )
+
+    def test_decoded_content_matches_encoded_frames(self, synthetic_clip_dir):
+        """Frames at t=0/500ms/1000ms are indices 0/5/10, encoded with
+        values 0/50/100 — confirms seek lands on the correct frames."""
+        d = synthetic_clip_dir
+        frames = load_front_clip(
+            data_root=d["data_root"],
+            clip_uuid=d["clip_uuid"],
+            egomotion_timestamps_us=[0, 500_000, 1_000_000],
+            front_cam=d["cam_name"],
+            camera_timestamps_us=d["camera_timestamps"][d["cam_name"]],
+        )
+        assert len(frames) == 3
+        for frame, expected in zip(frames, (0, 50, 100)):
+            assert frame.shape == (3, 32, 32)
+            assert frame.dtype == torch.uint8
+            mean_val = frame.float().mean().item()
+            assert abs(mean_val - expected) < 15, (
+                f"Decoded front-clip frame content looks wrong "
+                f"(mean={mean_val}); expected near {expected}."
             )
 
 
