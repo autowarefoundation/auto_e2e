@@ -8,6 +8,8 @@ __all__ = [
     "KitScenesDataset",
     "load_camera_frame",
     "CAMERA_NAMES",
+    "VIEW_NAMES",
+    "TELE_VIEW_NAME",
     "load_egomotion",
     "poses_to_arrays",
     "generate_bev_map_tile",
@@ -21,11 +23,16 @@ def __getattr__(name: str) -> Any:
     if name == "KitScenesDataset":
         from .dataset import KitScenesDataset
         return KitScenesDataset
-    if name in {"load_camera_frame", "CAMERA_NAMES", "NUM_VIEWS"}:
-        from .camera import CAMERA_NAMES, NUM_VIEWS, load_camera_frame
+    if name in {"load_camera_frame", "CAMERA_NAMES", "NUM_VIEWS",
+                "VIEW_NAMES", "TELE_VIEW_NAME"}:
+        from .camera import (
+            CAMERA_NAMES, NUM_VIEWS, TELE_VIEW_NAME, VIEW_NAMES, load_camera_frame,
+        )
         return {
             "load_camera_frame": load_camera_frame,
             "CAMERA_NAMES": CAMERA_NAMES,
+            "VIEW_NAMES": VIEW_NAMES,
+            "TELE_VIEW_NAME": TELE_VIEW_NAME,
             "NUM_VIEWS": NUM_VIEWS,
         }[name]
     if name in {
