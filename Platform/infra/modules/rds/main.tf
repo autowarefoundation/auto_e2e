@@ -67,9 +67,11 @@ resource "aws_db_parameter_group" "this" {
 }
 
 resource "aws_db_instance" "this" {
-  identifier     = "${var.cluster_name}-pg"
-  engine         = "postgres"
-  engine_version = "16.9"
+  identifier = "${var.cluster_name}-pg"
+  engine     = "postgres"
+  # Track the auto-applied minor version (AWS upgraded 16.9 → 16.13). Pinning the
+  # old value would make every plan attempt an invalid downgrade.
+  engine_version = "16.13"
   instance_class = "db.r6g.large"
 
   allocated_storage     = 100
@@ -85,12 +87,12 @@ resource "aws_db_instance" "this" {
   vpc_security_group_ids = [aws_security_group.rds.id]
   parameter_group_name   = aws_db_parameter_group.this.name
 
-  multi_az                = false
-  publicly_accessible     = false
-  deletion_protection     = true
-  skip_final_snapshot     = false
+  multi_az                  = false
+  publicly_accessible       = false
+  deletion_protection       = true
+  skip_final_snapshot       = false
   final_snapshot_identifier = "${var.cluster_name}-pg-final"
-  backup_retention_period = 7
+  backup_retention_period   = 7
 
   tags = { Name = "${var.cluster_name}-pg" }
 }

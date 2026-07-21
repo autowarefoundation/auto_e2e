@@ -103,6 +103,95 @@ parameter.
 | Reactive | conv_next_v2_tiny | bev | 2 | 5.5 | 182.1 | 183.2 | 1.2 | 3350 | 70.0M |
 | Reactive | conv_next_v2_tiny | bev | 4 | 2.8 | 355.7 | 356.8 | 1.1 | 6418 | 70.0M |
 
+### NVIDIA GeForce RTX 4070
+
+> CUDA 11.8 | Driver 575.57.08 | PyTorch 2.4.1+cu118 | Commit `f5647a2` | Resolution [256, 256]
+
+| Backbone | Fusion Mode | Batch | FPS | Latency (ms) | p99 (ms) | Jitter (ms) | VRAM (MB) | Params |
+|----------|-------------|-------|-----|--------------|----------|-------------|-----------|--------|
+| swin_v2_tiny | bev | 1 | 54.1 | 18.5 | 18.8 | 0.2 | 417 | 62.8M |
+| swin_v2_tiny | bev | 2 | 27.2 | 36.8 | 37.1 | 0.4 | 580 | 62.8M |
+| swin_v2_tiny | bev | 4 | 13.6 | 73.6 | 73.8 | 0.2 | 905 | 62.8M |
+| conv_next_v2_tiny | bev | 1 | 53.1 | 18.8 | 18.9 | 0.1 | 443 | 63.1M |
+| conv_next_v2_tiny | bev | 2 | 26.3 | 38.0 | 38.1 | 0.2 | 630 | 63.1M |
+| conv_next_v2_tiny | bev | 4 | 13.1 | 76.4 | 76.6 | 0.2 | 1003 | 63.1M |
+
+</details>
+
+## NVIDIA A40
+<details open>
+  <summary>Toggle view</summary>
+
+> CUDA 12.8 | Driver 610.43.02 | PyTorch 2.7.1+cu128 | Commit `ead2171` | Resolution [256, 256]
+
+| Backbone | Fusion Mode | Reasoning | Batch | FPS | Latency (ms) | p99 (ms) | Jitter (ms) | VRAM (MB) | Params |
+|----------|-------------|-----------|-------|-----|--------------|----------|-------------|-----------|--------|
+| swin_v2_tiny | bev | off | 1 | 32.9 | 30.4 | 30.9 | 0.5 | 375 | 56.8M |
+| swin_v2_tiny | bev | off | 2 | 22.9 | 43.7 | 46.3 | 2.6 | 520 | 56.8M |
+| swin_v2_tiny | bev | off | 4 | 14.1 | 70.8 | 71.3 | 0.7 | 803 | 56.8M |
+| conv_next_v2_tiny | bev | off | 1 | 33.1 | 30.2 | 31.2 | 1.2 | 396 | 57.1M |
+| conv_next_v2_tiny | bev | off | 2 | 23.0 | 43.6 | 45.1 | 1.7 | 561 | 57.1M |
+| conv_next_v2_tiny | bev | off | 4 | 14.3 | 69.7 | 72.8 | 3.2 | 887 | 57.1M |
+| swin_v2_tiny | bev | pooled_latent | 1 | 30.3 | 33.0 | 38.1 | 5.4 | 386 | 59.4M |
+| swin_v2_tiny | bev | horizon_cross_attention | 1 | 30.3 | 33.0 | 34.0 | 1.1 | 388 | 59.6M |
+
+</details>
+
+## NVIDIA GeForce RTX 5080 GPU (PyTorch 2.7.1 re-run)
+<details open>
+  <summary>Toggle view</summary>
+
+> CUDA 12.8 | Driver 580.95.05 | PyTorch 2.7.1+cu128 | Commit `ead2171` | Resolution [256, 256]
+
+| Backbone | Fusion Mode | Reasoning | Batch | FPS | Latency (ms) | p99 (ms) | Jitter (ms) | VRAM (MB) | Params |
+|----------|-------------|-----------|-------|-----|--------------|----------|-------------|-----------|--------|
+| swin_v2_tiny | bev | off | 1 | 55.9 | 17.9 | 18.9 | 0.9 | 375 | 56.8M |
+| swin_v2_tiny | bev | off | 2 | 30.6 | 32.7 | 34.7 | 1.4 | 520 | 56.8M |
+| swin_v2_tiny | bev | off | 4 | 15.2 | 66.0 | 68.8 | 1.2 | 803 | 56.8M |
+| conv_next_v2_tiny | bev | off | 1 | 57.4 | 17.4 | 18.4 | 0.8 | 396 | 57.1M |
+| conv_next_v2_tiny | bev | off | 2 | 29.8 | 33.5 | 35.0 | 0.8 | 561 | 57.1M |
+| conv_next_v2_tiny | bev | off | 4 | 14.7 | 67.9 | 70.5 | 1.0 | 887 | 57.1M |
+| swin_v2_tiny | bev | pooled_latent | 1 | 53.6 | 18.7 | 19.7 | 0.8 | 386 | 59.4M |
+| swin_v2_tiny | bev | horizon_cross_attention | 1 | 53.1 | 18.8 | 20.7 | 1.7 | 388 | 59.6M |
+
+</details>
+
+## NVIDIA GeForce RTX 5090
+<details open>
+  <summary>Toggle view</summary>
+
+> CUDA 12.8 | Driver 590.48.01 | PyTorch 2.7.1+cu128 | Commit `ead2171` | Resolution [256, 256]
+
+| Backbone | Fusion Mode | Reasoning | Batch | FPS | Latency (ms) | p99 (ms) | Jitter (ms) | VRAM (MB) | Params |
+|----------|-------------|-----------|-------|-----|--------------|----------|-------------|-----------|--------|
+| swin_v2_tiny | bev | off | 1 | 88.2 | 11.3 | 12.9 | 1.7 | 375 | 56.8M |
+| swin_v2_tiny | bev | off | 2 | 58.4 | 17.1 | 18.2 | 1.2 | 520 | 56.8M |
+| swin_v2_tiny | bev | off | 4 | 30.4 | 32.9 | 33.7 | 0.9 | 803 | 56.8M |
+| conv_next_v2_tiny | bev | off | 1 | 95.6 | 10.5 | 11.8 | 1.4 | 396 | 57.1M |
+| conv_next_v2_tiny | bev | off | 2 | 58.7 | 17.0 | 17.9 | 1.0 | 561 | 57.1M |
+| conv_next_v2_tiny | bev | off | 4 | 30.0 | 33.4 | 34.0 | 0.8 | 887 | 57.1M |
+| swin_v2_tiny | bev | pooled_latent | 1 | 84.2 | 11.9 | 12.8 | 1.0 | 386 | 59.4M |
+| swin_v2_tiny | bev | horizon_cross_attention | 1 | 83.5 | 12.0 | 12.8 | 0.9 | 388 | 59.6M |
+
+</details>
+
+## NVIDIA GeForce RTX 4070 Laptop GPU
+<details open>
+  <summary>Toggle view</summary>
+
+> CUDA 12.8 | Driver 595.71.05 | PyTorch 2.7.1+cu128 | Commit `ead2171` | Resolution [256, 256]
+
+| Backbone | Fusion Mode | Reasoning | Batch | FPS | Latency (ms) | p99 (ms) | Jitter (ms) | VRAM (MB) | Params |
+|----------|-------------|-----------|-------|-----|--------------|----------|-------------|-----------|--------|
+| swin_v2_tiny | bev | off | 1 | 24.6 | 40.6 | 43.5 | 3.0 | 375 | 56.8M |
+| swin_v2_tiny | bev | off | 2 | 13.0 | 76.8 | 80.5 | 4.0 | 520 | 56.8M |
+| swin_v2_tiny | bev | off | 4 | 6.3 | 157.8 | 160.0 | 2.1 | 803 | 56.8M |
+| conv_next_v2_tiny | bev | off | 1 | 25.8 | 38.8 | 41.9 | 3.1 | 396 | 57.1M |
+| conv_next_v2_tiny | bev | off | 2 | 13.0 | 77.1 | 80.3 | 3.3 | 561 | 57.1M |
+| conv_next_v2_tiny | bev | off | 4 | 6.4 | 157.0 | 160.3 | 3.2 | 887 | 57.1M |
+| swin_v2_tiny | bev | pooled_latent | 1 | 24.6 | 40.7 | 43.4 | 3.0 | 386 | 59.4M |
+| swin_v2_tiny | bev | horizon_cross_attention | 1 | 24.6 | 40.7 | 43.8 | 3.5 | 388 | 59.6M |
+
 </details>
 
 ## Add benchmarks for your own GPU

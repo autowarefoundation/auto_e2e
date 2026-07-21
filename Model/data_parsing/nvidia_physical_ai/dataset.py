@@ -34,6 +34,8 @@ import pandas as pd
 import torch
 from torch.utils.data import Dataset
 
+from data_processing.contract_versions import UID_SCHEMA_VERSION
+
 from .camera import CAMERA_NAMES, load_camera_frame, make_map_tile
 from .egomotion import (
     _EGOMOTION_COLUMNS,
@@ -83,9 +85,22 @@ class NvidiaAVDataset(Dataset):
         data_root: Path | str,
         camera_names: list[str] | None = None,
         clip_uuids: list[str] | None = None,
+        reasoning_clip_only: bool = False,
+        wm_num_frames: int = 4,
+        wm_stride: int = 10,
     ) -> None:
         self.data_root = Path(data_root)
         self.camera_names = camera_names or CAMERA_NAMES
+        # Reasoning-clip mode (#98): expose get_front_clip(idx) that decodes ONLY
+        # the front camera at the reasoning horizons (0/1/2/3/4 s = current +
+        # wm_num_frames future 1 Hz steps). wm_stride=10 turns the 10 Hz
+        # downsampled egomotion index into 1 Hz horizons — matching L2D. Sample
+        # enumeration is unchanged (egomotion margins 64/64 >> the horizon reach
+        # wm_num_frames*wm_stride=40), so sample_ids still JOIN with data_processing.
+        self._reasoning_clip_only = reasoning_clip_only
+        self._wm_num_frames = wm_num_frames
+        self._wm_stride = wm_stride
+        self._front_cam = (camera_names or CAMERA_NAMES)[0]
 
         # This is a pre-extraction source: __getitem__ returns RAW uint8 frames
         # (no resize/crop/normalize, no timm/backbone dependency). The shard
@@ -276,6 +291,56 @@ class NvidiaAVDataset(Dataset):
 
         proj = build_ftheta_projection(intrinsics, extrinsics, self.camera_names)
         return proj.to_spec()
+
+    def get_front_clip(self, idx: int) -> list[torch.Tensor]:
+        """Front-camera clip at the reasoning horizons (0/1/2/…s) for sample idx.
+
+        Only valid when built with ``reasoning_clip_only=True``. Decodes ONLY the
+        front camera at ``NUM_HORIZONS`` egomotion timestamps (current + future
+        1 Hz steps), so it is a single-camera, few-frame decode. ``idx`` uses the
+        SAME sample index as ``__getitem__``/generate so the sample_id JOIN holds.
+        """
+        if not self._reasoning_clip_only:
+            raise RuntimeError(
+                "get_front_clip requires NvidiaAVDataset(reasoning_clip_only=True).")
+        from .camera import load_front_clip
+
+        clip_uuid, sample_idx, _ts = self._samples[idx]
+        df_ds = self._egomotion_dfs[clip_uuid]
+        n_horizons = self._wm_num_frames + 1  # current + N future
+        # Horizon egomotion timestamps: current + 1 Hz future steps. The valid-
+        # sample margins guarantee sample_idx + N*stride stays in-range.
+        rows = [min(sample_idx + h * self._wm_stride, len(df_ds) - 1)
+                for h in range(n_horizons)]
+        ts_us = [int(df_ds.iloc[r]["timestamp"]) for r in rows]
+        cam_ts = self._camera_timestamps.get((clip_uuid, self._front_cam))
+        return load_front_clip(
+            self.data_root, clip_uuid, ts_us,
+            front_cam=self._front_cam, camera_timestamps_us=cam_ts)
+
+    def sample_uid(self, idx: int) -> str:
+        """Global, partition-independent sample id (#121 §3.1).
+
+        Built from (clip_uuid, sample_idx) — stable regardless of which clips a
+        pod loaded — so the label<->pack JOIN and S3 cache survive clip-range
+        sharding. No `.`/`/` (safe as a WebDataset ``__key__``); clip_uuid is a
+        UUID (hex + `-`).
+        """
+        clip_uuid, sample_idx, _ts = self._samples[idx]
+        return f"nv-{UID_SCHEMA_VERSION}-{clip_uuid}-f{sample_idx:06d}"
+
+    def split_group_uid(self, idx: int) -> str:
+        """Train/val split unit (#121 §3.1): the whole CLIP (frames within a clip
+        are correlated, so they must not straddle train/val)."""
+        clip_uuid, _sample_idx, _ts = self._samples[idx]
+        return f"nv-{clip_uuid}"
+
+    def frame_index(self, idx: int) -> int:
+        """Clip-local sample index for sample ``idx`` — used to pick the reasoning
+        1 Hz subset (label iff ``frame_index % stride == 0``), a stable per-sample
+        function so the labeled subset is partition-independent (#121 §3.4d)."""
+        _clip_uuid, sample_idx, _ts = self._samples[idx]
+        return sample_idx
 
     def __len__(self) -> int:
         return len(self._samples)

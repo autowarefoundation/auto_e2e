@@ -7,6 +7,7 @@ RUN pip install --no-cache-dir \
     mlflow-skinny==2.22.0 \
     webdataset \
     flytekit \
+    kubernetes \
     pyyaml \
     numpy
 

@@ -1,0 +1,95 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: console-api
+  namespace: console
+  labels:
+    app: console-api
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: console-api
+  template:
+    metadata:
+      labels:
+        app: console-api
+    spec:
+      serviceAccountName: console-api
+      # Spread the 2 replicas across nodes so a single node drain (Auto Mode
+      # consolidates/replaces nodes) cannot take out both at once.
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    app: console-api
+                topologyKey: kubernetes.io/hostname
+      containers:
+        - name: api
+          image: ${ECR_PREFIX}/auto-e2e/console-api:latest
+          ports:
+            - containerPort: 8080
+              protocol: TCP
+          env:
+            - name: PORT
+              value: "8080"
+            - name: AWS_REGION
+              value: "us-west-2"
+            - name: DATASETS_BUCKET
+              valueFrom:
+                configMapKeyRef:
+                  name: console-config
+                  key: datasets-bucket
+            - name: ARTIFACTS_BUCKET
+              valueFrom:
+                configMapKeyRef:
+                  name: console-config
+                  key: artifacts-bucket
+            - name: MLFLOW_URL
+              value: "http://mlflow.mlflow.svc.cluster.local:5000"
+            - name: FLYTE_URL
+              value: "http://flyteadmin.flyte.svc.cluster.local:80"
+            # Restrict the browser origin in production (edge auth is at
+            # CloudFront; this pins CORS off the default "*").
+            - name: CORS_ORIGIN
+              valueFrom:
+                configMapKeyRef:
+                  name: console-config
+                  key: cors-origin
+            # Exact GPS remains closed until API authentication verifies the
+            # viewer and attaches a trusted request principal.
+            - name: EXACT_GEO_ENABLED
+              value: "false"
+            - name: EXACT_GEO_REQUIRED_ROLE
+              value: "console-exact-geo"
+            # Go runtime does not read the cgroup memory limit; set it
+            # explicitly (~90% of the container limit) so GC runs before OOM.
+            - name: GOMEMLIMIT
+              value: "460MiB"
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 512Mi
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            # Handler waits up to 5s on S3; probe must not time out at the
+            # default 1s and flap the pod out of the LB under load.
+            timeoutSeconds: 6
+            failureThreshold: 3

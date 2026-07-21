@@ -8,6 +8,9 @@ benchmark_results.json
 sync-to-ec2.sh
 ec2-sync-and-push.sh
 
+# Local agent context (never committed)
+/AGENTS.md
+
 # Terraform
 .terraform/
 *.tfstate

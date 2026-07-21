@@ -13,19 +13,36 @@ from model_components.auto_e2e import AutoE2E
 from model_components.view_fusion import PinholeProjection
 
 
-def run_speed_benchmark(backbone, device, batch_size=1, num_views=7, enable_world_model=False):
+def run_speed_benchmark(backbone, device, batch_size=1, num_views=7,
+                        reasoning="off", enable_world_model=False):
 
     model_type = "Combined" if enable_world_model else "Reactive"
     print(f"{'='*80}")
-    print(f"  backbone = '{backbone}' | model = '{model_type}' | batch={batch_size} | views={num_views}")
+    print(f"  backbone = '{backbone}' | model = '{model_type}' | batch={batch_size} "
+          f"| views={num_views} | reasoning = '{reasoning}'")
     print(f"{'='*80}\n")
 
     # Instantiate model. Fusion is always BEV (concat / cross_attn and the
     # fusion_mode knob were removed); nav-map is a separate map_input branch, not
     # a camera view. Small BEV grid keeps the benchmark fast.
+    #
+    # ``reasoning`` optionally enables the reasoning branch (#98) so its inference
+    # cost is measured explicitly. The branch runs at 1 Hz in deployment, so the
+    # per-forward cost here is an upper bound on its real-time budget. The value
+    # is BOTH the result label and the planner coupling mode: "off" (disabled),
+    # "pooled_latent", or "horizon_cross_attention".
+    #
+    # ``enable_world_model`` measures the Combined (reactive + world model)
+    # forward cost (#102): the WM updates the recurrent visual history each
+    # step, so it is reset before warm-up and before timing.
+    extra_kwargs = {}
+    if reasoning != "off":
+        extra_kwargs = dict(enable_reasoning=True, reasoning_mode=reasoning)
     model = AutoE2E(backbone=backbone, num_views=num_views,
                     view_fusion_kwargs={"bev_h": 8, "bev_w": 8},
-                    enable_world_model=enable_world_model).to(device)
+                    enable_world_model=enable_world_model,
+                    **extra_kwargs)
+    model = model.to(device)
     model.eval()
 
     # Visual Scene Input: [batch, num_views, channels, height, width]
@@ -103,6 +120,7 @@ def run_speed_benchmark(backbone, device, batch_size=1, num_views=7, enable_worl
         "model_type": model_type,
         "backbone": backbone,
         "fusion_mode": "bev",
+        "reasoning": reasoning,
         "batch_size": batch_size,
         "num_views": num_views,
         "avg_fps": round(avg_fps, 2),
@@ -204,6 +222,18 @@ def main():
                 result = run_speed_benchmark(backbone, device, batch_size=batch_size, enable_world_model=enable_world_model)
                 all_results.append(result)
                 print()
+
+    # Reasoning branch (#98): measure the added cost of each coupling mode
+    # explicitly, on the default backbone at batch 1 (its deployment operating
+    # point — the branch runs at 1 Hz).
+    reasoning_variants = ["pooled_latent", "horizon_cross_attention"]
+    for reasoning in reasoning_variants:
+        if torch.cuda.is_available():
+            torch.cuda.reset_peak_memory_stats()
+        result = run_speed_benchmark(backbones[0], device, batch_size=1,
+                                     reasoning=reasoning)
+        all_results.append(result)
+        print()
 
     # Save structured results
     save_results_json(all_results, device)
