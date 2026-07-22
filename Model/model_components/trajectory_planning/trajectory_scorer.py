@@ -34,13 +34,25 @@ discussed for this fork (120 m front / 60 m rear / 60 m each side at 0.4 m
 resolution -> 450 x 300 px, issue #35) but have NOT been verified against
 the renderer itself — confirm with whoever owns that code before relying
 on the compliance score in any reported metric.
+
+DO NOT calibrate against Model/data_parsing/kit_scenes/map.py as it stands
+today without checking #148 and #149 first: #149 proposes replacing the
+current 640x360 non-square render with a 256x256 square tile at 120 m in
+*all four* directions (symmetric), and #148 is reworking what the map
+actually encodes (route direction from GPS traces, not just a static
+drivable-area raster). Both are open and assigned to riita10069 as of
+2026-07-21 — the geometry below may need to change again once those land,
+not just be verified against today's renderer.
 """
 
 from dataclasses import dataclass
 from typing import Optional
 
+import numpy as np
 import torch
 import torch.nn as nn
+
+from Model.evaluation.metrics import integrate_trajectory
 
 
 @dataclass
@@ -71,7 +83,8 @@ class ScorerConfig:
     max_comfortable_accel: float = 3.0     # m/s^2
     max_comfortable_lateral_accel: float = 2.0  # m/s^2, = curvature * speed^2
     dt: float = 0.1                        # seconds between model timesteps
-    initial_speed: float = 5.0             # m/s, matches existing decode convention
+    # NOTE: no fixed initial_speed field — real per-scene speed is read
+    # out of egomotion_history via extract_initial_speed(), not guessed.
 
     # --- scoring weights ---
     dac_weight: float = 1.0
@@ -82,50 +95,88 @@ class ScorerConfig:
     softmax_temperature: float = 1.0
 
 
+def extract_initial_speed(egomotion_history: torch.Tensor) -> torch.Tensor:
+    """Read the real per-scene starting speed out of egomotion_history.
+
+    egomotion_history is (256,) = 64 history timesteps x 4 signals
+    [speed, acceleration, yaw_rate, curvature] (see
+    Model/data_parsing/kit_scenes/egomotion.py). The most recent history
+    row (index -1) is "now" — its speed channel (index 0) is exactly the
+    v0 that the prediction horizon starts from.
+
+    Args:
+        egomotion_history: [..., 256].
+
+    Returns:
+        initial_speed: [...] real starting speed in m/s, one per row.
+    """
+    *batch_shape, dim = egomotion_history.shape
+    if dim != 256:
+        raise ValueError(
+            f"egomotion_history last dim must be 256 (64 timesteps x 4 "
+            f"signals), got {dim}."
+        )
+    history = egomotion_history.reshape(*batch_shape, 64, 4)
+    return history[..., -1, 0]
+
+
 def decode_trajectory_to_xy(trajectory: torch.Tensor, num_timesteps: int,
-                             dt: float = 0.1,
-                             initial_speed: float = 5.0) -> torch.Tensor:
+                             initial_speed: torch.Tensor,
+                             dt: float = 0.1) -> torch.Tensor:
     """Decode (acceleration, curvature) pairs into (x, y) waypoints.
 
-    Mirrors the bicycle-model integration already used for offline
-    evaluation against Waymo ground truth. If/when a canonical decode
-    utility lands (tracked under the open-loop eval pipeline, issue #66),
-    this function should be replaced by an import from that module instead
-    of duplicating the integration here.
+    Thin torch<->numpy wrapper around the canonical
+    ``Model.evaluation.metrics.integrate_trajectory`` bicycle-model
+    integrator, so this scorer and offline open-loop eval (ADE/FDE against
+    Waymo/KITScenes ground truth) share one integration implementation
+    instead of two that can silently drift apart.
+
+    Runs at @torch.no_grad() call sites only (TrajectoryComplianceScorer
+    has zero trainable parameters by design — see module docstring), so
+    the per-row Python loop and numpy round-trip cost nothing that
+    matters: K is small (default 8) and this never sits in a training step.
 
     Args:
         trajectory: [..., num_timesteps * 2] — flat (accel, curvature) pairs.
         num_timesteps: number of (accel, curvature) pairs encoded.
+        initial_speed: [...] real starting speed in m/s, one per row —
+            see ``extract_initial_speed``. Broadcasts against
+            ``trajectory``'s leading dims; every row MUST carry its own
+            real value, not a fixed placeholder — a fixed default here
+            silently overrides every sample's actual starting speed with
+            the same guess, regardless of how fast the ego really was
+            moving.
         dt: seconds between timesteps.
-        initial_speed: assumed starting speed in m/s.
 
     Returns:
         xy: [..., num_timesteps, 2] waypoints in ego-relative meters.
     """
     *batch_shape, _ = trajectory.shape
     pairs = trajectory.reshape(*batch_shape, num_timesteps, 2)
-    accels, curvatures = pairs[..., 0], pairs[..., 1]
+    accels = pairs[..., 0].reshape(-1, num_timesteps)
+    curvatures = pairs[..., 1].reshape(-1, num_timesteps)
+    speeds = initial_speed.reshape(-1)
+
+    if speeds.shape[0] != accels.shape[0]:
+        raise ValueError(
+            f"initial_speed must broadcast to trajectory's leading dims: "
+            f"got {speeds.shape[0]} speed rows for {accels.shape[0]} "
+            f"trajectory rows."
+        )
 
     device, dtype = trajectory.device, trajectory.dtype
-    flat = accels.reshape(-1, num_timesteps)
-    flat_curv = curvatures.reshape(-1, num_timesteps)
-    n = flat.shape[0]
+    accels_np = accels.detach().cpu().numpy()
+    curv_np = curvatures.detach().cpu().numpy()
+    speeds_np = speeds.detach().cpu().numpy()
 
-    x = torch.zeros(n, device=device, dtype=dtype)
-    y = torch.zeros(n, device=device, dtype=dtype)
-    heading = torch.zeros(n, device=device, dtype=dtype)
-    speed = torch.full((n,), initial_speed, device=device, dtype=dtype)
+    n = accels_np.shape[0]
+    xy_np = np.empty((n, num_timesteps, 2), dtype=np.float64)
+    for i in range(n):
+        xy_np[i] = integrate_trajectory(
+            accels_np[i], curv_np[i], float(speeds_np[i]), dt=dt,
+        )
 
-    xs, ys = [], []
-    for t in range(num_timesteps):
-        speed = torch.clamp(speed + flat[:, t] * dt, min=0.0)
-        heading = heading + flat_curv[:, t] * speed * dt
-        x = x + torch.cos(heading) * speed * dt
-        y = y + torch.sin(heading) * speed * dt
-        xs.append(x.clone())
-        ys.append(y.clone())
-
-    xy = torch.stack([torch.stack(xs, dim=-1), torch.stack(ys, dim=-1)], dim=-1)
+    xy = torch.from_numpy(xy_np).to(device=device, dtype=dtype)
     return xy.reshape(*batch_shape, num_timesteps, 2)
 
 
@@ -192,6 +243,7 @@ def drivable_area_compliance(xy: torch.Tensor, map_input: torch.Tensor,
 
 
 def kinematic_comfort_score(trajectory: torch.Tensor, num_timesteps: int,
+                            initial_speed: torch.Tensor,
                             config: ScorerConfig) -> torch.Tensor:
     """Penalize (acceleration, curvature) samples that exceed comfort bounds.
 
@@ -201,6 +253,11 @@ def kinematic_comfort_score(trajectory: torch.Tensor, num_timesteps: int,
     Args:
         trajectory: [B, num_timesteps * 2] flat (accel, curvature) pairs.
         num_timesteps: number of pairs encoded.
+        initial_speed: [B] real starting speed in m/s — see
+            ``extract_initial_speed``. Same reasoning as
+            ``decode_trajectory_to_xy``: a fixed guess here would silently
+            score every sample's lateral-accel comfort against the wrong
+            speed profile.
         config: comfort bound parameters.
 
     Returns:
@@ -211,7 +268,7 @@ def kinematic_comfort_score(trajectory: torch.Tensor, num_timesteps: int,
 
     # Approximate speed via cumulative integration of accel (matches decode).
     speed = torch.clamp(
-        config.initial_speed + torch.cumsum(accels * config.dt, dim=1),
+        initial_speed.reshape(-1, 1) + torch.cumsum(accels * config.dt, dim=1),
         min=0.0,
     )
     lateral_accel = curvatures * speed.pow(2)
@@ -266,11 +323,19 @@ class TrajectoryComplianceScorer(nn.Module):
         Returns:
             trajectory: [B, num_timesteps * num_signals] — best (or
                 softmax-blended) trajectory per batch element.
-            ego_hidden: [B, embed_dim] — from the FIRST sample only,
-                consistent with how FutureState is meant to receive a
-                single scene-gist vector, not a per-candidate one.
             scores: [B, num_samples] — combined score per candidate, for
                 logging / debugging.
+
+        Note: this used to also return an `ego_hidden` second element,
+        unpacked from `self.planner(...)` as if forward() returned a
+        2-tuple. It never did — BasePlanner.forward() has always returned
+        a single trajectory tensor (see base.py's own docstring), so that
+        unpack would raise the moment this ran against a real planner
+        instead of a test double shaped to match the wrong contract.
+        FutureState (the only place ego_hidden was ever consumed) isn't
+        wired into AutoE2E.forward() any more — the World Model path
+        (WorldActionModel.predict_future) superseded it — so there's
+        nothing left downstream expecting a second return value.
         """
         B = bev_features.shape[0]
         device = bev_features.device
@@ -283,17 +348,18 @@ class TrajectoryComplianceScorer(nn.Module):
         if seed is not None:
             generator = torch.Generator(device=device).manual_seed(seed)
 
-        trajectories, ego_hidden_all = self.planner(
+        trajectories = self.planner(
             bev_rep, vh_rep, eh_rep, generator=generator,
         )
         # trajectories: [B*K, trajectory_dim]
         trajectory_dim = trajectories.shape[-1]
         trajectories = trajectories.view(B, num_samples, trajectory_dim)
-        ego_hidden_all = ego_hidden_all.view(B, num_samples, -1)
+
+        initial_speed = extract_initial_speed(eh_rep).view(B, num_samples)
 
         xy = decode_trajectory_to_xy(
             trajectories, self.num_timesteps,
-            dt=self.config.dt, initial_speed=self.config.initial_speed,
+            initial_speed=initial_speed, dt=self.config.dt,
         )  # [B, K, T, 2]
 
         dac_scores = torch.stack([
@@ -303,7 +369,8 @@ class TrajectoryComplianceScorer(nn.Module):
 
         comfort_scores = torch.stack([
             kinematic_comfort_score(
-                trajectories[:, k], self.num_timesteps, self.config,
+                trajectories[:, k], self.num_timesteps,
+                initial_speed[:, k], self.config,
             )
             for k in range(num_samples)
         ], dim=1)  # [B, K]
@@ -327,5 +394,4 @@ class TrajectoryComplianceScorer(nn.Module):
                 f"got {self.config.selection!r}."
             )
 
-        ego_hidden = ego_hidden_all[:, 0]
-        return trajectory, ego_hidden, combined
+        return trajectory, combined
