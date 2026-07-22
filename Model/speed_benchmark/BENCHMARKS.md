@@ -26,22 +26,24 @@ parameter.
 <details open>
   <summary>Toggle view</summary>
 
-> CUDA 12.6 | Driver 610.62 | PyTorch 2.7.1+cu126 | Commit `82cc8ae` | Resolution [256, 256]
+> CUDA 11.8 | Driver 610.62 | PyTorch 2.7.1+cu118 | Commit `d01fb8b` | Resolution [256, 256]
 
-| Model | Backbone | Fusion Mode | Batch | FPS | Latency (ms) | p99 (ms) | Jitter (ms) | VRAM (MB) | Params |
-|----------|----------|-------------|-------|-----|--------------|----------|-------------|-----------|--------|
-| Reactive | swin_v2_tiny | bev | 1 | 20.0 | 50.0 | 72.4 | 25.2 | 417 | 62.8M |
-| Combined | swin_v2_tiny | bev | 1 | 12.2 | 82.0 | 86.4 | 4.7 | 556 | 98.3M |
-| Reactive | swin_v2_tiny | bev | 2 | 11.3 | 88.1 | 91.7 | 4.0 | 580 | 62.8M |
-| Combined | swin_v2_tiny | bev | 2 | 6.2 | 161.8 | 167.6 | 6.0 | 719 | 98.3M |
-| Reactive | swin_v2_tiny | bev | 4 | 5.6 | 178.0 | 181.8 | 4.0 | 905 | 62.8M |
-| Combined | swin_v2_tiny | bev | 4 | 3.0 | 331.4 | 335.6 | 4.2 | 1045 | 98.3M |
-| Reactive | conv_next_v2_tiny | bev | 1 | 19.6 | 50.9 | 68.7 | 19.8 | 443 | 63.1M |
-| Combined | conv_next_v2_tiny | bev | 1 | 11.3 | 88.8 | 94.1 | 6.3 | 579 | 98.8M |
-| Reactive | conv_next_v2_tiny | bev | 2 | 10.4 | 96.0 | 104.6 | 9.1 | 630 | 63.1M |
-| Combined | conv_next_v2_tiny | bev | 2 | 5.7 | 174.6 | 179.9 | 5.6 | 767 | 98.8M |
-| Reactive | conv_next_v2_tiny | bev | 4 | 5.3 | 188.7 | 192.0 | 3.5 | 1003 | 63.1M |
-| Combined | conv_next_v2_tiny | bev | 4 | 2.8 | 353.2 | 364.9 | 12.1 | 1140 | 98.8M |
+| Model | Backbone | Fusion Mode | Reasoning | Batch | FPS | Latency (ms) | p99 (ms) | Jitter (ms) | VRAM (MB) | Params |
+|-------|----------|-------------|-----------|-------|-----|--------------|----------|-------------|-----------|--------|
+| Reactive | swin_v2_tiny | bev | off | 1 | 18.6 | 53.9 | 80.1 | 29.2 | 375 | 56.8M |
+| Combined | swin_v2_tiny | bev | off | 1 | 12.5 | 79.9 | 99.4 | 21.1 | 525 | 94.7M |
+| Reactive | swin_v2_tiny | bev | off | 2 | 12.0 | 83.4 | 100.5 | 20.1 | 521 | 56.8M |
+| Combined | swin_v2_tiny | bev | off | 2 | 6.8 | 147.8 | 171.8 | 25.7 | 668 | 94.7M |
+| Reactive | swin_v2_tiny | bev | off | 4 | 6.3 | 159.0 | 168.1 | 9.8 | 803 | 56.8M |
+| Combined | swin_v2_tiny | bev | off | 4 | 3.4 | 294.2 | 304.6 | 10.9 | 952 | 94.7M |
+| Reactive | conv_next_v2_tiny | bev | off | 1 | 19.0 | 52.5 | 63.1 | 10.8 | 396 | 57.1M |
+| Combined | conv_next_v2_tiny | bev | off | 1 | 11.4 | 87.9 | 111.3 | 26.2 | 543 | 95.2M |
+| Reactive | conv_next_v2_tiny | bev | off | 2 | 10.9 | 91.4 | 115.7 | 27.4 | 562 | 57.1M |
+| Combined | conv_next_v2_tiny | bev | off | 2 | 6.3 | 158.3 | 173.5 | 16.1 | 707 | 95.2M |
+| Reactive | conv_next_v2_tiny | bev | off | 4 | 5.9 | 170.2 | 185.2 | 16.5 | 887 | 57.1M |
+| Combined | conv_next_v2_tiny | bev | off | 4 | 3.2 | 313.4 | 327.6 | 15.1 | 1034 | 95.2M |
+| Reactive | swin_v2_tiny | bev | pooled_latent | 1 | 16.3 | 61.4 | 131.4 | 75.9 | 388 | 59.4M |
+| Reactive | swin_v2_tiny | bev | horizon_cross_attention | 1 | 18.1 | 55.4 | 80.3 | 26.1 | 389 | 59.6M |
 
 </details>
 
