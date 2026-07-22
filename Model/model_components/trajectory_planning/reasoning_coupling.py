@@ -76,12 +76,44 @@ class ReasoningCoupling(nn.Module):
                 embed_dim, num_heads, dropout=0.0, batch_first=True
             )
 
+    def _scale_residual(
+        self, delta: torch.Tensor, confidence: Optional[torch.Tensor]
+    ) -> torch.Tensor:
+        """Scale gate residual using a monotone function of confidence.
+
+        If confidence is None, returns delta unchanged (scale factor 1.0).
+        Otherwise, scales delta by confidence such that lower confidence results
+        in a more conservative modulation of visual context/history.
+        """
+        if confidence is None:
+            return delta
+
+        conf = confidence
+        if not isinstance(conf, torch.Tensor):
+            conf = torch.tensor(conf, dtype=delta.dtype, device=delta.device)
+
+        # Reduce extra dimensions in confidence if conf has more dims than delta
+        while conf.ndim > delta.ndim:
+            conf = conf.mean(dim=1)
+
+        # Handle sequence length mismatches when ndims match
+        if conf.ndim == delta.ndim and conf.ndim >= 2:
+            if conf.shape[1] != delta.shape[1] and conf.shape[1] > 1:
+                conf = conf.mean(dim=1, keepdim=True)
+
+        # Expand confidence dimensions if conf has fewer dims than delta
+        while conf.ndim < delta.ndim:
+            conf = conf.unsqueeze(-1)
+
+        return delta * conf
+
     def forward(
         self,
         context: torch.Tensor,
         reasoning_latent: Optional[torch.Tensor] = None,
         horizon_tokens: Optional[torch.Tensor] = None,
         query: Optional[torch.Tensor] = None,
+        confidence: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Return the reasoning-conditioned context (unchanged if mode='none')."""
         if self.mode == "none":
@@ -91,6 +123,7 @@ class ReasoningCoupling(nn.Module):
             if reasoning_latent is None:
                 return context  # no reasoning available this step → no-op
             delta = self.reason_proj(reasoning_latent)          # [B, D]
+            delta = self._scale_residual(delta, confidence)
             return context + self.alpha * delta
 
         # horizon_cross_attention
@@ -99,6 +132,7 @@ class ReasoningCoupling(nn.Module):
         q = query if query is not None else context.unsqueeze(1)  # [B, Tq, D]
         attended, _ = self.cross_attn(q, horizon_tokens, horizon_tokens)  # [B, Tq, D]
         delta = self.reason_proj(attended)                        # [B, Tq, D]
+        delta = self._scale_residual(delta, confidence)
         gated = self.alpha * delta
         # Broadcast back onto the caller's context shape: a single-vector context
         # gets the squeezed residual; a per-token query context keeps its tokens.

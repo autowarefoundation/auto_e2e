@@ -223,7 +223,7 @@ class FlowMatchingPlanner(BasePlanner):
         return torch.cat([torch.sin(args), torch.cos(args)], dim=-1)
 
     def _modulation_conditioning(self, visual_history, egomotion_history,
-                                 reasoning_latent=None):
+                                 reasoning_latent=None, reasoning_confidence=None):
         """Conditioning vector fed into AdaLN — excludes BEV (cross-attn) and
         time (added per-step in the Euler loop).
 
@@ -238,7 +238,9 @@ class FlowMatchingPlanner(BasePlanner):
         )
         # Only the pooled path uses mod_cond; horizon tokens are routed to _v_theta.
         latent = reasoning_latent if self.reasoning_mode == "pooled_latent" else None
-        return self.reasoning_coupling(base, reasoning_latent=latent)
+        return self.reasoning_coupling(
+            base, reasoning_latent=latent, confidence=reasoning_confidence
+        )
 
 
     def _sample_timesteps(self, batch_size, device, dtype):
@@ -290,7 +292,7 @@ class FlowMatchingPlanner(BasePlanner):
         bev_seq = bev_features.flatten(2).transpose(1, 2)
         return self.bev_kv_proj(bev_seq)
 
-    def _v_theta(self, u_t, t, bev_seq, mod_cond, horizon_tokens=None):
+    def _v_theta(self, u_t, t, bev_seq, mod_cond, horizon_tokens=None, reasoning_confidence=None):
         """Conditional velocity network with BEV cross-attention + AdaLN.
 
         Args:
@@ -304,6 +306,7 @@ class FlowMatchingPlanner(BasePlanner):
                 "horizon_cross_attention" mode each action query attends these
                 (zero-init, no-op until trained) so timestep-t actions can look
                 at the now/1s/2s/3s/4s reasoning; ignored in other modes.
+            reasoning_confidence: optional confidence scalar or tensor.
 
         Returns:
             velocity: [B, trajectory_dim]
@@ -320,7 +323,8 @@ class FlowMatchingPlanner(BasePlanner):
         # a single pooled vector would lose.
         if self.reasoning_mode == "horizon_cross_attention" and horizon_tokens is not None:
             queries = self.reasoning_coupling(
-                queries, horizon_tokens=horizon_tokens, query=queries
+                queries, horizon_tokens=horizon_tokens, query=queries,
+                confidence=reasoning_confidence,
             )
 
         attended, _ = self.cross_attn(queries, bev_seq, bev_seq) # [B, T, C]
@@ -336,7 +340,7 @@ class FlowMatchingPlanner(BasePlanner):
 
     def forward(self, bev_features, visual_history, egomotion_history,
                 generator=None, initial_noise=None, reasoning_latent=None,
-                reasoning_horizon_tokens=None, **kwargs):
+                reasoning_horizon_tokens=None, reasoning_confidence=None, **kwargs):
         """Inference: Euler-integrate ``dx/dt = v_theta(x, t, ...)`` over [0, 1].
 
         Args:
@@ -353,6 +357,7 @@ class FlowMatchingPlanner(BasePlanner):
                 (reasoning_mode="pooled_latent").
             reasoning_horizon_tokens: optional [B, 5, embed_dim] per-horizon
                 reasoning tokens (reasoning_mode="horizon_cross_attention").
+            reasoning_confidence: optional confidence scalar or tensor.
             **kwargs: ignored. Accepts extra inputs other planners or
                 callers might pass so call sites can stay planner-agnostic.
 
@@ -363,6 +368,7 @@ class FlowMatchingPlanner(BasePlanner):
         mod_cond = self._modulation_conditioning(
             visual_history, egomotion_history,
             reasoning_latent=reasoning_latent,
+            reasoning_confidence=reasoning_confidence,
         )
         # bev_seq is computed once and reused across every Euler step.
         bev_seq = self._project_bev(bev_features)
@@ -385,6 +391,7 @@ class FlowMatchingPlanner(BasePlanner):
             t = torch.full((B,), t_val,
                            device=bev_features.device, dtype=bev_features.dtype)
             v = self._v_theta(x, t, bev_seq, mod_cond,
-                              horizon_tokens=reasoning_horizon_tokens)
+                               horizon_tokens=reasoning_horizon_tokens,
+                               reasoning_confidence=reasoning_confidence)
             x = x + dt * v
         return x
