@@ -235,7 +235,8 @@ def test_planner_forward_with_confidence_at_init(mode):
         )
         assert torch.allclose(b_base, b_conf, atol=1e-6)
 
-        
+        g1 = torch.Generator().manual_seed(99)
+        g2 = torch.Generator().manual_seed(99)
         f_base = flow(bev, vis, ego, generator=g1)
         f_conf = flow(
             bev, vis, ego, generator=g2,
