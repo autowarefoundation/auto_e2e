@@ -35,15 +35,29 @@ Without Lanelet2, map tiles fall back to zero tensors and the dataset still func
 
 ## Model inputs produced
 
-- `visual_tiles` `(7, 3, H, W)` — 7 camera frames
+- `visual_tiles` `(7, 3, H, W)` — 6 camera frames plus the derived tele view
 - `map_tile` `(3, H, W)` — BEV map tile (rasterization of Lanelet2 HD map)
 - `egomotion_history` `(256,)` — fixed model ABI: 64 past timesteps × 4 signals at 10 Hz
 - `visual_history` `(896,)` — zero-initialised placeholder; populated during sequential inference
 - `trajectory_target` `(128,)` — fixed model ABI: 64 future timesteps × 2 signals
-- `camera_params` `(7, 3, 4)` — projection matrices `P = K_scaled @ T_ref_to_cam` for the 7 camera views, computed from KITScenes calibration and scaled to match the backbone's resize/crop transform. 
+- `camera_params` `(7, 3, 4)` — projection matrices `P = K_scaled @ T_ref_to_cam` for the 7 views, computed from KITScenes calibration and scaled to match the backbone's resize/crop transform. 
 
 
-The 7 camera views are the hi-res front camera plus the 6 surround ring cameras (`CAMERA_NAMES` in `camera.py`). The stereo front pair is dropped as it duplicates forward coverage.
+The 7 views are 6 physical cameras plus one derived view (`VIEW_NAMES` in `camera.py`):
+
+| view | source | HFOV | px/deg at 256 |
+|---|---|---|---|
+| `camera_base_front_center` | long-range camera, 5856x3104 | 88.2 deg | 2.90 |
+| 5 x `camera_ring_*` | surround cameras, 3504x2272 | 87.1 deg | 2.94 |
+| `tele_center` | 30 deg centre crop of the long-range camera, taken at native resolution | 30.0 deg | **8.54** |
+
+`camera_ring_front` is dropped: it points the same way as the long-range camera and covers the same
+field of view, so the two are redundant (#146). The stereo front pair stays out — at 63.3 deg it
+trades field of view for baseline and is not the long-range imager.
+
+The tele view exists because reach is set by pixels per degree reaching the model, not by sensor
+resolution: every view is resized to `image_size`, so the long-range camera's full frame arrives at
+the same 2.9 px/deg as a ring camera. Cropping before the resize is what preserves the advantage.
 
 ### Egomotion history signals `(256,) = 64 × 4`
 
