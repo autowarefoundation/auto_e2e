@@ -158,3 +158,90 @@ def test_flow_matching_is_horizon_aware_not_pooled():
         b = planner(bev, vis, ego, generator=g2, reasoning_horizon_tokens=tokens_b)
     assert not torch.allclose(a, b, atol=1e-5), \
         "zeroing one horizon left the trajectory unchanged — timing info is lost"
+
+
+@pytest.mark.parametrize("mode", ["pooled_latent", "horizon_cross_attention"])
+@pytest.mark.parametrize("conf_val", [0.0, 0.1, 0.5, 0.9, 1.0])
+def test_confidence_zero_init_strict_noop(mode, conf_val):
+    """At init (alpha=0), ReasoningCoupling must remain a strict no-op regardless
+    of the confidence value passed in."""
+    torch.manual_seed(0)
+    c = ReasoningCoupling(EMBED, mode=mode)
+    ctx = torch.randn(B, EMBED)
+    latent = torch.randn(B, EMBED)
+    tokens = torch.randn(B, HZ, EMBED)
+    confidence = torch.full((B, HZ, 1), conf_val)
+
+    with torch.no_grad():
+        out = c(
+            ctx,
+            reasoning_latent=latent,
+            horizon_tokens=tokens,
+            confidence=confidence,
+        )
+
+    assert torch.allclose(out, ctx, atol=1e-6), \
+        f"Gate with confidence={conf_val} was not a strict no-op at init"
+
+
+@pytest.mark.parametrize("mode", ["pooled_latent", "horizon_cross_attention"])
+def test_confidence_monotone_residual_scaling(mode):
+    """When the gate is open, lower confidence must result in a smaller residual
+    norm (more conservative modulation of visual context/history)."""
+    torch.manual_seed(0)
+    c = ReasoningCoupling(EMBED, mode=mode)
+    with torch.no_grad():
+        c.alpha.fill_(1.0)
+        c.reason_proj[-1].weight.normal_()
+    ctx = torch.randn(B, EMBED)
+    latent = torch.randn(B, EMBED)
+    tokens = torch.randn(B, HZ, EMBED)
+
+    low_conf = torch.full((B, HZ, 1), 0.1)
+    high_conf = torch.full((B, HZ, 1), 0.9)
+
+    with torch.no_grad():
+        out_low = c(ctx, reasoning_latent=latent, horizon_tokens=tokens, confidence=low_conf)
+        out_high = c(ctx, reasoning_latent=latent, horizon_tokens=tokens, confidence=high_conf)
+
+    residual_low = (out_low - ctx).abs().sum()
+    residual_high = (out_high - ctx).abs().sum()
+
+    assert residual_low < residual_high, \
+        f"Low confidence residual ({residual_low}) should be smaller than high confidence residual ({residual_high})"
+
+
+@pytest.mark.parametrize("mode", ["pooled_latent", "horizon_cross_attention"])
+def test_planner_forward_with_confidence_at_init(mode):
+    """Bezier and FlowMatching planners with confidence signal should remain
+    byte-identical to baseline at init."""
+    torch.manual_seed(0)
+    bezier = BezierPlanner(reasoning_mode=mode).eval()
+    flow = FlowMatchingPlanner(reasoning_mode=mode, num_inference_steps=3).eval()
+    bev, vis, ego, latent, tokens = _inputs(bezier)
+
+    g1 = torch.Generator().manual_seed(99)
+    g2 = torch.Generator().manual_seed(99)
+
+    conf = torch.rand(B, HZ, 1, generator=g1)
+
+    with torch.no_grad():
+        b_base = bezier(bev, vis, ego)
+        b_conf = bezier(
+            bev, vis, ego,
+            reasoning_latent=latent,
+            reasoning_horizon_tokens=tokens,
+            reasoning_confidence=conf,
+        )
+        assert torch.allclose(b_base, b_conf, atol=1e-6)
+
+        
+        f_base = flow(bev, vis, ego, generator=g1)
+        f_conf = flow(
+            bev, vis, ego, generator=g2,
+            reasoning_latent=latent,
+            reasoning_horizon_tokens=tokens,
+            reasoning_confidence=conf,
+        )
+        assert torch.allclose(f_base, f_conf, atol=1e-6)
+
