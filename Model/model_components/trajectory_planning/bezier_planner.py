@@ -4,6 +4,7 @@ import torch
 import torch.nn as nn
 
 from .base import BasePlanner
+from ..losses.trajectory_loss import TrajectoryImitationLoss
 from .reasoning_coupling import ReasoningCoupling
 
 
@@ -167,8 +168,9 @@ class BezierPlanner(BasePlanner):
 
 
     def compute_planner_loss(self, bev_features, visual_history,
-                             egomotion_history, trajectory_target, **kwargs):
-        """SmoothL1 imitation objective (#115).
+                             egomotion_history, trajectory_target,
+                             training_policy=None, **kwargs):
+        """SmoothL1 imitation objective (#115), dataset-scale-aware (#124).
 
         Unlike FlowMatchingPlanner, BezierPlanner's forward() output IS a
         legitimate direct regression target — there's no sampler/ODE step
@@ -184,10 +186,32 @@ class BezierPlanner(BasePlanner):
         threaded through this path — forward() is called with its
         reasoning_latent / reasoning_horizon_tokens defaults, so training
         optimizes the same context the imitation baseline always has.
+
+        training_policy (#124 review): when given, applies the SAME
+        per-signal scaling and temporal decay TrajectoryImitationLoss
+        applies externally today — plain unweighted SmoothL1 (the
+        training_policy=None fallback) is a real, measured 71% loss
+        difference from the production-scale objective for realistic
+        (accel, curvature) magnitudes, not a rounding difference. When
+        None, falls back to unweighted SmoothL1 for backward
+        compatibility with existing direct callers/tests.
         """
         self._validate_trajectory_target(
             trajectory_target, bev_features.shape[0], bev_features.device
         )
         trajectory = self.forward(bev_features, visual_history, egomotion_history)
-        imitation_loss = torch.nn.functional.smooth_l1_loss(trajectory, trajectory_target)
+
+        if training_policy is not None:
+            weighted_loss_fn = TrajectoryImitationLoss(
+                loss_type="smooth_l1",
+                temporal_decay=training_policy.temporal_decay,
+                signal_scales=training_policy.signal_scales,
+                num_timesteps=self.num_timesteps,
+                num_signals=self.num_signals,
+            ).to(trajectory.device)
+            imitation_loss = weighted_loss_fn(trajectory, trajectory_target)
+        else:
+            imitation_loss = torch.nn.functional.smooth_l1_loss(
+                trajectory, trajectory_target)
+
         return {"loss": imitation_loss, "imitation_loss": imitation_loss}

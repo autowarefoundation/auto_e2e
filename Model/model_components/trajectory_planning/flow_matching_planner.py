@@ -377,7 +377,8 @@ class FlowMatchingPlanner(BasePlanner):
         return x
 
     def compute_planner_loss(self, bev_features, visual_history,
-                             egomotion_history, trajectory_target, **kwargs):
+                             egomotion_history, trajectory_target,
+                             training_policy=None, **kwargs):
         """Flow-matching velocity-MSE training objective (#115).
 
         Correct training path for flow matching — NOT a regression on
@@ -402,6 +403,18 @@ class FlowMatchingPlanner(BasePlanner):
         wiring it here would silently change what compute_planner_loss
         optimizes for enable_reasoning=True checkpoints without any review
         of that decision.
+
+        training_policy: accepted for signature parity with BezierPlanner
+        (both implement the same BasePlanner contract) but NOT applied.
+        BezierPlanner's signal_scales/temporal_decay weight a direct
+        (accel, curvature) trajectory regression — this method regresses a
+        rectified-flow VELOCITY (x1 - x0), a different quantity in the same
+        coordinate channels but not obviously the same operation to scale.
+        Applying trajectory-space per-signal scaling to a velocity target
+        is a real, unresolved design question (raised but not settled in
+        #124 review) — silently guessing an answer here would let a
+        production flow-matching checkpoint train against an unreviewed
+        objective. Left as an explicit no-op until that's decided.
         """
         B = bev_features.shape[0]
         self._validate_inputs(visual_history, egomotion_history)

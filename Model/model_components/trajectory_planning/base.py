@@ -50,11 +50,28 @@ class BasePlanner(nn.Module, ABC):
 
     @abstractmethod
     def compute_planner_loss(self, bev_features, visual_history,
-                             egomotion_history, trajectory_target, **kwargs):
+                             egomotion_history, trajectory_target,
+                             training_policy=None, **kwargs):
         """Training objective. Returns ``dict[str, Tensor]`` with a
         ``"loss"`` key (see class docstring). A missing implementation now
         fails loudly at planner-build time instead of silently mis-training
-        (the #115 failure mode)."""
+        (the #115 failure mode).
+
+        Args:
+            training_policy: optional ``DatasetTrainingPolicy``
+                (``Model/training/dataset_policy.py``). Pass the object
+                itself, not pre-extracted scalars — a caller that derives
+                ``signal_scales``/``temporal_decay`` separately and passes
+                them alongside the policy risks the two silently drifting
+                apart (see #124 review: ``signal_scales=(1.0, 1.0)`` vs.
+                production ``(0.79, 0.12)`` gave a 71% loss difference with
+                no error). Implementations that don't use per-signal
+                weighting (e.g. a velocity-MSE objective, where scaling
+                (accel, curvature) channels isn't obviously the same
+                operation as it is on a direct trajectory regression) may
+                accept and ignore it — see FlowMatchingPlanner's docstring
+                for why that's left unresolved rather than guessed at.
+        """
         raise NotImplementedError
 
     def _validate_trajectory_target(self, trajectory_target, batch_size, device):
