@@ -4,6 +4,7 @@ import torch
 import torch.nn as nn
 
 from .base import BasePlanner
+from ..losses.trajectory_loss import TrajectoryImitationLoss
 from .reasoning_coupling import ReasoningCoupling
 
 
@@ -47,6 +48,8 @@ class BezierPlanner(BasePlanner):
         self.num_controls = num_controls
         self.egomotion_dim = egomotion_dim
         self.visual_history_dim = visual_history_dim
+        # Shared with BasePlanner._validate_trajectory_target.
+        self.trajectory_dim = num_timesteps * num_signals
 
         # Context aggregation: ego state + visual history + global BEV summary.
         self.ego_state_proj = nn.Linear(egomotion_dim, embed_dim)
@@ -163,3 +166,52 @@ class BezierPlanner(BasePlanner):
         )
         return trajectory
 
+
+    def compute_planner_loss(self, bev_features, visual_history,
+                             egomotion_history, trajectory_target,
+                             training_policy=None, **kwargs):
+        """SmoothL1 imitation objective (#115), dataset-scale-aware (#124).
+
+        Unlike FlowMatchingPlanner, BezierPlanner's forward() output IS a
+        legitimate direct regression target — there's no sampler/ODE step
+        whose intermediate quantities would leak if regressed against.
+
+        Returns a dict for the same reason as FlowMatchingPlanner (see
+        BasePlanner docstring / #123): keeps train_il agnostic to which
+        planner produced the loss, and reserves room for a future combined
+        objective (e.g. an RL term added alongside "imitation_loss") without
+        a signature change.
+
+        Note: as with FlowMatchingPlanner, reasoning coupling is NOT
+        threaded through this path — forward() is called with its
+        reasoning_latent / reasoning_horizon_tokens defaults, so training
+        optimizes the same context the imitation baseline always has.
+
+        training_policy (#124 review): when given, applies the SAME
+        per-signal scaling and temporal decay TrajectoryImitationLoss
+        applies externally today — plain unweighted SmoothL1 (the
+        training_policy=None fallback) is a real, measured 71% loss
+        difference from the production-scale objective for realistic
+        (accel, curvature) magnitudes, not a rounding difference. When
+        None, falls back to unweighted SmoothL1 for backward
+        compatibility with existing direct callers/tests.
+        """
+        self._validate_trajectory_target(
+            trajectory_target, bev_features.shape[0], bev_features.device
+        )
+        trajectory = self.forward(bev_features, visual_history, egomotion_history)
+
+        if training_policy is not None:
+            weighted_loss_fn = TrajectoryImitationLoss(
+                loss_type="smooth_l1",
+                temporal_decay=training_policy.temporal_decay,
+                signal_scales=training_policy.signal_scales,
+                num_timesteps=self.num_timesteps,
+                num_signals=self.num_signals,
+            ).to(trajectory.device)
+            imitation_loss = weighted_loss_fn(trajectory, trajectory_target)
+        else:
+            imitation_loss = torch.nn.functional.smooth_l1_loss(
+                trajectory, trajectory_target)
+
+        return {"loss": imitation_loss, "imitation_loss": imitation_loss}

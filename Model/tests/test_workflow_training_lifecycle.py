@@ -203,8 +203,25 @@ def test_training_wires_dataset_specific_trajectory_policy():
 
     assert "training_policy_for_dataset" in training_source
     assert "dataset.value" in training_source
-    assert "signal_scales=training_policy.signal_scales" in training_source
-    assert "temporal_decay=training_policy.temporal_decay" in training_source
+    # #115/#124: the dataset-specific policy is no longer used to build an
+    # external TrajectoryImitationLoss applied to whatever forward()
+    # returned (that path SmoothL1-regressed FlowMatchingPlanner's Euler
+    # rollout instead of ever running its real training objective). It's
+    # now passed straight into model(...) as the policy OBJECT, which
+    # threads through to each planner's own compute_planner_loss — see
+    # BasePlanner.compute_planner_loss's docstring for why the object
+    # itself, not pre-extracted scalars, is what has to cross this
+    # boundary (a caller re-deriving signal_scales/temporal_decay
+    # separately risks it silently drifting from the policy — the exact
+    # #124 review finding: (1.0, 1.0) vs (0.79, 0.12) measured a 71% loss
+    # difference with no error).
+    assert "training_policy=training_policy" in training_source
+    assert "return_planner_loss=True" in training_source
+    assert "result[\"loss\"]" in training_source
+    # Still dataset-specific, still logged — just via the print statement
+    # instead of an external loss module's constructor args.
+    assert "temporal_decay={training_policy.temporal_decay" in training_source
+    assert "training_policy.signal_scales[0]" in training_source
     assert "supervised_timesteps" not in training_source
     assert "AUTO_E2E_TIMESTEPS" in training_source
     assert "adapt_egomotion_history" in training_source

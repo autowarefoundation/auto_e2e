@@ -93,16 +93,33 @@ class AutoE2E(nn.Module):
 
     def forward(self, camera_tiles, map_input, visual_history, egomotion_history,
                 projection=None, geometry_type=None, image_transform=None,
-                mode="train", trajectory_target=None,
+                mode="train", trajectory_target=None, training_policy=None,
+                return_planner_loss=False,
                 history_frames=None, future_frames=None, **kwargs):
         """
         Run the full autonomous-driving pipeline.
 
         Return contract:
-            * Inference (``mode != "train"``), or train with both branches off →
+            * Inference (``mode != "train"``), or train with both branches off,
+              and ``return_planner_loss`` not set →
               a single trajectory tensor ``[B, num_timesteps * num_signals]``.
+            * ``return_planner_loss=True`` AND ``trajectory_target`` given AND
+              ``mode == "train"`` → the trajectory planner's
+              ``compute_planner_loss()`` result (a ``dict[str, Tensor]`` with
+              at least ``"loss"``, see ``BasePlanner.compute_planner_loss``)
+              in place of the trajectory tensor above — the #115 fix:
+              previously ``trajectory_target`` reached this point but was
+              silently absorbed as an inert kwarg all the way down (it's
+              already passed at ~20 existing call sites across the test
+              suite that expect a trajectory tensor back), so a planner's
+              actual training objective never ran; ``train_il`` regressed
+              whatever forward() happened to return instead.
+              ``return_planner_loss`` defaults to False specifically so
+              none of those existing callers change behavior — only a
+              caller that explicitly opts in gets the new path.
             * Train mode with the World Model and/or the reasoning branch on →
-              ``(trajectory, aux_outputs)`` where ``aux_outputs`` is a dict with
+              ``(result, aux_outputs)`` where ``result`` is whichever of the
+              two things above applies, and ``aux_outputs`` is a dict with
               ``"future_state_pred"`` (World Model) and/or ``"reasoning_pred"``
               (HorizonReasoningPrediction). A dict avoids a positional-tuple
               that grows with every optional branch (#98 Task 4.2).
@@ -120,9 +137,21 @@ class AutoE2E(nn.Module):
                 "rectified_pinhole", "ftheta", "pseudo") passed to BEV fusion.
             image_transform: Optional ImageTransform for the model-input frame.
             mode: "train" also returns aux branch outputs for their losses.
+            trajectory_target: optional (B, num_timesteps * num_signals)
+                ground-truth trajectory. By itself, changes nothing — see
+                return_planner_loss.
+            training_policy: optional DatasetTrainingPolicy
+                (Model/training/dataset_policy.py), used only when
+                return_planner_loss=True, forwarded into
+                compute_planner_loss. Pass the object itself, not
+                pre-extracted scalars (#124 review).
+            return_planner_loss: opt-in flag, see "Return contract" above.
+                Default False — train_il is the one caller that should set
+                this True; every other existing caller is unaffected.
 
         Returns:
-            trajectory, or (trajectory, aux_outputs) in train mode with a branch on.
+            result, or (result, aux_outputs) in train mode with a branch on —
+            see "Return contract" above for what result is.
         """
 
         # World Action Model (1 Hz): produce the Encoded Visual History fed to the
@@ -183,18 +212,23 @@ class AutoE2E(nn.Module):
 
         # The reasoning branch runs INSIDE ReactiveE2E (after TemporalMemory).
         # In train mode with reasoning on, ReactiveE2E returns
-        # (trajectory, reasoning_pred); otherwise just the trajectory.
+        # (result, reasoning_pred); otherwise just the result — where
+        # `result` is a trajectory tensor if trajectory_target is None, or
+        # a compute_planner_loss dict if it was given (see ReactiveE2E's
+        # own docstring for the full contract).
         reactive_out = self.Reactive_E2E(
             camera_tiles, map_input, visual_history, egomotion_history,
             projection=projection, geometry_type=geometry_type,
             image_transform=image_transform,
-            mode=mode, trajectory_target=trajectory_target, **kwargs,
+            mode=mode, trajectory_target=trajectory_target,
+            training_policy=training_policy,
+            return_planner_loss=return_planner_loss, **kwargs,
         )
         reasoning_pred = None
         if self.enable_reasoning and mode == "train":
-            trajectory, reasoning_pred = reactive_out
+            result, reasoning_pred = reactive_out
         else:
-            trajectory = reactive_out
+            result = reactive_out
 
         # Assemble aux outputs (dict, not a growing positional tuple). The WM
         # keeps its future_frames alongside the prediction so the training loop
@@ -208,8 +242,8 @@ class AutoE2E(nn.Module):
                 "future_frames": future_frames,
                 "reasoning_pred": reasoning_pred,
             }
-            return trajectory, aux_outputs
-        return trajectory
+            return result, aux_outputs
+        return result
         
     
 

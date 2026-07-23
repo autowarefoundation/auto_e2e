@@ -2166,7 +2166,6 @@ def train_il(
         torch.multiprocessing.set_sharing_strategy("file_system")
 
     from model_components.auto_e2e import AutoE2E
-    from model_components.losses import TrajectoryImitationLoss
     from training.dataset_policy import (
         AUTO_E2E_TIMESTEPS,
         adapt_egomotion_history,
@@ -2515,13 +2514,18 @@ def train_il(
         factor=0.5,
         patience=1,
     )
-    loss_fn = TrajectoryImitationLoss(
-        loss_type="smooth_l1",
-        temporal_decay=training_policy.temporal_decay,
-        signal_scales=training_policy.signal_scales,
-    )
-    if hasattr(loss_fn, "to"):
-        loss_fn = loss_fn.to(device)
+    # NOTE (#115/#124): TrajectoryImitationLoss used to be instantiated here
+    # and applied externally to whatever forward() returned — which, for
+    # FlowMatchingPlanner, meant SmoothL1-regressing the Euler-from-noise
+    # ROLLOUT instead of ever running the real velocity-MSE objective. The
+    # loss is now computed inside each planner's own compute_planner_loss
+    # (BasePlanner contract), reached via model(..., return_planner_loss=True,
+    # training_policy=training_policy) below — training_policy is passed
+    # through as the object itself so BezierPlanner's internal
+    # TrajectoryImitationLoss uses the exact same signal_scales/temporal_decay
+    # this print statement reports, instead of the two silently drifting
+    # apart (#124 review: (1.0, 1.0) vs (0.79, 0.12) measured a 71% loss
+    # difference with no error).
     print(
         "Dataset training policy: "
         f"auto_e2e_timesteps={AUTO_E2E_TIMESTEPS} "
@@ -2809,11 +2813,14 @@ def train_il(
                 out = model(visual, map_input, vis_hist, ego_hist,
                             projection=proj_dev, geometry_type=batch_geom,
                             mode="train", trajectory_target=target,
+                            training_policy=training_policy,
+                            return_planner_loss=True,
                             history_frames=history_frames, future_frames=future_frames)
-                # Train mode returns (trajectory, aux) when a branch (reasoning /
-                # world model) is on; otherwise just the trajectory tensor.
-                trajectory, aux = out if isinstance(out, tuple) else (out, {})
-                traj_loss = loss_fn(trajectory, target)
+                # return_planner_loss=True: train mode returns (loss_dict, aux)
+                # when a branch (reasoning / world model) is on; otherwise
+                # just loss_dict (see BasePlanner.compute_planner_loss / #115).
+                result, aux = out if isinstance(out, tuple) else (out, {})
+                traj_loss = result["loss"]
                 loss = traj_loss
 
                 # JEPA loss (#13): future-feature reconstruction, added when the

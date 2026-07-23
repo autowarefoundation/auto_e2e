@@ -103,7 +103,9 @@ class ReactiveE2E(nn.Module):
 
     def forward(self, camera_tiles, map_input, visual_history, egomotion_history,
                 projection=None, geometry_type=None, image_transform=None,
-                route_context=None, map_context=None, mode="train", **kwargs):
+                route_context=None, map_context=None, mode="train",
+                trajectory_target=None, training_policy=None,
+                return_planner_loss=False, **kwargs):
         """
         Run the reactive end-to-end autonomous-driving pipeline.
 
@@ -119,12 +121,41 @@ class ReactiveE2E(nn.Module):
             image_transform: Optional ImageTransform for the model-input frame.
             route_context / map_context: optional extra reasoning context.
             mode: "train" also returns the reasoning prediction (for its loss).
+            trajectory_target: optional (B, num_timesteps * num_signals)
+                ground-truth trajectory. NOTE: passing this alone does NOT
+                change what's returned — trajectory_target is already
+                passed at ~20 existing call sites across the test suite
+                that expect a trajectory tensor back (an external loss_fn
+                consumes it separately, e.g. train_il's own
+                TrajectoryImitationLoss today). Only return_planner_loss
+                (below) opts into the new behavior.
+            training_policy: optional DatasetTrainingPolicy
+                (Model/training/dataset_policy.py), used only when
+                return_planner_loss=True — forwarded into
+                compute_planner_loss. Pass the object itself, not
+                pre-extracted scalars (#124 review: signal_scales/
+                temporal_decay drifting from the policy silently is a
+                real, measured 71% loss difference, not theoretical).
+            return_planner_loss: when True (and mode == "train" and
+                trajectory_target is given), calls the trajectory
+                planner's compute_planner_loss() instead of forward() and
+                returns that dict instead of a trajectory tensor — the
+                #115 fix: FlowMatchingPlanner's Euler rollout is no longer
+                silently regressed against the target externally. Default
+                False so every existing caller's behavior is byte-identical
+                to before this parameter existed; train_il is the one
+                caller that should pass True.
 
         Returns:
             trajectory (B, num_timesteps * num_signals), OR — when the reasoning
             branch is enabled and ``mode == "train"`` — a tuple
             ``(trajectory, reasoning_pred)`` so the training loop can compute the
             reasoning loss. ``reasoning_pred`` is a HorizonReasoningPrediction.
+
+            If return_planner_loss=True (and trajectory_target given, mode
+            == "train"): a loss dict (see BasePlanner.compute_planner_loss)
+            in place of trajectory above, or (loss_dict, reasoning_pred) if
+            reasoning is enabled — same tuple shape as the trajectory case.
         """
         B, V, C, H, W = camera_tiles.shape
 
@@ -162,7 +193,20 @@ class ReactiveE2E(nn.Module):
             reasoning_latent = reasoning_pred.reasoning_latent
             reasoning_horizon_tokens = reasoning_pred.horizon_tokens
 
-        # --- Trajectory Prediction ---
+        # --- Training objective path (#115) ---
+        # Explicit opt-in via return_planner_loss — NOT trajectory_target's
+        # mere presence, since trajectory_target is already passed at ~20
+        # existing call sites that expect a trajectory tensor back.
+        if mode == "train" and return_planner_loss and trajectory_target is not None:
+            loss_dict = self.TrajectoryPlanner.compute_planner_loss(
+                fused_features, visual_ctx, ego_ctx, trajectory_target,
+                training_policy=training_policy, **kwargs,
+            )
+            if self.ReasoningHead is not None:
+                return loss_dict, reasoning_pred
+            return loss_dict
+
+        # --- Trajectory Prediction (inference path — unchanged) ---
         trajectory = self.TrajectoryPlanner(
             fused_features, visual_ctx, ego_ctx,
             reasoning_latent=reasoning_latent,

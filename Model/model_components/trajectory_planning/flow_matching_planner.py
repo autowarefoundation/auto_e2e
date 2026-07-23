@@ -172,19 +172,6 @@ class FlowMatchingPlanner(BasePlanner):
                 f"got {u_t.dtype} and {t.dtype}."
             )
 
-    def _validate_trajectory_target(self, trajectory_target, batch_size, device):
-        expected = (batch_size, self.trajectory_dim)
-        if tuple(trajectory_target.shape) != expected:
-            raise ValueError(
-                f"trajectory_target must have shape {expected} "
-                f"(batch_size, num_timesteps * num_signals), got "
-                f"{tuple(trajectory_target.shape)}."
-            )
-        if trajectory_target.device != device:
-            raise ValueError(
-                f"trajectory_target must be on the same device as bev_features, "
-                f"got {trajectory_target.device} and {device}."
-            )
 
     def _validate_initial_noise(self, initial_noise, batch_size, device, dtype):
         expected = (batch_size, self.trajectory_dim)
@@ -388,3 +375,54 @@ class FlowMatchingPlanner(BasePlanner):
                               horizon_tokens=reasoning_horizon_tokens)
             x = x + dt * v
         return x
+
+    def compute_planner_loss(self, bev_features, visual_history,
+                             egomotion_history, trajectory_target,
+                             training_policy=None, **kwargs):
+        """Flow-matching velocity-MSE training objective (#115).
+
+        Correct training path for flow matching — NOT a regression on
+        forward()'s Euler output. Samples a random interpolation time t,
+        builds u_t = (1-t)x0 + t*x1, and regresses v_theta against the
+        constant velocity x1 - x0. This is what trains the velocity field
+        to transport noise to trajectories, not to chase the conditional
+        mean (the failure mode of differentiating the Euler sampler
+        end-to-end against a fixed target).
+
+        Returns a dict (see BasePlanner docstring for why): "loss" is the
+        scalar train_il actually backprops through; "velocity_mse" is the
+        same value exposed under its specific name for logging, and so a
+        future stage-3 objective can report it alongside RL terms without
+        the imitation signal's identity getting lost inside a combined
+        "loss" key.
+
+        Note: reasoning coupling is intentionally NOT threaded through this
+        path (mod_cond / _v_theta are called with their reasoning_latent /
+        horizon_tokens defaults). Training the reasoning-conditioned
+        velocity field is a separate, not-yet-scoped question from #115 —
+        wiring it here would silently change what compute_planner_loss
+        optimizes for enable_reasoning=True checkpoints without any review
+        of that decision.
+
+        training_policy: accepted for signature parity with BezierPlanner
+        (both implement the same BasePlanner contract) but NOT applied.
+        BezierPlanner's signal_scales/temporal_decay weight a direct
+        (accel, curvature) trajectory regression — this method regresses a
+        rectified-flow VELOCITY (x1 - x0), a different quantity in the same
+        coordinate channels but not obviously the same operation to scale.
+        Applying trajectory-space per-signal scaling to a velocity target
+        is a real, unresolved design question (raised but not settled in
+        #124 review) — silently guessing an answer here would let a
+        production flow-matching checkpoint train against an unreviewed
+        objective. Left as an explicit no-op until that's decided.
+        """
+        B = bev_features.shape[0]
+        self._validate_inputs(visual_history, egomotion_history)
+        self._validate_trajectory_target(trajectory_target, B, bev_features.device)
+
+        u_t, t, target_velocity = self.construct_training_data(trajectory_target)
+        bev_seq = self._project_bev(bev_features)
+        mod_cond = self._modulation_conditioning(visual_history, egomotion_history)
+        v_pred = self._v_theta(u_t, t, bev_seq, mod_cond)
+        velocity_mse = torch.nn.functional.mse_loss(v_pred, target_velocity)
+        return {"loss": velocity_mse, "velocity_mse": velocity_mse}

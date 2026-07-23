@@ -52,12 +52,66 @@ class TestOutputShapes:
     @pytest.mark.parametrize("batch_size", [1, 2, 4])
     def test_train_mode_also_returns_trajectory(self, model, device, batch_size):
         """forward returns the trajectory in train mode too (the loss is a
-        separate planner concern)."""
+        separate planner concern) — UNLESS return_planner_loss=True is
+        explicitly set (see test_return_planner_loss_gives_loss_dict below).
+        This is the default (return_planner_loss=False) behavior, and it
+        must stay unchanged: trajectory_target is already passed at ~20
+        other call sites across this suite that expect a trajectory back."""
         visual, map_input, vis_hist, ego = make_inputs(batch_size, 7, device)
         target = torch.randn(batch_size, 128, device=device)
         traj = model(visual, map_input, vis_hist, ego, mode="train",
                      trajectory_target=target)
         assert traj.shape == (batch_size, 128)
+
+    def test_return_planner_loss_gives_loss_dict(self, model, device):
+        """#115/#124: the opt-in path. Only when return_planner_loss=True
+        (and trajectory_target given, mode="train") does forward() call
+        compute_planner_loss instead of forward() on the planner."""
+        batch_size = 2
+        visual, map_input, vis_hist, ego = make_inputs(batch_size, 7, device)
+        target = torch.randn(batch_size, 128, device=device)
+        result = model(visual, map_input, vis_hist, ego, mode="train",
+                       trajectory_target=target, return_planner_loss=True)
+        assert isinstance(result, dict)
+        assert "loss" in result
+        assert result["loss"].dim() == 0
+        assert torch.isfinite(result["loss"])
+
+    def test_return_planner_loss_gradient_flows_to_backbone(self, model, device):
+        """The loss-dict path must still train the full network — backbone
+        included — not just the planner head."""
+        batch_size = 2
+        visual, map_input, vis_hist, ego = make_inputs(batch_size, 7, device)
+        target = torch.randn(batch_size, 128, device=device)
+        result = model(visual, map_input, vis_hist, ego, mode="train",
+                       trajectory_target=target, return_planner_loss=True)
+        result["loss"].backward()
+        backbone_params = list(model.Reactive_E2E.Backbone.parameters())
+        assert any(
+            p.grad is not None and p.grad.abs().sum() > 0
+            for p in backbone_params
+        )
+
+    def test_return_planner_loss_uses_training_policy(self, model, device):
+        """#124 review: passing training_policy must actually change the
+        loss for the default (bezier) planner — same regression guard as
+        BezierPlanner's own test, but exercised through the full AutoE2E
+        call site train_il actually uses."""
+        from training.dataset_policy import DatasetTrainingPolicy
+
+        batch_size = 2
+        visual, map_input, vis_hist, ego = make_inputs(batch_size, 7, device)
+        target = torch.randn(batch_size, 128, device=device)
+        no_policy = model(visual, map_input, vis_hist, ego, mode="train",
+                          trajectory_target=target, return_planner_loss=True)
+        policy = DatasetTrainingPolicy(
+            dataset_name="test/synthetic", temporal_decay=0.9,
+            signal_scales=(0.79, 0.12),
+        )
+        with_policy = model(visual, map_input, vis_hist, ego, mode="train",
+                            trajectory_target=target, return_planner_loss=True,
+                            training_policy=policy)
+        assert not torch.allclose(no_policy["loss"], with_policy["loss"])
 
 
 # ---------------------------------------------------------------------------
