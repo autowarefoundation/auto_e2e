@@ -20,6 +20,7 @@ from model_components.trajectory_planning import (
     build_planner,
 )
 from model_components.trajectory_planning.base import BasePlanner
+from training.dataset_policy import DatasetTrainingPolicy
 
 
 B, EMBED_DIM, BEV_H, BEV_W = 2, 32, 6, 6
@@ -56,6 +57,23 @@ class TestFlowMatchingPlannerLoss:
         assert "loss" in result
         assert "velocity_mse" in result
         assert torch.equal(result["loss"], result["velocity_mse"])
+
+    def test_accepts_training_policy_without_applying_it(self, fm_planner, inputs):
+        """Signature parity with BezierPlanner (both honor the same
+        BasePlanner contract), but the velocity-MSE objective doesn't
+        apply signal_scales/temporal_decay — see the method's own
+        docstring for why that's an open design question, not an
+        oversight. This just guards against the call crashing, and
+        against someone silently making it apply the scaling later
+        without updating this test to actually check the numbers."""
+        policy = DatasetTrainingPolicy(
+            dataset_name="test/synthetic", temporal_decay=0.9,
+            signal_scales=(0.79, 0.12),
+        )
+        with_policy = fm_planner.compute_planner_loss(
+            **inputs, training_policy=policy,
+        )
+        assert torch.isfinite(with_policy["loss"])
 
     def test_loss_is_scalar(self, fm_planner, inputs):
         result = fm_planner.compute_planner_loss(**inputs)
@@ -133,6 +151,38 @@ class TestBezierPlannerLoss:
             )
         result = bezier_planner.compute_planner_loss(**inputs)
         assert torch.allclose(result["loss"], expected, atol=1e-6)
+
+    def test_training_policy_changes_the_loss(self, bezier_planner, inputs):
+        """#124 review regression guard: signal_scales=(1.0, 1.0) (the
+        training_policy=None fallback) measured 71% lower than production
+        policy (0.79, 0.12) on realistic magnitudes. If compute_planner_loss
+        silently ignored training_policy, this would be the exact same
+        silent-wrong-objective bug the review caught, just moved one layer
+        deeper (into the planner instead of train_il)."""
+        default_result = bezier_planner.compute_planner_loss(**inputs)
+
+        policy = DatasetTrainingPolicy(
+            dataset_name="test/synthetic", temporal_decay=0.95,
+            signal_scales=(0.79, 0.12),
+        )
+        policy_result = bezier_planner.compute_planner_loss(
+            **inputs, training_policy=policy,
+        )
+        assert not torch.allclose(default_result["loss"], policy_result["loss"])
+
+    def test_training_policy_gradient_flows(self, bezier_planner, inputs):
+        policy = DatasetTrainingPolicy(
+            dataset_name="test/synthetic", temporal_decay=0.9,
+            signal_scales=(0.79, 0.12),
+        )
+        result = bezier_planner.compute_planner_loss(
+            **inputs, training_policy=policy,
+        )
+        result["loss"].backward()
+        assert any(
+            p.grad is not None and p.grad.abs().sum() > 0
+            for p in bezier_planner.parameters()
+        )
 
     def test_invalid_trajectory_target_shape_raises(self, bezier_planner, inputs):
         """Regression guard: a target missing its batch dimension must raise,
