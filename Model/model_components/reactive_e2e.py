@@ -15,7 +15,7 @@ class ReactiveE2E(nn.Module):
                  num_timesteps=64, num_signals=2, egomotion_dim=256,
                  visual_history_dim=896,
                  map_type="rasterized", map_context_channels=3,
-                 route_channels=2,
+                 route_channels=2, enable_route_conditioning=True,
                  map_fusion_mode="residual", map_fusion_kwargs=None,
                  temporal_memory_mode="no_memory", temporal_memory_kwargs=None,
                  planner_mode="gru", planner_kwargs=None,
@@ -50,6 +50,7 @@ class ReactiveE2E(nn.Module):
             raise ValueError("navigation channel counts must be positive")
         self.map_context_channels = int(map_context_channels)
         self.route_channels = int(route_channels)
+        self.enable_route_conditioning = bool(enable_route_conditioning)
 
         # One shared encoder consumes gated semantic map and route channels.
         self.NavigationEncoder = build_map_encoder(
@@ -122,6 +123,7 @@ class ReactiveE2E(nn.Module):
             map_context: (B, C_map, H_map, W_map) — semantic BEV map.
             route_mask: (B, C_route, H_map, W_map) — selected route.
             map_valid / route_valid: (B,) explicit sample validity.
+                ``enable_route_conditioning=False`` forces the route gate off.
             visual_history: (B, T, visual_history_dim) or (B, visual_history_dim).
             egomotion_history: (B, T, egomotion_dim) or (B, egomotion_dim).
             projection: Optional CameraProjectionModel operator — the geometry
@@ -194,6 +196,12 @@ class ReactiveE2E(nn.Module):
             default=True,
             name="map_valid",
         )
+        if not self.enable_route_conditioning:
+            route_valid = torch.zeros(
+                B,
+                dtype=torch.bool,
+                device=route_mask.device,
+            )
         gated_route = validity_gate(
             route_mask,
             route_valid,
