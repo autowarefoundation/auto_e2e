@@ -152,3 +152,69 @@ test("fetch targets: nothing to do when the nearest backward anchor is loading",
   expect(t.backward).toBeUndefined();
   expect(t.forward).toBe(20);
 });
+
+// driveToStable models the hook's fetch loop at a FIXED frame (i.e. paused):
+// repeatedly plan a target, resolve it into the cache, and re-plan — exactly
+// what the hook must do across resolutions. `labelAt` returns a label id for a
+// present anchor or null for a scoped-404 (absent). Returns the number of
+// backward fetches issued so a runaway (fetch-storm) shows up as a large count.
+// This is the regression guard for the paused-stall bug: the pure contract must
+// converge to a present fallback within the sparse anchor set, and the hook (via
+// `tick` in its effect deps) must keep invoking it until it does.
+function driveToStable(
+  anchors: number[],
+  frame: number,
+  labelAt: (f: number) => string | null,
+): { cache: Map<string, CacheEntry<Label>>; backwardFetches: number } {
+  const cache = new Map<string, CacheEntry<Label>>();
+  let backwardFetches = 0;
+  // Bounded well above the anchor count; a correct loop converges in <= anchors.
+  for (let guard = 0; guard < anchors.length + 5; guard++) {
+    const { backward, forward } = carryForwardFetchTargets(
+      anchors,
+      frame,
+      keyForFrame,
+      cache,
+    );
+    if (backward === undefined && forward === undefined) break;
+    for (const af of [backward, forward]) {
+      if (af === undefined) continue;
+      if (af === backward) backwardFetches++;
+      const id = labelAt(af);
+      cache.set(
+        keyForFrame(af),
+        id === null ? { status: "absent" } : { status: "present", label: { id } },
+      );
+    }
+  }
+  return { cache, backwardFetches };
+}
+
+test("paused backfill converges past scoped-404 anchors to the older present label", () => {
+  // Regression for the paused-stall bug: anchors 50 and 40 are candidates
+  // (has_reasoning any-run) but 404 in this scope; 30 has a label. Paused at 55,
+  // the loop must walk 50 -> 40 -> 30 and end showing the label at 30.
+  const anchors = [0, 10, 20, 30, 40, 50, 60];
+  const present = new Set([0, 10, 20, 30, 60]); // 40, 50 are scoped-404
+  const labelAt = (f: number) => (present.has(f) ? `a${f}` : null);
+
+  const { cache, backwardFetches } = driveToStable(anchors, 55, labelAt);
+  const sel = selectCarryForwardLabel(anchors, 55, keyForFrame, cache);
+  expect(sel.label?.id).toBe("a30");
+  expect(sel.anchorFrame).toBe(30);
+  expect(sel.pending).toBe(false);
+  // 50 (absent) + 40 (absent) + 30 (present) = 3 backward fetches, not the whole
+  // prior-anchor set — the storm guard holds.
+  expect(backwardFetches).toBe(3);
+});
+
+test("paused backfill reports none (not stuck loading) when no label precedes the playhead", () => {
+  // All anchors <= frame are scoped-404: the loop must terminate with a settled
+  // "none", never an indefinite pending/loading.
+  const anchors = [10, 20, 30];
+  const labelAt = () => null; // every anchor 404s in this scope
+  const { cache } = driveToStable(anchors, 35, labelAt);
+  const sel = selectCarryForwardLabel(anchors, 35, keyForFrame, cache);
+  expect(sel.label).toBeNull();
+  expect(sel.pending).toBe(false);
+});
