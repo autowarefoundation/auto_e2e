@@ -1317,6 +1317,7 @@ def data_processing(
                 scene_ids=ep_list,
                 image_size=image_size,
                 include_world_model_windows=world_model,
+                include_navigation=False,
             )
         else:
             from data_parsing.l2d import L2DDataset
@@ -1491,8 +1492,13 @@ def data_processing(
     num_views = 0
     has_map = False
     has_wm = False
+    navigation_artifact_summary = None
 
-    if world_model and dataset != Dataset.NVIDIA_PHYSICAL_AI and idx_list:
+    if (
+        dataset != Dataset.NVIDIA_PHYSICAL_AI
+        and idx_list
+        and (world_model or dataset == Dataset.KITSCENES)
+    ):
         # ── DECODE-DEDUP path: decode each UNIQUE physical row once ──
         # (#121 §3.4d) Previous approach decoded all 48 window frames per sample
         # (6 workers × ~8 sample overlap = ~8x redundant decode). This two-pass
@@ -1503,8 +1509,8 @@ def data_processing(
         #
         # Pass B: assemble each sample's members (window_index, ego, meta, calib,
         # reasoning JOIN) from the pool — zero video decode.
-        print(f"Packing {len(idx_list)} samples, decode-dedup mode "
-              f"(row-level workers, world_model=True)...")
+        print(f"Packing {len(idx_list)} samples, parent-assembly mode "
+              f"(row-level camera workers, world_model={world_model})...")
         row_init = (dataset.value, ep_list, raw_path, image_size)
 
         # Pass A: unique rows. ds is still alive here (not yet deleted).
@@ -1525,17 +1531,16 @@ def data_processing(
                 current_row = (ep_idx_s, row_s - ep_start_s)
             sample_cur_rows[si] = current_row
             all_rows.add(current_row)
-            # window_rows raises IndexError only if the margin invariant is
-            # broken — let it propagate (fail-loud on invariant violation).
-            for row_t in ds.window_rows(si):
-                all_rows.add(row_t)
+            if world_model:
+                # window_rows raises only if the margin invariant is broken.
+                for row_t in ds.window_rows(si):
+                    all_rows.add(row_t)
 
         del ds  # free before spawning workers
 
-        # row_map: (group_id, frame) -> {frame_id: blob} per cam + map_jpeg.
-        # Only current rows need a map tile; history/future windows contain
-        # camera pixels only. This is particularly important for KITScenes,
-        # where every map tile runs a Lanelet2 query and rasterization.
+        # row_map contains camera JPEGs and an optional legacy map JPEG. KITScenes
+        # navigation is generated once in the parent assembly below, never in a
+        # camera worker.
         row_map: dict = {}
         row_workers = _row_decode_worker_count(dataset, len(all_rows))
         current_rows = set(sample_cur_rows.values())
@@ -1546,12 +1551,12 @@ def data_processing(
         with ProcessPoolExecutor(max_workers=row_workers, mp_context=ctx,
                                  initializer=parallel_pack.init_row_worker,
                                  initargs=row_init) as rpool:
-            for row_key, cam_jpegs, map_jpeg in rpool.map(
+            for row_key, cam_jpegs, legacy_map in rpool.map(
                     parallel_pack.decode_row, decode_tasks):
-                row_map[row_key] = (cam_jpegs, map_jpeg)
+                row_map[row_key] = (cam_jpegs, legacy_map)
                 for fid, blob in cam_jpegs.items():
                     _write_pool(fid, blob)
-                if map_jpeg is not None:
+                if dataset != Dataset.KITSCENES and legacy_map is not None:
                     has_map = True
         num_views = len(next(iter(row_map.values()))[0]) if row_map else 0
         print(f"Frame pool: {pool_frames_written} unique frames decoded "
@@ -1569,6 +1574,8 @@ def data_processing(
                 scene_ids=ep_list,
                 image_size=image_size,
                 include_world_model_windows=False,
+                include_navigation=True,
+                source_revision=source_revision,
             )
         else:
             from data_parsing.l2d import L2DDataset
@@ -1579,6 +1586,37 @@ def data_processing(
                 root=raw_path,
             )
 
+        if dataset == Dataset.KITSCENES:
+            import hashlib
+
+            artifact_records = []
+            scene_artifacts = ds_asm.scene_navigation_artifacts()
+            for scene_id, artifacts in sorted(scene_artifacts.items()):
+                destination = (
+                    out_dir
+                    if len(scene_artifacts) == 1
+                    else os.path.join(out_dir, "navigation", scene_id)
+                )
+                os.makedirs(destination, exist_ok=True)
+                hashes = {}
+                for filename, blob in sorted(artifacts.items()):
+                    with open(os.path.join(destination, filename), "wb") as f:
+                        f.write(blob)
+                    hashes[filename] = hashlib.sha256(blob).hexdigest()
+                quality = json.loads(artifacts["navigation_quality.json"])
+                artifact_records.append({
+                    "scene_id": scene_id,
+                    "path": os.path.relpath(destination, out_dir),
+                    "hashes": hashes,
+                    "route_valid": bool(quality["route_valid"]),
+                    "route_confidence": float(quality["route_confidence"]),
+                    "geometry_id": quality["geometry_id"],
+                })
+            navigation_artifact_summary = {
+                "schema_version": "scene_navigation_v1",
+                "scenes": artifact_records,
+            }
+
         for si in idx_list:
             if sample_count % samples_per_shard == 0:
                 open_new_shard()
@@ -1587,26 +1625,29 @@ def data_processing(
             from data_processing.dataset_snapshot import split_bucket
             members: dict = {}
 
-            # window_index — pool frame_ids, no decode.
-            try:
+            if world_model:
+                # window_index contains pool frame IDs, never future navigation.
                 ids = ds_asm.window_frame_ids(si)
                 members["window_index.json"] = json.dumps(ids).encode()
                 has_wm = True
-            except (IndexError, AttributeError):
-                pass
 
             # cam_*.jpg = current frame (offset 0). The current-frame bytes are in
             # row_map[(ep_idx, cur_fi)][0] — the same jpegs already written to pool.
             cur_key = sample_cur_rows.get(si)
             if cur_key and cur_key in row_map:
-                cur_cams, cur_map = row_map[cur_key]
+                cur_cams, legacy_map = row_map[cur_key]
                 # cam_cams is {frame_id: bytes}; sort by cam index embedded in fid.
                 for fid, blob in sorted(cur_cams.items(),
                                         key=lambda kv: int(kv[0].rsplit("-c", 1)[-1])):
                     cam_i = int(fid.rsplit("-c", 1)[-1])
                     members[f"cam_{cam_i}.jpg"] = blob
-                if cur_map is not None:
-                    members["map.jpg"] = cur_map
+                if dataset == Dataset.KITSCENES:
+                    members.update(
+                        ds_asm.navigation_members_for_row(*cur_key)
+                    )
+                    has_map = True
+                elif legacy_map is not None:
+                    members["map.jpg"] = legacy_map
 
             # ego + meta + calib (no video decode).
             ego_hist, traj, pose_current, gps_future = ds_asm.numeric_for(si)
@@ -1660,7 +1701,10 @@ def data_processing(
                 for frame_id, blob in frame_pool.items():
                     _write_pool(frame_id, blob)
                 num_views = nviews
-                has_map = has_map or ("map.jpg" in members)
+                has_map = has_map or (
+                    "map.jpg" in members
+                    or "map_semantic.npz" in members
+                )
                 has_wm = has_wm or ("window_index.json" in members)
                 if _record_to_json is not None:
                     record = labels_by_id.get(sample_key)
@@ -1712,6 +1756,11 @@ def data_processing(
                 # separate map.jpg key and is NOT counted here (#77).
                 "num_views": num_views if sample_count else 0,
                 "has_map": bool(sample_count) and has_map,
+                "has_navigation": (
+                    bool(sample_count)
+                    and navigation_artifact_summary is not None
+                ),
+                "navigation": navigation_artifact_summary,
                 # World-Model windows present when packed (enables JEPA training).
                 "has_world_model": bool(sample_count) and has_wm,
                 "has_reasoning_labels": reasoning_label_count > 0,
