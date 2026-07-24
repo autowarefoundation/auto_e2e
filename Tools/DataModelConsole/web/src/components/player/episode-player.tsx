@@ -38,11 +38,11 @@ import { SceneMap } from "@/components/player/scene-map";
 import { TimelineScrubber } from "@/components/player/timeline-scrubber";
 import { TrajectoryBEV } from "@/components/player/trajectory-bev";
 import { ReasoningTimeline } from "@/components/reasoning-timeline";
+import { useCarryForwardLabel } from "@/components/player/use-carry-forward-label";
 import { Button } from "@/components/ui/button";
 import { usePlayback, MAX_SPEED, MIN_SPEED } from "@/hooks/use-playback";
 import {
   ApiError,
-  getReasoningLabel,
   getShardRigProjection,
   getShardOverlay,
   listShardOverlayModels,
@@ -73,7 +73,6 @@ import {
 } from "@/lib/projection";
 import type {
   OverlayModel,
-  ReasoningLabelRecord,
   RigProjectionDocument,
   ShardIndex,
 } from "@/types";
@@ -104,8 +103,6 @@ const SPACE_OWNING_ELEMENTS = [
   '[role="textbox"]',
   '[role="treeitem"]',
 ].join(",");
-
-type LabelState = { key: string; label: ReasoningLabelRecord } | null;
 
 export interface PlayerViewState {
   frame: number;
@@ -491,51 +488,27 @@ export function EpisodePlayer({
       projectTrajectoryRibbonToCameras(rigProjection, groundTruthTrajectory),
     [rigProjection, groundTruthTrajectory],
   );
-  const [reasoning, setReasoning] = useState<LabelState>(null);
-  const [labelStatus, setLabelStatus] = useState<
-    "idle" | "loading" | "ready" | "absent" | "error"
-  >("idle");
-  useEffect(() => {
-    if (!sample?.has_reasoning) {
-      setReasoning(null);
-      setLabelStatus("idle");
-      return;
-    }
-    const key = sample.key;
-    setLabelStatus("loading"); // clear any stale card immediately
-    let cancelled = false;
-    const timer = setTimeout(() => {
-      getReasoningLabel(dataset, key, promptVersion, version, teacher)
-        .then((label) => {
-          if (cancelled) return;
-          setReasoning({ key, label });
-          setLabelStatus("ready");
-        })
-        .catch((err: unknown) => {
-          if (cancelled) return;
-          if (err instanceof ApiError && err.status === 404) {
-            setReasoning(null);
-            setLabelStatus("absent");
-          } else {
-            console.warn("reasoning label fetch failed", err);
-            setReasoning(null);
-            setLabelStatus("error");
-          }
-        });
-    }, 250);
-    return () => {
-      cancelled = true;
-      clearTimeout(timer);
-    };
-  }, [
+  // Carry-forward reasoning label: labels attach at ~1Hz but video plays at
+  // 10Hz, so the panel shows the nearest label at or before the playhead
+  // (last-known-good) and swaps to a newer one the instant its anchor is
+  // crossed — never blanking between the sparse anchors. `elapsed*` measure how
+  // stale the shown label is (0 on its own anchor frame).
+  const {
+    label: displayedLabel,
+    anchorFrame,
+    isAnchorFrame,
+    pending: labelPending,
+    elapsedFrames,
+    elapsedSec,
+  } = useCarryForwardLabel({
+    samples: index.samples,
+    frame,
+    fps: index.fps || 10,
     dataset,
     version,
     teacher,
     promptVersion,
-    sample?.key,
-    sample?.has_reasoning,
-    sample,
-  ]);
+  });
 
   const focusCamera = useCallback(
     (idx: number) => {
@@ -703,9 +676,8 @@ export function EpisodePlayer({
             samples={index.samples}
             frame={frame}
             fps={index.fps || 10}
-            reasoning={
-              reasoning?.key === sample?.key ? reasoning.label : null
-            }
+            reasoning={displayedLabel}
+            labelIsAnchorFrame={isAnchorFrame}
             predictionTrajectories={predictionFan}
             medianPrediction={medianPrediction}
             curvatureSign={curvatureSign}
@@ -933,12 +905,38 @@ export function EpisodePlayer({
       )}
 
       <div className="rounded-lg border border-slate-800 bg-slate-950/50 p-4">
-        <p className="mb-3 text-[10px] uppercase tracking-wider text-slate-500">
-          Reasoning label
-        </p>
-        {labelStatus === "ready" && reasoning?.key === sample?.key ? (
-          <ReasoningTimeline label={reasoning.label} />
-        ) : labelStatus === "loading" ? (
+        <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+          <p className="text-[10px] uppercase tracking-wider text-slate-500">
+            Reasoning label
+          </p>
+          {displayedLabel && (
+            // Staleness of the carried-forward label: 0 on its own anchor
+            // frame, growing until the next ~1Hz anchor swaps it in. Amber past
+            // one label period (>=1s) flags that the expected next label is
+            // missing in this scope.
+            <span
+              role="status"
+              aria-live="polite"
+              className={`font-mono text-[10px] ${
+                elapsedFrames === 0
+                  ? "text-emerald-400"
+                  : elapsedSec >= 1
+                    ? "text-amber-400"
+                    : "text-slate-400"
+              }`}
+              title={`Label anchored at frame ${anchorFrame}; playhead is ${elapsedFrames} frame(s) later`}
+            >
+              {elapsedFrames === 0
+                ? "live · at label anchor"
+                : `carried · t+${elapsedSec.toFixed(1)}s since anchor · ${elapsedFrames} frame${
+                    elapsedFrames === 1 ? "" : "s"
+                  }`}
+            </span>
+          )}
+        </div>
+        {displayedLabel ? (
+          <ReasoningTimeline label={displayedLabel} />
+        ) : labelPending ? (
           <p
             role="status"
             aria-live="polite"
@@ -946,18 +944,13 @@ export function EpisodePlayer({
           >
             Loading label…
           </p>
-        ) : labelStatus === "error" ? (
-          <p role="alert" className="text-sm text-amber-500">
-            Could not load the label for this frame. It may retry on the next
-            step.
-          </p>
         ) : (
           <p
             role="status"
             aria-live="polite"
             className="text-sm text-slate-500"
           >
-            No reasoning label at this frame
+            No reasoning label at or before this frame
             {promptVersion ? " for the selected teacher and prompt version" : ""}. Amber
             ticks on the timeline mark frames labelled in any run, so a ticked
             frame may still be unlabelled in this one.
