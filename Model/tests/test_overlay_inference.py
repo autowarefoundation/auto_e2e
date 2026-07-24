@@ -68,10 +68,13 @@ class _NoiseEchoPolicy(torch.nn.Module):
     def forward(
         self,
         camera_tiles,
-        map_input,
+        map_context,
         visual_history,
         egomotion_history,
         *,
+        route_mask,
+        map_valid,
+        route_valid,
         initial_noise,
         **kwargs,
     ):
@@ -82,7 +85,10 @@ class _NoiseEchoPolicy(torch.nn.Module):
 def _batch(size):
     return {
         "visual_tiles": torch.zeros(size, 2, 3, 4, 4),
-        "map_input": torch.zeros(size, 3, 4, 4),
+        "map_context": torch.zeros(size, 3, 4, 4),
+        "route_mask": torch.zeros(size, 2, 4, 4),
+        "map_valid": torch.ones(size, dtype=torch.bool),
+        "route_valid": torch.zeros(size, dtype=torch.bool),
         "visual_history": torch.zeros(size, 896),
         "egomotion_history": torch.zeros(size, 256),
     }
