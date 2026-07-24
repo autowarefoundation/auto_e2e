@@ -16,7 +16,7 @@ class ReactiveE2E(nn.Module):
                  map_type="rasterized", map_in_channels=3,
                  map_fusion_mode="residual", map_fusion_kwargs=None,
                  temporal_memory_mode="no_memory", temporal_memory_kwargs=None,
-                 planner_mode="gru", planner_kwargs=None,
+                 planner_mode="bezier", planner_kwargs=None,
                  enable_reasoning=False, reasoning_mode="none",
                  reasoning_kwargs=None):
         super(ReactiveE2E, self).__init__()

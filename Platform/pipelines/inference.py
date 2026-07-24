@@ -101,11 +101,9 @@ def noise_from(
 
 def _planner(model: torch.nn.Module) -> torch.nn.Module:
     try:
-        return model.Reactive_E2E.TrajectoryPlanner
+        return model.trajectory_planner
     except AttributeError as exc:
-        raise ValueError(
-            "model does not expose Reactive_E2E.TrajectoryPlanner"
-        ) from exc
+        raise ValueError("model does not expose trajectory_planner") from exc
 
 
 def predict_control(

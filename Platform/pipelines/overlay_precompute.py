@@ -13,11 +13,9 @@ from Platform.pipelines.inference import predict_control
 def planner_is_deterministic(model: torch.nn.Module) -> bool:
     """Return whether the active trajectory planner ignores its noise prior."""
     try:
-        planner = model.Reactive_E2E.TrajectoryPlanner
+        planner = model.trajectory_planner
     except AttributeError as exc:
-        raise ValueError(
-            "model does not expose Reactive_E2E.TrajectoryPlanner"
-        ) from exc
+        raise ValueError("model does not expose trajectory_planner") from exc
     return planner.__class__.__name__.lower().startswith("bezier")
 
 
