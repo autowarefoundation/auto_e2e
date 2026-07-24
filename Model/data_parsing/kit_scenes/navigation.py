@@ -25,9 +25,6 @@ from navigation.rasterizer import (
     NavigationRaster,
 )
 
-from .map import _cached_scene_map
-
-
 ANCHOR_PERIOD_NS = 500_000_000
 KITSCENES_NAVIGATION_VERSION = "kitscenes_navigation_v1"
 
@@ -78,6 +75,8 @@ class KitScenesSceneNavigation:
         map_version = (
             f"kitscenes:{self.scene_id}:{self.map_sha256[:16]}"
         )
+        from .map import _cached_scene_map
+
         scene_map = _cached_scene_map(self.scene_path)
         if scene_map is None:
             raise ValueError(
