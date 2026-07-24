@@ -52,7 +52,9 @@ export function useCarryForwardLabel({
   // the fresh cache with cross-scope labels.
   const scopeRef = useRef(0);
   // Re-render trigger when a fetch resolves (the cache is a ref, not state).
-  const [, setTick] = useState(0);
+  // `tick` is a selector dependency so a resolution re-selects even while
+  // paused, when `frame` is not changing to drive the recompute on its own.
+  const [tick, setTick] = useState(0);
   const rerender = useCallback(() => setTick((t) => t + 1), []);
 
   const anchorFrames = useMemo(() => anchorFramesOf(samples), [samples]);
@@ -72,19 +74,18 @@ export function useCarryForwardLabel({
     rerender();
   }, [dataset, version, teacher, promptVersion, rerender]);
 
-  const selection = useMemo(
-    () =>
-      selectCarryForwardLabel(
-        anchorFrames,
-        frame,
-        keyForFrame,
-        cacheRef.current,
-      ),
-    // cacheRef.current is mutated in place; setTick (via `tick`) forces this to
-    // recompute when a fetch resolves. anchorFrames/frame/keyForFrame are the
-    // real inputs.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [anchorFrames, frame, keyForFrame, samples],
+  // Computed inline (not memoized) because it reads the mutable cacheRef: the
+  // component re-renders on every `frame` change and on every `tick` bump (a
+  // fetch resolving), which are exactly the moments the selection can change, so
+  // a fresh scan each render is both correct and cheap — the backward walk is
+  // over the sparse ~1Hz anchors, not every frame. `tick` is referenced so the
+  // dependency is explicit to readers even though the value isn't used directly.
+  void tick;
+  const selection = selectCarryForwardLabel(
+    anchorFrames,
+    frame,
+    keyForFrame,
+    cacheRef.current,
   );
 
   // Fetch driver: at most one backward (fill the label to show) + one forward
@@ -130,9 +131,9 @@ export function useCarryForwardLabel({
           rerender();
         });
     }
-    // setTick drives re-evaluation after each resolution via the closure over
-    // cacheRef; scope inputs re-run this when the partition changes.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // A resolution mutates cacheRef and calls rerender(); the parent re-renders
+    // and this effect re-runs (frame typically also changed), re-planning the
+    // next fetch target. Scope inputs re-run it when the partition changes.
   }, [
     anchorFrames,
     frame,
