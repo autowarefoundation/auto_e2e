@@ -21,6 +21,7 @@ from .contracts import (
     TransitionType,
 )
 from .lanelet2_adapter import _attr, _level, _points
+from .quality import DEFAULT_NAVIGATION_QUALITY_POLICY
 
 
 LANELET2_MATCHER_VERSION = "lanelet2_trace_matcher_v1"
@@ -37,9 +38,18 @@ class Lanelet2MatcherConfig:
     adjacent_cost: float = 1.0
     disconnected_cost: float = 25.0
     skipped_pose_cost: float = 0.5
-    minimum_matched_pose_ratio: float = 0.80
-    maximum_p95_distance_m: float = 5.0
-    maximum_p95_heading_error_rad: float = math.radians(45.0)
+    quality_policy_id: str = (
+        DEFAULT_NAVIGATION_QUALITY_POLICY.policy_id
+    )
+    minimum_matched_pose_ratio: float = (
+        DEFAULT_NAVIGATION_QUALITY_POLICY.minimum_matched_pose_ratio
+    )
+    maximum_p95_distance_m: float = (
+        DEFAULT_NAVIGATION_QUALITY_POLICY.maximum_p95_distance_m
+    )
+    maximum_p95_heading_error_rad: float = (
+        DEFAULT_NAVIGATION_QUALITY_POLICY.maximum_p95_heading_error_rad
+    )
 
     def __post_init__(self) -> None:
         positive = (
@@ -53,6 +63,8 @@ class Lanelet2MatcherConfig:
             raise ValueError("matcher metric parameters must be positive")
         if self.max_candidates_per_pose <= 0:
             raise ValueError("max_candidates_per_pose must be positive")
+        if not self.quality_policy_id:
+            raise ValueError("quality_policy_id must not be empty")
         if not 0.0 <= self.minimum_matched_pose_ratio <= 1.0:
             raise ValueError("minimum_matched_pose_ratio must be in [0,1]")
 
