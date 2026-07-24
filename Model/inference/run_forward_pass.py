@@ -16,6 +16,7 @@ def run_forward_pass(backbone, planner_mode, device, embed_dim=256, batch_size=2
     # map_input branch, not a camera view.
     model = AutoE2E(backbone=backbone, num_views=num_views, embed_dim=embed_dim,
                     planner_mode=planner_mode).to(device)
+    model.eval()
 
     # Visual Scene Input: [batch, num_views, channels, height, width]
     camera_tiles = torch.randn(batch_size, num_views, 3, 256, 256).to(device)
