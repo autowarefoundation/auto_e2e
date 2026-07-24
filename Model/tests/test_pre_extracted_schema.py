@@ -34,7 +34,12 @@ def _ego_bytes():
     return np.zeros(384, dtype=np.float32).tobytes()
 
 
-def _navigation_members(*, map_valid=True, route_valid=True):
+def _navigation_members(
+    *,
+    map_valid=True,
+    route_valid=True,
+    extra_metadata=None,
+):
     map_context = np.zeros((14, 256, 256), dtype=np.float32)
     map_context[0, 10:20, 10:20] = 0.25
     route_mask = np.zeros((2, 256, 256), dtype=np.uint8)
@@ -46,6 +51,7 @@ def _navigation_members(*, map_valid=True, route_valid=True):
             "schema_version": SAMPLE_NAVIGATION_ARTIFACT_VERSION,
             "map_valid": map_valid,
             "route_valid": route_valid,
+            **(extra_metadata or {}),
         }),
     }
 
@@ -116,6 +122,30 @@ class TestDecodeSampleMapSplit:
 
         with pytest.raises(ValueError, match="complete schema-v5 set"):
             _decode_sample(sample)
+
+    def test_navigation_metadata_collates_with_sample_provenance(self):
+        decoded = []
+        for index in range(2):
+            sample = {
+                "cam_0.jpg": _jpeg_bytes((0, 0, 0)),
+                "ego.npy": _ego_bytes(),
+                **_navigation_members(extra_metadata={
+                    "route_id": f"route-{index}",
+                    "route_revision": index + 1,
+                    "input_vector_sha256": f"digest-{index}",
+                }),
+            }
+            decoded.append(_decode_sample(sample))
+
+        batch = torch.utils.data.default_collate(decoded)
+
+        metadata = batch["navigation_metadata"]
+        assert metadata["route_id"] == ["route-0", "route-1"]
+        assert metadata["route_revision"].tolist() == [1, 2]
+        assert metadata["input_vector_sha256"] == [
+            "digest-0",
+            "digest-1",
+        ]
 
     def test_shard_pixels_normalized_exactly_once(self):
         """The raw-frame -> JPEG -> loader path must apply ImageNet Normalize
