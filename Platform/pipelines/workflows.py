@@ -118,6 +118,7 @@ _CACHE_VERSIONS = _cache_versions_for_contracts(
 INGEST_CACHE_VERSION = _CACHE_VERSIONS["ingest"]
 LABEL_CACHE_VERSION = _CACHE_VERSIONS["label"]
 PACK_CACHE_VERSION = _CACHE_VERSIONS["pack"]
+NAVIGATION_QUALITY_CACHE_VERSION = "navigation-quality-v1"
 
 
 def _data_prep_pod_template():
@@ -303,6 +304,53 @@ def _select_shard_dirs(shards, dataset) -> List[str]:
 def _loader_download_dir(shard) -> str:
     """Download one shard FlyteDirectory and return its local path (merged path)."""
     return str(shard.download())
+
+
+def _verified_navigation_training_shard_dirs(
+    shard_dirs: List[str],
+    manifests: dict[str, dict],
+    report: dict,
+) -> tuple[List[str], dict]:
+    """Verify the packed audit and select only policy-accepted partitions."""
+    from navigation.quality import (
+        verify_packed_navigation_quality_audit,
+    )
+
+    verified = verify_packed_navigation_quality_audit(
+        report,
+        shard_dirs,
+    )
+    path_by_partition = {}
+    for shard_dir in shard_dirs:
+        partition_id = manifests[shard_dir].get("partition_id")
+        if not isinstance(partition_id, str) or not partition_id:
+            raise ValueError(
+                "KITScenes navigation training requires partition IDs"
+            )
+        if partition_id in path_by_partition:
+            raise ValueError(
+                "KITScenes navigation training has duplicate partition ID "
+                f"{partition_id!r}"
+            )
+        path_by_partition[partition_id] = shard_dir
+
+    accepted = set(verified["accepted_partition_ids"])
+    excluded = set(verified["excluded_partition_ids"])
+    if accepted & excluded or accepted | excluded != set(
+        path_by_partition
+    ):
+        raise ValueError(
+            "navigation quality audit partition coverage differs from shards"
+        )
+    selected = [
+        path_by_partition[partition_id]
+        for partition_id in sorted(accepted)
+    ]
+    if not selected:
+        raise ValueError(
+            "navigation quality policy accepted no training partitions"
+        )
+    return selected, verified
 
 
 def _training_num_views_from_manifests(
@@ -1808,6 +1856,53 @@ def data_processing(
 
     print(f"Processed {dataset.value}: {sample_count} samples → {shard_idx} shards")
     return FlyteDirectory(out_dir)
+
+
+# ============================================================
+# Task: KITScenes navigation quality audit
+# ============================================================
+@task(
+    container_image=DATA_PREP_IMAGE,
+    pod_template=_data_prep_pod_template(),
+    requests=Resources(cpu="1", mem="2Gi", ephemeral_storage="2Gi"),
+    limits=Resources(cpu="1", mem="2Gi", ephemeral_storage="2Gi"),
+    cache=True,
+    cache_version=NAVIGATION_QUALITY_CACHE_VERSION,
+)
+def audit_kitscenes_navigation_quality(
+    shards: List[FlyteDirectory],
+) -> FlyteFile:
+    """Create a hash-bound route-quality gate before KITScenes training."""
+    import json
+    import os
+    import tempfile
+
+    from navigation.quality import audit_packed_navigation_quality
+
+    shard_dirs = [_loader_download_dir(shard) for shard in shards]
+    report = audit_packed_navigation_quality(shard_dirs)
+    output_dir = tempfile.mkdtemp(prefix="navigation-quality-")
+    output_path = os.path.join(
+        output_dir,
+        "navigation_quality_audit.json",
+    )
+    with open(output_path, "w", encoding="ascii") as stream:
+        json.dump(
+            report,
+            stream,
+            allow_nan=False,
+            ensure_ascii=True,
+            indent=2,
+            sort_keys=True,
+        )
+        stream.write("\n")
+    print(
+        "KITScenes navigation quality: "
+        f"accepted={report['accepted_scene_count']} "
+        f"excluded={report['excluded_scene_count']} "
+        f"report={output_path}"
+    )
+    return FlyteFile(output_path)
 
 
 # ============================================================
