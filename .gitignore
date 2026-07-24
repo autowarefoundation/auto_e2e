@@ -1,5 +1,7 @@
 __pycache__/
 *.py[cod]
+Model/navigation/native/libnavigation_rasterizer.so
+Model/navigation/native/libnavigation_rasterizer.dylib
 ._*
 benchmark_results.json
 **/data/
