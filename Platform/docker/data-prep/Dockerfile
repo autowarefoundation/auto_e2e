@@ -1,7 +1,7 @@
 FROM public.ecr.aws/docker/library/python:3.12-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ffmpeg git git-lfs && rm -rf /var/lib/apt/lists/*
+    ffmpeg g++ git git-lfs && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /workspace
 
@@ -61,6 +61,8 @@ RUN pip install --no-cache-dir \
 COPY Model/ /workspace/Model/
 COPY Platform/pipelines/ /workspace/Platform/pipelines/
 COPY Tools/trajectory_visualization/ /workspace/Tools/trajectory_visualization/
+
+RUN python Model/navigation/native/build.py
 
 ENV PYTHONPATH=/workspace/Model:/workspace
 ENV PYTHONUNBUFFERED=1
