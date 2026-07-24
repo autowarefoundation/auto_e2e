@@ -519,7 +519,10 @@ def _evaluate_open_loop(
                     )
                 vis_hist = batch["visual_history"].to(device)
                 target = batch["trajectory_target"]
-                map_input = batch["map_input"].to(device)
+                map_context = batch["map_context"].to(device)
+                route_mask = batch["route_mask"].to(device)
+                map_valid = batch["map_valid"].to(device)
+                route_valid = batch["route_valid"].to(device)
                 history_frames = batch.get("history_frames")
                 future_frames = batch.get("future_frames")
                 if history_frames is not None:
@@ -529,9 +532,12 @@ def _evaluate_open_loop(
 
                 pred = model(
                     visual,
-                    map_input,
+                    map_context,
                     vis_hist,
                     ego_hist,
+                    route_mask=route_mask,
+                    map_valid=map_valid,
+                    route_valid=route_valid,
                     projection=projection,
                     geometry_type=geometry_type,
                     history_frames=history_frames,
@@ -1761,6 +1767,10 @@ def data_processing(
                     and navigation_artifact_summary is not None
                 ),
                 "navigation": navigation_artifact_summary,
+                "map_context_channels": (
+                    14 if navigation_artifact_summary is not None else 3
+                ),
+                "route_channels": 2,
                 # World-Model windows present when packed (enables JEPA training).
                 "has_world_model": bool(sample_count) and has_wm,
                 "has_reasoning_labels": reasoning_label_count > 0,
@@ -2301,6 +2311,26 @@ def train_il(
         )
     )
     num_views = _training_num_views_from_manifests(manifests, shard_dirs)
+    map_context_channel_counts = {
+        int(manifests[path].get("map_context_channels", 3))
+        for path in shard_dirs
+    }
+    route_channel_counts = {
+        int(manifests[path].get("route_channels", 2))
+        for path in shard_dirs
+    }
+    if len(map_context_channel_counts) != 1:
+        raise ValueError(
+            "one training run cannot mix map-context channel contracts: "
+            f"{sorted(map_context_channel_counts)}"
+        )
+    if len(route_channel_counts) != 1:
+        raise ValueError(
+            "one training run cannot mix route channel contracts: "
+            f"{sorted(route_channel_counts)}"
+        )
+    map_context_channels = next(iter(map_context_channel_counts))
+    route_channels = next(iter(route_channel_counts))
 
     from Platform.pipelines.training_checkpoint import stable_digest
 
@@ -2332,6 +2362,11 @@ def train_il(
             "shard_names": list(manifest.get("shard_names", [])),
             "contracts": manifest.get("contracts"),
             "num_views": int(manifest.get("num_views", 0)),
+            "map_context_channels": int(
+                manifest.get("map_context_channels", 3)
+            ),
+            "route_channels": int(manifest.get("route_channels", 2)),
+            "navigation": manifest.get("navigation"),
             "has_world_model": bool(
                 manifest.get("has_world_model", False)
             ),
@@ -2515,6 +2550,14 @@ def train_il(
     for d in shard_dirs:
         manifest = manifests[d]
         dname = manifest.get("dataset", d)
+        if (
+            dataset == Dataset.KITSCENES
+            and not manifest.get("has_navigation", False)
+        ):
+            raise ValueError(
+                f"KITScenes shard '{dname}' ({d}) has no schema-v5 "
+                "navigation artifacts"
+            )
         if enable_world_model and not manifest.get("has_world_model", False):
             raise ValueError(
                 f"enable_world_model=True but dataset '{dname}' ({d}) has no "
@@ -2542,11 +2585,13 @@ def train_il(
             f"across {len(shard_dirs)} non-empty partitions"
         )
 
-    # Model. fusion_mode is gone (BEV hardcoded inside ReactiveE2E); the model
-    # now also owns the map branch, so its forward requires a map_input tensor.
+    # Route is fused only through the Reactive navigation encoder. Reasoning
+    # receives no route-derived argument.
     model = AutoE2E(
         backbone=bb, num_views=num_views, embed_dim=256,
         is_pretrained=True,
+        map_context_channels=map_context_channels,
+        route_channels=route_channels,
         enable_reasoning=enable_reasoning, reasoning_mode=reasoning_mode,
         enable_world_model=enable_world_model,
     ).to(device)
@@ -2596,6 +2641,8 @@ def train_il(
         "backbone": bb,
         "embed_dim": 256,
         "num_views": num_views,
+        "map_context_channels": map_context_channels,
+        "route_channels": route_channels,
         # Checkpoints contain the complete backbone. Reconstruction must not
         # download pretrained weights before loading that state.
         "is_pretrained": False,
@@ -2799,7 +2846,67 @@ def train_il(
     ]
 
     _proj_cache = _ProjectionDeviceCache(device)
-    _first_step = not resumed
+    optimizer_step_count = 0
+    route_valid_sample_count = 0
+    route_sample_count = 0
+    gradient_evidence = {
+        "first_step": None,
+        "navigation_encoder_first_nonzero_step": None,
+    }
+    optimizer_probe_name, optimizer_probe_parameter = next(
+        (name, parameter)
+        for name, parameter in model.named_parameters()
+        if parameter.requires_grad and "TrajectoryPlanner" in name
+    )
+    optimizer_probe_before = optimizer_probe_parameter.detach().clone()
+
+    def _branch_gradient_norm(name_fragment):
+        total, count = 0.0, 0
+        for parameter_name, parameter in model.named_parameters():
+            if (
+                name_fragment in parameter_name
+                and parameter.grad is not None
+            ):
+                total += float(parameter.grad.norm().item()) ** 2
+                count += 1
+        return {"norm": total ** 0.5, "parameter_count": count}
+
+    def _observe_gradient_flow(step_number):
+        planner = _branch_gradient_norm("TrajectoryPlanner")
+        navigation_fusion = _branch_gradient_norm("MapBEVFusion")
+        navigation_encoder = _branch_gradient_norm("NavigationEncoder")
+        if gradient_evidence["first_step"] is None:
+            first = {
+                "optimizer_step": step_number,
+                "planner": planner,
+                "navigation_fusion": navigation_fusion,
+                "navigation_encoder": navigation_encoder,
+            }
+            if enable_world_model:
+                first["world_model"] = _branch_gradient_norm(
+                    "World_Action_Model"
+                )
+            if enable_reasoning:
+                first["reasoning"] = _branch_gradient_norm("Reasoning")
+            gradient_evidence["first_step"] = first
+            print(f"grad-flow probe: {first}")
+        if (
+            navigation_encoder["norm"] > 0.0
+            and gradient_evidence[
+                "navigation_encoder_first_nonzero_step"
+            ] is None
+        ):
+            gradient_evidence[
+                "navigation_encoder_first_nonzero_step"
+            ] = {
+                "optimizer_step": step_number,
+                **navigation_encoder,
+            }
+            print(
+                "navigation encoder gradient became non-zero: "
+                f"{gradient_evidence['navigation_encoder_first_nonzero_step']}"
+            )
+
     accum = max(1, int(grad_accum_steps))
     if accum > 1:
         print(f"Gradient accumulation: {accum} micro-batches "
@@ -2835,7 +2942,12 @@ def train_il(
             )
             vis_hist = batch["visual_history"].to(device)     # (B, 896)
             target = batch["trajectory_target"].to(device)    # (B, 128)
-            map_input = batch["map_input"].to(device)
+            map_context = batch["map_context"].to(device)
+            route_mask = batch["route_mask"].to(device)
+            map_valid = batch["map_valid"].to(device)
+            route_valid = batch["route_valid"].to(device)
+            route_valid_sample_count += int(route_valid.sum().item())
+            route_sample_count += int(route_valid.numel())
 
             # A weak object-key cache cannot alias a newly opened scene when
             # Python reuses the identity of a projection from a retired loader.
@@ -2855,7 +2967,10 @@ def train_il(
             if micro_idx == 0:
                 optimizer.zero_grad()
             with torch.amp.autocast("cuda", enabled=amp):
-                out = model(visual, map_input, vis_hist, ego_hist,
+                out = model(visual, map_context, vis_hist, ego_hist,
+                            route_mask=route_mask,
+                            map_valid=map_valid,
+                            route_valid=route_valid,
                             projection=proj_dev, geometry_type=batch_geom,
                             mode="train", trajectory_target=target,
                             history_frames=history_frames, future_frames=future_frames)
@@ -2911,30 +3026,11 @@ def train_il(
             micro_idx = 0
 
             scaler.unscale_(optimizer)
-            # One-time gradient-flow probe (very first optimizer step): prove each
-            # enabled branch actually receives gradient (not just the trajectory
-            # head). We report the grad-norm of a parameter unique to each branch —
-            # a zero/None here means that branch is not training even though its
-            # loss is being added.
-            if _first_step:
-                def _branch_gn(substr):
-                    tot, n = 0.0, 0
-                    for nm, p in model.named_parameters():
-                        if substr in nm and p.grad is not None:
-                            tot += float(p.grad.norm().item()) ** 2
-                            n += 1
-                    return (tot ** 0.5, n)
-                planner_gn = _branch_gn("TrajectoryPlanner")
-                probe = f"grad-flow probe: planner={planner_gn}"
-                if enable_world_model:
-                    probe += f" world_model={_branch_gn('World_Action_Model')}"
-                if enable_reasoning:
-                    probe += f" reasoning={_branch_gn('Reasoning')}"
-                print(probe)
-                _first_step = False
+            _observe_gradient_flow(optimizer_step_count + 1)
             torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
             scaler.step(optimizer)
             scaler.update()
+            optimizer_step_count += 1
 
         # Flush a trailing partial accumulation window (epoch batch count not a
         # multiple of accum) so its grads aren't silently dropped at epoch end.
@@ -2945,9 +3041,11 @@ def train_il(
                 accumulation_steps=accum,
                 partial_count=micro_idx,
             )
+            _observe_gradient_flow(optimizer_step_count + 1)
             torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
             scaler.step(optimizer)
             scaler.update()
+            optimizer_step_count += 1
             micro_idx = 0
 
         if not epoch_losses:
@@ -3134,6 +3232,51 @@ def train_il(
             )
             break
 
+    optimizer_parameter_delta_norm = float(
+        (
+            optimizer_probe_parameter.detach() - optimizer_probe_before
+        ).norm().item()
+    )
+    if (
+        not terminal_resume
+        and (
+            optimizer_step_count <= 0
+            or optimizer_parameter_delta_norm <= 0.0
+        )
+    ):
+        raise RuntimeError(
+            "optimizer produced no parameter update: "
+            f"steps={optimizer_step_count} "
+            f"parameter={optimizer_probe_name} "
+            f"delta_norm={optimizer_parameter_delta_norm}"
+        )
+    first_gradient_evidence = gradient_evidence["first_step"] or {}
+    if (
+        not terminal_resume
+        and (
+            first_gradient_evidence.get(
+                "navigation_fusion", {}
+            ).get("norm", 0.0)
+            <= 0.0
+        )
+    ):
+        raise RuntimeError("Reactive navigation fusion received no gradient")
+    if (
+        not terminal_resume
+        and gradient_evidence[
+            "navigation_encoder_first_nonzero_step"
+        ] is None
+    ):
+        raise RuntimeError("Reactive NavigationEncoder received no gradient")
+    if (
+        not terminal_resume
+        and dataset == Dataset.KITSCENES
+        and route_valid_sample_count <= 0
+    ):
+        raise RuntimeError(
+            "KITScenes training saw no valid route-conditioned sample"
+        )
+
     if best_checkpoint is None or final_checkpoint is None:
         raise RuntimeError("training completed without a best/final checkpoint")
 
@@ -3171,6 +3314,8 @@ def train_il(
             "fusion_mode": fm,
             "embed_dim": 256,
             "num_views": num_views,
+            "map_context_channels": map_context_channels,
+            "route_channels": route_channels,
         },
         "training": {
             "epochs": epochs,
@@ -3193,6 +3338,23 @@ def train_il(
             "validation_scope": validation_scope,
             "validation_split": validation_split_contract,
             "metric_history": metric_history,
+            "optimizer_evidence": {
+                "step_count": optimizer_step_count,
+                "probe_parameter": optimizer_probe_name,
+                "probe_parameter_delta_norm": (
+                    optimizer_parameter_delta_norm
+                ),
+            },
+            "gradient_evidence": gradient_evidence,
+            "route_conditioning_evidence": {
+                "valid_sample_exposures": route_valid_sample_count,
+                "sample_exposures": route_sample_count,
+                "valid_fraction": (
+                    route_valid_sample_count / route_sample_count
+                    if route_sample_count
+                    else 0.0
+                ),
+            },
         },
         "validation": {
             "sample_count": validation_sample_count,
@@ -3339,7 +3501,10 @@ def train_offline_rl(
             )
             vis_hist = batch["visual_history"].to(device)
             target = batch["trajectory_target"].to(device)
-            map_input = batch["map_input"].to(device)
+            map_context = batch["map_context"].to(device)
+            route_mask = batch["route_mask"].to(device)
+            map_valid = batch["map_valid"].to(device)
+            route_valid = batch["route_valid"].to(device)
 
             optimizer.zero_grad()
             # Offline RL regresses only the trajectory; run mode="infer" so the
@@ -3347,7 +3512,10 @@ def train_offline_rl(
             # was trained with reasoning / world-model branches on (mode="train"
             # would return a (trajectory, aux) tuple and break the arithmetic).
             # The inference forward is still differentiable for the policy grad.
-            pred = model(visual, map_input, vis_hist, ego_hist,
+            pred = model(visual, map_context, vis_hist, ego_hist,
+                         route_mask=route_mask,
+                         map_valid=map_valid,
+                         route_valid=route_valid,
                          projection=projection, geometry_type=geometry_type,
                          mode="infer")
             # Advantage-weighted regression against the FROZEN IL prior. advantage
@@ -3356,7 +3524,11 @@ def train_offline_rl(
             # the frozen prior (not the live model) makes the advantage real and
             # non-zero, and makes beta actually do something.
             with torch.no_grad():
-                baseline_pred = baseline_model(visual, map_input, vis_hist, ego_hist,
+                baseline_pred = baseline_model(
+                                               visual, map_context, vis_hist, ego_hist,
+                                               route_mask=route_mask,
+                                               map_valid=map_valid,
+                                               route_valid=route_valid,
                                                projection=projection, geometry_type=geometry_type,
                                                mode="infer")
             advantage = -(pred.detach() - target).pow(2).mean(dim=-1) \
@@ -4145,9 +4317,12 @@ def evaluate_kitscenes_benchmark_checkpoint(
                 model.reset_visual_history()
             prediction = model(
                 batch["visual_tiles"].to(device),
-                batch["map_input"].to(device),
+                batch["map_context"].to(device),
                 batch["visual_history"].to(device),
                 limited_history.to(device),
+                route_mask=batch["route_mask"].to(device),
+                map_valid=batch["map_valid"].to(device),
+                route_valid=batch["route_valid"].to(device),
                 projection=projection_cache.get(projection),
                 geometry_type=geometry_type,
                 history_frames=history_frames,
