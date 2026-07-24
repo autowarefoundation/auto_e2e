@@ -13,7 +13,7 @@ class AutoE2E(nn.Module):
                  num_timesteps=64, num_signals=2, egomotion_dim=256,
                  visual_history_dim=896,
                  map_type="rasterized", map_context_channels=3,
-                 route_channels=2,
+                 route_channels=2, enable_route_conditioning=True,
                  map_fusion_mode="residual", map_fusion_kwargs=None,
                  temporal_memory_mode="no_memory", temporal_memory_kwargs=None,
                  planner_mode="bezier", planner_kwargs=None,
@@ -38,6 +38,7 @@ class AutoE2E(nn.Module):
                  map_type=map_type,
                  map_context_channels=map_context_channels,
                  route_channels=route_channels,
+                 enable_route_conditioning=enable_route_conditioning,
                  map_fusion_mode=map_fusion_mode, map_fusion_kwargs=map_fusion_kwargs,
                  temporal_memory_mode=temporal_memory_mode, temporal_memory_kwargs=temporal_memory_kwargs,
                  planner_mode=planner_mode, planner_kwargs=planner_kwargs,
@@ -119,6 +120,8 @@ class AutoE2E(nn.Module):
             route_mask: (B, 2, H_map, W_map) — selected route corridor and
                 destination marker. It enters only the Reactive branch.
             map_valid / route_valid: (B,) explicit validity gates.
+                The checkpoint-level ``enable_route_conditioning`` flag can
+                force the route gate off for a controlled baseline.
             visual_history: (B, T, visual_history_dim) or (B, visual_history_dim).
             egomotion_history: (B, T, egomotion_dim) or (B, egomotion_dim).
             projection: Optional CameraProjectionModel operator — the geometry
