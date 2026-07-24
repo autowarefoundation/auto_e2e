@@ -10,8 +10,11 @@ import pytest
 from navigation.quality import (
     DEFAULT_NAVIGATION_QUALITY_POLICY,
     NAVIGATION_QUALITY_AUDIT_VERSION,
+    PACKED_NAVIGATION_QUALITY_AUDIT_VERSION,
     audit_navigation_quality,
+    audit_packed_navigation_quality,
     load_packed_navigation_quality,
+    verify_packed_navigation_quality_audit,
 )
 
 
@@ -43,6 +46,42 @@ def _record(
             "failure_reasons": list(failures),
         },
     }
+
+
+def _write_partition(root, record, *, partition_id=None, total_samples=100):
+    root.mkdir()
+    quality = {
+        **record,
+        "quality_policy": DEFAULT_NAVIGATION_QUALITY_POLICY.contract(),
+    }
+    quality_bytes = json.dumps(
+        quality,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("ascii")
+    (root / "navigation_quality.json").write_bytes(quality_bytes)
+    manifest = {
+        "total_samples": total_samples,
+        "partition_id": partition_id or f"part-{record['scene_id']}",
+        "navigation": {
+            "scenes": [
+                {
+                    "scene_id": record["scene_id"],
+                    "path": ".",
+                    "hashes": {
+                        "navigation_quality.json": hashlib.sha256(
+                            quality_bytes
+                        ).hexdigest(),
+                    },
+                }
+            ]
+        },
+    }
+    (root / "manifest.json").write_text(
+        json.dumps(manifest),
+        encoding="ascii",
+    )
+    return quality_bytes
 
 
 def test_quality_audit_records_acceptance_distribution_and_failures():
@@ -114,44 +153,73 @@ def test_no_lane_sequence_is_always_excluded():
 
 
 def test_packed_quality_loader_checks_declared_hash(tmp_path):
-    quality = _record("scene-a")
-    quality["quality_policy"] = (
-        DEFAULT_NAVIGATION_QUALITY_POLICY.contract()
-    )
-    quality_bytes = json.dumps(
-        quality,
-        separators=(",", ":"),
-        sort_keys=True,
-    ).encode("ascii")
-    (tmp_path / "navigation_quality.json").write_bytes(quality_bytes)
-    manifest = {
-        "total_samples": 100,
-        "partition_id": "scene-a",
-        "navigation": {
-            "scenes": [
-                {
-                    "scene_id": "scene-a",
-                    "path": ".",
-                    "hashes": {
-                        "navigation_quality.json": hashlib.sha256(
-                            quality_bytes
-                        ).hexdigest(),
-                    },
-                }
-            ]
-        },
+    root = tmp_path / "partition"
+    quality = {
+        **_record("scene-a"),
+        "quality_policy": DEFAULT_NAVIGATION_QUALITY_POLICY.contract(),
     }
-    (tmp_path / "manifest.json").write_text(
-        json.dumps(manifest),
-        encoding="ascii",
+    quality_bytes = _write_partition(
+        root,
+        _record("scene-a"),
+        partition_id="scene-a",
     )
 
-    records, identities = load_packed_navigation_quality([tmp_path])
+    records, identities = load_packed_navigation_quality([root])
 
     assert records == [quality]
     assert identities[0]["scene_id"] == "scene-a"
-    (tmp_path / "navigation_quality.json").write_bytes(
+    (root / "navigation_quality.json").write_bytes(
         quality_bytes + b" "
     )
     with pytest.raises(ValueError, match="hash mismatch"):
-        load_packed_navigation_quality([tmp_path])
+        load_packed_navigation_quality([root])
+
+
+def test_packed_quality_audit_binds_partition_decisions(tmp_path):
+    accepted = tmp_path / "accepted"
+    excluded = tmp_path / "excluded"
+    _write_partition(accepted, _record("scene-a"))
+    _write_partition(
+        excluded,
+        _record(
+            "scene-b",
+            matched_ratio=0.5,
+            route_valid=False,
+        ),
+    )
+
+    audit = audit_packed_navigation_quality([excluded, accepted])
+
+    assert (
+        audit["schema_version"]
+        == PACKED_NAVIGATION_QUALITY_AUDIT_VERSION
+    )
+    assert audit["accepted_partition_ids"] == ["part-scene-a"]
+    assert audit["excluded_partition_ids"] == ["part-scene-b"]
+    assert [item["partition_id"] for item in audit["packed_artifacts"]] == [
+        "part-scene-a",
+        "part-scene-b",
+    ]
+    assert verify_packed_navigation_quality_audit(
+        audit,
+        [accepted, excluded],
+    ) == audit
+
+    audit["accepted_partition_ids"] = []
+    with pytest.raises(ValueError, match="differs from packed artifacts"):
+        verify_packed_navigation_quality_audit(
+            audit,
+            [accepted, excluded],
+        )
+
+
+def test_packed_quality_audit_rejects_sample_count_drift(tmp_path):
+    root = tmp_path / "partition"
+    _write_partition(
+        root,
+        _record("scene-a"),
+        total_samples=101,
+    )
+
+    with pytest.raises(ValueError, match="sample count differs"):
+        audit_packed_navigation_quality([root])
