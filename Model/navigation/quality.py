@@ -236,7 +236,7 @@ def audit_navigation_quality(
         })
 
     accepted_count = sum(
-        int(decision["accepted"]) for decision in decisions
+        1 for decision in decisions if decision["accepted"]
     )
     canonical_records = json.dumps(
         normalized,
