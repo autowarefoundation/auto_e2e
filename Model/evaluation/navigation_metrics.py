@@ -250,7 +250,7 @@ def route_swap_sample_metrics(
     )
     lateral_endpoint_delta = float(swapped[-1, 1] - predicted[-1, 1])
     direction_consistent = math.nan
-    if expected_direction not in (None, 0):
+    if expected_direction is not None and expected_direction != 0:
         direction_consistent = float(
             lateral_endpoint_delta * expected_direction > 0.0
         )
@@ -314,7 +314,7 @@ def _distribution_with_ci(
         dtype=np.float64,
     )
     summary = _mean_with_ci(
-        finite,
+        finite.tolist(),
         rng=rng,
         resamples=resamples,
     )
@@ -352,7 +352,7 @@ def _difference_with_ci(
         [value for value in right_values if math.isfinite(float(value))],
         dtype=np.float64,
     )
-    result = {
+    result: dict[str, Any] = {
         "left_count": int(len(left)),
         "right_count": int(len(right)),
         "mean": None,
@@ -497,7 +497,7 @@ def summarize_navigation_metrics(
         ),
     }
 
-    counterfactual = {
+    counterfactual: dict[str, Any] = {
         "sample_count": len(route_swap_records),
         "different_maneuver_sample_count": sum(
             record.get("selected_maneuver")
