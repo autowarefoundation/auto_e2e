@@ -151,7 +151,7 @@ def test_autoe2e_with_bezier_planner_end_to_end(device):
     from model_components.trajectory_planning import BezierPlanner
 
     model = _autoe2e_bezier(device)
-    assert isinstance(model.Reactive_E2E.TrajectoryPlanner, BezierPlanner)
+    assert isinstance(model.trajectory_planner, BezierPlanner)
 
     x = torch.randn(2, 8, 3, 256, 256, device=device)
     map_input = torch.randn(2, 3, 256, 256, device=device)
@@ -179,7 +179,7 @@ def test_autoe2e_with_bezier_planner_train_mode(device):
 
     (trajectory - target).pow(2).mean().backward()
     assert any(p.grad is not None
-               for p in model.Reactive_E2E.TrajectoryPlanner.parameters()), \
+               for p in model.trajectory_planner.parameters()), \
         "planner must receive gradient from a trajectory loss"
 
 
@@ -191,7 +191,25 @@ def test_autoe2e_default_planner_is_bezier(device):
     with patch("model_components.reactive_e2e.Backbone", _MockBackbone):
         model = AutoE2E(num_views=8,
                         view_fusion_kwargs={"bev_h": 8, "bev_w": 8}).to(device)
-    assert isinstance(model.Reactive_E2E.TrajectoryPlanner, BezierPlanner)
+    assert isinstance(model.trajectory_planner, BezierPlanner)
+    assert model.trajectory_planner is model.Reactive_E2E.TrajectoryPlanner
+    assert not any(
+        key.startswith("trajectory_planner.") for key in model.state_dict()
+    )
+
+
+def test_reactive_e2e_default_planner_is_bezier(device):
+    """ReactiveE2E is also valid when constructed without an outer AutoE2E."""
+    from unittest.mock import patch
+
+    from model_components.reactive_e2e import ReactiveE2E
+
+    with patch("model_components.reactive_e2e.Backbone", _MockBackbone):
+        model = ReactiveE2E(
+            num_views=8,
+            view_fusion_kwargs={"bev_h": 8, "bev_w": 8},
+        ).to(device)
+    assert isinstance(model.TrajectoryPlanner, BezierPlanner)
 
 
 def test_gradients_flow_to_all_parameters(device):
