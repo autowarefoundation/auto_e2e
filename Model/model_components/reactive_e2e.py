@@ -87,6 +87,11 @@ class ReactiveE2E(nn.Module):
         self.ReasoningHead = None
         if enable_reasoning:
             rkw = dict(reasoning_kwargs or {})
+            if rkw.get("route_context_dim") is not None:
+                raise ValueError(
+                    "route_context_dim is not supported by the initial #149 "
+                    "contract; route conditioning is Reactive-only"
+                )
             rkw.setdefault("visual_history_dim", visual_history_dim)
             rkw.setdefault("ego_context_dim", egomotion_dim)
             self.ReasoningHead = HorizonReasoningHead(**rkw)
