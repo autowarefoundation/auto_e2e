@@ -6,6 +6,7 @@
 |---|---|
 | Status | Proposed |
 | Owner | riita10069 |
+| Required reviewer | @bharatwrrr |
 | Created | 2026-07-25 |
 | Related issues | [#148](https://github.com/autowarefoundation/auto_e2e/issues/148), [#149](https://github.com/autowarefoundation/auto_e2e/issues/149), [#152](https://github.com/autowarefoundation/auto_e2e/issues/152) |
 | Initial training dataset | KITScenes only |
@@ -61,40 +62,51 @@ timestamped localization to apply a cheap SE(2) warp from the latest raster to
 the camera timestamp. Routing, map matching, tile building, and network access
 are never performed in the 10 Hz loop.
 
+Flyte preprocessing reproduces the same temporal contract: it renders
+deterministic 2 Hz anchor rasters and applies the production SE(2) warp to each
+10 Hz sample. Training therefore does not receive perfectly re-rendered map
+pixels that are unavailable at runtime.
+
 The work is complete only after a new immutable KITScenes dataset version has
 been produced, a route-conditioned model has been trained, and its result has
-been compared with the current baseline on the existing benchmark plus
-junction, maneuver, route-compliance, and offline counterfactual slices.
+been compared with a controlled no-route baseline on the existing benchmark
+plus junction, maneuver, route-compliance, and offline counterfactual slices.
 
-## 2. Decision Overrides
+## 2. Architectural Decisions
 
-The design discussion contained three answers that cannot all be implemented:
+### 2.1 Information-flow boundary
 
-1. "Route is initially Reasoning-only."
-2. "Concatenate map and route for the initial shared encoder."
-3. "Route is initially Reactive-only."
+The initial model has two explicit navigation paths:
 
-This document resolves them as follows:
+- `map_context` is encoded as a spatial prior for the Reactive map branch.
+- `route_mask` is encoded only for `HorizonReasoningHead`.
+- Route-derived activations reach the planner only through the existing
+  zero-initialized Reasoning coupling.
+- `map_context`, `route_mask`, `map_valid`, and `route_valid` remain separate in
+  the public data and model ABI.
+- Map and route may share an encoder trunk, but they use separate input stems
+  and forward paths. Route activations are not passed to `MapBEVFusion`.
 
-- The explicit latest direction, **Reasoning-only route conditioning**, wins.
-- `map_context` and `route_mask` remain separate in the public data and model
-  ABI.
-- They are not concatenated before the Reactive map encoder.
-- The first implementation may share an encoder trunk or encoder architecture,
-  but map and route use separate forward paths. A route-derived activation must
-  not reach the Reactive BEV.
-- A future ablation may compare direct Reactive route input, Reasoning-only
-  input, and both. That ablation is not part of the initial implementation.
+This boundary makes Reasoning-only route conditioning observable and testable.
+Direct Reactive route conditioning and combined Reasoning/Reactive
+conditioning remain future ablations.
 
-This override is necessary to make the information-flow claim testable. Merely
-placing map and route in different channels of one Reactive tensor would not be
-Reasoning-only conditioning.
+The baseline semantic map contains drivable area, lane boundary, centerline,
+intersection, crosswalk, stop line, static traffic-signal position, traffic
+direction, map validity, and road-level information when available.
 
-Question 29 did not include an explicit answer. This document adopts the
-proposed baseline layers (drivable area, lane boundary, centerline,
-intersection, crosswalk, and stop line), plus the separately approved static
-traffic-signal, direction, validity, and optional level channels. This is the
-only assumption added to the recorded answers.
+### 2.2 Rejected initial alternatives
+
+- Exact future-waypoint raster: rejected because it discloses the
+  imitation target rather than navigation intent.
+- Manual offline route annotation for inference: rejected because it is not
+  a production navigation interface.
+- Independent OSM and Lanelet2 raster contracts: rejected because they
+  would create incompatible training and inference geometry.
+- Route channels concatenated into the Reactive map input: deferred so the
+  first experiment isolates Reasoning-only route conditioning.
+- Python or network-dependent vehicle rendering: rejected in favor of a
+  deterministic C++ renderer over locally cached vectors.
 
 ## 3. Goals and Non-Goals
 
@@ -130,8 +142,8 @@ only assumption added to the recorded answers.
 - The full map-only/route-only/map+route/blank/shuffled/wrong-route ablation
   matrix.
 
-Encoder pretraining and broad route-robustness ablations are follow-up issues,
-outlined in Section 18.
+Encoder pretraining and broad route-robustness ablations are future work items
+outlined in Section 20.
 
 ## 4. Existing State and Gaps
 
@@ -223,11 +235,12 @@ KITScenes scene
         v
       NavigationRoute + RouteQuality
         |
-        +-> C++ rasterizer once per packed sample
+        +-> C++ rasterizer at deterministic 2 Hz anchors
         |     |-- semantic map channels
         |     |-- route corridor
         |     |-- destination marker
         |     +-- validity/metadata
+        +-> production SE(2) warp for each 10 Hz sample
         |
         +-> Flyte shard schema v3
         +-> route-aware Reasoning teacher context at 1 Hz
@@ -236,8 +249,9 @@ KITScenes scene
 ```
 
 The expensive route derivation is performed once per scene inside Flyte
-`data_processing`. Per-sample work is only local clipping, coordinate
-transformation, and rasterization.
+`data_processing`. Vector clipping and rasterization run only on deterministic
+2 Hz anchors. Per-sample work applies the same timestamped warp used at
+runtime.
 
 ### 5.2 Runtime path
 
@@ -307,9 +321,8 @@ NavigationRoute
   provenance: RouteProvenance
 ```
 
-The fields requested in the design discussion are mandatory:
-`route_id`, `revision`, `timestamp_ns`, `map_version`, `provider`,
-`confidence`, and `valid`.
+The metadata fields `route_id`, `revision`, `timestamp_ns`, `map_version`,
+`provider`, `confidence`, and `valid` are mandatory.
 
 Each `RouteLaneSegment` contains:
 
@@ -342,9 +355,9 @@ the model ABI.
   crop.
 - A lane change is represented by adjacent-lane transition metadata and the
   selected lane segments. No interpolated lateral movement line is generated.
-- The route raster is a fixed-width corridor, with a versioned default width of
-  3.5 m. Width is configuration and provenance, not an implicit renderer
-  constant.
+- The route raster is a fixed-width corridor. One width is selected from the
+  KITScenes lane-width audit and frozen per dataset/model contract version.
+  Width is configuration and provenance, not an implicit renderer constant.
 - Alternative routes are not model inputs.
 
 ### 6.4 `NavigationMap`
@@ -392,6 +405,8 @@ ego_anchor_row, ego_anchor_col
 frame = ego_flu
 pixel_convention
 matching_pc_range
+matching_bev_h
+matching_bev_w
 ```
 
 The following invariants are enforced:
@@ -401,6 +416,7 @@ The following invariants are enforced:
 (y_max_m - y_min_m) / width_px == meters_per_pixel
 map extent == camera BEV pc_range XY extent
 ego anchor == the origin implied by pc_range
+(x_max_m - x_min_m) / bev_h == (y_max_m - y_min_m) / bev_w
 ```
 
 The renderer must output the final dimensions directly. A route mask is never
@@ -417,7 +433,8 @@ Neither 0.5 nor 1.0 m/px is frozen before a KITScenes audit computes:
 - longitudinal and lateral displacement quantiles;
 - junction and turn extents;
 - fraction of target/control rollouts covered by each candidate;
-- memory and latency for each candidate.
+- camera BEV grid dimensions required for square metric BEV cells;
+- model memory and latency for each candidate.
 
 At minimum, report p50, p90, p95, p99, and maximum displacement. Compare
 0.5 and 1.0 m/px. The selected geometry must then update camera BEV `pc_range`
@@ -486,6 +503,10 @@ route_id
 route_revision
 render_timestamp_ns
 localization_timestamp_ns
+sample_timestamp_ns
+render_pose_enu
+sample_pose_enu
+render_to_sample_se2
 map_valid
 route_valid
 layer_availability
@@ -555,16 +576,16 @@ Scene-level quality includes:
 - failure reasons.
 
 Before the full repack, a route-audit Flyte task measures the corpus and freezes
-scene-exclusion thresholds in configuration. The initial proposed policy is:
+scene-exclusion thresholds in configuration. The policy is:
 
 - keep individual invalid samples as route-less samples;
 - exclude a scene from route-conditioned training when valid route coverage is
-  below 95 percent, an unresolved discontinuity remains, or the configured p95
-  distance/heading limits are exceeded;
+  below the audited threshold, an unresolved discontinuity remains, or the
+  configured p95 distance/heading limits are exceeded;
 - retain excluded-scene reports in the published quality artifact.
 
-The numerical distance and heading limits are selected from the audit rather
-than guessed in code.
+The numerical distance and heading limits are derived from the corpus audit and
+stored in versioned configuration.
 
 ### 8.4 Leakage prevention
 
@@ -600,6 +621,13 @@ render(
   EgoPose,
   NavigationRasterGeometry
 ) -> NavigationRaster
+
+warp(
+  NavigationRaster,
+  RenderPose,
+  SamplePose,
+  NavigationRasterGeometry
+) -> NavigationRaster
 ```
 
 Python preprocessing calls the same library through a thin binding. The
@@ -618,7 +646,10 @@ Python and C++ output for:
 - destination entry/exit at the crop edge;
 - adjacent-lane transition without a lateral target line;
 - level overlap;
-- invalid map and route cases.
+- invalid map and route cases;
+- 2 Hz anchor to 10 Hz sample translation/rotation;
+- newly exposed unknown pixels after a warp;
+- direction-vector rotation during a warp.
 
 Binary channels require exact equality. Float direction/level channels use a
 documented numerical tolerance.
@@ -666,6 +697,12 @@ geometry ID
 
 The task is fully offline and deterministic. It cannot call Overpass, Valhalla,
 or any external map service for KITScenes.
+
+KITScenes source poses are grouped onto a deterministic 500 ms anchor grid.
+The C++ renderer produces one map/route raster per anchor, and the production
+warp generates each 10 Hz sample tensor from the latest non-future anchor.
+Anchor timestamp, sample timestamp, and relative transform are persisted for
+audit.
 
 ### 10.2 Shard schema v3
 
@@ -848,9 +885,10 @@ A 2 Hz ego-centric raster cannot simply be held for 500 ms at 0.5 m/px. At
 T_render_ego_to_camera_ego
 ```
 
-to warp the latest map and route raster into the camera timestamp. Binary route
-channels use nearest-neighbor sampling. Direction channels are rotated as
-vectors, not only spatially warped. Pixels newly exposed by the warp become
+to warp the latest map and route raster into the camera timestamp. Binary map
+and route channels and categorical road level use nearest-neighbor sampling.
+Continuous direction channels use validity-aware interpolation and are rotated
+as vectors, not only spatially warped. Pixels newly exposed by the warp become
 unknown in the map-validity layer.
 
 Maximum accepted timestamp skew and raster age are versioned configuration and
@@ -907,19 +945,24 @@ route currently used by the model.
 
 ### 14.1 Required training experiment
 
-Use the same immutable split, camera inputs, optimizer policy, training budget,
-and evaluation code for:
+Use the same immutable KITScenes v3.0 split, semantic map tensors, geometry,
+camera inputs, non-route model configuration, optimizer policy, training
+budget, and evaluation code for:
 
-1. current baseline without route conditioning;
+1. controlled baseline with route conditioning disabled;
 2. map + Reasoning-only route conditioning with 1 Hz runtime cache semantics.
 
-This is not a separate benchmark track. Results are added to the existing
-KITScenes benchmark output and MLflow run.
+The legacy checkpoint remains a continuity reference, but it is not the
+controlled baseline because the dataset, semantic map contract, and geometry
+have changed. This is not a separate benchmark track. Results are added to the
+existing KITScenes benchmark output and MLflow run.
 
 Implementation completion requires a full comparable run and published
 analysis, even if the research hypothesis is not supported. The hypothesis is
 considered supported when junction/route metrics improve without an
-unacceptable aggregate regression.
+unacceptable aggregate regression. The primary route metric and maximum
+aggregate regression tolerance are frozen before the route-conditioned result
+is inspected.
 
 ### 14.2 Metrics
 
@@ -990,7 +1033,7 @@ overflow, no browser errors, and non-empty canvas pixels.
 | Provider/map version mismatch | Reject route before rasterization |
 | Reasoning cache stale after reset | Clear cache; do not reuse another sequence |
 
-## 17. Issue Scope, Ownership, and Integration
+## 17. Delivery Scope and Workstream Boundaries
 
 ### 17.1 Issue lifecycle
 
@@ -1002,11 +1045,11 @@ overflow, no browser errors, and non-empty canvas pixels.
   the required evaluation report are complete. It is then closed as superseded
   by the common design; it does not remain a permanent integration tracker.
 
-### 17.2 Proposed non-overlapping ownership
+### 17.2 Workstream boundaries
 
 The common contract PR must merge before provider implementation begins.
 
-| Work | Proposed owner | Must not include |
+| Workstream | Scope owner | Out of scope |
 |---|---|---|
 | Canonical contracts, geometry audit, model ABI | riita10069 | Lanelet2 adapter implementation |
 | Lanelet2 semantic adapter | @bharatwrrr | Flyte/model/Valhalla changes |
@@ -1017,21 +1060,31 @@ The common contract PR must merge before provider implementation begins.
 | Model, cache, inference orchestration | riita10069 | Direct Reactive route input |
 | Evaluation and Console | riita10069 | Closed-loop milestone expansion |
 
-This gives @bharatwrrr a meaningful #152 scope while preventing parallel
-implementations of the same Lanelet2 renderer. In particular, #152 should not
-draw raw future waypoints or establish a second geometry/API.
+This split keeps #152 focused on Lanelet2 extraction, matching, and common C++
+rasterization, while #149 retains OSM/Valhalla integration. Neither workstream
+introduces a second navigation ABI, a second Lanelet2 renderer, or raw
+future-waypoint rasterization.
 
-No implementation starts in an overlapping path until both owners acknowledge
-this table. The earlier request to document the split in the issue and the later
-decision to keep the detail under `Docs/` conflict; this document follows the
-later decision. It is the source of truth, and @bharatwrrr must receive the
-document link and acknowledge the split before implementation starts. A
-minimal issue link or direct message may be used for discovery, subject to the
-repository's approval rule for GitHub writes.
+### 17.3 Design review and implementation gate
+
+Once accepted, this document is the normative definition of the shared
+navigation contracts, geometry, and workstream boundaries for #149 and #152.
+Issue descriptions may summarize the design, but they do not define parallel
+interfaces.
+
+The status changes from `Proposed` to `Accepted` after @bharatwrrr acknowledges
+the shared contracts and the ownership boundaries in Section 17.2. The
+document owner records that acknowledgement by updating the status in Document
+Metadata. Work on the Lanelet2 adapter, trace matcher, and common rasterizer
+does not begin before that acknowledgement. Acknowledgement confirms design
+and scope alignment; it does not replace implementation review or the
+acceptance criteria in Section 19. Any implementation-driven change to a
+shared contract or workstream boundary updates this document before the
+conflicting implementation is merged.
 
 ## 18. Staged Delivery
 
-### PR 1: Contract and geometry
+### 18.1 PR 1: Contract and geometry
 
 - `NavigationRoute`, `NavigationMap`, raster, validity, quality, and provenance
   schemas.
@@ -1039,22 +1092,27 @@ repository's approval rule for GitHub writes.
 - Select 0.5 or 1.0 m/px and update matching BEV geometry.
 - Coordinate and serialization tests.
 
-### PR 2: Adapters and C++ renderer
+### 18.2 PR 2A: Lanelet2 adapter and C++ renderer
 
 - Authoritative C++ rasterizer and Python binding.
 - Python/C++ golden parity fixtures.
 - Lanelet2 adapter/matcher contribution.
-- OSM adapter and local Valhalla reference provider.
 - 20 ms / 100 MB benchmark and soak test.
 
-### PR 3: Flyte and dataset
+### 18.3 PR 2B: OSM adapter and Valhalla provider
+
+- OSM adapter and local Valhalla reference provider.
+- Local lane-sequence resolver and uncertainty handling.
+- OSM fixtures against the common vector and raster contracts.
+
+### 18.4 PR 3: Flyte and dataset
 
 - Scene-level route generation in `data_processing`.
 - Route-aware teacher context.
 - Shard schema v3 and immutable KITScenes v3.0 smoke repack.
 - Quality audit, threshold freeze, then full-scene repack.
 
-### PR 4: Model and inference
+### 18.5 PR 4: Model and inference
 
 - Semantic map input contract.
 - Shared navigation encoder trunk with separate map/route stems.
@@ -1063,7 +1121,7 @@ repository's approval rule for GitHub writes.
 - 1 Hz `ReasoningStateCache`.
 - 2 Hz raster scheduling and 10 Hz timestamp warp.
 
-### PR 5: Evaluation and Console
+### 18.6 PR 5: Evaluation and Console
 
 - Full baseline and route-conditioned Flyte training runs.
 - Junction/maneuver/route-compliance metrics and counterfactuals.
@@ -1071,28 +1129,31 @@ repository's approval rule for GitHub writes.
 - Console route and semantic-layer overlays.
 - Close #148 after acceptance evidence is linked.
 
-Every PR remains independently testable. Repository workflow requires one
-tracked file per signed-off commit, relevant tests after each change, EC2/GPU
-verification for model changes, and push only from the tested EC2 checkout.
+PR 1 is a dependency for both adapter workstreams. After it merges and the
+document status is `Accepted`, PR 2A and PR 2B may proceed in parallel against
+the frozen contract with disjoint file ownership. PR 2B's integration fixtures
+run against the common renderer after PR 2A provides it. Each PR includes the
+contract and behavior tests relevant to its scope.
 
 ## 19. Acceptance Criteria
 
-### Contract and data
+### 19.1 Contract and data
 
 - One vector/raster ABI works with Lanelet2 and OSM adapters.
 - No serialized exact future trajectory is present in route artifacts.
 - KITScenes scene routes are deterministic and quality-audited.
 - KITScenes v2.2 is unchanged; v3.0 is a complete immutable repack.
 - Lossless artifacts regenerate byte-identical rasters.
+- Flyte and runtime use the same 2 Hz render plus 10 Hz warp path.
 
-### Geometry and renderer
+### 19.2 Geometry and renderer
 
 - Map and route use the exact camera BEV XY extent and ego origin.
 - Python/C++ golden tests pass.
 - Binary route masks remain binary through storage and loading.
 - C++ p95 render is at most 20 ms and renderer memory is at most 100 MB.
 
-### Model and runtime
+### 19.3 Model and runtime
 
 - Route information reaches the planner only through Reasoning.
 - Reasoning runtime updates at 1 Hz and planner inference remains 10 Hz.
@@ -1101,7 +1162,7 @@ verification for model changes, and push only from the tested EC2 checkout.
 - Rerouting retains the old route until an atomic replacement is valid.
 - Local Valhalla works with prebuilt regional data and no cloud dependency.
 
-### Research result
+### 19.4 Research result
 
 - Baseline and route-conditioned models complete comparable Flyte runs.
 - Existing ADE/FDE and required route/junction slices are reported.
@@ -1111,7 +1172,7 @@ verification for model changes, and push only from the tested EC2 checkout.
 - Console displays route, destination, validity, and provenance distinctly from
   ground truth.
 
-## 20. Deferred Follow-Up Issues
+## 20. Future Work
 
 ### 20.1 Pretrain all encoders
 
