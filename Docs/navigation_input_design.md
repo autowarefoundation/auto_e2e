@@ -727,6 +727,13 @@ do not:
 - tar members and compressed containers are deterministic;
 - all content is covered by manifest hashes.
 
+`navigation_quality.json.sample_count` counts source poses used for the
+scene-level trace match. `manifest.json.total_samples` counts packed training
+windows after history/future eligibility filtering. These values are not
+expected to be equal. The packed quality audit exposes them unambiguously as
+`trace_pose_count` and `packed_sample_count`, and binds the scene decision to
+the partition through the manifest and quality-artifact hashes.
+
 The loader materializes:
 
 ```text
