@@ -16,9 +16,9 @@ import numpy as np
 from .contracts import RouteQuality
 
 
-NAVIGATION_QUALITY_AUDIT_VERSION = "navigation_quality_audit_v1"
+NAVIGATION_QUALITY_AUDIT_VERSION = "navigation_quality_audit_v2"
 PACKED_NAVIGATION_QUALITY_AUDIT_VERSION = (
-    "packed_navigation_quality_audit_v1"
+    "packed_navigation_quality_audit_v2"
 )
 
 
@@ -134,6 +134,16 @@ def load_packed_navigation_quality(
                 raise ValueError(
                     "navigation quality artifact uses another policy"
                 )
+            trace_pose_count = quality.get("sample_count")
+            if (
+                not isinstance(trace_pose_count, int)
+                or isinstance(trace_pose_count, bool)
+                or trace_pose_count <= 0
+            ):
+                raise ValueError(
+                    "navigation quality artifact has no positive source "
+                    "trace pose count"
+                )
             records.append(quality)
             identities.append({
                 "manifest_sha256": hashlib.sha256(
@@ -142,7 +152,8 @@ def load_packed_navigation_quality(
                 "navigation_quality_sha256": actual_hash,
                 "partition_id": manifest.get("partition_id"),
                 "scene_id": scene_id,
-                "sample_count": int(manifest["total_samples"]),
+                "packed_sample_count": int(manifest["total_samples"]),
+                "trace_pose_count": trace_pose_count,
             })
     if not records:
         raise ValueError("packed partitions contain no navigation quality")
@@ -209,7 +220,7 @@ def audit_navigation_quality(
     qualities = []
     decisions = []
     failure_counts: collections.Counter[str] = collections.Counter()
-    sample_count = 0
+    trace_pose_count = 0
     for record in normalized:
         raw_quality = record.get("quality")
         if not isinstance(raw_quality, Mapping):
@@ -222,9 +233,19 @@ def audit_navigation_quality(
                 "persisted route validity differs from quality policy for "
                 f"scene {record['scene_id']!r}"
             )
+        record_trace_pose_count = record.get("sample_count")
+        if (
+            not isinstance(record_trace_pose_count, int)
+            or isinstance(record_trace_pose_count, bool)
+            or record_trace_pose_count <= 0
+        ):
+            raise ValueError(
+                "navigation quality record has no positive source trace "
+                "pose count"
+            )
         qualities.append(quality)
         failure_counts.update(reasons)
-        sample_count += int(record.get("sample_count", 0))
+        trace_pose_count += record_trace_pose_count
         decisions.append({
             "accepted": accepted,
             "failure_reasons": list(reasons),
@@ -232,7 +253,7 @@ def audit_navigation_quality(
                 record.get("route_confidence", 0.0)
             ),
             "scene_id": str(record["scene_id"]),
-            "sample_count": int(record.get("sample_count", 0)),
+            "trace_pose_count": record_trace_pose_count,
         })
 
     accepted_count = sum(
@@ -255,7 +276,7 @@ def audit_navigation_quality(
         "accepted_scene_count": accepted_count,
         "excluded_scene_count": len(decisions) - accepted_count,
         "accepted_scene_fraction": accepted_count / len(decisions),
-        "sample_count": sample_count,
+        "trace_pose_count": trace_pose_count,
         "failure_reason_counts": dict(sorted(failure_counts.items())),
         "distributions": {
             "matched_pose_ratio": _distribution(
@@ -328,31 +349,21 @@ def audit_packed_navigation_quality(
             f"partition: {duplicate_partitions[:3]}"
         )
 
-    records_by_scene = {
-        str(record.get("scene_id", "")): record for record in records
-    }
-    for identity in identities:
-        scene_id = str(identity["scene_id"])
-        record = records_by_scene[scene_id]
-        if int(record.get("sample_count", -1)) != int(
-            identity["sample_count"]
-        ):
-            raise ValueError(
-                "navigation quality sample count differs from manifest for "
-                f"scene {scene_id!r}"
-            )
-
     audit = audit_navigation_quality(records)
-    partition_by_scene = {
-        str(identity["scene_id"]): str(identity["partition_id"])
+    identity_by_scene = {
+        str(identity["scene_id"]): identity
         for identity in identities
     }
     decisions = []
     for decision in audit["scenes"]:
         scene_id = str(decision["scene_id"])
+        identity = identity_by_scene[scene_id]
         decisions.append({
             **decision,
-            "partition_id": partition_by_scene[scene_id],
+            "packed_sample_count": int(
+                identity["packed_sample_count"]
+            ),
+            "partition_id": str(identity["partition_id"]),
         })
     accepted_partition_ids = sorted(
         decision["partition_id"]
@@ -371,6 +382,10 @@ def audit_packed_navigation_quality(
             NAVIGATION_QUALITY_AUDIT_VERSION
         ),
         "packed_artifacts": identities,
+        "packed_sample_count": sum(
+            int(identity["packed_sample_count"])
+            for identity in identities
+        ),
         "accepted_partition_ids": accepted_partition_ids,
         "excluded_partition_ids": excluded_partition_ids,
         "scenes": decisions,
