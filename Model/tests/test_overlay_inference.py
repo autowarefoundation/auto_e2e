@@ -50,16 +50,11 @@ class _FakePlanner:
     num_signals = 2
 
 
-class _FakeReactive:
-    TrajectoryPlanner = _FakePlanner()
-
-
 class _NoiseEchoPolicy(torch.nn.Module):
     def __init__(self):
         super().__init__()
         self.anchor = torch.nn.Parameter(torch.zeros(()))
         self.trajectory_planner = _FakePlanner()
-        self.Reactive_E2E = _FakeReactive()
         self.reset_count = 0
         self.last_egomotion_history = None
 
