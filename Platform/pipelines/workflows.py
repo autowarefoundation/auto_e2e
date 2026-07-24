@@ -572,7 +572,7 @@ def _evaluate_open_loop(
     sample_uids: list[str] = []
     navigation_records: list[dict] = []
     route_swap_records: list[dict] = []
-    route_cache: dict[str, torch.Tensor] = {}
+    route_cache: dict[str, dict] = {}
     model.eval()
     try:
         with torch.no_grad():
@@ -632,6 +632,7 @@ def _evaluate_open_loop(
 
                 swapped_pred_np = None
                 swapped_indices: set[int] = set()
+                swapped_route_entries: dict[int, dict] = {}
                 if (
                     navigation_geometry is not None
                     and route_swap_counterfactual
@@ -647,21 +648,40 @@ def _evaluate_open_loop(
                                 "",
                             )
                         )
+                        selected_maneuver = str(
+                            _collated_metadata_value(
+                                navigation_metadata,
+                                "route_maneuver",
+                                sample_index,
+                                "unknown",
+                            )
+                        )
                         candidates = sorted(
-                            candidate_id
-                            for candidate_id in route_cache
-                            if candidate_id != route_id
+                            (
+                                candidate_id
+                                for candidate_id in route_cache
+                                if candidate_id != route_id
+                            ),
+                            key=lambda candidate_id: (
+                                route_cache[candidate_id]["maneuver"]
+                                == selected_maneuver,
+                                route_cache[candidate_id]["maneuver"]
+                                not in ("left", "right", "straight"),
+                                candidate_id,
+                            ),
                         )
                         if (
                             bool(route_valid[sample_index].item())
                             and route_id
                             and candidates
                         ):
+                            candidate = route_cache[candidates[0]]
                             swapped_route_mask[sample_index] = (
-                                route_cache[candidates[0]]
+                                candidate["mask"]
                             )
                             swapped_route_valid[sample_index] = True
                             swapped_indices.add(sample_index)
+                            swapped_route_entries[sample_index] = candidate
                     if swapped_indices:
                         if hasattr(model, "reset_visual_history"):
                             model.reset_visual_history()
@@ -705,6 +725,7 @@ def _evaluate_open_loop(
                     all_fde.append(float(errors[-1]))
                     if navigation_geometry is not None:
                         from evaluation.navigation_metrics import (
+                            ROUTE_QUALITY_FIELDS,
                             navigation_sample_metrics,
                             route_swap_sample_metrics,
                         )
@@ -723,6 +744,13 @@ def _evaluate_open_loop(
                                 ("destination_visible", False),
                             )
                         }
+                        for key in ROUTE_QUALITY_FIELDS:
+                            metadata[key] = _collated_metadata_value(
+                                navigation_metadata,
+                                key,
+                                sample_index,
+                                float("nan"),
+                            )
                         navigation_records.append(
                             navigation_sample_metrics(
                                 pred_traj,
@@ -748,6 +776,9 @@ def _evaluate_open_loop(
                                 swapped_signals[:, 1],
                                 v0,
                             )
+                            swapped_entry = swapped_route_entries[
+                                sample_index
+                            ]
                             route_swap_records.append(
                                 route_swap_sample_metrics(
                                     pred_traj,
@@ -755,6 +786,15 @@ def _evaluate_open_loop(
                                     raw_route_mask[
                                         sample_index
                                     ].numpy(),
+                                    swapped_route_mask=swapped_entry[
+                                        "mask"
+                                    ].numpy(),
+                                    selected_maneuver=str(
+                                        metadata["route_maneuver"]
+                                    ),
+                                    swapped_maneuver=str(
+                                        swapped_entry["maneuver"]
+                                    ),
                                     geometry=navigation_geometry,
                                 )
                             )
@@ -772,12 +812,22 @@ def _evaluate_open_loop(
                             )
                         )
                         if route_id:
-                            route_cache[route_id] = (
-                                raw_route_mask[sample_index]
-                                .detach()
-                                .cpu()
-                                .clone()
-                            )
+                            route_cache[route_id] = {
+                                "mask": (
+                                    raw_route_mask[sample_index]
+                                    .detach()
+                                    .cpu()
+                                    .clone()
+                                ),
+                                "maneuver": str(
+                                    _collated_metadata_value(
+                                        navigation_metadata,
+                                        "route_maneuver",
+                                        sample_index,
+                                        "unknown",
+                                    )
+                                ),
+                            }
                     while len(route_cache) > 8:
                         route_cache.pop(next(iter(route_cache)))
     finally:
@@ -4370,6 +4420,9 @@ def _run_evaluation(checkpoint, shards, train_metadata, dataset, experiment_name
                 "eval/navigation/route_compliance": slices[
                     "route_valid"
                 ]["route_point_compliance"]["mean"],
+                "eval/navigation/route_outside_distance_m": slices[
+                    "route_valid"
+                ]["route_outside_distance_m"]["mean"],
                 "eval/navigation/wrong_branch_rate": slices[
                     "junction"
                 ]["wrong_branch_rate"]["mean"],
@@ -4391,12 +4444,30 @@ def _run_evaluation(checkpoint, shards, train_metadata, dataset, experiment_name
                 "eval/navigation/invalid_route_ade_m": slices[
                     "route_invalid"
                 ]["ade_m"]["mean"],
+                "eval/navigation/valid_minus_invalid_ade_m": (
+                    navigation_report["route_valid_vs_invalid_delta"][
+                        "ade_m"
+                    ]["mean"]
+                ),
+                "eval/navigation/valid_minus_invalid_fde_m": (
+                    navigation_report["route_valid_vs_invalid_delta"][
+                        "fde_m"
+                    ]["mean"]
+                ),
+                "eval/navigation/route_confidence_p50": slices[
+                    "overall"
+                ]["route_quality"]["route_confidence"]["p50"],
                 "eval/navigation/swap_endpoint_delta_m": counterfactual[
                     "endpoint_delta_m"
                 ]["mean"],
                 "eval/navigation/swap_compliance_drop": counterfactual[
                     "selected_compliance_drop"
                 ]["mean"],
+                "eval/navigation/swap_direction_consistency": (
+                    counterfactual[
+                        "maneuver_direction_consistent"
+                    ]["mean"]
+                ),
             }
             for maneuver in ("left", "right", "straight"):
                 maneuver_slice = slices[f"maneuver_{maneuver}"]
