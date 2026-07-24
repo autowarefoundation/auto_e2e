@@ -19,6 +19,7 @@ from navigation.contracts import (
 )
 from navigation.lanelet2_adapter import Lanelet2MapAdapter, file_sha256
 from navigation.lanelet2_matcher import Lanelet2TraceMatcher
+from navigation.quality import DEFAULT_NAVIGATION_QUALITY_POLICY
 from navigation.rasterizer import (
     EgoPose,
     NativeNavigationRasterizer,
@@ -217,6 +218,9 @@ class KitScenesSceneNavigation:
                 "route_valid": self.route.valid,
                 "route_confidence": self.route.confidence,
                 "quality": self.route.quality,
+                "quality_policy": (
+                    DEFAULT_NAVIGATION_QUALITY_POLICY.contract()
+                ),
                 "estimated_destination": self.route.estimated_destination,
                 "destination_source": self.route.destination.source,
                 "anchor_period_ns": ANCHOR_PERIOD_NS,
