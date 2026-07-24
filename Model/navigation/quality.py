@@ -17,6 +17,9 @@ from .contracts import RouteQuality
 
 
 NAVIGATION_QUALITY_AUDIT_VERSION = "navigation_quality_audit_v1"
+PACKED_NAVIGATION_QUALITY_AUDIT_VERSION = (
+    "packed_navigation_quality_audit_v1"
+)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -139,6 +142,7 @@ def load_packed_navigation_quality(
                 "navigation_quality_sha256": actual_hash,
                 "partition_id": manifest.get("partition_id"),
                 "scene_id": scene_id,
+                "sample_count": int(manifest["total_samples"]),
             })
     if not records:
         raise ValueError("packed partitions contain no navigation quality")
@@ -290,3 +294,113 @@ def audit_navigation_quality(
         },
         "scenes": decisions,
     }
+
+
+def audit_packed_navigation_quality(
+    shard_dirs: Sequence[str | Path],
+) -> dict[str, Any]:
+    """Audit one-scene KITScenes partitions and bind decisions to hashes."""
+    records, identities = load_packed_navigation_quality(shard_dirs)
+    identities = sorted(
+        identities,
+        key=lambda value: (
+            str(value.get("partition_id", "")),
+            str(value.get("scene_id", "")),
+        ),
+    )
+    partition_ids = [
+        str(identity.get("partition_id", "")) for identity in identities
+    ]
+    if any(not partition_id for partition_id in partition_ids):
+        raise ValueError(
+            "navigation quality audit requires partition IDs"
+        )
+    duplicate_partitions = sorted(
+        partition_id
+        for partition_id, count in collections.Counter(
+            partition_ids
+        ).items()
+        if count != 1
+    )
+    if duplicate_partitions:
+        raise ValueError(
+            "navigation quality audit requires exactly one scene per "
+            f"partition: {duplicate_partitions[:3]}"
+        )
+
+    records_by_scene = {
+        str(record.get("scene_id", "")): record for record in records
+    }
+    for identity in identities:
+        scene_id = str(identity["scene_id"])
+        record = records_by_scene[scene_id]
+        if int(record.get("sample_count", -1)) != int(
+            identity["sample_count"]
+        ):
+            raise ValueError(
+                "navigation quality sample count differs from manifest for "
+                f"scene {scene_id!r}"
+            )
+
+    audit = audit_navigation_quality(records)
+    partition_by_scene = {
+        str(identity["scene_id"]): str(identity["partition_id"])
+        for identity in identities
+    }
+    decisions = []
+    for decision in audit["scenes"]:
+        scene_id = str(decision["scene_id"])
+        decisions.append({
+            **decision,
+            "partition_id": partition_by_scene[scene_id],
+        })
+    accepted_partition_ids = sorted(
+        decision["partition_id"]
+        for decision in decisions
+        if decision["accepted"]
+    )
+    excluded_partition_ids = sorted(
+        decision["partition_id"]
+        for decision in decisions
+        if not decision["accepted"]
+    )
+    return {
+        **audit,
+        "schema_version": PACKED_NAVIGATION_QUALITY_AUDIT_VERSION,
+        "quality_audit_schema_version": (
+            NAVIGATION_QUALITY_AUDIT_VERSION
+        ),
+        "packed_artifacts": identities,
+        "accepted_partition_ids": accepted_partition_ids,
+        "excluded_partition_ids": excluded_partition_ids,
+        "scenes": decisions,
+    }
+
+
+def verify_packed_navigation_quality_audit(
+    report: Mapping[str, Any],
+    shard_dirs: Sequence[str | Path],
+) -> dict[str, Any]:
+    """Recompute a packed audit and reject stale or edited reports."""
+    if not isinstance(report, Mapping):
+        raise ValueError("navigation quality audit must be an object")
+    expected = audit_packed_navigation_quality(shard_dirs)
+    actual_bytes = json.dumps(
+        dict(report),
+        allow_nan=False,
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("ascii")
+    expected_bytes = json.dumps(
+        expected,
+        allow_nan=False,
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("ascii")
+    if actual_bytes != expected_bytes:
+        raise ValueError(
+            "navigation quality audit differs from packed artifacts"
+        )
+    return expected
