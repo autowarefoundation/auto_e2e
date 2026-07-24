@@ -421,29 +421,29 @@ resize.
 
 ### 7.2 Geometry selection gate
 
-Neither 0.5 nor 1.0 m/px is frozen before a KITScenes audit computes:
+The geometry audit is recorded in
+[`Docs/navigation_geometry_audit.json`](navigation_geometry_audit.json). It
+uses the 404 non-empty KITScenes v2.2 scene-path artifacts and 60,443 valid
+6.4-second horizon pairs. The measured distribution is:
 
-- current speed distribution;
-- displacement over the 6.4 second prediction horizon;
-- longitudinal and lateral displacement quantiles;
-- junction and turn extents;
-- fraction of target/control rollouts covered by each candidate;
-- camera BEV grid dimensions required for square metric BEV cells;
-- model memory and latency for each candidate.
+| Quantity | p50 | p90 | p95 | p99 | max |
+|---|---:|---:|---:|---:|---:|
+| Speed (m/s) | 7.15 | 13.60 | 15.51 | 20.68 | 28.20 |
+| 6.4 s displacement (m) | 44.15 | 86.57 | 100.25 | 131.35 | 178.81 |
+| Absolute lateral displacement (m) | 2.44 | 14.89 | 22.81 | 38.21 | 59.26 |
 
-At minimum, report p50, p90, p95, p99, and maximum displacement. Compare
-0.5 and 1.0 m/px. The selected geometry must then update camera BEV `pc_range`
-and navigation geometry together.
+The candidates cover:
 
-Preserving the current one-third-from-rear BEV origin gives approximately:
+| Resolution | Longitudinal extent | Lateral extent | Coverage |
+|---|---:|---:|---:|
+| 0.5 m/px | 42.75 m rear, 85.25 m front | 64 m each side | 89.31% |
+| 1.0 m/px | 85.5 m rear, 170.5 m front | 128 m each side | 99.79% |
 
-| Resolution | Longitudinal extent | Lateral extent |
-|---|---:|---:|
-| 0.5 m/px | 42.75 m rear, 85.25 m front | 64 m each side |
-| 1.0 m/px | 85.5 m rear, 170.5 m front | 128 m each side |
-
-These are audit candidates, not final constants. The final values use the exact
-cell-center convention selected by the geometry golden tests.
+The selected initial geometry is `kitscenes-v3-bev-1m-v1`: 256 by 256 pixels,
+1.0 m/px, `x=[-85.5, 170.5]`, `y=[-128, 128]`, ego anchor
+`(row=170.0, col=127.5)`, and matching camera BEV
+`pc_range=(-85.5, -128, -5, 170.5, 128, 3)`. Pixel coordinates refer to cell
+centers. Camera BEV and navigation geometry change together.
 
 ### 7.3 Semantic map channels
 
