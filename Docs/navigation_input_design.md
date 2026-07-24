@@ -1051,19 +1051,22 @@ The common contract PR must merge before provider implementation begins.
 
 | Workstream | Scope owner | Out of scope |
 |---|---|---|
-| Canonical contracts, geometry audit, model ABI | riita10069 | Lanelet2 adapter implementation |
-| Lanelet2 semantic adapter | @bharatwrrr | Flyte/model/Valhalla changes |
-| Lanelet2 trace matcher and route-quality output | @bharatwrrr | Exact future-waypoint rasterization |
-| Common C++ rasterizer and Lanelet2 fixtures | @bharatwrrr | OSM network fetching or model wiring |
+| Canonical contracts, geometry audit, model ABI | riita10069 | None within the shared contract |
+| Production Lanelet2 semantic adapter | riita10069 | Test-only fixture ownership |
+| Lanelet2 trace matcher and route-quality output | riita10069 | Exact future-waypoint rasterization |
+| Common C++ rasterizer, bindings, and warp | riita10069 | Provider-specific routing |
+| Lanelet2 semantic fixtures and conformance tests | @bharatwrrr | Production adapter, matcher, rasterizer, Flyte, or model wiring |
 | OSM lane-map adapter and Valhalla provider/resolver | riita10069 | Lanelet2 adapter files |
-| Flyte schema v3, repack, Reasoning labels | riita10069 | Changes inside the contributed adapter while it is under review |
+| Flyte schema v3, repack, Reasoning labels | riita10069 | Test-only fixture files under contribution |
 | Model, cache, inference orchestration | riita10069 | Direct Reactive route input |
 | Evaluation and Console | riita10069 | Closed-loop milestone expansion |
 
-This split keeps #152 focused on Lanelet2 extraction, matching, and common C++
-rasterization, while #149 retains OSM/Valhalla integration. Neither workstream
-introduces a second navigation ABI, a second Lanelet2 renderer, or raw
-future-waypoint rasterization.
+This split keeps all production data and model dependencies for #152 under
+`riita10069`, so KITScenes repacking, training, and evaluation never wait for
+the contributed fixture workstream. The fixtures independently validate
+Lanelet2 semantics, malformed-map handling, and expected vector/BEV outputs.
+They do not introduce a second adapter or renderer. #149 retains OSM/Valhalla
+integration, and neither issue rasterizes raw future waypoints.
 
 ### 17.3 Design review and implementation gate
 
@@ -1073,11 +1076,12 @@ Issue descriptions may summarize the design, but they do not define parallel
 interfaces.
 
 The status changes from `Proposed` to `Accepted` after @bharatwrrr acknowledges
-the shared contracts and the ownership boundaries in Section 17.2. The
-document owner records that acknowledgement by updating the status in Document
-Metadata. Work on the Lanelet2 adapter, trace matcher, and common rasterizer
-does not begin before that acknowledgement. Acknowledgement confirms design
-and scope alignment; it does not replace implementation review or the
+the shared contracts and the ownership boundaries in Section 17.2 during
+review of the Design Doc PR. The document owner records that acknowledgement
+by updating the status in Document Metadata. The contributed fixture work does
+not begin before that acknowledgement. Production work proceeds under the
+accepted contract without depending on the fixture PR. Acknowledgement confirms
+design and scope alignment; it does not replace implementation review or the
 acceptance criteria in Section 19. Any implementation-driven change to a
 shared contract or workstream boundary updates this document before the
 conflicting implementation is merged.
@@ -1092,27 +1096,36 @@ conflicting implementation is merged.
 - Select 0.5 or 1.0 m/px and update matching BEV geometry.
 - Coordinate and serialization tests.
 
-### 18.2 PR 2A: Lanelet2 adapter and C++ renderer
+### 18.2 PR 2A: Training-critical KITScenes navigation path
 
+- Production Lanelet2 semantic adapter.
+- Scene-level trace matcher and route-quality output.
 - Authoritative C++ rasterizer and Python binding.
 - Python/C++ golden parity fixtures.
-- Lanelet2 adapter/matcher contribution.
+- Production SE(2) warp.
 - 20 ms / 100 MB benchmark and soak test.
 
-### 18.3 PR 2B: OSM adapter and Valhalla provider
+### 18.3 PR 2B: Lanelet2 conformance fixtures
+
+- Small Lanelet2 maps covering straight lanes, intersections, crosswalks,
+  stop lines, traffic direction, level overlap, and malformed primitives.
+- Expected provider-independent semantic primitive manifests.
+- Adapter conformance, deterministic-output, and map-quality diagnostic tests.
+
+### 18.4 PR 2C: OSM adapter and Valhalla provider
 
 - OSM adapter and local Valhalla reference provider.
 - Local lane-sequence resolver and uncertainty handling.
 - OSM fixtures against the common vector and raster contracts.
 
-### 18.4 PR 3: Flyte and dataset
+### 18.5 PR 3: Flyte and dataset
 
 - Scene-level route generation in `data_processing`.
 - Route-aware teacher context.
 - Shard schema v3 and immutable KITScenes v3.0 smoke repack.
 - Quality audit, threshold freeze, then full-scene repack.
 
-### 18.5 PR 4: Model and inference
+### 18.6 PR 4: Model and inference
 
 - Semantic map input contract.
 - Shared navigation encoder trunk with separate map/route stems.
@@ -1121,7 +1134,7 @@ conflicting implementation is merged.
 - 1 Hz `ReasoningStateCache`.
 - 2 Hz raster scheduling and 10 Hz timestamp warp.
 
-### 18.6 PR 5: Evaluation and Console
+### 18.7 PR 5: Evaluation and Console
 
 - Full baseline and route-conditioned Flyte training runs.
 - Junction/maneuver/route-compliance metrics and counterfactuals.
@@ -1129,11 +1142,12 @@ conflicting implementation is merged.
 - Console route and semantic-layer overlays.
 - Close #148 after acceptance evidence is linked.
 
-PR 1 is a dependency for both adapter workstreams. After it merges and the
-document status is `Accepted`, PR 2A and PR 2B may proceed in parallel against
-the frozen contract with disjoint file ownership. PR 2B's integration fixtures
-run against the common renderer after PR 2A provides it. Each PR includes the
-contract and behavior tests relevant to its scope.
+PR 1 is a dependency for all workstreams. After it merges and the document
+status is `Accepted`, PR 2A, PR 2B, and PR 2C may proceed in parallel against
+the frozen contract with disjoint file ownership. PR 3 depends on PR 2A only;
+neither PR 2B nor PR 2C gates KITScenes repacking, model training, or
+evaluation. PR 2B runs its final integration assertions after PR 2A provides
+the common renderer.
 
 ## 19. Acceptance Criteria
 
