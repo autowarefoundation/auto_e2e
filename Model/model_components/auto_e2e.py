@@ -84,6 +84,11 @@ class AutoE2E(nn.Module):
             )
             self.visual_history_buffer = RollingHistoryBuffer(history_len=history_len)
 
+    @property
+    def trajectory_planner(self) -> nn.Module:
+        """Return the active planner through the public model interface."""
+        return self.Reactive_E2E.TrajectoryPlanner
+
     def reset_visual_history(self):
         """Clear the World Model's rolling buffer (call between sequences)."""
         if self.visual_history_buffer is not None:
@@ -212,4 +217,3 @@ class AutoE2E(nn.Module):
         return trajectory
         
     
-
