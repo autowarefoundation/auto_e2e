@@ -49,6 +49,30 @@ class _MetricModel:
         return torch.zeros((visual.shape[0], 128), dtype=torch.float32)
 
 
+class _RouteSensitiveMetricModel(_MetricModel):
+    def __call__(self, visual, *args, **kwargs):
+        route_mask = kwargs["route_mask"]
+        batch_size, _, _, width = route_mask.shape
+        columns = torch.arange(
+            width,
+            dtype=route_mask.dtype,
+            device=route_mask.device,
+        )
+        corridor = route_mask[:, 0]
+        mass = corridor.sum(dim=(1, 2)).clamp_min(1.0)
+        centroid = (
+            corridor.sum(dim=1) * columns
+        ).sum(dim=1) / mass
+        curvature = (width / 2.0 - centroid) * 1e-3
+        output = torch.zeros(
+            (batch_size, 64, 2),
+            dtype=visual.dtype,
+            device=visual.device,
+        )
+        output[:, :, 1] = curvature[:, None]
+        return output.reshape(batch_size, 128)
+
+
 def _validation_batch(sample_uids):
     batch_size = len(sample_uids)
     ego = torch.zeros((batch_size, 256), dtype=torch.float32)
@@ -74,6 +98,54 @@ def _validation_batch(sample_uids):
             (batch_size, 128), dtype=torch.float32
         ),
     }
+
+
+def _navigation_validation_batch(sample_uid, route_id, lateral_m):
+    from navigation.geometry import (
+        DEFAULT_NAVIGATION_GEOMETRY,
+        MapChannel,
+        RouteChannel,
+    )
+
+    geometry = DEFAULT_NAVIGATION_GEOMETRY
+    batch = _validation_batch([sample_uid])
+    batch["map_context"] = torch.zeros(
+        (1, 14, geometry.height_px, geometry.width_px),
+        dtype=torch.float32,
+    )
+    batch["map_context"][:, MapChannel.KNOWN_MAP_AREA] = 1.0
+    route = torch.zeros(
+        (1, 2, geometry.height_px, geometry.width_px),
+        dtype=torch.float32,
+    )
+    points = torch.stack([
+        torch.arange(0.0, 65.0),
+        torch.full((65,), float(lateral_m)),
+    ], dim=1).numpy()
+    pixels = geometry.ego_to_pixel(points)
+    for row, col in torch.from_numpy(pixels).round().to(torch.int64):
+        route[
+            0,
+            RouteChannel.SELECTED_CORRIDOR,
+            max(0, int(row) - 1):int(row) + 2,
+            max(0, int(col) - 1):int(col) + 2,
+        ] = 1.0
+    row, col = torch.from_numpy(pixels[-1]).round().to(torch.int64)
+    route[
+        0,
+        RouteChannel.DESTINATION,
+        max(0, int(row) - 1):int(row) + 2,
+        max(0, int(col) - 1):int(col) + 2,
+    ] = 1.0
+    batch["route_mask"] = route
+    batch["route_valid"] = torch.ones(1, dtype=torch.bool)
+    batch["navigation_metadata"] = {
+        "route_id": [route_id],
+        "route_maneuver": ["straight"],
+        "route_intersection": torch.zeros(1, dtype=torch.bool),
+        "destination_visible": torch.ones(1, dtype=torch.bool),
+    }
+    return batch
 
 
 def test_epoch_evaluation_restores_mode_and_hashes_fixed_uids():
@@ -267,6 +339,47 @@ def test_kitscenes_epoch_evaluation_preserves_auto_e2e_horizon():
     assert torch.count_nonzero(adapted[:, :24]) == 24 * 4
     assert adapted[0, -1, 0].item() == 2.0
     assert adapted[0, -1, 1].item() == 0.0
+
+
+def test_standalone_navigation_evaluation_runs_cross_scene_route_swap():
+    from navigation.geometry import DEFAULT_NAVIGATION_GEOMETRY
+
+    model = _RouteSensitiveMetricModel()
+    loader = [
+        (
+            _navigation_validation_batch(
+                "sample-a",
+                "route-a",
+                0.0,
+            ),
+            None,
+            "pseudo",
+        ),
+        (
+            _navigation_validation_batch(
+                "sample-b",
+                "route-b",
+                20.0,
+            ),
+            None,
+            "pseudo",
+        ),
+    ]
+
+    metrics = workflows._evaluate_open_loop(
+        model,
+        loader,
+        torch.device("cpu"),
+        navigation_geometry=DEFAULT_NAVIGATION_GEOMETRY,
+        route_swap_counterfactual=True,
+    )
+
+    report = metrics["navigation"]
+    assert report["slices"]["overall"]["sample_count"] == 2
+    assert report["slices"]["route_valid"]["sample_count"] == 2
+    counterfactual = report["route_swap_counterfactual"]
+    assert counterfactual["sample_count"] == 1
+    assert counterfactual["endpoint_delta_m"]["mean"] > 0.0
 
 
 def test_terminal_resume_state_allows_finalization():
