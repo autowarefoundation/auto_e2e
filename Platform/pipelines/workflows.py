@@ -528,11 +528,32 @@ def _resume_terminal_state(
     return completed_epoch == requested_epochs or stopped_early, stopped_early
 
 
+def _collated_metadata_value(
+    metadata,
+    key: str,
+    sample_index: int,
+    default=None,
+):
+    """Read one scalar/string from PyTorch's recursively collated metadata."""
+    if not isinstance(metadata, dict) or key not in metadata:
+        return default
+    value = metadata[key]
+    if isinstance(value, (list, tuple)):
+        return value[sample_index]
+    if hasattr(value, "ndim") and getattr(value, "ndim", 0) > 0:
+        value = value[sample_index]
+    if hasattr(value, "item"):
+        return value.item()
+    return value
+
+
 def _evaluate_open_loop(
     model,
     loader,
     device,
     training_policy=None,
+    navigation_geometry=None,
+    route_swap_counterfactual: bool = False,
 ) -> dict:
     """Evaluate one fixed loader and return finite ADE/FDE plus its UID digest."""
     import hashlib
@@ -549,6 +570,9 @@ def _evaluate_open_loop(
     all_ade: list[float] = []
     all_fde: list[float] = []
     sample_uids: list[str] = []
+    navigation_records: list[dict] = []
+    route_swap_records: list[dict] = []
+    route_cache: dict[str, torch.Tensor] = {}
     model.eval()
     try:
         with torch.no_grad():
@@ -568,10 +592,16 @@ def _evaluate_open_loop(
                     )
                 vis_hist = batch["visual_history"].to(device)
                 target = batch["trajectory_target"]
-                map_context = batch["map_context"].to(device)
-                route_mask = batch["route_mask"].to(device)
+                raw_map_context = batch["map_context"]
+                raw_route_mask = batch["route_mask"]
+                map_context = raw_map_context.to(device)
+                route_mask = raw_route_mask.to(device)
                 map_valid = batch["map_valid"].to(device)
                 route_valid = batch["route_valid"].to(device)
+                navigation_metadata = batch.get(
+                    "navigation_metadata",
+                    {},
+                )
                 history_frames = batch.get("history_frames")
                 future_frames = batch.get("future_frames")
                 if history_frames is not None:
@@ -600,6 +630,57 @@ def _evaluate_open_loop(
                     batch_uids = [batch_uids]
                 sample_uids.extend(str(uid) for uid in batch_uids)
 
+                swapped_pred_np = None
+                swapped_indices: set[int] = set()
+                if (
+                    navigation_geometry is not None
+                    and route_swap_counterfactual
+                ):
+                    swapped_route_mask = raw_route_mask.clone()
+                    swapped_route_valid = batch["route_valid"].clone()
+                    for sample_index in range(pred_np.shape[0]):
+                        route_id = str(
+                            _collated_metadata_value(
+                                navigation_metadata,
+                                "route_id",
+                                sample_index,
+                                "",
+                            )
+                        )
+                        candidates = sorted(
+                            candidate_id
+                            for candidate_id in route_cache
+                            if candidate_id != route_id
+                        )
+                        if (
+                            bool(route_valid[sample_index].item())
+                            and route_id
+                            and candidates
+                        ):
+                            swapped_route_mask[sample_index] = (
+                                route_cache[candidates[0]]
+                            )
+                            swapped_route_valid[sample_index] = True
+                            swapped_indices.add(sample_index)
+                    if swapped_indices:
+                        if hasattr(model, "reset_visual_history"):
+                            model.reset_visual_history()
+                        swapped_pred = model(
+                            visual,
+                            map_context,
+                            vis_hist,
+                            ego_hist,
+                            route_mask=swapped_route_mask.to(device),
+                            map_valid=map_valid,
+                            route_valid=swapped_route_valid.to(device),
+                            projection=projection,
+                            geometry_type=geometry_type,
+                            history_frames=history_frames,
+                            future_frames=future_frames,
+                            mode="infer",
+                        )
+                        swapped_pred_np = swapped_pred.cpu().numpy()
+
                 for sample_index in range(pred_np.shape[0]):
                     pred_signals = pred_np[sample_index].reshape(
                         AUTO_E2E_TIMESTEPS, 2
@@ -622,6 +703,83 @@ def _evaluate_open_loop(
                     )
                     all_ade.append(float(errors.mean()))
                     all_fde.append(float(errors[-1]))
+                    if navigation_geometry is not None:
+                        from evaluation.navigation_metrics import (
+                            navigation_sample_metrics,
+                            route_swap_sample_metrics,
+                        )
+
+                        metadata = {
+                            key: _collated_metadata_value(
+                                navigation_metadata,
+                                key,
+                                sample_index,
+                                default,
+                            )
+                            for key, default in (
+                                ("route_id", ""),
+                                ("route_maneuver", "unknown"),
+                                ("route_intersection", False),
+                                ("destination_visible", False),
+                            )
+                        }
+                        navigation_records.append(
+                            navigation_sample_metrics(
+                                pred_traj,
+                                target_traj,
+                                raw_route_mask[sample_index].numpy(),
+                                raw_map_context[sample_index].numpy(),
+                                route_valid=bool(
+                                    route_valid[sample_index].item()
+                                ),
+                                metadata=metadata,
+                                geometry=navigation_geometry,
+                            )
+                        )
+                        if (
+                            swapped_pred_np is not None
+                            and sample_index in swapped_indices
+                        ):
+                            swapped_signals = swapped_pred_np[
+                                sample_index
+                            ].reshape(AUTO_E2E_TIMESTEPS, 2)
+                            swapped_traj = integrate_trajectory(
+                                swapped_signals[:, 0],
+                                swapped_signals[:, 1],
+                                v0,
+                            )
+                            route_swap_records.append(
+                                route_swap_sample_metrics(
+                                    pred_traj,
+                                    swapped_traj,
+                                    raw_route_mask[
+                                        sample_index
+                                    ].numpy(),
+                                    geometry=navigation_geometry,
+                                )
+                            )
+
+                if navigation_geometry is not None:
+                    for sample_index in range(pred_np.shape[0]):
+                        if not bool(route_valid[sample_index].item()):
+                            continue
+                        route_id = str(
+                            _collated_metadata_value(
+                                navigation_metadata,
+                                "route_id",
+                                sample_index,
+                                "",
+                            )
+                        )
+                        if route_id:
+                            route_cache[route_id] = (
+                                raw_route_mask[sample_index]
+                                .detach()
+                                .cpu()
+                                .clone()
+                            )
+                    while len(route_cache) > 8:
+                        route_cache.pop(next(iter(route_cache)))
     finally:
         model.train(was_training)
         if hasattr(model, "reset_visual_history"):
@@ -643,13 +801,27 @@ def _evaluate_open_loop(
     uid_digest = hashlib.sha256(
         "\n".join(sorted(sample_uids)).encode("utf-8")
     ).hexdigest()
-    return {
+    result = {
         "ade": ade,
         "fde": fde,
         "evaluation_steps": AUTO_E2E_TIMESTEPS,
         "sample_count": len(all_ade),
         "sample_uid_digest": uid_digest,
     }
+    if navigation_geometry is not None:
+        from evaluation.navigation_metrics import (
+            summarize_navigation_metrics,
+        )
+
+        if len(navigation_records) != len(all_ade):
+            raise ValueError(
+                "navigation metric coverage differs from displacement metrics"
+            )
+        result["navigation"] = summarize_navigation_metrics(
+            navigation_records,
+            route_swap_records=route_swap_records,
+        )
+    return result
 
 
 def _register_checkpoint_version(
@@ -4052,11 +4224,25 @@ def _run_evaluation(checkpoint, shards, train_metadata, dataset, experiment_name
     print(f"Eval split={eval_split} (strategy={training_policy.validation_strategy}, "
           f"val_fraction={val_fraction}, {len(shard_dirs)} partitions) — "
           f"{'held-out generalization' if eval_split == 'val' else 'in-sample'}")
+    navigation_geometry = None
+    if dataset == Dataset.KITSCENES:
+        from navigation.geometry import DEFAULT_NAVIGATION_GEOMETRY
+
+        if config.get("navigation_geometry_id") != (
+            DEFAULT_NAVIGATION_GEOMETRY.geometry_id
+        ):
+            raise ValueError(
+                "KITScenes checkpoint navigation geometry differs from "
+                "the route evaluation contract"
+            )
+        navigation_geometry = DEFAULT_NAVIGATION_GEOMETRY
     evaluation = _evaluate_open_loop(
         model,
         loader,
         device,
         training_policy=training_policy,
+        navigation_geometry=navigation_geometry,
+        route_swap_counterfactual=(navigation_geometry is not None),
     )
     expected_digest = validation_metadata.get("sample_uid_digest")
     if expected_digest and evaluation["sample_uid_digest"] != expected_digest:
@@ -4067,6 +4253,24 @@ def _run_evaluation(checkpoint, shards, train_metadata, dataset, experiment_name
         )
     avg_ade = evaluation["ade"]
     avg_fde = evaluation["fde"]
+    navigation_report = evaluation.get("navigation")
+    if navigation_report is not None:
+        navigation_report = {
+            **navigation_report,
+            "checkpoint_sha256": checkpoint_sha256,
+            "dataset": dataset.value,
+            "dataset_version": meta.get("data", {}).get(
+                "dataset_version",
+                "unknown",
+            ),
+            "enable_route_conditioning": bool(
+                config.get("enable_route_conditioning", True)
+            ),
+            "navigation_geometry_id": config.get(
+                "navigation_geometry_id"
+            ),
+            "sample_uid_digest": evaluation["sample_uid_digest"],
+        }
     passed = avg_ade < 2.0 and avg_fde < 4.0
 
     # --- MLflow logging ---
@@ -4152,13 +4356,87 @@ def _run_evaluation(checkpoint, shards, train_metadata, dataset, experiment_name
         })
 
         # Eval metrics
-        mlflow.log_metrics({"eval/ade": avg_ade, "eval/fde": avg_fde, "eval/gate_pass": 1.0 if passed else 0.0})
+        logged_metrics = {
+            "eval/ade": avg_ade,
+            "eval/fde": avg_fde,
+            "eval/gate_pass": 1.0 if passed else 0.0,
+        }
+        if navigation_report is not None:
+            slices = navigation_report["slices"]
+            counterfactual = navigation_report[
+                "route_swap_counterfactual"
+            ]
+            navigation_metrics = {
+                "eval/navigation/route_compliance": slices[
+                    "route_valid"
+                ]["route_point_compliance"]["mean"],
+                "eval/navigation/wrong_branch_rate": slices[
+                    "junction"
+                ]["wrong_branch_rate"]["mean"],
+                "eval/navigation/destination_error_m": slices[
+                    "overall"
+                ]["destination_distance_error_m"]["mean"],
+                "eval/navigation/junction_ade_m": slices[
+                    "junction"
+                ]["ade_m"]["mean"],
+                "eval/navigation/junction_fde_m": slices[
+                    "junction"
+                ]["fde_m"]["mean"],
+                "eval/navigation/non_junction_ade_m": slices[
+                    "non_junction"
+                ]["ade_m"]["mean"],
+                "eval/navigation/valid_route_ade_m": slices[
+                    "route_valid"
+                ]["ade_m"]["mean"],
+                "eval/navigation/invalid_route_ade_m": slices[
+                    "route_invalid"
+                ]["ade_m"]["mean"],
+                "eval/navigation/swap_endpoint_delta_m": counterfactual[
+                    "endpoint_delta_m"
+                ]["mean"],
+                "eval/navigation/swap_compliance_drop": counterfactual[
+                    "selected_compliance_drop"
+                ]["mean"],
+            }
+            for maneuver in ("left", "right", "straight"):
+                maneuver_slice = slices[f"maneuver_{maneuver}"]
+                navigation_metrics[
+                    f"eval/navigation/{maneuver}_ade_m"
+                ] = maneuver_slice["ade_m"]["mean"]
+                navigation_metrics[
+                    f"eval/navigation/{maneuver}_fde_m"
+                ] = maneuver_slice["fde_m"]["mean"]
+            logged_metrics.update({
+                key: float(value)
+                for key, value in navigation_metrics.items()
+                if value is not None
+            })
+        mlflow.log_metrics(logged_metrics)
 
         # Artifacts
         os.makedirs("/tmp/eval-artifacts", exist_ok=True)
         with open("/tmp/eval-artifacts/config.yaml", "w") as f:
             yaml.dump(meta, f)
         mlflow.log_artifact("/tmp/eval-artifacts/config.yaml")
+        if navigation_report is not None:
+            navigation_report_path = (
+                "/tmp/eval-artifacts/navigation_evaluation.json"
+            )
+            with open(
+                navigation_report_path,
+                "w",
+                encoding="ascii",
+            ) as stream:
+                json.dump(
+                    navigation_report,
+                    stream,
+                    allow_nan=False,
+                    ensure_ascii=True,
+                    indent=2,
+                    sort_keys=True,
+                )
+                stream.write("\n")
+            mlflow.log_artifact(navigation_report_path)
 
         # Register only immutable best/final checkpoints. Retry of the eval
         # task reuses the same run/source pair and therefore the same versions.
@@ -4210,6 +4488,18 @@ def _run_evaluation(checkpoint, shards, train_metadata, dataset, experiment_name
             )
 
     print(f"Eval: ADE={avg_ade:.3f} FDE={avg_fde:.3f} Gate={'PASS' if passed else 'FAIL'}")
+    if navigation_report is not None:
+        route_compliance = navigation_report["slices"][
+            "route_valid"
+        ]["route_point_compliance"]["mean"]
+        swap_delta = navigation_report["route_swap_counterfactual"][
+            "endpoint_delta_m"
+        ]["mean"]
+        print(
+            "Navigation eval: "
+            f"route_compliance={route_compliance} "
+            f"swap_endpoint_delta_m={swap_delta}"
+        )
     return EvalMetrics(ade=avg_ade, fde=avg_fde, gate_pass=passed)
 
 
