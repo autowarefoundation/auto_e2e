@@ -48,56 +48,74 @@ export function useCarryForwardLabel({
 }): CarryForwardLabel {
   const cacheRef = useRef(new Map<string, CacheEntry<ReasoningLabelRecord>>());
   // Fetch-generation token: bumped whenever the scope changes so in-flight
-  // responses resolving after a scope switch are discarded instead of poisoning
-  // the fresh cache with cross-scope labels.
+  // responses resolving after a scope switch are discarded instead of writing a
+  // stale entry into the freshly-cleared cache.
   const scopeRef = useRef(0);
   // Re-render trigger when a fetch resolves (the cache is a ref, not state).
-  // `tick` is a selector dependency so a resolution re-selects even while
-  // paused, when `frame` is not changing to drive the recompute on its own.
+  // `tick` is a dependency of BOTH the selector and the fetch effect: a
+  // resolution must re-select the shown label AND re-plan the next fetch even
+  // while paused, when `frame` is not advancing to drive either on its own.
   const [tick, setTick] = useState(0);
   const rerender = useCallback(() => setTick((t) => t + 1), []);
 
   const anchorFrames = useMemo(() => anchorFramesOf(samples), [samples]);
 
-  const keyForFrame = useCallback(
+  // The cache is keyed by scope + sample so a render that happens BEFORE the
+  // scope-reset effect commits cannot read a prior scope's label (React runs
+  // render before effects): under the new scope the lookup key differs and
+  // misses, instead of momentarily painting the old teacher/prompt's label.
+  const scopeKey = useMemo(
+    () => [dataset, version ?? "", teacher ?? "", promptVersion ?? ""].join(" "),
+    [dataset, version, teacher, promptVersion],
+  );
+  // Raw WebDataset sample key (for the API call) vs the scope-qualified cache
+  // key (for the Map). The pure core treats keyForFrame as an opaque cache key,
+  // so it gets the scope-qualified one.
+  const sampleKeyForFrame = useCallback(
     (f: number) => samples[f]?.key,
     [samples],
   );
+  const cacheKeyForFrame = useCallback(
+    (f: number) => {
+      const k = samples[f]?.key;
+      return k === undefined ? undefined : `${scopeKey} ${k}`;
+    },
+    [samples, scopeKey],
+  );
 
-  // Reset on scope change: clear the cache, invalidate in-flight fetches, and
-  // re-render so the panel falls back to loading/none under the new scope. A new
-  // Map identity (not .clear()) keeps any captured closure from mutating the old
-  // one after the swap.
+  // Reset on scope change: drop the old scope's entries (memory) and invalidate
+  // in-flight fetches via the generation token. Correctness of what's SHOWN does
+  // not depend on this effect's timing — the scope-qualified keys already make a
+  // pre-commit render miss the old scope — so this is pure hygiene.
   useEffect(() => {
     cacheRef.current = new Map();
     scopeRef.current += 1;
     rerender();
-  }, [dataset, version, teacher, promptVersion, rerender]);
+  }, [scopeKey, rerender]);
 
   // Computed inline (not memoized) because it reads the mutable cacheRef: the
-  // component re-renders on every `frame` change and on every `tick` bump (a
-  // fetch resolving), which are exactly the moments the selection can change, so
-  // a fresh scan each render is both correct and cheap — the backward walk is
-  // over the sparse ~1Hz anchors, not every frame. `tick` is referenced so the
-  // dependency is explicit to readers even though the value isn't used directly.
-  void tick;
+  // component re-renders on every `frame` change and every `tick` bump (a fetch
+  // resolving), which are exactly the moments the selection can change, so a
+  // fresh scan each render is both correct and cheap — the backward walk is over
+  // the sparse ~1Hz anchors, not every frame.
   const selection = selectCarryForwardLabel(
     anchorFrames,
     frame,
-    keyForFrame,
+    cacheKeyForFrame,
     cacheRef.current,
   );
 
-  // Fetch driver: at most one backward (fill the label to show) + one forward
-  // (look-ahead so the next anchor swaps with no gap) fetch per frame move.
-  // Cache-status dedupe throttles it — no debounce timer, which is correct under
-  // continuous 10 Hz playback where `frame` changes every tick.
+  // Fetch driver: one backward (the label to show) + one forward (look-ahead so
+  // the next anchor swaps with no gap) fetch per invocation. It re-runs on every
+  // `frame` change AND every `tick` bump, so the backward walk past scoped-404
+  // (absent) anchors advances one step per resolution even while PAUSED — not
+  // only while `frame` is ticking. Cache-status dedupe throttles it (no timer).
   useEffect(() => {
     const cache = cacheRef.current;
     const { backward, forward } = carryForwardFetchTargets(
       anchorFrames,
       frame,
-      keyForFrame,
+      cacheKeyForFrame,
       cache,
     );
     const targets = [backward, forward].filter(
@@ -107,13 +125,14 @@ export function useCarryForwardLabel({
 
     const myScope = scopeRef.current;
     for (const af of targets) {
-      const key = keyForFrame(af);
-      if (!key || cache.get(key)) continue; // already loading/present/absent
-      cache.set(key, { status: "loading" });
-      getReasoningLabel(dataset, key, promptVersion, version, teacher)
+      const cacheKey = cacheKeyForFrame(af);
+      const sampleKey = sampleKeyForFrame(af);
+      if (!cacheKey || !sampleKey || cache.get(cacheKey)) continue; // deduped
+      cache.set(cacheKey, { status: "loading" });
+      getReasoningLabel(dataset, sampleKey, promptVersion, version, teacher)
         .then((label) => {
           if (scopeRef.current !== myScope) return; // scope changed mid-flight
-          cacheRef.current.set(key, { status: "present", label });
+          cacheRef.current.set(cacheKey, { status: "present", label });
           rerender();
         })
         .catch((err: unknown) => {
@@ -121,23 +140,28 @@ export function useCarryForwardLabel({
           if (err instanceof ApiError && err.status === 404) {
             // Not labelled in this scope: negative-cache so the selector skips
             // it and the playhead crossing it does not blank the panel.
-            cacheRef.current.set(key, { status: "absent" });
+            // rerender() so the tick-keyed effect re-runs and the backward walk
+            // advances to the next older anchor even while paused.
+            cacheRef.current.set(cacheKey, { status: "absent" });
+            rerender();
           } else {
-            // Transient failure: drop back to uncached so the next frame move
-            // retries, instead of dead-ending on an error state.
-            cacheRef.current.delete(key);
+            // Transient failure: drop back to uncached so a later fetch retries.
+            // Do NOT rerender here — with `tick` in the effect deps that would
+            // re-run the effect and immediately re-fetch the same key, hammering
+            // a persistent 5xx in a tight loop while paused. The display is
+            // unchanged (loading -> uncached both read as pending), so the retry
+            // waits for the next frame move instead.
+            cacheRef.current.delete(cacheKey);
             console.warn("reasoning label fetch failed", err);
           }
-          rerender();
         });
     }
-    // A resolution mutates cacheRef and calls rerender(); the parent re-renders
-    // and this effect re-runs (frame typically also changed), re-planning the
-    // next fetch target. Scope inputs re-run it when the partition changes.
   }, [
     anchorFrames,
     frame,
-    keyForFrame,
+    tick,
+    cacheKeyForFrame,
+    sampleKeyForFrame,
     dataset,
     version,
     teacher,
