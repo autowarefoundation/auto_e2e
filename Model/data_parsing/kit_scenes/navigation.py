@@ -276,11 +276,42 @@ class KitScenesSceneNavigation:
 
     def sample_members(self, frame_idx: int) -> dict[str, bytes]:
         raster = self.raster_for_frame(frame_idx)
+        quality = self.route.quality
         return encode_sample_navigation(
             raster,
             extra_metadata={
                 "scene_navigation_sha256": (
                     self._scene_navigation_sha256
+                ),
+                "route_quality_matched_pose_ratio": (
+                    quality.matched_pose_ratio
+                ),
+                "route_quality_median_lateral_distance_m": (
+                    quality.median_lateral_distance_m
+                ),
+                "route_quality_p95_lateral_distance_m": (
+                    quality.p95_lateral_distance_m
+                ),
+                "route_quality_median_heading_error_rad": (
+                    quality.median_heading_error_rad
+                ),
+                "route_quality_p95_heading_error_rad": (
+                    quality.p95_heading_error_rad
+                ),
+                "route_quality_shortest_path_fill_count": (
+                    quality.shortest_path_fill_count
+                ),
+                "route_quality_shortest_path_fill_length_m": (
+                    quality.shortest_path_fill_length_m
+                ),
+                "route_quality_adjacent_transition_count": (
+                    quality.adjacent_transition_count
+                ),
+                "route_quality_unresolved_discontinuities": (
+                    quality.unresolved_discontinuities
+                ),
+                "route_quality_failure_reasons": "|".join(
+                    quality.failure_reasons
                 ),
                 **self.route_semantics(frame_idx, raster),
             },
