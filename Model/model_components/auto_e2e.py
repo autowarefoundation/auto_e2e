@@ -12,7 +12,8 @@ class AutoE2E(nn.Module):
                  image_feature_size=8, view_fusion_kwargs=None,
                  num_timesteps=64, num_signals=2, egomotion_dim=256,
                  visual_history_dim=896,
-                 map_type="rasterized", map_in_channels=3,
+                 map_type="rasterized", map_context_channels=3,
+                 route_channels=2,
                  map_fusion_mode="residual", map_fusion_kwargs=None,
                  temporal_memory_mode="no_memory", temporal_memory_kwargs=None,
                  planner_mode="bezier", planner_kwargs=None,
@@ -34,7 +35,9 @@ class AutoE2E(nn.Module):
                  image_feature_size=image_feature_size, view_fusion_kwargs=view_fusion_kwargs,
                  num_timesteps=num_timesteps, num_signals=num_signals, egomotion_dim=egomotion_dim,
                  visual_history_dim=visual_history_dim,
-                 map_type=map_type, map_in_channels=map_in_channels,
+                 map_type=map_type,
+                 map_context_channels=map_context_channels,
+                 route_channels=route_channels,
                  map_fusion_mode=map_fusion_mode, map_fusion_kwargs=map_fusion_kwargs,
                  temporal_memory_mode=temporal_memory_mode, temporal_memory_kwargs=temporal_memory_kwargs,
                  planner_mode=planner_mode, planner_kwargs=planner_kwargs,
@@ -91,7 +94,9 @@ class AutoE2E(nn.Module):
                 history_len=self.visual_history_buffer.history_len)
 
 
-    def forward(self, camera_tiles, map_input, visual_history, egomotion_history,
+    def forward(self, camera_tiles, map_context, visual_history,
+                egomotion_history, route_mask=None, map_valid=None,
+                route_valid=None,
                 projection=None, geometry_type=None, image_transform=None,
                 mode="train", trajectory_target=None,
                 history_frames=None, future_frames=None, **kwargs):
@@ -109,8 +114,11 @@ class AutoE2E(nn.Module):
 
         Args:
             camera_tiles: (B, V, 3, H, W) — V real camera images (the nav-map is
-                a separate map_input, not a camera view).
-            map_input: (B, 3, H_map, W_map) — BEV nav-map image.
+                a separate navigation input, not a camera view).
+            map_context: (B, C_map, H_map, W_map) — semantic BEV map.
+            route_mask: (B, 2, H_map, W_map) — selected route corridor and
+                destination marker. It enters only the Reactive branch.
+            map_valid / route_valid: (B,) explicit validity gates.
             visual_history: (B, T, visual_history_dim) or (B, visual_history_dim).
             egomotion_history: (B, T, egomotion_dim) or (B, egomotion_dim).
             projection: Optional CameraProjectionModel operator — the geometry
@@ -185,7 +193,10 @@ class AutoE2E(nn.Module):
         # In train mode with reasoning on, ReactiveE2E returns
         # (trajectory, reasoning_pred); otherwise just the trajectory.
         reactive_out = self.Reactive_E2E(
-            camera_tiles, map_input, visual_history, egomotion_history,
+            camera_tiles, map_context, visual_history, egomotion_history,
+            route_mask=route_mask,
+            map_valid=map_valid,
+            route_valid=route_valid,
             projection=projection, geometry_type=geometry_type,
             image_transform=image_transform,
             mode=mode, trajectory_target=trajectory_target, **kwargs,
@@ -212,4 +223,3 @@ class AutoE2E(nn.Module):
         return trajectory
         
     
-
