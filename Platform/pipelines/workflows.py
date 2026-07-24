@@ -55,6 +55,7 @@ DATA_PREP_IMAGE = _os.environ.get(
 
 MLFLOW_URI = "http://mlflow.mlflow.svc.cluster.local:5000"
 DATASET_PACK_VERSION = "v2.2"
+KITSCENES_NAVIGATION_DATASET_VERSION = "v3.0"
 L2D_SOURCE_REVISION = "main"
 KITSCENES_SOURCE_REVISION = "6fde0034446669e2ed7235e4c7fe323cd23d599d"
 
@@ -4891,7 +4892,7 @@ def _map_recovered_kitscenes_artifacts(
 def wf_repack_existing_kitscenes(
     recovery_manifest: FlyteFile,
     artifact_set_sha256: str,
-    dataset_version: str = DATASET_PACK_VERSION,
+    dataset_version: str = KITSCENES_NAVIGATION_DATASET_VERSION,
     image_size: int = 256,
     pack_concurrency: int = 60,
 ) -> List[FlyteDirectory]:
@@ -4909,7 +4910,7 @@ def wf_repack_existing_kitscenes(
 def wf_create_dataset_sharded(
     dataset: Dataset = Dataset.KITSCENES,
     source_revision: str = KITSCENES_SOURCE_REVISION,
-    dataset_version: str = DATASET_PACK_VERSION,
+    dataset_version: str = KITSCENES_NAVIGATION_DATASET_VERSION,
     episodes: int = 10,
     start_ep: int = -1,
     end_ep: int = -1,
@@ -4965,7 +4966,7 @@ def wf_create_dataset_sharded(
 def wf_sharded_full_run(
     dataset: Dataset = Dataset.KITSCENES,
     source_revision: str = KITSCENES_SOURCE_REVISION,
-    dataset_version: str = DATASET_PACK_VERSION,
+    dataset_version: str = KITSCENES_NAVIGATION_DATASET_VERSION,
     episodes: int = 10,
     partition_size: int = 1,
     image_size: int = 256,
@@ -5035,7 +5036,7 @@ def wf_sharded_full_run(
 def wf_recovered_kitscenes_full_run(
     recovery_manifest: FlyteFile,
     artifact_set_sha256: str,
-    dataset_version: str = DATASET_PACK_VERSION,
+    dataset_version: str = KITSCENES_NAVIGATION_DATASET_VERSION,
     image_size: int = 256,
     pack_concurrency: int = 60,
     backbone: Backbone = Backbone.SWIN_V2_TINY,
