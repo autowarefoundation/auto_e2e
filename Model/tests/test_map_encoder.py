@@ -5,8 +5,8 @@ Covers:
   - ResidualMapFusion: zero-alpha init, output shape, alpha learns, gradient flow
   - MapCrossAttentionFusion: output shape, map influences output, gradient flow
   - MAP_ENCODER_REGISTRY and MAP_FUSION_REGISTRY
-  - AutoE2E map integration: zero map produces same output as alpha=0 baseline,
-    map_input influences trajectory once alpha is non-zero, MapEncoder and
+  - AutoE2E navigation integration: validity-gated map/route inputs are encoded
+    only by the Reactive branch, and NavigationEncoder / MapBEVFusion
     MapBEVFusion parameters receive gradients
 """
 
@@ -289,9 +289,9 @@ class TestAutoE2EMapIntegration:
         traj = model(visual, map_input, vis_hist, ego, mode="train")
         traj.pow(2).mean().backward()
 
-        no_grad = [n for n, p in model.Reactive_E2E.MapEncoder.named_parameters()
+        no_grad = [n for n, p in model.Reactive_E2E.NavigationEncoder.named_parameters()
                    if p.requires_grad and p.grad is None]
-        assert not no_grad, f"MapEncoder params without grad: {no_grad}"
+        assert not no_grad, f"NavigationEncoder params without grad: {no_grad}"
 
     def test_alpha_receives_gradient(self, build_mock_model, device):
         """Only for residual fusion: alpha must receive a non-zero gradient when map influences trajectory."""
@@ -313,7 +313,7 @@ class TestAutoE2EMapIntegration:
         assert alpha.grad.abs().max() > 0, "alpha gradient is all-zero"
 
     def test_map_encoder_receives_gradients_when_alpha_nonzero(self, build_mock_model, device):
-        """Only for residual fusion: MapEncoder parameters must receive gradients once alpha is non-zero."""
+        """The shared navigation encoder receives gradients once alpha is nonzero."""
         model = self._make_model(build_mock_model, device, map_fusion_mode="residual")
         model.train()
         with torch.no_grad():
@@ -327,9 +327,10 @@ class TestAutoE2EMapIntegration:
         traj = model(visual, map_input, vis_hist, ego, mode="train")
         traj.pow(2).mean().backward()
 
-        no_grad = [n for n, p in model.Reactive_E2E.MapEncoder.named_parameters()
+        no_grad = [n for n, p in model.Reactive_E2E.NavigationEncoder.named_parameters()
                 if p.requires_grad and p.grad is None]
-        assert not no_grad, f"MapEncoder params without grad after alpha=0.1: {no_grad}"
+        assert not no_grad, \
+            f"NavigationEncoder params without grad after alpha=0.1: {no_grad}"
 
     def test_cross_attn_fusion_mode_forward_succeeds(self, build_mock_model, device):
         model = self._make_model(build_mock_model, device, map_fusion_mode="cross_attn")
@@ -343,8 +344,151 @@ class TestAutoE2EMapIntegration:
 
     def test_map_encoder_attribute_exists(self, build_mock_model, device):
         model = self._make_model(build_mock_model, device)
-        assert hasattr(model.Reactive_E2E, "MapEncoder"), "Reactive_E2E missing MapEncoder attribute"
+        assert hasattr(model.Reactive_E2E, "NavigationEncoder"), \
+            "Reactive_E2E missing NavigationEncoder attribute"
         assert hasattr(model.Reactive_E2E, "MapBEVFusion"), "Reactive_E2E missing MapBEVFusion attribute"
+
+    def test_validity_gates_map_and_route_before_shared_encoder(
+        self,
+        build_mock_model,
+        device,
+    ):
+        model = build_mock_model(
+            num_views=7,
+            fusion_mode="bev",
+            device=device,
+            map_context_channels=14,
+        )
+        captured = {}
+
+        def capture_input(_module, args):
+            captured["navigation"] = args[0].detach().clone()
+
+        handle = model.Reactive_E2E.NavigationEncoder.register_forward_pre_hook(
+            capture_input
+        )
+        try:
+            model(
+                torch.randn(2, 7, 3, 256, 256, device=device),
+                torch.ones(2, 14, 256, 256, device=device),
+                torch.randn(2, 896, device=device),
+                torch.randn(2, 256, device=device),
+                route_mask=torch.ones(2, 2, 256, 256, device=device),
+                map_valid=torch.tensor([False, True], device=device),
+                route_valid=torch.tensor([True, False], device=device),
+                mode="infer",
+            )
+        finally:
+            handle.remove()
+
+        navigation = captured["navigation"]
+        assert navigation.shape == (2, 16, 256, 256)
+        assert navigation[0, :14].count_nonzero() == 0
+        assert navigation[0, 14:].min() == 1
+        assert navigation[1, :14].min() == 1
+        assert navigation[1, 14:].count_nonzero() == 0
+
+    def test_route_is_reactive_only_and_receives_gradient(
+        self,
+        build_mock_model,
+        device,
+    ):
+        model = build_mock_model(
+            num_views=7,
+            fusion_mode="bev",
+            device=device,
+            map_context_channels=14,
+            enable_reasoning=True,
+            reasoning_mode="pooled_latent",
+        )
+        with torch.no_grad():
+            model.Reactive_E2E.MapBEVFusion.alpha.fill_(0.1)
+        model.eval()
+        visual = torch.randn(2, 7, 3, 256, 256, device=device)
+        map_context = torch.rand(2, 14, 256, 256, device=device)
+        visual_history = torch.randn(2, 896, device=device)
+        ego = torch.randn(2, 256, device=device)
+        route_a = torch.zeros(
+            2, 2, 256, 256, device=device, requires_grad=True
+        )
+        route_b = torch.ones(2, 2, 256, 256, device=device)
+        valid = torch.ones(2, dtype=torch.bool, device=device)
+
+        trajectory_a, aux_a = model(
+            visual,
+            map_context,
+            visual_history,
+            ego,
+            route_mask=route_a,
+            map_valid=valid,
+            route_valid=valid,
+            mode="train",
+        )
+        trajectory_b, aux_b = model(
+            visual,
+            map_context,
+            visual_history,
+            ego,
+            route_mask=route_b,
+            map_valid=valid,
+            route_valid=valid,
+            mode="train",
+        )
+
+        assert not torch.allclose(trajectory_a, trajectory_b)
+        assert torch.allclose(
+            aux_a["reasoning_pred"].reasoning_latent,
+            aux_b["reasoning_pred"].reasoning_latent,
+        )
+        trajectory_a.square().mean().backward()
+        assert route_a.grad is not None
+        assert route_a.grad.abs().max() > 0
+        encoder_grad = sum(
+            float(parameter.grad.abs().sum())
+            for parameter in model.Reactive_E2E.NavigationEncoder.parameters()
+            if parameter.grad is not None
+        )
+        assert encoder_grad > 0
+
+    def test_invalid_route_is_a_route_less_fallback(
+        self,
+        build_mock_model,
+        device,
+    ):
+        model = build_mock_model(
+            num_views=7,
+            fusion_mode="bev",
+            device=device,
+            map_context_channels=14,
+        )
+        model.eval()
+        with torch.no_grad():
+            model.Reactive_E2E.MapBEVFusion.alpha.fill_(1.0)
+        visual = torch.randn(1, 7, 3, 256, 256, device=device)
+        map_context = torch.rand(1, 14, 256, 256, device=device)
+        visual_history = torch.randn(1, 896, device=device)
+        ego = torch.randn(1, 256, device=device)
+        invalid = torch.zeros(1, dtype=torch.bool, device=device)
+
+        first = model(
+            visual,
+            map_context,
+            visual_history,
+            ego,
+            route_mask=torch.zeros(1, 2, 256, 256, device=device),
+            route_valid=invalid,
+            mode="infer",
+        )
+        second = model(
+            visual,
+            map_context,
+            visual_history,
+            ego,
+            route_mask=torch.ones(1, 2, 256, 256, device=device),
+            route_valid=invalid,
+            mode="infer",
+        )
+        assert torch.allclose(first, second)
 
     def test_invalid_map_fusion_mode_raises(self, build_mock_model, device):
         with pytest.raises(ValueError, match="Unknown map_fusion_mode"):
