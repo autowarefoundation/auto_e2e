@@ -16,7 +16,6 @@ from .contracts import (
     NavigationRoute,
     PolygonPrimitive,
     PolylinePrimitive,
-    StaticTrafficSignal,
     contract_sha256,
 )
 from .geometry import (
@@ -444,7 +443,7 @@ class NativeNavigationRasterizer:
     ) -> NavigationRaster:
         map_valid = navigation_map is not None
         route_valid = bool(
-            map_valid
+            navigation_map is not None
             and route is not None
             and route.valid
             and route.map_version == navigation_map.map_version
