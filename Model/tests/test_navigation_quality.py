@@ -109,7 +109,7 @@ def test_quality_audit_records_acceptance_distribution_and_failures():
     assert audit["accepted_scene_count"] == 1
     assert audit["excluded_scene_count"] == 1
     assert audit["accepted_scene_fraction"] == 0.5
-    assert audit["sample_count"] == 200
+    assert audit["trace_pose_count"] == 200
     assert audit["failure_reason_counts"] == {
         "matched_pose_ratio_below_threshold": 1,
         "p95_distance_above_threshold": 1,
@@ -200,6 +200,8 @@ def test_packed_quality_audit_binds_partition_decisions(tmp_path):
         "part-scene-a",
         "part-scene-b",
     ]
+    assert audit["packed_sample_count"] == 200
+    assert audit["trace_pose_count"] == 200
     assert verify_packed_navigation_quality_audit(
         audit,
         [accepted, excluded],
@@ -213,13 +215,28 @@ def test_packed_quality_audit_binds_partition_decisions(tmp_path):
         )
 
 
-def test_packed_quality_audit_rejects_sample_count_drift(tmp_path):
+def test_packed_quality_audit_separates_trace_and_packed_counts(tmp_path):
     root = tmp_path / "partition"
     _write_partition(
         root,
         _record("scene-a"),
-        total_samples=101,
+        total_samples=12,
     )
 
-    with pytest.raises(ValueError, match="sample count differs"):
-        audit_packed_navigation_quality([root])
+    audit = audit_packed_navigation_quality([root])
+
+    assert audit["trace_pose_count"] == 100
+    assert audit["packed_sample_count"] == 12
+    assert audit["scenes"] == [
+        {
+            "accepted": True,
+            "failure_reasons": [],
+            "packed_sample_count": 12,
+            "partition_id": "part-scene-a",
+            "route_confidence": 0.9,
+            "scene_id": "scene-a",
+            "trace_pose_count": 100,
+        }
+    ]
+    assert audit["packed_artifacts"][0]["trace_pose_count"] == 100
+    assert audit["packed_artifacts"][0]["packed_sample_count"] == 12
