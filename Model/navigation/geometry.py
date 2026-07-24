@@ -180,6 +180,32 @@ class NavigationRasterGeometry:
             & (points[:, 1] <= self.y_max_m)
         )
 
+    def camera_bev_kwargs(self) -> dict[str, object]:
+        """Return the camera BEV configuration aligned with this raster."""
+        return {
+            "bev_h": self.matching_bev_h,
+            "bev_w": self.matching_bev_w,
+            "pc_range": list(self.matching_pc_range),
+        }
+
+    def contract(self) -> dict[str, object]:
+        """Return the JSON-safe geometry fields required by consumers."""
+        return {
+            "geometry_id": self.geometry_id,
+            "height_px": self.height_px,
+            "width_px": self.width_px,
+            "meters_per_pixel": self.meters_per_pixel,
+            "x_min_m": self.x_min_m,
+            "x_max_m": self.x_max_m,
+            "y_min_m": self.y_min_m,
+            "y_max_m": self.y_max_m,
+            "ego_anchor_row": self.ego_anchor_row,
+            "ego_anchor_col": self.ego_anchor_col,
+            "frame": self.frame,
+            "pixel_convention": self.pixel_convention,
+            "camera_bev": self.camera_bev_kwargs(),
+        }
+
 
 # Geometry audit over KITScenes v2.2:
 # 0.5 m/px covered 89.31% of 6.4 s endpoints; 1.0 m/px covered 99.79%.
