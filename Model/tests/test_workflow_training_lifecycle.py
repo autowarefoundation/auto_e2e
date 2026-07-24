@@ -100,7 +100,12 @@ def _validation_batch(sample_uids):
     }
 
 
-def _navigation_validation_batch(sample_uid, route_id, lateral_m):
+def _navigation_validation_batch(
+    sample_uid,
+    route_id,
+    lateral_m,
+    maneuver="straight",
+):
     from navigation.geometry import (
         DEFAULT_NAVIGATION_GEOMETRY,
         MapChannel,
@@ -141,9 +146,10 @@ def _navigation_validation_batch(sample_uid, route_id, lateral_m):
     batch["route_valid"] = torch.ones(1, dtype=torch.bool)
     batch["navigation_metadata"] = {
         "route_id": [route_id],
-        "route_maneuver": ["straight"],
+        "route_maneuver": [maneuver],
         "route_intersection": torch.zeros(1, dtype=torch.bool),
         "destination_visible": torch.ones(1, dtype=torch.bool),
+        "route_confidence": torch.full((1,), 0.9),
     }
     return batch
 
@@ -350,7 +356,8 @@ def test_standalone_navigation_evaluation_runs_cross_scene_route_swap():
             _navigation_validation_batch(
                 "sample-a",
                 "route-a",
-                0.0,
+                20.0,
+                maneuver="left",
             ),
             None,
             "pseudo",
@@ -359,7 +366,8 @@ def test_standalone_navigation_evaluation_runs_cross_scene_route_swap():
             _navigation_validation_batch(
                 "sample-b",
                 "route-b",
-                20.0,
+                -20.0,
+                maneuver="right",
             ),
             None,
             "pseudo",
@@ -379,7 +387,19 @@ def test_standalone_navigation_evaluation_runs_cross_scene_route_swap():
     assert report["slices"]["route_valid"]["sample_count"] == 2
     counterfactual = report["route_swap_counterfactual"]
     assert counterfactual["sample_count"] == 1
+    assert counterfactual["different_maneuver_sample_count"] == 1
     assert counterfactual["endpoint_delta_m"]["mean"] > 0.0
+    assert (
+        counterfactual["maneuver_direction_consistent"]["mean"]
+        == 1.0
+    )
+    assert "right_to_left" in counterfactual["maneuver_pairs"]
+    assert (
+        report["slices"]["overall"]["route_quality"][
+            "route_confidence"
+        ]["p50"]
+        == pytest.approx(0.9)
+    )
 
 
 def test_terminal_resume_state_allows_finalization():
