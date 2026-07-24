@@ -1875,11 +1875,67 @@ def audit_kitscenes_navigation_quality(
     """Create a hash-bound route-quality gate before KITScenes training."""
     import json
     import os
+    import shutil
     import tempfile
+    from pathlib import Path, PurePosixPath
 
     from navigation.quality import audit_packed_navigation_quality
 
-    shard_dirs = [_loader_download_dir(shard) for shard in shards]
+    view_root = Path(tempfile.mkdtemp(prefix="navigation-quality-input-"))
+    shard_dirs = []
+    for index, shard in enumerate(shards):
+        remote_source = str(getattr(shard, "remote_source", "") or "")
+        if "://" not in remote_source:
+            shard_dirs.append(_loader_download_dir(shard))
+            continue
+
+        destination = view_root / f"partition-{index:06d}"
+        destination.mkdir()
+        base_uri = remote_source.rstrip("/")
+        manifest_source = FlyteFile(
+            f"{base_uri}/manifest.json"
+        ).download()
+        manifest_path = destination / "manifest.json"
+        shutil.copyfile(manifest_source, manifest_path)
+        with manifest_path.open(encoding="utf-8") as stream:
+            manifest = json.load(stream)
+        if int(manifest.get("total_samples", 0)) > 0:
+            scenes = (manifest.get("navigation") or {}).get("scenes")
+            if not isinstance(scenes, list) or not scenes:
+                raise ValueError(
+                    "packed partition has no navigation scenes"
+                )
+            for scene in scenes:
+                relative = PurePosixPath(str(scene.get("path", "")))
+                if relative.is_absolute() or ".." in relative.parts:
+                    raise ValueError(
+                        "navigation quality path escapes packed partition"
+                    )
+                relative_parts = [
+                    part for part in relative.parts if part != "."
+                ]
+                remote_parts = [
+                    base_uri,
+                    *relative_parts,
+                    "navigation_quality.json",
+                ]
+                quality_source = FlyteFile(
+                    "/".join(remote_parts)
+                ).download()
+                quality_destination = destination.joinpath(
+                    *relative_parts,
+                    "navigation_quality.json",
+                )
+                quality_destination.parent.mkdir(
+                    parents=True,
+                    exist_ok=True,
+                )
+                shutil.copyfile(
+                    quality_source,
+                    quality_destination,
+                )
+        shard_dirs.append(str(destination))
+
     report = audit_packed_navigation_quality(shard_dirs)
     output_dir = tempfile.mkdtemp(prefix="navigation-quality-")
     output_path = os.path.join(
@@ -2245,6 +2301,7 @@ def train_il(
     # until the specific overflow op is isolated and kept in fp32 explicitly.
     amp: bool = False,
     enable_route_conditioning: bool = True,
+    navigation_quality_audit: Optional[FlyteFile] = None,
     enable_reasoning: bool = False,
     reasoning_mode: str = "pooled_latent",
     # Small default: the reasoning branch is zero-init coupled (alpha=0), so it
@@ -2297,6 +2354,11 @@ def train_il(
     the prediction against the frozen target on the real future frames. The WM
     also supplies the Encoded Visual History to the planner and reasoning branch
     (otherwise visual_history is zeros).
+
+    KITScenes requires the hash-bound output of
+    ``audit_kitscenes_navigation_quality``. The frozen validation inventory is
+    checked against every packed scene, while optimizer batches include only
+    policy-accepted scene partitions.
     """
     import os
     import json
@@ -2458,6 +2520,38 @@ def train_il(
 
     from Platform.pipelines.training_checkpoint import stable_digest
 
+    navigation_quality_report = None
+    navigation_quality_audit_sha256 = None
+    training_shard_dirs = list(shard_dirs)
+    if dataset == Dataset.KITSCENES:
+        if navigation_quality_audit is None:
+            raise ValueError(
+                "KITScenes training requires a navigation quality audit"
+            )
+        audit_path = navigation_quality_audit.download()
+        try:
+            with open(audit_path, encoding="ascii") as stream:
+                supplied_audit = json.load(stream)
+        except (OSError, UnicodeError, ValueError) as error:
+            raise ValueError(
+                "could not read the KITScenes navigation quality audit"
+            ) from error
+        (
+            training_shard_dirs,
+            navigation_quality_report,
+        ) = _verified_navigation_training_shard_dirs(
+            shard_dirs,
+            manifests,
+            supplied_audit,
+        )
+        navigation_quality_audit_sha256 = stable_digest(
+            navigation_quality_report
+        )
+    elif navigation_quality_audit is not None:
+        raise ValueError(
+            "navigation quality audits are supported only for KITScenes"
+        )
+
     contract_digests = {
         stable_digest(manifest.get("contracts"))
         for manifest in manifests.values()
@@ -2610,6 +2704,14 @@ def train_il(
     data_fingerprint = stable_digest({
         "partitions": data_identity,
         "coverage": data_coverage,
+        "navigation_quality_audit_sha256": (
+            navigation_quality_audit_sha256
+        ),
+        "training_partition_ids": (
+            navigation_quality_report["accepted_partition_ids"]
+            if navigation_quality_report is not None
+            else None
+        ),
     })
     validation_split_contract = {
         "strategy": training_policy.validation_strategy,
@@ -2654,10 +2756,13 @@ def train_il(
         prefetch_factor=1,
         decode_future_frames=False,
     )
-    print(f"Merged {len(shard_dirs)} non-empty partition(s) into one training stream "
-          f"(skipped_empty={skipped_empty}, split=train, "
-          f"val_fraction={val_fraction}, num_workers={num_workers}, "
-          f"num_views={num_views}, data_fingerprint={data_fingerprint}).")
+    print(
+        f"Selected {len(training_shard_dirs)}/{len(shard_dirs)} non-empty "
+        "partition(s) for the optimizer "
+        f"(skipped_empty={skipped_empty}, split=train, "
+        f"val_fraction={val_fraction}, num_workers={num_workers}, "
+        f"num_views={num_views}, data_fingerprint={data_fingerprint})."
+    )
     print(
         "Validation split: "
         f"strategy={training_policy.validation_strategy} "
@@ -2671,7 +2776,6 @@ def train_il(
     # random first batch cannot distinguish an intentionally unlabeled sample
     # from a wholly unsupervised shard. The pack manifest records the exact join
     # count; validate that deterministic aggregate instead.
-    total_reasoning_labels = 0
     for d in shard_dirs:
         manifest = manifests[d]
         dname = manifest.get("dataset", d)
@@ -2683,6 +2787,11 @@ def train_il(
                 f"KITScenes shard '{dname}' ({d}) has no schema-v5 "
                 "navigation artifacts"
             )
+
+    total_reasoning_labels = 0
+    for d in training_shard_dirs:
+        manifest = manifests[d]
+        dname = manifest.get("dataset", d)
         if enable_world_model and not manifest.get("has_world_model", False):
             raise ValueError(
                 f"enable_world_model=True but dataset '{dname}' ({d}) has no "
@@ -2707,7 +2816,7 @@ def train_il(
     if enable_reasoning:
         print(
             f"Reasoning supervision: {total_reasoning_labels} joined labels "
-            f"across {len(shard_dirs)} non-empty partitions"
+            f"across {len(training_shard_dirs)} accepted partitions"
         )
 
     # Route is fused only through the Reactive navigation encoder. Reasoning
@@ -2773,6 +2882,9 @@ def train_il(
         "map_context_channels": map_context_channels,
         "route_channels": route_channels,
         "enable_route_conditioning": enable_route_conditioning,
+        "navigation_quality_audit_sha256": (
+            navigation_quality_audit_sha256
+        ),
         # Checkpoints contain the complete backbone. Reconstruction must not
         # download pretrained weights before loading that state.
         "is_pretrained": False,
@@ -2931,6 +3043,12 @@ def train_il(
                 "data/dataset": dataset.value,
                 "data/dataset_version": dataset_version,
                 "data/fingerprint": data_fingerprint,
+                "data/navigation_quality_audit_sha256": (
+                    navigation_quality_audit_sha256 or "none"
+                ),
+                "data/training_partition_count": len(
+                    training_shard_dirs
+                ),
                 "model/backbone": bb,
                 "model/fusion_mode": fm,
                 "model/num_views": num_views,
@@ -3054,7 +3172,7 @@ def train_il(
     )
     for epoch in epoch_range:
         merged = make_multi_dataset_loader(
-            shard_dirs,
+            training_shard_dirs,
             batch_size=batch_size,
             num_workers=num_workers,
             pin_memory=(device.type == "cuda"),
@@ -3472,8 +3590,32 @@ def train_il(
             "data_fingerprint": data_fingerprint,
             "packed_partitions": len(manifests),
             "non_empty_partitions": len(shard_dirs),
+            "training_partitions": len(training_shard_dirs),
             "empty_partitions": skipped_empty,
             "coverage": data_coverage,
+            "navigation_quality": (
+                {
+                    "audit_sha256": navigation_quality_audit_sha256,
+                    "schema_version": navigation_quality_report[
+                        "schema_version"
+                    ],
+                    "policy": navigation_quality_report["policy"],
+                    "accepted_scene_count": navigation_quality_report[
+                        "accepted_scene_count"
+                    ],
+                    "excluded_scene_count": navigation_quality_report[
+                        "excluded_scene_count"
+                    ],
+                    "accepted_partition_ids": navigation_quality_report[
+                        "accepted_partition_ids"
+                    ],
+                    "excluded_partition_ids": navigation_quality_report[
+                        "excluded_partition_ids"
+                    ],
+                }
+                if navigation_quality_report is not None
+                else None
+            ),
         },
         "model": {
             "backbone": bb,
@@ -5194,10 +5336,14 @@ def wf_sharded_full_run(
         ingest_concurrency=ingest_concurrency,
         label_concurrency=label_concurrency,
         pack_concurrency=pack_concurrency)
+    navigation_quality_audit = audit_kitscenes_navigation_quality(
+        shards=shards,
+    )
     out = train_il(
         shards=shards, dataset=dataset, backbone=backbone, epochs=epochs,
         batch_size=batch_size, grad_accum_steps=grad_accum_steps, lr=lr,
         enable_route_conditioning=enable_route_conditioning,
+        navigation_quality_audit=navigation_quality_audit,
         enable_reasoning=enable_reasoning, reasoning_mode=reasoning_mode,
         enable_world_model=enable_world_model, val_fraction=val_fraction,
         validation_scope=validation_scope,
@@ -5235,6 +5381,9 @@ def wf_recovered_kitscenes_full_run(
         image_size=image_size,
         pack_concurrency=pack_concurrency,
     )
+    navigation_quality_audit = audit_kitscenes_navigation_quality(
+        shards=shards,
+    )
     out = train_il(
         shards=shards,
         dataset=Dataset.KITSCENES,
@@ -5244,6 +5393,7 @@ def wf_recovered_kitscenes_full_run(
         grad_accum_steps=grad_accum_steps,
         lr=lr,
         enable_route_conditioning=enable_route_conditioning,
+        navigation_quality_audit=navigation_quality_audit,
         enable_reasoning=True,
         reasoning_mode=reasoning_mode,
         enable_world_model=True,
@@ -5271,6 +5421,7 @@ def wf_train_il(
     lr: float = 1e-4,
     amp: bool = False,
     enable_route_conditioning: bool = True,
+    navigation_quality_audit: Optional[FlyteFile] = None,
     enable_reasoning: bool = False,
     reasoning_mode: str = "pooled_latent",
     enable_world_model: bool = False,
@@ -5299,6 +5450,7 @@ def wf_train_il(
                    epochs=epochs, batch_size=batch_size,
                    grad_accum_steps=grad_accum_steps, lr=lr, amp=amp,
                    enable_route_conditioning=enable_route_conditioning,
+                   navigation_quality_audit=navigation_quality_audit,
                    enable_reasoning=enable_reasoning, reasoning_mode=reasoning_mode,
                    enable_world_model=enable_world_model, val_fraction=val_fraction,
                    validation_scope=validation_scope,
