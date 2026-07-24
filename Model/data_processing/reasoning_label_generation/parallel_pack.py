@@ -130,7 +130,7 @@ def init_row_worker(
             scene_ids=scene_ids,
             image_size=image_size,
             include_world_model_windows=False,
-            include_navigation=True,
+            include_navigation=False,
         )
     else:
         from data_parsing.l2d import L2DDataset
@@ -183,13 +183,7 @@ def decode_row(
             ): _jpeg(visual[view])
             for view in range(visual.shape[0])
         }
-        navigation_members = None
-        if include_map:
-            navigation_members = _DS.navigation_members_for_row(
-                scene_id,
-                frame_index,
-            )
-        return (scene_id, frame_index), kitscenes_cams, navigation_members
+        return (scene_id, frame_index), kitscenes_cams, None
 
     from data_parsing.l2d.dataset import CAMERA_NAMES, MAP_VIEW_NAME
 
