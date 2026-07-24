@@ -233,16 +233,25 @@ def decode_scene_navigation(
     return navigation_map, route
 
 
-def encode_sample_navigation(raster: NavigationRaster) -> dict[str, bytes]:
+def encode_sample_navigation(
+    raster: NavigationRaster,
+    *,
+    extra_metadata: dict[str, Any] | None = None,
+) -> dict[str, bytes]:
+    metadata = {
+        "schema_version": SAMPLE_NAVIGATION_ARTIFACT_VERSION,
+        **raster.metadata(),
+    }
+    for key, value in (extra_metadata or {}).items():
+        if key in metadata:
+            raise ValueError(
+                f"extra navigation metadata collides with {key!r}"
+            )
+        metadata[key] = value
     return {
         "map_semantic.npz": encode_array(raster.map_context),
         "route_mask.npz": encode_array(raster.route_mask),
-        "navigation_meta.json": canonical_json_bytes(
-            {
-                "schema_version": SAMPLE_NAVIGATION_ARTIFACT_VERSION,
-                **raster.metadata(),
-            }
-        ),
+        "navigation_meta.json": canonical_json_bytes(metadata),
     }
 
 
