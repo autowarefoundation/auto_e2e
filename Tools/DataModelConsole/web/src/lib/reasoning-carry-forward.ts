@@ -90,10 +90,12 @@ export function selectCarryForwardLabel<Label>(
 }
 
 // carryForwardFetchTargets returns which anchors the driver should fetch now:
-//  - backward: the closest uncached anchor <= frame, stopping the scan once a
-//    present anchor is reached (a fresher fallback already exists closer to the
-//    playhead, so older-than-present anchors are irrelevant). Absent anchors are
-//    skipped so a scoped 404 falls through to the next real label.
+//  - backward: the closest uncached anchor <= frame. The scan STOPS at a present
+//    OR loading anchor — a fallback already exists or is resolving, so there is
+//    nothing to fetch yet. It only walks past an ABSENT anchor (scoped 404) to
+//    the next older one. This bounds fetching: on a cold jump into a late frame
+//    we fetch the nearest anchor and then walk back at most one-per-resolution
+//    as absents are discovered, never the whole prior-anchor set at once.
 //  - forward: the immediate next anchor > frame, if uncached, so crossing it
 //    swaps with no loading gap (look-ahead prefetch).
 // Anchors already loading/present/absent are never re-fetched; that cache-status
@@ -110,8 +112,10 @@ export function carryForwardFetchTargets<Label>(
     if (af > frame) continue;
     const key = keyForFrame(af);
     const entry = key ? cache.get(key) : undefined;
-    if (entry?.status === "present") break; // fresher fallback exists; stop
-    if (entry?.status === "absent" || entry?.status === "loading") continue;
+    // A present or in-flight anchor is (or will be) the fallback — wait for it
+    // instead of speculatively fetching older anchors (fetch-storm guard).
+    if (entry?.status === "present" || entry?.status === "loading") break;
+    if (entry?.status === "absent") continue; // scoped 404: try the next older
     backward = af; // closest uncached anchor <= frame
     break;
   }
