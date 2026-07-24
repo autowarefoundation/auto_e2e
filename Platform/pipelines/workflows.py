@@ -1750,6 +1750,7 @@ def data_processing(
         GPS_SCHEMA_VERSION,
         POSE_SCHEMA_VERSION,
     )
+    from navigation.geometry import DEFAULT_NAVIGATION_GEOMETRY
 
     manifest = {"total_samples": sample_count, "shards": shard_idx,
                 "shard_names": shard_names,
@@ -1768,6 +1769,11 @@ def data_processing(
                     and navigation_artifact_summary is not None
                 ),
                 "navigation": navigation_artifact_summary,
+                "navigation_geometry": (
+                    DEFAULT_NAVIGATION_GEOMETRY.contract()
+                    if navigation_artifact_summary is not None
+                    else None
+                ),
                 "map_context_channels": (
                     14 if navigation_artifact_summary is not None else 3
                 ),
@@ -2332,6 +2338,27 @@ def train_il(
         )
     map_context_channels = next(iter(map_context_channel_counts))
     route_channels = next(iter(route_channel_counts))
+    navigation_geometry_id = None
+    view_fusion_kwargs = None
+    if dataset == Dataset.KITSCENES:
+        from navigation.geometry import DEFAULT_NAVIGATION_GEOMETRY
+
+        expected_geometry = DEFAULT_NAVIGATION_GEOMETRY.contract()
+        mismatched_geometry = [
+            path
+            for path in shard_dirs
+            if manifests[path].get("navigation_geometry")
+            != expected_geometry
+        ]
+        if mismatched_geometry:
+            raise ValueError(
+                "KITScenes navigation geometry differs from the model "
+                f"contract in shards: {mismatched_geometry[:3]}"
+            )
+        navigation_geometry_id = DEFAULT_NAVIGATION_GEOMETRY.geometry_id
+        view_fusion_kwargs = (
+            DEFAULT_NAVIGATION_GEOMETRY.camera_bev_kwargs()
+        )
 
     from Platform.pipelines.training_checkpoint import stable_digest
 
@@ -2368,6 +2395,7 @@ def train_il(
             ),
             "route_channels": int(manifest.get("route_channels", 2)),
             "navigation": manifest.get("navigation"),
+            "navigation_geometry": manifest.get("navigation_geometry"),
             "has_world_model": bool(
                 manifest.get("has_world_model", False)
             ),
@@ -2591,6 +2619,7 @@ def train_il(
     model = AutoE2E(
         backbone=bb, num_views=num_views, embed_dim=256,
         is_pretrained=True,
+        view_fusion_kwargs=view_fusion_kwargs,
         map_context_channels=map_context_channels,
         route_channels=route_channels,
         enable_reasoning=enable_reasoning, reasoning_mode=reasoning_mode,
@@ -2642,6 +2671,8 @@ def train_il(
         "backbone": bb,
         "embed_dim": 256,
         "num_views": num_views,
+        "view_fusion_kwargs": view_fusion_kwargs,
+        "navigation_geometry_id": navigation_geometry_id,
         "map_context_channels": map_context_channels,
         "route_channels": route_channels,
         # Checkpoints contain the complete backbone. Reconstruction must not
@@ -2805,6 +2836,9 @@ def train_il(
                 "model/backbone": bb,
                 "model/fusion_mode": fm,
                 "model/num_views": num_views,
+                "model/navigation_geometry_id": (
+                    navigation_geometry_id or "legacy"
+                ),
                 "train/batch_size": batch_size,
                 "train/grad_accum_steps": grad_accum_steps,
                 "train/num_workers": num_workers,
@@ -3315,6 +3349,8 @@ def train_il(
             "fusion_mode": fm,
             "embed_dim": 256,
             "num_views": num_views,
+            "view_fusion_kwargs": view_fusion_kwargs,
+            "navigation_geometry_id": navigation_geometry_id,
             "map_context_channels": map_context_channels,
             "route_channels": route_channels,
         },
