@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
+
 import pytest
 
 from navigation.quality import (
     DEFAULT_NAVIGATION_QUALITY_POLICY,
     NAVIGATION_QUALITY_AUDIT_VERSION,
     audit_navigation_quality,
+    load_packed_navigation_quality,
 )
 
 
@@ -107,3 +111,47 @@ def test_no_lane_sequence_is_always_excluded():
 
     assert audit["accepted_scene_count"] == 0
     assert audit["failure_reason_counts"] == {"no_lane_sequence": 1}
+
+
+def test_packed_quality_loader_checks_declared_hash(tmp_path):
+    quality = _record("scene-a")
+    quality["quality_policy"] = (
+        DEFAULT_NAVIGATION_QUALITY_POLICY.contract()
+    )
+    quality_bytes = json.dumps(
+        quality,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("ascii")
+    (tmp_path / "navigation_quality.json").write_bytes(quality_bytes)
+    manifest = {
+        "total_samples": 100,
+        "partition_id": "scene-a",
+        "navigation": {
+            "scenes": [
+                {
+                    "scene_id": "scene-a",
+                    "path": ".",
+                    "hashes": {
+                        "navigation_quality.json": hashlib.sha256(
+                            quality_bytes
+                        ).hexdigest(),
+                    },
+                }
+            ]
+        },
+    }
+    (tmp_path / "manifest.json").write_text(
+        json.dumps(manifest),
+        encoding="ascii",
+    )
+
+    records, identities = load_packed_navigation_quality([tmp_path])
+
+    assert records == [quality]
+    assert identities[0]["scene_id"] == "scene-a"
+    (tmp_path / "navigation_quality.json").write_bytes(
+        quality_bytes + b" "
+    )
+    with pytest.raises(ValueError, match="hash mismatch"):
+        load_packed_navigation_quality([tmp_path])
