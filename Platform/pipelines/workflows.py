@@ -2149,6 +2149,7 @@ def train_il(
     # step (verified: control_head grad norm ~6.6, loss 6.30->5.00). Keep fp32
     # until the specific overflow op is isolated and kept in fp32 explicitly.
     amp: bool = False,
+    enable_route_conditioning: bool = True,
     enable_reasoning: bool = False,
     reasoning_mode: str = "pooled_latent",
     # Small default: the reasoning branch is zero-init coupled (alpha=0), so it
@@ -2622,6 +2623,7 @@ def train_il(
         view_fusion_kwargs=view_fusion_kwargs,
         map_context_channels=map_context_channels,
         route_channels=route_channels,
+        enable_route_conditioning=enable_route_conditioning,
         enable_reasoning=enable_reasoning, reasoning_mode=reasoning_mode,
         enable_world_model=enable_world_model,
     ).to(device)
@@ -2675,6 +2677,7 @@ def train_il(
         "navigation_geometry_id": navigation_geometry_id,
         "map_context_channels": map_context_channels,
         "route_channels": route_channels,
+        "enable_route_conditioning": enable_route_conditioning,
         # Checkpoints contain the complete backbone. Reconstruction must not
         # download pretrained weights before loading that state.
         "is_pretrained": False,
@@ -2839,6 +2842,9 @@ def train_il(
                 "model/navigation_geometry_id": (
                     navigation_geometry_id or "legacy"
                 ),
+                "model/enable_route_conditioning": (
+                    enable_route_conditioning
+                ),
                 "train/batch_size": batch_size,
                 "train/grad_accum_steps": grad_accum_steps,
                 "train/num_workers": num_workers,
@@ -2887,6 +2893,7 @@ def train_il(
     gradient_evidence = {
         "first_step": None,
         "navigation_encoder_first_nonzero_step": None,
+        "route_input_first_nonzero_step": None,
     }
     optimizer_probe_name, optimizer_probe_parameter = next(
         (name, parameter)
@@ -2983,6 +2990,15 @@ def train_il(
             route_valid = batch["route_valid"].to(device)
             route_valid_sample_count += int(route_valid.sum().item())
             route_sample_count += int(route_valid.numel())
+            probe_route_gradient = (
+                enable_route_conditioning
+                and gradient_evidence[
+                    "route_input_first_nonzero_step"
+                ] is None
+                and bool(route_valid.any().item())
+            )
+            if probe_route_gradient:
+                route_mask = route_mask.detach().requires_grad_(True)
 
             # A weak object-key cache cannot alias a newly opened scene when
             # Python reuses the identity of a projection from a retired loader.
@@ -3047,6 +3063,19 @@ def train_il(
             # of an effective batch of (batch_size * accum) — same scale as a plain
             # step, so lr/grad_clip keep their meaning. Log the unscaled loss.
             scaler.scale(loss / accum).backward()
+            if probe_route_gradient and route_mask.grad is not None:
+                route_gradient_norm = float(route_mask.grad.norm().item())
+                if route_gradient_norm > 0.0:
+                    gradient_evidence[
+                        "route_input_first_nonzero_step"
+                    ] = {
+                        "optimizer_step": optimizer_step_count + 1,
+                        "norm": route_gradient_norm,
+                    }
+                    print(
+                        "route input gradient became non-zero: "
+                        f"{gradient_evidence['route_input_first_nonzero_step']}"
+                    )
 
             epoch_losses.append(loss.item())
             traj_losses.append(traj_loss.item())
@@ -3311,6 +3340,13 @@ def train_il(
         raise RuntimeError(
             "KITScenes training saw no valid route-conditioned sample"
         )
+    if (
+        not terminal_resume
+        and dataset == Dataset.KITSCENES
+        and enable_route_conditioning
+        and gradient_evidence["route_input_first_nonzero_step"] is None
+    ):
+        raise RuntimeError("Reactive planner received no route input gradient")
 
     if best_checkpoint is None or final_checkpoint is None:
         raise RuntimeError("training completed without a best/final checkpoint")
@@ -3353,6 +3389,7 @@ def train_il(
             "navigation_geometry_id": navigation_geometry_id,
             "map_context_channels": map_context_channels,
             "route_channels": route_channels,
+            "enable_route_conditioning": enable_route_conditioning,
         },
         "training": {
             "epochs": epochs,
@@ -3384,7 +3421,13 @@ def train_il(
             },
             "gradient_evidence": gradient_evidence,
             "route_conditioning_evidence": {
+                "enabled": enable_route_conditioning,
                 "valid_sample_exposures": route_valid_sample_count,
+                "conditioned_valid_sample_exposures": (
+                    route_valid_sample_count
+                    if enable_route_conditioning
+                    else 0
+                ),
                 "sample_exposures": route_sample_count,
                 "valid_fraction": (
                     route_valid_sample_count / route_sample_count
@@ -5020,6 +5063,7 @@ def wf_sharded_full_run(
     batch_size: int = 1,
     grad_accum_steps: int = 4,
     lr: float = 1e-4,
+    enable_route_conditioning: bool = True,
     enable_reasoning: bool = True,
     reasoning_mode: str = "pooled_latent",
     enable_world_model: bool = True,
@@ -5058,6 +5102,7 @@ def wf_sharded_full_run(
     out = train_il(
         shards=shards, dataset=dataset, backbone=backbone, epochs=epochs,
         batch_size=batch_size, grad_accum_steps=grad_accum_steps, lr=lr,
+        enable_route_conditioning=enable_route_conditioning,
         enable_reasoning=enable_reasoning, reasoning_mode=reasoning_mode,
         enable_world_model=enable_world_model, val_fraction=val_fraction,
         validation_scope=validation_scope,
@@ -5080,6 +5125,7 @@ def wf_recovered_kitscenes_full_run(
     batch_size: int = 1,
     grad_accum_steps: int = 4,
     lr: float = 1e-4,
+    enable_route_conditioning: bool = True,
     reasoning_mode: str = "pooled_latent",
     val_fraction: float = 0.1,
     num_workers: int = 4,
@@ -5102,6 +5148,7 @@ def wf_recovered_kitscenes_full_run(
         batch_size=batch_size,
         grad_accum_steps=grad_accum_steps,
         lr=lr,
+        enable_route_conditioning=enable_route_conditioning,
         enable_reasoning=True,
         reasoning_mode=reasoning_mode,
         enable_world_model=True,
@@ -5128,6 +5175,7 @@ def wf_train_il(
     grad_accum_steps: int = 1,
     lr: float = 1e-4,
     amp: bool = False,
+    enable_route_conditioning: bool = True,
     enable_reasoning: bool = False,
     reasoning_mode: str = "pooled_latent",
     enable_world_model: bool = False,
@@ -5155,6 +5203,7 @@ def wf_train_il(
     out = train_il(shards=shards, dataset=dataset, backbone=backbone,
                    epochs=epochs, batch_size=batch_size,
                    grad_accum_steps=grad_accum_steps, lr=lr, amp=amp,
+                   enable_route_conditioning=enable_route_conditioning,
                    enable_reasoning=enable_reasoning, reasoning_mode=reasoning_mode,
                    enable_world_model=enable_world_model, val_fraction=val_fraction,
                    validation_scope=validation_scope,
