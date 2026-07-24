@@ -490,6 +490,49 @@ class TestAutoE2EMapIntegration:
         )
         assert torch.allclose(first, second)
 
+    def test_route_conditioning_gate_defines_controlled_baseline(
+        self,
+        build_mock_model,
+        device,
+    ):
+        model = build_mock_model(
+            num_views=7,
+            fusion_mode="bev",
+            device=device,
+            map_context_channels=14,
+            enable_route_conditioning=False,
+        )
+        model.eval()
+        with torch.no_grad():
+            model.Reactive_E2E.MapBEVFusion.alpha.fill_(1.0)
+        visual = torch.randn(1, 7, 3, 256, 256, device=device)
+        map_context = torch.rand(1, 14, 256, 256, device=device)
+        visual_history = torch.randn(1, 896, device=device)
+        ego = torch.randn(1, 256, device=device)
+        valid = torch.ones(1, dtype=torch.bool, device=device)
+
+        first = model(
+            visual,
+            map_context,
+            visual_history,
+            ego,
+            route_mask=torch.zeros(1, 2, 256, 256, device=device),
+            route_valid=valid,
+            mode="infer",
+        )
+        second = model(
+            visual,
+            map_context,
+            visual_history,
+            ego,
+            route_mask=torch.ones(1, 2, 256, 256, device=device),
+            route_valid=valid,
+            mode="infer",
+        )
+
+        assert not model.Reactive_E2E.enable_route_conditioning
+        assert torch.allclose(first, second)
+
     def test_invalid_map_fusion_mode_raises(self, build_mock_model, device):
         with pytest.raises(ValueError, match="Unknown map_fusion_mode"):
             build_mock_model(
