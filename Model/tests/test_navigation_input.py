@@ -244,6 +244,12 @@ def test_geometry_uses_pixel_centers_and_existing_anchor():
         geometry.x_min_m,
         geometry.y_min_m,
     )
+    contract = geometry.contract()
+    assert contract["camera_bev"] == {
+        "bev_h": geometry.height_px,
+        "bev_w": geometry.width_px,
+        "pc_range": list(geometry.matching_pc_range),
+    }
 
 
 def test_contract_has_no_future_target_field():
