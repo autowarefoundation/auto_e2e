@@ -14,9 +14,11 @@ from navigation.artifacts import (
     encode_scene_navigation,
 )
 from navigation.contracts import (
+    Maneuver,
     canonical_json_bytes,
     contract_sha256,
 )
+from navigation.geometry import MapChannel, RouteChannel
 from navigation.lanelet2_adapter import Lanelet2MapAdapter, file_sha256
 from navigation.lanelet2_matcher import Lanelet2TraceMatcher
 from navigation.quality import DEFAULT_NAVIGATION_QUALITY_POLICY
@@ -27,7 +29,36 @@ from navigation.rasterizer import (
 )
 
 ANCHOR_PERIOD_NS = 500_000_000
+MANEUVER_LOOKAHEAD_M = 100.0
 KITSCENES_NAVIGATION_VERSION = "kitscenes_navigation_v1"
+
+
+def _polyline_length(points: np.ndarray) -> float:
+    values = np.asarray(points, dtype=np.float64)
+    if len(values) < 2:
+        return 0.0
+    return float(np.linalg.norm(np.diff(values[:, :2], axis=0), axis=1).sum())
+
+
+def _point_to_polyline_distance(
+    point_xy: np.ndarray,
+    points: np.ndarray,
+) -> float:
+    line = np.asarray(points, dtype=np.float64)[:, :2]
+    point = np.asarray(point_xy, dtype=np.float64)[:2]
+    starts = line[:-1]
+    vectors = line[1:] - starts
+    lengths_squared = np.einsum("ij,ij->i", vectors, vectors)
+    offsets = point - starts
+    parameters = np.divide(
+        np.einsum("ij,ij->i", offsets, vectors),
+        lengths_squared,
+        out=np.zeros_like(lengths_squared),
+        where=lengths_squared > 0.0,
+    )
+    parameters = np.clip(parameters, 0.0, 1.0)
+    closest = starts + parameters[:, None] * vectors
+    return float(np.linalg.norm(closest - point, axis=1).min())
 
 
 @dataclasses.dataclass(frozen=True)
@@ -176,13 +207,82 @@ class KitScenesSceneNavigation:
             return anchor
         return self.rasterizer.warp(anchor, self._pose(frame_idx))
 
+    def route_semantics(
+        self,
+        frame_idx: int,
+        raster: NavigationRaster,
+    ) -> dict[str, object]:
+        """Return route-derived evaluation labels without future ego points."""
+        if not self.route.valid or not self.route.lane_sequence:
+            return {
+                "route_maneuver": Maneuver.UNKNOWN.value,
+                "route_intersection": False,
+                "destination_visible": False,
+                "current_route_lane_id": "",
+                "maneuver_lookahead_m": MANEUVER_LOOKAHEAD_M,
+            }
+
+        position = self.positions[frame_idx, :2]
+        active_index = min(
+            range(len(self.route.lane_sequence)),
+            key=lambda index: _point_to_polyline_distance(
+                position,
+                self.route.lane_sequence[index].centerline_enu_m,
+            ),
+        )
+        maneuver = Maneuver.STRAIGHT
+        distance = 0.0
+        decisive = {
+            Maneuver.LEFT,
+            Maneuver.RIGHT,
+            Maneuver.U_TURN,
+            Maneuver.MERGE,
+            Maneuver.EXIT,
+        }
+        for segment in self.route.lane_sequence[active_index:]:
+            if distance > MANEUVER_LOOKAHEAD_M:
+                break
+            if segment.maneuver in decisive:
+                maneuver = segment.maneuver
+                break
+            distance += _polyline_length(segment.centerline_enu_m)
+
+        geometry = self.rasterizer.geometry
+        x_forward, _ = geometry.pixel_center_grids()
+        route_intersection = bool(
+            np.any(
+                (raster.map_context[MapChannel.INTERSECTION] > 0.0)
+                & (
+                    raster.route_mask[RouteChannel.SELECTED_CORRIDOR]
+                    > 0
+                )
+                & (x_forward >= 0.0)
+                & (x_forward <= MANEUVER_LOOKAHEAD_M)
+            )
+        )
+        return {
+            "route_maneuver": maneuver.value,
+            "route_intersection": route_intersection,
+            "destination_visible": bool(
+                np.any(
+                    raster.route_mask[RouteChannel.DESTINATION] > 0
+                )
+            ),
+            "current_route_lane_id": (
+                self.route.lane_sequence[active_index].lane_id
+            ),
+            "maneuver_lookahead_m": MANEUVER_LOOKAHEAD_M,
+        }
+
     def sample_members(self, frame_idx: int) -> dict[str, bytes]:
+        raster = self.raster_for_frame(frame_idx)
         return encode_sample_navigation(
-            self.raster_for_frame(frame_idx),
+            raster,
             extra_metadata={
                 "scene_navigation_sha256": (
                     self._scene_navigation_sha256
                 ),
+                **self.route_semantics(frame_idx, raster),
             },
         )
 
