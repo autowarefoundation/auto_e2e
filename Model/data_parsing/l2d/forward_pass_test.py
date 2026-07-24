@@ -3,7 +3,7 @@ Forward pass test for AutoE2E using the yaak-ai/L2D LeRobot dataset.
 
 Tests two modes:
 1. Synthetic: Creates fake tensors matching L2D shapes to verify the model
-   accepts num_views=6 real cameras (+ a separate map_input) and all dimensions
+   accepts num_views=6 real cameras (+ separate navigation inputs) and all dimensions
    align. Always runs.
 2. Live: Loads actual L2D data via LeRobotDataset. Skipped if lerobot is
    not installed or the dataset is not cached locally.
@@ -44,9 +44,12 @@ def test_synthetic_forward_pass(pretrained_backbone: bool = False) -> None:
     batch_size = 2
     H, W = 256, 256
 
-    # 6 real cameras + a separate map_input (the nav-map is not a camera view).
+    # 6 real cameras + separate navigation inputs.
     camera_tiles = torch.randn(batch_size, 6, 3, H, W, device=device)
-    map_input = torch.randn(batch_size, 3, H, W, device=device)
+    map_context = torch.randn(batch_size, 3, H, W, device=device)
+    route_mask = torch.zeros(batch_size, 2, H, W, device=device)
+    map_valid = torch.ones(batch_size, dtype=torch.bool, device=device)
+    route_valid = torch.zeros(batch_size, dtype=torch.bool, device=device)
     visual_history = torch.zeros(batch_size, 896, device=device)
     egomotion_history = torch.randn(batch_size, EGOMOTION_DIM, device=device)
 
@@ -59,9 +62,12 @@ def test_synthetic_forward_pass(pretrained_backbone: bool = False) -> None:
     with torch.inference_mode():
         trajectory = model(
             camera_tiles=camera_tiles,
-            map_input=map_input,
+            map_context=map_context,
             visual_history=visual_history,
             egomotion_history=egomotion_history,
+            route_mask=route_mask,
+            map_valid=map_valid,
+            route_valid=route_valid,
             mode="infer",
         )
     t_fwd = time.time() - t0
@@ -136,12 +142,15 @@ def test_live_dataset(episodes: list[int], batch_size: int, pretrained_backbone:
     batch = next(iter(loader))
 
     camera_tiles = batch["visual_tiles"].to(device)
-    map_input = batch["map_input"].to(device)
+    map_context = batch["map_context"].to(device)
+    route_mask = batch["route_mask"].to(device)
+    map_valid = batch["map_valid"].to(device)
+    route_valid = batch["route_valid"].to(device)
     visual_history = batch["visual_history"].to(device)
     egomotion_history = batch["egomotion_history"].to(device)
 
     print(f"[live] camera_tiles: {tuple(camera_tiles.shape)}")
-    print(f"[live] map_input: {tuple(map_input.shape)}")
+    print(f"[live] map_context: {tuple(map_context.shape)}")
     print(f"[live] egomotion_history: {tuple(egomotion_history.shape)}")
 
     model = AutoE2E(num_views=camera_tiles.shape[1],
@@ -150,9 +159,12 @@ def test_live_dataset(episodes: list[int], batch_size: int, pretrained_backbone:
     with torch.inference_mode():
         trajectory = model(
             camera_tiles=camera_tiles,
-            map_input=map_input,
+            map_context=map_context,
             visual_history=visual_history,
             egomotion_history=egomotion_history,
+            route_mask=route_mask,
+            map_valid=map_valid,
+            route_valid=route_valid,
             projection=projection,
             geometry_type=geometry_type,
             mode="infer",
