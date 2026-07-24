@@ -247,16 +247,21 @@ class Lanelet2MapAdapter:
         )
         signals = self._traffic_signals()
 
-        all_points: list[np.ndarray] = []
-        for collection in (
-            drivable,
-            boundaries.values(),
-            centerlines,
-            crosswalks,
-            stop_lines,
-        ):
-            for primitive in collection:
-                all_points.append(primitive.points_enu_m)
+        all_points = [
+            primitive.points_enu_m for primitive in drivable
+        ]
+        all_points.extend(
+            primitive.points_enu_m for primitive in boundaries.values()
+        )
+        all_points.extend(
+            primitive.points_enu_m for primitive in centerlines
+        )
+        all_points.extend(
+            primitive.points_enu_m for primitive in crosswalks
+        )
+        all_points.extend(
+            primitive.points_enu_m for primitive in stop_lines
+        )
         all_points.extend(
             signal.position_enu_m.reshape(1, 3) for signal in signals
         )
