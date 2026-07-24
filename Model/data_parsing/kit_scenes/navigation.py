@@ -102,6 +102,13 @@ class KitScenesSceneNavigation:
             timestamps_ns=self.timestamps,
         )
         self.rasterizer = rasterizer or NativeNavigationRasterizer()
+        self._scene_navigation_payload = encode_scene_navigation(
+            self.navigation_map,
+            self.route,
+        )
+        self._scene_navigation_sha256 = hashlib.sha256(
+            self._scene_navigation_payload
+        ).hexdigest()
         self._anchor_cache: dict[int, NavigationRaster] = {}
 
     def _validate_trace(self) -> None:
@@ -170,7 +177,14 @@ class KitScenesSceneNavigation:
         return self.rasterizer.warp(anchor, self._pose(frame_idx))
 
     def sample_members(self, frame_idx: int) -> dict[str, bytes]:
-        return encode_sample_navigation(self.raster_for_frame(frame_idx))
+        return encode_sample_navigation(
+            self.raster_for_frame(frame_idx),
+            extra_metadata={
+                "scene_navigation_sha256": (
+                    self._scene_navigation_sha256
+                ),
+            },
+        )
 
     def artifacts(self) -> SceneNavigationArtifacts:
         geometry = self.rasterizer.geometry
@@ -190,10 +204,6 @@ class KitScenesSceneNavigation:
                 geometry.route_rear_clip_m,
             ],
             dtype=np.float64,
-        )
-        scene_payload = encode_scene_navigation(
-            self.navigation_map,
-            self.route,
         )
         quality_payload = canonical_json_bytes(
             {
@@ -215,16 +225,14 @@ class KitScenesSceneNavigation:
             }
         )
         return SceneNavigationArtifacts(
-            scene_navigation=scene_payload,
+            scene_navigation=self._scene_navigation_payload,
             scene_navigation_geometry=encode_array(geometry_values),
             navigation_quality=quality_payload,
         )
 
     @property
     def scene_navigation_sha256(self) -> str:
-        return hashlib.sha256(
-            self.artifacts().scene_navigation
-        ).hexdigest()
+        return self._scene_navigation_sha256
 
 
 def build_scene_navigation(
