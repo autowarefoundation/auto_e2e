@@ -118,7 +118,7 @@ _CACHE_VERSIONS = _cache_versions_for_contracts(
 INGEST_CACHE_VERSION = _CACHE_VERSIONS["ingest"]
 LABEL_CACHE_VERSION = _CACHE_VERSIONS["label"]
 PACK_CACHE_VERSION = _CACHE_VERSIONS["pack"]
-NAVIGATION_QUALITY_CACHE_VERSION = "navigation-quality-v1"
+NAVIGATION_QUALITY_CACHE_VERSION = "navigation-quality-v2"
 
 
 def _data_prep_pod_template():
