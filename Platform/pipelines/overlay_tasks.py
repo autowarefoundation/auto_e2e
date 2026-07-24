@@ -1265,7 +1265,7 @@ def precompute_overlay_partition(
         "dataset_version": dataset_version,
     })
     deterministic_planner = planner_is_deterministic(model)
-    planner = model.Reactive_E2E.TrajectoryPlanner
+    planner = model.trajectory_planner
     num_inference_steps = int(
         getattr(planner, "num_inference_steps", 1)
     )
