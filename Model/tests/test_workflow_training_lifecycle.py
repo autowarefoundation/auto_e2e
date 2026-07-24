@@ -58,9 +58,14 @@ def _validation_batch(sample_uids):
         "visual_tiles": torch.zeros(
             (batch_size, 7, 3, 2, 2), dtype=torch.float32
         ),
-        "map_input": torch.zeros(
+        "map_context": torch.zeros(
             (batch_size, 3, 2, 2), dtype=torch.float32
         ),
+        "route_mask": torch.zeros(
+            (batch_size, 2, 2, 2), dtype=torch.float32
+        ),
+        "map_valid": torch.ones(batch_size, dtype=torch.bool),
+        "route_valid": torch.zeros(batch_size, dtype=torch.bool),
         "egomotion_history": ego,
         "visual_history": torch.zeros(
             (batch_size, 896), dtype=torch.float32
