@@ -450,6 +450,22 @@ class TestAutoE2EMapIntegration:
         )
         assert encoder_grad > 0
 
+    def test_reasoning_route_context_configuration_is_rejected(
+        self,
+        build_mock_model,
+        device,
+    ):
+        with pytest.raises(ValueError, match="Reactive-only"):
+            build_mock_model(
+                num_views=7,
+                fusion_mode="bev",
+                device=device,
+                map_context_channels=14,
+                enable_reasoning=True,
+                reasoning_mode="pooled_latent",
+                reasoning_kwargs={"route_context_dim": 32},
+            )
+
     def test_invalid_route_is_a_route_less_fallback(
         self,
         build_mock_model,
