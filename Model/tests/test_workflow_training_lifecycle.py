@@ -386,9 +386,20 @@ def test_recovery_graph_never_calls_ingest_or_cosmos():
     ]
     assert static_entities == [
         workflows.wf_repack_existing_kitscenes.name,
+        workflows.audit_kitscenes_navigation_quality.name,
         workflows.train_il.name,
         workflows.evaluate_il_policy.name,
     ]
+    audit_node = workflows.wf_recovered_kitscenes_full_run.nodes[1]
+    train_node = workflows.wf_recovered_kitscenes_full_run.nodes[2]
+    train_bindings = {
+        binding.var: binding.binding.promise
+        for binding in train_node.bindings
+    }
+    assert (
+        train_bindings["navigation_quality_audit"].node_id
+        == audit_node.id
+    )
 
     dynamic_tree = ast.parse(
         inspect.getsource(
