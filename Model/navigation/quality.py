@@ -8,6 +8,7 @@ import hashlib
 import json
 import math
 from collections.abc import Mapping, Sequence
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -63,6 +64,85 @@ class NavigationQualityPolicy:
 
 
 DEFAULT_NAVIGATION_QUALITY_POLICY = NavigationQualityPolicy()
+
+
+def load_packed_navigation_quality(
+    shard_dirs: Sequence[str | Path],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Load and hash-check scene quality artifacts from packed partitions."""
+    records = []
+    identities = []
+    for value in sorted(str(Path(path)) for path in shard_dirs):
+        root = Path(value).resolve()
+        manifest_path = root / "manifest.json"
+        manifest_bytes = manifest_path.read_bytes()
+        manifest = json.loads(manifest_bytes)
+        if not isinstance(manifest, dict):
+            raise ValueError(
+                f"packed manifest is not an object: {manifest_path}"
+            )
+        if int(manifest.get("total_samples", 0)) <= 0:
+            continue
+        navigation = manifest.get("navigation")
+        if not isinstance(navigation, Mapping):
+            raise ValueError(
+                f"packed partition has no navigation summary: {root}"
+            )
+        scenes = navigation.get("scenes")
+        if not isinstance(scenes, list) or not scenes:
+            raise ValueError(
+                f"packed partition has no navigation scenes: {root}"
+            )
+        for scene in scenes:
+            if not isinstance(scene, Mapping):
+                raise ValueError("navigation scene summary must be an object")
+            scene_id = str(scene.get("scene_id", ""))
+            relative = Path(str(scene.get("path", "")))
+            destination = (root / relative).resolve()
+            if destination != root and root not in destination.parents:
+                raise ValueError(
+                    "navigation quality path escapes packed partition"
+                )
+            quality_path = destination / "navigation_quality.json"
+            quality_bytes = quality_path.read_bytes()
+            hashes = scene.get("hashes")
+            if not isinstance(hashes, Mapping):
+                raise ValueError("navigation scene summary has no hashes")
+            expected_hash = hashes.get("navigation_quality.json")
+            actual_hash = hashlib.sha256(quality_bytes).hexdigest()
+            if expected_hash != actual_hash:
+                raise ValueError(
+                    "navigation quality hash mismatch for "
+                    f"scene {scene_id!r}"
+                )
+            quality = json.loads(quality_bytes)
+            if not isinstance(quality, dict):
+                raise ValueError(
+                    "navigation quality artifact must be an object"
+                )
+            if str(quality.get("scene_id", "")) != scene_id:
+                raise ValueError(
+                    "navigation quality scene ID differs from manifest"
+                )
+            if (
+                quality.get("quality_policy")
+                != DEFAULT_NAVIGATION_QUALITY_POLICY.contract()
+            ):
+                raise ValueError(
+                    "navigation quality artifact uses another policy"
+                )
+            records.append(quality)
+            identities.append({
+                "manifest_sha256": hashlib.sha256(
+                    manifest_bytes
+                ).hexdigest(),
+                "navigation_quality_sha256": actual_hash,
+                "partition_id": manifest.get("partition_id"),
+                "scene_id": scene_id,
+            })
+    if not records:
+        raise ValueError("packed partitions contain no navigation quality")
+    return records, identities
 
 
 def _quality_from_mapping(value: Mapping[str, Any]) -> RouteQuality:
