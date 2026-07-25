@@ -926,9 +926,16 @@ existing KITScenes benchmark output and MLflow run.
 Implementation completion requires a full comparable run and published
 analysis, even if the research hypothesis is not supported. The hypothesis is
 considered supported when junction/route metrics improve without an
-unacceptable aggregate regression. The primary route metric and maximum
-aggregate regression tolerance are frozen before the route-conditioned result
-is inspected.
+unacceptable aggregate regression.
+
+The frozen primary metric is wrong-branch rate on route-valid junction samples;
+lower is better. The route-conditioned model supports the initial hypothesis
+only when the paired bootstrap 95% confidence interval for
+`conditioned - baseline` is entirely below zero and neither aggregate ADE nor
+aggregate FDE regresses by more than 2.0% relative to the controlled baseline.
+If the eligible junction count is too small to establish the interval, the
+result is inconclusive rather than positive. These gates are fixed before the
+full route-conditioned result is inspected.
 
 ### 14.2 Metrics
 
