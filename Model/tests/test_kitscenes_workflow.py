@@ -478,6 +478,12 @@ def test_recovery_launcher_requires_audited_artifacts_and_skips_source_stages():
     assert "wf_recovered_kitscenes_full_run" in buildspec
     assert "wf_sharded_full_run" not in buildspec
     assert "--reasoning_teacher" not in buildspec
+    assert "--enable_route_conditioning" in buildspec
+    assert "--no_enable_route_conditioning" in buildspec
+    assert (
+        '--enable_route_conditioning "${ENABLE_ROUTE_CONDITIONING}"'
+        not in buildspec
+    )
 
 
 def test_overlay_launcher_guards_selected_recovery_checkpoints():
