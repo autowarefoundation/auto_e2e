@@ -554,6 +554,7 @@ def _evaluate_open_loop(
     training_policy=None,
     navigation_geometry=None,
     route_swap_counterfactual: bool = False,
+    include_navigation_records: bool = False,
 ) -> dict:
     """Evaluate one fixed loader and return finite ADE/FDE plus its UID digest."""
     import hashlib
@@ -628,6 +629,12 @@ def _evaluate_open_loop(
                 batch_uids = batch.get("sample_uid", [])
                 if isinstance(batch_uids, str):
                     batch_uids = [batch_uids]
+                if len(batch_uids) != pred_np.shape[0]:
+                    raise ValueError(
+                        "evaluation batch lost sample identities: "
+                        f"samples={pred_np.shape[0]} "
+                        f"sample_uids={len(batch_uids)}"
+                    )
                 sample_uids.extend(str(uid) for uid in batch_uids)
 
                 swapped_pred_np = None
@@ -751,19 +758,21 @@ def _evaluate_open_loop(
                                 sample_index,
                                 float("nan"),
                             )
-                        navigation_records.append(
-                            navigation_sample_metrics(
-                                pred_traj,
-                                target_traj,
-                                raw_route_mask[sample_index].numpy(),
-                                raw_map_context[sample_index].numpy(),
-                                route_valid=bool(
-                                    route_valid[sample_index].item()
-                                ),
-                                metadata=metadata,
-                                geometry=navigation_geometry,
-                            )
+                        navigation_record = navigation_sample_metrics(
+                            pred_traj,
+                            target_traj,
+                            raw_route_mask[sample_index].numpy(),
+                            raw_map_context[sample_index].numpy(),
+                            route_valid=bool(
+                                route_valid[sample_index].item()
+                            ),
+                            metadata=metadata,
+                            geometry=navigation_geometry,
                         )
+                        navigation_record["sample_uid"] = str(
+                            batch_uids[sample_index]
+                        )
+                        navigation_records.append(navigation_record)
                         if (
                             swapped_pred_np is not None
                             and sample_index in swapped_indices
@@ -871,6 +880,8 @@ def _evaluate_open_loop(
             navigation_records,
             route_swap_records=route_swap_records,
         )
+        if include_navigation_records:
+            result["navigation_records"] = navigation_records
     return result
 
 
@@ -4132,7 +4143,15 @@ def train_offline_rl(
 # ============================================================
 # Task: Evaluate (THE ONLY MLflow logging point)
 # ============================================================
-def _run_evaluation(checkpoint, shards, train_metadata, dataset, experiment_name):
+def _run_evaluation(
+    checkpoint,
+    shards,
+    train_metadata,
+    dataset,
+    experiment_name,
+    *,
+    navigation_records_output=None,
+):
     """Shared open-loop evaluation + MLflow logging logic.
 
     Called by both evaluate_il_policy and evaluate_rl_policy. Kept as a plain
@@ -4141,6 +4160,7 @@ def _run_evaluation(checkpoint, shards, train_metadata, dataset, experiment_name
     """
     import os
     import json
+    import math
     import yaml
     import torch
     import mlflow
@@ -4316,6 +4336,9 @@ def _run_evaluation(checkpoint, shards, train_metadata, dataset, experiment_name
         training_policy=training_policy,
         navigation_geometry=navigation_geometry,
         route_swap_counterfactual=(navigation_geometry is not None),
+        include_navigation_records=(
+            navigation_records_output is not None
+        ),
     )
     expected_digest = validation_metadata.get("sample_uid_digest")
     if expected_digest and evaluation["sample_uid_digest"] != expected_digest:
@@ -4344,6 +4367,63 @@ def _run_evaluation(checkpoint, shards, train_metadata, dataset, experiment_name
             ),
             "sample_uid_digest": evaluation["sample_uid_digest"],
         }
+    if navigation_records_output is not None:
+        navigation_records = evaluation.get("navigation_records")
+        if navigation_report is None or not isinstance(
+            navigation_records,
+            list,
+        ):
+            raise ValueError(
+                "navigation record export requires KITScenes evaluation"
+            )
+        serializable_records = []
+        for record in navigation_records:
+            serializable_records.append({
+                key: (
+                    None
+                    if isinstance(value, float)
+                    and not math.isfinite(value)
+                    else value
+                )
+                for key, value in record.items()
+            })
+        os.makedirs(
+            os.path.dirname(navigation_records_output),
+            exist_ok=True,
+        )
+        with open(
+            navigation_records_output,
+            "w",
+            encoding="ascii",
+        ) as stream:
+            json.dump(
+                {
+                    "schema_version": (
+                        "navigation_evaluation_records_v1"
+                    ),
+                    "checkpoint_sha256": checkpoint_sha256,
+                    "dataset": dataset.value,
+                    "dataset_version": navigation_report[
+                        "dataset_version"
+                    ],
+                    "enable_route_conditioning": navigation_report[
+                        "enable_route_conditioning"
+                    ],
+                    "navigation_geometry_id": navigation_report[
+                        "navigation_geometry_id"
+                    ],
+                    "sample_uid_digest": evaluation[
+                        "sample_uid_digest"
+                    ],
+                    "records": serializable_records,
+                },
+                stream,
+                allow_nan=False,
+                ensure_ascii=True,
+                indent=2,
+                sort_keys=True,
+            )
+            stream.write("\n")
     passed = avg_ade < 2.0 and avg_fde < 4.0
 
     # --- MLflow logging ---
