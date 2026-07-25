@@ -320,6 +320,22 @@ def test_training_wires_dataset_specific_trajectory_policy():
     assert "refusing to train on one shard" in offline_rl_source
 
 
+def test_training_seed_controls_comparable_navigation_runs():
+    training_function = workflows.train_il.task_function
+    training_source = inspect.getsource(training_function)
+    signature = inspect.signature(training_function)
+
+    assert signature.parameters["training_seed"].default == 149
+    assert "random.seed(training_seed)" in training_source
+    assert "np.random.seed(training_seed)" in training_source
+    assert "torch.manual_seed(training_seed)" in training_source
+    assert "torch.cuda.manual_seed_all(training_seed)" in training_source
+    assert "torch.backends.cudnn.benchmark = False" in training_source
+    assert "torch.backends.cudnn.deterministic = True" in training_source
+    assert '"training_seed": training_seed' in training_source
+    assert '"train/seed": training_seed' in training_source
+
+
 def test_kitscenes_epoch_evaluation_preserves_auto_e2e_horizon():
     from training.dataset_policy import KITSCENES_TRAINING_POLICY
 
