@@ -34,6 +34,7 @@ class _MetricModel:
         self.training = True
         self.reset_count = 0
         self.last_egomotion_history = None
+        self.initial_noise_calls = []
 
     def eval(self):
         self.training = False
@@ -46,11 +47,17 @@ class _MetricModel:
 
     def __call__(self, visual, *args, **kwargs):
         self.last_egomotion_history = args[2]
+        self.initial_noise_calls.append(
+            kwargs["initial_noise"].detach().clone()
+        )
         return torch.zeros((visual.shape[0], 128), dtype=torch.float32)
 
 
 class _RouteSensitiveMetricModel(_MetricModel):
     def __call__(self, visual, *args, **kwargs):
+        self.initial_noise_calls.append(
+            kwargs["initial_noise"].detach().clone()
+        )
         route_mask = kwargs["route_mask"]
         batch_size, _, _, width = route_mask.shape
         columns = torch.arange(
@@ -176,6 +183,23 @@ def test_epoch_evaluation_restores_mode_and_hashes_fixed_uids():
     }
     assert model.training is True
     assert model.reset_count == 2
+
+
+def test_evaluation_noise_is_stable_by_sample_uid():
+    forward = workflows._stable_evaluation_noise(
+        ["sample-a", "sample-b"],
+        128,
+        torch.float32,
+    )
+    reverse = workflows._stable_evaluation_noise(
+        ["sample-b", "sample-a"],
+        128,
+        torch.float32,
+    )
+
+    torch.testing.assert_close(forward[0], reverse[1])
+    torch.testing.assert_close(forward[1], reverse[0])
+    assert not torch.equal(forward[0], forward[1])
 
 
 def test_epoch_evaluation_rejects_duplicate_uids():
@@ -421,6 +445,11 @@ def test_standalone_navigation_evaluation_runs_cross_scene_route_swap():
             "route_confidence"
         ]["p50"]
         == pytest.approx(0.9)
+    )
+    assert len(model.initial_noise_calls) == 3
+    torch.testing.assert_close(
+        model.initial_noise_calls[1],
+        model.initial_noise_calls[2],
     )
 
 
