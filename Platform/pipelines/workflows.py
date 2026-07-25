@@ -2513,6 +2513,7 @@ def train_il(
     # window start, step once at the window end. Default 1 = plain per-batch step.
     grad_accum_steps: int = 1,
     lr: float = 1e-4,
+    training_seed: int = 149,
     weight_decay: float = 1e-2,
     grad_clip: float = 1.0,
     # AMP off by default: with fp16 autocast the GradScaler detected inf/nan grads
@@ -2584,6 +2585,7 @@ def train_il(
     """
     import os
     import json
+    import random
     import torch
     import numpy as np
     import mlflow
@@ -2600,6 +2602,18 @@ def train_il(
         )
     if epochs <= 0:
         raise ValueError(f"epochs must be positive, got {epochs}")
+    if not 0 <= training_seed <= 2**32 - 1:
+        raise ValueError(
+            "training_seed must be between 0 and 2**32 - 1"
+        )
+
+    random.seed(training_seed)
+    np.random.seed(training_seed)
+    torch.manual_seed(training_seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(training_seed)
+    torch.backends.cudnn.benchmark = False
+    torch.backends.cudnn.deterministic = True
 
     # DataLoader workers (num_workers>0) transport batches to the parent via shared
     # memory (/dev/shm) by default; the Flyte pod's /dev/shm is tiny (~64MB), so
@@ -3115,6 +3129,7 @@ def train_il(
         "enable_world_model": enable_world_model,
         "optimizer": "AdamW",
         "lr": lr,
+        "training_seed": training_seed,
         "weight_decay": weight_decay,
         "grad_clip": grad_clip,
         "amp": amp,
@@ -3284,8 +3299,15 @@ def train_il(
                 "train/grad_accum_steps": grad_accum_steps,
                 "train/num_workers": num_workers,
                 "train/lr": lr,
+                "train/seed": training_seed,
                 "train/weight_decay": weight_decay,
                 "train/amp": amp,
+                "train/cudnn_benchmark": (
+                    torch.backends.cudnn.benchmark
+                ),
+                "train/cudnn_deterministic": (
+                    torch.backends.cudnn.deterministic
+                ),
                 "train/acceleration_signal_scale": (
                     training_policy.signal_scales[0]
                 ),
@@ -3859,6 +3881,7 @@ def train_il(
             "grad_accum_steps": grad_accum_steps,
             "num_workers": num_workers,
             "lr": lr,
+            "training_seed": training_seed,
             "weight_decay": weight_decay,
             "grad_clip": grad_clip,
             "amp": amp,
@@ -5661,6 +5684,7 @@ def wf_sharded_full_run(
     batch_size: int = 1,
     grad_accum_steps: int = 4,
     lr: float = 1e-4,
+    training_seed: int = 149,
     enable_route_conditioning: bool = True,
     enable_reasoning: bool = True,
     reasoning_mode: str = "pooled_latent",
@@ -5703,6 +5727,7 @@ def wf_sharded_full_run(
     out = train_il(
         shards=shards, dataset=dataset, backbone=backbone, epochs=epochs,
         batch_size=batch_size, grad_accum_steps=grad_accum_steps, lr=lr,
+        training_seed=training_seed,
         enable_route_conditioning=enable_route_conditioning,
         navigation_quality_audit=navigation_quality_audit,
         enable_reasoning=enable_reasoning, reasoning_mode=reasoning_mode,
@@ -5727,6 +5752,7 @@ def wf_recovered_kitscenes_full_run(
     batch_size: int = 1,
     grad_accum_steps: int = 4,
     lr: float = 1e-4,
+    training_seed: int = 149,
     enable_route_conditioning: bool = True,
     reasoning_mode: str = "pooled_latent",
     val_fraction: float = 0.1,
@@ -5753,6 +5779,7 @@ def wf_recovered_kitscenes_full_run(
         batch_size=batch_size,
         grad_accum_steps=grad_accum_steps,
         lr=lr,
+        training_seed=training_seed,
         enable_route_conditioning=enable_route_conditioning,
         navigation_quality_audit=navigation_quality_audit,
         enable_reasoning=True,
@@ -5780,6 +5807,7 @@ def wf_train_il(
     batch_size: int = 4,
     grad_accum_steps: int = 1,
     lr: float = 1e-4,
+    training_seed: int = 149,
     amp: bool = False,
     enable_route_conditioning: bool = True,
     navigation_quality_audit: Optional[FlyteFile] = None,
@@ -5809,7 +5837,8 @@ def wf_train_il(
     """
     out = train_il(shards=shards, dataset=dataset, backbone=backbone,
                    epochs=epochs, batch_size=batch_size,
-                   grad_accum_steps=grad_accum_steps, lr=lr, amp=amp,
+                   grad_accum_steps=grad_accum_steps, lr=lr,
+                   training_seed=training_seed, amp=amp,
                    enable_route_conditioning=enable_route_conditioning,
                    navigation_quality_audit=navigation_quality_audit,
                    enable_reasoning=enable_reasoning, reasoning_mode=reasoning_mode,
