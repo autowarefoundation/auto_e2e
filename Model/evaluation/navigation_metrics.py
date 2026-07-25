@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import math
 from collections.abc import Mapping, Sequence
 from typing import Any
@@ -17,8 +18,11 @@ from navigation.geometry import (
 
 
 NAVIGATION_EVALUATION_VERSION = "navigation_evaluation_v1"
+NAVIGATION_COMPARISON_VERSION = "navigation_comparison_v1"
 BOOTSTRAP_SEED = 149
 BOOTSTRAP_RESAMPLES = 1_000
+PRIMARY_MINIMUM_SAMPLE_COUNT = 30
+MAXIMUM_AGGREGATE_REGRESSION = 0.02
 ROUTE_QUALITY_FIELDS = (
     "route_confidence",
     "route_quality_matched_pose_ratio",
@@ -380,6 +384,252 @@ def _difference_with_ci(
         float(np.quantile(differences, 0.975)),
     ]
     return result
+
+
+def _paired_metric_with_ci(
+    conditioned_values: Sequence[float],
+    baseline_values: Sequence[float],
+    *,
+    rng: np.random.Generator,
+    resamples: int,
+) -> dict[str, Any]:
+    if len(conditioned_values) != len(baseline_values):
+        raise ValueError("paired metric inputs must have equal length")
+    finite_pairs = [
+        (float(conditioned), float(baseline))
+        for conditioned, baseline in zip(
+            conditioned_values,
+            baseline_values,
+            strict=True,
+        )
+        if conditioned is not None
+        and baseline is not None
+        and math.isfinite(float(conditioned))
+        and math.isfinite(float(baseline))
+    ]
+    if not finite_pairs:
+        return {
+            "count": 0,
+            "conditioned_mean": None,
+            "baseline_mean": None,
+            "difference_mean": None,
+            "difference_ci95": None,
+            "relative_regression": None,
+            "relative_regression_ci95": None,
+        }
+    values = np.asarray(finite_pairs, dtype=np.float64)
+    conditioned = values[:, 0]
+    baseline = values[:, 1]
+    differences = conditioned - baseline
+    conditioned_mean = float(conditioned.mean())
+    baseline_mean = float(baseline.mean())
+    if len(values) == 1:
+        bootstrap_differences = differences
+        bootstrap_relative = (
+            differences / baseline
+            if baseline[0] != 0.0
+            else np.asarray([], dtype=np.float64)
+        )
+    else:
+        indices = rng.integers(
+            0,
+            len(values),
+            size=(resamples, len(values)),
+        )
+        bootstrap_conditioned = conditioned[indices].mean(axis=1)
+        bootstrap_baseline = baseline[indices].mean(axis=1)
+        bootstrap_differences = (
+            bootstrap_conditioned - bootstrap_baseline
+        )
+        nonzero = bootstrap_baseline != 0.0
+        bootstrap_relative = (
+            bootstrap_differences[nonzero]
+            / bootstrap_baseline[nonzero]
+        )
+    relative_regression = (
+        None
+        if baseline_mean == 0.0
+        else float((conditioned_mean - baseline_mean) / baseline_mean)
+    )
+    relative_interval = (
+        None
+        if len(bootstrap_relative) == 0
+        else [
+            float(np.quantile(bootstrap_relative, 0.025)),
+            float(np.quantile(bootstrap_relative, 0.975)),
+        ]
+    )
+    return {
+        "count": int(len(values)),
+        "conditioned_mean": conditioned_mean,
+        "baseline_mean": baseline_mean,
+        "difference_mean": float(differences.mean()),
+        "difference_ci95": [
+            float(np.quantile(bootstrap_differences, 0.025)),
+            float(np.quantile(bootstrap_differences, 0.975)),
+        ],
+        "relative_regression": relative_regression,
+        "relative_regression_ci95": relative_interval,
+    }
+
+
+def _records_by_sample_uid(
+    records: Sequence[Mapping[str, Any]],
+    *,
+    label: str,
+) -> dict[str, Mapping[str, Any]]:
+    indexed: dict[str, Mapping[str, Any]] = {}
+    for record in records:
+        sample_uid = str(record.get("sample_uid", ""))
+        if not sample_uid:
+            raise ValueError(f"{label} record has no sample_uid")
+        if sample_uid in indexed:
+            raise ValueError(
+                f"{label} records contain duplicate sample_uid {sample_uid}"
+            )
+        indexed[sample_uid] = record
+    if not indexed:
+        raise ValueError(f"{label} records are empty")
+    return indexed
+
+
+def compare_navigation_records(
+    conditioned_records: Sequence[Mapping[str, Any]],
+    baseline_records: Sequence[Mapping[str, Any]],
+    *,
+    bootstrap_seed: int = BOOTSTRAP_SEED,
+    bootstrap_resamples: int = BOOTSTRAP_RESAMPLES,
+    primary_minimum_sample_count: int = PRIMARY_MINIMUM_SAMPLE_COUNT,
+    maximum_aggregate_regression: float = MAXIMUM_AGGREGATE_REGRESSION,
+) -> dict[str, Any]:
+    """Evaluate the frozen paired route-conditioning research gate."""
+    if bootstrap_resamples <= 0:
+        raise ValueError("bootstrap_resamples must be positive")
+    if primary_minimum_sample_count <= 0:
+        raise ValueError("primary_minimum_sample_count must be positive")
+    if maximum_aggregate_regression < 0.0:
+        raise ValueError("maximum_aggregate_regression must be non-negative")
+
+    conditioned = _records_by_sample_uid(
+        conditioned_records,
+        label="conditioned",
+    )
+    baseline = _records_by_sample_uid(
+        baseline_records,
+        label="baseline",
+    )
+    if conditioned.keys() != baseline.keys():
+        missing_conditioned = sorted(baseline.keys() - conditioned.keys())
+        missing_baseline = sorted(conditioned.keys() - baseline.keys())
+        raise ValueError(
+            "comparison sample identities differ: "
+            f"missing_conditioned={missing_conditioned[:3]} "
+            f"missing_baseline={missing_baseline[:3]}"
+        )
+
+    sample_uids = sorted(conditioned)
+    for sample_uid in sample_uids:
+        conditioned_record = conditioned[sample_uid]
+        baseline_record = baseline[sample_uid]
+        for key in ("route_valid", "junction", "maneuver"):
+            if conditioned_record.get(key) != baseline_record.get(key):
+                raise ValueError(
+                    f"comparison route metadata differs for {sample_uid}: "
+                    f"{key}"
+                )
+        conditioned_wrong_branch = conditioned_record.get("wrong_branch")
+        baseline_wrong_branch = baseline_record.get("wrong_branch")
+        conditioned_eligible = (
+            conditioned_wrong_branch is not None
+            and math.isfinite(float(conditioned_wrong_branch))
+        )
+        baseline_eligible = (
+            baseline_wrong_branch is not None
+            and math.isfinite(float(baseline_wrong_branch))
+        )
+        if conditioned_eligible != baseline_eligible:
+            raise ValueError(
+                "wrong-branch eligibility differs for "
+                f"{sample_uid}"
+            )
+
+    rng = np.random.default_rng(bootstrap_seed)
+    overall = {
+        metric: _paired_metric_with_ci(
+            [conditioned[uid][metric] for uid in sample_uids],
+            [baseline[uid][metric] for uid in sample_uids],
+            rng=rng,
+            resamples=bootstrap_resamples,
+        )
+        for metric in ("ade_m", "fde_m")
+    }
+    primary_uids = [
+        uid
+        for uid in sample_uids
+        if conditioned[uid].get("wrong_branch") is not None
+        and math.isfinite(float(conditioned[uid]["wrong_branch"]))
+    ]
+    primary = _paired_metric_with_ci(
+        [conditioned[uid]["wrong_branch"] for uid in primary_uids],
+        [baseline[uid]["wrong_branch"] for uid in primary_uids],
+        rng=rng,
+        resamples=bootstrap_resamples,
+    )
+    has_enough_evidence = (
+        primary["count"] >= primary_minimum_sample_count
+    )
+    primary_improved = (
+        has_enough_evidence
+        and primary["difference_ci95"] is not None
+        and primary["difference_ci95"][1] < 0.0
+    )
+    aggregate_within_tolerance = all(
+        overall[metric]["relative_regression"] is not None
+        and overall[metric]["relative_regression"]
+        <= maximum_aggregate_regression
+        for metric in ("ade_m", "fde_m")
+    )
+    if not has_enough_evidence:
+        verdict = "inconclusive"
+    elif primary_improved and aggregate_within_tolerance:
+        verdict = "supported"
+    else:
+        verdict = "not_supported"
+
+    return {
+        "schema_version": NAVIGATION_COMPARISON_VERSION,
+        "bootstrap": {
+            "confidence": 0.95,
+            "resamples": bootstrap_resamples,
+            "seed": bootstrap_seed,
+            "method": "paired_sample_bootstrap",
+        },
+        "sample_count": len(sample_uids),
+        "sample_uid_digest": hashlib.sha256(
+            "\n".join(sample_uids).encode("ascii")
+        ).hexdigest(),
+        "primary_metric": {
+            "name": "route_valid_junction_wrong_branch_rate",
+            "lower_is_better": True,
+            "minimum_sample_count": primary_minimum_sample_count,
+            "eligible_sample_uid_digest": hashlib.sha256(
+                "\n".join(primary_uids).encode("ascii")
+            ).hexdigest(),
+            **primary,
+        },
+        "aggregate_guardrails": {
+            "maximum_relative_regression": (
+                maximum_aggregate_regression
+            ),
+            **overall,
+        },
+        "decision": {
+            "verdict": verdict,
+            "has_enough_primary_evidence": has_enough_evidence,
+            "primary_interval_below_zero": primary_improved,
+            "aggregate_within_tolerance": aggregate_within_tolerance,
+        },
+    }
 
 
 def _slice_summary(
