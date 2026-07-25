@@ -4415,6 +4415,33 @@ def _run_evaluation(
                     "sample_uid_digest": evaluation[
                         "sample_uid_digest"
                     ],
+                    "training_seed": int(
+                        config.get("training_seed", -1)
+                    ),
+                    "mlflow_run_id": str(
+                        meta.get("tracking", {}).get(
+                            "mlflow_run_id",
+                            "",
+                        )
+                    ),
+                    "data_fingerprint": str(
+                        meta.get("data", {}).get(
+                            "data_fingerprint",
+                            "",
+                        )
+                    ),
+                    "navigation_quality_audit_sha256": str(
+                        config.get(
+                            "navigation_quality_audit_sha256",
+                            "",
+                        )
+                    ),
+                    "validation_group_uid_digest": str(
+                        validation_metadata.get(
+                            "validation_group_uid_digest",
+                            "",
+                        )
+                    ),
                     "records": serializable_records,
                 },
                 stream,
@@ -4696,6 +4723,219 @@ def evaluate_il_policy(
     and registers the checkpoint in the `auto-e2e-driving-policy` model registry.
     """
     return _run_evaluation(checkpoint, shards, train_metadata, dataset, "imitation-learning")
+
+
+@task(
+    container_image=EVAL_IMAGE,
+    requests=Resources(cpu="2", mem="8Gi", gpu="1"),
+    limits=Resources(cpu="2", mem="8Gi", gpu="1"),
+    environment={"MLFLOW_TRACKING_URI": MLFLOW_URI},
+    pod_template=_large_shm_pod_template(),
+)
+def evaluate_navigation_records(
+    checkpoint: FlyteFile,
+    shards: List[FlyteDirectory],
+    train_metadata: FlyteFile,
+    expected_route_conditioning: bool,
+) -> FlyteFile:
+    """Evaluate one KITScenes checkpoint and retain paired sample records."""
+    import json
+    import os
+
+    output_path = os.path.join(
+        "/tmp/navigation-evaluation-records",
+        (
+            "conditioned.json"
+            if expected_route_conditioning
+            else "baseline.json"
+        ),
+    )
+    _run_evaluation(
+        checkpoint,
+        shards,
+        train_metadata,
+        Dataset.KITSCENES,
+        "imitation-learning",
+        navigation_records_output=output_path,
+    )
+    with open(output_path, encoding="ascii") as stream:
+        payload = json.load(stream)
+    actual = bool(payload["enable_route_conditioning"])
+    if actual != expected_route_conditioning:
+        raise ValueError(
+            "navigation comparison checkpoint mode differs from its role: "
+            f"expected={expected_route_conditioning} actual={actual}"
+        )
+    return FlyteFile(output_path)
+
+
+@task(
+    container_image=EVAL_IMAGE,
+    requests=Resources(cpu="2", mem="4Gi"),
+    limits=Resources(cpu="2", mem="4Gi"),
+    environment={"MLFLOW_TRACKING_URI": MLFLOW_URI},
+)
+def compare_navigation_record_artifacts(
+    conditioned_records: FlyteFile,
+    baseline_records: FlyteFile,
+) -> FlyteFile:
+    """Validate two evaluations and publish the frozen paired research gate."""
+    import json
+    import os
+
+    import mlflow
+
+    from evaluation.navigation_metrics import compare_navigation_records
+
+    def load_records(artifact, label):
+        with open(artifact.download(), encoding="ascii") as stream:
+            payload = json.load(stream)
+        if (
+            payload.get("schema_version")
+            != "navigation_evaluation_records_v1"
+        ):
+            raise ValueError(
+                f"{label} has an unsupported navigation record schema"
+            )
+        records = payload.get("records")
+        if not isinstance(records, list) or not records:
+            raise ValueError(f"{label} has no navigation records")
+        return payload
+
+    conditioned = load_records(conditioned_records, "conditioned")
+    baseline = load_records(baseline_records, "baseline")
+    if not bool(conditioned.get("enable_route_conditioning")):
+        raise ValueError("conditioned artifact disabled route conditioning")
+    if bool(baseline.get("enable_route_conditioning")):
+        raise ValueError("baseline artifact enabled route conditioning")
+
+    identity_fields = (
+        "dataset",
+        "dataset_version",
+        "navigation_geometry_id",
+        "sample_uid_digest",
+        "training_seed",
+        "data_fingerprint",
+        "navigation_quality_audit_sha256",
+        "validation_group_uid_digest",
+    )
+    mismatches = [
+        field
+        for field in identity_fields
+        if conditioned.get(field) != baseline.get(field)
+    ]
+    if mismatches:
+        raise ValueError(
+            "navigation comparison provenance differs: "
+            f"{mismatches}"
+        )
+    for field in identity_fields:
+        if conditioned.get(field) in (None, "", -1):
+            raise ValueError(
+                f"navigation comparison provenance is missing {field}"
+            )
+
+    report = compare_navigation_records(
+        conditioned["records"],
+        baseline["records"],
+    )
+    report["provenance"] = {
+        field: conditioned[field] for field in identity_fields
+    }
+    report["provenance"].update({
+        "conditioned_checkpoint_sha256": conditioned[
+            "checkpoint_sha256"
+        ],
+        "baseline_checkpoint_sha256": baseline[
+            "checkpoint_sha256"
+        ],
+        "conditioned_mlflow_run_id": conditioned["mlflow_run_id"],
+        "baseline_mlflow_run_id": baseline["mlflow_run_id"],
+    })
+
+    mlflow.set_tracking_uri(os.environ["MLFLOW_TRACKING_URI"])
+    mlflow.set_experiment("navigation-comparison")
+    with mlflow.start_run(
+        run_name=(
+            "reactive-route-vs-baseline-"
+            f"seed-{conditioned['training_seed']}"
+        )
+    ) as active_run:
+        report["provenance"]["comparison_mlflow_run_id"] = (
+            active_run.info.run_id
+        )
+        output_dir = "/tmp/navigation-comparison"
+        os.makedirs(output_dir, exist_ok=True)
+        output_path = os.path.join(
+            output_dir,
+            "navigation_comparison.json",
+        )
+        with open(output_path, "w", encoding="ascii") as stream:
+            json.dump(
+                report,
+                stream,
+                allow_nan=False,
+                ensure_ascii=True,
+                indent=2,
+                sort_keys=True,
+            )
+            stream.write("\n")
+
+        primary = report["primary_metric"]
+        guardrails = report["aggregate_guardrails"]
+        decision = report["decision"]
+        mlflow.log_params({
+            "dataset": conditioned["dataset"],
+            "dataset_version": conditioned["dataset_version"],
+            "navigation_geometry_id": conditioned[
+                "navigation_geometry_id"
+            ],
+            "training_seed": conditioned["training_seed"],
+            "sample_uid_digest": conditioned["sample_uid_digest"],
+            "conditioned_run_id": conditioned["mlflow_run_id"],
+            "baseline_run_id": baseline["mlflow_run_id"],
+            "primary_metric": primary["name"],
+            "primary_minimum_sample_count": primary[
+                "minimum_sample_count"
+            ],
+            "maximum_relative_regression": guardrails[
+                "maximum_relative_regression"
+            ],
+            "verdict": decision["verdict"],
+        })
+        metrics = {
+            "primary/eligible_count": primary["count"],
+            "primary/conditioned_mean": primary["conditioned_mean"],
+            "primary/baseline_mean": primary["baseline_mean"],
+            "primary/difference_mean": primary["difference_mean"],
+            "primary/difference_ci95_low": (
+                primary["difference_ci95"][0]
+                if primary["difference_ci95"] is not None
+                else None
+            ),
+            "primary/difference_ci95_high": (
+                primary["difference_ci95"][1]
+                if primary["difference_ci95"] is not None
+                else None
+            ),
+            "guardrail/ade_relative_regression": guardrails["ade_m"][
+                "relative_regression"
+            ],
+            "guardrail/fde_relative_regression": guardrails["fde_m"][
+                "relative_regression"
+            ],
+            "decision/supported": (
+                1.0 if decision["verdict"] == "supported" else 0.0
+            ),
+        }
+        mlflow.log_metrics({
+            key: float(value)
+            for key, value in metrics.items()
+            if value is not None
+        })
+        mlflow.log_artifact(output_path)
+
+    return FlyteFile(output_path)
 
 
 @task(
@@ -5875,6 +6115,44 @@ def wf_recovered_kitscenes_full_run(
         shards=shards,
         dataset=Dataset.KITSCENES,
         train_metadata=out.metadata,
+    )
+
+
+@workflow
+def wf_compare_recovered_kitscenes_navigation(
+    recovery_manifest: FlyteFile,
+    artifact_set_sha256: str,
+    conditioned_checkpoint: FlyteFile,
+    conditioned_train_metadata: FlyteFile,
+    baseline_checkpoint: FlyteFile,
+    baseline_train_metadata: FlyteFile,
+    dataset_version: str = KITSCENES_NAVIGATION_DATASET_VERSION,
+    image_size: int = 256,
+    pack_concurrency: int = 60,
+) -> FlyteFile:
+    """Run the frozen paired comparison on the cached KITScenes v3 corpus."""
+    shards = wf_repack_existing_kitscenes(
+        recovery_manifest=recovery_manifest,
+        artifact_set_sha256=artifact_set_sha256,
+        dataset_version=dataset_version,
+        image_size=image_size,
+        pack_concurrency=pack_concurrency,
+    )
+    conditioned_records = evaluate_navigation_records(
+        checkpoint=conditioned_checkpoint,
+        shards=shards,
+        train_metadata=conditioned_train_metadata,
+        expected_route_conditioning=True,
+    )
+    baseline_records = evaluate_navigation_records(
+        checkpoint=baseline_checkpoint,
+        shards=shards,
+        train_metadata=baseline_train_metadata,
+        expected_route_conditioning=False,
+    )
+    return compare_navigation_record_artifacts(
+        conditioned_records=conditioned_records,
+        baseline_records=baseline_records,
     )
 
 
