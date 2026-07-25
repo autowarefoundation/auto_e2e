@@ -547,6 +547,30 @@ def _collated_metadata_value(
     return value
 
 
+def _stable_evaluation_noise(sample_uids, trajectory_width, dtype):
+    """Create a batch-order-independent planner prior for paired evaluation."""
+    import hashlib
+    import torch
+
+    noise = []
+    for sample_uid in sample_uids:
+        digest = hashlib.sha256(
+            f"auto-e2e-open-loop-noise-v1:{sample_uid}".encode("utf-8")
+        ).digest()
+        generator = torch.Generator(device="cpu")
+        generator.manual_seed(
+            int.from_bytes(digest[:8], "big") % (2**63 - 1)
+        )
+        noise.append(
+            torch.randn(
+                trajectory_width,
+                dtype=dtype,
+                generator=generator,
+            )
+        )
+    return torch.stack(noise)
+
+
 def _evaluate_open_loop(
     model,
     loader,
@@ -599,6 +623,25 @@ def _evaluate_open_loop(
                 route_mask = raw_route_mask.to(device)
                 map_valid = batch["map_valid"].to(device)
                 route_valid = batch["route_valid"].to(device)
+                batch_uids = batch.get("sample_uid", [])
+                if isinstance(batch_uids, str):
+                    batch_uids = [batch_uids]
+                batch_uids = [str(uid) for uid in batch_uids]
+                if len(batch_uids) != visual.shape[0]:
+                    raise ValueError(
+                        "evaluation batch lost sample identities: "
+                        f"samples={visual.shape[0]} "
+                        f"sample_uids={len(batch_uids)}"
+                    )
+                if any(not uid for uid in batch_uids):
+                    raise ValueError(
+                        "evaluation batch contains an empty sample UID"
+                    )
+                initial_noise = _stable_evaluation_noise(
+                    batch_uids,
+                    int(target.shape[-1]),
+                    visual.dtype,
+                ).to(device)
                 navigation_metadata = batch.get(
                     "navigation_metadata",
                     {},
@@ -623,12 +666,10 @@ def _evaluate_open_loop(
                     history_frames=history_frames,
                     future_frames=future_frames,
                     mode="infer",
+                    initial_noise=initial_noise,
                 )
                 pred_np = pred.cpu().numpy()
                 target_np = target.numpy()
-                batch_uids = batch.get("sample_uid", [])
-                if isinstance(batch_uids, str):
-                    batch_uids = [batch_uids]
                 if len(batch_uids) != pred_np.shape[0]:
                     raise ValueError(
                         "evaluation batch lost sample identities: "
@@ -705,6 +746,7 @@ def _evaluate_open_loop(
                             history_frames=history_frames,
                             future_frames=future_frames,
                             mode="infer",
+                            initial_noise=initial_noise,
                         )
                         swapped_pred_np = swapped_pred.cpu().numpy()
 
