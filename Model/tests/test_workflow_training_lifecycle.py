@@ -396,9 +396,15 @@ def test_standalone_navigation_evaluation_runs_cross_scene_route_swap():
         torch.device("cpu"),
         navigation_geometry=DEFAULT_NAVIGATION_GEOMETRY,
         route_swap_counterfactual=True,
+        include_navigation_records=True,
     )
 
     report = metrics["navigation"]
+    records = metrics["navigation_records"]
+    assert [record["sample_uid"] for record in records] == [
+        "sample-a",
+        "sample-b",
+    ]
     assert report["slices"]["overall"]["sample_count"] == 2
     assert report["slices"]["route_valid"]["sample_count"] == 2
     counterfactual = report["route_swap_counterfactual"]
@@ -562,6 +568,27 @@ def test_recovery_graph_never_calls_ingest_or_cosmos():
     assert "data_processing" in referenced_names
     assert "data_ingest" not in referenced_names
     assert "generate_reasoning_labels" not in referenced_names
+
+
+def test_navigation_comparison_graph_reuses_one_repack():
+    nodes = workflows.wf_compare_recovered_kitscenes_navigation.nodes
+    assert [
+        getattr(node.flyte_entity, "name", "")
+        for node in nodes
+    ] == [
+        workflows.wf_repack_existing_kitscenes.name,
+        workflows.evaluate_navigation_records.name,
+        workflows.evaluate_navigation_records.name,
+        workflows.compare_navigation_record_artifacts.name,
+    ]
+    comparison_bindings = {
+        binding.var: binding.binding.promise.node_id
+        for binding in nodes[3].bindings
+    }
+    assert comparison_bindings == {
+        "conditioned_records": nodes[1].id,
+        "baseline_records": nodes[2].id,
+    }
 
 
 def test_shared_pack_maps_bind_optional_strict_count_to_none():
