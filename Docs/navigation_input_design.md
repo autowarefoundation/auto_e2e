@@ -906,6 +906,12 @@ budget, and evaluation code for:
 2. map + Reactive-only route conditioning with production raster/warp
    semantics.
 
+Both runs use the same explicitly recorded training seed. The seed is applied
+to Python, NumPy, Torch, and CUDA before model construction, with a fixed cuDNN
+determinism policy, and is persisted in checkpoint and MLflow provenance. This
+controls model initialization and sample-order randomness across the two
+conditions without claiming cross-hardware bitwise reproducibility.
+
 The v3.0 split manifest inherits the exact scene, sample UID, and train/dev
 membership inventory from the frozen v2.2 manifest and pins that parent by
 SHA-256. It independently fixes the v3.0 packed-contract digest, so the
