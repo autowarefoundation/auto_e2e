@@ -1,3 +1,5 @@
+import hashlib
+import json
 import torch
 import pytest
 import sys
@@ -175,7 +177,7 @@ class TestTrajectoryImitationLoss:
                 "split_id": policy.validation_split_id,
                 "source_revision": "revision-a",
                 "source_artifact_set_sha256": "b" * 64,
-                "dataset_version": "v2.2",
+                "dataset_version": "v3.0",
                 "packed_contract_digest": "contract-a",
                 "validation_fraction": 0.1,
                 "available_scene_count": 20,
@@ -201,7 +203,7 @@ class TestTrajectoryImitationLoss:
             val_fraction=0.1,
             policy=KITSCENES_TRAINING_POLICY,
             source_revision="revision-a",
-            packed_dataset_version="v2.2",
+            packed_dataset_version="v3.0",
             packed_contract_digest="contract-a",
             packed_partition_count=20,
             empty_partition_count=3,
@@ -213,7 +215,7 @@ class TestTrajectoryImitationLoss:
             val_fraction=0.1,
             policy=KITSCENES_TRAINING_POLICY,
             source_revision="revision-a",
-            packed_dataset_version="v2.2",
+            packed_dataset_version="v3.0",
             packed_contract_digest="contract-a",
             packed_partition_count=20,
             empty_partition_count=3,
@@ -236,10 +238,10 @@ class TestTrajectoryImitationLoss:
                 source_revision=(
                     "6fde0034446669e2ed7235e4c7fe323cd23d599d"
                 ),
-                packed_dataset_version="v2.2",
+                packed_dataset_version="v3.0",
                 packed_contract_digest=(
-                    "a0bf504e37b448b42135e9292b307d7e"
-                    "a3087cb6ec9554e52cb1d4db7b696224"
+                    "03d2288799b51117606064ff61562de9d"
+                    "a230a557e6b7c2509860f2c0d055863"
                 ),
                 packed_partition_count=533,
                 empty_partition_count=129,
@@ -377,11 +379,18 @@ class TestTrajectoryImitationLoss:
         )
         assert payload["training_sample_count"] == 38847
         assert payload["validation_sample_count"] == 3820
-        assert payload["dataset_version"] == "v2.2"
+        assert payload["dataset_version"] == "v3.0"
         assert payload["packed_contract_digest"] == (
-            "a0bf504e37b448b42135e9292b307d7e"
-            "a3087cb6ec9554e52cb1d4db7b696224"
+            "03d2288799b51117606064ff61562de9d"
+            "a230a557e6b7c2509860f2c0d055863"
         )
+        assert payload["sample_inventory_parent"] == {
+            "manifest": "kitscenes_train_dev_v1.json",
+            "sha256": (
+                "7bffc71254db8a168aa9f5c5dc5b5159"
+                "abee8a3d5d71b927235fb2a9a56c1194"
+            ),
+        }
         assert group_uid_digest(selected) == (
             payload["validation_group_uid_digest"]
         )
@@ -392,6 +401,30 @@ class TestTrajectoryImitationLoss:
             "62ea79c5f45b1ac47dab3cfeab604244"
             "38cd0c09994b6f44c215a473f9e31f04",
         )
+
+    def test_navigation_manifest_lineage_rejects_inventory_drift(
+        self,
+        tmp_path,
+    ):
+        parent = {"eligible_sample_count": 42}
+        parent_bytes = json.dumps(parent, sort_keys=True).encode("ascii")
+        (tmp_path / "parent.json").write_bytes(parent_bytes)
+        child = {
+            "eligible_sample_count": 41,
+            "sample_inventory_parent": {
+                "manifest": "parent.json",
+                "sha256": hashlib.sha256(parent_bytes).hexdigest(),
+            },
+        }
+
+        with pytest.raises(
+            ValueError,
+            match="changed inherited sample inventory",
+        ):
+            dataset_policy._validate_sample_inventory_parent(
+                child,
+                tmp_path / "child.json",
+            )
 
     def test_l2d_holdout_retains_legacy_hash_buckets(self):
         assert validation_group_uids(
