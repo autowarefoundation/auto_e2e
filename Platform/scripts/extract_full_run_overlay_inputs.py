@@ -11,10 +11,22 @@ from typing import Any, Iterable, Mapping
 
 
 _EXECUTION_ID_RE = re.compile(r"^a[a-z0-9]{19}$")
-_FULL_RUN_WORKFLOW = "pipelines.workflows.wf_sharded_full_run"
-_DATASET_WORKFLOW = "pipelines.workflows.wf_create_dataset_sharded"
-_RECOVERY_WORKFLOW = "pipelines.workflows.wf_recovered_kitscenes_full_run"
-_REPACK_WORKFLOW = "pipelines.workflows.wf_repack_existing_kitscenes"
+_FULL_RUN_WORKFLOWS = {
+    "pipelines.workflows.wf_sharded_full_run",
+    "Platform.pipelines.workflows.wf_sharded_full_run",
+}
+_DATASET_WORKFLOWS = {
+    "pipelines.workflows.wf_create_dataset_sharded",
+    "Platform.pipelines.workflows.wf_create_dataset_sharded",
+}
+_RECOVERY_WORKFLOWS = {
+    "pipelines.workflows.wf_recovered_kitscenes_full_run",
+    "Platform.pipelines.workflows.wf_recovered_kitscenes_full_run",
+}
+_REPACK_WORKFLOWS = {
+    "pipelines.workflows.wf_repack_existing_kitscenes",
+    "Platform.pipelines.workflows.wf_repack_existing_kitscenes",
+}
 _WORKFLOW_RUNNING = 2
 _WORKFLOW_SUCCEEDED = 4
 _NODE_SUCCEEDED = 3
@@ -91,17 +103,17 @@ def dataset_node_id(execution: Any) -> str:
     """Find the dataset subworkflow node without depending on its compiled ID."""
     workflow = execution.flyte_workflow
     workflow_name = str(getattr(getattr(workflow, "id", None), "name", ""))
-    if workflow_name == _FULL_RUN_WORKFLOW:
-        expected_entity = _DATASET_WORKFLOW
+    if workflow_name in _FULL_RUN_WORKFLOWS:
+        expected_entities = _DATASET_WORKFLOWS
         expected_metadata = "wf_create_dataset_sharded"
-    elif workflow_name == _RECOVERY_WORKFLOW:
-        expected_entity = _REPACK_WORKFLOW
+    elif workflow_name in _RECOVERY_WORKFLOWS:
+        expected_entities = _REPACK_WORKFLOWS
         expected_metadata = "wf_repack_existing_kitscenes"
     else:
         raise ValueError(
             "execution workflow is "
-            f"{workflow_name!r}, expected {_FULL_RUN_WORKFLOW!r} or "
-            f"{_RECOVERY_WORKFLOW!r}"
+            f"{workflow_name!r}, expected a supported full-run or recovery "
+            "workflow"
         )
 
     matches = []
@@ -109,7 +121,7 @@ def dataset_node_id(execution: Any) -> str:
         entity_name = str(getattr(getattr(node, "flyte_entity", None), "name", ""))
         metadata_name = str(getattr(getattr(node, "metadata", None), "name", ""))
         if (
-            entity_name == expected_entity
+            entity_name in expected_entities
             or metadata_name == expected_metadata
         ):
             matches.append(str(node.id))
@@ -179,7 +191,7 @@ def build_overlay_inputs(
     )
     phase = int(execution.closure.phase)
     running_recovery = (
-        workflow_name == _RECOVERY_WORKFLOW
+        workflow_name in _RECOVERY_WORKFLOWS
         and allow_running_recovery
         and phase == _WORKFLOW_RUNNING
     )
@@ -188,12 +200,12 @@ def build_overlay_inputs(
             f"dataset-producing workflow {execution_id} is not SUCCEEDED "
             f"(phase={execution.closure.phase})"
         )
-    if workflow_name == _RECOVERY_WORKFLOW:
+    if workflow_name in _RECOVERY_WORKFLOWS:
         validate_recovery_inputs(
             execution.inputs,
             expected_dataset_version=expected_dataset_version,
         )
-    elif workflow_name == _FULL_RUN_WORKFLOW:
+    elif workflow_name in _FULL_RUN_WORKFLOWS:
         validate_full_run_inputs(
             execution.inputs,
             expected_dataset=expected_dataset,
