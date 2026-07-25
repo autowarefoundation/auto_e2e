@@ -18,7 +18,7 @@ import type {
   ScreenPoint,
   ScreenRibbon,
 } from "@/lib/projection";
-import { camLabel, gridDimensions, rigCam } from "@/lib/rig";
+import { camLabel, displayAspectRatio, gridDimensions, rigCam } from "@/lib/rig";
 import { cn } from "@/lib/utils";
 import type { IndexSample } from "@/types";
 
@@ -159,6 +159,7 @@ function CanvasTile({
   predictionRibbons,
   groundTruthRibbons,
   className,
+  aspectRatio,
   onClick,
   selected = false,
 }: {
@@ -166,11 +167,14 @@ function CanvasTile({
   frame: number;
   cam: string;
   label: string;
-  ordinal?: number; // 1-based badge matching the "1-7" focus shortcut
+  ordinal?: number; // 1-based badge matching the number-key focus shortcut
   predictionPaths?: ScreenPoint[][];
   predictionRibbons?: ScreenRibbon[];
   groundTruthRibbons?: ScreenRibbon[];
   className?: string;
+  // width/height the tile frame reserves; matches the packed image so there is
+  // no letterbox gap. Omit to keep the CSS-class-driven ratio.
+  aspectRatio?: number;
   onClick: () => void;
   selected?: boolean;
 }) {
@@ -269,6 +273,7 @@ function CanvasTile({
         "relative block overflow-hidden rounded-md border border-slate-800 bg-slate-900 p-0 text-left transition-colors hover:border-slate-500 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-slate-300",
         className,
       )}
+      style={aspectRatio ? { aspectRatio } : undefined}
       onClick={onClick}
       aria-label={`${label} camera`}
       aria-pressed={selected}
@@ -389,6 +394,9 @@ export function CameraMosaic({
   const hasGroundTruth = Object.values(groundTruthRibbons ?? {}).some(
     (ribbons) => ribbons.length > 0,
   );
+  // Tile frame shape for this dataset (KITScenes is 256x256 square; others 16:9)
+  // so the frame matches the packed image with no letterbox gap.
+  const aspectRatio = displayAspectRatio(dataset);
   if (mode === "focus") {
     const focusedIdx = Math.min(Math.max(focusCam, 0), cams.length - 1);
     const focused = cams[focusedIdx];
@@ -407,7 +415,8 @@ export function CameraMosaic({
             predictionPaths={predictionPaths?.[focused]}
             predictionRibbons={predictionRibbons?.[focused]}
             groundTruthRibbons={groundTruthRibbons?.[focused]}
-            className="aspect-video w-full"
+            className="w-full"
+            aspectRatio={aspectRatio}
             onClick={onToggleFocus}
             selected
           />
@@ -438,9 +447,10 @@ export function CameraMosaic({
               predictionRibbons={predictionRibbons?.[cam]}
               groundTruthRibbons={groundTruthRibbons?.[cam]}
               className={cn(
-                "aspect-video min-w-28 basis-28 shrink-0 grow",
+                "min-w-28 basis-28 shrink-0 grow",
                 cam === focused && "ring-1 ring-blue-500",
               )}
+              aspectRatio={aspectRatio}
               onClick={() => onSelectCam(i)}
               selected={cam === focused}
             />
@@ -493,7 +503,8 @@ export function CameraMosaic({
                 predictionPaths={predictionPaths?.[cam]}
                 predictionRibbons={predictionRibbons?.[cam]}
                 groundTruthRibbons={groundTruthRibbons?.[cam]}
-                className="aspect-video w-full"
+                className="w-full"
+                aspectRatio={aspectRatio}
                 onClick={() => onSelectCam(i)}
                 selected={false}
               />

@@ -8,7 +8,7 @@
 //   ArrowLeft/Right  step one frame
 //   , / .        step one frame back/forward
 //   [ / - and ] / +  slower/faster
-//   1-7          focus camera n
+//   1-N          focus camera n (N = displayed camera count)
 //   f            toggle focus/grid
 //   Esc          back to grid
 
@@ -48,6 +48,7 @@ import {
   listShardOverlayModels,
 } from "@/lib/api";
 import { FrameStore } from "@/lib/frame-store";
+import { isHiddenCam } from "@/lib/rig";
 import {
   decodeEgo,
   integrateInterleavedControl,
@@ -187,8 +188,9 @@ export function EpisodePlayer({
     return Object.keys(first.members)
       .filter((m) => m.match(/^cam_\d+\.jpg$/))
       .map((m) => m.replace(/\.jpg$/, ""))
+      .filter((cam) => !isHiddenCam(dataset, cam))
       .sort();
-  }, [index]);
+  }, [index, dataset]);
 
   const [overlayModels, setOverlayModels] = useState<OverlayModel[]>([]);
   const [selectedModelID, setSelectedModelID] = useState(
@@ -615,8 +617,10 @@ export function EpisodePlayer({
           setMode("grid");
           break;
         default: {
+          // Number keys focus the nth displayed camera (1-based). Cap by the
+          // actual camera count so a hidden/absent camera has no dead key.
           const n = parseInt(e.key, 10);
-          if (n >= 1 && n <= 7) {
+          if (n >= 1 && n <= Math.min(9, cams.length)) {
             e.preventDefault();
             focusCamera(n - 1);
           }
@@ -625,7 +629,7 @@ export function EpisodePlayer({
     }
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [toggle, step, setSpeed, speed, focusCamera, dismissHint]);
+  }, [toggle, step, setSpeed, speed, focusCamera, dismissHint, cams.length]);
 
   if (!store || cams.length === 0) {
     return (
@@ -644,7 +648,7 @@ export function EpisodePlayer({
       ref={containerRef}
       tabIndex={0}
       className="space-y-4 outline-none focus-visible:ring-1 focus-visible:ring-slate-600 rounded-lg"
-      aria-label="Episode player (keyboard: space, arrows, 1-7, f, ? for help)"
+      aria-label={`Episode player (keyboard: space, arrows, 1-${Math.min(9, cams.length)}, f, ? for help)`}
     >
       <OverlaySelectionBar
         models={overlayModels}
@@ -888,7 +892,10 @@ export function EpisodePlayer({
               ["→ / .", "step forward one frame"],
               ["[ / -", "slower"],
               ["] / +", "faster"],
-              ["1 - 7", "focus camera n"],
+              [
+                cams.length > 1 ? `1 - ${Math.min(9, cams.length)}` : "1",
+                "focus camera n",
+              ],
               ["f", "toggle focus / grid"],
               ["Esc", "back to grid"],
               ["?", "toggle this help"],
