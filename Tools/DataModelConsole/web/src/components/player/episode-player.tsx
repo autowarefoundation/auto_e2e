@@ -675,7 +675,7 @@ export function EpisodePlayer({
       ref={containerRef}
       tabIndex={0}
       className="space-y-4 outline-none focus-visible:ring-1 focus-visible:ring-slate-600 rounded-lg"
-      aria-label="Episode player (keyboard: space, arrows, 1-7, f, ? for help)"
+      aria-label={`Episode player (keyboard: space, arrows, 1-${Math.min(9, cams.length)}, f, ? for help)`}
     >
       <OverlaySelectionBar
         models={overlayModels}
