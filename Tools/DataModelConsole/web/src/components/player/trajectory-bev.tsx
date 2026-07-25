@@ -27,6 +27,7 @@ export function TrajectoryBEV({
   frame,
   fps = 10,
   reasoning,
+  labelIsAnchorFrame = false,
   predictionTrajectories = [],
   medianPrediction = [],
   curvatureSign = 1,
@@ -34,10 +35,15 @@ export function TrajectoryBEV({
   samples: IndexSample[];
   frame: number;
   fps?: number;
-  // Reasoning label for the current frame (when loaded). Its horizons are
-  // pinned onto the plan path at the matching rollout step so the reasoning
-  // cards and the geometry line up in time.
+  // Reasoning label to describe. Under carry-forward it may be a label anchored
+  // on an EARLIER frame than the one on screen; its horizons are relative to
+  // that anchor's own pose/plan, so they can only be pinned onto this frame's
+  // plan when the anchor IS the current frame (labelIsAnchorFrame).
   reasoning?: ReasoningLabelRecord | null;
+  // True only when the displayed label's anchor === the current frame. The
+  // t+Ns horizon dots are drawn onto `traj` (this frame's plan), which is
+  // correct geometry solely on the anchor frame; otherwise they are suppressed.
+  labelIsAnchorFrame?: boolean;
   predictionTrajectories?: TrajectoryPoint[][];
   medianPrediction?: TrajectoryPoint[];
   curvatureSign?: 1 | -1;
@@ -192,7 +198,12 @@ export function TrajectoryBEV({
   // (step = round(t*fps)) sits at traj[step-1]; t=0 is the ego origin. Using
   // traj[step] would place every dot one 10Hz step (+0.1s) too far ahead.
   const horizonDots = useMemo(() => {
-    if (!reasoning?.horizons?.length) return [];
+    // Only pin dots when the label's anchor is THIS frame. traj is the current
+    // frame's plan; a carried-forward label from an earlier anchor described a
+    // different pose/plan, so placing its t+Ns markers here would invent
+    // waypoints neither frame predicted. On non-anchor frames the panel's
+    // "carried · t+X.Xs" indicator conveys the label instead.
+    if (!labelIsAnchorFrame || !reasoning?.horizons?.length) return [];
     const out: { x: number; y: number; sec: number }[] = [];
     for (const h of reasoning.horizons) {
       const step = Math.round(h.horizon_sec * (fps || 10));
@@ -203,7 +214,7 @@ export function TrajectoryBEV({
     return out;
     // sx/sy derive from scale/cx/cy; traj + reasoning + fps drive the result.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [reasoning, traj, fps, scale]);
+  }, [reasoning, labelIsAnchorFrame, traj, fps, scale]);
 
   const speed = samples[frame]?.ego_now?.[0] ?? 0;
   // planSec is the plan horizon; the amber realized path is clipped to the same
