@@ -5,10 +5,13 @@ from __future__ import annotations
 import math
 
 import numpy as np
+import pytest
 
 from evaluation.navigation_metrics import (
+    NAVIGATION_COMPARISON_VERSION,
     NAVIGATION_EVALUATION_VERSION,
     ROUTE_QUALITY_FIELDS,
+    compare_navigation_records,
     navigation_sample_metrics,
     route_swap_sample_metrics,
     summarize_navigation_metrics,
@@ -45,6 +48,27 @@ def _raster_for_path(path):
         dtype=np.float32,
     )
     return route, maps
+
+
+def _comparison_records(
+    count,
+    *,
+    ade,
+    fde,
+    wrong_branch,
+):
+    return [
+        {
+            "sample_uid": f"sample-{index:03d}",
+            "ade_m": ade,
+            "fde_m": fde,
+            "route_valid": True,
+            "junction": True,
+            "maneuver": "left",
+            "wrong_branch": wrong_branch,
+        }
+        for index in range(count)
+    ]
 
 
 def test_navigation_metrics_detect_wrong_branch_and_destination_error():
@@ -209,3 +233,115 @@ def test_route_swap_metrics_measure_reactive_path_change():
         ]["mean"]
         == 1.0
     )
+
+
+def test_paired_comparison_supports_route_gain_within_guardrails():
+    baseline = _comparison_records(
+        40,
+        ade=1.0,
+        fde=2.0,
+        wrong_branch=1.0,
+    )
+    conditioned = _comparison_records(
+        40,
+        ade=1.01,
+        fde=2.02,
+        wrong_branch=0.0,
+    )
+
+    first = compare_navigation_records(
+        conditioned,
+        baseline,
+        bootstrap_seed=11,
+        bootstrap_resamples=50,
+    )
+    second = compare_navigation_records(
+        conditioned,
+        baseline,
+        bootstrap_seed=11,
+        bootstrap_resamples=50,
+    )
+
+    assert first == second
+    assert first["schema_version"] == NAVIGATION_COMPARISON_VERSION
+    assert first["decision"]["verdict"] == "supported"
+    assert first["primary_metric"]["count"] == 40
+    assert first["primary_metric"]["difference_ci95"] == [-1.0, -1.0]
+    assert (
+        first["aggregate_guardrails"]["ade_m"][
+            "relative_regression"
+        ]
+        == pytest.approx(0.01)
+    )
+
+
+def test_paired_comparison_rejects_aggregate_regression():
+    baseline = _comparison_records(
+        40,
+        ade=1.0,
+        fde=2.0,
+        wrong_branch=1.0,
+    )
+    conditioned = _comparison_records(
+        40,
+        ade=1.03,
+        fde=2.0,
+        wrong_branch=0.0,
+    )
+
+    report = compare_navigation_records(
+        conditioned,
+        baseline,
+        bootstrap_resamples=20,
+    )
+
+    assert report["decision"]["verdict"] == "not_supported"
+    assert report["decision"]["primary_interval_below_zero"] is True
+    assert report["decision"]["aggregate_within_tolerance"] is False
+
+
+def test_paired_comparison_requires_thirty_primary_samples():
+    baseline = _comparison_records(
+        29,
+        ade=1.0,
+        fde=2.0,
+        wrong_branch=1.0,
+    )
+    conditioned = _comparison_records(
+        29,
+        ade=1.0,
+        fde=2.0,
+        wrong_branch=0.0,
+    )
+
+    report = compare_navigation_records(
+        conditioned,
+        baseline,
+        bootstrap_resamples=20,
+    )
+
+    assert report["decision"]["verdict"] == "inconclusive"
+    assert report["decision"]["has_enough_primary_evidence"] is False
+
+
+def test_paired_comparison_rejects_sample_identity_drift():
+    baseline = _comparison_records(
+        30,
+        ade=1.0,
+        fde=2.0,
+        wrong_branch=1.0,
+    )
+    conditioned = _comparison_records(
+        30,
+        ade=1.0,
+        fde=2.0,
+        wrong_branch=0.0,
+    )
+    conditioned[-1]["sample_uid"] = "different-sample"
+
+    with pytest.raises(ValueError, match="sample identities differ"):
+        compare_navigation_records(
+            conditioned,
+            baseline,
+            bootstrap_resamples=20,
+        )
