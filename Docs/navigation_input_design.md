@@ -933,9 +933,9 @@ lower is better. The route-conditioned model supports the initial hypothesis
 only when the paired bootstrap 95% confidence interval for
 `conditioned - baseline` is entirely below zero and neither aggregate ADE nor
 aggregate FDE regresses by more than 2.0% relative to the controlled baseline.
-If the eligible junction count is too small to establish the interval, the
-result is inconclusive rather than positive. These gates are fixed before the
-full route-conditioned result is inspected.
+At least 30 paired eligible junction samples are required. A smaller eligible
+count makes the result inconclusive rather than positive. These gates are fixed
+before the full route-conditioned result is inspected.
 
 ### 14.2 Metrics
 
