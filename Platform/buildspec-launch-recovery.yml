@@ -6,7 +6,8 @@ version: 0.2
 # Required start-build overrides:
 #   ARTIFACT_SET_SHA256
 # Optional:
-#   RECOVERY_MANIFEST_URI, IMAGE_TAG, EPOCHS, RESUME_FROM
+#   RECOVERY_MANIFEST_URI, IMAGE_TAG, EPOCHS, TRAINING_SEED,
+#   ENABLE_ROUTE_CONDITIONING, RESUME_FROM
 
 env:
   shell: bash
@@ -22,6 +23,8 @@ env:
     BATCH_SIZE: "1"
     GRAD_ACCUM_STEPS: "4"
     LR: "1e-4"
+    TRAINING_SEED: "149"
+    ENABLE_ROUTE_CONDITIONING: "true"
     VAL_FRACTION: "0.1"
     NUM_WORKERS: "4"
     EARLY_STOPPING_PATIENCE: "3"
@@ -81,6 +84,8 @@ phases:
           --batch_size "${BATCH_SIZE}"
           --grad_accum_steps "${GRAD_ACCUM_STEPS}"
           --lr "${LR}"
+          --training_seed "${TRAINING_SEED}"
+          --enable_route_conditioning "${ENABLE_ROUTE_CONDITIONING}"
           --val_fraction "${VAL_FRACTION}"
           --num_workers "${NUM_WORKERS}"
           --early_stopping_patience "${EARLY_STOPPING_PATIENCE}"
