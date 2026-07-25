@@ -906,6 +906,12 @@ budget, and evaluation code for:
 2. map + Reactive-only route conditioning with production raster/warp
    semantics.
 
+The v3.0 split manifest inherits the exact scene, sample UID, and train/dev
+membership inventory from the frozen v2.2 manifest and pins that parent by
+SHA-256. It independently fixes the v3.0 packed-contract digest, so the
+comparison preserves benchmark membership without accepting legacy shards as
+navigation inputs.
+
 The legacy checkpoint remains a continuity reference, but it is not the
 controlled baseline because the dataset, semantic map contract, and geometry
 have changed. This is not a separate benchmark track. Results are added to the
