@@ -53,16 +53,20 @@ const L2D_RIG: Record<string, RigCam> = {
   cam_6: { label: "map", row: 1, col: 1 },
 };
 
-// Four columns keep both forward-facing cameras visible without occupying the
-// ego cell. The surround ring still reads left-to-right around the vehicle.
+// Six distinct cameras in a bird's-eye 3-col x 2-row grid: the forward row on
+// top, the rear row on the bottom, left cameras on the left. cam_1 (ring_front)
+// is hidden (see HIDDEN_CAMS) because it points the same way as cam_0
+// (base_front_center) and covers essentially the same FOV. With all six cells
+// filled there is no free centre cell, so the ego readout tile is omitted.
+//   (1,1) front-left    (1,2) front-center  (1,3) front-right
+//   (2,1) rear-left     (2,2) rear          (2,3) rear-right
 const KITSCENES_RIG: Record<string, RigCam> = {
   cam_0: { label: "front-center", row: 1, col: 2 },
-  cam_1: { label: "ring-front", row: 1, col: 3 },
   cam_2: { label: "front-left", row: 1, col: 1 },
-  cam_3: { label: "front-right", row: 1, col: 4 },
-  cam_4: { label: "rear", row: 3, col: 2 },
-  cam_5: { label: "rear-left", row: 3, col: 1 },
-  cam_6: { label: "rear-right", row: 3, col: 4 },
+  cam_3: { label: "front-right", row: 1, col: 3 },
+  cam_4: { label: "rear", row: 2, col: 2 },
+  cam_5: { label: "rear-left", row: 2, col: 1 },
+  cam_6: { label: "rear-right", row: 2, col: 3 },
 };
 
 const RIGS: Record<string, Record<string, RigCam>> = {
@@ -70,6 +74,22 @@ const RIGS: Record<string, Record<string, RigCam>> = {
   l2d: L2D_RIG,
   kitscenes: KITSCENES_RIG,
 };
+
+// Cameras that are packed in the shard but the console intentionally does not
+// display. KITScenes cam_1 (ring_front) duplicates cam_0 (base_front_center) —
+// same heading, essentially the same field of view — so it is the redundant
+// camera the model itself dropped (kit_scenes/camera.py, #146). Hiding it in the
+// viewer leaves the six distinct views for a clean 3x2 grid.
+const HIDDEN_CAMS: Record<string, Set<string>> = {
+  kitscenes: new Set(["cam_1"]),
+};
+
+// isHiddenCam reports whether a shard camera member should be omitted from the
+// mosaic for a dataset. Filtering happens on the displayed camera list, so the
+// hidden camera never claims a grid cell, a focus slot, or a keyboard ordinal.
+export function isHiddenCam(dataset: string, cam: string): boolean {
+  return HIDDEN_CAMS[dataset]?.has(cam) ?? false;
+}
 
 // rigCam returns the rig position + grid cell for a "cam_N" identifier.
 // Falls back to a sequential cell + the raw id for unknown datasets/cameras.
@@ -85,14 +105,31 @@ export function camLabel(dataset: string, cam: string): string {
   return RIGS[dataset]?.[cam]?.label ?? cam;
 }
 
+// displayAspectRatio is the width/height a camera tile should reserve for a
+// dataset, so the frame matches the packed image and there is no letterbox gap.
+// KITScenes cameras are packed 256x256 (1:1); the default 16:9 is kept for the
+// other datasets to avoid changing their existing layout. The canvas still
+// object-contain-fits the real bitmap, so a stray off-ratio image is letterboxed
+// rather than stretched — this only sets the frame's shape.
+const DATASET_ASPECT_RATIO: Record<string, number> = {
+  kitscenes: 1,
+};
+export function displayAspectRatio(dataset: string): number {
+  return DATASET_ASPECT_RATIO[dataset] ?? 16 / 9;
+}
+
 // gridDimensions returns the number of rows/cols spanned by a dataset's rig,
-// so the mosaic can size its CSS grid. Defaults to 3x3.
+// so the mosaic can size its CSS grid. It is the exact extent of the cameras'
+// placed cells (min 1x1) — NOT floored to 3x3. A rig that only spans 2 rows
+// (KITScenes: forward + rear) must report rows=2, or the grid emits a phantom
+// empty third row AND the ego cell lands in row 2 (ceil(3/2)) on top of a
+// camera. `cams` should already be the DISPLAYED set (hidden cams filtered).
 export function gridDimensions(dataset: string, cams: string[]): {
   rows: number;
   cols: number;
 } {
-  let rows = 3;
-  let cols = 3;
+  let rows = 1;
+  let cols = 1;
   cams.forEach((cam, i) => {
     const c = rigCam(dataset, cam, i);
     rows = Math.max(rows, c.row);
