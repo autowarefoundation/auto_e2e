@@ -172,6 +172,10 @@ func main() {
 			r.Use(middleware.Throttle(64))
 			r.Use(middleware.Timeout(30 * time.Second))
 			r.Get("/datasets/{name}/shards/{shard}/samples/{key}/image/{cam}", datasetsH.GetImage)
+			r.Get(
+				"/datasets/{name}/shards/{shard}/samples/{key}/navigation-map",
+				datasetsH.GetNavigationMap,
+			)
 			// Windowed multi-member range read: the player fetches one
 			// contiguous span covering a whole window of frames and slices the
 			// JPEGs client-side, so it belongs with the image reads (bounded S3
