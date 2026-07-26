@@ -900,7 +900,6 @@ function ExperimentsPageInner() {
   const [search, setSearch] = useState("");
   const [dataset, setDataset] = useState("all");
   const [version, setVersion] = useState("all");
-  const [scope, setScope] = useState("all");
   const [status, setStatus] = useState("all");
   const [period, setPeriod] = useState("all");
   const [trendMetric, setTrendMetric] = useState<MetricKey>("ade");
@@ -909,7 +908,13 @@ function ExperimentsPageInner() {
   const router = useRouter();
   const pathname = usePathname();
   const searchParams = useSearchParams();
-  const records = useMemo(() => data?.experiments ?? [], [data]);
+  const records = useMemo(
+    () =>
+      (data?.experiments ?? []).filter(
+        (record) => record.validation_scope === "full",
+      ),
+    [data],
+  );
 
   const datasets = useMemo(
     () => [...new Set(records.map((record) => record.dataset).filter(Boolean))].sort(),
@@ -932,7 +937,6 @@ function ExperimentsPageInner() {
     return records.filter((record) => {
       if (dataset !== "all" && record.dataset !== dataset) return false;
       if (version !== "all" && record.dataset_version !== version) return false;
-      if (scope !== "all" && (record.validation_scope || "unknown") !== scope) return false;
       if (status === "unlinked" && record.lineage_status === "complete") return false;
       if (status !== "all" && status !== "unlinked" && statusCategory(record) !== status) return false;
       if (period !== "all") {
@@ -953,7 +957,7 @@ function ExperimentsPageInner() {
         .filter(Boolean)
         .some((value) => value?.toLowerCase().includes(needle));
     });
-  }, [dataset, period, records, scope, search, status, version]);
+  }, [dataset, period, records, search, status, version]);
 
   const selectedRecord =
     records.find((record) => record.run_id === searchParams.get("run")) ?? null;
@@ -998,7 +1002,6 @@ function ExperimentsPageInner() {
     setSearch("");
     setDataset("all");
     setVersion("all");
-    setScope("all");
     setStatus("all");
     setPeriod("all");
   };
@@ -1093,17 +1096,6 @@ function ExperimentsPageInner() {
               {value}
             </option>
           ))}
-        </select>
-        <select
-          value={scope}
-          onChange={(event) => setScope(event.target.value)}
-          aria-label="Filter by validation scope"
-          className={SELECT_CLASS}
-        >
-          <option value="all">All scopes</option>
-          <option value="full">Full</option>
-          <option value="subset">Smoke</option>
-          <option value="unknown">Unknown scope</option>
         </select>
         <select
           value={status}
