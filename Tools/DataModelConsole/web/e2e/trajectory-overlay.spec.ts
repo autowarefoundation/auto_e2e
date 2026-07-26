@@ -448,6 +448,32 @@ test("trajectory overlays and geographic views honor production contracts", asyn
     "/scenes/kitscenes/train-000000.tar/0?version=v2.1",
     { waitUntil: "networkidle" },
   );
+  const playbackControls = page.getByRole("region", {
+    name: "Playback controls",
+  });
+  await expect(
+    playbackControls.getByRole("slider", { name: "Timeline" }),
+  ).toBeVisible();
+  await expect(
+    playbackControls.getByRole("button", { name: "Play", exact: true }),
+  ).toBeVisible();
+  const playbackPrecedesCameras = await page
+    .locator('[aria-label^="Episode player"]')
+    .evaluate((player) => {
+      const controls = player.querySelector(
+        '[aria-label="Playback controls"]',
+      );
+      const camera = player.querySelector(
+        'button[aria-label$=" camera"]',
+      );
+      return Boolean(
+        controls &&
+          camera &&
+          controls.compareDocumentPosition(camera) &
+            Node.DOCUMENT_POSITION_FOLLOWING,
+      );
+    });
+  expect(playbackPrecedesCameras).toBe(true);
   await expect(page.locator("#trajectory-model")).toHaveValue(MODEL_ID);
   await expect(page.getByText("3 seeds | median")).toBeVisible();
   await expect(page.getByText("episode/clip hold-out")).toBeVisible();
