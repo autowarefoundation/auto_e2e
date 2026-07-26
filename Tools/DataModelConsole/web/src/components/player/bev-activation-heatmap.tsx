@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef } from "react";
 
 import {
   BEV_HEATMAP_NAMES,
@@ -40,23 +40,17 @@ function heatColor(value: number): [number, number, number] {
   ];
 }
 
-export function BEVActivationHeatmap({
+function HeatmapTile({
+  name,
   overlay,
   row,
 }: {
-  overlay: OverlayArtifact | null;
-  row: number | undefined;
+  name: BEVHeatmapName;
+  overlay: OverlayArtifact;
+  row: number;
 }) {
-  const [mode, setMode] = useState<BEVHeatmapName>("fused");
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const availableNames =
-    overlay && overlay.bevHeatmapNames.length > 0
-      ? overlay.bevHeatmapNames
-      : BEV_HEATMAP_NAMES;
-  const heatmap =
-    overlay && row !== undefined
-      ? bevHeatmapForRow(overlay, row, mode)
-      : null;
+  const heatmap = bevHeatmapForRow(overlay, row, name);
   const statistics = heatmap
     ? heatmap.values.reduce(
         (result, value) => ({
@@ -74,14 +68,6 @@ export function BEVActivationHeatmap({
     statistics && heatmap
       ? (statistics.peak / 255) * heatmap.scale
       : null;
-
-  useEffect(() => {
-    if (!availableNames.includes(mode)) {
-      setMode(
-        availableNames.includes("fused") ? "fused" : availableNames[0],
-      );
-    }
-  }, [availableNames, mode]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -107,74 +93,92 @@ export function BEVActivationHeatmap({
   }, [heatmap]);
 
   return (
-    <section
+    <figure
       className="rounded-md border border-slate-800 bg-slate-950 p-2"
-      aria-label="BEV activation heatmap"
+      aria-label={`${LABELS[name]} activation`}
     >
-      <div className="mb-2 flex items-start justify-between gap-2">
-        <h3 className="text-xs font-medium text-slate-200">
-          Encoder diagnostics
-        </h3>
-        <div className="text-right font-mono text-[9px] leading-3 text-slate-500">
-          {heatmap && meanRMS !== null && peakRMS !== null ? (
+      <figcaption className="mb-2 flex min-h-8 items-start justify-between gap-2">
+        <span className="text-xs font-medium text-slate-200">
+          {LABELS[name]}
+        </span>
+        <span className="text-right font-mono text-[9px] leading-3 text-slate-500">
+          {meanRMS !== null && peakRMS !== null ? (
             <>
-              <div>mean {meanRMS.toPrecision(3)} RMS</div>
-              <div>
-                peak {peakRMS.toPrecision(3)} / shared{" "}
-                {heatmap.scale.toPrecision(3)}
-              </div>
+              mean {meanRMS.toPrecision(3)}
+              <br />
+              peak {peakRMS.toPrecision(3)}
             </>
           ) : (
             "unavailable"
           )}
+        </span>
+      </figcaption>
+      <div className="grid grid-cols-[14px_1fr] grid-rows-[1fr_14px]">
+        <span className="flex items-center text-[9px] text-slate-500 [writing-mode:vertical-rl]">
+          +X forward
+        </span>
+        <div className="relative aspect-square overflow-hidden border border-slate-800 bg-slate-950">
+          <canvas
+            ref={canvasRef}
+            width={BEV_HEATMAP_SIZE}
+            height={BEV_HEATMAP_SIZE}
+            className="size-full [image-rendering:pixelated]"
+          />
+          <span
+            className="absolute left-1/2 top-2/3 block size-2 -translate-x-1/2 -translate-y-1/2 rotate-45 border-l border-t border-white"
+            aria-hidden="true"
+          />
         </div>
+        <span />
+        <span className="text-center text-[9px] leading-[14px] text-slate-500">
+          +Y left
+        </span>
       </div>
-      <div
-        role="tablist"
-        aria-label="BEV encoder output"
-        className="mb-2 grid grid-cols-3 rounded border border-slate-800 bg-slate-900 p-0.5"
-      >
-        {availableNames.map((name) => (
-          <button
-            key={name}
-            type="button"
-            role="tab"
-            aria-selected={mode === name}
-            onClick={() => setMode(name)}
-            className={
-              mode === name
-                ? "h-7 rounded-sm bg-slate-700 px-1 text-[9px] text-white"
-                : "h-7 rounded-sm px-1 text-[9px] text-slate-400 hover:text-slate-200"
-            }
-          >
-            {LABELS[name]}
-          </button>
-        ))}
+    </figure>
+  );
+}
+
+export function BEVActivationHeatmap({
+  overlay,
+  row,
+}: {
+  overlay: OverlayArtifact | null;
+  row: number | undefined;
+}) {
+  const availableNames =
+    overlay && overlay.bevHeatmapNames.length > 0
+      ? overlay.bevHeatmapNames
+      : BEV_HEATMAP_NAMES;
+  const sharedScale =
+    overlay && row !== undefined && overlay.bevHeatmapScales
+      ? overlay.bevHeatmapScales[row]
+      : null;
+
+  return (
+    <section className="space-y-2" aria-label="BEV activation heatmap">
+      <div className="flex items-end justify-between gap-3">
+        <h3 className="text-sm font-medium text-slate-200">
+          Encoder diagnostics
+        </h3>
+        <span className="font-mono text-[10px] text-slate-500">
+          {sharedScale !== null
+            ? `shared ${sharedScale.toPrecision(3)} RMS`
+            : "unavailable"}
+        </span>
       </div>
-      {heatmap ? (
-        <div className="grid grid-cols-[14px_1fr] grid-rows-[1fr_14px]">
-          <span className="flex items-center text-[9px] text-slate-500 [writing-mode:vertical-rl]">
-            +X forward
-          </span>
-          <div className="relative aspect-square overflow-hidden border border-slate-800 bg-slate-950">
-            <canvas
-              ref={canvasRef}
-              width={BEV_HEATMAP_SIZE}
-              height={BEV_HEATMAP_SIZE}
-              className="size-full [image-rendering:pixelated]"
+      {overlay && row !== undefined && overlay.bevHeatmaps ? (
+        <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+          {availableNames.map((name) => (
+            <HeatmapTile
+              key={name}
+              name={name}
+              overlay={overlay}
+              row={row}
             />
-            <span
-              className="absolute left-1/2 top-2/3 block size-2 -translate-x-1/2 -translate-y-1/2 rotate-45 border-l border-t border-white"
-              aria-hidden="true"
-            />
-          </div>
-          <span />
-          <span className="text-center text-[9px] leading-[14px] text-slate-500">
-            +Y left
-          </span>
+          ))}
         </div>
       ) : (
-        <div className="flex aspect-square items-center justify-center border border-dashed border-slate-800 px-5 text-center text-xs text-slate-500">
+        <div className="flex min-h-32 items-center justify-center rounded-md border border-dashed border-slate-800 px-5 text-center text-xs text-slate-500">
           No encoder diagnostics for this model.
         </div>
       )}
