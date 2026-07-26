@@ -7608,10 +7608,10 @@ def wf_recovered_kitscenes_full_run(
     training_seed: int = 149,
     enable_route_conditioning: bool = True,
     training_objective_version: str = (
-        KITSCENES_NAVIGATION_OBJECTIVE_VERSION
+        ROLLOUT_ALIGNED_OBJECTIVE_VERSION
     ),
-    enable_junction_sampling: bool = True,
-    enable_route_consistency: bool = True,
+    enable_junction_sampling: bool = False,
+    enable_route_consistency: bool = False,
     route_consistency_weight: float = 0.10,
     reconstruction_audit: Optional[FlyteFile] = None,
     reconstruction_audit_decision: str = "",
