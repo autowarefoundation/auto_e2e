@@ -399,21 +399,12 @@ test("trajectory overlays and geographic views honor production contracts", asyn
     name: "BEV activation heatmap",
   });
   await expect(heatmap).toContainText("shared 2.00");
-  await expect(heatmap.getByRole("tab")).toHaveCount(6);
-  const heatmapCanvas = heatmap.locator("canvas");
-  const heatmapSnapshot = () =>
-    heatmapCanvas.evaluate((canvas) =>
-      (canvas as HTMLCanvasElement).toDataURL(),
-    );
-  const fusedHeatmap = await heatmapSnapshot();
-  await heatmap.getByRole("tab", { name: "Map only" }).click();
-  await expect.poll(heatmapSnapshot).not.toBe(fusedHeatmap);
-  const mapHeatmap = await heatmapSnapshot();
-  await heatmap.getByRole("tab", { name: "Route delta" }).click();
-  await expect.poll(heatmapSnapshot).not.toBe(mapHeatmap);
-  await heatmap.getByRole("tab", { name: "Camera" }).click();
-  await expect.poll(heatmapSnapshot).not.toBe(fusedHeatmap);
-  await heatmap.getByRole("tab", { name: "Fused" }).click();
+  const heatmapCanvases = heatmap.locator("canvas");
+  await expect(heatmapCanvases).toHaveCount(6);
+  const heatmapSnapshots = await heatmapCanvases.evaluateAll((canvases) =>
+    canvases.map((canvas) => (canvas as HTMLCanvasElement).toDataURL()),
+  );
+  expect(new Set(heatmapSnapshots).size).toBe(6);
   expect(rigRequestPath).toBe(
     "/api/v1/datasets/kitscenes/shards/train-000000.tar/rig-projection",
   );
@@ -527,7 +518,7 @@ test("trajectory overlays and geographic views honor production contracts", asyn
   await page.setViewportSize({ width: 390, height: 844 });
   await expect(page.getByText("Scene map")).toBeVisible();
   await expect(navigationMap.getByRole("img")).toBeVisible();
-  await expect(heatmapCanvas).toBeVisible();
+  await expect(heatmapCanvases.first()).toBeVisible();
   const overflow = await page.evaluate(
     () => document.documentElement.scrollWidth - window.innerWidth,
   );
