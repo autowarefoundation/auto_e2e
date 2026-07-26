@@ -39,6 +39,7 @@ import {
 import { cn } from "@/lib/utils";
 import type {
   ExperimentDisplacementMetrics,
+  ExperimentExecution,
   ExperimentRecord,
   FlytePhase,
 } from "@/types";
@@ -123,7 +124,12 @@ function Results({ record, compact = false }: { record: ExperimentRecord; compac
     return <span className="text-xs text-slate-500">Metrics pending</span>;
   }
   return (
-    <div className={cn("grid grid-cols-[auto_1fr_1fr] items-center gap-x-2", compact && "w-full")}>
+    <div
+      className={cn(
+        "grid grid-cols-[auto_1fr_1fr_auto] items-center gap-x-2",
+        compact && "w-full",
+      )}
+    >
       <span
         className={cn(
           "rounded-sm border px-1 py-0.5 font-mono text-[9px]",
@@ -142,6 +148,18 @@ function Results({ record, compact = false }: { record: ExperimentRecord; compac
         <span className="mr-1 text-[9px] text-slate-500">FDE</span>
         {formatMeters(source.metrics.fde)}
       </span>
+      {source.label === "Eval" && source.metrics.gate_pass !== undefined ? (
+        <span
+          className={cn(
+            "font-mono text-[9px]",
+            source.metrics.gate_pass ? "text-emerald-400" : "text-rose-400",
+          )}
+        >
+          {source.metrics.gate_pass ? "PASS" : "FAIL"}
+        </span>
+      ) : (
+        <span />
+      )}
     </div>
   );
 }
@@ -177,7 +195,12 @@ function RunTitle({ record }: { record: ExperimentRecord }) {
         )}
       </div>
       <p className="mt-1 truncate text-[11px] text-slate-400">
-        {[record.backbone, record.epochs && `${record.epochs} epochs`, record.seed && `seed ${record.seed}`]
+        {[
+          record.backbone,
+          record.epochs && `${record.epochs} epochs`,
+          record.params["train/lr"] && `lr ${record.params["train/lr"]}`,
+          record.seed && `seed ${record.seed}`,
+        ]
           .filter(Boolean)
           .join(" · ") || record.run_name}
       </p>
@@ -415,9 +438,11 @@ function MetricTrend({
 
 function DetailPanel({
   record,
+  baseline,
   onClose,
 }: {
   record: ExperimentRecord | null;
+  baseline: ExperimentRecord | null;
   onClose: () => void;
 }) {
   const navigationMetrics = record
@@ -425,15 +450,30 @@ function DetailPanel({
         .filter(([key]) => key.startsWith("eval/navigation/"))
         .sort(([left], [right]) => left.localeCompare(right))
     : [];
-  const configRows = record
+  const configRows = record ? experimentConfigRows(record) : [];
+  const baselineRows = baseline ? new Map(experimentConfigRows(baseline)) : null;
+  const changedRows = baselineRows
+    ? configRows
+        .filter(([label, value]) => baselineRows.get(label) !== value)
+        .map(([label, value]) => [label, baselineRows.get(label) || "Not recorded", value])
+    : [];
+  const trainingImage = record
+    ? record.params["ctx/train_docker_image"] ||
+      record.tags["ctx/train_docker_image"]
+    : "";
+  const evaluationImage = record
+    ? record.params["ctx/eval_docker_image"] ||
+      record.tags["ctx/eval_docker_image"]
+    : "";
+  const checkpointRows = record
     ? [
-        ["Dataset", `${record.dataset}${record.dataset_version ? ` / ${record.dataset_version}` : ""}`],
-        ["Validation", [record.validation_scope, record.validation_split_id].filter(Boolean).join(" · ")],
-        ["Backbone", record.backbone],
-        ["Fusion", record.fusion_mode],
-        ["Route conditioning", record.route_conditioning === undefined ? "" : record.route_conditioning ? "On" : "Off"],
-        ["Epochs", record.epochs_completed || record.epochs],
-        ["Seed", record.seed],
+        ["Best checkpoint SHA", record.tags["best_checkpoint_sha256"]],
+        ["Final checkpoint SHA", record.tags["final_checkpoint_sha256"]],
+        [
+          "Evaluation checkpoint SHA",
+          record.tags["checkpoint_sha256"] ||
+            record.params["model/checkpoint_sha256"],
+        ],
       ].filter(([, value]) => value)
     : [];
 
@@ -478,6 +518,18 @@ function DetailPanel({
                       <p className="font-mono text-sm">
                         FDE {formatMeters(record.evaluation.fde)}
                       </p>
+                      {record.evaluation.gate_pass !== undefined && (
+                        <p
+                          className={cn(
+                            "mt-1 font-mono text-[10px]",
+                            record.evaluation.gate_pass
+                              ? "text-emerald-400"
+                              : "text-rose-400",
+                          )}
+                        >
+                          Quality gate {record.evaluation.gate_pass ? "PASS" : "FAIL"}
+                        </p>
+                      )}
                     </div>
                   )}
                   {record.validation && (
@@ -495,6 +547,65 @@ function DetailPanel({
                     <p className="col-span-2 text-sm text-slate-500">Metrics pending</p>
                   )}
                 </div>
+              </section>
+
+              <section className="border-t border-slate-800 py-5">
+                <h3 className="text-xs font-medium uppercase text-slate-500">What changed</h3>
+                {baseline ? (
+                  changedRows.length > 0 ? (
+                    <dl className="mt-3 divide-y divide-slate-800">
+                      {changedRows.map(([label, before, after]) => (
+                        <div
+                          key={label}
+                          className="grid grid-cols-[7rem_1fr] gap-3 py-2 text-xs"
+                        >
+                          <dt className="text-slate-500">{label}</dt>
+                          <dd className="min-w-0 font-mono text-slate-300">
+                            <span className="break-words text-slate-600">{before}</span>
+                            <span className="px-2 text-slate-600">to</span>
+                            <span className="break-words text-cyan-300">{after}</span>
+                          </dd>
+                        </div>
+                      ))}
+                    </dl>
+                  ) : (
+                    <p className="mt-3 text-xs text-slate-500">
+                      No tracked configuration changes from the previous comparable run.
+                    </p>
+                  )
+                ) : (
+                  <p className="mt-3 text-xs text-slate-500">
+                    First recorded run for this dataset fingerprint and validation split.
+                  </p>
+                )}
+              </section>
+
+              <section className="border-t border-slate-800 py-5">
+                <h3 className="text-xs font-medium uppercase text-slate-500">Pipeline</h3>
+                <div className="mt-3 space-y-2">
+                  <PipelineExecution
+                    label="Training pipeline"
+                    execution={record.train_execution}
+                    fallbackID={
+                      record.tags["ctx/train_execution_id"] ||
+                      record.params["ctx/train_execution_id"]
+                    }
+                  />
+                  <PipelineExecution
+                    label="Evaluation"
+                    execution={record.eval_execution}
+                    fallbackID={
+                      record.tags["ctx/eval_execution_id"] ||
+                      record.params["ctx/eval_execution_id"]
+                    }
+                  />
+                </div>
+                {record.train_execution && (
+                  <p className="mt-3 text-[10px] text-slate-500">
+                    Training workflow covers ingest, reasoning labels, processing, and model training.
+                    Open Flyte for node-level status and timing.
+                  </p>
+                )}
               </section>
 
               <section className="border-t border-slate-800 py-5">
@@ -548,6 +659,30 @@ function DetailPanel({
                       </dd>
                     </div>
                   )}
+                  {trainingImage && (
+                    <div>
+                      <dt className="text-slate-500">Training image</dt>
+                      <dd className="mt-1 break-all font-mono text-slate-300">
+                        {trainingImage}
+                      </dd>
+                    </div>
+                  )}
+                  {evaluationImage && (
+                    <div>
+                      <dt className="text-slate-500">Evaluation image</dt>
+                      <dd className="mt-1 break-all font-mono text-slate-300">
+                        {evaluationImage}
+                      </dd>
+                    </div>
+                  )}
+                  {checkpointRows.map(([label, value]) => (
+                    <div key={label}>
+                      <dt className="text-slate-500">{label}</dt>
+                      <dd className="mt-1 break-all font-mono text-slate-300">
+                        {value}
+                      </dd>
+                    </div>
+                  ))}
                   {record.model_versions.length > 0 && (
                     <div>
                       <dt className="text-slate-500">Registry versions</dt>
@@ -567,11 +702,90 @@ function DetailPanel({
                   )}
                 </dl>
               </section>
+
+              {record.mlflow_url && (
+                <section className="border-t border-slate-800 pt-5">
+                  <h3 className="text-xs font-medium uppercase text-slate-500">Artifacts</h3>
+                  <a
+                    href={record.mlflow_url}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="mt-3 inline-flex items-center gap-1.5 text-xs text-cyan-300 hover:text-cyan-200"
+                  >
+                    Open run artifacts in MLflow <ExternalLink className="size-3.5" />
+                  </a>
+                </section>
+              )}
             </>
           )}
         </Dialog.Popup>
       </Dialog.Portal>
     </Dialog.Root>
+  );
+}
+
+function experimentConfigRows(record: ExperimentRecord): [string, string][] {
+  const rows: Array<[string, string | undefined]> = [
+    [
+      "Dataset",
+      `${record.dataset}${record.dataset_version ? ` / ${record.dataset_version}` : ""}`,
+    ],
+    [
+      "Validation",
+      [record.validation_scope, record.validation_split_id]
+        .filter(Boolean)
+        .join(" · "),
+    ],
+    ["Backbone", record.backbone],
+    ["Fusion", record.fusion_mode],
+    [
+      "Route conditioning",
+      record.route_conditioning === undefined
+        ? undefined
+        : record.route_conditioning
+          ? "On"
+          : "Off",
+    ],
+    ["Epochs", record.epochs_completed || record.epochs],
+    ["Learning rate", record.params["train/lr"]],
+    ["Batch size", record.params["train/batch_size"]],
+    ["Weight decay", record.params["train/weight_decay"]],
+    ["Seed", record.seed],
+  ];
+  return rows.filter((row): row is [string, string] => Boolean(row[1]));
+}
+
+function PipelineExecution({
+  label,
+  execution,
+  fallbackID,
+}: {
+  label: string;
+  execution?: ExperimentExecution;
+  fallbackID?: string;
+}) {
+  return (
+    <div className="grid grid-cols-[7rem_1fr_auto] items-center gap-3 border-b border-slate-800 py-2 text-xs">
+      <span className="text-slate-500">{label}</span>
+      <span className="min-w-0">
+        <span className="block truncate font-mono text-slate-300">
+          {execution?.workflow_name || fallbackID || "Not linked"}
+        </span>
+        {execution?.duration_s ? (
+          <span className="font-mono text-[10px] text-slate-600">
+            {execution.duration_s}s
+          </span>
+        ) : null}
+      </span>
+      {execution?.phase ? (
+        <StatusBadge
+          label={execution.phase}
+          tone={flytePhaseTone(execution.phase as FlytePhase)}
+        />
+      ) : (
+        <span className="text-[10px] text-slate-600">UNKNOWN</span>
+      )}
+    </div>
   );
 }
 
@@ -740,6 +954,19 @@ function ExperimentsPageInner() {
 
   const selectedRecord =
     records.find((record) => record.run_id === searchParams.get("run")) ?? null;
+  const baselineRecord = selectedRecord
+    ? records
+        .filter(
+          (record) =>
+            record.run_id !== selectedRecord.run_id &&
+            record.start_time < selectedRecord.start_time &&
+            record.dataset === selectedRecord.dataset &&
+            record.dataset_version === selectedRecord.dataset_version &&
+            record.data_fingerprint === selectedRecord.data_fingerprint &&
+            record.validation_split_id === selectedRecord.validation_split_id,
+        )
+        .sort((left, right) => right.start_time - left.start_time)[0] ?? null
+    : null;
   const compareRecords = compareIDs
     .map((id) => records.find((record) => record.run_id === id))
     .filter((record): record is ExperimentRecord => Boolean(record));
@@ -1045,7 +1272,11 @@ function ExperimentsPageInner() {
         )}
       </section>
 
-      <DetailPanel record={selectedRecord} onClose={closeDetails} />
+      <DetailPanel
+        record={selectedRecord}
+        baseline={baselineRecord}
+        onClose={closeDetails}
+      />
       <ComparePanel
         records={compareRecords}
         open={compareOpen && compareRecords.length >= 2}
