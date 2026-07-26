@@ -67,39 +67,47 @@ def comfort_excess_per_sample(
         raise ValueError("predicted speeds must match control timesteps")
     if target_speeds.shape != target.shape[:2]:
         raise ValueError("target speeds must match control timesteps")
-    predicted_jerk = (
-        predicted[:, 1:, 0] - predicted[:, :-1, 0]
-    ) / dt
-    target_jerk = (
-        target[:, 1:, 0] - target[:, :-1, 0]
-    ) / dt
-    predicted_lateral = (
-        predicted_speeds.square() * predicted[:, :, 1]
-    )
-    target_lateral = target_speeds.square() * target[:, :, 1]
+    with torch.autocast(
+        device_type=predicted.device.type,
+        enabled=False,
+    ):
+        predicted = predicted.to(dtype=torch.float32)
+        target = target.to(dtype=torch.float32)
+        predicted_speeds = predicted_speeds.to(dtype=torch.float32)
+        target_speeds = target_speeds.to(dtype=torch.float32)
+        predicted_jerk = (
+            predicted[:, 1:, 0] - predicted[:, :-1, 0]
+        ) / dt
+        target_jerk = (
+            target[:, 1:, 0] - target[:, :-1, 0]
+        ) / dt
+        predicted_lateral = (
+            predicted_speeds.square() * predicted[:, :, 1]
+        )
+        target_lateral = target_speeds.square() * target[:, :, 1]
 
-    predicted_jerk_peak = _barrier(
-        predicted_jerk,
-        jerk_threshold_mps3,
-    ).amax(dim=1)
-    target_jerk_peak = _barrier(
-        target_jerk,
-        jerk_threshold_mps3,
-    ).amax(dim=1)
-    predicted_lateral_peak = _barrier(
-        predicted_lateral,
-        lateral_acceleration_threshold_mps2,
-    ).amax(dim=1)
-    target_lateral_peak = _barrier(
-        target_lateral,
-        lateral_acceleration_threshold_mps2,
-    ).amax(dim=1)
-    jerk_excess = torch.relu(
-        predicted_jerk_peak - target_jerk_peak.detach()
-    )
-    lateral_excess = torch.relu(
-        predicted_lateral_peak - target_lateral_peak.detach()
-    )
+        predicted_jerk_peak = _barrier(
+            predicted_jerk,
+            jerk_threshold_mps3,
+        ).amax(dim=1)
+        target_jerk_peak = _barrier(
+            target_jerk,
+            jerk_threshold_mps3,
+        ).amax(dim=1)
+        predicted_lateral_peak = _barrier(
+            predicted_lateral,
+            lateral_acceleration_threshold_mps2,
+        ).amax(dim=1)
+        target_lateral_peak = _barrier(
+            target_lateral,
+            lateral_acceleration_threshold_mps2,
+        ).amax(dim=1)
+        jerk_excess = torch.relu(
+            predicted_jerk_peak - target_jerk_peak.detach()
+        )
+        lateral_excess = torch.relu(
+            predicted_lateral_peak - target_lateral_peak.detach()
+        )
     return (
         0.5 * (jerk_excess + lateral_excess),
         jerk_excess,
