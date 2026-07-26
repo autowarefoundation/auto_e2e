@@ -117,17 +117,17 @@ export default function HomePage() {
             subtitle="label objects across all teacher/prompt versions (a sample may be labelled more than once)"
           />
           <KpiCard
-            title="MLflow Runs"
+            title="Experiment Runs"
             value={mlflowDown ? "—" : formatNumber(stats.data?.mlflow_runs)}
             loading={stats.loading}
-            href="/models"
+            href="/experiments"
             subtitle={mlflowDown ? "Unavailable — upstream unreachable" : undefined}
           />
           <KpiCard
-            title="Latest ADE"
+            title="Latest Eval ADE"
             value={mlflowDown ? "—" : formatMeters(stats.data?.latest_ade)}
             loading={stats.loading}
-            href="/models"
+            href="/experiments"
             subtitle={
               mlflowDown
                 ? "Unavailable — upstream unreachable"

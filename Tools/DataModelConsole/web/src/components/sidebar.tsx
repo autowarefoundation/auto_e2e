@@ -3,10 +3,10 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import {
-  Boxes,
   Brain,
   Clapperboard,
   Database,
+  FlaskConical,
   Home,
   MapPinned,
   Workflow,
@@ -18,7 +18,7 @@ export const NAV_ITEMS = [
   { href: "/", label: "Home", icon: Home },
   { href: "/datasets", label: "Datasets", icon: Database },
   { href: "/reasoning-labels", label: "Reasoning Labels", icon: Brain },
-  { href: "/models", label: "Models", icon: Boxes },
+  { href: "/experiments", label: "Experiments", icon: FlaskConical },
   { href: "/runs", label: "Runs", icon: Workflow },
   { href: "/scenes", label: "Scenes", icon: Clapperboard },
   { href: "/geo", label: "Geo Coverage", icon: MapPinned },
