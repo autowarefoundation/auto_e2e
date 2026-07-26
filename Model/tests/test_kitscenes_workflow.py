@@ -475,6 +475,18 @@ def test_recovery_launcher_requires_audited_artifacts_and_skips_source_stages():
     assert 'test -n "${ARTIFACT_SET_SHA256}"' in buildspec
     assert "--recovery_manifest" in buildspec
     assert "--artifact_set_sha256" in buildspec
+    assert "DATASET_VERSION: v3.1" in buildspec
+    assert 'EPOCHS: "20"' in buildspec
+    assert (
+        "TRAINING_OBJECTIVE_VERSION: "
+        "kitscenes_navigation_objective_v1"
+    ) in buildspec
+    assert "--max_partitions" in buildspec
+    assert "--validation_scope" in buildspec
+    assert "--training_objective_version" in buildspec
+    assert "--enable_junction_sampling" in buildspec
+    assert "--enable_route_consistency" in buildspec
+    assert "--route_consistency_weight" in buildspec
     assert "wf_recovered_kitscenes_full_run" in buildspec
     assert "wf_sharded_full_run" not in buildspec
     assert "--reasoning_teacher" not in buildspec
