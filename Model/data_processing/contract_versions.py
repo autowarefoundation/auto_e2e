@@ -48,7 +48,9 @@ PARSER_VERSION = "v3"
 # scene-level canonical navigation vectors; it no longer stores map.jpg.
 # v6: KITScenes adds the loss-only route_supervision.npz member derived from the
 # canonical selected lane sequence.
-SHARD_SCHEMA_VERSION = "v6"
+# v7: route_supervision.npz also stores the loss-only drivable outside-distance
+# field derived from the semantic drivable-area channel.
+SHARD_SCHEMA_VERSION = "v7"
 
 # Calibration / projection spec encoding and raster-map coordinate semantics.
 # v2 queries KITScenes maps in the scene-local pose frame and applies the map
