@@ -11,9 +11,7 @@ ROLLOUT_POLICY_VERSION = "semi_implicit_unicycle_v1"
 
 
 def _assert_tensor(predicate: torch.Tensor, message: str) -> None:
-    if predicate.device.type == "cuda":
-        torch._assert_async(predicate, message)
-    elif not bool(predicate.item()):
+    if not bool(predicate.detach().to(device="cpu").item()):
         raise ValueError(message)
 
 
@@ -44,11 +42,6 @@ def integrate_controls_torch(
         torch.isfinite(initial_speed).all(),
         "initial_speed contains non-finite values",
     )
-    _assert_tensor(
-        (initial_speed >= 0).all(),
-        "initial_speed must be non-negative",
-    )
-
     with torch.autocast(device_type=controls.device.type, enabled=False):
         controls_f32 = controls.to(dtype=torch.float32)
         speed = initial_speed.to(
