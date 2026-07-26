@@ -3425,10 +3425,10 @@ def train_il(
         if enable_route_consistency and (
             not manifest.get("has_route_supervision", False)
             or manifest.get("route_supervision_version")
-            != "route_supervision_v1"
+            != "navigation_supervision_v2"
         ):
             raise ValueError(
-                f"route consistency requires route_supervision_v1 in "
+                f"route consistency requires navigation_supervision_v2 in "
                 f"dataset '{dname}' ({d})"
             )
         if objective_v2 and (
