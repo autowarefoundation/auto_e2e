@@ -12,9 +12,12 @@ from model_components.losses import TrajectoryImitationLoss
 from training.dataset_policy import (
     AUTO_E2E_TEMPORAL_DECAY,
     AUTO_E2E_TIMESTEPS,
+    KITSCENES_NAVIGATION_TEMPORAL_DECAY,
     KITSCENES_TRAINING_POLICY,
     L2D_TRAINING_POLICY,
     SUBSET_EXACT_GROUP_STRATEGY,
+    TEMPORAL_WEIGHT_NORMALIZATION_MEAN_ONE,
+    TEMPORAL_WEIGHT_NORMALIZATION_NONE,
     VALIDATION_SCOPE_SUBSET,
     adapt_egomotion_history,
     group_uid_digest,
@@ -142,7 +145,15 @@ class TestTrajectoryImitationLoss:
 
         assert policy is KITSCENES_TRAINING_POLICY
         assert AUTO_E2E_TIMESTEPS == 64
-        assert policy.temporal_decay == AUTO_E2E_TEMPORAL_DECAY
+        assert (
+            policy.temporal_decay
+            == KITSCENES_NAVIGATION_TEMPORAL_DECAY
+            == 0.99
+        )
+        assert (
+            policy.temporal_weight_normalization
+            == TEMPORAL_WEIGHT_NORMALIZATION_MEAN_ONE
+        )
         assert policy.signal_scales == pytest.approx((0.778, 0.0350))
         assert not hasattr(policy, "observation_steps")
         assert not hasattr(policy, "supervised_steps")
@@ -153,6 +164,10 @@ class TestTrajectoryImitationLoss:
 
         assert policy is L2D_TRAINING_POLICY
         assert policy.temporal_decay == AUTO_E2E_TEMPORAL_DECAY
+        assert (
+            policy.temporal_weight_normalization
+            == TEMPORAL_WEIGHT_NORMALIZATION_NONE
+        )
         assert policy.signal_scales == pytest.approx((0.79, 0.12))
 
     def test_unknown_dataset_cannot_inherit_l2d_policy(self):
@@ -167,6 +182,10 @@ class TestTrajectoryImitationLoss:
 
         assert policy is not KITSCENES_TRAINING_POLICY
         assert policy.temporal_decay == AUTO_E2E_TEMPORAL_DECAY
+        assert (
+            policy.temporal_weight_normalization
+            == TEMPORAL_WEIGHT_NORMALIZATION_NONE
+        )
         assert policy.signal_scales == pytest.approx((0.79, 0.12))
         assert policy.validation_strategy == "hash_buckets"
 
