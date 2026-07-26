@@ -479,8 +479,10 @@ def test_recovery_launcher_requires_audited_artifacts_and_skips_source_stages():
     assert 'EPOCHS: "20"' in buildspec
     assert (
         "TRAINING_OBJECTIVE_VERSION: "
-        "kitscenes_navigation_objective_v1"
+        "rollout_aligned_planner_v1"
     ) in buildspec
+    assert 'ENABLE_JUNCTION_SAMPLING: "false"' in buildspec
+    assert 'ENABLE_ROUTE_CONSISTENCY: "false"' in buildspec
     assert "--max_partitions" in buildspec
     assert "--validation_scope" in buildspec
     assert "--training_objective_version" in buildspec
