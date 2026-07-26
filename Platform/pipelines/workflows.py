@@ -2807,6 +2807,7 @@ def train_il(
     import hashlib
     import json
     import random
+    import time
     import torch
     import numpy as np
     import mlflow
@@ -4085,6 +4086,9 @@ def train_il(
         start_epoch, epochs + 1
     )
     for epoch in epoch_range:
+        if device.type == "cuda":
+            torch.cuda.synchronize(device)
+        epoch_compute_started = time.perf_counter()
         merged = make_multi_dataset_loader(
             training_shard_dirs,
             batch_size=batch_size,
@@ -4134,12 +4138,15 @@ def train_il(
             "heading_active_count": 0,
         }
         route_target_compliance_sum = 0.0
+        epoch_training_sample_count = 0
+        epoch_optimizer_step_start = optimizer_step_count
         micro_idx = 0  # position within the current accumulation window
         # Merged loader yields (batch, projection, geometry_type): each batch is
         # same-dataset (uniform num_views/geometry) but datasets are interleaved,
         # so the per-batch projection is applied to the batch it belongs to.
         for batch, batch_proj, batch_geom in merged:
             visual = batch["visual_tiles"].to(device)        # (B, V, 3, H, W)
+            epoch_training_sample_count += int(visual.shape[0])
             ego_hist = adapt_egomotion_history(
                 batch["egomotion_history"].to(device),
                 training_policy,
@@ -4498,9 +4505,23 @@ def train_il(
             optimizer_step_count += 1
             micro_idx = 0
 
+        if device.type == "cuda":
+            torch.cuda.synchronize(device)
+        training_wall_seconds = (
+            time.perf_counter() - epoch_compute_started
+        )
         if not epoch_losses:
             raise ValueError(
                 "the internal train split produced no batches"
+            )
+        if training_wall_seconds <= 0.0:
+            raise RuntimeError("training wall time must be positive")
+        epoch_optimizer_steps = (
+            optimizer_step_count - epoch_optimizer_step_start
+        )
+        if epoch_optimizer_steps <= 0:
+            raise RuntimeError(
+                "epoch completed without an optimizer step"
             )
         avg_loss = float(np.mean(epoch_losses))
         avg_traj = float(np.mean(traj_losses))
@@ -4646,6 +4667,23 @@ def train_il(
                 )
             )
             scheduler_metric = float(validation["ade"])
+        if device.type == "cuda":
+            torch.cuda.synchronize(device)
+        epoch_compute_wall_seconds = (
+            time.perf_counter() - epoch_compute_started
+        )
+        throughput = {
+            "train_wall_seconds": training_wall_seconds,
+            "epoch_compute_wall_seconds": epoch_compute_wall_seconds,
+            "sample_count": epoch_training_sample_count,
+            "samples_per_second": (
+                epoch_training_sample_count / training_wall_seconds
+            ),
+            "optimizer_step_count": epoch_optimizer_steps,
+            "optimizer_steps_per_second": (
+                epoch_optimizer_steps / training_wall_seconds
+            ),
+        }
         next_bad_epochs = 0 if improved else bad_epochs + 1
         key = checkpoint_key(run_id, epoch)
         checkpoint_uri = f"s3://{checkpoint_bucket}/{key}"
@@ -4685,6 +4723,7 @@ def train_il(
             "validation_sample_uid_digest": validation_digest,
             "checkpoint_selection": checkpoint_selection,
             "validation_aggregates": validation_aggregate_summary,
+            "throughput": throughput,
             "improved": improved,
         }
         metric_history.append(history_entry)
@@ -4863,6 +4902,24 @@ def train_il(
                         avg_rollout_terms["drivable"]
                     ),
                     "train/lr": current_lr,
+                    "train/throughput/train_wall_seconds": (
+                        throughput["train_wall_seconds"]
+                    ),
+                    "train/throughput/epoch_compute_wall_seconds": (
+                        throughput["epoch_compute_wall_seconds"]
+                    ),
+                    "train/throughput/sample_count": float(
+                        throughput["sample_count"]
+                    ),
+                    "train/throughput/samples_per_second": (
+                        throughput["samples_per_second"]
+                    ),
+                    "train/throughput/optimizer_step_count": float(
+                        throughput["optimizer_step_count"]
+                    ),
+                    "train/throughput/optimizer_steps_per_second": (
+                        throughput["optimizer_steps_per_second"]
+                    ),
                     "val/ade": validation["ade"],
                     "val/fde": validation["fde"],
                     **{
@@ -4976,6 +5033,9 @@ def train_il(
             f"jepa={avg_jepa:.4f} "
             f"reason={avg_reason:.4f} val_ADE={validation['ade']:.4f} "
             f"val_FDE={validation['fde']:.4f} improved={improved} "
+            f"samples_per_second={throughput['samples_per_second']:.3f} "
+            "optimizer_steps_per_second="
+            f"{throughput['optimizer_steps_per_second']:.3f} "
             f"{selector_summary}"
             f"bad_epochs={bad_epochs} checkpoint={uploaded['uri']}"
         )
@@ -5077,6 +5137,46 @@ def train_il(
             f"expected={best_checkpoint['sha256']} actual={best_digest}"
         )
 
+    throughput_history = [
+        dict(entry["throughput"])
+        for entry in metric_history
+        if isinstance(entry.get("throughput"), dict)
+    ]
+    throughput_train_wall_seconds = sum(
+        float(item["train_wall_seconds"])
+        for item in throughput_history
+    )
+    throughput_sample_count = sum(
+        int(item["sample_count"])
+        for item in throughput_history
+    )
+    throughput_optimizer_step_count = sum(
+        int(item["optimizer_step_count"])
+        for item in throughput_history
+    )
+    throughput_summary = {
+        "epoch_count": len(throughput_history),
+        "train_wall_seconds": throughput_train_wall_seconds,
+        "epoch_compute_wall_seconds": sum(
+            float(item["epoch_compute_wall_seconds"])
+            for item in throughput_history
+        ),
+        "sample_count": throughput_sample_count,
+        "samples_per_second": (
+            throughput_sample_count / throughput_train_wall_seconds
+            if throughput_train_wall_seconds > 0.0
+            else None
+        ),
+        "optimizer_step_count": throughput_optimizer_step_count,
+        "optimizer_steps_per_second": (
+            throughput_optimizer_step_count
+            / throughput_train_wall_seconds
+            if throughput_train_wall_seconds > 0.0
+            else None
+        ),
+        "per_epoch": throughput_history,
+    }
+
     meta = {
         "data": {
             "dataset": dataset.value,
@@ -5170,6 +5270,7 @@ def train_il(
                     optimizer_parameter_delta_norm
                 ),
             },
+            "throughput": throughput_summary,
             "gradient_evidence": gradient_evidence,
             "route_conditioning_evidence": {
                 "enabled": enable_route_conditioning,
