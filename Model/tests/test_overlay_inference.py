@@ -13,6 +13,7 @@ from Platform.pipelines.inference import (
     stable_seed64,
 )
 from Platform.pipelines.overlay_precompute import (
+    _spatial_feature_deviation,
     infer_loader_controls,
     infer_loader_overlay,
 )
@@ -246,12 +247,33 @@ def test_infer_loader_overlay_isolates_encoder_contributions():
     assert controls.shape == (2, 2, 64, 2)
     assert seeds == (0, 1)
     assert heatmaps.shape == (2, 6, 32, 32)
-    np.testing.assert_allclose(heatmaps[:, 0], np.sqrt(25.0 / 3.0))
-    np.testing.assert_allclose(heatmaps[:, 1], np.sqrt(9.0 / 3.0))
+    np.testing.assert_array_equal(heatmaps[:, 0], 0.0)
+    np.testing.assert_array_equal(heatmaps[:, 1], 0.0)
     np.testing.assert_allclose(heatmaps[:, 2], np.sqrt(14.0 / 3.0))
-    np.testing.assert_allclose(heatmaps[:, 3], np.sqrt(45.0 / 3.0))
+    np.testing.assert_array_equal(heatmaps[:, 3], 0.0)
     np.testing.assert_allclose(heatmaps[:, 4], np.sqrt(45.0 / 3.0))
-    np.testing.assert_allclose(heatmaps[:, 5], np.sqrt(114.0 / 3.0))
+    np.testing.assert_array_equal(heatmaps[:, 5], 0.0)
+
+
+def test_spatial_feature_deviation_preserves_channel_direction_changes():
+    features = torch.tensor(
+        [
+            [
+                [[1.0, -1.0], [0.0, 0.0]],
+                [[-1.0, 1.0], [0.0, 0.0]],
+            ]
+        ]
+    )
+
+    heatmap = _spatial_feature_deviation(
+        features,
+        preserve_zero_cells=True,
+    )
+
+    np.testing.assert_allclose(
+        heatmap,
+        [[[1.0, 1.0], [0.0, 0.0]]],
+    )
 
 
 def test_overlay_inference_applies_checkpoint_data_sanitization():
