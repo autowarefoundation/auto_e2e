@@ -444,6 +444,7 @@ def test_loader_wiring_avoids_training_peek_and_bounds_eval_prefetch():
         "buildspec-register.yml",
         "buildspec-launch-fullrun.yml",
         "buildspec-launch-recovery.yml",
+        "buildspec-launch-reconstruction-audit.yml",
     ),
 )
 def test_remote_registration_buildspecs_pin_runtime_contracts(buildspec_name):
@@ -502,6 +503,27 @@ def test_recovery_launcher_requires_audited_artifacts_and_skips_source_stages():
         '--enable_route_conditioning "${ENABLE_ROUTE_CONDITIONING}"'
         not in buildspec
     )
+
+
+def test_reconstruction_audit_launcher_defaults_to_smoke_subset():
+    buildspec = (
+        _REPO_ROOT
+        / "Platform"
+        / "buildspec-launch-reconstruction-audit.yml"
+    ).read_text()
+
+    assert "shell: bash" in buildspec
+    assert 'MAX_PARTITIONS: "10"' in buildspec
+    assert "VALIDATION_SCOPE: subset" in buildspec
+    assert 'test -n "${ARTIFACT_SET_SHA256}"' in buildspec
+    assert 'test -n "${AUDIT_CODE_REVISION}"' in buildspec
+    assert (
+        "wf_audit_recovered_kitscenes_target_reconstruction"
+        in buildspec
+    )
+    assert "--audit_code_revision" in buildspec
+    assert "--max_partitions" in buildspec
+    assert "--validation_scope" in buildspec
 
 
 def test_overlay_launcher_guards_selected_recovery_checkpoints():
