@@ -6,6 +6,7 @@ import type {
   Dataset,
   DatasetListResponse,
   DatasetVersionsResponse,
+  ExperimentsResponse,
   FlyteExecution,
   GeoJSONFeatureCollection,
   GeoStats,
@@ -99,6 +100,10 @@ async function apiFetchResponse(
 
 export function getDashboardStats(): Promise<DashboardStats> {
   return apiFetch<DashboardStats>("/api/v1/stats");
+}
+
+export function listJoinedExperiments(): Promise<ExperimentsResponse> {
+  return apiFetch<ExperimentsResponse>("/api/v1/experiments");
 }
 
 // ---------------------------------------------------------------------------
