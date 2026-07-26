@@ -180,6 +180,12 @@ def test_epoch_evaluation_restores_mode_and_hashes_fixed_uids():
         "evaluation_steps": 64,
         "sample_count": 2,
         "sample_uid_digest": expected_digest,
+        "horizons": {
+            "1s": {"steps": 10, "ade": 0.0, "fde": 0.0},
+            "2s": {"steps": 20, "ade": 0.0, "fde": 0.0},
+            "3s": {"steps": 30, "ade": 0.0, "fde": 0.0},
+            "6_4s": {"steps": 64, "ade": 0.0, "fde": 0.0},
+        },
     }
     assert model.training is True
     assert model.reset_count == 2
@@ -312,6 +318,10 @@ def test_training_wires_dataset_specific_trajectory_policy():
     assert "dataset.value" in training_source
     assert "signal_scales=training_policy.signal_scales" in training_source
     assert "temporal_decay=training_policy.temporal_decay" in training_source
+    assert (
+        "temporal_weight_normalization=("
+        in training_source
+    )
     assert "supervised_timesteps" not in training_source
     assert "AUTO_E2E_TIMESTEPS" in training_source
     assert "adapt_egomotion_history" in training_source
@@ -325,6 +335,14 @@ def test_training_wires_dataset_specific_trajectory_policy():
         training_source
     )
     assert '"validation_split": validation_split_contract' in (
+        training_source
+    )
+    assert '"training_objective_version": training_objective_version' in (
+        training_source
+    )
+    assert "route_consistency_loss_fn(" in training_source
+    assert "route_consistency_weight" in training_source
+    assert "route-enabled epoch produced no eligible route sample" in (
         training_source
     )
 
@@ -358,6 +376,70 @@ def test_training_seed_controls_comparable_navigation_runs():
     assert "torch.backends.cudnn.deterministic = True" in training_source
     assert '"training_seed": training_seed' in training_source
     assert '"train/seed": training_seed' in training_source
+
+
+def test_navigation_objective_wiring_is_train_only_and_versioned():
+    source = inspect.getsource(workflows.train_il.task_function)
+    tree = ast.parse(source)
+    loader_calls = [
+        call
+        for call in ast.walk(tree)
+        if isinstance(call, ast.Call)
+        and isinstance(call.func, ast.Name)
+        and call.func.id == "make_multi_dataset_loader"
+    ]
+    assert len(loader_calls) == 2
+    by_root = {
+        call.args[0].id: {
+            keyword.arg: keyword.value for keyword in call.keywords
+        }
+        for call in loader_calls
+    }
+    assert "navigation_repeat_policy" not in by_root["shard_dirs"]
+    training_repeat = by_root["training_shard_dirs"][
+        "navigation_repeat_policy"
+    ]
+    assert isinstance(training_repeat, ast.Name)
+    assert training_repeat.id == "navigation_repeat_policy"
+
+    module = ast.parse(inspect.getsource(workflows))
+    recovered = next(
+        node
+        for node in module.body
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "wf_recovered_kitscenes_full_run"
+    )
+    names = [argument.arg for argument in recovered.args.args]
+    defaults = dict(zip(
+        names[-len(recovered.args.defaults):],
+        recovered.args.defaults,
+        strict=True,
+    ))
+    assert ast.literal_eval(defaults["epochs"]) == 20
+    assert isinstance(defaults["training_objective_version"], ast.Name)
+    assert defaults["training_objective_version"].id == (
+        "KITSCENES_NAVIGATION_OBJECTIVE_VERSION"
+    )
+    assert ast.literal_eval(defaults["enable_junction_sampling"]) is True
+    assert ast.literal_eval(defaults["enable_route_consistency"]) is True
+    train_call = next(
+        call
+        for call in ast.walk(recovered)
+        if isinstance(call, ast.Call)
+        and isinstance(call.func, ast.Name)
+        and call.func.id == "train_il"
+    )
+    train_keywords = {
+        keyword.arg: keyword.value for keyword in train_call.keywords
+    }
+    for field in (
+        "training_objective_version",
+        "enable_junction_sampling",
+        "enable_route_consistency",
+        "route_consistency_weight",
+    ):
+        assert isinstance(train_keywords[field], ast.Name)
+        assert train_keywords[field].id == field
 
 
 def test_kitscenes_epoch_evaluation_preserves_auto_e2e_horizon():
