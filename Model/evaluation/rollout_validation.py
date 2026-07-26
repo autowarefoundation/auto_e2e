@@ -1,0 +1,285 @@
+"""Per-sample logged-XY metrics for rollout-aligned checkpoint selection."""
+
+from __future__ import annotations
+
+from collections.abc import Mapping, Sequence
+
+import numpy as np
+import torch
+
+from navigation.geometry import (
+    DEFAULT_NAVIGATION_GEOMETRY,
+    NavigationRasterGeometry,
+)
+from training.losses.control_rollout import integrate_controls_torch
+from training.losses.rollout_aligned_loss import (
+    _footprint_outside_distance,
+    comfort_excess_per_sample,
+)
+
+
+ROLLOUT_VALIDATION_VERSION = "rollout_validation_v1"
+
+
+def _logged_headings(logged_xy: torch.Tensor) -> torch.Tensor:
+    if logged_xy.ndim != 3 or logged_xy.shape[2] != 2:
+        raise ValueError("logged_xy must have shape [B,T,2]")
+    origin = torch.zeros(
+        logged_xy.shape[0],
+        1,
+        2,
+        dtype=logged_xy.dtype,
+        device=logged_xy.device,
+    )
+    deltas = torch.diff(
+        torch.cat((origin, logged_xy), dim=1),
+        dim=1,
+    )
+    headings = torch.atan2(deltas[:, :, 1], deltas[:, :, 0])
+    moving = torch.linalg.vector_norm(deltas, dim=2) > 1e-4
+    resolved = []
+    previous = torch.zeros(
+        logged_xy.shape[0],
+        dtype=logged_xy.dtype,
+        device=logged_xy.device,
+    )
+    for step in range(logged_xy.shape[1]):
+        previous = torch.where(
+            moving[:, step],
+            headings[:, step],
+            previous,
+        )
+        resolved.append(previous)
+    return torch.stack(resolved, dim=1)
+
+
+def build_rollout_validation_records(
+    predicted_controls: torch.Tensor,
+    target_controls: torch.Tensor,
+    initial_speeds_mps: torch.Tensor,
+    logged_xy_m: torch.Tensor | np.ndarray,
+    route_supervision: Mapping[str, torch.Tensor],
+    map_valid: torch.Tensor,
+    route_valid: torch.Tensor,
+    sample_uids: Sequence[str],
+    split_group_uids: Sequence[str],
+    *,
+    route_intersections: Sequence[bool] | None = None,
+    geometry: NavigationRasterGeometry = DEFAULT_NAVIGATION_GEOMETRY,
+    footprint_length_m: float = 4.8,
+    footprint_width_m: float = 2.0,
+) -> list[dict[str, object]]:
+    """Build one complete selector record per validation sample."""
+    predicted = predicted_controls.detach().to(
+        device="cpu",
+        dtype=torch.float32,
+    )
+    target = target_controls.detach().to(
+        device="cpu",
+        dtype=torch.float32,
+    )
+    if predicted.ndim == 2:
+        predicted = predicted.reshape(predicted.shape[0], -1, 2)
+    if target.ndim == 2:
+        target = target.reshape(target.shape[0], -1, 2)
+    if (
+        predicted.ndim != 3
+        or predicted.shape[2] != 2
+        or target.shape != predicted.shape
+    ):
+        raise ValueError(
+            "predicted and target controls must share shape [B,T,2]"
+        )
+    batch_size, timestep_count, _ = predicted.shape
+    speeds = initial_speeds_mps.detach().to(
+        device="cpu",
+        dtype=torch.float32,
+    )
+    if speeds.shape != (batch_size,):
+        raise ValueError("initial speeds must have shape [B]")
+    logged = torch.as_tensor(
+        logged_xy_m,
+        dtype=torch.float32,
+        device="cpu",
+    )
+    if logged.shape != (batch_size, timestep_count, 2):
+        raise ValueError(
+            "logged XY must match the control batch and horizon"
+        )
+    if (
+        len(sample_uids) != batch_size
+        or len(split_group_uids) != batch_size
+    ):
+        raise ValueError("validation identities must match batch size")
+    if any(not str(uid) for uid in sample_uids):
+        raise ValueError("validation sample UIDs must be non-empty")
+    if any(not str(uid) for uid in split_group_uids):
+        raise ValueError("validation group UIDs must be non-empty")
+    intersections = (
+        [False] * batch_size
+        if route_intersections is None
+        else [bool(value) for value in route_intersections]
+    )
+    if len(intersections) != batch_size:
+        raise ValueError("route intersections must match batch size")
+
+    with torch.no_grad():
+        (
+            predicted_xy,
+            predicted_headings,
+            predicted_speeds,
+        ) = integrate_controls_torch(predicted, speeds)
+        _, _, target_speeds = integrate_controls_torch(target, speeds)
+        comfort, _, _ = comfort_excess_per_sample(
+            predicted,
+            target,
+            predicted_speeds,
+            target_speeds,
+        )
+        target_headings = _logged_headings(logged)
+
+        fields = {}
+        expected_field_shape = (
+            batch_size,
+            geometry.height_px,
+            geometry.width_px,
+        )
+        for name in (
+            "distance_to_corridor_m",
+            "distance_to_drivable_m",
+        ):
+            field = route_supervision[name].detach().to(
+                device="cpu",
+                dtype=torch.float32,
+            )
+            if field.shape != expected_field_shape:
+                raise ValueError(
+                    f"{name} differs from validation geometry"
+                )
+            fields[name] = field
+        available = route_supervision["available"].detach().to(
+            device="cpu",
+            dtype=torch.bool,
+        )
+        if available.shape != (batch_size,):
+            raise ValueError(
+                "navigation supervision availability must have shape [B]"
+            )
+        map_available = (
+            map_valid.detach().to(device="cpu", dtype=torch.bool)
+            & available
+        )
+        route_available = (
+            route_valid.detach().to(device="cpu", dtype=torch.bool)
+            & available
+        )
+        predicted_drivable_distance = _footprint_outside_distance(
+            fields["distance_to_drivable_m"],
+            predicted_xy,
+            predicted_headings,
+            geometry,
+            length_m=footprint_length_m,
+            width_m=footprint_width_m,
+        )
+        target_drivable_distance = _footprint_outside_distance(
+            fields["distance_to_drivable_m"],
+            logged,
+            target_headings,
+            geometry,
+            length_m=footprint_length_m,
+            width_m=footprint_width_m,
+        )
+        predicted_route_distance = _footprint_outside_distance(
+            fields["distance_to_corridor_m"],
+            predicted_xy,
+            predicted_headings,
+            geometry,
+            length_m=footprint_length_m,
+            width_m=footprint_width_m,
+        )
+        target_route_distance = _footprint_outside_distance(
+            fields["distance_to_corridor_m"],
+            logged,
+            target_headings,
+            geometry,
+            length_m=footprint_length_m,
+            width_m=footprint_width_m,
+        )
+
+    errors = torch.linalg.vector_norm(predicted_xy - logged, dim=2)
+    predicted_drivable_inside = predicted_drivable_distance <= 1e-6
+    target_drivable_inside = target_drivable_distance <= 1e-6
+    predicted_route_inside = predicted_route_distance <= 1e-6
+    target_route_inside = target_route_distance <= 1e-6
+    destination = route_supervision["destination_xy_m"].detach().to(
+        device="cpu",
+        dtype=torch.float32,
+    )
+    destination_visible = route_supervision[
+        "destination_visible"
+    ].detach().to(device="cpu", dtype=torch.bool)
+    if destination.shape != (batch_size, 2):
+        raise ValueError("destination_xy_m must have shape [B,2]")
+    if destination_visible.shape != (batch_size,):
+        raise ValueError(
+            "destination_visible must have shape [B]"
+        )
+
+    records = []
+    for index in range(batch_size):
+        offroad_excess = None
+        if bool(map_available[index]):
+            predicted_offroad = float(
+                (~predicted_drivable_inside[index]).float().mean()
+            )
+            target_offroad = float(
+                (~target_drivable_inside[index]).float().mean()
+            )
+            offroad_excess = max(
+                0.0,
+                predicted_offroad - target_offroad,
+            )
+
+        route_gap = None
+        wrong_branch_excess = None
+        destination_error = None
+        if bool(route_available[index]):
+            predicted_compliance = float(
+                predicted_route_inside[index].float().mean()
+            )
+            target_compliance = float(
+                target_route_inside[index].float().mean()
+            )
+            route_gap = max(
+                0.0,
+                target_compliance - predicted_compliance,
+            )
+            if intersections[index] and bool(
+                target_route_inside[index, -1]
+            ):
+                wrong_branch_excess = float(
+                    not bool(predicted_route_inside[index, -1])
+                )
+            if bool(destination_visible[index]):
+                predicted_terminal = float(torch.linalg.vector_norm(
+                    predicted_xy[index, -1] - destination[index]
+                ))
+                target_terminal = float(torch.linalg.vector_norm(
+                    logged[index, -1] - destination[index]
+                ))
+                destination_error = abs(
+                    predicted_terminal - target_terminal
+                )
+
+        records.append({
+            "sample_uid": str(sample_uids[index]),
+            "split_group_uid": str(split_group_uids[index]),
+            "ade_3s_m": float(errors[index, :30].mean()),
+            "fde_6_4s_m": float(errors[index, -1]),
+            "comfort_excess": float(comfort[index]),
+            "offroad_excess": offroad_excess,
+            "route_gap": route_gap,
+            "wrong_branch_excess": wrong_branch_excess,
+            "destination_error_m": destination_error,
+        })
+    return records
