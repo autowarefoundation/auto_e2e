@@ -19,12 +19,19 @@ from typing import Sequence
 import numpy as np
 
 
-OVERLAY_SCHEMA = "v2"
-OVERLAY_FORMAT_VERSION = 2
+OVERLAY_SCHEMA = "v3"
+OVERLAY_FORMAT_VERSION = 3
 OVERLAY_MAGIC = b"AOVL"
 UID_HASH_ALGORITHM = "sha256-le64-v1"
 FLAG_DETERMINISTIC_PLANNER = 1 << 0
-BEV_HEATMAP_NAMES = ("image", "navigation", "fused")
+BEV_HEATMAP_NAMES = (
+    "image",
+    "map",
+    "route_delta",
+    "navigation",
+    "fusion_delta",
+    "fused",
+)
 BEV_HEATMAP_SIZE = 32
 
 _HEADER = struct.Struct("<4sHHIHHHH")
@@ -33,6 +40,12 @@ _DIRECTORY_ENTRY = struct.Struct("<QI")
 _HORIZON = 64
 _DIMS = 2
 _LEGACY_FORMAT_VERSION = 1
+_V2_HEATMAP_NAMES = ("image", "navigation", "fused")
+_HEATMAP_NAMES_BY_VERSION = {
+    1: (),
+    2: _V2_HEATMAP_NAMES,
+    3: BEV_HEATMAP_NAMES,
+}
 
 
 @dataclass(frozen=True)
@@ -53,6 +66,7 @@ class DecodedOverlay:
     v0: np.ndarray
     bev_heatmaps: np.ndarray | None
     bev_heatmap_scales: np.ndarray | None
+    bev_heatmap_names: tuple[str, ...]
 
 
 def sample_uid_hash(sample_uid: str) -> int:
@@ -276,11 +290,10 @@ def decode_overlay(payload: bytes) -> DecodedOverlay:
     ) = _HEADER.unpack_from(raw)
     if magic != OVERLAY_MAGIC:
         raise ValueError("invalid overlay magic")
-    if version not in (_LEGACY_FORMAT_VERSION, OVERLAY_FORMAT_VERSION):
+    if version not in _HEATMAP_NAMES_BY_VERSION:
         raise ValueError(f"unsupported overlay version {version}")
-    expected_heatmap_count = (
-        0 if version == _LEGACY_FORMAT_VERSION else len(BEV_HEATMAP_NAMES)
-    )
+    heatmap_names = _HEATMAP_NAMES_BY_VERSION[version]
+    expected_heatmap_count = len(heatmap_names)
     if (
         horizon != _HORIZON
         or dims != _DIMS
@@ -298,11 +311,11 @@ def decode_overlay(payload: bytes) -> DecodedOverlay:
         + sample_count * seed_count * horizon * dims * 4
         + sample_count * 4
     )
-    if version == OVERLAY_FORMAT_VERSION:
+    if heatmap_names:
         expected_size += (
             sample_count * 4
             + sample_count
-            * len(BEV_HEATMAP_NAMES)
+            * len(heatmap_names)
             * BEV_HEATMAP_SIZE
             * BEV_HEATMAP_SIZE
         )
@@ -339,7 +352,7 @@ def decode_overlay(payload: bytes) -> DecodedOverlay:
     cursor += sample_count * 4
     heatmaps = None
     heatmap_scales = None
-    if version == OVERLAY_FORMAT_VERSION:
+    if heatmap_names:
         heatmap_scales = np.frombuffer(
             raw, dtype="<f4", count=sample_count, offset=cursor
         ).copy()
@@ -349,14 +362,14 @@ def decode_overlay(payload: bytes) -> DecodedOverlay:
             dtype=np.uint8,
             count=(
                 sample_count
-                * len(BEV_HEATMAP_NAMES)
+                * len(heatmap_names)
                 * BEV_HEATMAP_SIZE
                 * BEV_HEATMAP_SIZE
             ),
             offset=cursor,
         ).reshape(
             sample_count,
-            len(BEV_HEATMAP_NAMES),
+            len(heatmap_names),
             BEV_HEATMAP_SIZE,
             BEV_HEATMAP_SIZE,
         )
@@ -373,4 +386,5 @@ def decode_overlay(payload: bytes) -> DecodedOverlay:
         v0=speeds,
         bev_heatmaps=heatmaps,
         bev_heatmap_scales=heatmap_scales,
+        bev_heatmap_names=tuple(heatmap_names),
     )
