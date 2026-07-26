@@ -6353,11 +6353,16 @@ def _map_recovered_kitscenes_artifacts(
     dataset_version: str,
     image_size: int,
     pack_concurrency: int,
+    max_partitions: int,
 ) -> List[FlyteDirectory]:
     """Map only pack tasks over an audited raw/label artifact set."""
     if pack_concurrency <= 0:
         raise ValueError(
             f"pack_concurrency must be positive, got {pack_concurrency}"
+        )
+    if max_partitions < 0:
+        raise ValueError(
+            f"max_partitions must be non-negative, got {max_partitions}"
         )
 
     from data_parsing.kit_scenes.source import sdk_split_scene_ids
@@ -6393,6 +6398,13 @@ def _map_recovered_kitscenes_artifacts(
         expected_label_count=AUDITED_LABEL_COUNT,
         expected_empty_scene_count=AUDITED_EMPTY_SCENE_COUNT,
     )
+    if max_partitions:
+        if not 2 <= max_partitions < len(entries):
+            raise ValueError(
+                "recovery subset max_partitions must select at least two "
+                "but fewer than the full manifest"
+            )
+        entries = entries[:max_partitions]
     raw_dirs = [
         FlyteDirectory(entry["raw_uri"]) for entry in entries
     ]
@@ -6432,6 +6444,7 @@ def wf_repack_existing_kitscenes(
     dataset_version: str = KITSCENES_NAVIGATION_DATASET_VERSION,
     image_size: int = 256,
     pack_concurrency: int = 60,
+    max_partitions: int = 0,
 ) -> List[FlyteDirectory]:
     """Repack audited raw/Cosmos artifacts without ingest or teacher calls."""
     return _map_recovered_kitscenes_artifacts(
@@ -6440,6 +6453,7 @@ def wf_repack_existing_kitscenes(
         dataset_version=dataset_version,
         image_size=image_size,
         pack_concurrency=pack_concurrency,
+        max_partitions=max_partitions,
     )
 
 
@@ -6594,6 +6608,7 @@ def wf_recovered_kitscenes_full_run(
     dataset_version: str = KITSCENES_NAVIGATION_DATASET_VERSION,
     image_size: int = 256,
     pack_concurrency: int = 60,
+    max_partitions: int = 0,
     backbone: Backbone = Backbone.SWIN_V2_TINY,
     epochs: int = 20,
     batch_size: int = 1,
@@ -6609,6 +6624,7 @@ def wf_recovered_kitscenes_full_run(
     route_consistency_weight: float = 0.10,
     reasoning_mode: str = "pooled_latent",
     val_fraction: float = 0.1,
+    validation_scope: str = "full",
     num_workers: int = 4,
     resume_from: Optional[FlyteFile] = None,
     early_stopping_patience: int = 3,
@@ -6620,6 +6636,7 @@ def wf_recovered_kitscenes_full_run(
         dataset_version=dataset_version,
         image_size=image_size,
         pack_concurrency=pack_concurrency,
+        max_partitions=max_partitions,
     )
     navigation_quality_audit = audit_kitscenes_navigation_quality(
         shards=shards,
@@ -6643,6 +6660,7 @@ def wf_recovered_kitscenes_full_run(
         reasoning_mode=reasoning_mode,
         enable_world_model=True,
         val_fraction=val_fraction,
+        validation_scope=validation_scope,
         num_workers=num_workers,
         resume_from=resume_from,
         early_stopping_patience=early_stopping_patience,
