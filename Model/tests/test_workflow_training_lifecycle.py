@@ -188,6 +188,7 @@ def _rollout_selector_validation_batch(sample_uid="sample-a"):
             "destination_xy_m": torch.zeros(1, 2),
             "destination_visible": torch.tensor([False]),
             "available": torch.tensor([True]),
+            "drivable_available": torch.tensor([True]),
         },
         "navigation_metadata": {
             "route_intersection": torch.tensor([False]),
