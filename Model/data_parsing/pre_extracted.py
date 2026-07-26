@@ -14,6 +14,7 @@ Usage:
         # batch["route_mask"]         (B, 2, 256, 256)     selected route
         # batch["map_valid"]          (B,)                  explicit validity
         # batch["route_valid"]        (B,)                  explicit validity
+        # batch["route_supervision"]  dict of loss-only route fields
         # batch["egomotion_history"]  (B, 256)
         # batch["visual_history"]     (B, 896)
         # batch["trajectory_target"]  (B, 128)
@@ -114,6 +115,7 @@ def _decode_sample(
     navigation_keys = {
         "map_semantic.npz",
         "route_mask.npz",
+        "route_supervision.npz",
         "navigation_meta.json",
     }
     present_navigation = navigation_keys.intersection(sample)
@@ -122,11 +124,15 @@ def _decode_sample(
             "navigation members must be present as a complete schema-v5 set"
         )
     if present_navigation:
-        from navigation.artifacts import decode_sample_navigation
+        from navigation.artifacts import (
+            decode_route_supervision,
+            decode_sample_navigation,
+        )
 
         map_array, route_array, navigation_metadata = (
             decode_sample_navigation(sample)
         )
+        supervision = decode_route_supervision(sample)
         map_context = torch.from_numpy(map_array.copy())
         route_mask = torch.from_numpy(
             route_array.astype(np.float32, copy=True)
@@ -139,6 +145,31 @@ def _decode_sample(
             bool(navigation_metadata["route_valid"]),
             dtype=torch.bool,
         )
+        route_supervision = {
+            "distance_to_corridor_m": torch.from_numpy(
+                supervision.distance_to_corridor_m.copy()
+            ),
+            "route_heading_sin": torch.from_numpy(
+                supervision.route_heading_sin.copy()
+            ),
+            "route_heading_cos": torch.from_numpy(
+                supervision.route_heading_cos.copy()
+            ),
+            "route_heading_valid": torch.from_numpy(
+                supervision.route_heading_valid.astype(
+                    np.bool_,
+                    copy=True,
+                )
+            ),
+            "destination_xy_m": torch.from_numpy(
+                supervision.destination_xy_m.copy()
+            ),
+            "destination_visible": torch.tensor(
+                supervision.destination_visible,
+                dtype=torch.bool,
+            ),
+            "available": torch.tensor(True, dtype=torch.bool),
+        }
     else:
         # L2D keeps its existing RGB map contract during this KITScenes
         # milestone. NVIDIA and map-less shards receive explicit invalid inputs.
@@ -157,6 +188,31 @@ def _decode_sample(
         )
         route_valid = torch.tensor(False, dtype=torch.bool)
         navigation_metadata = {}
+        shape = map_context.shape[-2:]
+        route_supervision = {
+            "distance_to_corridor_m": torch.zeros(
+                shape,
+                dtype=torch.float32,
+            ),
+            "route_heading_sin": torch.zeros(
+                shape,
+                dtype=torch.float32,
+            ),
+            "route_heading_cos": torch.zeros(
+                shape,
+                dtype=torch.float32,
+            ),
+            "route_heading_valid": torch.zeros(
+                shape,
+                dtype=torch.bool,
+            ),
+            "destination_xy_m": torch.zeros(2, dtype=torch.float32),
+            "destination_visible": torch.tensor(
+                False,
+                dtype=torch.bool,
+            ),
+            "available": torch.tensor(False, dtype=torch.bool),
+        }
 
     # Ego: raw bytes → numpy → split into history and future
     ego_bytes = sample.get("ego.npy", b"")
@@ -179,6 +235,7 @@ def _decode_sample(
         "route_mask": route_mask,
         "map_valid": map_valid,
         "route_valid": route_valid,
+        "route_supervision": route_supervision,
         "navigation_metadata": navigation_metadata,
         "egomotion_history": ego_history,
         "visual_history": torch.zeros(_VISUAL_HISTORY_DIM),
