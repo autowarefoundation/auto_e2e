@@ -61,7 +61,17 @@ def integrate_controls_torch(
     if dt <= 0.0:
         raise ValueError("dt must be positive")
 
-    speed = initial_speed.to(dtype=controls.dtype)
+    output_dtype = controls.dtype
+    integration_dtype = (
+        torch.float64
+        if controls.dtype in {torch.float32, torch.float64}
+        else torch.float32
+    )
+    controls = controls.to(dtype=integration_dtype)
+    speed = initial_speed.to(
+        device=controls.device,
+        dtype=integration_dtype,
+    )
     heading = torch.zeros_like(speed)
     x = torch.zeros_like(speed)
     y = torch.zeros_like(speed)
@@ -79,9 +89,9 @@ def integrate_controls_torch(
         headings.append(heading)
         speeds.append(speed)
     return (
-        torch.stack(positions, dim=1),
-        torch.stack(headings, dim=1),
-        torch.stack(speeds, dim=1),
+        torch.stack(positions, dim=1).to(dtype=output_dtype),
+        torch.stack(headings, dim=1).to(dtype=output_dtype),
+        torch.stack(speeds, dim=1).to(dtype=output_dtype),
     )
 
 
