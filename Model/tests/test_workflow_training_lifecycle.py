@@ -348,6 +348,13 @@ def test_training_wires_dataset_specific_trajectory_policy():
     assert '"rollout_aligned_loss": rollout_aligned_config' in (
         training_source
     )
+    assert "reconstruction audit identity differs from training" in (
+        training_source
+    )
+    assert "reconstruction_audit_decision != \"go\"" in training_source
+    assert '"reconstruction_audit": reconstruction_audit_contract' in (
+        training_source
+    )
     assert (
         '!= "navigation_supervision_v2"'
         in training_source
