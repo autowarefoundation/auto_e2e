@@ -20,6 +20,14 @@ METRIC_NAMES = (
     "wrong_branch_excess",
     "destination_error_m",
 )
+DIAGNOSTIC_NAMES = (
+    "diagnostic_predicted_offroad_rate",
+    "diagnostic_target_offroad_rate",
+    "diagnostic_predicted_route_compliance",
+    "diagnostic_target_route_compliance",
+    "diagnostic_raster_tolerance_m",
+)
+AGGREGATE_NAMES = METRIC_NAMES + DIAGNOSTIC_NAMES
 REQUIRED_METRICS = (
     "ade_3s_m",
     "fde_6_4s_m",
@@ -68,7 +76,7 @@ def aggregate_validation_records(
             )
         values = {
             name: _finite_optional(record, name)
-            for name in METRIC_NAMES
+            for name in AGGREGATE_NAMES
         }
         missing_required = [
             name for name in REQUIRED_METRICS
@@ -88,7 +96,7 @@ def aggregate_validation_records(
     normalized.sort(key=lambda item: str(item["sample_uid"]))
 
     metrics = {}
-    for name in METRIC_NAMES:
+    for name in AGGREGATE_NAMES:
         eligible = [
             record for record in normalized
             if record[name] is not None
@@ -170,11 +178,53 @@ def freeze_component_availability(
     offroad_count = int(
         metrics["offroad_excess"]["eligible_sample_count"]
     )
+    map_safety = offroad_count > 0
+    navigation = route_count >= minimum_route_samples
+    calibration = {}
+    if map_safety:
+        target_offroad = metrics[
+            "diagnostic_target_offroad_rate"
+        ]["natural"]
+        if target_offroad is None:
+            raise ValueError(
+                "map selector coverage has no target off-road diagnostic"
+            )
+        target_offroad = float(target_offroad)
+        if target_offroad >= 0.95:
+            raise ValueError(
+                "map selector target off-road rate is saturated"
+            )
+        calibration["target_offroad_rate"] = target_offroad
+    if navigation:
+        target_route_compliance = metrics[
+            "diagnostic_target_route_compliance"
+        ]["natural"]
+        if target_route_compliance is None:
+            raise ValueError(
+                "navigation selector coverage has no target route diagnostic"
+            )
+        target_route_compliance = float(target_route_compliance)
+        if target_route_compliance <= 0.05:
+            raise ValueError(
+                "navigation selector target compliance is saturated"
+            )
+        calibration["target_route_compliance"] = (
+            target_route_compliance
+        )
+    if map_safety or navigation:
+        raster_tolerance = metrics[
+            "diagnostic_raster_tolerance_m"
+        ]["natural"]
+        if raster_tolerance is None or float(raster_tolerance) <= 0.0:
+            raise ValueError(
+                "selector raster tolerance diagnostic is unavailable"
+            )
+        calibration["raster_tolerance_m"] = float(raster_tolerance)
     return {
         "trajectory": True,
         "comfort": True,
-        "map_safety": offroad_count > 0,
-        "navigation": route_count >= minimum_route_samples,
+        "map_safety": map_safety,
+        "navigation": navigation,
         "wrong_branch": (
             route_count >= minimum_route_samples
             and wrong_branch_count >= minimum_wrong_branch_samples
@@ -191,6 +241,7 @@ def freeze_component_availability(
         "minimum_wrong_branch_samples": (
             minimum_wrong_branch_samples
         ),
+        "calibration": calibration,
     }
 
 
