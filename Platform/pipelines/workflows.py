@@ -3288,6 +3288,21 @@ def train_il(
             raise ValueError(
                 "reconstruction audit coverage differs from validation"
             )
+        from evaluation.reconstruction_audit import (
+            P95_FDE_3S_LIMIT_M,
+            P95_FDE_FULL_LIMIT_M,
+        )
+
+        expected_thresholds = {
+            "p95_fde_3s_limit_m": P95_FDE_3S_LIMIT_M,
+            "p95_fde_full_limit_m": P95_FDE_FULL_LIMIT_M,
+        }
+        if audit_report.get("thresholds") != expected_thresholds:
+            raise ValueError(
+                "reconstruction audit thresholds differ from training: "
+                f"expected={expected_thresholds} "
+                f"actual={audit_report.get('thresholds')}"
+            )
         if not bool(audit_report.get("thresholds_pass", False)):
             raise ValueError(
                 "target rollout reconstruction thresholds failed; "
@@ -3300,6 +3315,7 @@ def train_il(
             "thresholds_pass": bool(
                 audit_report.get("thresholds_pass", False)
             ),
+            "thresholds": expected_thresholds,
             "audit_code_revision": provenance.get(
                 "audit_code_revision"
             ),
