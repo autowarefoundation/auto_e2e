@@ -1,0 +1,1377 @@
+# Design: Rollout-Aligned Loss and Scene-Balanced Checkpoint Selection
+
+## Document Metadata
+
+| Field | Value |
+|---|---|
+| Status | Proposed; blocked on the reconstruction audit |
+| Owner | riita10069 |
+| Created | 2026-07-26 |
+| Initial dataset | KITScenes navigation v3.1 |
+| Builds on | `Design/navigation_training_objectives.md` |
+| Training path | Flyte `train_il` only |
+| Model output | 64 steps of `(longitudinal acceleration, curvature)` at 10 Hz |
+
+## 1. Executive Summary
+
+AutoE2E is trained in control space but is evaluated primarily after those
+controls are integrated into an XY trajectory. The current action loss and
+ADE-based checkpoint selection do not fully represent that evaluation
+contract:
+
+1. a small control error can accumulate into a large long-horizon position
+   error;
+2. a checkpoint can improve average ADE while regressing safety, comfort, or
+   selected-route behavior;
+3. validation samples are averaged uniformly, so long scenes have more
+   influence than short scenes.
+
+This design makes two bounded changes:
+
+1. add a differentiable XY rollout loss and target-relative comfort/map
+   constraints while retaining the existing normalized action loss;
+2. select checkpoints with baseline-relative guardrails followed by a
+   composite score that combines natural and scene-balanced validation
+   aggregates.
+
+The training objective is:
+
+```text
+L_total =
+    L_action
+  + 0.50 * L_rollout
+  + 0.05 * L_constraint
+```
+
+For the matched experiment defined by this document, `L_total` means exactly
+these three planner-training terms. JEPA and Reasoning supervision are disabled
+in both the control and treatment runs. This isolates the effect of loss
+alignment and avoids silently changing the relative scale of unrelated
+objectives. The model architecture, route input boundary, and 64-step control
+output remain unchanged.
+
+The implementation is permitted to start only after a reconstruction audit
+shows that target controls, when integrated from the recorded initial speed,
+reconstruct the logged future pose accurately enough to serve as an XY target.
+If that audit fails, this proposal returns to design review instead of training
+against a known-inconsistent target.
+
+## 2. Motivation
+
+### 2.1 Current optimization and evaluation paths
+
+The current planner path is:
+
+```text
+camera + semantic map + selected route
+                  |
+                  v
+      64 x (acceleration, curvature)
+                  |
+          normalized Smooth L1
+```
+
+Open-loop evaluation adds another operation:
+
+```text
+64 x (acceleration, curvature)
+                  |
+        semi-implicit unicycle rollout
+                  |
+                  v
+             64 x (x, y)
+                  |
+             ADE / FDE
+```
+
+Action-space supervision remains necessary because different control sequences
+can produce similar positions and because control quality matters even when
+position error is small. It is not sufficient by itself because integration
+amplifies systematic acceleration and curvature errors over time.
+
+### 2.2 Scene imbalance
+
+The frozen validation split is scene-disjoint, but the current aggregate gives
+one equal vote to every sample. A scene with 1,000 valid windows therefore has
+ten times the influence of a scene with 100 windows. Natural aggregation is
+still useful because it describes the observed sample distribution. It should
+not be the only view used to choose a checkpoint.
+
+This design records both:
+
+- natural metrics: every validation sample has equal weight;
+- scene-balanced metrics: every `split_group_uid` has equal weight.
+
+### 2.3 Guardrail-first selection
+
+A single scalar score is useful for ranking checkpoints but must not be allowed
+to trade a serious safety regression for a small trajectory improvement.
+Selection therefore has two stages:
+
+1. reject checkpoints with incomplete metrics or baseline-relative guardrail
+   violations;
+2. rank only eligible checkpoints by the composite score.
+
+There is no ADE-only fallback.
+
+## 3. Goals and Non-Goals
+
+### 3.1 Goals
+
+1. Align planner optimization with the XY rollout used for ADE and FDE.
+2. Preserve the existing normalized action loss as the control-profile teacher.
+3. Penalize comfort and map violations only when they exceed the demonstrated
+   target behavior.
+4. Prevent long scenes from dominating checkpoint selection.
+5. Prevent checkpoint promotion when safety, comfort, or navigation guardrails
+   regress.
+6. Make metric availability, baseline identity, policy version, and selector
+   state reproducible across resume.
+7. Keep the first experiment scientifically attributable to the loss and
+   selection changes in this document.
+
+### 3.2 Non-goals
+
+- Cosmos relabeling.
+- Cosmos labels in a training loss.
+- Cosmos-derived sample weights or balancing.
+- Semantic buckets.
+- Weighted sampling.
+- Tail, top-k, or CVaR sample mining.
+- Speed or heading losses.
+- A model architecture change.
+- A new route encoder or route input to the Reasoning branch.
+- BEV segmentation auxiliary loss.
+- JEPA or Reasoning loss tuning.
+- Closed-loop acceptance.
+
+Cosmos-assisted balancing is a separate hypothesis. It should be considered
+only after this loss-alignment experiment establishes the remaining
+scene-balanced error distribution.
+
+## 4. Experiment Contract
+
+The initial experiment is a paired, three-seed comparison on one immutable
+dataset snapshot:
+
+| Arm | Planner loss | Checkpoint selection |
+|---|---|---|
+| A: control | Current normalized action loss | Current ADE/FDE policy |
+| B: treatment | Action + rollout + constraint | Guardrail-first composite |
+
+Both arms use:
+
+- identical model architecture and initialization policy;
+- identical dataset and frozen scene split;
+- identical seeds, batch size, optimizer, and maximum epochs;
+- identical camera, map, and route inputs;
+- identical JEPA and Reasoning settings, both disabled;
+- no weighted sampler or hard-example mining.
+
+Arm A is trained first. Its immutable selected checkpoint is evaluated with the
+new per-sample metric implementation and serves as Arm B's baseline artifact,
+unless an already existing production/main checkpoint has exactly the same
+model, data, and validation contracts. Arm A's composite score is computed
+retrospectively from that artifact even though Arm A itself retains the current
+ADE/FDE selection policy.
+
+If a future experiment retains JEPA or Reasoning losses, the three-term formula
+in this document must be named `L_planner`, and the separate top-level weights
+must be specified in a new policy version. They must not be added implicitly to
+the `L_total` defined here.
+
+## 5. Preflight Reconstruction Audit
+
+### 5.1 Status and purpose
+
+The audit is a spike task and a hard prerequisite, not Step 1 of the
+implementation PR. It answers whether integrated target controls are a valid
+proxy for logged future motion.
+
+The implementation PR must link an immutable audit artifact and record an
+explicit Go or No-Go decision.
+
+### 5.2 Inputs
+
+For each audited validation sample:
+
+- target acceleration and curvature, `[64, 2]`;
+- initial speed from the final causal egomotion-history step;
+- logged current pose;
+- 64 logged future positions at 10 Hz;
+- `sample_uid`;
+- `split_group_uid`.
+
+For KITScenes, the expected packed members are `pose.npy` and `gps.npy`.
+`gps.npy` contains the current point followed by 64 future points. The audit
+must first prove that these members are present and finite for every sample in
+the audited snapshot. Optional support in the generic shard schema is not
+evidence that a particular snapshot contains the data.
+
+The logged GPS trajectory is converted to current ego FLU coordinates with the
+same pose-grounded conversion used by the KITScenes benchmark. Rollout step
+`t=0` is compared with logged future point 1, not with the current point.
+
+### 5.3 Measurements
+
+For each sample, integrate the target controls with the exact rollout in
+Section 6 and compute:
+
+```text
+target rollout ADE@3s
+target rollout FDE@3s
+target rollout ADE@6.4s
+target rollout FDE@6.4s
+```
+
+The audit report contains:
+
+- sample-level records;
+- natural p50, p90, p95, mean, and maximum;
+- scene-level mean and p95;
+- the ten scenes with the highest FDE at each horizon;
+- error versus horizon plots or tables;
+- current-model pose-grounded errors on the same samples;
+- missing/non-finite sample counts.
+
+### 5.4 Provenance
+
+The audit artifact records:
+
+```text
+dataset name and version
+source revision
+packed contract digest
+validation split ID
+validation split_group_uid digest
+sorted sample_uid digest
+sample count
+audit code revision
+rollout policy version
+artifact SHA-256
+```
+
+The audit and training experiment must use the same validation snapshot
+identity. A digest mismatch is a hard error.
+
+### 5.5 Initial decision criteria
+
+The initial reference thresholds are:
+
+```text
+p95 FDE@3s   <= 1.0 m
+p95 FDE@6.4s <= 2.0 m
+```
+
+These are target-quality criteria, not product-quality gates. Exceeding either
+threshold does not automatically classify the dataset as unusable. The review
+must also determine:
+
+- whether the error is concentrated in a small number of scenes;
+- whether error grows monotonically with horizon;
+- whether target reconstruction error is small relative to current model
+  error;
+- whether timestamp alignment, speed extraction, heading convention, or GPS
+  projection explains the error.
+
+The Go decision must include a written rationale. A No-Go blocks the
+implementation in this document. The likely follow-up is a revised design that
+uses logged XY directly for `L_rollout`, while keeping target controls for
+`L_action`; that change is not silently included in this policy.
+
+## 6. Shared Rollout Contract
+
+### 6.1 Source of truth
+
+Training and evaluation use one shared PyTorch rollout implementation.
+The NumPy evaluator remains only as a parity implementation and must not define
+different motion semantics.
+
+For timestep `t`:
+
+\[
+v_t=\max(0,v_{t-1}+a_t\Delta t)
+\]
+
+\[
+\psi_t=\psi_{t-1}+v_t\kappa_t\Delta t
+\]
+
+\[
+x_t=x_{t-1}+v_t\cos(\psi_t)\Delta t
+\]
+
+\[
+y_t=y_{t-1}+v_t\sin(\psi_t)\Delta t
+\]
+
+Initial state:
+
+```text
+x[-1] = 0
+y[-1] = 0
+heading[-1] = 0
+speed[-1] = final causal speed from egomotion_history
+dt = 0.1 seconds
+```
+
+Prediction and target are integrated from the same initial state.
+
+### 6.2 Numerical contract
+
+- Inputs accept `[B, T, 2]` or the existing flattened `[B, 2T]` control shape.
+- Integration always runs in `torch.float32`.
+- The rollout executes outside AMP autocast even when the surrounding training
+  step uses AMP.
+- `torch.clamp_min(speed, 0.0)` implements the non-negative-speed constraint.
+- State updates are functional; no in-place tensor updates are permitted.
+- Controls, initial speed, and any supplied initial state must be finite.
+  Non-finite input fails before integration.
+- `dt` must be finite and positive.
+- The output contains float32 positions, headings, and speeds.
+
+The existing differentiable route rollout currently promotes float32 controls
+to float64. It must be replaced or refactored to call the shared float32
+implementation.
+
+### 6.3 Known gradient limitation
+
+When the unclamped speed is below zero, `clamp_min(0)` removes the local
+gradient from acceleration through speed. This is accepted for the first
+implementation:
+
+- no custom backward is introduced;
+- `L_action` still supervises acceleration during stopped intervals;
+- a unit test documents the zero-gradient region.
+
+## 7. Top-Level Training Loss
+
+For sample `i`:
+
+\[
+L_i =
+L_i^{action}
++0.5L_i^{rollout}
++0.05L_i^{constraint}
+\]
+
+The batch loss is the ordinary sample mean:
+
+\[
+L_{total}=\frac{1}{B}\sum_i L_i
+\]
+
+No sample weighting, repeat weighting, or hard-example selection is applied.
+Loss lambdas and all subterm definitions are checkpoint-defining policy.
+
+The action term is dimensionless after signal normalization. Rollout and map
+terms contain metric quantities. The fixed lambdas define their numerical
+trade-off; they are not interpreted as a dimensionally homogeneous physical
+sum.
+
+## 8. Action Loss
+
+The current normalized Smooth L1 loss and current dataset-policy temporal
+weights are retained.
+
+Let `s_a` and `s_kappa` be the existing KITScenes signal scales, and let `w_t`
+be the existing temporal weights. For the navigation objective v1 base, this
+means decay `0.99` with mean-one normalization. The treatment must not change
+these values relative to its paired control.
+
+\[
+L_i^{action}
+=
+\frac{1}{T}
+\sum_t w_t
+\frac{1}{2}
+\left[
+\rho\left(\frac{\hat a_t-a_t}{s_a}\right)
++
+\rho\left(\frac{\hat\kappa_t-\kappa_t}{s_\kappa}\right)
+\right]
+\]
+
+where PyTorch Smooth L1 with beta 1 is:
+
+\[
+\rho(z)=
+\begin{cases}
+0.5z^2 & |z| < 1\\
+|z|-0.5 & \text{otherwise}
+\end{cases}
+\]
+
+This term is retained because:
+
+- it directly supervises the control profile;
+- multiple action sequences can produce similar XY rollouts;
+- it preserves gradients in stopped intervals affected by the speed clamp;
+- changing action loss in the same experiment would obscure attribution.
+
+## 9. Rollout Position Loss
+
+Let `p_hat[t]` and `p[t]` be prediction and target XY positions from the shared
+rollout. Define Euclidean position error:
+
+\[
+e_t=\lVert\hat p_t-p_t\rVert_2
+\]
+
+The scalar Huber function with delta `1.0 m` is:
+
+\[
+H(e;1)=
+\begin{cases}
+0.5e^2 & e\le1\\
+e-0.5 & e>1
+\end{cases}
+\]
+
+The path term is:
+
+\[
+L_i^{path}=\frac{1}{T}\sum_t H(e_t;1)
+\]
+
+The final-position term is:
+
+\[
+L_i^{final}=H(e_T;1)
+\]
+
+The rollout term is:
+
+\[
+L_i^{rollout}
+=0.75L_i^{path}+0.25L_i^{final}
+\]
+
+Reduction is intentionally unweighted over time. `path` aligns with ADE and
+`final` keeps an explicit FDE contribution. Multiple horizon anchors, temporal
+decay, and horizon-dependent scales are not introduced in this PR.
+
+## 10. Target-Relative Constraint Loss
+
+The constraint contains only:
+
+1. comfort;
+2. selected-route and drivable-area compliance.
+
+For each sample, compute all available top-level terms and take their arithmetic
+mean:
+
+```text
+available = [comfort]
+if route or drivable supervision is available:
+    available += [map]
+L_constraint = mean(available)
+```
+
+Comfort is always available for finite controls. The map term may be absent.
+An unavailable optional term contributes neither a zero nor a denominator.
+When no route/drivable subterm is available, `L_map` is reported as finite zero
+for logging, while `L_constraint` contains comfort only.
+
+### 10.1 Comfort quantities
+
+Only longitudinal jerk and lateral acceleration are used:
+
+\[
+j_t=\frac{a_t-a_{t-1}}{\Delta t},\quad t=1,\ldots,T-1
+\]
+
+\[
+a_t^{lat}=v_t^2\kappa_t
+\]
+
+The first jerk step does not invent an `a[-1]`; jerk is computed over the 63
+adjacent action differences, matching the existing evaluator convention.
+
+Thresholds:
+
+```text
+longitudinal jerk: 4.13 m/s^3
+lateral acceleration: 4.89 m/s^2
+```
+
+For quantity `z` and threshold `c`, define:
+
+\[
+q(z;c)=\operatorname{ReLU}\left(\frac{|z|}{c}-1\right)^2
+\]
+
+Prediction and target are compared at the trajectory level:
+
+\[
+Q^{pred}=\max_t q(\hat z_t;c)
+\]
+
+\[
+Q^{target}=\max_t q(z_t;c)
+\]
+
+\[
+e^{comfort}
+=\operatorname{ReLU}
+\left(
+Q^{pred}-\operatorname{stopgrad}(Q^{target})
+\right)
+\]
+
+\[
+L_i^{comfort}
+=\frac{1}{2}
+\left(e_i^{jerk}+e_i^{lat}\right)
+\]
+
+This comparison deliberately ignores timing shifts. If prediction and target
+have the same peak normalized violation at different timesteps, the additional
+comfort loss is zero.
+
+### 10.2 Ego footprint
+
+Map compliance is evaluated with four oriented footprint corners, not the ego
+center. For center `(x_t, y_t)`, heading `psi_t`, length `l`, and width `w`,
+the local offsets are:
+
+```text
+(+l/2, +w/2)
+(+l/2, -w/2)
+(-l/2, +w/2)
+(-l/2, -w/2)
+```
+
+The initial policy uses a versioned `4.8 m x 2.0 m` proxy footprint for both
+prediction and target. The footprint source and dimensions are part of
+checkpoint metadata. If authoritative KITScenes vehicle dimensions become
+available before implementation, the policy value may be corrected once,
+before the audit and A/B snapshots are frozen. It may not change between arms
+or during a run.
+
+### 10.3 Outside-distance fields
+
+Each valid region is represented by a metric outside-distance field:
+
+```text
+0 inside the valid region
+Euclidean distance in metres outside the valid region
+```
+
+Required fields:
+
+- selected-route corridor outside distance;
+- drivable-area outside distance.
+
+The existing `route_supervision.npz::distance_to_corridor_m` supplies the first
+field. KITScenes preprocessing must add a loss-only drivable-area distance
+field derived from the canonical semantic drivable mask. It is not a model
+input and does not change inference.
+
+Distance fields are generated offline and losslessly stored as float32. Runtime
+sampling uses bilinear `grid_sample(align_corners=False)`. A point beyond the
+raster receives the sampled boundary distance plus its differentiable Euclidean
+distance beyond raster bounds; leaving the crop must not appear as zero
+distance.
+
+For region `r`, timestep `t`, and four transformed corners `c`:
+
+\[
+d_{t,r}=\max_c D_r(c_{t})
+\]
+
+The maximum means the entire rectangular footprint must fit inside the region.
+Prediction and target use the same field, geometry, and footprint.
+
+### 10.4 Target-relative map excess
+
+For each region:
+
+\[
+e_{t,r}^{map}
+=
+\operatorname{ReLU}
+\left(
+d_{t,r}^{pred}
+-
+\operatorname{stopgrad}(d_{t,r}^{target})
+-
+0.10
+\right)
+\]
+
+\[
+L_{i,r}^{map}
+=\frac{1}{T}\sum_t e_{t,r}^{map}
+\]
+
+The `0.10 m` tolerance absorbs rasterization and bilinear-sampling artifacts.
+It does not permit a fixed absolute map violation; it permits only a small
+difference relative to the target.
+
+Availability:
+
+- drivable term is active only when `map_valid=true` and its field is present;
+- route term is active only when `route_valid=true` and its field is present;
+- when both are active, `L_map` is their arithmetic mean;
+- when only one is active, `L_map` equals that term;
+- unavailable terms are masked before reduction;
+- an entirely unavailable map term returns differentiable finite zero for
+  logging.
+
+Centerline distance is not used. The selected corridor, not the route
+centerline, defines route compliance.
+
+## 11. Data and Supervision Contract
+
+### 11.1 Required sample identity
+
+Validation requires:
+
+```text
+sample_uid
+split_group_uid
+```
+
+Missing, empty, or duplicate `sample_uid` values fail validation. Missing or
+empty `split_group_uid` values also fail validation; hash-bucket fallback is not
+allowed for this checkpoint-selection policy. The packed `meta.json` already
+contains `split_group_uid`; the decoder and collator must expose it explicitly
+in each validation batch.
+
+### 11.2 Loss-only map supervision
+
+The packed training contract adds or versions a loss-only artifact containing:
+
+```text
+drivable_outside_distance_m: [H, W] float32
+available:                    scalar uint8
+geometry_id:                  metadata
+```
+
+Its geometry ID must equal the semantic map and route-supervision geometry.
+The artifact is generated deterministically in Flyte preprocessing without an
+external map API.
+
+The selected-route distance field remains in `route_supervision.npz`. A
+contract version bump is required because training must fail rather than
+silently disable a requested constraint when the field is missing.
+
+### 11.3 No inference contract change
+
+The model continues to receive:
+
+```text
+camera views
+map_context
+route_mask
+map_valid
+route_valid
+visual history
+egomotion history
+projection
+```
+
+Distance fields and logged future poses are train/evaluation-only values. They
+are never passed to `AutoE2E.forward` and do not enter the Reasoning branch.
+
+## 12. Per-Sample Validation Metrics
+
+Checkpoint selection starts from per-sample records. Aggregates must not be
+computed from already averaged batches.
+
+### 12.1 Trajectory
+
+Using prediction and target action rollouts:
+
+```text
+ADE@3s
+FDE@6.4s
+```
+
+Other existing horizons remain diagnostic but are not selector inputs.
+
+### 12.2 Comfort excess
+
+Per-sample comfort excess is the same target-relative trajectory-level quantity
+used by the loss:
+
+```text
+comfort_excess = 0.5 * (jerk_peak_excess + lateral_accel_peak_excess)
+```
+
+### 12.3 Off-road excess
+
+For each timestep, mark whether any footprint corner is outside the drivable
+region. Let `r_pred` and `r_target` be the resulting fractions over 64 steps:
+
+\[
+offroad\_excess=\max(0,r^{pred}-r^{target})
+\]
+
+This selector metric is dimensionless and in `[0, 1]`. The training map loss
+uses metric outside distance; the selector uses an interpretable violation
+fraction.
+
+### 12.4 Route gap
+
+Let `q_pred` and `q_target` be the fractions of timesteps for which all
+footprint corners are inside the selected-route corridor:
+
+\[
+route\_gap=\max(0,q^{target}-q^{pred})
+\]
+
+It is defined only for route-valid samples.
+
+### 12.5 Wrong-branch excess
+
+For an eligible junction, `b` is a binary wrong-branch indicator under the
+existing selected-route evaluation contract:
+
+\[
+wrong\_branch\_excess=\max(0,b^{pred}-b^{target})
+\]
+
+It is defined only when the target provides valid branch evidence.
+
+### 12.6 Destination error
+
+For a visible destination:
+
+\[
+destination\_error
+=
+\left|
+\lVert \hat p_T-d\rVert_2
+-
+\lVert p_T-d\rVert_2
+\right|
+\]
+
+It is reported in metres and remains target-relative.
+
+## 13. Validation Aggregation
+
+### 13.1 Natural aggregate
+
+For metric `m` with eligible sample set `S_m`:
+
+\[
+M_{natural}=\frac{1}{|S_m|}\sum_{i\in S_m}m_i
+\]
+
+Record at minimum:
+
+```text
+natural ADE@3s
+natural FDE@6.4s
+natural off-road excess
+natural comfort excess
+natural route gap
+natural wrong-branch excess
+natural destination error
+eligible sample count for every metric
+```
+
+### 13.2 Scene-balanced aggregate
+
+For metric `m`, first group eligible records by `split_group_uid`. Let `S_g,m`
+be the eligible samples in scene `g`:
+
+\[
+\bar m_g=\frac{1}{|S_{g,m}|}\sum_{i\in S_{g,m}}m_i
+\]
+
+\[
+M_{scene}=\frac{1}{G_m}\sum_g\bar m_g
+\]
+
+Only scenes with at least one eligible record for that metric enter its
+aggregate. Record:
+
+```text
+scene-balanced ADE@3s
+scene-balanced FDE@6.4s
+scene-balanced off-road excess
+scene-balanced comfort excess
+scene-balanced route gap
+scene-balanced wrong-branch excess
+scene-balanced destination error
+eligible scene count for every metric
+```
+
+For each metric's scene-mean distribution also record:
+
+```text
+scene mean
+scene p50
+scene p90
+```
+
+`scene mean` is the scene-balanced aggregate. Percentiles use
+`numpy.quantile(method="linear")` on scene means sorted by
+`split_group_uid`; this fixes the quantile convention and deterministic input
+order.
+
+Adding duplicate samples to one scene without changing that scene's mean must
+not change the scene-balanced aggregate.
+
+## 14. Baseline Artifact and Component Availability
+
+### 14.1 Immutable baseline
+
+Before epoch 1, the explicitly supplied immutable baseline checkpoint is
+evaluated on the exact validation snapshot. For the paired experiment this is
+normally Arm A's selected checkpoint. An existing production/main checkpoint
+may be used only when all model, data, and validation contracts match. The
+selector stores:
+
+```text
+baseline checkpoint URI
+baseline checkpoint SHA-256
+baseline model/config identity
+validation snapshot identity and digests
+baseline metric artifact URI and SHA-256
+selector policy version
+```
+
+Baseline metrics are never taken from another snapshot or copied from an older
+run by name alone. Dynamic aliases such as `latest` or a live branch name are
+not valid baseline identities. A missing identity or digest mismatch fails run
+initialization.
+
+### 14.2 Frozen availability
+
+Component availability is computed once from the baseline evaluation and
+validation data, then frozen before epoch 1:
+
+- trajectory `D`: always required;
+- comfort `C`: always required;
+- map safety `S`: available when semantic-map supervision has finite eligible
+  samples;
+- route navigation: available when route-valid sample count is at least 50;
+- wrong branch: available when eligible junction sample count is at least 20;
+- destination: available when at least one finite destination record exists.
+
+Coverage counts and exclusion reasons are stored in checkpoint metadata.
+Coverage changes during an epoch are a contract error, not a reason to
+silently reweight the score.
+
+If route navigation is unavailable, the entire navigation component `N` is
+excluded. Within an available navigation component, unavailable wrong-branch
+or destination subcomponents are removed and the remaining navigation weights
+are renormalized. This prevents missing evidence from being treated as perfect
+behavior.
+
+## 15. Metric Completeness and Guardrails
+
+### 15.1 Selection order
+
+Every epoch follows this order:
+
+1. verify validation snapshot and sample identity;
+2. verify all metrics required by frozen component availability are present,
+   finite, and have the expected coverage;
+3. compute baseline-relative guardrails;
+4. compute the composite score when metric-complete;
+5. rank the checkpoint only if all guardrails pass.
+
+A metric-incomplete checkpoint is ineligible and records explicit missing or
+non-finite metric names. It is not assigned a synthetic score.
+
+### 15.2 Default guardrails
+
+| Metric | Eligibility requirement |
+|---|---|
+| Natural ADE@3s | `<= max(2.5 m, baseline * 1.10)` |
+| Natural FDE@6.4s | `<= max(6.0 m, baseline * 1.10)` |
+| Natural off-road excess | `<= max(0.05, baseline + 0.02)` |
+| Natural comfort excess | `<= max(0.10, baseline + 0.03)` |
+| Natural route gap | `<= max(0.10, baseline + 0.03)` |
+| Natural wrong-branch excess | `<= max(0.10, baseline + 0.03)` |
+
+Optional guardrails apply only when their components are frozen as available.
+Scene-balanced metrics participate in the score and final acceptance criteria;
+the initial hard guardrail table remains natural to avoid introducing
+unmeasured scene-quantile noise into eligibility.
+
+Guardrail thresholds, baseline values, observed values, and pass/fail results
+are stored per epoch.
+
+## 16. Composite Checkpoint Score
+
+### 16.1 Trajectory utility
+
+\[
+D_{natural}
+=
+0.6\frac{1}{1+ADE^{natural}_{3s}/2.5}
++
+0.4\frac{1}{1+FDE^{natural}_{6.4s}/6.0}
+\]
+
+\[
+D_{scene}
+=
+0.6\frac{1}{1+ADE^{scene}_{3s}/2.5}
++
+0.4\frac{1}{1+FDE^{scene}_{6.4s}/6.0}
+\]
+
+\[
+D=0.5D_{natural}+0.5D_{scene}
+\]
+
+### 16.2 Comfort utility
+
+\[
+\bar c
+=
+0.5comfort^{natural}_{excess}
++
+0.5comfort^{scene}_{excess}
+\]
+
+\[
+C=1-\operatorname{clip}\left(\frac{\bar c}{0.15},0,1\right)
+\]
+
+### 16.3 Map-safety utility
+
+\[
+\bar r
+=
+0.5offroad^{natural}_{excess}
++
+0.5offroad^{scene}_{excess}
+\]
+
+\[
+S=1-\operatorname{clip}\left(\frac{\bar r}{0.10},0,1\right)
+\]
+
+### 16.4 Navigation utility
+
+\[
+\bar q
+=
+0.5route\_gap^{natural}
++
+0.5route\_gap^{scene}
+\]
+
+\[
+N_{route}
+=
+1-\operatorname{clip}\left(\frac{\bar q}{0.15},0,1\right)
+\]
+
+Destination error also combines natural and scene-balanced views:
+
+\[
+\bar d
+=
+0.5destination\_error^{natural}
++
+0.5destination\_error^{scene}
+\]
+
+\[
+N_{destination}=\frac{1}{1+\bar d/7.5}
+\]
+
+When wrong-branch evidence is available:
+
+\[
+\bar b
+=
+0.5wrong\_branch\_excess^{natural}
++
+0.5wrong\_branch\_excess^{scene}
+\]
+
+\[
+N
+=
+0.5N_{route}
++0.3(1-\operatorname{clip}(\bar b,0,1))
++0.2N_{destination}
+\]
+
+Without wrong-branch evidence:
+
+\[
+N=0.7N_{route}+0.3N_{destination}
+\]
+
+If destination evidence is unavailable, its term is removed and the remaining
+navigation weights are renormalized.
+
+### 16.5 Final score
+
+\[
+Score=0.50D+0.15C+0.15S+0.20N
+\]
+
+If `S` or `N` is unavailable, remove the component and renormalize the remaining
+top-level weights to sum to one. Availability and effective weights are fixed
+before epoch 1.
+
+All component inputs, component utilities, effective weights, and final score
+are logged. An ineligible but metric-complete checkpoint still has a diagnostic
+score; guardrail failure prevents selection regardless of that score.
+
+## 17. Scheduler, Early Stopping, and Selection
+
+### 17.1 Scheduler
+
+Use:
+
+```text
+ReduceLROnPlateau(
+    mode="max",
+    factor=0.5,
+    patience=1,
+    threshold=0.0005,
+    threshold_mode="abs",
+)
+```
+
+For every metric-complete epoch, pass the composite score to the scheduler.
+Metric-incomplete epochs do not call `scheduler.step`; they remain ineligible
+and are treated as bad epochs after eligibility has begun.
+
+Initial improvement threshold:
+
+```text
+min_delta = 0.0005
+early_stopping_patience = 3
+```
+
+The scheduler threshold and selector `min_delta` intentionally match. The
+three-seed experiment must report epoch-to-epoch score noise. A later change to
+either threshold or patience requires a selector policy-version bump.
+
+### 17.2 Eligibility and bad epochs
+
+- Before the first eligible checkpoint, early stopping is disabled.
+- An eligible checkpoint improves best only when
+  `score > best_score + min_delta`.
+- After the first eligible checkpoint, an ineligible epoch is a bad epoch.
+- After the first eligible checkpoint, an eligible non-improving epoch is a
+  bad epoch.
+- If no eligible checkpoint exists, training runs through all requested
+  epochs.
+- The final checkpoint is always saved.
+- ADE-only fallback is forbidden.
+
+### 17.3 Best ineligible diagnostics
+
+Among metric-complete ineligible checkpoints, retain:
+
+```text
+best_ineligible_score
+best_ineligible_epoch
+best_ineligible_checkpoint_uri
+best_ineligible_checkpoint_sha256
+best_ineligible_guardrail_violations
+```
+
+This is diagnostic state and never receives the `best` registry role.
+
+## 18. Checkpoint, Resume, and Registry Contract
+
+### 18.1 Saved selector state
+
+Every immutable epoch checkpoint stores:
+
+```text
+selector policy version
+baseline checkpoint and metric-artifact identities
+validation snapshot and sample/group digests
+frozen component availability and effective weights
+metric history with natural and scene-balanced aggregates
+guardrail results
+best eligible checkpoint, or null
+best ineligible diagnostic checkpoint, or null
+first eligible epoch, or null
+bad epoch count
+scheduler state
+optimizer/scaler/RNG state
+```
+
+Resume rejects any mismatch in policy, baseline, validation identity,
+availability, score weights, guardrails, or loss configuration. Restoring only
+model and optimizer state is insufficient.
+
+### 18.2 Workflow outputs
+
+The training workflow must distinguish:
+
+- `final`: always exists;
+- `best_eligible`: optional;
+- `best_ineligible`: optional diagnostic identity.
+
+The current workflow assumes that a best checkpoint always exists. That
+assumption must be removed. A no-eligible run returns the final artifact and
+metadata but no `best_eligible` role. Downstream automatic promotion requires
+`best_eligible`; explicit diagnostic evaluation may target `final`.
+
+### 18.3 Model registry
+
+Registry roles are:
+
+```text
+final
+best
+diagnostic-ineligible
+```
+
+Only an eligible checkpoint may receive `best`. A no-eligible run may register
+`final` for traceability but must not create or update a best pointer. The
+ineligible diagnostic role must include its guardrail violations and cannot be
+resolved by production inference as the selected model.
+
+## 19. MLflow and Auditability
+
+Log the following namespaces:
+
+```text
+train/loss_action
+train/loss_rollout_path
+train/loss_rollout_final
+train/loss_rollout
+train/loss_comfort_jerk
+train/loss_comfort_lateral
+train/loss_map_route
+train/loss_map_drivable
+train/loss_constraint
+train/loss_total
+
+validation/natural/*
+validation/scene_balanced/*
+validation/scene_distribution/*/{count,mean,p50,p90}
+validation/coverage/*
+
+selection/component/*
+selection/effective_weight/*
+selection/guardrail/*
+selection/score
+selection/eligible
+selection/bad_epochs
+selection/best_ineligible/*
+
+audit/reconstruction/*
+```
+
+Checkpoint metadata and MLflow must agree on epoch, score, eligibility,
+baseline identity, and validation digests. The immutable checkpoint metadata is
+authoritative if an MLflow retry occurs.
+
+## 20. Implementation Plan
+
+### Preflight: separate spike
+
+1. Extract the shared rollout into a minimal auditable function.
+2. Verify pose availability and sample alignment on the frozen snapshot.
+3. Run target-control reconstruction against logged future pose.
+4. Publish the immutable audit artifact and Go/No-Go decision.
+5. Stop and revise the design if the decision is No-Go.
+
+### PR Step 1: shared rollout
+
+- Add the float32 PyTorch source-of-truth rollout.
+- Refactor training and evaluation callers to use it where practical.
+- Retain a NumPy parity implementation for external/CPU reports.
+- Add AMP, finite-input, gradient, and parity tests.
+
+### PR Step 2: minimal planner loss
+
+- Preserve normalized action loss.
+- Add path and final rollout losses.
+- Add trajectory-level target-relative comfort.
+- Add pointwise target-relative route/drivable footprint loss.
+- Add deterministic offline drivable distance supervision.
+- Keep ordinary sample-mean reduction.
+
+### PR Step 3: validation records and aggregation
+
+- Emit one complete record per validation `sample_uid`.
+- Require `split_group_uid`.
+- Compute natural and scene-balanced aggregates.
+- Log scene counts and deterministic p50/p90 distributions.
+
+### PR Step 4: checkpoint selector
+
+- Load and verify immutable baseline metrics.
+- Freeze component availability before epoch 1.
+- Apply metric completeness and guardrails before ranking.
+- Compute the natural/scene-balanced composite score.
+- Persist best eligible and best ineligible states independently.
+
+### PR Step 5: Flyte lifecycle integration
+
+- Change scheduler input and mode.
+- Implement eligibility-aware early stopping.
+- Update checkpoint and resume validation.
+- Update MLflow logging and model-registry roles.
+- Ensure no-eligible runs complete without inventing a best checkpoint.
+
+## 21. Test Plan
+
+### 21.1 Reconstruction audit
+
+1. Report target-rollout versus logged-pose p50/p90/p95 at 3 s and 6.4 s.
+2. Persist dataset, validation-group, and sample UID digests.
+3. Report scene-level distributions and worst scenes.
+4. Reject missing, misaligned, or non-finite pose records.
+
+### 21.2 Rollout
+
+1. PyTorch and NumPy integration agree within the documented tolerance.
+2. Prediction equal to target produces zero rollout loss.
+3. Position loss has a finite non-zero gradient to acceleration.
+4. Position loss has a finite non-zero gradient to curvature.
+5. Braking through zero documents the clamp's zero-gradient region.
+6. AMP input still produces float32 rollout internals and outputs.
+7. Non-finite controls or initial state fail before integration.
+8. Flattened and structured controls produce identical output.
+
+### 21.3 Constraint loss
+
+1. Prediction equal to target produces zero comfort loss.
+2. Equal comfort peaks at shifted timesteps produce zero additional loss.
+3. A larger predicted peak increases comfort loss.
+4. Prediction equal to target produces zero map loss.
+5. Greater predicted footprint outside distance increases map loss.
+6. Corner checks detect violations missed by the ego center.
+7. Route and map validity masks act independently.
+8. Missing optional map supervision returns finite differentiable zero.
+9. Out-of-raster motion is penalized and remains differentiable.
+
+### 21.4 Aggregation
+
+1. Natural aggregation equals the direct eligible-sample mean.
+2. Scene-balanced aggregation equals the mean of scene means.
+3. Duplicating samples within one scene without changing its mean does not
+   change scene-balanced output.
+4. Missing `split_group_uid` fails validation.
+5. Scene p50/p90 use the fixed linear quantile method deterministically.
+6. Metric-specific eligibility produces the expected scene counts.
+
+### 21.5 Checkpoint selection
+
+1. Metric-incomplete checkpoints are ineligible.
+2. Guardrail-failing checkpoints never become best.
+3. Eligible checkpoints rank by composite score.
+4. Scene-balanced trajectory utility changes the score.
+5. Route utility is target-relative.
+6. Coverage shortage excludes optional components and renormalizes weights.
+7. Component availability does not change after epoch 1.
+8. Best-ineligible diagnostics are persisted.
+9. Early stopping cannot trigger before the first eligible checkpoint.
+10. A no-eligible run saves final and creates no best role.
+11. Resume reproduces the same best epoch and bad-epoch count.
+12. Resume rejects baseline, policy, availability, or validation drift.
+
+### 21.6 Performance
+
+Benchmark:
+
+- rollout forward;
+- rollout forward and backward;
+- full training step;
+- validation aggregation and selector overhead.
+
+The allowed full-step throughput regression is at most 12% relative to the
+paired control under the same batch and hardware configuration.
+
+## 22. Acceptance Criteria
+
+Run three paired seeds on the same immutable snapshot.
+
+Primary criteria:
+
+1. Paired median composite score for B is not worse than A.
+2. At least two of three seeds have B composite score greater than or equal to
+   A.
+3. Paired median natural ADE@3s and FDE@6.4s regress by no more than 5%.
+4. Paired median scene-balanced ADE@3s or scene-balanced FDE@6.4s improves.
+5. No safety, comfort, or navigation metric exceeds its baseline-relative
+   guardrail.
+6. Full training-step throughput regresses by no more than 12%.
+
+Required diagnostic report:
+
+- natural ADE/FDE;
+- scene-balanced ADE/FDE;
+- scene p50/p90;
+- each rollout and constraint loss;
+- reconstruction audit errors;
+- coverage and effective score weights;
+- best eligible and best ineligible checkpoint identities;
+- all guardrail values and violations.
+
+A fixed 5% improvement and universal absolute-threshold success across all
+seeds are not required.
+
+## 23. Risks and Mitigations
+
+### Target controls do not reconstruct logged motion
+
+Mitigation: the preflight audit blocks implementation. Do not optimize a
+rollout target known to disagree with pose-grounded evaluation.
+
+### Constraint scale overwhelms action learning
+
+Mitigation: fixed small top-level weight, per-term logging, gradient tests, and
+matched throughput/training diagnostics. Any weight change creates a new loss
+policy version.
+
+### Footprint or raster artifacts create false map penalties
+
+Mitigation: prediction is compared relative to target on the same geometry,
+with a `0.10 m` tolerance. Footprint dimensions and geometry are checkpoint
+metadata.
+
+### Composite score hides a regression
+
+Mitigation: guardrails run before score ranking, all components remain visible,
+and no scalar score can override ineligibility.
+
+### Sparse navigation evidence makes ranking unstable
+
+Mitigation: freeze coverage before epoch 1, require at least 50 route-valid and
+20 wrong-branch-eligible samples, and exclude unavailable components rather
+than treating missing evidence as success.
+
+### No checkpoint passes guardrails
+
+Mitigation: run the requested epochs, save final, retain best-ineligible
+diagnostics, and avoid registering an invented best checkpoint.
+
+## 24. Final Decision
+
+This proposal changes only:
+
+1. planner training loss by retaining action supervision and adding XY rollout,
+   target-relative comfort, and target-relative footprint map constraints;
+2. validation by adding natural and `split_group_uid` scene-balanced
+   aggregation;
+3. checkpoint lifecycle by applying immutable-baseline guardrails before a
+   composite score, with explicit coverage and resume contracts.
+
+It does not add Cosmos supervision, sample balancing, tail mining, speed or
+heading losses, JEPA/Reasoning objectives, or architecture changes.
+
+The primary hypothesis is:
+
+> Rollout-aligned planner loss improves scene-balanced ADE or FDE without
+> violating natural-distribution trajectory, safety, comfort, or navigation
+> guardrails.
+
+The reconstruction audit is the gate that determines whether this hypothesis
+can be tested with integrated target controls. The three-seed paired experiment
+then determines whether loss alignment is sufficient or whether a later,
+separate data-balancing proposal is justified.
