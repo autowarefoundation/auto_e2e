@@ -41,6 +41,7 @@ def _supervision(
         "destination_xy_m": torch.tensor([[32.0, 0.0]]),
         "destination_visible": torch.tensor([destination_visible]),
         "available": torch.tensor([True]),
+        "drivable_available": torch.tensor([True]),
     }
 
 
@@ -162,3 +163,24 @@ def test_inside_metrics_use_half_pixel_raster_tolerance():
     assert inside["diagnostic_target_route_compliance"] == 1.0
     assert outside["diagnostic_target_offroad_rate"] == 1.0
     assert outside["diagnostic_target_route_compliance"] == 0.0
+
+
+def test_missing_drivable_field_is_unavailable_not_perfect():
+    supervision = _supervision(torch.zeros(1, 256, 256))
+    supervision["drivable_available"] = torch.tensor([False])
+
+    record = build_rollout_validation_records(
+        _controls(),
+        _controls(),
+        torch.tensor([5.0]),
+        _logged_straight(),
+        supervision,
+        torch.tensor([True]),
+        torch.tensor([True]),
+        ["sample-a"],
+        ["scene-a"],
+    )[0]
+
+    assert record["offroad_excess"] is None
+    assert record["diagnostic_target_offroad_rate"] is None
+    assert record["route_gap"] == 0.0
