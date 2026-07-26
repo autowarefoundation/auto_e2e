@@ -358,6 +358,7 @@ class RolloutAlignedLoss(nn.Module):
             "distance_to_corridor_m",
             "distance_to_drivable_m",
             "available",
+            "drivable_available",
         }
         missing = required_fields - set(route_supervision)
         if missing:
@@ -392,6 +393,16 @@ class RolloutAlignedLoss(nn.Module):
             raise ValueError(
                 "navigation supervision availability must have shape [B]"
             )
+        drivable_artifact_available = route_supervision[
+            "drivable_available"
+        ].to(
+            device=predicted.device,
+            dtype=torch.bool,
+        )
+        if drivable_artifact_available.shape != (batch_size,):
+            raise ValueError(
+                "drivable supervision availability must have shape [B]"
+            )
 
         route_active = (
             route_valid.to(device=predicted.device, dtype=torch.bool)
@@ -400,6 +411,7 @@ class RolloutAlignedLoss(nn.Module):
         drivable_active = (
             map_valid.to(device=predicted.device, dtype=torch.bool)
             & artifact_available
+            & drivable_artifact_available
         )
         route_per_sample = self._region_excess(
             fields["distance_to_corridor_m"],
