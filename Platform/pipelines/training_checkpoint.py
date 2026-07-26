@@ -225,19 +225,37 @@ def update_best_pointer(
     checkpoint_sha256: str,
     ade: float,
     fde: float,
+    selection: Mapping[str, Any] | None = None,
 ) -> str:
     """Update the versioned best pointer after a metric improvement."""
     key = best_pointer_key(run_id)
+    pointer = {
+        "schema_version": (
+            "best_checkpoint_pointer_v2"
+            if selection is not None
+            else "best_checkpoint_pointer_v1"
+        ),
+        "run_id": run_id,
+        "epoch": epoch,
+        "checkpoint_uri": checkpoint_uri,
+        "checkpoint_sha256": checkpoint_sha256,
+        "ade": ade,
+        "fde": fde,
+    }
+    if selection is not None:
+        policy_version = selection.get("policy_version")
+        score = selection.get("score")
+        if not isinstance(policy_version, str) or not policy_version:
+            raise ValueError(
+                "checkpoint selection has no policy version"
+            )
+        if not isinstance(score, (int, float)):
+            raise ValueError(
+                "checkpoint selection has no numeric score"
+            )
+        pointer["selection"] = dict(selection)
     body = json.dumps(
-        {
-            "schema_version": "best_checkpoint_pointer_v1",
-            "run_id": run_id,
-            "epoch": epoch,
-            "checkpoint_uri": checkpoint_uri,
-            "checkpoint_sha256": checkpoint_sha256,
-            "ade": ade,
-            "fde": fde,
-        },
+        pointer,
         sort_keys=True,
         separators=(",", ":"),
     ).encode("ascii")
