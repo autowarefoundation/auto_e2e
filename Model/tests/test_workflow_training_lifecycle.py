@@ -601,6 +601,10 @@ def test_rollout_control_arm_uses_composite_selector_without_rollout_loss():
     assert '"calibration_report"' in source
     assert '"selection/effective_weight/{name}"' in source
     assert '"selection/calibration/min_rank_correlation"' in source
+    assert '"top_level_weights": dict(TOP_LEVEL_WEIGHTS)' in source
+    assert '"utility_scales": dict(UTILITY_SCALES)' in source
+    assert '"train/checkpoint_selector_weight_{name}"' in source
+    assert '"train/checkpoint_selector_scale_{name}"' in source
     assert '"train/loss_rollout"' in source
     assert '"train/loss_comfort_jerk"' in source
     assert '"train/loss_comfort_lateral_acceleration"' in source
