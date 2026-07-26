@@ -4534,6 +4534,7 @@ def train_il(
 
         checkpoint_selection = None
         validation_aggregates = None
+        validation_aggregate_summary = None
         if selector_enabled:
             from evaluation.checkpoint_selection import (
                 aggregate_validation_records,
@@ -4563,6 +4564,20 @@ def train_il(
                 validation_aggregates,
                 selector_availability,
             )
+            validation_aggregate_summary = {
+                "sample_count": validation_aggregates["sample_count"],
+                "scene_count": validation_aggregates["scene_count"],
+                "metrics": {
+                    metric_name: {
+                        key: value
+                        for key, value in aggregate.items()
+                        if key != "scene_means"
+                    }
+                    for metric_name, aggregate in validation_aggregates[
+                        "metrics"
+                    ].items()
+                },
+            }
             improved = (
                 best_checkpoint is None
                 or score_is_better(
@@ -4620,7 +4635,7 @@ def train_il(
             "validation_sample_count": validation["sample_count"],
             "validation_sample_uid_digest": validation_digest,
             "checkpoint_selection": checkpoint_selection,
-            "validation_aggregates": validation_aggregates,
+            "validation_aggregates": validation_aggregate_summary,
             "improved": improved,
         }
         metric_history.append(history_entry)
