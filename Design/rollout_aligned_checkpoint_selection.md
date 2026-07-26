@@ -7,7 +7,7 @@
 | Status | Proposed; blocked on the reconstruction audit |
 | Owner | riita10069 |
 | Created | 2026-07-26 |
-| Initial dataset | KITScenes navigation v3.1 |
+| Initial dataset | KITScenes navigation v3.2 |
 | Builds on | `Design/navigation_training_objectives.md` |
 | Training path | Flyte `train_il` only |
 | Model output | 64 steps of `(longitudinal acceleration, curvature)` at 10 Hz |
@@ -166,8 +166,8 @@ dataset snapshot:
 
 | Arm | Planner loss | Checkpoint selection |
 |---|---|---|
-| A: control | Current normalized action loss | Weighted composite score |
-| B: treatment | Action + rollout + constraint | Weighted composite score |
+| A: `rollout_aligned_control_v1` | Current normalized action loss | Weighted composite score |
+| B: `rollout_aligned_planner_v1` | Action + rollout + constraint | Weighted composite score |
 
 Both arms use:
 
@@ -944,6 +944,12 @@ that no utility is almost always saturated at zero or one. A sensitivity report
 recomputes rankings after independently changing each top-level weight by
 `+/-20%` and renormalizing. This calibrates units and rank stability without
 using treatment-run outcomes to tune the policy.
+
+The workflow stores this report after every epoch. A one-epoch Smoke provides
+utility-saturation evidence but not ranking evidence; two or more checkpoints
+add top-1 stability and Spearman rank correlation. Before the paired three-seed
+experiment, the same report is run over the available baseline checkpoint
+history and retained with the experiment artifacts.
 
 ## 15. Metric Completeness and Ranking
 
