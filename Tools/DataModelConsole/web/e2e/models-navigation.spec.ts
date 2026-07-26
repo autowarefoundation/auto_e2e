@@ -154,6 +154,40 @@ const experiments = [
     metrics: {},
   },
   {
+    run_id: "run-full-failed",
+    run_name: "kitscenes-full-failed",
+    experiment_id: "11",
+    experiment_name: "auto-e2e",
+    mlflow_status: "FAILED",
+    start_time: NOW - 20 * DAY_MS,
+    end_time: NOW - 20 * DAY_MS + 100_000,
+    dataset: "s3://auto-e2e/KITScenes",
+    dataset_version: "v3.0",
+    data_fingerprint: "fingerprint-kitscenes-full",
+    validation_scope: "full",
+    validation_split_id: "split-kitscenes-full",
+    backbone: "AutoE2E",
+    route_conditioning: true,
+    seed: "7",
+    epochs: "2",
+    lineage_status: "partial",
+    primary_execution_id: "flyte-full-failed",
+    primary_execution_url:
+      "https://flyte.example/console/projects/auto-e2e/domains/development/executions/flyte-full-failed",
+    mlflow_url: "https://mlflow.example/#/experiments/11/runs/run-full-failed",
+    train_execution: {
+      execution_id: "flyte-full-failed",
+      workflow_name: "full_run",
+      phase: "FAILED",
+      started_at: "2026-07-13T00:00:00Z",
+      duration_s: 100,
+    },
+    model_versions: [],
+    params: {},
+    tags: {},
+    metrics: {},
+  },
+  {
     run_id: "run-unlinked",
     run_name: "legacy-l2d-run",
     experiment_id: "9",
@@ -163,7 +197,6 @@ const experiments = [
     end_time: NOW - 120 * DAY_MS + 100_000,
     dataset: "s3://auto-e2e/L2D",
     dataset_version: "v1.0",
-    validation_scope: "subset",
     validation_split_id: "split-l2d-smoke",
     backbone: "legacy",
     lineage_status: "missing",
@@ -181,12 +214,12 @@ async function mockExperiments(page: Page) {
     fulfillJSON(route, {
       generated_at: "2026-07-26T00:00:00Z",
       summary: {
-        total: 4,
+        total: 5,
         running: 1,
-        failed: 1,
+        failed: 2,
         evaluated: 1,
         registered: 1,
-        unlinked: 1,
+        unlinked: 3,
       },
       experiments,
     }),
@@ -203,12 +236,17 @@ test("shows joined results, source links, and complete run details", async ({
   await expect(
     page.getByRole("heading", { name: "Experiments", exact: true }),
   ).toBeVisible();
-  await expect(page.getByText("4 results", { exact: true })).toBeVisible();
+  await expect(page.getByText("3 results", { exact: true })).toBeVisible();
   await expect(
     page.getByRole("img", { name: "evaluation ADE trend" }),
   ).toBeVisible();
 
   const table = page.getByRole("table");
+  await expect(
+    page.getByRole("combobox", { name: "Filter by validation scope" }),
+  ).toHaveCount(0);
+  await expect(table).not.toContainText("flyte-failed");
+  await expect(table).not.toContainText("run-unlinked");
   const evaluationRow = table
     .getByRole("row")
     .filter({ hasText: "flyte-eval" });
@@ -269,7 +307,7 @@ test("filters experiments by dataset, status, and identifiers", async ({
 }) => {
   await mockExperiments(page);
   await page.goto("/experiments");
-  await expect(page.getByText("4 results", { exact: true })).toBeVisible();
+  await expect(page.getByText("3 results", { exact: true })).toBeVisible();
 
   await page
     .getByRole("combobox", { name: "Filter by dataset", exact: true })
@@ -287,7 +325,7 @@ test("filters experiments by dataset, status, and identifiers", async ({
   await page.getByRole("button", { name: "Reset filters" }).click();
   await page
     .getByRole("searchbox", { name: "Search experiments" })
-    .fill("flyte-failed");
+    .fill("flyte-full-failed");
   await expect(page.getByText("1 results", { exact: true })).toBeVisible();
   await expect(page.getByRole("table")).toContainText("KITScenes");
   await expect(page.getByRole("table")).toContainText("FAILED");
@@ -296,10 +334,10 @@ test("filters experiments by dataset, status, and identifiers", async ({
   await page
     .getByRole("combobox", { name: "Filter by status" })
     .selectOption("unlinked");
-  await expect(page.getByText("2 results", { exact: true })).toBeVisible();
-  await expect(page.getByRole("table")).toContainText("UNLINKED");
+  await expect(page.getByText("1 results", { exact: true })).toBeVisible();
   await expect(page.getByRole("table")).toContainText("PARTIAL");
-  await expect(page.getByRole("table")).toContainText("run-unlinked");
+  await expect(page.getByRole("table")).toContainText("flyte-full-failed");
+  await expect(page.getByRole("table")).not.toContainText("run-unlinked");
 });
 
 test("filters experiments by a recent time window", async ({ page }) => {
@@ -318,7 +356,7 @@ test("filters experiments by a recent time window", async ({ page }) => {
     .getByRole("combobox", { name: "Filter by period" })
     .selectOption("30");
   await expect(page.getByText("3 results", { exact: true })).toBeVisible();
-  await expect(page.getByRole("table")).toContainText("flyte-failed");
+  await expect(page.getByRole("table")).toContainText("flyte-full-failed");
 });
 
 test("warns when selected experiment results are not comparable", async ({
@@ -329,14 +367,14 @@ test("warns when selected experiment results are not comparable", async ({
 
   await page.getByRole("checkbox", { name: "Compare route-on-evaluation" }).check();
   await page
-    .getByRole("checkbox", { name: "Compare kitscenes-smoke-failed" })
+    .getByRole("checkbox", { name: "Compare kitscenes-full-failed" })
     .check();
   await expect(page.getByText("2/3 selected", { exact: true })).toBeVisible();
   await page.getByRole("button", { name: "Compare", exact: true }).click();
 
   const comparison = page.getByRole("dialog", { name: "Compare experiments" });
   await expect(comparison).toContainText("route-on-evaluation");
-  await expect(comparison).toContainText("kitscenes-smoke-failed");
+  await expect(comparison).toContainText("kitscenes-full-failed");
   await expect(comparison).toContainText(
     "Dataset fingerprint or validation split differs. Scores are not directly comparable.",
   );
@@ -351,7 +389,7 @@ test("mobile experiment list and details do not overflow the viewport", async ({
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto("/experiments");
 
-  await expect(page.locator("article")).toHaveCount(4);
+  await expect(page.locator("article")).toHaveCount(3);
   await expect(page.getByRole("table")).toBeHidden();
   await expect(
     page.locator("article").filter({ hasText: "flyte-validation" }),
