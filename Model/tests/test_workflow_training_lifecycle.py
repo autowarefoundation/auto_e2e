@@ -526,10 +526,10 @@ def test_navigation_objective_wiring_is_train_only_and_versioned():
     assert ast.literal_eval(defaults["epochs"]) == 20
     assert isinstance(defaults["training_objective_version"], ast.Name)
     assert defaults["training_objective_version"].id == (
-        "KITSCENES_NAVIGATION_OBJECTIVE_VERSION"
+        "ROLLOUT_ALIGNED_OBJECTIVE_VERSION"
     )
-    assert ast.literal_eval(defaults["enable_junction_sampling"]) is True
-    assert ast.literal_eval(defaults["enable_route_consistency"]) is True
+    assert ast.literal_eval(defaults["enable_junction_sampling"]) is False
+    assert ast.literal_eval(defaults["enable_route_consistency"]) is False
     train_call = next(
         call
         for call in ast.walk(recovered)
