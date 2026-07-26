@@ -19,6 +19,11 @@ const LABELS: Record<BEVHeatmapName, string> = {
   fused: "Fused",
 };
 
+const DELTA_HEATMAPS = new Set<BEVHeatmapName>([
+  "route_delta",
+  "fusion_delta",
+]);
+
 const COLOR_STOPS = [
   [12, 15, 22],
   [35, 83, 132],
@@ -60,14 +65,20 @@ function HeatmapTile({
         { sum: 0, peak: 0 },
       )
     : null;
-  const meanRMS =
+  const meanValue =
     statistics && heatmap
       ? (statistics.sum / heatmap.values.length / 255) * heatmap.scale
       : null;
-  const peakRMS =
+  const peakValue =
     statistics && heatmap
       ? (statistics.peak / 255) * heatmap.scale
       : null;
+  const metric =
+    overlay.formatVersion >= 4
+      ? DELTA_HEATMAPS.has(name)
+        ? "delta RMS"
+        : "spatial deviation"
+      : "channel RMS";
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -98,15 +109,20 @@ function HeatmapTile({
       aria-label={`${LABELS[name]} activation`}
     >
       <figcaption className="mb-2 flex min-h-8 items-start justify-between gap-2">
-        <span className="text-xs font-medium text-slate-200">
-          {LABELS[name]}
+        <span>
+          <span className="block text-xs font-medium text-slate-200">
+            {LABELS[name]}
+          </span>
+          <span className="block text-[9px] leading-3 text-slate-500">
+            {metric}
+          </span>
         </span>
         <span className="text-right font-mono text-[9px] leading-3 text-slate-500">
-          {meanRMS !== null && peakRMS !== null ? (
+          {meanValue !== null && peakValue !== null ? (
             <>
-              mean {meanRMS.toPrecision(3)}
+              mean {meanValue.toPrecision(3)}
               <br />
-              peak {peakRMS.toPrecision(3)}
+              peak {peakValue.toPrecision(3)}
             </>
           ) : (
             "unavailable"
@@ -150,7 +166,10 @@ export function BEVActivationHeatmap({
       ? overlay.bevHeatmapNames
       : BEV_HEATMAP_NAMES;
   const sharedScale =
-    overlay && row !== undefined && overlay.bevHeatmapScales
+    overlay &&
+    overlay.formatVersion < 4 &&
+    row !== undefined &&
+    overlay.bevHeatmapScales
       ? overlay.bevHeatmapScales[row]
       : null;
 
@@ -161,7 +180,9 @@ export function BEVActivationHeatmap({
           Encoder diagnostics
         </h3>
         <span className="font-mono text-[10px] text-slate-500">
-          {sharedScale !== null
+          {overlay?.formatVersion && overlay.formatVersion >= 4
+            ? "per-encoder contrast"
+            : sharedScale !== null
             ? `shared ${sharedScale.toPrecision(3)} RMS`
             : "unavailable"}
         </span>
