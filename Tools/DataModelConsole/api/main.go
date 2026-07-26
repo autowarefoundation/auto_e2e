@@ -67,6 +67,12 @@ func main() {
 	}
 	mlflowSvc := service.NewMLflowService(cfg.MLflowURL)
 	flyteSvc := service.NewFlyteService(cfg.FlyteURL, cfg.FlyteProject, cfg.FlyteDomain)
+	experimentSvc := service.NewExperimentService(
+		mlflowSvc,
+		flyteSvc,
+		cfg.MLflowPublicURL,
+		cfg.FlyteConsoleURL,
+	)
 
 	healthH := handler.NewHealthHandler(s3svc)
 	datasetsH := handler.NewDatasetsHandlerWithGeoAccess(
@@ -79,6 +85,7 @@ func main() {
 	)
 	mlflowH := handler.NewMLflowHandler(mlflowSvc)
 	flyteH := handler.NewFlyteHandler(flyteSvc)
+	experimentsH := handler.NewExperimentsHandler(experimentSvc)
 	statsH := handler.NewStatsHandler(s3svc, mlflowSvc)
 
 	r := chi.NewRouter()
@@ -104,6 +111,7 @@ func main() {
 			r.Use(middleware.Timeout(25 * time.Second))
 
 			r.Get("/stats", statsH.Get)
+			r.Get("/experiments", experimentsH.List)
 
 			r.Get("/datasets", datasetsH.List)
 			r.Get("/datasets/{name}/versions", datasetsH.ListVersions)
