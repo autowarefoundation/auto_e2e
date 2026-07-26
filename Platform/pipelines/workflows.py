@@ -3969,6 +3969,7 @@ def train_il(
         "navigation_encoder_first_nonzero_step": None,
         "route_input_first_nonzero_step": None,
         "route_loss_gradient_budget": None,
+        "objective_term_gradient_norms": None,
     }
     optimizer_probe_name, optimizer_probe_parameter = next(
         (name, parameter)
@@ -4220,12 +4221,14 @@ def train_il(
                 # JEPA loss (#13): future-feature reconstruction, added when the
                 # WM ran the windowed path AND this batch carries future frames.
                 jepa_val = 0.0
+                weighted_jepa = None
                 future_state_pred = aux.get("future_state_pred")
                 if (enable_world_model and future_state_pred is not None
                         and future_frames is not None):
                     jepa = model.World_Action_Model_E2E.jepa_loss(
                         future_state_pred, future_frames)
-                    loss = loss + jepa_loss_weight * jepa
+                    weighted_jepa = jepa_loss_weight * jepa
+                    loss = loss + weighted_jepa
                     jepa_val = float(jepa.item())
 
                 # Add the reasoning loss when the branch is on AND this batch
@@ -4244,6 +4247,79 @@ def train_il(
                         )
                         loss = loss + reasoning_loss_weight * terms["total"]
                         reason_val = float(terms["total"].item())
+
+            if (
+                objective_v2
+                and rollout_terms is not None
+                and weighted_jepa is not None
+                and gradient_evidence[
+                    "objective_term_gradient_norms"
+                ] is None
+            ):
+                planner_parameters = [
+                    parameter
+                    for name, parameter in model.named_parameters()
+                    if (
+                        parameter.requires_grad
+                        and "TrajectoryPlanner" in name
+                    )
+                ]
+                world_model_parameters = [
+                    parameter
+                    for name, parameter in model.named_parameters()
+                    if (
+                        parameter.requires_grad
+                        and "World_Action_Model_E2E" in name
+                    )
+                ]
+                objective_terms = {
+                    "action": (traj_loss, planner_parameters),
+                    "weighted_rollout": (
+                        0.5 * rollout_terms["rollout"],
+                        planner_parameters,
+                    ),
+                    "weighted_constraint": (
+                        0.05 * rollout_terms["constraint"],
+                        planner_parameters,
+                    ),
+                    "weighted_jepa": (
+                        weighted_jepa,
+                        world_model_parameters,
+                    ),
+                }
+                term_norms = {}
+                for term_name, (
+                    term_loss,
+                    term_parameters,
+                ) in objective_terms.items():
+                    gradients = torch.autograd.grad(
+                        term_loss,
+                        term_parameters,
+                        retain_graph=True,
+                        allow_unused=True,
+                    )
+                    term_norms[term_name] = _gradient_list_norm(
+                        gradients
+                    )
+                if not all(
+                    np.isfinite(value)
+                    for value in term_norms.values()
+                ):
+                    raise RuntimeError(
+                        "rollout-aligned objective produced non-finite "
+                        f"gradient evidence: {term_norms}"
+                    )
+                if term_norms["weighted_jepa"] <= 0.0:
+                    raise RuntimeError(
+                        "weighted JEPA produced no World Model gradient"
+                    )
+                gradient_evidence[
+                    "objective_term_gradient_norms"
+                ] = term_norms
+                print(
+                    "rollout-aligned objective gradient norms: "
+                    f"{term_norms}"
+                )
 
             if (
                 route_terms is not None
@@ -4835,6 +4911,14 @@ def train_il(
     ):
         raise RuntimeError(
             "route consistency produced no planner gradient budget evidence"
+        )
+    if (
+        not terminal_resume
+        and objective_v2
+        and gradient_evidence["objective_term_gradient_norms"] is None
+    ):
+        raise RuntimeError(
+            "rollout-aligned objective produced no term gradient evidence"
         )
 
     if best_checkpoint is None or final_checkpoint is None:
