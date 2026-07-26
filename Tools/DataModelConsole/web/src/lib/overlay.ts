@@ -3,8 +3,16 @@ const HEADER_BYTES = 20;
 const DIRECTORY_ENTRY_BYTES = 12;
 const HORIZON = 64;
 const DIMS = 2;
-export const BEV_HEATMAP_NAMES = ["image", "navigation", "fused"] as const;
 export const BEV_HEATMAP_SIZE = 32;
+const LEGACY_BEV_HEATMAP_NAMES = ["image", "navigation", "fused"] as const;
+export const BEV_HEATMAP_NAMES = [
+  "image",
+  "map",
+  "route_delta",
+  "navigation",
+  "fusion_delta",
+  "fused",
+] as const;
 export type BEVHeatmapName = (typeof BEV_HEATMAP_NAMES)[number];
 
 export interface OverlayArtifact {
@@ -20,6 +28,7 @@ export interface OverlayArtifact {
   v0: Float32Array;
   bevHeatmaps: Uint8Array | null;
   bevHeatmapScales: Float32Array | null;
+  bevHeatmapNames: readonly BEVHeatmapName[];
 }
 
 export function parseOverlay(buffer: ArrayBuffer): OverlayArtifact {
@@ -39,9 +48,17 @@ export function parseOverlay(buffer: ArrayBuffer): OverlayArtifact {
   const horizon = view.getUint16(14, true);
   const dims = view.getUint16(16, true);
   const reserved = view.getUint16(18, true);
-  const heatmapCount = formatVersion === 2 ? BEV_HEATMAP_NAMES.length : 0;
+  const bevHeatmapNames =
+    formatVersion === 2
+      ? LEGACY_BEV_HEATMAP_NAMES
+      : formatVersion === 3
+        ? BEV_HEATMAP_NAMES
+        : [];
+  const heatmapCount = bevHeatmapNames.length;
   if (
-    (formatVersion !== 1 && formatVersion !== 2) ||
+    (formatVersion !== 1 &&
+      formatVersion !== 2 &&
+      formatVersion !== 3) ||
     horizon !== HORIZON ||
     dims !== DIMS ||
     reserved !== heatmapCount
@@ -66,7 +83,7 @@ export function parseOverlay(buffer: ArrayBuffer): OverlayArtifact {
     BEV_HEATMAP_SIZE *
     BEV_HEATMAP_SIZE;
   const expectedBytes =
-    formatVersion === 2
+    heatmapCount > 0
       ? heatmapsOffset + heatmapsLength
       : heatmapScalesOffset;
   if (buffer.byteLength !== expectedBytes) {
@@ -107,13 +124,14 @@ export function parseOverlay(buffer: ArrayBuffer): OverlayArtifact {
     controls: new Float32Array(buffer, controlsOffset, controlsLength),
     v0: new Float32Array(buffer, speedsOffset, sampleCount),
     bevHeatmaps:
-      formatVersion === 2
+      heatmapCount > 0
         ? new Uint8Array(buffer, heatmapsOffset, heatmapsLength)
         : null,
     bevHeatmapScales:
-      formatVersion === 2
+      heatmapCount > 0
         ? new Float32Array(buffer, heatmapScalesOffset, sampleCount)
         : null,
+    bevHeatmapNames,
   };
 }
 
@@ -148,11 +166,11 @@ export function bevHeatmapForRow(
   ) {
     return null;
   }
-  const heatmapIndex = BEV_HEATMAP_NAMES.indexOf(name);
+  const heatmapIndex = overlay.bevHeatmapNames.indexOf(name);
   if (heatmapIndex < 0) return null;
   const pixels = BEV_HEATMAP_SIZE * BEV_HEATMAP_SIZE;
   const begin =
-    (row * BEV_HEATMAP_NAMES.length + heatmapIndex) * pixels;
+    (row * overlay.bevHeatmapNames.length + heatmapIndex) * pixels;
   return {
     values: overlay.bevHeatmaps.subarray(begin, begin + pixels),
     scale: overlay.bevHeatmapScales[row],
