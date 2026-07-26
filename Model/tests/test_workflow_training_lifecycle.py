@@ -34,6 +34,7 @@ class _MetricModel:
         self.training = True
         self.reset_count = 0
         self.last_egomotion_history = None
+        self.initial_noise_calls = []
 
     def eval(self):
         self.training = False
@@ -46,7 +47,37 @@ class _MetricModel:
 
     def __call__(self, visual, *args, **kwargs):
         self.last_egomotion_history = args[2]
+        self.initial_noise_calls.append(
+            kwargs["initial_noise"].detach().clone()
+        )
         return torch.zeros((visual.shape[0], 128), dtype=torch.float32)
+
+
+class _RouteSensitiveMetricModel(_MetricModel):
+    def __call__(self, visual, *args, **kwargs):
+        self.initial_noise_calls.append(
+            kwargs["initial_noise"].detach().clone()
+        )
+        route_mask = kwargs["route_mask"]
+        batch_size, _, _, width = route_mask.shape
+        columns = torch.arange(
+            width,
+            dtype=route_mask.dtype,
+            device=route_mask.device,
+        )
+        corridor = route_mask[:, 0]
+        mass = corridor.sum(dim=(1, 2)).clamp_min(1.0)
+        centroid = (
+            corridor.sum(dim=1) * columns
+        ).sum(dim=1) / mass
+        curvature = (width / 2.0 - centroid) * 1e-3
+        output = torch.zeros(
+            (batch_size, 64, 2),
+            dtype=visual.dtype,
+            device=visual.device,
+        )
+        output[:, :, 1] = curvature[:, None]
+        return output.reshape(batch_size, 128)
 
 
 def _validation_batch(sample_uids):
@@ -58,9 +89,14 @@ def _validation_batch(sample_uids):
         "visual_tiles": torch.zeros(
             (batch_size, 7, 3, 2, 2), dtype=torch.float32
         ),
-        "map_input": torch.zeros(
+        "map_context": torch.zeros(
             (batch_size, 3, 2, 2), dtype=torch.float32
         ),
+        "route_mask": torch.zeros(
+            (batch_size, 2, 2, 2), dtype=torch.float32
+        ),
+        "map_valid": torch.ones(batch_size, dtype=torch.bool),
+        "route_valid": torch.zeros(batch_size, dtype=torch.bool),
         "egomotion_history": ego,
         "visual_history": torch.zeros(
             (batch_size, 896), dtype=torch.float32
@@ -69,6 +105,60 @@ def _validation_batch(sample_uids):
             (batch_size, 128), dtype=torch.float32
         ),
     }
+
+
+def _navigation_validation_batch(
+    sample_uid,
+    route_id,
+    lateral_m,
+    maneuver="straight",
+):
+    from navigation.geometry import (
+        DEFAULT_NAVIGATION_GEOMETRY,
+        MapChannel,
+        RouteChannel,
+    )
+
+    geometry = DEFAULT_NAVIGATION_GEOMETRY
+    batch = _validation_batch([sample_uid])
+    batch["map_context"] = torch.zeros(
+        (1, 14, geometry.height_px, geometry.width_px),
+        dtype=torch.float32,
+    )
+    batch["map_context"][:, MapChannel.KNOWN_MAP_AREA] = 1.0
+    route = torch.zeros(
+        (1, 2, geometry.height_px, geometry.width_px),
+        dtype=torch.float32,
+    )
+    points = torch.stack([
+        torch.arange(0.0, 65.0),
+        torch.full((65,), float(lateral_m)),
+    ], dim=1).numpy()
+    pixels = geometry.ego_to_pixel(points)
+    for row, col in torch.from_numpy(pixels).round().to(torch.int64):
+        route[
+            0,
+            RouteChannel.SELECTED_CORRIDOR,
+            max(0, int(row) - 1):int(row) + 2,
+            max(0, int(col) - 1):int(col) + 2,
+        ] = 1.0
+    row, col = torch.from_numpy(pixels[-1]).round().to(torch.int64)
+    route[
+        0,
+        RouteChannel.DESTINATION,
+        max(0, int(row) - 1):int(row) + 2,
+        max(0, int(col) - 1):int(col) + 2,
+    ] = 1.0
+    batch["route_mask"] = route
+    batch["route_valid"] = torch.ones(1, dtype=torch.bool)
+    batch["navigation_metadata"] = {
+        "route_id": [route_id],
+        "route_maneuver": [maneuver],
+        "route_intersection": torch.zeros(1, dtype=torch.bool),
+        "destination_visible": torch.ones(1, dtype=torch.bool),
+        "route_confidence": torch.full((1,), 0.9),
+    }
+    return batch
 
 
 def test_epoch_evaluation_restores_mode_and_hashes_fixed_uids():
@@ -93,6 +183,23 @@ def test_epoch_evaluation_restores_mode_and_hashes_fixed_uids():
     }
     assert model.training is True
     assert model.reset_count == 2
+
+
+def test_evaluation_noise_is_stable_by_sample_uid():
+    forward = workflows._stable_evaluation_noise(
+        ["sample-a", "sample-b"],
+        128,
+        torch.float32,
+    )
+    reverse = workflows._stable_evaluation_noise(
+        ["sample-b", "sample-a"],
+        128,
+        torch.float32,
+    )
+
+    torch.testing.assert_close(forward[0], reverse[1])
+    torch.testing.assert_close(forward[1], reverse[0])
+    assert not torch.equal(forward[0], forward[1])
 
 
 def test_epoch_evaluation_rejects_duplicate_uids():
@@ -237,6 +344,22 @@ def test_training_wires_dataset_specific_trajectory_policy():
     assert "refusing to train on one shard" in offline_rl_source
 
 
+def test_training_seed_controls_comparable_navigation_runs():
+    training_function = workflows.train_il.task_function
+    training_source = inspect.getsource(training_function)
+    signature = inspect.signature(training_function)
+
+    assert signature.parameters["training_seed"].default == 149
+    assert "random.seed(training_seed)" in training_source
+    assert "np.random.seed(training_seed)" in training_source
+    assert "torch.manual_seed(training_seed)" in training_source
+    assert "torch.cuda.manual_seed_all(training_seed)" in training_source
+    assert "torch.backends.cudnn.benchmark = False" in training_source
+    assert "torch.backends.cudnn.deterministic = True" in training_source
+    assert '"training_seed": training_seed' in training_source
+    assert '"train/seed": training_seed' in training_source
+
+
 def test_kitscenes_epoch_evaluation_preserves_auto_e2e_horizon():
     from training.dataset_policy import KITSCENES_TRAINING_POLICY
 
@@ -262,6 +385,72 @@ def test_kitscenes_epoch_evaluation_preserves_auto_e2e_horizon():
     assert torch.count_nonzero(adapted[:, :24]) == 24 * 4
     assert adapted[0, -1, 0].item() == 2.0
     assert adapted[0, -1, 1].item() == 0.0
+
+
+def test_standalone_navigation_evaluation_runs_cross_scene_route_swap():
+    from navigation.geometry import DEFAULT_NAVIGATION_GEOMETRY
+
+    model = _RouteSensitiveMetricModel()
+    loader = [
+        (
+            _navigation_validation_batch(
+                "sample-a",
+                "route-a",
+                20.0,
+                maneuver="left",
+            ),
+            None,
+            "pseudo",
+        ),
+        (
+            _navigation_validation_batch(
+                "sample-b",
+                "route-b",
+                -20.0,
+                maneuver="right",
+            ),
+            None,
+            "pseudo",
+        ),
+    ]
+
+    metrics = workflows._evaluate_open_loop(
+        model,
+        loader,
+        torch.device("cpu"),
+        navigation_geometry=DEFAULT_NAVIGATION_GEOMETRY,
+        route_swap_counterfactual=True,
+        include_navigation_records=True,
+    )
+
+    report = metrics["navigation"]
+    records = metrics["navigation_records"]
+    assert [record["sample_uid"] for record in records] == [
+        "sample-a",
+        "sample-b",
+    ]
+    assert report["slices"]["overall"]["sample_count"] == 2
+    assert report["slices"]["route_valid"]["sample_count"] == 2
+    counterfactual = report["route_swap_counterfactual"]
+    assert counterfactual["sample_count"] == 1
+    assert counterfactual["different_maneuver_sample_count"] == 1
+    assert counterfactual["endpoint_delta_m"]["mean"] > 0.0
+    assert (
+        counterfactual["maneuver_direction_consistent"]["mean"]
+        == 1.0
+    )
+    assert "right_to_left" in counterfactual["maneuver_pairs"]
+    assert (
+        report["slices"]["overall"]["route_quality"][
+            "route_confidence"
+        ]["p50"]
+        == pytest.approx(0.9)
+    )
+    assert len(model.initial_noise_calls) == 3
+    torch.testing.assert_close(
+        model.initial_noise_calls[1],
+        model.initial_noise_calls[2],
+    )
 
 
 def test_terminal_resume_state_allows_finalization():
@@ -381,9 +570,20 @@ def test_recovery_graph_never_calls_ingest_or_cosmos():
     ]
     assert static_entities == [
         workflows.wf_repack_existing_kitscenes.name,
+        workflows.audit_kitscenes_navigation_quality.name,
         workflows.train_il.name,
         workflows.evaluate_il_policy.name,
     ]
+    audit_node = workflows.wf_recovered_kitscenes_full_run.nodes[1]
+    train_node = workflows.wf_recovered_kitscenes_full_run.nodes[2]
+    train_bindings = {
+        binding.var: binding.binding.promise
+        for binding in train_node.bindings
+    }
+    assert (
+        train_bindings["navigation_quality_audit"].node_id
+        == audit_node.id
+    )
 
     dynamic_tree = ast.parse(
         inspect.getsource(
@@ -397,6 +597,27 @@ def test_recovery_graph_never_calls_ingest_or_cosmos():
     assert "data_processing" in referenced_names
     assert "data_ingest" not in referenced_names
     assert "generate_reasoning_labels" not in referenced_names
+
+
+def test_navigation_comparison_graph_reuses_one_repack():
+    nodes = workflows.wf_compare_recovered_kitscenes_navigation.nodes
+    assert [
+        getattr(node.flyte_entity, "name", "")
+        for node in nodes
+    ] == [
+        workflows.wf_repack_existing_kitscenes.name,
+        workflows.evaluate_navigation_records.name,
+        workflows.evaluate_navigation_records.name,
+        workflows.compare_navigation_record_artifacts.name,
+    ]
+    comparison_bindings = {
+        binding.var: binding.binding.promise.node_id
+        for binding in nodes[3].bindings
+    }
+    assert comparison_bindings == {
+        "conditioned_records": nodes[1].id,
+        "baseline_records": nodes[2].id,
+    }
 
 
 def test_shared_pack_maps_bind_optional_strict_count_to_none():

@@ -159,7 +159,10 @@ def _run_loss_trend(dataset, dataset_name, num_views, device):
             batch = next(data_iter)
 
         visual_tiles = batch["visual_tiles"].to(device)
-        map_input = batch["map_input"].to(device)
+        map_context = batch["map_context"].to(device)
+        route_mask = batch["route_mask"].to(device)
+        map_valid = batch["map_valid"].to(device)
+        route_valid = batch["route_valid"].to(device)
         visual_history = batch["visual_history"].to(device)
         egomotion_history = adapt_egomotion_history(
             batch["egomotion_history"].to(device),
@@ -169,7 +172,10 @@ def _run_loss_trend(dataset, dataset_name, num_views, device):
 
         optimizer.zero_grad(set_to_none=True)
         trajectory = model(
-            visual_tiles, map_input, visual_history, egomotion_history,
+            visual_tiles, map_context, visual_history, egomotion_history,
+            route_mask=route_mask,
+            map_valid=map_valid,
+            route_valid=route_valid,
             projection=projection, geometry_type=geometry_type, mode="eval",
         )
         loss = loss_fn(trajectory, target)

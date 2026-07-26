@@ -215,6 +215,7 @@ def test_data_prep_tasks_serialize_karpenter_disruption_protection():
         workflows.data_ingest,
         workflows.generate_reasoning_labels,
         workflows.data_processing,
+        workflows.audit_kitscenes_navigation_quality,
     ):
         assert task.get_k8s_pod(settings).metadata.annotations == expected
 
@@ -266,7 +267,7 @@ def test_contract_version_import_is_fail_closed():
     }
 
 
-def test_current_contracts_reuse_deployed_cache_versions():
+def test_navigation_contracts_invalidate_old_pack_caches():
     assert workflows._cache_versions_for_contracts(
         uid="v1",
         parser="v2",
@@ -278,9 +279,9 @@ def test_current_contracts_reuse_deployed_cache_versions():
         "label": "label-v1-v1-v1",
         "pack": "pack-v2-v1-v4-v2",
     }
-    assert workflows.INGEST_CACHE_VERSION == "ingest-v1"
-    assert workflows.LABEL_CACHE_VERSION == "label-v1-v1-v1"
-    assert workflows.PACK_CACHE_VERSION == "pack-v2-v1-v4-v2"
+    assert workflows.INGEST_CACHE_VERSION == "ingest-v3"
+    assert workflows.LABEL_CACHE_VERSION == "label-v3-v1-v2"
+    assert workflows.PACK_CACHE_VERSION == "pack-v3-v1-v5-v3"
 
 
 def test_old_geometry_pack_cache_is_not_aliased():
@@ -357,6 +358,35 @@ def test_training_rejects_invalid_manifest_num_views():
         )
 
 
+def test_navigation_quality_selects_only_accepted_optimizer_partitions(
+    monkeypatch,
+):
+    shard_dirs = ["excluded", "accepted"]
+    manifests = {
+        "excluded": {"partition_id": "part-b"},
+        "accepted": {"partition_id": "part-a"},
+    }
+    report = {
+        "accepted_partition_ids": ["part-a"],
+        "excluded_partition_ids": ["part-b"],
+    }
+    monkeypatch.setattr(
+        "navigation.quality.verify_packed_navigation_quality_audit",
+        lambda supplied, paths: report,
+    )
+
+    selected, verified = (
+        workflows._verified_navigation_training_shard_dirs(
+            shard_dirs,
+            manifests,
+            report,
+        )
+    )
+
+    assert selected == ["accepted"]
+    assert verified == report
+
+
 def test_loader_wiring_avoids_training_peek_and_bounds_eval_prefetch():
     tree = ast.parse(Path(workflows.__file__).read_text())
     functions = {
@@ -381,6 +411,19 @@ def test_loader_wiring_avoids_training_peek_and_bounds_eval_prefetch():
         and call.args[0].args[0].id == "merged"
     ]
     assert not merged_peeks
+
+    training_loader_calls = [
+        call
+        for call in ast.walk(train)
+        if isinstance(call, ast.Call)
+        and isinstance(call.func, ast.Name)
+        and call.func.id == "make_multi_dataset_loader"
+        and call.args
+        and isinstance(call.args[0], ast.Name)
+    ]
+    assert {
+        call.args[0].id for call in training_loader_calls
+    } == {"shard_dirs", "training_shard_dirs"}
 
     evaluation = functions["_run_evaluation"]
     loader_call = next(
@@ -435,6 +478,12 @@ def test_recovery_launcher_requires_audited_artifacts_and_skips_source_stages():
     assert "wf_recovered_kitscenes_full_run" in buildspec
     assert "wf_sharded_full_run" not in buildspec
     assert "--reasoning_teacher" not in buildspec
+    assert "--enable_route_conditioning" in buildspec
+    assert "--no_enable_route_conditioning" in buildspec
+    assert (
+        '--enable_route_conditioning "${ENABLE_ROUTE_CONDITIONING}"'
+        not in buildspec
+    )
 
 
 def test_overlay_launcher_guards_selected_recovery_checkpoints():

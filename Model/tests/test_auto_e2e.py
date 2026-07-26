@@ -35,7 +35,10 @@ def make_inputs(batch_size, num_views, device, include_camera_params=False):
 # gradient at init — both are excluded from the gradient-coverage checks.
 USED_GROUPS = ["Reactive_E2E.Backbone", "Reactive_E2E.FeatureFusion",
                "Reactive_E2E.TrajectoryPlanner"]
-NO_GRAD_OK = ("Reactive_E2E.MapEncoder.", "Reactive_E2E.FutureState.")
+NO_GRAD_OK = (
+    "Reactive_E2E.NavigationEncoder.",
+    "Reactive_E2E.FutureState.",
+)
 
 
 # ---------------------------------------------------------------------------

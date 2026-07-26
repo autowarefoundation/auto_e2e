@@ -12,15 +12,19 @@ def run_forward_pass(backbone, planner_mode, device, embed_dim=256, batch_size=2
           f"batch={batch_size} | views={num_views}")
     print(f"{'='*110}\n")
 
-    # Instantiate model. Fusion is always BEV (PR #94); the nav-map is a separate
-    # map_input branch, not a camera view.
+    # Instantiate model. Navigation remains separate from camera views.
     model = AutoE2E(backbone=backbone, num_views=num_views, embed_dim=embed_dim,
                     planner_mode=planner_mode).to(device)
 
     # Visual Scene Input: [batch, num_views, channels, height, width]
     camera_tiles = torch.randn(batch_size, num_views, 3, 256, 256).to(device)
-    # Map Input: [batch, channels, height, width]
-    map_input = torch.randn(batch_size, 3, 256, 256).to(device)
+    # Navigation Inputs: map context and selected route.
+    map_context = torch.rand(batch_size, 3, 256, 256, device=device)
+    route_mask = torch.randint(
+        0, 2, (batch_size, 2, 256, 256), device=device
+    ).float()
+    map_valid = torch.ones(batch_size, dtype=torch.bool, device=device)
+    route_valid = torch.ones(batch_size, dtype=torch.bool, device=device)
     # Visual History Input: [batch, 896]
     visual_history = torch.randn(batch_size, 896).to(device)
     # Egomotion History Input: [batch, 256]
@@ -38,8 +42,9 @@ def run_forward_pass(backbone, planner_mode, device, embed_dim=256, batch_size=2
         geometry_type = "pseudo"
 
     trajectory = model(
-        camera_tiles=camera_tiles, map_input=map_input,
+        camera_tiles=camera_tiles, map_context=map_context,
         visual_history=visual_history, egomotion_history=egomotion_history,
+        route_mask=route_mask, map_valid=map_valid, route_valid=route_valid,
         projection=projection, geometry_type=geometry_type, mode="infer",
     )
 

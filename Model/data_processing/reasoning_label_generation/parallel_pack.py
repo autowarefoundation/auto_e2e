@@ -64,6 +64,7 @@ def init_pack_worker(
             scene_ids=scene_ids,
             image_size=image_size,
             include_world_model_windows=world_model,
+            include_navigation=True,
         )
     else:
         from data_parsing.l2d import L2DDataset
@@ -129,6 +130,7 @@ def init_row_worker(
             scene_ids=scene_ids,
             image_size=image_size,
             include_world_model_windows=False,
+            include_navigation=False,
         )
     else:
         from data_parsing.l2d import L2DDataset
@@ -143,12 +145,17 @@ def init_row_worker(
 
 def decode_row(
     task: tuple[Any, ...],
-) -> tuple[tuple[Any, int], Dict[str, bytes], Optional[bytes]]:
-    """Decode ONE physical row's cameras (+ map) → JPEG bytes (#121 decode-dedup).
+) -> tuple[
+    tuple[Any, int],
+    Dict[str, bytes],
+    Optional[bytes | Dict[str, bytes]],
+]:
+    """Decode one physical row's cameras and navigation context.
 
     ``task`` = (ep_idx, frame_index) — GLOBAL identity, so the worker resolves the
     local row from its OWN _episode_ranges (robust across processes/partitions).
-    Returns ``((ep_idx, frame_index), {frame_id: jpeg per cam}, map_jpeg_or_None)``.
+    KITScenes returns lossless schema-v5 navigation members for current rows.
+    Other datasets retain the existing optional map JPEG.
 
     Each unique row is decoded exactly ONCE per partition — the parent maps this
     over the UNION of all samples' window rows, killing the ~8x per-sample
@@ -176,12 +183,7 @@ def decode_row(
             ): _jpeg(visual[view])
             for view in range(visual.shape[0])
         }
-        map_jpeg = None
-        if include_map:
-            map_tile = _DS.map_for_row(scene_id, frame_index)
-            if float(map_tile.abs().max()) > 0:
-                map_jpeg = _jpeg(map_tile)
-        return (scene_id, frame_index), kitscenes_cams, map_jpeg
+        return (scene_id, frame_index), kitscenes_cams, None
 
     from data_parsing.l2d.dataset import CAMERA_NAMES, MAP_VIEW_NAME
 
@@ -241,9 +243,13 @@ def pack_sample(si: int) -> Tuple[str, int, Dict[str, bytes], Dict[str, bytes]]:
     # tile into a nonzero per-channel CONSTANT at load time, contaminating the
     # shared map encoder (and wrongly flagging has_map=True). Skip all-zero tiles
     # so the loader's zero-fallback fires and has_map stays False.
-    map_tile = sample.get("map_tile")
-    if map_tile is not None and float(map_tile.abs().max()) > 0:
-        members["map.jpg"] = _jpeg(map_tile)
+    navigation_members = sample.get("navigation_members")
+    if navigation_members is not None:
+        members.update(navigation_members)
+    else:
+        map_tile = sample.get("map_tile")
+        if map_tile is not None and float(map_tile.abs().max()) > 0:
+            members["map.jpg"] = _jpeg(map_tile)
 
     # World-Model window (#13/#3.4d): store the frames in the shared pool keyed by
     # a GLOBAL frame_id, and record only the (step,view)→frame_id index per sample.

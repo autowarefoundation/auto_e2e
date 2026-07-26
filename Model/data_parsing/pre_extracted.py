@@ -10,7 +10,10 @@ Usage:
     loader = make_pre_extracted_loader("/data/shards", batch_size=8)
     for batch in loader:
         # batch["visual_tiles"]       (B, V, 3, 256, 256)  V real cameras
-        # batch["map_input"]          (B, 3, 256, 256)     nav-map (map branch)
+        # batch["map_context"]        (B, C_map, 256, 256) semantic map
+        # batch["route_mask"]         (B, 2, 256, 256)     selected route
+        # batch["map_valid"]          (B,)                  explicit validity
+        # batch["route_valid"]        (B,)                  explicit validity
         # batch["egomotion_history"]  (B, 256)
         # batch["visual_history"]     (B, 896)
         # batch["trajectory_target"]  (B, 128)
@@ -100,20 +103,60 @@ def _decode_sample(
     ``window_index.json`` mapping (step,view)→frame_id and the pixels live in a
     sibling ``pool/`` dir. None on shards without a pool (imitation-only / legacy).
     """
-    # Keys: "cam_0.jpg" ... "cam_{V-1}.jpg", optional "map.jpg",
-    # "ego.npy", "meta.json", "__key__".
+    # Keys: "cam_0.jpg" ... "cam_{V-1}.jpg", schema-v5 navigation
+    # members or a legacy optional "map.jpg", plus numeric/metadata members.
     cam_keys = sorted(
         (k for k in sample if _CAM_KEY_RE.match(k)),
         key=lambda k: int(k[len("cam_"):-len(".jpg")]),
     )
     frames = [_decode_image(sample[k]) for k in cam_keys]
 
-    # Map view -> map branch. Absent (legacy shards / NVIDIA zeros) -> zeros.
-    if "map.jpg" in sample:
-        map_input = _decode_image(sample["map.jpg"])
+    navigation_keys = {
+        "map_semantic.npz",
+        "route_mask.npz",
+        "navigation_meta.json",
+    }
+    present_navigation = navigation_keys.intersection(sample)
+    if present_navigation and present_navigation != navigation_keys:
+        raise ValueError(
+            "navigation members must be present as a complete schema-v5 set"
+        )
+    if present_navigation:
+        from navigation.artifacts import decode_sample_navigation
+
+        map_array, route_array, navigation_metadata = (
+            decode_sample_navigation(sample)
+        )
+        map_context = torch.from_numpy(map_array.copy())
+        route_mask = torch.from_numpy(
+            route_array.astype(np.float32, copy=True)
+        )
+        map_valid = torch.tensor(
+            bool(navigation_metadata["map_valid"]),
+            dtype=torch.bool,
+        )
+        route_valid = torch.tensor(
+            bool(navigation_metadata["route_valid"]),
+            dtype=torch.bool,
+        )
     else:
-        ref = frames[0] if frames else torch.zeros(3, 256, 256)
-        map_input = torch.zeros_like(ref)
+        # L2D keeps its existing RGB map contract during this KITScenes
+        # milestone. NVIDIA and map-less shards receive explicit invalid inputs.
+        if "map.jpg" in sample:
+            map_context = _decode_image(sample["map.jpg"])
+            map_valid = torch.tensor(True, dtype=torch.bool)
+        else:
+            ref = frames[0] if frames else torch.zeros(3, 256, 256)
+            map_context = torch.zeros_like(ref)
+            map_valid = torch.tensor(False, dtype=torch.bool)
+        route_mask = torch.zeros(
+            2,
+            map_context.shape[-2],
+            map_context.shape[-1],
+            dtype=torch.float32,
+        )
+        route_valid = torch.tensor(False, dtype=torch.bool)
+        navigation_metadata = {}
 
     # Ego: raw bytes → numpy → split into history and future
     ego_bytes = sample.get("ego.npy", b"")
@@ -132,7 +175,11 @@ def _decode_sample(
         # every batch so predictions do not depend on batch position or size.
         "sample_uid": sample.get("__key__", ""),
         "visual_tiles": torch.stack(frames),
-        "map_input": map_input,
+        "map_context": map_context,
+        "route_mask": route_mask,
+        "map_valid": map_valid,
+        "route_valid": route_valid,
+        "navigation_metadata": navigation_metadata,
         "egomotion_history": ego_history,
         "visual_history": torch.zeros(_VISUAL_HISTORY_DIM),
         "trajectory_target": ego_future,

@@ -170,6 +170,26 @@ def test_build_overlay_inputs_extracts_a_completed_running_recovery_repack():
     }
 
 
+def test_running_recovery_accepts_registered_platform_workflow_prefix():
+    remote = _recovery_remote("s3://artifacts/partition-a")
+    remote.execution.flyte_workflow.id.name = (
+        "Platform.pipelines.workflows.wf_recovered_kitscenes_full_run"
+    )
+    remote.execution.flyte_workflow.flyte_nodes[0].flyte_entity.name = (
+        "Platform.pipelines.workflows.wf_repack_existing_kitscenes"
+    )
+
+    result = build_overlay_inputs(
+        remote,
+        execution_id="a1234567890123456789",
+        expected_dataset="KIT-MRT/KITScenes-Multimodal",
+        expected_dataset_version="v2.2",
+        allow_running_recovery=True,
+    )
+
+    assert result["shards"] == ["s3://artifacts/partition-a"]
+
+
 def test_running_recovery_requires_explicit_opt_in():
     remote = _recovery_remote("s3://artifacts/partition-a")
 

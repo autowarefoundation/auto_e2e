@@ -64,7 +64,8 @@ def main():
     # Peek one batch to confirm shape + presence of WM window tensors
     it = iter(loader)
     batch = next(it)
-    for k in ("visual_tiles", "map_input", "egomotion_history",
+    for k in ("visual_tiles", "map_context", "route_mask", "map_valid",
+              "route_valid", "egomotion_history",
               "visual_history", "trajectory_target", "history_frames",
               "future_frames"):
         v = batch.get(k)
@@ -90,6 +91,8 @@ def main():
     model = AutoE2E(
         backbone="swin_v2_tiny", num_views=num_views, embed_dim=256,
         is_pretrained=True,
+        map_context_channels=int(manifest.get("map_context_channels", 3)),
+        route_channels=int(manifest.get("route_channels", 2)),
         enable_reasoning=True, reasoning_mode="pooled_latent",
         enable_world_model=True,
     ).to(device)
@@ -115,12 +118,18 @@ def main():
     )
     vis_hist = batch["visual_history"].to(device)
     target = batch["trajectory_target"].to(device)
-    map_input = batch["map_input"].to(device)
+    map_context = batch["map_context"].to(device)
+    route_mask = batch["route_mask"].to(device)
+    map_valid = batch["map_valid"].to(device)
+    route_valid = batch["route_valid"].to(device)
     history_frames = batch["history_frames"].to(device)
     future_frames = batch["future_frames"].to(device)
 
     optimizer.zero_grad()
-    out = model(visual, map_input, vis_hist, ego_hist,
+    out = model(visual, map_context, vis_hist, ego_hist,
+                route_mask=route_mask,
+                map_valid=map_valid,
+                route_valid=route_valid,
                 projection=projection, geometry_type=geometry_type,
                 mode="train", trajectory_target=target,
                 history_frames=history_frames, future_frames=future_frames)
