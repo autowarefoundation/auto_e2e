@@ -410,6 +410,9 @@ def test_training_wires_dataset_specific_trajectory_policy():
     assert '"rollout_aligned_loss": rollout_aligned_config' in (
         training_source
     )
+    assert '"objective_term_gradient_norms": None' in training_source
+    assert '"weighted_jepa": (' in training_source
+    assert "weighted JEPA produced no World Model gradient" in training_source
     assert "reconstruction audit identity differs from training" in (
         training_source
     )
