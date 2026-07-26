@@ -2,10 +2,13 @@ package service
 
 import (
 	"archive/tar"
+	"archive/zip"
 	"bytes"
 	"context"
 	"encoding/binary"
 	"errors"
+	"fmt"
+	"image/png"
 	"io"
 	"math"
 	"strings"
@@ -14,6 +17,99 @@ import (
 
 	"github.com/autowarefoundation/auto_e2e/tools/datamodelconsole/api/internal/model"
 )
+
+func navigationNPZFixture(
+	t *testing.T,
+	descr string,
+	shape [3]int,
+	data []byte,
+) []byte {
+	t.Helper()
+	header := fmt.Sprintf(
+		"{'descr': '%s', 'fortran_order': False, 'shape': (%d, %d, %d), }\n",
+		descr, shape[0], shape[1], shape[2],
+	)
+	var npy bytes.Buffer
+	npy.WriteString("\x93NUMPY")
+	npy.Write([]byte{1, 0})
+	if err := binary.Write(&npy, binary.LittleEndian, uint16(len(header))); err != nil {
+		t.Fatalf("write NPY header length: %v", err)
+	}
+	npy.WriteString(header)
+	npy.Write(data)
+
+	var output bytes.Buffer
+	archive := zip.NewWriter(&output)
+	member, err := archive.Create(navigationArrayMemberName)
+	if err != nil {
+		t.Fatalf("create NPZ member: %v", err)
+	}
+	if _, err := member.Write(npy.Bytes()); err != nil {
+		t.Fatalf("write NPZ member: %v", err)
+	}
+	if err := archive.Close(); err != nil {
+		t.Fatalf("close NPZ: %v", err)
+	}
+	return output.Bytes()
+}
+
+func TestDecodeNavigationNPZValidatesArrayContract(t *testing.T) {
+	shape := [3]int{2, navigationRasterSize, navigationRasterSize}
+	data := make([]byte, shape[0]*shape[1]*shape[2])
+	data[17] = 1
+	payload := navigationNPZFixture(t, "|u1", shape, data)
+
+	decoded, err := decodeNavigationNPZ(payload, "|u1", shape)
+	if err != nil {
+		t.Fatalf("decode navigation NPZ: %v", err)
+	}
+	if !bytes.Equal(decoded, data) {
+		t.Fatal("decoded navigation array differs from source")
+	}
+	if _, err := decodeNavigationNPZ(
+		payload,
+		"|u1",
+		[3]int{3, navigationRasterSize, navigationRasterSize},
+	); err == nil || !strings.Contains(err.Error(), "contract") {
+		t.Fatalf("shape mismatch error = %v", err)
+	}
+}
+
+func TestRenderNavigationPNGUsesSemanticAndRouteLayers(t *testing.T) {
+	pixels := navigationRasterSize * navigationRasterSize
+	mapBytes := make([]byte, navigationMapChannels*pixels*4)
+	routeBytes := make([]byte, navigationRouteChannels*pixels)
+	binary.LittleEndian.PutUint32(
+		mapBytes[0:4],
+		math.Float32bits(1),
+	)
+	routeBytes[0] = 1
+	routeBytes[pixels+(pixels-1)] = 1
+
+	body, err := renderNavigationPNG(mapBytes, routeBytes)
+	if err != nil {
+		t.Fatalf("render navigation PNG: %v", err)
+	}
+	image, err := png.Decode(bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("decode rendered PNG: %v", err)
+	}
+	if image.Bounds().Dx() != navigationRasterSize ||
+		image.Bounds().Dy() != navigationRasterSize {
+		t.Fatalf("rendered PNG bounds = %v", image.Bounds())
+	}
+	red, green, blue, _ := image.At(0, 0).RGBA()
+	if green <= red || green <= blue {
+		t.Fatalf("route corridor pixel is not green-dominant: %d %d %d", red, green, blue)
+	}
+	red, green, blue, _ = image.At(
+		navigationRasterSize-1,
+		navigationRasterSize-1,
+	).RGBA()
+	if red <= green || red <= blue {
+		t.Fatalf("destination pixel is not red-dominant: %d %d %d", red, green, blue)
+	}
+}
 
 func TestSampleKeyOf(t *testing.T) {
 	tests := []struct {
