@@ -4,7 +4,7 @@
 
 | Field | Value |
 |---|---|
-| Status | Proposed; blocked on the reconstruction audit |
+| Status | Accepted for implementation with the logged-XY fallback |
 | Owner | riita10069 |
 | Created | 2026-07-26 |
 | Initial dataset | KITScenes navigation v3.2 |
@@ -59,11 +59,12 @@ JEPA weight. It neither adds a new Cosmos-derived loss nor changes the existing
 Reasoning objective. The model architecture, route input boundary, and 64-step
 control output remain unchanged.
 
-The implementation is permitted to start only after a reconstruction audit
-shows that target controls, when integrated from the recorded initial speed,
-reconstruct the logged future pose accurately enough to serve as an XY target.
-If that audit fails, this proposal returns to design review instead of training
-against a known-inconsistent target.
+The reconstruction audit found that integrated target controls do not meet the
+initial target-quality thresholds on the full validation split. This design
+therefore uses logged pose-grounded XY directly as the position target for
+`L_rollout` and the target-relative map term. Target controls remain the
+teacher for `L_action` and target-relative comfort. This follows the preflight
+fallback instead of training against a known-inconsistent position target.
 
 ## 2. Motivation
 
@@ -167,7 +168,7 @@ dataset snapshot:
 | Arm | Planner loss | Checkpoint selection |
 |---|---|---|
 | A: `rollout_aligned_control_v1` | Current normalized action loss | Weighted composite score |
-| B: `rollout_aligned_planner_v1` | Action + rollout + constraint | Weighted composite score |
+| B: `rollout_aligned_planner_v1` | Action + logged-XY rollout + constraint | Weighted composite score |
 
 Both arms use:
 
@@ -199,9 +200,10 @@ weight tuning requires a separate policy version and experiment.
 
 ### 5.1 Status and purpose
 
-The audit is a spike task and a hard prerequisite, not Step 1 of the
-implementation PR. It answers whether integrated target controls are a valid
-proxy for logged future motion.
+The audit is a completed spike task and remains an immutable prerequisite, not
+Step 1 of the implementation PR. It determined whether integrated target
+controls were a valid proxy for logged future motion and selected the target
+source used below.
 
 The implementation PR must link an immutable audit artifact and record an
 explicit Go or No-Go decision.
@@ -277,17 +279,46 @@ p95 FDE@3s   <= 1.0 m
 p95 FDE@6.4s <= 2.0 m
 ```
 
-These are target-quality criteria, not product-quality gates, but they are hard
-gates for this first policy version. A threshold failure blocks training and
-returns the proposal to design review. That review may examine scene
-concentration, horizon drift, timestamp alignment, speed extraction, heading
-convention, GPS projection, and current-model error, but none of those may
-override this gate without a new versioned audit input and policy.
+These are target-quality criteria, not product-quality gates. Exceeding either
+threshold requires design review and prohibits using integrated target controls
+as the position teacher. It does not prohibit a versioned fallback to logged XY.
 
-The Go decision must include a written rationale. A No-Go blocks the
-implementation in this document. The likely follow-up is a revised design that
-uses logged XY directly for `L_rollout`, while keeping target controls for
-`L_action`; that change is not silently included in this policy.
+The Go decision must include a written rationale and the selected position
+target source. A No-Go blocks training. A Go with `position_target=logged_xy`
+requires the training task to consume the exact pose-grounded trajectory bound
+to the audited validation identity.
+
+### 5.6 Full-snapshot result and decision
+
+The immutable full-snapshot audit used 3,820 validation samples from 40 scenes:
+
+```text
+report SHA-256: 71211cc9ff009dbd476c7a94601615e520a73d6f17785572475af8020154b983
+p95 FDE@3s:     1.083 m
+p95 FDE@6.4s:   2.281 m
+mean FDE@6.4s:  1.269 m
+missing/non-finite samples: 0 / 0
+```
+
+The mismatch was not isolated: 373 samples in 17 scenes exceeded 1.0 m at
+3 seconds, and 510 samples in 26 scenes exceeded 2.0 m at 6.4 seconds. Natural
+p95 error grew approximately monotonically from 0.042 m at 0.1 seconds to
+2.281 m at 6.4 seconds. The current full-run model FDE is approximately
+10.18 m, so the target mismatch is smaller than current model error but is not
+negligible relative to the intended improvement.
+
+Decision:
+
+```text
+integrated target controls as position target: No-Go
+packed logged XY as position target:          Go for implementation and Smoke
+target controls for action and comfort:       retained
+```
+
+The failed thresholds remain recorded in checkpoint metadata. Training still
+requires the immutable audit, exact dataset/split digests, an explicit Go
+decision, and a written rationale. It must not reinterpret `thresholds_pass`
+as true.
 
 ## 6. Shared Rollout Contract
 
@@ -325,7 +356,11 @@ speed[-1] = final causal speed from egomotion_history
 dt = 0.1 seconds
 ```
 
-Prediction and target are integrated from the same initial state.
+Predicted controls are integrated from this initial state. Target controls are
+also integrated for target speed and heading used by comfort and footprint
+orientation, but their integrated XY is diagnostic only. Position supervision
+uses the packed logged future XY in the same ego FLU frame and timestep
+alignment as evaluation.
 
 ### 6.2 Numerical contract
 
@@ -446,11 +481,12 @@ This term is retained because:
 
 ## 9. Rollout Position Loss
 
-Let `p_hat[t]` and `p[t]` be prediction and target XY positions from the shared
-rollout. Define Euclidean position error:
+Let `p_hat[t]` be the predicted XY position from the shared rollout and
+`p_logged[t]` be the packed pose-grounded future XY position. Define Euclidean
+position error:
 
 \[
-e_t=\lVert\hat p_t-p_t\rVert_2
+e_t=\lVert\hat p_t-p_t^{logged}\rVert_2
 \]
 
 The scalar Huber function with delta `1.0 m` is:
@@ -616,7 +652,9 @@ d_{t,r}=\max_c D_r(c_{t})
 \]
 
 The maximum means the entire rectangular footprint must fit inside the region.
-Prediction and target use the same field, geometry, and footprint.
+Prediction and target use the same field, geometry, and footprint. Target
+footprint positions use logged XY; target footprint headings use the
+target-control rollout because KITScenes does not provide future orientation.
 
 ### 10.4 Target-relative map excess
 
@@ -746,6 +784,9 @@ projection
 
 Distance fields and logged future poses are train/evaluation-only values. They
 are never passed to `AutoE2E.forward` and do not enter the Reasoning branch.
+The training task converts packed `pose.npy` and `gps.npy` with the same
+pose-grounded transform used by evaluation and supplies float32 `[B,64,2]`
+logged XY only to the planner loss.
 
 ## 12. Per-Sample Validation Metrics
 
@@ -763,8 +804,9 @@ FDE@6.4s
 ```
 
 Other existing horizons remain diagnostic but are not selector inputs.
-Target action rollout is used by the training loss only after the reconstruction
-audit passes. It is not substituted for logged XY in checkpoint selection.
+Training and checkpoint selection use the same logged XY position target.
+Integrated target-control XY remains a reconstruction diagnostic and is not
+substituted for logged XY.
 
 ### 12.2 Comfort excess
 
@@ -1217,7 +1259,8 @@ is authoritative if an MLflow retry occurs.
 2. Verify pose availability and sample alignment on the frozen snapshot.
 3. Run target-control reconstruction against logged future pose.
 4. Publish the immutable audit artifact and Go/No-Go decision.
-5. Stop and revise the design if the decision is No-Go.
+5. If integrated controls are No-Go, select logged XY explicitly and version
+   the target-source contract before implementing the planner loss.
 
 ### PR Step 1: shared rollout
 
@@ -1229,7 +1272,7 @@ is authoritative if an MLflow retry occurs.
 ### PR Step 2: minimal planner loss
 
 - Preserve normalized action loss.
-- Add path and final rollout losses.
+- Add path and final rollout losses against packed logged XY.
 - Add trajectory-level target-relative comfort.
 - Add pointwise target-relative route/drivable footprint loss.
 - Retire the legacy combined route-consistency objective from the v2 training
@@ -1269,7 +1312,7 @@ is authoritative if an MLflow retry occurs.
 ### 21.2 Rollout
 
 1. PyTorch and NumPy integration agree within the documented tolerance.
-2. Prediction equal to target produces zero rollout loss.
+2. Prediction rollout equal to logged XY produces zero rollout loss.
 3. Position loss has a finite non-zero gradient to acceleration.
 4. Position loss has a finite non-zero gradient to curvature.
 5. Braking through zero documents the clamp's zero-gradient region.
@@ -1282,7 +1325,8 @@ is authoritative if an MLflow retry occurs.
 1. Prediction equal to target produces zero comfort loss.
 2. Equal comfort peaks at shifted timesteps produce zero additional loss.
 3. A larger predicted peak increases comfort loss.
-4. Prediction equal to target produces zero map loss.
+4. Prediction footprint equal to the logged target footprint produces zero map
+   loss.
 5. Greater predicted footprint outside distance increases map loss.
 6. Corner checks detect violations missed by the ego center.
 7. Route and map validity masks act independently.
@@ -1357,8 +1401,10 @@ seeds are not required.
 
 ### Target controls do not reconstruct logged motion
 
-Mitigation: the preflight audit blocks implementation. Do not optimize a
-rollout target known to disagree with pose-grounded evaluation.
+Mitigation: implemented. The full audit rejected integrated target-control XY.
+The planner now compares predicted rollout positions with packed logged XY,
+while retaining target controls for action and comfort. Audit identity and the
+observed reconstruction error remain immutable metadata.
 
 ### Constraint scale overwhelms action learning
 
@@ -1391,8 +1437,9 @@ than treating missing evidence as success.
 
 This proposal changes only:
 
-1. planner training loss by retaining action supervision and adding XY rollout,
-   target-relative comfort, and target-relative footprint map constraints;
+1. planner training loss by retaining action supervision and adding logged-XY
+   rollout, target-relative comfort, and target-relative footprint map
+   constraints;
 2. validation by adding natural and `split_group_uid` scene-balanced
    aggregation;
 3. checkpoint selection by replacing ADE-only comparison with a versioned
@@ -1409,7 +1456,7 @@ The primary hypothesis is:
 > sacrificing the combined trajectory, safety, comfort, and navigation
 > utility represented by the checkpoint score.
 
-The reconstruction audit is the gate that determines whether this hypothesis
-can be tested with integrated target controls. The three-seed paired experiment
-then determines whether loss alignment is sufficient or whether a later,
-separate data-balancing proposal is justified.
+The reconstruction audit selected logged XY instead of integrated target
+controls as the position teacher. The three-seed paired experiment then
+determines whether loss alignment is sufficient or whether a later, separate
+data-balancing proposal is justified.
