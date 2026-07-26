@@ -414,6 +414,16 @@ def test_training_wires_dataset_specific_trajectory_policy():
     assert "route_consistency_loss_fn(" in training_source
     assert "route_consistency_weight" in training_source
     assert "rollout_aligned_loss_fn(" in training_source
+    assert "wgs84_trajectory_to_ego_xy(" in training_source
+    assert "logged_positions = torch.from_numpy(" in training_source
+    assert "rollout-aligned loss requires packed pose and GPS" in (
+        training_source
+    )
+    assert (
+        "initial_speed,\n"
+        "                        logged_positions,\n"
+        "                        route_supervision,"
+    ) in training_source
     assert '0.5 * rollout_terms["rollout"]' in training_source
     assert '0.05 * rollout_terms["constraint"]' in training_source
     assert '"rollout_aligned_loss": rollout_aligned_config' in (
@@ -434,9 +444,12 @@ def test_training_wires_dataset_specific_trajectory_policy():
         "composite-selector training requires a reconstruction audit"
         in training_source
     )
-    assert (
-        "target rollout reconstruction thresholds failed"
-        in training_source
+    assert "target rollout reconstruction thresholds failed" not in (
+        training_source
+    )
+    assert '"position_target_source": (' in training_source
+    assert '"packed_logged_xy" if objective_v2 else "not_applicable"' in (
+        training_source
     )
     assert "audit_report.get(\"thresholds\") != expected_thresholds" in (
         training_source
