@@ -191,7 +191,7 @@ class RolloutAlignedLoss(nn.Module):
         lateral_acceleration_threshold_mps2: float = 4.89,
         footprint_length_m: float = 4.8,
         footprint_width_m: float = 2.0,
-        map_tolerance_m: float = 0.10,
+        map_tolerance_m: float | None = None,
     ) -> None:
         super().__init__()
         values = (
@@ -203,6 +203,8 @@ class RolloutAlignedLoss(nn.Module):
         )
         if any(value <= 0.0 for value in values):
             raise ValueError("rollout-aligned loss values must be positive")
+        if map_tolerance_m is None:
+            map_tolerance_m = 0.5 * geometry.meters_per_pixel
         if map_tolerance_m < 0.0:
             raise ValueError("map_tolerance_m must be non-negative")
         self.geometry = geometry
@@ -235,6 +237,10 @@ class RolloutAlignedLoss(nn.Module):
                 "footprint_length_m": self.footprint_length_m,
                 "footprint_width_m": self.footprint_width_m,
                 "target_relative_tolerance_m": self.map_tolerance_m,
+                "raster_tolerance_pixels": (
+                    self.map_tolerance_m
+                    / self.geometry.meters_per_pixel
+                ),
             },
         }
 
