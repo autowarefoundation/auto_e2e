@@ -51,6 +51,37 @@ class TestTrajectoryImitationLoss:
 
         assert uniform_loss.item() != decayed_loss.item()
 
+    def test_mean_one_temporal_weights_preserve_average_scale(self):
+        loss_fn = TrajectoryImitationLoss(
+            temporal_decay=0.99,
+            temporal_weight_normalization="mean_one",
+        )
+
+        assert loss_fn.temporal_weights.mean().item() == pytest.approx(1.0)
+        assert (
+            loss_fn.temporal_weights[-1] / loss_fn.temporal_weights[0]
+        ).item() == pytest.approx(0.99**63)
+
+    def test_uniform_mean_one_temporal_weights_remain_one(self):
+        loss_fn = TrajectoryImitationLoss(
+            temporal_decay=1.0,
+            temporal_weight_normalization="mean_one",
+        )
+
+        assert torch.equal(
+            loss_fn.temporal_weights,
+            torch.ones(64),
+        )
+
+    def test_invalid_temporal_weight_normalization_raises(self):
+        with pytest.raises(
+            ValueError,
+            match="temporal_weight_normalization",
+        ):
+            TrajectoryImitationLoss(
+                temporal_weight_normalization="sum_one",
+            )
+
     def test_zero_input_produces_zero_loss(self):
         loss_fn = TrajectoryImitationLoss()
         pred = torch.zeros(4, 128)
