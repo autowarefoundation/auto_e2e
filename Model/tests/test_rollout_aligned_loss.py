@@ -141,6 +141,25 @@ def test_comfort_penalizes_larger_prediction_peak():
     assert terms["jerk"].item() > 0.0
 
 
+def test_comfort_uses_float32_under_autocast():
+    predicted = _controls().to(dtype=torch.bfloat16)
+    target = _controls().to(dtype=torch.bfloat16)
+    predicted[:, 20:, 0] = 2.0
+    target[:, 10:, 0] = 1.0
+
+    with torch.autocast("cpu", dtype=torch.bfloat16):
+        terms = _loss(
+            predicted,
+            target,
+            map_valid=False,
+            route_valid=False,
+        )
+
+    assert terms["comfort"].dtype == torch.float32
+    assert terms["jerk"].dtype == torch.float32
+    assert terms["comfort"].item() > 0.0
+
+
 def test_map_loss_increases_when_footprint_leaves_target_band():
     field = _field_from_lateral_band()
     predicted = _controls(curvature=0.04, requires_grad=True)
