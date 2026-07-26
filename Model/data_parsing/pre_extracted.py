@@ -379,6 +379,18 @@ def _decode_sample(
             decode_sample_navigation(sample)
         )
         supervision = decode_route_supervision(sample)
+        from navigation.geometry import DEFAULT_NAVIGATION_GEOMETRY
+        from navigation.supervision import (
+            MAXIMUM_OUTSIDE_DISTANCE_M,
+        )
+
+        if (
+            navigation_metadata.get("geometry_id")
+            != DEFAULT_NAVIGATION_GEOMETRY.geometry_id
+        ):
+            raise ValueError(
+                "navigation sample geometry differs from the model contract"
+            )
         map_context = torch.from_numpy(map_array.copy())
         route_mask = torch.from_numpy(
             route_array.astype(np.float32, copy=True)
@@ -418,6 +430,13 @@ def _decode_sample(
                 dtype=torch.bool,
             ),
             "available": torch.tensor(True, dtype=torch.bool),
+            "drivable_available": torch.tensor(
+                bool(np.any(
+                    supervision.distance_to_drivable_m
+                    < MAXIMUM_OUTSIDE_DISTANCE_M
+                )),
+                dtype=torch.bool,
+            ),
         }
     else:
         # L2D keeps its existing RGB map contract during this KITScenes
@@ -465,6 +484,10 @@ def _decode_sample(
                 dtype=torch.bool,
             ),
             "available": torch.tensor(False, dtype=torch.bool),
+            "drivable_available": torch.tensor(
+                False,
+                dtype=torch.bool,
+            ),
         }
 
     # Ego: raw bytes → numpy → split into history and future
