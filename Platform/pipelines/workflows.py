@@ -3268,18 +3268,10 @@ def train_il(
                 "reconstruction audit coverage differs from validation"
             )
         if not bool(audit_report.get("thresholds_pass", False)):
-            availability = audit_report.get("metric_availability", {})
-            if (
-                not isinstance(availability, dict)
-                or availability.get(
-                    "current_model_pose_grounded_error"
-                )
-                != "computed"
-            ):
-                raise ValueError(
-                    "a threshold exception requires current-model "
-                    "pose-grounded error evidence"
-                )
+            raise ValueError(
+                "target rollout reconstruction thresholds failed; "
+                "return to design review before training"
+            )
         reconstruction_audit_contract = {
             "decision": reconstruction_audit_decision,
             "rationale": reconstruction_audit_rationale.strip(),
@@ -6792,7 +6784,7 @@ def audit_kitscenes_target_reconstruction(
     }
     report["metric_availability"] = {
         "current_model_pose_grounded_error": (
-            "required_for_review_if_thresholds_fail"
+            "not_computed_by_target_reconstruction_audit"
         ),
         "target_rollout_reconstruction": "computed",
     }
