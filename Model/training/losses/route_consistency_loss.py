@@ -13,6 +13,7 @@ from navigation.geometry import (
     DEFAULT_NAVIGATION_GEOMETRY,
     NavigationRasterGeometry,
 )
+from training.losses.control_rollout import integrate_controls_torch
 
 
 @dataclass(frozen=True)
@@ -41,58 +42,6 @@ class RouteConsistencyWeights:
             "destination": self.destination,
             "heading": self.heading,
         }
-
-
-def integrate_controls_torch(
-    controls: torch.Tensor,
-    initial_speed: torch.Tensor,
-    *,
-    dt: float = 0.1,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Integrate ``(acceleration, curvature)`` like the NumPy evaluator."""
-    if controls.ndim == 2:
-        if controls.shape[1] % 2:
-            raise ValueError("flattened controls must have an even width")
-        controls = controls.reshape(controls.shape[0], -1, 2)
-    if controls.ndim != 3 or controls.shape[2] != 2:
-        raise ValueError("controls must have shape [B,T,2] or [B,2T]")
-    if initial_speed.shape != (controls.shape[0],):
-        raise ValueError("initial_speed must have shape [B]")
-    if dt <= 0.0:
-        raise ValueError("dt must be positive")
-
-    output_dtype = controls.dtype
-    integration_dtype = (
-        torch.float64
-        if controls.dtype in {torch.float32, torch.float64}
-        else torch.float32
-    )
-    controls = controls.to(dtype=integration_dtype)
-    speed = initial_speed.to(
-        device=controls.device,
-        dtype=integration_dtype,
-    )
-    heading = torch.zeros_like(speed)
-    x = torch.zeros_like(speed)
-    y = torch.zeros_like(speed)
-    positions = []
-    headings = []
-    speeds = []
-    for step in range(controls.shape[1]):
-        acceleration = controls[:, step, 0]
-        curvature = controls[:, step, 1]
-        speed = torch.clamp_min(speed + acceleration * dt, 0.0)
-        heading = heading + curvature * speed * dt
-        x = x + speed * torch.cos(heading) * dt
-        y = y + speed * torch.sin(heading) * dt
-        positions.append(torch.stack((x, y), dim=-1))
-        headings.append(heading)
-        speeds.append(speed)
-    return (
-        torch.stack(positions, dim=1).to(dtype=output_dtype),
-        torch.stack(headings, dim=1).to(dtype=output_dtype),
-        torch.stack(speeds, dim=1).to(dtype=output_dtype),
-    )
 
 
 def ego_points_to_grid(
