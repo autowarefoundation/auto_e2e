@@ -342,6 +342,16 @@ def test_training_wires_dataset_specific_trajectory_policy():
     )
     assert "route_consistency_loss_fn(" in training_source
     assert "route_consistency_weight" in training_source
+    assert "rollout_aligned_loss_fn(" in training_source
+    assert '0.5 * rollout_terms["rollout"]' in training_source
+    assert '0.05 * rollout_terms["constraint"]' in training_source
+    assert '"rollout_aligned_loss": rollout_aligned_config' in (
+        training_source
+    )
+    assert (
+        '!= "navigation_supervision_v2"'
+        in training_source
+    )
     assert "route-enabled epoch produced no eligible route sample" in (
         training_source
     )
