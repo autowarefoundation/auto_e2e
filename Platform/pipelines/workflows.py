@@ -512,7 +512,7 @@ def _resumed_checkpoint_record(payload: dict, path: str) -> dict:
         raise ValueError(
             "resume checkpoint has no immutable current checkpoint URI"
         )
-    return {
+    record = {
         "epoch": epoch,
         "ade": float(history[-1]["val_ade"]),
         "fde": float(history[-1]["val_fde"]),
@@ -520,6 +520,14 @@ def _resumed_checkpoint_record(payload: dict, path: str) -> dict:
         "sha256": sha256_file(path),
         "size": os.path.getsize(path),
     }
+    selection = history[-1].get("checkpoint_selection")
+    if selection is not None:
+        if not isinstance(selection, dict):
+            raise ValueError(
+                "resume checkpoint selection state must be a mapping"
+            )
+        record["selection"] = dict(selection)
+    return record
 
 
 def _resume_terminal_state(
@@ -592,6 +600,7 @@ def _evaluate_open_loop(
     navigation_geometry=None,
     route_swap_counterfactual: bool = False,
     include_navigation_records: bool = False,
+    include_rollout_selector_records: bool = False,
 ) -> dict:
     """Evaluate one fixed loader and return finite ADE/FDE plus its UID digest."""
     import hashlib
@@ -622,6 +631,7 @@ def _evaluate_open_loop(
     sample_uids: list[str] = []
     navigation_records: list[dict] = []
     route_swap_records: list[dict] = []
+    rollout_selector_records: list[dict] = []
     route_cache: dict[str, dict] = {}
     model.eval()
     try:
@@ -702,6 +712,75 @@ def _evaluate_open_loop(
                         f"sample_uids={len(batch_uids)}"
                     )
                 sample_uids.extend(str(uid) for uid in batch_uids)
+
+                if include_rollout_selector_records:
+                    from evaluation.kitscenes_benchmark import (
+                        wgs84_trajectory_to_ego_xy,
+                    )
+                    from evaluation.rollout_validation import (
+                        build_rollout_validation_records,
+                    )
+
+                    batch_group_uids = batch.get(
+                        "split_group_uid",
+                        [],
+                    )
+                    if isinstance(batch_group_uids, str):
+                        batch_group_uids = [batch_group_uids]
+                    batch_group_uids = [
+                        str(uid) for uid in batch_group_uids
+                    ]
+                    if len(batch_group_uids) != pred_np.shape[0]:
+                        raise ValueError(
+                            "selector validation batch lost split group "
+                            "identities"
+                        )
+                    pose_current = batch.get("pose_current")
+                    gps_future = batch.get("gps_future")
+                    route_supervision = batch.get("route_supervision")
+                    if (
+                        pose_current is None
+                        or gps_future is None
+                        or route_supervision is None
+                    ):
+                        raise ValueError(
+                            "rollout selector requires packed pose, GPS, "
+                            "and route supervision"
+                        )
+                    logged_xy = wgs84_trajectory_to_ego_xy(
+                        gps_future.numpy(),
+                        pose_current.numpy(),
+                    )
+                    route_intersections = [
+                        bool(
+                            _collated_metadata_value(
+                                navigation_metadata,
+                                "route_intersection",
+                                sample_index,
+                                False,
+                            )
+                        )
+                        for sample_index in range(pred_np.shape[0])
+                    ]
+                    initial_speeds = raw_ego_hist.reshape(
+                        raw_ego_hist.shape[0],
+                        AUTO_E2E_TIMESTEPS,
+                        -1,
+                    )[:, -1, 0]
+                    rollout_selector_records.extend(
+                        build_rollout_validation_records(
+                            pred,
+                            target,
+                            initial_speeds,
+                            logged_xy,
+                            route_supervision,
+                            batch["map_valid"],
+                            batch["route_valid"],
+                            batch_uids,
+                            batch_group_uids,
+                            route_intersections=route_intersections,
+                        )
+                    )
 
                 swapped_pred_np = None
                 swapped_indices: set[int] = set()
@@ -970,6 +1049,14 @@ def _evaluate_open_loop(
         )
         if include_navigation_records:
             result["navigation_records"] = navigation_records
+    if include_rollout_selector_records:
+        if len(rollout_selector_records) != len(all_ade):
+            raise ValueError(
+                "rollout selector coverage differs from displacement metrics"
+            )
+        result["rollout_selector_records"] = (
+            rollout_selector_records
+        )
     return result
 
 
@@ -983,6 +1070,7 @@ def _register_checkpoint_version(
     checkpoint_sha256: str,
     ade: float,
     fde: float,
+    selection: dict | None = None,
 ) -> str:
     """Register one immutable checkpoint idempotently for an MLflow run."""
     model_name = "auto-e2e-driving-policy"
@@ -1022,6 +1110,13 @@ def _register_checkpoint_version(
         "validation_ade": str(ade),
         "validation_fde": str(fde),
     }
+    if selection is not None:
+        tags.update({
+            "checkpoint_selector_policy": str(
+                selection["policy_version"]
+            ),
+            "checkpoint_composite_score": str(selection["score"]),
+        })
     for key, value in tags.items():
         client.set_model_version_tag(model_name, version, key, value)
     return version
@@ -3405,11 +3500,16 @@ def train_il(
     optimizer = torch.optim.AdamW(
         model.parameters(), lr=lr, weight_decay=weight_decay
     )
+    selector_enabled = objective_v2
+    selector_mode = "max" if selector_enabled else "min"
+    selector_threshold = 0.0005 if selector_enabled else 1e-4
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer,
-        mode="min",
+        mode=selector_mode,
         factor=0.5,
         patience=1,
+        threshold=selector_threshold,
+        threshold_mode="abs",
     )
     loss_fn = TrajectoryImitationLoss(
         loss_type="smooth_l1",
@@ -3470,6 +3570,26 @@ def train_il(
         rollout_aligned_config.update(
             rollout_aligned_loss_fn.metadata()
         )
+        from evaluation.checkpoint_selection import (
+            SELECTOR_MIN_DELTA,
+            SELECTOR_POLICY_VERSION,
+        )
+
+        if selector_threshold != SELECTOR_MIN_DELTA:
+            raise RuntimeError(
+                "scheduler and checkpoint selector thresholds differ"
+            )
+        checkpoint_selection_config = {
+            "enabled": True,
+            "policy_version": SELECTOR_POLICY_VERSION,
+            "min_delta": SELECTOR_MIN_DELTA,
+        }
+    else:
+        checkpoint_selection_config = {
+            "enabled": False,
+            "policy_version": "ade_fde_lexicographic_v1",
+            "min_delta": None,
+        }
 
     scaler = torch.amp.GradScaler(enabled=amp)
     checkpoint_config = {
@@ -3512,6 +3632,7 @@ def train_il(
         },
         "route_consistency": route_consistency_config,
         "rollout_aligned_loss": rollout_aligned_config,
+        "checkpoint_selection": checkpoint_selection_config,
         "reconstruction_audit": reconstruction_audit_contract,
         "trajectory_training_policy": training_policy.metadata(),
         "val_fraction": val_fraction,
@@ -3520,9 +3641,11 @@ def train_il(
         "early_stopping_patience": early_stopping_patience,
         "scheduler": {
             "name": "ReduceLROnPlateau",
-            "mode": "min",
+            "mode": selector_mode,
             "factor": 0.5,
             "patience": 1,
+            "threshold": selector_threshold,
+            "threshold_mode": "abs",
         },
     }
 
@@ -3544,6 +3667,7 @@ def train_il(
     metric_history: list[dict] = []
     best_checkpoint = None
     final_checkpoint = None
+    selector_availability = None
     bad_epochs = 0
     expected_validation_digest = selected_validation_sample_digest
     validation_sample_count = selected_validation_sample_count
@@ -3594,6 +3718,21 @@ def train_il(
         saved_best = state.get("best")
         best_checkpoint = dict(saved_best) if saved_best is not None else None
         bad_epochs = int(state.get("bad_epochs", 0))
+        saved_selector_availability = state.get(
+            "checkpoint_selector_availability"
+        )
+        if selector_enabled:
+            if not isinstance(saved_selector_availability, dict):
+                raise ValueError(
+                    "resume checkpoint has no frozen selector availability"
+                )
+            selector_availability = dict(
+                saved_selector_availability
+            )
+        elif saved_selector_availability is not None:
+            raise ValueError(
+                "legacy checkpoint selection cannot restore composite state"
+            )
         saved_validation_digest = state.get(
             "validation_sample_uid_digest"
         )
@@ -3626,6 +3765,17 @@ def train_il(
             best_checkpoint = dict(resumed_checkpoint)
         if best_checkpoint is None:
             raise ValueError("resume checkpoint has no selected best checkpoint")
+        if selector_enabled:
+            best_selection = best_checkpoint.get("selection")
+            if (
+                not isinstance(best_selection, dict)
+                or best_selection.get("policy_version")
+                != checkpoint_selection_config["policy_version"]
+            ):
+                raise ValueError(
+                    "resume checkpoint best selection policy differs "
+                    "from the requested selector"
+                )
         terminal_resume, stopped_early = _resume_terminal_state(
             completed_epoch=completed_epoch,
             bad_epochs=bad_epochs,
@@ -3641,6 +3791,7 @@ def train_il(
             checkpoint_sha256=str(best_checkpoint["sha256"]),
             ade=float(best_checkpoint["ade"]),
             fde=float(best_checkpoint["fde"]),
+            selection=best_checkpoint.get("selection"),
         )
         restore_rng_state(resume_payload["rng_state"])
         print(
@@ -3777,7 +3928,39 @@ def train_il(
                     validation_group_digest or "hash_buckets"
                 ),
                 "train/early_stopping_patience": early_stopping_patience,
+                "train/checkpoint_selector_policy": (
+                    checkpoint_selection_config["policy_version"]
+                ),
+                "train/checkpoint_selector_min_delta": (
+                    checkpoint_selection_config["min_delta"]
+                    if selector_enabled
+                    else -1.0
+                ),
             })
+
+    if selector_enabled and not resumed:
+        from evaluation.checkpoint_selection import (
+            aggregate_validation_records,
+            freeze_component_availability,
+        )
+
+        preflight_validation = _evaluate_open_loop(
+            model,
+            validation_loader,
+            device,
+            training_policy=training_policy,
+            include_rollout_selector_records=True,
+        )
+        preflight_aggregates = aggregate_validation_records(
+            preflight_validation["rollout_selector_records"]
+        )
+        selector_availability = freeze_component_availability(
+            preflight_aggregates
+        )
+        print(
+            "Frozen checkpoint selector availability before epoch 1: "
+            f"{selector_availability}"
+        )
 
     # Training loop
     model.train()
@@ -4258,6 +4441,7 @@ def train_il(
             validation_loader,
             device,
             training_policy=training_policy,
+            include_rollout_selector_records=selector_enabled,
         )
         validation_digest = validation["sample_uid_digest"]
         if expected_validation_digest is None:
@@ -4275,26 +4459,70 @@ def train_il(
                 f"actual_count={validation['sample_count']}"
             )
 
-        improved = (
-            best_checkpoint is None
-            or metric_pair_is_better(
-                validation["ade"],
-                validation["fde"],
-                float(best_checkpoint["ade"]),
-                float(best_checkpoint["fde"]),
+        checkpoint_selection = None
+        validation_aggregates = None
+        if selector_enabled:
+            from evaluation.checkpoint_selection import (
+                aggregate_validation_records,
+                freeze_component_availability,
+                score_checkpoint,
+                score_is_better,
             )
-        )
+
+            validation_aggregates = aggregate_validation_records(
+                validation["rollout_selector_records"]
+            )
+            observed_availability = freeze_component_availability(
+                validation_aggregates
+            )
+            if selector_availability is None:
+                raise RuntimeError(
+                    "checkpoint selector availability was not frozen "
+                    "before training"
+                )
+            if observed_availability != selector_availability:
+                raise ValueError(
+                    "checkpoint selector availability changed during run: "
+                    f"expected={selector_availability} "
+                    f"actual={observed_availability}"
+                )
+            checkpoint_selection = score_checkpoint(
+                validation_aggregates,
+                selector_availability,
+            )
+            improved = (
+                best_checkpoint is None
+                or score_is_better(
+                    float(checkpoint_selection["score"]),
+                    float(best_checkpoint["selection"]["score"]),
+                )
+            )
+            scheduler_metric = float(checkpoint_selection["score"])
+        else:
+            improved = (
+                best_checkpoint is None
+                or metric_pair_is_better(
+                    validation["ade"],
+                    validation["fde"],
+                    float(best_checkpoint["ade"]),
+                    float(best_checkpoint["fde"]),
+                )
+            )
+            scheduler_metric = float(validation["ade"])
         next_bad_epochs = 0 if improved else bad_epochs + 1
         key = checkpoint_key(run_id, epoch)
         checkpoint_uri = f"s3://{checkpoint_bucket}/{key}"
+        candidate_record = {
+            "epoch": epoch,
+            "ade": validation["ade"],
+            "fde": validation["fde"],
+            "uri": checkpoint_uri,
+            "sha256": None,
+        }
+        if checkpoint_selection is not None:
+            candidate_record["selection"] = checkpoint_selection
         candidate_best = (
-            {
-                "epoch": epoch,
-                "ade": validation["ade"],
-                "fde": validation["fde"],
-                "uri": checkpoint_uri,
-                "sha256": None,
-            }
+            candidate_record
             if improved
             else dict(best_checkpoint)
         )
@@ -4318,12 +4546,52 @@ def train_il(
             "val_horizons": validation["horizons"],
             "validation_sample_count": validation["sample_count"],
             "validation_sample_uid_digest": validation_digest,
+            "checkpoint_selection": checkpoint_selection,
+            "validation_aggregates": validation_aggregates,
             "improved": improved,
         }
         metric_history.append(history_entry)
         losses_per_epoch.append(avg_loss)
-        scheduler.step(validation["ade"])
+        scheduler.step(scheduler_metric)
         current_lr = float(optimizer.param_groups[0]["lr"])
+        selector_mlflow_metrics = {}
+        if (
+            checkpoint_selection is not None
+            and validation_aggregates is not None
+        ):
+            selector_mlflow_metrics = {
+                "val/checkpoint_composite_score": float(
+                    checkpoint_selection["score"]
+                ),
+                **{
+                    f"val/checkpoint_component_{name}": float(value)
+                    for name, value in checkpoint_selection[
+                        "components"
+                    ].items()
+                },
+            }
+            for metric_name, aggregate in validation_aggregates[
+                "metrics"
+            ].items():
+                for aggregate_name in ("natural", "scene_balanced"):
+                    value = aggregate[aggregate_name]
+                    if value is not None:
+                        selector_mlflow_metrics[
+                            f"val/{metric_name}_{aggregate_name}"
+                        ] = float(value)
+                distribution = aggregate["scene_distribution"]
+                for statistic in ("p50", "p90"):
+                    value = distribution[statistic]
+                    if value is not None:
+                        selector_mlflow_metrics[
+                            f"val/{metric_name}_scene_{statistic}"
+                        ] = float(value)
+                selector_mlflow_metrics[
+                    f"val/{metric_name}_eligible_samples"
+                ] = float(aggregate["eligible_sample_count"])
+                selector_mlflow_metrics[
+                    f"val/{metric_name}_eligible_scenes"
+                ] = float(aggregate["eligible_scene_count"])
 
         # The same MLflow run is reopened for each epoch. A failed metric write
         # aborts before checkpointing, so resume cannot silently skip a metric.
@@ -4407,6 +4675,7 @@ def train_il(
                             "horizons"
                         ].items()
                     },
+                    **selector_mlflow_metrics,
                 },
                 step=epoch,
             )
@@ -4435,6 +4704,9 @@ def train_il(
                     "navigation_exposure": (
                         navigation_exposure_metadata
                     ),
+                    "checkpoint_selector_availability": (
+                        selector_availability
+                    ),
                     "current_checkpoint_uri": checkpoint_uri,
                     "early_stopping_patience": (
                         early_stopping_patience
@@ -4458,6 +4730,8 @@ def train_il(
             "sha256": uploaded["sha256"],
             "size": uploaded["size"],
         }
+        if checkpoint_selection is not None:
+            checkpoint_info["selection"] = checkpoint_selection
         history_entry["checkpoint_uri"] = uploaded["uri"]
         history_entry["checkpoint_sha256"] = uploaded["sha256"]
         previous_best_local_path = best_local_path
@@ -4473,6 +4747,7 @@ def train_il(
                 checkpoint_sha256=uploaded["sha256"],
                 ade=validation["ade"],
                 fde=validation["fde"],
+                selection=checkpoint_selection,
             )
             if (
                 previous_best_local_path
@@ -4487,12 +4762,19 @@ def train_il(
         bad_epochs = next_bad_epochs
         final_checkpoint = checkpoint_info
 
+        selector_summary = (
+            "composite_score="
+            f"{float(checkpoint_selection['score']):.6f} "
+            if checkpoint_selection is not None
+            else ""
+        )
         print(
             f"  Epoch {epoch}/{epochs} loss={avg_loss:.4f} "
             f"traj={avg_traj:.4f} route={avg_route:.4f} "
             f"jepa={avg_jepa:.4f} "
             f"reason={avg_reason:.4f} val_ADE={validation['ade']:.4f} "
             f"val_FDE={validation['fde']:.4f} improved={improved} "
+            f"{selector_summary}"
             f"bad_epochs={bad_epochs} checkpoint={uploaded['uri']}"
         )
         if bad_epochs >= early_stopping_patience:
@@ -4659,6 +4941,11 @@ def train_il(
             },
             "route_consistency": route_consistency_config,
             "rollout_aligned_loss": rollout_aligned_config,
+            "checkpoint_selection": {
+                **checkpoint_selection_config,
+                "availability": selector_availability,
+                "best": best_checkpoint.get("selection"),
+            },
             "reconstruction_audit": reconstruction_audit_contract,
             "final_loss": losses_per_epoch[-1],
             "losses_per_epoch": losses_per_epoch,
@@ -4730,6 +5017,14 @@ def train_il(
             "validation_split_id": training_policy.validation_split_id,
             "validation_group_uid_digest": (
                 validation_group_digest or "hash_buckets"
+            ),
+            "checkpoint_selector_policy": (
+                checkpoint_selection_config["policy_version"]
+            ),
+            "best_checkpoint_composite_score": (
+                str(best_checkpoint["selection"]["score"])
+                if selector_enabled
+                else "not_applicable"
             ),
         })
         mlflow.log_artifact(meta_path, artifact_path="training")
@@ -5443,6 +5738,7 @@ def _run_evaluation(
                 checkpoint_sha256=str(record["sha256"]),
                 ade=float(record["ade"]),
                 fde=float(record["fde"]),
+                selection=record.get("selection"),
             )
             print(
                 f"Registry version {version}: roles={item['roles']} "
