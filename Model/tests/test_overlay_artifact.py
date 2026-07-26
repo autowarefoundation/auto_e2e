@@ -71,10 +71,10 @@ def test_overlay_roundtrip_and_sorted_directory():
         decoded.bev_heatmap_scales,
         heatmaps.max(axis=(2, 3)),
     )
-    np.testing.assert_allclose(
-        decoded.bev_heatmaps,
-        heatmaps,
-        atol=decoded.bev_heatmap_scales[:, :, None, None] / 255.0,
+    quantization_error = np.abs(decoded.bev_heatmaps - heatmaps)
+    assert np.all(
+        quantization_error
+        <= decoded.bev_heatmap_scales[:, :, None, None] / 255.0
     )
     assert np.unique(
         decoded.bev_heatmaps[0, 0],
