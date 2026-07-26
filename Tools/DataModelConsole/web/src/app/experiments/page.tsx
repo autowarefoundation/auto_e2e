@@ -804,6 +804,7 @@ function ComparePanel({
         record.dataset,
         record.dataset_version,
         record.data_fingerprint,
+        record.validation_scope,
         record.validation_split_id,
       ].join("|"),
     ),
