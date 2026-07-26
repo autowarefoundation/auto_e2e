@@ -165,9 +165,20 @@ def build_rollout_validation_records(
             raise ValueError(
                 "navigation supervision availability must have shape [B]"
             )
+        drivable_available = route_supervision[
+            "drivable_available"
+        ].detach().to(
+            device="cpu",
+            dtype=torch.bool,
+        )
+        if drivable_available.shape != (batch_size,):
+            raise ValueError(
+                "drivable supervision availability must have shape [B]"
+            )
         map_available = (
             map_valid.detach().to(device="cpu", dtype=torch.bool)
             & available
+            & drivable_available
         )
         route_available = (
             route_valid.detach().to(device="cpu", dtype=torch.bool)
