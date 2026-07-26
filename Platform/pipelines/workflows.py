@@ -55,7 +55,7 @@ DATA_PREP_IMAGE = _os.environ.get(
 
 MLFLOW_URI = "http://mlflow.mlflow.svc.cluster.local:5000"
 DATASET_PACK_VERSION = "v2.2"
-KITSCENES_NAVIGATION_DATASET_VERSION = "v3.0"
+KITSCENES_NAVIGATION_DATASET_VERSION = "v3.1"
 BASELINE_TRAINING_OBJECTIVE_VERSION = "trajectory_imitation_v1"
 KITSCENES_NAVIGATION_OBJECTIVE_VERSION = (
     "kitscenes_navigation_objective_v1"
