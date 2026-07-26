@@ -89,9 +89,6 @@ def audit_target_rollout_reconstruction(
     }
 
     records = []
-    scene_values: dict[str, dict[str, list[float]]] = defaultdict(
-        lambda: defaultdict(list)
-    )
     for index, (sample_uid, group_uid) in enumerate(
         zip(sample_uids, split_group_uids, strict=True)
     ):
@@ -104,8 +101,16 @@ def audit_target_rollout_reconstruction(
             "split_group_uid": group_uid,
             **metrics,
         })
-        for name, value in metrics.items():
-            scene_values[group_uid][name].append(value)
+    records.sort(key=lambda record: str(record["sample_uid"]))
+
+    scene_values: dict[str, dict[str, list[float]]] = defaultdict(
+        lambda: defaultdict(list)
+    )
+    for record in records:
+        for name in metric_arrays:
+            scene_values[str(record["split_group_uid"])][name].append(
+                float(record[name])
+            )
 
     scenes = []
     for group_uid in sorted(scene_values):
@@ -119,7 +124,9 @@ def audit_target_rollout_reconstruction(
         })
     metrics = {
         name: {
-            "natural": _distribution(values),
+            "natural": _distribution([
+                float(record[name]) for record in records
+            ]),
             "scene_mean_distribution": _distribution([
                 float(scene[name]) for scene in scenes
             ]),
