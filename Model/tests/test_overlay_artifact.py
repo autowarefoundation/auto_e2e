@@ -27,12 +27,24 @@ def _fixture():
     ]
     controls = np.arange(3 * 2 * 64 * 2, dtype=np.float32).reshape(3, 2, 64, 2)
     v0 = np.array([3.5, 4.5, 5.5], dtype=np.float32)
-    heatmaps = np.linspace(
+    base = np.linspace(
         0.0,
-        6.0,
-        3 * len(BEV_HEATMAP_NAMES) * BEV_HEATMAP_SIZE * BEV_HEATMAP_SIZE,
+        1.0,
+        BEV_HEATMAP_SIZE * BEV_HEATMAP_SIZE,
         dtype=np.float32,
-    ).reshape(3, len(BEV_HEATMAP_NAMES), BEV_HEATMAP_SIZE, BEV_HEATMAP_SIZE)
+    ).reshape(BEV_HEATMAP_SIZE, BEV_HEATMAP_SIZE)
+    branch_scales = np.array(
+        [0.01, 30.0, 0.2, 28.0, 0.5, 1.0],
+        dtype=np.float32,
+    )
+    heatmaps = np.stack(
+        [
+            np.stack(
+                [base * scale * (row + 1) for scale in branch_scales]
+            )
+            for row in range(3)
+        ]
+    )
     return uids, controls, v0, heatmaps
 
 
@@ -57,13 +69,16 @@ def test_overlay_roundtrip_and_sorted_directory():
     np.testing.assert_array_equal(decoded.v0, v0)
     np.testing.assert_allclose(
         decoded.bev_heatmap_scales,
-        heatmaps.max(axis=(1, 2, 3)),
+        heatmaps.max(axis=(2, 3)),
     )
     np.testing.assert_allclose(
         decoded.bev_heatmaps,
         heatmaps,
-        atol=float(decoded.bev_heatmap_scales.max()) / 255.0,
+        atol=decoded.bev_heatmap_scales[:, :, None, None] / 255.0,
     )
+    assert np.unique(
+        decoded.bev_heatmaps[0, 0],
+    ).size > 200
     assert decoded.bev_heatmap_names == BEV_HEATMAP_NAMES
 
 
@@ -130,7 +145,7 @@ def test_overlay_key_is_split_free_and_validates_segments():
     model_id = "a" * 64
     key = overlay_s3_key(model_id, "l2d", "v2.1", "train-000001.tar")
     assert key == (
-        "overlays/schema=v3/model=" + model_id
+        "overlays/schema=v4/model=" + model_id
         + "/dataset=l2d/version=v2.1/shard=train-000001.tar/overlay.bin.gz"
     )
     assert "split=" not in key and "source=" not in key
