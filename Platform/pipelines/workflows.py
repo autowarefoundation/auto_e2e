@@ -7670,6 +7670,36 @@ def wf_repack_existing_kitscenes(
 
 
 @workflow
+def wf_audit_recovered_kitscenes_target_reconstruction(
+    recovery_manifest: FlyteFile,
+    artifact_set_sha256: str,
+    audit_code_revision: str,
+    dataset_version: str = KITSCENES_NAVIGATION_DATASET_VERSION,
+    image_size: int = 256,
+    pack_concurrency: int = 60,
+    max_partitions: int = 0,
+    val_fraction: float = 0.1,
+    validation_scope: str = "full",
+) -> ReconstructionAuditOutput:
+    """Repack the exact recovery scope and audit its derived holdout."""
+    shards = wf_repack_existing_kitscenes(
+        recovery_manifest=recovery_manifest,
+        artifact_set_sha256=artifact_set_sha256,
+        dataset_version=dataset_version,
+        image_size=image_size,
+        pack_concurrency=pack_concurrency,
+        max_partitions=max_partitions,
+    )
+    return audit_kitscenes_target_reconstruction(
+        packed_shards=shards,
+        audit_code_revision=audit_code_revision,
+        expected_dataset_version=dataset_version,
+        val_fraction=val_fraction,
+        validation_scope=validation_scope,
+    )
+
+
+@workflow
 def wf_create_dataset_sharded(
     dataset: Dataset = Dataset.KITSCENES,
     source_revision: str = KITSCENES_SOURCE_REVISION,
