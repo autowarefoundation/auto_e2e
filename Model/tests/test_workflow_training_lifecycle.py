@@ -579,6 +579,9 @@ def test_rollout_control_arm_uses_composite_selector_without_rollout_loss():
     assert '"calibration_report"' in source
     assert '"selection/effective_weight/{name}"' in source
     assert '"selection/calibration/min_rank_correlation"' in source
+    assert '"train/loss_rollout"' in source
+    assert '"train/loss_comfort_jerk"' in source
+    assert '"train/loss_comfort_lateral_acceleration"' in source
 
 
 def test_kitscenes_epoch_evaluation_preserves_auto_e2e_horizon():
