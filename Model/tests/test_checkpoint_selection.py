@@ -1,0 +1,184 @@
+"""Tests for scene-balanced composite checkpoint selection."""
+
+from __future__ import annotations
+
+import math
+
+import pytest
+
+from evaluation.checkpoint_selection import (
+    SELECTOR_MIN_DELTA,
+    aggregate_validation_records,
+    freeze_component_availability,
+    score_checkpoint,
+    score_is_better,
+)
+
+
+def _record(
+    sample_uid: str,
+    group_uid: str,
+    value: float,
+    **overrides,
+):
+    return {
+        "sample_uid": sample_uid,
+        "split_group_uid": group_uid,
+        "ade_3s_m": value,
+        "fde_6_4s_m": value * 2.0,
+        "comfort_excess": value / 100.0,
+        "offroad_excess": value / 200.0,
+        "route_gap": None,
+        "wrong_branch_excess": None,
+        "destination_error_m": None,
+        **overrides,
+    }
+
+
+def test_scene_balanced_aggregate_is_not_sample_weighted():
+    records = [
+        _record("a-1", "scene-a", 1.0),
+        _record("b-1", "scene-b", 3.0),
+        _record("b-2", "scene-b", 5.0),
+    ]
+
+    aggregate = aggregate_validation_records(records)
+    ade = aggregate["metrics"]["ade_3s_m"]
+
+    assert ade["natural"] == pytest.approx(3.0)
+    assert ade["scene_balanced"] == pytest.approx(2.5)
+    assert ade["eligible_sample_count"] == 3
+    assert ade["eligible_scene_count"] == 2
+    assert ade["scene_distribution"]["p50"] == pytest.approx(2.5)
+
+
+def test_duplicate_exposure_does_not_change_scene_balanced_mean():
+    base = [
+        _record("a-1", "scene-a", 1.0),
+        _record("b-1", "scene-b", 3.0),
+        _record("b-2", "scene-b", 5.0),
+    ]
+    repeated = base + [
+        _record("b-3", "scene-b", 3.0),
+        _record("b-4", "scene-b", 5.0),
+    ]
+
+    first = aggregate_validation_records(base)
+    second = aggregate_validation_records(repeated)
+
+    assert (
+        first["metrics"]["ade_3s_m"]["scene_balanced"]
+        == second["metrics"]["ade_3s_m"]["scene_balanced"]
+    )
+    assert (
+        first["metrics"]["ade_3s_m"]["natural"]
+        != second["metrics"]["ade_3s_m"]["natural"]
+    )
+
+
+def test_aggregation_rejects_missing_scene_and_duplicate_sample():
+    missing_scene = _record("sample", "scene", 1.0)
+    missing_scene["split_group_uid"] = ""
+    with pytest.raises(ValueError, match="split_group_uid"):
+        aggregate_validation_records([missing_scene])
+
+    with pytest.raises(ValueError, match="duplicate"):
+        aggregate_validation_records([
+            _record("sample", "scene-a", 1.0),
+            _record("sample", "scene-b", 2.0),
+        ])
+
+
+def test_availability_uses_frozen_coverage_thresholds():
+    records = [
+        _record(
+            f"sample-{index}",
+            f"scene-{index % 4}",
+            1.0,
+            route_gap=0.1,
+            wrong_branch_excess=(0.0 if index < 20 else None),
+            destination_error_m=(2.0 if index < 10 else None),
+        )
+        for index in range(50)
+    ]
+
+    availability = freeze_component_availability(
+        aggregate_validation_records(records)
+    )
+
+    assert availability["map_safety"]
+    assert availability["navigation"]
+    assert availability["wrong_branch"]
+    assert availability["destination"]
+
+
+def test_score_renormalizes_unavailable_map_and_navigation():
+    records = [
+        _record(
+            f"sample-{index}",
+            f"scene-{index % 2}",
+            1.0,
+            offroad_excess=None,
+        )
+        for index in range(4)
+    ]
+    aggregate = aggregate_validation_records(records)
+    availability = freeze_component_availability(aggregate)
+
+    result = score_checkpoint(aggregate, availability)
+
+    assert set(result["components"]) == {"trajectory", "comfort"}
+    assert sum(result["effective_weights"].values()) == pytest.approx(1.0)
+    assert result["effective_weights"]["trajectory"] == pytest.approx(
+        0.50 / 0.65
+    )
+    assert math.isfinite(result["score"])
+
+
+def test_lower_errors_produce_better_composite_score():
+    worse_records = [
+        _record(
+            f"sample-{index}",
+            f"scene-{index % 4}",
+            2.0,
+            route_gap=0.1,
+            wrong_branch_excess=(0.1 if index < 20 else None),
+            destination_error_m=2.0,
+        )
+        for index in range(50)
+    ]
+    better_records = [
+        {
+            **record,
+            "ade_3s_m": float(record["ade_3s_m"]) * 0.5,
+            "fde_6_4s_m": float(record["fde_6_4s_m"]) * 0.5,
+            "comfort_excess": float(record["comfort_excess"]) * 0.5,
+            "offroad_excess": float(record["offroad_excess"]) * 0.5,
+            "route_gap": float(record["route_gap"]) * 0.5,
+            "wrong_branch_excess": (
+                None
+                if record["wrong_branch_excess"] is None
+                else float(record["wrong_branch_excess"]) * 0.5
+            ),
+            "destination_error_m": (
+                float(record["destination_error_m"]) * 0.5
+            ),
+        }
+        for record in worse_records
+    ]
+    worse_aggregate = aggregate_validation_records(worse_records)
+    availability = freeze_component_availability(worse_aggregate)
+    better_aggregate = aggregate_validation_records(better_records)
+
+    worse = score_checkpoint(worse_aggregate, availability)
+    better = score_checkpoint(better_aggregate, availability)
+
+    assert better["score"] > worse["score"]
+    assert score_is_better(
+        better["score"],
+        worse["score"],
+    )
+    assert not score_is_better(
+        worse["score"] + SELECTOR_MIN_DELTA,
+        worse["score"],
+    )
