@@ -34,6 +34,7 @@ func TestNormalizeMLflowRuns(t *testing.T) {
 	body := []byte(`{"runs":[
 		{"info":{"run_id":"r1","run_name":"","experiment_id":"1","status":"FINISHED","start_time":1699000000000,"end_time":1699000100000},
 		 "data":{"params":[{"key":"lr","value":"3e-4"},{"key":"mlflow.runName","value":"tagged-name"}],
+		         "tags":[{"key":"ctx/eval_execution_id","value":"exec-1"}],
 		         "metrics":[{"key":"eval/ade","value":2.5},{"key":"eval/ade","value":9.9},{"key":"loss","value":"0.31"}]}}
 	]}`)
 	out, err := NormalizeMLflowRuns(body)
@@ -54,6 +55,9 @@ func TestNormalizeMLflowRuns(t *testing.T) {
 	if r.Params["lr"] != "3e-4" {
 		t.Errorf("param lr = %q", r.Params["lr"])
 	}
+	if r.Tags["ctx/eval_execution_id"] != "exec-1" {
+		t.Errorf("execution tag = %q", r.Tags["ctx/eval_execution_id"])
+	}
 	// First metric value for a key wins (upstream is newest-first).
 	if r.Metrics["eval/ade"] != 2.5 {
 		t.Errorf("metric eval/ade = %v, want 2.5", r.Metrics["eval/ade"])
@@ -61,6 +65,18 @@ func TestNormalizeMLflowRuns(t *testing.T) {
 	// Metric value as a STRING must coerce.
 	if r.Metrics["loss"] != 0.31 {
 		t.Errorf("metric loss = %v, want 0.31", r.Metrics["loss"])
+	}
+}
+
+func TestNormalizeMLflowRunNameFromTag(t *testing.T) {
+	body := []byte(`{"runs":[{"info":{"run_id":"r1"},"data":{
+		"tags":[{"key":"mlflow.runName","value":"tag-only-name"}]}}]}`)
+	runs, err := NormalizeMLflowRuns(body)
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if runs[0].RunName != "tag-only-name" {
+		t.Errorf("run name = %q, want tag-only-name", runs[0].RunName)
 	}
 }
 
@@ -112,6 +128,35 @@ func TestNormalizeMLflowModels(t *testing.T) {
 	v := out[0].LatestVersions[0]
 	if v.Version != "3" || v.Stage != "Production" || v.RunID != "r9" || v.Status != "READY" {
 		t.Errorf("version = %+v (current_stage must map to Stage)", v)
+	}
+}
+
+func TestNormalizeMLflowModelVersions(t *testing.T) {
+	body := []byte(`{"model_versions":[{
+		"name":"planner","version":"42","current_stage":"None","run_id":"r9",
+		"status":"READY","description":"best checkpoint",
+		"creation_timestamp":1699000000000,"last_updated_timestamp":"1699000001000",
+		"tags":[
+			{"key":"checkpoint_role","value":"best"},
+			{"key":"train_execution_id","value":"exec-9"}
+		]
+	}],"next_page_token":"versions-p2"}`)
+	page, err := NormalizeMLflowModelVersionsPage(body)
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if page.NextPageToken != "versions-p2" || len(page.Items) != 1 {
+		t.Fatalf("page = %+v", page)
+	}
+	version := page.Items[0]
+	if version.Name != "planner" || version.Version != "42" ||
+		version.RunID != "r9" || version.CreatedAt != 1699000000000 ||
+		version.LastUpdatedAt != 1699000001000 {
+		t.Errorf("version = %+v", version)
+	}
+	if version.Tags["checkpoint_role"] != "best" ||
+		version.Tags["train_execution_id"] != "exec-9" {
+		t.Errorf("version tags = %+v", version.Tags)
 	}
 }
 
@@ -179,6 +224,21 @@ func TestNormalizeFlyteExecutions_Fallbacks(t *testing.T) {
 	}
 }
 
+func TestNormalizeFlyteExecutions_StripsGeneratedWorkflowPrefix(t *testing.T) {
+	body := []byte(`{"executions":[
+		{"id":{"name":"e3"},
+		 "closure":{"phase":"RUNNING","workflowId":{
+			"name":".flytegen.Platform.pipelines.workflows.wf_navigation_ablation_pipeline"}}}
+	]}`)
+	out, err := NormalizeFlyteExecutions(body)
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if out[0].WorkflowName != "wf_navigation_ablation_pipeline" {
+		t.Errorf("workflow_name = %q", out[0].WorkflowName)
+	}
+}
+
 func TestListNormalizersPreservePaginationTokens(t *testing.T) {
 	experiments, err := NormalizeMLflowExperimentsPage([]byte(
 		`{"experiments":[],"next_page_token":"experiments-p2"}`,
@@ -197,6 +257,12 @@ func TestListNormalizersPreservePaginationTokens(t *testing.T) {
 	))
 	if err != nil || models.NextPageToken != "models-p2" {
 		t.Fatalf("models page = %+v, %v", models, err)
+	}
+	versions, err := NormalizeMLflowModelVersionsPage([]byte(
+		`{"model_versions":[],"next_page_token":"versions-p2"}`,
+	))
+	if err != nil || versions.NextPageToken != "versions-p2" {
+		t.Fatalf("versions page = %+v, %v", versions, err)
 	}
 	executions, err := NormalizeFlyteExecutionsPage([]byte(
 		`{"executions":[],"token":"flyte-p2"}`,
