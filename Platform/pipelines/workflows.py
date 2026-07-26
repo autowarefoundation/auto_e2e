@@ -61,6 +61,7 @@ KITSCENES_NAVIGATION_OBJECTIVE_VERSION = (
     "kitscenes_navigation_objective_v1"
 )
 ROLLOUT_ALIGNED_OBJECTIVE_VERSION = "rollout_aligned_planner_v1"
+ROLLOUT_ALIGNED_CONTROL_OBJECTIVE_VERSION = "rollout_aligned_control_v1"
 L2D_SOURCE_REVISION = "main"
 KITSCENES_SOURCE_REVISION = "6fde0034446669e2ed7235e4c7fe323cd23d599d"
 
@@ -2824,6 +2825,7 @@ def train_il(
     if training_objective_version not in {
         BASELINE_TRAINING_OBJECTIVE_VERSION,
         KITSCENES_NAVIGATION_OBJECTIVE_VERSION,
+        ROLLOUT_ALIGNED_CONTROL_OBJECTIVE_VERSION,
         ROLLOUT_ALIGNED_OBJECTIVE_VERSION,
     }:
         raise ValueError(
@@ -2837,7 +2839,14 @@ def train_il(
     objective_v2 = (
         training_objective_version == ROLLOUT_ALIGNED_OBJECTIVE_VERSION
     )
-    if (objective_v1 or objective_v2) and dataset != Dataset.KITSCENES:
+    objective_v2_control = (
+        training_objective_version
+        == ROLLOUT_ALIGNED_CONTROL_OBJECTIVE_VERSION
+    )
+    selector_enabled = objective_v2 or objective_v2_control
+    if (
+        objective_v1 or objective_v2 or objective_v2_control
+    ) and dataset != Dataset.KITSCENES:
         raise ValueError(
             "navigation planner objectives are KITScenes-only"
         )
@@ -2870,6 +2879,13 @@ def train_il(
     if objective_v2 and not enable_world_model:
         raise ValueError(
             "rollout-aligned matched experiments require the World Model"
+        )
+    if objective_v2_control and (
+        not enable_route_conditioning or not enable_world_model
+    ):
+        raise ValueError(
+            "rollout-aligned control requires Reactive route conditioning "
+            "and the World Model"
         )
     if not 0 <= training_seed <= 2**32 - 1:
         raise ValueError(
@@ -3497,7 +3513,6 @@ def train_il(
     optimizer = torch.optim.AdamW(
         model.parameters(), lr=lr, weight_decay=weight_decay
     )
-    selector_enabled = objective_v2
     selector_mode = "max" if selector_enabled else "min"
     selector_threshold = 0.0005 if selector_enabled else 1e-4
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
@@ -3567,6 +3582,7 @@ def train_il(
         rollout_aligned_config.update(
             rollout_aligned_loss_fn.metadata()
         )
+    if selector_enabled:
         from evaluation.checkpoint_selection import (
             SELECTOR_MIN_DELTA,
             SELECTOR_POLICY_VERSION,
