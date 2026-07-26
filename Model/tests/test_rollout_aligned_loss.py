@@ -50,6 +50,10 @@ def _supervision(
             else zeros.clone()
         ),
         "available": torch.tensor([available], dtype=torch.bool),
+        "drivable_available": torch.tensor(
+            [available],
+            dtype=torch.bool,
+        ),
     }
 
 
@@ -214,3 +218,22 @@ def test_map_validity_masks_regions_before_reduction():
     assert unavailable["map_sample_count"].item() == 0
     assert unavailable["map"].item() == 0.0
     assert torch.isfinite(unavailable["constraint"])
+
+
+def test_missing_drivable_field_keeps_route_term_available():
+    field = _field_from_lateral_band()
+    supervision = _supervision(
+        route_field=field,
+        drivable_field=torch.full_like(field, 30.0),
+    )
+    supervision["drivable_available"] = torch.tensor([False])
+
+    terms = _loss(
+        _controls(curvature=0.04),
+        _controls(),
+        supervision=supervision,
+    )
+
+    assert terms["route_sample_count"].item() == 1
+    assert terms["drivable_sample_count"].item() == 0
+    assert terms["map"].item() == terms["route"].item()
