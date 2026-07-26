@@ -271,3 +271,31 @@ def test_best_pointer_is_versioned_json():
     latest = json.loads(s3.versions[-1][1]["Body"])
     assert latest["epoch"] == 3
     assert latest["checkpoint_sha256"] == "b" * 64
+
+
+def test_best_pointer_records_composite_selection_policy():
+    s3 = _FakeS3()
+    selection = {
+        "policy_version": "rollout_composite_selector_v1",
+        "score": 0.75,
+        "components": {
+            "trajectory": 0.5,
+            "comfort": 1.0,
+        },
+    }
+
+    update_best_pointer(
+        s3,
+        bucket="checkpoints",
+        run_id="run-1",
+        epoch=4,
+        checkpoint_uri="s3://checkpoints/run/epoch-0004.pt",
+        checkpoint_sha256="c" * 64,
+        ade=1.0,
+        fde=2.0,
+        selection=selection,
+    )
+
+    latest = json.loads(s3.versions[-1][1]["Body"])
+    assert latest["schema_version"] == "best_checkpoint_pointer_v2"
+    assert latest["selection"] == selection
