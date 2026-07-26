@@ -221,6 +221,7 @@ class RolloutAlignedLoss(nn.Module):
         return {
             "version": ROLLOUT_ALIGNED_LOSS_VERSION,
             "dt": self.dt,
+            "position_target_source": "packed_logged_xy",
             "rollout": {
                 "path_weight": 0.75,
                 "final_weight": 0.25,
@@ -298,6 +299,7 @@ class RolloutAlignedLoss(nn.Module):
         predicted_controls: torch.Tensor,
         target_controls: torch.Tensor,
         initial_speed: torch.Tensor,
+        logged_positions: torch.Tensor,
         route_supervision: Mapping[str, torch.Tensor],
         map_valid: torch.Tensor,
         route_valid: torch.Tensor,
@@ -313,6 +315,24 @@ class RolloutAlignedLoss(nn.Module):
             raise ValueError("map_valid must have shape [B]")
         if route_valid.shape != (batch_size,):
             raise ValueError("route_valid must have shape [B]")
+        if logged_positions.shape != (
+            batch_size,
+            predicted.shape[1],
+            2,
+        ):
+            raise ValueError(
+                "logged_positions must match control shape [B,T,2]"
+            )
+        with torch.autocast(
+            device_type=predicted.device.type,
+            enabled=False,
+        ):
+            logged_positions = logged_positions.to(
+                device=predicted.device,
+                dtype=torch.float32,
+            )
+            if not torch.isfinite(logged_positions).all():
+                raise ValueError("logged_positions must be finite")
 
         (
             predicted_positions,
@@ -324,7 +344,7 @@ class RolloutAlignedLoss(nn.Module):
             dt=self.dt,
         )
         (
-            target_positions,
+            _,
             target_headings,
             target_speeds,
         ) = integrate_controls_torch(
@@ -334,7 +354,7 @@ class RolloutAlignedLoss(nn.Module):
         )
 
         position_error = torch.linalg.vector_norm(
-            predicted_positions - target_positions,
+            predicted_positions - logged_positions,
             dim=2,
         )
         path_per_sample = _huber_distance(position_error).mean(dim=1)
@@ -417,14 +437,14 @@ class RolloutAlignedLoss(nn.Module):
             fields["distance_to_corridor_m"],
             predicted_positions,
             predicted_headings,
-            target_positions,
+            logged_positions,
             target_headings,
         )
         drivable_per_sample = self._region_excess(
             fields["distance_to_drivable_m"],
             predicted_positions,
             predicted_headings,
-            target_positions,
+            logged_positions,
             target_headings,
         )
         route_weight = route_active.to(dtype=torch.float32)
