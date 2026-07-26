@@ -552,6 +552,12 @@ def test_rollout_control_arm_uses_composite_selector_without_rollout_loss():
         "selector_enabled = objective_v2 or objective_v2_control"
         in source
     )
+    assert "if selector_enabled and not manifest.get(\"has_gps\"" in source
+    assert (
+        "if selector_enabled and (\n"
+        "            not manifest.get(\"has_route_supervision\""
+        in source
+    )
     assert (
         "rollout_aligned_loss_fn = RolloutAlignedLoss().to(device)"
         in source
