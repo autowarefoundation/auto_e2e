@@ -492,6 +492,25 @@ def test_reconstruction_audit_uses_training_group_digest_contract():
     assert signature.parameters["validation_scope"].default == "full"
 
 
+def test_recovered_reconstruction_audit_binds_exact_repack_scope():
+    nodes = (
+        workflows.wf_audit_recovered_kitscenes_target_reconstruction.nodes
+    )
+    assert [
+        getattr(node.flyte_entity, "name", "")
+        for node in nodes
+    ] == [
+        workflows.wf_repack_existing_kitscenes.name,
+        workflows.audit_kitscenes_target_reconstruction.name,
+    ]
+    repack_node, audit_node = nodes
+    audit_bindings = {
+        binding.var: binding.binding.promise
+        for binding in audit_node.bindings
+    }
+    assert audit_bindings["packed_shards"].node_id == repack_node.id
+
+
 def test_training_seed_controls_comparable_navigation_runs():
     training_function = workflows.train_il.task_function
     training_source = inspect.getsource(training_function)
