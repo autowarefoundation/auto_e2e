@@ -3214,14 +3214,14 @@ def train_il(
             actual_validation_sample_digest,
         )
     reconstruction_audit_contract = None
-    if objective_v2:
+    if selector_enabled:
         if reconstruction_audit is None:
             raise ValueError(
-                "rollout-aligned training requires a reconstruction audit"
+                "composite-selector training requires a reconstruction audit"
             )
         if reconstruction_audit_decision != "go":
             raise ValueError(
-                "rollout-aligned training requires an explicit Go decision"
+                "composite-selector training requires an explicit Go decision"
             )
         if len(reconstruction_audit_rationale.strip()) < 20:
             raise ValueError(
@@ -3326,7 +3326,8 @@ def train_il(
         }
     elif reconstruction_audit is not None:
         raise ValueError(
-            "reconstruction audit is accepted only by rollout-aligned training"
+            "reconstruction audit is accepted only by composite-selector "
+            "training"
         )
     navigation_repeat_policy = (
         NavigationRepeatPolicy()
@@ -6838,12 +6839,12 @@ def evaluate_kitscenes_benchmark_checkpoint(
 )
 def audit_kitscenes_target_reconstruction(
     packed_shards: List[FlyteDirectory],
-    validation_group_uids: List[str],
-    expected_validation_sample_uid_digest: str,
     audit_code_revision: str,
     expected_dataset_version: str = KITSCENES_NAVIGATION_DATASET_VERSION,
+    val_fraction: float = 0.1,
+    validation_scope: str = "full",
 ) -> ReconstructionAuditOutput:
-    """Audit target-control rollout against packed GPS without image decode."""
+    """Derive the training holdout and audit target controls against GPS."""
     import hashlib
     import json
     import os
@@ -6859,25 +6860,18 @@ def audit_kitscenes_target_reconstruction(
         stable_digest,
     )
     from training.losses.control_rollout import ROLLOUT_POLICY_VERSION
-    from training.dataset_policy import group_uid_digest
+    from training.dataset_policy import (
+        group_uid_digest,
+        training_policy_for_dataset,
+        validation_group_uids as select_validation_group_uids,
+    )
+    from data_parsing.pre_extracted import discover_split_inventory
 
     if not packed_shards:
         raise ValueError("packed_shards must not be empty")
-    if (
-        not validation_group_uids
-        or validation_group_uids
-        != sorted(set(validation_group_uids))
-        or any(not uid for uid in validation_group_uids)
-    ):
+    if not 0.0 < val_fraction < 1.0:
         raise ValueError(
-            "validation_group_uids must be sorted, unique, and non-empty"
-        )
-    if not re.fullmatch(
-        r"[0-9a-f]{64}",
-        expected_validation_sample_uid_digest,
-    ):
-        raise ValueError(
-            "expected_validation_sample_uid_digest must be a SHA-256"
+            f"val_fraction must be between 0 and 1, got {val_fraction}"
         )
     if not re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", audit_code_revision):
         raise ValueError(
@@ -6966,6 +6960,48 @@ def audit_kitscenes_target_reconstruction(
         )
     )
 
+    source_revision = next(iter(source_revisions))
+    packed_contract_digest = next(iter(contract_digests))
+    split_inventory = discover_split_inventory(shard_dirs)
+    expected_sample_count = sum(
+        int(identity["total_samples"])
+        for identity in shard_identities
+    )
+    if split_inventory.sample_count != expected_sample_count:
+        raise ValueError(
+            "packed sample metadata coverage differs from manifests: "
+            f"expected={expected_sample_count} "
+            f"actual={split_inventory.sample_count}"
+        )
+    training_policy = training_policy_for_dataset(
+        Dataset.KITSCENES.value,
+        validation_scope=validation_scope,
+    )
+    validation_group_uids = select_validation_group_uids(
+        split_inventory.group_uids,
+        val_fraction=val_fraction,
+        policy=training_policy,
+        source_revision=source_revision,
+        packed_dataset_version=expected_dataset_version,
+        packed_contract_digest=packed_contract_digest,
+        packed_partition_count=len(shard_identities),
+        empty_partition_count=(
+            len(shard_identities) - len(shard_dirs)
+        ),
+        packed_sample_count=split_inventory.sample_count,
+        packed_sample_uid_digest=split_inventory.sample_uid_digest,
+    )
+    if validation_group_uids is None:
+        raise ValueError(
+            "reconstruction audit requires an exact validation split"
+        )
+    (
+        expected_validation_sample_count,
+        expected_validation_sample_uid_digest,
+    ) = split_inventory.sample_identity_for_groups(
+        validation_group_uids
+    )
+
     inputs = load_packed_reconstruction_inputs(
         shard_dirs,
         validation_group_uids=validation_group_uids,
@@ -6977,6 +7013,12 @@ def audit_kitscenes_target_reconstruction(
             "validation snapshot digest mismatch: "
             f"expected={expected_validation_sample_uid_digest} "
             f"actual={actual_sample_digest}"
+        )
+    if int(report["sample_count"]) != expected_validation_sample_count:
+        raise ValueError(
+            "validation snapshot sample count mismatch: "
+            f"expected={expected_validation_sample_count} "
+            f"actual={report['sample_count']}"
         )
 
     records = report.pop("records")
@@ -7010,15 +7052,17 @@ def audit_kitscenes_target_reconstruction(
         "container_image": os.environ["AUTO_E2E_EVAL_IMAGE"],
         "dataset": Dataset.KITSCENES.value,
         "dataset_version": next(iter(dataset_versions)),
-        "packed_contract_digest": next(iter(contract_digests)),
+        "packed_contract_digest": packed_contract_digest,
         "packed_manifest_digest": stable_digest(shard_identities),
         "partition_count": len(shard_identities),
         "rollout_policy_version": ROLLOUT_POLICY_VERSION,
-        "source_revision": next(iter(source_revisions)),
+        "source_revision": source_revision,
+        "validation_scope": validation_scope,
+        "validation_fraction": val_fraction,
         "validation_group_count": len(validation_group_uids),
         "validation_group_uid_digest": group_digest,
         "validation_sample_uid_digest": actual_sample_digest,
-        "validation_split_id": f"exact-groups-{group_digest[:16]}",
+        "validation_split_id": training_policy.validation_split_id,
     }
     report_path = output_dir / "report.json"
     report_path.write_text(
@@ -7077,20 +7121,18 @@ def wf_evaluate_kitscenes_benchmark(
 @workflow
 def wf_audit_kitscenes_target_reconstruction(
     packed_shards: List[FlyteDirectory],
-    validation_group_uids: List[str],
-    expected_validation_sample_uid_digest: str,
     audit_code_revision: str,
     expected_dataset_version: str = KITSCENES_NAVIGATION_DATASET_VERSION,
+    val_fraction: float = 0.1,
+    validation_scope: str = "full",
 ) -> ReconstructionAuditOutput:
     """Run the immutable preflight gate for rollout-aligned training."""
     return audit_kitscenes_target_reconstruction(
         packed_shards=packed_shards,
-        validation_group_uids=validation_group_uids,
-        expected_validation_sample_uid_digest=(
-            expected_validation_sample_uid_digest
-        ),
         audit_code_revision=audit_code_revision,
         expected_dataset_version=expected_dataset_version,
+        val_fraction=val_fraction,
+        validation_scope=validation_scope,
     )
 
 
