@@ -10,6 +10,7 @@ import pytest
 from data_processing.geospatial import encode_gps_future, encode_pose
 from evaluation.reconstruction_audit import (
     AUDIT_SCHEMA_VERSION,
+    audit_packed_target_rollout_reconstruction,
     audit_target_rollout_reconstruction,
     load_packed_reconstruction_inputs,
 )
@@ -36,9 +37,11 @@ def test_reconstruction_audit_accepts_exact_straight_rollout():
     report = audit_target_rollout_reconstruction(*_fixture())
 
     assert report["schema_version"] == AUDIT_SCHEMA_VERSION
-    assert report["go"] is True
+    assert report["thresholds_pass"] is True
+    assert report["decision"]["status"] == "pending_review"
     assert report["sample_count"] == 3
     assert report["scene_count"] == 2
+    assert len(report["error_by_step"]) == 64
     assert report["metrics"]["fde_full_m"]["natural"]["p95"] < 2e-5
     assert [scene["split_group_uid"] for scene in report["scenes"]] == [
         "scene-1",
@@ -58,7 +61,11 @@ def test_reconstruction_audit_rejects_large_pose_error():
         group_uids,
     )
 
-    assert report["go"] is False
+    assert report["thresholds_pass"] is False
+    assert (
+        report["decision"]["automatic_recommendation"]
+        == "review_required"
+    )
     assert report["metrics"]["fde_3s_m"]["natural"]["p95"] == pytest.approx(3.0)
     assert report["metrics"]["fde_full_m"]["natural"]["p95"] == pytest.approx(3.0)
 
@@ -149,7 +156,10 @@ def _write_packed_sample(
         _add_tar_member(archive, f"{sample_uid}.{suffix}", payload)
 
 
-def test_packed_loader_reads_only_selected_validation_groups(tmp_path):
+def test_packed_loader_reads_only_selected_validation_groups(
+    tmp_path,
+    monkeypatch,
+):
     tar_path = tmp_path / "samples.tar"
     with tarfile.open(tar_path, "w") as archive:
         _write_packed_sample(
@@ -185,6 +195,19 @@ def test_packed_loader_reads_only_selected_validation_groups(tmp_path):
     assert inputs.target_controls.shape == (2, 64, 2)
     assert inputs.logged_gps.shape == (2, 65, 2)
     assert inputs.current_poses.shape == (2, 3)
+
+    def fake_wgs84_to_ego_xy(gps, poses):
+        assert gps.shape == (2, 65, 2)
+        assert poses.shape == (2, 3)
+        return np.zeros((2, 64, 2), dtype=np.float64)
+
+    monkeypatch.setattr(
+        "evaluation.kitscenes_benchmark.wgs84_trajectory_to_ego_xy",
+        fake_wgs84_to_ego_xy,
+    )
+    report = audit_packed_target_rollout_reconstruction(inputs)
+    assert report["sample_uid_digest"]
+    assert report["sample_count"] == 2
 
 
 def test_packed_loader_rejects_missing_selected_member(tmp_path):
