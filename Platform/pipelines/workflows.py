@@ -3198,7 +3198,7 @@ def train_il(
             and not manifest.get("has_navigation", False)
         ):
             raise ValueError(
-                f"KITScenes shard '{dname}' ({d}) has no schema-v5 "
+                f"KITScenes shard '{dname}' ({d}) has no schema-v6 "
                 "navigation artifacts"
             )
         if enable_route_consistency and (
