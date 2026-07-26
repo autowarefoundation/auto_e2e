@@ -34,21 +34,31 @@ This design makes two bounded changes:
    composite score that combines natural and scene-balanced validation
    aggregates.
 
-The training objective is:
+The planner objective introduced by this design is:
 
 ```text
-L_total =
+L_planner =
     L_action
   + 0.50 * L_rollout
   + 0.05 * L_constraint
 ```
 
-For the matched experiment defined by this document, `L_total` means exactly
-these three planner-training terms. JEPA and Reasoning supervision are disabled
-in both the control and treatment runs. This isolates the effect of loss
-alignment and avoids silently changing the relative scale of unrelated
-objectives. The model architecture, route input boundary, and 64-step control
-output remain unchanged.
+The World Model and its JEPA objective remain enabled because they are a core
+part of AutoE2E representation learning. The complete training objective is:
+
+```text
+L_total =
+    L_planner
+  + lambda_jepa * L_jepa
+  + lambda_reasoning * L_reasoning_existing
+```
+
+This PR changes only `L_planner`. The matched control and treatment freeze the
+same World Model, JEPA weight, Reasoning enable flag, and Reasoning weight. The
+initial matched configuration keeps `enable_world_model=true` and the existing
+JEPA weight. It neither adds a new Cosmos-derived loss nor changes the existing
+Reasoning objective. The model architecture, route input boundary, and 64-step
+control output remain unchanged.
 
 The implementation is permitted to start only after a reconstruction audit
 shows that target controls, when integrated from the recorded initial speed,
@@ -165,7 +175,8 @@ Both arms use:
 - identical dataset and frozen scene split;
 - identical seeds, batch size, optimizer, and maximum epochs;
 - identical camera, map, and route inputs;
-- identical JEPA and Reasoning settings, both disabled;
+- identical World Model and JEPA settings, with the World Model enabled;
+- identical Reasoning enable flag, labels, and weight inherited from Arm A;
 - no weighted sampler or hard-example mining.
 
 Arm A is trained first. Its immutable selected checkpoint is evaluated with the
@@ -175,10 +186,10 @@ model, data, and validation contracts. Arm A's composite score is computed
 retrospectively from that artifact even though Arm A itself retains the current
 ADE/FDE selection policy.
 
-If a future experiment retains JEPA or Reasoning losses, the three-term formula
-in this document must be named `L_planner`, and the separate top-level weights
-must be specified in a new policy version. They must not be added implicitly to
-the `L_total` defined here.
+The auxiliary objectives are controlled variables, not treatment variables.
+Any JEPA or Reasoning configuration difference between paired arms invalidates
+the comparison. New Cosmos labels, a new Reasoning loss, or auxiliary-loss
+weight tuning requires a separate policy version and experiment.
 
 ## 5. Preflight Reconstruction Audit
 
@@ -346,23 +357,38 @@ implementation:
 
 ## 7. Top-Level Training Loss
 
-For sample `i`:
+For sample `i`, the planner objective is:
 
 \[
-L_i =
+L_i^{planner} =
 L_i^{action}
 +0.5L_i^{rollout}
 +0.05L_i^{constraint}
 \]
 
-The batch loss is the ordinary sample mean:
+The planner batch loss is the ordinary sample mean:
 
 \[
-L_{total}=\frac{1}{B}\sum_i L_i
+L_{planner}=\frac{1}{B}\sum_i L_i^{planner}
 \]
 
 No sample weighting, repeat weighting, or hard-example selection is applied.
 Loss lambdas and all subterm definitions are checkpoint-defining policy.
+
+The existing auxiliary objectives are then added without modification:
+
+\[
+L_{total}
+=
+L_{planner}
++\lambda_{jepa}L_{jepa}
++\lambda_{reasoning}L_{reasoning}^{existing}
+\]
+
+`enable_world_model=true` is required for the initial matched experiment.
+`lambda_jepa`, the Reasoning enable flag, and `lambda_reasoning` are copied from
+Arm A and frozen for Arm B. When existing Reasoning supervision is disabled,
+its term is absent in both arms; this design does not force it off.
 
 The action term is dimensionless after signal normalization. Rollout and map
 terms contain metric quantities. The fixed lambdas define their numerical
@@ -1363,7 +1389,9 @@ This proposal changes only:
    composite score, with explicit coverage and resume contracts.
 
 It does not add Cosmos supervision, sample balancing, tail mining, speed or
-heading losses, JEPA/Reasoning objectives, or architecture changes.
+heading losses, new JEPA/Reasoning objectives, or architecture changes. The
+existing World Model and JEPA objective remain enabled and unchanged in both
+matched arms.
 
 The primary hypothesis is:
 
