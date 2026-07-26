@@ -60,6 +60,7 @@ BASELINE_TRAINING_OBJECTIVE_VERSION = "trajectory_imitation_v1"
 KITSCENES_NAVIGATION_OBJECTIVE_VERSION = (
     "kitscenes_navigation_objective_v1"
 )
+ROLLOUT_ALIGNED_OBJECTIVE_VERSION = "rollout_aligned_planner_v1"
 L2D_SOURCE_REVISION = "main"
 KITSCENES_SOURCE_REVISION = "6fde0034446669e2ed7235e4c7fe323cd23d599d"
 
@@ -2724,6 +2725,7 @@ def train_il(
     if training_objective_version not in {
         BASELINE_TRAINING_OBJECTIVE_VERSION,
         KITSCENES_NAVIGATION_OBJECTIVE_VERSION,
+        ROLLOUT_ALIGNED_OBJECTIVE_VERSION,
     }:
         raise ValueError(
             "unsupported training_objective_version "
@@ -2733,9 +2735,12 @@ def train_il(
         training_objective_version
         == KITSCENES_NAVIGATION_OBJECTIVE_VERSION
     )
-    if objective_v1 and dataset != Dataset.KITSCENES:
+    objective_v2 = (
+        training_objective_version == ROLLOUT_ALIGNED_OBJECTIVE_VERSION
+    )
+    if (objective_v1 or objective_v2) and dataset != Dataset.KITSCENES:
         raise ValueError(
-            "kitscenes_navigation_objective_v1 is KITScenes-only"
+            "navigation planner objectives are KITScenes-only"
         )
     if (
         enable_junction_sampling or enable_route_consistency
@@ -2751,6 +2756,21 @@ def train_il(
     if enable_route_consistency and route_consistency_weight <= 0.0:
         raise ValueError(
             "enabled route consistency requires a positive weight"
+        )
+    if objective_v2 and (
+        enable_junction_sampling or enable_route_consistency
+    ):
+        raise ValueError(
+            "rollout_aligned_planner_v1 replaces legacy route consistency "
+            "and disables junction repeat"
+        )
+    if objective_v2 and not enable_route_conditioning:
+        raise ValueError(
+            "rollout_aligned_planner_v1 requires Reactive route conditioning"
+        )
+    if objective_v2 and not enable_world_model:
+        raise ValueError(
+            "rollout-aligned matched experiments require the World Model"
         )
     if not 0 <= training_seed <= 2**32 - 1:
         raise ValueError(
@@ -3206,7 +3226,7 @@ def train_il(
             and not manifest.get("has_navigation", False)
         ):
             raise ValueError(
-                f"KITScenes shard '{dname}' ({d}) has no schema-v6 "
+                f"KITScenes shard '{dname}' ({d}) has no schema-v7 "
                 "navigation artifacts"
             )
         if enable_route_consistency and (
@@ -3217,6 +3237,15 @@ def train_il(
             raise ValueError(
                 f"route consistency requires route_supervision_v1 in "
                 f"dataset '{dname}' ({d})"
+            )
+        if objective_v2 and (
+            not manifest.get("has_route_supervision", False)
+            or manifest.get("route_supervision_version")
+            != "navigation_supervision_v2"
+        ):
+            raise ValueError(
+                "rollout-aligned loss requires navigation_supervision_v2 "
+                f"in dataset '{dname}' ({d})"
             )
 
     total_reasoning_labels = 0
@@ -3322,6 +3351,19 @@ def train_il(
         route_consistency_config.update(
             route_consistency_loss_fn.metadata()
         )
+    rollout_aligned_loss_fn = None
+    rollout_aligned_config = {
+        "enabled": objective_v2,
+        "rollout_weight": 0.5,
+        "constraint_weight": 0.05,
+    }
+    if objective_v2:
+        from training.losses import RolloutAlignedLoss
+
+        rollout_aligned_loss_fn = RolloutAlignedLoss().to(device)
+        rollout_aligned_config.update(
+            rollout_aligned_loss_fn.metadata()
+        )
 
     scaler = torch.amp.GradScaler(enabled=amp)
     checkpoint_config = {
@@ -3363,6 +3405,7 @@ def train_il(
             ),
         },
         "route_consistency": route_consistency_config,
+        "rollout_aligned_loss": rollout_aligned_config,
         "trajectory_training_policy": training_policy.metadata(),
         "val_fraction": val_fraction,
         "validation_scope": validation_scope,
@@ -3726,6 +3769,23 @@ def train_il(
         jepa_vals = []
         reason_vals = []
         route_vals = []
+        rollout_term_vals = {
+            "rollout": [],
+            "path": [],
+            "final": [],
+            "constraint": [],
+            "comfort": [],
+            "jerk": [],
+            "lateral_acceleration": [],
+            "map": [],
+            "route": [],
+            "drivable": [],
+        }
+        rollout_term_counts = {
+            "map_sample_count": 0,
+            "route_sample_count": 0,
+            "drivable_sample_count": 0,
+        }
         route_term_vals = {
             "corridor": [],
             "branch": [],
@@ -3762,30 +3822,34 @@ def train_il(
             route_sample_count += int(route_valid.numel())
             route_supervision = None
             route_intersection = None
-            if route_consistency_loss_fn is not None:
+            if (
+                route_consistency_loss_fn is not None
+                or rollout_aligned_loss_fn is not None
+            ):
                 route_supervision = {
                     key: value.to(device)
                     for key, value in batch["route_supervision"].items()
                 }
-                navigation_metadata = batch.get(
-                    "navigation_metadata",
-                    {},
-                )
-                route_intersection = torch.tensor(
-                    [
-                        bool(
-                            _collated_metadata_value(
-                                navigation_metadata,
-                                "route_intersection",
-                                sample_index,
-                                False,
+                if route_consistency_loss_fn is not None:
+                    navigation_metadata = batch.get(
+                        "navigation_metadata",
+                        {},
+                    )
+                    route_intersection = torch.tensor(
+                        [
+                            bool(
+                                _collated_metadata_value(
+                                    navigation_metadata,
+                                    "route_intersection",
+                                    sample_index,
+                                    False,
+                                )
                             )
-                        )
-                        for sample_index in range(visual.shape[0])
-                    ],
-                    device=device,
-                    dtype=torch.bool,
-                )
+                            for sample_index in range(visual.shape[0])
+                        ],
+                        device=device,
+                        dtype=torch.bool,
+                    )
             probe_route_gradient = (
                 enable_route_conditioning
                 and gradient_evidence[
@@ -3826,16 +3890,16 @@ def train_il(
                 trajectory, aux = out if isinstance(out, tuple) else (out, {})
                 traj_loss = loss_fn(trajectory, target)
                 loss = traj_loss
+                initial_speed = ego_hist.reshape(
+                    ego_hist.shape[0],
+                    AUTO_E2E_TIMESTEPS,
+                    -1,
+                )[:, -1, 0]
 
                 route_terms = None
                 if route_consistency_loss_fn is not None:
                     assert route_supervision is not None
                     assert route_intersection is not None
-                    initial_speed = ego_hist.reshape(
-                        ego_hist.shape[0],
-                        AUTO_E2E_TIMESTEPS,
-                        -1,
-                    )[:, -1, 0]
                     route_terms = route_consistency_loss_fn(
                         trajectory,
                         target,
@@ -3848,6 +3912,22 @@ def train_il(
                         loss
                         + route_consistency_weight
                         * route_terms["total"]
+                    )
+                rollout_terms = None
+                if rollout_aligned_loss_fn is not None:
+                    assert route_supervision is not None
+                    rollout_terms = rollout_aligned_loss_fn(
+                        trajectory,
+                        target,
+                        initial_speed,
+                        route_supervision,
+                        map_valid,
+                        route_valid,
+                    )
+                    loss = (
+                        loss
+                        + 0.5 * rollout_terms["rollout"]
+                        + 0.05 * rollout_terms["constraint"]
                     )
 
                 # JEPA loss (#13): future-feature reconstruction, added when the
@@ -3971,6 +4051,15 @@ def train_il(
                 route_target_compliance_sum += float(
                     route_terms["target_compliance_sum"].item()
                 )
+            if rollout_terms is not None:
+                for term_name in rollout_term_vals:
+                    rollout_term_vals[term_name].append(
+                        float(rollout_terms[term_name].item())
+                    )
+                for count_name in rollout_term_counts:
+                    rollout_term_counts[count_name] += int(
+                        rollout_terms[count_name].item()
+                    )
 
             # Step only at the end of an accumulation window (or plain step when
             # accum==1). Grads persist across micro-batches until then.
@@ -4019,6 +4108,14 @@ def train_il(
             )
             for name, values in route_term_vals.items()
         }
+        avg_rollout_terms = {
+            name: (
+                float(np.mean(values))
+                if values
+                else 0.0
+            )
+            for name, values in rollout_term_vals.items()
+        }
         if (
             enable_route_consistency
             and route_epoch_counts["eligible_count"] <= 0
@@ -4035,6 +4132,7 @@ def train_il(
                 avg_reason,
                 avg_route,
                 *avg_route_terms.values(),
+                *avg_rollout_terms.values(),
             )
         ):
             raise ValueError(
@@ -4100,6 +4198,8 @@ def train_il(
             "route_target_compliance_sum": (
                 route_target_compliance_sum
             ),
+            "rollout_aligned_loss_terms": avg_rollout_terms,
+            "rollout_aligned_loss_counts": rollout_term_counts,
             "navigation_exposure": navigation_exposure_metadata,
             "val_ade": validation["ade"],
             "val_fde": validation["fde"],
@@ -4157,6 +4257,28 @@ def train_il(
                             "route_loss_gradient_budget"
                         ] is not None
                         else -1.0
+                    ),
+                    "train/rollout_loss": (
+                        avg_rollout_terms["rollout"]
+                    ),
+                    "train/rollout_path_loss": (
+                        avg_rollout_terms["path"]
+                    ),
+                    "train/rollout_final_loss": (
+                        avg_rollout_terms["final"]
+                    ),
+                    "train/constraint_loss": (
+                        avg_rollout_terms["constraint"]
+                    ),
+                    "train/comfort_loss": (
+                        avg_rollout_terms["comfort"]
+                    ),
+                    "train/map_loss": avg_rollout_terms["map"],
+                    "train/route_relative_loss": (
+                        avg_rollout_terms["route"]
+                    ),
+                    "train/drivable_relative_loss": (
+                        avg_rollout_terms["drivable"]
                     ),
                     "train/lr": current_lr,
                     "val/ade": validation["ade"],
@@ -4424,6 +4546,7 @@ def train_il(
                 "exposure": navigation_exposure_metadata,
             },
             "route_consistency": route_consistency_config,
+            "rollout_aligned_loss": rollout_aligned_config,
             "final_loss": losses_per_epoch[-1],
             "losses_per_epoch": losses_per_epoch,
             "val_fraction": val_fraction,
