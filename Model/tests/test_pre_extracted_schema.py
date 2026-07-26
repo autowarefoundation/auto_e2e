@@ -20,8 +20,14 @@ from data_parsing.pre_extracted import _decode_sample, load_projection_from_mani
 from navigation.artifacts import (
     SAMPLE_NAVIGATION_ARTIFACT_VERSION,
     encode_array,
+    encode_route_supervision,
 )
 from navigation.contracts import canonical_json_bytes
+from navigation.geometry import DEFAULT_NAVIGATION_GEOMETRY
+from navigation.supervision import (
+    ROUTE_SUPERVISION_ARTIFACT_VERSION,
+    empty_route_supervision,
+)
 
 
 def _jpeg_bytes(color):
@@ -47,8 +53,14 @@ def _navigation_members(
     return {
         "map_semantic.npz": encode_array(map_context),
         "route_mask.npz": encode_array(route_mask),
+        "route_supervision.npz": encode_route_supervision(
+            empty_route_supervision(DEFAULT_NAVIGATION_GEOMETRY)
+        ),
         "navigation_meta.json": canonical_json_bytes({
             "schema_version": SAMPLE_NAVIGATION_ARTIFACT_VERSION,
+            "route_supervision_version": (
+                ROUTE_SUPERVISION_ARTIFACT_VERSION
+            ),
             "map_valid": map_valid,
             "route_valid": route_valid,
             **(extra_metadata or {}),
@@ -112,6 +124,11 @@ class TestDecodeSampleMapSplit:
         assert out["route_mask"][0, 12, 12] == 1.0
         assert out["map_valid"]
         assert out["route_valid"]
+        assert out["route_supervision"]["available"]
+        assert out["route_supervision"][
+            "distance_to_corridor_m"
+        ].shape == (256, 256)
+        assert out["route_supervision"]["destination_xy_m"].shape == (2,)
 
     def test_partial_navigation_member_set_is_rejected(self):
         sample = {
