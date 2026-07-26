@@ -52,6 +52,16 @@ spec:
               value: "http://mlflow.mlflow.svc.cluster.local:5000"
             - name: FLYTE_URL
               value: "http://flyteadmin.flyte.svc.cluster.local:80"
+            - name: MLFLOW_PUBLIC_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: console-config
+                  key: mlflow-public-url
+            - name: FLYTE_CONSOLE_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: console-config
+                  key: flyte-console-url
             # Restrict the browser origin in production (edge auth is at
             # CloudFront; this pins CORS off the default "*").
             - name: CORS_ORIGIN
