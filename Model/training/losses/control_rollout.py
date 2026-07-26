@@ -7,6 +7,16 @@ import math
 import torch
 
 
+ROLLOUT_POLICY_VERSION = "semi_implicit_unicycle_v1"
+
+
+def _assert_tensor(predicate: torch.Tensor, message: str) -> None:
+    if predicate.device.type == "cuda":
+        torch._assert_async(predicate, message)
+    elif not bool(predicate.item()):
+        raise ValueError(message)
+
+
 def integrate_controls_torch(
     controls: torch.Tensor,
     initial_speed: torch.Tensor,
@@ -26,12 +36,18 @@ def integrate_controls_torch(
         raise ValueError("initial_speed must have shape [B]")
     if not math.isfinite(dt) or dt <= 0.0:
         raise ValueError("dt must be finite and positive")
-    if not bool(torch.isfinite(controls).all().item()):
-        raise ValueError("controls contain non-finite values")
-    if not bool(torch.isfinite(initial_speed).all().item()):
-        raise ValueError("initial_speed contains non-finite values")
-    if bool((initial_speed < 0).any().item()):
-        raise ValueError("initial_speed must be non-negative")
+    _assert_tensor(
+        torch.isfinite(controls).all(),
+        "controls contain non-finite values",
+    )
+    _assert_tensor(
+        torch.isfinite(initial_speed).all(),
+        "initial_speed contains non-finite values",
+    )
+    _assert_tensor(
+        (initial_speed >= 0).all(),
+        "initial_speed must be non-negative",
+    )
 
     with torch.autocast(device_type=controls.device.type, enabled=False):
         controls_f32 = controls.to(dtype=torch.float32)
