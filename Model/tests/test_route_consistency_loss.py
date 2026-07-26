@@ -157,6 +157,33 @@ def test_control_rollout_rejects_non_finite_input(
         integrate_controls_torch(controls, speed)
 
 
+def test_control_rollout_clamps_finite_negative_initial_speed():
+    positions, _, speeds = integrate_controls_torch(
+        torch.zeros(1, 1, 2),
+        torch.tensor([-1.0]),
+    )
+
+    torch.testing.assert_close(speeds, torch.zeros_like(speeds))
+    torch.testing.assert_close(positions, torch.zeros_like(positions))
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available(),
+    reason="CUDA is required for the device fail-fast contract",
+)
+def test_control_rollout_rejects_non_finite_cuda_input_immediately():
+    controls = torch.tensor(
+        [[[float("nan"), 0.0]]],
+        device="cuda",
+    )
+
+    with pytest.raises(ValueError, match="controls contain non-finite"):
+        integrate_controls_torch(
+            controls,
+            torch.tensor([1.0], device="cuda"),
+        )
+
+
 def test_control_rollout_documents_zero_gradient_after_stop_clamp():
     controls = torch.tensor(
         [[[-1.0, 0.1]]],
