@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/go-chi/chi/v5"
@@ -27,8 +28,13 @@ type fakeDatasetsService struct {
 	index       *model.ShardIndex
 	indexErr    error
 	body        []byte
+	mapBody     []byte
+	mapType     string
+	mapVersion  string
+	mapErr      error
 	buildCalls  []rangeCall
 	streamCalls []rangeCall
+	mapCalls    []rangeCall
 }
 
 func (*fakeDatasetsService) ListDatasets(context.Context) []model.Dataset {
@@ -81,6 +87,18 @@ func (f *fakeDatasetsService) StreamTarMemberRange(
 	})
 	reader := io.NopCloser(bytes.NewReader(f.body))
 	return reader, reader, int64(len(f.body)), nil
+}
+
+func (f *fakeDatasetsService) SampleNavigationMap(
+	_ context.Context,
+	dataset, version, shard, key string,
+) ([]byte, string, string, error) {
+	f.mapCalls = append(f.mapCalls, rangeCall{
+		dataset: dataset,
+		version: version,
+		shard:   shard,
+	})
+	return f.mapBody, f.mapType, f.mapVersion, f.mapErr
 }
 
 func newRangeService() *fakeDatasetsService {
@@ -138,6 +156,58 @@ func TestValidShardName(t *testing.T) {
 				t.Errorf("validShardName(%q) = %v, want %v", tt.in, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestGetNavigationMapReturnsRenderedImage(t *testing.T) {
+	fake := newRangeService()
+	fake.mapBody = []byte("\x89PNG\r\n\x1a\nbody")
+	fake.mapType = "image/png"
+	fake.mapVersion = "v2.1"
+	handler := &DatasetsHandler{s3: fake}
+	request := requestWithDatasetRoute(
+		"/api/v1/datasets/l2d/shards/train-000000.tar/samples/sample/navigation-map?version=v2.1",
+		"name", "l2d",
+		"shard", "train-000000.tar",
+		"key", "sample",
+	)
+	response := httptest.NewRecorder()
+
+	handler.GetNavigationMap(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+	}
+	if response.Header().Get("Content-Type") != "image/png" {
+		t.Fatalf("content type = %q", response.Header().Get("Content-Type"))
+	}
+	if !strings.Contains(response.Header().Get("Cache-Control"), "max-age=3600") {
+		t.Fatalf("cache control = %q", response.Header().Get("Cache-Control"))
+	}
+	if !bytes.Equal(response.Body.Bytes(), fake.mapBody) {
+		t.Fatal("navigation map response differs from service body")
+	}
+	if len(fake.mapCalls) != 1 || fake.mapCalls[0].version != "v2.1" {
+		t.Fatalf("navigation map calls = %+v", fake.mapCalls)
+	}
+}
+
+func TestGetNavigationMapMapsMissingSampleToNotFound(t *testing.T) {
+	fake := newRangeService()
+	fake.mapErr = service.ErrNotFound
+	handler := &DatasetsHandler{s3: fake}
+	request := requestWithDatasetRoute(
+		"/api/v1/datasets/l2d/shards/train-000000.tar/samples/missing/navigation-map",
+		"name", "l2d",
+		"shard", "train-000000.tar",
+		"key", "missing",
+	)
+	response := httptest.NewRecorder()
+
+	handler.GetNavigationMap(response, request)
+
+	if response.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
 	}
 }
 
