@@ -600,6 +600,7 @@ def test_rollout_control_arm_uses_composite_selector_without_rollout_loss():
     assert "build_selector_calibration_report" in source
     assert '"calibration_report"' in source
     assert '"selection/effective_weight/{name}"' in source
+    assert '"selection/component/{name}"' in source
     assert '"selection/calibration/min_rank_correlation"' in source
     assert '"top_level_weights": dict(TOP_LEVEL_WEIGHTS)' in source
     assert '"utility_scales": dict(UTILITY_SCALES)' in source
@@ -608,6 +609,14 @@ def test_rollout_control_arm_uses_composite_selector_without_rollout_loss():
     assert '"train/loss_rollout"' in source
     assert '"train/loss_comfort_jerk"' in source
     assert '"train/loss_comfort_lateral_acceleration"' in source
+    assert '"train/loss_comfort_lateral"' in source
+    assert '"train/loss_map_route"' in source
+    assert '"train/loss_map_drivable"' in source
+    assert '"train/loss_total"' in source
+    assert '"validation/{aggregate_name}/{metric_name}"' in source
+    assert '"validation/scene_distribution/"' in source
+    assert '"validation/coverage/{metric_name}/eligible_samples"' in source
+    assert '"audit/reconstruction/sample_count"' in source
     assert "torch.cuda.synchronize(device)" in source
     assert '"train_wall_seconds": training_wall_seconds' in source
     assert '"epoch_compute_wall_seconds": epoch_compute_wall_seconds' in source
