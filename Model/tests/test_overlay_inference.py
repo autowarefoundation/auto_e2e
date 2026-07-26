@@ -90,11 +90,23 @@ class _AddFusion(torch.nn.Module):
         return image_bev + navigation_bev
 
 
+class _DiagnosticNavigationEncoder(torch.nn.Module):
+    def forward(self, navigation_input):
+        map_context = navigation_input[:, :3]
+        route = navigation_input[:, 3:5]
+        route_effect = torch.cat(
+            [route[:, :1], route[:, 1:2], route.sum(dim=1, keepdim=True)],
+            dim=1,
+        )
+        return map_context + route_effect
+
+
 class _DiagnosticReactive:
     TrajectoryPlanner = _FakePlanner()
     FeatureFusion = torch.nn.Identity()
-    NavigationEncoder = torch.nn.Identity()
+    NavigationEncoder = _DiagnosticNavigationEncoder()
     MapBEVFusion = _AddFusion()
+    route_channels = 2
 
 
 class _DiagnosticPolicy(_NoiseEchoPolicy):
@@ -109,11 +121,16 @@ class _DiagnosticPolicy(_NoiseEchoPolicy):
         visual_history,
         egomotion_history,
         *,
+        route_mask,
+        route_valid,
         initial_noise,
         **kwargs,
     ):
         image_bev = self.Reactive_E2E.FeatureFusion(camera_tiles[:, 0])
-        navigation_bev = self.Reactive_E2E.NavigationEncoder(map_context)
+        gated_route = route_mask * route_valid.reshape(-1, 1, 1, 1)
+        navigation_bev = self.Reactive_E2E.NavigationEncoder(
+            torch.cat([map_context, gated_route], dim=1)
+        )
         self.Reactive_E2E.MapBEVFusion(image_bev, navigation_bev)
         return initial_noise + self.anchor
 
@@ -198,7 +215,7 @@ def test_infer_loader_controls_emits_seed_fan_and_v0():
     assert not np.array_equal(controls[:, 0], controls[:, 1])
 
 
-def test_infer_loader_overlay_captures_channel_rms_without_extra_forward():
+def test_infer_loader_overlay_isolates_encoder_contributions():
     model = _DiagnosticPolicy().eval()
     batch = _batch(2)
     batch["sample_uid"] = [
@@ -209,6 +226,9 @@ def test_infer_loader_overlay_captures_channel_rms_without_extra_forward():
     batch["visual_tiles"][:, 0, 1] = 4.0
     batch["map_context"][:, 0] = 1.0
     batch["map_context"][:, 1:] = 2.0
+    batch["route_mask"][:, 0] = 1.0
+    batch["route_mask"][:, 1] = 2.0
+    batch["route_valid"][:] = True
 
     class Loader(list):
         projection = None
@@ -225,10 +245,13 @@ def test_infer_loader_overlay_captures_channel_rms_without_extra_forward():
 
     assert controls.shape == (2, 2, 64, 2)
     assert seeds == (0, 1)
-    assert heatmaps.shape == (2, 3, 32, 32)
+    assert heatmaps.shape == (2, 6, 32, 32)
     np.testing.assert_allclose(heatmaps[:, 0], np.sqrt(25.0 / 3.0))
     np.testing.assert_allclose(heatmaps[:, 1], np.sqrt(9.0 / 3.0))
-    np.testing.assert_allclose(heatmaps[:, 2], np.sqrt(56.0 / 3.0))
+    np.testing.assert_allclose(heatmaps[:, 2], np.sqrt(14.0 / 3.0))
+    np.testing.assert_allclose(heatmaps[:, 3], np.sqrt(45.0 / 3.0))
+    np.testing.assert_allclose(heatmaps[:, 4], np.sqrt(45.0 / 3.0))
+    np.testing.assert_allclose(heatmaps[:, 5], np.sqrt(114.0 / 3.0))
 
 
 def test_overlay_inference_applies_checkpoint_data_sanitization():
