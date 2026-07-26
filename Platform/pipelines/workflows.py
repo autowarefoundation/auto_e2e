@@ -3235,6 +3235,10 @@ def train_il(
             raise ValueError(
                 "reconstruction audit has no provenance"
             )
+        from training.losses.control_rollout import (
+            ROLLOUT_POLICY_VERSION,
+        )
+
         expected_audit_identity = {
             "dataset": Dataset.KITSCENES.value,
             "dataset_version": dataset_version,
@@ -3244,6 +3248,7 @@ def train_il(
             "validation_sample_uid_digest": (
                 selected_validation_sample_digest
             ),
+            "rollout_policy_version": ROLLOUT_POLICY_VERSION,
         }
         mismatches = {
             key: {
