@@ -3610,6 +3610,8 @@ def train_il(
         from evaluation.checkpoint_selection import (
             SELECTOR_MIN_DELTA,
             SELECTOR_POLICY_VERSION,
+            TOP_LEVEL_WEIGHTS,
+            UTILITY_SCALES,
         )
 
         if selector_threshold != SELECTOR_MIN_DELTA:
@@ -3620,12 +3622,16 @@ def train_il(
             "enabled": True,
             "policy_version": SELECTOR_POLICY_VERSION,
             "min_delta": SELECTOR_MIN_DELTA,
+            "top_level_weights": dict(TOP_LEVEL_WEIGHTS),
+            "utility_scales": dict(UTILITY_SCALES),
         }
     else:
         checkpoint_selection_config = {
             "enabled": False,
             "policy_version": "ade_fde_lexicographic_v1",
             "min_delta": None,
+            "top_level_weights": None,
+            "utility_scales": None,
         }
 
     scaler = torch.amp.GradScaler(enabled=amp)
@@ -3973,6 +3979,22 @@ def train_il(
                     if selector_enabled
                     else -1.0
                 ),
+                **{
+                    f"train/checkpoint_selector_weight_{name}": value
+                    for name, value in (
+                        checkpoint_selection_config[
+                            "top_level_weights"
+                        ] or {}
+                    ).items()
+                },
+                **{
+                    f"train/checkpoint_selector_scale_{name}": value
+                    for name, value in (
+                        checkpoint_selection_config[
+                            "utility_scales"
+                        ] or {}
+                    ).items()
+                },
             })
 
     if selector_enabled and not resumed:
