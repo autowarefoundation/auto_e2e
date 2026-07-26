@@ -170,7 +170,7 @@ class RouteConsistencyLoss(nn.Module):
 
     def metadata(self) -> dict[str, object]:
         return {
-            "artifact_version": "route_supervision_v1",
+            "artifact_version": "navigation_supervision_v2",
             "target_compliance_threshold": (
                 self.target_compliance_threshold
             ),
