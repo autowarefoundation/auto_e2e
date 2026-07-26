@@ -4699,6 +4699,9 @@ def train_il(
                 "val/checkpoint_composite_score": float(
                     checkpoint_selection["score"]
                 ),
+                "selection/score": float(
+                    checkpoint_selection["score"]
+                ),
                 **{
                     f"val/checkpoint_component_{name}": float(value)
                     for name, value in checkpoint_selection[
@@ -4810,23 +4813,52 @@ def train_il(
                     "train/rollout_loss": (
                         avg_rollout_terms["rollout"]
                     ),
+                    "train/loss_action": avg_traj,
+                    "train/loss_rollout": (
+                        avg_rollout_terms["rollout"]
+                    ),
                     "train/rollout_path_loss": (
+                        avg_rollout_terms["path"]
+                    ),
+                    "train/loss_rollout_path": (
                         avg_rollout_terms["path"]
                     ),
                     "train/rollout_final_loss": (
                         avg_rollout_terms["final"]
                     ),
+                    "train/loss_rollout_final": (
+                        avg_rollout_terms["final"]
+                    ),
                     "train/constraint_loss": (
+                        avg_rollout_terms["constraint"]
+                    ),
+                    "train/loss_constraint": (
                         avg_rollout_terms["constraint"]
                     ),
                     "train/comfort_loss": (
                         avg_rollout_terms["comfort"]
                     ),
+                    "train/loss_comfort": (
+                        avg_rollout_terms["comfort"]
+                    ),
+                    "train/loss_comfort_jerk": (
+                        avg_rollout_terms["jerk"]
+                    ),
+                    "train/loss_comfort_lateral_acceleration": (
+                        avg_rollout_terms["lateral_acceleration"]
+                    ),
                     "train/map_loss": avg_rollout_terms["map"],
+                    "train/loss_map": avg_rollout_terms["map"],
                     "train/route_relative_loss": (
                         avg_rollout_terms["route"]
                     ),
+                    "train/loss_route_relative": (
+                        avg_rollout_terms["route"]
+                    ),
                     "train/drivable_relative_loss": (
+                        avg_rollout_terms["drivable"]
+                    ),
+                    "train/loss_drivable_relative": (
                         avg_rollout_terms["drivable"]
                     ),
                     "train/lr": current_lr,
