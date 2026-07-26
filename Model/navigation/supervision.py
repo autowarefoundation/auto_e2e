@@ -9,14 +9,15 @@ import numpy as np
 from .contracts import NavigationRoute
 from .geometry import (
     DEFAULT_NAVIGATION_GEOMETRY,
+    MapChannel,
     RouteChannel,
     NavigationRasterGeometry,
 )
 from .rasterizer import EgoPose, NavigationRaster
 
 
-ROUTE_SUPERVISION_ARTIFACT_VERSION = "route_supervision_v1"
-MAXIMUM_CORRIDOR_DISTANCE_M = 30.0
+ROUTE_SUPERVISION_ARTIFACT_VERSION = "navigation_supervision_v2"
+MAXIMUM_OUTSIDE_DISTANCE_M = 30.0
 
 
 @dataclasses.dataclass(frozen=True)
@@ -24,6 +25,7 @@ class RouteSupervision:
     """Loss-only fields that cannot reveal the demonstrated future path."""
 
     distance_to_corridor_m: np.ndarray
+    distance_to_drivable_m: np.ndarray
     route_heading_sin: np.ndarray
     route_heading_cos: np.ndarray
     route_heading_valid: np.ndarray
@@ -33,6 +35,10 @@ class RouteSupervision:
     def __post_init__(self) -> None:
         distance = np.ascontiguousarray(
             self.distance_to_corridor_m,
+            dtype=np.float32,
+        )
+        drivable_distance = np.ascontiguousarray(
+            self.distance_to_drivable_m,
             dtype=np.float32,
         )
         heading_sin = np.ascontiguousarray(
@@ -51,6 +57,7 @@ class RouteSupervision:
             raise ValueError("route distance field must have shape [H,W]")
         if (
             heading_sin.shape != distance.shape
+            or drivable_distance.shape != distance.shape
             or heading_cos.shape != distance.shape
             or heading_valid.shape != distance.shape
         ):
@@ -59,10 +66,21 @@ class RouteSupervision:
             distance.size
             and (
                 float(distance.min()) < 0.0
-                or float(distance.max()) > MAXIMUM_CORRIDOR_DISTANCE_M
+                or float(distance.max()) > MAXIMUM_OUTSIDE_DISTANCE_M
             )
         ):
             raise ValueError("route distances must be finite and clipped")
+        if not np.isfinite(drivable_distance).all() or (
+            drivable_distance.size
+            and (
+                float(drivable_distance.min()) < 0.0
+                or float(drivable_distance.max())
+                > MAXIMUM_OUTSIDE_DISTANCE_M
+            )
+        ):
+            raise ValueError(
+                "drivable distances must be finite and clipped"
+            )
         if not np.isfinite(heading_sin).all() or not np.isfinite(
             heading_cos
         ).all():
@@ -77,6 +95,7 @@ class RouteSupervision:
             raise ValueError("route destination must have shape [2]")
         for value in (
             distance,
+            drivable_distance,
             heading_sin,
             heading_cos,
             heading_valid,
@@ -84,6 +103,11 @@ class RouteSupervision:
         ):
             value.setflags(write=False)
         object.__setattr__(self, "distance_to_corridor_m", distance)
+        object.__setattr__(
+            self,
+            "distance_to_drivable_m",
+            drivable_distance,
+        )
         object.__setattr__(self, "route_heading_sin", heading_sin)
         object.__setattr__(self, "route_heading_cos", heading_cos)
         object.__setattr__(self, "route_heading_valid", heading_valid)
@@ -97,6 +121,7 @@ class RouteSupervision:
     def arrays(self) -> dict[str, np.ndarray]:
         return {
             "distance_to_corridor_m": self.distance_to_corridor_m,
+            "distance_to_drivable_m": self.distance_to_drivable_m,
             "route_heading_sin": self.route_heading_sin,
             "route_heading_cos": self.route_heading_cos,
             "route_heading_valid": self.route_heading_valid,
@@ -114,6 +139,7 @@ def empty_route_supervision(
     shape = (geometry.height_px, geometry.width_px)
     return RouteSupervision(
         distance_to_corridor_m=np.zeros(shape, dtype=np.float32),
+        distance_to_drivable_m=np.zeros(shape, dtype=np.float32),
         route_heading_sin=np.zeros(shape, dtype=np.float32),
         route_heading_cos=np.zeros(shape, dtype=np.float32),
         route_heading_valid=np.zeros(shape, dtype=np.uint8),
@@ -209,10 +235,32 @@ def build_route_supervision(
         geometry.width_px,
     ):
         raise ValueError("route supervision raster shape differs from geometry")
-    if not route.valid or not raster.route_valid:
-        return empty_route_supervision(geometry)
 
     from scipy.ndimage import distance_transform_edt
+
+    drivable = raster.map_context[MapChannel.DRIVABLE_AREA] > 0.0
+    if bool(drivable.any()):
+        drivable_distance = distance_transform_edt(
+            ~drivable,
+            sampling=geometry.meters_per_pixel,
+        )
+        drivable_distance = np.minimum(
+            drivable_distance,
+            MAXIMUM_OUTSIDE_DISTANCE_M,
+        ).astype(np.float32)
+    else:
+        drivable_distance = np.full(
+            drivable.shape,
+            MAXIMUM_OUTSIDE_DISTANCE_M,
+            dtype=np.float32,
+        )
+
+    if not route.valid or not raster.route_valid:
+        empty = empty_route_supervision(geometry)
+        return dataclasses.replace(
+            empty,
+            distance_to_drivable_m=drivable_distance,
+        )
 
     corridor = (
         raster.route_mask[RouteChannel.SELECTED_CORRIDOR] > 0
@@ -224,12 +272,12 @@ def build_route_supervision(
         )
         distance = np.minimum(
             distance,
-            MAXIMUM_CORRIDOR_DISTANCE_M,
+            MAXIMUM_OUTSIDE_DISTANCE_M,
         ).astype(np.float32)
     else:
         distance = np.full(
             corridor.shape,
-            MAXIMUM_CORRIDOR_DISTANCE_M,
+            MAXIMUM_OUTSIDE_DISTANCE_M,
             dtype=np.float32,
         )
 
@@ -267,6 +315,7 @@ def build_route_supervision(
     )
     return RouteSupervision(
         distance_to_corridor_m=distance,
+        distance_to_drivable_m=drivable_distance,
         route_heading_sin=heading_sin,
         route_heading_cos=heading_cos,
         route_heading_valid=heading_valid,
