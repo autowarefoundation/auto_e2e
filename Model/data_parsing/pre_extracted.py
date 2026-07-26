@@ -395,6 +395,9 @@ def _decode_sample(
             "distance_to_corridor_m": torch.from_numpy(
                 supervision.distance_to_corridor_m.copy()
             ),
+            "distance_to_drivable_m": torch.from_numpy(
+                supervision.distance_to_drivable_m.copy()
+            ),
             "route_heading_sin": torch.from_numpy(
                 supervision.route_heading_sin.copy()
             ),
@@ -437,6 +440,10 @@ def _decode_sample(
         shape = map_context.shape[-2:]
         route_supervision = {
             "distance_to_corridor_m": torch.zeros(
+                shape,
+                dtype=torch.float32,
+            ),
+            "distance_to_drivable_m": torch.zeros(
                 shape,
                 dtype=torch.float32,
             ),
