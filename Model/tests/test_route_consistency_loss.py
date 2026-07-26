@@ -209,6 +209,65 @@ def test_control_rollout_documents_zero_gradient_after_stop_clamp():
     assert controls.grad[0, 0, 1].item() == 0.0
 
 
+def test_vectorized_rollout_matches_recurrent_stop_and_restart():
+    controls = torch.tensor(
+        [[
+            [-20.0, 0.02],
+            [5.0, 0.03],
+            [5.0, -0.01],
+            [-20.0, 0.04],
+            [5.0, -0.02],
+        ]],
+        dtype=torch.float32,
+        requires_grad=True,
+    )
+    initial_speed = torch.tensor([1.0])
+
+    actual = integrate_controls_torch(controls, initial_speed)
+
+    speed = initial_speed
+    heading = torch.zeros_like(speed)
+    x = torch.zeros_like(speed)
+    y = torch.zeros_like(speed)
+    reference_positions = []
+    reference_headings = []
+    reference_speeds = []
+    for step in range(controls.shape[1]):
+        speed = torch.clamp_min(
+            speed + controls[:, step, 0] * 0.1,
+            0.0,
+        )
+        heading = heading + speed * controls[:, step, 1] * 0.1
+        x = x + speed * torch.cos(heading) * 0.1
+        y = y + speed * torch.sin(heading) * 0.1
+        reference_positions.append(torch.stack((x, y), dim=-1))
+        reference_headings.append(heading)
+        reference_speeds.append(speed)
+    reference = (
+        torch.stack(reference_positions, dim=1),
+        torch.stack(reference_headings, dim=1),
+        torch.stack(reference_speeds, dim=1),
+    )
+
+    for actual_value, reference_value in zip(
+        actual,
+        reference,
+        strict=True,
+    ):
+        torch.testing.assert_close(actual_value, reference_value)
+
+    actual_gradient = torch.autograd.grad(
+        sum(value.sum() for value in actual),
+        controls,
+        retain_graph=True,
+    )[0]
+    reference_gradient = torch.autograd.grad(
+        sum(value.sum() for value in reference),
+        controls,
+    )[0]
+    torch.testing.assert_close(actual_gradient, reference_gradient)
+
+
 def test_grid_coordinates_match_geometry_pixel_centers():
     points = torch.tensor([[
         [0.0, 0.0],
