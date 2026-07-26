@@ -18,7 +18,7 @@ export const NAV_ITEMS = [
   { href: "/", label: "Home", icon: Home },
   { href: "/datasets", label: "Datasets", icon: Database },
   { href: "/reasoning-labels", label: "Reasoning Labels", icon: Brain },
-  { href: "/models", label: "Experiments", icon: FlaskConical },
+  { href: "/experiments", label: "Experiments", icon: FlaskConical },
   { href: "/runs", label: "Runs", icon: Workflow },
   { href: "/scenes", label: "Scenes", icon: Clapperboard },
   { href: "/geo", label: "Geo Coverage", icon: MapPinned },
