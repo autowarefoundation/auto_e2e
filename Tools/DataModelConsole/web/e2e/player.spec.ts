@@ -60,6 +60,28 @@ test("player renders real camera pixels, advances, and focuses", async ({ page }
   await expect(
     page.locator('[aria-label^="Episode player"]'),
   ).toBeVisible({ timeout: 30_000 });
+  const playbackControls = page.getByRole("region", {
+    name: "Playback controls",
+  });
+  await expect(
+    playbackControls.getByRole("slider", { name: "Timeline" }),
+  ).toBeVisible();
+  await expect(
+    playbackControls.getByRole("button", { name: "Play", exact: true }),
+  ).toBeVisible();
+  const playbackPrecedesCameras = await page
+    .locator('[aria-label^="Episode player"]')
+    .evaluate((player) => {
+      const controls = player.querySelector('[aria-label="Playback controls"]');
+      const camera = player.querySelector('button[aria-label$=" camera"]');
+      return Boolean(
+        controls &&
+        camera &&
+        controls.compareDocumentPosition(camera) &
+          Node.DOCUMENT_POSITION_FOLLOWING,
+      );
+    });
+  expect(playbackPrecedesCameras).toBe(true);
   // Every camera frame canvas must have non-blank pixels (real frame, not
   // black). The aria-hidden trajectory layer is intentionally transparent
   // until a model is selected, so it is not a frame-pixel assertion target.

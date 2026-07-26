@@ -138,13 +138,20 @@ class BEVViewFusion(nn.Module):
         These represent the 3D ego/vehicle-frame locations that each BEV
         query should attend to.
         """
-        xs = torch.linspace(0.5, self.bev_w - 0.5, self.bev_w) / self.bev_w
-        ys = torch.linspace(0.5, self.bev_h - 0.5, self.bev_h) / self.bev_h
+        rows = torch.linspace(0.5, self.bev_h - 0.5, self.bev_h) / self.bev_h
+        cols = torch.linspace(0.5, self.bev_w - 0.5, self.bev_w) / self.bev_w
         zs = torch.linspace(0.5, self.num_points_in_pillar - 0.5,
                             self.num_points_in_pillar) / self.num_points_in_pillar
 
-        grid_y, grid_x, grid_z = torch.meshgrid(ys, xs, zs, indexing='ij')
-        ref_3d = torch.stack([grid_x, grid_y, grid_z], dim=-1)
+        grid_row, grid_col, grid_z = torch.meshgrid(
+            rows, cols, zs, indexing='ij'
+        )
+        # Raster contract: row 0 is forward (+X), column 0 is left (+Y).
+        # _ego_reference_homo maps normalized X/Y from pc_range minima to maxima,
+        # so both raster axes are reversed here.
+        ref_3d = torch.stack(
+            [1.0 - grid_row, 1.0 - grid_col, grid_z], dim=-1
+        )
         ref_3d = ref_3d.reshape(self.bev_h * self.bev_w, self.num_points_in_pillar, 3)
 
         self.register_buffer('reference_points_3d', ref_3d)

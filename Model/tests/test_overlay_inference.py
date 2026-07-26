@@ -12,7 +12,13 @@ from Platform.pipelines.inference import (
     sha256_file,
     stable_seed64,
 )
-from Platform.pipelines.overlay_precompute import infer_loader_controls
+from Platform.pipelines.overlay_precompute import (
+    _BEVActivationRecorder,
+    _downsample_features,
+    _spatial_feature_deviation,
+    infer_loader_controls,
+    infer_loader_overlay,
+)
 from training.dataset_policy import KITSCENES_TRAINING_POLICY
 
 
@@ -79,6 +85,56 @@ class _NoiseEchoPolicy(torch.nn.Module):
         **kwargs,
     ):
         self.last_egomotion_history = egomotion_history.detach().clone()
+        return initial_noise + self.anchor
+
+
+class _AddFusion(torch.nn.Module):
+    def forward(self, image_bev, navigation_bev):
+        return image_bev + navigation_bev
+
+
+class _DiagnosticNavigationEncoder(torch.nn.Module):
+    def forward(self, navigation_input):
+        map_context = navigation_input[:, :3]
+        route = navigation_input[:, 3:5]
+        route_effect = torch.cat(
+            [route[:, :1], route[:, 1:2], route.sum(dim=1, keepdim=True)],
+            dim=1,
+        )
+        return map_context + route_effect
+
+
+class _DiagnosticReactive:
+    TrajectoryPlanner = _FakePlanner()
+    FeatureFusion = torch.nn.Identity()
+    NavigationEncoder = _DiagnosticNavigationEncoder()
+    MapBEVFusion = _AddFusion()
+    route_channels = 2
+
+
+class _DiagnosticPolicy(_NoiseEchoPolicy):
+    def __init__(self):
+        super().__init__()
+        self.Reactive_E2E = _DiagnosticReactive()
+
+    def forward(
+        self,
+        camera_tiles,
+        map_context,
+        visual_history,
+        egomotion_history,
+        *,
+        route_mask,
+        route_valid,
+        initial_noise,
+        **kwargs,
+    ):
+        image_bev = self.Reactive_E2E.FeatureFusion(camera_tiles[:, 0])
+        gated_route = route_mask * route_valid.reshape(-1, 1, 1, 1)
+        navigation_bev = self.Reactive_E2E.NavigationEncoder(
+            torch.cat([map_context, gated_route], dim=1)
+        )
+        self.Reactive_E2E.MapBEVFusion(image_bev, navigation_bev)
         return initial_noise + self.anchor
 
 
@@ -160,6 +216,93 @@ def test_infer_loader_controls_emits_seed_fan_and_v0():
     np.testing.assert_array_equal(v0, [3.0, 4.0, 5.0])
     assert seeds == (0, 1)
     assert not np.array_equal(controls[:, 0], controls[:, 1])
+
+
+def test_infer_loader_overlay_isolates_encoder_contributions():
+    model = _DiagnosticPolicy().eval()
+    batch = _batch(2)
+    batch["sample_uid"] = [
+        "l2d-v1-e000001-f000064",
+        "l2d-v1-e000001-f000065",
+    ]
+    batch["visual_tiles"][:, 0, 0] = 3.0
+    batch["visual_tiles"][:, 0, 1] = 4.0
+    batch["map_context"][:, 0] = 1.0
+    batch["map_context"][:, 1:] = 2.0
+    batch["route_mask"][:, 0] = 1.0
+    batch["route_mask"][:, 1] = 2.0
+    batch["route_valid"][:] = True
+
+    class Loader(list):
+        projection = None
+        geometry_type = "pseudo"
+
+    _, controls, _, seeds, heatmaps = infer_loader_overlay(
+        model,
+        Loader([batch]),
+        model_artifact_id="model-sha",
+        dataset_manifest_digest="manifest-sha",
+        base_seeds=(0, 1),
+        device="cpu",
+    )
+
+    assert controls.shape == (2, 2, 64, 2)
+    assert seeds == (0, 1)
+    assert heatmaps.shape == (2, 6, 32, 32)
+    np.testing.assert_array_equal(heatmaps[:, 0], 0.0)
+    np.testing.assert_array_equal(heatmaps[:, 1], 0.0)
+    np.testing.assert_allclose(heatmaps[:, 2], np.sqrt(14.0 / 3.0))
+    np.testing.assert_array_equal(heatmaps[:, 3], 0.0)
+    np.testing.assert_allclose(heatmaps[:, 4], np.sqrt(45.0 / 3.0))
+    np.testing.assert_array_equal(heatmaps[:, 5], 0.0)
+
+
+def test_spatial_feature_deviation_preserves_channel_direction_changes():
+    features = torch.tensor(
+        [
+            [
+                [[1.0, -1.0], [0.0, 0.0]],
+                [[-1.0, 1.0], [0.0, 0.0]],
+            ]
+        ]
+    )
+
+    heatmap = _spatial_feature_deviation(
+        features,
+        preserve_zero_cells=True,
+    )
+
+    np.testing.assert_allclose(
+        heatmap,
+        [[[1.0, 1.0], [0.0, 0.0]]],
+    )
+
+
+def test_spatial_feature_deviation_uses_each_channel_spatial_mean():
+    features = torch.tensor(
+        [[[[1.0, 3.0], [5.0, 7.0]]]]
+    )
+
+    heatmap = _spatial_feature_deviation(features)
+
+    np.testing.assert_allclose(
+        heatmap,
+        [[[3.0, 1.0], [1.0, 3.0]]],
+    )
+
+
+def test_activation_recorder_rejects_incompatible_models_and_outputs():
+    with pytest.raises(ValueError, match="does not expose"):
+        _BEVActivationRecorder(torch.nn.Identity())
+    with pytest.raises(ValueError, match="must be a"):
+        _downsample_features(torch.zeros(1, 2, 3), "image")
+
+    recorder = _BEVActivationRecorder(_DiagnosticPolicy())
+    try:
+        with pytest.raises(RuntimeError, match="hooks did not run"):
+            recorder.take(_batch(1), 1)
+    finally:
+        recorder.close()
 
 
 def test_overlay_inference_applies_checkpoint_data_sanitization():

@@ -19,17 +19,33 @@ from typing import Sequence
 import numpy as np
 
 
-OVERLAY_SCHEMA = "v1"
-OVERLAY_FORMAT_VERSION = 1
+OVERLAY_SCHEMA = "v4"
+OVERLAY_FORMAT_VERSION = 4
 OVERLAY_MAGIC = b"AOVL"
 UID_HASH_ALGORITHM = "sha256-le64-v1"
 FLAG_DETERMINISTIC_PLANNER = 1 << 0
+BEV_HEATMAP_NAMES = (
+    "image",
+    "map",
+    "route_delta",
+    "navigation",
+    "fusion_delta",
+    "fused",
+)
+BEV_HEATMAP_SIZE = 32
 
 _HEADER = struct.Struct("<4sHHIHHHH")
 _SEED = struct.Struct("<q")
 _DIRECTORY_ENTRY = struct.Struct("<QI")
 _HORIZON = 64
 _DIMS = 2
+_V2_HEATMAP_NAMES = ("image", "navigation", "fused")
+_HEATMAP_NAMES_BY_VERSION = {
+    1: (),
+    2: _V2_HEATMAP_NAMES,
+    3: BEV_HEATMAP_NAMES,
+    4: BEV_HEATMAP_NAMES,
+}
 
 
 @dataclass(frozen=True)
@@ -48,6 +64,9 @@ class DecodedOverlay:
     directory: tuple[tuple[int, int], ...]
     controls: np.ndarray
     v0: np.ndarray
+    bev_heatmaps: np.ndarray | None
+    bev_heatmap_scales: np.ndarray | None
+    bev_heatmap_names: tuple[str, ...]
 
 
 def sample_uid_hash(sample_uid: str) -> int:
@@ -110,6 +129,40 @@ def _normalise_v0(v0: np.ndarray, sample_count: int) -> np.ndarray:
     return np.ascontiguousarray(array, dtype="<f4")
 
 
+def _quantise_bev_heatmaps(
+    bev_heatmaps: np.ndarray,
+    sample_count: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    array = np.asarray(bev_heatmaps)
+    expected = (
+        sample_count,
+        len(BEV_HEATMAP_NAMES),
+        BEV_HEATMAP_SIZE,
+        BEV_HEATMAP_SIZE,
+    )
+    if array.shape != expected:
+        raise ValueError(
+            f"bev_heatmaps must have shape {expected}, got {array.shape}"
+        )
+    if not np.issubdtype(array.dtype, np.floating):
+        raise TypeError("bev_heatmaps must be floating point")
+    if not np.isfinite(array).all():
+        raise ValueError("bev_heatmaps contain NaN or infinity")
+    if np.any(array < 0):
+        raise ValueError("bev_heatmaps must be non-negative")
+
+    heatmaps = np.ascontiguousarray(array, dtype=np.float32)
+    scales = heatmaps.max(axis=(2, 3)).astype("<f4", copy=False)
+    divisors = np.where(scales > 0, scales, 1.0).reshape(
+        sample_count,
+        len(BEV_HEATMAP_NAMES),
+        1,
+        1,
+    )
+    quantised = np.rint(np.clip(heatmaps / divisors, 0.0, 1.0) * 255.0)
+    return np.ascontiguousarray(quantised, dtype=np.uint8), scales
+
+
 def encode_overlay(
     sample_uids: Sequence[str],
     controls: np.ndarray,
@@ -117,6 +170,7 @@ def encode_overlay(
     *,
     base_seeds: Sequence[int] = (0,),
     deterministic_planner: bool = False,
+    bev_heatmaps: np.ndarray,
 ) -> bytes:
     """Encode and deterministically gzip one canonical shard overlay."""
     sample_uids = tuple(sample_uids)
@@ -141,6 +195,9 @@ def encode_overlay(
         controls, sample_count=sample_count, seed_count=seed_count
     )
     v0_f32 = _normalise_v0(v0, sample_count=sample_count)
+    heatmaps_u8, heatmap_scales = _quantise_bev_heatmaps(
+        bev_heatmaps, sample_count
+    )
 
     hashes = [sample_uid_hash(uid) for uid in sample_uids]
     if len(set(hashes)) != len(hashes):
@@ -157,7 +214,7 @@ def encode_overlay(
         seed_count,
         _HORIZON,
         _DIMS,
-        0,
+        len(BEV_HEATMAP_NAMES),
     ))
     for seed in base_seeds:
         raw.write(_SEED.pack(seed))
@@ -165,6 +222,8 @@ def encode_overlay(
         raw.write(_DIRECTORY_ENTRY.pack(uid_hash, row))
     raw.write(controls_f32.tobytes(order="C"))
     raw.write(v0_f32.tobytes(order="C"))
+    raw.write(heatmap_scales.tobytes(order="C"))
+    raw.write(heatmaps_u8.tobytes(order="C"))
 
     compressed = io.BytesIO()
     with gzip.GzipFile(
@@ -182,6 +241,7 @@ def write_overlay(
     *,
     base_seeds: Sequence[int] = (0,),
     deterministic_planner: bool = False,
+    bev_heatmaps: np.ndarray,
 ) -> OverlayArtifact:
     """Atomically write one overlay and return its pointer metadata."""
     path = Path(path)
@@ -191,6 +251,7 @@ def write_overlay(
         v0,
         base_seeds=base_seeds,
         deterministic_planner=deterministic_planner,
+        bev_heatmaps=bev_heatmaps,
     )
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
@@ -226,9 +287,15 @@ def decode_overlay(payload: bytes) -> DecodedOverlay:
     ) = _HEADER.unpack_from(raw)
     if magic != OVERLAY_MAGIC:
         raise ValueError("invalid overlay magic")
-    if version != OVERLAY_FORMAT_VERSION:
+    if version not in _HEATMAP_NAMES_BY_VERSION:
         raise ValueError(f"unsupported overlay version {version}")
-    if horizon != _HORIZON or dims != _DIMS or reserved != 0:
+    heatmap_names = _HEATMAP_NAMES_BY_VERSION[version]
+    expected_heatmap_count = len(heatmap_names)
+    if (
+        horizon != _HORIZON
+        or dims != _DIMS
+        or reserved != expected_heatmap_count
+    ):
         raise ValueError("unsupported overlay dimensions or reserved bits")
     if sample_count == 0 or seed_count == 0:
         raise ValueError("overlay must contain samples and seeds")
@@ -241,6 +308,17 @@ def decode_overlay(payload: bytes) -> DecodedOverlay:
         + sample_count * seed_count * horizon * dims * 4
         + sample_count * 4
     )
+    if heatmap_names:
+        scale_count = sample_count * (
+            len(heatmap_names) if version >= 4 else 1
+        )
+        expected_size += (
+            scale_count * 4
+            + sample_count
+            * len(heatmap_names)
+            * BEV_HEATMAP_SIZE
+            * BEV_HEATMAP_SIZE
+        )
     if len(raw) != expected_size:
         raise ValueError(
             f"overlay size mismatch: expected {expected_size}, got {len(raw)}"
@@ -271,10 +349,49 @@ def decode_overlay(payload: bytes) -> DecodedOverlay:
     speeds = np.frombuffer(
         raw, dtype="<f4", count=sample_count, offset=cursor
     ).copy()
+    cursor += sample_count * 4
+    heatmaps = None
+    heatmap_scales = None
+    if heatmap_names:
+        scale_shape = (
+            (sample_count, len(heatmap_names))
+            if version >= 4
+            else (sample_count,)
+        )
+        scale_count = int(np.prod(scale_shape))
+        heatmap_scales = np.frombuffer(
+            raw, dtype="<f4", count=scale_count, offset=cursor
+        ).reshape(scale_shape).copy()
+        cursor += scale_count * 4
+        quantised = np.frombuffer(
+            raw,
+            dtype=np.uint8,
+            count=(
+                sample_count
+                * len(heatmap_names)
+                * BEV_HEATMAP_SIZE
+                * BEV_HEATMAP_SIZE
+            ),
+            offset=cursor,
+        ).reshape(
+            sample_count,
+            len(heatmap_names),
+            BEV_HEATMAP_SIZE,
+            BEV_HEATMAP_SIZE,
+        )
+        scale_view = (
+            heatmap_scales.reshape(sample_count, len(heatmap_names), 1, 1)
+            if version >= 4
+            else heatmap_scales.reshape(sample_count, 1, 1, 1)
+        )
+        heatmaps = quantised.astype(np.float32) * scale_view / 255.0
     return DecodedOverlay(
         flags=flags,
         base_seeds=tuple(seeds),
         directory=tuple(directory),
         controls=controls,
         v0=speeds,
+        bev_heatmaps=heatmaps,
+        bev_heatmap_scales=heatmap_scales,
+        bev_heatmap_names=tuple(heatmap_names),
     )

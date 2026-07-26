@@ -4,6 +4,7 @@ package service
 
 import (
 	"archive/tar"
+	"archive/zip"
 	"bytes"
 	"context"
 	"crypto/sha256"
@@ -12,6 +13,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"image"
+	"image/color"
+	"image/png"
 	"io"
 	"log/slog"
 	"math"
@@ -56,6 +60,14 @@ const MaxRangeBytes = 32 << 20 // 32 MiB
 // roughly 0.5 MiB per 1000 samples and seed; 16 MiB leaves ample fan-out room
 // while preventing a corrupt pointer from exhausting the API pod.
 const MaxOverlayBytes = 16 << 20
+
+const (
+	navigationRasterSize      = 256
+	navigationMapChannels     = 14
+	navigationRouteChannels   = 2
+	maxNavigationArrayBytes   = 8 << 20
+	navigationArrayMemberName = "array.npy"
+)
 
 // maxConcurrentFullTarScans bounds full-shard streams across index, listing,
 // detail, and legacy member reads. A package-global semaphore makes the limit
@@ -1242,6 +1254,252 @@ func (s *S3Service) BuildShardIndex(ctx context.Context, dataset, version, shard
 		}()
 		return idx, err
 	}
+}
+
+// SampleNavigationMap returns a browser-ready navigation raster for one sample.
+// Legacy shards expose map.jpg directly; navigation-v3 shards are decoded from
+// their bounded NPZ members and rendered into a semantic PNG.
+func (s *S3Service) SampleNavigationMap(
+	ctx context.Context,
+	dataset, version, shard, sampleKey string,
+) ([]byte, string, string, error) {
+	index, err := s.BuildShardIndex(ctx, dataset, version, shard)
+	if err != nil {
+		return nil, "", "", err
+	}
+	var sample *model.IndexSample
+	for idx := range index.Samples {
+		if index.Samples[idx].Key == sampleKey {
+			sample = &index.Samples[idx]
+			break
+		}
+	}
+	if sample == nil {
+		return nil, "", index.Version, ErrNotFound
+	}
+	if member, ok := sample.Members["map.jpg"]; ok {
+		body, err := s.readShardMember(
+			ctx, dataset, index.Version, shard, member,
+		)
+		if err != nil {
+			return nil, "", index.Version, err
+		}
+		if len(body) < 4 ||
+			body[0] != 0xff || body[1] != 0xd8 ||
+			body[len(body)-2] != 0xff || body[len(body)-1] != 0xd9 {
+			return nil, "", index.Version, fmt.Errorf("legacy map is not JPEG")
+		}
+		return body, "image/jpeg", index.Version, nil
+	}
+
+	mapMember, hasMap := sample.Members["map_semantic.npz"]
+	routeMember, hasRoute := sample.Members["route_mask.npz"]
+	if !hasMap || !hasRoute {
+		return nil, "", index.Version, ErrNotFound
+	}
+	mapPayload, err := s.readShardMember(
+		ctx, dataset, index.Version, shard, mapMember,
+	)
+	if err != nil {
+		return nil, "", index.Version, err
+	}
+	routePayload, err := s.readShardMember(
+		ctx, dataset, index.Version, shard, routeMember,
+	)
+	if err != nil {
+		return nil, "", index.Version, err
+	}
+	mapBytes, err := decodeNavigationNPZ(
+		mapPayload,
+		"<f4",
+		[3]int{
+			navigationMapChannels,
+			navigationRasterSize,
+			navigationRasterSize,
+		},
+	)
+	if err != nil {
+		return nil, "", index.Version, fmt.Errorf(
+			"decode semantic navigation raster: %w", err,
+		)
+	}
+	routeBytes, err := decodeNavigationNPZ(
+		routePayload,
+		"|u1",
+		[3]int{
+			navigationRouteChannels,
+			navigationRasterSize,
+			navigationRasterSize,
+		},
+	)
+	if err != nil {
+		return nil, "", index.Version, fmt.Errorf(
+			"decode route navigation raster: %w", err,
+		)
+	}
+	body, err := renderNavigationPNG(mapBytes, routeBytes)
+	if err != nil {
+		return nil, "", index.Version, err
+	}
+	return body, "image/png", index.Version, nil
+}
+
+func (s *S3Service) readShardMember(
+	ctx context.Context,
+	dataset, version, shard string,
+	member model.MemberRange,
+) ([]byte, error) {
+	reader, closer, size, err := s.StreamTarMemberRange(
+		ctx, dataset, version, shard, member.Offset, member.Size,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer closer.Close()
+	body, err := io.ReadAll(io.LimitReader(reader, size+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(body)) != size {
+		return nil, fmt.Errorf(
+			"shard member size mismatch: expected %d, got %d", size, len(body),
+		)
+	}
+	return body, nil
+}
+
+func decodeNavigationNPZ(
+	payload []byte,
+	descr string,
+	shape [3]int,
+) ([]byte, error) {
+	archive, err := zip.NewReader(bytes.NewReader(payload), int64(len(payload)))
+	if err != nil {
+		return nil, fmt.Errorf("open NPZ: %w", err)
+	}
+	if len(archive.File) != 1 || archive.File[0].Name != navigationArrayMemberName {
+		return nil, fmt.Errorf("NPZ must contain only %s", navigationArrayMemberName)
+	}
+	entry := archive.File[0]
+	if entry.UncompressedSize64 > maxNavigationArrayBytes {
+		return nil, fmt.Errorf("NPY exceeds uncompressed size limit")
+	}
+	stream, err := entry.Open()
+	if err != nil {
+		return nil, fmt.Errorf("open NPY: %w", err)
+	}
+	defer stream.Close()
+	npy, err := io.ReadAll(io.LimitReader(stream, maxNavigationArrayBytes+1))
+	if err != nil {
+		return nil, fmt.Errorf("read NPY: %w", err)
+	}
+	if len(npy) > maxNavigationArrayBytes {
+		return nil, fmt.Errorf("NPY exceeds uncompressed size limit")
+	}
+	if len(npy) < 10 || string(npy[:6]) != "\x93NUMPY" {
+		return nil, fmt.Errorf("invalid NPY magic")
+	}
+	headerStart := 10
+	headerLength := 0
+	switch npy[6] {
+	case 1:
+		headerLength = int(binary.LittleEndian.Uint16(npy[8:10]))
+	case 2, 3:
+		if len(npy) < 12 {
+			return nil, fmt.Errorf("truncated NPY v%d header", npy[6])
+		}
+		headerStart = 12
+		headerLength = int(binary.LittleEndian.Uint32(npy[8:12]))
+	default:
+		return nil, fmt.Errorf("unsupported NPY version %d", npy[6])
+	}
+	if headerLength <= 0 || headerStart+headerLength > len(npy) {
+		return nil, fmt.Errorf("invalid NPY header length")
+	}
+	header := string(npy[headerStart : headerStart+headerLength])
+	expectedShape := fmt.Sprintf("(%d, %d, %d)", shape[0], shape[1], shape[2])
+	if !strings.Contains(header, fmt.Sprintf("'descr': '%s'", descr)) ||
+		!strings.Contains(header, "'fortran_order': False") ||
+		!strings.Contains(header, fmt.Sprintf("'shape': %s", expectedShape)) {
+		return nil, fmt.Errorf("NPY dtype, order, or shape differs from contract")
+	}
+	itemSize := 1
+	if descr == "<f4" {
+		itemSize = 4
+	}
+	expectedDataSize := shape[0] * shape[1] * shape[2] * itemSize
+	data := npy[headerStart+headerLength:]
+	if len(data) != expectedDataSize {
+		return nil, fmt.Errorf(
+			"NPY data size mismatch: expected %d, got %d",
+			expectedDataSize, len(data),
+		)
+	}
+	return data, nil
+}
+
+func renderNavigationPNG(mapBytes, routeBytes []byte) ([]byte, error) {
+	pixels := navigationRasterSize * navigationRasterSize
+	if len(mapBytes) != navigationMapChannels*pixels*4 ||
+		len(routeBytes) != navigationRouteChannels*pixels {
+		return nil, fmt.Errorf("navigation raster byte size differs from contract")
+	}
+	layer := func(channel, pixel int) float32 {
+		offset := (channel*pixels + pixel) * 4
+		return math.Float32frombits(binary.LittleEndian.Uint32(
+			mapBytes[offset : offset+4],
+		))
+	}
+	route := func(channel, pixel int) bool {
+		return routeBytes[channel*pixels+pixel] != 0
+	}
+	canvas := image.NewRGBA(image.Rect(
+		0, 0, navigationRasterSize, navigationRasterSize,
+	))
+	for pixel := 0; pixel < pixels; pixel++ {
+		value := color.RGBA{R: 11, G: 15, B: 20, A: 255}
+		switch {
+		case layer(13, pixel) > 0.5:
+			value = color.RGBA{R: 126, G: 76, B: 132, A: 255}
+		case layer(4, pixel) > 0.5:
+			value = color.RGBA{R: 180, G: 187, B: 191, A: 255}
+		case layer(3, pixel) > 0.5:
+			value = color.RGBA{R: 65, G: 72, B: 88, A: 255}
+		case layer(0, pixel) > 0.5:
+			value = color.RGBA{R: 52, G: 65, B: 74, A: 255}
+		case layer(10, pixel) > 0.5:
+			value = color.RGBA{R: 27, G: 33, B: 40, A: 255}
+		}
+		switch {
+		case layer(6, pixel) > 0.5:
+			value = color.RGBA{R: 238, G: 181, B: 55, A: 255}
+		case layer(5, pixel) > 0.5:
+			value = color.RGBA{R: 229, G: 87, B: 72, A: 255}
+		case layer(1, pixel) > 0.5:
+			value = color.RGBA{R: 218, G: 222, B: 225, A: 255}
+		case layer(2, pixel) > 0.5:
+			value = color.RGBA{R: 126, G: 163, B: 184, A: 255}
+		}
+		if route(0, pixel) {
+			value = color.RGBA{
+				R: uint8((int(value.R) + 25*2) / 3),
+				G: uint8((int(value.G) + 174*2) / 3),
+				B: uint8((int(value.B) + 151*2) / 3),
+				A: 255,
+			}
+		}
+		if route(1, pixel) {
+			value = color.RGBA{R: 239, G: 77, B: 65, A: 255}
+		}
+		x := pixel % navigationRasterSize
+		y := pixel / navigationRasterSize
+		canvas.SetRGBA(x, y, value)
+	}
+	var output bytes.Buffer
+	if err := png.Encode(&output, canvas); err != nil {
+		return nil, fmt.Errorf("encode navigation PNG: %w", err)
+	}
+	return output.Bytes(), nil
 }
 
 func acquireFullTarScan(ctx context.Context) (func(), error) {
