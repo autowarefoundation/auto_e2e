@@ -306,10 +306,12 @@ def _is_overlay_set_upgrade(
         "sk",
         "dataset_manifest_sha256",
         "artifacts_bucket",
-        "seeds",
     )
+    request_identity = existing.get("request_identity")
     return (
         existing.get("status") == "ready"
+        and isinstance(request_identity, str)
+        and _SHA256_RE.fullmatch(request_identity) is not None
         and all(existing.get(field) == item.get(field) for field in identity_fields)
         and _overlay_schema_version(existing.get("overlay_schema"))
         < _overlay_schema_version(item.get("overlay_schema"))
@@ -355,6 +357,10 @@ def _prepare_overlay_set_item(
         staged = dict(item)
         staged["previous_overlay_schema"] = existing["overlay_schema"]
         staged["previous_request_identity"] = existing["request_identity"]
+        staged["previous_created_at"] = existing["created_at"]
+        staged["previous_seeds"] = existing["seeds"]
+        staged["previous_n_shards"] = existing["n_shards"]
+        staged["previous_n_samples"] = existing["n_samples"]
         return staged
     raise RuntimeError(
         "immutable DynamoDB item exists with a different identity "
@@ -366,7 +372,7 @@ def _prepare_overlay_set_item(
 def _stage_overlay_set_upgrade(
     table,
     item: Mapping[str, Any],
-    gate: Mapping[str, str],
+    gate: Mapping[str, Any],
 ) -> None:
     from botocore.exceptions import ClientError
 
@@ -374,6 +380,10 @@ def _stage_overlay_set_upgrade(
     previous_request = gate.get("previous_request_identity")
     if not previous_schema or not previous_request:
         return
+    previous_seeds = gate["previous_seeds"]
+    previous_created_at = gate["previous_created_at"]
+    previous_n_shards = gate["previous_n_shards"]
+    previous_n_samples = gate["previous_n_samples"]
     try:
         table.put_item(
             Item=dict(item),
@@ -382,7 +392,11 @@ def _stage_overlay_set_upgrade(
                 "AND overlay_schema = :previous_schema "
                 "AND request_identity = :previous_request "
                 "AND dataset_manifest_sha256 = :dataset_manifest "
-                "AND artifacts_bucket = :artifacts_bucket"
+                "AND artifacts_bucket = :artifacts_bucket "
+                "AND seeds = :previous_seeds "
+                "AND created_at = :previous_created_at "
+                "AND n_shards = :previous_n_shards "
+                "AND n_samples = :previous_n_samples"
             ),
             ExpressionAttributeNames={"#status": "status"},
             ExpressionAttributeValues={
@@ -391,6 +405,10 @@ def _stage_overlay_set_upgrade(
                 ":previous_request": previous_request,
                 ":dataset_manifest": item["dataset_manifest_sha256"],
                 ":artifacts_bucket": item["artifacts_bucket"],
+                ":previous_seeds": previous_seeds,
+                ":previous_created_at": previous_created_at,
+                ":previous_n_shards": previous_n_shards,
+                ":previous_n_samples": previous_n_samples,
             },
         )
         return
@@ -565,7 +583,14 @@ def _gate_token(item: Mapping[str, Any], model_artifact_id: str) -> str:
         "request_identity": item["request_identity"],
         "status": item["status"],
     }
-    for name in ("previous_overlay_schema", "previous_request_identity"):
+    for name in (
+        "previous_overlay_schema",
+        "previous_request_identity",
+        "previous_created_at",
+        "previous_seeds",
+        "previous_n_shards",
+        "previous_n_samples",
+    ):
         if item.get(name):
             gate[name] = item[name]
     return json.dumps(
@@ -575,7 +600,7 @@ def _gate_token(item: Mapping[str, Any], model_artifact_id: str) -> str:
     )
 
 
-def _parse_gate(value: str) -> dict[str, str]:
+def _parse_gate(value: str) -> dict[str, Any]:
     try:
         gate = json.loads(value)
     except (TypeError, json.JSONDecodeError) as exc:
@@ -596,12 +621,41 @@ def _parse_gate(value: str) -> dict[str, str]:
         raise ValueError("overlay-set gate token is incomplete")
     if gate["status"] not in {"building", "ready"}:
         raise ValueError("overlay-set gate is not writable")
-    optional = ("previous_overlay_schema", "previous_request_identity")
-    if any(name in gate for name in optional) and any(
-        not isinstance(gate.get(name), str) or not gate[name]
-        for name in optional
-    ):
+    upgrade_fields = {
+        "previous_overlay_schema",
+        "previous_request_identity",
+        "previous_created_at",
+        "previous_seeds",
+        "previous_n_shards",
+        "previous_n_samples",
+    }
+    present_upgrade_fields = upgrade_fields.intersection(gate)
+    if present_upgrade_fields and present_upgrade_fields != upgrade_fields:
         raise ValueError("overlay-set upgrade gate is incomplete")
+    if present_upgrade_fields:
+        string_fields = (
+            "previous_overlay_schema",
+            "previous_request_identity",
+            "previous_created_at",
+        )
+        if any(
+            not isinstance(gate.get(name), str) or not gate[name]
+            for name in string_fields
+        ):
+            raise ValueError("overlay-set upgrade gate is incomplete")
+        if (
+            not isinstance(gate.get("previous_seeds"), list)
+            or not gate["previous_seeds"]
+            or not all(
+                isinstance(seed, int) and seed >= 0
+                for seed in gate["previous_seeds"]
+            )
+            or not isinstance(gate.get("previous_n_shards"), int)
+            or gate["previous_n_shards"] < 1
+            or not isinstance(gate.get("previous_n_samples"), int)
+            or gate["previous_n_samples"] < 1
+        ):
+            raise ValueError("overlay-set upgrade gate is incomplete")
     return gate
 
 
@@ -1229,6 +1283,7 @@ def resolve_overlay_model(
     requests=Resources(cpu="1", mem="2Gi"),
     limits=Resources(cpu="1", mem="2Gi"),
     environment=OVERLAY_TASK_ENV,
+    retries=3,
 )
 def prepare_overlay_set(
     resolved_metadata: FlyteFile,
@@ -1794,6 +1849,17 @@ def finalize_overlay_set(
     if len(actual_seed_sets) != 1:
         raise ValueError("overlay partitions used inconsistent seed sets")
     seeds = list(next(iter(actual_seed_sets)))
+    n_samples = sum(entry["sample_count"] for entry in entries)
+    if "previous_overlay_schema" in gate and (
+        gate["previous_n_shards"] != len(entries)
+        or gate["previous_n_samples"] != n_samples
+    ):
+        raise RuntimeError(
+            "overlay schema upgrade changed dataset coverage: "
+            f"{len(entries)} shards / {n_samples} samples != "
+            f"{gate['previous_n_shards']} shards / "
+            f"{gate['previous_n_samples']} samples"
+        )
     output_sha256 = hashlib.sha256(
         json.dumps(
             [(entry["shard"], entry["sha256"]) for entry in entries],
@@ -1815,7 +1881,7 @@ def finalize_overlay_set(
         "request_identity": environment["request_identity"],
         "cache_identity": environment["cache_identity"],
         "n_shards": len(entries),
-        "n_samples": sum(entry["sample_count"] for entry in entries),
+        "n_samples": n_samples,
         "seeds": seeds,
         "sampler": environment["sampler"],
         "num_inference_steps": environment["num_inference_steps"],
