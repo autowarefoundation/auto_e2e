@@ -51,14 +51,15 @@ export function parseOverlay(buffer: ArrayBuffer): OverlayArtifact {
   const bevHeatmapNames =
     formatVersion === 2
       ? LEGACY_BEV_HEATMAP_NAMES
-      : formatVersion === 3
+      : formatVersion === 3 || formatVersion === 4
         ? BEV_HEATMAP_NAMES
         : [];
   const heatmapCount = bevHeatmapNames.length;
   if (
     (formatVersion !== 1 &&
       formatVersion !== 2 &&
-      formatVersion !== 3) ||
+      formatVersion !== 3 &&
+      formatVersion !== 4) ||
     horizon !== HORIZON ||
     dims !== DIMS ||
     reserved !== heatmapCount
@@ -76,7 +77,11 @@ export function parseOverlay(buffer: ArrayBuffer): OverlayArtifact {
   const controlsLength = sampleCount * seedCount * horizon * dims;
   const speedsOffset = controlsOffset + controlsLength * 4;
   const heatmapScalesOffset = speedsOffset + sampleCount * 4;
-  const heatmapsOffset = heatmapScalesOffset + sampleCount * 4;
+  const heatmapScaleCount =
+    heatmapCount > 0
+      ? sampleCount * (formatVersion >= 4 ? heatmapCount : 1)
+      : 0;
+  const heatmapsOffset = heatmapScalesOffset + heatmapScaleCount * 4;
   const heatmapsLength =
     sampleCount *
     heatmapCount *
@@ -129,7 +134,11 @@ export function parseOverlay(buffer: ArrayBuffer): OverlayArtifact {
         : null,
     bevHeatmapScales:
       heatmapCount > 0
-        ? new Float32Array(buffer, heatmapScalesOffset, sampleCount)
+        ? new Float32Array(
+            buffer,
+            heatmapScalesOffset,
+            heatmapScaleCount,
+          )
         : null,
     bevHeatmapNames,
   };
@@ -173,7 +182,12 @@ export function bevHeatmapForRow(
     (row * overlay.bevHeatmapNames.length + heatmapIndex) * pixels;
   return {
     values: overlay.bevHeatmaps.subarray(begin, begin + pixels),
-    scale: overlay.bevHeatmapScales[row],
+    scale:
+      overlay.bevHeatmapScales[
+        overlay.formatVersion >= 4
+          ? row * overlay.bevHeatmapNames.length + heatmapIndex
+          : row
+      ],
   };
 }
 
