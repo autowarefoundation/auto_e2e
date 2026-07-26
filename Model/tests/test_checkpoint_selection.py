@@ -9,6 +9,7 @@ import pytest
 from evaluation.checkpoint_selection import (
     SELECTOR_MIN_DELTA,
     SELECTOR_POLICY_VERSION,
+    UTILITY_SCALES,
     aggregate_validation_records,
     build_selector_calibration_report,
     freeze_component_availability,
@@ -180,6 +181,7 @@ def test_score_renormalizes_unavailable_map_and_navigation():
 
     assert set(result["components"]) == {"trajectory", "comfort"}
     assert sum(result["effective_weights"].values()) == pytest.approx(1.0)
+    assert result["utility_scales"] == UTILITY_SCALES
     assert result["effective_weights"]["trajectory"] == pytest.approx(
         0.50 / 0.65
     )
