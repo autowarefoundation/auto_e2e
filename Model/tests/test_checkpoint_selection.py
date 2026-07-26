@@ -14,6 +14,7 @@ from evaluation.checkpoint_selection import (
     freeze_component_availability,
     score_checkpoint,
     score_is_better,
+    validate_frozen_availability,
 )
 
 
@@ -276,3 +277,26 @@ def test_calibration_rejects_component_availability_drift():
                 "components": {"trajectory": 0.6},
             },
         ])
+
+
+def test_frozen_availability_tolerates_only_calibration_float_noise():
+    expected = {
+        "trajectory": True,
+        "coverage": {"ade_3s_m": 10},
+        "calibration": {"raster_tolerance_m": 0.5},
+    }
+    observed = {
+        **expected,
+        "calibration": {"raster_tolerance_m": 0.5 + 1e-10},
+    }
+
+    validate_frozen_availability(expected, observed)
+
+    with pytest.raises(ValueError, match="discrete availability"):
+        validate_frozen_availability(
+            expected,
+            {
+                **observed,
+                "coverage": {"ade_3s_m": 9},
+            },
+        )
