@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from decimal import Decimal
 from types import SimpleNamespace
 
 import pytest
@@ -253,6 +254,9 @@ def test_gate_token_keeps_the_winning_creation_time_and_ready_state():
 def test_overlay_set_upgrade_stages_without_hiding_ready_schema():
     existing = _ready_item()
     existing["overlay_schema"] = "v3"
+    existing["seeds"] = [Decimal(0)]
+    existing["n_shards"] = Decimal(2)
+    existing["n_samples"] = Decimal(20)
     target = {
         **existing,
         "status": "building",
@@ -274,6 +278,9 @@ def test_overlay_set_upgrade_stages_without_hiding_ready_schema():
     assert staged["status"] == "building"
     assert staged["previous_overlay_schema"] == "v3"
     assert staged["previous_request_identity"] == "a" * 64
+    assert staged["previous_seeds"] == [0]
+    assert staged["previous_n_shards"] == 2
+    assert staged["previous_n_samples"] == 20
     gate = _parse_gate(_gate_token(staged, "e" * 64))
     assert gate["previous_overlay_schema"] == "v3"
     assert gate["previous_n_shards"] == 2
