@@ -751,6 +751,33 @@ def test_navigation_objective_wiring_is_train_only_and_versioned():
         assert train_keywords[field].id == field
 
 
+def test_sharded_full_run_forwards_composite_selector_audit():
+    module = ast.parse(inspect.getsource(workflows))
+    full_run = next(
+        node
+        for node in module.body
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "wf_sharded_full_run"
+    )
+    train_call = next(
+        call
+        for call in ast.walk(full_run)
+        if isinstance(call, ast.Call)
+        and isinstance(call.func, ast.Name)
+        and call.func.id == "train_il"
+    )
+    train_keywords = {
+        keyword.arg: keyword.value for keyword in train_call.keywords
+    }
+    for field in (
+        "reconstruction_audit",
+        "reconstruction_audit_decision",
+        "reconstruction_audit_rationale",
+    ):
+        assert isinstance(train_keywords[field], ast.Name)
+        assert train_keywords[field].id == field
+
+
 def test_rollout_control_arm_uses_composite_selector_without_rollout_loss():
     source = inspect.getsource(workflows.train_il.task_function)
 
