@@ -10,6 +10,7 @@ import torch
 from navigation.geometry import (
     DEFAULT_NAVIGATION_GEOMETRY,
     NavigationRasterGeometry,
+    RouteChannel,
 )
 from training.losses.control_rollout import integrate_controls_torch
 from training.losses.rollout_aligned_loss import (
@@ -32,6 +33,7 @@ def build_rollout_validation_records(
     sample_uids: Sequence[str],
     split_group_uids: Sequence[str],
     *,
+    route_mask: torch.Tensor | None = None,
     route_intersections: Sequence[bool] | None = None,
     geometry: NavigationRasterGeometry = DEFAULT_NAVIGATION_GEOMETRY,
     footprint_length_m: float = 4.8,
@@ -153,6 +155,33 @@ def build_rollout_validation_records(
             route_valid.detach().to(device="cpu", dtype=torch.bool)
             & available
         )
+        if route_mask is None:
+            routes = torch.zeros(
+                (
+                    batch_size,
+                    len(RouteChannel),
+                    geometry.height_px,
+                    geometry.width_px,
+                ),
+                dtype=torch.float32,
+            )
+            routes[:, RouteChannel.SELECTED_CORRIDOR] = (
+                fields["distance_to_corridor_m"] <= 0.0
+            )
+        else:
+            routes = route_mask.detach().to(
+                device="cpu",
+                dtype=torch.float32,
+            )
+        if routes.shape != (
+            batch_size,
+            len(RouteChannel),
+            geometry.height_px,
+            geometry.width_px,
+        ):
+            raise ValueError(
+                "route mask differs from validation geometry"
+            )
         predicted_drivable_distance = _footprint_outside_distance(
             fields["distance_to_drivable_m"],
             predicted_xy,
@@ -237,6 +266,10 @@ def build_rollout_validation_records(
         predicted_compliance = None
         target_compliance = None
         if bool(route_available[index]):
+            from evaluation.navigation_metrics import (
+                _mask_values_at_positions,
+            )
+
             predicted_compliance = float(
                 predicted_route_inside[index].float().mean()
             )
@@ -247,11 +280,23 @@ def build_rollout_validation_records(
                 0.0,
                 target_compliance - predicted_compliance,
             )
-            if intersections[index] and bool(
-                target_route_inside[index, -1]
-            ):
+            corridor = (
+                routes[index, RouteChannel.SELECTED_CORRIDOR].numpy()
+                > 0.0
+            )
+            predicted_center_on_route = _mask_values_at_positions(
+                corridor,
+                predicted_xy[index].numpy(),
+                geometry,
+            )
+            target_center_on_route = _mask_values_at_positions(
+                corridor,
+                logged[index].numpy(),
+                geometry,
+            )
+            if intersections[index] and bool(target_center_on_route[-1]):
                 wrong_branch_excess = float(
-                    not bool(predicted_route_inside[index, -1])
+                    not bool(predicted_center_on_route[-1])
                 )
             if bool(destination_visible[index]):
                 predicted_terminal = float(torch.linalg.vector_norm(
