@@ -30,9 +30,8 @@ This design makes two bounded changes:
 
 1. add a differentiable XY rollout loss and target-relative comfort/map
    constraints while retaining the existing normalized action loss;
-2. select checkpoints with baseline-relative guardrails followed by a
-   composite score that combines natural and scene-balanced validation
-   aggregates.
+2. select checkpoints with a weighted composite score that combines natural
+   and scene-balanced trajectory, comfort, map-safety, and navigation metrics.
 
 The planner objective introduced by this design is:
 
@@ -112,17 +111,18 @@ This design records both:
 - natural metrics: every validation sample has equal weight;
 - scene-balanced metrics: every `split_group_uid` has equal weight.
 
-### 2.3 Guardrail-first selection
+### 2.3 Multi-objective selection
 
-A single scalar score is useful for ranking checkpoints but must not be allowed
-to trade a serious safety regression for a small trajectory improvement.
-Selection therefore has two stages:
+A checkpoint should not be selected from ADE or FDE alone when training also
+optimizes comfort and map/navigation behavior. The selector therefore:
 
-1. reject checkpoints with incomplete metrics or baseline-relative guardrail
-   violations;
-2. rank only eligible checkpoints by the composite score.
+1. computes every required metric from the same validation records;
+2. converts metrics with different units into bounded utilities;
+3. ranks checkpoints by one versioned weighted sum;
+4. logs every component so the trade-off remains visible.
 
-There is no ADE-only fallback.
+There are no per-metric hard gates in this research selector. Production
+promotion policy is a separate concern and is outside this design.
 
 ## 3. Goals and Non-Goals
 
@@ -133,10 +133,10 @@ There is no ADE-only fallback.
 3. Penalize comfort and map violations only when they exceed the demonstrated
    target behavior.
 4. Prevent long scenes from dominating checkpoint selection.
-5. Prevent checkpoint promotion when safety, comfort, or navigation guardrails
-   regress.
-6. Make metric availability, baseline identity, policy version, and selector
-   state reproducible across resume.
+5. Select checkpoints from trajectory, comfort, map-safety, and navigation
+   evidence rather than ADE/FDE alone.
+6. Make metric availability, score policy, and selector state reproducible
+   across resume.
 7. Keep the first experiment scientifically attributable to the loss and
    selection changes in this document.
 
@@ -167,7 +167,7 @@ dataset snapshot:
 | Arm | Planner loss | Checkpoint selection |
 |---|---|---|
 | A: control | Current normalized action loss | Current ADE/FDE policy |
-| B: treatment | Action + rollout + constraint | Guardrail-first composite |
+| B: treatment | Action + rollout + constraint | Weighted composite score |
 
 Both arms use:
 
@@ -179,12 +179,10 @@ Both arms use:
 - identical Reasoning enable flag, labels, and weight inherited from Arm A;
 - no weighted sampler or hard-example mining.
 
-Arm A is trained first. Its immutable selected checkpoint is evaluated with the
-new per-sample metric implementation and serves as Arm B's baseline artifact,
-unless an already existing production/main checkpoint has exactly the same
-model, data, and validation contracts. Arm A's composite score is computed
-retrospectively from that artifact even though Arm A itself retains the current
-ADE/FDE selection policy.
+Arm A's selected checkpoint is evaluated with the new per-sample metric
+implementation so its composite score and all component metrics can be compared
+retrospectively with Arm B. Arm B does not require Arm A's metrics during
+training; the reference is used only for the final paired experiment report.
 
 The auxiliary objectives are controlled variables, not treatment variables.
 Any JEPA or Reasoning configuration difference between paired arms invalidates
@@ -843,34 +841,12 @@ order.
 Adding duplicate samples to one scene without changing that scene's mean must
 not change the scene-balanced aggregate.
 
-## 14. Baseline Artifact and Component Availability
+## 14. Component Availability and Score Policy
 
-### 14.1 Immutable baseline
+### 14.1 Frozen availability
 
-Before epoch 1, the explicitly supplied immutable baseline checkpoint is
-evaluated on the exact validation snapshot. For the paired experiment this is
-normally Arm A's selected checkpoint. An existing production/main checkpoint
-may be used only when all model, data, and validation contracts match. The
-selector stores:
-
-```text
-baseline checkpoint URI
-baseline checkpoint SHA-256
-baseline model/config identity
-validation snapshot identity and digests
-baseline metric artifact URI and SHA-256
-selector policy version
-```
-
-Baseline metrics are never taken from another snapshot or copied from an older
-run by name alone. Dynamic aliases such as `latest` or a live branch name are
-not valid baseline identities. A missing identity or digest mismatch fails run
-initialization.
-
-### 14.2 Frozen availability
-
-Component availability is computed once from the baseline evaluation and
-validation data, then frozen before epoch 1:
+Component availability is computed from the immutable validation snapshot
+before epoch 1 and then frozen:
 
 - trajectory `D`: always required;
 - comfort `C`: always required;
@@ -890,7 +866,23 @@ or destination subcomponents are removed and the remaining navigation weights
 are renormalized. This prevents missing evidence from being treated as perfect
 behavior.
 
-## 15. Metric Completeness and Guardrails
+### 14.2 Versioned score policy
+
+The selector policy stores:
+
+```text
+selector policy version
+validation snapshot identity and digests
+component availability and coverage counts
+metric-to-utility scales
+component weights after availability renormalization
+min_delta
+```
+
+These values are fixed for the run and saved in every checkpoint. Changing a
+utility scale or weight creates a new selector policy version.
+
+## 15. Metric Completeness and Ranking
 
 ### 15.1 Selection order
 
@@ -899,31 +891,12 @@ Every epoch follows this order:
 1. verify validation snapshot and sample identity;
 2. verify all metrics required by frozen component availability are present,
    finite, and have the expected coverage;
-3. compute baseline-relative guardrails;
-4. compute the composite score when metric-complete;
-5. rank the checkpoint only if all guardrails pass.
+3. compute every available utility and the weighted composite score;
+4. compare the score with the current best using `min_delta`.
 
-A metric-incomplete checkpoint is ineligible and records explicit missing or
-non-finite metric names. It is not assigned a synthetic score.
-
-### 15.2 Default guardrails
-
-| Metric | Eligibility requirement |
-|---|---|
-| Natural ADE@3s | `<= max(2.5 m, baseline * 1.10)` |
-| Natural FDE@6.4s | `<= max(6.0 m, baseline * 1.10)` |
-| Natural off-road excess | `<= max(0.05, baseline + 0.02)` |
-| Natural comfort excess | `<= max(0.10, baseline + 0.03)` |
-| Natural route gap | `<= max(0.10, baseline + 0.03)` |
-| Natural wrong-branch excess | `<= max(0.10, baseline + 0.03)` |
-
-Optional guardrails apply only when their components are frozen as available.
-Scene-balanced metrics participate in the score and final acceptance criteria;
-the initial hard guardrail table remains natural to avoid introducing
-unmeasured scene-quantile noise into eligibility.
-
-Guardrail thresholds, baseline values, observed values, and pass/fail results
-are stored per epoch.
+Missing or non-finite required metrics fail validation immediately. The
+selector does not silently remove a component after epoch 1, assign a synthetic
+value, or fall back to ADE.
 
 ## 16. Composite Checkpoint Score
 
@@ -1045,8 +1018,8 @@ top-level weights to sum to one. Availability and effective weights are fixed
 before epoch 1.
 
 All component inputs, component utilities, effective weights, and final score
-are logged. An ineligible but metric-complete checkpoint still has a diagnostic
-score; guardrail failure prevents selection regardless of that score.
+are logged. The checkpoint with the highest score under the fixed policy is the
+best checkpoint.
 
 ## 17. Scheduler, Early Stopping, and Selection
 
@@ -1064,9 +1037,9 @@ ReduceLROnPlateau(
 )
 ```
 
-For every metric-complete epoch, pass the composite score to the scheduler.
-Metric-incomplete epochs do not call `scheduler.step`; they remain ineligible
-and are treated as bad epochs after eligibility has begun.
+For every completed validation epoch, pass the composite score to the
+scheduler. Missing or non-finite required metrics fail the validation epoch
+rather than producing a partial score.
 
 Initial improvement threshold:
 
@@ -1079,32 +1052,15 @@ The scheduler threshold and selector `min_delta` intentionally match. The
 three-seed experiment must report epoch-to-epoch score noise. A later change to
 either threshold or patience requires a selector policy-version bump.
 
-### 17.2 Eligibility and bad epochs
+### 17.2 Best checkpoint and bad epochs
 
-- Before the first eligible checkpoint, early stopping is disabled.
-- An eligible checkpoint improves best only when
+- The first successfully validated checkpoint becomes best.
+- A later checkpoint improves best only when
   `score > best_score + min_delta`.
-- After the first eligible checkpoint, an ineligible epoch is a bad epoch.
-- After the first eligible checkpoint, an eligible non-improving epoch is a
-  bad epoch.
-- If no eligible checkpoint exists, training runs through all requested
-  epochs.
+- A successfully validated but non-improving epoch is a bad epoch.
+- Early stopping triggers when bad epochs reach the configured patience.
 - The final checkpoint is always saved.
 - ADE-only fallback is forbidden.
-
-### 17.3 Best ineligible diagnostics
-
-Among metric-complete ineligible checkpoints, retain:
-
-```text
-best_ineligible_score
-best_ineligible_epoch
-best_ineligible_checkpoint_uri
-best_ineligible_checkpoint_sha256
-best_ineligible_guardrail_violations
-```
-
-This is diagnostic state and never receives the `best` registry role.
 
 ## 18. Checkpoint, Resume, and Registry Contract
 
@@ -1114,35 +1070,29 @@ Every immutable epoch checkpoint stores:
 
 ```text
 selector policy version
-baseline checkpoint and metric-artifact identities
 validation snapshot and sample/group digests
 frozen component availability and effective weights
 metric history with natural and scene-balanced aggregates
-guardrail results
-best eligible checkpoint, or null
-best ineligible diagnostic checkpoint, or null
-first eligible epoch, or null
+best checkpoint identity and score
 bad epoch count
 scheduler state
 optimizer/scaler/RNG state
 ```
 
-Resume rejects any mismatch in policy, baseline, validation identity,
-availability, score weights, guardrails, or loss configuration. Restoring only
-model and optimizer state is insufficient.
+Resume rejects any mismatch in policy, validation identity, availability,
+score weights, utility scales, or loss configuration. Restoring only model and
+optimizer state is insufficient.
 
 ### 18.2 Workflow outputs
 
-The training workflow must distinguish:
+The training workflow retains the existing two roles:
 
-- `final`: always exists;
-- `best_eligible`: optional;
-- `best_ineligible`: optional diagnostic identity.
+- `final`: the last completed epoch;
+- `best`: the highest composite score.
 
-The current workflow assumes that a best checkpoint always exists. That
-assumption must be removed. A no-eligible run returns the final artifact and
-metadata but no `best_eligible` role. Downstream automatic promotion requires
-`best_eligible`; explicit diagnostic evaluation may target `final`.
+Because the first successful validation always establishes a best checkpoint,
+`best` does not become optional. The workflow changes its comparison key and
+stored metric bundle, not its output cardinality.
 
 ### 18.3 Model registry
 
@@ -1151,13 +1101,11 @@ Registry roles are:
 ```text
 final
 best
-diagnostic-ineligible
 ```
 
-Only an eligible checkpoint may receive `best`. A no-eligible run may register
-`final` for traceability but must not create or update a best pointer. The
-ineligible diagnostic role must include its guardrail violations and cannot be
-resolved by production inference as the selected model.
+The `best` role is selected by the versioned composite score. Production
+promotion gates, if later required, operate after research checkpoint
+selection and are not part of this policy.
 
 ## 19. MLflow and Auditability
 
@@ -1182,18 +1130,15 @@ validation/coverage/*
 
 selection/component/*
 selection/effective_weight/*
-selection/guardrail/*
 selection/score
-selection/eligible
 selection/bad_epochs
-selection/best_ineligible/*
 
 audit/reconstruction/*
 ```
 
-Checkpoint metadata and MLflow must agree on epoch, score, eligibility,
-baseline identity, and validation digests. The immutable checkpoint metadata is
-authoritative if an MLflow retry occurs.
+Checkpoint metadata and MLflow must agree on epoch, score, component values,
+effective weights, and validation digests. The immutable checkpoint metadata
+is authoritative if an MLflow retry occurs.
 
 ## 20. Implementation Plan
 
@@ -1230,19 +1175,16 @@ authoritative if an MLflow retry occurs.
 
 ### PR Step 4: checkpoint selector
 
-- Load and verify immutable baseline metrics.
 - Freeze component availability before epoch 1.
-- Apply metric completeness and guardrails before ranking.
 - Compute the natural/scene-balanced composite score.
-- Persist best eligible and best ineligible states independently.
+- Select and persist the highest-scoring checkpoint.
 
 ### PR Step 5: Flyte lifecycle integration
 
 - Change scheduler input and mode.
-- Implement eligibility-aware early stopping.
+- Drive early stopping from composite-score improvement.
 - Update checkpoint and resume validation.
 - Update MLflow logging and model-registry roles.
-- Ensure no-eligible runs complete without inventing a best checkpoint.
 
 ## 21. Test Plan
 
@@ -1288,18 +1230,16 @@ authoritative if an MLflow retry occurs.
 
 ### 21.5 Checkpoint selection
 
-1. Metric-incomplete checkpoints are ineligible.
-2. Guardrail-failing checkpoints never become best.
-3. Eligible checkpoints rank by composite score.
+1. Missing or non-finite required metrics fail validation.
+2. The first complete checkpoint becomes best.
+3. Later checkpoints rank only by composite score and `min_delta`.
 4. Scene-balanced trajectory utility changes the score.
 5. Route utility is target-relative.
 6. Coverage shortage excludes optional components and renormalizes weights.
 7. Component availability does not change after epoch 1.
-8. Best-ineligible diagnostics are persisted.
-9. Early stopping cannot trigger before the first eligible checkpoint.
-10. A no-eligible run saves final and creates no best role.
-11. Resume reproduces the same best epoch and bad-epoch count.
-12. Resume rejects baseline, policy, availability, or validation drift.
+8. Early stopping follows composite-score improvement.
+9. Resume reproduces the same best epoch and bad-epoch count.
+10. Resume rejects policy, availability, weight, or validation drift.
 
 ### 21.6 Performance
 
@@ -1324,8 +1264,8 @@ Primary criteria:
    A.
 3. Paired median natural ADE@3s and FDE@6.4s regress by no more than 5%.
 4. Paired median scene-balanced ADE@3s or scene-balanced FDE@6.4s improves.
-5. No safety, comfort, or navigation metric exceeds its baseline-relative
-   guardrail.
+5. Safety, comfort, and navigation component values and paired deltas are
+   reported separately; none is hidden by the aggregate score.
 6. Full training-step throughput regresses by no more than 12%.
 
 Required diagnostic report:
@@ -1336,8 +1276,8 @@ Required diagnostic report:
 - each rollout and constraint loss;
 - reconstruction audit errors;
 - coverage and effective score weights;
-- best eligible and best ineligible checkpoint identities;
-- all guardrail values and violations.
+- best and final checkpoint identities;
+- every composite-score component and its paired delta.
 
 A fixed 5% improvement and universal absolute-threshold success across all
 seeds are not required.
@@ -1363,19 +1303,17 @@ metadata.
 
 ### Composite score hides a regression
 
-Mitigation: guardrails run before score ranking, all components remain visible,
-and no scalar score can override ineligibility.
+Mitigation: every component and paired A/B delta remains visible in MLflow and
+the experiment report, and score weights/scales are versioned. The weighted
+trade-off is intentional in research selection. A separate production
+promotion policy may add hard operational gates later without changing how the
+research checkpoint is ranked.
 
 ### Sparse navigation evidence makes ranking unstable
 
 Mitigation: freeze coverage before epoch 1, require at least 50 route-valid and
 20 wrong-branch-eligible samples, and exclude unavailable components rather
 than treating missing evidence as success.
-
-### No checkpoint passes guardrails
-
-Mitigation: run the requested epochs, save final, retain best-ineligible
-diagnostics, and avoid registering an invented best checkpoint.
 
 ## 24. Final Decision
 
@@ -1385,8 +1323,8 @@ This proposal changes only:
    target-relative comfort, and target-relative footprint map constraints;
 2. validation by adding natural and `split_group_uid` scene-balanced
    aggregation;
-3. checkpoint lifecycle by applying immutable-baseline guardrails before a
-   composite score, with explicit coverage and resume contracts.
+3. checkpoint selection by replacing ADE-only comparison with a versioned
+   weighted composite score, with explicit coverage and resume contracts.
 
 It does not add Cosmos supervision, sample balancing, tail mining, speed or
 heading losses, new JEPA/Reasoning objectives, or architecture changes. The
@@ -1396,8 +1334,8 @@ matched arms.
 The primary hypothesis is:
 
 > Rollout-aligned planner loss improves scene-balanced ADE or FDE without
-> violating natural-distribution trajectory, safety, comfort, or navigation
-> guardrails.
+> sacrificing the combined trajectory, safety, comfort, and navigation
+> utility represented by the checkpoint score.
 
 The reconstruction audit is the gate that determines whether this hypothesis
 can be tested with integrated target controls. The three-seed paired experiment
