@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 import torch
 
 from navigation.geometry import DEFAULT_NAVIGATION_GEOMETRY
+from training.losses.control_rollout import integrate_controls_torch
 from training.losses.rollout_aligned_loss import RolloutAlignedLoss
 
 
@@ -61,14 +63,22 @@ def _loss(
     predicted: torch.Tensor,
     target: torch.Tensor,
     *,
+    logged_positions: torch.Tensor | None = None,
     supervision: dict[str, torch.Tensor] | None = None,
     map_valid: bool = True,
     route_valid: bool = True,
 ) -> dict[str, torch.Tensor]:
+    initial_speed = torch.tensor([5.0], dtype=torch.float32)
+    if logged_positions is None:
+        logged_positions, _, _ = integrate_controls_torch(
+            target,
+            initial_speed,
+        )
     return RolloutAlignedLoss()(
         predicted,
         target,
-        torch.tensor([5.0], dtype=torch.float32),
+        initial_speed,
+        logged_positions,
         supervision or _supervision(),
         torch.tensor([map_valid], dtype=torch.bool),
         torch.tensor([route_valid], dtype=torch.bool),
@@ -91,6 +101,42 @@ def test_prediction_equal_target_has_zero_losses():
         "drivable",
     ):
         assert terms[name].item() == 0.0
+
+
+def test_rollout_position_target_is_logged_xy_not_target_controls():
+    target = _controls(acceleration=0.1, curvature=0.01)
+    logged_positions, _, _ = integrate_controls_torch(
+        target,
+        torch.tensor([5.0], dtype=torch.float32),
+    )
+    logged_positions = logged_positions.clone()
+    logged_positions[:, :, 1] += 2.0
+
+    terms = _loss(
+        target.clone(),
+        target,
+        logged_positions=logged_positions,
+        map_valid=False,
+        route_valid=False,
+    )
+
+    assert terms["rollout"].item() > 0.0
+    assert terms["comfort"].item() == 0.0
+
+
+def test_non_finite_logged_xy_is_rejected():
+    logged_positions = torch.zeros(1, TIMESTEPS, 2)
+    logged_positions[:, -1, 0] = torch.nan
+
+    with pytest.raises(
+        ValueError,
+        match="logged_positions must be finite",
+    ):
+        _loss(
+            _controls(),
+            _controls(),
+            logged_positions=logged_positions,
+        )
 
 
 def test_rollout_loss_reaches_acceleration_and_curvature():
