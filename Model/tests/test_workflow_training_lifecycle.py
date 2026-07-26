@@ -575,6 +575,10 @@ def test_rollout_control_arm_uses_composite_selector_without_rollout_loss():
         workflows.ROLLOUT_ALIGNED_CONTROL_OBJECTIVE_VERSION
         == "rollout_aligned_control_v1"
     )
+    assert "build_selector_calibration_report" in source
+    assert '"calibration_report"' in source
+    assert '"selection/effective_weight/{name}"' in source
+    assert '"selection/calibration/min_rank_correlation"' in source
 
 
 def test_kitscenes_epoch_evaluation_preserves_auto_e2e_horizon():
