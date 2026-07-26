@@ -3318,6 +3318,9 @@ def train_il(
                 audit_report.get("thresholds_pass", False)
             ),
             "thresholds": expected_thresholds,
+            "sample_count": int(audit_report["sample_count"]),
+            "scene_count": int(audit_report["scene_count"]),
+            "metrics": audit_report["metrics"],
             "audit_code_revision": provenance.get(
                 "audit_code_revision"
             ),
@@ -3996,6 +3999,30 @@ def train_il(
                     ).items()
                 },
             })
+            if reconstruction_audit_contract is not None:
+                audit_metrics = {
+                    "audit/reconstruction/sample_count": float(
+                        reconstruction_audit_contract["sample_count"]
+                    ),
+                    "audit/reconstruction/scene_count": float(
+                        reconstruction_audit_contract["scene_count"]
+                    ),
+                    "audit/reconstruction/thresholds_pass": float(
+                        reconstruction_audit_contract["thresholds_pass"]
+                    ),
+                }
+                for metric_name, aggregates in (
+                    reconstruction_audit_contract["metrics"].items()
+                ):
+                    for aggregate_name, distribution in (
+                        aggregates.items()
+                    ):
+                        for statistic, value in distribution.items():
+                            audit_metrics[
+                                "audit/reconstruction/"
+                                f"{metric_name}/{aggregate_name}/{statistic}"
+                            ] = float(value)
+                mlflow.log_metrics(audit_metrics, step=0)
 
     if selector_enabled and not resumed:
         from evaluation.checkpoint_selection import (
@@ -4771,6 +4798,12 @@ def train_il(
                     ].items()
                 },
                 **{
+                    f"selection/component/{name}": float(value)
+                    for name, value in checkpoint_selection[
+                        "components"
+                    ].items()
+                },
+                **{
                     f"selection/effective_weight/{name}": float(value)
                     for name, value in checkpoint_selection[
                         "effective_weights"
@@ -4813,18 +4846,31 @@ def train_il(
                         selector_mlflow_metrics[
                             f"val/{metric_name}_{aggregate_name}"
                         ] = float(value)
+                        selector_mlflow_metrics[
+                            f"validation/{aggregate_name}/{metric_name}"
+                        ] = float(value)
                 distribution = aggregate["scene_distribution"]
-                for statistic in ("p50", "p90"):
+                for statistic in ("count", "mean", "p50", "p90"):
                     value = distribution[statistic]
                     if value is not None:
                         selector_mlflow_metrics[
                             f"val/{metric_name}_scene_{statistic}"
+                        ] = float(value)
+                        selector_mlflow_metrics[
+                            "validation/scene_distribution/"
+                            f"{metric_name}/{statistic}"
                         ] = float(value)
                 selector_mlflow_metrics[
                     f"val/{metric_name}_eligible_samples"
                 ] = float(aggregate["eligible_sample_count"])
                 selector_mlflow_metrics[
                     f"val/{metric_name}_eligible_scenes"
+                ] = float(aggregate["eligible_scene_count"])
+                selector_mlflow_metrics[
+                    f"validation/coverage/{metric_name}/eligible_samples"
+                ] = float(aggregate["eligible_sample_count"])
+                selector_mlflow_metrics[
+                    f"validation/coverage/{metric_name}/eligible_scenes"
                 ] = float(aggregate["eligible_scene_count"])
 
         # The same MLflow run is reopened for each epoch. A failed metric write
@@ -4909,6 +4955,9 @@ def train_il(
                     "train/loss_comfort_lateral_acceleration": (
                         avg_rollout_terms["lateral_acceleration"]
                     ),
+                    "train/loss_comfort_lateral": (
+                        avg_rollout_terms["lateral_acceleration"]
+                    ),
                     "train/map_loss": avg_rollout_terms["map"],
                     "train/loss_map": avg_rollout_terms["map"],
                     "train/route_relative_loss": (
@@ -4917,12 +4966,19 @@ def train_il(
                     "train/loss_route_relative": (
                         avg_rollout_terms["route"]
                     ),
+                    "train/loss_map_route": (
+                        avg_rollout_terms["route"]
+                    ),
                     "train/drivable_relative_loss": (
                         avg_rollout_terms["drivable"]
                     ),
                     "train/loss_drivable_relative": (
                         avg_rollout_terms["drivable"]
                     ),
+                    "train/loss_map_drivable": (
+                        avg_rollout_terms["drivable"]
+                    ),
+                    "train/loss_total": avg_loss,
                     "train/lr": current_lr,
                     "train/throughput/train_wall_seconds": (
                         throughput["train_wall_seconds"]
