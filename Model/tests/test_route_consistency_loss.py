@@ -67,6 +67,13 @@ def _loss(
     )
 
 
+def test_route_loss_declares_current_supervision_contract():
+    assert (
+        RouteConsistencyLoss().metadata()["artifact_version"]
+        == "navigation_supervision_v2"
+    )
+
+
 @pytest.mark.parametrize(
     ("acceleration", "curvature", "initial_speed"),
     [
