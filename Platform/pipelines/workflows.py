@@ -3452,13 +3452,18 @@ def train_il(
                 f"route consistency requires navigation_supervision_v2 in "
                 f"dataset '{dname}' ({d})"
             )
-        if objective_v2 and (
+        if selector_enabled and (
             not manifest.get("has_route_supervision", False)
             or manifest.get("route_supervision_version")
             != "navigation_supervision_v2"
         ):
             raise ValueError(
-                "rollout-aligned loss requires navigation_supervision_v2 "
+                "rollout composite selector requires navigation_supervision_v2 "
+                f"in dataset '{dname}' ({d})"
+            )
+        if selector_enabled and not manifest.get("has_gps", False):
+            raise ValueError(
+                "rollout composite selector requires packed pose and GPS "
                 f"in dataset '{dname}' ({d})"
             )
 
