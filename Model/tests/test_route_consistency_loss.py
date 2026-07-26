@@ -73,6 +73,7 @@ def _loss(
         (0.0, 0.0, 5.0),
         (-3.0, 0.0, 2.0),
         (0.5, 0.04, 8.0),
+        (0.5, -0.04, 8.0),
     ],
 )
 def test_torch_control_integration_matches_numpy(
@@ -98,6 +99,25 @@ def test_torch_control_integration_matches_numpy(
         rtol=0.0,
         atol=5e-5,
     )
+
+
+def test_control_rollout_accepts_flattened_controls():
+    controls = _controls(0.5, -0.04)
+    structured = integrate_controls_torch(
+        controls,
+        torch.tensor([8.0]),
+    )
+    flattened = integrate_controls_torch(
+        controls.flatten(start_dim=1),
+        torch.tensor([8.0]),
+    )
+
+    for structured_value, flattened_value in zip(
+        structured,
+        flattened,
+        strict=True,
+    ):
+        torch.testing.assert_close(structured_value, flattened_value)
 
 
 def test_control_rollout_is_float32_under_autocast():
@@ -135,6 +155,24 @@ def test_control_rollout_rejects_non_finite_input(
 ):
     with pytest.raises(ValueError, match=message):
         integrate_controls_torch(controls, speed)
+
+
+def test_control_rollout_documents_zero_gradient_after_stop_clamp():
+    controls = torch.tensor(
+        [[[-1.0, 0.1]]],
+        dtype=torch.float32,
+        requires_grad=True,
+    )
+    positions, _, _ = integrate_controls_torch(
+        controls,
+        torch.tensor([0.0]),
+    )
+
+    positions.sum().backward()
+
+    assert controls.grad is not None
+    assert controls.grad[0, 0, 0].item() == 0.0
+    assert controls.grad[0, 0, 1].item() == 0.0
 
 
 def test_grid_coordinates_match_geometry_pixel_centers():
