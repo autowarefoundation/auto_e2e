@@ -414,6 +414,11 @@ def test_training_wires_dataset_specific_trajectory_policy():
         training_source
     )
     assert "reconstruction_audit_decision != \"go\"" in training_source
+    assert (
+        "target rollout reconstruction thresholds failed"
+        in training_source
+    )
+    assert "threshold exception requires current-model" not in training_source
     assert '"reconstruction_audit": reconstruction_audit_contract' in (
         training_source
     )
