@@ -44,29 +44,30 @@ def integrate_controls_torch(
     )
     with torch.autocast(device_type=controls.device.type, enabled=False):
         controls_f32 = controls.to(dtype=torch.float32)
-        speed = initial_speed.to(
+        initial_speed_f32 = initial_speed.to(
             device=controls.device,
             dtype=torch.float32,
         )
-        heading = torch.zeros_like(speed)
-        x = torch.zeros_like(speed)
-        y = torch.zeros_like(speed)
-        positions = []
-        headings = []
-        speeds = []
-        for step in range(controls_f32.shape[1]):
-            acceleration = controls_f32[:, step, 0]
-            curvature = controls_f32[:, step, 1]
-            speed = torch.clamp_min(speed + acceleration * dt, 0.0)
-            heading = heading + speed * curvature * dt
-            x = x + speed * torch.cos(heading) * dt
-            y = y + speed * torch.sin(heading) * dt
-            positions.append(torch.stack((x, y), dim=-1))
-            headings.append(heading)
-            speeds.append(speed)
-
-        return (
-            torch.stack(positions, dim=1),
-            torch.stack(headings, dim=1),
-            torch.stack(speeds, dim=1),
+        speed_delta = torch.cumsum(
+            controls_f32[:, :, 0] * dt,
+            dim=1,
         )
+        # Lindley's recurrence is the vector form of clamp_min at every step.
+        running_min = torch.cummin(speed_delta, dim=1).values
+        reset_floor = torch.minimum(
+            running_min,
+            -initial_speed_f32.unsqueeze(1),
+        )
+        speeds = speed_delta - reset_floor
+        headings = torch.cumsum(
+            speeds * controls_f32[:, :, 1] * dt,
+            dim=1,
+        )
+        positions = torch.stack(
+            (
+                torch.cumsum(speeds * torch.cos(headings) * dt, dim=1),
+                torch.cumsum(speeds * torch.sin(headings) * dt, dim=1),
+            ),
+            dim=-1,
+        )
+        return positions, headings, speeds
