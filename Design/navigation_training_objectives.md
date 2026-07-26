@@ -4,12 +4,12 @@
 
 | Field | Value |
 |---|---|
-| Status | Proposed |
+| Status | Implemented and smoke-validated; full comparison pending |
 | Owner | riita10069 |
 | Created | 2026-07-26 |
 | Related issue | [#149](https://github.com/autowarefoundation/auto_e2e/issues/149) |
 | Builds on | `Docs/navigation_input_design.md` |
-| Initial dataset | KITScenes navigation v3 only |
+| Initial dataset | KITScenes navigation v3.1 only |
 | Route information boundary | Reactive branch only |
 
 ## 1. Executive Summary
@@ -747,7 +747,95 @@ pre-run gradient budget.
 Rejected for this objective version. The initial #149 boundary remains
 Reactive-only.
 
-## 19. Acceptance Criteria
+## 19. Implementation and Smoke Results
+
+The implementation is on branch `feat/navigation-training-objectives-v1` at
+commit `796bc642dfe84853da3c94367041ebd9638a1807`. It includes:
+
+- KITScenes temporal decay `0.99` with mean-one normalization;
+- packed schema v6 and loss-only `route_supervision.npz`;
+- deterministic `navigation_repeat_v1` exposure;
+- differentiable route corridor, branch, destination, and heading losses;
+- objective identity and resume validation in Flyte;
+- MLflow component, eligibility, gradient, and horizon metrics;
+- KITScenes dataset version v3.1 and audited recovery subset support.
+
+### 19.1 Test results
+
+Local focused tests passed with `93 passed, 2 skipped`. The full local suite
+passed with `700 passed, 22 skipped` except for one environment-only `pyproj`
+import failure. Installing `pyproj` into an isolated target made the affected
+benchmark group pass with `20 passed`.
+
+On the EC2 development host, the Python 3.12 and Flytekit 1.14.9 environment
+passed:
+
+- workflow tests: `53 passed`;
+- combined focused tests: `149 passed, 1 skipped`.
+
+The L40S route-loss micro-overfit reduced route loss from `4.8912873` to
+`0.0000927427`, produced finite gradients, and allocated approximately
+`1.3 MB` at peak for the isolated loss.
+
+### 19.2 Flyte GPU smoke
+
+The immutable one-epoch smoke used:
+
+| Field | Value |
+|---|---|
+| Flyte execution | `azm4tbtmlwm6z79cjq9d` |
+| MLflow run | `b1ac46a839cc4cbb93e37202f95a972f` |
+| Source commit | `796bc642dfe84853da3c94367041ebd9638a1807` |
+| Dataset | KITScenes v3.1, audited 10-partition subset |
+| Training/eval image | `sha256:4ad61aaf3fc9e25cb0b681b1fc05a2268fe27493283a9eadc6f78cf6ebd7710c` |
+| Data-prep image | `sha256:43898b5773d2bde24894dd4b4ca7591c6d8f51ff48fee465dfb1eabb0322e223` |
+| Training objective | `kitscenes_navigation_objective_v1` |
+| Route loss weight | `0.10` |
+| Result | Succeeded, train/eval restart count 0 |
+
+The training exposure contained 462 unique samples and 1,289 effective
+exposures. Its deterministic exposure digest was
+`2013335b9d95dad39fc62f732ced09f6bfb7cfa5cb7067e0b76e15d373523542`.
+Of 1,289 route candidates, 849 passed the target-compliance gate and 440 were
+rejected.
+
+The first fixed-batch route-to-trajectory planner gradient ratio was `1.1887`,
+below the `2.0` budget. The route-input gradient became non-zero at optimizer
+step 2 (`4.09e-7`), as did the navigation-encoder gradient (`8.91e-4`).
+
+Epoch 1 metrics were:
+
+| Metric | Value |
+|---|---:|
+| Total loss | 1.18164 |
+| Trajectory loss | 0.51993 |
+| Route loss | 0.72266 |
+| Weighted route loss | 0.07227 |
+| Corridor / branch / destination / heading | 0.05937 / 0.21795 / 0.42870 / 0.05218 |
+| Validation ADE / FDE at 1 s | 0.08482 / 0.16200 m |
+| Validation ADE / FDE at 2 s | 0.23878 / 0.75724 m |
+| Validation ADE / FDE at 3 s | 0.82374 / 3.43980 m |
+| Validation ADE / FDE at 6.4 s | 8.19002 / 27.53298 m |
+
+The checkpoint SHA-256 was
+`c453ecbb97d67483d43bfe444e5138feb357fc5c049bbff0d011fc8f03aecf54`.
+The one-epoch benchmark quality gate did not pass, as expected for a smoke
+run; the smoke acceptance condition is finite end-to-end optimization,
+checkpointing, and evaluation rather than final model quality.
+
+No OOM, NaN, skipped optimizer step, or container restart occurred. A Flyte
+Propeller metrics-counter panic occurred while reconciling the repack array;
+the controller replica recovered, all repack tasks completed, and the workflow
+reached the terminal succeeded phase. The model and data tasks did not fail.
+
+### 19.3 Remaining experiment
+
+Acceptance items 1 through 8 are implemented and smoke-validated. The combined
+20-epoch run, matched no-route control, and frozen full-benchmark comparison in
+acceptance item 9 remain intentionally unlaunched. They are performance
+experiments, not implementation or smoke blockers.
+
+## 20. Acceptance Criteria
 
 The design is implemented when:
 
@@ -763,7 +851,7 @@ The design is implemented when:
 9. the combined and no-route-control full runs are evaluated on the frozen
    KITScenes benchmark and navigation slices.
 
-## 20. References
+## 21. References
 
 - AutoE2E navigation input design:
   `Docs/navigation_input_design.md`.
