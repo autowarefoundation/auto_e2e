@@ -30,6 +30,8 @@ import {
 } from "lucide-react";
 
 import { CameraMosaic } from "@/components/player/camera-mosaic";
+import { BEVActivationHeatmap } from "@/components/player/bev-activation-heatmap";
+import { NavigationMap } from "@/components/player/navigation-map";
 import {
   OverlaySelectionBar,
   type OverlayLoadStatus,
@@ -440,23 +442,25 @@ export function EpisodePlayer({
   // discrete status drives the panel (never hangs on 404/5xx, never shows a
   // stale card for a frame that is still loading).
   const sample = index.samples[frame];
+  const overlayRow = sample
+    ? overlayRows.get(sample.sample_uid)
+    : undefined;
   const curvatureSign = trajectoryCurvatureSign(dataset);
   const predictionTrajectories = useMemo(() => {
     if (!overlay || !sample) return [];
-    const row = overlayRows.get(sample.sample_uid);
-    if (row === undefined) return [];
+    if (overlayRow === undefined) return [];
     const paths = new Array<TrajectoryPoint[]>(overlay.seedCount);
     for (let seed = 0; seed < overlay.seedCount; seed++) {
       paths[seed] = integrateInterleavedControl(
-        overlay.v0[row],
-        controlsForRow(overlay, row, seed),
+        overlay.v0[overlayRow],
+        controlsForRow(overlay, overlayRow, seed),
         0.1,
         predictionMode,
         curvatureSign,
       );
     }
     return paths;
-  }, [overlay, overlayRows, sample, predictionMode, curvatureSign]);
+  }, [overlay, overlayRow, sample, predictionMode, curvatureSign]);
   const medianPrediction = useMemo(
     () => medianTrajectory(predictionTrajectories),
     [predictionTrajectories],
@@ -686,6 +690,13 @@ export function EpisodePlayer({
             medianPrediction={medianPrediction}
             curvatureSign={curvatureSign}
           />
+          <NavigationMap
+            dataset={dataset}
+            shard={shard}
+            version={version}
+            sample={sample}
+          />
+          <BEVActivationHeatmap overlay={overlay} row={overlayRow} />
           <div className="rounded-md border border-slate-800 bg-slate-900/60 p-2 font-mono text-[10px] leading-relaxed text-slate-400">
             <p>
               ep {sample?.episode_id || "-"} ·{" "}
