@@ -12,7 +12,7 @@ import torch
 
 
 NOISE_POLICY_VERSION = "v1"
-INFERENCE_CONTRACT_VERSION = "v2"
+INFERENCE_CONTRACT_VERSION = "v3"
 
 
 def sha256_file(path: str | Path, chunk_size: int = 8 << 20) -> str:
@@ -166,9 +166,12 @@ def predict_control(
     with torch.no_grad():
         prediction = model(
             visual,
-            batch["map_input"],
+            batch["map_context"],
             batch["visual_history"],
             batch["egomotion_history"],
+            route_mask=batch["route_mask"],
+            map_valid=batch["map_valid"],
+            route_valid=batch["route_valid"],
             **kwargs,
         )
     if isinstance(prediction, tuple):

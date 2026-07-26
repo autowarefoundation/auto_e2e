@@ -4,7 +4,7 @@ Exercises the FULL post-#77 data path through the projection-operator ABI:
 
     NvidiaAVDataset (7 real cams + separate map_tile)
       -> WebDataset shard packing (cam_i.jpg + distinct map.jpg + manifest)
-      -> make_pre_extracted_loader (reconstruct projection operator, map_input)
+      -> make_pre_extracted_loader (projection operator + navigation inputs)
       -> AutoE2E forward (projection/geometry_type) -> imitation loss -> backward
 
 Not a pytest target (needs the real dataset + heavy decode); invoked directly:
@@ -123,7 +123,7 @@ def main():
     n, vpacked, geom = build_shards(ds, out_dir, args.samples)
     print(f"[e2e] packed {n} samples, V={vpacked}, geometry={geom}")
 
-    # 3. Loader — reconstructs the projection operator + map_input.
+    # 3. Loader — reconstructs projection and explicit navigation inputs.
     loader = make_pre_extracted_loader(out_dir, batch_size=args.batch_size,
                                        num_workers=0, shuffle=0)
     projection = getattr(loader, "projection", None)
@@ -132,10 +132,14 @@ def main():
         projection = projection.to(device)
     batch = next(iter(loader))
     assert batch["visual_tiles"].shape[1] == V, "loader V mismatch"
-    assert "map_input" in batch and batch["map_input"].shape[1] == 3
+    assert batch["map_context"].shape[1] == 3
+    assert batch["route_mask"].shape[1] == 2
+    assert batch["map_valid"].all()
+    assert not batch["route_valid"].any()
     assert "camera_params" not in batch, "geometry must be a loader attr, not per-sample"
     print(f"[e2e] loader OK: visual_tiles {tuple(batch['visual_tiles'].shape)}, "
-          f"map_input {tuple(batch['map_input'].shape)}, geometry={geometry_type}, "
+          f"map_context {tuple(batch['map_context'].shape)}, "
+          f"route_mask {tuple(batch['route_mask'].shape)}, geometry={geometry_type}, "
           f"projection={'real' if projection is not None else 'pseudo'}")
 
     # 4. Model forward + loss + backward through the projection ABI.
@@ -149,13 +153,19 @@ def main():
     opt = torch.optim.AdamW(model.parameters(), lr=1e-4)
 
     visual = batch["visual_tiles"].to(device)
-    map_input = batch["map_input"].to(device)
+    map_context = batch["map_context"].to(device)
+    route_mask = batch["route_mask"].to(device)
+    map_valid = batch["map_valid"].to(device)
+    route_valid = batch["route_valid"].to(device)
     vis_hist = torch.zeros(visual.shape[0], 896, device=device)
     ego_hist = batch["egomotion_history"].to(device)
     target = batch["trajectory_target"].to(device)
 
     opt.zero_grad()
-    pred = model(visual, map_input, vis_hist, ego_hist,
+    pred = model(visual, map_context, vis_hist, ego_hist,
+                 route_mask=route_mask,
+                 map_valid=map_valid,
+                 route_valid=route_valid,
                  projection=projection, geometry_type=geometry_type,
                  mode="train", trajectory_target=target)
     loss = loss_fn(pred, target)

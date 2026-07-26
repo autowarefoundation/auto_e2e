@@ -90,11 +90,9 @@ NVIDIA_TRAINING_POLICY = DatasetTrainingPolicy(
 )
 
 # AutoE2E retains its 64-step input/output horizon and temporal weighting for
-# KITScenes. Only signal scales are corpus statistics: population standard
-# deviations measured over the exact frozen internal-train tensors in the
-# 533-partition v2.2 pack (38,847 samples x 64 target rows). The separate
-# benchmark evaluator applies the KITScenes four-second observation and
-# three-/five-second reporting protocol without changing training.
+# KITScenes. The navigation v3 repack preserves the frozen v2.2 sample
+# inventory, so the population statistics and exact train/dev groups remain
+# unchanged while the packed contract is versioned independently.
 KITSCENES_TRAINING_POLICY = DatasetTrainingPolicy(
     dataset_name=KITSCENES_DATASET_NAME,
     temporal_decay=AUTO_E2E_TEMPORAL_DECAY,
@@ -105,8 +103,8 @@ KITSCENES_TRAINING_POLICY = DatasetTrainingPolicy(
     mask_latest_history_acceleration=True,
     validation_strategy="exact_group_fraction",
     validation_split_id="kitscenes_train_dev_v1",
-    validation_manifest="splits/kitscenes_train_dev_v1.json",
-    validation_manifest_schema="kitscenes_train_dev_split_v1",
+    validation_manifest="splits/kitscenes_train_dev_v2.json",
+    validation_manifest_schema="kitscenes_train_dev_split_v2",
 )
 
 # Checkpoints produced before dataset policies were recorded used L2D signal
@@ -200,7 +198,90 @@ def _load_validation_manifest(
         ) from error
     if not isinstance(payload, dict):
         raise ValueError("validation manifest must be a JSON object")
+    _validate_sample_inventory_parent(payload, manifest_path)
     return payload
+
+
+def _validate_sample_inventory_parent(
+    payload: Mapping[str, object],
+    manifest_path: Path,
+) -> None:
+    """Verify that a repack inherits an immutable sample/split inventory."""
+    lineage = payload.get("sample_inventory_parent")
+    if lineage is None:
+        return
+    if not isinstance(lineage, Mapping):
+        raise ValueError(
+            "validation manifest sample_inventory_parent must be an object"
+        )
+    parent_name = lineage.get("manifest")
+    if (
+        not isinstance(parent_name, str)
+        or not parent_name
+        or Path(parent_name).name != parent_name
+    ):
+        raise ValueError(
+            "validation manifest parent filename must be a local basename"
+        )
+    expected_sha256 = lineage.get("sha256")
+    if (
+        not isinstance(expected_sha256, str)
+        or len(expected_sha256) != 64
+        or any(
+            character not in "0123456789abcdef"
+            for character in expected_sha256
+        )
+    ):
+        raise ValueError(
+            "validation manifest parent SHA-256 is invalid"
+        )
+
+    parent_path = manifest_path.parent / parent_name
+    try:
+        parent_bytes = parent_path.read_bytes()
+        parent = json.loads(parent_bytes)
+    except (OSError, json.JSONDecodeError) as error:
+        raise ValueError(
+            f"could not load parent validation manifest {parent_path}"
+        ) from error
+    if hashlib.sha256(parent_bytes).hexdigest() != expected_sha256:
+        raise ValueError(
+            "parent validation manifest SHA-256 does not match lineage"
+        )
+    if not isinstance(parent, Mapping):
+        raise ValueError("parent validation manifest must be a JSON object")
+
+    inherited_fields = (
+        "split_id",
+        "dataset_name",
+        "source_revision",
+        "source_artifact_set_sha256",
+        "official_split",
+        "available_scene_count",
+        "excluded_empty_scene_count",
+        "eligible_group_count",
+        "eligible_group_uid_digest",
+        "eligible_sample_count",
+        "eligible_sample_uid_digest",
+        "validation_fraction",
+        "training_sample_count",
+        "training_sample_uid_digest",
+        "validation_group_count",
+        "validation_group_uid_digest",
+        "validation_sample_count",
+        "validation_sample_uid_digest",
+        "validation_group_uids",
+    )
+    changed = [
+        field
+        for field in inherited_fields
+        if payload.get(field) != parent.get(field)
+    ]
+    if changed:
+        raise ValueError(
+            "repacked validation manifest changed inherited sample "
+            f"inventory fields: {changed}"
+        )
 
 
 def _validation_manifest_split_id(

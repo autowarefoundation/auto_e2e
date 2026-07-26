@@ -17,6 +17,11 @@ pytest.importorskip("webdataset")  # module imports webdataset at top level
 from PIL import Image
 
 from data_parsing.pre_extracted import _decode_sample, load_projection_from_manifest
+from navigation.artifacts import (
+    SAMPLE_NAVIGATION_ARTIFACT_VERSION,
+    encode_array,
+)
+from navigation.contracts import canonical_json_bytes
 
 
 def _jpeg_bytes(color):
@@ -27,6 +32,28 @@ def _jpeg_bytes(color):
 
 def _ego_bytes():
     return np.zeros(384, dtype=np.float32).tobytes()
+
+
+def _navigation_members(
+    *,
+    map_valid=True,
+    route_valid=True,
+    extra_metadata=None,
+):
+    map_context = np.zeros((14, 256, 256), dtype=np.float32)
+    map_context[0, 10:20, 10:20] = 0.25
+    route_mask = np.zeros((2, 256, 256), dtype=np.uint8)
+    route_mask[0, 12:18, 12:18] = 1
+    return {
+        "map_semantic.npz": encode_array(map_context),
+        "route_mask.npz": encode_array(route_mask),
+        "navigation_meta.json": canonical_json_bytes({
+            "schema_version": SAMPLE_NAVIGATION_ARTIFACT_VERSION,
+            "map_valid": map_valid,
+            "route_valid": route_valid,
+            **(extra_metadata or {}),
+        }),
+    }
 
 
 class TestDecodeSampleMapSplit:
@@ -46,7 +73,10 @@ class TestDecodeSampleMapSplit:
         out = _decode_sample(sample)
         assert out["visual_tiles"].shape == (6, 3, 256, 256), \
             "map.jpg leaked into visual_tiles"
-        assert out["map_input"].shape == (3, 256, 256)
+        assert out["map_context"].shape == (3, 256, 256)
+        assert out["route_mask"].shape == (2, 256, 256)
+        assert out["map_valid"]
+        assert not out["route_valid"]
 
     def test_cam_ordering_numeric_not_lexical(self):
         """cam_10 must sort after cam_2 (numeric), not before (lexical)."""
@@ -61,8 +91,61 @@ class TestDecodeSampleMapSplit:
         sample["ego.npy"] = _ego_bytes()
         out = _decode_sample(sample)
         assert out["visual_tiles"].shape[0] == 7
-        assert out["map_input"].shape == (3, 256, 256)
-        assert out["map_input"].abs().max() == 0.0
+        assert out["map_context"].shape == (3, 256, 256)
+        assert out["map_context"].abs().max() == 0.0
+        assert not out["map_valid"]
+        assert not out["route_valid"]
+
+    def test_semantic_navigation_is_lossless_and_not_rgb_normalized(self):
+        sample = {
+            "cam_0.jpg": _jpeg_bytes((0, 0, 0)),
+            "ego.npy": _ego_bytes(),
+            **_navigation_members(),
+        }
+
+        out = _decode_sample(sample)
+
+        assert out["map_context"].shape == (14, 256, 256)
+        assert out["map_context"].dtype == torch.float32
+        assert out["map_context"][0, 10, 10] == 0.25
+        assert out["route_mask"].dtype == torch.float32
+        assert out["route_mask"][0, 12, 12] == 1.0
+        assert out["map_valid"]
+        assert out["route_valid"]
+
+    def test_partial_navigation_member_set_is_rejected(self):
+        sample = {
+            "cam_0.jpg": _jpeg_bytes((0, 0, 0)),
+            "ego.npy": _ego_bytes(),
+            "map_semantic.npz": _navigation_members()["map_semantic.npz"],
+        }
+
+        with pytest.raises(ValueError, match="complete schema-v5 set"):
+            _decode_sample(sample)
+
+    def test_navigation_metadata_collates_with_sample_provenance(self):
+        decoded = []
+        for index in range(2):
+            sample = {
+                "cam_0.jpg": _jpeg_bytes((0, 0, 0)),
+                "ego.npy": _ego_bytes(),
+                **_navigation_members(extra_metadata={
+                    "route_id": f"route-{index}",
+                    "route_revision": index + 1,
+                    "input_vector_sha256": f"digest-{index}",
+                }),
+            }
+            decoded.append(_decode_sample(sample))
+
+        batch = torch.utils.data.default_collate(decoded)
+
+        metadata = batch["navigation_metadata"]
+        assert metadata["route_id"] == ["route-0", "route-1"]
+        assert metadata["route_revision"].tolist() == [1, 2]
+        assert metadata["input_vector_sha256"] == [
+            "digest-0",
+            "digest-1",
+        ]
 
     def test_shard_pixels_normalized_exactly_once(self):
         """The raw-frame -> JPEG -> loader path must apply ImageNet Normalize

@@ -32,7 +32,7 @@ UID_SCHEMA_VERSION = "v1"
 # Sample enumeration + per-sample field contract of the parsers
 # (_build_sample_index, egomotion extraction, WM window offsets). Bump if which
 # frames are valid, or the fields a sample carries, change.
-PARSER_VERSION = "v2"
+PARSER_VERSION = "v3"
 
 # Packed WebDataset shard member layout (cam_i.jpg / map.jpg / hist_*/fut_* /
 # ego.npy / meta.json / calib.json / reasoning.json). Bump if the member set,
@@ -44,12 +44,16 @@ PARSER_VERSION = "v2"
 # 64 future lat/lon points) for datasets with geospatial source fields.
 # v4: emits dataset-level geo paths, sample-pose parquet, and privacy-filtered
 # heatmaps for every GPS-capable parser, including KITScenes partitions.
-SHARD_SCHEMA_VERSION = "v4"
+# v5: KITScenes stores lossless semantic-map and selected-route tensors plus
+# scene-level canonical navigation vectors; it no longer stores map.jpg.
+SHARD_SCHEMA_VERSION = "v5"
 
 # Calibration / projection spec encoding and raster-map coordinate semantics.
 # v2 queries KITScenes maps in the scene-local pose frame and applies the map
 # origin exactly once when publishing absolute geographic coordinates.
-GEOMETRY_VERSION = "v2"
+# v3 aligns the semantic navigation raster and camera BEV to the audited
+# one-meter geometry with the existing rear-third ego anchor.
+GEOMETRY_VERSION = "v3"
 
 # Selection policy for the sparse reasoning-label subset. v2 adds the first
 # valid sample of every split group to the regular frame-index grid so even a

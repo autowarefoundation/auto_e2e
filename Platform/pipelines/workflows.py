@@ -55,6 +55,7 @@ DATA_PREP_IMAGE = _os.environ.get(
 
 MLFLOW_URI = "http://mlflow.mlflow.svc.cluster.local:5000"
 DATASET_PACK_VERSION = "v2.2"
+KITSCENES_NAVIGATION_DATASET_VERSION = "v3.0"
 L2D_SOURCE_REVISION = "main"
 KITSCENES_SOURCE_REVISION = "6fde0034446669e2ed7235e4c7fe323cd23d599d"
 
@@ -117,6 +118,7 @@ _CACHE_VERSIONS = _cache_versions_for_contracts(
 INGEST_CACHE_VERSION = _CACHE_VERSIONS["ingest"]
 LABEL_CACHE_VERSION = _CACHE_VERSIONS["label"]
 PACK_CACHE_VERSION = _CACHE_VERSIONS["pack"]
+NAVIGATION_QUALITY_CACHE_VERSION = "navigation-quality-v2"
 
 
 def _data_prep_pod_template():
@@ -304,6 +306,53 @@ def _loader_download_dir(shard) -> str:
     return str(shard.download())
 
 
+def _verified_navigation_training_shard_dirs(
+    shard_dirs: List[str],
+    manifests: dict[str, dict],
+    report: dict,
+) -> tuple[List[str], dict]:
+    """Verify the packed audit and select only policy-accepted partitions."""
+    from navigation.quality import (
+        verify_packed_navigation_quality_audit,
+    )
+
+    verified = verify_packed_navigation_quality_audit(
+        report,
+        shard_dirs,
+    )
+    path_by_partition = {}
+    for shard_dir in shard_dirs:
+        partition_id = manifests[shard_dir].get("partition_id")
+        if not isinstance(partition_id, str) or not partition_id:
+            raise ValueError(
+                "KITScenes navigation training requires partition IDs"
+            )
+        if partition_id in path_by_partition:
+            raise ValueError(
+                "KITScenes navigation training has duplicate partition ID "
+                f"{partition_id!r}"
+            )
+        path_by_partition[partition_id] = shard_dir
+
+    accepted = set(verified["accepted_partition_ids"])
+    excluded = set(verified["excluded_partition_ids"])
+    if accepted & excluded or accepted | excluded != set(
+        path_by_partition
+    ):
+        raise ValueError(
+            "navigation quality audit partition coverage differs from shards"
+        )
+    selected = [
+        path_by_partition[partition_id]
+        for partition_id in sorted(accepted)
+    ]
+    if not selected:
+        raise ValueError(
+            "navigation quality policy accepted no training partitions"
+        )
+    return selected, verified
+
+
 def _training_num_views_from_manifests(
     manifests: dict[str, dict],
     shard_dirs: List[str],
@@ -479,11 +528,57 @@ def _resume_terminal_state(
     return completed_epoch == requested_epochs or stopped_early, stopped_early
 
 
+def _collated_metadata_value(
+    metadata,
+    key: str,
+    sample_index: int,
+    default=None,
+):
+    """Read one scalar/string from PyTorch's recursively collated metadata."""
+    if not isinstance(metadata, dict) or key not in metadata:
+        return default
+    value = metadata[key]
+    if isinstance(value, (list, tuple)):
+        return value[sample_index]
+    if hasattr(value, "ndim") and getattr(value, "ndim", 0) > 0:
+        value = value[sample_index]
+    if hasattr(value, "item"):
+        return value.item()
+    return value
+
+
+def _stable_evaluation_noise(sample_uids, trajectory_width, dtype):
+    """Create a batch-order-independent planner prior for paired evaluation."""
+    import hashlib
+    import torch
+
+    noise = []
+    for sample_uid in sample_uids:
+        digest = hashlib.sha256(
+            f"auto-e2e-open-loop-noise-v1:{sample_uid}".encode("utf-8")
+        ).digest()
+        generator = torch.Generator(device="cpu")
+        generator.manual_seed(
+            int.from_bytes(digest[:8], "big") % (2**63 - 1)
+        )
+        noise.append(
+            torch.randn(
+                trajectory_width,
+                dtype=dtype,
+                generator=generator,
+            )
+        )
+    return torch.stack(noise)
+
+
 def _evaluate_open_loop(
     model,
     loader,
     device,
     training_policy=None,
+    navigation_geometry=None,
+    route_swap_counterfactual: bool = False,
+    include_navigation_records: bool = False,
 ) -> dict:
     """Evaluate one fixed loader and return finite ADE/FDE plus its UID digest."""
     import hashlib
@@ -500,6 +595,9 @@ def _evaluate_open_loop(
     all_ade: list[float] = []
     all_fde: list[float] = []
     sample_uids: list[str] = []
+    navigation_records: list[dict] = []
+    route_swap_records: list[dict] = []
+    route_cache: dict[str, dict] = {}
     model.eval()
     try:
         with torch.no_grad():
@@ -519,7 +617,35 @@ def _evaluate_open_loop(
                     )
                 vis_hist = batch["visual_history"].to(device)
                 target = batch["trajectory_target"]
-                map_input = batch["map_input"].to(device)
+                raw_map_context = batch["map_context"]
+                raw_route_mask = batch["route_mask"]
+                map_context = raw_map_context.to(device)
+                route_mask = raw_route_mask.to(device)
+                map_valid = batch["map_valid"].to(device)
+                route_valid = batch["route_valid"].to(device)
+                batch_uids = batch.get("sample_uid", [])
+                if isinstance(batch_uids, str):
+                    batch_uids = [batch_uids]
+                batch_uids = [str(uid) for uid in batch_uids]
+                if len(batch_uids) != visual.shape[0]:
+                    raise ValueError(
+                        "evaluation batch lost sample identities: "
+                        f"samples={visual.shape[0]} "
+                        f"sample_uids={len(batch_uids)}"
+                    )
+                if any(not uid for uid in batch_uids):
+                    raise ValueError(
+                        "evaluation batch contains an empty sample UID"
+                    )
+                initial_noise = _stable_evaluation_noise(
+                    batch_uids,
+                    int(target.shape[-1]),
+                    visual.dtype,
+                ).to(device)
+                navigation_metadata = batch.get(
+                    "navigation_metadata",
+                    {},
+                )
                 history_frames = batch.get("history_frames")
                 future_frames = batch.get("future_frames")
                 if history_frames is not None:
@@ -529,21 +655,100 @@ def _evaluate_open_loop(
 
                 pred = model(
                     visual,
-                    map_input,
+                    map_context,
                     vis_hist,
                     ego_hist,
+                    route_mask=route_mask,
+                    map_valid=map_valid,
+                    route_valid=route_valid,
                     projection=projection,
                     geometry_type=geometry_type,
                     history_frames=history_frames,
                     future_frames=future_frames,
                     mode="infer",
+                    initial_noise=initial_noise,
                 )
                 pred_np = pred.cpu().numpy()
                 target_np = target.numpy()
-                batch_uids = batch.get("sample_uid", [])
-                if isinstance(batch_uids, str):
-                    batch_uids = [batch_uids]
+                if len(batch_uids) != pred_np.shape[0]:
+                    raise ValueError(
+                        "evaluation batch lost sample identities: "
+                        f"samples={pred_np.shape[0]} "
+                        f"sample_uids={len(batch_uids)}"
+                    )
                 sample_uids.extend(str(uid) for uid in batch_uids)
+
+                swapped_pred_np = None
+                swapped_indices: set[int] = set()
+                swapped_route_entries: dict[int, dict] = {}
+                if (
+                    navigation_geometry is not None
+                    and route_swap_counterfactual
+                ):
+                    swapped_route_mask = raw_route_mask.clone()
+                    swapped_route_valid = batch["route_valid"].clone()
+                    for sample_index in range(pred_np.shape[0]):
+                        route_id = str(
+                            _collated_metadata_value(
+                                navigation_metadata,
+                                "route_id",
+                                sample_index,
+                                "",
+                            )
+                        )
+                        selected_maneuver = str(
+                            _collated_metadata_value(
+                                navigation_metadata,
+                                "route_maneuver",
+                                sample_index,
+                                "unknown",
+                            )
+                        )
+                        candidates = sorted(
+                            (
+                                candidate_id
+                                for candidate_id in route_cache
+                                if candidate_id != route_id
+                            ),
+                            key=lambda candidate_id: (
+                                route_cache[candidate_id]["maneuver"]
+                                == selected_maneuver,
+                                route_cache[candidate_id]["maneuver"]
+                                not in ("left", "right", "straight"),
+                                candidate_id,
+                            ),
+                        )
+                        if (
+                            bool(route_valid[sample_index].item())
+                            and route_id
+                            and candidates
+                        ):
+                            candidate = route_cache[candidates[0]]
+                            swapped_route_mask[sample_index] = (
+                                candidate["mask"]
+                            )
+                            swapped_route_valid[sample_index] = True
+                            swapped_indices.add(sample_index)
+                            swapped_route_entries[sample_index] = candidate
+                    if swapped_indices:
+                        if hasattr(model, "reset_visual_history"):
+                            model.reset_visual_history()
+                        swapped_pred = model(
+                            visual,
+                            map_context,
+                            vis_hist,
+                            ego_hist,
+                            route_mask=swapped_route_mask.to(device),
+                            map_valid=map_valid,
+                            route_valid=swapped_route_valid.to(device),
+                            projection=projection,
+                            geometry_type=geometry_type,
+                            history_frames=history_frames,
+                            future_frames=future_frames,
+                            mode="infer",
+                            initial_noise=initial_noise,
+                        )
+                        swapped_pred_np = swapped_pred.cpu().numpy()
 
                 for sample_index in range(pred_np.shape[0]):
                     pred_signals = pred_np[sample_index].reshape(
@@ -567,6 +772,115 @@ def _evaluate_open_loop(
                     )
                     all_ade.append(float(errors.mean()))
                     all_fde.append(float(errors[-1]))
+                    if navigation_geometry is not None:
+                        from evaluation.navigation_metrics import (
+                            ROUTE_QUALITY_FIELDS,
+                            navigation_sample_metrics,
+                            route_swap_sample_metrics,
+                        )
+
+                        metadata = {
+                            key: _collated_metadata_value(
+                                navigation_metadata,
+                                key,
+                                sample_index,
+                                default,
+                            )
+                            for key, default in (
+                                ("route_id", ""),
+                                ("route_maneuver", "unknown"),
+                                ("route_intersection", False),
+                                ("destination_visible", False),
+                            )
+                        }
+                        for key in ROUTE_QUALITY_FIELDS:
+                            metadata[key] = _collated_metadata_value(
+                                navigation_metadata,
+                                key,
+                                sample_index,
+                                float("nan"),
+                            )
+                        navigation_record = navigation_sample_metrics(
+                            pred_traj,
+                            target_traj,
+                            raw_route_mask[sample_index].numpy(),
+                            raw_map_context[sample_index].numpy(),
+                            route_valid=bool(
+                                route_valid[sample_index].item()
+                            ),
+                            metadata=metadata,
+                            geometry=navigation_geometry,
+                        )
+                        navigation_record["sample_uid"] = str(
+                            batch_uids[sample_index]
+                        )
+                        navigation_records.append(navigation_record)
+                        if (
+                            swapped_pred_np is not None
+                            and sample_index in swapped_indices
+                        ):
+                            swapped_signals = swapped_pred_np[
+                                sample_index
+                            ].reshape(AUTO_E2E_TIMESTEPS, 2)
+                            swapped_traj = integrate_trajectory(
+                                swapped_signals[:, 0],
+                                swapped_signals[:, 1],
+                                v0,
+                            )
+                            swapped_entry = swapped_route_entries[
+                                sample_index
+                            ]
+                            route_swap_records.append(
+                                route_swap_sample_metrics(
+                                    pred_traj,
+                                    swapped_traj,
+                                    raw_route_mask[
+                                        sample_index
+                                    ].numpy(),
+                                    swapped_route_mask=swapped_entry[
+                                        "mask"
+                                    ].numpy(),
+                                    selected_maneuver=str(
+                                        metadata["route_maneuver"]
+                                    ),
+                                    swapped_maneuver=str(
+                                        swapped_entry["maneuver"]
+                                    ),
+                                    geometry=navigation_geometry,
+                                )
+                            )
+
+                if navigation_geometry is not None:
+                    for sample_index in range(pred_np.shape[0]):
+                        if not bool(route_valid[sample_index].item()):
+                            continue
+                        route_id = str(
+                            _collated_metadata_value(
+                                navigation_metadata,
+                                "route_id",
+                                sample_index,
+                                "",
+                            )
+                        )
+                        if route_id:
+                            route_cache[route_id] = {
+                                "mask": (
+                                    raw_route_mask[sample_index]
+                                    .detach()
+                                    .cpu()
+                                    .clone()
+                                ),
+                                "maneuver": str(
+                                    _collated_metadata_value(
+                                        navigation_metadata,
+                                        "route_maneuver",
+                                        sample_index,
+                                        "unknown",
+                                    )
+                                ),
+                            }
+                    while len(route_cache) > 8:
+                        route_cache.pop(next(iter(route_cache)))
     finally:
         model.train(was_training)
         if hasattr(model, "reset_visual_history"):
@@ -588,13 +902,29 @@ def _evaluate_open_loop(
     uid_digest = hashlib.sha256(
         "\n".join(sorted(sample_uids)).encode("utf-8")
     ).hexdigest()
-    return {
+    result = {
         "ade": ade,
         "fde": fde,
         "evaluation_steps": AUTO_E2E_TIMESTEPS,
         "sample_count": len(all_ade),
         "sample_uid_digest": uid_digest,
     }
+    if navigation_geometry is not None:
+        from evaluation.navigation_metrics import (
+            summarize_navigation_metrics,
+        )
+
+        if len(navigation_records) != len(all_ade):
+            raise ValueError(
+                "navigation metric coverage differs from displacement metrics"
+            )
+        result["navigation"] = summarize_navigation_metrics(
+            navigation_records,
+            route_swap_records=route_swap_records,
+        )
+        if include_navigation_records:
+            result["navigation_records"] = navigation_records
+    return result
 
 
 def _register_checkpoint_version(
@@ -1317,6 +1647,7 @@ def data_processing(
                 scene_ids=ep_list,
                 image_size=image_size,
                 include_world_model_windows=world_model,
+                include_navigation=False,
             )
         else:
             from data_parsing.l2d import L2DDataset
@@ -1491,8 +1822,13 @@ def data_processing(
     num_views = 0
     has_map = False
     has_wm = False
+    navigation_artifact_summary = None
 
-    if world_model and dataset != Dataset.NVIDIA_PHYSICAL_AI and idx_list:
+    if (
+        dataset != Dataset.NVIDIA_PHYSICAL_AI
+        and idx_list
+        and (world_model or dataset == Dataset.KITSCENES)
+    ):
         # ── DECODE-DEDUP path: decode each UNIQUE physical row once ──
         # (#121 §3.4d) Previous approach decoded all 48 window frames per sample
         # (6 workers × ~8 sample overlap = ~8x redundant decode). This two-pass
@@ -1503,8 +1839,8 @@ def data_processing(
         #
         # Pass B: assemble each sample's members (window_index, ego, meta, calib,
         # reasoning JOIN) from the pool — zero video decode.
-        print(f"Packing {len(idx_list)} samples, decode-dedup mode "
-              f"(row-level workers, world_model=True)...")
+        print(f"Packing {len(idx_list)} samples, parent-assembly mode "
+              f"(row-level camera workers, world_model={world_model})...")
         row_init = (dataset.value, ep_list, raw_path, image_size)
 
         # Pass A: unique rows. ds is still alive here (not yet deleted).
@@ -1525,17 +1861,16 @@ def data_processing(
                 current_row = (ep_idx_s, row_s - ep_start_s)
             sample_cur_rows[si] = current_row
             all_rows.add(current_row)
-            # window_rows raises IndexError only if the margin invariant is
-            # broken — let it propagate (fail-loud on invariant violation).
-            for row_t in ds.window_rows(si):
-                all_rows.add(row_t)
+            if world_model:
+                # window_rows raises only if the margin invariant is broken.
+                for row_t in ds.window_rows(si):
+                    all_rows.add(row_t)
 
         del ds  # free before spawning workers
 
-        # row_map: (group_id, frame) -> {frame_id: blob} per cam + map_jpeg.
-        # Only current rows need a map tile; history/future windows contain
-        # camera pixels only. This is particularly important for KITScenes,
-        # where every map tile runs a Lanelet2 query and rasterization.
+        # row_map contains camera JPEGs and an optional legacy map JPEG. KITScenes
+        # navigation is generated once in the parent assembly below, never in a
+        # camera worker.
         row_map: dict = {}
         row_workers = _row_decode_worker_count(dataset, len(all_rows))
         current_rows = set(sample_cur_rows.values())
@@ -1546,12 +1881,12 @@ def data_processing(
         with ProcessPoolExecutor(max_workers=row_workers, mp_context=ctx,
                                  initializer=parallel_pack.init_row_worker,
                                  initargs=row_init) as rpool:
-            for row_key, cam_jpegs, map_jpeg in rpool.map(
+            for row_key, cam_jpegs, legacy_map in rpool.map(
                     parallel_pack.decode_row, decode_tasks):
-                row_map[row_key] = (cam_jpegs, map_jpeg)
+                row_map[row_key] = (cam_jpegs, legacy_map)
                 for fid, blob in cam_jpegs.items():
                     _write_pool(fid, blob)
-                if map_jpeg is not None:
+                if dataset != Dataset.KITSCENES and legacy_map is not None:
                     has_map = True
         num_views = len(next(iter(row_map.values()))[0]) if row_map else 0
         print(f"Frame pool: {pool_frames_written} unique frames decoded "
@@ -1569,6 +1904,8 @@ def data_processing(
                 scene_ids=ep_list,
                 image_size=image_size,
                 include_world_model_windows=False,
+                include_navigation=True,
+                source_revision=source_revision,
             )
         else:
             from data_parsing.l2d import L2DDataset
@@ -1579,6 +1916,37 @@ def data_processing(
                 root=raw_path,
             )
 
+        if dataset == Dataset.KITSCENES:
+            import hashlib
+
+            artifact_records = []
+            scene_artifacts = ds_asm.scene_navigation_artifacts()
+            for scene_id, artifacts in sorted(scene_artifacts.items()):
+                destination = (
+                    out_dir
+                    if len(scene_artifacts) == 1
+                    else os.path.join(out_dir, "navigation", scene_id)
+                )
+                os.makedirs(destination, exist_ok=True)
+                hashes = {}
+                for filename, blob in sorted(artifacts.items()):
+                    with open(os.path.join(destination, filename), "wb") as f:
+                        f.write(blob)
+                    hashes[filename] = hashlib.sha256(blob).hexdigest()
+                quality = json.loads(artifacts["navigation_quality.json"])
+                artifact_records.append({
+                    "scene_id": scene_id,
+                    "path": os.path.relpath(destination, out_dir),
+                    "hashes": hashes,
+                    "route_valid": bool(quality["route_valid"]),
+                    "route_confidence": float(quality["route_confidence"]),
+                    "geometry_id": quality["geometry_id"],
+                })
+            navigation_artifact_summary = {
+                "schema_version": "scene_navigation_v1",
+                "scenes": artifact_records,
+            }
+
         for si in idx_list:
             if sample_count % samples_per_shard == 0:
                 open_new_shard()
@@ -1587,26 +1955,29 @@ def data_processing(
             from data_processing.dataset_snapshot import split_bucket
             members: dict = {}
 
-            # window_index — pool frame_ids, no decode.
-            try:
+            if world_model:
+                # window_index contains pool frame IDs, never future navigation.
                 ids = ds_asm.window_frame_ids(si)
                 members["window_index.json"] = json.dumps(ids).encode()
                 has_wm = True
-            except (IndexError, AttributeError):
-                pass
 
             # cam_*.jpg = current frame (offset 0). The current-frame bytes are in
             # row_map[(ep_idx, cur_fi)][0] — the same jpegs already written to pool.
             cur_key = sample_cur_rows.get(si)
             if cur_key and cur_key in row_map:
-                cur_cams, cur_map = row_map[cur_key]
+                cur_cams, legacy_map = row_map[cur_key]
                 # cam_cams is {frame_id: bytes}; sort by cam index embedded in fid.
                 for fid, blob in sorted(cur_cams.items(),
                                         key=lambda kv: int(kv[0].rsplit("-c", 1)[-1])):
                     cam_i = int(fid.rsplit("-c", 1)[-1])
                     members[f"cam_{cam_i}.jpg"] = blob
-                if cur_map is not None:
-                    members["map.jpg"] = cur_map
+                if dataset == Dataset.KITSCENES:
+                    members.update(
+                        ds_asm.navigation_members_for_row(*cur_key)
+                    )
+                    has_map = True
+                elif legacy_map is not None:
+                    members["map.jpg"] = legacy_map
 
             # ego + meta + calib (no video decode).
             ego_hist, traj, pose_current, gps_future = ds_asm.numeric_for(si)
@@ -1660,7 +2031,10 @@ def data_processing(
                 for frame_id, blob in frame_pool.items():
                     _write_pool(frame_id, blob)
                 num_views = nviews
-                has_map = has_map or ("map.jpg" in members)
+                has_map = has_map or (
+                    "map.jpg" in members
+                    or "map_semantic.npz" in members
+                )
                 has_wm = has_wm or ("window_index.json" in members)
                 if _record_to_json is not None:
                     record = labels_by_id.get(sample_key)
@@ -1699,6 +2073,7 @@ def data_processing(
         GPS_SCHEMA_VERSION,
         POSE_SCHEMA_VERSION,
     )
+    from navigation.geometry import DEFAULT_NAVIGATION_GEOMETRY
 
     manifest = {"total_samples": sample_count, "shards": shard_idx,
                 "shard_names": shard_names,
@@ -1712,6 +2087,20 @@ def data_processing(
                 # separate map.jpg key and is NOT counted here (#77).
                 "num_views": num_views if sample_count else 0,
                 "has_map": bool(sample_count) and has_map,
+                "has_navigation": (
+                    bool(sample_count)
+                    and navigation_artifact_summary is not None
+                ),
+                "navigation": navigation_artifact_summary,
+                "navigation_geometry": (
+                    DEFAULT_NAVIGATION_GEOMETRY.contract()
+                    if navigation_artifact_summary is not None
+                    else None
+                ),
+                "map_context_channels": (
+                    14 if navigation_artifact_summary is not None else 3
+                ),
+                "route_channels": 2,
                 # World-Model windows present when packed (enables JEPA training).
                 "has_world_model": bool(sample_count) and has_wm,
                 "has_reasoning_labels": reasoning_label_count > 0,
@@ -1742,6 +2131,109 @@ def data_processing(
 
     print(f"Processed {dataset.value}: {sample_count} samples → {shard_idx} shards")
     return FlyteDirectory(out_dir)
+
+
+# ============================================================
+# Task: KITScenes navigation quality audit
+# ============================================================
+@task(
+    container_image=DATA_PREP_IMAGE,
+    pod_template=_data_prep_pod_template(),
+    requests=Resources(cpu="1", mem="2Gi", ephemeral_storage="2Gi"),
+    limits=Resources(cpu="1", mem="2Gi", ephemeral_storage="2Gi"),
+    cache=True,
+    cache_version=NAVIGATION_QUALITY_CACHE_VERSION,
+)
+def audit_kitscenes_navigation_quality(
+    shards: List[FlyteDirectory],
+) -> FlyteFile:
+    """Create a hash-bound route-quality gate before KITScenes training."""
+    import json
+    import os
+    import shutil
+    import tempfile
+    from pathlib import Path, PurePosixPath
+
+    from navigation.quality import audit_packed_navigation_quality
+
+    view_root = Path(tempfile.mkdtemp(prefix="navigation-quality-input-"))
+    shard_dirs = []
+    for index, shard in enumerate(shards):
+        remote_source = str(getattr(shard, "remote_source", "") or "")
+        if "://" not in remote_source:
+            shard_dirs.append(_loader_download_dir(shard))
+            continue
+
+        destination = view_root / f"partition-{index:06d}"
+        destination.mkdir()
+        base_uri = remote_source.rstrip("/")
+        manifest_source = FlyteFile(
+            f"{base_uri}/manifest.json"
+        ).download()
+        manifest_path = destination / "manifest.json"
+        shutil.copyfile(manifest_source, manifest_path)
+        with manifest_path.open(encoding="utf-8") as stream:
+            manifest = json.load(stream)
+        if int(manifest.get("total_samples", 0)) > 0:
+            scenes = (manifest.get("navigation") or {}).get("scenes")
+            if not isinstance(scenes, list) or not scenes:
+                raise ValueError(
+                    "packed partition has no navigation scenes"
+                )
+            for scene in scenes:
+                relative = PurePosixPath(str(scene.get("path", "")))
+                if relative.is_absolute() or ".." in relative.parts:
+                    raise ValueError(
+                        "navigation quality path escapes packed partition"
+                    )
+                relative_parts = [
+                    part for part in relative.parts if part != "."
+                ]
+                remote_parts = [
+                    base_uri,
+                    *relative_parts,
+                    "navigation_quality.json",
+                ]
+                quality_source = FlyteFile(
+                    "/".join(remote_parts)
+                ).download()
+                quality_destination = destination.joinpath(
+                    *relative_parts,
+                    "navigation_quality.json",
+                )
+                quality_destination.parent.mkdir(
+                    parents=True,
+                    exist_ok=True,
+                )
+                shutil.copyfile(
+                    quality_source,
+                    quality_destination,
+                )
+        shard_dirs.append(str(destination))
+
+    report = audit_packed_navigation_quality(shard_dirs)
+    output_dir = tempfile.mkdtemp(prefix="navigation-quality-")
+    output_path = os.path.join(
+        output_dir,
+        "navigation_quality_audit.json",
+    )
+    with open(output_path, "w", encoding="ascii") as stream:
+        json.dump(
+            report,
+            stream,
+            allow_nan=False,
+            ensure_ascii=True,
+            indent=2,
+            sort_keys=True,
+        )
+        stream.write("\n")
+    print(
+        "KITScenes navigation quality: "
+        f"accepted={report['accepted_scene_count']} "
+        f"excluded={report['excluded_scene_count']} "
+        f"report={output_path}"
+    )
+    return FlyteFile(output_path)
 
 
 # ============================================================
@@ -2074,6 +2566,7 @@ def train_il(
     # window start, step once at the window end. Default 1 = plain per-batch step.
     grad_accum_steps: int = 1,
     lr: float = 1e-4,
+    training_seed: int = 149,
     weight_decay: float = 1e-2,
     grad_clip: float = 1.0,
     # AMP off by default: with fp16 autocast the GradScaler detected inf/nan grads
@@ -2083,6 +2576,8 @@ def train_il(
     # step (verified: control_head grad norm ~6.6, loss 6.30->5.00). Keep fp32
     # until the specific overflow op is isolated and kept in fp32 explicitly.
     amp: bool = False,
+    enable_route_conditioning: bool = True,
+    navigation_quality_audit: Optional[FlyteFile] = None,
     enable_reasoning: bool = False,
     reasoning_mode: str = "pooled_latent",
     # Small default: the reasoning branch is zero-init coupled (alpha=0), so it
@@ -2135,9 +2630,15 @@ def train_il(
     the prediction against the frozen target on the real future frames. The WM
     also supplies the Encoded Visual History to the planner and reasoning branch
     (otherwise visual_history is zeros).
+
+    KITScenes requires the hash-bound output of
+    ``audit_kitscenes_navigation_quality``. The frozen validation inventory is
+    checked against every packed scene, while optimizer batches include only
+    policy-accepted scene partitions.
     """
     import os
     import json
+    import random
     import torch
     import numpy as np
     import mlflow
@@ -2154,6 +2655,18 @@ def train_il(
         )
     if epochs <= 0:
         raise ValueError(f"epochs must be positive, got {epochs}")
+    if not 0 <= training_seed <= 2**32 - 1:
+        raise ValueError(
+            "training_seed must be between 0 and 2**32 - 1"
+        )
+
+    random.seed(training_seed)
+    np.random.seed(training_seed)
+    torch.manual_seed(training_seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(training_seed)
+    torch.backends.cudnn.benchmark = False
+    torch.backends.cudnn.deterministic = True
 
     # DataLoader workers (num_workers>0) transport batches to the parent via shared
     # memory (/dev/shm) by default; the Flyte pod's /dev/shm is tiny (~64MB), so
@@ -2255,8 +2768,81 @@ def train_il(
         )
     )
     num_views = _training_num_views_from_manifests(manifests, shard_dirs)
+    map_context_channel_counts = {
+        int(manifests[path].get("map_context_channels", 3))
+        for path in shard_dirs
+    }
+    route_channel_counts = {
+        int(manifests[path].get("route_channels", 2))
+        for path in shard_dirs
+    }
+    if len(map_context_channel_counts) != 1:
+        raise ValueError(
+            "one training run cannot mix map-context channel contracts: "
+            f"{sorted(map_context_channel_counts)}"
+        )
+    if len(route_channel_counts) != 1:
+        raise ValueError(
+            "one training run cannot mix route channel contracts: "
+            f"{sorted(route_channel_counts)}"
+        )
+    map_context_channels = next(iter(map_context_channel_counts))
+    route_channels = next(iter(route_channel_counts))
+    navigation_geometry_id = None
+    view_fusion_kwargs = None
+    if dataset == Dataset.KITSCENES:
+        from navigation.geometry import DEFAULT_NAVIGATION_GEOMETRY
+
+        expected_geometry = DEFAULT_NAVIGATION_GEOMETRY.contract()
+        mismatched_geometry = [
+            path
+            for path in shard_dirs
+            if manifests[path].get("navigation_geometry")
+            != expected_geometry
+        ]
+        if mismatched_geometry:
+            raise ValueError(
+                "KITScenes navigation geometry differs from the model "
+                f"contract in shards: {mismatched_geometry[:3]}"
+            )
+        navigation_geometry_id = DEFAULT_NAVIGATION_GEOMETRY.geometry_id
+        view_fusion_kwargs = (
+            DEFAULT_NAVIGATION_GEOMETRY.camera_bev_kwargs()
+        )
 
     from Platform.pipelines.training_checkpoint import stable_digest
+
+    navigation_quality_report = None
+    navigation_quality_audit_sha256 = None
+    training_shard_dirs = list(shard_dirs)
+    if dataset == Dataset.KITSCENES:
+        if navigation_quality_audit is None:
+            raise ValueError(
+                "KITScenes training requires a navigation quality audit"
+            )
+        audit_path = navigation_quality_audit.download()
+        try:
+            with open(audit_path, encoding="ascii") as stream:
+                supplied_audit = json.load(stream)
+        except (OSError, UnicodeError, ValueError) as error:
+            raise ValueError(
+                "could not read the KITScenes navigation quality audit"
+            ) from error
+        (
+            training_shard_dirs,
+            navigation_quality_report,
+        ) = _verified_navigation_training_shard_dirs(
+            shard_dirs,
+            manifests,
+            supplied_audit,
+        )
+        navigation_quality_audit_sha256 = stable_digest(
+            navigation_quality_report
+        )
+    elif navigation_quality_audit is not None:
+        raise ValueError(
+            "navigation quality audits are supported only for KITScenes"
+        )
 
     contract_digests = {
         stable_digest(manifest.get("contracts"))
@@ -2286,6 +2872,12 @@ def train_il(
             "shard_names": list(manifest.get("shard_names", [])),
             "contracts": manifest.get("contracts"),
             "num_views": int(manifest.get("num_views", 0)),
+            "map_context_channels": int(
+                manifest.get("map_context_channels", 3)
+            ),
+            "route_channels": int(manifest.get("route_channels", 2)),
+            "navigation": manifest.get("navigation"),
+            "navigation_geometry": manifest.get("navigation_geometry"),
             "has_world_model": bool(
                 manifest.get("has_world_model", False)
             ),
@@ -2404,6 +2996,14 @@ def train_il(
     data_fingerprint = stable_digest({
         "partitions": data_identity,
         "coverage": data_coverage,
+        "navigation_quality_audit_sha256": (
+            navigation_quality_audit_sha256
+        ),
+        "training_partition_ids": (
+            navigation_quality_report["accepted_partition_ids"]
+            if navigation_quality_report is not None
+            else None
+        ),
     })
     validation_split_contract = {
         "strategy": training_policy.validation_strategy,
@@ -2448,10 +3048,13 @@ def train_il(
         prefetch_factor=1,
         decode_future_frames=False,
     )
-    print(f"Merged {len(shard_dirs)} non-empty partition(s) into one training stream "
-          f"(skipped_empty={skipped_empty}, split=train, "
-          f"val_fraction={val_fraction}, num_workers={num_workers}, "
-          f"num_views={num_views}, data_fingerprint={data_fingerprint}).")
+    print(
+        f"Selected {len(training_shard_dirs)}/{len(shard_dirs)} non-empty "
+        "partition(s) for the optimizer "
+        f"(skipped_empty={skipped_empty}, split=train, "
+        f"val_fraction={val_fraction}, num_workers={num_workers}, "
+        f"num_views={num_views}, data_fingerprint={data_fingerprint})."
+    )
     print(
         "Validation split: "
         f"strategy={training_policy.validation_strategy} "
@@ -2465,8 +3068,20 @@ def train_il(
     # random first batch cannot distinguish an intentionally unlabeled sample
     # from a wholly unsupervised shard. The pack manifest records the exact join
     # count; validate that deterministic aggregate instead.
-    total_reasoning_labels = 0
     for d in shard_dirs:
+        manifest = manifests[d]
+        dname = manifest.get("dataset", d)
+        if (
+            dataset == Dataset.KITSCENES
+            and not manifest.get("has_navigation", False)
+        ):
+            raise ValueError(
+                f"KITScenes shard '{dname}' ({d}) has no schema-v5 "
+                "navigation artifacts"
+            )
+
+    total_reasoning_labels = 0
+    for d in training_shard_dirs:
         manifest = manifests[d]
         dname = manifest.get("dataset", d)
         if enable_world_model and not manifest.get("has_world_model", False):
@@ -2493,14 +3108,18 @@ def train_il(
     if enable_reasoning:
         print(
             f"Reasoning supervision: {total_reasoning_labels} joined labels "
-            f"across {len(shard_dirs)} non-empty partitions"
+            f"across {len(training_shard_dirs)} accepted partitions"
         )
 
-    # Model. fusion_mode is gone (BEV hardcoded inside ReactiveE2E); the model
-    # now also owns the map branch, so its forward requires a map_input tensor.
+    # Route is fused only through the Reactive navigation encoder. Reasoning
+    # receives no route-derived argument.
     model = AutoE2E(
         backbone=bb, num_views=num_views, embed_dim=256,
         is_pretrained=True,
+        view_fusion_kwargs=view_fusion_kwargs,
+        map_context_channels=map_context_channels,
+        route_channels=route_channels,
+        enable_route_conditioning=enable_route_conditioning,
         enable_reasoning=enable_reasoning, reasoning_mode=reasoning_mode,
         enable_world_model=enable_world_model,
     ).to(device)
@@ -2550,6 +3169,14 @@ def train_il(
         "backbone": bb,
         "embed_dim": 256,
         "num_views": num_views,
+        "view_fusion_kwargs": view_fusion_kwargs,
+        "navigation_geometry_id": navigation_geometry_id,
+        "map_context_channels": map_context_channels,
+        "route_channels": route_channels,
+        "enable_route_conditioning": enable_route_conditioning,
+        "navigation_quality_audit_sha256": (
+            navigation_quality_audit_sha256
+        ),
         # Checkpoints contain the complete backbone. Reconstruction must not
         # download pretrained weights before loading that state.
         "is_pretrained": False,
@@ -2558,6 +3185,7 @@ def train_il(
         "enable_world_model": enable_world_model,
         "optimizer": "AdamW",
         "lr": lr,
+        "training_seed": training_seed,
         "weight_decay": weight_decay,
         "grad_clip": grad_clip,
         "amp": amp,
@@ -2708,16 +3336,35 @@ def train_il(
                 "data/dataset": dataset.value,
                 "data/dataset_version": dataset_version,
                 "data/fingerprint": data_fingerprint,
+                "data/navigation_quality_audit_sha256": (
+                    navigation_quality_audit_sha256 or "none"
+                ),
+                "data/training_partition_count": len(
+                    training_shard_dirs
+                ),
                 "model/backbone": bb,
                 "model/fusion_mode": fm,
                 "model/num_views": num_views,
+                "model/navigation_geometry_id": (
+                    navigation_geometry_id or "legacy"
+                ),
+                "model/enable_route_conditioning": (
+                    enable_route_conditioning
+                ),
                 "train/batch_size": batch_size,
                 "train/grad_accum_steps": grad_accum_steps,
                 "train/num_workers": num_workers,
                 "train/epochs": epochs,
                 "train/lr": lr,
+                "train/seed": training_seed,
                 "train/weight_decay": weight_decay,
                 "train/amp": amp,
+                "train/cudnn_benchmark": (
+                    torch.backends.cudnn.benchmark
+                ),
+                "train/cudnn_deterministic": (
+                    torch.backends.cudnn.deterministic
+                ),
                 "train/acceleration_signal_scale": (
                     training_policy.signal_scales[0]
                 ),
@@ -2756,7 +3403,68 @@ def train_il(
     ]
 
     _proj_cache = _ProjectionDeviceCache(device)
-    _first_step = not resumed
+    optimizer_step_count = 0
+    route_valid_sample_count = 0
+    route_sample_count = 0
+    gradient_evidence = {
+        "first_step": None,
+        "navigation_encoder_first_nonzero_step": None,
+        "route_input_first_nonzero_step": None,
+    }
+    optimizer_probe_name, optimizer_probe_parameter = next(
+        (name, parameter)
+        for name, parameter in model.named_parameters()
+        if parameter.requires_grad and "TrajectoryPlanner" in name
+    )
+    optimizer_probe_before = optimizer_probe_parameter.detach().clone()
+
+    def _branch_gradient_norm(name_fragment):
+        total, count = 0.0, 0
+        for parameter_name, parameter in model.named_parameters():
+            if (
+                name_fragment in parameter_name
+                and parameter.grad is not None
+            ):
+                total += float(parameter.grad.norm().item()) ** 2
+                count += 1
+        return {"norm": total ** 0.5, "parameter_count": count}
+
+    def _observe_gradient_flow(step_number):
+        planner = _branch_gradient_norm("TrajectoryPlanner")
+        navigation_fusion = _branch_gradient_norm("MapBEVFusion")
+        navigation_encoder = _branch_gradient_norm("NavigationEncoder")
+        if gradient_evidence["first_step"] is None:
+            first = {
+                "optimizer_step": step_number,
+                "planner": planner,
+                "navigation_fusion": navigation_fusion,
+                "navigation_encoder": navigation_encoder,
+            }
+            if enable_world_model:
+                first["world_model"] = _branch_gradient_norm(
+                    "World_Action_Model"
+                )
+            if enable_reasoning:
+                first["reasoning"] = _branch_gradient_norm("Reasoning")
+            gradient_evidence["first_step"] = first
+            print(f"grad-flow probe: {first}")
+        if (
+            navigation_encoder["norm"] > 0.0
+            and gradient_evidence[
+                "navigation_encoder_first_nonzero_step"
+            ] is None
+        ):
+            gradient_evidence[
+                "navigation_encoder_first_nonzero_step"
+            ] = {
+                "optimizer_step": step_number,
+                **navigation_encoder,
+            }
+            print(
+                "navigation encoder gradient became non-zero: "
+                f"{gradient_evidence['navigation_encoder_first_nonzero_step']}"
+            )
+
     accum = max(1, int(grad_accum_steps))
     if accum > 1:
         print(f"Gradient accumulation: {accum} micro-batches "
@@ -2767,7 +3475,7 @@ def train_il(
     )
     for epoch in epoch_range:
         merged = make_multi_dataset_loader(
-            shard_dirs,
+            training_shard_dirs,
             batch_size=batch_size,
             num_workers=num_workers,
             pin_memory=(device.type == "cuda"),
@@ -2792,7 +3500,21 @@ def train_il(
             )
             vis_hist = batch["visual_history"].to(device)     # (B, 896)
             target = batch["trajectory_target"].to(device)    # (B, 128)
-            map_input = batch["map_input"].to(device)
+            map_context = batch["map_context"].to(device)
+            route_mask = batch["route_mask"].to(device)
+            map_valid = batch["map_valid"].to(device)
+            route_valid = batch["route_valid"].to(device)
+            route_valid_sample_count += int(route_valid.sum().item())
+            route_sample_count += int(route_valid.numel())
+            probe_route_gradient = (
+                enable_route_conditioning
+                and gradient_evidence[
+                    "route_input_first_nonzero_step"
+                ] is None
+                and bool(route_valid.any().item())
+            )
+            if probe_route_gradient:
+                route_mask = route_mask.detach().requires_grad_(True)
 
             # A weak object-key cache cannot alias a newly opened scene when
             # Python reuses the identity of a projection from a retired loader.
@@ -2812,7 +3534,10 @@ def train_il(
             if micro_idx == 0:
                 optimizer.zero_grad()
             with torch.amp.autocast("cuda", enabled=amp):
-                out = model(visual, map_input, vis_hist, ego_hist,
+                out = model(visual, map_context, vis_hist, ego_hist,
+                            route_mask=route_mask,
+                            map_valid=map_valid,
+                            route_valid=route_valid,
                             projection=proj_dev, geometry_type=batch_geom,
                             mode="train", trajectory_target=target,
                             history_frames=history_frames, future_frames=future_frames)
@@ -2854,6 +3579,19 @@ def train_il(
             # of an effective batch of (batch_size * accum) — same scale as a plain
             # step, so lr/grad_clip keep their meaning. Log the unscaled loss.
             scaler.scale(loss / accum).backward()
+            if probe_route_gradient and route_mask.grad is not None:
+                route_gradient_norm = float(route_mask.grad.norm().item())
+                if route_gradient_norm > 0.0:
+                    gradient_evidence[
+                        "route_input_first_nonzero_step"
+                    ] = {
+                        "optimizer_step": optimizer_step_count + 1,
+                        "norm": route_gradient_norm,
+                    }
+                    print(
+                        "route input gradient became non-zero: "
+                        f"{gradient_evidence['route_input_first_nonzero_step']}"
+                    )
 
             epoch_losses.append(loss.item())
             traj_losses.append(traj_loss.item())
@@ -2868,30 +3606,11 @@ def train_il(
             micro_idx = 0
 
             scaler.unscale_(optimizer)
-            # One-time gradient-flow probe (very first optimizer step): prove each
-            # enabled branch actually receives gradient (not just the trajectory
-            # head). We report the grad-norm of a parameter unique to each branch —
-            # a zero/None here means that branch is not training even though its
-            # loss is being added.
-            if _first_step:
-                def _branch_gn(substr):
-                    tot, n = 0.0, 0
-                    for nm, p in model.named_parameters():
-                        if substr in nm and p.grad is not None:
-                            tot += float(p.grad.norm().item()) ** 2
-                            n += 1
-                    return (tot ** 0.5, n)
-                planner_gn = _branch_gn("TrajectoryPlanner")
-                probe = f"grad-flow probe: planner={planner_gn}"
-                if enable_world_model:
-                    probe += f" world_model={_branch_gn('World_Action_Model')}"
-                if enable_reasoning:
-                    probe += f" reasoning={_branch_gn('Reasoning')}"
-                print(probe)
-                _first_step = False
+            _observe_gradient_flow(optimizer_step_count + 1)
             torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
             scaler.step(optimizer)
             scaler.update()
+            optimizer_step_count += 1
 
         # Flush a trailing partial accumulation window (epoch batch count not a
         # multiple of accum) so its grads aren't silently dropped at epoch end.
@@ -2902,9 +3621,11 @@ def train_il(
                 accumulation_steps=accum,
                 partial_count=micro_idx,
             )
+            _observe_gradient_flow(optimizer_step_count + 1)
             torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
             scaler.step(optimizer)
             scaler.update()
+            optimizer_step_count += 1
             micro_idx = 0
 
         if not epoch_losses:
@@ -3091,6 +3812,58 @@ def train_il(
             )
             break
 
+    optimizer_parameter_delta_norm = float(
+        (
+            optimizer_probe_parameter.detach() - optimizer_probe_before
+        ).norm().item()
+    )
+    if (
+        not terminal_resume
+        and (
+            optimizer_step_count <= 0
+            or optimizer_parameter_delta_norm <= 0.0
+        )
+    ):
+        raise RuntimeError(
+            "optimizer produced no parameter update: "
+            f"steps={optimizer_step_count} "
+            f"parameter={optimizer_probe_name} "
+            f"delta_norm={optimizer_parameter_delta_norm}"
+        )
+    first_gradient_evidence = gradient_evidence["first_step"] or {}
+    if (
+        not terminal_resume
+        and (
+            first_gradient_evidence.get(
+                "navigation_fusion", {}
+            ).get("norm", 0.0)
+            <= 0.0
+        )
+    ):
+        raise RuntimeError("Reactive navigation fusion received no gradient")
+    if (
+        not terminal_resume
+        and gradient_evidence[
+            "navigation_encoder_first_nonzero_step"
+        ] is None
+    ):
+        raise RuntimeError("Reactive NavigationEncoder received no gradient")
+    if (
+        not terminal_resume
+        and dataset == Dataset.KITSCENES
+        and route_valid_sample_count <= 0
+    ):
+        raise RuntimeError(
+            "KITScenes training saw no valid route-conditioned sample"
+        )
+    if (
+        not terminal_resume
+        and dataset == Dataset.KITSCENES
+        and enable_route_conditioning
+        and gradient_evidence["route_input_first_nonzero_step"] is None
+    ):
+        raise RuntimeError("Reactive planner received no route input gradient")
+
     if best_checkpoint is None or final_checkpoint is None:
         raise RuntimeError("training completed without a best/final checkpoint")
 
@@ -3120,14 +3893,43 @@ def train_il(
             "data_fingerprint": data_fingerprint,
             "packed_partitions": len(manifests),
             "non_empty_partitions": len(shard_dirs),
+            "training_partitions": len(training_shard_dirs),
             "empty_partitions": skipped_empty,
             "coverage": data_coverage,
+            "navigation_quality": (
+                {
+                    "audit_sha256": navigation_quality_audit_sha256,
+                    "schema_version": navigation_quality_report[
+                        "schema_version"
+                    ],
+                    "policy": navigation_quality_report["policy"],
+                    "accepted_scene_count": navigation_quality_report[
+                        "accepted_scene_count"
+                    ],
+                    "excluded_scene_count": navigation_quality_report[
+                        "excluded_scene_count"
+                    ],
+                    "accepted_partition_ids": navigation_quality_report[
+                        "accepted_partition_ids"
+                    ],
+                    "excluded_partition_ids": navigation_quality_report[
+                        "excluded_partition_ids"
+                    ],
+                }
+                if navigation_quality_report is not None
+                else None
+            ),
         },
         "model": {
             "backbone": bb,
             "fusion_mode": fm,
             "embed_dim": 256,
             "num_views": num_views,
+            "view_fusion_kwargs": view_fusion_kwargs,
+            "navigation_geometry_id": navigation_geometry_id,
+            "map_context_channels": map_context_channels,
+            "route_channels": route_channels,
+            "enable_route_conditioning": enable_route_conditioning,
         },
         "training": {
             "epochs": epochs,
@@ -3138,6 +3940,7 @@ def train_il(
             "grad_accum_steps": grad_accum_steps,
             "num_workers": num_workers,
             "lr": lr,
+            "training_seed": training_seed,
             "weight_decay": weight_decay,
             "grad_clip": grad_clip,
             "amp": amp,
@@ -3150,6 +3953,29 @@ def train_il(
             "validation_scope": validation_scope,
             "validation_split": validation_split_contract,
             "metric_history": metric_history,
+            "optimizer_evidence": {
+                "step_count": optimizer_step_count,
+                "probe_parameter": optimizer_probe_name,
+                "probe_parameter_delta_norm": (
+                    optimizer_parameter_delta_norm
+                ),
+            },
+            "gradient_evidence": gradient_evidence,
+            "route_conditioning_evidence": {
+                "enabled": enable_route_conditioning,
+                "valid_sample_exposures": route_valid_sample_count,
+                "conditioned_valid_sample_exposures": (
+                    route_valid_sample_count
+                    if enable_route_conditioning
+                    else 0
+                ),
+                "sample_exposures": route_sample_count,
+                "valid_fraction": (
+                    route_valid_sample_count / route_sample_count
+                    if route_sample_count
+                    else 0.0
+                ),
+            },
         },
         "validation": {
             "sample_count": validation_sample_count,
@@ -3298,7 +4124,10 @@ def train_offline_rl(
             )
             vis_hist = batch["visual_history"].to(device)
             target = batch["trajectory_target"].to(device)
-            map_input = batch["map_input"].to(device)
+            map_context = batch["map_context"].to(device)
+            route_mask = batch["route_mask"].to(device)
+            map_valid = batch["map_valid"].to(device)
+            route_valid = batch["route_valid"].to(device)
 
             optimizer.zero_grad()
             # Offline RL regresses only the trajectory; run mode="infer" so the
@@ -3306,7 +4135,10 @@ def train_offline_rl(
             # was trained with reasoning / world-model branches on (mode="train"
             # would return a (trajectory, aux) tuple and break the arithmetic).
             # The inference forward is still differentiable for the policy grad.
-            pred = model(visual, map_input, vis_hist, ego_hist,
+            pred = model(visual, map_context, vis_hist, ego_hist,
+                         route_mask=route_mask,
+                         map_valid=map_valid,
+                         route_valid=route_valid,
                          projection=projection, geometry_type=geometry_type,
                          mode="infer")
             # Advantage-weighted regression against the FROZEN IL prior. advantage
@@ -3315,7 +4147,11 @@ def train_offline_rl(
             # the frozen prior (not the live model) makes the advantage real and
             # non-zero, and makes beta actually do something.
             with torch.no_grad():
-                baseline_pred = baseline_model(visual, map_input, vis_hist, ego_hist,
+                baseline_pred = baseline_model(
+                                               visual, map_context, vis_hist, ego_hist,
+                                               route_mask=route_mask,
+                                               map_valid=map_valid,
+                                               route_valid=route_valid,
                                                projection=projection, geometry_type=geometry_type,
                                                mode="infer")
             advantage = -(pred.detach() - target).pow(2).mean(dim=-1) \
@@ -3357,7 +4193,15 @@ def train_offline_rl(
 # ============================================================
 # Task: Evaluate (THE ONLY MLflow logging point)
 # ============================================================
-def _run_evaluation(checkpoint, shards, train_metadata, dataset, experiment_name):
+def _run_evaluation(
+    checkpoint,
+    shards,
+    train_metadata,
+    dataset,
+    experiment_name,
+    *,
+    navigation_records_output=None,
+):
     """Shared open-loop evaluation + MLflow logging logic.
 
     Called by both evaluate_il_policy and evaluate_rl_policy. Kept as a plain
@@ -3366,6 +4210,7 @@ def _run_evaluation(checkpoint, shards, train_metadata, dataset, experiment_name
     """
     import os
     import json
+    import math
     import yaml
     import torch
     import mlflow
@@ -3522,11 +4367,28 @@ def _run_evaluation(checkpoint, shards, train_metadata, dataset, experiment_name
     print(f"Eval split={eval_split} (strategy={training_policy.validation_strategy}, "
           f"val_fraction={val_fraction}, {len(shard_dirs)} partitions) — "
           f"{'held-out generalization' if eval_split == 'val' else 'in-sample'}")
+    navigation_geometry = None
+    if dataset == Dataset.KITSCENES:
+        from navigation.geometry import DEFAULT_NAVIGATION_GEOMETRY
+
+        if config.get("navigation_geometry_id") != (
+            DEFAULT_NAVIGATION_GEOMETRY.geometry_id
+        ):
+            raise ValueError(
+                "KITScenes checkpoint navigation geometry differs from "
+                "the route evaluation contract"
+            )
+        navigation_geometry = DEFAULT_NAVIGATION_GEOMETRY
     evaluation = _evaluate_open_loop(
         model,
         loader,
         device,
         training_policy=training_policy,
+        navigation_geometry=navigation_geometry,
+        route_swap_counterfactual=(navigation_geometry is not None),
+        include_navigation_records=(
+            navigation_records_output is not None
+        ),
     )
     expected_digest = validation_metadata.get("sample_uid_digest")
     if expected_digest and evaluation["sample_uid_digest"] != expected_digest:
@@ -3537,6 +4399,108 @@ def _run_evaluation(checkpoint, shards, train_metadata, dataset, experiment_name
         )
     avg_ade = evaluation["ade"]
     avg_fde = evaluation["fde"]
+    navigation_report = evaluation.get("navigation")
+    if navigation_report is not None:
+        navigation_report = {
+            **navigation_report,
+            "checkpoint_sha256": checkpoint_sha256,
+            "dataset": dataset.value,
+            "dataset_version": meta.get("data", {}).get(
+                "dataset_version",
+                "unknown",
+            ),
+            "enable_route_conditioning": bool(
+                config.get("enable_route_conditioning", True)
+            ),
+            "navigation_geometry_id": config.get(
+                "navigation_geometry_id"
+            ),
+            "sample_uid_digest": evaluation["sample_uid_digest"],
+        }
+    if navigation_records_output is not None:
+        navigation_records = evaluation.get("navigation_records")
+        if navigation_report is None or not isinstance(
+            navigation_records,
+            list,
+        ):
+            raise ValueError(
+                "navigation record export requires KITScenes evaluation"
+            )
+        serializable_records = []
+        for record in navigation_records:
+            serializable_records.append({
+                key: (
+                    None
+                    if isinstance(value, float)
+                    and not math.isfinite(value)
+                    else value
+                )
+                for key, value in record.items()
+            })
+        os.makedirs(
+            os.path.dirname(navigation_records_output),
+            exist_ok=True,
+        )
+        with open(
+            navigation_records_output,
+            "w",
+            encoding="ascii",
+        ) as stream:
+            json.dump(
+                {
+                    "schema_version": (
+                        "navigation_evaluation_records_v1"
+                    ),
+                    "checkpoint_sha256": checkpoint_sha256,
+                    "dataset": dataset.value,
+                    "dataset_version": navigation_report[
+                        "dataset_version"
+                    ],
+                    "enable_route_conditioning": navigation_report[
+                        "enable_route_conditioning"
+                    ],
+                    "navigation_geometry_id": navigation_report[
+                        "navigation_geometry_id"
+                    ],
+                    "sample_uid_digest": evaluation[
+                        "sample_uid_digest"
+                    ],
+                    "training_seed": int(
+                        config.get("training_seed", -1)
+                    ),
+                    "mlflow_run_id": str(
+                        meta.get("tracking", {}).get(
+                            "mlflow_run_id",
+                            "",
+                        )
+                    ),
+                    "data_fingerprint": str(
+                        meta.get("data", {}).get(
+                            "data_fingerprint",
+                            "",
+                        )
+                    ),
+                    "navigation_quality_audit_sha256": str(
+                        config.get(
+                            "navigation_quality_audit_sha256",
+                            "",
+                        )
+                    ),
+                    "validation_group_uid_digest": str(
+                        validation_metadata.get(
+                            "validation_group_uid_digest",
+                            "",
+                        )
+                    ),
+                    "records": serializable_records,
+                },
+                stream,
+                allow_nan=False,
+                ensure_ascii=True,
+                indent=2,
+                sort_keys=True,
+            )
+            stream.write("\n")
     passed = avg_ade < 2.0 and avg_fde < 4.0
 
     # --- MLflow logging ---
@@ -3622,13 +4586,108 @@ def _run_evaluation(checkpoint, shards, train_metadata, dataset, experiment_name
         })
 
         # Eval metrics
-        mlflow.log_metrics({"eval/ade": avg_ade, "eval/fde": avg_fde, "eval/gate_pass": 1.0 if passed else 0.0})
+        logged_metrics = {
+            "eval/ade": avg_ade,
+            "eval/fde": avg_fde,
+            "eval/gate_pass": 1.0 if passed else 0.0,
+        }
+        if navigation_report is not None:
+            slices = navigation_report["slices"]
+            counterfactual = navigation_report[
+                "route_swap_counterfactual"
+            ]
+            navigation_metrics = {
+                "eval/navigation/route_compliance": slices[
+                    "route_valid"
+                ]["route_point_compliance"]["mean"],
+                "eval/navigation/route_outside_distance_m": slices[
+                    "route_valid"
+                ]["route_outside_distance_m"]["mean"],
+                "eval/navigation/wrong_branch_rate": slices[
+                    "junction"
+                ]["wrong_branch_rate"]["mean"],
+                "eval/navigation/destination_error_m": slices[
+                    "overall"
+                ]["destination_distance_error_m"]["mean"],
+                "eval/navigation/junction_ade_m": slices[
+                    "junction"
+                ]["ade_m"]["mean"],
+                "eval/navigation/junction_fde_m": slices[
+                    "junction"
+                ]["fde_m"]["mean"],
+                "eval/navigation/non_junction_ade_m": slices[
+                    "non_junction"
+                ]["ade_m"]["mean"],
+                "eval/navigation/valid_route_ade_m": slices[
+                    "route_valid"
+                ]["ade_m"]["mean"],
+                "eval/navigation/invalid_route_ade_m": slices[
+                    "route_invalid"
+                ]["ade_m"]["mean"],
+                "eval/navigation/valid_minus_invalid_ade_m": (
+                    navigation_report["route_valid_vs_invalid_delta"][
+                        "ade_m"
+                    ]["mean"]
+                ),
+                "eval/navigation/valid_minus_invalid_fde_m": (
+                    navigation_report["route_valid_vs_invalid_delta"][
+                        "fde_m"
+                    ]["mean"]
+                ),
+                "eval/navigation/route_confidence_p50": slices[
+                    "overall"
+                ]["route_quality"]["route_confidence"]["p50"],
+                "eval/navigation/swap_endpoint_delta_m": counterfactual[
+                    "endpoint_delta_m"
+                ]["mean"],
+                "eval/navigation/swap_compliance_drop": counterfactual[
+                    "selected_compliance_drop"
+                ]["mean"],
+                "eval/navigation/swap_direction_consistency": (
+                    counterfactual[
+                        "maneuver_direction_consistent"
+                    ]["mean"]
+                ),
+            }
+            for maneuver in ("left", "right", "straight"):
+                maneuver_slice = slices[f"maneuver_{maneuver}"]
+                navigation_metrics[
+                    f"eval/navigation/{maneuver}_ade_m"
+                ] = maneuver_slice["ade_m"]["mean"]
+                navigation_metrics[
+                    f"eval/navigation/{maneuver}_fde_m"
+                ] = maneuver_slice["fde_m"]["mean"]
+            logged_metrics.update({
+                key: float(value)
+                for key, value in navigation_metrics.items()
+                if value is not None
+            })
+        mlflow.log_metrics(logged_metrics)
 
         # Artifacts
         os.makedirs("/tmp/eval-artifacts", exist_ok=True)
         with open("/tmp/eval-artifacts/config.yaml", "w") as f:
             yaml.dump(meta, f)
         mlflow.log_artifact("/tmp/eval-artifacts/config.yaml")
+        if navigation_report is not None:
+            navigation_report_path = (
+                "/tmp/eval-artifacts/navigation_evaluation.json"
+            )
+            with open(
+                navigation_report_path,
+                "w",
+                encoding="ascii",
+            ) as stream:
+                json.dump(
+                    navigation_report,
+                    stream,
+                    allow_nan=False,
+                    ensure_ascii=True,
+                    indent=2,
+                    sort_keys=True,
+                )
+                stream.write("\n")
+            mlflow.log_artifact(navigation_report_path)
 
         # Register only immutable best/final checkpoints. Retry of the eval
         # task reuses the same run/source pair and therefore the same versions.
@@ -3680,6 +4739,18 @@ def _run_evaluation(checkpoint, shards, train_metadata, dataset, experiment_name
             )
 
     print(f"Eval: ADE={avg_ade:.3f} FDE={avg_fde:.3f} Gate={'PASS' if passed else 'FAIL'}")
+    if navigation_report is not None:
+        route_compliance = navigation_report["slices"][
+            "route_valid"
+        ]["route_point_compliance"]["mean"]
+        swap_delta = navigation_report["route_swap_counterfactual"][
+            "endpoint_delta_m"
+        ]["mean"]
+        print(
+            "Navigation eval: "
+            f"route_compliance={route_compliance} "
+            f"swap_endpoint_delta_m={swap_delta}"
+        )
     return EvalMetrics(ade=avg_ade, fde=avg_fde, gate_pass=passed)
 
 
@@ -3702,6 +4773,219 @@ def evaluate_il_policy(
     and registers the checkpoint in the `auto-e2e-driving-policy` model registry.
     """
     return _run_evaluation(checkpoint, shards, train_metadata, dataset, "imitation-learning")
+
+
+@task(
+    container_image=EVAL_IMAGE,
+    requests=Resources(cpu="2", mem="8Gi", gpu="1"),
+    limits=Resources(cpu="2", mem="8Gi", gpu="1"),
+    environment={"MLFLOW_TRACKING_URI": MLFLOW_URI},
+    pod_template=_large_shm_pod_template(),
+)
+def evaluate_navigation_records(
+    checkpoint: FlyteFile,
+    shards: List[FlyteDirectory],
+    train_metadata: FlyteFile,
+    expected_route_conditioning: bool,
+) -> FlyteFile:
+    """Evaluate one KITScenes checkpoint and retain paired sample records."""
+    import json
+    import os
+
+    output_path = os.path.join(
+        "/tmp/navigation-evaluation-records",
+        (
+            "conditioned.json"
+            if expected_route_conditioning
+            else "baseline.json"
+        ),
+    )
+    _run_evaluation(
+        checkpoint,
+        shards,
+        train_metadata,
+        Dataset.KITSCENES,
+        "imitation-learning",
+        navigation_records_output=output_path,
+    )
+    with open(output_path, encoding="ascii") as stream:
+        payload = json.load(stream)
+    actual = bool(payload["enable_route_conditioning"])
+    if actual != expected_route_conditioning:
+        raise ValueError(
+            "navigation comparison checkpoint mode differs from its role: "
+            f"expected={expected_route_conditioning} actual={actual}"
+        )
+    return FlyteFile(output_path)
+
+
+@task(
+    container_image=EVAL_IMAGE,
+    requests=Resources(cpu="2", mem="4Gi"),
+    limits=Resources(cpu="2", mem="4Gi"),
+    environment={"MLFLOW_TRACKING_URI": MLFLOW_URI},
+)
+def compare_navigation_record_artifacts(
+    conditioned_records: FlyteFile,
+    baseline_records: FlyteFile,
+) -> FlyteFile:
+    """Validate two evaluations and publish the frozen paired research gate."""
+    import json
+    import os
+
+    import mlflow
+
+    from evaluation.navigation_metrics import compare_navigation_records
+
+    def load_records(artifact, label):
+        with open(artifact.download(), encoding="ascii") as stream:
+            payload = json.load(stream)
+        if (
+            payload.get("schema_version")
+            != "navigation_evaluation_records_v1"
+        ):
+            raise ValueError(
+                f"{label} has an unsupported navigation record schema"
+            )
+        records = payload.get("records")
+        if not isinstance(records, list) or not records:
+            raise ValueError(f"{label} has no navigation records")
+        return payload
+
+    conditioned = load_records(conditioned_records, "conditioned")
+    baseline = load_records(baseline_records, "baseline")
+    if not bool(conditioned.get("enable_route_conditioning")):
+        raise ValueError("conditioned artifact disabled route conditioning")
+    if bool(baseline.get("enable_route_conditioning")):
+        raise ValueError("baseline artifact enabled route conditioning")
+
+    identity_fields = (
+        "dataset",
+        "dataset_version",
+        "navigation_geometry_id",
+        "sample_uid_digest",
+        "training_seed",
+        "data_fingerprint",
+        "navigation_quality_audit_sha256",
+        "validation_group_uid_digest",
+    )
+    mismatches = [
+        field
+        for field in identity_fields
+        if conditioned.get(field) != baseline.get(field)
+    ]
+    if mismatches:
+        raise ValueError(
+            "navigation comparison provenance differs: "
+            f"{mismatches}"
+        )
+    for field in identity_fields:
+        if conditioned.get(field) in (None, "", -1):
+            raise ValueError(
+                f"navigation comparison provenance is missing {field}"
+            )
+
+    report = compare_navigation_records(
+        conditioned["records"],
+        baseline["records"],
+    )
+    report["provenance"] = {
+        field: conditioned[field] for field in identity_fields
+    }
+    report["provenance"].update({
+        "conditioned_checkpoint_sha256": conditioned[
+            "checkpoint_sha256"
+        ],
+        "baseline_checkpoint_sha256": baseline[
+            "checkpoint_sha256"
+        ],
+        "conditioned_mlflow_run_id": conditioned["mlflow_run_id"],
+        "baseline_mlflow_run_id": baseline["mlflow_run_id"],
+    })
+
+    mlflow.set_tracking_uri(os.environ["MLFLOW_TRACKING_URI"])
+    mlflow.set_experiment("navigation-comparison")
+    with mlflow.start_run(
+        run_name=(
+            "reactive-route-vs-baseline-"
+            f"seed-{conditioned['training_seed']}"
+        )
+    ) as active_run:
+        report["provenance"]["comparison_mlflow_run_id"] = (
+            active_run.info.run_id
+        )
+        output_dir = "/tmp/navigation-comparison"
+        os.makedirs(output_dir, exist_ok=True)
+        output_path = os.path.join(
+            output_dir,
+            "navigation_comparison.json",
+        )
+        with open(output_path, "w", encoding="ascii") as stream:
+            json.dump(
+                report,
+                stream,
+                allow_nan=False,
+                ensure_ascii=True,
+                indent=2,
+                sort_keys=True,
+            )
+            stream.write("\n")
+
+        primary = report["primary_metric"]
+        guardrails = report["aggregate_guardrails"]
+        decision = report["decision"]
+        mlflow.log_params({
+            "dataset": conditioned["dataset"],
+            "dataset_version": conditioned["dataset_version"],
+            "navigation_geometry_id": conditioned[
+                "navigation_geometry_id"
+            ],
+            "training_seed": conditioned["training_seed"],
+            "sample_uid_digest": conditioned["sample_uid_digest"],
+            "conditioned_run_id": conditioned["mlflow_run_id"],
+            "baseline_run_id": baseline["mlflow_run_id"],
+            "primary_metric": primary["name"],
+            "primary_minimum_sample_count": primary[
+                "minimum_sample_count"
+            ],
+            "maximum_relative_regression": guardrails[
+                "maximum_relative_regression"
+            ],
+            "verdict": decision["verdict"],
+        })
+        metrics = {
+            "primary/eligible_count": primary["count"],
+            "primary/conditioned_mean": primary["conditioned_mean"],
+            "primary/baseline_mean": primary["baseline_mean"],
+            "primary/difference_mean": primary["difference_mean"],
+            "primary/difference_ci95_low": (
+                primary["difference_ci95"][0]
+                if primary["difference_ci95"] is not None
+                else None
+            ),
+            "primary/difference_ci95_high": (
+                primary["difference_ci95"][1]
+                if primary["difference_ci95"] is not None
+                else None
+            ),
+            "guardrail/ade_relative_regression": guardrails["ade_m"][
+                "relative_regression"
+            ],
+            "guardrail/fde_relative_regression": guardrails["fde_m"][
+                "relative_regression"
+            ],
+            "decision/supported": (
+                1.0 if decision["verdict"] == "supported" else 0.0
+            ),
+        }
+        mlflow.log_metrics({
+            key: float(value)
+            for key, value in metrics.items()
+            if value is not None
+        })
+        mlflow.log_artifact(output_path)
+
+    return FlyteFile(output_path)
 
 
 @task(
@@ -4104,9 +5388,12 @@ def evaluate_kitscenes_benchmark_checkpoint(
                 model.reset_visual_history()
             prediction = model(
                 batch["visual_tiles"].to(device),
-                batch["map_input"].to(device),
+                batch["map_context"].to(device),
                 batch["visual_history"].to(device),
                 limited_history.to(device),
+                route_mask=batch["route_mask"].to(device),
+                map_valid=batch["map_valid"].to(device),
+                route_valid=batch["route_valid"].to(device),
                 projection=projection_cache.get(projection),
                 geometry_type=geometry_type,
                 history_frames=history_frames,
@@ -4675,7 +5962,7 @@ def _map_recovered_kitscenes_artifacts(
 def wf_repack_existing_kitscenes(
     recovery_manifest: FlyteFile,
     artifact_set_sha256: str,
-    dataset_version: str = DATASET_PACK_VERSION,
+    dataset_version: str = KITSCENES_NAVIGATION_DATASET_VERSION,
     image_size: int = 256,
     pack_concurrency: int = 60,
 ) -> List[FlyteDirectory]:
@@ -4693,7 +5980,7 @@ def wf_repack_existing_kitscenes(
 def wf_create_dataset_sharded(
     dataset: Dataset = Dataset.KITSCENES,
     source_revision: str = KITSCENES_SOURCE_REVISION,
-    dataset_version: str = DATASET_PACK_VERSION,
+    dataset_version: str = KITSCENES_NAVIGATION_DATASET_VERSION,
     episodes: int = 10,
     start_ep: int = -1,
     end_ep: int = -1,
@@ -4749,7 +6036,7 @@ def wf_create_dataset_sharded(
 def wf_sharded_full_run(
     dataset: Dataset = Dataset.KITSCENES,
     source_revision: str = KITSCENES_SOURCE_REVISION,
-    dataset_version: str = DATASET_PACK_VERSION,
+    dataset_version: str = KITSCENES_NAVIGATION_DATASET_VERSION,
     episodes: int = 10,
     partition_size: int = 1,
     image_size: int = 256,
@@ -4767,6 +6054,8 @@ def wf_sharded_full_run(
     batch_size: int = 1,
     grad_accum_steps: int = 4,
     lr: float = 1e-4,
+    training_seed: int = 149,
+    enable_route_conditioning: bool = True,
     enable_reasoning: bool = True,
     reasoning_mode: str = "pooled_latent",
     enable_world_model: bool = True,
@@ -4802,9 +6091,15 @@ def wf_sharded_full_run(
         ingest_concurrency=ingest_concurrency,
         label_concurrency=label_concurrency,
         pack_concurrency=pack_concurrency)
+    navigation_quality_audit = audit_kitscenes_navigation_quality(
+        shards=shards,
+    )
     out = train_il(
         shards=shards, dataset=dataset, backbone=backbone, epochs=epochs,
         batch_size=batch_size, grad_accum_steps=grad_accum_steps, lr=lr,
+        training_seed=training_seed,
+        enable_route_conditioning=enable_route_conditioning,
+        navigation_quality_audit=navigation_quality_audit,
         enable_reasoning=enable_reasoning, reasoning_mode=reasoning_mode,
         enable_world_model=enable_world_model, val_fraction=val_fraction,
         validation_scope=validation_scope,
@@ -4819,7 +6114,7 @@ def wf_sharded_full_run(
 def wf_recovered_kitscenes_full_run(
     recovery_manifest: FlyteFile,
     artifact_set_sha256: str,
-    dataset_version: str = DATASET_PACK_VERSION,
+    dataset_version: str = KITSCENES_NAVIGATION_DATASET_VERSION,
     image_size: int = 256,
     pack_concurrency: int = 60,
     backbone: Backbone = Backbone.SWIN_V2_TINY,
@@ -4827,6 +6122,8 @@ def wf_recovered_kitscenes_full_run(
     batch_size: int = 1,
     grad_accum_steps: int = 4,
     lr: float = 1e-4,
+    training_seed: int = 149,
+    enable_route_conditioning: bool = True,
     reasoning_mode: str = "pooled_latent",
     val_fraction: float = 0.1,
     num_workers: int = 4,
@@ -4841,6 +6138,9 @@ def wf_recovered_kitscenes_full_run(
         image_size=image_size,
         pack_concurrency=pack_concurrency,
     )
+    navigation_quality_audit = audit_kitscenes_navigation_quality(
+        shards=shards,
+    )
     out = train_il(
         shards=shards,
         dataset=Dataset.KITSCENES,
@@ -4849,6 +6149,9 @@ def wf_recovered_kitscenes_full_run(
         batch_size=batch_size,
         grad_accum_steps=grad_accum_steps,
         lr=lr,
+        training_seed=training_seed,
+        enable_route_conditioning=enable_route_conditioning,
+        navigation_quality_audit=navigation_quality_audit,
         enable_reasoning=True,
         reasoning_mode=reasoning_mode,
         enable_world_model=True,
@@ -4866,6 +6169,44 @@ def wf_recovered_kitscenes_full_run(
 
 
 @workflow
+def wf_compare_recovered_kitscenes_navigation(
+    recovery_manifest: FlyteFile,
+    artifact_set_sha256: str,
+    conditioned_checkpoint: FlyteFile,
+    conditioned_train_metadata: FlyteFile,
+    baseline_checkpoint: FlyteFile,
+    baseline_train_metadata: FlyteFile,
+    dataset_version: str = KITSCENES_NAVIGATION_DATASET_VERSION,
+    image_size: int = 256,
+    pack_concurrency: int = 60,
+) -> FlyteFile:
+    """Run the frozen paired comparison on the cached KITScenes v3 corpus."""
+    shards = wf_repack_existing_kitscenes(
+        recovery_manifest=recovery_manifest,
+        artifact_set_sha256=artifact_set_sha256,
+        dataset_version=dataset_version,
+        image_size=image_size,
+        pack_concurrency=pack_concurrency,
+    )
+    conditioned_records = evaluate_navigation_records(
+        checkpoint=conditioned_checkpoint,
+        shards=shards,
+        train_metadata=conditioned_train_metadata,
+        expected_route_conditioning=True,
+    )
+    baseline_records = evaluate_navigation_records(
+        checkpoint=baseline_checkpoint,
+        shards=shards,
+        train_metadata=baseline_train_metadata,
+        expected_route_conditioning=False,
+    )
+    return compare_navigation_record_artifacts(
+        conditioned_records=conditioned_records,
+        baseline_records=baseline_records,
+    )
+
+
+@workflow
 def wf_train_il(
     shards: List[FlyteDirectory],
     dataset: Dataset = Dataset.L2D,
@@ -4874,7 +6215,10 @@ def wf_train_il(
     batch_size: int = 4,
     grad_accum_steps: int = 1,
     lr: float = 1e-4,
+    training_seed: int = 149,
     amp: bool = False,
+    enable_route_conditioning: bool = True,
+    navigation_quality_audit: Optional[FlyteFile] = None,
     enable_reasoning: bool = False,
     reasoning_mode: str = "pooled_latent",
     enable_world_model: bool = False,
@@ -4901,7 +6245,10 @@ def wf_train_il(
     """
     out = train_il(shards=shards, dataset=dataset, backbone=backbone,
                    epochs=epochs, batch_size=batch_size,
-                   grad_accum_steps=grad_accum_steps, lr=lr, amp=amp,
+                   grad_accum_steps=grad_accum_steps, lr=lr,
+                   training_seed=training_seed, amp=amp,
+                   enable_route_conditioning=enable_route_conditioning,
+                   navigation_quality_audit=navigation_quality_audit,
                    enable_reasoning=enable_reasoning, reasoning_mode=reasoning_mode,
                    enable_world_model=enable_world_model, val_fraction=val_fraction,
                    validation_scope=validation_scope,

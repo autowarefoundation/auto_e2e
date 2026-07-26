@@ -45,6 +45,8 @@ from .egomotion import (
     poses_to_arrays,
 )
 from .map import _cached_scene_map, generate_bev_map_tile
+from .navigation import KitScenesSceneNavigation, build_scene_navigation
+from .source import KITSCENES_DATA_REVISION
 
 logger = logging.getLogger(__name__)
 
@@ -55,7 +57,6 @@ _UID_SAFE = re.compile(r"^[A-Za-z0-9_-]+$")
 
 class KitScenesSample(TypedDict):
     visual_tiles: torch.Tensor
-    map_tile: torch.Tensor
     egomotion_history: torch.Tensor
     visual_history: torch.Tensor
     trajectory_target: torch.Tensor
@@ -64,6 +65,8 @@ class KitScenesSample(TypedDict):
     pose_current: dict[str, float | int]
     gps_future: np.ndarray
     camera_params: torch.Tensor
+    map_tile: NotRequired[torch.Tensor]
+    navigation_members: NotRequired[dict[str, bytes]]
     history_frames: NotRequired[torch.Tensor]
     future_frames: NotRequired[torch.Tensor]
 
@@ -133,6 +136,8 @@ class KitScenesDataset(Dataset):
         wm_hz: float = 1.0,
         source_hz: float = 10.0,
         reasoning_clip_only: bool = False,
+        include_navigation: bool = False,
+        source_revision: str = KITSCENES_DATA_REVISION,
     ) -> None:
         if image_size <= 0:
             raise ValueError(f"image_size must be positive, got {image_size}")
@@ -151,6 +156,8 @@ class KitScenesDataset(Dataset):
         self._source_hz = source_hz
         self._reasoning_clip_only = reasoning_clip_only
         self._front_cam = self.camera_names[0]
+        self._include_navigation = include_navigation
+        self._source_revision = source_revision
 
         self._sdk = _KITScenesSDK(root=data_root, split=split)
         available = set(self._sdk.scene_ids)
@@ -172,6 +179,7 @@ class KitScenesDataset(Dataset):
         self._scene_yaws: dict[str, np.ndarray] = {}
         self._scene_timestamps_ns: dict[str, np.ndarray] = {}
         self._scene_camera_params: dict[str, torch.Tensor] = {}
+        self._scene_navigation: dict[str, KitScenesSceneNavigation] = {}
         self._scene_ids: list[str] = []
         self._samples: list[tuple[str, int]] = []
 
@@ -246,6 +254,15 @@ class KitScenesDataset(Dataset):
             camera_names=self.camera_names,
             image_size=self.image_size,
         )
+        if self._include_navigation:
+            self._scene_navigation[scene_id] = build_scene_navigation(
+                scene_id=scene_id,
+                scene_path=loader.scene_path,
+                positions_enu_m=positions_local,
+                yaws_rad=yaws,
+                timestamps_ns=timestamps_ns,
+                source_revision=self._source_revision,
+            )
 
         return [
             (scene_id, frame_idx)
@@ -462,6 +479,31 @@ class KitScenesDataset(Dataset):
             )
         return torch.from_numpy(bev_map.copy()).permute(2, 0, 1)
 
+    def navigation_members_for_row(
+        self,
+        scene_id: str,
+        frame_idx: int,
+    ) -> dict[str, bytes]:
+        """Return lossless semantic map, route, and metadata members."""
+        if not self._include_navigation:
+            raise RuntimeError(
+                "navigation members require include_navigation=True"
+            )
+        return self._scene_navigation[scene_id].sample_members(frame_idx)
+
+    def scene_navigation_artifacts(self) -> dict[str, dict[str, bytes]]:
+        """Return deterministic scene-level vector and quality artifacts."""
+        if not self._include_navigation:
+            raise RuntimeError(
+                "scene navigation artifacts require include_navigation=True"
+            )
+        return {
+            scene_id: navigation.artifacts().members()
+            for scene_id, navigation in sorted(
+                self._scene_navigation.items()
+            )
+        }
+
     def get_front_clip(self, idx: int) -> list[torch.Tensor]:
         """Return front frames at the fixed 0/1/2/3/4 second horizons."""
         if not self._reasoning_clip_only:
@@ -492,7 +534,6 @@ class KitScenesDataset(Dataset):
     def __getitem__(self, idx: int) -> KitScenesSample:
         scene_id, frame_idx = self._samples[idx]
         visual_tiles = self._load_multiview_frame(scene_id, frame_idx)
-        map_tile = self.map_for_row(scene_id, frame_idx)
 
         (
             egomotion_history,
@@ -502,7 +543,6 @@ class KitScenesDataset(Dataset):
         ) = self.numeric_for(idx)
         sample = KitScenesSample(
             visual_tiles=visual_tiles,
-            map_tile=map_tile,
             egomotion_history=egomotion_history,
             visual_history=torch.zeros(
                 _VISUAL_HISTORY_DIM, dtype=torch.float32
@@ -514,6 +554,12 @@ class KitScenesDataset(Dataset):
             gps_future=gps_future,
             camera_params=self._scene_camera_params[scene_id],
         )
+        if self._include_navigation:
+            sample["navigation_members"] = (
+                self.navigation_members_for_row(scene_id, frame_idx)
+            )
+        else:
+            sample["map_tile"] = self.map_for_row(scene_id, frame_idx)
 
         if self._wm_enabled:
             scene_len = len(self._scene_egomotion[scene_id])
