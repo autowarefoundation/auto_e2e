@@ -143,7 +143,7 @@ promotion policy is a separate concern and is outside this design.
 ### 3.2 Non-goals
 
 - Cosmos relabeling.
-- Cosmos labels in a training loss.
+- New or reweighted Cosmos-derived training supervision.
 - Cosmos-derived sample weights or balancing.
 - Semantic buckets.
 - Weighted sampling.
@@ -166,7 +166,7 @@ dataset snapshot:
 
 | Arm | Planner loss | Checkpoint selection |
 |---|---|---|
-| A: control | Current normalized action loss | Current ADE/FDE policy |
+| A: control | Current normalized action loss | Weighted composite score |
 | B: treatment | Action + rollout + constraint | Weighted composite score |
 
 Both arms use:
@@ -177,6 +177,7 @@ Both arms use:
 - identical camera, map, and route inputs;
 - identical World Model and JEPA settings, with the World Model enabled;
 - identical Reasoning enable flag, labels, and weight inherited from Arm A;
+- junction-aware repeat disabled in both arms;
 - no weighted sampler or hard-example mining.
 
 The legacy `RouteConsistencyLoss` is disabled in both arms. Arm A uses the
@@ -184,10 +185,10 @@ existing normalized action objective as its planner loss. Arm B replaces the
 legacy route objective with the rollout and target-relative constraint terms
 defined here; it does not add them on top of the legacy objective.
 
-Arm A's selected checkpoint is evaluated with the new per-sample metric
-implementation so its composite score and all component metrics can be compared
-retrospectively with Arm B. Arm B does not require Arm A's metrics during
-training; the reference is used only for the final paired experiment report.
+Both arms save every epoch checkpoint. The current ADE/FDE selector is applied
+post hoc to both histories so selector effects can be measured without extra
+training. The primary paired comparison uses the same composite selector in
+both arms, isolating the planner-loss change.
 
 The auxiliary objectives are controlled variables, not treatment variables.
 Any JEPA or Reasoning configuration difference between paired arms invalidates
@@ -392,6 +393,12 @@ L_{planner}
 `lambda_jepa`, the Reasoning enable flag, and `lambda_reasoning` are copied from
 Arm A and frozen for Arm B. When existing Reasoning supervision is disabled,
 its term is absent in both arms; this design does not force it off.
+
+Keeping `lambda_jepa` fixed does not by itself guarantee that the World Model
+retains the same influence after planner terms are added. Before the full run,
+a fixed smoke batch records gradient norms from action, rollout, constraint,
+and weighted JEPA losses into the shared camera backbone. The treatment must
+show finite non-zero JEPA gradients; no automatic gradient balancing is added.
 
 The action term is dimensionless after signal normalization. Rollout and map
 terms contain metric quantities. The fixed lambdas define their numerical
@@ -742,7 +749,8 @@ computed from already averaged batches.
 
 ### 12.1 Trajectory
 
-Using prediction and target action rollouts:
+The predicted controls are rolled out and compared with logged pose-grounded
+future XY:
 
 ```text
 ADE@3s
@@ -750,6 +758,8 @@ FDE@6.4s
 ```
 
 Other existing horizons remain diagnostic but are not selector inputs.
+Target action rollout is used by the training loss only after the reconstruction
+audit passes. It is not substituted for logged XY in checkpoint selection.
 
 ### 12.2 Comfort excess
 
@@ -917,6 +927,12 @@ min_delta
 
 These values are fixed for the run and saved in every checkpoint. Changing a
 utility scale or weight creates a new selector policy version.
+
+Before freezing the first policy, existing checkpoints are evaluated to verify
+that no utility is almost always saturated at zero or one. A sensitivity report
+recomputes rankings after independently changing each top-level weight by
+`+/-20%` and renormalizing. This calibrates units and rank stability without
+using treatment-run outcomes to tune the policy.
 
 ## 15. Metric Completeness and Ranking
 
