@@ -1,9 +1,4 @@
-import { expect, test, type Route } from "@playwright/test";
-
-const EXPERIMENT_A = "experiment-a";
-const EXPERIMENT_B = "experiment-b";
-
-type Phase = "initial" | "select-b" | "back-a" | "forward-b";
+import { expect, test, type Page, type Route } from "@playwright/test";
 
 function fulfillJSON(route: Route, body: unknown) {
   return route.fulfill({
@@ -17,177 +12,325 @@ function fulfillJSON(route: Route, body: unknown) {
   });
 }
 
-function experiment(experimentId: string, name: string) {
-  return {
-    experiment_id: experimentId,
-    name,
-    artifact_location: `s3://models/${experimentId}`,
-    lifecycle_stage: "active",
-    run_count: 1,
-    last_update_time: 1_750_000_000_000,
-  };
-}
-
-function run(experimentId: string, runId: string, runName: string) {
-  return {
-    run_id: runId,
-    run_name: runName,
-    experiment_id: experimentId,
-    status: "FINISHED",
-    start_time: 1_750_000_000_000,
-    end_time: 1_750_000_001_000,
+const experiments = [
+  {
+    run_id: "run-eval",
+    run_name: "route-on-evaluation",
+    experiment_id: "11",
+    experiment_name: "auto-e2e",
+    mlflow_status: "FINISHED",
+    start_time: 1_750_003_000_000,
+    end_time: 1_750_003_600_000,
+    dataset: "s3://auto-e2e/PhysicalAI-AV",
+    dataset_version: "v3.0",
+    data_fingerprint: "fingerprint-v3-full",
+    validation_scope: "full",
+    validation_split_id: "split-v3-full",
+    backbone: "AutoE2E",
+    fusion_mode: "cross-attention",
+    route_conditioning: true,
+    seed: "42",
+    epochs: "10",
+    epochs_completed: "10",
+    lineage_status: "complete",
+    primary_execution_id: "flyte-eval",
+    primary_execution_url:
+      "https://flyte.example/console/projects/auto-e2e/domains/development/executions/flyte-eval",
+    mlflow_url: "https://mlflow.example/#/experiments/11/runs/run-eval",
+    evaluation: { ade: 3.51344, fde: 10.18399, gate_pass: true },
+    validation: { ade: 3.8395, fde: 10.9898 },
+    train_execution: {
+      execution_id: "flyte-train-eval",
+      workflow_name: "full_run",
+      phase: "SUCCEEDED",
+      started_at: "2026-07-15T00:00:00Z",
+      duration_s: 3600,
+    },
+    eval_execution: {
+      execution_id: "flyte-eval",
+      workflow_name: "evaluate_model",
+      phase: "SUCCEEDED",
+      started_at: "2026-07-15T02:00:00Z",
+      duration_s: 900,
+    },
+    model_versions: [
+      {
+        name: "AutoE2E",
+        version: "42",
+        role: "best",
+        status: "READY",
+        url: "https://mlflow.example/#/models/AutoE2E/versions/42",
+      },
+    ],
     params: {},
+    tags: {},
+    metrics: {
+      "eval/navigation/collision_rate": 0.025,
+      "eval/navigation/route_completion": 0.91,
+    },
+  },
+  {
+    run_id: "run-validation",
+    run_name: "route-off-validation",
+    experiment_id: "11",
+    experiment_name: "auto-e2e",
+    mlflow_status: "FINISHED",
+    start_time: 1_750_002_000_000,
+    end_time: 1_750_002_600_000,
+    dataset: "s3://auto-e2e/PhysicalAI-AV",
+    dataset_version: "v3.0",
+    data_fingerprint: "fingerprint-v3-full",
+    validation_scope: "full",
+    validation_split_id: "split-v3-full",
+    backbone: "AutoE2E",
+    fusion_mode: "cross-attention",
+    route_conditioning: false,
+    seed: "42",
+    epochs: "10",
+    epochs_completed: "10",
+    lineage_status: "complete",
+    primary_execution_id: "flyte-validation",
+    primary_execution_url:
+      "https://flyte.example/console/projects/auto-e2e/domains/development/executions/flyte-validation",
+    mlflow_url:
+      "https://mlflow.example/#/experiments/11/runs/run-validation",
+    validation: { ade: 3.9049, fde: 11.4284 },
+    train_execution: {
+      execution_id: "flyte-validation",
+      workflow_name: "full_run",
+      phase: "SUCCEEDED",
+      started_at: "2026-07-14T00:00:00Z",
+      duration_s: 3600,
+    },
+    model_versions: [],
+    params: {},
+    tags: {},
     metrics: {},
-  };
+  },
+  {
+    run_id: "run-failed",
+    run_name: "kitscenes-smoke-failed",
+    experiment_id: "11",
+    experiment_name: "auto-e2e",
+    mlflow_status: "FAILED",
+    start_time: 1_750_001_000_000,
+    end_time: 1_750_001_100_000,
+    dataset: "s3://auto-e2e/KITScenes",
+    dataset_version: "v2.1",
+    data_fingerprint: "fingerprint-kitscenes-smoke",
+    validation_scope: "subset",
+    validation_split_id: "split-kitscenes-smoke",
+    backbone: "AutoE2E",
+    route_conditioning: true,
+    seed: "7",
+    epochs: "2",
+    lineage_status: "partial",
+    primary_execution_id: "flyte-failed",
+    primary_execution_url:
+      "https://flyte.example/console/projects/auto-e2e/domains/development/executions/flyte-failed",
+    mlflow_url: "https://mlflow.example/#/experiments/11/runs/run-failed",
+    train_execution: {
+      execution_id: "flyte-failed",
+      workflow_name: "full_run",
+      phase: "FAILED",
+      started_at: "2026-07-13T00:00:00Z",
+      duration_s: 100,
+    },
+    model_versions: [],
+    params: {},
+    tags: {},
+    metrics: {},
+  },
+  {
+    run_id: "run-unlinked",
+    run_name: "legacy-l2d-run",
+    experiment_id: "9",
+    experiment_name: "legacy",
+    mlflow_status: "FINISHED",
+    start_time: 1_750_000_000_000,
+    end_time: 1_750_000_100_000,
+    dataset: "s3://auto-e2e/L2D",
+    dataset_version: "v1.0",
+    validation_scope: "subset",
+    validation_split_id: "split-l2d-smoke",
+    backbone: "legacy",
+    lineage_status: "missing",
+    mlflow_url: "https://mlflow.example/#/experiments/9/runs/run-unlinked",
+    validation: { ade: 5.25, fde: 15.5 },
+    model_versions: [],
+    params: {},
+    tags: {},
+    metrics: {},
+  },
+];
+
+async function mockExperiments(page: Page) {
+  await page.route("**/api/v1/experiments", (route) =>
+    fulfillJSON(route, {
+      generated_at: "2026-07-26T00:00:00Z",
+      summary: {
+        total: 4,
+        running: 1,
+        failed: 1,
+        evaluated: 1,
+        registered: 1,
+        unlinked: 1,
+      },
+      experiments,
+    }),
+  );
 }
 
-test("experiment selection follows URL history and ignores a stale run response", async ({
+test("shows joined results, source links, and complete run details", async ({
   page,
 }) => {
-  let phase: Phase = "initial";
-  let releaseInitialA: () => void = () => {};
-  const initialAGate = new Promise<void>((resolve) => {
-    releaseInitialA = resolve;
-  });
-  let initialARequests = 0;
-  let initialAResponses = 0;
-  const runRequests: Array<{
-    experiment: string;
-    urlExperiment: string | null;
-    phase: Phase;
-  }> = [];
+  await mockExperiments(page);
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await page.goto("/models");
 
-  await page.route("**/api/v1/mlflow/**", async (route) => {
-    const requestURL = new URL(route.request().url());
-    if (requestURL.pathname === "/api/v1/mlflow/experiments") {
-      return fulfillJSON(route, {
-        items: [
-          experiment(EXPERIMENT_A, "Experiment A"),
-          experiment(EXPERIMENT_B, "Experiment B"),
-        ],
-      });
-    }
+  await expect(
+    page.getByRole("heading", { name: "Experiments", exact: true }),
+  ).toBeVisible();
+  await expect(page.getByText("4 results", { exact: true })).toBeVisible();
+  await expect(
+    page.getByRole("img", { name: "evaluation ADE trend" }),
+  ).toBeVisible();
 
-    const match = requestURL.pathname.match(
-      /^\/api\/v1\/mlflow\/experiments\/([^/]+)\/runs$/,
-    );
-    if (!match) {
-      return route.fulfill({ status: 404, body: "not mocked" });
-    }
+  const table = page.getByRole("table");
+  const evaluationRow = table
+    .getByRole("row")
+    .filter({ hasText: "flyte-eval" });
+  const validationRow = table
+    .getByRole("row")
+    .filter({ hasText: "flyte-validation" });
 
-    const experimentId = decodeURIComponent(match[1]);
-    const requestPhase = phase;
-    runRequests.push({
-      experiment: experimentId,
-      urlExperiment: new URL(page.url()).searchParams.get("experiment"),
-      phase: requestPhase,
-    });
+  await expect(evaluationRow).toContainText("Eval");
+  await expect(evaluationRow).toContainText("ADE3.513 m");
+  await expect(evaluationRow).toContainText("FDE10.184 m");
+  await expect(validationRow).toContainText("Val");
+  await expect(validationRow).toContainText("ADE3.905 m");
+  await expect(validationRow).toContainText("FDE11.428 m");
+  await expect(validationRow).toContainText("EVAL PENDING");
 
-    if (experimentId === EXPERIMENT_A && requestPhase === "initial") {
-      initialARequests++;
-      await initialAGate;
-      await fulfillJSON(route, {
-        items: [run(EXPERIMENT_A, "run-a-stale", "Stale A run")],
-      });
-      initialAResponses++;
-      return;
-    }
-    if (experimentId === EXPERIMENT_A && requestPhase === "back-a") {
-      return fulfillJSON(route, {
-        items: [run(EXPERIMENT_A, "run-a-current", "Current A run")],
-      });
-    }
-    if (experimentId === EXPERIMENT_B && requestPhase === "select-b") {
-      return fulfillJSON(route, {
-        items: [run(EXPERIMENT_B, "run-b-selected", "Selected B run")],
-      });
-    }
-    if (experimentId === EXPERIMENT_B && requestPhase === "forward-b") {
-      return fulfillJSON(route, {
-        items: [run(EXPERIMENT_B, "run-b-forward", "Forward B run")],
-      });
-    }
-
-    return fulfillJSON(route, {
-      items: [run(experimentId, "run-unexpected", "Unexpected run")],
-    });
-  });
-
-  await page.goto("/models?experiment=missing");
-  await expect(page).toHaveURL(
-    new RegExp(`/models\\?experiment=${EXPERIMENT_A}$`),
+  await expect(evaluationRow.getByRole("link", { name: /Flyte/ })).toHaveAttribute(
+    "href",
+    experiments[0].primary_execution_url,
+  );
+  await expect(
+    evaluationRow.getByRole("link", { name: /MLflow/ }),
+  ).toHaveAttribute("href", experiments[0].mlflow_url);
+  await expect(evaluationRow.getByRole("link", { name: /v42/ })).toHaveAttribute(
+    "href",
+    experiments[0].model_versions[0].url,
   );
 
-  const experimentA = page.getByRole("button", { name: /Experiment A/ });
-  const experimentB = page.getByRole("button", { name: /Experiment B/ });
-  const runsTitle = page
-    .locator('[data-slot="card-title"]')
-    .filter({ hasText: "Runs" });
+  await evaluationRow.click();
+  await expect(page).toHaveURL(/\/models\?run=run-eval$/);
+  const details = page.getByRole("dialog", { name: "PhysicalAI AV v3.0" });
+  await expect(details).toContainText("Evaluation");
+  await expect(details).toContainText("ADE 3.513 m");
+  await expect(details).toContainText("Validation");
+  await expect(details).toContainText("ADE 3.840 m");
+  await expect(details).toContainText("collision_rate");
+  await expect(details).toContainText("flyte-eval");
+  await expect(details).toContainText("run-eval");
+  await expect(details).toContainText("v42 · best");
 
-  await expect(experimentA).toHaveAttribute("aria-pressed", "true");
-  await expect(runsTitle).toContainText("Experiment A");
-  await expect.poll(() => initialARequests).toBeGreaterThan(0);
+  await details
+    .getByRole("button", { name: "Close experiment details" })
+    .click();
+  await expect(page).toHaveURL(/\/models$/);
+});
 
-  phase = "select-b";
-  await experimentB.click();
-  await expect(page).toHaveURL(
-    new RegExp(`/models\\?experiment=${EXPERIMENT_B}$`),
+test("filters experiments by dataset, status, and identifiers", async ({
+  page,
+}) => {
+  await mockExperiments(page);
+  await page.goto("/models");
+  await expect(page.getByText("4 results", { exact: true })).toBeVisible();
+
+  await page
+    .getByRole("combobox", { name: "Filter by dataset", exact: true })
+    .selectOption("s3://auto-e2e/PhysicalAI-AV");
+  await expect(page.getByText("2 results", { exact: true })).toBeVisible();
+  await expect(page.getByRole("table")).not.toContainText("KITScenes");
+
+  await page
+    .getByRole("combobox", { name: "Filter by status" })
+    .selectOption("succeeded");
+  await expect(page.getByText("1 results", { exact: true })).toBeVisible();
+  await expect(page.getByRole("table")).toContainText("flyte-eval");
+  await expect(page.getByRole("table")).not.toContainText("flyte-validation");
+
+  await page.getByRole("button", { name: "Reset filters" }).click();
+  await page
+    .getByRole("searchbox", { name: "Search experiments" })
+    .fill("flyte-failed");
+  await expect(page.getByText("1 results", { exact: true })).toBeVisible();
+  await expect(page.getByRole("table")).toContainText("KITScenes");
+  await expect(page.getByRole("table")).toContainText("FAILED");
+
+  await page.getByRole("button", { name: "Reset filters" }).click();
+  await page
+    .getByRole("combobox", { name: "Filter by status" })
+    .selectOption("unlinked");
+  await expect(page.getByText("2 results", { exact: true })).toBeVisible();
+  await expect(page.getByRole("table")).toContainText("UNLINKED");
+  await expect(page.getByRole("table")).toContainText("PARTIAL");
+  await expect(page.getByRole("table")).toContainText("run-unlinked");
+});
+
+test("warns when selected experiment results are not comparable", async ({
+  page,
+}) => {
+  await mockExperiments(page);
+  await page.goto("/models");
+
+  await page.getByRole("checkbox", { name: "Compare route-on-evaluation" }).check();
+  await page
+    .getByRole("checkbox", { name: "Compare kitscenes-smoke-failed" })
+    .check();
+  await expect(page.getByText("2/3 selected", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Compare", exact: true }).click();
+
+  const comparison = page.getByRole("dialog", { name: "Compare experiments" });
+  await expect(comparison).toContainText("route-on-evaluation");
+  await expect(comparison).toContainText("kitscenes-smoke-failed");
+  await expect(comparison).toContainText(
+    "Dataset fingerprint or validation split differs. Scores are not directly comparable.",
   );
-  await expect(experimentB).toHaveAttribute("aria-pressed", "true");
-  await expect(runsTitle).toContainText("Experiment B");
-  await expect(page.getByText("Selected B run")).toBeVisible();
+  await expect(comparison).toContainText("Eval ADE");
+  await expect(comparison).toContainText("3.513 m");
+});
 
-  releaseInitialA();
+test("mobile experiment list and details do not overflow the viewport", async ({
+  page,
+}) => {
+  await mockExperiments(page);
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto("/models");
+
+  await expect(page.locator("article")).toHaveCount(4);
+  await expect(page.getByRole("table")).toBeHidden();
+  await expect(
+    page.locator("article").filter({ hasText: "flyte-validation" }),
+  ).toContainText("Val");
   await expect
-    .poll(() => initialARequests - initialAResponses)
-    .toBe(0);
-  await page.waitForTimeout(100);
-  await expect(page.getByText("Stale A run")).toHaveCount(0);
-  await expect(page.getByText("Selected B run")).toBeVisible();
+    .poll(() =>
+      page.evaluate(
+        () => document.documentElement.scrollWidth <= document.documentElement.clientWidth,
+      ),
+    )
+    .toBe(true);
 
-  phase = "back-a";
-  await page.goBack();
-  await expect(page).toHaveURL(
-    new RegExp(`/models\\?experiment=${EXPERIMENT_A}$`),
-  );
-  await expect(experimentA).toHaveAttribute("aria-pressed", "true");
-  await expect(runsTitle).toContainText("Experiment A");
-  await expect(page.getByText("Current A run")).toBeVisible();
-
-  phase = "forward-b";
-  await page.goForward();
-  await expect(page).toHaveURL(
-    new RegExp(`/models\\?experiment=${EXPERIMENT_B}$`),
-  );
-  await expect(experimentB).toHaveAttribute("aria-pressed", "true");
-  await expect(runsTitle).toContainText("Experiment B");
-  await expect(page.getByText("Forward B run")).toBeVisible();
-
-  expect(
-    runRequests.every(
-      ({ experiment: requested, urlExperiment }) =>
-        requested === urlExperiment,
-    ),
-    JSON.stringify(runRequests),
-  ).toBe(true);
-  expect(runRequests).toEqual(
-    expect.arrayContaining([
-      expect.objectContaining({
-        experiment: EXPERIMENT_A,
-        phase: "initial",
-      }),
-      expect.objectContaining({
-        experiment: EXPERIMENT_B,
-        phase: "select-b",
-      }),
-      expect.objectContaining({
-        experiment: EXPERIMENT_A,
-        phase: "back-a",
-      }),
-      expect.objectContaining({
-        experiment: EXPERIMENT_B,
-        phase: "forward-b",
-      }),
-    ]),
-  );
+  await page.locator("article").filter({ hasText: "flyte-eval" }).click();
+  const details = page.getByRole("dialog", { name: "PhysicalAI AV v3.0" });
+  await expect(details).toBeVisible();
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () => document.documentElement.scrollWidth <= document.documentElement.clientWidth,
+      ),
+    )
+    .toBe(true);
 });
