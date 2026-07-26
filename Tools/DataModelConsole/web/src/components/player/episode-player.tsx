@@ -184,15 +184,19 @@ export function EpisodePlayer({
     return () => s.destroy();
   }, [index, dataset, shard, version]);
 
-  const cams = useMemo(() => {
+  const packedCams = useMemo(() => {
     const first = index.samples[0];
     if (!first) return [];
     return Object.keys(first.members)
       .filter((m) => m.match(/^cam_\d+\.jpg$/))
       .map((m) => m.replace(/\.jpg$/, ""))
-      .filter((cam) => !isHiddenCam(dataset, cam))
       .sort();
-  }, [index, dataset]);
+  }, [index]);
+  const cams = useMemo(
+    () =>
+      packedCams.filter((cam) => !isHiddenCam(dataset, cam, packedCams.length)),
+    [dataset, packedCams],
+  );
 
   const [overlayModels, setOverlayModels] = useState<OverlayModel[]>([]);
   const [selectedModelID, setSelectedModelID] = useState(
@@ -671,6 +675,7 @@ export function EpisodePlayer({
           sample={sample}
           frame={frame}
           cams={cams}
+          packedCameraCount={packedCams.length}
           mode={mode}
           focusCam={focusCam}
           onSelectCam={focusCamera}
