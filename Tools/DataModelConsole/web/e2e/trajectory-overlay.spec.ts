@@ -51,7 +51,8 @@ function overlayBody(): Buffer {
   const directoryBytes = sampleCount * 12;
   const controlsBytes = sampleCount * seedCount * horizon * 2 * 4;
   const heatmapScalesBytes = sampleCount * 4;
-  const heatmapBytes = sampleCount * 3 * 32 * 32;
+  const heatmapCount = 6;
+  const heatmapBytes = sampleCount * heatmapCount * 32 * 32;
   const body = Buffer.alloc(
     headerBytes +
       seedsBytes +
@@ -62,13 +63,13 @@ function overlayBody(): Buffer {
       heatmapBytes,
   );
   body.write("AOVL", 0, "ascii");
-  body.writeUInt16LE(2, 4);
+  body.writeUInt16LE(3, 4);
   body.writeUInt16LE(0, 6);
   body.writeUInt32LE(sampleCount, 8);
   body.writeUInt16LE(seedCount, 12);
   body.writeUInt16LE(horizon, 14);
   body.writeUInt16LE(2, 16);
-  body.writeUInt16LE(3, 18);
+  body.writeUInt16LE(heatmapCount, 18);
 
   [0, 1, 2].forEach((seed, index) => {
     body.writeBigInt64LE(BigInt(seed), headerBytes + index * 8);
@@ -105,18 +106,23 @@ function overlayBody(): Buffer {
   const heatmapsOffset = scalesOffset + heatmapScalesBytes;
   for (let row = 0; row < sampleCount; row++) {
     body.writeFloatLE(2 + row, scalesOffset + row * 4);
-    for (let branch = 0; branch < 3; branch++) {
+    for (let branch = 0; branch < heatmapCount; branch++) {
       for (let pixel = 0; pixel < 32 * 32; pixel++) {
         const x = pixel % 32;
         const y = Math.floor(pixel / 32);
-        const value =
-          branch === 0
-            ? x * 8
-            : branch === 1
-              ? y * 8
-              : (x + y) * 4;
+        const patterns = [
+          x * 8,
+          y * 8,
+          (x + y) * 4,
+          (31 - x) * 8,
+          (31 - y) * 8,
+          Math.abs(x - y) * 8,
+        ];
+        const value = patterns[branch];
         const offset =
-          heatmapsOffset + (row * 3 + branch) * 32 * 32 + pixel;
+          heatmapsOffset +
+          (row * heatmapCount + branch) * 32 * 32 +
+          pixel;
         body.writeUInt8(Math.min(255, value), offset);
       }
     }
@@ -301,13 +307,13 @@ test("trajectory overlays and geographic views honor production contracts", asyn
           {
             model_artifact_id: MODEL_ID,
             registered_model_name: "auto-e2e-driving-policy",
-            model_version: 30,
+            model_version: 45,
             run_id: "run-30",
             model_name: "ConvNeXt-T",
             eval_ade: 1.25,
             eval_fde: 2.5,
             val_fraction: 0.3,
-            overlay_schema: "v2",
+            overlay_schema: "v3",
             sample_count: 3,
           },
         ],
@@ -392,13 +398,19 @@ test("trajectory overlays and geographic views honor production contracts", asyn
   const heatmap = page.getByRole("region", {
     name: "BEV activation heatmap",
   });
-  await expect(heatmap).toContainText("max RMS 2.00");
+  await expect(heatmap).toContainText("shared 2.00");
+  await expect(heatmap.getByRole("tab")).toHaveCount(6);
   const heatmapCanvas = heatmap.locator("canvas");
   const heatmapSnapshot = () =>
     heatmapCanvas.evaluate((canvas) =>
       (canvas as HTMLCanvasElement).toDataURL(),
     );
   const fusedHeatmap = await heatmapSnapshot();
+  await heatmap.getByRole("tab", { name: "Map only" }).click();
+  await expect.poll(heatmapSnapshot).not.toBe(fusedHeatmap);
+  const mapHeatmap = await heatmapSnapshot();
+  await heatmap.getByRole("tab", { name: "Route delta" }).click();
+  await expect.poll(heatmapSnapshot).not.toBe(mapHeatmap);
   await heatmap.getByRole("tab", { name: "Camera" }).click();
   await expect.poll(heatmapSnapshot).not.toBe(fusedHeatmap);
   await heatmap.getByRole("tab", { name: "Fused" }).click();
