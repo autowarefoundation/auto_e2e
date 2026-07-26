@@ -57,12 +57,11 @@ function shortDataset(dataset: string): string {
 }
 
 function effectiveStatus(record: ExperimentRecord): string {
-  const phase =
-    record.train_execution?.phase || record.eval_execution?.phase || "";
-  if (phase) return phase;
+  if (record.eval_execution?.phase) return record.eval_execution.phase;
   if (!record.evaluation && record.validation && record.mlflow_status === "FINISHED") {
     return "EVAL PENDING";
   }
+  if (record.train_execution?.phase) return record.train_execution.phase;
   return record.mlflow_status;
 }
 
