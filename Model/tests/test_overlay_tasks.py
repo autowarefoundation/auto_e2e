@@ -234,6 +234,8 @@ def test_gate_token_keeps_the_winning_creation_time_and_ready_state():
     token = _gate_token(item, "d" * 64)
     gate = _parse_gate(token)
     assert gate["status"] == "ready"
+    assert gate["created_at"] == "2026-07-15T00:00:00Z"
+    assert gate["request_identity"] == "a" * 64
 
 
 def test_overlay_set_upgrade_stages_without_hiding_ready_schema():
@@ -350,8 +352,6 @@ def test_overlay_schema_version_requires_positive_numeric_suffix(
 def test_overlay_schema_version_rejects_noncanonical_values(schema):
     with pytest.raises(ValueError, match="invalid overlay schema"):
         _overlay_schema_version(schema)
-    assert gate["created_at"] == "2026-07-15T00:00:00Z"
-    assert gate["request_identity"] == "a" * 64
 
 
 class _MLflowClient:
