@@ -400,7 +400,6 @@ def _stage_overlay_set_upgrade(
 
     existing = _get_dynamo_item(table, item)
     fields = (
-        "status",
         "request_identity",
         "dataset_manifest_sha256",
         "artifacts_bucket",
@@ -413,6 +412,8 @@ def _stage_overlay_set_upgrade(
         for field in fields
         if existing.get(field) != item.get(field)
     ]
+    if existing.get("status") not in {"building", "ready"}:
+        mismatches.append("status")
     if mismatches:
         raise RuntimeError(
             "overlay-set upgrade staging differs in "
