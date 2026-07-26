@@ -358,9 +358,11 @@ def _prepare_overlay_set_item(
         staged["previous_overlay_schema"] = existing["overlay_schema"]
         staged["previous_request_identity"] = existing["request_identity"]
         staged["previous_created_at"] = existing["created_at"]
-        staged["previous_seeds"] = existing["seeds"]
-        staged["previous_n_shards"] = existing["n_shards"]
-        staged["previous_n_samples"] = existing["n_samples"]
+        staged["previous_seeds"] = [
+            int(seed) for seed in existing["seeds"]
+        ]
+        staged["previous_n_shards"] = int(existing["n_shards"])
+        staged["previous_n_samples"] = int(existing["n_samples"])
         return staged
     raise RuntimeError(
         "immutable DynamoDB item exists with a different identity "
