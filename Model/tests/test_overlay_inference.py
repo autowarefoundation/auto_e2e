@@ -12,7 +12,10 @@ from Platform.pipelines.inference import (
     sha256_file,
     stable_seed64,
 )
-from Platform.pipelines.overlay_precompute import infer_loader_controls
+from Platform.pipelines.overlay_precompute import (
+    infer_loader_controls,
+    infer_loader_overlay,
+)
 from training.dataset_policy import KITSCENES_TRAINING_POLICY
 
 
@@ -79,6 +82,39 @@ class _NoiseEchoPolicy(torch.nn.Module):
         **kwargs,
     ):
         self.last_egomotion_history = egomotion_history.detach().clone()
+        return initial_noise + self.anchor
+
+
+class _AddFusion(torch.nn.Module):
+    def forward(self, image_bev, navigation_bev):
+        return image_bev + navigation_bev
+
+
+class _DiagnosticReactive:
+    TrajectoryPlanner = _FakePlanner()
+    FeatureFusion = torch.nn.Identity()
+    NavigationEncoder = torch.nn.Identity()
+    MapBEVFusion = _AddFusion()
+
+
+class _DiagnosticPolicy(_NoiseEchoPolicy):
+    def __init__(self):
+        super().__init__()
+        self.Reactive_E2E = _DiagnosticReactive()
+
+    def forward(
+        self,
+        camera_tiles,
+        map_context,
+        visual_history,
+        egomotion_history,
+        *,
+        initial_noise,
+        **kwargs,
+    ):
+        image_bev = self.Reactive_E2E.FeatureFusion(camera_tiles[:, 0])
+        navigation_bev = self.Reactive_E2E.NavigationEncoder(map_context)
+        self.Reactive_E2E.MapBEVFusion(image_bev, navigation_bev)
         return initial_noise + self.anchor
 
 
@@ -160,6 +196,39 @@ def test_infer_loader_controls_emits_seed_fan_and_v0():
     np.testing.assert_array_equal(v0, [3.0, 4.0, 5.0])
     assert seeds == (0, 1)
     assert not np.array_equal(controls[:, 0], controls[:, 1])
+
+
+def test_infer_loader_overlay_captures_channel_rms_without_extra_forward():
+    model = _DiagnosticPolicy().eval()
+    batch = _batch(2)
+    batch["sample_uid"] = [
+        "l2d-v1-e000001-f000064",
+        "l2d-v1-e000001-f000065",
+    ]
+    batch["visual_tiles"][:, 0, 0] = 3.0
+    batch["visual_tiles"][:, 0, 1] = 4.0
+    batch["map_context"][:, 0] = 1.0
+    batch["map_context"][:, 1:] = 2.0
+
+    class Loader(list):
+        projection = None
+        geometry_type = "pseudo"
+
+    _, controls, _, seeds, heatmaps = infer_loader_overlay(
+        model,
+        Loader([batch]),
+        model_artifact_id="model-sha",
+        dataset_manifest_digest="manifest-sha",
+        base_seeds=(0, 1),
+        device="cpu",
+    )
+
+    assert controls.shape == (2, 2, 64, 2)
+    assert seeds == (0, 1)
+    assert heatmaps.shape == (2, 3, 32, 32)
+    np.testing.assert_allclose(heatmaps[:, 0], np.sqrt(25.0 / 3.0))
+    np.testing.assert_allclose(heatmaps[:, 1], np.sqrt(9.0 / 3.0))
+    np.testing.assert_allclose(heatmaps[:, 2], np.sqrt(56.0 / 3.0))
 
 
 def test_overlay_inference_applies_checkpoint_data_sanitization():
