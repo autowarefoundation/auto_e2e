@@ -75,6 +75,20 @@ class TestDecodeSampleMapSplit:
                   "__key__": "l2d-v1-e000012-f000064"}
         out = _decode_sample(sample)
         assert out["sample_uid"] == sample["__key__"]
+        assert out["split_group_uid"] == ""
+
+    def test_split_group_uid_is_exposed_from_sample_metadata(self):
+        sample = {
+            "cam_0.jpg": _jpeg_bytes((0, 0, 0)),
+            "ego.npy": _ego_bytes(),
+            "meta.json": json.dumps({
+                "split_group_uid": "kitscenes-scene-001",
+            }).encode("ascii"),
+        }
+
+        out = _decode_sample(sample)
+
+        assert out["split_group_uid"] == "kitscenes-scene-001"
 
     def test_map_not_counted_as_camera(self):
         """A sample with 6 cams + map.jpg -> visual_tiles (6,...), map separate."""
