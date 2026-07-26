@@ -417,6 +417,9 @@ def test_training_wires_dataset_specific_trajectory_policy():
     assert "reconstruction audit identity differs from training" in (
         training_source
     )
+    assert '"rollout_policy_version": ROLLOUT_POLICY_VERSION' in (
+        training_source
+    )
     assert "reconstruction_audit_decision != \"go\"" in training_source
     assert (
         "target rollout reconstruction thresholds failed"
