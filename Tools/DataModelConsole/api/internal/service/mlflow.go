@@ -352,6 +352,9 @@ func (m *MLflowService) fetchRunStats(ctx context.Context) (runStatsValue, error
 				continue
 			}
 			seenRunIDs[run.RunID] = struct{}{}
+			if !isModelExperimentRun(run) {
+				continue
+			}
 			value.totalRuns++
 			if value.hasADE {
 				continue
