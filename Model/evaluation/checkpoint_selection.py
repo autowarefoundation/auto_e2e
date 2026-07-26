@@ -11,6 +11,13 @@ import numpy as np
 
 SELECTOR_POLICY_VERSION = "rollout_composite_selector_v1"
 SELECTOR_MIN_DELTA = 0.0005
+SELECTOR_CALIBRATION_VERSION = "rollout_selector_calibration_v1"
+TOP_LEVEL_WEIGHTS = {
+    "trajectory": 0.50,
+    "comfort": 0.15,
+    "map_safety": 0.15,
+    "navigation": 0.20,
+}
 METRIC_NAMES = (
     "ade_3s_m",
     "fde_6_4s_m",
@@ -277,6 +284,44 @@ def _clipped_utility(value: float, scale: float) -> float:
     return 1.0 - float(np.clip(value / scale, 0.0, 1.0))
 
 
+def _weighted_component_score(
+    components: Mapping[str, object],
+    configured_weights: Mapping[str, float],
+) -> tuple[float, dict[str, float]]:
+    component_values = {
+        str(name): float(value)
+        for name, value in components.items()
+    }
+    if not component_values:
+        raise ValueError("checkpoint score has no active components")
+    if any(
+        name not in configured_weights
+        for name in component_values
+    ):
+        raise ValueError("checkpoint score has an unknown component")
+    if any(
+        not math.isfinite(value) or not 0.0 <= value <= 1.0
+        for value in component_values.values()
+    ):
+        raise ValueError("checkpoint component utilities must be in [0, 1]")
+    active_weight = sum(
+        float(configured_weights[name]) for name in component_values
+    )
+    if not math.isfinite(active_weight) or active_weight <= 0.0:
+        raise ValueError("active checkpoint weight must be positive")
+    effective_weights = {
+        name: float(configured_weights[name]) / active_weight
+        for name in component_values
+    }
+    score = sum(
+        component_values[name] * effective_weights[name]
+        for name in component_values
+    )
+    if not math.isfinite(score):
+        raise ValueError("composite checkpoint score is non-finite")
+    return float(score), effective_weights
+
+
 def score_checkpoint(
     aggregates: Mapping[str, object],
     availability: Mapping[str, object],
@@ -356,25 +401,10 @@ def score_checkpoint(
             for utility, weight in navigation_parts.values()
         ) / navigation_weight
 
-    configured_weights = {
-        "trajectory": 0.50,
-        "comfort": 0.15,
-        "map_safety": 0.15,
-        "navigation": 0.20,
-    }
-    active_weight = sum(
-        configured_weights[name] for name in components
+    score, effective_weights = _weighted_component_score(
+        components,
+        TOP_LEVEL_WEIGHTS,
     )
-    effective_weights = {
-        name: configured_weights[name] / active_weight
-        for name in components
-    }
-    score = sum(
-        components[name] * effective_weights[name]
-        for name in components
-    )
-    if not math.isfinite(score):
-        raise ValueError("composite checkpoint score is non-finite")
     return {
         "policy_version": SELECTOR_POLICY_VERSION,
         "score": float(score),
@@ -390,6 +420,127 @@ def score_checkpoint(
             "destination_error_m": 7.5,
         },
         "min_delta": SELECTOR_MIN_DELTA,
+    }
+
+
+def build_selector_calibration_report(
+    selections: Sequence[Mapping[str, object]],
+) -> dict[str, object]:
+    """Report utility saturation and +/-20% top-level weight sensitivity."""
+    if not selections:
+        raise ValueError("selector calibration needs checkpoint selections")
+    components_by_checkpoint = []
+    expected_components = None
+    for index, selection in enumerate(selections):
+        if selection.get("policy_version") != SELECTOR_POLICY_VERSION:
+            raise ValueError(
+                "selector calibration received another policy version"
+            )
+        components = selection.get("components")
+        if not isinstance(components, Mapping):
+            raise ValueError(
+                f"checkpoint selection {index} has no components"
+            )
+        normalized = {
+            str(name): float(value)
+            for name, value in components.items()
+        }
+        _weighted_component_score(normalized, TOP_LEVEL_WEIGHTS)
+        component_names = frozenset(normalized)
+        if expected_components is None:
+            expected_components = component_names
+        elif component_names != expected_components:
+            raise ValueError(
+                "selector component availability changed across checkpoints"
+            )
+        components_by_checkpoint.append(normalized)
+
+    component_names = sorted(expected_components or ())
+    saturation = {}
+    for name in component_names:
+        values = np.asarray(
+            [components[name] for components in components_by_checkpoint],
+            dtype=np.float64,
+        )
+        near_zero_fraction = float(np.mean(values <= 0.01))
+        near_one_fraction = float(np.mean(values >= 0.99))
+        saturation[name] = {
+            "minimum": float(values.min()),
+            "maximum": float(values.max()),
+            "near_zero_fraction": near_zero_fraction,
+            "near_one_fraction": near_one_fraction,
+            "almost_always_saturated": bool(
+                max(near_zero_fraction, near_one_fraction) >= 0.90
+            ),
+        }
+
+    def ranking(weights: Mapping[str, float]) -> tuple[list[int], list[float]]:
+        scores = [
+            _weighted_component_score(components, weights)[0]
+            for components in components_by_checkpoint
+        ]
+        order = sorted(
+            range(len(scores)),
+            key=lambda index: (-scores[index], index),
+        )
+        return order, scores
+
+    baseline_ranking, baseline_scores = ranking(TOP_LEVEL_WEIGHTS)
+    baseline_positions = {
+        checkpoint_index: rank
+        for rank, checkpoint_index in enumerate(baseline_ranking)
+    }
+    scenarios = []
+    for name in component_names:
+        for multiplier in (0.8, 1.2):
+            weights = dict(TOP_LEVEL_WEIGHTS)
+            weights[name] *= multiplier
+            scenario_ranking, scenario_scores = ranking(weights)
+            if len(selections) < 2:
+                rank_correlation = None
+            else:
+                scenario_positions = {
+                    checkpoint_index: rank
+                    for rank, checkpoint_index in enumerate(
+                        scenario_ranking
+                    )
+                }
+                baseline = np.asarray([
+                    baseline_positions[index]
+                    for index in range(len(selections))
+                ], dtype=np.float64)
+                scenario = np.asarray([
+                    scenario_positions[index]
+                    for index in range(len(selections))
+                ], dtype=np.float64)
+                rank_correlation = float(np.corrcoef(
+                    baseline,
+                    scenario,
+                )[0, 1])
+            scenarios.append({
+                "component": name,
+                "multiplier": multiplier,
+                "ranking": scenario_ranking,
+                "scores": scenario_scores,
+                "top_checkpoint_unchanged": (
+                    scenario_ranking[0] == baseline_ranking[0]
+                ),
+                "spearman_rank_correlation": rank_correlation,
+            })
+
+    return {
+        "schema_version": SELECTOR_CALIBRATION_VERSION,
+        "selector_policy_version": SELECTOR_POLICY_VERSION,
+        "checkpoint_count": len(selections),
+        "rank_evidence_sufficient": len(selections) >= 2,
+        "baseline_ranking": baseline_ranking,
+        "baseline_scores": baseline_scores,
+        "component_saturation": saturation,
+        "almost_always_saturated_components": [
+            name for name in component_names
+            if saturation[name]["almost_always_saturated"]
+        ],
+        "weight_sensitivity": scenarios,
     }
 
 
