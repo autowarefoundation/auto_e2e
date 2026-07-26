@@ -15,6 +15,8 @@ set -euo pipefail
 #   CONSOLE_WEB_IMAGE      Full ECR digest URI for console-web
 #   CONSOLE_ORIGIN         CloudFront console origin, e.g. https://dXXXX.cloudfront.net
 #                          (required in locked phase; unset in bootstrap)
+#   MLFLOW_PUBLIC_URL      Public MLflow origin used for run/Registry links
+#   FLYTE_CONSOLE_URL      Public Flyte Console base ending in /console
 #
 # No ACM_CERT_ARN: the internal ALB listens on HTTP:80 (CloudFront terminates
 # viewer TLS and reaches the ALB over http-only through its VPC origin).
@@ -41,6 +43,8 @@ done
 : "${CONSOLE_INFRA_PHASE:?Set CONSOLE_INFRA_PHASE to bootstrap or locked}"
 : "${CONSOLE_API_IMAGE:?Set CONSOLE_API_IMAGE to the full ECR image digest URI}"
 : "${CONSOLE_WEB_IMAGE:?Set CONSOLE_WEB_IMAGE to the full ECR image digest URI}"
+: "${MLFLOW_PUBLIC_URL:?Set MLFLOW_PUBLIC_URL to the public MLflow origin}"
+: "${FLYTE_CONSOLE_URL:?Set FLYTE_CONSOLE_URL to the public Flyte /console URL}"
 
 # SG attached to the ALB via the Ingress security-groups annotation (Auto Mode
 # has no IngressClassParams.securityGroups). Admits HTTP:80 only from CloudFront's
@@ -60,6 +64,10 @@ done
     die "AWS_REGION must be ${REQUIRED_AWS_REGION}, got ${AWS_REGION}"
 [[ "${CONSOLE_ALB_SG_ID}" =~ ^sg-[0-9a-f]+$ ]] ||
     die "CONSOLE_ALB_SG_ID must be a valid security group ID"
+[[ "${MLFLOW_PUBLIC_URL}" =~ ^https://[a-z0-9.-]+$ ]] ||
+    die "MLFLOW_PUBLIC_URL must be an HTTPS origin without a path"
+[[ "${FLYTE_CONSOLE_URL}" =~ ^https://[a-z0-9.-]+/console$ ]] ||
+    die "FLYTE_CONSOLE_URL must be an HTTPS URL ending in /console"
 
 case "${CONSOLE_INFRA_PHASE}" in
     bootstrap)
@@ -115,6 +123,7 @@ active_cluster_endpoint="$(
     die "kubectl context does not target ${REQUIRED_CLUSTER_NAME} in the expected account and region"
 
 export CONSOLE_ALB_SG_ID CONSOLE_ORIGIN
+export MLFLOW_PUBLIC_URL FLYTE_CONSOLE_URL
 export ALB_SUBNET_CIDR_A ALB_SUBNET_CIDR_B ALB_SUBNET_CIDR_C
 
 echo "Deploying DataModelConsole to EKS..."
@@ -126,11 +135,13 @@ echo "  API image:          ${CONSOLE_API_IMAGE}"
 echo "  Web image:          ${CONSOLE_WEB_IMAGE}"
 echo "  CONSOLE_ALB_SG_ID:  ${CONSOLE_ALB_SG_ID}"
 echo "  CONSOLE_ORIGIN:     ${CONSOLE_ORIGIN:-(unset; same-origin /api)}"
+echo "  MLFLOW_PUBLIC_URL:  ${MLFLOW_PUBLIC_URL}"
+echo "  FLYTE_CONSOLE_URL:  ${FLYTE_CONSOLE_URL}"
 echo "  ALB_SUBNET_CIDRs:   ${ALB_SUBNET_CIDR_A}, ${ALB_SUBNET_CIDR_B}, ${ALB_SUBNET_CIDR_C}"
 
 # envsubst expects literal variable references in its allowlist.
 # shellcheck disable=SC2016
-SUBST_VARS='${CONSOLE_ALB_SG_ID} ${CONSOLE_ORIGIN} ${ALB_SUBNET_CIDR_A} ${ALB_SUBNET_CIDR_B} ${ALB_SUBNET_CIDR_C}'
+SUBST_VARS='${CONSOLE_ALB_SG_ID} ${CONSOLE_ORIGIN} ${MLFLOW_PUBLIC_URL} ${FLYTE_CONSOLE_URL} ${ALB_SUBNET_CIDR_A} ${ALB_SUBNET_CIDR_B} ${ALB_SUBNET_CIDR_C}'
 
 apply_manifest() {
     local manifest_name="$1"
