@@ -460,6 +460,23 @@ test("trajectory overlays and geographic views honor production contracts", asyn
     name: "BEV activation heatmap",
   });
   await expect(heatmap).toContainText("per-encoder contrast");
+  const diagnosticsFollowReasoning = await page
+    .locator('[aria-label^="Episode player"]')
+    .evaluate((player) => {
+      const reasoningTitle = Array.from(player.querySelectorAll("p")).find(
+        (element) => element.textContent?.trim() === "Reasoning label",
+      );
+      const diagnostics = player.querySelector(
+        '[aria-label="BEV activation heatmap"]',
+      );
+      return Boolean(
+        reasoningTitle &&
+          diagnostics &&
+          reasoningTitle.compareDocumentPosition(diagnostics) &
+            Node.DOCUMENT_POSITION_FOLLOWING,
+      );
+    });
+  expect(diagnosticsFollowReasoning).toBe(true);
   await expect(heatmap.getByText("spatial deviation")).toHaveCount(4);
   await expect(heatmap.getByText("delta RMS")).toHaveCount(2);
   const heatmapCanvases = heatmap.locator("canvas");
