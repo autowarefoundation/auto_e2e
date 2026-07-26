@@ -50,8 +50,8 @@ function overlayBody(): Buffer {
   const seedsBytes = seedCount * 8;
   const directoryBytes = sampleCount * 12;
   const controlsBytes = sampleCount * seedCount * horizon * 2 * 4;
-  const heatmapScalesBytes = sampleCount * 4;
   const heatmapCount = 6;
+  const heatmapScalesBytes = sampleCount * heatmapCount * 4;
   const heatmapBytes = sampleCount * heatmapCount * 32 * 32;
   const body = Buffer.alloc(
     headerBytes +
@@ -63,7 +63,7 @@ function overlayBody(): Buffer {
       heatmapBytes,
   );
   body.write("AOVL", 0, "ascii");
-  body.writeUInt16LE(3, 4);
+  body.writeUInt16LE(4, 4);
   body.writeUInt16LE(0, 6);
   body.writeUInt32LE(sampleCount, 8);
   body.writeUInt16LE(seedCount, 12);
@@ -105,8 +105,11 @@ function overlayBody(): Buffer {
   const scalesOffset = speedsOffset + sampleCount * 4;
   const heatmapsOffset = scalesOffset + heatmapScalesBytes;
   for (let row = 0; row < sampleCount; row++) {
-    body.writeFloatLE(2 + row, scalesOffset + row * 4);
     for (let branch = 0; branch < heatmapCount; branch++) {
+      body.writeFloatLE(
+        (row + 1) * (branch + 1),
+        scalesOffset + (row * heatmapCount + branch) * 4,
+      );
       for (let pixel = 0; pixel < 32 * 32; pixel++) {
         const x = pixel % 32;
         const y = Math.floor(pixel / 32);
@@ -313,7 +316,7 @@ test("trajectory overlays and geographic views honor production contracts", asyn
             eval_ade: 1.25,
             eval_fde: 2.5,
             val_fraction: 0.3,
-            overlay_schema: "v3",
+            overlay_schema: "v4",
             sample_count: 3,
           },
         ],
@@ -398,7 +401,9 @@ test("trajectory overlays and geographic views honor production contracts", asyn
   const heatmap = page.getByRole("region", {
     name: "BEV activation heatmap",
   });
-  await expect(heatmap).toContainText("shared 2.00");
+  await expect(heatmap).toContainText("per-encoder contrast");
+  await expect(heatmap.getByText("spatial deviation")).toHaveCount(4);
+  await expect(heatmap.getByText("delta RMS")).toHaveCount(2);
   const heatmapCanvases = heatmap.locator("canvas");
   await expect(heatmapCanvases).toHaveCount(6);
   const heatmapSnapshots = await heatmapCanvases.evaluateAll((canvases) =>
