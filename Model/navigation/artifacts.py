@@ -124,6 +124,7 @@ def decode_route_supervision(members: dict[str, bytes]) -> RouteSupervision:
     arrays = _decode_named_arrays(members[ROUTE_SUPERVISION_MEMBER])
     required = {
         "distance_to_corridor_m",
+        "distance_to_drivable_m",
         "route_heading_sin",
         "route_heading_cos",
         "route_heading_valid",
@@ -140,6 +141,7 @@ def decode_route_supervision(members: dict[str, bytes]) -> RouteSupervision:
         raise ValueError("destination visibility must be a binary scalar")
     return RouteSupervision(
         distance_to_corridor_m=arrays["distance_to_corridor_m"],
+        distance_to_drivable_m=arrays["distance_to_drivable_m"],
         route_heading_sin=arrays["route_heading_sin"],
         route_heading_cos=arrays["route_heading_cos"],
         route_heading_valid=arrays["route_heading_valid"],
