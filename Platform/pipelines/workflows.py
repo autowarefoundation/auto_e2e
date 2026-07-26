@@ -4576,6 +4576,7 @@ def train_il(
         if selector_enabled:
             from evaluation.checkpoint_selection import (
                 aggregate_validation_records,
+                build_selector_calibration_report,
                 freeze_component_availability,
                 score_checkpoint,
                 score_is_better,
@@ -4601,6 +4602,16 @@ def train_il(
             checkpoint_selection = score_checkpoint(
                 validation_aggregates,
                 selector_availability,
+            )
+            checkpoint_selection["calibration_report"] = (
+                build_selector_calibration_report([
+                    *[
+                        entry["checkpoint_selection"]
+                        for entry in metric_history
+                        if entry.get("checkpoint_selection") is not None
+                    ],
+                    checkpoint_selection,
+                ])
             )
             validation_aggregate_summary = {
                 "sample_count": validation_aggregates["sample_count"],
@@ -4695,7 +4706,40 @@ def train_il(
                         "components"
                     ].items()
                 },
+                **{
+                    f"selection/effective_weight/{name}": float(value)
+                    for name, value in checkpoint_selection[
+                        "effective_weights"
+                    ].items()
+                },
+                "selection/bad_epochs": float(next_bad_epochs),
             }
+            calibration_report = checkpoint_selection[
+                "calibration_report"
+            ]
+            selector_mlflow_metrics[
+                "selection/calibration/saturated_component_count"
+            ] = float(len(
+                calibration_report[
+                    "almost_always_saturated_components"
+                ]
+            ))
+            sensitivity = calibration_report["weight_sensitivity"]
+            selector_mlflow_metrics[
+                "selection/calibration/top1_stability"
+            ] = float(np.mean([
+                float(item["top_checkpoint_unchanged"])
+                for item in sensitivity
+            ]))
+            rank_correlations = [
+                float(item["spearman_rank_correlation"])
+                for item in sensitivity
+                if item["spearman_rank_correlation"] is not None
+            ]
+            if rank_correlations:
+                selector_mlflow_metrics[
+                    "selection/calibration/min_rank_correlation"
+                ] = min(rank_correlations)
             for metric_name, aggregate in validation_aggregates[
                 "metrics"
             ].items():
