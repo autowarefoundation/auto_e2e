@@ -6650,6 +6650,7 @@ def audit_kitscenes_target_reconstruction(
         stable_digest,
     )
     from training.losses.control_rollout import ROLLOUT_POLICY_VERSION
+    from training.dataset_policy import group_uid_digest
 
     if not packed_shards:
         raise ValueError("packed_shards must not be empty")
@@ -6785,9 +6786,7 @@ def audit_kitscenes_target_reconstruction(
             stream.write("\n")
     records_sha256 = sha256_file(records_path)
 
-    group_digest = hashlib.sha256(
-        "\n".join(validation_group_uids).encode("utf-8")
-    ).hexdigest()
+    group_digest = group_uid_digest(validation_group_uids)
     report["artifacts"] = {
         "sample_metrics_sha256": records_sha256,
     }
