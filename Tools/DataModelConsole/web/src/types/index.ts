@@ -394,6 +394,79 @@ export interface MLflowRegisteredModel {
 }
 
 // ---------------------------------------------------------------------------
+// Cross-system experiments
+// ---------------------------------------------------------------------------
+
+export interface ExperimentDisplacementMetrics {
+  ade?: number;
+  fde?: number;
+  gate_pass?: boolean;
+}
+
+export interface ExperimentExecution {
+  execution_id: string;
+  workflow_name: string;
+  phase: FlytePhase | "";
+  started_at: string;
+  duration_s: number;
+  url?: string;
+}
+
+export interface ExperimentModelVersion {
+  name: string;
+  version: string;
+  role?: string;
+  status: string;
+  url?: string;
+}
+
+export interface ExperimentRecord {
+  run_id: string;
+  run_name: string;
+  experiment_id: string;
+  experiment_name: string;
+  mlflow_status: MLflowRun["status"];
+  start_time: number;
+  end_time: number;
+  dataset: string;
+  dataset_version: string;
+  data_fingerprint?: string;
+  validation_scope?: string;
+  validation_split_id?: string;
+  backbone?: string;
+  fusion_mode?: string;
+  route_conditioning?: boolean;
+  seed?: string;
+  epochs?: string;
+  epochs_completed?: string;
+  lineage_status: "complete" | "partial" | "missing";
+  primary_execution_id?: string;
+  primary_execution_url?: string;
+  mlflow_url?: string;
+  evaluation?: ExperimentDisplacementMetrics;
+  validation?: ExperimentDisplacementMetrics;
+  train_execution?: ExperimentExecution;
+  eval_execution?: ExperimentExecution;
+  model_versions: ExperimentModelVersion[];
+  params: Record<string, string>;
+  tags: Record<string, string>;
+  metrics: Record<string, number>;
+}
+
+export interface ExperimentsResponse {
+  generated_at: string;
+  summary: {
+    total: number;
+    running: number;
+    failed: number;
+    evaluated: number;
+    registered: number;
+    unlinked: number;
+  };
+  experiments: ExperimentRecord[];
+}
+
+// ---------------------------------------------------------------------------
 // Flyte (proxy)
 // ---------------------------------------------------------------------------
 
