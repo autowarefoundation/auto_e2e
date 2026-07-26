@@ -21,38 +21,6 @@ from training.losses.rollout_aligned_loss import (
 ROLLOUT_VALIDATION_VERSION = "rollout_validation_v1"
 
 
-def _logged_headings(logged_xy: torch.Tensor) -> torch.Tensor:
-    if logged_xy.ndim != 3 or logged_xy.shape[2] != 2:
-        raise ValueError("logged_xy must have shape [B,T,2]")
-    origin = torch.zeros(
-        logged_xy.shape[0],
-        1,
-        2,
-        dtype=logged_xy.dtype,
-        device=logged_xy.device,
-    )
-    deltas = torch.diff(
-        torch.cat((origin, logged_xy), dim=1),
-        dim=1,
-    )
-    headings = torch.atan2(deltas[:, :, 1], deltas[:, :, 0])
-    moving = torch.linalg.vector_norm(deltas, dim=2) > 1e-4
-    resolved = []
-    previous = torch.zeros(
-        logged_xy.shape[0],
-        dtype=logged_xy.dtype,
-        device=logged_xy.device,
-    )
-    for step in range(logged_xy.shape[1]):
-        previous = torch.where(
-            moving[:, step],
-            headings[:, step],
-            previous,
-        )
-        resolved.append(previous)
-    return torch.stack(resolved, dim=1)
-
-
 def build_rollout_validation_records(
     predicted_controls: torch.Tensor,
     target_controls: torch.Tensor,
@@ -129,15 +97,16 @@ def build_rollout_validation_records(
             predicted_headings,
             predicted_speeds,
         ) = integrate_controls_torch(predicted, speeds)
-        _, _, target_speeds = integrate_controls_torch(target, speeds)
+        _, target_headings, target_speeds = integrate_controls_torch(
+            target,
+            speeds,
+        )
         comfort, _, _ = comfort_excess_per_sample(
             predicted,
             target,
             predicted_speeds,
             target_speeds,
         )
-        target_headings = _logged_headings(logged)
-
         fields = {}
         expected_field_shape = (
             batch_size,
