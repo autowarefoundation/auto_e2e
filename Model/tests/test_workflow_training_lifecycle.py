@@ -545,6 +545,24 @@ def test_navigation_objective_wiring_is_train_only_and_versioned():
         assert train_keywords[field].id == field
 
 
+def test_rollout_control_arm_uses_composite_selector_without_rollout_loss():
+    source = inspect.getsource(workflows.train_il.task_function)
+
+    assert (
+        "selector_enabled = objective_v2 or objective_v2_control"
+        in source
+    )
+    assert (
+        "rollout_aligned_loss_fn = RolloutAlignedLoss().to(device)"
+        in source
+    )
+    assert '"enabled": objective_v2' in source
+    assert (
+        workflows.ROLLOUT_ALIGNED_CONTROL_OBJECTIVE_VERSION
+        == "rollout_aligned_control_v1"
+    )
+
+
 def test_kitscenes_epoch_evaluation_preserves_auto_e2e_horizon():
     from training.dataset_policy import KITSCENES_TRAINING_POLICY
 
