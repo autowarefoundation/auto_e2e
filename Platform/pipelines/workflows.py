@@ -2645,6 +2645,9 @@ def train_il(
     enable_route_consistency: bool = False,
     route_consistency_weight: float = 0.10,
     navigation_quality_audit: Optional[FlyteFile] = None,
+    reconstruction_audit: Optional[FlyteFile] = None,
+    reconstruction_audit_decision: str = "",
+    reconstruction_audit_rationale: str = "",
     enable_reasoning: bool = False,
     reasoning_mode: str = "pooled_latent",
     # Small default: the reasoning branch is zero-init coupled (alpha=0), so it
@@ -2704,6 +2707,7 @@ def train_il(
     policy-accepted scene partitions.
     """
     import os
+    import hashlib
     import json
     import random
     import torch
@@ -3097,6 +3101,108 @@ def train_il(
             actual_validation_sample_count,
             actual_validation_sample_digest,
         )
+    reconstruction_audit_contract = None
+    if objective_v2:
+        if reconstruction_audit is None:
+            raise ValueError(
+                "rollout-aligned training requires a reconstruction audit"
+            )
+        if reconstruction_audit_decision != "go":
+            raise ValueError(
+                "rollout-aligned training requires an explicit Go decision"
+            )
+        if len(reconstruction_audit_rationale.strip()) < 20:
+            raise ValueError(
+                "reconstruction audit Go rationale is too short"
+            )
+        audit_path = str(reconstruction_audit.download())
+        with open(audit_path, "rb") as stream:
+            audit_bytes = stream.read()
+        try:
+            audit_report = json.loads(audit_bytes)
+        except (UnicodeError, json.JSONDecodeError) as error:
+            raise ValueError(
+                "reconstruction audit is not valid JSON"
+            ) from error
+        if not isinstance(audit_report, dict):
+            raise ValueError(
+                "reconstruction audit must be a JSON object"
+            )
+        if (
+            audit_report.get("schema_version")
+            != "target_rollout_reconstruction_v1"
+        ):
+            raise ValueError(
+                "unsupported reconstruction audit schema"
+            )
+        provenance = audit_report.get("provenance")
+        if not isinstance(provenance, dict):
+            raise ValueError(
+                "reconstruction audit has no provenance"
+            )
+        expected_audit_identity = {
+            "dataset": Dataset.KITSCENES.value,
+            "dataset_version": dataset_version,
+            "source_revision": packed_source_revision,
+            "packed_contract_digest": packed_contract_digest,
+            "validation_group_uid_digest": validation_group_digest,
+            "validation_sample_uid_digest": (
+                selected_validation_sample_digest
+            ),
+        }
+        mismatches = {
+            key: {
+                "expected": expected,
+                "actual": provenance.get(key),
+            }
+            for key, expected in expected_audit_identity.items()
+            if provenance.get(key) != expected
+        }
+        if mismatches:
+            raise ValueError(
+                "reconstruction audit identity differs from training: "
+                f"{mismatches}"
+            )
+        if (
+            int(audit_report.get("sample_count", -1))
+            != selected_validation_sample_count
+            or int(audit_report.get("scene_count", -1))
+            != len(fixed_validation_groups or ())
+        ):
+            raise ValueError(
+                "reconstruction audit coverage differs from validation"
+            )
+        if not bool(audit_report.get("thresholds_pass", False)):
+            availability = audit_report.get("metric_availability", {})
+            if (
+                not isinstance(availability, dict)
+                or availability.get(
+                    "current_model_pose_grounded_error"
+                )
+                != "computed"
+            ):
+                raise ValueError(
+                    "a threshold exception requires current-model "
+                    "pose-grounded error evidence"
+                )
+        reconstruction_audit_contract = {
+            "decision": reconstruction_audit_decision,
+            "rationale": reconstruction_audit_rationale.strip(),
+            "report_sha256": hashlib.sha256(audit_bytes).hexdigest(),
+            "thresholds_pass": bool(
+                audit_report.get("thresholds_pass", False)
+            ),
+            "audit_code_revision": provenance.get(
+                "audit_code_revision"
+            ),
+            "rollout_policy_version": provenance.get(
+                "rollout_policy_version"
+            ),
+        }
+    elif reconstruction_audit is not None:
+        raise ValueError(
+            "reconstruction audit is accepted only by rollout-aligned training"
+        )
     navigation_repeat_policy = (
         NavigationRepeatPolicy()
         if enable_junction_sampling
@@ -3406,6 +3512,7 @@ def train_il(
         },
         "route_consistency": route_consistency_config,
         "rollout_aligned_loss": rollout_aligned_config,
+        "reconstruction_audit": reconstruction_audit_contract,
         "trajectory_training_policy": training_policy.metadata(),
         "val_fraction": val_fraction,
         "validation_scope": validation_scope,
@@ -3590,6 +3697,11 @@ def train_il(
                     training_policy.temporal_weight_normalization
                 ),
                 "train/objective_version": training_objective_version,
+                "train/reconstruction_audit_sha256": (
+                    reconstruction_audit_contract["report_sha256"]
+                    if reconstruction_audit_contract is not None
+                    else "none"
+                ),
                 "train/junction_sampling_enabled": (
                     enable_junction_sampling
                 ),
@@ -4547,6 +4659,7 @@ def train_il(
             },
             "route_consistency": route_consistency_config,
             "rollout_aligned_loss": rollout_aligned_config,
+            "reconstruction_audit": reconstruction_audit_contract,
             "final_loss": losses_per_epoch[-1],
             "losses_per_epoch": losses_per_epoch,
             "val_fraction": val_fraction,
