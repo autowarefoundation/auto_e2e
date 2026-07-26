@@ -161,6 +161,41 @@ def _navigation_validation_batch(
     return batch
 
 
+def _rollout_selector_validation_batch(sample_uid="sample-a"):
+    from navigation.geometry import DEFAULT_NAVIGATION_GEOMETRY
+
+    batch = _validation_batch([sample_uid])
+    geometry = DEFAULT_NAVIGATION_GEOMETRY
+    field = torch.zeros(
+        1,
+        geometry.height_px,
+        geometry.width_px,
+        dtype=torch.float32,
+    )
+    batch.update({
+        "split_group_uid": ["scene-a"],
+        "pose_current": torch.tensor(
+            [[49.0, 8.0, 0.0]],
+            dtype=torch.float64,
+        ),
+        "gps_future": torch.tensor(
+            [[[49.0, 8.0]] * 65],
+            dtype=torch.float64,
+        ),
+        "route_supervision": {
+            "distance_to_corridor_m": field,
+            "distance_to_drivable_m": field,
+            "destination_xy_m": torch.zeros(1, 2),
+            "destination_visible": torch.tensor([False]),
+            "available": torch.tensor([True]),
+        },
+        "navigation_metadata": {
+            "route_intersection": torch.tensor([False]),
+        },
+    })
+    return batch
+
+
 def test_epoch_evaluation_restores_mode_and_hashes_fixed_uids():
     model = _MetricModel()
     loader = [
@@ -189,6 +224,33 @@ def test_epoch_evaluation_restores_mode_and_hashes_fixed_uids():
     }
     assert model.training is True
     assert model.reset_count == 2
+
+
+def test_epoch_evaluation_builds_logged_xy_selector_records():
+    model = _MetricModel()
+    loader = [
+        (
+            _rollout_selector_validation_batch(),
+            None,
+            "pseudo",
+        )
+    ]
+
+    metrics = workflows._evaluate_open_loop(
+        model,
+        loader,
+        torch.device("cpu"),
+        include_rollout_selector_records=True,
+    )
+
+    record = metrics["rollout_selector_records"][0]
+    assert record["sample_uid"] == "sample-a"
+    assert record["split_group_uid"] == "scene-a"
+    assert record["ade_3s_m"] > 0.0
+    assert record["fde_6_4s_m"] > record["ade_3s_m"]
+    assert record["comfort_excess"] == 0.0
+    assert record["offroad_excess"] == 0.0
+    assert record["route_gap"] == 0.0
 
 
 def test_evaluation_noise_is_stable_by_sample_uid():
@@ -609,6 +671,36 @@ def test_resume_record_recovers_self_digest_and_metrics(tmp_path):
     ).hexdigest()
 
 
+def test_resume_record_recovers_composite_selection(tmp_path):
+    checkpoint = tmp_path / "epoch-0003.pt"
+    checkpoint.write_bytes(b"trusted-checkpoint")
+    selection = {
+        "policy_version": "rollout_composite_selector_v1",
+        "score": 0.75,
+    }
+    payload = {
+        "epoch": 3,
+        "training_state": {
+            "current_checkpoint_uri": (
+                "s3://checkpoints/imitation-learning/run/epoch-0003.pt"
+            ),
+            "metric_history": [{
+                "epoch": 3,
+                "val_ade": 1.25,
+                "val_fde": 2.5,
+                "checkpoint_selection": selection,
+            }],
+        },
+    }
+
+    record = workflows._resumed_checkpoint_record(
+        payload,
+        str(checkpoint),
+    )
+
+    assert record["selection"] == selection
+
+
 class _RegistryClient:
     def __init__(self):
         self.registered = False
@@ -660,6 +752,33 @@ def test_registry_reuses_one_version_when_best_is_final():
     assert client.tags[
         ("auto-e2e-driving-policy", "1", "checkpoint_role")
     ] == "best,final"
+
+
+def test_registry_records_composite_checkpoint_selection():
+    client = _RegistryClient()
+    selection = {
+        "policy_version": "rollout_composite_selector_v1",
+        "score": 0.75,
+    }
+
+    version = workflows._register_checkpoint_version(
+        client,
+        run_id="run-1",
+        roles=["best"],
+        epoch=4,
+        checkpoint_uri="s3://checkpoints/run-1/epoch-0004.pt",
+        checkpoint_sha256="a" * 64,
+        ade=1.0,
+        fde=2.0,
+        selection=selection,
+    )
+
+    assert client.tags[
+        ("auto-e2e-driving-policy", version, "checkpoint_selector_policy")
+    ] == selection["policy_version"]
+    assert client.tags[
+        ("auto-e2e-driving-policy", version, "checkpoint_composite_score")
+    ] == str(selection["score"])
 
 
 def test_recovery_graph_never_calls_ingest_or_cosmos():
