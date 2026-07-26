@@ -10,6 +10,7 @@ import torch
 from model_components.losses import TrajectoryImitationLoss
 from navigation.geometry import DEFAULT_NAVIGATION_GEOMETRY
 from training.losses import RolloutAlignedLoss
+from training.losses.control_rollout import integrate_controls_torch
 
 
 def _measure(
@@ -98,6 +99,10 @@ def main() -> None:
         signal_scales=(0.778, 0.0350),
     ).to(device)
     aligned_loss = RolloutAlignedLoss().to(device)
+    logged_positions, _, _ = integrate_controls_torch(
+        target,
+        initial_speed,
+    )
 
     def action_only() -> torch.Tensor:
         return action_loss(predicted, target)
@@ -107,6 +112,7 @@ def main() -> None:
             predicted,
             target,
             initial_speed,
+            logged_positions,
             route_supervision,
             map_valid,
             route_valid,
