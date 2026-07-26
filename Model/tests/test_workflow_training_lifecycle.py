@@ -174,6 +174,13 @@ def _rollout_selector_validation_batch(sample_uid="sample-a"):
     )
     batch.update({
         "split_group_uid": ["scene-a"],
+        "route_mask": torch.zeros(
+            1,
+            2,
+            geometry.height_px,
+            geometry.width_px,
+            dtype=torch.float32,
+        ),
         "pose_current": torch.tensor(
             [[49.0, 8.0, 0.0]],
             dtype=torch.float64,
