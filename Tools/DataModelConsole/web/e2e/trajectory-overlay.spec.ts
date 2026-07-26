@@ -50,17 +50,25 @@ function overlayBody(): Buffer {
   const seedsBytes = seedCount * 8;
   const directoryBytes = sampleCount * 12;
   const controlsBytes = sampleCount * seedCount * horizon * 2 * 4;
+  const heatmapScalesBytes = sampleCount * 4;
+  const heatmapBytes = sampleCount * 3 * 32 * 32;
   const body = Buffer.alloc(
-    headerBytes + seedsBytes + directoryBytes + controlsBytes + sampleCount * 4,
+    headerBytes +
+      seedsBytes +
+      directoryBytes +
+      controlsBytes +
+      sampleCount * 4 +
+      heatmapScalesBytes +
+      heatmapBytes,
   );
   body.write("AOVL", 0, "ascii");
-  body.writeUInt16LE(1, 4);
+  body.writeUInt16LE(2, 4);
   body.writeUInt16LE(0, 6);
   body.writeUInt32LE(sampleCount, 8);
   body.writeUInt16LE(seedCount, 12);
   body.writeUInt16LE(horizon, 14);
   body.writeUInt16LE(2, 16);
-  body.writeUInt16LE(0, 18);
+  body.writeUInt16LE(3, 18);
 
   [0, 1, 2].forEach((seed, index) => {
     body.writeBigInt64LE(BigInt(seed), headerBytes + index * 8);
@@ -92,6 +100,26 @@ function overlayBody(): Buffer {
   const speedsOffset = controlsOffset + controlsBytes;
   for (let row = 0; row < sampleCount; row++) {
     body.writeFloatLE(8 + row, speedsOffset + row * 4);
+  }
+  const scalesOffset = speedsOffset + sampleCount * 4;
+  const heatmapsOffset = scalesOffset + heatmapScalesBytes;
+  for (let row = 0; row < sampleCount; row++) {
+    body.writeFloatLE(2 + row, scalesOffset + row * 4);
+    for (let branch = 0; branch < 3; branch++) {
+      for (let pixel = 0; pixel < 32 * 32; pixel++) {
+        const x = pixel % 32;
+        const y = Math.floor(pixel / 32);
+        const value =
+          branch === 0
+            ? x * 8
+            : branch === 1
+              ? y * 8
+              : (x + y) * 4;
+        const offset =
+          heatmapsOffset + (row * 3 + branch) * 32 * 32 + pixel;
+        body.writeUInt8(Math.min(255, value), offset);
+      }
+    }
   }
   return body;
 }
@@ -241,6 +269,14 @@ test("trajectory overlays and geographic views honor production contracts", asyn
           members: {
             "cam_0.jpg": { offset: index * 10_000 + 512, size: 200 },
             "cam_1.jpg": { offset: index * 10_000 + 2048, size: 200 },
+            "map_semantic.npz": {
+              offset: index * 10_000 + 3072,
+              size: 200,
+            },
+            "route_mask.npz": {
+              offset: index * 10_000 + 4096,
+              size: 200,
+            },
           },
           ego_now: [8 + index, 0.05, 0, 0],
           ego_history: egoHistory(8 + index),
@@ -271,7 +307,7 @@ test("trajectory overlays and geographic views honor production contracts", asyn
             eval_ade: 1.25,
             eval_fde: 2.5,
             val_fraction: 0.3,
-            overlay_schema: "v1",
+            overlay_schema: "v2",
             sample_count: 3,
           },
         ],
@@ -331,6 +367,13 @@ test("trajectory overlays and geographic views honor production contracts", asyn
         body: PIXEL,
       });
     }
+    if (path.endsWith("/navigation-map")) {
+      return route.fulfill({
+        status: 200,
+        contentType: "image/png",
+        body: PIXEL,
+      });
+    }
     return route.fulfill({ status: 404, body: "not mocked" });
   });
 
@@ -342,6 +385,23 @@ test("trajectory overlays and geographic views honor production contracts", asyn
   await expect(page.getByText("3 seeds | median")).toBeVisible();
   await expect(page.getByText("episode/clip hold-out")).toBeVisible();
   await expect(page.getByText("Scene map")).toBeVisible();
+  const navigationMap = page.getByRole("region", {
+    name: "Rendered navigation map",
+  });
+  await expect(navigationMap.getByRole("img")).toBeVisible();
+  const heatmap = page.getByRole("region", {
+    name: "BEV activation heatmap",
+  });
+  await expect(heatmap).toContainText("max RMS 2.00");
+  const heatmapCanvas = heatmap.locator("canvas");
+  const heatmapSnapshot = () =>
+    heatmapCanvas.evaluate((canvas) =>
+      (canvas as HTMLCanvasElement).toDataURL(),
+    );
+  const fusedHeatmap = await heatmapSnapshot();
+  await heatmap.getByRole("tab", { name: "Camera" }).click();
+  await expect.poll(heatmapSnapshot).not.toBe(fusedHeatmap);
+  await heatmap.getByRole("tab", { name: "Fused" }).click();
   expect(rigRequestPath).toBe(
     "/api/v1/datasets/kitscenes/shards/train-000000.tar/rig-projection",
   );
@@ -454,6 +514,8 @@ test("trajectory overlays and geographic views honor production contracts", asyn
 
   await page.setViewportSize({ width: 390, height: 844 });
   await expect(page.getByText("Scene map")).toBeVisible();
+  await expect(navigationMap.getByRole("img")).toBeVisible();
+  await expect(heatmapCanvas).toBeVisible();
   const overflow = await page.evaluate(
     () => document.documentElement.scrollWidth - window.innerWidth,
   );
