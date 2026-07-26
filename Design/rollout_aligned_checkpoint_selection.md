@@ -391,9 +391,13 @@ its term is absent in both arms; this design does not force it off.
 
 Keeping `lambda_jepa` fixed does not by itself guarantee that the World Model
 retains the same influence after planner terms are added. Before the full run,
-a fixed smoke batch records gradient norms from action, rollout, constraint,
-and weighted JEPA losses into the shared camera backbone. The treatment must
-show finite non-zero JEPA gradients; no automatic gradient balancing is added.
+a fixed smoke batch records isolated gradient norms from action, rollout, and
+constraint losses into planner parameters, and from weighted JEPA into the
+World Model's trainable parameters. JEPA intentionally does not update the
+shared image backbone in the current architecture because the World Model
+frame encoder detaches that shared feature map. The treatment must show finite
+non-zero JEPA gradients in World Model parameters; no automatic gradient
+balancing is added.
 
 The action term is dimensionless after signal normalization. Rollout and map
 terms contain metric quantities. The fixed lambdas define their numerical
