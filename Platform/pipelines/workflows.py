@@ -213,6 +213,14 @@ KITScenesBenchmarkOutput = NamedTuple(
     predictions=FlyteFile,
     report=FlyteFile,
 )
+ReconstructionAuditOutput = NamedTuple(
+    "ReconstructionAuditOutput",
+    thresholds_pass=bool,
+    report_sha256=str,
+    records_sha256=str,
+    report=FlyteFile,
+    records=FlyteFile,
+)
 # wf_create_dataset returns just the ready-to-train WebDataset shards (train_il
 # reads reasoning supervision from in-shard reasoning.json members). The
 # versioned reasoning-label artifact persists independently in S3 (the
@@ -6079,6 +6087,229 @@ def evaluate_kitscenes_benchmark_checkpoint(
     )
 
 
+@task(
+    container_image=EVAL_IMAGE,
+    requests=Resources(cpu="4", mem="16Gi"),
+    limits=Resources(cpu="4", mem="16Gi"),
+    environment={
+        "AUTO_E2E_EVAL_IMAGE": EVAL_IMAGE,
+    },
+)
+def audit_kitscenes_target_reconstruction(
+    packed_shards: List[FlyteDirectory],
+    validation_group_uids: List[str],
+    expected_validation_sample_uid_digest: str,
+    audit_code_revision: str,
+    expected_dataset_version: str = KITSCENES_NAVIGATION_DATASET_VERSION,
+) -> ReconstructionAuditOutput:
+    """Audit target-control rollout against packed GPS without image decode."""
+    import hashlib
+    import json
+    import os
+    import re
+    from pathlib import Path
+
+    from evaluation.reconstruction_audit import (
+        audit_packed_target_rollout_reconstruction,
+        load_packed_reconstruction_inputs,
+    )
+    from Platform.pipelines.training_checkpoint import (
+        sha256_file,
+        stable_digest,
+    )
+    from training.losses.control_rollout import ROLLOUT_POLICY_VERSION
+
+    if not packed_shards:
+        raise ValueError("packed_shards must not be empty")
+    if (
+        not validation_group_uids
+        or validation_group_uids
+        != sorted(set(validation_group_uids))
+        or any(not uid for uid in validation_group_uids)
+    ):
+        raise ValueError(
+            "validation_group_uids must be sorted, unique, and non-empty"
+        )
+    if not re.fullmatch(
+        r"[0-9a-f]{64}",
+        expected_validation_sample_uid_digest,
+    ):
+        raise ValueError(
+            "expected_validation_sample_uid_digest must be a SHA-256"
+        )
+    if not re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", audit_code_revision):
+        raise ValueError(
+            "audit_code_revision must be a 40- or 64-character revision"
+        )
+    if not expected_dataset_version:
+        raise ValueError("expected_dataset_version must not be empty")
+
+    shard_dirs: list[str] = []
+    shard_identities: list[dict] = []
+    dataset_versions: set[str] = set()
+    source_revisions: set[str] = set()
+    contract_digests: set[str] = set()
+    for shard in packed_shards:
+        shard_uri = str(getattr(shard, "remote_source", "") or shard)
+        shard_dir = str(shard.download())
+        manifest_path = Path(shard_dir) / "manifest.json"
+        if not manifest_path.is_file():
+            raise FileNotFoundError(
+                f"packed shard manifest is missing: {manifest_path}"
+            )
+        manifest_bytes = manifest_path.read_bytes()
+        try:
+            manifest = json.loads(manifest_bytes)
+        except json.JSONDecodeError as error:
+            raise ValueError(
+                f"invalid packed shard manifest: {manifest_path}"
+            ) from error
+        if not isinstance(manifest, dict):
+            raise ValueError(
+                f"packed shard manifest must be an object: {manifest_path}"
+            )
+        if manifest.get("dataset") != Dataset.KITSCENES.value:
+            raise ValueError(
+                "reconstruction audit only accepts KITScenes shards"
+            )
+        if not bool(manifest.get("has_gps", False)):
+            raise ValueError(
+                f"packed shard has no pose-grounded trajectory: {shard_dir}"
+            )
+        dataset_version = str(manifest.get("dataset_version", ""))
+        source_revision = str(manifest.get("source_revision", ""))
+        if not dataset_version or not source_revision:
+            raise ValueError(
+                f"packed shard has incomplete provenance: {shard_dir}"
+            )
+        dataset_versions.add(dataset_version)
+        source_revisions.add(source_revision)
+        contract_digests.add(stable_digest(manifest.get("contracts")))
+        identity = {
+            "contracts": manifest.get("contracts"),
+            "dataset": manifest.get("dataset"),
+            "dataset_version": dataset_version,
+            "hz": int(manifest.get("hz", 0)),
+            "manifest_sha256": hashlib.sha256(
+                manifest_bytes
+            ).hexdigest(),
+            "partition_id": manifest.get("partition_id"),
+            "shard_names": list(manifest.get("shard_names", [])),
+            "source_revision": source_revision,
+            "total_samples": int(manifest.get("total_samples", 0)),
+            "uri": shard_uri,
+        }
+        shard_identities.append(identity)
+        if identity["total_samples"] > 0:
+            shard_dirs.append(shard_dir)
+
+    if not shard_dirs:
+        raise ValueError("all packed shard partitions are empty")
+    if dataset_versions != {expected_dataset_version}:
+        raise ValueError(
+            "packed dataset version mismatch: "
+            f"expected={expected_dataset_version!r} "
+            f"actual={sorted(dataset_versions)}"
+        )
+    if len(source_revisions) != 1:
+        raise ValueError(
+            f"packed shards mix source revisions: {sorted(source_revisions)}"
+        )
+    if len(contract_digests) != 1:
+        raise ValueError("packed shards mix packing contracts")
+    shard_identities.sort(
+        key=lambda item: (
+            str(item["partition_id"]),
+            str(item["shard_names"]),
+        )
+    )
+
+    inputs = load_packed_reconstruction_inputs(
+        shard_dirs,
+        validation_group_uids=validation_group_uids,
+    )
+    report = audit_packed_target_rollout_reconstruction(inputs)
+    actual_sample_digest = str(report["sample_uid_digest"])
+    if actual_sample_digest != expected_validation_sample_uid_digest:
+        raise ValueError(
+            "validation snapshot digest mismatch: "
+            f"expected={expected_validation_sample_uid_digest} "
+            f"actual={actual_sample_digest}"
+        )
+
+    records = report.pop("records")
+    output_dir = Path("/tmp/target-rollout-reconstruction-audit")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    records_path = output_dir / "sample_metrics.jsonl"
+    with records_path.open("w", encoding="ascii") as stream:
+        for record in records:
+            stream.write(json.dumps(
+                record,
+                allow_nan=False,
+                ensure_ascii=True,
+                separators=(",", ":"),
+                sort_keys=True,
+            ))
+            stream.write("\n")
+    records_sha256 = sha256_file(records_path)
+
+    group_digest = hashlib.sha256(
+        "\n".join(validation_group_uids).encode("utf-8")
+    ).hexdigest()
+    report["artifacts"] = {
+        "sample_metrics_sha256": records_sha256,
+    }
+    report["metric_availability"] = {
+        "current_model_pose_grounded_error": (
+            "required_for_review_if_thresholds_fail"
+        ),
+        "target_rollout_reconstruction": "computed",
+    }
+    report["provenance"] = {
+        "audit_code_revision": audit_code_revision,
+        "container_image": os.environ["AUTO_E2E_EVAL_IMAGE"],
+        "dataset": Dataset.KITSCENES.value,
+        "dataset_version": next(iter(dataset_versions)),
+        "packed_contract_digest": next(iter(contract_digests)),
+        "packed_manifest_digest": stable_digest(shard_identities),
+        "partition_count": len(shard_identities),
+        "rollout_policy_version": ROLLOUT_POLICY_VERSION,
+        "source_revision": next(iter(source_revisions)),
+        "validation_group_count": len(validation_group_uids),
+        "validation_group_uid_digest": group_digest,
+        "validation_sample_uid_digest": actual_sample_digest,
+        "validation_split_id": f"exact-groups-{group_digest[:16]}",
+    }
+    report_path = output_dir / "report.json"
+    report_path.write_text(
+        json.dumps(
+            report,
+            allow_nan=False,
+            ensure_ascii=True,
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="ascii",
+    )
+    report_sha256 = sha256_file(report_path)
+
+    print(
+        "Target rollout reconstruction audit: "
+        f"samples={report['sample_count']} "
+        f"scenes={report['scene_count']} "
+        f"thresholds_pass={report['thresholds_pass']} "
+        f"report_sha256={report_sha256}"
+    )
+    return ReconstructionAuditOutput(
+        thresholds_pass=bool(report["thresholds_pass"]),
+        report_sha256=report_sha256,
+        records_sha256=records_sha256,
+        report=FlyteFile(str(report_path)),
+        records=FlyteFile(str(records_path)),
+    )
+
+
 
 # ============================================================
 # Workflows
@@ -6100,6 +6331,26 @@ def wf_evaluate_kitscenes_benchmark(
         expected_manifest_sha256=expected_manifest_sha256,
         mlflow_run_id=mlflow_run_id,
         batch_size=batch_size,
+    )
+
+
+@workflow
+def wf_audit_kitscenes_target_reconstruction(
+    packed_shards: List[FlyteDirectory],
+    validation_group_uids: List[str],
+    expected_validation_sample_uid_digest: str,
+    audit_code_revision: str,
+    expected_dataset_version: str = KITSCENES_NAVIGATION_DATASET_VERSION,
+) -> ReconstructionAuditOutput:
+    """Run the immutable preflight gate for rollout-aligned training."""
+    return audit_kitscenes_target_reconstruction(
+        packed_shards=packed_shards,
+        validation_group_uids=validation_group_uids,
+        expected_validation_sample_uid_digest=(
+            expected_validation_sample_uid_digest
+        ),
+        audit_code_revision=audit_code_revision,
+        expected_dataset_version=expected_dataset_version,
     )
 
 
