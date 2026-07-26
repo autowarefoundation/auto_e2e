@@ -779,6 +779,7 @@ def _evaluate_open_loop(
                             batch["route_valid"],
                             batch_uids,
                             batch_group_uids,
+                            route_mask=route_mask,
                             route_intersections=route_intersections,
                         )
                     )
