@@ -17,6 +17,8 @@ type Config struct {
 	ArtifactsBucket string
 	MLflowURL       string
 	FlyteURL        string
+	MLflowPublicURL string
+	FlyteConsoleURL string
 	PresignExpiry   time.Duration
 	// CORSOrigin is the value for Access-Control-Allow-Origin.
 	// "*" for development; set to the console origin in production.
@@ -42,6 +44,8 @@ func Load() *Config {
 		ArtifactsBucket: getenv("ARTIFACTS_BUCKET", "auto-e2e-platform-artifacts-381491877296"),
 		MLflowURL:       getenv("MLFLOW_URL", "http://mlflow.mlflow.svc.cluster.local:5000"),
 		FlyteURL:        getenv("FLYTE_URL", "http://flyteadmin.flyte.svc.cluster.local:80"),
+		MLflowPublicURL: getenv("MLFLOW_PUBLIC_URL", ""),
+		FlyteConsoleURL: getenv("FLYTE_CONSOLE_URL", ""),
 		CORSOrigin:      getenv("CORS_ORIGIN", "*"),
 		FlyteProject:    getenv("FLYTE_PROJECT", "auto-e2e"),
 		FlyteDomain:     getenv("FLYTE_DOMAIN", "development"),

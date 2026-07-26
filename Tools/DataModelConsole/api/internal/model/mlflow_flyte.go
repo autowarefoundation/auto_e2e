@@ -1,6 +1,9 @@
 package model
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"strings"
+)
 
 // This file normalizes the verbose, nested MLflow REST and Flyte Admin JSON
 // shapes into the FLAT shapes the console frontend consumes. The proxy used to
@@ -42,15 +45,21 @@ type MLflowRun struct {
 	StartTime    int64              `json:"start_time"`
 	EndTime      int64              `json:"end_time"`
 	Params       map[string]string  `json:"params"`
+	Tags         map[string]string  `json:"tags"`
 	Metrics      map[string]float64 `json:"metrics"`
 }
 
 // MLflowModelVersion is one registered-model version (flat).
 type MLflowModelVersion struct {
-	Version string `json:"version"`
-	Stage   string `json:"stage"`
-	RunID   string `json:"run_id"`
-	Status  string `json:"status"`
+	Name          string            `json:"name,omitempty"`
+	Version       string            `json:"version"`
+	Stage         string            `json:"stage"`
+	RunID         string            `json:"run_id"`
+	Status        string            `json:"status"`
+	Description   string            `json:"description,omitempty"`
+	CreatedAt     int64             `json:"created_at,omitempty"`
+	LastUpdatedAt int64             `json:"last_updated_at,omitempty"`
+	Tags          map[string]string `json:"tags,omitempty"`
 }
 
 // MLflowRegisteredModel is the flat registered-model shape.
@@ -159,6 +168,10 @@ type rawRun struct {
 			Key   string `json:"key"`
 			Value string `json:"value"`
 		} `json:"params"`
+		Tags []struct {
+			Key   string `json:"key"`
+			Value string `json:"value"`
+		} `json:"tags"`
 		Metrics []struct {
 			Key   string          `json:"key"`
 			Value json.RawMessage `json:"value"`
@@ -170,6 +183,10 @@ func (r rawRun) flatten() MLflowRun {
 	params := map[string]string{}
 	for _, p := range r.Data.Params {
 		params[p.Key] = p.Value
+	}
+	tags := map[string]string{}
+	for _, tag := range r.Data.Tags {
+		tags[tag.Key] = tag.Value
 	}
 	metrics := map[string]float64{}
 	seenMetrics := map[string]struct{}{}
@@ -185,6 +202,9 @@ func (r rawRun) flatten() MLflowRun {
 	// run_name lives under info in modern MLflow; fall back to the params tag.
 	name := r.Info.RunName
 	if name == "" {
+		name = tags["mlflow.runName"]
+	}
+	if name == "" {
 		name = params["mlflow.runName"]
 	}
 	return MLflowRun{
@@ -195,6 +215,7 @@ func (r rawRun) flatten() MLflowRun {
 		StartTime:    asInt64(r.Info.StartTime),
 		EndTime:      asInt64(r.Info.EndTime),
 		Params:       params,
+		Tags:         tags,
 		Metrics:      metrics,
 	}
 }
@@ -241,6 +262,56 @@ func NormalizeMLflowModelsPage(
 		out = append(out, MLflowRegisteredModel{Name: m.Name, LatestVersions: versions})
 	}
 	return TokenPage[MLflowRegisteredModel]{
+		Items:         out,
+		NextPageToken: env.NextPageToken,
+	}, nil
+}
+
+// NormalizeMLflowModelVersionsPage decodes model-versions/search, preserving
+// every immutable registry version rather than MLflow's one-version-per-stage
+// latest_versions summary.
+func NormalizeMLflowModelVersionsPage(
+	body []byte,
+) (TokenPage[MLflowModelVersion], error) {
+	var env struct {
+		ModelVersions []struct {
+			Name          string          `json:"name"`
+			Version       string          `json:"version"`
+			CurrentStage  string          `json:"current_stage"`
+			RunID         string          `json:"run_id"`
+			Status        string          `json:"status"`
+			Description   string          `json:"description"`
+			CreatedAt     json.RawMessage `json:"creation_timestamp"`
+			LastUpdatedAt json.RawMessage `json:"last_updated_timestamp"`
+			Tags          []struct {
+				Key   string `json:"key"`
+				Value string `json:"value"`
+			} `json:"tags"`
+		} `json:"model_versions"`
+		NextPageToken string `json:"next_page_token"`
+	}
+	if err := json.Unmarshal(body, &env); err != nil {
+		return TokenPage[MLflowModelVersion]{}, err
+	}
+	out := make([]MLflowModelVersion, 0, len(env.ModelVersions))
+	for _, version := range env.ModelVersions {
+		tags := make(map[string]string, len(version.Tags))
+		for _, tag := range version.Tags {
+			tags[tag.Key] = tag.Value
+		}
+		out = append(out, MLflowModelVersion{
+			Name:          version.Name,
+			Version:       version.Version,
+			Stage:         version.CurrentStage,
+			RunID:         version.RunID,
+			Status:        version.Status,
+			Description:   version.Description,
+			CreatedAt:     asInt64(version.CreatedAt),
+			LastUpdatedAt: asInt64(version.LastUpdatedAt),
+			Tags:          tags,
+		})
+	}
+	return TokenPage[MLflowModelVersion]{
 		Items:         out,
 		NextPageToken: env.NextPageToken,
 	}, nil
@@ -332,6 +403,11 @@ func (e rawFlyteExecution) flatten() FlyteExecution {
 	name := e.Closure.WorkflowID.Name
 	if name == "" {
 		name = e.Spec.LaunchPlan.Name
+	}
+	name = strings.TrimPrefix(name, ".flytegen.")
+	name = strings.TrimPrefix(name, ".")
+	if i := strings.LastIndexByte(name, '.'); i >= 0 {
+		name = name[i+1:]
 	}
 	return FlyteExecution{
 		ExecutionID:  e.ID.Name,

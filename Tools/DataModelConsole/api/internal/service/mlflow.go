@@ -175,8 +175,21 @@ func (m *MLflowService) SearchExperiments(ctx context.Context, maxResults int, p
 // (the MLflow REST API only accepts POST for runs/search; the console
 // endpoint stays GET and translates here).
 func (m *MLflowService) SearchRuns(ctx context.Context, experimentID string, maxResults int, pageToken string) (*UpstreamResult, error) {
+	return m.SearchRunsForExperiments(
+		ctx, []string{experimentID}, maxResults, pageToken,
+	)
+}
+
+// SearchRunsForExperiments searches several experiment buckets in one MLflow
+// request so the cross-system dashboard does not fan out one call per bucket.
+func (m *MLflowService) SearchRunsForExperiments(
+	ctx context.Context,
+	experimentIDs []string,
+	maxResults int,
+	pageToken string,
+) (*UpstreamResult, error) {
 	body := map[string]any{
-		"experiment_ids": []string{experimentID},
+		"experiment_ids": experimentIDs,
 		"order_by":       []string{"attributes.start_time DESC"},
 	}
 	if maxResults > 0 {
@@ -205,6 +218,25 @@ func (m *MLflowService) SearchRegisteredModels(ctx context.Context, maxResults i
 		q.Set("page_token", pageToken)
 	}
 	return httpGetJSON(ctx, m.client, m.baseURL, "/api/2.0/mlflow/registered-models/search", q)
+}
+
+// SearchModelVersions returns every immutable Registry version. The registered
+// models search endpoint exposes only one latest version per lifecycle stage.
+func (m *MLflowService) SearchModelVersions(
+	ctx context.Context,
+	maxResults int,
+	pageToken string,
+) (*UpstreamResult, error) {
+	q := url.Values{}
+	if maxResults > 0 {
+		q.Set("max_results", strconv.Itoa(maxResults))
+	}
+	if pageToken != "" {
+		q.Set("page_token", pageToken)
+	}
+	return httpGetJSON(
+		ctx, m.client, m.baseURL, "/api/2.0/mlflow/model-versions/search", q,
+	)
 }
 
 // RunStats aggregates dashboard KPIs from MLflow: total run count across all
@@ -320,6 +352,9 @@ func (m *MLflowService) fetchRunStats(ctx context.Context) (runStatsValue, error
 				continue
 			}
 			seenRunIDs[run.RunID] = struct{}{}
+			if !isModelExperimentRun(run) {
+				continue
+			}
 			value.totalRuns++
 			if value.hasADE {
 				continue

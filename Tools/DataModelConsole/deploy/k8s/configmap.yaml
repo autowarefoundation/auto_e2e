@@ -10,3 +10,7 @@ data:
   # not exercised on the primary path. Pin it to the CloudFront console origin
   # for any cross-origin SDK/CLI use; apply.sh substitutes ${CONSOLE_ORIGIN}.
   cors-origin: "${CONSOLE_ORIGIN}"
+  # Public read-only consoles used only for experiment deep links. Values are
+  # supplied at deploy time so environment-specific endpoints stay untracked.
+  mlflow-public-url: "${MLFLOW_PUBLIC_URL}"
+  flyte-console-url: "${FLYTE_CONSOLE_URL}"
