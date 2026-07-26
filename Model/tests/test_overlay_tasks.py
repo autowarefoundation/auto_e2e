@@ -294,6 +294,39 @@ def test_overlay_set_upgrade_cutover_requires_the_staged_source():
     assert request["ExpressionAttributeValues"][":previous_schema"] == "v3"
 
 
+def test_overlay_set_upgrade_accepts_retry_after_ready_publication():
+    target = {
+        **_ready_item(),
+        "status": "building",
+        "overlay_schema": "v4",
+        "request_identity": "d" * 64,
+        "cache_identity": "",
+        "n_shards": 0,
+        "n_samples": 0,
+        "manifest_key": "",
+        "created_at": "2026-07-27T00:00:00Z",
+    }
+    table = _Table()
+    table.item = {
+        **target,
+        "status": "ready",
+        "cache_identity": "e" * 64,
+        "n_shards": 404,
+        "n_samples": 42667,
+        "manifest_key": "manifest-v4.json",
+    }
+    table.fail_put_count = 1
+
+    _stage_overlay_set_upgrade(
+        table,
+        target,
+        {
+            "previous_overlay_schema": "v3",
+            "previous_request_identity": "a" * 64,
+        },
+    )
+
+
 def _overlay_pointer(schema: str) -> dict:
     return {
         "pk": "SHARD#kitscenes#v3.0#part-000000.tar",
