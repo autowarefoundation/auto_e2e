@@ -181,6 +181,7 @@ def _rollout_selector_validation_batch(sample_uid="sample-a"):
             geometry.width_px,
             dtype=torch.float32,
         ),
+        "route_valid": torch.ones(1, dtype=torch.bool),
         "pose_current": torch.tensor(
             [[49.0, 8.0, 0.0]],
             dtype=torch.float64,
