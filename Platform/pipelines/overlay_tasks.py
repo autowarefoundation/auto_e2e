@@ -522,6 +522,26 @@ def _publish_overlay_pointer(
             ) from exc
 
 
+def _validate_overlay_upgrade_coverage(
+    gate: Mapping[str, Any],
+    *,
+    n_shards: int,
+    n_samples: int,
+) -> None:
+    if "previous_overlay_schema" not in gate:
+        return
+    if (
+        gate["previous_n_shards"] != n_shards
+        or gate["previous_n_samples"] != n_samples
+    ):
+        raise RuntimeError(
+            "overlay schema upgrade changed dataset coverage: "
+            f"{n_shards} shards / {n_samples} samples != "
+            f"{gate['previous_n_shards']} shards / "
+            f"{gate['previous_n_samples']} samples"
+        )
+
+
 def _publish_overlay_set_ready(table, item: Mapping[str, Any]) -> None:
     from botocore.exceptions import ClientError
 
@@ -1850,16 +1870,11 @@ def finalize_overlay_set(
         raise ValueError("overlay partitions used inconsistent seed sets")
     seeds = list(next(iter(actual_seed_sets)))
     n_samples = sum(entry["sample_count"] for entry in entries)
-    if "previous_overlay_schema" in gate and (
-        gate["previous_n_shards"] != len(entries)
-        or gate["previous_n_samples"] != n_samples
-    ):
-        raise RuntimeError(
-            "overlay schema upgrade changed dataset coverage: "
-            f"{len(entries)} shards / {n_samples} samples != "
-            f"{gate['previous_n_shards']} shards / "
-            f"{gate['previous_n_samples']} samples"
-        )
+    _validate_overlay_upgrade_coverage(
+        gate,
+        n_shards=len(entries),
+        n_samples=n_samples,
+    )
     output_sha256 = hashlib.sha256(
         json.dumps(
             [(entry["shard"], entry["sha256"]) for entry in entries],
