@@ -25,6 +25,7 @@ from Platform.pipelines.overlay_tasks import (
     _resolve_model_version_for_execution,
     _stage_overlay_set_upgrade,
     _validate_empty_overlay_partition,
+    _validate_overlay_upgrade_coverage,
     _validate_selected_checkpoint_payload,
 )
 
@@ -210,6 +211,17 @@ def _ready_item() -> dict:
     }
 
 
+def _upgrade_gate() -> dict:
+    return {
+        "previous_overlay_schema": "v3",
+        "previous_request_identity": "a" * 64,
+        "previous_created_at": "2026-07-15T00:00:00Z",
+        "previous_seeds": [0],
+        "previous_n_shards": 2,
+        "previous_n_samples": 20,
+    }
+
+
 def test_ready_publication_only_transitions_from_compatible_building():
     item = _ready_item()
     table = _Table()
@@ -264,6 +276,7 @@ def test_overlay_set_upgrade_stages_without_hiding_ready_schema():
     assert staged["previous_request_identity"] == "a" * 64
     gate = _parse_gate(_gate_token(staged, "e" * 64))
     assert gate["previous_overlay_schema"] == "v3"
+    assert gate["previous_n_shards"] == 2
 
 
 def test_overlay_set_upgrade_cutover_requires_the_staged_source():
@@ -278,10 +291,7 @@ def test_overlay_set_upgrade_cutover_requires_the_staged_source():
         "manifest_key": "",
         "created_at": "2026-07-27T00:00:00Z",
     }
-    gate = {
-        "previous_overlay_schema": "v3",
-        "previous_request_identity": "a" * 64,
-    }
+    gate = _upgrade_gate()
     table = _Table()
 
     _stage_overlay_set_upgrade(table, target, gate)
@@ -292,6 +302,7 @@ def test_overlay_set_upgrade_cutover_requires_the_staged_source():
         "ConditionExpression"
     ]
     assert request["ExpressionAttributeValues"][":previous_schema"] == "v3"
+    assert request["ExpressionAttributeValues"][":previous_n_shards"] == 2
 
 
 def test_overlay_set_upgrade_accepts_retry_after_ready_publication():
@@ -320,11 +331,50 @@ def test_overlay_set_upgrade_accepts_retry_after_ready_publication():
     _stage_overlay_set_upgrade(
         table,
         target,
-        {
-            "previous_overlay_schema": "v3",
-            "previous_request_identity": "a" * 64,
-        },
+        _upgrade_gate(),
     )
+
+
+def test_overlay_set_upgrade_accepts_normalized_deterministic_seeds():
+    existing = _ready_item()
+    existing["overlay_schema"] = "v3"
+    target = {
+        **existing,
+        "status": "building",
+        "overlay_schema": "v4",
+        "request_identity": "d" * 64,
+        "seeds": [0, 1],
+    }
+    table = _Table()
+    table.item = existing
+    table.fail_put_count = 1
+
+    staged = _prepare_overlay_set_item(table, target)
+
+    assert staged["previous_seeds"] == [0]
+    assert staged["seeds"] == [0, 1]
+
+
+def test_overlay_upgrade_coverage_must_match_live_set():
+    gate = _upgrade_gate()
+
+    _validate_overlay_upgrade_coverage(
+        gate,
+        n_shards=2,
+        n_samples=20,
+    )
+    with pytest.raises(RuntimeError, match="changed dataset coverage"):
+        _validate_overlay_upgrade_coverage(
+            gate,
+            n_shards=1,
+            n_samples=20,
+        )
+    with pytest.raises(RuntimeError, match="changed dataset coverage"):
+        _validate_overlay_upgrade_coverage(
+            gate,
+            n_shards=2,
+            n_samples=19,
+        )
 
 
 def _overlay_pointer(schema: str) -> dict:
