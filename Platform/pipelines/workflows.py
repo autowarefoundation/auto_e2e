@@ -7087,7 +7087,8 @@ def audit_kitscenes_target_reconstruction(
             raise ValueError(
                 "reconstruction audit only accepts KITScenes shards"
             )
-        if not bool(manifest.get("has_gps", False)):
+        total_samples = int(manifest.get("total_samples", 0))
+        if total_samples > 0 and not bool(manifest.get("has_gps", False)):
             raise ValueError(
                 f"packed shard has no pose-grounded trajectory: {shard_dir}"
             )
@@ -7111,7 +7112,7 @@ def audit_kitscenes_target_reconstruction(
             "partition_id": manifest.get("partition_id"),
             "shard_names": list(manifest.get("shard_names", [])),
             "source_revision": source_revision,
-            "total_samples": int(manifest.get("total_samples", 0)),
+            "total_samples": total_samples,
             "uri": shard_uri,
         }
         shard_identities.append(identity)
@@ -7785,6 +7786,9 @@ def wf_sharded_full_run(
     enable_junction_sampling: bool = False,
     enable_route_consistency: bool = False,
     route_consistency_weight: float = 0.10,
+    reconstruction_audit: Optional[FlyteFile] = None,
+    reconstruction_audit_decision: str = "",
+    reconstruction_audit_rationale: str = "",
     enable_reasoning: bool = True,
     reasoning_mode: str = "pooled_latent",
     enable_world_model: bool = True,
@@ -7833,6 +7837,9 @@ def wf_sharded_full_run(
         enable_route_consistency=enable_route_consistency,
         route_consistency_weight=route_consistency_weight,
         navigation_quality_audit=navigation_quality_audit,
+        reconstruction_audit=reconstruction_audit,
+        reconstruction_audit_decision=reconstruction_audit_decision,
+        reconstruction_audit_rationale=reconstruction_audit_rationale,
         enable_reasoning=enable_reasoning, reasoning_mode=reasoning_mode,
         enable_world_model=enable_world_model, val_fraction=val_fraction,
         validation_scope=validation_scope,
