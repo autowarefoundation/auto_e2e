@@ -511,6 +511,163 @@ def test_recovered_reconstruction_audit_binds_exact_repack_scope():
     assert audit_bindings["packed_shards"].node_id == repack_node.id
 
 
+def test_reconstruction_audit_allows_only_empty_partitions_without_gps(
+    tmp_path,
+    monkeypatch,
+):
+    from evaluation import reconstruction_audit
+    from training import dataset_policy
+    from data_parsing import pre_extracted
+
+    source_revision = "a" * 40
+    sample_digest = "b" * 64
+    metric_distribution = {
+        "mean": 0.0,
+        "p50": 0.0,
+        "p90": 0.0,
+        "p95": 0.0,
+        "max": 0.0,
+    }
+    metrics = {
+        name: {
+            "natural": dict(metric_distribution),
+            "scene_mean_distribution": dict(metric_distribution),
+        }
+        for name in (
+            "ade_3s_m",
+            "fde_3s_m",
+            "ade_full_m",
+            "fde_full_m",
+        )
+    }
+
+    class _Shard:
+        def __init__(self, path):
+            self.path = path
+            self.remote_source = f"s3://test/{path.name}"
+
+        def download(self):
+            return str(self.path)
+
+    class _Inventory:
+        group_uids = ("scene-a", "scene-empty")
+        sample_count = 1
+        sample_uid_digest = sample_digest
+
+        @staticmethod
+        def sample_identity_for_groups(group_uids):
+            assert group_uids == ("scene-a",)
+            return 1, sample_digest
+
+    def write_manifest(path, *, total_samples, has_gps):
+        path.mkdir()
+        (path / "manifest.json").write_text(json.dumps({
+            "contracts": {"packed_schema": "v7"},
+            "dataset": workflows.Dataset.KITSCENES.value,
+            "dataset_version": "v3.2",
+            "has_gps": has_gps,
+            "hz": 10,
+            "partition_id": path.name,
+            "shard_names": (
+                ["samples.tar"] if total_samples else []
+            ),
+            "source_revision": source_revision,
+            "total_samples": total_samples,
+        }))
+
+    non_empty = tmp_path / "non-empty"
+    empty = tmp_path / "empty"
+    write_manifest(non_empty, total_samples=1, has_gps=True)
+    write_manifest(empty, total_samples=0, has_gps=False)
+
+    monkeypatch.setattr(
+        pre_extracted,
+        "discover_split_inventory",
+        lambda shard_dirs: _Inventory(),
+    )
+    monkeypatch.setattr(
+        dataset_policy,
+        "training_policy_for_dataset",
+        lambda *args, **kwargs: SimpleNamespace(
+            validation_split_id="subset-test",
+        ),
+    )
+    monkeypatch.setattr(
+        dataset_policy,
+        "validation_group_uids",
+        lambda *args, **kwargs: ("scene-a",),
+    )
+    monkeypatch.setattr(
+        reconstruction_audit,
+        "load_packed_reconstruction_inputs",
+        lambda *args, **kwargs: object(),
+    )
+    monkeypatch.setattr(
+        reconstruction_audit,
+        "audit_packed_target_rollout_reconstruction",
+        lambda inputs: {
+            "schema_version": "target_rollout_reconstruction_v1",
+            "sample_count": 1,
+            "scene_count": 1,
+            "sample_uid_digest": sample_digest,
+            "split_group_uid_digest": "c" * 64,
+            "horizons": {
+                "three_second_steps": 30,
+                "full_horizon_steps": 64,
+                "dt": 0.1,
+            },
+            "thresholds": {
+                "p95_fde_3s_limit_m": 1.0,
+                "p95_fde_full_limit_m": 2.0,
+            },
+            "thresholds_pass": True,
+            "decision": {
+                "status": "pending_review",
+                "automatic_recommendation": "go",
+                "rationale": None,
+            },
+            "input_quality": {
+                "missing_sample_count": 0,
+                "non_finite_sample_count": 0,
+            },
+            "metrics": metrics,
+            "error_by_step": [],
+            "worst_scenes": {},
+            "scenes": [],
+            "records": [{
+                "sample_uid": "sample-a",
+                "split_group_uid": "scene-a",
+                "ade_3s_m": 0.0,
+                "fde_3s_m": 0.0,
+                "ade_full_m": 0.0,
+                "fde_full_m": 0.0,
+            }],
+        },
+    )
+    monkeypatch.setenv("AUTO_E2E_EVAL_IMAGE", "eval@sha256:test")
+
+    result = workflows.audit_kitscenes_target_reconstruction.task_function(
+        packed_shards=[_Shard(non_empty), _Shard(empty)],
+        audit_code_revision="d" * 40,
+        expected_dataset_version="v3.2",
+        val_fraction=0.1,
+        validation_scope="subset",
+    )
+
+    assert result.thresholds_pass
+    manifest = json.loads((non_empty / "manifest.json").read_text())
+    manifest["has_gps"] = False
+    (non_empty / "manifest.json").write_text(json.dumps(manifest))
+    with pytest.raises(ValueError, match="no pose-grounded trajectory"):
+        workflows.audit_kitscenes_target_reconstruction.task_function(
+            packed_shards=[_Shard(non_empty), _Shard(empty)],
+            audit_code_revision="d" * 40,
+            expected_dataset_version="v3.2",
+            val_fraction=0.1,
+            validation_scope="subset",
+        )
+
+
 def test_training_seed_controls_comparable_navigation_runs():
     training_function = workflows.train_il.task_function
     training_source = inspect.getsource(training_function)
