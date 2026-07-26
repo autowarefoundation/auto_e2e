@@ -46,6 +46,67 @@ def _barrier(values: torch.Tensor, threshold: float) -> torch.Tensor:
     return torch.relu(values.abs() / threshold - 1.0).square()
 
 
+def comfort_excess_per_sample(
+    predicted_controls: torch.Tensor,
+    target_controls: torch.Tensor,
+    predicted_speeds: torch.Tensor,
+    target_speeds: torch.Tensor,
+    *,
+    dt: float = 0.1,
+    jerk_threshold_mps3: float = 4.13,
+    lateral_acceleration_threshold_mps2: float = 4.89,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Return target-relative comfort, jerk, and lateral peak excess."""
+    predicted = _structured_controls(predicted_controls)
+    target = _structured_controls(target_controls)
+    if target.shape != predicted.shape:
+        raise ValueError("predicted and target control shapes differ")
+    if predicted.shape[1] < 2:
+        raise ValueError("comfort loss requires at least two timesteps")
+    if predicted_speeds.shape != predicted.shape[:2]:
+        raise ValueError("predicted speeds must match control timesteps")
+    if target_speeds.shape != target.shape[:2]:
+        raise ValueError("target speeds must match control timesteps")
+    predicted_jerk = (
+        predicted[:, 1:, 0] - predicted[:, :-1, 0]
+    ) / dt
+    target_jerk = (
+        target[:, 1:, 0] - target[:, :-1, 0]
+    ) / dt
+    predicted_lateral = (
+        predicted_speeds.square() * predicted[:, :, 1]
+    )
+    target_lateral = target_speeds.square() * target[:, :, 1]
+
+    predicted_jerk_peak = _barrier(
+        predicted_jerk,
+        jerk_threshold_mps3,
+    ).amax(dim=1)
+    target_jerk_peak = _barrier(
+        target_jerk,
+        jerk_threshold_mps3,
+    ).amax(dim=1)
+    predicted_lateral_peak = _barrier(
+        predicted_lateral,
+        lateral_acceleration_threshold_mps2,
+    ).amax(dim=1)
+    target_lateral_peak = _barrier(
+        target_lateral,
+        lateral_acceleration_threshold_mps2,
+    ).amax(dim=1)
+    jerk_excess = torch.relu(
+        predicted_jerk_peak - target_jerk_peak.detach()
+    )
+    lateral_excess = torch.relu(
+        predicted_lateral_peak - target_lateral_peak.detach()
+    )
+    return (
+        0.5 * (jerk_excess + lateral_excess),
+        jerk_excess,
+        lateral_excess,
+    )
+
+
 def _footprint_corners(
     positions: torch.Tensor,
     headings: torch.Tensor,
@@ -176,49 +237,16 @@ class RolloutAlignedLoss(nn.Module):
         predicted_speeds: torch.Tensor,
         target_speeds: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        if predicted_controls.shape[1] < 2:
-            raise ValueError("comfort loss requires at least two timesteps")
-        predicted_jerk = (
-            predicted_controls[:, 1:, 0]
-            - predicted_controls[:, :-1, 0]
-        ) / self.dt
-        target_jerk = (
-            target_controls[:, 1:, 0]
-            - target_controls[:, :-1, 0]
-        ) / self.dt
-        predicted_lateral = (
-            predicted_speeds.square() * predicted_controls[:, :, 1]
-        )
-        target_lateral = (
-            target_speeds.square() * target_controls[:, :, 1]
-        )
-
-        predicted_jerk_peak = _barrier(
-            predicted_jerk,
-            self.jerk_threshold_mps3,
-        ).amax(dim=1)
-        target_jerk_peak = _barrier(
-            target_jerk,
-            self.jerk_threshold_mps3,
-        ).amax(dim=1)
-        predicted_lateral_peak = _barrier(
-            predicted_lateral,
-            self.lateral_acceleration_threshold_mps2,
-        ).amax(dim=1)
-        target_lateral_peak = _barrier(
-            target_lateral,
-            self.lateral_acceleration_threshold_mps2,
-        ).amax(dim=1)
-        jerk_excess = torch.relu(
-            predicted_jerk_peak - target_jerk_peak.detach()
-        )
-        lateral_excess = torch.relu(
-            predicted_lateral_peak - target_lateral_peak.detach()
-        )
-        return (
-            0.5 * (jerk_excess + lateral_excess),
-            jerk_excess,
-            lateral_excess,
+        return comfort_excess_per_sample(
+            predicted_controls,
+            target_controls,
+            predicted_speeds,
+            target_speeds,
+            dt=self.dt,
+            jerk_threshold_mps3=self.jerk_threshold_mps3,
+            lateral_acceleration_threshold_mps2=(
+                self.lateral_acceleration_threshold_mps2
+            ),
         )
 
     def _region_excess(
