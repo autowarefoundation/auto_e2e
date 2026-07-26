@@ -14,12 +14,16 @@ from Platform.pipelines.overlay_tasks import (
     OVERLAY_TASK_ENV,
     _gate_token,
     _metric_at_epoch,
+    _overlay_schema_version,
     _parse_gate,
+    _prepare_overlay_set_item,
+    _publish_overlay_pointer,
     _publish_overlay_set_ready,
     _put_dynamo_immutable,
     _put_s3_immutable,
     _register_selected_checkpoint_version,
     _resolve_model_version_for_execution,
+    _stage_overlay_set_upgrade,
     _validate_empty_overlay_partition,
     _validate_selected_checkpoint_payload,
 )
@@ -97,10 +101,12 @@ class _Table:
         self.put_calls = []
         self.item = None
         self.fail_put = False
+        self.fail_put_count = 0
 
     def put_item(self, **kwargs):
         self.put_calls.append(kwargs)
-        if self.fail_put:
+        if self.fail_put or self.fail_put_count > 0:
+            self.fail_put_count = max(0, self.fail_put_count - 1)
             raise _client_error(
                 "ConditionalCheckFailedException", "PutItem"
             )
@@ -228,6 +234,122 @@ def test_gate_token_keeps_the_winning_creation_time_and_ready_state():
     token = _gate_token(item, "d" * 64)
     gate = _parse_gate(token)
     assert gate["status"] == "ready"
+
+
+def test_overlay_set_upgrade_stages_without_hiding_ready_schema():
+    existing = _ready_item()
+    existing["overlay_schema"] = "v3"
+    target = {
+        **existing,
+        "status": "building",
+        "overlay_schema": "v4",
+        "request_identity": "d" * 64,
+        "cache_identity": "",
+        "n_shards": 0,
+        "n_samples": 0,
+        "manifest_key": "",
+        "created_at": "2026-07-27T00:00:00Z",
+    }
+    table = _Table()
+    table.item = dict(existing)
+    table.fail_put_count = 1
+
+    staged = _prepare_overlay_set_item(table, target)
+
+    assert table.item == existing
+    assert staged["status"] == "building"
+    assert staged["previous_overlay_schema"] == "v3"
+    assert staged["previous_request_identity"] == "a" * 64
+    gate = _parse_gate(_gate_token(staged, "e" * 64))
+    assert gate["previous_overlay_schema"] == "v3"
+
+
+def test_overlay_set_upgrade_cutover_requires_the_staged_source():
+    target = {
+        **_ready_item(),
+        "status": "building",
+        "overlay_schema": "v4",
+        "request_identity": "d" * 64,
+        "cache_identity": "",
+        "n_shards": 0,
+        "n_samples": 0,
+        "manifest_key": "",
+        "created_at": "2026-07-27T00:00:00Z",
+    }
+    gate = {
+        "previous_overlay_schema": "v3",
+        "previous_request_identity": "a" * 64,
+    }
+    table = _Table()
+
+    _stage_overlay_set_upgrade(table, target, gate)
+
+    request = table.put_calls[0]
+    assert request["Item"] == target
+    assert "overlay_schema = :previous_schema" in request[
+        "ConditionExpression"
+    ]
+    assert request["ExpressionAttributeValues"][":previous_schema"] == "v3"
+
+
+def _overlay_pointer(schema: str) -> dict:
+    return {
+        "pk": "SHARD#kitscenes#v3.0#part-000000.tar",
+        "sk": "MODEL#" + "e" * 64,
+        "s3_key": f"overlays/schema={schema}/overlay.bin.gz",
+        "sha256": "f" * 64,
+        "byte_size": 123,
+        "sample_count": 22,
+        "overlay_schema": schema,
+        "dataset_manifest_sha256": "c" * 64,
+        "cache_identity": "b" * 64,
+        "status": "ready",
+    }
+
+
+def test_overlay_pointer_upgrade_is_conditional_and_retryable():
+    table = _Table()
+    table.item = _overlay_pointer("v3")
+    table.fail_put_count = 1
+    target = _overlay_pointer("v4")
+
+    _publish_overlay_pointer(table, target)
+
+    assert table.item == target
+    request = table.put_calls[1]
+    assert "overlay_schema = :previous_schema" in request[
+        "ConditionExpression"
+    ]
+    assert request["ExpressionAttributeValues"][":previous_schema"] == "v3"
+
+    table.fail_put_count = 1
+    _publish_overlay_pointer(table, target)
+
+
+def test_overlay_pointer_rejects_schema_downgrade():
+    table = _Table()
+    table.item = _overlay_pointer("v4")
+    table.fail_put_count = 1
+
+    with pytest.raises(RuntimeError, match="different identity"):
+        _publish_overlay_pointer(table, _overlay_pointer("v3"))
+
+
+@pytest.mark.parametrize(
+    ("schema", "version"),
+    [("v1", 1), ("v4", 4), ("v12", 12)],
+)
+def test_overlay_schema_version_requires_positive_numeric_suffix(
+    schema,
+    version,
+):
+    assert _overlay_schema_version(schema) == version
+
+
+@pytest.mark.parametrize("schema", ["v0", "V4", "v4-beta", ""])
+def test_overlay_schema_version_rejects_noncanonical_values(schema):
+    with pytest.raises(ValueError, match="invalid overlay schema"):
+        _overlay_schema_version(schema)
     assert gate["created_at"] == "2026-07-15T00:00:00Z"
     assert gate["request_identity"] == "a" * 64
 
