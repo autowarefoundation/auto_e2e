@@ -246,7 +246,6 @@ The audit report contains:
 - scene-level mean and p95;
 - the ten scenes with the highest FDE at each horizon;
 - error versus horizon plots or tables;
-- current-model pose-grounded errors on the same samples;
 - missing/non-finite sample counts.
 
 ### 5.4 Provenance
@@ -278,16 +277,12 @@ p95 FDE@3s   <= 1.0 m
 p95 FDE@6.4s <= 2.0 m
 ```
 
-These are target-quality criteria, not product-quality gates. Exceeding either
-threshold does not automatically classify the dataset as unusable. The review
-must also determine:
-
-- whether the error is concentrated in a small number of scenes;
-- whether error grows monotonically with horizon;
-- whether target reconstruction error is small relative to current model
-  error;
-- whether timestamp alignment, speed extraction, heading convention, or GPS
-  projection explains the error.
+These are target-quality criteria, not product-quality gates, but they are hard
+gates for this first policy version. A threshold failure blocks training and
+returns the proposal to design review. That review may examine scene
+concentration, horizon drift, timestamp alignment, speed extraction, heading
+convention, GPS projection, and current-model error, but none of those may
+override this gate without a new versioned audit input and policy.
 
 The Go decision must include a written rationale. A No-Go blocks the
 implementation in this document. The likely follow-up is a revised design that
@@ -632,7 +627,7 @@ d_{t,r}^{pred}
 -
 \operatorname{stopgrad}(d_{t,r}^{target})
 -
-0.10
+\tau_{raster}
 \right)
 \]
 
@@ -641,9 +636,15 @@ L_{i,r}^{map}
 =\frac{1}{T}\sum_t e_{t,r}^{map}
 \]
 
-The `0.10 m` tolerance absorbs rasterization and bilinear-sampling artifacts.
-It does not permit a fixed absolute map violation; it permits only a small
-difference relative to the target.
+The tolerance is resolution-aware:
+
+\[
+\tau_{raster}=0.5\cdot meters\_per\_pixel
+\]
+
+At the initial `1.0 m/px` geometry this is `0.5 m`. It absorbs the half-pixel
+quantization and bilinear-sampling floor. It does not permit a fixed absolute
+map violation; it permits only a bounded difference relative to the target.
 
 Availability:
 
@@ -793,6 +794,12 @@ route\_gap=\max(0,q^{target}-q^{pred})
 \]
 
 It is defined only for route-valid samples.
+
+The inside test uses the same half-pixel metric tolerance as the training map
+loss. Before component availability is frozen, the selector fails if target
+route compliance is at most `0.05` or target off-road rate is at least `0.95`;
+these conditions indicate a saturated or inconsistent raster contract rather
+than meaningful navigation or safety evidence.
 
 ### 12.5 Wrong-branch excess
 
@@ -1352,8 +1359,9 @@ policy version.
 ### Footprint or raster artifacts create false map penalties
 
 Mitigation: prediction is compared relative to target on the same geometry,
-with a `0.10 m` tolerance. Footprint dimensions and geometry are checkpoint
-metadata.
+with a half-pixel resolution-aware tolerance. Footprint dimensions, geometry,
+and effective metric tolerance are checkpoint metadata. Selector calibration
+rejects saturated target route or drivable metrics before epoch 1.
 
 ### Composite score hides a regression
 
