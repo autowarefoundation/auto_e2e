@@ -27,6 +27,16 @@ type datasetsService interface {
 	StreamTarMemberRange(context.Context, string, string, string, int64, int64) (io.Reader, io.Closer, int64, error)
 }
 
+type navigationMapService interface {
+	SampleNavigationMap(
+		context.Context,
+		string,
+		string,
+		string,
+		string,
+	) ([]byte, string, string, error)
+}
+
 // DatasetsHandler serves the S3-backed dataset browsing endpoints.
 type DatasetsHandler struct {
 	s3                   datasetsService
@@ -326,6 +336,86 @@ func (h *DatasetsHandler) GetImage(w http.ResponseWriter, r *http.Request) {
 	if _, err := io.Copy(w, reader); err != nil {
 		// Headers already sent; just log (client likely disconnected).
 		slog.Warn("copy image body", "member", member, "error", err)
+	}
+}
+
+// GetNavigationMap handles a rendered semantic map for one indexed sample.
+func (h *DatasetsHandler) GetNavigationMap(
+	w http.ResponseWriter,
+	r *http.Request,
+) {
+	name := chi.URLParam(r, "name")
+	shard := chi.URLParam(r, "shard")
+	key := chi.URLParam(r, "key")
+	if !h.s3.ValidDataset(name) {
+		writeError(
+			w, http.StatusNotFound, model.CodeNotFound, "unknown dataset: "+name,
+		)
+		return
+	}
+	if !validShardName(shard) ||
+		key == "" ||
+		strings.ContainsAny(key, "/\\") ||
+		strings.Contains(key, "..") {
+		writeError(
+			w,
+			http.StatusBadRequest,
+			model.CodeInvalidParam,
+			"invalid shard/key",
+		)
+		return
+	}
+	version, ok := requestedVersion(r)
+	if !ok {
+		writeError(
+			w, http.StatusBadRequest, model.CodeInvalidParam, "invalid version",
+		)
+		return
+	}
+	mapService, ok := h.s3.(navigationMapService)
+	if !ok {
+		writeError(
+			w,
+			http.StatusServiceUnavailable,
+			model.CodeUnavailable,
+			"navigation map service unavailable",
+		)
+		return
+	}
+	body, contentType, _, err := mapService.SampleNavigationMap(
+		r.Context(), name, version, shard, key,
+	)
+	if err != nil {
+		if errors.Is(err, service.ErrNotFound) {
+			writeError(
+				w,
+				http.StatusNotFound,
+				model.CodeNotFound,
+				"navigation map not found: "+key,
+			)
+			return
+		}
+		slog.Error(
+			"render navigation map",
+			"dataset", name,
+			"shard", shard,
+			"key", key,
+			"error", err,
+		)
+		writeError(
+			w,
+			http.StatusBadGateway,
+			model.CodeS3Error,
+			"failed to render navigation map",
+		)
+		return
+	}
+	w.Header().Set("Content-Type", contentType)
+	w.Header().Set("Content-Length", fmt.Sprintf("%d", len(body)))
+	setShardRangeCacheControl(w, version)
+	w.WriteHeader(http.StatusOK)
+	if _, err := w.Write(body); err != nil {
+		slog.Warn("write navigation map", "key", key, "error", err)
 	}
 }
 
