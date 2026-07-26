@@ -544,6 +544,60 @@ def build_selector_calibration_report(
     }
 
 
+def validate_frozen_availability(
+    expected: Mapping[str, object],
+    observed: Mapping[str, object],
+    *,
+    calibration_atol: float = 1e-9,
+) -> None:
+    """Reject component drift while tolerating insignificant float noise."""
+    if calibration_atol < 0.0:
+        raise ValueError("calibration_atol must be non-negative")
+    expected_discrete = {
+        key: value
+        for key, value in expected.items()
+        if key != "calibration"
+    }
+    observed_discrete = {
+        key: value
+        for key, value in observed.items()
+        if key != "calibration"
+    }
+    if expected_discrete != observed_discrete:
+        raise ValueError(
+            "checkpoint selector discrete availability changed during run: "
+            f"expected={expected_discrete} actual={observed_discrete}"
+        )
+    expected_calibration = expected.get("calibration", {})
+    observed_calibration = observed.get("calibration", {})
+    if (
+        not isinstance(expected_calibration, Mapping)
+        or not isinstance(observed_calibration, Mapping)
+        or set(expected_calibration) != set(observed_calibration)
+    ):
+        raise ValueError(
+            "checkpoint selector calibration coverage changed during run"
+        )
+    mismatches = {
+        key: {
+            "expected": float(expected_calibration[key]),
+            "actual": float(observed_calibration[key]),
+        }
+        for key in expected_calibration
+        if not math.isclose(
+            float(expected_calibration[key]),
+            float(observed_calibration[key]),
+            rel_tol=0.0,
+            abs_tol=calibration_atol,
+        )
+    }
+    if mismatches:
+        raise ValueError(
+            "checkpoint selector calibration changed during run: "
+            f"{mismatches}"
+        )
+
+
 def score_is_better(
     score: float,
     best_score: float,
