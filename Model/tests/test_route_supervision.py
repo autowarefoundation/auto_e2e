@@ -15,10 +15,14 @@ from navigation.contracts import (
     RouteProvenance,
     RouteQuality,
 )
-from navigation.geometry import DEFAULT_NAVIGATION_GEOMETRY, RouteChannel
+from navigation.geometry import (
+    DEFAULT_NAVIGATION_GEOMETRY,
+    MapChannel,
+    RouteChannel,
+)
 from navigation.rasterizer import EgoPose, NavigationRaster
 from navigation.supervision import (
-    MAXIMUM_CORRIDOR_DISTANCE_M,
+    MAXIMUM_OUTSIDE_DISTANCE_M,
     build_route_supervision,
 )
 
@@ -63,6 +67,10 @@ def _route(*, valid: bool = True) -> NavigationRoute:
 
 def _raster(*, route_valid: bool = True) -> NavigationRaster:
     geometry = DEFAULT_NAVIGATION_GEOMETRY
+    map_context = np.zeros(
+        (14, geometry.height_px, geometry.width_px),
+        dtype=np.float32,
+    )
     route_mask = np.zeros(
         (2, geometry.height_px, geometry.width_px),
         dtype=np.uint8,
@@ -72,6 +80,11 @@ def _raster(*, route_valid: bool = True) -> NavigationRaster:
     )
     pixels = np.rint(geometry.ego_to_pixel(points)).astype(np.int64)
     for row, col in pixels:
+        map_context[
+            MapChannel.DRIVABLE_AREA,
+            max(0, row - 5):min(geometry.height_px, row + 6),
+            max(0, col - 5):min(geometry.width_px, col + 6),
+        ] = 1.0
         route_mask[
             RouteChannel.SELECTED_CORRIDOR,
             max(0, row - 2):min(geometry.height_px, row + 3),
@@ -84,10 +97,7 @@ def _raster(*, route_valid: bool = True) -> NavigationRaster:
     ] = 1
     pose = EgoPose(0.0, 0.0, 0.0, 0)
     return NavigationRaster(
-        map_context=np.zeros(
-            (14, geometry.height_px, geometry.width_px),
-            dtype=np.float32,
-        ),
+        map_context=map_context,
         route_mask=route_mask,
         map_valid=True,
         route_valid=route_valid,
@@ -124,7 +134,13 @@ def test_route_supervision_is_metric_deterministic_and_directional():
     assert first.distance_to_corridor_m[tuple(center)] == 0.0
     assert first.distance_to_corridor_m[tuple(outside)] > 0.0
     assert first.distance_to_corridor_m.max() <= (
-        MAXIMUM_CORRIDOR_DISTANCE_M
+        MAXIMUM_OUTSIDE_DISTANCE_M
+    )
+    assert first.distance_to_drivable_m[tuple(center)] == 0.0
+    assert first.distance_to_drivable_m[tuple(outside)] > 0.0
+    assert (
+        first.distance_to_drivable_m.max()
+        <= MAXIMUM_OUTSIDE_DISTANCE_M
     )
     assert first.route_heading_valid[tuple(center)] == 1
     direction_norm = np.hypot(
@@ -146,11 +162,13 @@ def test_invalid_route_has_no_supervision_or_future_trajectory_fields():
     )
 
     assert np.count_nonzero(supervision.distance_to_corridor_m) == 0
+    assert np.count_nonzero(supervision.distance_to_drivable_m) > 0
     assert np.count_nonzero(supervision.route_heading_valid) == 0
     assert np.count_nonzero(supervision.destination_xy_m) == 0
     assert not supervision.destination_visible
     assert set(supervision.arrays()) == {
         "distance_to_corridor_m",
+        "distance_to_drivable_m",
         "route_heading_sin",
         "route_heading_cos",
         "route_heading_valid",
