@@ -471,11 +471,23 @@ def _decode_sample(
     history_size = _HISTORY_STEPS * _HISTORY_SIGNALS
     ego_history = torch.from_numpy(ego[:history_size])
     ego_future = torch.from_numpy(ego[history_size:])
+    sample_metadata = (
+        _json_mapping(sample["meta.json"], member_name="meta.json")
+        if "meta.json" in sample
+        else {}
+    )
+    raw_split_group_uid = sample_metadata.get("split_group_uid", "")
+    split_group_uid = (
+        raw_split_group_uid
+        if isinstance(raw_split_group_uid, str)
+        else ""
+    )
 
     out = {
         # Overlay inference derives noise from this stable identity. Keep it in
         # every batch so predictions do not depend on batch position or size.
         "sample_uid": sample.get("__key__", ""),
+        "split_group_uid": split_group_uid,
         "visual_tiles": torch.stack(frames),
         "map_context": map_context,
         "route_mask": route_mask,
