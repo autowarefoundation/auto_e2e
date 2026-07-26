@@ -3,16 +3,221 @@
 from __future__ import annotations
 
 import hashlib
+import json
+import tarfile
 from collections import defaultdict
 from collections.abc import Sequence
+from dataclasses import dataclass
+from pathlib import Path
 
 import numpy as np
 import torch
 
+from data_processing.geospatial import decode_gps_future, decode_pose
 from training.losses.control_rollout import integrate_controls_torch
 
 
 AUDIT_SCHEMA_VERSION = "target_rollout_reconstruction_v1"
+_HISTORY_STEPS = 64
+_HISTORY_SIGNALS = 4
+_FUTURE_STEPS = 64
+_CONTROL_SIGNALS = 2
+_EGO_FLOAT_COUNT = (
+    _HISTORY_STEPS * _HISTORY_SIGNALS
+    + _FUTURE_STEPS * _CONTROL_SIGNALS
+)
+_AUDIT_MEMBER_SUFFIXES = {
+    ".ego.npy": "ego",
+    ".gps.npy": "gps",
+    ".meta.json": "metadata",
+    ".pose.npy": "pose",
+}
+
+
+@dataclass(frozen=True)
+class PackedReconstructionInputs:
+    """Minimal pose-grounded inputs read from packed WebDataset shards."""
+
+    target_controls: np.ndarray
+    logged_gps: np.ndarray
+    current_poses: np.ndarray
+    initial_speeds_mps: np.ndarray
+    sample_uids: tuple[str, ...]
+    split_group_uids: tuple[str, ...]
+
+
+def load_packed_reconstruction_inputs(
+    shard_dirs: Sequence[str | Path],
+    *,
+    validation_group_uids: Sequence[str] | None = None,
+) -> PackedReconstructionInputs:
+    """Read audit inputs from tar members without decoding camera or map data."""
+    roots = [Path(shard_dir) for shard_dir in shard_dirs]
+    if not roots:
+        raise ValueError("at least one shard directory is required")
+    selected_groups = (
+        frozenset(str(uid) for uid in validation_group_uids)
+        if validation_group_uids is not None
+        else None
+    )
+    if selected_groups is not None and (
+        not selected_groups
+        or len(selected_groups) != len(validation_group_uids)
+        or any(not uid for uid in selected_groups)
+    ):
+        raise ValueError(
+            "validation_group_uids must contain unique non-empty values"
+        )
+
+    records: dict[str, dict[str, bytes]] = {}
+    for root in roots:
+        tar_paths = sorted(root.glob("*.tar"))
+        if not tar_paths:
+            raise FileNotFoundError(f"No .tar shards found in {root}")
+        for tar_path in tar_paths:
+            with tarfile.open(tar_path, "r:*") as archive:
+                for member in archive:
+                    if not member.isfile():
+                        continue
+                    matched = next(
+                        (
+                            (suffix, field)
+                            for suffix, field in _AUDIT_MEMBER_SUFFIXES.items()
+                            if member.name.endswith(suffix)
+                        ),
+                        None,
+                    )
+                    if matched is None:
+                        continue
+                    suffix, field = matched
+                    sample_uid = member.name.removesuffix(suffix)
+                    if not sample_uid:
+                        raise ValueError(
+                            f"empty sample UID in {member.name} from {tar_path}"
+                        )
+                    record = records.setdefault(sample_uid, {})
+                    if field in record:
+                        raise ValueError(
+                            f"duplicate {field} member for {sample_uid!r}"
+                        )
+                    extracted = archive.extractfile(member)
+                    if extracted is None:
+                        raise ValueError(
+                            f"could not read {member.name} from {tar_path}"
+                        )
+                    record[field] = extracted.read()
+
+    parsed = []
+    observed_groups: set[str] = set()
+    required_fields = frozenset(_AUDIT_MEMBER_SUFFIXES.values())
+    for sample_uid, record in sorted(records.items()):
+        metadata_bytes = record.get("metadata")
+        if metadata_bytes is None:
+            continue
+        try:
+            metadata = json.loads(metadata_bytes)
+        except (UnicodeError, json.JSONDecodeError) as error:
+            raise ValueError(
+                f"invalid metadata for sample {sample_uid!r}"
+            ) from error
+        if not isinstance(metadata, dict):
+            raise ValueError(
+                f"metadata for sample {sample_uid!r} must be an object"
+            )
+        if metadata.get("sample_uid") != sample_uid:
+            raise ValueError(
+                f"metadata UID differs for sample {sample_uid!r}"
+            )
+        group_uid = metadata.get("split_group_uid")
+        if not isinstance(group_uid, str) or not group_uid:
+            raise ValueError(
+                f"sample {sample_uid!r} has no split_group_uid"
+            )
+        observed_groups.add(group_uid)
+        if selected_groups is not None and group_uid not in selected_groups:
+            continue
+        if set(record) != required_fields:
+            raise ValueError(
+                f"sample {sample_uid!r} has audit members "
+                f"{sorted(record)}, expected {sorted(required_fields)}"
+            )
+
+        ego = np.frombuffer(record["ego"], dtype="<f4")
+        if ego.shape != (_EGO_FLOAT_COUNT,):
+            raise ValueError(
+                f"sample {sample_uid!r} ego payload has {ego.size} floats, "
+                f"expected {_EGO_FLOAT_COUNT}"
+            )
+        history = ego[: _HISTORY_STEPS * _HISTORY_SIGNALS].reshape(
+            _HISTORY_STEPS,
+            _HISTORY_SIGNALS,
+        )
+        controls = ego[_HISTORY_STEPS * _HISTORY_SIGNALS :].reshape(
+            _FUTURE_STEPS,
+            _CONTROL_SIGNALS,
+        )
+        pose = decode_pose(record["pose"])
+        current_pose = np.asarray(
+            [
+                pose["latitude_deg"],
+                pose["longitude_deg"],
+                pose["heading_deg_cw_from_north"],
+            ],
+            dtype=np.float64,
+        )
+        gps = decode_gps_future(record["gps"])
+        initial_speed = float(history[-1, 0])
+        if (
+            not np.isfinite(history).all()
+            or not np.isfinite(controls).all()
+            or not np.isfinite(current_pose).all()
+            or not np.isfinite(gps).all()
+            or initial_speed < 0.0
+        ):
+            raise ValueError(
+                f"sample {sample_uid!r} has invalid audit inputs"
+            )
+        parsed.append(
+            (
+                sample_uid,
+                group_uid,
+                controls.copy(),
+                gps,
+                current_pose,
+                initial_speed,
+            )
+        )
+
+    if selected_groups is not None:
+        missing_groups = selected_groups - observed_groups
+        if missing_groups:
+            raise ValueError(
+                "validation groups are absent from packed shards: "
+                f"{sorted(missing_groups)}"
+            )
+    if not parsed:
+        raise ValueError("packed shards contain no selected audit samples")
+
+    return PackedReconstructionInputs(
+        target_controls=np.stack([item[2] for item in parsed]).astype(
+            np.float32,
+            copy=False,
+        ),
+        logged_gps=np.stack([item[3] for item in parsed]).astype(
+            np.float64,
+            copy=False,
+        ),
+        current_poses=np.stack([item[4] for item in parsed]).astype(
+            np.float64,
+            copy=False,
+        ),
+        initial_speeds_mps=np.asarray(
+            [item[5] for item in parsed],
+            dtype=np.float32,
+        ),
+        sample_uids=tuple(item[0] for item in parsed),
+        split_group_uids=tuple(item[1] for item in parsed),
+    )
 
 
 def _identity_digest(values: Sequence[str]) -> str:
