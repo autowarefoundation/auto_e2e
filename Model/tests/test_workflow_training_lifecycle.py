@@ -604,6 +604,15 @@ def test_rollout_control_arm_uses_composite_selector_without_rollout_loss():
     assert '"train/loss_rollout"' in source
     assert '"train/loss_comfort_jerk"' in source
     assert '"train/loss_comfort_lateral_acceleration"' in source
+    assert "torch.cuda.synchronize(device)" in source
+    assert '"train_wall_seconds": training_wall_seconds' in source
+    assert '"epoch_compute_wall_seconds": epoch_compute_wall_seconds' in source
+    assert '"samples_per_second": (' in source
+    assert '"optimizer_steps_per_second": (' in source
+    assert '"throughput": throughput' in source
+    assert '"throughput": throughput_summary' in source
+    assert '"train/throughput/samples_per_second"' in source
+    assert '"train/throughput/optimizer_steps_per_second"' in source
 
 
 def test_kitscenes_epoch_evaluation_preserves_auto_e2e_horizon():
