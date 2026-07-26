@@ -64,6 +64,7 @@ def test_overlay_roundtrip_and_sorted_directory():
         heatmaps,
         atol=float(decoded.bev_heatmap_scales.max()) / 255.0,
     )
+    assert decoded.bev_heatmap_names == BEV_HEATMAP_NAMES
 
 
 def test_overlay_gzip_bytes_are_deterministic():
@@ -122,13 +123,14 @@ def test_overlay_decoder_accepts_legacy_v1_without_heatmaps():
     )
     assert decoded.bev_heatmaps is None
     assert decoded.bev_heatmap_scales is None
+    assert decoded.bev_heatmap_names == ()
 
 
 def test_overlay_key_is_split_free_and_validates_segments():
     model_id = "a" * 64
     key = overlay_s3_key(model_id, "l2d", "v2.1", "train-000001.tar")
     assert key == (
-        "overlays/schema=v2/model=" + model_id
+        "overlays/schema=v3/model=" + model_id
         + "/dataset=l2d/version=v2.1/shard=train-000001.tar/overlay.bin.gz"
     )
     assert "split=" not in key and "source=" not in key
