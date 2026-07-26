@@ -421,6 +421,11 @@ def test_training_wires_dataset_specific_trajectory_policy():
         training_source
     )
     assert "reconstruction_audit_decision != \"go\"" in training_source
+    assert "if selector_enabled:" in training_source
+    assert (
+        "composite-selector training requires a reconstruction audit"
+        in training_source
+    )
     assert (
         "target rollout reconstruction thresholds failed"
         in training_source
@@ -462,12 +467,29 @@ def test_training_wires_dataset_specific_trajectory_policy():
 
 
 def test_reconstruction_audit_uses_training_group_digest_contract():
-    source = inspect.getsource(
+    audit_function = (
         workflows.audit_kitscenes_target_reconstruction.task_function
     )
+    source = inspect.getsource(audit_function)
+    signature = inspect.signature(audit_function)
 
     assert "group_uid_digest(validation_group_uids)" in source
     assert '"\\n".join(validation_group_uids)' not in source
+    assert "discover_split_inventory(shard_dirs)" in source
+    assert "training_policy_for_dataset(" in source
+    assert "select_validation_group_uids(" in source
+    assert "packed_partition_count=len(shard_identities)" in source
+    assert "packed_sample_count=split_inventory.sample_count" in source
+    assert (
+        "packed_sample_uid_digest=split_inventory.sample_uid_digest"
+        in source
+    )
+    assert "expected_validation_sample_uid_digest" not in (
+        signature.parameters
+    )
+    assert "validation_group_uids" not in signature.parameters
+    assert signature.parameters["val_fraction"].default == 0.1
+    assert signature.parameters["validation_scope"].default == "full"
 
 
 def test_training_seed_controls_comparable_navigation_runs():
