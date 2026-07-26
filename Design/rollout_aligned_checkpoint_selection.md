@@ -179,6 +179,11 @@ Both arms use:
 - identical Reasoning enable flag, labels, and weight inherited from Arm A;
 - no weighted sampler or hard-example mining.
 
+The legacy `RouteConsistencyLoss` is disabled in both arms. Arm A uses the
+existing normalized action objective as its planner loss. Arm B replaces the
+legacy route objective with the rollout and target-relative constraint terms
+defined here; it does not add them on top of the legacy objective.
+
 Arm A's selected checkpoint is evaluated with the new per-sample metric
 implementation so its composite score and all component metrics can be compared
 retrospectively with Arm B. Arm B does not require Arm A's metrics during
@@ -645,6 +650,37 @@ Availability:
 
 Centerline distance is not used. The selected corridor, not the route
 centerline, defines route compliance.
+
+### 10.5 Relationship to Navigation Objective v1
+
+This objective supersedes the combined `RouteConsistencyLoss` from navigation
+objective v1. The following v1 terms are not added to `L_planner`:
+
+```text
+absolute corridor loss
+late-junction branch loss
+destination-progress loss
+route-heading loss
+```
+
+Their relevant supervision is covered as follows:
+
+- path and final rollout losses supervise the demonstrated branch and terminal
+  progress in XY;
+- target-relative selected-corridor distance preserves a direct route gradient;
+- target-relative drivable distance adds the map-safety signal missing from v1;
+- action loss continues to supervise acceleration and curvature profiles.
+
+The replacement is intentional. Keeping both objectives would count selected
+route deviation in the legacy corridor/branch terms, the new route-footprint
+term, and the XY rollout term.
+
+Implementation may extract and reuse v1's differentiable rollout, ego-to-grid,
+distance sampling, and out-of-raster utilities. The legacy combined loss,
+branch/destination/heading term weights, and `enable_route_consistency`
+activation are removed from the objective-v2 training path. No legacy-loss
+ablation is required. Objective-v1 checkpoints remain valid artifacts but
+cannot resume as objective-v2 runs.
 
 ## 11. Data and Supervision Contract
 
@@ -1163,6 +1199,8 @@ is authoritative if an MLflow retry occurs.
 - Add path and final rollout losses.
 - Add trajectory-level target-relative comfort.
 - Add pointwise target-relative route/drivable footprint loss.
+- Retire the legacy combined route-consistency objective from the v2 training
+  path while reusing its geometry helpers.
 - Add deterministic offline drivable distance supervision.
 - Keep ordinary sample-mean reduction.
 
