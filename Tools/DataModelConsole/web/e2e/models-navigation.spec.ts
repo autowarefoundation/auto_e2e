@@ -12,6 +12,9 @@ function fulfillJSON(route: Route, body: unknown) {
   });
 }
 
+const DAY_MS = 24 * 60 * 60 * 1000;
+const NOW = Date.now();
+
 const experiments = [
   {
     run_id: "run-eval",
@@ -19,8 +22,8 @@ const experiments = [
     experiment_id: "11",
     experiment_name: "auto-e2e",
     mlflow_status: "FINISHED",
-    start_time: 1_750_003_000_000,
-    end_time: 1_750_003_600_000,
+    start_time: NOW - DAY_MS,
+    end_time: NOW - DAY_MS + 600_000,
     dataset: "s3://auto-e2e/PhysicalAI-AV",
     dataset_version: "v3.0",
     data_fingerprint: "fingerprint-v3-full",
@@ -62,8 +65,17 @@ const experiments = [
         url: "https://mlflow.example/#/models/AutoE2E/versions/42",
       },
     ],
-    params: {},
-    tags: {},
+    params: {
+      "train/lr": "0.0003",
+      "train/batch_size": "16",
+      "train/weight_decay": "0.01",
+      "ctx/train_docker_image": "training@sha256:111111111111",
+    },
+    tags: {
+      "ctx/eval_docker_image": "evaluation@sha256:222222222222",
+      "best_checkpoint_sha256": "aaaaaaaaaaaaaaaa",
+      "final_checkpoint_sha256": "bbbbbbbbbbbbbbbb",
+    },
     metrics: {
       "eval/navigation/collision_rate": 0.025,
       "eval/navigation/route_completion": 0.91,
@@ -75,8 +87,8 @@ const experiments = [
     experiment_id: "11",
     experiment_name: "auto-e2e",
     mlflow_status: "FINISHED",
-    start_time: 1_750_002_000_000,
-    end_time: 1_750_002_600_000,
+    start_time: NOW - 3 * DAY_MS,
+    end_time: NOW - 3 * DAY_MS + 600_000,
     dataset: "s3://auto-e2e/PhysicalAI-AV",
     dataset_version: "v3.0",
     data_fingerprint: "fingerprint-v3-full",
@@ -103,7 +115,7 @@ const experiments = [
       duration_s: 3600,
     },
     model_versions: [],
-    params: {},
+    params: { "train/lr": "0.0003" },
     tags: {},
     metrics: {},
   },
@@ -113,8 +125,8 @@ const experiments = [
     experiment_id: "11",
     experiment_name: "auto-e2e",
     mlflow_status: "FAILED",
-    start_time: 1_750_001_000_000,
-    end_time: 1_750_001_100_000,
+    start_time: NOW - 20 * DAY_MS,
+    end_time: NOW - 20 * DAY_MS + 100_000,
     dataset: "s3://auto-e2e/KITScenes",
     dataset_version: "v2.1",
     data_fingerprint: "fingerprint-kitscenes-smoke",
@@ -147,8 +159,8 @@ const experiments = [
     experiment_id: "9",
     experiment_name: "legacy",
     mlflow_status: "FINISHED",
-    start_time: 1_750_000_000_000,
-    end_time: 1_750_000_100_000,
+    start_time: NOW - 120 * DAY_MS,
+    end_time: NOW - 120 * DAY_MS + 100_000,
     dataset: "s3://auto-e2e/L2D",
     dataset_version: "v1.0",
     validation_scope: "subset",
@@ -186,7 +198,7 @@ test("shows joined results, source links, and complete run details", async ({
 }) => {
   await mockExperiments(page);
   await page.setViewportSize({ width: 1440, height: 1000 });
-  await page.goto("/models");
+  await page.goto("/experiments");
 
   await expect(
     page.getByRole("heading", { name: "Experiments", exact: true }),
@@ -225,28 +237,38 @@ test("shows joined results, source links, and complete run details", async ({
   );
 
   await evaluationRow.click();
-  await expect(page).toHaveURL(/\/models\?run=run-eval$/);
+  await expect(page).toHaveURL(/\/experiments\?run=run-eval$/);
   const details = page.getByRole("dialog", { name: "PhysicalAI AV v3.0" });
   await expect(details).toContainText("Evaluation");
   await expect(details).toContainText("ADE 3.513 m");
   await expect(details).toContainText("Validation");
   await expect(details).toContainText("ADE 3.840 m");
   await expect(details).toContainText("collision_rate");
+  await expect(details).toContainText("Quality gate PASS");
+  await expect(details).toContainText("What changed");
+  await expect(details).toContainText("OfftoOn");
+  await expect(details).toContainText("Training pipeline");
+  await expect(details).toContainText("Evaluation");
+  await expect(details).toContainText("training@sha256:111111111111");
+  await expect(details).toContainText("aaaaaaaaaaaaaaaa");
   await expect(details).toContainText("flyte-eval");
   await expect(details).toContainText("run-eval");
   await expect(details).toContainText("v42 · best");
+  await expect(
+    details.getByRole("link", { name: "Open run artifacts in MLflow" }),
+  ).toHaveAttribute("href", experiments[0].mlflow_url);
 
   await details
     .getByRole("button", { name: "Close experiment details" })
     .click();
-  await expect(page).toHaveURL(/\/models$/);
+  await expect(page).toHaveURL(/\/experiments$/);
 });
 
 test("filters experiments by dataset, status, and identifiers", async ({
   page,
 }) => {
   await mockExperiments(page);
-  await page.goto("/models");
+  await page.goto("/experiments");
   await expect(page.getByText("4 results", { exact: true })).toBeVisible();
 
   await page
@@ -280,11 +302,30 @@ test("filters experiments by dataset, status, and identifiers", async ({
   await expect(page.getByRole("table")).toContainText("run-unlinked");
 });
 
+test("filters experiments by a recent time window", async ({ page }) => {
+  await mockExperiments(page);
+  await page.goto("/experiments");
+
+  await page
+    .getByRole("combobox", { name: "Filter by period" })
+    .selectOption("7");
+  await expect(page.getByText("2 results", { exact: true })).toBeVisible();
+  await expect(page.getByRole("table")).toContainText("flyte-eval");
+  await expect(page.getByRole("table")).toContainText("flyte-validation");
+  await expect(page.getByRole("table")).not.toContainText("flyte-failed");
+
+  await page
+    .getByRole("combobox", { name: "Filter by period" })
+    .selectOption("30");
+  await expect(page.getByText("3 results", { exact: true })).toBeVisible();
+  await expect(page.getByRole("table")).toContainText("flyte-failed");
+});
+
 test("warns when selected experiment results are not comparable", async ({
   page,
 }) => {
   await mockExperiments(page);
-  await page.goto("/models");
+  await page.goto("/experiments");
 
   await page.getByRole("checkbox", { name: "Compare route-on-evaluation" }).check();
   await page
@@ -308,7 +349,7 @@ test("mobile experiment list and details do not overflow the viewport", async ({
 }) => {
   await mockExperiments(page);
   await page.setViewportSize({ width: 390, height: 844 });
-  await page.goto("/models");
+  await page.goto("/experiments");
 
   await expect(page.locator("article")).toHaveCount(4);
   await expect(page.getByRole("table")).toBeHidden();
@@ -333,4 +374,15 @@ test("mobile experiment list and details do not overflow the viewport", async ({
       ),
     )
     .toBe(true);
+});
+
+test("legacy models URL redirects to the experiments workspace", async ({
+  page,
+}) => {
+  await mockExperiments(page);
+  await page.goto("/models");
+  await expect(page).toHaveURL(/\/experiments$/);
+  await expect(
+    page.getByRole("heading", { name: "Experiments", exact: true }),
+  ).toBeVisible();
 });
