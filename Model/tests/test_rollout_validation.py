@@ -77,6 +77,11 @@ def test_logged_xy_equal_prediction_has_zero_selector_metrics():
         "route_gap": 0.0,
         "wrong_branch_excess": None,
         "destination_error_m": None,
+        "diagnostic_predicted_offroad_rate": 0.0,
+        "diagnostic_target_offroad_rate": 0.0,
+        "diagnostic_predicted_route_compliance": 1.0,
+        "diagnostic_target_route_compliance": 1.0,
+        "diagnostic_raster_tolerance_m": 0.5,
     }]
 
 
@@ -124,3 +129,36 @@ def test_invalid_map_and_route_are_unavailable_not_perfect():
     assert record["route_gap"] is None
     assert record["wrong_branch_excess"] is None
     assert record["destination_error_m"] is None
+
+
+def test_inside_metrics_use_half_pixel_raster_tolerance():
+    controls = _controls()
+    shape = (1, GEOMETRY.height_px, GEOMETRY.width_px)
+
+    inside = build_rollout_validation_records(
+        controls,
+        controls,
+        torch.tensor([5.0]),
+        _logged_straight(),
+        _supervision(torch.full(shape, 0.49)),
+        torch.tensor([True]),
+        torch.tensor([True]),
+        ["sample-a"],
+        ["scene-a"],
+    )[0]
+    outside = build_rollout_validation_records(
+        controls,
+        controls,
+        torch.tensor([5.0]),
+        _logged_straight(),
+        _supervision(torch.full(shape, 0.51)),
+        torch.tensor([True]),
+        torch.tensor([True]),
+        ["sample-a"],
+        ["scene-a"],
+    )[0]
+
+    assert inside["diagnostic_target_offroad_rate"] == 0.0
+    assert inside["diagnostic_target_route_compliance"] == 1.0
+    assert outside["diagnostic_target_offroad_rate"] == 1.0
+    assert outside["diagnostic_target_route_compliance"] == 0.0
