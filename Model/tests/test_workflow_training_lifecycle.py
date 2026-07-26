@@ -441,6 +441,15 @@ def test_training_wires_dataset_specific_trajectory_policy():
     assert "refusing to train on one shard" in offline_rl_source
 
 
+def test_reconstruction_audit_uses_training_group_digest_contract():
+    source = inspect.getsource(
+        workflows.audit_kitscenes_target_reconstruction.task_function
+    )
+
+    assert "group_uid_digest(validation_group_uids)" in source
+    assert '"\\n".join(validation_group_uids)' not in source
+
+
 def test_training_seed_controls_comparable_navigation_runs():
     training_function = workflows.train_il.task_function
     training_source = inspect.getsource(training_function)
