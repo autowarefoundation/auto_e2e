@@ -18,6 +18,8 @@ from training.losses.control_rollout import integrate_controls_torch
 
 
 AUDIT_SCHEMA_VERSION = "target_rollout_reconstruction_v1"
+P95_FDE_3S_LIMIT_M = 1.0
+P95_FDE_FULL_LIMIT_M = 2.0
 _HISTORY_STEPS = 64
 _HISTORY_SIGNALS = 4
 _FUTURE_STEPS = 64
@@ -251,8 +253,8 @@ def audit_target_rollout_reconstruction(
     dt: float = 0.1,
     three_second_steps: int = 30,
     full_horizon_steps: int = 64,
-    p95_fde_3s_limit_m: float = 1.0,
-    p95_fde_full_limit_m: float = 2.0,
+    p95_fde_3s_limit_m: float = P95_FDE_3S_LIMIT_M,
+    p95_fde_full_limit_m: float = P95_FDE_FULL_LIMIT_M,
 ) -> dict[str, object]:
     """Compare integrated target controls with logged ego-frame future XY."""
     controls = np.ascontiguousarray(target_controls, dtype=np.float32)
