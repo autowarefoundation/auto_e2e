@@ -2111,6 +2111,9 @@ def data_processing(
         POSE_SCHEMA_VERSION,
     )
     from navigation.geometry import DEFAULT_NAVIGATION_GEOMETRY
+    from navigation.supervision import (
+        ROUTE_SUPERVISION_ARTIFACT_VERSION,
+    )
 
     manifest = {"total_samples": sample_count, "shards": shard_idx,
                 "shard_names": shard_names,
@@ -2127,6 +2130,18 @@ def data_processing(
                 "has_navigation": (
                     bool(sample_count)
                     and navigation_artifact_summary is not None
+                ),
+                "has_route_supervision": (
+                    bool(sample_count)
+                    and navigation_artifact_summary is not None
+                ),
+                "route_supervision_version": (
+                    ROUTE_SUPERVISION_ARTIFACT_VERSION
+                    if (
+                        sample_count
+                        and navigation_artifact_summary is not None
+                    )
+                    else None
                 ),
                 "navigation": navigation_artifact_summary,
                 "navigation_geometry": (
