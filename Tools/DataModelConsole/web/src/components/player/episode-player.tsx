@@ -696,7 +696,6 @@ export function EpisodePlayer({
             version={version}
             sample={sample}
           />
-          <BEVActivationHeatmap overlay={overlay} row={overlayRow} />
           <div className="rounded-md border border-slate-800 bg-slate-900/60 p-2 font-mono text-[10px] leading-relaxed text-slate-400">
             <p>
               ep {sample?.episode_id || "-"} ·{" "}
@@ -761,6 +760,8 @@ export function EpisodePlayer({
           </div>
         </div>
       </div>
+
+      <BEVActivationHeatmap overlay={overlay} row={overlayRow} />
 
       <SceneMap
         dataset={dataset}
