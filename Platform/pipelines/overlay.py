@@ -39,7 +39,6 @@ _SEED = struct.Struct("<q")
 _DIRECTORY_ENTRY = struct.Struct("<QI")
 _HORIZON = 64
 _DIMS = 2
-_LEGACY_FORMAT_VERSION = 1
 _V2_HEATMAP_NAMES = ("image", "navigation", "fused")
 _HEATMAP_NAMES_BY_VERSION = {
     1: (),
@@ -171,7 +170,7 @@ def encode_overlay(
     *,
     base_seeds: Sequence[int] = (0,),
     deterministic_planner: bool = False,
-    bev_heatmaps: np.ndarray | None = None,
+    bev_heatmaps: np.ndarray,
 ) -> bytes:
     """Encode and deterministically gzip one canonical shard overlay."""
     sample_uids = tuple(sample_uids)
@@ -196,16 +195,9 @@ def encode_overlay(
         controls, sample_count=sample_count, seed_count=seed_count
     )
     v0_f32 = _normalise_v0(v0, sample_count=sample_count)
-    heatmaps_u8 = None
-    heatmap_scales = None
-    format_version = _LEGACY_FORMAT_VERSION
-    heatmap_count = 0
-    if bev_heatmaps is not None:
-        heatmaps_u8, heatmap_scales = _quantise_bev_heatmaps(
-            bev_heatmaps, sample_count
-        )
-        format_version = OVERLAY_FORMAT_VERSION
-        heatmap_count = len(BEV_HEATMAP_NAMES)
+    heatmaps_u8, heatmap_scales = _quantise_bev_heatmaps(
+        bev_heatmaps, sample_count
+    )
 
     hashes = [sample_uid_hash(uid) for uid in sample_uids]
     if len(set(hashes)) != len(hashes):
@@ -216,13 +208,13 @@ def encode_overlay(
     raw = io.BytesIO()
     raw.write(_HEADER.pack(
         OVERLAY_MAGIC,
-        format_version,
+        OVERLAY_FORMAT_VERSION,
         flags,
         sample_count,
         seed_count,
         _HORIZON,
         _DIMS,
-        heatmap_count,
+        len(BEV_HEATMAP_NAMES),
     ))
     for seed in base_seeds:
         raw.write(_SEED.pack(seed))
@@ -230,9 +222,8 @@ def encode_overlay(
         raw.write(_DIRECTORY_ENTRY.pack(uid_hash, row))
     raw.write(controls_f32.tobytes(order="C"))
     raw.write(v0_f32.tobytes(order="C"))
-    if heatmaps_u8 is not None and heatmap_scales is not None:
-        raw.write(heatmap_scales.tobytes(order="C"))
-        raw.write(heatmaps_u8.tobytes(order="C"))
+    raw.write(heatmap_scales.tobytes(order="C"))
+    raw.write(heatmaps_u8.tobytes(order="C"))
 
     compressed = io.BytesIO()
     with gzip.GzipFile(
@@ -250,7 +241,7 @@ def write_overlay(
     *,
     base_seeds: Sequence[int] = (0,),
     deterministic_planner: bool = False,
-    bev_heatmaps: np.ndarray | None = None,
+    bev_heatmaps: np.ndarray,
 ) -> OverlayArtifact:
     """Atomically write one overlay and return its pointer metadata."""
     path = Path(path)
