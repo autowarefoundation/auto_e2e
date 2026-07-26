@@ -1305,7 +1305,6 @@ def resolve_overlay_model(
     requests=Resources(cpu="1", mem="2Gi"),
     limits=Resources(cpu="1", mem="2Gi"),
     environment=OVERLAY_TASK_ENV,
-    retries=3,
 )
 def prepare_overlay_set(
     resolved_metadata: FlyteFile,
@@ -1757,6 +1756,7 @@ def precompute_overlay_partition(
     requests=Resources(cpu="1", mem="2Gi"),
     limits=Resources(cpu="1", mem="2Gi"),
     environment=OVERLAY_TASK_ENV,
+    retries=3,
 )
 def finalize_overlay_set(
     model_metadata: FlyteFile,
