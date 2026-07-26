@@ -4580,6 +4580,7 @@ def train_il(
                 freeze_component_availability,
                 score_checkpoint,
                 score_is_better,
+                validate_frozen_availability,
             )
 
             validation_aggregates = aggregate_validation_records(
@@ -4593,12 +4594,10 @@ def train_il(
                     "checkpoint selector availability was not frozen "
                     "before training"
                 )
-            if observed_availability != selector_availability:
-                raise ValueError(
-                    "checkpoint selector availability changed during run: "
-                    f"expected={selector_availability} "
-                    f"actual={observed_availability}"
-                )
+            validate_frozen_availability(
+                selector_availability,
+                observed_availability,
+            )
             checkpoint_selection = score_checkpoint(
                 validation_aggregates,
                 selector_availability,
