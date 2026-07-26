@@ -12,7 +12,10 @@ import {
 
 const LABELS: Record<BEVHeatmapName, string> = {
   image: "Camera",
+  map: "Map only",
+  route_delta: "Route delta",
   navigation: "Navigation",
+  fusion_delta: "Fusion delta",
   fused: "Fused",
 };
 
@@ -46,16 +49,47 @@ export function BEVActivationHeatmap({
 }) {
   const [mode, setMode] = useState<BEVHeatmapName>("fused");
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const availableNames =
+    overlay && overlay.bevHeatmapNames.length > 0
+      ? overlay.bevHeatmapNames
+      : BEV_HEATMAP_NAMES;
   const heatmap =
     overlay && row !== undefined
       ? bevHeatmapForRow(overlay, row, mode)
       : null;
+  const statistics = heatmap
+    ? heatmap.values.reduce(
+        (result, value) => ({
+          sum: result.sum + value,
+          peak: Math.max(result.peak, value),
+        }),
+        { sum: 0, peak: 0 },
+      )
+    : null;
+  const meanRMS =
+    statistics && heatmap
+      ? (statistics.sum / heatmap.values.length / 255) * heatmap.scale
+      : null;
+  const peakRMS =
+    statistics && heatmap
+      ? (statistics.peak / 255) * heatmap.scale
+      : null;
+
+  useEffect(() => {
+    if (!availableNames.includes(mode)) {
+      setMode(
+        availableNames.includes("fused") ? "fused" : availableNames[0],
+      );
+    }
+  }, [availableNames, mode]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
-    if (!canvas || !heatmap) return;
+    if (!canvas) return;
     const context = canvas.getContext("2d");
     if (!context) return;
+    context.clearRect(0, 0, canvas.width, canvas.height);
+    if (!heatmap) return;
 
     const image = context.createImageData(
       BEV_HEATMAP_SIZE,
@@ -77,18 +111,30 @@ export function BEVActivationHeatmap({
       className="rounded-md border border-slate-800 bg-slate-950 p-2"
       aria-label="BEV activation heatmap"
     >
-      <div className="mb-2 flex items-center justify-between gap-2">
-        <h3 className="text-xs font-medium text-slate-200">BEV activations</h3>
-        <span className="font-mono text-[10px] text-slate-500">
-          {heatmap ? `max RMS ${heatmap.scale.toPrecision(3)}` : "unavailable"}
-        </span>
+      <div className="mb-2 flex items-start justify-between gap-2">
+        <h3 className="text-xs font-medium text-slate-200">
+          Encoder diagnostics
+        </h3>
+        <div className="text-right font-mono text-[9px] leading-3 text-slate-500">
+          {heatmap && meanRMS !== null && peakRMS !== null ? (
+            <>
+              <div>mean {meanRMS.toPrecision(3)} RMS</div>
+              <div>
+                peak {peakRMS.toPrecision(3)} / shared{" "}
+                {heatmap.scale.toPrecision(3)}
+              </div>
+            </>
+          ) : (
+            "unavailable"
+          )}
+        </div>
       </div>
       <div
         role="tablist"
-        aria-label="BEV activation branch"
+        aria-label="BEV encoder output"
         className="mb-2 grid grid-cols-3 rounded border border-slate-800 bg-slate-900 p-0.5"
       >
-        {BEV_HEATMAP_NAMES.map((name) => (
+        {availableNames.map((name) => (
           <button
             key={name}
             type="button"
@@ -97,8 +143,8 @@ export function BEVActivationHeatmap({
             onClick={() => setMode(name)}
             className={
               mode === name
-                ? "h-6 rounded-sm bg-slate-700 px-1 text-[10px] text-white"
-                : "h-6 rounded-sm px-1 text-[10px] text-slate-400 hover:text-slate-200"
+                ? "h-7 rounded-sm bg-slate-700 px-1 text-[9px] text-white"
+                : "h-7 rounded-sm px-1 text-[9px] text-slate-400 hover:text-slate-200"
             }
           >
             {LABELS[name]}
@@ -129,7 +175,7 @@ export function BEVActivationHeatmap({
         </div>
       ) : (
         <div className="flex aspect-square items-center justify-center border border-dashed border-slate-800 px-5 text-center text-xs text-slate-500">
-          This model overlay has no BEV diagnostics.
+          No encoder diagnostics for this model.
         </div>
       )}
     </section>
