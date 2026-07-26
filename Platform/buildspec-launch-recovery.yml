@@ -7,7 +7,8 @@ version: 0.2
 #   ARTIFACT_SET_SHA256
 # Optional:
 #   RECOVERY_MANIFEST_URI, IMAGE_TAG, EPOCHS, TRAINING_SEED,
-#   ENABLE_ROUTE_CONDITIONING, RESUME_FROM
+#   MAX_PARTITIONS, VALIDATION_SCOPE, ENABLE_ROUTE_CONDITIONING,
+#   ENABLE_JUNCTION_SAMPLING, ENABLE_ROUTE_CONSISTENCY, RESUME_FROM
 
 env:
   shell: bash
@@ -17,15 +18,22 @@ env:
     FLYTE_DOMAIN: development
     ARTIFACT_SET_SHA256: ""
     RECOVERY_MANIFEST_URI: ""
+    DATASET_VERSION: v3.1
     PACK_CONCURRENCY: "60"
+    MAX_PARTITIONS: "0"
     BACKBONE: "swin_v2_tiny"
-    EPOCHS: "10"
+    EPOCHS: "20"
     BATCH_SIZE: "1"
     GRAD_ACCUM_STEPS: "4"
     LR: "1e-4"
     TRAINING_SEED: "149"
     ENABLE_ROUTE_CONDITIONING: "true"
+    TRAINING_OBJECTIVE_VERSION: kitscenes_navigation_objective_v1
+    ENABLE_JUNCTION_SAMPLING: "true"
+    ENABLE_ROUTE_CONSISTENCY: "true"
+    ROUTE_CONSISTENCY_WEIGHT: "0.10"
     VAL_FRACTION: "0.1"
+    VALIDATION_SCOPE: full
     NUM_WORKERS: "4"
     EARLY_STOPPING_PATIENCE: "3"
     RESUME_FROM: ""
@@ -78,14 +86,19 @@ phases:
         RUN_ARGS=(
           --recovery_manifest "${RECOVERY_MANIFEST_URI}"
           --artifact_set_sha256 "${ARTIFACT_SET_SHA256}"
+          --dataset_version "${DATASET_VERSION}"
           --pack_concurrency "${PACK_CONCURRENCY}"
+          --max_partitions "${MAX_PARTITIONS}"
           --backbone "${BACKBONE}"
           --epochs "${EPOCHS}"
           --batch_size "${BATCH_SIZE}"
           --grad_accum_steps "${GRAD_ACCUM_STEPS}"
           --lr "${LR}"
           --training_seed "${TRAINING_SEED}"
+          --training_objective_version "${TRAINING_OBJECTIVE_VERSION}"
+          --route_consistency_weight "${ROUTE_CONSISTENCY_WEIGHT}"
           --val_fraction "${VAL_FRACTION}"
+          --validation_scope "${VALIDATION_SCOPE}"
           --num_workers "${NUM_WORKERS}"
           --early_stopping_patience "${EARLY_STOPPING_PATIENCE}"
         )
@@ -98,6 +111,30 @@ phases:
             ;;
           *)
             echo "ENABLE_ROUTE_CONDITIONING must be true or false" >&2
+            exit 2
+            ;;
+        esac
+        case "${ENABLE_JUNCTION_SAMPLING,,}" in
+          true)
+            RUN_ARGS+=(--enable_junction_sampling)
+            ;;
+          false)
+            RUN_ARGS+=(--no_enable_junction_sampling)
+            ;;
+          *)
+            echo "ENABLE_JUNCTION_SAMPLING must be true or false" >&2
+            exit 2
+            ;;
+        esac
+        case "${ENABLE_ROUTE_CONSISTENCY,,}" in
+          true)
+            RUN_ARGS+=(--enable_route_consistency)
+            ;;
+          false)
+            RUN_ARGS+=(--no_enable_route_consistency)
+            ;;
+          *)
+            echo "ENABLE_ROUTE_CONSISTENCY must be true or false" >&2
             exit 2
             ;;
         esac
