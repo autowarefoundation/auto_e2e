@@ -105,6 +105,8 @@ def validate_report_provenance(
         raise ValueError("overlay and dataset publication identities differ")
     if overlay_manifest.get("overlay_binary_schema") not in {
         "v1",
+        "v2",
+        "v3",
         OVERLAY_SCHEMA,
     }:
         raise ValueError("overlay manifest has an unsupported binary schema")
