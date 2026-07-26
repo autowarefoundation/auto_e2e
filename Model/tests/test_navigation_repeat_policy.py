@@ -78,6 +78,24 @@ def test_raw_repeat_stage_preserves_deterministic_exposure():
     )
 
 
+def test_repeat_policy_composes_with_webdataset_tar_reader(tmp_path):
+    policy = NavigationRepeatPolicy()
+    _write_shard(tmp_path, [
+        _sample("left", maneuver="left"),
+        _sample("straight"),
+    ])
+    dataset = wds.WebDataset(
+        [str(tmp_path / "shard-000000.tar")],
+        shardshuffle=False,
+        empty_check=False,
+        nodesplitter=wds.single_node_only,
+    ).compose(policy)
+
+    assert [sample["__key__"] for sample in dataset] == (
+        ["left"] * 4 + ["straight"]
+    )
+
+
 def test_exposure_audit_excludes_validation_and_has_stable_digest(tmp_path):
     policy = NavigationRepeatPolicy()
     _write_shard(tmp_path, [
