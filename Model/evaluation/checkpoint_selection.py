@@ -18,6 +18,15 @@ TOP_LEVEL_WEIGHTS = {
     "map_safety": 0.15,
     "navigation": 0.20,
 }
+UTILITY_SCALES = {
+    "ade_3s_m": 2.5,
+    "fde_6_4s_m": 6.0,
+    "comfort_excess": 0.15,
+    "offroad_excess": 0.10,
+    "route_gap": 0.15,
+    "wrong_branch_excess": 1.0,
+    "destination_error_m": 7.5,
+}
 METRIC_NAMES = (
     "ade_3s_m",
     "fde_6_4s_m",
@@ -336,12 +345,24 @@ def score_checkpoint(
         "fde_6_4s_m",
     )
     natural_trajectory = (
-        0.6 * _bounded_inverse(ade_natural, 2.5)
-        + 0.4 * _bounded_inverse(fde_natural, 6.0)
+        0.6 * _bounded_inverse(
+            ade_natural,
+            UTILITY_SCALES["ade_3s_m"],
+        )
+        + 0.4 * _bounded_inverse(
+            fde_natural,
+            UTILITY_SCALES["fde_6_4s_m"],
+        )
     )
     scene_trajectory = (
-        0.6 * _bounded_inverse(ade_scene, 2.5)
-        + 0.4 * _bounded_inverse(fde_scene, 6.0)
+        0.6 * _bounded_inverse(
+            ade_scene,
+            UTILITY_SCALES["ade_3s_m"],
+        )
+        + 0.4 * _bounded_inverse(
+            fde_scene,
+            UTILITY_SCALES["fde_6_4s_m"],
+        )
     )
     components = {
         "trajectory": 0.5 * (
@@ -349,14 +370,14 @@ def score_checkpoint(
         ),
         "comfort": _clipped_utility(
             _combined_metric(aggregates, "comfort_excess"),
-            0.15,
+            UTILITY_SCALES["comfort_excess"],
         ),
     }
 
     if bool(availability.get("map_safety", False)):
         components["map_safety"] = _clipped_utility(
             _combined_metric(aggregates, "offroad_excess"),
-            0.10,
+            UTILITY_SCALES["offroad_excess"],
         )
     if bool(availability.get("navigation", False)):
         wrong_branch_available = bool(
@@ -366,7 +387,7 @@ def score_checkpoint(
             "route": (
                 _clipped_utility(
                     _combined_metric(aggregates, "route_gap"),
-                    0.15,
+                    UTILITY_SCALES["route_gap"],
                 ),
                 0.5 if wrong_branch_available else 0.7,
             ),
@@ -378,7 +399,7 @@ def score_checkpoint(
                         aggregates,
                         "wrong_branch_excess",
                     ),
-                    1.0,
+                    UTILITY_SCALES["wrong_branch_excess"],
                 ),
                 0.3,
             )
@@ -389,7 +410,7 @@ def score_checkpoint(
                         aggregates,
                         "destination_error_m",
                     ),
-                    7.5,
+                    UTILITY_SCALES["destination_error_m"],
                 ),
                 0.2 if wrong_branch_available else 0.3,
             )
@@ -411,14 +432,7 @@ def score_checkpoint(
         "components": components,
         "effective_weights": effective_weights,
         "availability": dict(availability),
-        "utility_scales": {
-            "ade_3s_m": 2.5,
-            "fde_6_4s_m": 6.0,
-            "comfort_excess": 0.15,
-            "offroad_excess": 0.10,
-            "route_gap": 0.15,
-            "destination_error_m": 7.5,
-        },
+        "utility_scales": dict(UTILITY_SCALES),
         "min_delta": SELECTOR_MIN_DELTA,
     }
 
