@@ -31,6 +31,11 @@ def _record(
         "route_gap": None,
         "wrong_branch_excess": None,
         "destination_error_m": None,
+        "diagnostic_predicted_offroad_rate": value / 100.0,
+        "diagnostic_target_offroad_rate": 0.0,
+        "diagnostic_predicted_route_compliance": 0.9,
+        "diagnostic_target_route_compliance": 1.0,
+        "diagnostic_raster_tolerance_m": 0.5,
         **overrides,
     }
 
@@ -110,6 +115,49 @@ def test_availability_uses_frozen_coverage_thresholds():
     assert availability["navigation"]
     assert availability["wrong_branch"]
     assert availability["destination"]
+    assert availability["calibration"] == {
+        "target_offroad_rate": 0.0,
+        "target_route_compliance": 1.0,
+        "raster_tolerance_m": 0.5,
+    }
+
+
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        (
+            {
+                "route_gap": 0.1,
+                "diagnostic_target_route_compliance": 0.0,
+            },
+            "target compliance is saturated",
+        ),
+        (
+            {
+                "diagnostic_target_offroad_rate": 1.0,
+            },
+            "target off-road rate is saturated",
+        ),
+    ],
+)
+def test_availability_rejects_saturated_map_diagnostics(
+    overrides,
+    message,
+):
+    records = [
+        _record(
+            f"sample-{index}",
+            f"scene-{index % 4}",
+            1.0,
+            **overrides,
+        )
+        for index in range(50)
+    ]
+
+    with pytest.raises(ValueError, match=message):
+        freeze_component_availability(
+            aggregate_validation_records(records)
+        )
 
 
 def test_score_renormalizes_unavailable_map_and_navigation():
