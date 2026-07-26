@@ -184,3 +184,29 @@ def test_missing_drivable_field_is_unavailable_not_perfect():
     assert record["offroad_excess"] is None
     assert record["diagnostic_target_offroad_rate"] is None
     assert record["route_gap"] == 0.0
+
+
+def test_wrong_branch_uses_center_corridor_not_footprint_compliance():
+    shape = (1, GEOMETRY.height_px, GEOMETRY.width_px)
+    route_mask = torch.zeros(1, 2, *shape[1:])
+    _, y_left = GEOMETRY.pixel_center_grids()
+    route_mask[0, 0] = torch.from_numpy(
+        (np.abs(y_left) <= 0.5).astype(np.float32)
+    )
+
+    record = build_rollout_validation_records(
+        _controls(),
+        _controls(),
+        torch.tensor([5.0]),
+        _logged_straight(),
+        _supervision(torch.full(shape, 0.51)),
+        torch.tensor([True]),
+        torch.tensor([True]),
+        ["sample-a"],
+        ["scene-a"],
+        route_mask=route_mask,
+        route_intersections=[True],
+    )[0]
+
+    assert record["diagnostic_target_route_compliance"] == 0.0
+    assert record["wrong_branch_excess"] == 0.0
