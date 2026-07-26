@@ -19,8 +19,8 @@ from typing import Sequence
 import numpy as np
 
 
-OVERLAY_SCHEMA = "v3"
-OVERLAY_FORMAT_VERSION = 3
+OVERLAY_SCHEMA = "v4"
+OVERLAY_FORMAT_VERSION = 4
 OVERLAY_MAGIC = b"AOVL"
 UID_HASH_ALGORITHM = "sha256-le64-v1"
 FLAG_DETERMINISTIC_PLANNER = 1 << 0
@@ -45,6 +45,7 @@ _HEATMAP_NAMES_BY_VERSION = {
     1: (),
     2: _V2_HEATMAP_NAMES,
     3: BEV_HEATMAP_NAMES,
+    4: BEV_HEATMAP_NAMES,
 }
 
 
@@ -152,8 +153,13 @@ def _quantise_bev_heatmaps(
         raise ValueError("bev_heatmaps must be non-negative")
 
     heatmaps = np.ascontiguousarray(array, dtype=np.float32)
-    scales = heatmaps.max(axis=(1, 2, 3)).astype("<f4", copy=False)
-    divisors = np.where(scales > 0, scales, 1.0).reshape(-1, 1, 1, 1)
+    scales = heatmaps.max(axis=(2, 3)).astype("<f4", copy=False)
+    divisors = np.where(scales > 0, scales, 1.0).reshape(
+        sample_count,
+        len(BEV_HEATMAP_NAMES),
+        1,
+        1,
+    )
     quantised = np.rint(np.clip(heatmaps / divisors, 0.0, 1.0) * 255.0)
     return np.ascontiguousarray(quantised, dtype=np.uint8), scales
 
@@ -312,8 +318,11 @@ def decode_overlay(payload: bytes) -> DecodedOverlay:
         + sample_count * 4
     )
     if heatmap_names:
+        scale_count = sample_count * (
+            len(heatmap_names) if version >= 4 else 1
+        )
         expected_size += (
-            sample_count * 4
+            scale_count * 4
             + sample_count
             * len(heatmap_names)
             * BEV_HEATMAP_SIZE
@@ -353,10 +362,16 @@ def decode_overlay(payload: bytes) -> DecodedOverlay:
     heatmaps = None
     heatmap_scales = None
     if heatmap_names:
+        scale_shape = (
+            (sample_count, len(heatmap_names))
+            if version >= 4
+            else (sample_count,)
+        )
+        scale_count = int(np.prod(scale_shape))
         heatmap_scales = np.frombuffer(
-            raw, dtype="<f4", count=sample_count, offset=cursor
-        ).copy()
-        cursor += sample_count * 4
+            raw, dtype="<f4", count=scale_count, offset=cursor
+        ).reshape(scale_shape).copy()
+        cursor += scale_count * 4
         quantised = np.frombuffer(
             raw,
             dtype=np.uint8,
@@ -373,11 +388,12 @@ def decode_overlay(payload: bytes) -> DecodedOverlay:
             BEV_HEATMAP_SIZE,
             BEV_HEATMAP_SIZE,
         )
-        heatmaps = (
-            quantised.astype(np.float32)
-            * heatmap_scales.reshape(-1, 1, 1, 1)
-            / 255.0
+        scale_view = (
+            heatmap_scales.reshape(sample_count, len(heatmap_names), 1, 1)
+            if version >= 4
+            else heatmap_scales.reshape(sample_count, 1, 1, 1)
         )
+        heatmaps = quantised.astype(np.float32) * scale_view / 255.0
     return DecodedOverlay(
         flags=flags,
         base_seeds=tuple(seeds),
