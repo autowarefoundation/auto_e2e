@@ -350,7 +350,7 @@ def _decode_sample(
     ``window_index.json`` mapping (step,view)→frame_id and the pixels live in a
     sibling ``pool/`` dir. None on shards without a pool (imitation-only / legacy).
     """
-    # Keys: "cam_0.jpg" ... "cam_{V-1}.jpg", schema-v5 navigation
+    # Keys: "cam_0.jpg" ... "cam_{V-1}.jpg", schema-v6 navigation
     # members or a legacy optional "map.jpg", plus numeric/metadata members.
     cam_keys = sorted(
         (k for k in sample if _CAM_KEY_RE.match(k)),
@@ -367,7 +367,7 @@ def _decode_sample(
     present_navigation = navigation_keys.intersection(sample)
     if present_navigation and present_navigation != navigation_keys:
         raise ValueError(
-            "navigation members must be present as a complete schema-v5 set"
+            "navigation members must be present as a complete schema-v6 set"
         )
     if present_navigation:
         from navigation.artifacts import (
