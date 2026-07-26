@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import gzip
 import hashlib
+import struct
 
 import numpy as np
 import pytest
@@ -46,6 +48,72 @@ def _fixture():
         ]
     )
     return uids, controls, v0, heatmaps
+
+
+def _legacy_payload(version, uids, controls, v0, heatmaps):
+    base_seeds = (0, 1)
+    raw_v4 = gzip.decompress(
+        encode_overlay(
+            uids,
+            controls,
+            v0,
+            base_seeds=base_seeds,
+            bev_heatmaps=heatmaps,
+        )
+    )
+    prefix_size = (
+        20
+        + len(base_seeds) * 8
+        + len(uids) * 12
+        + controls.size * 4
+        + v0.size * 4
+    )
+    if version == 1:
+        raw = (
+            struct.pack(
+                "<4sHHIHHHH",
+                b"AOVL",
+                version,
+                0,
+                len(uids),
+                len(base_seeds),
+                64,
+                2,
+                0,
+            )
+            + raw_v4[20:prefix_size]
+        )
+        return gzip.compress(raw, compresslevel=6, mtime=0), (), None
+
+    indices = (0, 3, 5) if version == 2 else tuple(range(6))
+    selected = heatmaps[:, indices]
+    scales = selected.max(axis=(1, 2, 3)).astype("<f4")
+    divisors = np.where(scales > 0, scales, 1.0).reshape(-1, 1, 1, 1)
+    quantised = np.rint(
+        np.clip(selected / divisors, 0.0, 1.0) * 255.0
+    ).astype(np.uint8)
+    raw = (
+        struct.pack(
+            "<4sHHIHHHH",
+            b"AOVL",
+            version,
+            0,
+            len(uids),
+            len(base_seeds),
+            64,
+            2,
+            len(indices),
+        )
+        + raw_v4[20:prefix_size]
+        + scales.tobytes(order="C")
+        + quantised.tobytes(order="C")
+    )
+    names = (
+        ("image", "navigation", "fused")
+        if version == 2
+        else BEV_HEATMAP_NAMES
+    )
+    return gzip.compress(raw, compresslevel=6, mtime=0), names, selected
 
 
 def test_overlay_roundtrip_and_sorted_directory():
@@ -114,13 +182,31 @@ def test_overlay_writer_returns_body_pointer_metadata(tmp_path):
 def test_overlay_validation_rejects_ambiguous_or_bad_data():
     uids, controls, v0, heatmaps = _fixture()
     with pytest.raises(ValueError, match="unique"):
-        encode_overlay([uids[0]] * 3, controls, v0, base_seeds=(0, 1))
+        encode_overlay(
+            [uids[0]] * 3,
+            controls,
+            v0,
+            base_seeds=(0, 1),
+            bev_heatmaps=heatmaps,
+        )
     with pytest.raises(ValueError, match="shape"):
-        encode_overlay(uids, controls[:, :1], v0, base_seeds=(0, 1))
+        encode_overlay(
+            uids,
+            controls[:, :1],
+            v0,
+            base_seeds=(0, 1),
+            bev_heatmaps=heatmaps,
+        )
     bad = controls.copy()
     bad[0, 0, 0, 0] = np.nan
     with pytest.raises(ValueError, match="NaN"):
-        encode_overlay(uids, bad, v0, base_seeds=(0, 1))
+        encode_overlay(
+            uids,
+            bad,
+            v0,
+            base_seeds=(0, 1),
+            bev_heatmaps=heatmaps,
+        )
     with pytest.raises(ValueError, match="shape"):
         encode_overlay(
             uids,
@@ -129,16 +215,55 @@ def test_overlay_validation_rejects_ambiguous_or_bad_data():
             base_seeds=(0, 1),
             bev_heatmaps=heatmaps[:, :2],
         )
+    invalid_heatmaps = heatmaps.copy()
+    invalid_heatmaps[0, 0, 0, 0] = -1.0
+    with pytest.raises(ValueError, match="non-negative"):
+        encode_overlay(
+            uids,
+            controls,
+            v0,
+            base_seeds=(0, 1),
+            bev_heatmaps=invalid_heatmaps,
+        )
+    invalid_heatmaps[0, 0, 0, 0] = np.inf
+    with pytest.raises(ValueError, match="infinity"):
+        encode_overlay(
+            uids,
+            controls,
+            v0,
+            base_seeds=(0, 1),
+            bev_heatmaps=invalid_heatmaps,
+        )
 
 
-def test_overlay_decoder_accepts_legacy_v1_without_heatmaps():
-    uids, controls, v0, _ = _fixture()
-    decoded = decode_overlay(
-        encode_overlay(uids, controls, v0, base_seeds=(0, 1))
+@pytest.mark.parametrize("version", [1, 2, 3])
+def test_overlay_decoder_accepts_legacy_formats(version):
+    uids, controls, v0, heatmaps = _fixture()
+    payload, names, selected = _legacy_payload(
+        version,
+        uids,
+        controls,
+        v0,
+        heatmaps,
     )
-    assert decoded.bev_heatmaps is None
-    assert decoded.bev_heatmap_scales is None
-    assert decoded.bev_heatmap_names == ()
+    decoded = decode_overlay(payload)
+
+    np.testing.assert_array_equal(decoded.controls, controls)
+    np.testing.assert_array_equal(decoded.v0, v0)
+    assert decoded.bev_heatmap_names == names
+    if version == 1:
+        assert decoded.bev_heatmaps is None
+        assert decoded.bev_heatmap_scales is None
+        return
+
+    assert selected is not None
+    expected_scales = selected.max(axis=(1, 2, 3))
+    np.testing.assert_array_equal(decoded.bev_heatmap_scales, expected_scales)
+    quantization_error = np.abs(decoded.bev_heatmaps - selected)
+    assert np.all(
+        quantization_error
+        <= expected_scales[:, None, None, None] / 255.0
+    )
 
 
 def test_overlay_key_is_split_free_and_validates_segments():
