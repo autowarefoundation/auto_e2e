@@ -12,13 +12,7 @@
 //   f            toggle focus/grid
 //   Esc          back to grid
 
-import {
-  useCallback,
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-} from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Gauge,
   Keyboard,
@@ -30,6 +24,8 @@ import {
 } from "lucide-react";
 
 import { CameraMosaic } from "@/components/player/camera-mosaic";
+import { BEVActivationHeatmap } from "@/components/player/bev-activation-heatmap";
+import { NavigationMap } from "@/components/player/navigation-map";
 import {
   OverlaySelectionBar,
   type OverlayLoadStatus,
@@ -58,10 +54,7 @@ import {
   trajectoryCurvatureSign,
   yawRateFrom,
 } from "@/lib/ego";
-import type {
-  TrajectoryDisplayMode,
-  TrajectoryPoint,
-} from "@/lib/ego";
+import type { TrajectoryDisplayMode, TrajectoryPoint } from "@/lib/ego";
 import {
   controlsForRow,
   parseOverlay,
@@ -72,11 +65,7 @@ import {
   projectTrajectoriesToCameras,
   projectTrajectoryRibbonToCameras,
 } from "@/lib/projection";
-import type {
-  OverlayModel,
-  RigProjectionDocument,
-  ShardIndex,
-} from "@/types";
+import type { OverlayModel, RigProjectionDocument, ShardIndex } from "@/types";
 
 const SPEED_STEPS = [0.1, 0.25, 0.5, 1, 2, 4, 8, 16];
 const SPACE_OWNING_ELEMENTS = [
@@ -182,24 +171,27 @@ export function EpisodePlayer({
     return () => s.destroy();
   }, [index, dataset, shard, version]);
 
-  const cams = useMemo(() => {
+  const packedCams = useMemo(() => {
     const first = index.samples[0];
     if (!first) return [];
     return Object.keys(first.members)
       .filter((m) => m.match(/^cam_\d+\.jpg$/))
       .map((m) => m.replace(/\.jpg$/, ""))
-      .filter((cam) => !isHiddenCam(dataset, cam))
       .sort();
-  }, [index, dataset]);
+  }, [index]);
+  const cams = useMemo(
+    () =>
+      packedCams.filter((cam) => !isHiddenCam(dataset, cam, packedCams.length)),
+    [dataset, packedCams],
+  );
 
   const [overlayModels, setOverlayModels] = useState<OverlayModel[]>([]);
   const [selectedModelID, setSelectedModelID] = useState(
     initialState?.model ?? "",
   );
-  const [predictionMode, setPredictionMode] =
-    useState<TrajectoryDisplayMode>(
-      initialState?.predictionMode ?? "raw",
-    );
+  const [predictionMode, setPredictionMode] = useState<TrajectoryDisplayMode>(
+    initialState?.predictionMode ?? "raw",
+  );
   const [overlayStatus, setOverlayStatus] =
     useState<OverlayLoadStatus>("loading-models");
   const [overlay, setOverlay] = useState<OverlayArtifact | null>(null);
@@ -361,7 +353,8 @@ export function EpisodePlayer({
   ]);
 
   const visibleCams = useMemo(
-    () => (mode === "focus" ? [cams[focusCam] ?? cams[0]].filter(Boolean) : cams),
+    () =>
+      mode === "focus" ? [cams[focusCam] ?? cams[0]].filter(Boolean) : cams,
     [mode, cams, focusCam],
   );
   visibleCamsRef.current = visibleCams;
@@ -440,23 +433,23 @@ export function EpisodePlayer({
   // discrete status drives the panel (never hangs on 404/5xx, never shows a
   // stale card for a frame that is still loading).
   const sample = index.samples[frame];
+  const overlayRow = sample ? overlayRows.get(sample.sample_uid) : undefined;
   const curvatureSign = trajectoryCurvatureSign(dataset);
   const predictionTrajectories = useMemo(() => {
     if (!overlay || !sample) return [];
-    const row = overlayRows.get(sample.sample_uid);
-    if (row === undefined) return [];
+    if (overlayRow === undefined) return [];
     const paths = new Array<TrajectoryPoint[]>(overlay.seedCount);
     for (let seed = 0; seed < overlay.seedCount; seed++) {
       paths[seed] = integrateInterleavedControl(
-        overlay.v0[row],
-        controlsForRow(overlay, row, seed),
+        overlay.v0[overlayRow],
+        controlsForRow(overlay, overlayRow, seed),
         0.1,
         predictionMode,
         curvatureSign,
       );
     }
     return paths;
-  }, [overlay, overlayRows, sample, predictionMode, curvatureSign]);
+  }, [overlay, overlayRow, sample, predictionMode, curvatureSign]);
   const medianPrediction = useMemo(
     () => medianTrajectory(predictionTrajectories),
     [predictionTrajectories],
@@ -633,11 +626,7 @@ export function EpisodePlayer({
 
   if (!store || cams.length === 0) {
     return (
-      <p
-        role="status"
-        aria-live="polite"
-        className="text-sm text-slate-500"
-      >
+      <p role="status" aria-live="polite" className="text-sm text-slate-500">
         Empty shard index — nothing to play.
       </p>
     );
@@ -660,6 +649,159 @@ export function EpisodePlayer({
         baseSeeds={overlay?.baseSeeds ?? []}
         splitBucket={sample?.split_bucket}
       />
+      <section className="space-y-3" aria-label="Playback controls">
+        <TimelineScrubber
+          samples={index.samples}
+          fps={index.fps || 10}
+          frame={frame}
+          onSeek={setFrame}
+          onScrubStart={pause}
+        />
+
+        <div className="flex flex-wrap items-center gap-2">
+          <Button
+            variant="outline"
+            size="icon-sm"
+            onClick={() => setFrame(0)}
+            aria-label="Back to start"
+            title="Back to start"
+          >
+            <Rewind className="size-3.5" />
+          </Button>
+          <Button
+            variant="outline"
+            size="icon-sm"
+            onClick={() => step(-1)}
+            aria-label="Step back one frame"
+            title="Step back one frame (← or ,)"
+          >
+            <StepBack className="size-3.5" />
+          </Button>
+          <Button
+            size="icon-sm"
+            onClick={toggle}
+            aria-label={playing ? "Pause" : "Play"}
+            title="Play/Pause (Space)"
+          >
+            {playing ? (
+              <Pause className="size-3.5" />
+            ) : (
+              <Play className="size-3.5" />
+            )}
+          </Button>
+          <Button
+            variant="outline"
+            size="icon-sm"
+            onClick={() => step(1)}
+            aria-label="Step forward one frame"
+            title="Step forward one frame (→ or .)"
+          >
+            <StepForward className="size-3.5" />
+          </Button>
+          <span className="mx-1 h-4 w-px bg-slate-800" />
+          <Gauge className="size-3.5 text-slate-500" />
+          {/* Always-visible readout: usePlayback clamps but accepts off-preset
+              speeds (e.g. ?speed=3), which would otherwise light no chip. */}
+          <span className="font-mono text-[10px] text-slate-400">{speed}x</span>
+          {SPEED_STEPS.map((s) => (
+            <button
+              key={s}
+              onClick={() => setSpeed(s)}
+              title={`Set speed ${s}x ([ / ] to change)`}
+              className={`rounded px-1.5 py-0.5 font-mono text-[10px] transition-colors ${
+                Math.abs(speed - s) < 1e-9
+                  ? "bg-blue-600 text-white"
+                  : "bg-slate-900 text-slate-400 hover:text-slate-200"
+              }`}
+            >
+              {s}x
+            </button>
+          ))}
+          {/* Group the buffering chip and Shortcuts button under one ml-auto so
+              the chip toggling does not reflow (shift) the Shortcuts button. */}
+          <div className="ml-auto flex items-center gap-2">
+            {buffering && (
+              <span
+                role="status"
+                aria-live="polite"
+                className="flex items-center gap-1 rounded bg-amber-950/60 px-2 py-0.5 font-mono text-[10px] text-amber-400"
+                title="Fetching frames ahead of the playhead"
+              >
+                <span className="size-1.5 animate-pulse rounded-full bg-amber-400" />
+                buffering
+              </span>
+            )}
+            <button
+              onClick={() => {
+                setShowHelp((v) => !v);
+                dismissHint();
+              }}
+              title="Keyboard shortcuts (?)"
+              aria-label="Keyboard shortcuts"
+              className="flex items-center gap-1 rounded bg-slate-900 px-2 py-1 font-mono text-[11px] text-slate-400 transition-colors hover:text-slate-200"
+            >
+              <Keyboard className="size-3.5" />
+              Shortcuts (?)
+            </button>
+          </div>
+        </div>
+
+        {showHint && (
+          <div className="flex items-center justify-between rounded-md border border-slate-800 bg-slate-900/60 px-3 py-1.5 text-[11px] text-slate-400">
+            <span>
+              Press <kbd className="rounded bg-slate-800 px-1">?</kbd> for
+              keyboard shortcuts.
+            </span>
+            <button
+              onClick={dismissHint}
+              className="font-mono text-slate-500 hover:text-slate-300"
+              aria-label="Dismiss hint"
+            >
+              dismiss
+            </button>
+          </div>
+        )}
+
+        {showHelp && (
+          <div className="rounded-lg border border-slate-700 bg-slate-950/80 p-4">
+            <div className="mb-2 flex items-center justify-between">
+              <p className="text-[10px] uppercase tracking-wider text-slate-500">
+                Keyboard shortcuts
+              </p>
+              <button
+                onClick={() => setShowHelp(false)}
+                className="font-mono text-[10px] text-slate-500 hover:text-slate-300"
+              >
+                close (esc)
+              </button>
+            </div>
+            <dl className="grid grid-cols-2 gap-x-6 gap-y-1 font-mono text-[11px] text-slate-400 sm:grid-cols-3">
+              {[
+                ["Space", "play / pause"],
+                ["← / ,", "step back one frame"],
+                ["→ / .", "step forward one frame"],
+                ["[ / -", "slower"],
+                ["] / +", "faster"],
+                [
+                  cams.length > 1 ? `1 - ${Math.min(9, cams.length)}` : "1",
+                  "focus camera n",
+                ],
+                ["f", "toggle focus / grid"],
+                ["Esc", "back to grid"],
+                ["?", "toggle this help"],
+              ].map(([k, desc]) => (
+                <div key={k} className="flex items-baseline gap-2">
+                  <kbd className="rounded bg-slate-800 px-1.5 py-0.5 text-slate-200">
+                    {k}
+                  </kbd>
+                  <span>{desc}</span>
+                </div>
+              ))}
+            </dl>
+          </div>
+        )}
+      </section>
+
       <div className="grid gap-4 xl:grid-cols-[1fr_300px]">
         <CameraMosaic
           store={store}
@@ -667,10 +809,13 @@ export function EpisodePlayer({
           sample={sample}
           frame={frame}
           cams={cams}
+          packedCameraCount={packedCams.length}
           mode={mode}
           focusCam={focusCam}
           onSelectCam={focusCamera}
-          onToggleFocus={() => setMode((m) => (m === "grid" ? "focus" : "grid"))}
+          onToggleFocus={() =>
+            setMode((m) => (m === "grid" ? "focus" : "grid"))
+          }
           predictionPaths={cameraPredictionPaths}
           predictionRibbons={cameraPredictionRibbons}
           groundTruthRibbons={cameraGroundTruthRibbons}
@@ -685,6 +830,12 @@ export function EpisodePlayer({
             predictionTrajectories={predictionFan}
             medianPrediction={medianPrediction}
             curvatureSign={curvatureSign}
+          />
+          <NavigationMap
+            dataset={dataset}
+            shard={shard}
+            version={version}
+            sample={sample}
           />
           <div className="rounded-md border border-slate-800 bg-slate-900/60 p-2 font-mono text-[10px] leading-relaxed text-slate-400">
             <p>
@@ -736,12 +887,18 @@ export function EpisodePlayer({
                   Math.abs(yawRateFrom(v, kappa)) >= MAX_YAW_RATE - 1e-9;
                 if (bevClamped) {
                   return (
-                    <span className="text-amber-600"> · non-physical (clamped in BEV)</span>
+                    <span className="text-amber-600">
+                      {" "}
+                      · non-physical (clamped in BEV)
+                    </span>
                   );
                 }
                 if (Math.abs(yaw) > MAX_YAW_RATE) {
                   return (
-                    <span className="text-amber-600"> · yaw_rate non-physical</span>
+                    <span className="text-amber-600">
+                      {" "}
+                      · yaw_rate non-physical
+                    </span>
                   );
                 }
                 return null;
@@ -759,157 +916,6 @@ export function EpisodePlayer({
         medianPrediction={medianPrediction}
         curvatureSign={curvatureSign}
       />
-
-      <TimelineScrubber
-        samples={index.samples}
-        fps={index.fps || 10}
-        frame={frame}
-        onSeek={setFrame}
-        onScrubStart={pause}
-      />
-
-      <div className="flex flex-wrap items-center gap-2">
-        <Button
-          variant="outline"
-          size="icon-sm"
-          onClick={() => setFrame(0)}
-          aria-label="Back to start"
-          title="Back to start"
-        >
-          <Rewind className="size-3.5" />
-        </Button>
-        <Button
-          variant="outline"
-          size="icon-sm"
-          onClick={() => step(-1)}
-          aria-label="Step back one frame"
-          title="Step back one frame (← or ,)"
-        >
-          <StepBack className="size-3.5" />
-        </Button>
-        <Button
-          size="icon-sm"
-          onClick={toggle}
-          aria-label={playing ? "Pause" : "Play"}
-          title="Play/Pause (Space)"
-        >
-          {playing ? (
-            <Pause className="size-3.5" />
-          ) : (
-            <Play className="size-3.5" />
-          )}
-        </Button>
-        <Button
-          variant="outline"
-          size="icon-sm"
-          onClick={() => step(1)}
-          aria-label="Step forward one frame"
-          title="Step forward one frame (→ or .)"
-        >
-          <StepForward className="size-3.5" />
-        </Button>
-        <span className="mx-1 h-4 w-px bg-slate-800" />
-        <Gauge className="size-3.5 text-slate-500" />
-        {/* Always-visible readout: usePlayback clamps but accepts off-preset
-            speeds (e.g. ?speed=3), which would otherwise light no chip. */}
-        <span className="font-mono text-[10px] text-slate-400">{speed}x</span>
-        {SPEED_STEPS.map((s) => (
-          <button
-            key={s}
-            onClick={() => setSpeed(s)}
-            title={`Set speed ${s}x ([ / ] to change)`}
-            className={`rounded px-1.5 py-0.5 font-mono text-[10px] transition-colors ${
-              Math.abs(speed - s) < 1e-9
-                ? "bg-blue-600 text-white"
-                : "bg-slate-900 text-slate-400 hover:text-slate-200"
-            }`}
-          >
-            {s}x
-          </button>
-        ))}
-        {/* Group the buffering chip and Shortcuts button under one ml-auto so
-            the chip toggling does not reflow (shift) the Shortcuts button. */}
-        <div className="ml-auto flex items-center gap-2">
-          {buffering && (
-            <span
-              role="status"
-              aria-live="polite"
-              className="flex items-center gap-1 rounded bg-amber-950/60 px-2 py-0.5 font-mono text-[10px] text-amber-400"
-              title="Fetching frames ahead of the playhead"
-            >
-              <span className="size-1.5 animate-pulse rounded-full bg-amber-400" />
-              buffering
-            </span>
-          )}
-          <button
-            onClick={() => {
-              setShowHelp((v) => !v);
-              dismissHint();
-            }}
-            title="Keyboard shortcuts (?)"
-            aria-label="Keyboard shortcuts"
-            className="flex items-center gap-1 rounded bg-slate-900 px-2 py-1 font-mono text-[11px] text-slate-400 transition-colors hover:text-slate-200"
-          >
-            <Keyboard className="size-3.5" />
-            Shortcuts (?)
-          </button>
-        </div>
-      </div>
-
-      {showHint && (
-        <div className="flex items-center justify-between rounded-md border border-slate-800 bg-slate-900/60 px-3 py-1.5 text-[11px] text-slate-400">
-          <span>
-            Press <kbd className="rounded bg-slate-800 px-1">?</kbd> for keyboard
-            shortcuts.
-          </span>
-          <button
-            onClick={dismissHint}
-            className="font-mono text-slate-500 hover:text-slate-300"
-            aria-label="Dismiss hint"
-          >
-            dismiss
-          </button>
-        </div>
-      )}
-
-      {showHelp && (
-        <div className="rounded-lg border border-slate-700 bg-slate-950/80 p-4">
-          <div className="mb-2 flex items-center justify-between">
-            <p className="text-[10px] uppercase tracking-wider text-slate-500">
-              Keyboard shortcuts
-            </p>
-            <button
-              onClick={() => setShowHelp(false)}
-              className="font-mono text-[10px] text-slate-500 hover:text-slate-300"
-            >
-              close (esc)
-            </button>
-          </div>
-          <dl className="grid grid-cols-2 gap-x-6 gap-y-1 font-mono text-[11px] text-slate-400 sm:grid-cols-3">
-            {[
-              ["Space", "play / pause"],
-              ["← / ,", "step back one frame"],
-              ["→ / .", "step forward one frame"],
-              ["[ / -", "slower"],
-              ["] / +", "faster"],
-              [
-                cams.length > 1 ? `1 - ${Math.min(9, cams.length)}` : "1",
-                "focus camera n",
-              ],
-              ["f", "toggle focus / grid"],
-              ["Esc", "back to grid"],
-              ["?", "toggle this help"],
-            ].map(([k, desc]) => (
-              <div key={k} className="flex items-baseline gap-2">
-                <kbd className="rounded bg-slate-800 px-1.5 py-0.5 text-slate-200">
-                  {k}
-                </kbd>
-                <span>{desc}</span>
-              </div>
-            ))}
-          </dl>
-        </div>
-      )}
 
       <div className="rounded-lg border border-slate-800 bg-slate-950/50 p-4">
         <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
@@ -958,12 +964,16 @@ export function EpisodePlayer({
             className="text-sm text-slate-500"
           >
             No reasoning label at or before this frame
-            {promptVersion ? " for the selected teacher and prompt version" : ""}. Amber
-            ticks on the timeline mark frames labelled in any run, so a ticked
-            frame may still be unlabelled in this one.
+            {promptVersion
+              ? " for the selected teacher and prompt version"
+              : ""}
+            . Amber ticks on the timeline mark frames labelled in any run, so a
+            ticked frame may still be unlabelled in this one.
           </p>
         )}
       </div>
+
+      <BEVActivationHeatmap overlay={overlay} row={overlayRow} />
     </div>
   );
 }

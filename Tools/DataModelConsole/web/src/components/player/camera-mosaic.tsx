@@ -18,7 +18,12 @@ import type {
   ScreenPoint,
   ScreenRibbon,
 } from "@/lib/projection";
-import { camLabel, displayAspectRatio, gridDimensions, rigCam } from "@/lib/rig";
+import {
+  camLabel,
+  displayAspectRatio,
+  gridDimensions,
+  rigCam,
+} from "@/lib/rig";
 import { cn } from "@/lib/utils";
 import type { IndexSample } from "@/types";
 
@@ -367,6 +372,7 @@ export function CameraMosaic({
   sample,
   frame,
   cams,
+  packedCameraCount,
   mode,
   focusCam,
   onSelectCam,
@@ -380,6 +386,7 @@ export function CameraMosaic({
   sample?: IndexSample;
   frame: number;
   cams: string[];
+  packedCameraCount?: number;
   mode: "grid" | "focus";
   focusCam: number; // index into cams
   onSelectCam: (idx: number) => void;
@@ -411,7 +418,7 @@ export function CameraMosaic({
             store={store}
             frame={frame}
             cam={focused}
-            label={camLabel(dataset, focused)}
+            label={camLabel(dataset, focused, packedCameraCount)}
             predictionPaths={predictionPaths?.[focused]}
             predictionRibbons={predictionRibbons?.[focused]}
             groundTruthRibbons={groundTruthRibbons?.[focused]}
@@ -441,7 +448,7 @@ export function CameraMosaic({
               store={store}
               frame={frame}
               cam={cam}
-              label={camLabel(dataset, cam)}
+              label={camLabel(dataset, cam, packedCameraCount)}
               ordinal={i + 1}
               predictionPaths={predictionPaths?.[cam]}
               predictionRibbons={predictionRibbons?.[cam]}
@@ -463,7 +470,7 @@ export function CameraMosaic({
   // Grid: bird's-eye layout. Each camera is placed in the CSS-grid cell that
   // matches where it points; the ego readout sits in the center. Cells with no
   // camera stay empty so the spatial arrangement reads clearly.
-  const { rows, cols } = gridDimensions(dataset, cams);
+  const { rows, cols } = gridDimensions(dataset, cams, packedCameraCount);
   const egoRow = Math.ceil(rows / 2);
   const egoCol = Math.ceil(cols / 2);
   // Detect a camera that would collide with the ego center cell; if one lands
@@ -471,7 +478,7 @@ export function CameraMosaic({
   // we only drop the ego tile into a cell no camera claims.
   const claimed = new Set(
     cams.map((cam, i) => {
-      const c = rigCam(dataset, cam, i);
+      const c = rigCam(dataset, cam, i, packedCameraCount);
       return `${c.row}:${c.col}`;
     }),
   );
@@ -491,7 +498,7 @@ export function CameraMosaic({
         }}
       >
         {cams.map((cam, i) => {
-          const c = rigCam(dataset, cam, i);
+          const c = rigCam(dataset, cam, i, packedCameraCount);
           return (
             <div key={cam} style={{ gridRow: c.row, gridColumn: c.col }}>
               <CanvasTile

@@ -14,7 +14,12 @@ import pytest
 from PIL import Image
 
 from evaluation.metrics import integrate_trajectory
-from Platform.pipelines.overlay import write_overlay
+from Platform.pipelines.overlay import (
+    BEV_HEATMAP_NAMES,
+    BEV_HEATMAP_SIZE,
+    OVERLAY_SCHEMA,
+    write_overlay,
+)
 from Tools.trajectory_visualization.artifacts import read_shard_samples
 from Tools.trajectory_visualization.kinematics import (
     AOVL_V1_CONTROL_CONTRACT,
@@ -46,6 +51,18 @@ def _jpeg(color: str) -> bytes:
     output = io.BytesIO()
     Image.new("RGB", (64, 64), color).save(output, format="JPEG")
     return output.getvalue()
+
+
+def _blank_diagnostics(sample_count: int) -> np.ndarray:
+    return np.zeros(
+        (
+            sample_count,
+            len(BEV_HEATMAP_NAMES),
+            BEV_HEATMAP_SIZE,
+            BEV_HEATMAP_SIZE,
+        ),
+        dtype=np.float32,
+    )
 
 
 def _write_shard(
@@ -145,7 +162,7 @@ def _write_publication_manifests(
         "num_inference_steps": 1,
         "inference_contract_version": "v1",
         "noise_policy_version": "v1",
-        "overlay_binary_schema": "v1",
+        "overlay_binary_schema": OVERLAY_SCHEMA,
         "shards": [{
             "shard": shard.name,
             "s3_key": "overlays/example/overlay.bin.gz",
@@ -253,6 +270,7 @@ def test_report_joins_aovl_by_uid_and_writes_scene_artifacts(tmp_path):
         list(reversed(sample_uids)),
         controls,
         np.array([8.0, 9.0], dtype=np.float32),
+        bev_heatmaps=_blank_diagnostics(2),
     )
     dataset_manifest, overlay_manifest = _write_publication_manifests(
         tmp_path,
@@ -321,6 +339,7 @@ def test_report_uses_explicit_scene_frame_selection(tmp_path):
         sample_uids,
         np.zeros((3, 1, 64, 2), dtype=np.float32),
         np.array([8.0, 9.0, 10.0], dtype=np.float32),
+        bev_heatmaps=_blank_diagnostics(3),
     )
     dataset_manifest, overlay_manifest = _write_publication_manifests(
         tmp_path,
@@ -386,6 +405,7 @@ def test_report_rejects_overlay_rows_outside_the_shard(tmp_path):
         [sample_uid, "l2d-v1-e000001-f000065"],
         np.zeros((2, 1, 64, 2), dtype=np.float32),
         np.array([8.0, 9.0], dtype=np.float32),
+        bev_heatmaps=_blank_diagnostics(2),
     )
     dataset_manifest, overlay_manifest = _write_publication_manifests(
         tmp_path,
@@ -414,6 +434,7 @@ def test_report_rejects_overlay_speed_mismatched_with_shard(tmp_path):
         [sample_uid],
         np.zeros((1, 1, 64, 2), dtype=np.float32),
         np.array([99.0], dtype=np.float32),
+        bev_heatmaps=_blank_diagnostics(1),
     )
     dataset_manifest, overlay_manifest = _write_publication_manifests(
         tmp_path,
@@ -442,6 +463,7 @@ def test_report_rejects_changed_dataset_manifest(tmp_path):
         [sample_uid],
         np.zeros((1, 1, 64, 2), dtype=np.float32),
         np.array([8.0], dtype=np.float32),
+        bev_heatmaps=_blank_diagnostics(1),
     )
     dataset_manifest, overlay_manifest = _write_publication_manifests(
         tmp_path,
@@ -477,6 +499,7 @@ def test_report_rejects_noncanonical_shard_rig(tmp_path):
         [sample_uid],
         np.zeros((1, 1, 64, 2), dtype=np.float32),
         np.array([8.0], dtype=np.float32),
+        bev_heatmaps=_blank_diagnostics(1),
     )
     dataset_manifest, overlay_manifest = _write_publication_manifests(
         tmp_path,
@@ -523,6 +546,7 @@ def test_report_rejects_overlay_body_digest_mismatch(tmp_path):
         [sample_uid],
         np.zeros((1, 1, 64, 2), dtype=np.float32),
         np.array([8.0], dtype=np.float32),
+        bev_heatmaps=_blank_diagnostics(1),
     )
     dataset_manifest, overlay_manifest = _write_publication_manifests(
         tmp_path,

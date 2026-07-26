@@ -207,7 +207,7 @@ const experiments = [
     tags: {},
     metrics: {},
   },
-];
+] as const;
 
 async function mockExperiments(page: Page) {
   await page.route("**/api/v1/experiments", (route) =>

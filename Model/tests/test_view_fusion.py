@@ -1,3 +1,4 @@
+import numpy as np
 import pytest
 import torch
 import sys
@@ -10,6 +11,7 @@ from model_components.view_fusion.projection import (
     FThetaProjection,
     PinholeProjection,
 )
+from navigation.geometry import DEFAULT_NAVIGATION_GEOMETRY
 
 
 def make_inputs(batch_size, num_views, device, include_camera_params=False):
@@ -178,6 +180,31 @@ class TestBEVFusion:
         assert fusion.bev_h == 450
         assert fusion.bev_w == 300
         assert fusion.pc_range == (-60.0, -60.0, -5.0, 120.0, 60.0, 3.0)
+
+    def test_reference_grid_matches_navigation_raster(self):
+        """Every camera BEV cell must use the navigation raster's ego-FLU point."""
+        geometry = DEFAULT_NAVIGATION_GEOMETRY
+        fusion = BEVViewFusion(
+            num_views=7,
+            embed_dim=8,
+            **geometry.camera_bev_kwargs(),
+        )
+
+        ego_points = fusion._ego_reference_homo(
+            fusion.reference_points_3d
+        ).reshape(
+            geometry.height_px,
+            geometry.width_px,
+            fusion.num_points_in_pillar,
+            4,
+        )
+        actual_xy = ego_points[:, :, 0, :2]
+        expected_x, expected_y = geometry.pixel_center_grids()
+        expected_xy = torch.from_numpy(
+            np.stack([expected_x, expected_y], axis=-1)
+        ).to(actual_xy)
+
+        assert torch.allclose(actual_xy, expected_xy, atol=1e-6)
 
     def test_asymmetric_resolution(self, device):
         """Configurable bev_h != bev_w yields a non-square BEV grid."""

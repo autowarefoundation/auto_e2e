@@ -3,6 +3,17 @@ const HEADER_BYTES = 20;
 const DIRECTORY_ENTRY_BYTES = 12;
 const HORIZON = 64;
 const DIMS = 2;
+export const BEV_HEATMAP_SIZE = 32;
+const LEGACY_BEV_HEATMAP_NAMES = ["image", "navigation", "fused"] as const;
+export const BEV_HEATMAP_NAMES = [
+  "image",
+  "map",
+  "route_delta",
+  "navigation",
+  "fusion_delta",
+  "fused",
+] as const;
+export type BEVHeatmapName = (typeof BEV_HEATMAP_NAMES)[number];
 
 export interface OverlayArtifact {
   formatVersion: number;
@@ -15,6 +26,9 @@ export interface OverlayArtifact {
   directory: Map<bigint, number>;
   controls: Float32Array;
   v0: Float32Array;
+  bevHeatmaps: Uint8Array | null;
+  bevHeatmapScales: Float32Array | null;
+  bevHeatmapNames: readonly BEVHeatmapName[];
 }
 
 export function parseOverlay(buffer: ArrayBuffer): OverlayArtifact {
@@ -34,7 +48,22 @@ export function parseOverlay(buffer: ArrayBuffer): OverlayArtifact {
   const horizon = view.getUint16(14, true);
   const dims = view.getUint16(16, true);
   const reserved = view.getUint16(18, true);
-  if (formatVersion !== 1 || horizon !== HORIZON || dims !== DIMS || reserved !== 0) {
+  const bevHeatmapNames =
+    formatVersion === 2
+      ? LEGACY_BEV_HEATMAP_NAMES
+      : formatVersion === 3 || formatVersion === 4
+        ? BEV_HEATMAP_NAMES
+        : [];
+  const heatmapCount = bevHeatmapNames.length;
+  if (
+    (formatVersion !== 1 &&
+      formatVersion !== 2 &&
+      formatVersion !== 3 &&
+      formatVersion !== 4) ||
+    horizon !== HORIZON ||
+    dims !== DIMS ||
+    reserved !== heatmapCount
+  ) {
     throw new Error("Unsupported overlay format");
   }
   if (sampleCount === 0 || seedCount === 0) {
@@ -47,7 +76,21 @@ export function parseOverlay(buffer: ArrayBuffer): OverlayArtifact {
     directoryOffset + sampleCount * DIRECTORY_ENTRY_BYTES;
   const controlsLength = sampleCount * seedCount * horizon * dims;
   const speedsOffset = controlsOffset + controlsLength * 4;
-  const expectedBytes = speedsOffset + sampleCount * 4;
+  const heatmapScalesOffset = speedsOffset + sampleCount * 4;
+  const heatmapScaleCount =
+    heatmapCount > 0
+      ? sampleCount * (formatVersion >= 4 ? heatmapCount : 1)
+      : 0;
+  const heatmapsOffset = heatmapScalesOffset + heatmapScaleCount * 4;
+  const heatmapsLength =
+    sampleCount *
+    heatmapCount *
+    BEV_HEATMAP_SIZE *
+    BEV_HEATMAP_SIZE;
+  const expectedBytes =
+    heatmapCount > 0
+      ? heatmapsOffset + heatmapsLength
+      : heatmapScalesOffset;
   if (buffer.byteLength !== expectedBytes) {
     throw new Error(
       `Overlay size mismatch: expected ${expectedBytes}, got ${buffer.byteLength}`,
@@ -85,6 +128,19 @@ export function parseOverlay(buffer: ArrayBuffer): OverlayArtifact {
     directory,
     controls: new Float32Array(buffer, controlsOffset, controlsLength),
     v0: new Float32Array(buffer, speedsOffset, sampleCount),
+    bevHeatmaps:
+      heatmapCount > 0
+        ? new Uint8Array(buffer, heatmapsOffset, heatmapsLength)
+        : null,
+    bevHeatmapScales:
+      heatmapCount > 0
+        ? new Float32Array(
+            buffer,
+            heatmapScalesOffset,
+            heatmapScaleCount,
+          )
+        : null,
+    bevHeatmapNames,
   };
 }
 
@@ -104,6 +160,35 @@ export function controlsForRow(
   const stride = overlay.horizon * overlay.dims;
   const begin = (row * overlay.seedCount + seedIndex) * stride;
   return overlay.controls.subarray(begin, begin + stride);
+}
+
+export function bevHeatmapForRow(
+  overlay: OverlayArtifact,
+  row: number,
+  name: BEVHeatmapName,
+): { values: Uint8Array; scale: number } | null {
+  if (
+    row < 0 ||
+    row >= overlay.sampleCount ||
+    overlay.bevHeatmaps === null ||
+    overlay.bevHeatmapScales === null
+  ) {
+    return null;
+  }
+  const heatmapIndex = overlay.bevHeatmapNames.indexOf(name);
+  if (heatmapIndex < 0) return null;
+  const pixels = BEV_HEATMAP_SIZE * BEV_HEATMAP_SIZE;
+  const begin =
+    (row * overlay.bevHeatmapNames.length + heatmapIndex) * pixels;
+  return {
+    values: overlay.bevHeatmaps.subarray(begin, begin + pixels),
+    scale:
+      overlay.bevHeatmapScales[
+        overlay.formatVersion >= 4
+          ? row * overlay.bevHeatmapNames.length + heatmapIndex
+          : row
+      ],
+  };
 }
 
 export async function sampleUIDHash(sampleUID: string): Promise<bigint> {

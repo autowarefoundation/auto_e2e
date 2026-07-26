@@ -376,6 +376,20 @@ export async function getShardOverlay(
   return response.arrayBuffer();
 }
 
+export function getSampleNavigationMapURL(
+  dataset: string,
+  shard: string,
+  key: string,
+  version?: string,
+): string {
+  return (
+    `${BASE_URL}/api/v1/datasets/${encodeURIComponent(dataset)}` +
+    `/shards/${encodeURIComponent(shard)}` +
+    `/samples/${encodeURIComponent(key)}/navigation-map` +
+    versionParam(version, "?")
+  );
+}
+
 export function getShardRigProjection(
   dataset: string,
   shard: string,
