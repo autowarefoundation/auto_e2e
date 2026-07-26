@@ -8,7 +8,9 @@ import pytest
 
 from evaluation.checkpoint_selection import (
     SELECTOR_MIN_DELTA,
+    SELECTOR_POLICY_VERSION,
     aggregate_validation_records,
+    build_selector_calibration_report,
     freeze_component_availability,
     score_checkpoint,
     score_is_better,
@@ -230,3 +232,47 @@ def test_lower_errors_produce_better_composite_score():
         worse["score"] + SELECTOR_MIN_DELTA,
         worse["score"],
     )
+
+
+def test_calibration_reports_saturation_and_weight_rank_sensitivity():
+    selections = [
+        {
+            "policy_version": SELECTOR_POLICY_VERSION,
+            "components": {
+                "trajectory": trajectory,
+                "comfort": 1.0,
+                "map_safety": map_safety,
+                "navigation": navigation,
+            },
+        }
+        for trajectory, map_safety, navigation in (
+            (0.3, 0.8, 0.5),
+            (0.5, 0.6, 0.7),
+            (0.8, 0.4, 0.6),
+        )
+    ]
+
+    report = build_selector_calibration_report(selections)
+
+    assert report["checkpoint_count"] == 3
+    assert report["rank_evidence_sufficient"]
+    assert report["almost_always_saturated_components"] == ["comfort"]
+    assert len(report["weight_sensitivity"]) == 8
+    assert all(
+        scenario["spearman_rank_correlation"] is not None
+        for scenario in report["weight_sensitivity"]
+    )
+
+
+def test_calibration_rejects_component_availability_drift():
+    with pytest.raises(ValueError, match="availability changed"):
+        build_selector_calibration_report([
+            {
+                "policy_version": SELECTOR_POLICY_VERSION,
+                "components": {"trajectory": 0.5, "comfort": 0.5},
+            },
+            {
+                "policy_version": SELECTOR_POLICY_VERSION,
+                "components": {"trajectory": 0.6},
+            },
+        ])
