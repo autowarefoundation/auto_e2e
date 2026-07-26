@@ -56,6 +56,10 @@ DATA_PREP_IMAGE = _os.environ.get(
 MLFLOW_URI = "http://mlflow.mlflow.svc.cluster.local:5000"
 DATASET_PACK_VERSION = "v2.2"
 KITSCENES_NAVIGATION_DATASET_VERSION = "v3.0"
+BASELINE_TRAINING_OBJECTIVE_VERSION = "trajectory_imitation_v1"
+KITSCENES_NAVIGATION_OBJECTIVE_VERSION = (
+    "kitscenes_navigation_objective_v1"
+)
 L2D_SOURCE_REVISION = "main"
 KITSCENES_SOURCE_REVISION = "6fde0034446669e2ed7235e4c7fe323cd23d599d"
 
@@ -594,6 +598,18 @@ def _evaluate_open_loop(
     was_training = model.training
     all_ade: list[float] = []
     all_fde: list[float] = []
+    horizon_steps = {
+        "1s": 10,
+        "2s": 20,
+        "3s": 30,
+        "6_4s": AUTO_E2E_TIMESTEPS,
+    }
+    horizon_ade: dict[str, list[float]] = {
+        label: [] for label in horizon_steps
+    }
+    horizon_fde: dict[str, list[float]] = {
+        label: [] for label in horizon_steps
+    }
     sample_uids: list[str] = []
     navigation_records: list[dict] = []
     route_swap_records: list[dict] = []
@@ -772,6 +788,19 @@ def _evaluate_open_loop(
                     )
                     all_ade.append(float(errors.mean()))
                     all_fde.append(float(errors[-1]))
+                    for label, step_count in horizon_steps.items():
+                        if step_count > len(errors):
+                            raise ValueError(
+                                f"evaluation horizon {label} exceeds "
+                                f"trajectory length {len(errors)}"
+                            )
+                        horizon_errors = errors[:step_count]
+                        horizon_ade[label].append(
+                            float(horizon_errors.mean())
+                        )
+                        horizon_fde[label].append(
+                            float(horizon_errors[-1])
+                        )
                     if navigation_geometry is not None:
                         from evaluation.navigation_metrics import (
                             ROUTE_QUALITY_FIELDS,
@@ -908,6 +937,14 @@ def _evaluate_open_loop(
         "evaluation_steps": AUTO_E2E_TIMESTEPS,
         "sample_count": len(all_ade),
         "sample_uid_digest": uid_digest,
+        "horizons": {
+            label: {
+                "steps": horizon_steps[label],
+                "ade": float(np.mean(horizon_ade[label])),
+                "fde": float(np.mean(horizon_fde[label])),
+            }
+            for label in horizon_steps
+        },
     }
     if navigation_geometry is not None:
         from evaluation.navigation_metrics import (
@@ -2577,6 +2614,12 @@ def train_il(
     # until the specific overflow op is isolated and kept in fp32 explicitly.
     amp: bool = False,
     enable_route_conditioning: bool = True,
+    training_objective_version: str = (
+        BASELINE_TRAINING_OBJECTIVE_VERSION
+    ),
+    enable_junction_sampling: bool = False,
+    enable_route_consistency: bool = False,
+    route_consistency_weight: float = 0.10,
     navigation_quality_audit: Optional[FlyteFile] = None,
     enable_reasoning: bool = False,
     reasoning_mode: str = "pooled_latent",
@@ -2655,6 +2698,37 @@ def train_il(
         )
     if epochs <= 0:
         raise ValueError(f"epochs must be positive, got {epochs}")
+    if training_objective_version not in {
+        BASELINE_TRAINING_OBJECTIVE_VERSION,
+        KITSCENES_NAVIGATION_OBJECTIVE_VERSION,
+    }:
+        raise ValueError(
+            "unsupported training_objective_version "
+            f"{training_objective_version!r}"
+        )
+    objective_v1 = (
+        training_objective_version
+        == KITSCENES_NAVIGATION_OBJECTIVE_VERSION
+    )
+    if objective_v1 and dataset != Dataset.KITSCENES:
+        raise ValueError(
+            "kitscenes_navigation_objective_v1 is KITScenes-only"
+        )
+    if (
+        enable_junction_sampling or enable_route_consistency
+    ) and not objective_v1:
+        raise ValueError(
+            "navigation sampling and route consistency require "
+            "kitscenes_navigation_objective_v1"
+        )
+    if enable_route_consistency and not enable_route_conditioning:
+        raise ValueError(
+            "route consistency requires Reactive route conditioning"
+        )
+    if enable_route_consistency and route_consistency_weight <= 0.0:
+        raise ValueError(
+            "enabled route consistency requires a positive weight"
+        )
     if not 0 <= training_seed <= 2**32 - 1:
         raise ValueError(
             "training_seed must be between 0 and 2**32 - 1"
@@ -2689,7 +2763,9 @@ def train_il(
         validation_sample_identity,
     )
     from data_parsing.pre_extracted import (
+        NavigationRepeatPolicy,
         discover_split_inventory,
+        discover_navigation_exposure,
         make_multi_dataset_loader,
     )
     # _loader_download_dir is a module-level helper in THIS file, not in
@@ -2873,6 +2949,12 @@ def train_il(
                 manifest.get("map_context_channels", 3)
             ),
             "route_channels": int(manifest.get("route_channels", 2)),
+            "has_route_supervision": bool(
+                manifest.get("has_route_supervision", False)
+            ),
+            "route_supervision_version": manifest.get(
+                "route_supervision_version"
+            ),
             "navigation": manifest.get("navigation"),
             "navigation_geometry": manifest.get("navigation_geometry"),
             "has_world_model": bool(
@@ -2972,6 +3054,33 @@ def train_il(
             actual_validation_sample_count,
             actual_validation_sample_digest,
         )
+    navigation_repeat_policy = (
+        NavigationRepeatPolicy()
+        if enable_junction_sampling
+        else None
+    )
+    navigation_exposure_audit = (
+        discover_navigation_exposure(
+            training_shard_dirs,
+            policy=navigation_repeat_policy,
+            validation_group_uids=fixed_validation_groups,
+        )
+        if navigation_repeat_policy is not None
+        else None
+    )
+    navigation_exposure_metadata = (
+        navigation_exposure_audit.metadata()
+        if navigation_exposure_audit is not None
+        else None
+    )
+    if navigation_exposure_metadata is not None:
+        print(
+            "Navigation exposure: "
+            f"unique={navigation_exposure_audit.unique_sample_count} "
+            f"effective={navigation_exposure_audit.effective_exposure_count} "
+            f"digest={navigation_exposure_audit.exposure_digest}"
+        )
+
     data_coverage = {
         "available_group_uid_digest": available_group_digest,
         "available_group_count": (
@@ -3001,6 +3110,7 @@ def train_il(
             if navigation_quality_report is not None
             else None
         ),
+        "navigation_exposure": navigation_exposure_metadata,
     })
     validation_split_contract = {
         "strategy": training_policy.validation_strategy,
@@ -3076,6 +3186,15 @@ def train_il(
                 f"KITScenes shard '{dname}' ({d}) has no schema-v5 "
                 "navigation artifacts"
             )
+        if enable_route_consistency and (
+            not manifest.get("has_route_supervision", False)
+            or manifest.get("route_supervision_version")
+            != "route_supervision_v1"
+        ):
+            raise ValueError(
+                f"route consistency requires route_supervision_v1 in "
+                f"dataset '{dname}' ({d})"
+            )
 
     total_reasoning_labels = 0
     for d in training_shard_dirs:
@@ -3137,6 +3256,9 @@ def train_il(
     loss_fn = TrajectoryImitationLoss(
         loss_type="smooth_l1",
         temporal_decay=training_policy.temporal_decay,
+        temporal_weight_normalization=(
+            training_policy.temporal_weight_normalization
+        ),
         signal_scales=training_policy.signal_scales,
     )
     if hasattr(loss_fn, "to"):
@@ -3145,6 +3267,8 @@ def train_il(
         "Dataset training policy: "
         f"auto_e2e_timesteps={AUTO_E2E_TIMESTEPS} "
         f"temporal_decay={training_policy.temporal_decay:.4g} "
+        "temporal_weight_normalization="
+        f"{training_policy.temporal_weight_normalization} "
         f"acceleration_scale={training_policy.signal_scales[0]:.4g} "
         f"curvature_scale={training_policy.signal_scales[1]:.4g}"
     )
@@ -3160,6 +3284,21 @@ def train_il(
         )
         reasoning_loss_fn = HorizonReasoningLoss()
         target_batch_from_loader = _tb_from_loader
+
+    route_consistency_loss_fn = None
+    route_consistency_config = {
+        "enabled": enable_route_consistency,
+        "weight": route_consistency_weight,
+    }
+    if enable_route_consistency:
+        from training.losses import RouteConsistencyLoss
+
+        route_consistency_loss_fn = RouteConsistencyLoss(
+            temporal_decay=training_policy.temporal_decay,
+        ).to(device)
+        route_consistency_config.update(
+            route_consistency_loss_fn.metadata()
+        )
 
     scaler = torch.amp.GradScaler(enabled=amp)
     checkpoint_config = {
@@ -3191,6 +3330,16 @@ def train_il(
         "num_workers": num_workers,
         "reasoning_loss_weight": reasoning_loss_weight,
         "jepa_loss_weight": jepa_loss_weight,
+        "training_objective_version": training_objective_version,
+        "junction_sampling": {
+            "enabled": enable_junction_sampling,
+            "policy": (
+                navigation_repeat_policy.metadata()
+                if navigation_repeat_policy is not None
+                else None
+            ),
+        },
+        "route_consistency": route_consistency_config,
         "trajectory_training_policy": training_policy.metadata(),
         "val_fraction": val_fraction,
         "validation_scope": validation_scope,
@@ -3371,6 +3520,68 @@ def train_il(
                 "train/temporal_decay": (
                     training_policy.temporal_decay
                 ),
+                "train/temporal_weight_normalization": (
+                    training_policy.temporal_weight_normalization
+                ),
+                "train/objective_version": training_objective_version,
+                "train/junction_sampling_enabled": (
+                    enable_junction_sampling
+                ),
+                "train/navigation_repeat_policy_version": (
+                    navigation_repeat_policy.version
+                    if navigation_repeat_policy is not None
+                    else "none"
+                ),
+                "train/navigation_turn_repeat": (
+                    navigation_repeat_policy.turn_repeat
+                    if navigation_repeat_policy is not None
+                    else 1
+                ),
+                "train/navigation_junction_repeat": (
+                    navigation_repeat_policy.junction_repeat
+                    if navigation_repeat_policy is not None
+                    else 1
+                ),
+                "train/navigation_exposure_digest": (
+                    navigation_exposure_audit.exposure_digest
+                    if navigation_exposure_audit is not None
+                    else "none"
+                ),
+                "train/navigation_unique_samples": (
+                    navigation_exposure_audit.unique_sample_count
+                    if navigation_exposure_audit is not None
+                    else -1
+                ),
+                "train/navigation_effective_exposures": (
+                    navigation_exposure_audit.effective_exposure_count
+                    if navigation_exposure_audit is not None
+                    else -1
+                ),
+                "train/route_consistency_enabled": (
+                    enable_route_consistency
+                ),
+                "train/route_consistency_weight": (
+                    route_consistency_weight
+                ),
+                "train/route_artifact_version": (
+                    route_consistency_config.get(
+                        "artifact_version",
+                        "none",
+                    )
+                ),
+                "train/route_target_compliance_threshold": (
+                    route_consistency_config.get(
+                        "target_compliance_threshold",
+                        -1.0,
+                    )
+                ),
+                **{
+                    f"train/route_term_weight_{name}": value
+                    for name, value in route_consistency_config.get(
+                        "term_weights",
+                        {},
+                    ).items()
+                },
                 "train/val_fraction": val_fraction,
                 "train/validation_scope": validation_scope,
                 "train/validation_strategy": (
@@ -3404,6 +3615,7 @@ def train_il(
         "first_step": None,
         "navigation_encoder_first_nonzero_step": None,
         "route_input_first_nonzero_step": None,
+        "route_loss_gradient_budget": None,
     }
     optimizer_probe_name, optimizer_probe_parameter = next(
         (name, parameter)
@@ -3459,6 +3671,13 @@ def train_il(
                 f"{gradient_evidence['navigation_encoder_first_nonzero_step']}"
             )
 
+    def _gradient_list_norm(gradients):
+        return sum(
+            float(gradient.detach().norm().item()) ** 2
+            for gradient in gradients
+            if gradient is not None
+        ) ** 0.5
+
     accum = max(1, int(grad_accum_steps))
     if accum > 1:
         print(f"Gradient accumulation: {accum} micro-batches "
@@ -3477,11 +3696,29 @@ def train_il(
             val_fraction=val_fraction,
             validation_group_uids=fixed_validation_groups,
             shuffle_seed=1729 + epoch * 1_000_003,
+            navigation_repeat_policy=navigation_repeat_policy,
         )
         epoch_losses = []
         traj_losses = []
         jepa_vals = []
         reason_vals = []
+        route_vals = []
+        route_term_vals = {
+            "corridor": [],
+            "branch": [],
+            "destination": [],
+            "heading": [],
+        }
+        route_epoch_counts = {
+            "candidate_count": 0,
+            "eligible_count": 0,
+            "compliance_rejected_count": 0,
+            "corridor_active_count": 0,
+            "branch_active_count": 0,
+            "destination_active_count": 0,
+            "heading_active_count": 0,
+        }
+        route_target_compliance_sum = 0.0
         micro_idx = 0  # position within the current accumulation window
         # Merged loader yields (batch, projection, geometry_type): each batch is
         # same-dataset (uniform num_views/geometry) but datasets are interleaved,
@@ -3500,6 +3737,32 @@ def train_il(
             route_valid = batch["route_valid"].to(device)
             route_valid_sample_count += int(route_valid.sum().item())
             route_sample_count += int(route_valid.numel())
+            route_supervision = None
+            route_intersection = None
+            if route_consistency_loss_fn is not None:
+                route_supervision = {
+                    key: value.to(device)
+                    for key, value in batch["route_supervision"].items()
+                }
+                navigation_metadata = batch.get(
+                    "navigation_metadata",
+                    {},
+                )
+                route_intersection = torch.tensor(
+                    [
+                        bool(
+                            _collated_metadata_value(
+                                navigation_metadata,
+                                "route_intersection",
+                                sample_index,
+                                False,
+                            )
+                        )
+                        for sample_index in range(visual.shape[0])
+                    ],
+                    device=device,
+                    dtype=torch.bool,
+                )
             probe_route_gradient = (
                 enable_route_conditioning
                 and gradient_evidence[
@@ -3541,6 +3804,29 @@ def train_il(
                 traj_loss = loss_fn(trajectory, target)
                 loss = traj_loss
 
+                route_terms = None
+                if route_consistency_loss_fn is not None:
+                    assert route_supervision is not None
+                    assert route_intersection is not None
+                    initial_speed = ego_hist.reshape(
+                        ego_hist.shape[0],
+                        AUTO_E2E_TIMESTEPS,
+                        -1,
+                    )[:, -1, 0]
+                    route_terms = route_consistency_loss_fn(
+                        trajectory,
+                        target,
+                        initial_speed,
+                        route_supervision,
+                        route_valid,
+                        route_intersection,
+                    )
+                    loss = (
+                        loss
+                        + route_consistency_weight
+                        * route_terms["total"]
+                    )
+
                 # JEPA loss (#13): future-feature reconstruction, added when the
                 # WM ran the windowed path AND this batch carries future frames.
                 jepa_val = 0.0
@@ -3569,6 +3855,60 @@ def train_il(
                         loss = loss + reasoning_loss_weight * terms["total"]
                         reason_val = float(terms["total"].item())
 
+            if (
+                route_terms is not None
+                and int(route_terms["eligible_count"].item()) > 0
+                and gradient_evidence["route_loss_gradient_budget"] is None
+            ):
+                planner_parameters = [
+                    parameter
+                    for name, parameter in model.named_parameters()
+                    if (
+                        parameter.requires_grad
+                        and "TrajectoryPlanner" in name
+                    )
+                ]
+                trajectory_gradients = torch.autograd.grad(
+                    traj_loss,
+                    planner_parameters,
+                    retain_graph=True,
+                    allow_unused=True,
+                )
+                weighted_route_gradients = torch.autograd.grad(
+                    route_consistency_weight * route_terms["total"],
+                    planner_parameters,
+                    retain_graph=True,
+                    allow_unused=True,
+                )
+                trajectory_gradient_norm = _gradient_list_norm(
+                    trajectory_gradients
+                )
+                route_gradient_norm = _gradient_list_norm(
+                    weighted_route_gradients
+                )
+                if trajectory_gradient_norm <= 0.0:
+                    raise RuntimeError(
+                        "trajectory planner gradient budget reference is zero"
+                    )
+                gradient_ratio = (
+                    route_gradient_norm / trajectory_gradient_norm
+                )
+                gradient_evidence["route_loss_gradient_budget"] = {
+                    "trajectory_planner_norm": trajectory_gradient_norm,
+                    "weighted_route_planner_norm": route_gradient_norm,
+                    "route_to_trajectory_ratio": gradient_ratio,
+                    "maximum_ratio": 2.0,
+                }
+                print(
+                    "route loss gradient budget: "
+                    f"{gradient_evidence['route_loss_gradient_budget']}"
+                )
+                if gradient_ratio > 2.0:
+                    raise RuntimeError(
+                        "weighted route planner gradient exceeds the 2x "
+                        "trajectory gradient budget"
+                    )
+
             # Divide by accum so summed micro-batch grads equal the MEAN gradient
             # of an effective batch of (batch_size * accum) — same scale as a plain
             # step, so lr/grad_clip keep their meaning. Log the unscaled loss.
@@ -3591,6 +3931,23 @@ def train_il(
             traj_losses.append(traj_loss.item())
             jepa_vals.append(jepa_val)
             reason_vals.append(reason_val)
+            route_vals.append(
+                float(route_terms["total"].item())
+                if route_terms is not None
+                else 0.0
+            )
+            if route_terms is not None:
+                for term_name in route_term_vals:
+                    route_term_vals[term_name].append(
+                        float(route_terms[term_name].item())
+                    )
+                for count_name in route_epoch_counts:
+                    route_epoch_counts[count_name] += int(
+                        route_terms[count_name].item()
+                    )
+                route_target_compliance_sum += float(
+                    route_terms["target_compliance_sum"].item()
+                )
 
             # Step only at the end of an accumulation window (or plain step when
             # accum==1). Grads persist across micro-batches until then.
@@ -3630,14 +3987,37 @@ def train_il(
         avg_traj = float(np.mean(traj_losses))
         avg_jepa = float(np.mean(jepa_vals))
         avg_reason = float(np.mean(reason_vals))
+        avg_route = float(np.mean(route_vals))
+        avg_route_terms = {
+            name: (
+                float(np.mean(values))
+                if values
+                else 0.0
+            )
+            for name, values in route_term_vals.items()
+        }
+        if (
+            enable_route_consistency
+            and route_epoch_counts["eligible_count"] <= 0
+        ):
+            raise RuntimeError(
+                "route-enabled epoch produced no eligible route sample"
+            )
         if not all(
             np.isfinite(value)
-            for value in (avg_loss, avg_traj, avg_jepa, avg_reason)
+            for value in (
+                avg_loss,
+                avg_traj,
+                avg_jepa,
+                avg_reason,
+                avg_route,
+                *avg_route_terms.values(),
+            )
         ):
             raise ValueError(
                 "non-finite training metrics at epoch "
                 f"{epoch}: loss={avg_loss} traj={avg_traj} "
-                f"jepa={avg_jepa} reason={avg_reason}"
+                f"route={avg_route} jepa={avg_jepa} reason={avg_reason}"
             )
 
         validation = _evaluate_open_loop(
@@ -3691,8 +4071,16 @@ def train_il(
             "trajectory_loss": avg_traj,
             "jepa_loss": avg_jepa,
             "reasoning_loss": avg_reason,
+            "route_loss": avg_route,
+            "route_loss_terms": avg_route_terms,
+            "route_loss_counts": route_epoch_counts,
+            "route_target_compliance_sum": (
+                route_target_compliance_sum
+            ),
+            "navigation_exposure": navigation_exposure_metadata,
             "val_ade": validation["ade"],
             "val_fde": validation["fde"],
+            "val_horizons": validation["horizons"],
             "validation_sample_count": validation["sample_count"],
             "validation_sample_uid_digest": validation_digest,
             "improved": improved,
@@ -3711,9 +4099,57 @@ def train_il(
                     "train/trajectory_loss": avg_traj,
                     "train/jepa_loss": avg_jepa,
                     "train/reasoning_loss": avg_reason,
+                    "train/route_loss": avg_route,
+                    "train/weighted_route_loss": (
+                        route_consistency_weight * avg_route
+                    ),
+                    "train/route_corridor_loss": (
+                        avg_route_terms["corridor"]
+                    ),
+                    "train/route_branch_loss": (
+                        avg_route_terms["branch"]
+                    ),
+                    "train/route_destination_loss": (
+                        avg_route_terms["destination"]
+                    ),
+                    "train/route_heading_loss": (
+                        avg_route_terms["heading"]
+                    ),
+                    "train/route_candidate_count": (
+                        route_epoch_counts["candidate_count"]
+                    ),
+                    "train/route_eligible_count": (
+                        route_epoch_counts["eligible_count"]
+                    ),
+                    "train/route_compliance_rejected_count": (
+                        route_epoch_counts[
+                            "compliance_rejected_count"
+                        ]
+                    ),
+                    "train/route_gradient_ratio": (
+                        gradient_evidence[
+                            "route_loss_gradient_budget"
+                        ]["route_to_trajectory_ratio"]
+                        if gradient_evidence[
+                            "route_loss_gradient_budget"
+                        ] is not None
+                        else -1.0
+                    ),
                     "train/lr": current_lr,
                     "val/ade": validation["ade"],
                     "val/fde": validation["fde"],
+                    **{
+                        f"val/ade_{label}": values["ade"]
+                        for label, values in validation[
+                            "horizons"
+                        ].items()
+                    },
+                    **{
+                        f"val/fde_{label}": values["fde"]
+                        for label, values in validation[
+                            "horizons"
+                        ].items()
+                    },
                 },
                 step=epoch,
             )
@@ -3739,6 +4175,9 @@ def train_il(
                     ),
                     "validation_sample_count": validation_sample_count,
                     "validation_split": validation_split_contract,
+                    "navigation_exposure": (
+                        navigation_exposure_metadata
+                    ),
                     "current_checkpoint_uri": checkpoint_uri,
                     "early_stopping_patience": (
                         early_stopping_patience
@@ -3793,7 +4232,8 @@ def train_il(
 
         print(
             f"  Epoch {epoch}/{epochs} loss={avg_loss:.4f} "
-            f"traj={avg_traj:.4f} jepa={avg_jepa:.4f} "
+            f"traj={avg_traj:.4f} route={avg_route:.4f} "
+            f"jepa={avg_jepa:.4f} "
             f"reason={avg_reason:.4f} val_ADE={validation['ade']:.4f} "
             f"val_FDE={validation['fde']:.4f} improved={improved} "
             f"bad_epochs={bad_epochs} checkpoint={uploaded['uri']}"
@@ -3857,6 +4297,14 @@ def train_il(
         and gradient_evidence["route_input_first_nonzero_step"] is None
     ):
         raise RuntimeError("Reactive planner received no route input gradient")
+    if (
+        not terminal_resume
+        and enable_route_consistency
+        and gradient_evidence["route_loss_gradient_budget"] is None
+    ):
+        raise RuntimeError(
+            "route consistency produced no planner gradient budget evidence"
+        )
 
     if best_checkpoint is None or final_checkpoint is None:
         raise RuntimeError("training completed without a best/final checkpoint")
@@ -3913,6 +4361,7 @@ def train_il(
                 if navigation_quality_report is not None
                 else None
             ),
+            "navigation_exposure": navigation_exposure_metadata,
         },
         "model": {
             "backbone": bb,
@@ -3941,6 +4390,17 @@ def train_il(
             "optimizer": "AdamW",
             "scheduler": "ReduceLROnPlateau",
             "trajectory_training_policy": training_policy.metadata(),
+            "training_objective_version": training_objective_version,
+            "junction_sampling": {
+                "enabled": enable_junction_sampling,
+                "policy": (
+                    navigation_repeat_policy.metadata()
+                    if navigation_repeat_policy is not None
+                    else None
+                ),
+                "exposure": navigation_exposure_metadata,
+            },
+            "route_consistency": route_consistency_config,
             "final_loss": losses_per_epoch[-1],
             "losses_per_epoch": losses_per_epoch,
             "val_fraction": val_fraction,
@@ -6048,6 +6508,12 @@ def wf_sharded_full_run(
     lr: float = 1e-4,
     training_seed: int = 149,
     enable_route_conditioning: bool = True,
+    training_objective_version: str = (
+        BASELINE_TRAINING_OBJECTIVE_VERSION
+    ),
+    enable_junction_sampling: bool = False,
+    enable_route_consistency: bool = False,
+    route_consistency_weight: float = 0.10,
     enable_reasoning: bool = True,
     reasoning_mode: str = "pooled_latent",
     enable_world_model: bool = True,
@@ -6091,6 +6557,10 @@ def wf_sharded_full_run(
         batch_size=batch_size, grad_accum_steps=grad_accum_steps, lr=lr,
         training_seed=training_seed,
         enable_route_conditioning=enable_route_conditioning,
+        training_objective_version=training_objective_version,
+        enable_junction_sampling=enable_junction_sampling,
+        enable_route_consistency=enable_route_consistency,
+        route_consistency_weight=route_consistency_weight,
         navigation_quality_audit=navigation_quality_audit,
         enable_reasoning=enable_reasoning, reasoning_mode=reasoning_mode,
         enable_world_model=enable_world_model, val_fraction=val_fraction,
@@ -6110,12 +6580,18 @@ def wf_recovered_kitscenes_full_run(
     image_size: int = 256,
     pack_concurrency: int = 60,
     backbone: Backbone = Backbone.SWIN_V2_TINY,
-    epochs: int = 10,
+    epochs: int = 20,
     batch_size: int = 1,
     grad_accum_steps: int = 4,
     lr: float = 1e-4,
     training_seed: int = 149,
     enable_route_conditioning: bool = True,
+    training_objective_version: str = (
+        KITSCENES_NAVIGATION_OBJECTIVE_VERSION
+    ),
+    enable_junction_sampling: bool = True,
+    enable_route_consistency: bool = True,
+    route_consistency_weight: float = 0.10,
     reasoning_mode: str = "pooled_latent",
     val_fraction: float = 0.1,
     num_workers: int = 4,
@@ -6143,6 +6619,10 @@ def wf_recovered_kitscenes_full_run(
         lr=lr,
         training_seed=training_seed,
         enable_route_conditioning=enable_route_conditioning,
+        training_objective_version=training_objective_version,
+        enable_junction_sampling=enable_junction_sampling,
+        enable_route_consistency=enable_route_consistency,
+        route_consistency_weight=route_consistency_weight,
         navigation_quality_audit=navigation_quality_audit,
         enable_reasoning=True,
         reasoning_mode=reasoning_mode,
@@ -6210,6 +6690,12 @@ def wf_train_il(
     training_seed: int = 149,
     amp: bool = False,
     enable_route_conditioning: bool = True,
+    training_objective_version: str = (
+        BASELINE_TRAINING_OBJECTIVE_VERSION
+    ),
+    enable_junction_sampling: bool = False,
+    enable_route_consistency: bool = False,
+    route_consistency_weight: float = 0.10,
     navigation_quality_audit: Optional[FlyteFile] = None,
     enable_reasoning: bool = False,
     reasoning_mode: str = "pooled_latent",
@@ -6240,6 +6726,10 @@ def wf_train_il(
                    grad_accum_steps=grad_accum_steps, lr=lr,
                    training_seed=training_seed, amp=amp,
                    enable_route_conditioning=enable_route_conditioning,
+                   training_objective_version=training_objective_version,
+                   enable_junction_sampling=enable_junction_sampling,
+                   enable_route_consistency=enable_route_consistency,
+                   route_consistency_weight=route_consistency_weight,
                    navigation_quality_audit=navigation_quality_audit,
                    enable_reasoning=enable_reasoning, reasoning_mode=reasoning_mode,
                    enable_world_model=enable_world_model, val_fraction=val_fraction,
