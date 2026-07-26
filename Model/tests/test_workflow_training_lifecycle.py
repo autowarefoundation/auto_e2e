@@ -425,6 +425,14 @@ def test_training_wires_dataset_specific_trajectory_policy():
         "target rollout reconstruction thresholds failed"
         in training_source
     )
+    assert "audit_report.get(\"thresholds\") != expected_thresholds" in (
+        training_source
+    )
+    assert '"p95_fde_3s_limit_m": P95_FDE_3S_LIMIT_M' in training_source
+    assert (
+        '"p95_fde_full_limit_m": P95_FDE_FULL_LIMIT_M'
+        in training_source
+    )
     assert "threshold exception requires current-model" not in training_source
     assert '"reconstruction_audit": reconstruction_audit_contract' in (
         training_source
