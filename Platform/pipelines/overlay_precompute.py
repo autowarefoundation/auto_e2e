@@ -12,6 +12,25 @@ from Platform.pipelines.inference import predict_control
 from Platform.pipelines.overlay import BEV_HEATMAP_NAMES, BEV_HEATMAP_SIZE
 
 
+_HOOK_HEATMAP_NAMES = ("image", "navigation", "fused")
+
+
+def _downsample_features(output: torch.Tensor, name: str) -> torch.Tensor:
+    if not torch.is_tensor(output) or output.ndim != 4:
+        raise ValueError(f"{name} BEV output must be a [B,C,H,W] tensor")
+    return F.adaptive_avg_pool2d(
+        output.detach().float(),
+        (BEV_HEATMAP_SIZE, BEV_HEATMAP_SIZE),
+    ).cpu()
+
+
+def _channel_rms(features: torch.Tensor) -> np.ndarray:
+    channel_rms = torch.linalg.vector_norm(
+        features, ord=2, dim=1
+    ) / float(features.shape[1]) ** 0.5
+    return channel_rms.numpy()
+
+
 class _BEVActivationRecorder:
     def __init__(self, model: torch.nn.Module):
         try:
@@ -25,11 +44,12 @@ class _BEVActivationRecorder:
             raise ValueError(
                 "model does not expose the BEV diagnostic modules"
             ) from exc
-        self._latest: dict[str, np.ndarray] = {}
+        self._reactive = reactive
+        self._latest: dict[str, torch.Tensor] = {}
         self._enabled = False
         self._handles = [
             module.register_forward_hook(self._hook(name))
-            for name, module in zip(BEV_HEATMAP_NAMES, modules)
+            for name, module in zip(_HOOK_HEATMAP_NAMES, modules)
         ]
 
     def _hook(self, name: str):
@@ -40,18 +60,7 @@ class _BEVActivationRecorder:
         ) -> None:
             if not self._enabled:
                 return
-            if not torch.is_tensor(output) or output.ndim != 4:
-                raise ValueError(
-                    f"{name} BEV output must be a [B,C,H,W] tensor"
-                )
-            channel_rms = torch.linalg.vector_norm(
-                output.detach(), ord=2, dim=1
-            ) / float(output.shape[1]) ** 0.5
-            downsampled = F.adaptive_avg_pool2d(
-                channel_rms[:, None].float(),
-                (BEV_HEATMAP_SIZE, BEV_HEATMAP_SIZE),
-            )[:, 0]
-            self._latest[name] = downsampled.cpu().numpy()
+            self._latest[name] = _downsample_features(output, name)
 
         return record
 
@@ -60,14 +69,69 @@ class _BEVActivationRecorder:
         if enabled:
             self._latest.clear()
 
-    def take(self, batch_size: int) -> np.ndarray:
-        missing = set(BEV_HEATMAP_NAMES) - set(self._latest)
+    def take(
+        self,
+        batch: Mapping[str, Any],
+        batch_size: int,
+    ) -> np.ndarray:
+        self.set_enabled(False)
+        missing = set(_HOOK_HEATMAP_NAMES) - set(self._latest)
         if missing:
             raise RuntimeError(
                 f"BEV diagnostic hooks did not run: {sorted(missing)}"
             )
+        map_context = batch["map_context"]
+        map_valid = batch.get("map_valid")
+        if map_valid is None:
+            map_valid = torch.ones(
+                batch_size,
+                dtype=torch.bool,
+                device=map_context.device,
+            )
+        gated_map = map_context * torch.as_tensor(
+            map_valid, device=map_context.device
+        ).reshape(batch_size, 1, 1, 1).to(map_context.dtype)
+        route_channels = int(self._reactive.route_channels)
+        map_only_input = torch.cat(
+            [
+                gated_map,
+                map_context.new_zeros(
+                    batch_size,
+                    route_channels,
+                    map_context.shape[-2],
+                    map_context.shape[-1],
+                ),
+            ],
+            dim=1,
+        )
+        with torch.no_grad():
+            map_features = _downsample_features(
+                self._reactive.NavigationEncoder(map_only_input),
+                "map-only",
+            )
+
+        image_features = self._latest["image"]
+        navigation_features = self._latest["navigation"]
+        fused_features = self._latest["fused"]
+        if (
+            map_features.shape != navigation_features.shape
+            or image_features.shape != fused_features.shape
+        ):
+            raise RuntimeError("BEV diagnostic feature shapes differ")
+        views = {
+            "image": _channel_rms(image_features),
+            "map": _channel_rms(map_features),
+            "route_delta": _channel_rms(
+                navigation_features - map_features
+            ),
+            "navigation": _channel_rms(navigation_features),
+            "fusion_delta": _channel_rms(
+                fused_features - image_features
+            ),
+            "fused": _channel_rms(fused_features),
+        }
         heatmaps = np.stack(
-            [self._latest[name] for name in BEV_HEATMAP_NAMES],
+            [views[name] for name in BEV_HEATMAP_NAMES],
             axis=1,
         )
         expected = (
@@ -240,7 +304,9 @@ def _infer_loader(
             control_batches.append(controls)
             speed_batches.append(speeds)
             if recorder is not None:
-                heatmap_batches.append(recorder.take(len(sample_uids)))
+                heatmap_batches.append(
+                    recorder.take(batch, len(sample_uids))
+                )
     finally:
         if recorder is not None:
             recorder.close()
