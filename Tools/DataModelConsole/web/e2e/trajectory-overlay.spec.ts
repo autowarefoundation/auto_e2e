@@ -174,6 +174,23 @@ test("legacy overlays use one shared heatmap scale per sample", () => {
   }
 });
 
+test("v4 overlays use one heatmap scale per encoder", () => {
+  const body = overlayBody(4);
+  const buffer = body.buffer.slice(
+    body.byteOffset,
+    body.byteOffset + body.byteLength,
+  ) as ArrayBuffer;
+  const overlay = parseOverlay(buffer);
+
+  expect(overlay.bevHeatmapScales?.length).toBe(
+    SAMPLE_UIDS.length * 6,
+  );
+  expect(bevHeatmapForRow(overlay, 0, "image")?.scale).toBe(1);
+  expect(bevHeatmapForRow(overlay, 0, "fused")?.scale).toBe(6);
+  expect(bevHeatmapForRow(overlay, 1, "image")?.scale).toBe(2);
+  expect(bevHeatmapForRow(overlay, 1, "fused")?.scale).toBe(12);
+});
+
 function episodePath(): Buffer {
   const body = Buffer.alloc(80 * 32);
   for (let index = 0; index < 80; index++) {
