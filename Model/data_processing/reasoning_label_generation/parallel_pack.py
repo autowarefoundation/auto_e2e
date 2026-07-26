@@ -154,7 +154,7 @@ def decode_row(
 
     ``task`` = (ep_idx, frame_index) — GLOBAL identity, so the worker resolves the
     local row from its OWN _episode_ranges (robust across processes/partitions).
-    KITScenes returns lossless schema-v6 navigation members for current rows.
+    KITScenes returns lossless schema-v7 navigation members for current rows.
     Other datasets retain the existing optional map JPEG.
 
     Each unique row is decoded exactly ONCE per partition — the parent maps this
