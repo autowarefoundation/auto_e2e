@@ -12,9 +12,12 @@
 // L2D (l2d/camera.py): 6 surround cameras (map is packed separately)
 //   0 front_left, 1 left_forward, 2 right_forward,
 //   3 left_backward, 4 rear, 5 right_backward
-// KITScenes (kit_scenes/camera.py): 7 cameras
-//   0 base_front_center, 1 ring_front, 2 ring_front_left,
-//   3 ring_front_right, 4 ring_rear, 5 ring_rear_left, 6 ring_rear_right
+// KITScenes has two published slot contracts:
+//   7-view: 0 base_front_center, 1 ring_front, 2 ring_front_left,
+//           3 ring_front_right, 4 ring_rear, 5 ring_rear_left,
+//           6 ring_rear_right
+//   6-view: 0 base_front_center, 1 ring_front_left, 2 ring_front_right,
+//           3 ring_rear, 4 ring_rear_left, 5 ring_rear_right
 
 export interface RigCam {
   label: string;
@@ -60,7 +63,7 @@ const L2D_RIG: Record<string, RigCam> = {
 // filled there is no free centre cell, so the ego readout tile is omitted.
 //   (1,1) front-left    (1,2) front-center  (1,3) front-right
 //   (2,1) rear-left     (2,2) rear          (2,3) rear-right
-const KITSCENES_RIG: Record<string, RigCam> = {
+const KITSCENES_SEVEN_VIEW_RIG: Record<string, RigCam> = {
   cam_0: { label: "front-center", row: 1, col: 2 },
   cam_2: { label: "front-left", row: 1, col: 1 },
   cam_3: { label: "front-right", row: 1, col: 3 },
@@ -69,40 +72,66 @@ const KITSCENES_RIG: Record<string, RigCam> = {
   cam_6: { label: "rear-right", row: 2, col: 3 },
 };
 
+const KITSCENES_SIX_VIEW_RIG: Record<string, RigCam> = {
+  cam_0: { label: "front-center", row: 1, col: 2 },
+  cam_1: { label: "front-left", row: 1, col: 1 },
+  cam_2: { label: "front-right", row: 1, col: 3 },
+  cam_3: { label: "rear", row: 2, col: 2 },
+  cam_4: { label: "rear-left", row: 2, col: 1 },
+  cam_5: { label: "rear-right", row: 2, col: 3 },
+};
+
 const RIGS: Record<string, Record<string, RigCam>> = {
   nvidia_av: NVIDIA_RIG,
   l2d: L2D_RIG,
-  kitscenes: KITSCENES_RIG,
 };
 
-// Cameras that are packed in the shard but the console intentionally does not
-// display. KITScenes cam_1 (ring_front) duplicates cam_0 (base_front_center) —
-// same heading, essentially the same field of view — so it is the redundant
-// camera the model itself dropped (kit_scenes/camera.py, #146). Hiding it in the
-// viewer leaves the six distinct views for a clean 3x2 grid.
-const HIDDEN_CAMS: Record<string, Set<string>> = {
-  kitscenes: new Set(["cam_1"]),
-};
+function datasetRig(
+  dataset: string,
+  packedCameraCount?: number,
+): Record<string, RigCam> | undefined {
+  if (dataset === "kitscenes") {
+    return packedCameraCount === 6
+      ? KITSCENES_SIX_VIEW_RIG
+      : KITSCENES_SEVEN_VIEW_RIG;
+  }
+  return RIGS[dataset];
+}
 
 // isHiddenCam reports whether a shard camera member should be omitted from the
 // mosaic for a dataset. Filtering happens on the displayed camera list, so the
 // hidden camera never claims a grid cell, a focus slot, or a keyboard ordinal.
-export function isHiddenCam(dataset: string, cam: string): boolean {
-  return HIDDEN_CAMS[dataset]?.has(cam) ?? false;
+export function isHiddenCam(
+  dataset: string,
+  cam: string,
+  packedCameraCount?: number,
+): boolean {
+  // Seven-view shards contain the redundant ring-front in slot 1. Six-view
+  // shards already removed it and compacted front-left into slot 1.
+  return dataset === "kitscenes" && packedCameraCount !== 6 && cam === "cam_1";
 }
 
 // rigCam returns the rig position + grid cell for a "cam_N" identifier.
 // Falls back to a sequential cell + the raw id for unknown datasets/cameras.
-export function rigCam(dataset: string, cam: string, index: number): RigCam {
-  const mapped = RIGS[dataset]?.[cam];
+export function rigCam(
+  dataset: string,
+  cam: string,
+  index: number,
+  packedCameraCount?: number,
+): RigCam {
+  const mapped = datasetRig(dataset, packedCameraCount)?.[cam];
   if (mapped) return mapped;
   // Unknown rig: lay out sequentially in a 3-col grid.
   return { label: cam, row: Math.floor(index / 3) + 1, col: (index % 3) + 1 };
 }
 
 // camLabel returns just the rig position label (back-compat helper).
-export function camLabel(dataset: string, cam: string): string {
-  return RIGS[dataset]?.[cam]?.label ?? cam;
+export function camLabel(
+  dataset: string,
+  cam: string,
+  packedCameraCount?: number,
+): string {
+  return datasetRig(dataset, packedCameraCount)?.[cam]?.label ?? cam;
 }
 
 // displayAspectRatio is the width/height a camera tile should reserve for a
@@ -124,14 +153,18 @@ export function displayAspectRatio(dataset: string): number {
 // (KITScenes: forward + rear) must report rows=2, or the grid emits a phantom
 // empty third row AND the ego cell lands in row 2 (ceil(3/2)) on top of a
 // camera. `cams` should already be the DISPLAYED set (hidden cams filtered).
-export function gridDimensions(dataset: string, cams: string[]): {
+export function gridDimensions(
+  dataset: string,
+  cams: string[],
+  packedCameraCount?: number,
+): {
   rows: number;
   cols: number;
 } {
   let rows = 1;
   let cols = 1;
   cams.forEach((cam, i) => {
-    const c = rigCam(dataset, cam, i);
+    const c = rigCam(dataset, cam, i, packedCameraCount);
     rows = Math.max(rows, c.row);
     cols = Math.max(cols, c.col);
   });
