@@ -253,14 +253,16 @@ def audit_target_rollout_reconstruction(
     p95_fde_full_limit_m: float = 2.0,
 ) -> dict[str, object]:
     """Compare integrated target controls with logged ego-frame future XY."""
-    controls = np.asarray(target_controls, dtype=np.float32)
-    logged = np.asarray(logged_xy_m, dtype=np.float64)
-    speeds = np.asarray(initial_speeds_mps, dtype=np.float32)
+    controls = np.ascontiguousarray(target_controls, dtype=np.float32)
+    logged = np.ascontiguousarray(logged_xy_m, dtype=np.float64)
+    speeds = np.ascontiguousarray(initial_speeds_mps, dtype=np.float32)
     if controls.ndim != 3 or controls.shape[2] != 2:
         raise ValueError("target_controls must have shape [B,T,2]")
     if logged.shape != controls.shape:
         raise ValueError("logged_xy_m must match target_controls shape")
     batch_size, timestep_count, _ = controls.shape
+    if batch_size == 0:
+        raise ValueError("audit inputs must contain at least one sample")
     if speeds.shape != (batch_size,):
         raise ValueError("initial_speeds_mps must have shape [B]")
     if len(sample_uids) != batch_size or len(split_group_uids) != batch_size:
@@ -275,6 +277,12 @@ def audit_target_rollout_reconstruction(
         raise ValueError("audit initial speeds must be finite and non-negative")
     if not 0 < three_second_steps <= full_horizon_steps <= timestep_count:
         raise ValueError("audit horizons do not fit the trajectory")
+    if not np.isclose(three_second_steps * dt, 3.0):
+        raise ValueError("three_second_steps and dt must describe 3 seconds")
+    if not np.isclose(full_horizon_steps * dt, 6.4):
+        raise ValueError(
+            "full_horizon_steps and dt must describe 6.4 seconds"
+        )
 
     with torch.no_grad():
         predicted_xy, _, _ = integrate_controls_torch(
@@ -319,9 +327,10 @@ def audit_target_rollout_reconstruction(
 
     scenes = []
     for group_uid in sorted(scene_values):
+        first_metric = next(iter(metric_arrays))
         scenes.append({
             "split_group_uid": group_uid,
-            "sample_count": len(scene_values[group_uid]["fde_full_m"]),
+            "sample_count": len(scene_values[group_uid][first_metric]),
             **{
                 name: float(np.mean(values))
                 for name, values in scene_values[group_uid].items()
@@ -336,9 +345,9 @@ def audit_target_rollout_reconstruction(
                 float(scene[name]) for scene in scenes
             ]),
         }
-        for name, values in metric_arrays.items()
+        for name in metric_arrays
     }
-    go = (
+    thresholds_pass = (
         metrics["fde_3s_m"]["natural"]["p95"] <= p95_fde_3s_limit_m
         and metrics["fde_full_m"]["natural"]["p95"]
         <= p95_fde_full_limit_m
@@ -356,6 +365,14 @@ def audit_target_rollout_reconstruction(
         ]
         for name in ("fde_3s_m", "fde_full_m")
     }
+    error_by_step = [
+        {
+            "step": step + 1,
+            "horizon_seconds": float((step + 1) * dt),
+            "natural": _distribution(errors[:, step]),
+        }
+        for step in range(full_horizon_steps)
+    ]
     return {
         "schema_version": AUDIT_SCHEMA_VERSION,
         "sample_count": batch_size,
@@ -373,9 +390,48 @@ def audit_target_rollout_reconstruction(
             "p95_fde_3s_limit_m": p95_fde_3s_limit_m,
             "p95_fde_full_limit_m": p95_fde_full_limit_m,
         },
-        "go": go,
+        "thresholds_pass": thresholds_pass,
+        "decision": {
+            "status": "pending_review",
+            "automatic_recommendation": (
+                "go" if thresholds_pass else "review_required"
+            ),
+            "rationale": None,
+        },
+        "input_quality": {
+            "missing_sample_count": 0,
+            "non_finite_sample_count": 0,
+        },
         "metrics": metrics,
+        "error_by_step": error_by_step,
         "worst_scenes": worst_scenes,
         "scenes": scenes,
         "records": records,
     }
+
+
+def audit_packed_target_rollout_reconstruction(
+    inputs: PackedReconstructionInputs,
+    **audit_kwargs: object,
+) -> dict[str, object]:
+    """Audit packed controls against GPS point 1..64 in current ego FLU."""
+    from evaluation.kitscenes_benchmark import (
+        wgs84_trajectory_to_ego_xy,
+    )
+
+    logged_xy = wgs84_trajectory_to_ego_xy(
+        inputs.logged_gps,
+        inputs.current_poses,
+    )
+    if logged_xy.shape != inputs.target_controls.shape:
+        raise ValueError(
+            "pose-grounded trajectory does not match the control horizon"
+        )
+    return audit_target_rollout_reconstruction(
+        inputs.target_controls,
+        logged_xy,
+        inputs.initial_speeds_mps,
+        inputs.sample_uids,
+        inputs.split_group_uids,
+        **audit_kwargs,
+    )
