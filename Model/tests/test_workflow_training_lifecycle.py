@@ -516,6 +516,9 @@ def test_navigation_objective_wiring_is_train_only_and_versioned():
         "enable_junction_sampling",
         "enable_route_consistency",
         "route_consistency_weight",
+        "reconstruction_audit",
+        "reconstruction_audit_decision",
+        "reconstruction_audit_rationale",
     ):
         assert isinstance(train_keywords[field], ast.Name)
         assert train_keywords[field].id == field
