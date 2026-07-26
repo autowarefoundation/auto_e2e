@@ -207,10 +207,19 @@ def build_rollout_validation_records(
         )
 
     errors = torch.linalg.vector_norm(predicted_xy - logged, dim=2)
-    predicted_drivable_inside = predicted_drivable_distance <= 1e-6
-    target_drivable_inside = target_drivable_distance <= 1e-6
-    predicted_route_inside = predicted_route_distance <= 1e-6
-    target_route_inside = target_route_distance <= 1e-6
+    raster_tolerance_m = 0.5 * geometry.meters_per_pixel
+    predicted_drivable_inside = (
+        predicted_drivable_distance <= raster_tolerance_m
+    )
+    target_drivable_inside = (
+        target_drivable_distance <= raster_tolerance_m
+    )
+    predicted_route_inside = (
+        predicted_route_distance <= raster_tolerance_m
+    )
+    target_route_inside = (
+        target_route_distance <= raster_tolerance_m
+    )
     destination = route_supervision["destination_xy_m"].detach().to(
         device="cpu",
         dtype=torch.float32,
@@ -228,6 +237,8 @@ def build_rollout_validation_records(
     records = []
     for index in range(batch_size):
         offroad_excess = None
+        predicted_offroad = None
+        target_offroad = None
         if bool(map_available[index]):
             predicted_offroad = float(
                 (~predicted_drivable_inside[index]).float().mean()
@@ -243,6 +254,8 @@ def build_rollout_validation_records(
         route_gap = None
         wrong_branch_excess = None
         destination_error = None
+        predicted_compliance = None
+        target_compliance = None
         if bool(route_available[index]):
             predicted_compliance = float(
                 predicted_route_inside[index].float().mean()
@@ -281,5 +294,12 @@ def build_rollout_validation_records(
             "route_gap": route_gap,
             "wrong_branch_excess": wrong_branch_excess,
             "destination_error_m": destination_error,
+            "diagnostic_predicted_offroad_rate": predicted_offroad,
+            "diagnostic_target_offroad_rate": target_offroad,
+            "diagnostic_predicted_route_compliance": (
+                predicted_compliance
+            ),
+            "diagnostic_target_route_compliance": target_compliance,
+            "diagnostic_raster_tolerance_m": raster_tolerance_m,
         })
     return records
