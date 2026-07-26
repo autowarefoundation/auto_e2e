@@ -205,7 +205,9 @@ function RunTitle({ record }: { record: ExperimentRecord }) {
           .join(" · ") || record.run_name}
       </p>
       <p className="mt-0.5 truncate font-mono text-[10px] text-slate-600">
-        {record.primary_execution_id || record.run_id}
+        {[record.validation_split_id, record.primary_execution_id || record.run_id]
+          .filter(Boolean)
+          .join(" · ")}
       </p>
     </div>
   );
