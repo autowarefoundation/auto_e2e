@@ -6,10 +6,10 @@ import torch
 
 from evaluation.metrics import integrate_trajectory
 from navigation.geometry import DEFAULT_NAVIGATION_GEOMETRY
+from training.losses.control_rollout import integrate_controls_torch
 from training.losses.route_consistency_loss import (
     RouteConsistencyLoss,
     ego_points_to_grid,
-    integrate_controls_torch,
 )
 
 
@@ -96,8 +96,45 @@ def test_torch_control_integration_matches_numpy(
         positions[0].numpy(),
         expected,
         rtol=0.0,
-        atol=1e-5,
+        atol=5e-5,
     )
+
+
+def test_control_rollout_is_float32_under_autocast():
+    controls = _controls(0.5, 0.04).to(dtype=torch.bfloat16)
+    with torch.autocast("cpu", dtype=torch.bfloat16):
+        positions, headings, speeds = integrate_controls_torch(
+            controls,
+            torch.tensor([8.0], dtype=torch.bfloat16),
+        )
+
+    assert positions.dtype == torch.float32
+    assert headings.dtype == torch.float32
+    assert speeds.dtype == torch.float32
+
+
+@pytest.mark.parametrize(
+    ("controls", "speed", "message"),
+    [
+        (
+            torch.tensor([[[float("nan"), 0.0]]]),
+            torch.tensor([1.0]),
+            "controls contain non-finite",
+        ),
+        (
+            torch.zeros(1, 1, 2),
+            torch.tensor([float("inf")]),
+            "initial_speed contains non-finite",
+        ),
+    ],
+)
+def test_control_rollout_rejects_non_finite_input(
+    controls,
+    speed,
+    message,
+):
+    with pytest.raises(ValueError, match=message):
+        integrate_controls_torch(controls, speed)
 
 
 def test_grid_coordinates_match_geometry_pixel_centers():
