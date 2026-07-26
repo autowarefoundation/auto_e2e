@@ -2183,6 +2183,9 @@ def train_il(
     # pre_extracted — call it directly (importing it from there is an ImportError).
 
     ctx = current_context()
+    train_execution_id = (
+        ctx.execution_id.name if ctx.execution_id else "local"
+    )
     bb, fm = backbone.value, FUSION_LABEL
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     training_policy = training_policy_for_dataset(
@@ -2711,6 +2714,7 @@ def train_il(
                 "train/batch_size": batch_size,
                 "train/grad_accum_steps": grad_accum_steps,
                 "train/num_workers": num_workers,
+                "train/epochs": epochs,
                 "train/lr": lr,
                 "train/weight_decay": weight_decay,
                 "train/amp": amp,
@@ -2741,6 +2745,8 @@ def train_il(
                     validation_group_digest or "hash_buckets"
                 ),
                 "train/early_stopping_patience": early_stopping_patience,
+                "ctx/train_execution_id": train_execution_id,
+                "ctx/train_docker_image": TRAINING_IMAGE,
             })
 
     # Training loop
@@ -3165,7 +3171,7 @@ def train_il(
             ),
         },
         "context": {
-            "flyte_execution_id": ctx.execution_id.name if ctx.execution_id else "local",
+            "flyte_execution_id": train_execution_id,
             "docker_image": TRAINING_IMAGE,
         },
     }
@@ -3186,6 +3192,8 @@ def train_il(
             "validation_group_uid_digest": (
                 validation_group_digest or "hash_buckets"
             ),
+            "ctx/train_execution_id": train_execution_id,
+            "ctx/train_docker_image": TRAINING_IMAGE,
         })
         mlflow.log_artifact(meta_path, artifact_path="training")
 
