@@ -118,8 +118,8 @@ KITSCENES_TRAINING_POLICY = DatasetTrainingPolicy(
     mask_latest_history_acceleration=True,
     validation_strategy="exact_group_fraction",
     validation_split_id="kitscenes_train_dev_v1",
-    validation_manifest="splits/kitscenes_train_dev_v2.json",
-    validation_manifest_schema="kitscenes_train_dev_split_v2",
+    validation_manifest="splits/kitscenes_train_dev_v3.json",
+    validation_manifest_schema="kitscenes_train_dev_split_v3",
 )
 
 # Checkpoints produced before dataset policies were recorded used L2D signal
