@@ -113,7 +113,9 @@ def load_packed_reconstruction_inputs(
     for sample_uid, record in sorted(records.items()):
         metadata_bytes = record.get("metadata")
         if metadata_bytes is None:
-            continue
+            raise ValueError(
+                f"sample {sample_uid!r} is missing audit metadata"
+            )
         try:
             metadata = json.loads(metadata_bytes)
         except (UnicodeError, json.JSONDecodeError) as error:
