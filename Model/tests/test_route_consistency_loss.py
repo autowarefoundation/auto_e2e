@@ -1,0 +1,213 @@
+"""Tests for differentiable selected-route control supervision."""
+
+import numpy as np
+import pytest
+import torch
+
+from evaluation.metrics import integrate_trajectory
+from navigation.geometry import DEFAULT_NAVIGATION_GEOMETRY
+from training.losses.route_consistency_loss import (
+    RouteConsistencyLoss,
+    ego_points_to_grid,
+    integrate_controls_torch,
+)
+
+
+GEOMETRY = DEFAULT_NAVIGATION_GEOMETRY
+TIMESTEPS = 64
+
+
+def _controls(acceleration=0.0, curvature=0.0, *, requires_grad=False):
+    value = torch.zeros(1, TIMESTEPS, 2)
+    value[..., 0] = acceleration
+    value[..., 1] = curvature
+    return value.requires_grad_(requires_grad)
+
+
+def _straight_route_supervision(*, destination_visible=False):
+    _, y_left = GEOMETRY.pixel_center_grids()
+    half_width = GEOMETRY.route_corridor_width_m
+    distance = np.maximum(np.abs(y_left) - half_width, 0.0)
+    corridor = np.abs(y_left) <= half_width
+    return {
+        "distance_to_corridor_m": torch.from_numpy(
+            distance.astype(np.float32)
+        ).unsqueeze(0),
+        "route_heading_sin": torch.zeros(
+            1,
+            GEOMETRY.height_px,
+            GEOMETRY.width_px,
+        ),
+        "route_heading_cos": torch.from_numpy(
+            corridor.astype(np.float32)
+        ).unsqueeze(0),
+        "route_heading_valid": torch.from_numpy(corridor).unsqueeze(0),
+        "destination_xy_m": torch.tensor([[100.0, 0.0]]),
+        "destination_visible": torch.tensor([destination_visible]),
+        "available": torch.tensor([True]),
+    }
+
+
+def _loss(
+    predicted,
+    target,
+    *,
+    initial_speed=5.0,
+    supervision=None,
+    route_valid=True,
+    intersection=False,
+):
+    return RouteConsistencyLoss()(
+        predicted,
+        target,
+        torch.tensor([initial_speed]),
+        supervision or _straight_route_supervision(),
+        torch.tensor([route_valid]),
+        torch.tensor([intersection]),
+    )
+
+
+@pytest.mark.parametrize(
+    ("acceleration", "curvature", "initial_speed"),
+    [
+        (0.0, 0.0, 5.0),
+        (-3.0, 0.0, 2.0),
+        (0.5, 0.04, 8.0),
+    ],
+)
+def test_torch_control_integration_matches_numpy(
+    acceleration,
+    curvature,
+    initial_speed,
+):
+    controls = _controls(acceleration, curvature)
+
+    positions, _, _ = integrate_controls_torch(
+        controls,
+        torch.tensor([initial_speed]),
+    )
+    expected = integrate_trajectory(
+        np.full(TIMESTEPS, acceleration),
+        np.full(TIMESTEPS, curvature),
+        initial_speed,
+    )
+
+    np.testing.assert_allclose(
+        positions[0].numpy(),
+        expected,
+        rtol=0.0,
+        atol=1e-5,
+    )
+
+
+def test_grid_coordinates_match_geometry_pixel_centers():
+    points = torch.tensor([[
+        [0.0, 0.0],
+        [20.0, 5.0],
+        [GEOMETRY.x_max_m, GEOMETRY.y_max_m],
+    ]])
+
+    grid = ego_points_to_grid(points, GEOMETRY)[0].numpy()
+    pixels = GEOMETRY.ego_to_pixel(points[0].numpy())
+    expected = np.column_stack([
+        2.0 * (pixels[:, 1] + 0.5) / GEOMETRY.width_px - 1.0,
+        2.0 * (pixels[:, 0] + 0.5) / GEOMETRY.height_px - 1.0,
+    ])
+
+    np.testing.assert_allclose(grid, expected, rtol=0.0, atol=1e-6)
+
+
+def test_out_of_bounds_motion_has_explicit_positive_gradient():
+    predicted = _controls(20.0, 0.0, requires_grad=True)
+    supervision = _straight_route_supervision()
+    supervision["distance_to_corridor_m"].zero_()
+
+    terms = _loss(
+        predicted,
+        _controls(),
+        supervision=supervision,
+    )
+    terms["total"].backward()
+
+    assert terms["eligible_count"].item() == 1
+    assert terms["corridor"].item() > 0.0
+    assert predicted.grad is not None
+    assert torch.isfinite(predicted.grad).all()
+    assert predicted.grad.abs().sum().item() > 0.0
+
+
+def test_wrong_junction_branch_costs_more_than_selected_route():
+    target = _controls()
+    selected = _controls(requires_grad=True)
+    wrong_branch = _controls(0.0, 0.05, requires_grad=True)
+
+    selected_terms = _loss(selected, target, intersection=True)
+    wrong_terms = _loss(wrong_branch, target, intersection=True)
+
+    assert selected_terms["branch_active_count"].item() == 1
+    assert selected_terms["total"].item() == pytest.approx(0.0)
+    assert wrong_terms["branch"].item() > selected_terms["branch"].item()
+    assert wrong_terms["total"].item() > selected_terms["total"].item()
+
+
+def test_destination_hinge_penalizes_only_lost_progress():
+    target = _controls()
+    supervision = _straight_route_supervision(destination_visible=True)
+    farther = _controls(-0.5, 0.0, requires_grad=True)
+    closer = _controls(0.5, 0.0, requires_grad=True)
+
+    farther_terms = _loss(
+        farther,
+        target,
+        supervision=supervision,
+    )
+    closer_terms = _loss(
+        closer,
+        target,
+        supervision=supervision,
+    )
+
+    assert farther_terms["destination"].item() > 0.0
+    assert closer_terms["destination"].item() == pytest.approx(0.0)
+
+
+def test_stationary_trajectory_has_no_heading_penalty():
+    predicted = _controls(0.0, 1.0, requires_grad=True)
+
+    terms = _loss(
+        predicted,
+        _controls(),
+        initial_speed=0.0,
+    )
+
+    assert terms["eligible_count"].item() == 1
+    assert terms["heading_active_count"].item() == 0
+    assert terms["heading"].item() == pytest.approx(0.0)
+
+
+def test_inconsistent_target_rejects_route_auxiliary():
+    predicted = _controls(requires_grad=True)
+    target = _controls(0.0, 0.1)
+
+    terms = _loss(predicted, target)
+    terms["total"].backward()
+
+    assert terms["candidate_count"].item() == 1
+    assert terms["eligible_count"].item() == 0
+    assert terms["compliance_rejected_count"].item() == 1
+    assert terms["total"].item() == pytest.approx(0.0)
+    assert predicted.grad is not None
+    assert predicted.grad.abs().sum().item() == pytest.approx(0.0)
+
+
+def test_empty_route_set_returns_differentiable_zero():
+    predicted = _controls(requires_grad=True)
+
+    terms = _loss(predicted, _controls(), route_valid=False)
+    terms["total"].backward()
+
+    assert terms["candidate_count"].item() == 0
+    assert terms["eligible_count"].item() == 0
+    assert terms["total"].item() == pytest.approx(0.0)
+    assert predicted.grad is not None
+    assert predicted.grad.abs().sum().item() == pytest.approx(0.0)
