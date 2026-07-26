@@ -21,17 +21,14 @@ reward the model for using route information:
 - the 64th control step receives only `0.95^63 = 0.0395` of the first step's
   trajectory-loss weight;
 - most samples do not contain an imminent route choice;
-- the imitation loss does not directly penalize leaving the selected route;
-- the camera BEV has no explicit geometric supervision before it is fused with
-  the semantic map and route.
+- the imitation loss does not directly penalize leaving the selected route.
 
-This design introduces one versioned KITScenes training objective with four
+This design introduces one versioned KITScenes training objective with three
 independently configurable components:
 
-1. a camera-only BEV semantic segmentation auxiliary head;
-2. mean-normalized long-horizon trajectory weights with decay `0.99`;
-3. deterministic junction- and maneuver-aware training resampling;
-4. a differentiable selected-route consistency loss.
+1. mean-normalized long-horizon trajectory weights with decay `0.99`;
+2. deterministic junction- and maneuver-aware training resampling;
+3. a differentiable selected-route consistency loss.
 
 The initial combined training path is:
 
@@ -39,11 +36,8 @@ The initial combined training path is:
 camera images
     -> shared camera backbone
     -> camera FeatureFusion
-    -> image_bev ------------------------------------+
-         |                                           |
-         +-> train-only BEV segmentation head        |
-         |      -> semantic map targets               |
-         |                                            v
+    -> image_bev -------------------------------------+
+                                                     |
 map_context + route_mask -> NavigationEncoder -> MapBEVFusion
                                                    |
                                                    v
@@ -56,11 +50,10 @@ map_context + route_mask -> NavigationEncoder -> MapBEVFusion
                                                             route loss
 ```
 
-The BEV segmentation head reads `image_bev` before navigation fusion. It cannot
-copy the semantic map input. Route-supervision fields are training targets, not
-model inputs. Route tensors still do not enter the Reasoning branch.
+Route-supervision fields are training targets, not model inputs. Route tensors
+still do not enter the Reasoning branch.
 
-All four components can be enabled together, but each has an explicit config
+All three components can be enabled together, but each has an explicit config
 field, checkpoint identity, MLflow metric namespace, and focused test. This
 preserves the ability to run controlled ablations after the combined result.
 
@@ -102,21 +95,19 @@ working information path, not evidence that the route is used optimally.
 
 ### 2.3 Why the changes are coupled
 
-The four changes address different failure modes:
+The three changes address different failure modes:
 
 | Change | Failure mode |
 |---|---|
 | Long-horizon weighting | Route choices occur after the heavily weighted near-term controls |
 | Junction-aware resampling | Straight lane following dominates the optimizer |
 | Route consistency | Control imitation alone does not identify the selected lane sequence as a constraint |
-| BEV segmentation | Camera BEV geometry is learned only indirectly through planning |
 
-Applying only a route loss to a weak camera BEV can produce map dependence
-without better perception. Applying only segmentation does not teach the
-planner which branch is selected. Applying only resampling repeats the same
-weak objective. The combined objective is therefore a coherent first
-performance experiment, while independent switches retain scientific
-traceability.
+Applying only a route loss leaves route-choice samples underrepresented.
+Applying only resampling repeats the same weak objective. Applying only
+long-horizon weighting does not encode selected-lane compliance. The combined
+objective is therefore a coherent first performance experiment, while
+independent switches retain scientific traceability.
 
 ## 3. Goals and Non-Goals
 
@@ -127,13 +118,11 @@ traceability.
    camera scene.
 3. Penalize predicted trajectories that leave the selected lane corridor or
    take the wrong junction branch.
-4. Train the camera BEV to represent road geometry without reading the map or
-   route tensors.
-5. Preserve the #149 navigation ABI and Reactive-only route boundary.
-6. Keep every new objective deterministic, masked by validity, and observable.
-7. Allow a combined run and controlled per-component ablations from the same
+4. Preserve the #149 navigation ABI and Reactive-only route boundary.
+5. Keep every new objective deterministic, masked by validity, and observable.
+6. Allow a combined run and controlled per-component ablations from the same
    implementation.
-8. Keep validation membership and distribution unchanged.
+7. Keep validation membership and distribution unchanged.
 
 ### 3.2 Non-goals
 
@@ -143,7 +132,8 @@ traceability.
 - Synthetic wrong-route training.
 - Map/route dropout or localization perturbation.
 - Changing the 64-step `(acceleration, curvature)` output ABI.
-- Changing runtime navigation inputs or adding a runtime segmentation output.
+- BEV segmentation auxiliary loss or BEV encoder pretraining.
+- Changing runtime navigation inputs.
 - Replacing the existing early-stopping policy in the first comparison.
 - Applying the new objective to L2D or NVIDIA PhysicalAI-AV.
 
@@ -156,8 +146,7 @@ model input:
   camera_tiles, map_context, route_mask, map_valid, route_valid, histories
 
 train-only target:
-  semantic BEV labels, selected-route distance/direction fields,
-  target controls
+  selected-route distance/direction fields, target controls
 
 runtime output:
   64 x (acceleration, curvature)
@@ -165,140 +154,35 @@ runtime output:
 
 The following rules are normative:
 
-1. The BEV segmentation head receives only `image_bev`.
-2. `map_context` is a target for the segmentation loss and remains a separate
-   input to `NavigationEncoder`; it is never concatenated into the segmentation
-   head.
-3. Selected-route distance and direction fields are consumed only by the
+1. Selected-route distance and direction fields are consumed only by the
    training loss.
-4. Exact future ego positions are never serialized as route inputs or route
+2. Exact future ego positions are never serialized as route inputs or route
    supervision.
-5. Ground-truth controls may be integrated inside the loss for masking or a
+3. Ground-truth controls may be integrated inside the loss for masking or a
    relative destination hinge because they are already the imitation target.
    They are never passed to the forward path used for inference.
-6. Route-derived tensors remain inside the Reactive training path and never
+4. Route-derived tensors remain inside the Reactive training path and never
    enter the Reasoning head, its teacher labels, or its cache.
 
-## 5. Model Architecture
+## 5. Deferred BEV Pretraining
 
-### 5.1 Reactive output contract
+BEV segmentation is outside this experiment. The current packed KITScenes
+contract has no dense dynamic-object BEV teacher. Lanelet2 provides static road
+geometry, but supervising static map layers is not equivalent to learning
+dynamic occupancy for vehicles, pedestrians, and other agents.
 
-`ReactiveE2E` exposes train-only auxiliary outputs through the existing
-`aux_outputs` dictionary:
+Camera-to-BEV pretraining should be specified separately in
+[#17](https://github.com/autowarefoundation/auto_e2e/issues/17). PandaSet is the
+proposed source dataset because it provides synchronized cameras, LiDAR,
+3D cuboids, and point-cloud semantic labels from which static and dynamic BEV
+targets can be constructed. That work must define its own class taxonomy,
+projection contract, checkpoint transfer boundary, and dataset attribution.
+It must not block or alter the KITScenes route-conditioned experiment defined
+here.
 
-```text
-trajectory: [B, 128]
-aux_outputs:
-  reasoning_pred: optional existing value
-  future_state_pred: optional existing value
-  bev_segmentation_logits: optional [B, 6, 256, 256]
-```
+## 6. Long-Horizon Imitation Loss
 
-Inference returns only the trajectory. The segmentation head is not executed
-when `mode != "train"`, so it adds no vehicle latency.
-
-### 5.2 BEV segmentation head
-
-The initial head is intentionally small:
-
-```text
-image_bev [B, 256, 256, 256]
-  -> Conv2d(256, 128, kernel=3, padding=1)
-  -> GroupNorm(32, 128)
-  -> GELU
-  -> Conv2d(128, 6, kernel=1)
-  -> logits [B, 6, 256, 256]
-```
-
-The spatial geometry is exactly `kitscenes-v3-bev-1m-v1`. No resize is
-permitted when the camera BEV and navigation geometry already match. A shape
-mismatch is a contract error, not an invitation to bilinear-resize labels.
-
-The six initial target channels are:
-
-1. `DRIVABLE_AREA`;
-2. `LANE_BOUNDARY`;
-3. `LANE_CENTERLINE`;
-4. `INTERSECTION`;
-5. `CROSSWALK`;
-6. `STOP_LINE`.
-
-The following map channels are excluded:
-
-- static traffic-signal points are too sparse for the initial dense head;
-- traffic direction is a vector-regression task, not binary segmentation;
-- known-map area is a supervision mask;
-- road level and overlap ambiguity are map provenance, not camera-visible
-  semantic classes.
-
-### 5.3 No segmentation shortcut
-
-Attaching the head after `MapBEVFusion` would let the model copy the supplied
-semantic map. That can drive segmentation loss to zero without improving visual
-features. The head therefore branches from `image_bev` before
-`NavigationEncoder` output is fused.
-
-This is enforced by a gradient-isolation test:
-
-- segmentation loss must produce gradients in `Backbone`, `FeatureFusion`, and
-  `BEVSegmentationHead`;
-- it must not produce gradients in `NavigationEncoder`, `MapBEVFusion`,
-  `TrajectoryPlanner`, or the Reasoning branch when evaluated by itself.
-
-### 5.4 Runtime footprint
-
-The head remains in the training checkpoint so a run is exactly reconstructable
-and segmentation quality can be evaluated. It is skipped in inference. A
-deployment export may omit its parameters after verifying that trajectory
-outputs remain byte-identical.
-
-## 6. BEV Segmentation Loss
-
-### 6.1 Validity
-
-For sample `b`, pixel `p`, and target channel `c`, supervision is valid only
-when:
-
-```text
-map_valid[b]
-and map_layer_valid[b, c]
-and map_context[b, KNOWN_MAP_AREA, p] == 1
-```
-
-`map_layer_valid` is derived from `NavigationMap.layer_availability` and packed
-as training metadata. An unavailable layer is ignored, not treated as an
-all-negative label.
-
-### 6.2 Loss definition
-
-The segmentation loss combines masked weighted BCE and soft Dice:
-
-```text
-L_bev = 0.5 * L_masked_bce + 0.5 * L_masked_dice
-```
-
-Per-channel positive weights are measured only on the frozen training split,
-clipped to `[1, 20]`, frozen in a versioned JSON artifact, and recorded in the
-checkpoint. Validation samples never contribute to class-weight estimation.
-
-Dice is computed per sample and channel, then averaged only over valid
-sample-channel pairs. Empty valid target channels contribute BCE but are
-excluded from Dice to avoid an unstable empty-set score.
-
-### 6.3 Metrics
-
-Validation reports per-channel and macro:
-
-- IoU at threshold `0.5`;
-- Dice;
-- precision and recall;
-- valid pixel and positive pixel counts.
-
-Metrics are computed from `image_bev` logits, never navigation-fused features.
-
-## 7. Long-Horizon Imitation Loss
-
-### 7.1 New KITScenes policy
+### 6.1 New KITScenes policy
 
 The combined objective changes KITScenes only:
 
@@ -331,9 +215,9 @@ instead of:
 Mean-one normalization keeps the average trajectory-loss scale constant when
 changing the temporal distribution. Without normalization, changing `0.95` to
 `0.99` also changes the trajectory loss's scale relative to JEPA, Reasoning,
-and the new auxiliary losses.
+and the route auxiliary loss.
 
-### 7.2 Signal normalization
+### 6.2 Signal normalization
 
 The existing KITScenes signal scales remain:
 
@@ -345,7 +229,7 @@ curvature_scale = 0.0350
 Long-horizon weighting does not change the control units, Smooth L1 definition,
 or output shape.
 
-### 7.3 Configuration and compatibility
+### 6.3 Configuration and compatibility
 
 Temporal decay and normalization mode are checkpoint-defining configuration.
 An objective-v1 checkpoint cannot resume from the current `0.95`,
@@ -355,15 +239,15 @@ initialization with the same seed and frozen data split.
 The implementation supports `0.99` and `1.0`, but the first combined run uses
 `0.99`. Uniform `1.0` remains a later ablation.
 
-## 8. Junction-Aware Training Resampling
+## 7. Junction-Aware Training Resampling
 
-### 8.1 Scope
+### 7.1 Scope
 
 Resampling applies only to the training iterator. Validation remains one
 exposure per unique sample in the frozen scene-level split. Evaluation rejects
 duplicate validation `sample_uid` values as it does today.
 
-### 8.2 Deterministic exposure policy
+### 7.2 Deterministic exposure policy
 
 The initial maximum repeat count is four:
 
@@ -379,7 +263,7 @@ repeated four times, not eight.
 The route maneuver is the existing 100 m selected-route lookahead label. It is
 route-derived and does not inspect the future ego trajectory.
 
-### 8.3 WebDataset placement
+### 7.3 WebDataset placement
 
 The repeat transform operates on raw WebDataset samples:
 
@@ -399,7 +283,7 @@ split members and keeps each repeated sample subject to the epoch shuffle.
 The transform is a picklable generator, not a lambda. It must work with the
 existing worker and bounded multi-loader lifecycle.
 
-### 8.4 Reproducibility
+### 7.4 Reproducibility
 
 The following values are logged for every epoch:
 
@@ -412,7 +296,7 @@ The following values are logged for every epoch:
 With the same dataset, split, policy, and epoch seed, the exposure digest must
 be identical.
 
-### 8.5 Bias controls
+### 7.5 Bias controls
 
 Resampling changes the optimization distribution, not the benchmark
 distribution. Aggregate metrics therefore continue to use the original
@@ -422,9 +306,9 @@ No inverse-frequency weighting is applied on top of deterministic repetition in
 the initial implementation. Combining both would make the effective objective
 harder to audit.
 
-## 9. Route-Supervision Artifact
+## 8. Route-Supervision Artifact
 
-### 9.1 Why an additional target is required
+### 8.1 Why an additional target is required
 
 Sampling a binary corridor with `grid_sample` gives useful gradients only near
 mask edges. It gives no direction toward the route when a predicted point is
@@ -435,7 +319,7 @@ Map traffic-direction channels are not sufficient for route supervision at
 intersections because they describe all mapped lanes, not only the selected
 lane sequence.
 
-### 9.2 Packed training target
+### 8.2 Packed training target
 
 KITScenes preprocessing adds a loss-only member:
 
@@ -459,7 +343,7 @@ unambiguous.
 
 For `route_valid=false`, all fields are zero and all validity fields are false.
 
-### 9.3 Production input remains unchanged
+### 8.3 Production input remains unchanged
 
 `route_supervision.npz` is decoded into the training batch but is never passed
 to `AutoE2E.forward`. The runtime model continues to receive only the binary
@@ -469,7 +353,7 @@ Adding this member creates a new packed training-contract version. Existing
 navigation scene artifacts can be deterministically repacked without rerunning
 source ingest, Lanelet2 matching, or the Cosmos teacher.
 
-## 10. Differentiable Control Integration
+## 9. Differentiable Control Integration
 
 The route loss converts predicted controls into ego-FLU positions with a Torch
 implementation matching `evaluation.metrics.integrate_trajectory`:
@@ -493,9 +377,9 @@ Out-of-bounds positions receive an explicit differentiable distance-to-bounds
 penalty; zero padding must not make leaving the raster look like zero route
 distance.
 
-## 11. Route Consistency Loss
+## 10. Route Consistency Loss
 
-### 11.1 Eligibility
+### 10.1 Eligibility
 
 The route loss is active only when:
 
@@ -509,7 +393,7 @@ the model away from the demonstrated behavior. It uses the target only as a
 train-time loss mask and is never a model input. Eligibility and rejection
 counts are logged.
 
-### 11.2 Terms
+### 10.2 Terms
 
 Let `p_t` and `theta_t` be integrated predicted positions and headings.
 
@@ -571,7 +455,7 @@ L_heading = mean(
 It is active only where route heading is valid and predicted speed is at least
 `1 m/s`. This avoids assigning unstable heading penalties while stationary.
 
-### 11.3 Combined route term
+### 10.3 Combined route term
 
 The normalized initial route term is:
 
@@ -586,14 +470,13 @@ L_route =
 Each term averages only over eligible samples and returns differentiable zero
 when its eligible set is empty. Empty eligibility must not produce NaN.
 
-## 12. Total Training Objective
+## 11. Total Training Objective
 
 The complete objective is:
 
 ```text
 L_total =
     L_trajectory
-  + lambda_bev       * L_bev
   + lambda_route     * L_route
   + lambda_jepa      * L_jepa
   + lambda_reasoning * L_reasoning
@@ -603,38 +486,34 @@ Initial weights:
 
 | Weight | Value |
 |---|---:|
-| `lambda_bev` | 0.10 |
 | `lambda_route` | 0.10 |
 | `lambda_jepa` | 1.00 |
 | `lambda_reasoning` | 0.05 |
 
 The existing JEPA and Reasoning values remain unchanged.
 
-### 12.1 Gradient budget gate
+### 11.1 Gradient budget gate
 
 Numeric weights alone do not guarantee balanced gradients. Before a full run,
 the training smoke test computes per-loss gradient norms on one fixed batch:
 
 - `L_trajectory` into the planner and camera backbone;
 - `L_route` into the planner;
-- `L_bev` into the camera backbone and FeatureFusion.
 
-Neither auxiliary term may exceed the relevant trajectory gradient norm by
-more than `2x` on the fixed smoke batch. If it does, its lambda is reduced and
-the frozen config is updated before the full run. This is a stability gate, not
-an automatic per-step gradient-balancing algorithm.
+`L_route` may not exceed the relevant trajectory gradient norm by more than
+`2x` on the fixed smoke batch. If it does, its lambda is reduced and the frozen
+config is updated before the full run. This is a stability gate, not an
+automatic per-step gradient-balancing algorithm.
 
-### 12.2 No silent loss activation
+### 11.2 No silent loss activation
 
-Every auxiliary has both an enable flag and a positive weight. Invalid
+The route auxiliary has both an enable flag and a positive weight. Invalid
 combinations fail:
 
-- enabled BEV loss with `lambda_bev <= 0`;
 - enabled route loss with `lambda_route <= 0`;
-- route loss on a dataset without the supervision contract;
-- segmentation head channels that differ from the frozen target list.
+- route loss on a dataset without the supervision contract.
 
-## 13. Configuration and Checkpoint Contract
+## 12. Configuration and Checkpoint Contract
 
 The following fields are checkpoint-defining:
 
@@ -644,13 +523,6 @@ training_objective_version = "kitscenes_navigation_objective_v1"
 trajectory:
   temporal_decay: 0.99
   temporal_weight_normalization: mean_one
-
-bev_segmentation:
-  enabled: true
-  target_channels: [0, 1, 2, 3, 4, 5]
-  loss: bce_dice
-  weight: 0.10
-  class_weight_artifact_sha256: ...
 
 junction_sampling:
   enabled: true
@@ -676,12 +548,11 @@ MLflow records every field above plus:
 - effective exposure digest per epoch;
 - each unweighted and weighted loss term;
 - each auxiliary gradient probe;
-- route-loss eligible sample counts;
-- segmentation valid-pixel counts.
+- route-loss eligible sample counts.
 
-## 14. Training and Evaluation Procedure
+## 13. Training and Evaluation Procedure
 
-### 14.1 Fresh training
+### 13.1 Fresh training
 
 The objective-v1 experiment starts from a fresh initialization. It uses:
 
@@ -697,25 +568,25 @@ Early stopping remains unchanged in the first comparison so the training
 objective is not confounded with a new checkpoint-selection rule. All epoch
 checkpoints and route metrics remain available for post-training analysis.
 
-### 14.2 Required runs
+### 13.2 Required runs
 
 The minimum full comparison is:
 
-| Run | BEV seg | Decay | Sampling | Route loss | Route input |
-|---|---:|---:|---:|---:|---:|
-| Existing controlled route run | off | 0.95 | uniform | off | on |
-| Objective-v1 combined | on | 0.99 | aware | on | on |
-| Objective-v1 no-route control | on | 0.99 | aware | off | off |
+| Run | Decay | Sampling | Route loss | Route input |
+|---|---:|---:|---:|---:|
+| Existing controlled route run | 0.95 | uniform | off | on |
+| Objective-v1 combined | 0.99 | aware | on | on |
+| Objective-v1 no-route control | 0.99 | aware | off | off |
 
-The no-route control keeps BEV supervision, long-horizon weighting, and the
-same training exposure distribution. It isolates the contribution of route
-input plus route consistency from the general training improvements.
+The no-route control keeps long-horizon weighting and the same training
+exposure distribution. It isolates the contribution of route input plus route
+consistency from the general training improvements.
 
 The implementation also supports leave-one-component-out runs without code
 changes. Full leave-one-out training is required only if the combined result is
 ambiguous or regresses.
 
-### 14.3 Metrics
+### 13.3 Metrics
 
 Retain all existing metrics and add:
 
@@ -726,14 +597,13 @@ Retain all existing metrics and add:
 - selected-route compliance and outside distance;
 - destination-approach error;
 - route-swap counterfactual response;
-- six-channel camera-only BEV IoU/Dice;
 - effective train exposure distribution;
 - each route-loss term and eligibility rate.
 
 Aggregate metrics use the original validation distribution. Oversampled
 training metrics are never presented as benchmark metrics.
 
-### 14.4 Success criteria
+### 13.4 Success criteria
 
 The combined objective is useful when:
 
@@ -742,20 +612,17 @@ The combined objective is useful when:
 2. junction FDE or wrong-branch rate improves with a paired bootstrap 95%
    confidence interval excluding zero;
 3. route-swap counterfactuals change the prediction in the selected direction;
-4. camera-only BEV macro IoU is above the all-background baseline;
-5. lane-follow performance remains valid when route input is disabled;
-6. all auxiliary branches show non-zero intended gradients and zero forbidden
+4. lane-follow performance remains valid when route input is disabled;
+5. the route auxiliary shows non-zero intended gradients and zero forbidden
    gradients.
 
 The exact metric values and confidence intervals are reported even when the
 hypothesis is not supported.
 
-## 15. Failure Semantics
+## 14. Failure Semantics
 
 | Condition | Behavior |
 |---|---|
-| `map_valid=false` | Skip BEV segmentation for that sample |
-| Semantic layer unavailable | Mask that channel, do not create negative labels |
 | `route_valid=false` | Skip route loss and use repeat count 1 |
 | Missing route-supervision member with route loss enabled | Fail before optimizer creation |
 | Target route compliance below 90% | Skip route loss for that sample and count rejection |
@@ -766,62 +633,54 @@ hypothesis is not supported.
 | Route heading invalid or predicted speed below 1 m/s | Skip heading term |
 | Non-finite auxiliary loss or metric | Fail before checkpoint upload |
 
-## 16. Implementation Boundaries
+## 15. Implementation Boundaries
 
-### 16.1 Model
+### 15.1 Model
 
-- Add a train-only `BEVSegmentationHead`.
-- Return its logits through the existing auxiliary-output dictionary.
 - Do not modify the Reasoning input contract.
 - Keep the shared map/route navigation encoder for this experiment.
 
-### 16.2 Data
+### 15.2 Data
 
-- Add layer-valid metadata.
 - Add `route_supervision.npz`.
 - Add deterministic raw-sample repeat transform.
 - Repack from existing immutable scene navigation and reasoning artifacts.
 
-### 16.3 Training
+### 15.3 Training
 
 - Add mean-normalized temporal weighting.
-- Add masked BCE/Dice loss.
 - Add Torch control integration and route consistency loss.
 - Record all objective settings in checkpoint and MLflow provenance.
 
-### 16.4 Evaluation
+### 15.4 Evaluation
 
-- Add camera-only BEV metrics.
 - Reuse existing route/junction and counterfactual metrics.
 - Keep unique, unmodified validation samples.
 
-## 17. Staged Implementation
+## 16. Staged Implementation
 
 1. Loss and integrator primitives:
    mean-normalized trajectory weights, differentiable control integration, and
    route-loss unit tests.
-2. BEV head:
-   camera-only branch, masked BCE/Dice, auxiliary-output contract, and gradient
-   isolation.
-3. Data contract:
-   route-supervision artifact, layer validity, deterministic repack, and golden
+2. Data contract:
+   route-supervision artifact, deterministic repack, and golden
    fixtures.
-4. Sampling:
+3. Sampling:
    pre-decode repeat transform, exposure audit, and worker determinism tests.
-5. Flyte integration:
+4. Flyte integration:
    config, checkpoint compatibility, MLflow metrics, and recovery workflow.
-6. Smoke:
+5. Smoke:
    small KITScenes subset forward/backward, gradient budget, checkpoint/resume,
    and one-epoch metric publication.
-7. Full training:
+6. Full training:
    combined objective and matched no-route control.
 
 Each stage is independently testable. The full run is not launched until the
 fixed smoke batch passes the gradient budget and no-forbidden-gradient checks.
 
-## 18. Test Plan
+## 17. Test Plan
 
-### 18.1 Unit tests
+### 17.1 Unit tests
 
 - `0.99` mean-normalized weights have mean one and final/first ratio
   `0.99^63`.
@@ -833,11 +692,9 @@ fixed smoke batch passes the gradient budget and no-forbidden-gradient checks.
 - The destination hinge does not reward passing the target terminal progress.
 - Stationary samples do not receive route-heading loss.
 - Empty valid sets return differentiable zero.
-- BCE/Dice masks invalid maps, pixels, and unavailable channels.
-- BEV segmentation gradients do not enter navigation or planner parameters.
 - Repeat counts and exposure digests match the frozen policy.
 
-### 18.2 Data tests
+### 17.2 Data tests
 
 - The route-supervision artifact is deterministic and lossless.
 - Distance is zero inside the corridor and positive outside.
@@ -846,83 +703,72 @@ fixed smoke batch passes the gradient budget and no-forbidden-gradient checks.
 - No future ego trajectory is serialized in route supervision.
 - Repack preserves the frozen sample UID and validation group inventories.
 
-### 18.3 Integration tests
+### 17.3 Integration tests
 
 - Objective-v1 performs a complete optimizer step with all losses enabled.
 - Every intended branch receives a finite non-zero gradient.
-- A no-route batch skips route loss but still trains trajectory and BEV losses.
+- A no-route batch skips route loss but still trains trajectory loss.
 - Resume succeeds only with an identical objective config.
 - Validation sample count and UID digest match the frozen manifest.
 - MLflow receives all component losses and exposure metrics.
 
-### 18.4 GPU smoke
+### 17.4 GPU smoke
 
 - One epoch on a small KITScenes subset.
 - No OOM, NaN, skipped optimizer steps, or DataLoader worker leaks.
-- Segmentation and route losses decrease on an overfit micro-batch.
+- Route loss decreases on an overfit micro-batch.
 - Route-conditioned predictions change under a route swap.
-- Inference output and latency are unchanged when the training-only head is
-  disabled.
 
-## 19. Rejected Alternatives
+## 18. Rejected Alternatives
 
-### 19.1 Segmentation after map fusion
-
-Rejected because the model can copy `map_context`, producing a misleadingly
-good auxiliary metric without improving camera features.
-
-### 19.2 Binary-mask-only route sampling
+### 18.1 Binary-mask-only route sampling
 
 Rejected as the sole route loss because gradients vanish when predicted points
 are far from the route corridor.
 
-### 19.3 Absolute destination terminal loss
+### 18.2 Absolute destination terminal loss
 
 Rejected because a visible destination may be beyond the 6.4-second reachable
 horizon and can reward unsafe acceleration.
 
-### 19.4 Validation oversampling
+### 18.3 Validation oversampling
 
 Rejected because it changes benchmark semantics and invalidates aggregate
 metric comparison.
 
-### 19.5 Automatic adaptive loss balancing
+### 18.4 Automatic adaptive loss balancing
 
 Deferred. It adds another stateful optimization algorithm and complicates
 checkpoint reproducibility. The initial implementation uses fixed weights and a
 pre-run gradient budget.
 
-### 19.6 Route input to Reasoning
+### 18.5 Route input to Reasoning
 
 Rejected for this objective version. The initial #149 boundary remains
 Reactive-only.
 
-## 20. Acceptance Criteria
+## 19. Acceptance Criteria
 
 The design is implemented when:
 
-1. all four components are independently configurable and jointly trainable;
-2. BEV segmentation reads camera-only BEV features;
-3. long-horizon weights are KITScenes-specific and mean-normalized;
-4. training exposure is deterministic and validation remains unchanged;
-5. route supervision contains no exact future ego trajectory and is never a
+1. all three components are independently configurable and jointly trainable;
+2. long-horizon weights are KITScenes-specific and mean-normalized;
+3. training exposure is deterministic and validation remains unchanged;
+4. route supervision contains no exact future ego trajectory and is never a
    model input;
-6. route loss is differentiable, validity-gated, and coordinate-tested;
-7. checkpoint resume rejects objective mismatches;
-8. focused unit and integration tests pass;
-9. a Flyte smoke completes with finite losses and intended gradients;
-10. the combined and no-route-control full runs are evaluated on the frozen
-    KITScenes benchmark and navigation slices.
+5. route loss is differentiable, validity-gated, and coordinate-tested;
+6. checkpoint resume rejects objective mismatches;
+7. focused unit and integration tests pass;
+8. a Flyte smoke completes with finite losses and intended gradients;
+9. the combined and no-route-control full runs are evaluated on the frozen
+   KITScenes benchmark and navigation slices.
 
-## 21. References
+## 20. References
 
 - AutoE2E navigation input design:
   `Docs/navigation_input_design.md`.
 - AutoE2E [#149](https://github.com/autowarefoundation/auto_e2e/issues/149).
+- AutoE2E [#17](https://github.com/autowarefoundation/auto_e2e/issues/17).
+- [PandaSet](https://pandaset.org/), provided by Hesai and Scale AI.
 - Bansal et al., [ChauffeurNet: Learning to Drive by Imitating the Best and
   Synthesizing the Worst](https://arxiv.org/abs/1812.03079).
-- Philion and Fidler, [Lift, Splat, Shoot: Encoding Images From Arbitrary Camera
-  Rigs by Implicitly Unprojecting to 3D](https://arxiv.org/abs/2008.05711).
-- Li et al., [BEVFormer: Learning Bird's-Eye-View Representation from
-  Multi-Camera Images via Spatiotemporal
-  Transformers](https://arxiv.org/abs/2203.17270).
