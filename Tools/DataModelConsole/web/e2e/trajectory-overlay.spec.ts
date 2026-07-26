@@ -2,6 +2,11 @@ import { createHash } from "node:crypto";
 
 import { expect, test } from "@playwright/test";
 
+import {
+  bevHeatmapForRow,
+  parseOverlay,
+} from "../src/lib/overlay";
+
 const MODEL_ID = "a".repeat(64);
 const SAMPLE_UIDS = [
   "kitscenes-v1-scene-0042-f000064",
@@ -42,7 +47,7 @@ function uidHash(uid: string): bigint {
   return createHash("sha256").update(uid).digest().readBigUInt64LE(0);
 }
 
-function overlayBody(): Buffer {
+function overlayBody(formatVersion: 2 | 3 | 4 = 4): Buffer {
   const sampleCount = SAMPLE_UIDS.length;
   const seedCount = 3;
   const horizon = 64;
@@ -50,8 +55,10 @@ function overlayBody(): Buffer {
   const seedsBytes = seedCount * 8;
   const directoryBytes = sampleCount * 12;
   const controlsBytes = sampleCount * seedCount * horizon * 2 * 4;
-  const heatmapCount = 6;
-  const heatmapScalesBytes = sampleCount * heatmapCount * 4;
+  const heatmapCount = formatVersion === 2 ? 3 : 6;
+  const heatmapScaleCount =
+    sampleCount * (formatVersion === 4 ? heatmapCount : 1);
+  const heatmapScalesBytes = heatmapScaleCount * 4;
   const heatmapBytes = sampleCount * heatmapCount * 32 * 32;
   const body = Buffer.alloc(
     headerBytes +
@@ -63,7 +70,7 @@ function overlayBody(): Buffer {
       heatmapBytes,
   );
   body.write("AOVL", 0, "ascii");
-  body.writeUInt16LE(4, 4);
+  body.writeUInt16LE(formatVersion, 4);
   body.writeUInt16LE(0, 6);
   body.writeUInt32LE(sampleCount, 8);
   body.writeUInt16LE(seedCount, 12);
@@ -105,11 +112,16 @@ function overlayBody(): Buffer {
   const scalesOffset = speedsOffset + sampleCount * 4;
   const heatmapsOffset = scalesOffset + heatmapScalesBytes;
   for (let row = 0; row < sampleCount; row++) {
+    if (formatVersion < 4) {
+      body.writeFloatLE((row + 1) * 10, scalesOffset + row * 4);
+    }
     for (let branch = 0; branch < heatmapCount; branch++) {
-      body.writeFloatLE(
-        (row + 1) * (branch + 1),
-        scalesOffset + (row * heatmapCount + branch) * 4,
-      );
+      if (formatVersion === 4) {
+        body.writeFloatLE(
+          (row + 1) * (branch + 1),
+          scalesOffset + (row * heatmapCount + branch) * 4,
+        );
+      }
       for (let pixel = 0; pixel < 32 * 32; pixel++) {
         const x = pixel % 32;
         const y = Math.floor(pixel / 32);
@@ -132,6 +144,35 @@ function overlayBody(): Buffer {
   }
   return body;
 }
+
+test("legacy overlays use one shared heatmap scale per sample", () => {
+  for (const version of [2, 3] as const) {
+    const body = overlayBody(version);
+    const buffer = body.buffer.slice(
+      body.byteOffset,
+      body.byteOffset + body.byteLength,
+    ) as ArrayBuffer;
+    const overlay = parseOverlay(buffer);
+    const expectedNames =
+      version === 2
+        ? ["image", "navigation", "fused"]
+        : [
+            "image",
+            "map",
+            "route_delta",
+            "navigation",
+            "fusion_delta",
+            "fused",
+          ];
+
+    expect(overlay.bevHeatmapNames).toEqual(expectedNames);
+    expect(overlay.bevHeatmapScales?.length).toBe(SAMPLE_UIDS.length);
+    for (const name of overlay.bevHeatmapNames) {
+      expect(bevHeatmapForRow(overlay, 0, name)?.scale).toBe(10);
+      expect(bevHeatmapForRow(overlay, 1, name)?.scale).toBe(20);
+    }
+  }
+});
 
 function episodePath(): Buffer {
   const body = Buffer.alloc(80 * 32);
