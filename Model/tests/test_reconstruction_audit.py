@@ -1,11 +1,17 @@
 """Tests for the pose-grounded target rollout reconstruction audit."""
 
+import io
+import json
+import tarfile
+
 import numpy as np
 import pytest
 
+from data_processing.geospatial import encode_gps_future, encode_pose
 from evaluation.reconstruction_audit import (
     AUDIT_SCHEMA_VERSION,
     audit_target_rollout_reconstruction,
+    load_packed_reconstruction_inputs,
 )
 
 
@@ -84,4 +90,116 @@ def test_reconstruction_audit_rejects_duplicate_sample_uid():
             speeds,
             ["duplicate", "duplicate", "sample"],
             group_uids,
+        )
+
+
+def _add_tar_member(
+    archive: tarfile.TarFile,
+    name: str,
+    payload: bytes,
+) -> None:
+    info = tarfile.TarInfo(name)
+    info.size = len(payload)
+    archive.addfile(info, io.BytesIO(payload))
+
+
+def _write_packed_sample(
+    archive: tarfile.TarFile,
+    *,
+    sample_uid: str,
+    group_uid: str,
+    speed_mps: float,
+    include_gps: bool = True,
+) -> None:
+    history = np.zeros((64, 4), dtype="<f4")
+    history[-1, 0] = speed_mps
+    controls = np.zeros((64, 2), dtype="<f4")
+    controls[:, 0] = 0.25
+    ego = np.concatenate([history.ravel(), controls.ravel()]).tobytes()
+    latitude = 49.0 + speed_mps * 1e-5
+    longitude = 8.4
+    gps = np.tile(
+        np.asarray([[latitude, longitude]], dtype=np.float64),
+        (65, 1),
+    )
+    metadata = json.dumps(
+        {
+            "sample_uid": sample_uid,
+            "split_group_uid": group_uid,
+        }
+    ).encode("ascii")
+    pose = encode_pose(
+        {
+            "latitude_deg": latitude,
+            "longitude_deg": longitude,
+            "heading_deg_cw_from_north": 90.0,
+            "timestamp_ns": 123,
+            "gps_accuracy_m": 0.5,
+        }
+    )
+    members = {
+        "cam_0.jpg": b"not-decoded",
+        "ego.npy": ego,
+        "meta.json": metadata,
+        "pose.npy": pose,
+    }
+    if include_gps:
+        members["gps.npy"] = encode_gps_future(gps)
+    for suffix, payload in members.items():
+        _add_tar_member(archive, f"{sample_uid}.{suffix}", payload)
+
+
+def test_packed_loader_reads_only_selected_validation_groups(tmp_path):
+    tar_path = tmp_path / "samples.tar"
+    with tarfile.open(tar_path, "w") as archive:
+        _write_packed_sample(
+            archive,
+            sample_uid="sample-z",
+            group_uid="scene-train",
+            speed_mps=9.0,
+        )
+        _write_packed_sample(
+            archive,
+            sample_uid="sample-b",
+            group_uid="scene-val",
+            speed_mps=4.0,
+        )
+        _write_packed_sample(
+            archive,
+            sample_uid="sample-a",
+            group_uid="scene-val",
+            speed_mps=2.0,
+        )
+
+    inputs = load_packed_reconstruction_inputs(
+        [tmp_path],
+        validation_group_uids=["scene-val"],
+    )
+
+    assert inputs.sample_uids == ("sample-a", "sample-b")
+    assert inputs.split_group_uids == ("scene-val", "scene-val")
+    np.testing.assert_array_equal(
+        inputs.initial_speeds_mps,
+        np.asarray([2.0, 4.0], dtype=np.float32),
+    )
+    assert inputs.target_controls.shape == (2, 64, 2)
+    assert inputs.logged_gps.shape == (2, 65, 2)
+    assert inputs.current_poses.shape == (2, 3)
+
+
+def test_packed_loader_rejects_missing_selected_member(tmp_path):
+    tar_path = tmp_path / "samples.tar"
+    with tarfile.open(tar_path, "w") as archive:
+        _write_packed_sample(
+            archive,
+            sample_uid="sample-a",
+            group_uid="scene-val",
+            speed_mps=2.0,
+            include_gps=False,
+        )
+
+    with pytest.raises(ValueError, match="audit members"):
+        load_packed_reconstruction_inputs(
+            [tmp_path],
+            validation_group_uids=["scene-val"],
         )
