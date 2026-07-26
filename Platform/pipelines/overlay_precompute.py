@@ -31,6 +31,35 @@ def _channel_rms(features: torch.Tensor) -> np.ndarray:
     return channel_rms.numpy()
 
 
+def _spatial_feature_deviation(
+    features: torch.Tensor,
+    *,
+    preserve_zero_cells: bool = False,
+) -> np.ndarray:
+    if preserve_zero_cells:
+        valid = torch.linalg.vector_norm(features, ord=2, dim=1) > 0
+    else:
+        valid = torch.ones(
+            features.shape[0],
+            features.shape[2],
+            features.shape[3],
+            dtype=torch.bool,
+            device=features.device,
+        )
+    weights = valid[:, None].to(features.dtype)
+    spatial_mean = (features * weights).sum(dim=(2, 3), keepdim=True)
+    spatial_mean = spatial_mean / weights.sum(
+        dim=(2, 3),
+        keepdim=True,
+    ).clamp(min=1.0)
+    deviation = torch.linalg.vector_norm(
+        features - spatial_mean,
+        ord=2,
+        dim=1,
+    ) / float(features.shape[1]) ** 0.5
+    return (deviation * valid).numpy()
+
+
 class _BEVActivationRecorder:
     def __init__(self, model: torch.nn.Module):
         try:
@@ -119,16 +148,21 @@ class _BEVActivationRecorder:
         ):
             raise RuntimeError("BEV diagnostic feature shapes differ")
         views = {
-            "image": _channel_rms(image_features),
-            "map": _channel_rms(map_features),
+            "image": _spatial_feature_deviation(
+                image_features,
+                preserve_zero_cells=True,
+            ),
+            "map": _spatial_feature_deviation(map_features),
             "route_delta": _channel_rms(
                 navigation_features - map_features
             ),
-            "navigation": _channel_rms(navigation_features),
+            "navigation": _spatial_feature_deviation(
+                navigation_features
+            ),
             "fusion_delta": _channel_rms(
                 fused_features - image_features
             ),
-            "fused": _channel_rms(fused_features),
+            "fused": _spatial_feature_deviation(fused_features),
         }
         heatmaps = np.stack(
             [views[name] for name in BEV_HEATMAP_NAMES],
