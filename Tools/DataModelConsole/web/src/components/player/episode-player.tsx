@@ -766,8 +766,6 @@ export function EpisodePlayer({
         </div>
       </div>
 
-      <BEVActivationHeatmap overlay={overlay} row={overlayRow} />
-
       <SceneMap
         dataset={dataset}
         version={version}
@@ -981,6 +979,8 @@ export function EpisodePlayer({
           </p>
         )}
       </div>
+
+      <BEVActivationHeatmap overlay={overlay} row={overlayRow} />
     </div>
   );
 }
