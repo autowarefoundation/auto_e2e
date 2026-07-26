@@ -39,10 +39,10 @@ func TestRunStatsSelectsLatestFiniteADE(t *testing.T) {
 			_, _ = w.Write([]byte(`{"experiments":[{"experiment_id":"1"}]}`))
 		case "/api/2.0/mlflow/runs/search":
 			_, _ = w.Write([]byte(`{"runs":[
-				{"info":{"run_id":"newest"},"data":{"metrics":[{"key":"eval/ade","value":"NaN"}]}},
-				{"info":{"run_id":"next"},"data":{"metrics":[{"key":"eval/ade","value":"Infinity"}]}},
-				{"info":{"run_id":"broken"},"data":{"metrics":[{"key":"eval/ade","value":"not-a-number"}]}},
-				{"info":{"run_id":"finite"},"data":{"metrics":[{"key":"eval/ade","value":1.25}]}}
+				{"info":{"run_id":"newest"},"data":{"params":[{"key":"data/dataset","value":"dataset"}],"metrics":[{"key":"eval/ade","value":"NaN"}]}},
+				{"info":{"run_id":"next"},"data":{"params":[{"key":"data/dataset","value":"dataset"}],"metrics":[{"key":"eval/ade","value":"Infinity"}]}},
+				{"info":{"run_id":"broken"},"data":{"params":[{"key":"data/dataset","value":"dataset"}],"metrics":[{"key":"eval/ade","value":"not-a-number"}]}},
+				{"info":{"run_id":"finite"},"data":{"params":[{"key":"data/dataset","value":"dataset"}],"metrics":[{"key":"eval/ade","value":1.25}]}}
 			]}`))
 		default:
 			http.NotFound(w, r)
@@ -304,7 +304,12 @@ func rawRunForTest(runID string, ade any) map[string]any {
 	}
 	return map[string]any{
 		"info": map[string]any{"run_id": runID},
-		"data": map[string]any{"metrics": metrics},
+		"data": map[string]any{
+			"params": []map[string]string{
+				{"key": "data/dataset", "value": "dataset"},
+			},
+			"metrics": metrics,
+		},
 	}
 }
 
