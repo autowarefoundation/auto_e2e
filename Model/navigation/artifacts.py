@@ -78,9 +78,12 @@ def _encode_named_arrays(arrays: dict[str, np.ndarray]) -> bytes:
     ) as archive:
         for name, array in sorted(arrays.items()):
             array_buffer = io.BytesIO()
+            value = np.asarray(array)
+            if value.ndim > 0:
+                value = np.ascontiguousarray(value)
             np.save(
                 array_buffer,
-                np.ascontiguousarray(array),
+                value,
                 allow_pickle=False,
             )
             info = zipfile.ZipInfo(
