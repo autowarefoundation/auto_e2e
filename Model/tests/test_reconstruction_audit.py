@@ -117,6 +117,7 @@ def _write_packed_sample(
     group_uid: str,
     speed_mps: float,
     include_gps: bool = True,
+    include_metadata: bool = True,
 ) -> None:
     history = np.zeros((64, 4), dtype="<f4")
     history[-1, 0] = speed_mps
@@ -147,9 +148,10 @@ def _write_packed_sample(
     members = {
         "cam_0.jpg": b"not-decoded",
         "ego.npy": ego,
-        "meta.json": metadata,
         "pose.npy": pose,
     }
+    if include_metadata:
+        members["meta.json"] = metadata
     if include_gps:
         members["gps.npy"] = encode_gps_future(gps)
     for suffix, payload in members.items():
@@ -226,3 +228,18 @@ def test_packed_loader_rejects_missing_selected_member(tmp_path):
             [tmp_path],
             validation_group_uids=["scene-val"],
         )
+
+
+def test_packed_loader_rejects_missing_metadata(tmp_path):
+    tar_path = tmp_path / "samples.tar"
+    with tarfile.open(tar_path, "w") as archive:
+        _write_packed_sample(
+            archive,
+            sample_uid="sample-a",
+            group_uid="scene-val",
+            speed_mps=2.0,
+            include_metadata=False,
+        )
+
+    with pytest.raises(ValueError, match="missing audit metadata"):
+        load_packed_reconstruction_inputs([tmp_path])
