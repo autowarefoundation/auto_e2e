@@ -8,7 +8,9 @@ version: 0.2
 # Optional:
 #   RECOVERY_MANIFEST_URI, IMAGE_TAG, EPOCHS, TRAINING_SEED,
 #   MAX_PARTITIONS, VALIDATION_SCOPE, ENABLE_ROUTE_CONDITIONING,
-#   ENABLE_JUNCTION_SAMPLING, ENABLE_ROUTE_CONSISTENCY, RESUME_FROM
+#   ENABLE_JUNCTION_SAMPLING, ENABLE_ROUTE_CONSISTENCY,
+#   RECONSTRUCTION_AUDIT_URI, RECONSTRUCTION_AUDIT_DECISION,
+#   RECONSTRUCTION_AUDIT_RATIONALE, RESUME_FROM
 
 env:
   shell: bash
@@ -32,6 +34,9 @@ env:
     ENABLE_JUNCTION_SAMPLING: "true"
     ENABLE_ROUTE_CONSISTENCY: "true"
     ROUTE_CONSISTENCY_WEIGHT: "0.10"
+    RECONSTRUCTION_AUDIT_URI: ""
+    RECONSTRUCTION_AUDIT_DECISION: ""
+    RECONSTRUCTION_AUDIT_RATIONALE: ""
     VAL_FRACTION: "0.1"
     VALIDATION_SCOPE: full
     NUM_WORKERS: "4"
@@ -140,6 +145,13 @@ phases:
         esac
         if [ -n "${RESUME_FROM}" ]; then
           RUN_ARGS+=(--resume_from "${RESUME_FROM}")
+        fi
+        if [ -n "${RECONSTRUCTION_AUDIT_URI}" ]; then
+          RUN_ARGS+=(
+            --reconstruction_audit "${RECONSTRUCTION_AUDIT_URI}"
+            --reconstruction_audit_decision "${RECONSTRUCTION_AUDIT_DECISION}"
+            --reconstruction_audit_rationale "${RECONSTRUCTION_AUDIT_RATIONALE}"
+          )
         fi
         pyflyte --config /tmp/flyte.yaml run --remote \
           --project "${FLYTE_PROJECT}" \
