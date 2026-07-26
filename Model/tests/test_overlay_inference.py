@@ -13,6 +13,8 @@ from Platform.pipelines.inference import (
     stable_seed64,
 )
 from Platform.pipelines.overlay_precompute import (
+    _BEVActivationRecorder,
+    _downsample_features,
     _spatial_feature_deviation,
     infer_loader_controls,
     infer_loader_overlay,
@@ -274,6 +276,33 @@ def test_spatial_feature_deviation_preserves_channel_direction_changes():
         heatmap,
         [[[1.0, 1.0], [0.0, 0.0]]],
     )
+
+
+def test_spatial_feature_deviation_uses_each_channel_spatial_mean():
+    features = torch.tensor(
+        [[[[1.0, 3.0], [5.0, 7.0]]]]
+    )
+
+    heatmap = _spatial_feature_deviation(features)
+
+    np.testing.assert_allclose(
+        heatmap,
+        [[[3.0, 1.0], [1.0, 3.0]]],
+    )
+
+
+def test_activation_recorder_rejects_incompatible_models_and_outputs():
+    with pytest.raises(ValueError, match="does not expose"):
+        _BEVActivationRecorder(torch.nn.Identity())
+    with pytest.raises(ValueError, match="must be a"):
+        _downsample_features(torch.zeros(1, 2, 3), "image")
+
+    recorder = _BEVActivationRecorder(_DiagnosticPolicy())
+    try:
+        with pytest.raises(RuntimeError, match="hooks did not run"):
+            recorder.take(_batch(1), 1)
+    finally:
+        recorder.close()
 
 
 def test_overlay_inference_applies_checkpoint_data_sanitization():
