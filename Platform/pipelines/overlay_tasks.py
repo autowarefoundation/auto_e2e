@@ -1175,11 +1175,13 @@ def precompute_overlay_partition(
     from data_parsing.pre_extracted import make_pre_extracted_loader
     from Platform.pipelines.inference import load_policy
     from Platform.pipelines.overlay import (
+        BEV_HEATMAP_NAMES,
+        BEV_HEATMAP_SIZE,
         overlay_s3_key,
         write_overlay,
     )
     from Platform.pipelines.overlay_precompute import (
-        infer_loader_controls,
+        infer_loader_overlay,
         planner_is_deterministic,
     )
     from Platform.pipelines.overlay_store import (
@@ -1311,6 +1313,8 @@ def precompute_overlay_partition(
                 )
                 object_identity = {
                     "base-seeds": ",".join(map(str, actual_seeds)),
+                    "bev-heatmap-names": ",".join(BEV_HEATMAP_NAMES),
+                    "bev-heatmap-size": str(BEV_HEATMAP_SIZE),
                     "cache-identity": cache_identity,
                     "dataset-manifest-digest": dataset_manifest_digest,
                     "model-artifact-id": model_artifact_id,
@@ -1359,7 +1363,8 @@ def precompute_overlay_partition(
                                 controls,
                                 v0,
                                 actual_seeds_tuple,
-                            ) = infer_loader_controls(
+                                bev_heatmaps,
+                            ) = infer_loader_overlay(
                                 model,
                                 loader,
                                 model_artifact_id=model_artifact_id,
@@ -1396,6 +1401,7 @@ def precompute_overlay_partition(
                         v0,
                         base_seeds=actual_seeds,
                         deterministic_planner=deterministic_planner,
+                        bev_heatmaps=bev_heatmaps,
                     )
                     artifact_sha = artifact.sha256
                     sample_count = artifact.sample_count
