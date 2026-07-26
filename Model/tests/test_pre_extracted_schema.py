@@ -61,6 +61,7 @@ def _navigation_members(
             "route_supervision_version": (
                 ROUTE_SUPERVISION_ARTIFACT_VERSION
             ),
+            "geometry_id": DEFAULT_NAVIGATION_GEOMETRY.geometry_id,
             "map_valid": map_valid,
             "route_valid": route_valid,
             **(extra_metadata or {}),
@@ -146,6 +147,18 @@ class TestDecodeSampleMapSplit:
             "distance_to_drivable_m"
         ].shape == (256, 256)
         assert out["route_supervision"]["destination_xy_m"].shape == (2,)
+
+    def test_navigation_geometry_must_match_model_contract(self):
+        sample = {
+            "cam_0.jpg": _jpeg_bytes((0, 0, 0)),
+            "ego.npy": _ego_bytes(),
+            **_navigation_members(extra_metadata={
+                "geometry_id": "different-256px-geometry",
+            }),
+        }
+
+        with pytest.raises(ValueError, match="geometry differs"):
+            _decode_sample(sample)
 
     def test_partial_navigation_member_set_is_rejected(self):
         sample = {
