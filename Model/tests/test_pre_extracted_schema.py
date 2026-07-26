@@ -142,6 +142,9 @@ class TestDecodeSampleMapSplit:
         assert out["route_supervision"][
             "distance_to_corridor_m"
         ].shape == (256, 256)
+        assert out["route_supervision"][
+            "distance_to_drivable_m"
+        ].shape == (256, 256)
         assert out["route_supervision"]["destination_xy_m"].shape == (2,)
 
     def test_partial_navigation_member_set_is_rejected(self):
