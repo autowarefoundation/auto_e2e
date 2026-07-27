@@ -47,8 +47,26 @@ from data_parsing.pre_extracted import (  # noqa: E402
 )
 
 
+
+
+class MockAutoE2EModel(torch.nn.Module):
+    def forward(self, tensors):
+        return {
+            "trajectory_points": torch.zeros((1, 64, 2)),
+            "headings": torch.zeros((1, 64))
+        }
+
+torch.serialization.add_safe_globals([MockAutoE2EModel])
+
+@pytest.fixture
+def dummy_checkpoint(tmp_path) -> str:
+    ckpt_path = tmp_path / "dummy_random.ckpt"
+    torch.save(MockAutoE2EModel(), ckpt_path)
+    return str(ckpt_path)
+
 @pytest.fixture
 def sample_rgb_images() -> Dict[str, Image.Image]:
+
     """Generate 7 synthetic PIL images for KitScenes camera topology.
 
     Returns a mapping from KitScenes camera names to 256x256 RGB images.
@@ -374,7 +392,7 @@ class TestEdgeCasesAndDiscrepancies:
 
         Passing inputs keyed by config camera names should successfully populate frames.
         """
-        config = AutoE2EAlpaSimConfig()
+        config = AutoE2EAlpaSimConfig(checkpoint_path='dummy_random.ckpt')
         config_cams = config.camera_names  # ['cam_front', 'cam_front_left', ...]
 
         assert list(config_cams) == list(PARSER_CAMERA_NAMES), (
@@ -425,14 +443,15 @@ class TestEdgeCasesAndDiscrepancies:
 class TestAlpasimDriverPlugin:
     """Verify AlpaSim driver plugin AutoE2EDriver interface and prediction return."""
 
-    def test_driver_plugin_initialization(self) -> None:
+    def test_driver_plugin_initialization(self, dummy_checkpoint: str) -> None:
         """Verify AutoE2EDriver initializes parser and device correctly."""
-        driver = AutoE2EDriver()
+        driver = AutoE2EDriver(model_checkpoint=dummy_checkpoint)
         assert isinstance(driver.parser, AlpasimStreamParser)
         assert isinstance(driver.device, torch.device)
 
     def test_driver_plugin_predict_happy_path(
-        self, sample_rgb_images: Dict[str, Image.Image]
+        self, sample_rgb_images: Dict[str, Image.Image],
+        dummy_checkpoint: str
     ) -> None:
         """Verify AutoE2EDriver.predict accepts PluginPredictionInput and returns ModelPrediction.
 
@@ -440,7 +459,7 @@ class TestAlpasimDriverPlugin:
           - ``trajectory_points``: numpy array of shape ``(64, 2)`` and float32.
           - ``headings``: numpy array of shape ``(64,)`` and float32.
         """
-        driver = AutoE2EDriver()
+        driver = AutoE2EDriver(model_checkpoint=dummy_checkpoint)
         pred_input = PluginPredictionInput(
             cameras=sample_rgb_images,
             speed=8.0,

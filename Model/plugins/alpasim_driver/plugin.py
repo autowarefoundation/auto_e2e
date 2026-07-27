@@ -36,14 +36,15 @@ logger = logging.getLogger(__name__)
 class AutoE2EDriver(BaseTrajectoryModel):
     """AutoE2E driver plugin for AlpaSim."""
 
-    def __init__(self, model_checkpoint: Optional[str] = None, **kwargs: Any) -> None:
+    def __init__(self, model_checkpoint: str, **kwargs: Any) -> None:
         super().__init__(**kwargs)
+        if not model_checkpoint:
+            raise ValueError("A valid model_checkpoint path must be provided to AutoE2EDriver.")
+        
         self.parser = AlpasimStreamParser()
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.model = None
-        if model_checkpoint is not None:
-            self.model = torch.load(model_checkpoint, map_location=self.device)
-            self.model.eval()
+        self.model = torch.load(model_checkpoint, map_location=self.device)
+        self.model.eval()
 
     def predict(self, input_data: PredictionInput) -> ModelPrediction:
         """Process real-time PredictionInput to ModelPrediction.
@@ -63,14 +64,10 @@ class AutoE2EDriver(BaseTrajectoryModel):
         tensors = self.parser.parse_observation(input_dict)
         tensors = {k: v.to(self.device) for k, v in tensors.items()}
         
-        if self.model is None:
-            points = np.zeros((64, 2), dtype=np.float32)
-            headings = np.zeros(64, dtype=np.float32)
-        else:
-            with torch.no_grad():
-                outputs = self.model(tensors)
-                points = outputs["trajectory_points"][0].cpu().numpy()
-                headings = outputs["headings"][0].cpu().numpy()
+        with torch.no_grad():
+            outputs = self.model(tensors)
+            points = outputs["trajectory_points"][0].cpu().numpy()
+            headings = outputs["headings"][0].cpu().numpy()
 
         return ModelPrediction(
             trajectory_points=points,
