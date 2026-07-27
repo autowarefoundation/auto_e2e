@@ -23,18 +23,19 @@ outputs are:
 2. searchable scene and interval metadata for dataset curation and failure
    analysis;
 3. reproducible evaluation slices that can be joined to model results by stable
-   scene and time identities;
-4. scene selection manifests for Active Learning and dataset balancing.
+   scene and time identities.
 
 These labels are not the existing Reasoning Labels. Reasoning Labels are sparse,
 prompt-dependent supervision for the model's action-relevant reasoning branch.
 ODD Labels are scene catalog metadata. They belong to a scene, not to a training
 sample, and are never fed to AutoE2E as an input or target. Their primary
-consumers are Dashboard exploration, corpus statistics, evaluation slicing, and
-Active Learning policies that select scenes for a subsequent training dataset.
-They must provide broad corpus coverage, retain source evidence, represent
-missingness explicitly, and remain usable without a particular model or
-training run.
+consumer is the DataModelConsole Dashboard: users inspect the available
+ontology, understand dataset composition, search for scenes, and inspect one
+scene's labels during playback. A future Active Learning extension may use the
+same catalog to select scenes for a subsequent training dataset, but that is a
+downstream use rather than the initial product. ODD Labels must provide broad
+corpus coverage, retain source evidence, represent missingness explicitly, and
+remain usable without a model, checkpoint, MLflow run, or training execution.
 
 A scene can contain time-varying ODD conditions, event intervals, camera
 conditions, and actor-scoped observations. These are children of one
@@ -86,8 +87,8 @@ immutable dataset snapshot
   -> label/event validation and quality audit
   -> immutable ODD LabelSet
   -> Dashboard statistics/search
-  -> Active Learning SceneSelectionManifest
   -> optional query-time evaluation-slice projection
+  -> optional future Active Learning SceneSelectionManifest
 ```
 
 ## 2. Problem Statement
@@ -134,7 +135,8 @@ The two artifacts have different ownership and use:
 | Storage | Training-oriented `reasoning.json` / records | Immutable sidecar Parquet |
 | Identity | `sample_uid` | `scene_uid` |
 | Model dependency | Training target | Never a model input or target |
-| Primary consumer | Training loss | Dashboard and Active Learning |
+| Primary consumer | Training loss | DataModelConsole Dashboard |
+| Optional downstream | None | Future Active Learning scene selection |
 | Prompt dependency | Yes | Only VLM evidence rows |
 
 The implementation may reuse low-level clip encoding and OpenAI-compatible HTTP
@@ -155,14 +157,15 @@ This boundary is intentional:
   horizon, or parser enumeration changes;
 - corpus statistics count actual scene time/distance instead of overlapping
   model windows;
-- Active Learning selects coherent scenes with temporal context;
+- a future Active Learning extension can select coherent scenes with temporal
+  context;
 - train/validation leakage remains controlled at scene or split-group level;
 - no future-aware ODD label can accidentally enter a model input tensor.
 
-For KITScenes v1, Active Learning selects complete scenes. A future dataset with
-very long recordings may allow contiguous scene clips only through a separately
-versioned selection policy. Individual training samples are never the ODD
-selection unit.
+If Active Learning is implemented later, KITScenes selects complete scenes. A
+future dataset with very long recordings may allow contiguous scene clips only
+through a separately versioned selection policy. Individual training samples
+are never the ODD selection unit.
 
 ### 3.3 Canonical source enum is small; evidence kinds are extensible
 
@@ -263,8 +266,8 @@ model batch.
     datasets.
 11. Preserve all source disagreements for audit and confidence calibration.
 12. Avoid additional KITScenes repacks when only labels change.
-13. Produce reproducible, budgeted scene selections for Active Learning without
-    turning labels into model features.
+13. Keep a clean future extension point for Active Learning scene selection
+    without making it part of the initial Dashboard milestone.
 
 ### 4.2 Non-goals for the first implementation
 
@@ -278,6 +281,8 @@ model batch.
   such as road friction or absolute visibility distance.
 - Claiming ground truth solely because a VLM produced a high score.
 - Live vehicle labeling or an online 10 Hz labeling service.
+- Automatically selecting training scenes or launching training from the
+  initial Dashboard milestone.
 - Labeling `near_collision` without relative trajectories and a validated TTC
   contract.
 - Requiring object tracks, LiDAR, or CAN for all datasets.
@@ -300,8 +305,8 @@ model batch.
   `event_uid`.
 - LabelSet: immutable collection of evidence, labels, events, statistics, and a
   manifest.
-- Scene selection manifest: an immutable Active Learning result that selects
-  scenes from a LabelSet without copying labels into model samples.
+- Scene selection manifest: a future, optional Active Learning result that
+  selects scenes from a LabelSet without copying labels into model samples.
 - Subject: the scene, camera, actor track, traffic control, or ego entity to
   which a label applies.
 
@@ -392,11 +397,14 @@ task ordering.
                               | statistics.parquet
                               | manifest.json
                                            |
+                              DataModelConsole
                     +----------------------+----------------------+
                     |                      |                      |
                     v                      v                      v
-             Console search       Active Learning        query-time metric
-             and statistics       scene selection        slice projection
+             ontology catalog      scene statistics       search + playback
+                                                                  |
+                                                         optional future
+                                                         Active Learning
 ```
 
 ### 6.2 Module boundaries
@@ -424,7 +432,8 @@ Tools/DataModelConsole/
 
 `Model/odd_labeling` contains offline data processing and must not be imported
 by `Model/model_components`. The Flyte layer orchestrates typed, local-testable
-functions; it does not contain label semantics.
+functions; it does not contain label semantics. The labeling workflow is a
+standalone dataset operation and is not called by any training workflow.
 
 ### 6.3 Reuse of navigation contracts
 
@@ -780,10 +789,14 @@ Each label definition contains:
 
 ```text
 key
+display_name
 description
 namespace
 cardinality
-allowed_values
+allowed_values:
+  - value
+    display_name
+    description
 neutral_value
 allowed_statuses
 allowed_sources
@@ -979,8 +992,8 @@ labels become `unavailable`; they are not guessed to improve coverage.
 
 The KITScenes ODD adapter operates on complete scenes. It does not iterate the
 42,667 training samples as labeling units. Existing sample identities are
-resolved only after Active Learning has selected scenes and the normal training
-pipeline enumerates those scenes.
+irrelevant to Dashboard labeling. If Active Learning is added later, the normal
+training pipeline enumerates samples only after scenes have been selected.
 
 ### 11.4 Future adapters
 
@@ -1351,6 +1364,25 @@ confidence, source, scope, evidence, and provenance fields defined above.
 
 ### 15.1 ODD labels
 
+This table is both the labeling contract and the initial Console ODD catalog.
+The Console must expose every key and every allowed value, including candidates
+with zero observed scenes, so users can understand what the system is intended
+to label instead of seeing only values that happened to appear in one dataset.
+For each key, the UI obtains from the ontology registry:
+
+- display name and definition;
+- single- or multi-select cardinality;
+- complete allowed-value list and per-value descriptions;
+- neutral/`none` semantics;
+- primary, fallback, and authoritative sources;
+- supported subject/scope and temporal semantics;
+- current quality tier;
+- counts and observable coverage for the selected LabelSet.
+
+Candidate values and observed values are separate concepts in the UI. An
+unobserved candidate displays a zero count or unsupported status; it is never
+removed from the catalog. Frontend constants must not duplicate this table.
+
 | Key | Type | Allowed values | Primary source |
 |---|---|---|---|
 | `odd.road.context` | single | `urban`, `suburban`, `rural`, `motorway`, `residential`, `industrial`, `parking` | `map_route` |
@@ -1482,7 +1514,35 @@ an invalid raw response for audit.
 
 ## 16. Flyte Workflow
 
-### 16.1 Workflow interface
+### 16.1 Standalone dataset-labeler lifecycle
+
+ODD Labeling is a standalone Dataset Labeler workflow. It is not a stage of
+`wf_train_il`, Reasoning label generation, model evaluation, or dataset
+training. Its only required domain input is an immutable published dataset
+snapshot.
+
+The following boundaries are mandatory:
+
+- training workflows never invoke the ODD workflow;
+- the ODD workflow never starts training or evaluation;
+- no checkpoint, model version, MLflow run, Model Registry entry, optimizer
+  configuration, or train/validation split is required;
+- completion publishes an ODD LabelSet and optionally refreshes the Console
+  read index;
+- failure cannot block an otherwise valid training run;
+- generating a new LabelSet does not modify packed training shards;
+- Active Learning, if added later, is a separate consumer of a ready LabelSet.
+
+The workflow can be launched manually, on a dataset-publication event, on a
+schedule, or from a Console administrative action. Re-running it with a new
+ontology, labeler, prompt, or source configuration creates a new immutable
+LabelSet without requiring any training activity.
+
+Flyte registers `wf_generate_odd_labelset` with a dedicated
+`odd-dataset-labeler` LaunchPlan. This LaunchPlan is independently executable
+and is not nested in a training LaunchPlan.
+
+### 16.2 Workflow interface
 
 The proposed top-level workflow is:
 
@@ -1510,7 +1570,11 @@ Mutable defaults are prohibited for full runs. Image digests, source revisions,
 model revisions, ontology hashes, prompt hashes, and configuration hashes are
 explicit task inputs.
 
-### 16.2 Task graph
+The workflow has no training-related input. In particular, it does not accept a
+checkpoint URI, MLflow run ID, registry model version, training execution ID,
+or training hyperparameters.
+
+### 16.3 Task graph
 
 ```text
 resolve_dataset_snapshot
@@ -1541,7 +1605,10 @@ Source labelers are independently cacheable. Changing a VLM prompt does not
 rerun map, GNSS/INS, or image-QC labeling. Changing a fusion policy reuses all
 source evidence.
 
-### 16.3 Cache keys
+`materialize_console_index` is a downstream read-model update. A successful
+LabelSet remains valid even if Console materialization needs to be retried.
+
+### 16.4 Cache keys
 
 Task cache identity includes only semantic inputs:
 
@@ -1560,7 +1627,7 @@ calibration bundle SHA-256
 Worker count, Flyte partition size, retry count, and resource requests do not
 change semantic identity.
 
-### 16.4 Partitioning and idempotency
+### 16.5 Partitioning and idempotency
 
 KITScenes uses one scene per logical partition, consistent with current
 navigation processing. Other datasets may group small scenes, but stable
@@ -1580,7 +1647,7 @@ The final publisher:
 A retry with identical inputs produces the same records and safely reuses
 content. Partial output is never discoverable as ready.
 
-### 16.5 VLM resource and failure policy
+### 16.6 VLM resource and failure policy
 
 - Deterministic tasks do not depend on the Cosmos endpoint.
 - VLM requests have bounded concurrency and explicit cost/request counts.
@@ -1692,7 +1759,7 @@ and is never supplied to the model. It is regenerated from a model/dataset
 manifest plus scene intervals, and its cache identity includes both manifests.
 The join uses interval containment or overlap rules from the ontology.
 
-## 18. Statistics and Search
+## 18. Console Dashboard Experience, Statistics, and Search
 
 ### 18.1 Correct denominators
 
@@ -1748,121 +1815,295 @@ The statistics artifact supports:
 Combinations are computed from interval overlap with a versioned minimum
 overlap, not by joining arbitrary nearest samples.
 
-### 18.4 Console materialization
+### 18.4 Product hierarchy
 
-DataModelConsole materializes only search and aggregate projections. Parquet and
-the LabelSet manifest remain authoritative.
-
-Required queries include:
+The initial product is a Dashboard, not an Active Learning application. The
+Console adds one ODD workspace, proposed at `/odd`, with these tabs:
 
 ```text
-label key/value/status/source/confidence
-dataset and LabelSet
-scene
-time range
-camera
-actor type/track
-event type and phase
-planned route action
-executed maneuver
-co-occurring labels
-model version and metric threshold
+Overview | Search | Ontology | LabelSets
 ```
 
-Search results return scene/time intervals and resolve to existing playback
-identities. The UI must display:
+- Overview answers "what kinds of scenes are in this dataset, and in what
+  proportion?"
+- Search answers "which scenes have these conditions?"
+- Ontology answers "which labels and candidate values can the system produce?"
+- LabelSets answers "which labeling version is ready and how complete is it?"
 
-- value, status, confidence, and source;
-- planned route action separately from actual maneuver;
-- evidence provenance and conflicts;
-- exact LabelSet and ontology versions;
-- observable coverage next to percentages.
+The selected dataset version and LabelSet remain visible and synchronized
+across all tabs. A user never sees statistics from one LabelSet and scene
+details from another without an explicit version change.
 
-### 18.5 Active Learning scene selection
+### 18.5 Ontology catalog
 
-Active Learning consumes the ODD LabelSet as a catalog and emits an independent
-`SceneSelectionManifest`. It never converts ODD values into model input
-features or per-sample targets.
+The Ontology tab renders the machine-readable registry that defines Section 15.
+It is not generated from observed label rows. The catalog is therefore complete
+even before a full labeling run or when a candidate value has zero scenes.
 
-The initial KITScenes selection unit is one complete `scene_uid`. A selection
-policy may combine:
-
-- underrepresented ODD values or combinations;
-- coverage targets by duration, distance, or scene count;
-- event rarity;
-- perception difficulty;
-- label confidence or source disagreement for human review;
-- model error or uncertainty imported as a separate model-run projection;
-- storage, labeling, and training-compute budgets;
-- diversity constraints that avoid selecting many near-duplicate scenes.
-
-The manifest contract is:
+The initial catalog groups keys into:
 
 ```text
-SceneSelectionManifest
-  schema_version
-  selection_id
-  dataset_name
-  dataset_version
-  dataset_manifest_sha256
-  labelset_id
-  ontology_sha256
-  policy_name
-  policy_version
-  policy_config_sha256
-  optional_model_run_refs
-  budget:
-    max_scene_count
-    max_duration_ns
-    max_distance_m
-    max_storage_bytes
-  selected_scenes:
-    - scene_uid
-      selection_score
-      selection_reasons
-      matched_observation_uids
-      matched_event_uids
-      scene_duration_ns
-      scene_distance_m
-  excluded_scenes_with_reasons
-  candidate_inventory_sha256
-  selected_inventory_sha256
-  created_at
-  provenance
+ODD | Events | Perception
 ```
 
-Selection reasons are auditable predicates such as:
+Each key row shows:
+
+- display name and canonical key;
+- concise definition;
+- single- or multi-select type;
+- all allowed candidate values;
+- neutral or `none` behavior;
+- primary and fallback sources;
+- applicable subject and temporal scope;
+- quality tier;
+- support state for the selected dataset;
+- scene count and observable coverage when a ready LabelSet exists.
+
+Expanding a key shows per-value definitions, source/fusion rules, status
+semantics, and examples. Candidate values with no observations show `0 scenes`;
+unsupported values show why they are unavailable. Neither case removes the
+candidate from the UI.
+
+The catalog uses ontology API data. Frontend code must not contain a second
+hard-coded copy of the keys or values in Section 15.1.
+
+### 18.6 Dataset composition overview
+
+Overview defaults to ODD scene composition. It includes:
+
+1. dataset/LabelSet coverage summary;
+2. scene-presence distribution by ODD key and candidate value;
+3. duration- and distance-weighted distribution;
+4. status coverage (`valid`, `unavailable`, `not_observable`, `ambiguous`);
+5. source distribution;
+6. common and rare ODD combinations;
+7. event and perception summaries as secondary tabs.
+
+The default scene ratio is:
+
+```text
+scene_presence_ratio(key, value) =
+  count(distinct scene_uid with status=valid and value present)
+  / count(distinct scene_uid with at least one valid observation for key)
+```
+
+The UI always shows numerator, denominator, and observable scene coverage.
+Presence ratios for different values may sum above 100% because one scene can
+contain several conditions over time. The chart labels this behavior. A
+segmented control switches between:
+
+```text
+Scene presence | Duration share | Distance share
+```
+
+Duration and distance views use the formulas in Section 18.1. Status coverage
+is displayed next to value distribution so a high value percentage over a
+small observable subset cannot be mistaken for broad dataset coverage.
+
+Scene-presence ratios include a 95% Wilson confidence interval using scenes as
+the independent units. Duration and distance views use a scene-clustered
+bootstrap interval. Frame or interval rows must not be treated as independent
+observations because adjacent labels are temporally correlated.
+
+For single-select labels, an optional dominant-scene view assigns each scene the
+value with the greatest valid duration and sums to 100%. It is visibly labeled
+as a derived view and never replaces scene presence.
+
+Selecting a chart segment opens Search with the exact dataset, LabelSet,
+key/value, status, and weighting encoded in the URL.
+
+### 18.7 Scene search
+
+Search provides a structured query builder rather than free-form text. One
+predicate contains:
+
+```text
+namespace/key
+value or values
+status
+source
+minimum confidence
+minimum occurrence duration
+camera/actor scope where applicable
+```
+
+Predicates support AND/OR groups. Initial required examples are:
 
 ```text
 odd.environment.road_lighting = unlit
-AND event.vru.interaction contains pedestrian_crossing
-AND status = valid
-AND confidence >= 0.8
+AND odd.road.junction_type = crossroad
+
+event.vru.interaction contains pedestrian_crossing
+AND perception.occlusion.level in [major, full]
+
+odd.route.action = turn_left
+AND event.ego.maneuver != turn_left
 ```
 
-`selection_id` is content-derived from the dataset/LabelSet identities, policy
-configuration, candidate inventory, and selected inventory. `created_at` is
-operational metadata and does not affect selection identity.
+Key and value menus are sourced from the Ontology catalog. Every candidate
+value is visible with its current scene count, including zero. Status and source
+filters are first-class; a user can search for unavailable or ambiguous
+coverage instead of only valid values.
 
-The training data pipeline consumes only the selected scene identities, then
-performs its normal parsing and sample enumeration from raw scene data. ODD
-labels do not enter the loader batch. Existing frozen validation/test scenes
-and split groups are excluded before ranking; Active Learning must not move
-them into training or split one scene across train and validation.
+Value predicates default to `status=valid`. In particular, `value != X` means a
+different valid value and does not match unavailable, not-observable, or
+ambiguous records unless the query explicitly requests those statuses.
 
-Selection manifests are stored outside immutable LabelSet content:
+Results are scene rows, not sample rows. Each result shows:
+
+- scene identifier and playback thumbnail;
+- matched key/value summary;
+- status, confidence, and source;
+- matched interval count and total duration;
+- first matched timestamp;
+- relevant event/actor summary;
+- a command to open playback at the matched interval.
+
+Pagination and sorting are stable. Supported sort modes include confidence,
+matched duration, scene duration, and recording time. Query state is
+deep-linkable and can be restored from the URL.
+
+### 18.8 Scene detail and playback
+
+The existing Scene page keeps Reasoning and ODD semantically separate while
+making both easy to inspect. The required vertical order is:
 
 ```text
-odd-selections/
-  dataset={dataset_name}/
-    version={dataset_version}/
-      labelset={labelset_id}/
-        selection={selection_id}/manifest.json
+scene media and playback controls
+trajectory/navigation/model overlays
+Reasoning Labels
+ODD Labels
+remaining diagnostics
 ```
 
-Dashboard users can preview matched intervals and selection reasons, compare
-candidate coverage before/after selection, and export the immutable manifest to
-the Flyte data-preparation workflow.
+The ODD Labels section appears directly below Reasoning Labels, with no
+unrelated section between them. It is an unframed page section, not a card
+nested inside the Reasoning panel.
+
+The section has:
+
+```text
+Current time | Whole scene
+ODD | Events | Perception
+```
+
+Current time displays observations active at the playback timestamp. Whole
+scene displays value presence, duration, and status coverage across the scene.
+Each row shows key, value, status, confidence, source, and active interval.
+Clicking a key opens the same ontology definition and complete candidate list
+used by the Ontology tab.
+
+The scene timeline renders:
+
+- ODD state intervals;
+- event onset, active, and resolution phases;
+- camera/actor-scoped perception intervals;
+- ambiguous and not-observable spans with distinct non-value styling.
+
+Selecting an interval seeks playback to its start. Playback updates Current
+time labels without shifting page layout. Planned `odd.route.action` and actual
+`event.ego.maneuver` are shown as separate rows even when their values agree.
+
+`none`, `not_observable`, `unavailable`, and `ambiguous` must be visually
+distinct. A missing response must never render as `none`. Evidence details show
+supporting/conflicting sources, measurements, labeler version, and LabelSet
+provenance without replacing the concise default view.
+
+### 18.9 LabelSet state and operational visibility
+
+The LabelSets tab lists ontology version, dataset manifest, sources, quality
+tier, created time, coverage, and immutable identity. States are:
+
+```text
+not_started | running | ready | failed | superseded
+```
+
+When labeling is running, the Console shows scene progress and per-source
+coverage without exposing partial results as ready. A failed run shows the
+failure stage and retains the last ready LabelSet. Switching LabelSets is
+explicit; the Dashboard never silently follows a newer experimental run.
+
+The Console may launch or retry the standalone Flyte Dataset Labeler when the
+user has operational permission. This action labels the dataset only. It does
+not launch training, evaluation, model registration, or Active Learning.
+
+### 18.10 Read APIs and materialization
+
+DataModelConsole materializes search and aggregate projections only. Parquet,
+the ontology registry, and the LabelSet manifest remain authoritative.
+
+The initial API surface is:
+
+```text
+GET  /api/v1/odd/ontology
+GET  /api/v1/odd/labelsets
+GET  /api/v1/odd/statistics
+POST /api/v1/odd/scenes/search
+GET  /api/v1/scenes/{scene_uid}/odd
+GET  /api/v1/scenes/{scene_uid}/odd/evidence/{observation_uid}
+```
+
+The ontology response includes all candidate values independent of observed
+counts. Statistics return numerator, denominator, weighting mode, status
+coverage, source coverage, and LabelSet identity. Scene detail returns
+coalesced intervals and event phases, not one row per camera frame.
+
+The read index is generation-pinned to the dataset manifest and LabelSet.
+Materialization publishes last after complete scene coverage and can be retried
+without rerunning labelers.
+
+### 18.11 Empty, loading, and error states
+
+The UI distinguishes:
+
+- no LabelSet has been generated;
+- a LabelSet is currently running;
+- a ready LabelSet contains no occurrence of one candidate;
+- the selected dataset does not support a source/key;
+- a key is mostly not observable;
+- statistics or search materialization failed.
+
+None of these states is rendered as an empty successful value distribution.
+The last ready generation remains readable while a replacement is running.
+
+### 18.12 Console acceptance tests
+
+Focused Playwright coverage verifies:
+
+- Ontology shows every Section 15.1 key and candidate, including zero-count
+  values;
+- Overview ratios use the displayed numerator and denominator;
+- clicking a chart segment opens the equivalent Search query;
+- AND/OR search returns scene identities and opens the correct matched time;
+- Reasoning Labels precede ODD Labels on desktop and mobile;
+- Current time labels follow playback seeking;
+- `none`, unavailable, not observable, and ambiguous remain distinct;
+- long keys and candidate values do not overflow;
+- no horizontal page overflow, browser error, or failed API request;
+- LabelSet version remains consistent across Overview, Search, and Scene detail.
+
+Required viewports are at least 1440 by 1000 and 390 by 844.
+
+### 18.13 Optional future Active Learning
+
+Active Learning is not required for the initial Dashboard. A future extension
+may consume the ODD LabelSet as a catalog and emit an independent
+`SceneSelectionManifest`. It must never convert ODD values into model input
+features or per-sample targets.
+
+The initial KITScenes selection unit would be one complete `scene_uid`. A
+selection policy may combine underrepresented ODD combinations, event rarity,
+perception difficulty, model uncertainty from a separate model-run projection,
+and compute/storage budgets.
+
+The training data pipeline would consume only selected scene identities, then
+perform normal parsing and sample enumeration from raw scene data. ODD labels
+would not enter the loader batch. Existing frozen validation/test scenes and
+split groups must be excluded before ranking.
+
+This future work requires a separately reviewed `SceneSelectionManifest`
+contract, selection quality metrics, and Console workflow. It does not gate the
+Dataset Labeler or Dashboard delivery.
 
 ## 19. Quality, Audit, and Governance
 
@@ -2041,17 +2282,19 @@ Implement:
 Unsupported event families remain unavailable or experimental. Full coverage is
 not fabricated from VLM-only still images.
 
-### 22.5 Phase 4: Console, Active Learning, and evaluation slices
+### 22.5 Phase 4: Console Dashboard and evaluation slices
 
 Add:
 
+- complete Ontology catalog with all Section 15 candidates;
 - ODD composition statistics with observable coverage;
+- scene-presence, duration, and distance ratio modes;
 - label/status/source/confidence filters;
-- scene and interval search;
+- AND/OR scene and interval search;
 - event timeline and evidence detail;
+- ODD Labels directly below Reasoning Labels on Scene pages;
 - route action versus executed maneuver display;
-- reproducible scene ranking and `SceneSelectionManifest` export;
-- before/after coverage comparison for selected scene sets;
+- LabelSet generation state and standalone Flyte launch visibility;
 - model ADE/FDE and other metric slicing by LabelSet;
 - desktop and mobile playback validation.
 
@@ -2061,10 +2304,11 @@ The initial LabelSet binds to the current immutable KITScenes dataset manifest
 and navigation artifacts. It is published as a sidecar. No shard repack is
 required.
 
-A future training experiment may consume a `SceneSelectionManifest` to decide
-which raw scenes are included. It must not consume ODD values as model inputs or
-targets. The selected scenes are packed through the ordinary dataset pipeline,
-and the source LabelSet remains unchanged.
+The Dashboard milestone has no training dependency. A later Active Learning
+experiment may define and consume a `SceneSelectionManifest` to decide which raw
+scenes are included. It must not consume ODD values as model inputs or targets.
+The selected scenes are packed through the ordinary dataset pipeline, and the
+source LabelSet remains unchanged.
 
 ## 23. Expansion to Other Datasets
 
@@ -2136,7 +2380,7 @@ observable coverage and another has 30%.
 - Coordinate-frame transforms.
 - Source gap and missing-frame handling.
 - Camera role/calibration mapping.
-- Stable scene/sample/track identities.
+- Stable scene/frame/track identities.
 - Capability absence versus interval observability.
 
 ### 24.3 Labeler unit tests
@@ -2183,8 +2427,14 @@ The KITScenes smoke set includes:
 - at least one temporal interaction candidate;
 - absent capability and not-observable examples.
 
-The smoke run validates artifacts, joins, statistics, Console search, and
-playback before a full VLM run.
+The smoke run validates artifacts, materialized statistics, Console search,
+ontology candidates, Scene-section ordering, and playback before a full VLM
+run.
+
+The compiled Flyte graph is also inspected to verify that it contains no
+training, checkpoint, MLflow, model-registry, or evaluation node. A synthetic
+dataset smoke must publish a LabelSet without any model artifact or training
+execution.
 
 ## 25. Staged Implementation
 
@@ -2227,14 +2477,16 @@ playback before a full VLM run.
 - Immutable LabelSet publisher.
 - Scene-rooted Parquet schemas and receipts.
 - Duration/distance/scene statistics.
-- Active Learning `SceneSelectionManifest` contract and selection engine.
 - Full validation and ready cutover.
 
 ### PR 7: Console
 
 - LabelSet catalog and materialization.
-- ODD composition, search, event timeline, and provenance.
-- Scene selection, selection-reason preview, and coverage comparison.
+- Complete ontology/candidate catalog.
+- Scene-presence, duration, distance, status, and source statistics.
+- Structured scene search, event timeline, and provenance.
+- ODD Labels directly below Reasoning Labels on the Scene page.
+- Standalone Dataset Labeler run state and permitted launch/retry actions.
 - Model metric slicing.
 - Desktop/mobile Playwright verification.
 
@@ -2244,6 +2496,14 @@ playback before a full VLM run.
 - Full evidence and LabelSet publication.
 - Human audit and calibration report.
 - Coverage, conflict, and cost report.
+
+### Future PR: Optional Active Learning
+
+- Separately reviewed `SceneSelectionManifest`.
+- Scene ranking, budget, diversity, and frozen-split safeguards.
+- Selection preview and coverage comparison.
+- Explicit handoff of scene identities to data preparation without ODD model
+  inputs.
 
 ## 26. Acceptance Criteria
 
@@ -2287,11 +2547,19 @@ playback before a full VLM run.
 
 ### 26.5 Product use
 
-- Console can find a scene/time interval by label, value, status, source, and
-  confidence.
+- Console Ontology shows every key and candidate value, including zero-count and
+  unsupported candidates.
+- Console Overview reports scene-presence, duration, and distance ratios with
+  explicit numerators, denominators, and observable coverage.
+- Console Search can find a scene/time interval by label, value, status, source,
+  confidence, and AND/OR combinations.
+- Scene detail shows ODD Labels directly below Reasoning Labels and synchronizes
+  Current time labels with playback.
 - Corpus statistics use correct observable denominators and timeline weighting.
-- Active Learning can emit an immutable, budgeted scene selection with
-  auditable reasons while preserving frozen split groups.
+- Console displays LabelSet run/readiness state without exposing partial output
+  as ready.
+- The Dataset Labeler can run without a training execution, checkpoint, MLflow
+  run, or model registry entry and never launches training.
 - Model metrics can be projected onto scene/time slices for analysis without
   changing the LabelSet or model inputs.
 - The UI distinguishes route intent, actual maneuver, event, and perception
