@@ -181,7 +181,8 @@ references, whose `kind` may include:
 
 ```text
 hd_map | osm | selected_route | pose | gnss | ins | camera | timestamp
-object_track | lidar | can | image_metric | vlm_response | derived_trajectory
+object_track | lidar | can | image_metric | vlm_response | bedrock_response
+derived_trajectory
 ```
 
 For example, a traffic-density value derived from camera object tracks has
@@ -746,11 +747,12 @@ ambiguous + []           evidence conflicts or is insufficiently separable
 
 Some proposed candidate sets contain a positive neutral value such as `normal`
 or `dry`. These describe an observed condition and do not replace the missing
-state. Before implementation, the machine-readable ontology must add `none` to
-any multi-select group that lacks an explicit negative and has a meaningful
+state. Before implementation, the machine-readable ontology adds `none` only to
+a multi-select group that lacks an explicit negative and has a meaningful
 absence case. In particular, `odd.dynamic.agent_type_present` requires `none`
-for an observed empty road. The taxonomy table in Section 15 marks normalized
-additions.
+for an observed empty road. `odd.road.surface_state` uses `dry` as its observed
+neutral and does not add a redundant `none`. The taxonomy table in Section 15
+marks normalized additions.
 
 For a single-select label whose domain includes `none`, `not_applicable`, or
 `no_response_required`, that token is also a valid observed semantic value.
@@ -1037,6 +1039,14 @@ The labeler uses vectors and attributes, not raster color. OSM and Lanelet2
 attribute mappings live in provider adapters, while final ontology mapping is
 shared.
 
+Most map/route labels use deterministic topology and geometry. When a valid map
+contains enough geometry but an irregular junction or route transition remains
+ambiguous under the versioned rules, a task-specific Bedrock Claude resolver
+may inspect an ego-local semantic map/route render plus a structured graph
+summary. It is a bounded fallback, not a replacement for map matching or
+missing map data. Its request and acceptance policy are defined in Section
+15.5.
+
 Road context and road type are distinct:
 
 - context describes surrounding functional environment such as urban,
@@ -1148,9 +1158,10 @@ deterministic sources:
 - traffic participants and interaction candidates;
 - occlusion, clutter, unusual appearance, and scene complexity.
 
-It uses temporal, timestamped, multi-view clips. Event claims such as cut-in,
-hard brake, evasive steer, or sudden emergence are prohibited from a
-single-image request.
+It calls a pinned OpenAI-compatible multimodal API; the expected production
+backend is a road-capable model such as Cosmos. It uses temporal, timestamped,
+multi-view vehicle-camera clips. Event claims such as cut-in, hard brake,
+evasive steer, or sudden emergence are prohibited from a single-image request.
 
 The initial scheduling policy is:
 
@@ -1399,7 +1410,7 @@ removed from the catalog. Frontend constants must not duplicate this table.
 | `odd.road.lane_type_present` | multi | `general`, `bus`, `bicycle`, `tram`, `emergency`, `turn_only`, `parking`, `shared`, `none` | `map_route` |
 | `odd.road.lane_marking_quality` | single | `clear`, `faded`, `missing`, `temporary`, `occluded` | `vlm` |
 | `odd.road.surface_type` | single | `asphalt`, `concrete`, `paving_stone`, `gravel`, `unpaved` | `vlm`, `map_route` |
-| `odd.road.surface_state` | multi | `dry`, `wet`, `standing_water`, `snow_covered`, `visually_contaminated`, `none` | `vlm` |
+| `odd.road.surface_state` | multi | `dry`, `wet`, `standing_water`, `snow_covered`, `visually_contaminated` | `vlm` |
 | `odd.road.edge_type_present` | multi | `curb`, `guardrail`, `solid_barrier`, `temporary_barrier`, `paved_shoulder`, `unpaved_shoulder`, `grass`, `none` | `map_route`, `vlm` |
 | `odd.road.special_structure` | multi | `bridge`, `tunnel`, `railway_crossing`, `pedestrian_crossing`, `access_gate`, `none` | `map_route` |
 | `odd.road.workzone_state` | multi | `roadworks`, `lane_closure`, `detour`, `cones`, `temporary_barrier`, `temporary_signage`, `none` | `vlm`, `map_route` |
@@ -1421,10 +1432,11 @@ removed from the catalog. Frontend constants must not duplicate this table.
 `odd.ego.speed_bin` always includes the continuous measurement
 `ego_speed_kph`.
 
-The ontology normalizes `none` into the multi-select lane type, surface state,
-and actor type groups to enforce the explicit-negative rule. For lane type,
-`none` is valid only when the road is observed and none of the listed lane
-types is represented. It must not be used when lane attribution is absent.
+The ontology normalizes `none` into the multi-select lane type and actor type
+groups to enforce the explicit-negative rule. For lane type, `none` is valid
+only when the road is observed and none of the listed lane types is represented.
+It must not be used when lane attribution is absent. Surface state retains
+`dry` as its explicit observed neutral.
 
 ### 15.2 Event labels
 
@@ -1512,6 +1524,282 @@ These exclusions are schema constraints, not merely prompt instructions. A VLM
 response containing an excluded label fails validation and is retained only as
 an invalid raw response for audit.
 
+### 15.5 Inference-provider routing
+
+Label acquisition uses the most direct source that can support the semantic
+claim. Model calls are selective fallbacks or semantic observers; they are not
+used to re-label deterministic facts.
+
+The matrices below use these backend codes:
+
+| Code | Backend | Permitted input | Canonical source |
+|---|---|---|---|
+| `DMR` | Deterministic map/route resolver | Canonical vectors, graph, attributes, route, map-match quality | `map_route` |
+| `BMR` | Bedrock Claude map/route resolver | Privacy-filtered ego-local semantic render and structured topology summary | `map_route` |
+| `KIN` | Deterministic GNSS/INS trajectory resolver | Pose, timestamps, quality, derived kinematics | `gnss_ins` |
+| `CAN` | Optional deterministic CAN resolver | Normalized vehicle signals | `can_optional` |
+| `IQC` | Deterministic image-quality resolver | Decoded camera frames and frame metadata | `image_qc` |
+| `ORV` | OpenAI-compatible road VLM | Timestamped vehicle-camera images/clips; expected backend is Cosmos-like | `vlm` |
+| `TRK` | Track/LiDAR geometry resolver | Object tracks, boxes, classes, LiDAR, calibration | `fusion` |
+| `FUS` | Deterministic cross-source fusion/state machine | Validated evidence from the other backends | `fusion` |
+
+`BMR` and `ORV` are different trust and data boundaries:
+
+- `ORV` is the only general model backend that receives real vehicle-camera
+  imagery. It handles visual road knowledge, weather appearance, agents,
+  interactions, and perception difficulty.
+- `BMR` receives no vehicle-camera image. It handles only topology/geometry
+  questions for a valid map and route when deterministic graph rules produce
+  several defensible candidates.
+- A raw camera frame must not be sent to Bedrock by this design.
+- A rendered map must not be presented to `ORV` as if it were a camera frame.
+- Provider names and model revisions are provenance; the canonical `source`
+  remains one of the six values defined in Section 3.3.
+
+#### Bedrock Claude map/route request
+
+`BMR` uses the Bedrock Converse API with a pinned Claude model or inference
+profile. The request is task-specific and contains:
+
+```text
+MapRouteResolverRequest
+  schema_version
+  label_key
+  allowed_values
+  geometry_id
+  coordinate_convention: ego FLU, +X forward, +Y left
+  semantic_layers:
+    drivable_area
+    lane_boundaries
+    lane_centerlines
+    lane_directions
+    intersection_polygons
+    route_corridor
+    route_transition
+    static_controls
+  ego_local_render_png
+  lane_graph_summary
+  route_segment_summary
+  deterministic_candidates_with_scores
+  map_quality
+  required_evidence
+```
+
+The render removes latitude/longitude, street names, provider object IDs,
+dataset IDs, and unrelated imagery. Primitive IDs in the request are ephemeral
+local references. The response is constrained to:
+
+```text
+status
+value
+confidence
+cited_primitive_ids
+candidate_rejections
+```
+
+The Converse request uses a tool schema for this response object and rejects a
+plain-text-only completion as a parse failure. Tool choice, inference
+configuration, model/inference-profile identity, and request body digest are
+recorded in provenance.
+
+`BMR` is called only when:
+
+1. map and route quality pass their minimum gates;
+2. all required semantic primitives are present;
+3. `DMR` returns `ambiguous`, not `unavailable`;
+4. the ontology explicitly allows `BMR` for that key.
+
+Its result is accepted only when the cited primitives exist and an independent
+geometry validator confirms the necessary invariant. Examples include a left
+route action having a positive signed route heading change in ego FLU, or a
+crossroad candidate having the required connected branch structure. Otherwise
+the final status remains `ambiguous`.
+
+`BMR` cannot invent map attributes. It is prohibited for surface material,
+weather, lane-marking quality, traffic-light color, actor presence, and other
+facts absent from the semantic input.
+
+#### OpenAI-compatible road VLM request
+
+`ORV` calls a pinned OpenAI-compatible multimodal endpoint backed by a
+road-capable model such as Cosmos. Requests preserve camera role, timestamp,
+ordering, and aspect ratio. They use small task bundles rather than one prompt
+for the entire ontology:
+
+```text
+RoadVLMRequest
+  schema_version
+  task_bundle:
+    road_appearance | environment | traffic_control
+    dynamic_agents | interaction | perception_condition
+  allowed_keys_and_values
+  scene_uid_hash
+  clip_start_timestamp_ns
+  clip_end_timestamp_ns
+  camera_frames:
+    camera_role
+    timestamp_ns
+    image
+    frame_quality
+  optional_track_summaries
+  observability_requirements
+```
+
+The response contains one evidence object per requested key, including explicit
+status, values, confidence, supporting camera/timestamps, and observability
+reason. Free-form values are rejected. The model's reported confidence is raw
+evidence and is calibrated before publication.
+
+The client requests JSON Schema structured output when the endpoint supports
+it. Otherwise it applies the same schema validator to returned JSON and
+abstains on any extra value, missing key, or invalid cardinality.
+
+Regular ODD/perception requests use a short multi-view temporal clip centered on
+the output interval. Event requests use denser clips that cover before, during,
+and after the candidate event. A single image is sufficient only for static
+appearance when the ontology allows it; it is never sufficient for an
+interaction or strong-response event.
+
+For rare, safety-relevant, or low-confidence observations, a second pass uses a
+different frame sampling or focused actor crop while keeping temperature and
+schema fixed. Agreement raises evidence strength; disagreement produces
+`ambiguous` rather than choosing the more convenient answer.
+
+#### Cross-provider acceptance rule
+
+Model inference cannot repair missing source evidence:
+
+- required channel absent: `unavailable`;
+- channel present but required area/actor is not visible: `not_observable`;
+- valid evidence supports conflicting values: `ambiguous`;
+- model output is invalid or cites no required evidence: reject the output and
+  retain the pre-inference status.
+
+`FUS` never converts an `ORV` or `BMR` response directly into certified truth.
+It applies source quality, geometry checks, temporal consistency, calibration,
+and the label-specific rules below.
+
+### 15.6 ODD label acquisition matrix
+
+The ODD spatial default is the ego-connected road and selected route up to 100 m
+ahead. The temporal default is a one-second scene interval. A row overrides
+these defaults where needed.
+
+| Key | Required evidence | Acquisition and backend | Window / scope | Fallback and status gate |
+|---|---|---|---|---|
+| `odd.road.context` | Land-use/road-context map attributes or observable surround imagery | `DMR` maps provider attributes; otherwise `ORV` classifies the visible built environment | 1 s, surround views, current road neighborhood | Do not use `BMR` from geometry alone. `ORV` fallback is experimental; no land-use attributes and insufficient view is `not_observable` |
+| `odd.road.type` | Current map-matched lane/road with provider class | `DMR` applies a versioned Lanelet2/OSM-to-ontology mapping | Current road segment | Unmapped but present class is `ambiguous`; missing/invalid map is `unavailable`. Camera shape alone does not determine functional class |
+| `odd.road.division` | Opposing-direction lane topology, median/barrier primitives | `DMR` groups carriageways and opposing lanes; `BMR` may resolve irregular valid topology | Current segment plus 100 m | `ORV` may provide experimental visual evidence when map is absent. Occluded median/road edge is `not_observable` |
+| `odd.road.directionality` | Traffic-rule direction or one-way map attribute | `DMR` reads canonical traffic rules | Current connected lane | `ORV` fallback requires visible one-way signs/arrows and is experimental. Geometry without direction metadata is `ambiguous`, not two-way |
+| `odd.road.horizontal_geometry` | Valid current/route centerline | `DMR` computes robust signed curvature over configurable arc length; `BMR` only for fragmented but connected geometry | 30-80 m forward arc | Invalid centerline is `unavailable`; curvature near deadband is `straight`; competing signs over the arc are `ambiguous` |
+| `odd.road.vertical_geometry` | Reliable map Z or GNSS/INS altitude profile and pose quality | `KIN`/`DMR` estimate smoothed grade and grade derivative | Configured 30-100 m baseline | No reliable elevation is `unavailable`. Neither `BMR` nor `ORV` may infer precise grade |
+| `odd.road.junction_type` | Lane graph connectivity, intersection polygons, levels | `DMR` classifies graph degree, branch angles, roundabout cycles, merge/split, and levels; `BMR` resolves irregular valid topology | Junction reached within 100 m | Missing graph is `unavailable`; several topology classes after `BMR` validation remain `ambiguous` |
+| `odd.road.junction_position` | Valid junction polygon/route distance and ego map match | `DMR` state machine: approach, inside, exit, midblock | Native pose timeline, temporally coalesced | Poor map match is `ambiguous`; no valid map coverage is `unavailable`; state transitions use hysteresis |
+| `odd.road.junction_control` | Route-relevant regulatory elements and lane association | `DMR` associates mapped controls; `BMR` may resolve which rendered control applies; `FUS` corroborates with `ORV` | Current/next junction movement | Visible control without lane association is `ambiguous`; no applicable mapped control with complete coverage is `uncontrolled`; missing coverage is `unavailable` |
+| `odd.route.action` | Selected route lane sequence and transitions | `DMR` uses transition type, signed heading change, route graph, and roundabout entry/exit; `BMR` resolves irregular/multi-branch cases | First decisive action within 100 m | No selected route is `unavailable`; route discontinuity is `ambiguous`; actual ego trajectory must not affect this value |
+| `odd.road.lane_count_bin` | Parallel ego-direction lane group and traffic rules | `DMR` counts travel-direction lanes; `BMR` may resolve complex split/merge geometry | Current carriageway, 50 m stable span | Camera-only `ORV` is experimental. Partial map lane coverage is `ambiguous`, never `one` by default |
+| `odd.road.lane_type_present` | Lane subtype/regulatory attributes; visible lane symbols | `DMR` maps lane attributes; `ORV` detects visible bus/bicycle/turn/parking markings; `FUS` unions corroborated types | Current carriageway, 1-3 s clip | Complete valid map with no listed type can emit `none`; missing attributes are `unavailable`; map/visual temporary conflict is `ambiguous` or workzone evidence |
+| `odd.road.lane_marking_quality` | Road surface around lane boundaries, valid camera exposure | `ORV` evaluates clear/faded/missing/temporary/occluded with `IQC` observability gate | Front and front-side clips, 1-3 s | Boundary outside view or image failure is `not_observable`; mapped boundary plus visually absent marking supports `missing`; temporary markings require temporal/multi-view support |
+| `odd.road.surface_type` | Map surface attribute and visible drivable surface | `DMR` uses explicit surface material; `ORV` classifies appearance; `FUS` prefers fresh explicit map unless temporary coverage is evident | Ego lane, 1-3 s clip | No visible road and no map attribute is `not_observable`/`unavailable`; disagreement without temporary evidence is `ambiguous` |
+| `odd.road.surface_state` | Visible road surface, precipitation/reflection QC cues | `ORV` classifies dry/wet/water/snow/contamination; `IQC` supplies reflection and visibility metrics; `FUS` enforces temporal consistency | Ego lane ahead, 2-5 s clip | Occluded or saturated road is `not_observable`; `dry` requires sufficient visible road area; uncertain wet versus reflection is `ambiguous` |
+| `odd.road.edge_type_present` | Map edge/barrier/shoulder primitives and visible road edge | `DMR` extracts available primitives; `ORV` detects visible curb/barrier/grass/shoulder; `FUS` forms union | Both road edges within local ROI | An edge outside camera/map coverage is not negative. `none` requires complete observable ROI; map/visual temporary barriers are retained as distinct evidence |
+| `odd.road.special_structure` | Map bridge/tunnel/crossing/gate tags and visible structure | `DMR` uses explicit structures; `ORV` corroborates tunnel, crossing, or gate appearance | Current road plus 100 m | `BMR` cannot infer an untagged bridge from flat geometry. Missing map and non-visible structure is `not_observable`; conflicts are `ambiguous` |
+| `odd.road.workzone_state` | Temporal camera clip and optional fresh roadworks/map data | `ORV` detects cones, barriers, signage, closures, detours; `FUS` combines mapped roadworks and route deviation | 3-8 s multi-view clip | Single isolated cone is low confidence; map-only stale roadworks is not enough for visual subtypes; insufficient road visibility is `not_observable` |
+| `odd.traffic_control.present` | Mapped regulatory elements and visible controls | `DMR` lists route-local controls; `ORV` detects signs/lights/officer; `FUS` associates subjects and unions current controls | Current road and next junction, 2-5 s | `none` requires complete mapped/visible coverage; visible but unassociated control remains valid as scene-present but not junction-applicable |
+| `odd.traffic_light.state` | Route-relevant mapped signal, camera projection/association, temporal visual state | `DMR` identifies candidate signal; `ORV` reads color/flash/off over several frames; `FUS` resolves controlling subject | Signal-specific, 0.5-2 s at native frames | Signal exists but is occluded/out of FOV is `not_observable`; several plausible signals is `ambiguous`; `not_applicable` requires no applicable signal |
+| `odd.environment.day_phase` | Absolute timestamp plus location, or visible illumination/sky | `FUS` uses astronomical solar elevation when time/location are valid; `ORV` is fallback | Scene interval, slowly varying | Timestamp without timezone is acceptable with UTC epoch/location; no absolute time and no observable sky/lighting is `not_observable`; dawn/dusk boundary uses configured solar angles |
+| `odd.environment.sky` | Sufficient visible sky pixels | `ORV` classifies clear/partly cloudy/overcast across cameras | 3-10 s, sky-visible cameras | Too little sky, tunnel, or severe exposure is `not_observable`; inconsistent views are fused by visible solid angle or marked `ambiguous` |
+| `odd.environment.precipitation_visual` | Temporal images with visible precipitation/road cues | `ORV` classifies none/rain/snow/mixed; `IQC` contributes streak/spray evidence | 3-8 s multi-view clip | `none_visible` means no visible precipitation, not meteorological no-rain; insufficient visibility is `not_observable` |
+| `odd.environment.visibility_degradation` | Distant scene contrast, temporal images, QC metrics | `ORV` distinguishes fog/haze/precipitation/spray/dust; `IQC` measures contrast and veiling | 3-8 s, forward and surround | Camera contamination must be separated from atmosphere; no distant view is `not_observable`; several supported causes may coexist |
+| `odd.environment.road_lighting` | Illumination, street-light/tunnel context, day phase | `ORV` classifies visible road lighting; `FUS` combines day phase and mapped tunnel | 3-5 s road-facing clip | Street lamps present but visibly off do not imply `street_lit`; clipped/black imagery is `not_observable`; tunnel map plus visible lamps supports `tunnel_lit` |
+| `odd.environment.glare` | Saturated bright regions, direction, semantic source | `IQC` detects glare candidates; `ORV` assigns sun/headlight/wet-road cause and direction; `FUS` validates persistence | 1-3 s per camera | Saturation from exposure alone is not glare; cause unresolvable is `ambiguous`; sufficient clean imagery with no glare emits `none` |
+| `odd.dynamic.traffic_density` | Tracks/counts in observable ROI and temporal traffic motion | `TRK` computes normalized actor count/occupancy/speed; `ORV` fallback classifies multi-view traffic; `FUS` detects stop-and-go | 3-10 s, ego-local road ROI | Front-only coverage cannot certify surround `empty`; missing tracks with full visual coverage uses experimental `ORV`; low observable area is `not_observable` |
+| `odd.dynamic.vru_density` | VRU tracks/classes or observable multi-view imagery | `TRK` counts VRUs by ROI and dwell; `ORV` fallback; `FUS` applies audited bins | 3-10 s, sidewalks/crossings/road ROI | `none` requires sufficient relevant-area coverage; class disagreement is `ambiguous`; untracked occluded sidewalks are not negative |
+| `odd.dynamic.parked_vehicle_density` | Vehicle tracks with motion history, parking/map context, imagery | `TRK` identifies stationary non-traffic vehicles; `ORV` adds parked semantics; `FUS` applies density bins | 5-15 s, curb/parking ROI | Stopped traffic must not be called parked; short track history is `ambiguous`; no observable parking edge is `not_observable` |
+| `odd.dynamic.oncoming_traffic` | Actor relative heading, lane direction/map association, imagery | `TRK` detects opposing motion in connected oncoming lanes; `ORV` fallback; `FUS` validates direction | 3-8 s, forward/side ROI | No actor can yield `absent` only with sufficient coverage; map direction unavailable and visual heading uncertain is `ambiguous` |
+| `odd.dynamic.agent_type_present` | Track classes and actor-visible images | `TRK` supplies stable actors; `ORV` classifies difficult vehicle/VRU types; `FUS` unions per-scene interval actors | 1-5 s, all observable cameras | `none` requires sufficient road/sidewalk coverage; unsupported fine class is `ambiguous_class` evidence, not a guessed type |
+| `odd.ego.speed_bin` | Metric pose timestamps and/or wheel speed | `KIN` derives gap-aware speed; `CAN` corroborates; `FUS` applies frozen epsilon, dwell, and bin boundaries | Native motion timeline, coalesced intervals | Missing/poor pose and CAN is `unavailable`; disagreement above tolerance is `ambiguous`; raw `ego_speed_kph` is always retained |
+
+### 15.7 Event label acquisition matrix
+
+Event rows are produced only after candidate detection and temporal
+segmentation. `ORV` event requests must span pre-event, active, and post-event
+frames.
+
+| Key | Required evidence | Acquisition and backend | Window / scope | Fallback and status gate |
+|---|---|---|---|---|
+| `event.ego.motion_state` | Signed speed, acceleration, timestamps, optional gear | `KIN`/`CAN` state machine with priority: stopped, reversing, starting, creeping, accelerating/decelerating, moving | Native timeline with dwell/hysteresis | No reliable motion source is `unavailable`; threshold oscillation is coalesced, not emitted as rapid events |
+| `event.ego.maneuver` | Actual ego trajectory, map match/lane transitions, road topology | `KIN` + `DMR` + `FUS` classify heading change, lane crossing, merge/diverge, stop, pull-over/out, and overtake | Complete maneuver, including approach and exit | Planned route alone is prohibited. Invalid trajectory is `unavailable`; competing lane/turn interpretations are `ambiguous` |
+| `event.ego.strong_response` | Acceleration, speed, yaw/steering response, road curvature, optional brake/steer CAN | `KIN`/`CAN`/`FUS` apply sustained deceleration and curvature-relative evasive thresholds | Trigger plus configured pre/post seconds | `ORV` cannot originate this label. No quality motion signal is `unavailable`; planned sharp turn must not become evasive steer |
+| `event.vehicle.interaction` | Stable vehicle tracks/relative trajectories and temporal camera evidence | `TRK` proposes geometric interactions; focused `ORV` identifies cut-in/out, braking, yielding, door opening; `FUS` requires actor continuity | Typically 3-10 s around interaction | Single image is invalid. No stable actor/temporal observability is `not_observable`; track/VLM disagreement is `ambiguous` |
+| `event.vru.interaction` | VRU actor continuity, path relation, temporal camera clip | `TRK` proposes crossings/merges; `ORV` resolves waiting, walking, sudden/occluded emergence, yielding; `FUS` validates ego-path relation | Typically 3-10 s around interaction | Single image cannot establish entering/emergence/yielding. Occluded actor without temporal evidence is `not_observable` |
+| `event.traffic_control.response` | Applicable control, current control state, ego trajectory | `DMR` identifies control; `ORV` reads visual state/officer; `KIN` provides response; `FUS` matches stop/proceed/yield behavior | Approach through control clearance | Any missing component makes response `unavailable` or `not_observable`; unrelated visible control must not be associated |
+| `event.right_of_way` | Static priority rules, route movement, actor movement and control state | `DMR` resolves regulatory priority; `BMR` may resolve irregular static topology; `TRK`/`ORV` supply actors; `FUS` determines current priority | Interaction/junction interval | `BMR` sees no camera. `ambiguous_priority` is valid only when sufficient evidence shows genuinely negotiated priority; insufficient rule/actor evidence uses `status=ambiguous`; no interaction/control context yields `not_applicable` |
+| `event.hazard.type` | Temporal road imagery, tracks/LiDAR, map/route blockage | `TRK` detects path occupancy/wrong-way motion; `ORV` identifies debris, obstacle, emergency vehicle; `FUS` requires corroboration for collision | Hazard onset through clearance | `collision` requires motion/contact or multiple-source evidence, not one VLM frame; no visible path is `not_observable` |
+| `event.hazard.response` | Valid hazard event plus ego trajectory after onset | `KIN`/`DMR`/`FUS` classify slow, stop, yield, lateral avoidance, or lane-change avoidance | Hazard onset through response completion | No valid hazard cannot produce a response; causality uncertain with unrelated maneuver is `ambiguous` |
+| `event.traffic_flow` | Ego speed history, traffic tracks, road/workzone context | `KIN`/`TRK` detect queue/congestion transitions; `ORV` identifies closure/workzone semantics; `FUS` segments entry/exit | 5-30 s depending on flow state | Stop at a signal is not congestion without traffic evidence; scene boundary before transition yields `interrupted` context |
+| `event.interaction.actor` | Actor identities/classes linked to an event | `TRK` supplies stable classes; `ORV` resolves semantic actor class; `FUS` attaches only event participants | Same interval as parent event | Scene-present but uninvolved actors are excluded; unknown class with visible actor is `ambiguous`, not `none` |
+| `event.outcome` | Complete event interval, actor/hazard state, ego motion, collision evidence | `FUS` applies outcome state machine after all event evidence | Event end plus resolution horizon | Scene ends early gives `interrupted` or `unresolved`; `normal_completion` requires observable resolution; collision requires corroboration |
+| `event.phase` | Final event boundaries and confidence | `FUS` temporal segmenter assigns onset/active/resolution subintervals | Within one `EventInstance` | No independent model call. Missing resolution remains an active event ending as `unresolved`; phases cannot overlap or exceed event bounds |
+
+### 15.8 Perception label acquisition matrix
+
+Object-level rows require a stable `actor_track_uid` or an explicitly marked
+experimental `visual_actor_uid`. Camera-level rows retain `camera_id`.
+
+| Key | Required evidence | Acquisition and backend | Window / scope | Fallback and status gate |
+|---|---|---|---|---|
+| `perception.occlusion.source` | Actor/scene visibility over time and possible occluders | `TRK` geometry proposes occluders; `ORV` classifies static/dynamic/ego/weather source; `FUS` unions supported sources | Actor-camera or scene interval, 1-5 s | No target/scene visibility reference is `not_observable`; `none` requires clear line of sight |
+| `perception.occlusion.level` | Visible fraction or temporally inferred actor extent | `TRK` uses box/mask/depth overlap; `ORV` estimates semantic level; `FUS` calibrates thresholds | Actor-camera interval | Full occlusion needs track continuity or known geometry; an actor never observed cannot be asserted `full` by VLM alone |
+| `perception.object.visibility` | Actor identity and per-camera visible extent | `TRK`/detection computes visible/truncated fractions; `ORV` handles semantic visibility; `FUS` resolves | Actor-camera interval | No actor identity is `unavailable`; outside FOV is handled by FOV state, while occluded in-FOV may be `not_visible` |
+| `perception.object.scale` | Actor bounding box/mask and camera resolution | `TRK` deterministically computes pixel-height/area bins per actor class; `ORV` fallback for experimental visual actors | Actor-camera frame/interval | No valid box or image geometry is `unavailable`; thresholds are camera-resolution and class normalized |
+| `perception.object.range` | LiDAR depth, 3D track, calibrated geometry, or monocular fallback | `TRK` uses metric range and frozen bins; `ORV` coarse fallback is experimental | Actor interval | VLM-only range has capped confidence; no metric/fallback observability is `not_observable`; raw range meters retained when available |
+| `perception.fov.state` | Camera calibration and temporal actor boxes/tracks | `TRK` deterministically evaluates center/edge/truncation and entering/leaving trend | Actor-camera sequence, at least several frames | Single frame cannot produce entering/leaving; missing calibration is `unavailable`; temporary missed detection is not automatically leaving |
+| `perception.scene.clutter` | Observable scene imagery and object/edge density | `ORV` gives semantic clutter; `TRK`/`IQC` provide actor count and edge-density features; `FUS` calibrates bins | Camera or surround scene, 1-3 s | Severe blur/occlusion is `not_observable`; high traffic alone is not necessarily high clutter |
+| `perception.object.overlap` | Actor boxes/masks, depth ordering, imagery | `TRK` computes overlap with nearer objects; `ORV` resolves semantic overlap; `FUS` bins severity | Actor-camera interval | 2D overlap without depth is lower confidence; missing actor geometry is `unavailable` |
+| `perception.visual.contrast` | Pixel luminance/chroma and target/background context | `IQC` measures local/global contrast; `ORV` distinguishes low-contrast versus silhouette | Camera or actor-camera interval | Invalid exposure first uses exposure/frame status; no identifiable target for object contrast is `not_observable` |
+| `perception.visual.lighting` | Exposure/HDR/shadow metrics and temporal semantic imagery | `IQC` proposes backlight, shadow, HDR, transition metrics; `ORV` assigns semantic lighting; `FUS` enforces mutual exclusion of normal | Per camera, 1-3 s | Invalid frame is `not_observable`; `normal` cannot co-occur with abnormal values |
+| `perception.visual.glare` | Saturation/bloom metrics and semantic light source | `IQC` detects candidate regions; `ORV` classifies sun/headlight/wet-road reflection | Per camera, 1-3 s | Exposure clipping without directional bloom is not glare; no cause support is `ambiguous`; clean visible frame can emit `none` |
+| `perception.image.exposure` | Decoded pixel histogram and spatial luminance | `IQC` deterministically classifies clipped dark/bright fractions and mixed regions | Per camera frame, temporally coalesced | Decode failure is frame status `corrupted_frame`; exposure is `not_observable` for invalid pixels |
+| `perception.image.blur` | Spatial frequency, edge spread, optical flow/ego motion | `IQC` detects blur and distinguishes motion versus defocus using temporal/flow cues; focused `ORV` only adjudicates ambiguous cause | Per camera, 0.5-2 s | Low-texture scene without enough edges is `not_observable`; no blur with adequate texture is `none` |
+| `perception.image.weather_artifact` | Temporal camera pixels and environment context | `IQC` proposes streak/spray/veiling patterns; `ORV` classifies artifact type; `FUS` separates lens-fixed contamination | Per camera, 2-5 s | No clean observable region is `not_observable`; atmospheric fog and lens condensation require temporal distinction |
+| `perception.image.lens_contamination` | Camera-fixed artifacts persistent across scene motion | `IQC` detects image-coordinate persistence; `ORV` classifies droplet/dirt/mud/condensation; `FUS` validates persistence | Per camera, preferably 3-10 s | A one-frame splash is weather artifact until persistent; insufficient temporal baseline is `ambiguous`; clean lens emits `none` |
+| `perception.image.frame_status` | Decoder result, timestamps, frame hashes, neighboring cameras/ego motion | `IQC` deterministically detects normal/obstruction/black/frozen/dropped/corrupted | Per camera at native rate | Stationary scene alone cannot imply frozen; full/partial obstruction semantic boundary may use `ORV` after deterministic candidate |
+| `perception.object.appearance` | Actor crop plus scene context and temporal identity | Focused `ORV` classifies unusual object/pose/temporary/ambiguous/deceptive appearance; `TRK` supplies stable actor | Actor-camera clip, 1-5 s | No stable actor/crop is `unavailable`; `normal` cannot coexist with unusual values; rare claim needs second-pass agreement |
+| `perception.map_element_condition` | Projected mapped element and corresponding camera region | `DMR` identifies expected lane/sign/control element; `ORV` classifies visible condition; `FUS` detects faded/occluded/temporary conflict/missing | Element-camera interval | Projection or association failure is `unavailable`; outside FOV is `not_observable`; visually missing requires valid expected map element and sufficient view |
+| `perception.scene.complexity` | Multi-view scene, topology, actor counts, controls, occlusion | `ORV` provides semantic complexity; `DMR`/`TRK` provide normalized feature vector; `FUS` applies audited calibration | Scene interval, 3-5 s | Complexity is not a raw VLM adjective: missing major modalities lowers confidence; thresholds are frozen from human audit |
+| `perception.mixed_traffic` | Actor classes and shared-lane/road context | `TRK` detects heterogeneous motorized/VRU participants; `ORV` fallback; `FUS` requires co-presence in relevant ROI | 3-10 s scene interval | Different actors at unrelated times do not establish mixed traffic; insufficient surround coverage is `not_observable` |
+| `perception.temporary_traffic_control` | Visible temporary signs/cones/barriers/officer and static map comparison | `ORV` detects temporary controls; `DMR` provides expected static state; `FUS` resolves present/absent and conflict | 3-8 s road/junction interval | `absent` requires sufficient road/control visibility; static mapped control alone is not temporary; map/visual mismatch supports present only with visual evidence |
+
+### 15.9 Acquisition completeness and KITScenes support
+
+The matrix defines how a label is acquired when the required capabilities
+exist. It does not claim that KITScenes supplies every capability.
+
+Before a KITScenes full run, the capability audit produces one row per
+key/backend:
+
+```text
+supported_certified
+supported_experimental
+unsupported_missing_source
+disabled_pending_audit
+```
+
+The Console Ontology tab displays this support state next to every candidate.
+Unsupported labels remain visible in the ontology but publish
+`status=unavailable`; they are not routed to a model to manufacture coverage.
+
+The initial expected routing is:
+
+- run `DMR`, `KIN`, and `IQC` wherever their source contracts are available;
+- run `BMR` only on the small subset of map/route observations that remain
+  geometrically ambiguous after deterministic resolution;
+- run `ORV` on task-specific camera clips for visual ODD/perception coverage;
+- enable track/LiDAR event rows only after the KITScenes capability audit
+  validates identities, calibration, and temporal coverage;
+- publish the exact supported/unsupported matrix with the LabelSet.
+
 ## 16. Flyte Workflow
 
 ### 16.1 Standalone dataset-labeler lifecycle
@@ -1558,9 +1846,12 @@ wf_generate_odd_labelset(
   labeler_config_uri,
   labeler_config_sha256,
   enabled_sources,
-  vlm_provider,
-  vlm_model_revision,
-  vlm_prompt_sha256,
+  road_vlm_provider,
+  road_vlm_model_revision,
+  road_vlm_prompt_bundle_sha256,
+  map_resolver_provider,
+  map_resolver_model_revision,
+  map_resolver_prompt_bundle_sha256,
   calibration_bundle_sha256,
   publication_prefix,
 )
@@ -1582,12 +1873,14 @@ resolve_dataset_snapshot
   -> plan_scene_partitions
   -> map over scene partitions:
        extract_canonical_evidence
-       +-> label_map_route
+       +-> label_map_route_deterministic
+             -> select_ambiguous_map_route_requests
+             -> label_map_route_bedrock
        +-> label_gnss_ins
        +-> label_image_qc
        +-> label_can_optional
-       +-> select_vlm_requests
-             -> label_vlm
+       +-> select_road_vlm_requests
+             -> label_openai_compatible_road_vlm
        -> label_fusion_candidates
        -> segment_events
        -> validate_partition
@@ -1603,7 +1896,9 @@ resolve_dataset_snapshot
 
 Source labelers are independently cacheable. Changing a VLM prompt does not
 rerun map, GNSS/INS, or image-QC labeling. Changing a fusion policy reuses all
-source evidence.
+source evidence. Changing a Bedrock topology prompt reruns only the cached
+deterministic-ambiguous `BMR` request set, not deterministic map extraction or
+camera labeling.
 
 `materialize_console_index` is a downstream read-model update. A successful
 LabelSet remains valid even if Console materialization needs to be retried.
@@ -1619,7 +1914,8 @@ source artifact digests
 adapter version/config
 ontology SHA-256
 labeler version/config
-VLM model/prompt/decoding hashes where applicable
+OpenAI-compatible VLM model/prompt/decoding hashes where applicable
+Bedrock map resolver model/prompt/inference-profile hashes where applicable
 fusion version/config
 calibration bundle SHA-256
 ```
@@ -1647,17 +1943,26 @@ The final publisher:
 A retry with identical inputs produces the same records and safely reuses
 content. Partial output is never discoverable as ready.
 
-### 16.6 VLM resource and failure policy
+### 16.6 Model-inference resource and failure policy
 
 - Deterministic tasks do not depend on the Cosmos endpoint.
-- VLM requests have bounded concurrency and explicit cost/request counts.
+- Deterministic map/route tasks do not depend on Bedrock.
+- OpenAI-compatible road-VLM and Bedrock map-resolver requests have separate
+  bounded concurrency, retry, timeout, and cost budgets.
+- Camera requests are routed only to the configured OpenAI-compatible endpoint.
+- Bedrock requests contain only privacy-filtered map/route renders and
+  structured topology summaries.
 - Transport retries are bounded and idempotent by request digest.
 - A failed request produces evidence with the appropriate unavailable or
   not-observable status; it does not create `none`.
-- A full LabelSet may publish with experimental VLM gaps only when the manifest
-  reports coverage and the frozen completeness gate permits it.
+- A failed `BMR` fallback preserves the deterministic `ambiguous` result; it
+  does not make the underlying map channel unavailable.
+- A full LabelSet may publish with experimental model-inference gaps only when
+  the manifest reports coverage and the frozen completeness gate permits it.
 - The existing Cosmos cluster is treated as an external protected dependency;
   this workflow does not modify its infrastructure.
+- The workflow invokes Bedrock Runtime only; it does not create or modify
+  Bedrock models, inference profiles, IAM roles, or guardrail resources.
 
 ## 17. Artifact and Publication Contract
 
@@ -1854,6 +2159,8 @@ Each key row shows:
 - all allowed candidate values;
 - neutral or `none` behavior;
 - primary and fallback sources;
+- inference backend where applicable (`deterministic`,
+  `openai_compatible`, or `bedrock_claude`);
 - applicable subject and temporal scope;
 - quality tier;
 - support state for the selected dataset;
@@ -2006,8 +2313,9 @@ time labels without shifting page layout. Planned `odd.route.action` and actual
 
 `none`, `not_observable`, `unavailable`, and `ambiguous` must be visually
 distinct. A missing response must never render as `none`. Evidence details show
-supporting/conflicting sources, measurements, labeler version, and LabelSet
-provenance without replacing the concise default view.
+supporting/conflicting sources, inference backend/model revision, measurements,
+labeler version, and LabelSet provenance without replacing the concise default
+view.
 
 ### 18.9 LabelSet state and operational visibility
 
@@ -2222,11 +2530,19 @@ definition is unclear, the ontology is changed first.
   policy. ODD search results must not bypass disabled exact-map access.
 - Raw camera clips and VLM responses remain under the same access controls as
   source data.
-- External VLM providers are disabled unless dataset policy explicitly permits
-  data transfer. The initial protected Cosmos endpoint is the expected backend.
+- Vehicle-camera images are sent only to the configured OpenAI-compatible road
+  VLM endpoint. External providers are disabled unless dataset policy explicitly
+  permits data transfer. The initial protected Cosmos endpoint is the expected
+  backend.
+- Bedrock Claude receives no vehicle-camera image, latitude/longitude, street
+  name, provider-native map ID, or scene ID. It receives only an ego-local
+  semantic map/route render, a privacy-filtered graph summary, and constrained
+  candidates.
+- Bedrock and OpenAI-compatible request/response artifacts use separate prefixes
+  and IAM permissions so routing mistakes fail closed.
 - Credentials and endpoint URLs are never stored in LabelSet provenance.
-- VLM request counts, input frame counts, failures, latency, GPU time, and
-  estimated cost are published as operational metrics.
+- Request counts, input image counts, failures, latency, model identifiers, and
+  estimated cost are published separately for `ORV` and `BMR`.
 - Deterministic source labels are generated before VLM scheduling so the VLM is
   not billed for fields that can be resolved without it.
 - Re-labeling one source or prompt reuses unaffected evidence through content
@@ -2252,6 +2568,7 @@ No full VLM run starts before this phase.
 Implement and validate:
 
 - map/route road topology and planned action;
+- deterministic ambiguity scores for route action and junction classification;
 - GNSS/INS speed, raw speed, motion, and actual maneuver candidates;
 - deterministic image quality;
 - status and capability records;
@@ -2259,14 +2576,21 @@ Implement and validate:
 
 This phase should already produce useful ODD statistics without Cosmos.
 
-### 22.3 Phase 2: visual ODD and perception labels
+### 22.3 Phase 2: selective model resolvers
 
-1. Define schema-constrained temporal multi-view prompts.
-2. Run a small stratified KITScenes subset.
-3. Audit per key/value and calibrate confidence.
-4. Correct ontology or prompt ambiguities before the full run.
-5. Run full 1 Hz coverage plus triggered refinement.
-6. Publish VLM evidence separately from resolved fusion output.
+1. Build privacy-filtered map/route renders and structured summaries for
+   deterministic ambiguous cases.
+2. Validate Bedrock Claude on irregular junction and route-action golden
+   fixtures, including post-response geometry checks.
+3. Define schema-constrained OpenAI-compatible temporal multi-view prompts for
+   camera-derived road knowledge.
+4. Run both providers on separate small stratified KITScenes subsets.
+5. Audit per key/value and calibrate confidence separately for `BMR` and `ORV`.
+6. Correct ontology, prompt, or deterministic-candidate ambiguities before the
+   full run.
+7. Run full 1 Hz `ORV` coverage plus triggered refinement; run `BMR` only for
+   deterministic ambiguous map/route observations.
+8. Publish each provider's evidence separately from resolved fusion output.
 
 ### 22.4 Phase 3: events and fusion
 
@@ -2369,10 +2693,13 @@ observable coverage and another has 30%.
 
 - JSON/Arrow schema round trip.
 - Exact enum and cardinality validation.
+- Every ontology key has exactly one acquisition-matrix entry and every matrix
+  entry references a real ontology key.
 - Status/value and `none` invariants.
 - Stable content identities across partitioning.
 - Dataset and LabelSet digest checks.
 - Provenance completeness.
+- Backend/source mapping permits only `BMR -> map_route` and `ORV -> vlm`.
 
 ### 24.2 Adapter conformance tests
 
@@ -2390,7 +2717,13 @@ observable coverage and another has 30%.
   reverse, hard brake, and evasive candidates.
 - Image fixtures for exposure, blur, black, frozen, dropped, and corrupted
   frames.
-- VLM parser tests for valid, incomplete, conflicting, and excluded outputs.
+- OpenAI-compatible road-VLM parser tests for valid, incomplete, conflicting,
+  and excluded outputs.
+- Bedrock map-resolver fixtures for left/right/straight route action,
+  T/Y/cross/roundabout/merge/diverge topology, and grade-separated ambiguity.
+- Post-Bedrock geometry validation rejects unsupported value/primitive pairs.
+- Request serialization proves that Bedrock receives no camera bytes or exact
+  geography and the road VLM receives no map render.
 - CAN normalization and missing-signal tests.
 
 ### 24.4 Fusion tests
@@ -2455,14 +2788,16 @@ execution.
 ### PR 3: Deterministic labelers
 
 - Map/route, GNSS/INS, and image-QC labelers.
+- Deterministic candidate scores and ambiguity reasons for map/route topology.
 - Continuous measurements and temporal smoothing.
 - KITScenes deterministic smoke LabelSet.
 
-### PR 4: VLM evidence
+### PR 4: Selective model-resolver evidence
 
-- ODD-specific temporal clip builder and prompt schema.
-- Model-agnostic VLM backend.
-- Bounded scheduling, cache, raw response artifacts, and parser.
+- OpenAI-compatible ODD temporal clip builder and prompt schema.
+- Bedrock Claude privacy-filtered map/route request and geometry validator.
+- Provider-specific bounded scheduling, cache, raw response artifacts, and
+  parser.
 - Stratified audit tooling.
 
 ### PR 5: Fusion and events
@@ -2517,6 +2852,8 @@ execution.
 - Planned route action and actual maneuver are separate keys and derivations.
 - Object and camera labels have valid subjects.
 - Taxonomy and output schemas are single-sourced and hashed.
+- Every ontology key has a reviewed acquisition rule with required evidence,
+  backend, scope, fallback, and status gate.
 - ODD values are absent from model input and target contracts.
 
 ### 26.2 Dataset independence
@@ -2535,6 +2872,8 @@ execution.
 - Every output is traceable to source artifact hashes, code, image, config, and
   Flyte executions.
 - Partial or mixed-version output cannot be published as ready.
+- OpenAI-compatible and Bedrock model revisions, prompts, decoding settings,
+  request digests, and response digests are pinned in provenance.
 
 ### 26.4 Quality
 
@@ -2544,6 +2883,9 @@ execution.
 - Experimental labels are visibly marked and never merged into certified
   statistics without filtering.
 - Event boundary and actor-continuity errors are measured.
+- Bedrock map/route responses pass independent geometry validation.
+- Camera-derived model labels pass per-key human audit and calibrated-confidence
+  gates before certification.
 
 ### 26.5 Product use
 
@@ -2580,6 +2922,10 @@ These are empirical configuration decisions, not unresolved architecture:
    refinement budget.
 6. Initial per-key certification thresholds and audit sample allocation.
 7. Which object-level labels remain disabled until stable tracks are available.
+8. Pinned OpenAI-compatible road-VLM model revision and per-bundle prompt
+   versions.
+9. Pinned Bedrock Claude model/inference profile, topology prompt versions, and
+   the deterministic ambiguity threshold that triggers `BMR`.
 
 Each value is selected from a reproducible audit artifact and frozen before the
 full run. None may be selected after inspecting desired model-performance
@@ -2597,3 +2943,8 @@ results.
 - ASAM OpenLABEL, scene, object, frame, and stream labeling concepts.
 - BSI PAS 1883:2020, operational design domain taxonomy.
 - PEGASUS project, six-layer scenario model.
+- AWS Bedrock Runtime,
+  [Converse API](https://docs.aws.amazon.com/bedrock/latest/APIReference/API_runtime_Converse.html).
+- OpenAI,
+  [Chat Completions API](https://platform.openai.com/docs/api-reference/chat),
+  used as the provider-compatible multimodal request boundary.
