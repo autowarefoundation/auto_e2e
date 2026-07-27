@@ -767,6 +767,7 @@ def test_navigation_objective_wiring_is_train_only_and_versioned():
         "reconstruction_audit",
         "reconstruction_audit_decision",
         "reconstruction_audit_rationale",
+        "allow_resume_policy_transition",
     ):
         assert isinstance(train_keywords[field], ast.Name)
         assert train_keywords[field].id == field
@@ -971,6 +972,67 @@ def test_terminal_resume_state_allows_finalization():
             bad_epochs=0,
             requested_epochs=10,
             patience=3,
+        )
+
+
+def test_resume_policy_transition_enables_repeat_and_resets_patience():
+    transition = workflows._resume_policy_transition(
+        saved_config={
+            "junction_sampling": {"enabled": False, "policy": None},
+            "early_stopping_patience": 3,
+        },
+        requested_config={
+            "junction_sampling": {
+                "enabled": True,
+                "policy": {"version": "navigation_repeat_v1"},
+            },
+            "early_stopping_patience": 8,
+        },
+    )
+
+    assert transition["policy_version"] == (
+        "navigation_repeat_resume_transition_v1"
+    )
+    assert transition["junction_sampling"]["from"]["enabled"] is False
+    assert transition["junction_sampling"]["to"]["enabled"] is True
+    assert transition["early_stopping_patience"] == {
+        "from": 3,
+        "to": 8,
+    }
+    assert transition["bad_epochs_after_reset"] == 0
+
+
+@pytest.mark.parametrize(
+    ("saved_enabled", "requested_enabled", "saved_patience", "new_patience"),
+    [
+        (True, True, 3, 8),
+        (False, False, 3, 8),
+        (False, True, 3, 3),
+        (False, True, 8, 3),
+    ],
+)
+def test_resume_policy_transition_rejects_unsupported_changes(
+    saved_enabled,
+    requested_enabled,
+    saved_patience,
+    new_patience,
+):
+    with pytest.raises(ValueError, match="resume policy transition"):
+        workflows._resume_policy_transition(
+            saved_config={
+                "junction_sampling": {
+                    "enabled": saved_enabled,
+                    "policy": None,
+                },
+                "early_stopping_patience": saved_patience,
+            },
+            requested_config={
+                "junction_sampling": {
+                    "enabled": requested_enabled,
+                    "policy": {"version": "navigation_repeat_v1"},
+                },
+                "early_stopping_patience": new_patience,
+            },
         )
 
 
