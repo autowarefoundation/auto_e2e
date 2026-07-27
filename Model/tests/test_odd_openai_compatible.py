@@ -123,6 +123,8 @@ def test_observer_uses_openai_contract_and_validates_output() -> None:
     system_prompt = request["messages"][0]["content"]
     assert "near collision" in system_prompt
     assert "single image" in system_prompt
+    assert "reason names or describes an allowed candidate" in system_prompt
+    assert "status MUST be valid" in system_prompt
 
 
 def test_invalid_responses_exhaust_retries_and_abstain() -> None:
