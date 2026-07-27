@@ -79,6 +79,7 @@ func main() {
 		s3svc, cfg.ExactGeoEnabled, cfg.ExactGeoRequiredRole,
 	)
 	reasoningH := handler.NewReasoningHandler(s3svc)
+	oddH := handler.NewODDHandler(s3svc)
 	scenesH := handler.NewScenesHandler(s3svc)
 	overlayH := handler.NewOverlayHandler(
 		s3svc, cfg.ExactGeoEnabled, cfg.ExactGeoRequiredRole,
@@ -130,6 +131,12 @@ func main() {
 			r.Get("/reasoning-labels/prompt-versions", reasoningH.PromptVersions)
 			r.Get("/reasoning-labels/stats-detail", reasoningH.StatsDetail)
 			r.Get("/reasoning-labels/{dataset}/{sample_id}", reasoningH.GetLabel)
+
+			r.Get("/odd/ontology", oddH.Ontology)
+			r.Get("/odd/statistics", oddH.Statistics)
+			r.Get("/odd/labelsets", oddH.LabelSets)
+			r.Get("/odd/scenes/search", oddH.Search)
+			r.Get("/odd/scenes/{scene_uid}", oddH.Scene)
 
 			r.Get("/mlflow/experiments", mlflowH.Experiments)
 			r.Get("/mlflow/experiments/{id}/runs", mlflowH.Runs)
