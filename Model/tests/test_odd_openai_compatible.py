@@ -91,6 +91,31 @@ def test_observer_uses_openai_contract_and_validates_output() -> None:
     assert request["model"] == "road-observer"
     assert request["temperature"] == 0.0
     assert request["response_format"]["type"] == "json_schema"
+    item_variants = request["response_format"]["json_schema"]["schema"][
+        "properties"
+    ]["observations"]["items"]["oneOf"]
+    sky_valid = next(
+        variant
+        for variant in item_variants
+        if variant["properties"]["key"].get("const") == "odd.environment.sky"
+        and variant["properties"]["status"].get("const") == "valid"
+    )
+    sky_missing = next(
+        variant
+        for variant in item_variants
+        if variant["properties"]["key"].get("const") == "odd.environment.sky"
+        and "enum" in variant["properties"]["status"]
+    )
+    assert sky_valid["properties"]["values"] == {
+        "type": "array",
+        "minItems": 1,
+        "maxItems": 1,
+        "items": {
+            "type": "string",
+            "enum": ["clear", "partly_cloudy", "overcast"],
+        },
+    }
+    assert sky_missing["properties"]["values"]["maxItems"] == 0
     assert (
         request["messages"][1]["content"][1]["image_url"]["url"]
         == "data:image/jpeg;base64,dGVzdC1qcGVn"
