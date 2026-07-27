@@ -484,11 +484,14 @@ def test_recovery_launcher_requires_audited_artifacts_and_skips_source_stages():
     ) in buildspec
     assert 'ENABLE_JUNCTION_SAMPLING: "false"' in buildspec
     assert 'ENABLE_ROUTE_CONSISTENCY: "false"' in buildspec
+    assert 'ALLOW_RESUME_POLICY_TRANSITION: "false"' in buildspec
     assert "--max_partitions" in buildspec
     assert "--validation_scope" in buildspec
     assert "--training_objective_version" in buildspec
     assert "--enable_junction_sampling" in buildspec
     assert "--enable_route_consistency" in buildspec
+    assert "--allow_resume_policy_transition" in buildspec
+    assert "--no_allow_resume_policy_transition" in buildspec
     assert "--route_consistency_weight" in buildspec
     assert 'RECONSTRUCTION_AUDIT_URI: ""' in buildspec
     assert "--reconstruction_audit" in buildspec
