@@ -246,7 +246,12 @@ def _system_prompt() -> str:
         "absent. Missing, occluded, clipped, or irrelevant evidence must be "
         "not_observable, never none. Use unavailable only when the supplied "
         "input cannot support the key. Use ambiguous for conflicting visible "
-        "evidence. Do not infer hard braking, evasive steering, collision, "
+        "evidence. Status and values must agree. If the reason names or "
+        "describes an allowed candidate, status MUST be valid and values MUST "
+        "contain that candidate. Use not_observable only when the reason "
+        "explains which required region or subject is not visible. Supplied "
+        "images are available and must not be treated as a missing input. "
+        "Do not infer hard braking, evasive steering, collision, "
         "near collision, or actor intent from a single image. Do not invent "
         "values outside the candidate list."
     )
