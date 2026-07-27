@@ -550,6 +550,53 @@ def _resume_terminal_state(
     return completed_epoch == requested_epochs or stopped_early, stopped_early
 
 
+def _resume_policy_transition(
+    *,
+    saved_config: dict,
+    requested_config: dict,
+) -> dict:
+    """Validate and describe the supported sampling-policy continuation."""
+    saved_sampling = saved_config.get("junction_sampling")
+    requested_sampling = requested_config.get("junction_sampling")
+    if not isinstance(saved_sampling, dict) or not isinstance(
+        requested_sampling, dict
+    ):
+        raise ValueError(
+            "resume policy transition requires junction sampling metadata"
+        )
+    if saved_sampling.get("enabled") is not False:
+        raise ValueError(
+            "resume policy transition requires sampling to be disabled "
+            "in the checkpoint"
+        )
+    if requested_sampling.get("enabled") is not True:
+        raise ValueError(
+            "resume policy transition requires sampling to be enabled"
+        )
+    saved_patience = int(saved_config.get("early_stopping_patience", 0))
+    requested_patience = int(
+        requested_config.get("early_stopping_patience", 0)
+    )
+    if requested_patience <= saved_patience:
+        raise ValueError(
+            "resume policy transition requires early-stopping patience "
+            "to increase"
+        )
+    return {
+        "policy_version": "navigation_repeat_resume_transition_v1",
+        "junction_sampling": {
+            "from": saved_sampling,
+            "to": requested_sampling,
+        },
+        "early_stopping_patience": {
+            "from": saved_patience,
+            "to": requested_patience,
+        },
+        "bad_epochs_before_reset": None,
+        "bad_epochs_after_reset": 0,
+    }
+
+
 def _collated_metadata_value(
     metadata,
     key: str,
@@ -2776,6 +2823,7 @@ def train_il(
     num_workers: int = 0,
     resume_from: Optional[FlyteFile] = None,
     early_stopping_patience: int = 3,
+    allow_resume_policy_transition: bool = False,
 ) -> TrainOutput:
     """Train AutoE2E model on pre-extracted WebDataset shards.
 
@@ -2818,9 +2866,13 @@ def train_il(
         raise ValueError(
             f"val_fraction must be between 0 and 1, got {val_fraction}"
         )
-    if not 3 <= early_stopping_patience <= 5:
+    if not 3 <= early_stopping_patience <= 10:
         raise ValueError(
-            "early_stopping_patience must be between 3 and 5"
+            "early_stopping_patience must be between 3 and 10"
+        )
+    if allow_resume_policy_transition and resume_from is None:
+        raise ValueError(
+            "resume policy transition requires a resume checkpoint"
         )
     if epochs <= 0:
         raise ValueError(f"epochs must be positive, got {epochs}")
@@ -2852,12 +2904,15 @@ def train_il(
         raise ValueError(
             "navigation planner objectives are KITScenes-only"
         )
-    if (
-        enable_junction_sampling or enable_route_consistency
-    ) and not objective_v1:
+    if enable_junction_sampling and not (
+        objective_v1 or objective_v2 or objective_v2_control
+    ):
         raise ValueError(
-            "navigation sampling and route consistency require "
-            "kitscenes_navigation_objective_v1"
+            "navigation sampling requires a KITScenes navigation objective"
+        )
+    if enable_route_consistency and not objective_v1:
+        raise ValueError(
+            "route consistency requires kitscenes_navigation_objective_v1"
         )
     if enable_route_consistency and not enable_route_conditioning:
         raise ValueError(
@@ -2867,12 +2922,9 @@ def train_il(
         raise ValueError(
             "enabled route consistency requires a positive weight"
         )
-    if objective_v2 and (
-        enable_junction_sampling or enable_route_consistency
-    ):
+    if objective_v2 and enable_route_consistency:
         raise ValueError(
-            "rollout_aligned_planner_v1 replaces legacy route consistency "
-            "and disables junction repeat"
+            "rollout_aligned_planner_v1 replaces legacy route consistency"
         )
     if objective_v2 and not enable_route_conditioning:
         raise ValueError(
@@ -3376,7 +3428,7 @@ def train_il(
             else None
         ),
     }
-    data_fingerprint = stable_digest({
+    data_fingerprint_payload = {
         "partitions": data_identity,
         "coverage": data_coverage,
         "navigation_quality_audit_sha256": (
@@ -3388,6 +3440,11 @@ def train_il(
             else None
         ),
         "navigation_exposure": navigation_exposure_metadata,
+    }
+    data_fingerprint = stable_digest(data_fingerprint_payload)
+    data_fingerprint_without_navigation_repeat = stable_digest({
+        **data_fingerprint_payload,
+        "navigation_exposure": None,
     })
     validation_split_contract = {
         "strategy": training_policy.validation_strategy,
@@ -3721,6 +3778,7 @@ def train_il(
     start_epoch = 1
     best_local_path = None
     resumed = resume_from is not None
+    resume_policy_transition = None
     terminal_resume = False
     stopped_early = False
 
@@ -3736,10 +3794,30 @@ def train_il(
             map_location="cpu",
             weights_only=False,
         )
+        if allow_resume_policy_transition:
+            resume_policy_transition = _resume_policy_transition(
+                saved_config=dict(resume_payload["config"]),
+                requested_config=checkpoint_config,
+            )
         validate_resume_payload(
             resume_payload,
             expected_config=checkpoint_config,
             expected_data_fingerprint=data_fingerprint,
+            allowed_config_changes=(
+                frozenset({
+                    "junction_sampling",
+                    "early_stopping_patience",
+                })
+                if resume_policy_transition is not None
+                else frozenset()
+            ),
+            compatible_data_fingerprints=(
+                frozenset({
+                    data_fingerprint_without_navigation_repeat,
+                })
+                if resume_policy_transition is not None
+                else frozenset()
+            ),
         )
         model.load_state_dict(resume_payload["model_state_dict"])
         optimizer.load_state_dict(resume_payload["optimizer_state_dict"])
@@ -3765,6 +3843,14 @@ def train_il(
         saved_best = state.get("best")
         best_checkpoint = dict(saved_best) if saved_best is not None else None
         bad_epochs = int(state.get("bad_epochs", 0))
+        if resume_policy_transition is not None:
+            resume_policy_transition["bad_epochs_before_reset"] = bad_epochs
+            bad_epochs = 0
+            resume_policy_transition["source_checkpoint"] = {
+                "epoch": completed_epoch,
+                "uri": resumed_checkpoint["uri"],
+                "sha256": resumed_checkpoint["sha256"],
+            }
         saved_selector_availability = state.get(
             "checkpoint_selector_availability"
         )
@@ -3841,6 +3927,18 @@ def train_il(
             selection=best_checkpoint.get("selection"),
         )
         restore_rng_state(resume_payload["rng_state"])
+        if resume_policy_transition is not None:
+            with mlflow.start_run(run_id=run_id):
+                mlflow.set_tags({
+                    "resume_policy_transition": (
+                        resume_policy_transition["policy_version"]
+                    ),
+                    "resume_bad_epochs_reset": "true",
+                    "resume_navigation_repeat_enabled": "true",
+                    "resume_early_stopping_patience": str(
+                        early_stopping_patience
+                    ),
+                })
         print(
             f"Resuming MLflow run {run_id} at epoch {start_epoch}; "
             f"bad_epochs={bad_epochs} terminal={terminal_resume}"
@@ -5069,6 +5167,7 @@ def train_il(
                     "early_stopping_patience": (
                         early_stopping_patience
                     ),
+                    "resume_policy_transition": resume_policy_transition,
                 },
                 "data_fingerprint": data_fingerprint,
             },
@@ -5327,6 +5426,7 @@ def train_il(
             "epochs_completed": int(final_checkpoint["epoch"]),
             "stopped_early": stopped_early,
             "early_stopping_patience": early_stopping_patience,
+            "resume_policy_transition": resume_policy_transition,
             "batch_size": batch_size,
             "grad_accum_steps": grad_accum_steps,
             "num_workers": num_workers,
@@ -5435,6 +5535,11 @@ def train_il(
                 str(best_checkpoint["selection"]["score"])
                 if selector_enabled
                 else "not_applicable"
+            ),
+            "resume_policy_transition": (
+                resume_policy_transition["policy_version"]
+                if resume_policy_transition is not None
+                else "none"
             ),
         })
         mlflow.log_artifact(meta_path, artifact_path="training")
@@ -7818,6 +7923,7 @@ def wf_sharded_full_run(
     num_workers: int = 4,
     resume_from: Optional[FlyteFile] = None,
     early_stopping_patience: int = 3,
+    allow_resume_policy_transition: bool = False,
 ) -> EvalMetrics:
     """End-to-end scaled run (#121): episode-sharded dataset fan-out → IL train
     (all three losses) → held-out eval, in ONE execution.
@@ -7865,7 +7971,8 @@ def wf_sharded_full_run(
         enable_world_model=enable_world_model, val_fraction=val_fraction,
         validation_scope=validation_scope,
         num_workers=num_workers, resume_from=resume_from,
-        early_stopping_patience=early_stopping_patience)
+        early_stopping_patience=early_stopping_patience,
+        allow_resume_policy_transition=allow_resume_policy_transition)
     return evaluate_il_policy(
         checkpoint=out.checkpoint, shards=shards, dataset=dataset,
         train_metadata=out.metadata)
@@ -7901,6 +8008,7 @@ def wf_recovered_kitscenes_full_run(
     num_workers: int = 4,
     resume_from: Optional[FlyteFile] = None,
     early_stopping_patience: int = 3,
+    allow_resume_policy_transition: bool = False,
 ) -> EvalMetrics:
     """Repack audited artifacts, then train/evaluate without ingest or Cosmos."""
     shards = wf_repack_existing_kitscenes(
@@ -7940,6 +8048,7 @@ def wf_recovered_kitscenes_full_run(
         num_workers=num_workers,
         resume_from=resume_from,
         early_stopping_patience=early_stopping_patience,
+        allow_resume_policy_transition=allow_resume_policy_transition,
     )
     return evaluate_il_policy(
         checkpoint=out.checkpoint,
@@ -8017,6 +8126,7 @@ def wf_train_il(
     num_workers: int = 0,
     resume_from: Optional[FlyteFile] = None,
     early_stopping_patience: int = 3,
+    allow_resume_policy_transition: bool = False,
 ) -> EvalMetrics:
     """IL Train → Evaluate. All datasets' shards passed in; `dataset` selects one.
 
@@ -8050,7 +8160,8 @@ def wf_train_il(
                    enable_world_model=enable_world_model, val_fraction=val_fraction,
                    validation_scope=validation_scope,
                    num_workers=num_workers, resume_from=resume_from,
-                   early_stopping_patience=early_stopping_patience)
+                   early_stopping_patience=early_stopping_patience,
+                   allow_resume_policy_transition=allow_resume_policy_transition)
     return evaluate_il_policy(checkpoint=out.checkpoint, shards=shards, dataset=dataset,
                               train_metadata=out.metadata)
 
