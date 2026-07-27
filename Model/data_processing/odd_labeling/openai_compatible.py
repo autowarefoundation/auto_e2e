@@ -138,6 +138,86 @@ def _parse_json_content(content: str) -> dict[str, Any]:
 
 def _response_schema(keys: Iterable[str]) -> dict[str, Any]:
     key_list = list(keys)
+    observation_variants: list[dict[str, Any]] = []
+    for key in key_list:
+        definition = ONTOLOGY[key]
+        shared_properties = {
+            "key": {"type": "string", "const": key},
+            "confidence": {
+                "type": "number",
+                "minimum": 0.0,
+                "maximum": 1.0,
+            },
+            "supporting_cameras": {
+                "type": "array",
+                "items": {"type": "string"},
+            },
+            "reason": {"type": "string"},
+        }
+        observation_variants.append(
+            {
+                "type": "object",
+                "additionalProperties": False,
+                "required": [
+                    "key",
+                    "status",
+                    "values",
+                    "confidence",
+                    "supporting_cameras",
+                    "reason",
+                ],
+                "properties": {
+                    **shared_properties,
+                    "status": {"type": "string", "const": "valid"},
+                    "values": {
+                        "type": "array",
+                        "minItems": 1,
+                        "maxItems": (
+                            1
+                            if definition.cardinality == "single"
+                            else len(definition.values)
+                        ),
+                        "items": {
+                            "type": "string",
+                            "enum": list(definition.values),
+                        },
+                    },
+                },
+            }
+        )
+        observation_variants.append(
+            {
+                "type": "object",
+                "additionalProperties": False,
+                "required": [
+                    "key",
+                    "status",
+                    "values",
+                    "confidence",
+                    "supporting_cameras",
+                    "reason",
+                ],
+                "properties": {
+                    **shared_properties,
+                    "status": {
+                        "type": "string",
+                        "enum": [
+                            "unavailable",
+                            "not_observable",
+                            "ambiguous",
+                        ],
+                    },
+                    "values": {
+                        "type": "array",
+                        "maxItems": 0,
+                        "items": {
+                            "type": "string",
+                            "enum": list(definition.values),
+                        },
+                    },
+                },
+            }
+        )
     return {
         "name": "road_scene_observations",
         "strict": True,
@@ -150,44 +230,7 @@ def _response_schema(keys: Iterable[str]) -> dict[str, Any]:
                     "type": "array",
                     "minItems": len(key_list),
                     "maxItems": len(key_list),
-                    "items": {
-                        "type": "object",
-                        "additionalProperties": False,
-                        "required": [
-                            "key",
-                            "status",
-                            "values",
-                            "confidence",
-                            "supporting_cameras",
-                            "reason",
-                        ],
-                        "properties": {
-                            "key": {"type": "string", "enum": key_list},
-                            "status": {
-                                "type": "string",
-                                "enum": [
-                                    "valid",
-                                    "unavailable",
-                                    "not_observable",
-                                    "ambiguous",
-                                ],
-                            },
-                            "values": {
-                                "type": "array",
-                                "items": {"type": "string"},
-                            },
-                            "confidence": {
-                                "type": "number",
-                                "minimum": 0.0,
-                                "maximum": 1.0,
-                            },
-                            "supporting_cameras": {
-                                "type": "array",
-                                "items": {"type": "string"},
-                            },
-                            "reason": {"type": "string"},
-                        },
-                    },
+                    "items": {"oneOf": observation_variants},
                 }
             },
         },
