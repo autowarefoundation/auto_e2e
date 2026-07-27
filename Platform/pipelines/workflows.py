@@ -29,6 +29,9 @@ from Platform.pipelines.overlay_tasks import (
     register_selected_overlay_checkpoint,
     resolve_overlay_model_version,
 )
+from Platform.pipelines.odd_labeling_workflow import (  # noqa: F401
+    wf_generate_odd_labelset,
+)
 from Platform.pipelines.trajectory_visualization_tasks import (
     export_trajectory_report,
 )
