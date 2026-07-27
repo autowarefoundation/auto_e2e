@@ -41,6 +41,9 @@ class AutoE2EDriver(BaseTrajectoryModel):
         self.parser = AlpasimStreamParser()
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.model = None
+        if model_checkpoint is not None:
+            self.model = torch.load(model_checkpoint, map_location=self.device)
+            self.model.eval()
 
     def predict(self, input_data: PredictionInput) -> ModelPrediction:
         """Process real-time PredictionInput to ModelPrediction.
@@ -65,7 +68,9 @@ class AutoE2EDriver(BaseTrajectoryModel):
             headings = np.zeros(64, dtype=np.float32)
         else:
             with torch.no_grad():
-                pass
+                outputs = self.model(tensors)
+                points = outputs["trajectory_points"][0].cpu().numpy()
+                headings = outputs["headings"][0].cpu().numpy()
 
         return ModelPrediction(
             trajectory_points=points,

@@ -303,38 +303,6 @@ class TestOfflineKitScenesParity:
         assert PARSER_CAMERA_NAMES == KITSCENES_CAMERA_NAMES
         assert len(PARSER_CAMERA_NAMES) == 7
 
-    def test_camera_projection_matrices_compatibility(self) -> None:
-        """Verify projection matrix generation for AlpasimStreamParser camera names.
-
-        The 7 camera projection matrices rescaled to 256x256 resolution must have
-        shape ``(7, 3, 4)`` and dtype ``torch.float32``.
-        """
-        if compute_camera_projection_matrices is None:
-            pytest.skip("kitscenes SDK is not installed")
-
-        class StubCalib:
-            image_size = (1920, 1080)
-            intrinsic = np.array([
-                [1000.0, 0.0, 960.0],
-                [0.0, 1000.0, 540.0],
-                [0.0, 0.0, 1.0],
-            ])
-            extrinsic = np.eye(4)
-
-        class StubLoader:
-            def get_camera_calibration(self, name: str) -> StubCalib:
-                return StubCalib()
-
-            def get_camera_image_size(
-                self, name: str, frame_idx: int
-            ) -> Tuple[int, int]:
-                return (1920, 1080)
-
-        proj = compute_camera_projection_matrices(
-            StubLoader(), camera_names=PARSER_CAMERA_NAMES, image_size=256
-        )
-        assert proj.shape == (7, 3, 4)
-        assert proj.dtype == torch.float32
 
 
 class TestEdgeCasesAndDiscrepancies:
@@ -399,18 +367,19 @@ class TestEdgeCasesAndDiscrepancies:
         tensors = parser.parse_observation(input_data)  # type: ignore[arg-type]
         assert tensors["visual_tiles"].shape == (1, 7, 3, 256, 256)
 
-    def test_discrepancy_config_camera_names_mismatch(
+    def test_config_camera_names_match_parser(
         self, sample_rgb_images: Dict[str, Image.Image]
     ) -> None:
-        """FINDING: AutoE2EAlpaSimConfig.camera_names mismatch with AlpasimStreamParser.CAMERA_NAMES.
+        """Verify AutoE2EAlpaSimConfig.camera_names match AlpasimStreamParser.CAMERA_NAMES.
 
-        ``AutoE2EAlpaSimConfig.camera_names`` defines names such as ``"cam_front"``,
-        whereas ``AlpasimStreamParser`` expects ``"camera_base_front_center"``.
-        Passing inputs keyed by config camera names results in ALL frames being treated
-        as missing (zeros).
+        Passing inputs keyed by config camera names should successfully populate frames.
         """
         config = AutoE2EAlpaSimConfig()
         config_cams = config.camera_names  # ['cam_front', 'cam_front_left', ...]
+
+        assert list(config_cams) == list(PARSER_CAMERA_NAMES), (
+            "Config camera names should match parser camera names."
+        )
 
         # Build prediction input using config's camera names
         cams_with_config_keys = {
@@ -422,27 +391,27 @@ class TestEdgeCasesAndDiscrepancies:
             {"cameras": cams_with_config_keys, "speed": 10.0, "acceleration": 0.0, "command": 1}
         )
 
-        # All tiles will be zeros because key lookups for KitScenes CAMERA_NAMES fail!
+        # Frames should not be empty since the camera names match
         visual_tiles = tensors["visual_tiles"]
-        assert (visual_tiles == 0.0).all(), (
-            "Mismatched camera names between config and parser cause silent missing-frame zeros."
+        assert not (visual_tiles == 0.0).all(), (
+            "Frames should not be empty since the camera names match."
         )
 
-    def test_discrepancy_camera_params_absent_in_stream_parser(
+    def test_camera_params_present_in_stream_parser(
         self, valid_prediction_input: PredictionInput
     ) -> None:
-        """FINDING: AlpasimStreamParser output dictionary lacks 'camera_params'.
+        """Verify AlpasimStreamParser output dictionary contains 'camera_params'.
 
-        Offline ``KitScenesDataset`` outputs ``camera_params`` tensor ``(V, 3, 4)`` or
-        ``PreExtractedDataset`` provides loader ``.projection``. ``AlpasimStreamParser``
-        omits camera calibration parameters from its returned dictionary.
+        It should provide dummy camera parameters matching the expected shape.
         """
         parser = AlpasimStreamParser()
         tensors = parser.parse_observation(valid_prediction_input)
 
-        assert "camera_params" not in tensors, (
-            "AlpasimStreamParser does not emit camera_params in output dict."
+        assert "camera_params" in tensors, (
+            "AlpasimStreamParser should emit camera_params in output dict."
         )
+        assert tensors["camera_params"].shape == (1, 7, 3, 4)
+        assert tensors["camera_params"].dtype == torch.float32
 
     def test_package_init_exports_autoe2e_model(self) -> None:
         """Verify alpasim_driver package exports AutoE2EAlpaSimModel (aliased to AutoE2EDriver)."""

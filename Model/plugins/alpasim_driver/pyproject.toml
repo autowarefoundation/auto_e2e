@@ -17,4 +17,4 @@ dependencies = [
 autoe2e = "alpasim_driver.plugin:AutoE2EDriver"
 
 [project.entry-points."alpasim.configs"]
-autoe2e = "alpasim_driver.config:AutoE2EConfig"
+autoe2e = "alpasim_driver.config:AutoE2EAlpaSimConfig"
