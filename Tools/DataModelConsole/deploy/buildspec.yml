@@ -12,7 +12,7 @@ phases:
         set -euo pipefail
 
         AWS_ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
-        SOURCE_REVISION="${CODEBUILD_RESOLVED_SOURCE_VERSION:?CODEBUILD_RESOLVED_SOURCE_VERSION is required}"
+        SOURCE_REVISION="${SOURCE_REVISION_OVERRIDE:-${CODEBUILD_RESOLVED_SOURCE_VERSION:?CODEBUILD_RESOLVED_SOURCE_VERSION is required}}"
         BUILD_NUMBER="${CODEBUILD_BUILD_NUMBER:?CODEBUILD_BUILD_NUMBER is required}"
 
         [[ "${AWS_ACCOUNT_ID}" =~ ^[0-9]{12}$ ]] || {
