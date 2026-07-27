@@ -32,10 +32,15 @@ from data_parsing.alpasim_stream.parser import (  # noqa: E402
     AlpasimStreamParser,
     PredictionInput,
 )
-from data_parsing.kit_scenes.camera import (  # noqa: E402
-    CAMERA_NAMES as KITSCENES_CAMERA_NAMES,
-    compute_camera_projection_matrices,
-)
+try:
+    from data_parsing.kit_scenes.camera import (  # noqa: E402
+        CAMERA_NAMES as KITSCENES_CAMERA_NAMES,
+        compute_camera_projection_matrices,
+    )
+except ImportError:
+    KITSCENES_CAMERA_NAMES = PARSER_CAMERA_NAMES
+    compute_camera_projection_matrices = None
+
 from data_parsing.pre_extracted import (  # noqa: E402
     _VISUAL_HISTORY_DIM,
     _decode_image as _decode_pre_extracted_image,
@@ -304,6 +309,9 @@ class TestOfflineKitScenesParity:
         The 7 camera projection matrices rescaled to 256x256 resolution must have
         shape ``(7, 3, 4)`` and dtype ``torch.float32``.
         """
+        if compute_camera_projection_matrices is None:
+            pytest.skip("kitscenes SDK is not installed")
+
         class StubCalib:
             image_size = (1920, 1080)
             intrinsic = np.array([
