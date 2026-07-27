@@ -154,6 +154,46 @@ def test_resume_validation_rejects_schema_config_and_data_drift():
         )
 
 
+def test_resume_validation_allows_explicit_policy_transition_only():
+    payload, config = _resume_payload()
+    payload["config"] = {
+        **config,
+        "junction_sampling": {"enabled": False, "policy": None},
+        "early_stopping_patience": 3,
+    }
+    requested = {
+        **config,
+        "junction_sampling": {
+            "enabled": True,
+            "policy": {"version": "navigation_repeat_v1"},
+        },
+        "early_stopping_patience": 8,
+    }
+
+    validate_resume_payload(
+        payload,
+        expected_config=requested,
+        expected_data_fingerprint="data-2",
+        allowed_config_changes=frozenset({
+            "junction_sampling",
+            "early_stopping_patience",
+        }),
+        compatible_data_fingerprints=frozenset({"data-1"}),
+    )
+
+    with pytest.raises(ValueError, match="config"):
+        validate_resume_payload(
+            payload,
+            expected_config={**requested, "backbone": "resnet_50"},
+            expected_data_fingerprint="data-2",
+            allowed_config_changes=frozenset({
+                "junction_sampling",
+                "early_stopping_patience",
+            }),
+            compatible_data_fingerprints=frozenset({"data-1"}),
+        )
+
+
 def test_rng_state_round_trip():
     random.seed(17)
     np.random.seed(17)
