@@ -26,6 +26,7 @@ import {
 import { CameraMosaic } from "@/components/player/camera-mosaic";
 import { BEVActivationHeatmap } from "@/components/player/bev-activation-heatmap";
 import { NavigationMap } from "@/components/player/navigation-map";
+import { ODDLabelPanel } from "@/components/odd-label-panel";
 import {
   OverlaySelectionBar,
   type OverlayLoadStatus,
@@ -972,6 +973,17 @@ export function EpisodePlayer({
           </p>
         )}
       </div>
+
+      {sample?.episode_id && (
+        <ODDLabelPanel
+          dataset={dataset}
+          version={version ?? index.version}
+          sceneUID={sample.episode_id}
+          timestampNS={sample.pose_current?.timestamp_ns}
+          frame={frame}
+          fps={index.fps || 10}
+        />
+      )}
 
       <BEVActivationHeatmap overlay={overlay} row={overlayRow} />
     </div>
