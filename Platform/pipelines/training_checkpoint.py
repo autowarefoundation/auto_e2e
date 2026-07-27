@@ -121,6 +121,8 @@ def validate_resume_payload(
     *,
     expected_config: Mapping[str, Any],
     expected_data_fingerprint: str,
+    allowed_config_changes: frozenset[str] = frozenset(),
+    compatible_data_fingerprints: frozenset[str] = frozenset(),
 ) -> None:
     required = {
         "schema_version",
@@ -144,9 +146,26 @@ def validate_resume_payload(
             "unsupported resume checkpoint schema "
             f"{payload['schema_version']!r}; expected {CHECKPOINT_SCHEMA_VERSION!r}"
         )
-    if stable_digest(payload["config"]) != stable_digest(expected_config):
+    saved_config = dict(payload["config"])
+    requested_config = dict(expected_config)
+    unknown_changes = allowed_config_changes - (
+        saved_config.keys() | requested_config.keys()
+    )
+    if unknown_changes:
+        raise ValueError(
+            "resume config change allowlist contains unknown fields: "
+            f"{sorted(unknown_changes)}"
+        )
+    for name in allowed_config_changes:
+        saved_config.pop(name, None)
+        requested_config.pop(name, None)
+    if stable_digest(saved_config) != stable_digest(requested_config):
         raise ValueError("resume checkpoint model/training config does not match")
-    if payload["data_fingerprint"] != expected_data_fingerprint:
+    accepted_fingerprints = {
+        expected_data_fingerprint,
+        *compatible_data_fingerprints,
+    }
+    if payload["data_fingerprint"] not in accepted_fingerprints:
         raise ValueError("resume checkpoint dataset fingerprint does not match")
     if int(payload["epoch"]) <= 0:
         raise ValueError("resume checkpoint epoch must be positive")
