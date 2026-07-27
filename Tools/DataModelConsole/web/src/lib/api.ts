@@ -15,6 +15,10 @@ import type {
   MLflowRun,
   OverlayModel,
   OverlayModelsResponse,
+  ODDOntology,
+  ODDSceneRecord,
+  ODDSearchResponse,
+  ODDStatistics,
   ReasoningLabelRecord,
   ReasoningLabelStats,
   ReasoningPromptVersionsResponse,
@@ -104,6 +108,68 @@ export function getDashboardStats(): Promise<DashboardStats> {
 
 export function listJoinedExperiments(): Promise<ExperimentsResponse> {
   return apiFetch<ExperimentsResponse>("/api/v1/experiments");
+}
+
+// ---------------------------------------------------------------------------
+// Scene-level ODD LabelSets
+// ---------------------------------------------------------------------------
+
+function oddCoordinate(dataset: string, version: string): string {
+  const query = new URLSearchParams({ dataset });
+  if (version) query.set("version", version);
+  return query.toString();
+}
+
+export function getODDOntology(
+  dataset: string,
+  version: string,
+): Promise<ODDOntology> {
+  return apiFetch<ODDOntology>(
+    `/api/v1/odd/ontology?${oddCoordinate(dataset, version)}`,
+  );
+}
+
+export function getODDStatistics(
+  dataset: string,
+  version: string,
+): Promise<ODDStatistics> {
+  return apiFetch<ODDStatistics>(
+    `/api/v1/odd/statistics?${oddCoordinate(dataset, version)}`,
+  );
+}
+
+export function searchODDScenes(
+  dataset: string,
+  version: string,
+  predicate: {
+    key?: string;
+    value?: string;
+    status?: string;
+    source?: string;
+    limit?: number;
+    offset?: number;
+  },
+): Promise<ODDSearchResponse> {
+  const query = new URLSearchParams(oddCoordinate(dataset, version));
+  for (const name of ["key", "value", "status", "source"] as const) {
+    const value = predicate[name];
+    if (value) query.set(name, value);
+  }
+  query.set("limit", String(predicate.limit ?? 100));
+  query.set("offset", String(predicate.offset ?? 0));
+  return apiFetch<ODDSearchResponse>(
+    `/api/v1/odd/scenes/search?${query.toString()}`,
+  );
+}
+
+export function getODDScene(
+  dataset: string,
+  version: string,
+  sceneUID: string,
+): Promise<ODDSceneRecord> {
+  return apiFetch<ODDSceneRecord>(
+    `/api/v1/odd/scenes/${encodeURIComponent(sceneUID)}?${oddCoordinate(dataset, version)}`,
+  );
 }
 
 // ---------------------------------------------------------------------------
