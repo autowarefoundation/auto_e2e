@@ -10,7 +10,8 @@ version: 0.2
 #   MAX_PARTITIONS, VALIDATION_SCOPE, ENABLE_ROUTE_CONDITIONING,
 #   ENABLE_JUNCTION_SAMPLING, ENABLE_ROUTE_CONSISTENCY,
 #   RECONSTRUCTION_AUDIT_URI, RECONSTRUCTION_AUDIT_DECISION,
-#   RECONSTRUCTION_AUDIT_RATIONALE, RESUME_FROM
+#   RECONSTRUCTION_AUDIT_RATIONALE, RESUME_FROM,
+#   ALLOW_RESUME_POLICY_TRANSITION
 
 env:
   shell: bash
@@ -42,6 +43,7 @@ env:
     NUM_WORKERS: "4"
     EARLY_STOPPING_PATIENCE: "3"
     RESUME_FROM: ""
+    ALLOW_RESUME_POLICY_TRANSITION: "false"
     IMAGE_TAG: latest
 
 phases:
@@ -140,6 +142,18 @@ phases:
             ;;
           *)
             echo "ENABLE_ROUTE_CONSISTENCY must be true or false" >&2
+            exit 2
+            ;;
+        esac
+        case "${ALLOW_RESUME_POLICY_TRANSITION,,}" in
+          true)
+            RUN_ARGS+=(--allow_resume_policy_transition)
+            ;;
+          false)
+            RUN_ARGS+=(--no_allow_resume_policy_transition)
+            ;;
+          *)
+            echo "ALLOW_RESUME_POLICY_TRANSITION must be true or false" >&2
             exit 2
             ;;
         esac
