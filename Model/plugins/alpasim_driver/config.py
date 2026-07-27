@@ -6,7 +6,7 @@ Defines model checkpoints, camera topology settings, and trajectory planning hor
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import List, Tuple, Optional
+from typing import List, Tuple
 
 
 @dataclass

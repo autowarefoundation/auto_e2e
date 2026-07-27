@@ -13,8 +13,13 @@ dependencies = [
     "Pillow"
 ]
 
+[tool.setuptools]
+py-modules = ["plugin", "config", "alpasim_autoe2e_plugin", "alpasim_autoe2e_config"]
+
 [project.entry-points."alpasim.models"]
-autoe2e = "alpasim_driver.plugin:AutoE2EDriver"
+autoe2e = "alpasim_autoe2e_plugin:AutoE2EDriver"
 
 [project.entry-points."alpasim.configs"]
-autoe2e = "alpasim_driver.config:AutoE2EAlpaSimConfig"
+autoe2e = "alpasim_autoe2e_config:AutoE2EAlpaSimConfig"
+
+
