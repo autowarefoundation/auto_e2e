@@ -1,0 +1,2331 @@
+# Design Document: Automatic ODD Labeling Pipeline
+
+## Document Metadata
+
+| Field | Value |
+|---|---|
+| Status | Proposed |
+| Owner | riita10069 |
+| Created | 2026-07-27 |
+| Initial dataset | KITScenes |
+| Future datasets | L2D, NVIDIA PhysicalAI-AV, and adapter-conformant datasets |
+| Related design | `Docs/navigation_input_design.md` |
+| Related implementation | `Model/navigation/`, `Model/data_processing/`, `Platform/pipelines/` |
+
+## 1. Executive Summary
+
+This document defines an automatic labeling pipeline for Operational Design
+Domain (ODD), driving events, and perception-difficulty conditions. Its primary
+outputs are:
+
+1. corpus statistics that describe which conditions are represented and for
+   how long;
+2. searchable scene and interval metadata for dataset curation and failure
+   analysis;
+3. reproducible evaluation slices that can be joined to model results by stable
+   scene and time identities;
+4. scene selection manifests for Active Learning and dataset balancing.
+
+These labels are not the existing Reasoning Labels. Reasoning Labels are sparse,
+prompt-dependent supervision for the model's action-relevant reasoning branch.
+ODD Labels are scene catalog metadata. They belong to a scene, not to a training
+sample, and are never fed to AutoE2E as an input or target. Their primary
+consumers are Dashboard exploration, corpus statistics, evaluation slicing, and
+Active Learning policies that select scenes for a subsequent training dataset.
+They must provide broad corpus coverage, retain source evidence, represent
+missingness explicitly, and remain usable without a particular model or
+training run.
+
+A scene can contain time-varying ODD conditions, event intervals, camera
+conditions, and actor-scoped observations. These are children of one
+`SceneLabelRecord`; they are not sample labels. A later training pipeline may
+select the scene and independently enumerate its samples, but that enumeration
+does not change the ODD LabelSet.
+
+The initial implementation targets KITScenes, but dataset-specific logic is
+confined to adapters. Every adapter emits the same canonical time-aligned
+evidence contract. Source labelers then operate on canonical map/route,
+GNSS/INS, camera, image-quality, object-track, LiDAR, and optional CAN evidence.
+The pipeline never encodes KITScenes directory names, frame numbering, or
+Lanelet2 types in the label schema.
+
+The design makes six central decisions:
+
+1. Deterministic evidence is authoritative where it is semantically sufficient.
+   Map/route and GNSS/INS derive road topology, planned route action, ego speed,
+   and actual trajectory properties. A VLM does not re-guess these values.
+2. Source evidence and resolved labels are separate artifacts. Fusion never
+   destroys disagreement or hides which input produced a value.
+3. Missing, unobservable, ambiguous, and explicitly absent conditions are
+   different states. `none` is a valid observed negative; it is never a
+   substitute for missing or unobservable evidence.
+4. Labels are temporal intervals with explicit scope. Event labels describe
+   actual behavior and interaction intervals; object-level perception labels
+   require an actor or camera subject.
+5. ODD ownership is scene-native. Timeline intervals exist to describe changes
+   inside a scene, never to mirror the model's sliding sample windows.
+6. An ODD LabelSet is an immutable sidecar bound to an immutable dataset
+   manifest. KITScenes v3.0 does not need to be repacked to add or revise ODD
+   labels.
+
+The high-level data flow is:
+
+```text
+immutable dataset snapshot
+  -> DatasetEvidenceAdapter
+  -> canonical scene timeline + capability manifest
+  -> source labelers
+       map_route
+       gnss_ins
+       image_qc
+       vlm
+       can_optional
+       fusion
+  -> immutable source evidence
+  -> deterministic fusion + temporal segmentation
+  -> label/event validation and quality audit
+  -> immutable ODD LabelSet
+  -> Dashboard statistics/search
+  -> Active Learning SceneSelectionManifest
+  -> optional query-time evaluation-slice projection
+```
+
+## 2. Problem Statement
+
+The current Reasoning pipeline answers action-facing questions such as why the
+planner should slow down or turn. It does not provide a complete description of
+the dataset's ODD composition. In particular, it is not designed to answer:
+
+- How much urban, motorway, workzone, wet-road, night, or high-traffic data is
+  present?
+- Which intervals contain a left route action versus an actually executed left
+  turn?
+- Which scenes have difficult image quality, occlusion, glare, small actors, or
+  temporary traffic control?
+- Which labels were determined from map/route, GNSS/INS, a VLM, or a fusion
+  algorithm?
+- Was a condition absent, unavailable in the dataset, outside the sensors'
+  observability, or genuinely ambiguous?
+- Can the same queries and statistics be produced for a dataset other than
+  KITScenes?
+
+A flat per-image VLM taxonomy does not solve this problem. It would duplicate
+facts that deterministic sources already know, make temporal events unreliable,
+and collapse data absence into false negatives. It also would not distinguish
+navigation intent from the trajectory actually driven.
+
+The required system is therefore a multi-source, time-aligned labeling pipeline,
+not a larger VLM prompt.
+
+## 3. Architectural Decisions
+
+### 3.1 ODD LabelSet is separate from Reasoning Labels
+
+The two artifacts have different ownership and use:
+
+| Property | Reasoning Label | ODD LabelSet |
+|---|---|---|
+| Primary purpose | Model supervision | Dataset description, search, slicing |
+| Typical coverage | Sparse samples | Complete eligible scene timeline |
+| Ownership unit | Training sample/horizon | Scene and children of that scene |
+| Primary producer | Offline teacher | Deterministic labelers + VLM + fusion |
+| Time model | Fixed 0, 1, 2, 3, 4 s horizons | Arbitrary half-open intervals |
+| Schema owner | Reasoning taxonomy | ODD ontology registry |
+| Storage | Training-oriented `reasoning.json` / records | Immutable sidecar Parquet |
+| Identity | `sample_uid` | `scene_uid` |
+| Model dependency | Training target | Never a model input or target |
+| Primary consumer | Training loss | Dashboard and Active Learning |
+| Prompt dependency | Yes | Only VLM evidence rows |
+
+The implementation may reuse low-level clip encoding and OpenAI-compatible HTTP
+utilities, but it must not reuse `ReasoningLabelRecord`, its taxonomy, prompt
+version, or training masks. ODD labels must not be embedded in training shards,
+collated into model batches, or exposed as model features or losses.
+
+### 3.2 Scene-native ownership
+
+The LabelSet's logical root is a scene. Every observation and event carries
+`scene_uid` and is published under that scene's inventory. Time intervals,
+camera subjects, and actor subjects refine where a condition occurred inside
+the scene; they do not create a sample-level ownership model.
+
+This boundary is intentional:
+
+- the ODD catalog remains stable if sample cadence, history length, future
+  horizon, or parser enumeration changes;
+- corpus statistics count actual scene time/distance instead of overlapping
+  model windows;
+- Active Learning selects coherent scenes with temporal context;
+- train/validation leakage remains controlled at scene or split-group level;
+- no future-aware ODD label can accidentally enter a model input tensor.
+
+For KITScenes v1, Active Learning selects complete scenes. A future dataset with
+very long recordings may allow contiguous scene clips only through a separately
+versioned selection policy. Individual training samples are never the ODD
+selection unit.
+
+### 3.3 Canonical source enum is small; evidence kinds are extensible
+
+Every resolved label has exactly one owning `source`:
+
+```text
+map_route | gnss_ins | vlm | image_qc | fusion | can_optional
+```
+
+This enum identifies the algorithm class responsible for the result. It is not
+an exhaustive list of sensor types. Detailed inputs are recorded as evidence
+references, whose `kind` may include:
+
+```text
+hd_map | osm | selected_route | pose | gnss | ins | camera | timestamp
+object_track | lidar | can | image_metric | vlm_response | derived_trajectory
+```
+
+For example, a traffic-density value derived from camera object tracks has
+`source=fusion` and evidence references of kind `object_track` and `camera`.
+Day phase derived from an absolute timestamp and location also has
+`source=fusion`. This preserves the requested stable source enum without hiding
+the actual inputs.
+
+### 3.4 Deterministic sources precede semantic inference
+
+The source precedence is semantic, not a universal numeric ranking:
+
+- canonical map/route owns static road topology and planned route action;
+- GNSS/INS or CAN owns ego motion and the actually driven trajectory;
+- image-quality algorithms own measurable pixel/signal defects;
+- VLM owns semantic visual appearance that is not available deterministically;
+- fusion owns labels that require several sources, temporal tracks, or conflict
+  resolution;
+- optional CAN corroborates motion and vehicle-state labels but is never a
+  required cross-dataset dependency.
+
+A VLM can provide fallback evidence for a map-derived field only when the
+ontology explicitly allows it. A fallback remains `source=vlm`; it is not
+presented as map truth.
+
+### 3.5 Label values never encode missingness
+
+Every record has one of four statuses:
+
+```text
+valid | unavailable | not_observable | ambiguous
+```
+
+No enum receives generic `unknown`, `missing`, or `unobservable` values.
+Existing domain values such as `not_applicable` and `no_response_required` are
+valid semantic outcomes and are not aliases for status.
+
+### 3.6 Sidecar publication preserves dataset immutability
+
+An ODD LabelSet references:
+
+- dataset name and immutable source revision;
+- published dataset version;
+- dataset manifest SHA-256;
+- complete scene identity digest;
+- ontology SHA-256;
+- labeler and fusion configuration digests.
+
+Changing a taxonomy, labeler, prompt, threshold, or source input creates a new
+LabelSet. It never mutates a published dataset version or previous LabelSet.
+
+### 3.7 Offline retrospective context is allowed and declared
+
+Scene search and dataset statistics are offline tasks. Event segmentation may
+therefore use frames or trajectory points after event onset. Every labeler
+declares `lookback_ns` and `lookahead_ns`, and VLM evidence records the exact
+clip timestamps.
+
+These labels are never model inputs under this design. Their retrospective
+context is valid for Dashboard, statistics, evaluation slicing, and selecting
+which scenes enter a future training dataset. The selected raw scene is then
+processed by the normal training pipeline without injecting ODD fields into the
+model batch.
+
+## 4. Goals and Non-Goals
+
+### 4.1 Goals
+
+1. Define a dataset-independent schema for ODD, event, and perception labels.
+2. Preserve status, confidence, source, evidence, and provenance per label.
+3. Use map/route, GNSS/INS, image QC, VLM, fusion, and optional CAN according to
+   their actual strengths.
+4. Distinguish planned `odd.route.action` from executed
+   `event.ego.maneuver`.
+5. Represent labels as temporal intervals and events as stable event instances.
+6. Support scene-, camera-, and actor-scoped labels without overloading one
+   field.
+7. Derive correct duration-, distance-, and scene-weighted corpus statistics.
+8. Support fast label search and model-metric slicing in DataModelConsole.
+9. Make every result reproducible from immutable inputs and versioned code.
+10. Start with KITScenes while requiring adapter conformance for future
+    datasets.
+11. Preserve all source disagreements for audit and confidence calibration.
+12. Avoid additional KITScenes repacks when only labels change.
+13. Produce reproducible, budgeted scene selections for Active Learning without
+    turning labels into model features.
+
+### 4.2 Non-goals for the first implementation
+
+- Training a new runtime ODD classifier.
+- Feeding ODD Labels into AutoE2E.
+- Using ODD Labels as direct supervision or attaching them to model samples.
+- Replacing the action-relevant Reasoning branch.
+- Producing ground-truth model error labels such as false positive, false
+  negative, or tracking loss.
+- Estimating physical quantities that the available sensors cannot support,
+  such as road friction or absolute visibility distance.
+- Claiming ground truth solely because a VLM produced a high score.
+- Live vehicle labeling or an online 10 Hz labeling service.
+- Labeling `near_collision` without relative trajectories and a validated TTC
+  contract.
+- Requiring object tracks, LiDAR, or CAN for all datasets.
+- Rewriting the existing navigation map and route contracts.
+
+## 5. Terminology and Identity
+
+### 5.1 Core terms
+
+- Dataset snapshot: immutable raw-source revision plus parser and publication
+  contracts.
+- Scene: one continuous, dataset-native recording after adapter normalization.
+- Timeline: ordered nanosecond timestamps in the scene's canonical clock.
+- Evidence: one source labeler's auditable claim before cross-source fusion.
+- Scene label record: the logical root containing one scene's observations,
+  events, coverage, and provenance.
+- Label observation: one resolved child of a scene record over a half-open time
+  interval.
+- Event instance: one temporally contiguous occurrence with a stable
+  `event_uid`.
+- LabelSet: immutable collection of evidence, labels, events, statistics, and a
+  manifest.
+- Scene selection manifest: an immutable Active Learning result that selects
+  scenes from a LabelSet without copying labels into model samples.
+- Subject: the scene, camera, actor track, traffic control, or ego entity to
+  which a label applies.
+
+### 5.2 Stable identities
+
+The following identities are mandatory:
+
+```text
+dataset_name
+dataset_version
+dataset_manifest_sha256
+scene_uid
+```
+
+Where the published dataset already provides them, the pipeline also retains:
+
+```text
+source_frame_id
+source_timestamp_ns
+camera_id
+actor_track_uid
+```
+
+`scene_uid` is dataset-global and partition-independent. It must not be a Flyte
+partition index. `sample_uid` and `split_group_uid` remain dataset/training
+identities outside the ODD schema. They may be resolved from a selected
+`scene_uid` by downstream data processing, but neither is stored on an ODD
+observation or used as ODD ownership.
+
+`observation_uid` is content-derived:
+
+```text
+sha256(
+  labelset_contract_version,
+  dataset_manifest_sha256,
+  scene_uid,
+  start_timestamp_ns,
+  end_timestamp_ns,
+  subject,
+  label_key,
+  source,
+  labeler_contract_sha256
+)
+```
+
+`event_uid` is stable within a LabelSet and derives from scene, event family,
+participants, and the final segmented interval. It does not depend on Flyte
+task ordering.
+
+## 6. System Architecture
+
+### 6.1 End-to-end flow
+
+```text
+                                      immutable dataset manifest
+                                                   |
+                                                   v
+                                    DatasetEvidenceAdapter
+                                    | capability manifest
+                                    | canonical scene clock
+                                    | source references
+                                                   |
+                  +----------------+---------------+----------------+
+                  |                |               |                |
+                  v                v               v                v
+           MapRouteLabeler  GNSSINSLabeler  ImageQCLabeler    VLMLabeler
+                  |                |               |                |
+                  +----------------+-------+-------+----------------+
+                                           |
+                                           v
+                                    source evidence rows
+                                           |
+                                           v
+                                Fusion + temporal segmentation
+                                 | conflict preservation
+                                 | confidence calibration
+                                 | event instance building
+                                           |
+                                           v
+                                schema and quality validation
+                                           |
+                                           v
+                           immutable ODD LabelSet publication
+                              | evidence.parquet
+                              | scene_records.parquet
+                              | observations.parquet
+                              | events.parquet
+                              | statistics.parquet
+                              | manifest.json
+                                           |
+                    +----------------------+----------------------+
+                    |                      |                      |
+                    v                      v                      v
+             Console search       Active Learning        query-time metric
+             and statistics       scene selection        slice projection
+```
+
+### 6.2 Module boundaries
+
+The proposed implementation boundaries are:
+
+```text
+Model/odd_labeling/
+  contracts.py
+  ontology.py
+  adapters/
+  labelers/
+  fusion/
+  temporal/
+  quality/
+  publication/
+
+Platform/pipelines/
+  odd_labeling_tasks.py
+  odd_labeling_workflows.py
+
+Tools/DataModelConsole/
+  ODD LabelSet materialization, APIs, statistics, and search UI
+```
+
+`Model/odd_labeling` contains offline data processing and must not be imported
+by `Model/model_components`. The Flyte layer orchestrates typed, local-testable
+functions; it does not contain label semantics.
+
+### 6.3 Reuse of navigation contracts
+
+The pipeline consumes, but does not replace:
+
+- `NavigationMap`;
+- `NavigationRoute`;
+- `navigation_meta.json`;
+- `scene_navigation.json`;
+- route quality and provenance.
+
+KITScenes map/route evidence comes from the canonical Lanelet2-derived
+navigation artifacts. Future OSM datasets use the same provider-independent
+contract. No ODD labeler reads rendered RGB map pixels to infer topology.
+
+## 7. Canonical Data Contracts
+
+### 7.1 Dataset capability manifest
+
+Every adapter first emits one capability manifest:
+
+```text
+DatasetCapabilityManifest
+  schema_version
+  dataset_name
+  dataset_version
+  dataset_manifest_sha256
+  source_revision
+  adapter_name
+  adapter_version
+  scene_inventory_sha256
+  timebase:
+    canonical_clock
+    timestamp_unit
+    absolute_time_available
+    timezone_resolution_available
+  channels:
+    cameras: [CameraCapability]
+    map: ChannelCapability
+    route: ChannelCapability
+    gnss: ChannelCapability
+    ins: ChannelCapability
+    lidar: ChannelCapability
+    object_tracks: ChannelCapability
+    can: ChannelCapability
+  coordinate_frames
+  calibration_refs
+  known_limitations
+```
+
+Each `ChannelCapability` states:
+
+```text
+availability: complete | partial | absent
+coverage_start_ns
+coverage_end_ns
+nominal_rate_hz
+observed_count
+missing_count
+source_artifact_sha256
+quality_summary
+```
+
+An absent channel causes `status=unavailable` for labels that require it. A
+present channel that cannot observe a particular interval or subject causes
+`status=not_observable`. This distinction is decided from the capability and
+per-interval coverage, not guessed by a VLM.
+
+### 7.2 Scene label record
+
+The logical publication unit is:
+
+```text
+SceneLabelRecord
+  schema_version
+  labelset_id
+  dataset_name
+  dataset_version
+  dataset_manifest_sha256
+  scene_uid
+  scene_start_timestamp_ns
+  scene_end_timestamp_ns
+  scene_duration_ns
+  scene_distance_m
+  observation_uids: list[string]
+  event_uids: list[string]
+  source_coverage
+  ontology_coverage
+  quality_summary
+  provenance
+```
+
+Evidence and observations may be physically stored in normalized Parquet tables
+for efficient filtering, but every row is a child of exactly one
+`SceneLabelRecord`. There is no `SampleLabelRecord` contract.
+
+### 7.3 Evidence record
+
+Source labelers emit evidence before fusion:
+
+```text
+LabelEvidence
+  schema_version
+  evidence_uid
+  label_key
+  cardinality: single | multi
+  values: list[string]
+  candidate_values: list[CandidateValue]
+  status: valid | unavailable | not_observable | ambiguous
+  confidence: float32
+  source: map_route | gnss_ins | vlm | image_qc | fusion | can_optional
+  scope: LabelScope
+  measurements: list[Measurement]
+  evidence_refs: list[EvidenceRef]
+  provenance: SemanticLabelerProvenance
+```
+
+`CandidateValue` contains a value, score, and optional evidence reference. It is
+used for ambiguity and audit, not as a resolved value.
+
+`Measurement` contains:
+
+```text
+name
+value
+unit
+quality
+aggregation
+```
+
+Examples include `ego_speed_kph`, signed road curvature, grade, clipped-pixel
+ratio, blur score, TTC, or actor count. Raw and continuous measurements remain
+available even when a categorical label is also emitted.
+
+### 7.4 Resolved label observation
+
+Fusion emits:
+
+```text
+LabelObservation
+  schema_version
+  observation_uid
+  labelset_id
+  label_key
+  cardinality: single | multi
+  values: list[string]
+  status: valid | unavailable | not_observable | ambiguous
+  confidence: float32
+  source: map_route | gnss_ins | vlm | image_qc | fusion | can_optional
+  scope: LabelScope
+  supporting_evidence_uids: list[string]
+  conflicting_evidence_uids: list[string]
+  measurements: list[Measurement]
+  fusion_provenance: SemanticLabelerProvenance
+```
+
+Single-select labels have exactly one value when `status=valid`. Multi-select
+labels have one or more values when `status=valid`. Other statuses have an
+empty `values` list. Candidate values remain in evidence rows.
+
+The owning source is:
+
+- the original source when fusion performs only validation, smoothing, or
+  interval coalescing without changing semantics;
+- `fusion` when several sources are required, one source overrides another
+  under an explicit rule, or a conflict is resolved.
+
+### 7.5 Label scope
+
+```text
+LabelScope
+  dataset_name
+  dataset_version
+  scene_uid
+  start_timestamp_ns
+  end_timestamp_ns
+  anchor_timestamp_ns
+  subject_type: scene | ego | camera | actor | traffic_control | route_segment
+  subject_id: optional
+  camera_ids: list[string]
+  coordinate_frame: optional
+  spatial_roi: optional
+```
+
+Intervals are half-open: `[start_timestamp_ns, end_timestamp_ns)`. A point
+observation uses the smallest adapter-supported interval around its timestamp;
+zero-duration intervals are prohibited.
+
+`subject_id` is mandatory for `camera`, `actor`, `traffic_control`, and
+`route_segment`. An object-level perception label without an actor identity is
+invalid. A scene-level summary may report the worst or aggregate condition only
+when the ontology defines that aggregation explicitly.
+
+### 7.6 Event instance
+
+Event labels are grouped into instances:
+
+```text
+EventInstance
+  schema_version
+  event_uid
+  labelset_id
+  scene_uid
+  start_timestamp_ns
+  end_timestamp_ns
+  primary_event_key
+  actor_track_uids
+  labels: list[LabelObservation]
+  phases:
+    - phase: onset | active | resolution
+      start_timestamp_ns
+      end_timestamp_ns
+  confidence
+  status
+  supporting_evidence_uids
+  provenance
+```
+
+One event instance can carry, for example:
+
+```text
+event.vehicle.interaction = [cut_in]
+event.interaction.actor = [vehicle]
+event.ego.strong_response = hard_brake
+event.hazard.response = slow_down
+event.outcome = hazard_avoided
+```
+
+Overlapping independent events are allowed and receive different `event_uid`
+values. Repeated frame detections of one cut-in are not separate events.
+
+### 7.7 Provenance
+
+Every canonical evidence and resolved record retains semantic provenance:
+
+```text
+SemanticLabelerProvenance
+  labeler_name
+  labeler_version
+  code_commit
+  container_image_digest
+  config_sha256
+  ontology_sha256
+  input_artifact_sha256s
+  model_provider: optional
+  model_name: optional
+  model_revision: optional
+  prompt_sha256: optional
+  decoding_config_sha256: optional
+  lookback_ns
+  lookahead_ns
+```
+
+VLM provenance must contain the exact model revision, prompt hash, response
+schema version, request image timestamps, sampling parameters, and raw response
+artifact digest. A mutable model name alone is insufficient.
+
+Wall-clock and orchestration metadata is stored separately:
+
+```text
+ExecutionReceipt
+  receipt_schema_version
+  semantic_partition_sha256
+  created_at
+  flyte_execution_id
+  flyte_task_execution_id
+  attempt
+  runtime_metrics
+```
+
+An execution retry may create a different receipt, but it must produce the same
+semantic partition SHA-256. Execution IDs and timestamps never enter
+`observation_uid`, `event_uid`, semantic Parquet rows, or `labelset_id`.
+
+## 8. Status, `none`, and Confidence Semantics
+
+### 8.1 Status definitions
+
+| Status | Meaning | Values |
+|---|---|---|
+| `valid` | The source had sufficient evidence and the label is resolved | Cardinality-valid list |
+| `unavailable` | A required channel, contract field, or provider capability is absent | Empty |
+| `not_observable` | The channel exists, but this interval/subject cannot be judged | Empty |
+| `ambiguous` | Relevant evidence exists but cannot support one canonical result | Empty |
+
+Examples:
+
+- A dataset has no CAN stream: CAN-only evidence is `unavailable`.
+- A camera exists but a road sign is fully occluded: the sign state is
+  `not_observable`.
+- Map says asphalt while visible construction plates cover most of the road:
+  surface type may be `ambiguous`, with both evidence rows retained.
+- A multi-select workzone label with a clear view and no workzone features is
+  `valid` with `values=["none"]`.
+
+### 8.2 Explicit negative rule
+
+For multi-select labels, an observed negative is explicit. The ontology
+registry defines a neutral token, normally `none`. It is mutually exclusive
+with all positive values.
+
+```text
+valid + ["none"]         observed and no condition is present
+not_observable + []      the condition could not be checked
+unavailable + []         the required source does not exist
+ambiguous + []           evidence conflicts or is insufficiently separable
+```
+
+`[]` is never a valid multi-select result.
+
+Some proposed candidate sets contain a positive neutral value such as `normal`
+or `dry`. These describe an observed condition and do not replace the missing
+state. Before implementation, the machine-readable ontology must add `none` to
+any multi-select group that lacks an explicit negative and has a meaningful
+absence case. In particular, `odd.dynamic.agent_type_present` requires `none`
+for an observed empty road. The taxonomy table in Section 15 marks normalized
+additions.
+
+For a single-select label whose domain includes `none`, `not_applicable`, or
+`no_response_required`, that token is also a valid observed semantic value.
+
+### 8.3 Confidence
+
+`confidence` is a calibrated estimate in `[0.0, 1.0]` that the record's status
+and, for `valid`, its resolved values are correct under the ontology
+definition.
+
+- It is not a VLM logit copied directly into the final artifact.
+- Deterministic rules may have confidence below 1.0 when map matching, sensor
+  quality, or interpolation is uncertain.
+- `unavailable` may have confidence 1.0 when the capability manifest
+  conclusively records an absent source.
+- `not_observable` may have high confidence when geometry proves the subject is
+  outside all camera fields of view.
+- `ambiguous` confidence describes confidence that the ambiguity classification
+  is correct. Candidate scores remain on evidence rows.
+
+Both raw source scores and calibrated final confidence are retained. Confidence
+calibration is label/source-specific and versioned.
+
+## 9. Ontology Registry
+
+### 9.1 Registry is the source of truth
+
+The implementation must introduce one machine-readable ontology registry,
+proposed as:
+
+```text
+Model/odd_labeling/ontology/odd_labeling_v1.yaml
+```
+
+Each label definition contains:
+
+```text
+key
+description
+namespace
+cardinality
+allowed_values
+neutral_value
+allowed_statuses
+allowed_sources
+authoritative_sources
+fallback_sources
+subject_types
+required_capabilities
+temporal_resolution
+spatial_context
+aggregation_rule
+conflict_rule
+minimum_duration_ns
+hysteresis
+quality_tier
+introduced_in
+```
+
+Code, JSON Schema, prompt response schema, Console facets, and documentation
+tables are generated or validated from this registry. Label strings are not
+duplicated manually in source code.
+
+### 9.2 Versioning
+
+The registry has an explicit schema version and SHA-256.
+
+- Removing or renaming a key/value, changing meaning, cardinality, scope, or
+  neutral semantics is a major version change.
+- Adding a value is a minor version change and still creates a new LabelSet.
+- Fixing documentation without semantic change is a patch version.
+- Value order is not a model-loss ABI, but canonical serialization sorts values
+  to make content hashes deterministic.
+
+There is no compatibility shim in the research phase. Consumers must request
+an exact ontology version or declare a tested migration.
+
+### 9.3 Quality tiers
+
+Each label/source pair is classified:
+
+```text
+certified       passes the frozen human-audit gate
+experimental    published and searchable with visible quality warning
+disabled        evidence may be retained but no resolved label is published
+```
+
+A key can be certified for `map_route` and experimental for `vlm`. Quality is
+not assigned only at the key level.
+
+## 10. Temporal and Spatial Semantics
+
+### 10.1 Canonical processing clocks
+
+The pipeline keeps source-native rates and produces interval labels:
+
+| Source | Typical KITScenes input rate | Processing policy |
+|---|---:|---|
+| GNSS/INS pose | 10 Hz | Derive continuous motion at native timestamps |
+| Map/route raster anchor | 2 Hz | Use canonical vectors; evaluate at pose timestamps |
+| Camera | 10 Hz reference timeline | QC per frame; semantic clips on selected cadence |
+| VLM | 1 Hz initial cadence | Temporal multi-view clips, plus event-triggered refinement |
+| Object tracks | Dataset-dependent | Native track timestamps |
+| CAN | Dataset-dependent | Resample only with bounded timestamp skew |
+
+Resolved ODD intervals are coalesced only when key, values, status, source,
+subject, and compatible confidence remain unchanged. Original evidence timing
+is not discarded.
+
+### 10.2 ODD labels
+
+`odd.*` describes conditions around the ego and selected route. It is not
+necessarily constant for a whole scene. Unless a label definition specifies
+otherwise, its spatial context is:
+
+- current ego-connected road element;
+- selected route up to 100 m ahead;
+- ego-local visible/drivable context within the navigation raster;
+- current one-second output interval.
+
+The exact lookahead and ROI are versioned per labeler. Statistics are computed
+from interval duration or distance, not the number of overlapping training
+samples.
+
+### 10.3 Planned route versus actual trajectory
+
+This distinction is normative:
+
+- `odd.route.action` is navigation intent from the selected
+  `NavigationRoute`. It answers what the route plans.
+- `event.ego.maneuver` is reconstructed from the driven trajectory, lane
+  sequence, and map context. It answers what ego actually executed.
+
+A planned left turn followed by a straight or interrupted trajectory therefore
+has:
+
+```text
+odd.route.action = turn_left
+event.ego.maneuver = lane_follow or interrupted event
+```
+
+No fusion rule may overwrite one with the other.
+
+### 10.4 Events
+
+Events are retrospective intervals. Detectors first produce candidates at
+native timestamps, then an event segmenter applies:
+
+- minimum duration;
+- entry and exit hysteresis;
+- maximum merge gap;
+- actor continuity;
+- mutually exclusive event rules;
+- onset, active, and resolution boundaries.
+
+Thresholds are key-specific configuration, not hidden constants.
+
+### 10.5 Perception labels
+
+`perception.*` describes observable scene difficulty, not whether a specific
+model failed.
+
+- `perception.image.*` is camera-scoped.
+- `perception.object.*` requires `subject_type=actor`.
+- `perception.fov.state` requires actor and camera geometry or a temporally
+  tracked VLM claim.
+- `perception.scene.*` is scene/window-scoped.
+- A multi-camera aggregate must declare `aggregation_rule`, for example
+  `worst_camera`, `front_center_only`, or `any_surround`.
+
+The system does not silently turn front-camera visibility into whole-scene
+visibility.
+
+## 11. Dataset Adapter Contract
+
+### 11.1 Adapter interface
+
+Every dataset implements:
+
+```text
+DatasetEvidenceAdapter
+  describe_capabilities() -> DatasetCapabilityManifest
+  list_scenes() -> list[SceneDescriptor]
+  open_scene(scene_uid) -> CanonicalSceneEvidence
+```
+
+`CanonicalSceneEvidence` provides lazy, typed access to:
+
+```text
+scene metadata and canonical clock
+camera frames + calibration + frame validity
+ego poses + covariance/quality where available
+canonical NavigationMap
+canonical NavigationRoute
+object tracks and classes where available
+LiDAR observations where available
+CAN signals where available
+dataset-native source references
+```
+
+An adapter normalizes identity, time, units, frames, and availability. It does
+not make semantic ODD decisions.
+
+### 11.2 Adapter invariants
+
+1. Timestamps are `int64` nanoseconds in one declared scene clock.
+2. Source timestamps are retained when synchronization creates a canonical
+   timestamp.
+3. Position frames and transforms are named; unlabeled XY arrays are invalid.
+4. Speed is m/s internally; published `ego_speed_kph` is explicitly converted.
+5. Missing frames remain missing and are not silently repeated.
+6. Duplicate or non-monotonic timestamps fail validation.
+7. Map and route carry provider versions and source hashes.
+8. Actor identities are stable within a scene and never synthesized from array
+   row order.
+9. The adapter reports capability absence before labelers run.
+10. All labeler outputs remain owned by the opened `scene_uid`.
+
+### 11.3 KITScenes adapter
+
+The initial KITScenes adapter consumes:
+
+- the pinned source revision and immutable dataset publication manifest;
+- 10 Hz pose timestamps, translations, and quaternion-derived yaw;
+- the existing derived speed, acceleration, yaw-rate, and curvature signals;
+- seven selected camera views and their calibration;
+- `scene_navigation.json` with canonical `NavigationMap` and
+  `NavigationRoute`;
+- `navigation_meta.json` and route-quality fields.
+
+The first implementation must not assume that every published KITScenes scene
+has usable object tracks, LiDAR, absolute civil time, CAN, or every Lanelet2
+attribute. The capability audit decides this from actual artifacts. Unsupported
+labels become `unavailable`; they are not guessed to improve coverage.
+
+The KITScenes ODD adapter operates on complete scenes. It does not iterate the
+42,667 training samples as labeling units. Existing sample identities are
+resolved only after Active Learning has selected scenes and the normal training
+pipeline enumerates those scenes.
+
+### 11.4 Future adapters
+
+L2D, NVIDIA PhysicalAI-AV, and future datasets implement the same interface.
+Dataset-specific aliases are resolved before label generation:
+
+```text
+dataset camera name -> canonical camera role
+dataset pose frame -> canonical ENU / ego FLU
+dataset map class -> canonical NavigationMap primitive
+dataset track class -> ontology actor class
+dataset timebase -> canonical nanoseconds
+```
+
+An adapter conformance suite uses synthetic fixtures so a new adapter cannot
+publish labels until identity, time, units, missingness, and frame transforms
+pass.
+
+## 12. Source Labelers
+
+### 12.1 MapRouteLabeler
+
+Inputs:
+
+- canonical `NavigationMap`;
+- selected `NavigationRoute`;
+- ego pose and map match;
+- map layer availability;
+- route/map quality and provenance.
+
+Responsibilities:
+
+- road context, class, division, directionality, geometry, junction, lane
+  count/type, static structures, and mapped controls;
+- planned route action;
+- map-supported surface and road-edge evidence;
+- route-relevant signal/control association;
+- quality-aware abstention and map/VLM conflict evidence.
+
+The labeler uses vectors and attributes, not raster color. OSM and Lanelet2
+attribute mappings live in provider adapters, while final ontology mapping is
+shared.
+
+Road context and road type are distinct:
+
+- context describes surrounding functional environment such as urban,
+  residential, or industrial;
+- type describes the current road hierarchy/use such as primary, residential,
+  or service.
+
+If a map has only road class but lacks defensible land-use context, road type
+may be valid while road context is unavailable or ambiguous.
+
+Lane count is for ego's current travel direction, not the sum across both
+directions. Junction position is relative to the ego and selected route.
+
+### 12.2 GNSSINSLabeler
+
+Inputs:
+
+- metric pose trajectory and timestamps;
+- pose quality/covariance when available;
+- map-matched road tangent and elevation when available;
+- optional corroborating CAN evidence.
+
+Responsibilities:
+
+- raw `ego_speed_kph`;
+- speed bin;
+- motion state;
+- actual maneuver candidates;
+- acceleration/deceleration and strong-response candidates;
+- road vertical geometry when reliable.
+
+Trajectory derivatives use a versioned, gap-aware smoothing configuration.
+Values spanning a gap above the configured threshold are
+`status=not_observable`; they are not interpolated through arbitrary outages.
+
+#### Speed bin contract
+
+The recommended semantic boundaries are:
+
+```text
+stationary: physical zero
+creeping:   above zero and below 5 km/h
+low_speed:  5 km/h to below 30 km/h
+medium_speed: 30 km/h through 60 km/h
+high_speed: above 60 km/h
+```
+
+Real GNSS/INS speed has noise, so the implementation uses a versioned
+`stationary_epsilon_kph` and dwell time:
+
+```text
+stationary    abs(speed) <= stationary_epsilon_kph for the dwell interval
+creeping      stationary_epsilon_kph < speed < 5
+low_speed     5 <= speed < 30
+medium_speed  30 <= speed <= 60
+high_speed    speed > 60
+```
+
+The initial epsilon and dwell are selected from the KITScenes stationary-noise
+audit and frozen before full labeling. The continuous `ego_speed_kph`, its
+quality, aggregation, and source timestamps are always stored alongside the
+bin.
+
+#### Actual maneuver contract
+
+`event.ego.maneuver` uses the driven trajectory, with map/route used only for
+topology and lane-reference context. It considers:
+
+- integrated heading change;
+- signed path curvature;
+- lanelet transitions or lane-boundary crossings;
+- longitudinal displacement;
+- entry/exit from junction and merge topology;
+- motion-state and stop intervals.
+
+Route maneuver alone cannot create an actual maneuver event.
+
+### 12.3 ImageQCLabeler
+
+Inputs are decoded camera frames, frame timestamps, and frame validity. The
+labeler computes deterministic evidence for:
+
+- exposure and mixed exposure;
+- blur candidates;
+- contrast;
+- black or corrupted frames;
+- frozen frames;
+- dropped-frame gaps;
+- partial/full obstruction candidates;
+- glare-related pixel metrics.
+
+Semantic causes such as water droplets, mud, fog, or wet-road reflection may
+require VLM evidence. Image QC records the measurable signal and fusion assigns
+the semantic label only when supported.
+
+Frozen-frame detection compares temporal image fingerprints and timestamps. A
+stationary scene alone must not be mislabeled frozen; motion cues from other
+cameras, ego motion, and encoding metadata are used in fusion.
+
+### 12.4 VLMLabeler
+
+The VLM labeler handles visual semantics not reliably available from
+deterministic sources:
+
+- lane-marking quality;
+- road surface appearance/state;
+- weather appearance and visibility degradation;
+- workzones and temporary controls;
+- traffic participants and interaction candidates;
+- occlusion, clutter, unusual appearance, and scene complexity.
+
+It uses temporal, timestamped, multi-view clips. Event claims such as cut-in,
+hard brake, evasive steer, or sudden emergence are prohibited from a
+single-image request.
+
+The initial scheduling policy is:
+
+1. one regular semantic clip per second for ODD/perception coverage;
+2. event-triggered higher-density clips around GNSS/INS, QC, map, or track
+   changes;
+3. de-duplicate overlapping requests by content/timestamp digest;
+4. batch by compatible camera layout and prompt schema;
+5. retain one explicit evidence row for every attempted field, including
+   abstention.
+
+VLM output is schema-constrained. Free-form rationale is an audit field, not a
+label. Prompted confidence is raw evidence only and must be calibrated against
+human audit.
+
+### 12.5 CANOptionalLabeler
+
+CAN is optional and never part of minimum adapter conformance. When present, it
+may provide:
+
+- wheel speed;
+- brake pressure or brake-pedal state;
+- accelerator position;
+- steering angle/rate;
+- gear/reverse state;
+- turn signal state.
+
+CAN can improve motion, hard-brake, reverse, and evasive-steer evidence. Signal
+names and units are normalized by the dataset adapter. A dataset without CAN
+still labels supported motion from GNSS/INS and records CAN-only claims as
+unavailable.
+
+### 12.6 FusionLabeler
+
+Fusion owns labels that require:
+
+- object tracks or LiDAR;
+- relative trajectories;
+- map plus visual state;
+- planned route plus driven trajectory;
+- timestamp plus location;
+- temporal interaction logic;
+- conflict resolution between sources.
+
+Examples include traffic density, actor range, right of way, route-control
+response, event outcome, and any future TTC-based near-collision label.
+
+## 13. Fusion and Conflict Resolution
+
+### 13.1 Fusion is label-specific
+
+There is no global "map beats VLM" function. Each ontology key defines a
+fusion policy. Common policies are:
+
+```text
+authoritative_only
+authoritative_with_fallback
+corroborated_union
+temporal_state_machine
+weighted_consensus
+conflict_to_ambiguous
+```
+
+Examples:
+
+- `odd.road.type`: map authoritative; VLM fallback only if explicitly enabled.
+- `odd.road.surface_state`: VLM primary; image QC corroborates wet/spray cues.
+- `odd.traffic_light.state`: VLM state joined to the route-relevant mapped
+  signal; neither source is sufficient alone when several signals are visible.
+- `event.ego.strong_response`: GNSS/INS and optional CAN temporal state machine;
+  VLM cannot create hard brake.
+- `perception.image.exposure`: image QC authoritative; VLM may explain but not
+  override the metric rule.
+
+### 13.2 Conflict policy
+
+For every conflict:
+
+1. retain all source evidence;
+2. determine whether sources refer to the same subject, interval, and spatial
+   context;
+3. apply the key's explicit priority and freshness policy;
+4. lower confidence for stale or low-quality evidence;
+5. resolve only if one result satisfies the policy margin;
+6. otherwise publish `status=ambiguous` with no resolved value.
+
+Map-versus-visual disagreement is often useful information. A temporary lane
+closure, construction plate, or missing sign can make the visual state differ
+from the static map. Such disagreement must not be erased as VLM error.
+
+### 13.3 Temporal smoothing
+
+Smoothing never changes a value across a real transition merely to improve
+stability. Each key specifies:
+
+- minimum on/off duration;
+- entry and exit thresholds;
+- permitted short gap;
+- confidence aggregation;
+- whether interval boundaries snap to source timestamps.
+
+Map-derived topology can change at a lane boundary. Weather and lighting change
+more slowly. Traffic-light state and interaction events change quickly. They
+must not share one median filter.
+
+### 13.4 Confidence calibration
+
+Calibration is performed per:
+
+```text
+ontology key x source x labeler version
+```
+
+Candidate methods include isotonic regression or temperature scaling selected
+on a frozen audit set. The manifest records:
+
+- calibration dataset digest;
+- method and parameters;
+- class counts;
+- Brier score or log loss;
+- expected calibration error;
+- confidence coverage curves.
+
+An uncalibrated source can publish experimental evidence but cannot claim
+certified confidence.
+
+## 14. Key Derivation Rules
+
+### 14.1 Road horizontal and vertical geometry
+
+- ODD horizontal geometry uses the current ego-connected road or route
+  centerline, not ego steering noise.
+- Signed curvature determines `curve_left` or `curve_right`; a deadband and
+  minimum arc length define `straight`.
+- Vertical geometry uses map elevation where available and GNSS/INS vertical
+  profile after quality filtering.
+- `crest` and `sag` require a signed grade transition over a minimum baseline.
+- Without reliable elevation, vertical geometry is unavailable; a camera VLM
+  does not infer precise grade in v1.
+
+### 14.2 Junction and control
+
+- Junction type comes from canonical topology and route connectivity.
+- Junction position is a temporal state machine around route distance to the
+  junction polygon: `approach -> inside -> exit -> midblock`.
+- `midblock` is valid only when the map coverage and current match are valid.
+- Junction control is the control applicable to ego's connected movement, not
+  any visible sign or signal in the image.
+- Multiple applicable controls without a resolvable lane/control association
+  produce ambiguity.
+
+### 14.3 Traffic-light state
+
+`odd.traffic_light.state` is scoped to a route-relevant traffic-control subject.
+The mapped signal position identifies candidates; VLM supplies visual state;
+camera projection and lane/control association disambiguate the controlling
+signal.
+
+`not_applicable` is valid when the route movement has no applicable traffic
+light. A signal that exists but is not visible is `not_observable`, not
+`off` or `not_applicable`.
+
+### 14.4 Density labels
+
+Density thresholds use a versioned ego-local ROI, time window, and observable
+area. Raw actor counts, track duration, and observable-area fraction are stored.
+
+- `empty` or `none` is valid only when the ROI is sufficiently observable.
+- A front-only image cannot establish surround traffic density.
+- Map-derived parked areas can support context but cannot establish that
+  vehicles are currently present.
+- Stop-and-go requires temporal ego/traffic motion, not a dense still image.
+
+### 14.5 Strong response and near collision
+
+`hard_brake`, `emergency_stop`, and `evasive_steer` require temporal motion
+signals. Initial thresholds are proposed by a KITScenes distribution audit and
+frozen before labels are generated. At minimum:
+
+- hard brake requires sustained longitudinal deceleration above a configured
+  magnitude and duration;
+- emergency stop requires a hard response followed by a near-stationary state
+  within a configured horizon;
+- evasive steer requires an abnormal lateral/yaw response relative to road
+  curvature, not merely a planned turn.
+
+`near_collision` is not part of the initial value set. It may be introduced only
+when relative actor trajectories, distance, and TTC are available under a
+validated coordinate and synchronization contract. The raw TTC definition,
+minimum prediction quality, threshold, actor identity, and uncertainty must be
+stored.
+
+### 14.6 Event response and outcome
+
+Event response is reconstructed from ego trajectory relative to event onset.
+Outcome is not inferred from one final image:
+
+- `normal_completion`: event completed without detected hazard escalation;
+- `interrupted`: evidence ended or the scene cut before resolution;
+- `hazard_avoided`: a supported hazard was resolved without collision;
+- `unresolved`: the event remained active at coverage end;
+- `collision`: requires corroborated collision evidence.
+
+An unavailable collision sensor does not turn every event into
+`normal_completion`.
+
+## 15. Ontology v1
+
+The values below are the initial ontology. All keys also carry the status,
+confidence, source, scope, evidence, and provenance fields defined above.
+
+### 15.1 ODD labels
+
+| Key | Type | Allowed values | Primary source |
+|---|---|---|---|
+| `odd.road.context` | single | `urban`, `suburban`, `rural`, `motorway`, `residential`, `industrial`, `parking` | `map_route` |
+| `odd.road.type` | single | `motorway`, `trunk`, `primary`, `secondary`, `tertiary`, `residential`, `service`, `ramp`, `parking_aisle`, `shared_space` | `map_route` |
+| `odd.road.division` | single | `divided`, `undivided` | `map_route` |
+| `odd.road.directionality` | single | `one_way`, `two_way` | `map_route` |
+| `odd.road.horizontal_geometry` | single | `straight`, `curve_left`, `curve_right` | `map_route` |
+| `odd.road.vertical_geometry` | single | `level`, `uphill`, `downhill`, `crest`, `sag` | `map_route`, `gnss_ins` |
+| `odd.road.junction_type` | single | `none`, `t_junction`, `y_junction`, `crossroad`, `staggered`, `roundabout`, `merge`, `diverge`, `grade_separated` | `map_route` |
+| `odd.road.junction_position` | single | `approach`, `inside`, `exit`, `midblock` | `map_route` |
+| `odd.road.junction_control` | single | `traffic_light`, `stop_sign`, `yield_sign`, `uncontrolled`, `other` | `map_route` |
+| `odd.route.action` | single | `lane_follow`, `straight`, `turn_left`, `turn_right`, `u_turn`, `merge`, `diverge`, `roundabout_enter`, `roundabout_exit` | `map_route` |
+| `odd.road.lane_count_bin` | single | `one`, `two`, `three`, `four_plus` | `map_route` |
+| `odd.road.lane_type_present` | multi | `general`, `bus`, `bicycle`, `tram`, `emergency`, `turn_only`, `parking`, `shared`, `none` | `map_route` |
+| `odd.road.lane_marking_quality` | single | `clear`, `faded`, `missing`, `temporary`, `occluded` | `vlm` |
+| `odd.road.surface_type` | single | `asphalt`, `concrete`, `paving_stone`, `gravel`, `unpaved` | `vlm`, `map_route` |
+| `odd.road.surface_state` | multi | `dry`, `wet`, `standing_water`, `snow_covered`, `visually_contaminated`, `none` | `vlm` |
+| `odd.road.edge_type_present` | multi | `curb`, `guardrail`, `solid_barrier`, `temporary_barrier`, `paved_shoulder`, `unpaved_shoulder`, `grass`, `none` | `map_route`, `vlm` |
+| `odd.road.special_structure` | multi | `bridge`, `tunnel`, `railway_crossing`, `pedestrian_crossing`, `access_gate`, `none` | `map_route` |
+| `odd.road.workzone_state` | multi | `roadworks`, `lane_closure`, `detour`, `cones`, `temporary_barrier`, `temporary_signage`, `none` | `vlm`, `map_route` |
+| `odd.traffic_control.present` | multi | `traffic_light`, `stop_sign`, `yield_sign`, `speed_limit_sign`, `temporary_sign`, `traffic_officer`, `none` | `map_route`, `vlm` |
+| `odd.traffic_light.state` | single | `red`, `red_yellow`, `yellow`, `green`, `flashing`, `off`, `not_applicable` | `vlm`, `map_route` |
+| `odd.environment.day_phase` | single | `day`, `dawn`, `dusk`, `night` | `fusion` from timestamp/location, VLM fallback |
+| `odd.environment.sky` | single | `clear`, `partly_cloudy`, `overcast` | `vlm` |
+| `odd.environment.precipitation_visual` | single | `none_visible`, `rain`, `snow`, `mixed` | `vlm` |
+| `odd.environment.visibility_degradation` | multi | `fog`, `haze`, `precipitation`, `water_spray`, `smoke_or_dust`, `none` | `vlm` |
+| `odd.environment.road_lighting` | single | `daylight`, `street_lit`, `unlit`, `tunnel_lit` | `vlm` |
+| `odd.environment.glare` | multi | `sun_front`, `sun_side`, `headlight`, `wet_road_reflection`, `none` | `vlm`, `image_qc` |
+| `odd.dynamic.traffic_density` | single | `empty`, `low`, `medium`, `high`, `stop_and_go` | `fusion` from VLM/tracks |
+| `odd.dynamic.vru_density` | single | `none`, `low`, `medium`, `high` | `fusion` from VLM/tracks |
+| `odd.dynamic.parked_vehicle_density` | single | `none`, `low`, `medium`, `high` | `fusion` from VLM/map |
+| `odd.dynamic.oncoming_traffic` | single | `absent`, `present` | `fusion` from VLM/tracks |
+| `odd.dynamic.agent_type_present` | multi | `passenger_vehicle`, `light_commercial_vehicle`, `heavy_truck`, `bus`, `motorcycle`, `bicycle`, `e_scooter`, `pedestrian`, `wheelchair_user`, `animal`, `emergency_vehicle`, `construction_vehicle`, `none` | `fusion` from VLM/tracks |
+| `odd.ego.speed_bin` | single | `stationary`, `creeping`, `low_speed`, `medium_speed`, `high_speed` | `gnss_ins`, `can_optional` |
+
+`odd.ego.speed_bin` always includes the continuous measurement
+`ego_speed_kph`.
+
+The ontology normalizes `none` into the multi-select lane type, surface state,
+and actor type groups to enforce the explicit-negative rule. For lane type,
+`none` is valid only when the road is observed and none of the listed lane
+types is represented. It must not be used when lane attribution is absent.
+
+### 15.2 Event labels
+
+| Key | Type | Allowed values | Primary source |
+|---|---|---|---|
+| `event.ego.motion_state` | single | `stopped`, `starting`, `moving`, `creeping`, `accelerating`, `decelerating`, `reversing` | `gnss_ins`, `can_optional` |
+| `event.ego.maneuver` | single | `lane_follow`, `turn_left`, `turn_right`, `u_turn`, `lane_change_left`, `lane_change_right`, `merge`, `diverge`, `pull_over`, `pull_out`, `overtake`, `stop` | `fusion` from trajectory/map |
+| `event.ego.strong_response` | single | `none`, `hard_brake`, `emergency_stop`, `evasive_steer` | `gnss_ins`, `can_optional`, `fusion` |
+| `event.vehicle.interaction` | multi | `cut_in`, `cut_out`, `lead_vehicle_braking`, `vehicle_merging_ahead`, `vehicle_crossing_path`, `oncoming_encroachment`, `parked_vehicle_pull_out`, `door_opening`, `vehicle_yielding`, `vehicle_not_yielding`, `being_overtaken`, `none` | `fusion` from temporal VLM/tracks |
+| `event.vru.interaction` | multi | `pedestrian_crossing`, `pedestrian_entering_road`, `pedestrian_waiting_to_cross`, `pedestrian_walking_along_road`, `cyclist_crossing`, `cyclist_merging`, `vru_sudden_emergence`, `occluded_vru_emergence`, `vru_yielding`, `vru_not_yielding`, `none` | `fusion` from temporal VLM/tracks |
+| `event.traffic_control.response` | single | `stop_at_red`, `proceed_on_green`, `stop_at_stop_sign`, `yield_at_yield_sign`, `stop_for_crosswalk`, `stop_at_rail_crossing`, `follow_traffic_officer`, `no_response_required` | `fusion` from map/route, VLM, trajectory |
+| `event.right_of_way` | single | `ego_has_priority`, `other_has_priority`, `ambiguous_priority`, `not_applicable` | `fusion` from map/route and VLM |
+| `event.hazard.type` | multi | `obstacle_on_road`, `debris_on_road`, `blocked_lane`, `wrong_way_vehicle`, `emergency_vehicle_approach`, `collision`, `none` | `vlm`, `fusion` |
+| `event.hazard.response` | single | `none`, `slow_down`, `stop`, `obstacle_avoidance`, `lane_change_avoidance`, `yield` | `fusion` from trajectory, GNSS/INS, VLM |
+| `event.traffic_flow` | multi | `congestion_entry`, `congestion_exit`, `queue_entry`, `queue_exit`, `stop_and_go`, `road_closure_encounter`, `workzone_entry`, `workzone_exit`, `none` | `fusion` from trajectory, VLM, map/route |
+| `event.interaction.actor` | multi | `vehicle`, `pedestrian`, `cyclist`, `motorcycle`, `emergency_vehicle`, `animal`, `static_obstacle`, `none` | `fusion` from VLM/tracks |
+| `event.outcome` | single | `normal_completion`, `interrupted`, `hazard_avoided`, `unresolved`, `collision` | `fusion` |
+| `event.phase` | single | `onset`, `active`, `resolution` | `fusion` |
+
+Required event rules:
+
+- `odd.route.action=turn_left` means the selected route plans a left turn.
+- `event.ego.maneuver=turn_left` means the driven trajectory executes a left
+  turn.
+- `hard_brake`, `evasive_steer`, and any future `near_collision` are prohibited
+  from single-image VLM inference.
+- `near_collision` may be added only with relative trajectories and a validated
+  TTC contract.
+- `event.phase` is stored as phase subintervals on an `EventInstance`; it is not
+  copied as an unrelated scene label.
+
+### 15.3 Perception labels
+
+| Key | Type | Allowed values | Primary source |
+|---|---|---|---|
+| `perception.occlusion.source` | multi | `static_object`, `dynamic_object`, `ego_body`, `weather`, `none` | `vlm` |
+| `perception.occlusion.level` | single | `none`, `partial`, `major`, `full` | `vlm` |
+| `perception.object.visibility` | single | `fully_visible`, `partially_visible`, `barely_visible`, `not_visible` | `vlm` |
+| `perception.object.scale` | single | `normal`, `small`, `very_small` | `fusion` from VLM/detection |
+| `perception.object.range` | single | `near`, `mid`, `far`, `very_far` | `fusion` from LiDAR/tracks/VLM |
+| `perception.fov.state` | single | `centered`, `edge_of_fov`, `truncated`, `entering_fov`, `leaving_fov` | `fusion` from temporal VLM/geometry |
+| `perception.scene.clutter` | single | `low`, `medium`, `high` | `vlm` |
+| `perception.object.overlap` | single | `none`, `moderate`, `heavy` | `fusion` from VLM/detection |
+| `perception.visual.contrast` | single | `normal`, `low_contrast`, `silhouette` | `image_qc`, `vlm` |
+| `perception.visual.lighting` | multi | `normal`, `backlit`, `deep_shadow`, `high_dynamic_range`, `tunnel_transition` | `image_qc`, `vlm` |
+| `perception.visual.glare` | multi | `sun`, `headlight`, `wet_road_reflection`, `none` | `image_qc`, `vlm` |
+| `perception.image.exposure` | single | `normal`, `overexposed`, `underexposed`, `mixed` | `image_qc` |
+| `perception.image.blur` | single | `none`, `motion_blur`, `defocus_blur` | `image_qc` |
+| `perception.image.weather_artifact` | multi | `rain_streak`, `snow_streak`, `water_spray`, `fog_or_haze`, `none` | `image_qc`, `vlm` |
+| `perception.image.lens_contamination` | multi | `water_droplet`, `dirt`, `mud`, `condensation`, `none` | `image_qc`, `vlm` |
+| `perception.image.frame_status` | single | `normal`, `partial_obstruction`, `full_obstruction`, `black_frame`, `frozen_frame`, `dropped_frame`, `corrupted_frame` | `image_qc` |
+| `perception.object.appearance` | multi | `normal`, `unusual_object`, `unusual_pose`, `temporary_object`, `ambiguous_class`, `deceptive_appearance` | `vlm` |
+| `perception.map_element_condition` | single | `clear`, `occluded`, `faded`, `temporary_conflict`, `visually_missing` | `fusion` from map/route and VLM |
+| `perception.scene.complexity` | single | `simple`, `moderate`, `complex`, `extreme` | `vlm` |
+| `perception.mixed_traffic` | single | `absent`, `present` | `vlm` |
+| `perception.temporary_traffic_control` | single | `absent`, `present` | `fusion` from VLM and map/route |
+
+`perception.visual.lighting` and `perception.object.appearance` use `normal` as
+an observed neutral condition. The ontology must prohibit `normal` from
+co-occurring with abnormal values. Missing evidence still uses status, never
+`normal`.
+
+Object-level keys require `actor_track_uid`. In a VLM-only experimental tier
+where stable tracks are unavailable, a short-lived `visual_actor_uid` may be
+created by the temporal VLM pipeline, but it must not be presented as a
+geometrically validated object track.
+
+### 15.4 Explicitly excluded labels
+
+| Excluded label | Reason |
+|---|---|
+| temperature, humidity, wind speed | Requires corresponding environmental sensors |
+| rainfall rate in mm/h | Absolute rate is unstable from imagery |
+| road friction, road-surface temperature | Requires dedicated measurement or a separately validated estimator |
+| visibility distance in meters | Requires a defensible metric-distance protocol |
+| illuminance in lux | Absolute illuminance is not recoverable from auto-exposed images |
+| ice, black ice | Cannot be confirmed reliably from current imagery |
+| sensor calibration drift | Requires comparison to a calibration reference |
+| false positive, false negative | Requires model output and ground truth |
+| misclassification, tracking loss | Requires model output and ground truth |
+| localization failure | Requires an independent position reference |
+| near collision | Requires synchronized relative trajectories, distance, and TTC |
+
+These exclusions are schema constraints, not merely prompt instructions. A VLM
+response containing an excluded label fails validation and is retained only as
+an invalid raw response for audit.
+
+## 16. Flyte Workflow
+
+### 16.1 Workflow interface
+
+The proposed top-level workflow is:
+
+```text
+wf_generate_odd_labelset(
+  dataset_name,
+  dataset_version,
+  dataset_manifest_uri,
+  dataset_manifest_sha256,
+  ontology_version,
+  ontology_sha256,
+  labeler_bundle_version,
+  labeler_config_uri,
+  labeler_config_sha256,
+  enabled_sources,
+  vlm_provider,
+  vlm_model_revision,
+  vlm_prompt_sha256,
+  calibration_bundle_sha256,
+  publication_prefix,
+)
+```
+
+Mutable defaults are prohibited for full runs. Image digests, source revisions,
+model revisions, ontology hashes, prompt hashes, and configuration hashes are
+explicit task inputs.
+
+### 16.2 Task graph
+
+```text
+resolve_dataset_snapshot
+  -> audit_dataset_capabilities
+  -> plan_scene_partitions
+  -> map over scene partitions:
+       extract_canonical_evidence
+       +-> label_map_route
+       +-> label_gnss_ins
+       +-> label_image_qc
+       +-> label_can_optional
+       +-> select_vlm_requests
+             -> label_vlm
+       -> label_fusion_candidates
+       -> segment_events
+       -> validate_partition
+       -> write_partition_receipt
+  -> merge_partition_receipts
+  -> calibrate_or_apply_frozen_calibration
+  -> resolve_and_coalesce_labels
+  -> compute_statistics
+  -> validate_labelset
+  -> publish_labelset
+  -> materialize_console_index
+```
+
+Source labelers are independently cacheable. Changing a VLM prompt does not
+rerun map, GNSS/INS, or image-QC labeling. Changing a fusion policy reuses all
+source evidence.
+
+### 16.3 Cache keys
+
+Task cache identity includes only semantic inputs:
+
+```text
+dataset manifest SHA-256
+scene identity digest
+source artifact digests
+adapter version/config
+ontology SHA-256
+labeler version/config
+VLM model/prompt/decoding hashes where applicable
+fusion version/config
+calibration bundle SHA-256
+```
+
+Worker count, Flyte partition size, retry count, and resource requests do not
+change semantic identity.
+
+### 16.4 Partitioning and idempotency
+
+KITScenes uses one scene per logical partition, consistent with current
+navigation processing. Other datasets may group small scenes, but stable
+`scene_uid` and `observation_uid` remain partition-independent.
+
+Every task writes to a temporary content-addressed prefix and emits a receipt.
+The final publisher:
+
+1. validates all expected scene receipts;
+2. rejects duplicate scenes or observations;
+3. checks source and ontology consistency;
+4. writes immutable artifacts;
+5. verifies object hashes;
+6. writes `manifest.json` last;
+7. atomically updates an optional ready pointer only after validation.
+
+A retry with identical inputs produces the same records and safely reuses
+content. Partial output is never discoverable as ready.
+
+### 16.5 VLM resource and failure policy
+
+- Deterministic tasks do not depend on the Cosmos endpoint.
+- VLM requests have bounded concurrency and explicit cost/request counts.
+- Transport retries are bounded and idempotent by request digest.
+- A failed request produces evidence with the appropriate unavailable or
+  not-observable status; it does not create `none`.
+- A full LabelSet may publish with experimental VLM gaps only when the manifest
+  reports coverage and the frozen completeness gate permits it.
+- The existing Cosmos cluster is treated as an external protected dependency;
+  this workflow does not modify its infrastructure.
+
+## 17. Artifact and Publication Contract
+
+### 17.1 LabelSet layout
+
+The proposed logical layout is:
+
+```text
+odd-labelsets/
+  dataset={dataset_name}/
+    version={dataset_version}/
+      labelset={labelset_id}/
+        manifest.json
+        capabilities.json
+        ontology.yaml
+        evidence/
+          source=map_route/*.parquet
+          source=gnss_ins/*.parquet
+          source=image_qc/*.parquet
+          source=vlm/*.parquet
+          source=can_optional/*.parquet
+          source=fusion/*.parquet
+        scene_records/*.parquet
+        observations/*.parquet
+        events/*.parquet
+        statistics/*.parquet
+        quality/
+          coverage.json
+          conflicts.parquet
+          audit_manifest.json
+          calibration.json
+        receipts/*.json
+```
+
+Paths are illustrative; the manifest, not path parsing, is authoritative.
+
+### 17.2 LabelSet ID
+
+`labelset_id` is a content identity derived from:
+
+```text
+dataset manifest SHA-256
+ontology SHA-256
+adapter bundle SHA-256
+labeler bundle SHA-256
+source configuration SHA-256
+fusion configuration SHA-256
+calibration bundle SHA-256
+semantic output Merkle root
+```
+
+The semantic output Merkle root is computed over canonical scene, evidence,
+observation, event, statistics, and quality payloads with the `labelset_id`
+field omitted. `labelset_id` is then computed once and inserted during final
+serialization. This avoids a self-referential hash while still making output
+content part of identity. It is not a timestamp or Flyte execution ID.
+
+### 17.3 Parquet requirements
+
+- Explicit Arrow schema; no inferred mixed types.
+- Nanosecond timestamps stored as signed int64.
+- Dictionary encoding for label keys, values, statuses, and sources.
+- Scene-based row groups for selective reads.
+- Canonical sorted value lists for multi-select labels.
+- No NaN confidence; values must be finite and in range.
+- Evidence and label rows sorted deterministically.
+- Schema metadata includes ontology and LabelSet identities.
+
+JSONL may be emitted for debugging small smoke runs, but Parquet is the
+authoritative full-corpus format.
+
+### 17.4 Scene ownership and physical layout
+
+Parquet normalization does not change the ownership model. `scene_records`
+contains one logical root per scene. Evidence, observations, and events are
+partitioned and indexed by `scene_uid`; no table contains a canonical
+`sample_uid -> label` relation.
+
+The LabelSet therefore remains unchanged when model sample cadence, history,
+target horizon, or sample eligibility changes.
+
+### 17.5 Derived evaluation projection
+
+Model analysis may need to ask which scene labels overlap a model evaluation
+row. The Console or evaluation service may build an ephemeral derived
+projection:
+
+```text
+sample_uid
+scene_uid
+sample_anchor_timestamp_ns
+label_observation_uids
+overlapping_event_uids
+projection_policy_version
+```
+
+This projection is not part of the ODD LabelSet, is not an ODD label artifact,
+and is never supplied to the model. It is regenerated from a model/dataset
+manifest plus scene intervals, and its cache identity includes both manifests.
+The join uses interval containment or overlap rules from the ontology.
+
+## 18. Statistics and Search
+
+### 18.1 Correct denominators
+
+For each key/value, publish:
+
+- scene occurrence count;
+- event instance count where applicable;
+- valid duration and distance;
+- value duration and distance;
+- valid interval count;
+- unavailable duration;
+- not-observable duration;
+- ambiguous duration;
+- confidence distribution;
+- source distribution;
+- dataset and scene coverage.
+
+Percentages use valid observable coverage as the semantic denominator:
+
+```text
+value_fraction = value_duration / valid_duration
+```
+
+Missingness is reported separately:
+
+```text
+observable_coverage =
+  valid_duration / total_eligible_duration
+```
+
+Unavailable and not-observable intervals are never counted as negative values.
+
+### 18.2 Avoiding sampling bias
+
+Statistics must not count overlapping 6.4-second training windows as independent
+time. Corpus composition is based on the normalized scene timeline. Training
+sample counts are not ODD LabelSet statistics.
+
+Publish duration-weighted, distance-weighted, and scene-weighted views. A long
+stationary scene must not dominate every reported composition without that
+weighting being visible.
+
+### 18.3 Co-occurrence
+
+The statistics artifact supports:
+
+- pairwise ODD co-occurrence;
+- ODD x event co-occurrence;
+- ODD/perception x model-metric joins;
+- rare-combination counts;
+- status and source cross-tabs.
+
+Combinations are computed from interval overlap with a versioned minimum
+overlap, not by joining arbitrary nearest samples.
+
+### 18.4 Console materialization
+
+DataModelConsole materializes only search and aggregate projections. Parquet and
+the LabelSet manifest remain authoritative.
+
+Required queries include:
+
+```text
+label key/value/status/source/confidence
+dataset and LabelSet
+scene
+time range
+camera
+actor type/track
+event type and phase
+planned route action
+executed maneuver
+co-occurring labels
+model version and metric threshold
+```
+
+Search results return scene/time intervals and resolve to existing playback
+identities. The UI must display:
+
+- value, status, confidence, and source;
+- planned route action separately from actual maneuver;
+- evidence provenance and conflicts;
+- exact LabelSet and ontology versions;
+- observable coverage next to percentages.
+
+### 18.5 Active Learning scene selection
+
+Active Learning consumes the ODD LabelSet as a catalog and emits an independent
+`SceneSelectionManifest`. It never converts ODD values into model input
+features or per-sample targets.
+
+The initial KITScenes selection unit is one complete `scene_uid`. A selection
+policy may combine:
+
+- underrepresented ODD values or combinations;
+- coverage targets by duration, distance, or scene count;
+- event rarity;
+- perception difficulty;
+- label confidence or source disagreement for human review;
+- model error or uncertainty imported as a separate model-run projection;
+- storage, labeling, and training-compute budgets;
+- diversity constraints that avoid selecting many near-duplicate scenes.
+
+The manifest contract is:
+
+```text
+SceneSelectionManifest
+  schema_version
+  selection_id
+  dataset_name
+  dataset_version
+  dataset_manifest_sha256
+  labelset_id
+  ontology_sha256
+  policy_name
+  policy_version
+  policy_config_sha256
+  optional_model_run_refs
+  budget:
+    max_scene_count
+    max_duration_ns
+    max_distance_m
+    max_storage_bytes
+  selected_scenes:
+    - scene_uid
+      selection_score
+      selection_reasons
+      matched_observation_uids
+      matched_event_uids
+      scene_duration_ns
+      scene_distance_m
+  excluded_scenes_with_reasons
+  candidate_inventory_sha256
+  selected_inventory_sha256
+  created_at
+  provenance
+```
+
+Selection reasons are auditable predicates such as:
+
+```text
+odd.environment.road_lighting = unlit
+AND event.vru.interaction contains pedestrian_crossing
+AND status = valid
+AND confidence >= 0.8
+```
+
+`selection_id` is content-derived from the dataset/LabelSet identities, policy
+configuration, candidate inventory, and selected inventory. `created_at` is
+operational metadata and does not affect selection identity.
+
+The training data pipeline consumes only the selected scene identities, then
+performs its normal parsing and sample enumeration from raw scene data. ODD
+labels do not enter the loader batch. Existing frozen validation/test scenes
+and split groups are excluded before ranking; Active Learning must not move
+them into training or split one scene across train and validation.
+
+Selection manifests are stored outside immutable LabelSet content:
+
+```text
+odd-selections/
+  dataset={dataset_name}/
+    version={dataset_version}/
+      labelset={labelset_id}/
+        selection={selection_id}/manifest.json
+```
+
+Dashboard users can preview matched intervals and selection reasons, compare
+candidate coverage before/after selection, and export the immutable manifest to
+the Flyte data-preparation workflow.
+
+## 19. Quality, Audit, and Governance
+
+### 19.1 Automated validation
+
+Every partition and final LabelSet validates:
+
+1. exact dataset manifest identity;
+2. complete expected scene coverage;
+3. unique scene, observation, evidence, and event identities;
+4. monotonic, bounded intervals;
+5. ontology key/value/cardinality conformance;
+6. status/value invariants;
+7. `none` mutual exclusion;
+8. confidence range and finiteness;
+9. allowed source and subject scope;
+10. evidence references exist and stay within the same LabelSet;
+11. event phases are ordered and within the event interval;
+12. object labels have actor subjects;
+13. camera labels have camera subjects;
+14. source artifact hashes match;
+15. deterministic reserialization hashes match.
+
+### 19.2 Human audit
+
+The audit set is selected before quality results are viewed and is stratified
+by:
+
+- key and value;
+- source;
+- confidence band;
+- status;
+- common and rare conditions;
+- map/VLM conflicts;
+- dataset and camera;
+- event boundary cases.
+
+Human review records independent annotations, adjudication, reviewer agreement,
+and ontology interpretation questions. Reviewers see source evidence only after
+their initial label to reduce anchoring.
+
+### 19.3 Initial quality gates
+
+Before a source/key pair becomes certified:
+
+- at least 50 audited valid examples for each material value where corpus
+  availability permits;
+- at least 50 audited negative/neutral examples for multi-select groups;
+- precision and recall with Wilson or bootstrap 95% intervals;
+- boundary error for events and temporal states;
+- status accuracy for unavailable/not-observable/ambiguous;
+- confidence calibration metrics;
+- documented failure modes.
+
+Numerical pass thresholds are frozen per label family before the full audit.
+Until then, labels are experimental. Sparse values that cannot meet the sample
+minimum remain experimental rather than being silently merged or dropped.
+
+### 19.4 Coverage gates
+
+A full LabelSet manifest reports, for every key:
+
+```text
+eligible_duration
+valid_duration
+unavailable_duration
+not_observable_duration
+ambiguous_duration
+attempted_count
+successful_count
+quality_tier
+```
+
+Publication fails on structural incompleteness. Semantic coverage may be below
+100% when accurately represented by status; the manifest must not call such a
+LabelSet complete without showing the per-key coverage.
+
+### 19.5 Ontology governance
+
+An ontology change requires:
+
+- motivation and examples;
+- affected keys/values;
+- migration or explicit non-migration decision;
+- source and fusion impact;
+- Console/statistics impact;
+- audit impact;
+- a new ontology digest and LabelSet.
+
+VLM prompt edits do not redefine ontology semantics. If a prompt reveals that a
+definition is unclear, the ontology is changed first.
+
+## 20. Failure Semantics
+
+| Failure | Required behavior |
+|---|---|
+| Dataset source channel absent | `unavailable`; continue supported labelers |
+| Timestamp gap exceeds bound | `not_observable` for affected interval |
+| Map match invalid | Map/route labels unavailable or ambiguous; retain quality |
+| Route absent | `odd.route.action` unavailable; actual maneuver may still be valid |
+| Camera frame corrupt | QC label valid for corruption; visual semantic labels not observable |
+| One camera absent | Camera-scoped unavailable; surround aggregate follows its declared rule |
+| VLM transport failure | Explicit failed evidence; no `none` substitution |
+| VLM schema failure | Invalid raw response retained; evidence status reflects failure |
+| Map and visual conflict | Preserve both; apply key policy or publish ambiguous |
+| Object track discontinuity | End or split actor-scoped event; do not join by row position |
+| CAN absent | CAN evidence unavailable; GNSS/INS path continues |
+| Partial Flyte partition output | No ready LabelSet publication |
+| Duplicate observation/event ID | Fail publication |
+| Taxonomy mismatch across partitions | Fail publication |
+| Calibration bundle mismatch | Fail resolved-label publication |
+
+## 21. Security, Privacy, and Cost
+
+- Exact geography follows the dataset's existing privacy and Console exposure
+  policy. ODD search results must not bypass disabled exact-map access.
+- Raw camera clips and VLM responses remain under the same access controls as
+  source data.
+- External VLM providers are disabled unless dataset policy explicitly permits
+  data transfer. The initial protected Cosmos endpoint is the expected backend.
+- Credentials and endpoint URLs are never stored in LabelSet provenance.
+- VLM request counts, input frame counts, failures, latency, GPU time, and
+  estimated cost are published as operational metrics.
+- Deterministic source labels are generated before VLM scheduling so the VLM is
+  not billed for fields that can be resolved without it.
+- Re-labeling one source or prompt reuses unaffected evidence through content
+  addressing.
+
+## 22. Initial KITScenes Delivery
+
+### 22.1 Phase 0: capability and ontology audit
+
+1. Pin the KITScenes dataset publication manifest and scene inventory.
+2. Audit actual availability and quality of map attributes, route semantics,
+   absolute timestamps, cameras, tracks, LiDAR, and other channels.
+3. Produce corpus distributions for GNSS/INS noise, gaps, speed, acceleration,
+   yaw rate, curvature, and map-match quality.
+4. Freeze ontology definitions, spatial ROI, temporal cadence, speed epsilon,
+   motion/event thresholds, and quality tiers.
+5. Build a small human-reviewed golden scene set.
+
+No full VLM run starts before this phase.
+
+### 22.2 Phase 1: deterministic labels
+
+Implement and validate:
+
+- map/route road topology and planned action;
+- GNSS/INS speed, raw speed, motion, and actual maneuver candidates;
+- deterministic image quality;
+- status and capability records;
+- immutable evidence and LabelSet smoke publication.
+
+This phase should already produce useful ODD statistics without Cosmos.
+
+### 22.3 Phase 2: visual ODD and perception labels
+
+1. Define schema-constrained temporal multi-view prompts.
+2. Run a small stratified KITScenes subset.
+3. Audit per key/value and calibrate confidence.
+4. Correct ontology or prompt ambiguities before the full run.
+5. Run full 1 Hz coverage plus triggered refinement.
+6. Publish VLM evidence separately from resolved fusion output.
+
+### 22.4 Phase 3: events and fusion
+
+Implement:
+
+- map/visual control association;
+- route-versus-actual maneuver comparison;
+- event segmentation and phases;
+- traffic, VRU, hazard, workzone, and interaction events supported by the
+  audited capabilities;
+- object-track or LiDAR fusion only where those contracts are validated.
+
+Unsupported event families remain unavailable or experimental. Full coverage is
+not fabricated from VLM-only still images.
+
+### 22.5 Phase 4: Console, Active Learning, and evaluation slices
+
+Add:
+
+- ODD composition statistics with observable coverage;
+- label/status/source/confidence filters;
+- scene and interval search;
+- event timeline and evidence detail;
+- route action versus executed maneuver display;
+- reproducible scene ranking and `SceneSelectionManifest` export;
+- before/after coverage comparison for selected scene sets;
+- model ADE/FDE and other metric slicing by LabelSet;
+- desktop and mobile playback validation.
+
+### 22.6 KITScenes publication policy
+
+The initial LabelSet binds to the current immutable KITScenes dataset manifest
+and navigation artifacts. It is published as a sidecar. No shard repack is
+required.
+
+A future training experiment may consume a `SceneSelectionManifest` to decide
+which raw scenes are included. It must not consume ODD values as model inputs or
+targets. The selected scenes are packed through the ordinary dataset pipeline,
+and the source LabelSet remains unchanged.
+
+## 23. Expansion to Other Datasets
+
+### 23.1 Minimum adapter tier
+
+A camera + pose dataset can support:
+
+- image QC;
+- some VLM ODD/perception labels;
+- ego speed/motion when timestamps and metric pose are valid;
+- actual trajectory maneuvers with reduced topology confidence.
+
+Map/route labels are unavailable unless a canonical map/route contract exists.
+
+### 23.2 Map-enabled tier
+
+A dataset with Lanelet2, OSM, or another vector map implements a provider
+adapter to `NavigationMap`. If a selected route exists, it also emits
+`NavigationRoute`. The ODD MapRouteLabeler remains unchanged.
+
+Map formats are not added to the labeler one by one.
+
+### 23.3 Track/LiDAR tier
+
+Object tracks and LiDAR enable:
+
+- calibrated actor range and scale;
+- traffic/VRU density with stronger observability;
+- relative motion and interaction events;
+- TTC and, after validation, possible near-collision candidates.
+
+The label schema remains the same. The source becomes `fusion`, and evidence
+records identify tracks/LiDAR.
+
+### 23.4 CAN-enhanced tier
+
+CAN improves motion-state and strong-response confidence but does not create a
+separate taxonomy. Dataset comparisons report which source tier produced each
+label so a CAN-rich dataset is not silently treated as equivalent to a
+camera-only dataset.
+
+### 23.5 Cross-dataset statistics
+
+Cross-dataset aggregation requires:
+
+- exact ontology version;
+- compatible label/source quality tier;
+- compatible temporal/spatial definitions;
+- compatible status semantics;
+- per-dataset coverage shown separately.
+
+The system must not compare raw label percentages when one dataset has 95%
+observable coverage and another has 30%.
+
+## 24. Testing Strategy
+
+### 24.1 Contract tests
+
+- JSON/Arrow schema round trip.
+- Exact enum and cardinality validation.
+- Status/value and `none` invariants.
+- Stable content identities across partitioning.
+- Dataset and LabelSet digest checks.
+- Provenance completeness.
+
+### 24.2 Adapter conformance tests
+
+- Timestamp monotonicity and unit conversion.
+- Coordinate-frame transforms.
+- Source gap and missing-frame handling.
+- Camera role/calibration mapping.
+- Stable scene/sample/track identities.
+- Capability absence versus interval observability.
+
+### 24.3 Labeler unit tests
+
+- Synthetic map fixtures for every road/junction/route class.
+- Synthetic trajectories for speed boundaries, turns, lane changes, stopping,
+  reverse, hard brake, and evasive candidates.
+- Image fixtures for exposure, blur, black, frozen, dropped, and corrupted
+  frames.
+- VLM parser tests for valid, incomplete, conflicting, and excluded outputs.
+- CAN normalization and missing-signal tests.
+
+### 24.4 Fusion tests
+
+- Map/VLM agreement and conflict.
+- Static map versus temporary visual control.
+- Route-planned turn versus actual straight trajectory.
+- Several visible signals with one route-relevant control.
+- Track discontinuity and actor reassociation rejection.
+- `none` versus not-observable.
+- Confidence calibration and conflict margin.
+
+### 24.5 Temporal tests
+
+- Half-open interval boundaries.
+- Hysteresis and minimum duration.
+- Event onset/active/resolution ordering.
+- Multiple overlapping events.
+- Source gap behavior.
+- Determinism under Flyte repartitioning.
+
+### 24.6 End-to-end smoke
+
+The KITScenes smoke set includes:
+
+- straight midblock;
+- left and right planned turns;
+- actually executed turn;
+- junction approach/inside/exit;
+- stationary and speed-boundary intervals;
+- day/night or low-light where available;
+- map/visual disagreement;
+- image-quality defect;
+- at least one temporal interaction candidate;
+- absent capability and not-observable examples.
+
+The smoke run validates artifacts, joins, statistics, Console search, and
+playback before a full VLM run.
+
+## 25. Staged Implementation
+
+### PR 1: Contracts and ontology
+
+- Canonical evidence, label, event, capability, and provenance schemas.
+- Machine-readable ontology v1.
+- Validators and generated JSON/Arrow schemas.
+- Contract and status tests.
+
+### PR 2: Adapter framework and KITScenes adapter
+
+- `DatasetEvidenceAdapter`.
+- KITScenes timeline, camera, pose, navigation, and identity integration.
+- Capability audit.
+- Adapter conformance fixtures.
+
+### PR 3: Deterministic labelers
+
+- Map/route, GNSS/INS, and image-QC labelers.
+- Continuous measurements and temporal smoothing.
+- KITScenes deterministic smoke LabelSet.
+
+### PR 4: VLM evidence
+
+- ODD-specific temporal clip builder and prompt schema.
+- Model-agnostic VLM backend.
+- Bounded scheduling, cache, raw response artifacts, and parser.
+- Stratified audit tooling.
+
+### PR 5: Fusion and events
+
+- Label-specific fusion registry.
+- Confidence calibration.
+- Event candidate and segmentation state machines.
+- Conflict and quality artifacts.
+
+### PR 6: Publication and statistics
+
+- Immutable LabelSet publisher.
+- Scene-rooted Parquet schemas and receipts.
+- Duration/distance/scene statistics.
+- Active Learning `SceneSelectionManifest` contract and selection engine.
+- Full validation and ready cutover.
+
+### PR 7: Console
+
+- LabelSet catalog and materialization.
+- ODD composition, search, event timeline, and provenance.
+- Scene selection, selection-reason preview, and coverage comparison.
+- Model metric slicing.
+- Desktop/mobile Playwright verification.
+
+### PR 8: Full KITScenes run and audit
+
+- Frozen configurations and image/model digests.
+- Full evidence and LabelSet publication.
+- Human audit and calibration report.
+- Coverage, conflict, and cost report.
+
+## 26. Acceptance Criteria
+
+### 26.1 Contract
+
+- Every label carries value/status, confidence, source, scope, evidence, and
+  provenance.
+- Every observation/event is owned by one `SceneLabelRecord`; no ODD
+  `SampleLabelRecord` exists.
+- `none`, unavailable, not observable, and ambiguous are demonstrably distinct.
+- Planned route action and actual maneuver are separate keys and derivations.
+- Object and camera labels have valid subjects.
+- Taxonomy and output schemas are single-sourced and hashed.
+- ODD values are absent from model input and target contracts.
+
+### 26.2 Dataset independence
+
+- KITScenes-specific code exists only in its adapter and provider mappings.
+- Shared labelers consume canonical evidence.
+- A synthetic second adapter passes the same conformance and labeler tests.
+- Missing map, route, track, LiDAR, or CAN channels do not break supported
+  labeling.
+
+### 26.3 Reproducibility
+
+- Same immutable inputs and configuration produce byte-equivalent canonical
+  records and identical LabelSet identity.
+- Repartitioning does not change IDs or labels.
+- Every output is traceable to source artifact hashes, code, image, config, and
+  Flyte executions.
+- Partial or mixed-version output cannot be published as ready.
+
+### 26.4 Quality
+
+- Structural validation passes for 100% of published rows.
+- Every key reports valid/unavailable/not-observable/ambiguous coverage.
+- Certified labels meet frozen human-audit and calibration gates.
+- Experimental labels are visibly marked and never merged into certified
+  statistics without filtering.
+- Event boundary and actor-continuity errors are measured.
+
+### 26.5 Product use
+
+- Console can find a scene/time interval by label, value, status, source, and
+  confidence.
+- Corpus statistics use correct observable denominators and timeline weighting.
+- Active Learning can emit an immutable, budgeted scene selection with
+  auditable reasons while preserving frozen split groups.
+- Model metrics can be projected onto scene/time slices for analysis without
+  changing the LabelSet or model inputs.
+- The UI distinguishes route intent, actual maneuver, event, and perception
+  difficulty.
+
+## 27. Open Decisions to Resolve in the KITScenes Audit
+
+These are empirical configuration decisions, not unresolved architecture:
+
+1. Exact KITScenes support for absolute civil time, object tracks, and LiDAR in
+   the published processing contract.
+2. Lanelet2/OSM attribute coverage for road context, lane count/type, surface,
+   structures, and traffic controls.
+3. `stationary_epsilon_kph`, dwell time, derivative smoothing, and source-gap
+   thresholds.
+4. Curvature, grade, event, and density thresholds.
+5. VLM temporal clip length, frame cadence, camera arrangement, and triggered
+   refinement budget.
+6. Initial per-key certification thresholds and audit sample allocation.
+7. Which object-level labels remain disabled until stable tracks are available.
+
+Each value is selected from a reproducible audit artifact and frozen before the
+full run. None may be selected after inspecting desired model-performance
+results.
+
+## 28. References
+
+- `Docs/navigation_input_design.md`, provider-independent navigation and
+  KITScenes route contracts.
+- `Design/horizon_reasoning_architecture.md`, action-relevant Reasoning Label
+  purpose and artifact separation.
+- ISO 34503:2023, Road vehicles - Test scenarios for automated driving systems
+  - Specification for operational design domain.
+- ASAM OpenODD, machine-readable ODD specification concepts.
+- ASAM OpenLABEL, scene, object, frame, and stream labeling concepts.
+- BSI PAS 1883:2020, operational design domain taxonomy.
+- PEGASUS project, six-layer scenario model.
