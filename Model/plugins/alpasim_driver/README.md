@@ -75,9 +75,3 @@ PYTHONPATH=.:Model python Model/plugins/alpasim_driver/examples/run_closed_loop.
 [INFO] [Step 49/50] t= 4.9s | Ego Pos: ( 76.69m,   2.16m) | Speed: 22.01 m/s | Heading:  1.99°
 [INFO] Closed-Loop Simulation completed successfully!
 ```
-
----
-
-## License
-
-Licensed under the Apache License 2.0. See [LICENSE](../../LICENSE) for details.
