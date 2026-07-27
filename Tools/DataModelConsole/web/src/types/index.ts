@@ -100,6 +100,117 @@ export interface SampleDetail {
 }
 
 // ---------------------------------------------------------------------------
+// Scene-level ODD LabelSets
+// ---------------------------------------------------------------------------
+
+export interface ODDLabelDefinition {
+  key: string;
+  namespace: "odd" | "event" | "perception";
+  display_name: string;
+  description: string;
+  cardinality: "single" | "multi";
+  values: { value: string }[];
+  primary_sources: string[];
+  backends: string[];
+  subject: string;
+  temporal_scope: string;
+  quality_tier: string;
+  none_semantics?: string | null;
+}
+
+export interface ODDOntology {
+  schema_version: string;
+  ontology_version: string;
+  ontology_sha256: string;
+  statuses: string[];
+  sources: string[];
+  labels: ODDLabelDefinition[];
+}
+
+export interface ODDValueStatistic {
+  value: string;
+  scene_count: number;
+  scene_ratio: number;
+  duration_ns: number;
+  duration_ratio: number;
+}
+
+export interface ODDKeyStatistic {
+  key: string;
+  namespace: string;
+  valid_scene_count: number;
+  eligible_scene_count: number;
+  observable_scene_coverage: number;
+  eligible_duration_ns: number;
+  valid_duration_ns: number;
+  status_scene_counts: Record<string, number>;
+  status_duration_ns: Record<string, number>;
+  source_scene_counts: Record<string, number>;
+  values: ODDValueStatistic[];
+}
+
+export interface ODDStatistics {
+  schema_version: string;
+  labelset_id: string;
+  scene_count: number;
+  scene_duration_ns: number;
+  keys: ODDKeyStatistic[];
+}
+
+export interface ODDObservation {
+  observation_uid: string;
+  scene_uid: string;
+  key: string;
+  status: string;
+  values: string[];
+  confidence: number;
+  source: string;
+  start_timestamp_ns: number;
+  end_timestamp_ns: number;
+  measurements: Record<string, string | number | boolean>;
+  provenance: Record<string, unknown>;
+  camera_id?: string | null;
+}
+
+export interface ODDSceneRecord {
+  scene_uid: string;
+  dataset_name: string;
+  dataset_version: string;
+  start_timestamp_ns: number;
+  end_timestamp_ns: number;
+  distance_m: number;
+  observations: ODDObservation[];
+}
+
+export interface ODDSceneSummary {
+  scene_uid: string;
+  shard_name: string;
+  start_timestamp_ns: number;
+  end_timestamp_ns: number;
+  distance_m: number;
+  observations: Array<{
+    key: string;
+    status: string;
+    values: string[];
+    source: string;
+    confidence: number;
+    duration_ns: number;
+    first_timestamp_ns: number;
+  }>;
+}
+
+export interface ODDSearchResponse {
+  dataset: string;
+  version: string;
+  labelset_id: string;
+  scenes: ODDSceneSummary[];
+  total: number;
+  limit: number;
+  offset: number;
+  more: boolean;
+}
+
+// ---------------------------------------------------------------------------
 // Shard index (ADAS player)
 // ---------------------------------------------------------------------------
 
