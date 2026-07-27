@@ -8,5 +8,6 @@ Dataset loaders and utilities for AutoE2E training data.
 - **`nvidia_physical_ai/`** — [NVIDIA Autonomous Vehicle dataset](https://huggingface.co/datasets/nvidia/PhysicalAI-Autonomous-Vehicles) loader
 - **`map_rendering/`** — Map tile rendering and GPS-to-map conversions
 - **`kit_scenes/`** — [KITScenes](https://kitscenes.com/multimodal/) data utilities
+- **`alpasim_stream/`** — Real-time observation stream parser for NVIDIA AlpaSim closed-loop simulation (`PredictionInput` parity with `kit_scenes`)
 
 Each module provides dataset classes (`*Dataset`) and helper functions for loading camera frames, extracting egomotion, and handling map data.
