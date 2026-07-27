@@ -10,7 +10,7 @@ from __future__ import annotations
 import io
 import sys
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Any, Dict, List, Tuple
 
 import numpy as np
 import pytest
@@ -39,7 +39,7 @@ try:
     )
 except ImportError:
     KITSCENES_CAMERA_NAMES = PARSER_CAMERA_NAMES
-    compute_camera_projection_matrices = None
+    compute_camera_projection_matrices: Any = None  # type: ignore[no-redef]
 
 from data_parsing.pre_extracted import (  # noqa: E402
     _VISUAL_HISTORY_DIM,
