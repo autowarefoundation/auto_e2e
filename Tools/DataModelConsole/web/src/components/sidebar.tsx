@@ -4,6 +4,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import {
   Brain,
+  ChartNoAxesColumn,
   Clapperboard,
   Database,
   FlaskConical,
@@ -18,6 +19,7 @@ export const NAV_ITEMS = [
   { href: "/", label: "Home", icon: Home },
   { href: "/datasets", label: "Datasets", icon: Database },
   { href: "/reasoning-labels", label: "Reasoning Labels", icon: Brain },
+  { href: "/odd", label: "ODD Dashboard", icon: ChartNoAxesColumn },
   { href: "/experiments", label: "Experiments", icon: FlaskConical },
   { href: "/runs", label: "Runs", icon: Workflow },
   { href: "/scenes", label: "Scenes", icon: Clapperboard },
