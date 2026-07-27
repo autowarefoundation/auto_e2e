@@ -16,7 +16,7 @@ class AutoE2EAlpaSimConfig:
     Registered with AlpaSim under entry point ``alpasim.configs``.
     """
 
-    checkpoint_path: Optional[str] = None
+    checkpoint_path: str
     """Path to trained AutoE2E model checkpoint file."""
 
     image_size: Tuple[int, int] = (256, 256)
