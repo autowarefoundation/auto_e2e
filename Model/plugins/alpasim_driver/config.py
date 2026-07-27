@@ -6,7 +6,7 @@ Defines model checkpoints, camera topology settings, and trajectory planning hor
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import List, Tuple
+from typing import List, Tuple, Optional
 
 
 @dataclass
@@ -16,7 +16,7 @@ class AutoE2EAlpaSimConfig:
     Registered with AlpaSim under entry point ``alpasim.configs``.
     """
 
-    checkpoint_path: str = "checkpoints/autoe2e_kitscenes_v1.ckpt"
+    checkpoint_path: Optional[str] = None
     """Path to trained AutoE2E model checkpoint file."""
 
     image_size: Tuple[int, int] = (256, 256)
@@ -25,18 +25,18 @@ class AutoE2EAlpaSimConfig:
     planning_horizon_s: float = 3.0
     """Total future trajectory planning horizon in seconds."""
 
-    planning_steps: int = 30
+    planning_steps: int = 64
     """Number of output waypoint steps along the planning horizon."""
 
     camera_names: List[str] = field(
         default_factory=lambda: [
-            "cam_front",
-            "cam_front_left",
-            "cam_front_right",
-            "cam_side_left",
-            "cam_side_right",
-            "cam_rear_left",
-            "cam_rear_right",
+            "camera_base_front_center",
+            "camera_ring_front",
+            "camera_ring_front_left",
+            "camera_ring_front_right",
+            "camera_ring_rear",
+            "camera_ring_rear_left",
+            "camera_ring_rear_right",
         ]
     )
     """List of 7 logical camera names matching KitScenes topology."""
