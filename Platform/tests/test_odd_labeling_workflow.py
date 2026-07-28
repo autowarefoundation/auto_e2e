@@ -45,22 +45,31 @@ def test_statistics_deduplicate_camera_and_source_coverage() -> None:
             "scene_uid": "scene-1",
             "start_timestamp_ns": 0,
             "end_timestamp_ns": 100,
+            "distance_m": 25.0,
             "observations": [
                 {
+                    "observation_uid": "oddobs-sky-vlm",
                     "key": "odd.environment.sky",
                     "status": "valid",
                     "values": ["clear"],
                     "source": "vlm",
+                    "confidence": 0.9,
                     "start_timestamp_ns": 0,
                     "end_timestamp_ns": 100,
+                    "measurements": {},
+                    "conflicting_evidence_uids": [],
                 },
                 {
+                    "observation_uid": "oddobs-sky-fusion",
                     "key": "odd.environment.sky",
                     "status": "valid",
                     "values": ["clear"],
                     "source": "fusion",
+                    "confidence": 0.8,
                     "start_timestamp_ns": 20,
                     "end_timestamp_ns": 80,
+                    "measurements": {},
+                    "conflicting_evidence_uids": [],
                 },
             ],
         }
@@ -88,7 +97,9 @@ def test_statistics_deduplicate_camera_and_source_coverage() -> None:
     statistics = _statistics(records, ontology, "oddls-test")
     row = statistics["keys"][0]
 
+    assert statistics["schema_version"] == "odd_statistics_v2"
     assert row["valid_duration_ns"] == 100
+    assert row["valid_distance_m"] == 25.0
     assert row["status_duration_ns"]["valid"] == 100
     assert row["values"][0]["duration_ns"] == 100
     assert row["values"][0]["duration_ratio"] == 1.0
