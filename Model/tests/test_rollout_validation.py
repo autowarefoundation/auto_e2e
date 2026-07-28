@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 import torch
 
 from evaluation.rollout_validation import (
@@ -130,6 +131,59 @@ def test_invalid_map_and_route_are_unavailable_not_perfect():
     assert record["route_gap"] is None
     assert record["wrong_branch_excess"] is None
     assert record["destination_error_m"] is None
+
+
+@pytest.mark.parametrize(
+    ("field_name", "map_valid", "route_valid"),
+    [
+        ("distance_to_corridor_m", False, True),
+        ("distance_to_drivable_m", True, False),
+    ],
+)
+def test_active_nonfinite_map_field_is_rejected(
+    field_name: str,
+    map_valid: bool,
+    route_valid: bool,
+):
+    supervision = _supervision(torch.zeros(1, 256, 256))
+    supervision[field_name] = torch.full(
+        (1, 256, 256),
+        torch.nan,
+    )
+
+    with pytest.raises(
+        ValueError,
+        match=f"active {field_name} must be finite",
+    ):
+        build_rollout_validation_records(
+            _controls(),
+            _controls(),
+            torch.tensor([5.0]),
+            _logged_straight(),
+            supervision,
+            torch.tensor([map_valid]),
+            torch.tensor([route_valid]),
+            ["sample-a"],
+            ["scene-a"],
+        )
+
+
+def test_inactive_nonfinite_map_fields_are_masked_before_sampling():
+    record = build_rollout_validation_records(
+        _controls(),
+        _controls(),
+        torch.tensor([5.0]),
+        _logged_straight(),
+        _supervision(torch.full((1, 256, 256), torch.nan)),
+        torch.tensor([False]),
+        torch.tensor([False]),
+        ["sample-a"],
+        ["scene-a"],
+    )[0]
+
+    assert record["ade_3s_m"] == 0.0
+    assert record["offroad_excess"] is None
+    assert record["route_gap"] is None
 
 
 def test_visible_destination_is_independent_of_route_validity():
