@@ -117,7 +117,11 @@ def test_capability_manifest_is_required_across_publication_tasks() -> None:
         "descriptors",
         "capability_manifest_json",
     }
-    assert "capability_manifest_json" in label_odd_scene.python_interface.inputs
+    assert {
+        "capability_manifest_json",
+        "labeler_image_digest",
+        "labeler_source_revision",
+    }.issubset(label_odd_scene.python_interface.inputs)
     assert (
         "capability_manifest_json"
         in publish_odd_labelset.python_interface.inputs
