@@ -34,6 +34,11 @@ OddPublication = NamedTuple(
     manifest_key=str,
     manifest_sha256=str,
 )
+OddScenePlan = NamedTuple(
+    "OddScenePlan",
+    descriptors=List[str],
+    capability_manifest_json=str,
+)
 
 
 def _scene_labeling_pod_template():
@@ -289,7 +294,7 @@ def _put_immutable(s3, bucket: str, key: str, payload: bytes) -> None:
 @task(
     container_image=DATA_PREP_IMAGE,
     cache=True,
-    cache_version="odd-resolve-scenes-v2",
+    cache_version="odd-resolve-scenes-v3",
     requests=Resources(cpu="1", mem="2Gi"),
     limits=Resources(cpu="2", mem="4Gi"),
 )
@@ -297,29 +302,38 @@ def resolve_odd_scenes(
     dataset_manifest_uri: str,
     dataset_manifest_sha256: str,
     maximum_scenes: int,
-) -> List[str]:
+) -> OddScenePlan:
     import boto3
 
     from data_processing.odd_labeling.published_snapshot import (
-        resolve_scene_descriptors,
+        PublishedSnapshotAdapter,
     )
 
-    descriptors = resolve_scene_descriptors(
+    adapter = PublishedSnapshotAdapter(
         boto3.client("s3"),
         dataset_manifest_uri=dataset_manifest_uri,
         dataset_manifest_sha256=dataset_manifest_sha256,
     )
+    descriptors = adapter.list_scenes()
+    capability_manifest = adapter.describe_capabilities()
     if maximum_scenes < 0:
         raise ValueError("maximum_scenes must be non-negative")
     if maximum_scenes:
         descriptors = descriptors[:maximum_scenes]
-    return [descriptor.to_json() for descriptor in descriptors]
+    return OddScenePlan(
+        descriptors=[descriptor.to_json() for descriptor in descriptors],
+        capability_manifest_json=json.dumps(
+            capability_manifest.to_dict(),
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+    )
 
 
 @task(
     container_image=DATA_PREP_IMAGE,
     cache=True,
-    cache_version="odd-label-scene-v4",
+    cache_version="odd-label-scene-v5",
     retries=2,
     pod_template=_scene_labeling_pod_template(),
     requests=Resources(cpu="2", mem="6Gi"),
@@ -339,6 +353,7 @@ def resolve_odd_scenes(
 )
 def label_odd_scene(
     descriptor_json: str,
+    capability_manifest_json: str,
     openai_model: str,
     openai_model_revision: str,
     camera_anchor_interval_s: float,
@@ -365,6 +380,7 @@ def label_odd_scene(
         load_scene_evidence,
     )
     from data_processing.odd_labeling.schema import (
+        DatasetCapabilityManifest,
         SceneLabelRecord,
         coalesce_observations,
         make_observation,
@@ -373,8 +389,22 @@ def label_odd_scene(
     if camera_anchor_interval_s <= 0 or maximum_camera_anchors <= 0:
         raise ValueError("camera anchor sampling must be positive")
     descriptor = PublishedSceneDescriptor.from_json(descriptor_json)
+    capability_manifest = DatasetCapabilityManifest.from_json(
+        capability_manifest_json
+    )
+    if (
+        descriptor.dataset_name != capability_manifest.dataset_name
+        or descriptor.dataset_version != capability_manifest.dataset_version
+        or descriptor.dataset_manifest_sha256
+        != capability_manifest.dataset_manifest_sha256
+    ):
+        raise ValueError("scene descriptor differs from capability coordinate")
     client = boto3.client("s3")
-    evidence = load_scene_evidence(client, descriptor)
+    evidence = load_scene_evidence(
+        client,
+        descriptor,
+        capability_manifest=capability_manifest,
+    )
     anchors = load_camera_anchors(
         client,
         evidence,
@@ -453,6 +483,7 @@ def label_odd_scene(
         observations=coalesce_observations(observations),
         source_artifact_uri=descriptor.source_uri,
         source_artifact_sha256=descriptor.source_manifest_sha256,
+        capability_manifest_sha256=capability_manifest.semantic_sha256(),
     )
     wrapper = {
         "record": record.to_dict(),
@@ -477,6 +508,7 @@ def label_odd_scene(
 )
 def map_odd_scenes(
     descriptors: List[str],
+    capability_manifest_json: str,
     openai_model: str,
     openai_model_revision: str,
     camera_anchor_interval_s: float,
@@ -488,6 +520,7 @@ def map_odd_scenes(
     labeler = map_task(
         functools.partial(
             label_odd_scene,
+            capability_manifest_json=capability_manifest_json,
             openai_model=openai_model,
             openai_model_revision=openai_model_revision,
             camera_anchor_interval_s=camera_anchor_interval_s,
@@ -501,12 +534,13 @@ def map_odd_scenes(
 @task(
     container_image=DATA_PREP_IMAGE,
     cache=True,
-    cache_version="odd-publish-labelset-v1",
+    cache_version="odd-publish-labelset-v2",
     requests=Resources(cpu="2", mem="8Gi"),
     limits=Resources(cpu="4", mem="16Gi"),
 )
 def publish_odd_labelset(
     scene_files: List[FlyteFile],
+    capability_manifest_json: str,
     dataset_name: str,
     dataset_version: str,
     dataset_manifest_uri: str,
@@ -522,7 +556,19 @@ def publish_odd_labelset(
 
     from data_processing.odd_labeling.ontology import ontology_document
     from data_processing.odd_labeling.published_snapshot import S3Location
+    from data_processing.odd_labeling.schema import DatasetCapabilityManifest
 
+    capability_manifest = DatasetCapabilityManifest.from_json(
+        capability_manifest_json
+    )
+    capability_manifest_sha256 = capability_manifest.semantic_sha256()
+    if (
+        capability_manifest.dataset_name != dataset_name
+        or capability_manifest.dataset_version != dataset_version
+        or capability_manifest.dataset_manifest_sha256
+        != dataset_manifest_sha256
+    ):
+        raise ValueError("capability manifest differs from publication coordinate")
     wrappers = []
     for scene_file in scene_files:
         path = scene_file.download()
@@ -547,6 +593,12 @@ def publish_odd_labelset(
         for record in records
     ):
         raise ValueError("ODD scene records differ from publication coordinate")
+    if any(
+        record.get("capability_manifest_sha256")
+        != capability_manifest_sha256
+        for record in records
+    ):
+        raise ValueError("ODD scene records differ from capability manifest")
     if SHA256_RE.fullmatch(labeler_image_digest) is None:
         raise ValueError("labeler_image_digest must be a sha256 digest")
     if SOURCE_REVISION_RE.fullmatch(labeler_source_revision) is None:
@@ -584,6 +636,7 @@ def publish_odd_labelset(
         "dataset_name": dataset_name,
         "dataset_version": dataset_version,
         "dataset_manifest_sha256": dataset_manifest_sha256,
+        "capability_manifest_sha256": capability_manifest_sha256,
         "ontology_sha256": ontology["ontology_sha256"],
         "labeler_version": ODD_LABELER_VERSION,
         "labeler_image_digest": labeler_image_digest,
@@ -613,6 +666,13 @@ def publish_odd_labelset(
             "byte_size": len(payload),
         }
 
+    publish(
+        "capabilities",
+        capability_manifest.to_dict(),
+        "capabilities.json",
+    )
+    if artifacts["capabilities"]["sha256"] != capability_manifest_sha256:
+        raise ValueError("published capability digest differs from semantic digest")
     publish("ontology", ontology, "ontology.json")
     publish(
         "statistics",
@@ -657,6 +717,14 @@ def publish_odd_labelset(
         "dataset_version": dataset_version,
         "dataset_manifest_uri": dataset_manifest_uri,
         "dataset_manifest_sha256": dataset_manifest_sha256,
+        "capability_manifest_sha256": capability_manifest_sha256,
+        "adapter": {
+            "name": capability_manifest.adapter_name,
+            "version": capability_manifest.adapter_version,
+            "scene_inventory_sha256": (
+                capability_manifest.scene_inventory_sha256
+            ),
+        },
         "ontology_version": ontology["ontology_version"],
         "ontology_sha256": ontology["ontology_sha256"],
         "labeler_version": ODD_LABELER_VERSION,
@@ -718,13 +786,14 @@ def wf_generate_odd_labelset(
     publication_scope: str = "full",
 ) -> OddPublication:
     """Label a published dataset independently from every training workflow."""
-    descriptors = resolve_odd_scenes(
+    scene_plan = resolve_odd_scenes(
         dataset_manifest_uri=dataset_manifest_uri,
         dataset_manifest_sha256=dataset_manifest_sha256,
         maximum_scenes=maximum_scenes,
     )
     scene_files = map_odd_scenes(
-        descriptors=descriptors,
+        descriptors=scene_plan.descriptors,
+        capability_manifest_json=scene_plan.capability_manifest_json,
         openai_model=openai_model,
         openai_model_revision=openai_model_revision,
         camera_anchor_interval_s=camera_anchor_interval_s,
@@ -733,6 +802,7 @@ def wf_generate_odd_labelset(
     )
     return publish_odd_labelset(
         scene_files=scene_files,
+        capability_manifest_json=scene_plan.capability_manifest_json,
         dataset_name=dataset_name,
         dataset_version=dataset_version,
         dataset_manifest_uri=dataset_manifest_uri,
