@@ -21,6 +21,7 @@ from Platform.pipelines.training_checkpoint import (
     stable_digest,
     update_best_pointer,
     upload_immutable_checkpoint,
+    validate_resume_envelope,
     validate_resume_payload,
 )
 
@@ -154,6 +155,21 @@ def test_resume_validation_rejects_schema_config_and_data_drift():
             expected_config=config,
             expected_data_fingerprint="different",
         )
+
+
+def test_resume_envelope_rejects_malformed_transition_input():
+    payload, _ = _resume_payload()
+
+    validate_resume_envelope(payload)
+
+    with pytest.raises(ValueError, match="schema"):
+        validate_resume_envelope(
+            dict(payload, schema_version="legacy")
+        )
+    malformed = dict(payload)
+    malformed.pop("config")
+    with pytest.raises(ValueError, match="missing required fields"):
+        validate_resume_envelope(malformed)
 
 
 def test_resume_validation_allows_explicit_policy_transition_only():
