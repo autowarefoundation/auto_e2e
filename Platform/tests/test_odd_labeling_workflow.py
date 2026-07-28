@@ -5,6 +5,9 @@ from Platform.pipelines.odd_labeling_workflow import (
     _scene_summary,
     _statistics,
     _union_duration,
+    label_odd_scene,
+    publish_odd_labelset,
+    resolve_odd_scenes,
     wf_generate_odd_labelset,
 )
 
@@ -107,3 +110,15 @@ def test_workflow_interface_does_not_expose_endpoint_url() -> None:
         "labeler_source_revision",
         "publication_scope",
     }.issubset(wf_generate_odd_labelset.python_interface.inputs)
+
+
+def test_capability_manifest_is_required_across_publication_tasks() -> None:
+    assert set(resolve_odd_scenes.python_interface.outputs) == {
+        "descriptors",
+        "capability_manifest_json",
+    }
+    assert "capability_manifest_json" in label_odd_scene.python_interface.inputs
+    assert (
+        "capability_manifest_json"
+        in publish_odd_labelset.python_interface.inputs
+    )
