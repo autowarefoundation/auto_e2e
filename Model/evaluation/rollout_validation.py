@@ -298,16 +298,19 @@ def build_rollout_validation_records(
                 wrong_branch_excess = float(
                     not bool(predicted_center_on_route[-1])
                 )
-            if bool(destination_visible[index]):
-                predicted_terminal = float(torch.linalg.vector_norm(
-                    predicted_xy[index, -1] - destination[index]
-                ))
-                target_terminal = float(torch.linalg.vector_norm(
-                    logged[index, -1] - destination[index]
-                ))
-                destination_error = abs(
-                    predicted_terminal - target_terminal
-                )
+        if (
+            bool(available[index])
+            and bool(destination_visible[index])
+        ):
+            predicted_terminal = float(torch.linalg.vector_norm(
+                predicted_xy[index, -1] - destination[index]
+            ))
+            target_terminal = float(torch.linalg.vector_norm(
+                logged[index, -1] - destination[index]
+            ))
+            destination_error = abs(
+                predicted_terminal - target_terminal
+            )
 
         records.append({
             "sample_uid": str(sample_uids[index]),
