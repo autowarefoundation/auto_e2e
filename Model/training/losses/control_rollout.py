@@ -21,40 +21,36 @@ def _integrate_controls_f32(
     dt: float,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     speed = initial_speed
-    heading = torch.zeros_like(speed)
-    x = torch.zeros_like(speed)
-    y = torch.zeros_like(speed)
-    positions = []
-    headings = []
     speeds = []
     for step in range(controls.shape[1]):
-        raw_speed = speed + controls[:, step, 0] * dt
-        clamped_speed = torch.clamp_min(raw_speed, 0.0)
-        # Inductor uses a different derivative at the clamp boundary than
-        # eager PyTorch. Select the raw branch at zero to preserve gradient 1.
-        speed = torch.where(
-            raw_speed >= 0.0,
-            raw_speed,
-            clamped_speed,
+        speed = torch.clamp_min(
+            speed + controls[:, step, 0] * dt,
+            0.0,
         )
-        heading = heading + speed * controls[:, step, 1] * dt
-        x = x + speed * torch.cos(heading) * dt
-        y = y + speed * torch.sin(heading) * dt
-        positions.append(torch.stack((x, y), dim=-1))
-        headings.append(heading)
         speeds.append(speed)
-    return (
-        torch.stack(positions, dim=1),
-        torch.stack(headings, dim=1),
-        torch.stack(speeds, dim=1),
+    speed_sequence = torch.stack(speeds, dim=1)
+    headings = torch.cumsum(
+        speed_sequence * controls[:, :, 1] * dt,
+        dim=1,
     )
-
-
-_compiled_integrate_controls_f32 = torch.compile(
-    _integrate_controls_f32,
-    fullgraph=True,
-    dynamic=False,
-)
+    positions = torch.stack(
+        (
+            torch.cumsum(
+                speed_sequence * torch.cos(headings) * dt,
+                dim=1,
+            ),
+            torch.cumsum(
+                speed_sequence * torch.sin(headings) * dt,
+                dim=1,
+            ),
+        ),
+        dim=-1,
+    )
+    return (
+        positions,
+        headings,
+        speed_sequence,
+    )
 
 
 def integrate_controls_torch(
@@ -90,9 +86,8 @@ def integrate_controls_torch(
             device=controls.device,
             dtype=torch.float32,
         )
-        integration = (
-            _compiled_integrate_controls_f32
-            if controls.device.type == "cuda"
-            else _integrate_controls_f32
+        return _integrate_controls_f32(
+            controls_f32,
+            initial_speed_f32,
+            dt,
         )
-        return integration(controls_f32, initial_speed_f32, dt)
