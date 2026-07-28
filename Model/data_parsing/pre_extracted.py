@@ -380,9 +380,6 @@ def _decode_sample(
         )
         supervision = decode_route_supervision(sample)
         from navigation.geometry import DEFAULT_NAVIGATION_GEOMETRY
-        from navigation.supervision import (
-            MAXIMUM_OUTSIDE_DISTANCE_M,
-        )
 
         if (
             navigation_metadata.get("geometry_id")
@@ -431,10 +428,7 @@ def _decode_sample(
             ),
             "available": torch.tensor(True, dtype=torch.bool),
             "drivable_available": torch.tensor(
-                bool(np.any(
-                    supervision.distance_to_drivable_m
-                    < MAXIMUM_OUTSIDE_DISTANCE_M
-                )),
+                supervision.drivable_available,
                 dtype=torch.bool,
             ),
         }
