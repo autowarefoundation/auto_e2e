@@ -672,6 +672,30 @@ def _stable_evaluation_noise(sample_uids, trajectory_width, dtype):
     return torch.stack(noise)
 
 
+def _validate_selector_preflight_identity(
+    validation: dict,
+    *,
+    expected_sample_count: int | None,
+    expected_sample_uid_digest: str | None,
+) -> None:
+    """Reject availability evidence from outside the frozen validation set."""
+    actual_count = validation.get("sample_count")
+    actual_digest = validation.get("sample_uid_digest")
+    if (
+        expected_sample_count is None
+        or not expected_sample_uid_digest
+        or actual_count != expected_sample_count
+        or actual_digest != expected_sample_uid_digest
+    ):
+        raise ValueError(
+            "selector preflight validation identity differs from frozen "
+            f"split: expected_count={expected_sample_count} "
+            f"actual_count={actual_count} "
+            f"expected_digest={expected_sample_uid_digest} "
+            f"actual_digest={actual_digest}"
+        )
+
+
 def _evaluate_open_loop(
     model,
     loader,
@@ -4222,6 +4246,11 @@ def train_il(
             device,
             training_policy=training_policy,
             include_rollout_selector_records=True,
+        )
+        _validate_selector_preflight_identity(
+            preflight_validation,
+            expected_sample_count=validation_sample_count,
+            expected_sample_uid_digest=expected_validation_digest,
         )
         preflight_aggregates = aggregate_validation_records(
             preflight_validation["rollout_selector_records"]
