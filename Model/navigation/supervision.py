@@ -251,7 +251,11 @@ def build_route_supervision(
 
     drivable_available = bool(raster.map_valid)
     drivable = raster.map_context[MapChannel.DRIVABLE_AREA] > 0.0
-    if drivable_available and bool(drivable.any()):
+    if drivable_available and not bool(drivable.any()):
+        raise ValueError(
+            "valid semantic map has no drivable pixels"
+        )
+    if drivable_available:
         drivable_distance = distance_transform_edt(
             ~drivable,
             sampling=geometry.meters_per_pixel,
