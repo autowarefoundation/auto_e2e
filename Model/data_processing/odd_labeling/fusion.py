@@ -244,14 +244,17 @@ def _semantic_provenance(
 
     model_name = str(details.get("model") or "")
     model_revision = str(details.get("model_revision") or "")
+    model_provider = str(details.get("model_provider") or "")
+    if observation.source == "vlm" and not model_provider:
+        model_provider = "openai_compatible"
     model_fields: dict[str, str | None] = {
         "model_provider": None,
         "model_name": None,
         "model_revision": None,
     }
-    if observation.source == "vlm" and model_name and model_revision:
+    if model_provider and model_name and model_revision:
         model_fields = {
-            "model_provider": "openai_compatible",
+            "model_provider": model_provider,
             "model_name": model_name,
             "model_revision": model_revision,
         }
