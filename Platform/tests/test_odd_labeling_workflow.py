@@ -101,3 +101,7 @@ def test_scene_summary_pins_record_integrity() -> None:
 
 def test_workflow_interface_does_not_expose_endpoint_url() -> None:
     assert "openai_base_url" not in wf_generate_odd_labelset.python_interface.inputs
+    assert {
+        "labeler_image_digest",
+        "labeler_source_revision",
+    }.issubset(wf_generate_odd_labelset.python_interface.inputs)
