@@ -367,7 +367,7 @@ def _decode_sample(
     present_navigation = navigation_keys.intersection(sample)
     if present_navigation and present_navigation != navigation_keys:
         raise ValueError(
-            "navigation members must be present as a complete schema-v7 set"
+            "navigation members must be present as a complete schema-v8 set"
         )
     if present_navigation:
         from navigation.artifacts import (
