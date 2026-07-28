@@ -15,10 +15,13 @@ import type {
   MLflowRun,
   OverlayModel,
   OverlayModelsResponse,
+  ODDEvidenceResponse,
+  ODDLabelSetsResponse,
   ODDOntology,
   ODDSceneRecord,
   ODDSearchResponse,
   ODDStatistics,
+  ODDStructuredSearchRequest,
   ReasoningLabelRecord,
   ReasoningLabelStats,
   ReasoningPromptVersionsResponse,
@@ -138,6 +141,15 @@ export function getODDStatistics(
   );
 }
 
+export function getODDLabelSets(
+  dataset: string,
+  version: string,
+): Promise<ODDLabelSetsResponse> {
+  return apiFetch<ODDLabelSetsResponse>(
+    `/api/v1/odd/labelsets?${oddCoordinate(dataset, version)}`,
+  );
+}
+
 export function searchODDScenes(
   dataset: string,
   version: string,
@@ -162,6 +174,21 @@ export function searchODDScenes(
   );
 }
 
+export function searchODDScenesStructured(
+  dataset: string,
+  version: string,
+  request: ODDStructuredSearchRequest,
+): Promise<ODDSearchResponse> {
+  return apiFetch<ODDSearchResponse>(
+    `/api/v1/odd/scenes/search?${oddCoordinate(dataset, version)}`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(request),
+    },
+  );
+}
+
 export function getODDScene(
   dataset: string,
   version: string,
@@ -169,6 +196,17 @@ export function getODDScene(
 ): Promise<ODDSceneRecord> {
   return apiFetch<ODDSceneRecord>(
     `/api/v1/odd/scenes/${encodeURIComponent(sceneUID)}?${oddCoordinate(dataset, version)}`,
+  );
+}
+
+export function getODDEvidence(
+  dataset: string,
+  version: string,
+  sceneUID: string,
+  observationUID: string,
+): Promise<ODDEvidenceResponse> {
+  return apiFetch<ODDEvidenceResponse>(
+    `/api/v1/scenes/${encodeURIComponent(sceneUID)}/odd/evidence/${encodeURIComponent(observationUID)}?${oddCoordinate(dataset, version)}`,
   );
 }
 
