@@ -50,7 +50,9 @@ PARSER_VERSION = "v3"
 # canonical selected lane sequence.
 # v7: route_supervision.npz also stores the loss-only drivable outside-distance
 # field derived from the semantic drivable-area channel.
-SHARD_SCHEMA_VERSION = "v7"
+# v8: route_supervision.npz explicitly stores drivable-field availability so
+# training never infers supervision validity from distance values.
+SHARD_SCHEMA_VERSION = "v8"
 
 # Calibration / projection spec encoding and raster-map coordinate semantics.
 # v2 queries KITScenes maps in the scene-local pose frame and applies the map
