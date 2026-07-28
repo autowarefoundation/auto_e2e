@@ -982,6 +982,7 @@ export function EpisodePlayer({
           timestampNS={sample.pose_current?.timestamp_ns}
           frame={frame}
           fps={index.fps || 10}
+          onSeek={setFrame}
         />
       )}
 
