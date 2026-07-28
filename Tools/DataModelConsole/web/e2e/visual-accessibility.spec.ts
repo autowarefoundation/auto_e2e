@@ -235,23 +235,23 @@ test("camera and player controls remain usable at 320px", async (
   ).toBeVisible();
   const filmstrip = page.getByRole("group", { name: "Camera filmstrip" });
   const cameraButtons = filmstrip.getByRole("button");
-  await expect(cameraButtons).toHaveCount(7);
+  await expect(cameraButtons).toHaveCount(6);
 
   const frontCenter = filmstrip.getByRole("button", {
     name: "front-center camera",
   });
-  const ringFront = filmstrip.getByRole("button", {
-    name: "ring-front camera",
+  const rearRight = filmstrip.getByRole("button", {
+    name: "rear-right camera",
   });
   await expect(frontCenter).toHaveAttribute("aria-pressed", "true");
-  await expect(ringFront).toHaveAttribute("aria-pressed", "false");
+  await expect(rearRight).toHaveAttribute("aria-pressed", "false");
   expect(await frontCenter.evaluate((element) => element.tagName)).toBe(
     "BUTTON",
   );
 
-  await ringFront.focus();
+  await rearRight.focus();
   await page.keyboard.press("Enter");
-  await expect(ringFront).toHaveAttribute("aria-pressed", "true");
+  await expect(rearRight).toHaveAttribute("aria-pressed", "true");
   await expect(frontCenter).toHaveAttribute("aria-pressed", "false");
 
   const filmstripMetrics = await filmstrip.evaluate((element) => ({
