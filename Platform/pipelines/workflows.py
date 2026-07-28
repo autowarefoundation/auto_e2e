@@ -3325,12 +3325,30 @@ def train_il(
             raise ValueError(
                 "reconstruction audit must be a JSON object"
             )
+        from evaluation.reconstruction_audit import AUDIT_SCHEMA_VERSION
+
         if (
             audit_report.get("schema_version")
-            != "target_rollout_reconstruction_v1"
+            != AUDIT_SCHEMA_VERSION
         ):
             raise ValueError(
                 "unsupported reconstruction audit schema"
+            )
+        heading_alignment = audit_report.get("heading_alignment")
+        valid_heading_steps = (
+            heading_alignment.get("valid_step_count")
+            if isinstance(heading_alignment, dict)
+            else None
+        )
+        if (
+            not isinstance(heading_alignment, dict)
+            or not isinstance(valid_heading_steps, int)
+            or isinstance(valid_heading_steps, bool)
+            or valid_heading_steps <= 0
+            or heading_alignment.get("full_horizon") is None
+        ):
+            raise ValueError(
+                "reconstruction audit has no usable heading alignment"
             )
         provenance = audit_report.get("provenance")
         if not isinstance(provenance, dict):
@@ -3403,6 +3421,7 @@ def train_il(
             "sample_count": int(audit_report["sample_count"]),
             "scene_count": int(audit_report["scene_count"]),
             "metrics": audit_report["metrics"],
+            "heading_alignment": heading_alignment,
             "audit_code_revision": provenance.get(
                 "audit_code_revision"
             ),
