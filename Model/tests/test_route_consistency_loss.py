@@ -269,6 +269,40 @@ def test_vectorized_rollout_matches_recurrent_stop_and_restart():
     torch.testing.assert_close(actual_gradient, reference_gradient)
 
 
+def test_control_rollout_matches_clamp_subgradient_at_zero_speed():
+    controls = torch.zeros(
+        1,
+        4,
+        2,
+        dtype=torch.float32,
+        requires_grad=True,
+    )
+    initial_speed = torch.zeros(1, dtype=torch.float32)
+    actual = integrate_controls_torch(controls, initial_speed)
+
+    speed = initial_speed
+    reference_speeds = []
+    for step in range(controls.shape[1]):
+        speed = torch.clamp_min(
+            speed + controls[:, step, 0] * 0.1,
+            0.0,
+        )
+        reference_speeds.append(speed)
+    reference = torch.stack(reference_speeds, dim=1)
+
+    torch.testing.assert_close(actual[2], reference)
+    actual_gradient = torch.autograd.grad(
+        actual[2].sum(),
+        controls,
+        retain_graph=True,
+    )[0]
+    reference_gradient = torch.autograd.grad(
+        reference.sum(),
+        controls,
+    )[0]
+    torch.testing.assert_close(actual_gradient, reference_gradient)
+
+
 def test_grid_coordinates_match_geometry_pixel_centers():
     points = torch.tensor([[
         [0.0, 0.0],
