@@ -464,7 +464,7 @@ def test_training_wires_dataset_specific_trajectory_policy():
         training_source
     )
     assert (
-        '!= "navigation_supervision_v2"'
+        "!= ROUTE_SUPERVISION_ARTIFACT_VERSION"
         in training_source
     )
     assert "route-enabled epoch produced no eligible route sample" in (
@@ -583,9 +583,9 @@ def test_reconstruction_audit_allows_only_empty_partitions_without_gps(
     def write_manifest(path, *, total_samples, has_gps):
         path.mkdir()
         (path / "manifest.json").write_text(json.dumps({
-            "contracts": {"packed_schema": "v7"},
+            "contracts": {"packed_schema": "v8"},
             "dataset": workflows.Dataset.KITSCENES.value,
-            "dataset_version": "v3.2",
+            "dataset_version": "v3.3",
             "has_gps": has_gps,
             "hz": 10,
             "partition_id": path.name,
@@ -670,7 +670,7 @@ def test_reconstruction_audit_allows_only_empty_partitions_without_gps(
     result = workflows.audit_kitscenes_target_reconstruction.task_function(
         packed_shards=[_Shard(non_empty), _Shard(empty)],
         audit_code_revision="d" * 40,
-        expected_dataset_version="v3.2",
+        expected_dataset_version="v3.3",
         val_fraction=0.1,
         validation_scope="subset",
     )
@@ -683,7 +683,7 @@ def test_reconstruction_audit_allows_only_empty_partitions_without_gps(
         workflows.audit_kitscenes_target_reconstruction.task_function(
             packed_shards=[_Shard(non_empty), _Shard(empty)],
             audit_code_revision="d" * 40,
-            expected_dataset_version="v3.2",
+            expected_dataset_version="v3.3",
             val_fraction=0.1,
             validation_scope="subset",
         )
