@@ -3845,6 +3845,7 @@ def train_il(
         sha256_file,
         update_best_pointer,
         upload_immutable_checkpoint,
+        validate_resume_envelope,
         validate_resume_payload,
     )
 
@@ -3876,6 +3877,7 @@ def train_il(
             map_location="cpu",
             weights_only=False,
         )
+        validate_resume_envelope(resume_payload)
         if allow_resume_policy_transition:
             resume_policy_transition = _resume_policy_transition(
                 saved_config=dict(resume_payload["config"]),
