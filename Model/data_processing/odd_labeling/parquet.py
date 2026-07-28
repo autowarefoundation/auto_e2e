@@ -11,7 +11,7 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 
-PARQUET_SCHEMA_VERSION = "odd_parquet_v1"
+PARQUET_SCHEMA_VERSION = "odd_parquet_v2"
 
 
 @dataclasses.dataclass(frozen=True)
@@ -236,11 +236,44 @@ def _schemas(pa):
                 pa.field("labelset_id", pa.string(), nullable=False),
                 pa.field("label_key", pa.string(), nullable=False),
                 pa.field("namespace", pa.string(), nullable=False),
+                pa.field("quality_tier", pa.string(), nullable=False),
                 pa.field("value", pa.string(), nullable=False),
                 pa.field("scene_count", pa.int64(), nullable=False),
                 pa.field("scene_ratio", pa.float64(), nullable=False),
+                pa.field(
+                    "scene_ratio_ci95_json",
+                    pa.string(),
+                    nullable=False,
+                ),
                 pa.field("duration_ns", pa.int64(), nullable=False),
                 pa.field("duration_ratio", pa.float64(), nullable=False),
+                pa.field(
+                    "duration_ratio_ci95_json",
+                    pa.string(),
+                    nullable=False,
+                ),
+                pa.field("distance_m", pa.float64(), nullable=False),
+                pa.field("distance_ratio", pa.float64(), nullable=False),
+                pa.field(
+                    "distance_ratio_ci95_json",
+                    pa.string(),
+                    nullable=False,
+                ),
+                pa.field(
+                    "value_valid_interval_count",
+                    pa.int64(),
+                    nullable=False,
+                ),
+                pa.field(
+                    "event_instance_count",
+                    pa.int64(),
+                    nullable=False,
+                ),
+                pa.field(
+                    "value_confidence_json",
+                    pa.string(),
+                    nullable=False,
+                ),
                 pa.field("valid_scene_count", pa.int64(), nullable=False),
                 pa.field("eligible_scene_count", pa.int64(), nullable=False),
                 pa.field(
@@ -251,10 +284,25 @@ def _schemas(pa):
                 pa.field("eligible_duration_ns", pa.int64(), nullable=False),
                 pa.field("valid_duration_ns", pa.int64(), nullable=False),
                 pa.field(
+                    "observable_duration_coverage",
+                    pa.float64(),
+                    nullable=False,
+                ),
+                pa.field("eligible_distance_m", pa.float64(), nullable=False),
+                pa.field("valid_distance_m", pa.float64(), nullable=False),
+                pa.field(
+                    "observable_distance_coverage",
+                    pa.float64(),
+                    nullable=False,
+                ),
+                pa.field(
                     "valid_interval_count",
                     pa.int64(),
                     nullable=False,
                 ),
+                pa.field("attempted_count", pa.int64(), nullable=False),
+                pa.field("successful_count", pa.int64(), nullable=False),
+                pa.field("conflict_count", pa.int64(), nullable=False),
                 pa.field(
                     "status_scene_counts_json",
                     pa.string(),
@@ -266,8 +314,71 @@ def _schemas(pa):
                     nullable=False,
                 ),
                 pa.field(
+                    "status_distance_m_json",
+                    pa.string(),
+                    nullable=False,
+                ),
+                pa.field(
                     "source_scene_counts_json",
                     pa.string(),
+                    nullable=False,
+                ),
+                pa.field(
+                    "source_duration_ns_json",
+                    pa.string(),
+                    nullable=False,
+                ),
+                pa.field(
+                    "source_distance_m_json",
+                    pa.string(),
+                    nullable=False,
+                ),
+                pa.field(
+                    "confidence_json",
+                    pa.string(),
+                    nullable=False,
+                ),
+            ]
+        ),
+        "odd_cooccurrences": pa.schema(
+            [
+                pa.field("left_key", pa.string(), nullable=False),
+                pa.field("left_value", pa.string(), nullable=False),
+                pa.field("right_key", pa.string(), nullable=False),
+                pa.field("right_value", pa.string(), nullable=False),
+                pa.field("scene_count", pa.int64(), nullable=False),
+                pa.field(
+                    "overlap_duration_ns",
+                    pa.int64(),
+                    nullable=False,
+                ),
+                pa.field(
+                    "overlap_distance_m",
+                    pa.float64(),
+                    nullable=False,
+                ),
+            ]
+        ),
+        "odd_event_cooccurrences": pa.schema(
+            [
+                pa.field("odd_key", pa.string(), nullable=False),
+                pa.field("odd_value", pa.string(), nullable=False),
+                pa.field("event_key", pa.string(), nullable=False),
+                pa.field("event_value", pa.string(), nullable=False),
+                pa.field("scene_count", pa.int64(), nullable=False),
+                pa.field(
+                    "event_instance_count",
+                    pa.int64(),
+                    nullable=False,
+                ),
+                pa.field(
+                    "overlap_duration_ns",
+                    pa.int64(),
+                    nullable=False,
+                ),
+                pa.field(
+                    "overlap_distance_m",
+                    pa.float64(),
                     nullable=False,
                 ),
             ]
@@ -536,11 +647,32 @@ def _statistics_rows(statistics: Mapping[str, Any]) -> list[dict[str, Any]]:
                     "labelset_id": str(statistics["labelset_id"]),
                     "label_key": str(key_row["key"]),
                     "namespace": str(key_row["namespace"]),
+                    "quality_tier": str(key_row["quality_tier"]),
                     "value": str(value_row["value"]),
                     "scene_count": int(value_row["scene_count"]),
                     "scene_ratio": float(value_row["scene_ratio"]),
+                    "scene_ratio_ci95_json": _json(
+                        value_row["scene_ratio_ci95"]
+                    ),
                     "duration_ns": int(value_row["duration_ns"]),
                     "duration_ratio": float(value_row["duration_ratio"]),
+                    "duration_ratio_ci95_json": _json(
+                        value_row["duration_ratio_ci95"]
+                    ),
+                    "distance_m": float(value_row["distance_m"]),
+                    "distance_ratio": float(value_row["distance_ratio"]),
+                    "distance_ratio_ci95_json": _json(
+                        value_row["distance_ratio_ci95"]
+                    ),
+                    "value_valid_interval_count": int(
+                        value_row["valid_interval_count"]
+                    ),
+                    "event_instance_count": int(
+                        value_row["event_instance_count"]
+                    ),
+                    "value_confidence_json": _json(
+                        value_row["confidence"]
+                    ),
                     "valid_scene_count": int(
                         key_row["valid_scene_count"]
                     ),
@@ -556,8 +688,29 @@ def _statistics_rows(statistics: Mapping[str, Any]) -> list[dict[str, Any]]:
                     "valid_duration_ns": int(
                         key_row["valid_duration_ns"]
                     ),
+                    "observable_duration_coverage": float(
+                        key_row["observable_duration_coverage"]
+                    ),
+                    "eligible_distance_m": float(
+                        key_row["eligible_distance_m"]
+                    ),
+                    "valid_distance_m": float(
+                        key_row["valid_distance_m"]
+                    ),
+                    "observable_distance_coverage": float(
+                        key_row["observable_distance_coverage"]
+                    ),
                     "valid_interval_count": int(
-                        key_row.get("valid_interval_count", 0)
+                        key_row["valid_interval_count"]
+                    ),
+                    "attempted_count": int(
+                        key_row["attempted_count"]
+                    ),
+                    "successful_count": int(
+                        key_row["successful_count"]
+                    ),
+                    "conflict_count": int(
+                        key_row["conflict_count"]
                     ),
                     "status_scene_counts_json": _json(
                         key_row["status_scene_counts"]
@@ -565,15 +718,35 @@ def _statistics_rows(statistics: Mapping[str, Any]) -> list[dict[str, Any]]:
                     "status_duration_ns_json": _json(
                         key_row["status_duration_ns"]
                     ),
+                    "status_distance_m_json": _json(
+                        key_row["status_distance_m"]
+                    ),
                     "source_scene_counts_json": _json(
                         key_row["source_scene_counts"]
                     ),
+                    "source_duration_ns_json": _json(
+                        key_row["source_duration_ns"]
+                    ),
+                    "source_distance_m_json": _json(
+                        key_row["source_distance_m"]
+                    ),
+                    "confidence_json": _json(key_row["confidence"]),
                 }
             )
     return sorted(
         rows,
         key=lambda item: (item["label_key"], item["value"]),
     )
+
+
+def _cooccurrence_rows(
+    statistics: Mapping[str, Any],
+    name: str,
+) -> list[dict[str, Any]]:
+    return [
+        dict(row)
+        for row in statistics.get("cooccurrences", {}).get(name, [])
+    ]
 
 
 def _write_table(
@@ -664,6 +837,14 @@ def build_parquet_artifacts(
         "observations": lambda: _observation_rows(records),
         "events": lambda: _event_rows(records),
         "statistics": lambda: _statistics_rows(statistics),
+        "odd_cooccurrences": lambda: _cooccurrence_rows(
+            statistics,
+            "odd_pairs",
+        ),
+        "odd_event_cooccurrences": lambda: _cooccurrence_rows(
+            statistics,
+            "odd_event",
+        ),
     }
     dictionary_columns = {
         "scene_records": ("dataset_name", "dataset_version"),
@@ -683,7 +864,24 @@ def build_parquet_artifacts(
             "source",
         ),
         "events": ("primary_event_key", "status"),
-        "statistics": ("label_key", "namespace", "value"),
+        "statistics": (
+            "label_key",
+            "namespace",
+            "quality_tier",
+            "value",
+        ),
+        "odd_cooccurrences": (
+            "left_key",
+            "left_value",
+            "right_key",
+            "right_value",
+        ),
+        "odd_event_cooccurrences": (
+            "odd_key",
+            "odd_value",
+            "event_key",
+            "event_value",
+        ),
     }
     output = {}
     for table_name in (
@@ -692,6 +890,8 @@ def build_parquet_artifacts(
         "observations",
         "events",
         "statistics",
+        "odd_cooccurrences",
+        "odd_event_cooccurrences",
     ):
         output[table_name] = _write_table(
             pa,
