@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import dataclasses
+
 import numpy as np
 import pytest
 
@@ -198,3 +200,17 @@ def test_invalid_map_disables_drivable_supervision_explicitly():
         supervision.distance_to_drivable_m
         == MAXIMUM_OUTSIDE_DISTANCE_M
     )
+
+
+def test_valid_map_without_drivable_pixels_is_rejected():
+    raster = _raster()
+    map_context = raster.map_context.copy()
+    map_context[MapChannel.DRIVABLE_AREA] = 0.0
+    raster = dataclasses.replace(raster, map_context=map_context)
+
+    with pytest.raises(ValueError, match="no drivable pixels"):
+        build_route_supervision(
+            _route(),
+            raster.sample_pose,
+            raster,
+        )
