@@ -16,7 +16,7 @@ env:
     MAXIMUM_CAMERA_ANCHORS: "12"
     MAXIMUM_SCENES: "1"
     SCENE_CONCURRENCY: "1"
-    PUBLISH_LATEST: "false"
+    PUBLICATION_SCOPE: smoke
 
 phases:
   install:
@@ -53,7 +53,7 @@ phases:
         [[ "${DATASET_MANIFEST_SHA256}" =~ ^[0-9a-f]{64}$ ]]
         [[ "${DATA_PREP_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]
         [[ "${LABELER_SOURCE_REVISION}" =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ ]]
-        [[ "${PUBLISH_LATEST}" == "true" || "${PUBLISH_LATEST}" == "false" ]]
+        [[ "${PUBLICATION_SCOPE}" == "smoke" || "${PUBLICATION_SCOPE}" == "full" ]]
 
         export AUTO_E2E_DATA_PREP_IMAGE="${ECR_URL}/auto-e2e/data-prep@${DATA_PREP_DIGEST}"
         export ECR_PREFIX="${ECR_URL}"
@@ -85,7 +85,7 @@ phases:
             ),
             "maximum_scenes": int(os.environ["MAXIMUM_SCENES"]),
             "scene_concurrency": int(os.environ["SCENE_CONCURRENCY"]),
-            "publish_latest": os.environ["PUBLISH_LATEST"] == "true",
+            "publication_scope": os.environ["PUBLICATION_SCOPE"],
         }
         with open("/tmp/odd-labeling-inputs.json", "w", encoding="utf-8") as stream:
             json.dump(inputs, stream, sort_keys=True)
