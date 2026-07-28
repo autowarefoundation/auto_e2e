@@ -137,16 +137,18 @@ def _union_duration(intervals: list[tuple[int, int]]) -> int:
 def _publication_scope(
     scene_count: int,
     expected_scene_count: int,
-    publish_latest: bool,
+    requested_scope: str,
 ) -> str:
     if scene_count <= 0 or expected_scene_count <= 0:
         raise ValueError("ODD publication scene counts must be positive")
-    if publish_latest and scene_count != expected_scene_count:
+    if requested_scope not in {"smoke", "full"}:
+        raise ValueError("ODD publication scope must be smoke or full")
+    if requested_scope == "full" and scene_count != expected_scene_count:
         raise ValueError(
             "latest ODD publication requires the complete scene inventory: "
             f"expected={expected_scene_count} actual={scene_count}"
         )
-    return "full" if publish_latest else "smoke"
+    return requested_scope
 
 
 def _statistics(records: list[dict], ontology: dict, labelset_id: str) -> dict:
@@ -514,7 +516,7 @@ def publish_odd_labelset(
     openai_model_revision: str,
     labeler_image_digest: str,
     labeler_source_revision: str,
-    publish_latest: bool,
+    publication_scope: str,
 ) -> OddPublication:
     import boto3
 
@@ -572,8 +574,8 @@ def publish_odd_labelset(
     ):
         raise ValueError("dataset manifest differs from publication coordinate")
     expected_scene_count = int(dataset_manifest["episodes"])
-    publication_scope = _publication_scope(
-        len(records), expected_scene_count, publish_latest
+    validated_publication_scope = _publication_scope(
+        len(records), expected_scene_count, publication_scope
     )
 
     ontology = ontology_document()
@@ -588,7 +590,7 @@ def publish_odd_labelset(
         "labeler_source_revision": labeler_source_revision,
         "openai_model": openai_model,
         "openai_model_revision": openai_model_revision,
-        "publication_scope": publication_scope,
+        "publication_scope": validated_publication_scope,
         "scene_record_sha256": [
             item["record_sha256"] for item in wrappers
         ],
@@ -660,7 +662,7 @@ def publish_odd_labelset(
         "labeler_version": ODD_LABELER_VERSION,
         "labeler_image_digest": labeler_image_digest,
         "labeler_source_revision": labeler_source_revision,
-        "publication_scope": publication_scope,
+        "publication_scope": validated_publication_scope,
         "expected_scene_count": expected_scene_count,
         "scene_count": len(records),
         "openai_compatible": {
@@ -674,7 +676,7 @@ def publish_odd_labelset(
     _put_immutable(s3, datasets_bucket, manifest_key, manifest_payload)
     manifest_sha256 = _sha256(manifest_payload)
 
-    if publish_latest:
+    if validated_publication_scope == "full":
         pointer = {
             "schema_version": "odd_labelset_pointer_v1",
             "status": "ready",
@@ -713,7 +715,7 @@ def wf_generate_odd_labelset(
     maximum_camera_anchors: int = 12,
     maximum_scenes: int = 0,
     scene_concurrency: int = 40,
-    publish_latest: bool = True,
+    publication_scope: str = "full",
 ) -> OddPublication:
     """Label a published dataset independently from every training workflow."""
     descriptors = resolve_odd_scenes(
@@ -740,5 +742,5 @@ def wf_generate_odd_labelset(
         openai_model_revision=openai_model_revision,
         labeler_image_digest=labeler_image_digest,
         labeler_source_revision=labeler_source_revision,
-        publish_latest=publish_latest,
+        publication_scope=publication_scope,
     )
