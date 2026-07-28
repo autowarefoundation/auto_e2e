@@ -476,7 +476,7 @@ def test_recovery_launcher_requires_audited_artifacts_and_skips_source_stages():
     assert 'test -n "${ARTIFACT_SET_SHA256}"' in buildspec
     assert "--recovery_manifest" in buildspec
     assert "--artifact_set_sha256" in buildspec
-    assert "DATASET_VERSION: v3.2" in buildspec
+    assert "DATASET_VERSION: v3.3" in buildspec
     assert 'EPOCHS: "20"' in buildspec
     assert (
         "TRAINING_OBJECTIVE_VERSION: "
