@@ -13,7 +13,7 @@ from .published_snapshot import CanonicalSceneEvidence
 from .schema import LabelObservation, make_observation
 
 
-LABELER_VERSION = "odd_deterministic_v1"
+LABELER_VERSION = "odd_deterministic_v2"
 INTERVAL_NS = 1_000_000_000
 STATIONARY_EPSILON_KPH = 0.5
 
@@ -46,6 +46,8 @@ def _interval_slices(timestamps: np.ndarray) -> list[tuple[int, int, int, int]]:
         interval_end = min(interval_start + INTERVAL_NS, end)
         left = int(np.searchsorted(timestamps, interval_start, side="left"))
         right = int(np.searchsorted(timestamps, interval_end, side="left"))
+        if left >= len(timestamps):
+            left = len(timestamps) - 1
         if right <= left:
             right = min(len(timestamps), left + 1)
         result.append((interval_start, interval_end, left, right))
