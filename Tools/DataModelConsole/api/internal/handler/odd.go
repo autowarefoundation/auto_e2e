@@ -1,7 +1,9 @@
 package handler
 
 import (
+	"encoding/json"
 	"errors"
+	"io"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -11,6 +13,8 @@ import (
 	"github.com/autowarefoundation/auto_e2e/tools/datamodelconsole/api/internal/model"
 	"github.com/autowarefoundation/auto_e2e/tools/datamodelconsole/api/internal/service"
 )
+
+const maxODDSearchBody = 64 << 10
 
 // ODDHandler serves immutable scene-level ODD LabelSet read models.
 type ODDHandler struct {
@@ -52,6 +56,8 @@ func writeODDError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusServiceUnavailable, model.CodeUnavailable, "ODD LabelSet is not ready")
 	case errors.Is(err, service.ErrNotFound):
 		writeError(w, http.StatusNotFound, model.CodeNotFound, "ODD scene not found")
+	case errors.Is(err, service.ErrODDInvalidQuery):
+		writeError(w, http.StatusBadRequest, model.CodeInvalidParam, err.Error())
 	default:
 		slog.Error("read ODD LabelSet", "error", err)
 		writeError(w, http.StatusBadGateway, model.CodeS3Error, "ODD LabelSet failed integrity validation")
@@ -133,6 +139,47 @@ func (h *ODDHandler) Search(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, response)
 }
 
+func decodeODDSearchRequest(
+	w http.ResponseWriter,
+	r *http.Request,
+) (service.ODDStructuredSearchRequest, error) {
+	var request service.ODDStructuredSearchRequest
+	body := http.MaxBytesReader(w, r.Body, maxODDSearchBody)
+	defer body.Close()
+	decoder := json.NewDecoder(body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&request); err != nil {
+		return request, err
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return request, errors.New("request body must contain one JSON object")
+		}
+		return request, err
+	}
+	return request, nil
+}
+
+func (h *ODDHandler) SearchStructured(w http.ResponseWriter, r *http.Request) {
+	dataset, version, ok := h.coordinate(w, r)
+	if !ok {
+		return
+	}
+	request, err := decodeODDSearchRequest(w, r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, model.CodeInvalidParam, "invalid ODD search request")
+		return
+	}
+	response, err := h.s3.SearchODDScenesStructured(
+		r.Context(), dataset, version, request,
+	)
+	if err != nil {
+		writeODDError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, response)
+}
+
 func (h *ODDHandler) Scene(w http.ResponseWriter, r *http.Request) {
 	dataset, version, ok := h.coordinate(w, r)
 	if !ok {
@@ -152,4 +199,27 @@ func (h *ODDHandler) Scene(w http.ResponseWriter, r *http.Request) {
 	}
 	setODDIdentity(w, manifest, digest)
 	writeRawJSON(w, http.StatusOK, body)
+}
+
+func (h *ODDHandler) Evidence(w http.ResponseWriter, r *http.Request) {
+	dataset, version, ok := h.coordinate(w, r)
+	if !ok {
+		return
+	}
+	sceneUID := chi.URLParam(r, "scene_uid")
+	observationUID := chi.URLParam(r, "observation_uid")
+	if !validReasoningParam(sceneUID) ||
+		!validReasoningParam(observationUID) {
+		writeError(w, http.StatusBadRequest, model.CodeInvalidParam, "invalid ODD evidence coordinate")
+		return
+	}
+	response, manifest, digest, err := h.s3.ODDEvidence(
+		r.Context(), dataset, version, sceneUID, observationUID,
+	)
+	if err != nil {
+		writeODDError(w, err)
+		return
+	}
+	setODDIdentity(w, manifest, digest)
+	writeJSON(w, http.StatusOK, response)
 }
