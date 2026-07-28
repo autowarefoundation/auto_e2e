@@ -6,6 +6,7 @@ import torch
 
 from evaluation.metrics import integrate_trajectory
 from navigation.geometry import DEFAULT_NAVIGATION_GEOMETRY
+from navigation.supervision import ROUTE_SUPERVISION_ARTIFACT_VERSION
 from training.losses.control_rollout import integrate_controls_torch
 from training.losses.route_consistency_loss import (
     RouteConsistencyLoss,
@@ -70,7 +71,7 @@ def _loss(
 def test_route_loss_declares_current_supervision_contract():
     assert (
         RouteConsistencyLoss().metadata()["artifact_version"]
-        == "navigation_supervision_v2"
+        == ROUTE_SUPERVISION_ARTIFACT_VERSION
     )
 
 
