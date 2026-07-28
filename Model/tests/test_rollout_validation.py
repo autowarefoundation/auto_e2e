@@ -132,6 +132,24 @@ def test_invalid_map_and_route_are_unavailable_not_perfect():
     assert record["destination_error_m"] is None
 
 
+def test_visible_destination_is_independent_of_route_validity():
+    record = build_rollout_validation_records(
+        _controls(curvature=0.04),
+        _controls(),
+        torch.tensor([5.0]),
+        _logged_straight(),
+        _supervision(_band_field(), destination_visible=True),
+        torch.tensor([False]),
+        torch.tensor([False]),
+        ["sample-a"],
+        ["scene-a"],
+    )[0]
+
+    assert record["route_gap"] is None
+    assert record["wrong_branch_excess"] is None
+    assert record["destination_error_m"] > 0.0
+
+
 def test_inside_metrics_use_half_pixel_raster_tolerance():
     controls = _controls()
     shape = (1, GEOMETRY.height_px, GEOMETRY.width_px)
