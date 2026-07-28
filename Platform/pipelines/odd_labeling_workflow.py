@@ -553,7 +553,7 @@ def label_odd_bedrock_map(
 @task(
     container_image=DATA_PREP_IMAGE,
     cache=True,
-    cache_version="odd-fuse-scene-v1",
+    cache_version="odd-fuse-scene-v2",
     requests=Resources(cpu="2", mem="6Gi"),
     limits=Resources(cpu="4", mem="12Gi"),
 )
