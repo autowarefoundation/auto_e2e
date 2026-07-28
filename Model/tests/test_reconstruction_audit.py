@@ -43,6 +43,12 @@ def test_reconstruction_audit_accepts_exact_straight_rollout():
     assert report["scene_count"] == 2
     assert len(report["error_by_step"]) == 64
     assert report["metrics"]["fde_full_m"]["natural"]["p95"] < 2e-5
+    heading = report["heading_alignment"]
+    assert heading["valid_step_count"] == 3 * 64
+    assert heading["valid_sample_count"] == 3
+    assert heading["full_horizon"]["p95"] < 1e-5
+    assert heading["at_3s"]["p95"] < 1e-5
+    assert heading["at_full_horizon"]["p95"] < 1e-5
     assert [scene["split_group_uid"] for scene in report["scenes"]] == [
         "scene-1",
         "scene-2",
@@ -210,6 +216,8 @@ def test_packed_loader_reads_only_selected_validation_groups(
     report = audit_packed_target_rollout_reconstruction(inputs)
     assert report["sample_uid_digest"]
     assert report["sample_count"] == 2
+    assert report["heading_alignment"]["valid_step_count"] == 0
+    assert report["heading_alignment"]["full_horizon"] is None
 
 
 def test_packed_loader_rejects_missing_selected_member(tmp_path):
