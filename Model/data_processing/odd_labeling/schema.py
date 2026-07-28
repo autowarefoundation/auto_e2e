@@ -341,6 +341,7 @@ class SemanticLabelerProvenance:
     decoding_config_sha256: str | None = None
     lookback_ns: int = 0
     lookahead_ns: int = 0
+    details: Mapping[str, Any] = dataclasses.field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not self.labeler_name or not self.labeler_version or not self.code_commit:
@@ -367,6 +368,9 @@ class SemanticLabelerProvenance:
             )
         if self.lookback_ns < 0 or self.lookahead_ns < 0:
             raise ValueError("retrospective context must be non-negative")
+        normalized_details = _json_value(self.details)
+        canonical_json_bytes(normalized_details)
+        object.__setattr__(self, "details", normalized_details)
         model_fields = (
             self.model_provider,
             self.model_name,
