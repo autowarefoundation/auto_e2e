@@ -8,7 +8,6 @@ import json
 import os
 import re
 import tempfile
-from collections import defaultdict
 from typing import List, NamedTuple
 
 from flytekit import Resources, Secret, dynamic, map_task, task, workflow
@@ -127,17 +126,9 @@ def _scene_summary(
 
 
 def _union_duration(intervals: list[tuple[int, int]]) -> int:
-    if not intervals:
-        return 0
-    total = 0
-    start, end = sorted(intervals)[0]
-    for next_start, next_end in sorted(intervals)[1:]:
-        if next_start <= end:
-            end = max(end, next_end)
-            continue
-        total += end - start
-        start, end = next_start, next_end
-    return total + end - start
+    from data_processing.odd_labeling.statistics import union_duration
+
+    return union_duration(intervals)
 
 
 def _publication_scope(
@@ -158,113 +149,9 @@ def _publication_scope(
 
 
 def _statistics(records: list[dict], ontology: dict, labelset_id: str) -> dict:
-    total_scenes = len(records)
-    scene_duration = {
-        record["scene_uid"]: (
-            int(record["end_timestamp_ns"])
-            - int(record["start_timestamp_ns"])
-        )
-        for record in records
-    }
-    rows = []
-    for definition in ontology["labels"]:
-        key = definition["key"]
-        valid_scenes: set[str] = set()
-        status_scenes: dict[str, set[str]] = defaultdict(set)
-        value_scenes: dict[str, set[str]] = defaultdict(set)
-        status_intervals: dict[str, dict[str, list[tuple[int, int]]]] = (
-            defaultdict(lambda: defaultdict(list))
-        )
-        value_intervals: dict[str, dict[str, list[tuple[int, int]]]] = (
-            defaultdict(lambda: defaultdict(list))
-        )
-        source_scenes: dict[str, set[str]] = defaultdict(set)
-        for record in records:
-            scene_uid = record["scene_uid"]
-            for observation in record["observations"]:
-                if observation["key"] != key:
-                    continue
-                status = observation["status"]
-                status_scenes[status].add(scene_uid)
-                interval = (
-                    int(observation["start_timestamp_ns"]),
-                    int(observation["end_timestamp_ns"]),
-                )
-                status_intervals[status][scene_uid].append(interval)
-                source_scenes[observation["source"]].add(scene_uid)
-                if status != "valid":
-                    continue
-                valid_scenes.add(scene_uid)
-                for value in observation["values"]:
-                    value_scenes[value].add(scene_uid)
-                    value_intervals[value][scene_uid].append(interval)
-        status_duration = {
-            status: sum(
-                _union_duration(intervals)
-                for intervals in by_scene.values()
-            )
-            for status, by_scene in status_intervals.items()
-        }
-        value_duration = {
-            value: sum(
-                _union_duration(intervals)
-                for intervals in by_scene.values()
-            )
-            for value, by_scene in value_intervals.items()
-        }
-        valid_duration = status_duration.get("valid", 0)
-        values = []
-        for candidate in definition["values"]:
-            value = candidate["value"]
-            count = len(value_scenes[value])
-            values.append(
-                {
-                    "value": value,
-                    "scene_count": count,
-                    "scene_ratio": (
-                        count / len(valid_scenes) if valid_scenes else 0.0
-                    ),
-                    "duration_ns": value_duration.get(value, 0),
-                    "duration_ratio": (
-                        value_duration.get(value, 0) / valid_duration
-                        if valid_duration
-                        else 0.0
-                    ),
-                }
-            )
-        rows.append(
-            {
-                "key": key,
-                "namespace": definition["namespace"],
-                "valid_scene_count": len(valid_scenes),
-                "eligible_scene_count": total_scenes,
-                "observable_scene_coverage": (
-                    len(valid_scenes) / total_scenes if total_scenes else 0.0
-                ),
-                "eligible_duration_ns": sum(scene_duration.values()),
-                "valid_duration_ns": valid_duration,
-                "status_scene_counts": {
-                    status: len(status_scenes[status])
-                    for status in ontology["statuses"]
-                },
-                "status_duration_ns": {
-                    status: status_duration.get(status, 0)
-                    for status in ontology["statuses"]
-                },
-                "source_scene_counts": {
-                    source: len(scenes)
-                    for source, scenes in sorted(source_scenes.items())
-                },
-                "values": values,
-            }
-        )
-    return {
-        "schema_version": "odd_statistics_v1",
-        "labelset_id": labelset_id,
-        "scene_count": total_scenes,
-        "scene_duration_ns": sum(scene_duration.values()),
-        "keys": rows,
-    }
+    from data_processing.odd_labeling.statistics import build_statistics
+
+    return build_statistics(records, ontology, labelset_id)
 
 
 def _put_immutable(
@@ -613,7 +500,7 @@ def map_odd_scenes(
 @task(
     container_image=DATA_PREP_IMAGE,
     cache=True,
-    cache_version="odd-publish-labelset-v4",
+    cache_version="odd-publish-labelset-v5",
     requests=Resources(cpu="2", mem="8Gi"),
     limits=Resources(cpu="4", mem="16Gi"),
 )
@@ -637,10 +524,14 @@ def publish_odd_labelset(
 
     from data_processing.odd_labeling.ontology import ontology_document
     from data_processing.odd_labeling.parquet import (
+        PARQUET_SCHEMA_VERSION,
         build_parquet_artifacts,
     )
     from data_processing.odd_labeling.published_snapshot import S3Location
     from data_processing.odd_labeling.schema import DatasetCapabilityManifest
+    from data_processing.odd_labeling.statistics import (
+        STATISTICS_SCHEMA_VERSION,
+    )
 
     capability_manifest = DatasetCapabilityManifest.from_json(
         capability_manifest_json
@@ -731,6 +622,8 @@ def publish_odd_labelset(
         "openai_model_revision": openai_model_revision,
         "bedrock_map_model_id": bedrock_map_model_id,
         "bedrock_map_model_revision": bedrock_map_model_revision,
+        "statistics_schema_version": STATISTICS_SCHEMA_VERSION,
+        "parquet_schema_version": PARQUET_SCHEMA_VERSION,
         "publication_scope": validated_publication_scope,
         "scene_record_sha256": [
             item["record_sha256"] for item in wrappers
