@@ -21,7 +21,7 @@ env:
     FLYTE_DOMAIN: development
     ARTIFACT_SET_SHA256: ""
     RECOVERY_MANIFEST_URI: ""
-    DATASET_VERSION: v3.2
+    DATASET_VERSION: v3.3
     PACK_CONCURRENCY: "60"
     MAX_PARTITIONS: "0"
     BACKBONE: "swin_v2_tiny"
