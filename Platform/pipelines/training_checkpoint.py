@@ -11,6 +11,18 @@ from typing import Any, Mapping
 
 
 CHECKPOINT_SCHEMA_VERSION = "il_checkpoint_v2"
+_RESUME_REQUIRED_FIELDS = {
+    "schema_version",
+    "model_state_dict",
+    "optimizer_state_dict",
+    "scheduler_state_dict",
+    "scaler_state_dict",
+    "rng_state",
+    "epoch",
+    "config",
+    "training_state",
+    "data_fingerprint",
+}
 
 
 def stable_digest(value: Any) -> str:
@@ -116,27 +128,11 @@ def restore_rng_state(state: Mapping[str, Any]) -> None:
         torch.cuda.set_rng_state_all(cuda_states)
 
 
-def validate_resume_payload(
-    payload: Mapping[str, Any],
-    *,
-    expected_config: Mapping[str, Any],
-    expected_data_fingerprint: str,
-    allowed_config_changes: frozenset[str] = frozenset(),
-    compatible_data_fingerprints: frozenset[str] = frozenset(),
-) -> None:
-    required = {
-        "schema_version",
-        "model_state_dict",
-        "optimizer_state_dict",
-        "scheduler_state_dict",
-        "scaler_state_dict",
-        "rng_state",
-        "epoch",
-        "config",
-        "training_state",
-        "data_fingerprint",
-    }
-    missing = required - set(payload)
+def validate_resume_envelope(payload: Mapping[str, Any]) -> None:
+    """Validate fields needed before interpreting a resume transition."""
+    if not isinstance(payload, Mapping):
+        raise ValueError("resume checkpoint must be a mapping")
+    missing = _RESUME_REQUIRED_FIELDS - set(payload)
     if missing:
         raise ValueError(
             f"resume checkpoint is missing required fields: {sorted(missing)}"
@@ -146,6 +142,19 @@ def validate_resume_payload(
             "unsupported resume checkpoint schema "
             f"{payload['schema_version']!r}; expected {CHECKPOINT_SCHEMA_VERSION!r}"
         )
+    if not isinstance(payload["config"], Mapping):
+        raise ValueError("resume checkpoint config must be a mapping")
+
+
+def validate_resume_payload(
+    payload: Mapping[str, Any],
+    *,
+    expected_config: Mapping[str, Any],
+    expected_data_fingerprint: str,
+    allowed_config_changes: frozenset[str] = frozenset(),
+    compatible_data_fingerprints: frozenset[str] = frozenset(),
+) -> None:
+    validate_resume_envelope(payload)
     saved_config = dict(payload["config"])
     requested_config = dict(expected_config)
     unknown_changes = allowed_config_changes - (
