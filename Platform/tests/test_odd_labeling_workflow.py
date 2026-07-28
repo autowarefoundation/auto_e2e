@@ -106,6 +106,8 @@ def test_workflow_interface_does_not_expose_endpoint_url() -> None:
     assert "openai_base_url" not in wf_generate_odd_labelset.python_interface.inputs
     assert "publish_latest" not in wf_generate_odd_labelset.python_interface.inputs
     assert {
+        "bedrock_map_model_id",
+        "bedrock_map_model_revision",
         "labeler_image_digest",
         "labeler_source_revision",
         "publication_scope",
@@ -118,11 +120,14 @@ def test_capability_manifest_is_required_across_publication_tasks() -> None:
         "capability_manifest_json",
     }
     assert {
+        "bedrock_map_model_id",
+        "bedrock_map_model_revision",
         "capability_manifest_json",
         "labeler_image_digest",
         "labeler_source_revision",
     }.issubset(label_odd_scene.python_interface.inputs)
-    assert (
-        "capability_manifest_json"
-        in publish_odd_labelset.python_interface.inputs
-    )
+    assert {
+        "bedrock_map_model_id",
+        "bedrock_map_model_revision",
+        "capability_manifest_json",
+    }.issubset(publish_odd_labelset.python_interface.inputs)
