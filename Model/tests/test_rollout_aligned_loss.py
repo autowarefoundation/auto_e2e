@@ -331,6 +331,28 @@ def test_map_validity_masks_regions_before_reduction():
     assert torch.isfinite(unavailable["constraint"])
 
 
+def test_unavailable_nonfinite_map_terms_are_masked_before_reduction():
+    field = torch.full(
+        (1, GEOMETRY.height_px, GEOMETRY.width_px),
+        torch.nan,
+    )
+
+    terms = _loss(
+        _controls(),
+        _controls(),
+        supervision=_supervision(
+            route_field=field,
+            drivable_field=field,
+            available=False,
+        ),
+        map_valid=False,
+        route_valid=False,
+    )
+
+    assert terms["map"].item() == 0.0
+    assert torch.isfinite(terms["constraint"])
+
+
 def test_missing_drivable_field_keeps_route_term_available():
     field = _field_from_lateral_band()
     supervision = _supervision(
