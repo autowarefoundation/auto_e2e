@@ -15,6 +15,7 @@ from Platform.pipelines.training_checkpoint import (
     CHECKPOINT_SCHEMA_VERSION,
     capture_rng_state,
     checkpoint_key,
+    mark_best_pointer_transition_pending,
     metric_pair_is_better,
     restore_rng_state,
     stable_digest,
@@ -340,3 +341,37 @@ def test_best_pointer_records_composite_selection_policy():
     latest = json.loads(s3.versions[-1][1]["Body"])
     assert latest["schema_version"] == "best_checkpoint_pointer_v2"
     assert latest["selection"] == selection
+
+
+def test_policy_transition_marks_best_pointer_pending():
+    s3 = _FakeS3()
+
+    uri = mark_best_pointer_transition_pending(
+        s3,
+        bucket="checkpoints",
+        run_id="run-1",
+        transition_policy_version="navigation_repeat_resume_transition_v1",
+        source_best={
+            "epoch": 5,
+            "uri": "s3://checkpoints/run/epoch-0005.pt",
+            "sha256": "a" * 64,
+            "selection_score": 0.42,
+        },
+    )
+
+    assert uri == "s3://checkpoints/imitation-learning/run-1/best.json"
+    payload = json.loads(s3.versions[-1][1]["Body"])
+    assert payload == {
+        "schema_version": "best_checkpoint_transition_v1",
+        "run_id": "run-1",
+        "status": "pending_post_transition_validation",
+        "transition_policy_version": (
+            "navigation_repeat_resume_transition_v1"
+        ),
+        "source_best": {
+            "epoch": 5,
+            "uri": "s3://checkpoints/run/epoch-0005.pt",
+            "sha256": "a" * 64,
+            "selection_score": 0.42,
+        },
+    }
