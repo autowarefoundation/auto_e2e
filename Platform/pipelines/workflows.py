@@ -3814,6 +3814,7 @@ def train_il(
         CHECKPOINT_SCHEMA_VERSION,
         capture_rng_state,
         checkpoint_key,
+        mark_best_pointer_transition_pending,
         metric_pair_is_better,
         rescale_partial_accumulation_gradients,
         restore_rng_state,
@@ -3985,6 +3986,18 @@ def train_il(
         if resume_policy_transition is not None and terminal_resume:
             raise ValueError(
                 "resume policy transition requires at least one new epoch"
+            )
+        if resume_policy_transition is not None:
+            mark_best_pointer_transition_pending(
+                s3_client,
+                bucket=checkpoint_bucket,
+                run_id=run_id,
+                transition_policy_version=(
+                    resume_policy_transition["policy_version"]
+                ),
+                source_best=resume_policy_transition[
+                    "best_before_reset"
+                ],
             )
         if best_checkpoint is not None:
             update_best_pointer(
