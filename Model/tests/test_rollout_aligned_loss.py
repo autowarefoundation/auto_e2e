@@ -357,6 +357,58 @@ def test_unavailable_nonfinite_map_terms_are_masked_before_reduction():
     assert torch.isfinite(predicted.grad).all()
 
 
+def test_mixed_batch_averages_only_available_map_terms_per_sample():
+    field = _field_from_lateral_band().repeat(2, 1, 1)
+    predicted = _controls(curvature=0.04).repeat(2, 1, 1)
+    target = _controls().repeat(2, 1, 1)
+    initial_speed = torch.full((2,), 5.0)
+    logged_positions, _, _ = integrate_controls_torch(
+        target,
+        initial_speed,
+    )
+    supervision = {
+        "distance_to_corridor_m": field,
+        "distance_to_drivable_m": field,
+        "available": torch.tensor([True, False]),
+        "drivable_available": torch.tensor([True, False]),
+    }
+
+    terms = RolloutAlignedLoss()(
+        predicted,
+        target,
+        initial_speed,
+        logged_positions,
+        supervision,
+        torch.tensor([True, False]),
+        torch.tensor([True, False]),
+    )
+
+    assert terms["map_sample_count"].item() == 1
+    assert terms["route_sample_count"].item() == 1
+    assert terms["drivable_sample_count"].item() == 1
+    assert terms["map"].item() > 0.0
+    assert terms["comfort"].item() == 0.0
+    assert terms["constraint"].item() == pytest.approx(
+        terms["map"].item() / 4.0
+    )
+
+
+def test_unavailable_map_diagnostics_do_not_overflow_half_precision():
+    predicted = _controls(acceleration=65504.0).to(torch.float16)
+
+    terms = _loss(
+        predicted,
+        predicted.clone(),
+        supervision=_supervision(available=False),
+        map_valid=False,
+        route_valid=False,
+    )
+
+    assert torch.isfinite(terms["map"])
+    assert torch.isfinite(terms["route"])
+    assert torch.isfinite(terms["drivable"])
+
+
 def test_missing_drivable_field_keeps_route_term_available():
     field = _field_from_lateral_band()
     supervision = _supervision(
