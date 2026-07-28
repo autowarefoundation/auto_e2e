@@ -14,11 +14,11 @@ def test_union_duration_counts_overlapping_intervals_once() -> None:
 
 
 def test_latest_publication_requires_complete_scene_inventory() -> None:
-    assert _publication_scope(404, 404, True) == "full"
-    assert _publication_scope(1, 404, False) == "smoke"
+    assert _publication_scope(404, 404, "full") == "full"
+    assert _publication_scope(1, 404, "smoke") == "smoke"
 
     try:
-        _publication_scope(1, 404, True)
+        _publication_scope(1, 404, "full")
     except ValueError as error:
         assert "complete scene inventory" in str(error)
     else:
@@ -101,7 +101,9 @@ def test_scene_summary_pins_record_integrity() -> None:
 
 def test_workflow_interface_does_not_expose_endpoint_url() -> None:
     assert "openai_base_url" not in wf_generate_odd_labelset.python_interface.inputs
+    assert "publish_latest" not in wf_generate_odd_labelset.python_interface.inputs
     assert {
         "labeler_image_digest",
         "labeler_source_revision",
+        "publication_scope",
     }.issubset(wf_generate_odd_labelset.python_interface.inputs)
