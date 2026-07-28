@@ -15,6 +15,7 @@ import torch
 
 pytest.importorskip("flytekit")
 
+from evaluation.checkpoint_selection import SELECTOR_POLICY_VERSION
 from Platform.pipelines import workflows
 
 
@@ -1068,7 +1069,7 @@ def test_resume_record_recovers_composite_selection(tmp_path):
     checkpoint = tmp_path / "epoch-0003.pt"
     checkpoint.write_bytes(b"trusted-checkpoint")
     selection = {
-        "policy_version": "rollout_composite_selector_v1",
+        "policy_version": SELECTOR_POLICY_VERSION,
         "score": 0.75,
     }
     payload = {
@@ -1150,7 +1151,7 @@ def test_registry_reuses_one_version_when_best_is_final():
 def test_registry_records_composite_checkpoint_selection():
     client = _RegistryClient()
     selection = {
-        "policy_version": "rollout_composite_selector_v1",
+        "policy_version": SELECTOR_POLICY_VERSION,
         "score": 0.75,
     }
 
