@@ -16,6 +16,7 @@ import torch
 pytest.importorskip("flytekit")
 
 from evaluation.checkpoint_selection import SELECTOR_POLICY_VERSION
+from evaluation.reconstruction_audit import AUDIT_SCHEMA_VERSION
 from Platform.pipelines import workflows
 
 
@@ -628,7 +629,7 @@ def test_reconstruction_audit_allows_only_empty_partitions_without_gps(
         reconstruction_audit,
         "audit_packed_target_rollout_reconstruction",
         lambda inputs: {
-            "schema_version": "target_rollout_reconstruction_v1",
+            "schema_version": AUDIT_SCHEMA_VERSION,
             "sample_count": 1,
             "scene_count": 1,
             "sample_uid_digest": sample_digest,
@@ -653,6 +654,16 @@ def test_reconstruction_audit_allows_only_empty_partitions_without_gps(
                 "non_finite_sample_count": 0,
             },
             "metrics": metrics,
+            "heading_alignment": {
+                "valid_step_count": 64,
+                "full_horizon": {
+                    "mean": 0.0,
+                    "p50": 0.0,
+                    "p90": 0.0,
+                    "p95": 0.0,
+                    "max": 0.0,
+                },
+            },
             "error_by_step": [],
             "worst_scenes": {},
             "scenes": [],
