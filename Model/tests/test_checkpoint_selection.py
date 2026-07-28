@@ -237,6 +237,42 @@ def test_lower_errors_produce_better_composite_score():
     )
 
 
+def test_large_excess_remains_rankable_without_hard_clipping():
+    worse_aggregate = aggregate_validation_records([
+        _record(
+            f"worse-{index}",
+            f"scene-{index % 2}",
+            1.0,
+            comfort_excess=0.6,
+            offroad_excess=0.8,
+        )
+        for index in range(4)
+    ])
+    better_aggregate = aggregate_validation_records([
+        _record(
+            f"better-{index}",
+            f"scene-{index % 2}",
+            1.0,
+            comfort_excess=0.3,
+            offroad_excess=0.4,
+        )
+        for index in range(4)
+    ])
+    availability = freeze_component_availability(worse_aggregate)
+
+    worse = score_checkpoint(worse_aggregate, availability)
+    better = score_checkpoint(better_aggregate, availability)
+
+    assert 0.0 < worse["components"]["comfort"] < 1.0
+    assert 0.0 < worse["components"]["map_safety"] < 1.0
+    assert better["components"]["comfort"] > worse["components"]["comfort"]
+    assert (
+        better["components"]["map_safety"]
+        > worse["components"]["map_safety"]
+    )
+    assert better["score"] > worse["score"]
+
+
 def test_calibration_reports_saturation_and_weight_rank_sensitivity():
     selections = [
         {
