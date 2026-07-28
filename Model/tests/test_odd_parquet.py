@@ -163,12 +163,20 @@ def _statistics() -> dict:
             {
                 "key": "event.ego.maneuver",
                 "namespace": "event",
+                "quality_tier": "experimental",
                 "valid_scene_count": 2,
                 "eligible_scene_count": 2,
                 "observable_scene_coverage": 1.0,
                 "eligible_duration_ns": 6_000_000_000,
                 "valid_duration_ns": 6_000_000_000,
+                "observable_duration_coverage": 1.0,
+                "eligible_distance_m": 85.0,
+                "valid_distance_m": 85.0,
+                "observable_distance_coverage": 1.0,
                 "valid_interval_count": 2,
+                "attempted_count": 2,
+                "successful_count": 2,
+                "conflict_count": 0,
                 "status_scene_counts": {
                     "valid": 2,
                     "unavailable": 0,
@@ -181,18 +189,89 @@ def _statistics() -> dict:
                     "not_observable": 0,
                     "ambiguous": 0,
                 },
+                "status_distance_m": {
+                    "valid": 85.0,
+                    "unavailable": 0.0,
+                    "not_observable": 0.0,
+                    "ambiguous": 0.0,
+                },
                 "source_scene_counts": {"fusion": 2},
+                "source_duration_ns": {"fusion": 6_000_000_000},
+                "source_distance_m": {"fusion": 85.0},
+                "confidence": {
+                    "observation_count": 2,
+                    "duration_weighted_mean": 0.95,
+                    "p10": 0.95,
+                    "p50": 0.95,
+                    "p90": 0.95,
+                    "bins": [],
+                },
                 "values": [
                     {
                         "value": "turn_left",
                         "scene_count": 2,
                         "scene_ratio": 1.0,
+                        "scene_ratio_ci95": {
+                            "lower": 0.34,
+                            "upper": 1.0,
+                            "method": "wilson_scene_95",
+                        },
                         "duration_ns": 6_000_000_000,
                         "duration_ratio": 1.0,
+                        "duration_ratio_ci95": {
+                            "lower": 1.0,
+                            "upper": 1.0,
+                            "method": "scene_clustered_bootstrap_95",
+                            "replicates": 256,
+                        },
+                        "distance_m": 85.0,
+                        "distance_ratio": 1.0,
+                        "distance_ratio_ci95": {
+                            "lower": 1.0,
+                            "upper": 1.0,
+                            "method": "scene_clustered_bootstrap_95",
+                            "replicates": 256,
+                        },
+                        "valid_interval_count": 2,
+                        "event_instance_count": 2,
+                        "confidence": {
+                            "observation_count": 2,
+                            "duration_weighted_mean": 0.95,
+                            "p10": 0.95,
+                            "p50": 0.95,
+                            "p90": 0.95,
+                            "bins": [],
+                        },
                     }
                 ],
             }
         ],
+        "cooccurrences": {
+            "minimum_overlap_ns": 100_000_000,
+            "odd_pairs": [
+                {
+                    "left_key": "odd.environment.sky",
+                    "left_value": "clear",
+                    "right_key": "odd.road.context",
+                    "right_value": "urban",
+                    "scene_count": 2,
+                    "overlap_duration_ns": 6_000_000_000,
+                    "overlap_distance_m": 85.0,
+                }
+            ],
+            "odd_event": [
+                {
+                    "odd_key": "odd.road.context",
+                    "odd_value": "urban",
+                    "event_key": "event.ego.maneuver",
+                    "event_value": "turn_left",
+                    "scene_count": 2,
+                    "event_instance_count": 2,
+                    "overlap_duration_ns": 6_000_000_000,
+                    "overlap_distance_m": 85.0,
+                }
+            ],
+        },
     }
 
 
@@ -224,6 +303,8 @@ def test_odd_parquet_artifacts_are_explicit_and_scene_grouped() -> None:
         "observations",
         "events",
         "statistics",
+        "odd_cooccurrences",
+        "odd_event_cooccurrences",
     }
     assert {
         name: artifact.row_count for name, artifact in artifacts.items()
@@ -233,11 +314,13 @@ def test_odd_parquet_artifacts_are_explicit_and_scene_grouped() -> None:
         "observations": 2,
         "events": 2,
         "statistics": 1,
+        "odd_cooccurrences": 1,
+        "odd_event_cooccurrences": 1,
     }
     for name, artifact in artifacts.items():
         parquet_file = _parquet_file(artifact.payload)
         metadata = parquet_file.schema_arrow.metadata
-        assert metadata[b"odd.parquet_schema_version"] == b"odd_parquet_v1"
+        assert metadata[b"odd.parquet_schema_version"] == b"odd_parquet_v2"
         assert metadata[b"odd.table_name"] == name.encode("ascii")
         assert metadata[b"odd.labelset_id"] == b"oddls-test"
         assert metadata[b"odd.ontology_sha256"] == b"2" * 64
