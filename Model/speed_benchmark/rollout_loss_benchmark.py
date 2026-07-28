@@ -135,15 +135,27 @@ def _measure_full_model_steps(
     iterations: int,
 ) -> tuple[float, float]:
     from model_components.auto_e2e import AutoE2E
+    from model_components.reasoning.reasoning_taxonomy import (
+        DEFAULT_TAXONOMY,
+        LabelMode,
+    )
+    from training.losses.horizon_reasoning_loss import (
+        HorizonReasoningLoss,
+    )
 
     model = AutoE2E(
         backbone="swin_v2_tiny",
         num_views=6,
         is_pretrained=False,
+        view_fusion_kwargs=(
+            DEFAULT_NAVIGATION_GEOMETRY.camera_bev_kwargs()
+        ),
         map_context_channels=14,
         route_channels=2,
         enable_route_conditioning=True,
         enable_world_model=True,
+        enable_reasoning=True,
+        reasoning_mode="pooled_latent",
     ).to(device)
     model.train()
     optimizer = torch.optim.AdamW(
@@ -255,6 +267,23 @@ def _measure_full_model_steps(
         signal_scales=(0.778, 0.0350),
     ).to(device)
     aligned_loss = RolloutAlignedLoss().to(device)
+    reasoning_loss = HorizonReasoningLoss()
+    reasoning_targets = {}
+    for group in DEFAULT_TAXONOMY.groups:
+        shape = (batch_size, 5, len(group))
+        if group.mode is LabelMode.MULTI:
+            target_values = torch.zeros(shape, device=device)
+            target_values[:, :, -1] = 1.0
+        else:
+            target_values = torch.zeros(
+                batch_size,
+                5,
+                dtype=torch.long,
+                device=device,
+            )
+        reasoning_targets[group.name] = target_values
+    reasoning_weights = torch.ones(batch_size, 5, device=device)
+    reasoning_confidence = torch.ones(batch_size, 5, device=device)
 
     def step(*, aligned: bool) -> None:
         optimizer.zero_grad(set_to_none=True)
@@ -279,6 +308,13 @@ def _measure_full_model_steps(
             future_state,
             future_frames,
         )
+        reasoning_terms = reasoning_loss(
+            auxiliary["reasoning_pred"],
+            reasoning_targets,
+            source_weights=reasoning_weights,
+            confidence_targets=reasoning_confidence,
+        )
+        loss = loss + 0.05 * reasoning_terms["total"]
         if aligned:
             terms = aligned_loss(
                 predicted,
@@ -316,8 +352,8 @@ def main() -> None:
     parser.add_argument("--warmup", type=int, default=10)
     parser.add_argument("--iterations", type=int, default=100)
     parser.add_argument("--full-step-batch-size", type=int, default=1)
-    parser.add_argument("--full-step-warmup", type=int, default=1)
-    parser.add_argument("--full-step-iterations", type=int, default=3)
+    parser.add_argument("--full-step-warmup", type=int, default=3)
+    parser.add_argument("--full-step-iterations", type=int, default=10)
     args = parser.parse_args()
     if not torch.cuda.is_available():
         raise RuntimeError("CUDA is required for this benchmark")
@@ -456,6 +492,7 @@ def main() -> None:
         "full_step_batch_size": args.full_step_batch_size,
         "full_step_iterations": args.full_step_iterations,
         "full_step_includes_world_model_jepa": True,
+        "full_step_includes_reasoning": True,
         "action_only_full_training_step_ms": full_step_baseline_ms,
         "rollout_aligned_full_training_step_ms": (
             full_step_treatment_ms
