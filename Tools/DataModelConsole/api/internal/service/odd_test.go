@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -244,6 +245,133 @@ func oddStructuredSearchService(t *testing.T) *S3Service {
 	return service
 }
 
+func oddEvidenceTestService(
+	t *testing.T,
+	mutateRecord func(map[string]any),
+) *S3Service {
+	t.Helper()
+	service := oddTestService(t, nil)
+	client := service.client.(*fakePublicationS3)
+	const root = "kitscenes/v3.0/odd/labelsets/oddls-test"
+	record := map[string]any{
+		"scene_uid":       "scene-1",
+		"dataset_name":    "kitscenes",
+		"dataset_version": "v3.0",
+		"provenance": map[string]any{
+			"labeler_version": "odd_dataset_labeler_v1",
+		},
+		"observations": []any{
+			map[string]any{
+				"observation_uid":           "observation-1",
+				"scene_uid":                 "scene-1",
+				"key":                       "event.ego.maneuver",
+				"status":                    "ambiguous",
+				"values":                    []string{},
+				"confidence":                0.6,
+				"source":                    "fusion",
+				"start_timestamp_ns":        10,
+				"end_timestamp_ns":          90,
+				"evidence_uids":             []string{"evidence-support"},
+				"conflicting_evidence_uids": []string{"evidence-conflict"},
+				"event_uid":                 "event-1",
+				"provenance": map[string]any{
+					"fusion_version": "odd_fusion_v1",
+				},
+			},
+		},
+		"evidence": []any{
+			map[string]any{
+				"evidence_uid": "evidence-support",
+				"label_key":    "event.ego.maneuver",
+				"status":       "valid",
+				"values":       []string{"turn_left"},
+				"source":       "gnss_ins",
+				"confidence":   0.91,
+				"scope": map[string]any{
+					"scene_uid":          "scene-1",
+					"start_timestamp_ns": 10,
+					"end_timestamp_ns":   90,
+				},
+				"provenance": map[string]any{
+					"labeler_name": "trajectory_resolver",
+				},
+			},
+			map[string]any{
+				"evidence_uid": "evidence-conflict",
+				"label_key":    "event.ego.maneuver",
+				"status":       "valid",
+				"values":       []string{"turn_right"},
+				"source":       "vlm",
+				"confidence":   0.72,
+				"scope": map[string]any{
+					"scene_uid":          "scene-1",
+					"start_timestamp_ns": 10,
+					"end_timestamp_ns":   90,
+				},
+				"provenance": map[string]any{
+					"labeler_name": "road_vlm",
+					"model_name":   "road-observer",
+				},
+			},
+		},
+		"events": []any{
+			map[string]any{
+				"event_uid":          "event-1",
+				"scene_uid":          "scene-1",
+				"primary_event_key":  "event.ego.maneuver",
+				"observation_uids":   []string{"observation-1"},
+				"start_timestamp_ns": 10,
+				"end_timestamp_ns":   90,
+				"phases": []any{
+					map[string]any{
+						"phase":              "active",
+						"start_timestamp_ns": 10,
+						"end_timestamp_ns":   90,
+					},
+				},
+			},
+		},
+	}
+	if mutateRecord != nil {
+		mutateRecord(record)
+	}
+	recordBody := oddJSON(t, record)
+	recordKey := root + "/scenes/scene-1.json"
+	client.objects[recordKey] = fakePublicationObject{body: recordBody}
+
+	indexKey := root + "/scene_index.json"
+	var index oddSceneIndex
+	if err := json.Unmarshal(client.objects[indexKey].body, &index); err != nil {
+		t.Fatal(err)
+	}
+	index.SchemaVersion = "odd_scene_index_v2"
+	index.Scenes[0].RecordSHA256 = oddDigest(recordBody)
+	index.Scenes[0].RecordByteSize = int64(len(recordBody))
+	indexBody := oddJSON(t, index)
+	client.objects[indexKey] = fakePublicationObject{body: indexBody}
+
+	manifestKey := root + "/manifest.json"
+	var manifest ODDManifest
+	if err := json.Unmarshal(client.objects[manifestKey].body, &manifest); err != nil {
+		t.Fatal(err)
+	}
+	artifact := manifest.Artifacts["scene_index"]
+	artifact.SHA256 = oddDigest(indexBody)
+	artifact.ByteSize = int64(len(indexBody))
+	manifest.Artifacts["scene_index"] = artifact
+	manifestBody := oddJSON(t, manifest)
+	client.objects[manifestKey] = fakePublicationObject{body: manifestBody}
+
+	pointerKey := "kitscenes/v3.0/odd/latest.json"
+	var pointer oddPointer
+	if err := json.Unmarshal(client.objects[pointerKey].body, &pointer); err != nil {
+		t.Fatal(err)
+	}
+	pointer.ManifestSHA256 = oddDigest(manifestBody)
+	client.objects[pointerKey] = fakePublicationObject{body: oddJSON(t, pointer)}
+	return service
+}
+
 func TestODDSceneVerifiesPinnedRecord(t *testing.T) {
 	service := oddTestService(t, nil)
 
@@ -430,5 +558,78 @@ func TestODDStructuredSearchRejectsInvalidRequests(t *testing.T) {
 
 	if err == nil || !strings.Contains(err.Error(), ErrODDInvalidQuery.Error()) {
 		t.Fatalf("invalid query error = %v", err)
+	}
+}
+
+func TestODDEvidenceReturnsReferencedSourcesAndEvent(t *testing.T) {
+	service := oddEvidenceTestService(t, nil)
+
+	response, manifest, digest, err := service.ODDEvidence(
+		context.Background(),
+		"kitscenes",
+		"v3.0",
+		"scene-1",
+		"observation-1",
+	)
+
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.LabelSetID != manifest.LabelSetID ||
+		response.ManifestSHA256 != digest ||
+		len(response.SupportingEvidence) != 1 ||
+		len(response.ConflictingEvidence) != 1 ||
+		len(response.RelatedEvents) != 1 {
+		t.Fatalf("evidence response = %+v", response)
+	}
+	if !strings.Contains(
+		string(response.SupportingEvidence[0]),
+		`"labeler_name":"trajectory_resolver"`,
+	) || !strings.Contains(
+		string(response.ConflictingEvidence[0]),
+		`"model_name":"road-observer"`,
+	) || !strings.Contains(
+		string(response.RelatedEvents[0]),
+		`"phase":"active"`,
+	) || !strings.Contains(
+		string(response.SceneProvenance),
+		`"labeler_version":"odd_dataset_labeler_v1"`,
+	) {
+		t.Fatalf("focused evidence content = %+v", response)
+	}
+}
+
+func TestODDEvidenceRejectsMissingReference(t *testing.T) {
+	service := oddEvidenceTestService(t, func(record map[string]any) {
+		evidence := record["evidence"].([]any)
+		record["evidence"] = evidence[:1]
+	})
+
+	_, _, _, err := service.ODDEvidence(
+		context.Background(),
+		"kitscenes",
+		"v3.0",
+		"scene-1",
+		"observation-1",
+	)
+
+	if err == nil || !strings.Contains(err.Error(), "missing evidence") {
+		t.Fatalf("missing evidence error = %v", err)
+	}
+}
+
+func TestODDEvidenceReturnsNotFoundForUnknownObservation(t *testing.T) {
+	service := oddEvidenceTestService(t, nil)
+
+	_, _, _, err := service.ODDEvidence(
+		context.Background(),
+		"kitscenes",
+		"v3.0",
+		"scene-1",
+		"unknown",
+	)
+
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("unknown observation error = %v", err)
 	}
 }
