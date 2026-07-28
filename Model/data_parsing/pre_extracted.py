@@ -350,7 +350,7 @@ def _decode_sample(
     ``window_index.json`` mapping (step,view)→frame_id and the pixels live in a
     sibling ``pool/`` dir. None on shards without a pool (imitation-only / legacy).
     """
-    # Keys: "cam_0.jpg" ... "cam_{V-1}.jpg", schema-v7 navigation
+    # Keys: "cam_0.jpg" ... "cam_{V-1}.jpg", schema-v8 navigation
     # members or a legacy optional "map.jpg", plus numeric/metadata members.
     cam_keys = sorted(
         (k for k in sample if _CAM_KEY_RE.match(k)),
