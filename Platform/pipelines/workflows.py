@@ -594,7 +594,39 @@ def _resume_policy_transition(
         },
         "bad_epochs_before_reset": None,
         "bad_epochs_after_reset": 0,
+        "scheduler_state_action": "reset",
+        "best_checkpoint_scope": "post_transition",
     }
+
+
+def _transition_resume_selection_state(
+    transition: dict | None,
+    *,
+    bad_epochs: int,
+    best_checkpoint: dict | None,
+) -> tuple[int, dict | None]:
+    """Reset ranking state when a declared training policy transition starts."""
+    if transition is None:
+        return bad_epochs, best_checkpoint
+    if bad_epochs < 0:
+        raise ValueError("resume checkpoint has negative bad_epochs")
+    if best_checkpoint is None:
+        raise ValueError(
+            "resume policy transition requires a source best checkpoint"
+        )
+    selection = best_checkpoint.get("selection")
+    transition["bad_epochs_before_reset"] = bad_epochs
+    transition["best_before_reset"] = {
+        "epoch": int(best_checkpoint["epoch"]),
+        "uri": str(best_checkpoint["uri"]),
+        "sha256": str(best_checkpoint["sha256"]),
+        "selection_score": (
+            float(selection["score"])
+            if isinstance(selection, dict) and "score" in selection
+            else None
+        ),
+    }
+    return 0, None
 
 
 def _collated_metadata_value(
@@ -3827,7 +3859,10 @@ def train_il(
         )
         model.load_state_dict(resume_payload["model_state_dict"])
         optimizer.load_state_dict(resume_payload["optimizer_state_dict"])
-        scheduler.load_state_dict(resume_payload["scheduler_state_dict"])
+        if resume_policy_transition is None:
+            scheduler.load_state_dict(
+                resume_payload["scheduler_state_dict"]
+            )
         scaler.load_state_dict(resume_payload["scaler_state_dict"])
         state = dict(resume_payload["training_state"])
         run_id = str(state.get("run_id", ""))
@@ -3850,8 +3885,6 @@ def train_il(
         best_checkpoint = dict(saved_best) if saved_best is not None else None
         bad_epochs = int(state.get("bad_epochs", 0))
         if resume_policy_transition is not None:
-            resume_policy_transition["bad_epochs_before_reset"] = bad_epochs
-            bad_epochs = 0
             resume_policy_transition["source_checkpoint"] = {
                 "epoch": completed_epoch,
                 "uri": resumed_checkpoint["uri"],
@@ -3915,23 +3948,37 @@ def train_il(
                     "resume checkpoint best selection policy differs "
                     "from the requested selector"
                 )
+        bad_epochs, best_checkpoint = (
+            _transition_resume_selection_state(
+                resume_policy_transition,
+                bad_epochs=bad_epochs,
+                best_checkpoint=best_checkpoint,
+            )
+        )
+        if resume_policy_transition is not None:
+            best_local_path = None
         terminal_resume, stopped_early = _resume_terminal_state(
             completed_epoch=completed_epoch,
             bad_epochs=bad_epochs,
             requested_epochs=epochs,
             patience=early_stopping_patience,
         )
-        update_best_pointer(
-            s3_client,
-            bucket=checkpoint_bucket,
-            run_id=run_id,
-            epoch=int(best_checkpoint["epoch"]),
-            checkpoint_uri=str(best_checkpoint["uri"]),
-            checkpoint_sha256=str(best_checkpoint["sha256"]),
-            ade=float(best_checkpoint["ade"]),
-            fde=float(best_checkpoint["fde"]),
-            selection=best_checkpoint.get("selection"),
-        )
+        if resume_policy_transition is not None and terminal_resume:
+            raise ValueError(
+                "resume policy transition requires at least one new epoch"
+            )
+        if best_checkpoint is not None:
+            update_best_pointer(
+                s3_client,
+                bucket=checkpoint_bucket,
+                run_id=run_id,
+                epoch=int(best_checkpoint["epoch"]),
+                checkpoint_uri=str(best_checkpoint["uri"]),
+                checkpoint_sha256=str(best_checkpoint["sha256"]),
+                ade=float(best_checkpoint["ade"]),
+                fde=float(best_checkpoint["fde"]),
+                selection=best_checkpoint.get("selection"),
+            )
         restore_rng_state(resume_payload["rng_state"])
         if resume_policy_transition is not None:
             with mlflow.start_run(run_id=run_id):
@@ -3940,6 +3987,8 @@ def train_il(
                         resume_policy_transition["policy_version"]
                     ),
                     "resume_bad_epochs_reset": "true",
+                    "resume_scheduler_state_reset": "true",
+                    "resume_best_checkpoint_reset": "true",
                     "resume_navigation_repeat_enabled": "true",
                     "resume_early_stopping_patience": str(
                         early_stopping_patience
