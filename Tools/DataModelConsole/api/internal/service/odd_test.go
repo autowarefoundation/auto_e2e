@@ -122,6 +122,128 @@ func oddTestService(
 	}
 }
 
+func oddStructuredSearchService(t *testing.T) *S3Service {
+	t.Helper()
+	service := oddTestService(t, nil)
+	client := service.client.(*fakePublicationS3)
+	const root = "kitscenes/v3.0/odd/labelsets/oddls-test"
+	scenes := []ODDSceneSummary{
+		{
+			SceneUID:         "scene-a",
+			ShardName:        "scene-a.tar",
+			RecordKey:        root + "/scenes/scene-a.json",
+			RecordSHA256:     strings.Repeat("c", 64),
+			RecordByteSize:   100,
+			StartTimestampNS: 100,
+			EndTimestampNS:   1_100,
+			DistanceM:        10,
+			Observations: []ODDSceneObservationSummary{
+				{
+					Key: "odd.road.context", Status: "valid",
+					Values: []string{"urban"}, Source: "map_route",
+					Confidence: 0.9, DurationNS: 800,
+					FirstTimestampNS: 100, IntervalCount: 1,
+				},
+				{
+					Key: "odd.environment.sky", Status: "unavailable",
+					Source: "vlm", Confidence: 0,
+					DurationNS: 1_000, FirstTimestampNS: 100,
+					IntervalCount: 1,
+				},
+			},
+		},
+		{
+			SceneUID:         "scene-b",
+			ShardName:        "scene-b.tar",
+			RecordKey:        root + "/scenes/scene-b.json",
+			RecordSHA256:     strings.Repeat("d", 64),
+			RecordByteSize:   100,
+			StartTimestampNS: 200,
+			EndTimestampNS:   2_200,
+			DistanceM:        20,
+			Observations: []ODDSceneObservationSummary{
+				{
+					Key: "odd.road.context", Status: "valid",
+					Values: []string{"suburban"}, Source: "map_route",
+					Confidence: 0.7, DurationNS: 1_500,
+					FirstTimestampNS: 200, IntervalCount: 2,
+				},
+				{
+					Key: "perception.object.visibility", Status: "valid",
+					Values: []string{"partially_visible"}, Source: "vlm",
+					Confidence: 0.85, DurationNS: 600,
+					FirstTimestampNS: 400, IntervalCount: 2,
+					CameraID: "front", ActorTrackUID: "vehicle-1",
+				},
+			},
+		},
+		{
+			SceneUID:         "scene-c",
+			ShardName:        "scene-c.tar",
+			RecordKey:        root + "/scenes/scene-c.json",
+			RecordSHA256:     strings.Repeat("e", 64),
+			RecordByteSize:   100,
+			StartTimestampNS: 300,
+			EndTimestampNS:   3_300,
+			DistanceM:        30,
+			Observations: []ODDSceneObservationSummary{
+				{
+					Key: "odd.road.context", Status: "valid",
+					Values: []string{"rural"}, Source: "fusion",
+					Confidence: 0.8, DurationNS: 2_500,
+					FirstTimestampNS: 300, IntervalCount: 1,
+				},
+				{
+					Key: "event.vehicle.interaction", Status: "valid",
+					Values: []string{"cut_in"}, Source: "fusion",
+					Confidence: 0.95, DurationNS: 500,
+					FirstTimestampNS: 500, IntervalCount: 1,
+					ActorTrackUID: "vehicle-2", EventUID: "event-1",
+				},
+			},
+			Events: []ODDSceneEventSummary{
+				{
+					EventUID: "event-1", PrimaryEventKey: "event.vehicle.interaction",
+					PrimaryValues:    []string{"cut_in"},
+					StartTimestampNS: 500, EndTimestampNS: 1_000,
+					Status: "valid", Confidence: 0.95,
+					ActorTrackUIDs: []string{"vehicle-2"},
+					Outcome:        "unresolved",
+				},
+			},
+		},
+	}
+	indexBody := oddJSON(t, oddSceneIndex{
+		SchemaVersion: "odd_scene_index_v2",
+		LabelSetID:    "oddls-test",
+		Scenes:        scenes,
+	})
+	indexKey := root + "/scene_index.json"
+	client.objects[indexKey] = fakePublicationObject{body: indexBody}
+
+	manifestKey := root + "/manifest.json"
+	var manifest ODDManifest
+	if err := json.Unmarshal(client.objects[manifestKey].body, &manifest); err != nil {
+		t.Fatal(err)
+	}
+	manifest.SceneCount = len(scenes)
+	artifact := manifest.Artifacts["scene_index"]
+	artifact.SHA256 = oddDigest(indexBody)
+	artifact.ByteSize = int64(len(indexBody))
+	manifest.Artifacts["scene_index"] = artifact
+	manifestBody := oddJSON(t, manifest)
+	client.objects[manifestKey] = fakePublicationObject{body: manifestBody}
+
+	pointerKey := "kitscenes/v3.0/odd/latest.json"
+	var pointer oddPointer
+	if err := json.Unmarshal(client.objects[pointerKey].body, &pointer); err != nil {
+		t.Fatal(err)
+	}
+	pointer.ManifestSHA256 = oddDigest(manifestBody)
+	client.objects[pointerKey] = fakePublicationObject{body: oddJSON(t, pointer)}
+	return service
+}
+
 func TestODDSceneVerifiesPinnedRecord(t *testing.T) {
 	service := oddTestService(t, nil)
 
@@ -167,5 +289,146 @@ func TestODDStatisticsRejectsArtifactSizeMismatch(t *testing.T) {
 
 	if err == nil || !strings.Contains(err.Error(), "size differs") {
 		t.Fatalf("artifact size error = %v", err)
+	}
+}
+
+func TestODDStructuredSearchSupportsNestedLogicAndScope(t *testing.T) {
+	service := oddStructuredSearchService(t)
+
+	response, err := service.SearchODDScenesStructured(
+		context.Background(),
+		"kitscenes",
+		"v3.0",
+		ODDStructuredSearchRequest{
+			Query: ODDSearchGroup{
+				Logic: "and",
+				Predicates: []ODDSearchPredicate{
+					{
+						Key: "odd.road.context", Operator: "in",
+						Values:            []string{"suburban", "rural"},
+						MinimumConfidence: 0.75,
+					},
+				},
+				Groups: []ODDSearchGroup{
+					{
+						Logic: "or",
+						Predicates: []ODDSearchPredicate{
+							{
+								Key:      "perception.object.visibility",
+								Operator: "equals",
+								Values:   []string{"partially_visible"},
+								CameraID: "front", ActorTrackUID: "vehicle-1",
+								MinimumDurationNS: 500,
+							},
+							{
+								Key:      "event.vehicle.interaction",
+								Operator: "contains", Values: []string{"cut_in"},
+								ActorTrackUID: "vehicle-2",
+							},
+						},
+					},
+				},
+			},
+			Sort:  "scene_uid",
+			Limit: 50,
+		},
+	)
+
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.Total != 1 || response.Scenes[0].SceneUID != "scene-c" {
+		t.Fatalf("nested search response = %+v", response)
+	}
+	if len(response.Scenes[0].Matched) != 2 ||
+		response.Scenes[0].MatchedDuration != 3_000 ||
+		response.Scenes[0].MatchConfidence != 0.95 {
+		t.Fatalf("match decoration = %+v", response.Scenes[0])
+	}
+}
+
+func TestODDNotEqualsExcludesUnavailableObservations(t *testing.T) {
+	service := oddStructuredSearchService(t)
+
+	response, err := service.SearchODDScenesStructured(
+		context.Background(),
+		"kitscenes",
+		"v3.0",
+		ODDStructuredSearchRequest{
+			Query: ODDSearchGroup{
+				Predicates: []ODDSearchPredicate{
+					{
+						Key:      "odd.environment.sky",
+						Operator: "not_equals",
+						Values:   []string{"clear"},
+					},
+				},
+			},
+			Limit: 50,
+		},
+	)
+
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.Total != 0 {
+		t.Fatalf("unavailable observation matched not_equals: %+v", response)
+	}
+}
+
+func TestODDStructuredSearchSortsAndPaginatesV2Events(t *testing.T) {
+	service := oddStructuredSearchService(t)
+
+	response, err := service.SearchODDScenesStructured(
+		context.Background(),
+		"kitscenes",
+		"v3.0",
+		ODDStructuredSearchRequest{
+			Query: ODDSearchGroup{
+				Predicates: []ODDSearchPredicate{
+					{Key: "odd.road.context", Operator: "exists"},
+				},
+			},
+			Sort:       "confidence",
+			Descending: true,
+			Limit:      1,
+			Offset:     1,
+		},
+	)
+
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.Total != 3 || len(response.Scenes) != 1 ||
+		response.Scenes[0].SceneUID != "scene-c" || !response.More {
+		t.Fatalf("paginated response = %+v", response)
+	}
+	if len(response.Scenes[0].Events) != 1 ||
+		response.Scenes[0].Events[0].Outcome != "unresolved" ||
+		response.Scenes[0].Events[0].ActorTrackUIDs[0] != "vehicle-2" {
+		t.Fatalf("v2 event summary = %+v", response.Scenes[0].Events)
+	}
+}
+
+func TestODDStructuredSearchRejectsInvalidRequests(t *testing.T) {
+	service := oddStructuredSearchService(t)
+
+	_, err := service.SearchODDScenesStructured(
+		context.Background(),
+		"kitscenes",
+		"v3.0",
+		ODDStructuredSearchRequest{
+			Query: ODDSearchGroup{
+				Logic: "not",
+				Predicates: []ODDSearchPredicate{
+					{Key: "odd.road.context", Operator: "exists"},
+				},
+			},
+			Limit: 50,
+		},
+	)
+
+	if err == nil || !strings.Contains(err.Error(), ErrODDInvalidQuery.Error()) {
+		t.Fatalf("invalid query error = %v", err)
 	}
 }
