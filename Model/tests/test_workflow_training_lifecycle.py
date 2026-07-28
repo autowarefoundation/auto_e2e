@@ -1058,6 +1058,40 @@ def test_resume_policy_transition_enables_repeat_and_resets_patience():
     }
 
 
+def test_resume_transition_wiring_resets_scheduler_and_best_scope():
+    source = inspect.getsource(workflows.train_il.task_function)
+
+    envelope_validation = source.index(
+        "validate_resume_envelope(resume_payload)"
+    )
+    transition_parsing = source.index(
+        "if allow_resume_policy_transition:"
+    )
+    payload_validation = source.index(
+        "validate_resume_payload("
+    )
+    scheduler_restore = source.index(
+        "if resume_policy_transition is None:\n"
+        "            scheduler.load_state_dict("
+    )
+    selection_reset = source.index(
+        "_transition_resume_selection_state("
+    )
+    pending_pointer = source.index(
+        "mark_best_pointer_transition_pending("
+    )
+    active_pointer = source.index(
+        "if best_checkpoint is not None:\n"
+        "            update_best_pointer("
+    )
+
+    assert envelope_validation < transition_parsing < payload_validation
+    assert payload_validation < scheduler_restore < selection_reset
+    assert selection_reset < pending_pointer < active_pointer
+    assert '"resume_scheduler_state_reset": "true"' in source
+    assert '"resume_best_checkpoint_reset": "true"' in source
+
+
 @pytest.mark.parametrize(
     ("saved_enabled", "requested_enabled", "saved_patience", "new_patience"),
     [
