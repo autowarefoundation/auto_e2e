@@ -336,9 +336,10 @@ def test_unavailable_nonfinite_map_terms_are_masked_before_reduction():
         (1, GEOMETRY.height_px, GEOMETRY.width_px),
         torch.nan,
     )
+    predicted = _controls().requires_grad_(True)
 
     terms = _loss(
-        _controls(),
+        predicted,
         _controls(),
         supervision=_supervision(
             route_field=field,
@@ -351,6 +352,9 @@ def test_unavailable_nonfinite_map_terms_are_masked_before_reduction():
 
     assert terms["map"].item() == 0.0
     assert torch.isfinite(terms["constraint"])
+    terms["constraint"].backward()
+    assert predicted.grad is not None
+    assert torch.isfinite(predicted.grad).all()
 
 
 def test_missing_drivable_field_keeps_route_term_available():
