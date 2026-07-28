@@ -433,6 +433,12 @@ class RolloutAlignedLoss(nn.Module):
             & artifact_available
             & drivable_artifact_available
         )
+        for name, active in (
+            ("distance_to_corridor_m", route_active),
+            ("distance_to_drivable_m", drivable_active),
+        ):
+            if not torch.isfinite(fields[name][active]).all():
+                raise ValueError(f"active {name} must be finite")
         route_field = torch.where(
             route_active[:, None, None],
             fields["distance_to_corridor_m"],
