@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from Platform.pipelines.odd_labeling_workflow import (
+    _publication_scope,
     _scene_summary,
     _statistics,
     _union_duration,
@@ -10,6 +11,18 @@ from Platform.pipelines.odd_labeling_workflow import (
 
 def test_union_duration_counts_overlapping_intervals_once() -> None:
     assert _union_duration([(10, 20), (15, 30), (40, 50)]) == 30
+
+
+def test_latest_publication_requires_complete_scene_inventory() -> None:
+    assert _publication_scope(404, 404, True) == "full"
+    assert _publication_scope(1, 404, False) == "smoke"
+
+    try:
+        _publication_scope(1, 404, True)
+    except ValueError as error:
+        assert "complete scene inventory" in str(error)
+    else:
+        raise AssertionError("partial LabelSet was accepted as latest")
 
 
 def test_statistics_deduplicate_camera_and_source_coverage() -> None:
