@@ -8,7 +8,12 @@ from Platform.pipelines.odd_labeling_workflow import (
     _scene_summary,
     _statistics,
     _union_duration,
-    label_odd_scene,
+    fuse_odd_scene,
+    label_odd_bedrock_map,
+    label_odd_image_quality,
+    label_odd_kinematics,
+    label_odd_map_route,
+    label_odd_visual,
     publish_odd_labelset,
     resolve_odd_scenes,
     wf_generate_odd_labelset,
@@ -159,22 +164,57 @@ def test_workflow_interface_does_not_expose_endpoint_url() -> None:
         "bedrock_map_model_revision",
         "labeler_image_digest",
         "labeler_source_revision",
+        "openai_concurrency",
+        "bedrock_concurrency",
         "publication_scope",
     }.issubset(wf_generate_odd_labelset.python_interface.inputs)
 
 
-def test_capability_manifest_is_required_across_publication_tasks() -> None:
+def test_source_labelers_have_independent_semantic_interfaces() -> None:
     assert set(resolve_odd_scenes.python_interface.outputs) == {
         "descriptors",
         "capability_manifest_json",
     }
+    for source_task in (
+        label_odd_map_route,
+        label_odd_kinematics,
+        label_odd_image_quality,
+        label_odd_visual,
+        label_odd_bedrock_map,
+    ):
+        assert "capability_manifest_json" in (
+            source_task.python_interface.inputs
+        )
+    assert "openai_model" not in label_odd_map_route.python_interface.inputs
+    assert "openai_model" not in label_odd_kinematics.python_interface.inputs
+    assert "openai_model" not in (
+        label_odd_image_quality.python_interface.inputs
+    )
+    assert {
+        "openai_model",
+        "openai_model_revision",
+    }.issubset(label_odd_visual.python_interface.inputs)
+    assert "bedrock_map_model_id" not in (
+        label_odd_visual.python_interface.inputs
+    )
     assert {
         "bedrock_map_model_id",
         "bedrock_map_model_revision",
+        "map_route_file",
+    }.issubset(label_odd_bedrock_map.python_interface.inputs)
+    assert "openai_model" not in (
+        label_odd_bedrock_map.python_interface.inputs
+    )
+    assert {
         "capability_manifest_json",
+        "map_route_file",
+        "kinematics_file",
+        "image_quality_file",
+        "visual_file",
+        "bedrock_map_file",
         "labeler_image_digest",
         "labeler_source_revision",
-    }.issubset(label_odd_scene.python_interface.inputs)
+    }.issubset(fuse_odd_scene.python_interface.inputs)
     assert {
         "bedrock_map_model_id",
         "bedrock_map_model_revision",
