@@ -26,7 +26,7 @@ from .schema import (
 
 
 FUSION_VERSION = "odd_source_fusion_v1"
-EVENT_SEGMENTER_VERSION = "odd_event_segmenter_v1"
+EVENT_SEGMENTER_VERSION = "odd_event_segmenter_v2"
 EVENT_JOIN_GAP_NS = 1_000_000_000
 EVENT_ONSET_QUANTUM_NS = 100_000_000
 
@@ -571,20 +571,28 @@ def _is_positive_event(observation: LabelObservation) -> bool:
     return bool(set(observation.values) - background)
 
 
-def _phase_intervals(start_ns: int, end_ns: int) -> tuple[EventPhase, ...]:
+def _phase_intervals(
+    start_ns: int,
+    end_ns: int,
+    *,
+    onset_observed: bool,
+    resolution_observed: bool,
+) -> tuple[EventPhase, ...]:
     duration = end_ns - start_ns
     if duration < 3:
         return (EventPhase("active", start_ns, end_ns),)
     edge = min(1_000_000_000, max(1, duration // 5))
-    active_start = start_ns + edge
-    active_end = end_ns - edge
+    active_start = start_ns + edge if onset_observed else start_ns
+    active_end = end_ns - edge if resolution_observed else end_ns
     if active_end <= active_start:
         return (EventPhase("active", start_ns, end_ns),)
-    return (
-        EventPhase("onset", start_ns, active_start),
-        EventPhase("active", active_start, active_end),
-        EventPhase("resolution", active_end, end_ns),
-    )
+    phases = []
+    if onset_observed:
+        phases.append(EventPhase("onset", start_ns, active_start))
+    phases.append(EventPhase("active", active_start, active_end))
+    if resolution_observed:
+        phases.append(EventPhase("resolution", active_end, end_ns))
+    return tuple(phases)
 
 
 def _merge_event_seeds(
@@ -629,17 +637,134 @@ def _merge_event_seeds(
     return tuple(segments)
 
 
+def _segment_actor_uids(
+    segment: Iterable[LabelObservation],
+) -> set[str]:
+    return {
+        item.actor_track_uid
+        for item in segment
+        if item.actor_track_uid
+    }
+
+
+def _segments_are_related(
+    left: tuple[LabelObservation, ...],
+    right: tuple[LabelObservation, ...],
+) -> bool:
+    left_start = min(item.start_timestamp_ns for item in left)
+    left_end = max(item.end_timestamp_ns for item in left)
+    right_start = min(item.start_timestamp_ns for item in right)
+    right_end = max(item.end_timestamp_ns for item in right)
+    if left_start >= right_end or right_start >= left_end:
+        return False
+    left_actors = _segment_actor_uids(left)
+    right_actors = _segment_actor_uids(right)
+    return not left_actors or not right_actors or bool(
+        left_actors & right_actors
+    )
+
+
+def _cluster_event_seeds(
+    segments: Iterable[tuple[LabelObservation, ...]],
+) -> tuple[tuple[LabelObservation, ...], ...]:
+    clusters: list[list[LabelObservation]] = []
+    ordered = sorted(
+        segments,
+        key=lambda segment: (
+            min(item.start_timestamp_ns for item in segment),
+            max(item.end_timestamp_ns for item in segment),
+            tuple(item.observation_uid for item in segment),
+        ),
+    )
+    for segment in ordered:
+        related_indices = [
+            index
+            for index, cluster in enumerate(clusters)
+            if _segments_are_related(tuple(cluster), segment)
+        ]
+        segment_actors = _segment_actor_uids(segment)
+        related_actor_sets = {
+            frozenset(_segment_actor_uids(clusters[index]))
+            for index in related_indices
+            if _segment_actor_uids(clusters[index])
+        }
+        if (
+            not segment_actors
+            and len(related_indices) > 1
+            and len(related_actor_sets) > 1
+        ):
+            segment_start = min(
+                item.start_timestamp_ns for item in segment
+            )
+            segment_end = max(item.end_timestamp_ns for item in segment)
+            related_indices = [
+                max(
+                    related_indices,
+                    key=lambda index: (
+                        min(
+                            segment_end,
+                            max(
+                                item.end_timestamp_ns
+                                for item in clusters[index]
+                            ),
+                        )
+                        - max(
+                            segment_start,
+                            min(
+                                item.start_timestamp_ns
+                                for item in clusters[index]
+                            ),
+                        ),
+                        -index,
+                    ),
+                )
+            ]
+        if not related_indices:
+            clusters.append(list(segment))
+            continue
+        merged = list(segment)
+        for index in reversed(related_indices):
+            merged.extend(clusters.pop(index))
+        clusters.append(merged)
+    return tuple(
+        tuple(
+            sorted(
+                cluster,
+                key=lambda item: (
+                    item.start_timestamp_ns,
+                    item.end_timestamp_ns,
+                    item.key,
+                    item.observation_uid,
+                ),
+            )
+        )
+        for cluster in sorted(
+            clusters,
+            key=lambda cluster: (
+                min(item.start_timestamp_ns for item in cluster),
+                max(item.end_timestamp_ns for item in cluster),
+            ),
+        )
+    )
+
+
 def segment_events(
     observations: Iterable[LabelObservation],
 ) -> tuple[EventInstance, ...]:
     ordered = tuple(observations)
+    if not ordered:
+        return ()
+    scene_start_ns = min(item.start_timestamp_ns for item in ordered)
+    scene_end_ns = max(item.end_timestamp_ns for item in ordered)
     events: list[EventInstance] = []
     primary_order = {
         key: index for index, key in enumerate(EVENT_PRIMARY_PRIORITY)
     }
-    for seed_segment in _merge_event_seeds(ordered):
+    seed_clusters = _cluster_event_seeds(_merge_event_seeds(ordered))
+    for seed_segment in seed_clusters:
         start_ns = min(item.start_timestamp_ns for item in seed_segment)
         end_ns = max(item.end_timestamp_ns for item in seed_segment)
+        seed_actor_uids = _segment_actor_uids(seed_segment)
         seed = min(
             seed_segment,
             key=lambda item: (
@@ -656,6 +781,11 @@ def segment_events(
             and item.key != "event.phase"
             and item.start_timestamp_ns < end_ns
             and item.end_timestamp_ns > start_ns
+            and (
+                not seed_actor_uids
+                or not item.actor_track_uid
+                or item.actor_track_uid in seed_actor_uids
+            )
             and (
                 _is_positive_event(item)
                 or item.key == "event.outcome"
@@ -691,6 +821,22 @@ def segment_events(
                 }
             )
         )
+        explicit_outcomes = sorted(
+            {
+                value
+                for item in related
+                if item.key == "event.outcome"
+                for value in item.values
+            }
+        )
+        onset_observed = start_ns > scene_start_ns
+        resolution_observed = end_ns < scene_end_ns
+        if explicit_outcomes:
+            inferred_outcome = explicit_outcomes[0]
+        elif not resolution_observed:
+            inferred_outcome = "unresolved"
+        else:
+            inferred_outcome = "not_observed"
         events.append(
             EventInstance(
                 event_uid=event_uid,
@@ -702,7 +848,12 @@ def segment_events(
                 observation_uids=tuple(
                     sorted(item.observation_uid for item in related)
                 ),
-                phases=_phase_intervals(start_ns, end_ns),
+                phases=_phase_intervals(
+                    start_ns,
+                    end_ns,
+                    onset_observed=onset_observed,
+                    resolution_observed=resolution_observed,
+                ),
                 confidence=min(item.confidence for item in seed_segment),
                 status="valid",
                 supporting_evidence_uids=supporting_evidence,
@@ -711,6 +862,9 @@ def segment_events(
                     "join_gap_ns": EVENT_JOIN_GAP_NS,
                     "onset_quantum_ns": EVENT_ONSET_QUANTUM_NS,
                     "primary_values": list(seed.values),
+                    "onset_observed": onset_observed,
+                    "resolution_observed": resolution_observed,
+                    "outcome": inferred_outcome,
                 },
             )
         )
