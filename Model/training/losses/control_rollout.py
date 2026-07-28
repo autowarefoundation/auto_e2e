@@ -15,6 +15,43 @@ def _assert_tensor(predicate: torch.Tensor, message: str) -> None:
         raise ValueError(message)
 
 
+def _integrate_controls_f32(
+    controls: torch.Tensor,
+    initial_speed: torch.Tensor,
+    dt: float,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    speed = initial_speed
+    heading = torch.zeros_like(speed)
+    x = torch.zeros_like(speed)
+    y = torch.zeros_like(speed)
+    positions = []
+    headings = []
+    speeds = []
+    for step in range(controls.shape[1]):
+        speed = torch.clamp_min(
+            speed + controls[:, step, 0] * dt,
+            0.0,
+        )
+        heading = heading + speed * controls[:, step, 1] * dt
+        x = x + speed * torch.cos(heading) * dt
+        y = y + speed * torch.sin(heading) * dt
+        positions.append(torch.stack((x, y), dim=-1))
+        headings.append(heading)
+        speeds.append(speed)
+    return (
+        torch.stack(positions, dim=1),
+        torch.stack(headings, dim=1),
+        torch.stack(speeds, dim=1),
+    )
+
+
+_compiled_integrate_controls_f32 = torch.compile(
+    _integrate_controls_f32,
+    fullgraph=True,
+    dynamic=False,
+)
+
+
 def integrate_controls_torch(
     controls: torch.Tensor,
     initial_speed: torch.Tensor,
@@ -48,29 +85,9 @@ def integrate_controls_torch(
             device=controls.device,
             dtype=torch.float32,
         )
-        speed = initial_speed_f32
-        heading = torch.zeros_like(speed)
-        x = torch.zeros_like(speed)
-        y = torch.zeros_like(speed)
-        positions = []
-        headings = []
-        speeds = []
-        for step in range(controls_f32.shape[1]):
-            speed = torch.clamp_min(
-                speed + controls_f32[:, step, 0] * dt,
-                0.0,
-            )
-            heading = (
-                heading
-                + speed * controls_f32[:, step, 1] * dt
-            )
-            x = x + speed * torch.cos(heading) * dt
-            y = y + speed * torch.sin(heading) * dt
-            positions.append(torch.stack((x, y), dim=-1))
-            headings.append(heading)
-            speeds.append(speed)
-        return (
-            torch.stack(positions, dim=1),
-            torch.stack(headings, dim=1),
-            torch.stack(speeds, dim=1),
+        integration = (
+            _compiled_integrate_controls_f32
+            if controls.device.type == "cuda"
+            else _integrate_controls_f32
         )
+        return integration(controls_f32, initial_speed_f32, dt)
