@@ -25,6 +25,7 @@ DATA_PREP_IMAGE = os.environ.get(
 )
 ODD_LABELER_VERSION = "odd_dataset_labeler_v3"
 MAX_ODD_ARTIFACT_BYTES = 64 << 20
+MAX_ODD_PARQUET_BYTES = 512 << 20
 SHA256_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 SOURCE_REVISION_RE = re.compile(r"^[0-9a-f]{40}([0-9a-f]{24})?$")
 
@@ -266,26 +267,38 @@ def _statistics(records: list[dict], ontology: dict, labelset_id: str) -> dict:
     }
 
 
-def _put_immutable(s3, bucket: str, key: str, payload: bytes) -> None:
+def _put_immutable(
+    s3,
+    bucket: str,
+    key: str,
+    payload: bytes,
+    *,
+    content_type: str = "application/json",
+    schema_version: str = "v1",
+    maximum_bytes: int = MAX_ODD_ARTIFACT_BYTES,
+) -> None:
     from botocore.exceptions import ClientError
 
-    if len(payload) > MAX_ODD_ARTIFACT_BYTES:
+    if len(payload) > maximum_bytes:
         raise ValueError(f"ODD artifact exceeds size cap: {key}")
     try:
         s3.put_object(
             Bucket=bucket,
             Key=key,
             Body=payload,
-            ContentType="application/json",
+            ContentType=content_type,
             IfNoneMatch="*",
-            Metadata={"sha256": _sha256(payload), "odd-schema": "v1"},
+            Metadata={
+                "sha256": _sha256(payload),
+                "odd-schema": schema_version,
+            },
         )
     except ClientError as exc:
         status = exc.response.get("ResponseMetadata", {}).get("HTTPStatusCode")
         if status != 412:
             raise
         existing = s3.get_object(Bucket=bucket, Key=key)["Body"].read(
-            MAX_ODD_ARTIFACT_BYTES + 1
+            maximum_bytes + 1
         )
         if existing != payload:
             raise ValueError(f"immutable ODD object differs: s3://{bucket}/{key}")
@@ -600,7 +613,7 @@ def map_odd_scenes(
 @task(
     container_image=DATA_PREP_IMAGE,
     cache=True,
-    cache_version="odd-publish-labelset-v3",
+    cache_version="odd-publish-labelset-v4",
     requests=Resources(cpu="2", mem="8Gi"),
     limits=Resources(cpu="4", mem="16Gi"),
 )
@@ -623,6 +636,9 @@ def publish_odd_labelset(
     import boto3
 
     from data_processing.odd_labeling.ontology import ontology_document
+    from data_processing.odd_labeling.parquet import (
+        build_parquet_artifacts,
+    )
     from data_processing.odd_labeling.published_snapshot import S3Location
     from data_processing.odd_labeling.schema import DatasetCapabilityManifest
 
@@ -736,6 +752,8 @@ def publish_odd_labelset(
             "key": key,
             "sha256": _sha256(payload),
             "byte_size": len(payload),
+            "content_type": "application/json",
+            "format": "json",
         }
 
     publish(
@@ -746,11 +764,44 @@ def publish_odd_labelset(
     if artifacts["capabilities"]["sha256"] != capability_manifest_sha256:
         raise ValueError("published capability digest differs from semantic digest")
     publish("ontology", ontology, "ontology.json")
+    statistics = _statistics(records, ontology, labelset_id)
     publish(
         "statistics",
-        _statistics(records, ontology, labelset_id),
+        statistics,
         "statistics.json",
     )
+    parquet_artifacts = build_parquet_artifacts(
+        records,
+        statistics,
+        labelset_id=labelset_id,
+        dataset_name=dataset_name,
+        dataset_version=dataset_version,
+        dataset_manifest_sha256=dataset_manifest_sha256,
+        capability_manifest_sha256=capability_manifest_sha256,
+        ontology_sha256=ontology["ontology_sha256"],
+    )
+    for table_name, parquet_artifact in parquet_artifacts.items():
+        relative_key = f"{table_name}/part-00000.parquet"
+        key = f"{root}/{relative_key}"
+        _put_immutable(
+            s3,
+            datasets_bucket,
+            key,
+            parquet_artifact.payload,
+            content_type="application/vnd.apache.parquet",
+            schema_version=parquet_artifact.schema_version,
+            maximum_bytes=MAX_ODD_PARQUET_BYTES,
+        )
+        artifacts[f"{table_name}_parquet"] = {
+            "key": key,
+            "sha256": parquet_artifact.sha256,
+            "byte_size": len(parquet_artifact.payload),
+            "content_type": "application/vnd.apache.parquet",
+            "format": "parquet",
+            "row_count": parquet_artifact.row_count,
+            "schema_version": parquet_artifact.schema_version,
+            "authoritative": True,
+        }
 
     scene_summaries = []
     for wrapper in wrappers:
