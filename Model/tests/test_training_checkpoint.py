@@ -10,6 +10,7 @@ import pytest
 import torch
 from botocore.exceptions import ClientError
 
+from evaluation.checkpoint_selection import SELECTOR_POLICY_VERSION
 from Platform.pipelines.training_checkpoint import (
     CHECKPOINT_SCHEMA_VERSION,
     capture_rng_state,
@@ -316,7 +317,7 @@ def test_best_pointer_is_versioned_json():
 def test_best_pointer_records_composite_selection_policy():
     s3 = _FakeS3()
     selection = {
-        "policy_version": "rollout_composite_selector_v1",
+        "policy_version": SELECTOR_POLICY_VERSION,
         "score": 0.75,
         "components": {
             "trajectory": 0.5,
