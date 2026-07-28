@@ -80,6 +80,32 @@ def test_source_claim_becomes_auditable_evidence() -> None:
     assert evidence.provenance.details["request_sha256"] == "7" * 64
 
 
+def test_map_evidence_retains_bedrock_model_identity() -> None:
+    observation = _observation(
+        key="odd.route.action",
+        values=("turn_left",),
+        source="map_route",
+        provenance={
+            "labeler_version": "bedrock_map_route_v1",
+            "model_provider": "amazon_bedrock",
+            "model": "us.anthropic.claude-sonnet-4-6",
+            "model_revision": "claude-sonnet-4-6",
+        },
+    )
+
+    evidence = source_observations_to_evidence(
+        (observation,),
+        context=_context(),
+    )[0]
+
+    assert evidence.source == "map_route"
+    assert evidence.provenance.model_provider == "amazon_bedrock"
+    assert evidence.provenance.model_name == (
+        "us.anthropic.claude-sonnet-4-6"
+    )
+    assert evidence.provenance.model_revision == "claude-sonnet-4-6"
+
+
 def test_fusion_retains_agreeing_source_evidence() -> None:
     evidence = source_observations_to_evidence(
         (
