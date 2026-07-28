@@ -111,6 +111,10 @@ class ChannelCapability:
     def to_dict(self) -> dict[str, Any]:
         return _json_value(self)
 
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any]) -> "ChannelCapability":
+        return cls(**dict(value))
+
 
 @dataclasses.dataclass(frozen=True)
 class CameraCapability:
@@ -125,6 +129,12 @@ class CameraCapability:
 
     def to_dict(self) -> dict[str, Any]:
         return _json_value(self)
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any]) -> "CameraCapability":
+        payload = dict(value)
+        payload["channel"] = ChannelCapability.from_dict(payload["channel"])
+        return cls(**payload)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -190,6 +200,36 @@ class DatasetCapabilityManifest:
 
     def to_dict(self) -> dict[str, Any]:
         return _json_value(self)
+
+    @classmethod
+    def from_dict(
+        cls,
+        value: Mapping[str, Any],
+    ) -> "DatasetCapabilityManifest":
+        payload = dict(value)
+        payload["cameras"] = tuple(
+            CameraCapability.from_dict(camera)
+            for camera in payload["cameras"]
+        )
+        payload["channels"] = {
+            str(name): ChannelCapability.from_dict(channel)
+            for name, channel in payload["channels"].items()
+        }
+        for name in (
+            "coordinate_frames",
+            "calibration_refs",
+            "known_limitations",
+        ):
+            if name in payload:
+                payload[name] = tuple(payload[name])
+        return cls(**payload)
+
+    @classmethod
+    def from_json(cls, payload: str) -> "DatasetCapabilityManifest":
+        value = json.loads(payload)
+        if not isinstance(value, dict):
+            raise ValueError("capability manifest must be a JSON object")
+        return cls.from_dict(value)
 
     def semantic_sha256(self) -> str:
         return content_sha256(self.to_dict())
