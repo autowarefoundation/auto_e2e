@@ -18,6 +18,8 @@ env:
     MAXIMUM_CAMERA_ANCHORS: "12"
     MAXIMUM_SCENES: "1"
     SCENE_CONCURRENCY: "1"
+    OPENAI_CONCURRENCY: "10"
+    BEDROCK_CONCURRENCY: "20"
     PUBLICATION_SCOPE: smoke
 
 phases:
@@ -93,6 +95,12 @@ phases:
             ),
             "maximum_scenes": int(os.environ["MAXIMUM_SCENES"]),
             "scene_concurrency": int(os.environ["SCENE_CONCURRENCY"]),
+            "openai_concurrency": int(
+                os.environ["OPENAI_CONCURRENCY"]
+            ),
+            "bedrock_concurrency": int(
+                os.environ["BEDROCK_CONCURRENCY"]
+            ),
             "publication_scope": os.environ["PUBLICATION_SCOPE"],
         }
         with open("/tmp/odd-labeling-inputs.json", "w", encoding="utf-8") as stream:
