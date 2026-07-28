@@ -214,7 +214,7 @@ class TestDecodeSampleMapSplit:
             "map_semantic.npz": _navigation_members()["map_semantic.npz"],
         }
 
-        with pytest.raises(ValueError, match="complete schema-v7 set"):
+        with pytest.raises(ValueError, match="complete schema-v8 set"):
             _decode_sample(sample)
 
     def test_navigation_metadata_collates_with_sample_provenance(self):
