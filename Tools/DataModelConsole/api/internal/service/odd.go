@@ -20,10 +20,25 @@ const maxOddJSONBytes = 64 << 20
 // ErrODDUnavailable means the selected dataset has no complete ready LabelSet.
 var ErrODDUnavailable = errors.New("ODD LabelSet unavailable")
 
+// ErrODDInvalidQuery means a structured search request is not executable.
+var ErrODDInvalidQuery = errors.New("invalid ODD search query")
+
 type ODDArtifact struct {
-	Key      string `json:"key"`
-	SHA256   string `json:"sha256"`
-	ByteSize int64  `json:"byte_size"`
+	Key           string `json:"key"`
+	SHA256        string `json:"sha256"`
+	ByteSize      int64  `json:"byte_size"`
+	ContentType   string `json:"content_type,omitempty"`
+	Format        string `json:"format,omitempty"`
+	RowCount      int64  `json:"row_count,omitempty"`
+	SchemaVersion string `json:"schema_version,omitempty"`
+	Authoritative bool   `json:"authoritative,omitempty"`
+}
+
+type ODDQualityState struct {
+	SchemaVersion       string `json:"schema_version"`
+	StructuralStatus    string `json:"structural_status"`
+	AuditStatus         string `json:"audit_status"`
+	CertificationStatus string `json:"certification_status"`
 }
 
 type ODDManifest struct {
@@ -37,8 +52,13 @@ type ODDManifest struct {
 	OntologyVersion       string                 `json:"ontology_version"`
 	OntologySHA256        string                 `json:"ontology_sha256"`
 	LabelerVersion        string                 `json:"labeler_version"`
+	LabelerImageDigest    string                 `json:"labeler_image_digest"`
+	LabelerSourceRevision string                 `json:"labeler_source_revision"`
+	PublicationScope      string                 `json:"publication_scope"`
+	ExpectedSceneCount    int                    `json:"expected_scene_count"`
 	SceneCount            int                    `json:"scene_count"`
 	OpenAICompatible      map[string]string      `json:"openai_compatible"`
+	Quality               ODDQualityState        `json:"quality"`
 	Artifacts             map[string]ODDArtifact `json:"artifacts"`
 }
 
@@ -60,6 +80,22 @@ type ODDSceneObservationSummary struct {
 	Confidence       float64  `json:"confidence"`
 	DurationNS       int64    `json:"duration_ns"`
 	FirstTimestampNS int64    `json:"first_timestamp_ns"`
+	IntervalCount    int      `json:"interval_count,omitempty"`
+	CameraID         string   `json:"camera_id,omitempty"`
+	ActorTrackUID    string   `json:"actor_track_uid,omitempty"`
+	EventUID         string   `json:"event_uid,omitempty"`
+}
+
+type ODDSceneEventSummary struct {
+	EventUID         string   `json:"event_uid"`
+	PrimaryEventKey  string   `json:"primary_event_key"`
+	PrimaryValues    []string `json:"primary_values"`
+	StartTimestampNS int64    `json:"start_timestamp_ns"`
+	EndTimestampNS   int64    `json:"end_timestamp_ns"`
+	Status           string   `json:"status"`
+	Confidence       float64  `json:"confidence"`
+	ActorTrackUIDs   []string `json:"actor_track_uids"`
+	Outcome          string   `json:"outcome"`
 }
 
 type ODDSceneSummary struct {
@@ -72,6 +108,11 @@ type ODDSceneSummary struct {
 	EndTimestampNS   int64                        `json:"end_timestamp_ns"`
 	DistanceM        float64                      `json:"distance_m"`
 	Observations     []ODDSceneObservationSummary `json:"observations"`
+	Events           []ODDSceneEventSummary       `json:"events,omitempty"`
+	Matched          []ODDSceneObservationSummary `json:"matched,omitempty"`
+	MatchedDuration  int64                        `json:"matched_duration_ns,omitempty"`
+	MatchConfidence  float64                      `json:"match_confidence,omitempty"`
+	FirstMatchedNS   int64                        `json:"first_matched_timestamp_ns,omitempty"`
 }
 
 type oddSceneIndex struct {
@@ -90,6 +131,32 @@ type ODDSearchResponse struct {
 	Offset         int               `json:"offset"`
 	More           bool              `json:"more"`
 	ManifestSHA256 string            `json:"manifest_sha256"`
+}
+
+type ODDSearchPredicate struct {
+	Key               string   `json:"key"`
+	Operator          string   `json:"operator"`
+	Values            []string `json:"values"`
+	Statuses          []string `json:"statuses"`
+	Sources           []string `json:"sources"`
+	MinimumConfidence float64  `json:"minimum_confidence"`
+	MinimumDurationNS int64    `json:"minimum_duration_ns"`
+	CameraID          string   `json:"camera_id"`
+	ActorTrackUID     string   `json:"actor_track_uid"`
+}
+
+type ODDSearchGroup struct {
+	Logic      string               `json:"logic"`
+	Predicates []ODDSearchPredicate `json:"predicates"`
+	Groups     []ODDSearchGroup     `json:"groups"`
+}
+
+type ODDStructuredSearchRequest struct {
+	Query      ODDSearchGroup `json:"query"`
+	Sort       string         `json:"sort"`
+	Descending bool           `json:"descending"`
+	Limit      int            `json:"limit"`
+	Offset     int            `json:"offset"`
 }
 
 func validOddDigest(value string) bool {
@@ -257,7 +324,8 @@ func (s *S3Service) oddScenes(
 			"decode ODD scene index: %w", err,
 		)
 	}
-	if index.SchemaVersion != "odd_scene_index_v1" ||
+	if (index.SchemaVersion != "odd_scene_index_v1" &&
+		index.SchemaVersion != "odd_scene_index_v2") ||
 		index.LabelSetID != manifest.LabelSetID ||
 		len(index.Scenes) != manifest.SceneCount {
 		return oddSceneIndex{}, manifest, digest, fmt.Errorf(
@@ -291,7 +359,280 @@ func (s *S3Service) oddScenes(
 	return index, manifest, digest, nil
 }
 
-// SearchODDScenes searches scene summaries, never overlapping training samples.
+func containsODDValue(values []string, target string) bool {
+	for _, value := range values {
+		if value == target {
+			return true
+		}
+	}
+	return false
+}
+
+func intersectsODDValues(left []string, right []string) bool {
+	for _, value := range left {
+		if containsODDValue(right, value) {
+			return true
+		}
+	}
+	return false
+}
+
+func matchODDPredicate(
+	observation ODDSceneObservationSummary,
+	predicate ODDSearchPredicate,
+) bool {
+	if predicate.Key != "" && observation.Key != predicate.Key {
+		return false
+	}
+	statuses := predicate.Statuses
+	if len(statuses) == 0 && len(predicate.Values) > 0 {
+		statuses = []string{"valid"}
+	}
+	if len(statuses) > 0 && !containsODDValue(statuses, observation.Status) {
+		return false
+	}
+	if len(predicate.Sources) > 0 &&
+		!containsODDValue(predicate.Sources, observation.Source) {
+		return false
+	}
+	if observation.Confidence < predicate.MinimumConfidence ||
+		observation.DurationNS < predicate.MinimumDurationNS {
+		return false
+	}
+	if predicate.CameraID != "" && observation.CameraID != predicate.CameraID {
+		return false
+	}
+	if predicate.ActorTrackUID != "" &&
+		observation.ActorTrackUID != predicate.ActorTrackUID {
+		return false
+	}
+	operator := predicate.Operator
+	if operator == "" {
+		operator = "contains"
+	}
+	switch operator {
+	case "exists":
+		return true
+	case "contains", "equals", "in":
+		return len(predicate.Values) == 0 ||
+			intersectsODDValues(observation.Values, predicate.Values)
+	case "not_equals":
+		return observation.Status == "valid" &&
+			len(observation.Values) > 0 &&
+			!intersectsODDValues(observation.Values, predicate.Values)
+	default:
+		return false
+	}
+}
+
+func validateODDGroup(group ODDSearchGroup, depth int) error {
+	if depth > 3 {
+		return fmt.Errorf("%w: nesting exceeds three levels", ErrODDInvalidQuery)
+	}
+	logic := group.Logic
+	if logic == "" {
+		logic = "and"
+	}
+	if logic != "and" && logic != "or" {
+		return fmt.Errorf("%w: logic must be and or or", ErrODDInvalidQuery)
+	}
+	if len(group.Predicates)+len(group.Groups) == 0 {
+		return fmt.Errorf("%w: group is empty", ErrODDInvalidQuery)
+	}
+	if len(group.Predicates) > 16 || len(group.Groups) > 8 {
+		return fmt.Errorf("%w: group is too large", ErrODDInvalidQuery)
+	}
+	for _, predicate := range group.Predicates {
+		switch predicate.Operator {
+		case "", "exists", "contains", "equals", "in", "not_equals":
+		default:
+			return fmt.Errorf("%w: unsupported operator", ErrODDInvalidQuery)
+		}
+		if predicate.MinimumConfidence < 0 ||
+			predicate.MinimumConfidence > 1 ||
+			predicate.MinimumDurationNS < 0 {
+			return fmt.Errorf("%w: invalid numeric filter", ErrODDInvalidQuery)
+		}
+	}
+	for _, child := range group.Groups {
+		if err := validateODDGroup(child, depth+1); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func matchODDGroup(
+	scene ODDSceneSummary,
+	group ODDSearchGroup,
+) (bool, []ODDSceneObservationSummary) {
+	logic := group.Logic
+	if logic == "" {
+		logic = "and"
+	}
+	results := make([]bool, 0, len(group.Predicates)+len(group.Groups))
+	matches := make([]ODDSceneObservationSummary, 0)
+	for _, predicate := range group.Predicates {
+		predicateMatches := make([]ODDSceneObservationSummary, 0)
+		for _, observation := range scene.Observations {
+			if matchODDPredicate(observation, predicate) {
+				predicateMatches = append(predicateMatches, observation)
+			}
+		}
+		results = append(results, len(predicateMatches) > 0)
+		matches = append(matches, predicateMatches...)
+	}
+	for _, child := range group.Groups {
+		matched, childMatches := matchODDGroup(scene, child)
+		results = append(results, matched)
+		if matched {
+			matches = append(matches, childMatches...)
+		}
+	}
+	matched := logic == "and"
+	for _, result := range results {
+		if logic == "and" {
+			matched = matched && result
+		} else {
+			matched = matched || result
+		}
+	}
+	if !matched {
+		return false, nil
+	}
+	seen := make(map[string]struct{}, len(matches))
+	unique := make([]ODDSceneObservationSummary, 0, len(matches))
+	for _, observation := range matches {
+		identity := fmt.Sprintf(
+			"%s\x00%s\x00%s\x00%d\x00%s\x00%s",
+			observation.Key,
+			observation.Status,
+			strings.Join(observation.Values, "\x00"),
+			observation.FirstTimestampNS,
+			observation.CameraID,
+			observation.ActorTrackUID,
+		)
+		if _, found := seen[identity]; found {
+			continue
+		}
+		seen[identity] = struct{}{}
+		unique = append(unique, observation)
+	}
+	return true, unique
+}
+
+func decorateODDMatch(
+	scene ODDSceneSummary,
+	matches []ODDSceneObservationSummary,
+) ODDSceneSummary {
+	scene.Matched = matches
+	scene.FirstMatchedNS = scene.EndTimestampNS
+	for _, match := range matches {
+		scene.MatchedDuration += match.DurationNS
+		scene.MatchConfidence = max(scene.MatchConfidence, match.Confidence)
+		scene.FirstMatchedNS = min(
+			scene.FirstMatchedNS,
+			match.FirstTimestampNS,
+		)
+	}
+	if len(matches) == 0 {
+		scene.FirstMatchedNS = 0
+	}
+	return scene
+}
+
+// SearchODDScenesStructured searches scene summaries, never training samples.
+func (s *S3Service) SearchODDScenesStructured(
+	ctx context.Context,
+	dataset string,
+	version string,
+	request ODDStructuredSearchRequest,
+) (ODDSearchResponse, error) {
+	if err := validateODDGroup(request.Query, 1); err != nil {
+		return ODDSearchResponse{}, err
+	}
+	if request.Limit <= 0 {
+		request.Limit = 50
+	}
+	if request.Limit > 200 || request.Offset < 0 {
+		return ODDSearchResponse{}, fmt.Errorf(
+			"%w: invalid pagination", ErrODDInvalidQuery,
+		)
+	}
+	switch request.Sort {
+	case "", "scene_uid", "confidence", "matched_duration",
+		"scene_duration", "recording_time":
+	default:
+		return ODDSearchResponse{}, fmt.Errorf(
+			"%w: invalid sort", ErrODDInvalidQuery,
+		)
+	}
+	index, manifest, manifestSHA, err := s.oddScenes(ctx, dataset, version)
+	if err != nil {
+		return ODDSearchResponse{}, err
+	}
+	matches := make([]ODDSceneSummary, 0)
+	for _, scene := range index.Scenes {
+		matched, observations := matchODDGroup(scene, request.Query)
+		if matched {
+			matches = append(matches, decorateODDMatch(scene, observations))
+		}
+	}
+	sort.SliceStable(matches, func(i, j int) bool {
+		var less bool
+		switch request.Sort {
+		case "confidence":
+			less = matches[i].MatchConfidence < matches[j].MatchConfidence
+		case "matched_duration":
+			less = matches[i].MatchedDuration < matches[j].MatchedDuration
+		case "scene_duration":
+			left := matches[i].EndTimestampNS - matches[i].StartTimestampNS
+			right := matches[j].EndTimestampNS - matches[j].StartTimestampNS
+			less = left < right
+		case "recording_time":
+			less = matches[i].StartTimestampNS < matches[j].StartTimestampNS
+		default:
+			return matches[i].SceneUID < matches[j].SceneUID
+		}
+		if request.Sort != "" && request.Sort != "scene_uid" {
+			var equal bool
+			switch request.Sort {
+			case "confidence":
+				equal = matches[i].MatchConfidence == matches[j].MatchConfidence
+			case "matched_duration":
+				equal = matches[i].MatchedDuration == matches[j].MatchedDuration
+			case "scene_duration":
+				equal = matches[i].EndTimestampNS-matches[i].StartTimestampNS ==
+					matches[j].EndTimestampNS-matches[j].StartTimestampNS
+			case "recording_time":
+				equal = matches[i].StartTimestampNS == matches[j].StartTimestampNS
+			}
+			if equal {
+				return matches[i].SceneUID < matches[j].SceneUID
+			}
+		}
+		if request.Descending {
+			return !less
+		}
+		return less
+	})
+	total := len(matches)
+	offset := min(request.Offset, total)
+	end := min(total, offset+request.Limit)
+	return ODDSearchResponse{
+		Dataset:        dataset,
+		Version:        version,
+		LabelSetID:     manifest.LabelSetID,
+		Scenes:         matches[offset:end],
+		Total:          total,
+		Limit:          request.Limit,
+		Offset:         offset,
+		More:           end < total,
+		ManifestSHA256: manifestSHA,
+	}, nil
+}
+
+// SearchODDScenes preserves the original single-predicate GET API.
 func (s *S3Service) SearchODDScenes(
 	ctx context.Context,
 	dataset string,
@@ -303,61 +644,30 @@ func (s *S3Service) SearchODDScenes(
 	limit int,
 	offset int,
 ) (ODDSearchResponse, error) {
-	index, manifest, manifestSHA, err := s.oddScenes(ctx, dataset, version)
-	if err != nil {
-		return ODDSearchResponse{}, err
+	predicate := ODDSearchPredicate{Key: key, Operator: "contains"}
+	if value != "" {
+		predicate.Values = []string{value}
 	}
-	matches := make([]ODDSceneSummary, 0)
-	for _, scene := range index.Scenes {
-		matched := false
-		for _, observation := range scene.Observations {
-			if key != "" && observation.Key != key {
-				continue
-			}
-			if status != "" && observation.Status != status {
-				continue
-			}
-			if source != "" && observation.Source != source {
-				continue
-			}
-			if value != "" {
-				found := false
-				for _, candidate := range observation.Values {
-					if candidate == value {
-						found = true
-						break
-					}
-				}
-				if !found {
-					continue
-				}
-			}
-			matched = true
-			break
-		}
-		if matched {
-			matches = append(matches, scene)
-		}
+	if status != "" {
+		predicate.Statuses = []string{status}
 	}
-	sort.Slice(matches, func(i, j int) bool {
-		return matches[i].SceneUID < matches[j].SceneUID
-	})
-	total := len(matches)
-	if offset > total {
-		offset = total
+	if source != "" {
+		predicate.Sources = []string{source}
 	}
-	end := min(total, offset+limit)
-	return ODDSearchResponse{
-		Dataset:        dataset,
-		Version:        version,
-		LabelSetID:     manifest.LabelSetID,
-		Scenes:         matches[offset:end],
-		Total:          total,
-		Limit:          limit,
-		Offset:         offset,
-		More:           end < total,
-		ManifestSHA256: manifestSHA,
-	}, nil
+	return s.SearchODDScenesStructured(
+		ctx,
+		dataset,
+		version,
+		ODDStructuredSearchRequest{
+			Query: ODDSearchGroup{
+				Logic:      "and",
+				Predicates: []ODDSearchPredicate{predicate},
+			},
+			Sort:   "scene_uid",
+			Limit:  limit,
+			Offset: offset,
+		},
+	)
 }
 
 // ODDScene returns one coalesced scene record from the pinned LabelSet.
