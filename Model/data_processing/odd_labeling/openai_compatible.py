@@ -15,8 +15,8 @@ from .ontology import ONTOLOGY
 from .schema import LabelObservation, canonical_json_bytes, make_observation
 
 
-ROAD_VLM_SCHEMA_VERSION = "road_vlm_request_v1"
-ROAD_VLM_PROMPT_VERSION = "road_scene_observer_v1"
+ROAD_VLM_SCHEMA_VERSION = "road_vlm_request_v2"
+ROAD_VLM_PROMPT_VERSION = "road_scene_observer_v2"
 
 STATIC_SCENE_KEYS = (
     "odd.road.context",
@@ -138,7 +138,7 @@ def _parse_json_content(content: str) -> dict[str, Any]:
 
 def _response_schema(keys: Iterable[str]) -> dict[str, Any]:
     key_list = list(keys)
-    observation_variants: list[dict[str, Any]] = []
+    observation_properties: dict[str, Any] = {}
     for key in key_list:
         definition = ONTOLOGY[key]
         shared_properties = {
@@ -154,7 +154,7 @@ def _response_schema(keys: Iterable[str]) -> dict[str, Any]:
             },
             "reason": {"type": "string"},
         }
-        observation_variants.append(
+        valid_observation = (
             {
                 "type": "object",
                 "additionalProperties": False,
@@ -185,7 +185,7 @@ def _response_schema(keys: Iterable[str]) -> dict[str, Any]:
                 },
             }
         )
-        observation_variants.append(
+        abstained_observation = (
             {
                 "type": "object",
                 "additionalProperties": False,
@@ -218,6 +218,9 @@ def _response_schema(keys: Iterable[str]) -> dict[str, Any]:
                 },
             }
         )
+        observation_properties[key] = {
+            "oneOf": [valid_observation, abstained_observation],
+        }
     return {
         "name": "road_scene_observations",
         "strict": True,
@@ -227,10 +230,10 @@ def _response_schema(keys: Iterable[str]) -> dict[str, Any]:
             "required": ["observations"],
             "properties": {
                 "observations": {
-                    "type": "array",
-                    "minItems": len(key_list),
-                    "maxItems": len(key_list),
-                    "items": {"oneOf": observation_variants},
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": key_list,
+                    "properties": observation_properties,
                 }
             },
         },
@@ -311,10 +314,13 @@ def _validate_response(
     keys: tuple[str, ...],
 ) -> tuple[dict[str, Any], ...]:
     raw_observations = payload.get("observations")
-    if not isinstance(raw_observations, list):
-        raise ValueError("road VLM response has no observations array")
+    if not isinstance(raw_observations, Mapping):
+        raise ValueError("road VLM response has no observations object")
+    if set(raw_observations) != set(keys):
+        raise ValueError("road VLM observation keys differ from request")
     by_key: dict[str, dict[str, Any]] = {}
-    for raw in raw_observations:
+    for requested_key in keys:
+        raw = raw_observations[requested_key]
         if not isinstance(raw, dict):
             raise ValueError("road VLM observation must be an object")
         if set(raw) != {
@@ -327,8 +333,8 @@ def _validate_response(
         }:
             raise ValueError("road VLM observation fields differ from schema")
         key = str(raw["key"])
-        if key not in keys or key in by_key:
-            raise ValueError(f"unexpected or duplicate road VLM key: {key}")
+        if key != requested_key:
+            raise ValueError(f"road VLM observation key differs: {key}")
         status = str(raw["status"])
         if status not in {
             "valid",
