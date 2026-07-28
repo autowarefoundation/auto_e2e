@@ -125,6 +125,7 @@ def decode_route_supervision(members: dict[str, bytes]) -> RouteSupervision:
     required = {
         "distance_to_corridor_m",
         "distance_to_drivable_m",
+        "drivable_available",
         "route_heading_sin",
         "route_heading_cos",
         "route_heading_valid",
@@ -139,9 +140,18 @@ def decode_route_supervision(members: dict[str, bytes]) -> RouteSupervision:
     visible = np.asarray(arrays["destination_visible"])
     if visible.shape != () or int(visible) not in (0, 1):
         raise ValueError("destination visibility must be a binary scalar")
+    drivable_available = np.asarray(arrays["drivable_available"])
+    if (
+        drivable_available.shape != ()
+        or int(drivable_available) not in (0, 1)
+    ):
+        raise ValueError(
+            "drivable availability must be a binary scalar"
+        )
     return RouteSupervision(
         distance_to_corridor_m=arrays["distance_to_corridor_m"],
         distance_to_drivable_m=arrays["distance_to_drivable_m"],
+        drivable_available=bool(int(drivable_available)),
         route_heading_sin=arrays["route_heading_sin"],
         route_heading_cos=arrays["route_heading_cos"],
         route_heading_valid=arrays["route_heading_valid"],
