@@ -85,6 +85,17 @@ def test_observer_uses_openai_contract_and_validates_output() -> None:
 
     assert [item.values for item in observations] == [("clear",), ("none",)]
     assert [item.source for item in observations] == ["vlm", "vlm"]
+    assert all(
+        len(item.provenance["prompt_sha256"]) == 64
+        and len(item.provenance["decoding_config_sha256"]) == 64
+        and len(item.provenance["request_sha256"]) == 64
+        and len(item.provenance["response_sha256"]) == 64
+        and item.provenance["input_start_timestamp_ns"] == 1_000
+        and item.provenance["input_end_timestamp_ns"] == 1_000
+        and item.provenance["lookback_ns"] == 0
+        and item.provenance["lookahead_ns"] == 0
+        for item in observations
+    )
     assert requests[0][0] == "https://road-vlm.example/v1/chat/completions"
     assert requests[0][2]["Authorization"] == "Bearer secret"
     request = requests[0][1]
@@ -180,3 +191,7 @@ def test_invalid_responses_exhaust_retries_and_abstain() -> None:
     assert observations[0].values == ()
     assert observations[0].confidence == 0.0
     assert observations[0].provenance["error_type"] == "ValueError"
+    assert observations[0].provenance["attempt"] == 2
+    assert len(observations[0].provenance["prompt_sha256"]) == 64
+    assert len(observations[0].provenance["decoding_config_sha256"]) == 64
+    assert len(observations[0].provenance["request_sha256"]) == 64
