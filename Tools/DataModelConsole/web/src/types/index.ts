@@ -103,6 +103,12 @@ export interface SampleDetail {
 // Scene-level ODD LabelSets
 // ---------------------------------------------------------------------------
 
+export type ODDStatus =
+  | "valid"
+  | "unavailable"
+  | "not_observable"
+  | "ambiguous";
+
 export interface ODDLabelDefinition {
   key: string;
   namespace: "odd" | "event" | "perception";
@@ -127,26 +133,94 @@ export interface ODDOntology {
   labels: ODDLabelDefinition[];
 }
 
+export interface ODDRatioInterval {
+  lower: number;
+  upper: number;
+  method: string;
+  replicates?: number;
+}
+
+export interface ODDConfidenceBin {
+  lower: number;
+  upper: number;
+  observation_count: number;
+  duration_ns: number;
+  distance_m: number;
+}
+
+export interface ODDConfidenceSummary {
+  observation_count: number;
+  duration_weighted_mean: number;
+  p10: number;
+  p50: number;
+  p90: number;
+  bins: ODDConfidenceBin[];
+}
+
 export interface ODDValueStatistic {
   value: string;
   scene_count: number;
   scene_ratio: number;
+  scene_ratio_ci95: ODDRatioInterval;
   duration_ns: number;
   duration_ratio: number;
+  duration_ratio_ci95: ODDRatioInterval;
+  distance_m: number;
+  distance_ratio: number;
+  distance_ratio_ci95: ODDRatioInterval;
+  valid_interval_count: number;
+  event_instance_count: number;
+  confidence: ODDConfidenceSummary;
 }
 
 export interface ODDKeyStatistic {
   key: string;
   namespace: string;
+  quality_tier: string;
   valid_scene_count: number;
   eligible_scene_count: number;
   observable_scene_coverage: number;
   eligible_duration_ns: number;
   valid_duration_ns: number;
+  observable_duration_coverage: number;
+  eligible_distance_m: number;
+  valid_distance_m: number;
+  observable_distance_coverage: number;
+  valid_interval_count: number;
+  attempted_count: number;
+  successful_count: number;
+  conflict_count: number;
   status_scene_counts: Record<string, number>;
   status_duration_ns: Record<string, number>;
+  status_distance_m: Record<string, number>;
   source_scene_counts: Record<string, number>;
+  source_duration_ns: Record<string, number>;
+  source_distance_m: Record<string, number>;
+  confidence: ODDConfidenceSummary;
   values: ODDValueStatistic[];
+}
+
+export interface ODDCooccurrenceStatistics {
+  minimum_overlap_ns: number;
+  odd_pairs: Array<{
+    left_key: string;
+    left_value: string;
+    right_key: string;
+    right_value: string;
+    scene_count: number;
+    overlap_duration_ns: number;
+    overlap_distance_m: number;
+  }>;
+  odd_event: Array<{
+    odd_key: string;
+    odd_value: string;
+    event_key: string;
+    event_value: string;
+    scene_count: number;
+    event_instance_count: number;
+    overlap_duration_ns: number;
+    overlap_distance_m: number;
+  }>;
 }
 
 export interface ODDStatistics {
@@ -154,22 +228,161 @@ export interface ODDStatistics {
   labelset_id: string;
   scene_count: number;
   scene_duration_ns: number;
+  scene_distance_m: number;
+  distance_weighting: {
+    method_scene_counts: Record<string, number>;
+    normalization: string;
+  };
   keys: ODDKeyStatistic[];
+  cooccurrences: ODDCooccurrenceStatistics;
+}
+
+export interface ODDArtifact {
+  key: string;
+  sha256: string;
+  byte_size: number;
+  content_type?: string;
+  format?: string;
+  row_count?: number;
+  schema_version?: string;
+  authoritative?: boolean;
+}
+
+export interface ODDQualityState {
+  schema_version: string;
+  structural_status: string;
+  audit_status: string;
+  certification_status: string;
+}
+
+export interface ODDLabelSet {
+  schema_version: string;
+  status: string;
+  labelset_id: string;
+  dataset_name: string;
+  dataset_version: string;
+  dataset_manifest_uri: string;
+  dataset_manifest_sha256: string;
+  ontology_version: string;
+  ontology_sha256: string;
+  labeler_version: string;
+  labeler_image_digest: string;
+  labeler_source_revision: string;
+  publication_scope: string;
+  expected_scene_count: number;
+  scene_count: number;
+  openai_compatible: Record<string, string>;
+  quality: ODDQualityState;
+  artifacts: Record<string, ODDArtifact>;
+}
+
+export interface ODDLabelSetsResponse {
+  dataset: string;
+  version: string;
+  labelsets: ODDLabelSet[];
 }
 
 export interface ODDObservation {
+  schema_version?: string;
   observation_uid: string;
   scene_uid: string;
   key: string;
-  status: string;
+  status: ODDStatus;
   values: string[];
   confidence: number;
   source: string;
   start_timestamp_ns: number;
   end_timestamp_ns: number;
+  evidence_uids: string[];
+  conflicting_evidence_uids: string[];
   measurements: Record<string, string | number | boolean>;
   provenance: Record<string, unknown>;
   camera_id?: string | null;
+  actor_track_uid?: string | null;
+  event_uid?: string | null;
+}
+
+export interface ODDEventPhase {
+  phase: "onset" | "active" | "resolution";
+  start_timestamp_ns: number;
+  end_timestamp_ns: number;
+}
+
+export interface ODDEvent {
+  schema_version?: string;
+  event_uid: string;
+  scene_uid: string;
+  start_timestamp_ns: number;
+  end_timestamp_ns: number;
+  primary_event_key: string;
+  actor_track_uids: string[];
+  observation_uids: string[];
+  phases: ODDEventPhase[];
+  confidence: number;
+  status: ODDStatus;
+  supporting_evidence_uids: string[];
+  provenance: Record<string, unknown>;
+}
+
+export interface ODDEvidenceScope {
+  dataset_name: string;
+  dataset_version: string;
+  scene_uid: string;
+  start_timestamp_ns: number;
+  end_timestamp_ns: number;
+  subject_type: string;
+  subject_id?: string | null;
+  anchor_timestamp_ns?: number | null;
+  camera_ids: string[];
+  coordinate_frame?: string | null;
+  spatial_roi?: Record<string, unknown> | null;
+}
+
+export interface ODDLabelEvidence {
+  schema_version: string;
+  evidence_uid: string;
+  label_key: string;
+  cardinality: "single" | "multi";
+  values: string[];
+  candidate_values: Array<{
+    value: string;
+    score: number;
+    evidence_ref?: string | null;
+  }>;
+  status: ODDStatus;
+  confidence: number;
+  source: string;
+  scope: ODDEvidenceScope;
+  measurements: Array<{
+    name: string;
+    value: string | number | boolean;
+    unit: string;
+    quality: string;
+    aggregation: string;
+  }>;
+  evidence_refs: Array<{
+    artifact_uri: string;
+    artifact_sha256: string;
+    timestamp_ns?: number | null;
+    camera_id?: string | null;
+  }>;
+  provenance: {
+    labeler_name: string;
+    labeler_version: string;
+    code_commit: string;
+    container_image_digest: string;
+    config_sha256: string;
+    ontology_sha256: string;
+    input_artifact_sha256s: string[];
+    model_provider?: string | null;
+    model_name?: string | null;
+    model_revision?: string | null;
+    prompt_sha256?: string | null;
+    decoding_config_sha256?: string | null;
+    lookback_ns: number;
+    lookahead_ns: number;
+    details: Record<string, unknown>;
+  };
 }
 
 export interface ODDSceneRecord {
@@ -180,6 +393,35 @@ export interface ODDSceneRecord {
   end_timestamp_ns: number;
   distance_m: number;
   observations: ODDObservation[];
+  evidence: ODDLabelEvidence[];
+  events: ODDEvent[];
+  provenance: Record<string, unknown>;
+}
+
+export interface ODDSceneObservationSummary {
+  key: string;
+  status: ODDStatus;
+  values: string[];
+  source: string;
+  confidence: number;
+  duration_ns: number;
+  first_timestamp_ns: number;
+  interval_count?: number;
+  camera_id?: string;
+  actor_track_uid?: string;
+  event_uid?: string;
+}
+
+export interface ODDSceneEventSummary {
+  event_uid: string;
+  primary_event_key: string;
+  primary_values: string[];
+  start_timestamp_ns: number;
+  end_timestamp_ns: number;
+  status: ODDStatus;
+  confidence: number;
+  actor_track_uids: string[];
+  outcome: string;
 }
 
 export interface ODDSceneSummary {
@@ -188,15 +430,50 @@ export interface ODDSceneSummary {
   start_timestamp_ns: number;
   end_timestamp_ns: number;
   distance_m: number;
-  observations: Array<{
-    key: string;
-    status: string;
-    values: string[];
-    source: string;
-    confidence: number;
-    duration_ns: number;
-    first_timestamp_ns: number;
-  }>;
+  observations: ODDSceneObservationSummary[];
+  events: ODDSceneEventSummary[];
+  matched?: ODDSceneObservationSummary[];
+  matched_duration_ns?: number;
+  match_confidence?: number;
+  first_matched_timestamp_ns?: number;
+}
+
+export type ODDSearchOperator =
+  | "exists"
+  | "contains"
+  | "equals"
+  | "in"
+  | "not_equals";
+
+export interface ODDSearchPredicate {
+  key: string;
+  operator: ODDSearchOperator;
+  values: string[];
+  statuses: ODDStatus[];
+  sources: string[];
+  minimum_confidence: number;
+  minimum_duration_ns: number;
+  camera_id: string;
+  actor_track_uid: string;
+}
+
+export interface ODDSearchGroup {
+  logic: "and" | "or";
+  predicates: ODDSearchPredicate[];
+  groups: ODDSearchGroup[];
+}
+
+export interface ODDStructuredSearchRequest {
+  query: ODDSearchGroup;
+  sort:
+    | "scene_uid"
+    | "confidence"
+    | "matched_duration"
+    | "scene_duration"
+    | "recording_time";
+  descending: boolean;
+  limit: number;
+  offset: number;
 }
 
 export interface ODDSearchResponse {
@@ -208,6 +485,20 @@ export interface ODDSearchResponse {
   limit: number;
   offset: number;
   more: boolean;
+  manifest_sha256: string;
+}
+
+export interface ODDEvidenceResponse {
+  dataset: string;
+  version: string;
+  labelset_id: string;
+  scene_uid: string;
+  observation: ODDObservation;
+  supporting_evidence: ODDLabelEvidence[];
+  conflicting_evidence: ODDLabelEvidence[];
+  related_events: ODDEvent[];
+  scene_provenance: Record<string, unknown>;
+  manifest_sha256: string;
 }
 
 // ---------------------------------------------------------------------------
