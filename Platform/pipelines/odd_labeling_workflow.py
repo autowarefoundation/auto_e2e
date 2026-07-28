@@ -36,6 +36,15 @@ OddPublication = NamedTuple(
 )
 
 
+def _scene_labeling_pod_template():
+    """Keep long-running VLM calls on their assigned Karpenter node."""
+    from flytekit import PodTemplate
+
+    return PodTemplate(
+        annotations={"karpenter.sh/do-not-disrupt": "true"},
+    )
+
+
 def _canonical_bytes(value: object) -> bytes:
     return json.dumps(
         value,
@@ -310,6 +319,7 @@ def resolve_odd_scenes(
     cache=True,
     cache_version="odd-label-scene-v2",
     retries=2,
+    pod_template=_scene_labeling_pod_template(),
     requests=Resources(cpu="2", mem="6Gi"),
     limits=Resources(cpu="4", mem="12Gi"),
     secret_requests=[
