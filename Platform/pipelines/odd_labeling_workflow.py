@@ -23,7 +23,7 @@ DATA_PREP_IMAGE = os.environ.get(
     "AUTO_E2E_DATA_PREP_IMAGE",
     f"{ECR_PREFIX}/auto-e2e/data-prep:latest",
 )
-ODD_LABELER_VERSION = "odd_dataset_labeler_v1"
+ODD_LABELER_VERSION = "odd_dataset_labeler_v2"
 MAX_ODD_ARTIFACT_BYTES = 64 << 20
 SHA256_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 SOURCE_REVISION_RE = re.compile(r"^[0-9a-f]{40}([0-9a-f]{24})?$")
@@ -319,7 +319,7 @@ def resolve_odd_scenes(
 @task(
     container_image=DATA_PREP_IMAGE,
     cache=True,
-    cache_version="odd-label-scene-v2",
+    cache_version="odd-label-scene-v3",
     retries=2,
     pod_template=_scene_labeling_pod_template(),
     requests=Resources(cpu="2", mem="6Gi"),
