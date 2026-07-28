@@ -9,6 +9,7 @@ env:
     DATASET_NAME: kitscenes
     DATASET_VERSION: v3.0
     DATASET_MANIFEST_SHA256: ""
+    LABELER_SOURCE_REVISION: ""
     OPENAI_MODEL: nvidia/Cosmos3-Nano
     OPENAI_MODEL_REVISION: deployed
     CAMERA_ANCHOR_INTERVAL_S: "4.0"
@@ -51,12 +52,14 @@ phases:
         [[ "${ACCOUNT_ID}" =~ ^[0-9]{12}$ ]]
         [[ "${DATASET_MANIFEST_SHA256}" =~ ^[0-9a-f]{64}$ ]]
         [[ "${DATA_PREP_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]
+        [[ "${LABELER_SOURCE_REVISION}" =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ ]]
         [[ "${PUBLISH_LATEST}" == "true" || "${PUBLISH_LATEST}" == "false" ]]
 
         export AUTO_E2E_DATA_PREP_IMAGE="${ECR_URL}/auto-e2e/data-prep@${DATA_PREP_DIGEST}"
         export ECR_PREFIX="${ECR_URL}"
         export PYTHONPATH="${CODEBUILD_SRC_DIR}/Model:${CODEBUILD_SRC_DIR}:${PYTHONPATH:-}"
         export DATASETS_BUCKET DATASET_MANIFEST_URI DATASET_MANIFEST_SHA256
+        export DATA_PREP_DIGEST
 
         python3 - <<'PY'
         import json
@@ -70,6 +73,10 @@ phases:
             "datasets_bucket": os.environ["DATASETS_BUCKET"],
             "openai_model": os.environ["OPENAI_MODEL"],
             "openai_model_revision": os.environ["OPENAI_MODEL_REVISION"],
+            "labeler_image_digest": os.environ["DATA_PREP_DIGEST"],
+            "labeler_source_revision": os.environ[
+                "LABELER_SOURCE_REVISION"
+            ],
             "camera_anchor_interval_s": float(
                 os.environ["CAMERA_ANCHOR_INTERVAL_S"]
             ),
