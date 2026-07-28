@@ -1033,7 +1033,9 @@ def test_resume_policy_transition_enables_repeat_and_resets_patience():
         "to": 8,
     }
     assert transition["bad_epochs_after_reset"] == 0
-    assert transition["scheduler_state_action"] == "reset"
+    assert transition["scheduler_state_action"] == (
+        "reset_plateau_state_preserve_optimizer_lr"
+    )
     assert transition["best_checkpoint_scope"] == "post_transition"
 
     bad_epochs, best = workflows._transition_resume_selection_state(
@@ -1070,9 +1072,8 @@ def test_resume_transition_wiring_resets_scheduler_and_best_scope():
     payload_validation = source.index(
         "validate_resume_payload("
     )
-    scheduler_restore = source.index(
-        "if resume_policy_transition is None:\n"
-        "            scheduler.load_state_dict("
+    optimization_restore = source.index(
+        "_restore_resume_optimization_state("
     )
     selection_reset = source.index(
         "_transition_resume_selection_state("
@@ -1086,10 +1087,59 @@ def test_resume_transition_wiring_resets_scheduler_and_best_scope():
     )
 
     assert envelope_validation < transition_parsing < payload_validation
-    assert payload_validation < scheduler_restore < selection_reset
+    assert payload_validation < optimization_restore < selection_reset
     assert selection_reset < pending_pointer < active_pointer
-    assert '"resume_scheduler_state_reset": "true"' in source
+    assert '"resume_plateau_state_reset": "true"' in source
+    assert '"resume_optimizer_lr_preserved": "true"' in source
     assert '"resume_best_checkpoint_reset": "true"' in source
+
+
+def test_resume_transition_preserves_optimizer_lr_and_resets_plateau():
+    source_parameter = torch.nn.Parameter(torch.tensor([1.0]))
+    source_optimizer = torch.optim.AdamW(
+        [source_parameter],
+        lr=0.01,
+    )
+    source_optimizer.param_groups[0]["lr"] = 0.0025
+    source_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        source_optimizer,
+        mode="max",
+        patience=1,
+    )
+    source_scheduler.step(0.5)
+    source_scheduler.step(0.4)
+    payload = {
+        "optimizer_state_dict": source_optimizer.state_dict(),
+        "scheduler_state_dict": source_scheduler.state_dict(),
+    }
+
+    resumed_parameter = torch.nn.Parameter(torch.tensor([1.0]))
+    resumed_optimizer = torch.optim.AdamW(
+        [resumed_parameter],
+        lr=0.1,
+    )
+    resumed_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        resumed_optimizer,
+        mode="max",
+        patience=1,
+    )
+    state = workflows._restore_resume_optimization_state(
+        resumed_optimizer,
+        resumed_scheduler,
+        payload,
+        transition={"policy_version": "transition-v1"},
+    )
+
+    assert resumed_optimizer.param_groups[0]["lr"] == pytest.approx(
+        0.0025
+    )
+    assert resumed_scheduler.state_dict()["best"] == -float("inf")
+    assert resumed_scheduler.state_dict()["num_bad_epochs"] == 0
+    assert state == {
+        "optimizer_lr": [0.0025],
+        "optimizer_lr_preserved": True,
+        "plateau_state_restored": False,
+    }
 
 
 @pytest.mark.parametrize(
