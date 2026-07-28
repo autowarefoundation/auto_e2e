@@ -393,3 +393,14 @@ def test_synthetic_adapter_preserves_missing_camera_frames() -> None:
     assert adapter.describe_capabilities().cameras[0].channel.missing_count == 13
     with pytest.raises(ValueError, match="no complete multi-camera anchor"):
         scene.camera_anchors()
+
+
+def test_capability_manifest_round_trip_preserves_semantic_identity() -> None:
+    original = _synthetic_adapter().describe_capabilities()
+
+    restored = DatasetCapabilityManifest.from_json(
+        json.dumps(original.to_dict())
+    )
+
+    assert restored.to_dict() == original.to_dict()
+    assert restored.semantic_sha256() == original.semantic_sha256()
