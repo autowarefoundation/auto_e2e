@@ -22,7 +22,7 @@ DATA_PREP_IMAGE = os.environ.get(
     "AUTO_E2E_DATA_PREP_IMAGE",
     f"{ECR_PREFIX}/auto-e2e/data-prep:latest",
 )
-ODD_LABELER_VERSION = "odd_dataset_labeler_v3"
+ODD_LABELER_VERSION = "odd_dataset_labeler_v4"
 MAX_ODD_ARTIFACT_BYTES = 64 << 20
 MAX_ODD_PARQUET_BYTES = 512 << 20
 SHA256_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
@@ -230,14 +230,185 @@ def resolve_odd_scenes(
     )
 
 
+def _load_canonical_scene(
+    descriptor_json: str,
+    capability_manifest_json: str,
+) -> tuple[object, object, object]:
+    import boto3
+
+    from data_processing.odd_labeling.published_snapshot import (
+        PublishedSceneDescriptor,
+        load_scene_evidence,
+    )
+    from data_processing.odd_labeling.schema import DatasetCapabilityManifest
+
+    descriptor = PublishedSceneDescriptor.from_json(descriptor_json)
+    capability_manifest = DatasetCapabilityManifest.from_json(
+        capability_manifest_json
+    )
+    if (
+        descriptor.dataset_name != capability_manifest.dataset_name
+        or descriptor.dataset_version != capability_manifest.dataset_version
+        or descriptor.dataset_manifest_sha256
+        != capability_manifest.dataset_manifest_sha256
+    ):
+        raise ValueError("scene descriptor differs from capability coordinate")
+    evidence = load_scene_evidence(
+        boto3.client("s3"),
+        descriptor,
+        capability_manifest=capability_manifest,
+    )
+    return descriptor, capability_manifest, evidence
+
+
+def _source_artifact_file(
+    *,
+    source_stage: str,
+    descriptor_json: str,
+    scene_uid: str,
+    observations: object,
+) -> FlyteFile:
+    from data_processing.odd_labeling.source_artifact import (
+        SourceObservationArtifact,
+    )
+
+    artifact = SourceObservationArtifact.create(
+        source_stage=source_stage,
+        descriptor_json=descriptor_json,
+        scene_uid=scene_uid,
+        observations=observations,
+    )
+    with tempfile.NamedTemporaryFile(
+        mode="wb",
+        prefix=f"odd-source-{source_stage}-",
+        suffix=".json",
+        delete=False,
+    ) as stream:
+        stream.write(artifact.to_bytes())
+        output = stream.name
+    return FlyteFile(output)
+
+
+def _read_source_artifact(
+    source_file: FlyteFile,
+    *,
+    descriptor_json: str,
+    source_stage: str,
+):
+    from data_processing.odd_labeling.source_artifact import (
+        SourceObservationArtifact,
+    )
+
+    path = source_file.download()
+    with open(path, "rb") as stream:
+        payload = stream.read(MAX_ODD_ARTIFACT_BYTES + 1)
+    if len(payload) > MAX_ODD_ARTIFACT_BYTES:
+        raise ValueError("source observation artifact exceeds size cap")
+    return SourceObservationArtifact.from_bytes(
+        payload,
+        expected_descriptor_json=descriptor_json,
+        expected_source_stage=source_stage,
+    )
+
+
 @task(
     container_image=DATA_PREP_IMAGE,
     cache=True,
-    cache_version="odd-label-scene-v7",
+    cache_version="odd-source-map-route-v1",
+    requests=Resources(cpu="2", mem="4Gi"),
+    limits=Resources(cpu="4", mem="8Gi"),
+)
+def label_odd_map_route(
+    descriptor_json: str,
+    capability_manifest_json: str,
+) -> FlyteFile:
+    from data_processing.odd_labeling.deterministic import label_map_route
+
+    _, _, evidence = _load_canonical_scene(
+        descriptor_json,
+        capability_manifest_json,
+    )
+    return _source_artifact_file(
+        source_stage="map_route_deterministic",
+        descriptor_json=descriptor_json,
+        scene_uid=evidence.scene_uid,
+        observations=label_map_route(evidence),
+    )
+
+
+@task(
+    container_image=DATA_PREP_IMAGE,
+    cache=True,
+    cache_version="odd-source-gnss-ins-v1",
+    requests=Resources(cpu="2", mem="4Gi"),
+    limits=Resources(cpu="4", mem="8Gi"),
+)
+def label_odd_kinematics(
+    descriptor_json: str,
+    capability_manifest_json: str,
+) -> FlyteFile:
+    from data_processing.odd_labeling.deterministic import label_kinematics
+
+    _, _, evidence = _load_canonical_scene(
+        descriptor_json,
+        capability_manifest_json,
+    )
+    return _source_artifact_file(
+        source_stage="gnss_ins",
+        descriptor_json=descriptor_json,
+        scene_uid=evidence.scene_uid,
+        observations=label_kinematics(evidence),
+    )
+
+
+@task(
+    container_image=DATA_PREP_IMAGE,
+    cache=True,
+    cache_version="odd-source-image-qc-v1",
+    requests=Resources(cpu="2", mem="6Gi"),
+    limits=Resources(cpu="4", mem="10Gi"),
+)
+def label_odd_image_quality(
+    descriptor_json: str,
+    capability_manifest_json: str,
+    camera_anchor_interval_s: float,
+    maximum_camera_anchors: int,
+) -> FlyteFile:
+    import boto3
+
+    from data_processing.odd_labeling.image_qc import (
+        label_image_quality,
+        load_camera_anchors,
+    )
+
+    if camera_anchor_interval_s <= 0 or maximum_camera_anchors <= 0:
+        raise ValueError("camera anchor sampling must be positive")
+    _, _, evidence = _load_canonical_scene(
+        descriptor_json,
+        capability_manifest_json,
+    )
+    anchors = load_camera_anchors(
+        boto3.client("s3"),
+        evidence,
+        interval_s=camera_anchor_interval_s,
+        maximum_anchors=maximum_camera_anchors,
+    )
+    return _source_artifact_file(
+        source_stage="image_qc",
+        descriptor_json=descriptor_json,
+        scene_uid=evidence.scene_uid,
+        observations=label_image_quality(evidence, anchors),
+    )
+
+
+@task(
+    container_image=DATA_PREP_IMAGE,
+    cache=True,
+    cache_version="odd-source-openai-compatible-v1",
     retries=2,
     pod_template=_scene_labeling_pod_template(),
     requests=Resources(cpu="2", mem="6Gi"),
-    limits=Resources(cpu="4", mem="12Gi"),
+    limits=Resources(cpu="4", mem="10Gi"),
     secret_requests=[
         Secret(
             group="odd-road-observer",
@@ -251,107 +422,32 @@ def resolve_odd_scenes(
         ),
     ],
 )
-def label_odd_scene(
+def label_odd_visual(
     descriptor_json: str,
     capability_manifest_json: str,
     openai_model: str,
     openai_model_revision: str,
-    bedrock_map_model_id: str,
-    bedrock_map_model_revision: str,
-    labeler_image_digest: str,
-    labeler_source_revision: str,
     camera_anchor_interval_s: float,
     maximum_camera_anchors: int,
 ) -> FlyteFile:
     import boto3
 
-    from data_processing.odd_labeling.bedrock_map_resolver import (
-        BedrockMapRouteResolver,
-        resolve_ambiguous_map_route,
-    )
-    from data_processing.odd_labeling.deterministic import (
-        label_kinematics,
-        label_map_route,
-    )
-    from data_processing.odd_labeling.fusion import (
-        EvidenceBuildContext,
-        build_resolved_scene_labels,
-    )
-    from data_processing.odd_labeling.image_qc import (
-        label_image_quality,
-        load_camera_anchors,
-    )
-    from data_processing.odd_labeling.ontology import ONTOLOGY
+    from data_processing.odd_labeling.image_qc import load_camera_anchors
     from data_processing.odd_labeling.openai_compatible import (
         OpenAICompatibleRoadObserver,
         RoadVLMConfig,
         label_visual_scene,
     )
-    from data_processing.odd_labeling.published_snapshot import (
-        PublishedSceneDescriptor,
-        load_scene_evidence,
-    )
-    from data_processing.odd_labeling.schema import (
-        DatasetCapabilityManifest,
-        SceneLabelRecord,
-        make_observation,
-    )
 
     if camera_anchor_interval_s <= 0 or maximum_camera_anchors <= 0:
         raise ValueError("camera anchor sampling must be positive")
-    if SHA256_RE.fullmatch(labeler_image_digest) is None:
-        raise ValueError("labeler_image_digest must be a sha256 digest")
-    if SOURCE_REVISION_RE.fullmatch(labeler_source_revision) is None:
-        raise ValueError("labeler_source_revision must be a full Git revision")
     if openai_model and not openai_model_revision:
         raise ValueError("OpenAI-compatible model revision must be pinned")
-    if bool(bedrock_map_model_id) != bool(bedrock_map_model_revision):
-        raise ValueError("Bedrock map model ID and revision must be paired")
-    descriptor = PublishedSceneDescriptor.from_json(descriptor_json)
-    capability_manifest = DatasetCapabilityManifest.from_json(
-        capability_manifest_json
+    _, _, evidence = _load_canonical_scene(
+        descriptor_json,
+        capability_manifest_json,
     )
-    if (
-        descriptor.dataset_name != capability_manifest.dataset_name
-        or descriptor.dataset_version != capability_manifest.dataset_version
-        or descriptor.dataset_manifest_sha256
-        != capability_manifest.dataset_manifest_sha256
-    ):
-        raise ValueError("scene descriptor differs from capability coordinate")
-    client = boto3.client("s3")
-    evidence = load_scene_evidence(
-        client,
-        descriptor,
-        capability_manifest=capability_manifest,
-    )
-    anchors = load_camera_anchors(
-        client,
-        evidence,
-        interval_s=camera_anchor_interval_s,
-        maximum_anchors=maximum_camera_anchors,
-    )
-    map_route_observations = label_map_route(evidence)
-    observations = [
-        *label_kinematics(evidence),
-        *map_route_observations,
-        *label_image_quality(evidence, anchors),
-    ]
-    if bedrock_map_model_id:
-        bedrock_resolver = BedrockMapRouteResolver(
-            boto3.client(
-                "bedrock-runtime",
-                region_name=os.environ.get("AWS_REGION", "us-west-2"),
-            ),
-            model_id=bedrock_map_model_id,
-            model_revision=bedrock_map_model_revision,
-        )
-        observations.extend(
-            resolve_ambiguous_map_route(
-                bedrock_resolver,
-                evidence,
-                map_route_observations,
-            )
-        )
+    observations = ()
     if openai_model:
         from flytekit import current_context
 
@@ -378,14 +474,134 @@ def label_odd_scene(
                 model_revision=openai_model_revision,
             )
         )
-        observations.extend(
-            label_visual_scene(
-                observer,
-                scene_uid=evidence.scene_uid,
-                scene_end_timestamp_ns=evidence.end_timestamp_ns,
-                anchors=anchors,
-            )
+        anchors = load_camera_anchors(
+            boto3.client("s3"),
+            evidence,
+            interval_s=camera_anchor_interval_s,
+            maximum_anchors=maximum_camera_anchors,
         )
+        observations = label_visual_scene(
+            observer,
+            scene_uid=evidence.scene_uid,
+            scene_end_timestamp_ns=evidence.end_timestamp_ns,
+            anchors=anchors,
+        )
+    return _source_artifact_file(
+        source_stage="openai_compatible_vlm",
+        descriptor_json=descriptor_json,
+        scene_uid=evidence.scene_uid,
+        observations=observations,
+    )
+
+
+@task(
+    container_image=DATA_PREP_IMAGE,
+    cache=True,
+    cache_version="odd-source-bedrock-map-v1",
+    retries=2,
+    requests=Resources(cpu="2", mem="4Gi"),
+    limits=Resources(cpu="4", mem="8Gi"),
+)
+def label_odd_bedrock_map(
+    descriptor_json: str,
+    capability_manifest_json: str,
+    map_route_file: FlyteFile,
+    bedrock_map_model_id: str,
+    bedrock_map_model_revision: str,
+) -> FlyteFile:
+    import boto3
+
+    from data_processing.odd_labeling.bedrock_map_resolver import (
+        BedrockMapRouteResolver,
+        resolve_ambiguous_map_route,
+    )
+
+    if bool(bedrock_map_model_id) != bool(bedrock_map_model_revision):
+        raise ValueError("Bedrock map model ID and revision must be paired")
+    map_artifact = _read_source_artifact(
+        map_route_file,
+        descriptor_json=descriptor_json,
+        source_stage="map_route_deterministic",
+    )
+    _, _, evidence = _load_canonical_scene(
+        descriptor_json,
+        capability_manifest_json,
+    )
+    observations = ()
+    if bedrock_map_model_id:
+        resolver = BedrockMapRouteResolver(
+            boto3.client(
+                "bedrock-runtime",
+                region_name=os.environ.get("AWS_REGION", "us-west-2"),
+            ),
+            model_id=bedrock_map_model_id,
+            model_revision=bedrock_map_model_revision,
+        )
+        observations = resolve_ambiguous_map_route(
+            resolver,
+            evidence,
+            map_artifact.observations,
+        )
+    return _source_artifact_file(
+        source_stage="bedrock_map_route",
+        descriptor_json=descriptor_json,
+        scene_uid=evidence.scene_uid,
+        observations=observations,
+    )
+
+
+@task(
+    container_image=DATA_PREP_IMAGE,
+    cache=True,
+    cache_version="odd-fuse-scene-v1",
+    requests=Resources(cpu="2", mem="6Gi"),
+    limits=Resources(cpu="4", mem="12Gi"),
+)
+def fuse_odd_scene(
+    descriptor_json: str,
+    capability_manifest_json: str,
+    map_route_file: FlyteFile,
+    kinematics_file: FlyteFile,
+    image_quality_file: FlyteFile,
+    visual_file: FlyteFile,
+    bedrock_map_file: FlyteFile,
+    labeler_image_digest: str,
+    labeler_source_revision: str,
+) -> FlyteFile:
+    from data_processing.odd_labeling.fusion import (
+        EvidenceBuildContext,
+        build_resolved_scene_labels,
+    )
+    from data_processing.odd_labeling.ontology import ONTOLOGY
+    from data_processing.odd_labeling.schema import (
+        SceneLabelRecord,
+        make_observation,
+    )
+
+    if SHA256_RE.fullmatch(labeler_image_digest) is None:
+        raise ValueError("labeler_image_digest must be a sha256 digest")
+    if SOURCE_REVISION_RE.fullmatch(labeler_source_revision) is None:
+        raise ValueError("labeler_source_revision must be a full Git revision")
+    descriptor, capability_manifest, evidence = _load_canonical_scene(
+        descriptor_json,
+        capability_manifest_json,
+    )
+    source_files = (
+        (map_route_file, "map_route_deterministic"),
+        (kinematics_file, "gnss_ins"),
+        (image_quality_file, "image_qc"),
+        (visual_file, "openai_compatible_vlm"),
+        (bedrock_map_file, "bedrock_map_route"),
+    )
+    observations = [
+        observation
+        for source_file, source_stage in source_files
+        for observation in _read_source_artifact(
+            source_file,
+            descriptor_json=descriptor_json,
+            source_stage=source_stage,
+        ).observations
+    ]
 
     observed_keys = {observation.key for observation in observations}
     for key in ONTOLOGY:
@@ -475,26 +691,84 @@ def map_odd_scenes(
     labeler_source_revision: str,
     camera_anchor_interval_s: float,
     maximum_camera_anchors: int,
-    scene_concurrency: int,
+    deterministic_concurrency: int,
+    image_qc_concurrency: int,
+    openai_concurrency: int,
+    bedrock_concurrency: int,
+    fusion_concurrency: int,
 ) -> List[FlyteFile]:
-    if scene_concurrency <= 0:
-        raise ValueError("scene_concurrency must be positive")
-    labeler = map_task(
+    concurrency_values = (
+        deterministic_concurrency,
+        image_qc_concurrency,
+        openai_concurrency,
+        bedrock_concurrency,
+        fusion_concurrency,
+    )
+    if any(value <= 0 for value in concurrency_values):
+        raise ValueError("source and fusion concurrency must be positive")
+    map_route_files = map_task(
         functools.partial(
-            label_odd_scene,
+            label_odd_map_route,
             capability_manifest_json=capability_manifest_json,
-            openai_model=openai_model,
-            openai_model_revision=openai_model_revision,
-            bedrock_map_model_id=bedrock_map_model_id,
-            bedrock_map_model_revision=bedrock_map_model_revision,
-            labeler_image_digest=labeler_image_digest,
-            labeler_source_revision=labeler_source_revision,
+        ),
+        concurrency=deterministic_concurrency,
+    )(descriptor_json=descriptors)
+    kinematics_files = map_task(
+        functools.partial(
+            label_odd_kinematics,
+            capability_manifest_json=capability_manifest_json,
+        ),
+        concurrency=deterministic_concurrency,
+    )(descriptor_json=descriptors)
+    image_quality_files = map_task(
+        functools.partial(
+            label_odd_image_quality,
+            capability_manifest_json=capability_manifest_json,
             camera_anchor_interval_s=camera_anchor_interval_s,
             maximum_camera_anchors=maximum_camera_anchors,
         ),
-        concurrency=scene_concurrency,
+        concurrency=image_qc_concurrency,
+    )(descriptor_json=descriptors)
+    visual_files = map_task(
+        functools.partial(
+            label_odd_visual,
+            capability_manifest_json=capability_manifest_json,
+            openai_model=openai_model,
+            openai_model_revision=openai_model_revision,
+            camera_anchor_interval_s=camera_anchor_interval_s,
+            maximum_camera_anchors=maximum_camera_anchors,
+        ),
+        concurrency=openai_concurrency,
+    )(descriptor_json=descriptors)
+    bedrock_map_files = map_task(
+        functools.partial(
+            label_odd_bedrock_map,
+            capability_manifest_json=capability_manifest_json,
+            bedrock_map_model_id=bedrock_map_model_id,
+            bedrock_map_model_revision=bedrock_map_model_revision,
+        ),
+        concurrency=bedrock_concurrency,
+    )(
+        descriptor_json=descriptors,
+        map_route_file=map_route_files,
     )
-    return labeler(descriptor_json=descriptors)
+    fuser = map_task(
+        functools.partial(
+            fuse_odd_scene,
+            capability_manifest_json=capability_manifest_json,
+            labeler_image_digest=labeler_image_digest,
+            labeler_source_revision=labeler_source_revision,
+        ),
+        concurrency=fusion_concurrency,
+    )
+    return fuser(
+        descriptor_json=descriptors,
+        map_route_file=map_route_files,
+        kinematics_file=kinematics_files,
+        image_quality_file=image_quality_files,
+        visual_file=visual_files,
+        bedrock_map_file=bedrock_map_files,
+    )
 
 
 @task(
@@ -856,6 +1130,8 @@ def wf_generate_odd_labelset(
     maximum_camera_anchors: int = 12,
     maximum_scenes: int = 0,
     scene_concurrency: int = 40,
+    openai_concurrency: int = 10,
+    bedrock_concurrency: int = 20,
     publication_scope: str = "full",
 ) -> OddPublication:
     """Label a published dataset independently from every training workflow."""
@@ -875,7 +1151,11 @@ def wf_generate_odd_labelset(
         labeler_source_revision=labeler_source_revision,
         camera_anchor_interval_s=camera_anchor_interval_s,
         maximum_camera_anchors=maximum_camera_anchors,
-        scene_concurrency=scene_concurrency,
+        deterministic_concurrency=scene_concurrency,
+        image_qc_concurrency=scene_concurrency,
+        openai_concurrency=openai_concurrency,
+        bedrock_concurrency=bedrock_concurrency,
+        fusion_concurrency=scene_concurrency,
     )
     return publish_odd_labelset(
         scene_files=scene_files,
