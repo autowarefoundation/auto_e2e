@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import numpy as np
 import pytest
 
+from data_processing.odd_labeling.deterministic import _interval_slices
 from data_processing.odd_labeling.ontology import (
     LABEL_STATUSES,
     ONTOLOGY,
@@ -11,6 +13,18 @@ from data_processing.odd_labeling.schema import (
     coalesce_observations,
     make_observation,
 )
+
+
+def test_interval_slices_carry_forward_final_sample() -> None:
+    timestamps = np.array(
+        [index * 100_000_000 for index in range(20)]
+        + [1_950_000_000],
+        dtype=np.int64,
+    )
+
+    slices = _interval_slices(timestamps)
+
+    assert slices[-1] == (2_000_000_000, 2_050_000_000, 20, 21)
 
 
 def test_ontology_contains_complete_scene_label_catalog() -> None:
