@@ -108,6 +108,14 @@ resource "aws_iam_role_policy" "flyte_user_s3" {
             "arn:aws:dynamodb:${var.region}:${data.aws_caller_identity.current.account_id}:table/${var.console_dynamo_table_name}",
           ]
         },
+        {
+          Effect = "Allow"
+          Action = ["bedrock:InvokeModel"]
+          Resource = [
+            "arn:aws:bedrock:${var.region}:${data.aws_caller_identity.current.account_id}:inference-profile/us.anthropic.claude-sonnet-4-6",
+            "arn:aws:bedrock:*::foundation-model/anthropic.claude-sonnet-4-6",
+          ]
+        },
       ],
       var.checkpoints_bucket != "" ? [
         {
