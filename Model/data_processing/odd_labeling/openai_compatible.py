@@ -85,6 +85,17 @@ class RoadVLMConfig:
             raise ValueError("retry_count must be non-negative")
 
 
+class RoadVLMRequestError(RuntimeError):
+    def __init__(
+        self,
+        message: str,
+        *,
+        provenance: Mapping[str, Any],
+    ) -> None:
+        super().__init__(message)
+        self.provenance = dict(provenance)
+
+
 def _urllib_transport(timeout_s: float) -> Transport:
     def post(
         url: str,
@@ -508,9 +519,22 @@ class OpenAICompatibleRoadObserver:
                 if attempt < self.config.retry_count:
                     time.sleep(min(8.0, 2.0**attempt))
         assert last_error is not None
-        raise RuntimeError(
-            f"OpenAI-compatible road observer failed after "
-            f"{self.config.retry_count + 1} attempts: {last_error}"
+        raise RoadVLMRequestError(
+            (
+                "OpenAI-compatible road observer failed after "
+                f"{self.config.retry_count + 1} attempts: {last_error}"
+            ),
+            provenance={
+                "prompt_sha256": _prompt_bundle_sha256(
+                    task_bundle,
+                    keys,
+                    self.config.prompt_version,
+                ),
+                "decoding_config_sha256": decoding_config_sha256,
+                "request_sha256": request_digest,
+                "attempt": self.config.retry_count + 1,
+                "error_type": type(last_error).__name__,
+            },
         ) from last_error
 
     def observe(
@@ -546,7 +570,7 @@ class OpenAICompatibleRoadObserver:
                 keys=keys,
                 frames=frames,
             )
-        except RuntimeError as exc:
+        except RoadVLMRequestError as exc:
             return tuple(
                 make_observation(
                     scene_uid=scene_uid,
@@ -567,7 +591,7 @@ class OpenAICompatibleRoadObserver:
                         "input_end_timestamp_ns": input_end_timestamp_ns,
                         "lookback_ns": lookback_ns,
                         "lookahead_ns": 0,
-                        "error_type": type(exc.__cause__ or exc).__name__,
+                        **exc.provenance,
                     },
                 )
                 for key in keys
