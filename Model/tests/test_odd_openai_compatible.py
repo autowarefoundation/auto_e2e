@@ -23,7 +23,7 @@ def _frame() -> CameraFrame:
     )
 
 
-def _completion(observations: list[dict[str, Any]]) -> dict[str, Any]:
+def _completion(observations: dict[str, dict[str, Any]]) -> dict[str, Any]:
     return {
         "choices": [
             {
@@ -45,8 +45,8 @@ def test_observer_uses_openai_contract_and_validates_output() -> None:
     ) -> dict[str, Any]:
         requests.append((url, payload, headers))
         return _completion(
-            [
-                {
+            {
+                "odd.environment.sky": {
                     "key": "odd.environment.sky",
                     "status": "valid",
                     "values": ["clear"],
@@ -54,7 +54,7 @@ def test_observer_uses_openai_contract_and_validates_output() -> None:
                     "supporting_cameras": ["front_center"],
                     "reason": "Visible blue sky.",
                 },
-                {
+                "event.hazard.type": {
                     "key": "event.hazard.type",
                     "status": "valid",
                     "values": ["none"],
@@ -62,7 +62,7 @@ def test_observer_uses_openai_contract_and_validates_output() -> None:
                     "supporting_cameras": ["front_center"],
                     "reason": "The road corridor is visible.",
                 },
-            ]
+            }
         )
 
     observer = OpenAICompatibleRoadObserver(
@@ -91,9 +91,16 @@ def test_observer_uses_openai_contract_and_validates_output() -> None:
     assert request["model"] == "road-observer"
     assert request["temperature"] == 0.0
     assert request["response_format"]["type"] == "json_schema"
-    item_variants = request["response_format"]["json_schema"]["schema"][
+    observation_schema = request["response_format"]["json_schema"]["schema"][
         "properties"
-    ]["observations"]["items"]["oneOf"]
+    ]["observations"]
+    assert observation_schema["required"] == [
+        "odd.environment.sky",
+        "event.hazard.type",
+    ]
+    item_variants = observation_schema["properties"]["odd.environment.sky"][
+        "oneOf"
+    ]
     sky_valid = next(
         variant
         for variant in item_variants
@@ -138,8 +145,8 @@ def test_invalid_responses_exhaust_retries_and_abstain() -> None:
         nonlocal calls
         calls += 1
         return _completion(
-            [
-                {
+            {
+                "odd.environment.sky": {
                     "key": "odd.environment.sky",
                     "status": "valid",
                     "values": ["tornado"],
@@ -147,7 +154,7 @@ def test_invalid_responses_exhaust_retries_and_abstain() -> None:
                     "supporting_cameras": ["front_center"],
                     "reason": "Invalid candidate.",
                 }
-            ]
+            }
         )
 
     observer = OpenAICompatibleRoadObserver(
