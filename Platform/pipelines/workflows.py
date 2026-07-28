@@ -673,6 +673,29 @@ def _collated_metadata_value(
     return value
 
 
+def _accumulate_rollout_epoch_terms(
+    term_sums: dict[str, float],
+    term_weights: dict[str, int],
+    terms: dict,
+    *,
+    batch_sample_count: int,
+) -> None:
+    """Accumulate diagnostics using their actual eligible sample counts."""
+    active_count_keys = {
+        "map": "map_sample_count",
+        "route": "route_sample_count",
+        "drivable": "drivable_sample_count",
+    }
+    for name in term_sums:
+        weight = (
+            int(terms[active_count_keys[name]].item())
+            if name in active_count_keys
+            else batch_sample_count
+        )
+        term_sums[name] += float(terms[name].item()) * weight
+        term_weights[name] += weight
+
+
 def _stable_evaluation_noise(sample_uids, trajectory_width, dtype):
     """Create a batch-order-independent planner prior for paired evaluation."""
     import hashlib
@@ -4790,31 +4813,12 @@ def train_il(
                     route_terms["target_compliance_sum"].item()
                 )
             if rollout_terms is not None:
-                batch_sample_count = int(trajectory.shape[0])
-                term_weights = {
-                    name: batch_sample_count
-                    for name in rollout_term_sums
-                }
-                term_weights.update({
-                    "map": int(
-                        rollout_terms["map_sample_count"].item()
-                    ),
-                    "route": int(
-                        rollout_terms["route_sample_count"].item()
-                    ),
-                    "drivable": int(
-                        rollout_terms[
-                            "drivable_sample_count"
-                        ].item()
-                    ),
-                })
-                for term_name in rollout_term_sums:
-                    term_weight = term_weights[term_name]
-                    rollout_term_sums[term_name] += (
-                        float(rollout_terms[term_name].item())
-                        * term_weight
-                    )
-                    rollout_term_weights[term_name] += term_weight
+                _accumulate_rollout_epoch_terms(
+                    rollout_term_sums,
+                    rollout_term_weights,
+                    rollout_terms,
+                    batch_sample_count=int(trajectory.shape[0]),
+                )
                 for count_name in rollout_term_counts:
                     rollout_term_counts[count_name] += int(
                         rollout_terms[count_name].item()
