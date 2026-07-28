@@ -357,6 +357,28 @@ def test_unavailable_nonfinite_map_terms_are_masked_before_reduction():
     assert torch.isfinite(predicted.grad).all()
 
 
+def test_active_nonfinite_map_field_is_rejected():
+    field = torch.full(
+        (1, GEOMETRY.height_px, GEOMETRY.width_px),
+        torch.nan,
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="active distance_to_corridor_m must be finite",
+    ):
+        _loss(
+            _controls(),
+            _controls(),
+            supervision=_supervision(
+                route_field=field,
+                drivable_field=torch.zeros_like(field),
+            ),
+            map_valid=False,
+            route_valid=True,
+        )
+
+
 def test_mixed_batch_averages_only_available_map_terms_per_sample():
     field = _field_from_lateral_band().repeat(2, 1, 1)
     predicted = _controls(curvature=0.04).repeat(2, 1, 1)
