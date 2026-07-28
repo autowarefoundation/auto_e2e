@@ -106,6 +106,37 @@ def test_prediction_equal_target_has_zero_losses():
         assert terms[name].item() == 0.0
 
 
+def test_empty_batch_is_rejected_with_clear_error():
+    controls = torch.empty(0, TIMESTEPS, 2)
+    field = torch.empty(
+        0,
+        GEOMETRY.height_px,
+        GEOMETRY.width_px,
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="requires a non-empty batch",
+    ):
+        RolloutAlignedLoss()(
+            controls,
+            controls,
+            torch.empty(0),
+            torch.empty(0, TIMESTEPS, 2),
+            {
+                "distance_to_corridor_m": field,
+                "distance_to_drivable_m": field,
+                "available": torch.empty(0, dtype=torch.bool),
+                "drivable_available": torch.empty(
+                    0,
+                    dtype=torch.bool,
+                ),
+            },
+            torch.empty(0, dtype=torch.bool),
+            torch.empty(0, dtype=torch.bool),
+        )
+
+
 def test_equal_footprints_have_zero_map_loss_on_nontrivial_field():
     target = _controls(acceleration=0.1, curvature=0.01)
     field = _field_from_lateral_band()
