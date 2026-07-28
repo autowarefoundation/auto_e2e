@@ -4402,17 +4402,24 @@ def train_il(
         jepa_vals = []
         reason_vals = []
         route_vals = []
-        rollout_term_vals = {
-            "rollout": [],
-            "path": [],
-            "final": [],
-            "constraint": [],
-            "comfort": [],
-            "jerk": [],
-            "lateral_acceleration": [],
-            "map": [],
-            "route": [],
-            "drivable": [],
+        rollout_term_sums = {
+            name: 0.0
+            for name in (
+                "rollout",
+                "path",
+                "final",
+                "constraint",
+                "comfort",
+                "jerk",
+                "lateral_acceleration",
+                "map",
+                "route",
+                "drivable",
+            )
+        }
+        rollout_term_weights = {
+            name: 0
+            for name in rollout_term_sums
         }
         rollout_term_counts = {
             "map_sample_count": 0,
@@ -4783,10 +4790,31 @@ def train_il(
                     route_terms["target_compliance_sum"].item()
                 )
             if rollout_terms is not None:
-                for term_name in rollout_term_vals:
-                    rollout_term_vals[term_name].append(
+                batch_sample_count = int(trajectory.shape[0])
+                term_weights = {
+                    name: batch_sample_count
+                    for name in rollout_term_sums
+                }
+                term_weights.update({
+                    "map": int(
+                        rollout_terms["map_sample_count"].item()
+                    ),
+                    "route": int(
+                        rollout_terms["route_sample_count"].item()
+                    ),
+                    "drivable": int(
+                        rollout_terms[
+                            "drivable_sample_count"
+                        ].item()
+                    ),
+                })
+                for term_name in rollout_term_sums:
+                    term_weight = term_weights[term_name]
+                    rollout_term_sums[term_name] += (
                         float(rollout_terms[term_name].item())
+                        * term_weight
                     )
+                    rollout_term_weights[term_name] += term_weight
                 for count_name in rollout_term_counts:
                     rollout_term_counts[count_name] += int(
                         rollout_terms[count_name].item()
@@ -4855,11 +4883,12 @@ def train_il(
         }
         avg_rollout_terms = {
             name: (
-                float(np.mean(values))
-                if values
+                rollout_term_sums[name]
+                / rollout_term_weights[name]
+                if rollout_term_weights[name] > 0
                 else 0.0
             )
-            for name, values in rollout_term_vals.items()
+            for name in rollout_term_sums
         }
         if (
             enable_route_consistency
