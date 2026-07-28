@@ -133,6 +133,19 @@ type ODDSearchResponse struct {
 	ManifestSHA256 string            `json:"manifest_sha256"`
 }
 
+type ODDEvidenceResponse struct {
+	Dataset             string            `json:"dataset"`
+	Version             string            `json:"version"`
+	LabelSetID          string            `json:"labelset_id"`
+	SceneUID            string            `json:"scene_uid"`
+	Observation         json.RawMessage   `json:"observation"`
+	SupportingEvidence  []json.RawMessage `json:"supporting_evidence"`
+	ConflictingEvidence []json.RawMessage `json:"conflicting_evidence"`
+	RelatedEvents       []json.RawMessage `json:"related_events"`
+	SceneProvenance     json.RawMessage   `json:"scene_provenance"`
+	ManifestSHA256      string            `json:"manifest_sha256"`
+}
+
 type ODDSearchPredicate struct {
 	Key               string   `json:"key"`
 	Operator          string   `json:"operator"`
@@ -710,4 +723,142 @@ func (s *S3Service) ODDScene(
 		return json.RawMessage(body), manifest, digest, err
 	}
 	return nil, manifest, digest, ErrNotFound
+}
+
+// ODDEvidence returns one observation with only its referenced evidence and events.
+func (s *S3Service) ODDEvidence(
+	ctx context.Context,
+	dataset string,
+	version string,
+	sceneUID string,
+	observationUID string,
+) (ODDEvidenceResponse, ODDManifest, string, error) {
+	body, manifest, digest, err := s.ODDScene(
+		ctx, dataset, version, sceneUID,
+	)
+	if err != nil {
+		return ODDEvidenceResponse{}, manifest, digest, err
+	}
+	var record struct {
+		SceneUID     string            `json:"scene_uid"`
+		Observations []json.RawMessage `json:"observations"`
+		Evidence     []json.RawMessage `json:"evidence"`
+		Events       []json.RawMessage `json:"events"`
+		Provenance   json.RawMessage   `json:"provenance"`
+	}
+	if err := json.Unmarshal(body, &record); err != nil {
+		return ODDEvidenceResponse{}, manifest, digest, fmt.Errorf(
+			"decode ODD scene evidence: %w", err,
+		)
+	}
+	var selected json.RawMessage
+	var observation struct {
+		ObservationUID          string   `json:"observation_uid"`
+		EventUID                string   `json:"event_uid"`
+		EvidenceUIDs            []string `json:"evidence_uids"`
+		ConflictingEvidenceUIDs []string `json:"conflicting_evidence_uids"`
+	}
+	for _, raw := range record.Observations {
+		var identity struct {
+			ObservationUID string `json:"observation_uid"`
+		}
+		if err := json.Unmarshal(raw, &identity); err != nil ||
+			identity.ObservationUID == "" {
+			return ODDEvidenceResponse{}, manifest, digest, fmt.Errorf(
+				"invalid observation in ODD scene record",
+			)
+		}
+		if identity.ObservationUID != observationUID {
+			continue
+		}
+		if selected != nil {
+			return ODDEvidenceResponse{}, manifest, digest, fmt.Errorf(
+				"duplicate ODD observation uid",
+			)
+		}
+		selected = raw
+		if err := json.Unmarshal(raw, &observation); err != nil {
+			return ODDEvidenceResponse{}, manifest, digest, fmt.Errorf(
+				"decode ODD observation: %w", err,
+			)
+		}
+	}
+	if selected == nil {
+		return ODDEvidenceResponse{}, manifest, digest, ErrNotFound
+	}
+
+	evidenceByUID := make(map[string]json.RawMessage, len(record.Evidence))
+	for _, raw := range record.Evidence {
+		var identity struct {
+			EvidenceUID string `json:"evidence_uid"`
+		}
+		if err := json.Unmarshal(raw, &identity); err != nil ||
+			identity.EvidenceUID == "" {
+			return ODDEvidenceResponse{}, manifest, digest, fmt.Errorf(
+				"invalid evidence in ODD scene record",
+			)
+		}
+		if _, found := evidenceByUID[identity.EvidenceUID]; found {
+			return ODDEvidenceResponse{}, manifest, digest, fmt.Errorf(
+				"duplicate ODD evidence uid",
+			)
+		}
+		evidenceByUID[identity.EvidenceUID] = raw
+	}
+	resolveEvidence := func(uids []string) ([]json.RawMessage, error) {
+		resolved := make([]json.RawMessage, 0, len(uids))
+		for _, uid := range uids {
+			raw, found := evidenceByUID[uid]
+			if !found {
+				return nil, fmt.Errorf(
+					"ODD observation references missing evidence",
+				)
+			}
+			resolved = append(resolved, raw)
+		}
+		return resolved, nil
+	}
+	supporting, err := resolveEvidence(observation.EvidenceUIDs)
+	if err != nil {
+		return ODDEvidenceResponse{}, manifest, digest, err
+	}
+	conflicting, err := resolveEvidence(observation.ConflictingEvidenceUIDs)
+	if err != nil {
+		return ODDEvidenceResponse{}, manifest, digest, err
+	}
+
+	events := make([]json.RawMessage, 0)
+	for _, raw := range record.Events {
+		var event struct {
+			EventUID        string   `json:"event_uid"`
+			ObservationUIDs []string `json:"observation_uids"`
+		}
+		if err := json.Unmarshal(raw, &event); err != nil ||
+			event.EventUID == "" {
+			return ODDEvidenceResponse{}, manifest, digest, fmt.Errorf(
+				"invalid event in ODD scene record",
+			)
+		}
+		if event.EventUID == observation.EventUID ||
+			containsODDValue(event.ObservationUIDs, observationUID) {
+			events = append(events, raw)
+		}
+	}
+	provenance := record.Provenance
+	if len(provenance) == 0 {
+		provenance = json.RawMessage(`{}`)
+	}
+	response := ODDEvidenceResponse{
+		Dataset:             dataset,
+		Version:             version,
+		LabelSetID:          manifest.LabelSetID,
+		SceneUID:            record.SceneUID,
+		Observation:         selected,
+		SupportingEvidence:  supporting,
+		ConflictingEvidence: conflicting,
+		RelatedEvents:       events,
+		SceneProvenance:     provenance,
+		ManifestSHA256:      digest,
+	}
+	return response, manifest, digest, nil
 }
