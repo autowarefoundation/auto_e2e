@@ -122,6 +122,21 @@ def _union_duration(intervals: list[tuple[int, int]]) -> int:
     return total + end - start
 
 
+def _publication_scope(
+    scene_count: int,
+    expected_scene_count: int,
+    publish_latest: bool,
+) -> str:
+    if scene_count <= 0 or expected_scene_count <= 0:
+        raise ValueError("ODD publication scene counts must be positive")
+    if publish_latest and scene_count != expected_scene_count:
+        raise ValueError(
+            "latest ODD publication requires the complete scene inventory: "
+            f"expected={expected_scene_count} actual={scene_count}"
+        )
+    return "full" if publish_latest else "smoke"
+
+
 def _statistics(records: list[dict], ontology: dict, labelset_id: str) -> dict:
     total_scenes = len(records)
     scene_duration = {
@@ -260,13 +275,14 @@ def _put_immutable(s3, bucket: str, key: str, payload: bytes) -> None:
 @task(
     container_image=DATA_PREP_IMAGE,
     cache=True,
-    cache_version="odd-resolve-scenes-v1",
+    cache_version="odd-resolve-scenes-v2",
     requests=Resources(cpu="1", mem="2Gi"),
     limits=Resources(cpu="2", mem="4Gi"),
 )
 def resolve_odd_scenes(
     dataset_manifest_uri: str,
     dataset_manifest_sha256: str,
+    maximum_scenes: int,
 ) -> List[str]:
     import boto3
 
@@ -279,6 +295,10 @@ def resolve_odd_scenes(
         dataset_manifest_uri=dataset_manifest_uri,
         dataset_manifest_sha256=dataset_manifest_sha256,
     )
+    if maximum_scenes < 0:
+        raise ValueError("maximum_scenes must be non-negative")
+    if maximum_scenes:
+        descriptors = descriptors[:maximum_scenes]
     return [descriptor.to_json() for descriptor in descriptors]
 
 
@@ -479,10 +499,12 @@ def publish_odd_labelset(
     datasets_bucket: str,
     openai_model: str,
     openai_model_revision: str,
+    publish_latest: bool,
 ) -> OddPublication:
     import boto3
 
     from data_processing.odd_labeling.ontology import ontology_document
+    from data_processing.odd_labeling.published_snapshot import S3Location
 
     wrappers = []
     for scene_file in scene_files:
@@ -509,6 +531,32 @@ def publish_odd_labelset(
     ):
         raise ValueError("ODD scene records differ from publication coordinate")
 
+    manifest_location = S3Location.parse(dataset_manifest_uri)
+    manifest_response = boto3.client("s3").get_object(
+        Bucket=manifest_location.bucket,
+        Key=manifest_location.key,
+    )
+    manifest_body = manifest_response["Body"]
+    try:
+        manifest_payload = manifest_body.read(MAX_ODD_ARTIFACT_BYTES + 1)
+    finally:
+        manifest_body.close()
+    if len(manifest_payload) > MAX_ODD_ARTIFACT_BYTES:
+        raise ValueError("dataset manifest exceeds ODD publication size cap")
+    if _sha256(manifest_payload) != dataset_manifest_sha256:
+        raise ValueError("dataset manifest digest differs during publication")
+    dataset_manifest = json.loads(manifest_payload)
+    if (
+        dataset_manifest.get("status") != "ready"
+        or dataset_manifest.get("dataset") != dataset_name
+        or dataset_manifest.get("version") != dataset_version
+    ):
+        raise ValueError("dataset manifest differs from publication coordinate")
+    expected_scene_count = int(dataset_manifest["episodes"])
+    publication_scope = _publication_scope(
+        len(records), expected_scene_count, publish_latest
+    )
+
     ontology = ontology_document()
     identity = {
         "schema_version": "odd_labelset_identity_v1",
@@ -519,6 +567,7 @@ def publish_odd_labelset(
         "labeler_version": ODD_LABELER_VERSION,
         "openai_model": openai_model,
         "openai_model_revision": openai_model_revision,
+        "publication_scope": publication_scope,
         "scene_record_sha256": [
             item["record_sha256"] for item in wrappers
         ],
@@ -588,6 +637,8 @@ def publish_odd_labelset(
         "ontology_version": ontology["ontology_version"],
         "ontology_sha256": ontology["ontology_sha256"],
         "labeler_version": ODD_LABELER_VERSION,
+        "publication_scope": publication_scope,
+        "expected_scene_count": expected_scene_count,
         "scene_count": len(records),
         "openai_compatible": {
             "model": openai_model,
@@ -600,22 +651,23 @@ def publish_odd_labelset(
     _put_immutable(s3, datasets_bucket, manifest_key, manifest_payload)
     manifest_sha256 = _sha256(manifest_payload)
 
-    pointer = {
-        "schema_version": "odd_labelset_pointer_v1",
-        "status": "ready",
-        "dataset_name": dataset_name,
-        "dataset_version": dataset_version,
-        "labelset_id": labelset_id,
-        "manifest_key": manifest_key,
-        "manifest_sha256": manifest_sha256,
-    }
-    s3.put_object(
-        Bucket=datasets_bucket,
-        Key=f"{dataset_name}/{dataset_version}/odd/latest.json",
-        Body=_canonical_bytes(pointer),
-        ContentType="application/json",
-        Metadata={"odd-schema": "v1", "status": "ready"},
-    )
+    if publish_latest:
+        pointer = {
+            "schema_version": "odd_labelset_pointer_v1",
+            "status": "ready",
+            "dataset_name": dataset_name,
+            "dataset_version": dataset_version,
+            "labelset_id": labelset_id,
+            "manifest_key": manifest_key,
+            "manifest_sha256": manifest_sha256,
+        }
+        s3.put_object(
+            Bucket=datasets_bucket,
+            Key=f"{dataset_name}/{dataset_version}/odd/latest.json",
+            Body=_canonical_bytes(pointer),
+            ContentType="application/json",
+            Metadata={"odd-schema": "v1", "status": "ready"},
+        )
     return OddPublication(
         labelset_id=labelset_id,
         manifest_key=manifest_key,
@@ -634,12 +686,15 @@ def wf_generate_odd_labelset(
     openai_model_revision: str,
     camera_anchor_interval_s: float = 4.0,
     maximum_camera_anchors: int = 12,
+    maximum_scenes: int = 0,
     scene_concurrency: int = 40,
+    publish_latest: bool = True,
 ) -> OddPublication:
     """Label a published dataset independently from every training workflow."""
     descriptors = resolve_odd_scenes(
         dataset_manifest_uri=dataset_manifest_uri,
         dataset_manifest_sha256=dataset_manifest_sha256,
+        maximum_scenes=maximum_scenes,
     )
     scene_files = map_odd_scenes(
         descriptors=descriptors,
@@ -658,4 +713,5 @@ def wf_generate_odd_labelset(
         datasets_bucket=datasets_bucket,
         openai_model=openai_model,
         openai_model_revision=openai_model_revision,
+        publish_latest=publish_latest,
     )
