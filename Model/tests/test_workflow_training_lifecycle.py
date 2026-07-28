@@ -886,6 +886,58 @@ def test_rollout_control_arm_uses_composite_selector_without_rollout_loss():
     assert '"train/throughput/optimizer_steps_per_second"' in source
 
 
+def test_rollout_epoch_diagnostics_use_eligible_sample_weights():
+    sums = {
+        "rollout": 0.0,
+        "map": 0.0,
+        "route": 0.0,
+        "drivable": 0.0,
+    }
+    weights = {name: 0 for name in sums}
+
+    workflows._accumulate_rollout_epoch_terms(
+        sums,
+        weights,
+        {
+            "rollout": torch.tensor(2.0),
+            "map": torch.tensor(8.0),
+            "route": torch.tensor(4.0),
+            "drivable": torch.tensor(0.0),
+            "map_sample_count": torch.tensor(1),
+            "route_sample_count": torch.tensor(1),
+            "drivable_sample_count": torch.tensor(0),
+        },
+        batch_sample_count=4,
+    )
+    workflows._accumulate_rollout_epoch_terms(
+        sums,
+        weights,
+        {
+            "rollout": torch.tensor(4.0),
+            "map": torch.tensor(2.0),
+            "route": torch.tensor(0.0),
+            "drivable": torch.tensor(3.0),
+            "map_sample_count": torch.tensor(2),
+            "route_sample_count": torch.tensor(0),
+            "drivable_sample_count": torch.tensor(2),
+        },
+        batch_sample_count=2,
+    )
+
+    assert sums == {
+        "rollout": 16.0,
+        "map": 12.0,
+        "route": 4.0,
+        "drivable": 6.0,
+    }
+    assert weights == {
+        "rollout": 6,
+        "map": 3,
+        "route": 1,
+        "drivable": 2,
+    }
+
+
 def test_kitscenes_epoch_evaluation_preserves_auto_e2e_horizon():
     from training.dataset_policy import KITSCENES_TRAINING_POLICY
 
