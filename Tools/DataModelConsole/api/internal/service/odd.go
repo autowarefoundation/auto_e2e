@@ -66,6 +66,8 @@ type ODDSceneSummary struct {
 	SceneUID         string                       `json:"scene_uid"`
 	ShardName        string                       `json:"shard_name"`
 	RecordKey        string                       `json:"record_key"`
+	RecordSHA256     string                       `json:"record_sha256"`
+	RecordByteSize   int64                        `json:"record_byte_size"`
 	StartTimestampNS int64                        `json:"start_timestamp_ns"`
 	EndTimestampNS   int64                        `json:"end_timestamp_ns"`
 	DistanceM        float64                      `json:"distance_m"`
@@ -102,6 +104,7 @@ func (s *S3Service) oddObject(
 	ctx context.Context,
 	key string,
 	expectedSHA256 string,
+	expectedByteSize int64,
 ) ([]byte, error) {
 	output, err := s.client.GetObject(ctx, &s3.GetObjectInput{
 		Bucket: aws.String(s.bucket),
@@ -117,6 +120,12 @@ func (s *S3Service) oddObject(
 	}
 	if len(payload) > maxOddJSONBytes {
 		return nil, fmt.Errorf("ODD object exceeds size cap: %s", key)
+	}
+	if expectedByteSize > 0 && int64(len(payload)) != expectedByteSize {
+		return nil, fmt.Errorf(
+			"ODD object size differs for %s: expected=%d actual=%d",
+			key, expectedByteSize, len(payload),
+		)
 	}
 	if expectedSHA256 != "" {
 		actual := fmt.Sprintf("%x", sha256.Sum256(payload))
@@ -137,7 +146,7 @@ func (s *S3Service) loadODDManifest(
 ) (ODDManifest, string, error) {
 	var manifest ODDManifest
 	pointerKey := fmt.Sprintf("%s/%s/odd/latest.json", dataset, version)
-	body, err := s.oddObject(ctx, pointerKey, "")
+	body, err := s.oddObject(ctx, pointerKey, "", 0)
 	if err != nil {
 		return manifest, "", err
 	}
@@ -156,7 +165,9 @@ func (s *S3Service) loadODDManifest(
 		!validOddDigest(pointer.ManifestSHA256) {
 		return manifest, "", fmt.Errorf("invalid ODD ready pointer")
 	}
-	body, err = s.oddObject(ctx, pointer.ManifestKey, pointer.ManifestSHA256)
+	body, err = s.oddObject(
+		ctx, pointer.ManifestKey, pointer.ManifestSHA256, 0,
+	)
 	if err != nil {
 		return manifest, "", err
 	}
@@ -199,7 +210,9 @@ func (s *S3Service) oddArtifact(
 		return nil, manifest, "", err
 	}
 	artifact := manifest.Artifacts[name]
-	body, err := s.oddObject(ctx, artifact.Key, artifact.SHA256)
+	body, err := s.oddObject(
+		ctx, artifact.Key, artifact.SHA256, artifact.ByteSize,
+	)
 	return body, manifest, manifestSHA, err
 }
 
@@ -250,6 +263,30 @@ func (s *S3Service) oddScenes(
 		return oddSceneIndex{}, manifest, digest, fmt.Errorf(
 			"ODD scene index differs from manifest",
 		)
+	}
+	root := fmt.Sprintf(
+		"%s/%s/odd/labelsets/%s/scenes/",
+		dataset, version, manifest.LabelSetID,
+	)
+	seen := make(map[string]struct{}, len(index.Scenes))
+	for _, scene := range index.Scenes {
+		if scene.SceneUID == "" ||
+			scene.ShardName == "" ||
+			!strings.HasPrefix(scene.RecordKey, root) ||
+			!validOddDigest(scene.RecordSHA256) ||
+			scene.RecordByteSize <= 0 ||
+			scene.RecordByteSize > maxOddJSONBytes ||
+			scene.EndTimestampNS <= scene.StartTimestampNS {
+			return oddSceneIndex{}, manifest, digest, fmt.Errorf(
+				"invalid ODD scene index entry",
+			)
+		}
+		if _, found := seen[scene.SceneUID]; found {
+			return oddSceneIndex{}, manifest, digest, fmt.Errorf(
+				"duplicate ODD scene uid",
+			)
+		}
+		seen[scene.SceneUID] = struct{}{}
 	}
 	return index, manifest, digest, nil
 }
@@ -338,16 +375,28 @@ func (s *S3Service) ODDScene(
 		if scene.SceneUID != sceneUID {
 			continue
 		}
-		root := fmt.Sprintf(
-			"%s/%s/odd/labelsets/%s/scenes/",
-			dataset, version, manifest.LabelSetID,
+		body, err := s.oddObject(
+			ctx,
+			scene.RecordKey,
+			scene.RecordSHA256,
+			scene.RecordByteSize,
 		)
-		if !strings.HasPrefix(scene.RecordKey, root) {
+		if err != nil {
+			return nil, manifest, digest, err
+		}
+		var identity struct {
+			SceneUID       string `json:"scene_uid"`
+			DatasetName    string `json:"dataset_name"`
+			DatasetVersion string `json:"dataset_version"`
+		}
+		if err := json.Unmarshal(body, &identity); err != nil ||
+			identity.SceneUID != sceneUID ||
+			identity.DatasetName != dataset ||
+			identity.DatasetVersion != version {
 			return nil, manifest, digest, fmt.Errorf(
-				"ODD scene record key escapes LabelSet",
+				"ODD scene record differs from index coordinate",
 			)
 		}
-		body, err := s.oddObject(ctx, scene.RecordKey, "")
 		return json.RawMessage(body), manifest, digest, err
 	}
 	return nil, manifest, digest, ErrNotFound
