@@ -579,6 +579,7 @@ def _evaluate_open_loop(
     navigation_geometry=None,
     route_swap_counterfactual: bool = False,
     include_navigation_records: bool = False,
+    report_intervention: bool = False,
 ) -> dict:
     """Evaluate one fixed loader and return finite ADE/FDE plus its UID digest."""
     import hashlib
@@ -598,6 +599,11 @@ def _evaluate_open_loop(
     navigation_records: list[dict] = []
     route_swap_records: list[dict] = []
     route_cache: dict[str, dict] = {}
+    _reactive = getattr(model, "Reactive_E2E", None)
+    report_delta = report_intervention and (
+        getattr(_reactive, "ReasoningHead", None) is not None
+    )
+    intervention_deltas: list[float] = []
     model.eval()
     try:
         with torch.no_grad():
@@ -772,6 +778,22 @@ def _evaluate_open_loop(
                     )
                     all_ade.append(float(errors.mean()))
                     all_fde.append(float(errors[-1]))
+                    if report_delta and len(intervention_deltas) < 50:
+                        from evaluation.faithfulness import (
+                            reasoning_intervention_delta,
+                        )
+                        intervention_deltas.append(
+                            reasoning_intervention_delta(
+                                model, visual, map_context, vis_hist,
+                                ego_hist, projection=projection,
+                                geometry_type=geometry_type,
+                                route_mask=route_mask, map_valid=map_valid,
+                                route_valid=route_valid,
+                                history_frames=history_frames,
+                                future_frames=future_frames,
+                                initial_noise=initial_noise,
+                            )["trajectory_l2"]
+                        )
                     if navigation_geometry is not None:
                         from evaluation.navigation_metrics import (
                             ROUTE_QUALITY_FIELDS,
@@ -909,6 +931,10 @@ def _evaluate_open_loop(
         "sample_count": len(all_ade),
         "sample_uid_digest": uid_digest,
     }
+    if intervention_deltas:
+        result["reasoning_intervention_delta"] = float(
+            np.mean(intervention_deltas)
+        )
     if navigation_geometry is not None:
         from evaluation.navigation_metrics import (
             summarize_navigation_metrics,
@@ -4385,6 +4411,7 @@ def _run_evaluation(
         device,
         training_policy=training_policy,
         navigation_geometry=navigation_geometry,
+        report_intervention=True,
         route_swap_counterfactual=(navigation_geometry is not None),
         include_navigation_records=(
             navigation_records_output is not None
@@ -4662,6 +4689,10 @@ def _run_evaluation(
                 for key, value in navigation_metrics.items()
                 if value is not None
             })
+        if evaluation.get("reasoning_intervention_delta") is not None:
+            logged_metrics["eval/reasoning_intervention_delta"] = float(
+                evaluation["reasoning_intervention_delta"]
+            )
         mlflow.log_metrics(logged_metrics)
 
         # Artifacts
