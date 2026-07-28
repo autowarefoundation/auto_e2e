@@ -204,9 +204,9 @@ def _statistics(records: list[dict], ontology: dict, labelset_id: str) -> dict:
                     "scene_ratio": (
                         count / len(valid_scenes) if valid_scenes else 0.0
                     ),
-                    "duration_ns": value_duration[value],
+                    "duration_ns": value_duration.get(value, 0),
                     "duration_ratio": (
-                        value_duration[value] / valid_duration
+                        value_duration.get(value, 0) / valid_duration
                         if valid_duration
                         else 0.0
                     ),
@@ -228,7 +228,7 @@ def _statistics(records: list[dict], ontology: dict, labelset_id: str) -> dict:
                     for status in ontology["statuses"]
                 },
                 "status_duration_ns": {
-                    status: status_duration[status]
+                    status: status_duration.get(status, 0)
                     for status in ontology["statuses"]
                 },
                 "source_scene_counts": {
