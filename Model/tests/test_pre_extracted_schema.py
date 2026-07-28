@@ -8,6 +8,7 @@ shards on disk.
 import dataclasses
 import io
 import json
+import zipfile
 
 import numpy as np
 import pytest
@@ -170,6 +171,29 @@ class TestDecodeSampleMapSplit:
         out = _decode_sample(sample)
 
         assert not out["route_supervision"]["drivable_available"]
+
+    def test_missing_drivable_availability_is_rejected(self):
+        members = _navigation_members()
+        output = io.BytesIO()
+        with zipfile.ZipFile(
+            io.BytesIO(members["route_supervision.npz"]),
+            mode="r",
+        ) as source, zipfile.ZipFile(output, mode="w") as destination:
+            for name in source.namelist():
+                if name != "drivable_available.npy":
+                    destination.writestr(
+                        source.getinfo(name),
+                        source.read(name),
+                    )
+        members["route_supervision.npz"] = output.getvalue()
+        sample = {
+            "cam_0.jpg": _jpeg_bytes((0, 0, 0)),
+            "ego.npy": _ego_bytes(),
+            **members,
+        }
+
+        with pytest.raises(ValueError, match="fields differ from contract"):
+            _decode_sample(sample)
 
     def test_navigation_geometry_must_match_model_contract(self):
         sample = {
