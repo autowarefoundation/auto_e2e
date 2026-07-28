@@ -10,7 +10,7 @@ import tempfile
 from collections import defaultdict
 from typing import List, NamedTuple
 
-from flytekit import Resources, dynamic, map_task, task, workflow
+from flytekit import Resources, Secret, dynamic, map_task, task, workflow
 from flytekit.types.file import FlyteFile
 
 
@@ -52,6 +52,8 @@ def _scene_summary(
     *,
     shard_name: str,
     record_key: str,
+    record_sha256: str,
+    record_byte_size: int,
 ) -> dict:
     grouped: dict[tuple[str, str, tuple[str, ...], str], dict] = {}
     for observation in record["observations"]:
@@ -89,6 +91,8 @@ def _scene_summary(
         "scene_uid": record["scene_uid"],
         "shard_name": shard_name,
         "record_key": record_key,
+        "record_sha256": record_sha256,
+        "record_byte_size": record_byte_size,
         "start_timestamp_ns": int(record["start_timestamp_ns"]),
         "end_timestamp_ns": int(record["end_timestamp_ns"]),
         "distance_m": float(record["distance_m"]),
@@ -102,6 +106,20 @@ def _scene_summary(
             ),
         ),
     }
+
+
+def _union_duration(intervals: list[tuple[int, int]]) -> int:
+    if not intervals:
+        return 0
+    total = 0
+    start, end = sorted(intervals)[0]
+    for next_start, next_end in sorted(intervals)[1:]:
+        if next_start <= end:
+            end = max(end, next_end)
+            continue
+        total += end - start
+        start, end = next_start, next_end
+    return total + end - start
 
 
 def _statistics(records: list[dict], ontology: dict, labelset_id: str) -> dict:
@@ -119,8 +137,12 @@ def _statistics(records: list[dict], ontology: dict, labelset_id: str) -> dict:
         valid_scenes: set[str] = set()
         status_scenes: dict[str, set[str]] = defaultdict(set)
         value_scenes: dict[str, set[str]] = defaultdict(set)
-        status_duration: dict[str, int] = defaultdict(int)
-        value_duration: dict[str, int] = defaultdict(int)
+        status_intervals: dict[str, dict[str, list[tuple[int, int]]]] = (
+            defaultdict(lambda: defaultdict(list))
+        )
+        value_intervals: dict[str, dict[str, list[tuple[int, int]]]] = (
+            defaultdict(lambda: defaultdict(list))
+        )
         source_scenes: dict[str, set[str]] = defaultdict(set)
         for record in records:
             scene_uid = record["scene_uid"]
@@ -128,19 +150,33 @@ def _statistics(records: list[dict], ontology: dict, labelset_id: str) -> dict:
                 if observation["key"] != key:
                     continue
                 status = observation["status"]
-                duration = (
-                    int(observation["end_timestamp_ns"])
-                    - int(observation["start_timestamp_ns"])
-                )
                 status_scenes[status].add(scene_uid)
-                status_duration[status] += duration
+                interval = (
+                    int(observation["start_timestamp_ns"]),
+                    int(observation["end_timestamp_ns"]),
+                )
+                status_intervals[status][scene_uid].append(interval)
                 source_scenes[observation["source"]].add(scene_uid)
                 if status != "valid":
                     continue
                 valid_scenes.add(scene_uid)
                 for value in observation["values"]:
                     value_scenes[value].add(scene_uid)
-                    value_duration[value] += duration
+                    value_intervals[value][scene_uid].append(interval)
+        status_duration = {
+            status: sum(
+                _union_duration(intervals)
+                for intervals in by_scene.values()
+            )
+            for status, by_scene in status_intervals.items()
+        }
+        value_duration = {
+            value: sum(
+                _union_duration(intervals)
+                for intervals in by_scene.values()
+            )
+            for value, by_scene in value_intervals.items()
+        }
         valid_duration = status_duration.get("valid", 0)
         values = []
         for candidate in definition["values"]:
@@ -249,14 +285,25 @@ def resolve_odd_scenes(
 @task(
     container_image=DATA_PREP_IMAGE,
     cache=True,
-    cache_version="odd-label-scene-v1",
+    cache_version="odd-label-scene-v2",
     retries=2,
     requests=Resources(cpu="2", mem="6Gi"),
     limits=Resources(cpu="4", mem="12Gi"),
+    secret_requests=[
+        Secret(
+            group="odd-road-observer",
+            key="OPENAI_COMPATIBLE_BASE_URL",
+            mount_requirement=Secret.MountType.ENV_VAR,
+        ),
+        Secret(
+            group="odd-road-observer",
+            key="OPENAI_COMPATIBLE_API_KEY",
+            mount_requirement=Secret.MountType.ENV_VAR,
+        ),
+    ],
 )
 def label_odd_scene(
     descriptor_json: str,
-    openai_base_url: str,
     openai_model: str,
     openai_model_revision: str,
     camera_anchor_interval_s: float,
@@ -304,11 +351,26 @@ def label_odd_scene(
         *label_map_route(evidence),
         *label_image_quality(evidence, anchors),
     ]
-    if openai_base_url and openai_model:
+    if openai_model:
+        from flytekit import current_context
+
+        base_url = current_context().secrets.get(
+            "odd-road-observer",
+            "OPENAI_COMPATIBLE_BASE_URL",
+        )
+        api_key = current_context().secrets.get(
+            "odd-road-observer",
+            "OPENAI_COMPATIBLE_API_KEY",
+        )
+        if not base_url:
+            raise ValueError(
+                "OpenAI-compatible labeling requires a configured base URL"
+            )
         observer = OpenAICompatibleRoadObserver(
             RoadVLMConfig(
-                base_url=openai_base_url,
+                base_url=base_url,
                 model=openai_model,
+                api_key=api_key or None,
                 timeout_s=600,
                 max_tokens=4096,
                 retry_count=2,
@@ -380,7 +442,6 @@ def label_odd_scene(
 )
 def map_odd_scenes(
     descriptors: List[str],
-    openai_base_url: str,
     openai_model: str,
     openai_model_revision: str,
     camera_anchor_interval_s: float,
@@ -392,7 +453,6 @@ def map_odd_scenes(
     labeler = map_task(
         functools.partial(
             label_odd_scene,
-            openai_base_url=openai_base_url,
             openai_model=openai_model,
             openai_model_revision=openai_model_revision,
             camera_anchor_interval_s=camera_anchor_interval_s,
@@ -431,7 +491,11 @@ def publish_odd_labelset(
             payload = stream.read(MAX_ODD_ARTIFACT_BYTES + 1)
         if len(payload) > MAX_ODD_ARTIFACT_BYTES:
             raise ValueError("scene ODD record exceeds size cap")
-        wrappers.append(json.loads(payload))
+        wrapper = json.loads(payload)
+        record_sha256 = _sha256(_canonical_bytes(wrapper["record"]))
+        if record_sha256 != wrapper.get("record_sha256"):
+            raise ValueError("ODD scene record digest differs from wrapper")
+        wrappers.append(wrapper)
     wrappers.sort(key=lambda item: item["record"]["scene_uid"])
     records = [item["record"] for item in wrappers]
     scene_ids = [record["scene_uid"] for record in records]
@@ -492,12 +556,15 @@ def publish_odd_labelset(
         ).hexdigest()
         record_key = f"{root}/scenes/{scene_digest}.json"
         record_payload = _canonical_bytes(record)
+        record_sha256 = _sha256(record_payload)
         _put_immutable(s3, datasets_bucket, record_key, record_payload)
         scene_summaries.append(
             _scene_summary(
                 record,
                 shard_name=wrapper["shard_name"],
                 record_key=record_key,
+                record_sha256=record_sha256,
+                record_byte_size=len(record_payload),
             )
         )
     publish(
@@ -563,7 +630,6 @@ def wf_generate_odd_labelset(
     dataset_manifest_uri: str,
     dataset_manifest_sha256: str,
     datasets_bucket: str,
-    openai_base_url: str,
     openai_model: str,
     openai_model_revision: str,
     camera_anchor_interval_s: float = 4.0,
@@ -577,7 +643,6 @@ def wf_generate_odd_labelset(
     )
     scene_files = map_odd_scenes(
         descriptors=descriptors,
-        openai_base_url=openai_base_url,
         openai_model=openai_model,
         openai_model_revision=openai_model_revision,
         camera_anchor_interval_s=camera_anchor_interval_s,
