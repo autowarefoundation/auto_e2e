@@ -288,10 +288,10 @@ class TestTrajectoryImitationLoss:
                 source_revision=(
                     "6fde0034446669e2ed7235e4c7fe323cd23d599d"
                 ),
-                packed_dataset_version="v3.2",
+                packed_dataset_version="v3.3",
                 packed_contract_digest=(
-                    "214137b5f1c5adae33fa404ca7651ecd"
-                    "8e84292dfa0cad0ab028c384b1262ed8"
+                    "6fb9d857d877e570522a59a38097b0f6"
+                    "b3320d8f702bbd05ec9670faa4be6d96"
                 ),
                 packed_partition_count=533,
                 empty_partition_count=129,
@@ -429,10 +429,10 @@ class TestTrajectoryImitationLoss:
         )
         assert payload["training_sample_count"] == 38847
         assert payload["validation_sample_count"] == 3820
-        assert payload["dataset_version"] == "v3.2"
+        assert payload["dataset_version"] == "v3.3"
         assert payload["packed_contract_digest"] == (
-            "214137b5f1c5adae33fa404ca7651ecd"
-            "8e84292dfa0cad0ab028c384b1262ed8"
+            "6fb9d857d877e570522a59a38097b0f6"
+            "b3320d8f702bbd05ec9670faa4be6d96"
         )
         assert payload["sample_inventory_parent"] == {
             "manifest": "kitscenes_train_dev_v2.json",
