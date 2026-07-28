@@ -594,8 +594,33 @@ def _resume_policy_transition(
         },
         "bad_epochs_before_reset": None,
         "bad_epochs_after_reset": 0,
-        "scheduler_state_action": "reset",
+        "scheduler_state_action": (
+            "reset_plateau_state_preserve_optimizer_lr"
+        ),
         "best_checkpoint_scope": "post_transition",
+    }
+
+
+def _restore_resume_optimization_state(
+    optimizer,
+    scheduler,
+    resume_payload: dict,
+    *,
+    transition: dict | None,
+) -> dict:
+    """Restore optimizer state and optionally the plateau scheduler state."""
+    optimizer.load_state_dict(resume_payload["optimizer_state_dict"])
+    plateau_state_restored = transition is None
+    if plateau_state_restored:
+        scheduler.load_state_dict(
+            resume_payload["scheduler_state_dict"]
+        )
+    return {
+        "optimizer_lr": [
+            float(group["lr"]) for group in optimizer.param_groups
+        ],
+        "optimizer_lr_preserved": True,
+        "plateau_state_restored": plateau_state_restored,
     }
 
 
@@ -3862,6 +3887,7 @@ def train_il(
     best_local_path = None
     resumed = resume_from is not None
     resume_policy_transition = None
+    resume_optimization_state = None
     terminal_resume = False
     stopped_early = False
 
@@ -3904,11 +3930,12 @@ def train_il(
             ),
         )
         model.load_state_dict(resume_payload["model_state_dict"])
-        optimizer.load_state_dict(resume_payload["optimizer_state_dict"])
-        if resume_policy_transition is None:
-            scheduler.load_state_dict(
-                resume_payload["scheduler_state_dict"]
-            )
+        resume_optimization_state = _restore_resume_optimization_state(
+            optimizer,
+            scheduler,
+            resume_payload,
+            transition=resume_policy_transition,
+        )
         scaler.load_state_dict(resume_payload["scaler_state_dict"])
         state = dict(resume_payload["training_state"])
         run_id = str(state.get("run_id", ""))
@@ -4002,6 +4029,9 @@ def train_il(
             )
         )
         if resume_policy_transition is not None:
+            resume_policy_transition["optimization_state"] = (
+                resume_optimization_state
+            )
             best_local_path = None
         terminal_resume, stopped_early = _resume_terminal_state(
             completed_epoch=completed_epoch,
@@ -4045,7 +4075,8 @@ def train_il(
                         resume_policy_transition["policy_version"]
                     ),
                     "resume_bad_epochs_reset": "true",
-                    "resume_scheduler_state_reset": "true",
+                    "resume_plateau_state_reset": "true",
+                    "resume_optimizer_lr_preserved": "true",
                     "resume_best_checkpoint_reset": "true",
                     "resume_navigation_repeat_enabled": "true",
                     "resume_early_stopping_patience": str(
