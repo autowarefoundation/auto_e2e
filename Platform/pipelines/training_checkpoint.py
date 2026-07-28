@@ -286,3 +286,42 @@ def update_best_pointer(
         Metadata={"sha256": hashlib.sha256(body).hexdigest()},
     )
     return f"s3://{bucket}/{key}"
+
+
+def mark_best_pointer_transition_pending(
+    s3_client,
+    *,
+    bucket: str,
+    run_id: str,
+    transition_policy_version: str,
+    source_best: Mapping[str, Any],
+) -> str:
+    """Prevent a pre-transition checkpoint from remaining the active best."""
+    if not transition_policy_version:
+        raise ValueError("transition policy version must be non-empty")
+    required = {"epoch", "uri", "sha256", "selection_score"}
+    if set(source_best) != required:
+        raise ValueError(
+            "source best transition fields differ from contract"
+        )
+    pointer = {
+        "schema_version": "best_checkpoint_transition_v1",
+        "run_id": run_id,
+        "status": "pending_post_transition_validation",
+        "transition_policy_version": transition_policy_version,
+        "source_best": dict(source_best),
+    }
+    body = json.dumps(
+        pointer,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("ascii")
+    key = best_pointer_key(run_id)
+    s3_client.put_object(
+        Bucket=bucket,
+        Key=key,
+        Body=body,
+        ContentType="application/json",
+        Metadata={"sha256": hashlib.sha256(body).hexdigest()},
+    )
+    return f"s3://{bucket}/{key}"
