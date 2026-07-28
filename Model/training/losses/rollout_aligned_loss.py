@@ -433,15 +433,25 @@ class RolloutAlignedLoss(nn.Module):
             & artifact_available
             & drivable_artifact_available
         )
-        route_per_sample = self._region_excess(
+        route_field = torch.where(
+            route_active[:, None, None],
             fields["distance_to_corridor_m"],
+            torch.zeros_like(fields["distance_to_corridor_m"]),
+        )
+        drivable_field = torch.where(
+            drivable_active[:, None, None],
+            fields["distance_to_drivable_m"],
+            torch.zeros_like(fields["distance_to_drivable_m"]),
+        )
+        route_per_sample = self._region_excess(
+            route_field,
             predicted_positions,
             predicted_headings,
             logged_positions,
             target_headings,
         )
         drivable_per_sample = self._region_excess(
-            fields["distance_to_drivable_m"],
+            drivable_field,
             predicted_positions,
             predicted_headings,
             logged_positions,
