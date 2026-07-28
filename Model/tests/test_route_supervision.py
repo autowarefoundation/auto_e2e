@@ -65,7 +65,11 @@ def _route(*, valid: bool = True) -> NavigationRoute:
     )
 
 
-def _raster(*, route_valid: bool = True) -> NavigationRaster:
+def _raster(
+    *,
+    map_valid: bool = True,
+    route_valid: bool = True,
+) -> NavigationRaster:
     geometry = DEFAULT_NAVIGATION_GEOMETRY
     map_context = np.zeros(
         (14, geometry.height_px, geometry.width_px),
@@ -99,7 +103,7 @@ def _raster(*, route_valid: bool = True) -> NavigationRaster:
     return NavigationRaster(
         map_context=map_context,
         route_mask=route_mask,
-        map_valid=True,
+        map_valid=map_valid,
         route_valid=route_valid,
         geometry_id=geometry.geometry_id,
         render_pose=pose,
@@ -142,6 +146,7 @@ def test_route_supervision_is_metric_deterministic_and_directional():
         first.distance_to_drivable_m.max()
         <= MAXIMUM_OUTSIDE_DISTANCE_M
     )
+    assert first.drivable_available
     assert first.route_heading_valid[tuple(center)] == 1
     direction_norm = np.hypot(
         first.route_heading_sin[tuple(center)],
@@ -163,15 +168,33 @@ def test_invalid_route_has_no_supervision_or_future_trajectory_fields():
 
     assert np.count_nonzero(supervision.distance_to_corridor_m) == 0
     assert np.count_nonzero(supervision.distance_to_drivable_m) > 0
+    assert supervision.drivable_available
     assert np.count_nonzero(supervision.route_heading_valid) == 0
     assert np.count_nonzero(supervision.destination_xy_m) == 0
     assert not supervision.destination_visible
     assert set(supervision.arrays()) == {
         "distance_to_corridor_m",
         "distance_to_drivable_m",
+        "drivable_available",
         "route_heading_sin",
         "route_heading_cos",
         "route_heading_valid",
         "destination_xy_m",
         "destination_visible",
     }
+
+
+def test_invalid_map_disables_drivable_supervision_explicitly():
+    raster = _raster(map_valid=False)
+
+    supervision = build_route_supervision(
+        _route(),
+        raster.sample_pose,
+        raster,
+    )
+
+    assert not supervision.drivable_available
+    assert np.all(
+        supervision.distance_to_drivable_m
+        == MAXIMUM_OUTSIDE_DISTANCE_M
+    )
