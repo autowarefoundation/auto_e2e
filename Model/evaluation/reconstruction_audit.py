@@ -17,7 +17,7 @@ from data_processing.geospatial import decode_gps_future, decode_pose
 from training.losses.control_rollout import integrate_controls_torch
 
 
-AUDIT_SCHEMA_VERSION = "target_rollout_reconstruction_v1"
+AUDIT_SCHEMA_VERSION = "target_rollout_reconstruction_v2"
 P95_FDE_3S_LIMIT_M = 1.0
 P95_FDE_FULL_LIMIT_M = 2.0
 _HISTORY_STEPS = 64
@@ -243,6 +243,76 @@ def _distribution(values: Sequence[float]) -> dict[str, float]:
     }
 
 
+def _optional_distribution(
+    values: np.ndarray,
+) -> dict[str, float] | None:
+    flattened = np.asarray(values, dtype=np.float64).reshape(-1)
+    return _distribution(flattened) if flattened.size else None
+
+
+def _heading_alignment(
+    logged_xy_m: np.ndarray,
+    target_headings_rad: np.ndarray,
+    *,
+    three_second_steps: int,
+    full_horizon_steps: int,
+    minimum_baseline_m: float,
+) -> dict[str, object]:
+    """Compare control headings with centered logged-path tangents."""
+    if not np.isfinite(minimum_baseline_m) or minimum_baseline_m <= 0.0:
+        raise ValueError("minimum heading baseline must be finite and positive")
+    logged = np.asarray(logged_xy_m, dtype=np.float64)
+    target = np.asarray(target_headings_rad, dtype=np.float64)
+    if target.shape != logged.shape[:2]:
+        raise ValueError("target headings must match logged trajectory steps")
+    origin = np.zeros_like(logged[:, :1])
+    previous = np.concatenate([origin, logged[:, :-1]], axis=1)
+    following = np.concatenate(
+        [logged[:, 1:], logged[:, -1:]],
+        axis=1,
+    )
+    baseline = following - previous
+    baseline_length = np.linalg.norm(baseline, axis=2)
+    valid = baseline_length >= minimum_baseline_m
+    logged_headings = np.arctan2(baseline[:, :, 1], baseline[:, :, 0])
+    difference = target - logged_headings
+    error_deg = np.rad2deg(np.abs(np.arctan2(
+        np.sin(difference),
+        np.cos(difference),
+    )))
+
+    def distribution_for(
+        errors: np.ndarray,
+        mask: np.ndarray,
+    ) -> dict[str, float] | None:
+        return _optional_distribution(errors[mask])
+
+    return {
+        "method": "centered_logged_xy_tangent_v1",
+        "minimum_baseline_m": minimum_baseline_m,
+        "valid_step_count": int(valid[:, :full_horizon_steps].sum()),
+        "valid_sample_count": int(
+            np.any(valid[:, :full_horizon_steps], axis=1).sum()
+        ),
+        "three_seconds": distribution_for(
+            error_deg[:, :three_second_steps],
+            valid[:, :three_second_steps],
+        ),
+        "full_horizon": distribution_for(
+            error_deg[:, :full_horizon_steps],
+            valid[:, :full_horizon_steps],
+        ),
+        "at_3s": distribution_for(
+            error_deg[:, three_second_steps - 1],
+            valid[:, three_second_steps - 1],
+        ),
+        "at_full_horizon": distribution_for(
+            error_deg[:, full_horizon_steps - 1],
+            valid[:, full_horizon_steps - 1],
+        ),
+    }
+
+
 def audit_target_rollout_reconstruction(
     target_controls: np.ndarray,
     logged_xy_m: np.ndarray,
@@ -255,6 +325,7 @@ def audit_target_rollout_reconstruction(
     full_horizon_steps: int = 64,
     p95_fde_3s_limit_m: float = P95_FDE_3S_LIMIT_M,
     p95_fde_full_limit_m: float = P95_FDE_FULL_LIMIT_M,
+    minimum_heading_baseline_m: float = 0.1,
 ) -> dict[str, object]:
     """Compare integrated target controls with logged ego-frame future XY."""
     controls = np.ascontiguousarray(target_controls, dtype=np.float32)
@@ -289,7 +360,7 @@ def audit_target_rollout_reconstruction(
         )
 
     with torch.no_grad():
-        predicted_xy, _, _ = integrate_controls_torch(
+        predicted_xy, target_headings, _ = integrate_controls_torch(
             torch.from_numpy(controls),
             torch.from_numpy(speeds),
             dt=dt,
@@ -377,6 +448,13 @@ def audit_target_rollout_reconstruction(
         }
         for step in range(full_horizon_steps)
     ]
+    heading_alignment = _heading_alignment(
+        logged,
+        target_headings.numpy(),
+        three_second_steps=three_second_steps,
+        full_horizon_steps=full_horizon_steps,
+        minimum_baseline_m=minimum_heading_baseline_m,
+    )
     return {
         "schema_version": AUDIT_SCHEMA_VERSION,
         "sample_count": batch_size,
@@ -407,6 +485,7 @@ def audit_target_rollout_reconstruction(
             "non_finite_sample_count": 0,
         },
         "metrics": metrics,
+        "heading_alignment": heading_alignment,
         "error_by_step": error_by_step,
         "worst_scenes": worst_scenes,
         "scenes": scenes,
