@@ -333,7 +333,7 @@ def resolve_odd_scenes(
 @task(
     container_image=DATA_PREP_IMAGE,
     cache=True,
-    cache_version="odd-label-scene-v5",
+    cache_version="odd-label-scene-v6",
     retries=2,
     pod_template=_scene_labeling_pod_template(),
     requests=Resources(cpu="2", mem="6Gi"),
@@ -356,6 +356,8 @@ def label_odd_scene(
     capability_manifest_json: str,
     openai_model: str,
     openai_model_revision: str,
+    labeler_image_digest: str,
+    labeler_source_revision: str,
     camera_anchor_interval_s: float,
     maximum_camera_anchors: int,
 ) -> FlyteFile:
@@ -364,6 +366,10 @@ def label_odd_scene(
     from data_processing.odd_labeling.deterministic import (
         label_kinematics,
         label_map_route,
+    )
+    from data_processing.odd_labeling.fusion import (
+        EvidenceBuildContext,
+        build_resolved_scene_labels,
     )
     from data_processing.odd_labeling.image_qc import (
         label_image_quality,
@@ -382,12 +388,17 @@ def label_odd_scene(
     from data_processing.odd_labeling.schema import (
         DatasetCapabilityManifest,
         SceneLabelRecord,
-        coalesce_observations,
         make_observation,
     )
 
     if camera_anchor_interval_s <= 0 or maximum_camera_anchors <= 0:
         raise ValueError("camera anchor sampling must be positive")
+    if SHA256_RE.fullmatch(labeler_image_digest) is None:
+        raise ValueError("labeler_image_digest must be a sha256 digest")
+    if SOURCE_REVISION_RE.fullmatch(labeler_source_revision) is None:
+        raise ValueError("labeler_source_revision must be a full Git revision")
+    if openai_model and not openai_model_revision:
+        raise ValueError("OpenAI-compatible model revision must be pinned")
     descriptor = PublishedSceneDescriptor.from_json(descriptor_json)
     capability_manifest = DatasetCapabilityManifest.from_json(
         capability_manifest_json
@@ -472,6 +483,21 @@ def label_odd_scene(
                 },
             )
         )
+    resolved = build_resolved_scene_labels(
+        observations,
+        context=EvidenceBuildContext(
+            dataset_name=descriptor.dataset_name,
+            dataset_version=descriptor.dataset_version,
+            dataset_manifest_sha256=descriptor.dataset_manifest_sha256,
+            capability_manifest_sha256=(
+                capability_manifest.semantic_sha256()
+            ),
+            source_artifact_uri=descriptor.source_uri,
+            source_artifact_sha256=descriptor.source_manifest_sha256,
+            labeler_image_digest=labeler_image_digest,
+            labeler_source_revision=labeler_source_revision,
+        ),
+    )
     record = SceneLabelRecord(
         scene_uid=evidence.scene_uid,
         dataset_name=descriptor.dataset_name,
@@ -480,10 +506,17 @@ def label_odd_scene(
         start_timestamp_ns=evidence.start_timestamp_ns,
         end_timestamp_ns=evidence.end_timestamp_ns,
         distance_m=evidence.distance_m,
-        observations=coalesce_observations(observations),
+        observations=resolved.observations,
         source_artifact_uri=descriptor.source_uri,
         source_artifact_sha256=descriptor.source_manifest_sha256,
+        evidence=resolved.evidence,
+        events=resolved.events,
         capability_manifest_sha256=capability_manifest.semantic_sha256(),
+        provenance={
+            "labeler_version": ODD_LABELER_VERSION,
+            "labeler_image_digest": labeler_image_digest,
+            "labeler_source_revision": labeler_source_revision,
+        },
     )
     wrapper = {
         "record": record.to_dict(),
@@ -511,6 +544,8 @@ def map_odd_scenes(
     capability_manifest_json: str,
     openai_model: str,
     openai_model_revision: str,
+    labeler_image_digest: str,
+    labeler_source_revision: str,
     camera_anchor_interval_s: float,
     maximum_camera_anchors: int,
     scene_concurrency: int,
@@ -523,6 +558,8 @@ def map_odd_scenes(
             capability_manifest_json=capability_manifest_json,
             openai_model=openai_model,
             openai_model_revision=openai_model_revision,
+            labeler_image_digest=labeler_image_digest,
+            labeler_source_revision=labeler_source_revision,
             camera_anchor_interval_s=camera_anchor_interval_s,
             maximum_camera_anchors=maximum_camera_anchors,
         ),
@@ -796,6 +833,8 @@ def wf_generate_odd_labelset(
         capability_manifest_json=scene_plan.capability_manifest_json,
         openai_model=openai_model,
         openai_model_revision=openai_model_revision,
+        labeler_image_digest=labeler_image_digest,
+        labeler_source_revision=labeler_source_revision,
         camera_anchor_interval_s=camera_anchor_interval_s,
         maximum_camera_anchors=maximum_camera_anchors,
         scene_concurrency=scene_concurrency,
