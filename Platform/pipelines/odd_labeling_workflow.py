@@ -500,7 +500,7 @@ def map_odd_scenes(
 @task(
     container_image=DATA_PREP_IMAGE,
     cache=True,
-    cache_version="odd-publish-labelset-v5",
+    cache_version="odd-publish-labelset-v6",
     requests=Resources(cpu="2", mem="8Gi"),
     limits=Resources(cpu="4", mem="16Gi"),
 )
@@ -528,6 +528,10 @@ def publish_odd_labelset(
         build_parquet_artifacts,
     )
     from data_processing.odd_labeling.published_snapshot import S3Location
+    from data_processing.odd_labeling.quality import (
+        QUALITY_SCHEMA_VERSION,
+        build_quality_documents,
+    )
     from data_processing.odd_labeling.schema import DatasetCapabilityManifest
     from data_processing.odd_labeling.statistics import (
         STATISTICS_SCHEMA_VERSION,
@@ -624,6 +628,7 @@ def publish_odd_labelset(
         "bedrock_map_model_revision": bedrock_map_model_revision,
         "statistics_schema_version": STATISTICS_SCHEMA_VERSION,
         "parquet_schema_version": PARQUET_SCHEMA_VERSION,
+        "quality_schema_version": QUALITY_SCHEMA_VERSION,
         "publication_scope": validated_publication_scope,
         "scene_record_sha256": [
             item["record_sha256"] for item in wrappers
@@ -634,6 +639,23 @@ def publish_odd_labelset(
         f"{dataset_name}/{dataset_version}/odd/labelsets/{labelset_id}"
     )
     s3 = boto3.client("s3")
+    statistics = _statistics(records, ontology, labelset_id)
+    quality_documents = build_quality_documents(
+        records,
+        statistics,
+        ontology,
+        labelset_id=labelset_id,
+    )
+    parquet_artifacts = build_parquet_artifacts(
+        records,
+        statistics,
+        labelset_id=labelset_id,
+        dataset_name=dataset_name,
+        dataset_version=dataset_version,
+        dataset_manifest_sha256=dataset_manifest_sha256,
+        capability_manifest_sha256=capability_manifest_sha256,
+        ontology_sha256=ontology["ontology_sha256"],
+    )
 
     artifacts = {}
 
@@ -657,24 +679,44 @@ def publish_odd_labelset(
     if artifacts["capabilities"]["sha256"] != capability_manifest_sha256:
         raise ValueError("published capability digest differs from semantic digest")
     publish("ontology", ontology, "ontology.json")
-    statistics = _statistics(records, ontology, labelset_id)
     publish(
         "statistics",
         statistics,
         "statistics.json",
     )
-    parquet_artifacts = build_parquet_artifacts(
-        records,
-        statistics,
-        labelset_id=labelset_id,
-        dataset_name=dataset_name,
-        dataset_version=dataset_version,
-        dataset_manifest_sha256=dataset_manifest_sha256,
-        capability_manifest_sha256=capability_manifest_sha256,
-        ontology_sha256=ontology["ontology_sha256"],
+    publish(
+        "quality_coverage",
+        quality_documents["coverage"],
+        "quality/coverage.json",
     )
+    publish(
+        "quality_audit_manifest",
+        quality_documents["audit_manifest"],
+        "quality/audit_manifest.json",
+    )
+    publish(
+        "quality_calibration",
+        quality_documents["calibration"],
+        "quality/calibration.json",
+    )
+    parquet_paths = {
+        "scene_records": "scene_records/part-00000.parquet",
+        "evidence": "evidence/part-00000.parquet",
+        "observations": "observations/part-00000.parquet",
+        "events": "events/part-00000.parquet",
+        "statistics": "statistics/values.parquet",
+        "odd_cooccurrences": "statistics/odd_cooccurrences.parquet",
+        "odd_event_cooccurrences": (
+            "statistics/odd_event_cooccurrences.parquet"
+        ),
+        "conflicts": "quality/conflicts.parquet",
+    }
+    if set(parquet_artifacts) != set(parquet_paths):
+        raise ValueError(
+            "ODD Parquet artifacts differ from the publication layout"
+        )
     for table_name, parquet_artifact in parquet_artifacts.items():
-        relative_key = f"{table_name}/part-00000.parquet"
+        relative_key = parquet_paths[table_name]
         key = f"{root}/{relative_key}"
         _put_immutable(
             s3,
@@ -757,6 +799,14 @@ def publish_odd_labelset(
             "model_id": bedrock_map_model_id,
             "model_revision": bedrock_map_model_revision,
             "input_policy": "privacy_filtered_map_route_only",
+        },
+        "quality": {
+            "schema_version": QUALITY_SCHEMA_VERSION,
+            "structural_status": quality_documents["coverage"][
+                "structural_validation"
+            ]["status"],
+            "audit_status": quality_documents["audit_manifest"]["status"],
+            "certification_status": "experimental",
         },
         "artifacts": artifacts,
     }
