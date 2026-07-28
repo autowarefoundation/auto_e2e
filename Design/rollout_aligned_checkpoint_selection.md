@@ -368,11 +368,9 @@ alignment as evaluation.
 - Integration always runs in `torch.float32`.
 - The rollout executes outside AMP autocast even when the surrounding training
   step uses AMP.
-- The non-negative-speed update is implemented as the vectorized Lindley
-  recurrence: cumulative speed increments are reflected at their running
-  minimum and the negative initial-speed floor. This is algebraically
-  equivalent to applying `torch.clamp_min(speed, 0.0)` at every timestep
-  without a Python loop.
+- `torch.clamp_min(speed, 0.0)` implements the non-negative-speed constraint at
+  every timestep. The recurrence uses functional tensor reassignment and list
+  accumulation rather than in-place state updates.
 - State updates are functional; no in-place tensor updates are permitted.
 - Controls, initial speed, and any supplied initial state must be finite.
   Non-finite input fails before integration.
@@ -385,9 +383,9 @@ implementation.
 
 ### 6.3 Known gradient limitation
 
-When the equivalent per-step unclamped speed is below zero, the reflected
-recurrence removes the local gradient from acceleration through speed. This is
-accepted for the first implementation:
+When the per-step unclamped speed is below zero, `clamp_min(0)` removes the
+local gradient from acceleration through speed. This is accepted for the first
+implementation:
 
 - no custom backward is introduced;
 - `L_action` still supervises acceleration during stopped intervals;
