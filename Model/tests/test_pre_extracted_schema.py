@@ -5,6 +5,7 @@ as a camera view) and the manifest projection round-trip, without needing real
 shards on disk.
 """
 
+import dataclasses
 import io
 import json
 
@@ -25,6 +26,7 @@ from navigation.artifacts import (
 from navigation.contracts import canonical_json_bytes
 from navigation.geometry import DEFAULT_NAVIGATION_GEOMETRY
 from navigation.supervision import (
+    MAXIMUM_OUTSIDE_DISTANCE_M,
     ROUTE_SUPERVISION_ARTIFACT_VERSION,
     empty_route_supervision,
 )
@@ -50,11 +52,20 @@ def _navigation_members(
     map_context[0, 10:20, 10:20] = 0.25
     route_mask = np.zeros((2, 256, 256), dtype=np.uint8)
     route_mask[0, 12:18, 12:18] = 1
+    supervision = dataclasses.replace(
+        empty_route_supervision(DEFAULT_NAVIGATION_GEOMETRY),
+        distance_to_drivable_m=np.full(
+            (256, 256),
+            MAXIMUM_OUTSIDE_DISTANCE_M,
+            dtype=np.float32,
+        ),
+        drivable_available=map_valid,
+    )
     return {
         "map_semantic.npz": encode_array(map_context),
         "route_mask.npz": encode_array(route_mask),
         "route_supervision.npz": encode_route_supervision(
-            empty_route_supervision(DEFAULT_NAVIGATION_GEOMETRY)
+            supervision
         ),
         "navigation_meta.json": canonical_json_bytes({
             "schema_version": SAMPLE_NAVIGATION_ARTIFACT_VERSION,
@@ -146,7 +157,19 @@ class TestDecodeSampleMapSplit:
         assert out["route_supervision"][
             "distance_to_drivable_m"
         ].shape == (256, 256)
+        assert out["route_supervision"]["drivable_available"]
         assert out["route_supervision"]["destination_xy_m"].shape == (2,)
+
+    def test_declared_drivable_unavailability_is_preserved(self):
+        sample = {
+            "cam_0.jpg": _jpeg_bytes((0, 0, 0)),
+            "ego.npy": _ego_bytes(),
+            **_navigation_members(map_valid=False),
+        }
+
+        out = _decode_sample(sample)
+
+        assert not out["route_supervision"]["drivable_available"]
 
     def test_navigation_geometry_must_match_model_contract(self):
         sample = {
