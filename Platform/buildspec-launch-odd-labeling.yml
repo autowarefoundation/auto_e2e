@@ -12,6 +12,8 @@ env:
     LABELER_SOURCE_REVISION: ""
     OPENAI_MODEL: nvidia/Cosmos3-Nano
     OPENAI_MODEL_REVISION: deployed
+    BEDROCK_MAP_MODEL_ID: us.anthropic.claude-sonnet-4-6
+    BEDROCK_MAP_MODEL_REVISION: claude-sonnet-4-6
     CAMERA_ANCHOR_INTERVAL_S: "4.0"
     MAXIMUM_CAMERA_ANCHORS: "12"
     MAXIMUM_SCENES: "1"
@@ -73,6 +75,12 @@ phases:
             "datasets_bucket": os.environ["DATASETS_BUCKET"],
             "openai_model": os.environ["OPENAI_MODEL"],
             "openai_model_revision": os.environ["OPENAI_MODEL_REVISION"],
+            "bedrock_map_model_id": os.environ[
+                "BEDROCK_MAP_MODEL_ID"
+            ],
+            "bedrock_map_model_revision": os.environ[
+                "BEDROCK_MAP_MODEL_REVISION"
+            ],
             "labeler_image_digest": os.environ["DATA_PREP_DIGEST"],
             "labeler_source_revision": os.environ[
                 "LABELER_SOURCE_REVISION"
