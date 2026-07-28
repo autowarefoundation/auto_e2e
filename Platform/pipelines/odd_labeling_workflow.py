@@ -6,6 +6,7 @@ import functools
 import hashlib
 import json
 import os
+import re
 import tempfile
 from collections import defaultdict
 from typing import List, NamedTuple
@@ -24,6 +25,8 @@ DATA_PREP_IMAGE = os.environ.get(
 )
 ODD_LABELER_VERSION = "odd_dataset_labeler_v1"
 MAX_ODD_ARTIFACT_BYTES = 64 << 20
+SHA256_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+SOURCE_REVISION_RE = re.compile(r"^[0-9a-f]{40}([0-9a-f]{24})?$")
 
 OddPublication = NamedTuple(
     "OddPublication",
@@ -499,6 +502,8 @@ def publish_odd_labelset(
     datasets_bucket: str,
     openai_model: str,
     openai_model_revision: str,
+    labeler_image_digest: str,
+    labeler_source_revision: str,
     publish_latest: bool,
 ) -> OddPublication:
     import boto3
@@ -530,6 +535,10 @@ def publish_odd_labelset(
         for record in records
     ):
         raise ValueError("ODD scene records differ from publication coordinate")
+    if SHA256_RE.fullmatch(labeler_image_digest) is None:
+        raise ValueError("labeler_image_digest must be a sha256 digest")
+    if SOURCE_REVISION_RE.fullmatch(labeler_source_revision) is None:
+        raise ValueError("labeler_source_revision must be a full Git revision")
 
     manifest_location = S3Location.parse(dataset_manifest_uri)
     manifest_response = boto3.client("s3").get_object(
@@ -565,6 +574,8 @@ def publish_odd_labelset(
         "dataset_manifest_sha256": dataset_manifest_sha256,
         "ontology_sha256": ontology["ontology_sha256"],
         "labeler_version": ODD_LABELER_VERSION,
+        "labeler_image_digest": labeler_image_digest,
+        "labeler_source_revision": labeler_source_revision,
         "openai_model": openai_model,
         "openai_model_revision": openai_model_revision,
         "publication_scope": publication_scope,
@@ -637,6 +648,8 @@ def publish_odd_labelset(
         "ontology_version": ontology["ontology_version"],
         "ontology_sha256": ontology["ontology_sha256"],
         "labeler_version": ODD_LABELER_VERSION,
+        "labeler_image_digest": labeler_image_digest,
+        "labeler_source_revision": labeler_source_revision,
         "publication_scope": publication_scope,
         "expected_scene_count": expected_scene_count,
         "scene_count": len(records),
@@ -684,6 +697,8 @@ def wf_generate_odd_labelset(
     datasets_bucket: str,
     openai_model: str,
     openai_model_revision: str,
+    labeler_image_digest: str,
+    labeler_source_revision: str,
     camera_anchor_interval_s: float = 4.0,
     maximum_camera_anchors: int = 12,
     maximum_scenes: int = 0,
@@ -713,5 +728,7 @@ def wf_generate_odd_labelset(
         datasets_bucket=datasets_bucket,
         openai_model=openai_model,
         openai_model_revision=openai_model_revision,
+        labeler_image_digest=labeler_image_digest,
+        labeler_source_revision=labeler_source_revision,
         publish_latest=publish_latest,
     )
