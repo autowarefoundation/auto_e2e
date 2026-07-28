@@ -262,6 +262,13 @@ def _semantic_provenance(
         or len(prompt_sha256) != 64
     ):
         prompt_sha256 = None
+    decoding_config_sha256 = details.get("decoding_config_sha256")
+    if (
+        observation.source != "vlm"
+        or not isinstance(decoding_config_sha256, str)
+        or len(decoding_config_sha256) != 64
+    ):
+        decoding_config_sha256 = None
 
     return SemanticLabelerProvenance(
         labeler_name={
@@ -286,6 +293,7 @@ def _semantic_provenance(
         lookahead_ns=int(details.get("lookahead_ns", 0) or 0),
         details=details,
         **model_fields,
+        decoding_config_sha256=decoding_config_sha256,
     )
 
 
