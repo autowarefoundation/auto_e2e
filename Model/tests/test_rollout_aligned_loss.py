@@ -8,7 +8,10 @@ import torch
 
 from navigation.geometry import DEFAULT_NAVIGATION_GEOMETRY
 from training.losses.control_rollout import integrate_controls_torch
-from training.losses.rollout_aligned_loss import RolloutAlignedLoss
+from training.losses.rollout_aligned_loss import (
+    RolloutAlignedLoss,
+    _footprint_outside_distance,
+)
 
 
 TIMESTEPS = 64
@@ -101,6 +104,68 @@ def test_prediction_equal_target_has_zero_losses():
         "drivable",
     ):
         assert terms[name].item() == 0.0
+
+
+def test_equal_footprints_have_zero_map_loss_on_nontrivial_field():
+    target = _controls(acceleration=0.1, curvature=0.01)
+    field = _field_from_lateral_band()
+
+    terms = _loss(
+        target.clone(),
+        target,
+        supervision=_supervision(
+            route_field=field,
+            drivable_field=field,
+        ),
+    )
+
+    assert terms["map"].item() == 0.0
+    assert terms["route"].item() == 0.0
+    assert terms["drivable"].item() == 0.0
+
+
+def test_footprint_corners_detect_violation_missed_by_center():
+    field = _field_from_lateral_band(half_width_m=0.5)
+    positions = torch.zeros(1, 1, 2)
+    headings = torch.zeros(1, 1)
+
+    distance = _footprint_outside_distance(
+        field,
+        positions,
+        headings,
+        GEOMETRY,
+        length_m=4.8,
+        width_m=2.0,
+    )
+
+    assert distance.item() > 0.0
+
+
+def test_out_of_raster_footprint_distance_is_differentiable():
+    field = torch.zeros(
+        1,
+        GEOMETRY.height_px,
+        GEOMETRY.width_px,
+    )
+    positions = torch.tensor(
+        [[[GEOMETRY.x_max_m + 1.0, 0.0]]],
+        requires_grad=True,
+    )
+
+    distance = _footprint_outside_distance(
+        field,
+        positions,
+        torch.zeros(1, 1),
+        GEOMETRY,
+        length_m=4.8,
+        width_m=2.0,
+    )
+    distance.sum().backward()
+
+    assert distance.item() > 0.0
+    assert positions.grad is not None
+    assert torch.isfinite(positions.grad).all()
+    assert positions.grad[0, 0, 0].item() > 0.0
 
 
 def test_rollout_position_target_is_logged_xy_not_target_controls():
