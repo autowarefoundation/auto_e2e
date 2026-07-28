@@ -55,6 +55,7 @@ def test_source_claim_becomes_auditable_evidence() -> None:
         provenance={
             "prompt_version": "road_scene_v1",
             "prompt_sha256": "6" * 64,
+            "decoding_config_sha256": "9" * 64,
             "model": "road-observer",
             "model_revision": "model-v1",
             "request_sha256": "7" * 64,
@@ -75,6 +76,7 @@ def test_source_claim_becomes_auditable_evidence() -> None:
     assert len(evidence.evidence_refs) == 2
     assert evidence.provenance.model_provider == "openai_compatible"
     assert evidence.provenance.prompt_sha256 == "6" * 64
+    assert evidence.provenance.decoding_config_sha256 == "9" * 64
     assert evidence.provenance.details["request_sha256"] == "7" * 64
 
 
