@@ -1204,6 +1204,29 @@ Resume rejects any mismatch in policy, validation identity, availability,
 score weights, utility scales, or loss configuration. Restoring only model and
 optimizer state is insufficient.
 
+For an unchanged training policy, resume restores the model, optimizer,
+`ReduceLROnPlateau`, gradient scaler, RNG, metric history, best checkpoint, and
+bad-epoch state exactly.
+
+One explicit research transition is supported:
+
+```text
+navigation repeat: disabled -> enabled
+early-stopping patience: increased
+```
+
+The caller must opt into this transition. No other config or dataset identity
+change is allowed. The optimizer state and its current learning rate are
+preserved, while the plateau scheduler state, bad-epoch count, and active best
+ranking scope are reset because the post-transition optimization and sampling
+policy is different. The source best remains in transition audit metadata but
+does not compete with post-transition checkpoints.
+
+Before the first post-transition validation, `best.json` is written with
+`pending_post_transition_validation` status. The first successfully validated
+post-transition epoch establishes the new active best. A transition is rejected
+unless at least one new epoch will run.
+
 ### 18.2 Workflow outputs
 
 The training workflow retains the existing two roles:
