@@ -7,7 +7,10 @@ import torch
 from evaluation.metrics import integrate_trajectory
 from navigation.geometry import DEFAULT_NAVIGATION_GEOMETRY
 from navigation.supervision import ROUTE_SUPERVISION_ARTIFACT_VERSION
-from training.losses.control_rollout import integrate_controls_torch
+from training.losses.control_rollout import (
+    _integrate_controls_f32,
+    integrate_controls_torch,
+)
 from training.losses.route_consistency_loss import (
     RouteConsistencyLoss,
     ego_points_to_grid,
@@ -301,6 +304,49 @@ def test_control_rollout_matches_clamp_subgradient_at_zero_speed():
         controls,
     )[0]
     torch.testing.assert_close(actual_gradient, reference_gradient)
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available(),
+    reason="CUDA compile parity requires a GPU",
+)
+def test_compiled_cuda_rollout_matches_eager_values_and_gradients():
+    controls = torch.tensor(
+        [[
+            [-10.0, 0.03],
+            [0.0, 0.02],
+            [5.0, -0.01],
+            [5.0, -0.02],
+        ]],
+        dtype=torch.float32,
+        device="cuda",
+        requires_grad=True,
+    )
+    eager_controls = controls.detach().clone().requires_grad_(True)
+    initial_speed = torch.tensor([1.0], device="cuda")
+
+    compiled = integrate_controls_torch(controls, initial_speed)
+    eager = _integrate_controls_f32(
+        eager_controls,
+        initial_speed,
+        0.1,
+    )
+
+    for compiled_value, eager_value in zip(
+        compiled,
+        eager,
+        strict=True,
+    ):
+        torch.testing.assert_close(compiled_value, eager_value)
+    compiled_gradient = torch.autograd.grad(
+        sum(value.sum() for value in compiled),
+        controls,
+    )[0]
+    eager_gradient = torch.autograd.grad(
+        sum(value.sum() for value in eager),
+        eager_controls,
+    )[0]
+    torch.testing.assert_close(compiled_gradient, eager_gradient)
 
 
 def test_grid_coordinates_match_geometry_pixel_centers():
