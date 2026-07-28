@@ -441,6 +441,20 @@ test("trajectory overlays and geographic views honor production contracts", asyn
         body: PIXEL,
       });
     }
+    if (path === "/api/v1/odd/scenes/scene-0042") {
+      return json({
+        scene_uid: "scene-0042",
+        dataset_name: "kitscenes",
+        dataset_version: "v2.1",
+        start_timestamp_ns: 1_700_000_000_000_000_000,
+        end_timestamp_ns: 1_700_000_000_200_000_000,
+        distance_m: 1.6,
+        observations: [],
+        evidence: [],
+        events: [],
+        provenance: {},
+      });
+    }
     return route.fulfill({ status: 404, body: "not mocked" });
   });
 
