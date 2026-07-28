@@ -9,9 +9,9 @@ from collections.abc import Mapping, Sequence
 import numpy as np
 
 
-SELECTOR_POLICY_VERSION = "rollout_composite_selector_v1"
+SELECTOR_POLICY_VERSION = "rollout_composite_selector_v2"
 SELECTOR_MIN_DELTA = 0.0005
-SELECTOR_CALIBRATION_VERSION = "rollout_selector_calibration_v1"
+SELECTOR_CALIBRATION_VERSION = "rollout_selector_calibration_v2"
 TOP_LEVEL_WEIGHTS = {
     "trajectory": 0.50,
     "comfort": 0.15,
@@ -286,11 +286,11 @@ def _combined_metric(
 
 
 def _bounded_inverse(value: float, scale: float) -> float:
+    if not math.isfinite(value) or value < 0.0:
+        raise ValueError("checkpoint utility input must be finite and non-negative")
+    if not math.isfinite(scale) or scale <= 0.0:
+        raise ValueError("checkpoint utility scale must be finite and positive")
     return 1.0 / (1.0 + value / scale)
-
-
-def _clipped_utility(value: float, scale: float) -> float:
-    return 1.0 - float(np.clip(value / scale, 0.0, 1.0))
 
 
 def _weighted_component_score(
@@ -368,14 +368,14 @@ def score_checkpoint(
         "trajectory": 0.5 * (
             natural_trajectory + scene_trajectory
         ),
-        "comfort": _clipped_utility(
+        "comfort": _bounded_inverse(
             _combined_metric(aggregates, "comfort_excess"),
             UTILITY_SCALES["comfort_excess"],
         ),
     }
 
     if bool(availability.get("map_safety", False)):
-        components["map_safety"] = _clipped_utility(
+        components["map_safety"] = _bounded_inverse(
             _combined_metric(aggregates, "offroad_excess"),
             UTILITY_SCALES["offroad_excess"],
         )
@@ -385,7 +385,7 @@ def score_checkpoint(
         )
         navigation_parts = {
             "route": (
-                _clipped_utility(
+                _bounded_inverse(
                     _combined_metric(aggregates, "route_gap"),
                     UTILITY_SCALES["route_gap"],
                 ),
@@ -394,7 +394,7 @@ def score_checkpoint(
         }
         if wrong_branch_available:
             navigation_parts["wrong_branch"] = (
-                _clipped_utility(
+                _bounded_inverse(
                     _combined_metric(
                         aggregates,
                         "wrong_branch_excess",
