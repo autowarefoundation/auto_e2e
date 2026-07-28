@@ -1,0 +1,96 @@
+version: 0.2
+
+env:
+  variables:
+    AWS_DEFAULT_REGION: us-west-2
+    FLYTE_PROJECT: auto-e2e
+    FLYTE_DOMAIN: development
+    IMAGE_TAG: latest
+    DATASET_NAME: kitscenes
+    DATASET_VERSION: v3.0
+    OPENAI_MODEL: nvidia/Cosmos3-Nano
+    OPENAI_MODEL_REVISION: deployed
+    CAMERA_ANCHOR_INTERVAL_S: "4.0"
+    MAXIMUM_CAMERA_ANCHORS: "12"
+    MAXIMUM_SCENES: "1"
+    SCENE_CONCURRENCY: "1"
+    PUBLISH_LATEST: "false"
+
+phases:
+  install:
+    commands:
+      - pip install -q flytekit==1.14.9 numpy torch kubernetes --extra-index-url https://download.pytorch.org/whl/cpu
+  build:
+    commands:
+      - |
+        set -euo pipefail
+
+        ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
+        ECR_URL="${ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com"
+        DATASETS_BUCKET="auto-e2e-platform-datasets-${ACCOUNT_ID}"
+        DATASET_MANIFEST_KEY="${DATASET_NAME}/${DATASET_VERSION}/shards/manifest.json"
+        DATASET_MANIFEST_URI="s3://${DATASETS_BUCKET}/${DATASET_MANIFEST_KEY}"
+        DATASET_MANIFEST_SHA256="$(
+          aws s3api head-object \
+            --bucket "${DATASETS_BUCKET}" \
+            --key "${DATASET_MANIFEST_KEY}" \
+            --query 'Metadata.sha256' \
+            --output text
+        )"
+        DATA_PREP_DIGEST="$(
+          aws ecr batch-get-image \
+            --repository-name auto-e2e/data-prep \
+            --image-ids imageTag="${IMAGE_TAG}" \
+            --query 'images[0].imageId.imageDigest' \
+            --output text
+        )"
+
+        [[ "${ACCOUNT_ID}" =~ ^[0-9]{12}$ ]]
+        [[ "${DATASET_MANIFEST_SHA256}" =~ ^[0-9a-f]{64}$ ]]
+        [[ "${DATA_PREP_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]
+        [[ "${PUBLISH_LATEST}" == "true" || "${PUBLISH_LATEST}" == "false" ]]
+
+        export AUTO_E2E_DATA_PREP_IMAGE="${ECR_URL}/auto-e2e/data-prep@${DATA_PREP_DIGEST}"
+        export ECR_PREFIX="${ECR_URL}"
+        export PYTHONPATH="${CODEBUILD_SRC_DIR}/Model:${CODEBUILD_SRC_DIR}:${PYTHONPATH:-}"
+        export DATASETS_BUCKET DATASET_MANIFEST_URI DATASET_MANIFEST_SHA256
+
+        python3 - <<'PY'
+        import json
+        import os
+
+        inputs = {
+            "dataset_name": os.environ["DATASET_NAME"],
+            "dataset_version": os.environ["DATASET_VERSION"],
+            "dataset_manifest_uri": os.environ["DATASET_MANIFEST_URI"],
+            "dataset_manifest_sha256": os.environ["DATASET_MANIFEST_SHA256"],
+            "datasets_bucket": os.environ["DATASETS_BUCKET"],
+            "openai_model": os.environ["OPENAI_MODEL"],
+            "openai_model_revision": os.environ["OPENAI_MODEL_REVISION"],
+            "camera_anchor_interval_s": float(
+                os.environ["CAMERA_ANCHOR_INTERVAL_S"]
+            ),
+            "maximum_camera_anchors": int(
+                os.environ["MAXIMUM_CAMERA_ANCHORS"]
+            ),
+            "maximum_scenes": int(os.environ["MAXIMUM_SCENES"]),
+            "scene_concurrency": int(os.environ["SCENE_CONCURRENCY"]),
+            "publish_latest": os.environ["PUBLISH_LATEST"] == "true",
+        }
+        with open("/tmp/odd-labeling-inputs.json", "w", encoding="utf-8") as stream:
+            json.dump(inputs, stream, sort_keys=True)
+        PY
+      - |
+        cat >/tmp/flyte.yaml <<EOF
+        admin:
+          endpoint: dns:///k8s-flyte-flyteadm-be92e7737c-cf0d1a0f3df10f77.elb.us-west-2.amazonaws.com:81
+          insecure: true
+        EOF
+      - |
+        pyflyte --config /tmp/flyte.yaml run --remote \
+          --project "${FLYTE_PROJECT}" \
+          --domain "${FLYTE_DOMAIN}" \
+          --image "${AUTO_E2E_DATA_PREP_IMAGE}" \
+          Platform/pipelines/workflows.py \
+          wf_generate_odd_labelset \
+          --inputs-file /tmp/odd-labeling-inputs.json
