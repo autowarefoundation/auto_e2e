@@ -13,6 +13,7 @@ from navigation.geometry import (
     DEFAULT_NAVIGATION_GEOMETRY,
     NavigationRasterGeometry,
 )
+from navigation.supervision import ROUTE_SUPERVISION_ARTIFACT_VERSION
 from training.losses.control_rollout import integrate_controls_torch
 
 
@@ -170,7 +171,7 @@ class RouteConsistencyLoss(nn.Module):
 
     def metadata(self) -> dict[str, object]:
         return {
-            "artifact_version": "navigation_supervision_v2",
+            "artifact_version": ROUTE_SUPERVISION_ARTIFACT_VERSION,
             "target_compliance_threshold": (
                 self.target_compliance_threshold
             ),
