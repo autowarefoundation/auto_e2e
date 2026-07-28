@@ -136,7 +136,13 @@ func main() {
 			r.Get("/odd/statistics", oddH.Statistics)
 			r.Get("/odd/labelsets", oddH.LabelSets)
 			r.Get("/odd/scenes/search", oddH.Search)
+			r.Post("/odd/scenes/search", oddH.SearchStructured)
 			r.Get("/odd/scenes/{scene_uid}", oddH.Scene)
+			r.Get("/scenes/{scene_uid}/odd", oddH.Scene)
+			r.Get(
+				"/scenes/{scene_uid}/odd/evidence/{observation_uid}",
+				oddH.Evidence,
+			)
 
 			r.Get("/mlflow/experiments", mlflowH.Experiments)
 			r.Get("/mlflow/experiments/{id}/runs", mlflowH.Runs)
@@ -249,7 +255,7 @@ func corsMiddleware(origin string) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Access-Control-Allow-Origin", origin)
-			w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
 			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
 			if origin != "*" {
 				w.Header().Add("Vary", "Origin")
