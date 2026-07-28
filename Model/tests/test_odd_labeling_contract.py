@@ -177,6 +177,35 @@ def _provenance() -> SemanticLabelerProvenance:
     )
 
 
+def test_semantic_provenance_retains_finite_audit_details() -> None:
+    details = {"request_sha256": "6" * 64, "attempt": 1}
+    provenance = SemanticLabelerProvenance(
+        labeler_name="synthetic_labeler",
+        labeler_version="synthetic_v1",
+        code_commit="1" * 40,
+        container_image_digest=f"sha256:{'2' * 64}",
+        config_sha256="3" * 64,
+        ontology_sha256="4" * 64,
+        input_artifact_sha256s=("5" * 64,),
+        details=details,
+    )
+    details["attempt"] = 2
+
+    assert provenance.details["attempt"] == 1
+
+    with pytest.raises(ValueError, match="Out of range float"):
+        SemanticLabelerProvenance(
+            labeler_name="synthetic_labeler",
+            labeler_version="synthetic_v1",
+            code_commit="1" * 40,
+            container_image_digest=f"sha256:{'2' * 64}",
+            config_sha256="3" * 64,
+            ontology_sha256="4" * 64,
+            input_artifact_sha256s=("5" * 64,),
+            details={"confidence": float("nan")},
+        )
+
+
 def test_dataset_capability_manifest_distinguishes_absent_channels() -> None:
     camera_channel = ChannelCapability(
         availability="complete",
