@@ -33,6 +33,7 @@ def _observation(
     end_ns: int = 200,
     confidence: float = 0.9,
     provenance: dict | None = None,
+    actor_track_uid: str | None = None,
 ):
     return make_observation(
         scene_uid="scene-1",
@@ -44,6 +45,7 @@ def _observation(
         start_timestamp_ns=start_ns,
         end_timestamp_ns=end_ns,
         provenance=provenance or {"labeler_version": f"{source}_v1"},
+        actor_track_uid=actor_track_uid,
     )
 
 
@@ -261,15 +263,64 @@ def test_event_segmentation_is_stable_and_ignores_background() -> None:
     first = build_resolved_scene_labels(source, context=_context())
     second = segment_events(first.observations)
 
-    assert len(first.events) == 2
+    assert len(first.events) == 1
     assert first.events == second
-    assert {
-        event.primary_event_key for event in first.events
-    } == {"event.ego.strong_response", "event.hazard.type"}
+    assert first.events[0].primary_event_key == "event.hazard.type"
     assert all(
         event.provenance["segmenter_version"] == EVENT_SEGMENTER_VERSION
         and tuple(phase.phase for phase in event.phases)
         == ("onset", "active", "resolution")
         and len(event.supporting_evidence_uids) == 2
+        and event.provenance["outcome"] == "not_observed"
         for event in first.events
     )
+
+
+def test_event_boundary_does_not_invent_onset_or_resolution() -> None:
+    event = build_resolved_scene_labels(
+        (
+            _observation(
+                key="event.ego.strong_response",
+                values=("hard_brake",),
+                source="gnss_ins",
+                start_ns=100,
+                end_ns=200,
+            ),
+        ),
+        context=_context(),
+    ).events[0]
+
+    assert tuple(phase.phase for phase in event.phases) == ("active",)
+    assert event.provenance["onset_observed"] is False
+    assert event.provenance["resolution_observed"] is False
+    assert event.provenance["outcome"] == "unresolved"
+
+
+def test_overlapping_events_with_distinct_actors_remain_independent() -> None:
+    events = build_resolved_scene_labels(
+        (
+            _observation(
+                key="event.vehicle.interaction",
+                values=("cut_in",),
+                source="vlm",
+                start_ns=100,
+                end_ns=300,
+                actor_track_uid="vehicle-a",
+            ),
+            _observation(
+                key="event.vehicle.interaction",
+                values=("cut_in",),
+                source="vlm",
+                start_ns=100,
+                end_ns=300,
+                actor_track_uid="vehicle-b",
+            ),
+        ),
+        context=_context(),
+    ).events
+
+    assert len(events) == 2
+    assert {event.actor_track_uids for event in events} == {
+        ("vehicle-a",),
+        ("vehicle-b",),
+    }
