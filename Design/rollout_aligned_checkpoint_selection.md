@@ -980,11 +980,17 @@ min_delta
 
 These values are fixed for the run and saved in every checkpoint. Changing a
 utility scale or weight creates a new selector policy version.
+The bounded-inverse equations in Section 16 define
+`rollout_composite_selector_v2`; checkpoints produced by the earlier clipped
+policy are not resume-compatible.
 
 Before freezing the first policy, existing checkpoints are evaluated to verify
-that no utility is almost always saturated at zero or one. A sensitivity report
-recomputes rankings after independently changing each top-level weight by
-`+/-20%` and renormalizing. This calibrates units and rank stability without
+component variation and identify semantically constant components. Excess
+metrics use bounded inverse utilities rather than hard clipping, so an error
+above one nominal scale remains rankable instead of collapsing to zero. An
+exactly zero excess may legitimately remain at utility one. A sensitivity
+report recomputes rankings after independently changing each top-level weight
+by `+/-20%` and renormalizing. This checks units and rank stability without
 using treatment-run outcomes to tune the policy.
 
 The workflow stores this report after every epoch. A one-epoch Smoke provides
@@ -1044,7 +1050,7 @@ D=0.5D_{natural}+0.5D_{scene}
 \]
 
 \[
-C=1-\operatorname{clip}\left(\frac{\bar c}{0.15},0,1\right)
+C=\frac{1}{1+\bar c/0.15}
 \]
 
 ### 16.3 Map-safety utility
@@ -1058,7 +1064,7 @@ C=1-\operatorname{clip}\left(\frac{\bar c}{0.15},0,1\right)
 \]
 
 \[
-S=1-\operatorname{clip}\left(\frac{\bar r}{0.10},0,1\right)
+S=\frac{1}{1+\bar r/0.10}
 \]
 
 ### 16.4 Navigation utility
@@ -1072,9 +1078,7 @@ S=1-\operatorname{clip}\left(\frac{\bar r}{0.10},0,1\right)
 \]
 
 \[
-N_{route}
-=
-1-\operatorname{clip}\left(\frac{\bar q}{0.15},0,1\right)
+N_{route}=\frac{1}{1+\bar q/0.15}
 \]
 
 Destination error also combines natural and scene-balanced views:
@@ -1102,10 +1106,14 @@ When wrong-branch evidence is available:
 \]
 
 \[
+N_{branch}=\frac{1}{1+\bar b/1.0}
+\]
+
+\[
 N
 =
 0.5N_{route}
-+0.3(1-\operatorname{clip}(\bar b,0,1))
++0.3N_{branch}
 +0.2N_{destination}
 \]
 
