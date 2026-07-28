@@ -155,6 +155,18 @@ def build_rollout_validation_records(
             route_valid.detach().to(device="cpu", dtype=torch.bool)
             & available
         )
+        sampling_fields = {}
+        for name, active in (
+            ("distance_to_corridor_m", route_available),
+            ("distance_to_drivable_m", map_available),
+        ):
+            if not torch.isfinite(fields[name][active]).all():
+                raise ValueError(f"active {name} must be finite")
+            sampling_fields[name] = torch.where(
+                active[:, None, None],
+                fields[name],
+                torch.zeros_like(fields[name]),
+            )
         if route_mask is None:
             routes = torch.zeros(
                 (
@@ -166,7 +178,7 @@ def build_rollout_validation_records(
                 dtype=torch.float32,
             )
             routes[:, RouteChannel.SELECTED_CORRIDOR] = (
-                fields["distance_to_corridor_m"] <= 0.0
+                sampling_fields["distance_to_corridor_m"] <= 0.0
             )
         else:
             routes = route_mask.detach().to(
@@ -183,7 +195,7 @@ def build_rollout_validation_records(
                 "route mask differs from validation geometry"
             )
         predicted_drivable_distance = _footprint_outside_distance(
-            fields["distance_to_drivable_m"],
+            sampling_fields["distance_to_drivable_m"],
             predicted_xy,
             predicted_headings,
             geometry,
@@ -191,7 +203,7 @@ def build_rollout_validation_records(
             width_m=footprint_width_m,
         )
         target_drivable_distance = _footprint_outside_distance(
-            fields["distance_to_drivable_m"],
+            sampling_fields["distance_to_drivable_m"],
             logged,
             target_headings,
             geometry,
@@ -199,7 +211,7 @@ def build_rollout_validation_records(
             width_m=footprint_width_m,
         )
         predicted_route_distance = _footprint_outside_distance(
-            fields["distance_to_corridor_m"],
+            sampling_fields["distance_to_corridor_m"],
             predicted_xy,
             predicted_headings,
             geometry,
@@ -207,7 +219,7 @@ def build_rollout_validation_records(
             width_m=footprint_width_m,
         )
         target_route_distance = _footprint_outside_distance(
-            fields["distance_to_corridor_m"],
+            sampling_fields["distance_to_corridor_m"],
             logged,
             target_headings,
             geometry,
