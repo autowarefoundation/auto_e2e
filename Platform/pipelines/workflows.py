@@ -55,7 +55,7 @@ DATA_PREP_IMAGE = _os.environ.get(
 
 MLFLOW_URI = "http://mlflow.mlflow.svc.cluster.local:5000"
 DATASET_PACK_VERSION = "v2.2"
-KITSCENES_NAVIGATION_DATASET_VERSION = "v3.2"
+KITSCENES_NAVIGATION_DATASET_VERSION = "v3.3"
 BASELINE_TRAINING_OBJECTIVE_VERSION = "trajectory_imitation_v1"
 KITSCENES_NAVIGATION_OBJECTIVE_VERSION = (
     "kitscenes_navigation_objective_v1"
@@ -3504,6 +3504,10 @@ def train_il(
         f"group_digest={validation_group_digest}"
     )
 
+    from navigation.supervision import (
+        ROUTE_SUPERVISION_ARTIFACT_VERSION,
+    )
+
     # Consistency guard (packing ↔ training) across every non-empty partition.
     # Sparse reasoning targets are masked on unlabeled samples, so probing a
     # random first batch cannot distinguish an intentionally unlabeled sample
@@ -3517,25 +3521,27 @@ def train_il(
             and not manifest.get("has_navigation", False)
         ):
             raise ValueError(
-                f"KITScenes shard '{dname}' ({d}) has no schema-v7 "
+                f"KITScenes shard '{dname}' ({d}) has no schema-v8 "
                 "navigation artifacts"
             )
         if enable_route_consistency and (
             not manifest.get("has_route_supervision", False)
             or manifest.get("route_supervision_version")
-            != "navigation_supervision_v2"
+            != ROUTE_SUPERVISION_ARTIFACT_VERSION
         ):
             raise ValueError(
-                f"route consistency requires navigation_supervision_v2 in "
+                "route consistency requires "
+                f"{ROUTE_SUPERVISION_ARTIFACT_VERSION} in "
                 f"dataset '{dname}' ({d})"
             )
         if selector_enabled and (
             not manifest.get("has_route_supervision", False)
             or manifest.get("route_supervision_version")
-            != "navigation_supervision_v2"
+            != ROUTE_SUPERVISION_ARTIFACT_VERSION
         ):
             raise ValueError(
-                "rollout composite selector requires navigation_supervision_v2 "
+                "rollout composite selector requires "
+                f"{ROUTE_SUPERVISION_ARTIFACT_VERSION} "
                 f"in dataset '{dname}' ({d})"
             )
         if selector_enabled and not manifest.get("has_gps", False):
