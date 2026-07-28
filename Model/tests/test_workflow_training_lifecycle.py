@@ -1001,6 +1001,29 @@ def test_resume_policy_transition_enables_repeat_and_resets_patience():
         "to": 8,
     }
     assert transition["bad_epochs_after_reset"] == 0
+    assert transition["scheduler_state_action"] == "reset"
+    assert transition["best_checkpoint_scope"] == "post_transition"
+
+    bad_epochs, best = workflows._transition_resume_selection_state(
+        transition,
+        bad_epochs=2,
+        best_checkpoint={
+            "epoch": 5,
+            "uri": "s3://checkpoints/run/epoch-0005.pt",
+            "sha256": "a" * 64,
+            "selection": {"score": 0.42},
+        },
+    )
+
+    assert bad_epochs == 0
+    assert best is None
+    assert transition["bad_epochs_before_reset"] == 2
+    assert transition["best_before_reset"] == {
+        "epoch": 5,
+        "uri": "s3://checkpoints/run/epoch-0005.pt",
+        "sha256": "a" * 64,
+        "selection_score": 0.42,
+    }
 
 
 @pytest.mark.parametrize(
