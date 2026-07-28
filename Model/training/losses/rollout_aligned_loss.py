@@ -480,7 +480,7 @@ class RolloutAlignedLoss(nn.Module):
         ) / (
             1.0 + map_available.to(dtype=torch.float32)
         )
-        zero = predicted.sum() * 0.0
+        zero = predicted.reshape(-1)[0].to(dtype=torch.float32) * 0.0
 
         def active_mean(
             values: torch.Tensor,
