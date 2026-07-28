@@ -31,11 +31,11 @@ def _integrate_controls_f32(
         raw_speed = speed + controls[:, step, 0] * dt
         clamped_speed = torch.clamp_min(raw_speed, 0.0)
         # Inductor uses a different derivative at the clamp boundary than
-        # eager PyTorch. Preserve clamp_min's eager >= 0 subgradient explicitly.
-        speed = (
-            clamped_speed.detach()
-            + (raw_speed - raw_speed.detach())
-            * (raw_speed >= 0.0).to(dtype=raw_speed.dtype)
+        # eager PyTorch. Select the raw branch at zero to preserve gradient 1.
+        speed = torch.where(
+            raw_speed >= 0.0,
+            raw_speed,
+            clamped_speed,
         )
         heading = heading + speed * controls[:, step, 1] * dt
         x = x + speed * torch.cos(heading) * dt
