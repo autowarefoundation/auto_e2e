@@ -8,6 +8,7 @@ env:
     IMAGE_TAG: latest
     DATASET_NAME: kitscenes
     DATASET_VERSION: v3.0
+    DATASET_MANIFEST_SHA256: ""
     OPENAI_MODEL: nvidia/Cosmos3-Nano
     OPENAI_MODEL_REVISION: deployed
     CAMERA_ANCHOR_INTERVAL_S: "4.0"
@@ -30,13 +31,15 @@ phases:
         DATASETS_BUCKET="auto-e2e-platform-datasets-${ACCOUNT_ID}"
         DATASET_MANIFEST_KEY="${DATASET_NAME}/${DATASET_VERSION}/shards/manifest.json"
         DATASET_MANIFEST_URI="s3://${DATASETS_BUCKET}/${DATASET_MANIFEST_KEY}"
-        DATASET_MANIFEST_SHA256="$(
-          aws s3api head-object \
-            --bucket "${DATASETS_BUCKET}" \
-            --key "${DATASET_MANIFEST_KEY}" \
-            --query 'Metadata.sha256' \
-            --output text
-        )"
+        if [ -z "${DATASET_MANIFEST_SHA256}" ]; then
+          DATASET_MANIFEST_SHA256="$(
+            aws s3api head-object \
+              --bucket "${DATASETS_BUCKET}" \
+              --key "${DATASET_MANIFEST_KEY}" \
+              --query 'Metadata.sha256' \
+              --output text
+          )"
+        fi
         DATA_PREP_DIGEST="$(
           aws ecr batch-get-image \
             --repository-name auto-e2e/data-prep \
