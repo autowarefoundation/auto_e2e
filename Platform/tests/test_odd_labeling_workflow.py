@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import pytest
+
 from Platform.pipelines.odd_labeling_workflow import (
     _publication_scope,
+    _put_immutable,
     _scene_summary,
     _statistics,
     _union_duration,
@@ -10,6 +13,14 @@ from Platform.pipelines.odd_labeling_workflow import (
     resolve_odd_scenes,
     wf_generate_odd_labelset,
 )
+
+
+class _RecordingS3:
+    def __init__(self) -> None:
+        self.request = {}
+
+    def put_object(self, **kwargs) -> None:
+        self.request = kwargs
 
 
 def test_union_duration_counts_overlapping_intervals_once() -> None:
@@ -100,6 +111,33 @@ def test_scene_summary_pins_record_integrity() -> None:
 
     assert summary["record_sha256"] == "a" * 64
     assert summary["record_byte_size"] == 123
+
+
+def test_immutable_parquet_upload_pins_binary_contract() -> None:
+    s3 = _RecordingS3()
+
+    _put_immutable(
+        s3,
+        "datasets",
+        "odd/evidence/part-00000.parquet",
+        b"parquet",
+        content_type="application/vnd.apache.parquet",
+        schema_version="odd_parquet_v1",
+        maximum_bytes=7,
+    )
+
+    assert s3.request["ContentType"] == "application/vnd.apache.parquet"
+    assert s3.request["IfNoneMatch"] == "*"
+    assert s3.request["Metadata"]["odd-schema"] == "odd_parquet_v1"
+    assert len(s3.request["Metadata"]["sha256"]) == 64
+    with pytest.raises(ValueError, match="exceeds size cap"):
+        _put_immutable(
+            s3,
+            "datasets",
+            "odd/evidence/part-00000.parquet",
+            b"parquet",
+            maximum_bytes=6,
+        )
 
 
 def test_workflow_interface_does_not_expose_endpoint_url() -> None:
