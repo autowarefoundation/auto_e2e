@@ -129,6 +129,69 @@ def test_scene_summary_pins_record_integrity() -> None:
     assert summary["record_byte_size"] == 123
 
 
+def test_scene_summary_preserves_search_scope_and_events() -> None:
+    summary = _scene_summary(
+        {
+            "scene_uid": "scene-1",
+            "start_timestamp_ns": 0,
+            "end_timestamp_ns": 100,
+            "distance_m": 12.5,
+            "observations": [
+                {
+                    "key": "event.vehicle.interaction",
+                    "status": "valid",
+                    "values": ["cut_in"],
+                    "source": "vlm",
+                    "confidence": 0.8,
+                    "start_timestamp_ns": 10,
+                    "end_timestamp_ns": 30,
+                    "camera_id": "front",
+                    "actor_track_uid": "vehicle-a",
+                    "event_uid": "event-1",
+                },
+                {
+                    "key": "event.vehicle.interaction",
+                    "status": "valid",
+                    "values": ["cut_in"],
+                    "source": "vlm",
+                    "confidence": 0.9,
+                    "start_timestamp_ns": 40,
+                    "end_timestamp_ns": 60,
+                    "camera_id": "front",
+                    "actor_track_uid": "vehicle-a",
+                    "event_uid": "event-1",
+                },
+            ],
+            "events": [
+                {
+                    "event_uid": "event-1",
+                    "primary_event_key": "event.vehicle.interaction",
+                    "start_timestamp_ns": 10,
+                    "end_timestamp_ns": 60,
+                    "status": "valid",
+                    "confidence": 0.8,
+                    "actor_track_uids": ["vehicle-a"],
+                    "provenance": {
+                        "primary_values": ["cut_in"],
+                        "outcome": "unresolved",
+                    },
+                }
+            ],
+        },
+        shard_name="scene-1.tar",
+        record_key="odd/scenes/scene-1.json",
+        record_sha256="a" * 64,
+        record_byte_size=123,
+    )
+
+    observation = summary["observations"][0]
+    assert observation["interval_count"] == 2
+    assert observation["duration_ns"] == 40
+    assert observation["camera_id"] == "front"
+    assert observation["actor_track_uid"] == "vehicle-a"
+    assert summary["events"][0]["outcome"] == "unresolved"
+
+
 def test_immutable_parquet_upload_pins_binary_contract() -> None:
     s3 = _RecordingS3()
 
