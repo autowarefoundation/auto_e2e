@@ -450,14 +450,23 @@ class RolloutAlignedLoss(nn.Module):
         route_weight = route_active.to(dtype=torch.float32)
         drivable_weight = drivable_active.to(dtype=torch.float32)
         map_term_count = route_weight + drivable_weight
+        route_contribution = torch.where(
+            route_active,
+            route_per_sample,
+            torch.zeros_like(route_per_sample),
+        )
+        drivable_contribution = torch.where(
+            drivable_active,
+            drivable_per_sample,
+            torch.zeros_like(drivable_per_sample),
+        )
         map_per_sample = (
-            route_per_sample * route_weight
-            + drivable_per_sample * drivable_weight
+            route_contribution + drivable_contribution
         ) / map_term_count.clamp_min(1.0)
         map_available = map_term_count > 0.0
         constraint_per_sample = (
             comfort_per_sample
-            + map_per_sample * map_available.to(dtype=torch.float32)
+            + map_per_sample
         ) / (
             1.0 + map_available.to(dtype=torch.float32)
         )
@@ -468,8 +477,13 @@ class RolloutAlignedLoss(nn.Module):
             active: torch.Tensor,
         ) -> torch.Tensor:
             weights = active.to(dtype=values.dtype)
+            active_values = torch.where(
+                active,
+                values,
+                torch.zeros_like(values),
+            )
             return (
-                (values * weights).sum()
+                active_values.sum()
                 / weights.sum().clamp_min(1.0)
                 + zero
             )
