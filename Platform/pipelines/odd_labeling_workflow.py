@@ -23,7 +23,7 @@ DATA_PREP_IMAGE = os.environ.get(
     "AUTO_E2E_DATA_PREP_IMAGE",
     f"{ECR_PREFIX}/auto-e2e/data-prep:latest",
 )
-ODD_LABELER_VERSION = "odd_dataset_labeler_v2"
+ODD_LABELER_VERSION = "odd_dataset_labeler_v3"
 MAX_ODD_ARTIFACT_BYTES = 64 << 20
 SHA256_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 SOURCE_REVISION_RE = re.compile(r"^[0-9a-f]{40}([0-9a-f]{24})?$")
@@ -333,7 +333,7 @@ def resolve_odd_scenes(
 @task(
     container_image=DATA_PREP_IMAGE,
     cache=True,
-    cache_version="odd-label-scene-v6",
+    cache_version="odd-label-scene-v7",
     retries=2,
     pod_template=_scene_labeling_pod_template(),
     requests=Resources(cpu="2", mem="6Gi"),
@@ -356,6 +356,8 @@ def label_odd_scene(
     capability_manifest_json: str,
     openai_model: str,
     openai_model_revision: str,
+    bedrock_map_model_id: str,
+    bedrock_map_model_revision: str,
     labeler_image_digest: str,
     labeler_source_revision: str,
     camera_anchor_interval_s: float,
@@ -363,6 +365,10 @@ def label_odd_scene(
 ) -> FlyteFile:
     import boto3
 
+    from data_processing.odd_labeling.bedrock_map_resolver import (
+        BedrockMapRouteResolver,
+        resolve_ambiguous_map_route,
+    )
     from data_processing.odd_labeling.deterministic import (
         label_kinematics,
         label_map_route,
@@ -399,6 +405,8 @@ def label_odd_scene(
         raise ValueError("labeler_source_revision must be a full Git revision")
     if openai_model and not openai_model_revision:
         raise ValueError("OpenAI-compatible model revision must be pinned")
+    if bool(bedrock_map_model_id) != bool(bedrock_map_model_revision):
+        raise ValueError("Bedrock map model ID and revision must be paired")
     descriptor = PublishedSceneDescriptor.from_json(descriptor_json)
     capability_manifest = DatasetCapabilityManifest.from_json(
         capability_manifest_json
@@ -422,11 +430,28 @@ def label_odd_scene(
         interval_s=camera_anchor_interval_s,
         maximum_anchors=maximum_camera_anchors,
     )
+    map_route_observations = label_map_route(evidence)
     observations = [
         *label_kinematics(evidence),
-        *label_map_route(evidence),
+        *map_route_observations,
         *label_image_quality(evidence, anchors),
     ]
+    if bedrock_map_model_id:
+        bedrock_resolver = BedrockMapRouteResolver(
+            boto3.client(
+                "bedrock-runtime",
+                region_name=os.environ.get("AWS_REGION", "us-west-2"),
+            ),
+            model_id=bedrock_map_model_id,
+            model_revision=bedrock_map_model_revision,
+        )
+        observations.extend(
+            resolve_ambiguous_map_route(
+                bedrock_resolver,
+                evidence,
+                map_route_observations,
+            )
+        )
     if openai_model:
         from flytekit import current_context
 
@@ -544,6 +569,8 @@ def map_odd_scenes(
     capability_manifest_json: str,
     openai_model: str,
     openai_model_revision: str,
+    bedrock_map_model_id: str,
+    bedrock_map_model_revision: str,
     labeler_image_digest: str,
     labeler_source_revision: str,
     camera_anchor_interval_s: float,
@@ -558,6 +585,8 @@ def map_odd_scenes(
             capability_manifest_json=capability_manifest_json,
             openai_model=openai_model,
             openai_model_revision=openai_model_revision,
+            bedrock_map_model_id=bedrock_map_model_id,
+            bedrock_map_model_revision=bedrock_map_model_revision,
             labeler_image_digest=labeler_image_digest,
             labeler_source_revision=labeler_source_revision,
             camera_anchor_interval_s=camera_anchor_interval_s,
@@ -571,7 +600,7 @@ def map_odd_scenes(
 @task(
     container_image=DATA_PREP_IMAGE,
     cache=True,
-    cache_version="odd-publish-labelset-v2",
+    cache_version="odd-publish-labelset-v3",
     requests=Resources(cpu="2", mem="8Gi"),
     limits=Resources(cpu="4", mem="16Gi"),
 )
@@ -585,6 +614,8 @@ def publish_odd_labelset(
     datasets_bucket: str,
     openai_model: str,
     openai_model_revision: str,
+    bedrock_map_model_id: str,
+    bedrock_map_model_revision: str,
     labeler_image_digest: str,
     labeler_source_revision: str,
     publication_scope: str,
@@ -606,6 +637,8 @@ def publish_odd_labelset(
         != dataset_manifest_sha256
     ):
         raise ValueError("capability manifest differs from publication coordinate")
+    if bool(bedrock_map_model_id) != bool(bedrock_map_model_revision):
+        raise ValueError("Bedrock map model ID and revision must be paired")
     wrappers = []
     for scene_file in scene_files:
         path = scene_file.download()
@@ -680,6 +713,8 @@ def publish_odd_labelset(
         "labeler_source_revision": labeler_source_revision,
         "openai_model": openai_model,
         "openai_model_revision": openai_model_revision,
+        "bedrock_map_model_id": bedrock_map_model_id,
+        "bedrock_map_model_revision": bedrock_map_model_revision,
         "publication_scope": validated_publication_scope,
         "scene_record_sha256": [
             item["record_sha256"] for item in wrappers
@@ -774,6 +809,11 @@ def publish_odd_labelset(
             "model": openai_model,
             "model_revision": openai_model_revision,
         },
+        "bedrock_map_resolver": {
+            "model_id": bedrock_map_model_id,
+            "model_revision": bedrock_map_model_revision,
+            "input_policy": "privacy_filtered_map_route_only",
+        },
         "artifacts": artifacts,
     }
     manifest_payload = _canonical_bytes(manifest)
@@ -814,6 +854,8 @@ def wf_generate_odd_labelset(
     datasets_bucket: str,
     openai_model: str,
     openai_model_revision: str,
+    bedrock_map_model_id: str,
+    bedrock_map_model_revision: str,
     labeler_image_digest: str,
     labeler_source_revision: str,
     camera_anchor_interval_s: float = 4.0,
@@ -833,6 +875,8 @@ def wf_generate_odd_labelset(
         capability_manifest_json=scene_plan.capability_manifest_json,
         openai_model=openai_model,
         openai_model_revision=openai_model_revision,
+        bedrock_map_model_id=bedrock_map_model_id,
+        bedrock_map_model_revision=bedrock_map_model_revision,
         labeler_image_digest=labeler_image_digest,
         labeler_source_revision=labeler_source_revision,
         camera_anchor_interval_s=camera_anchor_interval_s,
@@ -849,6 +893,8 @@ def wf_generate_odd_labelset(
         datasets_bucket=datasets_bucket,
         openai_model=openai_model,
         openai_model_revision=openai_model_revision,
+        bedrock_map_model_id=bedrock_map_model_id,
+        bedrock_map_model_revision=bedrock_map_model_revision,
         labeler_image_digest=labeler_image_digest,
         labeler_source_revision=labeler_source_revision,
         publication_scope=publication_scope,
