@@ -7,10 +7,7 @@ import torch
 from evaluation.metrics import integrate_trajectory
 from navigation.geometry import DEFAULT_NAVIGATION_GEOMETRY
 from navigation.supervision import ROUTE_SUPERVISION_ARTIFACT_VERSION
-from training.losses.control_rollout import (
-    _integrate_controls_f32,
-    integrate_controls_torch,
-)
+from training.losses.control_rollout import integrate_controls_torch
 from training.losses.route_consistency_loss import (
     RouteConsistencyLoss,
     ego_points_to_grid,
@@ -308,9 +305,9 @@ def test_control_rollout_matches_clamp_subgradient_at_zero_speed():
 
 @pytest.mark.skipif(
     not torch.cuda.is_available(),
-    reason="CUDA compile parity requires a GPU",
+    reason="CUDA recurrence parity requires a GPU",
 )
-def test_compiled_cuda_rollout_matches_eager_values_and_gradients():
+def test_cuda_rollout_matches_recurrent_values_and_gradients():
     controls = torch.tensor(
         [[
             [-10.0, 0.03],
@@ -322,31 +319,52 @@ def test_compiled_cuda_rollout_matches_eager_values_and_gradients():
         device="cuda",
         requires_grad=True,
     )
-    eager_controls = controls.detach().clone().requires_grad_(True)
+    reference_controls = controls.detach().clone().requires_grad_(True)
     initial_speed = torch.tensor([1.0], device="cuda")
 
-    compiled = integrate_controls_torch(controls, initial_speed)
-    eager = _integrate_controls_f32(
-        eager_controls,
-        initial_speed,
-        0.1,
+    actual = integrate_controls_torch(controls, initial_speed)
+    speed = initial_speed
+    heading = torch.zeros_like(speed)
+    x = torch.zeros_like(speed)
+    y = torch.zeros_like(speed)
+    reference_positions = []
+    reference_headings = []
+    reference_speeds = []
+    for step in range(reference_controls.shape[1]):
+        speed = torch.clamp_min(
+            speed + reference_controls[:, step, 0] * 0.1,
+            0.0,
+        )
+        heading = (
+            heading
+            + speed * reference_controls[:, step, 1] * 0.1
+        )
+        x = x + speed * torch.cos(heading) * 0.1
+        y = y + speed * torch.sin(heading) * 0.1
+        reference_positions.append(torch.stack((x, y), dim=-1))
+        reference_headings.append(heading)
+        reference_speeds.append(speed)
+    reference = (
+        torch.stack(reference_positions, dim=1),
+        torch.stack(reference_headings, dim=1),
+        torch.stack(reference_speeds, dim=1),
     )
 
-    for compiled_value, eager_value in zip(
-        compiled,
-        eager,
+    for actual_value, reference_value in zip(
+        actual,
+        reference,
         strict=True,
     ):
-        torch.testing.assert_close(compiled_value, eager_value)
-    compiled_gradient = torch.autograd.grad(
-        sum(value.sum() for value in compiled),
+        torch.testing.assert_close(actual_value, reference_value)
+    actual_gradient = torch.autograd.grad(
+        sum(value.sum() for value in actual),
         controls,
     )[0]
-    eager_gradient = torch.autograd.grad(
-        sum(value.sum() for value in eager),
-        eager_controls,
+    reference_gradient = torch.autograd.grad(
+        sum(value.sum() for value in reference),
+        reference_controls,
     )[0]
-    torch.testing.assert_close(compiled_gradient, eager_gradient)
+    torch.testing.assert_close(actual_gradient, reference_gradient)
 
 
 def test_grid_coordinates_match_geometry_pixel_centers():
