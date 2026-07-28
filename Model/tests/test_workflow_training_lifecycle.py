@@ -717,6 +717,27 @@ def test_training_seed_controls_comparable_navigation_runs():
     assert '"train/seed": training_seed' in training_source
 
 
+def test_selector_preflight_requires_frozen_validation_identity():
+    workflows._validate_selector_preflight_identity(
+        {
+            "sample_count": 2,
+            "sample_uid_digest": "a" * 64,
+        },
+        expected_sample_count=2,
+        expected_sample_uid_digest="a" * 64,
+    )
+
+    with pytest.raises(ValueError, match="preflight validation identity"):
+        workflows._validate_selector_preflight_identity(
+            {
+                "sample_count": 2,
+                "sample_uid_digest": "b" * 64,
+            },
+            expected_sample_count=2,
+            expected_sample_uid_digest="a" * 64,
+        )
+
+
 def test_navigation_objective_wiring_is_train_only_and_versioned():
     source = inspect.getsource(workflows.train_il.task_function)
     tree = ast.parse(source)
