@@ -309,6 +309,8 @@ class RolloutAlignedLoss(nn.Module):
         if target.shape != predicted.shape:
             raise ValueError("predicted and target control shapes differ")
         batch_size = predicted.shape[0]
+        if batch_size == 0:
+            raise ValueError("rollout-aligned loss requires a non-empty batch")
         if initial_speed.shape != (batch_size,):
             raise ValueError("initial_speed must have shape [B]")
         if map_valid.shape != (batch_size,):
