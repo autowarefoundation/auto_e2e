@@ -1315,7 +1315,13 @@ is authoritative if an MLflow retry occurs.
 1. Report target-rollout versus logged-pose p50/p90/p95 at 3 s and 6.4 s.
 2. Persist dataset, validation-group, and sample UID digests.
 3. Report scene-level distributions and worst scenes.
-4. Reject missing, misaligned, or non-finite pose records.
+4. Compare target-control headings with centered logged-XY tangents at moving
+   steps using a versioned minimum baseline, and report angular p50/p90/p95.
+5. Reject missing, misaligned, or non-finite pose records.
+
+Heading alignment is diagnostic in the first policy and does not alter the
+position Go/No-Go thresholds. It must be recorded before changing the target
+footprint heading source.
 
 ### 21.2 Rollout
 
@@ -1412,7 +1418,9 @@ seeds are not required.
 Mitigation: implemented. The full audit rejected integrated target-control XY.
 The planner now compares predicted rollout positions with packed logged XY,
 while retaining target controls for action and comfort. Audit identity and the
-observed reconstruction error remain immutable metadata.
+observed reconstruction error remain immutable metadata. The audit also records
+target-control heading error against moving logged-path tangents before any
+change to the target footprint heading source.
 
 ### Constraint scale overwhelms action learning
 
