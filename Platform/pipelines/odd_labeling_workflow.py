@@ -23,6 +23,7 @@ DATA_PREP_IMAGE = os.environ.get(
     f"{ECR_PREFIX}/auto-e2e/data-prep:latest",
 )
 ODD_LABELER_VERSION = "odd_dataset_labeler_v4"
+ODD_SCENE_INDEX_SCHEMA_VERSION = "odd_scene_index_v2"
 MAX_ODD_ARTIFACT_BYTES = 64 << 20
 MAX_ODD_PARQUET_BYTES = 512 << 20
 SHA256_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
@@ -72,13 +73,16 @@ def _scene_summary(
     record_sha256: str,
     record_byte_size: int,
 ) -> dict:
-    grouped: dict[tuple[str, str, tuple[str, ...], str], dict] = {}
+    grouped: dict[tuple[object, ...], dict] = {}
     for observation in record["observations"]:
         identity = (
             observation["key"],
             observation["status"],
             tuple(observation["values"]),
             observation["source"],
+            observation.get("camera_id"),
+            observation.get("actor_track_uid"),
+            observation.get("event_uid"),
         )
         current = grouped.get(identity)
         duration = (
@@ -94,6 +98,10 @@ def _scene_summary(
                 "confidence": float(observation["confidence"]),
                 "duration_ns": duration,
                 "first_timestamp_ns": int(observation["start_timestamp_ns"]),
+                "interval_count": 1,
+                "camera_id": observation.get("camera_id"),
+                "actor_track_uid": observation.get("actor_track_uid"),
+                "event_uid": observation.get("event_uid"),
             }
             continue
         current["confidence"] = max(
@@ -104,6 +112,7 @@ def _scene_summary(
             current["first_timestamp_ns"],
             int(observation["start_timestamp_ns"]),
         )
+        current["interval_count"] += 1
     return {
         "scene_uid": record["scene_uid"],
         "shard_name": shard_name,
@@ -120,6 +129,37 @@ def _scene_summary(
                 item["status"],
                 item["values"],
                 item["source"],
+                item["camera_id"] or "",
+                item["actor_track_uid"] or "",
+            ),
+        ),
+        "events": sorted(
+            [
+                {
+                    "event_uid": event["event_uid"],
+                    "primary_event_key": event["primary_event_key"],
+                    "primary_values": event.get("provenance", {}).get(
+                        "primary_values",
+                        [],
+                    ),
+                    "start_timestamp_ns": int(
+                        event["start_timestamp_ns"]
+                    ),
+                    "end_timestamp_ns": int(event["end_timestamp_ns"]),
+                    "status": event["status"],
+                    "confidence": float(event["confidence"]),
+                    "actor_track_uids": event["actor_track_uids"],
+                    "outcome": event.get("provenance", {}).get(
+                        "outcome",
+                        "not_observed",
+                    ),
+                }
+                for event in record.get("events", [])
+            ],
+            key=lambda item: (
+                item["start_timestamp_ns"],
+                item["end_timestamp_ns"],
+                item["event_uid"],
             ),
         ),
     }
@@ -903,6 +943,7 @@ def publish_odd_labelset(
         "statistics_schema_version": STATISTICS_SCHEMA_VERSION,
         "parquet_schema_version": PARQUET_SCHEMA_VERSION,
         "quality_schema_version": QUALITY_SCHEMA_VERSION,
+        "scene_index_schema_version": ODD_SCENE_INDEX_SCHEMA_VERSION,
         "publication_scope": validated_publication_scope,
         "scene_record_sha256": [
             item["record_sha256"] for item in wrappers
@@ -1034,7 +1075,7 @@ def publish_odd_labelset(
     publish(
         "scene_index",
         {
-            "schema_version": "odd_scene_index_v1",
+            "schema_version": ODD_SCENE_INDEX_SCHEMA_VERSION,
             "labelset_id": labelset_id,
             "scenes": scene_summaries,
         },
