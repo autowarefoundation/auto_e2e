@@ -309,6 +309,39 @@ def _task_prompt(
     )
 
 
+def _prompt_bundle_sha256(
+    task_bundle: str,
+    keys: tuple[str, ...],
+    prompt_version: str = ROAD_VLM_PROMPT_VERSION,
+) -> str:
+    definitions = [
+        {
+            "key": key,
+            "description": ONTOLOGY[key].description,
+            "cardinality": ONTOLOGY[key].cardinality,
+            "allowed_values": list(ONTOLOGY[key].values),
+            "none_semantics": ONTOLOGY[key].none_semantics,
+        }
+        for key in keys
+    ]
+    bundle = {
+        "schema_version": ROAD_VLM_SCHEMA_VERSION,
+        "prompt_version": prompt_version,
+        "system_prompt": _system_prompt(),
+        "task_bundle": task_bundle,
+        "requested_labels": definitions,
+        "response_schema": _response_schema(keys),
+        "requirements": {
+            "one_observation_per_requested_key": True,
+            "valid_requires_at_least_one_allowed_value": True,
+            "non_valid_requires_empty_values": True,
+            "multi_select_none_is_exclusive": True,
+            "events_require_temporal_evidence": True,
+        },
+    }
+    return hashlib.sha256(canonical_json_bytes(bundle)).hexdigest()
+
+
 def _validate_response(
     payload: Mapping[str, Any],
     keys: tuple[str, ...],
@@ -437,6 +470,15 @@ class OpenAICompatibleRoadObserver:
                 "json_schema": _response_schema(keys),
             },
         }
+        decoding_config_sha256 = hashlib.sha256(
+            canonical_json_bytes(
+                {
+                    "temperature": request["temperature"],
+                    "max_tokens": request["max_tokens"],
+                    "response_format": request["response_format"],
+                }
+            )
+        ).hexdigest()
         request_digest = hashlib.sha256(canonical_json_bytes(request)).hexdigest()
         last_error: Exception | None = None
         for attempt in range(self.config.retry_count + 1):
@@ -449,6 +491,12 @@ class OpenAICompatibleRoadObserver:
                     raise ValueError("OpenAI-compatible response content is empty")
                 parsed = _parse_json_content(content_text)
                 return _validate_response(parsed, keys), {
+                    "prompt_sha256": _prompt_bundle_sha256(
+                        task_bundle,
+                        keys,
+                        self.config.prompt_version,
+                    ),
+                    "decoding_config_sha256": decoding_config_sha256,
                     "request_sha256": request_digest,
                     "response_sha256": hashlib.sha256(
                         content_text.encode("utf-8")
@@ -477,6 +525,20 @@ class OpenAICompatibleRoadObserver:
     ) -> tuple[LabelObservation, ...]:
         if end_timestamp_ns <= start_timestamp_ns:
             raise ValueError("road VLM interval must be positive")
+        frame_timestamps = [frame.timestamp_ns for frame in frames]
+        if not frame_timestamps:
+            raise ValueError("road VLM request requires camera frames")
+        input_start_timestamp_ns = min(frame_timestamps)
+        input_end_timestamp_ns = max(frame_timestamps)
+        lookback_ns = max(
+            0,
+            start_timestamp_ns - input_start_timestamp_ns,
+        )
+        prompt_sha256 = _prompt_bundle_sha256(
+            task_bundle,
+            keys,
+            self.config.prompt_version,
+        )
         try:
             response, call_provenance = self._request(
                 scene_uid=scene_uid,
@@ -497,9 +559,14 @@ class OpenAICompatibleRoadObserver:
                     provenance={
                         "schema_version": ROAD_VLM_SCHEMA_VERSION,
                         "prompt_version": self.config.prompt_version,
+                        "prompt_sha256": prompt_sha256,
                         "model": self.config.model,
                         "model_revision": self.config.model_revision,
                         "task_bundle": task_bundle,
+                        "input_start_timestamp_ns": input_start_timestamp_ns,
+                        "input_end_timestamp_ns": input_end_timestamp_ns,
+                        "lookback_ns": lookback_ns,
+                        "lookahead_ns": 0,
                         "error_type": type(exc.__cause__ or exc).__name__,
                     },
                 )
@@ -531,6 +598,10 @@ class OpenAICompatibleRoadObserver:
                         "model_revision": self.config.model_revision,
                         "task_bundle": task_bundle,
                         "supporting_cameras": item["supporting_cameras"],
+                        "input_start_timestamp_ns": input_start_timestamp_ns,
+                        "input_end_timestamp_ns": input_end_timestamp_ns,
+                        "lookback_ns": lookback_ns,
+                        "lookahead_ns": 0,
                         "reason": str(item["reason"])[:1000],
                         **call_provenance,
                     },
