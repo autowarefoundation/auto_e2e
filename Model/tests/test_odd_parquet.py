@@ -109,9 +109,14 @@ def _record(scene_uid: str, offset_ns: int) -> dict:
                 "start_timestamp_ns": start_ns,
                 "end_timestamp_ns": end_ns,
                 "evidence_uids": [evidence_uid],
-                "conflicting_evidence_uids": [],
+                "conflicting_evidence_uids": [
+                    f"oddev-opposed-{scene_uid}"
+                ],
                 "measurements": {"heading_change_deg": 91.25},
-                "provenance": {"fusion_version": "v1"},
+                "provenance": {
+                    "fusion_version": "v1",
+                    "policy": "authoritative_source_override",
+                },
                 "camera_id": None,
                 "actor_track_uid": None,
                 "event_uid": event_uid,
@@ -305,6 +310,7 @@ def test_odd_parquet_artifacts_are_explicit_and_scene_grouped() -> None:
         "statistics",
         "odd_cooccurrences",
         "odd_event_cooccurrences",
+        "conflicts",
     }
     assert {
         name: artifact.row_count for name, artifact in artifacts.items()
@@ -316,17 +322,24 @@ def test_odd_parquet_artifacts_are_explicit_and_scene_grouped() -> None:
         "statistics": 1,
         "odd_cooccurrences": 1,
         "odd_event_cooccurrences": 1,
+        "conflicts": 2,
     }
     for name, artifact in artifacts.items():
         parquet_file = _parquet_file(artifact.payload)
         metadata = parquet_file.schema_arrow.metadata
-        assert metadata[b"odd.parquet_schema_version"] == b"odd_parquet_v2"
+        assert metadata[b"odd.parquet_schema_version"] == b"odd_parquet_v3"
         assert metadata[b"odd.table_name"] == name.encode("ascii")
         assert metadata[b"odd.labelset_id"] == b"oddls-test"
         assert metadata[b"odd.ontology_sha256"] == b"2" * 64
         assert parquet_file.metadata.num_rows == artifact.row_count
 
-    for name in ("scene_records", "evidence", "observations", "events"):
+    for name in (
+        "scene_records",
+        "evidence",
+        "observations",
+        "events",
+        "conflicts",
+    ):
         parquet_file = _parquet_file(artifacts[name].payload)
         assert parquet_file.num_row_groups == 2
         assert [
@@ -346,6 +359,9 @@ def test_odd_parquet_preserves_nested_evidence_and_event_fields() -> None:
     event = pq.read_table(
         pa.BufferReader(artifacts["events"].payload)
     ).to_pylist()[0]
+    conflict = pq.read_table(
+        pa.BufferReader(artifacts["conflicts"].payload)
+    ).to_pylist()[0]
 
     assert evidence["candidate_values"][0] == {
         "value": "turn_left",
@@ -360,6 +376,10 @@ def test_odd_parquet_preserves_nested_evidence_and_event_fields() -> None:
         "resolution",
     ]
     assert event["supporting_evidence_uids"] == ["oddev-scene-a"]
+    assert conflict["conflicting_evidence_uids"] == [
+        "oddev-opposed-scene-a"
+    ]
+    assert conflict["fusion_policy"] == "authoritative_source_override"
 
 
 def test_odd_parquet_uses_dictionary_encoding_and_is_deterministic() -> None:
