@@ -11,7 +11,7 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 
-PARQUET_SCHEMA_VERSION = "odd_parquet_v2"
+PARQUET_SCHEMA_VERSION = "odd_parquet_v3"
 
 
 @dataclasses.dataclass(frozen=True)
@@ -383,6 +383,32 @@ def _schemas(pa):
                 ),
             ]
         ),
+        "conflicts": pa.schema(
+            [
+                pa.field("scene_uid", pa.string(), nullable=False),
+                pa.field("observation_uid", pa.string(), nullable=False),
+                pa.field("label_key", pa.string(), nullable=False),
+                pa.field("namespace", pa.string(), nullable=False),
+                pa.field("status", pa.string(), nullable=False),
+                pa.field("values", string_list, nullable=False),
+                pa.field("confidence", pa.float32(), nullable=False),
+                pa.field("source", pa.string(), nullable=False),
+                pa.field("start_timestamp_ns", pa.int64(), nullable=False),
+                pa.field("end_timestamp_ns", pa.int64(), nullable=False),
+                pa.field(
+                    "supporting_evidence_uids",
+                    string_list,
+                    nullable=False,
+                ),
+                pa.field(
+                    "conflicting_evidence_uids",
+                    string_list,
+                    nullable=False,
+                ),
+                pa.field("fusion_policy", pa.string(), nullable=False),
+                pa.field("provenance_json", pa.string(), nullable=False),
+            ]
+        ),
     }
 
 
@@ -749,6 +775,57 @@ def _cooccurrence_rows(
     ]
 
 
+def _conflict_rows(
+    records: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    rows = []
+    for record in records:
+        for observation in record.get("observations", []):
+            conflicting = list(
+                observation.get("conflicting_evidence_uids", [])
+            )
+            if not conflicting:
+                continue
+            provenance = observation.get("provenance", {})
+            rows.append(
+                {
+                    "scene_uid": str(observation["scene_uid"]),
+                    "observation_uid": str(
+                        observation["observation_uid"]
+                    ),
+                    "label_key": str(observation["key"]),
+                    "namespace": str(observation["key"]).split(".", 1)[0],
+                    "status": str(observation["status"]),
+                    "values": list(observation["values"]),
+                    "confidence": float(observation["confidence"]),
+                    "source": str(observation["source"]),
+                    "start_timestamp_ns": int(
+                        observation["start_timestamp_ns"]
+                    ),
+                    "end_timestamp_ns": int(
+                        observation["end_timestamp_ns"]
+                    ),
+                    "supporting_evidence_uids": list(
+                        observation.get("evidence_uids", [])
+                    ),
+                    "conflicting_evidence_uids": conflicting,
+                    "fusion_policy": str(
+                        provenance.get("policy", "unspecified")
+                    ),
+                    "provenance_json": _json(provenance),
+                }
+            )
+    return sorted(
+        rows,
+        key=lambda item: (
+            item["scene_uid"],
+            item["start_timestamp_ns"],
+            item["label_key"],
+            item["observation_uid"],
+        ),
+    )
+
+
 def _write_table(
     pa,
     pq,
@@ -845,6 +922,7 @@ def build_parquet_artifacts(
             statistics,
             "odd_event",
         ),
+        "conflicts": lambda: _conflict_rows(records),
     }
     dictionary_columns = {
         "scene_records": ("dataset_name", "dataset_version"),
@@ -882,6 +960,13 @@ def build_parquet_artifacts(
             "event_key",
             "event_value",
         ),
+        "conflicts": (
+            "label_key",
+            "namespace",
+            "status",
+            "source",
+            "fusion_policy",
+        ),
     }
     output = {}
     for table_name in (
@@ -892,6 +977,7 @@ def build_parquet_artifacts(
         "statistics",
         "odd_cooccurrences",
         "odd_event_cooccurrences",
+        "conflicts",
     ):
         output[table_name] = _write_table(
             pa,
@@ -911,7 +997,13 @@ def build_parquet_artifacts(
             group_column=(
                 "scene_uid"
                 if table_name
-                in {"scene_records", "evidence", "observations", "events"}
+                in {
+                    "scene_records",
+                    "evidence",
+                    "observations",
+                    "events",
+                    "conflicts",
+                }
                 else None
             ),
         )
