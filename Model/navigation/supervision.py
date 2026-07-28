@@ -16,7 +16,7 @@ from .geometry import (
 from .rasterizer import EgoPose, NavigationRaster
 
 
-ROUTE_SUPERVISION_ARTIFACT_VERSION = "navigation_supervision_v2"
+ROUTE_SUPERVISION_ARTIFACT_VERSION = "navigation_supervision_v3"
 MAXIMUM_OUTSIDE_DISTANCE_M = 30.0
 
 
@@ -26,6 +26,7 @@ class RouteSupervision:
 
     distance_to_corridor_m: np.ndarray
     distance_to_drivable_m: np.ndarray
+    drivable_available: bool
     route_heading_sin: np.ndarray
     route_heading_cos: np.ndarray
     route_heading_valid: np.ndarray
@@ -108,6 +109,11 @@ class RouteSupervision:
             "distance_to_drivable_m",
             drivable_distance,
         )
+        object.__setattr__(
+            self,
+            "drivable_available",
+            bool(self.drivable_available),
+        )
         object.__setattr__(self, "route_heading_sin", heading_sin)
         object.__setattr__(self, "route_heading_cos", heading_cos)
         object.__setattr__(self, "route_heading_valid", heading_valid)
@@ -122,6 +128,10 @@ class RouteSupervision:
         return {
             "distance_to_corridor_m": self.distance_to_corridor_m,
             "distance_to_drivable_m": self.distance_to_drivable_m,
+            "drivable_available": np.asarray(
+                int(self.drivable_available),
+                dtype=np.uint8,
+            ),
             "route_heading_sin": self.route_heading_sin,
             "route_heading_cos": self.route_heading_cos,
             "route_heading_valid": self.route_heading_valid,
@@ -140,6 +150,7 @@ def empty_route_supervision(
     return RouteSupervision(
         distance_to_corridor_m=np.zeros(shape, dtype=np.float32),
         distance_to_drivable_m=np.zeros(shape, dtype=np.float32),
+        drivable_available=False,
         route_heading_sin=np.zeros(shape, dtype=np.float32),
         route_heading_cos=np.zeros(shape, dtype=np.float32),
         route_heading_valid=np.zeros(shape, dtype=np.uint8),
@@ -238,8 +249,9 @@ def build_route_supervision(
 
     from scipy.ndimage import distance_transform_edt
 
+    drivable_available = bool(raster.map_valid)
     drivable = raster.map_context[MapChannel.DRIVABLE_AREA] > 0.0
-    if bool(drivable.any()):
+    if drivable_available and bool(drivable.any()):
         drivable_distance = distance_transform_edt(
             ~drivable,
             sampling=geometry.meters_per_pixel,
@@ -260,6 +272,7 @@ def build_route_supervision(
         return dataclasses.replace(
             empty,
             distance_to_drivable_m=drivable_distance,
+            drivable_available=drivable_available,
         )
 
     corridor = (
@@ -316,6 +329,7 @@ def build_route_supervision(
     return RouteSupervision(
         distance_to_corridor_m=distance,
         distance_to_drivable_m=drivable_distance,
+        drivable_available=drivable_available,
         route_heading_sin=heading_sin,
         route_heading_cos=heading_cos,
         route_heading_valid=heading_valid,
