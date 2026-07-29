@@ -1166,22 +1166,48 @@ Initial improvement threshold:
 
 ```text
 min_delta = 0.0005
-early_stopping_patience = 3
+early_stopping_patience = 5
 ```
 
 The scheduler threshold and selector `min_delta` intentionally match. The
 three-seed experiment must report epoch-to-epoch score noise. A later change to
-either threshold or patience requires a selector policy-version bump.
+the score threshold requires a selector policy-version bump. Patience is an
+execution policy and may be increased for a resumed run without changing the
+score definition.
 
-### 17.2 Best checkpoint and bad epochs
+### 17.2 Independent best checkpoints
 
-- The first successfully validated checkpoint becomes best.
-- A later checkpoint improves best only when
+Maintain two independent best records:
+
+```text
+best: highest composite score
+best_trajectory: highest trajectory component utility
+```
+
+The trajectory component is the existing equal combination of natural and
+scene-balanced trajectory utility. It therefore reflects natural and
+scene-balanced ADE@3s and FDE@6.4s without introducing a separate ADE-only
+ranking rule.
+
+- The first successfully validated checkpoint establishes both records.
+- Composite best improves only when
   `score > best_score + min_delta`.
-- A successfully validated but non-improving epoch is a bad epoch.
+- Trajectory best improves only when
+  `trajectory > best_trajectory + min_delta`.
+- Either record may point to the same immutable checkpoint.
+- The scheduler continues to consume only the composite score. The trajectory
+  record affects checkpoint retention and early stopping, not learning-rate
+  scheduling.
+
+### 17.3 Bad epochs
+
+- An epoch is improving when either composite best or trajectory best improves.
+- A successfully validated epoch is a bad epoch only when neither record
+  improves.
+- Improvement in either record resets the bad-epoch count to zero.
 - Early stopping triggers when bad epochs reach the configured patience.
 - The final checkpoint is always saved.
-- ADE-only fallback is forbidden.
+- ADE-only fallback remains forbidden.
 
 ## 18. Checkpoint, Resume, and Registry Contract
 
@@ -1194,7 +1220,7 @@ selector policy version
 validation snapshot and sample/group digests
 frozen component availability and effective weights
 metric history with natural and scene-balanced aggregates
-best checkpoint identity and score
+composite-best and trajectory-best checkpoint identities
 bad epoch count
 scheduler state
 optimizer/scaler/RNG state
@@ -1208,35 +1234,31 @@ For an unchanged training policy, resume restores the model, optimizer,
 `ReduceLROnPlateau`, gradient scaler, RNG, metric history, best checkpoint, and
 bad-epoch state exactly.
 
-One explicit research transition is supported:
+An explicit continuation transition supports:
 
 ```text
-navigation repeat: disabled -> enabled
 early-stopping patience: increased
+optionally, navigation repeat: disabled -> enabled
 ```
 
 The caller must opt into this transition. No other config or dataset identity
-change is allowed. The optimizer state and its current learning rate are
-preserved, while the plateau scheduler state, bad-epoch count, and active best
-ranking scope are reset because the post-transition optimization and sampling
-policy is different. The source best remains in transition audit metadata but
-does not compete with post-transition checkpoints.
-
-Before the first post-transition validation, `best.json` is written with
-`pending_post_transition_validation` status. The first successfully validated
-post-transition epoch establishes the new active best. A transition is rejected
-unless at least one new epoch will run.
+change is allowed. The model, optimizer state, current learning rate, metric
+history, and historical composite best are preserved. The historical
+trajectory best is reconstructed from the stored trajectory component. The
+plateau scheduler and bad-epoch count reset so a checkpoint that stopped under
+the former patience can continue. A transition is rejected unless at least one
+new epoch will run.
 
 ### 18.2 Workflow outputs
 
-The training workflow retains the existing two roles:
+The training workflow records three roles:
 
 - `final`: the last completed epoch;
-- `best`: the highest composite score.
+- `best`: the highest composite score;
+- `best_trajectory`: the highest trajectory component utility.
 
-Because the first successful validation always establishes a best checkpoint,
-`best` does not become optional. The workflow changes its comparison key and
-stored metric bundle, not its output cardinality.
+The task output remains the composite-best checkpoint so downstream evaluation
+behavior does not change. Metadata exposes all three records.
 
 ### 18.3 Model registry
 
@@ -1245,6 +1267,7 @@ Registry roles are:
 ```text
 final
 best
+best_trajectory
 ```
 
 The `best` role is selected by the versioned composite score. Production
@@ -1276,6 +1299,8 @@ selection/component/*
 selection/effective_weight/*
 selection/score
 selection/bad_epochs
+selection/score_improved
+selection/trajectory_improved
 
 audit/reconstruction/*
 ```
