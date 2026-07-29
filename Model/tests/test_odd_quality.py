@@ -6,6 +6,7 @@ import pytest
 
 from data_processing.odd_labeling.quality import (
     build_quality_documents,
+    calibration_bundle_sha256,
     validate_labelset_records,
 )
 
@@ -145,6 +146,12 @@ def _record(scene_uid: str = "scene-a") -> dict:
             }
         ],
     }
+
+
+def test_pending_audit_calibration_hash_is_stable() -> None:
+    assert calibration_bundle_sha256() == (
+        "47d60cde2c55e108c9901603f66fad03eb32236282fa535e3067cf4ce94849e9"
+    )
 
 
 def _statistics() -> dict:
