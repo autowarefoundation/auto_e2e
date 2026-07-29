@@ -52,7 +52,8 @@ func (h *ODDHandler) coordinate(
 
 func writeODDError(w http.ResponseWriter, err error) {
 	switch {
-	case errors.Is(err, service.ErrODDUnavailable):
+	case errors.Is(err, service.ErrODDUnavailable),
+		errors.Is(err, service.ErrODDNotStarted):
 		writeError(w, http.StatusServiceUnavailable, model.CodeUnavailable, "ODD LabelSet is not ready")
 	case errors.Is(err, service.ErrNotFound):
 		writeError(w, http.StatusNotFound, model.CodeNotFound, "ODD scene not found")
@@ -104,12 +105,20 @@ func (h *ODDHandler) LabelSets(w http.ResponseWriter, r *http.Request) {
 	}
 	_, manifest, digest, err := h.s3.ODDStatistics(r.Context(), dataset, version)
 	if err != nil {
+		if errors.Is(err, service.ErrODDNotStarted) {
+			writeJSON(w, http.StatusOK, map[string]any{
+				"dataset": dataset, "version": version,
+				"state": "not_started", "labelsets": []service.ODDManifest{},
+			})
+			return
+		}
 		writeODDError(w, err)
 		return
 	}
 	setODDIdentity(w, manifest, digest)
 	writeJSON(w, http.StatusOK, map[string]any{
-		"dataset": dataset, "version": version, "labelsets": []service.ODDManifest{manifest},
+		"dataset": dataset, "version": version, "state": "ready",
+		"labelsets": []service.ODDManifest{manifest},
 	})
 }
 
