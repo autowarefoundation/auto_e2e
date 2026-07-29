@@ -7,16 +7,25 @@ import json
 from collections.abc import Iterable, Mapping
 from typing import Any
 
-from .schema import LabelObservation, canonical_json_bytes, content_sha256
+from .schema import (
+    LabelObservation,
+    ProviderExchange,
+    canonical_json_bytes,
+    content_sha256,
+)
 
 
-SOURCE_ARTIFACT_SCHEMA_VERSION = "odd_source_observations_v1"
+SOURCE_ARTIFACT_SCHEMA_VERSION = "odd_source_observations_v2"
 SOURCE_STAGES = {
     "map_route_deterministic",
     "gnss_ins",
     "image_qc",
     "openai_compatible_vlm",
     "bedrock_map_route",
+}
+PROVIDER_BACKEND_BY_SOURCE_STAGE = {
+    "openai_compatible_vlm": "ORV",
+    "bedrock_map_route": "BMR",
 }
 
 
@@ -33,6 +42,7 @@ class SourceObservationArtifact:
     scene_uid: str
     descriptor_sha256: str
     observations: tuple[LabelObservation, ...]
+    provider_exchanges: tuple[ProviderExchange, ...] = ()
     schema_version: str = SOURCE_ARTIFACT_SCHEMA_VERSION
 
     def __post_init__(self) -> None:
@@ -73,7 +83,43 @@ class SourceObservationArtifact:
         ]
         if len(observation_ids) != len(set(observation_ids)):
             raise ValueError("source artifact has duplicate observations")
+        expected_backend = PROVIDER_BACKEND_BY_SOURCE_STAGE.get(
+            self.source_stage
+        )
+        if self.provider_exchanges and expected_backend is None:
+            raise ValueError(
+                "provider exchange is invalid for deterministic source stage"
+            )
+        exchanges = tuple(
+            sorted(
+                self.provider_exchanges,
+                key=lambda item: (
+                    item.backend,
+                    item.request_sha256,
+                    item.attempt,
+                    item.response_sha256 or "",
+                    item.status,
+                ),
+            )
+        )
+        if any(
+            exchange.backend != expected_backend for exchange in exchanges
+        ):
+            raise ValueError("provider exchange backend differs from source stage")
+        exchange_identities = [
+            (
+                exchange.backend,
+                exchange.request_sha256,
+                exchange.attempt,
+                exchange.response_sha256,
+                exchange.status,
+            )
+            for exchange in exchanges
+        ]
+        if len(exchange_identities) != len(set(exchange_identities)):
+            raise ValueError("source artifact has duplicate provider exchanges")
         object.__setattr__(self, "observations", ordered)
+        object.__setattr__(self, "provider_exchanges", exchanges)
 
     @classmethod
     def create(
@@ -83,12 +129,14 @@ class SourceObservationArtifact:
         descriptor_json: str,
         scene_uid: str,
         observations: Iterable[LabelObservation],
+        provider_exchanges: Iterable[ProviderExchange] = (),
     ) -> "SourceObservationArtifact":
         return cls(
             source_stage=source_stage,
             scene_uid=scene_uid,
             descriptor_sha256=descriptor_sha256(descriptor_json),
             observations=tuple(observations),
+            provider_exchanges=tuple(provider_exchanges),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -100,6 +148,9 @@ class SourceObservationArtifact:
             "observations": [
                 observation.to_dict()
                 for observation in self.observations
+            ],
+            "provider_exchanges": [
+                exchange.to_dict() for exchange in self.provider_exchanges
             ],
         }
 
@@ -128,6 +179,10 @@ class SourceObservationArtifact:
             observations=tuple(
                 LabelObservation(**dict(observation))
                 for observation in value.get("observations", [])
+            ),
+            provider_exchanges=tuple(
+                ProviderExchange(**dict(exchange))
+                for exchange in value.get("provider_exchanges", [])
             ),
         )
         if (
