@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -19,8 +20,17 @@ const maxODDSearchBody = 64 << 10
 // ODDHandler serves immutable scene-level ODD LabelSet read models.
 type ODDHandler struct {
 	s3                     *service.S3Service
-	operations             *service.ODDOperationsService
+	operations             ODDOperations
 	operationsRequiredRole string
+}
+
+type ODDOperations interface {
+	Enabled() bool
+	AllowFull() bool
+	Launch(
+		context.Context, string, string, string,
+	) (service.ODDOperationResult, error)
+	Retry(context.Context, string) (service.ODDOperationResult, error)
 }
 
 func NewODDHandler(s3 *service.S3Service) *ODDHandler {
@@ -29,7 +39,7 @@ func NewODDHandler(s3 *service.S3Service) *ODDHandler {
 
 func NewODDHandlerWithOperations(
 	s3 *service.S3Service,
-	operations *service.ODDOperationsService,
+	operations ODDOperations,
 	requiredRole string,
 ) *ODDHandler {
 	return &ODDHandler{
