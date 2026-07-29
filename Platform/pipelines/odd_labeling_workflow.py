@@ -46,7 +46,7 @@ ODD_EXECUTABLE_SOURCES = frozenset(
 ODD_SOURCE_POLICY_VERSIONS = {
     "map_route": "odd_map_route_policy_v1",
     "gnss_ins": "odd_gnss_ins_policy_v2",
-    "vlm": "odd_road_vlm_policy_v5",
+    "vlm": "odd_road_vlm_policy_v6",
     "image_qc": "odd_image_qc_policy_v3",
     "fusion": "odd_source_fusion_v1",
 }
