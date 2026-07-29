@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import dataclasses
 import hashlib
 import json
@@ -21,8 +22,9 @@ from .schema import (
 )
 
 
-ROAD_VLM_SCHEMA_VERSION = "road_vlm_request_v3"
-ROAD_VLM_PROMPT_VERSION = "road_scene_observer_v4"
+ROAD_VLM_SCHEMA_VERSION = "road_vlm_request_v4"
+ROAD_VLM_PROMPT_VERSION = "road_scene_observer_v5"
+ROAD_VLM_PROTOCOL_REPAIR_VERSION = "road_vlm_protocol_repair_v1"
 DEFAULT_REFINEMENT_CONFIDENCE_THRESHOLD = 0.65
 VLM_FRAME_STATUS_VALUES = (
     "normal",
@@ -303,7 +305,13 @@ def _vlm_allowed_values(key: str) -> tuple[str, ...]:
     return ONTOLOGY[key].values
 
 
-def _response_schema(keys: Iterable[str]) -> dict[str, Any]:
+def _response_schema(
+    keys: Iterable[str],
+    *,
+    subject_scope: str,
+) -> dict[str, Any]:
+    if subject_scope not in {"scene", "camera"}:
+        raise ValueError(f"invalid road VLM subject scope: {subject_scope}")
     key_list = list(keys)
     observation_properties: dict[str, Any] = {}
     for key in key_list:
@@ -325,10 +333,7 @@ def _response_schema(keys: Iterable[str]) -> dict[str, Any]:
                 "items": {"type": "integer", "minimum": 0},
             },
             "camera_id": {
-                "oneOf": [
-                    {"type": "string"},
-                    {"type": "null"},
-                ]
+                "type": "null" if subject_scope == "scene" else "string",
             },
             "reason": {"type": "string"},
         }
@@ -439,6 +444,8 @@ def _system_prompt() -> str:
         "Cite only supplied camera roles and timestamps. For a camera-scoped "
         "request, camera_id must equal subject_camera_id. For a scene-scoped "
         "request, camera_id must be null. "
+        "For a multi-select label, none or normal is exclusive: when any "
+        "positive or abnormal candidate applies, omit the neutral candidate. "
         "For perception.image.frame_status, visual inference is limited to "
         "normal, partial_obstruction, or full_obstruction. Never infer black, "
         "frozen, dropped, or corrupted frame states; those require "
@@ -501,6 +508,7 @@ def _task_prompt(
             "valid_requires_at_least_one_allowed_value": True,
             "non_valid_requires_empty_values": True,
             "multi_select_none_is_exclusive": True,
+            "multi_select_neutral_is_exclusive": True,
             "events_require_temporal_evidence": True,
             "supporting_evidence_must_cite_supplied_frames": True,
         },
@@ -536,12 +544,17 @@ def _prompt_bundle_sha256(
         "task_bundle": task_bundle,
         "subject_scope": subject_scope,
         "requested_labels": definitions,
-        "response_schema": _response_schema(keys),
+        "response_schema": _response_schema(
+            keys,
+            subject_scope=subject_scope,
+        ),
+        "protocol_repair_version": ROAD_VLM_PROTOCOL_REPAIR_VERSION,
         "requirements": {
             "one_observation_per_requested_key": True,
             "valid_requires_at_least_one_allowed_value": True,
             "non_valid_requires_empty_values": True,
             "multi_select_none_is_exclusive": True,
+            "multi_select_neutral_is_exclusive": True,
             "events_require_temporal_evidence": True,
             "supporting_evidence_must_cite_supplied_frames": True,
         },
@@ -579,6 +592,7 @@ def road_vlm_prompt_bundle_document(
         "schema_version": "road_vlm_prompt_bundle_v1",
         "request_schema_version": ROAD_VLM_SCHEMA_VERSION,
         "prompt_version": prompt_version,
+        "protocol_repair_version": ROAD_VLM_PROTOCOL_REPAIR_VERSION,
         "entries": entries,
         "refinement": {
             "safety_relevant_keys": sorted(
@@ -614,7 +628,10 @@ def road_vlm_decoding_bundle_sha256(*, max_tokens: int = 4096) -> str:
                 {
                     "task_bundle": bundle.name,
                     "subject_scope": subject_scope,
-                    "response_schema": _response_schema(keys),
+                    "response_schema": _response_schema(
+                        keys,
+                        subject_scope=subject_scope,
+                    ),
                 }
             )
     return hashlib.sha256(
@@ -623,10 +640,77 @@ def road_vlm_decoding_bundle_sha256(*, max_tokens: int = 4096) -> str:
                 "schema_version": "road_vlm_decoding_bundle_v1",
                 "temperature": 0.0,
                 "max_tokens": max_tokens,
+                "protocol_repair_version": ROAD_VLM_PROTOCOL_REPAIR_VERSION,
                 "schemas": schemas,
             }
         )
     ).hexdigest()
+
+
+def _repair_response_protocol(
+    payload: Mapping[str, Any],
+    keys: tuple[str, ...],
+    *,
+    frames: tuple[CameraFrame, ...],
+    target_camera_id: str | None,
+) -> tuple[dict[str, Any], tuple[dict[str, Any], ...]]:
+    repaired = copy.deepcopy(dict(payload))
+    raw_observations = repaired.get("observations")
+    if not isinstance(raw_observations, dict):
+        return repaired, ()
+
+    repairs: list[dict[str, Any]] = []
+    allowed_cameras = {frame.camera_role for frame in frames}
+    for key in keys:
+        raw = raw_observations.get(key)
+        if not isinstance(raw, dict):
+            continue
+
+        camera_id = raw.get("camera_id")
+        supporting_cameras = raw.get("supporting_cameras")
+        if (
+            target_camera_id is None
+            and isinstance(camera_id, str)
+            and camera_id in allowed_cameras
+            and isinstance(supporting_cameras, list)
+            and camera_id in supporting_cameras
+        ):
+            raw["camera_id"] = None
+            repairs.append(
+                {
+                    "kind": "scene_camera_id_to_null",
+                    "key": key,
+                    "before": camera_id,
+                    "after": None,
+                }
+            )
+
+        values = raw.get("values")
+        definition = ONTOLOGY[key]
+        neutral = definition.neutral_value
+        if (
+            raw.get("status") == "valid"
+            and definition.cardinality == "multi"
+            and neutral is not None
+            and isinstance(values, list)
+            and all(isinstance(value, str) for value in values)
+            and set(values) <= set(_vlm_allowed_values(key))
+            and neutral in values
+            and len(set(values)) > 1
+        ):
+            canonical_values = [
+                value for value in values if value != neutral
+            ]
+            raw["values"] = canonical_values
+            repairs.append(
+                {
+                    "kind": "exclusive_neutral_removed",
+                    "key": key,
+                    "before": values,
+                    "after": canonical_values,
+                }
+            )
+    return repaired, tuple(repairs)
 
 
 def _validate_response(
@@ -796,7 +880,12 @@ class OpenAICompatibleRoadObserver:
             "max_tokens": self.config.max_tokens,
             "response_format": {
                 "type": "json_schema",
-                "json_schema": _response_schema(keys),
+                "json_schema": _response_schema(
+                    keys,
+                    subject_scope=(
+                        "camera" if target_camera_id else "scene"
+                    ),
+                ),
             },
         }
         decoding_config_sha256 = hashlib.sha256(
@@ -842,6 +931,7 @@ class OpenAICompatibleRoadObserver:
         last_exchange: ProviderExchange | None = None
         for attempt in range(self.config.retry_count + 1):
             response: Mapping[str, Any] | None = None
+            protocol_repairs: tuple[dict[str, Any], ...] = ()
             started_at = time.perf_counter()
             try:
                 response = self._transport(
@@ -851,8 +941,14 @@ class OpenAICompatibleRoadObserver:
                 if not content_text:
                     raise ValueError("OpenAI-compatible response content is empty")
                 parsed = _parse_json_content(content_text)
-                validated = _validate_response(
+                repaired, protocol_repairs = _repair_response_protocol(
                     parsed,
+                    keys,
+                    frames=frames,
+                    target_camera_id=target_camera_id,
+                )
+                validated = _validate_response(
+                    repaired,
                     keys,
                     frames=frames,
                     target_camera_id=target_camera_id,
@@ -876,6 +972,7 @@ class OpenAICompatibleRoadObserver:
                     input_image_count=len(frames),
                     request_metadata=request_metadata,
                     raw_response=response,
+                    protocol_repairs=protocol_repairs,
                     usage=_provider_usage(response),
                 )
                 self._provider_exchanges.append(exchange)
@@ -885,6 +982,12 @@ class OpenAICompatibleRoadObserver:
                     "request_sha256": request_digest,
                     "response_sha256": response_sha256,
                     "attempt": attempt + 1,
+                    "protocol_repair_version": (
+                        ROAD_VLM_PROTOCOL_REPAIR_VERSION
+                    ),
+                    "protocol_repairs": [
+                        dict(repair) for repair in protocol_repairs
+                    ],
                 }
             except Exception as exc:  # noqa: BLE001
                 last_error = exc
@@ -915,6 +1018,7 @@ class OpenAICompatibleRoadObserver:
                     input_image_count=len(frames),
                     request_metadata=request_metadata,
                     raw_response=response,
+                    protocol_repairs=protocol_repairs,
                     usage=(
                         _provider_usage(response)
                         if response is not None
@@ -937,6 +1041,17 @@ class OpenAICompatibleRoadObserver:
             failure_provenance["response_sha256"] = (
                 last_exchange.response_sha256
             )
+        failure_provenance["protocol_repair_version"] = (
+            ROAD_VLM_PROTOCOL_REPAIR_VERSION
+        )
+        failure_provenance["protocol_repairs"] = (
+            [
+                dict(repair)
+                for repair in last_exchange.protocol_repairs
+            ]
+            if last_exchange is not None
+            else []
+        )
         raise RoadVLMRequestError(
             (
                 "OpenAI-compatible road observer failed after "
@@ -1049,9 +1164,17 @@ class OpenAICompatibleRoadObserver:
 
         observations: list[LabelObservation] = []
         for item in response:
+            item_call_provenance = {
+                **call_provenance,
+                "protocol_repairs": [
+                    repair
+                    for repair in call_provenance["protocol_repairs"]
+                    if repair["key"] == item["key"]
+                ],
+            }
             observations.append(
                 _make_vlm_observation(
-                    request_identity=call_provenance,
+                    request_identity=item_call_provenance,
                     scene_uid=scene_uid,
                     key=str(item["key"]),
                     status=str(item["status"]),
@@ -1090,7 +1213,7 @@ class OpenAICompatibleRoadObserver:
                         "lookback_ns": lookback_ns,
                         "lookahead_ns": lookahead_ns,
                         "reason": str(item["reason"])[:1000],
-                        **call_provenance,
+                        **item_call_provenance,
                     },
                 )
             )
