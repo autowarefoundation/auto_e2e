@@ -16,12 +16,12 @@ from Platform.pipelines.training_checkpoint import (
     best_pointer_key,
     capture_rng_state,
     checkpoint_key,
-    mark_best_pointer_transition_pending,
     metric_pair_is_better,
     restore_rng_state,
     stable_digest,
     update_best_pointer,
     upload_immutable_checkpoint,
+    validate_immutable_checkpoint_record,
     validate_resume_envelope,
     validate_resume_payload,
 )
@@ -371,6 +371,50 @@ def test_trajectory_best_pointer_is_separate():
     ) not in s3.objects
 
 
+def test_best_pointer_rejects_invalid_checkpoint_digest():
+    with pytest.raises(ValueError, match="SHA-256"):
+        update_best_pointer(
+            _FakeS3(),
+            bucket="checkpoints",
+            run_id="run-1",
+            epoch=2,
+            checkpoint_uri="s3://checkpoints/run/epoch-0002.pt",
+            checkpoint_sha256="None",
+            ade=1.25,
+            fde=2.5,
+        )
+
+
+def test_checkpoint_record_is_verified_against_s3_metadata(tmp_path):
+    s3 = _FakeS3()
+    checkpoint = tmp_path / "epoch-0002.pt"
+    checkpoint.write_bytes(b"checkpoint-v2")
+    uploaded = upload_immutable_checkpoint(
+        s3,
+        bucket="checkpoints",
+        key="run/epoch-0002.pt",
+        path=checkpoint,
+    )
+    record = {
+        "uri": uploaded["uri"],
+        "sha256": uploaded["sha256"],
+        "size": uploaded["size"],
+    }
+
+    validate_immutable_checkpoint_record(s3, record)
+
+    with pytest.raises(ValueError, match="metadata"):
+        validate_immutable_checkpoint_record(
+            s3,
+            {**record, "sha256": "a" * 64},
+        )
+    with pytest.raises(ValueError, match="size"):
+        validate_immutable_checkpoint_record(
+            s3,
+            {**record, "size": uploaded["size"] + 1},
+        )
+
+
 def test_best_pointer_records_composite_selection_policy():
     s3 = _FakeS3()
     selection = {
@@ -397,37 +441,3 @@ def test_best_pointer_records_composite_selection_policy():
     latest = json.loads(s3.versions[-1][1]["Body"])
     assert latest["schema_version"] == "best_checkpoint_pointer_v2"
     assert latest["selection"] == selection
-
-
-def test_policy_transition_marks_best_pointer_pending():
-    s3 = _FakeS3()
-
-    uri = mark_best_pointer_transition_pending(
-        s3,
-        bucket="checkpoints",
-        run_id="run-1",
-        transition_policy_version="navigation_repeat_resume_transition_v1",
-        source_best={
-            "epoch": 5,
-            "uri": "s3://checkpoints/run/epoch-0005.pt",
-            "sha256": "a" * 64,
-            "selection_score": 0.42,
-        },
-    )
-
-    assert uri == "s3://checkpoints/imitation-learning/run-1/best.json"
-    payload = json.loads(s3.versions[-1][1]["Body"])
-    assert payload == {
-        "schema_version": "best_checkpoint_transition_v1",
-        "run_id": "run-1",
-        "status": "pending_post_transition_validation",
-        "transition_policy_version": (
-            "navigation_repeat_resume_transition_v1"
-        ),
-        "source_best": {
-            "epoch": 5,
-            "uri": "s3://checkpoints/run/epoch-0005.pt",
-            "sha256": "a" * 64,
-            "selection_score": 0.42,
-        },
-    }
