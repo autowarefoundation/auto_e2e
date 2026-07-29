@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import gzip
-import hashlib
 import json
 
 import numpy as np
@@ -20,6 +19,7 @@ from Platform.pipelines.overlay import (
     BEV_HEATMAP_SIZE,
     encode_overlay,
 )
+from Platform.pipelines.training_checkpoint import stable_digest
 
 
 def _overlay(sample_uids: list[str], speeds: list[float]) -> bytes:
@@ -62,9 +62,7 @@ def _index_sample(
 
 def _training_metadata() -> dict:
     groups = ["group-a", "group-b"]
-    group_digest = hashlib.sha256(
-        "\n".join(groups).encode("utf-8")
-    ).hexdigest()
+    group_digest = stable_digest(groups)
     return {
         "training": {
             "validation_split": {
