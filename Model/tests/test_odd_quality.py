@@ -247,6 +247,43 @@ def test_audit_selection_is_independent_of_scene_order() -> None:
     assert first == second
 
 
+def test_audit_selection_is_pinned_by_semantic_seed_not_labelset_id() -> None:
+    records = [_record(f"scene-{index:03d}") for index in range(60)]
+    selection_seed = "a" * 64
+
+    first = build_quality_documents(
+        records,
+        _statistics(),
+        _ontology(),
+        labelset_id="oddls-first",
+        audit_selection_seed=selection_seed,
+    )
+    second = build_quality_documents(
+        records,
+        _statistics(),
+        _ontology(),
+        labelset_id="oddls-second",
+        audit_selection_seed=selection_seed,
+    )
+
+    def selected_evidence(document: dict) -> list[str]:
+        row = next(
+            item
+            for item in document["audit_manifest"]["strata"]
+            if item["stratum_id"]
+            == "key=odd.road.context|source=map_route"
+        )
+        return [item["evidence_uid"] for item in row["selected"]]
+
+    assert selected_evidence(first) == selected_evidence(second)
+    assert first["audit_manifest"]["labelset_id"] == "oddls-first"
+    assert second["audit_manifest"]["labelset_id"] == "oddls-second"
+    assert (
+        first["audit_manifest"]["selection_policy"]["selection_seed_sha256"]
+        == selection_seed
+    )
+
+
 def test_coverage_uses_dataset_support_contract_states() -> None:
     statistics = _statistics()
     statistics["keys"].extend(
