@@ -20,6 +20,9 @@ const maxOddJSONBytes = 64 << 20
 // ErrODDUnavailable means the selected dataset has no complete ready LabelSet.
 var ErrODDUnavailable = errors.New("ODD LabelSet unavailable")
 
+// ErrODDNotStarted means no ready-pointer has ever been published.
+var ErrODDNotStarted = errors.New("ODD LabelSet not started")
+
 // ErrODDInvalidQuery means a structured search request is not executable.
 var ErrODDInvalidQuery = errors.New("invalid ODD search query")
 
@@ -216,6 +219,9 @@ func (s *S3Service) oddObject(
 		Key:    aws.String(key),
 	})
 	if err != nil {
+		if strings.HasSuffix(key, "/odd/latest.json") && isS3NotFound(err) {
+			return nil, fmt.Errorf("%w: read %s", ErrODDNotStarted, key)
+		}
 		return nil, fmt.Errorf("%w: read %s: %v", ErrODDUnavailable, key, err)
 	}
 	defer output.Body.Close()
