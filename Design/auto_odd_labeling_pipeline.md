@@ -948,6 +948,7 @@ DatasetEvidenceAdapter
 ```text
 scene metadata and canonical clock
 camera frames + calibration + frame validity
+camera frame inventory mode: capture_timeline | sampled_evidence | unknown
 ego poses + covariance/quality where available
 canonical NavigationMap
 canonical NavigationRoute
@@ -974,6 +975,9 @@ not make semantic ODD decisions.
    row order.
 9. The adapter reports capability absence before labelers run.
 10. All labeler outputs remain owned by the opened `scene_uid`.
+11. `dropped_frame` requires `frame_inventory_mode=capture_timeline`.
+    A gap in `sampled_evidence` or `unknown` is source-unavailable coverage,
+    not evidence that the camera or transport dropped a frame.
 
 ### 11.3 KITScenes adapter
 
@@ -1178,14 +1182,19 @@ Frozen-frame detection compares temporal image fingerprints and timestamps. A
 stationary scene alone must not be mislabeled frozen; motion cues from other
 cameras, ego motion, and encoding metadata are used in fusion.
 
-`odd_image_qc_policy_v2` applies these status rules:
+`odd_image_qc_policy_v3` applies these status rules:
 
 1. Build expected camera-frame inventory from the canonical scene clock and
-   dataset camera capability manifest. This inventory is native-timeline
+   dataset camera capability manifest only when the adapter declares
+   `frame_inventory_mode=capture_timeline`. This inventory is native-timeline
    evidence and is independent of the lower pixel-QC sampling cadence.
 2. A declared absent camera is `status=unavailable` for the scene. A missing
-   expected frame in a present or partial stream is `dropped_frame`; adjacent
-   missing frames are coalesced without hiding their count.
+   expected frame in an authoritative capture timeline is `dropped_frame`;
+   adjacent missing frames are coalesced without hiding their count. When the
+   opened artifact exposes only sampled model-input windows, as the initial
+   KITScenes published snapshot does, unsampled intervals are
+   `status=unavailable` with `frame_inventory_mode=sampled_evidence`. They
+   never become `dropped_frame` and never create VLM trigger anchors.
 3. An object with invalid size or an undecodable image is
    `corrupted_frame`. The scene task continues and records the failure instead
    of discarding every other camera observation.
@@ -1827,7 +1836,7 @@ experimental `visual_actor_uid`. Camera-level rows retain `camera_id`.
 | `perception.image.blur` | Spatial frequency, edge spread, optical flow/ego motion | `IQC` detects blur and distinguishes motion versus defocus using temporal/flow cues; focused `ORV` only adjudicates ambiguous cause | Per camera, 0.5-2 s | Low-texture scene without enough edges is `not_observable`; no blur with adequate texture is `none` |
 | `perception.image.weather_artifact` | Temporal camera pixels and environment context | `IQC` proposes streak/spray/veiling patterns; `ORV` classifies artifact type; `FUS` separates lens-fixed contamination | Per camera, 2-5 s | No clean observable region is `not_observable`; atmospheric fog and lens condensation require temporal distinction |
 | `perception.image.lens_contamination` | Camera-fixed artifacts persistent across scene motion | `IQC` detects image-coordinate persistence; `ORV` classifies droplet/dirt/mud/condensation; `FUS` validates persistence | Per camera, preferably 3-10 s | A one-frame splash is weather artifact until persistent; insufficient temporal baseline is `ambiguous`; clean lens emits `none` |
-| `perception.image.frame_status` | Decoder result, timestamps, frame hashes, neighboring cameras/ego motion | `IQC` deterministically detects normal/obstruction/black/frozen/dropped/corrupted | Per camera at native rate | Stationary scene alone cannot imply frozen; full/partial obstruction semantic boundary may use `ORV` after deterministic candidate |
+| `perception.image.frame_status` | Decoder result, timestamps, frame hashes, authoritative frame inventory, neighboring cameras/ego motion | `IQC` deterministically detects normal/obstruction/black/frozen/dropped/corrupted | Per camera at native rate only with `capture_timeline`; otherwise at sampled evidence intervals | `dropped_frame` requires an authoritative capture inventory; a missing sampled model-input frame is `unavailable`. Stationary scene alone cannot imply frozen; full/partial obstruction semantic boundary may use `ORV` after deterministic candidate |
 | `perception.object.appearance` | Actor crop plus scene context and temporal identity | Focused `ORV` classifies unusual object/pose/temporary/ambiguous/deceptive appearance; `TRK` supplies stable actor | Actor-camera clip, 1-5 s | No stable actor/crop is `unavailable`; `normal` cannot coexist with unusual values; rare claim needs second-pass agreement |
 | `perception.map_element_condition` | Projected mapped element and corresponding camera region | `DMR` identifies expected lane/sign/control element; `ORV` classifies visible condition; `FUS` detects faded/occluded/temporary conflict/missing | Element-camera interval | Projection or association failure is `unavailable`; outside FOV is `not_observable`; visually missing requires valid expected map element and sufficient view |
 | `perception.scene.complexity` | Multi-view scene, topology, actor counts, controls, occlusion | `ORV` provides semantic complexity; `DMR`/`TRK` provide normalized feature vector; `FUS` applies audited calibration | Scene interval, 3-5 s | Complexity is not a raw VLM adjective: missing major modalities lowers confidence; thresholds are frozen from human audit |
