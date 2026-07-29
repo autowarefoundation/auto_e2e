@@ -35,6 +35,7 @@ def _observation(
     confidence: float = 0.9,
     provenance: dict | None = None,
     actor_track_uid: str | None = None,
+    camera_id: str | None = None,
 ):
     return make_observation(
         scene_uid="scene-1",
@@ -47,6 +48,7 @@ def _observation(
         end_timestamp_ns=end_ns,
         provenance=provenance or {"labeler_version": f"{source}_v1"},
         actor_track_uid=actor_track_uid,
+        camera_id=camera_id,
     )
 
 
@@ -173,6 +175,43 @@ def test_authoritative_source_wins_but_conflict_remains_visible() -> None:
     assert observation.confidence == 0.95 * 0.85
     assert len(observation.evidence_uids) == 1
     assert len(observation.conflicting_evidence_uids) == 1
+
+
+def test_native_dropped_frame_overrides_visual_normal_interval() -> None:
+    evidence = source_observations_to_evidence(
+        (
+            _observation(
+                key="perception.image.frame_status",
+                values=("normal",),
+                source="vlm",
+                start_ns=0,
+                end_ns=1_000_000_000,
+                camera_id="front_center",
+            ),
+            _observation(
+                key="perception.image.frame_status",
+                values=("dropped_frame",),
+                source="image_qc",
+                start_ns=100_000_000,
+                end_ns=200_000_000,
+                confidence=1.0,
+                camera_id="front_center",
+            ),
+        ),
+        context=_context(),
+    )
+
+    observations = resolve_evidence(evidence)
+    dropped = next(
+        item for item in observations if item.values == ("dropped_frame",)
+    )
+
+    assert (dropped.start_timestamp_ns, dropped.end_timestamp_ns) == (
+        100_000_000,
+        200_000_000,
+    )
+    assert dropped.provenance["policy"] == "authoritative_source_override"
+    assert len(dropped.conflicting_evidence_uids) == 1
 
 
 def test_same_authority_conflict_abstains() -> None:
