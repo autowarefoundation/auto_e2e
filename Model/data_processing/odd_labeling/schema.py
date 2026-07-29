@@ -17,7 +17,7 @@ CAPABILITY_SCHEMA_VERSION = "odd_dataset_capabilities_v1"
 EVIDENCE_SCHEMA_VERSION = "odd_label_evidence_v1"
 EVENT_SCHEMA_VERSION = "odd_event_instance_v1"
 RECEIPT_SCHEMA_VERSION = "odd_execution_receipt_v1"
-PROVIDER_EXCHANGE_SCHEMA_VERSION = "odd_provider_exchange_v1"
+PROVIDER_EXCHANGE_SCHEMA_VERSION = "odd_provider_exchange_v2"
 
 CHANNEL_AVAILABILITY = ("complete", "partial", "absent")
 CAMERA_FRAME_INVENTORY_MODES = (
@@ -645,6 +645,7 @@ class ProviderExchange:
     input_image_count: int
     request_metadata: Mapping[str, Any]
     raw_response: Mapping[str, Any] | None
+    protocol_repairs: tuple[Mapping[str, Any], ...] = ()
     usage: Mapping[str, float | int] = dataclasses.field(default_factory=dict)
     error_type: str | None = None
     schema_version: str = PROVIDER_EXCHANGE_SCHEMA_VERSION
@@ -678,11 +679,32 @@ class ProviderExchange:
             raise ValueError("BMR exchanges require one semantic map render")
         try:
             canonical_json_bytes(_json_value(self.request_metadata))
+            canonical_repairs = tuple(
+                _json_value(repair) for repair in self.protocol_repairs
+            )
+            canonical_json_bytes(canonical_repairs)
             canonical_json_bytes(_json_value(self.usage))
         except (TypeError, ValueError) as error:
             raise ValueError(
                 "provider exchange metadata must be canonical JSON"
             ) from error
+        for repair in canonical_repairs:
+            if not isinstance(repair, Mapping) or set(repair) != {
+                "kind",
+                "key",
+                "before",
+                "after",
+            }:
+                raise ValueError("provider protocol repair is invalid")
+            if not isinstance(repair["kind"], str) or not repair["kind"]:
+                raise ValueError("provider protocol repair kind is required")
+            if not isinstance(repair["key"], str) or not repair["key"]:
+                raise ValueError("provider protocol repair key is required")
+        if len(
+            {canonical_json_bytes(repair) for repair in canonical_repairs}
+        ) != len(canonical_repairs):
+            raise ValueError("provider protocol repairs are duplicated")
+        object.__setattr__(self, "protocol_repairs", canonical_repairs)
         for name, value in self.usage.items():
             if (
                 not name
