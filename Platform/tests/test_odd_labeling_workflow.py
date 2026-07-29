@@ -389,4 +389,32 @@ def test_launcher_uses_full_rate_visual_sampling_contract() -> None:
     assert 'REFINEMENT_CONFIDENCE_THRESHOLD: "0.65"' in launcher
     assert '"trigger_context_s"' in launcher
     assert '"refinement_confidence_threshold"' in launcher
+    assert "odd_labeler_config_document" in launcher
+    assert 'IfNoneMatch="*"' in launcher
+    assert all(
+        name in launcher
+        for name in {
+            '"ontology_version"',
+            '"ontology_sha256"',
+            '"labeler_bundle_version"',
+            '"labeler_config_uri"',
+            '"labeler_config_sha256"',
+            '"enabled_sources"',
+            '"road_vlm_provider"',
+            '"road_vlm_model"',
+            '"road_vlm_model_revision"',
+            '"road_vlm_prompt_bundle_sha256"',
+            '"road_vlm_decoding_config_sha256"',
+            '"map_resolver_provider"',
+            '"map_resolver_model_id"',
+            '"map_resolver_model_revision"',
+            '"map_resolver_prompt_bundle_sha256"',
+            '"map_resolver_decoding_config_sha256"',
+            '"fusion_config_sha256"',
+            '"calibration_bundle_sha256"',
+            '"publication_prefix"',
+        }
+    )
+    assert '"openai_model"' not in launcher
+    assert '"bedrock_map_model_id"' not in launcher
     assert "odd_dataset_labeler_launch_plan" in launcher
