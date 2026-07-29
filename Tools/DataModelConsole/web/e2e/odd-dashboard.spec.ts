@@ -153,6 +153,7 @@ const statistics = {
 const labelsets = {
   dataset: "kitscenes",
   version: "v3.0",
+  state: "ready",
   labelsets: [
     {
       schema_version: "odd_labelset_manifest_v1",
@@ -173,6 +174,11 @@ const labelsets = {
       openai_compatible: {
         model: "road-observer",
         model_revision: "revision-1",
+        sampling: {
+          regular_interval_s: 1,
+          maximum_anchors: 128,
+          trigger_context_s: 1,
+        },
       },
       quality: {
         schema_version: "odd_quality_v1",
@@ -197,10 +203,41 @@ const labelsets = {
   ],
 };
 
+const oddExecutions = [
+  {
+    execution_id: "odd-current",
+    workflow_name: "odd-dataset-labeler",
+    phase: "SUCCEEDED",
+    started_at: "2026-07-29T00:00:00Z",
+    duration_s: 3600,
+  },
+  {
+    execution_id: "odd-previous",
+    workflow_name: "wf_generate_odd_labelset",
+    phase: "SUCCEEDED",
+    started_at: "2026-07-28T00:00:00Z",
+    duration_s: 7200,
+  },
+  {
+    execution_id: "training-run",
+    workflow_name: "wf_train_il",
+    phase: "RUNNING",
+    started_at: "2026-07-29T01:00:00Z",
+    duration_s: 0,
+  },
+];
+
 async function installODDDashboardRoutes(
   page: Page,
   searchRequests: unknown[] = [],
+  options: {
+    labelsets?: unknown;
+    executions?: unknown[];
+  } = {},
 ) {
+  await page.route("**/api/v1/flyte/executions?**", (route) =>
+    fulfillJSON(route, { items: options.executions ?? oddExecutions }),
+  );
   await page.route("**/api/v1/odd/**", async (route) => {
     const url = new URL(route.request().url());
     if (url.pathname === "/api/v1/odd/ontology") {
@@ -210,7 +247,7 @@ async function installODDDashboardRoutes(
       return fulfillJSON(route, statistics);
     }
     if (url.pathname === "/api/v1/odd/labelsets") {
-      return fulfillJSON(route, labelsets);
+      return fulfillJSON(route, options.labelsets ?? labelsets);
     }
     if (url.pathname === "/api/v1/odd/scenes/search") {
       if (route.request().method() === "POST") {
@@ -306,6 +343,58 @@ test("ODD Dashboard exposes weighted composition, structured search, ontology, a
   await expect(page.getByText("passed", { exact: true })).toBeVisible();
   await expect(page.getByText("pending_human_audit")).toBeVisible();
   await expect(page.getByText("experimental", { exact: true })).toBeVisible();
+  await expect(page.getByText("superseded", { exact: true })).toBeVisible();
+  await expect(page.getByText("training-run", { exact: true })).toHaveCount(0);
+});
+
+test("ODD Dashboard distinguishes running, failed, and not-started lifecycle states", async ({
+  page,
+}) => {
+  const emptyCatalog = {
+    dataset: "kitscenes",
+    version: "v3.0",
+    state: "not_started",
+    labelsets: [],
+  };
+  await installODDDashboardRoutes(page, [], {
+    labelsets: emptyCatalog,
+    executions: [
+      {
+        execution_id: "odd-running",
+        workflow_name: "odd-dataset-labeler",
+        phase: "RUNNING",
+        started_at: "2026-07-29T00:00:00Z",
+        duration_s: 0,
+      },
+    ],
+  });
+  await page.goto("/odd");
+  await expect(page.getByText("running", { exact: true }).first()).toBeVisible();
+
+  await page.unrouteAll({ behavior: "wait" });
+  await installODDDashboardRoutes(page, [], {
+    executions: [
+      {
+        execution_id: "odd-failed",
+        workflow_name: "odd-dataset-labeler",
+        phase: "FAILED",
+        started_at: "2026-07-29T00:00:00Z",
+        duration_s: 120,
+      },
+    ],
+  });
+  await page.reload();
+  await page.getByRole("button", { name: "LabelSets" }).click();
+  await expect(page.getByText("failed", { exact: true }).first()).toBeVisible();
+  await expect(page.getByText("oddls-test", { exact: true })).toBeVisible();
+
+  await page.unrouteAll({ behavior: "wait" });
+  await installODDDashboardRoutes(page, [], {
+    labelsets: emptyCatalog,
+    executions: [],
+  });
+  await page.reload();
+  await expect(page.getByText("not_started", { exact: true })).toBeVisible();
 });
 
 test("ODD Dashboard remains horizontally contained on mobile", async ({ page }) => {
