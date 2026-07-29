@@ -14,8 +14,10 @@ env:
     OPENAI_MODEL_REVISION: deployed
     BEDROCK_MAP_MODEL_ID: us.anthropic.claude-sonnet-4-6
     BEDROCK_MAP_MODEL_REVISION: claude-sonnet-4-6
-    CAMERA_ANCHOR_INTERVAL_S: "4.0"
-    MAXIMUM_CAMERA_ANCHORS: "12"
+    CAMERA_ANCHOR_INTERVAL_S: "1.0"
+    MAXIMUM_CAMERA_ANCHORS: "128"
+    TRIGGER_CONTEXT_S: "1.0"
+    REFINEMENT_CONFIDENCE_THRESHOLD: "0.65"
     MAXIMUM_SCENES: "1"
     SCENE_CONCURRENCY: "1"
     OPENAI_CONCURRENCY: "10"
@@ -92,6 +94,12 @@ phases:
             ),
             "maximum_camera_anchors": int(
                 os.environ["MAXIMUM_CAMERA_ANCHORS"]
+            ),
+            "trigger_context_s": float(
+                os.environ["TRIGGER_CONTEXT_S"]
+            ),
+            "refinement_confidence_threshold": float(
+                os.environ["REFINEMENT_CONFIDENCE_THRESHOLD"]
             ),
             "maximum_scenes": int(os.environ["MAXIMUM_SCENES"]),
             "scene_concurrency": int(os.environ["SCENE_CONCURRENCY"]),
