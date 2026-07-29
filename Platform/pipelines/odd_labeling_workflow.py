@@ -30,7 +30,7 @@ DATA_PREP_IMAGE = os.environ.get(
     "AUTO_E2E_DATA_PREP_IMAGE",
     f"{ECR_PREFIX}/auto-e2e/data-prep:latest",
 )
-ODD_LABELER_VERSION = "odd_dataset_labeler_v6"
+ODD_LABELER_VERSION = "odd_dataset_labeler_v7"
 ODD_SCENE_INDEX_SCHEMA_VERSION = "odd_scene_index_v2"
 MAX_ODD_ARTIFACT_BYTES = 64 << 20
 MAX_ODD_PARQUET_BYTES = 512 << 20
@@ -44,8 +44,8 @@ ODD_EXECUTABLE_SOURCES = frozenset(
 ODD_SOURCE_POLICY_VERSIONS = {
     "map_route": "odd_map_route_policy_v1",
     "gnss_ins": "odd_gnss_ins_policy_v2",
-    "vlm": "odd_road_vlm_policy_v4",
-    "image_qc": "odd_image_qc_policy_v2",
+    "vlm": "odd_road_vlm_policy_v5",
+    "image_qc": "odd_image_qc_policy_v3",
     "fusion": "odd_source_fusion_v1",
 }
 
@@ -818,7 +818,7 @@ def _put_immutable(
 @task(
     container_image=DATA_PREP_IMAGE,
     cache=True,
-    cache_version="odd-resolve-scenes-v3",
+    cache_version="odd-resolve-scenes-v4",
     requests=Resources(cpu="1", mem="2Gi"),
     limits=Resources(cpu="2", mem="4Gi"),
 )
@@ -1014,7 +1014,7 @@ def label_odd_kinematics(
 @task(
     container_image=DATA_PREP_IMAGE,
     cache=True,
-    cache_version="odd-source-image-qc-v3",
+    cache_version="odd-source-image-qc-v4",
     requests=Resources(cpu="2", mem="6Gi"),
     limits=Resources(cpu="4", mem="10Gi"),
 )
@@ -1069,7 +1069,7 @@ def label_odd_image_quality(
 @task(
     container_image=DATA_PREP_IMAGE,
     cache=True,
-    cache_version="odd-source-openai-compatible-v4",
+    cache_version="odd-source-openai-compatible-v5",
     retries=2,
     pod_template=_scene_labeling_pod_template(),
     requests=Resources(cpu="2", mem="6Gi"),
@@ -1327,7 +1327,7 @@ def label_odd_bedrock_map(
 @task(
     container_image=DATA_PREP_IMAGE,
     cache=True,
-    cache_version="odd-fuse-scene-v4",
+    cache_version="odd-fuse-scene-v5",
     requests=Resources(cpu="2", mem="6Gi"),
     limits=Resources(cpu="4", mem="12Gi"),
 )
