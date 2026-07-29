@@ -59,7 +59,7 @@ type oddLabelerInputTemplate struct {
 	BedrockConcurrency              int      `json:"bedrock_concurrency"`
 }
 
-const supportedODDLabelerBundleVersion = "odd_dataset_labeler_v6"
+const supportedODDLabelerBundleVersion = "odd_dataset_labeler_v7"
 
 type ODDOperationResult struct {
 	Action            string `json:"action"`
