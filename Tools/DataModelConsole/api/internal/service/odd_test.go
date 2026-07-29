@@ -43,12 +43,33 @@ func oddTestService(
 	})
 	ontologyBody := oddJSON(t, map[string]any{
 		"schema_version": "odd_ontology_registry_v1",
-		"labels":         []any{},
+		"labels": []any{map[string]any{
+			"key":          "odd.road.context",
+			"quality_tier": "experimental",
+			"values":       []any{map[string]any{"value": "urban"}},
+		}},
 	})
 	statisticsBody := oddJSON(t, map[string]any{
 		"schema_version": "odd_statistics_v1",
 		"labelset_id":    labelSet,
 		"scene_count":    1,
+		"keys": []any{map[string]any{
+			"key":                       "odd.road.context",
+			"valid_scene_count":         1,
+			"eligible_scene_count":      1,
+			"observable_scene_coverage": 1.0,
+		}},
+	})
+	coverageBody := oddJSON(t, map[string]any{
+		"schema_version": "odd_quality_v1",
+		"labelset_id":    labelSet,
+		"keys": []any{map[string]any{
+			"key":              "odd.road.context",
+			"quality_tier":     "experimental",
+			"support_state":    "supported_experimental",
+			"attempted_count":  1,
+			"successful_count": 1,
+		}},
 	})
 	sceneIndexBody := oddJSON(t, map[string]any{
 		"schema_version": "odd_scene_index_v1",
@@ -78,6 +99,10 @@ func oddTestService(
 			Key: root + "/scene_index.json", SHA256: oddDigest(sceneIndexBody),
 			ByteSize: int64(len(sceneIndexBody)),
 		},
+		"quality_coverage": {
+			Key: root + "/quality/coverage.json", SHA256: oddDigest(coverageBody),
+			ByteSize: int64(len(coverageBody)),
+		},
 	}
 	manifestBody := oddJSON(t, ODDManifest{
 		SchemaVersion:         "odd_labelset_manifest_v1",
@@ -104,11 +129,12 @@ func oddTestService(
 	})
 	objects := map[string]fakePublicationObject{
 		dataset + "/" + version + "/odd/latest.json": {body: pointerBody},
-		manifestKey:                  {body: manifestBody},
-		artifacts["ontology"].Key:    {body: ontologyBody},
-		artifacts["statistics"].Key:  {body: statisticsBody},
-		artifacts["scene_index"].Key: {body: sceneIndexBody},
-		recordKey:                    {body: recordBody},
+		manifestKey:                       {body: manifestBody},
+		artifacts["ontology"].Key:         {body: ontologyBody},
+		artifacts["statistics"].Key:       {body: statisticsBody},
+		artifacts["scene_index"].Key:      {body: sceneIndexBody},
+		artifacts["quality_coverage"].Key: {body: coverageBody},
+		recordKey:                         {body: recordBody},
 	}
 	if mutate != nil {
 		mutate(objects)
@@ -385,6 +411,64 @@ func TestODDSceneVerifiesPinnedRecord(t *testing.T) {
 	if manifest.LabelSetID != "oddls-test" ||
 		!strings.Contains(string(body), `"scene_uid":"scene-1"`) {
 		t.Fatalf("unexpected ODD scene response: %s", body)
+	}
+}
+
+func TestODDOntologyIncludesCanonicalDatasetSupport(t *testing.T) {
+	service := oddTestService(t, nil)
+
+	body, manifest, _, err := service.ODDOntology(
+		context.Background(), "kitscenes", "v3.0",
+	)
+
+	if err != nil {
+		t.Fatal(err)
+	}
+	if manifest.LabelSetID != "oddls-test" {
+		t.Fatalf("labelset = %q", manifest.LabelSetID)
+	}
+	var document struct {
+		DatasetName    string `json:"dataset_name"`
+		DatasetVersion string `json:"dataset_version"`
+		LabelSetID     string `json:"labelset_id"`
+		Labels         []struct {
+			Key            string `json:"key"`
+			DatasetSupport struct {
+				SupportState            string  `json:"support_state"`
+				ValidSceneCount         int64   `json:"valid_scene_count"`
+				EligibleSceneCount      int64   `json:"eligible_scene_count"`
+				ObservableSceneCoverage float64 `json:"observable_scene_coverage"`
+			} `json:"dataset_support"`
+		} `json:"labels"`
+	}
+	if err := json.Unmarshal(body, &document); err != nil {
+		t.Fatal(err)
+	}
+	if document.DatasetName != "kitscenes" ||
+		document.DatasetVersion != "v3.0" ||
+		document.LabelSetID != "oddls-test" ||
+		len(document.Labels) != 1 ||
+		document.Labels[0].Key != "odd.road.context" ||
+		document.Labels[0].DatasetSupport.SupportState !=
+			"supported_experimental" ||
+		document.Labels[0].DatasetSupport.ValidSceneCount != 1 ||
+		document.Labels[0].DatasetSupport.EligibleSceneCount != 1 ||
+		document.Labels[0].DatasetSupport.ObservableSceneCoverage != 1 {
+		t.Fatalf("unexpected enriched ontology: %+v", document)
+	}
+}
+
+func TestODDOntologyNormalizesLegacySupportState(t *testing.T) {
+	state, ok := canonicalODDSupportState(
+		"supported_observed",
+		"experimental",
+	)
+	if !ok || state != "supported_experimental" {
+		t.Fatalf("legacy support state = %q, %v", state, ok)
+	}
+	state, ok = canonicalODDSupportState("attempted_no_valid", "experimental")
+	if !ok || state != "unsupported_missing_source" {
+		t.Fatalf("legacy unavailable state = %q, %v", state, ok)
 	}
 }
 
