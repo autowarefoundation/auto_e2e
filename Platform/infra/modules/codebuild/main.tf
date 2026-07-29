@@ -61,6 +61,19 @@ resource "aws_iam_role_policy" "codebuild" {
         Action   = ["s3:GetObject", "s3:PutObject", "s3:GetBucketLocation"]
         Resource = ["${aws_s3_bucket.cache.arn}", "${aws_s3_bucket.cache.arn}/*"]
       },
+      {
+        Effect = "Allow"
+        Action = ["s3:GetObject"]
+        Resource = [
+          "arn:aws:s3:::${var.cluster_name}-datasets-${local.account_id}/*/shards/manifest.json",
+          "arn:aws:s3:::${var.cluster_name}-datasets-${local.account_id}/*/odd/configs/*",
+        ]
+      },
+      {
+        Effect   = "Allow"
+        Action   = ["s3:PutObject"]
+        Resource = ["arn:aws:s3:::${var.cluster_name}-datasets-${local.account_id}/*/odd/configs/*"]
+      },
     ]
   })
 }
