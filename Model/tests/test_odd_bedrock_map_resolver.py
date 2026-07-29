@@ -245,6 +245,21 @@ def test_resolver_uses_bedrock_tool_and_geometry_validation() -> None:
         "tool": {"name": BEDROCK_TOOL_NAME}
     }
     assert request["messages"][0]["content"][1]["image"]["format"] == "png"
+    assert len(resolver.provider_exchanges) == 1
+    exchange = resolver.provider_exchanges[0]
+    assert exchange.backend == "BMR"
+    assert exchange.status == "succeeded"
+    assert exchange.usage == {"input_tokens": 100, "output_tokens": 20}
+    assert exchange.raw_response is not None
+    exchange_request = json.dumps(
+        exchange.request_metadata,
+        sort_keys=True,
+    )
+    assert "private-scene-id" not in exchange_request
+    assert "fixture-provider" not in exchange_request
+    assert "latitude" not in exchange_request
+    assert "longitude" not in exchange_request
+    assert "PNG" not in exchange_request
 
 
 def test_geometry_rejection_preserves_ambiguous_evidence() -> None:
@@ -268,3 +283,7 @@ def test_geometry_rejection_preserves_ambiguous_evidence() -> None:
         item["value"]
         for item in observations[0].provenance["candidate_values"]
     } == {"turn_left", "straight"}
+    assert len(resolver.provider_exchanges) == 1
+    assert resolver.provider_exchanges[0].status == "geometry_rejected"
+    assert resolver.provider_exchanges[0].raw_response is not None
+    assert resolver.provider_exchanges[0].error_type == "ValueError"
