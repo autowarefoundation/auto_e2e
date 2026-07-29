@@ -21,9 +21,14 @@ from .schema import (
 )
 
 
-ROAD_VLM_SCHEMA_VERSION = "road_vlm_request_v2"
-ROAD_VLM_PROMPT_VERSION = "road_scene_observer_v3"
+ROAD_VLM_SCHEMA_VERSION = "road_vlm_request_v3"
+ROAD_VLM_PROMPT_VERSION = "road_scene_observer_v4"
 DEFAULT_REFINEMENT_CONFIDENCE_THRESHOLD = 0.65
+VLM_FRAME_STATUS_VALUES = (
+    "normal",
+    "partial_obstruction",
+    "full_obstruction",
+)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -121,6 +126,7 @@ ROAD_VLM_TASK_BUNDLES = (
             "perception.visual.lighting",
             "perception.visual.glare",
             "perception.image.blur",
+            "perception.image.frame_status",
             "perception.image.weather_artifact",
             "perception.image.lens_contamination",
         ),
@@ -291,11 +297,18 @@ def _parse_json_content(content: str) -> dict[str, Any]:
     return value
 
 
+def _vlm_allowed_values(key: str) -> tuple[str, ...]:
+    if key == "perception.image.frame_status":
+        return VLM_FRAME_STATUS_VALUES
+    return ONTOLOGY[key].values
+
+
 def _response_schema(keys: Iterable[str]) -> dict[str, Any]:
     key_list = list(keys)
     observation_properties: dict[str, Any] = {}
     for key in key_list:
         definition = ONTOLOGY[key]
+        allowed_values = _vlm_allowed_values(key)
         shared_properties = {
             "key": {"type": "string", "const": key},
             "confidence": {
@@ -342,11 +355,11 @@ def _response_schema(keys: Iterable[str]) -> dict[str, Any]:
                         "maxItems": (
                             1
                             if definition.cardinality == "single"
-                            else len(definition.values)
+                            else len(allowed_values)
                         ),
                         "items": {
                             "type": "string",
-                            "enum": list(definition.values),
+                            "enum": list(allowed_values),
                         },
                     },
                 },
@@ -381,7 +394,7 @@ def _response_schema(keys: Iterable[str]) -> dict[str, Any]:
                         "maxItems": 0,
                         "items": {
                             "type": "string",
-                            "enum": list(definition.values),
+                            "enum": list(allowed_values),
                         },
                     },
                 },
@@ -426,6 +439,10 @@ def _system_prompt() -> str:
         "Cite only supplied camera roles and timestamps. For a camera-scoped "
         "request, camera_id must equal subject_camera_id. For a scene-scoped "
         "request, camera_id must be null. "
+        "For perception.image.frame_status, visual inference is limited to "
+        "normal, partial_obstruction, or full_obstruction. Never infer black, "
+        "frozen, dropped, or corrupted frame states; those require "
+        "authoritative decoder and timing evidence. "
         "Do not infer hard braking, evasive steering, collision, "
         "near collision, or actor intent from a single image. Do not invent "
         "values outside the candidate list."
@@ -453,7 +470,7 @@ def _task_prompt(
                 "key": key,
                 "description": definition.description,
                 "cardinality": definition.cardinality,
-                "allowed_values": list(definition.values),
+                "allowed_values": list(_vlm_allowed_values(key)),
                 "none_semantics": definition.none_semantics,
             }
         )
@@ -507,7 +524,7 @@ def _prompt_bundle_sha256(
             "key": key,
             "description": ONTOLOGY[key].description,
             "cardinality": ONTOLOGY[key].cardinality,
-            "allowed_values": list(ONTOLOGY[key].values),
+            "allowed_values": list(_vlm_allowed_values(key)),
             "none_semantics": ONTOLOGY[key].none_semantics,
         }
         for key in keys
@@ -656,7 +673,7 @@ def _validate_response(
             isinstance(value, str) for value in values
         ):
             raise ValueError(f"invalid road VLM values: {key}")
-        allowed = set(ONTOLOGY[key].values)
+        allowed = set(_vlm_allowed_values(key))
         if set(values) - allowed:
             raise ValueError(f"road VLM returned an unknown value: {key}")
         if status == "valid":
