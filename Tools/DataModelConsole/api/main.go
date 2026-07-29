@@ -150,6 +150,7 @@ func main() {
 
 			r.Get("/odd/ontology", oddH.Ontology)
 			r.Get("/odd/statistics", oddH.Statistics)
+			r.Get("/odd/model-metrics", oddH.ModelMetrics)
 			r.Get("/odd/labelsets", oddH.LabelSets)
 			r.Get("/odd/operations", oddH.Operations)
 			r.Post("/odd/operations/launch", oddH.Launch)
