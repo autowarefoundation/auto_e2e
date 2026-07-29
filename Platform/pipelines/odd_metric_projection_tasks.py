@@ -23,6 +23,7 @@ from Platform.pipelines.odd_metric_projection import (
     project_metric_samples,
     projection_cache_identity,
 )
+from Platform.pipelines.training_checkpoint import stable_digest
 
 
 ECR_PREFIX = os.environ.get(
@@ -296,7 +297,7 @@ def _uid_digest(values: Sequence[str]) -> str:
         raise ValueError("identity values must be non-empty and unique")
     if any(not value for value in normalized):
         raise ValueError("identity values must not be empty")
-    return hashlib.sha256("\n".join(normalized).encode("utf-8")).hexdigest()
+    return stable_digest(normalized)
 
 
 def _validation_contract(
