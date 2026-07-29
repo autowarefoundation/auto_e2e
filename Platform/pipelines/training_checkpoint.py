@@ -5,9 +5,11 @@ from __future__ import annotations
 import hashlib
 import json
 import random
+import re
 import time
 from pathlib import Path
 from typing import Any, Mapping
+from urllib.parse import urlparse
 
 
 CHECKPOINT_SCHEMA_VERSION = "il_checkpoint_v2"
@@ -23,6 +25,7 @@ _RESUME_REQUIRED_FIELDS = {
     "training_state",
     "data_fingerprint",
 }
+_SHA256_RE = re.compile(r"[0-9a-f]{64}")
 
 
 def stable_digest(value: Any) -> str:
@@ -42,6 +45,13 @@ def sha256_file(path: str | Path, chunk_size: int = 1024 * 1024) -> str:
         for chunk in iter(lambda: stream.read(chunk_size), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def validate_sha256(value: object, *, field: str) -> str:
+    digest = value if isinstance(value, str) else ""
+    if _SHA256_RE.fullmatch(digest) is None:
+        raise ValueError(f"{field} must be a lowercase SHA-256 digest")
+    return digest
 
 
 def checkpoint_key(run_id: str, epoch: int) -> str:
@@ -249,6 +259,38 @@ def upload_immutable_checkpoint(
     }
 
 
+def validate_immutable_checkpoint_record(
+    s3_client,
+    record: Mapping[str, Any],
+) -> None:
+    """Verify a checkpoint record against immutable S3 object metadata."""
+    uri = record.get("uri")
+    if not isinstance(uri, str):
+        raise ValueError("checkpoint record has no S3 URI")
+    parsed = urlparse(uri)
+    if parsed.scheme != "s3" or not parsed.netloc or not parsed.path.lstrip("/"):
+        raise ValueError("checkpoint record has an invalid S3 URI")
+    digest = validate_sha256(
+        record.get("sha256"),
+        field="checkpoint record sha256",
+    )
+    head = s3_client.head_object(
+        Bucket=parsed.netloc,
+        Key=parsed.path.lstrip("/"),
+    )
+    if head.get("Metadata", {}).get("sha256") != digest:
+        raise ValueError(
+            "checkpoint record digest differs from immutable S3 metadata"
+        )
+    content_length = int(head.get("ContentLength", -1))
+    if content_length <= 0:
+        raise ValueError("checkpoint record points to an empty S3 object")
+    if record.get("size") is not None and int(record["size"]) != content_length:
+        raise ValueError(
+            "checkpoint record size differs from immutable S3 object"
+        )
+
+
 def update_best_pointer(
     s3_client,
     *,
@@ -264,6 +306,10 @@ def update_best_pointer(
 ) -> str:
     """Update the versioned best pointer after a metric improvement."""
     key = best_pointer_key(run_id, role=role)
+    checkpoint_sha256 = validate_sha256(
+        checkpoint_sha256,
+        field="checkpoint pointer sha256",
+    )
     pointer = {
         "schema_version": (
             "best_checkpoint_pointer_v2"
@@ -295,45 +341,6 @@ def update_best_pointer(
         sort_keys=True,
         separators=(",", ":"),
     ).encode("ascii")
-    s3_client.put_object(
-        Bucket=bucket,
-        Key=key,
-        Body=body,
-        ContentType="application/json",
-        Metadata={"sha256": hashlib.sha256(body).hexdigest()},
-    )
-    return f"s3://{bucket}/{key}"
-
-
-def mark_best_pointer_transition_pending(
-    s3_client,
-    *,
-    bucket: str,
-    run_id: str,
-    transition_policy_version: str,
-    source_best: Mapping[str, Any],
-) -> str:
-    """Prevent a pre-transition checkpoint from remaining the active best."""
-    if not transition_policy_version:
-        raise ValueError("transition policy version must be non-empty")
-    required = {"epoch", "uri", "sha256", "selection_score"}
-    if set(source_best) != required:
-        raise ValueError(
-            "source best transition fields differ from contract"
-        )
-    pointer = {
-        "schema_version": "best_checkpoint_transition_v1",
-        "run_id": run_id,
-        "status": "pending_post_transition_validation",
-        "transition_policy_version": transition_policy_version,
-        "source_best": dict(source_best),
-    }
-    body = json.dumps(
-        pointer,
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode("ascii")
-    key = best_pointer_key(run_id)
     s3_client.put_object(
         Bucket=bucket,
         Key=key,
