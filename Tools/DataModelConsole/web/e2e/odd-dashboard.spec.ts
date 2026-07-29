@@ -233,6 +233,15 @@ async function installODDDashboardRoutes(
   options: {
     labelsets?: unknown;
     executions?: unknown[];
+    capability?: {
+      enabled: boolean;
+      permitted: boolean;
+      allow_full: boolean;
+    };
+    operationRequests?: Array<{
+      path: string;
+      body: unknown;
+    }>;
   } = {},
 ) {
   await page.route("**/api/v1/flyte/executions?**", (route) =>
@@ -240,6 +249,30 @@ async function installODDDashboardRoutes(
   );
   await page.route("**/api/v1/odd/**", async (route) => {
     const url = new URL(route.request().url());
+    if (url.pathname === "/api/v1/odd/operations") {
+      return fulfillJSON(
+        route,
+        options.capability ?? {
+          enabled: false,
+          permitted: false,
+          allow_full: false,
+        },
+      );
+    }
+    if (
+      url.pathname === "/api/v1/odd/operations/launch" ||
+      url.pathname === "/api/v1/odd/operations/retry"
+    ) {
+      options.operationRequests?.push({
+        path: url.pathname,
+        body: route.request().postDataJSON(),
+      });
+      return fulfillJSON(route, {
+        action: url.pathname.endsWith("/retry") ? "retry" : "launch",
+        execution_id: "odd-created",
+        created: true,
+      });
+    }
     if (url.pathname === "/api/v1/odd/ontology") {
       return fulfillJSON(route, ontology);
     }
@@ -345,6 +378,46 @@ test("ODD Dashboard exposes weighted composition, structured search, ontology, a
   await expect(page.getByText("experimental", { exact: true })).toBeVisible();
   await expect(page.getByText("superseded", { exact: true })).toBeVisible();
   await expect(page.getByText("training-run", { exact: true })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Run smoke" })).toHaveCount(0);
+});
+
+test("ODD Dashboard sends only permitted Dataset Labeler commands", async ({
+  page,
+}) => {
+  const operationRequests: Array<{ path: string; body: unknown }> = [];
+  await installODDDashboardRoutes(page, [], {
+    capability: { enabled: true, permitted: true, allow_full: true },
+    executions: [
+      {
+        execution_id: "odd-failed",
+        workflow_name: "odd-dataset-labeler",
+        phase: "FAILED",
+        started_at: "2026-07-29T00:00:00Z",
+        duration_s: 120,
+      },
+    ],
+    operationRequests,
+  });
+  await page.goto("/odd?tab=labelsets");
+
+  await page.getByRole("button", { name: "Run smoke" }).click();
+  await expect.poll(() => operationRequests.length).toBe(1);
+  expect(operationRequests[0]).toEqual({
+    path: "/api/v1/odd/operations/launch",
+    body: {
+      dataset: "kitscenes",
+      version: "v3.0",
+      publication_scope: "smoke",
+    },
+  });
+
+  await expect(page.getByRole("button", { name: "Run full" })).toBeVisible();
+  await page.getByRole("button", { name: "Retry odd-failed" }).click();
+  await expect.poll(() => operationRequests.length).toBe(2);
+  expect(operationRequests[1]).toEqual({
+    path: "/api/v1/odd/operations/retry",
+    body: { execution_id: "odd-failed" },
+  });
 });
 
 test("ODD Dashboard distinguishes running, failed, and not-started lifecycle states", async ({
