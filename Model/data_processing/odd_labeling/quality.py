@@ -376,25 +376,53 @@ def _confidence_band(confidence: float) -> str:
 def _ranked_candidates(
     candidates: Sequence[dict[str, Any]],
     *,
-    labelset_id: str,
+    selection_seed: str,
     stratum_id: str,
 ) -> list[dict[str, Any]]:
     return sorted(
         candidates,
         key=lambda candidate: hashlib.sha256(
             (
-                f"{labelset_id}\0{stratum_id}\0"
+                f"{selection_seed}\0{stratum_id}\0"
                 f"{candidate['evidence_uid']}"
             ).encode("utf-8")
         ).hexdigest(),
     )[:AUDIT_SAMPLE_TARGET]
 
 
+def _audit_selection_seed(
+    records: Sequence[Mapping[str, Any]],
+) -> str:
+    inventory = [
+        {
+            "scene_uid": str(record["scene_uid"]),
+            "evidence_uids": sorted(
+                str(evidence["evidence_uid"])
+                for evidence in record.get("evidence", [])
+            ),
+        }
+        for record in sorted(
+            records,
+            key=lambda item: str(item["scene_uid"]),
+        )
+    ]
+    return hashlib.sha256(_canonical_bytes(inventory)).hexdigest()
+
+
 def _audit_document(
     records: Sequence[Mapping[str, Any]],
     *,
     labelset_id: str,
+    audit_selection_seed: str,
 ) -> dict[str, Any]:
+    if (
+        len(audit_selection_seed) != 64
+        or any(
+            character not in "0123456789abcdef"
+            for character in audit_selection_seed
+        )
+    ):
+        raise ValueError("audit selection seed must be a lowercase SHA-256")
     strata: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for record in records:
         scene_uid = str(record["scene_uid"])
@@ -444,7 +472,7 @@ def _audit_document(
         candidates = strata[stratum_id]
         selected = _ranked_candidates(
             candidates,
-            labelset_id=labelset_id,
+            selection_seed=audit_selection_seed,
             stratum_id=stratum_id,
         )
         rows.append(
@@ -465,6 +493,7 @@ def _audit_document(
         "status": "pending_human_audit",
         "selection_policy": {
             "method": "sha256_rank_within_stratum",
+            "selection_seed_sha256": audit_selection_seed,
             "target_per_stratum": AUDIT_SAMPLE_TARGET,
             "reviewer_blinding": "source_evidence_hidden_initially",
         },
@@ -519,8 +548,14 @@ def build_quality_documents(
     ontology: Mapping[str, Any],
     *,
     labelset_id: str,
+    audit_selection_seed: str | None = None,
 ) -> dict[str, dict[str, Any]]:
     structural_validation = validate_labelset_records(records, ontology)
+    selection_seed = (
+        audit_selection_seed
+        if audit_selection_seed is not None
+        else _audit_selection_seed(records)
+    )
     return {
         "coverage": _coverage_document(
             statistics,
@@ -530,6 +565,7 @@ def build_quality_documents(
         "audit_manifest": _audit_document(
             records,
             labelset_id=labelset_id,
+            audit_selection_seed=selection_seed,
         ),
         "calibration": _calibration_document(
             records,
