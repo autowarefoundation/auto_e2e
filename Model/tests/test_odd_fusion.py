@@ -128,6 +128,40 @@ def test_source_policy_thresholds_change_evidence_config_identity() -> None:
         != second_evidence.provenance.config_sha256
     )
 
+    sampled = _observation(
+        key="perception.image.frame_status",
+        values=("normal",),
+        source="image_qc",
+        provenance={
+            "labeler_version": "odd_image_qc_v3",
+            "image_qc_policy_version": "odd_image_qc_policy_v3",
+            "frame_inventory_mode": "sampled_evidence",
+            "frozen_ego_motion_threshold_m": 0.5,
+        },
+    )
+    capture = _observation(
+        key="perception.image.frame_status",
+        values=("normal",),
+        source="image_qc",
+        provenance={
+            **sampled.provenance,
+            "frame_inventory_mode": "capture_timeline",
+        },
+    )
+    sampled_evidence = source_observations_to_evidence(
+        (sampled,),
+        context=_context(),
+    )[0]
+    capture_evidence = source_observations_to_evidence(
+        (capture,),
+        context=_context(),
+    )[0]
+
+    assert (
+        sampled_evidence.provenance.config_sha256
+        != capture_evidence.provenance.config_sha256
+    )
+
 
 def test_map_evidence_retains_bedrock_model_identity() -> None:
     observation = _observation(
