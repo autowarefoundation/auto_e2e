@@ -17,6 +17,7 @@ import type {
   OverlayModelsResponse,
   ODDEvidenceResponse,
   ODDLabelSetsResponse,
+  ODDMetricProjectionsResponse,
   ODDOntology,
   ODDOperationResult,
   ODDOperationsCapability,
@@ -140,6 +141,15 @@ export function getODDStatistics(
 ): Promise<ODDStatistics> {
   return apiFetch<ODDStatistics>(
     `/api/v1/odd/statistics?${oddCoordinate(dataset, version)}`,
+  );
+}
+
+export function getODDModelMetrics(
+  dataset: string,
+  version: string,
+): Promise<ODDMetricProjectionsResponse> {
+  return apiFetch<ODDMetricProjectionsResponse>(
+    `/api/v1/odd/model-metrics?${oddCoordinate(dataset, version)}`,
   );
 }
 
