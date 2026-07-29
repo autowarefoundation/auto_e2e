@@ -399,7 +399,16 @@ def test_dataset_capability_manifest_distinguishes_absent_channels() -> None:
 
     assert manifest.channels["map"].availability == "absent"
     assert manifest.channels["gnss"].availability == "complete"
+    assert manifest.cameras[0].frame_inventory_mode == "unknown"
     assert len(manifest.semantic_sha256()) == 64
+
+    with pytest.raises(ValueError, match="frame inventory mode"):
+        CameraCapability(
+            camera_id="front",
+            canonical_role="front_center",
+            channel=camera_channel,
+            frame_inventory_mode="assumed_complete",
+        )
 
     with pytest.raises(ValueError, match="absent channel"):
         ChannelCapability(
