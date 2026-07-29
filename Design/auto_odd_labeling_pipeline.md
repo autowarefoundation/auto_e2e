@@ -1178,6 +1178,37 @@ Frozen-frame detection compares temporal image fingerprints and timestamps. A
 stationary scene alone must not be mislabeled frozen; motion cues from other
 cameras, ego motion, and encoding metadata are used in fusion.
 
+`odd_image_qc_policy_v2` applies these status rules:
+
+1. Build expected camera-frame inventory from the canonical scene clock and
+   dataset camera capability manifest. This inventory is native-timeline
+   evidence and is independent of the lower pixel-QC sampling cadence.
+2. A declared absent camera is `status=unavailable` for the scene. A missing
+   expected frame in a present or partial stream is `dropped_frame`; adjacent
+   missing frames are coalesced without hiding their count.
+3. An object with invalid size or an undecodable image is
+   `corrupted_frame`. The scene task continues and records the failure instead
+   of discarding every other camera observation.
+4. A decoded sampled frame covers only its native frame interval. It never
+   labels the time up to the next sampled anchor as normal.
+5. Exact repeated content becomes `frozen_frame` only when the ego moved at
+   least the configured distance or another synchronized camera changed.
+   Repeated content without independent motion evidence is `ambiguous`, not
+   frozen.
+6. An effectively black decoded image is `black_frame`; dependent exposure,
+   blur, contrast, lighting, and glare observations are
+   `not_observable` for that interval.
+7. `partial_obstruction` and `full_obstruction` require semantic visual
+   evidence. Pixel uniformity alone is not enough because sky, walls, and dark
+   scenes can look similar. The OpenAI-compatible observer may resolve these
+   states, but it cannot override authoritative decode, dropped-frame, or
+   timing facts.
+
+Every observation carries the Image QC policy and labeler versions. Pixel
+thresholds and frozen-motion thresholds remain experimental until the
+stratified human audit passes; changing them requires a new source policy and
+Flyte cache version.
+
 ### 12.4 VLMLabeler
 
 The VLM labeler handles visual semantics not reliably available from
