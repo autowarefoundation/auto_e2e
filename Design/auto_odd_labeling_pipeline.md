@@ -2516,6 +2516,43 @@ Human review records independent annotations, adjudication, reviewer agreement,
 and ontology interpretation questions. Reviewers see source evidence only after
 their initial label to reduce anchoring.
 
+The immutable annotation contract is
+`odd_human_audit_annotations_v1`. It binds:
+
+- LabelSet ID, audit-manifest SHA-256, and annotation-set ID;
+- reviewer count and `draft` or `adjudicated` status;
+- per-label evaluation units with scene/key/source/interval, sampling weight,
+  prediction, confidence, optional evidence ID, adjudicated reference, and
+  reviewer agreement;
+- per-event units with matched, spurious, or missed state, predicted/reference
+  boundaries, actor-continuity outcome, and sampling weight;
+- open and resolved ontology interpretation questions.
+
+Label units may have no predicted evidence but a valid human reference. This is
+required to measure false negatives and recall; auditing only emitted evidence
+would produce a biased precision-only report. Predicted evidence IDs and
+predicted/reference event IDs are unique within an annotation set so no sample
+can be counted twice.
+
+`odd_human_audit_results_v1` computes:
+
+- per key/source/value TP, FP, FN, precision, recall, inverse-sampling-weighted
+  estimates, and Wilson 95% intervals;
+- exact status/value accuracy and status confusion;
+- confidence-band accuracy and expected calibration error;
+- event precision/recall, onset and offset absolute error, temporal IoU, and
+  actor fragmentation/switch error;
+- reviewer agreement and unresolved ontology-question counts;
+- positive and negative sample sufficiency against the initial 50-example
+  target.
+
+Only adjudicated annotations from at least two reviewers produce measured
+results. The evaluator always emits `certified=false`; frozen per-family gates,
+sample sufficiency, resolved ontology questions, and explicit approval are
+separate requirements. Human audit results are post-publication artifacts
+bound to an immutable LabelSet, so Dataset Labeler execution remains
+independent of manual review.
+
 ### 19.3 Initial quality gates
 
 Before a source/key pair becomes certified:
