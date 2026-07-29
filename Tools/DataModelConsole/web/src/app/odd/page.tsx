@@ -36,6 +36,7 @@ import {
   getODDStatistics,
   launchODDDatasetLabeler,
   listExecutionsPage,
+  listJoinedExperiments,
   retryODDDatasetLabeler,
   searchODDScenesStructured,
 } from "@/lib/api";
@@ -516,6 +517,7 @@ function ODDPageContent() {
     [dataset, version],
     Boolean(readyLabelSet),
   );
+  const experiments = useApi(listJoinedExperiments, []);
   const executions = useApi(
     () => listExecutionsPage(100),
     [],
@@ -1121,6 +1123,7 @@ function ODDPageContent() {
           loading={modelMetrics.loading}
           error={modelMetrics.error}
           onRetry={modelMetrics.reload}
+          experiments={experiments.data?.experiments}
         />
       )}
 
