@@ -504,6 +504,86 @@ def _prompt_bundle_sha256(
     return hashlib.sha256(canonical_json_bytes(bundle)).hexdigest()
 
 
+def road_vlm_prompt_bundle_document(
+    prompt_version: str = ROAD_VLM_PROMPT_VERSION,
+) -> dict[str, Any]:
+    """Return the complete immutable prompt contract used by a Full Run."""
+    entries = []
+    for bundle in ROAD_VLM_TASK_BUNDLES:
+        for subject_scope, keys in (
+            ("scene", bundle.scene_keys),
+            ("camera", bundle.camera_keys),
+        ):
+            if not keys:
+                continue
+            entries.append(
+                {
+                    "task_bundle": bundle.name,
+                    "subject_scope": subject_scope,
+                    "temporal_mode": bundle.temporal_mode,
+                    "keys": list(keys),
+                    "prompt_sha256": _prompt_bundle_sha256(
+                        bundle.name,
+                        keys,
+                        subject_scope,
+                        prompt_version,
+                    ),
+                }
+            )
+    return {
+        "schema_version": "road_vlm_prompt_bundle_v1",
+        "request_schema_version": ROAD_VLM_SCHEMA_VERSION,
+        "prompt_version": prompt_version,
+        "entries": entries,
+        "refinement": {
+            "safety_relevant_keys": sorted(
+                SAFETY_RELEVANT_REFINEMENT_KEYS
+            ),
+            "negative_values": sorted(NEGATIVE_REFINEMENT_VALUES),
+        },
+    }
+
+
+def road_vlm_prompt_bundle_sha256(
+    prompt_version: str = ROAD_VLM_PROMPT_VERSION,
+) -> str:
+    return hashlib.sha256(
+        canonical_json_bytes(
+            road_vlm_prompt_bundle_document(prompt_version)
+        )
+    ).hexdigest()
+
+
+def road_vlm_decoding_bundle_sha256(*, max_tokens: int = 4096) -> str:
+    if max_tokens <= 0:
+        raise ValueError("road VLM max_tokens must be positive")
+    schemas = []
+    for bundle in ROAD_VLM_TASK_BUNDLES:
+        for subject_scope, keys in (
+            ("scene", bundle.scene_keys),
+            ("camera", bundle.camera_keys),
+        ):
+            if not keys:
+                continue
+            schemas.append(
+                {
+                    "task_bundle": bundle.name,
+                    "subject_scope": subject_scope,
+                    "response_schema": _response_schema(keys),
+                }
+            )
+    return hashlib.sha256(
+        canonical_json_bytes(
+            {
+                "schema_version": "road_vlm_decoding_bundle_v1",
+                "temperature": 0.0,
+                "max_tokens": max_tokens,
+                "schemas": schemas,
+            }
+        )
+    ).hexdigest()
+
+
 def _validate_response(
     payload: Mapping[str, Any],
     keys: tuple[str, ...],
