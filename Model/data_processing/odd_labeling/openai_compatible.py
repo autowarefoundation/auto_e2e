@@ -16,46 +16,162 @@ from .schema import LabelObservation, canonical_json_bytes, make_observation
 
 
 ROAD_VLM_SCHEMA_VERSION = "road_vlm_request_v2"
-ROAD_VLM_PROMPT_VERSION = "road_scene_observer_v2"
+ROAD_VLM_PROMPT_VERSION = "road_scene_observer_v3"
+DEFAULT_REFINEMENT_CONFIDENCE_THRESHOLD = 0.65
 
-STATIC_SCENE_KEYS = (
-    "odd.road.context",
-    "odd.road.lane_marking_quality",
-    "odd.road.surface_type",
-    "odd.road.surface_state",
-    "odd.road.edge_type_present",
-    "odd.road.special_structure",
-    "odd.road.workzone_state",
-    "odd.traffic_control.present",
-    "odd.traffic_light.state",
-    "odd.environment.day_phase",
-    "odd.environment.sky",
-    "odd.environment.precipitation_visual",
-    "odd.environment.visibility_degradation",
-    "odd.environment.road_lighting",
-    "odd.environment.glare",
-    "perception.occlusion.source",
-    "perception.occlusion.level",
-    "perception.scene.clutter",
-    "perception.image.weather_artifact",
-    "perception.image.lens_contamination",
-    "perception.map_element_condition",
-    "perception.scene.complexity",
-    "perception.temporary_traffic_control",
+
+@dataclasses.dataclass(frozen=True)
+class RoadVLMTaskBundle:
+    name: str
+    scene_keys: tuple[str, ...] = ()
+    camera_keys: tuple[str, ...] = ()
+    temporal_mode: str = "static"
+
+    def __post_init__(self) -> None:
+        if not self.name or not self.scene_keys + self.camera_keys:
+            raise ValueError("road VLM task bundle must have a name and keys")
+        if self.temporal_mode not in {"static", "short", "event"}:
+            raise ValueError(f"invalid temporal mode: {self.temporal_mode}")
+        keys = self.scene_keys + self.camera_keys
+        if len(keys) != len(set(keys)):
+            raise ValueError(f"duplicate key in road VLM task bundle: {self.name}")
+        unknown = set(keys) - set(ONTOLOGY)
+        if unknown:
+            raise ValueError(
+                f"unknown road VLM task bundle keys: {sorted(unknown)}"
+            )
+
+
+ROAD_VLM_TASK_BUNDLES = (
+    RoadVLMTaskBundle(
+        name="road_appearance",
+        scene_keys=(
+            "odd.road.context",
+            "odd.road.lane_marking_quality",
+            "odd.road.surface_type",
+            "odd.road.surface_state",
+            "odd.road.edge_type_present",
+            "odd.road.special_structure",
+            "odd.road.workzone_state",
+        ),
+    ),
+    RoadVLMTaskBundle(
+        name="environment",
+        scene_keys=(
+            "odd.environment.day_phase",
+            "odd.environment.sky",
+            "odd.environment.precipitation_visual",
+            "odd.environment.visibility_degradation",
+            "odd.environment.road_lighting",
+            "odd.environment.glare",
+        ),
+    ),
+    RoadVLMTaskBundle(
+        name="traffic_control",
+        scene_keys=(
+            "odd.road.junction_control",
+            "odd.traffic_control.present",
+            "odd.traffic_light.state",
+        ),
+    ),
+    RoadVLMTaskBundle(
+        name="dynamic_agents",
+        scene_keys=(
+            "odd.dynamic.traffic_density",
+            "odd.dynamic.vru_density",
+            "odd.dynamic.parked_vehicle_density",
+            "odd.dynamic.oncoming_traffic",
+            "odd.dynamic.agent_type_present",
+            "perception.mixed_traffic",
+        ),
+        temporal_mode="short",
+    ),
+    RoadVLMTaskBundle(
+        name="interaction",
+        scene_keys=(
+            "event.vehicle.interaction",
+            "event.vru.interaction",
+            "event.traffic_control.response",
+            "event.right_of_way",
+            "event.hazard.type",
+            "event.hazard.response",
+            "event.traffic_flow",
+            "event.interaction.actor",
+        ),
+        temporal_mode="event",
+    ),
+    RoadVLMTaskBundle(
+        name="perception_condition",
+        scene_keys=(
+            "perception.map_element_condition",
+            "perception.scene.complexity",
+            "perception.temporary_traffic_control",
+        ),
+        camera_keys=(
+            "perception.occlusion.source",
+            "perception.occlusion.level",
+            "perception.scene.clutter",
+            "perception.visual.contrast",
+            "perception.visual.lighting",
+            "perception.visual.glare",
+            "perception.image.blur",
+            "perception.image.weather_artifact",
+            "perception.image.lens_contamination",
+        ),
+        temporal_mode="short",
+    ),
 )
 
-DYNAMIC_SCENE_KEYS = (
-    "odd.dynamic.traffic_density",
-    "odd.dynamic.vru_density",
-    "odd.dynamic.parked_vehicle_density",
-    "odd.dynamic.oncoming_traffic",
-    "odd.dynamic.agent_type_present",
-    "event.vehicle.interaction",
-    "event.vru.interaction",
-    "event.hazard.type",
-    "event.traffic_flow",
-    "event.interaction.actor",
-    "perception.mixed_traffic",
+SAFETY_RELEVANT_REFINEMENT_KEYS = frozenset(
+    {
+        "odd.road.workzone_state",
+        "odd.traffic_light.state",
+        "perception.temporary_traffic_control",
+        *(
+            key
+            for bundle in ROAD_VLM_TASK_BUNDLES
+            for key in bundle.scene_keys
+            if key.startswith("event.")
+        ),
+    }
+)
+NEGATIVE_REFINEMENT_VALUES = frozenset(
+    {
+        "absent",
+        "no_response_required",
+        "none",
+        "none_visible",
+        "normal",
+        "not_applicable",
+    }
+)
+
+VISUAL_TRIGGER_KEYS = frozenset(
+    {
+        "odd.road.junction_position",
+        "odd.road.junction_control",
+        "odd.route.action",
+        "event.ego.motion_state",
+        "event.ego.maneuver",
+        "event.ego.strong_response",
+        "perception.image.frame_status",
+        "perception.image.exposure",
+        "perception.image.blur",
+        "perception.visual.contrast",
+        "perception.visual.lighting",
+        "perception.visual.glare",
+    }
+)
+
+VISUAL_TRIGGER_NEUTRAL_VALUES = frozenset(
+    {
+        "lane_follow",
+        "midblock",
+        "moving",
+        "none",
+        "normal",
+        "straight",
+    }
 )
 
 
@@ -163,6 +279,16 @@ def _response_schema(keys: Iterable[str]) -> dict[str, Any]:
                 "type": "array",
                 "items": {"type": "string"},
             },
+            "supporting_timestamps_ns": {
+                "type": "array",
+                "items": {"type": "integer", "minimum": 0},
+            },
+            "camera_id": {
+                "oneOf": [
+                    {"type": "string"},
+                    {"type": "null"},
+                ]
+            },
             "reason": {"type": "string"},
         }
         valid_observation = (
@@ -174,7 +300,9 @@ def _response_schema(keys: Iterable[str]) -> dict[str, Any]:
                     "status",
                     "values",
                     "confidence",
+                    "camera_id",
                     "supporting_cameras",
+                    "supporting_timestamps_ns",
                     "reason",
                 ],
                 "properties": {
@@ -205,7 +333,9 @@ def _response_schema(keys: Iterable[str]) -> dict[str, Any]:
                     "status",
                     "values",
                     "confidence",
+                    "camera_id",
                     "supporting_cameras",
+                    "supporting_timestamps_ns",
                     "reason",
                 ],
                 "properties": {
@@ -265,6 +395,9 @@ def _system_prompt() -> str:
         "contain that candidate. Use not_observable only when the reason "
         "explains which required region or subject is not visible. Supplied "
         "images are available and must not be treated as a missing input. "
+        "Cite only supplied camera roles and timestamps. For a camera-scoped "
+        "request, camera_id must equal subject_camera_id. For a scene-scoped "
+        "request, camera_id must be null. "
         "Do not infer hard braking, evasive steering, collision, "
         "near collision, or actor intent from a single image. Do not invent "
         "values outside the candidate list."
@@ -277,6 +410,11 @@ def _task_prompt(
     task_bundle: str,
     keys: tuple[str, ...],
     frames: tuple[CameraFrame, ...],
+    start_timestamp_ns: int,
+    end_timestamp_ns: int,
+    target_camera_id: str | None,
+    inference_pass: str,
+    refinement_reasons: Mapping[str, str],
 ) -> str:
     definitions = []
     for key in keys:
@@ -295,6 +433,7 @@ def _task_prompt(
             "ordinal": index,
             "camera_role": frame.camera_role,
             "timestamp_ns": frame.timestamp_ns,
+            "frame_index": frame.frame_index,
         }
         for index, frame in enumerate(frames)
     ]
@@ -302,6 +441,12 @@ def _task_prompt(
         "schema_version": ROAD_VLM_SCHEMA_VERSION,
         "task_bundle": task_bundle,
         "scene_uid_hash": scene_uid_hash,
+        "clip_start_timestamp_ns": start_timestamp_ns,
+        "clip_end_timestamp_ns": end_timestamp_ns,
+        "subject_scope": "camera" if target_camera_id else "scene",
+        "subject_camera_id": target_camera_id,
+        "inference_pass": inference_pass,
+        "refinement_reasons": dict(sorted(refinement_reasons.items())),
         "requested_labels": definitions,
         "camera_frames": frame_metadata,
         "requirements": {
@@ -310,6 +455,7 @@ def _task_prompt(
             "non_valid_requires_empty_values": True,
             "multi_select_none_is_exclusive": True,
             "events_require_temporal_evidence": True,
+            "supporting_evidence_must_cite_supplied_frames": True,
         },
     }
     return (
@@ -323,6 +469,7 @@ def _task_prompt(
 def _prompt_bundle_sha256(
     task_bundle: str,
     keys: tuple[str, ...],
+    subject_scope: str,
     prompt_version: str = ROAD_VLM_PROMPT_VERSION,
 ) -> str:
     definitions = [
@@ -340,6 +487,7 @@ def _prompt_bundle_sha256(
         "prompt_version": prompt_version,
         "system_prompt": _system_prompt(),
         "task_bundle": task_bundle,
+        "subject_scope": subject_scope,
         "requested_labels": definitions,
         "response_schema": _response_schema(keys),
         "requirements": {
@@ -348,6 +496,7 @@ def _prompt_bundle_sha256(
             "non_valid_requires_empty_values": True,
             "multi_select_none_is_exclusive": True,
             "events_require_temporal_evidence": True,
+            "supporting_evidence_must_cite_supplied_frames": True,
         },
     }
     return hashlib.sha256(canonical_json_bytes(bundle)).hexdigest()
@@ -356,6 +505,9 @@ def _prompt_bundle_sha256(
 def _validate_response(
     payload: Mapping[str, Any],
     keys: tuple[str, ...],
+    *,
+    frames: tuple[CameraFrame, ...],
+    target_camera_id: str | None,
 ) -> tuple[dict[str, Any], ...]:
     raw_observations = payload.get("observations")
     if not isinstance(raw_observations, Mapping):
@@ -372,7 +524,9 @@ def _validate_response(
             "status",
             "values",
             "confidence",
+            "camera_id",
             "supporting_cameras",
+            "supporting_timestamps_ns",
             "reason",
         }:
             raise ValueError("road VLM observation fields differ from schema")
@@ -414,10 +568,30 @@ def _validate_response(
             isinstance(value, str) for value in cameras
         ):
             raise ValueError(f"invalid supporting cameras: {key}")
+        allowed_cameras = {frame.camera_role for frame in frames}
+        if set(cameras) - allowed_cameras:
+            raise ValueError(f"road VLM cited an unknown camera: {key}")
+        timestamps = raw["supporting_timestamps_ns"]
+        if not isinstance(timestamps, list) or not all(
+            isinstance(value, int) and not isinstance(value, bool)
+            for value in timestamps
+        ):
+            raise ValueError(f"invalid supporting timestamps: {key}")
+        allowed_timestamps = {frame.timestamp_ns for frame in frames}
+        if set(timestamps) - allowed_timestamps:
+            raise ValueError(f"road VLM cited an unknown timestamp: {key}")
+        camera_id = raw["camera_id"]
+        if camera_id != target_camera_id:
+            raise ValueError(f"road VLM camera identity differs: {key}")
+        if status == "valid" and (not cameras or not timestamps):
+            raise ValueError(f"valid road VLM output lacks frame evidence: {key}")
+        if target_camera_id and set(cameras) - {target_camera_id}:
+            raise ValueError(f"camera-scoped road VLM output crossed cameras: {key}")
         by_key[key] = {
             **raw,
             "values": sorted(set(values)),
             "supporting_cameras": sorted(set(cameras)),
+            "supporting_timestamps_ns": sorted(set(timestamps)),
         }
     if set(by_key) != set(keys):
         missing = sorted(set(keys) - set(by_key))
@@ -452,6 +626,11 @@ class OpenAICompatibleRoadObserver:
         task_bundle: str,
         keys: tuple[str, ...],
         frames: tuple[CameraFrame, ...],
+        start_timestamp_ns: int,
+        end_timestamp_ns: int,
+        target_camera_id: str | None,
+        inference_pass: str,
+        refinement_reasons: Mapping[str, str],
     ) -> tuple[tuple[dict[str, Any], ...], dict[str, Any]]:
         scene_uid_hash = hashlib.sha256(scene_uid.encode("utf-8")).hexdigest()
         prompt = _task_prompt(
@@ -459,6 +638,11 @@ class OpenAICompatibleRoadObserver:
             task_bundle=task_bundle,
             keys=keys,
             frames=frames,
+            start_timestamp_ns=start_timestamp_ns,
+            end_timestamp_ns=end_timestamp_ns,
+            target_camera_id=target_camera_id,
+            inference_pass=inference_pass,
+            refinement_reasons=refinement_reasons,
         )
         content: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
         for frame in frames:
@@ -501,10 +685,16 @@ class OpenAICompatibleRoadObserver:
                 if not content_text:
                     raise ValueError("OpenAI-compatible response content is empty")
                 parsed = _parse_json_content(content_text)
-                return _validate_response(parsed, keys), {
+                return _validate_response(
+                    parsed,
+                    keys,
+                    frames=frames,
+                    target_camera_id=target_camera_id,
+                ), {
                     "prompt_sha256": _prompt_bundle_sha256(
                         task_bundle,
                         keys,
+                        "camera" if target_camera_id else "scene",
                         self.config.prompt_version,
                     ),
                     "decoding_config_sha256": decoding_config_sha256,
@@ -528,6 +718,7 @@ class OpenAICompatibleRoadObserver:
                 "prompt_sha256": _prompt_bundle_sha256(
                     task_bundle,
                     keys,
+                    "camera" if target_camera_id else "scene",
                     self.config.prompt_version,
                 ),
                 "decoding_config_sha256": decoding_config_sha256,
@@ -546,21 +737,45 @@ class OpenAICompatibleRoadObserver:
         frames: tuple[CameraFrame, ...],
         start_timestamp_ns: int,
         end_timestamp_ns: int,
+        target_camera_id: str | None = None,
+        inference_pass: str = "primary",
+        refinement_reasons: Mapping[str, str] | None = None,
     ) -> tuple[LabelObservation, ...]:
         if end_timestamp_ns <= start_timestamp_ns:
             raise ValueError("road VLM interval must be positive")
         frame_timestamps = [frame.timestamp_ns for frame in frames]
         if not frame_timestamps:
             raise ValueError("road VLM request requires camera frames")
+        if inference_pass not in {"primary", "refinement"}:
+            raise ValueError(f"invalid road VLM inference pass: {inference_pass}")
+        if target_camera_id is not None and (
+            not target_camera_id
+            or any(
+                frame.camera_role != target_camera_id
+                for frame in frames
+            )
+        ):
+            raise ValueError(
+                "camera-scoped road VLM frames must match target_camera_id"
+            )
+        refinement_reasons = dict(refinement_reasons or {})
+        if set(refinement_reasons) - set(keys):
+            raise ValueError("road VLM refinement reason has an unknown key")
         input_start_timestamp_ns = min(frame_timestamps)
         input_end_timestamp_ns = max(frame_timestamps)
         lookback_ns = max(
             0,
             start_timestamp_ns - input_start_timestamp_ns,
         )
+        lookahead_ns = max(
+            0,
+            input_end_timestamp_ns - end_timestamp_ns,
+        )
+        subject_scope = "camera" if target_camera_id else "scene"
         prompt_sha256 = _prompt_bundle_sha256(
             task_bundle,
             keys,
+            subject_scope,
             self.config.prompt_version,
         )
         try:
@@ -569,10 +784,16 @@ class OpenAICompatibleRoadObserver:
                 task_bundle=task_bundle,
                 keys=keys,
                 frames=frames,
+                start_timestamp_ns=start_timestamp_ns,
+                end_timestamp_ns=end_timestamp_ns,
+                target_camera_id=target_camera_id,
+                inference_pass=inference_pass,
+                refinement_reasons=refinement_reasons,
             )
         except RoadVLMRequestError as exc:
             return tuple(
-                make_observation(
+                _make_vlm_observation(
+                    request_identity=exc.provenance,
                     scene_uid=scene_uid,
                     key=key,
                     status="unavailable",
@@ -580,6 +801,7 @@ class OpenAICompatibleRoadObserver:
                     source="vlm",
                     start_timestamp_ns=start_timestamp_ns,
                     end_timestamp_ns=end_timestamp_ns,
+                    camera_id=target_camera_id,
                     provenance={
                         "schema_version": ROAD_VLM_SCHEMA_VERSION,
                         "prompt_version": self.config.prompt_version,
@@ -587,10 +809,17 @@ class OpenAICompatibleRoadObserver:
                         "model": self.config.model,
                         "model_revision": self.config.model_revision,
                         "task_bundle": task_bundle,
+                        "subject_scope": subject_scope,
+                        "inference_pass": inference_pass,
+                        "refinement_reasons": refinement_reasons,
                         "input_start_timestamp_ns": input_start_timestamp_ns,
                         "input_end_timestamp_ns": input_end_timestamp_ns,
+                        "request_frame_timestamps_ns": frame_timestamps,
+                        "request_camera_roles": [
+                            frame.camera_role for frame in frames
+                        ],
                         "lookback_ns": lookback_ns,
-                        "lookahead_ns": 0,
+                        "lookahead_ns": lookahead_ns,
                         **exc.provenance,
                     },
                 )
@@ -600,7 +829,8 @@ class OpenAICompatibleRoadObserver:
         observations: list[LabelObservation] = []
         for item in response:
             observations.append(
-                make_observation(
+                _make_vlm_observation(
+                    request_identity=call_provenance,
                     scene_uid=scene_uid,
                     key=str(item["key"]),
                     status=str(item["status"]),
@@ -609,6 +839,7 @@ class OpenAICompatibleRoadObserver:
                     source="vlm",
                     start_timestamp_ns=start_timestamp_ns,
                     end_timestamp_ns=end_timestamp_ns,
+                    camera_id=target_camera_id,
                     measurements={
                         "supporting_camera_count": len(
                             item["supporting_cameras"]
@@ -621,11 +852,21 @@ class OpenAICompatibleRoadObserver:
                         "model": self.config.model,
                         "model_revision": self.config.model_revision,
                         "task_bundle": task_bundle,
+                        "subject_scope": subject_scope,
+                        "inference_pass": inference_pass,
+                        "refinement_reasons": refinement_reasons,
                         "supporting_cameras": item["supporting_cameras"],
+                        "supporting_timestamps_ns": item[
+                            "supporting_timestamps_ns"
+                        ],
                         "input_start_timestamp_ns": input_start_timestamp_ns,
                         "input_end_timestamp_ns": input_end_timestamp_ns,
+                        "request_frame_timestamps_ns": frame_timestamps,
+                        "request_camera_roles": [
+                            frame.camera_role for frame in frames
+                        ],
                         "lookback_ns": lookback_ns,
-                        "lookahead_ns": 0,
+                        "lookahead_ns": lookahead_ns,
                         "reason": str(item["reason"])[:1000],
                         **call_provenance,
                     },
@@ -634,13 +875,191 @@ class OpenAICompatibleRoadObserver:
         return tuple(observations)
 
 
+def _make_vlm_observation(
+    *,
+    request_identity: Mapping[str, Any],
+    **kwargs: Any,
+) -> LabelObservation:
+    observation = make_observation(**kwargs)
+    identity = {
+        "base_observation_uid": observation.observation_uid,
+        "request_sha256": request_identity.get("request_sha256", ""),
+        "response_sha256": request_identity.get("response_sha256", ""),
+        "inference_pass": observation.provenance.get("inference_pass", ""),
+    }
+    return dataclasses.replace(
+        observation,
+        observation_uid=(
+            "oddobs-"
+            + hashlib.sha256(canonical_json_bytes(identity)).hexdigest()[:24]
+        ),
+    )
+
+
+def _anchor_indexes(
+    anchor_count: int,
+    index: int,
+    temporal_mode: str,
+) -> tuple[int, ...]:
+    if temporal_mode == "static":
+        candidates = (index,)
+    elif temporal_mode == "short":
+        candidates = (index - 1, index)
+    elif temporal_mode == "event":
+        candidates = (index - 1, index, index + 1)
+    else:
+        raise ValueError(f"invalid temporal mode: {temporal_mode}")
+    return tuple(
+        candidate
+        for candidate in candidates
+        if 0 <= candidate < anchor_count
+    )
+
+
+def _frames_for_indexes(
+    anchors: tuple[CameraAnchor, ...],
+    indexes: Iterable[int],
+    *,
+    camera_id: str | None = None,
+) -> tuple[CameraFrame, ...]:
+    return tuple(
+        frame
+        for index in indexes
+        for frame in anchors[index].frames
+        if camera_id is None or frame.camera_role == camera_id
+    )
+
+
+def _refinement_frames(
+    anchors: tuple[CameraAnchor, ...],
+    index: int,
+    *,
+    temporal_mode: str,
+    camera_id: str | None = None,
+) -> tuple[CameraFrame, ...]:
+    if temporal_mode == "event":
+        indexes = (
+            index - 2,
+            index - 1,
+            index,
+            index + 1,
+            index + 2,
+        )
+    else:
+        indexes = (index - 1, index, index + 1)
+    bounded = tuple(
+        candidate
+        for candidate in indexes
+        if 0 <= candidate < len(anchors)
+    )
+    return _frames_for_indexes(
+        anchors,
+        bounded,
+        camera_id=camera_id,
+    )
+
+
+def _frame_identity(frames: Iterable[CameraFrame]) -> tuple[tuple[Any, ...], ...]:
+    return tuple(
+        (
+            frame.timestamp_ns,
+            frame.camera_role,
+            frame.frame_index,
+            hashlib.sha256(frame.jpeg).hexdigest(),
+        )
+        for frame in frames
+    )
+
+
+def _refinement_plan(
+    observations: Iterable[LabelObservation],
+    *,
+    confidence_threshold: float,
+) -> dict[str, str]:
+    plan: dict[str, str] = {}
+    for observation in observations:
+        if observation.status == "unavailable":
+            continue
+        if observation.status in {"ambiguous", "not_observable"}:
+            plan[observation.key] = observation.status
+            continue
+        if observation.confidence < confidence_threshold:
+            plan[observation.key] = "low_confidence"
+            continue
+        if (
+            observation.key in SAFETY_RELEVANT_REFINEMENT_KEYS
+            and observation.status == "valid"
+            and set(observation.values) - NEGATIVE_REFINEMENT_VALUES
+        ):
+            plan[observation.key] = "positive_safety_relevant"
+    return plan
+
+
+def derive_visual_trigger_timestamps(
+    *observation_groups: Iterable[LabelObservation],
+) -> tuple[int, ...]:
+    grouped: dict[tuple[str, str, str], list[LabelObservation]] = {}
+    for observation in (
+        item for group in observation_groups for item in group
+    ):
+        if observation.key not in VISUAL_TRIGGER_KEYS:
+            continue
+        identity = (
+            observation.key,
+            observation.camera_id or "",
+            observation.actor_track_uid or "",
+        )
+        grouped.setdefault(identity, []).append(observation)
+
+    triggers: set[int] = set()
+    for rows in grouped.values():
+        ordered = sorted(
+            rows,
+            key=lambda item: (
+                item.start_timestamp_ns,
+                item.end_timestamp_ns,
+                item.observation_uid,
+            ),
+        )
+        previous_signature: tuple[str, tuple[str, ...]] | None = None
+        for observation in ordered:
+            signature = (observation.status, observation.values)
+            positive = (
+                observation.status == "valid"
+                and bool(
+                    set(observation.values)
+                    - VISUAL_TRIGGER_NEUTRAL_VALUES
+                )
+            )
+            if (
+                previous_signature is not None
+                and signature != previous_signature
+            ) or positive:
+                triggers.add(observation.start_timestamp_ns)
+                if observation.namespace == "event":
+                    triggers.add(observation.end_timestamp_ns - 1)
+            previous_signature = signature
+    return tuple(sorted(triggers))
+
+
 def label_visual_scene(
     observer: OpenAICompatibleRoadObserver,
     *,
     scene_uid: str,
     scene_end_timestamp_ns: int,
     anchors: tuple[CameraAnchor, ...],
+    refinement_confidence_threshold: float = (
+        DEFAULT_REFINEMENT_CONFIDENCE_THRESHOLD
+    ),
 ) -> tuple[LabelObservation, ...]:
+    if not 0.0 <= refinement_confidence_threshold <= 1.0:
+        raise ValueError("refinement confidence threshold must be in [0,1]")
+    if any(
+        left.timestamp_ns >= right.timestamp_ns
+        for left, right in zip(anchors, anchors[1:])
+    ):
+        raise ValueError("road VLM anchors must be strictly ordered")
+
     observations: list[LabelObservation] = []
     for index, anchor in enumerate(anchors):
         end_timestamp_ns = (
@@ -650,29 +1069,103 @@ def label_visual_scene(
         )
         if end_timestamp_ns <= anchor.timestamp_ns:
             continue
-        observations.extend(
-            observer.observe(
-                scene_uid=scene_uid,
-                task_bundle="static_scene",
-                keys=STATIC_SCENE_KEYS,
-                frames=anchor.frames,
-                start_timestamp_ns=anchor.timestamp_ns,
-                end_timestamp_ns=end_timestamp_ns,
+        for bundle in ROAD_VLM_TASK_BUNDLES:
+            primary_indexes = _anchor_indexes(
+                len(anchors),
+                index,
+                bundle.temporal_mode,
             )
-        )
-        temporal_frames = (
-            anchors[index - 1].frames + anchor.frames
-            if index > 0
-            else anchor.frames
-        )
-        observations.extend(
-            observer.observe(
-                scene_uid=scene_uid,
-                task_bundle="dynamic_scene",
-                keys=DYNAMIC_SCENE_KEYS,
-                frames=temporal_frames,
-                start_timestamp_ns=anchor.timestamp_ns,
-                end_timestamp_ns=end_timestamp_ns,
-            )
-        )
+            if bundle.scene_keys:
+                primary_frames = _frames_for_indexes(
+                    anchors,
+                    primary_indexes,
+                )
+                primary = observer.observe(
+                    scene_uid=scene_uid,
+                    task_bundle=bundle.name,
+                    keys=bundle.scene_keys,
+                    frames=primary_frames,
+                    start_timestamp_ns=anchor.timestamp_ns,
+                    end_timestamp_ns=end_timestamp_ns,
+                )
+                observations.extend(primary)
+                refinement_plan = _refinement_plan(
+                    primary,
+                    confidence_threshold=(
+                        refinement_confidence_threshold
+                    ),
+                )
+                alternate_frames = _refinement_frames(
+                    anchors,
+                    index,
+                    temporal_mode=bundle.temporal_mode,
+                )
+                if (
+                    refinement_plan
+                    and _frame_identity(alternate_frames)
+                    != _frame_identity(primary_frames)
+                ):
+                    observations.extend(
+                        observer.observe(
+                            scene_uid=scene_uid,
+                            task_bundle=bundle.name,
+                            keys=tuple(refinement_plan),
+                            frames=alternate_frames,
+                            start_timestamp_ns=anchor.timestamp_ns,
+                            end_timestamp_ns=end_timestamp_ns,
+                            inference_pass="refinement",
+                            refinement_reasons=refinement_plan,
+                        )
+                    )
+
+            if bundle.camera_keys:
+                camera_ids = tuple(
+                    frame.camera_role for frame in anchor.frames
+                )
+                for camera_id in camera_ids:
+                    primary_frames = _frames_for_indexes(
+                        anchors,
+                        primary_indexes,
+                        camera_id=camera_id,
+                    )
+                    primary = observer.observe(
+                        scene_uid=scene_uid,
+                        task_bundle=bundle.name,
+                        keys=bundle.camera_keys,
+                        frames=primary_frames,
+                        start_timestamp_ns=anchor.timestamp_ns,
+                        end_timestamp_ns=end_timestamp_ns,
+                        target_camera_id=camera_id,
+                    )
+                    observations.extend(primary)
+                    refinement_plan = _refinement_plan(
+                        primary,
+                        confidence_threshold=(
+                            refinement_confidence_threshold
+                        ),
+                    )
+                    alternate_frames = _refinement_frames(
+                        anchors,
+                        index,
+                        temporal_mode=bundle.temporal_mode,
+                        camera_id=camera_id,
+                    )
+                    if (
+                        refinement_plan
+                        and _frame_identity(alternate_frames)
+                        != _frame_identity(primary_frames)
+                    ):
+                        observations.extend(
+                            observer.observe(
+                                scene_uid=scene_uid,
+                                task_bundle=bundle.name,
+                                keys=tuple(refinement_plan),
+                                frames=alternate_frames,
+                                start_timestamp_ns=anchor.timestamp_ns,
+                                end_timestamp_ns=end_timestamp_ns,
+                                target_camera_id=camera_id,
+                                inference_pass="refinement",
+                                refinement_reasons=refinement_plan,
+                            )
+                        )
     return tuple(observations)
