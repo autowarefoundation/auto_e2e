@@ -3,11 +3,16 @@ from __future__ import annotations
 import hashlib
 import io
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import numpy as np
 import pytest
 
+from data_processing.odd_labeling.deterministic import (
+    MAP_ROUTE_KEYS,
+    label_kinematics,
+    label_map_route,
+)
 from data_processing.odd_labeling.published_snapshot import (
     CAMERA_ROLES_BY_COUNT,
     CameraObject,
@@ -313,6 +318,22 @@ def _synthetic_adapter() -> _SyntheticAdapter:
     return _SyntheticAdapter(manifest, descriptor, scene)
 
 
+def _synthetic_adapter_without_navigation() -> _SyntheticAdapter:
+    adapter = _synthetic_adapter()
+    channels = dict(adapter.capability_manifest.channels)
+    channels["map"] = _channel("absent")
+    channels["route"] = _channel("absent")
+    manifest = replace(adapter.capability_manifest, channels=channels)
+    scene = replace(
+        adapter.scene,
+        navigation_map=None,
+        navigation_route=None,
+        navigation_quality={},
+        capability_manifest=manifest,
+    )
+    return _SyntheticAdapter(manifest, adapter.descriptor, scene)
+
+
 def _assert_adapter_conforms(adapter: DatasetEvidenceAdapter) -> None:
     capabilities = adapter.describe_capabilities()
     descriptors = adapter.list_scenes()
@@ -383,6 +404,58 @@ def _assert_adapter_conforms(adapter: DatasetEvidenceAdapter) -> None:
 )
 def test_dataset_evidence_adapter_conformance(adapter_factory) -> None:
     _assert_adapter_conforms(adapter_factory())
+
+
+@pytest.mark.parametrize(
+    "adapter_factory",
+    [_published_adapter, _synthetic_adapter],
+    ids=["published-snapshot", "synthetic-second-adapter"],
+)
+def test_adapter_evidence_runs_shared_deterministic_labelers(
+    adapter_factory,
+) -> None:
+    adapter = adapter_factory()
+    scene = adapter.open_scene(adapter.list_scenes()[0].scene_uid)
+
+    kinematics = label_kinematics(scene)
+    map_route = label_map_route(scene)
+
+    assert kinematics
+    assert map_route
+    assert all(
+        observation.scene_uid == scene.scene_uid
+        for observation in (*kinematics, *map_route)
+    )
+    assert {
+        "odd.ego.speed_bin",
+        "event.ego.motion_state",
+        "event.ego.maneuver",
+        "event.ego.strong_response",
+    }.issubset({observation.key for observation in kinematics})
+    assert "odd.route.action" in {
+        observation.key for observation in map_route
+    }
+
+
+def test_missing_navigation_abstains_without_blocking_kinematics() -> None:
+    adapter = _synthetic_adapter_without_navigation()
+    _assert_adapter_conforms(adapter)
+    scene = adapter.open_scene("scene-2")
+
+    map_route = label_map_route(scene)
+    kinematics = label_kinematics(scene)
+
+    assert {observation.key for observation in map_route} == set(
+        MAP_ROUTE_KEYS
+    )
+    assert all(
+        observation.status == "unavailable"
+        and observation.values == ()
+        and observation.confidence == 1.0
+        for observation in map_route
+    )
+    assert kinematics
+    assert all(observation.status == "valid" for observation in kinematics)
 
 
 def test_synthetic_adapter_preserves_missing_camera_frames() -> None:
