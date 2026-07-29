@@ -306,6 +306,28 @@ const modelMetrics = {
   ],
 };
 
+const experiments = {
+  generated_at: "2026-07-29T00:00:00Z",
+  summary: {
+    total: 1,
+    running: 0,
+    failed: 0,
+    evaluated: 1,
+    registered: 1,
+    unlinked: 0,
+  },
+  experiments: [
+    {
+      run_id: "run-42",
+      primary_execution_id: "flyte-run-42",
+      primary_execution_url:
+        "https://flyte.example/console/executions/flyte-run-42",
+      mlflow_url: "https://mlflow.example/#/experiments/8/runs/run-42",
+      model_versions: [],
+    },
+  ],
+};
+
 const oddExecutions = [
   {
     execution_id: "odd-current",
@@ -345,8 +367,18 @@ async function installODDDashboardRoutes(
       path: string;
       body: unknown;
     }>;
+    experimentsStatus?: number;
   } = {},
 ) {
+  await page.route("**/api/v1/experiments", (route) => {
+    if (options.experimentsStatus) {
+      return route.fulfill({
+        status: options.experimentsStatus,
+        body: "experiment service unavailable",
+      });
+    }
+    return fulfillJSON(route, experiments);
+  });
   await page.route("**/api/v1/flyte/executions?**", (route) =>
     fulfillJSON(route, { items: options.executions ?? oddExecutions }),
   );
@@ -484,10 +516,19 @@ test("ODD Dashboard exposes weighted composition, structured search, ontology, a
   ).toHaveValue("1".repeat(64));
   await expect(page.getByText("validation only")).toBeVisible();
   await expect(page.getByText("kitscenes / v2.2")).toBeVisible();
-  await expect(page.getByRole("link", { name: /Run run-42/ })).toHaveAttribute(
+  await expect(
+    page.getByRole("link", { name: "Flyte flyte-run-42" }),
+  ).toHaveAttribute(
     "href",
-    "/runs/run-42",
+    "https://flyte.example/console/executions/flyte-run-42",
   );
+  await expect(
+    page.getByRole("link", { name: "MLflow run-42" }),
+  ).toHaveAttribute(
+    "href",
+    "https://mlflow.example/#/experiments/8/runs/run-42",
+  );
+  await expect(page.locator('a[href="/runs/run-42"]')).toHaveCount(0);
   await expect(page.getByText("odd.road.context").first()).toBeVisible();
   await expect(page.getByText("+2.00 m")).toBeVisible();
 
@@ -498,6 +539,18 @@ test("ODD Dashboard exposes weighted composition, structured search, ontology, a
   await expect(page.getByText("superseded", { exact: true })).toBeVisible();
   await expect(page.getByText("training-run", { exact: true })).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Run smoke" })).toHaveCount(0);
+});
+
+test("ODD model metrics remain available when experiment lineage fails", async ({
+  page,
+}) => {
+  await installODDDashboardRoutes(page, [], { experimentsStatus: 503 });
+  await page.goto("/odd?tab=metrics");
+
+  await expect(page.getByText("+2.00 m")).toBeVisible();
+  await expect(
+    page.getByRole("link", { name: "Experiment run-42" }),
+  ).toHaveAttribute("href", "/experiments");
 });
 
 test("ODD Dashboard sends only permitted Dataset Labeler commands", async ({
