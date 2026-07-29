@@ -55,6 +55,7 @@ RUN pip install --no-cache-dir \
     scipy \
     pyproj \
     "boto3==1.43.0" \
+    "mlflow-skinny==2.22.0" \
     pyarrow \
     && pip install --no-cache-dir --no-deps "lerobot-dataset==0.5.0"
 
