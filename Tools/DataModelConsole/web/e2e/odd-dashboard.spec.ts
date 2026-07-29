@@ -307,6 +307,22 @@ test("ODD Dashboard remains horizontally contained on mobile", async ({ page }) 
   ).toBe(0);
 });
 
+test("ODD ontology deep links expand the selected scene label definition", async ({
+  page,
+}) => {
+  await installODDDashboardRoutes(page);
+  await page.goto(
+    "/odd?dataset=kitscenes&version=v3.0&tab=ontology&key=odd.road.context",
+  );
+
+  const definition = page.locator("#ontology-odd\\.road\\.context");
+  await expect(definition).toHaveAttribute("open", "");
+  await expect(
+    definition.getByRole("button", { name: "suburban · 0" }),
+  ).toBeVisible();
+  await expect(definition).toBeInViewport();
+});
+
 async function installODDSceneRoutes(page: Page) {
   await page.route("**/api/v1/**", (route) => {
     const url = new URL(route.request().url());
