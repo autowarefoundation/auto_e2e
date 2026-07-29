@@ -17,8 +17,19 @@ CAPABILITY_SCHEMA_VERSION = "odd_dataset_capabilities_v1"
 EVIDENCE_SCHEMA_VERSION = "odd_label_evidence_v1"
 EVENT_SCHEMA_VERSION = "odd_event_instance_v1"
 RECEIPT_SCHEMA_VERSION = "odd_execution_receipt_v1"
+PROVIDER_EXCHANGE_SCHEMA_VERSION = "odd_provider_exchange_v1"
 
 CHANNEL_AVAILABILITY = ("complete", "partial", "absent")
+PROVIDER_BACKENDS = {
+    "ORV": "openai_compatible",
+    "BMR": "amazon_bedrock",
+}
+PROVIDER_EXCHANGE_STATUSES = (
+    "succeeded",
+    "transport_error",
+    "invalid_response",
+    "geometry_rejected",
+)
 SUBJECT_TYPES = (
     "scene",
     "ego",
@@ -604,6 +615,87 @@ class EventInstance:
             "supporting_evidence_uids",
             tuple(sorted(set(self.supporting_evidence_uids))),
         )
+
+    def to_dict(self) -> dict[str, Any]:
+        return _json_value(self)
+
+
+@dataclasses.dataclass(frozen=True)
+class ProviderExchange:
+    backend: str
+    provider: str
+    model: str
+    model_revision: str
+    request_sha256: str
+    response_sha256: str | None
+    status: str
+    attempt: int
+    latency_ms: float
+    input_image_count: int
+    request_metadata: Mapping[str, Any]
+    raw_response: Mapping[str, Any] | None
+    usage: Mapping[str, float | int] = dataclasses.field(default_factory=dict)
+    error_type: str | None = None
+    schema_version: str = PROVIDER_EXCHANGE_SCHEMA_VERSION
+
+    def __post_init__(self) -> None:
+        if self.schema_version != PROVIDER_EXCHANGE_SCHEMA_VERSION:
+            raise ValueError(
+                f"unsupported provider exchange schema: {self.schema_version}"
+            )
+        expected_provider = PROVIDER_BACKENDS.get(self.backend)
+        if expected_provider is None or self.provider != expected_provider:
+            raise ValueError("provider exchange backend mapping is invalid")
+        if not self.model or not self.model_revision:
+            raise ValueError("provider exchange model identity is required")
+        _require_sha256(self.request_sha256, name="provider request")
+        if self.response_sha256 is not None:
+            _require_sha256(self.response_sha256, name="provider response")
+        if self.status not in PROVIDER_EXCHANGE_STATUSES:
+            raise ValueError("provider exchange status is invalid")
+        if self.attempt <= 0:
+            raise ValueError("provider exchange attempt must be positive")
+        if not math.isfinite(self.latency_ms) or self.latency_ms < 0.0:
+            raise ValueError(
+                "provider exchange latency must be finite and non-negative"
+            )
+        if self.input_image_count < 0 or (
+            self.backend == "ORV" and self.input_image_count == 0
+        ):
+            raise ValueError("provider exchange input image count is invalid")
+        if self.backend == "BMR" and self.input_image_count != 1:
+            raise ValueError("BMR exchanges require one semantic map render")
+        try:
+            canonical_json_bytes(_json_value(self.request_metadata))
+            canonical_json_bytes(_json_value(self.usage))
+        except (TypeError, ValueError) as error:
+            raise ValueError(
+                "provider exchange metadata must be canonical JSON"
+            ) from error
+        for name, value in self.usage.items():
+            if (
+                not name
+                or isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(float(value))
+                or value < 0
+            ):
+                raise ValueError("provider exchange usage is invalid")
+        if self.raw_response is None:
+            if self.response_sha256 is not None:
+                raise ValueError(
+                    "provider response digest requires a raw response"
+                )
+        else:
+            actual_response_sha256 = content_sha256(
+                _json_value(self.raw_response)
+            )
+            if self.response_sha256 != actual_response_sha256:
+                raise ValueError("provider response digest differs")
+        if self.status == "succeeded" and self.raw_response is None:
+            raise ValueError("successful provider exchange needs a response")
+        if self.status != "succeeded" and not self.error_type:
+            raise ValueError("failed provider exchange needs an error type")
 
     def to_dict(self) -> dict[str, Any]:
         return _json_value(self)
