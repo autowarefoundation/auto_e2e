@@ -20,8 +20,8 @@ from .published_snapshot import (
 from .schema import LabelObservation, make_observation
 
 
-IMAGE_QC_VERSION = "odd_image_qc_v2"
-IMAGE_QC_POLICY_VERSION = "odd_image_qc_policy_v2"
+IMAGE_QC_VERSION = "odd_image_qc_v3"
+IMAGE_QC_POLICY_VERSION = "odd_image_qc_policy_v3"
 FROZEN_EGO_MOTION_THRESHOLD_M = 0.5
 DEPENDENT_QC_KEYS = (
     "perception.image.exposure",
@@ -322,6 +322,37 @@ def _camera_availability(
     )
 
 
+def _camera_frame_inventory_mode(
+    evidence: CanonicalSceneEvidence,
+    camera_role: str,
+) -> str:
+    if evidence.capability_manifest is None:
+        return "capture_timeline"
+    return next(
+        (
+            camera.frame_inventory_mode
+            for camera in evidence.capability_manifest.cameras
+            if camera.canonical_role == camera_role
+        ),
+        "unknown",
+    )
+
+
+def _base_provenance(
+    evidence: CanonicalSceneEvidence,
+    camera_role: str,
+) -> dict[str, object]:
+    return {
+        "labeler_version": IMAGE_QC_VERSION,
+        "image_qc_policy_version": IMAGE_QC_POLICY_VERSION,
+        "frozen_ego_motion_threshold_m": FROZEN_EGO_MOTION_THRESHOLD_M,
+        "frame_inventory_mode": _camera_frame_inventory_mode(
+            evidence,
+            camera_role,
+        ),
+    }
+
+
 def _expected_camera_roles(
     evidence: CanonicalSceneEvidence,
 ) -> tuple[str, ...]:
@@ -364,11 +395,7 @@ def _missing_frame_observations(
         availability = _camera_availability(evidence, camera_role)
         if availability == "absent":
             provenance = {
-                "labeler_version": IMAGE_QC_VERSION,
-                "image_qc_policy_version": IMAGE_QC_POLICY_VERSION,
-                "frozen_ego_motion_threshold_m": (
-                    FROZEN_EGO_MOTION_THRESHOLD_M
-                ),
+                **_base_provenance(evidence, camera_role),
                 "reason": "camera_channel_absent",
             }
             observations.append(
@@ -412,7 +439,7 @@ def _missing_frame_observations(
                 continue
             if run_start is not None:
                 observations.extend(
-                    _dropped_frame_observations(
+                    _missing_camera_frame_observations(
                         evidence,
                         camera_role=camera_role,
                         start_ns=run_start,
@@ -424,7 +451,7 @@ def _missing_frame_observations(
                 missing_count = 0
         if run_start is not None:
             observations.extend(
-                _dropped_frame_observations(
+                _missing_camera_frame_observations(
                     evidence,
                     camera_role=camera_role,
                     start_ns=run_start,
@@ -435,7 +462,7 @@ def _missing_frame_observations(
     return observations
 
 
-def _dropped_frame_observations(
+def _missing_camera_frame_observations(
     evidence: CanonicalSceneEvidence,
     *,
     camera_role: str,
@@ -443,23 +470,33 @@ def _dropped_frame_observations(
     end_ns: int,
     missing_count: int,
 ) -> list[LabelObservation]:
+    inventory_mode = _camera_frame_inventory_mode(evidence, camera_role)
+    authoritative = inventory_mode == "capture_timeline"
     provenance: dict[str, object] = {
-        "labeler_version": IMAGE_QC_VERSION,
-        "image_qc_policy_version": IMAGE_QC_POLICY_VERSION,
-        "frozen_ego_motion_threshold_m": FROZEN_EGO_MOTION_THRESHOLD_M,
-        "reason": "expected_camera_frame_missing",
+        **_base_provenance(evidence, camera_role),
+        "reason": (
+            "expected_camera_frame_missing"
+            if authoritative
+            else "camera_frame_inventory_not_authoritative"
+        ),
     }
     observations = [
         make_observation(
             scene_uid=evidence.scene_uid,
             key="perception.image.frame_status",
-            status="valid",
-            values=("dropped_frame",),
+            status="valid" if authoritative else "unavailable",
+            values=("dropped_frame",) if authoritative else (),
             confidence=1.0,
             source="image_qc",
             start_timestamp_ns=start_ns,
             end_timestamp_ns=end_ns,
-            measurements={"missing_frame_count": missing_count},
+            measurements={
+                (
+                    "missing_frame_count"
+                    if authoritative
+                    else "unobserved_frame_count"
+                ): missing_count
+            },
             provenance=provenance,
             camera_id=camera_role,
         )
@@ -470,7 +507,7 @@ def _dropped_frame_observations(
             camera_role=camera_role,
             start_ns=start_ns,
             end_ns=end_ns,
-            status="not_observable",
+            status="not_observable" if authoritative else "unavailable",
             provenance=provenance,
         )
     )
@@ -565,9 +602,7 @@ def _decode_failure_observations(
         else evidence.end_timestamp_ns
     )
     provenance: dict[str, object] = {
-        "labeler_version": IMAGE_QC_VERSION,
-        "image_qc_policy_version": IMAGE_QC_POLICY_VERSION,
-        "frozen_ego_motion_threshold_m": FROZEN_EGO_MOTION_THRESHOLD_M,
+        **_base_provenance(evidence, failure.camera_role),
         "frame_index": failure.frame_index,
         "reason": failure.reason,
     }
@@ -622,11 +657,7 @@ def label_image_quality(
         for frame in anchor.frames:
             metrics = _metrics(frame.rgb)
             provenance = {
-                "labeler_version": IMAGE_QC_VERSION,
-                "image_qc_policy_version": IMAGE_QC_POLICY_VERSION,
-                "frozen_ego_motion_threshold_m": (
-                    FROZEN_EGO_MOTION_THRESHOLD_M
-                ),
+                **_base_provenance(evidence, frame.camera_role),
                 "frame_index": frame.frame_index,
                 "frame_content_sha256": hashlib.sha256(frame.jpeg).hexdigest(),
             }
