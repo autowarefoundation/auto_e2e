@@ -261,12 +261,20 @@ def validate_labelset_records(
 
 
 def _support_state(key_row: Mapping[str, Any]) -> str:
-    if int(key_row["successful_count"]) > 0:
-        return "supported_observed"
-    if int(key_row["attempted_count"]) > 0:
-        return "attempted_no_valid"
-    if int(key_row["status_scene_counts"].get("unavailable", 0)) > 0:
-        return "unsupported_reported"
+    successful_count = int(key_row["successful_count"])
+    attempted_count = int(key_row["attempted_count"])
+    status_counts = key_row["status_scene_counts"]
+    unavailable_count = int(status_counts.get("unavailable", 0))
+    ambiguous_count = int(status_counts.get("ambiguous", 0))
+    not_observable_count = int(status_counts.get("not_observable", 0))
+    if successful_count > 0 or ambiguous_count > 0 or not_observable_count > 0:
+        return (
+            "supported_certified"
+            if key_row.get("quality_tier") == "certified"
+            else "supported_experimental"
+        )
+    if attempted_count > 0 or unavailable_count > 0:
+        return "unsupported_missing_source"
     return "disabled_pending_audit"
 
 
