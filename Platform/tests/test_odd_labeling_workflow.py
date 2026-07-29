@@ -9,6 +9,7 @@ from Platform.pipelines.odd_labeling_workflow import (
     _publication_scope,
     _put_immutable,
     _scene_summary,
+    _semantic_output_merkle_root,
     _statistics,
     _union_duration,
     fuse_odd_scene,
@@ -221,6 +222,86 @@ def test_immutable_parquet_upload_pins_binary_contract() -> None:
             b"parquet",
             maximum_bytes=6,
         )
+
+
+def test_semantic_output_merkle_root_covers_all_canonical_outputs() -> None:
+    records = [
+        {
+            "scene_uid": "scene-b",
+            "dataset_name": "kitscenes",
+            "observations": [
+                {
+                    "observation_uid": "observation-b",
+                    "key": "odd.environment.sky",
+                    "values": ["clear"],
+                }
+            ],
+            "evidence": [
+                {
+                    "evidence_uid": "evidence-b",
+                    "label_key": "odd.environment.sky",
+                    "values": ["clear"],
+                }
+            ],
+            "events": [],
+        },
+        {
+            "scene_uid": "scene-a",
+            "dataset_name": "kitscenes",
+            "observations": [],
+            "evidence": [],
+            "events": [
+                {
+                    "event_uid": "event-a",
+                    "primary_event_key": "event.ego.maneuver",
+                }
+            ],
+        },
+    ]
+    statistics = {
+        "schema_version": "odd_statistics_v2",
+        "labelset_id": "oddls-first",
+        "scene_count": 2,
+    }
+    quality = {
+        "coverage": {
+            "labelset_id": "oddls-first",
+            "structural_validation": {"status": "passed"},
+        },
+        "calibration": {
+            "labelset_id": "oddls-first",
+            "rows": [],
+        },
+    }
+
+    first = _semantic_output_merkle_root(records, statistics, quality)
+    second = _semantic_output_merkle_root(
+        list(reversed(records)),
+        {**statistics, "labelset_id": "oddls-second"},
+        {
+            name: {**document, "labelset_id": "oddls-second"}
+            for name, document in reversed(list(quality.items()))
+        },
+    )
+
+    assert first == second
+    changed = [
+        records[0],
+        {
+            **records[1],
+            "events": [
+                {
+                    "event_uid": "event-a",
+                    "primary_event_key": "event.ego.strong_response",
+                }
+            ],
+        },
+    ]
+    assert _semantic_output_merkle_root(
+        changed,
+        statistics,
+        quality,
+    ) != first
 
 
 def test_workflow_interface_does_not_expose_endpoint_url() -> None:
