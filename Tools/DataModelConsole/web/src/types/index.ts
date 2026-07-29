@@ -109,6 +109,22 @@ export type ODDStatus =
   | "not_observable"
   | "ambiguous";
 
+export type ODDSupportState =
+  | "supported_certified"
+  | "supported_experimental"
+  | "unsupported_missing_source"
+  | "disabled_pending_audit";
+
+export interface ODDDatasetSupport {
+  support_state: ODDSupportState;
+  quality_tier: string;
+  valid_scene_count: number;
+  eligible_scene_count: number;
+  observable_scene_coverage: number;
+  attempted_count: number;
+  successful_count: number;
+}
+
 export interface ODDLabelDefinition {
   key: string;
   namespace: "odd" | "event" | "perception";
@@ -122,12 +138,16 @@ export interface ODDLabelDefinition {
   temporal_scope: string;
   quality_tier: string;
   none_semantics?: string | null;
+  dataset_support: ODDDatasetSupport;
 }
 
 export interface ODDOntology {
   schema_version: string;
   ontology_version: string;
   ontology_sha256: string;
+  dataset_name: string;
+  dataset_version: string;
+  labelset_id: string;
   statuses: string[];
   sources: string[];
   labels: ODDLabelDefinition[];
