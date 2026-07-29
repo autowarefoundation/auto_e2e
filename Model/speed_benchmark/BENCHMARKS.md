@@ -196,6 +196,32 @@ parameter.
 
 </details>
 
+## NVIDIA Quadro RTX 5000
+
+<details open>
+  <summary>Toggle view</summary>
+
+> CUDA 11.8 | Driver 590.48.01 | PyTorch 2.7.1+cu118 | Commit `47c1e50` | Resolution [256, 256]
+
+| Model | Backbone | Fusion Mode | Reasoning | Batch | FPS | Latency (ms) | p99 (ms) | Jitter (ms) | VRAM (MB) | Params |
+|-------|----------|-------------|-----------|-------|-----|--------------|----------|-------------|-----------|--------|
+| Reactive | swin_v2_tiny | bev | off | 1 | 30.1 | 33.3 | 37.8 | 5.0 | 375 | 56.8M |
+| Combined | swin_v2_tiny | bev | off | 1 | 17.7 | 56.6 | 61.3 | 5.1 | 525 | 94.7M |
+| Reactive | swin_v2_tiny | bev | off | 2 | 18.1 | 55.3 | 60.2 | 5.3 | 521 | 56.8M |
+| Combined | swin_v2_tiny | bev | off | 2 | 10.1 | 99.0 | 102.5 | 4.3 | 668 | 94.7M |
+| Reactive | swin_v2_tiny | bev | off | 4 | 9.7 | 102.7 | 104.3 | 1.6 | 803 | 56.8M |
+| Combined | swin_v2_tiny | bev | off | 4 | 5.3 | 188.3 | 192.2 | 4.2 | 952 | 94.7M |
+| Reactive | conv_next_v2_tiny | bev | off | 1 | 28.3 | 35.4 | 37.6 | 2.4 | 396 | 57.1M |
+| Combined | conv_next_v2_tiny | bev | off | 1 | 16.4 | 60.9 | 65.5 | 4.8 | 543 | 95.3M |
+| Reactive | conv_next_v2_tiny | bev | off | 2 | 16.9 | 59.4 | 63.6 | 4.7 | 562 | 57.1M |
+| Combined | conv_next_v2_tiny | bev | off | 2 | 9.4 | 106.7 | 109.6 | 3.2 | 707 | 95.3M |
+| Reactive | conv_next_v2_tiny | bev | off | 4 | 9.0 | 111.6 | 113.7 | 2.3 | 887 | 57.1M |
+| Combined | conv_next_v2_tiny | bev | off | 4 | 4.9 | 203.5 | 205.7 | 2.3 | 1034 | 95.3M |
+| Reactive | swin_v2_tiny | bev | pooled_latent | 1 | 28.2 | 35.5 | 38.9 | 3.7 | 388 | 59.4M |
+| Reactive | swin_v2_tiny | bev | horizon_cross_attention | 1 | 27.9 | 35.8 | 39.0 | 3.5 | 389 | 59.6M |
+
+</details>
+
 ## Add benchmarks for your own GPU
 
 To obtain benchmarks for your GPU, simply run the
