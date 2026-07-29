@@ -8,14 +8,27 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"sort"
 	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+
+	"github.com/autowarefoundation/auto_e2e/tools/datamodelconsole/api/internal/store"
 )
 
 const maxOddJSONBytes = 64 << 20
+
+var oddMetricNames = []string{
+	"ade_1s_m",
+	"ade_2s_m",
+	"ade_3s_m",
+	"ade_horizon_m",
+	"fde_horizon_m",
+	"acceleration_mae",
+	"curvature_mae",
+}
 
 // ErrODDUnavailable means the selected dataset has no complete ready LabelSet.
 var ErrODDUnavailable = errors.New("ODD LabelSet unavailable")
@@ -200,6 +213,103 @@ type ODDStructuredSearchRequest struct {
 	Offset     int            `json:"offset"`
 }
 
+type ODDMetricProjectionResponse struct {
+	Dataset                string            `json:"dataset"`
+	Version                string            `json:"version"`
+	LabelSetID             string            `json:"labelset_id"`
+	LabelSetManifestSHA256 string            `json:"labelset_manifest_sha256"`
+	Projections            []json.RawMessage `json:"projections"`
+}
+
+type oddMetricProjectionStore interface {
+	ListReadyODDMetricProjections(
+		context.Context, string, string, string,
+	) ([]store.ODDMetricProjectionPointer, error)
+}
+
+type oddMetricAggregate struct {
+	SampleCount int                `json:"sample_count"`
+	SceneCount  int                `json:"scene_count"`
+	Metrics     map[string]float64 `json:"metrics"`
+}
+
+type oddMetricSlice struct {
+	Kind        string             `json:"kind"`
+	Key         string             `json:"key"`
+	Value       *string            `json:"value"`
+	Status      string             `json:"status"`
+	SampleCount int                `json:"sample_count"`
+	SceneCount  int                `json:"scene_count"`
+	Metrics     map[string]float64 `json:"metrics"`
+}
+
+type oddMetricProjectionReport struct {
+	SchemaVersion           string             `json:"schema_version"`
+	ProjectionPolicyVersion string             `json:"projection_policy_version"`
+	MetricPolicyVersion     string             `json:"metric_policy_version"`
+	FrequencyHz             int                `json:"frequency_hz"`
+	HorizonSteps            int                `json:"horizon_steps"`
+	HorizonSeconds          float64            `json:"horizon_seconds"`
+	ObservationJoin         string             `json:"observation_join"`
+	EventJoin               string             `json:"event_join"`
+	SeedAggregation         string             `json:"seed_aggregation"`
+	SampleUIDDigest         string             `json:"sample_uid_digest"`
+	SampleCount             int                `json:"sample_count"`
+	SceneCount              int                `json:"scene_count"`
+	SamplesWithObservations int                `json:"samples_with_observations"`
+	SamplesWithEvents       int                `json:"samples_with_events"`
+	Overall                 oddMetricAggregate `json:"overall"`
+	Slices                  []oddMetricSlice   `json:"slices"`
+	Status                  string             `json:"status"`
+	ProjectionID            string             `json:"projection_id"`
+	Model                   struct {
+		ArtifactSHA256      string `json:"artifact_sha256"`
+		RegisteredModelName string `json:"registered_model_name"`
+		ModelVersion        int    `json:"model_version"`
+		RunID               string `json:"run_id"`
+	} `json:"model"`
+	EvaluationDataset struct {
+		Dataset               string `json:"dataset"`
+		Version               string `json:"version"`
+		ManifestURI           string `json:"manifest_uri"`
+		ManifestSHA256        string `json:"manifest_sha256"`
+		OverlayManifestKey    string `json:"overlay_manifest_key"`
+		OverlayManifestSHA256 string `json:"overlay_manifest_sha256"`
+		OverlayCacheIdentity  string `json:"overlay_cache_identity"`
+	} `json:"evaluation_dataset"`
+	LabelSet struct {
+		Dataset               string `json:"dataset"`
+		Version               string `json:"version"`
+		LabelSetID            string `json:"labelset_id"`
+		ManifestKey           string `json:"manifest_key"`
+		ManifestSHA256        string `json:"manifest_sha256"`
+		DatasetManifestSHA256 string `json:"dataset_manifest_sha256"`
+	} `json:"labelset"`
+	Validation struct {
+		Strategy        string `json:"strategy"`
+		SplitID         string `json:"split_id"`
+		GroupCount      int    `json:"group_count"`
+		SampleCount     int    `json:"sample_count"`
+		SampleUIDDigest string `json:"sample_uid_digest"`
+	} `json:"validation"`
+}
+
+type oddMetricProjectionManifest struct {
+	SchemaVersion                   string                 `json:"schema_version"`
+	Status                          string                 `json:"status"`
+	ProjectionID                    string                 `json:"projection_id"`
+	ProjectionSchemaVersion         string                 `json:"projection_schema_version"`
+	ProjectionPolicyVersion         string                 `json:"projection_policy_version"`
+	MetricPolicyVersion             string                 `json:"metric_policy_version"`
+	ModelArtifactSHA256             string                 `json:"model_artifact_sha256"`
+	LabelSetID                      string                 `json:"labelset_id"`
+	LabelSetManifestSHA256          string                 `json:"labelset_manifest_sha256"`
+	EvaluationDatasetManifestSHA256 string                 `json:"evaluation_dataset_manifest_sha256"`
+	ValidationSampleUIDDigest       string                 `json:"validation_sample_uid_digest"`
+	SampleCount                     int                    `json:"sample_count"`
+	Artifacts                       map[string]ODDArtifact `json:"artifacts"`
+}
+
 func validOddDigest(value string) bool {
 	if len(value) != 64 {
 		return false
@@ -208,14 +318,18 @@ func validOddDigest(value string) bool {
 	return err == nil && strings.ToLower(value) == value
 }
 
-func (s *S3Service) oddObject(
+func (s *S3Service) verifiedODDObject(
 	ctx context.Context,
+	bucket string,
 	key string,
 	expectedSHA256 string,
 	expectedByteSize int64,
 ) ([]byte, error) {
+	if bucket == "" || key == "" {
+		return nil, fmt.Errorf("ODD object coordinate is incomplete")
+	}
 	output, err := s.client.GetObject(ctx, &s3.GetObjectInput{
-		Bucket: aws.String(s.bucket),
+		Bucket: aws.String(bucket),
 		Key:    aws.String(key),
 	})
 	if err != nil {
@@ -248,6 +362,21 @@ func (s *S3Service) oddObject(
 		}
 	}
 	return payload, nil
+}
+
+func (s *S3Service) oddObject(
+	ctx context.Context,
+	key string,
+	expectedSHA256 string,
+	expectedByteSize int64,
+) ([]byte, error) {
+	return s.verifiedODDObject(
+		ctx,
+		s.bucket,
+		key,
+		expectedSHA256,
+		expectedByteSize,
+	)
 }
 
 func (s *S3Service) loadODDManifest(
@@ -325,6 +454,292 @@ func (s *S3Service) oddArtifact(
 		ctx, artifact.Key, artifact.SHA256, artifact.ByteSize,
 	)
 	return body, manifest, manifestSHA, err
+}
+
+func validODDMetricValues(metrics map[string]float64) bool {
+	if len(metrics) != len(oddMetricNames) {
+		return false
+	}
+	for _, name := range oddMetricNames {
+		value, found := metrics[name]
+		if !found || math.IsNaN(value) || math.IsInf(value, 0) || value < 0 {
+			return false
+		}
+	}
+	return true
+}
+
+func validateODDMetricProjectionManifest(
+	manifest oddMetricProjectionManifest,
+	pointer store.ODDMetricProjectionPointer,
+	root string,
+) error {
+	report, hasReport := manifest.Artifacts["report"]
+	samples, hasSamples := manifest.Artifacts["samples"]
+	if manifest.SchemaVersion != "odd_model_metric_projection_manifest_v1" ||
+		manifest.Status != "ready" ||
+		manifest.ProjectionID != pointer.ProjectionID ||
+		manifest.ProjectionSchemaVersion != "odd_model_metric_projection_v1" ||
+		manifest.ProjectionPolicyVersion != pointer.ProjectionPolicyVersion ||
+		manifest.MetricPolicyVersion != pointer.MetricPolicyVersion ||
+		manifest.ModelArtifactSHA256 != pointer.ModelArtifactID ||
+		manifest.LabelSetID != pointer.LabelSetID ||
+		manifest.LabelSetManifestSHA256 != pointer.LabelSetManifestSHA256 ||
+		manifest.EvaluationDatasetManifestSHA256 !=
+			pointer.EvaluationDatasetManifestSHA256 ||
+		manifest.ValidationSampleUIDDigest !=
+			pointer.ValidationSampleUIDDigest ||
+		manifest.SampleCount != pointer.SampleCount ||
+		!hasReport ||
+		report.Key != pointer.ReportKey ||
+		report.Key != root+"/report.json" ||
+		report.SHA256 != pointer.ReportSHA256 ||
+		report.ByteSize != pointer.ReportByteSize ||
+		report.ContentType != "application/json" ||
+		!hasSamples ||
+		samples.Key != root+"/samples.jsonl.gz" ||
+		!validOddDigest(samples.SHA256) ||
+		samples.ByteSize <= 0 ||
+		samples.ContentType != "application/x-ndjson" {
+		return fmt.Errorf("ODD metric projection manifest identity differs")
+	}
+	return nil
+}
+
+func validateODDMetricProjectionReport(
+	report oddMetricProjectionReport,
+	pointer store.ODDMetricProjectionPointer,
+	labelSetManifest ODDManifest,
+	labelSetManifestSHA256 string,
+	dataset string,
+	version string,
+) error {
+	if report.SchemaVersion != "odd_model_metric_projection_v1" ||
+		report.Status != "ready" ||
+		report.ProjectionID != pointer.ProjectionID ||
+		report.ProjectionPolicyVersion != pointer.ProjectionPolicyVersion ||
+		report.MetricPolicyVersion != pointer.MetricPolicyVersion ||
+		report.SampleUIDDigest != pointer.ValidationSampleUIDDigest ||
+		report.SampleCount != pointer.SampleCount ||
+		report.SceneCount != pointer.SceneCount ||
+		report.FrequencyHz <= 0 ||
+		report.HorizonSteps <= 0 ||
+		math.IsNaN(report.HorizonSeconds) ||
+		math.IsInf(report.HorizonSeconds, 0) ||
+		report.HorizonSeconds <= 0 ||
+		report.ObservationJoin != "start <= anchor < end" ||
+		report.EventJoin !=
+			"event_start < anchor + model_horizon and event_end > anchor" ||
+		report.SeedAggregation != "arithmetic_mean" ||
+		report.SamplesWithObservations < 0 ||
+		report.SamplesWithObservations > report.SampleCount ||
+		report.SamplesWithEvents < 0 ||
+		report.SamplesWithEvents > report.SampleCount ||
+		report.Overall.SampleCount != report.SampleCount ||
+		report.Overall.SceneCount != report.SceneCount ||
+		!validODDMetricValues(report.Overall.Metrics) {
+		return fmt.Errorf("ODD metric projection report contract differs")
+	}
+	if report.Model.ArtifactSHA256 != pointer.ModelArtifactID ||
+		report.Model.RegisteredModelName != pointer.RegisteredModelName ||
+		report.Model.ModelVersion != pointer.ModelVersion ||
+		report.Model.RunID != pointer.RunID {
+		return fmt.Errorf("ODD metric projection model identity differs")
+	}
+	if report.EvaluationDataset.Dataset != pointer.EvaluationDataset ||
+		report.EvaluationDataset.Version != pointer.EvaluationVersion ||
+		report.EvaluationDataset.ManifestURI == "" ||
+		report.EvaluationDataset.ManifestSHA256 !=
+			pointer.EvaluationDatasetManifestSHA256 ||
+		report.EvaluationDataset.OverlayManifestKey == "" ||
+		!validOddDigest(
+			report.EvaluationDataset.OverlayManifestSHA256,
+		) ||
+		!validOddDigest(report.EvaluationDataset.OverlayCacheIdentity) {
+		return fmt.Errorf(
+			"ODD metric projection evaluation dataset identity differs",
+		)
+	}
+	if report.LabelSet.Dataset != dataset ||
+		report.LabelSet.Version != version ||
+		report.LabelSet.LabelSetID != labelSetManifest.LabelSetID ||
+		report.LabelSet.ManifestKey != fmt.Sprintf(
+			"%s/%s/odd/labelsets/%s/manifest.json",
+			dataset,
+			version,
+			labelSetManifest.LabelSetID,
+		) ||
+		report.LabelSet.ManifestSHA256 != labelSetManifestSHA256 ||
+		report.LabelSet.DatasetManifestSHA256 !=
+			labelSetManifest.DatasetManifestSHA256 {
+		return fmt.Errorf("ODD metric projection LabelSet identity differs")
+	}
+	if report.Validation.Strategy == "" ||
+		report.Validation.SplitID == "" ||
+		report.Validation.GroupCount <= 0 ||
+		report.Validation.SampleCount != report.SampleCount ||
+		report.Validation.SampleUIDDigest != pointer.ValidationSampleUIDDigest {
+		return fmt.Errorf("ODD metric projection validation identity differs")
+	}
+	seen := make(map[string]struct{}, len(report.Slices))
+	for _, slice := range report.Slices {
+		if (slice.Kind != "observation" && slice.Kind != "event") ||
+			slice.Key == "" ||
+			slice.Status == "" ||
+			slice.SampleCount <= 0 ||
+			slice.SampleCount > report.SampleCount ||
+			slice.SceneCount <= 0 ||
+			slice.SceneCount > report.SceneCount ||
+			!validODDMetricValues(slice.Metrics) ||
+			(slice.Value != nil && *slice.Value == "") {
+			return fmt.Errorf("ODD metric projection slice is invalid")
+		}
+		value := "\x00"
+		if slice.Value != nil {
+			value = *slice.Value
+		}
+		identity := strings.Join(
+			[]string{slice.Kind, slice.Key, value, slice.Status},
+			"\x00",
+		)
+		if _, found := seen[identity]; found {
+			return fmt.Errorf("ODD metric projection slice is duplicated")
+		}
+		seen[identity] = struct{}{}
+	}
+	return nil
+}
+
+// ODDMetricProjections returns analysis-only validation metrics projected onto
+// the current scene-native LabelSet. It never mutates or extends that LabelSet.
+func (s *S3Service) ODDMetricProjections(
+	ctx context.Context,
+	dataset string,
+	version string,
+) (ODDMetricProjectionResponse, ODDManifest, string, error) {
+	var response ODDMetricProjectionResponse
+	labelSetManifest, labelSetManifestSHA256, err := s.loadODDManifest(
+		ctx,
+		dataset,
+		version,
+	)
+	if err != nil {
+		return response, labelSetManifest, "", err
+	}
+	projectionStore, ok := s.store.(oddMetricProjectionStore)
+	if !ok {
+		return response, labelSetManifest, labelSetManifestSHA256, fmt.Errorf(
+			"ODD metric projection lookup requires a configured store",
+		)
+	}
+	pointers, err := projectionStore.ListReadyODDMetricProjections(
+		ctx,
+		dataset,
+		version,
+		labelSetManifest.LabelSetID,
+	)
+	if err != nil {
+		return response, labelSetManifest, labelSetManifestSHA256, err
+	}
+	response = ODDMetricProjectionResponse{
+		Dataset:                dataset,
+		Version:                version,
+		LabelSetID:             labelSetManifest.LabelSetID,
+		LabelSetManifestSHA256: labelSetManifestSHA256,
+		Projections:            make([]json.RawMessage, 0, len(pointers)),
+	}
+	for _, pointer := range pointers {
+		root := fmt.Sprintf(
+			"odd_metric_projections/schema=v1/dataset=%s/version=%s/"+
+				"labelset=%s/model=%s/projection=%s",
+			dataset,
+			version,
+			labelSetManifest.LabelSetID,
+			pointer.ModelArtifactID,
+			pointer.ProjectionID,
+		)
+		if pointer.LabelSetID != labelSetManifest.LabelSetID ||
+			pointer.LabelSetManifestSHA256 != labelSetManifestSHA256 ||
+			pointer.ArtifactsBucket != s.artifactsBucket ||
+			pointer.ManifestKey != root+"/manifest.json" ||
+			pointer.ReportKey != root+"/report.json" {
+			return ODDMetricProjectionResponse{},
+				labelSetManifest,
+				labelSetManifestSHA256,
+				fmt.Errorf("ODD metric projection pointer identity differs")
+		}
+		manifestBody, err := s.verifiedODDObject(
+			ctx,
+			s.artifactsBucket,
+			pointer.ManifestKey,
+			pointer.ManifestSHA256,
+			pointer.ManifestByteSize,
+		)
+		if err != nil {
+			return ODDMetricProjectionResponse{},
+				labelSetManifest,
+				labelSetManifestSHA256,
+				err
+		}
+		var projectionManifest oddMetricProjectionManifest
+		if err := json.Unmarshal(
+			manifestBody,
+			&projectionManifest,
+		); err != nil {
+			return ODDMetricProjectionResponse{},
+				labelSetManifest,
+				labelSetManifestSHA256,
+				fmt.Errorf("decode ODD metric projection manifest: %w", err)
+		}
+		if err := validateODDMetricProjectionManifest(
+			projectionManifest,
+			pointer,
+			root,
+		); err != nil {
+			return ODDMetricProjectionResponse{},
+				labelSetManifest,
+				labelSetManifestSHA256,
+				err
+		}
+		reportBody, err := s.verifiedODDObject(
+			ctx,
+			s.artifactsBucket,
+			pointer.ReportKey,
+			pointer.ReportSHA256,
+			pointer.ReportByteSize,
+		)
+		if err != nil {
+			return ODDMetricProjectionResponse{},
+				labelSetManifest,
+				labelSetManifestSHA256,
+				err
+		}
+		var report oddMetricProjectionReport
+		if err := json.Unmarshal(reportBody, &report); err != nil {
+			return ODDMetricProjectionResponse{},
+				labelSetManifest,
+				labelSetManifestSHA256,
+				fmt.Errorf("decode ODD metric projection report: %w", err)
+		}
+		if err := validateODDMetricProjectionReport(
+			report,
+			pointer,
+			labelSetManifest,
+			labelSetManifestSHA256,
+			dataset,
+			version,
+		); err != nil {
+			return ODDMetricProjectionResponse{},
+				labelSetManifest,
+				labelSetManifestSHA256,
+				err
+		}
+		response.Projections = append(
+			response.Projections,
+			json.RawMessage(reportBody),
+		)
+	}
+	return response, labelSetManifest, labelSetManifestSHA256, nil
 }
 
 // ODDOntology returns the complete registry, including zero-count candidates.
