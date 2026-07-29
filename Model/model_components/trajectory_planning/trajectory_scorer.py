@@ -27,22 +27,14 @@ terms, so it can be merged and evaluated without retraining the perception
 or planner stack — it only changes *how many* samples are drawn from an
 already-trained stochastic planner and *how* the best one is picked.
 
-Calibration note: `pixels_per_meter`, `ego_row`, and `ego_col` below MUST be
-set to match whatever convention the KITScenes / L2D map renderer actually
-uses to produce `map_input`. The defaults here follow the BEV geometry
-discussed for this fork (120 m front / 60 m rear / 60 m each side at 0.4 m
-resolution -> 450 x 300 px, issue #35) but have NOT been verified against
-the renderer itself — confirm with whoever owns that code before relying
-on the compliance score in any reported metric.
-
-DO NOT calibrate against Model/data_parsing/kit_scenes/map.py as it stands
-today without checking #148 and #149 first: #149 proposes replacing the
-current 640x360 non-square render with a 256x256 square tile at 120 m in
-*all four* directions (symmetric), and #148 is reworking what the map
-actually encodes (route direction from GPS traces, not just a static
-drivable-area raster). Both are open and assigned to riita10069 as of
-2026-07-21 — the geometry below may need to change again once those land,
-not just be verified against today's renderer.
+Calibration: `meters_per_pixel`, `ego_row`, `ego_col` below come directly
+from `Model.navigation.geometry.DEFAULT_NAVIGATION_GEOMETRY` — the actual
+geometry `map_context` is rasterized with (#161, merged, resolved #148/#149).
+This is no longer a guess to verify; it's imported from the same source of
+truth the renderer itself uses. Drivable-area compliance reads
+`map_context`'s `MapChannel.DRIVABLE_AREA` channel directly — a real
+binary semantic mask, not a pixel-colour heuristic on a human-viewable
+image (map_context is 14 semantic channels now, not a rendered RGB image).
 """
 
 from dataclasses import dataclass
@@ -53,31 +45,35 @@ import torch
 import torch.nn as nn
 
 from Model.evaluation.metrics import integrate_trajectory
+from Model.navigation.geometry import DEFAULT_NAVIGATION_GEOMETRY, MapChannel
 
 
 @dataclass
 class ScorerConfig:
-    # --- BEV pixel-space calibration (see calibration note above) ---
-    pixels_per_meter: float = 2.5          # 1 / 0.4 m
-    bev_h: int = 450                       # rows: forward axis
-    bev_w: int = 300                       # cols: lateral axis
-    ego_row: int = 300                     # row index where ego (x=0) sits
-                                            # (150m*2.5=375 if symmetric; the
-                                            # 120m-front/60m-rear split used
-                                            # in issue #35 gives 60*2.5=150 from
-                                            # the *bottom*, i.e. row 450-150=300
-                                            # from the top if rendered front-up).
-    ego_col: int = 150                     # col index where ego (y=0) sits
-                                            # (lateral center: 300 / 2)
-    forward_is_negative_row: bool = True   # True if increasing x (forward)
-                                            # moves to smaller row indices
-                                            # (image rendered nose-up).
+    # --- BEV pixel-space calibration ---
+    # Sourced directly from Model.navigation.geometry.DEFAULT_NAVIGATION_GEOMETRY
+    # (geometry_id="kitscenes-v3-bev-1m-v1") — the same geometry map_context
+    # is actually rasterized with, not a guessed/reverse-engineered value.
+    # This resolves the #148/#149 calibration risk this module used to warn
+    # about: those issues are merged (see #161), and this is their real
+    # output geometry, not a placeholder.
+    meters_per_pixel: float = DEFAULT_NAVIGATION_GEOMETRY.meters_per_pixel
+    bev_h: int = DEFAULT_NAVIGATION_GEOMETRY.height_px
+    bev_w: int = DEFAULT_NAVIGATION_GEOMETRY.width_px
+    x_max_m: float = DEFAULT_NAVIGATION_GEOMETRY.x_max_m
+    y_max_m: float = DEFAULT_NAVIGATION_GEOMETRY.y_max_m
+    ego_row: float = DEFAULT_NAVIGATION_GEOMETRY.ego_anchor_row
+    ego_col: float = DEFAULT_NAVIGATION_GEOMETRY.ego_anchor_col
 
-    # --- drivable-area colour lookup ---
-    # RGB tuple(s) considered "drivable" in the rendered map_input image.
-    # Confirm against the actual renderer palette before use.
-    drivable_rgb: tuple = (255, 255, 255)
-    drivable_rgb_tolerance: int = 10       # per-channel L1 tolerance
+    # --- drivable-area lookup ---
+    # map_context's DRIVABLE_AREA channel (Model.navigation.geometry.MapChannel)
+    # is one of BINARY_MAP_CHANNELS — a real semantic 0/1 mask, not a pixel
+    # colour to fuzzy-match. Replaces the old RGB-tolerance heuristic
+    # entirely: map_context is 14 semantic channels now (#161), not a
+    # human-viewable rasterized image, so there is no colour to match
+    # against any more.
+    drivable_area_channel: int = int(MapChannel.DRIVABLE_AREA)
+    drivable_threshold: float = 0.5
 
     # --- kinematic comfort bounds ---
     max_comfortable_accel: float = 3.0     # m/s^2
@@ -183,6 +179,14 @@ def decode_trajectory_to_xy(trajectory: torch.Tensor, num_timesteps: int,
 def project_xy_to_bev_pixel(xy: torch.Tensor, config: ScorerConfig) -> torch.Tensor:
     """Project ego-relative (x, y) meters into BEV pixel (row, col) indices.
 
+    Mirrors NavigationRasterGeometry.ego_to_pixel's formula exactly
+    (Model/navigation/geometry.py) — same sign conventions, same -0.5
+    pixel-center offset — so a trajectory scored here and the same
+    trajectory rendered through the real geometry object land on the same
+    pixel. Reimplemented in torch (not called directly) only to stay
+    differentiable/GPU-resident for the batched xy tensor this receives;
+    the arithmetic is identical, not independently derived.
+
     Args:
         xy: [..., 2] ego-relative coordinates in meters (x=forward, y=left).
         config: calibration parameters — see module docstring.
@@ -193,33 +197,31 @@ def project_xy_to_bev_pixel(xy: torch.Tensor, config: ScorerConfig) -> torch.Ten
             (see `drivable_area_compliance`).
     """
     x, y = xy[..., 0], xy[..., 1]
-    row_offset = -x if config.forward_is_negative_row else x
-    row = config.ego_row + row_offset * config.pixels_per_meter
-    col = config.ego_col - y * config.pixels_per_meter  # +y = left = smaller col
+    row = (config.x_max_m - x) / config.meters_per_pixel - 0.5
+    col = (config.y_max_m - y) / config.meters_per_pixel - 0.5
     return torch.stack([row, col], dim=-1).round().long()
 
 
-def drivable_area_compliance(xy: torch.Tensor, map_input: torch.Tensor,
+def drivable_area_compliance(xy: torch.Tensor, map_context: torch.Tensor,
                              config: ScorerConfig) -> torch.Tensor:
-    """Fraction of trajectory waypoints landing on a "drivable" map pixel.
+    """Fraction of trajectory waypoints landing on the drivable-area mask.
 
     Args:
         xy: [B, num_timesteps, 2] ego-relative waypoints in meters.
-        map_input: [B, 3, bev_h, bev_w] rasterized BEV map image, the same
-            tensor fed to RasterizedMapEncoder (channel order assumed RGB,
-            values in [0, 255] or normalized — see note below).
+        map_context: [B, 14, bev_h, bev_w] semantic navigation raster (#161)
+            — the same tensor ReactiveE2E.forward() takes as map_context.
+            Channel config.drivable_area_channel (MapChannel.DRIVABLE_AREA)
+            is a real binary 0/1 mask (Model.navigation.geometry.
+            BINARY_MAP_CHANNELS), not a pixel colour — no ImageNet
+            normalization or colour-space concern applies here the way it
+            did for the old rendered-RGB map_input.
         config: calibration parameters.
 
     Returns:
-        compliance: [B] fraction in [0, 1] of waypoints inside the
-            drivable-area colour band and within image bounds.
-
-    Note: if `map_input` has already been ImageNet-normalized upstream of
-    this call, the colour lookup must run on a separate un-normalized copy
-    of the map image — wire this scorer to whichever stage in the data
-    pipeline still has raw pixel values.
+        compliance: [B] fraction in [0, 1] of waypoints on a drivable
+            pixel and within the raster's bounds.
     """
-    B, _, H, W = map_input.shape
+    B, _, H, W = map_context.shape
     T = xy.shape[1]
     pixels = project_xy_to_bev_pixel(xy, config)  # [B, T, 2]
 
@@ -229,14 +231,11 @@ def drivable_area_compliance(xy: torch.Tensor, map_input: torch.Tensor,
     rows_c = rows.clamp(0, H - 1)
     cols_c = cols.clamp(0, W - 1)
 
-    target = torch.tensor(config.drivable_rgb, device=map_input.device,
-                          dtype=map_input.dtype).view(1, 1, 3)
+    drivable = map_context[:, config.drivable_area_channel]  # [B, H, W]
 
-    compliant = torch.zeros(B, T, dtype=torch.bool, device=map_input.device)
+    compliant = torch.zeros(B, T, dtype=torch.bool, device=map_context.device)
     for b in range(B):
-        sampled = map_input[b, :, rows_c[b], cols_c[b]].transpose(0, 1)  # [T, 3]
-        diff = (sampled - target[0]).abs().sum(dim=-1)
-        compliant[b] = diff <= (3 * config.drivable_rgb_tolerance)
+        compliant[b] = drivable[b, rows_c[b], cols_c[b]] > config.drivable_threshold
 
     compliant = compliant & in_bounds
     return compliant.float().mean(dim=1)  # [B]
@@ -304,7 +303,7 @@ class TrajectoryComplianceScorer(nn.Module):
     def sample_and_score(self, bev_features: torch.Tensor,
                          visual_history: torch.Tensor,
                          egomotion_history: torch.Tensor,
-                         map_input: torch.Tensor,
+                         map_context: torch.Tensor,
                          num_samples: int = 8,
                          seed: Optional[int] = None):
         """Draw `num_samples` trajectories per batch element and re-rank.
@@ -314,9 +313,12 @@ class TrajectoryComplianceScorer(nn.Module):
                 already produced by AutoE2E before the planner call.
             visual_history: [B, visual_history_dim].
             egomotion_history: [B, egomotion_dim].
-            map_input: [B, 3, bev_h, bev_w] raw (un-normalized) rasterized
-                map image — see `drivable_area_compliance` note on
-                normalization.
+            map_context: [B, 14, bev_h, bev_w] semantic navigation raster
+                (#161) — see `drivable_area_compliance`. Renamed from
+                map_input to match ReactiveE2E.forward()'s own naming
+                after #161; this is no longer a human-viewable rendered
+                image, so the old name (implying a raw image to feed
+                a CNN) was misleading.
             num_samples: K, number of stochastic samples per batch element.
             seed: optional base seed for reproducible re-sampling.
 
@@ -363,7 +365,7 @@ class TrajectoryComplianceScorer(nn.Module):
         )  # [B, K, T, 2]
 
         dac_scores = torch.stack([
-            drivable_area_compliance(xy[:, k], map_input, self.config)
+            drivable_area_compliance(xy[:, k], map_context, self.config)
             for k in range(num_samples)
         ], dim=1)  # [B, K]
 
