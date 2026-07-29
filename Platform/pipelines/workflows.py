@@ -30,6 +30,7 @@ from Platform.pipelines.overlay_tasks import (
     resolve_overlay_model_version,
 )
 from Platform.pipelines.odd_labeling_workflow import (  # noqa: F401
+    odd_dataset_labeler_launch_plan,
     wf_generate_odd_labelset,
 )
 from Platform.pipelines.trajectory_visualization_tasks import (
