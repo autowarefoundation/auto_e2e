@@ -540,6 +540,62 @@ def _prompt_sha256(request: PrivacySafeMapRouteRequest) -> str:
     ).hexdigest()
 
 
+def bedrock_map_prompt_bundle_document() -> dict[str, Any]:
+    return {
+        "schema_version": "bedrock_map_prompt_bundle_v1",
+        "request_schema_version": BEDROCK_MAP_SCHEMA_VERSION,
+        "prompt_version": BEDROCK_MAP_PROMPT_VERSION,
+        "tool_name": BEDROCK_TOOL_NAME,
+        "system_prompt": _system_prompt(),
+        "supported_labels": {
+            key: list(ONTOLOGY[key].values)
+            for key in sorted(SUPPORTED_KEYS)
+        },
+        "input_policy": {
+            "coordinate_convention": "ego_flu_x_forward_y_left_meters",
+            "maximum_local_range_m": MAX_LOCAL_RANGE_M,
+            "render_size_px": RENDER_SIZE_PX,
+            "forbidden_request_tokens": sorted(FORBIDDEN_REQUEST_TOKENS),
+            "camera_imagery_prohibited": True,
+            "geographic_identifiers_prohibited": True,
+            "select_only_deterministic_candidates": True,
+            "cite_ephemeral_primitive_ids": True,
+        },
+        "tool_output_contract": {
+            "additional_properties": False,
+            "required": [
+                "status",
+                "value",
+                "confidence",
+                "cited_primitive_ids",
+                "candidate_rejections",
+            ],
+            "statuses": ["resolved", "ambiguous"],
+        },
+    }
+
+
+def bedrock_map_prompt_bundle_sha256() -> str:
+    return hashlib.sha256(
+        canonical_json_bytes(bedrock_map_prompt_bundle_document())
+    ).hexdigest()
+
+
+def bedrock_map_decoding_config_sha256(*, max_tokens: int = 1024) -> str:
+    if max_tokens <= 0:
+        raise ValueError("Bedrock map max_tokens must be positive")
+    return hashlib.sha256(
+        canonical_json_bytes(
+            {
+                "schema_version": "bedrock_map_decoding_config_v1",
+                "maxTokens": max_tokens,
+                "temperature": 0.0,
+                "toolChoice": {"tool": {"name": BEDROCK_TOOL_NAME}},
+            }
+        )
+    ).hexdigest()
+
+
 def _extract_tool_input(response: Mapping[str, Any]) -> dict[str, Any]:
     try:
         content = response["output"]["message"]["content"]  # type: ignore[index]
