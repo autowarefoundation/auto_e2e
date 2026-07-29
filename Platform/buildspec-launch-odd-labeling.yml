@@ -10,10 +10,14 @@ env:
     DATASET_VERSION: v3.0
     DATASET_MANIFEST_SHA256: ""
     LABELER_SOURCE_REVISION: ""
-    OPENAI_MODEL: nvidia/Cosmos3-Nano
-    OPENAI_MODEL_REVISION: deployed
-    BEDROCK_MAP_MODEL_ID: us.anthropic.claude-sonnet-4-6
-    BEDROCK_MAP_MODEL_REVISION: claude-sonnet-4-6
+    ENABLED_SOURCES: map_route,gnss_ins,vlm,image_qc,fusion
+    ROAD_VLM_PROVIDER: openai_compatible
+    ROAD_VLM_MODEL: nvidia/Cosmos3-Nano
+    ROAD_VLM_MODEL_REVISION: 411f42a8fdfb8c5b2583cb8786e0938f49796eaa
+    MAP_RESOLVER_PROVIDER: amazon_bedrock
+    MAP_RESOLVER_MODEL_ID: us.anthropic.claude-sonnet-4-6
+    MAP_RESOLVER_MODEL_REVISION: claude-sonnet-4-6
+    PUBLICATION_PREFIX: ""
     CAMERA_ANCHOR_INTERVAL_S: "1.0"
     MAXIMUM_CAMERA_ANCHORS: "128"
     TRIGGER_CONTEXT_S: "1.0"
@@ -27,7 +31,7 @@ env:
 phases:
   install:
     commands:
-      - pip install -q flytekit==1.14.9 numpy torch kubernetes --extra-index-url https://download.pytorch.org/whl/cpu
+      - pip install -q flytekit==1.14.9 numpy Pillow torch kubernetes --extra-index-url https://download.pytorch.org/whl/cpu
   build:
     commands:
       - |
@@ -38,6 +42,10 @@ phases:
         DATASETS_BUCKET="auto-e2e-platform-datasets-${ACCOUNT_ID}"
         DATASET_MANIFEST_KEY="${DATASET_NAME}/${DATASET_VERSION}/shards/manifest.json"
         DATASET_MANIFEST_URI="s3://${DATASETS_BUCKET}/${DATASET_MANIFEST_KEY}"
+        PUBLICATION_PREFIX="${PUBLICATION_PREFIX:-${DATASET_NAME}/${DATASET_VERSION}/odd}"
+        if [ -z "${LABELER_SOURCE_REVISION}" ]; then
+          LABELER_SOURCE_REVISION="${CODEBUILD_RESOLVED_SOURCE_VERSION:-}"
+        fi
         if [ -z "${DATASET_MANIFEST_SHA256}" ]; then
           DATASET_MANIFEST_SHA256="$(
             aws s3api head-object \
@@ -60,31 +68,129 @@ phases:
         [[ "${DATA_PREP_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]
         [[ "${LABELER_SOURCE_REVISION}" =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ ]]
         [[ "${PUBLICATION_SCOPE}" == "smoke" || "${PUBLICATION_SCOPE}" == "full" ]]
+        [[ ! "${ROAD_VLM_MODEL_REVISION,,}" =~ ^(latest|deployed|main|unknown)$ ]]
+        [[ ! "${MAP_RESOLVER_MODEL_REVISION,,}" =~ ^(latest|deployed|main|unknown)$ ]]
 
         export AUTO_E2E_DATA_PREP_IMAGE="${ECR_URL}/auto-e2e/data-prep@${DATA_PREP_DIGEST}"
         export ECR_PREFIX="${ECR_URL}"
         export PYTHONPATH="${CODEBUILD_SRC_DIR}/Model:${CODEBUILD_SRC_DIR}:${PYTHONPATH:-}"
         export DATASETS_BUCKET DATASET_MANIFEST_URI DATASET_MANIFEST_SHA256
-        export DATA_PREP_DIGEST
+        export DATA_PREP_DIGEST LABELER_SOURCE_REVISION PUBLICATION_PREFIX
 
         python3 - <<'PY'
+        import hashlib
         import json
         import os
 
+        import boto3
+        from botocore.exceptions import ClientError
+
+        from data_processing.odd_labeling.bedrock_map_resolver import (
+            bedrock_map_decoding_config_sha256,
+            bedrock_map_prompt_bundle_sha256,
+        )
+        from data_processing.odd_labeling.fusion import fusion_config_sha256
+        from data_processing.odd_labeling.ontology import ontology_document
+        from data_processing.odd_labeling.openai_compatible import (
+            road_vlm_decoding_bundle_sha256,
+            road_vlm_prompt_bundle_sha256,
+        )
+        from data_processing.odd_labeling.quality import (
+            calibration_bundle_sha256,
+        )
+        from Platform.pipelines.odd_labeling_workflow import (
+            ODD_LABELER_VERSION,
+            _canonical_bytes,
+            odd_labeler_config_document,
+            odd_labeler_config_sha256,
+        )
+
+        enabled_sources = [
+            source.strip()
+            for source in os.environ["ENABLED_SOURCES"].split(",")
+            if source.strip()
+        ]
+        config = odd_labeler_config_document(enabled_sources)
+        config_body = _canonical_bytes(config)
+        config_sha256 = hashlib.sha256(config_body).hexdigest()
+        if config_sha256 != odd_labeler_config_sha256(enabled_sources):
+            raise RuntimeError("ODD labeler config digest is inconsistent")
+
+        publication_prefix = os.environ["PUBLICATION_PREFIX"]
+        config_key = (
+            f"{publication_prefix}/configs/{config_sha256}.json"
+        )
+        datasets_bucket = os.environ["DATASETS_BUCKET"]
+        s3 = boto3.client("s3")
+        try:
+            s3.put_object(
+                Bucket=datasets_bucket,
+                Key=config_key,
+                Body=config_body,
+                ContentType="application/json",
+                IfNoneMatch="*",
+                Metadata={
+                    "sha256": config_sha256,
+                    "odd-schema": "odd_labeler_config_v1",
+                },
+            )
+        except ClientError as error:
+            status = error.response.get(
+                "ResponseMetadata", {}
+            ).get("HTTPStatusCode")
+            if status != 412:
+                raise
+            existing = s3.get_object(
+                Bucket=datasets_bucket,
+                Key=config_key,
+            )["Body"].read()
+            if existing != config_body:
+                raise RuntimeError(
+                    "immutable ODD labeler config differs"
+                ) from error
+
+        ontology = ontology_document()
         inputs = {
             "dataset_name": os.environ["DATASET_NAME"],
             "dataset_version": os.environ["DATASET_VERSION"],
             "dataset_manifest_uri": os.environ["DATASET_MANIFEST_URI"],
             "dataset_manifest_sha256": os.environ["DATASET_MANIFEST_SHA256"],
-            "datasets_bucket": os.environ["DATASETS_BUCKET"],
-            "openai_model": os.environ["OPENAI_MODEL"],
-            "openai_model_revision": os.environ["OPENAI_MODEL_REVISION"],
-            "bedrock_map_model_id": os.environ[
-                "BEDROCK_MAP_MODEL_ID"
+            "datasets_bucket": datasets_bucket,
+            "ontology_version": ontology["ontology_version"],
+            "ontology_sha256": ontology["ontology_sha256"],
+            "labeler_bundle_version": ODD_LABELER_VERSION,
+            "labeler_config_uri": f"s3://{datasets_bucket}/{config_key}",
+            "labeler_config_sha256": config_sha256,
+            "enabled_sources": enabled_sources,
+            "road_vlm_provider": os.environ["ROAD_VLM_PROVIDER"],
+            "road_vlm_model": os.environ["ROAD_VLM_MODEL"],
+            "road_vlm_model_revision": os.environ[
+                "ROAD_VLM_MODEL_REVISION"
             ],
-            "bedrock_map_model_revision": os.environ[
-                "BEDROCK_MAP_MODEL_REVISION"
+            "road_vlm_prompt_bundle_sha256": (
+                road_vlm_prompt_bundle_sha256()
+            ),
+            "road_vlm_decoding_config_sha256": (
+                road_vlm_decoding_bundle_sha256(max_tokens=4096)
+            ),
+            "map_resolver_provider": os.environ[
+                "MAP_RESOLVER_PROVIDER"
             ],
+            "map_resolver_model_id": os.environ[
+                "MAP_RESOLVER_MODEL_ID"
+            ],
+            "map_resolver_model_revision": os.environ[
+                "MAP_RESOLVER_MODEL_REVISION"
+            ],
+            "map_resolver_prompt_bundle_sha256": (
+                bedrock_map_prompt_bundle_sha256()
+            ),
+            "map_resolver_decoding_config_sha256": (
+                bedrock_map_decoding_config_sha256(max_tokens=1024)
+            ),
+            "fusion_config_sha256": fusion_config_sha256(),
+            "calibration_bundle_sha256": calibration_bundle_sha256(),
+            "publication_prefix": publication_prefix,
             "labeler_image_digest": os.environ["DATA_PREP_DIGEST"],
             "labeler_source_revision": os.environ[
                 "LABELER_SOURCE_REVISION"
