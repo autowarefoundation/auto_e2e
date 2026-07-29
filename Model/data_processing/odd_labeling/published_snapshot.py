@@ -121,8 +121,8 @@ class CameraObject:
 class CanonicalSceneEvidence:
     descriptor: PublishedSceneDescriptor
     path_latlon_heading_timestamp: np.ndarray
-    navigation_map: NavigationMap
-    navigation_route: NavigationRoute
+    navigation_map: NavigationMap | None
+    navigation_route: NavigationRoute | None
     navigation_quality: dict[str, Any]
     camera_objects: tuple[CameraObject, ...]
     capability_manifest: DatasetCapabilityManifest | None = None
@@ -141,6 +141,8 @@ class CanonicalSceneEvidence:
             "path_latlon_heading_timestamp",
             np.ascontiguousarray(path, dtype=np.float64),
         )
+        if self.navigation_route is not None and self.navigation_map is None:
+            raise ValueError("navigation route requires its canonical map")
         if not self.camera_objects:
             raise ValueError("scene has no camera objects")
 
