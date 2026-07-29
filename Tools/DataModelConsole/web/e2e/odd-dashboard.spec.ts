@@ -203,6 +203,109 @@ const labelsets = {
   ],
 };
 
+const metricValues = {
+  ade_1s_m: 1.1,
+  ade_2s_m: 2.2,
+  ade_3s_m: 3.3,
+  ade_horizon_m: 4.4,
+  fde_horizon_m: 10,
+  acceleration_mae: 0.2,
+  curvature_mae: 0.01,
+};
+
+const modelMetrics = {
+  dataset: "kitscenes",
+  version: "v3.0",
+  labelset_id: "oddls-test",
+  labelset_manifest_sha256: "f".repeat(64),
+  projections: [
+    {
+      schema_version: "odd_model_metric_projection_v1",
+      status: "ready",
+      projection_id: "1".repeat(64),
+      projection_policy_version: "odd_interval_projection_v1",
+      metric_policy_version: "control_displacement_seed_mean_v1",
+      frequency_hz: 10,
+      horizon_steps: 64,
+      horizon_seconds: 6.4,
+      observation_join: "start <= anchor < end",
+      event_join:
+        "event_start < anchor + model_horizon and event_end > anchor",
+      seed_aggregation: "arithmetic_mean",
+      sample_uid_digest: "2".repeat(64),
+      sample_count: 3820,
+      scene_count: 40,
+      samples_with_observations: 3800,
+      samples_with_events: 120,
+      overall: {
+        sample_count: 3820,
+        scene_count: 40,
+        metrics: metricValues,
+      },
+      slices: [
+        {
+          kind: "observation",
+          key: "odd.road.context",
+          value: "urban",
+          status: "valid",
+          sample_count: 1200,
+          scene_count: 30,
+          metrics: {
+            ...metricValues,
+            ade_3s_m: 4.3,
+            ade_horizon_m: 5.4,
+            fde_horizon_m: 12,
+          },
+        },
+        {
+          kind: "observation",
+          key: "odd.road.context",
+          value: "suburban",
+          status: "valid",
+          sample_count: 500,
+          scene_count: 15,
+          metrics: {
+            ...metricValues,
+            ade_3s_m: 2.3,
+            ade_horizon_m: 3.4,
+            fde_horizon_m: 8,
+          },
+        },
+      ],
+      model: {
+        artifact_sha256: "3".repeat(64),
+        registered_model_name: "auto-e2e-driving-policy",
+        model_version: 42,
+        run_id: "run-42",
+      },
+      evaluation_dataset: {
+        dataset: "kitscenes",
+        version: "v2.2",
+        manifest_uri: "s3://datasets/kitscenes/v2.2/manifest.json",
+        manifest_sha256: "4".repeat(64),
+        overlay_manifest_key: "overlays/model/manifest.json",
+        overlay_manifest_sha256: "5".repeat(64),
+        overlay_cache_identity: "6".repeat(64),
+      },
+      labelset: {
+        dataset: "kitscenes",
+        version: "v3.0",
+        labelset_id: "oddls-test",
+        manifest_key: "kitscenes/v3.0/odd/labelsets/oddls-test/manifest.json",
+        manifest_sha256: "f".repeat(64),
+        dataset_manifest_sha256: "b".repeat(64),
+      },
+      validation: {
+        strategy: "exact_group_fraction",
+        split_id: "split-v1",
+        group_count: 40,
+        sample_count: 3820,
+        sample_uid_digest: "2".repeat(64),
+      },
+    },
+  ],
+};
+
 const oddExecutions = [
   {
     execution_id: "odd-current",
@@ -278,6 +381,9 @@ async function installODDDashboardRoutes(
     }
     if (url.pathname === "/api/v1/odd/statistics") {
       return fulfillJSON(route, statistics);
+    }
+    if (url.pathname === "/api/v1/odd/model-metrics") {
+      return fulfillJSON(route, modelMetrics);
     }
     if (url.pathname === "/api/v1/odd/labelsets") {
       return fulfillJSON(route, options.labelsets ?? labelsets);
@@ -371,6 +477,19 @@ test("ODD Dashboard exposes weighted composition, structured search, ontology, a
   await expect(page.getByRole("button", { name: "suburban · 0" })).toBeVisible();
   await expect(page.getByText("supported_experimental").first()).toBeVisible();
   await expect(page.getByText("2 / 2 scenes observable")).toBeVisible();
+
+  await page.getByRole("button", { name: "Model metrics" }).click();
+  await expect(
+    page.getByRole("combobox", { name: "Model projection" }),
+  ).toHaveValue("1".repeat(64));
+  await expect(page.getByText("validation only")).toBeVisible();
+  await expect(page.getByText("kitscenes / v2.2")).toBeVisible();
+  await expect(page.getByRole("link", { name: /Run run-42/ })).toHaveAttribute(
+    "href",
+    "/runs/run-42",
+  );
+  await expect(page.getByText("odd.road.context").first()).toBeVisible();
+  await expect(page.getByText("+2.00 m")).toBeVisible();
 
   await page.getByRole("button", { name: "LabelSets" }).click();
   await expect(page.getByText("passed", { exact: true })).toBeVisible();
