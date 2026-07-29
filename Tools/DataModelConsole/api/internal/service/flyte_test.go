@@ -20,7 +20,7 @@ func TestFlyteLaunchPlanExecutionUsesTypedInputs(t *testing.T) {
 					t.Fatalf("launch plan query = %s", r.URL.RawQuery)
 				}
 				_, _ = w.Write([]byte(`{"launchPlans":[{"id":{
-					"resourceType":3,
+					"resourceType":"LAUNCH_PLAN",
 					"project":"auto-e2e",
 					"domain":"development",
 					"name":"odd-dataset-labeler",
@@ -72,7 +72,8 @@ func TestFlyteLaunchPlanExecutionUsesTypedInputs(t *testing.T) {
 
 	spec := createPayload["spec"].(map[string]any)
 	identifier := spec["launchPlan"].(map[string]any)
-	if identifier["name"] != "odd-dataset-labeler" ||
+	if identifier["resourceType"] != "LAUNCH_PLAN" ||
+		identifier["name"] != "odd-dataset-labeler" ||
 		identifier["version"] != "immutable-v5" ||
 		spec["disableAll"] != true {
 		t.Fatalf("execution spec = %#v", spec)
