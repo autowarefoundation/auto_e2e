@@ -152,6 +152,60 @@ def _semantic_output_merkle_root(
     return level[0].hex()
 
 
+def _execution_receipt(
+    semantic_partition_sha256: str,
+    runtime_metrics: dict[str, float | int],
+    *,
+    environment: dict[str, str] | None = None,
+    created_at: str | None = None,
+) -> dict:
+    from datetime import UTC, datetime
+
+    from data_processing.odd_labeling.schema import ExecutionReceipt
+
+    env = os.environ if environment is None else environment
+    try:
+        attempt = int(env.get("FLYTE_ATTEMPT_NUMBER", "0")) + 1
+    except ValueError as error:
+        raise ValueError("Flyte attempt number is invalid") from error
+    execution_id = env.get("FLYTE_INTERNAL_EXECUTION_ID", "local-execution")
+    task_execution_id = env.get("HOSTNAME") or (
+        f"{env.get('FLYTE_INTERNAL_TASK_NAME', 'local-task')}:{attempt}"
+    )
+    timestamp = created_at or datetime.now(UTC).isoformat().replace(
+        "+00:00",
+        "Z",
+    )
+    return ExecutionReceipt(
+        semantic_partition_sha256=semantic_partition_sha256,
+        created_at=timestamp,
+        flyte_execution_id=execution_id,
+        flyte_task_execution_id=task_execution_id,
+        attempt=attempt,
+        runtime_metrics=runtime_metrics,
+    ).to_dict()
+
+
+def _execution_receipt_key(
+    publication_prefix: str,
+    receipt: dict,
+) -> str:
+    _validate_publication_prefix(publication_prefix)
+    semantic_partition_sha256 = str(
+        receipt["semantic_partition_sha256"]
+    )
+    _require_digest(
+        semantic_partition_sha256,
+        "semantic_partition_sha256",
+    )
+    receipt_sha256 = _sha256(_canonical_bytes(receipt))
+    return (
+        f"{publication_prefix}/execution-receipts/"
+        f"semantic-partition={semantic_partition_sha256}/"
+        f"receipt={receipt_sha256}.json"
+    )
+
+
 def _normalized_enabled_sources(enabled_sources: List[str]) -> tuple[str, ...]:
     if not enabled_sources:
         raise ValueError("at least one ODD source must be enabled")
@@ -1114,7 +1168,7 @@ def label_odd_bedrock_map(
 @task(
     container_image=DATA_PREP_IMAGE,
     cache=True,
-    cache_version="odd-fuse-scene-v2",
+    cache_version="odd-fuse-scene-v3",
     requests=Resources(cpu="2", mem="6Gi"),
     limits=Resources(cpu="4", mem="12Gi"),
 )
@@ -1138,6 +1192,9 @@ def fuse_odd_scene(
     trigger_context_s: float,
     refinement_confidence_threshold: float,
 ) -> FlyteFile:
+    import time
+
+    started_at = time.perf_counter()
     from data_processing.odd_labeling.fusion import (
         EvidenceBuildContext,
         build_resolved_scene_labels,
@@ -1271,11 +1328,21 @@ def fuse_odd_scene(
             },
         },
     )
+    record_sha256 = record.semantic_sha256()
     wrapper = {
         "record": record.to_dict(),
-        "record_sha256": record.semantic_sha256(),
+        "record_sha256": record_sha256,
         "shard_name": descriptor.shard_name,
         "partition_id": descriptor.partition_id,
+        "receipt": _execution_receipt(
+            record_sha256,
+            {
+                "wall_seconds": time.perf_counter() - started_at,
+                "evidence_count": len(record.evidence),
+                "observation_count": len(record.observations),
+                "event_count": len(record.events),
+            },
+        ),
     }
     with tempfile.NamedTemporaryFile(
         mode="wb",
@@ -1504,7 +1571,10 @@ def publish_odd_labelset(
         QUALITY_SCHEMA_VERSION,
         build_quality_documents,
     )
-    from data_processing.odd_labeling.schema import DatasetCapabilityManifest
+    from data_processing.odd_labeling.schema import (
+        DatasetCapabilityManifest,
+        ExecutionReceipt,
+    )
     from data_processing.odd_labeling.statistics import (
         STATISTICS_SCHEMA_VERSION,
     )
@@ -1540,6 +1610,15 @@ def publish_odd_labelset(
         record_sha256 = _sha256(_canonical_bytes(wrapper["record"]))
         if record_sha256 != wrapper.get("record_sha256"):
             raise ValueError("ODD scene record digest differs from wrapper")
+        raw_receipt = wrapper.get("receipt")
+        if not isinstance(raw_receipt, dict):
+            raise ValueError("ODD scene wrapper has no execution receipt")
+        receipt = ExecutionReceipt(**raw_receipt)
+        if (
+            receipt.semantic_partition_sha256 != record_sha256
+            or receipt.to_dict() != raw_receipt
+        ):
+            raise ValueError("ODD execution receipt differs from scene record")
         wrappers.append(wrapper)
     wrappers.sort(key=lambda item: item["record"]["scene_uid"])
     records = [item["record"] for item in wrappers]
@@ -1740,6 +1819,44 @@ def publish_odd_labelset(
             "format": "json",
         }
 
+    receipt_partitions = []
+    for wrapper in wrappers:
+        receipt = wrapper["receipt"]
+        receipt_payload = _canonical_bytes(receipt)
+        receipt_key = _execution_receipt_key(
+            publication_prefix,
+            receipt,
+        )
+        _put_immutable(
+            s3,
+            datasets_bucket,
+            receipt_key,
+            receipt_payload,
+        )
+        semantic_partition_sha256 = str(
+            receipt["semantic_partition_sha256"]
+        )
+        receipt_partitions.append(
+            {
+                "scene_uid": wrapper["record"]["scene_uid"],
+                "semantic_partition_sha256": semantic_partition_sha256,
+                "receipt_prefix": (
+                    f"{publication_prefix}/execution-receipts/"
+                    f"semantic-partition={semantic_partition_sha256}/"
+                ),
+            }
+        )
+    publish(
+        "execution_receipt_index",
+        {
+            "schema_version": "odd_execution_receipt_index_v1",
+            "receipt_schema_version": "odd_execution_receipt_v1",
+            "labelset_id": labelset_id,
+            "partition_count": len(receipt_partitions),
+            "partitions": receipt_partitions,
+        },
+        "receipts/index.json",
+    )
     publish(
         "capabilities",
         capability_manifest.to_dict(),
@@ -1871,6 +1988,11 @@ def publish_odd_labelset(
         "publication_scope": validated_publication_scope,
         "expected_scene_count": expected_scene_count,
         "scene_count": len(records),
+        "execution_receipts": {
+            "schema_version": "odd_execution_receipt_index_v1",
+            "artifact": "execution_receipt_index",
+            "partition_count": len(receipt_partitions),
+        },
         "openai_compatible": {
             "provider": road_vlm_provider,
             "model": road_vlm_model,
