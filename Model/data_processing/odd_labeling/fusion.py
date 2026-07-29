@@ -79,6 +79,41 @@ EVENT_CONTEXT_KEYS = {
 }
 
 
+def fusion_config_document() -> dict[str, Any]:
+    return {
+        "schema_version": "odd_fusion_config_v1",
+        "fusion_version": FUSION_VERSION,
+        "status_precedence": [
+            "ambiguous",
+            "not_observable",
+            "unavailable",
+        ],
+        "authoritative_conflict_confidence_multiplier": 0.85,
+        "union_keys": sorted(UNION_KEYS),
+        "event_segmenter": {
+            "version": EVENT_SEGMENTER_VERSION,
+            "join_gap_ns": EVENT_JOIN_GAP_NS,
+            "onset_quantum_ns": EVENT_ONSET_QUANTUM_NS,
+            "phase_edge_max_ns": 1_000_000_000,
+            "phase_edge_duration_fraction": 0.2,
+            "background_values": {
+                key: sorted(values)
+                for key, values in sorted(EVENT_BACKGROUND_VALUES.items())
+            },
+            "primary_priority": list(EVENT_PRIMARY_PRIORITY),
+            "context_keys": sorted(EVENT_CONTEXT_KEYS),
+        },
+        "source_precedence": {
+            key: list(definition.primary_sources)
+            for key, definition in sorted(ONTOLOGY.items())
+        },
+    }
+
+
+def fusion_config_sha256() -> str:
+    return content_sha256(fusion_config_document())
+
+
 @dataclasses.dataclass(frozen=True)
 class EvidenceBuildContext:
     dataset_name: str
