@@ -33,6 +33,13 @@ type Config struct {
 	// also attach a verified principal; viewer-supplied headers are ignored.
 	ExactGeoEnabled      bool
 	ExactGeoRequiredRole string
+	// ODD operations require both an explicit deployment gate and a verified
+	// principal role. Full runs have an additional independent gate.
+	ODDOperationsEnabled      bool
+	ODDOperationsAllowFull    bool
+	ODDOperationsRequiredRole string
+	ODDLaunchPlanName         string
+	ODDLabelerInputsJSON      string
 }
 
 // Load reads configuration from the environment, applying defaults.
@@ -54,6 +61,15 @@ func Load() *Config {
 		ExactGeoRequiredRole: getenv(
 			"EXACT_GEO_REQUIRED_ROLE", "console-exact-geo",
 		),
+		ODDOperationsEnabled:   getenvBool("ODD_OPERATIONS_ENABLED", false),
+		ODDOperationsAllowFull: getenvBool("ODD_OPERATIONS_ALLOW_FULL", false),
+		ODDOperationsRequiredRole: getenv(
+			"ODD_OPERATIONS_REQUIRED_ROLE", "console-odd-operator",
+		),
+		ODDLaunchPlanName: getenv(
+			"ODD_LAUNCH_PLAN_NAME", "odd-dataset-labeler",
+		),
+		ODDLabelerInputsJSON: os.Getenv("ODD_LABELER_INPUTS_JSON"),
 	}
 
 	expiry := getenv("PRESIGN_EXPIRY", "15m")
