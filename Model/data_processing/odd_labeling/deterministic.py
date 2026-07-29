@@ -16,6 +16,19 @@ from .schema import LabelObservation, make_observation
 LABELER_VERSION = "odd_deterministic_v2"
 INTERVAL_NS = 1_000_000_000
 STATIONARY_EPSILON_KPH = 0.5
+MAP_ROUTE_KEYS = (
+    "odd.road.horizontal_geometry",
+    "odd.road.vertical_geometry",
+    "odd.road.junction_type",
+    "odd.road.junction_position",
+    "odd.route.action",
+    "odd.road.lane_count_bin",
+    "odd.road.directionality",
+    "odd.road.lane_type_present",
+    "odd.road.special_structure",
+    "odd.traffic_control.present",
+    "odd.road.junction_control",
+)
 
 
 def _local_xy(path: np.ndarray, origin_lat: float, origin_lon: float) -> np.ndarray:
@@ -323,6 +336,26 @@ def label_map_route(
 ) -> tuple[LabelObservation, ...]:
     navigation_map = evidence.navigation_map
     route = evidence.navigation_route
+    if navigation_map is None or route is None:
+        provenance = {
+            "labeler_version": LABELER_VERSION,
+            "map_available": navigation_map is not None,
+            "route_available": route is not None,
+            "reason": "canonical map or selected route is unavailable",
+        }
+        return tuple(
+            make_observation(
+                scene_uid=evidence.scene_uid,
+                key=key,
+                status="unavailable",
+                confidence=1.0,
+                source="map_route",
+                start_timestamp_ns=evidence.start_timestamp_ns,
+                end_timestamp_ns=evidence.end_timestamp_ns,
+                provenance=provenance,
+            )
+            for key in MAP_ROUTE_KEYS
+        )
     path = evidence.path_latlon_heading_timestamp
     timestamps = path[:, 3].astype(np.int64)
     local_xy = _local_xy(
@@ -351,19 +384,7 @@ def label_map_route(
     observations: list[LabelObservation] = []
 
     if not quality_ok or not route.lane_sequence:
-        for key in (
-            "odd.road.horizontal_geometry",
-            "odd.road.vertical_geometry",
-            "odd.road.junction_type",
-            "odd.road.junction_position",
-            "odd.route.action",
-            "odd.road.lane_count_bin",
-            "odd.road.directionality",
-            "odd.road.lane_type_present",
-            "odd.road.special_structure",
-            "odd.traffic_control.present",
-            "odd.road.junction_control",
-        ):
+        for key in MAP_ROUTE_KEYS:
             observations.append(
                 make_observation(
                     scene_uid=evidence.scene_uid,
