@@ -287,7 +287,7 @@ def _parse_value_definitions(
                 ),
             )
         )
-    return tuple(sorted(values, key=lambda item: item.value))
+    return tuple(values)
 
 
 def _parse_capability_requirements(
