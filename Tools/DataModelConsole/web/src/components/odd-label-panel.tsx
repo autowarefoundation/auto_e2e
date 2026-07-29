@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useMemo, useState } from "react";
 import { AlertTriangle, Database, X } from "lucide-react";
 
@@ -24,6 +25,99 @@ const CATEGORIES = [
 ] as const;
 
 type Category = (typeof CATEGORIES)[number]["id"];
+
+interface WholeSceneGroup {
+  identity: string;
+  key: string;
+  status: ODDStatus;
+  values: string[];
+  source: string;
+  cameraID?: string | null;
+  actorTrackUID?: string | null;
+  intervalCount: number;
+  durationNS: number;
+  confidence: number;
+  first: ODDObservation;
+}
+
+function formatDurationNS(value: number): string {
+  const seconds = Math.max(0, value) / 1e9;
+  if (seconds >= 3600) return `${(seconds / 3600).toFixed(1)} h`;
+  if (seconds >= 60) return `${(seconds / 60).toFixed(1)} min`;
+  return `${seconds.toFixed(seconds < 10 ? 1 : 0)} s`;
+}
+
+function intervalUnionDuration(
+  observations: ODDObservation[],
+): number {
+  const intervals = observations
+    .map(
+      (observation) =>
+        [
+          observation.start_timestamp_ns,
+          observation.end_timestamp_ns,
+        ] as const,
+    )
+    .sort((left, right) => left[0] - right[0] || left[1] - right[1]);
+  let duration = 0;
+  let start = -1;
+  let end = -1;
+  for (const [nextStart, nextEnd] of intervals) {
+    if (nextStart > end) {
+      if (end > start) duration += end - start;
+      start = nextStart;
+      end = nextEnd;
+    } else {
+      end = Math.max(end, nextEnd);
+    }
+  }
+  if (end > start) duration += end - start;
+  return duration;
+}
+
+function groupWholeScene(
+  observations: ODDObservation[],
+): WholeSceneGroup[] {
+  const grouped = new Map<string, ODDObservation[]>();
+  for (const observation of observations) {
+    const identity = JSON.stringify([
+      observation.key,
+      observation.status,
+      observation.values,
+      observation.source,
+      observation.camera_id ?? "",
+      observation.actor_track_uid ?? "",
+    ]);
+    grouped.set(identity, [...(grouped.get(identity) ?? []), observation]);
+  }
+  return [...grouped.entries()]
+    .map(([identity, rows]) => {
+      const first = rows.reduce((earliest, row) =>
+        row.start_timestamp_ns < earliest.start_timestamp_ns ? row : earliest,
+      );
+      return {
+        identity,
+        key: first.key,
+        status: first.status,
+        values: first.values,
+        source: first.source,
+        cameraID: first.camera_id,
+        actorTrackUID: first.actor_track_uid,
+        intervalCount: rows.length,
+        durationNS: intervalUnionDuration(rows),
+        confidence: Math.max(...rows.map((row) => row.confidence)),
+        first,
+      };
+    })
+    .sort(
+      (left, right) =>
+        left.key.localeCompare(right.key) ||
+        observationValue(left.first).localeCompare(
+          observationValue(right.first),
+        ) ||
+        left.source.localeCompare(right.source),
+    );
+}
 
 function observationValue(observation: ODDObservation): string {
   return observation.status === "valid"
@@ -75,6 +169,17 @@ function EvidenceRows({
                   ? `${item.provenance.model_provider} / ${item.provenance.model_name} / ${item.provenance.model_revision}`
                   : item.provenance.labeler_version}
               </p>
+              <p className="mt-1 break-words font-mono text-[9px] text-slate-700">
+                {item.provenance.labeler_version}
+                {item.provenance.prompt_sha256
+                  ? ` · prompt ${item.provenance.prompt_sha256}`
+                  : ""}
+              </p>
+              {typeof item.provenance.details.reason === "string" && (
+                <p className="mt-1 text-[10px] text-slate-500">
+                  {item.provenance.details.reason}
+                </p>
+              )}
               {item.measurements.length > 0 && (
                 <p className="mt-1 text-[10px] text-slate-600">
                   {item.measurements
@@ -248,6 +353,17 @@ export function ODDLabelPanel({
         playhead < item.end_timestamp_ns,
     );
   }, [categoryObservations, mode, playhead]);
+  const wholeSceneGroups = useMemo(
+    () => groupWholeScene(categoryObservations),
+    [categoryObservations],
+  );
+  const categoryEvents = useMemo(
+    () =>
+      category === "event"
+        ? (result.data?.events ?? [])
+        : [],
+    [category, result.data],
+  );
   const routeAction = result.data?.observations.find(
     (item) =>
       item.key === "odd.route.action" &&
@@ -341,6 +457,135 @@ export function ODDLabelPanel({
           </button>
         ))}
       </div>
+
+      {mode === "whole" && wholeSceneGroups.length > 0 && (
+        <section aria-label="Whole scene label summary">
+          <p className="text-[9px] uppercase text-slate-600">
+            Whole scene presence and coverage
+          </p>
+          <div className="mt-2 divide-y divide-slate-900">
+            {wholeSceneGroups.map((group) => (
+              <div
+                key={group.identity}
+                className="grid gap-2 py-2 sm:grid-cols-[minmax(0,1fr)_auto]"
+              >
+                <div className="min-w-0">
+                  <Link
+                    href={`/odd?dataset=${encodeURIComponent(dataset)}&version=${encodeURIComponent(version)}&tab=ontology&key=${encodeURIComponent(group.key)}`}
+                    className="break-words font-mono text-[10px] text-slate-400 hover:text-cyan-300"
+                  >
+                    {group.key}
+                  </Link>
+                  <p className="mt-1 text-[10px] text-slate-600">
+                    {group.source}
+                    {group.cameraID ? ` · ${group.cameraID}` : ""}
+                    {group.actorTrackUID
+                      ? ` · ${group.actorTrackUID}`
+                      : ""}
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => selectObservation(group.first)}
+                  className="flex flex-wrap items-center justify-end gap-2 text-right"
+                >
+                  <span
+                    className={`max-w-full break-words border px-2 py-1 font-mono text-[10px] ${STATUS_STYLE[group.status]}`}
+                  >
+                    {group.status === "valid"
+                      ? observationValue(group.first)
+                      : `status: ${group.status}`}
+                  </span>
+                  <span className="font-mono text-[10px] text-slate-600">
+                    {formatDurationNS(group.durationNS)} ·{" "}
+                    {group.intervalCount.toLocaleString()} intervals ·{" "}
+                    {group.confidence.toFixed(2)}
+                  </span>
+                </button>
+              </div>
+            ))}
+          </div>
+        </section>
+      )}
+
+      {mode === "whole" &&
+        category === "event" &&
+        categoryEvents.length > 0 &&
+        result.data && (
+          <section aria-label="Event phase timeline">
+            <p className="text-[9px] uppercase text-slate-600">
+              Event onset, active, and resolution
+            </p>
+            <div className="mt-2 space-y-3">
+              {categoryEvents.map((event) => {
+                const sceneDuration = Math.max(
+                  1,
+                  result.data!.end_timestamp_ns -
+                    result.data!.start_timestamp_ns,
+                );
+                const eventObservation = categoryObservations.find(
+                  (observation) =>
+                    observation.event_uid === event.event_uid,
+                );
+                return (
+                  <button
+                    key={event.event_uid}
+                    type="button"
+                    aria-label={`Event phases ${event.event_uid}`}
+                    onClick={() => {
+                      if (eventObservation) {
+                        selectObservation(eventObservation);
+                      }
+                    }}
+                    className="block w-full text-left"
+                  >
+                    <span className="block break-words font-mono text-[10px] text-slate-500">
+                      {event.primary_event_key}
+                      {event.actor_track_uids.length > 0
+                        ? ` · ${event.actor_track_uids.join(", ")}`
+                        : ""}
+                    </span>
+                    <span className="relative mt-1 block h-5 bg-slate-900">
+                      {event.phases.map((phase) => {
+                        const left =
+                          ((phase.start_timestamp_ns -
+                            result.data!.start_timestamp_ns) /
+                            sceneDuration) *
+                          100;
+                        const width =
+                          ((phase.end_timestamp_ns -
+                            phase.start_timestamp_ns) /
+                            sceneDuration) *
+                          100;
+                        const style =
+                          phase.phase === "onset"
+                            ? "bg-amber-900 text-amber-300"
+                            : phase.phase === "resolution"
+                              ? "bg-emerald-900 text-emerald-300"
+                              : "bg-cyan-900 text-cyan-300";
+                        return (
+                          <span
+                            key={`${event.event_uid}-${phase.phase}`}
+                            className={`absolute top-0 grid h-full place-items-center overflow-hidden font-mono text-[8px] ${style}`}
+                            style={{
+                              left: `${Math.max(0, left)}%`,
+                              width: `${Math.max(
+                                1,
+                                Math.min(100 - left, width),
+                              )}%`,
+                            }}
+                          >
+                            {phase.phase}
+                          </span>
+                        );
+                      })}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+          </section>
+        )}
 
       {result.loading ? (
         <p className="text-xs text-slate-500">Loading ODD labels...</p>
