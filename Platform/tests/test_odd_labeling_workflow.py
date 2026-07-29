@@ -6,6 +6,8 @@ import pytest
 
 from Platform.pipelines.odd_labeling_workflow import (
     ODD_LABELER_VERSION,
+    _execution_receipt,
+    _execution_receipt_key,
     _publication_scope,
     _put_immutable,
     _scene_summary,
@@ -302,6 +304,41 @@ def test_semantic_output_merkle_root_covers_all_canonical_outputs() -> None:
         statistics,
         quality,
     ) != first
+
+
+def test_execution_receipt_is_separate_and_content_addressed() -> None:
+    semantic_partition_sha256 = "a" * 64
+    receipt = _execution_receipt(
+        semantic_partition_sha256,
+        {"wall_seconds": 12.5, "observation_count": 42},
+        environment={
+            "FLYTE_INTERNAL_EXECUTION_ID": "odd-full-run",
+            "FLYTE_INTERNAL_TASK_NAME": "fuse_odd_scene",
+            "FLYTE_ATTEMPT_NUMBER": "0",
+            "HOSTNAME": "odd-full-run-n2-0",
+        },
+        created_at="2026-07-29T00:00:00Z",
+    )
+
+    assert receipt == {
+        "receipt_schema_version": "odd_execution_receipt_v1",
+        "semantic_partition_sha256": semantic_partition_sha256,
+        "created_at": "2026-07-29T00:00:00Z",
+        "flyte_execution_id": "odd-full-run",
+        "flyte_task_execution_id": "odd-full-run-n2-0",
+        "attempt": 1,
+        "runtime_metrics": {
+            "observation_count": 42,
+            "wall_seconds": 12.5,
+        },
+    }
+    key = _execution_receipt_key("kitscenes/v3.0/odd", receipt)
+    assert key.startswith(
+        "kitscenes/v3.0/odd/execution-receipts/"
+        f"semantic-partition={semantic_partition_sha256}/receipt="
+    )
+    assert key.endswith(".json")
+    assert "odd-full-run" not in key
 
 
 def test_workflow_interface_does_not_expose_endpoint_url() -> None:
