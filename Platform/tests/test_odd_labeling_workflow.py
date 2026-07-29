@@ -9,7 +9,9 @@ from Platform.pipelines.odd_labeling_workflow import (
     ODD_LABELER_VERSION,
     _execution_receipt,
     _execution_receipt_key,
+    _provider_exchange_key,
     _provider_report,
+    _provider_report_key,
     _publication_scope,
     _put_immutable,
     _scene_summary,
@@ -379,6 +381,23 @@ def test_provider_report_aggregates_requests_without_raw_responses() -> None:
             "error_type": "TimeoutError",
             "schema_version": "odd_provider_exchange_v1",
         },
+        {
+            "backend": "ORV",
+            "provider": "openai_compatible",
+            "model": "cosmos",
+            "model_revision": "revision-1",
+            "request_sha256": "c" * 64,
+            "response_sha256": "d" * 64,
+            "status": "succeeded",
+            "attempt": 2,
+            "latency_ms": 200.0,
+            "input_image_count": 6,
+            "request_metadata": {"bundle": "road"},
+            "raw_response": {"result": "overcast"},
+            "usage": {"input_tokens": 100, "output_tokens": 30},
+            "error_type": None,
+            "schema_version": "odd_provider_exchange_v1",
+        },
     ]
 
     report = _provider_report(exchanges)
@@ -386,11 +405,11 @@ def test_provider_report_aggregates_requests_without_raw_responses() -> None:
     assert report["schema_version"] == "odd_provider_report_v1"
     assert "raw_response" not in json.dumps(report)
     assert report["totals"] == {
-        "attempt_count": 2,
+        "attempt_count": 3,
         "failure_count": 1,
-        "input_image_count": 12,
+        "input_image_count": 18,
         "request_count": 2,
-        "successful_count": 1,
+        "successful_count": 2,
     }
     backend = report["backends"][0]
     assert backend["backend"] == "ORV"
@@ -399,17 +418,73 @@ def test_provider_report_aggregates_requests_without_raw_responses() -> None:
         "mean": 200.0,
         "p50": 200.0,
         "p95": 290.0,
-        "total": 400.0,
+        "total": 600.0,
     }
     assert backend["usage"] == {
-        "input_tokens": 100,
-        "output_tokens": 20,
+        "input_tokens": 200,
+        "output_tokens": 50,
     }
     assert backend["estimated_cost_usd"] is None
     assert (
         backend["cost_estimation_status"]
         == "unavailable_without_frozen_pricing"
     )
+
+
+def test_provider_audit_keys_are_backend_separated_and_content_addressed() -> None:
+    exchange = {
+        "backend": "ORV",
+        "provider": "openai_compatible",
+        "model": "cosmos",
+        "model_revision": "revision-1",
+        "request_sha256": "a" * 64,
+        "response_sha256": "b" * 64,
+        "status": "succeeded",
+        "attempt": 1,
+        "latency_ms": 100.0,
+        "input_image_count": 6,
+        "request_metadata": {"bundle": "road"},
+        "raw_response": {"result": "clear"},
+        "usage": {},
+        "error_type": None,
+        "schema_version": "odd_provider_exchange_v1",
+    }
+    key = _provider_exchange_key(
+        "kitscenes/v3.0/odd",
+        "oddls-test",
+        exchange,
+    )
+
+    assert "/provider-artifacts/" in key
+    assert "/backend=ORV/" in key
+    assert f"/request={'a' * 64}/" in key
+    assert key.endswith(".json")
+    changed = {**exchange, "latency_ms": 101.0}
+    assert (
+        _provider_exchange_key(
+            "kitscenes/v3.0/odd",
+            "oddls-test",
+            changed,
+        )
+        != key
+    )
+
+    report = {
+        **_provider_report([exchange]),
+        "labelset_id": "oddls-test",
+        "dataset_name": "kitscenes",
+        "dataset_version": "v3.0",
+        "exchange_artifacts": [{"key": key}],
+    }
+    report_key = _provider_report_key(
+        "kitscenes/v3.0/odd",
+        "oddls-test",
+        report,
+    )
+    assert "/provider-reports/labelset=oddls-test/" in report_key
+    assert report_key.endswith(".json")
+    assert "raw_response" not in json.dumps(report)
+    assert _provider_report([])["backends"] == []
 
 
 def test_workflow_interface_does_not_expose_endpoint_url() -> None:
