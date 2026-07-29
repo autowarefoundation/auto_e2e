@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from Platform.pipelines.odd_labeling_workflow import (
+    ODD_LABELER_VERSION,
     _publication_scope,
     _put_immutable,
     _scene_summary,
@@ -230,7 +233,12 @@ def test_workflow_interface_does_not_expose_endpoint_url() -> None:
         "openai_concurrency",
         "bedrock_concurrency",
         "publication_scope",
+        "camera_anchor_interval_s",
+        "maximum_camera_anchors",
+        "trigger_context_s",
+        "refinement_confidence_threshold",
     }.issubset(wf_generate_odd_labelset.python_interface.inputs)
+    assert ODD_LABELER_VERSION == "odd_dataset_labeler_v5"
 
 
 def test_source_labelers_have_independent_semantic_interfaces() -> None:
@@ -254,8 +262,15 @@ def test_source_labelers_have_independent_semantic_interfaces() -> None:
         label_odd_image_quality.python_interface.inputs
     )
     assert {
+        "map_route_file",
+        "kinematics_file",
+        "image_quality_file",
         "openai_model",
         "openai_model_revision",
+        "camera_anchor_interval_s",
+        "maximum_camera_anchors",
+        "trigger_context_s",
+        "refinement_confidence_threshold",
     }.issubset(label_odd_visual.python_interface.inputs)
     assert "bedrock_map_model_id" not in (
         label_odd_visual.python_interface.inputs
@@ -277,9 +292,30 @@ def test_source_labelers_have_independent_semantic_interfaces() -> None:
         "bedrock_map_file",
         "labeler_image_digest",
         "labeler_source_revision",
+        "camera_anchor_interval_s",
+        "maximum_camera_anchors",
+        "trigger_context_s",
+        "refinement_confidence_threshold",
     }.issubset(fuse_odd_scene.python_interface.inputs)
     assert {
         "bedrock_map_model_id",
         "bedrock_map_model_revision",
         "capability_manifest_json",
+        "camera_anchor_interval_s",
+        "maximum_camera_anchors",
+        "trigger_context_s",
+        "refinement_confidence_threshold",
     }.issubset(publish_odd_labelset.python_interface.inputs)
+
+
+def test_launcher_uses_full_rate_visual_sampling_contract() -> None:
+    launcher = Path("Platform/buildspec-launch-odd-labeling.yml").read_text(
+        encoding="utf-8"
+    )
+
+    assert 'CAMERA_ANCHOR_INTERVAL_S: "1.0"' in launcher
+    assert 'MAXIMUM_CAMERA_ANCHORS: "128"' in launcher
+    assert 'TRIGGER_CONTEXT_S: "1.0"' in launcher
+    assert 'REFINEMENT_CONFIDENCE_THRESHOLD: "0.65"' in launcher
+    assert '"trigger_context_s"' in launcher
+    assert '"refinement_confidence_threshold"' in launcher
