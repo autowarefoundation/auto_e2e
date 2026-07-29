@@ -7,6 +7,7 @@ import { useEffect, useMemo, useState } from "react";
 import { ErrorState } from "@/components/error-state";
 import { Skeleton } from "@/components/ui/skeleton";
 import type {
+  ExperimentRecord,
   ODDMetricName,
   ODDMetricProjection,
   ODDMetricProjectionsResponse,
@@ -47,6 +48,7 @@ interface ODDModelMetricsProps {
   loading: boolean;
   error: Error | null;
   onRetry: () => void;
+  experiments?: ExperimentRecord[];
 }
 
 function shortDigest(value: string): string {
@@ -81,6 +83,7 @@ export function ODDModelMetrics({
   loading,
   error,
   onRetry,
+  experiments = [],
 }: ODDModelMetricsProps) {
   const [projectionID, setProjectionID] = useState("");
   const [deltaMetric, setDeltaMetric] =
@@ -133,6 +136,15 @@ export function ODDModelMetrics({
           left.key.localeCompare(right.key),
       );
   }, [deltaMetric, projection, query, status]);
+  const experiment = useMemo(
+    () =>
+      projection
+        ? experiments.find(
+            (item) => item.run_id === projection.model.run_id,
+          )
+        : undefined,
+    [experiments, projection],
+  );
 
   if (loading) return <Skeleton className="h-[28rem] w-full" />;
   if (error) return <ErrorState error={error} onRetry={onRetry} />;
@@ -171,13 +183,37 @@ export function ODDModelMetrics({
           <span className="border border-cyan-900 px-2 py-1 font-mono text-cyan-300">
             validation only
           </span>
-          <Link
-            href={`/runs/${encodeURIComponent(projection.model.run_id)}`}
-            className="flex items-center gap-1.5 border border-slate-700 px-2 py-1 font-mono text-slate-300 hover:border-cyan-700 hover:text-cyan-300"
-          >
-            Run {shortDigest(projection.model.run_id)}
-            <ExternalLink className="size-3" />
-          </Link>
+          {experiment?.primary_execution_url && (
+            <a
+              href={experiment.primary_execution_url}
+              target="_blank"
+              rel="noreferrer"
+              className="flex items-center gap-1.5 border border-slate-700 px-2 py-1 font-mono text-slate-300 hover:border-cyan-700 hover:text-cyan-300"
+            >
+              Flyte {shortDigest(experiment.primary_execution_id ?? "")}
+              <ExternalLink className="size-3" />
+            </a>
+          )}
+          {experiment?.mlflow_url && (
+            <a
+              href={experiment.mlflow_url}
+              target="_blank"
+              rel="noreferrer"
+              className="flex items-center gap-1.5 border border-slate-700 px-2 py-1 font-mono text-slate-300 hover:border-cyan-700 hover:text-cyan-300"
+            >
+              MLflow {shortDigest(projection.model.run_id)}
+              <ExternalLink className="size-3" />
+            </a>
+          )}
+          {!experiment?.primary_execution_url && !experiment?.mlflow_url && (
+            <Link
+              href="/experiments"
+              className="flex items-center gap-1.5 border border-slate-700 px-2 py-1 font-mono text-slate-300 hover:border-cyan-700 hover:text-cyan-300"
+            >
+              Experiment {shortDigest(projection.model.run_id)}
+              <ExternalLink className="size-3" />
+            </Link>
+          )}
         </div>
       </section>
 
