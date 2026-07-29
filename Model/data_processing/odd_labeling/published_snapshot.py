@@ -6,6 +6,8 @@ import dataclasses
 import hashlib
 import json
 import re
+from bisect import bisect_left
+from collections.abc import Iterable
 from typing import Any, Protocol
 from urllib.parse import urlparse
 
@@ -175,9 +177,17 @@ class CanonicalSceneEvidence:
         *,
         interval_s: float = 2.0,
         maximum_anchors: int = 32,
+        trigger_timestamps_ns: Iterable[int] = (),
+        trigger_context_s: float = 1.0,
     ) -> tuple[tuple[CameraObject, ...], ...]:
-        if interval_s <= 0.0 or maximum_anchors <= 0:
-            raise ValueError("camera anchor interval and cap must be positive")
+        if (
+            interval_s <= 0.0
+            or maximum_anchors <= 0
+            or trigger_context_s < 0.0
+        ):
+            raise ValueError(
+                "camera anchor interval/cap must be positive and context non-negative"
+            )
         by_frame: dict[int, list[CameraObject]] = {}
         for camera in self.camera_objects:
             by_frame.setdefault(camera.frame_index, []).append(camera)
@@ -190,19 +200,84 @@ class CanonicalSceneEvidence:
             raise ValueError("scene has no complete multi-camera anchor")
 
         interval_ns = max(1, int(interval_s * 1_000_000_000))
-        selected: list[tuple[CameraObject, ...]] = []
+        regular_indexes: list[int] = []
         next_timestamp = complete[0][1][0].timestamp_ns
-        for _, cameras in complete:
+        for index, (_, cameras) in enumerate(complete):
             timestamp = cameras[0].timestamp_ns
-            if timestamp < next_timestamp and selected:
+            if timestamp < next_timestamp and regular_indexes:
                 continue
-            selected.append(cameras)
+            regular_indexes.append(index)
             next_timestamp = timestamp + interval_ns
-            if len(selected) >= maximum_anchors:
-                break
-        if selected[-1] != complete[-1][1] and len(selected) < maximum_anchors:
-            selected.append(complete[-1][1])
-        return tuple(selected)
+        regular_indexes.append(len(complete) - 1)
+
+        timestamps = tuple(cameras[0].timestamp_ns for _, cameras in complete)
+        trigger_context_ns = int(trigger_context_s * 1_000_000_000)
+        trigger_offsets = (
+            (0,)
+            if trigger_context_ns == 0
+            else (-trigger_context_ns, 0, trigger_context_ns)
+        )
+        trigger_indexes: set[int] = set()
+        for raw_timestamp in sorted(set(trigger_timestamps_ns)):
+            timestamp = int(raw_timestamp)
+            if timestamp < 0:
+                raise ValueError("camera trigger timestamps must be non-negative")
+            for offset in trigger_offsets:
+                target = timestamp + offset
+                insertion = bisect_left(timestamps, target)
+                candidates = {
+                    max(0, min(len(timestamps) - 1, insertion)),
+                    max(0, min(len(timestamps) - 1, insertion - 1)),
+                }
+                trigger_indexes.add(
+                    min(
+                        candidates,
+                        key=lambda index: (
+                            abs(timestamps[index] - target),
+                            timestamps[index],
+                        ),
+                    )
+                )
+
+        required = trigger_indexes | {0, len(complete) - 1}
+        selected_indexes = required | set(regular_indexes)
+        if len(selected_indexes) > maximum_anchors:
+            selected_indexes = _bounded_anchor_indexes(
+                required=required,
+                preferred=set(regular_indexes),
+                maximum_anchors=maximum_anchors,
+            )
+        return tuple(complete[index][1] for index in sorted(selected_indexes))
+
+
+def _spread_indexes(indexes: list[int], count: int) -> set[int]:
+    if count <= 0 or not indexes:
+        return set()
+    if len(indexes) <= count:
+        return set(indexes)
+    if count == 1:
+        return {indexes[len(indexes) // 2]}
+    return {
+        indexes[round(position * (len(indexes) - 1) / (count - 1))]
+        for position in range(count)
+    }
+
+
+def _bounded_anchor_indexes(
+    *,
+    required: set[int],
+    preferred: set[int],
+    maximum_anchors: int,
+) -> set[int]:
+    required_sorted = sorted(required)
+    if len(required_sorted) >= maximum_anchors:
+        return _spread_indexes(required_sorted, maximum_anchors)
+    selected = set(required_sorted)
+    remaining = maximum_anchors - len(selected)
+    selected.update(
+        _spread_indexes(sorted(preferred - selected), remaining)
+    )
+    return selected
 
 
 def _read_object(
