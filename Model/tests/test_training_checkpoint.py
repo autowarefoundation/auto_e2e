@@ -13,6 +13,7 @@ from botocore.exceptions import ClientError
 from evaluation.checkpoint_selection import SELECTOR_POLICY_VERSION
 from Platform.pipelines.training_checkpoint import (
     CHECKPOINT_SCHEMA_VERSION,
+    best_pointer_key,
     capture_rng_state,
     checkpoint_key,
     mark_best_pointer_transition_pending,
@@ -111,6 +112,17 @@ def test_checkpoint_key_is_epoch_immutable():
         checkpoint_key("run-1", 0)
     with pytest.raises(ValueError, match="run id"):
         checkpoint_key("bad/run", 1)
+
+
+def test_best_pointer_keys_are_independent():
+    assert best_pointer_key("run-1") == (
+        "imitation-learning/run-1/best.json"
+    )
+    assert best_pointer_key("run-1", role="best_trajectory") == (
+        "imitation-learning/run-1/best-trajectory.json"
+    )
+    with pytest.raises(ValueError, match="role"):
+        best_pointer_key("run-1", role="final")
 
 
 def test_metric_ranking_uses_ade_then_fde():
@@ -327,8 +339,36 @@ def test_best_pointer_is_versioned_json():
     assert uri == "s3://checkpoints/imitation-learning/run-1/best.json"
     assert len(s3.versions) == 2
     latest = json.loads(s3.versions[-1][1]["Body"])
+    assert latest["checkpoint_role"] == "best"
     assert latest["epoch"] == 3
     assert latest["checkpoint_sha256"] == "b" * 64
+
+
+def test_trajectory_best_pointer_is_separate():
+    s3 = _FakeS3()
+
+    uri = update_best_pointer(
+        s3,
+        bucket="checkpoints",
+        run_id="run-1",
+        role="best_trajectory",
+        epoch=2,
+        checkpoint_uri="s3://checkpoints/run/epoch-0002.pt",
+        checkpoint_sha256="a" * 64,
+        ade=1.25,
+        fde=2.5,
+    )
+
+    assert uri == (
+        "s3://checkpoints/imitation-learning/run-1/"
+        "best-trajectory.json"
+    )
+    payload = json.loads(s3.versions[-1][1]["Body"])
+    assert payload["checkpoint_role"] == "best_trajectory"
+    assert (
+        "checkpoints",
+        "imitation-learning/run-1/best.json",
+    ) not in s3.objects
 
 
 def test_best_pointer_records_composite_selection_policy():
