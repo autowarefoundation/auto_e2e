@@ -202,7 +202,7 @@ def test_quality_documents_validate_and_keep_certification_pending() -> None:
     assert coverage["structural_validation"]["status"] == "passed"
     assert coverage["structural_validation"]["evidence_count"] == 2
     assert all(
-        row["support_state"] == "supported_observed"
+        row["support_state"] == "supported_experimental"
         for row in coverage["keys"]
     )
     audit = documents["audit_manifest"]
@@ -238,6 +238,93 @@ def test_audit_selection_is_independent_of_scene_order() -> None:
     )
 
     assert first == second
+
+
+def test_coverage_uses_dataset_support_contract_states() -> None:
+    statistics = _statistics()
+    statistics["keys"].extend(
+        [
+            {
+                "key": "odd.unsupported",
+                "namespace": "odd",
+                "eligible_duration_ns": 300,
+                "valid_duration_ns": 0,
+                "eligible_distance_m": 12.5,
+                "valid_distance_m": 0,
+                "attempted_count": 1,
+                "successful_count": 0,
+                "conflict_count": 0,
+                "quality_tier": "experimental",
+                "status_scene_counts": {
+                    "valid": 0,
+                    "unavailable": 1,
+                    "not_observable": 0,
+                    "ambiguous": 0,
+                },
+                "status_duration_ns": {
+                    "valid": 0,
+                    "unavailable": 300,
+                    "not_observable": 0,
+                    "ambiguous": 0,
+                },
+            },
+            {
+                "key": "odd.disabled",
+                "namespace": "odd",
+                "eligible_duration_ns": 300,
+                "valid_duration_ns": 0,
+                "eligible_distance_m": 12.5,
+                "valid_distance_m": 0,
+                "attempted_count": 0,
+                "successful_count": 0,
+                "conflict_count": 0,
+                "quality_tier": "experimental",
+                "status_scene_counts": {
+                    "valid": 0,
+                    "unavailable": 0,
+                    "not_observable": 0,
+                    "ambiguous": 0,
+                },
+                "status_duration_ns": {
+                    "valid": 0,
+                    "unavailable": 0,
+                    "not_observable": 0,
+                    "ambiguous": 0,
+                },
+            },
+        ]
+    )
+    ontology = _ontology()
+    ontology["labels"].extend(
+        [
+            {
+                "key": "odd.unsupported",
+                "namespace": "odd",
+                "cardinality": "single",
+                "values": [{"value": "value"}],
+            },
+            {
+                "key": "odd.disabled",
+                "namespace": "odd",
+                "cardinality": "single",
+                "values": [{"value": "value"}],
+            },
+        ]
+    )
+
+    coverage = build_quality_documents(
+        [_record()],
+        statistics,
+        ontology,
+        labelset_id="oddls-test",
+    )["coverage"]
+    support = {
+        row["key"]: row["support_state"] for row in coverage["keys"]
+    }
+
+    assert support["odd.road.context"] == "supported_experimental"
+    assert support["odd.unsupported"] == "unsupported_missing_source"
+    assert support["odd.disabled"] == "disabled_pending_audit"
 
 
 def test_structural_validation_rejects_invalid_label_and_reference() -> None:
