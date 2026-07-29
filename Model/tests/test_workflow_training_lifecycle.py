@@ -361,6 +361,28 @@ def test_training_wires_dataset_specific_trajectory_policy():
     assert "refusing to train on one shard" in offline_rl_source
 
 
+def test_training_wires_planner_mode_to_model_and_checkpoint():
+    """Before this: train_il/wf_train_il had no planner_mode parameter at
+    all, so every run silently trained AutoE2E's own default ("bezier")
+    regardless of intent -- compute_planner_loss (#115/#124) makes
+    FlowMatching correctly trainable for the first time, but that's moot
+    if nothing can actually select it for a real training run. Checks
+    both that AutoE2E(...) receives it AND that it's saved into
+    checkpoint_config -- without the latter, evaluate_kitscenes_benchmark_
+    checkpoint's _model_kwargs would silently reconstruct the wrong
+    architecture from a saved FlowMatching checkpoint."""
+    training_source = inspect.getsource(workflows.train_il.task_function)
+    assert "planner_mode: str = \"bezier\"" in training_source
+    assert "planner_kwargs: Optional[dict] = None" in training_source
+    assert "planner_mode=planner_mode, planner_kwargs=planner_kwargs" in training_source
+    assert '"planner_mode": planner_mode' in training_source
+    assert '"planner_kwargs": planner_kwargs' in training_source
+
+    wf_source = inspect.getsource(workflows.wf_train_il._workflow_function)
+    assert "planner_mode: str = \"bezier\"" in wf_source
+    assert "planner_mode=planner_mode, planner_kwargs=planner_kwargs" in wf_source
+
+
 def test_training_seed_controls_comparable_navigation_runs():
     training_function = workflows.train_il.task_function
     training_source = inspect.getsource(training_function)
