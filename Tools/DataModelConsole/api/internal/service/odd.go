@@ -82,7 +82,7 @@ type ODDManifest struct {
 	PublicationScope      string                 `json:"publication_scope"`
 	ExpectedSceneCount    int                    `json:"expected_scene_count"`
 	SceneCount            int                    `json:"scene_count"`
-	OpenAICompatible      map[string]string      `json:"openai_compatible"`
+	OpenAICompatible      map[string]any         `json:"openai_compatible"`
 	Quality               ODDQualityState        `json:"quality"`
 	Artifacts             map[string]ODDArtifact `json:"artifacts"`
 }
