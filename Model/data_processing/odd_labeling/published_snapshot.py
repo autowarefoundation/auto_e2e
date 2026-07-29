@@ -544,7 +544,7 @@ def describe_published_capabilities(
         dataset_manifest_sha256=dataset_manifest_sha256,
         source_revision=source_revision,
         adapter_name="published_snapshot",
-        adapter_version="published_snapshot_v1",
+        adapter_version="published_snapshot_v2",
         scene_inventory_sha256=scene_inventory_sha256,
         canonical_clock="scene_monotonic_ns",
         absolute_time_available=False,
@@ -554,6 +554,7 @@ def describe_published_capabilities(
                 camera_id=role,
                 canonical_role=role,
                 channel=camera_channel,
+                frame_inventory_mode="sampled_evidence",
             )
             for role in roles
         ),
@@ -569,6 +570,10 @@ def describe_published_capabilities(
         coordinate_frames=("wgs84", "enu", "ego_flu"),
         known_limitations=(
             "absolute civil time is unavailable",
+            (
+                "published camera objects are sampled model-input windows, "
+                "not an authoritative capture-frame inventory"
+            ),
             "object tracks, lidar, and CAN are not published",
             "pose covariance is unavailable",
         ),
