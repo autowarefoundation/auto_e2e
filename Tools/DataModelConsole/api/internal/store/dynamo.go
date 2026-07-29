@@ -67,6 +67,33 @@ type overlaySetItem struct {
 	ManifestKey           string `dynamodbav:"manifest_key"`
 }
 
+type oddMetricProjectionItem struct {
+	Status                          string `dynamodbav:"status"`
+	ProjectionID                    string `dynamodbav:"projection_id"`
+	ProjectionPolicyVersion         string `dynamodbav:"projection_policy_version"`
+	MetricPolicyVersion             string `dynamodbav:"metric_policy_version"`
+	LabelSetID                      string `dynamodbav:"labelset_id"`
+	LabelSetManifestSHA256          string `dynamodbav:"labelset_manifest_sha256"`
+	ModelArtifactID                 string `dynamodbav:"model_artifact_id"`
+	RegisteredModelName             string `dynamodbav:"registered_model_name"`
+	ModelVersion                    int    `dynamodbav:"model_version"`
+	RunID                           string `dynamodbav:"run_id"`
+	EvaluationDataset               string `dynamodbav:"evaluation_dataset"`
+	EvaluationVersion               string `dynamodbav:"evaluation_version"`
+	EvaluationDatasetManifestSHA256 string `dynamodbav:"evaluation_dataset_manifest_sha256"`
+	ValidationSampleUIDDigest       string `dynamodbav:"validation_sample_uid_digest"`
+	SampleCount                     int    `dynamodbav:"sample_count"`
+	SceneCount                      int    `dynamodbav:"scene_count"`
+	ManifestKey                     string `dynamodbav:"manifest_key"`
+	ManifestSHA256                  string `dynamodbav:"manifest_sha256"`
+	ManifestByteSize                int64  `dynamodbav:"manifest_byte_size"`
+	ReportKey                       string `dynamodbav:"report_key"`
+	ReportSHA256                    string `dynamodbav:"report_sha256"`
+	ReportByteSize                  int64  `dynamodbav:"report_byte_size"`
+	ArtifactsBucket                 string `dynamodbav:"artifacts_bucket"`
+	SK                              string `dynamodbav:"sk"`
+}
+
 // OverlayPointer is the validated S3 locator for one canonical shard body.
 type OverlayPointer struct {
 	ModelArtifactID       string
@@ -77,6 +104,33 @@ type OverlayPointer struct {
 	OverlaySchema         string
 	DatasetManifestSHA256 string
 	CacheIdentity         string
+}
+
+// ODDMetricProjectionPointer locates one ready analysis report. The caller
+// still validates the report body and current LabelSet manifest before serving.
+type ODDMetricProjectionPointer struct {
+	ProjectionID                    string
+	ProjectionPolicyVersion         string
+	MetricPolicyVersion             string
+	LabelSetID                      string
+	LabelSetManifestSHA256          string
+	ModelArtifactID                 string
+	RegisteredModelName             string
+	ModelVersion                    int
+	RunID                           string
+	EvaluationDataset               string
+	EvaluationVersion               string
+	EvaluationDatasetManifestSHA256 string
+	ValidationSampleUIDDigest       string
+	SampleCount                     int
+	SceneCount                      int
+	ManifestKey                     string
+	ManifestSHA256                  string
+	ManifestByteSize                int64
+	ReportKey                       string
+	ReportSHA256                    string
+	ReportByteSize                  int64
+	ArtifactsBucket                 string
 }
 
 // GeoRecord is the serving metadata for one privacy-filtered geo artifact set.
@@ -1247,6 +1301,141 @@ func (s *DynamoStore) QueryReadyOverlayModels(
 		return nil, "", err
 	}
 	return models, nextPageToken, nil
+}
+
+// ListReadyODDMetricProjections returns every complete projection published for
+// one LabelSet. Invalid or partial pointers are fail-closed and not returned.
+func (s *DynamoStore) ListReadyODDMetricProjections(
+	ctx context.Context,
+	dataset, version, labelSetID string,
+) ([]ODDMetricProjectionPointer, error) {
+	if dataset == "" || version == "" || labelSetID == "" {
+		return nil, fmt.Errorf(
+			"ODD metric projection coordinate must be complete",
+		)
+	}
+	pk := ODDMetricProjectionPK(dataset, version, labelSetID)
+	var (
+		startKey map[string]ddbtypes.AttributeValue
+		items    []oddMetricProjectionItem
+	)
+	for page := 0; page < 100; page++ {
+		out, err := s.client.Query(ctx, &dynamodb.QueryInput{
+			TableName: aws.String(s.table),
+			KeyConditionExpression: aws.String(
+				"pk = :pk AND begins_with(sk, :model)",
+			),
+			ExpressionAttributeValues: map[string]ddbtypes.AttributeValue{
+				":pk": &ddbtypes.AttributeValueMemberS{
+					Value: pk,
+				},
+				":model": &ddbtypes.AttributeValueMemberS{
+					Value: "MODEL#",
+				},
+			},
+			ExclusiveStartKey: startKey,
+			Limit:             aws.Int32(100),
+		})
+		if err != nil {
+			return nil, fmt.Errorf(
+				"query ODD metric projections: %w",
+				err,
+			)
+		}
+		var pageItems []oddMetricProjectionItem
+		if err := attributevalue.UnmarshalListOfMaps(
+			out.Items,
+			&pageItems,
+		); err != nil {
+			return nil, fmt.Errorf(
+				"decode ODD metric projections: %w",
+				err,
+			)
+		}
+		items = append(items, pageItems...)
+		if len(out.LastEvaluatedKey) == 0 {
+			break
+		}
+		startKey = out.LastEvaluatedKey
+		if page == 99 {
+			return nil, fmt.Errorf(
+				"ODD metric projection pagination exceeds limit",
+			)
+		}
+	}
+
+	projections := make([]ODDMetricProjectionPointer, 0, len(items))
+	for _, item := range items {
+		expectedSK := fmt.Sprintf(
+			"MODEL#%s#PROJECTION#%s",
+			item.ModelArtifactID,
+			item.ProjectionID,
+		)
+		if item.Status != "ready" ||
+			item.SK != expectedSK ||
+			item.LabelSetID != labelSetID ||
+			!validSHA256(item.ProjectionID) ||
+			!validSHA256(item.LabelSetManifestSHA256) ||
+			!validSHA256(item.ModelArtifactID) ||
+			!validSHA256(item.EvaluationDatasetManifestSHA256) ||
+			!validSHA256(item.ValidationSampleUIDDigest) ||
+			!validSHA256(item.ManifestSHA256) ||
+			!validSHA256(item.ReportSHA256) ||
+			item.ProjectionPolicyVersion == "" ||
+			item.MetricPolicyVersion == "" ||
+			item.RegisteredModelName == "" ||
+			item.ModelVersion <= 0 ||
+			item.RunID == "" ||
+			item.EvaluationDataset == "" ||
+			item.EvaluationVersion == "" ||
+			item.SampleCount <= 0 ||
+			item.SceneCount <= 0 ||
+			item.ManifestKey == "" ||
+			item.ManifestByteSize <= 0 ||
+			item.ReportKey == "" ||
+			item.ReportByteSize <= 0 ||
+			item.ArtifactsBucket == "" {
+			continue
+		}
+		projections = append(
+			projections,
+			ODDMetricProjectionPointer{
+				ProjectionID:                    item.ProjectionID,
+				ProjectionPolicyVersion:         item.ProjectionPolicyVersion,
+				MetricPolicyVersion:             item.MetricPolicyVersion,
+				LabelSetID:                      item.LabelSetID,
+				LabelSetManifestSHA256:          item.LabelSetManifestSHA256,
+				ModelArtifactID:                 item.ModelArtifactID,
+				RegisteredModelName:             item.RegisteredModelName,
+				ModelVersion:                    item.ModelVersion,
+				RunID:                           item.RunID,
+				EvaluationDataset:               item.EvaluationDataset,
+				EvaluationVersion:               item.EvaluationVersion,
+				EvaluationDatasetManifestSHA256: item.EvaluationDatasetManifestSHA256,
+				ValidationSampleUIDDigest:       item.ValidationSampleUIDDigest,
+				SampleCount:                     item.SampleCount,
+				SceneCount:                      item.SceneCount,
+				ManifestKey:                     item.ManifestKey,
+				ManifestSHA256:                  item.ManifestSHA256,
+				ManifestByteSize:                item.ManifestByteSize,
+				ReportKey:                       item.ReportKey,
+				ReportSHA256:                    item.ReportSHA256,
+				ReportByteSize:                  item.ReportByteSize,
+				ArtifactsBucket:                 item.ArtifactsBucket,
+			},
+		)
+	}
+	sort.Slice(projections, func(i, j int) bool {
+		if projections[i].ModelVersion != projections[j].ModelVersion {
+			return projections[i].ModelVersion > projections[j].ModelVersion
+		}
+		if projections[i].ModelArtifactID != projections[j].ModelArtifactID {
+			return projections[i].ModelArtifactID <
+				projections[j].ModelArtifactID
+		}
+		return projections[i].ProjectionID < projections[j].ProjectionID
+	})
+	return projections, nil
 }
 
 // GetReadyOverlayPointer resolves one pointer after enforcing the set-level
