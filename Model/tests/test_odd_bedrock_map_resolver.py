@@ -263,7 +263,7 @@ def test_resolver_uses_bedrock_tool_and_geometry_validation() -> None:
 
 
 def test_geometry_rejection_preserves_ambiguous_evidence() -> None:
-    client = _BedrockClient("turn_right")
+    client = _BedrockClient("straight")
     resolver = BedrockMapRouteResolver(
         client,
         model_id="us.anthropic.claude-sonnet-4-6",
