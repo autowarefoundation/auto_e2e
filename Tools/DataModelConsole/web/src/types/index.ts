@@ -318,6 +318,19 @@ export interface ODDLabelSetsResponse {
   labelsets: ODDLabelSet[];
 }
 
+export interface ODDOperationsCapability {
+  enabled: boolean;
+  permitted: boolean;
+  allow_full: boolean;
+}
+
+export interface ODDOperationResult {
+  action: "launch" | "retry";
+  execution_id: string;
+  created: boolean;
+  launch_plan_version?: string;
+}
+
 export interface ODDObservation {
   schema_version?: string;
   observation_uid: string;
