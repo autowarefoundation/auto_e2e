@@ -257,6 +257,89 @@ export interface ODDStatistics {
   cooccurrences: ODDCooccurrenceStatistics;
 }
 
+export type ODDMetricName =
+  | "ade_1s_m"
+  | "ade_2s_m"
+  | "ade_3s_m"
+  | "ade_horizon_m"
+  | "fde_horizon_m"
+  | "acceleration_mae"
+  | "curvature_mae";
+
+export type ODDMetricValues = Record<ODDMetricName, number>;
+
+export interface ODDMetricAggregate {
+  sample_count: number;
+  scene_count: number;
+  metrics: ODDMetricValues;
+}
+
+export interface ODDMetricSlice extends ODDMetricAggregate {
+  kind: "observation" | "event";
+  key: string;
+  value: string | null;
+  status: ODDStatus;
+}
+
+export interface ODDMetricProjection {
+  schema_version: "odd_model_metric_projection_v1";
+  status: "ready";
+  projection_id: string;
+  projection_policy_version: string;
+  metric_policy_version: string;
+  frequency_hz: number;
+  horizon_steps: number;
+  horizon_seconds: number;
+  observation_join: string;
+  event_join: string;
+  seed_aggregation: "arithmetic_mean";
+  sample_uid_digest: string;
+  sample_count: number;
+  scene_count: number;
+  samples_with_observations: number;
+  samples_with_events: number;
+  overall: ODDMetricAggregate;
+  slices: ODDMetricSlice[];
+  model: {
+    artifact_sha256: string;
+    registered_model_name: string;
+    model_version: number;
+    run_id: string;
+  };
+  evaluation_dataset: {
+    dataset: string;
+    version: string;
+    manifest_uri: string;
+    manifest_sha256: string;
+    overlay_manifest_key: string;
+    overlay_manifest_sha256: string;
+    overlay_cache_identity: string;
+  };
+  labelset: {
+    dataset: string;
+    version: string;
+    labelset_id: string;
+    manifest_key: string;
+    manifest_sha256: string;
+    dataset_manifest_sha256: string;
+  };
+  validation: {
+    strategy: string;
+    split_id: string;
+    group_count: number;
+    sample_count: number;
+    sample_uid_digest: string;
+  };
+}
+
+export interface ODDMetricProjectionsResponse {
+  dataset: string;
+  version: string;
+  labelset_id: string;
+  labelset_manifest_sha256: string;
+  projections: ODDMetricProjection[];
+}
+
 export interface ODDArtifact {
   key: string;
   sha256: string;
