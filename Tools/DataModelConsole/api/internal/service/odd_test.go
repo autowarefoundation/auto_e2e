@@ -442,6 +442,20 @@ func TestODDManifestPreservesNestedSamplingProvenance(t *testing.T) {
 	}
 }
 
+func TestODDManifestReportsUnstartedWithoutReadyPointer(t *testing.T) {
+	service := oddTestService(t, func(objects map[string]fakePublicationObject) {
+		delete(objects, "kitscenes/v3.0/odd/latest.json")
+	})
+
+	_, _, err := service.loadODDManifest(
+		context.Background(), "kitscenes", "v3.0",
+	)
+
+	if !errors.Is(err, ErrODDNotStarted) {
+		t.Fatalf("missing ready pointer error = %v", err)
+	}
+}
+
 func TestODDOntologyIncludesCanonicalDatasetSupport(t *testing.T) {
 	service := oddTestService(t, nil)
 
