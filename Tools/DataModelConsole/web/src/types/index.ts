@@ -304,9 +304,17 @@ export interface ODDLabelSet {
   artifacts: Record<string, ODDArtifact>;
 }
 
+export type ODDOperationalState =
+  | "not_started"
+  | "running"
+  | "ready"
+  | "failed"
+  | "superseded";
+
 export interface ODDLabelSetsResponse {
   dataset: string;
   version: string;
+  state: ODDOperationalState;
   labelsets: ODDLabelSet[];
 }
 
