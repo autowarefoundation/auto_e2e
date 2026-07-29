@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import functools
 import json
 from pathlib import Path
 
 import pytest
+from flytekit import map_task
 
 from Platform.pipelines.odd_labeling_workflow import (
     ODD_LABELER_VERSION,
@@ -568,7 +570,7 @@ def test_source_labelers_have_independent_semantic_interfaces() -> None:
         "map_route_file",
         "kinematics_file",
         "image_quality_file",
-        "enabled_sources",
+        "enabled_sources_json",
         "ontology_sha256",
         "labeler_config_sha256",
         "road_vlm_provider",
@@ -586,7 +588,7 @@ def test_source_labelers_have_independent_semantic_interfaces() -> None:
     )
     assert {
         "map_route_file",
-        "enabled_sources",
+        "enabled_sources_json",
         "ontology_sha256",
         "labeler_config_sha256",
         "map_resolver_provider",
@@ -605,7 +607,7 @@ def test_source_labelers_have_independent_semantic_interfaces() -> None:
         "image_quality_file",
         "visual_file",
         "bedrock_map_file",
-        "enabled_sources",
+        "enabled_sources_json",
         "ontology_sha256",
         "labeler_config_sha256",
         "fusion_config_sha256",
@@ -644,6 +646,25 @@ def test_source_labelers_have_independent_semantic_interfaces() -> None:
         "trigger_context_s",
         "refinement_confidence_threshold",
     }.issubset(publish_odd_labelset.python_interface.inputs)
+
+
+def test_scene_worker_source_selection_is_scalar_for_map_tasks() -> None:
+    encoded_sources = '["fusion","gnss_ins","image_qc","map_route","vlm"]'
+    for worker in (
+        label_odd_map_route,
+        label_odd_kinematics,
+        label_odd_image_quality,
+        label_odd_visual,
+        label_odd_bedrock_map,
+        fuse_odd_scene,
+    ):
+        assert worker.python_interface.inputs["enabled_sources_json"] is str
+        map_task(
+            functools.partial(
+                worker,
+                enabled_sources_json=encoded_sources,
+            ),
+        )
 
 
 def test_launcher_uses_full_rate_visual_sampling_contract() -> None:
