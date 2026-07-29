@@ -196,6 +196,51 @@ def test_observer_uses_openai_contract_and_validates_output() -> None:
     assert "single image" in system_prompt
     assert "reason names or describes an allowed candidate" in system_prompt
     assert "status MUST be valid" in system_prompt
+    exchanges = observer.provider_exchanges
+    assert len(exchanges) == 1
+    assert exchanges[0].backend == "ORV"
+    assert exchanges[0].status == "succeeded"
+    assert exchanges[0].raw_response == _completion(
+        {
+            "odd.environment.sky": {
+                "key": "odd.environment.sky",
+                "status": "valid",
+                "values": ["clear"],
+                "confidence": 0.91,
+                "camera_id": None,
+                "supporting_cameras": ["front_center"],
+                "supporting_timestamps_ns": [1_000],
+                "reason": "Visible blue sky.",
+            },
+            "event.hazard.type": {
+                "key": "event.hazard.type",
+                "status": "valid",
+                "values": ["none"],
+                "confidence": 0.82,
+                "camera_id": None,
+                "supporting_cameras": ["front_center"],
+                "supporting_timestamps_ns": [1_000],
+                "reason": "The road corridor is visible.",
+            },
+        }
+    )
+    request_metadata = json.dumps(
+        exchanges[0].request_metadata,
+        sort_keys=True,
+    )
+    assert "data:image" not in request_metadata
+    assert "road-vlm.example" not in request_metadata
+    assert "secret" not in request_metadata
+    assert exchanges[0].request_metadata["frames"] == [
+        {
+            "camera_role": "front_center",
+            "jpeg_sha256": (
+                "95addac620cbcf40dbfcbf5b32d76c58"
+                "c4f6c57cfe6d830590141c16db533830"
+            ),
+            "timestamp_ns": 1_000,
+        }
+    ]
 
 
 def test_invalid_responses_exhaust_retries_and_abstain() -> None:
@@ -250,6 +295,15 @@ def test_invalid_responses_exhaust_retries_and_abstain() -> None:
     assert len(observations[0].provenance["prompt_sha256"]) == 64
     assert len(observations[0].provenance["decoding_config_sha256"]) == 64
     assert len(observations[0].provenance["request_sha256"]) == 64
+    assert [exchange.status for exchange in observer.provider_exchanges] == [
+        "invalid_response",
+        "invalid_response",
+    ]
+    assert all(
+        exchange.raw_response is not None
+        and exchange.error_type == "ValueError"
+        for exchange in observer.provider_exchanges
+    )
 
 
 def test_task_bundles_are_small_and_scope_camera_conditions() -> None:
