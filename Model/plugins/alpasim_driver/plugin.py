@@ -7,14 +7,19 @@ import logging
 from dataclasses import dataclass, field
 from enum import IntEnum
 
-# Add alpasim core driver path to sys.path first to avoid package shadowing
-_ALPASIM_DRIVER_SRC = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "scratch", "alpasim", "src", "driver", "src"))
-if os.path.exists(_ALPASIM_DRIVER_SRC) and _ALPASIM_DRIVER_SRC not in sys.path:
-    sys.path.insert(0, _ALPASIM_DRIVER_SRC)
-
 _REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
+
+# Resolve ALPASIM_ROOT from environment variable or check .alpasim / scratch/alpasim in repo root
+_ALPASIM_ROOT = os.environ.get("ALPASIM_ROOT", os.path.join(_REPO_ROOT, ".alpasim"))
+
+if os.path.exists(_ALPASIM_ROOT):
+    _alpasim_src = os.path.join(_ALPASIM_ROOT, "src")
+    for sub in ["driver", "plugins", "grpc", "utils", "controller", "physics", "runtime"]:
+        sub_path = os.path.join(_alpasim_src, sub, "src")
+        if os.path.exists(sub_path) and sub_path not in sys.path:
+            sys.path.insert(0, sub_path)
 
 
 IS_MOCK_MODE = False

@@ -14,7 +14,7 @@ import logging
 import sys
 import time
 from pathlib import Path
-from typing import Any, List, Optional
+from typing import Any
 
 import numpy as np
 
@@ -71,8 +71,8 @@ class GroundTruthTrajectoryDriver(BaseTrajectoryModel):
         cls,
         model_cfg: Any,
         device: Any = None,
-        camera_ids: Optional[List[str]] = None,
-        context_length: Optional[int] = None,
+        camera_ids: list[str] | None = None,
+        context_length: int | None = None,
         output_frequency_hz: int = 10,
     ) -> "GroundTruthTrajectoryDriver":
         horizon = getattr(model_cfg, "planning_horizon_s", 6.4)
@@ -80,7 +80,7 @@ class GroundTruthTrajectoryDriver(BaseTrajectoryModel):
         return cls(planning_horizon_s=horizon, planning_steps=steps)
 
     @property
-    def camera_ids(self) -> List[str]:
+    def camera_ids(self) -> list[str]:
         return [
             "camera_base_front_center",
             "camera_ring_front",
@@ -173,7 +173,7 @@ def main() -> None:
         t_sim = step * dt
 
         # Dummy camera images container matching PredictionInput contract
-        camera_images = {cam_name: [] for cam_name in driver.camera_ids}
+        camera_images: dict[str, list[Any]] = {cam_name: [] for cam_name in driver.camera_ids}
 
         obs = PredictionInput(
             camera_images=camera_images,

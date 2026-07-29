@@ -27,8 +27,11 @@ for path in [_REPO_ROOT, _MODEL_DIR, _DRIVER_DIR]:
     if str(path) not in sys.path:
         sys.path.insert(0, str(path))
 
-# Check for scratch/alpasim source tree if present
-alpasim_src = _REPO_ROOT / "scratch" / "alpasim" / "src"
+# Resolve ALPASIM_ROOT from environment variable or check .alpasim / scratch/alpasim in repo root
+alpasim_root_env = os.environ.get("ALPASIM_ROOT", "")
+alpasim_root = Path(alpasim_root_env) if alpasim_root_env else _REPO_ROOT / ".alpasim"
+
+alpasim_src = alpasim_root / "src"
 if alpasim_src.exists():
     for sub in ["driver", "plugins", "grpc", "utils", "controller", "physics", "runtime"]:
         p = alpasim_src / sub / "src"
