@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
-import { Suspense, useMemo, useState } from "react";
+import { Suspense, useEffect, useMemo, useState } from "react";
 import type { FormEvent } from "react";
 import {
   ArrowDown,
@@ -341,6 +341,7 @@ function ODDPageContent() {
   const searchParams = useSearchParams();
   const dataset = searchParams.get("dataset")?.trim() || DEFAULT_DATASET;
   const version = searchParams.get("version")?.trim() || DEFAULT_VERSION;
+  const selectedOntologyKey = searchParams.get("key");
   const initialRequest = parseSearchRequest(searchParams.get("query"));
   const [tab, setTab] = useState<Tab>(() => {
     const requested = searchParams.get("tab");
@@ -405,6 +406,18 @@ function ODDPageContent() {
     executions.data?.items.filter((execution) =>
       execution.workflow_name.endsWith("wf_generate_odd_labelset"),
     ) ?? [];
+
+  useEffect(() => {
+    const requested = searchParams.get("tab");
+    if (isTab(requested)) setTab(requested);
+  }, [searchParams]);
+
+  useEffect(() => {
+    if (tab !== "ontology" || !selectedOntologyKey || !ontology.data) return;
+    document
+      .getElementById(`ontology-${selectedOntologyKey}`)
+      ?.scrollIntoView({ block: "start" });
+  }, [ontology.data, selectedOntologyKey, tab]);
 
   function replaceURL(
     nextTab: Tab,
@@ -1316,7 +1329,12 @@ function ODDPageContent() {
       {tab === "ontology" && (
         <div className="divide-y divide-slate-900">
           {ontologyData.labels.map((item) => (
-            <details key={item.key} className="py-4">
+            <details
+              key={item.key}
+              id={`ontology-${item.key}`}
+              open={selectedOntologyKey === item.key || undefined}
+              className="scroll-mt-20 py-4"
+            >
               <summary className="cursor-pointer list-none">
                 <div className="grid gap-1 sm:grid-cols-[1fr_auto]">
                   <span className="break-words font-mono text-xs text-slate-200">
