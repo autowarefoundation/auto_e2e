@@ -7,6 +7,8 @@ import numpy as np
 from data_processing.odd_labeling.bedrock_map_resolver import (
     BEDROCK_TOOL_NAME,
     BedrockMapRouteResolver,
+    bedrock_map_decoding_config_sha256,
+    bedrock_map_prompt_bundle_sha256,
     build_privacy_safe_request,
     resolve_ambiguous_map_route,
 )
@@ -147,6 +149,18 @@ def _ambiguous_route_action():
         end_timestamp_ns=300_000_000,
         provenance={"labeler_version": "deterministic-v1"},
     )
+
+
+def test_bedrock_map_semantic_hashes_are_stable() -> None:
+    assert bedrock_map_prompt_bundle_sha256() == (
+        "b68bd2ec197bbb35e9bffb9e48e3a4d7a3d99e14821d92e8d5705b72c3752e8f"
+    )
+    assert bedrock_map_decoding_config_sha256(max_tokens=1024) == (
+        "b5f42c6a13e7c29a8c624dbbb88ec4fc32eb3de368494db6b00e447a72c01050"
+    )
+    assert bedrock_map_decoding_config_sha256(
+        max_tokens=512
+    ) != bedrock_map_decoding_config_sha256(max_tokens=1024)
 
 
 class _BedrockClient:
