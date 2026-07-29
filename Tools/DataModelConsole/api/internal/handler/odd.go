@@ -18,11 +18,25 @@ const maxODDSearchBody = 64 << 10
 
 // ODDHandler serves immutable scene-level ODD LabelSet read models.
 type ODDHandler struct {
-	s3 *service.S3Service
+	s3                     *service.S3Service
+	operations             *service.ODDOperationsService
+	operationsRequiredRole string
 }
 
 func NewODDHandler(s3 *service.S3Service) *ODDHandler {
 	return &ODDHandler{s3: s3}
+}
+
+func NewODDHandlerWithOperations(
+	s3 *service.S3Service,
+	operations *service.ODDOperationsService,
+	requiredRole string,
+) *ODDHandler {
+	return &ODDHandler{
+		s3:                     s3,
+		operations:             operations,
+		operationsRequiredRole: requiredRole,
+	}
 }
 
 func (h *ODDHandler) coordinate(
