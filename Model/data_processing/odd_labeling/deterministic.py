@@ -13,9 +13,20 @@ from .published_snapshot import CanonicalSceneEvidence
 from .schema import LabelObservation, make_observation
 
 
-LABELER_VERSION = "odd_deterministic_v2"
+LABELER_VERSION = "odd_deterministic_v3"
+KINEMATICS_POLICY_VERSION = "odd_gnss_ins_kinematics_v2"
 INTERVAL_NS = 1_000_000_000
 STATIONARY_EPSILON_KPH = 0.5
+STATIONARY_DWELL_NS = 1_000_000_000
+STRONG_RESPONSE_DWELL_NS = 500_000_000
+MAX_GAP_FLOOR_NS = 500_000_000
+MAX_GAP_PERIOD_MULTIPLIER = 3
+KINEMATIC_KEYS = (
+    "odd.ego.speed_bin",
+    "event.ego.motion_state",
+    "event.ego.maneuver",
+    "event.ego.strong_response",
+)
 MAP_ROUTE_KEYS = (
     "odd.road.horizontal_geometry",
     "odd.road.vertical_geometry",
@@ -68,8 +79,11 @@ def _interval_slices(timestamps: np.ndarray) -> list[tuple[int, int, int, int]]:
     return result
 
 
-def _speed_bin(speed_kph: float) -> str:
-    if abs(speed_kph) <= STATIONARY_EPSILON_KPH:
+def _speed_bin(speed_kph: float, *, stationary_dwell_met: bool) -> str:
+    if (
+        abs(speed_kph) <= STATIONARY_EPSILON_KPH
+        and stationary_dwell_met
+    ):
         return "stationary"
     if speed_kph < 5.0:
         return "creeping"
@@ -83,11 +97,13 @@ def _speed_bin(speed_kph: float) -> str:
 def _motion_state(
     speed_kph: float,
     acceleration_mps2: float,
-    previous_speed_kph: float,
+    *,
+    stationary_dwell_met: bool,
+    previously_stationary: bool,
 ) -> str:
-    if speed_kph <= STATIONARY_EPSILON_KPH:
+    if stationary_dwell_met:
         return "stopped"
-    if previous_speed_kph <= STATIONARY_EPSILON_KPH and speed_kph > 1.0:
+    if previously_stationary and speed_kph > 1.0:
         return "starting"
     if speed_kph < 5.0:
         return "creeping"
@@ -98,27 +114,206 @@ def _motion_state(
     return "moving"
 
 
+def _expected_period_ns(
+    evidence: CanonicalSceneEvidence,
+    timestamps: np.ndarray,
+) -> int:
+    rates: list[float] = []
+    if evidence.capability_manifest is not None:
+        for name in ("gnss", "ins"):
+            channel = evidence.capability_manifest.channels.get(name)
+            if (
+                channel is not None
+                and channel.availability != "absent"
+                and channel.nominal_rate_hz is not None
+                and channel.nominal_rate_hz > 0.0
+            ):
+                rates.append(float(channel.nominal_rate_hz))
+    if rates:
+        return max(1, int(round(1_000_000_000 / max(rates))))
+    return max(1, int(np.median(np.diff(timestamps))))
+
+
+def _kinematic_derivatives(
+    xy: np.ndarray,
+    yaw: np.ndarray,
+    timestamps: np.ndarray,
+    *,
+    maximum_gap_ns: int,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    speed_mps = np.full(len(timestamps), np.nan, dtype=np.float64)
+    acceleration_mps2 = np.full(len(timestamps), np.nan, dtype=np.float64)
+    yaw_rate_radps = np.full(len(timestamps), np.nan, dtype=np.float64)
+    segment_ids = np.full(len(timestamps), -1, dtype=np.int64)
+    boundaries = np.flatnonzero(np.diff(timestamps) > maximum_gap_ns) + 1
+    starts = np.concatenate(([0], boundaries))
+    ends = np.concatenate((boundaries, [len(timestamps)]))
+    for segment_id, (start, end) in enumerate(zip(starts, ends, strict=True)):
+        segment_ids[start:end] = segment_id
+        if end - start < 3:
+            continue
+        seconds = (
+            timestamps[start:end] - timestamps[start]
+        ).astype(np.float64) / 1e9
+        vx = np.gradient(xy[start:end, 0], seconds)
+        vy = np.gradient(xy[start:end, 1], seconds)
+        segment_speed = _smoothed(np.hypot(vx, vy))
+        speed_mps[start:end] = segment_speed
+        acceleration_mps2[start:end] = _smoothed(
+            np.gradient(segment_speed, seconds)
+        )
+        yaw_rate_radps[start:end] = _smoothed(
+            np.gradient(yaw[start:end], seconds)
+        )
+    return speed_mps, acceleration_mps2, yaw_rate_radps, segment_ids
+
+
+def _missing_intervals(
+    timestamps: np.ndarray,
+    *,
+    expected_period_ns: int,
+    maximum_gap_ns: int,
+) -> tuple[tuple[int, int], ...]:
+    gaps = np.flatnonzero(np.diff(timestamps) > maximum_gap_ns)
+    return tuple(
+        (
+            int(timestamps[index]) + expected_period_ns,
+            int(timestamps[index + 1]),
+        )
+        for index in gaps
+    )
+
+
+def _overlaps_missing_interval(
+    start_ns: int,
+    end_ns: int,
+    missing_intervals: tuple[tuple[int, int], ...],
+) -> bool:
+    return any(
+        missing_start < end_ns and missing_end > start_ns
+        for missing_start, missing_end in missing_intervals
+    )
+
+
+def _heading_change(
+    yaw: np.ndarray,
+    timestamps: np.ndarray,
+    segment_ids: np.ndarray,
+    center: int,
+) -> float:
+    segment_id = segment_ids[center]
+    segment_indexes = np.flatnonzero(segment_ids == segment_id)
+    if len(segment_indexes) < 2:
+        return 0.0
+    window_ns = 1_500_000_000
+    center_timestamp = int(timestamps[center])
+    before = max(
+        int(segment_indexes[0]),
+        int(np.searchsorted(timestamps, center_timestamp - window_ns)),
+    )
+    after = min(
+        int(segment_indexes[-1]),
+        int(
+            np.searchsorted(
+                timestamps,
+                center_timestamp + window_ns,
+                side="right",
+            )
+            - 1
+        ),
+    )
+    return float(yaw[after] - yaw[before])
+
+
 def label_kinematics(
     evidence: CanonicalSceneEvidence,
 ) -> tuple[LabelObservation, ...]:
     path = evidence.path_latlon_heading_timestamp
     timestamps = path[:, 3].astype(np.int64)
-    seconds = (timestamps - timestamps[0]).astype(np.float64) / 1e9
     xy = _local_xy(path, float(path[0, 0]), float(path[0, 1]))
-    vx = np.gradient(xy[:, 0], seconds)
-    vy = np.gradient(xy[:, 1], seconds)
-    speed_mps = _smoothed(np.hypot(vx, vy))
-    acceleration = _smoothed(np.gradient(speed_mps, seconds))
     yaw = np.unwrap(np.radians(90.0 - path[:, 2]))
-    yaw_rate = _smoothed(np.gradient(yaw, seconds))
+    expected_period_ns = _expected_period_ns(evidence, timestamps)
+    maximum_gap_ns = max(
+        MAX_GAP_FLOOR_NS,
+        expected_period_ns * MAX_GAP_PERIOD_MULTIPLIER,
+    )
+    speed_mps, acceleration, yaw_rate, segment_ids = _kinematic_derivatives(
+        xy,
+        yaw,
+        timestamps,
+        maximum_gap_ns=maximum_gap_ns,
+    )
+    missing_intervals = _missing_intervals(
+        timestamps,
+        expected_period_ns=expected_period_ns,
+        maximum_gap_ns=maximum_gap_ns,
+    )
 
     observations: list[LabelObservation] = []
-    previous_speed_kph = float(speed_mps[0] * 3.6)
+    previous_speed_kph: float | None = None
+    previously_stationary = False
+    stationary_duration_ns = 0
+    strong_response_duration_ns = 0
     for start_ns, end_ns, left, right in _interval_slices(timestamps):
+        provenance = {
+            "labeler_version": LABELER_VERSION,
+            "kinematics_policy_version": KINEMATICS_POLICY_VERSION,
+            "expected_period_ns": expected_period_ns,
+            "maximum_gap_ns": maximum_gap_ns,
+            "stationary_epsilon_kph": STATIONARY_EPSILON_KPH,
+            "stationary_dwell_ns": STATIONARY_DWELL_NS,
+            "strong_response_dwell_ns": STRONG_RESPONSE_DWELL_NS,
+        }
+        interval_values = np.column_stack(
+            (
+                speed_mps[left:right],
+                acceleration[left:right],
+                yaw_rate[left:right],
+            )
+        )
+        missing_reason: str | None = None
+        if _overlaps_missing_interval(
+            start_ns,
+            end_ns,
+            missing_intervals,
+        ):
+            missing_reason = "timestamp_gap"
+        elif not np.isfinite(interval_values).all():
+            missing_reason = "insufficient_contiguous_motion_samples"
+        if missing_reason is not None:
+            unavailable_provenance = {
+                **provenance,
+                "reason": missing_reason,
+            }
+            for key in KINEMATIC_KEYS:
+                observations.append(
+                    make_observation(
+                        scene_uid=evidence.scene_uid,
+                        key=key,
+                        status="not_observable",
+                        confidence=1.0,
+                        source="gnss_ins",
+                        start_timestamp_ns=start_ns,
+                        end_timestamp_ns=end_ns,
+                        provenance=unavailable_provenance,
+                    )
+                )
+            previous_speed_kph = None
+            previously_stationary = False
+            stationary_duration_ns = 0
+            strong_response_duration_ns = 0
+            continue
+
         speed = float(np.median(speed_mps[left:right]))
         speed_kph = speed * 3.6
         accel = float(np.median(acceleration[left:right]))
         yaw_rate_value = float(np.median(yaw_rate[left:right]))
+        interval_duration_ns = end_ns - start_ns
+        if abs(speed_kph) <= STATIONARY_EPSILON_KPH:
+            stationary_duration_ns += interval_duration_ns
+        else:
+            stationary_duration_ns = 0
+        stationary_dwell_met = stationary_duration_ns >= STATIONARY_DWELL_NS
         common = {
             "scene_uid": evidence.scene_uid,
             "confidence": 0.97,
@@ -131,20 +326,27 @@ def label_kinematics(
                 "longitudinal_acceleration_mps2": accel,
                 "yaw_rate_radps": yaw_rate_value,
             },
-            "provenance": {
-                "labeler_version": LABELER_VERSION,
-                "stationary_epsilon_kph": STATIONARY_EPSILON_KPH,
-            },
+            "provenance": provenance,
         }
         observations.append(
             make_observation(
                 key="odd.ego.speed_bin",
                 status="valid",
-                values=(_speed_bin(speed_kph),),
+                values=(
+                    _speed_bin(
+                        speed_kph,
+                        stationary_dwell_met=stationary_dwell_met,
+                    ),
+                ),
                 **common,
             )
         )
-        motion_state = _motion_state(speed_kph, accel, previous_speed_kph)
+        motion_state = _motion_state(
+            speed_kph,
+            accel,
+            stationary_dwell_met=stationary_dwell_met,
+            previously_stationary=previously_stationary,
+        )
         observations.append(
             make_observation(
                 key="event.ego.motion_state",
@@ -155,18 +357,20 @@ def label_kinematics(
         )
 
         center = (left + right - 1) // 2
-        radius = max(1, int(round(1.5 / max(np.median(np.diff(seconds)), 1e-3))))
-        before = max(0, center - radius)
-        after = min(len(yaw) - 1, center + radius)
-        heading_change = float(yaw[after] - yaw[before])
-        if abs(heading_change) >= math.radians(150):
+        heading_change = _heading_change(
+            yaw,
+            timestamps,
+            segment_ids,
+            center,
+        )
+        if stationary_dwell_met:
+            maneuver = "stop"
+        elif abs(heading_change) >= math.radians(150):
             maneuver = "u_turn"
         elif heading_change >= math.radians(12):
             maneuver = "turn_left"
         elif heading_change <= -math.radians(12):
             maneuver = "turn_right"
-        elif speed_kph <= STATIONARY_EPSILON_KPH:
-            maneuver = "stop"
         else:
             maneuver = "lane_follow"
         observations.append(
@@ -178,9 +382,22 @@ def label_kinematics(
             )
         )
 
-        if accel <= -5.0 and speed_kph <= 1.0 and previous_speed_kph >= 15.0:
+        if accel <= -3.0:
+            strong_response_duration_ns += interval_duration_ns
+        else:
+            strong_response_duration_ns = 0
+        strong_response_dwell_met = (
+            strong_response_duration_ns >= STRONG_RESPONSE_DWELL_NS
+        )
+        if (
+            strong_response_dwell_met
+            and accel <= -5.0
+            and speed_kph <= 1.0
+            and previous_speed_kph is not None
+            and previous_speed_kph >= 15.0
+        ):
             strong_response = "emergency_stop"
-        elif accel <= -3.0:
+        elif strong_response_dwell_met:
             strong_response = "hard_brake"
         else:
             strong_response = "none"
@@ -193,6 +410,7 @@ def label_kinematics(
             )
         )
         previous_speed_kph = speed_kph
+        previously_stationary = stationary_dwell_met
     return tuple(observations)
 
 
