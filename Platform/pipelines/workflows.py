@@ -33,6 +33,9 @@ from Platform.pipelines.odd_labeling_workflow import (  # noqa: F401
     odd_dataset_labeler_launch_plan,
     wf_generate_odd_labelset,
 )
+from Platform.pipelines.odd_metric_projection_tasks import (
+    project_odd_model_metrics,
+)
 from Platform.pipelines.trajectory_visualization_tasks import (
     export_trajectory_report,
 )
@@ -6454,10 +6457,6 @@ def wf_project_odd_model_metrics(
     labeling. It reuses a ready overlay, verifies the model's exact validation
     population, and publishes a sidecar projection for the Console.
     """
-    from Platform.pipelines.odd_metric_projection_tasks import (
-        project_odd_model_metrics,
-    )
-
     return project_odd_model_metrics(
         overlay_manifest_key=overlay_manifest_key,
         overlay_manifest_sha256=overlay_manifest_sha256,
