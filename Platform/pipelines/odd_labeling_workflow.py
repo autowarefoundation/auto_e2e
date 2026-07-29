@@ -30,8 +30,10 @@ DATA_PREP_IMAGE = os.environ.get(
     "AUTO_E2E_DATA_PREP_IMAGE",
     f"{ECR_PREFIX}/auto-e2e/data-prep:latest",
 )
-ODD_LABELER_VERSION = "odd_dataset_labeler_v7"
+ODD_LABELER_VERSION = "odd_dataset_labeler_v8"
 ODD_SCENE_INDEX_SCHEMA_VERSION = "odd_scene_index_v2"
+ODD_PROVIDER_EXCHANGE_SCHEMA_VERSION = "odd_provider_exchange_v2"
+ODD_PROVIDER_REPORT_SCHEMA_VERSION = "odd_provider_report_v2"
 MAX_ODD_ARTIFACT_BYTES = 64 << 20
 MAX_ODD_PARQUET_BYTES = 512 << 20
 SHA256_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
@@ -225,9 +227,18 @@ def _provider_report(exchanges: list[dict]) -> dict:
     for backend, rows in sorted(grouped.items()):
         latency = [float(row["latency_ms"]) for row in rows]
         usage: dict[str, float | int] = {}
+        repairs: list[dict] = []
         for row in rows:
             for name, value in row.get("usage", {}).items():
                 usage[name] = usage.get(name, 0) + value
+            repairs.extend(row.get("protocol_repairs", []))
+        repairs_by_kind: dict[str, int] = {}
+        repairs_by_key: dict[str, int] = {}
+        for repair in repairs:
+            kind = str(repair["kind"])
+            key = str(repair["key"])
+            repairs_by_kind[kind] = repairs_by_kind.get(kind, 0) + 1
+            repairs_by_key[key] = repairs_by_key.get(key, 0) + 1
         failures: dict[str, int] = {}
         for row in rows:
             if row["status"] == "succeeded":
@@ -270,6 +281,11 @@ def _provider_report(exchanges: list[dict]) -> dict:
                 },
                 "usage": dict(sorted(usage.items())),
                 "failures": failures,
+                "protocol_repairs": {
+                    "count": len(repairs),
+                    "by_kind": dict(sorted(repairs_by_kind.items())),
+                    "by_key": dict(sorted(repairs_by_key.items())),
+                },
                 "estimated_cost_usd": None,
                 "cost_estimation_status": (
                     "unavailable_without_frozen_pricing"
@@ -277,7 +293,7 @@ def _provider_report(exchanges: list[dict]) -> dict:
             }
         )
     return {
-        "schema_version": "odd_provider_report_v1",
+        "schema_version": ODD_PROVIDER_REPORT_SCHEMA_VERSION,
         "totals": {
             "request_count": len(
                 {
@@ -296,6 +312,10 @@ def _provider_report(exchanges: list[dict]) -> dict:
             ),
             "input_image_count": sum(
                 int(exchange["input_image_count"])
+                for exchange in exchanges
+            ),
+            "protocol_repair_count": sum(
+                len(exchange.get("protocol_repairs", []))
                 for exchange in exchanges
             ),
         },
@@ -1069,7 +1089,7 @@ def label_odd_image_quality(
 @task(
     container_image=DATA_PREP_IMAGE,
     cache=True,
-    cache_version="odd-source-openai-compatible-v5",
+    cache_version="odd-source-openai-compatible-v6",
     retries=2,
     pod_template=_scene_labeling_pod_template(),
     requests=Resources(cpu="2", mem="6Gi"),
@@ -2080,7 +2100,7 @@ def publish_odd_labelset(
             datasets_bucket,
             exchange_key,
             exchange_payload,
-            schema_version="odd_provider_exchange_v1",
+            schema_version=ODD_PROVIDER_EXCHANGE_SCHEMA_VERSION,
         )
         exchange_artifacts.append(
             {
@@ -2111,7 +2131,7 @@ def publish_odd_labelset(
         datasets_bucket,
         provider_report_key,
         provider_report_payload,
-        schema_version="odd_provider_report_v1",
+        schema_version=ODD_PROVIDER_REPORT_SCHEMA_VERSION,
     )
     publish(
         "capabilities",
@@ -2250,12 +2270,12 @@ def publish_odd_labelset(
             "partition_count": len(receipt_partitions),
         },
         "provider_audit": {
-            "report_schema_version": "odd_provider_report_v1",
+            "report_schema_version": ODD_PROVIDER_REPORT_SCHEMA_VERSION,
             "report_prefix": (
                 f"{publication_prefix}/provider-reports/"
                 f"labelset={labelset_id}/"
             ),
-            "exchange_schema_version": "odd_provider_exchange_v1",
+            "exchange_schema_version": ODD_PROVIDER_EXCHANGE_SCHEMA_VERSION,
             "exchange_prefixes": {
                 backend: (
                     f"{publication_prefix}/provider-artifacts/"
