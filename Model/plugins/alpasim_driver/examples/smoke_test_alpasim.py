@@ -1,34 +1,28 @@
+import os
+import sys
 import torch
 import numpy as np
 from PIL import Image
-import sys
-import os
 
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), 'Model/plugins')))
-from alpasim_driver.plugin import AutoE2EDriver, PredictionInput
+_EXAMPLES_DIR = os.path.abspath(os.path.dirname(__file__))
+_DRIVER_DIR = os.path.abspath(os.path.join(_EXAMPLES_DIR, ".."))
+_PLUGINS_DIR = os.path.abspath(os.path.join(_DRIVER_DIR, ".."))
+_MODEL_DIR = os.path.abspath(os.path.join(_PLUGINS_DIR, ".."))
+_REPO_ROOT = os.path.abspath(os.path.join(_MODEL_DIR, ".."))
 
-sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
-from Tools.trajectory_visualization.rendering import render_frame, trajectory_extent
-from Tools.trajectory_visualization.artifacts import ShardSample
-import io
+for path in [_REPO_ROOT, _MODEL_DIR, _PLUGINS_DIR, _DRIVER_DIR]:
+    if path not in sys.path:
+        sys.path.insert(0, path)
 
-class DummyAutoE2EModel(torch.nn.Module):
-    def forward(self, tensors):
-        # Generate some realistic-looking dummy trajectory points (e.g. a curve)
-        t = torch.linspace(0, 20, 64)
-        x = t
-        y = 0.5 * t ** 2
-        points = torch.stack([x, y], dim=1).unsqueeze(0)  # shape (1, 64, 2)
-        headings = torch.atan2(t, torch.ones_like(t)).unsqueeze(0)  # shape (1, 64)
-        return {
-            "trajectory_points": points,
-            "headings": headings
-        }
+from alpasim_driver.plugin import AutoE2EDriver, PredictionInput  # noqa: E402
+from Tools.trajectory_visualization.rendering import render_frame, trajectory_extent  # noqa: E402
+from Tools.trajectory_visualization.artifacts import ShardSample  # noqa: E402
+import io  # noqa: E402
 
-torch.serialization.add_safe_globals([DummyAutoE2EModel])
+from model_components.auto_e2e import AutoE2E  # noqa: E402
 
-def create_dummy_checkpoint(ckpt_path):
-    model = DummyAutoE2EModel()
+def create_model_checkpoint(ckpt_path: str) -> None:
+    model = AutoE2E(num_views=7, is_pretrained=False)
     torch.save(model, ckpt_path)
 
 def generate_mock_prediction_input():
@@ -41,12 +35,12 @@ def generate_mock_prediction_input():
         "camera_ring_rear_left",
         "camera_ring_rear_right",
     ]
-    cameras = {}
+    camera_images = {}
     for name in camera_names:
-        cameras[name] = Image.new("RGB", (256, 256), color="gray")
+        camera_images[name] = Image.new("RGB", (256, 256), color="gray")
     
     return PredictionInput(
-        cameras=cameras,
+        camera_images=camera_images,
         speed=10.0,
         acceleration=0.5,
         command=1
@@ -54,17 +48,17 @@ def generate_mock_prediction_input():
 
 def main():
     ckpt_path = "dummy_random.ckpt"
-    create_dummy_checkpoint(ckpt_path)
-    print(f"Created dummy checkpoint at {ckpt_path}")
+    create_model_checkpoint(ckpt_path)
+    print(f"Created model checkpoint at {ckpt_path}")
     
-    driver = AutoE2EDriver(model_checkpoint=ckpt_path)
+    driver = AutoE2EDriver(model_checkpoint=ckpt_path, allow_mock=False)
     print("Initialized AutoE2EDriver")
     
     mock_input = generate_mock_prediction_input()
     prediction = driver.predict(mock_input)
     print("Executed predict()")
     
-    points = prediction.trajectory_points
+    points = prediction.trajectory_xy
     headings = prediction.headings
     print(f"Trajectory points shape: {points.shape}")
     print(f"Headings shape: {headings.shape}")

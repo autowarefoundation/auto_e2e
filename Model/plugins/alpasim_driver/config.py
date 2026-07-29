@@ -19,6 +19,12 @@ class AutoE2EAlpaSimConfig:
     checkpoint_path: str
     """Path to trained AutoE2E model checkpoint file."""
 
+    allow_mock: bool = False
+    """Whether to allow mock fallback mode when running without AlpaSim."""
+
+    allow_untrained_model: bool = False
+    """Whether to initialize an untrained AutoE2E model if model checkpoint is missing."""
+
     image_size: Tuple[int, int] = (256, 256)
     """Target camera resolution ``(H, W)`` expected by perception backbone."""
 
