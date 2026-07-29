@@ -35,7 +35,19 @@ ODD_SCENE_INDEX_SCHEMA_VERSION = "odd_scene_index_v2"
 MAX_ODD_ARTIFACT_BYTES = 64 << 20
 MAX_ODD_PARQUET_BYTES = 512 << 20
 SHA256_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+HEX_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 SOURCE_REVISION_RE = re.compile(r"^[0-9a-f]{40}([0-9a-f]{24})?$")
+PUBLICATION_PREFIX_RE = re.compile(r"^[a-z0-9][a-z0-9._/-]{0,254}$")
+ODD_EXECUTABLE_SOURCES = frozenset(
+    {"map_route", "gnss_ins", "vlm", "image_qc", "fusion"}
+)
+ODD_SOURCE_POLICY_VERSIONS = {
+    "map_route": "odd_map_route_policy_v1",
+    "gnss_ins": "odd_gnss_ins_policy_v1",
+    "vlm": "odd_road_vlm_policy_v3",
+    "image_qc": "odd_image_qc_policy_v1",
+    "fusion": "odd_source_fusion_v1",
+}
 
 OddPublication = NamedTuple(
     "OddPublication",
@@ -71,6 +83,299 @@ def _canonical_bytes(value: object) -> bytes:
 
 def _sha256(payload: bytes) -> str:
     return hashlib.sha256(payload).hexdigest()
+
+
+def _normalized_enabled_sources(enabled_sources: List[str]) -> tuple[str, ...]:
+    if not enabled_sources:
+        raise ValueError("at least one ODD source must be enabled")
+    normalized = tuple(sorted(set(enabled_sources)))
+    if len(normalized) != len(enabled_sources):
+        raise ValueError("enabled ODD sources must be unique")
+    unknown = set(normalized) - ODD_EXECUTABLE_SOURCES
+    if unknown:
+        raise ValueError(f"unsupported enabled ODD sources: {sorted(unknown)}")
+    if "fusion" not in normalized:
+        raise ValueError("fusion must be enabled for resolved ODD labels")
+    return normalized
+
+
+def odd_labeler_config_document(enabled_sources: List[str]) -> dict:
+    normalized = _normalized_enabled_sources(enabled_sources)
+    return {
+        "schema_version": "odd_labeler_config_v1",
+        "labeler_bundle_version": ODD_LABELER_VERSION,
+        "enabled_sources": list(normalized),
+        "source_policy_versions": {
+            source: ODD_SOURCE_POLICY_VERSIONS[source]
+            for source in normalized
+        },
+        "road_vlm_runtime": {
+            "timeout_s": 600,
+            "max_tokens": 4096,
+            "retry_count": 2,
+            "temperature": 0.0,
+        },
+        "bedrock_map_runtime": {
+            "max_tokens": 1024,
+            "temperature": 0.0,
+            "privacy_policy": "privacy_filtered_map_route_only",
+        },
+        "unresolved_label_policy": (
+            "publish_explicit_status_without_value"
+        ),
+    }
+
+
+def odd_labeler_config_sha256(enabled_sources: List[str]) -> str:
+    return _sha256(_canonical_bytes(odd_labeler_config_document(enabled_sources)))
+
+
+def _require_digest(value: str, name: str) -> None:
+    if HEX_SHA256_RE.fullmatch(value) is None:
+        raise ValueError(f"{name} must be a lowercase SHA-256")
+
+
+def _validate_source_semantic_inputs(
+    enabled_sources: List[str],
+    ontology_sha256: str,
+    labeler_config_sha256: str,
+) -> tuple[str, ...]:
+    from data_processing.odd_labeling.ontology import (
+        ontology_sha256 as local_ontology_sha256,
+    )
+
+    normalized = _normalized_enabled_sources(enabled_sources)
+    _require_digest(ontology_sha256, "ontology_sha256")
+    _require_digest(labeler_config_sha256, "labeler_config_sha256")
+    if ontology_sha256 != local_ontology_sha256():
+        raise ValueError("ontology_sha256 differs from the task implementation")
+    if labeler_config_sha256 != odd_labeler_config_sha256(list(normalized)):
+        raise ValueError("labeler_config_sha256 differs from enabled sources")
+    return normalized
+
+
+def _validate_publication_prefix(value: str) -> str:
+    if (
+        PUBLICATION_PREFIX_RE.fullmatch(value) is None
+        or value.endswith("/")
+        or "//" in value
+        or any(part in {"", ".", ".."} for part in value.split("/"))
+    ):
+        raise ValueError("publication_prefix is invalid")
+    return value
+
+
+@task(
+    container_image=DATA_PREP_IMAGE,
+    cache=True,
+    cache_version="odd-semantic-contract-v1",
+    requests=Resources(cpu="1", mem="2Gi"),
+    limits=Resources(cpu="2", mem="4Gi"),
+)
+def validate_odd_semantic_contract(
+    ontology_version: str,
+    ontology_sha256: str,
+    labeler_bundle_version: str,
+    labeler_config_uri: str,
+    labeler_config_sha256: str,
+    enabled_sources: List[str],
+    road_vlm_provider: str,
+    road_vlm_model: str,
+    road_vlm_model_revision: str,
+    road_vlm_prompt_bundle_sha256: str,
+    road_vlm_decoding_config_sha256: str,
+    map_resolver_provider: str,
+    map_resolver_model_id: str,
+    map_resolver_model_revision: str,
+    map_resolver_prompt_bundle_sha256: str,
+    map_resolver_decoding_config_sha256: str,
+    fusion_config_sha256: str,
+    calibration_bundle_sha256: str,
+    labeler_image_digest: str,
+    labeler_source_revision: str,
+    camera_anchor_interval_s: float,
+    maximum_camera_anchors: int,
+    trigger_context_s: float,
+    refinement_confidence_threshold: float,
+    publication_prefix: str,
+) -> str:
+    import boto3
+
+    from data_processing.odd_labeling.bedrock_map_resolver import (
+        bedrock_map_decoding_config_sha256 as local_bedrock_decoding_sha256,
+    )
+    from data_processing.odd_labeling.bedrock_map_resolver import (
+        bedrock_map_prompt_bundle_sha256 as local_bedrock_prompt_sha256,
+    )
+    from data_processing.odd_labeling.fusion import (
+        fusion_config_sha256 as local_fusion_sha256,
+    )
+    from data_processing.odd_labeling.ontology import ontology_document
+    from data_processing.odd_labeling.openai_compatible import (
+        road_vlm_decoding_bundle_sha256 as local_road_decoding_sha256,
+    )
+    from data_processing.odd_labeling.openai_compatible import (
+        road_vlm_prompt_bundle_sha256 as local_road_prompt_sha256,
+    )
+    from data_processing.odd_labeling.published_snapshot import S3Location
+    from data_processing.odd_labeling.quality import (
+        calibration_bundle_sha256 as local_calibration_sha256,
+    )
+
+    digest_inputs = {
+        "ontology_sha256": ontology_sha256,
+        "labeler_config_sha256": labeler_config_sha256,
+        "road_vlm_prompt_bundle_sha256": road_vlm_prompt_bundle_sha256,
+        "road_vlm_decoding_config_sha256": (
+            road_vlm_decoding_config_sha256
+        ),
+        "map_resolver_prompt_bundle_sha256": (
+            map_resolver_prompt_bundle_sha256
+        ),
+        "map_resolver_decoding_config_sha256": (
+            map_resolver_decoding_config_sha256
+        ),
+        "fusion_config_sha256": fusion_config_sha256,
+        "calibration_bundle_sha256": calibration_bundle_sha256,
+    }
+    for name, value in digest_inputs.items():
+        _require_digest(value, name)
+    if SHA256_RE.fullmatch(labeler_image_digest) is None:
+        raise ValueError("labeler_image_digest must be pinned by SHA-256")
+    if SOURCE_REVISION_RE.fullmatch(labeler_source_revision) is None:
+        raise ValueError("labeler_source_revision must be immutable")
+    if (
+        labeler_bundle_version != ODD_LABELER_VERSION
+        or road_vlm_provider != "openai_compatible"
+        or map_resolver_provider != "amazon_bedrock"
+        or not road_vlm_model
+        or not road_vlm_model_revision
+        or not map_resolver_model_id
+        or not map_resolver_model_revision
+    ):
+        raise ValueError("ODD provider or labeler identity is unsupported")
+    normalized_sources = _normalized_enabled_sources(enabled_sources)
+    if "vlm" not in normalized_sources:
+        raise ValueError("the production ODD contract requires the road VLM")
+    if (
+        camera_anchor_interval_s <= 0
+        or maximum_camera_anchors <= 0
+        or trigger_context_s < 0
+        or not 0 <= refinement_confidence_threshold <= 1
+    ):
+        raise ValueError("ODD sampling configuration is invalid")
+    _validate_publication_prefix(publication_prefix)
+
+    ontology = ontology_document()
+    expected = {
+        "ontology_version": ontology["ontology_version"],
+        "ontology_sha256": ontology["ontology_sha256"],
+        "road_vlm_prompt_bundle_sha256": local_road_prompt_sha256(),
+        "road_vlm_decoding_config_sha256": (
+            local_road_decoding_sha256(max_tokens=4096)
+        ),
+        "map_resolver_prompt_bundle_sha256": (
+            local_bedrock_prompt_sha256()
+        ),
+        "map_resolver_decoding_config_sha256": (
+            local_bedrock_decoding_sha256(max_tokens=1024)
+        ),
+        "fusion_config_sha256": local_fusion_sha256(),
+        "calibration_bundle_sha256": local_calibration_sha256(),
+    }
+    actual = {
+        "ontology_version": ontology_version,
+        "ontology_sha256": ontology_sha256,
+        "road_vlm_prompt_bundle_sha256": road_vlm_prompt_bundle_sha256,
+        "road_vlm_decoding_config_sha256": (
+            road_vlm_decoding_config_sha256
+        ),
+        "map_resolver_prompt_bundle_sha256": (
+            map_resolver_prompt_bundle_sha256
+        ),
+        "map_resolver_decoding_config_sha256": (
+            map_resolver_decoding_config_sha256
+        ),
+        "fusion_config_sha256": fusion_config_sha256,
+        "calibration_bundle_sha256": calibration_bundle_sha256,
+    }
+    if actual != expected:
+        differences = sorted(
+            name for name in expected if actual[name] != expected[name]
+        )
+        raise ValueError(
+            f"ODD semantic contract differs from implementation: {differences}"
+        )
+
+    config_location = S3Location.parse(labeler_config_uri)
+    response = boto3.client("s3").get_object(
+        Bucket=config_location.bucket,
+        Key=config_location.key,
+    )
+    body = response["Body"]
+    try:
+        payload = body.read(MAX_ODD_ARTIFACT_BYTES + 1)
+    finally:
+        body.close()
+    if len(payload) > MAX_ODD_ARTIFACT_BYTES:
+        raise ValueError("ODD labeler config exceeds size cap")
+    if _sha256(payload) != labeler_config_sha256:
+        raise ValueError("ODD labeler config digest differs")
+    config = json.loads(payload)
+    expected_config = odd_labeler_config_document(list(normalized_sources))
+    if payload != _canonical_bytes(config) or config != expected_config:
+        raise ValueError("ODD labeler config is not the canonical contract")
+
+    return json.dumps(
+        {
+            "schema_version": "odd_semantic_contract_v1",
+            "ontology": {
+                "version": ontology_version,
+                "sha256": ontology_sha256,
+            },
+            "labeler": {
+                "bundle_version": labeler_bundle_version,
+                "config_uri": labeler_config_uri,
+                "config_sha256": labeler_config_sha256,
+                "image_digest": labeler_image_digest,
+                "source_revision": labeler_source_revision,
+                "enabled_sources": list(normalized_sources),
+            },
+            "road_vlm": {
+                "provider": road_vlm_provider,
+                "model": road_vlm_model,
+                "model_revision": road_vlm_model_revision,
+                "prompt_bundle_sha256": road_vlm_prompt_bundle_sha256,
+                "decoding_config_sha256": (
+                    road_vlm_decoding_config_sha256
+                ),
+            },
+            "map_resolver": {
+                "provider": map_resolver_provider,
+                "model_id": map_resolver_model_id,
+                "model_revision": map_resolver_model_revision,
+                "prompt_bundle_sha256": (
+                    map_resolver_prompt_bundle_sha256
+                ),
+                "decoding_config_sha256": (
+                    map_resolver_decoding_config_sha256
+                ),
+            },
+            "fusion_config_sha256": fusion_config_sha256,
+            "calibration_bundle_sha256": calibration_bundle_sha256,
+            "sampling": {
+                "camera_anchor_interval_s": camera_anchor_interval_s,
+                "maximum_camera_anchors": maximum_camera_anchors,
+                "trigger_context_s": trigger_context_s,
+                "refinement_confidence_threshold": (
+                    refinement_confidence_threshold
+                ),
+            },
+            "publication_prefix": publication_prefix,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
 
 
 def _scene_summary(
@@ -369,9 +674,17 @@ def _read_source_artifact(
 def label_odd_map_route(
     descriptor_json: str,
     capability_manifest_json: str,
+    enabled_sources: List[str],
+    ontology_sha256: str,
+    labeler_config_sha256: str,
 ) -> FlyteFile:
     from data_processing.odd_labeling.deterministic import label_map_route
 
+    normalized_sources = _validate_source_semantic_inputs(
+        enabled_sources,
+        ontology_sha256,
+        labeler_config_sha256,
+    )
     _, _, evidence = _load_canonical_scene(
         descriptor_json,
         capability_manifest_json,
@@ -380,7 +693,11 @@ def label_odd_map_route(
         source_stage="map_route_deterministic",
         descriptor_json=descriptor_json,
         scene_uid=evidence.scene_uid,
-        observations=label_map_route(evidence),
+        observations=(
+            label_map_route(evidence)
+            if "map_route" in normalized_sources
+            else ()
+        ),
     )
 
 
@@ -394,9 +711,17 @@ def label_odd_map_route(
 def label_odd_kinematics(
     descriptor_json: str,
     capability_manifest_json: str,
+    enabled_sources: List[str],
+    ontology_sha256: str,
+    labeler_config_sha256: str,
 ) -> FlyteFile:
     from data_processing.odd_labeling.deterministic import label_kinematics
 
+    normalized_sources = _validate_source_semantic_inputs(
+        enabled_sources,
+        ontology_sha256,
+        labeler_config_sha256,
+    )
     _, _, evidence = _load_canonical_scene(
         descriptor_json,
         capability_manifest_json,
@@ -405,7 +730,11 @@ def label_odd_kinematics(
         source_stage="gnss_ins",
         descriptor_json=descriptor_json,
         scene_uid=evidence.scene_uid,
-        observations=label_kinematics(evidence),
+        observations=(
+            label_kinematics(evidence)
+            if "gnss_ins" in normalized_sources
+            else ()
+        ),
     )
 
 
@@ -419,6 +748,9 @@ def label_odd_kinematics(
 def label_odd_image_quality(
     descriptor_json: str,
     capability_manifest_json: str,
+    enabled_sources: List[str],
+    ontology_sha256: str,
+    labeler_config_sha256: str,
     camera_anchor_interval_s: float,
     maximum_camera_anchors: int,
 ) -> FlyteFile:
@@ -429,23 +761,34 @@ def label_odd_image_quality(
         load_camera_anchors,
     )
 
+    normalized_sources = _validate_source_semantic_inputs(
+        enabled_sources,
+        ontology_sha256,
+        labeler_config_sha256,
+    )
     if camera_anchor_interval_s <= 0 or maximum_camera_anchors <= 0:
         raise ValueError("camera anchor sampling must be positive")
     _, _, evidence = _load_canonical_scene(
         descriptor_json,
         capability_manifest_json,
     )
-    anchors = load_camera_anchors(
-        boto3.client("s3"),
-        evidence,
-        interval_s=camera_anchor_interval_s,
-        maximum_anchors=maximum_camera_anchors,
-    )
+    anchors = ()
+    if "image_qc" in normalized_sources:
+        anchors = load_camera_anchors(
+            boto3.client("s3"),
+            evidence,
+            interval_s=camera_anchor_interval_s,
+            maximum_anchors=maximum_camera_anchors,
+        )
     return _source_artifact_file(
         source_stage="image_qc",
         descriptor_json=descriptor_json,
         scene_uid=evidence.scene_uid,
-        observations=label_image_quality(evidence, anchors),
+        observations=(
+            label_image_quality(evidence, anchors)
+            if "image_qc" in normalized_sources
+            else ()
+        ),
     )
 
 
@@ -476,8 +819,14 @@ def label_odd_visual(
     map_route_file: FlyteFile,
     kinematics_file: FlyteFile,
     image_quality_file: FlyteFile,
-    openai_model: str,
-    openai_model_revision: str,
+    enabled_sources: List[str],
+    ontology_sha256: str,
+    labeler_config_sha256: str,
+    road_vlm_provider: str,
+    road_vlm_model: str,
+    road_vlm_model_revision: str,
+    road_vlm_prompt_bundle_sha256: str,
+    road_vlm_decoding_config_sha256: str,
     camera_anchor_interval_s: float,
     maximum_camera_anchors: int,
     trigger_context_s: float,
@@ -491,8 +840,23 @@ def label_odd_visual(
         RoadVLMConfig,
         derive_visual_trigger_timestamps,
         label_visual_scene,
+        road_vlm_decoding_bundle_sha256,
+        road_vlm_prompt_bundle_sha256 as local_prompt_bundle_sha256,
     )
 
+    normalized_sources = _validate_source_semantic_inputs(
+        enabled_sources,
+        ontology_sha256,
+        labeler_config_sha256,
+    )
+    _require_digest(
+        road_vlm_prompt_bundle_sha256,
+        "road_vlm_prompt_bundle_sha256",
+    )
+    _require_digest(
+        road_vlm_decoding_config_sha256,
+        "road_vlm_decoding_config_sha256",
+    )
     if (
         camera_anchor_interval_s <= 0
         or maximum_camera_anchors <= 0
@@ -500,14 +864,21 @@ def label_odd_visual(
         or not 0 <= refinement_confidence_threshold <= 1
     ):
         raise ValueError("camera anchor sampling must be positive")
-    if openai_model and not openai_model_revision:
-        raise ValueError("OpenAI-compatible model revision must be pinned")
+    if (
+        road_vlm_provider != "openai_compatible"
+        or not road_vlm_model
+        or not road_vlm_model_revision
+        or road_vlm_prompt_bundle_sha256 != local_prompt_bundle_sha256()
+        or road_vlm_decoding_config_sha256
+        != road_vlm_decoding_bundle_sha256(max_tokens=4096)
+    ):
+        raise ValueError("road VLM semantic contract is invalid")
     _, _, evidence = _load_canonical_scene(
         descriptor_json,
         capability_manifest_json,
     )
     observations = ()
-    if openai_model:
+    if "vlm" in normalized_sources:
         map_route_artifact = _read_source_artifact(
             map_route_file,
             descriptor_json=descriptor_json,
@@ -545,12 +916,12 @@ def label_odd_visual(
         observer = OpenAICompatibleRoadObserver(
             RoadVLMConfig(
                 base_url=base_url,
-                model=openai_model,
+                model=road_vlm_model,
                 api_key=api_key or None,
                 timeout_s=600,
                 max_tokens=4096,
                 retry_count=2,
-                model_revision=openai_model_revision,
+                model_revision=road_vlm_model_revision,
             )
         )
         anchors = load_camera_anchors(
@@ -600,18 +971,47 @@ def label_odd_bedrock_map(
     descriptor_json: str,
     capability_manifest_json: str,
     map_route_file: FlyteFile,
-    bedrock_map_model_id: str,
-    bedrock_map_model_revision: str,
+    enabled_sources: List[str],
+    ontology_sha256: str,
+    labeler_config_sha256: str,
+    map_resolver_provider: str,
+    map_resolver_model_id: str,
+    map_resolver_model_revision: str,
+    map_resolver_prompt_bundle_sha256: str,
+    map_resolver_decoding_config_sha256: str,
 ) -> FlyteFile:
     import boto3
 
     from data_processing.odd_labeling.bedrock_map_resolver import (
         BedrockMapRouteResolver,
+        bedrock_map_decoding_config_sha256,
+        bedrock_map_prompt_bundle_sha256,
         resolve_ambiguous_map_route,
     )
 
-    if bool(bedrock_map_model_id) != bool(bedrock_map_model_revision):
-        raise ValueError("Bedrock map model ID and revision must be paired")
+    normalized_sources = _validate_source_semantic_inputs(
+        enabled_sources,
+        ontology_sha256,
+        labeler_config_sha256,
+    )
+    _require_digest(
+        map_resolver_prompt_bundle_sha256,
+        "map_resolver_prompt_bundle_sha256",
+    )
+    _require_digest(
+        map_resolver_decoding_config_sha256,
+        "map_resolver_decoding_config_sha256",
+    )
+    if (
+        map_resolver_provider != "amazon_bedrock"
+        or not map_resolver_model_id
+        or not map_resolver_model_revision
+        or map_resolver_prompt_bundle_sha256
+        != bedrock_map_prompt_bundle_sha256()
+        or map_resolver_decoding_config_sha256
+        != bedrock_map_decoding_config_sha256(max_tokens=1024)
+    ):
+        raise ValueError("Bedrock map resolver semantic contract is invalid")
     map_artifact = _read_source_artifact(
         map_route_file,
         descriptor_json=descriptor_json,
@@ -622,14 +1022,14 @@ def label_odd_bedrock_map(
         capability_manifest_json,
     )
     observations = ()
-    if bedrock_map_model_id:
+    if "map_route" in normalized_sources:
         resolver = BedrockMapRouteResolver(
             boto3.client(
                 "bedrock-runtime",
                 region_name=os.environ.get("AWS_REGION", "us-west-2"),
             ),
-            model_id=bedrock_map_model_id,
-            model_revision=bedrock_map_model_revision,
+            model_id=map_resolver_model_id,
+            model_revision=map_resolver_model_revision,
         )
         observations = resolve_ambiguous_map_route(
             resolver,
@@ -659,6 +1059,11 @@ def fuse_odd_scene(
     image_quality_file: FlyteFile,
     visual_file: FlyteFile,
     bedrock_map_file: FlyteFile,
+    enabled_sources: List[str],
+    ontology_sha256: str,
+    labeler_config_sha256: str,
+    fusion_config_sha256: str,
+    calibration_bundle_sha256: str,
     labeler_image_digest: str,
     labeler_source_revision: str,
     camera_anchor_interval_s: float,
@@ -669,13 +1074,35 @@ def fuse_odd_scene(
     from data_processing.odd_labeling.fusion import (
         EvidenceBuildContext,
         build_resolved_scene_labels,
+        fusion_config_sha256 as local_fusion_config_sha256,
     )
     from data_processing.odd_labeling.ontology import ONTOLOGY
+    from data_processing.odd_labeling.quality import (
+        calibration_bundle_sha256 as local_calibration_bundle_sha256,
+    )
     from data_processing.odd_labeling.schema import (
         SceneLabelRecord,
         make_observation,
     )
 
+    normalized_sources = _validate_source_semantic_inputs(
+        enabled_sources,
+        ontology_sha256,
+        labeler_config_sha256,
+    )
+    _require_digest(fusion_config_sha256, "fusion_config_sha256")
+    _require_digest(
+        calibration_bundle_sha256,
+        "calibration_bundle_sha256",
+    )
+    if "fusion" not in normalized_sources:
+        raise ValueError("fusion source must be enabled")
+    if (
+        fusion_config_sha256 != local_fusion_config_sha256()
+        or calibration_bundle_sha256
+        != local_calibration_bundle_sha256()
+    ):
+        raise ValueError("fusion or calibration semantic contract differs")
     if SHA256_RE.fullmatch(labeler_image_digest) is None:
         raise ValueError("labeler_image_digest must be a sha256 digest")
     if SOURCE_REVISION_RE.fullmatch(labeler_source_revision) is None:
@@ -762,6 +1189,11 @@ def fuse_odd_scene(
             "labeler_version": ODD_LABELER_VERSION,
             "labeler_image_digest": labeler_image_digest,
             "labeler_source_revision": labeler_source_revision,
+            "ontology_sha256": ontology_sha256,
+            "labeler_config_sha256": labeler_config_sha256,
+            "fusion_config_sha256": fusion_config_sha256,
+            "calibration_bundle_sha256": calibration_bundle_sha256,
+            "enabled_sources": list(normalized_sources),
             "road_vlm_sampling": {
                 "regular_interval_s": camera_anchor_interval_s,
                 "maximum_anchors": maximum_camera_anchors,
@@ -796,10 +1228,22 @@ def fuse_odd_scene(
 def map_odd_scenes(
     descriptors: List[str],
     capability_manifest_json: str,
-    openai_model: str,
-    openai_model_revision: str,
-    bedrock_map_model_id: str,
-    bedrock_map_model_revision: str,
+    semantic_contract_json: str,
+    enabled_sources: List[str],
+    ontology_sha256: str,
+    labeler_config_sha256: str,
+    road_vlm_provider: str,
+    road_vlm_model: str,
+    road_vlm_model_revision: str,
+    road_vlm_prompt_bundle_sha256: str,
+    road_vlm_decoding_config_sha256: str,
+    map_resolver_provider: str,
+    map_resolver_model_id: str,
+    map_resolver_model_revision: str,
+    map_resolver_prompt_bundle_sha256: str,
+    map_resolver_decoding_config_sha256: str,
+    fusion_config_sha256: str,
+    calibration_bundle_sha256: str,
     labeler_image_digest: str,
     labeler_source_revision: str,
     camera_anchor_interval_s: float,
@@ -812,6 +1256,9 @@ def map_odd_scenes(
     bedrock_concurrency: int,
     fusion_concurrency: int,
 ) -> List[FlyteFile]:
+    semantic_contract = json.loads(semantic_contract_json)
+    if semantic_contract.get("schema_version") != "odd_semantic_contract_v1":
+        raise ValueError("validated ODD semantic contract is invalid")
     concurrency_values = (
         deterministic_concurrency,
         image_qc_concurrency,
@@ -825,6 +1272,9 @@ def map_odd_scenes(
         functools.partial(
             label_odd_map_route,
             capability_manifest_json=capability_manifest_json,
+            enabled_sources=enabled_sources,
+            ontology_sha256=ontology_sha256,
+            labeler_config_sha256=labeler_config_sha256,
         ),
         concurrency=deterministic_concurrency,
     )(descriptor_json=descriptors)
@@ -832,6 +1282,9 @@ def map_odd_scenes(
         functools.partial(
             label_odd_kinematics,
             capability_manifest_json=capability_manifest_json,
+            enabled_sources=enabled_sources,
+            ontology_sha256=ontology_sha256,
+            labeler_config_sha256=labeler_config_sha256,
         ),
         concurrency=deterministic_concurrency,
     )(descriptor_json=descriptors)
@@ -839,6 +1292,9 @@ def map_odd_scenes(
         functools.partial(
             label_odd_image_quality,
             capability_manifest_json=capability_manifest_json,
+            enabled_sources=enabled_sources,
+            ontology_sha256=ontology_sha256,
+            labeler_config_sha256=labeler_config_sha256,
             camera_anchor_interval_s=camera_anchor_interval_s,
             maximum_camera_anchors=maximum_camera_anchors,
         ),
@@ -848,8 +1304,18 @@ def map_odd_scenes(
         functools.partial(
             label_odd_visual,
             capability_manifest_json=capability_manifest_json,
-            openai_model=openai_model,
-            openai_model_revision=openai_model_revision,
+            enabled_sources=enabled_sources,
+            ontology_sha256=ontology_sha256,
+            labeler_config_sha256=labeler_config_sha256,
+            road_vlm_provider=road_vlm_provider,
+            road_vlm_model=road_vlm_model,
+            road_vlm_model_revision=road_vlm_model_revision,
+            road_vlm_prompt_bundle_sha256=(
+                road_vlm_prompt_bundle_sha256
+            ),
+            road_vlm_decoding_config_sha256=(
+                road_vlm_decoding_config_sha256
+            ),
             camera_anchor_interval_s=camera_anchor_interval_s,
             maximum_camera_anchors=maximum_camera_anchors,
             trigger_context_s=trigger_context_s,
@@ -868,8 +1334,18 @@ def map_odd_scenes(
         functools.partial(
             label_odd_bedrock_map,
             capability_manifest_json=capability_manifest_json,
-            bedrock_map_model_id=bedrock_map_model_id,
-            bedrock_map_model_revision=bedrock_map_model_revision,
+            enabled_sources=enabled_sources,
+            ontology_sha256=ontology_sha256,
+            labeler_config_sha256=labeler_config_sha256,
+            map_resolver_provider=map_resolver_provider,
+            map_resolver_model_id=map_resolver_model_id,
+            map_resolver_model_revision=map_resolver_model_revision,
+            map_resolver_prompt_bundle_sha256=(
+                map_resolver_prompt_bundle_sha256
+            ),
+            map_resolver_decoding_config_sha256=(
+                map_resolver_decoding_config_sha256
+            ),
         ),
         concurrency=bedrock_concurrency,
     )(
@@ -880,6 +1356,11 @@ def map_odd_scenes(
         functools.partial(
             fuse_odd_scene,
             capability_manifest_json=capability_manifest_json,
+            enabled_sources=enabled_sources,
+            ontology_sha256=ontology_sha256,
+            labeler_config_sha256=labeler_config_sha256,
+            fusion_config_sha256=fusion_config_sha256,
+            calibration_bundle_sha256=calibration_bundle_sha256,
             labeler_image_digest=labeler_image_digest,
             labeler_source_revision=labeler_source_revision,
             camera_anchor_interval_s=camera_anchor_interval_s,
@@ -911,15 +1392,30 @@ def map_odd_scenes(
 def publish_odd_labelset(
     scene_files: List[FlyteFile],
     capability_manifest_json: str,
+    semantic_contract_json: str,
     dataset_name: str,
     dataset_version: str,
     dataset_manifest_uri: str,
     dataset_manifest_sha256: str,
     datasets_bucket: str,
-    openai_model: str,
-    openai_model_revision: str,
-    bedrock_map_model_id: str,
-    bedrock_map_model_revision: str,
+    ontology_version: str,
+    ontology_sha256: str,
+    labeler_bundle_version: str,
+    labeler_config_uri: str,
+    labeler_config_sha256: str,
+    enabled_sources: List[str],
+    road_vlm_provider: str,
+    road_vlm_model: str,
+    road_vlm_model_revision: str,
+    road_vlm_prompt_bundle_sha256: str,
+    road_vlm_decoding_config_sha256: str,
+    map_resolver_provider: str,
+    map_resolver_model_id: str,
+    map_resolver_model_revision: str,
+    map_resolver_prompt_bundle_sha256: str,
+    map_resolver_decoding_config_sha256: str,
+    fusion_config_sha256: str,
+    calibration_bundle_sha256: str,
     labeler_image_digest: str,
     labeler_source_revision: str,
     camera_anchor_interval_s: float,
@@ -927,6 +1423,7 @@ def publish_odd_labelset(
     trigger_context_s: float,
     refinement_confidence_threshold: float,
     publication_scope: str,
+    publication_prefix: str,
 ) -> OddPublication:
     import boto3
 
@@ -949,6 +1446,15 @@ def publish_odd_labelset(
         capability_manifest_json
     )
     capability_manifest_sha256 = capability_manifest.semantic_sha256()
+    semantic_contract = json.loads(semantic_contract_json)
+    if semantic_contract.get("schema_version") != "odd_semantic_contract_v1":
+        raise ValueError("validated ODD semantic contract is invalid")
+    normalized_sources = _validate_source_semantic_inputs(
+        enabled_sources,
+        ontology_sha256,
+        labeler_config_sha256,
+    )
+    _validate_publication_prefix(publication_prefix)
     if (
         capability_manifest.dataset_name != dataset_name
         or capability_manifest.dataset_version != dataset_version
@@ -956,8 +1462,6 @@ def publish_odd_labelset(
         != dataset_manifest_sha256
     ):
         raise ValueError("capability manifest differs from publication coordinate")
-    if bool(bedrock_map_model_id) != bool(bedrock_map_model_revision):
-        raise ValueError("Bedrock map model ID and revision must be paired")
     wrappers = []
     for scene_file in scene_files:
         path = scene_file.download()
@@ -1027,28 +1531,31 @@ def publish_odd_labelset(
     )
 
     ontology = ontology_document()
+    if (
+        ontology["ontology_version"] != ontology_version
+        or ontology["ontology_sha256"] != ontology_sha256
+        or labeler_bundle_version != ODD_LABELER_VERSION
+        or semantic_contract["ontology"]
+        != {"version": ontology_version, "sha256": ontology_sha256}
+        or semantic_contract["labeler"]["config_uri"]
+        != labeler_config_uri
+        or semantic_contract["labeler"]["config_sha256"]
+        != labeler_config_sha256
+        or semantic_contract["labeler"]["enabled_sources"]
+        != list(normalized_sources)
+        or semantic_contract["publication_prefix"] != publication_prefix
+    ):
+        raise ValueError("publication semantic contract differs from inputs")
     identity = {
-        "schema_version": "odd_labelset_identity_v1",
+        "schema_version": "odd_labelset_identity_v2",
         "dataset_name": dataset_name,
         "dataset_version": dataset_version,
         "dataset_manifest_sha256": dataset_manifest_sha256,
         "capability_manifest_sha256": capability_manifest_sha256,
-        "ontology_sha256": ontology["ontology_sha256"],
-        "labeler_version": ODD_LABELER_VERSION,
-        "labeler_image_digest": labeler_image_digest,
-        "labeler_source_revision": labeler_source_revision,
-        "openai_model": openai_model,
-        "openai_model_revision": openai_model_revision,
-        "road_vlm_sampling": {
-            "regular_interval_s": camera_anchor_interval_s,
-            "maximum_anchors": maximum_camera_anchors,
-            "trigger_context_s": trigger_context_s,
-            "refinement_confidence_threshold": (
-                refinement_confidence_threshold
-            ),
-        },
-        "bedrock_map_model_id": bedrock_map_model_id,
-        "bedrock_map_model_revision": bedrock_map_model_revision,
+        "semantic_contract_sha256": _sha256(
+            semantic_contract_json.encode("utf-8")
+        ),
+        "semantic_contract": semantic_contract,
         "statistics_schema_version": STATISTICS_SCHEMA_VERSION,
         "parquet_schema_version": PARQUET_SCHEMA_VERSION,
         "quality_schema_version": QUALITY_SCHEMA_VERSION,
@@ -1059,9 +1566,7 @@ def publish_odd_labelset(
         ],
     }
     labelset_id = f"oddls-{_sha256(_canonical_bytes(identity))[:32]}"
-    root = (
-        f"{dataset_name}/{dataset_version}/odd/labelsets/{labelset_id}"
-    )
+    root = f"{publication_prefix}/labelsets/{labelset_id}"
     s3 = boto3.client("s3")
     statistics = _statistics(records, ontology, labelset_id)
     quality_documents = build_quality_documents(
@@ -1212,12 +1717,21 @@ def publish_odd_labelset(
         "labeler_version": ODD_LABELER_VERSION,
         "labeler_image_digest": labeler_image_digest,
         "labeler_source_revision": labeler_source_revision,
+        "semantic_contract": semantic_contract,
+        "semantic_contract_sha256": _sha256(
+            semantic_contract_json.encode("utf-8")
+        ),
         "publication_scope": validated_publication_scope,
         "expected_scene_count": expected_scene_count,
         "scene_count": len(records),
         "openai_compatible": {
-            "model": openai_model,
-            "model_revision": openai_model_revision,
+            "provider": road_vlm_provider,
+            "model": road_vlm_model,
+            "model_revision": road_vlm_model_revision,
+            "prompt_bundle_sha256": road_vlm_prompt_bundle_sha256,
+            "decoding_config_sha256": (
+                road_vlm_decoding_config_sha256
+            ),
             "sampling": {
                 "regular_interval_s": camera_anchor_interval_s,
                 "maximum_anchors": maximum_camera_anchors,
@@ -1228,8 +1742,15 @@ def publish_odd_labelset(
             },
         },
         "bedrock_map_resolver": {
-            "model_id": bedrock_map_model_id,
-            "model_revision": bedrock_map_model_revision,
+            "provider": map_resolver_provider,
+            "model_id": map_resolver_model_id,
+            "model_revision": map_resolver_model_revision,
+            "prompt_bundle_sha256": (
+                map_resolver_prompt_bundle_sha256
+            ),
+            "decoding_config_sha256": (
+                map_resolver_decoding_config_sha256
+            ),
             "input_policy": "privacy_filtered_map_route_only",
         },
         "quality": {
@@ -1259,7 +1780,7 @@ def publish_odd_labelset(
         }
         s3.put_object(
             Bucket=datasets_bucket,
-            Key=f"{dataset_name}/{dataset_version}/odd/latest.json",
+            Key=f"{publication_prefix}/latest.json",
             Body=_canonical_bytes(pointer),
             ContentType="application/json",
             Metadata={"odd-schema": "v1", "status": "ready"},
@@ -1278,10 +1799,25 @@ def wf_generate_odd_labelset(
     dataset_manifest_uri: str,
     dataset_manifest_sha256: str,
     datasets_bucket: str,
-    openai_model: str,
-    openai_model_revision: str,
-    bedrock_map_model_id: str,
-    bedrock_map_model_revision: str,
+    ontology_version: str,
+    ontology_sha256: str,
+    labeler_bundle_version: str,
+    labeler_config_uri: str,
+    labeler_config_sha256: str,
+    enabled_sources: List[str],
+    road_vlm_provider: str,
+    road_vlm_model: str,
+    road_vlm_model_revision: str,
+    road_vlm_prompt_bundle_sha256: str,
+    road_vlm_decoding_config_sha256: str,
+    map_resolver_provider: str,
+    map_resolver_model_id: str,
+    map_resolver_model_revision: str,
+    map_resolver_prompt_bundle_sha256: str,
+    map_resolver_decoding_config_sha256: str,
+    fusion_config_sha256: str,
+    calibration_bundle_sha256: str,
+    publication_prefix: str,
     labeler_image_digest: str,
     labeler_source_revision: str,
     camera_anchor_interval_s: float = 1.0,
@@ -1295,6 +1831,39 @@ def wf_generate_odd_labelset(
     publication_scope: str = "full",
 ) -> OddPublication:
     """Label a published dataset independently from every training workflow."""
+    semantic_contract_json = validate_odd_semantic_contract(
+        ontology_version=ontology_version,
+        ontology_sha256=ontology_sha256,
+        labeler_bundle_version=labeler_bundle_version,
+        labeler_config_uri=labeler_config_uri,
+        labeler_config_sha256=labeler_config_sha256,
+        enabled_sources=enabled_sources,
+        road_vlm_provider=road_vlm_provider,
+        road_vlm_model=road_vlm_model,
+        road_vlm_model_revision=road_vlm_model_revision,
+        road_vlm_prompt_bundle_sha256=road_vlm_prompt_bundle_sha256,
+        road_vlm_decoding_config_sha256=(
+            road_vlm_decoding_config_sha256
+        ),
+        map_resolver_provider=map_resolver_provider,
+        map_resolver_model_id=map_resolver_model_id,
+        map_resolver_model_revision=map_resolver_model_revision,
+        map_resolver_prompt_bundle_sha256=(
+            map_resolver_prompt_bundle_sha256
+        ),
+        map_resolver_decoding_config_sha256=(
+            map_resolver_decoding_config_sha256
+        ),
+        fusion_config_sha256=fusion_config_sha256,
+        calibration_bundle_sha256=calibration_bundle_sha256,
+        labeler_image_digest=labeler_image_digest,
+        labeler_source_revision=labeler_source_revision,
+        camera_anchor_interval_s=camera_anchor_interval_s,
+        maximum_camera_anchors=maximum_camera_anchors,
+        trigger_context_s=trigger_context_s,
+        refinement_confidence_threshold=refinement_confidence_threshold,
+        publication_prefix=publication_prefix,
+    )
     scene_plan = resolve_odd_scenes(
         dataset_manifest_uri=dataset_manifest_uri,
         dataset_manifest_sha256=dataset_manifest_sha256,
@@ -1303,10 +1872,28 @@ def wf_generate_odd_labelset(
     scene_files = map_odd_scenes(
         descriptors=scene_plan.descriptors,
         capability_manifest_json=scene_plan.capability_manifest_json,
-        openai_model=openai_model,
-        openai_model_revision=openai_model_revision,
-        bedrock_map_model_id=bedrock_map_model_id,
-        bedrock_map_model_revision=bedrock_map_model_revision,
+        semantic_contract_json=semantic_contract_json,
+        enabled_sources=enabled_sources,
+        ontology_sha256=ontology_sha256,
+        labeler_config_sha256=labeler_config_sha256,
+        road_vlm_provider=road_vlm_provider,
+        road_vlm_model=road_vlm_model,
+        road_vlm_model_revision=road_vlm_model_revision,
+        road_vlm_prompt_bundle_sha256=road_vlm_prompt_bundle_sha256,
+        road_vlm_decoding_config_sha256=(
+            road_vlm_decoding_config_sha256
+        ),
+        map_resolver_provider=map_resolver_provider,
+        map_resolver_model_id=map_resolver_model_id,
+        map_resolver_model_revision=map_resolver_model_revision,
+        map_resolver_prompt_bundle_sha256=(
+            map_resolver_prompt_bundle_sha256
+        ),
+        map_resolver_decoding_config_sha256=(
+            map_resolver_decoding_config_sha256
+        ),
+        fusion_config_sha256=fusion_config_sha256,
+        calibration_bundle_sha256=calibration_bundle_sha256,
         labeler_image_digest=labeler_image_digest,
         labeler_source_revision=labeler_source_revision,
         camera_anchor_interval_s=camera_anchor_interval_s,
@@ -1322,15 +1909,36 @@ def wf_generate_odd_labelset(
     return publish_odd_labelset(
         scene_files=scene_files,
         capability_manifest_json=scene_plan.capability_manifest_json,
+        semantic_contract_json=semantic_contract_json,
         dataset_name=dataset_name,
         dataset_version=dataset_version,
         dataset_manifest_uri=dataset_manifest_uri,
         dataset_manifest_sha256=dataset_manifest_sha256,
         datasets_bucket=datasets_bucket,
-        openai_model=openai_model,
-        openai_model_revision=openai_model_revision,
-        bedrock_map_model_id=bedrock_map_model_id,
-        bedrock_map_model_revision=bedrock_map_model_revision,
+        ontology_version=ontology_version,
+        ontology_sha256=ontology_sha256,
+        labeler_bundle_version=labeler_bundle_version,
+        labeler_config_uri=labeler_config_uri,
+        labeler_config_sha256=labeler_config_sha256,
+        enabled_sources=enabled_sources,
+        road_vlm_provider=road_vlm_provider,
+        road_vlm_model=road_vlm_model,
+        road_vlm_model_revision=road_vlm_model_revision,
+        road_vlm_prompt_bundle_sha256=road_vlm_prompt_bundle_sha256,
+        road_vlm_decoding_config_sha256=(
+            road_vlm_decoding_config_sha256
+        ),
+        map_resolver_provider=map_resolver_provider,
+        map_resolver_model_id=map_resolver_model_id,
+        map_resolver_model_revision=map_resolver_model_revision,
+        map_resolver_prompt_bundle_sha256=(
+            map_resolver_prompt_bundle_sha256
+        ),
+        map_resolver_decoding_config_sha256=(
+            map_resolver_decoding_config_sha256
+        ),
+        fusion_config_sha256=fusion_config_sha256,
+        calibration_bundle_sha256=calibration_bundle_sha256,
         labeler_image_digest=labeler_image_digest,
         labeler_source_revision=labeler_source_revision,
         camera_anchor_interval_s=camera_anchor_interval_s,
@@ -1338,6 +1946,7 @@ def wf_generate_odd_labelset(
         trigger_context_s=trigger_context_s,
         refinement_confidence_threshold=refinement_confidence_threshold,
         publication_scope=publication_scope,
+        publication_prefix=publication_prefix,
     )
 
 
