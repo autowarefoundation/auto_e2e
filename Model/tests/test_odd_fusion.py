@@ -91,6 +91,44 @@ def test_source_claim_becomes_auditable_evidence() -> None:
     assert evidence.provenance.details["request_sha256"] == "7" * 64
 
 
+def test_source_policy_thresholds_change_evidence_config_identity() -> None:
+    first = _observation(
+        key="odd.ego.speed_bin",
+        values=("low_speed",),
+        source="gnss_ins",
+        provenance={
+            "labeler_version": "odd_deterministic_kinematics_v3",
+            "kinematics_policy_version": "odd_gnss_ins_kinematics_v2",
+            "maximum_gap_ns": 500_000_000,
+            "stationary_epsilon_kph": 0.5,
+            "stationary_dwell_ns": 1_000_000_000,
+        },
+    )
+    second = _observation(
+        key="odd.ego.speed_bin",
+        values=("low_speed",),
+        source="gnss_ins",
+        provenance={
+            **first.provenance,
+            "maximum_gap_ns": 750_000_000,
+        },
+    )
+
+    first_evidence = source_observations_to_evidence(
+        (first,),
+        context=_context(),
+    )[0]
+    second_evidence = source_observations_to_evidence(
+        (second,),
+        context=_context(),
+    )[0]
+
+    assert (
+        first_evidence.provenance.config_sha256
+        != second_evidence.provenance.config_sha256
+    )
+
+
 def test_map_evidence_retains_bedrock_model_identity() -> None:
     observation = _observation(
         key="odd.route.action",
