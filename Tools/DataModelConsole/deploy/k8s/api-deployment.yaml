@@ -75,6 +75,16 @@ spec:
               value: "false"
             - name: EXACT_GEO_REQUIRED_ROLE
               value: "console-exact-geo"
+            # Dataset Labeler writes remain disabled until trusted auth
+            # middleware attaches the required operator role.
+            - name: ODD_OPERATIONS_ENABLED
+              value: "false"
+            - name: ODD_OPERATIONS_ALLOW_FULL
+              value: "false"
+            - name: ODD_OPERATIONS_REQUIRED_ROLE
+              value: "console-odd-operator"
+            - name: ODD_LAUNCH_PLAN_NAME
+              value: "odd-dataset-labeler"
             # Go runtime does not read the cgroup memory limit; set it
             # explicitly (~90% of the container limit) so GC runs before OOM.
             - name: GOMEMLIMIT
