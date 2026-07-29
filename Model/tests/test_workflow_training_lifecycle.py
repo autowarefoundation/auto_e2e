@@ -1075,11 +1075,10 @@ def test_resume_policy_transition_enables_repeat_and_resets_patience():
         },
     )
 
-    assert transition["policy_version"] == (
-        "navigation_repeat_resume_transition_v1"
-    )
+    assert transition["policy_version"] == "dual_best_resume_transition_v1"
     assert transition["junction_sampling"]["from"]["enabled"] is False
     assert transition["junction_sampling"]["to"]["enabled"] is True
+    assert transition["junction_sampling"]["changed"] is True
     assert transition["early_stopping_patience"] == {
         "from": 3,
         "to": 8,
@@ -1088,31 +1087,165 @@ def test_resume_policy_transition_enables_repeat_and_resets_patience():
     assert transition["scheduler_state_action"] == (
         "reset_plateau_state_preserve_optimizer_lr"
     )
-    assert transition["best_checkpoint_scope"] == "post_transition"
+    assert transition["best_checkpoint_scope"] == "full_history"
 
-    bad_epochs, best = workflows._transition_resume_selection_state(
-        transition,
-        bad_epochs=2,
-        best_checkpoint={
-            "epoch": 5,
-            "uri": "s3://checkpoints/run/epoch-0005.pt",
-            "sha256": "a" * 64,
-            "selection": {"score": 0.42},
+    score_best = {
+        "epoch": 1,
+        "uri": "s3://checkpoints/run/epoch-0001.pt",
+        "sha256": "a" * 64,
+        "selection": {
+            "score": 0.52,
+            "components": {"trajectory": 0.40},
         },
+    }
+    trajectory_best = {
+        "epoch": 2,
+        "uri": "s3://checkpoints/run/epoch-0002.pt",
+        "sha256": "b" * 64,
+        "selection": {
+            "score": 0.51,
+            "components": {"trajectory": 0.45},
+        },
+    }
+    bad_epochs, best, best_trajectory = (
+        workflows._transition_resume_selection_state(
+            transition,
+            bad_epochs=2,
+            best_checkpoint=score_best,
+            best_trajectory_checkpoint=trajectory_best,
+        )
     )
 
     assert bad_epochs == 0
-    assert best is None
+    assert best == score_best
+    assert best_trajectory == trajectory_best
     assert transition["bad_epochs_before_reset"] == 2
-    assert transition["best_before_reset"] == {
-        "epoch": 5,
-        "uri": "s3://checkpoints/run/epoch-0005.pt",
+    assert transition["best_before_resume"] == {
+        "epoch": 1,
+        "uri": "s3://checkpoints/run/epoch-0001.pt",
         "sha256": "a" * 64,
-        "selection_score": 0.42,
+        "selection_score": 0.52,
+    }
+    assert transition["best_trajectory_before_resume"] == {
+        "epoch": 2,
+        "uri": "s3://checkpoints/run/epoch-0002.pt",
+        "sha256": "b" * 64,
+        "trajectory_utility": 0.45,
     }
 
 
-def test_resume_transition_wiring_resets_scheduler_and_best_scope():
+def test_resume_policy_transition_allows_patience_only_continuation():
+    transition = workflows._resume_policy_transition(
+        saved_config={
+            "junction_sampling": {"enabled": False, "policy": None},
+            "early_stopping_patience": 3,
+        },
+        requested_config={
+            "junction_sampling": {"enabled": False, "policy": None},
+            "early_stopping_patience": 5,
+        },
+    )
+
+    assert transition["junction_sampling"]["changed"] is False
+    assert transition["early_stopping_patience"] == {"from": 3, "to": 5}
+
+
+@pytest.mark.parametrize(
+    (
+        "candidate_score",
+        "candidate_trajectory",
+        "expected_score",
+        "expected_trajectory",
+        "expected_patience_improvement",
+    ),
+    [
+        (0.61, 0.49, True, False, True),
+        (0.59, 0.51, False, True, True),
+        (0.59, 0.49, False, False, False),
+    ],
+)
+def test_dual_best_improvement_controls_patience(
+    candidate_score,
+    candidate_trajectory,
+    expected_score,
+    expected_trajectory,
+    expected_patience_improvement,
+):
+    score_improved, trajectory_improved = (
+        workflows._dual_best_improvements(
+            {
+                "score": candidate_score,
+                "components": {"trajectory": candidate_trajectory},
+            },
+            best_selection={
+                "score": 0.60,
+                "components": {"trajectory": 0.40},
+            },
+            best_trajectory_selection={
+                "score": 0.50,
+                "components": {"trajectory": 0.50},
+            },
+        )
+    )
+
+    assert score_improved is expected_score
+    assert trajectory_improved is expected_trajectory
+    assert (
+        score_improved or trajectory_improved
+    ) is expected_patience_improvement
+
+
+def test_trajectory_best_is_reconstructed_from_old_metric_history():
+    history = [
+        {
+            "epoch": 1,
+            "val_ade": 4.35,
+            "val_fde": 11.76,
+            "checkpoint_uri": "s3://checkpoints/run/epoch-0001.pt",
+            "checkpoint_sha256": "a" * 64,
+            "checkpoint_selection": {
+                "policy_version": SELECTOR_POLICY_VERSION,
+                "score": 0.53,
+                "components": {"trajectory": 0.40},
+            },
+        },
+        {
+            "epoch": 2,
+            "val_ade": 4.31,
+            "val_fde": 11.72,
+            "checkpoint_uri": "s3://checkpoints/run/epoch-0002.pt",
+            "checkpoint_sha256": "b" * 64,
+            "checkpoint_selection": {
+                "policy_version": SELECTOR_POLICY_VERSION,
+                "score": 0.52,
+                "components": {"trajectory": 0.45},
+            },
+        },
+        {
+            "epoch": 3,
+            "val_ade": 5.28,
+            "val_fde": 14.01,
+            "checkpoint_uri": "s3://checkpoints/run/epoch-0003.pt",
+            "checkpoint_sha256": "c" * 64,
+            "checkpoint_selection": {
+                "policy_version": SELECTOR_POLICY_VERSION,
+                "score": 0.50,
+                "components": {"trajectory": 0.4504},
+            },
+        },
+    ]
+
+    best = workflows._best_trajectory_checkpoint_from_history(
+        history,
+        min_delta=0.0005,
+    )
+
+    assert best["epoch"] == 2
+    assert best["uri"].endswith("epoch-0002.pt")
+    assert best["sha256"] == "b" * 64
+
+
+def test_resume_transition_wiring_resets_scheduler_and_preserves_bests():
     source = inspect.getsource(workflows.train_il.task_function)
 
     envelope_validation = source.index(
@@ -1127,11 +1260,8 @@ def test_resume_transition_wiring_resets_scheduler_and_best_scope():
     optimization_restore = source.index(
         "_restore_resume_optimization_state("
     )
-    selection_reset = source.index(
+    selection_transition = source.index(
         "_transition_resume_selection_state("
-    )
-    pending_pointer = source.index(
-        "mark_best_pointer_transition_pending("
     )
     active_pointer = source.index(
         "if best_checkpoint is not None:\n"
@@ -1139,11 +1269,11 @@ def test_resume_transition_wiring_resets_scheduler_and_best_scope():
     )
 
     assert envelope_validation < transition_parsing < payload_validation
-    assert payload_validation < optimization_restore < selection_reset
-    assert selection_reset < pending_pointer < active_pointer
+    assert payload_validation < optimization_restore < selection_transition
+    assert selection_transition < active_pointer
     assert '"resume_plateau_state_reset": "true"' in source
     assert '"resume_optimizer_lr_preserved": "true"' in source
-    assert '"resume_best_checkpoint_reset": "true"' in source
+    assert '"resume_best_checkpoints_preserved": "true"' in source
 
 
 def test_resume_transition_preserves_optimizer_lr_and_resets_plateau():
@@ -1197,10 +1327,10 @@ def test_resume_transition_preserves_optimizer_lr_and_resets_plateau():
 @pytest.mark.parametrize(
     ("saved_enabled", "requested_enabled", "saved_patience", "new_patience"),
     [
-        (True, True, 3, 8),
-        (False, False, 3, 8),
+        (True, False, 3, 8),
         (False, True, 3, 3),
         (False, True, 8, 3),
+        (False, False, 3, 3),
     ],
 )
 def test_resume_policy_transition_rejects_unsupported_changes(
@@ -1317,11 +1447,11 @@ class _RegistryClient:
         self.tags[(name, version, key)] = value
 
 
-def test_registry_reuses_one_version_when_best_is_final():
+def test_registry_reuses_one_version_for_all_checkpoint_roles():
     client = _RegistryClient()
     kwargs = {
         "run_id": "run-1",
-        "roles": ["final", "best"],
+        "roles": ["final", "best_trajectory", "best"],
         "epoch": 4,
         "checkpoint_uri": "s3://checkpoints/run-1/epoch-0004.pt",
         "checkpoint_sha256": "a" * 64,
@@ -1336,7 +1466,7 @@ def test_registry_reuses_one_version_when_best_is_final():
     assert len(client.versions) == 1
     assert client.tags[
         ("auto-e2e-driving-policy", "1", "checkpoint_role")
-    ] == "best,final"
+    ] == "best,best_trajectory,final"
 
 
 def test_registry_records_composite_checkpoint_selection():
