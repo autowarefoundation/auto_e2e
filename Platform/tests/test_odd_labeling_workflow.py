@@ -363,9 +363,17 @@ def test_provider_report_aggregates_requests_without_raw_responses() -> None:
             "input_image_count": 6,
             "request_metadata": {"bundle": "road"},
             "raw_response": {"result": "clear"},
+            "protocol_repairs": [
+                {
+                    "kind": "scene_camera_id_to_null",
+                    "key": "odd.environment.sky",
+                    "before": "front_center",
+                    "after": None,
+                }
+            ],
             "usage": {"input_tokens": 100, "output_tokens": 20},
             "error_type": None,
-            "schema_version": "odd_provider_exchange_v1",
+            "schema_version": "odd_provider_exchange_v2",
         },
         {
             "backend": "ORV",
@@ -382,7 +390,7 @@ def test_provider_report_aggregates_requests_without_raw_responses() -> None:
             "raw_response": None,
             "usage": {},
             "error_type": "TimeoutError",
-            "schema_version": "odd_provider_exchange_v1",
+            "schema_version": "odd_provider_exchange_v2",
         },
         {
             "backend": "ORV",
@@ -399,13 +407,13 @@ def test_provider_report_aggregates_requests_without_raw_responses() -> None:
             "raw_response": {"result": "overcast"},
             "usage": {"input_tokens": 100, "output_tokens": 30},
             "error_type": None,
-            "schema_version": "odd_provider_exchange_v1",
+            "schema_version": "odd_provider_exchange_v2",
         },
     ]
 
     report = _provider_report(exchanges)
 
-    assert report["schema_version"] == "odd_provider_report_v1"
+    assert report["schema_version"] == "odd_provider_report_v2"
     assert "raw_response" not in json.dumps(report)
     assert report["totals"] == {
         "attempt_count": 3,
@@ -413,6 +421,7 @@ def test_provider_report_aggregates_requests_without_raw_responses() -> None:
         "input_image_count": 18,
         "request_count": 2,
         "successful_count": 2,
+        "protocol_repair_count": 1,
     }
     backend = report["backends"][0]
     assert backend["backend"] == "ORV"
@@ -426,6 +435,11 @@ def test_provider_report_aggregates_requests_without_raw_responses() -> None:
     assert backend["usage"] == {
         "input_tokens": 200,
         "output_tokens": 50,
+    }
+    assert backend["protocol_repairs"] == {
+        "count": 1,
+        "by_kind": {"scene_camera_id_to_null": 1},
+        "by_key": {"odd.environment.sky": 1},
     }
     assert backend["estimated_cost_usd"] is None
     assert (
@@ -450,7 +464,7 @@ def test_provider_audit_keys_are_backend_separated_and_content_addressed() -> No
         "raw_response": {"result": "clear"},
         "usage": {},
         "error_type": None,
-        "schema_version": "odd_provider_exchange_v1",
+        "schema_version": "odd_provider_exchange_v2",
     }
     key = _provider_exchange_key(
         "kitscenes/v3.0/odd",
@@ -530,9 +544,9 @@ def test_workflow_interface_does_not_expose_endpoint_url() -> None:
         "trigger_context_s",
         "refinement_confidence_threshold",
     }.issubset(inputs)
-    assert ODD_LABELER_VERSION == "odd_dataset_labeler_v7"
+    assert ODD_LABELER_VERSION == "odd_dataset_labeler_v8"
     assert ODD_SOURCE_POLICY_VERSIONS["gnss_ins"] == "odd_gnss_ins_policy_v2"
-    assert ODD_SOURCE_POLICY_VERSIONS["vlm"] == "odd_road_vlm_policy_v5"
+    assert ODD_SOURCE_POLICY_VERSIONS["vlm"] == "odd_road_vlm_policy_v6"
     assert ODD_SOURCE_POLICY_VERSIONS["image_qc"] == "odd_image_qc_policy_v3"
 
 
