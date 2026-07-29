@@ -55,10 +55,10 @@ def _completion(observations: dict[str, dict[str, Any]]) -> dict[str, Any]:
 
 def test_road_vlm_semantic_hashes_are_stable() -> None:
     assert road_vlm_prompt_bundle_sha256() == (
-        "a507142f4acb0c8d46c35335d0d535dba564f01833fa4e426b62f407b80ae267"
+        "0719fc1600df206198ca0d6ac4186729deefeae4be306b60006eeb1bed9a22b3"
     )
     assert road_vlm_decoding_bundle_sha256(max_tokens=4096) == (
-        "730bc4c543fdba7037314f7e818b1301e9496ec8eed78c47354f9377d9d143c0"
+        "0c845ef4e2606f5c43433d0813ff503de8e9e4cd2507769b66c62ccc3df9e486"
     )
     assert road_vlm_decoding_bundle_sha256(
         max_tokens=2048
@@ -186,6 +186,7 @@ def test_observer_uses_openai_contract_and_validates_output() -> None:
     }
     assert sky_missing["properties"]["values"]["maxItems"] == 0
     assert "camera_id" in sky_valid["required"]
+    assert sky_valid["properties"]["camera_id"] == {"type": "null"}
     assert "supporting_timestamps_ns" in sky_valid["required"]
     assert (
         request["messages"][1]["content"][1]["image_url"]["url"]
@@ -241,6 +242,146 @@ def test_observer_uses_openai_contract_and_validates_output() -> None:
             "timestamp_ns": 1_000,
         }
     ]
+
+
+def test_scene_protocol_repairs_are_bounded_and_audited() -> None:
+    raw_response = _completion(
+        {
+            "event.hazard.type": {
+                "key": "event.hazard.type",
+                "status": "valid",
+                "values": ["obstacle_on_road", "none"],
+                "confidence": 0.88,
+                "camera_id": "front_center",
+                "supporting_cameras": ["front_center"],
+                "supporting_timestamps_ns": [1_000],
+                "reason": "An obstacle is visible in the road.",
+            }
+        }
+    )
+
+    observer = OpenAICompatibleRoadObserver(
+        RoadVLMConfig(
+            base_url="https://road-vlm.example/v1",
+            model="road-observer",
+            retry_count=0,
+        ),
+        transport=lambda _url, _payload, _headers: raw_response,
+    )
+    observation = observer.observe(
+        scene_uid="scene-1",
+        task_bundle="interaction",
+        keys=("event.hazard.type",),
+        frames=(_frame(),),
+        start_timestamp_ns=1_000,
+        end_timestamp_ns=2_000,
+    )[0]
+
+    expected_repairs = [
+        {
+            "kind": "scene_camera_id_to_null",
+            "key": "event.hazard.type",
+            "before": "front_center",
+            "after": None,
+        },
+        {
+            "kind": "exclusive_neutral_removed",
+            "key": "event.hazard.type",
+            "before": ["obstacle_on_road", "none"],
+            "after": ["obstacle_on_road"],
+        },
+    ]
+    assert observation.status == "valid"
+    assert observation.values == ("obstacle_on_road",)
+    assert observation.camera_id is None
+    assert observation.provenance["protocol_repairs"] == expected_repairs
+    exchange = observer.provider_exchanges[0]
+    assert exchange.status == "succeeded"
+    assert list(exchange.protocol_repairs) == expected_repairs
+    assert exchange.raw_response == raw_response
+    assert exchange.schema_version == "odd_provider_exchange_v2"
+
+
+def test_normal_is_removed_only_when_an_abnormal_value_is_valid() -> None:
+    observer = OpenAICompatibleRoadObserver(
+        RoadVLMConfig(
+            base_url="https://road-vlm.example/v1",
+            model="road-observer",
+            retry_count=0,
+        ),
+        transport=lambda _url, _payload, _headers: _completion(
+            {
+                "perception.visual.lighting": {
+                    "key": "perception.visual.lighting",
+                    "status": "valid",
+                    "values": ["normal", "backlit"],
+                    "confidence": 0.9,
+                    "camera_id": "front_center",
+                    "supporting_cameras": ["front_center"],
+                    "supporting_timestamps_ns": [1_000],
+                    "reason": "The subject is backlit.",
+                }
+            }
+        ),
+    )
+
+    observation = observer.observe(
+        scene_uid="scene-1",
+        task_bundle="perception_condition",
+        keys=("perception.visual.lighting",),
+        frames=(_frame(),),
+        start_timestamp_ns=1_000,
+        end_timestamp_ns=2_000,
+        target_camera_id="front_center",
+    )[0]
+
+    assert observation.values == ("backlit",)
+    assert observation.provenance["protocol_repairs"] == [
+        {
+            "kind": "exclusive_neutral_removed",
+            "key": "perception.visual.lighting",
+            "before": ["normal", "backlit"],
+            "after": ["backlit"],
+        }
+    ]
+
+
+def test_scene_camera_identity_is_not_repaired_without_matching_evidence() -> None:
+    observer = OpenAICompatibleRoadObserver(
+        RoadVLMConfig(
+            base_url="https://road-vlm.example/v1",
+            model="road-observer",
+            retry_count=0,
+        ),
+        transport=lambda _url, _payload, _headers: _completion(
+            {
+                "odd.environment.sky": {
+                    "key": "odd.environment.sky",
+                    "status": "valid",
+                    "values": ["clear"],
+                    "confidence": 0.9,
+                    "camera_id": "rear",
+                    "supporting_cameras": ["front_center"],
+                    "supporting_timestamps_ns": [1_000],
+                    "reason": "Clear sky is visible.",
+                }
+            }
+        ),
+    )
+
+    observation = observer.observe(
+        scene_uid="scene-1",
+        task_bundle="environment",
+        keys=("odd.environment.sky",),
+        frames=(_frame(),),
+        start_timestamp_ns=1_000,
+        end_timestamp_ns=2_000,
+    )[0]
+
+    assert observation.status == "unavailable"
+    assert observation.provenance["protocol_repairs"] == []
+    assert observer.provider_exchanges[0].status == "invalid_response"
+    assert observer.provider_exchanges[0].protocol_repairs == ()
 
 
 def test_invalid_responses_exhaust_retries_and_abstain() -> None:
@@ -439,6 +580,14 @@ def test_camera_scoped_observation_has_camera_identity() -> None:
     prompt = requests[0]["messages"][1]["content"][0]["text"]
     assert '"subject_camera_id":"front_center"' in prompt
     assert '"subject_scope":"camera"' in prompt
+    schema = requests[0]["response_format"]["json_schema"]["schema"]
+    variants = schema["properties"]["observations"]["properties"][
+        "perception.image.blur"
+    ]["oneOf"]
+    assert all(
+        variant["properties"]["camera_id"] == {"type": "string"}
+        for variant in variants
+    )
 
 
 def test_unknown_frame_citation_is_rejected() -> None:
