@@ -4,7 +4,8 @@ import sys
 import torch
 import numpy as np
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from enum import IntEnum
 
 # Add alpasim core driver path to sys.path first to avoid package shadowing
 _ALPASIM_DRIVER_SRC = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "scratch", "alpasim", "src", "driver", "src"))
@@ -23,19 +24,41 @@ try:
         ModelPrediction,
         DriveCommand,
     )
-except Exception:
+except ImportError:
+    class _MockDriveCommand(IntEnum):
+        LEFT = 0
+        STRAIGHT = 1
+        RIGHT = 2
+        UNKNOWN = 3
+
     @dataclass
     class _MockPredictionInput:
-        cameras: Dict[str, Any]
-        speed: float
-        acceleration: float
-        command: int
+        camera_images: Dict[str, Any] = field(default_factory=dict)
+        command: Any = _MockDriveCommand.STRAIGHT
+        speed: float = 0.0
+        acceleration: float = 0.0
+        ego_pose_history: Optional[List[Any]] = None
+        inference_seed: int = 0
+        cameras: Optional[Dict[str, Any]] = None
+
+        def __post_init__(self) -> None:
+            if self.cameras is not None and not self.camera_images:
+                self.camera_images = self.cameras
+            elif self.camera_images and self.cameras is None:
+                self.cameras = self.camera_images
 
     @dataclass
     class _MockModelPrediction:
-        trajectory_points: np.ndarray
+        trajectory_xy: np.ndarray
         headings: np.ndarray
-        trajectory_xy: Optional[np.ndarray] = None
+        reasoning_text: Optional[str] = None
+        trajectory_points: Optional[np.ndarray] = None
+
+        def __post_init__(self) -> None:
+            if self.trajectory_points is not None and self.trajectory_xy is None:
+                self.trajectory_xy = self.trajectory_points
+            elif self.trajectory_xy is not None and self.trajectory_points is None:
+                self.trajectory_points = self.trajectory_xy
 
     class _MockBaseTrajectoryModel:
         def __init__(self, *args: Any, **kwargs: Any) -> None:
@@ -46,7 +69,7 @@ except Exception:
     PredictionInput = _MockPredictionInput  # type: ignore
     ModelPrediction = _MockModelPrediction  # type: ignore
     BaseTrajectoryModel = _MockBaseTrajectoryModel  # type: ignore
-    DriveCommand = None
+    DriveCommand = _MockDriveCommand  # type: ignore
 
 from data_parsing.alpasim_stream.parser import AlpasimStreamParser, PredictionInput as ParserPredictionInput  # noqa: E402
 
@@ -117,20 +140,18 @@ class AutoE2EDriver(BaseTrajectoryModel):
         Returns:
             ModelPrediction with trajectory_points / trajectory_xy [64, 2] and headings [64].
         """
-        # Ensure model is loaded if checkpoint exists
-        if self.model is None and os.path.exists(self.model_checkpoint):
-            self.model = torch.load(self.model_checkpoint, map_location=self.device)
-            self.model.eval()
-
         # Extract cameras dict
         cameras_dict = {}
         if hasattr(input_data, "camera_images") and input_data.camera_images:
             for cam_name, frames in input_data.camera_images.items():
-                if frames:
-                    frame = frames[-1]
-                    cameras_dict[cam_name] = getattr(frame, "image", frame)
+                if isinstance(frames, (list, tuple)):
+                    if len(frames) > 0:
+                        frame = frames[-1]
+                        cameras_dict[cam_name] = getattr(frame, "image", frame)
+                    else:
+                        cameras_dict[cam_name] = None
                 else:
-                    cameras_dict[cam_name] = None
+                    cameras_dict[cam_name] = getattr(frames, "image", frames)
         elif hasattr(input_data, "cameras"):
             cameras_dict = input_data.cameras
 
