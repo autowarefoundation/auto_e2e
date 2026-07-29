@@ -1,13 +1,21 @@
 from __future__ import annotations
 
+import hashlib
+import json
+from pathlib import Path
+
 import numpy as np
 import pytest
 
+import data_processing.odd_labeling.ontology as ontology_module
 from data_processing.odd_labeling.deterministic import _interval_slices
 from data_processing.odd_labeling.ontology import (
     LABEL_STATUSES,
     ONTOLOGY,
+    ONTOLOGY_VERSION,
+    load_ontology_registry,
     ontology_document,
+    ontology_sha256,
 )
 from data_processing.odd_labeling.schema import (
     CameraCapability,
@@ -51,8 +59,98 @@ def test_ontology_contains_complete_scene_label_catalog() -> None:
         "ambiguous",
     )
     document = ontology_document()
+    assert ONTOLOGY_VERSION == "odd_ontology_v1.0.1"
     assert len(document["ontology_sha256"]) == 64
     assert len(document["labels"]) == 66
+
+
+def test_ontology_registry_exposes_acquisition_and_candidate_semantics() -> None:
+    document = ontology_document()
+    backends = {
+        item["backend"]: item["canonical_source"]
+        for item in document["backend_definitions"]
+    }
+    capabilities = set(document["capability_definitions"])
+
+    for label in document["labels"]:
+        assert label["display_name"]
+        assert label["description"]
+        assert label["values"]
+        assert all(value["display_name"] for value in label["values"])
+        assert all(value["description"] for value in label["values"])
+        assert set(label["authoritative_sources"]) <= set(
+            label["allowed_sources"]
+        )
+        assert set(label["fallback_sources"]) <= set(label["allowed_sources"])
+        assert set(label["quality_tier_by_source"]) == set(
+            label["allowed_sources"]
+        )
+        assert label["acquisition"]["required_evidence"]
+        assert label["acquisition"]["routing_policy"]
+        assert label["acquisition"]["fallback_policy"]
+        for backend in (
+            label["acquisition"]["primary_backends"]
+            + label["acquisition"]["fallback_backends"]
+        ):
+            assert backends[backend] in label["allowed_sources"]
+        for alternative in label["required_capabilities"]["any_of"]:
+            assert alternative
+            assert set(alternative) <= capabilities
+
+        values = {value["value"] for value in label["values"]}
+        neutral = values & {"none", "normal"}
+        if label["cardinality"] == "multi" and neutral:
+            assert neutral == {label["neutral_value"]}
+            assert label["none_semantics"]
+
+
+def test_ontology_digest_covers_expanded_registry_semantics() -> None:
+    document = ontology_document()
+    digest = document.pop("ontology_sha256")
+
+    expected = hashlib.sha256(
+        json.dumps(
+            document,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode()
+    ).hexdigest()
+
+    assert digest == expected == ontology_sha256()
+
+
+def test_ontology_loader_rejects_unknown_registry_fields(tmp_path: Path) -> None:
+    registry_path = Path(ontology_module.__file__).with_name(
+        "ontology_registry.json"
+    )
+    registry = json.loads(registry_path.read_text(encoding="utf-8"))
+    registry["labels"][0]["unreviewed_policy"] = "accept"
+    invalid_path = tmp_path / "invalid-ontology.json"
+    invalid_path.write_text(json.dumps(registry), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="unknown=.*unreviewed_policy"):
+        load_ontology_registry(invalid_path)
+
+
+def test_ontology_loader_rejects_backend_source_escalation(
+    tmp_path: Path,
+) -> None:
+    registry_path = Path(ontology_module.__file__).with_name(
+        "ontology_registry.json"
+    )
+    registry = json.loads(registry_path.read_text(encoding="utf-8"))
+    road_type = next(
+        label
+        for label in registry["labels"]
+        if label["key"] == "odd.road.type"
+    )
+    road_type["acquisition"]["fallback_backends"] = ["ORV"]
+    invalid_path = tmp_path / "invalid-routing.json"
+    invalid_path.write_text(json.dumps(registry), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="emits disallowed source vlm"):
+        load_ontology_registry(invalid_path)
 
 
 def test_route_plan_and_actual_maneuver_remain_distinct() -> None:
