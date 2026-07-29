@@ -2609,6 +2609,16 @@ def train_il(
     num_workers: int = 0,
     resume_from: Optional[FlyteFile] = None,
     early_stopping_patience: int = 3,
+    # Not threaded through to AutoE2E anywhere in this workflow until now —
+    # every train_il run has silently used AutoE2E.__init__'s own default
+    # ("bezier") regardless of intent. Added alongside the
+    # compute_planner_loss/train_il wiring (#115/#124) specifically so a
+    # FlowMatching run is actually launchable: compute_planner_loss makes
+    # FlowMatching correctly trainable for the first time, but that's moot
+    # if nothing can select it. planner_kwargs lets a launcher override
+    # e.g. num_inference_steps without a code change.
+    planner_mode: str = "bezier",
+    planner_kwargs: Optional[dict] = None,
 ) -> TrainOutput:
     """Train AutoE2E model on pre-extracted WebDataset shards.
 
@@ -2622,6 +2632,14 @@ def train_il(
     imitation loss. If reasoning is on but a batch has no labels, only the
     trajectory loss is used for that batch (the branch still runs, zero-init so
     it does not perturb the trajectory until trained).
+
+    ``planner_mode`` ("bezier" default, or "flow_matching") selects the
+    trajectory decoder — see Model/model_components/trajectory_planning/
+    __init__.py's PLANNER_REGISTRY. ``planner_kwargs`` forwards to that
+    planner's constructor (e.g. ``{"num_inference_steps": 10}`` for
+    flow_matching). Saved into the checkpoint's config so
+    evaluate_kitscenes_benchmark_checkpoint reconstructs the right
+    architecture automatically (see _model_kwargs).
 
     When ``enable_world_model`` is set and the shards carry World-Model windows
     (packed via data_processing(world_model=True)), the JEPA future-feature
@@ -3119,9 +3137,12 @@ def train_il(
         map_context_channels=map_context_channels,
         route_channels=route_channels,
         enable_route_conditioning=enable_route_conditioning,
+        planner_mode=planner_mode, planner_kwargs=planner_kwargs,
         enable_reasoning=enable_reasoning, reasoning_mode=reasoning_mode,
         enable_world_model=enable_world_model,
     ).to(device)
+    print(f"Planner: {planner_mode}"
+          + (f" (kwargs={planner_kwargs})" if planner_kwargs else ""))
     print(f"Reasoning: {'on' if enable_reasoning else 'off'}"
           + (f" (mode={reasoning_mode})" if enable_reasoning else ""))
     print(f"World Model: {'on' if enable_world_model else 'off'}")
@@ -3178,6 +3199,8 @@ def train_il(
         "map_context_channels": map_context_channels,
         "route_channels": route_channels,
         "enable_route_conditioning": enable_route_conditioning,
+        "planner_mode": planner_mode,
+        "planner_kwargs": planner_kwargs,
         "navigation_quality_audit_sha256": (
             navigation_quality_audit_sha256
         ),
@@ -6234,6 +6257,8 @@ def wf_train_il(
     num_workers: int = 0,
     resume_from: Optional[FlyteFile] = None,
     early_stopping_patience: int = 3,
+    planner_mode: str = "bezier",
+    planner_kwargs: Optional[dict] = None,
 ) -> EvalMetrics:
     """IL Train → Evaluate. All datasets' shards passed in; `dataset` selects one.
 
@@ -6249,6 +6274,10 @@ def wf_train_il(
     may explicitly select a deterministic subset split for smoke runs.
     ``num_workers`` > 0 parallelizes JPEG decode across worker processes (#121 P0)
     — the dominant per-epoch cost once episodes scale up.
+    ``planner_mode`` ("bezier" default, or "flow_matching") selects the
+    trajectory decoder — see train_il's own docstring. Not previously
+    exposed at this level; every prior wf_train_il run silently trained
+    Bezier regardless of intent.
     """
     out = train_il(shards=shards, dataset=dataset, backbone=backbone,
                    epochs=epochs, batch_size=batch_size,
@@ -6260,6 +6289,7 @@ def wf_train_il(
                    enable_world_model=enable_world_model, val_fraction=val_fraction,
                    validation_scope=validation_scope,
                    num_workers=num_workers, resume_from=resume_from,
+                   planner_mode=planner_mode, planner_kwargs=planner_kwargs,
                    early_stopping_patience=early_stopping_patience)
     return evaluate_il_policy(checkpoint=out.checkpoint, shards=shards, dataset=dataset,
                               train_metadata=out.metadata)
