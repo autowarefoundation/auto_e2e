@@ -122,6 +122,24 @@ func (h *ODDHandler) Statistics(w http.ResponseWriter, r *http.Request) {
 	writeRawJSON(w, http.StatusOK, body)
 }
 
+func (h *ODDHandler) ModelMetrics(w http.ResponseWriter, r *http.Request) {
+	dataset, version, ok := h.coordinate(w, r)
+	if !ok {
+		return
+	}
+	response, manifest, digest, err := h.s3.ODDMetricProjections(
+		r.Context(),
+		dataset,
+		version,
+	)
+	if err != nil {
+		writeODDError(w, err)
+		return
+	}
+	setODDIdentity(w, manifest, digest)
+	writeJSON(w, http.StatusOK, response)
+}
+
 func (h *ODDHandler) LabelSets(w http.ResponseWriter, r *http.Request) {
 	dataset, version, ok := h.coordinate(w, r)
 	if !ok {
