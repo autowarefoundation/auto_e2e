@@ -445,7 +445,7 @@ class TestAlpasimDriverPlugin:
 
     def test_driver_plugin_initialization(self, dummy_checkpoint: str) -> None:
         """Verify AutoE2EDriver initializes parser and device correctly."""
-        driver = AutoE2EDriver(model_checkpoint=dummy_checkpoint)
+        driver = AutoE2EDriver(model_checkpoint=dummy_checkpoint, allow_mock=True)
         assert isinstance(driver.parser, AlpasimStreamParser)
         assert isinstance(driver.device, torch.device)
 
@@ -459,7 +459,7 @@ class TestAlpasimDriverPlugin:
           - ``trajectory_points``: numpy array of shape ``(64, 2)`` and float32.
           - ``headings``: numpy array of shape ``(64,)`` and float32.
         """
-        driver = AutoE2EDriver(model_checkpoint=dummy_checkpoint)
+        driver = AutoE2EDriver(model_checkpoint=dummy_checkpoint, allow_mock=True)
         pred_input = PluginPredictionInput(
             cameras=sample_rgb_images,
             speed=8.0,
@@ -476,3 +476,10 @@ class TestAlpasimDriverPlugin:
         assert result.headings.shape == (64,)
         assert result.trajectory_points.dtype == np.float32
         assert result.headings.dtype == np.float32
+
+    def test_driver_plugin_strict_mock_disallowed(self) -> None:
+        """Verify that initializing with allow_mock=False fails fast when using mock dependencies."""
+        from alpasim_driver.plugin import IS_MOCK_MODE
+        if IS_MOCK_MODE:
+            with pytest.raises(ImportError, match="allow_mock=False"):
+                AutoE2EDriver(model_checkpoint="nonexistent.ckpt", allow_mock=False)

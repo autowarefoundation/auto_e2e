@@ -70,35 +70,13 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 logger = logging.getLogger("AlpaSimClosedLoopExample")
 
 
-class DummyAutoE2EModel(torch.nn.Module):
-    """Synthetic AutoE2E model producing smooth forward trajectory waypoints."""
-
-    def forward(self, tensors: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
-        batch_size = tensors["visual_tiles"].shape[0]
-        t = torch.linspace(0, 6.4, 64, device=tensors["visual_tiles"].device)
-
-        ego_hist = tensors.get("egomotion_history")
-        current_speed = 10.0
-        if ego_hist is not None and ego_hist.shape[1] >= 4:
-            current_speed = max(2.0, float(ego_hist[0, -4].cpu()))
-
-        x = current_speed * t
-        y = 0.2 * torch.sin(0.5 * t)
-
-        points = torch.stack([x, y], dim=-1).unsqueeze(0).repeat(batch_size, 1, 1)
-        headings = torch.atan2(torch.gradient(y)[0], torch.gradient(x)[0]).unsqueeze(0).repeat(batch_size, 1)
-
-        return {
-            "trajectory_points": points,
-            "headings": headings,
-        }
+from model_components.auto_e2e import AutoE2E  # noqa: E402
 
 
 def create_checkpoint(ckpt_path: str) -> None:
-    torch.serialization.add_safe_globals([DummyAutoE2EModel])
-    model = DummyAutoE2EModel()
+    model = AutoE2E(num_views=7, is_pretrained=False)
     torch.save(model, ckpt_path)
-    logger.info("Created synthetic model checkpoint: %s", ckpt_path)
+    logger.info("Created AutoE2E model checkpoint: %s", ckpt_path)
 
 
 def generate_camera_observation(step: int) -> dict[str, Image.Image]:
@@ -139,8 +117,14 @@ def main() -> None:
         ckpt_path = os.path.join(tmpdir, "autoe2e_model.ckpt")
         create_checkpoint(ckpt_path)
 
-        cfg = AutoE2EAlpaSimConfig(checkpoint_path=ckpt_path)
-        driver = AutoE2EDriver(model_checkpoint=cfg.checkpoint_path)
+        cfg = AutoE2EAlpaSimConfig(checkpoint_path=ckpt_path, allow_mock=False)
+        driver = AutoE2EDriver.from_config(
+            cfg,
+            device=torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            camera_ids=[],
+            context_length=1,
+            output_frequency_hz=10,
+        )
         logger.info("Instantiated driver plugin: %s", driver.__class__.__name__)
         logger.info("Camera topology (%d cameras): %s", len(driver.camera_ids), driver.camera_ids)
 
@@ -176,11 +160,7 @@ def main() -> None:
             prediction = driver.predict(obs)
             inference_ms = (time.perf_counter() - step_start_t) * 1000.0
 
-            if hasattr(prediction, "trajectory_xy") and prediction.trajectory_xy is not None:
-                traj_pts = prediction.trajectory_xy
-            else:
-                traj_pts = prediction.trajectory_points
-
+            traj_pts = prediction.trajectory_xy
             headings = prediction.headings
 
             dx_local = float(traj_pts[1, 0])
