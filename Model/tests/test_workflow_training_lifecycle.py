@@ -1185,6 +1185,7 @@ def test_dual_best_improvement_controls_patience(
                 "score": 0.50,
                 "components": {"trajectory": 0.50},
             },
+            min_delta=0.0005,
         )
     )
 
@@ -1193,6 +1194,18 @@ def test_dual_best_improvement_controls_patience(
     assert (
         score_improved or trajectory_improved
     ) is expected_patience_improvement
+
+
+def test_first_selection_establishes_both_best_tracks():
+    assert workflows._dual_best_improvements(
+        {
+            "score": 0.60,
+            "components": {"trajectory": 0.50},
+        },
+        best_selection=None,
+        best_trajectory_selection=None,
+        min_delta=0.0005,
+    ) == (True, True)
 
 
 def test_trajectory_best_is_reconstructed_from_old_metric_history():
@@ -1237,12 +1250,49 @@ def test_trajectory_best_is_reconstructed_from_old_metric_history():
 
     best = workflows._best_trajectory_checkpoint_from_history(
         history,
+        expected_policy_version=SELECTOR_POLICY_VERSION,
         min_delta=0.0005,
     )
 
     assert best["epoch"] == 2
     assert best["uri"].endswith("epoch-0002.pt")
     assert best["sha256"] == "b" * 64
+
+
+def test_trajectory_best_reconstruction_rejects_invalid_identity_and_policy():
+    entry = {
+        "epoch": 1,
+        "val_ade": 4.35,
+        "val_fde": 11.76,
+        "checkpoint_uri": "s3://checkpoints/run/epoch-0001.pt",
+        "checkpoint_sha256": None,
+        "checkpoint_selection": {
+            "policy_version": SELECTOR_POLICY_VERSION,
+            "score": 0.53,
+            "components": {"trajectory": 0.40},
+        },
+    }
+
+    with pytest.raises(ValueError, match="immutable checkpoint identity"):
+        workflows._best_trajectory_checkpoint_from_history(
+            [entry],
+            expected_policy_version=SELECTOR_POLICY_VERSION,
+            min_delta=0.0005,
+        )
+
+    with pytest.raises(ValueError, match="policy differs"):
+        workflows._best_trajectory_checkpoint_from_history(
+            [{
+                **entry,
+                "checkpoint_sha256": "a" * 64,
+                "checkpoint_selection": {
+                    **entry["checkpoint_selection"],
+                    "policy_version": "different-selector",
+                },
+            }],
+            expected_policy_version=SELECTOR_POLICY_VERSION,
+            min_delta=0.0005,
+        )
 
 
 def test_resume_transition_wiring_resets_scheduler_and_preserves_bests():
