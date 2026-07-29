@@ -126,5 +126,5 @@ phases:
           --domain "${FLYTE_DOMAIN}" \
           --image "${AUTO_E2E_DATA_PREP_IMAGE}" \
           Platform/pipelines/workflows.py \
-          wf_generate_odd_labelset \
+          odd_dataset_labeler_launch_plan \
           --inputs-file /tmp/odd-labeling-inputs.json
