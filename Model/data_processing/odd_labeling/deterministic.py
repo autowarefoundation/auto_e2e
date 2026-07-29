@@ -13,7 +13,8 @@ from .published_snapshot import CanonicalSceneEvidence
 from .schema import LabelObservation, make_observation
 
 
-LABELER_VERSION = "odd_deterministic_v3"
+MAP_ROUTE_LABELER_VERSION = "odd_deterministic_v2"
+KINEMATICS_LABELER_VERSION = "odd_deterministic_kinematics_v3"
 KINEMATICS_POLICY_VERSION = "odd_gnss_ins_kinematics_v2"
 INTERVAL_NS = 1_000_000_000
 STATIONARY_EPSILON_KPH = 0.5
@@ -256,7 +257,7 @@ def label_kinematics(
     strong_response_duration_ns = 0
     for start_ns, end_ns, left, right in _interval_slices(timestamps):
         provenance = {
-            "labeler_version": LABELER_VERSION,
+            "labeler_version": KINEMATICS_LABELER_VERSION,
             "kinematics_policy_version": KINEMATICS_POLICY_VERSION,
             "expected_period_ns": expected_period_ns,
             "maximum_gap_ns": maximum_gap_ns,
@@ -556,7 +557,7 @@ def label_map_route(
     route = evidence.navigation_route
     if navigation_map is None or route is None:
         provenance = {
-            "labeler_version": LABELER_VERSION,
+            "labeler_version": MAP_ROUTE_LABELER_VERSION,
             "map_available": navigation_map is not None,
             "route_available": route is not None,
             "reason": "canonical map or selected route is unavailable",
@@ -593,7 +594,7 @@ def label_map_route(
         float(quality.matched_pose_ratio),
     )
     provenance = {
-        "labeler_version": LABELER_VERSION,
+        "labeler_version": MAP_ROUTE_LABELER_VERSION,
         "map_version": navigation_map.map_version,
         "route_id": route.route_id,
         "route_confidence": route.confidence,
