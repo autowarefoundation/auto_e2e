@@ -115,7 +115,14 @@ func oddTestService(
 		OntologySHA256:        strings.Repeat("b", 64),
 		LabelerVersion:        "odd_dataset_labeler_v1",
 		SceneCount:            1,
-		Artifacts:             artifacts,
+		OpenAICompatible: map[string]any{
+			"model": "road-observer",
+			"sampling": map[string]any{
+				"camera_anchor_interval_s": 1.0,
+				"maximum_camera_anchors":   128,
+			},
+		},
+		Artifacts: artifacts,
 	})
 	manifestKey := root + "/manifest.json"
 	pointerBody := oddJSON(t, oddPointer{
@@ -411,6 +418,27 @@ func TestODDSceneVerifiesPinnedRecord(t *testing.T) {
 	if manifest.LabelSetID != "oddls-test" ||
 		!strings.Contains(string(body), `"scene_uid":"scene-1"`) {
 		t.Fatalf("unexpected ODD scene response: %s", body)
+	}
+}
+
+func TestODDManifestPreservesNestedSamplingProvenance(t *testing.T) {
+	service := oddTestService(t, nil)
+
+	manifest, _, err := service.loadODDManifest(
+		context.Background(), "kitscenes", "v3.0",
+	)
+
+	if err != nil {
+		t.Fatal(err)
+	}
+	sampling, ok := manifest.OpenAICompatible["sampling"].(map[string]any)
+	if !ok ||
+		sampling["camera_anchor_interval_s"] != 1.0 ||
+		sampling["maximum_camera_anchors"] != float64(128) {
+		t.Fatalf(
+			"nested OpenAI-compatible sampling provenance = %#v",
+			manifest.OpenAICompatible,
+		)
 	}
 }
 
