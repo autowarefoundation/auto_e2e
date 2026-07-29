@@ -327,6 +327,8 @@ def build_privacy_safe_request(
         observation.source != "map_route"
         or observation.status != "ambiguous"
         or observation.key not in SUPPORTED_KEYS
+        or evidence.navigation_map is None
+        or evidence.navigation_route is None
     ):
         return None
     path = evidence.path_latlon_heading_timestamp
