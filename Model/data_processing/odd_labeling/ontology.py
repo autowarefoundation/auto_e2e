@@ -1,46 +1,158 @@
-"""Machine-readable ontology for scene-level ODD labeling."""
+"""Strict loader for the scene-level ODD ontology registry."""
 
 from __future__ import annotations
 
 import dataclasses
 import hashlib
 import json
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
+from pathlib import Path
 from typing import Any
 
 
-ONTOLOGY_VERSION = "odd_ontology_v1"
-LABEL_STATUSES = ("valid", "unavailable", "not_observable", "ambiguous")
-LABEL_SOURCES = (
-    "map_route",
-    "gnss_ins",
-    "vlm",
-    "image_qc",
-    "fusion",
-    "can_optional",
+_REGISTRY_PATH = Path(__file__).with_name("ontology_registry.json")
+_REGISTRY_SCHEMA_VERSION = "odd_ontology_registry_v2"
+_NAMESPACES = frozenset({"odd", "event", "perception"})
+_CARDINALITIES = frozenset({"single", "multi"})
+_SUBJECT_TYPES = frozenset(
+    {"scene", "camera", "actor", "actor_camera", "map_element"}
 )
+_QUALITY_TIERS = frozenset({"certified", "experimental", "disabled"})
+_VALUE_FIELDS = frozenset({"value", "display_name", "description"})
+_ACQUISITION_FIELDS = frozenset(
+    {
+        "primary_backends",
+        "fallback_backends",
+        "required_evidence",
+        "routing_policy",
+        "fallback_policy",
+    }
+)
+_LABEL_FIELDS = frozenset(
+    {
+        "key",
+        "display_name",
+        "description",
+        "cardinality",
+        "allowed_values",
+        "neutral_value",
+        "allowed_statuses",
+        "allowed_sources",
+        "authoritative_sources",
+        "fallback_sources",
+        "subject_types",
+        "temporal_scope",
+        "required_capabilities",
+        "acquisition",
+        "temporal_resolution",
+        "spatial_context",
+        "aggregation_rule",
+        "conflict_rule",
+        "minimum_duration_ns",
+        "hysteresis",
+        "quality_tier_by_source",
+        "none_semantics",
+        "introduced_in",
+    }
+)
+_TOP_LEVEL_FIELDS = frozenset(
+    {
+        "schema_version",
+        "ontology_version",
+        "status_definitions",
+        "source_definitions",
+        "backend_definitions",
+        "capability_definitions",
+        "labels",
+        "excluded_labels",
+    }
+)
+
+
+@dataclasses.dataclass(frozen=True)
+class ValueDefinition:
+    value: str
+    display_name: str
+    description: str
+
+    def to_dict(self) -> dict[str, str]:
+        return dataclasses.asdict(self)
+
+
+@dataclasses.dataclass(frozen=True)
+class AcquisitionPolicy:
+    primary_backends: tuple[str, ...]
+    fallback_backends: tuple[str, ...]
+    required_evidence: str
+    routing_policy: str
+    fallback_policy: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "primary_backends": list(self.primary_backends),
+            "fallback_backends": list(self.fallback_backends),
+            "required_evidence": self.required_evidence,
+            "routing_policy": self.routing_policy,
+            "fallback_policy": self.fallback_policy,
+        }
 
 
 @dataclasses.dataclass(frozen=True)
 class LabelDefinition:
     key: str
-    cardinality: str
-    values: tuple[str, ...]
-    primary_sources: tuple[str, ...]
-    backends: tuple[str, ...]
+    display_name: str
     description: str
-    subject: str = "scene"
-    temporal_scope: str = "interval"
-    quality_tier: str = "experimental"
-    none_semantics: str | None = None
+    cardinality: str
+    value_definitions: tuple[ValueDefinition, ...]
+    neutral_value: str | None
+    allowed_statuses: tuple[str, ...]
+    primary_sources: tuple[str, ...]
+    authoritative_sources: tuple[str, ...]
+    fallback_sources: tuple[str, ...]
+    subject_types: tuple[str, ...]
+    temporal_scope: str
+    required_capabilities: tuple[tuple[str, ...], ...]
+    acquisition: AcquisitionPolicy
+    temporal_resolution: str
+    spatial_context: str
+    aggregation_rule: str
+    conflict_rule: str
+    minimum_duration_ns: int
+    hysteresis: str
+    quality_tier_by_source: tuple[tuple[str, str], ...]
+    none_semantics: str | None
+    introduced_in: str
 
     @property
     def namespace(self) -> str:
         return self.key.split(".", 1)[0]
 
     @property
-    def display_name(self) -> str:
-        return self.key.split(".", 1)[1].replace(".", " ").replace("_", " ").title()
+    def values(self) -> tuple[str, ...]:
+        return tuple(item.value for item in self.value_definitions)
+
+    @property
+    def backends(self) -> tuple[str, ...]:
+        return self.acquisition.primary_backends + tuple(
+            backend
+            for backend in self.acquisition.fallback_backends
+            if backend not in self.acquisition.primary_backends
+        )
+
+    @property
+    def subject(self) -> str:
+        if self.subject_types == ("camera", "actor", "actor_camera"):
+            return "camera_or_actor"
+        return self.subject_types[0]
+
+    @property
+    def quality_tier(self) -> str:
+        tiers = {tier for _, tier in self.quality_tier_by_source}
+        if "disabled" in tiers:
+            return "disabled"
+        if tiers == {"certified"}:
+            return "certified"
+        return "experimental"
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -49,149 +161,558 @@ class LabelDefinition:
             "display_name": self.display_name,
             "description": self.description,
             "cardinality": self.cardinality,
-            "values": [{"value": value} for value in self.values],
+            "values": [item.to_dict() for item in self.value_definitions],
+            "neutral_value": self.neutral_value,
+            "allowed_statuses": list(self.allowed_statuses),
+            # Keep these compatibility fields while exposing the complete policy.
             "primary_sources": list(self.primary_sources),
             "backends": list(self.backends),
             "subject": self.subject,
             "temporal_scope": self.temporal_scope,
             "quality_tier": self.quality_tier,
             "none_semantics": self.none_semantics,
+            "allowed_sources": list(self.primary_sources),
+            "authoritative_sources": list(self.authoritative_sources),
+            "fallback_sources": list(self.fallback_sources),
+            "subject_types": list(self.subject_types),
+            "required_capabilities": {
+                "any_of": [list(group) for group in self.required_capabilities]
+            },
+            "acquisition": self.acquisition.to_dict(),
+            "temporal_resolution": self.temporal_resolution,
+            "spatial_context": self.spatial_context,
+            "aggregation_rule": self.aggregation_rule,
+            "conflict_rule": self.conflict_rule,
+            "minimum_duration_ns": self.minimum_duration_ns,
+            "hysteresis": self.hysteresis,
+            "quality_tier_by_source": dict(self.quality_tier_by_source),
+            "introduced_in": self.introduced_in,
         }
 
 
-def _definition(
-    key: str,
-    cardinality: str,
-    values: str,
-    sources: str,
-    backends: str,
-    description: str,
+def _require_object(value: Any, context: str) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise ValueError(f"{context} must be an object")
+    return value
+
+
+def _require_exact_fields(
+    value: Mapping[str, Any],
+    expected: frozenset[str],
+    context: str,
+) -> None:
+    actual = set(value)
+    missing = sorted(expected - actual)
+    unknown = sorted(actual - expected)
+    if missing or unknown:
+        raise ValueError(
+            f"{context} fields differ: missing={missing}, unknown={unknown}"
+        )
+
+
+def _require_text(value: Any, context: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{context} must be a non-empty string")
+    return value
+
+
+def _require_string_list(
+    value: Any,
+    context: str,
     *,
-    subject: str = "scene",
-    temporal_scope: str = "interval",
-    quality_tier: str = "experimental",
-    none_semantics: str | None = None,
-) -> LabelDefinition:
-    return LabelDefinition(
-        key=key,
-        cardinality=cardinality,
-        values=tuple(values.split()),
-        primary_sources=tuple(sources.split()),
-        backends=tuple(backends.split()),
-        description=description,
-        subject=subject,
-        temporal_scope=temporal_scope,
-        quality_tier=quality_tier,
-        none_semantics=none_semantics,
+    allow_empty: bool = False,
+) -> tuple[str, ...]:
+    if not isinstance(value, list) or (not value and not allow_empty):
+        raise ValueError(f"{context} must be a non-empty string array")
+    items = tuple(_require_text(item, context) for item in value)
+    if len(items) != len(set(items)):
+        raise ValueError(f"{context} contains duplicates")
+    return items
+
+
+def _parse_named_definitions(
+    raw: Any,
+    *,
+    name_field: str,
+    context: str,
+) -> tuple[dict[str, Any], ...]:
+    if not isinstance(raw, list) or not raw:
+        raise ValueError(f"{context} must be a non-empty array")
+    definitions: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for index, item in enumerate(raw):
+        parsed = _require_object(item, f"{context}[{index}]")
+        name = _require_text(
+            parsed.get(name_field), f"{context}[{index}].{name_field}"
+        )
+        if name in seen:
+            raise ValueError(f"duplicate {context} name: {name}")
+        seen.add(name)
+        definitions.append(parsed)
+    return tuple(definitions)
+
+
+def _parse_value_definitions(
+    raw: Any,
+    *,
+    key: str,
+) -> tuple[ValueDefinition, ...]:
+    if not isinstance(raw, list) or not raw:
+        raise ValueError(f"{key}.allowed_values must be a non-empty array")
+    values: list[ValueDefinition] = []
+    seen: set[str] = set()
+    for index, item in enumerate(raw):
+        parsed = _require_object(item, f"{key}.allowed_values[{index}]")
+        _require_exact_fields(
+            parsed,
+            _VALUE_FIELDS,
+            f"{key}.allowed_values[{index}]",
+        )
+        value = _require_text(
+            parsed["value"], f"{key}.allowed_values[{index}].value"
+        )
+        if value in seen:
+            raise ValueError(f"duplicate value for {key}: {value}")
+        seen.add(value)
+        values.append(
+            ValueDefinition(
+                value=value,
+                display_name=_require_text(
+                    parsed["display_name"],
+                    f"{key}.allowed_values[{index}].display_name",
+                ),
+                description=_require_text(
+                    parsed["description"],
+                    f"{key}.allowed_values[{index}].description",
+                ),
+            )
+        )
+    return tuple(sorted(values, key=lambda item: item.value))
+
+
+def _parse_capability_requirements(
+    raw: Any,
+    *,
+    key: str,
+    known_capabilities: frozenset[str],
+) -> tuple[tuple[str, ...], ...]:
+    parsed = _require_object(raw, f"{key}.required_capabilities")
+    _require_exact_fields(
+        parsed, frozenset({"any_of"}), f"{key}.required_capabilities"
+    )
+    alternatives = parsed["any_of"]
+    if not isinstance(alternatives, list) or not alternatives:
+        raise ValueError(f"{key}.required_capabilities.any_of must be non-empty")
+    result: list[tuple[str, ...]] = []
+    for index, group in enumerate(alternatives):
+        capabilities = _require_string_list(
+            group, f"{key}.required_capabilities.any_of[{index}]"
+        )
+        unknown = set(capabilities) - known_capabilities
+        if unknown:
+            raise ValueError(
+                f"{key} references unknown capabilities: {sorted(unknown)}"
+            )
+        result.append(tuple(sorted(capabilities)))
+    normalized = tuple(sorted(set(result)))
+    if len(normalized) != len(result):
+        raise ValueError(f"{key} contains duplicate capability alternatives")
+    return normalized
+
+
+def _parse_acquisition(
+    raw: Any,
+    *,
+    key: str,
+    known_backends: frozenset[str],
+) -> AcquisitionPolicy:
+    parsed = _require_object(raw, f"{key}.acquisition")
+    _require_exact_fields(parsed, _ACQUISITION_FIELDS, f"{key}.acquisition")
+    primary = _require_string_list(
+        parsed["primary_backends"], f"{key}.acquisition.primary_backends"
+    )
+    fallback = _require_string_list(
+        parsed["fallback_backends"],
+        f"{key}.acquisition.fallback_backends",
+        allow_empty=True,
+    )
+    unknown = (set(primary) | set(fallback)) - known_backends
+    if unknown:
+        raise ValueError(f"{key} references unknown backends: {sorted(unknown)}")
+    if set(primary) & set(fallback):
+        raise ValueError(f"{key} repeats a primary backend as fallback")
+    return AcquisitionPolicy(
+        primary_backends=primary,
+        fallback_backends=fallback,
+        required_evidence=_require_text(
+            parsed["required_evidence"],
+            f"{key}.acquisition.required_evidence",
+        ),
+        routing_policy=_require_text(
+            parsed["routing_policy"], f"{key}.acquisition.routing_policy"
+        ),
+        fallback_policy=_require_text(
+            parsed["fallback_policy"], f"{key}.acquisition.fallback_policy"
+        ),
     )
 
 
-_DEFINITIONS = (
-    _definition("odd.road.context", "single", "urban suburban rural motorway residential industrial parking", "map_route vlm", "deterministic openai_compatible", "Functional character of the road surroundings."),
-    _definition("odd.road.type", "single", "motorway trunk primary secondary tertiary residential service ramp parking_aisle shared_space", "map_route", "deterministic bedrock_claude", "Current road hierarchy or use."),
-    _definition("odd.road.division", "single", "divided undivided", "map_route", "deterministic", "Whether opposing traffic is physically divided."),
-    _definition("odd.road.directionality", "single", "one_way two_way", "map_route", "deterministic", "Permitted travel direction on the current road."),
-    _definition("odd.road.horizontal_geometry", "single", "straight curve_left curve_right", "map_route", "deterministic", "Signed horizontal geometry of the ego-connected road."),
-    _definition("odd.road.vertical_geometry", "single", "level uphill downhill crest sag", "map_route gnss_ins", "deterministic", "Vertical profile of the driven road."),
-    _definition("odd.road.junction_type", "single", "none t_junction y_junction crossroad staggered roundabout merge diverge grade_separated", "map_route", "deterministic bedrock_claude", "Topology of the current or approaching junction."),
-    _definition("odd.road.junction_position", "single", "approach inside exit midblock", "map_route", "deterministic", "Ego position relative to a junction."),
-    _definition("odd.road.junction_control", "single", "traffic_light stop_sign yield_sign uncontrolled other", "map_route vlm", "deterministic openai_compatible", "Control governing the route-relevant junction."),
-    _definition("odd.route.action", "single", "lane_follow straight turn_left turn_right u_turn merge diverge roundabout_enter roundabout_exit", "map_route", "deterministic bedrock_claude", "Action planned by the selected route."),
-    _definition("odd.road.lane_count_bin", "single", "one two three four_plus", "map_route", "deterministic", "Lane count in the ego travel direction."),
-    _definition("odd.road.lane_type_present", "multi", "general bus bicycle tram emergency turn_only parking shared none", "map_route", "deterministic", "Lane types present in the local road corridor.", none_semantics="Observed corridor contains none of the listed lane types."),
-    _definition("odd.road.lane_marking_quality", "single", "clear faded missing temporary occluded", "vlm", "openai_compatible", "Visual condition of lane markings."),
-    _definition("odd.road.surface_type", "single", "asphalt concrete paving_stone gravel unpaved", "vlm map_route", "openai_compatible deterministic", "Visible or mapped road-surface material."),
-    _definition("odd.road.surface_state", "multi", "dry wet standing_water snow_covered visually_contaminated", "vlm", "openai_compatible", "Visible state of the road surface."),
-    _definition("odd.road.edge_type_present", "multi", "curb guardrail solid_barrier temporary_barrier paved_shoulder unpaved_shoulder grass none", "map_route vlm", "deterministic openai_compatible", "Road-edge treatments visible or mapped in the local corridor.", none_semantics="Both relevant road edges were observed and no listed treatment is present."),
-    _definition("odd.road.special_structure", "multi", "bridge tunnel railway_crossing pedestrian_crossing access_gate none", "map_route vlm", "deterministic openai_compatible", "Special road structures on the current route.", none_semantics="The route corridor was observed and no listed structure is present."),
-    _definition("odd.road.workzone_state", "multi", "roadworks lane_closure detour cones temporary_barrier temporary_signage none", "vlm map_route", "openai_compatible deterministic", "Temporary road-work conditions.", none_semantics="Road and control area were observed with no workzone condition."),
-    _definition("odd.traffic_control.present", "multi", "traffic_light stop_sign yield_sign speed_limit_sign temporary_sign traffic_officer none", "map_route vlm", "deterministic openai_compatible", "Traffic controls present in the route-relevant area.", none_semantics="The relevant control area was observed and no listed control is present."),
-    _definition("odd.traffic_light.state", "single", "red red_yellow yellow green flashing off not_applicable", "vlm map_route", "openai_compatible deterministic", "State of the route-relevant traffic signal."),
-    _definition("odd.environment.day_phase", "single", "day dawn dusk night", "fusion vlm", "deterministic openai_compatible", "Solar or visually inferred phase of day."),
-    _definition("odd.environment.sky", "single", "clear partly_cloudy overcast", "vlm", "openai_compatible", "Visible sky condition."),
-    _definition("odd.environment.precipitation_visual", "single", "none_visible rain snow mixed", "vlm image_qc", "openai_compatible deterministic", "Precipitation visible in camera imagery."),
-    _definition("odd.environment.visibility_degradation", "multi", "fog haze precipitation water_spray smoke_or_dust none", "vlm image_qc", "openai_compatible deterministic", "Atmospheric causes that reduce visibility.", none_semantics="Sufficient distant scene content was visible without a listed degradation."),
-    _definition("odd.environment.road_lighting", "single", "daylight street_lit unlit tunnel_lit", "vlm fusion", "openai_compatible deterministic", "Lighting available on the driven road."),
-    _definition("odd.environment.glare", "multi", "sun_front sun_side headlight wet_road_reflection none", "vlm image_qc", "openai_compatible deterministic", "Glare source and direction affecting the road view.", none_semantics="Usable camera views contain no supported glare condition."),
-    _definition("odd.dynamic.traffic_density", "single", "empty low medium high stop_and_go", "fusion vlm", "openai_compatible deterministic", "Density and flow state of motorized traffic."),
-    _definition("odd.dynamic.vru_density", "single", "none low medium high", "fusion vlm", "openai_compatible deterministic", "Density of vulnerable road users."),
-    _definition("odd.dynamic.parked_vehicle_density", "single", "none low medium high", "fusion vlm", "openai_compatible deterministic", "Density of parked vehicles along the corridor."),
-    _definition("odd.dynamic.oncoming_traffic", "single", "absent present", "fusion vlm", "openai_compatible deterministic", "Presence of traffic moving in the opposing direction."),
-    _definition("odd.dynamic.agent_type_present", "multi", "passenger_vehicle light_commercial_vehicle heavy_truck bus motorcycle bicycle e_scooter pedestrian wheelchair_user animal emergency_vehicle construction_vehicle none", "fusion vlm", "openai_compatible deterministic", "Road-agent classes present in the observable scene.", none_semantics="Road and sidewalk regions were observed and no listed agent is present."),
-    _definition("odd.ego.speed_bin", "single", "stationary creeping low_speed medium_speed high_speed", "gnss_ins can_optional", "deterministic", "Gap-aware ego-speed category with raw speed retained."),
-    _definition("event.ego.motion_state", "single", "stopped starting moving creeping accelerating decelerating reversing", "gnss_ins can_optional", "deterministic", "Observed ego motion state.", temporal_scope="event"),
-    _definition("event.ego.maneuver", "single", "lane_follow turn_left turn_right u_turn lane_change_left lane_change_right merge diverge pull_over pull_out overtake stop", "fusion gnss_ins map_route", "deterministic", "Maneuver executed by the driven trajectory.", temporal_scope="event"),
-    _definition("event.ego.strong_response", "single", "none hard_brake emergency_stop evasive_steer", "gnss_ins can_optional fusion", "deterministic", "Strong ego response derived from motion signals.", temporal_scope="event"),
-    _definition("event.vehicle.interaction", "multi", "cut_in cut_out lead_vehicle_braking vehicle_merging_ahead vehicle_crossing_path oncoming_encroachment parked_vehicle_pull_out door_opening vehicle_yielding vehicle_not_yielding being_overtaken none", "fusion vlm", "openai_compatible deterministic", "Temporal interaction with another vehicle.", temporal_scope="event", none_semantics="The interval was observable and no listed vehicle interaction occurred."),
-    _definition("event.vru.interaction", "multi", "pedestrian_crossing pedestrian_entering_road pedestrian_waiting_to_cross pedestrian_walking_along_road cyclist_crossing cyclist_merging vru_sudden_emergence occluded_vru_emergence vru_yielding vru_not_yielding none", "fusion vlm", "openai_compatible deterministic", "Temporal interaction with a vulnerable road user.", temporal_scope="event", none_semantics="The interval was observable and no listed VRU interaction occurred."),
-    _definition("event.traffic_control.response", "single", "stop_at_red proceed_on_green stop_at_stop_sign yield_at_yield_sign stop_for_crosswalk stop_at_rail_crossing follow_traffic_officer no_response_required", "fusion map_route vlm gnss_ins", "deterministic openai_compatible", "Actual ego response to an applicable control.", temporal_scope="event"),
-    _definition("event.right_of_way", "single", "ego_has_priority other_has_priority ambiguous_priority not_applicable", "fusion map_route vlm", "deterministic bedrock_claude openai_compatible", "Right-of-way state during an interaction.", temporal_scope="event"),
-    _definition("event.hazard.type", "multi", "obstacle_on_road debris_on_road blocked_lane wrong_way_vehicle emergency_vehicle_approach collision none", "vlm fusion", "openai_compatible deterministic", "Observed roadway hazard.", temporal_scope="event", none_semantics="The road corridor was observable and no listed hazard occurred."),
-    _definition("event.hazard.response", "single", "none slow_down stop obstacle_avoidance lane_change_avoidance yield", "fusion gnss_ins vlm", "deterministic openai_compatible", "Ego response caused by a valid hazard.", temporal_scope="event"),
-    _definition("event.traffic_flow", "multi", "congestion_entry congestion_exit queue_entry queue_exit stop_and_go road_closure_encounter workzone_entry workzone_exit none", "fusion gnss_ins vlm map_route", "deterministic openai_compatible", "Transitions in traffic-flow state.", temporal_scope="event", none_semantics="The interval was observable and no listed flow transition occurred."),
-    _definition("event.interaction.actor", "multi", "vehicle pedestrian cyclist motorcycle emergency_vehicle animal static_obstacle none", "fusion vlm", "openai_compatible deterministic", "Actor classes participating in an event.", temporal_scope="event", none_semantics="A valid event was observed without a listed participating actor."),
-    _definition("event.outcome", "single", "normal_completion interrupted hazard_avoided unresolved collision", "fusion", "deterministic", "Observed resolution of an event.", temporal_scope="event"),
-    _definition("event.phase", "single", "onset active resolution", "fusion", "deterministic", "Phase subinterval inside an event instance.", temporal_scope="event_phase"),
-    _definition("perception.occlusion.source", "multi", "static_object dynamic_object ego_body weather none", "vlm fusion", "openai_compatible deterministic", "Source of scene or actor occlusion.", subject="camera_or_actor", none_semantics="The target or scene was observable with no supported occlusion source."),
-    _definition("perception.occlusion.level", "single", "none partial major full", "vlm fusion", "openai_compatible deterministic", "Severity of scene or actor occlusion.", subject="camera_or_actor"),
-    _definition("perception.object.visibility", "single", "fully_visible partially_visible barely_visible not_visible", "vlm fusion", "openai_compatible deterministic", "Visibility of a tracked or visual actor.", subject="actor"),
-    _definition("perception.object.scale", "single", "normal small very_small", "fusion vlm", "deterministic openai_compatible", "Image scale of an actor.", subject="actor"),
-    _definition("perception.object.range", "single", "near mid far very_far", "fusion vlm", "deterministic openai_compatible", "Range category of an actor.", subject="actor"),
-    _definition("perception.fov.state", "single", "centered edge_of_fov truncated entering_fov leaving_fov", "fusion vlm", "deterministic openai_compatible", "Actor position and motion relative to camera field of view.", subject="actor_camera"),
-    _definition("perception.scene.clutter", "single", "low medium high", "vlm image_qc", "openai_compatible deterministic", "Semantic and visual clutter of the observable scene.", subject="camera"),
-    _definition("perception.object.overlap", "single", "none moderate heavy", "fusion vlm", "deterministic openai_compatible", "Overlap of an actor with nearer scene content.", subject="actor_camera"),
-    _definition("perception.visual.contrast", "single", "normal low_contrast silhouette", "image_qc vlm", "deterministic openai_compatible", "Contrast affecting perception.", subject="camera"),
-    _definition("perception.visual.lighting", "multi", "normal backlit deep_shadow high_dynamic_range tunnel_transition", "image_qc vlm", "deterministic openai_compatible", "Lighting conditions affecting camera perception.", subject="camera"),
-    _definition("perception.visual.glare", "multi", "sun headlight wet_road_reflection none", "image_qc vlm", "deterministic openai_compatible", "Glare affecting a camera view.", subject="camera", none_semantics="The camera view is usable and contains no supported glare source."),
-    _definition("perception.image.exposure", "single", "normal overexposed underexposed mixed", "image_qc", "deterministic", "Image exposure condition.", subject="camera"),
-    _definition("perception.image.blur", "single", "none motion_blur defocus_blur", "image_qc vlm", "deterministic openai_compatible", "Image blur condition.", subject="camera"),
-    _definition("perception.image.weather_artifact", "multi", "rain_streak snow_streak water_spray fog_or_haze none", "image_qc vlm", "deterministic openai_compatible", "Weather artifacts visible in an image.", subject="camera", none_semantics="Usable image content contains no listed weather artifact."),
-    _definition("perception.image.lens_contamination", "multi", "water_droplet dirt mud condensation none", "image_qc vlm", "deterministic openai_compatible", "Camera-fixed lens contamination.", subject="camera", none_semantics="The lens was observable over time and no listed contamination is present."),
-    _definition("perception.image.frame_status", "single", "normal partial_obstruction full_obstruction black_frame frozen_frame dropped_frame corrupted_frame", "image_qc", "deterministic", "Decode, timing, and obstruction state of a camera frame.", subject="camera"),
-    _definition("perception.object.appearance", "multi", "normal unusual_object unusual_pose temporary_object ambiguous_class deceptive_appearance", "vlm", "openai_compatible", "Appearance conditions that make an actor difficult to recognize.", subject="actor"),
-    _definition("perception.map_element_condition", "single", "clear occluded faded temporary_conflict visually_missing", "fusion map_route vlm", "deterministic openai_compatible", "Visual condition of an expected mapped element.", subject="map_element"),
-    _definition("perception.scene.complexity", "single", "simple moderate complex extreme", "vlm fusion", "openai_compatible deterministic", "Combined topology, actor, control, and visibility complexity."),
-    _definition("perception.mixed_traffic", "single", "absent present", "vlm fusion", "openai_compatible deterministic", "Co-presence of heterogeneous motorized and vulnerable traffic."),
-    _definition("perception.temporary_traffic_control", "single", "absent present", "vlm map_route fusion", "openai_compatible deterministic", "Visible temporary traffic-control elements."),
-)
+def _parse_label(
+    raw: Any,
+    *,
+    index: int,
+    known_statuses: frozenset[str],
+    known_sources: frozenset[str],
+    known_backends: frozenset[str],
+    backend_sources: Mapping[str, str],
+    known_capabilities: frozenset[str],
+) -> LabelDefinition:
+    parsed = _require_object(raw, f"labels[{index}]")
+    _require_exact_fields(parsed, _LABEL_FIELDS, f"labels[{index}]")
+    key = _require_text(parsed["key"], f"labels[{index}].key")
+    namespace, separator, local_name = key.partition(".")
+    if (
+        not separator
+        or not local_name
+        or namespace not in _NAMESPACES
+        or any(not part for part in local_name.split("."))
+    ):
+        raise ValueError(f"invalid ontology key: {key}")
+    cardinality = _require_text(parsed["cardinality"], f"{key}.cardinality")
+    if cardinality not in _CARDINALITIES:
+        raise ValueError(f"invalid cardinality for {key}: {cardinality}")
+
+    values = _parse_value_definitions(parsed["allowed_values"], key=key)
+    value_names = {item.value for item in values}
+    neutral_value = parsed["neutral_value"]
+    if neutral_value is not None:
+        neutral_value = _require_text(neutral_value, f"{key}.neutral_value")
+        if neutral_value not in value_names:
+            raise ValueError(f"{key}.neutral_value is not an allowed value")
+
+    allowed_statuses = _require_string_list(
+        parsed["allowed_statuses"], f"{key}.allowed_statuses"
+    )
+    if set(allowed_statuses) != known_statuses:
+        raise ValueError(f"{key} must explicitly allow every canonical status")
+
+    allowed_sources = _require_string_list(
+        parsed["allowed_sources"], f"{key}.allowed_sources"
+    )
+    unknown_sources = set(allowed_sources) - known_sources
+    if unknown_sources:
+        raise ValueError(
+            f"{key} references unknown sources: {sorted(unknown_sources)}"
+        )
+    authoritative_sources = _require_string_list(
+        parsed["authoritative_sources"], f"{key}.authoritative_sources"
+    )
+    fallback_sources = _require_string_list(
+        parsed["fallback_sources"],
+        f"{key}.fallback_sources",
+        allow_empty=True,
+    )
+    for field_name, sources in (
+        ("authoritative_sources", authoritative_sources),
+        ("fallback_sources", fallback_sources),
+    ):
+        unknown = set(sources) - set(allowed_sources)
+        if unknown:
+            raise ValueError(
+                f"{key}.{field_name} is not allowed: {sorted(unknown)}"
+            )
+
+    subject_types = _require_string_list(
+        parsed["subject_types"], f"{key}.subject_types"
+    )
+    invalid_subjects = set(subject_types) - _SUBJECT_TYPES
+    if invalid_subjects:
+        raise ValueError(
+            f"{key} has invalid subject types: {sorted(invalid_subjects)}"
+        )
+    acquisition = _parse_acquisition(
+        parsed["acquisition"],
+        key=key,
+        known_backends=known_backends,
+    )
+    for backend in (
+        acquisition.primary_backends + acquisition.fallback_backends
+    ):
+        if backend_sources[backend] not in allowed_sources:
+            raise ValueError(
+                f"{key} backend {backend} emits disallowed source "
+                f"{backend_sources[backend]}"
+            )
+
+    quality = _require_object(
+        parsed["quality_tier_by_source"], f"{key}.quality_tier_by_source"
+    )
+    if set(quality) != set(allowed_sources):
+        raise ValueError(
+            f"{key}.quality_tier_by_source must cover allowed_sources exactly"
+        )
+    quality_pairs: list[tuple[str, str]] = []
+    for source in sorted(quality):
+        tier = _require_text(
+            quality[source], f"{key}.quality_tier_by_source.{source}"
+        )
+        if tier not in _QUALITY_TIERS:
+            raise ValueError(f"{key} has invalid quality tier: {tier}")
+        quality_pairs.append((source, tier))
+
+    none_semantics = parsed["none_semantics"]
+    if none_semantics is not None:
+        none_semantics = _require_text(none_semantics, f"{key}.none_semantics")
+    semantic_neutrals = value_names & {"none", "normal"}
+    if cardinality == "multi" and semantic_neutrals:
+        if len(semantic_neutrals) != 1:
+            raise ValueError(f"{key} has multiple exclusive neutral values")
+        expected_neutral = next(iter(semantic_neutrals))
+        if neutral_value != expected_neutral or none_semantics is None:
+            raise ValueError(
+                f"{key} must declare exclusive neutral semantics for "
+                f"{expected_neutral}"
+            )
+
+    minimum_duration_ns = parsed["minimum_duration_ns"]
+    if (
+        isinstance(minimum_duration_ns, bool)
+        or not isinstance(minimum_duration_ns, int)
+        or minimum_duration_ns < 0
+    ):
+        raise ValueError(f"{key}.minimum_duration_ns must be a non-negative int")
+
+    return LabelDefinition(
+        key=key,
+        display_name=_require_text(parsed["display_name"], f"{key}.display_name"),
+        description=_require_text(parsed["description"], f"{key}.description"),
+        cardinality=cardinality,
+        value_definitions=values,
+        neutral_value=neutral_value,
+        allowed_statuses=allowed_statuses,
+        primary_sources=allowed_sources,
+        authoritative_sources=authoritative_sources,
+        fallback_sources=fallback_sources,
+        subject_types=subject_types,
+        temporal_scope=_require_text(
+            parsed["temporal_scope"], f"{key}.temporal_scope"
+        ),
+        required_capabilities=_parse_capability_requirements(
+            parsed["required_capabilities"],
+            key=key,
+            known_capabilities=known_capabilities,
+        ),
+        acquisition=acquisition,
+        temporal_resolution=_require_text(
+            parsed["temporal_resolution"], f"{key}.temporal_resolution"
+        ),
+        spatial_context=_require_text(
+            parsed["spatial_context"], f"{key}.spatial_context"
+        ),
+        aggregation_rule=_require_text(
+            parsed["aggregation_rule"], f"{key}.aggregation_rule"
+        ),
+        conflict_rule=_require_text(
+            parsed["conflict_rule"], f"{key}.conflict_rule"
+        ),
+        minimum_duration_ns=minimum_duration_ns,
+        hysteresis=_require_text(parsed["hysteresis"], f"{key}.hysteresis"),
+        quality_tier_by_source=tuple(quality_pairs),
+        none_semantics=none_semantics,
+        introduced_in=_require_text(
+            parsed["introduced_in"], f"{key}.introduced_in"
+        ),
+    )
 
 
+def _parse_registry(
+    raw: Any,
+) -> tuple[
+    str,
+    tuple[dict[str, Any], ...],
+    tuple[dict[str, Any], ...],
+    tuple[dict[str, Any], ...],
+    tuple[str, ...],
+    tuple[LabelDefinition, ...],
+    tuple[dict[str, Any], ...],
+]:
+    registry = _require_object(raw, "ontology registry")
+    _require_exact_fields(registry, _TOP_LEVEL_FIELDS, "ontology registry")
+    if registry["schema_version"] != _REGISTRY_SCHEMA_VERSION:
+        raise ValueError(
+            "unsupported ontology registry schema: "
+            f"{registry['schema_version']!r}"
+        )
+    ontology_version = _require_text(
+        registry["ontology_version"], "ontology_version"
+    )
+
+    status_definitions = _parse_named_definitions(
+        registry["status_definitions"],
+        name_field="status",
+        context="status_definitions",
+    )
+    source_definitions = _parse_named_definitions(
+        registry["source_definitions"],
+        name_field="source",
+        context="source_definitions",
+    )
+    backend_definitions = _parse_named_definitions(
+        registry["backend_definitions"],
+        name_field="backend",
+        context="backend_definitions",
+    )
+    for context, definitions, expected_fields in (
+        (
+            "status_definitions",
+            status_definitions,
+            frozenset({"status", "description"}),
+        ),
+        (
+            "source_definitions",
+            source_definitions,
+            frozenset({"source", "description"}),
+        ),
+        (
+            "backend_definitions",
+            backend_definitions,
+            frozenset(
+                {
+                    "backend",
+                    "name",
+                    "canonical_source",
+                    "permitted_inputs",
+                }
+            ),
+        ),
+    ):
+        for index, definition in enumerate(definitions):
+            _require_exact_fields(
+                definition, expected_fields, f"{context}[{index}]"
+            )
+
+    statuses = frozenset(item["status"] for item in status_definitions)
+    expected_statuses = frozenset(
+        {"valid", "unavailable", "not_observable", "ambiguous"}
+    )
+    if statuses != expected_statuses:
+        raise ValueError("status definitions differ from the canonical contract")
+    sources = frozenset(item["source"] for item in source_definitions)
+
+    backend_sources: dict[str, str] = {}
+    for definition in backend_definitions:
+        source = _require_text(
+            definition["canonical_source"],
+            f"backend {definition['backend']} canonical_source",
+        )
+        if source not in sources:
+            raise ValueError(
+                f"backend {definition['backend']} has unknown source {source}"
+            )
+        _require_string_list(
+            definition["permitted_inputs"],
+            f"backend {definition['backend']} permitted_inputs",
+        )
+        backend_sources[definition["backend"]] = source
+
+    capabilities = _require_string_list(
+        registry["capability_definitions"], "capability_definitions"
+    )
+    labels_raw = registry["labels"]
+    if not isinstance(labels_raw, list) or not labels_raw:
+        raise ValueError("labels must be a non-empty array")
+    definitions = tuple(
+        _parse_label(
+            item,
+            index=index,
+            known_statuses=statuses,
+            known_sources=sources,
+            known_backends=frozenset(backend_sources),
+            backend_sources=backend_sources,
+            known_capabilities=frozenset(capabilities),
+        )
+        for index, item in enumerate(labels_raw)
+    )
+    if len({definition.key for definition in definitions}) != len(definitions):
+        raise ValueError("ontology registry contains duplicate label keys")
+
+    excluded = _parse_named_definitions(
+        registry["excluded_labels"],
+        name_field="key",
+        context="excluded_labels",
+    )
+    for index, definition in enumerate(excluded):
+        _require_exact_fields(
+            definition,
+            frozenset({"key", "reason"}),
+            f"excluded_labels[{index}]",
+        )
+        _require_text(definition["reason"], f"excluded_labels[{index}].reason")
+
+    return (
+        ontology_version,
+        status_definitions,
+        source_definitions,
+        backend_definitions,
+        tuple(sorted(capabilities)),
+        tuple(sorted(definitions, key=lambda item: item.key)),
+        tuple(sorted(excluded, key=lambda item: item["key"])),
+    )
+
+
+def load_ontology_registry(
+    path: Path = _REGISTRY_PATH,
+) -> tuple[
+    str,
+    tuple[dict[str, Any], ...],
+    tuple[dict[str, Any], ...],
+    tuple[dict[str, Any], ...],
+    tuple[str, ...],
+    tuple[LabelDefinition, ...],
+    tuple[dict[str, Any], ...],
+]:
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise ValueError(f"cannot load ontology registry {path}: {error}") from error
+    return _parse_registry(raw)
+
+
+(
+    ONTOLOGY_VERSION,
+    _STATUS_DEFINITIONS,
+    _SOURCE_DEFINITIONS,
+    _BACKEND_DEFINITIONS,
+    _CAPABILITY_DEFINITIONS,
+    _DEFINITIONS,
+    _EXCLUDED_LABELS,
+) = load_ontology_registry()
+
+LABEL_STATUSES = tuple(item["status"] for item in _STATUS_DEFINITIONS)
+LABEL_SOURCES = tuple(item["source"] for item in _SOURCE_DEFINITIONS)
 ONTOLOGY = {definition.key: definition for definition in _DEFINITIONS}
 
 
-def _validate_registry(definitions: Iterable[LabelDefinition]) -> None:
-    seen: set[str] = set()
-    for definition in definitions:
-        if definition.key in seen:
-            raise ValueError(f"duplicate ontology key: {definition.key}")
-        seen.add(definition.key)
-        if definition.namespace not in {"odd", "event", "perception"}:
-            raise ValueError(f"invalid ontology namespace: {definition.key}")
-        if definition.cardinality not in {"single", "multi"}:
-            raise ValueError(f"invalid cardinality: {definition.key}")
-        if not definition.values or len(set(definition.values)) != len(definition.values):
-            raise ValueError(f"invalid values: {definition.key}")
-        if not set(definition.primary_sources).issubset(LABEL_SOURCES):
-            raise ValueError(f"invalid sources: {definition.key}")
-        if "none" in definition.values and definition.cardinality == "multi":
-            if definition.none_semantics is None:
-                raise ValueError(f"multi-select none needs semantics: {definition.key}")
-
-
-_validate_registry(_DEFINITIONS)
-
-
 def ontology_document() -> dict[str, Any]:
-    labels = [definition.to_dict() for definition in _DEFINITIONS]
     body = {
-        "schema_version": "odd_ontology_registry_v1",
+        "schema_version": _REGISTRY_SCHEMA_VERSION,
         "ontology_version": ONTOLOGY_VERSION,
         "statuses": list(LABEL_STATUSES),
         "sources": list(LABEL_SOURCES),
-        "labels": labels,
+        "status_definitions": [dict(item) for item in _STATUS_DEFINITIONS],
+        "source_definitions": [dict(item) for item in _SOURCE_DEFINITIONS],
+        "backend_definitions": [dict(item) for item in _BACKEND_DEFINITIONS],
+        "capability_definitions": list(_CAPABILITY_DEFINITIONS),
+        "labels": [definition.to_dict() for definition in _DEFINITIONS],
+        "excluded_labels": [dict(item) for item in _EXCLUDED_LABELS],
     }
     body["ontology_sha256"] = hashlib.sha256(
-        json.dumps(body, sort_keys=True, separators=(",", ":")).encode()
+        json.dumps(
+            body,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode()
     ).hexdigest()
     return body
 
@@ -212,8 +733,8 @@ def validate_values(key: str, values: Iterable[str]) -> tuple[str, ...]:
         raise ValueError(f"unknown values for {key}: {sorted(unknown)}")
     if definition.cardinality == "single" and len(normalized) != 1:
         raise ValueError(f"single-select label has {len(normalized)} values: {key}")
-    if "none" in normalized and len(normalized) != 1:
-        raise ValueError(f"none cannot coexist with another value: {key}")
-    if "normal" in normalized and len(normalized) != 1:
-        raise ValueError(f"normal cannot coexist with an abnormal value: {key}")
+    if definition.neutral_value in normalized and len(normalized) != 1:
+        raise ValueError(
+            f"{definition.neutral_value} cannot coexist with another value: {key}"
+        )
     return normalized
