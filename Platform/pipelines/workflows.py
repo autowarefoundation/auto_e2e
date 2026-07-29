@@ -555,7 +555,7 @@ def _resume_policy_transition(
     saved_config: dict,
     requested_config: dict,
 ) -> dict:
-    """Validate and describe the supported sampling-policy continuation."""
+    """Validate and describe the supported continuation transition."""
     saved_sampling = saved_config.get("junction_sampling")
     requested_sampling = requested_config.get("junction_sampling")
     if not isinstance(saved_sampling, dict) or not isinstance(
@@ -564,14 +564,14 @@ def _resume_policy_transition(
         raise ValueError(
             "resume policy transition requires junction sampling metadata"
         )
-    if saved_sampling.get("enabled") is not False:
+    sampling_changed = saved_sampling != requested_sampling
+    if sampling_changed and not (
+        saved_sampling.get("enabled") is False
+        and requested_sampling.get("enabled") is True
+    ):
         raise ValueError(
-            "resume policy transition requires sampling to be disabled "
-            "in the checkpoint"
-        )
-    if requested_sampling.get("enabled") is not True:
-        raise ValueError(
-            "resume policy transition requires sampling to be enabled"
+            "resume policy transition only supports unchanged sampling or "
+            "disabled-to-enabled junction sampling"
         )
     saved_patience = int(saved_config.get("early_stopping_patience", 0))
     requested_patience = int(
@@ -583,10 +583,11 @@ def _resume_policy_transition(
             "to increase"
         )
     return {
-        "policy_version": "navigation_repeat_resume_transition_v1",
+        "policy_version": "dual_best_resume_transition_v1",
         "junction_sampling": {
             "from": saved_sampling,
             "to": requested_sampling,
+            "changed": sampling_changed,
         },
         "early_stopping_patience": {
             "from": saved_patience,
@@ -597,7 +598,7 @@ def _resume_policy_transition(
         "scheduler_state_action": (
             "reset_plateau_state_preserve_optimizer_lr"
         ),
-        "best_checkpoint_scope": "post_transition",
+        "best_checkpoint_scope": "full_history",
     }
 
 
@@ -629,19 +630,21 @@ def _transition_resume_selection_state(
     *,
     bad_epochs: int,
     best_checkpoint: dict | None,
-) -> tuple[int, dict | None]:
-    """Reset ranking state when a declared training policy transition starts."""
+    best_trajectory_checkpoint: dict | None,
+) -> tuple[int, dict | None, dict | None]:
+    """Reset patience while preserving both historical best checkpoints."""
     if transition is None:
-        return bad_epochs, best_checkpoint
+        return bad_epochs, best_checkpoint, best_trajectory_checkpoint
     if bad_epochs < 0:
         raise ValueError("resume checkpoint has negative bad_epochs")
-    if best_checkpoint is None:
+    if best_checkpoint is None or best_trajectory_checkpoint is None:
         raise ValueError(
-            "resume policy transition requires a source best checkpoint"
+            "resume policy transition requires both source best checkpoints"
         )
     selection = best_checkpoint.get("selection")
+    trajectory_selection = best_trajectory_checkpoint.get("selection")
     transition["bad_epochs_before_reset"] = bad_epochs
-    transition["best_before_reset"] = {
+    transition["best_before_resume"] = {
         "epoch": int(best_checkpoint["epoch"]),
         "uri": str(best_checkpoint["uri"]),
         "sha256": str(best_checkpoint["sha256"]),
@@ -651,7 +654,64 @@ def _transition_resume_selection_state(
             else None
         ),
     }
-    return 0, None
+    transition["best_trajectory_before_resume"] = {
+        "epoch": int(best_trajectory_checkpoint["epoch"]),
+        "uri": str(best_trajectory_checkpoint["uri"]),
+        "sha256": str(best_trajectory_checkpoint["sha256"]),
+        "trajectory_utility": (
+            float(trajectory_selection["components"]["trajectory"])
+            if isinstance(trajectory_selection, dict)
+            and isinstance(trajectory_selection.get("components"), dict)
+            and "trajectory" in trajectory_selection["components"]
+            else None
+        ),
+    }
+    return 0, best_checkpoint, best_trajectory_checkpoint
+
+
+def _best_trajectory_checkpoint_from_history(
+    metric_history: list[dict],
+    *,
+    min_delta: float,
+) -> dict:
+    """Reconstruct the immutable trajectory-best record from metric history."""
+    import math
+
+    best = None
+    best_utility = None
+    for entry in metric_history:
+        selection = entry.get("checkpoint_selection")
+        components = (
+            selection.get("components")
+            if isinstance(selection, dict)
+            else None
+        )
+        if not isinstance(components, dict) or "trajectory" not in components:
+            continue
+        utility = float(components["trajectory"])
+        if not math.isfinite(utility):
+            raise ValueError("metric history has non-finite trajectory utility")
+        if best is not None and utility <= float(best_utility) + min_delta:
+            continue
+        uri = str(entry.get("checkpoint_uri", ""))
+        sha256 = str(entry.get("checkpoint_sha256", ""))
+        if not uri.startswith("s3://") or not sha256:
+            raise ValueError(
+                "metric history trajectory best lacks immutable checkpoint "
+                "identity"
+            )
+        best = {
+            "epoch": int(entry["epoch"]),
+            "ade": float(entry["val_ade"]),
+            "fde": float(entry["val_fde"]),
+            "uri": uri,
+            "sha256": sha256,
+            "selection": dict(selection),
+        }
+        best_utility = utility
+    if best is None:
+        raise ValueError("metric history has no trajectory checkpoint")
+    return best
 
 
 def _collated_metadata_value(
@@ -1228,7 +1288,11 @@ def _register_checkpoint_version(
     """Register one immutable checkpoint idempotently for an MLflow run."""
     model_name = "auto-e2e-driving-policy"
     normalized_roles = sorted(set(roles))
-    if not normalized_roles or not set(normalized_roles) <= {"best", "final"}:
+    if (
+        not normalized_roles
+        or not set(normalized_roles)
+        <= {"best", "best_trajectory", "final"}
+    ):
         raise ValueError(f"invalid checkpoint roles: {roles}")
 
     try:
@@ -2926,7 +2990,7 @@ def train_il(
     # (smaller) shards too.
     num_workers: int = 0,
     resume_from: Optional[FlyteFile] = None,
-    early_stopping_patience: int = 3,
+    early_stopping_patience: int = 5,
     allow_resume_policy_transition: bool = False,
 ) -> TrainOutput:
     """Train AutoE2E model on pre-extracted WebDataset shards.
@@ -3886,7 +3950,6 @@ def train_il(
         CHECKPOINT_SCHEMA_VERSION,
         capture_rng_state,
         checkpoint_key,
-        mark_best_pointer_transition_pending,
         metric_pair_is_better,
         rescale_partial_accumulation_gradients,
         restore_rng_state,
@@ -3901,6 +3964,7 @@ def train_il(
     s3_client = boto3.client("s3")
     metric_history: list[dict] = []
     best_checkpoint = None
+    best_trajectory_checkpoint = None
     final_checkpoint = None
     selector_availability = None
     bad_epochs = 0
@@ -3979,6 +4043,7 @@ def train_il(
         final_checkpoint = resumed_checkpoint
         saved_best = state.get("best")
         best_checkpoint = dict(saved_best) if saved_best is not None else None
+        saved_best_trajectory = state.get("best_trajectory")
         bad_epochs = int(state.get("bad_epochs", 0))
         if resume_policy_transition is not None:
             resume_policy_transition["source_checkpoint"] = {
@@ -4044,18 +4109,57 @@ def train_il(
                     "resume checkpoint best selection policy differs "
                     "from the requested selector"
                 )
-        bad_epochs, best_checkpoint = (
+            if saved_best_trajectory is None:
+                best_trajectory_checkpoint = (
+                    _best_trajectory_checkpoint_from_history(
+                        metric_history,
+                        min_delta=float(
+                            checkpoint_selection_config["min_delta"]
+                        ),
+                    )
+                )
+            else:
+                best_trajectory_checkpoint = dict(saved_best_trajectory)
+            if (
+                int(best_trajectory_checkpoint["epoch"])
+                == completed_epoch
+            ):
+                best_trajectory_checkpoint = dict(resumed_checkpoint)
+            trajectory_selection = best_trajectory_checkpoint.get(
+                "selection"
+            )
+            if (
+                not isinstance(trajectory_selection, dict)
+                or trajectory_selection.get("policy_version")
+                != checkpoint_selection_config["policy_version"]
+                or not isinstance(
+                    trajectory_selection.get("components"), dict
+                )
+                or "trajectory"
+                not in trajectory_selection["components"]
+            ):
+                raise ValueError(
+                    "resume checkpoint trajectory-best selection differs "
+                    "from the requested selector"
+                )
+        else:
+            best_trajectory_checkpoint = dict(best_checkpoint)
+        (
+            bad_epochs,
+            best_checkpoint,
+            best_trajectory_checkpoint,
+        ) = (
             _transition_resume_selection_state(
                 resume_policy_transition,
                 bad_epochs=bad_epochs,
                 best_checkpoint=best_checkpoint,
+                best_trajectory_checkpoint=best_trajectory_checkpoint,
             )
         )
         if resume_policy_transition is not None:
             resume_policy_transition["optimization_state"] = (
                 resume_optimization_state
             )
-            best_local_path = None
         terminal_resume, stopped_early = _resume_terminal_state(
             completed_epoch=completed_epoch,
             bad_epochs=bad_epochs,
@@ -4065,18 +4169,6 @@ def train_il(
         if resume_policy_transition is not None and terminal_resume:
             raise ValueError(
                 "resume policy transition requires at least one new epoch"
-            )
-        if resume_policy_transition is not None:
-            mark_best_pointer_transition_pending(
-                s3_client,
-                bucket=checkpoint_bucket,
-                run_id=run_id,
-                transition_policy_version=(
-                    resume_policy_transition["policy_version"]
-                ),
-                source_best=resume_policy_transition[
-                    "best_before_reset"
-                ],
             )
         if best_checkpoint is not None:
             update_best_pointer(
@@ -4090,6 +4182,21 @@ def train_il(
                 fde=float(best_checkpoint["fde"]),
                 selection=best_checkpoint.get("selection"),
             )
+        if best_trajectory_checkpoint is not None:
+            update_best_pointer(
+                s3_client,
+                bucket=checkpoint_bucket,
+                run_id=run_id,
+                role="best_trajectory",
+                epoch=int(best_trajectory_checkpoint["epoch"]),
+                checkpoint_uri=str(best_trajectory_checkpoint["uri"]),
+                checkpoint_sha256=str(
+                    best_trajectory_checkpoint["sha256"]
+                ),
+                ade=float(best_trajectory_checkpoint["ade"]),
+                fde=float(best_trajectory_checkpoint["fde"]),
+                selection=best_trajectory_checkpoint.get("selection"),
+            )
         restore_rng_state(resume_payload["rng_state"])
         if resume_policy_transition is not None:
             with mlflow.start_run(run_id=run_id):
@@ -4100,8 +4207,12 @@ def train_il(
                     "resume_bad_epochs_reset": "true",
                     "resume_plateau_state_reset": "true",
                     "resume_optimizer_lr_preserved": "true",
-                    "resume_best_checkpoint_reset": "true",
-                    "resume_navigation_repeat_enabled": "true",
+                    "resume_best_checkpoints_preserved": "true",
+                    "resume_navigation_repeat_enabled": str(
+                        resume_policy_transition["junction_sampling"][
+                            "to"
+                        ]["enabled"]
+                    ).lower(),
                     "resume_early_stopping_patience": str(
                         early_stopping_patience
                     ),
@@ -4998,16 +5109,29 @@ def train_il(
                     ].items()
                 },
             }
-            improved = (
+            score_improved = (
                 best_checkpoint is None
                 or score_is_better(
                     float(checkpoint_selection["score"]),
                     float(best_checkpoint["selection"]["score"]),
                 )
             )
+            trajectory_improved = (
+                best_trajectory_checkpoint is None
+                or score_is_better(
+                    float(
+                        checkpoint_selection["components"]["trajectory"]
+                    ),
+                    float(
+                        best_trajectory_checkpoint["selection"][
+                            "components"
+                        ]["trajectory"]
+                    ),
+                )
+            )
             scheduler_metric = float(checkpoint_selection["score"])
         else:
-            improved = (
+            score_improved = (
                 best_checkpoint is None
                 or metric_pair_is_better(
                     validation["ade"],
@@ -5016,6 +5140,7 @@ def train_il(
                     float(best_checkpoint["fde"]),
                 )
             )
+            trajectory_improved = score_improved
             scheduler_metric = float(validation["ade"])
         if device.type == "cuda":
             torch.cuda.synchronize(device)
@@ -5034,7 +5159,8 @@ def train_il(
                 epoch_optimizer_steps / training_wall_seconds
             ),
         }
-        next_bad_epochs = 0 if improved else bad_epochs + 1
+        patience_improved = score_improved or trajectory_improved
+        next_bad_epochs = 0 if patience_improved else bad_epochs + 1
         key = checkpoint_key(run_id, epoch)
         checkpoint_uri = f"s3://{checkpoint_bucket}/{key}"
         candidate_record = {
@@ -5048,8 +5174,13 @@ def train_il(
             candidate_record["selection"] = checkpoint_selection
         candidate_best = (
             candidate_record
-            if improved
+            if score_improved
             else dict(best_checkpoint)
+        )
+        candidate_best_trajectory = (
+            candidate_record
+            if trajectory_improved
+            else dict(best_trajectory_checkpoint)
         )
         history_entry = {
             "epoch": epoch,
@@ -5074,7 +5205,9 @@ def train_il(
             "checkpoint_selection": checkpoint_selection,
             "validation_aggregates": validation_aggregate_summary,
             "throughput": throughput,
-            "improved": improved,
+            "improved": patience_improved,
+            "score_improved": score_improved,
+            "trajectory_improved": trajectory_improved,
         }
         metric_history.append(history_entry)
         losses_per_epoch.append(avg_loss)
@@ -5111,6 +5244,10 @@ def train_il(
                     ].items()
                 },
                 "selection/bad_epochs": float(next_bad_epochs),
+                "selection/score_improved": float(score_improved),
+                "selection/trajectory_improved": float(
+                    trajectory_improved
+                ),
             }
             calibration_report = checkpoint_selection[
                 "calibration_report"
@@ -5332,6 +5469,7 @@ def train_il(
                 "training_state": {
                     "run_id": run_id,
                     "best": candidate_best,
+                    "best_trajectory": candidate_best_trajectory,
                     "bad_epochs": next_bad_epochs,
                     "metric_history": metric_history,
                     "validation_sample_uid_digest": (
@@ -5374,7 +5512,7 @@ def train_il(
         history_entry["checkpoint_uri"] = uploaded["uri"]
         history_entry["checkpoint_sha256"] = uploaded["sha256"]
         previous_best_local_path = best_local_path
-        if improved:
+        if score_improved:
             best_checkpoint = checkpoint_info
             best_local_path = checkpoint_path
             update_best_pointer(
@@ -5396,7 +5534,21 @@ def train_il(
                 )
             ):
                 os.remove(previous_best_local_path)
-        else:
+        if trajectory_improved:
+            best_trajectory_checkpoint = checkpoint_info
+            update_best_pointer(
+                s3_client,
+                bucket=checkpoint_bucket,
+                run_id=run_id,
+                role="best_trajectory",
+                epoch=epoch,
+                checkpoint_uri=uploaded["uri"],
+                checkpoint_sha256=uploaded["sha256"],
+                ade=validation["ade"],
+                fde=validation["fde"],
+                selection=checkpoint_selection,
+            )
+        if not score_improved:
             os.remove(checkpoint_path)
         bad_epochs = next_bad_epochs
         final_checkpoint = checkpoint_info
@@ -5412,7 +5564,9 @@ def train_il(
             f"traj={avg_traj:.4f} route={avg_route:.4f} "
             f"jepa={avg_jepa:.4f} "
             f"reason={avg_reason:.4f} val_ADE={validation['ade']:.4f} "
-            f"val_FDE={validation['fde']:.4f} improved={improved} "
+            f"val_FDE={validation['fde']:.4f} "
+            f"score_improved={score_improved} "
+            f"trajectory_improved={trajectory_improved} "
             f"samples_per_second={throughput['samples_per_second']:.3f} "
             "optimizer_steps_per_second="
             f"{throughput['optimizer_steps_per_second']:.3f} "
@@ -5495,8 +5649,14 @@ def train_il(
             "rollout-aligned objective produced no term gradient evidence"
         )
 
-    if best_checkpoint is None or final_checkpoint is None:
-        raise RuntimeError("training completed without a best/final checkpoint")
+    if (
+        best_checkpoint is None
+        or best_trajectory_checkpoint is None
+        or final_checkpoint is None
+    ):
+        raise RuntimeError(
+            "training completed without best/best-trajectory/final checkpoints"
+        )
 
     if best_local_path is None:
         from urllib.parse import urlparse
@@ -5636,6 +5796,9 @@ def train_il(
                 **checkpoint_selection_config,
                 "availability": selector_availability,
                 "best": best_checkpoint.get("selection"),
+                "best_trajectory": (
+                    best_trajectory_checkpoint.get("selection")
+                ),
             },
             "reconstruction_audit": reconstruction_audit_contract,
             "final_loss": losses_per_epoch[-1],
@@ -5682,10 +5845,15 @@ def train_il(
         },
         "checkpoints": {
             "best": best_checkpoint,
+            "best_trajectory": best_trajectory_checkpoint,
             "final": final_checkpoint,
             "best_pointer_uri": (
                 f"s3://{checkpoint_bucket}/imitation-learning/"
                 f"{run_id}/best.json"
+            ),
+            "best_trajectory_pointer_uri": (
+                f"s3://{checkpoint_bucket}/imitation-learning/"
+                f"{run_id}/best-trajectory.json"
             ),
         },
         "context": {
@@ -5703,6 +5871,9 @@ def train_il(
             "backbone": bb,
             "fusion": fm,
             "best_checkpoint_sha256": best_checkpoint["sha256"],
+            "best_trajectory_checkpoint_sha256": (
+                best_trajectory_checkpoint["sha256"]
+            ),
             "final_checkpoint_sha256": final_checkpoint["sha256"],
             "validation_sample_uid_digest": expected_validation_digest,
             "validation_strategy": training_policy.validation_strategy,
@@ -5715,6 +5886,15 @@ def train_il(
             ),
             "best_checkpoint_composite_score": (
                 str(best_checkpoint["selection"]["score"])
+                if selector_enabled
+                else "not_applicable"
+            ),
+            "best_trajectory_checkpoint_utility": (
+                str(
+                    best_trajectory_checkpoint["selection"]["components"][
+                        "trajectory"
+                    ]
+                )
                 if selector_enabled
                 else "not_applicable"
             ),
@@ -6392,11 +6572,11 @@ def _run_evaluation(
                 stream.write("\n")
             mlflow.log_artifact(navigation_report_path)
 
-        # Register only immutable best/final checkpoints. Retry of the eval
-        # task reuses the same run/source pair and therefore the same versions.
+        # Register immutable selected/final checkpoints. Retry of the eval task
+        # reuses the same run/source pair and therefore the same versions.
         saved_checkpoints = meta.get("checkpoints", {})
         grouped: dict[str, dict] = {}
-        for role in ("best", "final"):
+        for role in ("best", "best_trajectory", "final"):
             record = saved_checkpoints.get(role)
             if not record:
                 continue
@@ -8104,7 +8284,7 @@ def wf_sharded_full_run(
     validation_scope: str = "full",
     num_workers: int = 4,
     resume_from: Optional[FlyteFile] = None,
-    early_stopping_patience: int = 3,
+    early_stopping_patience: int = 5,
     allow_resume_policy_transition: bool = False,
 ) -> EvalMetrics:
     """End-to-end scaled run (#121): episode-sharded dataset fan-out → IL train
@@ -8189,7 +8369,7 @@ def wf_recovered_kitscenes_full_run(
     validation_scope: str = "full",
     num_workers: int = 4,
     resume_from: Optional[FlyteFile] = None,
-    early_stopping_patience: int = 3,
+    early_stopping_patience: int = 5,
     allow_resume_policy_transition: bool = False,
 ) -> EvalMetrics:
     """Repack audited artifacts, then train/evaluate without ingest or Cosmos."""
@@ -8307,7 +8487,7 @@ def wf_train_il(
     validation_scope: str = "full",
     num_workers: int = 0,
     resume_from: Optional[FlyteFile] = None,
-    early_stopping_patience: int = 3,
+    early_stopping_patience: int = 5,
     allow_resume_policy_transition: bool = False,
 ) -> EvalMetrics:
     """IL Train → Evaluate. All datasets' shards passed in; `dataset` selects one.
