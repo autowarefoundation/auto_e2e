@@ -67,6 +67,20 @@ func main() {
 	}
 	mlflowSvc := service.NewMLflowService(cfg.MLflowURL)
 	flyteSvc := service.NewFlyteService(cfg.FlyteURL, cfg.FlyteProject, cfg.FlyteDomain)
+	oddOperations, err := service.NewODDOperationsService(
+		s3svc,
+		flyteSvc,
+		service.ODDOperationsConfig{
+			Enabled:        cfg.ODDOperationsEnabled,
+			AllowFull:      cfg.ODDOperationsAllowFull,
+			LaunchPlanName: cfg.ODDLaunchPlanName,
+			InputsJSON:     cfg.ODDLabelerInputsJSON,
+		},
+	)
+	if err != nil {
+		slog.Error("init ODD operations", "error", err)
+		os.Exit(1)
+	}
 	experimentSvc := service.NewExperimentService(
 		mlflowSvc,
 		flyteSvc,
@@ -79,7 +93,9 @@ func main() {
 		s3svc, cfg.ExactGeoEnabled, cfg.ExactGeoRequiredRole,
 	)
 	reasoningH := handler.NewReasoningHandler(s3svc)
-	oddH := handler.NewODDHandler(s3svc)
+	oddH := handler.NewODDHandlerWithOperations(
+		s3svc, oddOperations, cfg.ODDOperationsRequiredRole,
+	)
 	scenesH := handler.NewScenesHandler(s3svc)
 	overlayH := handler.NewOverlayHandler(
 		s3svc, cfg.ExactGeoEnabled, cfg.ExactGeoRequiredRole,
@@ -135,6 +151,9 @@ func main() {
 			r.Get("/odd/ontology", oddH.Ontology)
 			r.Get("/odd/statistics", oddH.Statistics)
 			r.Get("/odd/labelsets", oddH.LabelSets)
+			r.Get("/odd/operations", oddH.Operations)
+			r.Post("/odd/operations/launch", oddH.Launch)
+			r.Post("/odd/operations/retry", oddH.Retry)
 			r.Get("/odd/scenes/search", oddH.Search)
 			r.Post("/odd/scenes/search", oddH.SearchStructured)
 			r.Get("/odd/scenes/{scene_uid}", oddH.Scene)
