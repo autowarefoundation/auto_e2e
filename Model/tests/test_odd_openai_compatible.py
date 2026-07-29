@@ -101,6 +101,10 @@ def test_observer_uses_openai_contract_and_validates_output() -> None:
         frames=(_frame(),),
         start_timestamp_ns=1_000,
         end_timestamp_ns=2_000,
+        sampling_parameters={
+            "regular_interval_s": 1.0,
+            "trigger_context_s": 1.0,
+        },
     )
 
     assert [item.values for item in observations] == [("clear",), ("none",)]
@@ -117,6 +121,10 @@ def test_observer_uses_openai_contract_and_validates_output() -> None:
         and item.provenance["subject_scope"] == "scene"
         and item.provenance["inference_pass"] == "primary"
         and item.provenance["supporting_timestamps_ns"] == [1_000]
+        and item.provenance["sampling_parameters"] == {
+            "regular_interval_s": 1.0,
+            "trigger_context_s": 1.0,
+        }
         for item in observations
     )
     assert requests[0][0] == "https://road-vlm.example/v1/chat/completions"
@@ -135,6 +143,9 @@ def test_observer_uses_openai_contract_and_validates_output() -> None:
     assert request["messages"][1]["content"][0]["text"].find(
         '"subject_scope":"scene"'
     ) > 0
+    assert '"regular_interval_s":1.0' in (
+        request["messages"][1]["content"][0]["text"]
+    )
     item_variants = observation_schema["properties"]["odd.environment.sky"][
         "oneOf"
     ]
