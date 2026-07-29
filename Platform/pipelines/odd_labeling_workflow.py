@@ -22,7 +22,7 @@ DATA_PREP_IMAGE = os.environ.get(
     "AUTO_E2E_DATA_PREP_IMAGE",
     f"{ECR_PREFIX}/auto-e2e/data-prep:latest",
 )
-ODD_LABELER_VERSION = "odd_dataset_labeler_v4"
+ODD_LABELER_VERSION = "odd_dataset_labeler_v5"
 ODD_SCENE_INDEX_SCHEMA_VERSION = "odd_scene_index_v2"
 MAX_ODD_ARTIFACT_BYTES = 64 << 20
 MAX_ODD_PARQUET_BYTES = 512 << 20
@@ -444,7 +444,7 @@ def label_odd_image_quality(
 @task(
     container_image=DATA_PREP_IMAGE,
     cache=True,
-    cache_version="odd-source-openai-compatible-v1",
+    cache_version="odd-source-openai-compatible-v2",
     retries=2,
     pod_template=_scene_labeling_pod_template(),
     requests=Resources(cpu="2", mem="6Gi"),
@@ -465,10 +465,15 @@ def label_odd_image_quality(
 def label_odd_visual(
     descriptor_json: str,
     capability_manifest_json: str,
+    map_route_file: FlyteFile,
+    kinematics_file: FlyteFile,
+    image_quality_file: FlyteFile,
     openai_model: str,
     openai_model_revision: str,
     camera_anchor_interval_s: float,
     maximum_camera_anchors: int,
+    trigger_context_s: float,
+    refinement_confidence_threshold: float,
 ) -> FlyteFile:
     import boto3
 
@@ -476,10 +481,16 @@ def label_odd_visual(
     from data_processing.odd_labeling.openai_compatible import (
         OpenAICompatibleRoadObserver,
         RoadVLMConfig,
+        derive_visual_trigger_timestamps,
         label_visual_scene,
     )
 
-    if camera_anchor_interval_s <= 0 or maximum_camera_anchors <= 0:
+    if (
+        camera_anchor_interval_s <= 0
+        or maximum_camera_anchors <= 0
+        or trigger_context_s < 0
+        or not 0 <= refinement_confidence_threshold <= 1
+    ):
         raise ValueError("camera anchor sampling must be positive")
     if openai_model and not openai_model_revision:
         raise ValueError("OpenAI-compatible model revision must be pinned")
@@ -489,6 +500,26 @@ def label_odd_visual(
     )
     observations = ()
     if openai_model:
+        map_route_artifact = _read_source_artifact(
+            map_route_file,
+            descriptor_json=descriptor_json,
+            source_stage="map_route_deterministic",
+        )
+        kinematics_artifact = _read_source_artifact(
+            kinematics_file,
+            descriptor_json=descriptor_json,
+            source_stage="gnss_ins",
+        )
+        image_quality_artifact = _read_source_artifact(
+            image_quality_file,
+            descriptor_json=descriptor_json,
+            source_stage="image_qc",
+        )
+        trigger_timestamps_ns = derive_visual_trigger_timestamps(
+            map_route_artifact.observations,
+            kinematics_artifact.observations,
+            image_quality_artifact.observations,
+        )
         from flytekit import current_context
 
         base_url = current_context().secrets.get(
@@ -519,12 +550,27 @@ def label_odd_visual(
             evidence,
             interval_s=camera_anchor_interval_s,
             maximum_anchors=maximum_camera_anchors,
+            trigger_timestamps_ns=trigger_timestamps_ns,
+            trigger_context_s=trigger_context_s,
         )
+        sampling_parameters = {
+            "regular_interval_s": camera_anchor_interval_s,
+            "maximum_anchors": maximum_camera_anchors,
+            "trigger_context_s": trigger_context_s,
+            "trigger_count": len(trigger_timestamps_ns),
+            "refinement_confidence_threshold": (
+                refinement_confidence_threshold
+            ),
+        }
         observations = label_visual_scene(
             observer,
             scene_uid=evidence.scene_uid,
             scene_end_timestamp_ns=evidence.end_timestamp_ns,
             anchors=anchors,
+            refinement_confidence_threshold=(
+                refinement_confidence_threshold
+            ),
+            sampling_parameters=sampling_parameters,
         )
     return _source_artifact_file(
         source_stage="openai_compatible_vlm",
@@ -607,6 +653,10 @@ def fuse_odd_scene(
     bedrock_map_file: FlyteFile,
     labeler_image_digest: str,
     labeler_source_revision: str,
+    camera_anchor_interval_s: float,
+    maximum_camera_anchors: int,
+    trigger_context_s: float,
+    refinement_confidence_threshold: float,
 ) -> FlyteFile:
     from data_processing.odd_labeling.fusion import (
         EvidenceBuildContext,
@@ -622,6 +672,13 @@ def fuse_odd_scene(
         raise ValueError("labeler_image_digest must be a sha256 digest")
     if SOURCE_REVISION_RE.fullmatch(labeler_source_revision) is None:
         raise ValueError("labeler_source_revision must be a full Git revision")
+    if (
+        camera_anchor_interval_s <= 0
+        or maximum_camera_anchors <= 0
+        or trigger_context_s < 0
+        or not 0 <= refinement_confidence_threshold <= 1
+    ):
+        raise ValueError("VLM sampling configuration is invalid")
     descriptor, capability_manifest, evidence = _load_canonical_scene(
         descriptor_json,
         capability_manifest_json,
@@ -697,6 +754,14 @@ def fuse_odd_scene(
             "labeler_version": ODD_LABELER_VERSION,
             "labeler_image_digest": labeler_image_digest,
             "labeler_source_revision": labeler_source_revision,
+            "road_vlm_sampling": {
+                "regular_interval_s": camera_anchor_interval_s,
+                "maximum_anchors": maximum_camera_anchors,
+                "trigger_context_s": trigger_context_s,
+                "refinement_confidence_threshold": (
+                    refinement_confidence_threshold
+                ),
+            },
         },
     )
     wrapper = {
@@ -731,6 +796,8 @@ def map_odd_scenes(
     labeler_source_revision: str,
     camera_anchor_interval_s: float,
     maximum_camera_anchors: int,
+    trigger_context_s: float,
+    refinement_confidence_threshold: float,
     deterministic_concurrency: int,
     image_qc_concurrency: int,
     openai_concurrency: int,
@@ -777,9 +844,18 @@ def map_odd_scenes(
             openai_model_revision=openai_model_revision,
             camera_anchor_interval_s=camera_anchor_interval_s,
             maximum_camera_anchors=maximum_camera_anchors,
+            trigger_context_s=trigger_context_s,
+            refinement_confidence_threshold=(
+                refinement_confidence_threshold
+            ),
         ),
         concurrency=openai_concurrency,
-    )(descriptor_json=descriptors)
+    )(
+        descriptor_json=descriptors,
+        map_route_file=map_route_files,
+        kinematics_file=kinematics_files,
+        image_quality_file=image_quality_files,
+    )
     bedrock_map_files = map_task(
         functools.partial(
             label_odd_bedrock_map,
@@ -798,6 +874,12 @@ def map_odd_scenes(
             capability_manifest_json=capability_manifest_json,
             labeler_image_digest=labeler_image_digest,
             labeler_source_revision=labeler_source_revision,
+            camera_anchor_interval_s=camera_anchor_interval_s,
+            maximum_camera_anchors=maximum_camera_anchors,
+            trigger_context_s=trigger_context_s,
+            refinement_confidence_threshold=(
+                refinement_confidence_threshold
+            ),
         ),
         concurrency=fusion_concurrency,
     )
@@ -814,7 +896,7 @@ def map_odd_scenes(
 @task(
     container_image=DATA_PREP_IMAGE,
     cache=True,
-    cache_version="odd-publish-labelset-v6",
+    cache_version="odd-publish-labelset-v7",
     requests=Resources(cpu="2", mem="8Gi"),
     limits=Resources(cpu="4", mem="16Gi"),
 )
@@ -832,6 +914,10 @@ def publish_odd_labelset(
     bedrock_map_model_revision: str,
     labeler_image_digest: str,
     labeler_source_revision: str,
+    camera_anchor_interval_s: float,
+    maximum_camera_anchors: int,
+    trigger_context_s: float,
+    refinement_confidence_threshold: float,
     publication_scope: str,
 ) -> OddPublication:
     import boto3
@@ -898,6 +984,13 @@ def publish_odd_labelset(
         raise ValueError("labeler_image_digest must be a sha256 digest")
     if SOURCE_REVISION_RE.fullmatch(labeler_source_revision) is None:
         raise ValueError("labeler_source_revision must be a full Git revision")
+    if (
+        camera_anchor_interval_s <= 0
+        or maximum_camera_anchors <= 0
+        or trigger_context_s < 0
+        or not 0 <= refinement_confidence_threshold <= 1
+    ):
+        raise ValueError("VLM sampling configuration is invalid")
 
     manifest_location = S3Location.parse(dataset_manifest_uri)
     manifest_response = boto3.client("s3").get_object(
@@ -938,6 +1031,14 @@ def publish_odd_labelset(
         "labeler_source_revision": labeler_source_revision,
         "openai_model": openai_model,
         "openai_model_revision": openai_model_revision,
+        "road_vlm_sampling": {
+            "regular_interval_s": camera_anchor_interval_s,
+            "maximum_anchors": maximum_camera_anchors,
+            "trigger_context_s": trigger_context_s,
+            "refinement_confidence_threshold": (
+                refinement_confidence_threshold
+            ),
+        },
         "bedrock_map_model_id": bedrock_map_model_id,
         "bedrock_map_model_revision": bedrock_map_model_revision,
         "statistics_schema_version": STATISTICS_SCHEMA_VERSION,
@@ -1109,6 +1210,14 @@ def publish_odd_labelset(
         "openai_compatible": {
             "model": openai_model,
             "model_revision": openai_model_revision,
+            "sampling": {
+                "regular_interval_s": camera_anchor_interval_s,
+                "maximum_anchors": maximum_camera_anchors,
+                "trigger_context_s": trigger_context_s,
+                "refinement_confidence_threshold": (
+                    refinement_confidence_threshold
+                ),
+            },
         },
         "bedrock_map_resolver": {
             "model_id": bedrock_map_model_id,
@@ -1167,8 +1276,10 @@ def wf_generate_odd_labelset(
     bedrock_map_model_revision: str,
     labeler_image_digest: str,
     labeler_source_revision: str,
-    camera_anchor_interval_s: float = 4.0,
-    maximum_camera_anchors: int = 12,
+    camera_anchor_interval_s: float = 1.0,
+    maximum_camera_anchors: int = 128,
+    trigger_context_s: float = 1.0,
+    refinement_confidence_threshold: float = 0.65,
     maximum_scenes: int = 0,
     scene_concurrency: int = 40,
     openai_concurrency: int = 10,
@@ -1192,6 +1303,8 @@ def wf_generate_odd_labelset(
         labeler_source_revision=labeler_source_revision,
         camera_anchor_interval_s=camera_anchor_interval_s,
         maximum_camera_anchors=maximum_camera_anchors,
+        trigger_context_s=trigger_context_s,
+        refinement_confidence_threshold=refinement_confidence_threshold,
         deterministic_concurrency=scene_concurrency,
         image_qc_concurrency=scene_concurrency,
         openai_concurrency=openai_concurrency,
@@ -1212,5 +1325,9 @@ def wf_generate_odd_labelset(
         bedrock_map_model_revision=bedrock_map_model_revision,
         labeler_image_digest=labeler_image_digest,
         labeler_source_revision=labeler_source_revision,
+        camera_anchor_interval_s=camera_anchor_interval_s,
+        maximum_camera_anchors=maximum_camera_anchors,
+        trigger_context_s=trigger_context_s,
+        refinement_confidence_threshold=refinement_confidence_threshold,
         publication_scope=publication_scope,
     )
