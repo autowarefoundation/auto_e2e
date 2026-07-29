@@ -415,6 +415,7 @@ def _task_prompt(
     target_camera_id: str | None,
     inference_pass: str,
     refinement_reasons: Mapping[str, str],
+    sampling_parameters: Mapping[str, Any],
 ) -> str:
     definitions = []
     for key in keys:
@@ -447,6 +448,7 @@ def _task_prompt(
         "subject_camera_id": target_camera_id,
         "inference_pass": inference_pass,
         "refinement_reasons": dict(sorted(refinement_reasons.items())),
+        "sampling_parameters": dict(sorted(sampling_parameters.items())),
         "requested_labels": definitions,
         "camera_frames": frame_metadata,
         "requirements": {
@@ -631,6 +633,7 @@ class OpenAICompatibleRoadObserver:
         target_camera_id: str | None,
         inference_pass: str,
         refinement_reasons: Mapping[str, str],
+        sampling_parameters: Mapping[str, Any],
     ) -> tuple[tuple[dict[str, Any], ...], dict[str, Any]]:
         scene_uid_hash = hashlib.sha256(scene_uid.encode("utf-8")).hexdigest()
         prompt = _task_prompt(
@@ -643,6 +646,7 @@ class OpenAICompatibleRoadObserver:
             target_camera_id=target_camera_id,
             inference_pass=inference_pass,
             refinement_reasons=refinement_reasons,
+            sampling_parameters=sampling_parameters,
         )
         content: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
         for frame in frames:
@@ -740,6 +744,7 @@ class OpenAICompatibleRoadObserver:
         target_camera_id: str | None = None,
         inference_pass: str = "primary",
         refinement_reasons: Mapping[str, str] | None = None,
+        sampling_parameters: Mapping[str, Any] | None = None,
     ) -> tuple[LabelObservation, ...]:
         if end_timestamp_ns <= start_timestamp_ns:
             raise ValueError("road VLM interval must be positive")
@@ -759,6 +764,7 @@ class OpenAICompatibleRoadObserver:
                 "camera-scoped road VLM frames must match target_camera_id"
             )
         refinement_reasons = dict(refinement_reasons or {})
+        sampling_parameters = dict(sampling_parameters or {})
         if set(refinement_reasons) - set(keys):
             raise ValueError("road VLM refinement reason has an unknown key")
         input_start_timestamp_ns = min(frame_timestamps)
@@ -789,6 +795,7 @@ class OpenAICompatibleRoadObserver:
                 target_camera_id=target_camera_id,
                 inference_pass=inference_pass,
                 refinement_reasons=refinement_reasons,
+                sampling_parameters=sampling_parameters,
             )
         except RoadVLMRequestError as exc:
             return tuple(
@@ -812,6 +819,7 @@ class OpenAICompatibleRoadObserver:
                         "subject_scope": subject_scope,
                         "inference_pass": inference_pass,
                         "refinement_reasons": refinement_reasons,
+                        "sampling_parameters": sampling_parameters,
                         "input_start_timestamp_ns": input_start_timestamp_ns,
                         "input_end_timestamp_ns": input_end_timestamp_ns,
                         "request_frame_timestamps_ns": frame_timestamps,
@@ -855,6 +863,7 @@ class OpenAICompatibleRoadObserver:
                         "subject_scope": subject_scope,
                         "inference_pass": inference_pass,
                         "refinement_reasons": refinement_reasons,
+                        "sampling_parameters": sampling_parameters,
                         "supporting_cameras": item["supporting_cameras"],
                         "supporting_timestamps_ns": item[
                             "supporting_timestamps_ns"
@@ -1051,6 +1060,7 @@ def label_visual_scene(
     refinement_confidence_threshold: float = (
         DEFAULT_REFINEMENT_CONFIDENCE_THRESHOLD
     ),
+    sampling_parameters: Mapping[str, Any] | None = None,
 ) -> tuple[LabelObservation, ...]:
     if not 0.0 <= refinement_confidence_threshold <= 1.0:
         raise ValueError("refinement confidence threshold must be in [0,1]")
@@ -1059,6 +1069,7 @@ def label_visual_scene(
         for left, right in zip(anchors, anchors[1:])
     ):
         raise ValueError("road VLM anchors must be strictly ordered")
+    sampling_parameters = dict(sampling_parameters or {})
 
     observations: list[LabelObservation] = []
     for index, anchor in enumerate(anchors):
@@ -1087,6 +1098,7 @@ def label_visual_scene(
                     frames=primary_frames,
                     start_timestamp_ns=anchor.timestamp_ns,
                     end_timestamp_ns=end_timestamp_ns,
+                    sampling_parameters=sampling_parameters,
                 )
                 observations.extend(primary)
                 refinement_plan = _refinement_plan(
@@ -1115,6 +1127,7 @@ def label_visual_scene(
                             end_timestamp_ns=end_timestamp_ns,
                             inference_pass="refinement",
                             refinement_reasons=refinement_plan,
+                            sampling_parameters=sampling_parameters,
                         )
                     )
 
@@ -1136,6 +1149,7 @@ def label_visual_scene(
                         start_timestamp_ns=anchor.timestamp_ns,
                         end_timestamp_ns=end_timestamp_ns,
                         target_camera_id=camera_id,
+                        sampling_parameters=sampling_parameters,
                     )
                     observations.extend(primary)
                     refinement_plan = _refinement_plan(
@@ -1166,6 +1180,7 @@ def label_visual_scene(
                                 target_camera_id=camera_id,
                                 inference_pass="refinement",
                                 refinement_reasons=refinement_plan,
+                                sampling_parameters=sampling_parameters,
                             )
                         )
     return tuple(observations)
