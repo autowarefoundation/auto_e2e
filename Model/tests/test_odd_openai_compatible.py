@@ -55,10 +55,10 @@ def _completion(observations: dict[str, dict[str, Any]]) -> dict[str, Any]:
 
 def test_road_vlm_semantic_hashes_are_stable() -> None:
     assert road_vlm_prompt_bundle_sha256() == (
-        "580c6cdc154c0fd8d819f40f4fd9da7b028c47d4dfdcbc9dc65dc3035d96bc59"
+        "a507142f4acb0c8d46c35335d0d535dba564f01833fa4e426b62f407b80ae267"
     )
     assert road_vlm_decoding_bundle_sha256(max_tokens=4096) == (
-        "b67dec110ffdf46083c1e5ed3fd0db567e7e986d857248127f6d01e5b4380c8d"
+        "730bc4c543fdba7037314f7e818b1301e9496ec8eed78c47354f9377d9d143c0"
     )
     assert road_vlm_decoding_bundle_sha256(
         max_tokens=2048
@@ -306,6 +306,67 @@ def test_invalid_responses_exhaust_retries_and_abstain() -> None:
     )
 
 
+def test_visual_frame_status_cannot_claim_decoder_or_timing_failures() -> None:
+    requests: list[dict[str, Any]] = []
+
+    def transport(
+        _url: str,
+        payload: dict[str, Any],
+        _headers: dict[str, str],
+    ) -> dict[str, Any]:
+        requests.append(payload)
+        return _completion(
+            {
+                "perception.image.frame_status": {
+                    "key": "perception.image.frame_status",
+                    "status": "valid",
+                    "values": ["frozen_frame"],
+                    "confidence": 0.99,
+                    "camera_id": "front_center",
+                    "supporting_cameras": ["front_center"],
+                    "supporting_timestamps_ns": [1_000],
+                    "reason": "The visible frame appears unchanged.",
+                }
+            }
+        )
+
+    observer = OpenAICompatibleRoadObserver(
+        RoadVLMConfig(
+            base_url="https://road-vlm.example/v1",
+            model="road-observer",
+            retry_count=0,
+        ),
+        transport=transport,
+    )
+    observation = observer.observe(
+        scene_uid="scene-1",
+        task_bundle="perception_condition",
+        keys=("perception.image.frame_status",),
+        frames=(_frame(),),
+        start_timestamp_ns=1_000,
+        end_timestamp_ns=2_000,
+        target_camera_id="front_center",
+    )[0]
+
+    assert observation.status == "unavailable"
+    assert observation.values == ()
+    assert observer.provider_exchanges[0].status == "invalid_response"
+    schema = requests[0]["response_format"]["json_schema"]["schema"]
+    variants = schema["properties"]["observations"]["properties"][
+        "perception.image.frame_status"
+    ]["oneOf"]
+    valid = next(
+        variant
+        for variant in variants
+        if variant["properties"]["status"].get("const") == "valid"
+    )
+    assert valid["properties"]["values"]["items"]["enum"] == [
+        "normal",
+        "partial_obstruction",
+        "full_obstruction",
+    ]
+
+
 def test_task_bundles_are_small_and_scope_camera_conditions() -> None:
     assert [bundle.name for bundle in ROAD_VLM_TASK_BUNDLES] == [
         "road_appearance",
@@ -323,6 +384,7 @@ def test_task_bundles_are_small_and_scope_camera_conditions() -> None:
     assert len(requested_keys) == len(set(requested_keys))
     perception = ROAD_VLM_TASK_BUNDLES[-1]
     assert "perception.image.blur" in perception.camera_keys
+    assert "perception.image.frame_status" in perception.camera_keys
     assert "perception.image.lens_contamination" in perception.camera_keys
     assert not any(
         key.startswith("perception.object.")
