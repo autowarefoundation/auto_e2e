@@ -275,6 +275,14 @@ export interface ODDQualityState {
   certification_status: string;
 }
 
+export type JSONValue =
+  | string
+  | number
+  | boolean
+  | null
+  | JSONValue[]
+  | { [key: string]: JSONValue };
+
 export interface ODDLabelSet {
   schema_version: string;
   status: string;
@@ -291,7 +299,7 @@ export interface ODDLabelSet {
   publication_scope: string;
   expected_scene_count: number;
   scene_count: number;
-  openai_compatible: Record<string, string>;
+  openai_compatible: Record<string, JSONValue>;
   quality: ODDQualityState;
   artifacts: Record<string, ODDArtifact>;
 }
