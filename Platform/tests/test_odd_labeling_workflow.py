@@ -17,6 +17,7 @@ from Platform.pipelines.odd_labeling_workflow import (
     label_odd_kinematics,
     label_odd_map_route,
     label_odd_visual,
+    odd_dataset_labeler_launch_plan,
     publish_odd_labelset,
     resolve_odd_scenes,
     wf_generate_odd_labelset,
@@ -241,6 +242,12 @@ def test_workflow_interface_does_not_expose_endpoint_url() -> None:
     assert ODD_LABELER_VERSION == "odd_dataset_labeler_v5"
 
 
+def test_dataset_labeler_has_dedicated_launch_plan() -> None:
+    assert odd_dataset_labeler_launch_plan.name == "odd-dataset-labeler"
+    assert odd_dataset_labeler_launch_plan.workflow == wf_generate_odd_labelset
+    assert odd_dataset_labeler_launch_plan.fixed_inputs.literals == {}
+
+
 def test_source_labelers_have_independent_semantic_interfaces() -> None:
     assert set(resolve_odd_scenes.python_interface.outputs) == {
         "descriptors",
@@ -319,3 +326,4 @@ def test_launcher_uses_full_rate_visual_sampling_contract() -> None:
     assert 'REFINEMENT_CONFIDENCE_THRESHOLD: "0.65"' in launcher
     assert '"trigger_context_s"' in launcher
     assert '"refinement_confidence_threshold"' in launcher
+    assert "odd_dataset_labeler_launch_plan" in launcher
