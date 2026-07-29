@@ -589,6 +589,45 @@ def test_visual_trigger_timestamps_cover_transitions_and_events() -> None:
     ) == (2_000, 4_000, 4_999)
 
 
+def test_unavailable_sampled_camera_gap_is_not_a_visual_trigger() -> None:
+    observations = (
+        make_observation(
+            scene_uid="scene-1",
+            key="perception.image.frame_status",
+            status="valid",
+            values=("normal",),
+            confidence=0.98,
+            source="image_qc",
+            start_timestamp_ns=1_000,
+            end_timestamp_ns=2_000,
+            camera_id="front_center",
+        ),
+        make_observation(
+            scene_uid="scene-1",
+            key="perception.image.frame_status",
+            status="unavailable",
+            confidence=1.0,
+            source="image_qc",
+            start_timestamp_ns=2_000,
+            end_timestamp_ns=3_000,
+            camera_id="front_center",
+        ),
+        make_observation(
+            scene_uid="scene-1",
+            key="perception.image.frame_status",
+            status="valid",
+            values=("normal",),
+            confidence=0.98,
+            source="image_qc",
+            start_timestamp_ns=3_000,
+            end_timestamp_ns=4_000,
+            camera_id="front_center",
+        ),
+    )
+
+    assert derive_visual_trigger_timestamps(observations) == ()
+
+
 def test_visual_scene_uses_focused_alternate_frames() -> None:
     calls: list[dict[str, Any]] = []
 
