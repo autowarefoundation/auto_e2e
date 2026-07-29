@@ -13,6 +13,8 @@ from data_processing.odd_labeling.openai_compatible import (
     RoadVLMConfig,
     derive_visual_trigger_timestamps,
     label_visual_scene,
+    road_vlm_decoding_bundle_sha256,
+    road_vlm_prompt_bundle_sha256,
 )
 from data_processing.odd_labeling.schema import make_observation
 
@@ -49,6 +51,18 @@ def _completion(observations: dict[str, dict[str, Any]]) -> dict[str, Any]:
             }
         ]
     }
+
+
+def test_road_vlm_semantic_hashes_are_stable() -> None:
+    assert road_vlm_prompt_bundle_sha256() == (
+        "580c6cdc154c0fd8d819f40f4fd9da7b028c47d4dfdcbc9dc65dc3035d96bc59"
+    )
+    assert road_vlm_decoding_bundle_sha256(max_tokens=4096) == (
+        "b67dec110ffdf46083c1e5ed3fd0db567e7e986d857248127f6d01e5b4380c8d"
+    )
+    assert road_vlm_decoding_bundle_sha256(
+        max_tokens=2048
+    ) != road_vlm_decoding_bundle_sha256(max_tokens=4096)
 
 
 def test_observer_uses_openai_contract_and_validates_output() -> None:
