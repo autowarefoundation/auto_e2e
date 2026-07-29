@@ -201,13 +201,6 @@ function weightedRecordAmount(
   return `${sceneCount.toLocaleString()} scenes`;
 }
 
-function supportState(key: ODDKeyStatistic | undefined): string {
-  if (!key || key.attempted_count === 0) return "unsupported";
-  if (key.successful_count === 0) return "unavailable";
-  if (key.observable_scene_coverage < 0.8) return "partial";
-  return "supported";
-}
-
 function EventTimeline({
   scene,
 }: {
@@ -1342,7 +1335,7 @@ function ODDPageContent() {
                   </span>
                   <span className="text-xs text-slate-500">
                     {item.cardinality} · {item.subject} · {item.temporal_scope}{" "}
-                    · {supportState(counts.get(item.key))}
+                    · {item.dataset_support.support_state}
                   </span>
                 </div>
                 <p className="mt-1 text-xs text-slate-500">
@@ -1377,7 +1370,15 @@ function ODDPageContent() {
                   </dt>
                   <dd className="mt-1 font-mono text-[10px] text-slate-400">
                     {dataset} / {version} ·{" "}
-                    {supportState(counts.get(item.key))}
+                    {item.dataset_support.support_state}
+                  </dd>
+                  <dd className="mt-1 font-mono text-[9px] text-slate-600">
+                    {item.dataset_support.valid_scene_count.toLocaleString()} /{" "}
+                    {item.dataset_support.eligible_scene_count.toLocaleString()}{" "}
+                    scenes observable ·{" "}
+                    {percent(
+                      item.dataset_support.observable_scene_coverage,
+                    )}
                   </dd>
                 </div>
                 <div>
