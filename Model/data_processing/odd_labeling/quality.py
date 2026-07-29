@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import math
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
@@ -18,6 +19,44 @@ CONFIDENCE_BANDS = (
     (0.6, 0.8),
     (0.8, 1.0),
 )
+
+
+def calibration_bundle_document() -> dict[str, Any]:
+    return {
+        "schema_version": "odd_calibration_bundle_v1",
+        "mode": "identity_pending_human_audit",
+        "partition_by": [
+            "ontology_key",
+            "source",
+            "labeler_version",
+        ],
+        "raw_confidence_retained": True,
+        "resolved_confidence_transform": "identity",
+        "certification_status": "experimental",
+        "certified": False,
+        "audit_sample_target": AUDIT_SAMPLE_TARGET,
+        "confidence_bands": [list(band) for band in CONFIDENCE_BANDS],
+        "future_allowed_methods": [
+            "isotonic_regression",
+            "temperature_scaling",
+        ],
+    }
+
+
+def calibration_bundle_sha256() -> str:
+    return hashlib.sha256(
+        _canonical_bytes(calibration_bundle_document())
+    ).hexdigest()
+
+
+def _canonical_bytes(value: Any) -> bytes:
+    return json.dumps(
+        value,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        allow_nan=False,
+    ).encode("ascii")
 
 
 def _check_interval(
