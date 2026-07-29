@@ -60,6 +60,7 @@ func TestFlyteLaunchPlanExecutionUsesTypedInputs(t *testing.T) {
 			"maximum_camera_anchors":          128,
 			"camera_anchor_interval_s":        1.0,
 			"refinement_confidence_threshold": 0.65,
+			"enabled_sources":                 []string{"vlm", "fusion"},
 			"enabled":                         true,
 		},
 	)
@@ -88,6 +89,15 @@ func TestFlyteLaunchPlanExecutionUsesTypedInputs(t *testing.T) {
 		primitive("refinement_confidence_threshold")["floatValue"] != 0.65 ||
 		primitive("enabled")["boolean"] != true {
 		t.Fatalf("typed literals = %#v", literals)
+	}
+	sources := literals["enabled_sources"].(map[string]any)["collection"].(map[string]any)["literals"].([]any)
+	sourceValue := func(index int) string {
+		return sources[index].(map[string]any)["scalar"].(map[string]any)["primitive"].(map[string]any)["stringValue"].(string)
+	}
+	if len(sources) != 2 ||
+		sourceValue(0) != "vlm" ||
+		sourceValue(1) != "fusion" {
+		t.Fatalf("string collection literal = %#v", sources)
 	}
 }
 
