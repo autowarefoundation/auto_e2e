@@ -7,6 +7,7 @@ import hashlib
 import io
 import json
 import math
+import time
 from collections.abc import Iterable, Mapping
 from typing import Any, Protocol
 
@@ -17,7 +18,13 @@ from navigation.contracts import Maneuver, TransitionType
 
 from .ontology import ONTOLOGY
 from .published_snapshot import CanonicalSceneEvidence
-from .schema import LabelObservation, canonical_json_bytes, make_observation
+from .schema import (
+    LabelObservation,
+    ProviderExchange,
+    canonical_json_bytes,
+    content_sha256,
+    make_observation,
+)
 
 
 BEDROCK_MAP_SCHEMA_VERSION = "bedrock_map_route_request_v1"
@@ -615,6 +622,36 @@ def _extract_tool_input(response: Mapping[str, Any]) -> dict[str, Any]:
     return dict(tools[0]["input"])
 
 
+def _provider_usage(response: Mapping[str, Any]) -> dict[str, int | float]:
+    raw = response.get("usage")
+    if not isinstance(raw, Mapping):
+        return {}
+    aliases = {
+        "inputTokens": "input_tokens",
+        "outputTokens": "output_tokens",
+        "totalTokens": "total_tokens",
+    }
+    usage: dict[str, int | float] = {}
+    for source_name, target_name in aliases.items():
+        value = raw.get(source_name)
+        if (
+            isinstance(value, (int, float))
+            and not isinstance(value, bool)
+            and math.isfinite(float(value))
+            and value >= 0
+        ):
+            usage[target_name] = value
+    return usage
+
+
+def _raw_model_response(response: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        key: response[key]
+        for key in ("output", "stopReason", "usage", "metrics")
+        if key in response
+    }
+
+
 def _validate_geometry(
     request: PrivacySafeMapRouteRequest,
     value: str,
@@ -696,6 +733,11 @@ class BedrockMapRouteResolver:
         self.model_id = model_id
         self.model_revision = model_revision
         self.max_tokens = max_tokens
+        self._provider_exchanges: list[ProviderExchange] = []
+
+    @property
+    def provider_exchanges(self) -> tuple[ProviderExchange, ...]:
+        return tuple(self._provider_exchanges)
 
     def resolve(
         self,
@@ -723,43 +765,120 @@ class BedrockMapRouteResolver:
         request_sha256 = hashlib.sha256(
             canonical_json_bytes(request_identity)
         ).hexdigest()
-        response = self.client.converse(
-            modelId=self.model_id,
-            system=[{"text": _system_prompt()}],
-            messages=[
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "text": json.dumps(
-                                payload,
-                                sort_keys=True,
-                                separators=(",", ":"),
-                            )
-                        },
-                        {
-                            "image": {
-                                "format": "png",
-                                "source": {"bytes": request.render_png},
-                            }
-                        },
-                    ],
-                }
-            ],
-            toolConfig={
-                "tools": [_tool_schema(request)],
-                "toolChoice": {"tool": {"name": BEDROCK_TOOL_NAME}},
-            },
-            inferenceConfig=decoding,
-        )
-        result = _extract_tool_input(response)
-        status, selected_value, citations, confidence = _validate_tool_result(
-            request,
-            result,
-        )
-        response_sha256 = hashlib.sha256(
-            canonical_json_bytes(result)
-        ).hexdigest()
+        request_metadata = {
+            "schema_version": BEDROCK_MAP_SCHEMA_VERSION,
+            "prompt_sha256": prompt_sha256,
+            "decoding_config_sha256": decoding_sha256,
+            "payload": payload,
+            "render_png_sha256": request_identity["render_png_sha256"],
+            "tool": request_identity["tool"],
+        }
+        _assert_privacy_safe(request_metadata)
+        response: Mapping[str, Any] | None = None
+        started_at = time.perf_counter()
+        try:
+            response = self.client.converse(
+                modelId=self.model_id,
+                system=[{"text": _system_prompt()}],
+                messages=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "text": json.dumps(
+                                    payload,
+                                    sort_keys=True,
+                                    separators=(",", ":"),
+                                )
+                            },
+                            {
+                                "image": {
+                                    "format": "png",
+                                    "source": {"bytes": request.render_png},
+                                }
+                            },
+                        ],
+                    }
+                ],
+                toolConfig={
+                    "tools": [_tool_schema(request)],
+                    "toolChoice": {"tool": {"name": BEDROCK_TOOL_NAME}},
+                },
+                inferenceConfig=decoding,
+            )
+            raw_response = _raw_model_response(response)
+            result = _extract_tool_input(response)
+            status, selected_value, citations, confidence = (
+                _validate_tool_result(
+                    request,
+                    result,
+                )
+            )
+            response_sha256 = content_sha256(raw_response)
+            self._provider_exchanges.append(
+                ProviderExchange(
+                    backend="BMR",
+                    provider="amazon_bedrock",
+                    model=self.model_id,
+                    model_revision=self.model_revision,
+                    request_sha256=request_sha256,
+                    response_sha256=response_sha256,
+                    status="succeeded",
+                    attempt=1,
+                    latency_ms=(
+                        time.perf_counter() - started_at
+                    )
+                    * 1000.0,
+                    input_image_count=1,
+                    request_metadata=request_metadata,
+                    raw_response=raw_response,
+                    usage=_provider_usage(response),
+                )
+            )
+        except Exception as error:
+            raw_response = (
+                _raw_model_response(response)
+                if response is not None
+                else None
+            )
+            self._provider_exchanges.append(
+                ProviderExchange(
+                    backend="BMR",
+                    provider="amazon_bedrock",
+                    model=self.model_id,
+                    model_revision=self.model_revision,
+                    request_sha256=request_sha256,
+                    response_sha256=(
+                        content_sha256(raw_response)
+                        if raw_response is not None
+                        else None
+                    ),
+                    status=(
+                        "geometry_rejected"
+                        if "independent geometry validation" in str(error)
+                        else (
+                            "invalid_response"
+                            if response is not None
+                            else "transport_error"
+                        )
+                    ),
+                    attempt=1,
+                    latency_ms=(
+                        time.perf_counter() - started_at
+                    )
+                    * 1000.0,
+                    input_image_count=1,
+                    request_metadata=request_metadata,
+                    raw_response=raw_response,
+                    usage=(
+                        _provider_usage(response)
+                        if response is not None
+                        else {}
+                    ),
+                    error_type=type(error).__name__,
+                )
+            )
+            raise
         return status, selected_value, citations, confidence, {
             "schema_version": BEDROCK_MAP_SCHEMA_VERSION,
             "prompt_version": BEDROCK_MAP_PROMPT_VERSION,
@@ -815,6 +934,7 @@ def resolve_ambiguous_map_route(
                 request
             )
         except Exception as exc:  # noqa: BLE001
+            exchange = resolver.provider_exchanges[-1]
             output.append(
                 make_observation(
                     scene_uid=observation.scene_uid,
@@ -826,6 +946,9 @@ def resolve_ambiguous_map_route(
                     end_timestamp_ns=observation.end_timestamp_ns,
                     provenance={
                         **base_provenance,
+                        "request_sha256": exchange.request_sha256,
+                        "response_sha256": exchange.response_sha256,
+                        "attempt": exchange.attempt,
                         "error_type": type(exc).__name__,
                         "error_message": str(exc)[:500],
                     },
