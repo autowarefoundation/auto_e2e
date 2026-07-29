@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+
+	"github.com/autowarefoundation/auto_e2e/tools/datamodelconsole/api/internal/store"
 )
 
 func oddJSON(t *testing.T, value any) []byte {
@@ -154,6 +156,189 @@ func oddTestService(
 		},
 		bucket: "datasets",
 	}
+}
+
+type fakeODDMetricProjectionStore struct {
+	consoleStore
+	pointers []store.ODDMetricProjectionPointer
+}
+
+func (s *fakeODDMetricProjectionStore) ListReadyODDMetricProjections(
+	context.Context,
+	string,
+	string,
+	string,
+) ([]store.ODDMetricProjectionPointer, error) {
+	return append([]store.ODDMetricProjectionPointer(nil), s.pointers...), nil
+}
+
+func oddMetricValues(value float64) map[string]float64 {
+	return map[string]float64{
+		"ade_1s_m":         value,
+		"ade_2s_m":         value,
+		"ade_3s_m":         value,
+		"ade_horizon_m":    value,
+		"fde_horizon_m":    value,
+		"acceleration_mae": value,
+		"curvature_mae":    value,
+	}
+}
+
+func oddMetricProjectionTestService(
+	t *testing.T,
+	mutateReport func(map[string]any),
+) (*S3Service, *fakePublicationS3, *fakeODDMetricProjectionStore) {
+	t.Helper()
+	service := oddTestService(t, nil)
+	client := service.client.(*fakePublicationS3)
+	service.artifactsBucket = "artifacts"
+
+	var labelSetPointer oddPointer
+	if err := json.Unmarshal(
+		client.objects["kitscenes/v3.0/odd/latest.json"].body,
+		&labelSetPointer,
+	); err != nil {
+		t.Fatal(err)
+	}
+	modelArtifactID := strings.Repeat("1", 64)
+	projectionID := strings.Repeat("2", 64)
+	evaluationManifestSHA256 := strings.Repeat("3", 64)
+	validationSampleUIDDigest := strings.Repeat("4", 64)
+	root := fmt.Sprintf(
+		"odd_metric_projections/schema=v1/dataset=kitscenes/version=v3.0/"+
+			"labelset=oddls-test/model=%s/projection=%s",
+		modelArtifactID,
+		projectionID,
+	)
+	reportKey := root + "/report.json"
+	manifestKey := root + "/manifest.json"
+	report := map[string]any{
+		"schema_version":            "odd_model_metric_projection_v1",
+		"projection_policy_version": "odd_interval_projection_v1",
+		"metric_policy_version":     "control_displacement_seed_mean_v1",
+		"frequency_hz":              10,
+		"horizon_steps":             64,
+		"horizon_seconds":           6.4,
+		"observation_join":          "start <= anchor < end",
+		"event_join": "event_start < anchor + model_horizon " +
+			"and event_end > anchor",
+		"seed_aggregation":          "arithmetic_mean",
+		"sample_uid_digest":         validationSampleUIDDigest,
+		"sample_count":              3820,
+		"scene_count":               40,
+		"samples_with_observations": 3800,
+		"samples_with_events":       100,
+		"overall": map[string]any{
+			"sample_count": 3820,
+			"scene_count":  40,
+			"metrics":      oddMetricValues(1.0),
+		},
+		"slices": []any{map[string]any{
+			"kind":         "observation",
+			"key":          "odd.road.context",
+			"value":        "urban",
+			"status":       "valid",
+			"sample_count": 100,
+			"scene_count":  20,
+			"metrics":      oddMetricValues(1.1),
+		}},
+		"status":        "ready",
+		"projection_id": projectionID,
+		"model": map[string]any{
+			"artifact_sha256":       modelArtifactID,
+			"registered_model_name": "auto-e2e-driving-policy",
+			"model_version":         42,
+			"run_id":                "run-42",
+		},
+		"evaluation_dataset": map[string]any{
+			"dataset":                 "kitscenes",
+			"version":                 "v2.2",
+			"manifest_uri":            "s3://datasets/kitscenes/v2.2/manifest.json",
+			"manifest_sha256":         evaluationManifestSHA256,
+			"overlay_manifest_key":    "overlays/model/manifest.json",
+			"overlay_manifest_sha256": strings.Repeat("5", 64),
+			"overlay_cache_identity":  strings.Repeat("6", 64),
+		},
+		"labelset": map[string]any{
+			"dataset":                 "kitscenes",
+			"version":                 "v3.0",
+			"labelset_id":             "oddls-test",
+			"manifest_key":            labelSetPointer.ManifestKey,
+			"manifest_sha256":         labelSetPointer.ManifestSHA256,
+			"dataset_manifest_sha256": strings.Repeat("a", 64),
+		},
+		"validation": map[string]any{
+			"strategy":          "exact_group_fraction",
+			"split_id":          "split-v1",
+			"group_count":       40,
+			"sample_count":      3820,
+			"sample_uid_digest": validationSampleUIDDigest,
+		},
+	}
+	if mutateReport != nil {
+		mutateReport(report)
+	}
+	reportBody := oddJSON(t, report)
+	reportSHA256 := oddDigest(reportBody)
+	projectionManifest := map[string]any{
+		"schema_version":                     "odd_model_metric_projection_manifest_v1",
+		"status":                             "ready",
+		"projection_id":                      projectionID,
+		"projection_schema_version":          "odd_model_metric_projection_v1",
+		"projection_policy_version":          "odd_interval_projection_v1",
+		"metric_policy_version":              "control_displacement_seed_mean_v1",
+		"model_artifact_sha256":              modelArtifactID,
+		"labelset_id":                        "oddls-test",
+		"labelset_manifest_sha256":           labelSetPointer.ManifestSHA256,
+		"evaluation_dataset_manifest_sha256": evaluationManifestSHA256,
+		"validation_sample_uid_digest":       validationSampleUIDDigest,
+		"sample_count":                       3820,
+		"artifacts": map[string]any{
+			"report": map[string]any{
+				"key":          reportKey,
+				"sha256":       reportSHA256,
+				"byte_size":    len(reportBody),
+				"content_type": "application/json",
+			},
+			"samples": map[string]any{
+				"key":          root + "/samples.jsonl.gz",
+				"sha256":       strings.Repeat("7", 64),
+				"byte_size":    4096,
+				"content_type": "application/x-ndjson",
+			},
+		},
+	}
+	manifestBody := oddJSON(t, projectionManifest)
+	client.objects[reportKey] = fakePublicationObject{body: reportBody}
+	client.objects[manifestKey] = fakePublicationObject{body: manifestBody}
+	fakeStore := &fakeODDMetricProjectionStore{
+		pointers: []store.ODDMetricProjectionPointer{{
+			ProjectionID:                    projectionID,
+			ProjectionPolicyVersion:         "odd_interval_projection_v1",
+			MetricPolicyVersion:             "control_displacement_seed_mean_v1",
+			LabelSetID:                      "oddls-test",
+			LabelSetManifestSHA256:          labelSetPointer.ManifestSHA256,
+			ModelArtifactID:                 modelArtifactID,
+			RegisteredModelName:             "auto-e2e-driving-policy",
+			ModelVersion:                    42,
+			RunID:                           "run-42",
+			EvaluationDataset:               "kitscenes",
+			EvaluationVersion:               "v2.2",
+			EvaluationDatasetManifestSHA256: evaluationManifestSHA256,
+			ValidationSampleUIDDigest:       validationSampleUIDDigest,
+			SampleCount:                     3820,
+			SceneCount:                      40,
+			ManifestKey:                     manifestKey,
+			ManifestSHA256:                  oddDigest(manifestBody),
+			ManifestByteSize:                int64(len(manifestBody)),
+			ReportKey:                       reportKey,
+			ReportSHA256:                    reportSHA256,
+			ReportByteSize:                  int64(len(reportBody)),
+			ArtifactsBucket:                 "artifacts",
+		}},
+	}
+	service.store = fakeStore
+	return service, client, fakeStore
 }
 
 func oddStructuredSearchService(t *testing.T) *S3Service {
@@ -453,6 +638,104 @@ func TestODDManifestReportsUnstartedWithoutReadyPointer(t *testing.T) {
 
 	if !errors.Is(err, ErrODDNotStarted) {
 		t.Fatalf("missing ready pointer error = %v", err)
+	}
+}
+
+func TestODDMetricProjectionsVerifyAndReturnReport(t *testing.T) {
+	service, _, _ := oddMetricProjectionTestService(t, nil)
+
+	response, manifest, digest, err := service.ODDMetricProjections(
+		context.Background(),
+		"kitscenes",
+		"v3.0",
+	)
+
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.Dataset != "kitscenes" ||
+		response.Version != "v3.0" ||
+		response.LabelSetID != "oddls-test" ||
+		response.LabelSetManifestSHA256 != digest ||
+		manifest.LabelSetID != response.LabelSetID ||
+		len(response.Projections) != 1 {
+		t.Fatalf("ODD metric projection response = %+v", response)
+	}
+	var report oddMetricProjectionReport
+	if err := json.Unmarshal(response.Projections[0], &report); err != nil {
+		t.Fatal(err)
+	}
+	if report.Model.ModelVersion != 42 ||
+		report.SampleCount != 3820 ||
+		report.SceneCount != 40 ||
+		report.Overall.Metrics["ade_horizon_m"] != 1.0 ||
+		len(report.Slices) != 1 {
+		t.Fatalf("ODD metric projection report = %+v", report)
+	}
+}
+
+func TestODDMetricProjectionsRejectTamperedObjects(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		mutateBody func([]byte) []byte
+		want       string
+	}{
+		{
+			name: "size",
+			mutateBody: func(body []byte) []byte {
+				return append(body, '\n')
+			},
+			want: "size differs",
+		},
+		{
+			name: "digest",
+			mutateBody: func(body []byte) []byte {
+				tampered := append([]byte(nil), body...)
+				tampered[len(tampered)-2] ^= 1
+				return tampered
+			},
+			want: "digest differs",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			service, client, fakeStore := oddMetricProjectionTestService(
+				t,
+				nil,
+			)
+			reportKey := fakeStore.pointers[0].ReportKey
+			object := client.objects[reportKey]
+			object.body = test.mutateBody(object.body)
+			client.objects[reportKey] = object
+
+			_, _, _, err := service.ODDMetricProjections(
+				context.Background(),
+				"kitscenes",
+				"v3.0",
+			)
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("tampered report error = %v", err)
+			}
+		})
+	}
+}
+
+func TestODDMetricProjectionsRejectSemanticIdentityDrift(t *testing.T) {
+	service, _, _ := oddMetricProjectionTestService(
+		t,
+		func(report map[string]any) {
+			labelSet := report["labelset"].(map[string]any)
+			labelSet["manifest_sha256"] = strings.Repeat("f", 64)
+		},
+	)
+
+	_, _, _, err := service.ODDMetricProjections(
+		context.Background(),
+		"kitscenes",
+		"v3.0",
+	)
+
+	if err == nil || !strings.Contains(err.Error(), "LabelSet identity differs") {
+		t.Fatalf("semantic identity drift error = %v", err)
 	}
 }
 
