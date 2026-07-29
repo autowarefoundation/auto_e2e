@@ -44,7 +44,7 @@ ODD_EXECUTABLE_SOURCES = frozenset(
 ODD_SOURCE_POLICY_VERSIONS = {
     "map_route": "odd_map_route_policy_v1",
     "gnss_ins": "odd_gnss_ins_policy_v2",
-    "vlm": "odd_road_vlm_policy_v3",
+    "vlm": "odd_road_vlm_policy_v4",
     "image_qc": "odd_image_qc_policy_v2",
     "fusion": "odd_source_fusion_v1",
 }
@@ -1044,7 +1044,7 @@ def label_odd_image_quality(
 @task(
     container_image=DATA_PREP_IMAGE,
     cache=True,
-    cache_version="odd-source-openai-compatible-v3",
+    cache_version="odd-source-openai-compatible-v4",
     retries=2,
     pod_template=_scene_labeling_pod_template(),
     requests=Resources(cpu="2", mem="6Gi"),
