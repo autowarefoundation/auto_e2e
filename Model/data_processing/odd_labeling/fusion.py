@@ -276,6 +276,7 @@ def _semantic_provenance(
             "stationary_dwell_ns",
             "strong_response_dwell_ns",
             "frozen_ego_motion_threshold_m",
+            "frame_inventory_mode",
             "model",
             "model_revision",
         )
