@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 
 import numpy as np
 
@@ -216,6 +217,33 @@ def test_request_removes_geography_and_provider_identity() -> None:
         "route-000",
         "lane-000",
     }
+
+
+def test_missing_navigation_never_calls_bedrock() -> None:
+    scene = replace(
+        _scene(),
+        navigation_map=None,
+        navigation_route=None,
+        navigation_quality={},
+    )
+    client = _BedrockClient("turn_left")
+    resolver = BedrockMapRouteResolver(
+        client,
+        model_id="us.anthropic.claude-sonnet-4-6",
+        model_revision="claude-sonnet-4-6",
+    )
+
+    assert build_privacy_safe_request(
+        scene,
+        _ambiguous_route_action(),
+    ) is None
+    assert resolve_ambiguous_map_route(
+        resolver,
+        scene,
+        (_ambiguous_route_action(),),
+    ) == ()
+    assert client.requests == []
+    assert resolver.provider_exchanges == ()
 
 
 def test_resolver_uses_bedrock_tool_and_geometry_validation() -> None:
