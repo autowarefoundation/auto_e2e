@@ -590,16 +590,29 @@ test("ODD Dashboard distinguishes running, failed, and not-started lifecycle sta
 });
 
 test("ODD Dashboard remains horizontally contained on mobile", async ({ page }) => {
+  const browserErrors: string[] = [];
+  page.on("console", (message) => {
+    if (message.type() === "error") browserErrors.push(message.text());
+  });
+  page.on("pageerror", (error) => browserErrors.push(error.message));
   await page.setViewportSize({ width: 390, height: 844 });
   await installODDDashboardRoutes(page);
-  await page.goto("/odd");
+  await page.goto("/odd?tab=metrics");
   await expect(page.getByRole("heading", { name: "ODD Dashboard" })).toBeVisible();
+  await expect(page.getByText("+2.00 m")).toBeVisible();
 
   expect(
     await page.evaluate(
       () => document.documentElement.scrollWidth - window.innerWidth,
     ),
   ).toBe(0);
+  expect(
+    await page.locator("table").evaluate((table) => {
+      const scroller = table.parentElement;
+      return Boolean(scroller && scroller.scrollWidth > scroller.clientWidth);
+    }),
+  ).toBe(true);
+  expect(browserErrors).toEqual([]);
 });
 
 test("ODD ontology deep links expand the selected scene label definition", async ({
