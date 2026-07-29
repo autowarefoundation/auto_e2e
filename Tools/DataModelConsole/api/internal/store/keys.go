@@ -195,6 +195,17 @@ func OverlaySetPK(modelArtifactID, dataset, version string) string {
 	return fmt.Sprintf("OVLSET#%s#%s#%s", modelArtifactID, dataset, version)
 }
 
+// ODDMetricProjectionPK groups analysis-only model metric projections for one
+// immutable LabelSet. Model and projection identities remain in the sort key.
+func ODDMetricProjectionPK(dataset, version, labelSetID string) string {
+	return fmt.Sprintf(
+		"ODDPROJ#%s#%s#%s",
+		dataset,
+		version,
+		labelSetID,
+	)
+}
+
 // GeoPK identifies the privacy-filtered geospatial summary for a dataset
 // version. Exact episode paths remain in access-controlled S3 objects.
 func GeoPK(dataset, version string) string {
