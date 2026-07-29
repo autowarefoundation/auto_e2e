@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -8,6 +9,7 @@ from Platform.pipelines.odd_labeling_workflow import (
     ODD_LABELER_VERSION,
     _execution_receipt,
     _execution_receipt_key,
+    _provider_report,
     _publication_scope,
     _put_immutable,
     _scene_summary,
@@ -339,6 +341,75 @@ def test_execution_receipt_is_separate_and_content_addressed() -> None:
     )
     assert key.endswith(".json")
     assert "odd-full-run" not in key
+
+
+def test_provider_report_aggregates_requests_without_raw_responses() -> None:
+    exchanges = [
+        {
+            "backend": "ORV",
+            "provider": "openai_compatible",
+            "model": "cosmos",
+            "model_revision": "revision-1",
+            "request_sha256": "a" * 64,
+            "response_sha256": "b" * 64,
+            "status": "succeeded",
+            "attempt": 1,
+            "latency_ms": 100.0,
+            "input_image_count": 6,
+            "request_metadata": {"bundle": "road"},
+            "raw_response": {"result": "clear"},
+            "usage": {"input_tokens": 100, "output_tokens": 20},
+            "error_type": None,
+            "schema_version": "odd_provider_exchange_v1",
+        },
+        {
+            "backend": "ORV",
+            "provider": "openai_compatible",
+            "model": "cosmos",
+            "model_revision": "revision-1",
+            "request_sha256": "c" * 64,
+            "response_sha256": None,
+            "status": "transport_error",
+            "attempt": 1,
+            "latency_ms": 300.0,
+            "input_image_count": 6,
+            "request_metadata": {"bundle": "road"},
+            "raw_response": None,
+            "usage": {},
+            "error_type": "TimeoutError",
+            "schema_version": "odd_provider_exchange_v1",
+        },
+    ]
+
+    report = _provider_report(exchanges)
+
+    assert report["schema_version"] == "odd_provider_report_v1"
+    assert "raw_response" not in json.dumps(report)
+    assert report["totals"] == {
+        "attempt_count": 2,
+        "failure_count": 1,
+        "input_image_count": 12,
+        "request_count": 2,
+        "successful_count": 1,
+    }
+    backend = report["backends"][0]
+    assert backend["backend"] == "ORV"
+    assert backend["latency_ms"] == {
+        "max": 300.0,
+        "mean": 200.0,
+        "p50": 200.0,
+        "p95": 290.0,
+        "total": 400.0,
+    }
+    assert backend["usage"] == {
+        "input_tokens": 100,
+        "output_tokens": 20,
+    }
+    assert backend["estimated_cost_usd"] is None
+    assert (
+        backend["cost_estimation_status"]
+        == "unavailable_without_frozen_pricing"
+    )
 
 
 def test_workflow_interface_does_not_expose_endpoint_url() -> None:
