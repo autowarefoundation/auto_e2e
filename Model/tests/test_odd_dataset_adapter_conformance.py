@@ -395,6 +395,52 @@ def test_synthetic_adapter_preserves_missing_camera_frames() -> None:
         scene.camera_anchors()
 
 
+def test_camera_anchors_include_trigger_context_deterministically() -> None:
+    scene = _published_adapter().open_scene("scene-1")
+
+    first = scene.camera_anchors(
+        interval_s=10.0,
+        maximum_anchors=3,
+        trigger_timestamps_ns=(100_000_000,),
+        trigger_context_s=0.0,
+    )
+    second = scene.camera_anchors(
+        interval_s=10.0,
+        maximum_anchors=3,
+        trigger_timestamps_ns=(100_000_000,),
+        trigger_context_s=0.0,
+    )
+
+    assert [anchor[0].timestamp_ns for anchor in first] == [
+        0,
+        100_000_000,
+        200_000_000,
+    ]
+    assert first == second
+
+
+def test_camera_anchor_cap_spreads_trigger_context_without_duplicates() -> None:
+    scene = _published_adapter().open_scene("scene-1")
+
+    anchors = scene.camera_anchors(
+        interval_s=0.05,
+        maximum_anchors=2,
+        trigger_timestamps_ns=(100_000_000,),
+        trigger_context_s=0.1,
+    )
+
+    timestamps = [anchor[0].timestamp_ns for anchor in anchors]
+    assert timestamps == [0, 200_000_000]
+    assert len(timestamps) == len(set(timestamps))
+
+
+def test_camera_anchor_rejects_negative_trigger_timestamp() -> None:
+    scene = _published_adapter().open_scene("scene-1")
+
+    with pytest.raises(ValueError, match="non-negative"):
+        scene.camera_anchors(trigger_timestamps_ns=(-1,))
+
+
 def test_capability_manifest_round_trip_preserves_semantic_identity() -> None:
     original = _synthetic_adapter().describe_capabilities()
 
