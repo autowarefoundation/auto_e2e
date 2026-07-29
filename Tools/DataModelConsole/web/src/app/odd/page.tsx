@@ -13,26 +13,34 @@ import {
   ChartNoAxesColumn,
   Database,
   ExternalLink,
+  LoaderCircle,
   Plus,
+  Play,
+  RotateCcw,
   Search,
   Trash2,
 } from "lucide-react";
 
 import { ErrorState } from "@/components/error-state";
 import { StatusBadge } from "@/components/status-badge";
+import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useApi } from "@/hooks/use-api";
 import {
   getODDLabelSets,
   getODDOntology,
+  getODDOperations,
   getODDStatistics,
+  launchODDDatasetLabeler,
   listExecutionsPage,
+  retryODDDatasetLabeler,
   searchODDScenesStructured,
 } from "@/lib/api";
 import type {
   FlyteExecution,
   ODDKeyStatistic,
   ODDOperationalState,
+  ODDOperationsCapability,
   ODDRatioInterval,
   ODDSearchPredicate,
   ODDStatus,
@@ -336,11 +344,21 @@ function DatasetLabelerRuns({
   loading,
   state,
   hasReadyLabelSet,
+  capability,
+  pending,
+  error,
+  onLaunch,
+  onRetry,
 }: {
   executions: FlyteExecution[];
   loading: boolean;
   state: ODDOperationalState;
   hasReadyLabelSet: boolean;
+  capability: ODDOperationsCapability | null;
+  pending: string;
+  error: string;
+  onLaunch: (scope: "smoke" | "full") => void;
+  onRetry: (executionID: string) => void;
 }) {
   return (
     <section className="border-t border-slate-800 pt-5">
@@ -353,14 +371,53 @@ function DatasetLabelerRuns({
             <StatusBadge label={state} tone={oddStateTone(state)} />
           </div>
         </div>
-        <Link
-          href="/runs"
-          className="flex items-center gap-1 text-xs text-slate-500 hover:text-cyan-300"
-        >
-          All runs
-          <ExternalLink className="size-3" />
-        </Link>
+        <div className="flex flex-wrap items-center justify-end gap-2">
+          {capability?.permitted && (
+            <>
+              <Button
+                size="xs"
+                variant="outline"
+                disabled={pending !== ""}
+                onClick={() => onLaunch("smoke")}
+              >
+                {pending === "launch:smoke" ? (
+                  <LoaderCircle className="animate-spin" />
+                ) : (
+                  <Play />
+                )}
+                Run smoke
+              </Button>
+              {capability.allow_full && (
+                <Button
+                  size="xs"
+                  variant="outline"
+                  disabled={pending !== ""}
+                  onClick={() => onLaunch("full")}
+                >
+                  {pending === "launch:full" ? (
+                    <LoaderCircle className="animate-spin" />
+                  ) : (
+                    <Play />
+                  )}
+                  Run full
+                </Button>
+              )}
+            </>
+          )}
+          <Link
+            href="/runs"
+            className="flex items-center gap-1 text-xs text-slate-500 hover:text-cyan-300"
+          >
+            All runs
+            <ExternalLink className="size-3" />
+          </Link>
+        </div>
       </div>
+      {error && (
+        <p role="alert" className="mt-3 text-xs text-rose-400">
+          {error}
+        </p>
+      )}
       {loading ? (
         <Skeleton className="mt-3 h-16 w-full" />
       ) : executions.length === 0 ? (
@@ -374,7 +431,7 @@ function DatasetLabelerRuns({
             return (
               <div
                 key={execution.execution_id}
-                className="grid gap-2 py-2 sm:grid-cols-[minmax(0,1fr)_auto_auto]"
+                className="grid gap-2 py-2 sm:grid-cols-[minmax(0,1fr)_auto_auto_auto]"
               >
                 <Link
                   href={`/runs/${encodeURIComponent(execution.execution_id)}`}
@@ -392,6 +449,27 @@ function DatasetLabelerRuns({
                   label={runState}
                   tone={oddStateTone(runState)}
                 />
+                {capability?.permitted &&
+                ["FAILED", "ABORTED", "TIMED_OUT"].includes(
+                  execution.phase,
+                ) ? (
+                  <Button
+                    size="icon-xs"
+                    variant="ghost"
+                    title="Retry Dataset Labeler run"
+                    aria-label={`Retry ${execution.execution_id}`}
+                    disabled={pending !== ""}
+                    onClick={() => onRetry(execution.execution_id)}
+                  >
+                    {pending === execution.execution_id ? (
+                      <LoaderCircle className="animate-spin" />
+                    ) : (
+                      <RotateCcw />
+                    )}
+                  </Button>
+                ) : (
+                  <span className="hidden size-6 sm:block" />
+                )}
               </div>
             );
           })}
@@ -433,6 +511,9 @@ function ODDPageContent() {
     () => listExecutionsPage(100),
     [],
   );
+  const operations = useApi(getODDOperations, []);
+  const [operationPending, setOperationPending] = useState("");
+  const [operationError, setOperationError] = useState("");
   const [logic, setLogic] = useState<"and" | "or">(
     initialRequest.query.logic,
   );
@@ -587,6 +668,48 @@ function ODDPageContent() {
     replaceURL("search", request);
   }
 
+  function refreshOperations() {
+    labelsets.reload();
+    executions.reload();
+    window.setTimeout(executions.reload, 1_000);
+  }
+
+  async function launchLabeler(scope: "smoke" | "full") {
+    if (
+      scope === "full" &&
+      !window.confirm(`Run full ODD labeling for ${dataset} / ${version}?`)
+    ) {
+      return;
+    }
+    setOperationPending(`launch:${scope}`);
+    setOperationError("");
+    try {
+      await launchODDDatasetLabeler(dataset, version, scope);
+      refreshOperations();
+    } catch (error) {
+      setOperationError(
+        error instanceof Error ? error.message : "ODD launch failed.",
+      );
+    } finally {
+      setOperationPending("");
+    }
+  }
+
+  async function retryLabeler(executionID: string) {
+    setOperationPending(executionID);
+    setOperationError("");
+    try {
+      await retryODDDatasetLabeler(executionID);
+      refreshOperations();
+    } catch (error) {
+      setOperationError(
+        error instanceof Error ? error.message : "ODD retry failed.",
+      );
+    } finally {
+      setOperationPending("");
+    }
+  }
+
   if (labelsets.loading) {
     return <Skeleton className="h-[34rem] w-full" />;
   }
@@ -614,6 +737,11 @@ function ODDPageContent() {
           loading={executions.loading}
           state={operationalState}
           hasReadyLabelSet={false}
+          capability={operations.data}
+          pending={operationPending}
+          error={operationError}
+          onLaunch={launchLabeler}
+          onRetry={retryLabeler}
         />
       </div>
     );
@@ -1599,6 +1727,11 @@ function ODDPageContent() {
               loading={executions.loading}
               state={operationalState}
               hasReadyLabelSet
+              capability={operations.data}
+              pending={operationPending}
+              error={operationError}
+              onLaunch={launchLabeler}
+              onRetry={retryLabeler}
             />
           </div>
         ) : (
