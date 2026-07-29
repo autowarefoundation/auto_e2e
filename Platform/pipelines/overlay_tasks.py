@@ -858,6 +858,12 @@ def _resolve_model_version_for_execution(
     ]
     if selected:
         matches = selected
+    else:
+        composite_best = [
+            match for match in matches if "best" in match[3]
+        ]
+        if composite_best:
+            matches = composite_best
     if not matches:
         raise ValueError(
             f"no {registered_model_name!r} model was produced by "
