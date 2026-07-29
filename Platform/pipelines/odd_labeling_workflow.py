@@ -206,6 +206,131 @@ def _execution_receipt_key(
     )
 
 
+def _percentile(values: list[float], quantile: float) -> float:
+    if not values or not 0.0 <= quantile <= 1.0:
+        raise ValueError("percentile input is invalid")
+    ordered = sorted(values)
+    position = (len(ordered) - 1) * quantile
+    lower = int(position)
+    upper = min(lower + 1, len(ordered) - 1)
+    fraction = position - lower
+    return ordered[lower] + (ordered[upper] - ordered[lower]) * fraction
+
+
+def _provider_report(exchanges: list[dict]) -> dict:
+    grouped: dict[str, list[dict]] = {}
+    for exchange in exchanges:
+        grouped.setdefault(str(exchange["backend"]), []).append(exchange)
+    backend_rows = []
+    for backend, rows in sorted(grouped.items()):
+        latency = [float(row["latency_ms"]) for row in rows]
+        usage: dict[str, float | int] = {}
+        for row in rows:
+            for name, value in row.get("usage", {}).items():
+                usage[name] = usage.get(name, 0) + value
+        failures: dict[str, int] = {}
+        for row in rows:
+            if row["status"] == "succeeded":
+                continue
+            identity = (
+                f"{row['status']}:{row.get('error_type') or 'unknown'}"
+            )
+            failures[identity] = failures.get(identity, 0) + 1
+        backend_rows.append(
+            {
+                "backend": backend,
+                "providers": sorted(
+                    {str(row["provider"]) for row in rows}
+                ),
+                "models": sorted(
+                    {
+                        f"{row['model']}@{row['model_revision']}"
+                        for row in rows
+                    }
+                ),
+                "request_count": len(
+                    {str(row["request_sha256"]) for row in rows}
+                ),
+                "attempt_count": len(rows),
+                "successful_count": sum(
+                    row["status"] == "succeeded" for row in rows
+                ),
+                "failure_count": sum(
+                    row["status"] != "succeeded" for row in rows
+                ),
+                "input_image_count": sum(
+                    int(row["input_image_count"]) for row in rows
+                ),
+                "latency_ms": {
+                    "total": sum(latency),
+                    "mean": sum(latency) / len(latency),
+                    "p50": _percentile(latency, 0.5),
+                    "p95": _percentile(latency, 0.95),
+                    "max": max(latency),
+                },
+                "usage": dict(sorted(usage.items())),
+                "failures": failures,
+                "estimated_cost_usd": None,
+                "cost_estimation_status": (
+                    "unavailable_without_frozen_pricing"
+                ),
+            }
+        )
+    return {
+        "schema_version": "odd_provider_report_v1",
+        "totals": {
+            "request_count": len(
+                {
+                    str(exchange["request_sha256"])
+                    for exchange in exchanges
+                }
+            ),
+            "attempt_count": len(exchanges),
+            "successful_count": sum(
+                exchange["status"] == "succeeded"
+                for exchange in exchanges
+            ),
+            "failure_count": sum(
+                exchange["status"] != "succeeded"
+                for exchange in exchanges
+            ),
+            "input_image_count": sum(
+                int(exchange["input_image_count"])
+                for exchange in exchanges
+            ),
+        },
+        "backends": backend_rows,
+    }
+
+
+def _provider_exchange_key(
+    publication_prefix: str,
+    labelset_id: str,
+    exchange: dict,
+) -> str:
+    _validate_publication_prefix(publication_prefix)
+    exchange_sha256 = _sha256(_canonical_bytes(exchange))
+    return (
+        f"{publication_prefix}/provider-artifacts/"
+        f"labelset={labelset_id}/backend={exchange['backend']}/"
+        f"request={exchange['request_sha256']}/"
+        f"exchange={exchange_sha256}.json"
+    )
+
+
+def _provider_report_key(
+    publication_prefix: str,
+    labelset_id: str,
+    report: dict,
+) -> str:
+    _validate_publication_prefix(publication_prefix)
+    report_sha256 = _sha256(_canonical_bytes(report))
+    return (
+        f"{publication_prefix}/provider-reports/"
+        f"labelset={labelset_id}/report={report_sha256}.json"
+    )
+
+
 def _normalized_enabled_sources(enabled_sources: List[str]) -> tuple[str, ...]:
     if not enabled_sources:
         raise ValueError("at least one ODD source must be enabled")
@@ -741,6 +866,7 @@ def _source_artifact_file(
     descriptor_json: str,
     scene_uid: str,
     observations: object,
+    provider_exchanges: object = (),
 ) -> FlyteFile:
     from data_processing.odd_labeling.source_artifact import (
         SourceObservationArtifact,
@@ -751,6 +877,7 @@ def _source_artifact_file(
         descriptor_json=descriptor_json,
         scene_uid=scene_uid,
         observations=observations,
+        provider_exchanges=provider_exchanges,
     )
     with tempfile.NamedTemporaryFile(
         mode="wb",
@@ -788,7 +915,7 @@ def _read_source_artifact(
 @task(
     container_image=DATA_PREP_IMAGE,
     cache=True,
-    cache_version="odd-source-map-route-v1",
+    cache_version="odd-source-map-route-v2",
     requests=Resources(cpu="2", mem="4Gi"),
     limits=Resources(cpu="4", mem="8Gi"),
 )
@@ -825,7 +952,7 @@ def label_odd_map_route(
 @task(
     container_image=DATA_PREP_IMAGE,
     cache=True,
-    cache_version="odd-source-gnss-ins-v1",
+    cache_version="odd-source-gnss-ins-v2",
     requests=Resources(cpu="2", mem="4Gi"),
     limits=Resources(cpu="4", mem="8Gi"),
 )
@@ -862,7 +989,7 @@ def label_odd_kinematics(
 @task(
     container_image=DATA_PREP_IMAGE,
     cache=True,
-    cache_version="odd-source-image-qc-v1",
+    cache_version="odd-source-image-qc-v2",
     requests=Resources(cpu="2", mem="6Gi"),
     limits=Resources(cpu="4", mem="10Gi"),
 )
@@ -916,7 +1043,7 @@ def label_odd_image_quality(
 @task(
     container_image=DATA_PREP_IMAGE,
     cache=True,
-    cache_version="odd-source-openai-compatible-v2",
+    cache_version="odd-source-openai-compatible-v3",
     retries=2,
     pod_template=_scene_labeling_pod_template(),
     requests=Resources(cpu="2", mem="6Gi"),
@@ -999,6 +1126,7 @@ def label_odd_visual(
         capability_manifest_json,
     )
     observations = ()
+    provider_exchanges = ()
     if "vlm" in normalized_sources:
         map_route_artifact = _read_source_artifact(
             map_route_file,
@@ -1072,18 +1200,20 @@ def label_odd_visual(
             ),
             sampling_parameters=sampling_parameters,
         )
+        provider_exchanges = observer.provider_exchanges
     return _source_artifact_file(
         source_stage="openai_compatible_vlm",
         descriptor_json=descriptor_json,
         scene_uid=evidence.scene_uid,
         observations=observations,
+        provider_exchanges=provider_exchanges,
     )
 
 
 @task(
     container_image=DATA_PREP_IMAGE,
     cache=True,
-    cache_version="odd-source-bedrock-map-v1",
+    cache_version="odd-source-bedrock-map-v2",
     retries=2,
     requests=Resources(cpu="2", mem="4Gi"),
     limits=Resources(cpu="4", mem="8Gi"),
@@ -1143,6 +1273,7 @@ def label_odd_bedrock_map(
         capability_manifest_json,
     )
     observations = ()
+    provider_exchanges = ()
     if "map_route" in normalized_sources:
         resolver = BedrockMapRouteResolver(
             boto3.client(
@@ -1157,18 +1288,20 @@ def label_odd_bedrock_map(
             evidence,
             map_artifact.observations,
         )
+        provider_exchanges = resolver.provider_exchanges
     return _source_artifact_file(
         source_stage="bedrock_map_route",
         descriptor_json=descriptor_json,
         scene_uid=evidence.scene_uid,
         observations=observations,
+        provider_exchanges=provider_exchanges,
     )
 
 
 @task(
     container_image=DATA_PREP_IMAGE,
     cache=True,
-    cache_version="odd-fuse-scene-v3",
+    cache_version="odd-fuse-scene-v4",
     requests=Resources(cpu="2", mem="6Gi"),
     limits=Resources(cpu="4", mem="12Gi"),
 )
@@ -1249,15 +1382,33 @@ def fuse_odd_scene(
         (visual_file, "openai_compatible_vlm"),
         (bedrock_map_file, "bedrock_map_route"),
     )
-    observations = [
-        observation
-        for source_file, source_stage in source_files
-        for observation in _read_source_artifact(
+    source_artifacts = [
+        _read_source_artifact(
             source_file,
             descriptor_json=descriptor_json,
             source_stage=source_stage,
-        ).observations
+        )
+        for source_file, source_stage in source_files
     ]
+    observations = [
+        observation
+        for artifact in source_artifacts
+        for observation in artifact.observations
+    ]
+    provider_exchanges = sorted(
+        [
+            exchange.to_dict()
+            for artifact in source_artifacts
+            for exchange in artifact.provider_exchanges
+        ],
+        key=lambda item: (
+            item["backend"],
+            item["request_sha256"],
+            item["attempt"],
+            item.get("response_sha256") or "",
+            item["status"],
+        ),
+    )
 
     observed_keys = {observation.key for observation in observations}
     for key in ONTOLOGY:
@@ -1341,8 +1492,14 @@ def fuse_odd_scene(
                 "evidence_count": len(record.evidence),
                 "observation_count": len(record.observations),
                 "event_count": len(record.events),
+                "provider_attempt_count": len(provider_exchanges),
+                "provider_failure_count": sum(
+                    exchange["status"] != "succeeded"
+                    for exchange in provider_exchanges
+                ),
             },
         ),
+        "provider_exchanges": provider_exchanges,
     }
     with tempfile.NamedTemporaryFile(
         mode="wb",
@@ -1519,7 +1676,7 @@ def map_odd_scenes(
 @task(
     container_image=DATA_PREP_IMAGE,
     cache=True,
-    cache_version="odd-publish-labelset-v8",
+    cache_version="odd-publish-labelset-v9",
     requests=Resources(cpu="2", mem="8Gi"),
     limits=Resources(cpu="4", mem="16Gi"),
 )
@@ -1574,6 +1731,7 @@ def publish_odd_labelset(
     from data_processing.odd_labeling.schema import (
         DatasetCapabilityManifest,
         ExecutionReceipt,
+        ProviderExchange,
     )
     from data_processing.odd_labeling.statistics import (
         STATISTICS_SCHEMA_VERSION,
@@ -1619,9 +1777,34 @@ def publish_odd_labelset(
             or receipt.to_dict() != raw_receipt
         ):
             raise ValueError("ODD execution receipt differs from scene record")
+        raw_exchanges = wrapper.get("provider_exchanges")
+        if not isinstance(raw_exchanges, list):
+            raise ValueError("ODD scene wrapper has no provider exchanges")
+        validated_exchanges = []
+        for raw_exchange in raw_exchanges:
+            if not isinstance(raw_exchange, dict):
+                raise ValueError("ODD provider exchange must be an object")
+            exchange = ProviderExchange(**raw_exchange)
+            if exchange.to_dict() != raw_exchange:
+                raise ValueError("ODD provider exchange is not canonical")
+            if (
+                exchange.backend == "ORV"
+                and exchange.request_metadata.get("scene_uid_sha256")
+                != _sha256(wrapper["record"]["scene_uid"].encode("utf-8"))
+            ):
+                raise ValueError(
+                    "ODD road-observer exchange belongs to another scene"
+                )
+            validated_exchanges.append(exchange.to_dict())
+        wrapper["provider_exchanges"] = validated_exchanges
         wrappers.append(wrapper)
     wrappers.sort(key=lambda item: item["record"]["scene_uid"])
     records = [item["record"] for item in wrappers]
+    provider_exchanges = [
+        exchange
+        for wrapper in wrappers
+        for exchange in wrapper["provider_exchanges"]
+    ]
     scene_ids = [record["scene_uid"] for record in records]
     if not records or len(scene_ids) != len(set(scene_ids)):
         raise ValueError("ODD publication has no scenes or duplicate scene ids")
@@ -1857,6 +2040,52 @@ def publish_odd_labelset(
         },
         "receipts/index.json",
     )
+    exchange_artifacts = []
+    for exchange in provider_exchanges:
+        exchange_payload = _canonical_bytes(exchange)
+        exchange_key = _provider_exchange_key(
+            publication_prefix,
+            labelset_id,
+            exchange,
+        )
+        _put_immutable(
+            s3,
+            datasets_bucket,
+            exchange_key,
+            exchange_payload,
+            schema_version="odd_provider_exchange_v1",
+        )
+        exchange_artifacts.append(
+            {
+                "backend": exchange["backend"],
+                "request_sha256": exchange["request_sha256"],
+                "attempt": exchange["attempt"],
+                "status": exchange["status"],
+                "key": exchange_key,
+                "sha256": _sha256(exchange_payload),
+                "byte_size": len(exchange_payload),
+            }
+        )
+    provider_report = {
+        **_provider_report(provider_exchanges),
+        "labelset_id": labelset_id,
+        "dataset_name": dataset_name,
+        "dataset_version": dataset_version,
+        "exchange_artifacts": exchange_artifacts,
+    }
+    provider_report_payload = _canonical_bytes(provider_report)
+    provider_report_key = _provider_report_key(
+        publication_prefix,
+        labelset_id,
+        provider_report,
+    )
+    _put_immutable(
+        s3,
+        datasets_bucket,
+        provider_report_key,
+        provider_report_payload,
+        schema_version="odd_provider_report_v1",
+    )
     publish(
         "capabilities",
         capability_manifest.to_dict(),
@@ -1992,6 +2221,21 @@ def publish_odd_labelset(
             "schema_version": "odd_execution_receipt_index_v1",
             "artifact": "execution_receipt_index",
             "partition_count": len(receipt_partitions),
+        },
+        "provider_audit": {
+            "report_schema_version": "odd_provider_report_v1",
+            "report_prefix": (
+                f"{publication_prefix}/provider-reports/"
+                f"labelset={labelset_id}/"
+            ),
+            "exchange_schema_version": "odd_provider_exchange_v1",
+            "exchange_prefixes": {
+                backend: (
+                    f"{publication_prefix}/provider-artifacts/"
+                    f"labelset={labelset_id}/backend={backend}/"
+                )
+                for backend in ("ORV", "BMR")
+            },
         },
         "openai_compatible": {
             "provider": road_vlm_provider,
