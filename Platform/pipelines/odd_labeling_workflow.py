@@ -85,6 +85,73 @@ def _sha256(payload: bytes) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
+def _without_labelset_id(value: object) -> object:
+    if isinstance(value, dict):
+        return {
+            key: _without_labelset_id(item)
+            for key, item in value.items()
+            if key != "labelset_id"
+        }
+    if isinstance(value, (list, tuple)):
+        return [_without_labelset_id(item) for item in value]
+    return value
+
+
+def _semantic_output_merkle_root(
+    records: list[dict],
+    statistics: dict,
+    quality_documents: dict[str, dict],
+) -> str:
+    leaves: list[tuple[str, object]] = []
+    for record in sorted(records, key=lambda item: str(item["scene_uid"])):
+        scene_uid = str(record["scene_uid"])
+        scene_root = {
+            key: value
+            for key, value in record.items()
+            if key not in {"evidence", "observations", "events"}
+        }
+        leaves.append((f"scene\0{scene_uid}", scene_root))
+        for kind, identity_key, values in (
+            ("evidence", "evidence_uid", record.get("evidence", [])),
+            (
+                "observation",
+                "observation_uid",
+                record.get("observations", []),
+            ),
+            ("event", "event_uid", record.get("events", [])),
+        ):
+            for value in values:
+                identity = str(value[identity_key])
+                leaves.append((f"{kind}\0{identity}", value))
+    leaves.append(("statistics\0dataset", statistics))
+    for name, document in quality_documents.items():
+        leaves.append((f"quality\0{name}", document))
+
+    identities = [identity for identity, _ in leaves]
+    if not leaves or len(identities) != len(set(identities)):
+        raise ValueError("semantic output Merkle leaves are empty or duplicated")
+    level = [
+        hashlib.sha256(
+            b"\x00"
+            + _canonical_bytes(
+                {
+                    "identity": identity,
+                    "payload": _without_labelset_id(payload),
+                }
+            )
+        ).digest()
+        for identity, payload in sorted(leaves, key=lambda item: item[0])
+    ]
+    while len(level) > 1:
+        if len(level) % 2:
+            level.append(level[-1])
+        level = [
+            hashlib.sha256(b"\x01" + level[index] + level[index + 1]).digest()
+            for index in range(0, len(level), 2)
+        ]
+    return level[0].hex()
+
+
 def _normalized_enabled_sources(enabled_sources: List[str]) -> tuple[str, ...]:
     if not enabled_sources:
         raise ValueError("at least one ODD source must be enabled")
@@ -1385,7 +1452,7 @@ def map_odd_scenes(
 @task(
     container_image=DATA_PREP_IMAGE,
     cache=True,
-    cache_version="odd-publish-labelset-v7",
+    cache_version="odd-publish-labelset-v8",
     requests=Resources(cpu="2", mem="8Gi"),
     limits=Resources(cpu="4", mem="16Gi"),
 )
@@ -1546,16 +1613,77 @@ def publish_odd_labelset(
         or semantic_contract["publication_prefix"] != publication_prefix
     ):
         raise ValueError("publication semantic contract differs from inputs")
+    audit_selection_seed = _sha256(
+        _canonical_bytes(
+            {
+                "policy": "odd_audit_selection_v1",
+                "dataset_manifest_sha256": dataset_manifest_sha256,
+                "ontology_sha256": ontology_sha256,
+                "scene_record_sha256": [
+                    item["record_sha256"] for item in wrappers
+                ],
+            }
+        )
+    )
+    provisional_statistics = _statistics(records, ontology, "")
+    provisional_quality_documents = build_quality_documents(
+        records,
+        provisional_statistics,
+        ontology,
+        labelset_id="",
+        audit_selection_seed=audit_selection_seed,
+    )
+    semantic_output_merkle_root = _semantic_output_merkle_root(
+        records,
+        provisional_statistics,
+        provisional_quality_documents,
+    )
+    adapter_bundle_sha256 = _sha256(
+        _canonical_bytes(
+            {
+                "adapter_name": capability_manifest.adapter_name,
+                "adapter_version": capability_manifest.adapter_version,
+                "scene_inventory_sha256": (
+                    capability_manifest.scene_inventory_sha256
+                ),
+                "capability_manifest_sha256": capability_manifest_sha256,
+            }
+        )
+    )
+    labeler_bundle_sha256 = _sha256(
+        _canonical_bytes(
+            {
+                "labeler_bundle_version": labeler_bundle_version,
+                "labeler_config_sha256": labeler_config_sha256,
+                "labeler_image_digest": labeler_image_digest,
+                "labeler_source_revision": labeler_source_revision,
+            }
+        )
+    )
+    source_configuration_sha256 = _sha256(
+        _canonical_bytes(
+            {
+                "enabled_sources": list(normalized_sources),
+                "road_vlm": semantic_contract["road_vlm"],
+                "map_resolver": semantic_contract["map_resolver"],
+                "sampling": semantic_contract["sampling"],
+            }
+        )
+    )
     identity = {
-        "schema_version": "odd_labelset_identity_v2",
+        "schema_version": "odd_labelset_identity_v3",
         "dataset_name": dataset_name,
         "dataset_version": dataset_version,
         "dataset_manifest_sha256": dataset_manifest_sha256,
         "capability_manifest_sha256": capability_manifest_sha256,
+        "adapter_bundle_sha256": adapter_bundle_sha256,
+        "labeler_bundle_sha256": labeler_bundle_sha256,
+        "source_configuration_sha256": source_configuration_sha256,
+        "fusion_config_sha256": fusion_config_sha256,
+        "calibration_bundle_sha256": calibration_bundle_sha256,
         "semantic_contract_sha256": _sha256(
             semantic_contract_json.encode("utf-8")
         ),
-        "semantic_contract": semantic_contract,
         "statistics_schema_version": STATISTICS_SCHEMA_VERSION,
         "parquet_schema_version": PARQUET_SCHEMA_VERSION,
         "quality_schema_version": QUALITY_SCHEMA_VERSION,
@@ -1564,6 +1692,8 @@ def publish_odd_labelset(
         "scene_record_sha256": [
             item["record_sha256"] for item in wrappers
         ],
+        "semantic_output_merkle_algorithm": "sha256_binary_dup_last_v1",
+        "semantic_output_merkle_root": semantic_output_merkle_root,
     }
     labelset_id = f"oddls-{_sha256(_canonical_bytes(identity))[:32]}"
     root = f"{publication_prefix}/labelsets/{labelset_id}"
@@ -1574,7 +1704,17 @@ def publish_odd_labelset(
         statistics,
         ontology,
         labelset_id=labelset_id,
+        audit_selection_seed=audit_selection_seed,
     )
+    if (
+        _semantic_output_merkle_root(
+            records,
+            statistics,
+            quality_documents,
+        )
+        != semantic_output_merkle_root
+    ):
+        raise ValueError("final ODD outputs differ from semantic Merkle identity")
     parquet_artifacts = build_parquet_artifacts(
         records,
         statistics,
@@ -1711,12 +1851,19 @@ def publish_odd_labelset(
             "scene_inventory_sha256": (
                 capability_manifest.scene_inventory_sha256
             ),
+            "bundle_sha256": adapter_bundle_sha256,
         },
         "ontology_version": ontology["ontology_version"],
         "ontology_sha256": ontology["ontology_sha256"],
         "labeler_version": ODD_LABELER_VERSION,
         "labeler_image_digest": labeler_image_digest,
         "labeler_source_revision": labeler_source_revision,
+        "labeler_bundle_sha256": labeler_bundle_sha256,
+        "source_configuration_sha256": source_configuration_sha256,
+        "fusion_config_sha256": fusion_config_sha256,
+        "calibration_bundle_sha256": calibration_bundle_sha256,
+        "semantic_output_merkle_algorithm": "sha256_binary_dup_last_v1",
+        "semantic_output_merkle_root": semantic_output_merkle_root,
         "semantic_contract": semantic_contract,
         "semantic_contract_sha256": _sha256(
             semantic_contract_json.encode("utf-8")
