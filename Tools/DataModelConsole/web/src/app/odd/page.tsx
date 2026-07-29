@@ -19,7 +19,7 @@ import {
 } from "lucide-react";
 
 import { ErrorState } from "@/components/error-state";
-import { StatusBadge, flytePhaseTone } from "@/components/status-badge";
+import { StatusBadge } from "@/components/status-badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useApi } from "@/hooks/use-api";
 import {
@@ -32,6 +32,7 @@ import {
 import type {
   FlyteExecution,
   ODDKeyStatistic,
+  ODDOperationalState,
   ODDRatioInterval,
   ODDSearchPredicate,
   ODDStatus,
@@ -62,6 +63,69 @@ type Weighting = (typeof WEIGHTINGS)[number];
 
 function isTab(value: string | null): value is Tab {
   return TABS.some((tab) => tab.id === value);
+}
+
+function isODDDatasetLabelerExecution(execution: FlyteExecution): boolean {
+  const name = execution.workflow_name.toLowerCase();
+  return (
+    name === "odd-dataset-labeler" ||
+    name.endsWith("wf_generate_odd_labelset") ||
+    name.endsWith("wf-generate-odd-labelset")
+  );
+}
+
+function isActiveFlytePhase(phase: FlyteExecution["phase"]): boolean {
+  return ["QUEUED", "RUNNING", "SUCCEEDING"].includes(phase);
+}
+
+function isFailedFlytePhase(phase: FlyteExecution["phase"]): boolean {
+  return ["FAILED", "FAILING", "ABORTED", "ABORTING", "TIMED_OUT"].includes(
+    phase,
+  );
+}
+
+function oddOperationalState(
+  catalogState: ODDOperationalState,
+  executions: FlyteExecution[],
+): ODDOperationalState {
+  const latest = executions[0];
+  if (!latest) return catalogState;
+  if (isActiveFlytePhase(latest.phase)) return "running";
+  if (isFailedFlytePhase(latest.phase)) return "failed";
+  if (latest.phase === "SUCCEEDED") {
+    return catalogState === "ready" ? "ready" : "failed";
+  }
+  return catalogState;
+}
+
+function oddRunState(
+  execution: FlyteExecution,
+  index: number,
+  hasReadyLabelSet: boolean,
+): ODDOperationalState {
+  if (isActiveFlytePhase(execution.phase)) return "running";
+  if (isFailedFlytePhase(execution.phase)) return "failed";
+  if (execution.phase === "SUCCEEDED") {
+    return index === 0 && hasReadyLabelSet ? "ready" : "superseded";
+  }
+  return "failed";
+}
+
+function oddStateTone(
+  state: ODDOperationalState,
+): "success" | "warning" | "error" | "info" | "neutral" {
+  switch (state) {
+    case "ready":
+      return "success";
+    case "running":
+      return "warning";
+    case "failed":
+      return "error";
+    case "superseded":
+      return "info";
+    default:
+      return "neutral";
+  }
 }
 
 function parseSearchRequest(value: string | null): ODDStructuredSearchRequest {
@@ -270,20 +334,24 @@ function EventTimeline({
 function DatasetLabelerRuns({
   executions,
   loading,
+  state,
+  hasReadyLabelSet,
 }: {
   executions: FlyteExecution[];
   loading: boolean;
+  state: ODDOperationalState;
+  hasReadyLabelSet: boolean;
 }) {
   return (
     <section className="border-t border-slate-800 pt-5">
       <div className="flex items-center justify-between gap-3">
-        <div>
+        <div className="min-w-0">
           <p className="text-[10px] uppercase text-slate-600">
             Dataset Labeler runs
           </p>
-          <p className="mt-1 text-xs text-slate-500">
-            Standalone Flyte workflow, independent of training and MLflow.
-          </p>
+          <div className="mt-1">
+            <StatusBadge label={state} tone={oddStateTone(state)} />
+          </div>
         </div>
         <Link
           href="/runs"
@@ -301,28 +369,32 @@ function DatasetLabelerRuns({
         </p>
       ) : (
         <div className="mt-3 divide-y divide-slate-900">
-          {executions.slice(0, 5).map((execution) => (
-            <div
-              key={execution.execution_id}
-              className="grid gap-2 py-2 sm:grid-cols-[minmax(0,1fr)_auto_auto]"
-            >
-              <Link
-                href={`/runs/${encodeURIComponent(execution.execution_id)}`}
-                className="break-all font-mono text-xs text-slate-300 hover:text-cyan-300"
+          {executions.slice(0, 5).map((execution, index) => {
+            const runState = oddRunState(execution, index, hasReadyLabelSet);
+            return (
+              <div
+                key={execution.execution_id}
+                className="grid gap-2 py-2 sm:grid-cols-[minmax(0,1fr)_auto_auto]"
               >
-                {execution.execution_id}
-              </Link>
-              <span className="font-mono text-[10px] text-slate-600">
-                {execution.duration_s > 0
-                  ? `${Math.round(execution.duration_s).toLocaleString()} s`
-                  : "in progress"}
-              </span>
-              <StatusBadge
-                label={execution.phase}
-                tone={flytePhaseTone(execution.phase)}
-              />
-            </div>
-          ))}
+                <Link
+                  href={`/runs/${encodeURIComponent(execution.execution_id)}`}
+                  className="break-all font-mono text-xs text-slate-300 hover:text-cyan-300"
+                >
+                  {execution.execution_id}
+                </Link>
+                <span className="font-mono text-[10px] text-slate-600">
+                  {execution.phase} ·{" "}
+                  {execution.duration_s > 0
+                    ? `${Math.round(execution.duration_s).toLocaleString()} s`
+                    : "in progress"}
+                </span>
+                <StatusBadge
+                  label={runState}
+                  tone={oddStateTone(runState)}
+                />
+              </div>
+            );
+          })}
         </div>
       )}
     </section>
@@ -397,8 +469,11 @@ function ODDPageContent() {
   );
   const oddExecutions =
     executions.data?.items.filter((execution) =>
-      execution.workflow_name.endsWith("wf_generate_odd_labelset"),
+      isODDDatasetLabelerExecution(execution),
     ) ?? [];
+  const catalogState =
+    labelsets.data?.state ?? (readyLabelSet ? "ready" : "not_started");
+  const operationalState = oddOperationalState(catalogState, oddExecutions);
 
   useEffect(() => {
     const requested = searchParams.get("tab");
@@ -534,7 +609,12 @@ function ODDPageContent() {
         <p className="text-sm text-slate-500">
           No ready ODD LabelSet is published for {dataset} / {version}.
         </p>
-        <DatasetLabelerRuns executions={oddExecutions} loading={executions.loading} />
+        <DatasetLabelerRuns
+          executions={oddExecutions}
+          loading={executions.loading}
+          state={operationalState}
+          hasReadyLabelSet={false}
+        />
       </div>
     );
   }
@@ -1429,7 +1509,7 @@ function ODDPageContent() {
                   Publication
                 </p>
                 <p className="mt-1 font-mono text-xs text-emerald-300">
-                  {readyLabelSet.status} · {readyLabelSet.publication_scope}
+                  {operationalState} · {readyLabelSet.publication_scope}
                 </p>
               </div>
               <div>
@@ -1517,6 +1597,8 @@ function ODDPageContent() {
             <DatasetLabelerRuns
               executions={oddExecutions}
               loading={executions.loading}
+              state={operationalState}
+              hasReadyLabelSet
             />
           </div>
         ) : (
