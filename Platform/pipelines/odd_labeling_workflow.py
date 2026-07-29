@@ -400,6 +400,31 @@ def _validate_source_semantic_inputs(
     return normalized
 
 
+def _enabled_sources_json(enabled_sources: List[str]) -> str:
+    normalized = _normalized_enabled_sources(enabled_sources)
+    return json.dumps(list(normalized), separators=(",", ":"))
+
+
+def _validate_source_semantic_json(
+    enabled_sources_json: str,
+    ontology_sha256: str,
+    labeler_config_sha256: str,
+) -> tuple[str, ...]:
+    try:
+        enabled_sources = json.loads(enabled_sources_json)
+    except json.JSONDecodeError as error:
+        raise ValueError("enabled_sources_json must be valid JSON") from error
+    if not isinstance(enabled_sources, list) or any(
+        not isinstance(source, str) for source in enabled_sources
+    ):
+        raise ValueError("enabled_sources_json must encode a string list")
+    return _validate_source_semantic_inputs(
+        enabled_sources,
+        ontology_sha256,
+        labeler_config_sha256,
+    )
+
+
 def _validate_publication_prefix(value: str) -> str:
     if (
         PUBLICATION_PREFIX_RE.fullmatch(value) is None
@@ -922,14 +947,14 @@ def _read_source_artifact(
 def label_odd_map_route(
     descriptor_json: str,
     capability_manifest_json: str,
-    enabled_sources: List[str],
+    enabled_sources_json: str,
     ontology_sha256: str,
     labeler_config_sha256: str,
 ) -> FlyteFile:
     from data_processing.odd_labeling.deterministic import label_map_route
 
-    normalized_sources = _validate_source_semantic_inputs(
-        enabled_sources,
+    normalized_sources = _validate_source_semantic_json(
+        enabled_sources_json,
         ontology_sha256,
         labeler_config_sha256,
     )
@@ -959,14 +984,14 @@ def label_odd_map_route(
 def label_odd_kinematics(
     descriptor_json: str,
     capability_manifest_json: str,
-    enabled_sources: List[str],
+    enabled_sources_json: str,
     ontology_sha256: str,
     labeler_config_sha256: str,
 ) -> FlyteFile:
     from data_processing.odd_labeling.deterministic import label_kinematics
 
-    normalized_sources = _validate_source_semantic_inputs(
-        enabled_sources,
+    normalized_sources = _validate_source_semantic_json(
+        enabled_sources_json,
         ontology_sha256,
         labeler_config_sha256,
     )
@@ -996,7 +1021,7 @@ def label_odd_kinematics(
 def label_odd_image_quality(
     descriptor_json: str,
     capability_manifest_json: str,
-    enabled_sources: List[str],
+    enabled_sources_json: str,
     ontology_sha256: str,
     labeler_config_sha256: str,
     camera_anchor_interval_s: float,
@@ -1009,8 +1034,8 @@ def label_odd_image_quality(
         load_camera_quality_inputs,
     )
 
-    normalized_sources = _validate_source_semantic_inputs(
-        enabled_sources,
+    normalized_sources = _validate_source_semantic_json(
+        enabled_sources_json,
         ontology_sha256,
         labeler_config_sha256,
     )
@@ -1068,7 +1093,7 @@ def label_odd_visual(
     map_route_file: FlyteFile,
     kinematics_file: FlyteFile,
     image_quality_file: FlyteFile,
-    enabled_sources: List[str],
+    enabled_sources_json: str,
     ontology_sha256: str,
     labeler_config_sha256: str,
     road_vlm_provider: str,
@@ -1093,8 +1118,8 @@ def label_odd_visual(
         road_vlm_prompt_bundle_sha256 as local_prompt_bundle_sha256,
     )
 
-    normalized_sources = _validate_source_semantic_inputs(
-        enabled_sources,
+    normalized_sources = _validate_source_semantic_json(
+        enabled_sources_json,
         ontology_sha256,
         labeler_config_sha256,
     )
@@ -1223,7 +1248,7 @@ def label_odd_bedrock_map(
     descriptor_json: str,
     capability_manifest_json: str,
     map_route_file: FlyteFile,
-    enabled_sources: List[str],
+    enabled_sources_json: str,
     ontology_sha256: str,
     labeler_config_sha256: str,
     map_resolver_provider: str,
@@ -1241,8 +1266,8 @@ def label_odd_bedrock_map(
         resolve_ambiguous_map_route,
     )
 
-    normalized_sources = _validate_source_semantic_inputs(
-        enabled_sources,
+    normalized_sources = _validate_source_semantic_json(
+        enabled_sources_json,
         ontology_sha256,
         labeler_config_sha256,
     )
@@ -1314,7 +1339,7 @@ def fuse_odd_scene(
     image_quality_file: FlyteFile,
     visual_file: FlyteFile,
     bedrock_map_file: FlyteFile,
-    enabled_sources: List[str],
+    enabled_sources_json: str,
     ontology_sha256: str,
     labeler_config_sha256: str,
     fusion_config_sha256: str,
@@ -1343,8 +1368,8 @@ def fuse_odd_scene(
         make_observation,
     )
 
-    normalized_sources = _validate_source_semantic_inputs(
-        enabled_sources,
+    normalized_sources = _validate_source_semantic_json(
+        enabled_sources_json,
         ontology_sha256,
         labeler_config_sha256,
     )
@@ -1560,11 +1585,12 @@ def map_odd_scenes(
     )
     if any(value <= 0 for value in concurrency_values):
         raise ValueError("source and fusion concurrency must be positive")
+    encoded_sources = _enabled_sources_json(enabled_sources)
     map_route_files = map_task(
         functools.partial(
             label_odd_map_route,
             capability_manifest_json=capability_manifest_json,
-            enabled_sources=enabled_sources,
+            enabled_sources_json=encoded_sources,
             ontology_sha256=ontology_sha256,
             labeler_config_sha256=labeler_config_sha256,
         ),
@@ -1574,7 +1600,7 @@ def map_odd_scenes(
         functools.partial(
             label_odd_kinematics,
             capability_manifest_json=capability_manifest_json,
-            enabled_sources=enabled_sources,
+            enabled_sources_json=encoded_sources,
             ontology_sha256=ontology_sha256,
             labeler_config_sha256=labeler_config_sha256,
         ),
@@ -1584,7 +1610,7 @@ def map_odd_scenes(
         functools.partial(
             label_odd_image_quality,
             capability_manifest_json=capability_manifest_json,
-            enabled_sources=enabled_sources,
+            enabled_sources_json=encoded_sources,
             ontology_sha256=ontology_sha256,
             labeler_config_sha256=labeler_config_sha256,
             camera_anchor_interval_s=camera_anchor_interval_s,
@@ -1596,7 +1622,7 @@ def map_odd_scenes(
         functools.partial(
             label_odd_visual,
             capability_manifest_json=capability_manifest_json,
-            enabled_sources=enabled_sources,
+            enabled_sources_json=encoded_sources,
             ontology_sha256=ontology_sha256,
             labeler_config_sha256=labeler_config_sha256,
             road_vlm_provider=road_vlm_provider,
@@ -1626,7 +1652,7 @@ def map_odd_scenes(
         functools.partial(
             label_odd_bedrock_map,
             capability_manifest_json=capability_manifest_json,
-            enabled_sources=enabled_sources,
+            enabled_sources_json=encoded_sources,
             ontology_sha256=ontology_sha256,
             labeler_config_sha256=labeler_config_sha256,
             map_resolver_provider=map_resolver_provider,
@@ -1648,7 +1674,7 @@ def map_odd_scenes(
         functools.partial(
             fuse_odd_scene,
             capability_manifest_json=capability_manifest_json,
-            enabled_sources=enabled_sources,
+            enabled_sources_json=encoded_sources,
             ontology_sha256=ontology_sha256,
             labeler_config_sha256=labeler_config_sha256,
             fusion_config_sha256=fusion_config_sha256,
