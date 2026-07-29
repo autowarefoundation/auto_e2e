@@ -17,6 +17,11 @@ from data_processing.odd_labeling.published_snapshot import (
     CanonicalSceneEvidence,
     PublishedSceneDescriptor,
 )
+from data_processing.odd_labeling.schema import (
+    CameraCapability,
+    ChannelCapability,
+    DatasetCapabilityManifest,
+)
 
 
 EARTH_RADIUS_M = 6_371_008.8
@@ -48,6 +53,7 @@ def _scene(
     distances_m: np.ndarray | None = None,
     present_indexes: tuple[int, ...] | None = None,
     payload_sizes: dict[int, int] | None = None,
+    frame_inventory_mode: str | None = None,
 ) -> CanonicalSceneEvidence:
     if distances_m is None:
         distances_m = np.zeros(len(timestamps_ns), dtype=np.float64)
@@ -88,6 +94,56 @@ def _scene(
         )
         for index in present_indexes
     )
+    capability_manifest = None
+    if frame_inventory_mode is not None:
+        camera_channel = ChannelCapability(
+            availability="complete",
+            coverage_start_ns=int(timestamps_ns[0]),
+            coverage_end_ns=int(timestamps_ns[-1]) + 100_000_000,
+            nominal_rate_hz=10.0,
+            observed_count=len(present_indexes),
+            missing_count=len(timestamps_ns) - len(present_indexes),
+            source_artifact_sha256="3" * 64,
+        )
+        absent_channel = ChannelCapability(
+            availability="absent",
+            coverage_start_ns=None,
+            coverage_end_ns=None,
+            nominal_rate_hz=None,
+            observed_count=0,
+            missing_count=0,
+            source_artifact_sha256=None,
+        )
+        capability_manifest = DatasetCapabilityManifest(
+            dataset_name=descriptor.dataset_name,
+            dataset_version=descriptor.dataset_version,
+            dataset_manifest_sha256=descriptor.dataset_manifest_sha256,
+            source_revision="fixture-source-v1",
+            adapter_name="fixture",
+            adapter_version="fixture-v1",
+            scene_inventory_sha256="4" * 64,
+            canonical_clock="scene_monotonic_ns",
+            absolute_time_available=False,
+            timezone_resolution_available=False,
+            cameras=(
+                CameraCapability(
+                    camera_id="front_center",
+                    canonical_role="front_center",
+                    channel=camera_channel,
+                    frame_inventory_mode=frame_inventory_mode,
+                ),
+            ),
+            channels={
+                "map": absent_channel,
+                "route": absent_channel,
+                "gnss": camera_channel,
+                "ins": camera_channel,
+                "lidar": absent_channel,
+                "object_tracks": absent_channel,
+                "can": absent_channel,
+            },
+            coordinate_frames=("ego_flu",),
+        )
     return CanonicalSceneEvidence(
         descriptor=descriptor,
         path_latlon_heading_timestamp=path,
@@ -95,6 +151,7 @@ def _scene(
         navigation_route=None,
         navigation_quality={},
         camera_objects=camera_objects,
+        capability_manifest=capability_manifest,
     )
 
 
@@ -155,6 +212,45 @@ def test_sampled_frame_does_not_cover_unsampled_or_missing_intervals() -> None:
     assert len(observations) == len(
         {item.observation_uid for item in observations}
     )
+
+
+def test_sampled_evidence_gap_is_unavailable_not_dropped() -> None:
+    timestamps = np.arange(4, dtype=np.int64) * 100_000_000
+    evidence = _scene(
+        timestamps,
+        present_indexes=(0, 2, 3),
+        frame_inventory_mode="sampled_evidence",
+    )
+    anchors = (
+        CameraAnchor(0, (_frame(0, 0),)),
+        CameraAnchor(
+            200_000_000,
+            (_frame(2, 200_000_000, value=120),),
+        ),
+    )
+
+    observations = label_image_quality(evidence, anchors)
+    statuses = _frame_statuses(observations)
+    gap = next(
+        item
+        for item in statuses
+        if item.start_timestamp_ns == 100_000_000
+    )
+
+    assert gap.status == "unavailable"
+    assert gap.values == ()
+    assert gap.provenance["frame_inventory_mode"] == "sampled_evidence"
+    assert (
+        gap.provenance["reason"]
+        == "camera_frame_inventory_not_authoritative"
+    )
+    assert not any(item.values == ("dropped_frame",) for item in statuses)
+    assert {
+        item.status
+        for item in observations
+        if item.start_timestamp_ns == 100_000_000
+        and item.key in DEPENDENT_QC_KEYS
+    } == {"unavailable"}
 
 
 def test_invalid_jpeg_becomes_corrupted_evidence_without_failing_scene() -> None:
