@@ -135,6 +135,18 @@ func (f *FlyteService) LatestLaunchPlan(
 func flyteLiteral(value any) (map[string]any, error) {
 	primitive := make(map[string]any, 1)
 	switch typed := value.(type) {
+	case []string:
+		literals := make([]map[string]any, 0, len(typed))
+		for _, item := range typed {
+			literal, err := flyteLiteral(item)
+			if err != nil {
+				return nil, err
+			}
+			literals = append(literals, literal)
+		}
+		return map[string]any{
+			"collection": map[string]any{"literals": literals},
+		}, nil
 	case string:
 		primitive["stringValue"] = typed
 	case int:
