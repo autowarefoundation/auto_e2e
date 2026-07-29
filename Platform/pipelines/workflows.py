@@ -6435,6 +6435,45 @@ def wf_precompute_overlays(
     )
 
 
+@workflow
+def wf_project_odd_model_metrics(
+    overlay_manifest_key: str,
+    overlay_manifest_sha256: str,
+    evaluation_dataset_manifest_uri: str,
+    evaluation_dataset_manifest_sha256: str,
+    labelset_manifest_key: str,
+    labelset_manifest_sha256: str,
+    datasets_bucket: str,
+    artifacts_bucket: str,
+    dynamo_table: str = "auto-e2e-console",
+    aws_region: str = "us-west-2",
+) -> str:
+    """Project frozen validation metrics onto one immutable ODD LabelSet.
+
+    This analysis-only workflow does not run training, model inference, or ODD
+    labeling. It reuses a ready overlay, verifies the model's exact validation
+    population, and publishes a sidecar projection for the Console.
+    """
+    from Platform.pipelines.odd_metric_projection_tasks import (
+        project_odd_model_metrics,
+    )
+
+    return project_odd_model_metrics(
+        overlay_manifest_key=overlay_manifest_key,
+        overlay_manifest_sha256=overlay_manifest_sha256,
+        evaluation_dataset_manifest_uri=evaluation_dataset_manifest_uri,
+        evaluation_dataset_manifest_sha256=(
+            evaluation_dataset_manifest_sha256
+        ),
+        labelset_manifest_key=labelset_manifest_key,
+        labelset_manifest_sha256=labelset_manifest_sha256,
+        datasets_bucket=datasets_bucket,
+        artifacts_bucket=artifacts_bucket,
+        dynamo_table=dynamo_table,
+        aws_region=aws_region,
+    )
+
+
 @dynamic(
     container_image=DATA_PREP_IMAGE,
     environment={"AUTO_E2E_DATA_PREP_IMAGE": DATA_PREP_IMAGE},
