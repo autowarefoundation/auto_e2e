@@ -370,6 +370,46 @@ def test_full_run_model_resolution_prefers_selected_tagged_checkpoint():
     assert _resolve(client) == "43"
 
 
+def test_full_run_model_resolution_prefers_composite_best_over_other_roles():
+    tags = {
+        "train_execution_id": "a1234567890123456789",
+        "dataset": "KIT-MRT/KITScenes-Multimodal",
+        "dataset_version": "v2.1",
+    }
+    client = _MLflowClient(
+        [
+            _model_version(
+                44,
+                "best",
+                "a" * 64,
+                checkpoint_role="best",
+                **tags,
+            ),
+            _model_version(
+                45,
+                "trajectory",
+                "b" * 64,
+                checkpoint_role="best_trajectory",
+                **tags,
+            ),
+            _model_version(
+                46,
+                "final",
+                "c" * 64,
+                checkpoint_role="final",
+                **tags,
+            ),
+        ],
+        {
+            "best": _run(),
+            "trajectory": _run(),
+            "final": _run(),
+        },
+    )
+
+    assert _resolve(client) == "44"
+
+
 def test_full_run_model_resolution_rejects_partial_lineage_tags():
     client = _MLflowClient(
         [
