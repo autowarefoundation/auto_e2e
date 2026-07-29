@@ -366,6 +366,9 @@ def _missing_frame_observations(
             provenance = {
                 "labeler_version": IMAGE_QC_VERSION,
                 "image_qc_policy_version": IMAGE_QC_POLICY_VERSION,
+                "frozen_ego_motion_threshold_m": (
+                    FROZEN_EGO_MOTION_THRESHOLD_M
+                ),
                 "reason": "camera_channel_absent",
             }
             observations.append(
@@ -443,6 +446,7 @@ def _dropped_frame_observations(
     provenance: dict[str, object] = {
         "labeler_version": IMAGE_QC_VERSION,
         "image_qc_policy_version": IMAGE_QC_POLICY_VERSION,
+        "frozen_ego_motion_threshold_m": FROZEN_EGO_MOTION_THRESHOLD_M,
         "reason": "expected_camera_frame_missing",
     }
     observations = [
@@ -563,6 +567,7 @@ def _decode_failure_observations(
     provenance: dict[str, object] = {
         "labeler_version": IMAGE_QC_VERSION,
         "image_qc_policy_version": IMAGE_QC_POLICY_VERSION,
+        "frozen_ego_motion_threshold_m": FROZEN_EGO_MOTION_THRESHOLD_M,
         "frame_index": failure.frame_index,
         "reason": failure.reason,
     }
@@ -619,6 +624,9 @@ def label_image_quality(
             provenance = {
                 "labeler_version": IMAGE_QC_VERSION,
                 "image_qc_policy_version": IMAGE_QC_POLICY_VERSION,
+                "frozen_ego_motion_threshold_m": (
+                    FROZEN_EGO_MOTION_THRESHOLD_M
+                ),
                 "frame_index": frame.frame_index,
                 "frame_content_sha256": hashlib.sha256(frame.jpeg).hexdigest(),
             }
