@@ -59,6 +59,8 @@ type oddLabelerInputTemplate struct {
 	BedrockConcurrency              int      `json:"bedrock_concurrency"`
 }
 
+const supportedODDLabelerBundleVersion = "odd_dataset_labeler_v6"
+
 type ODDOperationResult struct {
 	Action            string `json:"action"`
 	ExecutionID       string `json:"execution_id"`
@@ -162,7 +164,7 @@ func (t oddLabelerInputTemplate) validate() error {
 			)
 		}
 	}
-	if t.LabelerBundleVersion != "odd_dataset_labeler_v5" ||
+	if t.LabelerBundleVersion != supportedODDLabelerBundleVersion ||
 		t.RoadVLMProvider != "openai_compatible" ||
 		t.MapResolverProvider != "amazon_bedrock" ||
 		!validOddS3URI(t.LabelerConfigURI) {
