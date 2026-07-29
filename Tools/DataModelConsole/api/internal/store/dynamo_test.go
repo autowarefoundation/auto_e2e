@@ -31,6 +31,7 @@ type fakeDDB struct {
 	items               map[string]map[string]ddbtypes.AttributeValue
 	batchCalls          int
 	getCalls            int
+	queryCalls          int
 	lastGetConsistent   bool
 	lastQueryConsistent bool
 	// forceUnprocessedOnce returns the first batch's items as unprocessed once,
@@ -208,6 +209,7 @@ func (f *fakeDDB) BatchWriteItem(_ context.Context, in *dynamodb.BatchWriteItemI
 }
 
 func (f *fakeDDB) Query(_ context.Context, in *dynamodb.QueryInput, _ ...func(*dynamodb.Options)) (*dynamodb.QueryOutput, error) {
+	f.queryCalls++
 	f.lastQueryConsistent = in.ConsistentRead != nil && *in.ConsistentRead
 	pk := in.ExpressionAttributeValues[":pk"].(*ddbtypes.AttributeValueMemberS).Value
 	prefix := ""
@@ -1407,6 +1409,143 @@ func TestDynamoStore_OverlayModelsPaginationBoundsReadinessLookups(
 				test.limit,
 				test.token,
 			)
+		}
+	}
+}
+
+func testODDMetricProjectionItem(seed int) oddMetricProjectionItem {
+	modelArtifactID := fmt.Sprintf("%064x", seed)
+	projectionID := fmt.Sprintf("%064x", seed+1000)
+	return oddMetricProjectionItem{
+		Status:                          "ready",
+		ProjectionID:                    projectionID,
+		ProjectionPolicyVersion:         "odd_metric_projection_v1",
+		MetricPolicyVersion:             "trajectory_metric_v1",
+		LabelSetID:                      "oddls-test",
+		LabelSetManifestSHA256:          strings.Repeat("a", 64),
+		ModelArtifactID:                 modelArtifactID,
+		RegisteredModelName:             "auto-e2e-driving-policy",
+		ModelVersion:                    seed,
+		RunID:                           fmt.Sprintf("run-%d", seed),
+		EvaluationDataset:               "kitscenes",
+		EvaluationVersion:               "v2.2",
+		EvaluationDatasetManifestSHA256: strings.Repeat("b", 64),
+		ValidationSampleUIDDigest:       strings.Repeat("c", 64),
+		SampleCount:                     3820,
+		SceneCount:                      40,
+		ManifestKey:                     fmt.Sprintf("odd-metrics/%d/manifest.json", seed),
+		ManifestSHA256:                  strings.Repeat("d", 64),
+		ManifestByteSize:                1024,
+		ReportKey:                       fmt.Sprintf("odd-metrics/%d/report.json", seed),
+		ReportSHA256:                    strings.Repeat("e", 64),
+		ReportByteSize:                  2048,
+		ArtifactsBucket:                 "test-artifacts",
+		SK: fmt.Sprintf(
+			"MODEL#%s#PROJECTION#%s",
+			modelArtifactID,
+			projectionID,
+		),
+	}
+}
+
+func putODDMetricProjectionTestItem(
+	t *testing.T,
+	fake *fakeDDB,
+	item oddMetricProjectionItem,
+) {
+	t.Helper()
+	attributes, err := attributevalue.MarshalMap(item)
+	if err != nil {
+		t.Fatal(err)
+	}
+	attributes["pk"] = &ddbtypes.AttributeValueMemberS{
+		Value: ODDMetricProjectionPK(
+			"kitscenes",
+			"v3.0",
+			"oddls-test",
+		),
+	}
+	fake.items[keyOf(attributes)] = attributes
+}
+
+func TestDynamoStore_ODDMetricProjectionsPaginateAndSort(t *testing.T) {
+	store, fake := newTestStore()
+	for seed := 1; seed <= 101; seed++ {
+		putODDMetricProjectionTestItem(
+			t,
+			fake,
+			testODDMetricProjectionItem(seed),
+		)
+	}
+
+	got, err := store.ListReadyODDMetricProjections(
+		context.Background(),
+		"kitscenes",
+		"v3.0",
+		"oddls-test",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 101 {
+		t.Fatalf("projection count = %d, want 101", len(got))
+	}
+	if fake.queryCalls != 2 {
+		t.Fatalf("DynamoDB query calls = %d, want 2", fake.queryCalls)
+	}
+	if got[0].ModelVersion != 101 || got[100].ModelVersion != 1 {
+		t.Fatalf(
+			"projection sort order = %d..%d, want 101..1",
+			got[0].ModelVersion,
+			got[100].ModelVersion,
+		)
+	}
+}
+
+func TestDynamoStore_ODDMetricProjectionsRejectInvalidPointers(t *testing.T) {
+	store, fake := newTestStore()
+	putODDMetricProjectionTestItem(
+		t,
+		fake,
+		testODDMetricProjectionItem(1),
+	)
+	mutations := []func(*oddMetricProjectionItem){
+		func(item *oddMetricProjectionItem) { item.Status = "building" },
+		func(item *oddMetricProjectionItem) { item.LabelSetID = "oddls-other" },
+		func(item *oddMetricProjectionItem) { item.ReportSHA256 = "invalid" },
+		func(item *oddMetricProjectionItem) { item.ReportByteSize = 0 },
+		func(item *oddMetricProjectionItem) { item.SK += "#tampered" },
+	}
+	for index, mutate := range mutations {
+		item := testODDMetricProjectionItem(index + 2)
+		mutate(&item)
+		putODDMetricProjectionTestItem(t, fake, item)
+	}
+
+	got, err := store.ListReadyODDMetricProjections(
+		context.Background(),
+		"kitscenes",
+		"v3.0",
+		"oddls-test",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].ModelVersion != 1 {
+		t.Fatalf("ready projections = %+v, want only the valid pointer", got)
+	}
+	for _, coordinate := range [][3]string{
+		{"", "v3.0", "oddls-test"},
+		{"kitscenes", "", "oddls-test"},
+		{"kitscenes", "v3.0", ""},
+	} {
+		if _, err := store.ListReadyODDMetricProjections(
+			context.Background(),
+			coordinate[0],
+			coordinate[1],
+			coordinate[2],
+		); err == nil {
+			t.Fatalf("incomplete coordinate %q was accepted", coordinate)
 		}
 	}
 }
