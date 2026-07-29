@@ -1082,6 +1082,36 @@ Trajectory derivatives use a versioned, gap-aware smoothing configuration.
 Values spanning a gap above the configured threshold are
 `status=not_observable`; they are not interpolated through arbitrary outages.
 
+#### Gap and derivative contract
+
+`odd_gnss_ins_policy_v2` freezes the following initial policy:
+
+1. Determine the expected period from the highest declared, non-absent
+   GNSS/INS nominal rate. If a dataset adapter has no declared rate, use the
+   median positive pose timestamp delta.
+2. Define `maximum_gap_ns` as the greater of 500 ms and three expected
+   periods. A timestamp delta strictly above this threshold starts a new
+   contiguous segment.
+3. Compute local metric velocity, speed, acceleration, unwrapped heading
+   change, and yaw rate independently inside each contiguous segment. Never
+   smooth, differentiate, or integrate across segment boundaries.
+4. Require at least three ordered pose samples in a contiguous segment before
+   publishing derived kinematics. A shorter segment is
+   `status=not_observable`, not a zero-motion segment.
+5. Treat the missing interval as beginning one expected period after the last
+   sample and ending at the next sample. Every one-second observation interval
+   overlapping it publishes `status=not_observable` with no resolved value for
+   the KIN-owned speed, motion, maneuver, and strong-response keys.
+6. Reset stationary, starting, and strong-response state-machine history after
+   a gap. State before an outage cannot establish dwell or event continuity
+   after it.
+
+Each observation records the policy version, expected period, effective
+maximum gap, stationary epsilon, and dwell thresholds in provenance. Any
+change to these rules increments both the GNSS/INS source policy and Flyte task
+cache version. A full LabelSet produced under an earlier source policy is not
+silently reinterpreted.
+
 #### Speed bin contract
 
 The recommended semantic boundaries are:
@@ -1105,10 +1135,12 @@ medium_speed  30 <= speed <= 60
 high_speed    speed > 60
 ```
 
-The initial epsilon and dwell are selected from the KITScenes stationary-noise
-audit and frozen before full labeling. The continuous `ego_speed_kph`, its
-quality, aggregation, and source timestamps are always stored alongside the
-bin.
+The v2 experimental defaults are `stationary_epsilon_kph=0.5` and
+`stationary_dwell_ns=1_000_000_000`. They must be revalidated against the
+KITScenes stationary-noise audit before a LabelSet is certified. A threshold
+change requires a new source policy version rather than mutating an existing
+LabelSet. The continuous `ego_speed_kph`, its quality, aggregation, and source
+timestamps are always stored alongside the bin.
 
 #### Actual maneuver contract
 
