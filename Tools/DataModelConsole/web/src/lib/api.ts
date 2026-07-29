@@ -18,6 +18,8 @@ import type {
   ODDEvidenceResponse,
   ODDLabelSetsResponse,
   ODDOntology,
+  ODDOperationResult,
+  ODDOperationsCapability,
   ODDSceneRecord,
   ODDSearchResponse,
   ODDStatistics,
@@ -148,6 +150,36 @@ export function getODDLabelSets(
   return apiFetch<ODDLabelSetsResponse>(
     `/api/v1/odd/labelsets?${oddCoordinate(dataset, version)}`,
   );
+}
+
+export function getODDOperations(): Promise<ODDOperationsCapability> {
+  return apiFetch<ODDOperationsCapability>("/api/v1/odd/operations");
+}
+
+export function launchODDDatasetLabeler(
+  dataset: string,
+  version: string,
+  publicationScope: "smoke" | "full",
+): Promise<ODDOperationResult> {
+  return apiFetch<ODDOperationResult>("/api/v1/odd/operations/launch", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      dataset,
+      version,
+      publication_scope: publicationScope,
+    }),
+  });
+}
+
+export function retryODDDatasetLabeler(
+  executionID: string,
+): Promise<ODDOperationResult> {
+  return apiFetch<ODDOperationResult>("/api/v1/odd/operations/retry", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ execution_id: executionID }),
+  });
 }
 
 export function searchODDScenes(
