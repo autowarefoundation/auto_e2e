@@ -20,6 +20,11 @@ RECEIPT_SCHEMA_VERSION = "odd_execution_receipt_v1"
 PROVIDER_EXCHANGE_SCHEMA_VERSION = "odd_provider_exchange_v1"
 
 CHANNEL_AVAILABILITY = ("complete", "partial", "absent")
+CAMERA_FRAME_INVENTORY_MODES = (
+    "capture_timeline",
+    "sampled_evidence",
+    "unknown",
+)
 PROVIDER_BACKENDS = {
     "ORV": "openai_compatible",
     "BMR": "amazon_bedrock",
@@ -132,11 +137,17 @@ class CameraCapability:
     camera_id: str
     canonical_role: str
     channel: ChannelCapability
+    frame_inventory_mode: str = "unknown"
     calibration_ref: str | None = None
 
     def __post_init__(self) -> None:
         if not self.camera_id or not self.canonical_role:
             raise ValueError("camera identity and canonical role are required")
+        if self.frame_inventory_mode not in CAMERA_FRAME_INVENTORY_MODES:
+            raise ValueError(
+                "invalid camera frame inventory mode: "
+                f"{self.frame_inventory_mode}"
+            )
 
     def to_dict(self) -> dict[str, Any]:
         return _json_value(self)
