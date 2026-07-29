@@ -1,7 +1,9 @@
 "use client";
 
 import Link from "next/link";
-import { useMemo, useState } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
+import { Suspense, useMemo, useState } from "react";
+import type { FormEvent } from "react";
 import {
   ArrowDown,
   ArrowLeft,
@@ -10,30 +12,35 @@ import {
   BookOpen,
   ChartNoAxesColumn,
   Database,
+  ExternalLink,
   Plus,
   Search,
   Trash2,
 } from "lucide-react";
 
 import { ErrorState } from "@/components/error-state";
+import { StatusBadge, flytePhaseTone } from "@/components/status-badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useApi } from "@/hooks/use-api";
 import {
   getODDLabelSets,
   getODDOntology,
   getODDStatistics,
+  listExecutionsPage,
   searchODDScenesStructured,
 } from "@/lib/api";
 import type {
+  FlyteExecution,
   ODDKeyStatistic,
+  ODDRatioInterval,
   ODDSearchPredicate,
   ODDStatus,
   ODDStructuredSearchRequest,
   ODDValueStatistic,
 } from "@/types";
 
-const DATASET = "kitscenes";
-const VERSION = "v3.0";
+const DEFAULT_DATASET = "kitscenes";
+const DEFAULT_VERSION = "v3.0";
 const TABS = [
   { id: "overview", label: "Overview", icon: ChartNoAxesColumn },
   { id: "search", label: "Search", icon: Search },
@@ -52,6 +59,31 @@ const STATUS_STYLE: Record<string, string> = {
 type Tab = (typeof TABS)[number]["id"];
 type Namespace = (typeof NAMESPACES)[number];
 type Weighting = (typeof WEIGHTINGS)[number];
+
+function isTab(value: string | null): value is Tab {
+  return TABS.some((tab) => tab.id === value);
+}
+
+function parseSearchRequest(value: string | null): ODDStructuredSearchRequest {
+  if (!value) return createRequest([createPredicate()]);
+  try {
+    const parsed = JSON.parse(value) as ODDStructuredSearchRequest;
+    if (
+      !parsed ||
+      !parsed.query ||
+      !["and", "or"].includes(parsed.query.logic) ||
+      !Array.isArray(parsed.query.predicates) ||
+      !Array.isArray(parsed.query.groups) ||
+      !Number.isInteger(parsed.limit) ||
+      !Number.isInteger(parsed.offset)
+    ) {
+      return createRequest([createPredicate()]);
+    }
+    return parsed;
+  } catch {
+    return createRequest([createPredicate()]);
+  }
+}
 
 function percent(value: number): string {
   if (!Number.isFinite(value)) return "0%";
@@ -103,6 +135,15 @@ function valueRatio(value: ODDValueStatistic, weighting: Weighting): number {
   return value.scene_ratio;
 }
 
+function valueInterval(
+  value: ODDValueStatistic,
+  weighting: Weighting,
+): ODDRatioInterval {
+  if (weighting === "duration") return value.duration_ratio_ci95;
+  if (weighting === "distance") return value.distance_ratio_ci95;
+  return value.scene_ratio_ci95;
+}
+
 function valueAmount(
   value: ODDValueStatistic,
   weighting: Weighting,
@@ -112,10 +153,59 @@ function valueAmount(
   return `${value.scene_count.toLocaleString()} scenes`;
 }
 
+function valueDenominator(
+  key: ODDKeyStatistic,
+  weighting: Weighting,
+): string {
+  if (weighting === "duration") return formatDurationNS(key.valid_duration_ns);
+  if (weighting === "distance") return formatDistance(key.valid_distance_m);
+  return `${key.valid_scene_count.toLocaleString()} scenes`;
+}
+
 function keyCoverage(key: ODDKeyStatistic, weighting: Weighting): number {
   if (weighting === "duration") return key.observable_duration_coverage ?? 0;
   if (weighting === "distance") return key.observable_distance_coverage ?? 0;
   return key.observable_scene_coverage;
+}
+
+function keyCoverageAmounts(
+  key: ODDKeyStatistic,
+  weighting: Weighting,
+): [string, string] {
+  if (weighting === "duration") {
+    return [
+      formatDurationNS(key.valid_duration_ns),
+      formatDurationNS(key.eligible_duration_ns),
+    ];
+  }
+  if (weighting === "distance") {
+    return [
+      formatDistance(key.valid_distance_m),
+      formatDistance(key.eligible_distance_m),
+    ];
+  }
+  return [
+    `${key.valid_scene_count.toLocaleString()} scenes`,
+    `${key.eligible_scene_count.toLocaleString()} scenes`,
+  ];
+}
+
+function weightedRecordAmount(
+  sceneCount: number,
+  durationNS: number,
+  distanceM: number,
+  weighting: Weighting,
+): string {
+  if (weighting === "duration") return formatDurationNS(durationNS);
+  if (weighting === "distance") return formatDistance(distanceM);
+  return `${sceneCount.toLocaleString()} scenes`;
+}
+
+function supportState(key: ODDKeyStatistic | undefined): string {
+  if (!key || key.attempted_count === 0) return "unsupported";
+  if (key.successful_count === 0) return "unavailable";
+  if (key.observable_scene_coverage < 0.8) return "partial";
+  return "supported";
 }
 
 function EventTimeline({
@@ -184,35 +274,115 @@ function EventTimeline({
   );
 }
 
-export default function ODDPage() {
-  const [tab, setTab] = useState<Tab>("overview");
+function DatasetLabelerRuns({
+  executions,
+  loading,
+}: {
+  executions: FlyteExecution[];
+  loading: boolean;
+}) {
+  return (
+    <section className="border-t border-slate-800 pt-5">
+      <div className="flex items-center justify-between gap-3">
+        <div>
+          <p className="text-[10px] uppercase text-slate-600">
+            Dataset Labeler runs
+          </p>
+          <p className="mt-1 text-xs text-slate-500">
+            Standalone Flyte workflow, independent of training and MLflow.
+          </p>
+        </div>
+        <Link
+          href="/runs"
+          className="flex items-center gap-1 text-xs text-slate-500 hover:text-cyan-300"
+        >
+          All runs
+          <ExternalLink className="size-3" />
+        </Link>
+      </div>
+      {loading ? (
+        <Skeleton className="mt-3 h-16 w-full" />
+      ) : executions.length === 0 ? (
+        <p className="mt-3 text-xs text-slate-600">
+          No recent Dataset Labeler execution was returned by Flyte.
+        </p>
+      ) : (
+        <div className="mt-3 divide-y divide-slate-900">
+          {executions.slice(0, 5).map((execution) => (
+            <div
+              key={execution.execution_id}
+              className="grid gap-2 py-2 sm:grid-cols-[minmax(0,1fr)_auto_auto]"
+            >
+              <Link
+                href={`/runs/${encodeURIComponent(execution.execution_id)}`}
+                className="break-all font-mono text-xs text-slate-300 hover:text-cyan-300"
+              >
+                {execution.execution_id}
+              </Link>
+              <span className="font-mono text-[10px] text-slate-600">
+                {execution.duration_s > 0
+                  ? `${Math.round(execution.duration_s).toLocaleString()} s`
+                  : "in progress"}
+              </span>
+              <StatusBadge
+                label={execution.phase}
+                tone={flytePhaseTone(execution.phase)}
+              />
+            </div>
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function ODDPageContent() {
+  const router = useRouter();
+  const searchParams = useSearchParams();
+  const dataset = searchParams.get("dataset")?.trim() || DEFAULT_DATASET;
+  const version = searchParams.get("version")?.trim() || DEFAULT_VERSION;
+  const initialRequest = parseSearchRequest(searchParams.get("query"));
+  const [tab, setTab] = useState<Tab>(() => {
+    const requested = searchParams.get("tab");
+    return isTab(requested) ? requested : "overview";
+  });
   const [namespace, setNamespace] = useState<Namespace>("odd");
   const [weighting, setWeighting] = useState<Weighting>("scene");
+  const labelsets = useApi(
+    () => getODDLabelSets(dataset, version),
+    [dataset, version],
+  );
+  const readyLabelSet = labelsets.data?.labelsets[0];
   const ontology = useApi(
-    () => getODDOntology(DATASET, VERSION),
-    [DATASET, VERSION],
+    () => getODDOntology(dataset, version),
+    [dataset, version],
+    Boolean(readyLabelSet),
   );
   const statistics = useApi(
-    () => getODDStatistics(DATASET, VERSION),
-    [DATASET, VERSION],
+    () => getODDStatistics(dataset, version),
+    [dataset, version],
+    Boolean(readyLabelSet),
   );
-  const labelsets = useApi(
-    () => getODDLabelSets(DATASET, VERSION),
-    [DATASET, VERSION],
+  const executions = useApi(
+    () => listExecutionsPage(100),
+    [],
   );
-  const [logic, setLogic] = useState<"and" | "or">("and");
-  const [predicates, setPredicates] = useState<ODDSearchPredicate[]>([
-    createPredicate(),
-  ]);
+  const [logic, setLogic] = useState<"and" | "or">(
+    initialRequest.query.logic,
+  );
+  const [predicates, setPredicates] = useState<ODDSearchPredicate[]>(
+    initialRequest.query.predicates.length > 0
+      ? initialRequest.query.predicates
+      : [createPredicate()],
+  );
   const [appliedRequest, setAppliedRequest] =
-    useState<ODDStructuredSearchRequest>(() =>
-      createRequest([createPredicate()]),
-    );
+    useState<ODDStructuredSearchRequest>(initialRequest);
   const searchIdentity = JSON.stringify(appliedRequest);
   const search = useApi(
     () =>
-      searchODDScenesStructured(DATASET, VERSION, appliedRequest),
-    [DATASET, VERSION, searchIdentity],
+      searchODDScenesStructured(dataset, version, appliedRequest),
+    [dataset, version, searchIdentity],
+    Boolean(readyLabelSet),
   );
   const definitionByKey = useMemo(
     () =>
@@ -231,7 +401,45 @@ export default function ODDPage() {
       ),
     [statistics.data],
   );
-  const readyLabelSet = labelsets.data?.labelsets[0];
+  const oddExecutions =
+    executions.data?.items.filter((execution) =>
+      execution.workflow_name.endsWith("wf_generate_odd_labelset"),
+    ) ?? [];
+
+  function replaceURL(
+    nextTab: Tab,
+    request: ODDStructuredSearchRequest | null = null,
+    coordinate: { dataset?: string; version?: string } = {},
+  ) {
+    const params = new URLSearchParams(searchParams.toString());
+    params.set("dataset", coordinate.dataset ?? dataset);
+    params.set("version", coordinate.version ?? version);
+    params.set("tab", nextTab);
+    if (request) {
+      params.set("query", JSON.stringify(request));
+    } else if (nextTab !== "search") {
+      params.delete("query");
+    }
+    router.replace(`/odd?${params.toString()}`, { scroll: false });
+  }
+
+  function selectTab(nextTab: Tab) {
+    setTab(nextTab);
+    replaceURL(nextTab, nextTab === "search" ? appliedRequest : null);
+  }
+
+  function selectCoordinate(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const form = new FormData(event.currentTarget);
+    const nextDataset = String(form.get("dataset") ?? "").trim();
+    const nextVersion = String(form.get("version") ?? "").trim();
+    if (!nextDataset || !nextVersion) return;
+    setTab("overview");
+    replaceURL("overview", null, {
+      dataset: nextDataset,
+      version: nextVersion,
+    });
+  }
 
   function updatePredicate(
     index: number,
@@ -249,11 +457,21 @@ export default function ODDPage() {
     nextLogic = logic,
     offset = 0,
   ) {
-    setAppliedRequest((current) => ({
-      ...current,
+    const request = {
+      ...appliedRequest,
       query: { logic: nextLogic, predicates: nextPredicates, groups: [] },
       offset,
-    }));
+    };
+    setAppliedRequest(request);
+    replaceURL("search", request);
+  }
+
+  function patchAppliedRequest(
+    patch: Partial<ODDStructuredSearchRequest>,
+  ) {
+    const request = { ...appliedRequest, ...patch };
+    setAppliedRequest(request);
+    replaceURL("search", request);
   }
 
   function searchValue(key: string, value: string) {
@@ -264,10 +482,56 @@ export default function ODDPage() {
     };
     setPredicates([predicate]);
     setLogic("and");
-    setAppliedRequest(createRequest([predicate]));
+    const request = createRequest([predicate]);
+    setAppliedRequest(request);
     setTab("search");
+    replaceURL("search", request);
   }
 
+  function searchPair(
+    leftKey: string,
+    leftValue: string,
+    rightKey: string,
+    rightValue: string,
+  ) {
+    const nextPredicates = [
+      { ...createPredicate(leftKey), operator: "contains" as const, values: [leftValue] },
+      { ...createPredicate(rightKey), operator: "contains" as const, values: [rightValue] },
+    ];
+    setPredicates(nextPredicates);
+    setLogic("and");
+    const request = createRequest(nextPredicates);
+    setAppliedRequest(request);
+    setTab("search");
+    replaceURL("search", request);
+  }
+
+  if (labelsets.loading) {
+    return <Skeleton className="h-[34rem] w-full" />;
+  }
+  if (labelsets.error) {
+    return (
+      <ErrorState
+        error={labelsets.error}
+        onRetry={() => {
+          ontology.reload();
+          statistics.reload();
+          labelsets.reload();
+        }}
+      />
+    );
+  }
+  if (!readyLabelSet) {
+    return (
+      <div className="space-y-6">
+        <h1 className="text-xl font-semibold">ODD Dashboard</h1>
+        <p className="text-sm text-slate-500">
+          No ready ODD LabelSet is published for {dataset} / {version}.
+        </p>
+        <DatasetLabelerRuns executions={oddExecutions} loading={executions.loading} />
+      </div>
+    );
+  }
   if (ontology.loading || statistics.loading) {
     return <Skeleton className="h-[34rem] w-full" />;
   }
@@ -290,15 +554,65 @@ export default function ODDPage() {
   const visibleKeys = statisticsData.keys.filter(
     (item) => item.namespace === namespace,
   );
+  const commonOddPairs = [...statisticsData.cooccurrences.odd_pairs]
+    .filter((item) => item.scene_count > 0)
+    .sort(
+      (left, right) =>
+        right.scene_count - left.scene_count ||
+        right.overlap_duration_ns - left.overlap_duration_ns,
+    )
+    .slice(0, 6);
+  const rareOddPairs = [...statisticsData.cooccurrences.odd_pairs]
+    .filter((item) => item.scene_count > 0)
+    .sort(
+      (left, right) =>
+        left.scene_count - right.scene_count ||
+        left.overlap_duration_ns - right.overlap_duration_ns,
+    )
+    .slice(0, 6);
+  const commonOddEvents = [...statisticsData.cooccurrences.odd_event]
+    .filter((item) => item.scene_count > 0)
+    .sort(
+      (left, right) =>
+        right.event_instance_count - left.event_instance_count ||
+        right.overlap_duration_ns - left.overlap_duration_ns,
+    )
+    .slice(0, 6);
 
   return (
     <div className="space-y-6">
-      <header className="flex flex-wrap items-end justify-between gap-4 border-b border-slate-800 pb-4">
-        <div>
-          <p className="font-mono text-xs text-slate-500">
-            {DATASET} / {VERSION}
-          </p>
+      <header className="flex flex-wrap items-end justify-between gap-5 border-b border-slate-800 pb-4">
+        <div className="space-y-3">
           <h1 className="mt-1 text-xl font-semibold">ODD Dashboard</h1>
+          <form
+            onSubmit={selectCoordinate}
+            className="flex flex-wrap items-end gap-2"
+          >
+            <label className="space-y-1 text-[9px] uppercase text-slate-600">
+              Dataset
+              <input
+                key={`dataset-${dataset}`}
+                name="dataset"
+                defaultValue={dataset}
+                className="block h-8 w-32 border border-slate-800 bg-slate-950 px-2 font-mono text-xs normal-case text-slate-300"
+              />
+            </label>
+            <label className="space-y-1 text-[9px] uppercase text-slate-600">
+              Version
+              <input
+                key={`version-${version}`}
+                name="version"
+                defaultValue={version}
+                className="block h-8 w-24 border border-slate-800 bg-slate-950 px-2 font-mono text-xs normal-case text-slate-300"
+              />
+            </label>
+            <button
+              type="submit"
+              className="h-8 border border-slate-700 px-3 text-xs text-slate-400 hover:border-cyan-700 hover:text-cyan-300"
+            >
+              Open
+            </button>
+          </form>
         </div>
         <div className="grid grid-cols-3 gap-x-6 text-right">
           <div>
@@ -330,7 +644,7 @@ export default function ODDPage() {
           <button
             key={id}
             type="button"
-            onClick={() => setTab(id)}
+            onClick={() => selectTab(id)}
             className={`flex h-10 shrink-0 items-center gap-2 border-b-2 px-3 text-sm ${
               tab === id
                 ? "border-cyan-500 text-slate-100"
@@ -374,11 +688,19 @@ export default function ODDPage() {
                       : "text-slate-500 hover:text-slate-300"
                   }`}
                 >
-                  {item}
+                  {item === "scene"
+                    ? "Scene presence"
+                    : item === "duration"
+                      ? "Duration share"
+                      : "Distance share"}
                 </button>
               ))}
             </div>
           </div>
+          <p className="text-[10px] text-slate-600">
+            Scene presence can exceed 100% across values because one scene may
+            contain multiple conditions over time.
+          </p>
 
           <div className="divide-y divide-slate-900">
             {visibleKeys.map((item) => (
@@ -397,35 +719,73 @@ export default function ODDPage() {
                       </span>
                     )}
                   </div>
-                  <p className="mt-2 text-xs text-slate-500">
-                    Observable {percent(keyCoverage(item, weighting))}
-                  </p>
+                  {(() => {
+                    const [numerator, denominator] = keyCoverageAmounts(
+                      item,
+                      weighting,
+                    );
+                    return (
+                      <p className="mt-2 text-xs text-slate-500">
+                        Observable {percent(keyCoverage(item, weighting))} ·{" "}
+                        {numerator} / {denominator}
+                      </p>
+                    );
+                  })()}
                   <div className="mt-2 flex flex-wrap gap-1">
-                    {Object.entries(item.status_scene_counts).map(
-                      ([status, count]) =>
-                        count > 0 && (
-                          <span
-                            key={status}
-                            className={`border px-1.5 py-0.5 font-mono text-[10px] ${
-                              STATUS_STYLE[status] ?? STATUS_STYLE.unavailable
-                            }`}
-                          >
-                            {status} {count}
-                          </span>
-                        ),
-                    )}
+                    {ontologyData.statuses.map((status) => (
+                      <span
+                        key={status}
+                        className={`border px-1.5 py-0.5 font-mono text-[10px] ${
+                          STATUS_STYLE[status] ?? STATUS_STYLE.unavailable
+                        }`}
+                      >
+                        {status}{" "}
+                        {weightedRecordAmount(
+                          item.status_scene_counts[status] ?? 0,
+                          item.status_duration_ns[status] ?? 0,
+                          item.status_distance_m[status] ?? 0,
+                          weighting,
+                        )}
+                      </span>
+                    ))}
                   </div>
+                  <details className="mt-3">
+                    <summary className="w-fit cursor-pointer text-[10px] uppercase text-slate-600">
+                      Source coverage
+                    </summary>
+                    <div className="mt-2 space-y-1">
+                      {Object.entries(item.source_scene_counts).map(
+                        ([source, sceneCount]) => (
+                          <p
+                            key={source}
+                            className="flex justify-between gap-3 font-mono text-[10px] text-slate-600"
+                          >
+                            <span>{source}</span>
+                            <span>
+                              {weightedRecordAmount(
+                                sceneCount,
+                                item.source_duration_ns[source] ?? 0,
+                                item.source_distance_m[source] ?? 0,
+                                weighting,
+                              )}
+                            </span>
+                          </p>
+                        ),
+                      )}
+                    </div>
+                  </details>
                 </div>
                 <div className="space-y-2.5">
                   {item.values.map((entry) => {
                     const ratio = valueRatio(entry, weighting);
+                    const interval = valueInterval(entry, weighting);
                     return (
                       <button
                         key={entry.value}
                         type="button"
                         aria-label={`${entry.value} ${percent(ratio)}`}
                         onClick={() => searchValue(item.key, entry.value)}
-                        className="grid w-full grid-cols-[minmax(6rem,12rem)_minmax(5rem,1fr)_6.5rem] items-center gap-2 text-left text-xs"
+                        className="grid w-full grid-cols-[minmax(6rem,12rem)_minmax(5rem,1fr)_minmax(10rem,auto)] items-center gap-2 text-left text-xs"
                       >
                         <span className="truncate font-mono text-slate-400">
                           {entry.value}
@@ -437,7 +797,15 @@ export default function ODDPage() {
                           />
                         </span>
                         <span className="text-right font-mono text-[10px] text-slate-500">
-                          {valueAmount(entry, weighting)} · {percent(ratio)}
+                          <span className="block">
+                            {valueAmount(entry, weighting)} /{" "}
+                            {valueDenominator(item, weighting)} ·{" "}
+                            {percent(ratio)}
+                          </span>
+                          <span className="mt-0.5 block text-[9px] text-slate-700">
+                            95% CI {percent(interval.lower)}–
+                            {percent(interval.upper)}
+                          </span>
                         </span>
                       </button>
                     );
@@ -446,6 +814,81 @@ export default function ODDPage() {
               </section>
             ))}
           </div>
+          {namespace === "odd" && (
+            <section className="grid gap-6 border-t border-slate-800 pt-5 lg:grid-cols-3">
+              {[
+                {
+                  title: "Common ODD combinations",
+                  rows: commonOddPairs,
+                },
+                {
+                  title: "Rare ODD combinations",
+                  rows: rareOddPairs,
+                },
+              ].map((group) => (
+                <div key={group.title}>
+                  <p className="text-[10px] uppercase text-slate-600">
+                    {group.title}
+                  </p>
+                  <div className="mt-2 divide-y divide-slate-900">
+                    {group.rows.map((row) => (
+                      <button
+                        key={`${row.left_key}:${row.left_value}:${row.right_key}:${row.right_value}`}
+                        type="button"
+                        onClick={() =>
+                          searchPair(
+                            row.left_key,
+                            row.left_value,
+                            row.right_key,
+                            row.right_value,
+                          )
+                        }
+                        className="grid w-full gap-1 py-2 text-left"
+                      >
+                        <span className="break-words font-mono text-[10px] text-slate-400">
+                          {row.left_value} + {row.right_value}
+                        </span>
+                        <span className="text-[10px] text-slate-600">
+                          {row.scene_count.toLocaleString()} scenes ·{" "}
+                          {formatDurationNS(row.overlap_duration_ns)} overlap
+                        </span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              ))}
+              <div>
+                <p className="text-[10px] uppercase text-slate-600">
+                  ODD and event overlap
+                </p>
+                <div className="mt-2 divide-y divide-slate-900">
+                  {commonOddEvents.map((row) => (
+                    <button
+                      key={`${row.odd_key}:${row.odd_value}:${row.event_key}:${row.event_value}`}
+                      type="button"
+                      onClick={() =>
+                        searchPair(
+                          row.odd_key,
+                          row.odd_value,
+                          row.event_key,
+                          row.event_value,
+                        )
+                      }
+                      className="grid w-full gap-1 py-2 text-left"
+                    >
+                      <span className="break-words font-mono text-[10px] text-slate-400">
+                        {row.odd_value} + {row.event_value}
+                      </span>
+                      <span className="text-[10px] text-slate-600">
+                        {row.scene_count.toLocaleString()} scenes ·{" "}
+                        {row.event_instance_count.toLocaleString()} events
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </section>
+          )}
         </div>
       )}
 
@@ -474,12 +917,11 @@ export default function ODDPage() {
                   aria-label="Search sort"
                   value={appliedRequest.sort}
                   onChange={(event) =>
-                    setAppliedRequest((current) => ({
-                      ...current,
+                    patchAppliedRequest({
                       sort: event.target
                         .value as ODDStructuredSearchRequest["sort"],
                       offset: 0,
-                    }))
+                    })
                   }
                   className="h-8 border border-slate-700 bg-slate-950 px-2 text-xs text-slate-300"
                 >
@@ -502,11 +944,10 @@ export default function ODDPage() {
                       : "Ascending order"
                   }
                   onClick={() =>
-                    setAppliedRequest((current) => ({
-                      ...current,
-                      descending: !current.descending,
+                    patchAppliedRequest({
+                      descending: !appliedRequest.descending,
                       offset: 0,
-                    }))
+                    })
                   }
                   className="grid size-8 place-items-center border border-slate-700 text-slate-400 hover:text-slate-100"
                 >
@@ -568,16 +1009,29 @@ export default function ODDPage() {
                     <label className="space-y-1 text-[10px] uppercase text-slate-600">
                       Value
                       <select
-                        value={predicate.values[0] ?? ""}
+                        multiple={predicate.operator === "in"}
+                        value={
+                          predicate.operator === "in"
+                            ? predicate.values
+                            : predicate.values[0] ?? ""
+                        }
                         disabled={predicate.operator === "exists"}
                         onChange={(event) =>
                           updatePredicate(index, {
-                            values: event.target.value
-                              ? [event.target.value]
-                              : [],
+                            values:
+                              predicate.operator === "in"
+                                ? Array.from(
+                                    event.target.selectedOptions,
+                                    (option) => option.value,
+                                  ).filter(Boolean)
+                                : event.target.value
+                                  ? [event.target.value]
+                                  : [],
                           })
                         }
-                        className="h-9 w-full border border-slate-700 bg-slate-950 px-2 font-mono text-xs normal-case text-slate-200 disabled:text-slate-700"
+                        className={`w-full border border-slate-700 bg-slate-950 px-2 font-mono text-xs normal-case text-slate-200 disabled:text-slate-700 ${
+                          predicate.operator === "in" ? "h-20 py-1" : "h-9"
+                        }`}
                       >
                         <option value="">Any value</option>
                         {definition?.values.map((candidate) => (
@@ -770,7 +1224,7 @@ export default function ODDPage() {
                       <div className="grid gap-2 sm:grid-cols-[1fr_auto]">
                         <div className="min-w-0">
                           <Link
-                            href={`/scenes/${DATASET}/${encodeURIComponent(scene.shard_name)}/${frame}?version=${VERSION}`}
+                            href={`/scenes/${dataset}/${encodeURIComponent(scene.shard_name)}/${frame}?version=${version}`}
                             className="break-all font-mono text-xs text-slate-200 hover:text-cyan-300"
                           >
                             {scene.scene_uid}
@@ -826,10 +1280,12 @@ export default function ODDPage() {
                     aria-label="Previous page"
                     disabled={(search.data?.offset ?? 0) === 0}
                     onClick={() =>
-                      setAppliedRequest((current) => ({
-                        ...current,
-                        offset: Math.max(0, current.offset - current.limit),
-                      }))
+                      patchAppliedRequest({
+                        offset: Math.max(
+                          0,
+                          appliedRequest.offset - appliedRequest.limit,
+                        ),
+                      })
                     }
                     className="grid size-8 place-items-center border border-slate-800 text-slate-500 hover:text-slate-100 disabled:text-slate-800"
                   >
@@ -841,10 +1297,10 @@ export default function ODDPage() {
                     aria-label="Next page"
                     disabled={!search.data?.more}
                     onClick={() =>
-                      setAppliedRequest((current) => ({
-                        ...current,
-                        offset: current.offset + current.limit,
-                      }))
+                      patchAppliedRequest({
+                        offset:
+                          appliedRequest.offset + appliedRequest.limit,
+                      })
                     }
                     className="grid size-8 place-items-center border border-slate-800 text-slate-500 hover:text-slate-100 disabled:text-slate-800"
                   >
@@ -867,7 +1323,8 @@ export default function ODDPage() {
                     {item.key}
                   </span>
                   <span className="text-xs text-slate-500">
-                    {item.cardinality} · {item.subject} · {item.temporal_scope}
+                    {item.cardinality} · {item.subject} · {item.temporal_scope}{" "}
+                    · {supportState(counts.get(item.key))}
                   </span>
                 </div>
                 <p className="mt-1 text-xs text-slate-500">
@@ -895,6 +1352,41 @@ export default function ODDPage() {
                   );
                 })}
               </div>
+              <dl className="mt-4 grid gap-x-5 gap-y-3 text-xs sm:grid-cols-2 lg:grid-cols-4">
+                <div>
+                  <dt className="text-[9px] uppercase text-slate-700">
+                    Dataset support
+                  </dt>
+                  <dd className="mt-1 font-mono text-[10px] text-slate-400">
+                    {dataset} / {version} ·{" "}
+                    {supportState(counts.get(item.key))}
+                  </dd>
+                </div>
+                <div>
+                  <dt className="text-[9px] uppercase text-slate-700">
+                    Sources
+                  </dt>
+                  <dd className="mt-1 font-mono text-[10px] text-slate-400">
+                    {item.primary_sources.join(", ")}
+                  </dd>
+                </div>
+                <div>
+                  <dt className="text-[9px] uppercase text-slate-700">
+                    Inference
+                  </dt>
+                  <dd className="mt-1 font-mono text-[10px] text-slate-400">
+                    {item.backends.join(", ")}
+                  </dd>
+                </div>
+                <div>
+                  <dt className="text-[9px] uppercase text-slate-700">
+                    Status semantics
+                  </dt>
+                  <dd className="mt-1 font-mono text-[10px] text-slate-400">
+                    {ontologyData.statuses.join(", ")}
+                  </dd>
+                </div>
+              </dl>
               {item.none_semantics && (
                 <p className="mt-3 text-xs text-amber-400">
                   none: {item.none_semantics}
@@ -1003,6 +1495,10 @@ export default function ODDPage() {
                 </p>
               </div>
             </section>
+            <DatasetLabelerRuns
+              executions={oddExecutions}
+              loading={executions.loading}
+            />
           </div>
         ) : (
           <p className="text-sm text-slate-500">
@@ -1010,5 +1506,13 @@ export default function ODDPage() {
           </p>
         ))}
     </div>
+  );
+}
+
+export default function ODDPage() {
+  return (
+    <Suspense fallback={<Skeleton className="h-[34rem] w-full" />}>
+      <ODDPageContent />
+    </Suspense>
   );
 }
