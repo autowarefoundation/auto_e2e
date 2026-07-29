@@ -41,6 +41,31 @@ type ODDQualityState struct {
 	CertificationStatus string `json:"certification_status"`
 }
 
+type oddCoverageKey struct {
+	Key             string `json:"key"`
+	QualityTier     string `json:"quality_tier"`
+	SupportState    string `json:"support_state"`
+	AttemptedCount  int64  `json:"attempted_count"`
+	SuccessfulCount int64  `json:"successful_count"`
+}
+
+type oddCoverageDocument struct {
+	LabelSetID string           `json:"labelset_id"`
+	Keys       []oddCoverageKey `json:"keys"`
+}
+
+type oddStatisticKey struct {
+	Key                     string  `json:"key"`
+	ValidSceneCount         int64   `json:"valid_scene_count"`
+	EligibleSceneCount      int64   `json:"eligible_scene_count"`
+	ObservableSceneCoverage float64 `json:"observable_scene_coverage"`
+}
+
+type oddStatisticsDocument struct {
+	LabelSetID string            `json:"labelset_id"`
+	Keys       []oddStatisticKey `json:"keys"`
+}
+
 type ODDManifest struct {
 	SchemaVersion         string                 `json:"schema_version"`
 	Status                string                 `json:"status"`
@@ -305,7 +330,160 @@ func (s *S3Service) ODDOntology(
 	body, manifest, digest, err := s.oddArtifact(
 		ctx, dataset, version, "ontology",
 	)
-	return json.RawMessage(body), manifest, digest, err
+	if err != nil {
+		return nil, manifest, digest, err
+	}
+	coverageBody, coverageManifest, _, err := s.oddArtifact(
+		ctx, dataset, version, "quality_coverage",
+	)
+	if err != nil {
+		return nil, manifest, digest, err
+	}
+	statisticsBody, statisticsManifest, _, err := s.oddArtifact(
+		ctx, dataset, version, "statistics",
+	)
+	if err != nil {
+		return nil, manifest, digest, err
+	}
+	if coverageManifest.LabelSetID != manifest.LabelSetID ||
+		statisticsManifest.LabelSetID != manifest.LabelSetID {
+		return nil, manifest, digest, fmt.Errorf(
+			"ODD ontology support artifacts differ from LabelSet",
+		)
+	}
+	enriched, err := enrichODDOntology(
+		body,
+		coverageBody,
+		statisticsBody,
+		dataset,
+		version,
+		manifest.LabelSetID,
+	)
+	if err != nil {
+		return nil, manifest, digest, err
+	}
+	return json.RawMessage(enriched), manifest, digest, nil
+}
+
+func canonicalODDSupportState(value string, qualityTier string) (string, bool) {
+	switch value {
+	case "supported_certified", "supported_experimental",
+		"unsupported_missing_source", "disabled_pending_audit":
+		return value, true
+	case "supported_observed":
+		if qualityTier == "certified" {
+			return "supported_certified", true
+		}
+		return "supported_experimental", true
+	case "attempted_no_valid", "unsupported_reported":
+		return "unsupported_missing_source", true
+	default:
+		return "", false
+	}
+}
+
+func enrichODDOntology(
+	ontologyBody []byte,
+	coverageBody []byte,
+	statisticsBody []byte,
+	dataset string,
+	version string,
+	labelSetID string,
+) ([]byte, error) {
+	var ontology map[string]any
+	if err := json.Unmarshal(ontologyBody, &ontology); err != nil {
+		return nil, fmt.Errorf("decode ODD ontology: %w", err)
+	}
+	labels, ok := ontology["labels"].([]any)
+	if !ok {
+		return nil, fmt.Errorf("ODD ontology labels are invalid")
+	}
+	var coverage oddCoverageDocument
+	if err := json.Unmarshal(coverageBody, &coverage); err != nil {
+		return nil, fmt.Errorf("decode ODD coverage: %w", err)
+	}
+	var statistics oddStatisticsDocument
+	if err := json.Unmarshal(statisticsBody, &statistics); err != nil {
+		return nil, fmt.Errorf("decode ODD statistics: %w", err)
+	}
+	if coverage.LabelSetID != labelSetID || statistics.LabelSetID != labelSetID {
+		return nil, fmt.Errorf("ODD ontology support identity differs")
+	}
+	coverageByKey := make(map[string]oddCoverageKey, len(coverage.Keys))
+	for _, row := range coverage.Keys {
+		if row.Key == "" {
+			return nil, fmt.Errorf("ODD coverage has an empty key")
+		}
+		if _, found := coverageByKey[row.Key]; found {
+			return nil, fmt.Errorf("ODD coverage has duplicate key %s", row.Key)
+		}
+		coverageByKey[row.Key] = row
+	}
+	statisticsByKey := make(map[string]oddStatisticKey, len(statistics.Keys))
+	for _, row := range statistics.Keys {
+		if row.Key == "" {
+			return nil, fmt.Errorf("ODD statistics has an empty key")
+		}
+		if _, found := statisticsByKey[row.Key]; found {
+			return nil, fmt.Errorf("ODD statistics has duplicate key %s", row.Key)
+		}
+		statisticsByKey[row.Key] = row
+	}
+	seen := make(map[string]struct{}, len(labels))
+	for _, rawLabel := range labels {
+		label, ok := rawLabel.(map[string]any)
+		if !ok {
+			return nil, fmt.Errorf("ODD ontology label is invalid")
+		}
+		key, ok := label["key"].(string)
+		if !ok || key == "" {
+			return nil, fmt.Errorf("ODD ontology label key is invalid")
+		}
+		if _, found := seen[key]; found {
+			return nil, fmt.Errorf("ODD ontology has duplicate key %s", key)
+		}
+		seen[key] = struct{}{}
+		coverageRow, found := coverageByKey[key]
+		if !found {
+			return nil, fmt.Errorf("ODD coverage is missing key %s", key)
+		}
+		statisticsRow, found := statisticsByKey[key]
+		if !found {
+			return nil, fmt.Errorf("ODD statistics is missing key %s", key)
+		}
+		supportState, valid := canonicalODDSupportState(
+			coverageRow.SupportState,
+			coverageRow.QualityTier,
+		)
+		if !valid {
+			return nil, fmt.Errorf(
+				"ODD coverage has invalid support state %s",
+				coverageRow.SupportState,
+			)
+		}
+		label["dataset_support"] = map[string]any{
+			"support_state":             supportState,
+			"quality_tier":              coverageRow.QualityTier,
+			"valid_scene_count":         statisticsRow.ValidSceneCount,
+			"eligible_scene_count":      statisticsRow.EligibleSceneCount,
+			"observable_scene_coverage": statisticsRow.ObservableSceneCoverage,
+			"attempted_count":           coverageRow.AttemptedCount,
+			"successful_count":          coverageRow.SuccessfulCount,
+		}
+	}
+	if len(seen) != len(coverageByKey) || len(seen) != len(statisticsByKey) {
+		return nil, fmt.Errorf(
+			"ODD ontology, coverage, and statistics keys differ",
+		)
+	}
+	ontology["dataset_name"] = dataset
+	ontology["dataset_version"] = version
+	ontology["labelset_id"] = labelSetID
+	enriched, err := json.Marshal(ontology)
+	if err != nil {
+		return nil, fmt.Errorf("encode enriched ODD ontology: %w", err)
+	}
+	return enriched, nil
 }
 
 // ODDStatistics returns the precomputed scene-native dataset composition.
