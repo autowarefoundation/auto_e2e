@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"strings"
 
 	"github.com/autowarefoundation/auto_e2e/tools/datamodelconsole/api/internal/model"
@@ -28,20 +29,34 @@ type ODDOperationsConfig struct {
 }
 
 type oddLabelerInputTemplate struct {
-	OpenAIModel                   string  `json:"openai_model"`
-	OpenAIModelRevision           string  `json:"openai_model_revision"`
-	BedrockMapModelID             string  `json:"bedrock_map_model_id"`
-	BedrockMapModelRevision       string  `json:"bedrock_map_model_revision"`
-	LabelerImageDigest            string  `json:"labeler_image_digest"`
-	LabelerSourceRevision         string  `json:"labeler_source_revision"`
-	CameraAnchorIntervalS         float64 `json:"camera_anchor_interval_s"`
-	MaximumCameraAnchors          int     `json:"maximum_camera_anchors"`
-	TriggerContextS               float64 `json:"trigger_context_s"`
-	RefinementConfidenceThreshold float64 `json:"refinement_confidence_threshold"`
-	SmokeMaximumScenes            int     `json:"smoke_maximum_scenes"`
-	SceneConcurrency              int     `json:"scene_concurrency"`
-	OpenAIConcurrency             int     `json:"openai_concurrency"`
-	BedrockConcurrency            int     `json:"bedrock_concurrency"`
+	OntologyVersion                 string   `json:"ontology_version"`
+	OntologySHA256                  string   `json:"ontology_sha256"`
+	LabelerBundleVersion            string   `json:"labeler_bundle_version"`
+	LabelerConfigURI                string   `json:"labeler_config_uri"`
+	LabelerConfigSHA256             string   `json:"labeler_config_sha256"`
+	EnabledSources                  []string `json:"enabled_sources"`
+	RoadVLMProvider                 string   `json:"road_vlm_provider"`
+	RoadVLMModel                    string   `json:"road_vlm_model"`
+	RoadVLMModelRevision            string   `json:"road_vlm_model_revision"`
+	RoadVLMPromptBundleSHA256       string   `json:"road_vlm_prompt_bundle_sha256"`
+	RoadVLMDecodingConfigSHA256     string   `json:"road_vlm_decoding_config_sha256"`
+	MapResolverProvider             string   `json:"map_resolver_provider"`
+	MapResolverModelID              string   `json:"map_resolver_model_id"`
+	MapResolverModelRevision        string   `json:"map_resolver_model_revision"`
+	MapResolverPromptBundleSHA256   string   `json:"map_resolver_prompt_bundle_sha256"`
+	MapResolverDecodingConfigSHA256 string   `json:"map_resolver_decoding_config_sha256"`
+	FusionConfigSHA256              string   `json:"fusion_config_sha256"`
+	CalibrationBundleSHA256         string   `json:"calibration_bundle_sha256"`
+	LabelerImageDigest              string   `json:"labeler_image_digest"`
+	LabelerSourceRevision           string   `json:"labeler_source_revision"`
+	CameraAnchorIntervalS           float64  `json:"camera_anchor_interval_s"`
+	MaximumCameraAnchors            int      `json:"maximum_camera_anchors"`
+	TriggerContextS                 float64  `json:"trigger_context_s"`
+	RefinementConfidenceThreshold   float64  `json:"refinement_confidence_threshold"`
+	SmokeMaximumScenes              int      `json:"smoke_maximum_scenes"`
+	SceneConcurrency                int      `json:"scene_concurrency"`
+	OpenAIConcurrency               int      `json:"openai_concurrency"`
+	BedrockConcurrency              int      `json:"bedrock_concurrency"`
 }
 
 type ODDOperationResult struct {
@@ -115,12 +130,17 @@ func decodeODDLabelerInputTemplate(
 
 func (t oddLabelerInputTemplate) validate() error {
 	required := map[string]string{
-		"openai_model":               t.OpenAIModel,
-		"openai_model_revision":      t.OpenAIModelRevision,
-		"bedrock_map_model_id":       t.BedrockMapModelID,
-		"bedrock_map_model_revision": t.BedrockMapModelRevision,
-		"labeler_image_digest":       t.LabelerImageDigest,
-		"labeler_source_revision":    t.LabelerSourceRevision,
+		"ontology_version":            t.OntologyVersion,
+		"labeler_bundle_version":      t.LabelerBundleVersion,
+		"labeler_config_uri":          t.LabelerConfigURI,
+		"road_vlm_provider":           t.RoadVLMProvider,
+		"road_vlm_model":              t.RoadVLMModel,
+		"road_vlm_model_revision":     t.RoadVLMModelRevision,
+		"map_resolver_provider":       t.MapResolverProvider,
+		"map_resolver_model_id":       t.MapResolverModelID,
+		"map_resolver_model_revision": t.MapResolverModelRevision,
+		"labeler_image_digest":        t.LabelerImageDigest,
+		"labeler_source_revision":     t.LabelerSourceRevision,
 	}
 	for name, value := range required {
 		if value == "" || len(value) > 256 {
@@ -131,8 +151,8 @@ func (t oddLabelerInputTemplate) validate() error {
 		}
 	}
 	for _, revision := range []string{
-		t.OpenAIModelRevision,
-		t.BedrockMapModelRevision,
+		t.RoadVLMModelRevision,
+		t.MapResolverModelRevision,
 	} {
 		switch strings.ToLower(revision) {
 		case "latest", "deployed", "main", "unknown":
@@ -141,6 +161,77 @@ func (t oddLabelerInputTemplate) validate() error {
 				ErrODDInvalidOperation, revision,
 			)
 		}
+	}
+	if t.LabelerBundleVersion != "odd_dataset_labeler_v5" ||
+		t.RoadVLMProvider != "openai_compatible" ||
+		t.MapResolverProvider != "amazon_bedrock" ||
+		!validOddS3URI(t.LabelerConfigURI) {
+		return fmt.Errorf(
+			"%w: ODD labeler provider or config identity is invalid",
+			ErrODDInvalidOperation,
+		)
+	}
+	digests := map[string]string{
+		"ontology_sha256":                     t.OntologySHA256,
+		"labeler_config_sha256":               t.LabelerConfigSHA256,
+		"road_vlm_prompt_bundle_sha256":       t.RoadVLMPromptBundleSHA256,
+		"road_vlm_decoding_config_sha256":     t.RoadVLMDecodingConfigSHA256,
+		"map_resolver_prompt_bundle_sha256":   t.MapResolverPromptBundleSHA256,
+		"map_resolver_decoding_config_sha256": t.MapResolverDecodingConfigSHA256,
+		"fusion_config_sha256":                t.FusionConfigSHA256,
+		"calibration_bundle_sha256":           t.CalibrationBundleSHA256,
+	}
+	for name, digest := range digests {
+		if !validOddDigest(digest) {
+			return fmt.Errorf(
+				"%w: %s is not a lowercase SHA-256",
+				ErrODDInvalidOperation, name,
+			)
+		}
+	}
+	if !strings.HasSuffix(
+		t.LabelerConfigURI,
+		"/"+t.LabelerConfigSHA256+".json",
+	) {
+		return fmt.Errorf(
+			"%w: ODD labeler config URI is not content-addressed",
+			ErrODDInvalidOperation,
+		)
+	}
+	allowedSources := map[string]struct{}{
+		"map_route": {},
+		"gnss_ins":  {},
+		"vlm":       {},
+		"image_qc":  {},
+		"fusion":    {},
+	}
+	enabledSources := make(map[string]struct{}, len(t.EnabledSources))
+	for _, source := range t.EnabledSources {
+		if _, allowed := allowedSources[source]; !allowed {
+			return fmt.Errorf(
+				"%w: unsupported ODD source %q",
+				ErrODDInvalidOperation, source,
+			)
+		}
+		if _, duplicate := enabledSources[source]; duplicate {
+			return fmt.Errorf(
+				"%w: duplicate ODD source %q",
+				ErrODDInvalidOperation, source,
+			)
+		}
+		enabledSources[source] = struct{}{}
+	}
+	if _, hasVLM := enabledSources["vlm"]; !hasVLM {
+		return fmt.Errorf(
+			"%w: road VLM source is required",
+			ErrODDInvalidOperation,
+		)
+	}
+	if _, hasFusion := enabledSources["fusion"]; !hasFusion {
+		return fmt.Errorf(
+			"%w: fusion source is required",
+			ErrODDInvalidOperation,
+		)
 	}
 	if !strings.HasPrefix(t.LabelerImageDigest, "sha256:") ||
 		!validOddDigest(strings.TrimPrefix(t.LabelerImageDigest, "sha256:")) ||
@@ -165,6 +256,18 @@ func (t oddLabelerInputTemplate) validate() error {
 		)
 	}
 	return nil
+}
+
+func validOddS3URI(value string) bool {
+	parsed, err := url.Parse(value)
+	return err == nil &&
+		parsed.Scheme == "s3" &&
+		parsed.Host != "" &&
+		parsed.User == nil &&
+		strings.Trim(parsed.Path, "/") != "" &&
+		!strings.Contains(parsed.Path, "//") &&
+		parsed.RawQuery == "" &&
+		parsed.Fragment == ""
 }
 
 func validSourceRevision(value string) bool {
@@ -223,26 +326,41 @@ func (s *ODDOperationsService) Launch(
 		maximumScenes = 0
 	}
 	inputs := map[string]any{
-		"dataset_name":                    dataset,
-		"dataset_version":                 version,
-		"dataset_manifest_uri":            fmt.Sprintf("s3://%s/%s/%s/shards/manifest.json", s.s3.bucket, dataset, version),
-		"dataset_manifest_sha256":         manifest.SHA256,
-		"datasets_bucket":                 s.s3.bucket,
-		"openai_model":                    s.template.OpenAIModel,
-		"openai_model_revision":           s.template.OpenAIModelRevision,
-		"bedrock_map_model_id":            s.template.BedrockMapModelID,
-		"bedrock_map_model_revision":      s.template.BedrockMapModelRevision,
-		"labeler_image_digest":            s.template.LabelerImageDigest,
-		"labeler_source_revision":         s.template.LabelerSourceRevision,
-		"camera_anchor_interval_s":        s.template.CameraAnchorIntervalS,
-		"maximum_camera_anchors":          s.template.MaximumCameraAnchors,
-		"trigger_context_s":               s.template.TriggerContextS,
-		"refinement_confidence_threshold": s.template.RefinementConfidenceThreshold,
-		"maximum_scenes":                  maximumScenes,
-		"scene_concurrency":               s.template.SceneConcurrency,
-		"openai_concurrency":              s.template.OpenAIConcurrency,
-		"bedrock_concurrency":             s.template.BedrockConcurrency,
-		"publication_scope":               publicationScope,
+		"dataset_name":                        dataset,
+		"dataset_version":                     version,
+		"dataset_manifest_uri":                fmt.Sprintf("s3://%s/%s/%s/shards/manifest.json", s.s3.bucket, dataset, version),
+		"dataset_manifest_sha256":             manifest.SHA256,
+		"datasets_bucket":                     s.s3.bucket,
+		"ontology_version":                    s.template.OntologyVersion,
+		"ontology_sha256":                     s.template.OntologySHA256,
+		"labeler_bundle_version":              s.template.LabelerBundleVersion,
+		"labeler_config_uri":                  s.template.LabelerConfigURI,
+		"labeler_config_sha256":               s.template.LabelerConfigSHA256,
+		"enabled_sources":                     s.template.EnabledSources,
+		"road_vlm_provider":                   s.template.RoadVLMProvider,
+		"road_vlm_model":                      s.template.RoadVLMModel,
+		"road_vlm_model_revision":             s.template.RoadVLMModelRevision,
+		"road_vlm_prompt_bundle_sha256":       s.template.RoadVLMPromptBundleSHA256,
+		"road_vlm_decoding_config_sha256":     s.template.RoadVLMDecodingConfigSHA256,
+		"map_resolver_provider":               s.template.MapResolverProvider,
+		"map_resolver_model_id":               s.template.MapResolverModelID,
+		"map_resolver_model_revision":         s.template.MapResolverModelRevision,
+		"map_resolver_prompt_bundle_sha256":   s.template.MapResolverPromptBundleSHA256,
+		"map_resolver_decoding_config_sha256": s.template.MapResolverDecodingConfigSHA256,
+		"fusion_config_sha256":                s.template.FusionConfigSHA256,
+		"calibration_bundle_sha256":           s.template.CalibrationBundleSHA256,
+		"publication_prefix":                  fmt.Sprintf("%s/%s/odd", dataset, version),
+		"labeler_image_digest":                s.template.LabelerImageDigest,
+		"labeler_source_revision":             s.template.LabelerSourceRevision,
+		"camera_anchor_interval_s":            s.template.CameraAnchorIntervalS,
+		"maximum_camera_anchors":              s.template.MaximumCameraAnchors,
+		"trigger_context_s":                   s.template.TriggerContextS,
+		"refinement_confidence_threshold":     s.template.RefinementConfidenceThreshold,
+		"maximum_scenes":                      maximumScenes,
+		"scene_concurrency":                   s.template.SceneConcurrency,
+		"openai_concurrency":                  s.template.OpenAIConcurrency,
+		"bedrock_concurrency":                 s.template.BedrockConcurrency,
+		"publication_scope":                   publicationScope,
 	}
 	executionName, err := oddExecutionName("odd", map[string]any{
 		"launch_plan": launchPlan,
