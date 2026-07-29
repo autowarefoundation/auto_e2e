@@ -714,6 +714,33 @@ def _best_trajectory_checkpoint_from_history(
     return best
 
 
+def _dual_best_improvements(
+    selection: dict,
+    *,
+    best_selection: dict | None,
+    best_trajectory_selection: dict | None,
+) -> tuple[bool, bool]:
+    """Return independent composite-score and trajectory improvements."""
+    from evaluation.checkpoint_selection import score_is_better
+
+    score = float(selection["score"])
+    trajectory = float(selection["components"]["trajectory"])
+    score_improved = (
+        best_selection is None
+        or score_is_better(score, float(best_selection["score"]))
+    )
+    trajectory_improved = (
+        best_trajectory_selection is None
+        or score_is_better(
+            trajectory,
+            float(
+                best_trajectory_selection["components"]["trajectory"]
+            ),
+        )
+    )
+    return score_improved, trajectory_improved
+
+
 def _collated_metadata_value(
     metadata,
     key: str,
@@ -5062,7 +5089,6 @@ def train_il(
                 build_selector_calibration_report,
                 freeze_component_availability,
                 score_checkpoint,
-                score_is_better,
                 validate_frozen_availability,
             )
 
@@ -5109,23 +5135,18 @@ def train_il(
                     ].items()
                 },
             }
-            score_improved = (
-                best_checkpoint is None
-                or score_is_better(
-                    float(checkpoint_selection["score"]),
-                    float(best_checkpoint["selection"]["score"]),
-                )
-            )
-            trajectory_improved = (
-                best_trajectory_checkpoint is None
-                or score_is_better(
-                    float(
-                        checkpoint_selection["components"]["trajectory"]
+            score_improved, trajectory_improved = (
+                _dual_best_improvements(
+                    checkpoint_selection,
+                    best_selection=(
+                        best_checkpoint["selection"]
+                        if best_checkpoint is not None
+                        else None
                     ),
-                    float(
-                        best_trajectory_checkpoint["selection"][
-                            "components"
-                        ]["trajectory"]
+                    best_trajectory_selection=(
+                        best_trajectory_checkpoint["selection"]
+                        if best_trajectory_checkpoint is not None
+                        else None
                     ),
                 )
             )
