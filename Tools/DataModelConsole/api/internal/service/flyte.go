@@ -19,12 +19,29 @@ type FlyteService struct {
 	client  *http.Client
 }
 
+type flyteResourceType string
+
+const flyteLaunchPlanResourceType flyteResourceType = "LAUNCH_PLAN"
+
+func (t *flyteResourceType) UnmarshalJSON(body []byte) error {
+	var name string
+	if err := json.Unmarshal(body, &name); err == nil {
+		*t = flyteResourceType(name)
+		return nil
+	}
+	if string(body) == "3" {
+		*t = flyteLaunchPlanResourceType
+		return nil
+	}
+	return fmt.Errorf("invalid Flyte resource type %s", body)
+}
+
 type FlyteLaunchPlanID struct {
-	ResourceType int    `json:"resourceType"`
-	Project      string `json:"project"`
-	Domain       string `json:"domain"`
-	Name         string `json:"name"`
-	Version      string `json:"version"`
+	ResourceType flyteResourceType `json:"resourceType"`
+	Project      string            `json:"project"`
+	Domain       string            `json:"domain"`
+	Name         string            `json:"name"`
+	Version      string            `json:"version"`
 }
 
 type FlyteExecutionCreateResult struct {
@@ -103,7 +120,7 @@ func (f *FlyteService) LatestLaunchPlan(
 		return identifier, fmt.Errorf("Flyte LaunchPlan %q is not registered", name)
 	}
 	identifier = response.LaunchPlans[0].ID
-	if identifier.ResourceType != 3 ||
+	if identifier.ResourceType != flyteLaunchPlanResourceType ||
 		identifier.Project != f.project ||
 		identifier.Domain != f.domain ||
 		identifier.Name != name ||
