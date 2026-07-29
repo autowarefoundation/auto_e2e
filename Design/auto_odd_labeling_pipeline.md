@@ -1726,6 +1726,27 @@ The client requests JSON Schema structured output when the endpoint supports
 it. Otherwise it applies the same schema validator to returned JSON and
 abstains on any extra value, missing key, or invalid cardinality.
 
+The client may apply a versioned, deterministic protocol repair before strict
+validation. This is wire-format canonicalization, not semantic inference, and
+is limited to the following cases:
+
+1. For a scene-scoped observation, replace a non-null `camera_id` with `null`
+   only when that ID is both a supplied camera role and explicitly cited in the
+   observation's `supporting_cameras`.
+2. For a valid multi-select observation, remove its ontology-defined neutral
+   value (`none` or `normal`) only when one or more other returned values are
+   present and every returned value belongs to the allowed candidate set.
+
+Unknown values, missing or extra keys, malformed JSON, unsupported timestamps,
+unknown cameras, a wrong camera-scoped identity, missing evidence citations,
+and every other schema violation remain invalid. The raw provider response and
+its digest are never changed. Each applied repair records its version, label
+key, repair kind, and exact before/after values in both the provider exchange
+artifact and the resulting observation provenance. The provider report
+aggregates repair counts by backend, kind, and label key so that a high repair
+rate remains visible as a provider-quality issue rather than being hidden by a
+successful validation result.
+
 Regular ODD/perception requests use a short multi-view temporal clip centered on
 the output interval. Event requests use denser clips that cover before, during,
 and after the candidate event. A single image is sufficient only for static
@@ -2625,6 +2646,7 @@ definition is unclear, the ontology is changed first.
 | One camera absent | Camera-scoped unavailable; surround aggregate follows its declared rule |
 | VLM transport failure | Explicit failed evidence; no `none` substitution |
 | VLM schema failure | Invalid raw response retained; evidence status reflects failure |
+| VLM bounded protocol repair | Preserve raw response; record exact repair in exchange, observation provenance, and provider report |
 | Map and visual conflict | Preserve both; apply key policy or publish ambiguous |
 | Object track discontinuity | End or split actor-scoped event; do not join by row position |
 | CAN absent | CAN evidence unavailable; GNSS/INS path continues |
@@ -2828,6 +2850,9 @@ observable coverage and another has 30%.
   frames.
 - OpenAI-compatible road-VLM parser tests for valid, incomplete, conflicting,
   and excluded outputs.
+- Bounded protocol-repair tests prove raw responses remain immutable, repaired
+  values remain ontology-valid, repair provenance is complete, and unsupported
+  cameras/timestamps/values are still rejected.
 - Bedrock map-resolver fixtures for left/right/straight route action,
   T/Y/cross/roundabout/merge/diverge topology, and grade-separated ambiguity.
 - Post-Bedrock geometry validation rejects unsupported value/primitive pairs.
