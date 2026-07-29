@@ -4,6 +4,7 @@ from data_processing.odd_labeling.fusion import (
     EVENT_SEGMENTER_VERSION,
     EvidenceBuildContext,
     build_resolved_scene_labels,
+    fusion_config_sha256,
     resolve_evidence,
     segment_events,
     source_observations_to_evidence,
@@ -46,6 +47,12 @@ def _observation(
         end_timestamp_ns=end_ns,
         provenance=provenance or {"labeler_version": f"{source}_v1"},
         actor_track_uid=actor_track_uid,
+    )
+
+
+def test_fusion_policy_hash_is_stable() -> None:
+    assert fusion_config_sha256() == (
+        "569f7e022131e7742fd36ee9f2e6d0ed874abfbdf96f320641c28787b2778771"
     )
 
 
