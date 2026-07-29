@@ -12,7 +12,13 @@ from typing import Any
 
 from .image_qc import CameraAnchor, CameraFrame
 from .ontology import ONTOLOGY
-from .schema import LabelObservation, canonical_json_bytes, make_observation
+from .schema import (
+    LabelObservation,
+    ProviderExchange,
+    canonical_json_bytes,
+    content_sha256,
+    make_observation,
+)
 
 
 ROAD_VLM_SCHEMA_VERSION = "road_vlm_request_v2"
@@ -246,6 +252,28 @@ def _extract_content(response: Mapping[str, Any]) -> str:
             if isinstance(item, Mapping)
         )
     return ""
+
+
+def _provider_usage(response: Mapping[str, Any]) -> dict[str, int | float]:
+    raw = response.get("usage")
+    if not isinstance(raw, Mapping):
+        return {}
+    aliases = {
+        "prompt_tokens": "input_tokens",
+        "completion_tokens": "output_tokens",
+        "total_tokens": "total_tokens",
+    }
+    usage: dict[str, int | float] = {}
+    for source_name, target_name in aliases.items():
+        value = raw.get(source_name)
+        if (
+            isinstance(value, (int, float))
+            and not isinstance(value, bool)
+            and math.isfinite(float(value))
+            and value >= 0
+        ):
+            usage[target_name] = value
+    return usage
 
 
 def _parse_json_content(content: str) -> dict[str, Any]:
@@ -690,10 +718,15 @@ class OpenAICompatibleRoadObserver:
     ) -> None:
         self.config = config
         self._transport = transport or _urllib_transport(config.timeout_s)
+        self._provider_exchanges: list[ProviderExchange] = []
 
     @property
     def endpoint(self) -> str:
         return f"{self.config.base_url.rstrip('/')}/chat/completions"
+
+    @property
+    def provider_exchanges(self) -> tuple[ProviderExchange, ...]:
+        return tuple(self._provider_exchanges)
 
     def _headers(self) -> dict[str, str]:
         headers = {"Content-Type": "application/json"}
@@ -759,8 +792,40 @@ class OpenAICompatibleRoadObserver:
             )
         ).hexdigest()
         request_digest = hashlib.sha256(canonical_json_bytes(request)).hexdigest()
+        prompt_sha256 = _prompt_bundle_sha256(
+            task_bundle,
+            keys,
+            "camera" if target_camera_id else "scene",
+            self.config.prompt_version,
+        )
+        request_metadata = {
+            "schema_version": ROAD_VLM_SCHEMA_VERSION,
+            "scene_uid_sha256": scene_uid_hash,
+            "task_bundle": task_bundle,
+            "keys": list(keys),
+            "subject_scope": "camera" if target_camera_id else "scene",
+            "subject_camera_id": target_camera_id,
+            "start_timestamp_ns": start_timestamp_ns,
+            "end_timestamp_ns": end_timestamp_ns,
+            "inference_pass": inference_pass,
+            "refinement_reasons": dict(refinement_reasons),
+            "sampling_parameters": dict(sampling_parameters),
+            "prompt_sha256": prompt_sha256,
+            "decoding_config_sha256": decoding_config_sha256,
+            "frames": [
+                {
+                    "camera_role": frame.camera_role,
+                    "timestamp_ns": frame.timestamp_ns,
+                    "jpeg_sha256": hashlib.sha256(frame.jpeg).hexdigest(),
+                }
+                for frame in frames
+            ],
+        }
         last_error: Exception | None = None
+        last_exchange: ProviderExchange | None = None
         for attempt in range(self.config.retry_count + 1):
+            response: Mapping[str, Any] | None = None
+            started_at = time.perf_counter()
             try:
                 response = self._transport(
                     self.endpoint, request, self._headers()
@@ -769,47 +834,98 @@ class OpenAICompatibleRoadObserver:
                 if not content_text:
                     raise ValueError("OpenAI-compatible response content is empty")
                 parsed = _parse_json_content(content_text)
-                return _validate_response(
+                validated = _validate_response(
                     parsed,
                     keys,
                     frames=frames,
                     target_camera_id=target_camera_id,
-                ), {
-                    "prompt_sha256": _prompt_bundle_sha256(
-                        task_bundle,
-                        keys,
-                        "camera" if target_camera_id else "scene",
-                        self.config.prompt_version,
+                )
+                response_sha256 = content_sha256(response)
+                exchange = ProviderExchange(
+                    backend="ORV",
+                    provider="openai_compatible",
+                    model=self.config.model,
+                    model_revision=(
+                        self.config.model_revision or "unversioned"
                     ),
+                    request_sha256=request_digest,
+                    response_sha256=response_sha256,
+                    status="succeeded",
+                    attempt=attempt + 1,
+                    latency_ms=(
+                        time.perf_counter() - started_at
+                    )
+                    * 1000.0,
+                    input_image_count=len(frames),
+                    request_metadata=request_metadata,
+                    raw_response=response,
+                    usage=_provider_usage(response),
+                )
+                self._provider_exchanges.append(exchange)
+                return validated, {
+                    "prompt_sha256": prompt_sha256,
                     "decoding_config_sha256": decoding_config_sha256,
                     "request_sha256": request_digest,
-                    "response_sha256": hashlib.sha256(
-                        content_text.encode("utf-8")
-                    ).hexdigest(),
+                    "response_sha256": response_sha256,
                     "attempt": attempt + 1,
                 }
             except Exception as exc:  # noqa: BLE001
                 last_error = exc
+                response_sha256 = (
+                    content_sha256(response)
+                    if response is not None
+                    else None
+                )
+                last_exchange = ProviderExchange(
+                    backend="ORV",
+                    provider="openai_compatible",
+                    model=self.config.model,
+                    model_revision=(
+                        self.config.model_revision or "unversioned"
+                    ),
+                    request_sha256=request_digest,
+                    response_sha256=response_sha256,
+                    status=(
+                        "invalid_response"
+                        if response is not None
+                        else "transport_error"
+                    ),
+                    attempt=attempt + 1,
+                    latency_ms=(
+                        time.perf_counter() - started_at
+                    )
+                    * 1000.0,
+                    input_image_count=len(frames),
+                    request_metadata=request_metadata,
+                    raw_response=response,
+                    usage=(
+                        _provider_usage(response)
+                        if response is not None
+                        else {}
+                    ),
+                    error_type=type(exc).__name__,
+                )
+                self._provider_exchanges.append(last_exchange)
                 if attempt < self.config.retry_count:
                     time.sleep(min(8.0, 2.0**attempt))
         assert last_error is not None
+        failure_provenance = {
+            "prompt_sha256": prompt_sha256,
+            "decoding_config_sha256": decoding_config_sha256,
+            "request_sha256": request_digest,
+            "attempt": self.config.retry_count + 1,
+            "error_type": type(last_error).__name__,
+        }
+        if last_exchange is not None and last_exchange.response_sha256:
+            failure_provenance["response_sha256"] = (
+                last_exchange.response_sha256
+            )
         raise RoadVLMRequestError(
             (
                 "OpenAI-compatible road observer failed after "
                 f"{self.config.retry_count + 1} attempts: {last_error}"
             ),
-            provenance={
-                "prompt_sha256": _prompt_bundle_sha256(
-                    task_bundle,
-                    keys,
-                    "camera" if target_camera_id else "scene",
-                    self.config.prompt_version,
-                ),
-                "decoding_config_sha256": decoding_config_sha256,
-                "request_sha256": request_digest,
-                "attempt": self.config.retry_count + 1,
-                "error_type": type(last_error).__name__,
-            },
+            provenance=failure_provenance,
         ) from last_error
 
     def observe(
