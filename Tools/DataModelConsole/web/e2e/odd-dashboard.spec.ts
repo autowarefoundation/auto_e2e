@@ -17,6 +17,9 @@ const ontology = {
   schema_version: "odd_ontology_registry_v1",
   ontology_version: "odd_ontology_v1",
   ontology_sha256: "a".repeat(64),
+  dataset_name: "kitscenes",
+  dataset_version: "v3.0",
+  labelset_id: "oddls-test",
   statuses: ["valid", "unavailable", "not_observable", "ambiguous"],
   sources: ["map_route", "gnss_ins", "vlm", "image_qc", "fusion"],
   labels: [
@@ -32,6 +35,15 @@ const ontology = {
       subject: "scene",
       temporal_scope: "interval",
       quality_tier: "experimental",
+      dataset_support: {
+        support_state: "supported_experimental",
+        quality_tier: "experimental",
+        valid_scene_count: 2,
+        eligible_scene_count: 2,
+        observable_scene_coverage: 1,
+        attempted_count: 2,
+        successful_count: 2,
+      },
     },
   ],
 };
@@ -287,6 +299,8 @@ test("ODD Dashboard exposes weighted composition, structured search, ontology, a
   await page.getByRole("button", { name: "Ontology" }).click();
   await page.getByText("odd.road.context", { exact: true }).click();
   await expect(page.getByRole("button", { name: "suburban · 0" })).toBeVisible();
+  await expect(page.getByText("supported_experimental").first()).toBeVisible();
+  await expect(page.getByText("2 / 2 scenes observable")).toBeVisible();
 
   await page.getByRole("button", { name: "LabelSets" }).click();
   await expect(page.getByText("passed", { exact: true })).toBeVisible();
