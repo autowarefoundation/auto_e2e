@@ -15,6 +15,18 @@ func TestShardIndexPK(t *testing.T) {
 	}
 }
 
+func TestODDMetricProjectionPK(t *testing.T) {
+	got := ODDMetricProjectionPK(
+		"kitscenes",
+		"v3.0",
+		"oddls-123",
+	)
+	want := "ODDPROJ#kitscenes#v3.0#oddls-123"
+	if got != want {
+		t.Errorf("ODDMetricProjectionPK = %q, want %q", got, want)
+	}
+}
+
 func TestStatsPK(t *testing.T) {
 	got := StatsPK("l2d", "v2.0", "action_relevant_reasoning_v3_temporal_front256")
 	want := "STATS#l2d#v2.0#action_relevant_reasoning_v3_temporal_front256"
