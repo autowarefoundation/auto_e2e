@@ -12,6 +12,7 @@ or:
 
 import torch
 import torch.nn as nn
+import numpy as np
 import pytest
 
 from Model.model_components.trajectory_planning.trajectory_scorer import (
@@ -23,10 +24,14 @@ from Model.model_components.trajectory_planning.trajectory_scorer import (
     kinematic_comfort_score,
     project_xy_to_bev_pixel,
 )
+from Model.navigation.geometry import DEFAULT_NAVIGATION_GEOMETRY, MapChannel
 
 NUM_TIMESTEPS = 4
 BATCH = 2
-BEV_H, BEV_W = 450, 300
+# Real geometry (#161), not a guessed shape — see ScorerConfig's own defaults.
+BEV_H = DEFAULT_NAVIGATION_GEOMETRY.height_px
+BEV_W = DEFAULT_NAVIGATION_GEOMETRY.width_px
+NAV_CHANNELS = 14  # Model.navigation.geometry.MAP_CHANNEL_COUNT
 DEFAULT_SPEED = 5.0  # m/s, used to build realistic-looking egomotion fixtures
 
 
@@ -69,16 +74,18 @@ def visual_history(): return torch.randn(BATCH, 16)
 @pytest.fixture()
 def egomotion_history(): return _egomotion()
 @pytest.fixture()
-def map_input():
-    # ScorerConfig defaults put ego_row at 300 — the drivable rectangle
-    # must include that row or the ego origin itself reads as
-    # non-drivable (this fixture originally stopped at row 300 exclusive,
-    # a one-pixel-short rectangle that made the "origin should always be
-    # compliant" assumption below false; never caught because this file
-    # lived at repo-root tests/, outside what `make test` / CI actually
-    # collects — see Model/pytest.ini + Makefile's `test:` target).
-    m = torch.zeros(BATCH, 3, BEV_H, BEV_W)
-    m[:, :, 100:301, 100:200] = 255.0
+def map_context():
+    """[B, 14, H, W] semantic navigation raster (#161) — NOT a rendered
+    RGB image any more. Only the DRIVABLE_AREA channel is set here; the
+    other 13 channels are left zero since nothing under test reads them.
+    A generous drivable rectangle is used so the ego origin (which the
+    tests below rely on being compliant) is safely inside it — this file
+    used to ship a rectangle that was exactly one row short of the ego
+    row, an off-by-one that went uncaught for a while (see git history);
+    generous margins here are deliberate, not laziness.
+    """
+    m = torch.zeros(BATCH, NAV_CHANNELS, BEV_H, BEV_W)
+    m[:, MapChannel.DRIVABLE_AREA, 50:BEV_H, 50:BEV_W - 50] = 1.0
     return m
 @pytest.fixture()
 def planner(): return FakePlanner(num_timesteps=NUM_TIMESTEPS)
@@ -134,31 +141,61 @@ class TestDecodeTrajectoryToXY:
 
 class TestProjectXYToBEVPixel:
     def test_ego_origin_maps_correctly(self):
+        """Must match DEFAULT_NAVIGATION_GEOMETRY.ego_to_pixel exactly —
+        this is a reimplementation of that method for batched torch use,
+        not an independent formula, so cross-check against it directly."""
         cfg = ScorerConfig()
         px = project_xy_to_bev_pixel(torch.zeros(1, 2), cfg)
-        assert px[0, 0].item() == cfg.ego_row
-        assert px[0, 1].item() == cfg.ego_col
+        expected = DEFAULT_NAVIGATION_GEOMETRY.ego_to_pixel(np.zeros((1, 2)))
+        assert px[0, 0].item() == round(expected[0, 0])
+        assert px[0, 1].item() == round(expected[0, 1])
+        assert px[0, 0].item() == round(cfg.ego_row)
+        assert px[0, 1].item() == round(cfg.ego_col)
 
     def test_forward_motion_reduces_row(self):
-        cfg = ScorerConfig(forward_is_negative_row=True)
+        cfg = ScorerConfig()
         px = project_xy_to_bev_pixel(torch.tensor([[10.0, 0.0]]), cfg)
         assert px[0, 0].item() < cfg.ego_row
 
+    def test_matches_real_geometry_object_on_random_points(self):
+        """Broader cross-check than the origin alone — random points
+        inside the raster bounds must match
+        NavigationRasterGeometry.ego_to_pixel to the pixel."""
+        cfg = ScorerConfig()
+        pts = np.array([[10.0, -5.0], [-20.0, 30.0], [0.0, 50.0]])
+        expected = DEFAULT_NAVIGATION_GEOMETRY.ego_to_pixel(pts)
+        got = project_xy_to_bev_pixel(torch.tensor(pts, dtype=torch.float64), cfg)
+        for i in range(len(pts)):
+            assert got[i, 0].item() == round(expected[i, 0])
+            assert got[i, 1].item() == round(expected[i, 1])
+
 
 class TestDrivableAreaCompliance:
-    def test_oob_reduces_compliance(self, map_input):
+    def test_oob_reduces_compliance(self, map_context):
         cfg = ScorerConfig()
         traj = torch.zeros(BATCH, 1, 2)
         traj[0, 0] = torch.tensor([10000.0, 10000.0])
-        dac = drivable_area_compliance(traj, map_input, cfg)
+        dac = drivable_area_compliance(traj, map_context, cfg)
         assert dac[0].item() < 1.0
         assert dac[1].item() == 1.0
 
-    def test_range_zero_to_one(self, map_input):
+    def test_range_zero_to_one(self, map_context):
         cfg = ScorerConfig()
         traj = torch.randn(BATCH, NUM_TIMESTEPS, 2) * 10
-        dac = drivable_area_compliance(traj, map_input, cfg)
+        dac = drivable_area_compliance(traj, map_context, cfg)
         assert ((dac >= 0.0) & (dac <= 1.0)).all()
+
+    def test_reads_binary_channel_not_pixel_color(self, map_context):
+        """The whole point of the redesign: compliance is a channel
+        lookup, not a colour-distance heuristic. A trajectory sitting on
+        a pixel where DRIVABLE_AREA=0 must score non-compliant even
+        though every other channel (all zero in this fixture) would have
+        matched an old "close to black" heuristic."""
+        cfg = ScorerConfig()
+        traj = torch.zeros(1, 1, 2)
+        traj[0, 0] = torch.tensor([-200.0, 0.0])  # well outside the fixture's drivable rect, but in-bounds
+        dac = drivable_area_compliance(traj, map_context[:1], cfg)
+        assert dac[0].item() == 0.0
 
 
 class TestKinematicComfortScore:
@@ -178,41 +215,41 @@ class TestKinematicComfortScore:
 
 
 class TestTrajectoryComplianceScorer:
-    def test_output_shapes(self, scorer, bev_features, visual_history, egomotion_history, map_input):
+    def test_output_shapes(self, scorer, bev_features, visual_history, egomotion_history, map_context):
         traj, scores = scorer.sample_and_score(
-            bev_features, visual_history, egomotion_history, map_input, num_samples=5, seed=42)
+            bev_features, visual_history, egomotion_history, map_context, num_samples=5, seed=42)
         assert traj.shape == (BATCH, NUM_TIMESTEPS * 2)
         assert scores.shape == (BATCH, 5)
 
-    def test_mean_selection(self, planner, bev_features, visual_history, egomotion_history, map_input):
+    def test_mean_selection(self, planner, bev_features, visual_history, egomotion_history, map_context):
         cfg = ScorerConfig(selection="mean")
         s = TrajectoryComplianceScorer(planner, NUM_TIMESTEPS, config=cfg)
-        traj, _ = s.sample_and_score(bev_features, visual_history, egomotion_history, map_input, num_samples=4)
+        traj, _ = s.sample_and_score(bev_features, visual_history, egomotion_history, map_context, num_samples=4)
         assert traj.shape == (BATCH, NUM_TIMESTEPS * 2)
 
-    def test_invalid_selection_raises(self, planner, bev_features, visual_history, egomotion_history, map_input):
+    def test_invalid_selection_raises(self, planner, bev_features, visual_history, egomotion_history, map_context):
         cfg = ScorerConfig(selection="bogus")
         s = TrajectoryComplianceScorer(planner, NUM_TIMESTEPS, config=cfg)
         with pytest.raises(ValueError, match="config.selection"):
-            s.sample_and_score(bev_features, visual_history, egomotion_history, map_input, num_samples=3)
+            s.sample_and_score(bev_features, visual_history, egomotion_history, map_context, num_samples=3)
 
-    def test_seed_reproducibility(self, scorer, bev_features, visual_history, egomotion_history, map_input):
-        t1, _ = scorer.sample_and_score(bev_features, visual_history, egomotion_history, map_input, num_samples=4, seed=0)
-        t2, _ = scorer.sample_and_score(bev_features, visual_history, egomotion_history, map_input, num_samples=4, seed=0)
+    def test_seed_reproducibility(self, scorer, bev_features, visual_history, egomotion_history, map_context):
+        t1, _ = scorer.sample_and_score(bev_features, visual_history, egomotion_history, map_context, num_samples=4, seed=0)
+        t2, _ = scorer.sample_and_score(bev_features, visual_history, egomotion_history, map_context, num_samples=4, seed=0)
         assert torch.allclose(t1, t2)
 
-    def test_different_seeds_differ(self, scorer, bev_features, visual_history, egomotion_history, map_input):
-        t1, _ = scorer.sample_and_score(bev_features, visual_history, egomotion_history, map_input, num_samples=4, seed=0)
-        t2, _ = scorer.sample_and_score(bev_features, visual_history, egomotion_history, map_input, num_samples=4, seed=99)
+    def test_different_seeds_differ(self, scorer, bev_features, visual_history, egomotion_history, map_context):
+        t1, _ = scorer.sample_and_score(bev_features, visual_history, egomotion_history, map_context, num_samples=4, seed=0)
+        t2, _ = scorer.sample_and_score(bev_features, visual_history, egomotion_history, map_context, num_samples=4, seed=99)
         assert not torch.allclose(t1, t2)
 
-    def test_scores_vary_across_samples(self, planner, bev_features, visual_history, egomotion_history, map_input):
+    def test_scores_vary_across_samples(self, planner, bev_features, visual_history, egomotion_history, map_context):
         cfg = ScorerConfig(dac_weight=1.0, comfort_weight=1.0)
         s = TrajectoryComplianceScorer(planner, NUM_TIMESTEPS, config=cfg)
-        _, scores = s.sample_and_score(bev_features, visual_history, egomotion_history, map_input, num_samples=8, seed=7)
+        _, scores = s.sample_and_score(bev_features, visual_history, egomotion_history, map_context, num_samples=8, seed=7)
         assert scores.std(dim=1).sum() > 0
 
-    def test_different_initial_speeds_change_selection(self, planner, bev_features, visual_history, map_input):
+    def test_different_initial_speeds_change_selection(self, planner, bev_features, visual_history, map_context):
         """Regression guard for the original bug this file's fixtures used
         to hide: a scorer wired to a fixed initial_speed can't distinguish
         a scene where the ego starts at 1 m/s from one where it starts at
@@ -223,9 +260,9 @@ class TestTrajectoryComplianceScorer:
         eh_slow = _egomotion(speed=1.0)
         eh_fast = _egomotion(speed=25.0)
         torch.manual_seed(0)
-        traj_slow, _ = s.sample_and_score(bev_features, visual_history, eh_slow, map_input, num_samples=4, seed=3)
+        traj_slow, _ = s.sample_and_score(bev_features, visual_history, eh_slow, map_context, num_samples=4, seed=3)
         torch.manual_seed(0)
-        traj_fast, _ = s.sample_and_score(bev_features, visual_history, eh_fast, map_input, num_samples=4, seed=3)
+        traj_fast, _ = s.sample_and_score(bev_features, visual_history, eh_fast, map_context, num_samples=4, seed=3)
         assert not torch.allclose(traj_slow, traj_fast)
 
 
@@ -234,8 +271,8 @@ if __name__ == "__main__":
     bev = torch.randn(BATCH, 8, 6, 6)
     vh = torch.randn(BATCH, 16)
     eh = _egomotion()
-    mp = torch.zeros(BATCH, 3, BEV_H, BEV_W)
-    mp[:, :, 100:300, 100:200] = 255.0
+    mp = torch.zeros(BATCH, NAV_CHANNELS, BEV_H, BEV_W)
+    mp[:, MapChannel.DRIVABLE_AREA, 50:BEV_H, 50:BEV_W - 50] = 1.0
     sc = TrajectoryComplianceScorer(FakePlanner(NUM_TIMESTEPS), NUM_TIMESTEPS)
     traj, scores = sc.sample_and_score(bev, vh, eh, mp, num_samples=6, seed=42)
     print(f"  trajectory:  {tuple(traj.shape)}")
