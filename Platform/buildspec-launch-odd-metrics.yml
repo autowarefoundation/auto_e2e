@@ -1,0 +1,120 @@
+version: 0.2
+
+# Launch one validation-only ADE/FDE projection against immutable overlay,
+# evaluation-dataset, and ODD LabelSet manifests.
+#
+# Required start-build overrides:
+#   IMAGE_TAG
+#   OVERLAY_MANIFEST_KEY, OVERLAY_MANIFEST_SHA256
+#   EVALUATION_DATASET_MANIFEST_URI, EVALUATION_DATASET_MANIFEST_SHA256
+#   LABELSET_MANIFEST_KEY, LABELSET_MANIFEST_SHA256
+
+env:
+  shell: bash
+  variables:
+    AWS_DEFAULT_REGION: us-west-2
+    FLYTE_PROJECT: auto-e2e
+    FLYTE_DOMAIN: development
+    IMAGE_TAG: ""
+    OVERLAY_MANIFEST_KEY: ""
+    OVERLAY_MANIFEST_SHA256: ""
+    EVALUATION_DATASET_MANIFEST_URI: ""
+    EVALUATION_DATASET_MANIFEST_SHA256: ""
+    LABELSET_MANIFEST_KEY: ""
+    LABELSET_MANIFEST_SHA256: ""
+    DATASETS_BUCKET: ""
+    ARTIFACTS_BUCKET: ""
+    DYNAMO_TABLE: auto-e2e-console
+
+phases:
+  install:
+    commands:
+      - pip install -q flytekit==1.14.9 numpy torch kubernetes --extra-index-url https://download.pytorch.org/whl/cpu
+  build:
+    commands:
+      - ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+      - ECR_URL="${ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com"
+      - |
+        for NAME in \
+          IMAGE_TAG \
+          OVERLAY_MANIFEST_KEY \
+          OVERLAY_MANIFEST_SHA256 \
+          EVALUATION_DATASET_MANIFEST_URI \
+          EVALUATION_DATASET_MANIFEST_SHA256 \
+          LABELSET_MANIFEST_KEY \
+          LABELSET_MANIFEST_SHA256
+        do
+          test -n "${!NAME}" || {
+            echo "${NAME} is required" >&2
+            exit 1
+          }
+        done
+        for DIGEST in \
+          "${OVERLAY_MANIFEST_SHA256}" \
+          "${EVALUATION_DATASET_MANIFEST_SHA256}" \
+          "${LABELSET_MANIFEST_SHA256}"
+        do
+          printf '%s' "${DIGEST}" | grep -Eq '^[0-9a-f]{64}$' || {
+            echo "Manifest digests must be lowercase SHA-256 values" >&2
+            exit 1
+          }
+        done
+        printf '%s' "${EVALUATION_DATASET_MANIFEST_URI}" \
+          | grep -Eq '^s3://[^/]+/.+' || {
+            echo "EVALUATION_DATASET_MANIFEST_URI must be an S3 URI" >&2
+            exit 1
+          }
+      - |
+        if [ -z "${DATASETS_BUCKET}" ]; then
+          DATASETS_BUCKET="auto-e2e-platform-datasets-${ACCOUNT_ID}"
+        fi
+        if [ -z "${ARTIFACTS_BUCKET}" ]; then
+          ARTIFACTS_BUCKET="auto-e2e-platform-artifacts-${ACCOUNT_ID}"
+        fi
+        export DATASETS_BUCKET ARTIFACTS_BUCKET
+      - |
+        image_ref() {
+          REPOSITORY="$1"
+          DIGEST=$(aws ecr batch-get-image \
+            --repository-name "auto-e2e/${REPOSITORY}" \
+            --image-ids imageTag="${IMAGE_TAG}" \
+            --query 'images[0].imageId.imageDigest' \
+            --output text)
+          if [ -z "${DIGEST}" ] || [ "${DIGEST}" = "None" ]; then
+            echo "No digest found for auto-e2e/${REPOSITORY}:${IMAGE_TAG}" >&2
+            return 1
+          fi
+          printf '%s/auto-e2e/%s@%s' \
+            "${ECR_URL}" "${REPOSITORY}" "${DIGEST}"
+        }
+        AUTO_E2E_TRAINING_IMAGE="$(image_ref training)" || exit 1
+        AUTO_E2E_EVAL_IMAGE="$(image_ref eval)" || exit 1
+        AUTO_E2E_OFFLINE_RL_IMAGE="$(image_ref offline-rl)" || exit 1
+        AUTO_E2E_DATA_PREP_IMAGE="$(image_ref data-prep)" || exit 1
+        export AUTO_E2E_TRAINING_IMAGE AUTO_E2E_EVAL_IMAGE
+        export AUTO_E2E_OFFLINE_RL_IMAGE AUTO_E2E_DATA_PREP_IMAGE
+        export ECR_PREFIX="${ECR_URL}"
+        export PYTHONPATH="${CODEBUILD_SRC_DIR}/Model:${CODEBUILD_SRC_DIR}:${PYTHONPATH:-}"
+      - |
+        cat > /tmp/flyte.yaml << EOF
+        admin:
+          endpoint: dns:///k8s-flyte-flyteadm-be92e7737c-cf0d1a0f3df10f77.elb.us-west-2.amazonaws.com:81
+          insecure: true
+        EOF
+      - |
+        pyflyte --config /tmp/flyte.yaml run --remote \
+          --project "${FLYTE_PROJECT}" \
+          --domain "${FLYTE_DOMAIN}" \
+          --image "${AUTO_E2E_TRAINING_IMAGE}" \
+          Platform/pipelines/workflows.py \
+          wf_project_odd_model_metrics \
+          --overlay_manifest_key "${OVERLAY_MANIFEST_KEY}" \
+          --overlay_manifest_sha256 "${OVERLAY_MANIFEST_SHA256}" \
+          --evaluation_dataset_manifest_uri "${EVALUATION_DATASET_MANIFEST_URI}" \
+          --evaluation_dataset_manifest_sha256 "${EVALUATION_DATASET_MANIFEST_SHA256}" \
+          --labelset_manifest_key "${LABELSET_MANIFEST_KEY}" \
+          --labelset_manifest_sha256 "${LABELSET_MANIFEST_SHA256}" \
+          --datasets_bucket "${DATASETS_BUCKET}" \
+          --artifacts_bucket "${ARTIFACTS_BUCKET}" \
+          --dynamo_table "${DYNAMO_TABLE}" \
+          --aws_region "${AWS_DEFAULT_REGION}"
