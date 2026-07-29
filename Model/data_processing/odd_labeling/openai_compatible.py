@@ -1224,7 +1224,10 @@ def derive_visual_trigger_timestamps(
     for observation in (
         item for group in observation_groups for item in group
     ):
-        if observation.key not in VISUAL_TRIGGER_KEYS:
+        if (
+            observation.key not in VISUAL_TRIGGER_KEYS
+            or observation.status == "unavailable"
+        ):
             continue
         identity = (
             observation.key,
