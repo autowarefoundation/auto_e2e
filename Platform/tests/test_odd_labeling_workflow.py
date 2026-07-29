@@ -7,6 +7,7 @@ import pytest
 
 from Platform.pipelines.odd_labeling_workflow import (
     ODD_LABELER_VERSION,
+    ODD_SOURCE_POLICY_VERSIONS,
     _execution_receipt,
     _execution_receipt_key,
     _provider_exchange_key,
@@ -527,7 +528,8 @@ def test_workflow_interface_does_not_expose_endpoint_url() -> None:
         "trigger_context_s",
         "refinement_confidence_threshold",
     }.issubset(inputs)
-    assert ODD_LABELER_VERSION == "odd_dataset_labeler_v5"
+    assert ODD_LABELER_VERSION == "odd_dataset_labeler_v6"
+    assert ODD_SOURCE_POLICY_VERSIONS["gnss_ins"] == "odd_gnss_ins_policy_v2"
 
 
 def test_dataset_labeler_has_dedicated_launch_plan() -> None:
