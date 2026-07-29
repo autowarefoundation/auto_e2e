@@ -83,11 +83,15 @@ def load_camera_anchors(
     *,
     interval_s: float = 2.0,
     maximum_anchors: int = 32,
+    trigger_timestamps_ns: Iterable[int] = (),
+    trigger_context_s: float = 1.0,
 ) -> tuple[CameraAnchor, ...]:
     output: list[CameraAnchor] = []
     for objects in evidence.camera_anchors(
         interval_s=interval_s,
         maximum_anchors=maximum_anchors,
+        trigger_timestamps_ns=trigger_timestamps_ns,
+        trigger_context_s=trigger_context_s,
     ):
         frames = tuple(
             _decode_camera(camera, object_bytes(client, camera))
