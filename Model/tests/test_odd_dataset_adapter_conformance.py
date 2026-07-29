@@ -258,6 +258,7 @@ def _synthetic_adapter() -> _SyntheticAdapter:
                 camera_id=role,
                 canonical_role=role,
                 channel=partial_camera,
+                frame_inventory_mode="capture_timeline",
             )
             for role in camera_roles
         ),
@@ -466,6 +467,19 @@ def test_synthetic_adapter_preserves_missing_camera_frames() -> None:
     assert adapter.describe_capabilities().cameras[0].channel.missing_count == 13
     with pytest.raises(ValueError, match="no complete multi-camera anchor"):
         scene.camera_anchors()
+
+
+def test_adapters_declare_camera_inventory_semantics() -> None:
+    published = _published_adapter().describe_capabilities()
+    synthetic = _synthetic_adapter().describe_capabilities()
+
+    assert published.adapter_version == "published_snapshot_v2"
+    assert {
+        camera.frame_inventory_mode for camera in published.cameras
+    } == {"sampled_evidence"}
+    assert {
+        camera.frame_inventory_mode for camera in synthetic.cameras
+    } == {"capture_timeline"}
 
 
 def test_camera_anchors_include_trigger_context_deterministically() -> None:
