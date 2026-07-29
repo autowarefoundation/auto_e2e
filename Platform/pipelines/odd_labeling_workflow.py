@@ -10,7 +10,15 @@ import re
 import tempfile
 from typing import List, NamedTuple
 
-from flytekit import Resources, Secret, dynamic, map_task, task, workflow
+from flytekit import (
+    LaunchPlan,
+    Resources,
+    Secret,
+    dynamic,
+    map_task,
+    task,
+    workflow,
+)
 from flytekit.types.file import FlyteFile
 
 
@@ -1331,3 +1339,9 @@ def wf_generate_odd_labelset(
         refinement_confidence_threshold=refinement_confidence_threshold,
         publication_scope=publication_scope,
     )
+
+
+odd_dataset_labeler_launch_plan = LaunchPlan.get_or_create(
+    workflow=wf_generate_odd_labelset,
+    name="odd-dataset-labeler",
+)
