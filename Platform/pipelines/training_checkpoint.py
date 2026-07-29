@@ -52,10 +52,16 @@ def checkpoint_key(run_id: str, epoch: int) -> str:
     return f"imitation-learning/{run_id}/epoch-{epoch:04d}.pt"
 
 
-def best_pointer_key(run_id: str) -> str:
+def best_pointer_key(run_id: str, *, role: str = "best") -> str:
     if not run_id or "/" in run_id:
         raise ValueError(f"invalid MLflow run id: {run_id!r}")
-    return f"imitation-learning/{run_id}/best.json"
+    filenames = {
+        "best": "best.json",
+        "best_trajectory": "best-trajectory.json",
+    }
+    if role not in filenames:
+        raise ValueError(f"invalid best checkpoint role: {role!r}")
+    return f"imitation-learning/{run_id}/{filenames[role]}"
 
 
 def metric_pair_is_better(
@@ -248,6 +254,7 @@ def update_best_pointer(
     *,
     bucket: str,
     run_id: str,
+    role: str = "best",
     epoch: int,
     checkpoint_uri: str,
     checkpoint_sha256: str,
@@ -256,7 +263,7 @@ def update_best_pointer(
     selection: Mapping[str, Any] | None = None,
 ) -> str:
     """Update the versioned best pointer after a metric improvement."""
-    key = best_pointer_key(run_id)
+    key = best_pointer_key(run_id, role=role)
     pointer = {
         "schema_version": (
             "best_checkpoint_pointer_v2"
@@ -264,6 +271,7 @@ def update_best_pointer(
             else "best_checkpoint_pointer_v1"
         ),
         "run_id": run_id,
+        "checkpoint_role": role,
         "epoch": epoch,
         "checkpoint_uri": checkpoint_uri,
         "checkpoint_sha256": checkpoint_sha256,
