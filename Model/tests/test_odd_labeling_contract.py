@@ -27,9 +27,12 @@ from data_processing.odd_labeling.schema import (
     LabelEvidence,
     LabelScope,
     Measurement,
+    ProviderExchange,
     SceneLabelRecord,
     SemanticLabelerProvenance,
+    canonical_json_bytes,
     coalesce_observations,
+    content_sha256,
     make_observation,
 )
 
@@ -102,6 +105,55 @@ def test_ontology_registry_exposes_acquisition_and_candidate_semantics() -> None
         if label["cardinality"] == "multi" and neutral:
             assert neutral == {label["neutral_value"]}
             assert label["none_semantics"]
+
+
+def test_provider_exchange_retains_auditable_raw_response() -> None:
+    raw_response = {
+        "choices": [
+            {
+                "message": {
+                    "content": "{\"observations\":{}}",
+                }
+            }
+        ],
+        "usage": {"prompt_tokens": 100, "completion_tokens": 20},
+    }
+    exchange = ProviderExchange(
+        backend="ORV",
+        provider="openai_compatible",
+        model="nvidia/Cosmos3-Nano",
+        model_revision="revision-1",
+        request_sha256="a" * 64,
+        response_sha256=content_sha256(raw_response),
+        status="succeeded",
+        attempt=1,
+        latency_ms=1234.5,
+        input_image_count=6,
+        request_metadata={
+            "task_bundle": "road_appearance",
+            "frame_timestamps_ns": [100, 200],
+        },
+        raw_response=raw_response,
+        usage={"input_tokens": 100, "output_tokens": 20},
+    )
+
+    assert exchange.to_dict()["raw_response"] == raw_response
+    assert canonical_json_bytes(exchange.to_dict())
+
+    with pytest.raises(ValueError, match="response digest"):
+        ProviderExchange(
+            **{
+                **exchange.to_dict(),
+                "response_sha256": "b" * 64,
+            }
+        )
+    with pytest.raises(ValueError, match="latency"):
+        ProviderExchange(
+            **{
+                **exchange.to_dict(),
+                "latency_ms": -1.0,
+            }
+        )
 
 
 def test_ontology_digest_covers_expanded_registry_semantics() -> None:
