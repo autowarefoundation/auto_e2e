@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import dataclasses
+import hashlib
 import io
 from collections.abc import Iterable
 
@@ -19,7 +20,16 @@ from .published_snapshot import (
 from .schema import LabelObservation, make_observation
 
 
-IMAGE_QC_VERSION = "odd_image_qc_v1"
+IMAGE_QC_VERSION = "odd_image_qc_v2"
+IMAGE_QC_POLICY_VERSION = "odd_image_qc_policy_v2"
+FROZEN_EGO_MOTION_THRESHOLD_M = 0.5
+DEPENDENT_QC_KEYS = (
+    "perception.image.exposure",
+    "perception.visual.contrast",
+    "perception.image.blur",
+    "perception.visual.lighting",
+    "perception.visual.glare",
+)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -57,6 +67,24 @@ class CameraAnchor:
         indexes = [frame.camera_index for frame in self.frames]
         if indexes != sorted(set(indexes)):
             raise ValueError("camera anchor indexes must be unique and ordered")
+
+
+@dataclasses.dataclass(frozen=True)
+class CameraDecodeFailure:
+    frame_index: int
+    camera_index: int
+    camera_role: str
+    timestamp_ns: int
+    reason: str
+
+    def __post_init__(self) -> None:
+        if self.frame_index < 0 or self.camera_index < 0 or self.timestamp_ns < 0:
+            raise ValueError("camera decode failure identity must be non-negative")
+        if not self.camera_role or self.reason not in {
+            "invalid_object_size",
+            "invalid_jpeg",
+        }:
+            raise ValueError("camera decode failure reason is invalid")
 
 
 def _decode_camera(camera: CameraObject, payload: bytes) -> CameraFrame:
@@ -101,6 +129,82 @@ def load_camera_anchors(
             CameraAnchor(timestamp_ns=frames[0].timestamp_ns, frames=frames)
         )
     return tuple(output)
+
+
+def load_camera_quality_inputs(
+    client: S3Client,
+    evidence: CanonicalSceneEvidence,
+    *,
+    interval_s: float = 2.0,
+    maximum_anchors: int = 32,
+) -> tuple[tuple[CameraAnchor, ...], tuple[CameraDecodeFailure, ...]]:
+    if interval_s <= 0.0 or maximum_anchors <= 0:
+        raise ValueError("camera quality sampling must be positive")
+    by_frame: dict[int, list[CameraObject]] = {}
+    for camera in evidence.camera_objects:
+        by_frame.setdefault(camera.frame_index, []).append(camera)
+    object_anchors = [
+        tuple(sorted(objects, key=lambda item: item.camera_index))
+        for _, objects in sorted(by_frame.items())
+    ]
+    selected: list[tuple[CameraObject, ...]] = []
+    next_timestamp_ns = -1
+    interval_ns = max(1, int(interval_s * 1_000_000_000))
+    for objects in object_anchors:
+        timestamp_ns = objects[0].timestamp_ns
+        if timestamp_ns < next_timestamp_ns and selected:
+            continue
+        selected.append(objects)
+        next_timestamp_ns = timestamp_ns + interval_ns
+    if object_anchors and (
+        not selected
+        or selected[-1][0].frame_index != object_anchors[-1][0].frame_index
+    ):
+        selected.append(object_anchors[-1])
+    if len(selected) > maximum_anchors:
+        indexes = {
+            round(position * (len(selected) - 1) / (maximum_anchors - 1))
+            for position in range(maximum_anchors)
+        } if maximum_anchors > 1 else {len(selected) // 2}
+        selected = [selected[index] for index in sorted(indexes)]
+
+    anchors: list[CameraAnchor] = []
+    failures: list[CameraDecodeFailure] = []
+    for objects in selected:
+        frames: list[CameraFrame] = []
+        for camera in objects:
+            if camera.byte_size <= 0 or camera.byte_size > 16 << 20:
+                failures.append(
+                    CameraDecodeFailure(
+                        frame_index=camera.frame_index,
+                        camera_index=camera.camera_index,
+                        camera_role=camera.camera_role,
+                        timestamp_ns=camera.timestamp_ns,
+                        reason="invalid_object_size",
+                    )
+                )
+                continue
+            payload = object_bytes(client, camera)
+            try:
+                frames.append(_decode_camera(camera, payload))
+            except ValueError:
+                failures.append(
+                    CameraDecodeFailure(
+                        frame_index=camera.frame_index,
+                        camera_index=camera.camera_index,
+                        camera_role=camera.camera_role,
+                        timestamp_ns=camera.timestamp_ns,
+                        reason="invalid_jpeg",
+                    )
+                )
+        if frames:
+            anchors.append(
+                CameraAnchor(
+                    timestamp_ns=objects[0].timestamp_ns,
+                    frames=tuple(frames),
+                )
+            )
+    return tuple(anchors), tuple(failures)
 
 
 def _metrics(rgb: np.ndarray) -> dict[str, float]:
@@ -164,28 +268,359 @@ def _intervals(
     evidence: CanonicalSceneEvidence,
     anchors: tuple[CameraAnchor, ...],
 ) -> Iterable[tuple[CameraAnchor, int, int]]:
-    for index, anchor in enumerate(anchors):
-        start = max(evidence.start_timestamp_ns, anchor.timestamp_ns)
-        if index + 1 < len(anchors):
-            end = anchors[index + 1].timestamp_ns
-        else:
-            end = evidence.end_timestamp_ns
-        end = min(evidence.end_timestamp_ns, end)
-        if end > start:
-            yield anchor, start, end
+    timestamps = evidence.path_latlon_heading_timestamp[:, 3].astype(np.int64)
+    for anchor in anchors:
+        index = int(np.searchsorted(timestamps, anchor.timestamp_ns))
+        if index >= len(timestamps) or timestamps[index] != anchor.timestamp_ns:
+            raise ValueError("camera anchor timestamp is outside canonical timeline")
+        end = (
+            int(timestamps[index + 1])
+            if index + 1 < len(timestamps)
+            else evidence.end_timestamp_ns
+        )
+        yield anchor, anchor.timestamp_ns, end
+
+
+def _dependent_quality_observations(
+    evidence: CanonicalSceneEvidence,
+    *,
+    camera_role: str,
+    start_ns: int,
+    end_ns: int,
+    status: str,
+    provenance: dict[str, object],
+) -> list[LabelObservation]:
+    return [
+        make_observation(
+            scene_uid=evidence.scene_uid,
+            key=key,
+            status=status,
+            confidence=1.0,
+            source="image_qc",
+            start_timestamp_ns=start_ns,
+            end_timestamp_ns=end_ns,
+            provenance=provenance,
+            camera_id=camera_role,
+        )
+        for key in DEPENDENT_QC_KEYS
+    ]
+
+
+def _camera_availability(
+    evidence: CanonicalSceneEvidence,
+    camera_role: str,
+) -> str | None:
+    if evidence.capability_manifest is None:
+        return None
+    return next(
+        (
+            camera.channel.availability
+            for camera in evidence.capability_manifest.cameras
+            if camera.canonical_role == camera_role
+        ),
+        None,
+    )
+
+
+def _expected_camera_roles(
+    evidence: CanonicalSceneEvidence,
+) -> tuple[str, ...]:
+    if (
+        evidence.capability_manifest is not None
+        and len(evidence.capability_manifest.cameras)
+        == evidence.descriptor.camera_count
+    ):
+        return tuple(
+            camera.canonical_role
+            for camera in evidence.capability_manifest.cameras
+        )
+    roles_by_index: dict[int, str] = {}
+    for camera in evidence.camera_objects:
+        existing = roles_by_index.setdefault(
+            camera.camera_index,
+            camera.camera_role,
+        )
+        if existing != camera.camera_role:
+            raise ValueError("camera index maps to multiple canonical roles")
+    return tuple(
+        roles_by_index.get(index, f"camera_{index}")
+        for index in range(evidence.descriptor.camera_count)
+    )
+
+
+def _missing_frame_observations(
+    evidence: CanonicalSceneEvidence,
+) -> list[LabelObservation]:
+    timestamps = evidence.path_latlon_heading_timestamp[:, 3].astype(np.int64)
+    timestamp_ends = np.concatenate(
+        (timestamps[1:], np.asarray([evidence.end_timestamp_ns]))
+    )
+    available = {
+        (camera.timestamp_ns, camera.camera_role)
+        for camera in evidence.camera_objects
+    }
+    observations: list[LabelObservation] = []
+    for camera_role in _expected_camera_roles(evidence):
+        availability = _camera_availability(evidence, camera_role)
+        if availability == "absent":
+            provenance = {
+                "labeler_version": IMAGE_QC_VERSION,
+                "image_qc_policy_version": IMAGE_QC_POLICY_VERSION,
+                "reason": "camera_channel_absent",
+            }
+            observations.append(
+                make_observation(
+                    scene_uid=evidence.scene_uid,
+                    key="perception.image.frame_status",
+                    status="unavailable",
+                    confidence=1.0,
+                    source="image_qc",
+                    start_timestamp_ns=evidence.start_timestamp_ns,
+                    end_timestamp_ns=evidence.end_timestamp_ns,
+                    provenance=provenance,
+                    camera_id=camera_role,
+                )
+            )
+            observations.extend(
+                _dependent_quality_observations(
+                    evidence,
+                    camera_role=camera_role,
+                    start_ns=evidence.start_timestamp_ns,
+                    end_ns=evidence.end_timestamp_ns,
+                    status="unavailable",
+                    provenance=provenance,
+                )
+            )
+            continue
+
+        run_start: int | None = None
+        run_end = 0
+        missing_count = 0
+        for timestamp, timestamp_end in zip(
+            timestamps,
+            timestamp_ends,
+            strict=True,
+        ):
+            if (int(timestamp), camera_role) not in available:
+                if run_start is None:
+                    run_start = int(timestamp)
+                run_end = int(timestamp_end)
+                missing_count += 1
+                continue
+            if run_start is not None:
+                observations.extend(
+                    _dropped_frame_observations(
+                        evidence,
+                        camera_role=camera_role,
+                        start_ns=run_start,
+                        end_ns=run_end,
+                        missing_count=missing_count,
+                    )
+                )
+                run_start = None
+                missing_count = 0
+        if run_start is not None:
+            observations.extend(
+                _dropped_frame_observations(
+                    evidence,
+                    camera_role=camera_role,
+                    start_ns=run_start,
+                    end_ns=run_end,
+                    missing_count=missing_count,
+                )
+            )
+    return observations
+
+
+def _dropped_frame_observations(
+    evidence: CanonicalSceneEvidence,
+    *,
+    camera_role: str,
+    start_ns: int,
+    end_ns: int,
+    missing_count: int,
+) -> list[LabelObservation]:
+    provenance: dict[str, object] = {
+        "labeler_version": IMAGE_QC_VERSION,
+        "image_qc_policy_version": IMAGE_QC_POLICY_VERSION,
+        "reason": "expected_camera_frame_missing",
+    }
+    observations = [
+        make_observation(
+            scene_uid=evidence.scene_uid,
+            key="perception.image.frame_status",
+            status="valid",
+            values=("dropped_frame",),
+            confidence=1.0,
+            source="image_qc",
+            start_timestamp_ns=start_ns,
+            end_timestamp_ns=end_ns,
+            measurements={"missing_frame_count": missing_count},
+            provenance=provenance,
+            camera_id=camera_role,
+        )
+    ]
+    observations.extend(
+        _dependent_quality_observations(
+            evidence,
+            camera_role=camera_role,
+            start_ns=start_ns,
+            end_ns=end_ns,
+            status="not_observable",
+            provenance=provenance,
+        )
+    )
+    return observations
+
+
+def _path_distance_m(
+    evidence: CanonicalSceneEvidence,
+    start_timestamp_ns: int,
+    end_timestamp_ns: int,
+) -> float:
+    path = evidence.path_latlon_heading_timestamp
+    timestamps = path[:, 3].astype(np.int64)
+    start = max(
+        0,
+        int(np.searchsorted(timestamps, start_timestamp_ns, side="right")) - 1,
+    )
+    end = min(
+        len(path) - 1,
+        int(np.searchsorted(timestamps, end_timestamp_ns, side="left")),
+    )
+    if end <= start:
+        return 0.0
+    latlon = np.radians(path[start : end + 1, :2])
+    dlat = np.diff(latlon[:, 0])
+    dlon = np.diff(latlon[:, 1])
+    mean_lat = (latlon[:-1, 0] + latlon[1:, 0]) * 0.5
+    return float(
+        6_371_008.8 * np.hypot(dlat, dlon * np.cos(mean_lat)).sum()
+    )
+
+
+def _frozen_frame_states(
+    evidence: CanonicalSceneEvidence,
+    anchors: tuple[CameraAnchor, ...],
+) -> dict[tuple[int, str], dict[str, object]]:
+    states: dict[tuple[int, str], dict[str, object]] = {}
+    ordered = tuple(sorted(anchors, key=lambda item: item.timestamp_ns))
+    for previous, current in zip(ordered, ordered[1:]):
+        previous_by_role = {
+            frame.camera_role: frame for frame in previous.frames
+        }
+        current_by_role = {
+            frame.camera_role: frame for frame in current.frames
+        }
+        shared_roles = set(previous_by_role) & set(current_by_role)
+        changed_roles = {
+            role
+            for role in shared_roles
+            if previous_by_role[role].jpeg != current_by_role[role].jpeg
+        }
+        ego_distance_m = _path_distance_m(
+            evidence,
+            previous.timestamp_ns,
+            current.timestamp_ns,
+        )
+        for role in shared_roles:
+            previous_frame = previous_by_role[role]
+            current_frame = current_by_role[role]
+            if previous_frame.jpeg != current_frame.jpeg:
+                continue
+            motion_evidence = (
+                ego_distance_m >= FROZEN_EGO_MOTION_THRESHOLD_M
+                or bool(changed_roles - {role})
+            )
+            states[(current.timestamp_ns, role)] = {
+                "status": "valid" if motion_evidence else "ambiguous",
+                "value": "frozen_frame" if motion_evidence else None,
+                "reason": (
+                    "identical_content_with_independent_motion"
+                    if motion_evidence
+                    else "identical_content_without_independent_motion"
+                ),
+                "ego_distance_m": ego_distance_m,
+                "other_camera_changed": bool(changed_roles - {role}),
+                "previous_timestamp_ns": previous.timestamp_ns,
+            }
+    return states
+
+
+def _decode_failure_observations(
+    evidence: CanonicalSceneEvidence,
+    failure: CameraDecodeFailure,
+) -> list[LabelObservation]:
+    timestamps = evidence.path_latlon_heading_timestamp[:, 3].astype(np.int64)
+    index = int(np.searchsorted(timestamps, failure.timestamp_ns))
+    if index >= len(timestamps) or timestamps[index] != failure.timestamp_ns:
+        raise ValueError("decode failure timestamp is outside canonical timeline")
+    end_ns = (
+        int(timestamps[index + 1])
+        if index + 1 < len(timestamps)
+        else evidence.end_timestamp_ns
+    )
+    provenance: dict[str, object] = {
+        "labeler_version": IMAGE_QC_VERSION,
+        "image_qc_policy_version": IMAGE_QC_POLICY_VERSION,
+        "frame_index": failure.frame_index,
+        "reason": failure.reason,
+    }
+    observations = [
+        make_observation(
+            scene_uid=evidence.scene_uid,
+            key="perception.image.frame_status",
+            status="valid",
+            values=("corrupted_frame",),
+            confidence=1.0,
+            source="image_qc",
+            start_timestamp_ns=failure.timestamp_ns,
+            end_timestamp_ns=end_ns,
+            provenance=provenance,
+            camera_id=failure.camera_role,
+        )
+    ]
+    observations.extend(
+        _dependent_quality_observations(
+            evidence,
+            camera_role=failure.camera_role,
+            start_ns=failure.timestamp_ns,
+            end_ns=end_ns,
+            status="not_observable",
+            provenance=provenance,
+        )
+    )
+    return observations
 
 
 def label_image_quality(
     evidence: CanonicalSceneEvidence,
     anchors: tuple[CameraAnchor, ...],
+    decode_failures: tuple[CameraDecodeFailure, ...] = (),
 ) -> tuple[LabelObservation, ...]:
-    observations: list[LabelObservation] = []
+    decoded_identities = {
+        (frame.timestamp_ns, frame.camera_role)
+        for anchor in anchors
+        for frame in anchor.frames
+    }
+    failed_identities = {
+        (failure.timestamp_ns, failure.camera_role)
+        for failure in decode_failures
+    }
+    if decoded_identities & failed_identities:
+        raise ValueError("camera frame cannot be both decoded and corrupted")
+    observations = _missing_frame_observations(evidence)
+    for failure in decode_failures:
+        observations.extend(_decode_failure_observations(evidence, failure))
+    frozen_states = _frozen_frame_states(evidence, anchors)
     for anchor, start_ns, end_ns in _intervals(evidence, anchors):
         for frame in anchor.frames:
             metrics = _metrics(frame.rgb)
             provenance = {
                 "labeler_version": IMAGE_QC_VERSION,
+                "image_qc_policy_version": IMAGE_QC_POLICY_VERSION,
                 "frame_index": frame.frame_index,
+                "frame_content_sha256": hashlib.sha256(frame.jpeg).hexdigest(),
             }
             common = {
                 "scene_uid": evidence.scene_uid,
@@ -198,30 +633,39 @@ def label_image_quality(
                 "camera_id": frame.camera_role,
             }
             if metrics["dark_fraction"] >= 0.98:
+                frame_status_state = "valid"
                 frame_status = "black_frame"
+            elif (frame.timestamp_ns, frame.camera_role) in frozen_states:
+                frozen_state = frozen_states[
+                    (frame.timestamp_ns, frame.camera_role)
+                ]
+                frame_status_state = str(frozen_state["status"])
+                frame_status = frozen_state["value"]
+                provenance = {**provenance, **frozen_state}
+                common["provenance"] = provenance
             else:
+                frame_status_state = "valid"
                 frame_status = "normal"
             observations.append(
                 make_observation(
                     key="perception.image.frame_status",
-                    status="valid",
-                    values=(frame_status,),
+                    status=frame_status_state,
+                    values=(frame_status,) if frame_status else (),
                     **common,
                 )
             )
-            if frame_status != "normal":
-                observations.append(
-                    make_observation(
-                        scene_uid=evidence.scene_uid,
-                        key="perception.image.exposure",
+            if frame_status == "black_frame":
+                observations.extend(
+                    _dependent_quality_observations(
+                        evidence,
+                        camera_role=frame.camera_role,
+                        start_ns=start_ns,
+                        end_ns=end_ns,
                         status="not_observable",
-                        confidence=0.0,
-                        source="image_qc",
-                        start_timestamp_ns=start_ns,
-                        end_timestamp_ns=end_ns,
-                        measurements=metrics,
-                        provenance=provenance,
-                        camera_id=frame.camera_role,
+                        provenance={
+                            **provenance,
+                            "reason": "black_frame",
+                        },
                     )
                 )
                 continue
