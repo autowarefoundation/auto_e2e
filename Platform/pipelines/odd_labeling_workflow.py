@@ -45,7 +45,7 @@ ODD_SOURCE_POLICY_VERSIONS = {
     "map_route": "odd_map_route_policy_v1",
     "gnss_ins": "odd_gnss_ins_policy_v2",
     "vlm": "odd_road_vlm_policy_v3",
-    "image_qc": "odd_image_qc_policy_v1",
+    "image_qc": "odd_image_qc_policy_v2",
     "fusion": "odd_source_fusion_v1",
 }
 
@@ -989,7 +989,7 @@ def label_odd_kinematics(
 @task(
     container_image=DATA_PREP_IMAGE,
     cache=True,
-    cache_version="odd-source-image-qc-v2",
+    cache_version="odd-source-image-qc-v3",
     requests=Resources(cpu="2", mem="6Gi"),
     limits=Resources(cpu="4", mem="10Gi"),
 )
@@ -1006,7 +1006,7 @@ def label_odd_image_quality(
 
     from data_processing.odd_labeling.image_qc import (
         label_image_quality,
-        load_camera_anchors,
+        load_camera_quality_inputs,
     )
 
     normalized_sources = _validate_source_semantic_inputs(
@@ -1021,8 +1021,9 @@ def label_odd_image_quality(
         capability_manifest_json,
     )
     anchors = ()
+    decode_failures = ()
     if "image_qc" in normalized_sources:
-        anchors = load_camera_anchors(
+        anchors, decode_failures = load_camera_quality_inputs(
             boto3.client("s3"),
             evidence,
             interval_s=camera_anchor_interval_s,
@@ -1033,7 +1034,7 @@ def label_odd_image_quality(
         descriptor_json=descriptor_json,
         scene_uid=evidence.scene_uid,
         observations=(
-            label_image_quality(evidence, anchors)
+            label_image_quality(evidence, anchors, decode_failures)
             if "image_qc" in normalized_sources
             else ()
         ),
