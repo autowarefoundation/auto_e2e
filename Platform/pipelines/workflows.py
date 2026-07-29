@@ -672,6 +672,7 @@ def _transition_resume_selection_state(
 def _best_trajectory_checkpoint_from_history(
     metric_history: list[dict],
     *,
+    expected_policy_version: str,
     min_delta: float,
 ) -> dict:
     """Reconstruct the immutable trajectory-best record from metric history."""
@@ -681,6 +682,14 @@ def _best_trajectory_checkpoint_from_history(
     best_utility = None
     for entry in metric_history:
         selection = entry.get("checkpoint_selection")
+        if (
+            isinstance(selection, dict)
+            and selection.get("policy_version") != expected_policy_version
+        ):
+            raise ValueError(
+                "metric history trajectory selection policy differs from "
+                "the requested selector"
+            )
         components = (
             selection.get("components")
             if isinstance(selection, dict)
@@ -694,8 +703,13 @@ def _best_trajectory_checkpoint_from_history(
         if best is not None and utility <= float(best_utility) + min_delta:
             continue
         uri = str(entry.get("checkpoint_uri", ""))
-        sha256 = str(entry.get("checkpoint_sha256", ""))
-        if not uri.startswith("s3://") or not sha256:
+        sha256 = entry.get("checkpoint_sha256") or ""
+        if (
+            not uri.startswith("s3://")
+            or not isinstance(sha256, str)
+            or len(sha256) != 64
+            or any(character not in "0123456789abcdef" for character in sha256)
+        ):
             raise ValueError(
                 "metric history trajectory best lacks immutable checkpoint "
                 "identity"
@@ -719,6 +733,7 @@ def _dual_best_improvements(
     *,
     best_selection: dict | None,
     best_trajectory_selection: dict | None,
+    min_delta: float,
 ) -> tuple[bool, bool]:
     """Return independent composite-score and trajectory improvements."""
     from evaluation.checkpoint_selection import score_is_better
@@ -727,7 +742,11 @@ def _dual_best_improvements(
     trajectory = float(selection["components"]["trajectory"])
     score_improved = (
         best_selection is None
-        or score_is_better(score, float(best_selection["score"]))
+        or score_is_better(
+            score,
+            float(best_selection["score"]),
+            min_delta=min_delta,
+        )
     )
     trajectory_improved = (
         best_trajectory_selection is None
@@ -736,6 +755,7 @@ def _dual_best_improvements(
             float(
                 best_trajectory_selection["components"]["trajectory"]
             ),
+            min_delta=min_delta,
         )
     )
     return score_improved, trajectory_improved
@@ -3982,6 +4002,7 @@ def train_il(
         restore_rng_state,
         sha256_file,
         update_best_pointer,
+        validate_immutable_checkpoint_record,
         upload_immutable_checkpoint,
         validate_resume_envelope,
         validate_resume_payload,
@@ -4140,6 +4161,9 @@ def train_il(
                 best_trajectory_checkpoint = (
                     _best_trajectory_checkpoint_from_history(
                         metric_history,
+                        expected_policy_version=str(
+                            checkpoint_selection_config["policy_version"]
+                        ),
                         min_delta=float(
                             checkpoint_selection_config["min_delta"]
                         ),
@@ -4151,6 +4175,15 @@ def train_il(
                 int(best_trajectory_checkpoint["epoch"])
                 == completed_epoch
             ):
+                saved_digest = best_trajectory_checkpoint.get("sha256")
+                if saved_digest not in (
+                    None,
+                    resumed_checkpoint["sha256"],
+                ):
+                    raise ValueError(
+                        "resume checkpoint bytes differ from its saved "
+                        "trajectory-best digest"
+                    )
                 best_trajectory_checkpoint = dict(resumed_checkpoint)
             trajectory_selection = best_trajectory_checkpoint.get(
                 "selection"
@@ -4171,6 +4204,11 @@ def train_il(
                 )
         else:
             best_trajectory_checkpoint = dict(best_checkpoint)
+        validate_immutable_checkpoint_record(s3_client, best_checkpoint)
+        validate_immutable_checkpoint_record(
+            s3_client,
+            best_trajectory_checkpoint,
+        )
         (
             bad_epochs,
             best_checkpoint,
@@ -5147,6 +5185,9 @@ def train_il(
                         best_trajectory_checkpoint["selection"]
                         if best_trajectory_checkpoint is not None
                         else None
+                    ),
+                    min_delta=float(
+                        checkpoint_selection_config["min_delta"]
                     ),
                 )
             )
