@@ -13,6 +13,7 @@ import {
   ChartNoAxesColumn,
   Database,
   ExternalLink,
+  Gauge,
   LoaderCircle,
   Plus,
   Play,
@@ -22,12 +23,14 @@ import {
 } from "lucide-react";
 
 import { ErrorState } from "@/components/error-state";
+import { ODDModelMetrics } from "@/components/odd-model-metrics";
 import { StatusBadge } from "@/components/status-badge";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useApi } from "@/hooks/use-api";
 import {
   getODDLabelSets,
+  getODDModelMetrics,
   getODDOntology,
   getODDOperations,
   getODDStatistics,
@@ -52,6 +55,7 @@ const DEFAULT_DATASET = "kitscenes";
 const DEFAULT_VERSION = "v3.0";
 const TABS = [
   { id: "overview", label: "Overview", icon: ChartNoAxesColumn },
+  { id: "metrics", label: "Model metrics", icon: Gauge },
   { id: "search", label: "Search", icon: Search },
   { id: "ontology", label: "Ontology", icon: BookOpen },
   { id: "labelsets", label: "LabelSets", icon: Database },
@@ -504,6 +508,11 @@ function ODDPageContent() {
   );
   const statistics = useApi(
     () => getODDStatistics(dataset, version),
+    [dataset, version],
+    Boolean(readyLabelSet),
+  );
+  const modelMetrics = useApi(
+    () => getODDModelMetrics(dataset, version),
     [dataset, version],
     Boolean(readyLabelSet),
   );
@@ -1104,6 +1113,15 @@ function ODDPageContent() {
             </section>
           )}
         </div>
+      )}
+
+      {tab === "metrics" && (
+        <ODDModelMetrics
+          data={modelMetrics.data}
+          loading={modelMetrics.loading}
+          error={modelMetrics.error}
+          onRetry={modelMetrics.reload}
+        />
       )}
 
       {tab === "search" && (
