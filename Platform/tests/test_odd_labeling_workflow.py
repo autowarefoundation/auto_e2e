@@ -224,11 +224,35 @@ def test_immutable_parquet_upload_pins_binary_contract() -> None:
 
 
 def test_workflow_interface_does_not_expose_endpoint_url() -> None:
-    assert "openai_base_url" not in wf_generate_odd_labelset.python_interface.inputs
-    assert "publish_latest" not in wf_generate_odd_labelset.python_interface.inputs
+    inputs = wf_generate_odd_labelset.python_interface.inputs
     assert {
+        "openai_base_url",
+        "openai_model",
+        "openai_model_revision",
         "bedrock_map_model_id",
         "bedrock_map_model_revision",
+        "publish_latest",
+    }.isdisjoint(inputs)
+    assert {
+        "ontology_version",
+        "ontology_sha256",
+        "labeler_bundle_version",
+        "labeler_config_uri",
+        "labeler_config_sha256",
+        "enabled_sources",
+        "road_vlm_provider",
+        "road_vlm_model",
+        "road_vlm_model_revision",
+        "road_vlm_prompt_bundle_sha256",
+        "road_vlm_decoding_config_sha256",
+        "map_resolver_provider",
+        "map_resolver_model_id",
+        "map_resolver_model_revision",
+        "map_resolver_prompt_bundle_sha256",
+        "map_resolver_decoding_config_sha256",
+        "fusion_config_sha256",
+        "calibration_bundle_sha256",
+        "publication_prefix",
         "labeler_image_digest",
         "labeler_source_revision",
         "openai_concurrency",
@@ -238,7 +262,7 @@ def test_workflow_interface_does_not_expose_endpoint_url() -> None:
         "maximum_camera_anchors",
         "trigger_context_s",
         "refinement_confidence_threshold",
-    }.issubset(wf_generate_odd_labelset.python_interface.inputs)
+    }.issubset(inputs)
     assert ODD_LABELER_VERSION == "odd_dataset_labeler_v5"
 
 
@@ -263,31 +287,47 @@ def test_source_labelers_have_independent_semantic_interfaces() -> None:
         assert "capability_manifest_json" in (
             source_task.python_interface.inputs
         )
-    assert "openai_model" not in label_odd_map_route.python_interface.inputs
-    assert "openai_model" not in label_odd_kinematics.python_interface.inputs
-    assert "openai_model" not in (
-        label_odd_image_quality.python_interface.inputs
-    )
+    for deterministic_task in (
+        label_odd_map_route,
+        label_odd_kinematics,
+        label_odd_image_quality,
+    ):
+        assert {
+            "road_vlm_model",
+            "map_resolver_model_id",
+        }.isdisjoint(deterministic_task.python_interface.inputs)
     assert {
         "map_route_file",
         "kinematics_file",
         "image_quality_file",
-        "openai_model",
-        "openai_model_revision",
+        "enabled_sources",
+        "ontology_sha256",
+        "labeler_config_sha256",
+        "road_vlm_provider",
+        "road_vlm_model",
+        "road_vlm_model_revision",
+        "road_vlm_prompt_bundle_sha256",
+        "road_vlm_decoding_config_sha256",
         "camera_anchor_interval_s",
         "maximum_camera_anchors",
         "trigger_context_s",
         "refinement_confidence_threshold",
     }.issubset(label_odd_visual.python_interface.inputs)
-    assert "bedrock_map_model_id" not in (
+    assert "map_resolver_model_id" not in (
         label_odd_visual.python_interface.inputs
     )
     assert {
-        "bedrock_map_model_id",
-        "bedrock_map_model_revision",
         "map_route_file",
+        "enabled_sources",
+        "ontology_sha256",
+        "labeler_config_sha256",
+        "map_resolver_provider",
+        "map_resolver_model_id",
+        "map_resolver_model_revision",
+        "map_resolver_prompt_bundle_sha256",
+        "map_resolver_decoding_config_sha256",
     }.issubset(label_odd_bedrock_map.python_interface.inputs)
-    assert "openai_model" not in (
+    assert "road_vlm_model" not in (
         label_odd_bedrock_map.python_interface.inputs
     )
     assert {
@@ -297,6 +337,11 @@ def test_source_labelers_have_independent_semantic_interfaces() -> None:
         "image_quality_file",
         "visual_file",
         "bedrock_map_file",
+        "enabled_sources",
+        "ontology_sha256",
+        "labeler_config_sha256",
+        "fusion_config_sha256",
+        "calibration_bundle_sha256",
         "labeler_image_digest",
         "labeler_source_revision",
         "camera_anchor_interval_s",
@@ -305,9 +350,27 @@ def test_source_labelers_have_independent_semantic_interfaces() -> None:
         "refinement_confidence_threshold",
     }.issubset(fuse_odd_scene.python_interface.inputs)
     assert {
-        "bedrock_map_model_id",
-        "bedrock_map_model_revision",
         "capability_manifest_json",
+        "semantic_contract_json",
+        "ontology_version",
+        "ontology_sha256",
+        "labeler_bundle_version",
+        "labeler_config_uri",
+        "labeler_config_sha256",
+        "enabled_sources",
+        "road_vlm_provider",
+        "road_vlm_model",
+        "road_vlm_model_revision",
+        "road_vlm_prompt_bundle_sha256",
+        "road_vlm_decoding_config_sha256",
+        "map_resolver_provider",
+        "map_resolver_model_id",
+        "map_resolver_model_revision",
+        "map_resolver_prompt_bundle_sha256",
+        "map_resolver_decoding_config_sha256",
+        "fusion_config_sha256",
+        "calibration_bundle_sha256",
+        "publication_prefix",
         "camera_anchor_interval_s",
         "maximum_camera_anchors",
         "trigger_context_s",
