@@ -39,12 +39,22 @@ class RoadVLMTaskBundle:
     scene_keys: tuple[str, ...] = ()
     camera_keys: tuple[str, ...] = ()
     temporal_mode: str = "static"
+    scene_camera_roles: tuple[str, ...] | None = None
 
     def __post_init__(self) -> None:
         if not self.name or not self.scene_keys + self.camera_keys:
             raise ValueError("road VLM task bundle must have a name and keys")
         if self.temporal_mode not in {"static", "short", "event"}:
             raise ValueError(f"invalid temporal mode: {self.temporal_mode}")
+        if (
+            self.scene_camera_roles is not None
+            and (
+                not self.scene_camera_roles
+                or len(self.scene_camera_roles)
+                != len(set(self.scene_camera_roles))
+            )
+        ):
+            raise ValueError("scene camera roles must be unique and non-empty")
         keys = self.scene_keys + self.camera_keys
         if len(keys) != len(set(keys)):
             raise ValueError(f"duplicate key in road VLM task bundle: {self.name}")
@@ -67,6 +77,7 @@ ROAD_VLM_TASK_BUNDLES = (
             "odd.road.special_structure",
             "odd.road.workzone_state",
         ),
+        scene_camera_roles=("front_left", "front_center", "front_right"),
     ),
     RoadVLMTaskBundle(
         name="environment",
@@ -78,6 +89,7 @@ ROAD_VLM_TASK_BUNDLES = (
             "odd.environment.road_lighting",
             "odd.environment.glare",
         ),
+        scene_camera_roles=("front_center",),
     ),
     RoadVLMTaskBundle(
         name="traffic_control",
@@ -86,6 +98,7 @@ ROAD_VLM_TASK_BUNDLES = (
             "odd.traffic_control.present",
             "odd.traffic_light.state",
         ),
+        scene_camera_roles=("front_left", "front_center", "front_right"),
     ),
     RoadVLMTaskBundle(
         name="dynamic_agents",
@@ -97,7 +110,7 @@ ROAD_VLM_TASK_BUNDLES = (
             "odd.dynamic.agent_type_present",
             "perception.mixed_traffic",
         ),
-        temporal_mode="short",
+        temporal_mode="static",
     ),
     RoadVLMTaskBundle(
         name="interaction",
@@ -112,6 +125,7 @@ ROAD_VLM_TASK_BUNDLES = (
             "event.interaction.actor",
         ),
         temporal_mode="event",
+        scene_camera_roles=("front_center",),
     ),
     RoadVLMTaskBundle(
         name="perception_condition",
@@ -133,6 +147,7 @@ ROAD_VLM_TASK_BUNDLES = (
             "perception.image.lens_contamination",
         ),
         temporal_mode="short",
+        scene_camera_roles=("front_left", "front_center", "front_right"),
     ),
 )
 
@@ -579,6 +594,11 @@ def road_vlm_prompt_bundle_document(
                     "task_bundle": bundle.name,
                     "subject_scope": subject_scope,
                     "temporal_mode": bundle.temporal_mode,
+                    "scene_camera_roles": (
+                        list(bundle.scene_camera_roles)
+                        if bundle.scene_camera_roles is not None
+                        else ["all_available"]
+                    ),
                     "keys": list(keys),
                     "prompt_sha256": _prompt_bundle_sha256(
                         bundle.name,
@@ -1266,12 +1286,21 @@ def _frames_for_indexes(
     indexes: Iterable[int],
     *,
     camera_id: str | None = None,
+    camera_roles: tuple[str, ...] | None = None,
 ) -> tuple[CameraFrame, ...]:
+    if camera_id is not None and camera_roles is not None:
+        raise ValueError("camera_id and camera_roles are mutually exclusive")
     return tuple(
         frame
         for index in indexes
         for frame in anchors[index].frames
-        if camera_id is None or frame.camera_role == camera_id
+        if (
+            (camera_id is None or frame.camera_role == camera_id)
+            and (
+                camera_roles is None
+                or frame.camera_role in camera_roles
+            )
+        )
     )
 
 
@@ -1281,6 +1310,7 @@ def _refinement_frames(
     *,
     temporal_mode: str,
     camera_id: str | None = None,
+    camera_roles: tuple[str, ...] | None = None,
 ) -> tuple[CameraFrame, ...]:
     if temporal_mode == "event":
         indexes = (
@@ -1301,6 +1331,7 @@ def _refinement_frames(
         anchors,
         bounded,
         camera_id=camera_id,
+        camera_roles=camera_roles,
     )
 
 
@@ -1429,6 +1460,7 @@ def label_visual_scene(
                 primary_frames = _frames_for_indexes(
                     anchors,
                     primary_indexes,
+                    camera_roles=bundle.scene_camera_roles,
                 )
                 primary = observer.observe(
                     scene_uid=scene_uid,
@@ -1450,6 +1482,7 @@ def label_visual_scene(
                     anchors,
                     index,
                     temporal_mode=bundle.temporal_mode,
+                    camera_roles=bundle.scene_camera_roles,
                 )
                 if (
                     refinement_plan
