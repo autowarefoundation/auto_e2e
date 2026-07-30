@@ -30,7 +30,7 @@ from navigation.rasterizer import (
 
 ANCHOR_PERIOD_NS = 500_000_000
 MANEUVER_LOOKAHEAD_M = 100.0
-KITSCENES_NAVIGATION_VERSION = "kitscenes_navigation_v1"
+KITSCENES_NAVIGATION_VERSION = "kitscenes_navigation_v2"
 
 
 def _polyline_length(points: np.ndarray) -> float:
