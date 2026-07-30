@@ -73,7 +73,7 @@ def test_logged_xy_equal_prediction_has_zero_selector_metrics():
         "sample_uid": "sample-a",
         "split_group_uid": "scene-a",
         "ade_3s_m": 0.0,
-        "fde_6_4s_m": 0.0,
+        "fde_3s_m": 0.0,
         "comfort_excess": 0.0,
         "offroad_excess": 0.0,
         "route_gap": 0.0,
@@ -105,11 +105,37 @@ def test_logged_xy_metrics_detect_map_route_and_destination_regression():
     record = records[0]
 
     assert record["ade_3s_m"] > 0.0
-    assert record["fde_6_4s_m"] > record["ade_3s_m"]
+    assert record["fde_3s_m"] > record["ade_3s_m"]
     assert record["offroad_excess"] > 0.0
     assert record["route_gap"] > 0.0
     assert record["wrong_branch_excess"] == 1.0
     assert record["destination_error_m"] > 0.0
+
+
+def test_selector_metrics_ignore_controls_after_three_seconds():
+    prediction = _controls()
+    prediction[:, 30:, 0] = 5.0
+
+    record = build_rollout_validation_records(
+        prediction,
+        _controls(),
+        torch.tensor([5.0]),
+        _logged_straight(),
+        _supervision(_band_field(), destination_visible=True),
+        torch.tensor([True]),
+        torch.tensor([True]),
+        ["sample-a"],
+        ["scene-a"],
+        route_intersections=[True],
+    )[0]
+
+    assert record["ade_3s_m"] == 0.0
+    assert record["fde_3s_m"] == 0.0
+    assert record["comfort_excess"] == 0.0
+    assert record["offroad_excess"] == 0.0
+    assert record["route_gap"] == 0.0
+    assert record["wrong_branch_excess"] == 0.0
+    assert record["destination_error_m"] == 0.0
 
 
 def test_invalid_map_and_route_are_unavailable_not_perfect():
