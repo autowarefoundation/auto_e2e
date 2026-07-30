@@ -19,7 +19,8 @@ from training.losses.rollout_aligned_loss import (
 )
 
 
-ROLLOUT_VALIDATION_VERSION = "rollout_validation_v1"
+ROLLOUT_VALIDATION_VERSION = "rollout_validation_v2"
+ROLLOUT_VALIDATION_HORIZON_STEPS = 30
 
 
 def build_rollout_validation_records(
@@ -61,6 +62,13 @@ def build_rollout_validation_records(
             "predicted and target controls must share shape [B,T,2]"
         )
     batch_size, timestep_count, _ = predicted.shape
+    if timestep_count < ROLLOUT_VALIDATION_HORIZON_STEPS:
+        raise ValueError(
+            "rollout validation requires at least 30 timesteps"
+        )
+    evaluation_slice = slice(0, ROLLOUT_VALIDATION_HORIZON_STEPS)
+    predicted_evaluation = predicted[:, evaluation_slice]
+    target_evaluation = target[:, evaluation_slice]
     speeds = initial_speeds_mps.detach().to(
         device="cpu",
         dtype=torch.float32,
@@ -98,14 +106,14 @@ def build_rollout_validation_records(
             predicted_xy,
             predicted_headings,
             predicted_speeds,
-        ) = integrate_controls_torch(predicted, speeds)
+        ) = integrate_controls_torch(predicted_evaluation, speeds)
         _, target_headings, target_speeds = integrate_controls_torch(
-            target,
+            target_evaluation,
             speeds,
         )
         comfort, _, _ = comfort_excess_per_sample(
-            predicted,
-            target,
+            predicted_evaluation,
+            target_evaluation,
             predicted_speeds,
             target_speeds,
         )
@@ -204,7 +212,7 @@ def build_rollout_validation_records(
         )
         target_drivable_distance = _footprint_outside_distance(
             sampling_fields["distance_to_drivable_m"],
-            logged,
+            logged[:, evaluation_slice],
             target_headings,
             geometry,
             length_m=footprint_length_m,
@@ -220,14 +228,18 @@ def build_rollout_validation_records(
         )
         target_route_distance = _footprint_outside_distance(
             sampling_fields["distance_to_corridor_m"],
-            logged,
+            logged[:, evaluation_slice],
             target_headings,
             geometry,
             length_m=footprint_length_m,
             width_m=footprint_width_m,
         )
 
-    errors = torch.linalg.vector_norm(predicted_xy - logged, dim=2)
+    logged_evaluation = logged[:, evaluation_slice]
+    errors = torch.linalg.vector_norm(
+        predicted_xy - logged_evaluation,
+        dim=2,
+    )
     raster_tolerance_m = 0.5 * geometry.meters_per_pixel
     predicted_drivable_inside = (
         predicted_drivable_distance <= raster_tolerance_m
@@ -303,7 +315,7 @@ def build_rollout_validation_records(
             )
             target_center_on_route = _mask_values_at_positions(
                 corridor,
-                logged[index].numpy(),
+                logged_evaluation[index].numpy(),
                 geometry,
             )
             if intersections[index] and bool(target_center_on_route[-1]):
@@ -318,7 +330,7 @@ def build_rollout_validation_records(
                 predicted_xy[index, -1] - destination[index]
             ))
             target_terminal = float(torch.linalg.vector_norm(
-                logged[index, -1] - destination[index]
+                logged_evaluation[index, -1] - destination[index]
             ))
             destination_error = abs(
                 predicted_terminal - target_terminal
@@ -327,8 +339,8 @@ def build_rollout_validation_records(
         records.append({
             "sample_uid": str(sample_uids[index]),
             "split_group_uid": str(split_group_uids[index]),
-            "ade_3s_m": float(errors[index, :30].mean()),
-            "fde_6_4s_m": float(errors[index, -1]),
+            "ade_3s_m": float(errors[index].mean()),
+            "fde_3s_m": float(errors[index, -1]),
             "comfort_excess": float(comfort[index]),
             "offroad_excess": offroad_excess,
             "route_gap": route_gap,
