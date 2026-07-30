@@ -266,7 +266,20 @@ def test_contract_has_no_future_target_field():
 
 
 def test_lanelet_adapter_extracts_provider_independent_primitives():
-    lane = _Lanelet(1, 0.0, 20.0, attributes={"turn_direction": "left"})
+    lane = _Lanelet(
+        1,
+        0.0,
+        20.0,
+        attributes={
+            "turn_direction": "left",
+            "highway": "residential",
+            "oneway": "yes",
+            "carriageway_id": "road-1-east",
+            "median": "yes",
+        },
+    )
+    lane.leftBound.attributes = {"type": "concrete_barrier"}
+    lane.rightBound.attributes = {"type": "line_thin"}
     crosswalk = _Lanelet(
         2,
         5.0,
@@ -296,6 +309,16 @@ def test_lanelet_adapter_extracts_provider_independent_primitives():
     assert [field.lane_id for field in result.directed_lane_fields] == [
         "lanelet2:1"
     ]
+    field = result.directed_lane_fields[0]
+    assert field.road_class == "residential"
+    assert field.lane_subtype == "road"
+    assert field.one_way is True
+    assert field.carriageway_id == "road-1-east"
+    assert field.median_separated is True
+    assert field.barrier_separated is True
+    assert field.provider_attributes["highway"] == "residential"
+    assert field.left_boundary_attributes["type"] == "concrete_barrier"
+    assert result.layer_availability["lane_topology"] is True
     assert len(result.drivable_polygons) == 1
     assert len(result.crosswalk_polygons) == 1
     assert len(result.intersection_polygons) == 1
@@ -350,6 +373,45 @@ def test_trace_matcher_fills_routing_gap_without_serializing_trace():
     assert route.quality.shortest_path_fill_count == 1
     assert route.provenance.trace_sha256
     assert b"positions_enu_m" not in canonical_json_bytes(route)
+
+
+def test_trace_matcher_marks_only_the_disconnected_segment_boundary():
+    first = _Lanelet(1, 0.0, 10.0)
+    disconnected = _Lanelet(2, 20.0, 30.0)
+    graph = _Graph()
+
+    def query(center, radius):
+        return [first] if center[0] < 15.0 else [disconnected]
+
+    scene_map = SimpleNamespace(
+        routing_graph=graph,
+        traffic_rules=SimpleNamespace(canPass=lambda _: True),
+        get_lanelets_in_roi=query,
+    )
+    navigation_map = NavigationMap(
+        map_version="map-v1",
+        provider="test",
+        frame=_frame(),
+        bounds_enu_m=(0.0, -3.0, 30.0, 3.0),
+    )
+    route = Lanelet2TraceMatcher(
+        scene_map,
+        navigation_map,
+        map_sha256="map",
+        source_revision="source",
+    ).match(
+        scene_id="scene",
+        positions_enu_m=np.asarray(
+            [[2.0, 0.0], [8.0, 0.0], [22.0, 0.0], [28.0, 0.0]]
+        ),
+        yaws_rad=np.zeros(4),
+        timestamps_ns=np.arange(4, dtype=np.int64) * 100_000_000,
+    )
+
+    assert route.quality.unresolved_discontinuities == 1
+    assert [
+        segment.connected_from_previous for segment in route.lane_sequence
+    ] == [True, False]
 
 
 def _reference_route_mask(centerline, destination):
