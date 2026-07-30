@@ -29,7 +29,7 @@ def _record(
         "sample_uid": sample_uid,
         "split_group_uid": group_uid,
         "ade_3s_m": value,
-        "fde_6_4s_m": value * 2.0,
+        "fde_3s_m": value * 2.0,
         "comfort_excess": value / 100.0,
         "offroad_excess": value / 200.0,
         "route_gap": None,
@@ -42,6 +42,13 @@ def _record(
         "diagnostic_raster_tolerance_m": 0.5,
         **overrides,
     }
+
+
+def test_selector_policy_uses_three_second_displacement_contract():
+    assert SELECTOR_POLICY_VERSION == "rollout_composite_selector_v3"
+    assert UTILITY_SCALES["ade_3s_m"] == 2.5
+    assert UTILITY_SCALES["fde_3s_m"] == 3.0
+    assert "fde_6_4s_m" not in UTILITY_SCALES
 
 
 def test_scene_balanced_aggregate_is_not_sample_weighted():
@@ -204,7 +211,7 @@ def test_lower_errors_produce_better_composite_score():
         {
             **record,
             "ade_3s_m": float(record["ade_3s_m"]) * 0.5,
-            "fde_6_4s_m": float(record["fde_6_4s_m"]) * 0.5,
+            "fde_3s_m": float(record["fde_3s_m"]) * 0.5,
             "comfort_excess": float(record["comfort_excess"]) * 0.5,
             "offroad_excess": float(record["offroad_excess"]) * 0.5,
             "route_gap": float(record["route_gap"]) * 0.5,
