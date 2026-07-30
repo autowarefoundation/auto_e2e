@@ -479,13 +479,7 @@ class Lanelet2MapAdapter:
                     or lane.carriageway_id is not None
                     for lane in directions
                 ),
-                "lane_topology": any(
-                    lane.successor_lane_ids
-                    or lane.predecessor_lane_ids
-                    or lane.left_adjacent_lane_id is not None
-                    or lane.right_adjacent_lane_id is not None
-                    for lane in directions
-                ),
+                "lane_topology": bool(directions),
             },
             provenance={
                 "adapter_version": LANELET2_ADAPTER_VERSION,
