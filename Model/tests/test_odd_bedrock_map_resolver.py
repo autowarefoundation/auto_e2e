@@ -139,22 +139,28 @@ def _scene() -> CanonicalSceneEvidence:
     )
 
 
-def _ambiguous_route_action():
+def _ambiguous_junction():
     return make_observation(
         scene_uid="private-scene-id",
-        key="odd.route.action",
+        key="odd.road.junction_type",
         status="ambiguous",
         confidence=0.0,
         source="map_route",
         start_timestamp_ns=0,
         end_timestamp_ns=300_000_000,
-        provenance={"labeler_version": "deterministic-v1"},
+        measurements={"junction_branch_count": 3},
+        provenance={
+            "labeler_version": "deterministic-v3",
+            "matched_lane_id": "provider-lane-0",
+            "bedrock_eligible": True,
+            "candidate_values": ["t_junction", "y_junction"],
+        },
     )
 
 
 def test_bedrock_map_semantic_hashes_are_stable() -> None:
     assert bedrock_map_prompt_bundle_sha256() == (
-        "b68bd2ec197bbb35e9bffb9e48e3a4d7a3d99e14821d92e8d5705b72c3752e8f"
+        "a0c72c946a20c36b0942d3c6532437bea7cd0513e72dc195bfb74a908003904c"
     )
     assert bedrock_map_decoding_config_sha256(max_tokens=1024) == (
         "b5f42c6a13e7c29a8c624dbbb88ec4fc32eb3de368494db6b00e447a72c01050"
@@ -198,7 +204,7 @@ class _BedrockClient:
 
 
 def test_request_removes_geography_and_provider_identity() -> None:
-    request = build_privacy_safe_request(_scene(), _ambiguous_route_action())
+    request = build_privacy_safe_request(_scene(), _ambiguous_junction())
 
     assert request is not None
     payload = request.payload()
@@ -229,46 +235,46 @@ def test_missing_navigation_never_calls_bedrock() -> None:
     client = _BedrockClient("turn_left")
     resolver = BedrockMapRouteResolver(
         client,
-        model_id="us.anthropic.claude-sonnet-4-6",
-        model_revision="claude-sonnet-4-6",
+        model_id="us.anthropic.claude-opus-5",
+        model_revision="claude-opus-5",
     )
 
     assert build_privacy_safe_request(
         scene,
-        _ambiguous_route_action(),
+        _ambiguous_junction(),
     ) is None
     assert resolve_ambiguous_map_route(
         resolver,
         scene,
-        (_ambiguous_route_action(),),
+        (_ambiguous_junction(),),
     ) == ()
     assert client.requests == []
     assert resolver.provider_exchanges == ()
 
 
 def test_resolver_uses_bedrock_tool_and_geometry_validation() -> None:
-    client = _BedrockClient("turn_left")
+    client = _BedrockClient("t_junction")
     resolver = BedrockMapRouteResolver(
         client,
-        model_id="us.anthropic.claude-sonnet-4-6",
-        model_revision="claude-sonnet-4-6",
+        model_id="us.anthropic.claude-opus-5",
+        model_revision="claude-opus-5",
     )
 
     observations = resolve_ambiguous_map_route(
         resolver,
         _scene(),
-        (_ambiguous_route_action(),),
+        (_ambiguous_junction(),),
     )
 
     assert len(observations) == 1
     assert observations[0].status == "valid"
-    assert observations[0].values == ("turn_left",)
+    assert observations[0].values == ("t_junction",)
     assert observations[0].confidence == 0.88
     assert observations[0].provenance["model_provider"] == "amazon_bedrock"
-    assert observations[0].provenance["selected_value"] == "turn_left"
+    assert observations[0].provenance["selected_value"] == "t_junction"
     assert len(observations[0].provenance["request_sha256"]) == 64
     request = client.requests[0]
-    assert request["modelId"] == "us.anthropic.claude-sonnet-4-6"
+    assert request["modelId"] == "us.anthropic.claude-opus-5"
     assert request["toolConfig"]["toolChoice"] == {
         "tool": {"name": BEDROCK_TOOL_NAME}
     }
@@ -290,18 +296,18 @@ def test_resolver_uses_bedrock_tool_and_geometry_validation() -> None:
     assert "PNG" not in exchange_request
 
 
-def test_geometry_rejection_preserves_ambiguous_evidence() -> None:
+def test_invalid_candidate_preserves_ambiguous_evidence() -> None:
     client = _BedrockClient("straight")
     resolver = BedrockMapRouteResolver(
         client,
-        model_id="us.anthropic.claude-sonnet-4-6",
-        model_revision="claude-sonnet-4-6",
+        model_id="us.anthropic.claude-opus-5",
+        model_revision="claude-opus-5",
     )
 
     observations = resolve_ambiguous_map_route(
         resolver,
         _scene(),
-        (_ambiguous_route_action(),),
+        (_ambiguous_junction(),),
     )
 
     assert observations[0].status == "ambiguous"
@@ -310,8 +316,26 @@ def test_geometry_rejection_preserves_ambiguous_evidence() -> None:
     assert {
         item["value"]
         for item in observations[0].provenance["candidate_values"]
-    } == {"turn_left", "straight"}
+    } == {"t_junction", "y_junction"}
     assert len(resolver.provider_exchanges) == 1
-    assert resolver.provider_exchanges[0].status == "geometry_rejected"
+    assert resolver.provider_exchanges[0].status == "invalid_response"
     assert resolver.provider_exchanges[0].raw_response is not None
     assert resolver.provider_exchanges[0].error_type == "ValueError"
+
+
+def test_route_action_is_never_sent_to_bedrock() -> None:
+    observation = make_observation(
+        scene_uid="private-scene-id",
+        key="odd.route.action",
+        status="ambiguous",
+        confidence=0.0,
+        source="map_route",
+        start_timestamp_ns=0,
+        end_timestamp_ns=300_000_000,
+        provenance={
+            "bedrock_eligible": True,
+            "candidate_values": ["turn_left", "turn_right"],
+        },
+    )
+
+    assert build_privacy_safe_request(_scene(), observation) is None
