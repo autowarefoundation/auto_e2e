@@ -10,6 +10,7 @@ import pytest
 
 from data_processing.odd_labeling.deterministic import (
     MAP_ROUTE_KEYS,
+    _junction_type,
     label_kinematics,
     label_map_route,
 )
@@ -576,6 +577,56 @@ def test_route_action_rejects_only_the_local_discontinuity() -> None:
     assert action.status == "ambiguous"
     assert action.values == ()
     assert "local discontinuity" in action.provenance["reason"]
+
+
+@pytest.mark.parametrize(
+    ("successor_angles_deg", "expected", "bedrock_eligible"),
+    [
+        ((0.0, 90.0), "t_junction", False),
+        ((60.0, 300.0), "y_junction", False),
+        ((35.0, 285.0), None, True),
+    ],
+)
+def test_three_arm_junction_classifier_limits_bedrock_to_t_y_boundary(
+    successor_angles_deg,
+    expected,
+    bedrock_eligible,
+) -> None:
+    def line(angle_deg: float, start: float, end: float) -> np.ndarray:
+        angle = np.radians(angle_deg)
+        direction = np.asarray([np.cos(angle), np.sin(angle)])
+        return np.asarray([direction * start, direction * end])
+
+    predecessor = DirectedLaneField(
+        lane_id="predecessor",
+        centerline_enu_m=np.asarray([[-20.0, 0.0], [-10.0, 0.0]]),
+    )
+    successors = tuple(
+        DirectedLaneField(
+            lane_id=f"successor-{index}",
+            centerline_enu_m=line(angle, 0.0, 10.0),
+        )
+        for index, angle in enumerate(successor_angles_deg)
+    )
+    current = DirectedLaneField(
+        lane_id="current",
+        centerline_enu_m=np.asarray([[-10.0, 0.0], [0.0, 0.0]]),
+        predecessor_lane_ids=(predecessor.lane_id,),
+        successor_lane_ids=tuple(item.lane_id for item in successors),
+        is_intersection=True,
+    )
+    lanes = {
+        item.lane_id: item
+        for item in (predecessor, current, *successors)
+    }
+
+    value, branch_count, eligible = _junction_type(
+        current, "inside", lanes
+    )
+
+    assert value == expected
+    assert branch_count == 3
+    assert eligible is bedrock_eligible
 
 
 def test_synthetic_adapter_preserves_missing_camera_frames() -> None:
