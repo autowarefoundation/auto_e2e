@@ -20,6 +20,15 @@ from evaluation.reconstruction_audit import AUDIT_SCHEMA_VERSION
 from Platform.pipelines import workflows
 
 
+CANONICAL_METRIC_CONTRACT = {
+    "version": "rollout_validation_v2",
+    "horizon_seconds": 3.0,
+    "horizon_steps": 30,
+    "target_source": "logged_xy",
+    "aggregation": "scene_balanced",
+}
+
+
 class _SceneProjection:
     def __init__(self, scene_index):
         self.scene_index = scene_index
@@ -223,14 +232,21 @@ def test_epoch_evaluation_restores_mode_and_hashes_fixed_uids():
     assert metrics == {
         "ade": 0.0,
         "fde": 0.0,
-        "evaluation_steps": 64,
+        "evaluation_steps": 30,
+        "prediction_steps": 64,
         "sample_count": 2,
         "sample_uid_digest": expected_digest,
+        "metric_contract": {
+            "version": "control_rollout_validation_v2",
+            "horizon_seconds": 3.0,
+            "horizon_steps": 30,
+            "target_source": "target_control_rollout",
+            "aggregation": "sample_mean",
+        },
         "horizons": {
             "1s": {"steps": 10, "ade": 0.0, "fde": 0.0},
             "2s": {"steps": 20, "ade": 0.0, "fde": 0.0},
             "3s": {"steps": 30, "ade": 0.0, "fde": 0.0},
-            "6_4s": {"steps": 64, "ade": 0.0, "fde": 0.0},
         },
     }
     assert model.training is True
@@ -258,10 +274,13 @@ def test_epoch_evaluation_builds_logged_xy_selector_records():
     assert record["sample_uid"] == "sample-a"
     assert record["split_group_uid"] == "scene-a"
     assert record["ade_3s_m"] > 0.0
-    assert record["fde_6_4s_m"] > record["ade_3s_m"]
+    assert record["fde_3s_m"] > record["ade_3s_m"]
     assert record["comfort_excess"] == 0.0
     assert record["offroad_excess"] == 0.0
     assert record["route_gap"] == 0.0
+    assert metrics["ade"] == record["ade_3s_m"]
+    assert metrics["fde"] == record["fde_3s_m"]
+    assert metrics["metric_contract"] == CANONICAL_METRIC_CONTRACT
 
 
 def test_evaluation_noise_is_stable_by_sample_uid():
@@ -938,7 +957,7 @@ def test_rollout_epoch_diagnostics_use_eligible_sample_weights():
     }
 
 
-def test_kitscenes_epoch_evaluation_preserves_auto_e2e_horizon():
+def test_kitscenes_evaluation_keeps_prediction_but_scores_three_seconds():
     from training.dataset_policy import KITSCENES_TRAINING_POLICY
 
     model = _MetricModel()
@@ -956,9 +975,10 @@ def test_kitscenes_epoch_evaluation_preserves_auto_e2e_horizon():
         training_policy=KITSCENES_TRAINING_POLICY,
     )
 
-    assert metrics["ade"] > 0.0
-    assert metrics["fde"] > 0.0
-    assert metrics["evaluation_steps"] == 64
+    assert metrics["ade"] == 0.0
+    assert metrics["fde"] == 0.0
+    assert metrics["evaluation_steps"] == 30
+    assert metrics["prediction_steps"] == 64
     adapted = model.last_egomotion_history.reshape(1, 64, 4)
     assert torch.count_nonzero(adapted[:, :24]) == 24 * 4
     assert adapted[0, -1, 0].item() == 2.0
@@ -1216,6 +1236,7 @@ def test_trajectory_best_is_reconstructed_from_old_metric_history():
             "val_fde": 11.76,
             "checkpoint_uri": "s3://checkpoints/run/epoch-0001.pt",
             "checkpoint_sha256": "a" * 64,
+            "validation_metric_contract": CANONICAL_METRIC_CONTRACT,
             "checkpoint_selection": {
                 "policy_version": SELECTOR_POLICY_VERSION,
                 "score": 0.53,
@@ -1228,6 +1249,7 @@ def test_trajectory_best_is_reconstructed_from_old_metric_history():
             "val_fde": 11.72,
             "checkpoint_uri": "s3://checkpoints/run/epoch-0002.pt",
             "checkpoint_sha256": "b" * 64,
+            "validation_metric_contract": CANONICAL_METRIC_CONTRACT,
             "checkpoint_selection": {
                 "policy_version": SELECTOR_POLICY_VERSION,
                 "score": 0.52,
@@ -1240,6 +1262,7 @@ def test_trajectory_best_is_reconstructed_from_old_metric_history():
             "val_fde": 14.01,
             "checkpoint_uri": "s3://checkpoints/run/epoch-0003.pt",
             "checkpoint_sha256": "c" * 64,
+            "validation_metric_contract": CANONICAL_METRIC_CONTRACT,
             "checkpoint_selection": {
                 "policy_version": SELECTOR_POLICY_VERSION,
                 "score": 0.50,
@@ -1266,6 +1289,7 @@ def test_trajectory_best_reconstruction_rejects_invalid_identity_and_policy():
         "val_fde": 11.76,
         "checkpoint_uri": "s3://checkpoints/run/epoch-0001.pt",
         "checkpoint_sha256": None,
+        "validation_metric_contract": CANONICAL_METRIC_CONTRACT,
         "checkpoint_selection": {
             "policy_version": SELECTOR_POLICY_VERSION,
             "score": 0.53,
@@ -1453,6 +1477,7 @@ def test_resume_record_recovers_composite_selection(tmp_path):
                 "epoch": 3,
                 "val_ade": 1.25,
                 "val_fde": 2.5,
+                "validation_metric_contract": CANONICAL_METRIC_CONTRACT,
                 "checkpoint_selection": selection,
             }],
         },
@@ -1464,6 +1489,7 @@ def test_resume_record_recovers_composite_selection(tmp_path):
     )
 
     assert record["selection"] == selection
+    assert record["metric_contract"] == CANONICAL_METRIC_CONTRACT
 
 
 class _RegistryClient:
@@ -1507,6 +1533,7 @@ def test_registry_reuses_one_version_for_all_checkpoint_roles():
         "checkpoint_sha256": "a" * 64,
         "ade": 1.0,
         "fde": 2.0,
+        "metric_contract": CANONICAL_METRIC_CONTRACT,
     }
 
     first = workflows._register_checkpoint_version(client, **kwargs)
@@ -1535,6 +1562,7 @@ def test_registry_records_composite_checkpoint_selection():
         checkpoint_sha256="a" * 64,
         ade=1.0,
         fde=2.0,
+        metric_contract=CANONICAL_METRIC_CONTRACT,
         selection=selection,
     )
 
@@ -1544,6 +1572,16 @@ def test_registry_records_composite_checkpoint_selection():
     assert client.tags[
         ("auto-e2e-driving-policy", version, "checkpoint_composite_score")
     ] == str(selection["score"])
+    assert client.tags[
+        ("auto-e2e-driving-policy", version, "validation_ade_3s_m")
+    ] == "1.0"
+    assert client.tags[
+        (
+            "auto-e2e-driving-policy",
+            version,
+            "validation_metric_target_source",
+        )
+    ] == "logged_xy"
 
 
 def test_recovery_graph_never_calls_ingest_or_cosmos():
