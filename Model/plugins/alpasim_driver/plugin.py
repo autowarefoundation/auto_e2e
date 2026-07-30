@@ -17,9 +17,9 @@ _ALPASIM_ROOT = os.environ.get("ALPASIM_ROOT", os.path.join(_REPO_ROOT, ".alpasi
 if os.path.exists(_ALPASIM_ROOT):
     _alpasim_src = os.path.join(_ALPASIM_ROOT, "src")
     for sub in ["driver", "plugins", "grpc", "utils", "controller", "physics", "runtime"]:
-        sub_path = os.path.join(_alpasim_src, sub, "src")
-        if os.path.exists(sub_path) and sub_path not in sys.path:
-            sys.path.insert(0, sub_path)
+        for p in [os.path.join(_alpasim_src, sub, "src"), os.path.join(_alpasim_src, sub)]:
+            if os.path.exists(p) and p not in sys.path:
+                sys.path.insert(0, p)
 
 
 IS_MOCK_MODE = False
