@@ -54,7 +54,7 @@ def _observation(
 
 def test_fusion_policy_hash_is_stable() -> None:
     assert fusion_config_sha256() == (
-        "569f7e022131e7742fd36ee9f2e6d0ed874abfbdf96f320641c28787b2778771"
+        "fd1d8c2bd9303beb046e4e5cd9f352076d15a35f58fd5a74de4c363bbe1e4bc9"
     )
 
 
@@ -313,7 +313,7 @@ def test_same_authority_conflict_abstains() -> None:
     }
 
 
-def test_multi_select_union_never_combines_none() -> None:
+def test_multi_select_union_never_combines_neutral_values() -> None:
     union_evidence = source_observations_to_evidence(
         (
             _observation(
@@ -344,13 +344,36 @@ def test_multi_select_union_never_combines_none() -> None:
         ),
         context=_context(),
     )
+    normal_conflict = source_observations_to_evidence(
+        (
+            _observation(
+                key="perception.visual.lighting",
+                values=("normal",),
+                source="vlm",
+                camera_id="front_center",
+            ),
+            _observation(
+                key="perception.visual.lighting",
+                values=("backlit",),
+                source="vlm",
+                camera_id="front_center",
+            ),
+        ),
+        context=_context(),
+    )
 
     union = resolve_evidence(union_evidence)[0]
-    ambiguous = resolve_evidence(none_conflict)[0]
+    none_ambiguous = resolve_evidence(none_conflict)[0]
+    normal_ambiguous = resolve_evidence(normal_conflict)[0]
 
     assert union.values == ("curb", "grass")
-    assert ambiguous.status == "ambiguous"
-    assert ambiguous.values == ()
+    assert none_ambiguous.status == "ambiguous"
+    assert none_ambiguous.values == ()
+    assert normal_ambiguous.status == "ambiguous"
+    assert normal_ambiguous.values == ()
+    assert set(normal_ambiguous.conflicting_evidence_uids) == {
+        item.evidence_uid for item in normal_conflict
+    }
 
 
 def test_event_segmentation_is_stable_and_ignores_background() -> None:
