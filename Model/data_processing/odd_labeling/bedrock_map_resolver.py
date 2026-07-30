@@ -14,8 +14,6 @@ from typing import Any, Protocol
 import numpy as np
 from PIL import Image, ImageDraw
 
-from navigation.contracts import Maneuver, TransitionType
-
 from .ontology import ONTOLOGY
 from .published_snapshot import CanonicalSceneEvidence
 from .schema import (
@@ -27,15 +25,14 @@ from .schema import (
 )
 
 
-BEDROCK_MAP_SCHEMA_VERSION = "bedrock_map_route_request_v1"
-BEDROCK_MAP_PROMPT_VERSION = "bedrock_map_route_resolver_v1"
+BEDROCK_MAP_SCHEMA_VERSION = "bedrock_map_junction_request_v2"
+BEDROCK_MAP_PROMPT_VERSION = "bedrock_map_junction_resolver_v2"
 BEDROCK_TOOL_NAME = "resolve_map_route_topology"
 MAX_LOCAL_RANGE_M = 120.0
 RENDER_SIZE_PX = 512
 
 SUPPORTED_KEYS = {
     "odd.road.junction_type",
-    "odd.route.action",
 }
 
 FORBIDDEN_REQUEST_TOKENS = {
@@ -219,45 +216,7 @@ def _signed_heading_change_deg(points_flu: np.ndarray) -> float:
     return math.degrees(math.atan2(cross, dot))
 
 
-def _route_action_candidates(
-    heading_change_deg: float,
-    transition: TransitionType,
-    maneuver: Maneuver,
-) -> tuple[MapRouteCandidate, ...]:
-    if transition == TransitionType.MERGE:
-        return (MapRouteCandidate("merge", 0.95, "route transition"),)
-    if transition == TransitionType.SPLIT:
-        return (MapRouteCandidate("diverge", 0.95, "route transition"),)
-    if maneuver == Maneuver.MERGE:
-        return (MapRouteCandidate("merge", 0.95, "route maneuver"),)
-    if maneuver == Maneuver.EXIT:
-        return (MapRouteCandidate("diverge", 0.95, "route maneuver"),)
-    if abs(heading_change_deg) >= 135.0:
-        return (
-            MapRouteCandidate("u_turn", 0.9, "large heading reversal"),
-        )
-    if heading_change_deg >= 12.0:
-        return (
-            MapRouteCandidate("turn_left", 0.75, "positive heading change"),
-            MapRouteCandidate("straight", 0.25, "borderline branch geometry"),
-        )
-    if heading_change_deg <= -12.0:
-        return (
-            MapRouteCandidate("turn_right", 0.75, "negative heading change"),
-            MapRouteCandidate("straight", 0.25, "borderline branch geometry"),
-        )
-    return (
-        MapRouteCandidate("straight", 0.6, "small heading change"),
-        MapRouteCandidate("lane_follow", 0.4, "no decisive branch"),
-    )
-
-
 def _junction_candidates(branch_count: int) -> tuple[MapRouteCandidate, ...]:
-    if branch_count >= 4:
-        return (
-            MapRouteCandidate("crossroad", 0.65, "four or more branches"),
-            MapRouteCandidate("staggered", 0.35, "offset branch geometry"),
-        )
     if branch_count == 3:
         return (
             MapRouteCandidate("t_junction", 0.6, "three branches"),
@@ -328,7 +287,9 @@ def build_privacy_safe_request(
         or observation.status != "ambiguous"
         or observation.key not in SUPPORTED_KEYS
         or evidence.navigation_map is None
-        or evidence.navigation_route is None
+        or observation.provenance.get("bedrock_eligible") is not True
+        or set(observation.provenance.get("candidate_values", ()))
+        != {"t_junction", "y_junction"}
     ):
         return None
     path = evidence.path_latlon_heading_timestamp
@@ -346,13 +307,20 @@ def build_privacy_safe_request(
     ego_position = path_enu[path_index]
     ego_yaw = math.radians(90.0 - float(path[path_index, 2]))
 
+    matched_lane_id = str(
+        observation.provenance.get("matched_lane_id", "")
+    )
     route_segment = None
     route_distance = math.inf
-    for candidate in evidence.navigation_route.lane_sequence:
+    for candidate in evidence.navigation_map.directed_lane_fields:
         distance, _ = _closest_segment(
             ego_position,
             candidate.centerline_enu_m,
         )
+        if candidate.lane_id == matched_lane_id:
+            route_segment = candidate
+            route_distance = distance
+            break
         if distance < route_distance:
             route_segment = candidate
             route_distance = distance
@@ -371,12 +339,11 @@ def build_privacy_safe_request(
     primitives.append(
         {
             "primitive_id": "route-000",
-            "kind": "route_segment",
+            "kind": "matched_lane",
             "points_flu_m": route_points,
         }
     )
 
-    branch_count = 0
     for lane_index, lane in enumerate(
         evidence.navigation_map.directed_lane_fields
     ):
@@ -395,7 +362,6 @@ def build_privacy_safe_request(
         )
         if len(points) < 2:
             continue
-        branch_count += 1
         primitives.append(
             {
                 "primitive_id": f"lane-{lane_index:03d}",
@@ -425,14 +391,12 @@ def build_privacy_safe_request(
         )
 
     heading_change_deg = _signed_heading_change_deg(route_points_flu)
-    if observation.key == "odd.route.action":
-        candidates = _route_action_candidates(
-            heading_change_deg,
-            route_segment.transition_from_previous,
-            route_segment.maneuver,
-        )
-    else:
-        candidates = _junction_candidates(branch_count)
+    deterministic_branch_count = int(
+        observation.measurements.get("junction_branch_count", 0)
+    )
+    if deterministic_branch_count != 3:
+        return None
+    candidates = _junction_candidates(deterministic_branch_count)
     if len(candidates) < 2:
         return None
 
@@ -440,8 +404,8 @@ def build_privacy_safe_request(
         "label_key": observation.key,
         "primitives": primitives,
         "heading_change_deg": round(heading_change_deg, 3),
-        "branch_count": branch_count,
-        "transition": route_segment.transition_from_previous.value,
+        "branch_count": deterministic_branch_count,
+        "transition": "map_only",
     }
     geometry_id = hashlib.sha256(
         canonical_json_bytes(geometry_basis)
@@ -455,21 +419,19 @@ def build_privacy_safe_request(
         candidates=candidates,
         primitives=tuple(primitives),
         topology_summary={
-            "branch_count": branch_count,
+            "branch_count": deterministic_branch_count,
             "intersection_polygon_count": sum(
                 primitive["kind"] == "intersection"
                 for primitive in primitives
             ),
-            "route_transition": (
-                route_segment.transition_from_previous.value
-            ),
+            "route_transition": "map_only",
         },
         geometry_checks={
             "signed_route_heading_change_deg": round(
                 heading_change_deg,
                 3,
             ),
-            "branch_count": branch_count,
+            "branch_count": deterministic_branch_count,
         },
         render_png=_semantic_render(primitives),
         geometry_id=geometry_id,
@@ -528,7 +490,8 @@ def _tool_schema(request: PrivacySafeMapRouteRequest) -> dict[str, Any]:
 
 def _system_prompt() -> str:
     return (
-        "You resolve a static road-map topology ambiguity. The input is an "
+        "You resolve only a T-junction versus Y-junction static map "
+        "topology ambiguity. The input is an "
         "ego-local semantic map render plus structured primitives. It contains "
         "no camera imagery and no geographic identity. Select only an allowed "
         "deterministic candidate, cite primitive IDs, and use ambiguous when "
@@ -568,6 +531,7 @@ def bedrock_map_prompt_bundle_document() -> dict[str, Any]:
             "camera_imagery_prohibited": True,
             "geographic_identifiers_prohibited": True,
             "select_only_deterministic_candidates": True,
+            "t_y_junction_only": True,
             "cite_ephemeral_primitive_ids": True,
         },
         "tool_output_contract": {
@@ -658,23 +622,10 @@ def _validate_geometry(
     request: PrivacySafeMapRouteRequest,
     value: str,
 ) -> bool:
-    heading = float(
-        request.geometry_checks.get("signed_route_heading_change_deg", 0.0)
-    )
     branches = int(request.geometry_checks.get("branch_count", 0))
-    if value == "turn_left":
-        return heading >= 8.0
-    if value == "turn_right":
-        return heading <= -8.0
-    if value == "u_turn":
-        return abs(heading) >= 120.0
-    if value in {"straight", "lane_follow"}:
-        return abs(heading) <= 20.0
     if value in {"t_junction", "y_junction"}:
         return branches == 3
-    if value in {"crossroad", "staggered"}:
-        return branches >= 4
-    return value in {"merge", "diverge"}
+    return False
 
 
 def _validate_tool_result(
@@ -963,10 +914,7 @@ def resolve_ambiguous_map_route(
                 key=observation.key,
                 status="valid" if status == "resolved" else "ambiguous",
                 values=(selected,) if status == "resolved" else (),
-                confidence=min(
-                    confidence,
-                    float(evidence.navigation_route.confidence),
-                ),
+                confidence=confidence,
                 source="map_route",
                 start_timestamp_ns=observation.start_timestamp_ns,
                 end_timestamp_ns=observation.end_timestamp_ns,
