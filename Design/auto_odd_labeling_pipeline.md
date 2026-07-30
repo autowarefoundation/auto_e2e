@@ -1324,6 +1324,15 @@ Map-versus-visual disagreement is often useful information. A temporary lane
 closure, construction plate, or missing sign can make the visual state differ
 from the static map. Such disagreement must not be erased as VLM error.
 
+For a multi-select label, fusion may union positive values only when no active
+evidence contains the ontology-defined neutral value. A neutral claim such as
+`none` or `normal` and a positive/abnormal claim from evidence at the same
+authority are conflicting observations, so fusion publishes `ambiguous` and
+retains both evidence IDs. A label-specific authoritative-source rule may
+resolve the value, but the overridden evidence remains in
+`conflicting_evidence_uids`. Fusion never emits a neutral value together with a
+positive value.
+
 ### 13.3 Temporal smoothing
 
 Smoothing never changes a value across a real transition merely to improve
