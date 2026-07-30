@@ -13,7 +13,7 @@ from typing import Any
 import numpy as np
 
 
-NAVIGATION_SCHEMA_VERSION = "v1"
+NAVIGATION_SCHEMA_VERSION = "v2"
 
 
 class TransitionType(str, enum.Enum):
@@ -126,6 +126,27 @@ class DirectedLaneField:
     lane_id: str
     centerline_enu_m: np.ndarray
     level: int | None = None
+    road_class: str | None = None
+    lane_subtype: str | None = None
+    one_way: bool | None = None
+    carriageway_id: str | None = None
+    median_separated: bool | None = None
+    barrier_separated: bool | None = None
+    successor_lane_ids: tuple[str, ...] = ()
+    predecessor_lane_ids: tuple[str, ...] = ()
+    left_adjacent_lane_id: str | None = None
+    right_adjacent_lane_id: str | None = None
+    is_intersection: bool = False
+    turn_direction: str | None = None
+    provider_attributes: Mapping[str, str] = dataclasses.field(
+        default_factory=dict
+    )
+    left_boundary_attributes: Mapping[str, str] = dataclasses.field(
+        default_factory=dict
+    )
+    right_boundary_attributes: Mapping[str, str] = dataclasses.field(
+        default_factory=dict
+    )
 
     def __post_init__(self) -> None:
         if not self.lane_id:
@@ -139,6 +160,43 @@ class DirectedLaneField:
                 minimum=2,
             ),
         )
+        for field_name in (
+            "road_class",
+            "lane_subtype",
+            "carriageway_id",
+            "left_adjacent_lane_id",
+            "right_adjacent_lane_id",
+            "turn_direction",
+        ):
+            value = getattr(self, field_name)
+            if value is not None:
+                normalized = str(value).strip()
+                object.__setattr__(
+                    self,
+                    field_name,
+                    normalized if normalized else None,
+                )
+        for field_name in ("successor_lane_ids", "predecessor_lane_ids"):
+            values = tuple(str(value) for value in getattr(self, field_name))
+            if any(not value for value in values) or len(values) != len(
+                set(values)
+            ):
+                raise ValueError(f"{field_name} must contain unique lane IDs")
+            object.__setattr__(self, field_name, values)
+        for field_name in (
+            "provider_attributes",
+            "left_boundary_attributes",
+            "right_boundary_attributes",
+        ):
+            attributes = {
+                str(key): str(value)
+                for key, value in getattr(self, field_name).items()
+            }
+            object.__setattr__(
+                self,
+                field_name,
+                dict(sorted(attributes.items())),
+            )
 
 
 @dataclasses.dataclass(frozen=True)
@@ -175,6 +233,7 @@ class RouteLaneSegment:
     transition_from_previous: TransitionType = TransitionType.FOLLOW
     maneuver: Maneuver = Maneuver.UNKNOWN
     confidence: float = 1.0
+    connected_from_previous: bool = True
 
     def __post_init__(self) -> None:
         if not self.lane_id or not self.provider_segment_id:
