@@ -22,8 +22,11 @@ from .contracts import (
 )
 
 
-OSM_ADAPTER_VERSION = "osm_lane_graph_adapter_v1"
-OSM_LANE_GRAPH_SCHEMA_VERSION = "osm_lane_graph_v1"
+OSM_ADAPTER_VERSION = "osm_lane_graph_adapter_v2"
+OSM_LANE_GRAPH_SCHEMA_VERSION = "osm_lane_graph_v2"
+SUPPORTED_OSM_LANE_GRAPH_SCHEMA_VERSIONS = frozenset(
+    {"osm_lane_graph_v1", OSM_LANE_GRAPH_SCHEMA_VERSION}
+)
 
 
 def _provider_segment_id(value: Mapping[str, Any]) -> str:
@@ -53,6 +56,23 @@ class OSMLaneSegment:
     maneuver: Maneuver
     level: int | None
     confidence: float
+    predecessor_ids: tuple[str, ...] = ()
+    road_class: str | None = None
+    lane_subtype: str | None = None
+    one_way: bool | None = None
+    carriageway_id: str | None = None
+    median_separated: bool | None = None
+    barrier_separated: bool | None = None
+    is_intersection: bool = False
+    provider_attributes: Mapping[str, str] = dataclasses.field(
+        default_factory=dict
+    )
+    left_boundary_attributes: Mapping[str, str] = dataclasses.field(
+        default_factory=dict
+    )
+    right_boundary_attributes: Mapping[str, str] = dataclasses.field(
+        default_factory=dict
+    )
 
     def __post_init__(self) -> None:
         if not self.lane_id or not self.provider_segment_id:
@@ -79,6 +99,17 @@ class OSMLaneSegment:
                     ),
                 )
         object.__setattr__(self, "successor_ids", tuple(self.successor_ids))
+        object.__setattr__(self, "predecessor_ids", tuple(self.predecessor_ids))
+        for field_name in (
+            "provider_attributes",
+            "left_boundary_attributes",
+            "right_boundary_attributes",
+        ):
+            object.__setattr__(
+                self,
+                field_name,
+                dict(sorted(getattr(self, field_name).items())),
+            )
         if not 0.0 <= self.confidence <= 1.0:
             raise ValueError("OSM lane confidence must be in [0,1]")
 
@@ -92,6 +123,41 @@ def _optional_points(
     if value is None:
         return None
     return _points(value, name=name, minimum=minimum)
+
+
+def _optional_bool(value: Any) -> bool | None:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    normalized = str(value).strip().lower()
+    if normalized in {"1", "true", "yes", "y"}:
+        return True
+    if normalized in {"0", "false", "no", "n"}:
+        return False
+    return None
+
+
+def _string_mapping(value: Any) -> dict[str, str]:
+    if not isinstance(value, Mapping):
+        return {}
+    return {
+        str(key): str(item)
+        for key, item in value.items()
+        if str(key) and str(item)
+    }
+
+
+def _first_value(
+    value: Mapping[str, Any],
+    attributes: Mapping[str, str],
+    *names: str,
+) -> str | None:
+    for name in names:
+        candidate = value.get(name, attributes.get(name))
+        if candidate is not None and str(candidate).strip():
+            return str(candidate).strip()
+    return None
 
 
 def _polyline_primitives(
@@ -139,7 +205,10 @@ class OSMMapAdapter:
         *,
         source_sha256: str,
     ) -> None:
-        if payload.get("schema_version") != OSM_LANE_GRAPH_SCHEMA_VERSION:
+        if (
+            payload.get("schema_version")
+            not in SUPPORTED_OSM_LANE_GRAPH_SCHEMA_VERSIONS
+        ):
             raise ValueError("unsupported OSM lane-graph schema")
         if not source_sha256:
             raise ValueError("source_sha256 must not be empty")
@@ -221,6 +290,11 @@ class OSMMapAdapter:
                 raise ValueError(
                     f"unsupported OSM lane maneuver {value.get('maneuver')!r}"
                 ) from error
+            attributes = _string_mapping(value.get("tags", {}))
+            one_way_value = value.get(
+                "one_way",
+                value.get("oneway", attributes.get("oneway")),
+            )
             lanes.append(
                 OSMLaneSegment(
                     lane_id=canonical[provider_id],
@@ -253,9 +327,61 @@ class OSMMapAdapter:
                         else None
                     ),
                     confidence=float(value.get("confidence", 1.0)),
+                    road_class=_first_value(
+                        value,
+                        attributes,
+                        "road_class",
+                        "highway",
+                    ),
+                    lane_subtype=_first_value(
+                        value,
+                        attributes,
+                        "lane_subtype",
+                        "lane_type",
+                        "subtype",
+                    ),
+                    one_way=_optional_bool(one_way_value),
+                    carriageway_id=_first_value(
+                        value,
+                        attributes,
+                        "carriageway_id",
+                        "carriageway",
+                    ),
+                    median_separated=_optional_bool(
+                        value.get(
+                            "median_separated",
+                            attributes.get("median"),
+                        )
+                    ),
+                    barrier_separated=_optional_bool(
+                        value.get(
+                            "barrier_separated",
+                            attributes.get("barrier"),
+                        )
+                    ),
+                    is_intersection=bool(value.get("is_intersection", False)),
+                    provider_attributes=attributes,
+                    left_boundary_attributes=_string_mapping(
+                        value.get("left_boundary_attributes", {})
+                    ),
+                    right_boundary_attributes=_string_mapping(
+                        value.get("right_boundary_attributes", {})
+                    ),
                 )
             )
-        return tuple(lanes)
+        predecessors: dict[str, list[str]] = {
+            lane.lane_id: [] for lane in lanes
+        }
+        for lane in lanes:
+            for successor_id in lane.successor_ids:
+                predecessors[successor_id].append(lane.lane_id)
+        return tuple(
+            dataclasses.replace(
+                lane,
+                predecessor_ids=tuple(sorted(predecessors[lane.lane_id])),
+            )
+            for lane in lanes
+        )
 
     def _build_navigation_map(self) -> NavigationMap:
         semantic = self.payload.get("semantic", {})
@@ -273,9 +399,33 @@ class OSMMapAdapter:
             )
             directed_fields.append(
                 DirectedLaneField(
-                    lane.lane_id,
-                    lane.centerline_enu_m,
-                    lane.level,
+                    lane_id=lane.lane_id,
+                    centerline_enu_m=lane.centerline_enu_m,
+                    level=lane.level,
+                    road_class=lane.road_class,
+                    lane_subtype=lane.lane_subtype,
+                    one_way=lane.one_way,
+                    carriageway_id=lane.carriageway_id,
+                    median_separated=lane.median_separated,
+                    barrier_separated=lane.barrier_separated,
+                    successor_lane_ids=lane.successor_ids,
+                    predecessor_lane_ids=lane.predecessor_ids,
+                    left_adjacent_lane_id=lane.left_adjacent_id,
+                    right_adjacent_lane_id=lane.right_adjacent_id,
+                    is_intersection=lane.is_intersection,
+                    turn_direction=(
+                        lane.maneuver.value
+                        if lane.maneuver
+                        in {
+                            Maneuver.LEFT,
+                            Maneuver.RIGHT,
+                            Maneuver.U_TURN,
+                        }
+                        else None
+                    ),
+                    provider_attributes=lane.provider_attributes,
+                    left_boundary_attributes=lane.left_boundary_attributes,
+                    right_boundary_attributes=lane.right_boundary_attributes,
                 )
             )
             for side, boundary in (
@@ -403,6 +553,19 @@ class OSMMapAdapter:
                 "static_traffic_signal": bool(signals),
                 "stop_line": bool(stop_lines),
                 "traffic_direction": bool(directed_fields),
+                "lane_semantics": any(
+                    lane.road_class is not None
+                    or lane.one_way is not None
+                    or lane.carriageway_id is not None
+                    for lane in directed_fields
+                ),
+                "lane_topology": any(
+                    lane.successor_lane_ids
+                    or lane.predecessor_lane_ids
+                    or lane.left_adjacent_lane_id is not None
+                    or lane.right_adjacent_lane_id is not None
+                    for lane in directed_fields
+                ),
             },
             provenance={
                 "adapter_version": OSM_ADAPTER_VERSION,
