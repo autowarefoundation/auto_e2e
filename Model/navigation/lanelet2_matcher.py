@@ -366,7 +366,13 @@ class Lanelet2TraceMatcher:
     def _lane_sequence(
         self,
         selected: list[tuple[int, _Candidate]],
-    ) -> tuple[list[tuple[Any, TransitionType]], int, float, int, int]:
+    ) -> tuple[
+        list[tuple[Any, TransitionType, bool]],
+        int,
+        float,
+        int,
+        int,
+    ]:
         deduplicated: list[Any] = []
         for _, candidate in selected:
             if (
@@ -377,8 +383,8 @@ class Lanelet2TraceMatcher:
         if not deduplicated:
             return [], 0, 0.0, 0, 0
 
-        output: list[tuple[Any, TransitionType]] = [
-            (deduplicated[0], TransitionType.FOLLOW)
+        output: list[tuple[Any, TransitionType, bool]] = [
+            (deduplicated[0], TransitionType.FOLLOW, True)
         ]
         fill_count = 0
         fill_length_m = 0.0
@@ -388,7 +394,7 @@ class Lanelet2TraceMatcher:
             previous = output[-1][0]
             relation = self._relation(previous, current)
             if relation is not None:
-                output.append((current, relation))
+                output.append((current, relation, True))
                 if relation in (
                     TransitionType.LEFT_ADJACENT,
                     TransitionType.RIGHT_ADJACENT,
@@ -406,11 +412,11 @@ class Lanelet2TraceMatcher:
                 for lanelet in path[1:]:
                     if int(lanelet.id) == int(output[-1][0].id):
                         continue
-                    output.append((lanelet, TransitionType.FOLLOW))
+                    output.append((lanelet, TransitionType.FOLLOW, True))
                     fill_length_m += _polyline_length(_points(lanelet.centerline))
             else:
                 unresolved += 1
-                output.append((current, TransitionType.FOLLOW))
+                output.append((current, TransitionType.FOLLOW, False))
         return output, fill_count, fill_length_m, adjacent_count, unresolved
 
     @staticmethod
@@ -445,6 +451,7 @@ class Lanelet2TraceMatcher:
         transition: TransitionType,
         *,
         destination: bool,
+        connected_from_previous: bool,
     ) -> RouteLaneSegment:
         lanelet_id = int(lanelet.id)
         return RouteLaneSegment(
@@ -461,6 +468,7 @@ class Lanelet2TraceMatcher:
                 else self._maneuver(lanelet)
             ),
             confidence=1.0,
+            connected_from_previous=connected_from_previous,
         )
 
     def match(
@@ -572,8 +580,11 @@ class Lanelet2TraceMatcher:
                 lanelet,
                 transition,
                 destination=index == len(lane_sequence) - 1,
+                connected_from_previous=connected,
             )
-            for index, (lanelet, transition) in enumerate(lane_sequence)
+            for index, (lanelet, transition, connected) in enumerate(
+                lane_sequence
+            )
         )
         return NavigationRoute(
             route_id=f"kitscenes:{scene_id}:{route_identity}",
