@@ -7,13 +7,18 @@ from collections.abc import Iterable
 
 import numpy as np
 
-from navigation.contracts import Maneuver, TransitionType
+from navigation.contracts import (
+    DirectedLaneField,
+    Maneuver,
+    RouteLaneSegment,
+    TransitionType,
+)
 
 from .published_snapshot import CanonicalSceneEvidence
 from .schema import LabelObservation, make_observation
 
 
-MAP_ROUTE_LABELER_VERSION = "odd_deterministic_v2"
+MAP_ROUTE_LABELER_VERSION = "odd_deterministic_v3"
 KINEMATICS_LABELER_VERSION = "odd_deterministic_kinematics_v3"
 KINEMATICS_POLICY_VERSION = "odd_gnss_ins_kinematics_v2"
 INTERVAL_NS = 1_000_000_000
@@ -29,6 +34,8 @@ KINEMATIC_KEYS = (
     "event.ego.strong_response",
 )
 MAP_ROUTE_KEYS = (
+    "odd.road.type",
+    "odd.road.division",
     "odd.road.horizontal_geometry",
     "odd.road.vertical_geometry",
     "odd.road.junction_type",
@@ -41,6 +48,10 @@ MAP_ROUTE_KEYS = (
     "odd.traffic_control.present",
     "odd.road.junction_control",
 )
+LOCAL_MAP_MAX_DISTANCE_M = 8.0
+LOCAL_ROUTE_MAX_DISTANCE_M = 10.0
+LOCAL_MATCH_MAX_HEADING_ERROR_RAD = math.radians(75.0)
+LOCAL_ROUTE_MIN_SEGMENT_CONFIDENCE = 0.5
 
 
 def _local_xy(path: np.ndarray, origin_lat: float, origin_lon: float) -> np.ndarray:
@@ -527,27 +538,403 @@ def _near_polyline(
     )
 
 
-def _lane_context(
+def _wrap_angle(value: float) -> float:
+    return math.atan2(math.sin(value), math.cos(value))
+
+
+def _polyline_heading(polyline: np.ndarray, segment_index: int) -> float:
+    points = np.asarray(polyline, dtype=np.float64)[:, :2]
+    delta = points[segment_index + 1] - points[segment_index]
+    return math.atan2(float(delta[1]), float(delta[0]))
+
+
+def _match_lane(
     point: np.ndarray,
-    route_tangent: np.ndarray,
-    lane_fields: Iterable[np.ndarray],
-) -> tuple[int, int]:
-    same = 0
-    opposite = 0
-    tangent_norm = float(np.linalg.norm(route_tangent))
-    if tangent_norm < 1e-6:
-        return same, opposite
-    for centerline in lane_fields:
-        distance, index = _point_to_polyline(point, centerline)
-        if distance > 8.0:
+    heading_rad: float,
+    lanes: Iterable[DirectedLaneField],
+) -> tuple[DirectedLaneField, float, int, float] | None:
+    candidates: list[
+        tuple[float, str, DirectedLaneField, float, int, float]
+    ] = []
+    for lane in lanes:
+        distance, segment_index = _point_to_polyline(
+            point, lane.centerline_enu_m
+        )
+        lane_heading = _polyline_heading(
+            lane.centerline_enu_m, segment_index
+        )
+        heading_error = abs(_wrap_angle(heading_rad - lane_heading))
+        if (
+            distance > LOCAL_MAP_MAX_DISTANCE_M
+            or heading_error > LOCAL_MATCH_MAX_HEADING_ERROR_RAD
+        ):
             continue
-        points = np.asarray(centerline, dtype=np.float64)[:, :2]
-        lane_tangent = points[index + 1] - points[index]
-        if float(np.dot(route_tangent, lane_tangent)) >= 0.0:
-            same += 1
+        score = distance + 2.0 * heading_error
+        candidates.append(
+            (
+                score,
+                lane.lane_id,
+                lane,
+                distance,
+                segment_index,
+                heading_error,
+            )
+        )
+    if not candidates:
+        return None
+    _, _, lane, distance, segment_index, heading_error = min(candidates)
+    return lane, distance, segment_index, heading_error
+
+
+def _match_route_segment(
+    point: np.ndarray,
+    heading_rad: float,
+    segments: Iterable[RouteLaneSegment],
+) -> tuple[RouteLaneSegment, float, int, float] | None:
+    candidates: list[
+        tuple[float, str, RouteLaneSegment, float, int, float]
+    ] = []
+    for segment in segments:
+        if segment.confidence < LOCAL_ROUTE_MIN_SEGMENT_CONFIDENCE:
+            continue
+        distance, segment_index = _point_to_polyline(
+            point, segment.centerline_enu_m
+        )
+        route_heading = _polyline_heading(
+            segment.centerline_enu_m, segment_index
+        )
+        heading_error = abs(_wrap_angle(heading_rad - route_heading))
+        if (
+            distance > LOCAL_ROUTE_MAX_DISTANCE_M
+            or heading_error > LOCAL_MATCH_MAX_HEADING_ERROR_RAD
+        ):
+            continue
+        score = (
+            distance
+            + 2.0 * heading_error
+            + (1.0 - segment.confidence)
+        )
+        candidates.append(
+            (
+                score,
+                segment.lane_id,
+                segment,
+                distance,
+                segment_index,
+                heading_error,
+            )
+        )
+    if not candidates:
+        return None
+    _, _, segment, distance, segment_index, heading_error = min(candidates)
+    return segment, distance, segment_index, heading_error
+
+
+def _match_confidence(distance_m: float, heading_error_rad: float) -> float:
+    confidence = math.exp(-distance_m / LOCAL_MAP_MAX_DISTANCE_M)
+    confidence *= math.exp(
+        -heading_error_rad / LOCAL_MATCH_MAX_HEADING_ERROR_RAD
+    )
+    return min(1.0, max(0.0, confidence))
+
+
+def _road_type(road_class: str | None) -> str | None:
+    if road_class is None:
+        return None
+    value = road_class.strip().lower().replace("-", "_")
+    aliases = {
+        "motorway": "motorway",
+        "motorway_link": "ramp",
+        "trunk": "trunk",
+        "trunk_link": "ramp",
+        "primary": "primary",
+        "primary_link": "ramp",
+        "secondary": "secondary",
+        "secondary_link": "ramp",
+        "tertiary": "tertiary",
+        "tertiary_link": "ramp",
+        "residential": "residential",
+        "service": "service",
+        "parking_aisle": "parking_aisle",
+        "living_street": "shared_space",
+        "shared_space": "shared_space",
+        "ramp": "ramp",
+    }
+    return aliases.get(value)
+
+
+def _lane_type(lane: DirectedLaneField) -> str | None:
+    value = (lane.lane_subtype or "").strip().lower().replace("-", "_")
+    if value in {"road", "lane", "driving", "vehicle", "general"}:
+        return "general"
+    if "bus" in value:
+        return "bus"
+    if value in {"bicycle", "bike", "cycleway", "cycle_lane"}:
+        return "bicycle"
+    if "tram" in value:
+        return "tram"
+    if "emergency" in value:
+        return "emergency"
+    if "turn" in value:
+        return "turn_only"
+    if "parking" in value:
+        return "parking"
+    if "shared" in value:
+        return "shared"
+    return None
+
+
+def _nearby_lane_context(
+    point: np.ndarray,
+    matched_lane: DirectedLaneField,
+    matched_index: int,
+    lanes: tuple[DirectedLaneField, ...],
+) -> tuple[tuple[DirectedLaneField, ...], tuple[DirectedLaneField, ...]]:
+    matched_heading = _polyline_heading(
+        matched_lane.centerline_enu_m, matched_index
+    )
+    same: list[DirectedLaneField] = []
+    opposite: list[DirectedLaneField] = []
+    for lane in lanes:
+        distance, segment_index = _point_to_polyline(
+            point, lane.centerline_enu_m
+        )
+        if distance > 12.0:
+            continue
+        lane_heading = _polyline_heading(
+            lane.centerline_enu_m, segment_index
+        )
+        if math.cos(_wrap_angle(lane_heading - matched_heading)) >= 0.0:
+            same.append(lane)
         else:
-            opposite += 1
-    return same, opposite
+            opposite.append(lane)
+    return tuple(same), tuple(opposite)
+
+
+def _same_direction_carriageway_lanes(
+    matched_lane: DirectedLaneField,
+    nearby_same: tuple[DirectedLaneField, ...],
+    lanes_by_id: dict[str, DirectedLaneField],
+    *,
+    topology_available: bool,
+) -> tuple[DirectedLaneField, ...]:
+    if matched_lane.carriageway_id is not None:
+        return tuple(
+            lane
+            for lane in nearby_same
+            if lane.carriageway_id == matched_lane.carriageway_id
+        )
+    if not topology_available:
+        return ()
+    lane_ids = {matched_lane.lane_id}
+    frontier = [matched_lane.lane_id]
+    while frontier:
+        lane_id = frontier.pop()
+        lane = lanes_by_id[lane_id]
+        for adjacent_id in (
+            lane.left_adjacent_lane_id,
+            lane.right_adjacent_lane_id,
+        ):
+            if adjacent_id is None or adjacent_id in lane_ids:
+                continue
+            adjacent = lanes_by_id.get(adjacent_id)
+            if adjacent is None or adjacent not in nearby_same:
+                continue
+            lane_ids.add(adjacent_id)
+            frontier.append(adjacent_id)
+    return tuple(lanes_by_id[lane_id] for lane_id in sorted(lane_ids))
+
+
+def _lane_count_bin(count: int) -> str:
+    if count <= 1:
+        return "one"
+    if count == 2:
+        return "two"
+    if count == 3:
+        return "three"
+    return "four_plus"
+
+
+def _directionality(
+    lane: DirectedLaneField,
+    nearby_opposite: tuple[DirectedLaneField, ...],
+) -> str | None:
+    if lane.one_way is not None:
+        return "one_way" if lane.one_way else "two_way"
+    if lane.carriageway_id is not None and any(
+        other.carriageway_id == lane.carriageway_id
+        for other in nearby_opposite
+    ):
+        return "two_way"
+    return None
+
+
+def _division(
+    lane: DirectedLaneField,
+    nearby_opposite: tuple[DirectedLaneField, ...],
+) -> str | None:
+    if lane.median_separated is True or lane.barrier_separated is True:
+        return "divided"
+    if (
+        lane.median_separated is False
+        and lane.barrier_separated is False
+    ):
+        return "undivided"
+    if lane.carriageway_id is None or not nearby_opposite:
+        return None
+    opposite_carriageways = {
+        other.carriageway_id
+        for other in nearby_opposite
+        if other.carriageway_id is not None
+    }
+    if lane.carriageway_id in opposite_carriageways:
+        return "undivided"
+    if opposite_carriageways:
+        return "divided"
+    return None
+
+
+def _junction_position(
+    point: np.ndarray,
+    center: int,
+    local_xy: np.ndarray,
+    lane: DirectedLaneField,
+    lanes_by_id: dict[str, DirectedLaneField],
+    intersection_polygons: list[np.ndarray],
+) -> tuple[str, float]:
+    distance = _distance_to_polygons(point, intersection_polygons)
+    if lane.is_intersection or any(
+        _inside_polygon(point, polygon)
+        for polygon in intersection_polygons
+    ):
+        return "inside", distance
+    if distance <= 30.0:
+        future = local_xy[center:min(len(local_xy), center + 51)]
+        past = local_xy[max(0, center - 50):center]
+        future_inside = any(
+            _inside_polygon(candidate, polygon)
+            for candidate in future
+            for polygon in intersection_polygons
+        )
+        past_inside = any(
+            _inside_polygon(candidate, polygon)
+            for candidate in past
+            for polygon in intersection_polygons
+        )
+        if future_inside:
+            return "approach", distance
+        if past_inside:
+            return "exit", distance
+    successors = [
+        lanes_by_id[lane_id]
+        for lane_id in lane.successor_lane_ids
+        if lane_id in lanes_by_id
+    ]
+    predecessors = [
+        lanes_by_id[lane_id]
+        for lane_id in lane.predecessor_lane_ids
+        if lane_id in lanes_by_id
+    ]
+    if any(item.is_intersection for item in successors):
+        return "approach", distance
+    if any(item.is_intersection for item in predecessors):
+        return "exit", distance
+    return "midblock", distance
+
+
+def _junction_arm_headings(
+    lane: DirectedLaneField,
+    lanes_by_id: dict[str, DirectedLaneField],
+) -> tuple[float, ...]:
+    headings: list[float] = []
+    predecessors = [
+        lanes_by_id[lane_id]
+        for lane_id in lane.predecessor_lane_ids
+        if lane_id in lanes_by_id
+    ]
+    successors = [
+        lanes_by_id[lane_id]
+        for lane_id in lane.successor_lane_ids
+        if lane_id in lanes_by_id
+    ]
+    if predecessors:
+        for item in predecessors:
+            headings.append(
+                _wrap_angle(
+                    _polyline_heading(
+                        item.centerline_enu_m,
+                        len(item.centerline_enu_m) - 2,
+                    )
+                    + math.pi
+                )
+            )
+    else:
+        headings.append(
+            _wrap_angle(_polyline_heading(lane.centerline_enu_m, 0) + math.pi)
+        )
+    if successors:
+        for item in successors:
+            headings.append(_polyline_heading(item.centerline_enu_m, 0))
+    elif lane.is_intersection:
+        headings.append(
+            _polyline_heading(
+                lane.centerline_enu_m,
+                len(lane.centerline_enu_m) - 2,
+            )
+        )
+    unique: list[float] = []
+    for heading in sorted(headings):
+        if all(
+            abs(_wrap_angle(heading - existing)) > math.radians(25.0)
+            for existing in unique
+        ):
+            unique.append(heading)
+    return tuple(unique)
+
+
+def _junction_type(
+    lane: DirectedLaneField,
+    position: str,
+    lanes_by_id: dict[str, DirectedLaneField],
+) -> tuple[str | None, int, bool]:
+    if position == "midblock":
+        return "none", 0, False
+    attributes = {
+        key.lower(): value.lower()
+        for key, value in lane.provider_attributes.items()
+    }
+    if any(
+        "roundabout" in value
+        for key, value in attributes.items()
+        if key in {"junction", "subtype", "type"}
+    ):
+        return "roundabout", 0, False
+    predecessor_count = len(lane.predecessor_lane_ids)
+    successor_count = len(lane.successor_lane_ids)
+    if predecessor_count > 1 and successor_count <= 1:
+        return "merge", predecessor_count + successor_count, False
+    arms = _junction_arm_headings(lane, lanes_by_id)
+    branch_count = len(arms)
+    if branch_count == 4:
+        return "crossroad", branch_count, False
+    if branch_count == 3:
+        ordered = sorted((heading + 2 * math.pi) % (2 * math.pi) for heading in arms)
+        gaps = [
+            ordered[(index + 1) % 3]
+            - ordered[index]
+            if index < 2
+            else ordered[0] + 2 * math.pi - ordered[2]
+            for index in range(3)
+        ]
+        largest_gap_deg = math.degrees(max(gaps))
+        if largest_gap_deg >= 150.0:
+            return "t_junction", branch_count, False
+        if largest_gap_deg <= 140.0:
+            return "y_junction", branch_count, False
+        return None, branch_count, True
+    if successor_count > 1:
+        return "diverge", branch_count, False
+    return None, branch_count, False
 
 
 def label_map_route(
@@ -555,12 +942,12 @@ def label_map_route(
 ) -> tuple[LabelObservation, ...]:
     navigation_map = evidence.navigation_map
     route = evidence.navigation_route
-    if navigation_map is None or route is None:
+    if navigation_map is None:
         provenance = {
             "labeler_version": MAP_ROUTE_LABELER_VERSION,
-            "map_available": navigation_map is not None,
+            "map_available": False,
             "route_available": route is not None,
-            "reason": "canonical map or selected route is unavailable",
+            "reason": "canonical map is unavailable",
         }
         return tuple(
             make_observation(
@@ -582,41 +969,28 @@ def label_map_route(
         navigation_map.frame.origin_latitude_deg,
         navigation_map.frame.origin_longitude_deg,
     )
-    quality = route.quality
-    quality_ok = (
-        route.valid
-        and route.confidence >= 0.6
-        and quality.matched_pose_ratio >= 0.8
-        and quality.unresolved_discontinuities == 0
-    )
-    confidence = min(
-        float(route.confidence),
-        float(quality.matched_pose_ratio),
-    )
-    provenance = {
+    route_quality = route.quality if route is not None else None
+    provenance: dict[str, object] = {
         "labeler_version": MAP_ROUTE_LABELER_VERSION,
         "map_version": navigation_map.map_version,
-        "route_id": route.route_id,
-        "route_confidence": route.confidence,
-        "matched_pose_ratio": quality.matched_pose_ratio,
+        "quality_policy": "ego_local_map_match_v1",
+        "route_available": route is not None,
     }
+    if route is not None and route_quality is not None:
+        provenance.update(
+            {
+                "route_id": route.route_id,
+                "route_valid_global": route.valid,
+                "route_confidence_global": route.confidence,
+                "matched_pose_ratio_global": (
+                    route_quality.matched_pose_ratio
+                ),
+                "unresolved_discontinuities_global": (
+                    route_quality.unresolved_discontinuities
+                ),
+            }
+        )
     observations: list[LabelObservation] = []
-
-    if not quality_ok or not route.lane_sequence:
-        for key in MAP_ROUTE_KEYS:
-            observations.append(
-                make_observation(
-                    scene_uid=evidence.scene_uid,
-                    key=key,
-                    status="unavailable",
-                    confidence=0.0,
-                    source="map_route",
-                    start_timestamp_ns=evidence.start_timestamp_ns,
-                    end_timestamp_ns=evidence.end_timestamp_ns,
-                    provenance=provenance,
-                )
-            )
-        return tuple(observations)
 
     intersection_polygons = [
         polygon.points_enu_m
@@ -630,72 +1004,80 @@ def label_map_route(
         signal.position_enu_m.reshape(1, -1)
         for signal in navigation_map.static_traffic_signals
     ]
-    lane_fields = [
-        lane.centerline_enu_m for lane in navigation_map.directed_lane_fields
-    ]
+    lane_fields = navigation_map.directed_lane_fields
+    lanes_by_id = {lane.lane_id: lane for lane in lane_fields}
+    topology_available = bool(
+        navigation_map.layer_availability.get("lane_topology", False)
+    )
 
     for start_ns, end_ns, left, right in _interval_slices(timestamps):
         center = (left + right - 1) // 2
         point = local_xy[center]
-        best_segment = None
-        best_distance = math.inf
-        best_line_index = 0
-        for segment in route.lane_sequence:
-            distance, line_index = _point_to_polyline(
-                point, segment.centerline_enu_m
-            )
-            if distance < best_distance:
-                best_segment = segment
-                best_distance = distance
-                best_line_index = line_index
-        if best_segment is None or best_distance > 15.0:
-            for key in (
-                "odd.road.horizontal_geometry",
-                "odd.road.vertical_geometry",
-                "odd.road.junction_type",
-                "odd.road.junction_position",
-                "odd.route.action",
-            ):
+        heading_rad = math.radians(90.0 - float(path[center, 2]))
+        lane_match = _match_lane(point, heading_rad, lane_fields)
+        if lane_match is None:
+            for key in MAP_ROUTE_KEYS:
+                status = (
+                    "unavailable"
+                    if not lane_fields or key != "odd.route.action"
+                    else "ambiguous"
+                )
                 observations.append(
                     make_observation(
                         scene_uid=evidence.scene_uid,
                         key=key,
-                        status="ambiguous",
+                        status=status,
                         confidence=0.0,
                         source="map_route",
                         start_timestamp_ns=start_ns,
                         end_timestamp_ns=end_ns,
-                        provenance=provenance,
+                        provenance={
+                            **provenance,
+                            "reason": "ego local map match unavailable",
+                        },
                     )
                 )
             continue
 
-        common = {
+        lane, map_distance, lane_index, map_heading_error = lane_match
+        map_confidence = _match_confidence(
+            map_distance, map_heading_error
+        )
+        interval_provenance = {
+            **provenance,
+            "matched_lane_id": lane.lane_id,
+            "local_map_match": {
+                "distance_m": map_distance,
+                "heading_error_rad": map_heading_error,
+            },
+        }
+        common: dict[str, object] = {
             "scene_uid": evidence.scene_uid,
             "status": "valid",
-            "confidence": confidence,
+            "confidence": map_confidence,
             "source": "map_route",
             "start_timestamp_ns": start_ns,
             "end_timestamp_ns": end_ns,
-            "measurements": {"route_lateral_distance_m": best_distance},
-            "provenance": provenance,
+            "measurements": {
+                "map_lateral_distance_m": map_distance,
+                "map_heading_error_rad": map_heading_error,
+            },
+            "provenance": interval_provenance,
         }
-        action = _route_action(
-            best_segment.maneuver,
-            best_segment.transition_from_previous,
-        )
+
+        road_type = _road_type(lane.road_class)
         observations.append(
             make_observation(
-                key="odd.route.action",
-                status="valid" if action else "ambiguous",
-                values=(action,) if action else (),
-                confidence=confidence if action else 0.0,
-                source="map_route",
+                key="odd.road.type",
+                status="valid" if road_type else "unavailable",
+                values=(road_type,) if road_type else (),
+                confidence=map_confidence if road_type else 0.0,
                 scene_uid=evidence.scene_uid,
+                source="map_route",
                 start_timestamp_ns=start_ns,
                 end_timestamp_ns=end_ns,
-                measurements={"route_lateral_distance_m": best_distance},
-                provenance=provenance,
+                measurements=common["measurements"],
+                provenance=interval_provenance,
             )
         )
         observations.append(
@@ -703,7 +1085,7 @@ def label_map_route(
                 key="odd.road.horizontal_geometry",
                 values=(
                     _horizontal_geometry(
-                        best_segment.centerline_enu_m, best_line_index
+                        lane.centerline_enu_m, lane_index
                     ),
                 ),
                 **common,
@@ -714,40 +1096,21 @@ def label_map_route(
                 key="odd.road.vertical_geometry",
                 values=(
                     _vertical_geometry(
-                        best_segment.centerline_enu_m, best_line_index
+                        lane.centerline_enu_m, lane_index
                     ),
                 ),
                 **common,
             )
         )
 
-        inside_intersection = any(
-            _inside_polygon(point, polygon)
-            for polygon in intersection_polygons
+        junction_position, distance_to_intersection = _junction_position(
+            point,
+            center,
+            local_xy,
+            lane,
+            lanes_by_id,
+            intersection_polygons,
         )
-        distance_to_intersection = _distance_to_polygons(
-            point, intersection_polygons
-        )
-        if inside_intersection:
-            junction_position = "inside"
-        elif distance_to_intersection <= 30.0:
-            future = local_xy[center:min(len(local_xy), center + 51)]
-            past = local_xy[max(0, center - 50):center]
-            future_inside = any(
-                _inside_polygon(candidate, polygon)
-                for candidate in future
-                for polygon in intersection_polygons
-            )
-            past_inside = any(
-                _inside_polygon(candidate, polygon)
-                for candidate in past
-                for polygon in intersection_polygons
-            )
-            junction_position = "approach" if future_inside else (
-                "exit" if past_inside else "midblock"
-            )
-        else:
-            junction_position = "midblock"
         observations.append(
             make_observation(
                 key="odd.road.junction_position",
@@ -756,21 +1119,23 @@ def label_map_route(
             )
         )
 
-        if best_segment.transition_from_previous == TransitionType.MERGE:
-            junction_type = "merge"
-        elif best_segment.transition_from_previous == TransitionType.SPLIT:
-            junction_type = "diverge"
-        elif junction_position == "midblock":
-            junction_type = "none"
-        else:
-            junction_type = None
+        junction_type, branch_count, bedrock_eligible = _junction_type(
+            lane, junction_position, lanes_by_id
+        )
+        junction_status = (
+            "valid"
+            if junction_type is not None
+            else "ambiguous"
+            if bedrock_eligible
+            else "unavailable"
+        )
         observations.append(
             make_observation(
                 scene_uid=evidence.scene_uid,
                 key="odd.road.junction_type",
-                status="valid" if junction_type else "ambiguous",
+                status=junction_status,
                 values=(junction_type,) if junction_type else (),
-                confidence=confidence if junction_type else 0.0,
+                confidence=map_confidence if junction_type else 0.0,
                 source="map_route",
                 start_timestamp_ns=start_ns,
                 end_timestamp_ns=end_ns,
@@ -779,52 +1144,181 @@ def label_map_route(
                         distance_to_intersection
                         if math.isfinite(distance_to_intersection)
                         else -1.0
-                    )
+                    ),
+                    "junction_branch_count": branch_count,
                 },
-                provenance=provenance,
+                provenance={
+                    **interval_provenance,
+                    "bedrock_eligible": bedrock_eligible,
+                    "candidate_values": (
+                        ["t_junction", "y_junction"]
+                        if bedrock_eligible
+                        else []
+                    ),
+                },
             )
         )
 
-        route_points = np.asarray(
-            best_segment.centerline_enu_m, dtype=np.float64
-        )[:, :2]
-        route_tangent = (
-            route_points[best_line_index + 1] - route_points[best_line_index]
+        nearby_same, nearby_opposite = _nearby_lane_context(
+            point, lane, lane_index, lane_fields
         )
-        same_lanes, opposite_lanes = _lane_context(
-            point, route_tangent, lane_fields
+        carriageway_lanes = _same_direction_carriageway_lanes(
+            lane,
+            nearby_same,
+            lanes_by_id,
+            topology_available=topology_available,
         )
-        if same_lanes > 0:
-            lane_count = (
-                "one"
-                if same_lanes == 1
-                else "two"
-                if same_lanes == 2
-                else "three"
-                if same_lanes == 3
-                else "four_plus"
+        observations.append(
+            make_observation(
+                scene_uid=evidence.scene_uid,
+                key="odd.road.lane_count_bin",
+                status="valid" if carriageway_lanes else "unavailable",
+                values=(
+                    (_lane_count_bin(len(carriageway_lanes)),)
+                    if carriageway_lanes
+                    else ()
+                ),
+                confidence=map_confidence if carriageway_lanes else 0.0,
+                source="map_route",
+                start_timestamp_ns=start_ns,
+                end_timestamp_ns=end_ns,
+                measurements={
+                    **common["measurements"],
+                    "same_direction_lane_count": len(carriageway_lanes),
+                },
+                provenance=interval_provenance,
             )
-            observations.append(
-                make_observation(
-                    key="odd.road.lane_count_bin",
-                    values=(lane_count,),
-                    **common,
+        )
+        directionality = _directionality(lane, nearby_opposite)
+        observations.append(
+            make_observation(
+                scene_uid=evidence.scene_uid,
+                key="odd.road.directionality",
+                status="valid" if directionality else "unavailable",
+                values=(directionality,) if directionality else (),
+                confidence=map_confidence if directionality else 0.0,
+                source="map_route",
+                start_timestamp_ns=start_ns,
+                end_timestamp_ns=end_ns,
+                measurements=common["measurements"],
+                provenance=interval_provenance,
+            )
+        )
+        division = _division(lane, nearby_opposite)
+        observations.append(
+            make_observation(
+                scene_uid=evidence.scene_uid,
+                key="odd.road.division",
+                status="valid" if division else "unavailable",
+                values=(division,) if division else (),
+                confidence=map_confidence if division else 0.0,
+                source="map_route",
+                start_timestamp_ns=start_ns,
+                end_timestamp_ns=end_ns,
+                measurements=common["measurements"],
+                provenance=interval_provenance,
+            )
+        )
+        lane_types = sorted(
+            {
+                value
+                for item in carriageway_lanes or (lane,)
+                if (value := _lane_type(item)) is not None
+            }
+        )
+        observations.append(
+            make_observation(
+                scene_uid=evidence.scene_uid,
+                key="odd.road.lane_type_present",
+                status="valid" if lane_types else "unavailable",
+                values=lane_types,
+                confidence=map_confidence if lane_types else 0.0,
+                source="map_route",
+                start_timestamp_ns=start_ns,
+                end_timestamp_ns=end_ns,
+                measurements=common["measurements"],
+                provenance=interval_provenance,
+            )
+        )
+
+        route_match = (
+            _match_route_segment(
+                point, heading_rad, route.lane_sequence
+            )
+            if route is not None and route.lane_sequence
+            else None
+        )
+        route_status = "unavailable"
+        route_values: tuple[str, ...] = ()
+        route_confidence = 0.0
+        route_measurements: dict[str, float] = {}
+        route_provenance = {
+            **interval_provenance,
+            "route_quality_policy": "local_segment_match_v1",
+            "intent_semantics": (
+                "reconstructed_from_ego_trace"
+                if route is not None and route.estimated_destination
+                else "planned_route"
+            ),
+            "estimated_destination": (
+                route.estimated_destination if route is not None else None
+            ),
+        }
+        if route_match is not None:
+            (
+                route_segment,
+                route_distance,
+                _,
+                route_heading_error,
+            ) = route_match
+            route_measurements = {
+                "route_lateral_distance_m": route_distance,
+                "route_heading_error_rad": route_heading_error,
+                "route_segment_confidence": route_segment.confidence,
+            }
+            route_provenance["matched_route_lane_id"] = (
+                route_segment.lane_id
+            )
+            if route_segment.connected_from_previous:
+                action = _route_action(
+                    route_segment.maneuver,
+                    route_segment.transition_from_previous,
                 )
-            )
-            observations.append(
-                make_observation(
-                    key="odd.road.directionality",
-                    values=("two_way" if opposite_lanes else "one_way",),
-                    **common,
+                if action is not None:
+                    route_status = "valid"
+                    route_values = (action,)
+                    route_confidence = min(
+                        route_segment.confidence,
+                        _match_confidence(
+                            route_distance, route_heading_error
+                        ),
+                    )
+                else:
+                    route_status = "ambiguous"
+            else:
+                route_status = "ambiguous"
+                route_provenance["reason"] = (
+                    "matched route segment begins at a local discontinuity"
                 )
+        elif route is not None and route.lane_sequence:
+            route_status = "ambiguous"
+            route_provenance["reason"] = (
+                "no route segment passed local distance and heading gates"
             )
-            observations.append(
-                make_observation(
-                    key="odd.road.lane_type_present",
-                    values=("general",),
-                    **common,
-                )
+        observations.append(
+            make_observation(
+                scene_uid=evidence.scene_uid,
+                key="odd.route.action",
+                status=route_status,
+                values=route_values,
+                confidence=route_confidence,
+                source="map_route",
+                start_timestamp_ns=start_ns,
+                end_timestamp_ns=end_ns,
+                measurements=route_measurements,
+                provenance=route_provenance,
             )
+        )
 
         structures: list[str] = []
         if any(
@@ -857,11 +1351,11 @@ def label_map_route(
                 key="odd.traffic_control.present",
                 status="valid" if controls else "unavailable",
                 values=controls,
-                confidence=confidence if controls else 0.0,
+                confidence=map_confidence if controls else 0.0,
                 source="map_route",
                 start_timestamp_ns=start_ns,
                 end_timestamp_ns=end_ns,
-                provenance=provenance,
+                provenance=interval_provenance,
             )
         )
         if near_signal:
@@ -879,11 +1373,11 @@ def label_map_route(
                 key="odd.road.junction_control",
                 status=control_status,
                 values=(control,) if control else (),
-                confidence=confidence if control else 0.0,
+                confidence=map_confidence if control else 0.0,
                 source="map_route",
                 start_timestamp_ns=start_ns,
                 end_timestamp_ns=end_ns,
-                provenance=provenance,
+                provenance=interval_provenance,
             )
         )
     return tuple(observations)
