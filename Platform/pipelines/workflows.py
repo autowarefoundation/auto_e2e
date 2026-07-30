@@ -1950,7 +1950,7 @@ def data_processing(
                     "geometry_id": quality["geometry_id"],
                 })
             navigation_artifact_summary = {
-                "schema_version": "scene_navigation_v1",
+                "schema_version": "scene_navigation_v2",
                 "scenes": artifact_records,
             }
 
