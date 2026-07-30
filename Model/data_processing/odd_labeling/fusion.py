@@ -25,7 +25,7 @@ from .schema import (
 )
 
 
-FUSION_VERSION = "odd_source_fusion_v1"
+FUSION_VERSION = "odd_source_fusion_v2"
 EVENT_SEGMENTER_VERSION = "odd_event_segmenter_v2"
 EVENT_JOIN_GAP_NS = 1_000_000_000
 EVENT_ONSET_QUANTUM_NS = 100_000_000
@@ -90,6 +90,9 @@ def fusion_config_document() -> dict[str, Any]:
         ],
         "authoritative_conflict_confidence_multiplier": 0.85,
         "union_keys": sorted(UNION_KEYS),
+        "union_neutral_values": {
+            key: ONTOLOGY[key].neutral_value for key in sorted(UNION_KEYS)
+        },
         "event_segmenter": {
             "version": EVENT_SEGMENTER_VERSION,
             "join_gap_ns": EVENT_JOIN_GAP_NS,
@@ -482,7 +485,13 @@ def _resolve_interval(
             policy = "cross_source_agreement"
         elif (
             key in UNION_KEYS
-            and all("none" not in item.values for item in valid)
+            and (
+                ONTOLOGY[key].neutral_value is None
+                or all(
+                    ONTOLOGY[key].neutral_value not in item.values
+                    for item in valid
+                )
+            )
         ):
             values = tuple(
                 sorted(
