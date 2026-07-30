@@ -281,7 +281,8 @@ def test_navigation_contracts_invalidate_old_pack_caches():
     }
     assert workflows.INGEST_CACHE_VERSION == "ingest-v3"
     assert workflows.LABEL_CACHE_VERSION == "label-v3-v1-v2"
-    assert workflows.PACK_CACHE_VERSION == "pack-v3-v1-v5-v3"
+    assert workflows.PACK_CACHE_VERSION == "pack-v3-v1-v6-v3"
+    assert workflows.KITSCENES_NAVIGATION_DATASET_VERSION == "v3.1"
 
 
 def test_old_geometry_pack_cache_is_not_aliased():
