@@ -237,6 +237,23 @@ class Lanelet2MapAdapter:
             if item is not None and self._can_pass(item)
         )
 
+    def _adjacent_lane_ids(
+        self,
+        lanelet: Any,
+        side: str,
+    ) -> tuple[str, ...]:
+        relation_names = (
+            (side, f"adjacent{side.title()}")
+            if side in {"left", "right"}
+            else ()
+        )
+        output: list[str] = []
+        for relation in relation_names:
+            for lane_id in self._related_lane_ids(lanelet, relation):
+                if lane_id not in output:
+                    output.append(lane_id)
+        return tuple(output)
+
     def _traffic_signals(self) -> tuple[StaticTrafficSignal, ...]:
         signals: list[StaticTrafficSignal] = []
         layer = getattr(
@@ -340,8 +357,8 @@ class Lanelet2MapAdapter:
                             right_attributes,
                         )
                     )
-                    left_ids = self._related_lane_ids(lanelet, "left")
-                    right_ids = self._related_lane_ids(lanelet, "right")
+                    left_ids = self._adjacent_lane_ids(lanelet, "left")
+                    right_ids = self._adjacent_lane_ids(lanelet, "right")
                     directions.append(
                         DirectedLaneField(
                             lane_id=canonical_id,
