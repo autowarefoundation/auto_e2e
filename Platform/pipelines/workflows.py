@@ -521,6 +521,13 @@ def _resumed_checkpoint_record(payload: dict, path: str) -> dict:
         "sha256": sha256_file(path),
         "size": os.path.getsize(path),
     }
+    metric_contract = history[-1].get("validation_metric_contract")
+    if metric_contract is not None:
+        if not isinstance(metric_contract, dict):
+            raise ValueError(
+                "resume checkpoint metric contract must be a mapping"
+            )
+        record["metric_contract"] = dict(metric_contract)
     selection = history[-1].get("checkpoint_selection")
     if selection is not None:
         if not isinstance(selection, dict):
@@ -721,6 +728,9 @@ def _best_trajectory_checkpoint_from_history(
             "uri": uri,
             "sha256": sha256,
             "selection": dict(selection),
+            "metric_contract": dict(
+                entry["validation_metric_contract"]
+            ),
         }
         best_utility = utility
     if best is None:
@@ -875,11 +885,11 @@ def _evaluate_open_loop(
     was_training = model.training
     all_ade: list[float] = []
     all_fde: list[float] = []
+    evaluation_steps = 30
     horizon_steps = {
         "1s": 10,
         "2s": 20,
-        "3s": 30,
-        "6_4s": AUTO_E2E_TIMESTEPS,
+        "3s": evaluation_steps,
     }
     horizon_ade: dict[str, list[float]] = {
         label: [] for label in horizon_steps
@@ -1134,8 +1144,9 @@ def _evaluate_open_loop(
                     errors = np.linalg.norm(
                         pred_traj - target_traj, axis=1
                     )
-                    all_ade.append(float(errors.mean()))
-                    all_fde.append(float(errors[-1]))
+                    evaluation_errors = errors[:evaluation_steps]
+                    all_ade.append(float(evaluation_errors.mean()))
+                    all_fde.append(float(evaluation_errors[-1]))
                     for label, step_count in horizon_steps.items():
                         if step_count > len(errors):
                             raise ValueError(
@@ -1178,8 +1189,8 @@ def _evaluate_open_loop(
                                 float("nan"),
                             )
                         navigation_record = navigation_sample_metrics(
-                            pred_traj,
-                            target_traj,
+                            pred_traj[:evaluation_steps],
+                            target_traj[:evaluation_steps],
                             raw_route_mask[sample_index].numpy(),
                             raw_map_context[sample_index].numpy(),
                             route_valid=bool(
@@ -1209,8 +1220,8 @@ def _evaluate_open_loop(
                             ]
                             route_swap_records.append(
                                 route_swap_sample_metrics(
-                                    pred_traj,
-                                    swapped_traj,
+                                    pred_traj[:evaluation_steps],
+                                    swapped_traj[:evaluation_steps],
                                     raw_route_mask[
                                         sample_index
                                     ].numpy(),
@@ -1282,9 +1293,17 @@ def _evaluate_open_loop(
     result = {
         "ade": ade,
         "fde": fde,
-        "evaluation_steps": AUTO_E2E_TIMESTEPS,
+        "evaluation_steps": evaluation_steps,
+        "prediction_steps": AUTO_E2E_TIMESTEPS,
         "sample_count": len(all_ade),
         "sample_uid_digest": uid_digest,
+        "metric_contract": {
+            "version": "control_rollout_validation_v2",
+            "horizon_seconds": 3.0,
+            "horizon_steps": evaluation_steps,
+            "target_source": "target_control_rollout",
+            "aggregation": "sample_mean",
+        },
         "horizons": {
             label: {
                 "steps": horizon_steps[label],
@@ -1317,6 +1336,29 @@ def _evaluate_open_loop(
         result["rollout_selector_records"] = (
             rollout_selector_records
         )
+        from evaluation.checkpoint_selection import (
+            aggregate_validation_records,
+        )
+        from evaluation.rollout_validation import (
+            ROLLOUT_VALIDATION_VERSION,
+        )
+
+        aggregates = aggregate_validation_records(
+            rollout_selector_records
+        )
+        result["ade"] = float(
+            aggregates["metrics"]["ade_3s_m"]["scene_balanced"]
+        )
+        result["fde"] = float(
+            aggregates["metrics"]["fde_3s_m"]["scene_balanced"]
+        )
+        result["metric_contract"] = {
+            "version": ROLLOUT_VALIDATION_VERSION,
+            "horizon_seconds": 3.0,
+            "horizon_steps": evaluation_steps,
+            "target_source": "logged_xy",
+            "aggregation": "scene_balanced",
+        }
     return result
 
 
@@ -1330,9 +1372,27 @@ def _register_checkpoint_version(
     checkpoint_sha256: str,
     ade: float,
     fde: float,
+    metric_contract: dict,
     selection: dict | None = None,
 ) -> str:
     """Register one immutable checkpoint idempotently for an MLflow run."""
+    expected_metric_contract = {
+        "horizon_seconds": 3.0,
+        "horizon_steps": 30,
+    }
+    mismatched_metric_contract = {
+        key: {
+            "expected": value,
+            "actual": metric_contract.get(key),
+        }
+        for key, value in expected_metric_contract.items()
+        if metric_contract.get(key) != value
+    }
+    if mismatched_metric_contract:
+        raise ValueError(
+            "registry checkpoint metrics are not canonical: "
+            f"{mismatched_metric_contract}"
+        )
     model_name = "auto-e2e-driving-policy"
     normalized_roles = sorted(set(roles))
     if (
@@ -1371,8 +1431,23 @@ def _register_checkpoint_version(
         "checkpoint_epoch": str(epoch),
         "checkpoint_s3_uri": checkpoint_uri,
         "checkpoint_sha256": checkpoint_sha256,
+        "validation_ade_3s_m": str(ade),
+        "validation_fde_3s_m": str(fde),
         "validation_ade": str(ade),
         "validation_fde": str(fde),
+        "validation_metric_version": str(metric_contract["version"]),
+        "validation_metric_horizon_seconds": str(
+            metric_contract["horizon_seconds"]
+        ),
+        "validation_metric_horizon_steps": str(
+            metric_contract["horizon_steps"]
+        ),
+        "validation_metric_target_source": str(
+            metric_contract["target_source"]
+        ),
+        "validation_metric_aggregation": str(
+            metric_contract["aggregation"]
+        ),
     }
     if selection is not None:
         tags.update({
@@ -4246,6 +4321,7 @@ def train_il(
                 ade=float(best_checkpoint["ade"]),
                 fde=float(best_checkpoint["fde"]),
                 selection=best_checkpoint.get("selection"),
+                metric_contract=best_checkpoint.get("metric_contract"),
             )
         if best_trajectory_checkpoint is not None:
             update_best_pointer(
@@ -4261,6 +4337,9 @@ def train_il(
                 ade=float(best_trajectory_checkpoint["ade"]),
                 fde=float(best_trajectory_checkpoint["fde"]),
                 selection=best_trajectory_checkpoint.get("selection"),
+                metric_contract=best_trajectory_checkpoint.get(
+                    "metric_contract"
+                ),
             )
         restore_rng_state(resume_payload["rng_state"])
         if resume_policy_transition is not None:
@@ -5133,6 +5212,16 @@ def train_il(
             validation_aggregates = aggregate_validation_records(
                 validation["rollout_selector_records"]
             )
+            validation["ade"] = float(
+                validation_aggregates["metrics"]["ade_3s_m"][
+                    "scene_balanced"
+                ]
+            )
+            validation["fde"] = float(
+                validation_aggregates["metrics"]["fde_3s_m"][
+                    "scene_balanced"
+                ]
+            )
             observed_availability = freeze_component_availability(
                 validation_aggregates
             )
@@ -5231,6 +5320,7 @@ def train_il(
             "fde": validation["fde"],
             "uri": checkpoint_uri,
             "sha256": None,
+            "metric_contract": validation["metric_contract"],
         }
         if checkpoint_selection is not None:
             candidate_record["selection"] = checkpoint_selection
@@ -5262,6 +5352,7 @@ def train_il(
             "val_ade": validation["ade"],
             "val_fde": validation["fde"],
             "val_horizons": validation["horizons"],
+            "validation_metric_contract": validation["metric_contract"],
             "validation_sample_count": validation["sample_count"],
             "validation_sample_uid_digest": validation_digest,
             "checkpoint_selection": checkpoint_selection,
@@ -5284,6 +5375,8 @@ def train_il(
                 "val/checkpoint_composite_score": float(
                     checkpoint_selection["score"]
                 ),
+                "val/ade_3s_scene_balanced_logged_xy": validation["ade"],
+                "val/fde_3s_scene_balanced_logged_xy": validation["fde"],
                 "selection/score": float(
                     checkpoint_selection["score"]
                 ),
@@ -5501,13 +5594,13 @@ def train_il(
                     "val/ade": validation["ade"],
                     "val/fde": validation["fde"],
                     **{
-                        f"val/ade_{label}": values["ade"]
+                        f"val/control_rollout_ade_{label}": values["ade"]
                         for label, values in validation[
                             "horizons"
                         ].items()
                     },
                     **{
-                        f"val/fde_{label}": values["fde"]
+                        f"val/control_rollout_fde_{label}": values["fde"]
                         for label, values in validation[
                             "horizons"
                         ].items()
@@ -5568,6 +5661,7 @@ def train_il(
             "uri": uploaded["uri"],
             "sha256": uploaded["sha256"],
             "size": uploaded["size"],
+            "metric_contract": validation["metric_contract"],
         }
         if checkpoint_selection is not None:
             checkpoint_info["selection"] = checkpoint_selection
@@ -5587,6 +5681,7 @@ def train_il(
                 ade=validation["ade"],
                 fde=validation["fde"],
                 selection=checkpoint_selection,
+                metric_contract=validation["metric_contract"],
             )
             if (
                 previous_best_local_path
@@ -5609,6 +5704,7 @@ def train_il(
                 ade=validation["ade"],
                 fde=validation["fde"],
                 selection=checkpoint_selection,
+                metric_contract=validation["metric_contract"],
             )
         if not score_improved:
             os.remove(checkpoint_path)
@@ -5898,7 +5994,9 @@ def train_il(
             "sample_count": validation_sample_count,
             "sample_uid_digest": expected_validation_digest,
             "split": "internal_scene_holdout",
-            "evaluation_steps": AUTO_E2E_TIMESTEPS,
+            "evaluation_steps": 30,
+            "prediction_steps": AUTO_E2E_TIMESTEPS,
+            "metric_contract": final_checkpoint["metric_contract"],
             **validation_split_contract,
         },
         "tracking": {
@@ -5945,6 +6043,25 @@ def train_il(
             ),
             "checkpoint_selector_policy": (
                 checkpoint_selection_config["policy_version"]
+            ),
+            "validation_metric_version": str(
+                final_checkpoint["metric_contract"]["version"]
+            ),
+            "validation_metric_horizon_seconds": "3.0",
+            "validation_metric_horizon_steps": "30",
+            "validation_metric_target_source": str(
+                final_checkpoint["metric_contract"]["target_source"]
+            ),
+            "validation_metric_aggregation": str(
+                final_checkpoint["metric_contract"]["aggregation"]
+            ),
+            "best_checkpoint_ade_3s_m": str(best_checkpoint["ade"]),
+            "best_checkpoint_fde_3s_m": str(best_checkpoint["fde"]),
+            "best_trajectory_checkpoint_ade_3s_m": str(
+                best_trajectory_checkpoint["ade"]
+            ),
+            "best_trajectory_checkpoint_fde_3s_m": str(
+                best_trajectory_checkpoint["fde"]
             ),
             "best_checkpoint_composite_score": (
                 str(best_checkpoint["selection"]["score"])
@@ -6334,6 +6451,9 @@ def _run_evaluation(
         include_navigation_records=(
             navigation_records_output is not None
         ),
+        include_rollout_selector_records=(
+            navigation_geometry is not None
+        ),
     )
     expected_digest = validation_metadata.get("sample_uid_digest")
     if expected_digest and evaluation["sample_uid_digest"] != expected_digest:
@@ -6528,6 +6648,21 @@ def _run_evaluation(
                 training.get("epochs_completed", training.get("epochs", "?"))
             ),
             "train/final_loss": str(training.get("final_loss", "?")),
+            "validation_metric_version": str(
+                evaluation["metric_contract"]["version"]
+            ),
+            "validation_metric_horizon_seconds": str(
+                evaluation["metric_contract"]["horizon_seconds"]
+            ),
+            "validation_metric_horizon_steps": str(
+                evaluation["metric_contract"]["horizon_steps"]
+            ),
+            "validation_metric_target_source": str(
+                evaluation["metric_contract"]["target_source"]
+            ),
+            "validation_metric_aggregation": str(
+                evaluation["metric_contract"]["aggregation"]
+            ),
         })
 
         # Eval metrics
@@ -6536,6 +6671,11 @@ def _run_evaluation(
             "eval/fde": avg_fde,
             "eval/gate_pass": 1.0 if passed else 0.0,
         }
+        if evaluation["metric_contract"]["target_source"] == "logged_xy":
+            logged_metrics.update({
+                "eval/ade_3s_scene_balanced_logged_xy": avg_ade,
+                "eval/fde_3s_scene_balanced_logged_xy": avg_fde,
+            })
         if navigation_report is not None:
             slices = navigation_report["slices"]
             counterfactual = navigation_report[
@@ -6662,6 +6802,7 @@ def _run_evaluation(
                     "sha256": checkpoint_sha256,
                     "ade": avg_ade,
                     "fde": avg_fde,
+                    "metric_contract": evaluation["metric_contract"],
                 },
             }
 
@@ -6677,6 +6818,7 @@ def _run_evaluation(
                 checkpoint_sha256=str(record["sha256"]),
                 ade=float(record["ade"]),
                 fde=float(record["fde"]),
+                metric_contract=dict(record["metric_contract"]),
                 selection=record.get("selection"),
             )
             print(
