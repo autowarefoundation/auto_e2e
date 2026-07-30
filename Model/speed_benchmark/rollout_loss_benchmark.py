@@ -94,7 +94,7 @@ def _selector_records(
             "sample_uid": f"sample-{index:06d}",
             "split_group_uid": f"scene-{index % scene_count:03d}",
             "ade_3s_m": 1.0 + (index % 11) * 0.01,
-            "fde_6_4s_m": 4.0 + (index % 17) * 0.02,
+            "fde_3s_m": 2.0 + (index % 17) * 0.01,
             "comfort_excess": 0.01,
             "offroad_excess": 0.02,
             "route_gap": 0.03,
