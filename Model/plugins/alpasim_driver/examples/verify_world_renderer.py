@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+from PIL import Image, ImageDraw
 
 # Dynamically resolve repository root and add to sys.path
 _EXAMPLES_DIR = Path(__file__).resolve().parent
@@ -29,8 +30,7 @@ for path in [_REPO_ROOT, _MODEL_DIR, _PLUGINS_DIR, _DRIVER_DIR]:
     if str(path) not in sys.path:
         sys.path.insert(0, str(path))
 
-# Require actual AlpaSim imports (allow_mock=False mode)
-from alpasim_driver.models.base import (  # noqa: E402
+from alpasim_driver.plugin import (  # noqa: E402
     BaseTrajectoryModel,
     DriveCommand,
     ModelPrediction,
@@ -165,12 +165,16 @@ def main() -> None:
         "a": 0.0,
     }
 
+    history_positions: list[tuple[float, float]] = []
+    frames: list[Image.Image] = []
+
     logger.info("-" * 70)
     logger.info("Evaluating World Renderer across 50 simulation steps...")
     logger.info("-" * 70)
 
     for step in range(n_steps):
         t_sim = step * dt
+        history_positions.append((state["x"], state["y"]))
 
         # Dummy camera images container matching PredictionInput contract
         camera_images: dict[str, list[Any]] = {cam_name: [] for cam_name in driver.camera_ids}
@@ -216,10 +220,136 @@ def main() -> None:
                 f"Prediction Step Time: {step_ms:5.2f} ms"
             )
 
+        frame = render_verification_frame(step, t_sim, state, traj_pts, step_ms, history_positions)
+        frames.append(frame)
+
     logger.info("=" * 70)
     logger.info("World Renderer Verification completed successfully!")
     logger.info(f"Final Ground-Truth Position: ({state['x']:.2f}m, {state['y']:.2f}m)")
+    
+    video_output_path = Path("verify_world_renderer.mp4")
+    gif_output_path = Path("verify_world_renderer.gif")
+    
+    export_video(frames, video_output_path, gif_output_path, fps=10.0)
     logger.info("=" * 70)
+
+
+def render_verification_frame(
+    step: int,
+    t_sim: float,
+    state: dict[str, float],
+    traj_pts: np.ndarray,
+    step_ms: float,
+    history_positions: list[tuple[float, float]],
+) -> Image.Image:
+    width, height = 1280, 720
+    img = Image.new("RGB", (width, height), color=(15, 23, 42))
+    draw = ImageDraw.Draw(img)
+
+    # Header bar
+    draw.rectangle([(0, 0), (width, 50)], fill=(30, 41, 59))
+    draw.text((20, 15), "AlpaSim World Renderer Verification (Ground Truth Trajectory)", fill=(255, 255, 255))
+
+    # BEV Panel (560x560)
+    bev_x0, bev_y0, bev_w, bev_h = 40, 80, 560, 560
+    draw.rectangle([(bev_x0, bev_y0), (bev_x0 + bev_w, bev_y0 + bev_h)], fill=(9, 13, 20), outline=(51, 65, 85), width=2)
+    draw.text((bev_x0 + 15, bev_y0 + 15), "Bird's-Eye View (BEV) Trajectory", fill=(148, 163, 184))
+
+    center_x = bev_x0 + bev_w // 2
+    center_y = bev_y0 + bev_h // 2
+    scale = 5.0  # 5 pixels per meter
+
+    # Distance concentric circles
+    for r in range(10, 100, 20):
+        r_px = int(r * scale)
+        draw.ellipse([(center_x - r_px, center_y - r_px), (center_x + r_px, center_y + r_px)], outline=(30, 41, 59), width=1)
+
+    # Draw historical vehicle trajectory path
+    if len(history_positions) > 1:
+        hist_px = []
+        for hx, hy in history_positions:
+            px = center_x + int((hx - state["x"]) * scale)
+            py = center_y - int((hy - state["y"]) * scale)
+            hist_px.append((px, py))
+        draw.line(hist_px, fill=(59, 130, 246), width=3)
+
+    # Draw predicted ground-truth trajectory waypoints
+    pts_px = []
+    for pt in traj_pts:
+        px = center_x + int(pt[1] * scale)
+        py = center_y - int(pt[0] * scale)
+        pts_px.append((px, py))
+    if len(pts_px) > 1:
+        draw.line(pts_px, fill=(52, 211, 153), width=4)
+    for px, py in pts_px[::4]:
+        draw.ellipse([(px - 3, py - 3), (px + 3, py + 3)], fill=(52, 211, 153))
+
+    # Draw Ego Vehicle Icon at center
+    draw.polygon([
+        (center_x, center_y - 12),
+        (center_x - 8, center_y + 12),
+        (center_x + 8, center_y + 12)
+    ], fill=(239, 68, 68), outline=(255, 255, 255))
+
+    # Telemetry & Status Panel (600x560)
+    tel_x0, tel_y0, tel_w, tel_h = 640, 80, 600, 560
+    draw.rectangle([(tel_x0, tel_y0), (tel_x0 + tel_w, tel_y0 + tel_h)], fill=(15, 23, 42), outline=(51, 65, 85), width=2)
+    draw.text((tel_x0 + 20, tel_y0 + 20), "Simulation Telemetry & Status", fill=(226, 232, 240))
+
+    lines = [
+        f"Simulation Step  : {step:02d} / 50",
+        f"Sim Time (t)     : {t_sim:.2f} s",
+        f"Ego Position X   : {state['x']:.2f} m",
+        f"Ego Position Y   : {state['y']:.2f} m",
+        f"Ego Speed        : {state['v']:.2f} m/s ({state['v']*3.6:.1f} km/h)",
+        f"Ego Acceleration : {state['a']:.2f} m/s^2",
+        f"Predict Latency  : {step_ms:.2f} ms",
+        f"Subscribed Cams  : 7 (KitScenes Surround Topology)",
+        f"Renderer Mode    : AlpaSim Closed-Loop Simulation",
+    ]
+
+    y_offset = tel_y0 + 70
+    for line in lines:
+        draw.text((tel_x0 + 20, y_offset), line, fill=(203, 213, 225))
+        y_offset += 35
+
+    return img
+
+
+def export_video(
+    frames: list[Image.Image],
+    mp4_path: Path,
+    gif_output_path: Path,
+    fps: float = 10.0,
+) -> None:
+    # Always save animated GIF fallback
+    if frames:
+        frames[0].save(
+            gif_output_path,
+            save_all=True,
+            append_images=frames[1:],
+            duration=int(1000.0 / fps),
+            loop=0,
+        )
+        logger.info("Saved visualization GIF: %s", gif_output_path.resolve())
+
+    # Try MP4 export via imageio / ffmpeg
+    try:
+        import imageio.v2 as imageio
+        with imageio.get_writer(
+            mp4_path,
+            format="FFMPEG",
+            mode="I",
+            fps=fps,
+            codec="libx264",
+            pixelformat="yuv420p",
+            macro_block_size=2,
+        ) as writer:
+            for f in frames:
+                writer.append_data(np.asarray(f))
+        logger.info("Saved visualization MP4: %s", mp4_path.resolve())
+    except Exception as e:
+        logger.warning("Could not export MP4 video (%s). Animated GIF saved at %s", e, gif_output_path.resolve())
 
 
 if __name__ == "__main__":

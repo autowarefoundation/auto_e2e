@@ -37,41 +37,107 @@ graph TD
 
 ---
 
-## Installation
+## Installation & Setup
 
-Install the driver plugin into your Python environment in editable mode:
+### 1. Install Driver & Dependencies
+
+Install the driver plugin and dataset parser in editable mode:
 
 ```bash
+# 1. Install alpasim_driver plugin package
 pip install -e Model/plugins/alpasim_driver
+
+# 2. Install KITScenes SDK
+pip install -e Model/data_parsing/kit_scenes/kitscenes --no-deps
+
+# 3. Install Lanelet2 (for vector HD map parsing & BEV rasterization)
+pip install lanelet2
 ```
 
-Verify that AlpaSim discovers the plugin:
+### 2. Environment Configuration
 
-```python
-import alpasim_plugins.plugins as p
+Configure root directories for KITScenes dataset files and AlpaSim source repository. You can source them from `.env` or export them manually:
 
-print(p.get_plugin_info())
-# Output should list 'autoe2e' under 'alpasim.models' and 'alpasim.configs'
+```bash
+# Option A: Load from .env file
+set -a; source .env; set +a
+
+# Option B: Set environment variables manually
+export KITSCENES_ROOT="/path/to/auto_e2e/.KITdata"
+export ALPASIM_ROOT="/path/to/auto_e2e/.alpasim"
+```
+
+### 3. Download KITScenes Data Samples
+
+Download dataset scene archives using the `kitscenes` CLI:
+
+```bash
+python -m kitscenes.download "$KITSCENES_ROOT" --scenes c34c778f-ad8c-0aa9-7e1a-c86a73f887c7
 ```
 
 ---
 
-## Running Closed-Loop Simulation Example
+## Model Control Parameters
 
-Run the standalone 50-step closed-loop simulation demonstration:
+Controls for simulation execution in [`config.py`](./config.py) and [`plugin.py`](./plugin.py):
 
-```bash
-PYTHONPATH=.:Model python Model/plugins/alpasim_driver/examples/run_closed_loop.py
+| Parameter | Type | Default | Description |
+| :--- | :--- | :--- | :--- |
+| `checkpoint_path` | `str` | `"autoe2e_model.ckpt"` | Path to pre-trained AutoE2E PyTorch checkpoint file. |
+| `allow_untrained_model` | `bool` | `False` | When `True`, initializes a fresh `AutoE2E(num_views=7)` PyTorch neural network with random weights if no checkpoint file exists on disk. |
+| `allow_mock` | `bool` | `False` | When `False` (default), strictly requires the actual AlpaSim runtime and real model execution, failing fast if dependencies are missing. |
+
+---
+
+## Plugin Discovery Verification
+
+Confirm that AlpaSim discovers the `autoe2e` plugin entry points:
+
+```python
+import alpasim_driver.plugin
+import alpasim_plugins.plugins as p
+
+print("Registered Models:", p.PluginRegistry("alpasim.models").get_names())
+print("Registered Configs:", p.PluginRegistry("alpasim.configs").get_names())
 ```
 
-### Expected Output
+**Expected Output**:
 ```text
-[INFO] Starting Closed-Loop Simulation Example
-[INFO] AlpaSim Registered Models: ['autoe2e']
-[INFO] AlpaSim Registered Configs: ['autoe2e']
-[INFO] Instantiated driver plugin: AutoE2EDriver
-[INFO] Executing 50-step closed-loop simulation loop...
-[INFO] [Step 00/50] t= 0.0s | Ego Pos: (  1.02m,   0.01m) | Speed: 10.16 m/s | Heading:  0.06°
-[INFO] [Step 49/50] t= 4.9s | Ego Pos: ( 76.69m,   2.16m) | Speed: 22.01 m/s | Heading:  1.99°
-[INFO] Closed-Loop Simulation completed successfully!
+Registered Models: ['autoe2e']
+Registered Configs: ['autoe2e']
+```
+
+---
+
+## Running Closed-Loop Workflows
+
+### Workflow A: Closed-Loop Model Policy Rollouts (`run_closed_loop.py`)
+
+Executes real-time closed-loop rollouts of the `AutoE2E` PyTorch neural network model taking 7 camera streams at 10 Hz:
+
+```bash
+python Model/plugins/alpasim_driver/examples/run_closed_loop.py
+```
+
+### Workflow B: World Renderer Verification (`verify_world_renderer.py`)
+
+Drives closed-loop simulation using ground-truth trajectory predictions to evaluate and compare world renderers (AlpaSim vs NuRec vs KITScenes renderer) without policy prediction noise:
+
+```bash
+python Model/plugins/alpasim_driver/examples/verify_world_renderer.py
+```
+
+### Expected Output Example
+```text
+[INFO] Starting World Renderer Verification (Ground Truth Trajectory Driver)
+[INFO] Discovered AlpaSim Registered Models: ['autoe2e']
+[INFO] Discovered AlpaSim Registered Configs: ['autoe2e']
+[INFO] Initialized Ground Truth Driver: GroundTruthTrajectoryDriver
+[INFO] Subscribed Camera Topology (7 cameras): ['camera_base_front_center', 'camera_ring_front', 'camera_ring_front_left', 'camera_ring_front_right', 'camera_ring_rear', 'camera_ring_rear_left', 'camera_ring_rear_right']
+[INFO] Evaluating World Renderer across 50 simulation steps...
+[INFO] [Renderer Step 00/50] t= 0.0s | Ego Pos: (  0.48m,   0.00m) | Speed:  4.76 m/s | Prediction Step Time:  0.60 ms
+[INFO] [Renderer Step 49/50] t= 4.9s | Ego Pos: (  6.80m,   0.00m) | Speed:  4.76 m/s | Prediction Step Time:  0.17 ms
+[INFO] World Renderer Verification completed successfully!
+[INFO] Final Ground-Truth Position: (6.80m, 0.00m)
+[INFO] Saved visualization GIF: /path/to/verify_world_renderer.gif
 ```
