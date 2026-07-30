@@ -71,7 +71,7 @@ def _completion(observations: dict[str, dict[str, Any]]) -> dict[str, Any]:
 
 def test_road_vlm_semantic_hashes_are_stable() -> None:
     assert road_vlm_prompt_bundle_sha256() == (
-        "94b75118717a65a37e8b086925e46abee84295e15a19d0b941c04bb49f477ef8"
+        "f163bcc5163335a61e1e3cd8be672ba4c15eeaa54efbcfefd3f47f1cd6bd3243"
     )
     assert road_vlm_decoding_bundle_sha256(max_tokens=4096) == (
         "0c845ef4e2606f5c43433d0813ff503de8e9e4cd2507769b66c62ccc3df9e486"
