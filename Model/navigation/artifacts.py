@@ -28,7 +28,10 @@ from .contracts import (
 from .rasterizer import EgoPose, NavigationRaster
 
 
-SCENE_NAVIGATION_ARTIFACT_VERSION = "scene_navigation_v1"
+SCENE_NAVIGATION_ARTIFACT_VERSION = "scene_navigation_v2"
+SUPPORTED_SCENE_NAVIGATION_ARTIFACT_VERSIONS = frozenset(
+    {"scene_navigation_v1", SCENE_NAVIGATION_ARTIFACT_VERSION}
+)
 SAMPLE_NAVIGATION_ARTIFACT_VERSION = "sample_navigation_v1"
 _ZIP_TIMESTAMP = (1980, 1, 1, 0, 0, 0)
 
@@ -99,7 +102,10 @@ def decode_scene_navigation(
     payload: bytes,
 ) -> tuple[NavigationMap, NavigationRoute]:
     data = json.loads(payload)
-    if data.get("schema_version") != SCENE_NAVIGATION_ARTIFACT_VERSION:
+    if (
+        data.get("schema_version")
+        not in SUPPORTED_SCENE_NAVIGATION_ARTIFACT_VERSIONS
+    ):
         raise ValueError("unsupported scene navigation artifact version")
     map_data = data["navigation_map"]
     navigation_map = NavigationMap(
@@ -143,6 +149,29 @@ def decode_scene_navigation(
                     value["centerline_enu_m"], dtype=np.float64
                 ),
                 level=value.get("level"),
+                road_class=value.get("road_class"),
+                lane_subtype=value.get("lane_subtype"),
+                one_way=value.get("one_way"),
+                carriageway_id=value.get("carriageway_id"),
+                median_separated=value.get("median_separated"),
+                barrier_separated=value.get("barrier_separated"),
+                successor_lane_ids=tuple(
+                    value.get("successor_lane_ids", ())
+                ),
+                predecessor_lane_ids=tuple(
+                    value.get("predecessor_lane_ids", ())
+                ),
+                left_adjacent_lane_id=value.get("left_adjacent_lane_id"),
+                right_adjacent_lane_id=value.get("right_adjacent_lane_id"),
+                is_intersection=bool(value.get("is_intersection", False)),
+                turn_direction=value.get("turn_direction"),
+                provider_attributes=value.get("provider_attributes", {}),
+                left_boundary_attributes=value.get(
+                    "left_boundary_attributes", {}
+                ),
+                right_boundary_attributes=value.get(
+                    "right_boundary_attributes", {}
+                ),
             )
             for value in map_data["directed_lane_fields"]
         ),
@@ -185,6 +214,9 @@ def decode_scene_navigation(
                 ),
                 maneuver=Maneuver(value["maneuver"]),
                 confidence=float(value["confidence"]),
+                connected_from_previous=bool(
+                    value.get("connected_from_previous", True)
+                ),
             )
             for value in route_data["lane_sequence"]
         ),
