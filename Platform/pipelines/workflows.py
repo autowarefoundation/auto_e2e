@@ -62,7 +62,7 @@ DATA_PREP_IMAGE = _os.environ.get(
 
 MLFLOW_URI = "http://mlflow.mlflow.svc.cluster.local:5000"
 DATASET_PACK_VERSION = "v2.2"
-KITSCENES_NAVIGATION_DATASET_VERSION = "v3.0"
+KITSCENES_NAVIGATION_DATASET_VERSION = "v3.1"
 L2D_SOURCE_REVISION = "main"
 KITSCENES_SOURCE_REVISION = "6fde0034446669e2ed7235e4c7fe323cd23d599d"
 
@@ -6516,6 +6516,37 @@ def wf_publish_dataset_snapshot(
         datasets_bucket=datasets_bucket,
         dynamo_table=dynamo_table,
         aws_region=aws_region,
+    )
+
+
+@workflow
+def wf_repack_and_publish_kitscenes_snapshot(
+    recovery_manifest: FlyteFile,
+    artifact_set_sha256: str,
+    datasets_bucket: str,
+    dataset_version: str = KITSCENES_NAVIGATION_DATASET_VERSION,
+    image_size: int = 256,
+    pack_concurrency: int = 60,
+    dynamo_table: str = "auto-e2e-console",
+    aws_region: str = "us-west-2",
+    copy_workers: int = 16,
+) -> DatasetPublication:
+    """Publish lossless navigation without training or teacher inference."""
+    shards = wf_repack_existing_kitscenes(
+        recovery_manifest=recovery_manifest,
+        artifact_set_sha256=artifact_set_sha256,
+        dataset_version=dataset_version,
+        image_size=image_size,
+        pack_concurrency=pack_concurrency,
+    )
+    return wf_publish_dataset_snapshot(
+        shards=shards,
+        published_dataset="kitscenes",
+        datasets_bucket=datasets_bucket,
+        dataset_version=dataset_version,
+        dynamo_table=dynamo_table,
+        aws_region=aws_region,
+        copy_workers=copy_workers,
     )
 
 
