@@ -7,7 +7,7 @@ env:
     FLYTE_DOMAIN: development
     IMAGE_TAG: latest
     DATASET_NAME: kitscenes
-    DATASET_VERSION: v3.0
+    DATASET_VERSION: v3.1
     DATASET_MANIFEST_SHA256: ""
     LABELER_SOURCE_REVISION: ""
     ENABLED_SOURCES: map_route,gnss_ins,vlm,image_qc,fusion
