@@ -27,6 +27,15 @@ from Platform.pipelines.training_checkpoint import (
 )
 
 
+CANONICAL_METRIC_CONTRACT = {
+    "version": "rollout_validation_v2",
+    "horizon_seconds": 3.0,
+    "horizon_steps": 30,
+    "target_source": "logged_xy",
+    "aggregation": "scene_balanced",
+}
+
+
 class _FakeS3:
     def __init__(self, conditional_conflicts=0):
         self.objects = {}
@@ -221,6 +230,29 @@ def test_resume_validation_allows_explicit_policy_transition_only():
                 "early_stopping_patience",
             }),
             compatible_data_fingerprints=frozenset({"data-1"}),
+        )
+
+
+def test_resume_rejects_selector_v2_history_under_v3_policy():
+    payload, config = _resume_payload()
+    payload["config"] = {
+        **config,
+        "checkpoint_selection": {
+            "policy_version": "rollout_composite_selector_v2",
+        },
+    }
+    requested = {
+        **config,
+        "checkpoint_selection": {
+            "policy_version": SELECTOR_POLICY_VERSION,
+        },
+    }
+
+    with pytest.raises(ValueError, match="config"):
+        validate_resume_payload(
+            payload,
+            expected_config=requested,
+            expected_data_fingerprint="data-1",
         )
 
 
@@ -436,8 +468,10 @@ def test_best_pointer_records_composite_selection_policy():
         ade=1.0,
         fde=2.0,
         selection=selection,
+        metric_contract=CANONICAL_METRIC_CONTRACT,
     )
 
     latest = json.loads(s3.versions[-1][1]["Body"])
-    assert latest["schema_version"] == "best_checkpoint_pointer_v2"
+    assert latest["schema_version"] == "best_checkpoint_pointer_v3"
     assert latest["selection"] == selection
+    assert latest["metric_contract"] == CANONICAL_METRIC_CONTRACT
