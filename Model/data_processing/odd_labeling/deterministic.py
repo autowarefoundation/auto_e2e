@@ -34,6 +34,7 @@ KINEMATIC_KEYS = (
     "event.ego.strong_response",
 )
 MAP_ROUTE_KEYS = (
+    "odd.road.context",
     "odd.road.type",
     "odd.road.division",
     "odd.road.horizontal_geometry",
@@ -663,6 +664,31 @@ def _road_type(road_class: str | None) -> str | None:
     return aliases.get(value)
 
 
+def _road_context(
+    lane: DirectedLaneField,
+    road_type: str | None,
+) -> str | None:
+    if road_type in {"motorway", "residential", "parking_aisle"}:
+        return {
+            "motorway": "motorway",
+            "residential": "residential",
+            "parking_aisle": "parking",
+        }[road_type]
+    attributes = {
+        key.lower(): value.strip().lower()
+        for key, value in lane.provider_attributes.items()
+    }
+    location = attributes.get("location")
+    if location in {"urban", "city"}:
+        return "urban"
+    if location in {"nonurban", "rural"}:
+        return "rural"
+    landuse = attributes.get("landuse")
+    if landuse in {"industrial", "commercial"}:
+        return "industrial"
+    return None
+
+
 def _lane_type(lane: DirectedLaneField) -> str | None:
     value = (lane.lane_subtype or "").strip().lower().replace("-", "_")
     if value in {"road", "lane", "driving", "vehicle", "general"}:
@@ -758,14 +784,15 @@ def _lane_count_bin(count: int) -> str:
 def _directionality(
     lane: DirectedLaneField,
     nearby_opposite: tuple[DirectedLaneField, ...],
+    *,
+    topology_available: bool,
 ) -> str | None:
     if lane.one_way is not None:
         return "one_way" if lane.one_way else "two_way"
-    if lane.carriageway_id is not None and any(
-        other.carriageway_id == lane.carriageway_id
-        for other in nearby_opposite
-    ):
+    if nearby_opposite:
         return "two_way"
+    if topology_available:
+        return "one_way"
     return None
 
 
@@ -1066,6 +1093,21 @@ def label_map_route(
         }
 
         road_type = _road_type(lane.road_class)
+        road_context = _road_context(lane, road_type)
+        observations.append(
+            make_observation(
+                key="odd.road.context",
+                status="valid" if road_context else "unavailable",
+                values=(road_context,) if road_context else (),
+                confidence=map_confidence if road_context else 0.0,
+                scene_uid=evidence.scene_uid,
+                source="map_route",
+                start_timestamp_ns=start_ns,
+                end_timestamp_ns=end_ns,
+                measurements=common["measurements"],
+                provenance=interval_provenance,
+            )
+        )
         observations.append(
             make_observation(
                 key="odd.road.type",
@@ -1189,7 +1231,11 @@ def label_map_route(
                 provenance=interval_provenance,
             )
         )
-        directionality = _directionality(lane, nearby_opposite)
+        directionality = _directionality(
+            lane,
+            nearby_opposite,
+            topology_available=topology_available,
+        )
         observations.append(
             make_observation(
                 scene_uid=evidence.scene_uid,
