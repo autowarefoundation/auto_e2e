@@ -29,6 +29,8 @@ from data_processing.odd_labeling.schema import (
 from navigation.artifacts import encode_scene_navigation
 from navigation.contracts import (
     Destination,
+    DirectedLaneField,
+    Maneuver,
     MapFrame,
     NavigationMap,
     NavigationRoute,
@@ -457,6 +459,123 @@ def test_missing_navigation_abstains_without_blocking_kinematics() -> None:
     )
     assert kinematics
     assert all(observation.status == "valid" for observation in kinematics)
+
+
+def test_map_labels_ignore_scene_wide_route_quality() -> None:
+    scene = _published_adapter().open_scene("scene-1")
+    centerline = np.asarray([[0.0, -10.0], [0.0, 30.0]])
+    lane = DirectedLaneField(
+        lane_id="lane-1",
+        centerline_enu_m=centerline,
+        road_class="residential",
+        lane_subtype="road",
+        one_way=False,
+        carriageway_id="carriageway-1",
+        median_separated=False,
+        barrier_separated=False,
+    )
+    navigation_map = replace(
+        scene.navigation_map,
+        directed_lane_fields=(lane,),
+        layer_availability={"lane_topology": True},
+    )
+    route_segment = RouteLaneSegment(
+        lane_id=lane.lane_id,
+        provider_segment_id="provider-lane-1",
+        centerline_enu_m=centerline,
+        maneuver=Maneuver.LEFT,
+    )
+    route = replace(
+        scene.navigation_route,
+        lane_sequence=(route_segment,),
+        confidence=0.01,
+        valid=False,
+        estimated_destination=True,
+        quality=RouteQuality(
+            matched_pose_ratio=0.2,
+            median_lateral_distance_m=0.1,
+            p95_lateral_distance_m=40.0,
+            median_heading_error_rad=0.1,
+            p95_heading_error_rad=3.0,
+            unresolved_discontinuities=2,
+            failure_reasons=("unresolved_discontinuity",),
+        ),
+    )
+
+    observations = label_map_route(
+        replace(
+            scene,
+            navigation_map=navigation_map,
+            navigation_route=route,
+        )
+    )
+    by_key = {observation.key: observation for observation in observations}
+
+    assert by_key["odd.road.type"].values == ("residential",)
+    assert by_key["odd.road.directionality"].values == ("two_way",)
+    assert by_key["odd.road.horizontal_geometry"].values == ("straight",)
+    assert by_key["odd.road.junction_position"].values == ("midblock",)
+    assert by_key["odd.road.lane_count_bin"].values == ("one",)
+    assert by_key["odd.road.division"].values == ("undivided",)
+    assert by_key["odd.route.action"].values == ("turn_left",)
+    assert by_key["odd.route.action"].provenance[
+        "intent_semantics"
+    ] == "reconstructed_from_ego_trace"
+    assert by_key["odd.route.action"].provenance[
+        "route_confidence_global"
+    ] == 0.01
+
+
+def test_route_action_rejects_only_the_local_discontinuity() -> None:
+    scene = _published_adapter().open_scene("scene-1")
+    centerline = np.asarray([[0.0, -10.0], [0.0, 30.0]])
+    lane = DirectedLaneField(
+        lane_id="lane-1",
+        centerline_enu_m=centerline,
+        road_class="residential",
+        lane_subtype="road",
+    )
+    navigation_map = replace(
+        scene.navigation_map,
+        directed_lane_fields=(lane,),
+        layer_availability={"lane_topology": True},
+    )
+    route = replace(
+        scene.navigation_route,
+        lane_sequence=(
+            RouteLaneSegment(
+                lane_id=lane.lane_id,
+                provider_segment_id="provider-lane-1",
+                centerline_enu_m=centerline,
+                maneuver=Maneuver.LEFT,
+                connected_from_previous=False,
+            ),
+        ),
+        confidence=0.9,
+        valid=False,
+        quality=replace(
+            scene.navigation_route.quality,
+            unresolved_discontinuities=1,
+            failure_reasons=("unresolved_discontinuity",),
+        ),
+    )
+
+    observations = label_map_route(
+        replace(
+            scene,
+            navigation_map=navigation_map,
+            navigation_route=route,
+        )
+    )
+    action = next(
+        observation
+        for observation in observations
+        if observation.key == "odd.route.action"
+    )
+
+    assert action.status == "ambiguous"
+    assert action.values == ()
+    assert "local discontinuity" in action.provenance["reason"]
 
 
 def test_synthetic_adapter_preserves_missing_camera_frames() -> None:
