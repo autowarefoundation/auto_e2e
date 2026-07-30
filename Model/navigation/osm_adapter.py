@@ -559,12 +559,10 @@ class OSMMapAdapter:
                     or lane.carriageway_id is not None
                     for lane in directed_fields
                 ),
-                "lane_topology": any(
-                    lane.successor_lane_ids
-                    or lane.predecessor_lane_ids
-                    or lane.left_adjacent_lane_id is not None
-                    or lane.right_adjacent_lane_id is not None
-                    for lane in directed_fields
+                "lane_topology": (
+                    bool(directed_fields)
+                    and self.payload.get("schema_version")
+                    == OSM_LANE_GRAPH_SCHEMA_VERSION
                 ),
             },
             provenance={
