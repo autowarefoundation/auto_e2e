@@ -18,7 +18,7 @@ from .contracts import (
 )
 
 
-LANELET2_ADAPTER_VERSION = "lanelet2_adapter_v1"
+LANELET2_ADAPTER_VERSION = "lanelet2_adapter_v2"
 
 
 def _attr(obj: Any, name: str, default: str = "") -> str:
@@ -27,6 +27,88 @@ def _attr(obj: Any, name: str, default: str = "") -> str:
         return str(attributes[name]) if name in attributes else default
     except (KeyError, TypeError):
         return default
+
+
+def _attributes(obj: Any) -> dict[str, str]:
+    values = getattr(obj, "attributes", {})
+    try:
+        items = values.items()
+    except AttributeError:
+        try:
+            items = ((key, values[key]) for key in values)
+        except (KeyError, TypeError):
+            return {}
+    return {
+        str(key): str(value)
+        for key, value in items
+        if str(key) and str(value)
+    }
+
+
+def _first_attribute(
+    attributes: dict[str, str],
+    *names: str,
+) -> str | None:
+    for name in names:
+        value = attributes.get(name, "").strip()
+        if value:
+            return value
+    return None
+
+
+def _optional_bool(
+    attributes: dict[str, str],
+    *names: str,
+) -> bool | None:
+    value = _first_attribute(attributes, *names)
+    if value is None:
+        return None
+    normalized = value.lower()
+    if normalized in {"1", "true", "yes", "y"}:
+        return True
+    if normalized in {"0", "false", "no", "n"}:
+        return False
+    return None
+
+
+def _separation_semantics(
+    lane_attributes: dict[str, str],
+    left_attributes: dict[str, str],
+    right_attributes: dict[str, str],
+) -> tuple[bool | None, bool | None]:
+    boundary_values = {
+        value.lower()
+        for attributes in (left_attributes, right_attributes)
+        for key, value in attributes.items()
+        if key in {"type", "subtype", "barrier", "road_border"}
+    }
+    median = _optional_bool(
+        lane_attributes,
+        "median_separated",
+        "median",
+        "divided",
+    )
+    barrier = _optional_bool(
+        lane_attributes,
+        "barrier_separated",
+        "barrier",
+    )
+    if median is None and any("median" in value for value in boundary_values):
+        median = True
+    barrier_types = (
+        "barrier",
+        "concrete",
+        "guard_rail",
+        "guardrail",
+        "jersey",
+    )
+    if barrier is None and any(
+        token in value
+        for value in boundary_values
+        for token in barrier_types
+    ):
+        barrier = True
+    return median, barrier
 
 
 def _level(obj: Any) -> int | None:
@@ -136,6 +218,25 @@ class Lanelet2MapAdapter:
             pass
         return False
 
+    def _related_lane_ids(
+        self,
+        lanelet: Any,
+        relation: str,
+    ) -> tuple[str, ...]:
+        try:
+            related = getattr(self.scene_map.routing_graph, relation)(lanelet)
+        except Exception:
+            return ()
+        if related is None:
+            return ()
+        if not isinstance(related, (list, tuple)):
+            related = (related,)
+        return tuple(
+            f"lanelet2:{int(item.id)}"
+            for item in sorted(related, key=lambda value: int(value.id))
+            if item is not None and self._can_pass(item)
+        )
+
     def _traffic_signals(self) -> tuple[StaticTrafficSignal, ...]:
         signals: list[StaticTrafficSignal] = []
         layer = getattr(
@@ -229,11 +330,68 @@ class Lanelet2MapAdapter:
                     )
                 )
                 if can_pass:
+                    lane_attributes = _attributes(lanelet)
+                    left_attributes = _attributes(lanelet.leftBound)
+                    right_attributes = _attributes(lanelet.rightBound)
+                    median_separated, barrier_separated = (
+                        _separation_semantics(
+                            lane_attributes,
+                            left_attributes,
+                            right_attributes,
+                        )
+                    )
+                    left_ids = self._related_lane_ids(lanelet, "left")
+                    right_ids = self._related_lane_ids(lanelet, "right")
                     directions.append(
                         DirectedLaneField(
                             lane_id=canonical_id,
                             centerline_enu_m=centerline,
                             level=level,
+                            road_class=_first_attribute(
+                                lane_attributes,
+                                "road_class",
+                                "highway",
+                                "road_type",
+                            ),
+                            lane_subtype=_first_attribute(
+                                lane_attributes,
+                                "lane_subtype",
+                                "lane_type",
+                                "subtype",
+                            ),
+                            one_way=_optional_bool(
+                                lane_attributes,
+                                "oneway",
+                                "one_way",
+                            ),
+                            carriageway_id=_first_attribute(
+                                lane_attributes,
+                                "carriageway_id",
+                                "carriageway",
+                                "road_id",
+                                "way_id",
+                            ),
+                            median_separated=median_separated,
+                            barrier_separated=barrier_separated,
+                            successor_lane_ids=self._related_lane_ids(
+                                lanelet, "following"
+                            ),
+                            predecessor_lane_ids=self._related_lane_ids(
+                                lanelet, "previous"
+                            ),
+                            left_adjacent_lane_id=(
+                                left_ids[0] if left_ids else None
+                            ),
+                            right_adjacent_lane_id=(
+                                right_ids[0] if right_ids else None
+                            ),
+                            is_intersection=self._is_intersection(lanelet),
+                            turn_direction=_first_attribute(
+                                lane_attributes, "turn_direction"
+                            ),
+                            provider_attributes=lane_attributes,
+                            left_boundary_attributes=left_attributes,
+                            right_boundary_attributes=right_attributes,
                         )
                     )
 
@@ -315,6 +473,19 @@ class Lanelet2MapAdapter:
                 "static_traffic_signal": bool(signals),
                 "stop_line": bool(stop_lines),
                 "traffic_direction": bool(directions),
+                "lane_semantics": any(
+                    lane.road_class is not None
+                    or lane.one_way is not None
+                    or lane.carriageway_id is not None
+                    for lane in directions
+                ),
+                "lane_topology": any(
+                    lane.successor_lane_ids
+                    or lane.predecessor_lane_ids
+                    or lane.left_adjacent_lane_id is not None
+                    or lane.right_adjacent_lane_id is not None
+                    for lane in directions
+                ),
             },
             provenance={
                 "adapter_version": LANELET2_ADAPTER_VERSION,
