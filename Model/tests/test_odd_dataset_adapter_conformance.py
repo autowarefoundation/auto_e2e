@@ -474,6 +474,7 @@ def test_map_labels_ignore_scene_wide_route_quality() -> None:
         carriageway_id="carriageway-1",
         median_separated=False,
         barrier_separated=False,
+        provider_attributes={"location": "urban"},
     )
     navigation_map = replace(
         scene.navigation_map,
@@ -513,6 +514,7 @@ def test_map_labels_ignore_scene_wide_route_quality() -> None:
     by_key = {observation.key: observation for observation in observations}
 
     assert by_key["odd.road.type"].values == ("residential",)
+    assert by_key["odd.road.context"].values == ("residential",)
     assert by_key["odd.road.directionality"].values == ("two_way",)
     assert by_key["odd.road.horizontal_geometry"].values == ("straight",)
     assert by_key["odd.road.junction_position"].values == ("midblock",)
