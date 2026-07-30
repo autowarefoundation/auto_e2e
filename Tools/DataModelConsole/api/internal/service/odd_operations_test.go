@@ -15,7 +15,7 @@ func validODDOperationsConfig(t *testing.T) ODDOperationsConfig {
 	body, err := json.Marshal(oddLabelerInputTemplate{
 		OntologyVersion:                 "odd_ontology_v1.0.1",
 		OntologySHA256:                  strings.Repeat("1", 64),
-		LabelerBundleVersion:            "odd_dataset_labeler_v8",
+		LabelerBundleVersion:            "odd_dataset_labeler_v9",
 		LabelerConfigURI:                "s3://datasets/odd/configs/" + configSHA256 + ".json",
 		LabelerConfigSHA256:             configSHA256,
 		EnabledSources:                  []string{"map_route", "gnss_ins", "vlm", "image_qc", "fusion"},
@@ -124,7 +124,7 @@ func TestODDOperationsLaunchPinsDatasetPublication(t *testing.T) {
 		primitive("ontology_version")["stringValue"] != "odd_ontology_v1.0.1" ||
 		primitive("ontology_sha256")["stringValue"] != strings.Repeat("1", 64) ||
 		primitive("labeler_bundle_version")["stringValue"] !=
-			"odd_dataset_labeler_v8" ||
+			"odd_dataset_labeler_v9" ||
 		primitive("labeler_config_sha256")["stringValue"] !=
 			strings.Repeat("2", 64) ||
 		primitive("road_vlm_provider")["stringValue"] !=
