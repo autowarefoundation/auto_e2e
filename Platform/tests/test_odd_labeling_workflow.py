@@ -544,10 +544,11 @@ def test_workflow_interface_does_not_expose_endpoint_url() -> None:
         "trigger_context_s",
         "refinement_confidence_threshold",
     }.issubset(inputs)
-    assert ODD_LABELER_VERSION == "odd_dataset_labeler_v8"
+    assert ODD_LABELER_VERSION == "odd_dataset_labeler_v9"
     assert ODD_SOURCE_POLICY_VERSIONS["gnss_ins"] == "odd_gnss_ins_policy_v2"
     assert ODD_SOURCE_POLICY_VERSIONS["vlm"] == "odd_road_vlm_policy_v6"
     assert ODD_SOURCE_POLICY_VERSIONS["image_qc"] == "odd_image_qc_policy_v3"
+    assert ODD_SOURCE_POLICY_VERSIONS["fusion"] == "odd_source_fusion_v2"
 
 
 def test_dataset_labeler_has_dedicated_launch_plan() -> None:
