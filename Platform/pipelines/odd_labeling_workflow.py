@@ -30,7 +30,7 @@ DATA_PREP_IMAGE = os.environ.get(
     "AUTO_E2E_DATA_PREP_IMAGE",
     f"{ECR_PREFIX}/auto-e2e/data-prep:latest",
 )
-ODD_LABELER_VERSION = "odd_dataset_labeler_v8"
+ODD_LABELER_VERSION = "odd_dataset_labeler_v9"
 ODD_SCENE_INDEX_SCHEMA_VERSION = "odd_scene_index_v2"
 ODD_PROVIDER_EXCHANGE_SCHEMA_VERSION = "odd_provider_exchange_v2"
 ODD_PROVIDER_REPORT_SCHEMA_VERSION = "odd_provider_report_v2"
@@ -48,7 +48,7 @@ ODD_SOURCE_POLICY_VERSIONS = {
     "gnss_ins": "odd_gnss_ins_policy_v2",
     "vlm": "odd_road_vlm_policy_v6",
     "image_qc": "odd_image_qc_policy_v3",
-    "fusion": "odd_source_fusion_v1",
+    "fusion": "odd_source_fusion_v2",
 }
 
 OddPublication = NamedTuple(
