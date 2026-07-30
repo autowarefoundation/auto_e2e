@@ -46,7 +46,9 @@ PARSER_VERSION = "v3"
 # heatmaps for every GPS-capable parser, including KITScenes partitions.
 # v5: KITScenes stores lossless semantic-map and selected-route tensors plus
 # scene-level canonical navigation vectors; it no longer stores map.jpg.
-SHARD_SCHEMA_VERSION = "v5"
+# v6: scene-level navigation preserves lossless road, lane, carriageway,
+# separation, and lane-graph semantics for local ODD labeling.
+SHARD_SCHEMA_VERSION = "v6"
 
 # Calibration / projection spec encoding and raster-map coordinate semantics.
 # v2 queries KITScenes maps in the scene-local pose frame and applies the map
