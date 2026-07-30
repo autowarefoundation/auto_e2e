@@ -46,7 +46,8 @@ does not change the ODD LabelSet.
 The initial implementation targets KITScenes, but dataset-specific logic is
 confined to adapters. Every adapter emits the same canonical time-aligned
 evidence contract. Source labelers then operate on canonical map/route,
-GNSS/INS, camera, image-quality, object-track, LiDAR, and optional CAN evidence.
+GNSS/INS, camera, image-quality, and optional CAN evidence. Object tracks,
+detector output, and LiDAR are not dependencies of the initial implementation.
 The pipeline never encodes KITScenes directory names, frame numbering, or
 Lanelet2 types in the label schema.
 
@@ -66,8 +67,8 @@ The design makes six central decisions:
 5. ODD ownership is scene-native. Timeline intervals exist to describe changes
    inside a scene, never to mirror the model's sliding sample windows.
 6. An ODD LabelSet is an immutable sidecar bound to an immutable dataset
-   manifest. KITScenes v3.0 does not need to be repacked to add or revise ODD
-   labels.
+   manifest. KITScenes is republished once as v3.1 to carry lossless navigation
+   contract v2; later ODD Label revisions do not require another repack.
 
 The high-level data flow is:
 
@@ -185,11 +186,10 @@ object_track | lidar | can | image_metric | vlm_response | bedrock_response
 derived_trajectory
 ```
 
-For example, a traffic-density value derived from camera object tracks has
-`source=fusion` and evidence references of kind `object_track` and `camera`.
-Day phase derived from an absolute timestamp and location also has
-`source=fusion`. This preserves the requested stable source enum without hiding
-the actual inputs.
+`object_track` and `lidar` are reserved for a future extension and are not
+emitted by the initial KITScenes pipeline. Day phase derived from an absolute
+timestamp and location has `source=fusion`. This preserves the requested stable
+source enum without hiding the actual inputs.
 
 ### 3.4 Deterministic sources precede semantic inference
 
@@ -286,8 +286,9 @@ model batch.
   initial Dashboard milestone.
 - Labeling `near_collision` without relative trajectories and a validated TTC
   contract.
-- Requiring object tracks, LiDAR, or CAN for all datasets.
-- Rewriting the existing navigation map and route contracts.
+- Adding an object detector, tracker, or LiDAR processing pipeline to the
+  initial KITScenes implementation.
+- Reconstructing semantic map attributes from the raster model-input masks.
 
 ## 5. Terminology and Identity
 
@@ -952,8 +953,6 @@ camera frame inventory mode: capture_timeline | sampled_evidence | unknown
 ego poses + covariance/quality where available
 canonical NavigationMap
 canonical NavigationRoute
-object tracks and classes where available
-LiDAR observations where available
 CAN signals where available
 dataset-native source references
 ```
@@ -971,8 +970,8 @@ not make semantic ODD decisions.
 5. Missing frames remain missing and are not silently repeated.
 6. Duplicate or non-monotonic timestamps fail validation.
 7. Map and route carry provider versions and source hashes.
-8. Actor identities are stable within a scene and never synthesized from array
-   row order.
+8. Any future actor identities must be stable within a Scene and never
+   synthesized from array row order.
 9. The adapter reports capability absence before labelers run.
 10. All labeler outputs remain owned by the opened `scene_uid`.
 11. `dropped_frame` requires `frame_inventory_mode=capture_timeline`.
@@ -991,10 +990,11 @@ The initial KITScenes adapter consumes:
   `NavigationRoute`;
 - `navigation_meta.json` and route-quality fields.
 
-The first implementation must not assume that every published KITScenes scene
-has usable object tracks, LiDAR, absolute civil time, CAN, or every Lanelet2
-attribute. The capability audit decides this from actual artifacts. Unsupported
-labels become `unavailable`; they are not guessed to improve coverage.
+The first implementation does not consume object tracks, detector output, or
+LiDAR. It must not assume that every published KITScenes Scene has absolute
+civil time, CAN, or every Lanelet2 attribute. The capability audit decides this
+from actual artifacts. Unsupported labels become `unavailable`; they are not
+guessed to improve coverage.
 
 The KITScenes ODD adapter operates on complete scenes. It does not iterate the
 42,667 training samples as labeling units. Existing sample identities are
@@ -1043,13 +1043,29 @@ The labeler uses vectors and attributes, not raster color. OSM and Lanelet2
 attribute mappings live in provider adapters, while final ontology mapping is
 shared.
 
-Most map/route labels use deterministic topology and geometry. When a valid map
-contains enough geometry but an irregular junction or route transition remains
-ambiguous under the versioned rules, a task-specific Bedrock Claude resolver
-may inspect an ego-local semantic map/route render plus a structured graph
-summary. It is a bounded fallback, not a replacement for map matching or
-missing map data. Its request and acceptance policy are defined in Section
-15.5.
+Most map/route labels use deterministic topology and geometry. Map-only labels
+are gated by the ego-local map match, never by whole-scene Route quality. The
+initial local gate requires lateral distance at most 8 m and heading error at
+most 75 degrees. Whole-scene `route.valid`, Route confidence, matched-pose
+ratio, and unresolved-discontinuity count remain in provenance for audit, but
+cannot make an otherwise usable current road segment unavailable.
+
+`odd.route.action` is the only label in this group that requires the selected
+Route. It uses a separately matched local Route segment with lateral distance
+at most 10 m, heading error at most 75 degrees, segment confidence at least
+0.5, and local continuity from the preceding segment. A discontinuity elsewhere
+in the Scene is irrelevant. For KITScenes, the selected Route is reconstructed
+from the driven trace and estimated destination rather than supplied planner
+intent, so every result records `intent_semantics=reconstructed_from_ego_trace`.
+It must still remain distinct from the trajectory-derived
+`event.ego.maneuver`.
+
+When a locally valid three-arm junction falls in the deterministic T/Y angular
+boundary, a task-specific Bedrock Claude Opus 5 resolver may inspect an
+ego-local semantic map render plus a structured graph summary. No other
+junction class and no Route action are sent to Bedrock. It is a bounded
+tie-breaker, not a replacement for map matching or missing map attributes. Its
+request and acceptance policy are defined in Section 15.5.
 
 Road context and road type are distinct:
 
@@ -1231,15 +1247,28 @@ deterministic sources:
 - occlusion, clutter, unusual appearance, and scene complexity.
 
 It calls a pinned OpenAI-compatible multimodal API; the expected production
-backend is a road-capable model such as Cosmos. It uses temporal, timestamped,
-multi-view vehicle-camera clips. Event claims such as cut-in, hard brake,
-evasive steer, or sudden emergence are prohibited from a single-image request.
+backend is a road-capable model such as Cosmos. Camera selection is
+task-specific so temporal evidence is not displaced by unnecessary surround
+views:
+
+- road appearance and traffic-control tasks use front-left, front-center, and
+  front-right at the current evidence time;
+- environment tasks use front-center at the current evidence time;
+- traffic-density and agent-presence tasks use all available cameras at one
+  current timestamp because these are surround-coverage questions;
+- Event interaction tasks use front-center at three ordered timestamps
+  describing before, active, and after;
+- camera-scoped perception tasks use a short temporal window for that camera.
+
+No request sends all camera directions across a temporal clip. Event claims
+such as cut-in or sudden emergence are prohibited from a single-image request.
+Hard brake and evasive steer are never originated by the VLM.
 
 The initial scheduling policy is:
 
 1. one regular semantic clip per second for ODD/perception coverage;
-2. event-triggered higher-density clips around GNSS/INS, QC, map, or track
-   changes;
+2. event-triggered three-frame front-center clips around GNSS/INS, QC, map, or
+   visual-semantic changes;
 3. de-duplicate overlapping requests by content/timestamp digest;
 4. batch by compatible camera layout and prompt schema;
 5. retain one explicit evidence row for every attempted field, including
@@ -1270,16 +1299,21 @@ unavailable.
 
 Fusion owns labels that require:
 
-- object tracks or LiDAR;
-- relative trajectories;
 - map plus visual state;
 - planned route plus driven trajectory;
 - timestamp plus location;
 - temporal interaction logic;
 - conflict resolution between sources.
 
-Examples include traffic density, actor range, right of way, route-control
-response, event outcome, and any future TTC-based near-collision label.
+The initial KITScenes implementation deliberately does not consume object
+tracks, detector output, or LiDAR. Traffic density and actor presence use
+task-specific ORV observations; temporal interactions use front-center clips;
+motion response uses GNSS/INS. Labels that fundamentally require stable actor
+identity, metric relative trajectories, object boxes, or depth remain
+`unsupported_missing_source` rather than introducing a detector/tracker
+pipeline. Actor range and TTC-based near-collision are examples. A future
+LabelSet version may add a separately reviewed geometry backend without making
+it a prerequisite for this pipeline.
 
 ## 13. Fusion and Conflict Resolution
 
@@ -1407,14 +1441,17 @@ light. A signal that exists but is not visible is `not_observable`, not
 
 ### 14.4 Density labels
 
-Density thresholds use a versioned ego-local ROI, time window, and observable
-area. Raw actor counts, track duration, and observable-area fraction are stored.
+Density thresholds use a versioned ego-local ROI and observable area. In the
+initial KITScenes implementation, ORV observes all available camera directions
+at one timestamp and returns the ontology bin directly; no detector count or
+track duration is manufactured.
 
 - `empty` or `none` is valid only when the ROI is sufficiently observable.
 - A front-only image cannot establish surround traffic density.
 - Map-derived parked areas can support context but cannot establish that
   vehicles are currently present.
-- Stop-and-go requires temporal ego/traffic motion, not a dense still image.
+- Stop-and-go requires temporal evidence and therefore cannot be established by
+  the static all-camera density request alone.
 
 ### 14.5 Strong response and near collision
 
@@ -1555,12 +1592,12 @@ Required event rules:
 |---|---|---|---|
 | `perception.occlusion.source` | multi | `static_object`, `dynamic_object`, `ego_body`, `weather`, `none` | `vlm` |
 | `perception.occlusion.level` | single | `none`, `partial`, `major`, `full` | `vlm` |
-| `perception.object.visibility` | single | `fully_visible`, `partially_visible`, `barely_visible`, `not_visible` | `vlm` |
-| `perception.object.scale` | single | `normal`, `small`, `very_small` | `fusion` from VLM/detection |
-| `perception.object.range` | single | `near`, `mid`, `far`, `very_far` | `fusion` from LiDAR/tracks/VLM |
-| `perception.fov.state` | single | `centered`, `edge_of_fov`, `truncated`, `entering_fov`, `leaving_fov` | `fusion` from temporal VLM/geometry |
+| `perception.object.visibility` | single | `fully_visible`, `partially_visible`, `barely_visible`, `not_visible` | future actor geometry; initially disabled |
+| `perception.object.scale` | single | `normal`, `small`, `very_small` | future actor geometry; initially disabled |
+| `perception.object.range` | single | `near`, `mid`, `far`, `very_far` | future metric actor geometry; initially disabled |
+| `perception.fov.state` | single | `centered`, `edge_of_fov`, `truncated`, `entering_fov`, `leaving_fov` | future temporal actor geometry; initially disabled |
 | `perception.scene.clutter` | single | `low`, `medium`, `high` | `vlm` |
-| `perception.object.overlap` | single | `none`, `moderate`, `heavy` | `fusion` from VLM/detection |
+| `perception.object.overlap` | single | `none`, `moderate`, `heavy` | future actor geometry; initially disabled |
 | `perception.visual.contrast` | single | `normal`, `low_contrast`, `silhouette` | `image_qc`, `vlm` |
 | `perception.visual.lighting` | multi | `normal`, `backlit`, `deep_shadow`, `high_dynamic_range`, `tunnel_transition` | `image_qc`, `vlm` |
 | `perception.visual.glare` | multi | `sun`, `headlight`, `wet_road_reflection`, `none` | `image_qc`, `vlm` |
@@ -1569,7 +1606,7 @@ Required event rules:
 | `perception.image.weather_artifact` | multi | `rain_streak`, `snow_streak`, `water_spray`, `fog_or_haze`, `none` | `image_qc`, `vlm` |
 | `perception.image.lens_contamination` | multi | `water_droplet`, `dirt`, `mud`, `condensation`, `none` | `image_qc`, `vlm` |
 | `perception.image.frame_status` | single | `normal`, `partial_obstruction`, `full_obstruction`, `black_frame`, `frozen_frame`, `dropped_frame`, `corrupted_frame` | `image_qc` |
-| `perception.object.appearance` | multi | `normal`, `unusual_object`, `unusual_pose`, `temporary_object`, `ambiguous_class`, `deceptive_appearance` | `vlm` |
+| `perception.object.appearance` | multi | `normal`, `unusual_object`, `unusual_pose`, `temporary_object`, `ambiguous_class`, `deceptive_appearance` | future actor-scoped VLM; initially disabled |
 | `perception.map_element_condition` | single | `clear`, `occluded`, `faded`, `temporary_conflict`, `visually_missing` | `fusion` from map/route and VLM |
 | `perception.scene.complexity` | single | `simple`, `moderate`, `complex`, `extreme` | `vlm` |
 | `perception.mixed_traffic` | single | `absent`, `present` | `vlm` |
@@ -1580,10 +1617,10 @@ an observed neutral condition. The ontology must prohibit `normal` from
 co-occurring with abnormal values. Missing evidence still uses status, never
 `normal`.
 
-Object-level keys require `actor_track_uid`. In a VLM-only experimental tier
-where stable tracks are unavailable, a short-lived `visual_actor_uid` may be
-created by the temporal VLM pipeline, but it must not be presented as a
-geometrically validated object track.
+Object-level keys require a future, explicitly designed stable actor identity
+and geometry contract. The initial VLM pipeline does not create
+`visual_actor_uid` values and does not present Scene descriptions as object
+tracks.
 
 ### 15.4 Explicitly excluded labels
 
@@ -1621,7 +1658,6 @@ The matrices below use these backend codes:
 | `CAN` | Optional deterministic CAN resolver | Normalized vehicle signals | `can_optional` |
 | `IQC` | Deterministic image-quality resolver | Decoded camera frames and frame metadata | `image_qc` |
 | `ORV` | OpenAI-compatible road VLM | Timestamped vehicle-camera images/clips; expected backend is Cosmos-like | `vlm` |
-| `TRK` | Track/LiDAR geometry resolver | Object tracks, boxes, classes, LiDAR, calibration | `fusion` |
 | `FUS` | Deterministic cross-source fusion/state machine | Validated evidence from the other backends | `fusion` |
 
 `BMR` and `ORV` are different trust and data boundaries:
@@ -1629,9 +1665,9 @@ The matrices below use these backend codes:
 - `ORV` is the only general model backend that receives real vehicle-camera
   imagery. It handles visual road knowledge, weather appearance, agents,
   interactions, and perception difficulty.
-- `BMR` receives no vehicle-camera image. It handles only topology/geometry
-  questions for a valid map and route when deterministic graph rules produce
-  several defensible candidates.
+- `BMR` receives no vehicle-camera image. In the initial implementation it
+  handles only a locally valid three-arm junction whose branch angles leave T
+  and Y as the two deterministic candidates.
 - A raw camera frame must not be sent to Bedrock by this design.
 - A rendered map must not be presented to `ORV` as if it were a camera frame.
 - Provider names and model revisions are provenance; the canonical `source`
@@ -1639,8 +1675,9 @@ The matrices below use these backend codes:
 
 #### Bedrock Claude map/route request
 
-`BMR` uses the Bedrock Converse API with a pinned Claude model or inference
-profile. The request is task-specific and contains:
+`BMR` uses the Bedrock Converse API with the pinned US inference profile
+`us.anthropic.claude-opus-5` and model revision `claude-opus-5`. The request is
+task-specific and contains:
 
 ```text
 MapRouteResolverRequest
@@ -1656,13 +1693,10 @@ MapRouteResolverRequest
     lane_directions
     intersection_polygons
     route_corridor
-    route_transition
-    static_controls
   ego_local_render_png
   lane_graph_summary
-  route_segment_summary
   deterministic_candidates_with_scores
-  map_quality
+  ego_local_map_match
   required_evidence
 ```
 
@@ -1685,16 +1719,16 @@ recorded in provenance.
 
 `BMR` is called only when:
 
-1. map and route quality pass their minimum gates;
-2. all required semantic primitives are present;
-3. `DMR` returns `ambiguous`, not `unavailable`;
-4. the ontology explicitly allows `BMR` for that key.
+1. `odd.road.junction_type` has a valid ego-local map match;
+2. all required lane-graph primitives are present;
+3. exactly three junction arms are available;
+4. the deterministic largest-angle gap is in the 140-150 degree boundary, so
+   `DMR` returns `ambiguous` with candidates `t_junction` and `y_junction`.
 
 Its result is accepted only when the cited primitives exist and an independent
-geometry validator confirms the necessary invariant. Examples include a left
-route action having a positive signed route heading change in ego FLU, or a
-crossroad candidate having the required connected branch structure. Otherwise
-the final status remains `ambiguous`.
+geometry validator confirms the three-arm invariant. Opus 5 may select only T
+or Y from the supplied candidates. It cannot return crossroad, merge, diverge,
+roundabout, or a Route action. Otherwise the final status remains `ambiguous`.
 
 `BMR` cannot invent map attributes. It is prohibited for surface material,
 weather, lane-marking quality, traffic-light color, actor presence, and other
@@ -1722,7 +1756,6 @@ RoadVLMRequest
     timestamp_ns
     image
     frame_quality
-  optional_track_summaries
   observability_requirements
 ```
 
@@ -1756,9 +1789,10 @@ aggregates repair counts by backend, kind, and label key so that a high repair
 rate remains visible as a provider-quality issue rather than being hidden by a
 successful validation result.
 
-Regular ODD/perception requests use a short multi-view temporal clip centered on
-the output interval. Event requests use denser clips that cover before, during,
-and after the candidate event. A single image is sufficient only for static
+Requests follow the task-specific camera policy in Section 12.4. Static
+surround questions may use several cameras at one timestamp; temporal Event
+questions use three ordered front-center frames; camera-scoped perception uses
+one camera over a short window. A single image is sufficient only for static
 appearance when the ontology allows it; it is never sufficient for an
 interaction or strong-response event.
 
@@ -1791,15 +1825,15 @@ these defaults where needed.
 |---|---|---|---|---|
 | `odd.road.context` | Land-use/road-context map attributes or observable surround imagery | `DMR` maps provider attributes; otherwise `ORV` classifies the visible built environment | 1 s, surround views, current road neighborhood | Do not use `BMR` from geometry alone. `ORV` fallback is experimental; no land-use attributes and insufficient view is `not_observable` |
 | `odd.road.type` | Current map-matched lane/road with provider class | `DMR` applies a versioned Lanelet2/OSM-to-ontology mapping | Current road segment | Unmapped but present class is `ambiguous`; missing/invalid map is `unavailable`. Camera shape alone does not determine functional class |
-| `odd.road.division` | Opposing-direction lane topology, median/barrier primitives | `DMR` groups carriageways and opposing lanes; `BMR` may resolve irregular valid topology | Current segment plus 100 m | `ORV` may provide experimental visual evidence when map is absent. Occluded median/road edge is `not_observable` |
+| `odd.road.division` | Opposing-direction lane topology, carriageway identity, median/barrier attributes | `DMR` groups carriageways and opposing lanes | Ego-local current segment | Missing separation attributes and insufficient opposing-lane topology are `unavailable`; `BMR` and `ORV` do not guess division |
 | `odd.road.directionality` | Traffic-rule direction or one-way map attribute | `DMR` reads canonical traffic rules | Current connected lane | `ORV` fallback requires visible one-way signs/arrows and is experimental. Geometry without direction metadata is `ambiguous`, not two-way |
-| `odd.road.horizontal_geometry` | Valid current/route centerline | `DMR` computes robust signed curvature over configurable arc length; `BMR` only for fragmented but connected geometry | 30-80 m forward arc | Invalid centerline is `unavailable`; curvature near deadband is `straight`; competing signs over the arc are `ambiguous` |
+| `odd.road.horizontal_geometry` | Valid ego-local current-lane centerline | `DMR` computes robust signed curvature over configurable arc length | 30-80 m local arc | A distant Route defect is irrelevant. Invalid local centerline is `unavailable`; curvature near deadband is `straight`; competing signs over the arc are `ambiguous` |
 | `odd.road.vertical_geometry` | Reliable map Z or GNSS/INS altitude profile and pose quality | `KIN`/`DMR` estimate smoothed grade and grade derivative | Configured 30-100 m baseline | No reliable elevation is `unavailable`. Neither `BMR` nor `ORV` may infer precise grade |
-| `odd.road.junction_type` | Lane graph connectivity, intersection polygons, levels | `DMR` classifies graph degree, branch angles, roundabout cycles, merge/split, and levels; `BMR` resolves irregular valid topology | Junction reached within 100 m | Missing graph is `unavailable`; several topology classes after `BMR` validation remain `ambiguous` |
-| `odd.road.junction_position` | Valid junction polygon/route distance and ego map match | `DMR` state machine: approach, inside, exit, midblock | Native pose timeline, temporally coalesced | Poor map match is `ambiguous`; no valid map coverage is `unavailable`; state transitions use hysteresis |
-| `odd.road.junction_control` | Route-relevant regulatory elements and lane association | `DMR` associates mapped controls; `BMR` may resolve which rendered control applies; `FUS` corroborates with `ORV` | Current/next junction movement | Visible control without lane association is `ambiguous`; no applicable mapped control with complete coverage is `uncontrolled`; missing coverage is `unavailable` |
-| `odd.route.action` | Selected route lane sequence and transitions | `DMR` uses transition type, signed heading change, route graph, and roundabout entry/exit; `BMR` resolves irregular/multi-branch cases | First decisive action within 100 m | No selected route is `unavailable`; route discontinuity is `ambiguous`; actual ego trajectory must not affect this value |
-| `odd.road.lane_count_bin` | Parallel ego-direction lane group and traffic rules | `DMR` counts travel-direction lanes; `BMR` may resolve complex split/merge geometry | Current carriageway, 50 m stable span | Camera-only `ORV` is experimental. Partial map lane coverage is `ambiguous`, never `one` by default |
+| `odd.road.junction_type` | Ego-local lane graph connectivity, intersection polygons, levels | `DMR` classifies graph degree, branch angles, roundabout cycles, merge/split, and levels; Opus 5 `BMR` resolves only the 140-150 degree three-arm T/Y boundary | Junction reached within the local map ROI | Missing local graph is `unavailable`; all non-T/Y ambiguity remains `ambiguous` without a model call |
+| `odd.road.junction_position` | Valid ego-local junction polygon/distance and local map match | `DMR` state machine: approach, inside, exit, midblock | Native pose timeline, temporally coalesced | Global Route quality and distant discontinuities are ignored; poor local match is `ambiguous`; no local map coverage is `unavailable` |
+| `odd.road.junction_control` | Route-relevant regulatory elements and lane association | `DMR` associates mapped controls; `FUS` corroborates with `ORV` | Current/next junction movement | Visible control without lane association is `ambiguous`; no applicable mapped control with complete coverage is `uncontrolled`; missing coverage is `unavailable`; no Bedrock fallback |
+| `odd.route.action` | Locally matched selected-Route segment and transition | `DMR` uses transition type, signed heading change, and local continuity; no model fallback | Current locally matched Route segment | No selected Route is `unavailable`; only a discontinuity at the matched segment is `ambiguous`; KITScenes records reconstructed intent in provenance; actual maneuver remains a separate trajectory label |
+| `odd.road.lane_count_bin` | Parallel ego-direction lane group and traffic rules | `DMR` counts travel-direction lanes from adjacency and carriageway identity | Current carriageway, 50 m stable span | Partial map lane coverage is `unavailable` or `ambiguous`, never `one` by default; no model fallback |
 | `odd.road.lane_type_present` | Lane subtype/regulatory attributes; visible lane symbols | `DMR` maps lane attributes; `ORV` detects visible bus/bicycle/turn/parking markings; `FUS` unions corroborated types | Current carriageway, 1-3 s clip | Complete valid map with no listed type can emit `none`; missing attributes are `unavailable`; map/visual temporary conflict is `ambiguous` or workzone evidence |
 | `odd.road.lane_marking_quality` | Road surface around lane boundaries, valid camera exposure | `ORV` evaluates clear/faded/missing/temporary/occluded with `IQC` observability gate | Front and front-side clips, 1-3 s | Boundary outside view or image failure is `not_observable`; mapped boundary plus visually absent marking supports `missing`; temporary markings require temporal/multi-view support |
 | `odd.road.surface_type` | Map surface attribute and visible drivable surface | `DMR` uses explicit surface material; `ORV` classifies appearance; `FUS` prefers fresh explicit map unless temporary coverage is evident | Ego lane, 1-3 s clip | No visible road and no map attribute is `not_observable`/`unavailable`; disagreement without temporary evidence is `ambiguous` |
@@ -1815,11 +1849,11 @@ these defaults where needed.
 | `odd.environment.visibility_degradation` | Distant scene contrast, temporal images, QC metrics | `ORV` distinguishes fog/haze/precipitation/spray/dust; `IQC` measures contrast and veiling | 3-8 s, forward and surround | Camera contamination must be separated from atmosphere; no distant view is `not_observable`; several supported causes may coexist |
 | `odd.environment.road_lighting` | Illumination, street-light/tunnel context, day phase | `ORV` classifies visible road lighting; `FUS` combines day phase and mapped tunnel | 3-5 s road-facing clip | Street lamps present but visibly off do not imply `street_lit`; clipped/black imagery is `not_observable`; tunnel map plus visible lamps supports `tunnel_lit` |
 | `odd.environment.glare` | Saturated bright regions, direction, semantic source | `IQC` detects glare candidates; `ORV` assigns sun/headlight/wet-road cause and direction; `FUS` validates persistence | 1-3 s per camera | Saturation from exposure alone is not glare; cause unresolvable is `ambiguous`; sufficient clean imagery with no glare emits `none` |
-| `odd.dynamic.traffic_density` | Tracks/counts in observable ROI and temporal traffic motion | `TRK` computes normalized actor count/occupancy/speed; `ORV` fallback classifies multi-view traffic; `FUS` detects stop-and-go | 3-10 s, ego-local road ROI | Front-only coverage cannot certify surround `empty`; missing tracks with full visual coverage uses experimental `ORV`; low observable area is `not_observable` |
-| `odd.dynamic.vru_density` | VRU tracks/classes or observable multi-view imagery | `TRK` counts VRUs by ROI and dwell; `ORV` fallback; `FUS` applies audited bins | 3-10 s, sidewalks/crossings/road ROI | `none` requires sufficient relevant-area coverage; class disagreement is `ambiguous`; untracked occluded sidewalks are not negative |
-| `odd.dynamic.parked_vehicle_density` | Vehicle tracks with motion history, parking/map context, imagery | `TRK` identifies stationary non-traffic vehicles; `ORV` adds parked semantics; `FUS` applies density bins | 5-15 s, curb/parking ROI | Stopped traffic must not be called parked; short track history is `ambiguous`; no observable parking edge is `not_observable` |
-| `odd.dynamic.oncoming_traffic` | Actor relative heading, lane direction/map association, imagery | `TRK` detects opposing motion in connected oncoming lanes; `ORV` fallback; `FUS` validates direction | 3-8 s, forward/side ROI | No actor can yield `absent` only with sufficient coverage; map direction unavailable and visual heading uncertain is `ambiguous` |
-| `odd.dynamic.agent_type_present` | Track classes and actor-visible images | `TRK` supplies stable actors; `ORV` classifies difficult vehicle/VRU types; `FUS` unions per-scene interval actors | 1-5 s, all observable cameras | `none` requires sufficient road/sidewalk coverage; unsupported fine class is `ambiguous_class` evidence, not a guessed type |
+| `odd.dynamic.traffic_density` | Observable surround imagery | `ORV` classifies the ontology bin from all available cameras at one timestamp | Current timestamp, ego-local road ROI | Front-only coverage cannot certify surround `empty`; low observable area is `not_observable`; static input does not establish `stop_and_go` |
+| `odd.dynamic.vru_density` | Observable sidewalks, crossings, and road imagery | `ORV` classifies the ontology bin from all available cameras at one timestamp | Current timestamp, relevant surround ROI | `none` requires sufficient relevant-area coverage; occluded areas are not negative |
+| `odd.dynamic.parked_vehicle_density` | Observable curb/parking imagery and optional map context | `ORV` classifies parked-vehicle density from all available cameras at one timestamp | Current timestamp, curb/parking ROI | Visually uncertain stopped-versus-parked vehicles produce `ambiguous`; no observable parking edge is `not_observable` |
+| `odd.dynamic.oncoming_traffic` | Observable surround imagery and optional map direction | `ORV` classifies visible opposing traffic; `FUS` may corroborate lane direction | Current timestamp, forward/side ROI | `absent` requires sufficient coverage; visual heading uncertainty is `ambiguous` |
+| `odd.dynamic.agent_type_present` | Observable surround imagery | `ORV` classifies scene-present actor types from all available cameras at one timestamp | Current timestamp, all observable cameras | `none` requires sufficient road/sidewalk coverage; unsupported fine class remains absent from resolved values rather than guessed |
 | `odd.ego.speed_bin` | Metric pose timestamps and/or wheel speed | `KIN` derives gap-aware speed; `CAN` corroborates; `FUS` applies frozen epsilon, dwell, and bin boundaries | Native motion timeline, coalesced intervals | Missing/poor pose and CAN is `unavailable`; disagreement above tolerance is `ambiguous`; raw `ego_speed_kph` is always retained |
 
 ### 15.7 Event label acquisition matrix
@@ -1833,32 +1867,34 @@ frames.
 | `event.ego.motion_state` | Signed speed, acceleration, timestamps, optional gear | `KIN`/`CAN` state machine with priority: stopped, reversing, starting, creeping, accelerating/decelerating, moving | Native timeline with dwell/hysteresis | No reliable motion source is `unavailable`; threshold oscillation is coalesced, not emitted as rapid events |
 | `event.ego.maneuver` | Actual ego trajectory, map match/lane transitions, road topology | `KIN` + `DMR` + `FUS` classify heading change, lane crossing, merge/diverge, stop, pull-over/out, and overtake | Complete maneuver, including approach and exit | Planned route alone is prohibited. Invalid trajectory is `unavailable`; competing lane/turn interpretations are `ambiguous` |
 | `event.ego.strong_response` | Acceleration, speed, yaw/steering response, road curvature, optional brake/steer CAN | `KIN`/`CAN`/`FUS` apply sustained deceleration and curvature-relative evasive thresholds | Trigger plus configured pre/post seconds | `ORV` cannot originate this label. No quality motion signal is `unavailable`; planned sharp turn must not become evasive steer |
-| `event.vehicle.interaction` | Stable vehicle tracks/relative trajectories and temporal camera evidence | `TRK` proposes geometric interactions; focused `ORV` identifies cut-in/out, braking, yielding, door opening; `FUS` requires actor continuity | Typically 3-10 s around interaction | Single image is invalid. No stable actor/temporal observability is `not_observable`; track/VLM disagreement is `ambiguous` |
-| `event.vru.interaction` | VRU actor continuity, path relation, temporal camera clip | `TRK` proposes crossings/merges; `ORV` resolves waiting, walking, sudden/occluded emergence, yielding; `FUS` validates ego-path relation | Typically 3-10 s around interaction | Single image cannot establish entering/emergence/yielding. Occluded actor without temporal evidence is `not_observable` |
+| `event.vehicle.interaction` | Ordered front-center frames with visible vehicle continuity | Focused `ORV` identifies cut-in/out, braking, yielding, door opening, and related visual interactions | Three timestamps describing before, active, and after | Single image is invalid. Occlusion or loss of visual continuity is `not_observable` or `ambiguous`; no metric relative-trajectory claim is made |
+| `event.vru.interaction` | Ordered front-center frames with visible VRU continuity and ego-path context | Focused `ORV` identifies crossing, entering, waiting, walking, emergence, and yielding semantics | Three timestamps describing before, active, and after | Single image cannot establish entering/emergence/yielding. Occluded actor without temporal evidence is `not_observable` |
 | `event.traffic_control.response` | Applicable control, current control state, ego trajectory | `DMR` identifies control; `ORV` reads visual state/officer; `KIN` provides response; `FUS` matches stop/proceed/yield behavior | Approach through control clearance | Any missing component makes response `unavailable` or `not_observable`; unrelated visible control must not be associated |
-| `event.right_of_way` | Static priority rules, route movement, actor movement and control state | `DMR` resolves regulatory priority; `BMR` may resolve irregular static topology; `TRK`/`ORV` supply actors; `FUS` determines current priority | Interaction/junction interval | `BMR` sees no camera. `ambiguous_priority` is valid only when sufficient evidence shows genuinely negotiated priority; insufficient rule/actor evidence uses `status=ambiguous`; no interaction/control context yields `not_applicable` |
-| `event.hazard.type` | Temporal road imagery, tracks/LiDAR, map/route blockage | `TRK` detects path occupancy/wrong-way motion; `ORV` identifies debris, obstacle, emergency vehicle; `FUS` requires corroboration for collision | Hazard onset through clearance | `collision` requires motion/contact or multiple-source evidence, not one VLM frame; no visible path is `not_observable` |
+| `event.right_of_way` | Static priority rules, route movement, temporal visual actor/control evidence | `DMR` resolves mapped priority; `ORV` supplies visual interaction semantics; `FUS` determines current priority | Interaction/junction interval | Opus 5 is not used for right of way. Insufficient rule/actor evidence is `ambiguous`; no interaction/control context yields `not_applicable` |
+| `event.hazard.type` | Temporal front-road imagery and map/route blockage context | `ORV` identifies debris, obstacle, wrong-way vehicle, and emergency vehicle; `FUS` may corroborate with map and ego motion | Hazard onset through clearance | `collision` requires corroborating motion/contact evidence, not one VLM frame; no visible path is `not_observable` |
 | `event.hazard.response` | Valid hazard event plus ego trajectory after onset | `KIN`/`DMR`/`FUS` classify slow, stop, yield, lateral avoidance, or lane-change avoidance | Hazard onset through response completion | No valid hazard cannot produce a response; causality uncertain with unrelated maneuver is `ambiguous` |
-| `event.traffic_flow` | Ego speed history, traffic tracks, road/workzone context | `KIN`/`TRK` detect queue/congestion transitions; `ORV` identifies closure/workzone semantics; `FUS` segments entry/exit | 5-30 s depending on flow state | Stop at a signal is not congestion without traffic evidence; scene boundary before transition yields `interrupted` context |
-| `event.interaction.actor` | Actor identities/classes linked to an event | `TRK` supplies stable classes; `ORV` resolves semantic actor class; `FUS` attaches only event participants | Same interval as parent event | Scene-present but uninvolved actors are excluded; unknown class with visible actor is `ambiguous`, not `none` |
+| `event.traffic_flow` | Ego speed history and temporal visual traffic/workzone context | `KIN` detects ego flow transitions; `ORV` identifies queue, closure, and workzone semantics; `FUS` segments entry/exit | 5-30 s depending on flow state | Stop at a signal is not congestion without visual traffic evidence; Scene boundary before transition yields interrupted context |
+| `event.interaction.actor` | Visually identifiable actor class linked to an Event | `ORV` resolves the semantic participant class; `FUS` attaches only Event participants | Same interval as parent Event | No persistent global track ID is created. Scene-present but uninvolved actors are excluded; unknown class is `ambiguous`, not `none` |
 | `event.outcome` | Complete event interval, actor/hazard state, ego motion, collision evidence | `FUS` applies outcome state machine after all event evidence | Event end plus resolution horizon | Scene ends early gives `interrupted` or `unresolved`; `normal_completion` requires observable resolution; collision requires corroboration |
 | `event.phase` | Final event boundaries and confidence | `FUS` temporal segmenter assigns onset/active/resolution subintervals | Within one `EventInstance` | No independent model call. Missing resolution remains an active event ending as `unresolved`; phases cannot overlap or exceed event bounds |
 
 ### 15.8 Perception label acquisition matrix
 
-Object-level rows require a stable `actor_track_uid` or an explicitly marked
-experimental `visual_actor_uid`. Camera-level rows retain `camera_id`.
+The initial KITScenes pipeline publishes Scene- and camera-scoped perception
+conditions without running a detector or tracker. Object-level keys that
+require stable actor geometry remain `unsupported_missing_source`.
+Camera-level rows retain `camera_id`.
 
 | Key | Required evidence | Acquisition and backend | Window / scope | Fallback and status gate |
 |---|---|---|---|---|
-| `perception.occlusion.source` | Actor/scene visibility over time and possible occluders | `TRK` geometry proposes occluders; `ORV` classifies static/dynamic/ego/weather source; `FUS` unions supported sources | Actor-camera or scene interval, 1-5 s | No target/scene visibility reference is `not_observable`; `none` requires clear line of sight |
-| `perception.occlusion.level` | Visible fraction or temporally inferred actor extent | `TRK` uses box/mask/depth overlap; `ORV` estimates semantic level; `FUS` calibrates thresholds | Actor-camera interval | Full occlusion needs track continuity or known geometry; an actor never observed cannot be asserted `full` by VLM alone |
-| `perception.object.visibility` | Actor identity and per-camera visible extent | `TRK`/detection computes visible/truncated fractions; `ORV` handles semantic visibility; `FUS` resolves | Actor-camera interval | No actor identity is `unavailable`; outside FOV is handled by FOV state, while occluded in-FOV may be `not_visible` |
-| `perception.object.scale` | Actor bounding box/mask and camera resolution | `TRK` deterministically computes pixel-height/area bins per actor class; `ORV` fallback for experimental visual actors | Actor-camera frame/interval | No valid box or image geometry is `unavailable`; thresholds are camera-resolution and class normalized |
-| `perception.object.range` | LiDAR depth, 3D track, calibrated geometry, or monocular fallback | `TRK` uses metric range and frozen bins; `ORV` coarse fallback is experimental | Actor interval | VLM-only range has capped confidence; no metric/fallback observability is `not_observable`; raw range meters retained when available |
-| `perception.fov.state` | Camera calibration and temporal actor boxes/tracks | `TRK` deterministically evaluates center/edge/truncation and entering/leaving trend | Actor-camera sequence, at least several frames | Single frame cannot produce entering/leaving; missing calibration is `unavailable`; temporary missed detection is not automatically leaving |
-| `perception.scene.clutter` | Observable scene imagery and object/edge density | `ORV` gives semantic clutter; `TRK`/`IQC` provide actor count and edge-density features; `FUS` calibrates bins | Camera or surround scene, 1-3 s | Severe blur/occlusion is `not_observable`; high traffic alone is not necessarily high clutter |
-| `perception.object.overlap` | Actor boxes/masks, depth ordering, imagery | `TRK` computes overlap with nearer objects; `ORV` resolves semantic overlap; `FUS` bins severity | Actor-camera interval | 2D overlap without depth is lower confidence; missing actor geometry is `unavailable` |
+| `perception.occlusion.source` | Per-camera Scene visibility over a short window | `ORV` classifies static/dynamic/ego/weather source for each camera | Camera interval, 1-5 s | No visible reference region is `not_observable`; `none` requires a clear observable view |
+| `perception.occlusion.level` | Per-camera Scene visibility over a short window | `ORV` estimates Scene-level none/partial/major/full occlusion for each camera | Camera interval, 1-5 s | This is not an object-visible-fraction measurement. Invalid or fully unobservable input is `not_observable` |
+| `perception.object.visibility` | Stable actor identity and visible geometry | Disabled in the initial KITScenes LabelSet | Object-camera interval | `unsupported_missing_source`; a VLM Scene description does not create an actor identity |
+| `perception.object.scale` | Stable actor box/mask and camera resolution | Disabled in the initial KITScenes LabelSet | Object-camera interval | `unsupported_missing_source`; no detector output is introduced |
+| `perception.object.range` | Metric depth or calibrated 3D actor geometry | Disabled in the initial KITScenes LabelSet | Object interval | `unsupported_missing_source`; VLM-only range is not published as metric evidence |
+| `perception.fov.state` | Stable actor geometry across camera frames | Disabled in the initial KITScenes LabelSet | Object-camera sequence | `unsupported_missing_source`; Scene-level camera coverage is handled separately |
+| `perception.scene.clutter` | Observable camera imagery and image structure | `ORV` gives semantic clutter; `IQC` contributes edge/quality observability | Per camera, 1-3 s | Severe blur/occlusion is `not_observable`; high traffic alone is not necessarily high clutter |
+| `perception.object.overlap` | Stable actor boxes/masks and depth ordering | Disabled in the initial KITScenes LabelSet | Object-camera interval | `unsupported_missing_source`; no detector output is introduced |
 | `perception.visual.contrast` | Pixel luminance/chroma and target/background context | `IQC` measures local/global contrast; `ORV` distinguishes low-contrast versus silhouette | Camera or actor-camera interval | Invalid exposure first uses exposure/frame status; no identifiable target for object contrast is `not_observable` |
 | `perception.visual.lighting` | Exposure/HDR/shadow metrics and temporal semantic imagery | `IQC` proposes backlight, shadow, HDR, transition metrics; `ORV` assigns semantic lighting; `FUS` enforces mutual exclusion of normal | Per camera, 1-3 s | Invalid frame is `not_observable`; `normal` cannot co-occur with abnormal values |
 | `perception.visual.glare` | Saturation/bloom metrics and semantic light source | `IQC` detects candidate regions; `ORV` classifies sun/headlight/wet-road reflection | Per camera, 1-3 s | Exposure clipping without directional bloom is not glare; no cause support is `ambiguous`; clean visible frame can emit `none` |
@@ -1867,10 +1903,10 @@ experimental `visual_actor_uid`. Camera-level rows retain `camera_id`.
 | `perception.image.weather_artifact` | Temporal camera pixels and environment context | `IQC` proposes streak/spray/veiling patterns; `ORV` classifies artifact type; `FUS` separates lens-fixed contamination | Per camera, 2-5 s | No clean observable region is `not_observable`; atmospheric fog and lens condensation require temporal distinction |
 | `perception.image.lens_contamination` | Camera-fixed artifacts persistent across scene motion | `IQC` detects image-coordinate persistence; `ORV` classifies droplet/dirt/mud/condensation; `FUS` validates persistence | Per camera, preferably 3-10 s | A one-frame splash is weather artifact until persistent; insufficient temporal baseline is `ambiguous`; clean lens emits `none` |
 | `perception.image.frame_status` | Decoder result, timestamps, frame hashes, authoritative frame inventory, neighboring cameras/ego motion | `IQC` deterministically detects normal/obstruction/black/frozen/dropped/corrupted | Per camera at native rate only with `capture_timeline`; otherwise at sampled evidence intervals | `dropped_frame` requires an authoritative capture inventory; a missing sampled model-input frame is `unavailable`. Stationary scene alone cannot imply frozen; full/partial obstruction semantic boundary may use `ORV` after deterministic candidate |
-| `perception.object.appearance` | Actor crop plus scene context and temporal identity | Focused `ORV` classifies unusual object/pose/temporary/ambiguous/deceptive appearance; `TRK` supplies stable actor | Actor-camera clip, 1-5 s | No stable actor/crop is `unavailable`; `normal` cannot coexist with unusual values; rare claim needs second-pass agreement |
+| `perception.object.appearance` | Stable actor crop plus temporal identity | Disabled in the initial KITScenes LabelSet | Object-camera clip | `unsupported_missing_source`; a Scene-level VLM request does not manufacture stable actor crops |
 | `perception.map_element_condition` | Projected mapped element and corresponding camera region | `DMR` identifies expected lane/sign/control element; `ORV` classifies visible condition; `FUS` detects faded/occluded/temporary conflict/missing | Element-camera interval | Projection or association failure is `unavailable`; outside FOV is `not_observable`; visually missing requires valid expected map element and sufficient view |
-| `perception.scene.complexity` | Multi-view scene, topology, actor counts, controls, occlusion | `ORV` provides semantic complexity; `DMR`/`TRK` provide normalized feature vector; `FUS` applies audited calibration | Scene interval, 3-5 s | Complexity is not a raw VLM adjective: missing major modalities lowers confidence; thresholds are frozen from human audit |
-| `perception.mixed_traffic` | Actor classes and shared-lane/road context | `TRK` detects heterogeneous motorized/VRU participants; `ORV` fallback; `FUS` requires co-presence in relevant ROI | 3-10 s scene interval | Different actors at unrelated times do not establish mixed traffic; insufficient surround coverage is `not_observable` |
+| `perception.scene.complexity` | Front Scene imagery, topology, controls, and occlusion | `ORV` provides semantic complexity; `DMR` provides topology context; `FUS` applies audited calibration | Front camera set at the current evidence interval | Missing major visual coverage lowers confidence; thresholds are frozen from human audit |
+| `perception.mixed_traffic` | Co-present heterogeneous participants in observable surround imagery | `ORV` classifies from all available cameras at one timestamp | Current timestamp, surround Scene | Different actors at unrelated times do not establish mixed traffic; insufficient surround coverage is `not_observable` |
 | `perception.temporary_traffic_control` | Visible temporary signs/cones/barriers/officer and static map comparison | `ORV` detects temporary controls; `DMR` provides expected static state; `FUS` resolves present/absent and conflict | 3-8 s road/junction interval | `absent` requires sufficient road/control visibility; static mapped control alone is not temporary; map/visual mismatch supports present only with visual evidence |
 
 ### 15.9 Acquisition completeness and KITScenes support
@@ -1895,12 +1931,35 @@ Unsupported labels remain visible in the ontology but publish
 The initial expected routing is:
 
 - run `DMR`, `KIN`, and `IQC` wherever their source contracts are available;
-- run `BMR` only on the small subset of map/route observations that remain
-  geometrically ambiguous after deterministic resolution;
+- run Opus 5 `BMR` only on the small subset of locally valid three-arm junctions
+  that remain T/Y ambiguous after deterministic resolution;
 - run `ORV` on task-specific camera clips for visual ODD/perception coverage;
-- enable track/LiDAR event rows only after the KITScenes capability audit
-  validates identities, calibration, and temporal coverage;
+- do not run an object detector, tracker, or LiDAR geometry pipeline; mark keys
+  that fundamentally require those sources as `unsupported_missing_source`;
 - publish the exact supported/unsupported matrix with the LabelSet.
+
+The KITScenes source audit of the current `map.osm` found 75 Lanelets:
+
+- `location` exists on all 75 (`urban` on 43 and `nonurban` on 32), so
+  `odd.road.context` can use explicit provider data;
+- `highway`/`road_class` exists on 0 of 75, so `odd.road.type` must remain
+  `unavailable` rather than inferring suburban/residential from camera
+  appearance;
+- `one_way` exists on 18 of 75 and `road_section` on 3 of 75, so
+  directionality, lane grouping, and division coverage are necessarily partial.
+
+Navigation contract v2 preserves road class, lane subtype, one-way,
+carriageway, median/barrier, predecessor/successor, adjacency, boundary
+attributes, and raw provider attributes without reducing them to raster masks.
+This makes richer source maps usable end to end, but cannot recover attributes
+that are absent in the original KITScenes map.
+
+The published KITScenes camera artifact is a sampled model-input window, not an
+authoritative capture timeline. Image QC therefore evaluates decoded sampled
+frames and never calls unsampled time a dropped frame. The current Full
+LabelSet audit found 85,428 Image QC evidence rows: 81,761 valid, 2,855
+ambiguous, 812 not observable, and 0 unavailable. The separately observed
+3,400 unavailable rows came from exhausted VLM retries, not Image QC.
 
 ## 16. Flyte Workflow
 
@@ -2694,7 +2753,8 @@ definition is unclear, the ontology is changed first.
 
 1. Pin the KITScenes dataset publication manifest and scene inventory.
 2. Audit actual availability and quality of map attributes, route semantics,
-   absolute timestamps, cameras, tracks, LiDAR, and other channels.
+   absolute timestamps, cameras, and GNSS/INS. Object tracks, detector output,
+   and LiDAR are explicitly outside the initial pipeline.
 3. Produce corpus distributions for GNSS/INS noise, gaps, speed, acceleration,
    yaw rate, curvature, and map-match quality.
 4. Freeze ontology definitions, spatial ROI, temporal cadence, speed epsilon,
@@ -2718,18 +2778,18 @@ This phase should already produce useful ODD statistics without Cosmos.
 
 ### 22.3 Phase 2: selective model resolvers
 
-1. Build privacy-filtered map/route renders and structured summaries for
-   deterministic ambiguous cases.
-2. Validate Bedrock Claude on irregular junction and route-action golden
-   fixtures, including post-response geometry checks.
-3. Define schema-constrained OpenAI-compatible temporal multi-view prompts for
+1. Build privacy-filtered ego-local map renders and structured summaries for
+   three-arm T/Y boundary cases.
+2. Validate Bedrock Claude Opus 5 on T/Y golden fixtures, including
+   post-response three-arm geometry checks.
+3. Define schema-constrained OpenAI-compatible task-specific camera prompts for
    camera-derived road knowledge.
 4. Run both providers on separate small stratified KITScenes subsets.
 5. Audit per key/value and calibrate confidence separately for `BMR` and `ORV`.
 6. Correct ontology, prompt, or deterministic-candidate ambiguities before the
    full run.
 7. Run full 1 Hz `ORV` coverage plus triggered refinement; run `BMR` only for
-   deterministic ambiguous map/route observations.
+   deterministic T/Y ambiguous junction observations.
 8. Publish each provider's evidence separately from resolved fusion output.
 
 ### 22.4 Phase 3: events and fusion
@@ -2740,8 +2800,7 @@ Implement:
 - route-versus-actual maneuver comparison;
 - event segmentation and phases;
 - traffic, VRU, hazard, workzone, and interaction events supported by the
-  audited capabilities;
-- object-track or LiDAR fusion only where those contracts are validated.
+  audited visual and trajectory capabilities.
 
 Unsupported event families remain unavailable or experimental. Full coverage is
 not fabricated from VLM-only still images.
@@ -2764,9 +2823,12 @@ Add:
 
 ### 22.6 KITScenes publication policy
 
-The initial LabelSet binds to the current immutable KITScenes dataset manifest
-and navigation artifacts. It is published as a sidecar. No shard repack is
-required.
+The initial v10 LabelSet binds to the immutable KITScenes v3.1 manifest and
+navigation contract v2 artifacts. Creating v3.1 performs one training-free
+repack from the audited recovery manifest so lossless provider attributes and
+topology reach `scene_navigation.json`; it does not invoke training, evaluation,
+Reasoning labeling, or Cosmos. ODD reruns then publish sidecars against v3.1
+without another shard repack.
 
 The Dashboard milestone has no training dependency. A later Active Learning
 experiment may define and consume a `SceneSelectionManifest` to decide which raw
@@ -2795,17 +2857,18 @@ adapter to `NavigationMap`. If a selected route exists, it also emits
 
 Map formats are not added to the labeler one by one.
 
-### 23.3 Track/LiDAR tier
+### 23.3 Deferred actor-geometry tier
 
-Object tracks and LiDAR enable:
+A future, separately scoped actor-geometry pipeline could enable:
 
 - calibrated actor range and scale;
 - traffic/VRU density with stronger observability;
 - relative motion and interaction events;
 - TTC and, after validation, possible near-collision candidates.
 
-The label schema remains the same. The source becomes `fusion`, and evidence
-records identify tracks/LiDAR.
+This tier is not implemented or scheduled for the initial KITScenes LabelSet.
+If later approved, the label schema can remain the same while evidence records
+identify the newly introduced geometry source.
 
 ### 23.4 CAN-enhanced tier
 
@@ -2862,8 +2925,8 @@ observable coverage and another has 30%.
 - Bounded protocol-repair tests prove raw responses remain immutable, repaired
   values remain ontology-valid, repair provenance is complete, and unsupported
   cameras/timestamps/values are still rejected.
-- Bedrock map-resolver fixtures for left/right/straight route action,
-  T/Y/cross/roundabout/merge/diverge topology, and grade-separated ambiguity.
+- Bedrock map-resolver fixtures for only the three-arm T/Y boundary; prove
+  Route action and all other junction classes never generate a request.
 - Post-Bedrock geometry validation rejects unsupported value/primitive pairs.
 - Request serialization proves that Bedrock receives no camera bytes or exact
   geography and the road VLM receives no map render.
@@ -3054,21 +3117,23 @@ execution.
 
 These are empirical configuration decisions, not unresolved architecture:
 
-1. Exact KITScenes support for absolute civil time, object tracks, and LiDAR in
-   the published processing contract.
-2. Lanelet2/OSM attribute coverage for road context, lane count/type, surface,
-   structures, and traffic controls.
+1. Exact KITScenes support for absolute civil time in the published processing
+   contract. Object tracks and LiDAR are not initial dependencies.
+2. Lanelet2/OSM attribute coverage beyond the audited `location`, sparse
+   `one_way`, and sparse `road_section` fields, especially road class, lane
+   count/type, surface, structures, and traffic controls.
 3. `stationary_epsilon_kph`, dwell time, derivative smoothing, and source-gap
    thresholds.
 4. Curvature, grade, event, and density thresholds.
-5. VLM temporal clip length, frame cadence, camera arrangement, and triggered
-   refinement budget.
+5. VLM temporal cadence and triggered refinement budget within the frozen
+   task-specific camera policy.
 6. Initial per-key certification thresholds and audit sample allocation.
-7. Which object-level labels remain disabled until stable tracks are available.
+7. Whether a future, separately scoped LabelSet should add object-level
+   geometry; all such labels remain disabled in the initial implementation.
 8. Pinned OpenAI-compatible road-VLM model revision and per-bundle prompt
    versions.
-9. Pinned Bedrock Claude model/inference profile, topology prompt versions, and
-   the deterministic ambiguity threshold that triggers `BMR`.
+9. Opus 5 topology prompt revisions and any change to the frozen 140-150 degree
+   T/Y ambiguity boundary that triggers `BMR`.
 
 Each value is selected from a reproducible audit artifact and frozen before the
 full run. None may be selected after inspecting desired model-performance
