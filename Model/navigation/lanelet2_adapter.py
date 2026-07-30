@@ -368,6 +368,7 @@ class Lanelet2MapAdapter:
                                 lane_attributes,
                                 "carriageway_id",
                                 "carriageway",
+                                "road_section",
                                 "road_id",
                                 "way_id",
                             ),
