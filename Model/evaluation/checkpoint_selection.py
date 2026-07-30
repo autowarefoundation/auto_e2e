@@ -9,9 +9,9 @@ from collections.abc import Mapping, Sequence
 import numpy as np
 
 
-SELECTOR_POLICY_VERSION = "rollout_composite_selector_v2"
+SELECTOR_POLICY_VERSION = "rollout_composite_selector_v3"
 SELECTOR_MIN_DELTA = 0.0005
-SELECTOR_CALIBRATION_VERSION = "rollout_selector_calibration_v2"
+SELECTOR_CALIBRATION_VERSION = "rollout_selector_calibration_v3"
 TOP_LEVEL_WEIGHTS = {
     "trajectory": 0.50,
     "comfort": 0.15,
@@ -20,7 +20,7 @@ TOP_LEVEL_WEIGHTS = {
 }
 UTILITY_SCALES = {
     "ade_3s_m": 2.5,
-    "fde_6_4s_m": 6.0,
+    "fde_3s_m": 3.0,
     "comfort_excess": 0.15,
     "offroad_excess": 0.10,
     "route_gap": 0.15,
@@ -29,7 +29,7 @@ UTILITY_SCALES = {
 }
 METRIC_NAMES = (
     "ade_3s_m",
-    "fde_6_4s_m",
+    "fde_3s_m",
     "comfort_excess",
     "offroad_excess",
     "route_gap",
@@ -46,7 +46,7 @@ DIAGNOSTIC_NAMES = (
 AGGREGATE_NAMES = METRIC_NAMES + DIAGNOSTIC_NAMES
 REQUIRED_METRICS = (
     "ade_3s_m",
-    "fde_6_4s_m",
+    "fde_3s_m",
     "comfort_excess",
 )
 
@@ -342,7 +342,7 @@ def score_checkpoint(
     )
     fde_natural, fde_scene = _metric_pair(
         aggregates,
-        "fde_6_4s_m",
+        "fde_3s_m",
     )
     natural_trajectory = (
         0.6 * _bounded_inverse(
@@ -351,7 +351,7 @@ def score_checkpoint(
         )
         + 0.4 * _bounded_inverse(
             fde_natural,
-            UTILITY_SCALES["fde_6_4s_m"],
+            UTILITY_SCALES["fde_3s_m"],
         )
     )
     scene_trajectory = (
@@ -361,7 +361,7 @@ def score_checkpoint(
         )
         + 0.4 * _bounded_inverse(
             fde_scene,
-            UTILITY_SCALES["fde_6_4s_m"],
+            UTILITY_SCALES["fde_3s_m"],
         )
     )
     components = {
