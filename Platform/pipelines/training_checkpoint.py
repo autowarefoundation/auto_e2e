@@ -303,6 +303,7 @@ def update_best_pointer(
     ade: float,
     fde: float,
     selection: Mapping[str, Any] | None = None,
+    metric_contract: Mapping[str, Any] | None = None,
 ) -> str:
     """Update the versioned best pointer after a metric improvement."""
     key = best_pointer_key(run_id, role=role)
@@ -312,9 +313,13 @@ def update_best_pointer(
     )
     pointer = {
         "schema_version": (
-            "best_checkpoint_pointer_v2"
-            if selection is not None
-            else "best_checkpoint_pointer_v1"
+            "best_checkpoint_pointer_v3"
+            if metric_contract is not None
+            else (
+                "best_checkpoint_pointer_v2"
+                if selection is not None
+                else "best_checkpoint_pointer_v1"
+            )
         ),
         "run_id": run_id,
         "checkpoint_role": role,
@@ -336,6 +341,28 @@ def update_best_pointer(
                 "checkpoint selection has no numeric score"
             )
         pointer["selection"] = dict(selection)
+    if metric_contract is not None:
+        required = {
+            "version",
+            "horizon_seconds",
+            "horizon_steps",
+            "target_source",
+            "aggregation",
+        }
+        missing = required - set(metric_contract)
+        if missing:
+            raise ValueError(
+                "checkpoint metric contract is incomplete: "
+                f"{sorted(missing)}"
+            )
+        if (
+            float(metric_contract["horizon_seconds"]) <= 0.0
+            or int(metric_contract["horizon_steps"]) <= 0
+        ):
+            raise ValueError(
+                "checkpoint metric horizon must be positive"
+            )
+        pointer["metric_contract"] = dict(metric_contract)
     body = json.dumps(
         pointer,
         sort_keys=True,
