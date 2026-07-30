@@ -23,7 +23,7 @@ from .schema import (
 
 
 ROAD_VLM_SCHEMA_VERSION = "road_vlm_request_v4"
-ROAD_VLM_PROMPT_VERSION = "road_scene_observer_v5"
+ROAD_VLM_PROMPT_VERSION = "road_scene_observer_v6"
 ROAD_VLM_PROTOCOL_REPAIR_VERSION = "road_vlm_protocol_repair_v1"
 DEFAULT_REFINEMENT_CONFIDENCE_THRESHOLD = 0.65
 VLM_FRAME_STATUS_VALUES = (
