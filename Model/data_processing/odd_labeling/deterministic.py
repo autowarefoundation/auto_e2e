@@ -13,6 +13,7 @@ from navigation.contracts import (
     RouteLaneSegment,
     TransitionType,
 )
+from navigation.geodesy import wgs84_to_map_xy
 
 from .published_snapshot import CanonicalSceneEvidence
 from .schema import LabelObservation, make_observation
@@ -543,6 +544,11 @@ def _wrap_angle(value: float) -> float:
     return math.atan2(math.sin(value), math.cos(value))
 
 
+def _undirected_heading_error(first: float, second: float) -> float:
+    directed_error = abs(_wrap_angle(first - second))
+    return min(directed_error, math.pi - directed_error)
+
+
 def _polyline_heading(polyline: np.ndarray, segment_index: int) -> float:
     points = np.asarray(polyline, dtype=np.float64)[:, :2]
     delta = points[segment_index + 1] - points[segment_index]
@@ -564,7 +570,9 @@ def _match_lane(
         lane_heading = _polyline_heading(
             lane.centerline_enu_m, segment_index
         )
-        heading_error = abs(_wrap_angle(heading_rad - lane_heading))
+        heading_error = _undirected_heading_error(
+            heading_rad, lane_heading
+        )
         if (
             distance > LOCAL_MAP_MAX_DISTANCE_M
             or heading_error > LOCAL_MATCH_MAX_HEADING_ERROR_RAD
@@ -991,10 +999,9 @@ def label_map_route(
         )
     path = evidence.path_latlon_heading_timestamp
     timestamps = path[:, 3].astype(np.int64)
-    local_xy = _local_xy(
+    local_xy = wgs84_to_map_xy(
         path,
-        navigation_map.frame.origin_latitude_deg,
-        navigation_map.frame.origin_longitude_deg,
+        navigation_map.frame,
     )
     route_quality = route.quality if route is not None else None
     provenance: dict[str, object] = {
@@ -1076,6 +1083,7 @@ def label_map_route(
             "local_map_match": {
                 "distance_m": map_distance,
                 "heading_error_rad": map_heading_error,
+                "heading_semantics": "undirected_centerline_geometry",
             },
         }
         common: dict[str, object] = {
