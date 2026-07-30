@@ -237,8 +237,8 @@ Section 6 and compute:
 ```text
 target rollout ADE@3s
 target rollout FDE@3s
-target rollout ADE@6.4s
-target rollout FDE@6.4s
+target rollout ADE@6.4s (noncanonical target-quality diagnostic)
+target rollout FDE@6.4s (noncanonical target-quality diagnostic)
 ```
 
 The audit report contains:
@@ -279,9 +279,11 @@ p95 FDE@3s   <= 1.0 m
 p95 FDE@6.4s <= 2.0 m
 ```
 
-These are target-quality criteria, not product-quality gates. Exceeding either
-threshold requires design review and prohibits using integrated target controls
-as the position teacher. It does not prohibit a versioned fallback to logged XY.
+These are target-quality criteria, not model-evaluation or checkpoint gates.
+The 6.4-second audit verifies the full training target and is never published
+as canonical model ADE/FDE. Exceeding either threshold requires design review
+and prohibits using integrated target controls as the position teacher. It
+does not prohibit a versioned fallback to logged XY.
 
 The Go decision must include a written rationale and the selected position
 target source. A No-Go blocks training. A Go with `position_target=logged_xy`
@@ -802,13 +804,18 @@ future XY:
 
 ```text
 ADE@3s
-FDE@6.4s
+FDE@3s
 ```
 
-Other existing horizons remain diagnostic but are not selector inputs.
-Training and checkpoint selection use the same logged XY position target.
-Integrated target-control XY remains a reconstruction diagnostic and is not
-substituted for logged XY.
+These are the canonical `ade` and `fde` values throughout checkpoint history,
+best-epoch selection, MLflow, and the model registry. Both are scene-balanced
+after per-sample records are aggregated. Integrated target-control XY remains
+a reconstruction diagnostic and is not substituted for logged XY.
+
+All selector metrics in Sections 12.2 through 12.6 use the same first 30
+steps. The model and planner loss retain their 64-step prediction and training
+horizon; only validation and checkpoint selection use the fixed 3-second
+horizon.
 
 ### 12.2 Comfort excess
 
@@ -822,7 +829,7 @@ comfort_excess = 0.5 * (jerk_peak_excess + lateral_accel_peak_excess)
 ### 12.3 Off-road excess
 
 For each timestep, mark whether any footprint corner is outside the drivable
-region. Let `r_pred` and `r_target` be the resulting fractions over 64 steps:
+region. Let `r_pred` and `r_target` be the resulting fractions over 30 steps:
 
 \[
 offroad\_excess=\max(0,r^{pred}-r^{target})
@@ -874,6 +881,8 @@ destination\_error
 \right|
 \]
 
+Here, `T` is validation step 30, not the 64-step prediction endpoint.
+
 It is reported in metres and remains target-relative.
 
 ## 13. Validation Aggregation
@@ -890,7 +899,7 @@ Record at minimum:
 
 ```text
 natural ADE@3s
-natural FDE@6.4s
+natural FDE@3s
 natural off-road excess
 natural comfort excess
 natural route gap
@@ -917,7 +926,7 @@ aggregate. Record:
 
 ```text
 scene-balanced ADE@3s
-scene-balanced FDE@6.4s
+scene-balanced FDE@3s
 scene-balanced off-road excess
 scene-balanced comfort excess
 scene-balanced route gap
@@ -983,8 +992,10 @@ min_delta
 These values are fixed for the run and saved in every checkpoint. Changing a
 utility scale or weight creates a new selector policy version.
 The bounded-inverse equations in Section 16 define
-`rollout_composite_selector_v2`; checkpoints produced by the earlier clipped
-policy are not resume-compatible.
+`rollout_composite_selector_v3`. It consumes `rollout_validation_v2` records,
+whose displacement and constraint metrics all use the first 30 steps.
+Checkpoints produced by selector v2, which mixed 3-second ADE with 6.4-second
+FDE and constraints, are not resume-compatible.
 
 Before freezing the first policy, existing checkpoints are evaluated to verify
 component variation and identify semantically constant components. Excess
@@ -1026,7 +1037,7 @@ D_{natural}
 =
 0.6\frac{1}{1+ADE^{natural}_{3s}/2.5}
 +
-0.4\frac{1}{1+FDE^{natural}_{6.4s}/6.0}
+0.4\frac{1}{1+FDE^{natural}_{3s}/3.0}
 \]
 
 \[
@@ -1034,7 +1045,7 @@ D_{scene}
 =
 0.6\frac{1}{1+ADE^{scene}_{3s}/2.5}
 +
-0.4\frac{1}{1+FDE^{scene}_{6.4s}/6.0}
+0.4\frac{1}{1+FDE^{scene}_{3s}/3.0}
 \]
 
 \[
@@ -1186,7 +1197,7 @@ best_trajectory: highest trajectory component utility
 
 The trajectory component is the existing equal combination of natural and
 scene-balanced trajectory utility. It therefore reflects natural and
-scene-balanced ADE@3s and FDE@6.4s without introducing a separate ADE-only
+scene-balanced ADE@3s and FDE@3s without introducing a separate ADE-only
 ranking rule.
 
 - The first successfully validated checkpoint establishes both records.
@@ -1220,6 +1231,7 @@ selector policy version
 validation snapshot and sample/group digests
 frozen component availability and effective weights
 metric history with natural and scene-balanced aggregates
+validation metric contract (`3.0 s`, 30 steps, logged XY, scene-balanced)
 composite-best and trajectory-best checkpoint identities
 bad epoch count
 scheduler state
@@ -1274,6 +1286,13 @@ The `best` role is selected by the versioned composite score. Production
 promotion gates, if later required, operate after research checkpoint
 selection and are not part of this policy.
 
+Every v3 registry version stores `validation_ade_3s_m`,
+`validation_fde_3s_m`, `validation_metric_version`,
+`validation_metric_horizon_seconds`, `validation_metric_horizon_steps`,
+`validation_metric_target_source`, and `validation_metric_aggregation`.
+Generic `validation_ade` and `validation_fde` aliases have the same canonical
+3-second meaning for v3 versions.
+
 ## 19. MLflow and Auditability
 
 Log the following namespaces:
@@ -1295,6 +1314,11 @@ validation/scene_balanced/*
 validation/scene_distribution/*/{count,mean,p50,p90}
 validation/coverage/*
 
+val/ade
+val/fde
+val/ade_3s_scene_balanced_logged_xy
+val/fde_3s_scene_balanced_logged_xy
+
 selection/component/*
 selection/effective_weight/*
 selection/score
@@ -1306,8 +1330,11 @@ audit/reconstruction/*
 ```
 
 Checkpoint metadata and MLflow must agree on epoch, score, component values,
-effective weights, and validation digests. The immutable checkpoint metadata
-is authoritative if an MLflow retry occurs.
+effective weights, validation digests, and the validation metric contract.
+`val/ade` and `val/fde` are canonical scene-balanced logged-XY 3-second
+metrics. Target-control rollout diagnostics use the explicit
+`val/control_rollout_*` namespace. The immutable checkpoint metadata is
+authoritative if an MLflow retry occurs.
 
 ## 20. Implementation Plan
 
@@ -1354,7 +1381,8 @@ is authoritative if an MLflow retry occurs.
 ### PR Step 5: Flyte lifecycle integration
 
 - Change scheduler input and mode.
-- Drive early stopping from composite-score improvement.
+- Drive early stopping from either composite-best or trajectory-best
+  improvement while keeping the scheduler on composite score.
 - Update checkpoint and resume validation.
 - Update MLflow logging and model-registry roles.
 
@@ -1411,12 +1439,13 @@ footprint heading source.
 
 1. Missing or non-finite required metrics fail validation.
 2. The first complete checkpoint becomes best.
-3. Later checkpoints rank only by composite score and `min_delta`.
+3. Later checkpoints independently update composite-best and trajectory-best
+   using the same `min_delta`.
 4. Scene-balanced trajectory utility changes the score.
 5. Route utility is target-relative.
 6. Coverage shortage excludes optional components and renormalizes weights.
 7. Component availability does not change after epoch 1.
-8. Early stopping follows composite-score improvement.
+8. Early stopping resets when either best record improves.
 9. Resume reproduces the same best epoch and bad-epoch count.
 10. Resume rejects policy, availability, weight, or validation drift.
 
@@ -1441,8 +1470,8 @@ Primary criteria:
 1. Paired median composite score for B is not worse than A.
 2. At least two of three seeds have B composite score greater than or equal to
    A.
-3. Paired median natural ADE@3s and FDE@6.4s regress by no more than 5%.
-4. Paired median scene-balanced ADE@3s or scene-balanced FDE@6.4s improves.
+3. Paired median natural ADE@3s and FDE@3s regress by no more than 5%.
+4. Paired median scene-balanced ADE@3s or scene-balanced FDE@3s improves.
 5. Safety, comfort, and navigation component values and paired deltas are
    reported separately; none is hidden by the aggregate score.
 6. Full training-step throughput regresses by no more than 12%.
