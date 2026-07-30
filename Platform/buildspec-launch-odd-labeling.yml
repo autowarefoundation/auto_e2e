@@ -15,8 +15,8 @@ env:
     ROAD_VLM_MODEL: nvidia/Cosmos3-Nano
     ROAD_VLM_MODEL_REVISION: 411f42a8fdfb8c5b2583cb8786e0938f49796eaa
     MAP_RESOLVER_PROVIDER: amazon_bedrock
-    MAP_RESOLVER_MODEL_ID: us.anthropic.claude-sonnet-4-6
-    MAP_RESOLVER_MODEL_REVISION: claude-sonnet-4-6
+    MAP_RESOLVER_MODEL_ID: us.anthropic.claude-opus-5
+    MAP_RESOLVER_MODEL_REVISION: claude-opus-5
     PUBLICATION_PREFIX: ""
     CAMERA_ANCHOR_INTERVAL_S: "1.0"
     MAXIMUM_CAMERA_ANCHORS: "128"
