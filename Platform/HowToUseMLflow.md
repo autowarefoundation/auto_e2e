@@ -63,8 +63,8 @@ ctx/eval_execution_id, ctx/eval_docker_image
 **Metrics**:
 ```
 train/loss        per-epoch training loss curve (step = epoch)
-eval/ade          Average Displacement Error (meters, lower is better)
-eval/fde          Final Displacement Error (meters, lower is better)
+eval/ade          Scene-balanced logged-XY ADE@3s (meters, lower is better)
+eval/fde          Scene-balanced logged-XY FDE@3s (meters, lower is better)
 eval/gate_pass    1.0 if ade<2.0 AND fde<4.0 else 0.0
 rl/q_loss, rl/v_loss, rl/policy_loss             (offline-rl runs only)
 ```
@@ -82,15 +82,17 @@ model/            the checkpoint (.pt), also registered in the Model Registry
 **You are**: anyone choosing a model to promote.
 
 1. Open the **`imitation-learning`** experiment.
-2. In the run table, click the **`eval/ade`** column header to **sort ascending**
-   (lowest displacement error = best).
+2. For selector-v3 runs, sort `selection/score` descending to find the
+   composite-best epoch. Use `eval/ade` and `eval/fde` to inspect the selected
+   checkpoint's 3-second displacement quality.
 3. Add/show the columns you care about (gear/columns button): `model/backbone`,
    `model/fusion_mode`, `data/dataset`, `eval/ade`, `eval/fde`, `eval/gate_pass`.
 4. The top row is your best IL model. Repeat in **`offline-rl`** to see if RL
    refinement improved it.
 
-> Lower `eval/ade` and `eval/fde` are better. `eval/gate_pass = 1` means it cleared
-> the quality gate (ade<2.0m, fde<4.0m).
+> Lower `eval/ade` and `eval/fde` are better. For KITScenes selector-v3 runs,
+> both use logged XY, a 3-second horizon, and equal scene weighting. Confirm
+> `validation_metric_*` tags before comparing older runs.
 
 ---
 
@@ -187,14 +189,15 @@ model/            the checkpoint (.pt), also registered in the Model Registry
 
 | Metric | Meaning | Good value |
 |--------|---------|-----------|
-| `eval/ade` | mean (x,y) error over the 6.4s horizon (m) | lower; <2.0 passes gate |
-| `eval/fde` | error at the final predicted point (m) | lower; <4.0 passes gate |
+| `eval/ade` | scene-balanced logged-XY mean error through 3.0s (m) | lower; <2.0 passes gate |
+| `eval/fde` | scene-balanced logged-XY endpoint error at 3.0s (m) | lower; <4.0 passes gate |
 | `eval/gate_pass` | 1.0 if both gates pass | 1.0 |
 | `train/loss` | smooth-L1 trajectory loss per epoch | decreasing & flattening |
 | `rl/q_loss`,`rl/v_loss`,`rl/policy_loss` | IQL component losses | decreasing |
 
-> Trajectories are produced by integrating predicted `(accel, curvature)` into
-> (x,y) positions and comparing to ground truth (see `evaluation/metrics.py`).
+> Predicted `(accel, curvature)` is integrated into XY and compared with packed
+> logged XY. The model still predicts and trains over 64 steps; canonical
+> validation uses the first 30 steps.
 
 ---
 
