@@ -556,18 +556,20 @@ class LocalLaneSequenceResolver:
         for _, lane, _, _ in matched:
             if not deduplicated or deduplicated[-1].lane_id != lane.lane_id:
                 deduplicated.append(lane)
-        resolved: list[tuple[OSMLaneSegment, TransitionType]] = []
+        resolved: list[
+            tuple[OSMLaneSegment, TransitionType, bool]
+        ] = []
         fill_count = 0
         fill_length = 0.0
         adjacent_count = 0
         unresolved = 0
         if deduplicated:
-            resolved.append((deduplicated[0], TransitionType.FOLLOW))
+            resolved.append((deduplicated[0], TransitionType.FOLLOW, True))
         for lane in deduplicated[1:]:
             previous = resolved[-1][0]
             relation = self._relation(previous, lane)
             if relation is not None:
-                resolved.append((lane, relation))
+                resolved.append((lane, relation, True))
                 if relation in (
                     TransitionType.LEFT_ADJACENT,
                     TransitionType.RIGHT_ADJACENT,
@@ -578,7 +580,7 @@ class LocalLaneSequenceResolver:
             if path:
                 fill_count += 1
                 for filled in path[1:]:
-                    resolved.append((filled, TransitionType.FOLLOW))
+                    resolved.append((filled, TransitionType.FOLLOW, True))
                     fill_length += float(
                         np.linalg.norm(
                             np.diff(
@@ -590,7 +592,7 @@ class LocalLaneSequenceResolver:
                     )
             else:
                 unresolved += 1
-                resolved.append((lane, TransitionType.FOLLOW))
+                resolved.append((lane, TransitionType.FOLLOW, False))
 
         distances = np.asarray(
             [item[2] for item in matched],
@@ -648,7 +650,7 @@ class LocalLaneSequenceResolver:
             failure_reasons=tuple(failures),
         )
         lane_confidence = (
-            float(np.mean([lane.confidence for lane, _ in resolved]))
+            float(np.mean([lane.confidence for lane, _, _ in resolved]))
             if resolved
             else 0.0
         )
@@ -672,8 +674,9 @@ class LocalLaneSequenceResolver:
                     else lane.maneuver
                 ),
                 confidence=lane.confidence,
+                connected_from_previous=connected,
             )
-            for index, (lane, transition) in enumerate(resolved)
+            for index, (lane, transition, connected) in enumerate(resolved)
         )
         route_hash = hashlib.sha256(
             (
