@@ -40,6 +40,15 @@ def _lane_graph():
                 "right_boundary_enu_m": [[0, -2], [20, -2]],
                 "successors": ["11:forward:0"],
                 "maneuver": "straight",
+                "road_class": "primary",
+                "lane_subtype": "general",
+                "one_way": True,
+                "carriageway_id": "way-10-forward",
+                "median_separated": True,
+                "barrier_separated": False,
+                "left_adjacent": None,
+                "right_adjacent": None,
+                "tags": {"highway": "primary", "maxspeed": "50"},
             },
             {
                 "way_id": 11,
@@ -50,6 +59,15 @@ def _lane_graph():
                 "right_boundary_enu_m": [[20, -2], [40, -2]],
                 "successors": [],
                 "maneuver": "straight",
+                "road_class": "primary",
+                "lane_subtype": "general",
+                "one_way": True,
+                "carriageway_id": "way-10-forward",
+                "median_separated": True,
+                "barrier_separated": False,
+                "left_adjacent": None,
+                "right_adjacent": None,
+                "tags": {"highway": "primary", "maxspeed": "50"},
             },
         ],
         "semantic": {
@@ -114,6 +132,21 @@ def test_osm_adapter_extracts_stable_lane_and_semantic_contract(tmp_path):
     assert adapter.lane_segments[0].successor_ids == (
         adapter.lane_segments[1].lane_id,
     )
+    field = navigation_map.directed_lane_fields[0]
+    assert field.road_class == "primary"
+    assert field.lane_subtype == "general"
+    assert field.one_way is True
+    assert field.carriageway_id == "way-10-forward"
+    assert field.median_separated is True
+    assert field.barrier_separated is False
+    assert field.provider_attributes["maxspeed"] == "50"
+    assert field.successor_lane_ids == (
+        navigation_map.directed_lane_fields[1].lane_id,
+    )
+    assert navigation_map.directed_lane_fields[1].predecessor_lane_ids == (
+        field.lane_id,
+    )
+    assert navigation_map.layer_availability["lane_topology"] is True
     assert len(navigation_map.drivable_polygons) == 2
     assert len(navigation_map.crosswalk_polygons) == 1
     assert len(navigation_map.stop_lines) == 1
