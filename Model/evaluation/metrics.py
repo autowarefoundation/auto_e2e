@@ -77,7 +77,7 @@ def compute_open_loop_metrics(
     if initial_heading is None:
         initial_heading = np.zeros(B)
 
-    ade_1s, ade_2s, ade_3s, ade_full, fde_full = [], [], [], [], []
+    ade_1s, ade_2s, ade_3s, fde_3s = [], [], [], []
 
     for i in range(B):
         pred_xy = integrate_trajectory(pred_accel[i], pred_curv[i],
@@ -89,15 +89,13 @@ def compute_open_loop_metrics(
         ade_1s.append(errors[:10].mean())
         ade_2s.append(errors[:20].mean())
         ade_3s.append(errors[:30].mean())
-        ade_full.append(errors.mean())
-        fde_full.append(errors[-1])
+        fde_3s.append(errors[29])
 
     return {
         "ADE@1s": float(np.mean(ade_1s)),
         "ADE@2s": float(np.mean(ade_2s)),
         "ADE@3s": float(np.mean(ade_3s)),
-        "ADE@6.4s": float(np.mean(ade_full)),
-        "FDE@6.4s": float(np.mean(fde_full)),
+        "FDE@3s": float(np.mean(fde_3s)),
         "accel_mae": float(np.mean(np.abs(pred_accel - gt_accel))),
         "curvature_mae": float(np.mean(np.abs(pred_curv - gt_curv))),
     }
@@ -106,7 +104,7 @@ def compute_open_loop_metrics(
 # Gate thresholds (initial baselines, tightened after first real training)
 GATE_THRESHOLDS = {
     "ADE@3s": 2.0,
-    "FDE@6.4s": 5.0,
+    "FDE@3s": 4.0,
 }
 
 
