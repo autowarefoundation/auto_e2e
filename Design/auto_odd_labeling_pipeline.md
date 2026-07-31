@@ -1281,9 +1281,10 @@ The initial scheduling policy is:
 1. one regular semantic anchor every four seconds for ODD/perception coverage,
    with at most 32 combined regular and triggered anchors per Scene;
 2. event-triggered three-frame front-center clips around GNSS/INS, QC, map, or
-   visual-semantic changes;
-3. issue three regular requests per anchor: road/environment,
-   traffic/dynamic, and forward perception;
+   visual-semantic changes. Trigger context anchors are Event-only evidence
+   and never schedule regular ODD/perception bundles;
+3. issue three requests per regular anchor: road/environment, traffic/dynamic,
+   and forward perception;
 4. permit at most one focused refinement per bundle and anchor when evidence
    is ambiguous, not observable, low-confidence, or safety-relevant positive;
 5. de-duplicate overlapping requests by content/timestamp digest;
