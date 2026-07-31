@@ -30,7 +30,7 @@ DATA_PREP_IMAGE = os.environ.get(
     "AUTO_E2E_DATA_PREP_IMAGE",
     f"{ECR_PREFIX}/auto-e2e/data-prep:latest",
 )
-ODD_LABELER_VERSION = "odd_dataset_labeler_v12"
+ODD_LABELER_VERSION = "odd_dataset_labeler_v13"
 ODD_SCENE_INDEX_SCHEMA_VERSION = "odd_scene_index_v2"
 ODD_PROVIDER_EXCHANGE_SCHEMA_VERSION = "odd_provider_exchange_v2"
 ODD_PROVIDER_REPORT_SCHEMA_VERSION = "odd_provider_report_v2"
@@ -46,7 +46,7 @@ ODD_EXECUTABLE_SOURCES = frozenset(
 ODD_SOURCE_POLICY_VERSIONS = {
     "map_route": "odd_map_route_policy_v3",
     "gnss_ins": "odd_gnss_ins_policy_v2",
-    "vlm": "odd_road_vlm_policy_v8",
+    "vlm": "odd_road_vlm_policy_v9",
     "image_qc": "odd_image_qc_policy_v4",
     "fusion": "odd_source_fusion_v2",
 }
@@ -1089,7 +1089,7 @@ def label_odd_image_quality(
 @task(
     container_image=DATA_PREP_IMAGE,
     cache=True,
-    cache_version="odd-source-openai-compatible-v8",
+    cache_version="odd-source-openai-compatible-v9",
     retries=2,
     pod_template=_scene_labeling_pod_template(),
     requests=Resources(cpu="2", mem="6Gi"),
@@ -1241,6 +1241,7 @@ def label_odd_visual(
             scene_uid=evidence.scene_uid,
             scene_end_timestamp_ns=evidence.end_timestamp_ns,
             anchors=anchors,
+            event_trigger_timestamps_ns=trigger_timestamps_ns,
             refinement_confidence_threshold=(
                 refinement_confidence_threshold
             ),
