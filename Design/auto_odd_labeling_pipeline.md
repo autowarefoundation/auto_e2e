@@ -859,7 +859,7 @@ The pipeline keeps source-native rates and produces interval labels:
 | GNSS/INS pose | 10 Hz | Derive continuous motion at native timestamps |
 | Map/route raster anchor | 2 Hz | Use canonical vectors; evaluate at pose timestamps |
 | Camera | 10 Hz reference timeline | QC per frame; semantic clips on selected cadence |
-| VLM | 1 Hz initial cadence | Temporal multi-view clips, plus event-triggered refinement |
+| VLM | 0.25 Hz regular cadence | Front-view evidence, plus event-triggered temporal clips |
 | Object tracks | Dataset-dependent | Native track timestamps |
 | CAN | Dataset-dependent | Resample only with bounded timestamp skew |
 
@@ -1259,31 +1259,35 @@ deterministic sources:
 - occlusion, clutter, unusual appearance, and scene complexity.
 
 It calls a pinned OpenAI-compatible multimodal API; the expected production
-backend is a road-capable model such as Cosmos. Camera selection is
-task-specific so temporal evidence is not displaced by unnecessary surround
-views:
+backend is a road-capable model such as Cosmos. The primary forward camera is
+the default semantic observation surface:
 
-- road appearance and traffic-control tasks use front-left, front-center, and
-  front-right at the current evidence time;
-- environment tasks use front-center at the current evidence time;
-- traffic-density and agent-presence tasks use all available cameras at one
-  current timestamp because these are surround-coverage questions;
-- Event interaction tasks use front-center at three ordered timestamps
-  describing before, active, and after;
-- camera-scoped perception tasks use a short temporal window for that camera.
+- road/environment and traffic/dynamic tasks use front-center at the current
+  evidence time;
+- forward perception uses a short front-center temporal window and carries
+  `camera_id=front_center`;
+- Event interaction tasks run only at deterministic trigger anchors and use
+  ordered front-center frames describing before, active, and after;
+- Image QC may inspect every available camera without sending those images to
+  the VLM.
 
-No request sends all camera directions across a temporal clip. Event claims
-such as cut-in or sudden emergence are prohibited from a single-image request.
-Hard brake and evasive steer are never originated by the VLM.
+These visual labels describe the observable forward corridor, not unobserved
+surround conditions. No Event claim such as cut-in or sudden emergence is
+originated from a single image. Hard brake and evasive steer are never
+originated by the VLM.
 
 The initial scheduling policy is:
 
-1. one regular semantic clip per second for ODD/perception coverage;
+1. one regular semantic anchor every four seconds for ODD/perception coverage,
+   with at most 32 combined regular and triggered anchors per Scene;
 2. event-triggered three-frame front-center clips around GNSS/INS, QC, map, or
    visual-semantic changes;
-3. de-duplicate overlapping requests by content/timestamp digest;
-4. batch by compatible camera layout and prompt schema;
-5. retain one explicit evidence row for every attempted field, including
+3. issue three regular requests per anchor: road/environment,
+   traffic/dynamic, and forward perception;
+4. permit at most one focused refinement per bundle and anchor when evidence
+   is ambiguous, not observable, low-confidence, or safety-relevant positive;
+5. de-duplicate overlapping requests by content/timestamp digest;
+6. retain one explicit evidence row for every attempted field, including
    abstention.
 
 VLM output is schema-constrained. Free-form rationale is an audit field, not a
@@ -1454,16 +1458,17 @@ light. A signal that exists but is not visible is `not_observable`, not
 ### 14.4 Density labels
 
 Density thresholds use a versioned ego-local ROI and observable area. In the
-initial KITScenes implementation, ORV observes all available camera directions
-at one timestamp and returns the ontology bin directly; no detector count or
-track duration is manufactured.
+initial KITScenes implementation, ORV observes the forward-visible corridor at
+one timestamp and returns the ontology bin directly; no detector count or track
+duration is manufactured. Provenance records the front-center observation
+scope.
 
 - `empty` or `none` is valid only when the ROI is sufficiently observable.
-- A front-only image cannot establish surround traffic density.
+- A front-only image does not establish surround traffic density.
 - Map-derived parked areas can support context but cannot establish that
   vehicles are currently present.
 - Stop-and-go requires temporal evidence and therefore cannot be established by
-  the static all-camera density request alone.
+  the static forward-view density request alone.
 
 ### 14.5 Strong response and near collision
 
@@ -1806,17 +1811,17 @@ provider report aggregates repair counts by backend, kind, and label key so
 that a high repair rate remains visible as a provider-quality issue rather
 than being hidden by a successful validation result.
 
-Requests follow the task-specific camera policy in Section 12.4. Static
-surround questions may use several cameras at one timestamp; temporal Event
-questions use three ordered front-center frames; camera-scoped perception uses
-one camera over a short window. A single image is sufficient only for static
-appearance when the ontology allows it; it is never sufficient for an
-interaction or strong-response event.
+Requests follow the task-specific camera policy in Section 12.4. Regular
+questions use front-center evidence; temporal Event questions use ordered
+front-center frames; camera-scoped perception is explicitly scoped to
+front-center. A single image is sufficient only for static appearance when the
+ontology allows it; it is never sufficient for an interaction or
+strong-response event.
 
-For rare, safety-relevant, or low-confidence observations, a second pass uses a
-different frame sampling or focused actor crop while keeping temperature and
-schema fixed. Agreement raises evidence strength; disagreement produces
-`ambiguous` rather than choosing the more convenient answer.
+For rare, safety-relevant, or low-confidence observations, at most one second
+pass per bundle and anchor uses a wider temporal window while keeping
+temperature and schema fixed. Agreement raises evidence strength; disagreement
+produces `ambiguous` rather than choosing the more convenient answer.
 
 #### Cross-provider acceptance rule
 
@@ -2808,8 +2813,9 @@ This phase should already produce useful ODD statistics without Cosmos.
 5. Audit per key/value and calibrate confidence separately for `BMR` and `ORV`.
 6. Correct ontology, prompt, or deterministic-candidate ambiguities before the
    full run.
-7. Run full 1 Hz `ORV` coverage plus triggered refinement; run `BMR` only for
-   deterministic T/Y ambiguous junction observations.
+7. Run full 0.25 Hz front-center `ORV` coverage plus trigger-only temporal
+   Event inference and bounded refinement; run `BMR` only for deterministic
+   T/Y ambiguous junction observations.
 8. Publish each provider's evidence separately from resolved fusion output.
 
 ### 22.4 Phase 3: events and fusion
