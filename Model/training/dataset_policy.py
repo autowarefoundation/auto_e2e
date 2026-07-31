@@ -17,6 +17,9 @@ import torch
 
 AUTO_E2E_TIMESTEPS = 64
 AUTO_E2E_TEMPORAL_DECAY = 0.95
+KITSCENES_NAVIGATION_TEMPORAL_DECAY = 0.99
+TEMPORAL_WEIGHT_NORMALIZATION_NONE = "none"
+TEMPORAL_WEIGHT_NORMALIZATION_MEAN_ONE = "mean_one"
 EGOMOTION_SIGNALS = 4
 ACCELERATION_INDEX = 1
 
@@ -35,6 +38,7 @@ class DatasetTrainingPolicy:
     dataset_name: str
     temporal_decay: float
     signal_scales: tuple[float, float]
+    temporal_weight_normalization: str = TEMPORAL_WEIGHT_NORMALIZATION_NONE
     mask_latest_history_acceleration: bool = False
     validation_strategy: str = "hash_buckets"
     validation_split_id: str = "legacy_hash_buckets_v1"
@@ -44,6 +48,14 @@ class DatasetTrainingPolicy:
     def __post_init__(self) -> None:
         if not 0.0 < self.temporal_decay <= 1.0:
             raise ValueError("temporal_decay must be in (0, 1]")
+        if self.temporal_weight_normalization not in {
+            TEMPORAL_WEIGHT_NORMALIZATION_NONE,
+            TEMPORAL_WEIGHT_NORMALIZATION_MEAN_ONE,
+        }:
+            raise ValueError(
+                "unsupported temporal_weight_normalization "
+                f"{self.temporal_weight_normalization!r}"
+            )
         if len(self.signal_scales) != 2 or any(
             value <= 0.0 for value in self.signal_scales
         ):
@@ -95,16 +107,19 @@ NVIDIA_TRAINING_POLICY = DatasetTrainingPolicy(
 # unchanged while the packed contract is versioned independently.
 KITSCENES_TRAINING_POLICY = DatasetTrainingPolicy(
     dataset_name=KITSCENES_DATASET_NAME,
-    temporal_decay=AUTO_E2E_TEMPORAL_DECAY,
+    temporal_decay=KITSCENES_NAVIGATION_TEMPORAL_DECAY,
     signal_scales=(0.778, 0.0350),
+    temporal_weight_normalization=(
+        TEMPORAL_WEIGHT_NORMALIZATION_MEAN_ONE
+    ),
     # KITScenes v2 derives acceleration with centered finite differences. Its
     # final history acceleration indirectly reads frame i+1, so mask that one
     # value until a causal parser revision is repacked.
     mask_latest_history_acceleration=True,
     validation_strategy="exact_group_fraction",
     validation_split_id="kitscenes_train_dev_v1",
-    validation_manifest="splits/kitscenes_train_dev_v2.json",
-    validation_manifest_schema="kitscenes_train_dev_split_v2",
+    validation_manifest="splits/kitscenes_train_dev_v3.json",
+    validation_manifest_schema="kitscenes_train_dev_split_v3",
 )
 
 # Checkpoints produced before dataset policies were recorded used L2D signal
