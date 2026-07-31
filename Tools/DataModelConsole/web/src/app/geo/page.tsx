@@ -377,6 +377,15 @@ function GeoPageInner() {
               </option>
             ))}
           </select>
+          {activeGeo?.stats?.artifact_source_version &&
+            activeGeo.stats.artifact_source_version !== version && (
+              <span className="text-xs text-slate-500">
+                Compatible heatmap from{" "}
+                <span className="font-mono">
+                  {activeGeo.stats.artifact_source_version}
+                </span>
+              </span>
+            )}
         </div>
       </div>
 
