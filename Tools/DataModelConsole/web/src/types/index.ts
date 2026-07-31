@@ -147,6 +147,7 @@ export interface ODDOntology {
   ontology_sha256: string;
   dataset_name: string;
   dataset_version: string;
+  artifact_source_version: string;
   labelset_id: string;
   statuses: string[];
   sources: string[];
@@ -245,6 +246,9 @@ export interface ODDCooccurrenceStatistics {
 
 export interface ODDStatistics {
   schema_version: string;
+  dataset_name: string;
+  dataset_version: string;
+  artifact_source_version: string;
   labelset_id: string;
   scene_count: number;
   scene_duration_ns: number;
@@ -335,6 +339,7 @@ export interface ODDMetricProjection {
 export interface ODDMetricProjectionsResponse {
   dataset: string;
   version: string;
+  artifact_source_version: string;
   labelset_id: string;
   labelset_manifest_sha256: string;
   projections: ODDMetricProjection[];
@@ -397,6 +402,7 @@ export type ODDOperationalState =
 export interface ODDLabelSetsResponse {
   dataset: string;
   version: string;
+  artifact_source_version?: string;
   state: ODDOperationalState;
   labelsets: ODDLabelSet[];
 }
@@ -611,6 +617,7 @@ export interface ODDStructuredSearchRequest {
 export interface ODDSearchResponse {
   dataset: string;
   version: string;
+  artifact_source_version: string;
   labelset_id: string;
   scenes: ODDSceneSummary[];
   total: number;
@@ -623,6 +630,7 @@ export interface ODDSearchResponse {
 export interface ODDEvidenceResponse {
   dataset: string;
   version: string;
+  artifact_source_version: string;
   labelset_id: string;
   scene_uid: string;
   observation: ODDObservation;
@@ -701,6 +709,7 @@ export interface OverlayModel {
 export interface OverlayModelsResponse {
   dataset: string;
   version: string;
+  artifact_source_version: string;
   shard: string;
   models: OverlayModel[];
   next_page_token?: string;
@@ -730,6 +739,7 @@ export interface GeoSummary {
 export interface GeoStats {
   dataset: string;
   version: string;
+  artifact_source_version: string;
   summary: GeoSummary;
   heatmap_url?: string;
   n_samples: number;
@@ -816,6 +826,8 @@ export interface ReasoningPromptVersion {
 
 export interface ReasoningPromptVersionsResponse {
   dataset: string;
+  version: string;
+  artifact_source_version: string;
   prompt_versions: ReasoningPromptVersion[];
 }
 
@@ -846,6 +858,7 @@ export interface ReasoningStatsBlob {
 export interface ReasoningStatsDetail {
   dataset: string;
   version: string;
+  artifact_source_version: string;
   prompt_version: string;
   teacher: string;
   teacher_provider?: string;
@@ -877,6 +890,7 @@ export interface SceneSearchResult {
   teacher: string;
   prompt_version: string;
   version?: string;
+  artifact_source_version?: string;
   field: string;
   value: string;
   scenes: SceneHit[];
