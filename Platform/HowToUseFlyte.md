@@ -149,6 +149,10 @@ Flyte shows **execution status**; **MLflow** shows **metrics**. Use both.
 5. Each run also stores `config.yaml` + the checkpoint as **artifacts**, and the
    model is registered under **`auto-e2e-driving-policy`** in the Model Registry.
 
+For KITScenes selector-v3 runs, `eval/ade` and `eval/fde` are the
+scene-balanced logged-XY ADE@3s and FDE@3s. Use the
+`validation_metric_*` MLflow tags to distinguish older metric contracts.
+
 ---
 
 ## Use case E — "Something failed. How do I debug?"
