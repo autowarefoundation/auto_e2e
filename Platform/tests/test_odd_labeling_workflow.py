@@ -10,6 +10,7 @@ from flytekit import map_task
 from Platform.pipelines.odd_labeling_workflow import (
     ODD_LABELER_VERSION,
     ODD_SOURCE_POLICY_VERSIONS,
+    _bind_semantic_output_labelset_id,
     _execution_receipt,
     _execution_receipt_key,
     _provider_exchange_key,
@@ -311,6 +312,60 @@ def test_semantic_output_merkle_root_covers_all_canonical_outputs() -> None:
         statistics,
         quality,
     ) != first
+
+
+def test_labelset_id_binding_preserves_provisional_semantic_outputs() -> None:
+    statistics = {
+        "labelset_id": "",
+        "keys": [
+            {
+                "key": "odd.road.type",
+                "values": [
+                    {
+                        "value": "residential",
+                        "duration_ratio_ci95": [0.125, 0.875],
+                    }
+                ],
+            }
+        ],
+    }
+    quality = {
+        "coverage": {
+            "labelset_id": "",
+            "structural_validation": {"status": "passed"},
+        }
+    }
+    records = [{"scene_uid": "scene-a"}]
+    provisional_root = _semantic_output_merkle_root(
+        records,
+        statistics,
+        quality,
+    )
+
+    bound_statistics, bound_quality = _bind_semantic_output_labelset_id(
+        statistics,
+        quality,
+        "oddls-final",
+    )
+
+    assert bound_statistics["labelset_id"] == "oddls-final"
+    assert bound_quality["coverage"]["labelset_id"] == "oddls-final"
+    assert statistics["labelset_id"] == ""
+    assert quality["coverage"]["labelset_id"] == ""
+    assert (
+        _semantic_output_merkle_root(
+            records,
+            bound_statistics,
+            bound_quality,
+        )
+        == provisional_root
+    )
+    with pytest.raises(ValueError, match="unbound labelset ID"):
+        _bind_semantic_output_labelset_id(
+            bound_statistics,
+            bound_quality,
+            "oddls-second",
+        )
 
 
 def test_execution_receipt_is_separate_and_content_addressed() -> None:
