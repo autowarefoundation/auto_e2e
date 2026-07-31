@@ -71,10 +71,10 @@ def _completion(observations: dict[str, dict[str, Any]]) -> dict[str, Any]:
 
 def test_road_vlm_semantic_hashes_are_stable() -> None:
     assert road_vlm_prompt_bundle_sha256() == (
-        "26e63841f8f60ea2d6f93c575d87dee88e35bccdc1a5ce94fdab036885455e4c"
+        "1dc8231f9b9698e3412b725d6d7013a35ce94f6638f56cbc9a447726140b85ad"
     )
     assert road_vlm_decoding_bundle_sha256(max_tokens=4096) == (
-        "a97dbbe353fd52bdd1405f87de77ff6d066b318ff031c235884ee7c8d91fe517"
+        "0627d339b8fdc715ea1a9115d133723b4b52940f9885debf0daf6bfd38f2d500"
     )
     assert road_vlm_decoding_bundle_sha256(
         max_tokens=2048
@@ -526,12 +526,10 @@ def test_visual_frame_status_cannot_claim_decoder_or_timing_failures() -> None:
 
 def test_task_bundles_are_small_and_scope_camera_conditions() -> None:
     assert [bundle.name for bundle in ROAD_VLM_TASK_BUNDLES] == [
-        "road_appearance",
-        "environment",
-        "traffic_control",
-        "dynamic_agents",
-        "interaction",
-        "perception_condition",
+        "road_environment",
+        "traffic_dynamic",
+        "temporal_event",
+        "forward_perception",
     ]
     requested_keys = [
         key
@@ -548,10 +546,11 @@ def test_task_bundles_are_small_and_scope_camera_conditions() -> None:
         for key in requested_keys
     )
     by_name = {bundle.name: bundle for bundle in ROAD_VLM_TASK_BUNDLES}
-    assert by_name["interaction"].scene_camera_roles == ("front_center",)
-    assert by_name["interaction"].temporal_mode == "event"
-    assert by_name["dynamic_agents"].scene_camera_roles is None
-    assert by_name["dynamic_agents"].temporal_mode == "static"
+    assert by_name["temporal_event"].scene_camera_roles == ("front_center",)
+    assert by_name["temporal_event"].temporal_mode == "event"
+    assert by_name["temporal_event"].trigger_only
+    assert by_name["traffic_dynamic"].scene_camera_roles == ("front_center",)
+    assert by_name["forward_perception"].camera_roles == ("front_center",)
 
 
 def test_camera_scoped_observation_has_camera_identity() -> None:
@@ -916,12 +915,9 @@ def test_visual_scene_uses_focused_alternate_frames() -> None:
         if call.get("inference_pass", "primary") == "primary"
     }
     assert primary_bundles == {
-        "road_appearance",
-        "environment",
-        "traffic_control",
-        "dynamic_agents",
-        "interaction",
-        "perception_condition",
+        "road_environment",
+        "traffic_dynamic",
+        "forward_perception",
     }
     refinement = [
         call
@@ -945,28 +941,47 @@ def test_visual_scene_uses_focused_alternate_frames() -> None:
     assert {
         observation.camera_id for observation in camera_observations
     } == {"front_center"}
+    assert len(calls) == 10
 
 
-def test_visual_scene_uses_front_temporal_event_and_static_surround() -> None:
+def test_visual_scene_uses_front_view_and_triggered_temporal_event() -> None:
     calls: list[dict[str, Any]] = []
 
     class RecordingObserver:
         def observe(self, **kwargs: Any) -> tuple[Any, ...]:
             calls.append(kwargs)
-            return tuple(
-                make_observation(
-                    scene_uid=kwargs["scene_uid"],
-                    key=key,
-                    status="valid",
-                    values=(ONTOLOGY[key].values[0],),
-                    confidence=1.0,
-                    source="vlm",
-                    start_timestamp_ns=kwargs["start_timestamp_ns"],
-                    end_timestamp_ns=kwargs["end_timestamp_ns"],
-                    camera_id=kwargs.get("target_camera_id"),
+            output = []
+            for key in kwargs["keys"]:
+                candidates = ONTOLOGY[key].values
+                value = next(
+                    (
+                        neutral
+                        for neutral in (
+                            "none",
+                            "none_visible",
+                            "absent",
+                            "not_applicable",
+                            "no_response_required",
+                            "normal",
+                        )
+                        if neutral in candidates
+                    ),
+                    candidates[0],
                 )
-                for key in kwargs["keys"]
-            )
+                output.append(
+                    make_observation(
+                        scene_uid=kwargs["scene_uid"],
+                        key=key,
+                        status="valid",
+                        values=(value,),
+                        confidence=1.0,
+                        source="vlm",
+                        start_timestamp_ns=kwargs["start_timestamp_ns"],
+                        end_timestamp_ns=kwargs["end_timestamp_ns"],
+                        camera_id=kwargs.get("target_camera_id"),
+                    )
+                )
+            return tuple(output)
 
     roles = (
         "front_center",
@@ -997,6 +1012,7 @@ def test_visual_scene_uses_front_temporal_event_and_static_surround() -> None:
         scene_uid="scene-1",
         scene_end_timestamp_ns=4_000,
         anchors=anchors,
+        event_trigger_timestamps_ns=(2_000,),
     )
 
     middle_scene_calls = {
@@ -1006,7 +1022,7 @@ def test_visual_scene_uses_front_temporal_event_and_static_surround() -> None:
         and call.get("target_camera_id") is None
         and call.get("inference_pass", "primary") == "primary"
     }
-    interaction_frames = middle_scene_calls["interaction"]["frames"]
+    interaction_frames = middle_scene_calls["temporal_event"]["frames"]
     assert {frame.camera_role for frame in interaction_frames} == {
         "front_center"
     }
@@ -1015,14 +1031,22 @@ def test_visual_scene_uses_front_temporal_event_and_static_surround() -> None:
         2_000,
         3_000,
     ]
-    dynamic_frames = middle_scene_calls["dynamic_agents"]["frames"]
-    assert {frame.camera_role for frame in dynamic_frames} == set(roles)
+    dynamic_frames = middle_scene_calls["traffic_dynamic"]["frames"]
+    assert {frame.camera_role for frame in dynamic_frames} == {
+        "front_center"
+    }
     assert {frame.timestamp_ns for frame in dynamic_frames} == {2_000}
     assert {
         frame.camera_role
-        for frame in middle_scene_calls["road_appearance"]["frames"]
-    } == {"front_left", "front_center", "front_right"}
-    assert {
-        frame.camera_role
-        for frame in middle_scene_calls["environment"]["frames"]
+        for frame in middle_scene_calls["road_environment"]["frames"]
     } == {"front_center"}
+    camera_calls = [
+        call
+        for call in calls
+        if call.get("target_camera_id") is not None
+        and call.get("inference_pass", "primary") == "primary"
+    ]
+    assert {call["target_camera_id"] for call in camera_calls} == {
+        "front_center"
+    }
+    assert len(calls) == 10
