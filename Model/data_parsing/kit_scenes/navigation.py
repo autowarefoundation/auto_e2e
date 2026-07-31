@@ -27,6 +27,7 @@ from navigation.rasterizer import (
     NativeNavigationRasterizer,
     NavigationRaster,
 )
+from navigation.supervision import build_route_supervision
 
 ANCHOR_PERIOD_NS = 500_000_000
 MANEUVER_LOOKAHEAD_M = 100.0
@@ -279,6 +280,12 @@ class KitScenesSceneNavigation:
         quality = self.route.quality
         return encode_sample_navigation(
             raster,
+            route_supervision=build_route_supervision(
+                self.route,
+                self._pose(frame_idx),
+                raster,
+                self.rasterizer.geometry,
+            ),
             extra_metadata={
                 "scene_navigation_sha256": (
                     self._scene_navigation_sha256
