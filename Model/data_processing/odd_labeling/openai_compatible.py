@@ -24,7 +24,7 @@ from .schema import (
 
 ROAD_VLM_SCHEMA_VERSION = "road_vlm_request_v4"
 ROAD_VLM_PROMPT_VERSION = "road_scene_observer_v6"
-ROAD_VLM_PROTOCOL_REPAIR_VERSION = "road_vlm_protocol_repair_v1"
+ROAD_VLM_PROTOCOL_REPAIR_VERSION = "road_vlm_protocol_repair_v2"
 DEFAULT_REFINEMENT_CONFIDENCE_THRESHOLD = 0.65
 VLM_FRAME_STATUS_VALUES = (
     "normal",
@@ -681,6 +681,7 @@ def _repair_response_protocol(
 
     repairs: list[dict[str, Any]] = []
     allowed_cameras = {frame.camera_role for frame in frames}
+    allowed_timestamps = {frame.timestamp_ns for frame in frames}
     for key in keys:
         raw = raw_observations.get(key)
         if not isinstance(raw, dict):
@@ -730,6 +731,31 @@ def _repair_response_protocol(
                     "after": canonical_values,
                 }
             )
+
+        supporting_timestamps = raw.get("supporting_timestamps_ns")
+        if (
+            isinstance(supporting_timestamps, list)
+            and all(
+                isinstance(timestamp, int)
+                and not isinstance(timestamp, bool)
+                for timestamp in supporting_timestamps
+            )
+        ):
+            supported = [
+                timestamp
+                for timestamp in supporting_timestamps
+                if timestamp in allowed_timestamps
+            ]
+            if supported and len(supported) != len(supporting_timestamps):
+                raw["supporting_timestamps_ns"] = supported
+                repairs.append(
+                    {
+                        "kind": "unsupported_timestamps_removed",
+                        "key": key,
+                        "before": supporting_timestamps,
+                        "after": supported,
+                    }
+                )
     return repaired, tuple(repairs)
 
 
