@@ -320,38 +320,61 @@ func (s *S3Service) ListOverlayModels(
 	dataset, version, shard string,
 	limit int,
 	pageToken string,
-) ([]model.OverlayModel, string, string, error) {
+	artifactVersion string,
+) ([]model.OverlayModel, string, string, string, error) {
 	if s.store == nil {
-		return nil, "", "", fmt.Errorf(
+		return nil, "", "", "", fmt.Errorf(
 			"overlay lookup requires a configured dynamo store",
 		)
 	}
-	var err error
-	expectedManifestDigest := ""
-	version, err = s.publishedVersion(ctx, dataset, version)
-	if err != nil {
-		return nil, "", "", err
-	}
-	if requiresPublicationManifest(version) {
-		if _, err := s.publishedShard(ctx, dataset, version, shard); err != nil {
-			return nil, version, "", err
-		}
-		manifest, err := s.loadPublicationManifest(ctx, dataset, version)
-		if err != nil {
-			return nil, version, "", err
-		}
-		expectedManifestDigest = manifest.SHA256
-	}
-	models, nextPageToken, err := s.store.QueryReadyOverlayModels(
-		ctx,
-		dataset,
-		version,
-		shard,
-		limit,
-		pageToken,
-		expectedManifestDigest,
+	targetVersion, candidates, err := s.compatibleArtifactVersions(
+		ctx, dataset, version,
 	)
-	return models, version, nextPageToken, err
+	if err != nil {
+		return nil, "", "", "", err
+	}
+	if _, err := s.publishedShard(
+		ctx, dataset, targetVersion, shard,
+	); err != nil {
+		return nil, targetVersion, "", "", err
+	}
+	if artifactVersion != "" {
+		found := false
+		for _, candidate := range candidates {
+			if candidate == artifactVersion {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return nil, targetVersion, "", "", ErrNotFound
+		}
+		candidates = []string{artifactVersion}
+	}
+	for _, candidate := range candidates {
+		manifest, err := s.loadPublicationManifest(
+			ctx, dataset, candidate,
+		)
+		if err != nil {
+			continue
+		}
+		models, nextPageToken, err := s.store.QueryReadyOverlayModels(
+			ctx,
+			dataset,
+			candidate,
+			shard,
+			limit,
+			pageToken,
+			manifest.SHA256,
+		)
+		if err != nil {
+			return nil, targetVersion, candidate, "", err
+		}
+		if len(models) > 0 || nextPageToken != "" {
+			return models, targetVersion, candidate, nextPageToken, nil
+		}
+	}
+	return []model.OverlayModel{}, targetVersion, targetVersion, "", nil
 }
 
 // GetOverlayBody follows a ready Dynamo pointer, constrains it to the canonical
@@ -361,72 +384,90 @@ func (s *S3Service) GetOverlayBody(ctx context.Context, dataset, version, shard,
 	if s.store == nil {
 		return nil, "", fmt.Errorf("overlay lookup requires a configured dynamo store")
 	}
-	var err error
-	expectedManifestDigest := ""
-	version, err = s.publishedVersion(ctx, dataset, version)
+	targetVersion, candidates, err := s.compatibleArtifactVersions(
+		ctx, dataset, version,
+	)
 	if err != nil {
 		return nil, "", err
 	}
-	if requiresPublicationManifest(version) {
-		if _, err := s.publishedShard(ctx, dataset, version, shard); err != nil {
-			return nil, version, err
-		}
-		manifest, err := s.loadPublicationManifest(ctx, dataset, version)
-		if err != nil {
-			return nil, version, err
-		}
-		expectedManifestDigest = manifest.SHA256
+	if _, err := s.publishedShard(
+		ctx, dataset, targetVersion, shard,
+	); err != nil {
+		return nil, targetVersion, err
 	}
-	pointer, err := s.store.GetReadyOverlayPointer(
-		ctx, dataset, version, shard, modelArtifactID,
-		expectedManifestDigest,
-	)
-	if err != nil {
-		if errors.Is(err, store.ErrNotFound) {
-			return nil, version, ErrNotFound
-		}
-		return nil, version, err
-	}
-	expectedPrefix := fmt.Sprintf(
-		"overlays/schema=%s/model=%s/dataset=%s/version=%s/shard=%s/",
-		pointer.OverlaySchema, modelArtifactID, dataset, version, shard,
-	)
-	if !strings.HasPrefix(pointer.S3Key, expectedPrefix) ||
-		path.Base(pointer.S3Key) != "overlay.bin.gz" {
-		return nil, version, fmt.Errorf("overlay pointer escapes canonical prefix")
-	}
-	if pointer.ByteSize > MaxOverlayBytes {
-		return nil, version, ErrRangeTooLarge
-	}
-	payload, err := s.getObjectBytesFromBucket(
-		ctx, s.artifactsBucket, pointer.S3Key, MaxOverlayBytes,
-	)
-	if err != nil {
-		return nil, version, err
-	}
-	if int64(len(payload)) != pointer.ByteSize {
-		return nil, version, fmt.Errorf(
-			"overlay size mismatch: pointer=%d body=%d",
-			pointer.ByteSize, len(payload),
+	for _, candidate := range candidates {
+		manifest, err := s.loadPublicationManifest(
+			ctx, dataset, candidate,
 		)
+		if err != nil {
+			continue
+		}
+		pointer, err := s.store.GetReadyOverlayPointer(
+			ctx,
+			dataset,
+			candidate,
+			shard,
+			modelArtifactID,
+			manifest.SHA256,
+		)
+		if err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				continue
+			}
+			return nil, candidate, err
+		}
+		expectedPrefix := fmt.Sprintf(
+			"overlays/schema=%s/model=%s/dataset=%s/version=%s/shard=%s/",
+			pointer.OverlaySchema,
+			modelArtifactID,
+			dataset,
+			candidate,
+			shard,
+		)
+		if !strings.HasPrefix(pointer.S3Key, expectedPrefix) ||
+			path.Base(pointer.S3Key) != "overlay.bin.gz" {
+			return nil, candidate, fmt.Errorf(
+				"overlay pointer escapes canonical prefix",
+			)
+		}
+		if pointer.ByteSize > MaxOverlayBytes {
+			return nil, candidate, ErrRangeTooLarge
+		}
+		payload, err := s.getObjectBytesFromBucket(
+			ctx, s.artifactsBucket, pointer.S3Key, MaxOverlayBytes,
+		)
+		if err != nil {
+			return nil, candidate, err
+		}
+		if int64(len(payload)) != pointer.ByteSize {
+			return nil, candidate, fmt.Errorf(
+				"overlay size mismatch: pointer=%d body=%d",
+				pointer.ByteSize, len(payload),
+			)
+		}
+		digest := sha256.Sum256(payload)
+		if hex.EncodeToString(digest[:]) != pointer.SHA256 {
+			return nil, candidate, fmt.Errorf("overlay SHA-256 mismatch")
+		}
+		if len(payload) < 2 ||
+			payload[0] != 0x1f ||
+			payload[1] != 0x8b {
+			return nil, candidate, fmt.Errorf(
+				"overlay body is not gzip",
+			)
+		}
+		return &OverlayBody{
+			Descriptor: model.OverlayDescriptor{
+				ModelArtifactID: modelArtifactID,
+				OverlaySchema:   pointer.OverlaySchema,
+				SHA256:          pointer.SHA256,
+				ByteSize:        pointer.ByteSize,
+				SampleCount:     pointer.SampleCount,
+			},
+			Payload: payload,
+		}, candidate, nil
 	}
-	digest := sha256.Sum256(payload)
-	if hex.EncodeToString(digest[:]) != pointer.SHA256 {
-		return nil, version, fmt.Errorf("overlay SHA-256 mismatch")
-	}
-	if len(payload) < 2 || payload[0] != 0x1f || payload[1] != 0x8b {
-		return nil, version, fmt.Errorf("overlay body is not gzip")
-	}
-	return &OverlayBody{
-		Descriptor: model.OverlayDescriptor{
-			ModelArtifactID: modelArtifactID,
-			OverlaySchema:   pointer.OverlaySchema,
-			SHA256:          pointer.SHA256,
-			ByteSize:        pointer.ByteSize,
-			SampleCount:     pointer.SampleCount,
-		},
-		Payload: payload,
-	}, version, nil
+	return nil, targetVersion, ErrNotFound
 }
 
 // GeoStats returns a small Dynamo summary and a same-origin heatmap URL. The
@@ -435,41 +476,43 @@ func (s *S3Service) GeoStats(ctx context.Context, dataset, version string) (*mod
 	if s.store == nil {
 		return nil, fmt.Errorf("geo stats require a configured dynamo store")
 	}
-	var err error
-	version, err = s.publishedVersion(ctx, dataset, version)
+	targetVersion, candidates, err := s.compatibleArtifactVersions(
+		ctx, dataset, version,
+	)
 	if err != nil {
 		return nil, err
 	}
-	expectedManifestDigest := ""
-	if requiresPublicationManifest(version) {
-		manifest, err := s.loadPublicationManifest(ctx, dataset, version)
+	for _, candidate := range candidates {
+		manifest, err := s.loadPublicationManifest(
+			ctx, dataset, candidate,
+		)
 		if err != nil {
+			continue
+		}
+		record, err := s.store.GetGeoRecord(ctx, dataset, candidate)
+		if err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				continue
+			}
 			return nil, err
 		}
-		expectedManifestDigest = manifest.SHA256
-	}
-	record, err := s.store.GetGeoRecord(ctx, dataset, version)
-	if err != nil {
-		if errors.Is(err, store.ErrNotFound) {
-			return nil, ErrNotFound
+		if record.DatasetManifestSHA256 != manifest.SHA256 {
+			continue
 		}
-		return nil, err
+		return &model.GeoStatsResponse{
+			Dataset:               dataset,
+			Version:               targetVersion,
+			ArtifactSourceVersion: candidate,
+			Summary:               json.RawMessage(record.Summary),
+			HeatmapURL: fmt.Sprintf(
+				"/api/v1/datasets/%s/geo/heatmap?version=%s",
+				dataset, targetVersion,
+			),
+			NSamples:   record.NSamples,
+			ComputedAt: record.ComputedAt,
+		}, nil
 	}
-	if expectedManifestDigest != "" &&
-		record.DatasetManifestSHA256 != expectedManifestDigest {
-		return nil, ErrNotFound
-	}
-	return &model.GeoStatsResponse{
-		Dataset: dataset,
-		Version: version,
-		Summary: json.RawMessage(record.Summary),
-		HeatmapURL: fmt.Sprintf(
-			"/api/v1/datasets/%s/geo/heatmap?version=%s",
-			dataset, version,
-		),
-		NSamples:   record.NSamples,
-		ComputedAt: record.ComputedAt,
-	}, nil
+	return nil, ErrNotFound
 }
 
 // GeoHeatmap returns the k-anonymized, endpoint-trimmed aggregate referenced by
@@ -478,55 +521,59 @@ func (s *S3Service) GeoHeatmap(ctx context.Context, dataset, version string) ([]
 	if s.store == nil {
 		return nil, "", fmt.Errorf("geo heatmap requires a configured dynamo store")
 	}
-	var err error
-	version, err = s.publishedVersion(ctx, dataset, version)
+	targetVersion, candidates, err := s.compatibleArtifactVersions(
+		ctx, dataset, version,
+	)
 	if err != nil {
 		return nil, "", err
 	}
-	var manifest *publicationManifest
-	if requiresPublicationManifest(version) {
-		manifest, err = s.loadPublicationManifest(ctx, dataset, version)
+	for _, candidate := range candidates {
+		manifest, err := s.loadPublicationManifest(
+			ctx, dataset, candidate,
+		)
 		if err != nil {
-			return nil, version, err
+			continue
 		}
-	}
-	record, err := s.store.GetGeoRecord(ctx, dataset, version)
-	if err != nil {
-		if errors.Is(err, store.ErrNotFound) {
-			return nil, version, ErrNotFound
+		record, err := s.store.GetGeoRecord(ctx, dataset, candidate)
+		if err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				continue
+			}
+			return nil, candidate, err
 		}
-		return nil, version, err
-	}
-	if manifest != nil &&
-		record.DatasetManifestSHA256 != manifest.SHA256 {
-		return nil, version, ErrNotFound
-	}
-	expectedKey := fmt.Sprintf(
-		"%s/%s/geo/heatmap.geojson.gz", dataset, version,
-	)
-	if record.GeoJSONKey != expectedKey {
-		return nil, version, fmt.Errorf("geo heatmap pointer is not canonical")
-	}
-	body, err := s.getObjectBytesFromBucket(
-		ctx, s.bucket, record.GeoJSONKey, MaxRangeBytes,
-	)
-	if err != nil {
-		return nil, version, err
-	}
-	if manifest != nil {
+		if record.DatasetManifestSHA256 != manifest.SHA256 {
+			continue
+		}
+		expectedKey := fmt.Sprintf(
+			"%s/%s/geo/heatmap.geojson.gz", dataset, candidate,
+		)
+		if record.GeoJSONKey != expectedKey {
+			return nil, candidate, fmt.Errorf(
+				"geo heatmap pointer is not canonical",
+			)
+		}
+		body, err := s.getObjectBytesFromBucket(
+			ctx, s.bucket, record.GeoJSONKey, MaxRangeBytes,
+		)
+		if err != nil {
+			return nil, candidate, err
+		}
 		if manifest.GeoArtifacts == nil ||
 			manifest.GeoArtifacts.HeatmapKey != record.GeoJSONKey {
-			return nil, version, fmt.Errorf(
+			return nil, candidate, fmt.Errorf(
 				"geo heatmap pointer differs from publication",
 			)
 		}
 		digest := sha256.Sum256(body)
 		if hex.EncodeToString(digest[:]) !=
 			manifest.GeoArtifacts.HeatmapSHA256 {
-			return nil, version, fmt.Errorf("geo heatmap SHA-256 mismatch")
+			return nil, candidate, fmt.Errorf(
+				"geo heatmap SHA-256 mismatch",
+			)
 		}
+		return body, candidate, nil
 	}
-	return body, version, err
+	return nil, targetVersion, ErrNotFound
 }
 
 // ShardRigProjection returns the projection artifact bound to one immutable shard.
