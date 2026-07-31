@@ -7,6 +7,7 @@ import {
 
 const SHARD = "train-000000.tar";
 const SCENE_URL = `/scenes/catalog/${SHARD}/0?version=v2.1`;
+const ARTIFACT_VERSION = "v2.0";
 const PAGE_TOKEN = "f".repeat(64);
 const MAX_DATA_PAGES = 20;
 const PIXEL = Buffer.from(
@@ -118,6 +119,7 @@ test("overlay catalog merges, deduplicates, and globally sorts two pages", async
       return fulfillJSON(route, {
         dataset: "catalog",
         version: "v2.1",
+        artifact_source_version: ARTIFACT_VERSION,
         shard: SHARD,
         models: [
           model("model-c", 9),
@@ -129,6 +131,7 @@ test("overlay catalog merges, deduplicates, and globally sorts two pages", async
     return fulfillJSON(route, {
       dataset: "catalog",
       version: "v2.1",
+      artifact_source_version: ARTIFACT_VERSION,
       shard: SHARD,
       models: [model("model-b", 7), model("model-d", 4)],
       next_page_token: PAGE_TOKEN,
@@ -155,6 +158,9 @@ test("overlay catalog merges, deduplicates, and globally sorts two pages", async
     null,
     PAGE_TOKEN,
   ]);
+  expect(
+    requests.map((url) => url.searchParams.get("artifact_version")),
+  ).toEqual([null, ARTIFACT_VERSION]);
   expect(requests[1].toString()).toContain(
     new URLSearchParams({ page_token: PAGE_TOKEN }).toString(),
   );
@@ -170,6 +176,7 @@ test("overlay catalog rejects a token cycle without another request", async ({
     return fulfillJSON(route, {
       dataset: "catalog",
       version: "v2.1",
+      artifact_source_version: ARTIFACT_VERSION,
       shard: SHARD,
       models: [model(token ? "model-b" : "model-a", 1)],
       next_page_token: "cycle-token",
@@ -201,6 +208,7 @@ test("overlay catalog permits one empty terminal probe after 20 pages", async ({
       return fulfillJSON(route, {
         dataset: "catalog",
         version: "v2.1",
+        artifact_source_version: ARTIFACT_VERSION,
         shard: SHARD,
         models: [],
       });
@@ -208,6 +216,7 @@ test("overlay catalog permits one empty terminal probe after 20 pages", async ({
     return fulfillJSON(route, {
       dataset: "catalog",
       version: "v2.1",
+      artifact_source_version: ARTIFACT_VERSION,
       shard: SHARD,
       models: [model(tokenForPage(pageNumber + 1), pageNumber + 1)],
       next_page_token: tokenForPage(pageNumber + 1),
