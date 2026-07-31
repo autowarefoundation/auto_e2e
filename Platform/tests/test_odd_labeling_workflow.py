@@ -544,10 +544,10 @@ def test_workflow_interface_does_not_expose_endpoint_url() -> None:
         "trigger_context_s",
         "refinement_confidence_threshold",
     }.issubset(inputs)
-    assert ODD_LABELER_VERSION == "odd_dataset_labeler_v12"
+    assert ODD_LABELER_VERSION == "odd_dataset_labeler_v13"
     assert ODD_SOURCE_POLICY_VERSIONS["map_route"] == "odd_map_route_policy_v3"
     assert ODD_SOURCE_POLICY_VERSIONS["gnss_ins"] == "odd_gnss_ins_policy_v2"
-    assert ODD_SOURCE_POLICY_VERSIONS["vlm"] == "odd_road_vlm_policy_v8"
+    assert ODD_SOURCE_POLICY_VERSIONS["vlm"] == "odd_road_vlm_policy_v9"
     assert ODD_SOURCE_POLICY_VERSIONS["image_qc"] == "odd_image_qc_policy_v4"
     assert ODD_SOURCE_POLICY_VERSIONS["fusion"] == "odd_source_fusion_v2"
 
@@ -688,8 +688,8 @@ def test_launcher_uses_full_rate_visual_sampling_contract() -> None:
         encoding="utf-8"
     )
 
-    assert 'CAMERA_ANCHOR_INTERVAL_S: "1.0"' in launcher
-    assert 'MAXIMUM_CAMERA_ANCHORS: "128"' in launcher
+    assert 'CAMERA_ANCHOR_INTERVAL_S: "4.0"' in launcher
+    assert 'MAXIMUM_CAMERA_ANCHORS: "32"' in launcher
     assert 'TRIGGER_CONTEXT_S: "1.0"' in launcher
     assert 'REFINEMENT_CONFIDENCE_THRESHOLD: "0.65"' in launcher
     assert '"trigger_context_s"' in launcher
