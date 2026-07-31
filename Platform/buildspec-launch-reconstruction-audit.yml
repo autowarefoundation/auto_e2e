@@ -1,0 +1,87 @@
+version: 0.2
+
+# Repack one immutable recovery scope and run the reconstruction audit.
+# Training is intentionally separate so a human can review the report first.
+#
+# Required start-build overrides:
+#   ARTIFACT_SET_SHA256, AUDIT_CODE_REVISION
+# Optional:
+#   RECOVERY_MANIFEST_URI, IMAGE_TAG, MAX_PARTITIONS, VALIDATION_SCOPE
+
+env:
+  shell: bash
+  variables:
+    AWS_DEFAULT_REGION: us-west-2
+    FLYTE_PROJECT: auto-e2e
+    FLYTE_DOMAIN: development
+    ARTIFACT_SET_SHA256: ""
+    AUDIT_CODE_REVISION: ""
+    RECOVERY_MANIFEST_URI: ""
+    DATASET_VERSION: v3.3
+    IMAGE_SIZE: "256"
+    PACK_CONCURRENCY: "60"
+    MAX_PARTITIONS: "10"
+    VAL_FRACTION: "0.1"
+    VALIDATION_SCOPE: subset
+    IMAGE_TAG: latest
+
+phases:
+  install:
+    commands:
+      - pip install -q flytekit==1.14.9 numpy torch kubernetes --extra-index-url https://download.pytorch.org/whl/cpu
+  build:
+    commands:
+      - ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+      - ECR_URL="${ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com"
+      - export ECR_PREFIX="${ECR_URL}"
+      - export PYTHONPATH="${CODEBUILD_SRC_DIR}/Model:${CODEBUILD_SRC_DIR}:${PYTHONPATH:-}"
+      - test -n "${ARTIFACT_SET_SHA256}"
+      - test -n "${AUDIT_CODE_REVISION}"
+      - |
+        if [ -z "${RECOVERY_MANIFEST_URI}" ]; then
+          RECOVERY_MANIFEST_URI="s3://auto-e2e-platform-checkpoints-${ACCOUNT_ID}/recovery-manifests/${ARTIFACT_SET_SHA256}.json"
+        fi
+        export RECOVERY_MANIFEST_URI
+      - |
+        image_ref() {
+          REPOSITORY="$1"
+          DIGEST=$(aws ecr batch-get-image \
+            --repository-name "auto-e2e/${REPOSITORY}" \
+            --image-ids imageTag="${IMAGE_TAG}" \
+            --query 'images[0].imageId.imageDigest' \
+            --output text)
+          if [ -z "${DIGEST}" ] || [ "${DIGEST}" = "None" ]; then
+            echo "No digest found for auto-e2e/${REPOSITORY}:${IMAGE_TAG}" >&2
+            return 1
+          fi
+          printf '%s/auto-e2e/%s@%s' \
+            "${ECR_URL}" "${REPOSITORY}" "${DIGEST}"
+        }
+        AUTO_E2E_TRAINING_IMAGE="$(image_ref training)" || exit 1
+        AUTO_E2E_EVAL_IMAGE="$(image_ref eval)" || exit 1
+        AUTO_E2E_OFFLINE_RL_IMAGE="$(image_ref offline-rl)" || exit 1
+        AUTO_E2E_DATA_PREP_IMAGE="$(image_ref data-prep)" || exit 1
+        export AUTO_E2E_TRAINING_IMAGE AUTO_E2E_EVAL_IMAGE
+        export AUTO_E2E_OFFLINE_RL_IMAGE AUTO_E2E_DATA_PREP_IMAGE
+      - |
+        cat > /tmp/flyte.yaml << EOF
+        admin:
+          endpoint: dns:///k8s-flyte-flyteadm-be92e7737c-cf0d1a0f3df10f77.elb.us-west-2.amazonaws.com:81
+          insecure: true
+        EOF
+      - >
+        pyflyte --config /tmp/flyte.yaml run --remote
+        --project "${FLYTE_PROJECT}"
+        --domain "${FLYTE_DOMAIN}"
+        --image "${AUTO_E2E_TRAINING_IMAGE}"
+        Platform/pipelines/workflows.py
+        wf_audit_recovered_kitscenes_target_reconstruction
+        --recovery_manifest "${RECOVERY_MANIFEST_URI}"
+        --artifact_set_sha256 "${ARTIFACT_SET_SHA256}"
+        --audit_code_revision "${AUDIT_CODE_REVISION}"
+        --dataset_version "${DATASET_VERSION}"
+        --image_size "${IMAGE_SIZE}"
+        --pack_concurrency "${PACK_CONCURRENCY}"
+        --max_partitions "${MAX_PARTITIONS}"
+        --val_fraction "${VAL_FRACTION}"
+        --validation_scope "${VALIDATION_SCOPE}"
