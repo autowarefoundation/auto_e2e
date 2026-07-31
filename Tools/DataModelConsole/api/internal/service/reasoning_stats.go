@@ -75,7 +75,7 @@ func (s *S3Service) ReasoningStatsDetail(ctx context.Context, dataset, version, 
 			"reasoning stats require a configured dynamo store",
 		)
 	}
-	inventory, _, _, err := s.reasoningInventory(
+	inventory, artifactSourceVersion, _, err := s.reasoningInventory(
 		ctx, dataset, version,
 	)
 	if err != nil {
@@ -87,7 +87,7 @@ func (s *S3Service) ReasoningStatsDetail(ctx context.Context, dataset, version, 
 	blob, computedAt, err := s.store.GetTeacherStats(
 		ctx,
 		dataset,
-		version,
+		artifactSourceVersion,
 		inventory.Generation,
 		teacher,
 		promptVersion,
@@ -104,6 +104,7 @@ func (s *S3Service) ReasoningStatsDetail(ctx context.Context, dataset, version, 
 	resp.Stats = blob
 	resp.ComputedAt = computedAt
 	resp.Cached = true
+	resp.ArtifactSourceVersion = artifactSourceVersion
 	return resp, nil
 }
 
@@ -642,42 +643,63 @@ func (s *S3Service) reasoningInventory(
 			"reasoning inventory requires a configured dynamo store",
 		)
 	}
-	resolvedVersion, err := s.publishedVersion(ctx, dataset, version)
-	if err != nil {
-		return model.ReasoningInventory{}, "", "", err
-	}
-	if !requiresPublicationManifest(resolvedVersion) {
-		return model.ReasoningInventory{}, "", "",
-			ErrReasoningUnavailable
-	}
-	manifest, err := s.loadPublicationManifest(
-		ctx, dataset, resolvedVersion,
+	targetVersion, candidates, err := s.compatibleArtifactVersions(
+		ctx, dataset, version,
 	)
 	if err != nil {
 		return model.ReasoningInventory{}, "", "", err
 	}
+	for _, candidate := range candidates {
+		inventory, computedAt, err := s.reasoningInventoryAtVersion(
+			ctx, dataset, candidate,
+		)
+		if err != nil {
+			if errors.Is(err, ErrReasoningUnavailable) {
+				continue
+			}
+			return model.ReasoningInventory{}, "", "", err
+		}
+		return inventory, candidate, computedAt, nil
+	}
+	return model.ReasoningInventory{}, targetVersion, "",
+		ErrReasoningUnavailable
+}
+
+func (s *S3Service) reasoningInventoryAtVersion(
+	ctx context.Context,
+	dataset, version string,
+) (model.ReasoningInventory, string, error) {
+	if !requiresPublicationManifest(version) {
+		return model.ReasoningInventory{}, "", ErrReasoningUnavailable
+	}
+	manifest, err := s.loadPublicationManifest(
+		ctx, dataset, version,
+	)
+	if err != nil {
+		return model.ReasoningInventory{}, "", err
+	}
 	inventory, computedAt, err := s.store.GetReasoningInventory(
-		ctx, dataset, resolvedVersion,
+		ctx, dataset, version,
 	)
 	if err != nil {
 		if isStoreNotFound(err) {
-			return model.ReasoningInventory{}, "", "",
+			return model.ReasoningInventory{}, "",
 				ErrReasoningUnavailable
 		}
-		return model.ReasoningInventory{}, "", "", err
+		return model.ReasoningInventory{}, "", err
 	}
 	if err := validateReasoningInventory(inventory); err != nil {
-		return model.ReasoningInventory{}, "", "", fmt.Errorf(
+		return model.ReasoningInventory{}, "", fmt.Errorf(
 			"%w: %v", ErrReasoningIntegrity, err,
 		)
 	}
 	if inventory.DatasetManifestSHA256 != manifest.SHA256 {
-		return model.ReasoningInventory{}, "", "", fmt.Errorf(
+		return model.ReasoningInventory{}, "", fmt.Errorf(
 			"%w: reasoning inventory does not match the active publication",
 			ErrReasoningIntegrity,
 		)
 	}
-	return inventory, resolvedVersion, computedAt, nil
+	return inventory, computedAt, nil
 }
 
 func validateReasoningInventory(inventory model.ReasoningInventory) error {
@@ -968,26 +990,34 @@ func (s *S3Service) SearchScenesByLabelForTeacherAtVersion(
 	ctx context.Context,
 	dataset, version, teacher, promptVersion, field, value string,
 	limit int,
-) ([]model.SceneRef, string, error) {
+) ([]model.SceneRef, string, string, error) {
 	if s.store == nil {
-		return nil, "", fmt.Errorf("scene search requires a configured dynamo store")
+		return nil, "", "", fmt.Errorf(
+			"scene search requires a configured dynamo store",
+		)
 	}
 	if _, _, ok := parseReasoningTeacherID(teacher); !ok {
-		return nil, "", fmt.Errorf("scene search requires a teacher identity")
+		return nil, "", "", fmt.Errorf(
+			"scene search requires a teacher identity",
+		)
 	}
-	inventory, resolvedVersion, _, err := s.reasoningInventory(
+	targetVersion, err := s.publishedVersion(ctx, dataset, version)
+	if err != nil {
+		return nil, "", "", err
+	}
+	inventory, artifactSourceVersion, _, err := s.reasoningInventory(
 		ctx, dataset, version,
 	)
 	if err != nil {
-		return nil, "", err
+		return nil, "", "", err
 	}
 	if !inventoryContainsPartition(inventory, teacher, promptVersion) {
-		return nil, resolvedVersion, ErrNotFound
+		return nil, targetVersion, artifactSourceVersion, ErrNotFound
 	}
 	scenes, err := s.store.QueryReasoningScenes(
 		ctx,
 		dataset,
-		resolvedVersion,
+		artifactSourceVersion,
 		inventory.Generation,
 		teacher,
 		promptVersion,
@@ -995,7 +1025,7 @@ func (s *S3Service) SearchScenesByLabelForTeacherAtVersion(
 		value,
 		limit,
 	)
-	return scenes, resolvedVersion, err
+	return scenes, targetVersion, artifactSourceVersion, err
 }
 
 // isStoreNotFound reports whether err is the store's not-found sentinel.
