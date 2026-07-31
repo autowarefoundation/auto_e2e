@@ -30,7 +30,7 @@ DATA_PREP_IMAGE = os.environ.get(
     "AUTO_E2E_DATA_PREP_IMAGE",
     f"{ECR_PREFIX}/auto-e2e/data-prep:latest",
 )
-ODD_LABELER_VERSION = "odd_dataset_labeler_v13"
+ODD_LABELER_VERSION = "odd_dataset_labeler_v14"
 ODD_SCENE_INDEX_SCHEMA_VERSION = "odd_scene_index_v2"
 ODD_PROVIDER_EXCHANGE_SCHEMA_VERSION = "odd_provider_exchange_v2"
 ODD_PROVIDER_REPORT_SCHEMA_VERSION = "odd_provider_report_v2"
@@ -46,7 +46,7 @@ ODD_EXECUTABLE_SOURCES = frozenset(
 ODD_SOURCE_POLICY_VERSIONS = {
     "map_route": "odd_map_route_policy_v3",
     "gnss_ins": "odd_gnss_ins_policy_v2",
-    "vlm": "odd_road_vlm_policy_v9",
+    "vlm": "odd_road_vlm_policy_v10",
     "image_qc": "odd_image_qc_policy_v4",
     "fusion": "odd_source_fusion_v2",
 }
@@ -1089,7 +1089,7 @@ def label_odd_image_quality(
 @task(
     container_image=DATA_PREP_IMAGE,
     cache=True,
-    cache_version="odd-source-openai-compatible-v9",
+    cache_version="odd-source-openai-compatible-v10",
     retries=2,
     pod_template=_scene_labeling_pod_template(),
     requests=Resources(cpu="2", mem="6Gi"),
@@ -1219,6 +1219,13 @@ def label_odd_visual(
                 model_revision=road_vlm_model_revision,
             )
         )
+        regular_anchor_timestamps_ns = tuple(
+            objects[0].timestamp_ns
+            for objects in evidence.camera_anchors(
+                interval_s=camera_anchor_interval_s,
+                maximum_anchors=maximum_camera_anchors,
+            )
+        )
         anchors = load_camera_anchors(
             boto3.client("s3"),
             evidence,
@@ -1227,9 +1234,18 @@ def label_odd_visual(
             trigger_timestamps_ns=trigger_timestamps_ns,
             trigger_context_s=trigger_context_s,
         )
+        available_anchor_timestamps_ns = {
+            anchor.timestamp_ns for anchor in anchors
+        }
+        regular_anchor_timestamps_ns = tuple(
+            timestamp_ns
+            for timestamp_ns in regular_anchor_timestamps_ns
+            if timestamp_ns in available_anchor_timestamps_ns
+        )
         sampling_parameters = {
             "regular_interval_s": camera_anchor_interval_s,
             "maximum_anchors": maximum_camera_anchors,
+            "regular_anchor_count": len(regular_anchor_timestamps_ns),
             "trigger_context_s": trigger_context_s,
             "trigger_count": len(trigger_timestamps_ns),
             "refinement_confidence_threshold": (
@@ -1241,6 +1257,7 @@ def label_odd_visual(
             scene_uid=evidence.scene_uid,
             scene_end_timestamp_ns=evidence.end_timestamp_ns,
             anchors=anchors,
+            regular_anchor_timestamps_ns=regular_anchor_timestamps_ns,
             event_trigger_timestamps_ns=trigger_timestamps_ns,
             refinement_confidence_threshold=(
                 refinement_confidence_threshold
