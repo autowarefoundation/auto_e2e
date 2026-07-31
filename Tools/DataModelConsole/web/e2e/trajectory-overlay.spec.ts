@@ -363,6 +363,7 @@ test("trajectory overlays and geographic views honor production contracts", asyn
       return json({
         dataset: "kitscenes",
         version: "v2.1",
+        artifact_source_version: "v2.1",
         shard: "train-000000.tar",
         models: [
           {
