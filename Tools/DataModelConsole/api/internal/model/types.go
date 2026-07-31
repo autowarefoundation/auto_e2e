@@ -178,11 +178,12 @@ type OverlayModel struct {
 
 // OverlayModelsResponse lists only models whose whole overlay set is ready.
 type OverlayModelsResponse struct {
-	Dataset       string         `json:"dataset"`
-	Version       string         `json:"version"`
-	Shard         string         `json:"shard"`
-	Models        []OverlayModel `json:"models"`
-	NextPageToken string         `json:"next_page_token,omitempty"`
+	Dataset               string         `json:"dataset"`
+	Version               string         `json:"version"`
+	ArtifactSourceVersion string         `json:"artifact_source_version"`
+	Shard                 string         `json:"shard"`
+	Models                []OverlayModel `json:"models"`
+	NextPageToken         string         `json:"next_page_token,omitempty"`
 }
 
 // OverlayDescriptor accompanies the binary response through HTTP headers and
@@ -199,12 +200,13 @@ type OverlayDescriptor struct {
 // Summary is kept as JSON because its per-region dimensions may evolve without
 // changing the serving envelope.
 type GeoStatsResponse struct {
-	Dataset    string          `json:"dataset"`
-	Version    string          `json:"version"`
-	Summary    json.RawMessage `json:"summary"`
-	HeatmapURL string          `json:"heatmap_url"`
-	NSamples   int             `json:"n_samples"`
-	ComputedAt string          `json:"computed_at"`
+	Dataset               string          `json:"dataset"`
+	Version               string          `json:"version"`
+	ArtifactSourceVersion string          `json:"artifact_source_version"`
+	Summary               json.RawMessage `json:"summary"`
+	HeatmapURL            string          `json:"heatmap_url"`
+	NSamples              int             `json:"n_samples"`
+	ComputedAt            string          `json:"computed_at"`
 }
 
 // ReasoningStatsEntry is one dataset/teacher/prompt_version bucket with its
@@ -238,8 +240,10 @@ type ReasoningPromptVersion struct {
 // ReasoningPromptVersionsResponse wraps
 // GET /api/v1/reasoning-labels/prompt-versions?dataset={name}.
 type ReasoningPromptVersionsResponse struct {
-	Dataset        string                   `json:"dataset"`
-	PromptVersions []ReasoningPromptVersion `json:"prompt_versions"`
+	Dataset               string                   `json:"dataset"`
+	Version               string                   `json:"version"`
+	ArtifactSourceVersion string                   `json:"artifact_source_version"`
+	PromptVersions        []ReasoningPromptVersion `json:"prompt_versions"`
 }
 
 // ReasoningInventory is the atomic publication pointer for one immutable
@@ -333,15 +337,16 @@ type ReasoningStatsBlob struct {
 // Stats is the precomputed blob; ComputedAt is when it was materialised (RFC3339,
 // empty when just computed inline and not yet persisted).
 type ReasoningStatsDetailResponse struct {
-	Dataset         string             `json:"dataset"`
-	Version         string             `json:"version"`
-	PromptVersion   string             `json:"prompt_version"`
-	Teacher         string             `json:"teacher"`
-	TeacherProvider string             `json:"teacher_provider,omitempty"`
-	TeacherModel    string             `json:"teacher_model,omitempty"`
-	ComputedAt      string             `json:"computed_at,omitempty"`
-	Cached          bool               `json:"cached"` // true when served from a DynamoDB hit
-	Stats           ReasoningStatsBlob `json:"stats"`
+	Dataset               string             `json:"dataset"`
+	Version               string             `json:"version"`
+	ArtifactSourceVersion string             `json:"artifact_source_version"`
+	PromptVersion         string             `json:"prompt_version"`
+	Teacher               string             `json:"teacher"`
+	TeacherProvider       string             `json:"teacher_provider,omitempty"`
+	TeacherModel          string             `json:"teacher_model,omitempty"`
+	ComputedAt            string             `json:"computed_at,omitempty"`
+	Cached                bool               `json:"cached"` // true when served from a DynamoDB hit
+	Stats                 ReasoningStatsBlob `json:"stats"`
 }
 
 // SceneRef identifies one scene carrying a searched reasoning label. Shard is
@@ -360,14 +365,15 @@ type SceneRef struct {
 // present in the requested version's published shards (linkable). Truncated is
 // true when the label index held more matches than the requested limit.
 type SceneSearchResponse struct {
-	Dataset       string     `json:"dataset"`
-	PromptVersion string     `json:"prompt_version"`
-	Teacher       string     `json:"teacher"`
-	Version       string     `json:"version,omitempty"`
-	Field         string     `json:"field"`
-	Value         string     `json:"value"`
-	Scenes        []SceneRef `json:"scenes"`
-	Total         int        `json:"total"`
-	Available     int        `json:"available"`
-	Truncated     bool       `json:"truncated"`
+	Dataset               string     `json:"dataset"`
+	PromptVersion         string     `json:"prompt_version"`
+	Teacher               string     `json:"teacher"`
+	Version               string     `json:"version,omitempty"`
+	ArtifactSourceVersion string     `json:"artifact_source_version,omitempty"`
+	Field                 string     `json:"field"`
+	Value                 string     `json:"value"`
+	Scenes                []SceneRef `json:"scenes"`
+	Total                 int        `json:"total"`
+	Available             int        `json:"available"`
+	Truncated             bool       `json:"truncated"`
 }
