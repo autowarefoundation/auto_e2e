@@ -225,6 +225,64 @@ def test_request_removes_geography_and_provider_identity() -> None:
     }
 
 
+def test_request_projects_distant_wgs84_evidence_into_map_frame() -> None:
+    scene = _scene()
+    frame = MapFrame(
+        "kitscenes-utm",
+        49.01439,
+        8.41722,
+        "EPSG:32632 local ENU",
+    )
+    offset = np.asarray([2938.634, -3302.5931, 0.0])
+    navigation_map = replace(
+        scene.navigation_map,
+        frame=frame,
+        bounds_enu_m=(2900.0, -3340.0, 2980.0, -3260.0),
+        intersection_polygons=tuple(
+            replace(
+                polygon,
+                points_enu_m=polygon.points_enu_m + offset,
+            )
+            for polygon in scene.navigation_map.intersection_polygons
+        ),
+        directed_lane_fields=tuple(
+            replace(
+                lane,
+                centerline_enu_m=lane.centerline_enu_m + offset,
+            )
+            for lane in scene.navigation_map.directed_lane_fields
+        ),
+    )
+    path = np.asarray(
+        [
+            [48.98504346, 8.45748267, 137.27752823, 0.0],
+            [48.98488597, 8.45774490, 138.5, 100_000_000.0],
+            [48.98472848, 8.45800713, 140.35287086, 200_000_000.0],
+        ]
+    )
+    projected_scene = replace(
+        scene,
+        path_latlon_heading_timestamp=path,
+        navigation_map=navigation_map,
+        navigation_route=replace(
+            scene.navigation_route,
+            frame=frame,
+            map_version=navigation_map.map_version,
+        ),
+    )
+
+    request = build_privacy_safe_request(
+        projected_scene,
+        _ambiguous_junction(),
+    )
+
+    assert request is not None
+    assert request.payload()["allowed_values"] == [
+        "t_junction",
+        "y_junction",
+    ]
+
+
 def test_missing_navigation_never_calls_bedrock() -> None:
     scene = replace(
         _scene(),
