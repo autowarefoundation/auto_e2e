@@ -14,6 +14,8 @@ from typing import Any, Protocol
 import numpy as np
 from PIL import Image, ImageDraw
 
+from navigation.geodesy import wgs84_to_map_xy
+
 from .ontology import ONTOLOGY
 from .published_snapshot import CanonicalSceneEvidence
 from .schema import (
@@ -144,25 +146,6 @@ def _assert_privacy_safe(value: Any, *, path: str = "request") -> None:
             raise ValueError(
                 f"privacy-prohibited reference in Bedrock request: {path}"
             )
-
-
-def _local_xy(
-    path: np.ndarray,
-    origin_latitude_deg: float,
-    origin_longitude_deg: float,
-) -> np.ndarray:
-    radius = 6_371_008.8
-    latitude = np.radians(path[:, 0])
-    longitude = np.radians(path[:, 1])
-    latitude_origin = math.radians(origin_latitude_deg)
-    longitude_origin = math.radians(origin_longitude_deg)
-    east = (
-        radius
-        * (longitude - longitude_origin)
-        * math.cos(latitude_origin)
-    )
-    north = radius * (latitude - latitude_origin)
-    return np.column_stack([east, north])
 
 
 def _ego_flu(
@@ -299,11 +282,7 @@ def build_privacy_safe_request(
     ) // 2
     path_index = int(np.argmin(np.abs(timestamps - anchor_ns)))
     map_frame = evidence.navigation_map.frame
-    path_enu = _local_xy(
-        path,
-        map_frame.origin_latitude_deg,
-        map_frame.origin_longitude_deg,
-    )
+    path_enu = wgs84_to_map_xy(path, map_frame)
     ego_position = path_enu[path_index]
     ego_yaw = math.radians(90.0 - float(path[path_index, 2]))
 
