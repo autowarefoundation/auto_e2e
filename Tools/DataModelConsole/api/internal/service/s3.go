@@ -194,6 +194,12 @@ type S3Service struct {
 	publicationMu    sync.Mutex
 	publicationCache map[string]*publicationManifest
 
+	// compatibleVersionCache memoizes dataset versions that share the same
+	// immutable KITScenes scene inventory. Derived artifacts can be resolved
+	// independently from the currently displayed pack version.
+	compatibleVersionMu    sync.Mutex
+	compatibleVersionCache map[string]cachedCompatibleVersions
+
 	// indexSF single-flights concurrent shard-index builds so a large shard is
 	// scanned from S3 only once even under many simultaneous players. The built
 	// index is NOT held in an in-memory map: those indexes are multi-MB each (a
@@ -237,7 +243,10 @@ func NewS3Service(ctx context.Context, region, bucket string, presignExpiry time
 		store:            st,
 		versionCache:     make(map[string]cachedVersion),
 		publicationCache: make(map[string]*publicationManifest),
-		indexSF:          make(map[string]*shardIndexBuild),
+		compatibleVersionCache: make(
+			map[string]cachedCompatibleVersions,
+		),
+		indexSF: make(map[string]*shardIndexBuild),
 	}, nil
 }
 
