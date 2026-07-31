@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 import io
 
 import numpy as np
@@ -214,7 +215,7 @@ def test_sampled_frame_does_not_cover_unsampled_or_missing_intervals() -> None:
     )
 
 
-def test_sampled_evidence_gap_is_unavailable_not_dropped() -> None:
+def test_sampled_evidence_ignores_unpublished_capture_timestamps() -> None:
     timestamps = np.arange(4, dtype=np.int64) * 100_000_000
     evidence = _scene(
         timestamps,
@@ -231,26 +232,66 @@ def test_sampled_evidence_gap_is_unavailable_not_dropped() -> None:
 
     observations = label_image_quality(evidence, anchors)
     statuses = _frame_statuses(observations)
-    gap = next(
-        item
-        for item in statuses
-        if item.start_timestamp_ns == 100_000_000
-    )
 
-    assert gap.status == "unavailable"
-    assert gap.values == ()
-    assert gap.provenance["frame_inventory_mode"] == "sampled_evidence"
-    assert (
-        gap.provenance["reason"]
-        == "camera_frame_inventory_not_authoritative"
+    assert not any(
+        item.start_timestamp_ns == 100_000_000
+        for item in observations
     )
     assert not any(item.values == ("dropped_frame",) for item in statuses)
-    assert {
-        item.status
+    assert not any(item.status == "unavailable" for item in observations)
+
+
+def test_sampled_evidence_detects_missing_synchronized_camera() -> None:
+    timestamps = np.arange(3, dtype=np.int64) * 100_000_000
+    base = _scene(
+        timestamps,
+        present_indexes=(0, 2),
+        frame_inventory_mode="sampled_evidence",
+    )
+    assert base.capability_manifest is not None
+    front_capability = base.capability_manifest.cameras[0]
+    rear_capability = dataclasses.replace(
+        front_capability,
+        camera_id="rear",
+        canonical_role="rear",
+    )
+    rear = CameraObject(
+        frame_index=0,
+        camera_index=1,
+        camera_role="rear",
+        timestamp_ns=0,
+        bucket="fixture",
+        key="rear-frame-0.jpg",
+        byte_size=1,
+    )
+    evidence = dataclasses.replace(
+        base,
+        descriptor=dataclasses.replace(base.descriptor, camera_count=2),
+        camera_objects=base.camera_objects + (rear,),
+        capability_manifest=dataclasses.replace(
+            base.capability_manifest,
+            cameras=(front_capability, rear_capability),
+        ),
+    )
+
+    observations = label_image_quality(evidence, ())
+    missing = [
+        item
         for item in observations
-        if item.start_timestamp_ns == 100_000_000
-        and item.key in DEPENDENT_QC_KEYS
-    } == {"unavailable"}
+        if item.camera_id == "rear"
+        and item.start_timestamp_ns == 200_000_000
+    ]
+
+    assert {item.key for item in missing} == {
+        "perception.image.frame_status",
+        *DEPENDENT_QC_KEYS,
+    }
+    assert {item.status for item in missing} == {"unavailable"}
+    assert all(
+        item.provenance["reason"]
+        == "camera_frame_inventory_not_authoritative"
+        for item in missing
+    )
 
 
 def test_invalid_jpeg_becomes_corrupted_evidence_without_failing_scene() -> None:
