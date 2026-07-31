@@ -5,8 +5,10 @@ as a camera view) and the manifest projection round-trip, without needing real
 shards on disk.
 """
 
+import dataclasses
 import io
 import json
+import zipfile
 
 import numpy as np
 import pytest
@@ -20,8 +22,15 @@ from data_parsing.pre_extracted import _decode_sample, load_projection_from_mani
 from navigation.artifacts import (
     SAMPLE_NAVIGATION_ARTIFACT_VERSION,
     encode_array,
+    encode_route_supervision,
 )
 from navigation.contracts import canonical_json_bytes
+from navigation.geometry import DEFAULT_NAVIGATION_GEOMETRY
+from navigation.supervision import (
+    MAXIMUM_OUTSIDE_DISTANCE_M,
+    ROUTE_SUPERVISION_ARTIFACT_VERSION,
+    empty_route_supervision,
+)
 
 
 def _jpeg_bytes(color):
@@ -44,11 +53,27 @@ def _navigation_members(
     map_context[0, 10:20, 10:20] = 0.25
     route_mask = np.zeros((2, 256, 256), dtype=np.uint8)
     route_mask[0, 12:18, 12:18] = 1
+    supervision = dataclasses.replace(
+        empty_route_supervision(DEFAULT_NAVIGATION_GEOMETRY),
+        distance_to_drivable_m=np.full(
+            (256, 256),
+            MAXIMUM_OUTSIDE_DISTANCE_M,
+            dtype=np.float32,
+        ),
+        drivable_available=map_valid,
+    )
     return {
         "map_semantic.npz": encode_array(map_context),
         "route_mask.npz": encode_array(route_mask),
+        "route_supervision.npz": encode_route_supervision(
+            supervision
+        ),
         "navigation_meta.json": canonical_json_bytes({
             "schema_version": SAMPLE_NAVIGATION_ARTIFACT_VERSION,
+            "route_supervision_version": (
+                ROUTE_SUPERVISION_ARTIFACT_VERSION
+            ),
+            "geometry_id": DEFAULT_NAVIGATION_GEOMETRY.geometry_id,
             "map_valid": map_valid,
             "route_valid": route_valid,
             **(extra_metadata or {}),
@@ -63,6 +88,20 @@ class TestDecodeSampleMapSplit:
                   "__key__": "l2d-v1-e000012-f000064"}
         out = _decode_sample(sample)
         assert out["sample_uid"] == sample["__key__"]
+        assert out["split_group_uid"] == ""
+
+    def test_split_group_uid_is_exposed_from_sample_metadata(self):
+        sample = {
+            "cam_0.jpg": _jpeg_bytes((0, 0, 0)),
+            "ego.npy": _ego_bytes(),
+            "meta.json": json.dumps({
+                "split_group_uid": "kitscenes-scene-001",
+            }).encode("ascii"),
+        }
+
+        out = _decode_sample(sample)
+
+        assert out["split_group_uid"] == "kitscenes-scene-001"
 
     def test_map_not_counted_as_camera(self):
         """A sample with 6 cams + map.jpg -> visual_tiles (6,...), map separate."""
@@ -112,6 +151,61 @@ class TestDecodeSampleMapSplit:
         assert out["route_mask"][0, 12, 12] == 1.0
         assert out["map_valid"]
         assert out["route_valid"]
+        assert out["route_supervision"]["available"]
+        assert out["route_supervision"][
+            "distance_to_corridor_m"
+        ].shape == (256, 256)
+        assert out["route_supervision"][
+            "distance_to_drivable_m"
+        ].shape == (256, 256)
+        assert out["route_supervision"]["drivable_available"]
+        assert out["route_supervision"]["destination_xy_m"].shape == (2,)
+
+    def test_declared_drivable_unavailability_is_preserved(self):
+        sample = {
+            "cam_0.jpg": _jpeg_bytes((0, 0, 0)),
+            "ego.npy": _ego_bytes(),
+            **_navigation_members(map_valid=False),
+        }
+
+        out = _decode_sample(sample)
+
+        assert not out["route_supervision"]["drivable_available"]
+
+    def test_missing_drivable_availability_is_rejected(self):
+        members = _navigation_members()
+        output = io.BytesIO()
+        with zipfile.ZipFile(
+            io.BytesIO(members["route_supervision.npz"]),
+            mode="r",
+        ) as source, zipfile.ZipFile(output, mode="w") as destination:
+            for name in source.namelist():
+                if name != "drivable_available.npy":
+                    destination.writestr(
+                        source.getinfo(name),
+                        source.read(name),
+                    )
+        members["route_supervision.npz"] = output.getvalue()
+        sample = {
+            "cam_0.jpg": _jpeg_bytes((0, 0, 0)),
+            "ego.npy": _ego_bytes(),
+            **members,
+        }
+
+        with pytest.raises(ValueError, match="fields differ from contract"):
+            _decode_sample(sample)
+
+    def test_navigation_geometry_must_match_model_contract(self):
+        sample = {
+            "cam_0.jpg": _jpeg_bytes((0, 0, 0)),
+            "ego.npy": _ego_bytes(),
+            **_navigation_members(extra_metadata={
+                "geometry_id": "different-256px-geometry",
+            }),
+        }
+
+        with pytest.raises(ValueError, match="geometry differs"):
+            _decode_sample(sample)
 
     def test_partial_navigation_member_set_is_rejected(self):
         sample = {
@@ -120,7 +214,7 @@ class TestDecodeSampleMapSplit:
             "map_semantic.npz": _navigation_members()["map_semantic.npz"],
         }
 
-        with pytest.raises(ValueError, match="complete schema-v5 set"):
+        with pytest.raises(ValueError, match="complete schema-v8 set"):
             _decode_sample(sample)
 
     def test_navigation_metadata_collates_with_sample_provenance(self):
