@@ -529,6 +529,88 @@ def test_map_labels_ignore_scene_wide_route_quality() -> None:
     ] == 0.01
 
 
+def test_map_labels_use_declared_projection_and_undirected_geometry() -> None:
+    scene = _synthetic_adapter().scene
+    frame = MapFrame(
+        "kitscenes-utm",
+        49.01439,
+        8.41722,
+        "EPSG:32632 local ENU",
+    )
+    path = np.asarray(
+        [
+            [48.98504346, 8.45748267, 137.27752823, 0.0],
+            [48.98488597, 8.45774490, 138.5, 100_000_000.0],
+            [48.98472848, 8.45800713, 140.35287086, 200_000_000.0],
+        ]
+    )
+    reverse_centerline = np.asarray(
+        [
+            [2958.85346758, -3319.40846500],
+            [2939.79264236, -3301.76419203],
+            [2920.73181714, -3284.11991905],
+        ]
+    )
+    lane = DirectedLaneField(
+        lane_id="lane-reverse",
+        centerline_enu_m=reverse_centerline,
+        road_class="residential",
+        lane_subtype="road",
+        one_way=False,
+        provider_attributes={"location": "urban"},
+    )
+    navigation_map = replace(
+        scene.navigation_map,
+        frame=frame,
+        bounds_enu_m=(2900.0, -3340.0, 2980.0, -3260.0),
+        directed_lane_fields=(lane,),
+        layer_availability={"lane_topology": True},
+    )
+    route = replace(
+        scene.navigation_route,
+        frame=frame,
+        map_version=navigation_map.map_version,
+        lane_sequence=(
+            RouteLaneSegment(
+                lane_id=lane.lane_id,
+                provider_segment_id="provider-lane-reverse",
+                centerline_enu_m=reverse_centerline,
+                maneuver=Maneuver.LEFT,
+            ),
+        ),
+        confidence=0.01,
+        valid=False,
+        estimated_destination=True,
+        quality=replace(
+            scene.navigation_route.quality,
+            unresolved_discontinuities=2,
+            failure_reasons=("unresolved_discontinuity",),
+        ),
+    )
+
+    observations = label_map_route(
+        replace(
+            scene,
+            path_latlon_heading_timestamp=path,
+            navigation_map=navigation_map,
+            navigation_route=route,
+        )
+    )
+    by_key = {observation.key: observation for observation in observations}
+
+    geometry = by_key["odd.road.horizontal_geometry"]
+    assert geometry.status == "valid"
+    assert geometry.provenance["local_map_match"]["distance_m"] < 1.0
+    assert (
+        geometry.provenance["local_map_match"]["heading_semantics"]
+        == "undirected_centerline_geometry"
+    )
+    assert geometry.provenance["route_valid_global"] is False
+    assert geometry.provenance["unresolved_discontinuities_global"] == 2
+    assert by_key["odd.road.junction_position"].status == "valid"
+    assert by_key["odd.route.action"].status == "ambiguous"
+
+
 def test_route_action_rejects_only_the_local_discontinuity() -> None:
     scene = _published_adapter().open_scene("scene-1")
     centerline = np.asarray([[0.0, -10.0], [0.0, 30.0]])
