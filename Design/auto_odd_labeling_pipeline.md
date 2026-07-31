@@ -1046,26 +1046,35 @@ shared.
 Most map/route labels use deterministic topology and geometry. Map-only labels
 are gated by the ego-local map match, never by whole-scene Route quality. The
 initial local gate requires lateral distance at most 8 m and heading error at
-most 75 degrees. Whole-scene `route.valid`, Route confidence, matched-pose
-ratio, and unresolved-discontinuity count remain in provenance for audit, but
-cannot make an otherwise usable current road segment unavailable.
+most 75 degrees. WGS84 ego evidence is first transformed with the exact
+`MapFrame.projection`; an EPSG-backed UTM map must not be matched with an
+equirectangular approximation. Map-only matching treats a centerline as
+undirected geometry because provider storage direction is not evidence that
+the road shape, junction, or context is unusable. The applied projection and
+`heading_semantics=undirected_centerline_geometry` are auditable provenance.
+Whole-scene `route.valid`, Route confidence, matched-pose ratio, and
+unresolved-discontinuity count remain in provenance for audit, but cannot make
+an otherwise usable current road segment unavailable.
 
 `odd.route.action` is the only label in this group that requires the selected
 Route. It uses a separately matched local Route segment with lateral distance
 at most 10 m, heading error at most 75 degrees, segment confidence at least
-0.5, and local continuity from the preceding segment. A discontinuity elsewhere
-in the Scene is irrelevant. For KITScenes, the selected Route is reconstructed
-from the driven trace and estimated destination rather than supplied planner
-intent, so every result records `intent_semantics=reconstructed_from_ego_trace`.
-It must still remain distinct from the trajectory-derived
-`event.ego.maneuver`.
+0.5, and local continuity from the preceding segment. Unlike Map-only matching,
+Route matching remains directed because segment direction is part of intended
+action. A discontinuity elsewhere in the Scene is irrelevant. For KITScenes,
+the selected Route is reconstructed from the driven trace and estimated
+destination rather than supplied planner intent, so every result records
+`intent_semantics=reconstructed_from_ego_trace`. It must still remain distinct
+from the trajectory-derived `event.ego.maneuver`.
 
 When a locally valid three-arm junction falls in the deterministic T/Y angular
 boundary, a task-specific Bedrock Claude Opus 5 resolver may inspect an
-ego-local semantic map render plus a structured graph summary. No other
-junction class and no Route action are sent to Bedrock. It is a bounded
-tie-breaker, not a replacement for map matching or missing map attributes. Its
-request and acceptance policy are defined in Section 15.5.
+ego-local semantic map render plus a structured graph summary. This request
+uses the same declared-map projection as deterministic matching before exact
+geography is removed. No other junction class and no Route action are sent to
+Bedrock. It is a bounded tie-breaker, not a replacement for map matching or
+missing map attributes. Its request and acceptance policy are defined in
+Section 15.5.
 
 Road context and road type are distinct:
 
