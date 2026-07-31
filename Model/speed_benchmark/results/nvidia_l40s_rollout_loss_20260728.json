@@ -1,0 +1,30 @@
+{
+  "timestamp": "2026-07-28T21:28:12+09:00",
+  "commit_sha": "1ed3cb5af402450fa2f3dbd13b57b0887631c98f",
+  "gpu_name": "NVIDIA L40S",
+  "driver_version": "580.159.04",
+  "pytorch_version": "2.10.0+cu130",
+  "cuda_version": "13.0",
+  "batch_size": 4,
+  "iterations": 100,
+  "rollout_forward_ms": 2.84892333984375,
+  "rollout_forward_backward_ms": 10.31487548828125,
+  "action_only_forward_backward_ms": 0.33508159637451174,
+  "rollout_aligned_forward_backward_ms": 19.106527099609377,
+  "loss_only_regression_percent": 5602.052069208397,
+  "full_step": {
+    "batch_size": 1,
+    "warmup": 3,
+    "iterations": 10,
+    "includes_world_model_jepa": true,
+    "includes_reasoning": true,
+    "action_only_ms": 243.2714599609375,
+    "rollout_aligned_ms": 262.5174560546875,
+    "regression_percent": 7.911325108518841,
+    "maximum_allowed_regression_percent": 12.0,
+    "passes": true
+  },
+  "validation_aggregation_and_selector_ms": 22.96052509918809,
+  "validation_sample_count": 3820,
+  "validation_scene_count": 40
+}
