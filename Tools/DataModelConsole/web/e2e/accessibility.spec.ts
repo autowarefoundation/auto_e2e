@@ -70,6 +70,8 @@ async function installReasoningRoutes(
     if (url.pathname === "/api/v1/reasoning-labels/prompt-versions") {
       return fulfillJSON(route, {
         dataset: "review",
+        version: "v2.1",
+        artifact_source_version: "v2.1",
         prompt_versions: [
           {
             teacher: "teacher-id",
@@ -185,6 +187,7 @@ async function installPlayerRoutes(page: Page) {
       return fulfillJSON(route, {
         dataset: "a11y",
         version: "v2.1",
+        artifact_source_version: "v2.1",
         shard: "train-000000.tar",
         models: [],
       });
