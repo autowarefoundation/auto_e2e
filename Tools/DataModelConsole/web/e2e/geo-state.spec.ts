@@ -35,6 +35,7 @@ function geoStats(datasetName: string, version: string, samples: number) {
   return {
     dataset: datasetName,
     version,
+    artifact_source_version: version,
     summary: {
       bbox: [10.99, 48.99, 11.02, 49.02],
       episode_count: 3,
@@ -49,6 +50,39 @@ function geoStats(datasetName: string, version: string, samples: number) {
     n_samples: samples,
   };
 }
+
+test("latest dataset version identifies a compatible heatmap source", async ({
+  page,
+}) => {
+  await page.route("**/api/v1/**", (route) => {
+    const url = new URL(route.request().url());
+    if (url.pathname === "/api/v1/datasets") {
+      return fulfillJSON(route, {
+        datasets: [dataset("kitscenes", "v3.1")],
+      });
+    }
+    if (url.pathname === "/api/v1/datasets/kitscenes/versions") {
+      return fulfillJSON(route, {
+        dataset: "kitscenes",
+        versions: [datasetVersion("v3.1"), datasetVersion("v2.2")],
+      });
+    }
+    if (url.pathname === "/api/v1/datasets/kitscenes/geo-stats") {
+      return fulfillJSON(route, {
+        ...geoStats("kitscenes", "v3.1", 42667),
+        artifact_source_version: "v2.2",
+      });
+    }
+    return route.fulfill({ status: 404, body: "not mocked" });
+  });
+
+  await page.goto("/geo");
+
+  await expectSelection(page, "kitscenes", "v3.1", 42667);
+  const source = page.getByText("Compatible heatmap from");
+  await expect(source).toBeVisible();
+  await expect(source).toContainText("v2.2");
+});
 
 async function expectSelection(
   page: Page,
