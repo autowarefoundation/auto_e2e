@@ -2146,15 +2146,33 @@ func (s *S3Service) ReasoningPromptVersionsAtVersion(
 	ctx context.Context,
 	dataset, version string,
 ) ([]model.ReasoningPromptVersion, error) {
-	inventory, _, _, err := s.reasoningInventory(ctx, dataset, version)
+	entries, _, _, err := s.ReasoningPromptVersionsWithSource(
+		ctx, dataset, version,
+	)
+	return entries, err
+}
+
+// ReasoningPromptVersionsWithSource keeps the displayed pack coordinate
+// separate from the compatible materialized inventory that supplies labels.
+func (s *S3Service) ReasoningPromptVersionsWithSource(
+	ctx context.Context,
+	dataset, version string,
+) ([]model.ReasoningPromptVersion, string, string, error) {
+	targetVersion, err := s.publishedVersion(ctx, dataset, version)
 	if err != nil {
-		return nil, err
+		return nil, "", "", err
+	}
+	inventory, artifactSourceVersion, _, err := s.reasoningInventory(
+		ctx, dataset, version,
+	)
+	if err != nil {
+		return nil, "", "", err
 	}
 	entries := append(
 		[]model.ReasoningPromptVersion(nil),
 		inventory.PromptVersions...,
 	)
-	return entries, nil
+	return entries, targetVersion, artifactSourceVersion, nil
 }
 
 // GetReasoningLabel fetches the canonical embedded JSON label from the newest
