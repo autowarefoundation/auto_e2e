@@ -46,7 +46,13 @@ PARSER_VERSION = "v3"
 # heatmaps for every GPS-capable parser, including KITScenes partitions.
 # v5: KITScenes stores lossless semantic-map and selected-route tensors plus
 # scene-level canonical navigation vectors; it no longer stores map.jpg.
-SHARD_SCHEMA_VERSION = "v5"
+# v6: KITScenes adds the loss-only route_supervision.npz member derived from the
+# canonical selected lane sequence.
+# v7: route_supervision.npz also stores the loss-only drivable outside-distance
+# field derived from the semantic drivable-area channel.
+# v8: route_supervision.npz explicitly stores drivable-field availability so
+# training never infers supervision validity from distance values.
+SHARD_SCHEMA_VERSION = "v8"
 
 # Calibration / projection spec encoding and raster-map coordinate semantics.
 # v2 queries KITScenes maps in the scene-local pose frame and applies the map
