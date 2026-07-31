@@ -71,10 +71,10 @@ def _completion(observations: dict[str, dict[str, Any]]) -> dict[str, Any]:
 
 def test_road_vlm_semantic_hashes_are_stable() -> None:
     assert road_vlm_prompt_bundle_sha256() == (
-        "f163bcc5163335a61e1e3cd8be672ba4c15eeaa54efbcfefd3f47f1cd6bd3243"
+        "26e63841f8f60ea2d6f93c575d87dee88e35bccdc1a5ce94fdab036885455e4c"
     )
     assert road_vlm_decoding_bundle_sha256(max_tokens=4096) == (
-        "0c845ef4e2606f5c43433d0813ff503de8e9e4cd2507769b66c62ccc3df9e486"
+        "a97dbbe353fd52bdd1405f87de77ff6d066b318ff031c235884ee7c8d91fe517"
     )
     assert road_vlm_decoding_bundle_sha256(
         max_tokens=2048
@@ -651,6 +651,56 @@ def test_unknown_frame_citation_is_rejected() -> None:
 
     assert observation.status == "unavailable"
     assert observation.provenance["error_type"] == "ValueError"
+
+
+def test_interval_end_citation_is_removed_when_input_frame_is_also_cited() -> None:
+    def transport(
+        _url: str,
+        _payload: dict[str, Any],
+        _headers: dict[str, str],
+    ) -> dict[str, Any]:
+        return _completion(
+            {
+                "odd.environment.sky": {
+                    "key": "odd.environment.sky",
+                    "status": "valid",
+                    "values": ["clear"],
+                    "confidence": 0.9,
+                    "camera_id": None,
+                    "supporting_cameras": ["front_center"],
+                    "supporting_timestamps_ns": [1_000, 2_000],
+                    "reason": "The input frame shows clear sky.",
+                }
+            }
+        )
+
+    observer = OpenAICompatibleRoadObserver(
+        RoadVLMConfig(
+            base_url="https://road-vlm.example/v1",
+            model="road-observer",
+            retry_count=0,
+        ),
+        transport=transport,
+    )
+    observation = observer.observe(
+        scene_uid="scene-1",
+        task_bundle="environment",
+        keys=("odd.environment.sky",),
+        frames=(_frame(),),
+        start_timestamp_ns=1_000,
+        end_timestamp_ns=2_000,
+    )[0]
+
+    assert observation.status == "valid"
+    assert observation.provenance["supporting_timestamps_ns"] == [1_000]
+    assert observation.provenance["protocol_repairs"] == [
+        {
+            "kind": "unsupported_timestamps_removed",
+            "key": "odd.environment.sky",
+            "before": [1_000, 2_000],
+            "after": [1_000],
+        }
+    ]
 
 
 def test_refinement_pass_has_distinct_evidence_identity() -> None:
