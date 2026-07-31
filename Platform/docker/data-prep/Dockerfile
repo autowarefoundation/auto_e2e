@@ -53,7 +53,7 @@ RUN pip install --no-cache-dir \
     "termcolor>=2.4,<4.0" \
     timm \
     scipy \
-    pyproj \
+    pyproj==3.7.2 \
     "boto3==1.43.0" \
     pyarrow \
     && pip install --no-cache-dir --no-deps "lerobot-dataset==0.5.0"
