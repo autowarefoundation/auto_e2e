@@ -20,8 +20,8 @@ from .published_snapshot import (
 from .schema import LabelObservation, make_observation
 
 
-IMAGE_QC_VERSION = "odd_image_qc_v3"
-IMAGE_QC_POLICY_VERSION = "odd_image_qc_policy_v3"
+IMAGE_QC_VERSION = "odd_image_qc_v4"
+IMAGE_QC_POLICY_VERSION = "odd_image_qc_policy_v4"
 FROZEN_EGO_MOTION_THRESHOLD_M = 0.5
 DEPENDENT_QC_KEYS = (
     "perception.image.exposure",
