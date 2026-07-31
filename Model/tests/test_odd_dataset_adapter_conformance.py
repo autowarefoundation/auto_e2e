@@ -11,7 +11,7 @@ import pytest
 from data_processing.odd_labeling.deterministic import (
     MAP_ROUTE_KEYS,
     _junction_type,
-    _match_local_lane,
+    _match_lane,
     _match_route_segment,
     label_kinematics,
     label_map_route,
@@ -114,7 +114,7 @@ def test_local_map_and_route_matching_handle_exact_candidate_ties() -> None:
         centerline_enu_m=centerline.copy(),
     )
 
-    lane_match = _match_local_lane(
+    lane_match = _match_lane(
         np.asarray([5.0, 0.0]),
         0.0,
         (first_lane, second_lane),
