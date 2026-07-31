@@ -19,6 +19,7 @@ const ontology = {
   ontology_sha256: "a".repeat(64),
   dataset_name: "kitscenes",
   dataset_version: "v3.0",
+  artifact_source_version: "v3.0",
   labelset_id: "oddls-test",
   statuses: ["valid", "unavailable", "not_observable", "ambiguous"],
   sources: ["map_route", "gnss_ins", "vlm", "image_qc", "fusion"],
@@ -65,6 +66,9 @@ const interval = {
 
 const statistics = {
   schema_version: "odd_statistics_v2",
+  dataset_name: "kitscenes",
+  dataset_version: "v3.0",
+  artifact_source_version: "v3.0",
   labelset_id: "oddls-test",
   scene_count: 2,
   scene_duration_ns: 200_000_000_000,
@@ -153,6 +157,7 @@ const statistics = {
 const labelsets = {
   dataset: "kitscenes",
   version: "v3.0",
+  artifact_source_version: "v3.0",
   state: "ready",
   labelsets: [
     {
@@ -216,6 +221,7 @@ const metricValues = {
 const modelMetrics = {
   dataset: "kitscenes",
   version: "v3.0",
+  artifact_source_version: "v3.0",
   labelset_id: "oddls-test",
   labelset_manifest_sha256: "f".repeat(64),
   projections: [
@@ -427,6 +433,7 @@ async function installODDDashboardRoutes(
       return fulfillJSON(route, {
         dataset: "kitscenes",
         version: "v3.0",
+        artifact_source_version: "v3.0",
         labelset_id: "oddls-test",
         manifest_sha256: "f".repeat(64),
         scenes: [
@@ -475,6 +482,27 @@ async function installODDDashboardRoutes(
     return route.fulfill({ status: 404, body: "not mocked" });
   });
 }
+
+test("bare ODD URL resolves the latest dataset and identifies carried labels", async ({
+  page,
+}) => {
+  await installODDDashboardRoutes(page, [], {
+    labelsets: {
+      ...labelsets,
+      version: "v3.1",
+      artifact_source_version: "v3.0",
+    },
+  });
+
+  await page.goto("/odd");
+
+  await expect
+    .poll(() => new URL(page.url()).searchParams.get("version"))
+    .toBe("v3.1");
+  await expect(
+    page.getByText(/Compatible ODD LabelSet from/),
+  ).toBeVisible();
+});
 
 test("ODD Dashboard exposes weighted composition, structured search, ontology, and quality", async ({
   page,
@@ -884,6 +912,7 @@ async function installODDSceneRoutes(page: Page) {
       return fulfillJSON(route, {
         dataset: "kitscenes",
         version: "v3.0",
+        artifact_source_version: "v3.0",
         shard: "scene-1.tar",
         models: [],
       });
