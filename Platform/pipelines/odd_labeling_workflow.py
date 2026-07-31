@@ -154,6 +154,25 @@ def _semantic_output_merkle_root(
     return level[0].hex()
 
 
+def _bind_semantic_output_labelset_id(
+    statistics: dict,
+    quality_documents: dict[str, dict],
+    labelset_id: str,
+) -> tuple[dict, dict[str, dict]]:
+    documents = [statistics, *quality_documents.values()]
+    if not labelset_id or any(
+        document.get("labelset_id") != "" for document in documents
+    ):
+        raise ValueError("semantic outputs must have an unbound labelset ID")
+    return (
+        {**statistics, "labelset_id": labelset_id},
+        {
+            name: {**document, "labelset_id": labelset_id}
+            for name, document in quality_documents.items()
+        },
+    )
+
+
 def _execution_receipt(
     semantic_partition_sha256: str,
     runtime_metrics: dict[str, float | int],
@@ -2031,14 +2050,11 @@ def publish_odd_labelset(
     s3 = boto3.client("s3")
     # The provisional documents define the semantic identity. Recomputing
     # statistics with labelset_id would change its bootstrap sampling seed.
-    statistics = {
-        **provisional_statistics,
-        "labelset_id": labelset_id,
-    }
-    quality_documents = {
-        name: {**document, "labelset_id": labelset_id}
-        for name, document in provisional_quality_documents.items()
-    }
+    statistics, quality_documents = _bind_semantic_output_labelset_id(
+        provisional_statistics,
+        provisional_quality_documents,
+        labelset_id,
+    )
     if (
         _semantic_output_merkle_root(
             records,
