@@ -1022,6 +1022,7 @@ def test_visual_scene_uses_front_view_and_triggered_temporal_event() -> None:
         scene_uid="scene-1",
         scene_end_timestamp_ns=4_000,
         anchors=anchors,
+        regular_anchor_timestamps_ns=(1_000, 3_000),
         event_trigger_timestamps_ns=(2_000,),
     )
 
@@ -1041,14 +1042,21 @@ def test_visual_scene_uses_front_view_and_triggered_temporal_event() -> None:
         2_000,
         3_000,
     ]
-    dynamic_frames = middle_scene_calls["traffic_dynamic"]["frames"]
-    assert {frame.camera_role for frame in dynamic_frames} == {
-        "front_center"
+    assert set(middle_scene_calls) == {"temporal_event"}
+    regular_calls = [
+        call
+        for call in calls
+        if call["task_bundle"] != "temporal_event"
+        and call.get("inference_pass", "primary") == "primary"
+    ]
+    assert {call["start_timestamp_ns"] for call in regular_calls} == {
+        1_000,
+        3_000,
     }
-    assert {frame.timestamp_ns for frame in dynamic_frames} == {2_000}
     assert {
         frame.camera_role
-        for frame in middle_scene_calls["road_environment"]["frames"]
+        for call in regular_calls
+        for frame in call["frames"]
     } == {"front_center"}
     camera_calls = [
         call
@@ -1059,4 +1067,8 @@ def test_visual_scene_uses_front_view_and_triggered_temporal_event() -> None:
     assert {call["target_camera_id"] for call in camera_calls} == {
         "front_center"
     }
-    assert len(calls) == 10
+    assert {call["start_timestamp_ns"] for call in camera_calls} == {
+        1_000,
+        3_000,
+    }
+    assert len(calls) == 7
