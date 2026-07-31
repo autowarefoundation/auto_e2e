@@ -34,6 +34,9 @@ func (s *S3Service) compatibleArtifactVersions(
 		!requiresPublicationManifest(targetVersion) {
 		return targetVersion, []string{targetVersion}, nil
 	}
+	if s.client == nil {
+		return targetVersion, []string{targetVersion}, nil
+	}
 
 	cacheKey := dataset + "/" + targetVersion
 	s.compatibleVersionMu.Lock()
@@ -54,6 +57,17 @@ func (s *S3Service) compatibleArtifactVersions(
 	versions, err := s.publishedVersionNames(ctx, dataset)
 	if err != nil {
 		return "", nil, err
+	}
+	targetListed := false
+	for _, version := range versions {
+		if version == targetVersion {
+			targetListed = true
+			break
+		}
+	}
+	if !targetListed {
+		versions = append(versions, targetVersion)
+		sortVersionsNewestFirst(versions)
 	}
 	compatible := make([]string, 0, len(versions))
 	for _, version := range versions {
@@ -79,6 +93,11 @@ func (s *S3Service) compatibleArtifactVersions(
 	}
 
 	s.compatibleVersionMu.Lock()
+	if s.compatibleVersionCache == nil {
+		s.compatibleVersionCache = make(
+			map[string]cachedCompatibleVersions,
+		)
+	}
 	s.compatibleVersionCache[cacheKey] = cachedCompatibleVersions{
 		versions: append([]string(nil), compatible...),
 		at:       nowFunc(),
