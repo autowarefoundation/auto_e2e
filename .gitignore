@@ -12,6 +12,8 @@ ec2-sync-and-push.sh
 
 # Local agent context (never committed)
 /AGENTS.md
+/CLAUDE.md
+/.claude/
 
 # Terraform
 .terraform/
