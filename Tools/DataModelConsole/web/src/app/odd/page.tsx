@@ -53,7 +53,6 @@ import type {
 } from "@/types";
 
 const DEFAULT_DATASET = "kitscenes";
-const DEFAULT_VERSION = "v3.0";
 const TABS = [
   { id: "overview", label: "Overview", icon: ChartNoAxesColumn },
   { id: "metrics", label: "Model metrics", icon: Gauge },
@@ -488,7 +487,7 @@ function ODDPageContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const dataset = searchParams.get("dataset")?.trim() || DEFAULT_DATASET;
-  const version = searchParams.get("version")?.trim() || DEFAULT_VERSION;
+  const version = searchParams.get("version")?.trim() || "";
   const selectedOntologyKey = searchParams.get("key");
   const initialRequest = parseSearchRequest(searchParams.get("query"));
   const [tab, setTab] = useState<Tab>(() => {
@@ -501,20 +500,28 @@ function ODDPageContent() {
     () => getODDLabelSets(dataset, version),
     [dataset, version],
   );
+  useEffect(() => {
+    if (version || !labelsets.data?.version) return;
+    const params = new URLSearchParams(searchParams.toString());
+    params.set("dataset", dataset);
+    params.set("version", labelsets.data.version);
+    router.replace(`/odd?${params.toString()}`, { scroll: false });
+  }, [dataset, labelsets.data?.version, router, searchParams, version]);
+  const resolvedVersion = version || labelsets.data?.version || "";
   const readyLabelSet = labelsets.data?.labelsets[0];
   const ontology = useApi(
-    () => getODDOntology(dataset, version),
-    [dataset, version],
+    () => getODDOntology(dataset, resolvedVersion),
+    [dataset, resolvedVersion],
     Boolean(readyLabelSet),
   );
   const statistics = useApi(
-    () => getODDStatistics(dataset, version),
-    [dataset, version],
+    () => getODDStatistics(dataset, resolvedVersion),
+    [dataset, resolvedVersion],
     Boolean(readyLabelSet),
   );
   const modelMetrics = useApi(
-    () => getODDModelMetrics(dataset, version),
-    [dataset, version],
+    () => getODDModelMetrics(dataset, resolvedVersion),
+    [dataset, resolvedVersion],
     Boolean(readyLabelSet),
   );
   const experiments = useApi(listJoinedExperiments, []);
@@ -538,8 +545,8 @@ function ODDPageContent() {
   const searchIdentity = JSON.stringify(appliedRequest);
   const search = useApi(
     () =>
-      searchODDScenesStructured(dataset, version, appliedRequest),
-    [dataset, version, searchIdentity],
+      searchODDScenesStructured(dataset, resolvedVersion, appliedRequest),
+    [dataset, resolvedVersion, searchIdentity],
     Boolean(readyLabelSet),
   );
   const definitionByKey = useMemo(
@@ -586,7 +593,7 @@ function ODDPageContent() {
   ) {
     const params = new URLSearchParams(searchParams.toString());
     params.set("dataset", coordinate.dataset ?? dataset);
-    params.set("version", coordinate.version ?? version);
+    params.set("version", coordinate.version ?? resolvedVersion);
     params.set("tab", nextTab);
     if (request) {
       params.set("query", JSON.stringify(request));
@@ -688,14 +695,16 @@ function ODDPageContent() {
   async function launchLabeler(scope: "smoke" | "full") {
     if (
       scope === "full" &&
-      !window.confirm(`Run full ODD labeling for ${dataset} / ${version}?`)
+      !window.confirm(
+        `Run full ODD labeling for ${dataset} / ${resolvedVersion}?`,
+      )
     ) {
       return;
     }
     setOperationPending(`launch:${scope}`);
     setOperationError("");
     try {
-      await launchODDDatasetLabeler(dataset, version, scope);
+      await launchODDDatasetLabeler(dataset, resolvedVersion, scope);
       refreshOperations();
     } catch (error) {
       setOperationError(
@@ -741,7 +750,7 @@ function ODDPageContent() {
       <div className="space-y-6">
         <h1 className="text-xl font-semibold">ODD Dashboard</h1>
         <p className="text-sm text-slate-500">
-          No ready ODD LabelSet is published for {dataset} / {version}.
+          No ready ODD LabelSet is published for {dataset} / {resolvedVersion}.
         </p>
         <DatasetLabelerRuns
           executions={oddExecutions}
@@ -825,9 +834,9 @@ function ODDPageContent() {
             <label className="space-y-1 text-[9px] uppercase text-slate-600">
               Version
               <input
-                key={`version-${version}`}
+                key={`version-${resolvedVersion}`}
                 name="version"
-                defaultValue={version}
+                defaultValue={resolvedVersion}
                 className="block h-8 w-24 border border-slate-800 bg-slate-950 px-2 font-mono text-xs normal-case text-slate-300"
               />
             </label>
@@ -838,6 +847,14 @@ function ODDPageContent() {
               Open
             </button>
           </form>
+          {statisticsData.artifact_source_version !== resolvedVersion && (
+            <p className="text-xs text-slate-500">
+              Compatible ODD LabelSet from{" "}
+              <span className="font-mono">
+                {statisticsData.artifact_source_version}
+              </span>
+            </p>
+          )}
         </div>
         <div className="grid grid-cols-3 gap-x-6 text-right">
           <div>
@@ -1459,7 +1476,7 @@ function ODDPageContent() {
                       <div className="grid gap-2 sm:grid-cols-[1fr_auto]">
                         <div className="min-w-0">
                           <Link
-                            href={`/scenes/${dataset}/${encodeURIComponent(scene.shard_name)}/${frame}?version=${version}`}
+                            href={`/scenes/${dataset}/${encodeURIComponent(scene.shard_name)}/${frame}?version=${resolvedVersion}`}
                             className="break-all font-mono text-xs text-slate-200 hover:text-cyan-300"
                           >
                             {scene.scene_uid}
@@ -1598,7 +1615,7 @@ function ODDPageContent() {
                     Dataset support
                   </dt>
                   <dd className="mt-1 font-mono text-[10px] text-slate-400">
-                    {dataset} / {version} ·{" "}
+                    {dataset} / {resolvedVersion} ·{" "}
                     {item.dataset_support.support_state}
                   </dd>
                   <dd className="mt-1 font-mono text-[9px] text-slate-600">
