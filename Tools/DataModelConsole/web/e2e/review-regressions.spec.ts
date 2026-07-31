@@ -69,7 +69,13 @@ async function installCatalogRoutes(
       });
     }
     if (path === "/api/v1/reasoning-labels/prompt-versions") {
-      return fulfillJSON(route, { prompt_versions: [] });
+      const version = selectedVersion ?? "v2.2";
+      return fulfillJSON(route, {
+        dataset: "review",
+        version,
+        artifact_source_version: version,
+        prompt_versions: [],
+      });
     }
     if (path === "/api/v1/datasets/review/shards") {
       if (
@@ -188,7 +194,13 @@ test("dataset shards wait for version resolution and version history is navigabl
       });
     }
     if (url.pathname === "/api/v1/reasoning-labels/prompt-versions") {
-      return fulfillJSON(route, { prompt_versions: [] });
+      const version = url.searchParams.get("version") ?? "v2.2";
+      return fulfillJSON(route, {
+        dataset: "review",
+        version,
+        artifact_source_version: version,
+        prompt_versions: [],
+      });
     }
     return route.fulfill({ status: 404, body: "not mocked" });
   });
@@ -392,6 +404,8 @@ test("reasoning prompt discovery follows the selected dataset version", async ({
         selectedVersion === "v2.0" ? teacherOld : teacherNew;
       return fulfillJSON(route, {
         dataset: "review",
+        version: selectedVersion ?? "v2.1",
+        artifact_source_version: selectedVersion ?? "v2.1",
         prompt_versions: [
           {
             teacher,
