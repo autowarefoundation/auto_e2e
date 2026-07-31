@@ -40,6 +40,8 @@ export function OverlaySelectionBar({
   status,
   baseSeeds,
   splitBucket,
+  datasetVersion,
+  artifactSourceVersion,
 }: {
   models: OverlayModel[];
   selectedModelID: string;
@@ -49,6 +51,8 @@ export function OverlaySelectionBar({
   status: OverlayLoadStatus;
   baseSeeds: bigint[];
   splitBucket?: number;
+  datasetVersion: string;
+  artifactSourceVersion: string;
 }) {
   const selected = models.find(
     (model) => model.model_artifact_id === selectedModelID,
@@ -109,6 +113,12 @@ export function OverlaySelectionBar({
           <span className="font-mono text-[10px] text-slate-500">
             {splitLabel}
           </span>
+          {artifactSourceVersion &&
+            artifactSourceVersion !== datasetVersion && (
+              <span className="font-mono text-[10px] text-slate-500">
+                overlay {artifactSourceVersion}
+              </span>
+            )}
           <label
             className="ml-auto flex cursor-pointer items-center gap-2 text-xs text-slate-400"
             title="Post-processes extreme curvature for display and can hide model error"
