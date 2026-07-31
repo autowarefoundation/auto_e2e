@@ -162,6 +162,7 @@ async function mockConsole(page: Page) {
       return fulfillJSON(route, {
         dataset: "kitscenes",
         version: "v2.1",
+        artifact_source_version: "v2.1",
         shard: "train-000000.tar",
         models: [],
       });
