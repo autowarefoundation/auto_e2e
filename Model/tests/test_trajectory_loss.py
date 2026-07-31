@@ -12,9 +12,12 @@ from model_components.losses import TrajectoryImitationLoss
 from training.dataset_policy import (
     AUTO_E2E_TEMPORAL_DECAY,
     AUTO_E2E_TIMESTEPS,
+    KITSCENES_NAVIGATION_TEMPORAL_DECAY,
     KITSCENES_TRAINING_POLICY,
     L2D_TRAINING_POLICY,
     SUBSET_EXACT_GROUP_STRATEGY,
+    TEMPORAL_WEIGHT_NORMALIZATION_MEAN_ONE,
+    TEMPORAL_WEIGHT_NORMALIZATION_NONE,
     VALIDATION_SCOPE_SUBSET,
     adapt_egomotion_history,
     group_uid_digest,
@@ -50,6 +53,37 @@ class TestTrajectoryImitationLoss:
         decayed_loss = TrajectoryImitationLoss(temporal_decay=0.9)(pred, target)
 
         assert uniform_loss.item() != decayed_loss.item()
+
+    def test_mean_one_temporal_weights_preserve_average_scale(self):
+        loss_fn = TrajectoryImitationLoss(
+            temporal_decay=0.99,
+            temporal_weight_normalization="mean_one",
+        )
+
+        assert loss_fn.temporal_weights.mean().item() == pytest.approx(1.0)
+        assert (
+            loss_fn.temporal_weights[-1] / loss_fn.temporal_weights[0]
+        ).item() == pytest.approx(0.99**63)
+
+    def test_uniform_mean_one_temporal_weights_remain_one(self):
+        loss_fn = TrajectoryImitationLoss(
+            temporal_decay=1.0,
+            temporal_weight_normalization="mean_one",
+        )
+
+        assert torch.equal(
+            loss_fn.temporal_weights,
+            torch.ones(64),
+        )
+
+    def test_invalid_temporal_weight_normalization_raises(self):
+        with pytest.raises(
+            ValueError,
+            match="temporal_weight_normalization",
+        ):
+            TrajectoryImitationLoss(
+                temporal_weight_normalization="sum_one",
+            )
 
     def test_zero_input_produces_zero_loss(self):
         loss_fn = TrajectoryImitationLoss()
@@ -111,7 +145,15 @@ class TestTrajectoryImitationLoss:
 
         assert policy is KITSCENES_TRAINING_POLICY
         assert AUTO_E2E_TIMESTEPS == 64
-        assert policy.temporal_decay == AUTO_E2E_TEMPORAL_DECAY
+        assert (
+            policy.temporal_decay
+            == KITSCENES_NAVIGATION_TEMPORAL_DECAY
+            == 0.99
+        )
+        assert (
+            policy.temporal_weight_normalization
+            == TEMPORAL_WEIGHT_NORMALIZATION_MEAN_ONE
+        )
         assert policy.signal_scales == pytest.approx((0.778, 0.0350))
         assert not hasattr(policy, "observation_steps")
         assert not hasattr(policy, "supervised_steps")
@@ -122,6 +164,10 @@ class TestTrajectoryImitationLoss:
 
         assert policy is L2D_TRAINING_POLICY
         assert policy.temporal_decay == AUTO_E2E_TEMPORAL_DECAY
+        assert (
+            policy.temporal_weight_normalization
+            == TEMPORAL_WEIGHT_NORMALIZATION_NONE
+        )
         assert policy.signal_scales == pytest.approx((0.79, 0.12))
 
     def test_unknown_dataset_cannot_inherit_l2d_policy(self):
@@ -136,6 +182,10 @@ class TestTrajectoryImitationLoss:
 
         assert policy is not KITSCENES_TRAINING_POLICY
         assert policy.temporal_decay == AUTO_E2E_TEMPORAL_DECAY
+        assert (
+            policy.temporal_weight_normalization
+            == TEMPORAL_WEIGHT_NORMALIZATION_NONE
+        )
         assert policy.signal_scales == pytest.approx((0.79, 0.12))
         assert policy.validation_strategy == "hash_buckets"
 
@@ -238,10 +288,10 @@ class TestTrajectoryImitationLoss:
                 source_revision=(
                     "6fde0034446669e2ed7235e4c7fe323cd23d599d"
                 ),
-                packed_dataset_version="v3.0",
+                packed_dataset_version="v3.3",
                 packed_contract_digest=(
-                    "03d2288799b51117606064ff61562de9d"
-                    "a230a557e6b7c2509860f2c0d055863"
+                    "6fb9d857d877e570522a59a38097b0f6"
+                    "b3320d8f702bbd05ec9670faa4be6d96"
                 ),
                 packed_partition_count=533,
                 empty_partition_count=129,
@@ -379,16 +429,16 @@ class TestTrajectoryImitationLoss:
         )
         assert payload["training_sample_count"] == 38847
         assert payload["validation_sample_count"] == 3820
-        assert payload["dataset_version"] == "v3.0"
+        assert payload["dataset_version"] == "v3.3"
         assert payload["packed_contract_digest"] == (
-            "03d2288799b51117606064ff61562de9d"
-            "a230a557e6b7c2509860f2c0d055863"
+            "6fb9d857d877e570522a59a38097b0f6"
+            "b3320d8f702bbd05ec9670faa4be6d96"
         )
         assert payload["sample_inventory_parent"] == {
-            "manifest": "kitscenes_train_dev_v1.json",
+            "manifest": "kitscenes_train_dev_v2.json",
             "sha256": (
-                "7bffc71254db8a168aa9f5c5dc5b5159"
-                "abee8a3d5d71b927235fb2a9a56c1194"
+                "b22d3ee109b7d7e5489339b4fe7a1a57"
+                "d4060524807acd9711005845ad87225f"
             ),
         }
         assert group_uid_digest(selected) == (
