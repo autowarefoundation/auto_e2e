@@ -1046,18 +1046,26 @@ func TestFailedRerunPreservesActiveGeneration(t *testing.T) {
 		fakeStore, client, testPublication("old-shard.tar", 1, 1),
 	)
 	entry := inventory.PromptVersions[0]
-	scenes, _, err := service.SearchScenesByLabelForTeacherAtVersion(
-		context.Background(),
-		"kitscenes",
-		"v2.1",
-		entry.Teacher,
-		entry.PromptVersion,
-		store.FieldCause,
-		"lead_vehicle",
-		10,
-	)
+	scenes, resolvedVersion, artifactSourceVersion, err :=
+		service.SearchScenesByLabelForTeacherAtVersion(
+			context.Background(),
+			"kitscenes",
+			"v2.1",
+			entry.Teacher,
+			entry.PromptVersion,
+			store.FieldCause,
+			"lead_vehicle",
+			10,
+		)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if resolvedVersion != "v2.1" || artifactSourceVersion != "v2.1" {
+		t.Fatalf(
+			"scene versions = (%q, %q), want v2.1",
+			resolvedVersion,
+			artifactSourceVersion,
+		)
 	}
 	if len(scenes) != 1 ||
 		scenes[0].SampleID != "old-sample" ||
@@ -1071,8 +1079,11 @@ func TestFailedRerunPreservesActiveGeneration(t *testing.T) {
 		)
 	}
 	_, listCalls := client.observations()
-	if listCalls != 0 {
-		t.Fatalf("scene search listed shards %d times", listCalls)
+	if listCalls != 1 {
+		t.Fatalf(
+			"scene search version discovery calls = %d, want 1",
+			listCalls,
+		)
 	}
 }
 
@@ -1229,8 +1240,11 @@ func TestGetReasoningLabelUsesDirectLookupWithoutShardScan(t *testing.T) {
 		)
 	}
 	_, listCalls := client.observations()
-	if listCalls != 0 {
-		t.Fatalf("direct label read listed shards %d times", listCalls)
+	if listCalls != 1 {
+		t.Fatalf(
+			"direct label version discovery calls = %d, want 1",
+			listCalls,
+		)
 	}
 	if got := client.objectIfMatches(key); len(got) != 1 ||
 		got[0] != `"test-etag"` {
