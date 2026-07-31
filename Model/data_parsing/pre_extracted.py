@@ -14,6 +14,7 @@ Usage:
         # batch["route_mask"]         (B, 2, 256, 256)     selected route
         # batch["map_valid"]          (B,)                  explicit validity
         # batch["route_valid"]        (B,)                  explicit validity
+        # batch["route_supervision"]  dict of loss-only route fields
         # batch["egomotion_history"]  (B, 256)
         # batch["visual_history"]     (B, 896)
         # batch["trajectory_target"]  (B, 128)
@@ -30,7 +31,7 @@ import re
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Sequence
+from typing import Iterable, Mapping, Sequence
 
 import numpy as np
 import torch
@@ -56,6 +57,252 @@ _CAM_KEY_RE = re.compile(r"^cam_\d+\.jpg$")
 # World-Model window frames: hist_<t>_cam_<v>.jpg / fut_<f>_cam_<v>.jpg (#13).
 _HIST_KEY_RE = re.compile(r"^hist_(\d+)_cam_(\d+)\.jpg$")
 _FUT_KEY_RE = re.compile(r"^fut_(\d+)_cam_(\d+)\.jpg$")
+
+NAVIGATION_REPEAT_POLICY_VERSION = "navigation_repeat_v1"
+_DECISIVE_ROUTE_MANEUVERS = frozenset({
+    "left",
+    "right",
+    "u_turn",
+    "merge",
+    "exit",
+})
+
+
+def _json_mapping(value, *, member_name: str) -> Mapping[str, object]:
+    try:
+        decoded = json.loads(
+            value.decode()
+            if isinstance(value, (bytes, bytearray))
+            else value
+        )
+    except (TypeError, UnicodeError, ValueError) as error:
+        raise ValueError(f"invalid {member_name}") from error
+    if not isinstance(decoded, Mapping):
+        raise ValueError(f"{member_name} must contain a JSON object")
+    return decoded
+
+
+@dataclass(frozen=True)
+class NavigationRepeatPolicy:
+    """Deterministic raw-sample exposure policy for route-choice training."""
+
+    version: str = NAVIGATION_REPEAT_POLICY_VERSION
+    turn_repeat: int = 4
+    junction_repeat: int = 2
+    max_repeat: int = 4
+
+    def __post_init__(self) -> None:
+        if self.version != NAVIGATION_REPEAT_POLICY_VERSION:
+            raise ValueError(
+                f"unsupported navigation repeat policy {self.version!r}"
+            )
+        if not (
+            1 <= self.junction_repeat <= self.max_repeat
+            and 1 <= self.turn_repeat <= self.max_repeat
+        ):
+            raise ValueError(
+                "navigation repeat counts must be between one and max_repeat"
+            )
+
+    def metadata(self) -> dict[str, object]:
+        return {
+            "version": self.version,
+            "turn_repeat": self.turn_repeat,
+            "junction_repeat": self.junction_repeat,
+            "max_repeat": self.max_repeat,
+            "decisive_maneuvers": sorted(_DECISIVE_ROUTE_MANEUVERS),
+        }
+
+    def repeat_count(self, navigation_metadata: Mapping[str, object]) -> int:
+        if not bool(navigation_metadata.get("route_valid", False)):
+            return 1
+        repeat = 1
+        maneuver = str(
+            navigation_metadata.get("route_maneuver", "unknown")
+        ).lower()
+        if maneuver in _DECISIVE_ROUTE_MANEUVERS:
+            repeat = max(repeat, self.turn_repeat)
+        if bool(navigation_metadata.get("route_intersection", False)):
+            repeat = max(repeat, self.junction_repeat)
+        return min(repeat, self.max_repeat)
+
+    def __call__(self, source: Iterable[dict]):
+        """Repeat samples before shuffle and image decoding."""
+        for sample in source:
+            navigation_data = sample.get("navigation_meta.json")
+            metadata = (
+                _json_mapping(
+                    navigation_data,
+                    member_name="navigation_meta.json",
+                )
+                if navigation_data is not None
+                else {}
+            )
+            for _ in range(self.repeat_count(metadata)):
+                yield sample
+
+
+@dataclass(frozen=True)
+class NavigationExposureAudit:
+    """Header-only audit of the effective navigation training distribution."""
+
+    policy: Mapping[str, object]
+    unique_sample_count: int
+    effective_exposure_count: int
+    route_valid_sample_count: int
+    maneuver_unique_counts: Mapping[str, int]
+    maneuver_exposure_counts: Mapping[str, int]
+    junction_unique_counts: Mapping[str, int]
+    junction_exposure_counts: Mapping[str, int]
+    exposure_digest: str
+
+    def metadata(self) -> dict[str, object]:
+        return {
+            "policy": dict(self.policy),
+            "unique_sample_count": self.unique_sample_count,
+            "effective_exposure_count": self.effective_exposure_count,
+            "route_valid_sample_count": self.route_valid_sample_count,
+            "maneuver_unique_counts": dict(self.maneuver_unique_counts),
+            "maneuver_exposure_counts": dict(
+                self.maneuver_exposure_counts
+            ),
+            "junction_unique_counts": dict(self.junction_unique_counts),
+            "junction_exposure_counts": dict(
+                self.junction_exposure_counts
+            ),
+            "exposure_digest": self.exposure_digest,
+        }
+
+
+def discover_navigation_exposure(
+    shard_dirs: Sequence[str | Path],
+    *,
+    policy: NavigationRepeatPolicy,
+    validation_group_uids: Sequence[str] | None = None,
+) -> NavigationExposureAudit:
+    """Audit train exposure from tar JSON members without decoding tensors."""
+    import tarfile
+
+    roots = [Path(shard_dir) for shard_dir in shard_dirs]
+    if not roots:
+        raise ValueError("at least one shard directory is required")
+    validation_groups = frozenset(
+        str(uid) for uid in (validation_group_uids or ())
+    )
+    if validation_group_uids is not None and (
+        not validation_groups
+        or len(validation_groups) != len(validation_group_uids)
+        or any(not uid for uid in validation_groups)
+    ):
+        raise ValueError(
+            "validation_group_uids must contain unique non-empty values"
+        )
+
+    records: dict[str, dict[str, Mapping[str, object]]] = {}
+    for root in roots:
+        tarfiles = sorted(root.glob("*.tar"))
+        if not tarfiles:
+            raise FileNotFoundError(f"No .tar shards found in {root}")
+        for tar_path in tarfiles:
+            with tarfile.open(tar_path, "r:*") as archive:
+                for member in archive:
+                    if not member.isfile():
+                        continue
+                    if member.name.endswith(".navigation_meta.json"):
+                        suffix = ".navigation_meta.json"
+                        record_key = "navigation"
+                    elif member.name.endswith(".meta.json"):
+                        suffix = ".meta.json"
+                        record_key = "sample"
+                    else:
+                        continue
+                    sample_uid = member.name.removesuffix(suffix)
+                    extracted = archive.extractfile(member)
+                    if extracted is None:
+                        raise ValueError(
+                            f"could not read {member.name} from {tar_path}"
+                        )
+                    metadata = _json_mapping(
+                        extracted.read(),
+                        member_name=f"{member.name} in {tar_path}",
+                    )
+                    record = records.setdefault(sample_uid, {})
+                    if record_key in record:
+                        raise ValueError(
+                            f"duplicate {member.name} for {sample_uid!r}"
+                        )
+                    record[record_key] = metadata
+
+    repeat_records: list[tuple[str, int]] = []
+    maneuver_unique: dict[str, int] = {}
+    maneuver_exposure: dict[str, int] = {}
+    junction_unique = {"junction": 0, "non_junction": 0}
+    junction_exposure = {"junction": 0, "non_junction": 0}
+    route_valid_count = 0
+    for sample_uid, record in sorted(records.items()):
+        if set(record) != {"sample", "navigation"}:
+            raise ValueError(
+                f"sample {sample_uid!r} lacks sample or navigation metadata"
+            )
+        sample_metadata = record["sample"]
+        if sample_metadata.get("sample_uid") != sample_uid:
+            raise ValueError(
+                f"sample metadata UID differs for {sample_uid!r}"
+            )
+        group_uid = sample_metadata.get("split_group_uid")
+        if not isinstance(group_uid, str) or not group_uid:
+            raise ValueError(
+                f"sample {sample_uid!r} has no split_group_uid"
+            )
+        if group_uid in validation_groups:
+            continue
+
+        navigation_metadata = record["navigation"]
+        repeat = policy.repeat_count(navigation_metadata)
+        repeat_records.append((sample_uid, repeat))
+        route_valid = bool(
+            navigation_metadata.get("route_valid", False)
+        )
+        route_valid_count += int(route_valid)
+        maneuver = (
+            str(navigation_metadata.get("route_maneuver", "unknown")).lower()
+            if route_valid
+            else "route_invalid"
+        )
+        junction = (
+            "junction"
+            if route_valid
+            and bool(
+                navigation_metadata.get("route_intersection", False)
+            )
+            else "non_junction"
+        )
+        maneuver_unique[maneuver] = maneuver_unique.get(maneuver, 0) + 1
+        maneuver_exposure[maneuver] = (
+            maneuver_exposure.get(maneuver, 0) + repeat
+        )
+        junction_unique[junction] += 1
+        junction_exposure[junction] += repeat
+
+    if not repeat_records:
+        raise ValueError("navigation exposure audit selected no train samples")
+    digest_payload = "".join(
+        f"{sample_uid}\t{repeat}\n"
+        for sample_uid, repeat in repeat_records
+    ).encode("utf-8")
+    return NavigationExposureAudit(
+        policy=policy.metadata(),
+        unique_sample_count=len(repeat_records),
+        effective_exposure_count=sum(
+            repeat for _, repeat in repeat_records
+        ),
+        route_valid_sample_count=route_valid_count,
+        maneuver_unique_counts=dict(sorted(maneuver_unique.items())),
+        maneuver_exposure_counts=dict(sorted(maneuver_exposure.items())),
+        junction_unique_counts=junction_unique,
+        junction_exposure_counts=junction_exposure,
+        exposure_digest=hashlib.sha256(digest_payload).hexdigest(),
+    )
 
 
 def _decode_image(data) -> torch.Tensor:
@@ -103,7 +350,7 @@ def _decode_sample(
     ``window_index.json`` mapping (step,view)→frame_id and the pixels live in a
     sibling ``pool/`` dir. None on shards without a pool (imitation-only / legacy).
     """
-    # Keys: "cam_0.jpg" ... "cam_{V-1}.jpg", schema-v5 navigation
+    # Keys: "cam_0.jpg" ... "cam_{V-1}.jpg", schema-v8 navigation
     # members or a legacy optional "map.jpg", plus numeric/metadata members.
     cam_keys = sorted(
         (k for k in sample if _CAM_KEY_RE.match(k)),
@@ -114,19 +361,33 @@ def _decode_sample(
     navigation_keys = {
         "map_semantic.npz",
         "route_mask.npz",
+        "route_supervision.npz",
         "navigation_meta.json",
     }
     present_navigation = navigation_keys.intersection(sample)
     if present_navigation and present_navigation != navigation_keys:
         raise ValueError(
-            "navigation members must be present as a complete schema-v5 set"
+            "navigation members must be present as a complete schema-v8 set"
         )
     if present_navigation:
-        from navigation.artifacts import decode_sample_navigation
+        from navigation.artifacts import (
+            decode_route_supervision,
+            decode_sample_navigation,
+        )
 
         map_array, route_array, navigation_metadata = (
             decode_sample_navigation(sample)
         )
+        supervision = decode_route_supervision(sample)
+        from navigation.geometry import DEFAULT_NAVIGATION_GEOMETRY
+
+        if (
+            navigation_metadata.get("geometry_id")
+            != DEFAULT_NAVIGATION_GEOMETRY.geometry_id
+        ):
+            raise ValueError(
+                "navigation sample geometry differs from the model contract"
+            )
         map_context = torch.from_numpy(map_array.copy())
         route_mask = torch.from_numpy(
             route_array.astype(np.float32, copy=True)
@@ -139,6 +400,38 @@ def _decode_sample(
             bool(navigation_metadata["route_valid"]),
             dtype=torch.bool,
         )
+        route_supervision = {
+            "distance_to_corridor_m": torch.from_numpy(
+                supervision.distance_to_corridor_m.copy()
+            ),
+            "distance_to_drivable_m": torch.from_numpy(
+                supervision.distance_to_drivable_m.copy()
+            ),
+            "route_heading_sin": torch.from_numpy(
+                supervision.route_heading_sin.copy()
+            ),
+            "route_heading_cos": torch.from_numpy(
+                supervision.route_heading_cos.copy()
+            ),
+            "route_heading_valid": torch.from_numpy(
+                supervision.route_heading_valid.astype(
+                    np.bool_,
+                    copy=True,
+                )
+            ),
+            "destination_xy_m": torch.from_numpy(
+                supervision.destination_xy_m.copy()
+            ),
+            "destination_visible": torch.tensor(
+                supervision.destination_visible,
+                dtype=torch.bool,
+            ),
+            "available": torch.tensor(True, dtype=torch.bool),
+            "drivable_available": torch.tensor(
+                supervision.drivable_available,
+                dtype=torch.bool,
+            ),
+        }
     else:
         # L2D keeps its existing RGB map contract during this KITScenes
         # milestone. NVIDIA and map-less shards receive explicit invalid inputs.
@@ -157,6 +450,39 @@ def _decode_sample(
         )
         route_valid = torch.tensor(False, dtype=torch.bool)
         navigation_metadata = {}
+        shape = map_context.shape[-2:]
+        route_supervision = {
+            "distance_to_corridor_m": torch.zeros(
+                shape,
+                dtype=torch.float32,
+            ),
+            "distance_to_drivable_m": torch.zeros(
+                shape,
+                dtype=torch.float32,
+            ),
+            "route_heading_sin": torch.zeros(
+                shape,
+                dtype=torch.float32,
+            ),
+            "route_heading_cos": torch.zeros(
+                shape,
+                dtype=torch.float32,
+            ),
+            "route_heading_valid": torch.zeros(
+                shape,
+                dtype=torch.bool,
+            ),
+            "destination_xy_m": torch.zeros(2, dtype=torch.float32),
+            "destination_visible": torch.tensor(
+                False,
+                dtype=torch.bool,
+            ),
+            "available": torch.tensor(False, dtype=torch.bool),
+            "drivable_available": torch.tensor(
+                False,
+                dtype=torch.bool,
+            ),
+        }
 
     # Ego: raw bytes → numpy → split into history and future
     ego_bytes = sample.get("ego.npy", b"")
@@ -169,16 +495,29 @@ def _decode_sample(
     history_size = _HISTORY_STEPS * _HISTORY_SIGNALS
     ego_history = torch.from_numpy(ego[:history_size])
     ego_future = torch.from_numpy(ego[history_size:])
+    sample_metadata = (
+        _json_mapping(sample["meta.json"], member_name="meta.json")
+        if "meta.json" in sample
+        else {}
+    )
+    raw_split_group_uid = sample_metadata.get("split_group_uid", "")
+    split_group_uid = (
+        raw_split_group_uid
+        if isinstance(raw_split_group_uid, str)
+        else ""
+    )
 
     out = {
         # Overlay inference derives noise from this stable identity. Keep it in
         # every batch so predictions do not depend on batch position or size.
         "sample_uid": sample.get("__key__", ""),
+        "split_group_uid": split_group_uid,
         "visual_tiles": torch.stack(frames),
         "map_context": map_context,
         "route_mask": route_mask,
         "map_valid": map_valid,
         "route_valid": route_valid,
+        "route_supervision": route_supervision,
         "navigation_metadata": navigation_metadata,
         "egomotion_history": ego_history,
         "visual_history": torch.zeros(_VISUAL_HISTORY_DIM),
@@ -698,6 +1037,7 @@ def make_pre_extracted_loader(
     sample_uids: Sequence[str] | None = None,
     validation_group_uids: Sequence[str] | None = None,
     decode_future_frames: bool = True,
+    navigation_repeat_policy: NavigationRepeatPolicy | None = None,
 ) -> wds.WebLoader:
     """Create a WebDataset DataLoader reading from local EBS shard cache.
 
@@ -731,6 +1071,8 @@ def make_pre_extracted_loader(
         decode_future_frames: decode World-Model target images. Benchmark
             inference disables this so future camera frames cannot enter its
             input batch; training keeps the default because JEPA needs them.
+        navigation_repeat_policy: optional raw-sample repeat transform. Training
+            applies it after split filtering and before shuffle/decode.
 
     The returned loader carries two extra attributes describing the dataset's
     geometry (a rig constant, so it lives on the loader, not per batch):
@@ -785,6 +1127,12 @@ def make_pre_extracted_loader(
         val_fraction > 0.0 or validation_group_uids is not None
     ):
         dataset = dataset.select(keep)
+    if navigation_repeat_policy is not None:
+        if split != "train":
+            raise ValueError(
+                "navigation repeat policy is valid only for the train split"
+            )
+        dataset = dataset.compose(navigation_repeat_policy)
     if shuffle > 0:
         dataset = dataset.shuffle(shuffle, seed=shuffle_seed)
     # Frame-pool accessor for deduped WM windows (#121 §3.4d): a sibling pool/ dir
@@ -965,6 +1313,7 @@ def make_multi_dataset_loader(
     sample_uids: Sequence[str] | None = None,
     validation_group_uids: Sequence[str] | None = None,
     decode_future_frames: bool = True,
+    navigation_repeat_policy: NavigationRepeatPolicy | None = None,
 ) -> MergedDatasetLoader:
     """Build a :class:`MergedDatasetLoader` over several shard directories.
 
@@ -1011,6 +1360,7 @@ def make_multi_dataset_loader(
             sample_uids=sample_uids,
             validation_group_uids=validation_group_uids,
             decode_future_frames=decode_future_frames,
+            navigation_repeat_policy=navigation_repeat_policy,
         )
         for index, d in enumerate(shard_dirs)
     ]
