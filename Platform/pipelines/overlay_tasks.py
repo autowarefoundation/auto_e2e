@@ -759,6 +759,7 @@ def _validate_selected_checkpoint_payload(
     data_fingerprint: str,
     validation_ade: float,
     validation_fde: float,
+    validation_metric_contract: Mapping[str, Any],
 ) -> None:
     import math
 
@@ -796,6 +797,12 @@ def _validate_selected_checkpoint_payload(
         )
 
     latest = history[-1]
+    if latest.get("validation_metric_contract") != dict(
+        validation_metric_contract
+    ):
+        raise ValueError(
+            "checkpoint validation metric contract differs from selection"
+        )
     for key, expected in (
         ("val_ade", validation_ade),
         ("val_fde", validation_fde),
@@ -827,6 +834,7 @@ def _register_selected_checkpoint_version(
     data_fingerprint: str,
     validation_ade: float,
     validation_fde: float,
+    validation_metric_contract: Mapping[str, Any],
 ) -> str:
     """Create or reuse one registry coordinate for an operator selection."""
     try:
@@ -848,6 +856,23 @@ def _register_selected_checkpoint_version(
         "data_fingerprint": data_fingerprint,
         "validation_ade": str(validation_ade),
         "validation_fde": str(validation_fde),
+        "validation_ade_3s_m": str(validation_ade),
+        "validation_fde_3s_m": str(validation_fde),
+        "validation_metric_version": str(
+            validation_metric_contract["version"]
+        ),
+        "validation_metric_horizon_seconds": str(
+            validation_metric_contract["horizon_seconds"]
+        ),
+        "validation_metric_horizon_steps": str(
+            validation_metric_contract["horizon_steps"]
+        ),
+        "validation_metric_target_source": str(
+            validation_metric_contract["target_source"]
+        ),
+        "validation_metric_aggregation": str(
+            validation_metric_contract["aggregation"]
+        ),
     }
     matching = []
     for version in client.search_model_versions(
@@ -1057,6 +1082,26 @@ def register_selected_overlay_checkpoint(
     )
     if not isinstance(payload, Mapping):
         raise ValueError("checkpoint payload is not a mapping")
+    history = payload.get("training_state", {}).get("metric_history", [])
+    validation_metric_contract = (
+        history[-1].get("validation_metric_contract")
+        if history and isinstance(history[-1], Mapping)
+        else None
+    )
+    expected_metric_contract = {
+        "horizon_seconds": 3.0,
+        "horizon_steps": 30,
+        "target_source": "logged_xy",
+        "aggregation": "scene_balanced",
+    }
+    if not isinstance(validation_metric_contract, Mapping) or any(
+        validation_metric_contract.get(key) != value
+        for key, value in expected_metric_contract.items()
+    ):
+        raise ValueError(
+            "selected checkpoint does not use canonical 3-second "
+            "scene-balanced logged-XY metrics"
+        )
     _validate_selected_checkpoint_payload(
         payload,
         checkpoint_schema=CHECKPOINT_SCHEMA_VERSION,
@@ -1066,6 +1111,7 @@ def register_selected_overlay_checkpoint(
         data_fingerprint=data_fingerprint,
         validation_ade=validation_ade,
         validation_fde=validation_fde,
+        validation_metric_contract=validation_metric_contract,
     )
     del payload
 
@@ -1083,6 +1129,7 @@ def register_selected_overlay_checkpoint(
         data_fingerprint=data_fingerprint,
         validation_ade=validation_ade,
         validation_fde=validation_fde,
+        validation_metric_contract=validation_metric_contract,
     )
 
 
@@ -1156,6 +1203,12 @@ def _resolve_model_version_for_execution(
     ]
     if selected:
         matches = selected
+    else:
+        composite_best = [
+            match for match in matches if "best" in match[3]
+        ]
+        if composite_best:
+            matches = composite_best
     if not matches:
         raise ValueError(
             f"no {registered_model_name!r} model was produced by "
@@ -1280,10 +1333,24 @@ def resolve_overlay_model(
         "checkpoint_sha256": checkpoint_sha256,
         "model_name": params.get("model/backbone", registered_model_name),
         "eval_ade": version_tags.get(
-            "validation_ade", metrics.get("eval/ade")
+            "validation_ade_3s_m",
+            version_tags.get("validation_ade", metrics.get("eval/ade")),
         ),
         "eval_fde": version_tags.get(
-            "validation_fde", metrics.get("eval/fde")
+            "validation_fde_3s_m",
+            version_tags.get("validation_fde", metrics.get("eval/fde")),
+        ),
+        "validation_metric_version": version_tags.get(
+            "validation_metric_version"
+        ),
+        "validation_metric_horizon_seconds": version_tags.get(
+            "validation_metric_horizon_seconds"
+        ),
+        "validation_metric_target_source": version_tags.get(
+            "validation_metric_target_source"
+        ),
+        "validation_metric_aggregation": version_tags.get(
+            "validation_metric_aggregation"
         ),
         "eval_gate_pass": metrics.get("eval/gate_pass"),
         "dataset_source": source_dataset,
