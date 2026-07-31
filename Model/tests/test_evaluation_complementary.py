@@ -125,7 +125,25 @@ def test_baseline_scored_by_existing_metrics_runs():
     a, k = constant_velocity_baseline(B, T)
     gt_a, gt_k = np.full((B, T), 0.3), np.zeros((B, T))
     m = compute_open_loop_metrics(a, k, gt_a, gt_k, np.full(B, 6.0))
-    assert m["ADE@6.4s"] > 0.0  # const-vel diverges from an accelerating gt
+    assert m["ADE@3s"] > 0.0  # const-vel diverges from an accelerating gt
+    assert m["FDE@3s"] > m["ADE@3s"]
+
+
+def test_open_loop_metrics_ignore_errors_after_three_seconds():
+    pred_a, pred_k = _zeros()
+    gt_a, gt_k = _zeros()
+    pred_a[:, 30:] = 5.0
+
+    metrics = compute_open_loop_metrics(
+        pred_a,
+        pred_k,
+        gt_a,
+        gt_k,
+        np.full(B, 6.0),
+    )
+
+    assert metrics["ADE@3s"] == 0.0
+    assert metrics["FDE@3s"] == 0.0
 
 
 # ---- splits (#66 §4) -------------------------------------------------------
