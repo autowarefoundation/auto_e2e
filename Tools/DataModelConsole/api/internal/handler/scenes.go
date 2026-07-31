@@ -78,16 +78,17 @@ func (h *ScenesHandler) Search(w http.ResponseWriter, r *http.Request) {
 
 	// Fetch one extra row so we can report truncation truthfully instead of
 	// silently capping at `limit`.
-	scenes, resolvedVersion, err := h.s3.SearchScenesByLabelForTeacherAtVersion(
-		r.Context(),
-		dataset,
-		version,
-		teacher,
-		promptVersion,
-		field,
-		value,
-		limit+1,
-	)
+	scenes, resolvedVersion, artifactSourceVersion, err :=
+		h.s3.SearchScenesByLabelForTeacherAtVersion(
+			r.Context(),
+			dataset,
+			version,
+			teacher,
+			promptVersion,
+			field,
+			value,
+			limit+1,
+		)
 	if err != nil {
 		if writeReasoningAvailabilityError(w, err) {
 			return
@@ -117,15 +118,16 @@ func (h *ScenesHandler) Search(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, http.StatusOK, model.SceneSearchResponse{
-		Dataset:       dataset,
-		Teacher:       teacher,
-		PromptVersion: promptVersion,
-		Version:       resolvedVersion,
-		Field:         field,
-		Value:         value,
-		Scenes:        scenes,
-		Total:         len(scenes),
-		Available:     available,
-		Truncated:     truncated,
+		Dataset:               dataset,
+		Teacher:               teacher,
+		PromptVersion:         promptVersion,
+		Version:               resolvedVersion,
+		ArtifactSourceVersion: artifactSourceVersion,
+		Field:                 field,
+		Value:                 value,
+		Scenes:                scenes,
+		Total:                 len(scenes),
+		Available:             available,
+		Truncated:             truncated,
 	})
 }
