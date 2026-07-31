@@ -1207,7 +1207,7 @@ Frozen-frame detection compares temporal image fingerprints and timestamps. A
 stationary scene alone must not be mislabeled frozen; motion cues from other
 cameras, ego motion, and encoding metadata are used in fusion.
 
-`odd_image_qc_policy_v3` applies these status rules:
+`odd_image_qc_policy_v4` applies these status rules:
 
 1. Build expected camera-frame inventory from the canonical scene clock and
    dataset camera capability manifest only when the adapter declares
@@ -1216,10 +1216,13 @@ cameras, ego motion, and encoding metadata are used in fusion.
 2. A declared absent camera is `status=unavailable` for the scene. A missing
    expected frame in an authoritative capture timeline is `dropped_frame`;
    adjacent missing frames are coalesced without hiding their count. When the
-   opened artifact exposes only sampled model-input windows, as the initial
-   KITScenes published snapshot does, unsampled intervals are
-   `status=unavailable` with `frame_inventory_mode=sampled_evidence`. They
-   never become `dropped_frame` and never create VLM trigger anchors.
+   artifact exposes only sampled model-input windows, as KITScenes does, the
+   published synchronized sample timestamps form the expected inventory.
+   Capture timestamps between those anchors are outside the artifact contract
+   and produce no observation. A declared camera missing at a published sample
+   anchor is `status=unavailable` with
+   `frame_inventory_mode=sampled_evidence`; it never becomes `dropped_frame`
+   and never creates a VLM trigger anchor.
 3. An object with invalid size or an undecodable image is
    `corrupted_frame`. The scene task continues and records the failure instead
    of discarding every other camera observation.
@@ -1787,16 +1790,21 @@ is limited to the following cases:
 2. For a valid multi-select observation, remove its ontology-defined neutral
    value (`none` or `normal`) only when one or more other returned values are
    present and every returned value belongs to the allowed candidate set.
+3. Remove unsupported entries from `supporting_timestamps_ns` only when the
+   response also cites at least one exact timestamp of an input frame. This
+   handles providers that append the requested half-open interval boundary to
+   otherwise valid frame citations. The client never snaps, substitutes, or
+   invents a timestamp, and an unsupported-only citation remains invalid.
 
-Unknown values, missing or extra keys, malformed JSON, unsupported timestamps,
-unknown cameras, a wrong camera-scoped identity, missing evidence citations,
-and every other schema violation remain invalid. The raw provider response and
-its digest are never changed. Each applied repair records its version, label
-key, repair kind, and exact before/after values in both the provider exchange
-artifact and the resulting observation provenance. The provider report
-aggregates repair counts by backend, kind, and label key so that a high repair
-rate remains visible as a provider-quality issue rather than being hidden by a
-successful validation result.
+Unknown values, missing or extra keys, malformed JSON, unsupported-only
+timestamps, unknown cameras, a wrong camera-scoped identity, missing evidence
+citations, and every other schema violation remain invalid. The raw provider
+response and its digest are never changed. Each applied repair records its
+version, label key, repair kind, and exact before/after values in both the
+provider exchange artifact and the resulting observation provenance. The
+provider report aggregates repair counts by backend, kind, and label key so
+that a high repair rate remains visible as a provider-quality issue rather
+than being hidden by a successful validation result.
 
 Requests follow the task-specific camera policy in Section 12.4. Static
 surround questions may use several cameras at one timestamp; temporal Event
@@ -1965,10 +1973,13 @@ that are absent in the original KITScenes map.
 
 The published KITScenes camera artifact is a sampled model-input window, not an
 authoritative capture timeline. Image QC therefore evaluates decoded sampled
-frames and never calls unsampled time a dropped frame. The current Full
-LabelSet audit found 85,428 Image QC evidence rows: 81,761 valid, 2,855
-ambiguous, 812 not observable, and 0 unavailable. The separately observed
-3,400 unavailable rows came from exhausted VLM retries, not Image QC.
+frames and emits no evidence for unpublished capture intervals. It reports
+`unavailable` only when a declared synchronized camera is missing at a
+published sample anchor. A KITScenes v3.1 real-scene regression initially
+produced 378 false `unavailable` rows by comparing sampled cameras with the
+10 Hz pose timeline. Policy v4 corrects the inventory boundary; the same scene
+now produces 363 valid, 14 ambiguous, one not-observable, zero unavailable,
+and zero decode failures.
 
 ## 16. Flyte Workflow
 
@@ -2933,7 +2944,8 @@ observable coverage and another has 30%.
   and excluded outputs.
 - Bounded protocol-repair tests prove raw responses remain immutable, repaired
   values remain ontology-valid, repair provenance is complete, and unsupported
-  cameras/timestamps/values are still rejected.
+  cameras, unsupported-only timestamps, and unsupported values are still
+  rejected.
 - Bedrock map-resolver fixtures for only the three-arm T/Y boundary; prove
   Route action and all other junction classes never generate a request.
 - Post-Bedrock geometry validation rejects unsupported value/primitive pairs.
