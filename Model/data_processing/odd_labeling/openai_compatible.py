@@ -40,6 +40,8 @@ class RoadVLMTaskBundle:
     camera_keys: tuple[str, ...] = ()
     temporal_mode: str = "static"
     scene_camera_roles: tuple[str, ...] | None = None
+    camera_roles: tuple[str, ...] | None = None
+    trigger_only: bool = False
 
     def __post_init__(self) -> None:
         if not self.name or not self.scene_keys + self.camera_keys:
@@ -55,6 +57,13 @@ class RoadVLMTaskBundle:
             )
         ):
             raise ValueError("scene camera roles must be unique and non-empty")
+        if self.camera_roles is not None and (
+            not self.camera_roles
+            or len(self.camera_roles) != len(set(self.camera_roles))
+        ):
+            raise ValueError("camera roles must be unique and non-empty")
+        if self.camera_roles is not None and not self.camera_keys:
+            raise ValueError("camera roles require camera-scoped keys")
         keys = self.scene_keys + self.camera_keys
         if len(keys) != len(set(keys)):
             raise ValueError(f"duplicate key in road VLM task bundle: {self.name}")
@@ -67,7 +76,7 @@ class RoadVLMTaskBundle:
 
 ROAD_VLM_TASK_BUNDLES = (
     RoadVLMTaskBundle(
-        name="road_appearance",
+        name="road_environment",
         scene_keys=(
             "odd.road.context",
             "odd.road.lane_marking_quality",
@@ -76,12 +85,6 @@ ROAD_VLM_TASK_BUNDLES = (
             "odd.road.edge_type_present",
             "odd.road.special_structure",
             "odd.road.workzone_state",
-        ),
-        scene_camera_roles=("front_left", "front_center", "front_right"),
-    ),
-    RoadVLMTaskBundle(
-        name="environment",
-        scene_keys=(
             "odd.environment.day_phase",
             "odd.environment.sky",
             "odd.environment.precipitation_visual",
@@ -92,28 +95,25 @@ ROAD_VLM_TASK_BUNDLES = (
         scene_camera_roles=("front_center",),
     ),
     RoadVLMTaskBundle(
-        name="traffic_control",
+        name="traffic_dynamic",
         scene_keys=(
             "odd.road.junction_control",
             "odd.traffic_control.present",
             "odd.traffic_light.state",
-        ),
-        scene_camera_roles=("front_left", "front_center", "front_right"),
-    ),
-    RoadVLMTaskBundle(
-        name="dynamic_agents",
-        scene_keys=(
             "odd.dynamic.traffic_density",
             "odd.dynamic.vru_density",
             "odd.dynamic.parked_vehicle_density",
             "odd.dynamic.oncoming_traffic",
             "odd.dynamic.agent_type_present",
             "perception.mixed_traffic",
+            "perception.map_element_condition",
+            "perception.scene.complexity",
+            "perception.temporary_traffic_control",
         ),
-        temporal_mode="static",
+        scene_camera_roles=("front_center",),
     ),
     RoadVLMTaskBundle(
-        name="interaction",
+        name="temporal_event",
         scene_keys=(
             "event.vehicle.interaction",
             "event.vru.interaction",
@@ -126,14 +126,10 @@ ROAD_VLM_TASK_BUNDLES = (
         ),
         temporal_mode="event",
         scene_camera_roles=("front_center",),
+        trigger_only=True,
     ),
     RoadVLMTaskBundle(
-        name="perception_condition",
-        scene_keys=(
-            "perception.map_element_condition",
-            "perception.scene.complexity",
-            "perception.temporary_traffic_control",
-        ),
+        name="forward_perception",
         camera_keys=(
             "perception.occlusion.source",
             "perception.occlusion.level",
@@ -147,7 +143,7 @@ ROAD_VLM_TASK_BUNDLES = (
             "perception.image.lens_contamination",
         ),
         temporal_mode="short",
-        scene_camera_roles=("front_left", "front_center", "front_right"),
+        camera_roles=("front_center",),
     ),
 )
 
@@ -599,6 +595,12 @@ def road_vlm_prompt_bundle_document(
                         if bundle.scene_camera_roles is not None
                         else ["all_available"]
                     ),
+                    "camera_roles": (
+                        list(bundle.camera_roles)
+                        if bundle.camera_roles is not None
+                        else ["all_available"]
+                    ),
+                    "trigger_only": bundle.trigger_only,
                     "keys": list(keys),
                     "prompt_sha256": _prompt_bundle_sha256(
                         bundle.name,
@@ -1447,12 +1449,32 @@ def derive_visual_trigger_timestamps(
     return tuple(sorted(triggers))
 
 
+def _trigger_anchor_indexes(
+    anchors: tuple[CameraAnchor, ...],
+    trigger_timestamps_ns: Iterable[int],
+) -> frozenset[int]:
+    if not anchors:
+        return frozenset()
+    timestamps = tuple(anchor.timestamp_ns for anchor in anchors)
+    return frozenset(
+        min(
+            range(len(timestamps)),
+            key=lambda index: (
+                abs(timestamps[index] - int(trigger_timestamp_ns)),
+                timestamps[index],
+            ),
+        )
+        for trigger_timestamp_ns in set(trigger_timestamps_ns)
+    )
+
+
 def label_visual_scene(
     observer: OpenAICompatibleRoadObserver,
     *,
     scene_uid: str,
     scene_end_timestamp_ns: int,
     anchors: tuple[CameraAnchor, ...],
+    event_trigger_timestamps_ns: tuple[int, ...] = (),
     refinement_confidence_threshold: float = (
         DEFAULT_REFINEMENT_CONFIDENCE_THRESHOLD
     ),
@@ -1466,6 +1488,10 @@ def label_visual_scene(
     ):
         raise ValueError("road VLM anchors must be strictly ordered")
     sampling_parameters = dict(sampling_parameters or {})
+    trigger_anchor_indexes = _trigger_anchor_indexes(
+        anchors,
+        event_trigger_timestamps_ns,
+    )
 
     observations: list[LabelObservation] = []
     for index, anchor in enumerate(anchors):
@@ -1477,6 +1503,8 @@ def label_visual_scene(
         if end_timestamp_ns <= anchor.timestamp_ns:
             continue
         for bundle in ROAD_VLM_TASK_BUNDLES:
+            if bundle.trigger_only and index not in trigger_anchor_indexes:
+                continue
             primary_indexes = _anchor_indexes(
                 len(anchors),
                 index,
@@ -1531,7 +1559,14 @@ def label_visual_scene(
 
             if bundle.camera_keys:
                 camera_ids = tuple(
-                    frame.camera_role for frame in anchor.frames
+                    dict.fromkeys(
+                        frame.camera_role
+                        for frame in anchor.frames
+                        if (
+                            bundle.camera_roles is None
+                            or frame.camera_role in bundle.camera_roles
+                        )
+                    )
                 )
                 for camera_id in camera_ids:
                     primary_frames = _frames_for_indexes(
