@@ -35,6 +35,7 @@ from navigation.lanelet2_adapter import Lanelet2MapAdapter
 from navigation.lanelet2_matcher import Lanelet2TraceMatcher
 from navigation.native.build import build as build_native
 from navigation.rasterizer import EgoPose, NativeNavigationRasterizer
+from navigation.supervision import empty_route_supervision
 
 
 class _Point:
@@ -480,8 +481,15 @@ def test_artifacts_are_deterministic_and_lossless(native_library):
     second = encode_array(raster.map_context)
     assert first == second
     np.testing.assert_array_equal(decode_array(first), raster.map_context)
-    first_members = encode_sample_navigation(raster)
-    second_members = encode_sample_navigation(raster)
+    supervision = empty_route_supervision(rasterizer.geometry)
+    first_members = encode_sample_navigation(
+        raster,
+        route_supervision=supervision,
+    )
+    second_members = encode_sample_navigation(
+        raster,
+        route_supervision=supervision,
+    )
     assert first_members == second_members
     scene = encode_scene_navigation(navigation_map, route)
     decoded_map, decoded_route = decode_scene_navigation(scene)
