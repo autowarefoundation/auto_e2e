@@ -163,28 +163,30 @@ type oddSceneIndex struct {
 }
 
 type ODDSearchResponse struct {
-	Dataset        string            `json:"dataset"`
-	Version        string            `json:"version"`
-	LabelSetID     string            `json:"labelset_id"`
-	Scenes         []ODDSceneSummary `json:"scenes"`
-	Total          int               `json:"total"`
-	Limit          int               `json:"limit"`
-	Offset         int               `json:"offset"`
-	More           bool              `json:"more"`
-	ManifestSHA256 string            `json:"manifest_sha256"`
+	Dataset               string            `json:"dataset"`
+	Version               string            `json:"version"`
+	ArtifactSourceVersion string            `json:"artifact_source_version"`
+	LabelSetID            string            `json:"labelset_id"`
+	Scenes                []ODDSceneSummary `json:"scenes"`
+	Total                 int               `json:"total"`
+	Limit                 int               `json:"limit"`
+	Offset                int               `json:"offset"`
+	More                  bool              `json:"more"`
+	ManifestSHA256        string            `json:"manifest_sha256"`
 }
 
 type ODDEvidenceResponse struct {
-	Dataset             string            `json:"dataset"`
-	Version             string            `json:"version"`
-	LabelSetID          string            `json:"labelset_id"`
-	SceneUID            string            `json:"scene_uid"`
-	Observation         json.RawMessage   `json:"observation"`
-	SupportingEvidence  []json.RawMessage `json:"supporting_evidence"`
-	ConflictingEvidence []json.RawMessage `json:"conflicting_evidence"`
-	RelatedEvents       []json.RawMessage `json:"related_events"`
-	SceneProvenance     json.RawMessage   `json:"scene_provenance"`
-	ManifestSHA256      string            `json:"manifest_sha256"`
+	Dataset               string            `json:"dataset"`
+	Version               string            `json:"version"`
+	ArtifactSourceVersion string            `json:"artifact_source_version"`
+	LabelSetID            string            `json:"labelset_id"`
+	SceneUID              string            `json:"scene_uid"`
+	Observation           json.RawMessage   `json:"observation"`
+	SupportingEvidence    []json.RawMessage `json:"supporting_evidence"`
+	ConflictingEvidence   []json.RawMessage `json:"conflicting_evidence"`
+	RelatedEvents         []json.RawMessage `json:"related_events"`
+	SceneProvenance       json.RawMessage   `json:"scene_provenance"`
+	ManifestSHA256        string            `json:"manifest_sha256"`
 }
 
 type ODDSearchPredicate struct {
@@ -216,6 +218,7 @@ type ODDStructuredSearchRequest struct {
 type ODDMetricProjectionResponse struct {
 	Dataset                string            `json:"dataset"`
 	Version                string            `json:"version"`
+	ArtifactSourceVersion  string            `json:"artifact_source_version"`
 	LabelSetID             string            `json:"labelset_id"`
 	LabelSetManifestSHA256 string            `json:"labelset_manifest_sha256"`
 	Projections            []json.RawMessage `json:"projections"`
@@ -380,6 +383,47 @@ func (s *S3Service) oddObject(
 }
 
 func (s *S3Service) loadODDManifest(
+	ctx context.Context,
+	dataset string,
+	version string,
+) (ODDManifest, string, error) {
+	targetVersion, candidates, err := s.compatibleArtifactVersions(
+		ctx, dataset, version,
+	)
+	if err != nil {
+		return ODDManifest{}, "", err
+	}
+	targetPublication, err := s.loadPublicationManifest(
+		ctx, dataset, targetVersion,
+	)
+	if err != nil {
+		return ODDManifest{}, "", err
+	}
+	for _, candidate := range candidates {
+		manifest, digest, err := s.loadODDManifestAtVersion(
+			ctx, dataset, candidate,
+		)
+		if err != nil {
+			if errors.Is(err, ErrODDNotStarted) ||
+				errors.Is(err, ErrODDUnavailable) {
+				continue
+			}
+			return ODDManifest{}, "", err
+		}
+		if manifest.SceneCount != targetPublication.ShardCount {
+			continue
+		}
+		return manifest, digest, nil
+	}
+	return ODDManifest{}, "", fmt.Errorf(
+		"%w: no compatible LabelSet for %s/%s",
+		ErrODDNotStarted,
+		dataset,
+		targetVersion,
+	)
+}
+
+func (s *S3Service) loadODDManifestAtVersion(
 	ctx context.Context,
 	dataset string,
 	version string,
@@ -635,7 +679,7 @@ func (s *S3Service) ODDMetricProjections(
 	pointers, err := projectionStore.ListReadyODDMetricProjections(
 		ctx,
 		dataset,
-		version,
+		labelSetManifest.DatasetVersion,
 		labelSetManifest.LabelSetID,
 	)
 	if err != nil {
@@ -644,6 +688,7 @@ func (s *S3Service) ODDMetricProjections(
 	response = ODDMetricProjectionResponse{
 		Dataset:                dataset,
 		Version:                version,
+		ArtifactSourceVersion:  labelSetManifest.DatasetVersion,
 		LabelSetID:             labelSetManifest.LabelSetID,
 		LabelSetManifestSHA256: labelSetManifestSHA256,
 		Projections:            make([]json.RawMessage, 0, len(pointers)),
@@ -653,7 +698,7 @@ func (s *S3Service) ODDMetricProjections(
 			"odd_metric_projections/schema=v1/dataset=%s/version=%s/"+
 				"labelset=%s/model=%s/projection=%s",
 			dataset,
-			version,
+			labelSetManifest.DatasetVersion,
 			labelSetManifest.LabelSetID,
 			pointer.ModelArtifactID,
 			pointer.ProjectionID,
@@ -727,7 +772,7 @@ func (s *S3Service) ODDMetricProjections(
 			labelSetManifest,
 			labelSetManifestSHA256,
 			dataset,
-			version,
+			labelSetManifest.DatasetVersion,
 		); err != nil {
 			return ODDMetricProjectionResponse{},
 				labelSetManifest,
@@ -778,6 +823,7 @@ func (s *S3Service) ODDOntology(
 		statisticsBody,
 		dataset,
 		version,
+		manifest.DatasetVersion,
 		manifest.LabelSetID,
 	)
 	if err != nil {
@@ -809,6 +855,7 @@ func enrichODDOntology(
 	statisticsBody []byte,
 	dataset string,
 	version string,
+	artifactSourceVersion string,
 	labelSetID string,
 ) ([]byte, error) {
 	var ontology map[string]any
@@ -899,6 +946,7 @@ func enrichODDOntology(
 	}
 	ontology["dataset_name"] = dataset
 	ontology["dataset_version"] = version
+	ontology["artifact_source_version"] = artifactSourceVersion
 	ontology["labelset_id"] = labelSetID
 	enriched, err := json.Marshal(ontology)
 	if err != nil {
@@ -916,7 +964,27 @@ func (s *S3Service) ODDStatistics(
 	body, manifest, digest, err := s.oddArtifact(
 		ctx, dataset, version, "statistics",
 	)
-	return json.RawMessage(body), manifest, digest, err
+	if err != nil {
+		return nil, manifest, digest, err
+	}
+	var statistics map[string]any
+	if err := json.Unmarshal(body, &statistics); err != nil {
+		return nil, manifest, digest, fmt.Errorf(
+			"decode ODD statistics: %w",
+			err,
+		)
+	}
+	statistics["dataset_name"] = dataset
+	statistics["dataset_version"] = version
+	statistics["artifact_source_version"] = manifest.DatasetVersion
+	enriched, err := json.Marshal(statistics)
+	if err != nil {
+		return nil, manifest, digest, fmt.Errorf(
+			"encode ODD statistics: %w",
+			err,
+		)
+	}
+	return json.RawMessage(enriched), manifest, digest, nil
 }
 
 func (s *S3Service) oddScenes(
@@ -946,7 +1014,7 @@ func (s *S3Service) oddScenes(
 	}
 	root := fmt.Sprintf(
 		"%s/%s/odd/labelsets/%s/scenes/",
-		dataset, version, manifest.LabelSetID,
+		dataset, manifest.DatasetVersion, manifest.LabelSetID,
 	)
 	seen := make(map[string]struct{}, len(index.Scenes))
 	for _, scene := range index.Scenes {
@@ -1232,15 +1300,16 @@ func (s *S3Service) SearchODDScenesStructured(
 	offset := min(request.Offset, total)
 	end := min(total, offset+request.Limit)
 	return ODDSearchResponse{
-		Dataset:        dataset,
-		Version:        version,
-		LabelSetID:     manifest.LabelSetID,
-		Scenes:         matches[offset:end],
-		Total:          total,
-		Limit:          request.Limit,
-		Offset:         offset,
-		More:           end < total,
-		ManifestSHA256: manifestSHA,
+		Dataset:               dataset,
+		Version:               version,
+		ArtifactSourceVersion: manifest.DatasetVersion,
+		LabelSetID:            manifest.LabelSetID,
+		Scenes:                matches[offset:end],
+		Total:                 total,
+		Limit:                 request.Limit,
+		Offset:                offset,
+		More:                  end < total,
+		ManifestSHA256:        manifestSHA,
 	}, nil
 }
 
@@ -1314,7 +1383,7 @@ func (s *S3Service) ODDScene(
 		if err := json.Unmarshal(body, &identity); err != nil ||
 			identity.SceneUID != sceneUID ||
 			identity.DatasetName != dataset ||
-			identity.DatasetVersion != version {
+			identity.DatasetVersion != manifest.DatasetVersion {
 			return nil, manifest, digest, fmt.Errorf(
 				"ODD scene record differs from index coordinate",
 			)
@@ -1448,16 +1517,17 @@ func (s *S3Service) ODDEvidence(
 		provenance = json.RawMessage(`{}`)
 	}
 	response := ODDEvidenceResponse{
-		Dataset:             dataset,
-		Version:             version,
-		LabelSetID:          manifest.LabelSetID,
-		SceneUID:            record.SceneUID,
-		Observation:         selected,
-		SupportingEvidence:  supporting,
-		ConflictingEvidence: conflicting,
-		RelatedEvents:       events,
-		SceneProvenance:     provenance,
-		ManifestSHA256:      digest,
+		Dataset:               dataset,
+		Version:               version,
+		ArtifactSourceVersion: manifest.DatasetVersion,
+		LabelSetID:            manifest.LabelSetID,
+		SceneUID:              record.SceneUID,
+		Observation:           selected,
+		SupportingEvidence:    supporting,
+		ConflictingEvidence:   conflicting,
+		RelatedEvents:         events,
+		SceneProvenance:       provenance,
+		ManifestSHA256:        digest,
 	}
 	return response, manifest, digest, nil
 }
