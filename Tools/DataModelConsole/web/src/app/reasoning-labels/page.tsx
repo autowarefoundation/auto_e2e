@@ -432,9 +432,9 @@ function ReasoningLabelsInner() {
   const promptVersionsApi = useApi(
     async () => ({
       version,
-      prompts: version
+      response: version
         ? await getReasoningPromptVersions(dataset, version)
-        : [],
+        : null,
     }),
     [dataset, version],
   );
@@ -444,12 +444,16 @@ function ReasoningLabelsInner() {
   const promptVersions = useMemo(
     () =>
       promptVersionsApi.data?.version === version
-        ? [...promptVersionsApi.data.prompts].sort(
+        ? [...(promptVersionsApi.data.response?.prompt_versions ?? [])].sort(
             (a, b) => b.count - a.count,
           )
         : [],
     [promptVersionsApi.data, version],
   );
+  const reasoningSourceVersion =
+    promptVersionsApi.data?.version === version
+      ? promptVersionsApi.data.response?.artifact_source_version
+      : undefined;
   const selectedPrompt = useMemo(() => {
     if (promptVersions.length === 0) return null;
     return (
@@ -619,6 +623,12 @@ function ReasoningLabelsInner() {
                 </option>
               ))}
             </select>
+            {reasoningSourceVersion &&
+              reasoningSourceVersion !== version && (
+                <span className="text-[10px] text-slate-500">
+                  Compatible labels from {reasoningSourceVersion}
+                </span>
+              )}
           </div>
 
           <div className="flex min-w-0 flex-col gap-1">
