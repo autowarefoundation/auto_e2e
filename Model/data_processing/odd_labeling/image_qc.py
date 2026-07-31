@@ -382,14 +382,26 @@ def _expected_camera_roles(
 def _missing_frame_observations(
     evidence: CanonicalSceneEvidence,
 ) -> list[LabelObservation]:
-    timestamps = evidence.path_latlon_heading_timestamp[:, 3].astype(np.int64)
-    timestamp_ends = np.concatenate(
-        (timestamps[1:], np.asarray([evidence.end_timestamp_ns]))
+    timeline_timestamps = evidence.path_latlon_heading_timestamp[
+        :, 3
+    ].astype(np.int64)
+    timeline_ends = np.concatenate(
+        (
+            timeline_timestamps[1:],
+            np.asarray([evidence.end_timestamp_ns]),
+        )
+    )
+    timestamp_ends = dict(
+        zip(timeline_timestamps, timeline_ends, strict=True)
     )
     available = {
         (camera.timestamp_ns, camera.camera_role)
         for camera in evidence.camera_objects
     }
+    sampled_timestamps = np.asarray(
+        sorted({camera.timestamp_ns for camera in evidence.camera_objects}),
+        dtype=np.int64,
+    )
     observations: list[LabelObservation] = []
     for camera_role in _expected_camera_roles(evidence):
         availability = _camera_availability(evidence, camera_role)
@@ -423,14 +435,21 @@ def _missing_frame_observations(
             )
             continue
 
+        timestamps = (
+            timeline_timestamps
+            if _camera_frame_inventory_mode(evidence, camera_role)
+            == "capture_timeline"
+            else sampled_timestamps
+        )
         run_start: int | None = None
         run_end = 0
         missing_count = 0
-        for timestamp, timestamp_end in zip(
-            timestamps,
-            timestamp_ends,
-            strict=True,
-        ):
+        for timestamp in timestamps:
+            timestamp_end = timestamp_ends.get(int(timestamp))
+            if timestamp_end is None:
+                raise ValueError(
+                    "sampled camera timestamp is outside canonical timeline"
+                )
             if (int(timestamp), camera_role) not in available:
                 if run_start is None:
                     run_start = int(timestamp)
