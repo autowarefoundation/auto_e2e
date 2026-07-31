@@ -218,16 +218,20 @@ function DatasetDetailInner({ dataset }: { dataset: string }) {
   const promptVersions = useApi(
     async () => ({
       version: selectedVersion,
-      prompts: selectedVersion
+      response: selectedVersion
         ? await getReasoningPromptVersions(dataset, selectedVersion)
-        : [],
+        : null,
     }),
     [dataset, selectedVersion],
   );
   const promptVersionList =
     promptVersions.data?.version === selectedVersion
-      ? promptVersions.data.prompts
+      ? (promptVersions.data.response?.prompt_versions ?? [])
       : [];
+  const reasoningSourceVersion =
+    promptVersions.data?.version === selectedVersion
+      ? promptVersions.data.response?.artifact_source_version
+      : undefined;
 
   return (
     <div className="space-y-6">
@@ -380,6 +384,13 @@ function DatasetDetailInner({ dataset }: { dataset: string }) {
             version: offline teacher labels attached per sample. A shard version
             can be trained with any of these label sets.
           </p>
+          {reasoningSourceVersion &&
+            reasoningSourceVersion !== selectedVersion && (
+              <p className="mb-3 text-xs text-slate-400">
+                Compatible labels from{" "}
+                <span className="font-mono">{reasoningSourceVersion}</span>
+              </p>
+            )}
           {promptVersions.error ? (
             <ErrorState
               error={promptVersions.error}
