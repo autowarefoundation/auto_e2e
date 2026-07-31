@@ -148,6 +148,19 @@ func oddTestService(
 	if mutate != nil {
 		mutate(objects)
 	}
+	publication := &publicationManifest{
+		SchemaVersion: publicationSchema,
+		Status:        "ready",
+		Dataset:       dataset,
+		Version:       version,
+		TotalSamples:  1,
+		Shards:        1,
+		ShardCount:    1,
+		Episodes:      1,
+		ShardEntries: []publicationShardEntry{{
+			Name: "scene-1.tar",
+		}},
+	}
 	return &S3Service{
 		client: &fakePublicationS3{
 			objects:   objects,
@@ -155,6 +168,12 @@ func oddTestService(
 			headCalls: make(map[string]int),
 		},
 		bucket: "datasets",
+		publicationCache: map[string]*publicationManifest{
+			dataset + "/" + version: publication,
+		},
+		compatibleVersionCache: make(
+			map[string]cachedCompatibleVersions,
+		),
 	}
 }
 
@@ -460,6 +479,21 @@ func oddStructuredSearchService(t *testing.T) *S3Service {
 	}
 	pointer.ManifestSHA256 = oddDigest(manifestBody)
 	client.objects[pointerKey] = fakePublicationObject{body: oddJSON(t, pointer)}
+	publication := service.publicationCache["kitscenes/v3.0"]
+	publication.TotalSamples = len(scenes)
+	publication.Shards = len(scenes)
+	publication.ShardCount = len(scenes)
+	publication.Episodes = len(scenes)
+	publication.ShardEntries = make(
+		[]publicationShardEntry,
+		len(scenes),
+	)
+	for index, scene := range scenes {
+		publication.ShardEntries[index].Name = scene.ShardName
+	}
+	service.compatibleVersionCache = make(
+		map[string]cachedCompatibleVersions,
+	)
 	return service
 }
 
@@ -638,6 +672,42 @@ func TestODDManifestReportsUnstartedWithoutReadyPointer(t *testing.T) {
 
 	if !errors.Is(err, ErrODDNotStarted) {
 		t.Fatalf("missing ready pointer error = %v", err)
+	}
+}
+
+func TestODDStatisticsCarryForwardUsesCurrentDatasetCoordinate(t *testing.T) {
+	service := oddTestService(t, nil)
+	source := service.publicationCache["kitscenes/v3.0"]
+	target := *source
+	target.Version = "v3.1"
+	target.SHA256 = strings.Repeat("f", 64)
+	service.publicationCache["kitscenes/v3.1"] = &target
+	service.compatibleVersionCache["kitscenes/v3.1"] =
+		cachedCompatibleVersions{
+			versions: []string{"v3.1", "v3.0"},
+			at:       nowFunc(),
+		}
+
+	body, manifest, _, err := service.ODDStatistics(
+		context.Background(),
+		"kitscenes",
+		"v3.1",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var response map[string]any
+	if err := json.Unmarshal(body, &response); err != nil {
+		t.Fatal(err)
+	}
+	if manifest.DatasetVersion != "v3.0" ||
+		response["dataset_version"] != "v3.1" ||
+		response["artifact_source_version"] != "v3.0" {
+		t.Fatalf(
+			"carry-forward response = manifest %q body %+v",
+			manifest.DatasetVersion,
+			response,
+		)
 	}
 }
 
