@@ -416,7 +416,10 @@ export async function listShardOverlayModels(
   const seenPageTokens = new Set<string>();
   let pageToken = "";
   let coordinates:
-    | Pick<OverlayModelsResponse, "dataset" | "version" | "shard">
+    | Pick<
+        OverlayModelsResponse,
+        "dataset" | "version" | "artifact_source_version" | "shard"
+      >
     | undefined;
 
   // DynamoDB may return a LastEvaluatedKey when a page exactly reaches Limit,
@@ -435,6 +438,12 @@ export async function listShardOverlayModels(
     });
     const requestedVersion = version ?? coordinates?.version;
     if (requestedVersion) query.set("version", requestedVersion);
+    if (coordinates?.artifact_source_version) {
+      query.set(
+        "artifact_version",
+        coordinates.artifact_source_version,
+      );
+    }
     if (pageToken) query.set("page_token", pageToken);
 
     const response = await apiFetch<OverlayModelsResponse>(
@@ -444,6 +453,7 @@ export async function listShardOverlayModels(
       response.dataset !== dataset ||
       response.shard !== shard ||
       !response.version ||
+      !response.artifact_source_version ||
       (requestedVersion && response.version !== requestedVersion)
     ) {
       throw new Error("overlay model pagination returned invalid coordinates");
@@ -452,11 +462,14 @@ export async function listShardOverlayModels(
       coordinates = {
         dataset: response.dataset,
         version: response.version,
+        artifact_source_version: response.artifact_source_version,
         shard: response.shard,
       };
     } else if (
       response.dataset !== coordinates.dataset ||
       response.version !== coordinates.version ||
+      response.artifact_source_version !==
+        coordinates.artifact_source_version ||
       response.shard !== coordinates.shard
     ) {
       throw new Error("overlay model pagination changed coordinates");
@@ -587,13 +600,12 @@ export function getReasoningLabelStats(): Promise<ReasoningLabelStats> {
 export async function getReasoningPromptVersions(
   dataset: string,
   version?: string,
-): Promise<ReasoningPromptVersionsResponse["prompt_versions"]> {
+): Promise<ReasoningPromptVersionsResponse> {
   const query = new URLSearchParams({ dataset });
   if (version) query.set("version", version);
-  const res = await apiFetch<ReasoningPromptVersionsResponse>(
+  return apiFetch<ReasoningPromptVersionsResponse>(
     `/api/v1/reasoning-labels/prompt-versions?${query.toString()}`,
   );
-  return res.prompt_versions ?? [];
 }
 
 export function getReasoningLabel(
