@@ -187,6 +187,7 @@ export function EpisodePlayer({
   );
 
   const [overlayModels, setOverlayModels] = useState<OverlayModel[]>([]);
+  const [overlaySourceVersion, setOverlaySourceVersion] = useState("");
   const [selectedModelID, setSelectedModelID] = useState(
     initialState?.model ?? "",
   );
@@ -206,6 +207,7 @@ export function EpisodePlayer({
     let cancelled = false;
     setOverlayStatus("loading-models");
     setOverlayModels([]);
+    setOverlaySourceVersion("");
     setOverlay(null);
     setOverlayRows(new Map());
     listShardOverlayModels(dataset, shard, version)
@@ -213,6 +215,7 @@ export function EpisodePlayer({
         if (cancelled) return;
         const models = response.models ?? [];
         setOverlayModels(models);
+        setOverlaySourceVersion(response.artifact_source_version);
         if (models.length === 0) {
           setSelectedModelID("");
           setOverlayStatus("no-models");
@@ -649,6 +652,8 @@ export function EpisodePlayer({
         status={overlayStatus}
         baseSeeds={overlay?.baseSeeds ?? []}
         splitBucket={sample?.split_bucket}
+        datasetVersion={version ?? index.version}
+        artifactSourceVersion={overlaySourceVersion}
       />
       <section className="space-y-3" aria-label="Playback controls">
         <TimelineScrubber
