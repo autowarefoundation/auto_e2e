@@ -53,9 +53,27 @@ func (h *OverlayHandler) Models(w http.ResponseWriter, r *http.Request) {
 		)
 		return
 	}
-	models, resolvedVersion, nextPageToken, err := h.s3.ListOverlayModels(
-		r.Context(), dataset, version, shard, limit, pageToken,
-	)
+	artifactVersion := r.URL.Query().Get("artifact_version")
+	if artifactVersion != "" &&
+		!service.ValidVersion(artifactVersion) {
+		writeError(
+			w,
+			http.StatusBadRequest,
+			model.CodeInvalidParam,
+			"invalid artifact version",
+		)
+		return
+	}
+	models, resolvedVersion, artifactSourceVersion, nextPageToken, err :=
+		h.s3.ListOverlayModels(
+			r.Context(),
+			dataset,
+			version,
+			shard,
+			limit,
+			pageToken,
+			artifactVersion,
+		)
 	if err != nil {
 		slog.Error("list overlay models", "dataset", dataset, "shard", shard, "error", err)
 		writeError(w, http.StatusBadGateway, model.CodeUnavailable, "overlay index unavailable")
@@ -65,11 +83,12 @@ func (h *OverlayHandler) Models(w http.ResponseWriter, r *http.Request) {
 		models = []model.OverlayModel{}
 	}
 	writeJSON(w, http.StatusOK, model.OverlayModelsResponse{
-		Dataset:       dataset,
-		Version:       resolvedVersion,
-		Shard:         shard,
-		Models:        models,
-		NextPageToken: nextPageToken,
+		Dataset:               dataset,
+		Version:               resolvedVersion,
+		ArtifactSourceVersion: artifactSourceVersion,
+		Shard:                 shard,
+		Models:                models,
+		NextPageToken:         nextPageToken,
 	})
 }
 
@@ -102,7 +121,7 @@ func (h *OverlayHandler) Body(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, model.CodeInvalidParam, "invalid model artifact id")
 		return
 	}
-	body, _, err := h.s3.GetOverlayBody(
+	body, artifactSourceVersion, err := h.s3.GetOverlayBody(
 		r.Context(), dataset, version, shard, modelID,
 	)
 	if err != nil {
@@ -123,6 +142,7 @@ func (h *OverlayHandler) Body(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-Overlay-Schema", d.OverlaySchema)
 	w.Header().Set("X-Overlay-SHA256", d.SHA256)
 	w.Header().Set("X-Overlay-Sample-Count", strconv.Itoa(d.SampleCount))
+	w.Header().Set("X-Artifact-Source-Version", artifactSourceVersion)
 	w.WriteHeader(http.StatusOK)
 	if _, err := w.Write(body.Payload); err != nil {
 		slog.Warn("write overlay response", "model_id", modelID, "error", err)
@@ -201,7 +221,9 @@ func (h *OverlayHandler) GeoHeatmap(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	body, _, err := h.s3.GeoHeatmap(r.Context(), dataset, version)
+	body, artifactSourceVersion, err := h.s3.GeoHeatmap(
+		r.Context(), dataset, version,
+	)
 	if err != nil {
 		if errors.Is(err, service.ErrNotFound) {
 			writeError(w, http.StatusNotFound, model.CodeNotFound, "geo heatmap not found")
@@ -217,6 +239,7 @@ func (h *OverlayHandler) GeoHeatmap(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Encoding", "gzip")
 	}
 	w.Header().Set("Content-Length", strconv.Itoa(len(body)))
+	w.Header().Set("X-Artifact-Source-Version", artifactSourceVersion)
 	w.WriteHeader(http.StatusOK)
 	if _, err := w.Write(body); err != nil {
 		slog.Warn("write geo heatmap", "dataset", dataset, "error", err)
