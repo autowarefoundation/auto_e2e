@@ -22,6 +22,7 @@ class TrajectoryImitationLoss(nn.Module):
         self,
         loss_type: str = "smooth_l1",
         temporal_decay: float = 0.95,
+        temporal_weight_normalization: str = "none",
         num_timesteps: int = 64,
         num_signals: int = 2,
         signal_scales: Optional[tuple] = None,
@@ -38,12 +39,18 @@ class TrajectoryImitationLoss(nn.Module):
         self.num_signals = num_signals
         if not 0.0 < temporal_decay <= 1.0:
             raise ValueError("temporal_decay must be in (0, 1]")
+        if temporal_weight_normalization not in {"none", "mean_one"}:
+            raise ValueError(
+                "temporal_weight_normalization must be 'none' or 'mean_one'"
+            )
 
         if temporal_decay == 1.0:
             weights = torch.ones(num_timesteps)
         else:
             t = torch.arange(num_timesteps, dtype=torch.float32)
             weights = temporal_decay ** t
+        if temporal_weight_normalization == "mean_one":
+            weights = weights / weights.mean()
         self.register_buffer("temporal_weights", weights)
 
         scales = signal_scales if signal_scales is not None else self._DEFAULT_SIGNAL_SCALES
