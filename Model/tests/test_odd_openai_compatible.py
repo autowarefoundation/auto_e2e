@@ -779,6 +779,16 @@ def test_visual_trigger_timestamps_cover_transitions_and_events() -> None:
         start_timestamp_ns=2_000,
         end_timestamp_ns=3_000,
     )
+    route_turn_continues = make_observation(
+        scene_uid="scene-1",
+        key="odd.route.action",
+        status="valid",
+        values=("turn_left",),
+        confidence=1.0,
+        source="map_route",
+        start_timestamp_ns=3_000,
+        end_timestamp_ns=4_000,
+    )
     hard_brake = make_observation(
         scene_uid="scene-1",
         key="event.ego.strong_response",
@@ -802,7 +812,7 @@ def test_visual_trigger_timestamps_cover_transitions_and_events() -> None:
     )
 
     assert derive_visual_trigger_timestamps(
-        (route_before, route_turn),
+        (route_before, route_turn, route_turn_continues),
         (hard_brake,),
         (normal_frame,),
     ) == (2_000, 4_000, 4_999)
