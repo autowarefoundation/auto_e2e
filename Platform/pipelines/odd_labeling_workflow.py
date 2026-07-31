@@ -961,6 +961,7 @@ def _read_source_artifact(
     container_image=DATA_PREP_IMAGE,
     cache=True,
     cache_version="odd-source-map-route-v4",
+    retries=2,
     requests=Resources(cpu="2", mem="4Gi"),
     limits=Resources(cpu="4", mem="8Gi"),
 )
@@ -998,6 +999,7 @@ def label_odd_map_route(
     container_image=DATA_PREP_IMAGE,
     cache=True,
     cache_version="odd-source-gnss-ins-v3",
+    retries=2,
     requests=Resources(cpu="2", mem="4Gi"),
     limits=Resources(cpu="4", mem="8Gi"),
 )
@@ -1035,6 +1037,7 @@ def label_odd_kinematics(
     container_image=DATA_PREP_IMAGE,
     cache=True,
     cache_version="odd-source-image-qc-v5",
+    retries=2,
     requests=Resources(cpu="2", mem="6Gi"),
     limits=Resources(cpu="4", mem="10Gi"),
 )
@@ -1366,6 +1369,7 @@ def label_odd_bedrock_map(
     container_image=DATA_PREP_IMAGE,
     cache=True,
     cache_version="odd-fuse-scene-v5",
+    retries=2,
     requests=Resources(cpu="2", mem="6Gi"),
     limits=Resources(cpu="4", mem="12Gi"),
 )
