@@ -2029,14 +2029,16 @@ def publish_odd_labelset(
     labelset_id = f"oddls-{_sha256(_canonical_bytes(identity))[:32]}"
     root = f"{publication_prefix}/labelsets/{labelset_id}"
     s3 = boto3.client("s3")
-    statistics = _statistics(records, ontology, labelset_id)
-    quality_documents = build_quality_documents(
-        records,
-        statistics,
-        ontology,
-        labelset_id=labelset_id,
-        audit_selection_seed=audit_selection_seed,
-    )
+    # The provisional documents define the semantic identity. Recomputing
+    # statistics with labelset_id would change its bootstrap sampling seed.
+    statistics = {
+        **provisional_statistics,
+        "labelset_id": labelset_id,
+    }
+    quality_documents = {
+        name: {**document, "labelset_id": labelset_id}
+        for name, document in provisional_quality_documents.items()
+    }
     if (
         _semantic_output_merkle_root(
             records,
