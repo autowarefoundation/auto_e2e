@@ -92,6 +92,7 @@ func writeODDError(w http.ResponseWriter, err error) {
 func setODDIdentity(w http.ResponseWriter, manifest service.ODDManifest, digest string) {
 	w.Header().Set("X-ODD-LabelSet-ID", manifest.LabelSetID)
 	w.Header().Set("X-ODD-Manifest-SHA256", digest)
+	w.Header().Set("X-Artifact-Source-Version", manifest.DatasetVersion)
 }
 
 func (h *ODDHandler) Ontology(w http.ResponseWriter, r *http.Request) {
@@ -159,8 +160,10 @@ func (h *ODDHandler) LabelSets(w http.ResponseWriter, r *http.Request) {
 	}
 	setODDIdentity(w, manifest, digest)
 	writeJSON(w, http.StatusOK, map[string]any{
-		"dataset": dataset, "version": version, "state": "ready",
-		"labelsets": []service.ODDManifest{manifest},
+		"dataset": dataset, "version": version,
+		"artifact_source_version": manifest.DatasetVersion,
+		"state":                   "ready",
+		"labelsets":               []service.ODDManifest{manifest},
 	})
 }
 
