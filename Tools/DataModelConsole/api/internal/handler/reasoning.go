@@ -86,9 +86,10 @@ func (h *ReasoningHandler) PromptVersions(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusBadRequest, model.CodeInvalidParam, "invalid version")
 		return
 	}
-	entries, err := h.s3.ReasoningPromptVersionsAtVersion(
-		r.Context(), dataset, version,
-	)
+	entries, resolvedVersion, artifactSourceVersion, err :=
+		h.s3.ReasoningPromptVersionsWithSource(
+			r.Context(), dataset, version,
+		)
 	if err != nil {
 		if writeReasoningAvailabilityError(w, err) {
 			return
@@ -114,7 +115,12 @@ func (h *ReasoningHandler) PromptVersions(w http.ResponseWriter, r *http.Request
 	if entries == nil {
 		entries = []model.ReasoningPromptVersion{}
 	}
-	writeJSON(w, http.StatusOK, model.ReasoningPromptVersionsResponse{Dataset: dataset, PromptVersions: entries})
+	writeJSON(w, http.StatusOK, model.ReasoningPromptVersionsResponse{
+		Dataset:               dataset,
+		Version:               resolvedVersion,
+		ArtifactSourceVersion: artifactSourceVersion,
+		PromptVersions:        entries,
+	})
 }
 
 // StatsDetail handles
@@ -199,7 +205,7 @@ func (h *ReasoningHandler) GetLabel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	body, _, err := h.s3.GetReasoningLabelAtVersion(
+	body, artifactSourceVersion, err := h.s3.GetReasoningLabelAtVersion(
 		r.Context(), dataset, version, sampleID, teacher, promptVersion,
 	)
 	if err != nil {
@@ -218,5 +224,6 @@ func (h *ReasoningHandler) GetLabel(w http.ResponseWriter, r *http.Request) {
 
 	// Label files are JSON; pass through verbatim. The source S3 key is
 	// intentionally NOT exposed (bucket layout disclosure).
+	w.Header().Set("X-Artifact-Source-Version", artifactSourceVersion)
 	writeRawJSON(w, http.StatusOK, body)
 }
