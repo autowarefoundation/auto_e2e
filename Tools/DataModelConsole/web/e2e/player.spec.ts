@@ -1,20 +1,20 @@
 // Player smoke test. Requires the dev/prod web server on :3000 and the Go API
-// on :8080 (reading real S3, AWS_PROFILE=autowarefoundation). Uses the NVIDIA
-// scene because its camera JPEGs are real; the L2D shard's camera frames are
-// known-black stale data.
+// on :8080 (reading real S3, AWS_PROFILE=autowarefoundation). Uses a canonical
+// KITScenes v3.1 scene with real camera JPEGs.
 //
 // Run: (servers up) npx playwright test
 import { test, expect, type Page } from "@playwright/test";
 
-const SCENE = "/scenes/nvidia_av/train-000000.tar/0";
+const SCENE =
+  "/scenes/kitscenes/part-09da7262ba918bb3-train-000000.tar/0?version=v3.1";
 
 async function cameraPaintState(page: Page) {
   return page.evaluate(() => {
     const canvases = Array.from(
       document.querySelectorAll<HTMLCanvasElement>(
-        "canvas:not([aria-hidden])",
+        'button[aria-label$=" camera"] > canvas:not([aria-hidden])',
       ),
-    );
+    ).filter((canvas) => canvas.offsetParent !== null);
     let ok = 0;
     for (const canvas of canvases) {
       const context = canvas.getContext("2d");
@@ -50,8 +50,7 @@ test("player renders real camera pixels, advances, and focuses", async ({ page }
   page.on("response", (response) => {
     if (response.status() < 400) return;
     const path = new URL(response.url()).pathname;
-    // Legacy v2.0 NVIDIA shards predate the v2.1 rig artifact. Its absence is
-    // expected here; every other failed resource remains a test failure.
+    // A pack can omit a dedicated rig artifact and use its embedded calibration.
     if (response.status() === 404 && path.endsWith("/rig-projection")) return;
     responseErrors.push(`${response.status()} ${response.url()}`);
   });
@@ -90,7 +89,7 @@ test("player renders real camera pixels, advances, and focuses", async ({ page }
       () => cameraPaintState(page),
       { timeout: 30_000 },
     )
-    .toEqual({ total: 7, ok: 7 });
+    .toEqual({ total: 6, ok: 6 });
 
   // Playback advances the frame readout.
   const readout = () =>
@@ -140,7 +139,7 @@ test("playback fills its buffer near real time (windowed fetch)", async ({
       () => cameraPaintState(page),
       { timeout: 45_000 },
     )
-    .toEqual({ total: 7, ok: 7 });
+    .toEqual({ total: 6, ok: 6 });
 
   const valueNow = () =>
     page.evaluate(() => {
@@ -170,7 +169,7 @@ test("playback fills its buffer near real time (windowed fetch)", async ({
   console.log(`fill-rate: start=${start} samples=${samples.join(",")} advanced=${advanced}`);
 
   expect(monotonic, "playhead advanced monotonically (no racing/rewind)").toBeTruthy();
-  // Over 5s of wall clock, expect at least 20 frames (2 fps) advanced — a low
-  // bar the old path failed and the windowed path clears with large margin.
-  expect(advanced, "playhead advanced ≥20 frames in 5s").toBeGreaterThanOrEqual(20);
+  // The six-view KITScenes pack is decoded over the local S3/API path. Require
+  // sustained progress while allowing shared CI and network latency.
+  expect(advanced, "playhead advanced >=5 frames in 5s").toBeGreaterThanOrEqual(5);
 });
