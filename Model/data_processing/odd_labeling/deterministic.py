@@ -19,7 +19,7 @@ from .published_snapshot import CanonicalSceneEvidence
 from .schema import LabelObservation, make_observation
 
 
-MAP_ROUTE_LABELER_VERSION = "odd_deterministic_v3"
+MAP_ROUTE_LABELER_VERSION = "odd_deterministic_v4"
 KINEMATICS_LABELER_VERSION = "odd_deterministic_kinematics_v3"
 KINEMATICS_POLICY_VERSION = "odd_gnss_ins_kinematics_v2"
 INTERVAL_NS = 1_000_000_000
