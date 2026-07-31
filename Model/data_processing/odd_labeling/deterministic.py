@@ -591,7 +591,16 @@ def _match_lane(
         )
     if not candidates:
         return None
-    _, _, lane, distance, segment_index, heading_error = min(candidates)
+    _, _, lane, distance, segment_index, heading_error = min(
+        candidates,
+        key=lambda candidate: (
+            candidate[0],
+            candidate[1],
+            candidate[3],
+            candidate[5],
+            candidate[4],
+        ),
+    )
     return lane, distance, segment_index, heading_error
 
 
@@ -635,7 +644,16 @@ def _match_route_segment(
         )
     if not candidates:
         return None
-    _, _, segment, distance, segment_index, heading_error = min(candidates)
+    _, _, segment, distance, segment_index, heading_error = min(
+        candidates,
+        key=lambda candidate: (
+            candidate[0],
+            candidate[1],
+            candidate[3],
+            candidate[5],
+            candidate[4],
+        ),
+    )
     return segment, distance, segment_index, heading_error
 
 
