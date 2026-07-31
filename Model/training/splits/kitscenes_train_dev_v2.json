@@ -4,8 +4,8 @@
   "dataset_name": "KIT-MRT/KITScenes-Multimodal",
   "source_revision": "6fde0034446669e2ed7235e4c7fe323cd23d599d",
   "source_artifact_set_sha256": "24afc76fc07d74023fa2acc3ee17868dcae5e306be09cbf7350032b636304a12",
-  "dataset_version": "v3.0",
-  "packed_contract_digest": "03d2288799b51117606064ff61562de9da230a557e6b7c2509860f2c0d055863",
+  "dataset_version": "v3.1",
+  "packed_contract_digest": "c81a5746a365246fad8adbc60e68779095012f7d144d179bee3c0226e930e938",
   "sample_inventory_parent": {
     "manifest": "kitscenes_train_dev_v1.json",
     "sha256": "7bffc71254db8a168aa9f5c5dc5b5159abee8a3d5d71b927235fb2a9a56c1194"
