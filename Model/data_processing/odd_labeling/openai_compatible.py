@@ -1438,10 +1438,12 @@ def derive_visual_trigger_timestamps(
                     - VISUAL_TRIGGER_NEUTRAL_VALUES
                 )
             )
-            if (
+            changed = (
                 previous_signature is not None
                 and signature != previous_signature
-            ) or positive:
+            )
+            positive_onset = previous_signature is None and positive
+            if changed or positive_onset:
                 triggers.add(observation.start_timestamp_ns)
                 if observation.namespace == "event":
                     triggers.add(observation.end_timestamp_ns - 1)
