@@ -1,0 +1,38 @@
+# AutoE2E Driver Configuration for Alpasim Wizard
+
+defaults:
+  - _self_
+
+log_level: ${wizard.log_level}
+
+model:
+  model_type: autoe2e
+  checkpoint_path: "autoe2e_model.ckpt"
+  device: "cuda"
+
+host: "0.0.0.0"
+port: ???
+
+inference:
+  use_cameras:
+    - camera_base_front_center
+    - camera_ring_front
+    - camera_ring_front_left
+    - camera_ring_front_right
+    - camera_ring_rear
+    - camera_ring_rear_left
+    - camera_ring_rear_right
+  max_batch_size: 1
+  subsample_factor: 1
+  context_length: 1
+
+route:
+  default_command: 2
+  use_waypoint_commands: true
+
+output_dir: "/mnt/output/driver"
+
+trajectory_optimizer:
+  enabled: false
+
+plot_debug_images: false

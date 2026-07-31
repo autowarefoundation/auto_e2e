@@ -1,10 +1,4 @@
-"""AlpaSim driver plugin package for AutoE2E.
+from alpasim_autoe2e.plugin import AutoE2EDriver
+from alpasim_autoe2e.config import AutoE2EAlpaSimConfig
 
-Registers AutoE2E model and configuration entry points with the AlpaSim simulator.
-"""
-
-from .config import AutoE2EAlpaSimConfig
-from .plugin import AutoE2EDriver, AutoE2EAlpaSimModel
-
-__all__ = ["AutoE2EAlpaSimConfig", "AutoE2EDriver", "AutoE2EAlpaSimModel"]
-
+__all__ = ["AutoE2EDriver", "AutoE2EAlpaSimConfig"]

@@ -2,6 +2,8 @@
 
 This package provides the official **AutoE2E driver plugin** for [NVIDIA AlpaSim](https://github.com/NVlabs/alpasim), enabling real-time closed-loop evaluation and policy rollouts of the AutoE2E VLA driving model on the KitScenes 7-camera sensor topology.
 
+For full official setup, microservices architecture, and execution details, refer to the [NVIDIA AlpaSim GitHub Repository](https://github.com/NVlabs/alpasim).
+
 ---
 
 ## Architecture Overview
@@ -109,35 +111,6 @@ Registered Configs: ['autoe2e']
 
 ---
 
-## Running Closed-Loop Workflows
+## Workflows & Official Documentation
 
-### Workflow A: Closed-Loop Model Policy Rollouts (`run_closed_loop.py`)
-
-Executes real-time closed-loop rollouts of the `AutoE2E` PyTorch neural network model taking 7 camera streams at 10 Hz:
-
-```bash
-python Model/plugins/alpasim_driver/examples/run_closed_loop.py
-```
-
-### Workflow B: World Renderer Verification (`verify_world_renderer.py`)
-
-Drives closed-loop simulation using ground-truth trajectory predictions to evaluate and compare world renderers (AlpaSim vs NuRec vs KITScenes renderer) without policy prediction noise:
-
-```bash
-python Model/plugins/alpasim_driver/examples/verify_world_renderer.py
-```
-
-### Expected Output Example
-```text
-[INFO] Starting World Renderer Verification (Ground Truth Trajectory Driver)
-[INFO] Discovered AlpaSim Registered Models: ['autoe2e']
-[INFO] Discovered AlpaSim Registered Configs: ['autoe2e']
-[INFO] Initialized Ground Truth Driver: GroundTruthTrajectoryDriver
-[INFO] Subscribed Camera Topology (7 cameras): ['camera_base_front_center', 'camera_ring_front', 'camera_ring_front_left', 'camera_ring_front_right', 'camera_ring_rear', 'camera_ring_rear_left', 'camera_ring_rear_right']
-[INFO] Evaluating World Renderer across 50 simulation steps...
-[INFO] [Renderer Step 00/50] t= 0.0s | Ego Pos: (  0.48m,   0.00m) | Speed:  4.76 m/s | Prediction Step Time:  0.60 ms
-[INFO] [Renderer Step 49/50] t= 4.9s | Ego Pos: (  6.80m,   0.00m) | Speed:  4.76 m/s | Prediction Step Time:  0.17 ms
-[INFO] World Renderer Verification completed successfully!
-[INFO] Final Ground-Truth Position: (6.80m, 0.00m)
-[INFO] Saved visualization GIF: /path/to/verify_world_renderer.gif
-```
+For executing closed-loop simulation rollouts, NuRec 3DGS rendering, and official CLI workflows, refer to the [NVIDIA AlpaSim GitHub Repository](https://github.com/NVlabs/alpasim).
