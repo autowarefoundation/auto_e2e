@@ -11,6 +11,8 @@ import pytest
 from data_processing.odd_labeling.deterministic import (
     MAP_ROUTE_KEYS,
     _junction_type,
+    _match_local_lane,
+    _match_route_segment,
     label_kinematics,
     label_map_route,
 )
@@ -91,6 +93,42 @@ def _navigation() -> tuple[NavigationMap, NavigationRoute]:
         ),
     )
     return navigation_map, route
+
+
+def test_local_map_and_route_matching_handle_exact_candidate_ties() -> None:
+    centerline = np.asarray([[0.0, 0.0], [20.0, 0.0]])
+    first_lane = DirectedLaneField(
+        lane_id="duplicate-lane",
+        centerline_enu_m=centerline,
+        road_class="residential",
+    )
+    second_lane = replace(first_lane, centerline_enu_m=centerline.copy())
+    first_segment = RouteLaneSegment(
+        lane_id="duplicate-lane",
+        provider_segment_id="provider-segment-a",
+        centerline_enu_m=centerline,
+    )
+    second_segment = replace(
+        first_segment,
+        provider_segment_id="provider-segment-b",
+        centerline_enu_m=centerline.copy(),
+    )
+
+    lane_match = _match_local_lane(
+        np.asarray([5.0, 0.0]),
+        0.0,
+        (first_lane, second_lane),
+    )
+    route_match = _match_route_segment(
+        np.asarray([5.0, 0.0]),
+        0.0,
+        (first_segment, second_segment),
+    )
+
+    assert lane_match is not None
+    assert lane_match[0] is first_lane
+    assert route_match is not None
+    assert route_match[0] is first_segment
 
 
 class _MemoryBody(io.BytesIO):
