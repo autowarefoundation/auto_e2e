@@ -1476,6 +1476,7 @@ def label_visual_scene(
     scene_uid: str,
     scene_end_timestamp_ns: int,
     anchors: tuple[CameraAnchor, ...],
+    regular_anchor_timestamps_ns: tuple[int, ...] | None = None,
     event_trigger_timestamps_ns: tuple[int, ...] = (),
     refinement_confidence_threshold: float = (
         DEFAULT_REFINEMENT_CONFIDENCE_THRESHOLD
@@ -1489,6 +1490,23 @@ def label_visual_scene(
         for left, right in zip(anchors, anchors[1:])
     ):
         raise ValueError("road VLM anchors must be strictly ordered")
+    anchor_timestamps = tuple(anchor.timestamp_ns for anchor in anchors)
+    if regular_anchor_timestamps_ns is None:
+        regular_anchor_indexes = frozenset(range(len(anchors)))
+    else:
+        requested_regular_timestamps = set(regular_anchor_timestamps_ns)
+        unknown_regular_timestamps = (
+            requested_regular_timestamps - set(anchor_timestamps)
+        )
+        if unknown_regular_timestamps:
+            raise ValueError(
+                "regular road VLM timestamps must reference supplied anchors"
+            )
+        regular_anchor_indexes = frozenset(
+            index
+            for index, timestamp_ns in enumerate(anchor_timestamps)
+            if timestamp_ns in requested_regular_timestamps
+        )
     sampling_parameters = dict(sampling_parameters or {})
     trigger_anchor_indexes = _trigger_anchor_indexes(
         anchors,
@@ -1505,7 +1523,10 @@ def label_visual_scene(
         if end_timestamp_ns <= anchor.timestamp_ns:
             continue
         for bundle in ROAD_VLM_TASK_BUNDLES:
-            if bundle.trigger_only and index not in trigger_anchor_indexes:
+            if bundle.trigger_only:
+                if index not in trigger_anchor_indexes:
+                    continue
+            elif index not in regular_anchor_indexes:
                 continue
             primary_indexes = _anchor_indexes(
                 len(anchors),
