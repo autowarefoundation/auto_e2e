@@ -159,23 +159,31 @@ parameter.
 </details>
 
 ## NVIDIA GeForce RTX 5090
+
 <details open>
   <summary>Toggle view</summary>
 
-> CUDA 12.8 | Driver 590.48.01 | PyTorch 2.7.1+cu128 | Commit `ead2171` | Resolution [256, 256]
+> CUDA 12.8 | Driver 590.48.01 | PyTorch 2.7.1+cu128 | Commit `92043448` | Resolution [256, 256]
 
-| Backbone | Fusion Mode | Reasoning | Batch | FPS | Latency (ms) | p99 (ms) | Jitter (ms) | VRAM (MB) | Params |
-|----------|-------------|-----------|-------|-----|--------------|----------|-------------|-----------|--------|
-| swin_v2_tiny | bev | off | 1 | 88.2 | 11.3 | 12.9 | 1.7 | 375 | 56.8M |
-| swin_v2_tiny | bev | off | 2 | 58.4 | 17.1 | 18.2 | 1.2 | 520 | 56.8M |
-| swin_v2_tiny | bev | off | 4 | 30.4 | 32.9 | 33.7 | 0.9 | 803 | 56.8M |
-| conv_next_v2_tiny | bev | off | 1 | 95.6 | 10.5 | 11.8 | 1.4 | 396 | 57.1M |
-| conv_next_v2_tiny | bev | off | 2 | 58.7 | 17.0 | 17.9 | 1.0 | 561 | 57.1M |
-| conv_next_v2_tiny | bev | off | 4 | 30.0 | 33.4 | 34.0 | 0.8 | 887 | 57.1M |
-| swin_v2_tiny | bev | pooled_latent | 1 | 84.2 | 11.9 | 12.8 | 1.0 | 386 | 59.4M |
-| swin_v2_tiny | bev | horizon_cross_attention | 1 | 83.5 | 12.0 | 12.8 | 0.9 | 388 | 59.6M |
+| Model | Backbone | Fusion Mode | Reasoning | Batch | FPS | Latency (ms) | p99 (ms) | Jitter (ms) | VRAM (MB) | Params |
+|-------|----------|-------------|-----------|-------|-----|--------------|----------|-------------|-----------|--------|
+| Reactive | swin_v2_tiny | bev | off | 1 | 87.3 | 11.4 | 13.5 | 2.1 | 375 | 56.8M |
+| Combined | swin_v2_tiny | bev | off | 1 | 55.4 | 18.1 | 18.9 | 0.9 | 525 | 94.7M |
+| Reactive | swin_v2_tiny | bev | off | 2 | 58.2 | 17.2 | 18.0 | 0.8 | 521 | 56.8M |
+| Combined | swin_v2_tiny | bev | off | 2 | 34.0 | 29.4 | 30.3 | 0.9 | 668 | 94.7M |
+| Reactive | swin_v2_tiny | bev | off | 4 | 30.4 | 32.9 | 33.7 | 0.8 | 803 | 56.8M |
+| Combined | swin_v2_tiny | bev | off | 4 | 16.7 | 59.8 | 60.7 | 1.0 | 952 | 94.7M |
+| Reactive | conv_next_v2_tiny | bev | off | 1 | 94.7 | 10.6 | 11.2 | 0.6 | 396 | 57.1M |
+| Combined | conv_next_v2_tiny | bev | off | 1 | 60.9 | 16.4 | 17.1 | 0.7 | 543 | 95.3M |
+| Reactive | conv_next_v2_tiny | bev | off | 2 | 58.8 | 17.0 | 17.6 | 0.6 | 562 | 57.1M |
+| Combined | conv_next_v2_tiny | bev | off | 2 | 34.4 | 29.1 | 30.7 | 1.7 | 707 | 95.3M |
+| Reactive | conv_next_v2_tiny | bev | off | 4 | 29.9 | 33.4 | 34.1 | 0.9 | 887 | 57.1M |
+| Combined | conv_next_v2_tiny | bev | off | 4 | 16.5 | 60.6 | 61.4 | 0.9 | 1034 | 95.3M |
+| Reactive | swin_v2_tiny | bev | pooled_latent | 1 | 83.5 | 12.0 | 12.5 | 0.6 | 388 | 59.4M |
+| Reactive | swin_v2_tiny | bev | horizon_cross_attention | 1 | 82.9 | 12.1 | 12.5 | 0.5 | 389 | 59.6M |
 
 </details>
+
 
 ## NVIDIA GeForce RTX 4070 Laptop GPU
 <details open>
