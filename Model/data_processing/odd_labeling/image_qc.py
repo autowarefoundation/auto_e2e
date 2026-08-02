@@ -6,7 +6,8 @@ import base64
 import dataclasses
 import hashlib
 import io
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
+from typing import Any, TypedDict
 
 import numpy as np
 from PIL import Image, UnidentifiedImageError
@@ -30,6 +31,26 @@ DEPENDENT_QC_KEYS = (
     "perception.visual.lighting",
     "perception.visual.glare",
 )
+
+
+class _ObservationCommon(TypedDict):
+    scene_uid: str
+    confidence: float
+    source: str
+    start_timestamp_ns: int
+    end_timestamp_ns: int
+    measurements: Mapping[str, float | int | str | bool]
+    provenance: Mapping[str, Any]
+    camera_id: str
+
+
+class _FrozenFrameState(TypedDict):
+    status: str
+    value: str | None
+    reason: str
+    ego_distance_m: float
+    other_camera_changed: bool
+    previous_timestamp_ns: int
 
 
 @dataclasses.dataclass(frozen=True)
@@ -562,8 +583,8 @@ def _path_distance_m(
 def _frozen_frame_states(
     evidence: CanonicalSceneEvidence,
     anchors: tuple[CameraAnchor, ...],
-) -> dict[tuple[int, str], dict[str, object]]:
-    states: dict[tuple[int, str], dict[str, object]] = {}
+) -> dict[tuple[int, str], _FrozenFrameState]:
+    states: dict[tuple[int, str], _FrozenFrameState] = {}
     ordered = tuple(sorted(anchors, key=lambda item: item.timestamp_ns))
     for previous, current in zip(ordered, ordered[1:]):
         previous_by_role = {
@@ -680,7 +701,7 @@ def label_image_quality(
                 "frame_index": frame.frame_index,
                 "frame_content_sha256": hashlib.sha256(frame.jpeg).hexdigest(),
             }
-            common = {
+            common: _ObservationCommon = {
                 "scene_uid": evidence.scene_uid,
                 "confidence": 0.98,
                 "source": "image_qc",
@@ -690,6 +711,7 @@ def label_image_quality(
                 "provenance": provenance,
                 "camera_id": frame.camera_role,
             }
+            frame_status: str | None
             if metrics["dark_fraction"] >= 0.98:
                 frame_status_state = "valid"
                 frame_status = "black_frame"
