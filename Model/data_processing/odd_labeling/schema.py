@@ -901,11 +901,12 @@ def make_observation(
     actor_track_uid: str | None = None,
     event_uid: str | None = None,
 ) -> LabelObservation:
+    normalized_values = sorted(set(values))
     identity = {
         "scene_uid": scene_uid,
         "key": key,
         "status": status,
-        "values": sorted(set(values)),
+        "values": normalized_values,
         "source": source,
         "start_timestamp_ns": int(start_timestamp_ns),
         "end_timestamp_ns": int(end_timestamp_ns),
@@ -919,7 +920,7 @@ def make_observation(
         scene_uid=scene_uid,
         key=key,
         status=status,
-        values=tuple(identity["values"]),
+        values=tuple(normalized_values),
         confidence=float(confidence),
         source=source,
         start_timestamp_ns=int(start_timestamp_ns),
