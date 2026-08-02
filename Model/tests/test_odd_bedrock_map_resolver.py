@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import replace
+from typing import Any
 
 import numpy as np
 
@@ -173,9 +174,9 @@ def test_bedrock_map_semantic_hashes_are_stable() -> None:
 class _BedrockClient:
     def __init__(self, value: str) -> None:
         self.value = value
-        self.requests = []
+        self.requests: list[dict[str, Any]] = []
 
-    def converse(self, **kwargs):
+    def converse(self, **kwargs: Any) -> dict[str, Any]:
         self.requests.append(kwargs)
         return {
             "output": {
@@ -227,6 +228,10 @@ def test_request_removes_geography_and_provider_identity() -> None:
 
 def test_request_projects_distant_wgs84_evidence_into_map_frame() -> None:
     scene = _scene()
+    source_map = scene.navigation_map
+    source_route = scene.navigation_route
+    assert source_map is not None
+    assert source_route is not None
     frame = MapFrame(
         "kitscenes-utm",
         49.01439,
@@ -235,7 +240,7 @@ def test_request_projects_distant_wgs84_evidence_into_map_frame() -> None:
     )
     offset = np.asarray([2938.634, -3302.5931, 0.0])
     navigation_map = replace(
-        scene.navigation_map,
+        source_map,
         frame=frame,
         bounds_enu_m=(2900.0, -3340.0, 2980.0, -3260.0),
         intersection_polygons=tuple(
@@ -243,14 +248,14 @@ def test_request_projects_distant_wgs84_evidence_into_map_frame() -> None:
                 polygon,
                 points_enu_m=polygon.points_enu_m + offset,
             )
-            for polygon in scene.navigation_map.intersection_polygons
+            for polygon in source_map.intersection_polygons
         ),
         directed_lane_fields=tuple(
             replace(
                 lane,
                 centerline_enu_m=lane.centerline_enu_m + offset,
             )
-            for lane in scene.navigation_map.directed_lane_fields
+            for lane in source_map.directed_lane_fields
         ),
     )
     path = np.asarray(
@@ -265,7 +270,7 @@ def test_request_projects_distant_wgs84_evidence_into_map_frame() -> None:
         path_latlon_heading_timestamp=path,
         navigation_map=navigation_map,
         navigation_route=replace(
-            scene.navigation_route,
+            source_route,
             frame=frame,
             map_version=navigation_map.map_version,
         ),
