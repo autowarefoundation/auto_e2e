@@ -768,7 +768,7 @@ class BedrockMapRouteResolver:
                 )
             )
         except Exception as error:
-            raw_response = (
+            failed_raw_response = (
                 _raw_model_response(response)
                 if response is not None
                 else None
@@ -781,8 +781,8 @@ class BedrockMapRouteResolver:
                     model_revision=self.model_revision,
                     request_sha256=request_sha256,
                     response_sha256=(
-                        content_sha256(raw_response)
-                        if raw_response is not None
+                        content_sha256(failed_raw_response)
+                        if failed_raw_response is not None
                         else None
                     ),
                     status=(
@@ -801,7 +801,7 @@ class BedrockMapRouteResolver:
                     * 1000.0,
                     input_image_count=1,
                     request_metadata=request_metadata,
-                    raw_response=raw_response,
+                    raw_response=failed_raw_response,
                     usage=(
                         _provider_usage(response)
                         if response is not None
