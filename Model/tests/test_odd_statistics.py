@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 
 from data_processing.odd_labeling.statistics import (
@@ -21,8 +23,8 @@ def _observation(
     status: str = "valid",
     confidence: float = 0.9,
     source: str = "fusion",
-    measurements: dict | None = None,
-) -> dict:
+    measurements: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     return {
         "observation_uid": uid,
         "scene_uid": "",
@@ -38,8 +40,8 @@ def _observation(
     }
 
 
-def _records() -> list[dict]:
-    scene_a = {
+def _records() -> list[dict[str, Any]]:
+    scene_a: dict[str, Any] = {
         "scene_uid": "scene-a",
         "start_timestamp_ns": 0,
         "end_timestamp_ns": 10 * SECOND,
@@ -117,7 +119,7 @@ def _records() -> list[dict]:
             }
         ],
     }
-    scene_b = {
+    scene_b: dict[str, Any] = {
         "scene_uid": "scene-b",
         "start_timestamp_ns": 0,
         "end_timestamp_ns": 10 * SECOND,
