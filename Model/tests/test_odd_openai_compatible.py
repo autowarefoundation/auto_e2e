@@ -870,7 +870,7 @@ def test_visual_scene_uses_focused_alternate_frames() -> None:
                     and kwargs["start_timestamp_ns"] == 2_000
                     and kwargs.get("inference_pass", "primary") == "primary"
                 )
-                values = ()
+                values: tuple[str, ...] = ()
                 if not forced_ambiguity:
                     candidates = ONTOLOGY[key].values
                     values = (
