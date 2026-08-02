@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import dataclasses
 import io
+from typing import Any
 
 import numpy as np
 from PIL import Image
@@ -32,13 +33,16 @@ class _MemoryS3:
     def __init__(self, objects: dict[str, bytes]) -> None:
         self.objects = objects
 
-    def get_object(self, *, Bucket: str, Key: str) -> dict[str, object]:
-        del Bucket
-        payload = self.objects[Key]
+    def get_object(self, **kwargs: Any) -> dict[str, Any]:
+        payload = self.objects[str(kwargs["Key"])]
         return {
             "Body": io.BytesIO(payload),
             "ContentLength": len(payload),
         }
+
+    def list_objects_v2(self, **kwargs: Any) -> dict[str, Any]:
+        del kwargs
+        return {"Contents": [], "IsTruncated": False}
 
 
 def _jpeg(value: int) -> tuple[bytes, np.ndarray]:
