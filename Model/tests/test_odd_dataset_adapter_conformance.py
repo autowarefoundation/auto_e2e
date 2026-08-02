@@ -4,6 +4,7 @@ import hashlib
 import io
 import json
 from dataclasses import dataclass, replace
+from typing import Any
 
 import numpy as np
 import pytest
@@ -139,14 +140,14 @@ class _MemoryS3:
     def __init__(self, objects: dict[tuple[str, str], bytes]) -> None:
         self.objects = objects
 
-    def get_object(self, *, Bucket: str, Key: str) -> dict[str, object]:
-        payload = self.objects[(Bucket, Key)]
+    def get_object(self, **kwargs: Any) -> dict[str, Any]:
+        payload = self.objects[(str(kwargs["Bucket"]), str(kwargs["Key"]))]
         return {
             "Body": _MemoryBody(payload),
             "ContentLength": len(payload),
         }
 
-    def list_objects_v2(self, **kwargs: object) -> dict[str, object]:
+    def list_objects_v2(self, **kwargs: Any) -> dict[str, Any]:
         bucket = str(kwargs["Bucket"])
         prefix = str(kwargs["Prefix"])
         contents = [
@@ -502,6 +503,10 @@ def test_missing_navigation_abstains_without_blocking_kinematics() -> None:
 
 def test_map_labels_ignore_scene_wide_route_quality() -> None:
     scene = _published_adapter().open_scene("scene-1")
+    source_map = scene.navigation_map
+    source_route = scene.navigation_route
+    assert source_map is not None
+    assert source_route is not None
     centerline = np.asarray([[0.0, -10.0], [0.0, 30.0]])
     lane = DirectedLaneField(
         lane_id="lane-1",
@@ -515,7 +520,7 @@ def test_map_labels_ignore_scene_wide_route_quality() -> None:
         provider_attributes={"location": "urban"},
     )
     navigation_map = replace(
-        scene.navigation_map,
+        source_map,
         directed_lane_fields=(lane,),
         layer_availability={"lane_topology": True},
     )
@@ -526,7 +531,7 @@ def test_map_labels_ignore_scene_wide_route_quality() -> None:
         maneuver=Maneuver.LEFT,
     )
     route = replace(
-        scene.navigation_route,
+        source_route,
         lane_sequence=(route_segment,),
         confidence=0.01,
         valid=False,
@@ -569,6 +574,10 @@ def test_map_labels_ignore_scene_wide_route_quality() -> None:
 
 def test_map_labels_use_declared_projection_and_undirected_geometry() -> None:
     scene = _synthetic_adapter().scene
+    source_map = scene.navigation_map
+    source_route = scene.navigation_route
+    assert source_map is not None
+    assert source_route is not None
     frame = MapFrame(
         "kitscenes-utm",
         49.01439,
@@ -598,14 +607,14 @@ def test_map_labels_use_declared_projection_and_undirected_geometry() -> None:
         provider_attributes={"location": "urban"},
     )
     navigation_map = replace(
-        scene.navigation_map,
+        source_map,
         frame=frame,
         bounds_enu_m=(2900.0, -3340.0, 2980.0, -3260.0),
         directed_lane_fields=(lane,),
         layer_availability={"lane_topology": True},
     )
     route = replace(
-        scene.navigation_route,
+        source_route,
         frame=frame,
         map_version=navigation_map.map_version,
         lane_sequence=(
@@ -620,7 +629,7 @@ def test_map_labels_use_declared_projection_and_undirected_geometry() -> None:
         valid=False,
         estimated_destination=True,
         quality=replace(
-            scene.navigation_route.quality,
+            source_route.quality,
             unresolved_discontinuities=2,
             failure_reasons=("unresolved_discontinuity",),
         ),
@@ -651,6 +660,10 @@ def test_map_labels_use_declared_projection_and_undirected_geometry() -> None:
 
 def test_route_action_rejects_only_the_local_discontinuity() -> None:
     scene = _published_adapter().open_scene("scene-1")
+    source_map = scene.navigation_map
+    source_route = scene.navigation_route
+    assert source_map is not None
+    assert source_route is not None
     centerline = np.asarray([[0.0, -10.0], [0.0, 30.0]])
     lane = DirectedLaneField(
         lane_id="lane-1",
@@ -659,12 +672,12 @@ def test_route_action_rejects_only_the_local_discontinuity() -> None:
         lane_subtype="road",
     )
     navigation_map = replace(
-        scene.navigation_map,
+        source_map,
         directed_lane_fields=(lane,),
         layer_availability={"lane_topology": True},
     )
     route = replace(
-        scene.navigation_route,
+        source_route,
         lane_sequence=(
             RouteLaneSegment(
                 lane_id=lane.lane_id,
@@ -677,7 +690,7 @@ def test_route_action_rejects_only_the_local_discontinuity() -> None:
         confidence=0.9,
         valid=False,
         quality=replace(
-            scene.navigation_route.quality,
+            source_route.quality,
             unresolved_discontinuities=1,
             failure_reasons=("unresolved_discontinuity",),
         ),
