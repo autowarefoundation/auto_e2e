@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import math
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
+from typing import Any, TypedDict
 
 import numpy as np
 
@@ -54,6 +55,20 @@ LOCAL_MAP_MAX_DISTANCE_M = 8.0
 LOCAL_ROUTE_MAX_DISTANCE_M = 10.0
 LOCAL_MATCH_MAX_HEADING_ERROR_RAD = math.radians(75.0)
 LOCAL_ROUTE_MIN_SEGMENT_CONFIDENCE = 0.5
+
+
+class _KinematicObservationCommon(TypedDict):
+    scene_uid: str
+    confidence: float
+    source: str
+    start_timestamp_ns: int
+    end_timestamp_ns: int
+    measurements: Mapping[str, float | int | str | bool]
+    provenance: Mapping[str, Any]
+
+
+class _MapObservationCommon(_KinematicObservationCommon):
+    status: str
 
 
 def _local_xy(path: np.ndarray, origin_lat: float, origin_lon: float) -> np.ndarray:
@@ -328,7 +343,7 @@ def label_kinematics(
         else:
             stationary_duration_ns = 0
         stationary_dwell_met = stationary_duration_ns >= STATIONARY_DWELL_NS
-        common = {
+        common: _KinematicObservationCommon = {
             "scene_uid": evidence.scene_uid,
             "confidence": 0.97,
             "source": "gnss_ins",
@@ -996,7 +1011,7 @@ def label_map_route(
     navigation_map = evidence.navigation_map
     route = evidence.navigation_route
     if navigation_map is None:
-        provenance = {
+        unavailable_provenance = {
             "labeler_version": MAP_ROUTE_LABELER_VERSION,
             "map_available": False,
             "route_available": route is not None,
@@ -1011,7 +1026,7 @@ def label_map_route(
                 source="map_route",
                 start_timestamp_ns=evidence.start_timestamp_ns,
                 end_timestamp_ns=evidence.end_timestamp_ns,
-                provenance=provenance,
+                provenance=unavailable_provenance,
             )
             for key in MAP_ROUTE_KEYS
         )
@@ -1022,14 +1037,14 @@ def label_map_route(
         navigation_map.frame,
     )
     route_quality = route.quality if route is not None else None
-    provenance: dict[str, object] = {
+    map_provenance: dict[str, Any] = {
         "labeler_version": MAP_ROUTE_LABELER_VERSION,
         "map_version": navigation_map.map_version,
         "quality_policy": "ego_local_map_match_v1",
         "route_available": route is not None,
     }
     if route is not None and route_quality is not None:
-        provenance.update(
+        map_provenance.update(
             {
                 "route_id": route.route_id,
                 "route_valid_global": route.valid,
@@ -1084,7 +1099,7 @@ def label_map_route(
                         start_timestamp_ns=start_ns,
                         end_timestamp_ns=end_ns,
                         provenance={
-                            **provenance,
+                            **map_provenance,
                             "reason": "ego local map match unavailable",
                         },
                     )
@@ -1096,7 +1111,7 @@ def label_map_route(
             map_distance, map_heading_error
         )
         interval_provenance = {
-            **provenance,
+            **map_provenance,
             "matched_lane_id": lane.lane_id,
             "local_map_match": {
                 "distance_m": map_distance,
@@ -1104,7 +1119,7 @@ def label_map_route(
                 "heading_semantics": "undirected_centerline_geometry",
             },
         }
-        common: dict[str, object] = {
+        common: _MapObservationCommon = {
             "scene_uid": evidence.scene_uid,
             "status": "valid",
             "confidence": map_confidence,
