@@ -1039,7 +1039,7 @@ class OpenAICompatibleRoadObserver:
                 }
             except Exception as exc:  # noqa: BLE001
                 last_error = exc
-                response_sha256 = (
+                failed_response_sha256 = (
                     content_sha256(response)
                     if response is not None
                     else None
@@ -1052,7 +1052,7 @@ class OpenAICompatibleRoadObserver:
                         self.config.model_revision or "unversioned"
                     ),
                     request_sha256=request_digest,
-                    response_sha256=response_sha256,
+                    response_sha256=failed_response_sha256,
                     status=(
                         "invalid_response"
                         if response is not None
@@ -1294,6 +1294,7 @@ def _anchor_indexes(
     index: int,
     temporal_mode: str,
 ) -> tuple[int, ...]:
+    candidates: tuple[int, ...]
     if temporal_mode == "static":
         candidates = (index,)
     elif temporal_mode == "short":
@@ -1340,6 +1341,7 @@ def _refinement_frames(
     camera_id: str | None = None,
     camera_roles: tuple[str, ...] | None = None,
 ) -> tuple[CameraFrame, ...]:
+    indexes: tuple[int, ...]
     if temporal_mode == "event":
         indexes = (
             index - 2,
