@@ -562,7 +562,7 @@ def _parse_registry(
         name_field="backend",
         context="backend_definitions",
     )
-    for context, definitions, expected_fields in (
+    for context, named_definitions, expected_fields in (
         (
             "status_definitions",
             status_definitions,
@@ -586,7 +586,7 @@ def _parse_registry(
             ),
         ),
     ):
-        for index, definition in enumerate(definitions):
+        for index, definition in enumerate(named_definitions):
             _require_exact_fields(
                 definition, expected_fields, f"{context}[{index}]"
             )
