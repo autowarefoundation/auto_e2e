@@ -80,7 +80,7 @@ except ImportError:
     BaseTrajectoryModel = _MockBaseTrajectoryModel  # type: ignore
     DriveCommand = _MockDriveCommand  # type: ignore
 
-from data_parsing.alpasim_stream.parser import AlpasimStreamParser, PredictionInput as ParserPredictionInput  # noqa: E402
+from .parser import AlpasimStreamParser, PredictionInput as ParserPredictionInput  # noqa: E402
 
 logger = logging.getLogger(__name__)
 

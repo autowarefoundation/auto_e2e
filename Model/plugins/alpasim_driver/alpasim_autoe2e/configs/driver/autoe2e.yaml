@@ -2,6 +2,7 @@
 
 defaults:
   - _self_
+  - autoe2e_configs
 
 log_level: ${wizard.log_level}
 
