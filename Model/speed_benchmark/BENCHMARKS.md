@@ -47,33 +47,29 @@ parameter.
 
 </details>
 
-## NVIDIA GeForce RTX 5080 GPU
+## NVIDIA GeForce RTX 5080
 
 <details open>
   <summary>Toggle view</summary>
 
-> CUDA 12.8 | Driver 595.71.05 | PyTorch 2.11.0+cu128 | Commit `9015914` | Resolution [256, 256]
+> CUDA 12.8 | Driver 580.95.05 | PyTorch 2.7.1+cu128 | Commit `9204344` | Resolution [256, 256]
 
-| Model | Backbone | Fusion Mode | Batch | FPS | Latency (ms) | p99 (ms) | Jitter (ms) | VRAM (MB) | Params |
-|-------|----------|-------------|-------|-----|--------------|----------|-------------|-----------|--------|
-| Reactive | swin_v2_tiny | concat | 1 | 76.5 | 13.1 | 13.6 | 0.6 | 308 | 35.3M |
-| Reactive | swin_v2_tiny | concat | 2 | 46.8 | 21.4 | 21.7 | 0.3 | 473 | 35.3M |
-| Reactive | swin_v2_tiny | concat | 4 | 25.2 | 39.7 | 40.4 | 0.6 | 797 | 35.3M |
-| Reactive | swin_v2_tiny | cross_attn | 1 | 75.6 | 13.2 | 13.7 | 0.5 | 311 | 35.3M |
-| Reactive | swin_v2_tiny | cross_attn | 2 | 46.6 | 21.5 | 21.9 | 0.4 | 473 | 35.3M |
-| Reactive | swin_v2_tiny | cross_attn | 4 | 25.1 | 39.9 | 40.5 | 0.6 | 797 | 35.3M |
-| Reactive | swin_v2_tiny | bev | 1 | 16.3 | 61.5 | 62.0 | 0.5 | 1820 | 69.7M |
-| Reactive | swin_v2_tiny | bev | 2 | 8.2 | 121.6 | 122.4 | 0.8 | 3354 | 69.7M |
-| Reactive | swin_v2_tiny | bev | 4 | 4.2 | 239.6 | 240.8 | 1.1 | 6421 | 69.7M |
-| Reactive | conv_next_v2_tiny | concat | 1 | 74.2 | 13.5 | 14.2 | 0.7 | 334 | 35.6M |
-| Reactive | conv_next_v2_tiny | concat | 2 | 42.7 | 23.4 | 23.9 | 0.5 | 520 | 35.6M |
-| Reactive | conv_next_v2_tiny | concat | 4 | 22.7 | 44.0 | 44.7 | 0.6 | 892 | 35.6M |
-| Reactive | conv_next_v2_tiny | cross_attn | 1 | 73.8 | 13.6 | 14.1 | 0.6 | 333 | 35.6M |
-| Reactive | conv_next_v2_tiny | cross_attn | 2 | 42.3 | 23.6 | 24.9 | 1.3 | 519 | 35.6M |
-| Reactive | conv_next_v2_tiny | cross_attn | 4 | 22.6 | 44.1 | 44.7 | 0.6 | 891 | 35.6M |
-| Reactive | conv_next_v2_tiny | bev | 1 | 16.2 | 61.9 | 62.5 | 0.7 | 1820 | 70.0M |
-| Reactive | conv_next_v2_tiny | bev | 2 | 8.1 | 122.8 | 123.8 | 0.9 | 3351 | 70.0M |
-| Reactive | conv_next_v2_tiny | bev | 4 | 4.1 | 243.1 | 244.0 | 0.9 | 6419 | 70.0M |
+| Model | Backbone | Fusion Mode | Reasoning | Batch | FPS | Latency (ms) | p99 (ms) | Jitter (ms) | VRAM (MB) | Params |
+|-------|----------|-------------|-----------|-------|-----|--------------|----------|-------------|-----------|--------|
+| Reactive | swin_v2_tiny | bev | off | 1 | 56.9 | 17.6 | 18.0 | 0.5 | 375 | 56.8M |
+| Combined | swin_v2_tiny | bev | off | 1 | 33.1 | 30.2 | 31.1 | 0.9 | 525 | 94.7M |
+| Reactive | swin_v2_tiny | bev | off | 2 | 30.4 | 32.9 | 33.4 | 0.5 | 521 | 56.8M |
+| Combined | swin_v2_tiny | bev | off | 2 | 16.8 | 59.4 | 60.2 | 1.0 | 668 | 94.7M |
+| Reactive | swin_v2_tiny | bev | off | 4 | 15.2 | 65.5 | 66.2 | 0.7 | 803 | 56.8M |
+| Combined | swin_v2_tiny | bev | off | 4 | 8.2 | 122.2 | 123.2 | 1.1 | 952 | 94.7M |
+| Reactive | conv_next_v2_tiny | bev | off | 1 | 58.2 | 17.2 | 17.7 | 0.5 | 396 | 57.1M |
+| Combined | conv_next_v2_tiny | bev | off | 1 | 34.4 | 29.1 | 29.6 | 0.5 | 543 | 95.3M |
+| Reactive | conv_next_v2_tiny | bev | off | 2 | 30.0 | 33.3 | 33.6 | 0.3 | 562 | 57.1M |
+| Combined | conv_next_v2_tiny | bev | off | 2 | 16.6 | 60.2 | 60.5 | 0.3 | 707 | 95.3M |
+| Reactive | conv_next_v2_tiny | bev | off | 4 | 14.8 | 67.7 | 68.0 | 0.4 | 887 | 57.1M |
+| Combined | conv_next_v2_tiny | bev | off | 4 | 8.0 | 125.0 | 126.0 | 1.3 | 1034 | 95.3M |
+| Reactive | swin_v2_tiny | bev | pooled_latent | 1 | 54.1 | 18.5 | 19.1 | 0.6 | 388 | 59.4M |
+| Reactive | swin_v2_tiny | bev | horizon_cross_attention | 1 | 54.2 | 18.4 | 19.0 | 0.6 | 389 | 59.6M |
 
 </details>
 
