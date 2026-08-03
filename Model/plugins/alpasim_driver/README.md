@@ -24,6 +24,7 @@ graph TD
 - **`AutoE2EDriver`** ([`plugin.py`](./plugin.py)): Subclass of AlpaSim's `BaseTrajectoryModel`. Implements `from_config()`, `camera_ids`, `context_length`, `output_frequency_hz`, and `predict()`.
 - **`AutoE2EAlpaSimConfig`** ([`config.py`](./config.py)): Dataclass defining model checkpoint paths, 7-camera topology configuration, and trajectory horizon parameters.
 - **Entry Points** ([`pyproject.toml`](./pyproject.toml)): Registers `autoe2e` under entry point groups `alpasim.models` and `alpasim.configs`.
+- **Driver Configs** ([`configs/driver/`](./alpasim_autoe2e/configs/driver/)): Contains `autoe2e.yaml` and `autoe2e_configs.yaml`. These files formally register the 7-camera KIT topology with AlpaSim to override the default renderer camera setup, avoiding `KeyError`s during closed-loop simulation.
 
 ---
 
@@ -113,4 +114,43 @@ Registered Configs: ['autoe2e']
 
 ## Workflows & Official Documentation
 
-For executing closed-loop simulation rollouts, NuRec 3DGS rendering, and official CLI workflows, refer to the [NVIDIA AlpaSim GitHub Repository](https://github.com/NVlabs/alpasim).
+### 1. Build the Driver Container Image
+Before running the simulation, you must build a custom Docker image that extends the default AlpaSim base image with this driver plugin installed.
+
+Create a `Dockerfile.driver` in the root of the `auto_e2e` repository:
+
+```dockerfile
+# Start from the base AlpaSim image
+FROM alpasim-base:0.111.0
+
+# Copy the necessary Model directories into the container
+COPY Model/ /app/Model/
+
+# Install the dependencies, clone the KITScenes SDK, and install the driver plugin
+RUN pip install lanelet2 && \
+    git clone https://github.com/KIT-MRT/kitscenes.git /app/Model/data_parsing/kit_scenes/kitscenes && \
+    pip install -e /app/Model/data_parsing/kit_scenes/kitscenes --no-deps && \
+    pip install -e /app/Model/plugins/alpasim_driver
+```
+
+Then build the image (from the `auto_e2e` root directory):
+```bash
+docker build -t alpasim-base:latest -f Dockerfile.driver .
+```
+
+### 2. Run the Closed-Loop Simulation
+Once the image is built, use the `alpasim_wizard` from the `.alpasim` containerized environment. Execute:
+
+```bash
+# From the .alpasim root directory:
+uv run --project src/wizard alpasim_wizard \
+    deploy=local \
+    topology=1gpu \
+    driver=autoe2e \
+    wizard.log_dir=$PWD/outputs/autoe2e_closed_loop_run \
+    defines.base_image=alpasim-base:latest
+```
+
+*Note: For the NuRec 3DGS renderer to successfully boot and render the 7 KIT cameras, the selected dataset scene must have `.usdz` artifacts compiled and available in the scene cache.*
+
+For further details on official CLI workflows and AlpaSim architecture, refer to the [NVIDIA AlpaSim GitHub Repository](https://github.com/NVlabs/alpasim).
