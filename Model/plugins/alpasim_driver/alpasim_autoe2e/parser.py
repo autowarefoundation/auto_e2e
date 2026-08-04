@@ -15,16 +15,6 @@ _HISTORY_STEPS = 64
 _HISTORY_SIGNALS = 4
 _VISUAL_HISTORY_DIM = 896
 
-CAMERA_NAMES = [
-    "camera_base_front_center",
-    "camera_ring_front",
-    "camera_ring_front_left",
-    "camera_ring_front_right",
-    "camera_ring_rear",
-    "camera_ring_rear_left",
-    "camera_ring_rear_right",
-]
-
 class PredictionInput(TypedDict):
     cameras: Dict[str, Any]
     speed: float
@@ -33,7 +23,8 @@ class PredictionInput(TypedDict):
 
 class AlpasimStreamParser:
     """Parses live AlpaSim frames into the exact tensor format produced by pre_extracted.py."""
-    def __init__(self) -> None:
+    def __init__(self, camera_names: list[str]) -> None:
+        self.camera_names = camera_names
         self._egomotion_buffer: collections.deque[list[float]] = collections.deque(maxlen=_HISTORY_STEPS)
         for _ in range(_HISTORY_STEPS):
             self._egomotion_buffer.append([0.0, 0.0, 0.0, 0.0])
@@ -62,7 +53,7 @@ class AlpasimStreamParser:
                 - route_valid: ``[1]``
         """
         frames = []
-        for cam_name in CAMERA_NAMES:
+        for cam_name in self.camera_names:
             frame_data = observation["cameras"].get(cam_name)
             if frame_data is None:
                 frames.append(torch.zeros(3, 256, 256))

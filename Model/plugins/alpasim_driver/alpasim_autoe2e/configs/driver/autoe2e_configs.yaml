@@ -2,37 +2,32 @@
 runtime:
   simulation_config:
     cameras:
-      - logical_id: camera_base_front_center
+      - logical_id: camera_front_wide_120fov
         height: 320
         width: 512
         frame_interval_us: 100_000
         shutter_duration_us: 30_000
-      - logical_id: camera_ring_front
+      - logical_id: camera_front_tele_30fov
         height: 320
         width: 512
         frame_interval_us: 100_000
         shutter_duration_us: 30_000
-      - logical_id: camera_ring_front_left
+      - logical_id: camera_cross_left_120fov
         height: 320
         width: 512
         frame_interval_us: 100_000
         shutter_duration_us: 30_000
-      - logical_id: camera_ring_front_right
+      - logical_id: camera_cross_right_120fov
         height: 320
         width: 512
         frame_interval_us: 100_000
         shutter_duration_us: 30_000
-      - logical_id: camera_ring_rear
+      - logical_id: camera_rear_left_70fov
         height: 320
         width: 512
         frame_interval_us: 100_000
         shutter_duration_us: 30_000
-      - logical_id: camera_ring_rear_left
-        height: 320
-        width: 512
-        frame_interval_us: 100_000
-        shutter_duration_us: 30_000
-      - logical_id: camera_ring_rear_right
+      - logical_id: camera_rear_right_70fov
         height: 320
         width: 512
         frame_interval_us: 100_000

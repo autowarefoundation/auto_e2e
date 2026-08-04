@@ -93,6 +93,7 @@ class AutoE2EDriver(BaseTrajectoryModel):
         model_checkpoint: str = "dummy_random.ckpt",
         allow_mock: bool = False,
         allow_untrained_model: bool = False,
+        camera_ids: Optional[List[str]] = None,
         **kwargs: Any
     ) -> None:
         super().__init__()
@@ -106,7 +107,13 @@ class AutoE2EDriver(BaseTrajectoryModel):
             )
 
         self.model_checkpoint = model_checkpoint
-        self.parser = AlpasimStreamParser()
+        
+        if camera_ids is None:
+            from .config import AutoE2EAlpaSimConfig
+            camera_ids = AutoE2EAlpaSimConfig().camera_names
+        self._camera_ids = camera_ids
+        
+        self.parser = AlpasimStreamParser(camera_names=self._camera_ids)
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.model = None
 
@@ -117,7 +124,7 @@ class AutoE2EDriver(BaseTrajectoryModel):
             try:
                 from model_components.auto_e2e import AutoE2E
                 logger.info("Checkpoint path '%s' not found. Initializing untrained AutoE2E model (allow_untrained_model=True).", model_checkpoint)
-                self.model = AutoE2E(num_views=7, is_pretrained=False).to(self.device)
+                self.model = AutoE2E(num_views=len(self._camera_ids), is_pretrained=False).to(self.device)
                 self.model.eval()
             except Exception as e:
                 logger.error("Failed to initialize untrained AutoE2E model: %s", e)
@@ -142,27 +149,27 @@ class AutoE2EDriver(BaseTrajectoryModel):
         allow_untrained_model: bool = False,
     ) -> "AutoE2EDriver":
         checkpoint_path = getattr(model_cfg, "checkpoint_path", "dummy_random.ckpt")
+        
         allow_mock_cfg = getattr(model_cfg, "allow_mock", allow_mock)
+        if checkpoint_path == "MOCK":
+            allow_mock_cfg = True
+            
         allow_untrained_cfg = getattr(model_cfg, "allow_untrained_model", allow_untrained_model)
+        if checkpoint_path == "UNTRAINED":
+            allow_untrained_cfg = True
+            
         driver = cls(
             model_checkpoint=checkpoint_path,
             allow_mock=allow_mock_cfg,
             allow_untrained_model=allow_untrained_cfg,
+            camera_ids=camera_ids,
         )
         driver.device = device
         return driver
 
     @property
     def camera_ids(self) -> List[str]:
-        return [
-            "camera_base_front_center",
-            "camera_ring_front",
-            "camera_ring_front_left",
-            "camera_ring_front_right",
-            "camera_ring_rear",
-            "camera_ring_rear_left",
-            "camera_ring_rear_right",
-        ]
+        return self._camera_ids
 
     @property
     def context_length(self) -> int:
@@ -189,14 +196,24 @@ class AutoE2EDriver(BaseTrajectoryModel):
         cameras_dict = {}
         if hasattr(input_data, "camera_images") and input_data.camera_images:
             for cam_name, frames in input_data.camera_images.items():
-                if isinstance(frames, (list, tuple)):
-                    if len(frames) > 0:
-                        frame = frames[-1]
-                        cameras_dict[cam_name] = getattr(frame, "image", frame)
-                    else:
-                        cameras_dict[cam_name] = None
+                if not frames:
+                    cameras_dict[cam_name] = None
+                    continue
+                
+                if isinstance(frames, list):
+                    frame = frames[-1]
                 else:
-                    cameras_dict[cam_name] = getattr(frames, "image", frames)
+                    frame = frames
+                    
+                if hasattr(frame, "image"):
+                    cameras_dict[cam_name] = frame.image
+                elif isinstance(frame, tuple):
+                    if len(frame) == 2:
+                        cameras_dict[cam_name] = frame[1]
+                    else:
+                        cameras_dict[cam_name] = frame[-1]
+                else:
+                    cameras_dict[cam_name] = frame
         elif hasattr(input_data, "cameras"):
             cameras_dict = input_data.cameras
 

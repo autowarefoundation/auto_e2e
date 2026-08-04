@@ -115,35 +115,29 @@ Registered Configs: ['autoe2e']
 ## Workflows & Official Documentation
 
 ### 1. Build the Driver Container Image
-Before running the simulation, you must build a custom Docker image that extends the default AlpaSim base image with this driver plugin installed.
+AlpaSim automatically discovers and installs plugins located in its `plugins/` directory. Because Docker cannot resolve symlinks that point outside of its build context, you **must** hardcopy the driver plugin into `.alpasim/plugins/` before building the image.
 
-Create a `Dockerfile.driver` in the root of the `auto_e2e` repository:
+From the repository root, execute:
 
-```dockerfile
-# Start from the base AlpaSim image
-FROM alpasim-base:0.111.0
-
-# Copy the necessary Model directories into the container
-COPY Model/ /app/Model/
-
-# Install the dependencies, clone the KITScenes SDK, and install the driver plugin
-RUN pip install lanelet2 && \
-    git clone https://github.com/KIT-MRT/kitscenes.git /app/Model/data_parsing/kit_scenes/kitscenes && \
-    pip install -e /app/Model/data_parsing/kit_scenes/kitscenes --no-deps && \
-    pip install -e /app/Model/plugins/alpasim_driver
-```
-
-Then build the image (from the `auto_e2e` root directory):
 ```bash
-docker build -t alpasim-base:latest -f Dockerfile.driver .
+# 1. Sync the plugin code into the AlpaSim build context
+rm -rf .alpasim/plugins/alpasim_driver
+cp -r Model/plugins/alpasim_driver .alpasim/plugins/
+
+# 2. Build the Docker image
+cd .alpasim
+docker build -t alpasim-base:latest .
+cd ..
 ```
+
+*Note: The `AutoE2E` inference pipeline inside the simulator relies purely on `torch` and does not require the offline `kitscenes` or `lanelet2` packages, as the AlpaSim parser receives generic tensors directly.*
 
 ### 2. Run the Closed-Loop Simulation
-Once the image is built, use the `alpasim_wizard` from the `.alpasim` containerized environment. Execute:
+Once the image is built, use the `alpasim_wizard` from the repository root to launch the simulation.
 
 ```bash
-# From the .alpasim root directory:
-uv run --project src/wizard alpasim_wizard \
+# From the repository root:
+uv run --project .alpasim/src/wizard alpasim_wizard \
     deploy=local \
     topology=1gpu \
     driver=autoe2e \

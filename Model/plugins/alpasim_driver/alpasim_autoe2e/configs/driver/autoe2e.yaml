@@ -8,7 +8,7 @@ log_level: ${wizard.log_level}
 
 model:
   model_type: autoe2e
-  checkpoint_path: "autoe2e_model.ckpt"
+  checkpoint_path: "MOCK"
   device: "cuda"
 
 host: "0.0.0.0"
