@@ -74,7 +74,7 @@ class AlpasimStreamParser:
         map_valid = torch.tensor([False], dtype=torch.bool)
         route_valid = torch.tensor([False], dtype=torch.bool)
 
-        camera_params = torch.eye(4)[:3].unsqueeze(0).repeat(7, 1, 1).unsqueeze(0).to(torch.float32)
+        camera_params = torch.eye(4)[:3].unsqueeze(0).repeat(len(self.camera_names), 1, 1).unsqueeze(0).to(torch.float32)
 
         return {
             "visual_tiles": visual_tiles,

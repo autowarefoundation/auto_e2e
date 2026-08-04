@@ -110,7 +110,7 @@ class AutoE2EDriver(BaseTrajectoryModel):
         
         if camera_ids is None:
             from .config import AutoE2EAlpaSimConfig
-            camera_ids = AutoE2EAlpaSimConfig().camera_names
+            camera_ids = AutoE2EAlpaSimConfig(checkpoint_path=self.model_checkpoint).camera_names
         self._camera_ids = camera_ids
         
         self.parser = AlpasimStreamParser(camera_names=self._camera_ids)
@@ -193,7 +193,7 @@ class AutoE2EDriver(BaseTrajectoryModel):
             ModelPrediction with trajectory_points / trajectory_xy [64, 2] and headings [64].
         """
         # Extract cameras dict
-        cameras_dict = {}
+        cameras_dict: Dict[str, Any] = {}
         if hasattr(input_data, "camera_images") and input_data.camera_images:
             for cam_name, frames in input_data.camera_images.items():
                 if not frames:
