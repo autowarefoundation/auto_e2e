@@ -31,7 +31,6 @@ from alpasim_autoe2e.parser import (  # noqa: E402
     AlpasimStreamParser,
     PredictionInput,
 )
-from alpasim_autoe2e.config import AutoE2EAlpaSimConfig
 PARSER_CAMERA_NAMES = AutoE2EAlpaSimConfig(checkpoint_path='dummy.ckpt').camera_names
 try:
     from data_parsing.kit_scenes.camera import (  # noqa: E402
@@ -487,7 +486,6 @@ class TestAlpasimDriverPlugin:
         parser = AlpasimStreamParser(camera_names=custom_cameras)
         
         # Build fake observation
-        import numpy as np
         from PIL import Image
         fake_images = {
             "left_cam": Image.new("RGB", (256, 256), (255, 0, 0)),
