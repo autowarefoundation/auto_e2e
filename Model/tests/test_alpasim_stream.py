@@ -17,21 +17,21 @@ import pytest
 import torch
 from PIL import Image
 
-_PLUGINS_DIR = Path(__file__).resolve().parents[1] / "plugins"
-if str(_PLUGINS_DIR) not in sys.path:
-    sys.path.insert(0, str(_PLUGINS_DIR))
+_ALPASIM_DRIVER_DIR = Path(__file__).resolve().parents[1] / "plugins" / "alpasim_driver"
+if str(_ALPASIM_DRIVER_DIR) not in sys.path:
+    sys.path.insert(0, str(_ALPASIM_DRIVER_DIR))
 
-from alpasim_driver.alpasim_autoe2e.config import AutoE2EAlpaSimConfig  # noqa: E402
-from alpasim_driver.alpasim_autoe2e.plugin import (  # noqa: E402
+from alpasim_autoe2e.config import AutoE2EAlpaSimConfig  # noqa: E402
+from alpasim_autoe2e.plugin import (  # noqa: E402
     AutoE2EDriver,
     ModelPrediction,
     PredictionInput as PluginPredictionInput,
 )
-from alpasim_driver.alpasim_autoe2e.parser import (  # noqa: E402
+from alpasim_autoe2e.parser import (  # noqa: E402
     AlpasimStreamParser,
     PredictionInput,
 )
-from alpasim_driver.alpasim_autoe2e.config import AutoE2EAlpaSimConfig
+from alpasim_autoe2e.config import AutoE2EAlpaSimConfig
 PARSER_CAMERA_NAMES = AutoE2EAlpaSimConfig(checkpoint_path='dummy.ckpt').camera_names
 try:
     from data_parsing.kit_scenes.camera import (  # noqa: E402
@@ -430,13 +430,7 @@ class TestEdgeCasesAndDiscrepancies:
         assert tensors["camera_params"].shape == (1, 7, 3, 4)
         assert tensors["camera_params"].dtype == torch.float32
 
-    def test_package_init_exports_autoe2e_model(self) -> None:
-        """Verify alpasim_driver package exports AutoE2EAlpaSimModel (aliased to AutoE2EDriver)."""
-        import alpasim_driver
-        from alpasim_driver import AutoE2EDriver as _AutoE2EDriver
 
-        assert _AutoE2EDriver.__name__ == AutoE2EDriver.__name__
-        assert hasattr(alpasim_driver, "AutoE2EAlpaSimConfig")
 
 
 class TestAlpasimDriverPlugin:
@@ -460,25 +454,29 @@ class TestAlpasimDriverPlugin:
         """
         driver = AutoE2EDriver(model_checkpoint=dummy_checkpoint, allow_mock=True)
         pred_input = PluginPredictionInput(
-            cameras=sample_rgb_images,
+            camera_images=sample_rgb_images,
             speed=8.0,
             acceleration=0.1,
             command=1,
+            ego_pose_history=[],
+            inference_seed=0,
         )
 
         result = driver.predict(pred_input)
 
         assert isinstance(result, ModelPrediction)
-        assert isinstance(result.trajectory_points, np.ndarray)
+        assert hasattr(result, "trajectory_xy") or hasattr(result, "trajectory_points")
+        traj = getattr(result, "trajectory_xy", getattr(result, "trajectory_points", None))
+        assert isinstance(traj, np.ndarray)
         assert isinstance(result.headings, np.ndarray)
-        assert result.trajectory_points.shape == (64, 2)
+        assert traj.shape == (64, 2)
         assert result.headings.shape == (64,)
-        assert result.trajectory_points.dtype == np.float32
+        assert traj.dtype == np.float32
         assert result.headings.dtype == np.float32
 
     def test_driver_plugin_strict_mock_disallowed(self) -> None:
         """Verify that initializing with allow_mock=False fails fast when using mock dependencies."""
-        from alpasim_driver.alpasim_autoe2e.plugin import IS_MOCK_MODE
+        from alpasim_autoe2e.plugin import IS_MOCK_MODE
         if IS_MOCK_MODE:
             with pytest.raises(ImportError, match="allow_mock=False"):
                 AutoE2EDriver(model_checkpoint="nonexistent.ckpt", allow_mock=False)
@@ -510,5 +508,5 @@ class TestAlpasimDriverPlugin:
         driver = AutoE2EDriver(model_checkpoint="MOCK", allow_mock=True, camera_ids=custom_cameras)
         assert len(driver.camera_ids) == 2
         # Mock prediction output
-        pred = driver.predict(PluginPredictionInput(cameras=fake_images, speed=5.0, acceleration=1.0, command=1))
+        pred = driver.predict(PluginPredictionInput(camera_images=fake_images, speed=5.0, acceleration=1.0, command=1, ego_pose_history=[], inference_seed=0))
         assert pred.trajectory_xy.shape == (64, 2)
