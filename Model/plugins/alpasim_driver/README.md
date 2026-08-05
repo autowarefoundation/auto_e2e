@@ -21,8 +21,8 @@ graph TD
 
 ### Key Components
 
-- **`AutoE2EDriver`** ([`plugin.py`](./plugin.py)): Subclass of AlpaSim's `BaseTrajectoryModel`. Implements `from_config()`, `camera_ids`, `context_length`, `output_frequency_hz`, and `predict()`.
-- **`AutoE2EAlpaSimConfig`** ([`config.py`](./config.py)): Dataclass defining model checkpoint paths, 7-camera topology configuration, and trajectory horizon parameters.
+- **`AutoE2EDriver`** ([`plugin.py`](./alpasim_autoe2e/plugin.py)): Subclass of AlpaSim's `BaseTrajectoryModel`. Implements `from_config()`, `camera_ids`, `context_length`, `output_frequency_hz`, and `predict()`.
+- **`AutoE2EAlpaSimConfig`** ([`config.py`](./alpasim_autoe2e/config.py)): Dataclass defining model checkpoint paths, dynamic camera topology configuration, and trajectory horizon parameters.
 - **Entry Points** ([`pyproject.toml`](./pyproject.toml)): Registers `autoe2e` under entry point groups `alpasim.models` and `alpasim.configs`.
 - **Driver Configs** ([`configs/driver/`](./alpasim_autoe2e/configs/driver/)): Contains `autoe2e.yaml` and `autoe2e_configs.yaml`. These files formally register the 7-camera KIT topology with AlpaSim to override the default renderer camera setup, avoiding `KeyError`s during closed-loop simulation.
 
@@ -66,8 +66,8 @@ Configure root directories for KITScenes dataset files and AlpaSim source reposi
 set -a; source .env; set +a
 
 # Option B: Set environment variables manually
-export KITSCENES_ROOT="/path/to/auto_e2e/.KITdata"
-export ALPASIM_ROOT="/path/to/auto_e2e/.alpasim"
+export KITSCENES_ROOT="/path/to/your/dataset/directory"
+export ALPASIM_ROOT="/path/to/alpasim/repository"
 ```
 
 ### 3. Download KITScenes Data Samples
@@ -82,12 +82,12 @@ python -m kitscenes.download "$KITSCENES_ROOT" --scenes <scene_id> # for example
 
 ## Model Control Parameters
 
-Controls for simulation execution in [`config.py`](./config.py) and [`plugin.py`](./plugin.py):
+Controls for simulation execution in [`config.py`](./alpasim_autoe2e/config.py) and [`plugin.py`](./alpasim_autoe2e/plugin.py):
 
 | Parameter | Type | Default | Description |
 | :--- | :--- | :--- | :--- |
 | `checkpoint_path` | `str` | `"autoe2e_model.ckpt"` | Path to pre-trained AutoE2E PyTorch checkpoint file. |
-| `allow_untrained_model` | `bool` | `False` | When `True`, initializes a fresh `AutoE2E(num_views=7)` PyTorch neural network with random weights if no checkpoint file exists on disk. |
+| `allow_untrained_model` | `bool` | `False` | When `True`, initializes a fresh `AutoE2E` PyTorch neural network with random weights (dynamically scaled to `num_views=len(camera_ids)`) if no checkpoint file exists on disk. |
 | `allow_mock` | `bool` | `False` | When `False` (default), strictly requires the actual AlpaSim runtime and real model execution, failing fast if dependencies are missing. |
 
 ---
@@ -97,7 +97,7 @@ Controls for simulation execution in [`config.py`](./config.py) and [`plugin.py`
 Confirm that AlpaSim discovers the `autoe2e` plugin entry points:
 
 ```python
-import alpasim_driver.plugin
+import alpasim_autoe2e.plugin
 import alpasim_plugins.plugins as p
 
 print("Registered Models:", p.PluginRegistry("alpasim.models").get_names())
@@ -115,19 +115,19 @@ Registered Configs: ['autoe2e']
 ## Workflows & Official Documentation
 
 ### 1. Build the Driver Container Image
-AlpaSim automatically discovers and installs plugins located in its `plugins/` directory. Because Docker cannot resolve symlinks that point outside of its build context, you **must** hardcopy the driver plugin into `.alpasim/plugins/` before building the image.
+AlpaSim automatically discovers and installs plugins located in its `plugins/` directory. Because Docker cannot resolve symlinks that point outside of its build context, you **must** hardcopy the driver plugin into `$ALPASIM_ROOT/plugins/` before building the image.
 
 From the repository root, execute:
 
 ```bash
 # 1. Sync the plugin code into the AlpaSim build context
-rm -rf .alpasim/plugins/alpasim_driver
-cp -r Model/plugins/alpasim_driver .alpasim/plugins/
+rm -rf "$ALPASIM_ROOT/plugins/alpasim_driver"
+cp -r Model/plugins/alpasim_driver "$ALPASIM_ROOT/plugins/"
 
 # 2. Build the Docker image
-cd .alpasim
+cd "$ALPASIM_ROOT"
 docker build -t alpasim-base:latest .
-cd ..
+cd -
 ```
 
 *Note: The `AutoE2E` inference pipeline inside the simulator relies purely on `torch` and does not require the offline `kitscenes` or `lanelet2` packages, as the AlpaSim parser receives generic tensors directly.*
@@ -137,7 +137,7 @@ Once the image is built, use the `alpasim_wizard` from the repository root to la
 
 ```bash
 # From the repository root:
-uv run --project .alpasim/src/wizard alpasim_wizard \
+uv run --project "$ALPASIM_ROOT/src/wizard" alpasim_wizard \
     deploy=local \
     topology=1gpu \
     driver=autoe2e \
