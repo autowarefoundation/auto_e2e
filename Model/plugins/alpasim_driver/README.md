@@ -32,11 +32,11 @@ graph TD
 
 ### Input Observations (`PredictionInput`)
 - **Visual Topology**: 7 KitScenes camera streams (`camera_base_front_center`, `camera_ring_front`, `camera_ring_front_left`, `camera_ring_front_right`, `camera_ring_rear`, `camera_ring_rear_left`, `camera_ring_rear_right`).
-- **Telemetry**: Scalar ego vehicle speed ($\text{m/s}$), acceleration ($\text{m/s}^2$), and high-level routing `DriveCommand` (LEFT, STRAIGHT, RIGHT).
+- **Telemetry**: Scalar ego vehicle speed (*m/s*), acceleration (*m/s²*), and high-level routing `DriveCommand` (LEFT, STRAIGHT, RIGHT).
 
 ### Output Predictions (`ModelPrediction`)
-- **`trajectory_xy`**: Waypoint coordinates $[64, 2]$ in rig frame ($X$ forward, $Y$ left).
-- **`headings`**: Vehicle target headings $[64]$ in radians.
+- **`trajectory_xy`**: Waypoint coordinates *[64, 2]* in rig frame (*X* forward, *Y* left).
+- **`headings`**: Vehicle target headings *[64]* in radians.
 
 ---
 
@@ -75,7 +75,7 @@ export ALPASIM_ROOT="/path/to/auto_e2e/.alpasim"
 Download dataset scene archives using the `kitscenes` CLI:
 
 ```bash
-python -m kitscenes.download "$KITSCENES_ROOT" --scenes c34c778f-ad8c-0aa9-7e1a-c86a73f887c7
+python -m kitscenes.download "$KITSCENES_ROOT" --scenes <scene_id> # for example c34c778f-ad8c-0aa9-7e1a-c86a73f887c7
 ```
 
 ---
