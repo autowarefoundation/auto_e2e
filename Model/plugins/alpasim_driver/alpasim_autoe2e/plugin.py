@@ -4,6 +4,7 @@ import sys
 import torch
 import numpy as np
 import logging
+import math
 from dataclasses import dataclass, field
 from enum import IntEnum
 
@@ -221,12 +222,37 @@ class AutoE2EDriver(BaseTrajectoryModel):
         acceleration = float(getattr(input_data, "acceleration", 0.0))
         raw_cmd = getattr(input_data, "command", 1)
         command = self._encode_command(raw_cmd)
+        
+        yaw_rate = 0.0
+        curvature = 0.0
+        ego_pose_history = getattr(input_data, "ego_pose_history", None)
+        if ego_pose_history and len(ego_pose_history) >= 2:
+            prev = ego_pose_history[-2]
+            curr = ego_pose_history[-1]
+            dt = (curr.timestamp_us - prev.timestamp_us) / 1_000_000.0
+            if dt > 0:
+                def extract_yaw(quat: Any) -> float:
+                    return math.atan2(
+                        2.0 * (quat.w * quat.z + quat.x * quat.y),
+                        1.0 - 2.0 * (quat.y * quat.y + quat.z * quat.z)
+                    )
+                try:
+                    prev_yaw = extract_yaw(prev.pose.quat)
+                    curr_yaw = extract_yaw(curr.pose.quat)
+                    diff = curr_yaw - prev_yaw
+                    diff = math.atan2(math.sin(diff), math.cos(diff))
+                    yaw_rate = diff / dt
+                    curvature = yaw_rate / max(speed, 0.1)
+                except AttributeError:
+                    pass  # Gracefully fallback to 0.0 if pose shape is mocked or unrecognized
 
         input_dict = cast(ParserPredictionInput, {
             "cameras": cameras_dict,
             "speed": speed,
             "acceleration": acceleration,
             "command": command,
+            "yaw_rate": yaw_rate,
+            "curvature": curvature,
         })
         
         tensors = self.parser.parse_observation(input_dict)

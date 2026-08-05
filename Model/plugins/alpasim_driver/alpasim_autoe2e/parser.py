@@ -20,6 +20,8 @@ class PredictionInput(TypedDict):
     speed: float
     acceleration: float
     command: int
+    yaw_rate: float
+    curvature: float
 
 class AlpasimStreamParser:
     """Parses live AlpaSim frames into the exact tensor format produced by pre_extracted.py."""
@@ -27,7 +29,7 @@ class AlpasimStreamParser:
         self.camera_names = camera_names
         self._egomotion_buffer: collections.deque[list[float]] = collections.deque(maxlen=_HISTORY_STEPS)
         for _ in range(_HISTORY_STEPS):
-            self._egomotion_buffer.append([0.0, 0.0, 0.0, 0.0])
+            self._egomotion_buffer.append([0.0] * _HISTORY_SIGNALS)
             
     def _decode_image(self, data: Any) -> torch.Tensor:
         """Decode and normalize image exactly as the offline loader."""
@@ -61,7 +63,11 @@ class AlpasimStreamParser:
                 frames.append(self._decode_image(frame_data))
         visual_tiles = torch.stack(frames).unsqueeze(0)
 
-        current_ego = [float(observation["speed"]), float(observation["acceleration"]), 0.0, 0.0]
+        current_ego = [0.0] * _HISTORY_SIGNALS
+        current_ego[0] = float(observation["speed"])
+        current_ego[1] = float(observation["acceleration"])
+        current_ego[2] = float(observation.get("yaw_rate", 0.0))
+        current_ego[3] = float(observation.get("curvature", 0.0))
         self._egomotion_buffer.append(current_ego)
         
         ego_history_np = np.array(self._egomotion_buffer, dtype=np.float32).flatten()

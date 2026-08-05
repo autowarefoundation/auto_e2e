@@ -508,3 +508,63 @@ class TestAlpasimDriverPlugin:
         # Mock prediction output
         pred = driver.predict(PluginPredictionInput(camera_images=fake_images, speed=5.0, acceleration=1.0, command=1, ego_pose_history=[], inference_seed=0))
         assert pred.trajectory_xy.shape == (64, 2)
+
+    def test_dynamic_yaw_rate_and_curvature(self, dummy_checkpoint: str, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Verify yaw_rate and curvature are computed dynamically from ego_pose_history."""
+        import math
+        from dataclasses import dataclass
+
+        @dataclass
+        class MockQuat:
+            w: float
+            x: float
+            y: float
+            z: float
+
+        @dataclass
+        class MockPose:
+            quat: MockQuat
+
+        @dataclass
+        class MockPoseAtTime:
+            timestamp_us: int
+            pose: MockPose
+
+        # A pure yaw rotation has w = cos(theta/2), z = sin(theta/2), x=0, y=0
+        # Let's say prev_yaw = 0.0, curr_yaw = 0.1. dt = 1 second.
+        prev_quat = MockQuat(w=math.cos(0.0 / 2.0), x=0.0, y=0.0, z=math.sin(0.0 / 2.0))
+        curr_quat = MockQuat(w=math.cos(0.1 / 2.0), x=0.0, y=0.0, z=math.sin(0.1 / 2.0))
+
+        prev_pose = MockPoseAtTime(timestamp_us=1000000, pose=MockPose(quat=prev_quat))
+        curr_pose = MockPoseAtTime(timestamp_us=2000000, pose=MockPose(quat=curr_quat))
+
+        driver = AutoE2EDriver(model_checkpoint=dummy_checkpoint, allow_mock=True)
+
+        captured_input = {}
+        def mock_parse_observation(input_dict):
+            nonlocal captured_input
+            captured_input = input_dict
+            # Return dummy tensors to prevent failure
+            return {
+                "visual_tiles": torch.zeros((1, 7, 3, 256, 256)),
+                "camera_params": torch.zeros((1, 7, 3, 4)),
+            }
+        
+        monkeypatch.setattr(driver.parser, "parse_observation", mock_parse_observation)
+
+        pred_input = PluginPredictionInput(
+            camera_images={},
+            speed=10.0,
+            acceleration=0.0,
+            command=1,
+            ego_pose_history=[prev_pose, curr_pose],
+            inference_seed=0,
+        )
+
+        driver.predict(pred_input)
+
+        assert "yaw_rate" in captured_input
+        assert "curvature" in captured_input
+        assert captured_input["yaw_rate"] == pytest.approx(0.1, abs=1e-5)
+        # curvature = yaw_rate / max(speed, 0.1) -> 0.1 / 10.0 = 0.01
+        assert captured_input["curvature"] == pytest.approx(0.01, abs=1e-5)
