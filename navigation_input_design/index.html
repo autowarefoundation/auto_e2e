@@ -1,0 +1,1513 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+      
+      
+      
+      
+      
+        
+      
+      
+      <link rel="icon" href="../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+    
+    
+      
+        <title>Design: Provider-Independent Navigation Input for KITScenes and Runtime Routing - AutoE2E</title>
+      
+    
+    
+      <link rel="stylesheet" href="../assets/stylesheets/main.ec1eaa64.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+    <script>__md_scope=new URL("..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    <body dir="ltr">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#design-provider-independent-navigation-input-for-kitscenes-and-runtime-routing" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href=".." title="AutoE2E" class="md-header__button md-logo" aria-label="AutoE2E" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            AutoE2E
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Design: Provider-Independent Navigation Input for KITScenes and Runtime Routing
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+
+<nav class="md-nav md-nav--primary" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href=".." title="AutoE2E" class="md-nav__button md-logo" aria-label="AutoE2E" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    AutoE2E
+  </label>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href=".." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#document-metadata" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Document Metadata
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#1-executive-summary" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        1. Executive Summary
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+
+<h1 id="design-provider-independent-navigation-input-for-kitscenes-and-runtime-routing">Design: Provider-Independent Navigation Input for KITScenes and Runtime Routing</h1>
+<h2 id="document-metadata">Document Metadata</h2>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Value</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Status</td>
+<td>Accepted</td>
+</tr>
+<tr>
+<td>Owner</td>
+<td>riita10069</td>
+</tr>
+<tr>
+<td>Created</td>
+<td>2026-07-25</td>
+</tr>
+<tr>
+<td>Related issue</td>
+<td><a href="https://github.com/autowarefoundation/auto_e2e/issues/149">#149</a></td>
+</tr>
+<tr>
+<td>Initial training dataset</td>
+<td>KITScenes only</td>
+</tr>
+<tr>
+<td>Initial runtime route provider</td>
+<td>Local Valhalla service</td>
+</tr>
+<tr>
+<td>Initial model route path</td>
+<td>Reactive branch only</td>
+</tr>
+</tbody>
+</table>
+<h2 id="1-executive-summary">1. Executive Summary</h2>
+<h1 id="149-requires-one-navigation-contract-across-the-kitscenes-lanelet2-training">149 requires one navigation contract across the KITScenes Lanelet2 training</h1>
+<p>path and the OSM/Valhalla runtime path:</p>
+<pre><code class="language-text">destination
+    -&gt; RouteProvider
+    -&gt; provider-native global route
+    -&gt; LocalLaneSequenceResolver
+    -&gt; NavigationRoute
+    -&gt; C++ ego-local rasterizer
+    -&gt; map_context + route_mask + validity + provenance
+</code></pre>
+<p>OSM and Lanelet2 are adapters behind this contract. They are not separate model
+interfaces. The first runtime <code>RouteProvider</code> is a vehicle-local Valhalla
+service backed by prebuilt regional tiles. KITScenes training derives the same
+<code>NavigationRoute</code> contract by matching each complete scene trace to its
+Lanelet2 map.</p>
+<p>The training route must not contain the exact future ego trajectory. Directly
+drawing the 64 future ground-truth points would disclose the target that the
+model is trained to predict. KITScenes therefore reduces a complete scene to a
+sequence of selected lanelets. Rasterization uses a fixed-width corridor around
+the selected lanelet centerlines and never draws a sample-specific lateral
+lane-change trajectory.</p>
+<p>The initial information boundary is:</p>
+<pre><code class="language-text">semantic map raster --+
+                      +-&gt; validity gate -&gt; channel concat
+route raster ---------+                    -&gt; navigation encoder
+                                           -&gt; Reactive BEV fusion
+                                           -&gt; Reactive planner at 10 Hz
+
+visual/ego context ---------------------------&gt; Reasoning branch
+</code></pre>
+<p>The route enters only the Reactive branch in the initial implementation. It is
+not supplied to <code>HorizonReasoningHead</code>, its teacher prompt, or a
+Reasoning-specific cache. <code>map_context</code>, <code>route_mask</code>, <code>map_valid</code>, and
+<code>route_valid</code> remain separate at the public API and storage boundaries; the
+model concatenates the gated tensors immediately before its navigation encoder.</p>
+<p>Map and route rasters are generated by an authoritative C++ renderer at about
+2 Hz by decimating 20 Hz localization by ten. A 10 Hz camera/model tick uses
+timestamped localization to apply a cheap SE(2) warp from the latest raster to
+the camera timestamp. Routing, map matching, tile building, and network access
+are never performed in the 10 Hz loop.</p>
+<p>Flyte preprocessing reproduces the same temporal contract: it renders
+deterministic 2 Hz anchor rasters and applies the production SE(2) warp to each
+10 Hz sample. Training therefore does not receive perfectly re-rendered map
+pixels that are unavailable at runtime.</p>
+<p>The work is complete only after a new immutable KITScenes dataset version has
+been produced, a route-conditioned model has been trained, and its result has
+been compared with a controlled no-route baseline on the existing benchmark
+plus junction, maneuver, route-compliance, and offline counterfactual slices.</p>
+<h2 id="2-architectural-decisions">2. Architectural Decisions</h2>
+<h3 id="21-information-flow-boundary">2.1 Information-flow boundary</h3>
+<p>The initial model has two explicit navigation inputs:</p>
+<ul>
+<li><code>map_context</code> and <code>route_mask</code> are gated independently by their explicit
+  validity inputs.</li>
+<li><code>map_context</code>, <code>route_mask</code>, <code>map_valid</code>, and <code>route_valid</code> remain separate in
+  the public data and model ABI.</li>
+<li>The gated map and route tensors are channel-concatenated and encoded by the
+  Reactive navigation encoder.</li>
+<li>The resulting spatial features are passed to <code>MapBEVFusion</code>.</li>
+<li>Route tensors and route-derived features are never supplied to the Reasoning
+  branch in the initial implementation.</li>
+</ul>
+<p>This boundary makes Reactive-only route conditioning observable and testable.
+Reasoning-only and combined Reasoning/Reactive conditioning remain future
+ablations.</p>
+<p>The baseline semantic map contains drivable area, lane boundary, centerline,
+intersection, crosswalk, stop line, static traffic-signal position, traffic
+direction, map validity, and road-level information when available.</p>
+<h3 id="22-rejected-initial-alternatives">2.2 Rejected initial alternatives</h3>
+<ul>
+<li>Exact future-waypoint raster: rejected because it discloses the
+  imitation target rather than navigation intent.</li>
+<li>Manual offline route annotation for inference: rejected because it is not
+  a production navigation interface.</li>
+<li>Independent OSM and Lanelet2 raster contracts: rejected because they
+  would create incompatible training and inference geometry.</li>
+<li>Route input to the Reasoning branch: deferred so the first experiment
+  isolates Reactive-only route conditioning.</li>
+<li>Python or network-dependent vehicle rendering: rejected in favor of a
+  deterministic C++ renderer over locally cached vectors.</li>
+</ul>
+<h2 id="3-goals-and-non-goals">3. Goals and Non-Goals</h2>
+<h3 id="31-goals">3.1 Goals</h3>
+<ol>
+<li>Define one provider-independent vector and raster navigation ABI.</li>
+<li>Support Lanelet2 and OSM through separate adapters.</li>
+<li>Derive a lane-sequence route from KITScenes without exact-trajectory
+   leakage.</li>
+<li>Provide a realistic local Valhalla runtime reference instead of manual route
+   annotation.</li>
+<li>Use one authoritative C++ rasterizer in preprocessing and inference.</li>
+<li>Align navigation pixels exactly with the camera BEV metric frame.</li>
+<li>Preserve route, raster, validity, quality, and provenance losslessly.</li>
+<li>Feed route information only through the Reactive branch initially.</li>
+<li>Train and evaluate the route-conditioned model through Flyte.</li>
+<li>Show the selected route, destination, validity, and quality in
+    DataModelConsole.</li>
+<li>Keep route-less lane following functional.</li>
+</ol>
+<h3 id="32-non-goals-for-the-initial-implementation">3.2 Non-goals for the initial implementation</h3>
+<ul>
+<li>L2D or NVIDIA PhysicalAI-AV route training.</li>
+<li>Cloud routing or live Overpass access from the vehicle.</li>
+<li>Buildings, vegetation, shop names, or other decorative OSM layers.</li>
+<li>Exact lateral lane-change trajectories.</li>
+<li>Alternate-route model input.</li>
+<li>Closed-loop evaluation.</li>
+<li>Map/route dropout, synthetic wrong-route training, or localization/yaw
+  augmentation.</li>
+<li>Separate pretraining of navigation or visual encoders.</li>
+<li>The full map-only/route-only/map+route/blank/shuffled/wrong-route ablation
+  matrix.</li>
+<li>Route conditioning of the Reasoning branch and a Reasoning-state cache.</li>
+</ul>
+<p>Encoder pretraining and broad route-robustness ablations are future work items
+outlined in Section 20.</p>
+<h2 id="4-existing-state-and-gaps">4. Existing State and Gaps</h2>
+<h3 id="41-kitscenes">4.1 KITScenes</h3>
+<p><code>Model/data_parsing/kit_scenes/map.py</code> already renders a 256 by 256 tile over a
+120 m by 120 m area:</p>
+<pre><code class="language-text">radius_meters = 60
+meters_per_pixel = 120 / 256 = 0.46875
+</code></pre>
+<p>Its important gaps are:</p>
+<ul>
+<li>no selected route;</li>
+<li>no route vector artifact;</li>
+<li>palette RGB instead of fixed semantic channels;</li>
+<li>ego centered instead of aligned with the camera BEV origin;</li>
+<li>no per-layer or sample validity;</li>
+<li>no fixed frame/geometry ABI;</li>
+<li>Python/OpenCV rendering through a 2048 by 2048 supersampled canvas;</li>
+<li>lossy JPEG storage in the current shard path.</li>
+</ul>
+<p>The current camera BEV default is also not the same geometry. It uses
+<code>pc_range=(-60, -60, -5, 120, 60, 3)</code>, which is 180 m longitudinal by
+120 m lateral and places the ego one third from the rear edge. A square 256
+pixel raster with square 0.5 or 1.0 meter pixels cannot exactly match that
+rectangular range. Geometry must be selected jointly; it cannot be fixed by
+resizing one branch.</p>
+<h3 id="42-osm">4.2 OSM</h3>
+<p><code>Model/data_parsing/map_rendering/gps_to_map.py</code> currently:</p>
+<ul>
+<li>downloads through Overpass;</li>
+<li>performs nearest-node matching;</li>
+<li>fills gaps with NetworkX shortest paths;</li>
+<li>draws with Matplotlib;</li>
+<li>outputs a 640 by 360 RGB image;</li>
+<li>can draw the raw GPS points and matched route in the same image.</li>
+</ul>
+<p>This is an offline prototype, not a vehicle runtime. It must be replaced by a
+local vector-map adapter and the common C++ rasterizer. Live Overpass requests
+are prohibited.</p>
+<h3 id="43-reasoning">4.3 Reasoning</h3>
+<p><code>HorizonReasoningHead</code> already accepts an optional <code>route_context</code>, but the
+initial #149 implementation deliberately leaves it unset. Existing Reasoning
+labels and prompts remain route-agnostic. Reasoning scheduling and caching are
+separate concerns and do not gate Reactive route conditioning.</p>
+<h3 id="44-why-training-and-runtime-need-one-contract">4.4 Why training and runtime need one contract</h3>
+<p>Implementing the KITScenes and OSM/Valhalla paths independently would create:</p>
+<ul>
+<li>two incompatible pixel geometries;</li>
+<li>two route semantics;</li>
+<li>separate model inputs;</li>
+<li>training/inference skew;</li>
+<li>duplicated rendering code.</li>
+</ul>
+<p>The common contract freezes semantics first. Provider adapters then supply
+canonical vectors to one rasterizer.</p>
+<h2 id="5-system-architecture">5. System Architecture</h2>
+<h3 id="51-offline-kitscenes-path">5.1 Offline KITScenes path</h3>
+<pre><code class="language-text">KITScenes scene
+  |-- Lanelet2 map
+  |-- complete ego pose trace
+  |
+  +-&gt; Lanelet2MapAdapter
+  +-&gt; Lanelet2TraceMatcher
+        |-- pose + heading candidates
+        |-- traffic-rule filtering
+        |-- sequence continuity
+        |-- routing-graph gap fill
+        |-- adjacent-lane transitions
+        v
+      NavigationRoute + RouteQuality
+        |
+        +-&gt; C++ rasterizer at deterministic 2 Hz anchors
+        |     |-- semantic map channels
+        |     |-- route corridor
+        |     |-- destination marker
+        |     +-- validity/metadata
+        +-&gt; production SE(2) warp for each 10 Hz sample
+        |
+        +-&gt; Flyte shard schema v5
+        +-&gt; train_il
+        +-&gt; evaluate + Console
+</code></pre>
+<p>The expensive route derivation is performed once per scene inside Flyte
+<code>data_processing</code>. Vector clipping and rasterization run only on deterministic
+2 Hz anchors. Per-sample work applies the same timestamped warp used at
+runtime.</p>
+<h3 id="52-runtime-path">5.2 Runtime path</h3>
+<pre><code class="language-text">user destination
+  -&gt; local Valhalla /route request
+  -&gt; ValhallaRouteProvider
+  -&gt; OSM local lane graph
+  -&gt; LocalLaneSequenceResolver
+  -&gt; NavigationRoute revision N
+  -&gt; atomic route store
+
+20 Hz localization
+  -&gt; decimate by 10
+  -&gt; C++ rasterizer at about 2 Hz
+  -&gt; timestamped NavigationRaster
+
+10 Hz camera/model tick
+  -&gt; select latest complete raster revision
+  -&gt; SE(2) warp to camera timestamp
+  -&gt; map_context + route_mask to Reactive navigation encoder
+  -&gt; Reactive planner
+</code></pre>
+<p>Valhalla is a global routing provider, not a Lanelet2 route provider. A raw
+Valhalla polyline is not accepted as the canonical lane sequence. It must first
+be resolved against the onboard local lane graph. Where OSM has sufficient
+<code>lanes</code> and <code>turn:lanes</code> attribution, the OSM adapter materializes stable
+directed lane segments. Missing lane detail lowers route confidence and is
+recorded; it must not be silently represented as exact HD-lane knowledge.</p>
+<h2 id="6-vector-contracts">6. Vector Contracts</h2>
+<h3 id="61-coordinate-frames">6.1 Coordinate frames</h3>
+<p>All adapters must make frame conversion explicit:</p>
+<ol>
+<li>Provider frame: WGS84, provider tile coordinates, or Lanelet2 map frame.</li>
+<li>Canonical map frame: local ENU meters.</li>
+<li>Model frame: ego FLU meters, with +X forward and +Y left.</li>
+<li>Pixel frame: row downward and column rightward.</li>
+</ol>
+<p>No adapter may return an unlabelled <code>x, y</code> array. Every vector object carries a
+frame identifier and map origin/projection metadata.</p>
+<h3 id="62-navigationroute">6.2 <code>NavigationRoute</code></h3>
+<p>The canonical route is a selected ordered lane-segment sequence:</p>
+<pre><code class="language-text">NavigationRoute
+  schema_version: string
+  route_id: string
+  revision: uint64
+  provider: string
+  timestamp_ns: int64
+  valid_from_ns: int64
+  map_version: string
+  frame: MapFrame
+  lane_sequence: List[RouteLaneSegment]
+  destination: Destination
+  confidence: float32 in [0, 1]
+  valid: bool
+  quality: RouteQuality
+  estimated_destination: bool
+  provenance: RouteProvenance
+</code></pre>
+<p>The metadata fields <code>route_id</code>, <code>revision</code>, <code>timestamp_ns</code>, <code>map_version</code>,
+<code>provider</code>, <code>confidence</code>, and <code>valid</code> are mandatory.</p>
+<p>Each <code>RouteLaneSegment</code> contains:</p>
+<pre><code class="language-text">lane_id: stable canonical string
+provider_segment_id: provider-native identifier
+centerline_enu_m: N by 3 float64
+left_boundary_enu_m: optional N by 3 float64
+right_boundary_enu_m: optional N by 3 float64
+level: optional int32
+transition_from_previous:
+  follow | left_adjacent | right_adjacent | merge | split
+maneuver:
+  straight | left | right | u_turn | merge | exit | destination | unknown
+confidence: float32
+</code></pre>
+<p>For Lanelet2, <code>lane_id</code> includes the Lanelet2 ID. For OSM, it is a stable
+directed lane identifier derived from map version, OSM way/edge direction, and
+lane index. Provider-native IDs remain available for debugging but never become
+the model ABI.</p>
+<h3 id="63-route-semantics">6.3 Route semantics</h3>
+<ul>
+<li>Only the selected route is stored as model input.</li>
+<li>The full route to the destination is retained in vector form.</li>
+<li>A raster contains only the local crop.</li>
+<li>At most 10 m of route behind the ego is retained in the crop.</li>
+<li>A destination marker is rendered only when the destination lies inside the
+  crop.</li>
+<li>A lane change is represented by adjacent-lane transition metadata and the
+  selected lane segments. No interpolated lateral movement line is generated.</li>
+<li>The route raster is a fixed-width corridor. One width is selected from the
+  KITScenes lane-width audit and frozen per dataset/model contract version.
+  Width is configuration and provenance, not an implicit renderer constant.</li>
+<li>Alternative routes are not model inputs.</li>
+</ul>
+<h3 id="64-navigationmap">6.4 <code>NavigationMap</code></h3>
+<p>Map adapters emit canonical semantic primitives, not colored pixels:</p>
+<pre><code class="language-text">NavigationMap
+  schema_version
+  map_version
+  provider
+  frame
+  bounds
+  drivable_polygons
+  lane_boundaries
+  lane_centerlines
+  intersection_polygons
+  crosswalk_polygons
+  stop_lines
+  static_traffic_signals
+  directed_lane_fields
+  primitive_levels
+  layer_availability
+  provenance
+</code></pre>
+<p>Buildings and vegetation are deliberately absent from the initial contract.
+The static position of a traffic signal is map context; its current color is a
+camera/perception concern.</p>
+<h2 id="7-raster-contract">7. Raster Contract</h2>
+<h3 id="71-navigationrastergeometry">7.1 <code>NavigationRasterGeometry</code></h3>
+<p>Raster geometry is immutable and versioned:</p>
+<pre><code class="language-text">geometry_id
+height_px = 256
+width_px = 256
+meters_per_pixel
+x_min_m, x_max_m
+y_min_m, y_max_m
+ego_anchor_row, ego_anchor_col
+frame = ego_flu
+pixel_convention
+matching_pc_range
+matching_bev_h
+matching_bev_w
+</code></pre>
+<p>The following invariants are enforced:</p>
+<pre><code class="language-text">(x_max_m - x_min_m) / height_px == meters_per_pixel
+(y_max_m - y_min_m) / width_px == meters_per_pixel
+map extent == camera BEV pc_range XY extent
+ego anchor == the origin implied by pc_range
+(x_max_m - x_min_m) / bev_h == (y_max_m - y_min_m) / bev_w
+</code></pre>
+<p>The renderer must output the final dimensions directly. A route mask is never
+resized with bilinear or bicubic interpolation. Any required mask resize uses
+nearest-neighbor interpolation, but the production path should require no
+resize.</p>
+<h3 id="72-geometry-selection-gate">7.2 Geometry selection gate</h3>
+<p>The geometry audit is recorded in
+<a href="../navigation_geometry_audit.json"><code>Docs/navigation_geometry_audit.json</code></a>. It
+uses the 404 non-empty KITScenes v2.2 scene-path artifacts and 60,443 valid
+6.4-second horizon pairs. The measured distribution is:</p>
+<table>
+<thead>
+<tr>
+<th>Quantity</th>
+<th style="text-align: right;">p50</th>
+<th style="text-align: right;">p90</th>
+<th style="text-align: right;">p95</th>
+<th style="text-align: right;">p99</th>
+<th style="text-align: right;">max</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Speed (m/s)</td>
+<td style="text-align: right;">7.15</td>
+<td style="text-align: right;">13.60</td>
+<td style="text-align: right;">15.51</td>
+<td style="text-align: right;">20.68</td>
+<td style="text-align: right;">28.20</td>
+</tr>
+<tr>
+<td>6.4 s displacement (m)</td>
+<td style="text-align: right;">44.15</td>
+<td style="text-align: right;">86.57</td>
+<td style="text-align: right;">100.25</td>
+<td style="text-align: right;">131.35</td>
+<td style="text-align: right;">178.81</td>
+</tr>
+<tr>
+<td>Absolute lateral displacement (m)</td>
+<td style="text-align: right;">2.44</td>
+<td style="text-align: right;">14.89</td>
+<td style="text-align: right;">22.81</td>
+<td style="text-align: right;">38.21</td>
+<td style="text-align: right;">59.26</td>
+</tr>
+</tbody>
+</table>
+<p>The candidates cover:</p>
+<table>
+<thead>
+<tr>
+<th>Resolution</th>
+<th style="text-align: right;">Longitudinal extent</th>
+<th style="text-align: right;">Lateral extent</th>
+<th style="text-align: right;">Coverage</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>0.5 m/px</td>
+<td style="text-align: right;">42.75 m rear, 85.25 m front</td>
+<td style="text-align: right;">64 m each side</td>
+<td style="text-align: right;">89.31%</td>
+</tr>
+<tr>
+<td>1.0 m/px</td>
+<td style="text-align: right;">85.5 m rear, 170.5 m front</td>
+<td style="text-align: right;">128 m each side</td>
+<td style="text-align: right;">99.79%</td>
+</tr>
+</tbody>
+</table>
+<p>The selected initial geometry is <code>kitscenes-v3-bev-1m-v1</code>: 256 by 256 pixels,
+1.0 m/px, <code>x=[-85.5, 170.5]</code>, <code>y=[-128, 128]</code>, ego anchor
+<code>(row=170.0, col=127.5)</code>, and matching camera BEV
+<code>pc_range=(-85.5, -128, -5, 170.5, 128, 3)</code>. Pixel coordinates refer to cell
+centers. Camera BEV and navigation geometry change together.</p>
+<h3 id="73-semantic-map-channels">7.3 Semantic map channels</h3>
+<p>The baseline uses fixed semantic channels:</p>
+<table>
+<thead>
+<tr>
+<th style="text-align: right;">Index</th>
+<th>Channel</th>
+<th>Storage/model range</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align: right;">0</td>
+<td>drivable area</td>
+<td>binary / [0, 1]</td>
+</tr>
+<tr>
+<td style="text-align: right;">1</td>
+<td>lane boundary</td>
+<td>binary / [0, 1]</td>
+</tr>
+<tr>
+<td style="text-align: right;">2</td>
+<td>lane centerline</td>
+<td>binary / [0, 1]</td>
+</tr>
+<tr>
+<td style="text-align: right;">3</td>
+<td>intersection</td>
+<td>binary / [0, 1]</td>
+</tr>
+<tr>
+<td style="text-align: right;">4</td>
+<td>crosswalk</td>
+<td>binary / [0, 1]</td>
+</tr>
+<tr>
+<td style="text-align: right;">5</td>
+<td>stop line</td>
+<td>binary / [0, 1]</td>
+</tr>
+<tr>
+<td style="text-align: right;">6</td>
+<td>static traffic signal</td>
+<td>binary / [0, 1]</td>
+</tr>
+<tr>
+<td style="text-align: right;">7</td>
+<td>traffic direction sin, encoded as <code>(sin + 1) / 2</code></td>
+<td>float32 / [0, 1]</td>
+</tr>
+<tr>
+<td style="text-align: right;">8</td>
+<td>traffic direction cos, encoded as <code>(cos + 1) / 2</code></td>
+<td>float32 / [0, 1]</td>
+</tr>
+<tr>
+<td style="text-align: right;">9</td>
+<td>traffic direction valid</td>
+<td>binary / [0, 1]</td>
+</tr>
+<tr>
+<td style="text-align: right;">10</td>
+<td>known map area</td>
+<td>binary / [0, 1]</td>
+</tr>
+<tr>
+<td style="text-align: right;">11</td>
+<td>road level, versioned normalized encoding</td>
+<td>float32 / [0, 1]</td>
+</tr>
+<tr>
+<td style="text-align: right;">12</td>
+<td>road level valid</td>
+<td>binary / [0, 1]</td>
+</tr>
+<tr>
+<td style="text-align: right;">13</td>
+<td>overlapping-level ambiguity</td>
+<td>binary / [0, 1]</td>
+</tr>
+</tbody>
+</table>
+<p>The vector map always retains level when the provider supplies it. At a raster
+overlap, the initial renderer selects the ego/route-connected level and marks
+ambiguity. It must not merge a bridge and road into an unexplained single
+drivable surface.</p>
+<p>The model receives <code>float32</code> in <code>[0, 1]</code> without ImageNet RGB normalization.
+Binary layers may be stored as <code>uint8</code> and converted losslessly at load time.</p>
+<h3 id="74-route-channels">7.4 Route channels</h3>
+<p><code>route_mask</code> is separate from <code>map_context</code>:</p>
+<table>
+<thead>
+<tr>
+<th style="text-align: right;">Index</th>
+<th>Channel</th>
+<th>Storage/model range</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align: right;">0</td>
+<td>selected fixed-width route corridor</td>
+<td>binary / [0, 1]</td>
+</tr>
+<tr>
+<td style="text-align: right;">1</td>
+<td>destination marker</td>
+<td>binary / [0, 1]</td>
+</tr>
+</tbody>
+</table>
+<p>The persisted mask is binary and lossless. <code>route_valid</code> is also supplied as a
+sample-level scalar; an all-zero mask alone is not used to distinguish "no
+route", "destination outside crop", and "render failure".</p>
+<h3 id="75-raster-metadata">7.5 Raster metadata</h3>
+<p>Every raster carries:</p>
+<pre><code class="language-text">geometry_id
+map_version
+route_id
+route_revision
+render_timestamp_ns
+localization_timestamp_ns
+sample_timestamp_ns
+render_pose_enu
+sample_pose_enu
+render_to_sample_se2
+map_valid
+route_valid
+layer_availability
+route_confidence
+renderer_version
+input_vector_sha256
+</code></pre>
+<p><code>map_valid</code> and <code>route_valid</code> are explicit model inputs and are included in
+evaluation output.</p>
+<h2 id="8-kitscenes-route-derivation">8. KITScenes Route Derivation</h2>
+<h3 id="81-scene-level-matching">8.1 Scene-level matching</h3>
+<p>The entire scene trace is matched once. It is not matched independently for
+each 64-step training target.</p>
+<p>For every pose:</p>
+<ol>
+<li>Query candidate lanelets within a configured metric radius.</li>
+<li>Score position and heading, using probabilistic matching when covariance is
+   available.</li>
+<li>Remove candidates that violate participant traffic rules.</li>
+<li>Use sequence optimization across the full scene so isolated nearest-lane
+   choices cannot jump between disconnected or opposite-direction lanelets.</li>
+<li>Fill non-adjacent matched gaps with the routing graph shortest path.</li>
+<li>Preserve valid left/right adjacent transitions as lane changes.</li>
+<li>Deduplicate consecutive lanelet IDs while retaining transition metadata.</li>
+</ol>
+<p>The sequence optimizer records its distance, heading, traffic-rule, transition,
+and gap-fill costs in versioned matcher configuration. Tie-breaking is stable
+and deterministic.</p>
+<h3 id="82-destination">8.2 Destination</h3>
+<p>The final valid matched scene lanelet and final scene position form the
+training destination. This is an estimated destination, not a user-entered
+navigation goal, so:</p>
+<pre><code class="language-text">estimated_destination = true
+destination_source = &quot;kitscenes_scene_end&quot;
+</code></pre>
+<p>must be present in the route artifact and dataset manifest.</p>
+<h3 id="83-failure-and-quality-policy">8.3 Failure and quality policy</h3>
+<p>A failed sample is not silently removed. It receives:</p>
+<pre><code class="language-text">route_valid = false
+route_mask = zeros
+RouteQuality.failure_reason
+</code></pre>
+<p>Scene-level quality includes:</p>
+<ul>
+<li>matched-pose ratio;</li>
+<li>median and p95 lateral match distance;</li>
+<li>median and p95 heading error;</li>
+<li>number and length of shortest-path fills;</li>
+<li>number of adjacent-lane transitions;</li>
+<li>unresolved discontinuities;</li>
+<li>confidence;</li>
+<li>failure reasons.</li>
+</ul>
+<p>Before the full repack, a route-audit Flyte task measures the corpus and freezes
+scene-exclusion thresholds in configuration. The policy is:</p>
+<ul>
+<li>keep individual invalid samples as route-less samples;</li>
+<li>exclude a scene from route-conditioned training when valid route coverage is
+  below the audited threshold, an unresolved discontinuity remains, or the
+  configured p95 distance/heading limits are exceeded;</li>
+<li>retain excluded-scene reports in the published quality artifact.</li>
+</ul>
+<p>The numerical distance and heading limits are derived from the corpus audit and
+stored in versioned configuration.</p>
+<h3 id="84-leakage-prevention">8.4 Leakage prevention</h3>
+<p>The implementation must make it impossible to reintroduce target drawing
+through a convenience path:</p>
+<ul>
+<li><code>NavigationRoute</code> has no per-sample future-waypoint field.</li>
+<li>Rasterizer input is only map geometry, selected lane IDs, destination, ego
+  pose, and geometry configuration.</li>
+<li>The route corridor comes from lane centerlines, never ego future positions.</li>
+<li>Lateral offsets, speed profile, acceleration, and curvature targets are not
+  route fields.</li>
+<li>Synthetic traces with different speeds and lateral offsets but the same
+  selected lane sequence must produce the same scene-level route.</li>
+<li>Perturbing a future trajectory while holding selected lane IDs fixed must not
+  change the route raster for a fixed ego pose.</li>
+<li>Artifact inspection verifies that no 64-step target coordinate array is
+  serialized into navigation members.</li>
+</ul>
+<p>The selected route intentionally reveals navigation intent at a fork. It must
+not reveal the exact trajectory used as the imitation target.</p>
+<h2 id="9-c-rasterizer">9. C++ Rasterizer</h2>
+<h3 id="91-authority-and-bindings">9.1 Authority and bindings</h3>
+<p>The C++ renderer is authoritative for both training and runtime. It exposes:</p>
+<pre><code class="language-text">render(
+  NavigationMapView,
+  NavigationRouteView,
+  EgoPose,
+  NavigationRasterGeometry
+) -&gt; NavigationRaster
+
+warp(
+  NavigationRaster,
+  RenderPose,
+  SamplePose,
+  NavigationRasterGeometry
+) -&gt; NavigationRaster
+</code></pre>
+<p>Python preprocessing calls the same library through a thin binding. The
+runtime can link the C++ library directly. No Matplotlib, OSMnx, network fetch,
+or Python plotting code is on the production path.</p>
+<p>A small Python reference renderer remains test-only. Golden fixtures compare
+Python and C++ output for:</p>
+<ul>
+<li>ENU -&gt; ego FLU -&gt; pixel transforms;</li>
+<li>ego anchor and crop boundaries;</li>
+<li>each semantic channel;</li>
+<li>direction encoding;</li>
+<li>route corridor width;</li>
+<li>10 m rear clipping;</li>
+<li>destination entry/exit at the crop edge;</li>
+<li>adjacent-lane transition without a lateral target line;</li>
+<li>level overlap;</li>
+<li>invalid map and route cases;</li>
+<li>2 Hz anchor to 10 Hz sample translation/rotation;</li>
+<li>newly exposed unknown pixels after a warp;</li>
+<li>direction-vector rotation during a warp.</li>
+</ul>
+<p>Binary channels require exact equality. Float direction/level channels use a
+documented numerical tolerance.</p>
+<h3 id="92-determinism">9.2 Determinism</h3>
+<ul>
+<li>Direct target-resolution rasterization; no 2048 pixel supersampling.</li>
+<li>Stable primitive and segment ordering.</li>
+<li>Fixed polygon fill and line-coverage rules.</li>
+<li>No antialiasing on binary route channels.</li>
+<li>No locale-dependent parsing.</li>
+<li>No network or wall-clock input.</li>
+<li>Same input vectors and configuration produce byte-identical artifacts.</li>
+</ul>
+<h3 id="93-runtime-budget">9.3 Runtime budget</h3>
+<p>On the target vehicle-class reference hardware:</p>
+<ul>
+<li>p95 C++ map+route render latency: at most 20 ms;</li>
+<li>renderer resident memory increase: at most 100 MB;</li>
+<li>no allocation growth over a 30 minute soak test;</li>
+<li>route revision swap is atomic;</li>
+<li>missed deadlines retain the previous valid raster and increment diagnostics.</li>
+</ul>
+<p>The model and vector-map cache are measured separately from the renderer budget.</p>
+<h2 id="10-flyte-and-dataset-contract">10. Flyte and Dataset Contract</h2>
+<h3 id="101-processing-location">10.1 Processing location</h3>
+<p>Scene-level route generation belongs inside Flyte <code>data_processing</code>, after raw
+scene materialization and before sample packing. It runs once per scene and is
+cache-keyed by:</p>
+<pre><code class="language-text">source revision
+scene ID
+map SHA-256
+matcher version/config
+traffic-rule config
+navigation contract version
+renderer version
+geometry ID
+</code></pre>
+<p>The task is fully offline and deterministic. It cannot call Overpass, Valhalla,
+or any external map service for KITScenes.</p>
+<p>KITScenes source poses are grouped onto a deterministic 500 ms anchor grid.
+The C++ renderer produces one map/route raster per anchor, and the production
+warp generates each 10 Hz sample tensor from the latest non-future anchor.
+Anchor timestamp, sample timestamp, and relative transform are persisted for
+audit.</p>
+<h3 id="102-shard-schema-v5">10.2 Shard schema v5</h3>
+<p>KITScenes v2.2 remains immutable. This breaking contract publishes a new
+KITScenes v3.0 dataset after audit and full repack.</p>
+<p>Each scene partition contains one scene-level vector route artifact and sample
+members that reference its digest. Proposed members are:</p>
+<pre><code class="language-text">scene_navigation.json
+scene_navigation_geometry.npz
+navigation_quality.json
+
+&lt;sample_uid&gt;.map_semantic.npz
+&lt;sample_uid&gt;.route_mask.npz
+&lt;sample_uid&gt;.navigation_meta.json
+</code></pre>
+<p>The exact container may change after storage benchmarks, but these invariants
+do not:</p>
+<ul>
+<li>no JPEG for semantic map or route;</li>
+<li>binary channels remain lossless;</li>
+<li>float direction/level channels retain exact stored float32 values;</li>
+<li>route vector and provenance can regenerate every sample raster;</li>
+<li>tar members and compressed containers are deterministic;</li>
+<li>all content is covered by manifest hashes.</li>
+</ul>
+<p><code>navigation_quality.json.sample_count</code> counts source poses used for the
+scene-level trace match. <code>manifest.json.total_samples</code> counts packed training
+windows after history/future eligibility filtering. These values are not
+expected to be equal. The packed quality audit exposes them unambiguously as
+<code>trace_pose_count</code> and <code>packed_sample_count</code>, and binds the scene decision to
+the partition through the manifest and quality-artifact hashes.</p>
+<p>The loader materializes:</p>
+<pre><code class="language-text">map_context: float32 [B, C_map, 256, 256]
+route_mask: float32 [B, 2, 256, 256]
+map_valid: bool [B]
+route_valid: bool [B]
+navigation_metadata: non-model audit data
+</code></pre>
+<p>L2D and NVIDIA remain on their existing contracts during this milestone.</p>
+<h3 id="103-reasoning-labels">10.3 Reasoning labels</h3>
+<p>The initial #149 implementation does not add route information to the
+Reasoning teacher request or label schema. Existing 1 Hz Reasoning labels remain
+valid because the model's Reasoning branch receives no route input. A future
+Reasoning-conditioning experiment must introduce a separately versioned prompt,
+label artifact, and model contract.</p>
+<h2 id="11-model-integration">11. Model Integration</h2>
+<h3 id="111-public-abi">11.1 Public ABI</h3>
+<p>The forward/data API keeps the inputs separate:</p>
+<pre><code class="language-text">map_context
+route_mask
+map_valid
+route_valid
+</code></pre>
+<p>The current ambiguous <code>map_input</code> name is replaced as part of the breaking
+research-phase contract change.</p>
+<h3 id="112-information-flow">11.2 Information flow</h3>
+<p>The initial model enforces:</p>
+<pre><code class="language-text">map_context -- map_valid gate --+
+                                +-&gt; channel concat
+route_mask --- route_valid gate-+   -&gt; Reactive navigation encoder
+                                    -&gt; spatial navigation features
+                                    -&gt; MapBEVFusion
+                                    -&gt; Reactive planner
+
+visual history + ego context ------&gt; HorizonReasoningHead
+                                    -&gt; optional ReasoningCoupling
+                                    -&gt; Reactive planner
+</code></pre>
+<p>Map and route remain distinct inputs until validity gating. Channel
+concatenation provides one shared spatial encoder without conflating storage or
+validity semantics. Route-derived tensors must not be arguments to
+<code>HorizonReasoningHead</code>. A model unit test registers hooks and verifies this
+information-flow invariant.</p>
+<p>All encoders use semantic <code>[0, 1]</code> inputs without ImageNet RGB normalization.
+No map-specific or general encoder pretraining is added initially.</p>
+<h3 id="113-validity">11.3 Validity</h3>
+<ul>
+<li><code>map_valid=false</code>: zero the map residual and continue camera-based planning.</li>
+<li><code>route_valid=false</code>: zero the route channels and use the route-less Reactive
+  path.</li>
+<li>Route-less operation must retain lane-follow behavior.</li>
+<li>Validity is never inferred only from tensor contents.</li>
+</ul>
+<h3 id="114-route-update-behavior">11.4 Route update behavior</h3>
+<p>The 10 Hz Reactive call consumes the latest timestamp-aligned map and route
+raster. Route planning and vector resolution occur only on destination or
+reroute events; raster generation remains approximately 2 Hz and each model
+tick applies the production SE(2) warp. No route-specific neural latent cache is
+required for the initial Reactive-only path.</p>
+<h2 id="12-runtime-synchronization-and-rendering-rate">12. Runtime Synchronization and Rendering Rate</h2>
+<h3 id="121-clocks">12.1 Clocks</h3>
+<ul>
+<li>localization input: 20 Hz;</li>
+<li>authoritative C++ raster: every tenth localization update, about 2 Hz;</li>
+<li>camera and Reactive planner: 10 Hz.</li>
+</ul>
+<p>This follows the useful scheduling pattern in openpilot v0.9.4, where
+<code>liveLocationKalman</code> publishes at 20 Hz for cars and the map renderer uses
+<code>LLK_DECIMATION = 10</code>. It does not copy openpilot's 2 m/px geometry.</p>
+<h3 id="122-timestamp-alignment">12.2 Timestamp alignment</h3>
+<p>Every camera inference chooses localization and navigation state by timestamp.
+Route revision, camera frame, localization pose, and raster metadata are
+recorded in the inference result.</p>
+<p>A 2 Hz ego-centric raster cannot simply be held for 500 ms at 0.5 m/px. At
+20 m/s that would create about 20 pixels of longitudinal error. Therefore each
+10 Hz tick applies the relative localization transform:</p>
+<pre><code class="language-text">T_render_ego_to_camera_ego
+</code></pre>
+<p>to warp the latest map and route raster into the camera timestamp. Binary map
+and route channels and categorical road level use nearest-neighbor sampling.
+Continuous direction channels use validity-aware interpolation and are rotated
+as vectors, not only spatially warped. Pixels newly exposed by the warp become
+unknown in the map-validity layer.</p>
+<p>Maximum accepted timestamp skew and raster age are versioned configuration and
+reported. Stale inputs are marked invalid instead of silently treated as
+current.</p>
+<h2 id="13-valhalla-reference-provider">13. Valhalla Reference Provider</h2>
+<h3 id="131-deployment">13.1 Deployment</h3>
+<ul>
+<li>Valhalla runs as a vehicle-local service.</li>
+<li>Regional Valhalla tiles and OSM/lane-graph data are built before the drive.</li>
+<li>Driving never fetches Overpass data.</li>
+<li>Route requests occur on destination selection or rerouting, not every frame.</li>
+<li>The initial request uses the <code>auto</code> costing model and requests route shape,
+  maneuvers, turn-lane guidance, and a request ID.</li>
+</ul>
+<h3 id="132-provider-interface">13.2 Provider interface</h3>
+<pre><code class="language-text">RouteProvider.plan(
+  current_pose,
+  destination,
+  map_version
+) -&gt; ProviderRoute
+
+LocalLaneSequenceResolver.resolve(
+  ProviderRoute,
+  NavigationMap
+) -&gt; NavigationRoute
+</code></pre>
+<p>The Valhalla adapter consumes route shape, maneuver shape indices, bearings,
+turn lanes, and provider attribution where available. A separate local resolver
+maps these to canonical directed lane segments.</p>
+<p>Valhalla can provide road-edge and turn-lane guidance, but not a guaranteed
+Lanelet2 lane ID sequence. The resolver must express uncertainty:</p>
+<ul>
+<li>exact lane geometry available: emit selected lane IDs with high confidence;</li>
+<li>only lane-count/turn-lane attribution available: emit synthesized lane
+  segments with lower confidence;</li>
+<li>no defensible lane resolution: <code>route_valid=false</code> for lane-level
+  conditioning rather than inventing precision.</li>
+</ul>
+<h3 id="133-rerouting">13.3 Rerouting</h3>
+<p>New routes are built under a new revision and committed atomically after
+validation. During computation or a transient provider failure, the previous
+valid route remains active. A failed replacement never partially overwrites the
+route currently used by the model.</p>
+<h2 id="14-evaluation">14. Evaluation</h2>
+<h3 id="141-required-training-experiment">14.1 Required training experiment</h3>
+<p>Use the same immutable KITScenes v3.0 split, semantic map tensors, geometry,
+camera inputs, non-route model configuration, optimizer policy, training
+budget, and evaluation code for:</p>
+<ol>
+<li>controlled baseline with route conditioning disabled;</li>
+<li>map + Reactive-only route conditioning with production raster/warp
+   semantics.</li>
+</ol>
+<p>Both runs use the same explicitly recorded training seed. The seed is applied
+to Python, NumPy, Torch, and CUDA before model construction, with a fixed cuDNN
+determinism policy, and is persisted in checkpoint and MLflow provenance. This
+controls model initialization and sample-order randomness across the two
+conditions without claiming cross-hardware bitwise reproducibility.</p>
+<p>The v3.0 split manifest inherits the exact scene, sample UID, and train/dev
+membership inventory from the frozen v2.2 manifest and pins that parent by
+SHA-256. It independently fixes the v3.0 packed-contract digest, so the
+comparison preserves benchmark membership without accepting legacy shards as
+navigation inputs.</p>
+<p>The legacy checkpoint remains a continuity reference, but it is not the
+controlled baseline because the dataset, semantic map contract, and geometry
+have changed. This is not a separate benchmark track. Results are added to the
+existing KITScenes benchmark output and MLflow run.</p>
+<p>Implementation completion requires a full comparable run and published
+analysis, even if the research hypothesis is not supported. The hypothesis is
+considered supported when junction/route metrics improve without an
+unacceptable aggregate regression.</p>
+<p>The frozen primary metric is wrong-branch rate on route-valid junction samples;
+lower is better. The route-conditioned model supports the initial hypothesis
+only when the paired bootstrap 95% confidence interval for
+<code>conditioned - baseline</code> is entirely below zero and neither aggregate ADE nor
+aggregate FDE regresses by more than 2.0% relative to the controlled baseline.
+At least 30 paired eligible junction samples are required. A smaller eligible
+count makes the result inconclusive rather than positive. These gates are fixed
+before the full route-conditioned result is inspected.</p>
+<h3 id="142-metrics">14.2 Metrics</h3>
+<p>Retain existing ADE/FDE and add:</p>
+<ul>
+<li>ADE/FDE for junction vs non-junction;</li>
+<li>ADE/FDE for route maneuver: left, right, straight;</li>
+<li>wrong-branch rate at junctions;</li>
+<li>predicted-path distance outside the selected route corridor;</li>
+<li>selected-lane sequence compliance;</li>
+<li>destination-approach error when the marker is visible;</li>
+<li>valid-route coverage and invalid-route performance;</li>
+<li>route-valid vs route-invalid performance delta.</li>
+</ul>
+<p>Predicted acceleration/curvature controls are integrated with the repository's
+vehicle dynamics before spatial route-compliance metrics are computed.</p>
+<p>Report bootstrap confidence intervals, corpus counts, and route-quality
+distribution for every slice. Do not report an improvement from a very small
+left/right subset without its uncertainty.</p>
+<h3 id="143-offline-counterfactual-tests">14.3 Offline counterfactual tests</h3>
+<p>Closed-loop simulation is out of scope, but offline counterfactuals are
+required:</p>
+<ul>
+<li>hold camera/map/ego inputs fixed and swap between valid left/right/straight
+  routes at a fork;</li>
+<li>verify that the predicted controls change in the selected direction;</li>
+<li>verify that blank/invalid route preserves lane-follow behavior;</li>
+<li>verify that route swaps affect the planner only through the Reactive
+  navigation encoder;</li>
+<li>verify that exact future targets cannot be reconstructed from serialized
+  route fields as described in Section 8.4.</li>
+</ul>
+<p>These focused counterfactuals do not expand the milestone into the deferred full
+ablation matrix.</p>
+<h2 id="15-datamodelconsole">15. DataModelConsole</h2>
+<p>The new KITScenes version adds:</p>
+<ul>
+<li>route corridor overlay;</li>
+<li>destination marker;</li>
+<li>selected lane IDs and transition types;</li>
+<li>map/route validity;</li>
+<li>route confidence and quality failures;</li>
+<li>map version, route ID/revision, geometry ID, and renderer version;</li>
+<li>layer toggles for semantic map channels;</li>
+<li>a clear distinction between ground-truth trajectory and navigation route.</li>
+</ul>
+<p>The route must never be styled as if it were the ground-truth trajectory.
+Desktop and mobile playback tests verify alignment, no overlap, no horizontal
+overflow, no browser errors, and non-empty canvas pixels.</p>
+<h2 id="16-failure-semantics">16. Failure Semantics</h2>
+<table>
+<thead>
+<tr>
+<th>Condition</th>
+<th>Behavior</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>No destination/route</td>
+<td><code>route_valid=false</code>; lane-follow model path</td>
+</tr>
+<tr>
+<td>KITScenes sample match failure</td>
+<td>Zero route mask, quality record, keep sample</td>
+</tr>
+<tr>
+<td>KITScenes scene below quality threshold</td>
+<td>Exclude from route-conditioned training, retain report</td>
+</tr>
+<tr>
+<td>Map missing/unknown</td>
+<td><code>map_valid=false</code>; camera-only map residual</td>
+</tr>
+<tr>
+<td>Reroute in progress</td>
+<td>Continue previous complete route revision</td>
+</tr>
+<tr>
+<td>New route invalid</td>
+<td>Reject revision and retain previous route</td>
+</tr>
+<tr>
+<td>Raster deadline missed</td>
+<td>Reuse previous raster, warp if valid, increment diagnostic</td>
+</tr>
+<tr>
+<td>Raster too stale</td>
+<td>Mark map/route invalid</td>
+</tr>
+<tr>
+<td>Provider/map version mismatch</td>
+<td>Reject route before rasterization</td>
+</tr>
+</tbody>
+</table>
+<h2 id="17-delivery-scope-and-ownership">17. Delivery Scope and Ownership</h2>
+<h3 id="171-issue-lifecycle">17.1 Issue lifecycle</h3>
+<ul>
+<li>
+<h1 id="149-owns-the-complete-navigation-input-implementation-canonical-contracts">149 owns the complete navigation-input implementation: canonical contracts,</h1>
+  KITScenes Lanelet2 route derivation, C++ rasterization, Flyte packing, Reactive
+  model integration, OSM/Valhalla runtime routing, evaluation, and Console
+  provenance.</li>
+<li>No external issue or contributor workstream gates #149 implementation,
+  training, or evaluation.</li>
+</ul>
+<h3 id="172-implementation-boundaries">17.2 Implementation boundaries</h3>
+<p>All workstreams are owned by <code>riita10069</code>. Exact future-waypoint
+rasterization, direct route input to Reasoning, cloud routing, and closed-loop
+evaluation remain outside the initial scope.</p>
+<h3 id="173-normative-design">17.3 Normative design</h3>
+<p>This document is the normative definition of #149 navigation contracts,
+geometry, ownership, and acceptance criteria. Issue text may summarize the
+design but does not define a parallel interface. Any implementation-driven
+contract change updates this document before the conflicting implementation is
+merged.</p>
+<h2 id="18-staged-delivery">18. Staged Delivery</h2>
+<h3 id="181-pr-1-contract-and-geometry">18.1 PR 1: Contract and geometry</h3>
+<ul>
+<li><code>NavigationRoute</code>, <code>NavigationMap</code>, raster, validity, quality, and provenance
+  schemas.</li>
+<li>KITScenes speed/6.4-second displacement audit.</li>
+<li>Select 0.5 or 1.0 m/px and update matching BEV geometry.</li>
+<li>Coordinate and serialization tests.</li>
+</ul>
+<h3 id="182-pr-2-training-critical-kitscenes-navigation-path">18.2 PR 2: Training-critical KITScenes navigation path</h3>
+<ul>
+<li>Production Lanelet2 semantic adapter.</li>
+<li>Scene-level trace matcher and route-quality output.</li>
+<li>Authoritative C++ rasterizer and Python binding.</li>
+<li>Python/C++ golden parity fixtures.</li>
+<li>Production SE(2) warp.</li>
+<li>20 ms / 100 MB benchmark and soak test.</li>
+</ul>
+<h3 id="183-pr-3-lanelet2-conformance-fixtures">18.3 PR 3: Lanelet2 conformance fixtures</h3>
+<ul>
+<li>Small Lanelet2 maps covering straight lanes, intersections, crosswalks,
+  stop lines, traffic direction, level overlap, and malformed primitives.</li>
+<li>Expected provider-independent semantic primitive manifests.</li>
+<li>Adapter conformance, deterministic-output, and map-quality diagnostic tests.</li>
+</ul>
+<h3 id="184-pr-4-osm-adapter-and-valhalla-provider">18.4 PR 4: OSM adapter and Valhalla provider</h3>
+<ul>
+<li>OSM adapter and local Valhalla reference provider.</li>
+<li>Local lane-sequence resolver and uncertainty handling.</li>
+<li>OSM fixtures against the common vector and raster contracts.</li>
+</ul>
+<h3 id="185-pr-5-flyte-and-dataset">18.5 PR 5: Flyte and dataset</h3>
+<ul>
+<li>Scene-level route generation in <code>data_processing</code>.</li>
+<li>Shard schema v5 and immutable KITScenes v3.0 smoke repack.</li>
+<li>Quality audit, threshold freeze, then full-scene repack.</li>
+</ul>
+<h3 id="186-pr-6-model-and-inference">18.6 PR 6: Model and inference</h3>
+<ul>
+<li>Semantic map input contract.</li>
+<li>Reactive navigation encoder with independently gated map/route inputs and
+  channel concatenation.</li>
+<li>Reactive-only route information path.</li>
+<li><code>map_valid</code>/<code>route_valid</code> gating.</li>
+<li>2 Hz raster scheduling and 10 Hz timestamp warp.</li>
+</ul>
+<h3 id="187-pr-7-evaluation-and-console">18.7 PR 7: Evaluation and Console</h3>
+<ul>
+<li>Full baseline and route-conditioned Flyte training runs.</li>
+<li>Junction/maneuver/route-compliance metrics and counterfactuals.</li>
+<li>MLflow report.</li>
+<li>Console route and semantic-layer overlays.</li>
+</ul>
+<p>PR 1 freezes the contract. Subsequent PRs may be developed in parallel where
+their file ownership is disjoint, but training and evaluation use only merged,
+versioned contracts.</p>
+<h2 id="19-acceptance-criteria">19. Acceptance Criteria</h2>
+<h3 id="191-contract-and-data">19.1 Contract and data</h3>
+<ul>
+<li>One vector/raster ABI works with Lanelet2 and OSM adapters.</li>
+<li>No serialized exact future trajectory is present in route artifacts.</li>
+<li>KITScenes scene routes are deterministic and quality-audited.</li>
+<li>KITScenes v2.2 is unchanged; v3.0 is a complete immutable repack.</li>
+<li>Lossless artifacts regenerate byte-identical rasters.</li>
+<li>Flyte and runtime use the same 2 Hz render plus 10 Hz warp path.</li>
+</ul>
+<h3 id="192-geometry-and-renderer">19.2 Geometry and renderer</h3>
+<ul>
+<li>Map and route use the exact camera BEV XY extent and ego origin.</li>
+<li>Python/C++ golden tests pass.</li>
+<li>Binary route masks remain binary through storage and loading.</li>
+<li>C++ p95 render is at most 20 ms and renderer memory is at most 100 MB.</li>
+</ul>
+<h3 id="193-model-and-runtime">19.3 Model and runtime</h3>
+<ul>
+<li>Route information reaches the planner only through the Reactive navigation
+  encoder.</li>
+<li>Route tensors never enter <code>HorizonReasoningHead</code> in the initial model.</li>
+<li>Map/route raster updates at about 2 Hz with timestamp warp at model ticks.</li>
+<li>Route-less lane following remains functional.</li>
+<li>Rerouting retains the old route until an atomic replacement is valid.</li>
+<li>Local Valhalla works with prebuilt regional data and no cloud dependency.</li>
+</ul>
+<h3 id="194-research-result">19.4 Research result</h3>
+<ul>
+<li>Baseline and route-conditioned models complete comparable Flyte runs.</li>
+<li>Existing ADE/FDE and required route/junction slices are reported.</li>
+<li>Offline route-swap counterfactuals are reported.</li>
+<li>Result and uncertainty are recorded even if route conditioning does not
+  improve the model.</li>
+<li>Console displays route, destination, validity, and provenance distinctly from
+  ground truth.</li>
+</ul>
+<h2 id="20-future-work">20. Future Work</h2>
+<h3 id="201-pretrain-all-encoders">20.1 Pretrain all encoders</h3>
+<p>Investigate pretraining for the visual, map, route, history, and related
+encoders before joint AutoE2E training. This is intentionally broader than the
+comma.ai map-autoencoder approach and should compare frozen, partially frozen,
+and end-to-end fine-tuned initialization.</p>
+<h3 id="202-navigation-robustness-ablations">20.2 Navigation robustness ablations</h3>
+<p>Evaluate map-only, route-only, map+route, blank, shuffled, and wrong-route
+inputs, then add map/route dropout and localization/yaw perturbations. This
+follow-up owns robustness percentages and the broader ablation matrix; the
+initial milestone implements only the focused no-route and route-swap
+counterfactual checks.</p>
+<h3 id="203-reasoning-route-conditioning">20.3 Reasoning route conditioning</h3>
+<p>Compare the initial Reactive-only route path with Reasoning-only and combined
+Reactive/Reasoning conditioning. A Reasoning-conditioned variant requires a
+versioned route encoder, teacher context policy, and 1 Hz latent/token cache;
+none of those are implicit in the initial #149 implementation.</p>
+<h2 id="21-references">21. References</h2>
+<ul>
+<li>AutoE2E <a href="https://github.com/autowarefoundation/auto_e2e/issues/149">#149</a>.</li>
+<li>comma.ai, <a href="https://www.youtube.com/watch?v=ZEMPQjK1ZPw">Navigate on openpilot</a>.</li>
+<li>openpilot v0.9.4
+  <a href="https://github.com/commaai/openpilot/blob/v0.9.4/selfdrive/navd/map_renderer.cc">map renderer</a>
+  and
+  <a href="https://github.com/commaai/openpilot/blob/v0.9.4/selfdrive/locationd/locationd.cc#L713-L715">20 Hz localization publication</a>.</li>
+<li>Valhalla
+  <a href="https://github.com/valhalla/valhalla/blob/master/docs/docs/api/route/api-reference.md">route API</a>
+  and
+  <a href="https://github.com/valhalla/valhalla/blob/master/docs/docs/api/map-matching.md">map matching API</a>.</li>
+<li>Lanelet2
+  <a href="https://github.com/fzi-forschungszentrum-informatik/Lanelet2/blob/master/lanelet2_matching/README.md">matching module</a>.</li>
+<li>Bansal et al.,
+  <a href="https://arxiv.org/abs/1812.03079">ChauffeurNet: Learning to Drive by Imitating the Best and Synthesizing the Worst</a>.</li>
+<li>Codevilla et al.,
+  <a href="https://arxiv.org/abs/1710.02410">End-to-end Driving via Conditional Imitation Learning</a>.</li>
+</ul>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "..", "features": [], "search": "../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+    
+    
+      <script src="../assets/javascripts/bundle.d7400e89.min.js"></script>
+      
+    
+  </body>
+</html>
