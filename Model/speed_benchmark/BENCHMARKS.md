@@ -47,6 +47,33 @@ parameter.
 
 </details>
 
+## NVIDIA GeForce RTX 4080
+
+<details open>
+  <summary>Toggle view</summary>
+
+> CUDA 12.8 | Driver 580.65.06 | PyTorch 2.7.1+cu128 | Commit `9204344` | Resolution [256, 256]
+
+| Model | Backbone | Fusion Mode | Reasoning | Batch | FPS | Latency (ms) | p99 (ms) | Jitter (ms) | VRAM (MB) | Params |
+|-------|----------|-------------|-----------|-------|-----|--------------|----------|-------------|-----------|--------|
+| Reactive | swin_v2_tiny | bev | off | 1 | 69.6 | 14.4 | 15.5 | 1.1 | 375 | 56.8M |
+| Combined | swin_v2_tiny | bev | off | 1 | 45.6 | 21.9 | 22.6 | 0.7 | 525 | 94.7M |
+| Reactive | swin_v2_tiny | bev | off | 2 | 45.9 | 21.8 | 22.5 | 0.8 | 521 | 56.8M |
+| Combined | swin_v2_tiny | bev | off | 2 | 27.2 | 36.8 | 37.9 | 1.2 | 668 | 94.7M |
+| Reactive | swin_v2_tiny | bev | off | 4 | 25.0 | 40.0 | 40.8 | 0.9 | 803 | 56.8M |
+| Combined | swin_v2_tiny | bev | off | 4 | 13.9 | 72.2 | 73.2 | 1.1 | 952 | 94.7M |
+| Reactive | conv_next_v2_tiny | bev | off | 1 | 71.0 | 14.1 | 15.6 | 1.6 | 396 | 57.1M |
+| Combined | conv_next_v2_tiny | bev | off | 1 | 46.4 | 21.6 | 22.1 | 0.6 | 543 | 95.3M |
+| Reactive | conv_next_v2_tiny | bev | off | 2 | 43.8 | 22.8 | 23.5 | 0.7 | 562 | 57.1M |
+| Combined | conv_next_v2_tiny | bev | off | 2 | 25.8 | 38.8 | 39.6 | 0.9 | 707 | 95.3M |
+| Reactive | conv_next_v2_tiny | bev | off | 4 | 23.3 | 42.9 | 43.8 | 1.0 | 887 | 57.1M |
+| Combined | conv_next_v2_tiny | bev | off | 4 | 12.8 | 78.2 | 78.8 | 0.7 | 1034 | 95.3M |
+| Reactive | swin_v2_tiny | bev | pooled_latent | 1 | 64.8 | 15.4 | 16.0 | 0.7 | 388 | 59.4M |
+| Reactive | swin_v2_tiny | bev | horizon_cross_attention | 1 | 64.4 | 15.5 | 16.1 | 0.7 | 389 | 59.6M |
+
+</details>
+
+
 ## NVIDIA GeForce RTX 5080
 
 <details open>
