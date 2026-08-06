@@ -4,6 +4,8 @@ Covers:
   - RasterizedMapEncoder: output shape, channel layout, gradient flow
   - ResidualMapFusion: zero-alpha init, output shape, alpha learns, gradient flow
   - MapCrossAttentionFusion: output shape, map influences output, gradient flow
+  - MapDeformableCrossAttentionFusion: output shape, map influences output,
+    gradient flow, configurable sample points
   - MAP_ENCODER_REGISTRY and MAP_FUSION_REGISTRY
   - AutoE2E navigation integration: validity-gated map/route inputs are encoded
     only by the Reactive branch, and NavigationEncoder / MapBEVFusion
@@ -24,6 +26,9 @@ from model_components.map_encoder import (
 )
 from model_components.map_encoder.map_bev_fusion.residual_fusion import ResidualMapFusion
 from model_components.map_encoder.map_bev_fusion.cross_attention_fusion import MapCrossAttentionFusion
+from model_components.map_encoder.map_bev_fusion.deformable_cross_attention_fusion import (
+    MapDeformableCrossAttentionFusion,
+)
 
 
 _MAP_H = 256
@@ -196,6 +201,68 @@ class TestMapCrossAttentionFusion:
                 f"Expected (1, 32, {h}, {w}), got {tuple(out.shape)}"
 
 
+class TestMapDeformableCrossAttentionFusion:
+    def test_output_shape(self, device):
+        fusion = MapDeformableCrossAttentionFusion(embed_dim=256).to(device)
+        image_bev, map_bev = _make_bev_pair(2, 256, 8, device)
+        out = fusion(image_bev, map_bev)
+        assert out.shape == (2, 256, 8, 8)
+
+    def test_map_influences_output(self, device):
+        fusion = MapDeformableCrossAttentionFusion(embed_dim=256).to(device)
+        fusion.eval()
+        image_bev = torch.randn(1, 256, 8, 8, device=device)
+        map_a = torch.randn(1, 256, 8, 8, device=device)
+        map_b = torch.randn(1, 256, 8, 8, device=device)
+        out_a = fusion(image_bev, map_a)
+        out_b = fusion(image_bev, map_b)
+        assert not torch.allclose(out_a, out_b, atol=1e-5), \
+            "Different map inputs produced identical output — deformable attention has no effect"
+
+    def test_gradient_flows_through_fusion(self, device):
+        fusion = MapDeformableCrossAttentionFusion(embed_dim=64).to(device)
+        image_bev = torch.randn(1, 64, 4, 4, device=device, requires_grad=True)
+        map_bev = torch.randn(1, 64, 4, 4, device=device, requires_grad=True)
+        fusion(image_bev, map_bev).sum().backward()
+        assert image_bev.grad is not None and image_bev.grad.abs().max() > 0
+        assert map_bev.grad is not None and map_bev.grad.abs().max() > 0
+
+    def test_all_parameters_receive_gradients(self, device):
+        fusion = MapDeformableCrossAttentionFusion(embed_dim=64).to(device)
+        image_bev = torch.randn(1, 64, 4, 4, device=device)
+        map_bev = torch.randn(1, 64, 4, 4, device=device)
+        fusion(image_bev, map_bev).sum().backward()
+        no_grad = [n for n, p in fusion.named_parameters()
+                   if p.requires_grad and p.grad is None]
+        assert not no_grad, f"Parameters without grad: {no_grad}"
+
+    def test_no_nan_with_zero_inputs(self, device):
+        fusion = MapDeformableCrossAttentionFusion(embed_dim=64).to(device)
+        out = fusion(
+            torch.zeros(1, 64, 4, 4, device=device),
+            torch.zeros(1, 64, 4, 4, device=device),
+        )
+        assert torch.isfinite(out).all()
+
+    def test_output_matches_input_spatial_size(self, device):
+        for h, w in [(4, 4), (8, 8), (7, 7), (4, 8)]:
+            fusion = MapDeformableCrossAttentionFusion(embed_dim=32).to(device)
+            image_bev = torch.randn(1, 32, h, w, device=device)
+            map_bev = torch.randn(1, 32, h, w, device=device)
+            out = fusion(image_bev, map_bev)
+            assert out.shape == (1, 32, h, w), \
+                f"Expected (1, 32, {h}, {w}), got {tuple(out.shape)}"
+
+    def test_num_sample_points_is_configurable(self, device):
+        image_bev, map_bev = _make_bev_pair(1, 32, 8, device)
+        for k in (1, 4, 8):
+            fusion = MapDeformableCrossAttentionFusion(
+                embed_dim=32, num_sample_points=k
+            ).to(device)
+            out = fusion(image_bev, map_bev)
+            assert out.shape == (1, 32, 8, 8), \
+                f"K={k} produced {tuple(out.shape)}"
+
 
 class TestMapRegistries:
     def test_rasterized_in_encoder_registry(self):
@@ -205,9 +272,10 @@ class TestMapRegistries:
         with pytest.raises(ValueError, match="Unknown map_type"):
             build_map_encoder("vectorized")
 
-    def test_residual_and_cross_attn_in_fusion_registry(self):
+    def test_all_fusion_modes_in_registry(self):
         assert "residual" in MAP_FUSION_REGISTRY
         assert "cross_attn" in MAP_FUSION_REGISTRY
+        assert "deformable" in MAP_FUSION_REGISTRY
 
     def test_unknown_fusion_mode_raises(self):
         with pytest.raises(ValueError, match="Unknown map_fusion_mode"):
@@ -224,6 +292,10 @@ class TestMapRegistries:
     def test_build_map_bev_fusion_cross_attn(self, device):
         fusion = build_map_bev_fusion("cross_attn", embed_dim=64).to(device)
         assert isinstance(fusion, MapCrossAttentionFusion)
+
+    def test_build_map_bev_fusion_deformable(self, device):
+        fusion = build_map_bev_fusion("deformable", embed_dim=64).to(device)
+        assert isinstance(fusion, MapDeformableCrossAttentionFusion)
 
 
 class TestAutoE2EMapIntegration:
@@ -341,6 +413,33 @@ class TestAutoE2EMapIntegration:
         traj = model(visual, map_input, vis_hist, ego, mode="infer")
         assert traj.shape == (2, 128)
         assert torch.isfinite(traj).all()
+
+    def test_deformable_fusion_mode_forward_succeeds(self, build_mock_model, device):
+        model = self._make_model(build_mock_model, device, map_fusion_mode="deformable")
+        visual = torch.randn(2, 7, 3, 256, 256, device=device)
+        map_input = torch.randn(2, 3, _MAP_H, _MAP_W, device=device)
+        vis_hist = torch.randn(2, 896, device=device)
+        ego = torch.randn(2, 256, device=device)
+        traj = model(visual, map_input, vis_hist, ego, mode="infer")
+        assert traj.shape == (2, 128)
+        assert torch.isfinite(traj).all()
+
+    def test_deformable_fusion_parameters_receive_gradients(self, build_mock_model, device):
+        model = self._make_model(build_mock_model, device, map_fusion_mode="deformable")
+        model.train()
+
+        visual = torch.randn(2, 7, 3, 256, 256, device=device)
+        map_input = torch.randn(2, 3, _MAP_H, _MAP_W, device=device)
+        vis_hist = torch.randn(2, 896, device=device)
+        ego = torch.randn(2, 256, device=device)
+
+        traj = model(visual, map_input, vis_hist, ego, mode="train")
+        traj.pow(2).mean().backward()
+
+        no_grad = [n for n, p in model.Reactive_E2E.MapBEVFusion.named_parameters()
+                   if p.requires_grad and p.grad is None]
+        assert not no_grad, \
+            f"MapBEVFusion params without grad: {no_grad}"
 
     def test_map_encoder_attribute_exists(self, build_mock_model, device):
         model = self._make_model(build_mock_model, device)
