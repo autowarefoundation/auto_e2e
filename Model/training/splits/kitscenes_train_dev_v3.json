@@ -1,14 +1,14 @@
 {
-  "schema_version": "kitscenes_train_dev_split_v2",
+  "schema_version": "kitscenes_train_dev_split_v3",
   "split_id": "kitscenes_train_dev_v1",
   "dataset_name": "KIT-MRT/KITScenes-Multimodal",
   "source_revision": "6fde0034446669e2ed7235e4c7fe323cd23d599d",
   "source_artifact_set_sha256": "24afc76fc07d74023fa2acc3ee17868dcae5e306be09cbf7350032b636304a12",
-  "dataset_version": "v3.1",
-  "packed_contract_digest": "c81a5746a365246fad8adbc60e68779095012f7d144d179bee3c0226e930e938",
+  "dataset_version": "v3.3",
+  "packed_contract_digest": "6fb9d857d877e570522a59a38097b0f6b3320d8f702bbd05ec9670faa4be6d96",
   "sample_inventory_parent": {
-    "manifest": "kitscenes_train_dev_v1.json",
-    "sha256": "7bffc71254db8a168aa9f5c5dc5b5159abee8a3d5d71b927235fb2a9a56c1194"
+    "manifest": "kitscenes_train_dev_v2.json",
+    "sha256": "b22d3ee109b7d7e5489339b4fe7a1a57d4060524807acd9711005845ad87225f"
   },
   "official_split": "train",
   "available_scene_count": 533,

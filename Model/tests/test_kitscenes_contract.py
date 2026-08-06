@@ -10,6 +10,8 @@ import torch
 pytest.importorskip("kitscenes")
 
 from data_parsing.kit_scenes.camera import (
+    CAMERA_NAMES,
+    NUM_VIEWS,
     compute_camera_projection_matrices,
     load_camera_frame,
 )
@@ -34,6 +36,19 @@ def _dataset_stub(samples):
         for scene_id, _ in samples
     }
     return dataset
+
+
+def test_camera_view_contract_uses_six_non_redundant_views():
+    assert CAMERA_NAMES == [
+        "camera_base_front_center",
+        "camera_ring_front_left",
+        "camera_ring_front_right",
+        "camera_ring_rear",
+        "camera_ring_rear_left",
+        "camera_ring_rear_right",
+    ]
+    assert NUM_VIEWS == len(CAMERA_NAMES) == 6
+    assert "camera_ring_front" not in CAMERA_NAMES
 
 
 def test_sample_uid_is_stable_across_scene_subsets():

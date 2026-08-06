@@ -4,7 +4,7 @@ KIT Scenes stores per-frame JPEGs on disk (not videos), already at the 10 Hz
 reference timeline, so a single ``frame_idx`` indexes every camera and the ego
 poses alike. The ``kitscenes`` SDK's ``SensorDataLoader`` decodes a frame to an
 RGB ``np.ndarray``; this module resizes/normalises it for the AutoE2E backbone
-and stacks the 7 camera views into the tensor the model expects.
+and stacks the 6 camera views into the tensor the model expects.
 
 Camera projection matrices are computed from KITScenes calibration files, with
 intrinsics scaled to match the backbone's actual resize/crop transform.
@@ -22,12 +22,13 @@ from torchvision.transforms import Compose
 from ..calibration import scale_intrinsic
 
 # Camera directories used as visual tiles for the KIT Scenes dataset.
-# Order: hi-res front, then the 6 surround ring cameras. The 2-camera stereo
-# pair (camera_base_front_left_rect/_right_rect) is intentionally dropped; it
-# duplicates forward coverage already given by the ring front camera.
+# Order: long-range front, then the 5 remaining surround ring cameras.
+#
+# camera_ring_front is omitted because it duplicates the long-range front
+# camera's approximately 88-degree forward coverage at a lower resolution.
+# The narrower stereo front pair remains outside the model input contract.
 CAMERA_NAMES: list[str] = [
     "camera_base_front_center",
-    "camera_ring_front",
     "camera_ring_front_left",
     "camera_ring_front_right",
     "camera_ring_rear",
@@ -35,8 +36,8 @@ CAMERA_NAMES: list[str] = [
     "camera_ring_rear_right",
 ]
 
-# Total views fed to the model = 7 cameras.
-NUM_VIEWS = 7
+# Total views fed to the model = 6 cameras.
+NUM_VIEWS = len(CAMERA_NAMES)
 
 def compute_camera_projection_matrices(
     loader: SensorDataLoader,
@@ -119,8 +120,7 @@ def load_camera_frame(
             ``(H, W)``. Images are resized but not normalized.
 
     Returns:
-        Float tensor of shape (7, 3, H, W):
-        7 camera views.
+        Float tensor of shape ``(len(camera_names), 3, H, W)``.
     """
     if camera_names is None:
         camera_names = CAMERA_NAMES
@@ -146,4 +146,4 @@ def load_camera_frame(
         array = np.asarray(image, dtype=np.uint8).copy()
         camera_tensors.append(torch.from_numpy(array).permute(2, 0, 1))
 
-    return torch.stack(camera_tensors, dim=0)  # (7, 3, H, W)
+    return torch.stack(camera_tensors, dim=0)  # (V, 3, H, W)

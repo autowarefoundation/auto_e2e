@@ -55,7 +55,13 @@ DATA_PREP_IMAGE = _os.environ.get(
 
 MLFLOW_URI = "http://mlflow.mlflow.svc.cluster.local:5000"
 DATASET_PACK_VERSION = "v2.2"
-KITSCENES_NAVIGATION_DATASET_VERSION = "v3.0"
+KITSCENES_NAVIGATION_DATASET_VERSION = "v3.3"
+BASELINE_TRAINING_OBJECTIVE_VERSION = "trajectory_imitation_v1"
+KITSCENES_NAVIGATION_OBJECTIVE_VERSION = (
+    "kitscenes_navigation_objective_v1"
+)
+ROLLOUT_ALIGNED_OBJECTIVE_VERSION = "rollout_aligned_planner_v1"
+ROLLOUT_ALIGNED_CONTROL_OBJECTIVE_VERSION = "rollout_aligned_control_v1"
 L2D_SOURCE_REVISION = "main"
 KITSCENES_SOURCE_REVISION = "6fde0034446669e2ed7235e4c7fe323cd23d599d"
 
@@ -208,6 +214,14 @@ KITScenesBenchmarkOutput = NamedTuple(
     fde_5s=float,
     predictions=FlyteFile,
     report=FlyteFile,
+)
+ReconstructionAuditOutput = NamedTuple(
+    "ReconstructionAuditOutput",
+    thresholds_pass=bool,
+    report_sha256=str,
+    records_sha256=str,
+    report=FlyteFile,
+    records=FlyteFile,
 )
 # wf_create_dataset returns just the ready-to-train WebDataset shards (train_il
 # reads reasoning supervision from in-shard reasoning.json members). The
@@ -499,7 +513,7 @@ def _resumed_checkpoint_record(payload: dict, path: str) -> dict:
         raise ValueError(
             "resume checkpoint has no immutable current checkpoint URI"
         )
-    return {
+    record = {
         "epoch": epoch,
         "ade": float(history[-1]["val_ade"]),
         "fde": float(history[-1]["val_fde"]),
@@ -507,6 +521,21 @@ def _resumed_checkpoint_record(payload: dict, path: str) -> dict:
         "sha256": sha256_file(path),
         "size": os.path.getsize(path),
     }
+    metric_contract = history[-1].get("validation_metric_contract")
+    if metric_contract is not None:
+        if not isinstance(metric_contract, dict):
+            raise ValueError(
+                "resume checkpoint metric contract must be a mapping"
+            )
+        record["metric_contract"] = dict(metric_contract)
+    selection = history[-1].get("checkpoint_selection")
+    if selection is not None:
+        if not isinstance(selection, dict):
+            raise ValueError(
+                "resume checkpoint selection state must be a mapping"
+            )
+        record["selection"] = dict(selection)
+    return record
 
 
 def _resume_terminal_state(
@@ -528,6 +557,220 @@ def _resume_terminal_state(
     return completed_epoch == requested_epochs or stopped_early, stopped_early
 
 
+def _resume_policy_transition(
+    *,
+    saved_config: dict,
+    requested_config: dict,
+) -> dict:
+    """Validate and describe the supported continuation transition."""
+    saved_sampling = saved_config.get("junction_sampling")
+    requested_sampling = requested_config.get("junction_sampling")
+    if not isinstance(saved_sampling, dict) or not isinstance(
+        requested_sampling, dict
+    ):
+        raise ValueError(
+            "resume policy transition requires junction sampling metadata"
+        )
+    sampling_changed = saved_sampling != requested_sampling
+    if sampling_changed and not (
+        saved_sampling.get("enabled") is False
+        and requested_sampling.get("enabled") is True
+    ):
+        raise ValueError(
+            "resume policy transition only supports unchanged sampling or "
+            "disabled-to-enabled junction sampling"
+        )
+    saved_patience = int(saved_config.get("early_stopping_patience", 0))
+    requested_patience = int(
+        requested_config.get("early_stopping_patience", 0)
+    )
+    if requested_patience <= saved_patience:
+        raise ValueError(
+            "resume policy transition requires early-stopping patience "
+            "to increase"
+        )
+    return {
+        "policy_version": "dual_best_resume_transition_v1",
+        "junction_sampling": {
+            "from": saved_sampling,
+            "to": requested_sampling,
+            "changed": sampling_changed,
+        },
+        "early_stopping_patience": {
+            "from": saved_patience,
+            "to": requested_patience,
+        },
+        "bad_epochs_before_reset": None,
+        "bad_epochs_after_reset": 0,
+        "scheduler_state_action": (
+            "reset_plateau_state_preserve_optimizer_lr"
+        ),
+        "best_checkpoint_scope": "full_history",
+    }
+
+
+def _restore_resume_optimization_state(
+    optimizer,
+    scheduler,
+    resume_payload: dict,
+    *,
+    transition: dict | None,
+) -> dict:
+    """Restore optimizer state and optionally the plateau scheduler state."""
+    optimizer.load_state_dict(resume_payload["optimizer_state_dict"])
+    plateau_state_restored = transition is None
+    if plateau_state_restored:
+        scheduler.load_state_dict(
+            resume_payload["scheduler_state_dict"]
+        )
+    return {
+        "optimizer_lr": [
+            float(group["lr"]) for group in optimizer.param_groups
+        ],
+        "optimizer_lr_preserved": True,
+        "plateau_state_restored": plateau_state_restored,
+    }
+
+
+def _transition_resume_selection_state(
+    transition: dict | None,
+    *,
+    bad_epochs: int,
+    best_checkpoint: dict | None,
+    best_trajectory_checkpoint: dict | None,
+) -> tuple[int, dict | None, dict | None]:
+    """Reset patience while preserving both historical best checkpoints."""
+    if transition is None:
+        return bad_epochs, best_checkpoint, best_trajectory_checkpoint
+    if bad_epochs < 0:
+        raise ValueError("resume checkpoint has negative bad_epochs")
+    if best_checkpoint is None or best_trajectory_checkpoint is None:
+        raise ValueError(
+            "resume policy transition requires both source best checkpoints"
+        )
+    selection = best_checkpoint.get("selection")
+    trajectory_selection = best_trajectory_checkpoint.get("selection")
+    transition["bad_epochs_before_reset"] = bad_epochs
+    transition["best_before_resume"] = {
+        "epoch": int(best_checkpoint["epoch"]),
+        "uri": str(best_checkpoint["uri"]),
+        "sha256": str(best_checkpoint["sha256"]),
+        "selection_score": (
+            float(selection["score"])
+            if isinstance(selection, dict) and "score" in selection
+            else None
+        ),
+    }
+    transition["best_trajectory_before_resume"] = {
+        "epoch": int(best_trajectory_checkpoint["epoch"]),
+        "uri": str(best_trajectory_checkpoint["uri"]),
+        "sha256": str(best_trajectory_checkpoint["sha256"]),
+        "trajectory_utility": (
+            float(trajectory_selection["components"]["trajectory"])
+            if isinstance(trajectory_selection, dict)
+            and isinstance(trajectory_selection.get("components"), dict)
+            and "trajectory" in trajectory_selection["components"]
+            else None
+        ),
+    }
+    return 0, best_checkpoint, best_trajectory_checkpoint
+
+
+def _best_trajectory_checkpoint_from_history(
+    metric_history: list[dict],
+    *,
+    expected_policy_version: str,
+    min_delta: float,
+) -> dict:
+    """Reconstruct the immutable trajectory-best record from metric history."""
+    import math
+
+    best = None
+    best_utility = None
+    for entry in metric_history:
+        selection = entry.get("checkpoint_selection")
+        if (
+            isinstance(selection, dict)
+            and selection.get("policy_version") != expected_policy_version
+        ):
+            raise ValueError(
+                "metric history trajectory selection policy differs from "
+                "the requested selector"
+            )
+        components = (
+            selection.get("components")
+            if isinstance(selection, dict)
+            else None
+        )
+        if not isinstance(components, dict) or "trajectory" not in components:
+            continue
+        utility = float(components["trajectory"])
+        if not math.isfinite(utility):
+            raise ValueError("metric history has non-finite trajectory utility")
+        if best is not None and utility <= float(best_utility) + min_delta:
+            continue
+        uri = str(entry.get("checkpoint_uri", ""))
+        sha256 = entry.get("checkpoint_sha256") or ""
+        if (
+            not uri.startswith("s3://")
+            or not isinstance(sha256, str)
+            or len(sha256) != 64
+            or any(character not in "0123456789abcdef" for character in sha256)
+        ):
+            raise ValueError(
+                "metric history trajectory best lacks immutable checkpoint "
+                "identity"
+            )
+        best = {
+            "epoch": int(entry["epoch"]),
+            "ade": float(entry["val_ade"]),
+            "fde": float(entry["val_fde"]),
+            "uri": uri,
+            "sha256": sha256,
+            "selection": dict(selection),
+            "metric_contract": dict(
+                entry["validation_metric_contract"]
+            ),
+        }
+        best_utility = utility
+    if best is None:
+        raise ValueError("metric history has no trajectory checkpoint")
+    return best
+
+
+def _dual_best_improvements(
+    selection: dict,
+    *,
+    best_selection: dict | None,
+    best_trajectory_selection: dict | None,
+    min_delta: float,
+) -> tuple[bool, bool]:
+    """Return independent composite-score and trajectory improvements."""
+    from evaluation.checkpoint_selection import score_is_better
+
+    score = float(selection["score"])
+    trajectory = float(selection["components"]["trajectory"])
+    score_improved = (
+        best_selection is None
+        or score_is_better(
+            score,
+            float(best_selection["score"]),
+            min_delta=min_delta,
+        )
+    )
+    trajectory_improved = (
+        best_trajectory_selection is None
+        or score_is_better(
+            trajectory,
+            float(
+                best_trajectory_selection["components"]["trajectory"]
+            ),
+            min_delta=min_delta,
+        )
+    )
+    return score_improved, trajectory_improved
+
+
 def _collated_metadata_value(
     metadata,
     key: str,
@@ -545,6 +788,29 @@ def _collated_metadata_value(
     if hasattr(value, "item"):
         return value.item()
     return value
+
+
+def _accumulate_rollout_epoch_terms(
+    term_sums: dict[str, float],
+    term_weights: dict[str, int],
+    terms: dict,
+    *,
+    batch_sample_count: int,
+) -> None:
+    """Accumulate diagnostics using their actual eligible sample counts."""
+    active_count_keys = {
+        "map": "map_sample_count",
+        "route": "route_sample_count",
+        "drivable": "drivable_sample_count",
+    }
+    for name in term_sums:
+        weight = (
+            int(terms[active_count_keys[name]].item())
+            if name in active_count_keys
+            else batch_sample_count
+        )
+        term_sums[name] += float(terms[name].item()) * weight
+        term_weights[name] += weight
 
 
 def _stable_evaluation_noise(sample_uids, trajectory_width, dtype):
@@ -571,6 +837,30 @@ def _stable_evaluation_noise(sample_uids, trajectory_width, dtype):
     return torch.stack(noise)
 
 
+def _validate_selector_preflight_identity(
+    validation: dict,
+    *,
+    expected_sample_count: int | None,
+    expected_sample_uid_digest: str | None,
+) -> None:
+    """Reject availability evidence from outside the frozen validation set."""
+    actual_count = validation.get("sample_count")
+    actual_digest = validation.get("sample_uid_digest")
+    if (
+        expected_sample_count is None
+        or not expected_sample_uid_digest
+        or actual_count != expected_sample_count
+        or actual_digest != expected_sample_uid_digest
+    ):
+        raise ValueError(
+            "selector preflight validation identity differs from frozen "
+            f"split: expected_count={expected_sample_count} "
+            f"actual_count={actual_count} "
+            f"expected_digest={expected_sample_uid_digest} "
+            f"actual_digest={actual_digest}"
+        )
+
+
 def _evaluate_open_loop(
     model,
     loader,
@@ -579,6 +869,7 @@ def _evaluate_open_loop(
     navigation_geometry=None,
     route_swap_counterfactual: bool = False,
     include_navigation_records: bool = False,
+    include_rollout_selector_records: bool = False,
 ) -> dict:
     """Evaluate one fixed loader and return finite ADE/FDE plus its UID digest."""
     import hashlib
@@ -594,9 +885,22 @@ def _evaluate_open_loop(
     was_training = model.training
     all_ade: list[float] = []
     all_fde: list[float] = []
+    evaluation_steps = 30
+    horizon_steps = {
+        "1s": 10,
+        "2s": 20,
+        "3s": evaluation_steps,
+    }
+    horizon_ade: dict[str, list[float]] = {
+        label: [] for label in horizon_steps
+    }
+    horizon_fde: dict[str, list[float]] = {
+        label: [] for label in horizon_steps
+    }
     sample_uids: list[str] = []
     navigation_records: list[dict] = []
     route_swap_records: list[dict] = []
+    rollout_selector_records: list[dict] = []
     route_cache: dict[str, dict] = {}
     model.eval()
     try:
@@ -677,6 +981,76 @@ def _evaluate_open_loop(
                         f"sample_uids={len(batch_uids)}"
                     )
                 sample_uids.extend(str(uid) for uid in batch_uids)
+
+                if include_rollout_selector_records:
+                    from evaluation.kitscenes_benchmark import (
+                        wgs84_trajectory_to_ego_xy,
+                    )
+                    from evaluation.rollout_validation import (
+                        build_rollout_validation_records,
+                    )
+
+                    batch_group_uids = batch.get(
+                        "split_group_uid",
+                        [],
+                    )
+                    if isinstance(batch_group_uids, str):
+                        batch_group_uids = [batch_group_uids]
+                    batch_group_uids = [
+                        str(uid) for uid in batch_group_uids
+                    ]
+                    if len(batch_group_uids) != pred_np.shape[0]:
+                        raise ValueError(
+                            "selector validation batch lost split group "
+                            "identities"
+                        )
+                    pose_current = batch.get("pose_current")
+                    gps_future = batch.get("gps_future")
+                    route_supervision = batch.get("route_supervision")
+                    if (
+                        pose_current is None
+                        or gps_future is None
+                        or route_supervision is None
+                    ):
+                        raise ValueError(
+                            "rollout selector requires packed pose, GPS, "
+                            "and route supervision"
+                        )
+                    logged_xy = wgs84_trajectory_to_ego_xy(
+                        gps_future.numpy(),
+                        pose_current.numpy(),
+                    )
+                    route_intersections = [
+                        bool(
+                            _collated_metadata_value(
+                                navigation_metadata,
+                                "route_intersection",
+                                sample_index,
+                                False,
+                            )
+                        )
+                        for sample_index in range(pred_np.shape[0])
+                    ]
+                    initial_speeds = raw_ego_hist.reshape(
+                        raw_ego_hist.shape[0],
+                        AUTO_E2E_TIMESTEPS,
+                        -1,
+                    )[:, -1, 0]
+                    rollout_selector_records.extend(
+                        build_rollout_validation_records(
+                            pred,
+                            target,
+                            initial_speeds,
+                            logged_xy,
+                            route_supervision,
+                            batch["map_valid"],
+                            batch["route_valid"],
+                            batch_uids,
+                            batch_group_uids,
+                            route_mask=route_mask,
+                            route_intersections=route_intersections,
+                        )
+                    )
 
                 swapped_pred_np = None
                 swapped_indices: set[int] = set()
@@ -770,8 +1144,22 @@ def _evaluate_open_loop(
                     errors = np.linalg.norm(
                         pred_traj - target_traj, axis=1
                     )
-                    all_ade.append(float(errors.mean()))
-                    all_fde.append(float(errors[-1]))
+                    evaluation_errors = errors[:evaluation_steps]
+                    all_ade.append(float(evaluation_errors.mean()))
+                    all_fde.append(float(evaluation_errors[-1]))
+                    for label, step_count in horizon_steps.items():
+                        if step_count > len(errors):
+                            raise ValueError(
+                                f"evaluation horizon {label} exceeds "
+                                f"trajectory length {len(errors)}"
+                            )
+                        horizon_errors = errors[:step_count]
+                        horizon_ade[label].append(
+                            float(horizon_errors.mean())
+                        )
+                        horizon_fde[label].append(
+                            float(horizon_errors[-1])
+                        )
                     if navigation_geometry is not None:
                         from evaluation.navigation_metrics import (
                             ROUTE_QUALITY_FIELDS,
@@ -801,8 +1189,8 @@ def _evaluate_open_loop(
                                 float("nan"),
                             )
                         navigation_record = navigation_sample_metrics(
-                            pred_traj,
-                            target_traj,
+                            pred_traj[:evaluation_steps],
+                            target_traj[:evaluation_steps],
                             raw_route_mask[sample_index].numpy(),
                             raw_map_context[sample_index].numpy(),
                             route_valid=bool(
@@ -832,8 +1220,8 @@ def _evaluate_open_loop(
                             ]
                             route_swap_records.append(
                                 route_swap_sample_metrics(
-                                    pred_traj,
-                                    swapped_traj,
+                                    pred_traj[:evaluation_steps],
+                                    swapped_traj[:evaluation_steps],
                                     raw_route_mask[
                                         sample_index
                                     ].numpy(),
@@ -905,9 +1293,25 @@ def _evaluate_open_loop(
     result = {
         "ade": ade,
         "fde": fde,
-        "evaluation_steps": AUTO_E2E_TIMESTEPS,
+        "evaluation_steps": evaluation_steps,
+        "prediction_steps": AUTO_E2E_TIMESTEPS,
         "sample_count": len(all_ade),
         "sample_uid_digest": uid_digest,
+        "metric_contract": {
+            "version": "control_rollout_validation_v2",
+            "horizon_seconds": 3.0,
+            "horizon_steps": evaluation_steps,
+            "target_source": "target_control_rollout",
+            "aggregation": "sample_mean",
+        },
+        "horizons": {
+            label: {
+                "steps": horizon_steps[label],
+                "ade": float(np.mean(horizon_ade[label])),
+                "fde": float(np.mean(horizon_fde[label])),
+            }
+            for label in horizon_steps
+        },
     }
     if navigation_geometry is not None:
         from evaluation.navigation_metrics import (
@@ -924,6 +1328,37 @@ def _evaluate_open_loop(
         )
         if include_navigation_records:
             result["navigation_records"] = navigation_records
+    if include_rollout_selector_records:
+        if len(rollout_selector_records) != len(all_ade):
+            raise ValueError(
+                "rollout selector coverage differs from displacement metrics"
+            )
+        result["rollout_selector_records"] = (
+            rollout_selector_records
+        )
+        from evaluation.checkpoint_selection import (
+            aggregate_validation_records,
+        )
+        from evaluation.rollout_validation import (
+            ROLLOUT_VALIDATION_VERSION,
+        )
+
+        aggregates = aggregate_validation_records(
+            rollout_selector_records
+        )
+        result["ade"] = float(
+            aggregates["metrics"]["ade_3s_m"]["scene_balanced"]
+        )
+        result["fde"] = float(
+            aggregates["metrics"]["fde_3s_m"]["scene_balanced"]
+        )
+        result["metric_contract"] = {
+            "version": ROLLOUT_VALIDATION_VERSION,
+            "horizon_seconds": 3.0,
+            "horizon_steps": evaluation_steps,
+            "target_source": "logged_xy",
+            "aggregation": "scene_balanced",
+        }
     return result
 
 
@@ -937,11 +1372,34 @@ def _register_checkpoint_version(
     checkpoint_sha256: str,
     ade: float,
     fde: float,
+    metric_contract: dict,
+    selection: dict | None = None,
 ) -> str:
     """Register one immutable checkpoint idempotently for an MLflow run."""
+    expected_metric_contract = {
+        "horizon_seconds": 3.0,
+        "horizon_steps": 30,
+    }
+    mismatched_metric_contract = {
+        key: {
+            "expected": value,
+            "actual": metric_contract.get(key),
+        }
+        for key, value in expected_metric_contract.items()
+        if metric_contract.get(key) != value
+    }
+    if mismatched_metric_contract:
+        raise ValueError(
+            "registry checkpoint metrics are not canonical: "
+            f"{mismatched_metric_contract}"
+        )
     model_name = "auto-e2e-driving-policy"
     normalized_roles = sorted(set(roles))
-    if not normalized_roles or not set(normalized_roles) <= {"best", "final"}:
+    if (
+        not normalized_roles
+        or not set(normalized_roles)
+        <= {"best", "best_trajectory", "final"}
+    ):
         raise ValueError(f"invalid checkpoint roles: {roles}")
 
     try:
@@ -973,9 +1431,31 @@ def _register_checkpoint_version(
         "checkpoint_epoch": str(epoch),
         "checkpoint_s3_uri": checkpoint_uri,
         "checkpoint_sha256": checkpoint_sha256,
+        "validation_ade_3s_m": str(ade),
+        "validation_fde_3s_m": str(fde),
         "validation_ade": str(ade),
         "validation_fde": str(fde),
+        "validation_metric_version": str(metric_contract["version"]),
+        "validation_metric_horizon_seconds": str(
+            metric_contract["horizon_seconds"]
+        ),
+        "validation_metric_horizon_steps": str(
+            metric_contract["horizon_steps"]
+        ),
+        "validation_metric_target_source": str(
+            metric_contract["target_source"]
+        ),
+        "validation_metric_aggregation": str(
+            metric_contract["aggregation"]
+        ),
     }
+    if selection is not None:
+        tags.update({
+            "checkpoint_selector_policy": str(
+                selection["policy_version"]
+            ),
+            "checkpoint_composite_score": str(selection["score"]),
+        })
     for key, value in tags.items():
         client.set_model_version_tag(model_name, version, key, value)
     return version
@@ -2074,6 +2554,9 @@ def data_processing(
         POSE_SCHEMA_VERSION,
     )
     from navigation.geometry import DEFAULT_NAVIGATION_GEOMETRY
+    from navigation.supervision import (
+        ROUTE_SUPERVISION_ARTIFACT_VERSION,
+    )
 
     manifest = {"total_samples": sample_count, "shards": shard_idx,
                 "shard_names": shard_names,
@@ -2090,6 +2573,18 @@ def data_processing(
                 "has_navigation": (
                     bool(sample_count)
                     and navigation_artifact_summary is not None
+                ),
+                "has_route_supervision": (
+                    bool(sample_count)
+                    and navigation_artifact_summary is not None
+                ),
+                "route_supervision_version": (
+                    ROUTE_SUPERVISION_ARTIFACT_VERSION
+                    if (
+                        sample_count
+                        and navigation_artifact_summary is not None
+                    )
+                    else None
                 ),
                 "navigation": navigation_artifact_summary,
                 "navigation_geometry": (
@@ -2577,7 +3072,16 @@ def train_il(
     # until the specific overflow op is isolated and kept in fp32 explicitly.
     amp: bool = False,
     enable_route_conditioning: bool = True,
+    training_objective_version: str = (
+        BASELINE_TRAINING_OBJECTIVE_VERSION
+    ),
+    enable_junction_sampling: bool = False,
+    enable_route_consistency: bool = False,
+    route_consistency_weight: float = 0.10,
     navigation_quality_audit: Optional[FlyteFile] = None,
+    reconstruction_audit: Optional[FlyteFile] = None,
+    reconstruction_audit_decision: str = "",
+    reconstruction_audit_rationale: str = "",
     enable_reasoning: bool = False,
     reasoning_mode: str = "pooled_latent",
     # Small default: the reasoning branch is zero-init coupled (alpha=0), so it
@@ -2608,7 +3112,8 @@ def train_il(
     # (smaller) shards too.
     num_workers: int = 0,
     resume_from: Optional[FlyteFile] = None,
-    early_stopping_patience: int = 3,
+    early_stopping_patience: int = 5,
+    allow_resume_policy_transition: bool = False,
 ) -> TrainOutput:
     """Train AutoE2E model on pre-extracted WebDataset shards.
 
@@ -2637,8 +3142,10 @@ def train_il(
     policy-accepted scene partitions.
     """
     import os
+    import hashlib
     import json
     import random
+    import time
     import torch
     import numpy as np
     import mlflow
@@ -2649,12 +3156,81 @@ def train_il(
         raise ValueError(
             f"val_fraction must be between 0 and 1, got {val_fraction}"
         )
-    if not 3 <= early_stopping_patience <= 5:
+    if not 3 <= early_stopping_patience <= 10:
         raise ValueError(
-            "early_stopping_patience must be between 3 and 5"
+            "early_stopping_patience must be between 3 and 10"
+        )
+    if allow_resume_policy_transition and resume_from is None:
+        raise ValueError(
+            "resume policy transition requires a resume checkpoint"
         )
     if epochs <= 0:
         raise ValueError(f"epochs must be positive, got {epochs}")
+    if training_objective_version not in {
+        BASELINE_TRAINING_OBJECTIVE_VERSION,
+        KITSCENES_NAVIGATION_OBJECTIVE_VERSION,
+        ROLLOUT_ALIGNED_CONTROL_OBJECTIVE_VERSION,
+        ROLLOUT_ALIGNED_OBJECTIVE_VERSION,
+    }:
+        raise ValueError(
+            "unsupported training_objective_version "
+            f"{training_objective_version!r}"
+        )
+    objective_v1 = (
+        training_objective_version
+        == KITSCENES_NAVIGATION_OBJECTIVE_VERSION
+    )
+    objective_v2 = (
+        training_objective_version == ROLLOUT_ALIGNED_OBJECTIVE_VERSION
+    )
+    objective_v2_control = (
+        training_objective_version
+        == ROLLOUT_ALIGNED_CONTROL_OBJECTIVE_VERSION
+    )
+    selector_enabled = objective_v2 or objective_v2_control
+    if (
+        objective_v1 or objective_v2 or objective_v2_control
+    ) and dataset != Dataset.KITSCENES:
+        raise ValueError(
+            "navigation planner objectives are KITScenes-only"
+        )
+    if enable_junction_sampling and not (
+        objective_v1 or objective_v2 or objective_v2_control
+    ):
+        raise ValueError(
+            "navigation sampling requires a KITScenes navigation objective"
+        )
+    if enable_route_consistency and not objective_v1:
+        raise ValueError(
+            "route consistency requires kitscenes_navigation_objective_v1"
+        )
+    if enable_route_consistency and not enable_route_conditioning:
+        raise ValueError(
+            "route consistency requires Reactive route conditioning"
+        )
+    if enable_route_consistency and route_consistency_weight <= 0.0:
+        raise ValueError(
+            "enabled route consistency requires a positive weight"
+        )
+    if objective_v2 and enable_route_consistency:
+        raise ValueError(
+            "rollout_aligned_planner_v1 replaces legacy route consistency"
+        )
+    if objective_v2 and not enable_route_conditioning:
+        raise ValueError(
+            "rollout_aligned_planner_v1 requires Reactive route conditioning"
+        )
+    if objective_v2 and not enable_world_model:
+        raise ValueError(
+            "rollout-aligned matched experiments require the World Model"
+        )
+    if objective_v2_control and (
+        not enable_route_conditioning or not enable_world_model
+    ):
+        raise ValueError(
+            "rollout-aligned control requires Reactive route conditioning "
+            "and the World Model"
+        )
     if not 0 <= training_seed <= 2**32 - 1:
         raise ValueError(
             "training_seed must be between 0 and 2**32 - 1"
@@ -2689,7 +3265,9 @@ def train_il(
         validation_sample_identity,
     )
     from data_parsing.pre_extracted import (
+        NavigationRepeatPolicy,
         discover_split_inventory,
+        discover_navigation_exposure,
         make_multi_dataset_loader,
     )
     # _loader_download_dir is a module-level helper in THIS file, not in
@@ -2876,6 +3454,12 @@ def train_il(
                 manifest.get("map_context_channels", 3)
             ),
             "route_channels": int(manifest.get("route_channels", 2)),
+            "has_route_supervision": bool(
+                manifest.get("has_route_supervision", False)
+            ),
+            "route_supervision_version": manifest.get(
+                "route_supervision_version"
+            ),
             "navigation": manifest.get("navigation"),
             "navigation_geometry": manifest.get("navigation_geometry"),
             "has_world_model": bool(
@@ -2975,6 +3559,169 @@ def train_il(
             actual_validation_sample_count,
             actual_validation_sample_digest,
         )
+    reconstruction_audit_contract = None
+    if selector_enabled:
+        if reconstruction_audit is None:
+            raise ValueError(
+                "composite-selector training requires a reconstruction audit"
+            )
+        if reconstruction_audit_decision != "go":
+            raise ValueError(
+                "composite-selector training requires an explicit Go decision"
+            )
+        if len(reconstruction_audit_rationale.strip()) < 20:
+            raise ValueError(
+                "reconstruction audit Go rationale is too short"
+            )
+        audit_path = str(reconstruction_audit.download())
+        with open(audit_path, "rb") as stream:
+            audit_bytes = stream.read()
+        try:
+            audit_report = json.loads(audit_bytes)
+        except (UnicodeError, json.JSONDecodeError) as error:
+            raise ValueError(
+                "reconstruction audit is not valid JSON"
+            ) from error
+        if not isinstance(audit_report, dict):
+            raise ValueError(
+                "reconstruction audit must be a JSON object"
+            )
+        from evaluation.reconstruction_audit import AUDIT_SCHEMA_VERSION
+
+        if (
+            audit_report.get("schema_version")
+            != AUDIT_SCHEMA_VERSION
+        ):
+            raise ValueError(
+                "unsupported reconstruction audit schema"
+            )
+        heading_alignment = audit_report.get("heading_alignment")
+        valid_heading_steps = (
+            heading_alignment.get("valid_step_count")
+            if isinstance(heading_alignment, dict)
+            else None
+        )
+        if (
+            not isinstance(heading_alignment, dict)
+            or not isinstance(valid_heading_steps, int)
+            or isinstance(valid_heading_steps, bool)
+            or valid_heading_steps <= 0
+            or heading_alignment.get("full_horizon") is None
+        ):
+            raise ValueError(
+                "reconstruction audit has no usable heading alignment"
+            )
+        provenance = audit_report.get("provenance")
+        if not isinstance(provenance, dict):
+            raise ValueError(
+                "reconstruction audit has no provenance"
+            )
+        from training.losses.control_rollout import (
+            ROLLOUT_POLICY_VERSION,
+        )
+
+        expected_audit_identity = {
+            "dataset": Dataset.KITSCENES.value,
+            "dataset_version": dataset_version,
+            "source_revision": packed_source_revision,
+            "packed_contract_digest": packed_contract_digest,
+            "validation_group_uid_digest": validation_group_digest,
+            "validation_sample_uid_digest": (
+                selected_validation_sample_digest
+            ),
+            "rollout_policy_version": ROLLOUT_POLICY_VERSION,
+        }
+        mismatches = {
+            key: {
+                "expected": expected,
+                "actual": provenance.get(key),
+            }
+            for key, expected in expected_audit_identity.items()
+            if provenance.get(key) != expected
+        }
+        if mismatches:
+            raise ValueError(
+                "reconstruction audit identity differs from training: "
+                f"{mismatches}"
+            )
+        if (
+            int(audit_report.get("sample_count", -1))
+            != selected_validation_sample_count
+            or int(audit_report.get("scene_count", -1))
+            != len(fixed_validation_groups or ())
+        ):
+            raise ValueError(
+                "reconstruction audit coverage differs from validation"
+            )
+        from evaluation.reconstruction_audit import (
+            P95_FDE_3S_LIMIT_M,
+            P95_FDE_FULL_LIMIT_M,
+        )
+
+        expected_thresholds = {
+            "p95_fde_3s_limit_m": P95_FDE_3S_LIMIT_M,
+            "p95_fde_full_limit_m": P95_FDE_FULL_LIMIT_M,
+        }
+        if audit_report.get("thresholds") != expected_thresholds:
+            raise ValueError(
+                "reconstruction audit thresholds differ from training: "
+                f"expected={expected_thresholds} "
+                f"actual={audit_report.get('thresholds')}"
+            )
+        reconstruction_audit_contract = {
+            "decision": reconstruction_audit_decision,
+            "rationale": reconstruction_audit_rationale.strip(),
+            "position_target_source": (
+                "packed_logged_xy" if objective_v2 else "not_applicable"
+            ),
+            "report_sha256": hashlib.sha256(audit_bytes).hexdigest(),
+            "thresholds_pass": bool(
+                audit_report.get("thresholds_pass", False)
+            ),
+            "thresholds": expected_thresholds,
+            "sample_count": int(audit_report["sample_count"]),
+            "scene_count": int(audit_report["scene_count"]),
+            "metrics": audit_report["metrics"],
+            "heading_alignment": heading_alignment,
+            "audit_code_revision": provenance.get(
+                "audit_code_revision"
+            ),
+            "rollout_policy_version": provenance.get(
+                "rollout_policy_version"
+            ),
+        }
+    elif reconstruction_audit is not None:
+        raise ValueError(
+            "reconstruction audit is accepted only by composite-selector "
+            "training"
+        )
+    navigation_repeat_policy = (
+        NavigationRepeatPolicy()
+        if enable_junction_sampling
+        else None
+    )
+    navigation_exposure_audit = (
+        discover_navigation_exposure(
+            training_shard_dirs,
+            policy=navigation_repeat_policy,
+            validation_group_uids=fixed_validation_groups,
+        )
+        if navigation_repeat_policy is not None
+        else None
+    )
+    navigation_exposure_metadata = (
+        navigation_exposure_audit.metadata()
+        if navigation_exposure_audit is not None
+        else None
+    )
+    if navigation_exposure_metadata is not None:
+        print(
+            "Navigation exposure: "
+            f"unique={navigation_exposure_audit.unique_sample_count} "
+            f"effective={navigation_exposure_audit.effective_exposure_count} "
+            f"digest={navigation_exposure_audit.exposure_digest}"
+        )
+
     data_coverage = {
         "available_group_uid_digest": available_group_digest,
         "available_group_count": (
@@ -2993,7 +3740,7 @@ def train_il(
             else None
         ),
     }
-    data_fingerprint = stable_digest({
+    data_fingerprint_payload = {
         "partitions": data_identity,
         "coverage": data_coverage,
         "navigation_quality_audit_sha256": (
@@ -3004,6 +3751,12 @@ def train_il(
             if navigation_quality_report is not None
             else None
         ),
+        "navigation_exposure": navigation_exposure_metadata,
+    }
+    data_fingerprint = stable_digest(data_fingerprint_payload)
+    data_fingerprint_without_navigation_repeat = stable_digest({
+        **data_fingerprint_payload,
+        "navigation_exposure": None,
     })
     validation_split_contract = {
         "strategy": training_policy.validation_strategy,
@@ -3063,6 +3816,10 @@ def train_il(
         f"group_digest={validation_group_digest}"
     )
 
+    from navigation.supervision import (
+        ROUTE_SUPERVISION_ARTIFACT_VERSION,
+    )
+
     # Consistency guard (packing ↔ training) across every non-empty partition.
     # Sparse reasoning targets are masked on unlabeled samples, so probing a
     # random first batch cannot distinguish an intentionally unlabeled sample
@@ -3076,8 +3833,33 @@ def train_il(
             and not manifest.get("has_navigation", False)
         ):
             raise ValueError(
-                f"KITScenes shard '{dname}' ({d}) has no schema-v5 "
+                f"KITScenes shard '{dname}' ({d}) has no schema-v8 "
                 "navigation artifacts"
+            )
+        if enable_route_consistency and (
+            not manifest.get("has_route_supervision", False)
+            or manifest.get("route_supervision_version")
+            != ROUTE_SUPERVISION_ARTIFACT_VERSION
+        ):
+            raise ValueError(
+                "route consistency requires "
+                f"{ROUTE_SUPERVISION_ARTIFACT_VERSION} in "
+                f"dataset '{dname}' ({d})"
+            )
+        if selector_enabled and (
+            not manifest.get("has_route_supervision", False)
+            or manifest.get("route_supervision_version")
+            != ROUTE_SUPERVISION_ARTIFACT_VERSION
+        ):
+            raise ValueError(
+                "rollout composite selector requires "
+                f"{ROUTE_SUPERVISION_ARTIFACT_VERSION} "
+                f"in dataset '{dname}' ({d})"
+            )
+        if selector_enabled and not manifest.get("has_gps", False):
+            raise ValueError(
+                "rollout composite selector requires packed pose and GPS "
+                f"in dataset '{dname}' ({d})"
             )
 
     total_reasoning_labels = 0
@@ -3131,15 +3913,22 @@ def train_il(
     optimizer = torch.optim.AdamW(
         model.parameters(), lr=lr, weight_decay=weight_decay
     )
+    selector_mode = "max" if selector_enabled else "min"
+    selector_threshold = 0.0005 if selector_enabled else 1e-4
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer,
-        mode="min",
+        mode=selector_mode,
         factor=0.5,
         patience=1,
+        threshold=selector_threshold,
+        threshold_mode="abs",
     )
     loss_fn = TrajectoryImitationLoss(
         loss_type="smooth_l1",
         temporal_decay=training_policy.temporal_decay,
+        temporal_weight_normalization=(
+            training_policy.temporal_weight_normalization
+        ),
         signal_scales=training_policy.signal_scales,
     )
     if hasattr(loss_fn, "to"):
@@ -3148,6 +3937,8 @@ def train_il(
         "Dataset training policy: "
         f"auto_e2e_timesteps={AUTO_E2E_TIMESTEPS} "
         f"temporal_decay={training_policy.temporal_decay:.4g} "
+        "temporal_weight_normalization="
+        f"{training_policy.temporal_weight_normalization} "
         f"acceleration_scale={training_policy.signal_scales[0]:.4g} "
         f"curvature_scale={training_policy.signal_scales[1]:.4g}"
     )
@@ -3163,6 +3954,64 @@ def train_il(
         )
         reasoning_loss_fn = HorizonReasoningLoss()
         target_batch_from_loader = _tb_from_loader
+
+    route_consistency_loss_fn = None
+    route_consistency_config = {
+        "enabled": enable_route_consistency,
+        "weight": route_consistency_weight,
+    }
+    if enable_route_consistency:
+        from training.losses import RouteConsistencyLoss
+
+        route_consistency_loss_fn = RouteConsistencyLoss(
+            temporal_decay=training_policy.temporal_decay,
+        ).to(device)
+        route_consistency_config.update(
+            route_consistency_loss_fn.metadata()
+        )
+    rollout_aligned_loss_fn = None
+    rollout_aligned_config = {
+        "enabled": objective_v2,
+        "rollout_weight": 0.5,
+        "constraint_weight": 0.05,
+    }
+    if objective_v2:
+        from evaluation.kitscenes_benchmark import (
+            wgs84_trajectory_to_ego_xy,
+        )
+        from training.losses import RolloutAlignedLoss
+
+        rollout_aligned_loss_fn = RolloutAlignedLoss().to(device)
+        rollout_aligned_config.update(
+            rollout_aligned_loss_fn.metadata()
+        )
+    if selector_enabled:
+        from evaluation.checkpoint_selection import (
+            SELECTOR_MIN_DELTA,
+            SELECTOR_POLICY_VERSION,
+            TOP_LEVEL_WEIGHTS,
+            UTILITY_SCALES,
+        )
+
+        if selector_threshold != SELECTOR_MIN_DELTA:
+            raise RuntimeError(
+                "scheduler and checkpoint selector thresholds differ"
+            )
+        checkpoint_selection_config = {
+            "enabled": True,
+            "policy_version": SELECTOR_POLICY_VERSION,
+            "min_delta": SELECTOR_MIN_DELTA,
+            "top_level_weights": dict(TOP_LEVEL_WEIGHTS),
+            "utility_scales": dict(UTILITY_SCALES),
+        }
+    else:
+        checkpoint_selection_config = {
+            "enabled": False,
+            "policy_version": "ade_fde_lexicographic_v1",
+            "min_delta": None,
+            "top_level_weights": None,
+            "utility_scales": None,
+        }
 
     scaler = torch.amp.GradScaler(enabled=amp)
     checkpoint_config = {
@@ -3194,6 +4043,19 @@ def train_il(
         "num_workers": num_workers,
         "reasoning_loss_weight": reasoning_loss_weight,
         "jepa_loss_weight": jepa_loss_weight,
+        "training_objective_version": training_objective_version,
+        "junction_sampling": {
+            "enabled": enable_junction_sampling,
+            "policy": (
+                navigation_repeat_policy.metadata()
+                if navigation_repeat_policy is not None
+                else None
+            ),
+        },
+        "route_consistency": route_consistency_config,
+        "rollout_aligned_loss": rollout_aligned_config,
+        "checkpoint_selection": checkpoint_selection_config,
+        "reconstruction_audit": reconstruction_audit_contract,
         "trajectory_training_policy": training_policy.metadata(),
         "val_fraction": val_fraction,
         "validation_scope": validation_scope,
@@ -3201,9 +4063,11 @@ def train_il(
         "early_stopping_patience": early_stopping_patience,
         "scheduler": {
             "name": "ReduceLROnPlateau",
-            "mode": "min",
+            "mode": selector_mode,
             "factor": 0.5,
             "patience": 1,
+            "threshold": selector_threshold,
+            "threshold_mode": "abs",
         },
     }
 
@@ -3216,7 +4080,9 @@ def train_il(
         restore_rng_state,
         sha256_file,
         update_best_pointer,
+        validate_immutable_checkpoint_record,
         upload_immutable_checkpoint,
+        validate_resume_envelope,
         validate_resume_payload,
     )
 
@@ -3224,13 +4090,17 @@ def train_il(
     s3_client = boto3.client("s3")
     metric_history: list[dict] = []
     best_checkpoint = None
+    best_trajectory_checkpoint = None
     final_checkpoint = None
+    selector_availability = None
     bad_epochs = 0
     expected_validation_digest = selected_validation_sample_digest
     validation_sample_count = selected_validation_sample_count
     start_epoch = 1
     best_local_path = None
     resumed = resume_from is not None
+    resume_policy_transition = None
+    resume_optimization_state = None
     terminal_resume = False
     stopped_early = False
 
@@ -3246,14 +4116,39 @@ def train_il(
             map_location="cpu",
             weights_only=False,
         )
+        validate_resume_envelope(resume_payload)
+        if allow_resume_policy_transition:
+            resume_policy_transition = _resume_policy_transition(
+                saved_config=dict(resume_payload["config"]),
+                requested_config=checkpoint_config,
+            )
         validate_resume_payload(
             resume_payload,
             expected_config=checkpoint_config,
             expected_data_fingerprint=data_fingerprint,
+            allowed_config_changes=(
+                frozenset({
+                    "junction_sampling",
+                    "early_stopping_patience",
+                })
+                if resume_policy_transition is not None
+                else frozenset()
+            ),
+            compatible_data_fingerprints=(
+                frozenset({
+                    data_fingerprint_without_navigation_repeat,
+                })
+                if resume_policy_transition is not None
+                else frozenset()
+            ),
         )
         model.load_state_dict(resume_payload["model_state_dict"])
-        optimizer.load_state_dict(resume_payload["optimizer_state_dict"])
-        scheduler.load_state_dict(resume_payload["scheduler_state_dict"])
+        resume_optimization_state = _restore_resume_optimization_state(
+            optimizer,
+            scheduler,
+            resume_payload,
+            transition=resume_policy_transition,
+        )
         scaler.load_state_dict(resume_payload["scaler_state_dict"])
         state = dict(resume_payload["training_state"])
         run_id = str(state.get("run_id", ""))
@@ -3274,7 +4169,29 @@ def train_il(
         final_checkpoint = resumed_checkpoint
         saved_best = state.get("best")
         best_checkpoint = dict(saved_best) if saved_best is not None else None
+        saved_best_trajectory = state.get("best_trajectory")
         bad_epochs = int(state.get("bad_epochs", 0))
+        if resume_policy_transition is not None:
+            resume_policy_transition["source_checkpoint"] = {
+                "epoch": completed_epoch,
+                "uri": resumed_checkpoint["uri"],
+                "sha256": resumed_checkpoint["sha256"],
+            }
+        saved_selector_availability = state.get(
+            "checkpoint_selector_availability"
+        )
+        if selector_enabled:
+            if not isinstance(saved_selector_availability, dict):
+                raise ValueError(
+                    "resume checkpoint has no frozen selector availability"
+                )
+            selector_availability = dict(
+                saved_selector_availability
+            )
+        elif saved_selector_availability is not None:
+            raise ValueError(
+                "legacy checkpoint selection cannot restore composite state"
+            )
         saved_validation_digest = state.get(
             "validation_sample_uid_digest"
         )
@@ -3307,23 +4224,146 @@ def train_il(
             best_checkpoint = dict(resumed_checkpoint)
         if best_checkpoint is None:
             raise ValueError("resume checkpoint has no selected best checkpoint")
+        if selector_enabled:
+            best_selection = best_checkpoint.get("selection")
+            if (
+                not isinstance(best_selection, dict)
+                or best_selection.get("policy_version")
+                != checkpoint_selection_config["policy_version"]
+            ):
+                raise ValueError(
+                    "resume checkpoint best selection policy differs "
+                    "from the requested selector"
+                )
+            if saved_best_trajectory is None:
+                best_trajectory_checkpoint = (
+                    _best_trajectory_checkpoint_from_history(
+                        metric_history,
+                        expected_policy_version=str(
+                            checkpoint_selection_config["policy_version"]
+                        ),
+                        min_delta=float(
+                            checkpoint_selection_config["min_delta"]
+                        ),
+                    )
+                )
+            else:
+                best_trajectory_checkpoint = dict(saved_best_trajectory)
+            if (
+                int(best_trajectory_checkpoint["epoch"])
+                == completed_epoch
+            ):
+                saved_digest = best_trajectory_checkpoint.get("sha256")
+                if saved_digest not in (
+                    None,
+                    resumed_checkpoint["sha256"],
+                ):
+                    raise ValueError(
+                        "resume checkpoint bytes differ from its saved "
+                        "trajectory-best digest"
+                    )
+                best_trajectory_checkpoint = dict(resumed_checkpoint)
+            trajectory_selection = best_trajectory_checkpoint.get(
+                "selection"
+            )
+            if (
+                not isinstance(trajectory_selection, dict)
+                or trajectory_selection.get("policy_version")
+                != checkpoint_selection_config["policy_version"]
+                or not isinstance(
+                    trajectory_selection.get("components"), dict
+                )
+                or "trajectory"
+                not in trajectory_selection["components"]
+            ):
+                raise ValueError(
+                    "resume checkpoint trajectory-best selection differs "
+                    "from the requested selector"
+                )
+        else:
+            best_trajectory_checkpoint = dict(best_checkpoint)
+        validate_immutable_checkpoint_record(s3_client, best_checkpoint)
+        validate_immutable_checkpoint_record(
+            s3_client,
+            best_trajectory_checkpoint,
+        )
+        (
+            bad_epochs,
+            best_checkpoint,
+            best_trajectory_checkpoint,
+        ) = (
+            _transition_resume_selection_state(
+                resume_policy_transition,
+                bad_epochs=bad_epochs,
+                best_checkpoint=best_checkpoint,
+                best_trajectory_checkpoint=best_trajectory_checkpoint,
+            )
+        )
+        if resume_policy_transition is not None:
+            resume_policy_transition["optimization_state"] = (
+                resume_optimization_state
+            )
         terminal_resume, stopped_early = _resume_terminal_state(
             completed_epoch=completed_epoch,
             bad_epochs=bad_epochs,
             requested_epochs=epochs,
             patience=early_stopping_patience,
         )
-        update_best_pointer(
-            s3_client,
-            bucket=checkpoint_bucket,
-            run_id=run_id,
-            epoch=int(best_checkpoint["epoch"]),
-            checkpoint_uri=str(best_checkpoint["uri"]),
-            checkpoint_sha256=str(best_checkpoint["sha256"]),
-            ade=float(best_checkpoint["ade"]),
-            fde=float(best_checkpoint["fde"]),
-        )
+        if resume_policy_transition is not None and terminal_resume:
+            raise ValueError(
+                "resume policy transition requires at least one new epoch"
+            )
+        if best_checkpoint is not None:
+            update_best_pointer(
+                s3_client,
+                bucket=checkpoint_bucket,
+                run_id=run_id,
+                epoch=int(best_checkpoint["epoch"]),
+                checkpoint_uri=str(best_checkpoint["uri"]),
+                checkpoint_sha256=str(best_checkpoint["sha256"]),
+                ade=float(best_checkpoint["ade"]),
+                fde=float(best_checkpoint["fde"]),
+                selection=best_checkpoint.get("selection"),
+                metric_contract=best_checkpoint.get("metric_contract"),
+            )
+        if best_trajectory_checkpoint is not None:
+            update_best_pointer(
+                s3_client,
+                bucket=checkpoint_bucket,
+                run_id=run_id,
+                role="best_trajectory",
+                epoch=int(best_trajectory_checkpoint["epoch"]),
+                checkpoint_uri=str(best_trajectory_checkpoint["uri"]),
+                checkpoint_sha256=str(
+                    best_trajectory_checkpoint["sha256"]
+                ),
+                ade=float(best_trajectory_checkpoint["ade"]),
+                fde=float(best_trajectory_checkpoint["fde"]),
+                selection=best_trajectory_checkpoint.get("selection"),
+                metric_contract=best_trajectory_checkpoint.get(
+                    "metric_contract"
+                ),
+            )
         restore_rng_state(resume_payload["rng_state"])
+        if resume_policy_transition is not None:
+            with mlflow.start_run(run_id=run_id):
+                mlflow.set_tags({
+                    "resume_policy_transition": (
+                        resume_policy_transition["policy_version"]
+                    ),
+                    "resume_bad_epochs_reset": "true",
+                    "resume_plateau_state_reset": "true",
+                    "resume_optimizer_lr_preserved": "true",
+                    "resume_best_checkpoints_preserved": "true",
+                    "resume_navigation_repeat_enabled": str(
+                        resume_policy_transition["junction_sampling"][
+                            "to"
+                        ]["enabled"]
+                    ).lower(),
+                    "resume_early_stopping_patience": str(
+                        early_stopping_patience
+                    ),
+                })
         print(
             f"Resuming MLflow run {run_id} at epoch {start_epoch}; "
             f"bad_epochs={bad_epochs} terminal={terminal_resume}"
@@ -3375,6 +4415,73 @@ def train_il(
                 "train/temporal_decay": (
                     training_policy.temporal_decay
                 ),
+                "train/temporal_weight_normalization": (
+                    training_policy.temporal_weight_normalization
+                ),
+                "train/objective_version": training_objective_version,
+                "train/reconstruction_audit_sha256": (
+                    reconstruction_audit_contract["report_sha256"]
+                    if reconstruction_audit_contract is not None
+                    else "none"
+                ),
+                "train/junction_sampling_enabled": (
+                    enable_junction_sampling
+                ),
+                "train/navigation_repeat_policy_version": (
+                    navigation_repeat_policy.version
+                    if navigation_repeat_policy is not None
+                    else "none"
+                ),
+                "train/navigation_turn_repeat": (
+                    navigation_repeat_policy.turn_repeat
+                    if navigation_repeat_policy is not None
+                    else 1
+                ),
+                "train/navigation_junction_repeat": (
+                    navigation_repeat_policy.junction_repeat
+                    if navigation_repeat_policy is not None
+                    else 1
+                ),
+                "train/navigation_exposure_digest": (
+                    navigation_exposure_audit.exposure_digest
+                    if navigation_exposure_audit is not None
+                    else "none"
+                ),
+                "train/navigation_unique_samples": (
+                    navigation_exposure_audit.unique_sample_count
+                    if navigation_exposure_audit is not None
+                    else -1
+                ),
+                "train/navigation_effective_exposures": (
+                    navigation_exposure_audit.effective_exposure_count
+                    if navigation_exposure_audit is not None
+                    else -1
+                ),
+                "train/route_consistency_enabled": (
+                    enable_route_consistency
+                ),
+                "train/route_consistency_weight": (
+                    route_consistency_weight
+                ),
+                "train/route_artifact_version": (
+                    route_consistency_config.get(
+                        "artifact_version",
+                        "none",
+                    )
+                ),
+                "train/route_target_compliance_threshold": (
+                    route_consistency_config.get(
+                        "target_compliance_threshold",
+                        -1.0,
+                    )
+                ),
+                **{
+                    f"train/route_term_weight_{name}": value
+                    for name, value in route_consistency_config.get(
+                        "term_weights",
+                        {},
+                    ).items()
+                },
                 "train/val_fraction": val_fraction,
                 "train/validation_scope": validation_scope,
                 "train/validation_strategy": (
@@ -3392,9 +4499,86 @@ def train_il(
                     validation_group_digest or "hash_buckets"
                 ),
                 "train/early_stopping_patience": early_stopping_patience,
+                "train/checkpoint_selector_policy": (
+                    checkpoint_selection_config["policy_version"]
+                ),
+                "train/checkpoint_selector_min_delta": (
+                    checkpoint_selection_config["min_delta"]
+                    if selector_enabled
+                    else -1.0
+                ),
+                **{
+                    f"train/checkpoint_selector_weight_{name}": value
+                    for name, value in (
+                        checkpoint_selection_config[
+                            "top_level_weights"
+                        ] or {}
+                    ).items()
+                },
+                **{
+                    f"train/checkpoint_selector_scale_{name}": value
+                    for name, value in (
+                        checkpoint_selection_config[
+                            "utility_scales"
+                        ] or {}
+                    ).items()
+                },
                 "ctx/train_execution_id": train_execution_id,
                 "ctx/train_docker_image": TRAINING_IMAGE,
             })
+            if reconstruction_audit_contract is not None:
+                audit_metrics = {
+                    "audit/reconstruction/sample_count": float(
+                        reconstruction_audit_contract["sample_count"]
+                    ),
+                    "audit/reconstruction/scene_count": float(
+                        reconstruction_audit_contract["scene_count"]
+                    ),
+                    "audit/reconstruction/thresholds_pass": float(
+                        reconstruction_audit_contract["thresholds_pass"]
+                    ),
+                }
+                for metric_name, aggregates in (
+                    reconstruction_audit_contract["metrics"].items()
+                ):
+                    for aggregate_name, distribution in (
+                        aggregates.items()
+                    ):
+                        for statistic, value in distribution.items():
+                            audit_metrics[
+                                "audit/reconstruction/"
+                                f"{metric_name}/{aggregate_name}/{statistic}"
+                            ] = float(value)
+                mlflow.log_metrics(audit_metrics, step=0)
+
+    if selector_enabled and not resumed:
+        from evaluation.checkpoint_selection import (
+            aggregate_validation_records,
+            freeze_component_availability,
+        )
+
+        preflight_validation = _evaluate_open_loop(
+            model,
+            validation_loader,
+            device,
+            training_policy=training_policy,
+            include_rollout_selector_records=True,
+        )
+        _validate_selector_preflight_identity(
+            preflight_validation,
+            expected_sample_count=validation_sample_count,
+            expected_sample_uid_digest=expected_validation_digest,
+        )
+        preflight_aggregates = aggregate_validation_records(
+            preflight_validation["rollout_selector_records"]
+        )
+        selector_availability = freeze_component_availability(
+            preflight_aggregates
+        )
+        print(
+            "Frozen checkpoint selector availability before epoch 1: "
+            f"{selector_availability}"
+        )
 
     # Training loop
     model.train()
@@ -3410,6 +4594,8 @@ def train_il(
         "first_step": None,
         "navigation_encoder_first_nonzero_step": None,
         "route_input_first_nonzero_step": None,
+        "route_loss_gradient_budget": None,
+        "objective_term_gradient_norms": None,
     }
     optimizer_probe_name, optimizer_probe_parameter = next(
         (name, parameter)
@@ -3465,6 +4651,13 @@ def train_il(
                 f"{gradient_evidence['navigation_encoder_first_nonzero_step']}"
             )
 
+    def _gradient_list_norm(gradients):
+        return sum(
+            float(gradient.detach().norm().item()) ** 2
+            for gradient in gradients
+            if gradient is not None
+        ) ** 0.5
+
     accum = max(1, int(grad_accum_steps))
     if accum > 1:
         print(f"Gradient accumulation: {accum} micro-batches "
@@ -3474,6 +4667,9 @@ def train_il(
         start_epoch, epochs + 1
     )
     for epoch in epoch_range:
+        if device.type == "cuda":
+            torch.cuda.synchronize(device)
+        epoch_compute_started = time.perf_counter()
         merged = make_multi_dataset_loader(
             training_shard_dirs,
             batch_size=batch_size,
@@ -3483,17 +4679,62 @@ def train_il(
             val_fraction=val_fraction,
             validation_group_uids=fixed_validation_groups,
             shuffle_seed=1729 + epoch * 1_000_003,
+            navigation_repeat_policy=navigation_repeat_policy,
         )
         epoch_losses = []
         traj_losses = []
         jepa_vals = []
         reason_vals = []
+        route_vals = []
+        rollout_term_sums = {
+            name: 0.0
+            for name in (
+                "rollout",
+                "path",
+                "final",
+                "constraint",
+                "comfort",
+                "jerk",
+                "lateral_acceleration",
+                "map",
+                "route",
+                "drivable",
+            )
+        }
+        rollout_term_weights = {
+            name: 0
+            for name in rollout_term_sums
+        }
+        rollout_term_counts = {
+            "map_sample_count": 0,
+            "route_sample_count": 0,
+            "drivable_sample_count": 0,
+        }
+        route_term_vals = {
+            "corridor": [],
+            "branch": [],
+            "destination": [],
+            "heading": [],
+        }
+        route_epoch_counts = {
+            "candidate_count": 0,
+            "eligible_count": 0,
+            "compliance_rejected_count": 0,
+            "corridor_active_count": 0,
+            "branch_active_count": 0,
+            "destination_active_count": 0,
+            "heading_active_count": 0,
+        }
+        route_target_compliance_sum = 0.0
+        epoch_training_sample_count = 0
+        epoch_optimizer_step_start = optimizer_step_count
         micro_idx = 0  # position within the current accumulation window
         # Merged loader yields (batch, projection, geometry_type): each batch is
         # same-dataset (uniform num_views/geometry) but datasets are interleaved,
         # so the per-batch projection is applied to the batch it belongs to.
         for batch, batch_proj, batch_geom in merged:
             visual = batch["visual_tiles"].to(device)        # (B, V, 3, H, W)
+            epoch_training_sample_count += int(visual.shape[0])
             ego_hist = adapt_egomotion_history(
                 batch["egomotion_history"].to(device),
                 training_policy,
@@ -3506,6 +4747,54 @@ def train_il(
             route_valid = batch["route_valid"].to(device)
             route_valid_sample_count += int(route_valid.sum().item())
             route_sample_count += int(route_valid.numel())
+            route_supervision = None
+            route_intersection = None
+            logged_positions = None
+            if (
+                route_consistency_loss_fn is not None
+                or rollout_aligned_loss_fn is not None
+            ):
+                route_supervision = {
+                    key: value.to(device)
+                    for key, value in batch["route_supervision"].items()
+                }
+                if rollout_aligned_loss_fn is not None:
+                    pose_current = batch.get("pose_current")
+                    gps_future = batch.get("gps_future")
+                    if pose_current is None or gps_future is None:
+                        raise ValueError(
+                            "rollout-aligned loss requires packed pose and GPS"
+                        )
+                    logged_positions = torch.from_numpy(
+                        wgs84_trajectory_to_ego_xy(
+                            gps_future.detach().cpu().numpy(),
+                            pose_current.detach().cpu().numpy(),
+                        )
+                    ).to(
+                        device=device,
+                        dtype=torch.float32,
+                        non_blocking=True,
+                    )
+                if route_consistency_loss_fn is not None:
+                    navigation_metadata = batch.get(
+                        "navigation_metadata",
+                        {},
+                    )
+                    route_intersection = torch.tensor(
+                        [
+                            bool(
+                                _collated_metadata_value(
+                                    navigation_metadata,
+                                    "route_intersection",
+                                    sample_index,
+                                    False,
+                                )
+                            )
+                            for sample_index in range(visual.shape[0])
+                        ],
+                        device=device,
+                        dtype=torch.bool,
+                    )
             probe_route_gradient = (
                 enable_route_conditioning
                 and gradient_evidence[
@@ -3546,16 +4835,59 @@ def train_il(
                 trajectory, aux = out if isinstance(out, tuple) else (out, {})
                 traj_loss = loss_fn(trajectory, target)
                 loss = traj_loss
+                initial_speed = ego_hist.reshape(
+                    ego_hist.shape[0],
+                    AUTO_E2E_TIMESTEPS,
+                    -1,
+                )[:, -1, 0]
+
+                route_terms = None
+                if route_consistency_loss_fn is not None:
+                    assert route_supervision is not None
+                    assert route_intersection is not None
+                    route_terms = route_consistency_loss_fn(
+                        trajectory,
+                        target,
+                        initial_speed,
+                        route_supervision,
+                        route_valid,
+                        route_intersection,
+                    )
+                    loss = (
+                        loss
+                        + route_consistency_weight
+                        * route_terms["total"]
+                    )
+                rollout_terms = None
+                if rollout_aligned_loss_fn is not None:
+                    assert route_supervision is not None
+                    assert logged_positions is not None
+                    rollout_terms = rollout_aligned_loss_fn(
+                        trajectory,
+                        target,
+                        initial_speed,
+                        logged_positions,
+                        route_supervision,
+                        map_valid,
+                        route_valid,
+                    )
+                    loss = (
+                        loss
+                        + 0.5 * rollout_terms["rollout"]
+                        + 0.05 * rollout_terms["constraint"]
+                    )
 
                 # JEPA loss (#13): future-feature reconstruction, added when the
                 # WM ran the windowed path AND this batch carries future frames.
                 jepa_val = 0.0
+                weighted_jepa = None
                 future_state_pred = aux.get("future_state_pred")
                 if (enable_world_model and future_state_pred is not None
                         and future_frames is not None):
                     jepa = model.World_Action_Model_E2E.jepa_loss(
                         future_state_pred, future_frames)
-                    loss = loss + jepa_loss_weight * jepa
+                    weighted_jepa = jepa_loss_weight * jepa
+                    loss = loss + weighted_jepa
                     jepa_val = float(jepa.item())
 
                 # Add the reasoning loss when the branch is on AND this batch
@@ -3574,6 +4906,133 @@ def train_il(
                         )
                         loss = loss + reasoning_loss_weight * terms["total"]
                         reason_val = float(terms["total"].item())
+
+            if (
+                objective_v2
+                and rollout_terms is not None
+                and weighted_jepa is not None
+                and gradient_evidence[
+                    "objective_term_gradient_norms"
+                ] is None
+            ):
+                planner_parameters = [
+                    parameter
+                    for name, parameter in model.named_parameters()
+                    if (
+                        parameter.requires_grad
+                        and "TrajectoryPlanner" in name
+                    )
+                ]
+                world_model_parameters = [
+                    parameter
+                    for name, parameter in model.named_parameters()
+                    if (
+                        parameter.requires_grad
+                        and "World_Action_Model_E2E" in name
+                    )
+                ]
+                objective_terms = {
+                    "action": (traj_loss, planner_parameters),
+                    "weighted_rollout": (
+                        0.5 * rollout_terms["rollout"],
+                        planner_parameters,
+                    ),
+                    "weighted_constraint": (
+                        0.05 * rollout_terms["constraint"],
+                        planner_parameters,
+                    ),
+                    "weighted_jepa": (
+                        weighted_jepa,
+                        world_model_parameters,
+                    ),
+                }
+                term_norms = {}
+                for term_name, (
+                    term_loss,
+                    term_parameters,
+                ) in objective_terms.items():
+                    gradients = torch.autograd.grad(
+                        term_loss,
+                        term_parameters,
+                        retain_graph=True,
+                        allow_unused=True,
+                    )
+                    term_norms[term_name] = _gradient_list_norm(
+                        gradients
+                    )
+                if not all(
+                    np.isfinite(value)
+                    for value in term_norms.values()
+                ):
+                    raise RuntimeError(
+                        "rollout-aligned objective produced non-finite "
+                        f"gradient evidence: {term_norms}"
+                    )
+                if term_norms["weighted_jepa"] <= 0.0:
+                    raise RuntimeError(
+                        "weighted JEPA produced no World Model gradient"
+                    )
+                gradient_evidence[
+                    "objective_term_gradient_norms"
+                ] = term_norms
+                print(
+                    "rollout-aligned objective gradient norms: "
+                    f"{term_norms}"
+                )
+
+            if (
+                route_terms is not None
+                and int(route_terms["eligible_count"].item()) > 0
+                and gradient_evidence["route_loss_gradient_budget"] is None
+            ):
+                planner_parameters = [
+                    parameter
+                    for name, parameter in model.named_parameters()
+                    if (
+                        parameter.requires_grad
+                        and "TrajectoryPlanner" in name
+                    )
+                ]
+                trajectory_gradients = torch.autograd.grad(
+                    traj_loss,
+                    planner_parameters,
+                    retain_graph=True,
+                    allow_unused=True,
+                )
+                weighted_route_gradients = torch.autograd.grad(
+                    route_consistency_weight * route_terms["total"],
+                    planner_parameters,
+                    retain_graph=True,
+                    allow_unused=True,
+                )
+                trajectory_gradient_norm = _gradient_list_norm(
+                    trajectory_gradients
+                )
+                route_gradient_norm = _gradient_list_norm(
+                    weighted_route_gradients
+                )
+                if trajectory_gradient_norm <= 0.0:
+                    raise RuntimeError(
+                        "trajectory planner gradient budget reference is zero"
+                    )
+                gradient_ratio = (
+                    route_gradient_norm / trajectory_gradient_norm
+                )
+                gradient_evidence["route_loss_gradient_budget"] = {
+                    "trajectory_planner_norm": trajectory_gradient_norm,
+                    "weighted_route_planner_norm": route_gradient_norm,
+                    "route_to_trajectory_ratio": gradient_ratio,
+                    "maximum_ratio": 2.0,
+                }
+                print(
+                    "route loss gradient budget: "
+                    f"{gradient_evidence['route_loss_gradient_budget']}"
+                )
+                if gradient_ratio > 2.0:
+                    raise RuntimeError(
+                        "weighted route planner gradient exceeds the 2x "
+                        "trajectory gradient budget"
+                    )
 
             # Divide by accum so summed micro-batch grads equal the MEAN gradient
             # of an effective batch of (batch_size * accum) — same scale as a plain
@@ -3597,6 +5056,34 @@ def train_il(
             traj_losses.append(traj_loss.item())
             jepa_vals.append(jepa_val)
             reason_vals.append(reason_val)
+            route_vals.append(
+                float(route_terms["total"].item())
+                if route_terms is not None
+                else 0.0
+            )
+            if route_terms is not None:
+                for term_name in route_term_vals:
+                    route_term_vals[term_name].append(
+                        float(route_terms[term_name].item())
+                    )
+                for count_name in route_epoch_counts:
+                    route_epoch_counts[count_name] += int(
+                        route_terms[count_name].item()
+                    )
+                route_target_compliance_sum += float(
+                    route_terms["target_compliance_sum"].item()
+                )
+            if rollout_terms is not None:
+                _accumulate_rollout_epoch_terms(
+                    rollout_term_sums,
+                    rollout_term_weights,
+                    rollout_terms,
+                    batch_sample_count=int(trajectory.shape[0]),
+                )
+                for count_name in rollout_term_counts:
+                    rollout_term_counts[count_name] += int(
+                        rollout_terms[count_name].item()
+                    )
 
             # Step only at the end of an accumulation window (or plain step when
             # accum==1). Grads persist across micro-batches until then.
@@ -3628,22 +5115,69 @@ def train_il(
             optimizer_step_count += 1
             micro_idx = 0
 
+        if device.type == "cuda":
+            torch.cuda.synchronize(device)
+        training_wall_seconds = (
+            time.perf_counter() - epoch_compute_started
+        )
         if not epoch_losses:
             raise ValueError(
                 "the internal train split produced no batches"
+            )
+        if training_wall_seconds <= 0.0:
+            raise RuntimeError("training wall time must be positive")
+        epoch_optimizer_steps = (
+            optimizer_step_count - epoch_optimizer_step_start
+        )
+        if epoch_optimizer_steps <= 0:
+            raise RuntimeError(
+                "epoch completed without an optimizer step"
             )
         avg_loss = float(np.mean(epoch_losses))
         avg_traj = float(np.mean(traj_losses))
         avg_jepa = float(np.mean(jepa_vals))
         avg_reason = float(np.mean(reason_vals))
+        avg_route = float(np.mean(route_vals))
+        avg_route_terms = {
+            name: (
+                float(np.mean(values))
+                if values
+                else 0.0
+            )
+            for name, values in route_term_vals.items()
+        }
+        avg_rollout_terms = {
+            name: (
+                rollout_term_sums[name]
+                / rollout_term_weights[name]
+                if rollout_term_weights[name] > 0
+                else 0.0
+            )
+            for name in rollout_term_sums
+        }
+        if (
+            enable_route_consistency
+            and route_epoch_counts["eligible_count"] <= 0
+        ):
+            raise RuntimeError(
+                "route-enabled epoch produced no eligible route sample"
+            )
         if not all(
             np.isfinite(value)
-            for value in (avg_loss, avg_traj, avg_jepa, avg_reason)
+            for value in (
+                avg_loss,
+                avg_traj,
+                avg_jepa,
+                avg_reason,
+                avg_route,
+                *avg_route_terms.values(),
+                *avg_rollout_terms.values(),
+            )
         ):
             raise ValueError(
                 "non-finite training metrics at epoch "
                 f"{epoch}: loss={avg_loss} traj={avg_traj} "
-                f"jepa={avg_jepa} reason={avg_reason}"
+                f"route={avg_route} jepa={avg_jepa} reason={avg_reason}"
             )
 
         validation = _evaluate_open_loop(
@@ -3651,6 +5185,7 @@ def train_il(
             validation_loader,
             device,
             training_policy=training_policy,
+            include_rollout_selector_records=selector_enabled,
         )
         validation_digest = validation["sample_uid_digest"]
         if expected_validation_digest is None:
@@ -3668,28 +5203,142 @@ def train_il(
                 f"actual_count={validation['sample_count']}"
             )
 
-        improved = (
-            best_checkpoint is None
-            or metric_pair_is_better(
-                validation["ade"],
-                validation["fde"],
-                float(best_checkpoint["ade"]),
-                float(best_checkpoint["fde"]),
+        checkpoint_selection = None
+        validation_aggregates = None
+        validation_aggregate_summary = None
+        if selector_enabled:
+            from evaluation.checkpoint_selection import (
+                aggregate_validation_records,
+                build_selector_calibration_report,
+                freeze_component_availability,
+                score_checkpoint,
+                validate_frozen_availability,
             )
+
+            validation_aggregates = aggregate_validation_records(
+                validation["rollout_selector_records"]
+            )
+            validation["ade"] = float(
+                validation_aggregates["metrics"]["ade_3s_m"][
+                    "scene_balanced"
+                ]
+            )
+            validation["fde"] = float(
+                validation_aggregates["metrics"]["fde_3s_m"][
+                    "scene_balanced"
+                ]
+            )
+            observed_availability = freeze_component_availability(
+                validation_aggregates
+            )
+            if selector_availability is None:
+                raise RuntimeError(
+                    "checkpoint selector availability was not frozen "
+                    "before training"
+                )
+            validate_frozen_availability(
+                selector_availability,
+                observed_availability,
+            )
+            checkpoint_selection = score_checkpoint(
+                validation_aggregates,
+                selector_availability,
+            )
+            checkpoint_selection["calibration_report"] = (
+                build_selector_calibration_report([
+                    *[
+                        entry["checkpoint_selection"]
+                        for entry in metric_history
+                        if entry.get("checkpoint_selection") is not None
+                    ],
+                    checkpoint_selection,
+                ])
+            )
+            validation_aggregate_summary = {
+                "sample_count": validation_aggregates["sample_count"],
+                "scene_count": validation_aggregates["scene_count"],
+                "metrics": {
+                    metric_name: {
+                        key: value
+                        for key, value in aggregate.items()
+                        if key != "scene_means"
+                    }
+                    for metric_name, aggregate in validation_aggregates[
+                        "metrics"
+                    ].items()
+                },
+            }
+            score_improved, trajectory_improved = (
+                _dual_best_improvements(
+                    checkpoint_selection,
+                    best_selection=(
+                        best_checkpoint["selection"]
+                        if best_checkpoint is not None
+                        else None
+                    ),
+                    best_trajectory_selection=(
+                        best_trajectory_checkpoint["selection"]
+                        if best_trajectory_checkpoint is not None
+                        else None
+                    ),
+                    min_delta=float(
+                        checkpoint_selection_config["min_delta"]
+                    ),
+                )
+            )
+            scheduler_metric = float(checkpoint_selection["score"])
+        else:
+            score_improved = (
+                best_checkpoint is None
+                or metric_pair_is_better(
+                    validation["ade"],
+                    validation["fde"],
+                    float(best_checkpoint["ade"]),
+                    float(best_checkpoint["fde"]),
+                )
+            )
+            trajectory_improved = score_improved
+            scheduler_metric = float(validation["ade"])
+        if device.type == "cuda":
+            torch.cuda.synchronize(device)
+        epoch_compute_wall_seconds = (
+            time.perf_counter() - epoch_compute_started
         )
-        next_bad_epochs = 0 if improved else bad_epochs + 1
+        throughput = {
+            "train_wall_seconds": training_wall_seconds,
+            "epoch_compute_wall_seconds": epoch_compute_wall_seconds,
+            "sample_count": epoch_training_sample_count,
+            "samples_per_second": (
+                epoch_training_sample_count / training_wall_seconds
+            ),
+            "optimizer_step_count": epoch_optimizer_steps,
+            "optimizer_steps_per_second": (
+                epoch_optimizer_steps / training_wall_seconds
+            ),
+        }
+        patience_improved = score_improved or trajectory_improved
+        next_bad_epochs = 0 if patience_improved else bad_epochs + 1
         key = checkpoint_key(run_id, epoch)
         checkpoint_uri = f"s3://{checkpoint_bucket}/{key}"
+        candidate_record = {
+            "epoch": epoch,
+            "ade": validation["ade"],
+            "fde": validation["fde"],
+            "uri": checkpoint_uri,
+            "sha256": None,
+            "metric_contract": validation["metric_contract"],
+        }
+        if checkpoint_selection is not None:
+            candidate_record["selection"] = checkpoint_selection
         candidate_best = (
-            {
-                "epoch": epoch,
-                "ade": validation["ade"],
-                "fde": validation["fde"],
-                "uri": checkpoint_uri,
-                "sha256": None,
-            }
-            if improved
+            candidate_record
+            if score_improved
             else dict(best_checkpoint)
+        )
+        candidate_best_trajectory = (
+            candidate_record
+            if trajectory_improved
+            else dict(best_trajectory_checkpoint)
         )
         history_entry = {
             "epoch": epoch,
@@ -3697,16 +5346,131 @@ def train_il(
             "trajectory_loss": avg_traj,
             "jepa_loss": avg_jepa,
             "reasoning_loss": avg_reason,
+            "route_loss": avg_route,
+            "route_loss_terms": avg_route_terms,
+            "route_loss_counts": route_epoch_counts,
+            "route_target_compliance_sum": (
+                route_target_compliance_sum
+            ),
+            "rollout_aligned_loss_terms": avg_rollout_terms,
+            "rollout_aligned_loss_counts": rollout_term_counts,
+            "navigation_exposure": navigation_exposure_metadata,
             "val_ade": validation["ade"],
             "val_fde": validation["fde"],
+            "val_horizons": validation["horizons"],
+            "validation_metric_contract": validation["metric_contract"],
             "validation_sample_count": validation["sample_count"],
             "validation_sample_uid_digest": validation_digest,
-            "improved": improved,
+            "checkpoint_selection": checkpoint_selection,
+            "validation_aggregates": validation_aggregate_summary,
+            "throughput": throughput,
+            "improved": patience_improved,
+            "score_improved": score_improved,
+            "trajectory_improved": trajectory_improved,
         }
         metric_history.append(history_entry)
         losses_per_epoch.append(avg_loss)
-        scheduler.step(validation["ade"])
+        scheduler.step(scheduler_metric)
         current_lr = float(optimizer.param_groups[0]["lr"])
+        selector_mlflow_metrics = {}
+        if (
+            checkpoint_selection is not None
+            and validation_aggregates is not None
+        ):
+            selector_mlflow_metrics = {
+                "val/checkpoint_composite_score": float(
+                    checkpoint_selection["score"]
+                ),
+                "val/ade_3s_scene_balanced_logged_xy": validation["ade"],
+                "val/fde_3s_scene_balanced_logged_xy": validation["fde"],
+                "selection/score": float(
+                    checkpoint_selection["score"]
+                ),
+                **{
+                    f"val/checkpoint_component_{name}": float(value)
+                    for name, value in checkpoint_selection[
+                        "components"
+                    ].items()
+                },
+                **{
+                    f"selection/component/{name}": float(value)
+                    for name, value in checkpoint_selection[
+                        "components"
+                    ].items()
+                },
+                **{
+                    f"selection/effective_weight/{name}": float(value)
+                    for name, value in checkpoint_selection[
+                        "effective_weights"
+                    ].items()
+                },
+                "selection/bad_epochs": float(next_bad_epochs),
+                "selection/score_improved": float(score_improved),
+                "selection/trajectory_improved": float(
+                    trajectory_improved
+                ),
+            }
+            calibration_report = checkpoint_selection[
+                "calibration_report"
+            ]
+            selector_mlflow_metrics[
+                "selection/calibration/saturated_component_count"
+            ] = float(len(
+                calibration_report[
+                    "almost_always_saturated_components"
+                ]
+            ))
+            sensitivity = calibration_report["weight_sensitivity"]
+            selector_mlflow_metrics[
+                "selection/calibration/top1_stability"
+            ] = float(np.mean([
+                float(item["top_checkpoint_unchanged"])
+                for item in sensitivity
+            ]))
+            rank_correlations = [
+                float(item["spearman_rank_correlation"])
+                for item in sensitivity
+                if item["spearman_rank_correlation"] is not None
+            ]
+            if rank_correlations:
+                selector_mlflow_metrics[
+                    "selection/calibration/min_rank_correlation"
+                ] = min(rank_correlations)
+            for metric_name, aggregate in validation_aggregates[
+                "metrics"
+            ].items():
+                for aggregate_name in ("natural", "scene_balanced"):
+                    value = aggregate[aggregate_name]
+                    if value is not None:
+                        selector_mlflow_metrics[
+                            f"val/{metric_name}_{aggregate_name}"
+                        ] = float(value)
+                        selector_mlflow_metrics[
+                            f"validation/{aggregate_name}/{metric_name}"
+                        ] = float(value)
+                distribution = aggregate["scene_distribution"]
+                for statistic in ("count", "mean", "p50", "p90"):
+                    value = distribution[statistic]
+                    if value is not None:
+                        selector_mlflow_metrics[
+                            f"val/{metric_name}_scene_{statistic}"
+                        ] = float(value)
+                        selector_mlflow_metrics[
+                            "validation/scene_distribution/"
+                            f"{metric_name}/{statistic}"
+                        ] = float(value)
+                selector_mlflow_metrics[
+                    f"val/{metric_name}_eligible_samples"
+                ] = float(aggregate["eligible_sample_count"])
+                selector_mlflow_metrics[
+                    f"val/{metric_name}_eligible_scenes"
+                ] = float(aggregate["eligible_scene_count"])
+                selector_mlflow_metrics[
+                    f"validation/coverage/{metric_name}/eligible_samples"
+                ] = float(aggregate["eligible_sample_count"])
+                selector_mlflow_metrics[
+                    f"validation/coverage/{metric_name}/eligible_scenes"
+                ] = float(aggregate["eligible_scene_count"])
 
         # The same MLflow run is reopened for each epoch. A failed metric write
         # aborts before checkpointing, so resume cannot silently skip a metric.
@@ -3717,9 +5481,137 @@ def train_il(
                     "train/trajectory_loss": avg_traj,
                     "train/jepa_loss": avg_jepa,
                     "train/reasoning_loss": avg_reason,
+                    "train/route_loss": avg_route,
+                    "train/weighted_route_loss": (
+                        route_consistency_weight * avg_route
+                    ),
+                    "train/route_corridor_loss": (
+                        avg_route_terms["corridor"]
+                    ),
+                    "train/route_branch_loss": (
+                        avg_route_terms["branch"]
+                    ),
+                    "train/route_destination_loss": (
+                        avg_route_terms["destination"]
+                    ),
+                    "train/route_heading_loss": (
+                        avg_route_terms["heading"]
+                    ),
+                    "train/route_candidate_count": (
+                        route_epoch_counts["candidate_count"]
+                    ),
+                    "train/route_eligible_count": (
+                        route_epoch_counts["eligible_count"]
+                    ),
+                    "train/route_compliance_rejected_count": (
+                        route_epoch_counts[
+                            "compliance_rejected_count"
+                        ]
+                    ),
+                    "train/route_gradient_ratio": (
+                        gradient_evidence[
+                            "route_loss_gradient_budget"
+                        ]["route_to_trajectory_ratio"]
+                        if gradient_evidence[
+                            "route_loss_gradient_budget"
+                        ] is not None
+                        else -1.0
+                    ),
+                    "train/rollout_loss": (
+                        avg_rollout_terms["rollout"]
+                    ),
+                    "train/loss_action": avg_traj,
+                    "train/loss_rollout": (
+                        avg_rollout_terms["rollout"]
+                    ),
+                    "train/rollout_path_loss": (
+                        avg_rollout_terms["path"]
+                    ),
+                    "train/loss_rollout_path": (
+                        avg_rollout_terms["path"]
+                    ),
+                    "train/rollout_final_loss": (
+                        avg_rollout_terms["final"]
+                    ),
+                    "train/loss_rollout_final": (
+                        avg_rollout_terms["final"]
+                    ),
+                    "train/constraint_loss": (
+                        avg_rollout_terms["constraint"]
+                    ),
+                    "train/loss_constraint": (
+                        avg_rollout_terms["constraint"]
+                    ),
+                    "train/comfort_loss": (
+                        avg_rollout_terms["comfort"]
+                    ),
+                    "train/loss_comfort": (
+                        avg_rollout_terms["comfort"]
+                    ),
+                    "train/loss_comfort_jerk": (
+                        avg_rollout_terms["jerk"]
+                    ),
+                    "train/loss_comfort_lateral_acceleration": (
+                        avg_rollout_terms["lateral_acceleration"]
+                    ),
+                    "train/loss_comfort_lateral": (
+                        avg_rollout_terms["lateral_acceleration"]
+                    ),
+                    "train/map_loss": avg_rollout_terms["map"],
+                    "train/loss_map": avg_rollout_terms["map"],
+                    "train/route_relative_loss": (
+                        avg_rollout_terms["route"]
+                    ),
+                    "train/loss_route_relative": (
+                        avg_rollout_terms["route"]
+                    ),
+                    "train/loss_map_route": (
+                        avg_rollout_terms["route"]
+                    ),
+                    "train/drivable_relative_loss": (
+                        avg_rollout_terms["drivable"]
+                    ),
+                    "train/loss_drivable_relative": (
+                        avg_rollout_terms["drivable"]
+                    ),
+                    "train/loss_map_drivable": (
+                        avg_rollout_terms["drivable"]
+                    ),
+                    "train/loss_total": avg_loss,
                     "train/lr": current_lr,
+                    "train/throughput/train_wall_seconds": (
+                        throughput["train_wall_seconds"]
+                    ),
+                    "train/throughput/epoch_compute_wall_seconds": (
+                        throughput["epoch_compute_wall_seconds"]
+                    ),
+                    "train/throughput/sample_count": float(
+                        throughput["sample_count"]
+                    ),
+                    "train/throughput/samples_per_second": (
+                        throughput["samples_per_second"]
+                    ),
+                    "train/throughput/optimizer_step_count": float(
+                        throughput["optimizer_step_count"]
+                    ),
+                    "train/throughput/optimizer_steps_per_second": (
+                        throughput["optimizer_steps_per_second"]
+                    ),
                     "val/ade": validation["ade"],
                     "val/fde": validation["fde"],
+                    **{
+                        f"val/control_rollout_ade_{label}": values["ade"]
+                        for label, values in validation[
+                            "horizons"
+                        ].items()
+                    },
+                    **{
+                        f"val/control_rollout_fde_{label}": values["fde"]
+                        for label, values in validation[
+                            "horizons"
+                        ].items()
+                    },
+                    **selector_mlflow_metrics,
                 },
                 step=epoch,
             )
@@ -3738,6 +5630,7 @@ def train_il(
                 "training_state": {
                     "run_id": run_id,
                     "best": candidate_best,
+                    "best_trajectory": candidate_best_trajectory,
                     "bad_epochs": next_bad_epochs,
                     "metric_history": metric_history,
                     "validation_sample_uid_digest": (
@@ -3745,10 +5638,17 @@ def train_il(
                     ),
                     "validation_sample_count": validation_sample_count,
                     "validation_split": validation_split_contract,
+                    "navigation_exposure": (
+                        navigation_exposure_metadata
+                    ),
+                    "checkpoint_selector_availability": (
+                        selector_availability
+                    ),
                     "current_checkpoint_uri": checkpoint_uri,
                     "early_stopping_patience": (
                         early_stopping_patience
                     ),
+                    "resume_policy_transition": resume_policy_transition,
                 },
                 "data_fingerprint": data_fingerprint,
             },
@@ -3767,11 +5667,14 @@ def train_il(
             "uri": uploaded["uri"],
             "sha256": uploaded["sha256"],
             "size": uploaded["size"],
+            "metric_contract": validation["metric_contract"],
         }
+        if checkpoint_selection is not None:
+            checkpoint_info["selection"] = checkpoint_selection
         history_entry["checkpoint_uri"] = uploaded["uri"]
         history_entry["checkpoint_sha256"] = uploaded["sha256"]
         previous_best_local_path = best_local_path
-        if improved:
+        if score_improved:
             best_checkpoint = checkpoint_info
             best_local_path = checkpoint_path
             update_best_pointer(
@@ -3783,6 +5686,8 @@ def train_il(
                 checkpoint_sha256=uploaded["sha256"],
                 ade=validation["ade"],
                 fde=validation["fde"],
+                selection=checkpoint_selection,
+                metric_contract=validation["metric_contract"],
             )
             if (
                 previous_best_local_path
@@ -3792,16 +5697,44 @@ def train_il(
                 )
             ):
                 os.remove(previous_best_local_path)
-        else:
+        if trajectory_improved:
+            best_trajectory_checkpoint = checkpoint_info
+            update_best_pointer(
+                s3_client,
+                bucket=checkpoint_bucket,
+                run_id=run_id,
+                role="best_trajectory",
+                epoch=epoch,
+                checkpoint_uri=uploaded["uri"],
+                checkpoint_sha256=uploaded["sha256"],
+                ade=validation["ade"],
+                fde=validation["fde"],
+                selection=checkpoint_selection,
+                metric_contract=validation["metric_contract"],
+            )
+        if not score_improved:
             os.remove(checkpoint_path)
         bad_epochs = next_bad_epochs
         final_checkpoint = checkpoint_info
 
+        selector_summary = (
+            "composite_score="
+            f"{float(checkpoint_selection['score']):.6f} "
+            if checkpoint_selection is not None
+            else ""
+        )
         print(
             f"  Epoch {epoch}/{epochs} loss={avg_loss:.4f} "
-            f"traj={avg_traj:.4f} jepa={avg_jepa:.4f} "
+            f"traj={avg_traj:.4f} route={avg_route:.4f} "
+            f"jepa={avg_jepa:.4f} "
             f"reason={avg_reason:.4f} val_ADE={validation['ade']:.4f} "
-            f"val_FDE={validation['fde']:.4f} improved={improved} "
+            f"val_FDE={validation['fde']:.4f} "
+            f"score_improved={score_improved} "
+            f"trajectory_improved={trajectory_improved} "
+            f"samples_per_second={throughput['samples_per_second']:.3f} "
+            "optimizer_steps_per_second="
+            f"{throughput['optimizer_steps_per_second']:.3f} "
+            f"{selector_summary}"
             f"bad_epochs={bad_epochs} checkpoint={uploaded['uri']}"
         )
         if bad_epochs >= early_stopping_patience:
@@ -3863,9 +5796,31 @@ def train_il(
         and gradient_evidence["route_input_first_nonzero_step"] is None
     ):
         raise RuntimeError("Reactive planner received no route input gradient")
+    if (
+        not terminal_resume
+        and enable_route_consistency
+        and gradient_evidence["route_loss_gradient_budget"] is None
+    ):
+        raise RuntimeError(
+            "route consistency produced no planner gradient budget evidence"
+        )
+    if (
+        not terminal_resume
+        and objective_v2
+        and gradient_evidence["objective_term_gradient_norms"] is None
+    ):
+        raise RuntimeError(
+            "rollout-aligned objective produced no term gradient evidence"
+        )
 
-    if best_checkpoint is None or final_checkpoint is None:
-        raise RuntimeError("training completed without a best/final checkpoint")
+    if (
+        best_checkpoint is None
+        or best_trajectory_checkpoint is None
+        or final_checkpoint is None
+    ):
+        raise RuntimeError(
+            "training completed without best/best-trajectory/final checkpoints"
+        )
 
     if best_local_path is None:
         from urllib.parse import urlparse
@@ -3885,6 +5840,46 @@ def train_il(
             "local best checkpoint differs from its immutable S3 object: "
             f"expected={best_checkpoint['sha256']} actual={best_digest}"
         )
+
+    throughput_history = [
+        dict(entry["throughput"])
+        for entry in metric_history
+        if isinstance(entry.get("throughput"), dict)
+    ]
+    throughput_train_wall_seconds = sum(
+        float(item["train_wall_seconds"])
+        for item in throughput_history
+    )
+    throughput_sample_count = sum(
+        int(item["sample_count"])
+        for item in throughput_history
+    )
+    throughput_optimizer_step_count = sum(
+        int(item["optimizer_step_count"])
+        for item in throughput_history
+    )
+    throughput_summary = {
+        "epoch_count": len(throughput_history),
+        "train_wall_seconds": throughput_train_wall_seconds,
+        "epoch_compute_wall_seconds": sum(
+            float(item["epoch_compute_wall_seconds"])
+            for item in throughput_history
+        ),
+        "sample_count": throughput_sample_count,
+        "samples_per_second": (
+            throughput_sample_count / throughput_train_wall_seconds
+            if throughput_train_wall_seconds > 0.0
+            else None
+        ),
+        "optimizer_step_count": throughput_optimizer_step_count,
+        "optimizer_steps_per_second": (
+            throughput_optimizer_step_count
+            / throughput_train_wall_seconds
+            if throughput_train_wall_seconds > 0.0
+            else None
+        ),
+        "per_epoch": throughput_history,
+    }
 
     meta = {
         "data": {
@@ -3919,6 +5914,7 @@ def train_il(
                 if navigation_quality_report is not None
                 else None
             ),
+            "navigation_exposure": navigation_exposure_metadata,
         },
         "model": {
             "backbone": bb,
@@ -3936,6 +5932,7 @@ def train_il(
             "epochs_completed": int(final_checkpoint["epoch"]),
             "stopped_early": stopped_early,
             "early_stopping_patience": early_stopping_patience,
+            "resume_policy_transition": resume_policy_transition,
             "batch_size": batch_size,
             "grad_accum_steps": grad_accum_steps,
             "num_workers": num_workers,
@@ -3947,6 +5944,27 @@ def train_il(
             "optimizer": "AdamW",
             "scheduler": "ReduceLROnPlateau",
             "trajectory_training_policy": training_policy.metadata(),
+            "training_objective_version": training_objective_version,
+            "junction_sampling": {
+                "enabled": enable_junction_sampling,
+                "policy": (
+                    navigation_repeat_policy.metadata()
+                    if navigation_repeat_policy is not None
+                    else None
+                ),
+                "exposure": navigation_exposure_metadata,
+            },
+            "route_consistency": route_consistency_config,
+            "rollout_aligned_loss": rollout_aligned_config,
+            "checkpoint_selection": {
+                **checkpoint_selection_config,
+                "availability": selector_availability,
+                "best": best_checkpoint.get("selection"),
+                "best_trajectory": (
+                    best_trajectory_checkpoint.get("selection")
+                ),
+            },
+            "reconstruction_audit": reconstruction_audit_contract,
             "final_loss": losses_per_epoch[-1],
             "losses_per_epoch": losses_per_epoch,
             "val_fraction": val_fraction,
@@ -3960,6 +5978,7 @@ def train_il(
                     optimizer_parameter_delta_norm
                 ),
             },
+            "throughput": throughput_summary,
             "gradient_evidence": gradient_evidence,
             "route_conditioning_evidence": {
                 "enabled": enable_route_conditioning,
@@ -3981,7 +6000,9 @@ def train_il(
             "sample_count": validation_sample_count,
             "sample_uid_digest": expected_validation_digest,
             "split": "internal_scene_holdout",
-            "evaluation_steps": AUTO_E2E_TIMESTEPS,
+            "evaluation_steps": 30,
+            "prediction_steps": AUTO_E2E_TIMESTEPS,
+            "metric_contract": final_checkpoint["metric_contract"],
             **validation_split_contract,
         },
         "tracking": {
@@ -3990,10 +6011,15 @@ def train_il(
         },
         "checkpoints": {
             "best": best_checkpoint,
+            "best_trajectory": best_trajectory_checkpoint,
             "final": final_checkpoint,
             "best_pointer_uri": (
                 f"s3://{checkpoint_bucket}/imitation-learning/"
                 f"{run_id}/best.json"
+            ),
+            "best_trajectory_pointer_uri": (
+                f"s3://{checkpoint_bucket}/imitation-learning/"
+                f"{run_id}/best-trajectory.json"
             ),
         },
         "context": {
@@ -4011,12 +6037,56 @@ def train_il(
             "backbone": bb,
             "fusion": fm,
             "best_checkpoint_sha256": best_checkpoint["sha256"],
+            "best_trajectory_checkpoint_sha256": (
+                best_trajectory_checkpoint["sha256"]
+            ),
             "final_checkpoint_sha256": final_checkpoint["sha256"],
             "validation_sample_uid_digest": expected_validation_digest,
             "validation_strategy": training_policy.validation_strategy,
             "validation_split_id": training_policy.validation_split_id,
             "validation_group_uid_digest": (
                 validation_group_digest or "hash_buckets"
+            ),
+            "checkpoint_selector_policy": (
+                checkpoint_selection_config["policy_version"]
+            ),
+            "validation_metric_version": str(
+                final_checkpoint["metric_contract"]["version"]
+            ),
+            "validation_metric_horizon_seconds": "3.0",
+            "validation_metric_horizon_steps": "30",
+            "validation_metric_target_source": str(
+                final_checkpoint["metric_contract"]["target_source"]
+            ),
+            "validation_metric_aggregation": str(
+                final_checkpoint["metric_contract"]["aggregation"]
+            ),
+            "best_checkpoint_ade_3s_m": str(best_checkpoint["ade"]),
+            "best_checkpoint_fde_3s_m": str(best_checkpoint["fde"]),
+            "best_trajectory_checkpoint_ade_3s_m": str(
+                best_trajectory_checkpoint["ade"]
+            ),
+            "best_trajectory_checkpoint_fde_3s_m": str(
+                best_trajectory_checkpoint["fde"]
+            ),
+            "best_checkpoint_composite_score": (
+                str(best_checkpoint["selection"]["score"])
+                if selector_enabled
+                else "not_applicable"
+            ),
+            "best_trajectory_checkpoint_utility": (
+                str(
+                    best_trajectory_checkpoint["selection"]["components"][
+                        "trajectory"
+                    ]
+                )
+                if selector_enabled
+                else "not_applicable"
+            ),
+            "resume_policy_transition": (
+                resume_policy_transition["policy_version"]
+                if resume_policy_transition is not None
+                else "none"
             ),
             "ctx/train_execution_id": train_execution_id,
             "ctx/train_docker_image": TRAINING_IMAGE,
@@ -4389,6 +6459,9 @@ def _run_evaluation(
         include_navigation_records=(
             navigation_records_output is not None
         ),
+        include_rollout_selector_records=(
+            navigation_geometry is not None
+        ),
     )
     expected_digest = validation_metadata.get("sample_uid_digest")
     if expected_digest and evaluation["sample_uid_digest"] != expected_digest:
@@ -4583,6 +6656,21 @@ def _run_evaluation(
                 training.get("epochs_completed", training.get("epochs", "?"))
             ),
             "train/final_loss": str(training.get("final_loss", "?")),
+            "validation_metric_version": str(
+                evaluation["metric_contract"]["version"]
+            ),
+            "validation_metric_horizon_seconds": str(
+                evaluation["metric_contract"]["horizon_seconds"]
+            ),
+            "validation_metric_horizon_steps": str(
+                evaluation["metric_contract"]["horizon_steps"]
+            ),
+            "validation_metric_target_source": str(
+                evaluation["metric_contract"]["target_source"]
+            ),
+            "validation_metric_aggregation": str(
+                evaluation["metric_contract"]["aggregation"]
+            ),
         })
 
         # Eval metrics
@@ -4591,6 +6679,11 @@ def _run_evaluation(
             "eval/fde": avg_fde,
             "eval/gate_pass": 1.0 if passed else 0.0,
         }
+        if evaluation["metric_contract"]["target_source"] == "logged_xy":
+            logged_metrics.update({
+                "eval/ade_3s_scene_balanced_logged_xy": avg_ade,
+                "eval/fde_3s_scene_balanced_logged_xy": avg_fde,
+            })
         if navigation_report is not None:
             slices = navigation_report["slices"]
             counterfactual = navigation_report[
@@ -4689,11 +6782,11 @@ def _run_evaluation(
                 stream.write("\n")
             mlflow.log_artifact(navigation_report_path)
 
-        # Register only immutable best/final checkpoints. Retry of the eval
-        # task reuses the same run/source pair and therefore the same versions.
+        # Register immutable selected/final checkpoints. Retry of the eval task
+        # reuses the same run/source pair and therefore the same versions.
         saved_checkpoints = meta.get("checkpoints", {})
         grouped: dict[str, dict] = {}
-        for role in ("best", "final"):
+        for role in ("best", "best_trajectory", "final"):
             record = saved_checkpoints.get(role)
             if not record:
                 continue
@@ -4717,6 +6810,7 @@ def _run_evaluation(
                     "sha256": checkpoint_sha256,
                     "ade": avg_ade,
                     "fde": avg_fde,
+                    "metric_contract": evaluation["metric_contract"],
                 },
             }
 
@@ -4732,6 +6826,8 @@ def _run_evaluation(
                 checkpoint_sha256=str(record["sha256"]),
                 ade=float(record["ade"]),
                 fde=float(record["fde"]),
+                metric_contract=dict(record["metric_contract"]),
+                selection=record.get("selection"),
             )
             print(
                 f"Registry version {version}: roles={item['roles']} "
@@ -5612,6 +7708,272 @@ def evaluate_kitscenes_benchmark_checkpoint(
     )
 
 
+@task(
+    container_image=EVAL_IMAGE,
+    requests=Resources(cpu="4", mem="16Gi"),
+    limits=Resources(cpu="4", mem="16Gi"),
+    environment={
+        "AUTO_E2E_EVAL_IMAGE": EVAL_IMAGE,
+    },
+)
+def audit_kitscenes_target_reconstruction(
+    packed_shards: List[FlyteDirectory],
+    audit_code_revision: str,
+    expected_dataset_version: str = KITSCENES_NAVIGATION_DATASET_VERSION,
+    val_fraction: float = 0.1,
+    validation_scope: str = "full",
+) -> ReconstructionAuditOutput:
+    """Derive the training holdout and audit target controls against GPS."""
+    import hashlib
+    import json
+    import os
+    import re
+    from pathlib import Path
+
+    from evaluation.reconstruction_audit import (
+        audit_packed_target_rollout_reconstruction,
+        load_packed_reconstruction_inputs,
+    )
+    from Platform.pipelines.training_checkpoint import (
+        sha256_file,
+        stable_digest,
+    )
+    from training.losses.control_rollout import ROLLOUT_POLICY_VERSION
+    from training.dataset_policy import (
+        group_uid_digest,
+        training_policy_for_dataset,
+        validation_group_uids as select_validation_group_uids,
+    )
+    from data_parsing.pre_extracted import discover_split_inventory
+
+    if not packed_shards:
+        raise ValueError("packed_shards must not be empty")
+    if not 0.0 < val_fraction < 1.0:
+        raise ValueError(
+            f"val_fraction must be between 0 and 1, got {val_fraction}"
+        )
+    if not re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", audit_code_revision):
+        raise ValueError(
+            "audit_code_revision must be a 40- or 64-character revision"
+        )
+    if not expected_dataset_version:
+        raise ValueError("expected_dataset_version must not be empty")
+
+    shard_dirs: list[str] = []
+    shard_identities: list[dict] = []
+    dataset_versions: set[str] = set()
+    source_revisions: set[str] = set()
+    contract_digests: set[str] = set()
+    for shard in packed_shards:
+        shard_uri = str(getattr(shard, "remote_source", "") or shard)
+        shard_dir = str(shard.download())
+        manifest_path = Path(shard_dir) / "manifest.json"
+        if not manifest_path.is_file():
+            raise FileNotFoundError(
+                f"packed shard manifest is missing: {manifest_path}"
+            )
+        manifest_bytes = manifest_path.read_bytes()
+        try:
+            manifest = json.loads(manifest_bytes)
+        except json.JSONDecodeError as error:
+            raise ValueError(
+                f"invalid packed shard manifest: {manifest_path}"
+            ) from error
+        if not isinstance(manifest, dict):
+            raise ValueError(
+                f"packed shard manifest must be an object: {manifest_path}"
+            )
+        if manifest.get("dataset") != Dataset.KITSCENES.value:
+            raise ValueError(
+                "reconstruction audit only accepts KITScenes shards"
+            )
+        total_samples = int(manifest.get("total_samples", 0))
+        if total_samples > 0 and not bool(manifest.get("has_gps", False)):
+            raise ValueError(
+                f"packed shard has no pose-grounded trajectory: {shard_dir}"
+            )
+        dataset_version = str(manifest.get("dataset_version", ""))
+        source_revision = str(manifest.get("source_revision", ""))
+        if not dataset_version or not source_revision:
+            raise ValueError(
+                f"packed shard has incomplete provenance: {shard_dir}"
+            )
+        dataset_versions.add(dataset_version)
+        source_revisions.add(source_revision)
+        contract_digests.add(stable_digest(manifest.get("contracts")))
+        identity = {
+            "contracts": manifest.get("contracts"),
+            "dataset": manifest.get("dataset"),
+            "dataset_version": dataset_version,
+            "hz": int(manifest.get("hz", 0)),
+            "manifest_sha256": hashlib.sha256(
+                manifest_bytes
+            ).hexdigest(),
+            "partition_id": manifest.get("partition_id"),
+            "shard_names": list(manifest.get("shard_names", [])),
+            "source_revision": source_revision,
+            "total_samples": total_samples,
+            "uri": shard_uri,
+        }
+        shard_identities.append(identity)
+        if identity["total_samples"] > 0:
+            shard_dirs.append(shard_dir)
+
+    if not shard_dirs:
+        raise ValueError("all packed shard partitions are empty")
+    if dataset_versions != {expected_dataset_version}:
+        raise ValueError(
+            "packed dataset version mismatch: "
+            f"expected={expected_dataset_version!r} "
+            f"actual={sorted(dataset_versions)}"
+        )
+    if len(source_revisions) != 1:
+        raise ValueError(
+            f"packed shards mix source revisions: {sorted(source_revisions)}"
+        )
+    if len(contract_digests) != 1:
+        raise ValueError("packed shards mix packing contracts")
+    shard_identities.sort(
+        key=lambda item: (
+            str(item["partition_id"]),
+            str(item["shard_names"]),
+        )
+    )
+
+    source_revision = next(iter(source_revisions))
+    packed_contract_digest = next(iter(contract_digests))
+    split_inventory = discover_split_inventory(shard_dirs)
+    expected_sample_count = sum(
+        int(identity["total_samples"])
+        for identity in shard_identities
+    )
+    if split_inventory.sample_count != expected_sample_count:
+        raise ValueError(
+            "packed sample metadata coverage differs from manifests: "
+            f"expected={expected_sample_count} "
+            f"actual={split_inventory.sample_count}"
+        )
+    training_policy = training_policy_for_dataset(
+        Dataset.KITSCENES.value,
+        validation_scope=validation_scope,
+    )
+    validation_group_uids = select_validation_group_uids(
+        split_inventory.group_uids,
+        val_fraction=val_fraction,
+        policy=training_policy,
+        source_revision=source_revision,
+        packed_dataset_version=expected_dataset_version,
+        packed_contract_digest=packed_contract_digest,
+        packed_partition_count=len(shard_identities),
+        empty_partition_count=(
+            len(shard_identities) - len(shard_dirs)
+        ),
+        packed_sample_count=split_inventory.sample_count,
+        packed_sample_uid_digest=split_inventory.sample_uid_digest,
+    )
+    if validation_group_uids is None:
+        raise ValueError(
+            "reconstruction audit requires an exact validation split"
+        )
+    (
+        expected_validation_sample_count,
+        expected_validation_sample_uid_digest,
+    ) = split_inventory.sample_identity_for_groups(
+        validation_group_uids
+    )
+
+    inputs = load_packed_reconstruction_inputs(
+        shard_dirs,
+        validation_group_uids=validation_group_uids,
+    )
+    report = audit_packed_target_rollout_reconstruction(inputs)
+    actual_sample_digest = str(report["sample_uid_digest"])
+    if actual_sample_digest != expected_validation_sample_uid_digest:
+        raise ValueError(
+            "validation snapshot digest mismatch: "
+            f"expected={expected_validation_sample_uid_digest} "
+            f"actual={actual_sample_digest}"
+        )
+    if int(report["sample_count"]) != expected_validation_sample_count:
+        raise ValueError(
+            "validation snapshot sample count mismatch: "
+            f"expected={expected_validation_sample_count} "
+            f"actual={report['sample_count']}"
+        )
+
+    records = report.pop("records")
+    output_dir = Path("/tmp/target-rollout-reconstruction-audit")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    records_path = output_dir / "sample_metrics.jsonl"
+    with records_path.open("w", encoding="ascii") as stream:
+        for record in records:
+            stream.write(json.dumps(
+                record,
+                allow_nan=False,
+                ensure_ascii=True,
+                separators=(",", ":"),
+                sort_keys=True,
+            ))
+            stream.write("\n")
+    records_sha256 = sha256_file(records_path)
+
+    group_digest = group_uid_digest(validation_group_uids)
+    report["artifacts"] = {
+        "sample_metrics_sha256": records_sha256,
+    }
+    report["metric_availability"] = {
+        "current_model_pose_grounded_error": (
+            "not_computed_by_target_reconstruction_audit"
+        ),
+        "target_rollout_reconstruction": "computed",
+    }
+    report["provenance"] = {
+        "audit_code_revision": audit_code_revision,
+        "container_image": os.environ["AUTO_E2E_EVAL_IMAGE"],
+        "dataset": Dataset.KITSCENES.value,
+        "dataset_version": next(iter(dataset_versions)),
+        "packed_contract_digest": packed_contract_digest,
+        "packed_manifest_digest": stable_digest(shard_identities),
+        "partition_count": len(shard_identities),
+        "rollout_policy_version": ROLLOUT_POLICY_VERSION,
+        "source_revision": source_revision,
+        "validation_scope": validation_scope,
+        "validation_fraction": val_fraction,
+        "validation_group_count": len(validation_group_uids),
+        "validation_group_uid_digest": group_digest,
+        "validation_sample_uid_digest": actual_sample_digest,
+        "validation_split_id": training_policy.validation_split_id,
+    }
+    report_path = output_dir / "report.json"
+    report_path.write_text(
+        json.dumps(
+            report,
+            allow_nan=False,
+            ensure_ascii=True,
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="ascii",
+    )
+    report_sha256 = sha256_file(report_path)
+
+    print(
+        "Target rollout reconstruction audit: "
+        f"samples={report['sample_count']} "
+        f"scenes={report['scene_count']} "
+        f"thresholds_pass={report['thresholds_pass']} "
+        f"report_sha256={report_sha256}"
+    )
+    return ReconstructionAuditOutput(
+        thresholds_pass=bool(report["thresholds_pass"]),
+        report_sha256=report_sha256,
+        records_sha256=records_sha256,
+        report=FlyteFile(str(report_path)),
+        records=FlyteFile(str(records_path)),
+    )
+
+
 
 # ============================================================
 # Workflows
@@ -5633,6 +7995,24 @@ def wf_evaluate_kitscenes_benchmark(
         expected_manifest_sha256=expected_manifest_sha256,
         mlflow_run_id=mlflow_run_id,
         batch_size=batch_size,
+    )
+
+
+@workflow
+def wf_audit_kitscenes_target_reconstruction(
+    packed_shards: List[FlyteDirectory],
+    audit_code_revision: str,
+    expected_dataset_version: str = KITSCENES_NAVIGATION_DATASET_VERSION,
+    val_fraction: float = 0.1,
+    validation_scope: str = "full",
+) -> ReconstructionAuditOutput:
+    """Run the immutable preflight gate for rollout-aligned training."""
+    return audit_kitscenes_target_reconstruction(
+        packed_shards=packed_shards,
+        audit_code_revision=audit_code_revision,
+        expected_dataset_version=expected_dataset_version,
+        val_fraction=val_fraction,
+        validation_scope=validation_scope,
     )
 
 
@@ -5886,11 +8266,16 @@ def _map_recovered_kitscenes_artifacts(
     dataset_version: str,
     image_size: int,
     pack_concurrency: int,
+    max_partitions: int,
 ) -> List[FlyteDirectory]:
     """Map only pack tasks over an audited raw/label artifact set."""
     if pack_concurrency <= 0:
         raise ValueError(
             f"pack_concurrency must be positive, got {pack_concurrency}"
+        )
+    if max_partitions < 0:
+        raise ValueError(
+            f"max_partitions must be non-negative, got {max_partitions}"
         )
 
     from data_parsing.kit_scenes.source import sdk_split_scene_ids
@@ -5926,6 +8311,13 @@ def _map_recovered_kitscenes_artifacts(
         expected_label_count=AUDITED_LABEL_COUNT,
         expected_empty_scene_count=AUDITED_EMPTY_SCENE_COUNT,
     )
+    if max_partitions:
+        if not 2 <= max_partitions < len(entries):
+            raise ValueError(
+                "recovery subset max_partitions must select at least two "
+                "but fewer than the full manifest"
+            )
+        entries = entries[:max_partitions]
     raw_dirs = [
         FlyteDirectory(entry["raw_uri"]) for entry in entries
     ]
@@ -5965,6 +8357,7 @@ def wf_repack_existing_kitscenes(
     dataset_version: str = KITSCENES_NAVIGATION_DATASET_VERSION,
     image_size: int = 256,
     pack_concurrency: int = 60,
+    max_partitions: int = 0,
 ) -> List[FlyteDirectory]:
     """Repack audited raw/Cosmos artifacts without ingest or teacher calls."""
     return _map_recovered_kitscenes_artifacts(
@@ -5973,6 +8366,37 @@ def wf_repack_existing_kitscenes(
         dataset_version=dataset_version,
         image_size=image_size,
         pack_concurrency=pack_concurrency,
+        max_partitions=max_partitions,
+    )
+
+
+@workflow
+def wf_audit_recovered_kitscenes_target_reconstruction(
+    recovery_manifest: FlyteFile,
+    artifact_set_sha256: str,
+    audit_code_revision: str,
+    dataset_version: str = KITSCENES_NAVIGATION_DATASET_VERSION,
+    image_size: int = 256,
+    pack_concurrency: int = 60,
+    max_partitions: int = 0,
+    val_fraction: float = 0.1,
+    validation_scope: str = "full",
+) -> ReconstructionAuditOutput:
+    """Repack the exact recovery scope and audit its derived holdout."""
+    shards = wf_repack_existing_kitscenes(
+        recovery_manifest=recovery_manifest,
+        artifact_set_sha256=artifact_set_sha256,
+        dataset_version=dataset_version,
+        image_size=image_size,
+        pack_concurrency=pack_concurrency,
+        max_partitions=max_partitions,
+    )
+    return audit_kitscenes_target_reconstruction(
+        packed_shards=shards,
+        audit_code_revision=audit_code_revision,
+        expected_dataset_version=dataset_version,
+        val_fraction=val_fraction,
+        validation_scope=validation_scope,
     )
 
 
@@ -6056,6 +8480,15 @@ def wf_sharded_full_run(
     lr: float = 1e-4,
     training_seed: int = 149,
     enable_route_conditioning: bool = True,
+    training_objective_version: str = (
+        BASELINE_TRAINING_OBJECTIVE_VERSION
+    ),
+    enable_junction_sampling: bool = False,
+    enable_route_consistency: bool = False,
+    route_consistency_weight: float = 0.10,
+    reconstruction_audit: Optional[FlyteFile] = None,
+    reconstruction_audit_decision: str = "",
+    reconstruction_audit_rationale: str = "",
     enable_reasoning: bool = True,
     reasoning_mode: str = "pooled_latent",
     enable_world_model: bool = True,
@@ -6063,7 +8496,8 @@ def wf_sharded_full_run(
     validation_scope: str = "full",
     num_workers: int = 4,
     resume_from: Optional[FlyteFile] = None,
-    early_stopping_patience: int = 3,
+    early_stopping_patience: int = 5,
+    allow_resume_policy_transition: bool = False,
 ) -> EvalMetrics:
     """End-to-end scaled run (#121): episode-sharded dataset fan-out → IL train
     (all three losses) → held-out eval, in ONE execution.
@@ -6099,12 +8533,20 @@ def wf_sharded_full_run(
         batch_size=batch_size, grad_accum_steps=grad_accum_steps, lr=lr,
         training_seed=training_seed,
         enable_route_conditioning=enable_route_conditioning,
+        training_objective_version=training_objective_version,
+        enable_junction_sampling=enable_junction_sampling,
+        enable_route_consistency=enable_route_consistency,
+        route_consistency_weight=route_consistency_weight,
         navigation_quality_audit=navigation_quality_audit,
+        reconstruction_audit=reconstruction_audit,
+        reconstruction_audit_decision=reconstruction_audit_decision,
+        reconstruction_audit_rationale=reconstruction_audit_rationale,
         enable_reasoning=enable_reasoning, reasoning_mode=reasoning_mode,
         enable_world_model=enable_world_model, val_fraction=val_fraction,
         validation_scope=validation_scope,
         num_workers=num_workers, resume_from=resume_from,
-        early_stopping_patience=early_stopping_patience)
+        early_stopping_patience=early_stopping_patience,
+        allow_resume_policy_transition=allow_resume_policy_transition)
     return evaluate_il_policy(
         checkpoint=out.checkpoint, shards=shards, dataset=dataset,
         train_metadata=out.metadata)
@@ -6117,18 +8559,30 @@ def wf_recovered_kitscenes_full_run(
     dataset_version: str = KITSCENES_NAVIGATION_DATASET_VERSION,
     image_size: int = 256,
     pack_concurrency: int = 60,
+    max_partitions: int = 0,
     backbone: Backbone = Backbone.SWIN_V2_TINY,
-    epochs: int = 10,
+    epochs: int = 20,
     batch_size: int = 1,
     grad_accum_steps: int = 4,
     lr: float = 1e-4,
     training_seed: int = 149,
     enable_route_conditioning: bool = True,
+    training_objective_version: str = (
+        ROLLOUT_ALIGNED_OBJECTIVE_VERSION
+    ),
+    enable_junction_sampling: bool = False,
+    enable_route_consistency: bool = False,
+    route_consistency_weight: float = 0.10,
+    reconstruction_audit: Optional[FlyteFile] = None,
+    reconstruction_audit_decision: str = "",
+    reconstruction_audit_rationale: str = "",
     reasoning_mode: str = "pooled_latent",
     val_fraction: float = 0.1,
+    validation_scope: str = "full",
     num_workers: int = 4,
     resume_from: Optional[FlyteFile] = None,
-    early_stopping_patience: int = 3,
+    early_stopping_patience: int = 5,
+    allow_resume_policy_transition: bool = False,
 ) -> EvalMetrics:
     """Repack audited artifacts, then train/evaluate without ingest or Cosmos."""
     shards = wf_repack_existing_kitscenes(
@@ -6137,6 +8591,7 @@ def wf_recovered_kitscenes_full_run(
         dataset_version=dataset_version,
         image_size=image_size,
         pack_concurrency=pack_concurrency,
+        max_partitions=max_partitions,
     )
     navigation_quality_audit = audit_kitscenes_navigation_quality(
         shards=shards,
@@ -6151,14 +8606,23 @@ def wf_recovered_kitscenes_full_run(
         lr=lr,
         training_seed=training_seed,
         enable_route_conditioning=enable_route_conditioning,
+        training_objective_version=training_objective_version,
+        enable_junction_sampling=enable_junction_sampling,
+        enable_route_consistency=enable_route_consistency,
+        route_consistency_weight=route_consistency_weight,
         navigation_quality_audit=navigation_quality_audit,
+        reconstruction_audit=reconstruction_audit,
+        reconstruction_audit_decision=reconstruction_audit_decision,
+        reconstruction_audit_rationale=reconstruction_audit_rationale,
         enable_reasoning=True,
         reasoning_mode=reasoning_mode,
         enable_world_model=True,
         val_fraction=val_fraction,
+        validation_scope=validation_scope,
         num_workers=num_workers,
         resume_from=resume_from,
         early_stopping_patience=early_stopping_patience,
+        allow_resume_policy_transition=allow_resume_policy_transition,
     )
     return evaluate_il_policy(
         checkpoint=out.checkpoint,
@@ -6218,7 +8682,16 @@ def wf_train_il(
     training_seed: int = 149,
     amp: bool = False,
     enable_route_conditioning: bool = True,
+    training_objective_version: str = (
+        BASELINE_TRAINING_OBJECTIVE_VERSION
+    ),
+    enable_junction_sampling: bool = False,
+    enable_route_consistency: bool = False,
+    route_consistency_weight: float = 0.10,
     navigation_quality_audit: Optional[FlyteFile] = None,
+    reconstruction_audit: Optional[FlyteFile] = None,
+    reconstruction_audit_decision: str = "",
+    reconstruction_audit_rationale: str = "",
     enable_reasoning: bool = False,
     reasoning_mode: str = "pooled_latent",
     enable_world_model: bool = False,
@@ -6226,7 +8699,8 @@ def wf_train_il(
     validation_scope: str = "full",
     num_workers: int = 0,
     resume_from: Optional[FlyteFile] = None,
-    early_stopping_patience: int = 3,
+    early_stopping_patience: int = 5,
+    allow_resume_policy_transition: bool = False,
 ) -> EvalMetrics:
     """IL Train → Evaluate. All datasets' shards passed in; `dataset` selects one.
 
@@ -6248,12 +8722,20 @@ def wf_train_il(
                    grad_accum_steps=grad_accum_steps, lr=lr,
                    training_seed=training_seed, amp=amp,
                    enable_route_conditioning=enable_route_conditioning,
+                   training_objective_version=training_objective_version,
+                   enable_junction_sampling=enable_junction_sampling,
+                   enable_route_consistency=enable_route_consistency,
+                   route_consistency_weight=route_consistency_weight,
                    navigation_quality_audit=navigation_quality_audit,
+                   reconstruction_audit=reconstruction_audit,
+                   reconstruction_audit_decision=reconstruction_audit_decision,
+                   reconstruction_audit_rationale=reconstruction_audit_rationale,
                    enable_reasoning=enable_reasoning, reasoning_mode=reasoning_mode,
                    enable_world_model=enable_world_model, val_fraction=val_fraction,
                    validation_scope=validation_scope,
                    num_workers=num_workers, resume_from=resume_from,
-                   early_stopping_patience=early_stopping_patience)
+                   early_stopping_patience=early_stopping_patience,
+                   allow_resume_policy_transition=allow_resume_policy_transition)
     return evaluate_il_policy(checkpoint=out.checkpoint, shards=shards, dataset=dataset,
                               train_metadata=out.metadata)
 

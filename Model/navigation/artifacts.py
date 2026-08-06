@@ -26,10 +26,15 @@ from .contracts import (
     canonical_json_bytes,
 )
 from .rasterizer import EgoPose, NavigationRaster
+from .supervision import (
+    ROUTE_SUPERVISION_ARTIFACT_VERSION,
+    RouteSupervision,
+)
 
 
 SCENE_NAVIGATION_ARTIFACT_VERSION = "scene_navigation_v1"
-SAMPLE_NAVIGATION_ARTIFACT_VERSION = "sample_navigation_v1"
+SAMPLE_NAVIGATION_ARTIFACT_VERSION = "sample_navigation_v2"
+ROUTE_SUPERVISION_MEMBER = "route_supervision.npz"
 _ZIP_TIMESTAMP = (1980, 1, 1, 0, 0, 0)
 
 
@@ -60,6 +65,99 @@ def decode_array(payload: bytes) -> np.ndarray:
             raise ValueError(f"navigation NPZ members differ from contract: {names}")
         with archive.open("array.npy") as stream:
             return np.load(io.BytesIO(stream.read()), allow_pickle=False)
+
+
+def _encode_named_arrays(arrays: dict[str, np.ndarray]) -> bytes:
+    output = io.BytesIO()
+    with zipfile.ZipFile(
+        output,
+        mode="w",
+        compression=zipfile.ZIP_DEFLATED,
+        compresslevel=6,
+        strict_timestamps=True,
+    ) as archive:
+        for name, array in sorted(arrays.items()):
+            array_buffer = io.BytesIO()
+            value = np.asarray(array)
+            if value.ndim > 0:
+                value = np.ascontiguousarray(value)
+            np.save(
+                array_buffer,
+                value,
+                allow_pickle=False,
+            )
+            info = zipfile.ZipInfo(
+                f"{name}.npy",
+                date_time=_ZIP_TIMESTAMP,
+            )
+            info.compress_type = zipfile.ZIP_DEFLATED
+            info.create_system = 3
+            info.external_attr = 0o100644 << 16
+            archive.writestr(info, array_buffer.getvalue())
+    return output.getvalue()
+
+
+def _decode_named_arrays(payload: bytes) -> dict[str, np.ndarray]:
+    arrays = {}
+    with zipfile.ZipFile(io.BytesIO(payload), mode="r") as archive:
+        names = archive.namelist()
+        if names != sorted(names) or any(
+            not name.endswith(".npy") for name in names
+        ):
+            raise ValueError("route supervision NPZ members are not canonical")
+        for name in names:
+            with archive.open(name) as stream:
+                arrays[name.removesuffix(".npy")] = np.load(
+                    io.BytesIO(stream.read()),
+                    allow_pickle=False,
+                )
+    return arrays
+
+
+def encode_route_supervision(supervision: RouteSupervision) -> bytes:
+    return _encode_named_arrays(supervision.arrays())
+
+
+def decode_route_supervision(members: dict[str, bytes]) -> RouteSupervision:
+    if ROUTE_SUPERVISION_MEMBER not in members:
+        raise ValueError("navigation sample is missing route supervision")
+    arrays = _decode_named_arrays(members[ROUTE_SUPERVISION_MEMBER])
+    required = {
+        "distance_to_corridor_m",
+        "distance_to_drivable_m",
+        "drivable_available",
+        "route_heading_sin",
+        "route_heading_cos",
+        "route_heading_valid",
+        "destination_xy_m",
+        "destination_visible",
+    }
+    if set(arrays) != required:
+        raise ValueError(
+            "route supervision fields differ from contract: "
+            f"{sorted(arrays)}"
+        )
+    visible = np.asarray(arrays["destination_visible"])
+    if visible.shape != () or int(visible) not in (0, 1):
+        raise ValueError("destination visibility must be a binary scalar")
+    drivable_available = np.asarray(arrays["drivable_available"])
+    if (
+        drivable_available.shape != ()
+        or int(drivable_available) not in (0, 1)
+    ):
+        raise ValueError(
+            "drivable availability must be a binary scalar"
+        )
+    return RouteSupervision(
+        distance_to_corridor_m=arrays["distance_to_corridor_m"],
+        distance_to_drivable_m=arrays["distance_to_drivable_m"],
+        drivable_available=bool(int(drivable_available)),
+        route_heading_sin=arrays["route_heading_sin"],
+        route_heading_cos=arrays["route_heading_cos"],
+        route_heading_valid=arrays["route_heading_valid"],
+        destination_xy_m=arrays["destination_xy_m"],
+        destination_visible=bool(int(visible)),
+    )
 
 
 def encode_scene_navigation(
@@ -236,10 +334,12 @@ def decode_scene_navigation(
 def encode_sample_navigation(
     raster: NavigationRaster,
     *,
+    route_supervision: RouteSupervision,
     extra_metadata: dict[str, Any] | None = None,
 ) -> dict[str, bytes]:
     metadata = {
         "schema_version": SAMPLE_NAVIGATION_ARTIFACT_VERSION,
+        "route_supervision_version": ROUTE_SUPERVISION_ARTIFACT_VERSION,
         **raster.metadata(),
     }
     for key, value in (extra_metadata or {}).items():
@@ -251,6 +351,9 @@ def encode_sample_navigation(
     return {
         "map_semantic.npz": encode_array(raster.map_context),
         "route_mask.npz": encode_array(raster.route_mask),
+        ROUTE_SUPERVISION_MEMBER: encode_route_supervision(
+            route_supervision
+        ),
         "navigation_meta.json": canonical_json_bytes(metadata),
     }
 
@@ -261,6 +364,7 @@ def decode_sample_navigation(
     required = {
         "map_semantic.npz",
         "route_mask.npz",
+        ROUTE_SUPERVISION_MEMBER,
         "navigation_meta.json",
     }
     missing = required - set(members)
@@ -277,6 +381,11 @@ def decode_sample_navigation(
     metadata = json.loads(members["navigation_meta.json"])
     if metadata.get("schema_version") != SAMPLE_NAVIGATION_ARTIFACT_VERSION:
         raise ValueError("unsupported sample navigation artifact version")
+    if (
+        metadata.get("route_supervision_version")
+        != ROUTE_SUPERVISION_ARTIFACT_VERSION
+    ):
+        raise ValueError("unsupported route supervision artifact version")
     return map_context, route_mask, metadata
 
 

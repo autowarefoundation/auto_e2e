@@ -1,4 +1,6 @@
 boto3==1.43.0
+flytekit==1.16.24
+kubernetes==34.1.0
 mypy==2.1.0
 numpy==2.2.6
 pyproj==3.7.2

@@ -10,6 +10,7 @@ RUN pip install --no-cache-dir \
     kubernetes \
     pyyaml \
     numpy \
+    pyproj==3.7.2 \
     boto3==1.43.0
 
 COPY Model/ /workspace/Model/

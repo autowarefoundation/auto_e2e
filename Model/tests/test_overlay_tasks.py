@@ -31,6 +31,15 @@ from Platform.pipelines.overlay_tasks import (
 )
 
 
+CANONICAL_METRIC_CONTRACT = {
+    "version": "rollout_validation_v2",
+    "horizon_seconds": 3.0,
+    "horizon_steps": 30,
+    "target_source": "logged_xy",
+    "aggregation": "scene_balanced",
+}
+
+
 def test_overlay_tasks_configure_deterministic_cublas_workspace():
     assert OVERLAY_TASK_ENV["CUBLAS_WORKSPACE_CONFIG"] == ":4096:8"
 
@@ -582,6 +591,46 @@ def test_full_run_model_resolution_prefers_selected_tagged_checkpoint():
     assert _resolve(client) == "43"
 
 
+def test_full_run_model_resolution_prefers_composite_best_over_other_roles():
+    tags = {
+        "train_execution_id": "a1234567890123456789",
+        "dataset": "KIT-MRT/KITScenes-Multimodal",
+        "dataset_version": "v2.1",
+    }
+    client = _MLflowClient(
+        [
+            _model_version(
+                44,
+                "best",
+                "a" * 64,
+                checkpoint_role="best",
+                **tags,
+            ),
+            _model_version(
+                45,
+                "trajectory",
+                "b" * 64,
+                checkpoint_role="best_trajectory",
+                **tags,
+            ),
+            _model_version(
+                46,
+                "final",
+                "c" * 64,
+                checkpoint_role="final",
+                **tags,
+            ),
+        ],
+        {
+            "best": _run(),
+            "trajectory": _run(),
+            "final": _run(),
+        },
+    )
+
+    assert _resolve(client) == "44"
+
+
 def test_full_run_model_resolution_rejects_partial_lineage_tags():
     client = _MLflowClient(
         [
@@ -694,6 +743,7 @@ def _register_selected(client):
         data_fingerprint="f" * 64,
         validation_ade=9.689568680297887,
         validation_fde=29.656355911506907,
+        validation_metric_contract=CANONICAL_METRIC_CONTRACT,
     )
 
 
@@ -717,6 +767,13 @@ def test_selected_checkpoint_registration_records_exact_provenance():
         "checkpoint_role": "selected-overlay",
         "validation_ade": "9.689568680297887",
         "validation_fde": "29.656355911506907",
+        "validation_ade_3s_m": "9.689568680297887",
+        "validation_fde_3s_m": "29.656355911506907",
+        "validation_metric_version": "rollout_validation_v2",
+        "validation_metric_horizon_seconds": "3.0",
+        "validation_metric_horizon_steps": "30",
+        "validation_metric_target_source": "logged_xy",
+        "validation_metric_aggregation": "scene_balanced",
     }
 
 
@@ -829,6 +886,9 @@ def _selected_checkpoint_payload():
                     if epoch == 4 else 20.0 - epoch,
                     "val_fde": 29.656355911506907
                     if epoch == 4 else 40.0 - epoch,
+                    "validation_metric_contract": (
+                        CANONICAL_METRIC_CONTRACT
+                    ),
                 }
                 for epoch in range(1, 5)
             ],
@@ -849,6 +909,7 @@ def _validate_payload(payload):
         data_fingerprint="f" * 64,
         validation_ade=9.689568680297887,
         validation_fde=29.656355911506907,
+        validation_metric_contract=CANONICAL_METRIC_CONTRACT,
     )
 
 
