@@ -1,0 +1,82 @@
+version: 0.2
+
+env:
+  variables:
+    AWS_DEFAULT_REGION: us-west-2
+    FLYTE_PROJECT: auto-e2e
+    FLYTE_DOMAIN: development
+    WORKFLOW_NAME: >-
+      Platform.pipelines.distributed_training.wf_reactive_multistage_ray_2_canary
+    FLYTE_VERSION: ""
+    EXECUTION_NAME: ""
+    WAIT_TIMEOUT_SECONDS: "3300"
+
+phases:
+  install:
+    commands:
+      - pip install -q flytekit==1.16.24
+  pre_build:
+    commands:
+      - test -n "${FLYTE_VERSION}"
+      - test -n "${EXECUTION_NAME}"
+      - printf '%s' "${EXECUTION_NAME}" | grep -Eq '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
+      - test "${#EXECUTION_NAME}" -le 63
+      - printf '%s' "${WAIT_TIMEOUT_SECONDS}" | grep -Eq '^[1-9][0-9]*$'
+      - |
+        cat > /tmp/flyte.yaml << EOF
+        admin:
+          endpoint: dns:///k8s-flyte-flyteadm-be92e7737c-cf0d1a0f3df10f77.elb.us-west-2.amazonaws.com:81
+          insecure: true
+        EOF
+  build:
+    commands:
+      - |
+        python3 - <<'PY'
+        import os
+
+        from flytekit.configuration import Config
+        from flytekit.models.core.execution import WorkflowExecutionPhase
+        from flytekit.remote import FlyteRemote
+
+        project = os.environ["FLYTE_PROJECT"]
+        domain = os.environ["FLYTE_DOMAIN"]
+        workflow_name = os.environ["WORKFLOW_NAME"]
+        version = os.environ["FLYTE_VERSION"]
+        execution_name = os.environ["EXECUTION_NAME"]
+        timeout_seconds = int(os.environ["WAIT_TIMEOUT_SECONDS"])
+
+        remote = FlyteRemote(
+            config=Config.auto(config_file="/tmp/flyte.yaml"),
+            default_project=project,
+            default_domain=domain,
+        )
+        launch_plan = remote.fetch_launch_plan(
+            project=project,
+            domain=domain,
+            name=workflow_name,
+            version=version,
+        )
+        execution = remote.execute(
+            launch_plan,
+            inputs={},
+            execution_name=execution_name,
+            wait=False,
+        )
+        print(f"FLYTE_EXECUTION_ID={execution.id.name}", flush=True)
+        execution = remote.wait(
+            execution,
+            timeout=timeout_seconds,
+            poll_interval=10,
+        )
+        phase = execution.closure.phase
+        phase_name = WorkflowExecutionPhase.enum_to_string(phase)
+        print(f"FLYTE_EXECUTION_PHASE={phase_name}", flush=True)
+        if phase != WorkflowExecutionPhase.SUCCEEDED:
+            error = execution.error
+            if error is not None:
+                print(f"FLYTE_EXECUTION_ERROR={error}", flush=True)
+            raise SystemExit(
+                f"Flyte execution {execution.id.name} ended in {phase_name}"
+            )
+        print(f"FLYTE_EXECUTION_OUTPUTS={execution.outputs}", flush=True)
+        PY
