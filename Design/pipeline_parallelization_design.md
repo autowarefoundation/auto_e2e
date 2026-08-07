@@ -30,7 +30,9 @@ document:
   of the 534 official train archives. For this milestone, the full pipeline runs
   all 533 available train scenes under the bounded inventory policy in §3.3.1.
 - Data prep may fan out across CPU pods. Training remains serial on one GPU;
-  a 3–4 day training run is acceptable and DDP is out of scope.
+  a 3–4 day training run is acceptable and DDP is out of scope for this
+  milestone. The follow-up multi-node milestone is defined in
+  [distributed_imitation_training.md](distributed_imitation_training.md).
 
 ### Decisions locked in review
 1. **Distribute data prep, not training.** CPU/memory capacity may be increased
