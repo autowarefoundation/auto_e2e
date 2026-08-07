@@ -7,7 +7,10 @@ import json
 
 import pytest
 
-from data_parsing.pre_extracted import make_pre_extracted_loader
+from data_parsing.pre_extracted import (
+    make_pre_extracted_loader,
+    passthrough_nodesplitter,
+)
 from distributed_training.reactive_canary_data import (
     write_reactive_canary_dataset,
 )
@@ -205,6 +208,12 @@ def test_restarting_iterator_repeats_finite_loader():
         next(RestartingIterator([]))
 
 
+def test_rank_owned_nodesplitter_preserves_every_assigned_shard():
+    urls = ["rank-000-part-000.tar", "rank-000-part-003.tar"]
+
+    assert list(passthrough_nodesplitter(iter(urls))) == urls
+
+
 def _stage_config(stage: str) -> dict[str, object]:
     return {
         "backbone": "swin_v2_tiny",
@@ -280,6 +289,7 @@ def test_canary_dataset_uses_production_loader_contract(
         val_fraction=0.5,
         shuffle=0,
         decode_future_frames=False,
+        nodesplitter=passthrough_nodesplitter,
     ))
     validation_batches = list(make_pre_extracted_loader(
         str(dataset),
@@ -289,6 +299,7 @@ def test_canary_dataset_uses_production_loader_contract(
         val_fraction=0.5,
         shuffle=0,
         decode_future_frames=False,
+        nodesplitter=passthrough_nodesplitter,
     ))
 
     assert manifest["total_samples"] == 6
