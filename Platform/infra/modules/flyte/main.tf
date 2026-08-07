@@ -164,6 +164,10 @@ resource "helm_release" "flyte" {
     value = var.region
   }
   set {
+    name  = "userSettings.controlPlaneRoleName"
+    value = "${var.cluster_name}-s3-access"
+  }
+  set {
     name  = "userSettings.certificateArn"
     value = ""
   }
@@ -189,6 +193,22 @@ resource "helm_release" "flyte" {
   }
   set {
     name  = "flyteadmin.serviceAccount.annotations.eks\\.amazonaws\\.com/role-arn"
+    value = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:role/${var.cluster_name}-s3-access"
+  }
+  set {
+    name  = "flytepropeller.serviceAccount.name"
+    value = "flytepropeller"
+  }
+  set {
+    name  = "flytepropeller.serviceAccount.annotations.eks\\.amazonaws\\.com/role-arn"
+    value = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:role/${var.cluster_name}-s3-access"
+  }
+  set {
+    name  = "datacatalog.serviceAccount.name"
+    value = "datacatalog"
+  }
+  set {
+    name  = "datacatalog.serviceAccount.annotations.eks\\.amazonaws\\.com/role-arn"
     value = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:role/${var.cluster_name}-s3-access"
   }
   set {
