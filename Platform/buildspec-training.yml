@@ -1,0 +1,32 @@
+version: 0.2
+
+env:
+  variables:
+    AWS_DEFAULT_REGION: us-west-2
+    DOCKER_BUILDKIT: "1"
+
+phases:
+  pre_build:
+    commands:
+      - test -n "${IMAGE_TAG}"
+      - ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+      - ECR_URL="${ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com"
+      - aws ecr get-login-password --region "${AWS_DEFAULT_REGION}" | docker login --username AWS --password-stdin "${ECR_URL}"
+      - docker pull "${ECR_URL}/auto-e2e/training:latest" || true
+  build:
+    commands:
+      - >
+        DOCKER_BUILDKIT=1 docker build
+        --cache-from "${ECR_URL}/auto-e2e/training:latest"
+        --build-arg BUILDKIT_INLINE_CACHE=1
+        -t "${ECR_URL}/auto-e2e/training:${IMAGE_TAG}"
+        -f Platform/docker/training/Dockerfile .
+      - docker push "${ECR_URL}/auto-e2e/training:${IMAGE_TAG}"
+  post_build:
+    commands:
+      - >
+        aws ecr describe-images
+        --repository-name auto-e2e/training
+        --image-ids imageTag="${IMAGE_TAG}"
+        --query 'imageDetails[0].{digest:imageDigest,pushed:imagePushedAt,size:imageSizeInBytes}'
+        --output json
