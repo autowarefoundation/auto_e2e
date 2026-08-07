@@ -13,6 +13,8 @@ variable "pod_identity_associations" {
   default = [
     { namespace = "auto-e2e-training", service_account = "training-sa" },
     { namespace = "flyte", service_account = "flyteadmin" },
+    { namespace = "flyte", service_account = "flytepropeller" },
+    { namespace = "flyte", service_account = "datacatalog" },
     { namespace = "mlflow", service_account = "mlflow" },
   ]
 }
@@ -72,7 +74,11 @@ resource "aws_iam_role" "s3_access" {
         Action    = "sts:AssumeRoleWithWebIdentity"
         Condition = {
           StringLike = {
-            "${var.oidc_provider_url}:sub" = "system:serviceaccount:flyte:flyteadmin"
+            "${var.oidc_provider_url}:sub" = [
+              "system:serviceaccount:flyte:flyteadmin",
+              "system:serviceaccount:flyte:flytepropeller",
+              "system:serviceaccount:flyte:datacatalog",
+            ]
           }
         }
       }] : []
