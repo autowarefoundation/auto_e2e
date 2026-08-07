@@ -1,61 +1,88 @@
 # Kueue cluster-scoped objects for GPU queue management.
-# Apply AFTER Kueue Helm install.
+# Apply after the KubeRay and Kueue CRDs are installed.
 ---
-apiVersion: kueue.x-k8s.io/v1beta1
+apiVersion: kueue.x-k8s.io/v1beta2
 kind: ResourceFlavor
 metadata:
-  name: g6e-l40s
+  name: default-flavor
+spec: {}
+---
+apiVersion: kueue.x-k8s.io/v1beta2
+kind: ResourceFlavor
+metadata:
+  name: gpu-flavor
 spec:
   nodeLabels:
-    node.kubernetes.io/instance-type: g6e.4xlarge
+    workload-type: gpu-training
   tolerations:
     - key: nvidia.com/gpu
       operator: Exists
       effect: NoSchedule
 ---
-apiVersion: kueue.x-k8s.io/v1beta1
+apiVersion: kueue.x-k8s.io/v1beta2
 kind: WorkloadPriorityClass
 metadata:
   name: research-low
 value: 1000
-description: "Default priority for research/sweep jobs"
+description: "Default priority for research and canary jobs"
 ---
-apiVersion: kueue.x-k8s.io/v1beta1
+apiVersion: kueue.x-k8s.io/v1beta2
 kind: WorkloadPriorityClass
 metadata:
   name: production-high
 value: 10000
-description: "High priority for production training (preempts research)"
+description: "High priority for production training"
 ---
-apiVersion: kueue.x-k8s.io/v1beta1
+apiVersion: kueue.x-k8s.io/v1beta2
 kind: ClusterQueue
 metadata:
-  name: gpu-cq
+  name: training-queue
 spec:
   namespaceSelector:
-    matchLabels:
-      kubernetes.io/metadata.name: auto-e2e-training
+    matchExpressions:
+      - key: kubernetes.io/metadata.name
+        operator: In
+        values:
+          - auto-e2e-development
+          - auto-e2e-training
   resourceGroups:
-    - coveredResources: ["cpu", "memory", "nvidia.com/gpu"]
+    - coveredResources:
+        - cpu
+        - memory
       flavors:
-        - name: g6e-l40s
+        - name: default-flavor
           resources:
-            - name: "cpu"
-              nominalQuota: "14"
-            - name: "memory"
-              nominalQuota: "120Gi"
-            - name: "nvidia.com/gpu"
-              nominalQuota: "1"
+            - name: cpu
+              nominalQuota: "40"
+            - name: memory
+              nominalQuota: 160Gi
+    - coveredResources:
+        - nvidia.com/gpu
+      flavors:
+        - name: gpu-flavor
+          resources:
+            - name: nvidia.com/gpu
+              nominalQuota: "8"
   preemption:
     withinClusterQueue: LowerPriority
     reclaimWithinCohort: Never
 ---
-apiVersion: kueue.x-k8s.io/v1beta1
+apiVersion: kueue.x-k8s.io/v1beta2
 kind: LocalQueue
 metadata:
-  name: gpu-queue
+  name: training
   namespace: auto-e2e-training
   annotations:
     kueue.x-k8s.io/default-queue: "true"
 spec:
-  clusterQueue: gpu-cq
+  clusterQueue: training-queue
+---
+apiVersion: kueue.x-k8s.io/v1beta2
+kind: LocalQueue
+metadata:
+  name: training
+  namespace: auto-e2e-development
+  annotations:
+    kueue.x-k8s.io/default-queue: "true"
+spec:
+  clusterQueue: training-queue
