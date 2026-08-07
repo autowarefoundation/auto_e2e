@@ -212,6 +212,49 @@ def _seed_epoch(seed: int, rank: int, epoch: int) -> None:
     torch.cuda.manual_seed_all(epoch_seed)
 
 
+def clip_finite_gradients_float64(
+    parameters,
+    max_norm: float,
+):
+    """Clip finite gradients without overflowing the global norm."""
+    import torch
+
+    gradients = [
+        parameter.grad
+        for parameter in parameters
+        if parameter.grad is not None
+    ]
+    if not gradients:
+        return torch.zeros((), dtype=torch.float64), True
+    device = gradients[0].device
+    norm_squared = torch.zeros(
+        (),
+        dtype=torch.float64,
+        device=device,
+    )
+    finite = True
+    for gradient in gradients:
+        if gradient.device != device:
+            raise ValueError("all gradients must be on the same device")
+        finite = finite and bool(torch.isfinite(gradient).all().item())
+        norm_squared += gradient.detach().to(torch.float64).square().sum()
+    gradient_norm = torch.sqrt(norm_squared)
+    finite = finite and bool(torch.isfinite(gradient_norm).item())
+    if finite:
+        scale = torch.clamp(
+            torch.as_tensor(
+                max_norm,
+                dtype=torch.float64,
+                device=device,
+            )
+            / gradient_norm.clamp_min(torch.finfo(torch.float64).tiny),
+            max=1.0,
+        )
+        for gradient in gradients:
+            gradient.mul_(scale.to(dtype=gradient.dtype))
+    return gradient_norm, finite
+
+
 def _train_fixed_steps(
     model,
     loader,
@@ -318,11 +361,10 @@ def _train_fixed_steps(
             for parameter in model.parameters()
             if parameter.requires_grad
         ]
-        gradient_norm = torch.nn.utils.clip_grad_norm_(
+        gradient_norm, finite_gradient = clip_finite_gradients_float64(
             trainable,
             grad_clip,
         )
-        finite_gradient = bool(torch.isfinite(gradient_norm).item())
         if not _collective_true(finite_gradient, device):
             raise FloatingPointError(
                 "a Reactive DDP rank produced non-finite gradients"
