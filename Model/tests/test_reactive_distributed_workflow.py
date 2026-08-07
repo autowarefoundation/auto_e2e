@@ -34,6 +34,26 @@ def test_reviewed_ray_topologies_have_fixed_worker_groups():
         assert config.enable_autoscaling is False
 
 
+def test_ray_tasks_serialize_the_resolved_storage_path():
+    expected_environment = {
+        "AWS_DEFAULT_REGION": "us-west-2",
+        "AUTO_E2E_RAY_STORAGE_PATH": (
+            distributed_training.RAY_STORAGE_PATH
+        ),
+        "RAY_TRAIN_V2_ENABLED": "1",
+    }
+
+    assert distributed_training.ray_ddp_smoke_4.environment == (
+        expected_environment
+    )
+    assert distributed_training.train_reactive_stage_ray_2.environment == (
+        expected_environment
+    )
+    assert distributed_training.train_reactive_stage_ray_8.environment == (
+        expected_environment
+    )
+
+
 def test_distributed_program_passes_stage_a_checkpoint_to_stage_b():
     stage_a, stage_b = (
         distributed_training.wf_train_reactive_nuplan_l2d_ray_8.nodes
