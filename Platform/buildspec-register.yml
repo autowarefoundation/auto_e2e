@@ -6,6 +6,10 @@ env:
     FLYTE_PROJECT: auto-e2e
     FLYTE_DOMAIN: development
     IMAGE_TAG: latest
+    TRAINING_IMAGE_TAG: ""
+    DATA_PREP_IMAGE_TAG: ""
+    EVAL_IMAGE_TAG: ""
+    OFFLINE_RL_IMAGE_TAG: ""
 
 phases:
   install:
@@ -23,23 +27,36 @@ phases:
       - export ECR_PREFIX="${ECR_URL}"
       - export PYTHONPATH="${CODEBUILD_SRC_DIR}/Model:${CODEBUILD_SRC_DIR}:${PYTHONPATH:-}"
       - |
+        TRAINING_IMAGE_TAG="${TRAINING_IMAGE_TAG:-${IMAGE_TAG}}"
+        DATA_PREP_IMAGE_TAG="${DATA_PREP_IMAGE_TAG:-${IMAGE_TAG}}"
+        EVAL_IMAGE_TAG="${EVAL_IMAGE_TAG:-${IMAGE_TAG}}"
+        OFFLINE_RL_IMAGE_TAG="${OFFLINE_RL_IMAGE_TAG:-${IMAGE_TAG}}"
         image_ref() {
           REPOSITORY="$1"
+          TAG="$2"
           DIGEST=$(aws ecr batch-get-image \
             --repository-name "auto-e2e/${REPOSITORY}" \
-            --image-ids imageTag="${IMAGE_TAG}" \
+            --image-ids imageTag="${TAG}" \
             --query 'images[0].imageId.imageDigest' \
             --output text)
           if [ -z "${DIGEST}" ] || [ "${DIGEST}" = "None" ]; then
-            echo "No digest found for auto-e2e/${REPOSITORY}:${IMAGE_TAG}" >&2
+            echo "No digest found for auto-e2e/${REPOSITORY}:${TAG}" >&2
             return 1
           fi
           printf '%s/auto-e2e/%s@%s' "${ECR_URL}" "${REPOSITORY}" "${DIGEST}"
         }
-        AUTO_E2E_TRAINING_IMAGE="$(image_ref training)" || exit 1
-        AUTO_E2E_EVAL_IMAGE="$(image_ref eval)" || exit 1
-        AUTO_E2E_OFFLINE_RL_IMAGE="$(image_ref offline-rl)" || exit 1
-        AUTO_E2E_DATA_PREP_IMAGE="$(image_ref data-prep)" || exit 1
+        AUTO_E2E_TRAINING_IMAGE="$(
+          image_ref training "${TRAINING_IMAGE_TAG}"
+        )" || exit 1
+        AUTO_E2E_EVAL_IMAGE="$(
+          image_ref eval "${EVAL_IMAGE_TAG}"
+        )" || exit 1
+        AUTO_E2E_OFFLINE_RL_IMAGE="$(
+          image_ref offline-rl "${OFFLINE_RL_IMAGE_TAG}"
+        )" || exit 1
+        AUTO_E2E_DATA_PREP_IMAGE="$(
+          image_ref data-prep "${DATA_PREP_IMAGE_TAG}"
+        )" || exit 1
         export AUTO_E2E_TRAINING_IMAGE AUTO_E2E_EVAL_IMAGE
         export AUTO_E2E_OFFLINE_RL_IMAGE AUTO_E2E_DATA_PREP_IMAGE
       - |
