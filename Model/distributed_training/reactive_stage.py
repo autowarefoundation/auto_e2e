@@ -202,6 +202,41 @@ def _download_checkpoint(checkpoint_uri: str, destination: Path) -> None:
     )
 
 
+def normalize_ray_checkpoint_uri(
+    checkpoint_path: str,
+    storage_path: str,
+) -> str:
+    """Restore the S3 scheme Ray omits from filesystem-backed paths."""
+    raw_path = checkpoint_path.rstrip("/")
+    storage_uri = storage_path.rstrip("/")
+    storage = urlparse(storage_uri)
+    if storage.scheme != "s3" or not storage.netloc:
+        raise ValueError("Reactive Ray checkpoint storage must be an S3 URI")
+    storage_without_scheme = (
+        f"{storage.netloc}/{storage.path.lstrip('/')}".rstrip("/")
+    )
+    parsed = urlparse(raw_path)
+    if parsed.scheme == "s3":
+        checkpoint_uri = raw_path
+    elif parsed.scheme == "" and (
+        raw_path == storage_without_scheme
+        or raw_path.startswith(f"{storage_without_scheme}/")
+    ):
+        checkpoint_uri = f"s3://{raw_path}"
+    else:
+        raise ValueError(
+            "Ray checkpoint path is outside the configured S3 storage"
+        )
+    if not (
+        checkpoint_uri == storage_uri
+        or checkpoint_uri.startswith(f"{storage_uri}/")
+    ):
+        raise ValueError(
+            "Ray checkpoint URI is outside the configured S3 storage"
+        )
+    return checkpoint_uri
+
+
 def _seed_epoch(seed: int, rank: int, epoch: int) -> None:
     import torch
 
@@ -886,7 +921,10 @@ def run_reactive_stage(config: Mapping[str, Any]) -> dict[str, Any]:
     result = trainer.fit()
     if result.checkpoint is None:
         raise RuntimeError("Reactive Ray training returned no checkpoint")
-    checkpoint_uri = str(result.checkpoint.path).rstrip("/")
+    checkpoint_uri = normalize_ray_checkpoint_uri(
+        str(result.checkpoint.path),
+        str(config["storage_path"]),
+    )
     metrics = dict(result.metrics)
     if int(metrics.get("world_size", 0)) != int(config["num_workers"]):
         raise RuntimeError(
