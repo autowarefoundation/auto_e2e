@@ -33,8 +33,14 @@ phases:
       - |
         python3 - <<'PY'
         import os
+        import time
 
+        import grpc
         from flytekit.configuration import Config
+        from flytekit.exceptions.user import (
+            FlyteEntityAlreadyExistsException,
+            FlyteEntityNotExistException,
+        )
         from flytekit.models.core.execution import WorkflowExecutionPhase
         from flytekit.remote import FlyteRemote
 
@@ -56,18 +62,95 @@ phases:
             name=workflow_name,
             version=version,
         )
-        execution = remote.execute(
-            launch_plan,
-            inputs={},
-            execution_name=execution_name,
-            wait=False,
-        )
+
+        def grpc_code(error):
+            visited = set()
+            candidate = error
+            while candidate is not None and id(candidate) not in visited:
+                visited.add(id(candidate))
+                if isinstance(candidate, grpc.RpcError):
+                    return candidate.code()
+                candidate = (
+                    candidate.__cause__
+                    if candidate.__cause__ is not None
+                    else candidate.__context__
+                )
+            return None
+
+        transient_codes = {
+            grpc.StatusCode.DEADLINE_EXCEEDED,
+            grpc.StatusCode.INTERNAL,
+            grpc.StatusCode.RESOURCE_EXHAUSTED,
+            grpc.StatusCode.UNAVAILABLE,
+            grpc.StatusCode.UNKNOWN,
+        }
+        launch_deadline = time.monotonic() + 300
+        execution = None
+        while execution is None:
+            try:
+                execution = remote.fetch_execution(
+                    project=project,
+                    domain=domain,
+                    name=execution_name,
+                )
+                break
+            except FlyteEntityNotExistException:
+                pass
+            except Exception as fetch_error:
+                fetch_code = grpc_code(fetch_error)
+                if fetch_code not in transient_codes:
+                    raise
+            try:
+                execution = remote.execute(
+                    launch_plan,
+                    inputs={},
+                    execution_name=execution_name,
+                    wait=False,
+                )
+            except FlyteEntityAlreadyExistsException:
+                pass
+            except Exception as create_error:
+                create_code = grpc_code(create_error)
+                if create_code not in transient_codes:
+                    raise
+            if execution is None:
+                if time.monotonic() >= launch_deadline:
+                    raise TimeoutError(
+                        "timed out fetching or creating Flyte execution"
+                    )
+                time.sleep(5)
+
         print(f"FLYTE_EXECUTION_ID={execution.id.name}", flush=True)
-        execution = remote.wait(
-            execution,
-            timeout=timeout_seconds,
-            poll_interval=10,
-        )
+        wait_deadline = time.monotonic() + timeout_seconds
+        terminal_phases = {
+            WorkflowExecutionPhase.ABORTED,
+            WorkflowExecutionPhase.FAILED,
+            WorkflowExecutionPhase.SUCCEEDED,
+            WorkflowExecutionPhase.TIMED_OUT,
+        }
+        while True:
+            try:
+                execution = remote.sync_execution(
+                    execution,
+                    sync_nodes=True,
+                )
+            except Exception as sync_error:
+                if grpc_code(sync_error) not in transient_codes:
+                    raise
+                print(
+                    "FLYTE_ADMIN_TRANSIENT_RETRY="
+                    f"{grpc_code(sync_error).name}",
+                    flush=True,
+                )
+            else:
+                if execution.closure.phase in terminal_phases:
+                    break
+            if time.monotonic() >= wait_deadline:
+                raise TimeoutError(
+                    f"timed out waiting for Flyte execution {execution_name}"
+                )
+            time.sleep(10)
+
         phase = execution.closure.phase
         phase_name = WorkflowExecutionPhase.enum_to_string(phase)
         print(f"FLYTE_EXECUTION_PHASE={phase_name}", flush=True)
