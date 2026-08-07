@@ -103,6 +103,21 @@ def test_distributed_workflow_source_has_no_deployment_account_id():
     assert "pg-" not in source
 
 
+def test_canary_launcher_is_idempotent_and_retries_flyte_admin():
+    buildspec = (
+        Path(distributed_training.__file__).parents[1]
+        / "buildspec-launch-distributed-canary.yml"
+    ).read_text()
+
+    assert "remote.fetch_execution(" in buildspec
+    assert "remote.sync_execution(" in buildspec
+    assert "FlyteEntityAlreadyExistsException" in buildspec
+    assert "FlyteEntityNotExistException" in buildspec
+    assert "grpc.StatusCode.UNAVAILABLE" in buildspec
+    assert "FLYTE_ADMIN_TRANSIENT_RETRY=" in buildspec
+    assert "remote.wait(" not in buildspec
+
+
 def test_l2d_reactive_pack_workflow_binds_osm_and_target_contract():
     node, = workflows.wf_pack_l2d_reactive_dataset.nodes
     assert node.flyte_entity.name.endswith("wf_create_dataset_sharded")
