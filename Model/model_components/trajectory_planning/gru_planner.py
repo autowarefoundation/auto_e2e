@@ -90,6 +90,14 @@ class GRUPlanner(BasePlanner):
             (sampled * weights.unsqueeze(-1)).sum(dim=1)
         )
 
+    @staticmethod
+    def _lookup_query(
+        hidden: torch.Tensor,
+        ego_query: torch.Tensor,
+    ) -> torch.Tensor:
+        """Keep deformable lookup gradients out of recurrent state history."""
+        return hidden.detach() + ego_query
+
     def forward(
         self,
         bev_features: torch.Tensor,
@@ -124,7 +132,7 @@ class GRUPlanner(BasePlanner):
         controls = []
         for _ in range(self.num_timesteps):
             attended = self._cross_attend(
-                hidden.squeeze(0) + ego_query,
+                self._lookup_query(hidden.squeeze(0), ego_query),
                 values,
             )
             _, hidden = self.gru(attended.unsqueeze(0), hidden)
