@@ -35,7 +35,7 @@ from Platform.pipelines.trajectory_visualization_tasks import (
 
 import os as _os
 
-ECR_PREFIX = _os.environ.get("ECR_PREFIX", "381491877296.dkr.ecr.us-west-2.amazonaws.com")
+ECR_PREFIX = _os.environ.get("ECR_PREFIX", "registry.invalid")
 TRAINING_IMAGE = _os.environ.get(
     "AUTO_E2E_TRAINING_IMAGE",
     f"{ECR_PREFIX}/auto-e2e/training:latest",
@@ -10023,6 +10023,8 @@ def wf_build_l2d_osm_graph_artifact(
 def wf_pack_l2d_reactive_dataset(
     osm_graph_snapshot: FlyteFile,
     episodes: int = 0,
+    start_ep: int = -1,
+    end_ep: int = -1,
     partition_size: int = 1,
     max_partitions: int = 600,
     ingest_concurrency: int = 40,
@@ -10034,6 +10036,8 @@ def wf_pack_l2d_reactive_dataset(
         source_revision=L2D_SOURCE_REVISION,
         dataset_version=L2D_REACTIVE_DATASET_VERSION,
         episodes=episodes,
+        start_ep=start_ep,
+        end_ep=end_ep,
         partition_size=partition_size,
         image_size=256,
         world_model=False,
@@ -10045,6 +10049,39 @@ def wf_pack_l2d_reactive_dataset(
         pack_concurrency=pack_concurrency,
         reactive_targets=True,
         osm_graph_snapshot=osm_graph_snapshot,
+    )
+
+
+@workflow
+def wf_prepare_l2d_reactive_dataset(
+    source_pbf: FlyteFile,
+    source_revision: str,
+    source_date: str,
+    attribution: str = "OpenStreetMap contributors",
+    episodes: int = 0,
+    start_ep: int = -1,
+    end_ep: int = -1,
+    partition_size: int = 1,
+    max_partitions: int = 600,
+    ingest_concurrency: int = 40,
+    pack_concurrency: int = 40,
+) -> List[FlyteDirectory]:
+    """Build a pinned OSM graph and pack one immutable L2D subset."""
+    osm_graph_snapshot = build_l2d_osm_graph_artifact(
+        source_pbf=source_pbf,
+        source_revision=source_revision,
+        source_date=source_date,
+        attribution=attribution,
+    )
+    return wf_pack_l2d_reactive_dataset(
+        osm_graph_snapshot=osm_graph_snapshot,
+        episodes=episodes,
+        start_ep=start_ep,
+        end_ep=end_ep,
+        partition_size=partition_size,
+        max_partitions=max_partitions,
+        ingest_concurrency=ingest_concurrency,
+        pack_concurrency=pack_concurrency,
     )
 
 
