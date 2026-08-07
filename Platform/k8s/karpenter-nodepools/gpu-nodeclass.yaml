@@ -1,0 +1,25 @@
+apiVersion: eks.amazonaws.com/v1
+kind: NodeClass
+metadata:
+  name: auto-e2e-gpu-training
+spec:
+  role: auto-e2e-platform-node-role
+  subnetSelectorTerms:
+    - tags:
+        Name: auto-e2e-platform-private-us-west-2b
+  securityGroupSelectorTerms:
+    - tags:
+        aws:eks:cluster-name: auto-e2e-platform
+  capacityReservationSelectorTerms:
+    - ownerID: "REPLACE_WITH_AWS_ACCOUNT_ID"
+      tags:
+        Name: auto-e2e-distributed-training
+  placementGroupSelector:
+    name: auto-e2e-distributed-training-pg
+  ephemeralStorage:
+    size: 200Gi
+    iops: 3000
+    throughput: 125
+  networkPolicy: DefaultAllow
+  networkPolicyEventLogs: Disabled
+  snatPolicy: Random
