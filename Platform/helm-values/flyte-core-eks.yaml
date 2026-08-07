@@ -11,6 +11,7 @@ userSettings:
   logGroup: <LOG_GROUP_NAME>
   redisHostUrl: <REDIS_HOST_URL>
   redisHostKey: <REDIS_HOST_KEY>
+  controlPlaneRoleName: <CONTROL_PLANE_ROLE_NAME>
 
 #
 # FLYTEADMIN
@@ -20,11 +21,10 @@ flyteadmin:
   replicaCount: 2
   # -- IAM role for SA: https://docs.aws.amazon.com/eks/latest/userguide/iam-roles-for-service-accounts.html
   serviceAccount:
-    # -- If the service account is created by you, make this false, else a new service account will be created and the iam-role-flyte will be added
-    # you can change the name of this role
+    # -- If the service account is created by you, make this false.
     create: true
     annotations:
-      eks.amazonaws.com/role-arn: arn:aws:iam::{{ .Values.userSettings.accountNumber }}:role/iam-role-flyte
+      eks.amazonaws.com/role-arn: arn:aws:iam::{{ .Values.userSettings.accountNumber }}:role/{{ .Values.userSettings.controlPlaneRoleName }}
 
   serviceMonitor:
     enabled: false
@@ -61,7 +61,7 @@ datacatalog:
     # -- If the service account is created by you, make this false
     create: true
     annotations:
-      eks.amazonaws.com/role-arn: arn:aws:iam::{{ .Values.userSettings.accountNumber }}:role/iam-role-flyte
+      eks.amazonaws.com/role-arn: arn:aws:iam::{{ .Values.userSettings.accountNumber }}:role/{{ .Values.userSettings.controlPlaneRoleName }}
   resources:
     limits:
       cpu: 1
@@ -93,7 +93,7 @@ flytepropeller:
     # -- If the service account is created by you, make this false
     create: true
     annotations:
-      eks.amazonaws.com/role-arn: arn:aws:iam::{{ .Values.userSettings.accountNumber }}:role/iam-role-flyte
+      eks.amazonaws.com/role-arn: arn:aws:iam::{{ .Values.userSettings.accountNumber }}:role/{{ .Values.userSettings.controlPlaneRoleName }}
   resources:
     limits:
       cpu: 1
@@ -298,6 +298,7 @@ configmap:
           - container
           - sidecar
           - k8s-array
+          - ray
           - connector-service
           - echo
         #          - sagemaker_hyperparameter_tuning
@@ -307,6 +308,7 @@ configmap:
           container: container
           sidecar: sidecar
           container_array: k8s-array
+          ray: ray
   #          sagemaker_custom_training_task: sagemaker_custom_training
   #          sagemaker_custom_training_job_task: sagemaker_custom_training
 
@@ -377,6 +379,8 @@ cluster_resource_manager:
                 value: "5"
             - projectQuotaMemory:
                 value: "4000Mi"
+            - projectQuotaGpu:
+                value: "1"
             - defaultIamRole:
                 value: "arn:aws:iam::{{ .Values.userSettings.accountNumber }}:role/flyte-user-role"
         - staging:
@@ -384,6 +388,8 @@ cluster_resource_manager:
                 value: "2"
             - projectQuotaMemory:
                 value: "3000Mi"
+            - projectQuotaGpu:
+                value: "1"
             - defaultIamRole:
                 value: "arn:aws:iam::{{ .Values.userSettings.accountNumber }}:role/flyte-user-role"
         - development:
@@ -394,6 +400,8 @@ cluster_resource_manager:
                 value: "1000"
             - projectQuotaMemory:
                 value: "8Ti"
+            - projectQuotaGpu:
+                value: "8"
             - defaultIamRole:
                 value: "arn:aws:iam::{{ .Values.userSettings.accountNumber }}:role/flyte-user-role"
 
@@ -431,8 +439,10 @@ cluster_resource_manager:
           hard:
             limits.cpu: {{ projectQuotaCpu }}
             limits.memory: {{ projectQuotaMemory }}
+            limits.nvidia.com/gpu: {{ projectQuotaGpu }}
             requests.cpu: {{ projectQuotaCpu }}
             requests.memory: {{ projectQuotaMemory }}
+            requests.nvidia.com/gpu: {{ projectQuotaGpu }}
 
 
 
