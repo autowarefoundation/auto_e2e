@@ -1,0 +1,126 @@
+apiVersion: ray.io/v1
+kind: RayJob
+metadata:
+  name: auto-e2e-ddp-smoke-4
+  namespace: auto-e2e-development
+  labels:
+    kueue.x-k8s.io/queue-name: training
+    kueue.x-k8s.io/priority-class: research-low
+spec:
+  suspend: true
+  shutdownAfterJobFinishes: true
+  ttlSecondsAfterFinished: 300
+  backoffLimit: 0
+  entrypoint: >-
+    python -m distributed_training.ray_smoke
+    --num-workers 4
+    --steps 4
+    --storage-path REPLACE_WITH_RAY_STORAGE_PATH
+    --run-name auto-e2e-ddp-smoke-4
+  rayClusterSpec:
+    rayVersion: "2.46.0"
+    enableInTreeAutoscaling: false
+    headGroupSpec:
+      rayStartParams:
+        dashboard-host: "0.0.0.0"
+        num-cpus: "0"
+      template:
+        metadata:
+          labels:
+            auto-e2e.training/role: ray-head
+          annotations:
+            karpenter.sh/do-not-disrupt: "true"
+        spec:
+          serviceAccountName: default
+          containers:
+            - name: ray-head
+              image: REPLACE_WITH_TRAINING_IMAGE
+              imagePullPolicy: Always
+              env:
+                - name: AWS_DEFAULT_REGION
+                  value: us-west-2
+                - name: RAY_TRAIN_V2_ENABLED
+                  value: "1"
+              ports:
+                - name: gcs-server
+                  containerPort: 6379
+                - name: dashboard
+                  containerPort: 8265
+                - name: client
+                  containerPort: 10001
+                - name: metrics
+                  containerPort: 8080
+              resources:
+                requests:
+                  cpu: "2"
+                  memory: 8Gi
+                limits:
+                  cpu: "2"
+                  memory: 8Gi
+              volumeMounts:
+                - name: dshm
+                  mountPath: /dev/shm
+          volumes:
+            - name: dshm
+              emptyDir:
+                medium: Memory
+                sizeLimit: 2Gi
+    workerGroupSpecs:
+      - groupName: gpu-workers
+        replicas: 4
+        minReplicas: 4
+        maxReplicas: 4
+        rayStartParams:
+          num-cpus: "4"
+          num-gpus: "1"
+        template:
+          metadata:
+            labels:
+              auto-e2e.training/role: ray-gpu-worker
+            annotations:
+              karpenter.sh/do-not-disrupt: "true"
+          spec:
+            serviceAccountName: default
+            nodeSelector:
+              workload-type: gpu-training
+            tolerations:
+              - key: nvidia.com/gpu
+                operator: Exists
+                effect: NoSchedule
+            affinity:
+              podAntiAffinity:
+                requiredDuringSchedulingIgnoredDuringExecution:
+                  - labelSelector:
+                      matchLabels:
+                        auto-e2e.training/role: ray-gpu-worker
+                    topologyKey: kubernetes.io/hostname
+            containers:
+              - name: ray-worker
+                image: REPLACE_WITH_TRAINING_IMAGE
+                imagePullPolicy: Always
+                env:
+                  - name: AWS_DEFAULT_REGION
+                    value: us-west-2
+                  - name: RAY_TRAIN_V2_ENABLED
+                    value: "1"
+                  - name: NCCL_DEBUG
+                    value: INFO
+                  - name: TORCH_DISTRIBUTED_DEBUG
+                    value: DETAIL
+                resources:
+                  requests:
+                    cpu: "4"
+                    memory: 16Gi
+                    nvidia.com/gpu: "1"
+                  limits:
+                    cpu: "4"
+                    memory: 16Gi
+                    nvidia.com/gpu: "1"
+                volumeMounts:
+                  - name: dshm
+                    mountPath: /dev/shm
+            volumes:
+              - name: dshm
+                emptyDir:
+                  medium: Memory
+                  sizeLimit: 8Gi
