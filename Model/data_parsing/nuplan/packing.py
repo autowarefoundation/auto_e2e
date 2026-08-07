@@ -708,6 +708,13 @@ def pack_nuplan_reactive_scenarios(
         name: hashlib.sha256((output / name).read_bytes()).hexdigest()
         for name in shard_names
     }
+    shard_sample_counts = {
+        name: min(
+            samples_per_shard,
+            len(accepted) - index * samples_per_shard,
+        )
+        for index, name in enumerate(shard_names)
+    }
     manifest: dict[str, object] = {
         "bev_segmentation_count": len(accepted),
         "bev_taxonomy_version": "bev_segmentation_v1",
@@ -738,6 +745,7 @@ def pack_nuplan_reactive_scenarios(
         ).hexdigest(),
         "schema_version": NUPLAN_PACK_MANIFEST_VERSION,
         "shard_names": shard_names,
+        "shard_sample_counts": shard_sample_counts,
         "shard_sha256": shard_hashes,
         "source_revision": source_revision,
         "split_group_count": len({
