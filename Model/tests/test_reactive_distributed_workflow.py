@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import json
+import re
 
 import pytest
 
@@ -98,7 +99,7 @@ def test_remote_dataset_inputs_are_required():
 def test_distributed_workflow_source_has_no_deployment_account_id():
     source = Path(distributed_training.__file__).read_text()
 
-    assert "381491877296" not in source
+    assert re.search(r"\b[0-9]{12}\b", source) is None
     assert "cr-" not in source
     assert "pg-" not in source
 
@@ -118,6 +119,22 @@ def test_canary_launcher_is_idempotent_and_retries_flyte_admin():
     assert "remote.wait(" not in buildspec
 
 
+def test_l2d_mini_launcher_uses_explicit_range_and_remote_osm():
+    buildspec = (
+        Path(distributed_training.__file__).parents[1]
+        / "buildspec-launch-l2d-reactive-mini.yml"
+    ).read_text()
+
+    assert '"source_pbf": FlyteFile(os.environ["SOURCE_PBF_URI"])' in (
+        buildspec
+    )
+    assert '"start_ep": int(os.environ["START_EP"])' in buildspec
+    assert '"end_ep": int(os.environ["END_EP"])' in buildspec
+    assert "remote.fetch_execution(" in buildspec
+    assert "remote.sync_execution(" in buildspec
+    assert re.search(r"\b[0-9]{12}\b", buildspec) is None
+
+
 def test_l2d_reactive_pack_workflow_binds_osm_and_target_contract():
     node, = workflows.wf_pack_l2d_reactive_dataset.nodes
     assert node.flyte_entity.name.endswith("wf_create_dataset_sharded")
@@ -134,6 +151,8 @@ def test_l2d_reactive_pack_workflow_binds_osm_and_target_contract():
     assert bindings["osm_graph_snapshot"].promise.var == (
         "osm_graph_snapshot"
     )
+    assert bindings["start_ep"].promise.var == "start_ep"
+    assert bindings["end_ep"].promise.var == "end_ep"
 
 
 def test_l2d_osm_builder_workflow_is_one_offline_task():
@@ -143,6 +162,24 @@ def test_l2d_osm_builder_workflow_is_one_offline_task():
         "build_l2d_osm_graph_artifact"
     )
     assert node.bindings[0].binding.promise is not None
+
+
+def test_l2d_reactive_prepare_workflow_passes_built_osm_to_pack():
+    build_osm, pack = workflows.wf_prepare_l2d_reactive_dataset.nodes
+
+    assert build_osm.flyte_entity.name.endswith(
+        "build_l2d_osm_graph_artifact"
+    )
+    assert pack.flyte_entity.name.endswith(
+        "wf_pack_l2d_reactive_dataset"
+    )
+    bindings = {
+        binding.var: binding.binding
+        for binding in pack.bindings
+    }
+    assert bindings["osm_graph_snapshot"].promise.node_id == build_osm.id
+    assert bindings["start_ep"].promise.var == "start_ep"
+    assert bindings["end_ep"].promise.var == "end_ep"
 
 
 def test_two_rank_canary_wires_both_stages_and_gate():
