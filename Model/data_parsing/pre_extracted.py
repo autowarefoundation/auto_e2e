@@ -68,6 +68,11 @@ _DECISIVE_ROUTE_MANEUVERS = frozenset({
 })
 
 
+def passthrough_nodesplitter(urls: Iterable[str]) -> Iterable[str]:
+    """Keep every URL when the caller already assigned shards to this rank."""
+    yield from urls
+
+
 def _json_mapping(value, *, member_name: str) -> Mapping[str, object]:
     try:
         decoded = json.loads(
@@ -1213,6 +1218,7 @@ def make_pre_extracted_loader(
     validation_group_uids: Sequence[str] | None = None,
     decode_future_frames: bool = True,
     navigation_repeat_policy: NavigationRepeatPolicy | None = None,
+    nodesplitter=None,
 ) -> wds.WebLoader:
     """Create a WebDataset DataLoader reading from local EBS shard cache.
 
@@ -1248,6 +1254,9 @@ def make_pre_extracted_loader(
             input batch; training keeps the default because JEPA needs them.
         navigation_repeat_policy: optional raw-sample repeat transform. Training
             applies it after split filtering and before shuffle/decode.
+        nodesplitter: optional WebDataset node splitter. Distributed callers
+            with explicit rank-owned shards use ``passthrough_nodesplitter``;
+            the default rejects accidental multi-node iteration.
 
     The returned loader carries two extra attributes describing the dataset's
     geometry (a rig constant, so it lives on the loader, not per batch):
@@ -1282,8 +1291,12 @@ def make_pre_extracted_loader(
     # Use single_node_only for the NODE slot (correct until multi-node DDP, which
     # would set split_by_node here) and let the default workersplitter do the
     # per-worker shard split exactly once.
-    dataset = wds.WebDataset(urls, shardshuffle=False, empty_check=False,
-                             nodesplitter=wds.single_node_only)
+    dataset = wds.WebDataset(
+        urls,
+        shardshuffle=False,
+        empty_check=False,
+        nodesplitter=nodesplitter or wds.single_node_only,
+    )
     if sample_uids is not None:
         requested = [str(uid) for uid in sample_uids]
         allowed = frozenset(requested)
@@ -1489,6 +1502,7 @@ def make_multi_dataset_loader(
     validation_group_uids: Sequence[str] | None = None,
     decode_future_frames: bool = True,
     navigation_repeat_policy: NavigationRepeatPolicy | None = None,
+    nodesplitter=None,
 ) -> MergedDatasetLoader:
     """Build a :class:`MergedDatasetLoader` over several shard directories.
 
@@ -1536,6 +1550,7 @@ def make_multi_dataset_loader(
             validation_group_uids=validation_group_uids,
             decode_future_frames=decode_future_frames,
             navigation_repeat_policy=navigation_repeat_policy,
+            nodesplitter=nodesplitter,
         )
         for index, d in enumerate(shard_dirs)
     ]
