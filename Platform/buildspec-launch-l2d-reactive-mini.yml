@@ -1,0 +1,196 @@
+version: 0.2
+
+env:
+  variables:
+    AWS_DEFAULT_REGION: us-west-2
+    FLYTE_PROJECT: auto-e2e
+    FLYTE_DOMAIN: development
+    WORKFLOW_NAME: >-
+      Platform.pipelines.workflows.wf_prepare_l2d_reactive_dataset
+    FLYTE_VERSION: ""
+    EXECUTION_NAME: ""
+    SOURCE_PBF_URI: ""
+    SOURCE_REVISION: ""
+    SOURCE_DATE: ""
+    START_EP: "185"
+    END_EP: "188"
+    PARTITION_SIZE: "1"
+    MAX_PARTITIONS: "3"
+    INGEST_CONCURRENCY: "3"
+    PACK_CONCURRENCY: "3"
+    WAIT_TIMEOUT_SECONDS: "7200"
+
+phases:
+  install:
+    commands:
+      - pip install -q flytekit==1.16.24
+  pre_build:
+    commands:
+      - test -n "${FLYTE_VERSION}"
+      - test -n "${EXECUTION_NAME}"
+      - test -n "${SOURCE_PBF_URI}"
+      - test -n "${SOURCE_REVISION}"
+      - test -n "${SOURCE_DATE}"
+      - printf '%s' "${SOURCE_PBF_URI}" | grep -Eq '^s3://'
+      - printf '%s' "${EXECUTION_NAME}" | grep -Eq '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
+      - test "${#EXECUTION_NAME}" -le 63
+      - printf '%s' "${START_EP}" | grep -Eq '^[0-9]+$'
+      - printf '%s' "${END_EP}" | grep -Eq '^[0-9]+$'
+      - test "${END_EP}" -gt "${START_EP}"
+      - printf '%s' "${WAIT_TIMEOUT_SECONDS}" | grep -Eq '^[1-9][0-9]*$'
+      - |
+        cat > /tmp/flyte.yaml << EOF
+        admin:
+          endpoint: dns:///k8s-flyte-flyteadm-be92e7737c-cf0d1a0f3df10f77.elb.us-west-2.amazonaws.com:81
+          insecure: true
+        EOF
+  build:
+    commands:
+      - |
+        python3 - <<'PY'
+        import os
+        import time
+
+        import grpc
+        from flytekit.configuration import Config
+        from flytekit.exceptions.user import (
+            FlyteEntityAlreadyExistsException,
+            FlyteEntityNotExistException,
+        )
+        from flytekit.models.core.execution import WorkflowExecutionPhase
+        from flytekit.remote import FlyteRemote
+        from flytekit.types.file import FlyteFile
+
+        project = os.environ["FLYTE_PROJECT"]
+        domain = os.environ["FLYTE_DOMAIN"]
+        workflow_name = os.environ["WORKFLOW_NAME"]
+        version = os.environ["FLYTE_VERSION"]
+        execution_name = os.environ["EXECUTION_NAME"]
+        timeout_seconds = int(os.environ["WAIT_TIMEOUT_SECONDS"])
+        inputs = {
+            "source_pbf": FlyteFile(os.environ["SOURCE_PBF_URI"]),
+            "source_revision": os.environ["SOURCE_REVISION"],
+            "source_date": os.environ["SOURCE_DATE"],
+            "episodes": 0,
+            "start_ep": int(os.environ["START_EP"]),
+            "end_ep": int(os.environ["END_EP"]),
+            "partition_size": int(os.environ["PARTITION_SIZE"]),
+            "max_partitions": int(os.environ["MAX_PARTITIONS"]),
+            "ingest_concurrency": int(
+                os.environ["INGEST_CONCURRENCY"]
+            ),
+            "pack_concurrency": int(os.environ["PACK_CONCURRENCY"]),
+        }
+
+        remote = FlyteRemote(
+            config=Config.auto(config_file="/tmp/flyte.yaml"),
+            default_project=project,
+            default_domain=domain,
+        )
+        launch_plan = remote.fetch_launch_plan(
+            project=project,
+            domain=domain,
+            name=workflow_name,
+            version=version,
+        )
+
+        def grpc_code(error):
+            visited = set()
+            candidate = error
+            while candidate is not None and id(candidate) not in visited:
+                visited.add(id(candidate))
+                if isinstance(candidate, grpc.RpcError):
+                    return candidate.code()
+                candidate = (
+                    candidate.__cause__
+                    if candidate.__cause__ is not None
+                    else candidate.__context__
+                )
+            return None
+
+        transient_codes = {
+            grpc.StatusCode.DEADLINE_EXCEEDED,
+            grpc.StatusCode.INTERNAL,
+            grpc.StatusCode.RESOURCE_EXHAUSTED,
+            grpc.StatusCode.UNAVAILABLE,
+            grpc.StatusCode.UNKNOWN,
+        }
+        launch_deadline = time.monotonic() + 300
+        execution = None
+        while execution is None:
+            try:
+                execution = remote.fetch_execution(
+                    project=project,
+                    domain=domain,
+                    name=execution_name,
+                )
+                break
+            except FlyteEntityNotExistException:
+                pass
+            except Exception as fetch_error:
+                if grpc_code(fetch_error) not in transient_codes:
+                    raise
+            try:
+                execution = remote.execute(
+                    launch_plan,
+                    inputs=inputs,
+                    execution_name=execution_name,
+                    wait=False,
+                )
+            except FlyteEntityAlreadyExistsException:
+                pass
+            except Exception as create_error:
+                if grpc_code(create_error) not in transient_codes:
+                    raise
+            if execution is None:
+                if time.monotonic() >= launch_deadline:
+                    raise TimeoutError(
+                        "timed out fetching or creating Flyte execution"
+                    )
+                time.sleep(5)
+
+        print(f"FLYTE_EXECUTION_ID={execution.id.name}", flush=True)
+        wait_deadline = time.monotonic() + timeout_seconds
+        terminal_phases = {
+            WorkflowExecutionPhase.ABORTED,
+            WorkflowExecutionPhase.FAILED,
+            WorkflowExecutionPhase.SUCCEEDED,
+            WorkflowExecutionPhase.TIMED_OUT,
+        }
+        while True:
+            try:
+                execution = remote.sync_execution(
+                    execution,
+                    sync_nodes=True,
+                )
+            except Exception as sync_error:
+                code = grpc_code(sync_error)
+                if code not in transient_codes:
+                    raise
+                print(
+                    f"FLYTE_ADMIN_TRANSIENT_RETRY={code.name}",
+                    flush=True,
+                )
+            else:
+                if execution.closure.phase in terminal_phases:
+                    break
+            if time.monotonic() >= wait_deadline:
+                raise TimeoutError(
+                    f"timed out waiting for Flyte execution {execution_name}"
+                )
+            time.sleep(10)
+
+        phase = execution.closure.phase
+        phase_name = WorkflowExecutionPhase.enum_to_string(phase)
+        print(f"FLYTE_EXECUTION_PHASE={phase_name}", flush=True)
+        if phase != WorkflowExecutionPhase.SUCCEEDED:
+            if execution.error is not None:
+                print(
+                    f"FLYTE_EXECUTION_ERROR={execution.error}",
+                    flush=True,
+                )
+            raise SystemExit(
+                f"Flyte execution {execution.id.name} ended in {phase_name}"
+            )
+        print(f"FLYTE_EXECUTION_OUTPUTS={execution.outputs}", flush=True)
+        PY
