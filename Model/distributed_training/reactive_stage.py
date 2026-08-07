@@ -505,7 +505,10 @@ def train_loop_per_worker(config: dict[str, Any]) -> None:
     from ray.train import Checkpoint
     from ray.train.torch import get_device, prepare_model
 
-    from data_parsing.pre_extracted import make_multi_dataset_loader
+    from data_parsing.pre_extracted import (
+        make_multi_dataset_loader,
+        passthrough_nodesplitter,
+    )
     from model_components.auto_e2e import AutoE2E
     from training.reactive_multitask import (
         ReactiveMultitaskObjective,
@@ -682,6 +685,7 @@ def train_loop_per_worker(config: dict[str, Any]) -> None:
             shuffle_seed=seed + epoch,
             pin_memory=True,
             decode_future_frames=False,
+            nodesplitter=passthrough_nodesplitter,
         )
         train_metrics = _train_fixed_steps(
             model,
@@ -706,6 +710,7 @@ def train_loop_per_worker(config: dict[str, Any]) -> None:
             pin_memory=True,
             max_active_loaders=1,
             decode_future_frames=False,
+            nodesplitter=passthrough_nodesplitter,
         )
         validation = _evaluate_global_trajectory(
             model,
