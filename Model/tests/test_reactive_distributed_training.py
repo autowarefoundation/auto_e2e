@@ -23,6 +23,7 @@ from distributed_training.reactive_data import (
     stage_rank_reactive_shards,
 )
 from distributed_training.reactive_stage import (
+    clip_finite_gradients_float64,
     validate_reactive_stage_config,
 )
 from navigation.geometry import AUTOE2E_NAVIGATION_GEOMETRY
@@ -206,6 +207,33 @@ def test_restarting_iterator_repeats_finite_loader():
 
     with pytest.raises(ValueError, match="yielded no batches"):
         next(RestartingIterator([]))
+
+
+def test_float64_gradient_clipping_handles_large_finite_values():
+    torch = pytest.importorskip("torch")
+    parameter = torch.nn.Parameter(torch.zeros(2))
+    parameter.grad = torch.tensor([5.0e23, -2.0e23])
+
+    norm, finite = clip_finite_gradients_float64([parameter], 1.0)
+
+    assert finite
+    assert torch.isfinite(norm)
+    assert norm.item() > 1.0e23
+    assert torch.linalg.vector_norm(parameter.grad).item() == pytest.approx(
+        1.0,
+        rel=1e-6,
+    )
+
+
+def test_float64_gradient_clipping_rejects_non_finite_values():
+    torch = pytest.importorskip("torch")
+    parameter = torch.nn.Parameter(torch.zeros(2))
+    parameter.grad = torch.tensor([float("nan"), 1.0])
+
+    _, finite = clip_finite_gradients_float64([parameter], 1.0)
+
+    assert not finite
+    assert torch.isnan(parameter.grad[0])
 
 
 def test_rank_owned_nodesplitter_preserves_every_assigned_shard():
