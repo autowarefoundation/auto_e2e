@@ -16,6 +16,10 @@ resource "helm_release" "kueue" {
     name  = "controller.manager.configuration.integrations.frameworks[1]"
     value = "kubeflow.org/pytorchjob"
   }
+  set {
+    name  = "controller.manager.configuration.integrations.frameworks[2]"
+    value = "ray.io/rayjob"
+  }
 
   values = [file("${path.module}/../../../helm-values/kueue.yaml")]
 }
