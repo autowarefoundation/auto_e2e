@@ -46,6 +46,11 @@ RAY_STORAGE_PATH = os.environ.get(
     "AUTO_E2E_RAY_STORAGE_PATH",
     "s3://auto-e2e-platform-checkpoints/ray-train",
 )
+RAY_TASK_ENVIRONMENT = {
+    "AWS_DEFAULT_REGION": "us-west-2",
+    "AUTO_E2E_RAY_STORAGE_PATH": RAY_STORAGE_PATH,
+    "RAY_TRAIN_V2_ENABLED": "1",
+}
 
 
 class RaySmokeOutput(NamedTuple):
@@ -223,10 +228,7 @@ RAY_8 = _ray_job_config(8)
         "kueue.x-k8s.io/queue-name": "training",
         "kueue.x-k8s.io/priority-class": "research-low",
     },
-    environment={
-        "AWS_DEFAULT_REGION": "us-west-2",
-        "RAY_TRAIN_V2_ENABLED": "1",
-    },
+    environment=RAY_TASK_ENVIRONMENT,
 )
 def ray_ddp_smoke_4(steps: int = 4) -> RaySmokeOutput:
     from distributed_training.ray_smoke import run_smoke
@@ -476,10 +478,7 @@ def verify_reactive_canary_training(
         "kueue.x-k8s.io/queue-name": "training",
         "kueue.x-k8s.io/priority-class": "research-low",
     },
-    environment={
-        "AWS_DEFAULT_REGION": "us-west-2",
-        "RAY_TRAIN_V2_ENABLED": "1",
-    },
+    environment=RAY_TASK_ENVIRONMENT,
 )
 def train_reactive_stage_ray_2(
     shards: List[FlyteDirectory],
@@ -541,10 +540,7 @@ def train_reactive_stage_ray_2(
         "kueue.x-k8s.io/queue-name": "training",
         "kueue.x-k8s.io/priority-class": "research-low",
     },
-    environment={
-        "AWS_DEFAULT_REGION": "us-west-2",
-        "RAY_TRAIN_V2_ENABLED": "1",
-    },
+    environment=RAY_TASK_ENVIRONMENT,
 )
 def train_reactive_stage_ray_8(
     shards: List[FlyteDirectory],
