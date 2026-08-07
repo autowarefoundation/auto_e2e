@@ -450,7 +450,12 @@ def test_loader_wiring_avoids_training_peek_and_bounds_eval_prefetch():
 def test_remote_registration_buildspecs_pin_runtime_contracts(buildspec_name):
     buildspec = (_REPO_ROOT / "Platform" / buildspec_name).read_text()
 
-    assert "flytekit==1.14.9" in buildspec
+    expected_flytekit = (
+        "flytekit==1.16.24"
+        if buildspec_name == "buildspec-register.yml"
+        else "flytekit==1.14.9"
+    )
+    assert expected_flytekit in buildspec
     assert (
         'export PYTHONPATH="${CODEBUILD_SRC_DIR}/Model:'
         '${CODEBUILD_SRC_DIR}:${PYTHONPATH:-}"'
