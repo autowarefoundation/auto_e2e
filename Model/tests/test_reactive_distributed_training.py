@@ -24,6 +24,7 @@ from distributed_training.reactive_data import (
 )
 from distributed_training.reactive_stage import (
     clip_finite_gradients_float64,
+    normalize_ray_checkpoint_uri,
     validate_reactive_stage_config,
 )
 from navigation.geometry import AUTOE2E_NAVIGATION_GEOMETRY
@@ -234,6 +235,27 @@ def test_float64_gradient_clipping_rejects_non_finite_values():
 
     assert not finite
     assert torch.isnan(parameter.grad[0])
+
+
+def test_ray_checkpoint_uri_restores_s3_scheme_within_storage():
+    storage = "s3://checkpoints/ray-train"
+
+    assert normalize_ray_checkpoint_uri(
+        "checkpoints/ray-train/run/checkpoint_0001",
+        storage,
+    ) == "s3://checkpoints/ray-train/run/checkpoint_0001"
+    assert normalize_ray_checkpoint_uri(
+        "s3://checkpoints/ray-train/run/checkpoint_0001/",
+        storage,
+    ) == "s3://checkpoints/ray-train/run/checkpoint_0001"
+
+
+def test_ray_checkpoint_uri_rejects_paths_outside_storage():
+    with pytest.raises(ValueError, match="outside"):
+        normalize_ray_checkpoint_uri(
+            "other-bucket/ray-train/run/checkpoint_0001",
+            "s3://checkpoints/ray-train",
+        )
 
 
 def test_rank_owned_nodesplitter_preserves_every_assigned_shard():
