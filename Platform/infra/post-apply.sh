@@ -15,6 +15,10 @@ PROFILE="${AWS_PROFILE:-autowarefoundation}"
 REGION="${AWS_REGION:-us-west-2}"
 CLUSTER="${EKS_CLUSTER:-auto-e2e-platform}"
 CONTAINER_CLI="${CONTAINER_CLI:-finch}"   # finch or docker
+ACCOUNT=$(aws sts get-caller-identity \
+  --profile "$PROFILE" \
+  --query Account \
+  --output text)
 
 echo "=== 1. Update kubeconfig ==="
 aws eks update-kubeconfig --name "$CLUSTER" --region "$REGION" --profile "$PROFILE"
@@ -22,14 +26,15 @@ aws eks update-kubeconfig --name "$CLUSTER" --region "$REGION" --profile "$PROFI
 echo "=== 2. Verify cluster access ==="
 kubectl get nodepools
 
-echo "=== 3. Apply GPU NodePool + warm-node keeper ==="
+echo "=== 3. Apply GPU NodeClass, NodePool, and warm-node keeper ==="
+sed "s/REPLACE_WITH_AWS_ACCOUNT_ID/${ACCOUNT}/g" \
+  ../k8s/karpenter-nodepools/gpu-nodeclass.yaml | kubectl apply -f -
 kubectl apply -f ../k8s/karpenter-nodepools/gpu-nodepool.yaml
 kubectl apply -f ../k8s/gpu-node-keeper.yaml
 echo "Waiting for a GPU node to register (Karpenter provisions g6e)..."
 kubectl wait --for=condition=Ready node -l workload-type=gpu-training --timeout=600s
 
 echo "=== 4. ECR login ==="
-ACCOUNT=$(aws sts get-caller-identity --profile "$PROFILE" --query Account --output text)
 ECR_URL="${ACCOUNT}.dkr.ecr.${REGION}.amazonaws.com"
 aws ecr get-login-password --region "$REGION" --profile "$PROFILE" | \
   "$CONTAINER_CLI" login --username AWS --password-stdin "$ECR_URL"
