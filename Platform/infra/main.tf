@@ -60,12 +60,20 @@ module "training_operator" {
   depends_on = [module.eks]
 }
 
+module "kuberay" {
+  source = "./modules/kuberay"
+
+  cluster_name = var.cluster_name
+
+  depends_on = [module.eks]
+}
+
 module "kueue" {
   source = "./modules/kueue"
 
   cluster_name = var.cluster_name
 
-  depends_on = [module.training_operator]
+  depends_on = [module.training_operator, module.kuberay]
 }
 
 module "mlflow" {
