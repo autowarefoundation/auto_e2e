@@ -55,6 +55,7 @@ DATA_PREP_IMAGE = _os.environ.get(
 
 MLFLOW_URI = "http://mlflow.mlflow.svc.cluster.local:5000"
 DATASET_PACK_VERSION = "v2.2"
+L2D_REACTIVE_DATASET_VERSION = "v3.0-reactive-v1"
 KITSCENES_NAVIGATION_DATASET_VERSION = "v3.3"
 BASELINE_TRAINING_OBJECTIVE_VERSION = "trajectory_imitation_v1"
 KITSCENES_NAVIGATION_OBJECTIVE_VERSION = (
@@ -2086,6 +2087,7 @@ def data_processing(
     (num_frames/stride) matches the online dataset so shards and on-the-fly
     windows are identical.
     """
+    import hashlib
     import os
     import io
     import json
@@ -2327,6 +2329,8 @@ def data_processing(
 
     shard_idx = 0
     shard_names: list[str] = []
+    shard_sample_counts: dict[str, int] = {}
+    current_shard_name: str | None = None
     sample_count = 0
     reasoning_label_count = 0
     joined_reasoning_ids: set[str] = set()
@@ -2353,12 +2357,14 @@ def data_processing(
         pool_frames_written += 1
 
     def open_new_shard():
-        nonlocal current_tar, shard_idx
+        nonlocal current_tar, current_shard_name, shard_idx
         if current_tar:
             current_tar.close()
         shard_name = published_shard_name(group_ids, shard_idx)
         current_tar = tarfile.open(os.path.join(out_dir, shard_name), "w")
         shard_names.append(shard_name)
+        shard_sample_counts[shard_name] = 0
+        current_shard_name = shard_name
         shard_idx += 1
 
     # Decode+JPEG-encode happens in the pack workers (parallel_pack); the parent
@@ -2622,6 +2628,8 @@ def data_processing(
                     reasoning_label_count += 1
                     joined_reasoning_ids.add(uid)
             sample_count += 1
+            assert current_shard_name is not None
+            shard_sample_counts[current_shard_name] += 1
 
     else:
         # ── Legacy path (imitation-only L2D, NVIDIA, or empty partition) ──
@@ -2674,9 +2682,17 @@ def data_processing(
                         reasoning_label_count += 1
                         joined_reasoning_ids.add(sample_key)
                 sample_count += 1
+                assert current_shard_name is not None
+                shard_sample_counts[current_shard_name] += 1
 
     if current_tar:
         current_tar.close()
+    shard_sha256 = {
+        name: hashlib.sha256(
+            Path(out_dir, name).read_bytes()
+        ).hexdigest()
+        for name in shard_names
+    }
 
     if (
         reactive_targets
@@ -2729,6 +2745,8 @@ def data_processing(
 
     manifest = {"total_samples": sample_count, "shards": shard_idx,
                 "shard_names": shard_names,
+                "shard_sample_counts": shard_sample_counts,
+                "shard_sha256": shard_sha256,
                 "partition_id": partition_id or None,
                 "hz": hz, "image_size": image_size, "dataset": dataset.value,
                 "source_revision": source_revision,
@@ -6434,6 +6452,45 @@ def pack_nuplan_reactive_dataset(
     return FlyteDirectory(str(output))
 
 
+@task(
+    container_image=DATA_PREP_IMAGE,
+    requests=Resources(cpu="4", mem="16Gi"),
+    limits=Resources(cpu="4", mem="16Gi"),
+)
+def build_l2d_osm_graph_artifact(
+    source_pbf: FlyteFile,
+    source_revision: str,
+    source_date: str,
+    attribution: str = "OpenStreetMap contributors",
+) -> FlyteFile:
+    """Convert one pinned regional OSM PBF into the canonical L2D graph."""
+    import shutil
+    import tempfile
+    from pathlib import Path
+
+    from data_parsing.l2d import build_l2d_osm_graph_snapshot
+
+    if not source_revision or not source_date or not attribution:
+        raise ValueError("OSM provenance fields must not be empty")
+    downloaded = Path(source_pbf.download())
+    output_directory = Path(
+        tempfile.mkdtemp(prefix="l2d-osm-graph-")
+    )
+    source = downloaded
+    if source.suffixes[-2:] != [".osm", ".pbf"]:
+        source = output_directory / "source.osm.pbf"
+        shutil.copyfile(downloaded, source)
+    output = output_directory / "l2d-osm-graph.json"
+    build_l2d_osm_graph_snapshot(
+        source,
+        output,
+        source_revision=source_revision,
+        source_date=source_date,
+        attribution=attribution,
+    )
+    return FlyteFile(str(output))
+
+
 # ============================================================
 # Task: Reactive nuPlan -> L2D multi-stage training
 # ============================================================
@@ -9653,6 +9710,8 @@ def _map_dataset_partitions(
     ingest_concurrency: int,
     label_concurrency: int,
     pack_concurrency: int,
+    reactive_targets: bool,
+    osm_graph_snapshot: Optional[FlyteFile],
 ) -> List[FlyteDirectory]:
     """Execute each data-prep stage as one bounded Flyte array node."""
     for name, value in (
@@ -9662,6 +9721,14 @@ def _map_dataset_partitions(
     ):
         if value <= 0:
             raise ValueError(f"{name} must be positive, got {value}")
+    if (
+        reactive_targets
+        and dataset == Dataset.L2D
+        and osm_graph_snapshot is None
+    ):
+        raise ValueError(
+            "L2D Reactive packing requires an OSM graph snapshot"
+        )
 
     ingest = map_task(
         functools.partial(
@@ -9701,6 +9768,8 @@ def _map_dataset_partitions(
                 episodes=0,
                 world_model=True,
                 expected_reasoning_label_count=None,
+                reactive_targets=reactive_targets,
+                osm_graph_snapshot=osm_graph_snapshot,
             ),
             concurrency=pack_concurrency,
         )
@@ -9722,6 +9791,8 @@ def _map_dataset_partitions(
             world_model=world_model,
             reasoning_labels=None,
             expected_reasoning_label_count=None,
+            reactive_targets=reactive_targets,
+            osm_graph_snapshot=osm_graph_snapshot,
         ),
         concurrency=pack_concurrency,
     )
@@ -9892,6 +9963,8 @@ def wf_create_dataset_sharded(
     ingest_concurrency: int = 60,
     label_concurrency: int = 5,
     pack_concurrency: int = 60,
+    reactive_targets: bool = False,
+    osm_graph_snapshot: Optional[FlyteFile] = None,
 ) -> List[FlyteDirectory]:
     """Fan out immutable source groups through bounded ingest/label/pack arrays.
 
@@ -9925,6 +9998,53 @@ def wf_create_dataset_sharded(
         ingest_concurrency=ingest_concurrency,
         label_concurrency=label_concurrency,
         pack_concurrency=pack_concurrency,
+        reactive_targets=reactive_targets,
+        osm_graph_snapshot=osm_graph_snapshot,
+    )
+
+
+@workflow
+def wf_build_l2d_osm_graph_artifact(
+    source_pbf: FlyteFile,
+    source_revision: str,
+    source_date: str,
+    attribution: str = "OpenStreetMap contributors",
+) -> FlyteFile:
+    """Build the immutable OSM graph used by all L2D pack partitions."""
+    return build_l2d_osm_graph_artifact(
+        source_pbf=source_pbf,
+        source_revision=source_revision,
+        source_date=source_date,
+        attribution=attribution,
+    )
+
+
+@workflow
+def wf_pack_l2d_reactive_dataset(
+    osm_graph_snapshot: FlyteFile,
+    episodes: int = 0,
+    partition_size: int = 1,
+    max_partitions: int = 600,
+    ingest_concurrency: int = 40,
+    pack_concurrency: int = 40,
+) -> List[FlyteDirectory]:
+    """Repack L2D with trajectory, OSM Map, and Route targets."""
+    return wf_create_dataset_sharded(
+        dataset=Dataset.L2D,
+        source_revision=L2D_SOURCE_REVISION,
+        dataset_version=L2D_REACTIVE_DATASET_VERSION,
+        episodes=episodes,
+        partition_size=partition_size,
+        image_size=256,
+        world_model=False,
+        reasoning_teacher="none",
+        max_partitions=max_partitions,
+        max_missing_scenes=0,
+        ingest_concurrency=ingest_concurrency,
+        label_concurrency=1,
+        pack_concurrency=pack_concurrency,
+        reactive_targets=True,
+        osm_graph_snapshot=osm_graph_snapshot,
     )
 
 
