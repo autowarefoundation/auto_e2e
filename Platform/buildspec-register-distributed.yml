@@ -1,0 +1,49 @@
+version: 0.2
+
+env:
+  variables:
+    AWS_DEFAULT_REGION: us-west-2
+    FLYTE_PROJECT: auto-e2e
+    FLYTE_DOMAIN: development
+
+phases:
+  install:
+    commands:
+      - >
+        pip install -q
+        flytekit==1.16.24
+        flytekitplugins-ray==1.16.24
+        ray==2.46.0
+        numpy
+        torch
+        kubernetes
+        --extra-index-url https://download.pytorch.org/whl/cpu
+  build:
+    commands:
+      - test -n "${IMAGE_TAG}"
+      - ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+      - ECR_URL="${ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com"
+      - AUTO_E2E_RAY_STORAGE_PATH="s3://auto-e2e-platform-checkpoints-${ACCOUNT_ID}/ray-train"
+      - export AUTO_E2E_RAY_STORAGE_PATH
+      - >
+        IMAGE_DIGEST=$(aws ecr batch-get-image
+        --repository-name auto-e2e/training
+        --image-ids imageTag="${IMAGE_TAG}"
+        --query 'images[0].imageId.imageDigest'
+        --output text)
+      - test -n "${IMAGE_DIGEST}" && test "${IMAGE_DIGEST}" != "None"
+      - AUTO_E2E_TRAINING_IMAGE="${ECR_URL}/auto-e2e/training@${IMAGE_DIGEST}"
+      - export AUTO_E2E_TRAINING_IMAGE
+      - export PYTHONPATH="${CODEBUILD_SRC_DIR}/Model:${CODEBUILD_SRC_DIR}:${PYTHONPATH:-}"
+      - |
+        cat > /tmp/flyte.yaml << EOF
+        admin:
+          endpoint: dns:///k8s-flyte-flyteadm-be92e7737c-cf0d1a0f3df10f77.elb.us-west-2.amazonaws.com:81
+          insecure: true
+        EOF
+      - >
+        pyflyte --config /tmp/flyte.yaml register
+        --project "${FLYTE_PROJECT}"
+        --domain "${FLYTE_DOMAIN}"
+        --image "${AUTO_E2E_TRAINING_IMAGE}"
+        Platform/pipelines/distributed_training.py
