@@ -30,7 +30,10 @@ class AutoE2E(nn.Module):
                  planner_mode="bezier", planner_kwargs=None,
                  enable_world_model=False, world_model_kwargs=None,
                  enable_reasoning=False, reasoning_mode="none",
-                 reasoning_kwargs: Optional[Dict[str, Any]] = None):
+                 reasoning_kwargs: Optional[Dict[str, Any]] = None,
+                 enable_bev_segmentation=False,
+                 bev_segmentation_classes=8,
+                 enable_route_reconstruction=False):
         super(AutoE2E, self).__init__()
 
         # Reactive model which runs at 10Hz and processes multi-camera inputs
@@ -54,7 +57,10 @@ class AutoE2E(nn.Module):
                  temporal_memory_mode=temporal_memory_mode, temporal_memory_kwargs=temporal_memory_kwargs,
                  planner_mode=planner_mode, planner_kwargs=planner_kwargs,
                  enable_reasoning=enable_reasoning, reasoning_mode=reasoning_mode,
-                 reasoning_kwargs=reasoning_kwargs)
+                 reasoning_kwargs=reasoning_kwargs,
+                 enable_bev_segmentation=enable_bev_segmentation,
+                 bev_segmentation_classes=bev_segmentation_classes,
+                 enable_route_reconstruction=enable_route_reconstruction)
         self.enable_reasoning = enable_reasoning
 
         # World Action Model (slow, ~1Hz): encodes the multi-camera history into
@@ -111,7 +117,11 @@ class AutoE2E(nn.Module):
                 route_valid=None,
                 projection=None, geometry_type=None, image_transform=None,
                 mode="train", trajectory_target=None,
-                history_frames=None, future_frames=None, **kwargs):
+                history_frames=None, future_frames=None,
+                return_auxiliary=False,
+                compute_bev_segmentation=True,
+                compute_route_reconstruction=True,
+                **kwargs):
         """
         Run the full autonomous-driving pipeline.
 
@@ -231,11 +241,16 @@ class AutoE2E(nn.Module):
             route_valid=route_valid,
             projection=projection, geometry_type=geometry_type,
             image_transform=image_transform,
-            mode=mode, trajectory_target=trajectory_target, **kwargs,
+            mode=mode,
+            return_auxiliary=return_auxiliary,
+            compute_bev_segmentation=compute_bev_segmentation,
+            compute_route_reconstruction=compute_route_reconstruction,
+            trajectory_target=trajectory_target,
+            **kwargs,
         )
-        reasoning_pred = None
-        if self.enable_reasoning and mode == "train":
-            trajectory, reasoning_pred = reactive_out
+        reactive_aux = {}
+        if isinstance(reactive_out, tuple):
+            trajectory, reactive_aux = reactive_out
         else:
             trajectory = reactive_out
 
@@ -243,14 +258,13 @@ class AutoE2E(nn.Module):
         # keeps its future_frames alongside the prediction so the training loop
         # can call jepa_loss(future_state_pred, future_frames) without re-plumbing
         # the frames itself.
-        if mode == "train" and (
-            self.World_Action_Model_E2E is not None or reasoning_pred is not None
-        ):
-            aux_outputs = {
+        if mode == "train" and self.World_Action_Model_E2E is not None:
+            reactive_aux.update({
                 "future_state_pred": future_state_pred,
                 "future_frames": future_frames,
-                "reasoning_pred": reasoning_pred,
-            }
+            })
+        if reactive_aux:
+            aux_outputs = reactive_aux
             return trajectory, aux_outputs
         return trajectory
         
