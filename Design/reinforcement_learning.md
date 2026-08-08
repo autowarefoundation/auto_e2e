@@ -4,7 +4,7 @@
 
 | Field | Value |
 |-------|-------|
-| Status | Work in Progress |
+| Status | Work in Progress / Proposed |
 | Authors | Arseni10Lk |
 | Date | 2026-08-06 |
 | Related Issues | [#140](https://github.com/autowarefoundation/auto_e2e/issues/140), [#123](https://github.com/autowarefoundation/auto_e2e/issues/123) |
@@ -78,9 +78,9 @@ According to the official NVlabs/alpasim [2] documentation:
 
 Because of this, we can rely directly on AlpaSim's built-in hooks to stream our ego trajectories into NuRec and receive synchronized multiview observations with zero custom architectural overhead.
 
-## 5. AutoE2E AlpaSim Plugin
+## 5. AutoE2E AlpaSim Plugin (WIP)
 
-To bridge our policy model with the simulation engine, we have implemented a native AlpaSim driver plugin located in `Model/plugins/alpasim_driver/`. This integration connects AutoE2E directly to AlpaSim's microservices simulation loop without introducing custom networking overhead.
+To bridge the policy model with the simulation engine, this architecture defines a native AlpaSim driver plugin located in `Model/plugins/alpasim_driver/`. *(Note: Full integration is currently Work in Progress, tracked in PR [#166](https://github.com/autowarefoundation/auto_e2e/pull/166) and [#177](https://github.com/autowarefoundation/auto_e2e/pull/177). The current implementation has several gaps that prevent the documented flow from working, so the following sections describe the intended target architecture).* This integration will connect AutoE2E directly to AlpaSim's microservices simulation loop without introducing custom networking overhead.
 
 ### 5.1 Architecture & Components
 
@@ -103,7 +103,7 @@ The plugin establishes a input/output contract for the AutoE2E model:
 - **`trajectory_xy`**: Projected waypoint coordinates `[64, 2]` in the rig frame (*X* forward, *Y* left).
 - **`headings`**: Target vehicle headings `[64]` in radians.
 
-## 6. Reward Design
+## 6. Reward Design (Future Work)
 
 Based on the [Issue #123](https://github.com/autowarefoundation/auto_e2e/issues/123) proposal for stage-3 closed-loop RL, the reward function must address a core constraint: **a reward computed from information the policy already observes cannot change the policy's ranking of actions, it can only re-weight it.** Therefore, the shaping signal must carry information the policy does not otherwise have (e.g., predicted consequences, un-pooled spatial structure, or external ground truth).
 
@@ -131,40 +131,40 @@ To prevent this and enforce true reasoning-action consistency (**Alpamayo-R1** [
 
 An imitation-only policy evaluated in AlpaSim demonstrated that safety/compliance terms alone score a stationary vehicle as near-perfect. Thus, `R_progress` is treated as a first-class safety metric; under-progress (e.g., driving 44 km/h slower than traffic) guarantees rear-end collisions.
 
-## 7. Training Infrastructure
+## 7. Training Infrastructure (Future Work)
 
-A photorealistic renderer in the closed RL loop is computationally expensive. To prevent the reward design and RL tuning phases from being bottlenecked by rendering latency, the architecture introduces a dual-backend infrastructure.
+A photorealistic renderer in the closed RL loop is computationally expensive. To prevent the reward design and RL tuning phases from being bottlenecked by rendering latency, the proposed architecture introduces a dual-backend infrastructure.
 
 ### 7.1 Two-Tier Rollout Adapter (`SimAdapter`)
 
-The `SimAdapter` provides a unified interface for policy rollouts, abstracting away the underlying world model to support fast iteration:
+The `SimAdapter` will provide a unified interface for policy rollouts, abstracting away the underlying world model to support fast iteration:
 - **Tier-L (Latent)**: Rollouts occur purely in the JEPA world-model latent space. Because there is no pixel rendering overhead, this tier is exceptionally fast and is used to sweep and tune reward variants across thousands of episodes. (Motivated by **MAPLE** [6], which proved the viability of latent-space multi-agent rollouts).
 - **Tier-P (Pixel)**: Rollouts utilize the full generative simulator (AlpaSim + NuRec). This tier is reserved for final policy validation, generalization testing, and computing the definitive performance metrics.
 
 ### 7.2 The `RewardRegistry`
 
-Following the established patterns for planners and temporal memory, reward terms are implemented as decoupled plugins managed by a `RewardRegistry` (`handcrafted`, `irl`, `reasoning_shaped`, `faithfulness_gated`).
+Following the established patterns for planners and temporal memory, reward terms will be implemented as decoupled plugins managed by a `RewardRegistry` (`handcrafted`, `irl`, `reasoning_shaped`, `faithfulness_gated`).
 
 Each plugin conforms to a strict interface (`term(state, action, rollout, info) -> Tensor`) and must declare the inputs it consumes. This allows mechanical verification of the non-redundancy constraint outlined in Section 5.
 
-## 8. Evaluation Strategy
+## 8. Evaluation Strategy (Future Work)
 
-To thoroughly validate the RL policy, our evaluation suite addresses specific shortcomings found in existing public benchmarks (e.g., NavSim, Bench2Drive).
+To thoroughly validate the RL policy, our proposed evaluation suite addresses specific shortcomings found in existing public benchmarks (e.g., NavSim, Bench2Drive).
 
 ### 8.1 Service Manoeuvres Taxonomy
 
-Standard closed-loop benchmarks predominantly evaluate merges, overtakes, and intersections. However, as a robotaxi application, the policy must also excel at passenger interactions. Our task taxonomy explicitly introduces **Service Manoeuvres**:
+Standard closed-loop benchmarks predominantly evaluate merges, overtakes, and intersections. However, as a robotaxi application, the policy must also excel at passenger interactions. Our planned task taxonomy explicitly introduces **Service Manoeuvres**:
 - **Pull-over**
 - **Pick-up**
 - **Drop-off**
 
-These tasks are evaluated using domain-specific service metrics, such as stopping precision (distance to curb) and door-opening safety.
+These tasks will be evaluated using domain-specific service metrics, such as stopping precision (distance to curb) and door-opening safety.
 
 ### 8.2 Counterfactual Synthesis (Addressing Optimistic Bias)
 
 A known risk of training world models exclusively on safe expert data is the development of an "optimistic bias" (**AD-R1** [7]). Because the model has never observed a collision, it cannot reliably predict the consequences of catastrophic actions. A reward computed *inside* this generative model can therefore get hacked by "hallucinated success" (**WoVR** [8]), leading the RL agent to optimize against a flawed simulation.
 
-To combat this, the evaluation suite relies on **Counterfactual Synthesis**. By generating a curriculum of plausible collisions and off-road events (diverging from the expert log), we force the world model to predict unsafe states. Measuring how accurately the model represents these failure modes is a strict prerequisite before gating any rollout-based reward.
+To combat this, the planned evaluation suite will rely on **Counterfactual Synthesis**. By generating a curriculum of plausible collisions and off-road events (diverging from the expert log), we will force the world model to predict unsafe states. Measuring how accurately the model represents these failure modes is a strict prerequisite before gating any rollout-based reward.
 
 ## 9. References
 
