@@ -129,6 +129,84 @@ func (h *OverlayHandler) Body(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// SemanticOccupancy handles
+// GET /datasets/{name}/shards/{shard}/semantic-occupancy/{model_id}.
+func (h *OverlayHandler) SemanticOccupancy(
+	w http.ResponseWriter,
+	r *http.Request,
+) {
+	dataset, shard, version, ok := h.shardRequest(w, r)
+	if !ok {
+		return
+	}
+	modelID := chi.URLParam(r, "model_id")
+	if !validArtifactID(modelID) {
+		writeError(
+			w,
+			http.StatusBadRequest,
+			model.CodeInvalidParam,
+			"invalid model artifact id",
+		)
+		return
+	}
+	body, _, err := h.s3.GetSemanticOccupancyBody(
+		r.Context(),
+		dataset,
+		version,
+		shard,
+		modelID,
+	)
+	if err != nil {
+		if errors.Is(err, service.ErrNotFound) {
+			writeError(
+				w,
+				http.StatusNotFound,
+				model.CodeNotFound,
+				"semantic occupancy not found",
+			)
+			return
+		}
+		slog.Error(
+			"read semantic occupancy body",
+			"dataset", dataset,
+			"shard", shard,
+			"model_id", modelID,
+			"error", err,
+		)
+		writeError(
+			w,
+			http.StatusBadGateway,
+			model.CodeS3Error,
+			"semantic occupancy artifact failed validation",
+		)
+		return
+	}
+	d := body.Descriptor
+	w.Header().Set(
+		"Content-Type",
+		"application/vnd.auto-e2e.semantic-occupancy",
+	)
+	w.Header().Set("Content-Encoding", "gzip")
+	w.Header().Set("Content-Length", strconv.FormatInt(d.ByteSize, 10))
+	setOverlayCacheControl(w, version)
+	w.Header().Set("ETag", fmt.Sprintf("%q", d.SHA256))
+	w.Header().Set("X-Semantic-Occupancy-Schema", d.Schema)
+	w.Header().Set("X-Semantic-Occupancy-Geometry", d.GeometryID)
+	w.Header().Set(
+		"X-Semantic-Occupancy-Taxonomy",
+		d.TaxonomyVersion,
+	)
+	w.Header().Set("X-Semantic-Occupancy-Head", d.HeadVersion)
+	w.WriteHeader(http.StatusOK)
+	if _, err := w.Write(body.Payload); err != nil {
+		slog.Warn(
+			"write semantic occupancy response",
+			"model_id", modelID,
+			"error", err,
+		)
+	}
+}
+
 func setOverlayCacheControl(w http.ResponseWriter, requestedVersion string) {
 	if requestedVersion == "" {
 		w.Header().Set("Cache-Control", "no-store")

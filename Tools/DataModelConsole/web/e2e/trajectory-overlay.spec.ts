@@ -145,6 +145,74 @@ function overlayBody(formatVersion: 2 | 3 | 4 = 4): Buffer {
   return body;
 }
 
+function semanticOccupancyBody(): Buffer {
+  const sampleCount = SAMPLE_UIDS.length;
+  const classCount = 8;
+  const height = 450;
+  const width = 300;
+  const headerBytes = 20;
+  const directoryBytes = sampleCount * 12;
+  const cellCount = sampleCount * classCount * height * width;
+  const validBytes = Math.ceil(cellCount / 8);
+  const body = Buffer.alloc(
+    headerBytes + directoryBytes + cellCount * 2 + validBytes,
+  );
+  body.write("ASOC", 0, "ascii");
+  body.writeUInt16LE(1, 4);
+  body.writeUInt16LE(1, 6);
+  body.writeUInt32LE(sampleCount, 8);
+  body.writeUInt16LE(classCount, 12);
+  body.writeUInt16LE(height, 14);
+  body.writeUInt16LE(width, 16);
+  body.writeUInt16LE(0, 18);
+
+  const directory = SAMPLE_UIDS.map((uid, row) => ({
+    hash: uidHash(uid),
+    row,
+  })).sort((a, b) => (a.hash < b.hash ? -1 : 1));
+  let cursor = headerBytes;
+  for (const entry of directory) {
+    body.writeBigUInt64LE(entry.hash, cursor);
+    body.writeUInt32LE(entry.row, cursor + 8);
+    cursor += 12;
+  }
+
+  const probabilityOffset = headerBytes + directoryBytes;
+  const teacherOffset = probabilityOffset + cellCount;
+  const indexOf = (
+    row: number,
+    classIndex: number,
+    rasterRow: number,
+    rasterCol: number,
+  ) =>
+    (((row * classCount + classIndex) * height + rasterRow) * width) +
+    rasterCol;
+  for (let row = 0; row < sampleCount; row++) {
+    for (let rasterRow = 80; rasterRow < 380; rasterRow++) {
+      for (let rasterCol = 80; rasterCol < 220; rasterCol++) {
+        const drivable = indexOf(row, 0, rasterRow, rasterCol);
+        body[probabilityOffset + drivable] = 185;
+        body[teacherOffset + drivable] = 255;
+      }
+    }
+    for (let rasterRow = 90; rasterRow < 330; rasterRow++) {
+      const laneCol = 145 + ((rasterRow + row * 5) % 12);
+      const lane = indexOf(row, 1, rasterRow, laneCol);
+      body[probabilityOffset + lane] = 240;
+      body[teacherOffset + lane] = 255;
+    }
+    for (let rasterRow = 260; rasterRow < 285; rasterRow++) {
+      for (let rasterCol = 138; rasterCol < 162; rasterCol++) {
+        const vehicle = indexOf(row, 5, rasterRow, rasterCol);
+        body[probabilityOffset + vehicle] = 235;
+        if (rasterRow < 280) body[teacherOffset + vehicle] = 255;
+      }
+    }
+  }
+  body.fill(255, teacherOffset + cellCount);
+  return body;
+}
+
 test("legacy overlays use one shared heatmap scale per sample", () => {
   for (const version of [2, 3] as const) {
     const body = overlayBody(version);
@@ -387,6 +455,13 @@ test("trajectory overlays and geographic views honor production contracts", asyn
         body: overlayBody(),
       });
     }
+    if (path.endsWith(`/semantic-occupancy/${MODEL_ID}`)) {
+      return route.fulfill({
+        status: 200,
+        contentType: "application/vnd.auto-e2e.semantic-occupancy",
+        body: semanticOccupancyBody(),
+      });
+    }
     if (path.endsWith("/rig-projection")) {
       rigRequestPath = path;
       return json({
@@ -511,6 +586,51 @@ test("trajectory overlays and geographic views honor production contracts", asyn
     canvases.map((canvas) => (canvas as HTMLCanvasElement).toDataURL()),
   );
   expect(new Set(heatmapSnapshots).size).toBe(6);
+  const semanticOccupancy = page.getByRole("region", {
+    name: "2D BEV semantic occupancy",
+  });
+  await expect(semanticOccupancy).toContainText("180 m × 120 m");
+  const semanticCanvas = semanticOccupancy.locator("canvas");
+  await expect(semanticCanvas).toBeVisible();
+  const semanticTopDown = await semanticCanvas.evaluate((canvas) => {
+    const context = (canvas as HTMLCanvasElement).getContext("2d");
+    if (!context) return { nonBackground: 0, snapshot: "" };
+    const data = context.getImageData(
+      0,
+      0,
+      (canvas as HTMLCanvasElement).width,
+      (canvas as HTMLCanvasElement).height,
+    ).data;
+    let nonBackground = 0;
+    for (let offset = 0; offset < data.length; offset += 4) {
+      if (
+        data[offset] !== 8 ||
+        data[offset + 1] !== 11 ||
+        data[offset + 2] !== 16
+      ) {
+        nonBackground++;
+      }
+    }
+    return {
+      nonBackground,
+      snapshot: (canvas as HTMLCanvasElement).toDataURL(),
+    };
+  });
+  expect(semanticTopDown.nonBackground).toBeGreaterThan(100);
+  await semanticOccupancy
+    .getByRole("button", { name: "Isometric 2D semantic occupancy" })
+    .click();
+  await expect
+    .poll(() =>
+      semanticCanvas.evaluate((canvas) =>
+        (canvas as HTMLCanvasElement).toDataURL(),
+      ),
+    )
+    .not.toBe(semanticTopDown.snapshot);
+  await semanticOccupancy.getByRole("tab", { name: "Teacher" }).click();
+  await expect(
+    semanticOccupancy.getByRole("tab", { name: "Teacher" }),
+  ).toHaveAttribute("aria-selected", "true");
   expect(rigRequestPath).toBe(
     "/api/v1/datasets/kitscenes/shards/train-000000.tar/rig-projection",
   );

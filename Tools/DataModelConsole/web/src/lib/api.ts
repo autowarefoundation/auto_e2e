@@ -376,6 +376,19 @@ export async function getShardOverlay(
   return response.arrayBuffer();
 }
 
+export async function getShardSemanticOccupancy(
+  dataset: string,
+  shard: string,
+  modelArtifactId: string,
+  version?: string,
+): Promise<ArrayBuffer> {
+  const response = await apiFetchResponse(
+    `/api/v1/datasets/${encodeURIComponent(dataset)}/shards/${encodeURIComponent(shard)}/semantic-occupancy/${encodeURIComponent(modelArtifactId)}${versionParam(version, "?")}`,
+    "application/vnd.auto-e2e.semantic-occupancy",
+  );
+  return response.arrayBuffer();
+}
+
 export function getSampleNavigationMapURL(
   dataset: string,
   shard: string,

@@ -24,6 +24,7 @@ EGOMOTION_SIGNALS = 4
 ACCELERATION_INDEX = 1
 
 L2D_DATASET_NAME = "yaak-ai/L2D"
+NUPLAN_DATASET_NAME = "nuplan/nuplan-v1.1"
 NVIDIA_DATASET_NAME = "nvidia/PhysicalAI-Autonomous-Vehicles"
 KITSCENES_DATASET_NAME = "KIT-MRT/KITScenes-Multimodal"
 VALIDATION_SCOPE_FULL = "full"
@@ -93,6 +94,15 @@ L2D_TRAINING_POLICY = DatasetTrainingPolicy(
     signal_scales=(0.79, 0.12),
 )
 
+# nuPlan uses pose-space supervision for the new objective. The legacy
+# control-space weighting fields remain neutral and are not consumed by
+# simple_xy_imitation_v1.
+NUPLAN_TRAINING_POLICY = DatasetTrainingPolicy(
+    dataset_name=NUPLAN_DATASET_NAME,
+    temporal_decay=1.0,
+    signal_scales=(1.0, 1.0),
+)
+
 # NVIDIA has not yet had a corpus-specific scale audit. Preserve its prior
 # behavior explicitly instead of reaching it through an unknown-dataset fallback.
 NVIDIA_TRAINING_POLICY = DatasetTrainingPolicy(
@@ -135,6 +145,7 @@ _POLICIES = {
     policy.dataset_name: policy
     for policy in (
         L2D_TRAINING_POLICY,
+        NUPLAN_TRAINING_POLICY,
         NVIDIA_TRAINING_POLICY,
         KITSCENES_TRAINING_POLICY,
     )
@@ -142,6 +153,7 @@ _POLICIES = {
 
 _LEGACY_POLICIES = {
     L2D_DATASET_NAME: L2D_TRAINING_POLICY,
+    NUPLAN_DATASET_NAME: NUPLAN_TRAINING_POLICY,
     NVIDIA_DATASET_NAME: NVIDIA_TRAINING_POLICY,
     KITSCENES_DATASET_NAME: LEGACY_KITSCENES_TRAINING_POLICY,
 }

@@ -67,6 +67,7 @@ class L2DSample(TypedDict):
     frame_index: int
     pose_current: dict[str, float | int]
     gps_future: np.ndarray           # (65, 2) float64: current + 64 future
+    route_waypoints_lon_lat: np.ndarray  # (10, 2), route intent
     # Present only when include_world_model_windows=True (#16, enables JEPA #13):
     # the 1 Hz multi-view past/future windows, each (N, 6, 3, H, W), oldest->newest.
     history_frames: NotRequired[torch.Tensor]
@@ -395,6 +396,23 @@ class L2DDataset(Dataset):
         )
         return ego_history, trajectory_target, pose_current, gps_future
 
+    def route_waypoints_for(self, idx: int) -> np.ndarray:
+        """Return the current row's OSM-snapped [longitude, latitude] route."""
+        _ep_idx, row = self._samples[idx]
+        hf = self.lerobot_dataset.hf_dataset
+        column = hf.select_columns(["observation.state.waypoints"])
+        waypoints = np.asarray(
+            column[row]["observation.state.waypoints"],
+            dtype=np.float64,
+        )
+        if waypoints.shape != (10, 2):
+            raise ValueError(
+                "L2D route waypoints must have shape [10,2]"
+            )
+        if not np.isfinite(waypoints).all():
+            raise ValueError("L2D route waypoints contain non-finite values")
+        return waypoints
+
     def _get_vehicle_states_window(self, ep_start: int, ep_end: int) -> np.ndarray:
         """Load vehicle state vectors for one episode (local row range).
 
@@ -571,6 +589,7 @@ class L2DDataset(Dataset):
             frame_index=sample_idx_in_episode,
             pose_current=pose_current,
             gps_future=gps_future,
+            route_waypoints_lon_lat=self.route_waypoints_for(idx),
         )
         if self._wm_enabled:
             sample["history_frames"] = history_frames

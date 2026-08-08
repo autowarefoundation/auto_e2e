@@ -61,6 +61,10 @@ const MaxRangeBytes = 32 << 20 // 32 MiB
 // while preventing a corrupt pointer from exhausting the API pod.
 const MaxOverlayBytes = 16 << 20
 
+// MaxSemanticOccupancyBytes bounds one compressed shard-level occupancy body.
+// Dense 8x450x300 uint8 predictions are large even after compression.
+const MaxSemanticOccupancyBytes = 512 << 20
+
 const (
 	navigationRasterSize      = 256
 	navigationMapChannels     = 14
@@ -304,6 +308,12 @@ type OverlayBody struct {
 	Payload    []byte
 }
 
+// SemanticOccupancyBody is one verified, precomputed 2D BEV semantic body.
+type SemanticOccupancyBody struct {
+	Descriptor model.SemanticOccupancyDescriptor
+	Payload    []byte
+}
+
 // ListOverlayModels returns one bounded page of completely published model
 // overlays for an immutable shard.
 func (s *S3Service) ListOverlayModels(
@@ -415,6 +425,95 @@ func (s *S3Service) GetOverlayBody(ctx context.Context, dataset, version, shard,
 			SHA256:          pointer.SHA256,
 			ByteSize:        pointer.ByteSize,
 			SampleCount:     pointer.SampleCount,
+		},
+		Payload: payload,
+	}, version, nil
+}
+
+// GetSemanticOccupancyBody resolves the same ready-model publication gate as
+// trajectory overlays, then reads the independently keyed semantic artifact.
+func (s *S3Service) GetSemanticOccupancyBody(
+	ctx context.Context,
+	dataset, version, shard, modelArtifactID string,
+) (*SemanticOccupancyBody, string, error) {
+	if s.store == nil {
+		return nil, "", fmt.Errorf(
+			"semantic occupancy lookup requires a configured dynamo store",
+		)
+	}
+	var err error
+	expectedManifestDigest := ""
+	version, err = s.publishedVersion(ctx, dataset, version)
+	if err != nil {
+		return nil, "", err
+	}
+	if requiresPublicationManifest(version) {
+		if _, err := s.publishedShard(ctx, dataset, version, shard); err != nil {
+			return nil, version, err
+		}
+		manifest, err := s.loadPublicationManifest(ctx, dataset, version)
+		if err != nil {
+			return nil, version, err
+		}
+		expectedManifestDigest = manifest.SHA256
+	}
+	pointer, err := s.store.GetReadyOverlayPointer(
+		ctx,
+		dataset,
+		version,
+		shard,
+		modelArtifactID,
+		expectedManifestDigest,
+	)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return nil, version, ErrNotFound
+		}
+		return nil, version, err
+	}
+	const (
+		schema          = "v1"
+		geometryID      = "autoe2e-bev-450x300-0p4m-v1"
+		taxonomyVersion = "autoe2e-bev-semantic-v1"
+		headVersion     = "bev-segmentation-head-v1"
+	)
+	key := fmt.Sprintf(
+		"semantic-occupancy/schema=%s/model=%s/manifest=%s/"+
+			"geometry=%s/taxonomy=%s/head=%s/dataset=%s/shard=%s/"+
+			"occupancy.bin.gz",
+		schema,
+		modelArtifactID,
+		pointer.DatasetManifestSHA256,
+		geometryID,
+		taxonomyVersion,
+		headVersion,
+		dataset,
+		shard,
+	)
+	payload, err := s.getObjectBytesFromBucket(
+		ctx,
+		s.artifactsBucket,
+		key,
+		MaxSemanticOccupancyBytes,
+	)
+	if err != nil {
+		return nil, version, err
+	}
+	if len(payload) < 2 || payload[0] != 0x1f || payload[1] != 0x8b {
+		return nil, version, fmt.Errorf(
+			"semantic occupancy body is not gzip",
+		)
+	}
+	digest := sha256.Sum256(payload)
+	return &SemanticOccupancyBody{
+		Descriptor: model.SemanticOccupancyDescriptor{
+			ModelArtifactID: modelArtifactID,
+			Schema:          schema,
+			GeometryID:      geometryID,
+			TaxonomyVersion: taxonomyVersion,
+			HeadVersion:     headVersion,
+			SHA256:          hex.EncodeToString(digest[:]),
+			ByteSize:        int64(len(payload)),
 		},
 		Payload: payload,
 	}, version, nil

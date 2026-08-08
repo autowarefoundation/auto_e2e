@@ -1,5 +1,9 @@
 import torch
 import torch.nn as nn
+from .auxiliary_heads import (
+    BEVSegmentationHead,
+    RouteReconstructionHead,
+)
 from .backbone import Backbone
 from .feature_fusion import FeatureFusion
 from .trajectory_planning import build_planner
@@ -20,7 +24,10 @@ class ReactiveE2E(nn.Module):
                  temporal_memory_mode="no_memory", temporal_memory_kwargs=None,
                  planner_mode="gru", planner_kwargs=None,
                  enable_reasoning=False, reasoning_mode="none",
-                 reasoning_kwargs=None):
+                 reasoning_kwargs=None,
+                 enable_bev_segmentation=False,
+                 bev_segmentation_classes=8,
+                 enable_route_reconstruction=False):
         super(ReactiveE2E, self).__init__()
 
         # Camera backbone feature extractor
@@ -66,6 +73,27 @@ class ReactiveE2E(nn.Module):
             map_fusion_mode,
             embed_dim=embed_dim,
             **(map_fusion_kwargs or {}),
+        )
+        self.BEVSegmentationHead = (
+            BEVSegmentationHead(
+                embed_dim=embed_dim,
+                num_classes=bev_segmentation_classes,
+            )
+            if enable_bev_segmentation
+            else None
+        )
+        if enable_route_reconstruction and map_fusion_mode != "residual":
+            raise ValueError(
+                "route reconstruction requires residual map fusion so the "
+                "gated navigation contribution is explicit"
+            )
+        self.RouteReconstructionHead = (
+            RouteReconstructionHead(
+                embed_dim=embed_dim,
+                route_channels=route_channels,
+            )
+            if enable_route_reconstruction
+            else None
         )
 
         # Temporal Memory — compresses/fuses [B, T, feat] sequence histories into contexts
@@ -114,11 +142,45 @@ class ReactiveE2E(nn.Module):
         # FutureState module was instantiated here but NEVER called in forward — a
         # gradient-dead parameter block — so it is removed. See auto_e2e.py.
 
+    def encode_camera_bev(
+        self,
+        camera_tiles,
+        *,
+        projection=None,
+        geometry_type=None,
+        image_transform=None,
+    ):
+        """Encode camera tiles without reading navigation inputs."""
+        if camera_tiles.ndim != 5:
+            raise ValueError(
+                "camera_tiles must have shape [B,V,3,H,W]"
+            )
+        batch_size, num_views, channels, height, width = camera_tiles.shape
+        features = self.Backbone(
+            camera_tiles.reshape(
+                batch_size * num_views,
+                channels,
+                height,
+                width,
+            )
+        )
+        return self.FeatureFusion(
+            features,
+            batch_size,
+            num_views,
+            projection=projection,
+            geometry_type=geometry_type,
+            image_transform=image_transform,
+        )
+
     def forward(self, camera_tiles, map_context, visual_history,
                 egomotion_history, route_mask=None, map_valid=None,
                 route_valid=None,
                 projection=None, geometry_type=None, image_transform=None,
-                mode="train", **kwargs):
+                mode="train", return_auxiliary=False,
+                compute_bev_segmentation=True,
+                compute_route_reconstruction=True,
+                **kwargs):
         """
         Run the reactive end-to-end autonomous-driving pipeline.
 
@@ -135,25 +197,33 @@ class ReactiveE2E(nn.Module):
                 ABI (Pinhole / FTheta / Pseudo). No [B,V,3,4] matrix argument.
             geometry_type: Optional explicit geometry label passed to BEV fusion.
             image_transform: Optional ImageTransform for the model-input frame.
-            mode: "train" also returns the reasoning prediction (for its loss).
+            mode: "train" returns enabled auxiliary predictions.
+            return_auxiliary: also return enabled auxiliary predictions during
+                inference, for offline Dashboard artifact generation.
 
         Returns:
-            trajectory (B, num_timesteps * num_signals), OR — when the reasoning
-            branch is enabled and ``mode == "train"`` — a tuple
-            ``(trajectory, reasoning_pred)`` so the training loop can compute the
-            reasoning loss. ``reasoning_pred`` is a HorizonReasoningPrediction.
+            trajectory (B, num_timesteps * num_signals), or
+            ``(trajectory, aux_outputs)`` when auxiliary outputs were requested.
         """
-        B, V, C, H, W = camera_tiles.shape
+        B = camera_tiles.shape[0]
 
         # --- Camera branch ---
-        x = camera_tiles.reshape(B * V, C, H, W)
-        features = self.Backbone(x)
-        image_bev = self.FeatureFusion(
-            features, B, V,
+        image_bev = self.encode_camera_bev(
+            camera_tiles,
             projection=projection,
             geometry_type=geometry_type,
             image_transform=image_transform,
         )
+        emit_auxiliary = mode == "train" or bool(return_auxiliary)
+        aux_outputs = {}
+        if (
+            self.BEVSegmentationHead is not None
+            and emit_auxiliary
+            and compute_bev_segmentation
+        ):
+            aux_outputs["bev_segmentation_logits"] = (
+                self.BEVSegmentationHead(image_bev)
+            )
 
         # --- Reactive-only navigation branch ---
         if (
@@ -217,7 +287,21 @@ class ReactiveE2E(nn.Module):
         navigation_bev = self.NavigationEncoder(navigation_input)
 
         # --- Fuse image BEV + navigation BEV ---
-        fused_features = self.MapBEVFusion(image_bev, navigation_bev)
+        if self.RouteReconstructionHead is not None:
+            fused_features, navigation_contribution = (
+                self.MapBEVFusion.forward_with_contribution(
+                    image_bev,
+                    navigation_bev,
+                )
+            )
+            if emit_auxiliary and compute_route_reconstruction:
+                aux_outputs["route_reconstruction_logits"] = (
+                    self.RouteReconstructionHead(
+                        navigation_contribution
+                    )
+                )
+        else:
+            fused_features = self.MapBEVFusion(image_bev, navigation_bev)
 
         # --- Temporal Memory ---
         visual_ctx, ego_ctx = self.TemporalMemory(visual_history, egomotion_history)
@@ -244,6 +328,8 @@ class ReactiveE2E(nn.Module):
             **kwargs,
         )
 
-        if self.ReasoningHead is not None and mode == "train":
-            return trajectory, reasoning_pred
+        if reasoning_pred is not None and mode == "train":
+            aux_outputs["reasoning_pred"] = reasoning_pred
+        if aux_outputs:
+            return trajectory, aux_outputs
         return trajectory

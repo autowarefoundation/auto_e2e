@@ -364,7 +364,6 @@ def decode_sample_navigation(
     required = {
         "map_semantic.npz",
         "route_mask.npz",
-        ROUTE_SUPERVISION_MEMBER,
         "navigation_meta.json",
     }
     missing = required - set(members)
@@ -374,18 +373,27 @@ def decode_sample_navigation(
         decode_array(members["map_semantic.npz"]),
         dtype=np.float32,
     )
-    route_mask = np.ascontiguousarray(
-        decode_array(members["route_mask.npz"]),
-        dtype=np.uint8,
-    )
     metadata = json.loads(members["navigation_meta.json"])
-    if metadata.get("schema_version") != SAMPLE_NAVIGATION_ARTIFACT_VERSION:
+    schema_version = metadata.get("schema_version")
+    if schema_version not in {
+        SAMPLE_NAVIGATION_ARTIFACT_VERSION,
+        "sample_navigation_v3",
+    }:
         raise ValueError("unsupported sample navigation artifact version")
-    if (
+    if schema_version == SAMPLE_NAVIGATION_ARTIFACT_VERSION and (
         metadata.get("route_supervision_version")
         != ROUTE_SUPERVISION_ARTIFACT_VERSION
     ):
         raise ValueError("unsupported route supervision artifact version")
+    route_dtype = (
+        np.float32
+        if schema_version == "sample_navigation_v3"
+        else np.uint8
+    )
+    route_mask = np.ascontiguousarray(
+        decode_array(members["route_mask.npz"]),
+        dtype=route_dtype,
+    )
     return map_context, route_mask, metadata
 
 

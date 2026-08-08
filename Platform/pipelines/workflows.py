@@ -62,6 +62,7 @@ KITSCENES_NAVIGATION_OBJECTIVE_VERSION = (
 )
 ROLLOUT_ALIGNED_OBJECTIVE_VERSION = "rollout_aligned_planner_v1"
 ROLLOUT_ALIGNED_CONTROL_OBJECTIVE_VERSION = "rollout_aligned_control_v1"
+SIMPLE_XY_IMITATION_OBJECTIVE_VERSION = "simple_xy_imitation_v1"
 L2D_SOURCE_REVISION = "main"
 KITSCENES_SOURCE_REVISION = "6fde0034446669e2ed7235e4c7fe323cd23d599d"
 
@@ -173,6 +174,7 @@ def _large_shm_pod_template():
 
 # --- Enums ---
 class Dataset(enum.Enum):
+    NUPLAN = "nuplan/nuplan-v1.1"
     L2D = "yaak-ai/L2D"
     KITSCENES = "KIT-MRT/KITScenes-Multimodal"
     NVIDIA_PHYSICAL_AI = "nvidia/PhysicalAI-Autonomous-Vehicles"
@@ -222,6 +224,43 @@ ReconstructionAuditOutput = NamedTuple(
     records_sha256=str,
     report=FlyteFile,
     records=FlyteFile,
+)
+ReactiveTrainingProgramOutput = NamedTuple(
+    "ReactiveTrainingProgramOutput",
+    stage_a_checkpoint=FlyteFile,
+    stage_a_metadata=FlyteFile,
+    stage_b_checkpoint=FlyteFile,
+    stage_b_metadata=FlyteFile,
+    retention_report=FlyteFile,
+    retention_report_sha256=str,
+)
+ReactiveRetentionOutput = NamedTuple(
+    "ReactiveRetentionOutput",
+    report=FlyteFile,
+    report_sha256=str,
+)
+ReactiveBenchmarkProgramOutput = NamedTuple(
+    "ReactiveBenchmarkProgramOutput",
+    stage_a_ade_3s=float,
+    stage_a_fde_3s=float,
+    stage_a_ade_5s=float,
+    stage_a_fde_5s=float,
+    stage_a_predictions=FlyteFile,
+    stage_a_report=FlyteFile,
+    stage_b_ade_3s=float,
+    stage_b_fde_3s=float,
+    stage_b_ade_5s=float,
+    stage_b_fde_5s=float,
+    stage_b_predictions=FlyteFile,
+    stage_b_report=FlyteFile,
+)
+SemanticOccupancyPrecomputeOutput = NamedTuple(
+    "SemanticOccupancyPrecomputeOutput",
+    manifest_key=str,
+    manifest_sha256=str,
+    checkpoint_sha256=str,
+    shard_count=int,
+    sample_count=int,
 )
 # wf_create_dataset returns just the ready-to-train WebDataset shards (train_il
 # reads reasoning supervision from in-shard reasoning.json members). The
@@ -2026,6 +2065,8 @@ def data_processing(
     reasoning_labels: Optional[FlyteDirectory] = None,
     group_ids: Optional[List[str]] = None,
     expected_reasoning_label_count: Optional[int] = None,
+    reactive_targets: bool = False,
+    osm_graph_snapshot: Optional[FlyteFile] = None,
 ) -> Annotated[FlyteDirectory, BatchSize(4)]:
     """Pre-extract aligned frames + egomotion → WebDataset shards.
 
@@ -2060,9 +2101,43 @@ def data_processing(
             raise ValueError(
                 "expected_reasoning_label_count requires reasoning_labels"
             )
+    if reactive_targets and dataset == Dataset.L2D:
+        if osm_graph_snapshot is None:
+            raise ValueError(
+                "L2D reactive targets require a pinned OSM graph snapshot"
+            )
+    elif osm_graph_snapshot is not None:
+        raise ValueError(
+            "osm_graph_snapshot is supported only for L2D reactive targets"
+        )
+    if reactive_targets and dataset not in {
+        Dataset.L2D,
+        Dataset.KITSCENES,
+    }:
+        raise ValueError(
+            "generic data_processing supports reactive targets only for "
+            "L2D and KITScenes; nuPlan uses its scenario adapter"
+        )
+    if dataset == Dataset.NUPLAN:
+        raise ValueError(
+            "nuPlan cannot use the LeRobot/KITScenes packer; provide shards "
+            "produced by the nuPlan scenario adapter"
+        )
 
     raw_path = raw_data.download()
     print(f"Processing raw data from: {raw_path} (dataset={dataset.value})")
+    osm_graph_snapshot_path = (
+        osm_graph_snapshot.download()
+        if osm_graph_snapshot is not None
+        else None
+    )
+    osm_snapshot = None
+    if osm_graph_snapshot_path is not None:
+        from data_parsing.l2d import load_l2d_osm_graph_snapshot
+
+        osm_snapshot = load_l2d_osm_graph_snapshot(
+            osm_graph_snapshot_path
+        )
 
     # Reasoning labels present ⇒ this is a full-loss run, and the JEPA/world-model
     # loss needs the WM window (future frames) packed — so force WM on. Note the
@@ -2303,6 +2378,9 @@ def data_processing(
     has_map = False
     has_wm = False
     navigation_artifact_summary = None
+    trajectory_xy_count = 0
+    bev_segmentation_count = 0
+    reactive_navigation_count = 0
 
     if (
         dataset != Dataset.NVIDIA_PHYSICAL_AI
@@ -2471,6 +2549,54 @@ def data_processing(
                 "pose_current": pose_current,
                 "gps_future": gps_future,
             }))
+            if (
+                reactive_targets
+                and pose_current is not None
+                and gps_future is not None
+            ):
+                from data_processing.reactive_training_artifacts import (
+                    TRAJECTORY_XY_MEMBER,
+                    encode_trajectory_xy,
+                    wgs84_future_to_ego_xy,
+                )
+
+                trajectory_xy, trajectory_valid = (
+                    wgs84_future_to_ego_xy(
+                        gps_future,
+                        current_latitude_deg=float(
+                            pose_current["latitude_deg"]
+                        ),
+                        current_longitude_deg=float(
+                            pose_current["longitude_deg"]
+                        ),
+                        heading_deg_cw_from_north=float(
+                            pose_current[
+                                "heading_deg_cw_from_north"
+                            ]
+                        ),
+                    )
+                )
+                members[TRAJECTORY_XY_MEMBER] = encode_trajectory_xy(
+                    trajectory_xy,
+                    trajectory_valid,
+                )
+            if dataset == Dataset.L2D and osm_snapshot is not None:
+                if pose_current is None:
+                    raise ValueError(
+                        "L2D reactive targets require the current GPS pose"
+                    )
+                from data_parsing.l2d import (
+                    l2d_reactive_navigation_members,
+                )
+
+                members.update(
+                    l2d_reactive_navigation_members(
+                        osm_snapshot,
+                        ds_asm.route_waypoints_for(si),
+                        pose_current,
+                    )
+                )
+                has_map = True
             members["meta.json"] = json.dumps({
                 "idx": si, "dataset": dataset.value,
                 "sample_uid": uid, "split_group_uid": split_group,
@@ -2481,6 +2607,13 @@ def data_processing(
 
             for suffix, blob in members.items():
                 _add_member(uid, suffix, blob)
+            trajectory_xy_count += int("trajectory_xy.npz" in members)
+            bev_segmentation_count += int(
+                "bev_segmentation.npz" in members
+            )
+            reactive_navigation_count += int(
+                "navigation_meta.json" in members
+            )
             if _record_to_json is not None:
                 record = labels_by_id.get(uid)
                 if record is not None:
@@ -2497,7 +2630,15 @@ def data_processing(
         pack_workers = max(1, min(max_workers_cap, len(idx_list)))
         print(f"Packing {len(idx_list)} samples, legacy mode "
               f"(world_model={world_model}, per-sample decode)...")
-        pack_init = (dataset.value, ep_list, raw_path, image_size, world_model, calib_bytes)
+        pack_init = (
+            dataset.value,
+            ep_list,
+            raw_path,
+            image_size,
+            world_model,
+            calib_bytes,
+            osm_graph_snapshot_path,
+        )
         del ds
         with ProcessPoolExecutor(max_workers=pack_workers, mp_context=ctx,
                                  initializer=parallel_pack.init_pack_worker,
@@ -2516,6 +2657,15 @@ def data_processing(
                     or "map_semantic.npz" in members
                 )
                 has_wm = has_wm or ("window_index.json" in members)
+                trajectory_xy_count += int(
+                    "trajectory_xy.npz" in members
+                )
+                bev_segmentation_count += int(
+                    "bev_segmentation.npz" in members
+                )
+                reactive_navigation_count += int(
+                    "navigation_meta.json" in members
+                )
                 if _record_to_json is not None:
                     record = labels_by_id.get(sample_key)
                     if record is not None:
@@ -2527,6 +2677,16 @@ def data_processing(
 
     if current_tar:
         current_tar.close()
+
+    if (
+        reactive_targets
+        and sample_count
+        and reactive_navigation_count != sample_count
+    ):
+        raise ValueError(
+            "reactive target packing was incomplete: "
+            f"{reactive_navigation_count}/{sample_count} samples"
+        )
 
     if expected_reasoning_label_count is not None:
         unjoined_ids = set(labels_by_id) - joined_reasoning_ids
@@ -2553,7 +2713,16 @@ def data_processing(
         GPS_SCHEMA_VERSION,
         POSE_SCHEMA_VERSION,
     )
-    from navigation.geometry import DEFAULT_NAVIGATION_GEOMETRY
+    from data_processing.reactive_training_artifacts import (
+        BEV_SEGMENTATION_ARTIFACT_VERSION,
+        BEV_SEGMENTATION_CLASSES,
+        REACTIVE_NAVIGATION_ARTIFACT_VERSION,
+        TRAJECTORY_XY_ARTIFACT_VERSION,
+    )
+    from navigation.geometry import (
+        AUTOE2E_NAVIGATION_GEOMETRY,
+        DEFAULT_NAVIGATION_GEOMETRY,
+    )
     from navigation.supervision import (
         ROUTE_SUPERVISION_ARTIFACT_VERSION,
     )
@@ -2565,18 +2734,33 @@ def data_processing(
                 "source_revision": source_revision,
                 "dataset_version": dataset_version,
                 "episodes": episodes,
+                "reactive_targets_requested": reactive_targets,
                 "contracts": contract_versions(),
                 # num_views = real cameras only; the map view is stored under a
                 # separate map.jpg key and is NOT counted here (#77).
                 "num_views": num_views if sample_count else 0,
                 "has_map": bool(sample_count) and has_map,
-                "has_navigation": (
+                "has_navigation": bool(sample_count) and (
+                    navigation_artifact_summary is not None
+                    or reactive_navigation_count == sample_count
+                ),
+                "has_reactive_navigation": (
                     bool(sample_count)
-                    and navigation_artifact_summary is not None
+                    and reactive_navigation_count == sample_count
+                ),
+                "reactive_navigation_count": reactive_navigation_count,
+                "reactive_navigation_version": (
+                    REACTIVE_NAVIGATION_ARTIFACT_VERSION
+                    if reactive_navigation_count
+                    else None
                 ),
                 "has_route_supervision": (
                     bool(sample_count)
                     and navigation_artifact_summary is not None
+                ),
+                "has_route_reconstruction": (
+                    bool(sample_count)
+                    and reactive_navigation_count == sample_count
                 ),
                 "route_supervision_version": (
                     ROUTE_SUPERVISION_ARTIFACT_VERSION
@@ -2587,15 +2771,62 @@ def data_processing(
                     else None
                 ),
                 "navigation": navigation_artifact_summary,
+                "navigation_source": (
+                    {
+                        "type": "pinned_osm_graph",
+                        "sha256": osm_snapshot.source_sha256,
+                        "revision": osm_snapshot.source_revision,
+                        "attribution": osm_snapshot.attribution,
+                    }
+                    if osm_snapshot is not None
+                    else None
+                ),
                 "navigation_geometry": (
-                    DEFAULT_NAVIGATION_GEOMETRY.contract()
-                    if navigation_artifact_summary is not None
+                    (
+                        AUTOE2E_NAVIGATION_GEOMETRY.contract()
+                        if reactive_navigation_count
+                        else DEFAULT_NAVIGATION_GEOMETRY.contract()
+                    )
+                    if (
+                        navigation_artifact_summary is not None
+                        or reactive_navigation_count
+                    )
                     else None
                 ),
                 "map_context_channels": (
-                    14 if navigation_artifact_summary is not None else 3
+                    14
+                    if (
+                        navigation_artifact_summary is not None
+                        or reactive_navigation_count
+                    )
+                    else 3
                 ),
                 "route_channels": 2,
+                "has_trajectory_xy": (
+                    bool(sample_count)
+                    and trajectory_xy_count == sample_count
+                ),
+                "trajectory_xy_count": trajectory_xy_count,
+                "trajectory_xy_version": (
+                    TRAJECTORY_XY_ARTIFACT_VERSION
+                    if trajectory_xy_count
+                    else None
+                ),
+                "has_bev_segmentation": (
+                    bool(sample_count)
+                    and bev_segmentation_count == sample_count
+                ),
+                "bev_segmentation_count": bev_segmentation_count,
+                "bev_segmentation_version": (
+                    BEV_SEGMENTATION_ARTIFACT_VERSION
+                    if bev_segmentation_count
+                    else None
+                ),
+                "bev_segmentation_classes": (
+                    list(BEV_SEGMENTATION_CLASSES)
+                    if bev_segmentation_count
+                    else None
+                ),
                 # World-Model windows present when packed (enables JEPA training).
                 "has_world_model": bool(sample_count) and has_wm,
                 "has_reasoning_labels": reasoning_label_count > 0,
@@ -6100,6 +6331,1073 @@ def train_il(
 
 
 # ============================================================
+# Task: raw nuPlan -> immutable Reactive shards
+# ============================================================
+@task(
+    container_image=DATA_PREP_IMAGE,
+    requests=Resources(cpu="8", mem="32Gi"),
+    limits=Resources(cpu="8", mem="32Gi"),
+)
+def pack_nuplan_reactive_dataset(
+    data_root: FlyteDirectory,
+    map_root: FlyteDirectory,
+    sensor_root: FlyteDirectory,
+    db_files: List[str],
+    source_revision: str,
+    map_version: str,
+    limit_total_scenarios: int = 0,
+    image_size: int = 256,
+    samples_per_shard: int = 1000,
+    max_rejection_fraction: float = 0.0,
+) -> FlyteDirectory:
+    """Pack raw local nuPlan scenarios with camera, BEV, Route, and XY targets."""
+    import os
+    import tempfile
+    from pathlib import Path
+
+    from data_parsing.nuplan import pack_nuplan_reactive_scenarios
+    from nuplan.planning.scenario_builder.nuplan_db.nuplan_scenario_builder import (
+        NuPlanScenarioBuilder,
+    )
+    from nuplan.planning.scenario_builder.scenario_filter import (
+        ScenarioFilter,
+    )
+    from nuplan.planning.utils.multithreading.worker_sequential import (
+        Sequential,
+    )
+
+    if not source_revision or not map_version:
+        raise ValueError("nuPlan source_revision and map_version are required")
+    if limit_total_scenarios < 0:
+        raise ValueError("limit_total_scenarios must be non-negative")
+    local_data = Path(data_root.download()).resolve()
+    local_map = Path(map_root.download()).resolve()
+    local_sensor = Path(sensor_root.download()).resolve()
+    for name, path in (
+        ("data_root", local_data),
+        ("map_root", local_map),
+        ("sensor_root", local_sensor),
+    ):
+        if not path.is_dir():
+            raise FileNotFoundError(f"nuPlan {name} is not a directory: {path}")
+
+    resolved_db_files = []
+    for relative in db_files:
+        candidate = (local_data / relative).resolve()
+        if local_data not in candidate.parents or candidate.suffix != ".db":
+            raise ValueError(
+                "nuPlan db_files must be relative .db children of data_root"
+            )
+        if not candidate.is_file():
+            raise FileNotFoundError(f"nuPlan DB is missing: {candidate}")
+        resolved_db_files.append(str(candidate))
+    os.environ["NUPLAN_DATA_STORE"] = "local"
+    builder = NuPlanScenarioBuilder(
+        data_root=str(local_data),
+        map_root=str(local_map),
+        sensor_root=str(local_sensor),
+        db_files=resolved_db_files or None,
+        map_version=map_version,
+        include_cameras=True,
+        max_workers=1,
+        verbose=False,
+    )
+    scenario_filter = ScenarioFilter(
+        scenario_types=None,
+        scenario_tokens=None,
+        log_names=None,
+        map_names=None,
+        num_scenarios_per_type=None,
+        limit_total_scenarios=(
+            limit_total_scenarios or None
+        ),
+        timestamp_threshold_s=None,
+        ego_displacement_minimum_m=None,
+        expand_scenarios=False,
+        remove_invalid_goals=True,
+        shuffle=False,
+    )
+    scenarios = builder.get_scenarios(
+        scenario_filter,
+        Sequential(),
+    )
+    output = Path(tempfile.mkdtemp(prefix="nuplan-reactive-shards-"))
+    pack_nuplan_reactive_scenarios(
+        scenarios,
+        output,
+        source_revision=source_revision,
+        map_version=map_version,
+        image_size=image_size,
+        samples_per_shard=samples_per_shard,
+        max_rejection_fraction=max_rejection_fraction,
+    )
+    return FlyteDirectory(str(output))
+
+
+# ============================================================
+# Task: Reactive nuPlan -> L2D multi-stage training
+# ============================================================
+@task(
+    container_image=TRAINING_IMAGE,
+    requests=Resources(cpu="4", mem="24Gi", gpu="1"),
+    limits=Resources(cpu="4", mem="24Gi", gpu="1"),
+    pod_template=_large_shm_pod_template(),
+    environment={"MLFLOW_TRACKING_URI": MLFLOW_URI},
+)
+def train_reactive_multitask_stage(
+    shards: List[FlyteDirectory],
+    dataset: Dataset,
+    stage: str,
+    parent_checkpoint: Optional[FlyteFile] = None,
+    backbone: Backbone = Backbone.SWIN_V2_TINY,
+    epochs: int = 3,
+    batch_size: int = 2,
+    lr: float = 1e-4,
+    weight_decay: float = 1e-2,
+    grad_clip: float = 1.0,
+    val_fraction: float = 0.1,
+    num_workers: int = 0,
+    training_seed: int = 149,
+    bev_weight: float = 1.0,
+    route_weight: float = 1.0,
+    bev_pos_weights: List[float] = [
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+    ],
+    corridor_pos_weight: float = 1.0,
+) -> TrainOutput:
+    """Train one locked Reactive stage on already packed immutable shards."""
+    import hashlib
+    import json
+    import os
+    import random
+    from pathlib import Path
+
+    import mlflow
+    import numpy as np
+    import torch
+    from flytekit import current_context
+
+    from data_parsing.pre_extracted import make_multi_dataset_loader
+    from model_components.auto_e2e import AutoE2E
+    from navigation.geometry import AUTOE2E_NAVIGATION_GEOMETRY
+    from Platform.pipelines.training_checkpoint import stable_digest
+    from training.reactive_multitask import (
+        SIMPLE_XY_IMITATION_OBJECTIVE_VERSION,
+        ReactiveMultitaskObjective,
+        ReactiveTrainingStage,
+        configure_model_for_stage,
+        reactive_model_kwargs,
+    )
+    from training.reactive_stage_runner import (
+        evaluate_reactive_xy,
+        inspect_reactive_checkpoint_identity,
+        load_stage_a_parent,
+        run_reactive_epoch,
+        save_reactive_checkpoint,
+    )
+
+    try:
+        training_stage = ReactiveTrainingStage(stage)
+    except ValueError as error:
+        raise ValueError(f"unsupported Reactive training stage {stage!r}") from error
+    expected_dataset = (
+        Dataset.NUPLAN
+        if training_stage is ReactiveTrainingStage.NUPLAN_FULL
+        else Dataset.L2D
+    )
+    if dataset is not expected_dataset:
+        raise ValueError(
+            f"{training_stage.value} requires dataset={expected_dataset.value}"
+        )
+    if (
+        training_stage is ReactiveTrainingStage.NUPLAN_FULL
+        and parent_checkpoint is not None
+    ):
+        raise ValueError("Stage A must not load a parent checkpoint")
+    if (
+        training_stage is ReactiveTrainingStage.L2D_CONTINUATION
+        and parent_checkpoint is None
+    ):
+        raise ValueError("Stage B requires the exact Stage A checkpoint")
+    if epochs <= 0 or batch_size <= 0:
+        raise ValueError("epochs and batch_size must be positive")
+    if lr <= 0.0 or weight_decay < 0.0 or grad_clip <= 0.0:
+        raise ValueError("optimizer parameters are invalid")
+    if not 0.0 < val_fraction < 1.0:
+        raise ValueError("val_fraction must be between zero and one")
+    if num_workers < 0:
+        raise ValueError("num_workers must be non-negative")
+    if len(bev_pos_weights) != 8 or any(
+        not np.isfinite(value) or value <= 0.0
+        for value in bev_pos_weights
+    ):
+        raise ValueError("bev_pos_weights must contain eight positive values")
+    if not 0 <= training_seed <= 2**32 - 1:
+        raise ValueError("training_seed is outside uint32")
+
+    random.seed(training_seed)
+    np.random.seed(training_seed)
+    torch.manual_seed(training_seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(training_seed)
+    torch.backends.cudnn.benchmark = False
+    torch.backends.cudnn.deterministic = True
+    if num_workers:
+        torch.multiprocessing.set_sharing_strategy("file_system")
+
+    shard_dirs: list[str] = []
+    manifest_identities: list[dict] = []
+    view_counts: set[int] = set()
+    expected_geometry = AUTOE2E_NAVIGATION_GEOMETRY.contract()
+    for shard in shards:
+        shard_uri = str(
+            getattr(shard, "remote_source", "") or shard
+        )
+        shard_dir = _loader_download_dir(shard)
+        manifest_path = Path(shard_dir) / "manifest.json"
+        if not manifest_path.is_file():
+            raise FileNotFoundError(
+                f"packed shard manifest is missing: {manifest_path}"
+            )
+        manifest_bytes = manifest_path.read_bytes()
+        try:
+            manifest = json.loads(manifest_bytes)
+        except json.JSONDecodeError as error:
+            raise ValueError(
+                f"packed shard manifest is invalid: {manifest_path}"
+            ) from error
+        if manifest.get("dataset") != dataset.value:
+            continue
+        sample_count = int(manifest.get("total_samples", 0))
+        if sample_count <= 0:
+            continue
+        required_flags = {
+            "has_reactive_navigation": True,
+            "has_route_reconstruction": True,
+            "has_trajectory_xy": True,
+        }
+        if training_stage is ReactiveTrainingStage.NUPLAN_FULL:
+            required_flags["has_bev_segmentation"] = True
+        mismatched_flags = {
+            key: manifest.get(key)
+            for key, expected in required_flags.items()
+            if manifest.get(key) is not expected
+        }
+        if mismatched_flags:
+            raise ValueError(
+                "packed Reactive target coverage is incomplete: "
+                f"{mismatched_flags} ({manifest_path})"
+            )
+        if manifest.get("navigation_geometry") != expected_geometry:
+            raise ValueError(
+                "packed navigation geometry differs from the common "
+                f"450x300 contract: {manifest_path}"
+            )
+        if int(manifest.get("map_context_channels", 0)) != 14:
+            raise ValueError("Reactive stages require 14 map channels")
+        if int(manifest.get("route_channels", 0)) != 2:
+            raise ValueError("Reactive stages require two route channels")
+        num_views = int(manifest.get("num_views", 0))
+        if num_views <= 0:
+            raise ValueError("Reactive stage shard has no camera views")
+        view_counts.add(num_views)
+        shard_dirs.append(shard_dir)
+        manifest_identities.append({
+            "dataset": dataset.value,
+            "manifest_sha256": hashlib.sha256(
+                manifest_bytes
+            ).hexdigest(),
+            "partition_id": manifest.get("partition_id"),
+            "shard_names": list(manifest.get("shard_names", [])),
+            "source_revision": manifest.get("source_revision"),
+            "total_samples": sample_count,
+            "uri": shard_uri,
+        })
+    if not shard_dirs:
+        raise ValueError(
+            f"no non-empty packed shards matched {dataset.value}"
+        )
+    if len(view_counts) != 1:
+        raise ValueError(
+            f"Reactive stage mixes camera counts: {sorted(view_counts)}"
+        )
+    manifest_identities.sort(
+        key=lambda item: (
+            str(item["partition_id"]),
+            str(item["shard_names"]),
+            str(item["uri"]),
+        )
+    )
+    dataset_manifest_sha256 = stable_digest(manifest_identities)
+    num_views = next(iter(view_counts))
+
+    device = torch.device(
+        "cuda" if torch.cuda.is_available() else "cpu"
+    )
+    constructor_kwargs = reactive_model_kwargs(
+        training_stage,
+        num_views=num_views,
+    )
+    model = AutoE2E(
+        backbone=backbone.value,
+        embed_dim=256,
+        is_pretrained=(
+            training_stage is ReactiveTrainingStage.NUPLAN_FULL
+        ),
+        **constructor_kwargs,
+    ).to(device)
+    lineage: dict[str, str] = {}
+    if parent_checkpoint is not None:
+        lineage.update(
+            load_stage_a_parent(
+                model,
+                str(parent_checkpoint.download()),
+            )
+        )
+    configure_model_for_stage(model, training_stage)
+    objective = ReactiveMultitaskObjective(
+        training_stage,
+        bev_pos_weight=bev_pos_weights,
+        bev_weight=bev_weight,
+        route_weight=route_weight,
+        corridor_pos_weight=corridor_pos_weight,
+    ).to(device)
+    trainable = [
+        parameter
+        for parameter in model.parameters()
+        if parameter.requires_grad
+    ]
+    optimizer = torch.optim.AdamW(
+        trainable,
+        lr=lr,
+        weight_decay=weight_decay,
+    )
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer,
+        mode="min",
+        factor=0.5,
+        patience=1,
+        threshold=1e-4,
+        threshold_mode="abs",
+    )
+    train_loader = make_multi_dataset_loader(
+        shard_dirs,
+        batch_size=batch_size,
+        num_workers=num_workers,
+        split="train",
+        val_fraction=val_fraction,
+        shuffle=1000,
+        shuffle_seed=training_seed,
+        pin_memory=(device.type == "cuda"),
+        decode_future_frames=False,
+    )
+    validation_loader = make_multi_dataset_loader(
+        shard_dirs,
+        batch_size=batch_size,
+        num_workers=min(num_workers, 1),
+        split="val",
+        val_fraction=val_fraction,
+        shuffle=0,
+        pin_memory=(device.type == "cuda"),
+        max_active_loaders=1,
+        decode_future_frames=False,
+    )
+
+    output_dir = Path("/tmp/reactive-multistage") / training_stage.value
+    output_dir.mkdir(parents=True, exist_ok=True)
+    checkpoint_path = output_dir / "best.pt"
+    metadata_path = output_dir / "metadata.json"
+    history = []
+    best_ade = float("inf")
+    best_epoch = 0
+    best_sha256 = ""
+    model_config = {
+        "backbone": backbone.value,
+        "embed_dim": 256,
+        # Evaluation must never download initialization weights.
+        "is_pretrained": False,
+        **constructor_kwargs,
+    }
+
+    mlflow.set_tracking_uri(os.environ["MLFLOW_TRACKING_URI"])
+    mlflow.set_experiment("reactive-multistage")
+    ctx = current_context()
+    with mlflow.start_run() as active_run:
+        run_id = active_run.info.run_id
+        mlflow.log_params({
+            "training_stage": training_stage.value,
+            "dataset": dataset.value,
+            "training_objective_version": (
+                SIMPLE_XY_IMITATION_OBJECTIVE_VERSION
+            ),
+            "navigation_geometry_id": (
+                AUTOE2E_NAVIGATION_GEOMETRY.geometry_id
+            ),
+            "planner_mode": "gru",
+            "enable_world_model": False,
+            "enable_reasoning": False,
+            "epochs": epochs,
+            "batch_size": batch_size,
+            "lr": lr,
+            "bev_weight": bev_weight,
+            "route_weight": route_weight,
+        })
+        for epoch in range(1, epochs + 1):
+            train_metrics = run_reactive_epoch(
+                model,
+                train_loader,
+                objective,
+                optimizer,
+                device=device,
+                grad_clip=grad_clip,
+            )
+            validation_metrics = evaluate_reactive_xy(
+                model,
+                validation_loader,
+                device=device,
+            )
+            scheduler.step(validation_metrics["ade_6p4s_m"])
+            record = {
+                "epoch": epoch,
+                "train": train_metrics,
+                "validation": validation_metrics,
+                "lr": float(optimizer.param_groups[0]["lr"]),
+            }
+            history.append(record)
+            mlflow.log_metrics(
+                {
+                    **{
+                        f"train/{name}": value
+                        for name, value in train_metrics.items()
+                    },
+                    **{
+                        f"val/{name}": value
+                        for name, value in validation_metrics.items()
+                    },
+                },
+                step=epoch,
+            )
+            if validation_metrics["ade_6p4s_m"] < best_ade:
+                best_ade = validation_metrics["ade_6p4s_m"]
+                best_epoch = epoch
+                best_sha256 = save_reactive_checkpoint(
+                    checkpoint_path,
+                    model,
+                    stage=training_stage,
+                    dataset_manifest_sha256=dataset_manifest_sha256,
+                    epoch=epoch,
+                    model_config=model_config,
+                    optimizer=optimizer,
+                    scheduler=scheduler,
+                    metrics=validation_metrics,
+                    training_state={
+                        "run_id": run_id,
+                        "flyte_execution_id": (
+                            ctx.execution_id.name
+                            if ctx.execution_id
+                            else "local"
+                        ),
+                    },
+                    lineage=lineage,
+                )
+        mlflow.log_artifact(str(checkpoint_path), artifact_path="checkpoints")
+
+    checkpoint_identity = inspect_reactive_checkpoint_identity(
+        checkpoint_path
+    )
+    metadata = {
+        "schema_version": "reactive_multistage_training_v1",
+        "training_stage": training_stage.value,
+        "dataset": dataset.value,
+        "dataset_manifest_sha256": dataset_manifest_sha256,
+        "best_epoch": best_epoch,
+        "best_checkpoint_sha256": best_sha256,
+        "best_checkpoint_identity": checkpoint_identity,
+        "history": history,
+        "lineage": lineage,
+        "model_config": model_config,
+        "objective": {
+            "version": SIMPLE_XY_IMITATION_OBJECTIVE_VERSION,
+            "bev_weight": (
+                bev_weight
+                if training_stage is ReactiveTrainingStage.NUPLAN_FULL
+                else 0.0
+            ),
+            "route_weight": route_weight,
+        },
+    }
+    metadata_path.write_text(
+        json.dumps(
+            metadata,
+            allow_nan=False,
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="ascii",
+    )
+    return TrainOutput(
+        checkpoint=FlyteFile(str(checkpoint_path)),
+        metadata=FlyteFile(str(metadata_path)),
+    )
+
+
+@task(
+    container_image=EVAL_IMAGE,
+    requests=Resources(cpu="4", mem="24Gi", gpu="1"),
+    limits=Resources(cpu="4", mem="24Gi", gpu="1"),
+    pod_template=_large_shm_pod_template(),
+)
+def evaluate_reactive_transfer_matrix(
+    stage_a_checkpoint: FlyteFile,
+    stage_b_checkpoint: FlyteFile,
+    nuplan_shards: List[FlyteDirectory],
+    l2d_shards: List[FlyteDirectory],
+    batch_size: int = 2,
+    val_fraction: float = 0.1,
+    num_workers: int = 0,
+) -> ReactiveRetentionOutput:
+    """Evaluate Stage A/B on one frozen nuPlan/L2D validation split."""
+    import hashlib
+    import json
+    import tempfile
+    from pathlib import Path
+
+    import torch
+
+    from data_parsing.pre_extracted import (
+        discover_split_inventory,
+        make_multi_dataset_loader,
+    )
+    from data_processing.dataset_snapshot import split_bucket
+    from navigation.geometry import AUTOE2E_NAVIGATION_GEOMETRY
+    from Platform.pipelines.inference import load_policy
+    from Platform.pipelines.training_checkpoint import stable_digest
+    from training.reactive_multitask import ReactiveTrainingStage
+    from training.reactive_stage_runner import (
+        evaluate_reactive_multitask,
+        inspect_reactive_checkpoint_identity,
+    )
+
+    if batch_size <= 0 or num_workers < 0:
+        raise ValueError("invalid retention evaluation loader settings")
+    if not 0.0 < val_fraction < 1.0:
+        raise ValueError("val_fraction must be between zero and one")
+
+    expected_geometry = AUTOE2E_NAVIGATION_GEOMETRY.contract()
+
+    def resolve_dataset(
+        shards: List[FlyteDirectory],
+        dataset: Dataset,
+    ) -> tuple[list[str], str, dict]:
+        directories: list[str] = []
+        identities: list[dict] = []
+        for shard in shards:
+            directory = _loader_download_dir(shard)
+            manifest_path = Path(directory) / "manifest.json"
+            if not manifest_path.is_file():
+                raise FileNotFoundError(
+                    f"packed shard manifest is missing: {manifest_path}"
+                )
+            payload = manifest_path.read_bytes()
+            manifest = json.loads(payload)
+            if manifest.get("dataset") != dataset.value:
+                continue
+            if int(manifest.get("total_samples", 0)) <= 0:
+                continue
+            if manifest.get("navigation_geometry") != expected_geometry:
+                raise ValueError(
+                    "retention dataset navigation geometry differs from "
+                    "the common contract"
+                )
+            required = {
+                "has_reactive_navigation": True,
+                "has_route_reconstruction": True,
+                "has_trajectory_xy": True,
+            }
+            if dataset is Dataset.NUPLAN:
+                required["has_bev_segmentation"] = True
+            mismatches = {
+                key: manifest.get(key)
+                for key, expected in required.items()
+                if manifest.get(key) is not expected
+            }
+            if mismatches:
+                raise ValueError(
+                    "retention dataset target coverage is incomplete: "
+                    f"{mismatches}"
+                )
+            directories.append(directory)
+            identities.append({
+                "dataset": dataset.value,
+                "manifest_sha256": hashlib.sha256(payload).hexdigest(),
+                "partition_id": manifest.get("partition_id"),
+                "shard_names": list(manifest.get("shard_names", [])),
+                "source_revision": manifest.get("source_revision"),
+                "total_samples": int(manifest["total_samples"]),
+                "uri": str(
+                    getattr(shard, "remote_source", "") or shard
+                ),
+            })
+        if not directories:
+            raise ValueError(
+                f"no non-empty retention shards matched {dataset.value}"
+            )
+        identities.sort(
+            key=lambda item: (
+                str(item["partition_id"]),
+                str(item["shard_names"]),
+                str(item["uri"]),
+            )
+        )
+        inventory = discover_split_inventory(directories)
+        buckets = 10
+        validation_bucket_count = max(
+            1,
+            min(buckets - 1, round(val_fraction * buckets)),
+        )
+        validation_groups = tuple(
+            group_uid
+            for group_uid in inventory.group_uids
+            if split_bucket(group_uid, buckets) < validation_bucket_count
+        )
+        if not validation_groups:
+            raise ValueError(
+                f"{dataset.value} has no groups in the frozen validation split"
+            )
+        expected_count, expected_uid_digest = (
+            inventory.sample_identity_for_groups(validation_groups)
+        )
+        return directories, stable_digest(identities), {
+            "dataset": dataset.value,
+            "manifest_digest": stable_digest(identities),
+            "validation_group_count": len(validation_groups),
+            "validation_group_sha256": hashlib.sha256(
+                "\n".join(validation_groups).encode("utf-8")
+            ).hexdigest(),
+            "validation_groups": list(validation_groups),
+            "expected_sample_count": expected_count,
+            "expected_sample_uid_sha256": expected_uid_digest,
+        }
+
+    nuplan_directories, nuplan_digest, nuplan_split = resolve_dataset(
+        nuplan_shards,
+        Dataset.NUPLAN,
+    )
+    l2d_directories, l2d_digest, l2d_split = resolve_dataset(
+        l2d_shards,
+        Dataset.L2D,
+    )
+    dataset_specs = {
+        "nuplan": (
+            nuplan_directories,
+            nuplan_split,
+        ),
+        "l2d": (
+            l2d_directories,
+            l2d_split,
+        ),
+    }
+
+    stage_a_path = str(stage_a_checkpoint.download())
+    stage_b_path = str(stage_b_checkpoint.download())
+    device = torch.device(
+        "cuda" if torch.cuda.is_available() else "cpu"
+    )
+    if torch.backends.cudnn.is_available():
+        torch.backends.cudnn.benchmark = False
+        torch.backends.cudnn.deterministic = True
+
+    stage_a_identity = inspect_reactive_checkpoint_identity(stage_a_path)
+    stage_b_identity = inspect_reactive_checkpoint_identity(stage_b_path)
+    stage_a_sha256 = stage_a_identity["checkpoint_sha256"]
+    stage_b_sha256 = stage_b_identity["checkpoint_sha256"]
+
+    loader_factories = {
+        dataset_name: functools.partial(
+            make_multi_dataset_loader,
+            directories,
+            batch_size=batch_size,
+            num_workers=num_workers,
+            split="val",
+            val_fraction=0.0,
+            shuffle=0,
+            pin_memory=(device.type == "cuda"),
+            max_active_loaders=1,
+            validation_group_uids=(
+                split_metadata["validation_groups"]
+            ),
+            decode_future_frames=False,
+        )
+        for dataset_name, (
+            directories,
+            split_metadata,
+        ) in dataset_specs.items()
+    }
+    matrix: dict[str, dict[str, dict]] = {
+        "stage_a": {},
+        "stage_b": {},
+    }
+    checkpoint_specs = (
+        (
+            "stage_a",
+            stage_a_path,
+            ReactiveTrainingStage.NUPLAN_FULL.value,
+            nuplan_digest,
+        ),
+        (
+            "stage_b",
+            stage_b_path,
+            ReactiveTrainingStage.L2D_CONTINUATION.value,
+            l2d_digest,
+        ),
+    )
+    checkpoint_configs = {}
+    for (
+        checkpoint_name,
+        checkpoint_path,
+        expected_stage,
+        expected_manifest_digest,
+    ) in checkpoint_specs:
+        model, config, loaded_sha256 = load_policy(
+            checkpoint_path,
+            device,
+        )
+        expected_sha256 = (
+            stage_a_sha256
+            if checkpoint_name == "stage_a"
+            else stage_b_sha256
+        )
+        if loaded_sha256 != expected_sha256:
+            raise ValueError(
+                f"{checkpoint_name} identity changed while loading"
+            )
+        if config.get("training_stage") != expected_stage:
+            raise ValueError(
+                f"{checkpoint_name} checkpoint has the wrong training stage"
+            )
+        if config.get(
+            "dataset_manifest_sha256"
+        ) != expected_manifest_digest:
+            raise ValueError(
+                f"{checkpoint_name} checkpoint was trained on different shards"
+            )
+        if (
+            checkpoint_name == "stage_b"
+            and config.get("stage_a_parent_checkpoint_sha256")
+            != stage_a_sha256
+        ):
+            raise ValueError(
+                "Stage B lineage does not reference the supplied "
+                "Stage A checkpoint"
+            )
+        checkpoint_configs[checkpoint_name] = config
+        for dataset_name, loader_factory in loader_factories.items():
+            matrix[checkpoint_name][dataset_name] = (
+                evaluate_reactive_multitask(
+                    model,
+                    loader_factory(),
+                    device=device,
+                )
+            )
+        del model
+        if device.type == "cuda":
+            torch.cuda.empty_cache()
+
+    stage_b_config = checkpoint_configs["stage_b"]
+    for dataset_name in dataset_specs:
+        stage_a_metrics = matrix["stage_a"][dataset_name]
+        stage_b_metrics = matrix["stage_b"][dataset_name]
+        if (
+            stage_a_metrics["sample_count"]
+            != stage_b_metrics["sample_count"]
+            or stage_a_metrics["sample_uid_sha256"]
+            != stage_b_metrics["sample_uid_sha256"]
+        ):
+            raise ValueError(
+                "Stage A and Stage B retention cells used different "
+                f"{dataset_name} validation samples"
+            )
+    for checkpoint_name in ("stage_a", "stage_b"):
+        for dataset_name, (
+            _,
+            split_metadata,
+        ) in dataset_specs.items():
+            metrics = matrix[checkpoint_name][dataset_name]
+            if metrics["sample_count"] != (
+                split_metadata["expected_sample_count"]
+            ):
+                raise ValueError(
+                    "retention evaluation sample count differs from "
+                    f"the frozen inventory for {dataset_name}"
+                )
+            if metrics["sample_uid_sha256"] != (
+                split_metadata["expected_sample_uid_sha256"]
+            ):
+                raise ValueError(
+                    "retention evaluation sample UID digest differs from "
+                    f"the frozen inventory for {dataset_name}"
+                )
+
+    report = {
+        "schema_version": "reactive_transfer_matrix_v1",
+        "checkpoint_lineage": {
+            "stage_a_checkpoint_sha256": stage_a_sha256,
+            "stage_b_checkpoint_sha256": stage_b_sha256,
+            "stage_b_parent_checkpoint_sha256": stage_b_config[
+                "stage_a_parent_checkpoint_sha256"
+            ],
+            "stage_a_config_digest": stage_a_identity["config_sha256"],
+            "stage_b_config_digest": stage_b_identity["config_sha256"],
+            "stage_a_model_state_sha256": (
+                stage_a_identity["model_state_sha256"]
+            ),
+            "stage_b_model_state_sha256": (
+                stage_b_identity["model_state_sha256"]
+            ),
+        },
+        "datasets": {
+            "nuplan": nuplan_split,
+            "l2d": l2d_split,
+        },
+        "matrix": matrix,
+    }
+    report_payload = (
+        json.dumps(
+            report,
+            allow_nan=False,
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n"
+    ).encode("ascii")
+    report_sha256 = hashlib.sha256(report_payload).hexdigest()
+    output_path = (
+        Path(tempfile.mkdtemp(prefix="reactive-retention-"))
+        / "retention-report.json"
+    )
+    output_path.write_bytes(report_payload)
+    return ReactiveRetentionOutput(
+        report=FlyteFile(str(output_path)),
+        report_sha256=report_sha256,
+    )
+
+
+@task(
+    container_image=EVAL_IMAGE,
+    requests=Resources(cpu="4", mem="24Gi", gpu="1"),
+    limits=Resources(cpu="4", mem="24Gi", gpu="1"),
+    pod_template=_large_shm_pod_template(),
+)
+def precompute_semantic_occupancy_artifacts(
+    checkpoint: FlyteFile,
+    shard_dirs: List[FlyteDirectory],
+    dataset: str,
+    dataset_manifest_sha256: str,
+    artifacts_bucket: str,
+    aws_region: str = "us-west-2",
+    batch_size: int = 2,
+    num_workers: int = 0,
+) -> SemanticOccupancyPrecomputeOutput:
+    """Precompute immutable 2D semantic occupancy bodies per packed tar."""
+    import hashlib
+    import json
+    import re
+    from pathlib import Path
+
+    import boto3
+    import torch
+
+    from data_parsing.pre_extracted import make_pre_extracted_loader
+    from Platform.pipelines.inference import load_policy
+    from Platform.pipelines.overlay_tasks import _put_s3_immutable
+    from Platform.pipelines.semantic_occupancy import (
+        SEMANTIC_OCCUPANCY_GEOMETRY_ID,
+        SEMANTIC_OCCUPANCY_HEAD_VERSION,
+        SEMANTIC_OCCUPANCY_SCHEMA,
+        SEMANTIC_OCCUPANCY_TAXONOMY_VERSION,
+        encode_semantic_occupancy,
+        infer_semantic_occupancy,
+        semantic_occupancy_s3_key,
+    )
+
+    if not re.fullmatch(r"[0-9a-f]{64}", dataset_manifest_sha256):
+        raise ValueError(
+            "dataset_manifest_sha256 must be a lowercase SHA-256"
+        )
+    for name, value in (
+        ("dataset", dataset),
+        ("artifacts_bucket", artifacts_bucket),
+        ("aws_region", aws_region),
+    ):
+        if not value:
+            raise ValueError(f"{name} must not be empty")
+    if "/" in dataset or "\\" in dataset:
+        raise ValueError("dataset must be one path segment")
+    if not shard_dirs:
+        raise ValueError("shard_dirs must not be empty")
+    if batch_size <= 0 or num_workers < 0:
+        raise ValueError("invalid semantic occupancy loader settings")
+
+    torch.use_deterministic_algorithms(True)
+    if torch.backends.cudnn.is_available():
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+    if num_workers:
+        torch.multiprocessing.set_sharing_strategy("file_system")
+    device = torch.device(
+        "cuda" if torch.cuda.is_available() else "cpu"
+    )
+    checkpoint_path = str(checkpoint.download())
+    model, config, checkpoint_sha256 = load_policy(
+        checkpoint_path,
+        device,
+    )
+    if not config.get("enable_bev_segmentation", False):
+        raise ValueError("checkpoint has no BEV segmentation head")
+
+    s3 = boto3.client("s3", region_name=aws_region)
+    entries = []
+    total_samples = 0
+    for shard_directory in shard_dirs:
+        local_directory = Path(shard_directory.download())
+        if not (local_directory / "manifest.json").is_file():
+            raise FileNotFoundError(
+                f"packed manifest missing: {local_directory}"
+            )
+        for tar_path in sorted(local_directory.glob("*.tar")):
+            loader = make_pre_extracted_loader(
+                str(local_directory),
+                batch_size=batch_size,
+                num_workers=num_workers,
+                split="all",
+                val_fraction=0.0,
+                shuffle=0,
+                pin_memory=(device.type == "cuda"),
+                prefetch_factor=1,
+                shard_files=[tar_path],
+                decode_future_frames=False,
+            )
+            (
+                sample_uids,
+                probability,
+                teacher,
+                valid_mask,
+            ) = infer_semantic_occupancy(
+                model,
+                loader,
+                device=device,
+            )
+            payload = encode_semantic_occupancy(
+                sample_uids,
+                probability,
+                teacher=teacher,
+                valid_mask=valid_mask,
+            )
+            payload_sha256 = hashlib.sha256(payload).hexdigest()
+            key = semantic_occupancy_s3_key(
+                checkpoint_sha256,
+                dataset_manifest_sha256,
+                dataset,
+                tar_path.name,
+            )
+            _put_s3_immutable(
+                s3,
+                bucket=artifacts_bucket,
+                key=key,
+                payload=payload,
+                metadata={
+                    "checkpoint-sha256": checkpoint_sha256,
+                    "dataset-manifest-sha256": (
+                        dataset_manifest_sha256
+                    ),
+                    "geometry-id": SEMANTIC_OCCUPANCY_GEOMETRY_ID,
+                    "head-version": SEMANTIC_OCCUPANCY_HEAD_VERSION,
+                    "payload-sha256": payload_sha256,
+                    "sample-count": str(len(sample_uids)),
+                    "schema": SEMANTIC_OCCUPANCY_SCHEMA,
+                    "taxonomy-version": (
+                        SEMANTIC_OCCUPANCY_TAXONOMY_VERSION
+                    ),
+                },
+                content_type=(
+                    "application/vnd.auto-e2e.semantic-occupancy"
+                ),
+                content_encoding="gzip",
+            )
+            entries.append({
+                "byte_size": len(payload),
+                "sample_count": len(sample_uids),
+                "s3_key": key,
+                "sha256": payload_sha256,
+                "shard": tar_path.name,
+                "teacher_present": teacher is not None,
+            })
+            total_samples += len(sample_uids)
+    if not entries:
+        raise ValueError("packed directories contain no tar shards")
+    entries.sort(key=lambda entry: entry["shard"])
+    if len({entry["shard"] for entry in entries}) != len(entries):
+        raise ValueError("semantic occupancy shard names are not unique")
+    manifest = {
+        "schema_version": "semantic_occupancy_manifest_v1",
+        "artifact_schema": SEMANTIC_OCCUPANCY_SCHEMA,
+        "checkpoint_sha256": checkpoint_sha256,
+        "dataset": dataset,
+        "dataset_manifest_sha256": dataset_manifest_sha256,
+        "geometry_id": SEMANTIC_OCCUPANCY_GEOMETRY_ID,
+        "head_version": SEMANTIC_OCCUPANCY_HEAD_VERSION,
+        "taxonomy_version": SEMANTIC_OCCUPANCY_TAXONOMY_VERSION,
+        "sample_count": total_samples,
+        "shards": entries,
+    }
+    manifest_payload = (
+        json.dumps(
+            manifest,
+            allow_nan=False,
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n"
+    ).encode("ascii")
+    manifest_sha256 = hashlib.sha256(manifest_payload).hexdigest()
+    manifest_key = (
+        "semantic-occupancy-manifest/schema=v1/"
+        f"model={checkpoint_sha256}/"
+        f"manifest={dataset_manifest_sha256}/dataset={dataset}/"
+        "manifest.json"
+    )
+    _put_s3_immutable(
+        s3,
+        bucket=artifacts_bucket,
+        key=manifest_key,
+        payload=manifest_payload,
+        metadata={
+            "checkpoint-sha256": checkpoint_sha256,
+            "dataset-manifest-sha256": dataset_manifest_sha256,
+            "manifest-sha256": manifest_sha256,
+            "sample-count": str(total_samples),
+            "schema": "semantic_occupancy_manifest_v1",
+        },
+        content_type="application/json",
+    )
+    return SemanticOccupancyPrecomputeOutput(
+        manifest_key=manifest_key,
+        manifest_sha256=manifest_sha256,
+        checkpoint_sha256=checkpoint_sha256,
+        shard_count=len(entries),
+        sample_count=total_samples,
+    )
+
+
+# ============================================================
 # Task: Offline RL
 # ============================================================
 @task(
@@ -7219,9 +8517,17 @@ def evaluate_kitscenes_benchmark_checkpoint(
     if not isinstance(payload["config"], dict):
         raise ValueError("benchmark checkpoint config must be an object")
     config = dict(payload["config"])
-    training_policy = training_policy_from_config(
-        config,
-        Dataset.KITSCENES.value,
+    simple_xy_objective = (
+        config.get("training_objective_version")
+        == SIMPLE_XY_IMITATION_OBJECTIVE_VERSION
+    )
+    training_policy = (
+        None
+        if simple_xy_objective
+        else training_policy_from_config(
+            config,
+            Dataset.KITSCENES.value,
+        )
     )
     epoch = int(payload["epoch"])
     if epoch <= 0:
@@ -7436,9 +8742,13 @@ def evaluate_kitscenes_benchmark_checkpoint(
                     "benchmark GPS trajectory has unexpected shape "
                     f"{getattr(gps_future, 'shape', None)}"
                 )
-            policy_history = adapt_egomotion_history(
-                history,
-                training_policy,
+            policy_history = (
+                history
+                if training_policy is None
+                else adapt_egomotion_history(
+                    history,
+                    training_policy,
+                )
             )
             limited_history = limit_egomotion_history(
                 policy_history,
@@ -7978,6 +9288,168 @@ def audit_kitscenes_target_reconstruction(
 # ============================================================
 # Workflows
 # ============================================================
+@workflow
+def wf_pack_nuplan_reactive_dataset(
+    data_root: FlyteDirectory,
+    map_root: FlyteDirectory,
+    sensor_root: FlyteDirectory,
+    db_files: List[str],
+    source_revision: str,
+    map_version: str,
+    limit_total_scenarios: int = 0,
+    image_size: int = 256,
+    samples_per_shard: int = 1000,
+    max_rejection_fraction: float = 0.0,
+) -> FlyteDirectory:
+    """Build the immutable Stage A source shards from raw nuPlan assets."""
+    return pack_nuplan_reactive_dataset(
+        data_root=data_root,
+        map_root=map_root,
+        sensor_root=sensor_root,
+        db_files=db_files,
+        source_revision=source_revision,
+        map_version=map_version,
+        limit_total_scenarios=limit_total_scenarios,
+        image_size=image_size,
+        samples_per_shard=samples_per_shard,
+        max_rejection_fraction=max_rejection_fraction,
+    )
+
+
+@workflow
+def wf_train_reactive_nuplan_l2d(
+    nuplan_shards: List[FlyteDirectory],
+    l2d_shards: List[FlyteDirectory],
+    backbone: Backbone = Backbone.SWIN_V2_TINY,
+    stage_a_epochs: int = 3,
+    stage_b_epochs: int = 3,
+    batch_size: int = 2,
+    stage_a_lr: float = 1e-4,
+    stage_b_lr: float = 3e-5,
+    val_fraction: float = 0.1,
+    num_workers: int = 0,
+    training_seed: int = 149,
+    bev_weight: float = 1.0,
+    route_weight: float = 1.0,
+) -> ReactiveTrainingProgramOutput:
+    """Run Stage A nuPlan and Stage B L2D with a weights-only boundary."""
+    stage_a = train_reactive_multitask_stage(
+        shards=nuplan_shards,
+        dataset=Dataset.NUPLAN,
+        stage="nuplan_full",
+        parent_checkpoint=None,
+        backbone=backbone,
+        epochs=stage_a_epochs,
+        batch_size=batch_size,
+        lr=stage_a_lr,
+        val_fraction=val_fraction,
+        num_workers=num_workers,
+        training_seed=training_seed,
+        bev_weight=bev_weight,
+        route_weight=route_weight,
+    )
+    stage_b = train_reactive_multitask_stage(
+        shards=l2d_shards,
+        dataset=Dataset.L2D,
+        stage="l2d_continuation",
+        parent_checkpoint=stage_a.checkpoint,
+        backbone=backbone,
+        epochs=stage_b_epochs,
+        batch_size=batch_size,
+        lr=stage_b_lr,
+        val_fraction=val_fraction,
+        num_workers=num_workers,
+        training_seed=training_seed,
+        bev_weight=0.0,
+        route_weight=route_weight,
+    )
+    retention = evaluate_reactive_transfer_matrix(
+        stage_a_checkpoint=stage_a.checkpoint,
+        stage_b_checkpoint=stage_b.checkpoint,
+        nuplan_shards=nuplan_shards,
+        l2d_shards=l2d_shards,
+        batch_size=batch_size,
+        val_fraction=val_fraction,
+        num_workers=num_workers,
+    )
+    return ReactiveTrainingProgramOutput(
+        stage_a_checkpoint=stage_a.checkpoint,
+        stage_a_metadata=stage_a.metadata,
+        stage_b_checkpoint=stage_b.checkpoint,
+        stage_b_metadata=stage_b.metadata,
+        retention_report=retention.report,
+        retention_report_sha256=retention.report_sha256,
+    )
+
+
+@workflow
+def wf_benchmark_reactive_program(
+    stage_a_checkpoint: FlyteFile,
+    stage_b_checkpoint: FlyteFile,
+    benchmark_shards: List[FlyteDirectory],
+    benchmark_manifest: FlyteFile,
+    expected_manifest_sha256: str = "",
+    stage_a_mlflow_run_id: str = "",
+    stage_b_mlflow_run_id: str = "",
+    batch_size: int = 4,
+) -> ReactiveBenchmarkProgramOutput:
+    """Evaluate predeclared Stage A/B checkpoints without optimizer access."""
+    stage_a = evaluate_kitscenes_benchmark_checkpoint(
+        checkpoint=stage_a_checkpoint,
+        benchmark_shards=benchmark_shards,
+        benchmark_manifest=benchmark_manifest,
+        expected_manifest_sha256=expected_manifest_sha256,
+        mlflow_run_id=stage_a_mlflow_run_id,
+        batch_size=batch_size,
+    )
+    stage_b = evaluate_kitscenes_benchmark_checkpoint(
+        checkpoint=stage_b_checkpoint,
+        benchmark_shards=benchmark_shards,
+        benchmark_manifest=benchmark_manifest,
+        expected_manifest_sha256=expected_manifest_sha256,
+        mlflow_run_id=stage_b_mlflow_run_id,
+        batch_size=batch_size,
+    )
+    return ReactiveBenchmarkProgramOutput(
+        stage_a_ade_3s=stage_a.ade_3s,
+        stage_a_fde_3s=stage_a.fde_3s,
+        stage_a_ade_5s=stage_a.ade_5s,
+        stage_a_fde_5s=stage_a.fde_5s,
+        stage_a_predictions=stage_a.predictions,
+        stage_a_report=stage_a.report,
+        stage_b_ade_3s=stage_b.ade_3s,
+        stage_b_fde_3s=stage_b.fde_3s,
+        stage_b_ade_5s=stage_b.ade_5s,
+        stage_b_fde_5s=stage_b.fde_5s,
+        stage_b_predictions=stage_b.predictions,
+        stage_b_report=stage_b.report,
+    )
+
+
+@workflow
+def wf_precompute_semantic_occupancy(
+    checkpoint: FlyteFile,
+    shard_dirs: List[FlyteDirectory],
+    dataset: str,
+    dataset_manifest_sha256: str,
+    artifacts_bucket: str,
+    aws_region: str = "us-west-2",
+    batch_size: int = 2,
+    num_workers: int = 0,
+) -> SemanticOccupancyPrecomputeOutput:
+    """Publish Dashboard semantic bodies without running model inference in API."""
+    return precompute_semantic_occupancy_artifacts(
+        checkpoint=checkpoint,
+        shard_dirs=shard_dirs,
+        dataset=dataset,
+        dataset_manifest_sha256=dataset_manifest_sha256,
+        artifacts_bucket=artifacts_bucket,
+        aws_region=aws_region,
+        batch_size=batch_size,
+        num_workers=num_workers,
+    )
+
+
 @workflow
 def wf_evaluate_kitscenes_benchmark(
     checkpoint: FlyteFile,

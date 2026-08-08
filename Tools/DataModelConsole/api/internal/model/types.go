@@ -195,6 +195,17 @@ type OverlayDescriptor struct {
 	SampleCount     int    `json:"sample_count"`
 }
 
+// SemanticOccupancyDescriptor identifies one immutable 2D BEV semantic body.
+type SemanticOccupancyDescriptor struct {
+	ModelArtifactID string `json:"model_artifact_id"`
+	Schema          string `json:"schema"`
+	GeometryID      string `json:"geometry_id"`
+	TaxonomyVersion string `json:"taxonomy_version"`
+	HeadVersion     string `json:"head_version"`
+	SHA256          string `json:"sha256"`
+	ByteSize        int64  `json:"byte_size"`
+}
+
 // GeoStatsResponse is the privacy-filtered dataset-level ODD geography.
 // Summary is kept as JSON because its per-region dimensions may evolve without
 // changing the serving envelope.
