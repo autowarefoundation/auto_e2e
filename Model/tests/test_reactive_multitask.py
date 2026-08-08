@@ -291,7 +291,7 @@ def test_bev_loss_reaches_camera_but_not_navigation(
     _, auxiliary = _forward(model, _inputs(device))
     logits = auxiliary["bev_segmentation_logits"]
     target = torch.rand_like(logits)
-    loss = BEVSegmentationAuxiliaryLoss([1.0] * 8)(
+    loss = BEVSegmentationAuxiliaryLoss([1.0] * 8).to(device)(
         logits,
         target,
         torch.ones_like(logits, dtype=torch.bool),
