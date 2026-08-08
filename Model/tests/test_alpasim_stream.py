@@ -482,14 +482,14 @@ class TestAlpasimDriverPlugin:
 
     def test_dynamic_camera_list(self) -> None:
         """Verify the parser and driver work correctly with an arbitrary list of camera names."""
-        custom_cameras = ["left_cam", "right_cam"]
+        custom_cameras = ["camera_ring_front_left", "camera_ring_front_right"]
         parser = AlpasimStreamParser(camera_names=custom_cameras)
         
         # Build fake observation
         from PIL import Image
         fake_images = {
-            "left_cam": Image.new("RGB", (256, 256), (255, 0, 0)),
-            "right_cam": Image.new("RGB", (256, 256), (0, 255, 0))
+            "camera_ring_front_left": Image.new("RGB", (256, 256), (255, 0, 0)),
+            "camera_ring_front_right": Image.new("RGB", (256, 256), (0, 255, 0))
         }
         obs = {
             "cameras": fake_images,

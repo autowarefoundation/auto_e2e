@@ -266,9 +266,16 @@ class AutoE2EDriver(BaseTrajectoryModel):
             "curvature": curvature,
         })
         
-        tensors = self.parser.parse_observation(input_dict)
-        tensors = {k: v.to(self.device) for k, v in tensors.items()}
+        parsed = self.parser.parse_observation(input_dict)
+        from typing import Any
+        tensors: dict[str, Any] = {k: v.to(self.device) for k, v in parsed.items()}
         
+        if "camera_params" in tensors:
+            from model_components.view_fusion import PinholeProjection
+            camera_params = tensors.pop("camera_params")
+            tensors["projection"] = PinholeProjection(camera_params)
+            tensors["geometry_type"] = "pinhole"
+            
         if self.model is not None:
             with torch.no_grad():
                 outputs = self.model(**tensors, mode="inference")
