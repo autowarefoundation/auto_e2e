@@ -1,39 +1,79 @@
+# @package _global_
 # AutoE2E Driver Configuration for Alpasim Wizard
 
 defaults:
   - _self_
-  - autoe2e_configs
 
-log_level: ${wizard.log_level}
+driver:
+  log_level: ${wizard.log_level}
 
-model:
-  model_type: autoe2e
-  checkpoint_path: "MOCK"
-  device: "cuda"
+  model:
+    model_type: autoe2e
+    checkpoint_path: "MOCK"
+    device: "cuda"
 
-host: "0.0.0.0"
-port: ???
+  host: "0.0.0.0"
+  port: ???
 
-inference:
-  use_cameras:
-    - camera_base_front_center
-    - camera_ring_front
-    - camera_ring_front_left
-    - camera_ring_front_right
-    - camera_ring_rear
-    - camera_ring_rear_left
-    - camera_ring_rear_right
-  max_batch_size: 1
-  subsample_factor: 1
-  context_length: 1
+  inference:
+    use_cameras:
+      - camera_base_front_center
+      - camera_ring_front
+      - camera_ring_front_left
+      - camera_ring_front_right
+      - camera_ring_rear
+      - camera_ring_rear_left
+      - camera_ring_rear_right
+    max_batch_size: 1
+    subsample_factor: 1
+    context_length: 1
 
-route:
-  default_command: 2
-  use_waypoint_commands: true
+  route:
+    default_command: 2
+    use_waypoint_commands: true
 
-output_dir: "/mnt/output/driver"
+  output_dir: "/mnt/output/driver"
 
-trajectory_optimizer:
-  enabled: false
+  trajectory_optimizer:
+    enabled: false
 
-plot_debug_images: false
+  plot_debug_images: false
+
+runtime:
+  simulation_config:
+    cameras:
+      - logical_id: ${driver.inference.use_cameras[0]}
+        height: 320
+        width: 512
+        frame_interval_us: 100_000
+        shutter_duration_us: 30_000
+      - logical_id: ${driver.inference.use_cameras[1]}
+        height: 320
+        width: 512
+        frame_interval_us: 100_000
+        shutter_duration_us: 30_000
+      - logical_id: ${driver.inference.use_cameras[2]}
+        height: 320
+        width: 512
+        frame_interval_us: 100_000
+        shutter_duration_us: 30_000
+      - logical_id: ${driver.inference.use_cameras[3]}
+        height: 320
+        width: 512
+        frame_interval_us: 100_000
+        shutter_duration_us: 30_000
+      - logical_id: ${driver.inference.use_cameras[4]}
+        height: 320
+        width: 512
+        frame_interval_us: 100_000
+        shutter_duration_us: 30_000
+      - logical_id: ${driver.inference.use_cameras[5]}
+        height: 320
+        width: 512
+        frame_interval_us: 100_000
+        shutter_duration_us: 30_000
+      - logical_id: ${driver.inference.use_cameras[6]}
+        height: 320
+        width: 512
+        frame_interval_us: 100_000
+        shutter_duration_us: 30_000
