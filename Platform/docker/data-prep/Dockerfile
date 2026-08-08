@@ -28,6 +28,16 @@ RUN git lfs install --system \
     && pip install --no-cache-dir ".[map]" \
     && rm -rf /tmp/kitscenes
 
+# nuPlan is installed from one reviewed revision without its obsolete global
+# requirements lock. The minimal Python 3.12-compatible runtime dependencies
+# are pinned below together with the rest of the data-prep environment.
+ARG NUPLAN_DEVKIT_REVISION=e9241677997dd86bfc0bcd44817ab04fe631405b
+RUN GIT_LFS_SKIP_SMUDGE=1 git clone \
+      https://github.com/motional/nuplan-devkit.git /tmp/nuplan-devkit \
+    && git -C /tmp/nuplan-devkit checkout "${NUPLAN_DEVKIT_REVISION}" \
+    && pip install --no-cache-dir --no-deps /tmp/nuplan-devkit \
+    && rm -rf /tmp/nuplan-devkit
+
 # KITScenes requires NumPy 1.x, while lerobot-dataset 0.5.0's package metadata
 # requires NumPy 2.x even though its dataset runtime remains NumPy 1-compatible.
 # Install its non-conflicting runtime dependencies explicitly, then install the
@@ -49,6 +59,14 @@ RUN pip install --no-cache-dir \
     "deepdiff>=7.0,<9.0" \
     "imageio[ffmpeg]>=2.34,<3.0" \
     "jsonlines>=4.0,<5.0" \
+    networkx \
+    "osmium==4.3.1" \
+    "geopandas>=0.14,<1.0" \
+    "hydra-core>=1.3,<1.4" \
+    pyquaternion \
+    "SQLAlchemy>=1.4.54,<2.0" \
+    retry \
+    ujson \
     "packaging>=24.2,<26.0" \
     "termcolor>=2.4,<4.0" \
     timm \
