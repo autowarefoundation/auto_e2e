@@ -7,7 +7,10 @@ from .artifacts import (
     encode_scene_navigation,
 )
 from .contracts import NavigationMap, NavigationRoute
-from .geometry import DEFAULT_NAVIGATION_GEOMETRY
+from .geometry import (
+    AUTOE2E_NAVIGATION_GEOMETRY,
+    DEFAULT_NAVIGATION_GEOMETRY,
+)
 from .lanelet2_adapter import Lanelet2MapAdapter
 from .lanelet2_matcher import Lanelet2TraceMatcher
 from .osm_adapter import OSMMapAdapter
@@ -28,6 +31,7 @@ from .valhalla import (
 )
 
 __all__ = [
+    "AUTOE2E_NAVIGATION_GEOMETRY",
     "DEFAULT_NAVIGATION_GEOMETRY",
     "EgoPose",
     "GeoRoutePose",
