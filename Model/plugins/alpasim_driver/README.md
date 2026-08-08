@@ -2,6 +2,8 @@
 
 This package provides the official **AutoE2E driver plugin** for [NVIDIA AlpaSim](https://github.com/NVlabs/alpasim), enabling real-time closed-loop evaluation and policy rollouts of the AutoE2E VLA driving model on the KitScenes 7-camera sensor topology.
 
+For full official setup, microservices architecture, and execution details, refer to the [NVIDIA AlpaSim GitHub Repository](https://github.com/NVlabs/alpasim).
+
 ---
 
 ## Architecture Overview
@@ -19,9 +21,10 @@ graph TD
 
 ### Key Components
 
-- **`AutoE2EDriver`** ([`plugin.py`](./plugin.py)): Subclass of AlpaSim's `BaseTrajectoryModel`. Implements `from_config()`, `camera_ids`, `context_length`, `output_frequency_hz`, and `predict()`.
-- **`AutoE2EAlpaSimConfig`** ([`config.py`](./config.py)): Dataclass defining model checkpoint paths, 7-camera topology configuration, and trajectory horizon parameters.
+- **`AutoE2EDriver`** ([`plugin.py`](./alpasim_autoe2e/plugin.py)): Subclass of AlpaSim's `BaseTrajectoryModel`. Implements `from_config()`, `camera_ids`, `context_length`, `output_frequency_hz`, and `predict()`.
+- **`AutoE2EAlpaSimConfig`** ([`config.py`](./alpasim_autoe2e/config.py)): Dataclass defining model checkpoint paths, dynamic camera topology configuration, and trajectory horizon parameters.
 - **Entry Points** ([`pyproject.toml`](./pyproject.toml)): Registers `autoe2e` under entry point groups `alpasim.models` and `alpasim.configs`.
+- **Driver Configs** ([`configs/driver/`](./alpasim_autoe2e/configs/driver/)): Contains `autoe2e.yaml` and `autoe2e_configs.yaml`. These files formally register the 7-camera KIT topology with AlpaSim to override the default renderer camera setup, avoiding `KeyError`s during closed-loop simulation.
 
 ---
 
@@ -29,11 +32,11 @@ graph TD
 
 ### Input Observations (`PredictionInput`)
 - **Visual Topology**: 7 KitScenes camera streams (`camera_base_front_center`, `camera_ring_front`, `camera_ring_front_left`, `camera_ring_front_right`, `camera_ring_rear`, `camera_ring_rear_left`, `camera_ring_rear_right`).
-- **Telemetry**: Scalar ego vehicle speed ($\text{m/s}$), acceleration ($\text{m/s}^2$), and high-level routing `DriveCommand` (LEFT, STRAIGHT, RIGHT).
+- **Telemetry**: Scalar ego vehicle speed (*m/s*), acceleration (*m/s²*), and high-level routing `DriveCommand` (LEFT, STRAIGHT, RIGHT).
 
 ### Output Predictions (`ModelPrediction`)
-- **`trajectory_xy`**: Waypoint coordinates $[64, 2]$ in rig frame ($X$ forward, $Y$ left).
-- **`headings`**: Vehicle target headings $[64]$ in radians.
+- **`trajectory_xy`**: Waypoint coordinates *[64, 2]* in rig frame (*X* forward, *Y* left).
+- **`headings`**: Vehicle target headings *[64]* in radians.
 
 ---
 
@@ -63,8 +66,8 @@ Configure root directories for KITScenes dataset files and AlpaSim source reposi
 set -a; source .env; set +a
 
 # Option B: Set environment variables manually
-export KITSCENES_ROOT="/path/to/auto_e2e/.KITdata"
-export ALPASIM_ROOT="/path/to/auto_e2e/.alpasim"
+export KITSCENES_ROOT="/path/to/your/dataset/directory"
+export ALPASIM_ROOT="/path/to/alpasim/repository"
 ```
 
 ### 3. Download KITScenes Data Samples
@@ -72,19 +75,19 @@ export ALPASIM_ROOT="/path/to/auto_e2e/.alpasim"
 Download dataset scene archives using the `kitscenes` CLI:
 
 ```bash
-python -m kitscenes.download "$KITSCENES_ROOT" --scenes c34c778f-ad8c-0aa9-7e1a-c86a73f887c7
+python -m kitscenes.download "$KITSCENES_ROOT" --scenes <scene_id> # for example c34c778f-ad8c-0aa9-7e1a-c86a73f887c7
 ```
 
 ---
 
 ## Model Control Parameters
 
-Controls for simulation execution in [`config.py`](./config.py) and [`plugin.py`](./plugin.py):
+Controls for simulation execution in [`config.py`](./alpasim_autoe2e/config.py) and [`plugin.py`](./alpasim_autoe2e/plugin.py):
 
 | Parameter | Type | Default | Description |
 | :--- | :--- | :--- | :--- |
 | `checkpoint_path` | `str` | `"autoe2e_model.ckpt"` | Path to pre-trained AutoE2E PyTorch checkpoint file. |
-| `allow_untrained_model` | `bool` | `False` | When `True`, initializes a fresh `AutoE2E(num_views=7)` PyTorch neural network with random weights if no checkpoint file exists on disk. |
+| `allow_untrained_model` | `bool` | `False` | When `True`, initializes a fresh `AutoE2E` PyTorch neural network with random weights (dynamically scaled to `num_views=len(camera_ids)`) if no checkpoint file exists on disk. |
 | `allow_mock` | `bool` | `False` | When `False` (default), strictly requires the actual AlpaSim runtime and real model execution, failing fast if dependencies are missing. |
 
 ---
@@ -94,7 +97,7 @@ Controls for simulation execution in [`config.py`](./config.py) and [`plugin.py`
 Confirm that AlpaSim discovers the `autoe2e` plugin entry points:
 
 ```python
-import alpasim_driver.plugin
+import alpasim_autoe2e.plugin
 import alpasim_plugins.plugins as p
 
 print("Registered Models:", p.PluginRegistry("alpasim.models").get_names())
@@ -109,35 +112,41 @@ Registered Configs: ['autoe2e']
 
 ---
 
-## Running Closed-Loop Workflows
+## Workflows & Official Documentation
 
-### Workflow A: Closed-Loop Model Policy Rollouts (`run_closed_loop.py`)
+### 1. Build the Driver Container Image
+AlpaSim automatically discovers and installs plugins located in its `plugins/` directory. Because Docker cannot resolve symlinks that point outside of its build context, you **must** hardcopy the driver plugin into `$ALPASIM_ROOT/plugins/` before building the image.
 
-Executes real-time closed-loop rollouts of the `AutoE2E` PyTorch neural network model taking 7 camera streams at 10 Hz:
-
-```bash
-python Model/plugins/alpasim_driver/examples/run_closed_loop.py
-```
-
-### Workflow B: World Renderer Verification (`verify_world_renderer.py`)
-
-Drives closed-loop simulation using ground-truth trajectory predictions to evaluate and compare world renderers (AlpaSim vs NuRec vs KITScenes renderer) without policy prediction noise:
+From the repository root, execute:
 
 ```bash
-python Model/plugins/alpasim_driver/examples/verify_world_renderer.py
+# 1. Sync the plugin code into the AlpaSim build context
+rm -rf "$ALPASIM_ROOT/plugins/alpasim_driver"
+cp -r Model/plugins/alpasim_driver "$ALPASIM_ROOT/plugins/"
+
+# 2. Build the Docker image
+cd "$ALPASIM_ROOT"
+docker build -t alpasim-base:latest .
+cd -
 ```
 
-### Expected Output Example
-```text
-[INFO] Starting World Renderer Verification (Ground Truth Trajectory Driver)
-[INFO] Discovered AlpaSim Registered Models: ['autoe2e']
-[INFO] Discovered AlpaSim Registered Configs: ['autoe2e']
-[INFO] Initialized Ground Truth Driver: GroundTruthTrajectoryDriver
-[INFO] Subscribed Camera Topology (7 cameras): ['camera_base_front_center', 'camera_ring_front', 'camera_ring_front_left', 'camera_ring_front_right', 'camera_ring_rear', 'camera_ring_rear_left', 'camera_ring_rear_right']
-[INFO] Evaluating World Renderer across 50 simulation steps...
-[INFO] [Renderer Step 00/50] t= 0.0s | Ego Pos: (  0.48m,   0.00m) | Speed:  4.76 m/s | Prediction Step Time:  0.60 ms
-[INFO] [Renderer Step 49/50] t= 4.9s | Ego Pos: (  6.80m,   0.00m) | Speed:  4.76 m/s | Prediction Step Time:  0.17 ms
-[INFO] World Renderer Verification completed successfully!
-[INFO] Final Ground-Truth Position: (6.80m, 0.00m)
-[INFO] Saved visualization GIF: /path/to/verify_world_renderer.gif
+*Note: The `AutoE2E` inference pipeline inside the simulator relies purely on `torch` and does not require the offline `kitscenes` or `lanelet2` packages, as the AlpaSim parser receives generic tensors directly.*
+
+### 2. Run the Closed-Loop Simulation
+Once the image is built, use the `alpasim_wizard` from the repository root to launch the simulation.
+
+```bash
+# From the repository root (Mock Mode for testing):
+uv run --project "$ALPASIM_ROOT/src/wizard" alpasim_wizard \
+    deploy=local \
+    topology=1gpu \
+    driver=autoe2e_mock \
+    wizard.log_dir=$PWD/outputs/autoe2e_closed_loop_run \
+    defines.base_image=alpasim-base:latest
 ```
+
+*To run with a real production checkpoint, use `driver=autoe2e driver.model.checkpoint_path=/path/to/checkpoint.pt`.*
+
+*Note: For the NuRec 3DGS renderer to successfully boot and render the 7 KIT cameras, the selected dataset scene must have `.usdz` artifacts compiled and available in the scene cache.*
+
+For further details on official CLI workflows and AlpaSim architecture, refer to the [NVIDIA AlpaSim GitHub Repository](https://github.com/NVlabs/alpasim).

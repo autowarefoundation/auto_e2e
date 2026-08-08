@@ -3,26 +3,24 @@ requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "alpasim-autoe2e-driver"
+name = "alpasim_autoe2e"
 version = "0.1.0"
 description = "AutoE2E driver plugin for AlpaSim"
+requires-python = ">=3.11,<3.13"
 dependencies = [
+    "alpasim_plugins",
+    "alpasim_driver",
     "torch",
     "numpy",
     "torchvision",
     "Pillow"
 ]
 
-[tool.setuptools]
-packages = ["alpasim_driver"]
-
-[tool.setuptools.package-dir]
-"alpasim_driver" = "."
-
 [project.entry-points."alpasim.models"]
-autoe2e = "alpasim_driver.plugin:AutoE2EDriver"
+autoe2e = "alpasim_autoe2e.plugin:AutoE2EDriver"
 
 [project.entry-points."alpasim.configs"]
-autoe2e = "alpasim_driver.config:AutoE2EAlpaSimConfig"
+autoe2e = "alpasim_autoe2e.configs"
 
-
+[tool.setuptools.packages.find]
+include = ["alpasim_autoe2e*"]
