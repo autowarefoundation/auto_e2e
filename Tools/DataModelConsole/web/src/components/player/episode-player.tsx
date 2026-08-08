@@ -31,6 +31,7 @@ import {
   type OverlayLoadStatus,
 } from "@/components/player/overlay-selection-bar";
 import { SceneMap } from "@/components/player/scene-map";
+import { SemanticOccupancyView } from "@/components/player/semantic-occupancy-view";
 import { TimelineScrubber } from "@/components/player/timeline-scrubber";
 import { TrajectoryBEV } from "@/components/player/trajectory-bev";
 import { ReasoningTimeline } from "@/components/reasoning-timeline";
@@ -41,6 +42,7 @@ import {
   ApiError,
   getShardRigProjection,
   getShardOverlay,
+  getShardSemanticOccupancy,
   listShardOverlayModels,
 } from "@/lib/api";
 import { FrameStore } from "@/lib/frame-store";
@@ -61,6 +63,11 @@ import {
   resolveOverlayRows,
 } from "@/lib/overlay";
 import type { OverlayArtifact } from "@/lib/overlay";
+import {
+  parseSemanticOccupancy,
+  resolveSemanticOccupancyRows,
+  type SemanticOccupancyArtifact,
+} from "@/lib/semantic-occupancy";
 import {
   projectTrajectoriesToCameras,
   projectTrajectoryRibbonToCameras,
@@ -198,6 +205,14 @@ export function EpisodePlayer({
   const [overlayRows, setOverlayRows] = useState<Map<string, number>>(
     new Map(),
   );
+  const [semanticOccupancy, setSemanticOccupancy] =
+    useState<SemanticOccupancyArtifact | null>(null);
+  const [semanticRows, setSemanticRows] = useState<Map<string, number>>(
+    new Map(),
+  );
+  const [semanticStatus, setSemanticStatus] = useState<
+    "idle" | "loading" | "ready" | "unavailable" | "error"
+  >("idle");
   const [rigProjection, setRigProjection] =
     useState<RigProjectionDocument | null>(null);
 
@@ -207,6 +222,9 @@ export function EpisodePlayer({
     setOverlayModels([]);
     setOverlay(null);
     setOverlayRows(new Map());
+    setSemanticOccupancy(null);
+    setSemanticRows(new Map());
+    setSemanticStatus("idle");
     listShardOverlayModels(dataset, shard, version)
       .then((response) => {
         if (cancelled) return;
@@ -277,6 +295,45 @@ export function EpisodePlayer({
         if (cancelled) return;
         console.warn("trajectory overlay fetch failed", err);
         setOverlayStatus("error");
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [dataset, shard, selectedModelID, version, index.samples]);
+
+  useEffect(() => {
+    if (!selectedModelID) {
+      setSemanticOccupancy(null);
+      setSemanticRows(new Map());
+      setSemanticStatus("idle");
+      return;
+    }
+    let cancelled = false;
+    setSemanticOccupancy(null);
+    setSemanticRows(new Map());
+    setSemanticStatus("loading");
+    getShardSemanticOccupancy(dataset, shard, selectedModelID, version)
+      .then((buffer) => {
+        const parsed = parseSemanticOccupancy(buffer);
+        return resolveSemanticOccupancyRows(
+          parsed,
+          index.samples.map((entry) => entry.sample_uid),
+        ).then((rows) => ({ parsed, rows }));
+      })
+      .then(({ parsed, rows }) => {
+        if (cancelled) return;
+        setSemanticOccupancy(parsed);
+        setSemanticRows(rows);
+        setSemanticStatus("ready");
+      })
+      .catch((err: unknown) => {
+        if (cancelled) return;
+        if (err instanceof ApiError && err.status === 404) {
+          setSemanticStatus("unavailable");
+          return;
+        }
+        console.warn("semantic occupancy fetch failed", err);
+        setSemanticStatus("error");
       });
     return () => {
       cancelled = true;
@@ -434,6 +491,9 @@ export function EpisodePlayer({
   // stale card for a frame that is still loading).
   const sample = index.samples[frame];
   const overlayRow = sample ? overlayRows.get(sample.sample_uid) : undefined;
+  const semanticRow = sample
+    ? semanticRows.get(sample.sample_uid)
+    : undefined;
   const curvatureSign = trajectoryCurvatureSign(dataset);
   const predictionTrajectories = useMemo(() => {
     if (!overlay || !sample) return [];
@@ -915,6 +975,12 @@ export function EpisodePlayer({
         predictionTrajectories={predictionFan}
         medianPrediction={medianPrediction}
         curvatureSign={curvatureSign}
+      />
+
+      <SemanticOccupancyView
+        artifact={semanticOccupancy}
+        row={semanticRow}
+        status={semanticStatus}
       />
 
       <div className="rounded-lg border border-slate-800 bg-slate-950/50 p-4">
