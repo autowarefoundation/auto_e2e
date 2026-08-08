@@ -358,16 +358,19 @@ def _decode_sample(
     )
     frames = [_decode_image(sample[k]) for k in cam_keys]
 
-    navigation_keys = {
+    navigation_base_keys = {
         "map_semantic.npz",
         "route_mask.npz",
-        "route_supervision.npz",
         "navigation_meta.json",
     }
+    navigation_keys = navigation_base_keys | {"route_supervision.npz"}
     present_navigation = navigation_keys.intersection(sample)
-    if present_navigation and present_navigation != navigation_keys:
+    if present_navigation and not navigation_base_keys.issubset(
+        present_navigation
+    ):
         raise ValueError(
-            "navigation members must be present as a complete schema-v8 set"
+            "navigation members must contain the complete schema-v8 set "
+            "or the sample_navigation_v3 map, route, and metadata set"
         )
     if present_navigation:
         from navigation.artifacts import (
@@ -378,15 +381,35 @@ def _decode_sample(
         map_array, route_array, navigation_metadata = (
             decode_sample_navigation(sample)
         )
-        supervision = decode_route_supervision(sample)
-        from navigation.geometry import DEFAULT_NAVIGATION_GEOMETRY
+        supervision = (
+            decode_route_supervision(sample)
+            if "route_supervision.npz" in sample
+            else None
+        )
+        from navigation.geometry import (
+            AUTOE2E_NAVIGATION_GEOMETRY,
+            DEFAULT_NAVIGATION_GEOMETRY,
+        )
 
-        if (
-            navigation_metadata.get("geometry_id")
-            != DEFAULT_NAVIGATION_GEOMETRY.geometry_id
-        ):
+        geometry_by_id = {
+            geometry.geometry_id: geometry
+            for geometry in (
+                AUTOE2E_NAVIGATION_GEOMETRY,
+                DEFAULT_NAVIGATION_GEOMETRY,
+            )
+        }
+        geometry_id = navigation_metadata.get("geometry_id")
+        if geometry_id not in geometry_by_id:
             raise ValueError(
                 "navigation sample geometry differs from the model contract"
+            )
+        geometry = geometry_by_id[geometry_id]
+        if map_array.shape[1:] != (
+            geometry.height_px,
+            geometry.width_px,
+        ):
+            raise ValueError(
+                "navigation sample raster shape differs from its geometry"
             )
         map_context = torch.from_numpy(map_array.copy())
         route_mask = torch.from_numpy(
@@ -400,38 +423,84 @@ def _decode_sample(
             bool(navigation_metadata["route_valid"]),
             dtype=torch.bool,
         )
-        route_supervision = {
-            "distance_to_corridor_m": torch.from_numpy(
-                supervision.distance_to_corridor_m.copy()
-            ),
-            "distance_to_drivable_m": torch.from_numpy(
-                supervision.distance_to_drivable_m.copy()
-            ),
-            "route_heading_sin": torch.from_numpy(
-                supervision.route_heading_sin.copy()
-            ),
-            "route_heading_cos": torch.from_numpy(
-                supervision.route_heading_cos.copy()
-            ),
-            "route_heading_valid": torch.from_numpy(
-                supervision.route_heading_valid.astype(
-                    np.bool_,
-                    copy=True,
+        raw_channel_valid = navigation_metadata.get(
+            "route_channel_valid"
+        )
+        if raw_channel_valid is None:
+            route_channel_valid = torch.tensor(
+                [
+                    bool(navigation_metadata["route_valid"]),
+                    bool(navigation_metadata["route_valid"])
+                    and supervision is not None
+                    and supervision.destination_visible,
+                ],
+                dtype=torch.bool,
+            )
+        else:
+            if (
+                not isinstance(raw_channel_valid, list)
+                or len(raw_channel_valid) != 2
+                or any(
+                    not isinstance(value, bool)
+                    for value in raw_channel_valid
                 )
-            ),
-            "destination_xy_m": torch.from_numpy(
-                supervision.destination_xy_m.copy()
-            ),
-            "destination_visible": torch.tensor(
-                supervision.destination_visible,
+            ):
+                raise ValueError(
+                    "route_channel_valid must contain two booleans"
+                )
+            route_channel_valid = torch.tensor(
+                raw_channel_valid,
                 dtype=torch.bool,
-            ),
-            "available": torch.tensor(True, dtype=torch.bool),
-            "drivable_available": torch.tensor(
-                supervision.drivable_available,
-                dtype=torch.bool,
-            ),
-        }
+            )
+        shape = map_context.shape[-2:]
+        if supervision is not None:
+            route_supervision = {
+                "distance_to_corridor_m": torch.from_numpy(
+                    supervision.distance_to_corridor_m.copy()
+                ),
+                "distance_to_drivable_m": torch.from_numpy(
+                    supervision.distance_to_drivable_m.copy()
+                ),
+                "route_heading_sin": torch.from_numpy(
+                    supervision.route_heading_sin.copy()
+                ),
+                "route_heading_cos": torch.from_numpy(
+                    supervision.route_heading_cos.copy()
+                ),
+                "route_heading_valid": torch.from_numpy(
+                    supervision.route_heading_valid.astype(
+                        np.bool_,
+                        copy=True,
+                    )
+                ),
+                "destination_xy_m": torch.from_numpy(
+                    supervision.destination_xy_m.copy()
+                ),
+                "destination_visible": torch.tensor(
+                    supervision.destination_visible,
+                    dtype=torch.bool,
+                ),
+                "available": torch.tensor(True, dtype=torch.bool),
+                "drivable_available": torch.tensor(
+                    supervision.drivable_available,
+                    dtype=torch.bool,
+                ),
+            }
+        else:
+            route_supervision = {
+                "distance_to_corridor_m": torch.zeros(shape),
+                "distance_to_drivable_m": torch.zeros(shape),
+                "route_heading_sin": torch.zeros(shape),
+                "route_heading_cos": torch.zeros(shape),
+                "route_heading_valid": torch.zeros(
+                    shape,
+                    dtype=torch.bool,
+                ),
+                "destination_xy_m": torch.zeros(2),
+                "destination_visible": torch.tensor(False),
+                "available": torch.tensor(False),
+                "drivable_available": torch.tensor(False),
+            }
     else:
         # L2D keeps its existing RGB map contract during this KITScenes
         # milestone. NVIDIA and map-less shards receive explicit invalid inputs.
@@ -449,6 +518,7 @@ def _decode_sample(
             dtype=torch.float32,
         )
         route_valid = torch.tensor(False, dtype=torch.bool)
+        route_channel_valid = torch.zeros(2, dtype=torch.bool)
         navigation_metadata = {}
         shape = map_context.shape[-2:]
         route_supervision = {
@@ -495,6 +565,65 @@ def _decode_sample(
     history_size = _HISTORY_STEPS * _HISTORY_SIGNALS
     ego_history = torch.from_numpy(ego[:history_size])
     ego_future = torch.from_numpy(ego[history_size:])
+    trajectory_xy_data = sample.get("trajectory_xy.npz")
+    if trajectory_xy_data is not None:
+        from data_processing.reactive_training_artifacts import (
+            decode_trajectory_xy,
+        )
+
+        trajectory_xy, trajectory_valid = decode_trajectory_xy(
+            trajectory_xy_data
+        )
+        if trajectory_xy.shape != (_FUTURE_STEPS, 2):
+            raise ValueError(
+                "trajectory XY target must contain exactly 64 timesteps"
+            )
+        trajectory_xy_m = torch.from_numpy(trajectory_xy.copy())
+        trajectory_valid_tensor = torch.from_numpy(
+            trajectory_valid.copy()
+        )
+    else:
+        trajectory_xy_m = torch.zeros(
+            _FUTURE_STEPS,
+            2,
+            dtype=torch.float32,
+        )
+        trajectory_valid_tensor = torch.zeros(
+            _FUTURE_STEPS,
+            dtype=torch.bool,
+        )
+
+    bev_data = sample.get("bev_segmentation.npz")
+    if bev_data is not None:
+        from data_processing.reactive_training_artifacts import (
+            decode_bev_segmentation,
+        )
+
+        bev_target, bev_valid = decode_bev_segmentation(bev_data)
+        if bev_target.shape[1:] != map_context.shape[-2:]:
+            raise ValueError(
+                "BEV segmentation geometry differs from navigation raster"
+            )
+        bev_segmentation_target = torch.from_numpy(bev_target.copy())
+        bev_segmentation_valid = torch.from_numpy(bev_valid.copy())
+        bev_segmentation_available = torch.tensor(
+            True,
+            dtype=torch.bool,
+        )
+    else:
+        bev_segmentation_target = torch.zeros(
+            8,
+            *map_context.shape[-2:],
+            dtype=torch.float32,
+        )
+        bev_segmentation_valid = torch.zeros_like(
+            bev_segmentation_target,
+            dtype=torch.bool,
+        )
+        bev_segmentation_available = torch.tensor(
+            False,
+            dtype=torch.bool,
+        )
     sample_metadata = (
         _json_mapping(sample["meta.json"], member_name="meta.json")
         if "meta.json" in sample
@@ -506,6 +635,39 @@ def _decode_sample(
         if isinstance(raw_split_group_uid, str)
         else ""
     )
+    camera_projection_matrix = None
+    camera_geometry_type = None
+    if "calib.json" in sample:
+        calibration = _json_mapping(
+            sample["calib.json"],
+            member_name="calib.json",
+        )
+        projection_spec = calibration.get("projection")
+        geometry_label = calibration.get("geometry_type")
+        if projection_spec is not None:
+            if (
+                not isinstance(projection_spec, Mapping)
+                or projection_spec.get("type")
+                not in ("pinhole", "rectified_pinhole")
+            ):
+                # Existing f-theta datasets keep their loader-level operator.
+                projection_spec = None
+            else:
+                matrix = np.asarray(
+                    projection_spec.get("matrix"),
+                    dtype=np.float32,
+                )
+                if (
+                    matrix.shape != (len(frames), 3, 4)
+                    or not np.isfinite(matrix).all()
+                ):
+                    raise ValueError(
+                        "per-sample camera projection must have shape [V,3,4]"
+                    )
+                camera_projection_matrix = torch.from_numpy(
+                    matrix.copy()
+                )
+                camera_geometry_type = str(geometry_label)
 
     out = {
         # Overlay inference derives noise from this stable identity. Keep it in
@@ -517,12 +679,25 @@ def _decode_sample(
         "route_mask": route_mask,
         "map_valid": map_valid,
         "route_valid": route_valid,
+        "route_channel_valid": route_channel_valid,
         "route_supervision": route_supervision,
         "navigation_metadata": navigation_metadata,
         "egomotion_history": ego_history,
         "visual_history": torch.zeros(_VISUAL_HISTORY_DIM),
         "trajectory_target": ego_future,
+        "trajectory_xy_m": trajectory_xy_m,
+        "trajectory_valid": trajectory_valid_tensor,
+        "initial_speed_mps": ego_history.reshape(
+            _HISTORY_STEPS,
+            _HISTORY_SIGNALS,
+        )[-1, 0],
+        "bev_segmentation_target": bev_segmentation_target,
+        "bev_segmentation_valid": bev_segmentation_valid,
+        "bev_segmentation_available": bev_segmentation_available,
     }
+    if camera_projection_matrix is not None:
+        out["camera_projection_matrix"] = camera_projection_matrix
+        out["camera_geometry_type"] = camera_geometry_type
 
     pose_data = sample.get("pose.npy")
     gps_data = sample.get("gps.npy")
