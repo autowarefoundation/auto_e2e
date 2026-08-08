@@ -52,14 +52,18 @@ PARSER_VERSION = "v3"
 # field derived from the semantic drivable-area channel.
 # v8: route_supervision.npz explicitly stores drivable-field availability so
 # training never infers supervision validity from distance values.
-SHARD_SCHEMA_VERSION = "v8"
+# v9: adds deterministic trajectory_xy.npz, optional bev_segmentation.npz, and
+# the sample_navigation_v3 semantic Map/Route members used by Reactive stages.
+SHARD_SCHEMA_VERSION = "v9"
 
 # Calibration / projection spec encoding and raster-map coordinate semantics.
 # v2 queries KITScenes maps in the scene-local pose frame and applies the map
 # origin exactly once when publishing absolute geographic coordinates.
 # v3 aligns the semantic navigation raster and camera BEV to the audited
 # one-meter geometry with the existing rear-third ego anchor.
-GEOMETRY_VERSION = "v3"
+# v4 adds the shared Reactive geometry: 450 x 300 cells at 0.4 m/px with the
+# exact camera-BEV pc_range, used by nuPlan and L2D target artifacts.
+GEOMETRY_VERSION = "v4"
 
 # Selection policy for the sparse reasoning-label subset. v2 adds the first
 # valid sample of every split group to the regular frame-index grid so even a
