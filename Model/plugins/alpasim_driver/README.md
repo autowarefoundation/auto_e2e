@@ -136,14 +136,16 @@ cd -
 Once the image is built, use the `alpasim_wizard` from the repository root to launch the simulation.
 
 ```bash
-# From the repository root:
+# From the repository root (Mock Mode for testing):
 uv run --project "$ALPASIM_ROOT/src/wizard" alpasim_wizard \
     deploy=local \
     topology=1gpu \
-    driver=autoe2e \
+    driver=autoe2e_mock \
     wizard.log_dir=$PWD/outputs/autoe2e_closed_loop_run \
     defines.base_image=alpasim-base:latest
 ```
+
+*To run with a real production checkpoint, use `driver=autoe2e driver.model.checkpoint_path=/path/to/checkpoint.pt`.*
 
 *Note: For the NuRec 3DGS renderer to successfully boot and render the 7 KIT cameras, the selected dataset scene must have `.usdz` artifacts compiled and available in the scene cache.*
 

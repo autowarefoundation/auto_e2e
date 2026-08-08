@@ -119,8 +119,19 @@ class AutoE2EDriver(BaseTrajectoryModel):
         self.model = None
 
         if model_checkpoint and os.path.exists(model_checkpoint):
-            self.model = torch.load(model_checkpoint, map_location=self.device)
-            self.model.eval()
+            checkpoint = torch.load(model_checkpoint, map_location=self.device)
+            if isinstance(checkpoint, dict) and "model_state_dict" in checkpoint:
+                try:
+                    from model_components.auto_e2e import AutoE2E
+                    self.model = AutoE2E(num_views=len(self._camera_ids), is_pretrained=False).to(self.device)
+                    self.model.load_state_dict(checkpoint["model_state_dict"])
+                except Exception as e:
+                    logger.error("Failed to load AutoE2E model from state_dict: %s", e)
+            else:
+                self.model = checkpoint
+            
+            if self.model is not None:
+                self.model.eval()
         elif self.allow_untrained_model:
             try:
                 from model_components.auto_e2e import AutoE2E
@@ -260,10 +271,7 @@ class AutoE2EDriver(BaseTrajectoryModel):
         
         if self.model is not None:
             with torch.no_grad():
-                try:
-                    outputs = self.model(tensors)
-                except TypeError:
-                    outputs = self.model(**tensors)
+                outputs = self.model(**tensors, mode="inference")
 
                 if isinstance(outputs, dict):
                     points = outputs["trajectory_points"][0].cpu().numpy() if isinstance(outputs.get("trajectory_points"), torch.Tensor) else outputs["trajectory_points"][0]
@@ -271,14 +279,28 @@ class AutoE2EDriver(BaseTrajectoryModel):
                 elif isinstance(outputs, torch.Tensor):
                     pts_tensor = outputs[0].cpu().numpy()
                     if pts_tensor.ndim == 1 and pts_tensor.shape[0] == 128:
-                        points = pts_tensor.reshape(64, 2)
-                    elif pts_tensor.ndim == 2:
-                        points = pts_tensor[:, :2]
+                        controls = pts_tensor.reshape(64, 2)
+                        points = np.zeros((64, 2), dtype=np.float32)
+                        headings = np.zeros(64, dtype=np.float32)
+                        
+                        dt = 0.1  # 10Hz planning rate
+                        v = float(input_dict["speed"])
+                        x, y, theta = 0.0, 0.0, 0.0
+                        
+                        for i in range(64):
+                            a, k = controls[i, 0], controls[i, 1]
+                            
+                            # Kinematic unicycle update
+                            x += v * np.cos(theta) * dt
+                            y += v * np.sin(theta) * dt
+                            theta += v * k * dt
+                            v += a * dt
+                            
+                            points[i, 0] = x
+                            points[i, 1] = y
+                            headings[i] = theta
                     else:
-                        points = pts_tensor
-                    dx = np.gradient(points[:, 0])
-                    dy = np.gradient(points[:, 1])
-                    headings = np.arctan2(dy, dx)
+                        raise ValueError(f"Unexpected tensor shape from AutoE2E: {pts_tensor.shape}")
                 else:
                     raise TypeError(f"Unexpected model output type: {type(outputs)}")
         else:

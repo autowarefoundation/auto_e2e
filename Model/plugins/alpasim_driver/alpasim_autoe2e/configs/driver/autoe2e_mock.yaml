@@ -1,0 +1,10 @@
+# @package _global_
+# AutoE2E Mock Driver Configuration
+
+defaults:
+  - autoe2e
+  - _self_
+
+driver:
+  model:
+    checkpoint_path: "MOCK"

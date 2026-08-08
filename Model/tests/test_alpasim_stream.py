@@ -50,7 +50,7 @@ from data_parsing.pre_extracted import (  # noqa: E402
 
 
 class MockAutoE2EModel(torch.nn.Module):
-    def forward(self, tensors):
+    def forward(self, **kwargs):
         return {
             "trajectory_points": torch.zeros((1, 64, 2)),
             "headings": torch.zeros((1, 64))
@@ -161,7 +161,7 @@ class TestAlpasimStreamParserFixturesAndBasicShape:
         parser = AlpasimStreamParser(camera_names=PARSER_CAMERA_NAMES)
         tensors = parser.parse_observation(valid_prediction_input)
 
-        assert tensors["visual_tiles"].shape == (1, 7, 3, 256, 256)
+        assert tensors["camera_tiles"].shape == (1, 7, 3, 256, 256)
         assert tensors["egomotion_history"].shape == (1, 256)
         assert tensors["visual_history"].shape == (1, _VISUAL_HISTORY_DIM)
         assert tensors["map_context"].shape == (1, 3, 256, 256)
@@ -179,7 +179,7 @@ class TestAlpasimStreamParserFixturesAndBasicShape:
         parser = AlpasimStreamParser(camera_names=PARSER_CAMERA_NAMES)
         tensors = parser.parse_observation(valid_prediction_input)
 
-        assert tensors["visual_tiles"].dtype == torch.float32
+        assert tensors["camera_tiles"].dtype == torch.float32
         assert tensors["egomotion_history"].dtype == torch.float32
         assert tensors["visual_history"].dtype == torch.float32
         assert tensors["map_context"].dtype == torch.float32
@@ -198,13 +198,13 @@ class TestAlpasimStreamParserFixturesAndBasicShape:
 
         t1 = parser.parse_observation(
             {"cameras": sample_rgb_images, "speed": 5.0, "acceleration": 0.0, "command": 0}
-        )["visual_tiles"]
+        )["camera_tiles"]
         t2 = parser.parse_observation(
             {"cameras": sample_numpy_frames, "speed": 5.0, "acceleration": 0.0, "command": 0}
-        )["visual_tiles"]
+        )["camera_tiles"]
         t3 = parser.parse_observation(
             {"cameras": sample_jpeg_bytes, "speed": 5.0, "acceleration": 0.0, "command": 0}
-        )["visual_tiles"]
+        )["camera_tiles"]
 
         assert t1.shape == (1, 7, 3, 256, 256)
         assert t2.shape == (1, 7, 3, 256, 256)
@@ -341,7 +341,7 @@ class TestEdgeCasesAndDiscrepancies:
         )
 
         missing_idx = PARSER_CAMERA_NAMES.index(missing_cam)
-        missing_tile = tensors["visual_tiles"][0, missing_idx]
+        missing_tile = tensors["camera_tiles"][0, missing_idx]
 
         assert missing_tile.shape == (3, 256, 256)
         assert missing_tile.dtype == torch.float32
@@ -381,7 +381,7 @@ class TestEdgeCasesAndDiscrepancies:
             "command": None,
         }
         tensors = parser.parse_observation(input_data)  # type: ignore[arg-type]
-        assert tensors["visual_tiles"].shape == (1, 7, 3, 256, 256)
+        assert tensors["camera_tiles"].shape == (1, 7, 3, 256, 256)
 
     def test_config_camera_names_match_parser(
         self, sample_rgb_images: Dict[str, Image.Image]
@@ -408,7 +408,7 @@ class TestEdgeCasesAndDiscrepancies:
         )
 
         # Frames should not be empty since the camera names match
-        visual_tiles = tensors["visual_tiles"]
+        visual_tiles = tensors["camera_tiles"]
         assert not (visual_tiles == 0.0).all(), (
             "Frames should not be empty since the camera names match."
         )
@@ -499,7 +499,7 @@ class TestAlpasimDriverPlugin:
         }
         
         tensors = parser.parse_observation(obs)
-        assert tensors["visual_tiles"].shape == (1, 2, 3, 256, 256)
+        assert tensors["camera_tiles"].shape == (1, 2, 3, 256, 256)
         assert tensors["camera_params"].shape == (1, 2, 3, 4)
         
         # Test driver fallback init with custom cameras
@@ -546,7 +546,7 @@ class TestAlpasimDriverPlugin:
             captured_input = input_dict
             # Return dummy tensors to prevent failure
             return {
-                "visual_tiles": torch.zeros((1, 7, 3, 256, 256)),
+                "camera_tiles": torch.zeros((1, 7, 3, 256, 256)),
                 "camera_params": torch.zeros((1, 7, 3, 4)),
             }
         

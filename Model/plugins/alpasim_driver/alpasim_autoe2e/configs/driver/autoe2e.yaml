@@ -9,7 +9,7 @@ driver:
 
   model:
     model_type: autoe2e
-    checkpoint_path: "MOCK"
+    checkpoint_path: ???
     device: "cuda"
 
   host: "0.0.0.0"

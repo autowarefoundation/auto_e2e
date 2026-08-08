@@ -83,7 +83,7 @@ class AlpasimStreamParser:
         camera_params = torch.eye(4)[:3].unsqueeze(0).repeat(len(self.camera_names), 1, 1).unsqueeze(0).to(torch.float32)
 
         return {
-            "visual_tiles": visual_tiles,
+            "camera_tiles": visual_tiles,
             "egomotion_history": egomotion_history,
             "visual_history": visual_history,
             "map_context": map_context,
