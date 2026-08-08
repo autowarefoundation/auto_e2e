@@ -207,6 +207,28 @@ class NavigationRasterGeometry:
         }
 
 
+# Shared nuPlan -> L2D training geometry. The axis order matches camera BEV:
+# height is longitudinal X and width is lateral Y.
+AUTOE2E_NAVIGATION_GEOMETRY: Final = NavigationRasterGeometry(
+    geometry_id="autoe2e-bev-450x300-0p4m-v1",
+    height_px=450,
+    width_px=300,
+    meters_per_pixel=0.4,
+    x_min_m=-60.0,
+    x_max_m=120.0,
+    y_min_m=-60.0,
+    y_max_m=60.0,
+    ego_anchor_row=299.5,
+    ego_anchor_col=149.5,
+    matching_pc_range=(-60.0, -60.0, -5.0, 120.0, 60.0, 3.0),
+    matching_bev_h=450,
+    matching_bev_w=300,
+    route_corridor_width_m=3.5,
+    destination_marker_radius_m=2.0,
+    route_rear_clip_m=10.0,
+)
+
+
 # Geometry audit over KITScenes v2.2:
 # 0.5 m/px covered 89.31% of 6.4 s endpoints; 1.0 m/px covered 99.79%.
 # The one-third rear / two-thirds front anchor matches the existing BEV origin.
