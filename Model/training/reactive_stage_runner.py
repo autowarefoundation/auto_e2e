@@ -520,27 +520,28 @@ def _route_gradient_evidence(
     if not bool(route_valid.any()):
         return None
     route = batch["route_mask"].detach().clone().requires_grad_(True)
-    controls = model(
-        batch["visual_tiles"],
-        batch["map_context"],
-        batch["visual_history"],
-        batch["egomotion_history"],
-        route_mask=route,
-        map_valid=batch["map_valid"],
-        route_valid=batch["route_valid"],
-        projection=projection,
-        geometry_type=geometry_type,
-        mode="infer",
-        compute_bev_segmentation=False,
-        compute_route_reconstruction=False,
-    )
-    if isinstance(controls, tuple):
-        controls = controls[0]
-    gradient = torch.autograd.grad(
-        controls.to(torch.float32).square().mean(),
-        route,
-        allow_unused=True,
-    )[0]
+    with torch.backends.cudnn.flags(enabled=False):
+        controls = model(
+            batch["visual_tiles"],
+            batch["map_context"],
+            batch["visual_history"],
+            batch["egomotion_history"],
+            route_mask=route,
+            map_valid=batch["map_valid"],
+            route_valid=batch["route_valid"],
+            projection=projection,
+            geometry_type=geometry_type,
+            mode="infer",
+            compute_bev_segmentation=False,
+            compute_route_reconstruction=False,
+        )
+        if isinstance(controls, tuple):
+            controls = controls[0]
+        gradient = torch.autograd.grad(
+            controls.to(torch.float32).square().mean(),
+            route,
+            allow_unused=True,
+        )[0]
     if gradient is None:
         return 0.0
     valid_gradient = gradient[route_valid]
