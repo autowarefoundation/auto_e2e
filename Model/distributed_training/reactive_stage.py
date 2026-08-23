@@ -134,6 +134,41 @@ def validate_reactive_stage_config(config: Mapping[str, Any]) -> None:
         raise ValueError("Stage A cannot load a parent checkpoint")
     if stage is ReactiveTrainingStage.L2D_CONTINUATION and not parent_uri:
         raise ValueError("Stage B requires the exact Stage A checkpoint")
+    is_pretrained = config.get("is_pretrained")
+    allow_random_init = config.get(
+        "allow_random_bevformer_init",
+        False,
+    )
+    if not isinstance(is_pretrained, bool) or not isinstance(
+        allow_random_init,
+        bool,
+    ):
+        raise ValueError("BEVFormer initialization flags must be boolean")
+    if is_pretrained == allow_random_init:
+        raise ValueError(
+            "exactly one BEVFormer initialization mode must be selected"
+        )
+    if is_pretrained and not parent_uri:
+        pretrained_uri = str(
+            config.get("bevformer_pretrained_checkpoint_uri") or ""
+        )
+        pretrained_sha256 = str(
+            config.get("bevformer_pretrained_checkpoint_sha256") or ""
+        )
+        if urlparse(pretrained_uri).scheme not in {
+            "",
+            "file",
+            "http",
+            "https",
+            "s3",
+        }:
+            raise ValueError("unsupported BEVFormer checkpoint URI")
+        if not pretrained_uri:
+            raise ValueError("BEVFormer checkpoint URI is required")
+        if re.fullmatch(r"[0-9a-f]{64}", pretrained_sha256) is None:
+            raise ValueError(
+                "BEVFormer checkpoint SHA-256 must be 64 lowercase hex chars"
+            )
     override = int(config.get("steps_per_epoch", 0))
     if override < 0:
         raise ValueError("steps_per_epoch cannot be negative")
@@ -555,10 +590,14 @@ def _bev_overfit_selected_support(
 def _camera_feature_scale_weights(model) -> tuple[float, ...]:
     import torch
 
+    feature_fusion = _base_model(model).Reactive_E2E.FeatureFusion
+    if getattr(feature_fusion, "architecture", None) == "bevformer_v2_t1":
+        level_count = int(feature_fusion.view_fusion.num_levels)
+        if level_count <= 0:
+            raise ValueError("BEVFormer feature level count is invalid")
+        return (1.0 / level_count,) * level_count
     try:
-        scale_logits = _base_model(
-            model
-        ).Reactive_E2E.FeatureFusion.scale_logits
+        scale_logits = feature_fusion.scale_logits
     except AttributeError as error:
         raise ValueError(
             "Reactive model omitted camera feature scale logits"
@@ -614,8 +653,20 @@ def _download_checkpoint(checkpoint_uri: str, destination: Path) -> None:
         source = Path(unquote(parsed.path))
         destination.write_bytes(source.read_bytes())
         return
+    if parsed.scheme in {"http", "https"} and parsed.netloc:
+        from urllib.request import urlopen
+
+        temporary = destination.with_suffix(destination.suffix + ".download")
+        with urlopen(checkpoint_uri, timeout=120) as response:
+            with temporary.open("wb") as output:
+                while chunk := response.read(1024 * 1024):
+                    output.write(chunk)
+        temporary.replace(destination)
+        return
     if parsed.scheme != "s3" or not parsed.netloc:
-        raise ValueError("checkpoint must be a local path or S3 URI")
+        raise ValueError(
+            "checkpoint must be a local path, HTTP(S), or S3 URI"
+        )
     import boto3
 
     boto3.client("s3").download_file(
@@ -1908,7 +1959,11 @@ def train_loop_per_worker(config: dict[str, Any]) -> None:
         BEV_SEGMENTATION_CLASSES,
     )
     from model_components.auto_e2e import AutoE2E
+    from model_components.bevformer_v2_pretrained import (
+        load_bevformer_v2_t1_checkpoint,
+    )
     from training.reactive_multitask import (
+        REACTIVE_MODEL_ARCHITECTURE_VERSION,
         ReactiveMultitaskObjective,
         configure_model_for_stage,
         reactive_model_kwargs,
@@ -2115,19 +2170,50 @@ def train_loop_per_worker(config: dict[str, Any]) -> None:
         stage,
         num_views=plan.num_views,
     )
+    parent_uri = str(config.get("parent_checkpoint_uri") or "")
+    restored = train.get_checkpoint()
+    initialize_bevformer = (
+        bool(config["is_pretrained"])
+        and not parent_uri
+        and restored is None
+    )
     model = AutoE2E(
         backbone=str(config["backbone"]),
         embed_dim=256,
-        is_pretrained=bool(config["is_pretrained"]),
+        # The official BEVFormer checkpoint owns both R50 and encoder init.
+        is_pretrained=False,
         **constructor_kwargs,
     ).to(device)
-    lineage: dict[str, str] = {}
-    parent_uri = str(config.get("parent_checkpoint_uri") or "")
-    if parent_uri:
+    initialization_metadata: dict[str, object] | None = None
+    lineage: dict[str, Any] = {}
+    if initialize_bevformer:
+        pretrained_path = cache_root / "bevformer-v2-r50-t1.pth"
+        pretrained_path.parent.mkdir(parents=True, exist_ok=True)
+        _download_checkpoint(
+            str(config["bevformer_pretrained_checkpoint_uri"]),
+            pretrained_path,
+        )
+        initialization_report = load_bevformer_v2_t1_checkpoint(
+            model,
+            pretrained_path,
+            expected_sha256=str(
+                config["bevformer_pretrained_checkpoint_sha256"]
+            ),
+        )
+        initialization_metadata = initialization_report.metadata()
+        lineage["bevformer_v2_parent_checkpoint_sha256"] = (
+            initialization_report.source_sha256
+        )
+    if parent_uri and restored is None:
         parent_path = cache_root / "stage-a-parent.pt"
         parent_path.parent.mkdir(parents=True, exist_ok=True)
         _download_checkpoint(parent_uri, parent_path)
         lineage.update(load_stage_a_parent(model, parent_path))
+        inherited_initialization = lineage.get(
+            "bevformer_v2_initialization"
+        )
+        if inherited_initialization is not None:
+            initialization_metadata = dict(inherited_initialization)
     configure_model_for_stage(
         model,
         stage,
@@ -2190,6 +2276,7 @@ def train_loop_per_worker(config: dict[str, Any]) -> None:
         * int(config["gradient_accumulation_steps"])
     )
     expected_resume = {
+        "model_architecture_version": REACTIVE_MODEL_ARCHITECTURE_VERSION,
         "dataset_manifest_sha256": plan.dataset_manifest_sha256,
         "distributed_assignment_sha256": assignment_sha256,
         "distributed_global_batch": global_batch,
@@ -2212,16 +2299,70 @@ def train_loop_per_worker(config: dict[str, Any]) -> None:
         "bev_taxonomy_version": BEV_SEGMENTATION_TAXONOMY_VERSION,
         "validation_sample_count": validation_sample_count,
         "validation_sample_uid_sha256": validation_sample_uid_sha256,
+        "allow_random_bevformer_init": bool(
+            config.get("allow_random_bevformer_init", False)
+        ),
+        "bevformer_v2_initialization": initialization_metadata,
     }
     start_epoch = 1
     best_selection_score = -float("inf")
     best_ade = float("inf")
     epoch_history: list[dict[str, Any]] = []
-    restored = train.get_checkpoint()
     if overfit_sample_count and restored is not None:
         raise ValueError("BEV overfit mode cannot resume a checkpoint")
     if restored is not None:
         with restored.as_directory() as checkpoint_directory:
+            resume_payload = torch.load(
+                Path(checkpoint_directory) / "checkpoint.pt",
+                map_location="cpu",
+                weights_only=False,
+            )
+            resume_config = resume_payload.get("config")
+            if not isinstance(resume_config, Mapping):
+                raise ValueError(
+                    "Reactive DDP resume checkpoint has no config"
+                )
+            resume_initialization = resume_config.get(
+                "bevformer_v2_initialization"
+            )
+            if bool(config["is_pretrained"]):
+                expected_source_sha256 = str(
+                    config["bevformer_pretrained_checkpoint_sha256"]
+                )
+                if (
+                    not isinstance(resume_initialization, Mapping)
+                    or resume_initialization.get("source_sha256")
+                    != expected_source_sha256
+                    or resume_config.get(
+                        "bevformer_v2_parent_checkpoint_sha256"
+                    )
+                    != expected_source_sha256
+                ):
+                    raise ValueError(
+                        "Reactive DDP resume checkpoint has invalid "
+                        "BEVFormer initialization provenance"
+                    )
+                initialization_metadata = dict(resume_initialization)
+                lineage["bevformer_v2_parent_checkpoint_sha256"] = (
+                    expected_source_sha256
+                )
+            elif resume_initialization is not None:
+                raise ValueError(
+                    "random-init resume unexpectedly has BEVFormer "
+                    "initialization provenance"
+                )
+            expected_resume["bevformer_v2_initialization"] = (
+                initialization_metadata
+            )
+            for lineage_key in (
+                "stage_a_parent_checkpoint_sha256",
+                "stage_a_config_digest",
+                "stage_a_model_state_sha256",
+                "bevformer_v2_initialization_mode",
+            ):
+                lineage_value = resume_config.get(lineage_key)
+                if lineage_value is not None:
+                    lineage[lineage_key] = lineage_value
             (
                 start_epoch,
                 best_selection_score,
@@ -2249,6 +2390,7 @@ def train_loop_per_worker(config: dict[str, Any]) -> None:
         )
 
     model_config = {
+        "model_architecture_version": REACTIVE_MODEL_ARCHITECTURE_VERSION,
         "backbone": str(config["backbone"]),
         "embed_dim": 256,
         "is_pretrained": bool(config["is_pretrained"]),
@@ -2273,6 +2415,10 @@ def train_loop_per_worker(config: dict[str, Any]) -> None:
         "bev_taxonomy_version": BEV_SEGMENTATION_TAXONOMY_VERSION,
         "validation_sample_count": validation_sample_count,
         "validation_sample_uid_sha256": validation_sample_uid_sha256,
+        "allow_random_bevformer_init": bool(
+            config.get("allow_random_bevformer_init", False)
+        ),
+        "bevformer_v2_initialization": initialization_metadata,
     }
     if raw_bev_statistics is not None:
         model_config["bev_raw_statistics"] = (

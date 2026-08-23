@@ -42,13 +42,25 @@ class MapDeformableCrossAttentionFusion(nn.Module):
         num_sample_points: int = 4,
         num_heads: int = 8,
         dropout: float = 0.1,
+        query_chunk_size: int = 4096,
     ) -> None:
         super().__init__()
+        if (
+            embed_dim % num_heads
+            or min(
+                embed_dim,
+                num_sample_points,
+                num_heads,
+                query_chunk_size,
+            ) <= 0
+        ):
+            raise ValueError("deformable map fusion dimensions are invalid")
 
         self.embed_dim = embed_dim
         self.num_points = num_sample_points
         self.num_heads = num_heads
         self.head_dim = embed_dim // num_heads
+        self.query_chunk_size = int(query_chunk_size)
 
         # Predict K 2D offsets (pixel displacements) from the query feature.
         self.offset_proj = nn.Linear(embed_dim, num_sample_points * 2)
@@ -69,6 +81,17 @@ class MapDeformableCrossAttentionFusion(nn.Module):
             nn.Dropout(dropout),
         )
         self.norm_ffn = nn.LayerNorm(embed_dim)
+        self.reset_residual_parameters()
+
+    def reset_residual_parameters(self) -> None:
+        """Keep the pretrained camera BEV path unchanged at initialization."""
+        nn.init.zeros_(self.out_proj.weight)
+        nn.init.zeros_(self.out_proj.bias)
+        final_linear = self.ffn[3]
+        if not isinstance(final_linear, nn.Linear):
+            raise RuntimeError("deformable fusion FFN layout changed")
+        nn.init.zeros_(final_linear.weight)
+        nn.init.zeros_(final_linear.bias)
 
     def forward(
         self,
@@ -86,6 +109,10 @@ class MapDeformableCrossAttentionFusion(nn.Module):
             (B, embed_dim, H, W) image BEV updated with map context.
         """
         B, C, H, W = image_bev.shape
+        if map_bev.shape != image_bev.shape:
+            raise ValueError("image_bev and map_bev must have identical shapes")
+        if C != self.embed_dim or min(H, W) <= 1:
+            raise ValueError("map fusion input differs from configured shape")
         N = H * W
         K = self.num_points
         nH = self.num_heads
@@ -104,10 +131,6 @@ class MapDeformableCrossAttentionFusion(nn.Module):
         q = image_bev.permute(0, 2, 3, 1).reshape(B, N, C)
         q_norm = self.norm_query(q)
 
-        # Predict K offsets and per-head attention logits from the query.
-        offsets = self.offset_proj(q_norm).reshape(B, N, K, 2)
-        attn_logits = self.attn_proj(q_norm).reshape(B, N, nH, K)
-
         # Offsets are pixel displacements; rescale to grid coordinates
         # (a pixel step is 2/(size-1) with align_corners=True).
         scale = torch.tensor(
@@ -115,29 +138,48 @@ class MapDeformableCrossAttentionFusion(nn.Module):
             device=image_bev.device,
             dtype=image_bev.dtype,
         )
-        offsets = offsets * scale.view(1, 1, 1, 2)
-
-        # Sampling positions = reference + offset. Out-of-map positions are
-        # clamped by grid_sample's padding_mode="border".
-        sample_grid = (ref_grid + offsets).reshape(B, N, K, 2)
-
-        # grid_sample with H_out=N, W_out=K: cell (i, j) holds sample point j
-        # of query i -> (B, C, N, K).
-        sampled = F.grid_sample(
-            map_bev,
-            sample_grid,
-            mode="bilinear",
-            padding_mode="border",
-            align_corners=True,
-        )
-        sampled = sampled.permute(0, 2, 3, 1)  # (B, N, K, C)
-
-        # Split channels per head, weight by softmax over K, and sum.
-        sampled = sampled.reshape(B, N, K, nH, self.head_dim)
-        sampled = sampled.permute(0, 1, 3, 2, 4)  # (B, N, nH, K, head_dim)
-        attn_weights = F.softmax(attn_logits, dim=-1)  # (B, N, nH, K)
-        attn_out = (sampled * attn_weights.unsqueeze(-1)).sum(dim=3)
-        attn_out = attn_out.reshape(B, N, C)  # (B, N, C)
+        attended_chunks = []
+        for start in range(0, N, self.query_chunk_size):
+            stop = min(start + self.query_chunk_size, N)
+            count = stop - start
+            chunk_query = q_norm[:, start:stop]
+            offsets = self.offset_proj(chunk_query).reshape(
+                B,
+                count,
+                K,
+                2,
+            )
+            offsets = offsets * scale.view(1, 1, 1, 2)
+            attn_logits = self.attn_proj(chunk_query).reshape(
+                B,
+                count,
+                nH,
+                K,
+            )
+            sample_grid = (
+                ref_grid[:, start:stop] + offsets
+            ).reshape(B, count, K, 2)
+            sampled = F.grid_sample(
+                map_bev,
+                sample_grid,
+                mode="bilinear",
+                padding_mode="border",
+                align_corners=True,
+            ).permute(0, 2, 3, 1)
+            sampled = sampled.reshape(
+                B,
+                count,
+                K,
+                nH,
+                self.head_dim,
+            ).permute(0, 1, 3, 2, 4)
+            attn_weights = F.softmax(attn_logits, dim=-1)
+            attended_chunks.append(
+                (
+                    sampled * attn_weights.unsqueeze(-1)
+                ).sum(dim=3).reshape(B, count, C)
+            )
+        attn_out = torch.cat(attended_chunks, dim=1)
 
         # Output projection with residual, then FFN with residual.
         q = q + self.out_proj(attn_out)

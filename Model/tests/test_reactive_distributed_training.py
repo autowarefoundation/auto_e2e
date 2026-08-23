@@ -434,6 +434,7 @@ def _stage_config(stage: str) -> dict[str, object]:
         "bev_pos_weight_cap": 64.0,
         "bev_repeat_frequency_threshold": 0.05,
         "bev_weight": 1.0,
+        "allow_random_bevformer_init": True,
         "corridor_pos_weight": 1.0,
         "epochs": 2,
         "grad_clip": 1.0,
@@ -492,6 +493,19 @@ def test_validate_stage_config_rejects_parent_and_batch_contract_changes():
     caller_weighted["bev_pos_weights"] = [1.0] * 8
     with pytest.raises(ValueError, match="derived"):
         validate_reactive_stage_config(caller_weighted)
+
+
+def test_validate_stage_config_requires_one_initialization_mode():
+    config = _stage_config("nuplan_full")
+    config["allow_random_bevformer_init"] = False
+
+    with pytest.raises(ValueError, match="exactly one"):
+        validate_reactive_stage_config(config)
+
+    config["is_pretrained"] = True
+    config["bevformer_pretrained_checkpoint_uri"] = "s3://bucket/model.pth"
+    config["bevformer_pretrained_checkpoint_sha256"] = "a" * 64
+    validate_reactive_stage_config(config)
 
 
 def test_validate_stage_config_accepts_bev_only_capacity_probe():
@@ -1056,6 +1070,16 @@ def test_camera_feature_scale_diagnostics_are_normalized():
     model.Reactive_E2E.FeatureFusion.scale_logits[0] = float("nan")
     with pytest.raises(FloatingPointError, match="non-finite"):
         _camera_feature_scale_weights(model)
+
+    bevformer = SimpleNamespace(
+        Reactive_E2E=SimpleNamespace(
+            FeatureFusion=SimpleNamespace(
+                architecture="bevformer_v2_t1",
+                view_fusion=SimpleNamespace(num_levels=4),
+            ),
+        ),
+    )
+    assert _camera_feature_scale_weights(bevformer) == (0.25,) * 4
 
 
 def test_bev_statistics_all_reduce_preserves_vector_offsets(monkeypatch):

@@ -89,6 +89,8 @@ class _BEVActivationRecorder:
         ) -> None:
             if not self._enabled:
                 return
+            if isinstance(output, tuple):
+                output = output[0]
             self._latest[name] = _downsample_features(output, name)
 
         return record
@@ -120,22 +122,25 @@ class _BEVActivationRecorder:
         gated_map = map_context * torch.as_tensor(
             map_valid, device=map_context.device
         ).reshape(batch_size, 1, 1, 1).to(map_context.dtype)
-        route_channels = int(self._reactive.route_channels)
-        map_only_input = torch.cat(
-            [
-                gated_map,
-                map_context.new_zeros(
-                    batch_size,
-                    route_channels,
-                    map_context.shape[-2],
-                    map_context.shape[-1],
-                ),
-            ],
-            dim=1,
+        route_zeros = map_context.new_zeros(
+            batch_size,
+            int(self._reactive.route_channels),
+            map_context.shape[-2],
+            map_context.shape[-1],
         )
         with torch.no_grad():
+            navigation_encoder = self._reactive.NavigationEncoder
+            if hasattr(navigation_encoder, "MapEncoder"):
+                map_navigation = navigation_encoder(
+                    gated_map,
+                    route_zeros,
+                )
+            else:
+                map_navigation = navigation_encoder(
+                    torch.cat([gated_map, route_zeros], dim=1)
+                )
             map_features = _downsample_features(
-                self._reactive.NavigationEncoder(map_only_input),
+                map_navigation,
                 "map-only",
             )
 

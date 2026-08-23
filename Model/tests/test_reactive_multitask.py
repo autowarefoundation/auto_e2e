@@ -244,13 +244,30 @@ def test_common_geometry_matches_camera_bev_contract():
     )
 
 
-def test_reactive_model_contract_preserves_native_camera_resolution():
+def test_reactive_model_contract_uses_bevformer_t1_latent_grid():
     kwargs = reactive_model_kwargs(
         ReactiveTrainingStage.NUPLAN_FULL,
         num_views=8,
     )
 
-    assert kwargs["image_feature_size"] == 64
+    assert "image_feature_size" not in kwargs
+    assert kwargs["view_fusion_kwargs"] == {
+        "architecture": "bevformer_v2_t1",
+        "activation_checkpointing": True,
+        "bev_h": 256,
+        "bev_w": 256,
+        "feedforward_channels": 512,
+        "image_size": 256,
+        "num_encoder_layers": 6,
+        "num_heads": 8,
+        "num_levels": 4,
+        "num_points": 8,
+        "pc_range": [-60.0, -60.0, -5.0, 120.0, 60.0, 3.0],
+        "query_chunk_size": 4096,
+    }
+    assert kwargs["map_fusion_mode"] == "deformable"
+    assert kwargs["route_encoder_hidden_channels"] == 96
+    assert kwargs["auxiliary_output_size"] == (450, 300)
 
 
 def test_bev_head_uses_full_residual_spatial_blocks(device):
@@ -323,7 +340,7 @@ def test_bev_logits_do_not_depend_on_navigation(
     )
 
 
-def test_route_loss_reaches_gate_but_not_camera(
+def test_route_loss_reaches_route_gate_but_not_camera_or_map(
     build_mock_model,
     device,
 ):
@@ -337,16 +354,26 @@ def test_route_loss_reaches_gate_but_not_camera(
     )
     loss.backward()
 
-    alpha = model.Reactive_E2E.MapBEVFusion.alpha
-    assert alpha.grad is not None
-    assert bool((alpha.grad != 0).any())
-    assert all(
-        parameter.grad is None
-        for parameter in model.Reactive_E2E.Backbone.parameters()
+    reactive = model.Reactive_E2E
+    route_gate = reactive.NavigationEncoder.route_gate
+    assert route_gate.grad is not None
+    assert bool((route_gate.grad != 0).any())
+    assert reactive.MapBEVFusion.alpha.grad is None
+    assert any(
+        parameter.grad is not None
+        for parameter in reactive.NavigationEncoder.RouteEncoder.parameters()
     )
     assert all(
         parameter.grad is None
-        for parameter in model.Reactive_E2E.FeatureFusion.parameters()
+        for parameter in reactive.NavigationEncoder.MapEncoder.parameters()
+    )
+    assert all(
+        parameter.grad is None
+        for parameter in reactive.Backbone.parameters()
+    )
+    assert all(
+        parameter.grad is None
+        for parameter in reactive.FeatureFusion.parameters()
     )
 
 
@@ -1055,6 +1082,8 @@ def test_stage_a_to_stage_b_to_semantic_artifact_smoke(
             "bev_pos_weights": [1.0] * 8,
             "bev_repeat_factors": [1] * 8,
             "bev_taxonomy_version": BEV_SEGMENTATION_TAXONOMY_VERSION,
+            "is_pretrained": False,
+            "allow_random_bevformer_init": True,
         },
         optimizer=stage_a_optimizer,
         metrics=stage_a_metrics,
@@ -1069,6 +1098,9 @@ def test_stage_a_to_stage_b_to_semantic_artifact_smoke(
     lineage = load_stage_a_parent(stage_b_model, checkpoint_path)
     assert lineage["stage_a_parent_checkpoint_sha256"] == (
         checkpoint_sha256
+    )
+    assert lineage["bevformer_v2_initialization_mode"] == (
+        "explicit_random_init"
     )
     configure_model_for_stage(
         stage_b_model,
@@ -1266,7 +1298,7 @@ def test_checkpoint_selection_evaluation_skips_auxiliary_heads(
     assert calls == {"bev": 0, "route": 0}
 
 
-def test_stage_b_rejects_stage_a_without_bev_v2_lineage(
+def test_stage_b_rejects_stage_a_without_bevformer_provenance(
     build_mock_model,
     device,
     tmp_path,
@@ -1279,14 +1311,79 @@ def test_stage_b_rejects_stage_a_without_bev_v2_lineage(
         stage=ReactiveTrainingStage.NUPLAN_FULL,
         dataset_manifest_sha256="a" * 64,
         epoch=1,
-        model_config={"num_views": 8},
+        model_config={
+            "trajectory_weight": 1.0,
+            "bev_weight": 1.0,
+            "route_weight": 1.0,
+            "corridor_pos_weight": 1.0,
+            "training_seed": 149,
+            "scheduler_identity": "selection_plateau_v1",
+            "overfit_bev_only": False,
+            "overfit_fixed_lr": False,
+            "bev_pos_weights": [2.0] * 8,
+            "bev_repeat_factors": [1] * 8,
+            "bev_taxonomy_version": BEV_SEGMENTATION_TAXONOMY_VERSION,
+            "is_pretrained": False,
+            "allow_random_bevformer_init": False,
+        },
     )
 
     with pytest.raises(
         ValueError,
-        match="Stage A parent checkpoint contract differs",
+        match="lacks BEVFormer initialization provenance",
     ):
         load_stage_a_parent(model, checkpoint_path)
+
+
+def test_stage_b_inherits_bevformer_initialization_provenance(
+    build_mock_model,
+    device,
+    tmp_path,
+):
+    model = _model(build_mock_model, device)
+    checkpoint_path = tmp_path / "pretrained-stage-a.pt"
+    source_sha256 = "b" * 64
+    initialization = {
+        "source_sha256": source_sha256,
+        "source_url": "https://example.invalid/bevformer.pth",
+        "source_repository": "https://example.invalid/repository",
+        "weight_license_spdx": "NOASSERTION",
+        "training_data_license_spdx": "CC-BY-NC-SA-4.0",
+    }
+    save_reactive_checkpoint(
+        checkpoint_path,
+        model,
+        stage=ReactiveTrainingStage.NUPLAN_FULL,
+        dataset_manifest_sha256="a" * 64,
+        epoch=1,
+        model_config={
+            "trajectory_weight": 1.0,
+            "bev_weight": 1.0,
+            "route_weight": 1.0,
+            "corridor_pos_weight": 1.0,
+            "training_seed": 149,
+            "scheduler_identity": "selection_plateau_v1",
+            "overfit_bev_only": False,
+            "overfit_fixed_lr": False,
+            "bev_pos_weights": [2.0] * 8,
+            "bev_repeat_factors": [1] * 8,
+            "bev_taxonomy_version": BEV_SEGMENTATION_TAXONOMY_VERSION,
+            "bevformer_v2_initialization": initialization,
+            "is_pretrained": True,
+            "allow_random_bevformer_init": False,
+        },
+        lineage={
+            "bevformer_v2_parent_checkpoint_sha256": source_sha256,
+        },
+    )
+
+    inherited = load_stage_a_parent(model, checkpoint_path)
+
+    assert inherited["bevformer_v2_initialization"] == initialization
+    assert (
+        inherited["bevformer_v2_parent_checkpoint_sha256"]
+        == source_sha256
+    )
 
 
 def test_stage_b_rejects_stage_a_that_did_not_optimize_bev(

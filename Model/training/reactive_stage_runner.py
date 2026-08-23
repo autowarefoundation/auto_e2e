@@ -18,6 +18,7 @@ from data_processing.reactive_training_artifacts import (
 )
 from navigation.geometry import AUTOE2E_NAVIGATION_GEOMETRY
 from training.reactive_multitask import (
+    REACTIVE_MODEL_ARCHITECTURE_VERSION,
     SIMPLE_XY_IMITATION_OBJECTIVE_VERSION,
     ReactiveMultitaskObjective,
     ReactiveTrainingStage,
@@ -192,6 +193,7 @@ def load_stage_a_parent(
     if not isinstance(config, Mapping):
         raise ValueError("Stage A checkpoint has no config mapping")
     required = {
+        "model_architecture_version": REACTIVE_MODEL_ARCHITECTURE_VERSION,
         "training_objective_version": (
             SIMPLE_XY_IMITATION_OBJECTIVE_VERSION
         ),
@@ -274,11 +276,45 @@ def load_stage_a_parent(
         raise ValueError("Stage A checkpoint model-state digest is invalid")
     model.load_state_dict(state_dict)
     digest = hashlib.sha256(path.read_bytes()).hexdigest()
-    return {
+    lineage: dict[str, Any] = {
         "stage_a_parent_checkpoint_sha256": digest,
         "stage_a_config_digest": config_sha256,
         "stage_a_model_state_sha256": model_state_sha256,
     }
+    initialization = config.get("bevformer_v2_initialization")
+    source_sha256 = config.get(
+        "bevformer_v2_parent_checkpoint_sha256"
+    )
+    if initialization is not None:
+        if (
+            not isinstance(initialization, Mapping)
+            or initialization.get("source_sha256") != source_sha256
+            or config.get("is_pretrained") is not True
+            or config.get("allow_random_bevformer_init") is True
+        ):
+            raise ValueError(
+                "Stage A BEVFormer initialization provenance is invalid"
+            )
+        lineage["bevformer_v2_initialization"] = dict(initialization)
+        lineage["bevformer_v2_parent_checkpoint_sha256"] = str(
+            source_sha256
+        )
+    elif source_sha256 is not None:
+        raise ValueError(
+            "Stage A BEVFormer parent digest lacks initialization provenance"
+        )
+    elif not (
+        config.get("is_pretrained") is False
+        and config.get("allow_random_bevformer_init") is True
+    ):
+        raise ValueError(
+            "Stage A parent lacks BEVFormer initialization provenance"
+        )
+    else:
+        lineage["bevformer_v2_initialization_mode"] = (
+            "explicit_random_init"
+        )
+    return lineage
 
 
 def run_reactive_epoch(
@@ -1442,7 +1478,7 @@ def save_reactive_checkpoint(
     scheduler: Any | None = None,
     metrics: Mapping[str, float] | None = None,
     training_state: Mapping[str, Any] | None = None,
-    lineage: Mapping[str, str] | None = None,
+    lineage: Mapping[str, Any] | None = None,
 ) -> str:
     """Write a stage checkpoint with immutable lineage fields."""
     if (
@@ -1457,6 +1493,7 @@ def save_reactive_checkpoint(
         raise ValueError("checkpoint epoch must be positive")
     config: dict[str, Any] = {
         **dict(model_config),
+        "model_architecture_version": REACTIVE_MODEL_ARCHITECTURE_VERSION,
         "training_objective_version": (
             SIMPLE_XY_IMITATION_OBJECTIVE_VERSION
         ),

@@ -3,7 +3,9 @@ from collections.abc import Sequence
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from .feature_pyramid import BEVFormerFeaturePyramid
 from .view_fusion import build_view_fusion
+from .view_fusion.bevformer_v2_t1 import BEVFormerV2T1ViewFusion
 
 
 class FeatureFusion(nn.Module):
@@ -29,6 +31,31 @@ class FeatureFusion(nn.Module):
             raise ValueError("image_feature_size must be positive")
         self.backbone_channels = channels
         self.image_feature_size = int(image_feature_size)
+        view_kwargs = dict(view_fusion_kwargs or {})
+        self.architecture = str(
+            view_kwargs.pop("architecture", "legacy")
+        )
+        if self.architecture not in {"legacy", "bevformer_v2_t1"}:
+            raise ValueError(
+                f"unknown camera BEV architecture {self.architecture!r}"
+            )
+        self.feature_pyramid: BEVFormerFeaturePyramid | None
+        self.refine: nn.Module
+        self.view_fusion: nn.Module
+        if self.architecture == "bevformer_v2_t1":
+            self.feature_pyramid = BEVFormerFeaturePyramid(
+                channels,
+                embed_dim=embed_dim,
+            )
+            self.lateral_projections = nn.ModuleList()
+            self.refine = nn.Identity()
+            self.view_fusion = BEVFormerV2T1ViewFusion(
+                num_views=num_views,
+                embed_dim=embed_dim,
+                **view_kwargs,
+            )
+            return
+        self.feature_pyramid = None
         self.lateral_projections = nn.ModuleList(
             nn.Conv2d(channel_count, embed_dim, kernel_size=1)
             for channel_count in channels
@@ -51,12 +78,24 @@ class FeatureFusion(nn.Module):
         # View fusion strategy (pluggable). Extra kwargs (bev_h, bev_w, pc_range,
         # image_size, ...) are forwarded to the selected fusion module.
         self.view_fusion = build_view_fusion(
-            fusion_mode, num_views, embed_dim, **(view_fusion_kwargs or {})
+            fusion_mode, num_views, embed_dim, **view_kwargs
         )
 
     def forward(self, features, B, V, projection=None, geometry_type=None,
                 image_transform=None):
         # features: list of 4 multi-scale feature maps from backbone (channels-first)
+        if self.architecture == "bevformer_v2_t1":
+            if self.feature_pyramid is None:
+                raise RuntimeError("BEVFormer feature pyramid is missing")
+            pyramid = self.feature_pyramid(features)
+            return self.view_fusion(
+                pyramid,
+                B,
+                V,
+                projection=projection,
+                geometry_type=geometry_type,
+                image_transform=image_transform,
+            )
         if len(features) != len(self.lateral_projections):
             raise ValueError(
                 "backbone feature count differs from configured stages"

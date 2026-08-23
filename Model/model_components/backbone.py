@@ -4,12 +4,35 @@ from .backbones import build_backbone
 
 
 class Backbone(nn.Module):
-    def __init__(self, backbone="swin_v2_tiny", is_pretrained: bool = True):
+    def __init__(
+        self,
+        backbone="swin_v2_tiny",
+        is_pretrained: bool = True,
+        input_profile: str = "imagenet",
+    ):
         super().__init__()
+        if input_profile not in {"imagenet", "bevformer_v2"}:
+            raise ValueError(f"unknown backbone input profile {input_profile!r}")
 
         # Pre-trained backbone (pluggable)
         self.backbone = build_backbone(backbone, pretrained=is_pretrained)
         self.backbone_name = backbone
+        self.input_profile = input_profile
+        self.register_buffer(
+            "_imagenet_mean",
+            torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1),
+            persistent=False,
+        )
+        self.register_buffer(
+            "_imagenet_std",
+            torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1),
+            persistent=False,
+        )
+        self.register_buffer(
+            "_bevformer_bgr_mean",
+            torch.tensor([103.53, 116.28, 123.675]).view(1, 3, 1, 1),
+            persistent=False,
+        )
 
         # Discover per-stage channel counts. feature_info is the timm convention
         # and is preferred (no forward pass), but a custom backbone may not
@@ -59,6 +82,18 @@ class Backbone(nn.Module):
         return [f.shape[1] for f in out]
 
     def forward(self, image):
+        if self.input_profile == "bevformer_v2":
+            if image.ndim != 4 or image.shape[1] != 3:
+                raise ValueError(
+                    "BEVFormer backbone input must have shape [B,3,H,W]"
+                )
+            mean = self._imagenet_mean.to(dtype=image.dtype)
+            std = self._imagenet_std.to(dtype=image.dtype)
+            bgr_mean = self._bevformer_bgr_mean.to(dtype=image.dtype)
+            image = (
+                (image * std + mean).flip(dims=(1,)) * 255.0
+                - bgr_mean
+            )
         features = self.backbone(image)
 
         # Detect channel layout per-feature-map from the actual tensor shape

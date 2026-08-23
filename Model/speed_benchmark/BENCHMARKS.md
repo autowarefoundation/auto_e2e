@@ -4,6 +4,39 @@ Per-GPU inference benchmarks for AutoE2E. To add results for your own GPU, run t
 [benchmarking script](./) in this folder — it documents the meaning of each benchmark
 parameter.
 
+## BEVFormer V2 t1 Training Memory
+
+> Measured 2026-08-24 on one NVIDIA L4 (23 GiB), BF16, batch 1, 8 cameras.
+> Production architecture: ResNet50, latent BEV 256x256, supervision 450x300,
+> 6 encoder layers, 8 heads, 4 FPN levels, 8 SCA points, activation
+> checkpointing enabled.
+
+| Forward | Backward | Step throughput | Peak allocated | Peak reserved | Loss |
+|---------|----------|-----------------|----------------|---------------|------|
+| 5.0138 s | 13.2946 s | 0.0546 samples/s | 6.6438 GiB | 7.0547 GiB | 0.7791 |
+
+The measurement used
+`Model/speed_benchmark/bevformer_v2_memory_benchmark.py` with the official
+checkpoint and includes trajectory, BEV segmentation, and route reconstruction
+heads in the backward pass. The model has 50,180,546 parameters after removal
+of the non-official four-value FPN scale.
+
+Checkpoint evidence:
+
+- SHA-256: `a498acf289307f5bf47501b650e7b171fa9dfcb326430ee62055fdef7c4d3291`
+- Account-local key: `pretrained/bevformer-v2/r50-t1-epoch24-a498acf289307f5bf47501b650e7b171fa9dfcb326430ee62055fdef7c4d3291.pth`
+- Verified platform version ID: `mzD0dLQxZ.FAEdTAgytUKxwx54SNJYfZ`
+- Size: `730956415` bytes
+- Server-side encryption: `AES256`
+- Weight license: `NOASSERTION`; training-data license: `CC-BY-NC-SA-4.0`
+
+Provision another platform account with:
+
+```bash
+python Platform/scripts/provision_bevformer_v2_checkpoint.py \
+  --source /path/to/bevformer-v2-r50-t1-epoch24.pth
+```
+
 ## NVIDIA GeForce RTX 3060 Laptop GPU
 
 <details open>

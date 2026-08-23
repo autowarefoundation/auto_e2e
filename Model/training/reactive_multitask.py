@@ -23,6 +23,9 @@ from navigation.geometry import (
 
 
 SIMPLE_XY_IMITATION_OBJECTIVE_VERSION = "simple_xy_imitation_v1"
+REACTIVE_MODEL_ARCHITECTURE_VERSION = (
+    "bevformer_v2_t1_split_navigation_v1"
+)
 
 
 class ReactiveTrainingStage(str, enum.Enum):
@@ -38,17 +41,36 @@ def reactive_model_kwargs(
     """Return the locked Reactive-only model configuration."""
     if num_views <= 0:
         raise ValueError("num_views must be positive")
+    view_fusion_kwargs = (
+        AUTOE2E_NAVIGATION_GEOMETRY.camera_bev_kwargs()
+    )
+    view_fusion_kwargs.update({
+        "architecture": "bevformer_v2_t1",
+        "bev_h": 256,
+        "bev_w": 256,
+        "image_size": 256,
+        "num_heads": 8,
+        "num_levels": 4,
+        "num_points": 8,
+        "num_encoder_layers": 6,
+        "feedforward_channels": 512,
+        "query_chunk_size": 4096,
+        "activation_checkpointing": True,
+    })
     return {
         "num_views": num_views,
-        "image_feature_size": 64,
-        "view_fusion_kwargs": (
-            AUTOE2E_NAVIGATION_GEOMETRY.camera_bev_kwargs()
-        ),
+        "view_fusion_kwargs": view_fusion_kwargs,
         "map_context_channels": MAP_CHANNEL_COUNT,
         "route_channels": ROUTE_CHANNEL_COUNT,
+        "route_encoder_hidden_channels": 96,
         "map_type": "semantic_raster",
         "enable_route_conditioning": True,
-        "map_fusion_mode": "residual",
+        "map_fusion_mode": "deformable",
+        "map_fusion_kwargs": {
+            "num_sample_points": 8,
+            "num_heads": 8,
+            "query_chunk_size": 4096,
+        },
         "temporal_memory_mode": "no_memory",
         "planner_mode": "gru",
         "enable_world_model": False,
@@ -57,6 +79,10 @@ def reactive_model_kwargs(
         "enable_bev_segmentation": True,
         "bev_segmentation_classes": 8,
         "enable_route_reconstruction": True,
+        "auxiliary_output_size": (
+            AUTOE2E_NAVIGATION_GEOMETRY.height_px,
+            AUTOE2E_NAVIGATION_GEOMETRY.width_px,
+        ),
     }
 
 

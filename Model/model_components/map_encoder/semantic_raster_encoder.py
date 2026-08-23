@@ -32,43 +32,51 @@ class SemanticRasterEncoder(nn.Module):
         self.stem = nn.Sequential(
             nn.Conv2d(
                 in_channels,
-                64,
+                96,
                 kernel_size=5,
-                stride=2,
                 padding=2,
                 bias=False,
             ),
-            nn.GroupNorm(_group_count(64), 64),
+            nn.GroupNorm(_group_count(96), 96),
             nn.SiLU(),
         )
         self.downsample = nn.Sequential(
             nn.Conv2d(
-                64,
-                64,
+                96,
+                96,
                 kernel_size=3,
                 stride=2,
                 padding=1,
-                groups=64,
+                groups=96,
                 bias=False,
             ),
-            nn.Conv2d(64, 128, kernel_size=1, bias=False),
-            nn.GroupNorm(_group_count(128), 128),
+            nn.Conv2d(96, 192, kernel_size=1, bias=False),
+            nn.GroupNorm(_group_count(192), 192),
             nn.SiLU(),
             nn.Conv2d(
-                128,
-                128,
+                192,
+                192,
                 kernel_size=3,
                 stride=2,
                 padding=1,
-                groups=128,
+                groups=192,
                 bias=False,
             ),
-            nn.Conv2d(128, 128, kernel_size=1, bias=False),
-            nn.GroupNorm(_group_count(128), 128),
+            nn.Conv2d(192, 192, kernel_size=1, bias=False),
+            nn.GroupNorm(_group_count(192), 192),
             nn.SiLU(),
         )
+        self.local_projection = nn.Conv2d(
+            96,
+            embed_dim,
+            kernel_size=1,
+            bias=False,
+        )
         self.output_projection = nn.Sequential(
-            nn.Conv2d(128, embed_dim, kernel_size=1, bias=False),
+            nn.Conv2d(192, embed_dim, kernel_size=1, bias=False),
+            nn.GroupNorm(_group_count(embed_dim), embed_dim),
+        )
+        self.output_norm = nn.Sequential(
             nn.GroupNorm(_group_count(embed_dim), embed_dim),
             nn.SiLU(),
         )
@@ -78,14 +86,19 @@ class SemanticRasterEncoder(nn.Module):
             raise ValueError(
                 "navigation_raster must have shape [B,C,H,W]"
             )
-        output = self.output_projection(
-            self.downsample(self.stem(navigation_raster))
-        )
-        if output.shape[-2:] != (self.output_h, self.output_w):
-            output = F.interpolate(
-                output,
+        if navigation_raster.shape[-2:] != (self.output_h, self.output_w):
+            navigation_raster = F.interpolate(
+                navigation_raster,
                 size=(self.output_h, self.output_w),
                 mode="bilinear",
                 align_corners=False,
             )
-        return output
+        local = self.stem(navigation_raster)
+        context = self.output_projection(self.downsample(local))
+        context = F.interpolate(
+            context,
+            size=local.shape[-2:],
+            mode="bilinear",
+            align_corners=False,
+        )
+        return self.output_norm(self.local_projection(local) + context)

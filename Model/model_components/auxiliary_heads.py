@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 
 def _validate_channels(
@@ -57,6 +58,7 @@ class BEVSegmentationHead(nn.Module):
         hidden_channels: int = 64,
         num_classes: int = 8,
         num_groups: int = 8,
+        output_size: tuple[int, int] | None = None,
     ) -> None:
         super().__init__()
         _validate_channels(
@@ -64,6 +66,13 @@ class BEVSegmentationHead(nn.Module):
             hidden_channels,
             num_classes,
             num_groups,
+        )
+        if output_size is not None and min(output_size) <= 0:
+            raise ValueError("output_size dimensions must be positive")
+        self.output_size = (
+            tuple(int(value) for value in output_size)
+            if output_size is not None
+            else None
         )
         self.decoder = nn.Sequential(
             nn.Conv2d(embed_dim, hidden_channels, kernel_size=1, bias=False),
@@ -77,7 +86,15 @@ class BEVSegmentationHead(nn.Module):
     def forward(self, image_bev: torch.Tensor) -> torch.Tensor:
         if image_bev.ndim != 4:
             raise ValueError("image_bev must have shape [B,C,H,W]")
-        return self.decoder(image_bev)
+        logits = self.decoder(image_bev)
+        if self.output_size is not None and logits.shape[-2:] != self.output_size:
+            logits = F.interpolate(
+                logits,
+                size=self.output_size,
+                mode="bilinear",
+                align_corners=False,
+            )
+        return logits
 
 
 class RouteReconstructionHead(nn.Module):
@@ -89,6 +106,7 @@ class RouteReconstructionHead(nn.Module):
         hidden_channels: int = 64,
         route_channels: int = 2,
         num_groups: int = 8,
+        output_size: tuple[int, int] | None = None,
     ) -> None:
         super().__init__()
         _validate_channels(
@@ -96,6 +114,13 @@ class RouteReconstructionHead(nn.Module):
             hidden_channels,
             route_channels,
             num_groups,
+        )
+        if output_size is not None and min(output_size) <= 0:
+            raise ValueError("output_size dimensions must be positive")
+        self.output_size = (
+            tuple(int(value) for value in output_size)
+            if output_size is not None
+            else None
         )
         self.decoder = nn.Sequential(
             nn.Conv2d(embed_dim, hidden_channels, kernel_size=1, bias=False),
@@ -121,4 +146,12 @@ class RouteReconstructionHead(nn.Module):
             raise ValueError(
                 "navigation_contribution must have shape [B,C,H,W]"
             )
-        return self.decoder(navigation_contribution)
+        logits = self.decoder(navigation_contribution)
+        if self.output_size is not None and logits.shape[-2:] != self.output_size:
+            logits = F.interpolate(
+                logits,
+                size=self.output_size,
+                mode="bilinear",
+                align_corners=False,
+            )
+        return logits

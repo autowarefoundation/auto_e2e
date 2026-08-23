@@ -8,7 +8,10 @@ from .backbone import Backbone
 from .feature_fusion import FeatureFusion
 from .fused_feature_pooling import FusedFeaturePooling
 from .trajectory_planning import build_planner
-from .map_encoder import build_map_encoder, build_map_bev_fusion
+from .map_encoder import (
+    build_map_bev_fusion,
+    build_split_navigation_encoder,
+)
 from .temporal_memory import build_temporal_memory
 from .reasoning.horizon_reasoning_head import HorizonReasoningHead
 
@@ -22,6 +25,7 @@ class ReactiveE2E(nn.Module):
                  visual_history_dim=896,
                  map_type="rasterized", map_context_channels=3,
                  route_channels=2, enable_route_conditioning=True,
+                 route_encoder_hidden_channels=96,
                  map_fusion_mode="residual", map_fusion_kwargs=None,
                  temporal_memory_mode="no_memory", temporal_memory_kwargs=None,
                  planner_mode="gru", planner_kwargs=None,
@@ -29,11 +33,23 @@ class ReactiveE2E(nn.Module):
                  reasoning_kwargs=None,
                  enable_bev_segmentation=False,
                  bev_segmentation_classes=8,
-                 enable_route_reconstruction=False):
+                 enable_route_reconstruction=False,
+                 auxiliary_output_size=None):
         super(ReactiveE2E, self).__init__()
 
         # Camera backbone feature extractor
-        self.Backbone = Backbone(backbone=backbone, is_pretrained=is_pretrained)
+        camera_architecture = str(
+            (view_fusion_kwargs or {}).get("architecture", "legacy")
+        )
+        self.Backbone = Backbone(
+            backbone=backbone,
+            is_pretrained=is_pretrained,
+            input_profile=(
+                "bevformer_v2"
+                if camera_architecture == "bevformer_v2_t1"
+                else "imagenet"
+            ),
+        )
 
         # Multi-scale feature fusion with view unification.
         # view_fusion_kwargs forwards bev_h/bev_w/pc_range/image_size to BEV fusion.
@@ -68,13 +84,14 @@ class ReactiveE2E(nn.Module):
         self.route_channels = int(route_channels)
         self.enable_route_conditioning = bool(enable_route_conditioning)
 
-        # One shared encoder consumes gated semantic map and route channels.
-        self.NavigationEncoder = build_map_encoder(
+        self.NavigationEncoder = build_split_navigation_encoder(
             map_type,
-            in_channels=self.map_context_channels + self.route_channels,
+            map_channels=self.map_context_channels,
+            route_channels=self.route_channels,
             embed_dim=embed_dim,
             output_h=map_output_h,
             output_w=map_output_w,
+            route_hidden_channels=route_encoder_hidden_channels,
         )
  
         # Map BEV fusion: combines image BEV features with map BEV features
@@ -87,19 +104,16 @@ class ReactiveE2E(nn.Module):
             BEVSegmentationHead(
                 embed_dim=embed_dim,
                 num_classes=bev_segmentation_classes,
+                output_size=auxiliary_output_size,
             )
             if enable_bev_segmentation
             else None
         )
-        if enable_route_reconstruction and map_fusion_mode != "residual":
-            raise ValueError(
-                "route reconstruction requires residual map fusion so the "
-                "gated navigation contribution is explicit"
-            )
         self.RouteReconstructionHead = (
             RouteReconstructionHead(
                 embed_dim=embed_dim,
                 route_channels=route_channels,
+                output_size=auxiliary_output_size,
             )
             if enable_route_reconstruction
             else None
@@ -292,25 +306,22 @@ class ReactiveE2E(nn.Module):
             default=False,
             name="route_valid",
         )
-        navigation_input = torch.cat([gated_map, gated_route], dim=1)
-        navigation_bev = self.NavigationEncoder(navigation_input)
+        navigation_bev, route_contribution = self.NavigationEncoder(
+            gated_map,
+            gated_route,
+            return_route_contribution=True,
+        )
 
         # --- Fuse image BEV + navigation BEV ---
-        if self.RouteReconstructionHead is not None:
-            fused_features, navigation_contribution = (
-                self.MapBEVFusion.forward_with_contribution(
-                    image_bev,
-                    navigation_bev,
-                )
+        fused_features = self.MapBEVFusion(image_bev, navigation_bev)
+        if (
+            self.RouteReconstructionHead is not None
+            and emit_auxiliary
+            and compute_route_reconstruction
+        ):
+            aux_outputs["route_reconstruction_logits"] = (
+                self.RouteReconstructionHead(route_contribution)
             )
-            if emit_auxiliary and compute_route_reconstruction:
-                aux_outputs["route_reconstruction_logits"] = (
-                    self.RouteReconstructionHead(
-                        navigation_contribution
-                    )
-                )
-        else:
-            fused_features = self.MapBEVFusion(image_bev, navigation_bev)
 
         planner_features = (
             self.FusedFeaturePooling(fused_features)

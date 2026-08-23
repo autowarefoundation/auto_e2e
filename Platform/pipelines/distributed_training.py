@@ -405,9 +405,15 @@ def _run_reactive_stage_task(
     overfit_bev_only: bool,
     overfit_fixed_lr: bool,
     validation_sample_limit: int,
+    allow_random_bevformer_init: bool = False,
     required_gate_dataset_manifest_sha256: str = "",
 ) -> ReactiveRayOutput:
     from distributed_training.reactive_stage import run_reactive_stage
+    from model_components.bevformer_v2_pretrained import (
+        BEVFORMER_V2_T1_CHECKPOINT_MIRROR_KEY,
+        BEVFORMER_V2_T1_CHECKPOINT_SHA256,
+        bevformer_v2_t1_checkpoint_mirror_uri,
+    )
 
     context = current_context()
     execution_name = (
@@ -428,7 +434,32 @@ def _run_reactive_stage_task(
         if parent_checkpoint is not None
         else ""
     )
+    pretrained_uri = ""
+    if is_pretrained and not parent_uri:
+        configured_bucket = os.environ.get(
+            "AUTO_E2E_CHECKPOINT_BUCKET",
+            "",
+        ).strip()
+        if configured_bucket:
+            pretrained_uri = (
+                f"s3://{configured_bucket}/"
+                f"{BEVFORMER_V2_T1_CHECKPOINT_MIRROR_KEY}"
+            )
+        else:
+            import boto3
+
+            account_id = str(
+                boto3.client("sts").get_caller_identity()["Account"]
+            )
+            pretrained_uri = bevformer_v2_t1_checkpoint_mirror_uri(
+                account_id,
+                cluster_name=os.environ.get(
+                    "AUTO_E2E_CLUSTER_NAME",
+                    "auto-e2e-platform",
+                ),
+            )
     result = run_reactive_stage({
+        "allow_random_bevformer_init": allow_random_bevformer_init,
         "backbone": backbone,
         "bev_ap_bins": 1024,
         "bev_max_repeat": bev_max_repeat,
@@ -439,6 +470,10 @@ def _run_reactive_stage_task(
             bev_repeat_frequency_threshold
         ),
         "bev_weight": bev_weight,
+        "bevformer_pretrained_checkpoint_sha256": (
+            BEVFORMER_V2_T1_CHECKPOINT_SHA256
+        ),
+        "bevformer_pretrained_checkpoint_uri": pretrained_uri,
         "corridor_pos_weight": corridor_pos_weight,
         "epochs": epochs,
         "grad_clip": grad_clip,
@@ -976,7 +1011,7 @@ def train_reactive_stage_ray_2(
     shards: List[FlyteDirectory],
     stage: str,
     parent_checkpoint: Optional[FlyteFile] = None,
-    backbone: str = "swin_v2_tiny",
+    backbone: str = "res_net_50",
     epochs: int = 2,
     learning_rate: float = 1e-4,
     weight_decay: float = 1e-2,
@@ -988,15 +1023,16 @@ def train_reactive_stage_ray_2(
     gradient_accumulation_steps: int = 1,
     steps_per_epoch: int = 2,
     shuffle_buffer: int = 64,
-    is_pretrained: bool = False,
+    is_pretrained: bool = True,
     trajectory_weight: float = 1.0,
     bev_weight: float = 1.0,
     route_weight: float = 1.0,
     corridor_pos_weight: float = 1.0,
     overfit_bev_only: bool = False,
     overfit_fixed_lr: bool = False,
+    allow_random_bevformer_init: bool = False,
 ) -> ReactiveRayOutput:
-    """Run a two-node real-model integration canary."""
+    """Run two-rank training with the production pretrained default."""
     return _run_reactive_stage_task(
         shards=shards,
         stage=stage,
@@ -1031,6 +1067,7 @@ def train_reactive_stage_ray_2(
         overfit_bev_only=overfit_bev_only,
         overfit_fixed_lr=overfit_fixed_lr,
         validation_sample_limit=256,
+        allow_random_bevformer_init=allow_random_bevformer_init,
     )
 
 
@@ -1049,7 +1086,7 @@ def train_reactive_stage_ray_4(
     stage: str,
     parent_checkpoint: Optional[FlyteFile] = None,
     gate_metadata: Optional[FlyteFile] = None,
-    backbone: str = "swin_v2_tiny",
+    backbone: str = "res_net_50",
     epochs: int = 30,
     learning_rate: float = 1e-4,
     weight_decay: float = 1e-2,
@@ -1165,7 +1202,7 @@ def train_reactive_stage_ray_8(
     stage: str,
     parent_checkpoint: Optional[FlyteFile] = None,
     gate_metadata: Optional[FlyteFile] = None,
-    backbone: str = "swin_v2_tiny",
+    backbone: str = "res_net_50",
     epochs: int = 3,
     learning_rate: float = 1e-4,
     weight_decay: float = 1e-2,
@@ -1483,7 +1520,7 @@ def wf_train_reactive_nuplan_l2d_ray_8(
 
 @workflow
 def wf_reactive_multistage_ray_2_canary() -> ReactiveCanaryOutput:
-    """Run the real Reactive objectives through two multi-node RayJobs."""
+    """Run a fast random-init plumbing canary through two RayJobs."""
     stage_a_data = build_reactive_canary_dataset(
         stage="nuplan_full"
     )
@@ -1502,6 +1539,7 @@ def wf_reactive_multistage_ray_2_canary() -> ReactiveCanaryOutput:
         steps_per_epoch=4,
         shuffle_buffer=0,
         is_pretrained=False,
+        allow_random_bevformer_init=True,
         bev_weight=0.1,
         route_weight=0.1,
     )
@@ -1517,6 +1555,7 @@ def wf_reactive_multistage_ray_2_canary() -> ReactiveCanaryOutput:
         steps_per_epoch=2,
         shuffle_buffer=0,
         is_pretrained=False,
+        allow_random_bevformer_init=True,
         bev_weight=0.0,
         route_weight=0.1,
     )

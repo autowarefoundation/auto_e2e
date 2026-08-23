@@ -74,6 +74,7 @@ class AutoE2E(nn.Module):
                  visual_history_dim=896,
                  map_type="rasterized", map_context_channels=3,
                  route_channels=2, enable_route_conditioning=True,
+                 route_encoder_hidden_channels=96,
                  map_fusion_mode="residual", map_fusion_kwargs=None,
                  temporal_memory_mode="no_memory", temporal_memory_kwargs=None,
                  planner_mode="bezier", planner_kwargs=None,
@@ -82,7 +83,8 @@ class AutoE2E(nn.Module):
                  reasoning_kwargs: Optional[Dict[str, Any]] = None,
                  enable_bev_segmentation=False,
                  bev_segmentation_classes=8,
-                 enable_route_reconstruction=False):
+                 enable_route_reconstruction=False,
+                 auxiliary_output_size=None):
         super(AutoE2E, self).__init__()
 
         # Reactive model which runs at 10Hz and processes multi-camera inputs
@@ -103,6 +105,7 @@ class AutoE2E(nn.Module):
                  map_context_channels=map_context_channels,
                  route_channels=route_channels,
                  enable_route_conditioning=enable_route_conditioning,
+                 route_encoder_hidden_channels=route_encoder_hidden_channels,
                  map_fusion_mode=map_fusion_mode, map_fusion_kwargs=map_fusion_kwargs,
                  temporal_memory_mode=temporal_memory_mode, temporal_memory_kwargs=temporal_memory_kwargs,
                  planner_mode=planner_mode, planner_kwargs=planner_kwargs,
@@ -110,7 +113,8 @@ class AutoE2E(nn.Module):
                  reasoning_kwargs=reasoning_kwargs,
                  enable_bev_segmentation=enable_bev_segmentation,
                  bev_segmentation_classes=bev_segmentation_classes,
-                 enable_route_reconstruction=enable_route_reconstruction)
+                 enable_route_reconstruction=enable_route_reconstruction,
+                 auxiliary_output_size=auxiliary_output_size)
         self.enable_reasoning = enable_reasoning
 
         # World Action Model (slow, ~1Hz): encodes the multi-camera history into

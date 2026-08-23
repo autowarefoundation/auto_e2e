@@ -41,6 +41,18 @@ def _make_bev_pair(batch_size, embed_dim, spatial, device):
     return image_bev, map_bev
 
 
+def _open_deformable_navigation_path(fusion):
+    with torch.no_grad():
+        fusion.out_proj.weight.copy_(
+            torch.eye(
+                fusion.embed_dim,
+                device=fusion.out_proj.weight.device,
+                dtype=fusion.out_proj.weight.dtype,
+            )
+        )
+        fusion.out_proj.bias.zero_()
+
+
 @pytest.fixture(scope="session")
 def map_encoder(device):
     return RasterizedMapEncoder(embed_dim=256, output_h=8, output_w=8).to(device)
@@ -208,8 +220,18 @@ class TestMapDeformableCrossAttentionFusion:
         out = fusion(image_bev, map_bev)
         assert out.shape == (2, 256, 8, 8)
 
+    def test_initialization_preserves_camera_bev_exactly(self, device):
+        fusion = MapDeformableCrossAttentionFusion(embed_dim=64).to(device)
+        fusion.eval()
+        image_bev, map_bev = _make_bev_pair(2, 64, 8, device)
+
+        out = fusion(image_bev, map_bev)
+
+        assert torch.equal(out, image_bev)
+
     def test_map_influences_output(self, device):
         fusion = MapDeformableCrossAttentionFusion(embed_dim=256).to(device)
+        _open_deformable_navigation_path(fusion)
         fusion.eval()
         image_bev = torch.randn(1, 256, 8, 8, device=device)
         map_a = torch.randn(1, 256, 8, 8, device=device)
@@ -221,6 +243,7 @@ class TestMapDeformableCrossAttentionFusion:
 
     def test_gradient_flows_through_fusion(self, device):
         fusion = MapDeformableCrossAttentionFusion(embed_dim=64).to(device)
+        _open_deformable_navigation_path(fusion)
         image_bev = torch.randn(1, 64, 4, 4, device=device, requires_grad=True)
         map_bev = torch.randn(1, 64, 4, 4, device=device, requires_grad=True)
         fusion(image_bev, map_bev).sum().backward()
@@ -229,6 +252,7 @@ class TestMapDeformableCrossAttentionFusion:
 
     def test_all_parameters_receive_gradients(self, device):
         fusion = MapDeformableCrossAttentionFusion(embed_dim=64).to(device)
+        _open_deformable_navigation_path(fusion)
         image_bev = torch.randn(1, 64, 4, 4, device=device)
         map_bev = torch.randn(1, 64, 4, 4, device=device)
         fusion(image_bev, map_bev).sum().backward()
@@ -426,6 +450,7 @@ class TestAutoE2EMapIntegration:
 
     def test_deformable_fusion_parameters_receive_gradients(self, build_mock_model, device):
         model = self._make_model(build_mock_model, device, map_fusion_mode="deformable")
+        _open_deformable_navigation_path(model.Reactive_E2E.MapBEVFusion)
         model.train()
 
         visual = torch.randn(2, 7, 3, 256, 256, device=device)
@@ -447,7 +472,7 @@ class TestAutoE2EMapIntegration:
             "Reactive_E2E missing NavigationEncoder attribute"
         assert hasattr(model.Reactive_E2E, "MapBEVFusion"), "Reactive_E2E missing MapBEVFusion attribute"
 
-    def test_validity_gates_map_and_route_before_shared_encoder(
+    def test_validity_gates_map_and_route_before_split_encoders(
         self,
         build_mock_model,
         device,
@@ -461,7 +486,8 @@ class TestAutoE2EMapIntegration:
         captured = {}
 
         def capture_input(_module, args):
-            captured["navigation"] = args[0].detach().clone()
+            captured["map"] = args[0].detach().clone()
+            captured["route"] = args[1].detach().clone()
 
         handle = model.Reactive_E2E.NavigationEncoder.register_forward_pre_hook(
             capture_input
@@ -480,12 +506,60 @@ class TestAutoE2EMapIntegration:
         finally:
             handle.remove()
 
-        navigation = captured["navigation"]
-        assert navigation.shape == (2, 16, 256, 256)
-        assert navigation[0, :14].count_nonzero() == 0
-        assert navigation[0, 14:].min() == 1
-        assert navigation[1, :14].min() == 1
-        assert navigation[1, 14:].count_nonzero() == 0
+        assert captured["map"].shape == (2, 14, 256, 256)
+        assert captured["route"].shape == (2, 2, 256, 256)
+        assert captured["map"][0].count_nonzero() == 0
+        assert captured["route"][0].min() == 1
+        assert captured["map"][1].min() == 1
+        assert captured["route"][1].count_nonzero() == 0
+
+    def test_route_only_change_alters_final_deformable_trajectory(
+        self,
+        build_mock_model,
+        device,
+    ):
+        torch.manual_seed(41)
+        model = build_mock_model(
+            num_views=7,
+            fusion_mode="bev",
+            device=device,
+            map_context_channels=14,
+            map_fusion_mode="deformable",
+        ).eval()
+        _open_deformable_navigation_path(model.Reactive_E2E.MapBEVFusion)
+        camera = torch.randn(1, 7, 3, 256, 256, device=device)
+        map_context = torch.rand(1, 14, 256, 256, device=device)
+        visual_history = torch.randn(1, 896, device=device)
+        ego = torch.randn(1, 256, device=device)
+        route_a = torch.zeros(1, 2, 256, 256, device=device)
+        route_b = route_a.clone()
+        route_a[:, 0, 32:224, 72:88] = 1.0
+        route_b[:, 0, 32:224, 168:184] = 1.0
+        valid = torch.ones(1, dtype=torch.bool, device=device)
+
+        with torch.no_grad():
+            trajectory_a = model(
+                camera,
+                map_context,
+                visual_history,
+                ego,
+                route_mask=route_a,
+                map_valid=valid,
+                route_valid=valid,
+                mode="infer",
+            )
+            trajectory_b = model(
+                camera,
+                map_context,
+                visual_history,
+                ego,
+                route_mask=route_b,
+                map_valid=valid,
+                route_valid=valid,
+                mode="infer",
+            )
+
+        assert not torch.allclose(trajectory_a, trajectory_b, atol=1e-7)
 
     def test_route_is_reactive_only_and_receives_gradient(
         self,
@@ -499,6 +573,7 @@ class TestAutoE2EMapIntegration:
             map_context_channels=14,
             enable_reasoning=True,
             reasoning_mode="pooled_latent",
+            planner_mode="gru",
         )
         with torch.no_grad():
             model.Reactive_E2E.MapBEVFusion.alpha.fill_(0.1)
