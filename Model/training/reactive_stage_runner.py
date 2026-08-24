@@ -143,7 +143,12 @@ def reactive_model_state_sha256(
         ).encode("ascii")
         digest.update(len(metadata).to_bytes(8, "little"))
         digest.update(metadata)
-        raw = tensor.view(torch.uint8).numpy().tobytes(order="C")
+        raw = (
+            tensor.reshape(tensor.numel())
+            .view(torch.uint8)
+            .numpy()
+            .tobytes(order="C")
+        )
         digest.update(len(raw).to_bytes(8, "little"))
         digest.update(raw)
     return digest.hexdigest()

@@ -33,9 +33,30 @@ from training.reactive_stage_runner import (
     evaluate_reactive_transfer_matrix_models,
     evaluate_reactive_xy,
     load_stage_a_parent,
+    reactive_model_state_sha256,
     run_reactive_epoch,
     save_reactive_checkpoint,
 )
+
+
+def test_model_state_digest_supports_scalar_tensors():
+    state = {
+        "counter": torch.tensor(3, dtype=torch.long),
+        "scale": torch.tensor(1.5, dtype=torch.bfloat16),
+    }
+
+    digest = reactive_model_state_sha256(state)
+
+    assert len(digest) == 64
+    assert digest == reactive_model_state_sha256(state)
+    assert digest != reactive_model_state_sha256({
+        **state,
+        "counter": torch.tensor(4, dtype=torch.long),
+    })
+    assert digest != reactive_model_state_sha256({
+        **state,
+        "counter": torch.tensor([3], dtype=torch.long),
+    })
 
 
 def test_bev_artifact_encoding_does_not_follow_taxonomy_version():
