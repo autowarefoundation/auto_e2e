@@ -9,7 +9,7 @@ env:
       Platform.pipelines.distributed_training.wf_train_reactive_nuplan_ray_4
     FLYTE_VERSION: ""
     EXECUTION_NAME: ""
-    NUPLAN_DATASET_URI: ""
+    NUPLAN_DATASET_URIS_URI: ""
     EPOCHS: "3"
     LEARNING_RATE: "1e-4"
     VAL_FRACTION: "0.2"
@@ -30,8 +30,9 @@ phases:
     commands:
       - test -n "${FLYTE_VERSION}"
       - test -n "${EXECUTION_NAME}"
-      - test -n "${NUPLAN_DATASET_URI}"
-      - printf '%s' "${NUPLAN_DATASET_URI}" | grep -Eq '^s3://'
+      - test -n "${NUPLAN_DATASET_URIS_URI}"
+      - printf '%s' "${NUPLAN_DATASET_URIS_URI}" | grep -Eq '^s3://'
+      - aws s3 cp "${NUPLAN_DATASET_URIS_URI}" /tmp/nuplan-dataset-uris.json
       - printf '%s' "${EXECUTION_NAME}" | grep -Eq '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
       - test "${#EXECUTION_NAME}" -le 63
       - printf '%s' "${EPOCHS}" | grep -Eq '^[1-9][0-9]*$'
@@ -43,6 +44,26 @@ phases:
       - |
         python3 - <<'PY'
         import os
+        import json
+
+        with open(
+            "/tmp/nuplan-dataset-uris.json",
+            encoding="ascii",
+        ) as stream:
+            dataset_uris = json.load(stream)
+        if (
+            not isinstance(dataset_uris, list)
+            or len(dataset_uris) != 43
+            or len(set(dataset_uris)) != 43
+            or any(
+                not isinstance(uri, str)
+                or not uri.startswith("s3://")
+                for uri in dataset_uris
+            )
+        ):
+            raise ValueError(
+                "nuPlan dataset URI manifest must contain 43 unique S3 URIs"
+            )
 
         if not 0.0 < float(os.environ["LEARNING_RATE"]):
             raise ValueError("LEARNING_RATE must be positive")
@@ -67,6 +88,7 @@ phases:
       - |
         python3 - <<'PY'
         import os
+        import json
         import time
 
         import grpc
@@ -87,9 +109,14 @@ phases:
         wait_for_completion = (
             os.environ["WAIT_FOR_COMPLETION"] == "true"
         )
+        with open(
+            "/tmp/nuplan-dataset-uris.json",
+            encoding="ascii",
+        ) as stream:
+            dataset_uris = json.load(stream)
         inputs = {
             "nuplan_shards": [
-                FlyteDirectory(os.environ["NUPLAN_DATASET_URI"])
+                FlyteDirectory(uri) for uri in dataset_uris
             ],
             "epochs": int(os.environ["EPOCHS"]),
             "learning_rate": float(os.environ["LEARNING_RATE"]),

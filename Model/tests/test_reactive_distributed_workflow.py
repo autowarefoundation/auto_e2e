@@ -975,7 +975,11 @@ def test_reactive_nuplan_launcher_uses_registered_four_rank_workflow():
     ) in buildspec
     assert 'EPOCHS: "3"' in buildspec
     assert 'PRECISION: "bf16"' in buildspec
-    assert "NUPLAN_DATASET_URI" in buildspec
+    assert "NUPLAN_DATASET_URIS_URI" in buildspec
+    assert "len(dataset_uris) != 43" in buildspec
+    assert "len(set(dataset_uris)) != 43" in buildspec
+    assert "FlyteDirectory(uri) for uri in dataset_uris" in buildspec
+    assert "NUPLAN_DATASET_URI:" not in buildspec
     assert re.search(r"\b[0-9]{12}\b", buildspec) is None
 
 
