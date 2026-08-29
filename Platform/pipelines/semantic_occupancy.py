@@ -314,6 +314,8 @@ def infer_semantic_occupancy(
     teacher_mode: bool | None = None
     from training.reactive_stage_runner import (
         resolve_reactive_batch_projection,
+        resolve_reactive_camera_history,
+        resolve_reactive_front_projection,
     )
 
     model.eval()
@@ -332,6 +334,18 @@ def infer_semantic_occupancy(
                         device=device,
                     )
                 )
+                front_projection = resolve_reactive_front_projection(
+                    batch,
+                    geometry_type,
+                    device=device,
+                )
+                camera_history_tiles, history_projections = (
+                    resolve_reactive_camera_history(
+                        batch,
+                        geometry_type,
+                        device=device,
+                    )
+                )
                 output = model(
                     batch["visual_tiles"].to(device),
                     batch["map_context"].to(device),
@@ -342,6 +356,14 @@ def infer_semantic_occupancy(
                     route_valid=batch["route_valid"].to(device),
                     projection=projection,
                     geometry_type=geometry_type,
+                    camera_history_tiles=camera_history_tiles,
+                    history_projections=history_projections,
+                    front_camera_tile=(
+                        batch.get("front_camera_tile").to(device)
+                        if batch.get("front_camera_tile") is not None
+                        else None
+                    ),
+                    front_projection=front_projection,
                     mode="infer",
                     return_auxiliary=True,
                     compute_bev_segmentation=True,

@@ -74,7 +74,7 @@ def _build_kit_scenes():
 
 
 # View counts are real cameras only; the nav-map is a separate map branch input
-# (not a camera view), so L2D=6, NVIDIA=7, KITScenes=7 (#77).
+# (not a camera view), so L2D=6, NVIDIA=7, KITScenes=6 (#77).
 DATASET_SPECS = [
     pytest.param(
         "l2d", "yaak-ai/L2D", _build_l2d, 6, id="l2d"
@@ -90,7 +90,7 @@ DATASET_SPECS = [
         "kit_scenes",
         "KIT-MRT/KITScenes-Multimodal",
         _build_kit_scenes,
-        7,
+        6,
         id="kit_scenes",
     ),
 ]

@@ -30,17 +30,11 @@ from distributed_training.reactive_data import (
     stage_rank_reactive_shards,
 )
 from navigation.geometry import AUTOE2E_NAVIGATION_GEOMETRY
-from reactive_training_contracts import (
-    MAX_OVERFIT_SAMPLE_COUNT,
-    MIN_OVERFIT_SAMPLE_COUNT,
-)
 from training.reactive_multitask import ReactiveTrainingStage
 
 
 SUPPORTED_WORLD_SIZES = frozenset({2, 4, 8})
 SUPPORTED_PRECISIONS = frozenset({"fp32", "bf16"})
-MIN_OVERFIT_OPTIMIZER_STEPS = 5_000
-BEV_OVERFIT_MIN_POSITIVE_SAMPLES = 8
 BEV_LANE_NEAR_RADIUS_M = 30.0
 CAMERA_FEATURE_SCALE_WEIGHT_METRIC_PREFIX = (
     "camera_feature_scale_weight_"
@@ -50,9 +44,6 @@ PEAK_CUDA_ALLOCATED_BYTES_METRIC_PREFIX = (
 )
 PEAK_CUDA_RESERVED_BYTES_METRIC_PREFIX = (
     "peak_cuda_reserved_bytes_rank_"
-)
-OVERFIT_POSITIVE_SAMPLE_SUPPORT_METRIC_PREFIX = (
-    "overfit_positive_sample_support_"
 )
 BEV_LANE_RANGE_METRIC_PREFIX = "bev_lane_boundary_"
 ROUTE_DESTINATION_LOGIT_RANGE_EPSILON = 1e-6
@@ -172,77 +163,9 @@ def validate_reactive_stage_config(config: Mapping[str, Any]) -> None:
     override = int(config.get("steps_per_epoch", 0))
     if override < 0:
         raise ValueError("steps_per_epoch cannot be negative")
-    overfit_sample_count = int(config.get("overfit_sample_count", 0))
-    if overfit_sample_count not in (
-        0,
-        *range(
-            MIN_OVERFIT_SAMPLE_COUNT,
-            MAX_OVERFIT_SAMPLE_COUNT + 1,
-        ),
-    ):
-        raise ValueError(
-            "overfit_sample_count must be zero or between "
-            f"{MIN_OVERFIT_SAMPLE_COUNT} and "
-            f"{MAX_OVERFIT_SAMPLE_COUNT}"
-        )
-    if (
-        overfit_sample_count
-        and stage is not ReactiveTrainingStage.NUPLAN_FULL
-    ):
-        raise ValueError("BEV overfit mode is valid only for Stage A")
-    if overfit_sample_count and overfit_sample_count % world_size:
-        raise ValueError(
-            "overfit_sample_count must be divisible by num_workers"
-        )
-    overfit_bev_only = config.get("overfit_bev_only")
-    overfit_fixed_lr = config.get("overfit_fixed_lr")
-    if not isinstance(overfit_bev_only, bool):
-        raise ValueError("overfit_bev_only must be a boolean")
-    if not isinstance(overfit_fixed_lr, bool):
-        raise ValueError("overfit_fixed_lr must be a boolean")
-    if not overfit_sample_count and (
-        overfit_bev_only or overfit_fixed_lr
-    ):
-        raise ValueError(
-            "overfit controls require overfit_sample_count"
-        )
-    if overfit_sample_count and not overfit_fixed_lr:
-        raise ValueError("BEV overfit gates require a fixed learning rate")
-    if (
-        overfit_sample_count
-        and int(config["epochs"]) * override
-        < MIN_OVERFIT_OPTIMIZER_STEPS
-    ):
-        raise ValueError(
-            "BEV overfit gates require at least "
-            f"{MIN_OVERFIT_OPTIMIZER_STEPS} optimizer steps"
-        )
-    if overfit_bev_only:
-        expected_weights = {
-            "trajectory_weight": 0.0,
-            "bev_weight": 1.0,
-            "route_weight": 0.0,
-        }
-        mismatches = {
-            name: (float(config[name]), expected)
-            for name, expected in expected_weights.items()
-            if float(config[name]) != expected
-        }
-        if mismatches:
-            raise ValueError(
-                f"BEV-only objective weights differ: {mismatches}"
-            )
-        if float(config["weight_decay"]) != 0.0:
-            raise ValueError("BEV-only capacity probes require weight_decay=0")
-    overfit_shard_limit = int(config.get("overfit_shard_limit", 0))
-    if overfit_shard_limit and overfit_shard_limit < world_size:
-        raise ValueError(
-            "overfit_shard_limit must be zero or at least num_workers"
-        )
-    for name in ("overfit_min_ap", "overfit_min_recall"):
-        threshold = float(config.get(name, -1.0))
-        if not 0.0 < threshold <= 1.0:
-            raise ValueError(f"{name} must be in (0,1]")
+    freeze_bevformer = config.get("freeze_bevformer")
+    if not isinstance(freeze_bevformer, bool):
+        raise ValueError("freeze_bevformer must be a boolean")
     if "bev_pos_weights" in config:
         raise ValueError(
             "bev_pos_weights is derived from train statistics and cannot "
@@ -276,16 +199,6 @@ def validate_reactive_stage_config(config: Mapping[str, Any]) -> None:
     ) < 0.0:
         raise ValueError(
             "selection_ade_regression_margin_m must be non-negative"
-        )
-    gate_dataset_digest = str(
-        config.get("required_gate_dataset_manifest_sha256", "")
-    )
-    if gate_dataset_digest and re.fullmatch(
-        r"[0-9a-f]{64}",
-        gate_dataset_digest,
-    ) is None:
-        raise ValueError(
-            "required_gate_dataset_manifest_sha256 must be empty or SHA-256"
         )
 
 
@@ -400,198 +313,14 @@ def _all_reduce_bev_statistics(local_statistics, device):
     )
 
 
-def _select_bev_overfit_subset(
-    rank_summaries,
-    *,
-    sample_count: int,
-) -> tuple[str, ...]:
-    """Choose a deterministic class-balanced subset with exact rank quotas."""
-    if not (
-        MIN_OVERFIT_SAMPLE_COUNT
-        <= sample_count
-        <= MAX_OVERFIT_SAMPLE_COUNT
-    ):
-        raise ValueError(
-            "BEV overfit subset must contain "
-            f"{MIN_OVERFIT_SAMPLE_COUNT} to "
-            f"{MAX_OVERFIT_SAMPLE_COUNT} samples"
-        )
-    rank_count = len(rank_summaries)
-    if rank_count <= 0 or sample_count % rank_count:
-        raise ValueError(
-            "BEV overfit subset must divide evenly across ranks"
-        )
-    per_rank_count = sample_count // rank_count
-    class_count = 8
-    candidates: list[tuple[str, int, tuple[int, ...]]] = []
-    for rank, summaries in enumerate(rank_summaries):
-        if len(summaries) < per_rank_count:
-            raise ValueError(
-                f"BEV overfit rank {rank} has fewer than "
-                f"{per_rank_count} train samples"
-            )
-        for sample_uid, positive_cell_count in summaries:
-            cell_counts = tuple(
-                int(value) for value in positive_cell_count
-            )
-            if (
-                not sample_uid
-                or len(cell_counts) != class_count
-                or any(value < 0 for value in cell_counts)
-            ):
-                raise ValueError(
-                    "BEV overfit summary has invalid positive cell counts"
-                )
-            candidates.append((str(sample_uid), rank, cell_counts))
-    if len(candidates) < sample_count:
-        raise ValueError(
-            "BEV overfit request exceeds available train samples"
-        )
-    identities = [candidate[0] for candidate in candidates]
-    if len(set(identities)) != len(identities):
-        raise ValueError("BEV overfit candidates contain duplicate samples")
-
-    available_support = [
-        sum(candidate[2][class_index] > 0 for candidate in candidates)
-        for class_index in range(class_count)
-    ]
-    insufficient = {
-        class_index: support
-        for class_index, support in enumerate(available_support)
-        if support < BEV_OVERFIT_MIN_POSITIVE_SAMPLES
-    }
-    if insufficient:
-        raise ValueError(
-            "BEV overfit candidates have insufficient positive sample "
-            f"support: {insufficient}"
-        )
-
-    selected: dict[str, tuple[str, int, tuple[int, ...]]] = {}
-    selected_per_rank = [0] * rank_count
-    selected_support = [0] * class_count
-    while any(
-        support < BEV_OVERFIT_MIN_POSITIVE_SAMPLES
-        for support in selected_support
-    ):
-        under_supported = [
-            class_index
-            for class_index, support in enumerate(selected_support)
-            if support < BEV_OVERFIT_MIN_POSITIVE_SAMPLES
-        ]
-        target_class = min(
-            under_supported,
-            key=lambda class_index: (
-                available_support[class_index],
-                selected_support[class_index],
-                class_index,
-            ),
-        )
-        eligible = [
-            candidate
-            for candidate in candidates
-            if candidate[0] not in selected
-            and candidate[2][target_class] > 0
-            and selected_per_rank[candidate[1]] < per_rank_count
-        ]
-        if not eligible:
-            remaining_capacity = tuple(
-                per_rank_count - count for count in selected_per_rank
-            )
-            available_support_by_rank = tuple(
-                sum(
-                    candidate[1] == rank
-                    and candidate[2][target_class] > 0
-                    for candidate in candidates
-                )
-                for rank in range(rank_count)
-            )
-            remaining_support = tuple(
-                sum(
-                    candidate[0] not in selected
-                    and candidate[1] == rank
-                    and candidate[2][target_class] > 0
-                    for candidate in candidates
-                )
-                for rank in range(rank_count)
-            )
-            raise ValueError(
-                "BEV overfit rank quotas cannot satisfy positive sample "
-                f"support for class {target_class}: "
-                f"available_by_rank="
-                f"{available_support_by_rank}, "
-                f"remaining_support_by_rank={remaining_support}, "
-                f"remaining_capacity_by_rank={remaining_capacity}"
-            )
-        chosen = min(
-            eligible,
-            key=lambda candidate: (
-                -sum(
-                    candidate[2][class_index] > 0
-                    for class_index in under_supported
-                ),
-                -candidate[2][target_class],
-                selected_per_rank[candidate[1]],
-                candidate[0],
-            ),
-        )
-        selected[chosen[0]] = chosen
-        selected_per_rank[chosen[1]] += 1
-        for class_index, cell_count in enumerate(chosen[2]):
-            selected_support[class_index] += int(cell_count > 0)
-
-    for rank in range(rank_count):
-        for candidate in sorted(
-            (
-                candidate
-                for candidate in candidates
-                if candidate[1] == rank
-            ),
-            key=lambda value: value[0],
-        ):
-            if selected_per_rank[rank] >= per_rank_count:
-                break
-            if candidate[0] in selected:
-                continue
-            selected[candidate[0]] = candidate
-            selected_per_rank[rank] += 1
-    if len(selected) != sample_count:
-        raise ValueError("BEV overfit subset construction is incomplete")
-    if selected_per_rank != [per_rank_count] * rank_count:
-        raise ValueError("BEV overfit subset is not rank balanced")
-    if any(
-        support < BEV_OVERFIT_MIN_POSITIVE_SAMPLES
-        for support in selected_support
-    ):
-        raise ValueError("BEV overfit subset lacks class support")
-    return tuple(sorted(selected))
-
-
-def _bev_overfit_selected_support(
-    rank_summaries,
-    sample_uids,
-) -> tuple[int, ...]:
-    selected = set(sample_uids)
-    found: set[str] = set()
-    support = [0] * 8
-    for summaries in rank_summaries:
-        for sample_uid, positive_cell_count in summaries:
-            if sample_uid not in selected:
-                continue
-            found.add(sample_uid)
-            if len(positive_cell_count) != len(support):
-                raise ValueError("BEV overfit summary has invalid class count")
-            for class_index, cell_count in enumerate(positive_cell_count):
-                support[class_index] += int(cell_count > 0)
-    if found != selected:
-        raise ValueError("BEV overfit support omitted selected samples")
-    return tuple(support)
-
-
 def _camera_feature_scale_weights(model) -> tuple[float, ...]:
     import torch
 
     feature_fusion = _base_model(model).Reactive_E2E.FeatureFusion
-    if getattr(feature_fusion, "architecture", None) == "bevformer_v2_t1":
+    if getattr(feature_fusion, "architecture", None) in {
+        "bevformer_v2_t1",
+        "bevformer_v2_t8",
+    }:
         level_count = int(feature_fusion.view_fusion.num_levels)
         if level_count <= 0:
             raise ValueError("BEVFormer feature level count is invalid")
@@ -791,10 +520,19 @@ def reactive_gradient_parameter_groups(model) -> dict[str, list[Any]]:
     }
     groups: dict[str, list[Any]] = {
         "camera": [],
+        "front_gate": [],
         "navigation": [],
         "planner": [],
     }
     assigned: set[int] = set()
+    front_gate = getattr(
+        getattr(reactive.FeatureFusion, "view_fusion", None),
+        "front_residual_gate",
+        None,
+    )
+    if front_gate is not None and front_gate.requires_grad:
+        assigned.add(id(front_gate))
+        groups["front_gate"].append(front_gate)
     for group_name, modules in grouped_modules.items():
         for module in modules:
             if module is None:
@@ -803,6 +541,8 @@ def reactive_gradient_parameter_groups(model) -> dict[str, list[Any]]:
                 if not parameter.requires_grad:
                     continue
                 identity = id(parameter)
+                if parameter is front_gate:
+                    continue
                 if identity in assigned:
                     raise ValueError(
                         "Reactive gradient parameter groups overlap"
@@ -824,17 +564,11 @@ def reactive_gradient_parameter_groups(model) -> dict[str, list[Any]]:
     return groups
 
 
-def _build_reactive_scheduler(optimizer, *, fixed_lr: bool):
+def _build_reactive_scheduler(
+    optimizer,
+):
     import torch
 
-    if fixed_lr:
-        return (
-            "constant_v1",
-            torch.optim.lr_scheduler.LambdaLR(
-                optimizer,
-                lr_lambda=lambda _: 1.0,
-            ),
-        )
     return (
         "selection_plateau_v1",
         torch.optim.lr_scheduler.ReduceLROnPlateau(
@@ -847,6 +581,46 @@ def _build_reactive_scheduler(optimizer, *, fixed_lr: bool):
             cooldown=1,
             min_lr=1e-5,
         ),
+    )
+
+
+def _synchronize_t8_temporal_batch_norm(model) -> int:
+    """Use global rank statistics for T8 temporal normalization."""
+    import torch.nn as nn
+
+    feature_fusion = _base_model(model).Reactive_E2E.FeatureFusion
+    if getattr(feature_fusion, "architecture", None) != "bevformer_v2_t8":
+        return 0
+    temporal_fusion = getattr(feature_fusion, "temporal_fusion", None)
+    if temporal_fusion is None:
+        raise ValueError("BEVFormer V2 T8 temporal fusion is missing")
+    batch_norm_count = sum(
+        isinstance(module, nn.BatchNorm2d)
+        for module in temporal_fusion.modules()
+    )
+    if batch_norm_count <= 0:
+        raise ValueError("BEVFormer V2 T8 temporal fusion has no BatchNorm")
+    feature_fusion.temporal_fusion = (
+        nn.SyncBatchNorm.convert_sync_batchnorm(temporal_fusion)
+    )
+    sync_count = sum(
+        isinstance(module, nn.SyncBatchNorm)
+        for module in feature_fusion.temporal_fusion.modules()
+    )
+    if sync_count != batch_norm_count:
+        raise RuntimeError("T8 BatchNorm conversion was incomplete")
+    return sync_count
+
+
+def _synchronize_gradient_micro_step(
+    optimizer_step_index: int,
+    accumulation_index: int,
+    gradient_accumulation_steps: int,
+) -> bool:
+    """Keep static DDP out of no_sync until its reducer is initialized."""
+    return (
+        optimizer_step_index == 0
+        or accumulation_index == gradient_accumulation_steps - 1
     )
 
 
@@ -867,6 +641,8 @@ def _train_fixed_steps(
 
     from training.reactive_stage_runner import (
         resolve_reactive_batch_projection,
+        resolve_reactive_camera_history,
+        resolve_reactive_front_projection,
     )
 
     model.train()
@@ -884,16 +660,24 @@ def _train_fixed_steps(
         dtype=torch.float64,
         device=device,
     )
-    gradient_group_names = ("camera", "navigation", "planner")
+    gradient_group_names = (
+        "camera",
+        "front_gate",
+        "navigation",
+        "planner",
+    )
     gradient_groups = reactive_gradient_parameter_groups(model)
     gradient_totals = torch.zeros(
         len(gradient_group_names) * 2,
         dtype=torch.float64,
         device=device,
     )
+    require_stage_a_camera_context = (
+        objective.stage is ReactiveTrainingStage.NUPLAN_FULL
+    )
     consumed_samples = 0
     micro_steps = optimizer_steps * gradient_accumulation_steps
-    for _ in range(optimizer_steps):
+    for optimizer_step_index in range(optimizer_steps):
         optimizer.zero_grad(set_to_none=True)
         finite_step = torch.ones((), dtype=torch.bool, device=device)
         for accumulation_index in range(gradient_accumulation_steps):
@@ -910,9 +694,24 @@ def _train_fixed_steps(
                     device=device,
                 )
             )
-            synchronize = (
-                accumulation_index
-                == gradient_accumulation_steps - 1
+            front_projection = resolve_reactive_front_projection(
+                batch,
+                geometry_type,
+                device=device,
+                required=require_stage_a_camera_context,
+            )
+            camera_history_tiles, history_projections = (
+                resolve_reactive_camera_history(
+                    batch,
+                    geometry_type,
+                    device=device,
+                    required=require_stage_a_camera_context,
+                )
+            )
+            synchronize = _synchronize_gradient_micro_step(
+                optimizer_step_index,
+                accumulation_index,
+                gradient_accumulation_steps,
             )
             sync_context = (
                 contextlib.nullcontext()
@@ -935,6 +734,10 @@ def _train_fixed_steps(
                         route_valid=batch["route_valid"],
                         projection=projection,
                         geometry_type=geometry_type,
+                        camera_history_tiles=camera_history_tiles,
+                        history_projections=history_projections,
+                        front_camera_tile=batch.get("front_camera_tile"),
+                        front_projection=front_projection,
                         mode="train",
                         compute_bev_segmentation=(
                             objective.compute_bev_segmentation
@@ -1028,6 +831,7 @@ def _train_fixed_steps(
     dist.all_reduce(packed, op=dist.ReduceOp.SUM)
     denominator = dist.get_world_size() * micro_steps
     gradient_denominator = dist.get_world_size() * optimizer_steps
+    consumed_offset = len(term_names) + len(gradient_group_names) * 2
     metrics = {
         "total": float(packed[0].item() / denominator),
         "trajectory": float(packed[1].item() / denominator),
@@ -1041,17 +845,19 @@ def _train_fixed_steps(
         "route_reconstruction": float(
             packed[5].item() / denominator
         ),
-        "consumed_samples": float(packed[12].item()),
-        "loader_restarts": float(packed[13].item()),
+        "consumed_samples": float(packed[consumed_offset].item()),
+        "loader_restarts": float(packed[consumed_offset + 1].item()),
         "local_consumed_samples": float(consumed_samples),
         "local_loader_restarts": float(iterator.restarts),
     }
     for group_index, group_name in enumerate(gradient_group_names):
         metrics[f"gradient_{group_name}_pre_clip_norm"] = float(
-            packed[6 + group_index * 2].item() / gradient_denominator
+            packed[len(term_names) + group_index * 2].item()
+            / gradient_denominator
         )
         metrics[f"gradient_{group_name}_clip_scale"] = float(
-            packed[7 + group_index * 2].item() / gradient_denominator
+            packed[len(term_names) + group_index * 2 + 1].item()
+            / gradient_denominator
         )
     return metrics
 
@@ -1295,6 +1101,8 @@ def _evaluate_global_reactive(
     from training.losses.control_rollout import integrate_controls_torch
     from training.reactive_stage_runner import (
         resolve_reactive_batch_projection,
+        resolve_reactive_camera_history,
+        resolve_reactive_front_projection,
     )
 
     base = _base_model(model)
@@ -1350,6 +1158,24 @@ def _evaluate_global_reactive(
                         device=device,
                     )
                 )
+                front_projection = resolve_reactive_front_projection(
+                    batch,
+                    geometry_type,
+                    device=device,
+                    required=(
+                        stage is ReactiveTrainingStage.NUPLAN_FULL
+                    ),
+                )
+                camera_history_tiles, history_projections = (
+                    resolve_reactive_camera_history(
+                        batch,
+                        geometry_type,
+                        device=device,
+                        required=(
+                            stage is ReactiveTrainingStage.NUPLAN_FULL
+                        ),
+                    )
+                )
                 output = base(
                     batch["visual_tiles"],
                     batch["map_context"],
@@ -1360,6 +1186,10 @@ def _evaluate_global_reactive(
                     route_valid=batch["route_valid"],
                     projection=projection,
                     geometry_type=geometry_type,
+                    camera_history_tiles=camera_history_tiles,
+                    history_projections=history_projections,
+                    front_camera_tile=batch.get("front_camera_tile"),
+                    front_projection=front_projection,
                     mode="infer",
                     return_auxiliary=(
                         stage is ReactiveTrainingStage.NUPLAN_FULL
@@ -1870,59 +1700,6 @@ def _load_resume_checkpoint(
     )
 
 
-def _bev_overfit_gate_result(
-    validation: Mapping[str, float],
-    *,
-    minimum_ap: float,
-    minimum_recall: float,
-) -> dict[str, Any]:
-    from data_processing.reactive_training_artifacts import (
-        BEV_SEGMENTATION_CLASSES,
-    )
-
-    class_average_precisions = {
-        class_name: float(
-            validation[f"bev_{class_name}_average_precision"]
-        )
-        for class_name in BEV_SEGMENTATION_CLASSES
-    }
-    class_recalls = {
-        class_name: float(validation[f"bev_{class_name}_recall"])
-        for class_name in BEV_SEGMENTATION_CLASSES
-    }
-    minimum_ap_class = min(
-        class_average_precisions,
-        key=class_average_precisions.__getitem__,
-    )
-    minimum_recall_class = min(
-        class_recalls,
-        key=class_recalls.__getitem__,
-    )
-    observed_ap = class_average_precisions[minimum_ap_class]
-    observed_recall = class_recalls[minimum_recall_class]
-    return {
-        "passed": (
-            observed_ap >= minimum_ap
-            and observed_recall >= minimum_recall
-        ),
-        "minimum_ap": observed_ap,
-        "minimum_ap_class": minimum_ap_class,
-        "minimum_recall": observed_recall,
-        "minimum_recall_class": minimum_recall_class,
-    }
-
-
-def _overfit_gate_passed(
-    *,
-    thresholds_passed: bool,
-    executed_optimizer_steps: int,
-) -> bool:
-    return (
-        thresholds_passed
-        and executed_optimizer_steps >= MIN_OVERFIT_OPTIMIZER_STEPS
-    )
-
-
 def _report_reactive_epoch(
     report,
     metrics: Mapping[str, Any],
@@ -1952,15 +1729,11 @@ def train_loop_per_worker(config: dict[str, Any]) -> None:
         make_multi_dataset_loader,
         passthrough_nodesplitter,
         select_bev_validation_sample_uids,
-        summarize_bev_positive_samples,
         summarize_bev_training_statistics,
-    )
-    from data_processing.reactive_training_artifacts import (
-        BEV_SEGMENTATION_CLASSES,
     )
     from model_components.auto_e2e import AutoE2E
     from model_components.bevformer_v2_pretrained import (
-        load_bevformer_v2_t1_checkpoint,
+        load_bevformer_v2_t8_checkpoint,
     )
     from training.reactive_multitask import (
         REACTIVE_MODEL_ARCHITECTURE_VERSION,
@@ -1993,26 +1766,8 @@ def train_loop_per_worker(config: dict[str, Any]) -> None:
         list(config["source_uris"]),
         stage=stage,
     )
-    required_gate_dataset_digest = str(
-        config.get("required_gate_dataset_manifest_sha256", "")
-    )
-    if (
-        required_gate_dataset_digest
-        and plan.dataset_manifest_sha256
-        != required_gate_dataset_digest
-    ):
-        raise ValueError(
-            "BEV overfit gate dataset differs from the full training dataset"
-        )
-    overfit_sample_count = int(config["overfit_sample_count"])
-    overfit_bev_only = bool(config["overfit_bev_only"])
-    overfit_fixed_lr = bool(config["overfit_fixed_lr"])
-    assignment_shards = plan.shards
-    overfit_shard_limit = int(config.get("overfit_shard_limit", 0))
-    if overfit_sample_count and overfit_shard_limit:
-        assignment_shards = plan.shards[:overfit_shard_limit]
     assignments = assign_reactive_shards(
-        assignment_shards,
+        plan.shards,
         world_size=world_size,
     )
     assignment_sha256 = reactive_assignment_sha256(assignments)
@@ -2034,71 +1789,44 @@ def train_loop_per_worker(config: dict[str, Any]) -> None:
         if stage is ReactiveTrainingStage.NUPLAN_FULL
         else None
     )
-    overfit_sample_uids: tuple[str, ...] | None = None
-    overfit_positive_sample_support: tuple[int, ...] | None = None
-    overfit_sample_uid_sha256 = ""
-    if overfit_sample_count:
-        assert local_bev_records is not None
-        local_summaries = summarize_bev_positive_samples(
-            local_bev_records,
-            val_fraction=float(config["val_fraction"]),
-        )
-        rank_summaries: list[Any] = [None] * world_size
-        dist.all_gather_object(rank_summaries, local_summaries)
-        overfit_sample_uids = _select_bev_overfit_subset(
-            rank_summaries,
-            sample_count=overfit_sample_count,
-        )
-        overfit_positive_sample_support = (
-            _bev_overfit_selected_support(
-                rank_summaries,
-                overfit_sample_uids,
-            )
-        )
-        overfit_sample_uid_sha256 = hashlib.sha256(
-            "\n".join(overfit_sample_uids).encode("utf-8")
-        ).hexdigest()
     validation_sample_uids: tuple[str, ...] | None = None
     validation_sample_uid_sha256 = ""
     validation_sample_count = 0
-    if not overfit_sample_count:
-        local_validation_limit = math.ceil(
-            int(config.get("validation_sample_limit", 1024))
-            / world_size
+    local_validation_limit = math.ceil(
+        int(config.get("validation_sample_limit", 1024))
+        / world_size
+    )
+    if stage is ReactiveTrainingStage.NUPLAN_FULL:
+        assert local_bev_records is not None
+        validation_sample_uids = select_bev_validation_sample_uids(
+            local_bev_records,
+            val_fraction=float(config["val_fraction"]),
+            sample_limit=local_validation_limit,
         )
-        if stage is ReactiveTrainingStage.NUPLAN_FULL:
-            assert local_bev_records is not None
-            validation_sample_uids = select_bev_validation_sample_uids(
-                local_bev_records,
-                val_fraction=float(config["val_fraction"]),
-                sample_limit=local_validation_limit,
-            )
-        else:
-            validation_sample_uids = discover_validation_sample_uids(
-                local_directories,
-                val_fraction=float(config["val_fraction"]),
-                sample_limit=local_validation_limit,
-            )
-        rank_validation_uids: list[Any] = [None] * world_size
-        dist.all_gather_object(
-            rank_validation_uids,
-            validation_sample_uids,
+    else:
+        validation_sample_uids = discover_validation_sample_uids(
+            local_directories,
+            val_fraction=float(config["val_fraction"]),
+            sample_limit=local_validation_limit,
         )
-        global_validation_uids = sorted(
-            str(sample_uid)
-            for rank_uids in rank_validation_uids
-            for sample_uid in rank_uids
+    rank_validation_uids: list[Any] = [None] * world_size
+    dist.all_gather_object(
+        rank_validation_uids,
+        validation_sample_uids,
+    )
+    global_validation_uids = sorted(
+        str(sample_uid)
+        for rank_uids in rank_validation_uids
+        for sample_uid in rank_uids
+    )
+    if len(set(global_validation_uids)) != len(global_validation_uids):
+        raise ValueError(
+            "Reactive validation subset contains duplicate samples"
         )
-        if len(set(global_validation_uids)) != len(
-            global_validation_uids
-        ):
-            raise ValueError(
-                "Reactive validation subset contains duplicate samples"
-            )
-        validation_sample_count = len(global_validation_uids)
-        validation_sample_uid_sha256 = hashlib.sha256(
-            "\n".join(global_validation_uids).encode("utf-8")
-        ).hexdigest()
+    validation_sample_count = len(global_validation_uids)
+    validation_sample_uid_sha256 = hashlib.sha256(
+        "\n".join(global_validation_uids).encode("utf-8")
+    ).hexdigest()
     bev_pos_weights: tuple[float, ...] = (1.0,) * 8
     bev_repeat_factors: tuple[int, ...] = (1,) * 8
     bev_repeat_policy = None
@@ -2109,7 +1837,6 @@ def train_loop_per_worker(config: dict[str, Any]) -> None:
         local_raw_statistics = summarize_bev_training_statistics(
             local_bev_records,
             val_fraction=float(config["val_fraction"]),
-            sample_uids=overfit_sample_uids,
         )
         raw_bev_statistics = _all_reduce_bev_statistics(
             local_raw_statistics,
@@ -2133,36 +1860,31 @@ def train_loop_per_worker(config: dict[str, Any]) -> None:
             ),
             max_repeat=int(config["bev_max_repeat"]),
         )
-        if overfit_sample_count:
-            effective_bev_statistics = raw_bev_statistics
-        else:
-            local_effective_statistics = (
-                summarize_bev_training_statistics(
-                    local_bev_records,
-                    val_fraction=float(config["val_fraction"]),
-                    repeat_factors=bev_repeat_factors,
-                    sample_uids=overfit_sample_uids,
-                )
+        local_effective_statistics = (
+            summarize_bev_training_statistics(
+                local_bev_records,
+                val_fraction=float(config["val_fraction"]),
+                repeat_factors=bev_repeat_factors,
             )
-            effective_bev_statistics = _all_reduce_bev_statistics(
-                local_effective_statistics,
-                device,
-            )
+        )
+        effective_bev_statistics = _all_reduce_bev_statistics(
+            local_effective_statistics,
+            device,
+        )
         bev_pos_weights = tuple(round(value, 6) for value in (
             derive_bev_pos_weights(
                 effective_bev_statistics,
                 max_weight=float(config["bev_pos_weight_cap"]),
             )
         ))
-        if not overfit_sample_count:
-            mean_repeat = (
-                effective_bev_statistics.effective_exposure_count
-                / effective_bev_statistics.sample_count
-            )
-            bev_repeat_policy = BEVClassRepeatPolicy(
-                repeat_factors=bev_repeat_factors,
-                mean_repeat=mean_repeat,
-            )
+        mean_repeat = (
+            effective_bev_statistics.effective_exposure_count
+            / effective_bev_statistics.sample_count
+        )
+        bev_repeat_policy = BEVClassRepeatPolicy(
+            repeat_factors=bev_repeat_factors,
+            mean_repeat=mean_repeat,
+        )
 
     seed = int(config["training_seed"])
     _seed_epoch(seed, rank, 0)
@@ -2187,13 +1909,13 @@ def train_loop_per_worker(config: dict[str, Any]) -> None:
     initialization_metadata: dict[str, object] | None = None
     lineage: dict[str, Any] = {}
     if initialize_bevformer:
-        pretrained_path = cache_root / "bevformer-v2-r50-t1.pth"
+        pretrained_path = cache_root / "bevformer-v2-r50-t8.pth"
         pretrained_path.parent.mkdir(parents=True, exist_ok=True)
         _download_checkpoint(
             str(config["bevformer_pretrained_checkpoint_uri"]),
             pretrained_path,
         )
-        initialization_report = load_bevformer_v2_t1_checkpoint(
+        initialization_report = load_bevformer_v2_t8_checkpoint(
             model,
             pretrained_path,
             expected_sha256=str(
@@ -2208,7 +1930,13 @@ def train_loop_per_worker(config: dict[str, Any]) -> None:
         parent_path = cache_root / "stage-a-parent.pt"
         parent_path.parent.mkdir(parents=True, exist_ok=True)
         _download_checkpoint(parent_uri, parent_path)
-        lineage.update(load_stage_a_parent(model, parent_path))
+        lineage.update(
+            load_stage_a_parent(
+                model,
+                parent_path,
+                target_camera_slots=plan.camera_slots,
+            )
+        )
         inherited_initialization = lineage.get(
             "bevformer_v2_initialization"
         )
@@ -2217,7 +1945,11 @@ def train_loop_per_worker(config: dict[str, Any]) -> None:
     configure_model_for_stage(
         model,
         stage,
-        bev_only=overfit_bev_only,
+        freeze_bevformer=bool(config["freeze_bevformer"]),
+        train_bev_head=float(config["bev_weight"]) > 0.0,
+    )
+    synchronized_temporal_batch_norm_count = (
+        _synchronize_t8_temporal_batch_norm(model)
     )
     objective = ReactiveMultitaskObjective(
         stage,
@@ -2232,8 +1964,11 @@ def train_loop_per_worker(config: dict[str, Any]) -> None:
         model,
         parallel_strategy="ddp",
         parallel_strategy_kwargs={
-            "find_unused_parameters": True,
+            # Reentrant activation checkpoints require static DDP when a stage
+            # leaves parameters such as pseudo_projection unused.
+            "find_unused_parameters": False,
             "gradient_as_bucket_view": True,
+            "static_graph": True,
         },
     )
     optimizer = torch.optim.AdamW(
@@ -2245,30 +1980,16 @@ def train_loop_per_worker(config: dict[str, Any]) -> None:
         lr=float(config["learning_rate"]),
         weight_decay=float(config["weight_decay"]),
     )
-    scheduler_identity, scheduler = _build_reactive_scheduler(
-        optimizer,
-        fixed_lr=overfit_fixed_lr,
+    scheduler_identity, scheduler = _build_reactive_scheduler(optimizer)
+    calculated_steps = optimizer_steps_per_epoch(
+        total_samples=plan.total_samples,
+        val_fraction=float(config["val_fraction"]),
+        world_size=world_size,
+        per_rank_batch_size=int(config["per_rank_batch_size"]),
+        gradient_accumulation_steps=int(
+            config["gradient_accumulation_steps"]
+        ),
     )
-
-    if overfit_sample_count:
-        per_rank_overfit_samples = overfit_sample_count // world_size
-        calculated_steps = max(1, math.ceil(
-            per_rank_overfit_samples
-            / (
-                int(config["per_rank_batch_size"])
-                * int(config["gradient_accumulation_steps"])
-            )
-        ))
-    else:
-        calculated_steps = optimizer_steps_per_epoch(
-            total_samples=plan.total_samples,
-            val_fraction=float(config["val_fraction"]),
-            world_size=world_size,
-            per_rank_batch_size=int(config["per_rank_batch_size"]),
-            gradient_accumulation_steps=int(
-                config["gradient_accumulation_steps"]
-            ),
-        )
     optimizer_steps = int(config["steps_per_epoch"]) or calculated_steps
     global_batch = (
         world_size
@@ -2278,6 +1999,8 @@ def train_loop_per_worker(config: dict[str, Any]) -> None:
     expected_resume = {
         "model_architecture_version": REACTIVE_MODEL_ARCHITECTURE_VERSION,
         "dataset_manifest_sha256": plan.dataset_manifest_sha256,
+        "camera_slots": list(plan.camera_slots),
+        "physical_camera_order": list(plan.physical_camera_order),
         "distributed_assignment_sha256": assignment_sha256,
         "distributed_global_batch": global_batch,
         "distributed_precision": str(config["precision"]),
@@ -2291,8 +2014,13 @@ def train_loop_per_worker(config: dict[str, Any]) -> None:
         "corridor_pos_weight": float(config["corridor_pos_weight"]),
         "training_seed": seed,
         "scheduler_identity": scheduler_identity,
-        "overfit_bev_only": overfit_bev_only,
-        "overfit_fixed_lr": overfit_fixed_lr,
+        "temporal_normalization_identity": (
+            "sync_batch_norm_running_stats_v1"
+        ),
+        "synchronized_temporal_batch_norm_count": (
+            synchronized_temporal_batch_norm_count
+        ),
+        "freeze_bevformer": bool(config["freeze_bevformer"]),
         "training_stage": stage.value,
         "bev_pos_weights": list(bev_pos_weights),
         "bev_repeat_factors": list(bev_repeat_factors),
@@ -2308,8 +2036,6 @@ def train_loop_per_worker(config: dict[str, Any]) -> None:
     best_selection_score = -float("inf")
     best_ade = float("inf")
     epoch_history: list[dict[str, Any]] = []
-    if overfit_sample_count and restored is not None:
-        raise ValueError("BEV overfit mode cannot resume a checkpoint")
     if restored is not None:
         with restored.as_directory() as checkpoint_directory:
             resume_payload = torch.load(
@@ -2358,6 +2084,8 @@ def train_loop_per_worker(config: dict[str, Any]) -> None:
                 "stage_a_parent_checkpoint_sha256",
                 "stage_a_config_digest",
                 "stage_a_model_state_sha256",
+                "stage_a_freeze_bevformer",
+                "stage_a_camera_embedding_transfer",
                 "bevformer_v2_initialization_mode",
             ):
                 lineage_value = resume_config.get(lineage_key)
@@ -2393,6 +2121,8 @@ def train_loop_per_worker(config: dict[str, Any]) -> None:
         "model_architecture_version": REACTIVE_MODEL_ARCHITECTURE_VERSION,
         "backbone": str(config["backbone"]),
         "embed_dim": 256,
+        "camera_slots": list(plan.camera_slots),
+        "physical_camera_order": list(plan.physical_camera_order),
         "is_pretrained": bool(config["is_pretrained"]),
         **constructor_kwargs,
         "distributed_assignment_sha256": assignment_sha256,
@@ -2408,8 +2138,13 @@ def train_loop_per_worker(config: dict[str, Any]) -> None:
         "corridor_pos_weight": float(config["corridor_pos_weight"]),
         "training_seed": seed,
         "scheduler_identity": scheduler_identity,
-        "overfit_bev_only": overfit_bev_only,
-        "overfit_fixed_lr": overfit_fixed_lr,
+        "temporal_normalization_identity": (
+            "sync_batch_norm_running_stats_v1"
+        ),
+        "synchronized_temporal_batch_norm_count": (
+            synchronized_temporal_batch_norm_count
+        ),
+        "freeze_bevformer": bool(config["freeze_bevformer"]),
         "bev_pos_weights": list(bev_pos_weights),
         "bev_repeat_factors": list(bev_repeat_factors),
         "bev_taxonomy_version": BEV_SEGMENTATION_TAXONOMY_VERSION,
@@ -2428,20 +2163,6 @@ def train_loop_per_worker(config: dict[str, Any]) -> None:
         model_config["bev_effective_statistics"] = (
             effective_bev_statistics.metadata()
         )
-    if overfit_sample_uids is not None:
-        assert overfit_positive_sample_support is not None
-        model_config["bev_overfit_sample_count"] = len(
-            overfit_sample_uids
-        )
-        model_config["bev_overfit_positive_sample_support"] = list(
-            overfit_positive_sample_support
-        )
-        model_config["bev_overfit_sample_uid_sha256"] = (
-            overfit_sample_uid_sha256
-        )
-        model_config["bev_overfit_staged_shard_count"] = len(
-            assignment_shards
-        )
     started = time.perf_counter()
     for epoch in range(start_epoch, int(config["epochs"]) + 1):
         _seed_epoch(seed, rank, epoch)
@@ -2455,7 +2176,6 @@ def train_loop_per_worker(config: dict[str, Any]) -> None:
             shuffle=int(config["shuffle_buffer"]),
             shuffle_seed=seed + epoch,
             pin_memory=True,
-            sample_uids=overfit_sample_uids,
             decode_future_frames=False,
             bev_repeat_policy=bev_repeat_policy,
             nodesplitter=passthrough_nodesplitter,
@@ -2477,16 +2197,12 @@ def train_loop_per_worker(config: dict[str, Any]) -> None:
             local_directories,
             batch_size=int(config["per_rank_batch_size"]),
             num_workers=min(int(config["num_loader_workers"]), 1),
-            split=("train" if overfit_sample_count else "val"),
+            split="val",
             val_fraction=float(config["val_fraction"]),
             shuffle=0,
             pin_memory=True,
             max_active_loaders=1,
-            sample_uids=(
-                overfit_sample_uids
-                if overfit_sample_count
-                else validation_sample_uids
-            ),
+            sample_uids=validation_sample_uids,
             decode_future_frames=False,
             nodesplitter=passthrough_nodesplitter,
         )
@@ -2499,42 +2215,8 @@ def train_loop_per_worker(config: dict[str, Any]) -> None:
             probability_bins=int(config["bev_ap_bins"]),
             ade_scale_m=float(config["selection_ade_scale_m"]),
         )
-        if overfit_fixed_lr:
-            scheduler.step()
-        else:
-            scheduler.step(validation["selection_score"])
-        overfit_gate = None
-        overfit_gate_pass = False
-        overfit_thresholds_pass = False
-        overfit_failure_message = None
+        scheduler.step(validation["selection_score"])
         executed_optimizer_steps = epoch * optimizer_steps
-        if overfit_sample_count:
-            overfit_gate = _bev_overfit_gate_result(
-                validation,
-                minimum_ap=float(config["overfit_min_ap"]),
-                minimum_recall=float(config["overfit_min_recall"]),
-            )
-            overfit_thresholds_pass = bool(overfit_gate["passed"])
-            overfit_gate_pass = _overfit_gate_passed(
-                thresholds_passed=overfit_thresholds_pass,
-                executed_optimizer_steps=executed_optimizer_steps,
-            )
-            if (
-                epoch == int(config["epochs"])
-                and not overfit_gate_pass
-            ):
-                overfit_failure_message = (
-                    "BEV overfit gate failed: "
-                    f"minimum_ap={overfit_gate['minimum_ap']:.6f} "
-                    f"class={overfit_gate['minimum_ap_class']} "
-                    "minimum_recall="
-                    f"{overfit_gate['minimum_recall']:.6f} "
-                    f"class={overfit_gate['minimum_recall_class']} "
-                    "executed_optimizer_steps="
-                    f"{executed_optimizer_steps} evidence_uri="
-                    f"{str(config['storage_path']).rstrip('/')}/"
-                    f"{config['run_name']}"
-                )
         maximum_delta = _maximum_parameter_delta(
             model,
             world_size=world_size,
@@ -2583,7 +2265,7 @@ def train_loop_per_worker(config: dict[str, Any]) -> None:
             else -1.0
         )
         checkpoint_retention_score = checkpoint_selection_score
-        if overfit_gate_pass or epoch == int(config["epochs"]):
+        if epoch == int(config["epochs"]):
             checkpoint_retention_score = (
                 2.0 + validation["selection_score"]
             )
@@ -2594,15 +2276,9 @@ def train_loop_per_worker(config: dict[str, Any]) -> None:
             f"{CAMERA_FEATURE_SCALE_WEIGHT_METRIC_PREFIX}{index}": weight
             for index, weight in enumerate(feature_scale_weights)
         }
-        if overfit_positive_sample_support is not None:
-            for class_name, support in zip(
-                BEV_SEGMENTATION_CLASSES,
-                overfit_positive_sample_support,
-            ):
-                diagnostic_metrics[
-                    f"{OVERFIT_POSITIVE_SAMPLE_SUPPORT_METRIC_PREFIX}"
-                    f"{class_name}"
-                ] = support
+        diagnostic_metrics["synchronized_temporal_batch_norm_count"] = (
+            synchronized_temporal_batch_norm_count
+        )
         for evidence in rank_evidence:
             if not isinstance(evidence, Mapping):
                 raise RuntimeError("Reactive rank evidence is incomplete")
@@ -2627,27 +2303,6 @@ def train_loop_per_worker(config: dict[str, Any]) -> None:
         checkpoint_metrics["executed_optimizer_steps"] = (
             executed_optimizer_steps
         )
-        checkpoint_metrics["overfit_gate_pass"] = int(
-            overfit_gate_pass
-        )
-        checkpoint_metrics["overfit_thresholds_pass"] = int(
-            overfit_thresholds_pass
-        )
-        if overfit_gate is not None:
-            checkpoint_metrics.update({
-                "overfit_minimum_ap": float(
-                    overfit_gate["minimum_ap"]
-                ),
-                "overfit_minimum_ap_class": str(
-                    overfit_gate["minimum_ap_class"]
-                ),
-                "overfit_minimum_recall": float(
-                    overfit_gate["minimum_recall"]
-                ),
-                "overfit_minimum_recall_class": str(
-                    overfit_gate["minimum_recall_class"]
-                ),
-            })
         checkpoint_sha256: str | None = None
         with tempfile.TemporaryDirectory() as checkpoint_directory:
             checkpoint = None
@@ -2710,15 +2365,8 @@ def train_loop_per_worker(config: dict[str, Any]) -> None:
                 ),
                 "maximum_parameter_delta": maximum_delta,
                 "optimizer_steps_per_epoch": optimizer_steps,
-                "overfit_bev_only": overfit_bev_only,
-                "overfit_fixed_lr": overfit_fixed_lr,
-                "overfit_gate_pass": int(overfit_gate_pass),
-                "overfit_sample_count": overfit_sample_count,
-                "overfit_sample_uid_sha256": (
-                    overfit_sample_uid_sha256
-                ),
-                "overfit_thresholds_pass": int(
-                    overfit_thresholds_pass
+                "freeze_bevformer": int(
+                    bool(config["freeze_bevformer"])
                 ),
                 "route_weight": float(config["route_weight"]),
                 "scheduler_identity": scheduler_identity,
@@ -2770,7 +2418,12 @@ def train_loop_per_worker(config: dict[str, Any]) -> None:
                 metrics[f"bev_repeat_factor_{class_index}"] = (
                     bev_repeat_factors[class_index]
                 )
-            for group_name in ("camera", "navigation", "planner"):
+            for group_name in (
+                "camera",
+                "front_gate",
+                "navigation",
+                "planner",
+            ):
                 metrics[
                     f"train_gradient_{group_name}_pre_clip_norm"
                 ] = train_metrics[
@@ -2780,19 +2433,6 @@ def train_loop_per_worker(config: dict[str, Any]) -> None:
                     train_metrics[
                         f"gradient_{group_name}_clip_scale"
                     ]
-                )
-            if overfit_gate is not None:
-                metrics["overfit_minimum_ap"] = float(
-                    overfit_gate["minimum_ap"]
-                )
-                metrics["overfit_minimum_ap_class"] = str(
-                    overfit_gate["minimum_ap_class"]
-                )
-                metrics["overfit_minimum_recall"] = float(
-                    overfit_gate["minimum_recall"]
-                )
-                metrics["overfit_minimum_recall_class"] = str(
-                    overfit_gate["minimum_recall_class"]
                 )
             epoch_history.append(metrics)
             if rank == 0:
@@ -2815,10 +2455,7 @@ def train_loop_per_worker(config: dict[str, Any]) -> None:
                 train.report,
                 metrics,
                 checkpoint=checkpoint,
-                failure_message=overfit_failure_message,
             )
-        if overfit_gate_pass:
-            return
 
 
 def _result_checkpoint_entry(entry) -> tuple[Any, dict[str, Any]]:
@@ -2834,15 +2471,10 @@ def _result_checkpoint_entry(entry) -> tuple[Any, dict[str, Any]]:
 
 def _select_result_checkpoint(
     result,
-    *,
-    overfit_mode: bool,
 ) -> tuple[Any, dict[str, Any]]:
-    """Select the gated final checkpoint or the best ADE-guarded checkpoint."""
+    """Select the best ADE-guarded checkpoint."""
     if result.checkpoint is None:
         raise RuntimeError("Reactive Ray training returned no checkpoint")
-    final_metrics = dict(result.metrics)
-    if overfit_mode:
-        return result.checkpoint, final_metrics
 
     candidates = []
     for entry in getattr(result, "best_checkpoints", ()) or ():
@@ -2906,11 +2538,7 @@ def run_reactive_stage(config: Mapping[str, Any]) -> dict[str, Any]:
         run_config=train.RunConfig(
             name=str(config["run_name"]),
             storage_path=str(config["storage_path"]),
-            failure_config=train.FailureConfig(
-                max_failures=(
-                    0 if int(config["overfit_sample_count"]) else 2
-                ),
-            ),
+            failure_config=train.FailureConfig(max_failures=2),
             checkpoint_config=train.CheckpointConfig(
                 num_to_keep=None,
                 checkpoint_score_attribute="checkpoint_retention_score",
@@ -2922,10 +2550,7 @@ def run_reactive_stage(config: Mapping[str, Any]) -> dict[str, Any]:
     if result.checkpoint is None:
         raise RuntimeError("Reactive Ray training returned no checkpoint")
     history = _checkpoint_history(result.checkpoint)
-    checkpoint, metrics = _select_result_checkpoint(
-        result,
-        overfit_mode=bool(int(config["overfit_sample_count"])),
-    )
+    checkpoint, metrics = _select_result_checkpoint(result)
     checkpoint_uri = normalize_ray_checkpoint_uri(
         str(checkpoint.path),
         str(config["storage_path"]),

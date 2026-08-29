@@ -95,10 +95,14 @@ def _build_model_with_mock_backbone(num_views, fusion_mode="bev", device=None,
     from unittest.mock import patch
     from model_components.auto_e2e import AutoE2E
 
+    view_fusion_kwargs = {"bev_h": 8, "bev_w": 8}
+    view_fusion_kwargs.update(
+        model_kwargs.pop("view_fusion_kwargs", {})
+    )
     with patch('model_components.reactive_e2e.Backbone', MockBackbone):
         model = AutoE2E(
             num_views=num_views,
-            view_fusion_kwargs={"bev_h": 8, "bev_w": 8},
+            view_fusion_kwargs=view_fusion_kwargs,
             num_timesteps=num_timesteps,
             planner_mode=planner_mode,
             planner_kwargs=planner_kwargs,

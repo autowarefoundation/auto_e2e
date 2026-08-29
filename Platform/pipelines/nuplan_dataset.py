@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import functools
+import io
 import os
-from typing import List, NamedTuple, Optional
+import re
+from typing import Any, List, Mapping, NamedTuple, Optional, Sequence
 
 from flytekit import (
     PodTemplate,
@@ -16,9 +18,24 @@ from flytekit import (
 )
 from flytekit.types.directory import FlyteDirectory
 from flytekit.types.file import FlyteFile
+from navigation.contracts import canonical_json_bytes
 
 from data_processing.reactive_training_artifacts import (
     BEV_SEGMENTATION_TAXONOMY_VERSION,
+)
+from data_parsing.nuplan import (
+    NUPLAN_CAMERA_SYNC_TOLERANCE_US,
+    NUPLAN_HISTORY_CAMERA_SPREAD_MAX_US,
+    NUPLAN_HISTORY_FALLBACK_MAX_OFFSET_US,
+    NUPLAN_PACK_MANIFEST_VERSION,
+)
+from reactive_training_contracts import (
+    REACTIVE_BEVFORMER_FRAME_INTERVAL_US,
+    REACTIVE_BEVFORMER_FRAME_OFFSETS,
+    REACTIVE_BEVFORMER_HISTORY_FRAMES,
+    REACTIVE_CAMERA_IMAGE_SIZE,
+    REACTIVE_FRONT_CAMERA_IMAGE_SIZE,
+    REACTIVE_FRONT_CAMERA_INDEX,
 )
 
 
@@ -26,6 +43,10 @@ DATA_PREP_IMAGE = os.environ.get(
     "AUTO_E2E_DATA_PREP_IMAGE",
     "auto-e2e/data-prep:latest",
 )
+NUPLAN_FULL_TRAIN_GROUP_COUNT = 43
+NUPLAN_FULL_TRAIN_LOG_COUNT = 1_085
+NUPLAN_FULL_TRAIN_SAMPLE_LIMIT = 131_072
+NUPLAN_FULL_PACK_EPHEMERAL_STORAGE = "1200Gi"
 
 
 class NuPlanRawSnapshotOutput(NamedTuple):
@@ -34,6 +55,83 @@ class NuPlanRawSnapshotOutput(NamedTuple):
     snapshot_prefix: str
     archive_count: int
     total_size_bytes: int
+
+
+class _S3RangeReader(io.RawIOBase):
+    """Expose one immutable S3 object as a seekable range-backed stream."""
+
+    def __init__(
+        self,
+        s3_client: Any,
+        *,
+        bucket: str,
+        key: str,
+        size: int,
+        archive_id: str,
+    ) -> None:
+        self._s3 = s3_client
+        self.bucket = bucket
+        self.key = key
+        self.size = size
+        self.archive_id = archive_id
+        self.position = 0
+        head = self._s3.head_object(Bucket=self.bucket, Key=self.key)
+        if int(head["ContentLength"]) != self.size:
+            raise ValueError(
+                "nuPlan DB archive size changed for "
+                f"{self.archive_id!r}"
+            )
+
+    def readable(self) -> bool:
+        return True
+
+    def seekable(self) -> bool:
+        return True
+
+    def tell(self) -> int:
+        return self.position
+
+    def seek(
+        self,
+        offset: int,
+        whence: int = io.SEEK_SET,
+    ) -> int:
+        if whence == io.SEEK_SET:
+            position = offset
+        elif whence == io.SEEK_CUR:
+            position = self.position + offset
+        elif whence == io.SEEK_END:
+            position = self.size + offset
+        else:
+            raise ValueError(f"unsupported seek mode: {whence}")
+        if position < 0:
+            raise ValueError("negative S3 range seek")
+        self.position = position
+        return position
+
+    def read(self, size: int = -1) -> bytes:
+        if size == 0 or self.position >= self.size:
+            return b""
+        end = (
+            self.size - 1
+            if size < 0
+            else min(self.size - 1, self.position + size - 1)
+        )
+        response = self._s3.get_object(
+            Bucket=self.bucket,
+            Key=self.key,
+            Range=f"bytes={self.position}-{end}",
+        )
+        payload = response["Body"].read()
+        expected_size = end - self.position + 1
+        if len(payload) != expected_size:
+            raise OSError(
+                "short S3 range read for nuPlan archive "
+                f"{self.archive_id!r}: expected={expected_size} "
+                f"actual={len(payload)}"
+            )
+        self.position += len(payload)
+        return payload
 
 
 def _data_prep_pod_template() -> PodTemplate:
@@ -50,7 +148,215 @@ def _nuplan_pack_worker_count(
         raise ValueError("nuPlan pack requires at least one DB file")
     if limit_total_scenarios < 0:
         raise ValueError("limit_total_scenarios must be non-negative")
-    return 1 if limit_total_scenarios else min(8, db_file_count)
+    return min(8, db_file_count, limit_total_scenarios or db_file_count)
+
+
+def _parse_nuplan_train_sensor_inventory(
+    payload: str,
+) -> dict[int, tuple[str, ...]]:
+    """Parse the official train sensor group inventory."""
+    groups: dict[int, list[str]] = {}
+    current_group: int | None = None
+    for line_number, raw_line in enumerate(payload.splitlines(), start=1):
+        line = raw_line.strip()
+        if not line:
+            continue
+        match = re.fullmatch(r"File group:\s*(\d+)", line)
+        if match:
+            current_group = int(match.group(1))
+            if current_group in groups:
+                raise ValueError(
+                    "duplicate nuPlan train sensor group "
+                    f"{current_group} at line {line_number}"
+                )
+            groups[current_group] = []
+            continue
+        if current_group is None:
+            raise ValueError(
+                "nuPlan train sensor inventory has a log before its "
+                f"group header at line {line_number}"
+            )
+        groups[current_group].append(line)
+
+    expected_groups = set(range(NUPLAN_FULL_TRAIN_GROUP_COUNT))
+    if set(groups) != expected_groups:
+        raise ValueError(
+            "nuPlan train sensor inventory group mismatch: "
+            f"expected={sorted(expected_groups)} actual={sorted(groups)}"
+        )
+    flattened = [
+        log_name
+        for group_index in range(NUPLAN_FULL_TRAIN_GROUP_COUNT)
+        for log_name in groups[group_index]
+    ]
+    if (
+        not flattened
+        or len(flattened) != len(set(flattened))
+        or any(not log_name for log_name in flattened)
+        or any(not log_names for log_names in groups.values())
+    ):
+        raise ValueError(
+            "nuPlan train sensor inventory contains an empty group or "
+            "duplicate logs"
+        )
+    return {
+        group_index: tuple(groups[group_index])
+        for group_index in range(NUPLAN_FULL_TRAIN_GROUP_COUNT)
+    }
+
+
+def _allocate_nuplan_group_scenario_limits(
+    group_log_counts: Sequence[int],
+    total_scenario_limit: int,
+) -> list[int]:
+    """Allocate an exact deterministic scenario budget by log count."""
+    if (
+        len(group_log_counts) != NUPLAN_FULL_TRAIN_GROUP_COUNT
+        or any(
+            isinstance(count, bool)
+            or not isinstance(count, int)
+            or count <= 0
+            for count in group_log_counts
+        )
+    ):
+        raise ValueError(
+            "nuPlan full pack requires one positive log count for each "
+            f"of {NUPLAN_FULL_TRAIN_GROUP_COUNT} groups"
+        )
+    total_logs = sum(group_log_counts)
+    if total_scenario_limit < total_logs:
+        raise ValueError(
+            "total_scenario_limit must allow at least one scenario for "
+            f"each of the {total_logs} nuPlan train logs"
+        )
+    weighted = [
+        total_scenario_limit * count / total_logs
+        for count in group_log_counts
+    ]
+    limits = [int(value) for value in weighted]
+    unassigned = total_scenario_limit - sum(limits)
+    if unassigned < 0:
+        raise AssertionError("nuPlan group scenario allocation is negative")
+    remainder_order = sorted(
+        range(len(group_log_counts)),
+        key=lambda index: (
+            -(weighted[index] - limits[index]),
+            index,
+        ),
+    )
+    for index in remainder_order[:unassigned]:
+        limits[index] += 1
+    if sum(limits) != total_scenario_limit or any(
+        limit < log_count
+        for limit, log_count in zip(limits, group_log_counts)
+    ):
+        raise AssertionError("nuPlan group scenario allocation is invalid")
+    return limits
+
+
+def _build_nuplan_train_pack_plan(
+    manifest: Mapping[str, Any],
+    sensor_groups: Mapping[int, Sequence[str]],
+    database_logs: Mapping[str, Sequence[str]],
+    total_scenario_limit: int,
+) -> tuple[list[list[str]], list[int]]:
+    """Build validated archive sets and limits for all train sensor groups."""
+    archives = manifest.get("archives")
+    if not isinstance(archives, list):
+        raise ValueError("nuPlan snapshot archives must be a list")
+    map_candidates = [
+        str(archive["archive_id"])
+        for archive in archives
+        if archive.get("component") == "maps"
+        and archive.get("filename")
+        == f"{manifest.get('map_version')}.zip"
+    ]
+    if len(map_candidates) != 1:
+        raise ValueError(
+            "nuPlan train pack requires exactly one matching map archive"
+        )
+    map_archive_id = map_candidates[0]
+
+    sensor_archive_ids: dict[str, dict[int, str]] = {
+        "camera": {},
+        "lidar": {},
+    }
+    pattern = re.compile(
+        r"^sensor-train-train_(camera|lidar)_(\d+)$"
+    )
+    for archive in archives:
+        match = pattern.fullmatch(str(archive.get("archive_id", "")))
+        if match:
+            modality, group_text = match.groups()
+            sensor_archive_ids[modality][int(group_text)] = str(
+                archive["archive_id"]
+            )
+    expected_groups = set(range(NUPLAN_FULL_TRAIN_GROUP_COUNT))
+    for modality, group_archives in sensor_archive_ids.items():
+        if set(group_archives) != expected_groups:
+            raise ValueError(
+                f"nuPlan train {modality} archive group mismatch"
+            )
+
+    database_order = {
+        str(archive["archive_id"]): index
+        for index, archive in enumerate(archives)
+        if archive.get("component") == "database"
+        and str(archive.get("archive_id", "")).startswith("db-train_")
+    }
+    if set(database_logs) != set(database_order):
+        raise ValueError(
+            "nuPlan train DB inventory does not match snapshot DB archives"
+        )
+    database_by_log: dict[str, str] = {}
+    for archive_id, log_names in database_logs.items():
+        for log_name in log_names:
+            previous = database_by_log.setdefault(log_name, archive_id)
+            if previous != archive_id:
+                raise ValueError(
+                    f"nuPlan log {log_name!r} appears in multiple DB archives"
+                )
+
+    archive_sets: list[list[str]] = []
+    group_log_counts: list[int] = []
+    for group_index in range(NUPLAN_FULL_TRAIN_GROUP_COUNT):
+        log_names = tuple(sensor_groups.get(group_index, ()))
+        if not log_names:
+            raise ValueError(
+                f"nuPlan train sensor group {group_index} is empty"
+            )
+        missing_logs = sorted(
+            set(log_names) - set(database_by_log)
+        )
+        if missing_logs:
+            raise ValueError(
+                "nuPlan train sensor logs have no matching DB archive: "
+                f"{missing_logs[:3]}"
+            )
+        group_databases = sorted(
+            {database_by_log[log_name] for log_name in log_names},
+            key=database_order.__getitem__,
+        )
+        archive_sets.append([
+            map_archive_id,
+            *group_databases,
+            sensor_archive_ids["camera"][group_index],
+            sensor_archive_ids["lidar"][group_index],
+        ])
+        group_log_counts.append(len(log_names))
+
+    used_logs = {
+        log_name
+        for group_index in range(NUPLAN_FULL_TRAIN_GROUP_COUNT)
+        for log_name in sensor_groups[group_index]
+    }
+    if len(used_logs) != sum(group_log_counts):
+        raise ValueError("nuPlan train sensor groups overlap")
+    limits = _allocate_nuplan_group_scenario_limits(
+        group_log_counts,
+        total_scenario_limit,
+    )
+    return archive_sets, limits
 
 
 @task(
@@ -591,7 +897,7 @@ def wf_acquire_nuplan_raw_snapshot(
         ephemeral_storage="500Gi",
     ),
     cache=True,
-    cache_version="nuplan-snapshot-pack-v5-parallel",
+    cache_version="nuplan-snapshot-pack-v13-manifest-v10",
     retries=1,
 )
 def pack_nuplan_snapshot_reactive_dataset(
@@ -599,14 +905,13 @@ def pack_nuplan_snapshot_reactive_dataset(
     datasets_bucket: str,
     archive_ids: Optional[List[str]] = None,
     limit_total_scenarios: int = 0,
-    image_size: int = 256,
-    samples_per_shard: int = 1000,
+    image_size: int = REACTIVE_CAMERA_IMAGE_SIZE,
+    samples_per_shard: int = 100,
     max_rejection_fraction: float = 0.0,
     aws_region: str = "us-west-2",
 ) -> FlyteDirectory:
     """Materialize an immutable raw snapshot and emit BEV v3 shards."""
     import hashlib
-    import json
     import tempfile
     from pathlib import Path
     from urllib.parse import urlsplit
@@ -631,8 +936,14 @@ def pack_nuplan_snapshot_reactive_dataset(
         raise ValueError("datasets_bucket must be one S3 bucket name")
     if limit_total_scenarios < 0:
         raise ValueError("limit_total_scenarios must be non-negative")
-    if image_size <= 0 or samples_per_shard <= 0:
-        raise ValueError("image_size and samples_per_shard must be positive")
+    if (
+        image_size != REACTIVE_CAMERA_IMAGE_SIZE
+        or samples_per_shard <= 0
+    ):
+        raise ValueError(
+            "image_size must match the camera contract and "
+            "samples_per_shard must be positive"
+        )
     if not 0.0 <= max_rejection_fraction < 1.0:
         raise ValueError("max_rejection_fraction must be in [0, 1)")
 
@@ -717,8 +1028,60 @@ def pack_nuplan_snapshot_reactive_dataset(
         != BEV_SEGMENTATION_TAXONOMY_VERSION
     ):
         raise ValueError("nuPlan packer did not emit the current BEV taxonomy")
-    if packed.get("schema_version") != "nuplan_reactive_manifest_v2":
-        raise ValueError("nuPlan packer did not emit manifest schema v2")
+    if packed.get("schema_version") != NUPLAN_PACK_MANIFEST_VERSION:
+        raise ValueError(
+            "nuPlan packer did not emit manifest schema "
+            f"{NUPLAN_PACK_MANIFEST_VERSION}"
+        )
+    if (
+        packed.get("front_camera_index") != REACTIVE_FRONT_CAMERA_INDEX
+        or packed.get("front_camera_image_size")
+        != REACTIVE_FRONT_CAMERA_IMAGE_SIZE
+    ):
+        raise ValueError(
+            "nuPlan packer did not emit the front camera contract"
+        )
+    if (
+        packed.get("temporal_frame_offsets")
+        != list(REACTIVE_BEVFORMER_FRAME_OFFSETS)
+        or packed.get("temporal_frame_interval_us")
+        != REACTIVE_BEVFORMER_FRAME_INTERVAL_US
+    ):
+        raise ValueError(
+            "nuPlan packer did not emit the T8 temporal contract"
+        )
+    max_camera_time_offset_us = packed.get(
+        "max_camera_time_offset_us"
+    )
+    if (
+        not isinstance(max_camera_time_offset_us, int)
+        or isinstance(max_camera_time_offset_us, bool)
+        or not 0
+        <= max_camera_time_offset_us
+        <= NUPLAN_CAMERA_SYNC_TOLERANCE_US
+    ):
+        raise ValueError(
+            "nuPlan packer exceeded the current camera sync tolerance"
+        )
+    max_history_camera_time_offset_us = packed.get(
+        "max_history_camera_time_offset_us"
+    )
+    if (
+        packed.get("history_fallback_max_offset_us")
+        != NUPLAN_HISTORY_FALLBACK_MAX_OFFSET_US
+        or packed.get("history_camera_spread_max_us")
+        != NUPLAN_HISTORY_CAMERA_SPREAD_MAX_US
+        or not isinstance(max_history_camera_time_offset_us, int)
+        or isinstance(max_history_camera_time_offset_us, bool)
+        or not 0
+        <= max_history_camera_time_offset_us
+        <= NUPLAN_HISTORY_FALLBACK_MAX_OFFSET_US
+        or packed.get("distinct_history_frame_count")
+        != REACTIVE_BEVFORMER_HISTORY_FRAMES
+    ):
+        raise ValueError(
+            "nuPlan packer exceeded the T8 history timing contract"
+        )
     packed_counts = {
         name: packed.get(name)
         for name in (
@@ -761,11 +1124,158 @@ def pack_nuplan_snapshot_reactive_dataset(
             materialized.sensor_log_names
         ),
     })
-    (output / "manifest.json").write_text(
-        json.dumps(packed, indent=2, sort_keys=True) + "\n",
-        encoding="ascii",
-    )
+    temporary_manifest = output / ".manifest.json.tmp"
+    temporary_manifest.write_bytes(canonical_json_bytes(packed))
+    temporary_manifest.replace(output / "manifest.json")
     return FlyteDirectory(str(output))
+
+
+@dynamic(
+    container_image=DATA_PREP_IMAGE,
+    environment={"AUTO_E2E_DATA_PREP_IMAGE": DATA_PREP_IMAGE},
+)
+def _pack_nuplan_snapshot_reactive_dataset_sharded(
+    snapshot_manifest: FlyteFile,
+    datasets_bucket: str,
+    total_scenario_limit: int,
+    image_size: int,
+    samples_per_shard: int,
+    max_rejection_fraction: float,
+    aws_region: str,
+    concurrency: int,
+) -> List[FlyteDirectory]:
+    """Resolve all train logs, then map one bounded pack task per sensor group."""
+    import json
+    from pathlib import Path, PurePosixPath
+    from urllib.parse import urlsplit
+    import zipfile
+
+    import boto3
+
+    from data_parsing.nuplan.materialization import (
+        load_nuplan_snapshot_manifest,
+    )
+
+    if concurrency <= 0:
+        raise ValueError("concurrency must be positive")
+    if total_scenario_limit < NUPLAN_FULL_TRAIN_LOG_COUNT:
+        raise ValueError(
+            "total_scenario_limit must cover every nuPlan train log"
+        )
+    manifest = load_nuplan_snapshot_manifest(
+        Path(snapshot_manifest.download()).read_bytes()
+    )
+    s3 = boto3.client("s3", region_name=aws_region)
+
+    def object_location(archive: Mapping[str, Any]) -> tuple[str, str]:
+        parsed = urlsplit(str(archive["object_uri"]))
+        bucket = parsed.netloc
+        key = parsed.path.lstrip("/")
+        if bucket != datasets_bucket or not key:
+            raise ValueError(
+                "nuPlan full pack archive is outside datasets_bucket: "
+                f"{archive['archive_id']!r}"
+            )
+        return bucket, key
+
+    inventory_archives = [
+        archive
+        for archive in manifest["archives"]
+        if archive["archive_id"]
+        == "sensor-train-public_set_train_sensor"
+    ]
+    if len(inventory_archives) != 1:
+        raise ValueError(
+            "nuPlan full pack requires the official train sensor inventory"
+        )
+    inventory_bucket, inventory_key = object_location(
+        inventory_archives[0]
+    )
+    inventory_payload = s3.get_object(
+        Bucket=inventory_bucket,
+        Key=inventory_key,
+    )["Body"].read().decode("utf-8")
+    sensor_groups = _parse_nuplan_train_sensor_inventory(
+        inventory_payload
+    )
+    if sum(map(len, sensor_groups.values())) != NUPLAN_FULL_TRAIN_LOG_COUNT:
+        raise ValueError(
+            "nuPlan train sensor inventory no longer contains the audited "
+            f"{NUPLAN_FULL_TRAIN_LOG_COUNT} logs"
+        )
+
+    database_logs: dict[str, tuple[str, ...]] = {}
+    for archive in manifest["archives"]:
+        archive_id = str(archive["archive_id"])
+        if (
+            archive["component"] != "database"
+            or not archive_id.startswith("db-train_")
+        ):
+            continue
+        bucket, key = object_location(archive)
+        with zipfile.ZipFile(
+            _S3RangeReader(
+                s3,
+                bucket=bucket,
+                key=key,
+                size=int(archive["size_bytes"]),
+                archive_id=archive_id,
+            )
+        ) as source:
+            log_names = tuple(sorted({
+                PurePosixPath(info.filename).stem
+                for info in source.infolist()
+                if not info.is_dir()
+                and PurePosixPath(info.filename).suffix == ".db"
+            }))
+        if not log_names:
+            raise ValueError(
+                f"nuPlan DB archive {archive_id!r} contains no DB logs"
+            )
+        database_logs[archive_id] = log_names
+
+    archive_sets, scenario_limits = _build_nuplan_train_pack_plan(
+        manifest,
+        sensor_groups,
+        database_logs,
+        total_scenario_limit,
+    )
+    print(json.dumps({
+        "archive_sets": archive_sets,
+        "group_count": len(archive_sets),
+        "scenario_limits": scenario_limits,
+        "sensor_log_count": sum(map(len, sensor_groups.values())),
+        "total_scenario_limit": sum(scenario_limits),
+    }, sort_keys=True))
+
+    packer = map_task(
+        functools.partial(
+            pack_nuplan_snapshot_reactive_dataset,
+            snapshot_manifest=snapshot_manifest,
+            datasets_bucket=datasets_bucket,
+            image_size=image_size,
+            samples_per_shard=samples_per_shard,
+            max_rejection_fraction=max_rejection_fraction,
+            aws_region=aws_region,
+        ),
+        concurrency=concurrency,
+    )
+    packed = packer(
+        archive_ids=archive_sets,
+        limit_total_scenarios=scenario_limits,
+    )
+    return packed.with_overrides(
+        requests=Resources(
+            cpu="16",
+            mem="64Gi",
+            ephemeral_storage=NUPLAN_FULL_PACK_EPHEMERAL_STORAGE,
+        ),
+        limits=Resources(
+            cpu="16",
+            mem="64Gi",
+            ephemeral_storage=NUPLAN_FULL_PACK_EPHEMERAL_STORAGE,
+        ),
+    )
 
 
 @workflow
@@ -774,8 +1284,8 @@ def wf_pack_nuplan_snapshot_reactive_dataset(
     datasets_bucket: str,
     archive_ids: Optional[List[str]] = None,
     limit_total_scenarios: int = 0,
-    image_size: int = 256,
-    samples_per_shard: int = 1000,
+    image_size: int = REACTIVE_CAMERA_IMAGE_SIZE,
+    samples_per_shard: int = 100,
     max_rejection_fraction: float = 0.0,
     aws_region: str = "us-west-2",
 ) -> FlyteDirectory:
@@ -789,4 +1299,28 @@ def wf_pack_nuplan_snapshot_reactive_dataset(
         samples_per_shard=samples_per_shard,
         max_rejection_fraction=max_rejection_fraction,
         aws_region=aws_region,
+    )
+
+
+@workflow
+def wf_pack_nuplan_snapshot_reactive_dataset_sharded(
+    snapshot_manifest: FlyteFile,
+    datasets_bucket: str,
+    total_scenario_limit: int = NUPLAN_FULL_TRAIN_SAMPLE_LIMIT,
+    image_size: int = REACTIVE_CAMERA_IMAGE_SIZE,
+    samples_per_shard: int = 100,
+    max_rejection_fraction: float = 0.25,
+    aws_region: str = "us-west-2",
+    concurrency: int = 4,
+) -> List[FlyteDirectory]:
+    """Pack bounded samples with complete nuPlan train-log coverage."""
+    return _pack_nuplan_snapshot_reactive_dataset_sharded(
+        snapshot_manifest=snapshot_manifest,
+        datasets_bucket=datasets_bucket,
+        total_scenario_limit=total_scenario_limit,
+        image_size=image_size,
+        samples_per_shard=samples_per_shard,
+        max_rejection_fraction=max_rejection_fraction,
+        aws_region=aws_region,
+        concurrency=concurrency,
     )

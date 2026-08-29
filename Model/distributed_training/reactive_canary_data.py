@@ -12,6 +12,10 @@ from typing import Any
 import numpy as np
 from PIL import Image
 
+from data_parsing.camera_slots import CANONICAL_SIX_CAMERA_SLOTS
+from data_parsing.l2d.calibration import l2d_projection_spec
+from data_parsing.l2d.camera import CAMERA_NAMES as L2D_CAMERA_NAMES
+from data_parsing.nuplan.packing import NUPLAN_CAMERA_CHANNELS
 from data_processing.dataset_snapshot import split_bucket
 from data_processing.reactive_training_artifacts import (
     BEV_SEGMENTATION_MEMBER,
@@ -24,6 +28,14 @@ from data_processing.reactive_training_artifacts import (
 )
 from navigation.contracts import canonical_json_bytes
 from navigation.geometry import AUTOE2E_NAVIGATION_GEOMETRY
+from reactive_training_contracts import (
+    REACTIVE_BEVFORMER_FRAME_INTERVAL_US,
+    REACTIVE_BEVFORMER_FRAME_OFFSETS,
+    REACTIVE_BEVFORMER_HISTORY_FRAMES,
+    REACTIVE_CAMERA_IMAGE_SIZE,
+    REACTIVE_FRONT_CAMERA_IMAGE_SIZE,
+    REACTIVE_FRONT_CAMERA_INDEX,
+)
 from training.dataset_policy import (
     L2D_DATASET_NAME,
     NUPLAN_DATASET_NAME,
@@ -31,12 +43,20 @@ from training.dataset_policy import (
 from training.reactive_multitask import ReactiveTrainingStage
 
 
-REACTIVE_CANARY_SCHEMA_VERSION = "reactive_ddp_canary_v2"
+REACTIVE_CANARY_SCHEMA_VERSION = "reactive_ddp_canary_v8"
 
 
-def _jpeg_bytes(color: tuple[int, int, int]) -> bytes:
+def _jpeg_bytes(
+    color: tuple[int, int, int],
+    *,
+    image_size: int = REACTIVE_CAMERA_IMAGE_SIZE,
+) -> bytes:
     output = io.BytesIO()
-    Image.new("RGB", (256, 256), color=color).save(
+    Image.new(
+        "RGB",
+        (image_size, image_size),
+        color=color,
+    ).save(
         output,
         format="JPEG",
         quality=90,
@@ -82,9 +102,7 @@ def _sample_members(
     geometry = AUTOE2E_NAVIGATION_GEOMETRY
     height = geometry.height_px
     width = geometry.width_px
-    num_views = (
-        8 if stage is ReactiveTrainingStage.NUPLAN_FULL else 6
-    )
+    num_views = len(CANONICAL_SIX_CAMERA_SLOTS)
     map_context = np.zeros((14, height, width), dtype=np.float32)
     map_context[0, 90:360, 80:220] = 1.0
     map_context[1, 100:350, 110:190] = 1.0
@@ -113,7 +131,6 @@ def _sample_members(
         96 + sample_index % 96,
         160 + sample_index % 64,
     )
-    jpeg = _jpeg_bytes(color)
     dataset = (
         NUPLAN_DATASET_NAME
         if stage is ReactiveTrainingStage.NUPLAN_FULL
@@ -135,8 +152,76 @@ def _sample_members(
         ),
     }
     for view in range(num_views):
-        members[f"cam_{view}.jpg"] = jpeg
+        image_size = (
+            REACTIVE_FRONT_CAMERA_IMAGE_SIZE
+            if (
+                stage is ReactiveTrainingStage.NUPLAN_FULL
+                and view == REACTIVE_FRONT_CAMERA_INDEX
+            )
+            else REACTIVE_CAMERA_IMAGE_SIZE
+        )
+        members[f"cam_{view}.jpg"] = _jpeg_bytes(
+            color,
+            image_size=image_size,
+        )
     if stage is ReactiveTrainingStage.NUPLAN_FULL:
+        projection = np.zeros((num_views, 3, 4), dtype=np.float32)
+        projection[:, 0, 3] = REACTIVE_CAMERA_IMAGE_SIZE / 2
+        projection[:, 1, 3] = REACTIVE_CAMERA_IMAGE_SIZE / 2
+        projection[:, 2, 3] = 1.0
+        front_projection = projection[
+            REACTIVE_FRONT_CAMERA_INDEX:
+            REACTIVE_FRONT_CAMERA_INDEX + 1
+        ].copy()
+        front_projection[:, :2] *= (
+            REACTIVE_FRONT_CAMERA_IMAGE_SIZE
+            / REACTIVE_CAMERA_IMAGE_SIZE
+        )
+        history_projection = np.repeat(
+            projection[None],
+            REACTIVE_BEVFORMER_HISTORY_FRAMES,
+            axis=0,
+        )
+        for history_index in range(
+            REACTIVE_BEVFORMER_HISTORY_FRAMES
+        ):
+            for view in range(num_views):
+                members[
+                    f"bev_hist_{history_index}_cam_{view}.jpg"
+                ] = _jpeg_bytes(
+                    color,
+                    image_size=REACTIVE_CAMERA_IMAGE_SIZE,
+                )
+        members["calib.json"] = canonical_json_bytes({
+            "camera_order": list(NUPLAN_CAMERA_CHANNELS),
+            "camera_slots": list(CANONICAL_SIX_CAMERA_SLOTS),
+            "dataset": dataset,
+            "front_camera_image_size": (
+                REACTIVE_FRONT_CAMERA_IMAGE_SIZE
+            ),
+            "front_camera_index": REACTIVE_FRONT_CAMERA_INDEX,
+            "front_projection": {
+                "matrix": front_projection.tolist(),
+                "type": "rectified_pinhole",
+            },
+            "geometry_type": "rectified_pinhole",
+            "history_projection": {
+                "matrix": history_projection.tolist(),
+                "reference_frame": "current_ego",
+                "type": "rectified_pinhole",
+            },
+            "image_size": REACTIVE_CAMERA_IMAGE_SIZE,
+            "projection": {
+                "matrix": projection.tolist(),
+                "type": "rectified_pinhole",
+            },
+            "temporal_frame_interval_us": (
+                REACTIVE_BEVFORMER_FRAME_INTERVAL_US
+            ),
+            "temporal_frame_offsets": list(
+                REACTIVE_BEVFORMER_FRAME_OFFSETS
+            ),
+        })
         bev = np.zeros((8, height, width), dtype=np.float32)
         bev[0] = map_context[0]
         bev[1, 100:350:20, 110:190] = 1.0
@@ -157,6 +242,14 @@ def _sample_members(
                 valid,
             )
         )
+    else:
+        members["calib.json"] = canonical_json_bytes({
+            "camera_order": list(L2D_CAMERA_NAMES),
+            "camera_slots": list(CANONICAL_SIX_CAMERA_SLOTS),
+            "dataset": dataset,
+            "geometry_type": "pinhole",
+            "image_size": REACTIVE_CAMERA_IMAGE_SIZE,
+        })
     return members
 
 
@@ -236,22 +329,31 @@ def write_reactive_canary_dataset(
             if stage is ReactiveTrainingStage.NUPLAN_FULL
             else None
         ),
+        "camera_order": (
+            list(NUPLAN_CAMERA_CHANNELS)
+            if stage is ReactiveTrainingStage.NUPLAN_FULL
+            else list(L2D_CAMERA_NAMES)
+        ),
+        "camera_slots": list(CANONICAL_SIX_CAMERA_SLOTS),
         "dataset": dataset,
         "dataset_version": REACTIVE_CANARY_SCHEMA_VERSION,
-        "geometry_type": "pseudo",
+        "geometry_type": (
+            "rectified_pinhole"
+            if stage is ReactiveTrainingStage.NUPLAN_FULL
+            else "pinhole"
+        ),
         "has_bev_segmentation": (
             stage is ReactiveTrainingStage.NUPLAN_FULL
         ),
         "has_reactive_navigation": True,
         "has_route_reconstruction": True,
         "has_trajectory_xy": True,
+        "image_size": REACTIVE_CAMERA_IMAGE_SIZE,
         "map_context_channels": 14,
         "navigation_geometry": (
             AUTOE2E_NAVIGATION_GEOMETRY.contract()
         ),
-        "num_views": (
-            8 if stage is ReactiveTrainingStage.NUPLAN_FULL else 6
-        ),
+        "num_views": len(CANONICAL_SIX_CAMERA_SLOTS),
         "partition_id": f"canary-{stage.value}",
         "route_channels": 2,
         "schema_version": REACTIVE_CANARY_SCHEMA_VERSION,
@@ -261,6 +363,23 @@ def write_reactive_canary_dataset(
         "source_revision": REACTIVE_CANARY_SCHEMA_VERSION,
         "total_samples": sample_index,
     }
+    if stage is ReactiveTrainingStage.NUPLAN_FULL:
+        manifest.update({
+            "front_camera_image_size": (
+                REACTIVE_FRONT_CAMERA_IMAGE_SIZE
+            ),
+            "front_camera_index": REACTIVE_FRONT_CAMERA_INDEX,
+            "temporal_frame_interval_us": (
+                REACTIVE_BEVFORMER_FRAME_INTERVAL_US
+            ),
+            "temporal_frame_offsets": list(
+                REACTIVE_BEVFORMER_FRAME_OFFSETS
+            ),
+        })
+    else:
+        manifest["projection"] = l2d_projection_spec(
+            REACTIVE_CAMERA_IMAGE_SIZE
+        )
     (output / "manifest.json").write_text(
         json.dumps(
             manifest,

@@ -4,10 +4,75 @@
 
 | Field | Value |
 |-------|-------|
-| Status | Proposed |
+| Status | Historical proposal; superseded in production |
 | Authors | riita10069 |
 | Created | 2026-06-05 |
 | Related Issue | [#2 - Enhancement Proposal: Multi-Camera Feature Fusion](https://github.com/autowarefoundation/auto_e2e/issues/2) |
+
+> **Production note (2026-08-25):** The nuPlan/L2D Reactive training path uses
+> a different implementation from the historical `BEVViewFusion` below: the
+> pretrained ResNet-50 BEVFormer V2 T8 implementation with a four-level FPN.
+> Seven history frames at `-3.5, -3.0, ..., -0.5 s` are independently encoded
+> with frozen shared camera-BEV weights under `eval()` and `no_grad()`. Their
+> projection matrices map current-ego coordinates into each historical image.
+> The seven detached history BEVs and current frozen camera BEV are concatenated in
+> oldest-to-current order, then fused by the official three-BasicBlock
+> `2048 -> 512 -> 256` ResNetFusion initialized from the T8 checkpoint.
+> The channel groups follow upstream
+> `frames=(-7,-6,-5,-4,-3,-2,-1,0)` order at BEVFormer revision
+> `66b65f3a1f58caf0507cb2a971b9c0e7f842376c`
+> (`transformerV2.py`, lines 308-324).
+> nuPlan Stage A packs all seven calibrated history slots. When a requested
+> timestamp is outside the log or one camera is missing from its 50 ms window,
+> the packer may use that camera's nearest frame only when it is less than
+> `250 ms` from the requested slot, all six selected camera timestamps remain
+> within a `100 ms` spread, and preserves each actual pose in the projection.
+> Packing rejects non-increasing, repeated, or cross-camera-unsynchronized
+> history and records
+> the maximum offset plus distinct-frame count in the manifest. Datasets
+> without calibrated history explicitly fill all history slots with detached
+> current BEVs.
+> All six cameras use `512 x 512` in the ordinary BEVFormer pass. CAM_F0 is
+> additionally processed at `1024 x 1024`, producing native `128/64/32/16` FPN
+> levels for a front-only spatial cross-attention residual. A zero-initialized
+> per-channel gate makes that extra residual an exact no-op at initialization.
+> The residual
+> uses a separate attention module initialized from the final official encoder
+> SCA weights and shares only that encoder layer's post-cross-attention
+> LayerNorm. The front-only call excludes level/camera embeddings and projection
+> biases, then subtracts the query-only LayerNorm result, so the gated delta
+> contains only native front image evidence. Official checkpoint-derived
+> Backbone, encoder, front-attention, LayerNorm, and temporal-fusion parameters
+> stay frozen. Only the new per-channel front residual gate is optimized.
+> The official temporal ResNetFusion remains uncheckpointed. In nuPlan Stage A,
+> its frozen BatchNorm affine parameters use synchronized batch statistics and
+> update running statistics once per micro-step. L2D Stage B retains those
+> Stage A running statistics because it has no real T8 history. Reactive DDP uses
+> `static_graph=True` and `find_unused_parameters=False`, which supports that
+> recomputation even when calibrated batches leave `pseudo_projection` unused.
+> The first optimizer step synchronizes every accumulation micro-step to
+> initialize the static reducer before later micro-steps use `DDP.no_sync()`.
+> ResNet-50 weights, BatchNorm statistics, and affine parameters are frozen.
+> History uses the ordinary six-view `512 x 512` path without the native-front
+> residual; native `1024 x 1024` CAM_F0 is packed only for the current frame to
+> bound storage and decode cost. ResNetFusion therefore receives seven
+> base-resolution history BEVs and one current BEV with the optional gated
+> front residual.
+> L2D uses lens-FOV-derived pinhole intrinsics but has no native 1024 front
+> artifact, so it uses only the ordinary calibrated six-camera branch and omits
+> the optional native-front residual.
+> nuPlan inputs never use that fallback and must provide the packed native front
+> and matching projection.
+> The encoder
+> uses six layers and a `300 x 200` latent over the
+> `180 m x 120 m` `pc_range` (`0.6 m` per latent cell on both axes). The
+> `450 x 300` grid is the navigation and auxiliary-supervision raster in that
+> path, not its latent. This model revision changes the latent to `300 x 200`
+> and planner sampling from 8 to 16 points; both invalidate older checkpoints
+> through the architecture-version guard.
+> The sections below preserve the original pluggable-fusion proposal, where
+> `450 x 300` is the legacy module's latent, and are not normative for the
+> nuPlan/L2D Reactive module.
 
 ---
 

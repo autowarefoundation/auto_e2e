@@ -18,7 +18,8 @@ env:
     DATASET: "KIT-MRT/KITScenes-Multimodal"
     SOURCE_REVISION: "6fde0034446669e2ed7235e4c7fe323cd23d599d"
     PUBLISHED_DATASET: ""
-    DATASET_VERSION: v2.2
+    DATASET_VERSION: v2.4
+    IMAGE_SIZE: "512"
     EPISODES: "1"
     PARTITION_SIZE: "1"
     REASONING_TEACHER: openai_compatible
@@ -180,6 +181,7 @@ phases:
             --source_revision "${SOURCE_REVISION}" \
             --published_dataset "${PUBLISHED_DATASET}" \
             --dataset_version "${DATASET_VERSION}" \
+            --image_size "${IMAGE_SIZE}" \
             --episodes "${EPISODES}" \
             --partition_size "${PARTITION_SIZE}" \
             --reasoning_teacher "${REASONING_TEACHER}" \

@@ -34,6 +34,7 @@ def _dataset_stub(samples):
     dataset._sampling_history_steps = 64
     dataset._sampling_future_steps = 64
     dataset.camera_names = ["front", "left"]
+    dataset.camera_slots = ["front", "front_left"]
     dataset._scene_egomotion = {
         scene_id: np.zeros((200, 4), dtype=np.float32)
         for scene_id, _ in samples
@@ -46,8 +47,8 @@ def test_camera_view_contract_uses_six_non_redundant_views():
         "camera_base_front_center",
         "camera_ring_front_left",
         "camera_ring_front_right",
-        "camera_ring_rear",
         "camera_ring_rear_left",
+        "camera_ring_rear",
         "camera_ring_rear_right",
     ]
     assert NUM_VIEWS == len(CAMERA_NAMES) == 6

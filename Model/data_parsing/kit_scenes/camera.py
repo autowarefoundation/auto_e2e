@@ -20,6 +20,7 @@ from torchvision.transforms import Compose
 
 # Shared, dataset-agnostic intrinsic scaling (re-exported for backward compat).
 from ..calibration import scale_intrinsic
+from ..camera_slots import CANONICAL_SIX_CAMERA_SLOTS
 
 # Camera directories used as visual tiles for the KIT Scenes dataset.
 # Order: long-range front, then the 5 remaining surround ring cameras.
@@ -31,13 +32,15 @@ CAMERA_NAMES: list[str] = [
     "camera_base_front_center",
     "camera_ring_front_left",
     "camera_ring_front_right",
-    "camera_ring_rear",
     "camera_ring_rear_left",
+    "camera_ring_rear",
     "camera_ring_rear_right",
 ]
 
 # Total views fed to the model = 6 cameras.
 NUM_VIEWS = len(CAMERA_NAMES)
+CAMERA_SLOTS = CANONICAL_SIX_CAMERA_SLOTS
+CAMERA_SLOT_BY_NAME = dict(zip(CAMERA_NAMES, CAMERA_SLOTS))
 
 def compute_camera_projection_matrices(
     loader: SensorDataLoader,

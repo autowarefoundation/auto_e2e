@@ -13,8 +13,9 @@ Implementation snapshot (2026-07-16):
   VPC-local CodeBuild project `auto-e2e-platform-overlay-launch`.
 - PR #74's offline report boundary is implemented as
   `wf_export_trajectory_report`: it consumes the canonical AOVL, its v2.1
-  shard, and both immutable publication manifests; it emits per-scene MP4,
-  thumbnail, metrics, and verified model/dataset provenance.
+  shard, both immutable publication manifests, and the shard-selected immutable
+  rig projection; it emits per-scene MP4, thumbnail, metrics, and verified
+  model/dataset/rig provenance.
 - The publication workflow exposes the immutable manifest key and digest.
   Reasoning stats, direct sample lookups, and scene-search rows are populated
   by an explicit digest-pinned `batch/v1 Job` after that workflow succeeds;
@@ -525,7 +526,7 @@ Heavy geo data (point sets, heatmap, parquet) is produced by the v2.1 repack int
   - If each sample is a 64-step future clip: **64 frames/sample** → **~190 GB/model** → **~1.9 TB @ 10 models**, and it abandons the windowed `/blob` engine.
   The draft's "10 models × 1 k scenes × 20 MB = 200 GB" matches neither layout nor real shard counts.
 
-**The decisive fact (cost-frontend #2, adas #3, flyte #7, P1.12):** baking's *only* claimed advantage was camera projection under L2D `geometry_type='pseudo'`. But calibrated projection is a function of the **fixed camera rig**, not model weights, and PR#74 confirms it is a **per-rig constant**. Store each rig once and resolve it through the active shard (§5), and the client draws *any* model's polyline in camera space. Baking therefore buys nothing that vectors + a rig projection don't, at ~3–4 orders more storage. And under pseudo-geometry the projection is a heuristic approximation **either way** — baking just freezes the same error into un-auditable pixels.
+**The decisive fact (cost-frontend #2, adas #3, flyte #7, P1.12):** baking's *only* claimed advantage was camera projection. Calibrated projection is a function of the **fixed camera rig**, not model weights, and PR#74 confirms it is a **per-rig constant**. Store each rig once and resolve it through the active shard (§5), and the client draws *any* model's polyline in camera space. Baking therefore buys nothing that vectors + a rig projection don't, at ~3–4 orders more storage. L2D now uses pinned relative extrinsics and FOV-derived pinhole intrinsics; its unpublished distortion and reference-camera translation remain explicit approximations rather than being hidden in baked pixels.
 
 **Flexibility:** vectors toggle/compare 2–3 models on one canvas at ~0.5 KB each; baked frames make multi-model comparison physically impossible (can't composite two videos) and make a single toggle a multi-MB re-download (cost-frontend #5). The feature centers on *picking* (and comparing) models — vector-first is the correct default.
 
@@ -583,7 +584,7 @@ lat = lat0 + north/R·(180/π);  lon = lon0 + east/(R·cos(lat0))·(180/π)
 1. **Yaw-sign / heading convention (dominant risk).** The BEV overlay uses ego-relative `+y=left` and may already be mirrored (§10). Placing on the map additionally needs the **absolute** compass bearing `ψ0`. L2D `heading` is compass (CW-from-north, degrees); `integrate_trajectory`'s internal `θ` is math CCW starting at 0. **The corrected ENU formula is NECESSARY but NOT SUFFICIENT (P0.4):** it composes with the L2D yaw-sign mirror (§10) and the heading *source*. Trusting the corrected formula alone gives false confidence. **Action:** validate map placement **JOINTLY** on (a) a known straight clip and (b) a known left AND right turn — the predicted path must lie ON the driven GPS path when the model predicts near-GT; only then trust turns. A mirror is far more obvious on a real road than in BEV.
 2. **Float precision.** `pose_current` and the path are float64 (§4b) precisely so the map origin doesn't jitter; do NOT downcast for this path.
 3. **`v0` / one-frame gap (§10).** ~0.2 s scale offset — small but visible against real roads; note it.
-4. **Pseudo-geometry.** L2D has no calibration; the *shape* is metric (unicycle integration is calibration-free), so map placement is actually **less** sensitive to pseudo-geometry than the camera-pixel projection is — the map path depends only on integration + origin + bearing, not on camera intrinsics. A point in favor of the map view.
+4. **Camera geometry.** L2D map placement is independent of its FOV-derived pinhole approximation: the map path depends only on integration + origin + bearing, not on camera intrinsics. The camera overlay still carries the documented uncertainty from unpublished distortion and reference-camera translation.
 
 **Reuse:** placement is a pure client transform over the SAME raw `(64,2)+v0` control blob + `pose_current` — **no extra Flyte artifact**. GT (`ego_future`) places on the map by the identical transform, so pred-vs-GT-vs-driven-path can be compared on one map. Acceptance: the joint harness (§10) must pass for the map path specifically.
 
@@ -664,9 +665,10 @@ a principal established by signature-validating authentication middleware.
   `wf_create_publish_and_precompute_overlays`, and the VPC-local
   `auto-e2e-platform-overlay-launch` CodeBuild project.
 - **Optional export:** PR #74's renderer/report concept is adapted to consume
-  canonical AOVL controls and `sample_uid` joins. The CPU-only
-  `wf_export_trajectory_report` returns a self-contained `FlyteDirectory`
-  without re-running checkpoint inference.
+  canonical AOVL controls, `sample_uid` joins, and the manifest-selected rig
+  JSON. The CPU-only `wf_export_trajectory_report` verifies that rig's digest
+  before returning a self-contained `FlyteDirectory` without re-running
+  checkpoint inference.
 
 ### Remaining production rollout
 

@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 from pathlib import Path
+import tarfile
 import zipfile
 
 import pytest
@@ -230,6 +232,130 @@ def test_archive_digest_rejects_modified_payload(tmp_path):
 
     with pytest.raises(ValueError, match="size mismatch"):
         verify_archive_file(paths["maps"], archive)
+
+
+def test_extracts_sensor_tar_with_zip_filename(tmp_path):
+    archive_path = tmp_path / "train_camera_0.zip"
+    payload = b"camera bytes"
+    with tarfile.open(archive_path, "w") as archive:
+        info = tarfile.TarInfo(
+            "nuplan-v1.1_train_camera_0/log/CAM_F0/frame.jpg"
+        )
+        info.size = len(payload)
+        archive.addfile(info, io.BytesIO(payload))
+    archive_spec = {
+        "archive_id": "sensor-train-camera-0",
+        "component": "sensor_blobs",
+        "extract_to": "nuplan-v1.1/sensor_blobs",
+    }
+
+    stats = extract_nuplan_archive(
+        archive_path,
+        archive_spec,
+        tmp_path / "dataset",
+        map_version="nuplan-maps-v1.1",
+    )
+
+    assert stats == {
+        "archive_format": "tar",
+        "file_count": 1,
+        "uncompressed_bytes": len(payload),
+    }
+    assert (
+        tmp_path
+        / "dataset"
+        / "nuplan-v1.1"
+        / "sensor_blobs"
+        / "log"
+        / "CAM_F0"
+        / "frame.jpg"
+    ).read_bytes() == payload
+
+
+def test_sensor_archives_allow_only_identical_duplicate_files(tmp_path):
+    archive_spec = {
+        "archive_id": "sensor-train",
+        "component": "sensor_blobs",
+        "extract_to": "nuplan-v1.1/sensor_blobs",
+    }
+    dataset_root = tmp_path / "dataset"
+
+    def write_archive(path, root, payload):
+        with tarfile.open(path, "w") as archive:
+            info = tarfile.TarInfo(f"{root}/LICENSE")
+            info.size = len(payload)
+            archive.addfile(info, io.BytesIO(payload))
+
+    first = tmp_path / "camera.zip"
+    identical = tmp_path / "lidar.zip"
+    conflicting = tmp_path / "conflicting.zip"
+    write_archive(first, "camera-root", b"shared license")
+    write_archive(identical, "lidar-root", b"shared license")
+    write_archive(conflicting, "other-root", b"different license")
+
+    extract_nuplan_archive(
+        first,
+        archive_spec,
+        dataset_root,
+        map_version="nuplan-maps-v1.1",
+    )
+    extract_nuplan_archive(
+        identical,
+        archive_spec,
+        dataset_root,
+        map_version="nuplan-maps-v1.1",
+    )
+
+    target = dataset_root / "nuplan-v1.1" / "sensor_blobs" / "LICENSE"
+    assert target.read_bytes() == b"shared license"
+    with pytest.raises(FileExistsError, match="conflicting duplicate"):
+        extract_nuplan_archive(
+            conflicting,
+            archive_spec,
+            dataset_root,
+            map_version="nuplan-maps-v1.1",
+        )
+    assert target.read_bytes() == b"shared license"
+
+
+@pytest.mark.parametrize(
+    ("member_name", "member_type", "match"),
+    [
+        ("../escape.jpg", tarfile.REGTYPE, "unsafe TAR member path"),
+        ("sensor/link", tarfile.SYMTYPE, "TAR link is not allowed"),
+    ],
+)
+def test_tar_member_path_and_links_are_rejected(
+    tmp_path,
+    member_name,
+    member_type,
+    match,
+):
+    archive_path = tmp_path / "unsafe.zip"
+    with tarfile.open(archive_path, "w") as archive:
+        info = tarfile.TarInfo(member_name)
+        info.type = member_type
+        if member_type == tarfile.SYMTYPE:
+            info.linkname = "target"
+        else:
+            info.size = 1
+        archive.addfile(
+            info,
+            None if member_type == tarfile.SYMTYPE else io.BytesIO(b"x"),
+        )
+    archive_spec = {
+        "archive_id": "unsafe",
+        "component": "sensor_blobs",
+        "extract_to": "nuplan-v1.1/sensor_blobs",
+    }
+
+    with pytest.raises(ValueError, match=match):
+        extract_nuplan_archive(
+            archive_path,
+            archive_spec,
+            tmp_path / "dataset",
+            map_version="nuplan-maps-v1.1",
+        )
 
 
 def test_zip_member_path_and_symlink_are_rejected(tmp_path):

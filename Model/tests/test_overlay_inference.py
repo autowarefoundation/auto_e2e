@@ -6,12 +6,14 @@ import pytest
 import torch
 
 from Platform.pipelines.inference import (
+    INFERENCE_CONTRACT_VERSION,
     load_policy,
     noise_from,
     predict_control,
     sha256_file,
     stable_seed64,
 )
+from model_components.view_fusion.projection import PinholeProjection
 from Platform.pipelines.overlay_precompute import (
     _BEVActivationRecorder,
     _downsample_features,
@@ -184,6 +186,46 @@ def test_predict_control_rejects_uid_count_mismatch():
             model_artifact_id="model-sha",
             dataset_manifest_digest="manifest-sha",
         )
+
+
+def test_predict_control_uses_packed_projection_and_native_front():
+    class CapturePolicy(_NoiseEchoPolicy):
+        def __init__(self):
+            super().__init__()
+            self.kwargs = None
+
+        def forward(self, *args, **kwargs):
+            self.kwargs = kwargs
+            return kwargs["initial_noise"] + self.anchor
+
+    model = CapturePolicy().eval()
+    batch = _batch(1)
+    matrix = torch.zeros(1, 2, 3, 4)
+    matrix[:, :, 2, 3] = 1.0
+    front_matrix = matrix[:, :1].clone()
+    front_matrix[:, :, :2] *= 2.0
+    batch["camera_projection_matrix"] = matrix
+    batch["camera_geometry_type"] = ["rectified_pinhole"]
+    batch["front_camera_tile"] = torch.zeros(1, 3, 8, 8)
+    batch["front_camera_projection_matrix"] = front_matrix
+    fallback = PinholeProjection(torch.ones_like(matrix))
+
+    predict_control(
+        model,
+        batch,
+        sample_uids=["sample"],
+        model_artifact_id="model-sha",
+        dataset_manifest_digest="manifest-sha",
+        projection=fallback,
+        geometry_type="pinhole",
+    )
+
+    assert INFERENCE_CONTRACT_VERSION == "v4"
+    assert model.kwargs is not None
+    assert torch.equal(model.kwargs["projection"].matrix, matrix)
+    assert torch.equal(model.kwargs["front_projection"].matrix, front_matrix)
+    assert model.kwargs["front_camera_tile"] is batch["front_camera_tile"]
+    assert model.kwargs["geometry_type"] == "rectified_pinhole"
 
 
 def test_infer_loader_controls_emits_seed_fan_and_v0():

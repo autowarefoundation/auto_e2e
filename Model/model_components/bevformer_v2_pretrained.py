@@ -1,4 +1,4 @@
-"""Strict import of the official BEVFormer V2 R50 t1 checkpoint."""
+"""Strict import of official BEVFormer V2 R50 T1 and T8 checkpoints."""
 
 from __future__ import annotations
 
@@ -26,8 +26,39 @@ BEVFORMER_V2_T1_CHECKPOINT_MIRROR_KEY = (
     "r50-t1-epoch24-a498acf289307f5bf47501b650e7b171"
     "fa9dfcb326430ee62055fdef7c4d3291.pth"
 )
+BEVFORMER_V2_T8_CHECKPOINT_URL = (
+    "https://drive.usercontent.google.com/download"
+    "?id=14gL9Z6il5oCtrZmTUpRC4Wyqn8iliA2M&export=download&confirm=t"
+)
+BEVFORMER_V2_T8_CHECKPOINT_SHA256 = (
+    "5585bc4d3ff8b396928cb92d91f773a2"
+    "c57a81258f83cab0c668ebb2eb9d3307"
+)
+BEVFORMER_V2_T8_CHECKPOINT_MIRROR_KEY = (
+    "pretrained/bevformer-v2/"
+    "r50-t8-epoch24-5585bc4d3ff8b396928cb92d91f773a2"
+    "c57a81258f83cab0c668ebb2eb9d3307.pth"
+)
 BEVFORMER_V2_SOURCE_REPOSITORY = (
     "https://github.com/fundamentalvision/BEVFormer"
+)
+BEVFORMER_V2_SOURCE_REVISION = (
+    "66b65f3a1f58caf0507cb2a971b9c0e7f842376c"
+)
+BEVFORMER_V2_T8_TEMPORAL_FRAME_ORDER = (
+    -7,
+    -6,
+    -5,
+    -4,
+    -3,
+    -2,
+    -1,
+    0,
+)
+BEVFORMER_V2_T8_TEMPORAL_FUSION_SOURCE_URL = (
+    "https://github.com/fundamentalvision/BEVFormer/blob/"
+    f"{BEVFORMER_V2_SOURCE_REVISION}/projects/mmdet3d_plugin/"
+    "bevformer/modules/transformerV2.py#L308-L324"
 )
 BEVFORMER_V2_WEIGHT_LICENSE_SPDX = "NOASSERTION"
 BEVFORMER_V2_TRAINING_DATA_LICENSE_SPDX = "CC-BY-NC-SA-4.0"
@@ -47,11 +78,26 @@ def bevformer_v2_t1_checkpoint_mirror_uri(
     return f"s3://{bucket}/{BEVFORMER_V2_T1_CHECKPOINT_MIRROR_KEY}"
 
 
+def bevformer_v2_t8_checkpoint_mirror_uri(
+    account_id: str,
+    *,
+    cluster_name: str = "auto-e2e-platform",
+) -> str:
+    """Resolve the account-local content-addressed T8 checkpoint mirror."""
+    if re.fullmatch(r"[0-9]{12}", account_id) is None:
+        raise ValueError("AWS account ID must contain exactly 12 digits")
+    if re.fullmatch(r"[a-z0-9][a-z0-9-]*", cluster_name) is None:
+        raise ValueError("cluster name is not valid in an S3 bucket name")
+    bucket = f"{cluster_name}-checkpoints-{account_id}"
+    return f"s3://{bucket}/{BEVFORMER_V2_T8_CHECKPOINT_MIRROR_KEY}"
+
+
 @dataclass(frozen=True)
 class BEVFormerV2InitializationReport:
     source_sha256: str
     source_url: str
     source_repository: str
+    source_revision: str
     weight_license_spdx: str
     training_data_license_spdx: str
     loaded_tensor_count: int
@@ -59,6 +105,8 @@ class BEVFormerV2InitializationReport:
     resized_tensors: tuple[str, ...]
     adapted_tensors: tuple[str, ...]
     omitted_components: tuple[str, ...]
+    temporal_fusion_frame_order: tuple[int, ...]
+    temporal_fusion_source_url: str | None
 
     def metadata(self) -> dict[str, object]:
         return asdict(self)
@@ -141,6 +189,9 @@ def load_bevformer_v2_t1_checkpoint(
     checkpoint_path: str | Path,
     *,
     expected_sha256: str = BEVFORMER_V2_T1_CHECKPOINT_SHA256,
+    _expected_architecture: str = "bevformer_v2_t1",
+    _source_url: str = BEVFORMER_V2_T1_CHECKPOINT_URL,
+    _include_temporal_fusion: bool = False,
 ) -> BEVFormerV2InitializationReport:
     """Import every compatible camera-BEV tensor and report adaptations."""
     path = Path(checkpoint_path)
@@ -157,9 +208,12 @@ def load_bevformer_v2_t1_checkpoint(
     if getattr(reactive.Backbone, "backbone_name", None) != "res_net_50":
         raise ValueError("BEVFormer V2 initialization requires res_net_50")
     feature_fusion: Any = reactive.FeatureFusion
-    if getattr(feature_fusion, "architecture", None) != "bevformer_v2_t1":
+    if getattr(feature_fusion, "architecture", None) != (
+        _expected_architecture
+    ):
         raise ValueError(
-            "BEVFormer V2 initialization requires bevformer_v2_t1 fusion"
+            "BEVFormer V2 initialization requires "
+            f"{_expected_architecture} fusion"
         )
     view_fusion: Any = feature_fusion.view_fusion
     target = model.state_dict()
@@ -318,6 +372,56 @@ def load_bevformer_v2_t1_checkpoint(
                     ),
                 )
 
+    final_source_layer = (
+        "pts_bbox_head.transformer.encoder.layers."
+        f"{len(view_fusion.layers) - 1}"
+    )
+    for field in (
+        "sampling_offsets.weight",
+        "sampling_offsets.bias",
+        "attention_weights.weight",
+        "attention_weights.bias",
+        "value_proj.weight",
+        "value_proj.bias",
+        "output_proj.weight",
+        "output_proj.bias",
+    ):
+        cross_source = (
+            f"{final_source_layer}.attentions.1.output_proj"
+            if field.startswith("output_proj.")
+            else (
+                f"{final_source_layer}.attentions.1."
+                f"deformable_attention.{field.rsplit('.', 1)[0]}"
+            )
+        )
+        add(
+            f"FeatureFusion.view_fusion.front_cross_attention.{field}",
+            f"{cross_source}.{field.rsplit('.', 1)[1]}",
+        )
+
+    if _include_temporal_fusion:
+        temporal_fusion = getattr(
+            feature_fusion,
+            "temporal_fusion",
+            None,
+        )
+        if temporal_fusion is None:
+            raise ValueError("BEVFormer V2 T8 temporal fusion is missing")
+        source_prefix = "pts_bbox_head.transformer.fusion."
+        temporal_source_names = sorted(
+            name for name in source if name.startswith(source_prefix)
+        )
+        if not temporal_source_names:
+            raise ValueError(
+                "BEVFormer V2 T8 checkpoint lacks temporal fusion"
+            )
+        for source_name in temporal_source_names:
+            suffix = source_name.removeprefix(source_prefix)
+            add(
+                f"FeatureFusion.temporal_fusion.{suffix}",
+                source_name,
+            )
+
     incompatible = model.load_state_dict(updates, strict=False)
     unexpected = tuple(incompatible.unexpected_keys)
     if unexpected:
@@ -332,6 +436,7 @@ def load_bevformer_v2_t1_checkpoint(
         for name, _parameter in feature_fusion.named_parameters()
     }
     intentionally_new = {
+        root + "FeatureFusion.view_fusion.front_residual_gate",
         root + "FeatureFusion.view_fusion.pseudo_projection",
     }
     uninitialized = camera_parameters - set(updates) - intentionally_new
@@ -342,8 +447,9 @@ def load_bevformer_v2_t1_checkpoint(
         )
     return BEVFormerV2InitializationReport(
         source_sha256=actual_sha256,
-        source_url=BEVFORMER_V2_T1_CHECKPOINT_URL,
+        source_url=_source_url,
         source_repository=BEVFORMER_V2_SOURCE_REPOSITORY,
+        source_revision=BEVFORMER_V2_SOURCE_REVISION,
         weight_license_spdx=BEVFORMER_V2_WEIGHT_LICENSE_SPDX,
         training_data_license_spdx=(
             BEVFORMER_V2_TRAINING_DATA_LICENSE_SPDX
@@ -353,4 +459,31 @@ def load_bevformer_v2_t1_checkpoint(
         resized_tensors=tuple(resized),
         adapted_tensors=tuple(adapted),
         omitted_components=("detector_and_perspective_heads",),
+        temporal_fusion_frame_order=(
+            BEVFORMER_V2_T8_TEMPORAL_FRAME_ORDER
+            if _include_temporal_fusion
+            else ()
+        ),
+        temporal_fusion_source_url=(
+            BEVFORMER_V2_T8_TEMPORAL_FUSION_SOURCE_URL
+            if _include_temporal_fusion
+            else None
+        ),
+    )
+
+
+def load_bevformer_v2_t8_checkpoint(
+    model: torch.nn.Module,
+    checkpoint_path: str | Path,
+    *,
+    expected_sha256: str = BEVFORMER_V2_T8_CHECKPOINT_SHA256,
+) -> BEVFormerV2InitializationReport:
+    """Import the official T8 camera encoder and temporal ResNet fusion."""
+    return load_bevformer_v2_t1_checkpoint(
+        model,
+        checkpoint_path,
+        expected_sha256=expected_sha256,
+        _expected_architecture="bevformer_v2_t8",
+        _source_url=BEVFORMER_V2_T8_CHECKPOINT_URL,
+        _include_temporal_fusion=True,
     )

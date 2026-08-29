@@ -21,7 +21,7 @@ DATA_PREP_IMAGE = os.environ.get(
     requests=Resources(cpu="2", mem="4Gi"),
     limits=Resources(cpu="2", mem="4Gi"),
     cache=True,
-    cache_version="trajectory-report-v3-ground-plane",
+    cache_version="trajectory-report-v4-rig-projection",
     cache_serialize=True,
 )
 def export_trajectory_report(
@@ -29,6 +29,7 @@ def export_trajectory_report(
     overlay: FlyteFile,
     dataset_manifest: FlyteFile,
     overlay_manifest: FlyteFile,
+    rig_projection: FlyteFile,
     selection_manifest: Optional[FlyteFile] = None,
     scene_uids: List[str] = [],
     seed_index: int = 0,
@@ -57,6 +58,7 @@ def export_trajectory_report(
         output_dir=output,
         dataset_manifest_path=dataset_manifest.download(),
         overlay_manifest_path=overlay_manifest.download(),
+        rig_projection_path=rig_projection.download(),
         scene_uids=scene_uids or None,
         scene_selections=scene_selections,
         seed_index=seed_index,

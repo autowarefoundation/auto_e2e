@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 import shutil
 import stat
+import tarfile
 from typing import Any
 from urllib.parse import urlsplit
 import zipfile
@@ -274,13 +275,13 @@ def _safe_member_parts(info: zipfile.ZipInfo) -> tuple[str, ...]:
     return parts
 
 
-def _member_destination(
-    info: zipfile.ZipInfo,
+def _member_destination_from_parts(
+    parts: tuple[str, ...],
     archive: Mapping[str, Any],
     *,
+    is_directory: bool,
     map_version: str,
 ) -> PurePosixPath | None:
-    parts = _safe_member_parts(info)
     if parts == ("LICENSE",):
         return None
     component = archive["component"]
@@ -289,12 +290,12 @@ def _member_destination(
         if parts[0] != map_version:
             raise ValueError(
                 f"map archive member is outside {map_version!r}: "
-                f"{info.filename!r}"
+                f"{PurePosixPath(*parts)!s}"
             )
         relative = PurePosixPath(*parts[1:])
         return extract_to / relative if relative.parts else None
     if component == "database":
-        if info.is_dir() or PurePosixPath(*parts).suffix != ".db":
+        if is_directory or PurePosixPath(*parts).suffix != ".db":
             return None
         return extract_to / parts[-1]
     if len(parts) < 2:
@@ -303,63 +304,154 @@ def _member_destination(
     return extract_to / relative if relative.parts else None
 
 
+def _safe_tar_member_parts(info: tarfile.TarInfo) -> tuple[str, ...]:
+    path = PurePosixPath(info.name)
+    parts = path.parts
+    if (
+        path.is_absolute()
+        or not parts
+        or any(part in {"", ".", ".."} for part in parts)
+    ):
+        raise ValueError(f"unsafe TAR member path: {info.name!r}")
+    if info.issym() or info.islnk():
+        raise ValueError(f"TAR link is not allowed: {info.name!r}")
+    if not (info.isdir() or info.isreg()):
+        raise ValueError(f"unsupported TAR member type: {info.name!r}")
+    return parts
+
+
+def _archive_map_version(
+    member_paths: Sequence[tuple[str, ...]],
+) -> str:
+    map_versions = {
+        parts[0]
+        for parts in member_paths
+        if len(parts) == 2
+        and parts[0].startswith("nuplan-maps-v")
+        and parts[1] == f"{parts[0]}.json"
+    }
+    if len(map_versions) != 1:
+        raise ValueError(
+            "nuPlan map archive must contain exactly one "
+            "version metadata file"
+        )
+    return map_versions.pop()
+
+
+def _write_archive_member(
+    source: Any,
+    target: Path,
+    dataset_root: Path,
+) -> None:
+    if dataset_root.resolve() not in target.parents:
+        raise ValueError(f"archive member escapes dataset root: {target}")
+    if target.exists():
+        if not target.is_file():
+            raise FileExistsError(
+                f"duplicate nuPlan materialized path is not a file: {target}"
+            )
+        with source, target.open("rb") as existing:
+            while True:
+                incoming_chunk = source.read(16 * 1024 * 1024)
+                existing_chunk = existing.read(16 * 1024 * 1024)
+                if incoming_chunk != existing_chunk:
+                    raise FileExistsError(
+                        "conflicting duplicate nuPlan materialized file: "
+                        f"{target}"
+                    )
+                if not incoming_chunk:
+                    return
+    target.parent.mkdir(parents=True, exist_ok=True)
+    with source, target.open("wb") as output:
+        shutil.copyfileobj(
+            source,
+            output,
+            length=16 * 1024 * 1024,
+        )
+
+
 def extract_nuplan_archive(
     archive_path: Path,
     archive: Mapping[str, Any],
     dataset_root: Path,
     *,
     map_version: str,
-) -> dict[str, int]:
-    """Safely normalize one official nuPlan ZIP into the devkit hierarchy."""
+) -> dict[str, int | str]:
+    """Safely normalize one official nuPlan ZIP or TAR archive."""
     file_count = 0
     uncompressed_bytes = 0
-    with zipfile.ZipFile(archive_path) as source:
-        members = source.infolist()
+    if zipfile.is_zipfile(archive_path):
+        with zipfile.ZipFile(archive_path) as source:
+            members = source.infolist()
+            member_parts = [
+                _safe_member_parts(info) for info in members
+            ]
+            archive_map_version = map_version
+            if archive["component"] == "maps":
+                archive_map_version = _archive_map_version(member_parts)
+            for info, parts in zip(members, member_parts):
+                relative = _member_destination_from_parts(
+                    parts,
+                    archive,
+                    is_directory=info.is_dir(),
+                    map_version=archive_map_version,
+                )
+                if relative is None:
+                    continue
+                target = (
+                    dataset_root / Path(*relative.parts)
+                ).resolve()
+                if info.is_dir():
+                    target.mkdir(parents=True, exist_ok=True)
+                    continue
+                _write_archive_member(
+                    source.open(info),
+                    target,
+                    dataset_root,
+                )
+                file_count += 1
+                uncompressed_bytes += info.file_size
+        return {
+            "archive_format": "zip",
+            "file_count": file_count,
+            "uncompressed_bytes": uncompressed_bytes,
+        }
+
+    if not tarfile.is_tarfile(archive_path):
+        raise ValueError(
+            f"unsupported nuPlan archive format: {archive['archive_id']!r}"
+        )
+    with tarfile.open(archive_path, mode="r:*") as source:
+        members = source.getmembers()
+        member_parts = [
+            _safe_tar_member_parts(info) for info in members
+        ]
         archive_map_version = map_version
         if archive["component"] == "maps":
-            map_versions = {
-                parts[0]
-                for info in members
-                if len(parts := _safe_member_parts(info)) == 2
-                and parts[0].startswith("nuplan-maps-v")
-                and parts[1] == f"{parts[0]}.json"
-            }
-            if len(map_versions) != 1:
-                raise ValueError(
-                    "nuPlan map archive must contain exactly one "
-                    "version metadata file"
-                )
-            archive_map_version = map_versions.pop()
-        for info in members:
-            relative = _member_destination(
-                info,
+            archive_map_version = _archive_map_version(member_parts)
+        for info, parts in zip(members, member_parts):
+            relative = _member_destination_from_parts(
+                parts,
                 archive,
+                is_directory=info.isdir(),
                 map_version=archive_map_version,
             )
             if relative is None:
                 continue
             target = (dataset_root / Path(*relative.parts)).resolve()
-            if dataset_root.resolve() not in target.parents:
-                raise ValueError(
-                    f"ZIP member escapes dataset root: {info.filename!r}"
-                )
-            if info.is_dir():
+            if info.isdir():
                 target.mkdir(parents=True, exist_ok=True)
                 continue
-            if target.exists():
-                raise FileExistsError(
-                    f"duplicate nuPlan materialized file: {target}"
+            input_stream = source.extractfile(info)
+            if input_stream is None:
+                raise ValueError(
+                    f"failed to read TAR member: {info.name!r}"
                 )
-            target.parent.mkdir(parents=True, exist_ok=True)
-            with source.open(info) as input_stream, target.open("wb") as output:
-                shutil.copyfileobj(
-                    input_stream,
-                    output,
-                    length=16 * 1024 * 1024,
-                )
+            _write_archive_member(input_stream, target, dataset_root)
             file_count += 1
-            uncompressed_bytes += info.file_size
+            uncompressed_bytes += info.size
     return {
+        "archive_format": "tar",
         "file_count": file_count,
         "uncompressed_bytes": uncompressed_bytes,
     }

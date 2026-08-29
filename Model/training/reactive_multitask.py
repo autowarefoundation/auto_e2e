@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import dataclasses
 import enum
 import math
 from collections.abc import Mapping, Sequence
-from typing import Any
+from typing import Any, Final
 
 import torch
 import torch.nn as nn
@@ -20,11 +21,60 @@ from navigation.geometry import (
     MAP_CHANNEL_COUNT,
     ROUTE_CHANNEL_COUNT,
 )
+from reactive_training_contracts import (
+    REACTIVE_CAMERA_IMAGE_SIZE,
+    REACTIVE_FRONT_CAMERA_IMAGE_SIZE,
+    REACTIVE_FRONT_CAMERA_INDEX,
+)
 
 
 SIMPLE_XY_IMITATION_OBJECTIVE_VERSION = "simple_xy_imitation_v1"
 REACTIVE_MODEL_ARCHITECTURE_VERSION = (
-    "bevformer_v2_t1_split_navigation_v1"
+    "bevformer_v2_t8_split_navigation_v5"
+)
+
+
+@dataclasses.dataclass(frozen=True)
+class ReactiveBEVLatentGeometry:
+    """Model-owned latent grid independent of persisted raster identity."""
+
+    bev_h: int
+    bev_w: int
+    pc_range: tuple[float, float, float, float, float, float]
+
+    def __post_init__(self) -> None:
+        if self.bev_h <= 0 or self.bev_w <= 0:
+            raise ValueError("BEV latent dimensions must be positive")
+        if len(self.pc_range) != 6 or not all(
+            math.isfinite(value)
+            for value in self.pc_range
+        ):
+            raise ValueError("BEV latent pc_range must contain six finite values")
+        x_extent = self.pc_range[3] - self.pc_range[0]
+        y_extent = self.pc_range[4] - self.pc_range[1]
+        z_extent = self.pc_range[5] - self.pc_range[2]
+        if min(x_extent, y_extent, z_extent) <= 0.0:
+            raise ValueError("BEV latent XYZ extents must be positive")
+        if not math.isclose(
+            x_extent / self.bev_h,
+            y_extent / self.bev_w,
+            rel_tol=0.0,
+            abs_tol=1e-9,
+        ):
+            raise ValueError("BEV latent cells must have isotropic XY pitch")
+
+    def camera_bev_kwargs(self) -> dict[str, object]:
+        return {
+            "bev_h": self.bev_h,
+            "bev_w": self.bev_w,
+            "pc_range": list(self.pc_range),
+        }
+
+
+AUTOE2E_REACTIVE_BEV_GEOMETRY: Final = ReactiveBEVLatentGeometry(
+    bev_h=300,
+    bev_w=200,
+    pc_range=AUTOE2E_NAVIGATION_GEOMETRY.matching_pc_range,
 )
 
 
@@ -42,13 +92,13 @@ def reactive_model_kwargs(
     if num_views <= 0:
         raise ValueError("num_views must be positive")
     view_fusion_kwargs = (
-        AUTOE2E_NAVIGATION_GEOMETRY.camera_bev_kwargs()
+        AUTOE2E_REACTIVE_BEV_GEOMETRY.camera_bev_kwargs()
     )
     view_fusion_kwargs.update({
-        "architecture": "bevformer_v2_t1",
-        "bev_h": 256,
-        "bev_w": 256,
-        "image_size": 256,
+        "architecture": "bevformer_v2_t8",
+        "front_camera_index": REACTIVE_FRONT_CAMERA_INDEX,
+        "front_image_size": REACTIVE_FRONT_CAMERA_IMAGE_SIZE,
+        "image_size": REACTIVE_CAMERA_IMAGE_SIZE,
         "num_heads": 8,
         "num_levels": 4,
         "num_points": 8,
@@ -73,6 +123,9 @@ def reactive_model_kwargs(
         },
         "temporal_memory_mode": "no_memory",
         "planner_mode": "gru",
+        "planner_kwargs": {
+            "num_points": 16,
+        },
         "enable_world_model": False,
         "enable_reasoning": False,
         # Stage B retains and loads the Stage A head but does not execute it.
@@ -90,11 +143,10 @@ def configure_model_for_stage(
     model: nn.Module,
     stage: ReactiveTrainingStage,
     *,
-    bev_only: bool = False,
+    freeze_bevformer: bool = False,
+    train_bev_head: bool = True,
 ) -> None:
     """Apply trainability rules after loading the stage checkpoint."""
-    if bev_only and stage is not ReactiveTrainingStage.NUPLAN_FULL:
-        raise ValueError("BEV-only training is valid only for Stage A")
     try:
         reactive = getattr(model, "Reactive_E2E")
         bev_head = getattr(reactive, "BEVSegmentationHead")
@@ -104,19 +156,19 @@ def configure_model_for_stage(
         ) from exc
     if not isinstance(bev_head, nn.Module):
         raise ValueError("multi-stage training requires the BEV head")
-    if bev_only:
-        for parameter in model.parameters():
-            parameter.requires_grad_(False)
-        for module in (
-            reactive.Backbone,
-            reactive.FeatureFusion,
-            bev_head,
-        ):
-            for parameter in module.parameters():
-                parameter.requires_grad_(True)
-            module.train()
-        return
-    train_bev = stage is ReactiveTrainingStage.NUPLAN_FULL
+    if freeze_bevformer:
+        freeze_camera_bev = getattr(reactive, "freeze_camera_bev", None)
+        if not callable(freeze_camera_bev):
+            raise ValueError("model cannot freeze the camera BEV modules")
+        freeze_camera_bev(
+            adapt_temporal_running_stats=(
+                stage is ReactiveTrainingStage.NUPLAN_FULL
+            ),
+        )
+    train_bev = (
+        stage is ReactiveTrainingStage.NUPLAN_FULL
+        and bool(train_bev_head)
+    )
     for parameter in bev_head.parameters():
         parameter.requires_grad_(train_bev)
     bev_head.train(train_bev)

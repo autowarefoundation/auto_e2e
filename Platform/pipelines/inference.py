@@ -12,7 +12,7 @@ import torch
 
 
 NOISE_POLICY_VERSION = "v1"
-INFERENCE_CONTRACT_VERSION = "v3"
+INFERENCE_CONTRACT_VERSION = "v4"
 
 
 def sha256_file(path: str | Path, chunk_size: int = 8 << 20) -> str:
@@ -134,6 +134,30 @@ def predict_control(
         )
 
     device = visual.device
+    from training.reactive_stage_runner import (
+        resolve_reactive_batch_projection,
+        resolve_reactive_camera_history,
+        resolve_reactive_front_projection,
+    )
+
+    projection, geometry_type = resolve_reactive_batch_projection(
+        batch,
+        projection,
+        geometry_type,
+        device=device,
+    )
+    front_projection = resolve_reactive_front_projection(
+        batch,
+        geometry_type,
+        device=device,
+    )
+    camera_history_tiles, history_projections = (
+        resolve_reactive_camera_history(
+            batch,
+            geometry_type,
+            device=device,
+        )
+    )
     initial_noise = torch.stack(
         [
             noise_from(
@@ -155,6 +179,10 @@ def predict_control(
     kwargs: dict[str, Any] = {
         "projection": projection,
         "geometry_type": geometry_type,
+        "camera_history_tiles": camera_history_tiles,
+        "history_projections": history_projections,
+        "front_camera_tile": batch.get("front_camera_tile"),
+        "front_projection": front_projection,
         "mode": "infer",
         "initial_noise": initial_noise,
     }

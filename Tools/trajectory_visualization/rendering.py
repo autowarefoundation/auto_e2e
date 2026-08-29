@@ -156,6 +156,45 @@ def trajectory_ground_z_m(calibration: Mapping[str, Any]) -> float:
     return _KITSCENES_GROUND_Z_M if "kitscenes" in dataset else 0.0
 
 
+def _camera_projection(
+    calibration: Mapping[str, Any],
+    *,
+    camera_index: int,
+    image_wh: tuple[int, int],
+) -> tuple[Mapping[str, Any], int, tuple[int, int]] | None:
+    spec = calibration.get("projection")
+    projection_view = camera_index
+    base_size = calibration.get("image_size")
+    projection_image_wh = (
+        (base_size, base_size)
+        if (
+            isinstance(base_size, int)
+            and not isinstance(base_size, bool)
+            and base_size > 0
+        )
+        else image_wh
+    )
+    front_index = calibration.get("front_camera_index")
+    if (
+        isinstance(front_index, int)
+        and not isinstance(front_index, bool)
+        and camera_index == front_index
+    ):
+        spec = calibration.get("front_projection")
+        front_size = calibration.get("front_camera_image_size")
+        if (
+            not isinstance(front_size, int)
+            or isinstance(front_size, bool)
+            or front_size <= 0
+        ):
+            return None
+        projection_view = 0
+        projection_image_wh = (front_size, front_size)
+    if not isinstance(spec, Mapping):
+        return None
+    return spec, projection_view, projection_image_wh
+
+
 def project_trajectory(
     calibration: Mapping[str, Any],
     trajectory: np.ndarray,
@@ -163,9 +202,14 @@ def project_trajectory(
     camera_index: int,
     image_wh: tuple[int, int],
 ) -> list[list[tuple[float, float]]]:
-    spec = calibration.get("projection")
-    if not isinstance(spec, dict):
+    projection = _camera_projection(
+        calibration,
+        camera_index=camera_index,
+        image_wh=image_wh,
+    )
+    if projection is None:
         return []
+    spec, projection_view, projection_image_wh = projection
     geometry_type = str(
         spec.get("type", calibration.get("geometry_type", "pseudo"))
     )
@@ -176,14 +220,14 @@ def project_trajectory(
     paths: list[list[tuple[float, float]]] = [[]]
     for point in trajectory:
         projected = (
-            _ftheta_point(spec, camera_index, point, ground_z)
+            _ftheta_point(spec, projection_view, point, ground_z)
             if geometry_type == "ftheta"
             else _pinhole_point(
                 spec,
-                camera_index,
+                projection_view,
                 point,
                 ground_z,
-                image_wh,
+                projection_image_wh,
             )
         )
         if projected is None:
@@ -199,21 +243,27 @@ def camera_projection_status(
     *,
     camera_index: int,
 ) -> str:
-    spec = calibration.get("projection")
+    projection = _camera_projection(
+        calibration,
+        camera_index=camera_index,
+        image_wh=(1, 1),
+    )
+    spec = projection[0] if projection is not None else None
+    projection_view = projection[1] if projection is not None else camera_index
     geometry_type = str(
         (
             spec.get("type", calibration.get("geometry_type", "pseudo"))
-            if isinstance(spec, dict)
+            if isinstance(spec, Mapping)
             else calibration.get("geometry_type", "pseudo")
         )
     )
     if geometry_type == "pseudo":
         return "unsupported_pseudo_geometry"
-    if not isinstance(spec, dict):
+    if not isinstance(spec, Mapping):
         return "unsupported"
     field = "t_camera_ego" if geometry_type == "ftheta" else "matrix"
     values = spec.get(field)
-    if not isinstance(values, list) or camera_index >= len(values):
+    if not isinstance(values, list) or projection_view >= len(values):
         return "unsupported"
     return "calibrated"
 

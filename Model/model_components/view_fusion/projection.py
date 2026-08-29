@@ -181,7 +181,9 @@ def _finalize_linear(projected, image_transform, geometry_type) -> ProjectionRes
     # whole geometry divide+normalize in fp32, then cast the bounded result.
     uv_f = projected[..., :2].float() / depth_safe.float()
     wh = torch.tensor([w, h], device=uv_f.device, dtype=torch.float32)
-    uv_norm = (uv_f / wh).to(projected.dtype)
+    # Sampling coordinates stay FP32 even when the feature path uses bf16.
+    # bf16 quantization in [0, 1] is several pixels at 512/1024 resolution.
+    uv_norm = uv_f / wh
     in_bounds = (
         (uv_norm[..., 0] >= 0) & (uv_norm[..., 0] <= 1)
         & (uv_norm[..., 1] >= 0) & (uv_norm[..., 1] <= 1)
@@ -259,9 +261,14 @@ class PinholeProjection:
         """Project ego points ``[M, 3]`` (or homogeneous ``[M, 4]``) onto each
         camera. ``B, V`` come from the matrix — runtime ``V`` is derived here."""
         pts = _homogenize(points_ego)
-        proj = self.matrix.to(device=pts.device, dtype=pts.dtype)
-        # out[b, v, m, i] = sum_j proj[b, v, i, j] * points[m, j]
-        projected = torch.einsum("bvij,mj->bvmi", proj, pts)
+        with torch.autocast(device_type=pts.device.type, enabled=False):
+            proj = self.matrix.to(device=pts.device, dtype=torch.float32)
+            # out[b, v, m, i] = sum_j proj[b, v, i, j] * points[m, j]
+            projected = torch.einsum(
+                "bvij,mj->bvmi",
+                proj,
+                pts.float(),
+            )
         return _finalize_linear(projected, image_transform, self.geometry_type)
 
 
@@ -299,9 +306,17 @@ class PseudoProjection:
         # Expand the shared [3, 4] prior to [1, V, 3, 4]: batch dim 1 broadcasts
         # across the real batch in the sampling loop (prior is batch- and
         # view-independent by construction).
-        proj = self.matrix.reshape(3, 4).unsqueeze(0).unsqueeze(0)  # [1, 1, 3, 4]
-        proj = proj.expand(1, self.num_views, 3, 4).to(device=pts.device, dtype=pts.dtype)
-        projected = torch.einsum("bvij,mj->bvmi", proj, pts)  # [1, V, M, 3]
+        with torch.autocast(device_type=pts.device.type, enabled=False):
+            proj = self.matrix.reshape(3, 4).unsqueeze(0).unsqueeze(0)
+            proj = proj.expand(1, self.num_views, 3, 4).to(
+                device=pts.device,
+                dtype=torch.float32,
+            )
+            projected = torch.einsum(
+                "bvij,mj->bvmi",
+                proj,
+                pts.float(),
+            )
 
         depth = projected[..., 2]
         valid_depth = depth > _DEPTH_EPS
@@ -314,7 +329,7 @@ class PseudoProjection:
         uv = projected[..., :2].float() / depth_safe.float()
         # Unbounded pseudo outputs → sigmoid to keep coords in (0, 1). in-bounds
         # is then trivially satisfied, so the mask reduces to the depth check.
-        uv_norm = uv.sigmoid().to(projected.dtype)
+        uv_norm = uv.sigmoid()
         it = _as_image_transform(image_transform)
         meta = {"geometry_type": self.geometry_type,
                 "model_input_size": it.model_input_size, "rectification": None}
@@ -450,9 +465,17 @@ class FThetaProjection:
     def project_ego_to_image(self, points_ego, image_transform) -> ProjectionResult:
         pts = _homogenize(points_ego)
         it = _as_image_transform(image_transform)
-        T = self.t_camera_ego.to(device=pts.device, dtype=pts.dtype)
-        # camera-frame points: [B, V, M, 4] then drop homogeneous w.
-        cam = torch.einsum("bvij,mj->bvmi", T, pts)[..., :3]
+        with torch.autocast(device_type=pts.device.type, enabled=False):
+            T = self.t_camera_ego.to(
+                device=pts.device,
+                dtype=torch.float32,
+            )
+            # camera-frame points: [B, V, M, 4] then drop homogeneous w.
+            cam = torch.einsum(
+                "bvij,mj->bvmi",
+                T,
+                pts.float(),
+            )[..., :3]
         x, y, z = cam[..., 0], cam[..., 1], cam[..., 2]
         rho = torch.sqrt(x * x + y * y).clamp(min=_DEPTH_EPS)
         theta = torch.atan2(rho, z)                     # incidence angle from +Z

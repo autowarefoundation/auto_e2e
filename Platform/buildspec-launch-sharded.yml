@@ -15,8 +15,12 @@ env:
     AWS_DEFAULT_REGION: us-west-2
     FLYTE_PROJECT: auto-e2e
     FLYTE_DOMAIN: development
+    DATASET: KIT-MRT/KITScenes-Multimodal
+    DATASET_VERSION: v3.4
+    IMAGE_SIZE: "512"
     EPISODES: "10"
     PARTITION_SIZE: "1"
+    TOTAL_SAMPLE_LIMIT: "0"
     REASONING_TEACHER: "openai_compatible"
     IMAGE_TAG: latest
 
@@ -65,7 +69,10 @@ phases:
         --domain $FLYTE_DOMAIN
         --image "${AUTO_E2E_TRAINING_IMAGE}"
         Platform/pipelines/workflows.py wf_create_dataset_sharded
-        --dataset "KIT-MRT/KITScenes-Multimodal"
+        --dataset "$DATASET"
+        --dataset_version $DATASET_VERSION
+        --image_size $IMAGE_SIZE
         --episodes $EPISODES
         --partition_size $PARTITION_SIZE
+        --total_sample_limit $TOTAL_SAMPLE_LIMIT
         --reasoning_teacher $REASONING_TEACHER

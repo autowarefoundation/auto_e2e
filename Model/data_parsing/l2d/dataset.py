@@ -44,7 +44,8 @@ else:  # Python 3.10 (local dev venv); CI runs 3.12
 from data_processing.contract_versions import UID_SCHEMA_VERSION
 from data_processing.source_revisions import L2D_DATA_REVISION
 
-from .camera import CAMERA_NAMES, MAP_VIEW_NAME
+from .calibration import l2d_projection_spec
+from .camera import CAMERA_NAMES, CAMERA_SLOTS, MAP_VIEW_NAME
 from .egomotion import (
     MIN_FRAMES,
     _FUTURE_TIMESTEPS,
@@ -122,6 +123,8 @@ class L2DDataset(Dataset):
 
         self.repo_id = repo_id
         self._episodes = episodes
+        self.camera_names = list(CAMERA_NAMES)
+        self.camera_slots = list(CAMERA_SLOTS)
 
         # World Model (#16): optionally emit the 1 Hz multi-view past/future
         # windows that the JEPA loss (#13) needs. stride converts the source rate
@@ -203,6 +206,13 @@ class L2DDataset(Dataset):
             raise ValueError("No valid samples found in the dataset.")
 
         logger.info("L2DDataset: %d samples", len(self._samples))
+
+    def projection_spec(
+        self,
+        image_size: int | tuple[int, int] = 256,
+    ) -> dict[str, Any]:
+        """Return the FOV-derived L2D pinhole projection contract."""
+        return l2d_projection_spec(image_size)
 
     def _episode_local_ranges(self) -> dict[int, tuple[int, int]]:
         """Map each episode to its [start, end) row range in ``hf_dataset``.

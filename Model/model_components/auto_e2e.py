@@ -174,6 +174,9 @@ class AutoE2E(nn.Module):
                 egomotion_history, route_mask=None, map_valid=None,
                 route_valid=None,
                 projection=None, geometry_type=None, image_transform=None,
+                camera_history_tiles=None, history_projections=None,
+                front_camera_tile=None, front_projection=None,
+                front_image_transform=None,
                 mode="train", trajectory_target=None,
                 history_frames=None, future_frames=None,
                 return_auxiliary=False,
@@ -209,6 +212,10 @@ class AutoE2E(nn.Module):
             geometry_type: Optional explicit geometry label ("pinhole",
                 "rectified_pinhole", "ftheta", "pseudo") passed to BEV fusion.
             image_transform: Optional ImageTransform for the model-input frame.
+            front_camera_tile: Optional native-resolution front image tensor.
+            front_projection: Optional one-view projection for the native front.
+            camera_history_tiles: Optional seven-frame camera history for T8.
+            history_projections: Optional current-ego-aligned history geometry.
             mode: "train" also returns aux branch outputs for their losses.
 
         Returns:
@@ -304,6 +311,11 @@ class AutoE2E(nn.Module):
             route_valid=route_valid,
             projection=projection, geometry_type=geometry_type,
             image_transform=image_transform,
+            camera_history_tiles=camera_history_tiles,
+            history_projections=history_projections,
+            front_camera_tile=front_camera_tile,
+            front_projection=front_projection,
+            front_image_transform=front_image_transform,
             mode=mode,
             return_auxiliary=return_auxiliary,
             compute_bev_segmentation=compute_bev_segmentation,

@@ -36,6 +36,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Local immutable overlay-set manifest",
     )
     parser.add_argument(
+        "--rig-projection",
+        required=True,
+        help="Local rig JSON referenced by the selected shard entry",
+    )
+    parser.add_argument(
         "--output-dir",
         required=True,
         help="Empty destination directory",
@@ -71,6 +76,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         output_dir=args.output_dir,
         dataset_manifest_path=args.dataset_manifest,
         overlay_manifest_path=args.overlay_manifest,
+        rig_projection_path=args.rig_projection,
         seed_index=args.seed_index,
         camera_index=args.camera_index,
         scene_uids=args.scenes,

@@ -21,7 +21,8 @@ env:
     FLYTE_DOMAIN: development
     ARTIFACT_SET_SHA256: ""
     RECOVERY_MANIFEST_URI: ""
-    DATASET_VERSION: v3.3
+    DATASET_VERSION: v3.4
+    IMAGE_SIZE: "512"
     PACK_CONCURRENCY: "60"
     MAX_PARTITIONS: "0"
     BACKBONE: "swin_v2_tiny"
@@ -94,6 +95,7 @@ phases:
           --recovery_manifest "${RECOVERY_MANIFEST_URI}"
           --artifact_set_sha256 "${ARTIFACT_SET_SHA256}"
           --dataset_version "${DATASET_VERSION}"
+          --image_size "${IMAGE_SIZE}"
           --pack_concurrency "${PACK_CONCURRENCY}"
           --max_partitions "${MAX_PARTITIONS}"
           --backbone "${BACKBONE}"

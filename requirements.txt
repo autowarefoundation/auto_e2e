@@ -6,6 +6,7 @@ mypy==2.1.0
 numpy==2.2.6
 pyproj==3.7.2
 pytest==9.0.3
+PyYAML==6.0.3
 ray[train]==2.46.0
 ruff==0.15.16
 timm==1.0.27

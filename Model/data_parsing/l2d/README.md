@@ -5,14 +5,31 @@ Parser for the L2D LeRobot dataset (v3.0), producing tensors directly consumable
 ## Dataset overview
 
 - 100,000 episodes at 10 FPS
-- 7 camera views: 6 surround cameras + 1 BEV map (640×360)
+- 6 surround camera views and 1 separate BEV map (640×360)
 - Vehicle state: float32 shape[8] — speed, heading, heading_error, lat, lon, alt, accel_x, accel_y
 - Waypoints: float32 shape[10,2] — GPS lon/lat
 - Actions: float32 shape[3] — gas, brake, steering
 
+## Camera calibration approximation
+
+L2D publishes six-camera inter-camera RDF extrinsics but no vehicle pose for
+the reference camera, distortion coefficients, or verified rectification
+calibration. The parser pins the official extrinsics and assumes the reference
+camera is at the ego origin with zero mounting rotation.
+
+The vendor horizontal and vertical FOV pairs cannot both describe one
+square-pixel pinhole at the 1920×1080 stream aspect ratio. The production
+approximation therefore derives one `fx = fy` source focal length from the
+published vertical FOV, preserving the image-row angles used for ground-plane
+projection, then applies the independent horizontal and vertical resize scales
+for the packed square image. The unused horizontal-FOV discrepancy and focal
+ratio are recorded per lens in rig provenance. This remains an audited
+approximation, not measured camera calibration.
+
 ## Model inputs produced
 
-- `visual_tiles` `(7, 3, H, W)` — 7 camera views (6 cameras + 1 BEV map)
+- `visual_tiles` `(6, 3, H, W)` — 6 camera views
+- `map_tile` `(3, H, W)` — BEV map for the separate navigation branch
 - `egomotion_history` `(256,)` — 64 past timesteps × 4 signals at 10 Hz
 - `visual_history` `(896,)` — zero-initialised; populated during sequential inference
 - `trajectory_target` `(128,)` — 64 future timesteps × 2 signals (supervision target)
@@ -71,7 +88,8 @@ dataset = L2DDataset(
 loader = DataLoader(dataset, batch_size=8, shuffle=True, num_workers=4)
 
 for batch in loader:
-    visual_tiles      = batch["visual_tiles"].to(device)       # (B, 7, 3, H, W)
+    visual_tiles      = batch["visual_tiles"].to(device)       # (B, 6, 3, H, W)
+    map_tile          = batch["map_tile"].to(device)           # (B, 3, H, W)
     visual_history    = batch["visual_history"].to(device)     # (B, 896)
     egomotion_history = batch["egomotion_history"].to(device)  # (B, 256)
     trajectory_target = batch["trajectory_target"].to(device)  # (B, 128)

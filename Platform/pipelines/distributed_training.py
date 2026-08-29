@@ -39,12 +39,6 @@ from kubernetes.client import (
     V1VolumeMount,
 )
 
-from reactive_training_contracts import (
-    MAX_OVERFIT_SAMPLE_COUNT,
-    MIN_OVERFIT_SAMPLE_COUNT,
-)
-
-
 TRAINING_IMAGE = os.environ.get(
     "AUTO_E2E_TRAINING_IMAGE",
     "auto-e2e/training:latest",
@@ -58,14 +52,7 @@ RAY_TASK_ENVIRONMENT = {
     "AUTO_E2E_RAY_STORAGE_PATH": RAY_STORAGE_PATH,
     "RAY_TRAIN_V2_ENABLED": "1",
 }
-BEV_OVERFIT_SAMPLE_COUNT = MIN_OVERFIT_SAMPLE_COUNT
-BEV_OVERFIT_MIN_AP = 0.9
-BEV_OVERFIT_MIN_RECALL = 0.9
-BEV_CAPACITY_GATE_EPOCHS = 10
-BEV_CAPACITY_GATE_STEPS_PER_EPOCH = 500
-BEV_JOINT_GATE_EPOCHS = 10
-BEV_JOINT_GATE_STEPS_PER_EPOCH = 500
-BEV_OVERFIT_LEARNING_RATE = 3e-4
+BEV_POS_WEIGHT_CAP = 2048.0
 
 
 class RaySmokeOutput(NamedTuple):
@@ -355,18 +342,11 @@ def _reactive_run_name(
     execution_name: str,
     stage: str,
     num_workers: int,
-    overfit_sample_count: int,
-    overfit_bev_only: bool,
 ) -> str:
-    if overfit_sample_count:
-        mode = "capacity" if overfit_bev_only else "joint"
-        run_suffix = f"{mode}-overfit-{overfit_sample_count}"
-    else:
-        run_suffix = "full"
     return re.sub(
         r"[^a-zA-Z0-9_-]",
         "-",
-        f"{execution_name}-{stage}-ray-{num_workers}-{run_suffix}",
+        f"{execution_name}-{stage}-ray-{num_workers}-full",
     )
 
 
@@ -398,21 +378,15 @@ def _run_reactive_stage_task(
     bev_max_repeat: int,
     bev_min_positive_samples: int,
     bev_min_positive_cells: int,
-    overfit_sample_count: int,
-    overfit_shard_limit: int,
-    overfit_min_ap: float,
-    overfit_min_recall: float,
-    overfit_bev_only: bool,
-    overfit_fixed_lr: bool,
+    freeze_bevformer: bool,
     validation_sample_limit: int,
     allow_random_bevformer_init: bool = False,
-    required_gate_dataset_manifest_sha256: str = "",
 ) -> ReactiveRayOutput:
     from distributed_training.reactive_stage import run_reactive_stage
     from model_components.bevformer_v2_pretrained import (
-        BEVFORMER_V2_T1_CHECKPOINT_MIRROR_KEY,
-        BEVFORMER_V2_T1_CHECKPOINT_SHA256,
-        bevformer_v2_t1_checkpoint_mirror_uri,
+        BEVFORMER_V2_T8_CHECKPOINT_MIRROR_KEY,
+        BEVFORMER_V2_T8_CHECKPOINT_SHA256,
+        bevformer_v2_t8_checkpoint_mirror_uri,
     )
 
     context = current_context()
@@ -425,8 +399,6 @@ def _run_reactive_stage_task(
         execution_name=execution_name,
         stage=stage,
         num_workers=num_workers,
-        overfit_sample_count=overfit_sample_count,
-        overfit_bev_only=overfit_bev_only,
     )
     source_uris = [_flyte_remote_uri(shard) for shard in shards]
     parent_uri = (
@@ -443,7 +415,7 @@ def _run_reactive_stage_task(
         if configured_bucket:
             pretrained_uri = (
                 f"s3://{configured_bucket}/"
-                f"{BEVFORMER_V2_T1_CHECKPOINT_MIRROR_KEY}"
+                f"{BEVFORMER_V2_T8_CHECKPOINT_MIRROR_KEY}"
             )
         else:
             import boto3
@@ -451,7 +423,7 @@ def _run_reactive_stage_task(
             account_id = str(
                 boto3.client("sts").get_caller_identity()["Account"]
             )
-            pretrained_uri = bevformer_v2_t1_checkpoint_mirror_uri(
+            pretrained_uri = bevformer_v2_t8_checkpoint_mirror_uri(
                 account_id,
                 cluster_name=os.environ.get(
                     "AUTO_E2E_CLUSTER_NAME",
@@ -471,7 +443,7 @@ def _run_reactive_stage_task(
         ),
         "bev_weight": bev_weight,
         "bevformer_pretrained_checkpoint_sha256": (
-            BEVFORMER_V2_T1_CHECKPOINT_SHA256
+            BEVFORMER_V2_T8_CHECKPOINT_SHA256
         ),
         "bevformer_pretrained_checkpoint_uri": pretrained_uri,
         "corridor_pos_weight": corridor_pos_weight,
@@ -481,24 +453,16 @@ def _run_reactive_stage_task(
             gradient_accumulation_steps
         ),
         "is_pretrained": is_pretrained,
+        "freeze_bevformer": freeze_bevformer,
         "learning_rate": learning_rate,
         "local_cache_root": "/tmp/auto-e2e-reactive",
         "num_loader_workers": num_loader_workers,
         "num_workers": num_workers,
-        "overfit_bev_only": overfit_bev_only,
-        "overfit_fixed_lr": overfit_fixed_lr,
-        "overfit_min_ap": overfit_min_ap,
-        "overfit_min_recall": overfit_min_recall,
-        "overfit_sample_count": overfit_sample_count,
-        "overfit_shard_limit": overfit_shard_limit,
         "parent_checkpoint_uri": parent_uri,
         "per_rank_batch_size": 1,
         "precision": precision,
         "route_weight": route_weight,
         "run_name": run_name,
-        "required_gate_dataset_manifest_sha256": (
-            required_gate_dataset_manifest_sha256
-        ),
         "selection_ade_regression_margin_m": 0.5,
         "selection_ade_scale_m": 5.0,
         "shuffle_buffer": shuffle_buffer,
@@ -531,295 +495,6 @@ def _run_reactive_stage_task(
         checkpoint_uri=str(result["checkpoint_file_uri"]),
         checkpoint_sha256=str(metrics["checkpoint_sha256"]),
     )
-
-
-def _validated_bev_overfit_gate_dataset(
-    source: FlyteFile,
-    *,
-    expected_bev_only: bool,
-    expected_trajectory_weight: float,
-    expected_bev_weight: float,
-    expected_route_weight: float,
-    expected_corridor_pos_weight: float,
-    expected_training_seed: int,
-) -> str:
-    """Return the gated dataset digest after validating all overfit evidence."""
-    import math
-
-    from data_processing.reactive_training_artifacts import (
-        BEV_SEGMENTATION_CLASSES,
-    )
-    from distributed_training.reactive_stage import (
-        BEV_LANE_RANGE_METRIC_PREFIX,
-        BEV_OVERFIT_MIN_POSITIVE_SAMPLES,
-        CAMERA_FEATURE_SCALE_WEIGHT_METRIC_PREFIX,
-        MIN_OVERFIT_OPTIMIZER_STEPS,
-        OVERFIT_POSITIVE_SAMPLE_SUPPORT_METRIC_PREFIX,
-        PEAK_CUDA_ALLOCATED_BYTES_METRIC_PREFIX,
-        PEAK_CUDA_RESERVED_BYTES_METRIC_PREFIX,
-    )
-
-    payload = json.loads(Path(source.download()).read_text())
-    metrics = payload.get("metrics")
-    history = payload.get("history")
-    if not isinstance(metrics, dict):
-        raise ValueError("BEV overfit gate metadata omitted final metrics")
-    if not isinstance(history, list) or not history:
-        raise ValueError("BEV overfit gate metadata omitted epoch history")
-    final_history = history[-1]
-    if not isinstance(final_history, dict):
-        raise ValueError("BEV overfit gate final history is invalid")
-
-    integer_contract = {
-        "overfit_gate_pass": 1,
-        "overfit_thresholds_pass": 1,
-        "world_size": 4,
-    }
-    for name, expected in integer_contract.items():
-        if int(metrics.get(name, -1)) != expected:
-            raise ValueError(
-                f"BEV overfit gate has invalid {name}: {metrics.get(name)!r}"
-            )
-        if int(final_history.get(name, -1)) != expected:
-            raise ValueError(
-                f"BEV overfit gate history has invalid {name}"
-            )
-    sample_count = int(metrics.get("overfit_sample_count", -1))
-    if not (
-        BEV_OVERFIT_SAMPLE_COUNT
-        <= sample_count
-        <= MAX_OVERFIT_SAMPLE_COUNT
-    ):
-        raise ValueError(
-            "BEV overfit gate sample count must be between "
-            f"{BEV_OVERFIT_SAMPLE_COUNT} and "
-            f"{MAX_OVERFIT_SAMPLE_COUNT}"
-        )
-    if int(final_history.get("overfit_sample_count", -1)) != sample_count:
-        raise ValueError(
-            "BEV overfit gate history has invalid overfit_sample_count"
-        )
-    executed_optimizer_steps = int(
-        metrics.get("executed_optimizer_steps", -1)
-    )
-    if executed_optimizer_steps < MIN_OVERFIT_OPTIMIZER_STEPS:
-        raise ValueError(
-            "BEV overfit gate executed fewer than "
-            f"{MIN_OVERFIT_OPTIMIZER_STEPS} optimizer steps"
-        )
-    if (
-        int(final_history.get("executed_optimizer_steps", -1))
-        != executed_optimizer_steps
-    ):
-        raise ValueError(
-            "BEV overfit gate history has invalid executed_optimizer_steps"
-        )
-
-    objective_contract = {
-        "trajectory_weight": expected_trajectory_weight,
-        "bev_weight": expected_bev_weight,
-        "route_weight": expected_route_weight,
-        "corridor_pos_weight": expected_corridor_pos_weight,
-    }
-    for evidence_name, evidence in (
-        ("final metrics", metrics),
-        ("history", final_history),
-    ):
-        raw_bev_only = evidence.get("overfit_bev_only")
-        if (
-            not isinstance(raw_bev_only, (bool, int))
-            or int(raw_bev_only) not in {0, 1}
-            or bool(raw_bev_only) != expected_bev_only
-        ):
-            raise ValueError(
-                f"BEV overfit gate {evidence_name} has wrong mode"
-            )
-        raw_fixed_lr = evidence.get("overfit_fixed_lr")
-        if (
-            not isinstance(raw_fixed_lr, (bool, int))
-            or int(raw_fixed_lr) != 1
-        ):
-            raise ValueError(
-                f"BEV overfit gate {evidence_name} did not use fixed LR"
-            )
-        if str(evidence.get("scheduler_identity", "")) != "constant_v1":
-            raise ValueError(
-                f"BEV overfit gate {evidence_name} has wrong scheduler"
-            )
-        if int(evidence.get("training_seed", -1)) != expected_training_seed:
-            raise ValueError(
-                f"BEV overfit gate {evidence_name} has wrong seed"
-            )
-        for name, expected_weight in objective_contract.items():
-            try:
-                actual = float(evidence[name])
-            except (KeyError, TypeError, ValueError) as error:
-                raise ValueError(
-                    f"BEV overfit gate {evidence_name} omitted {name}"
-                ) from error
-            if not math.isfinite(actual) or actual != expected_weight:
-                raise ValueError(
-                    f"BEV overfit gate {evidence_name} has wrong {name}"
-                )
-        scale_pattern = re.compile(
-            re.escape(CAMERA_FEATURE_SCALE_WEIGHT_METRIC_PREFIX)
-            + r"(\d+)"
-        )
-        scale_entries = []
-        for name, value in evidence.items():
-            match = scale_pattern.fullmatch(name)
-            if match is None:
-                continue
-            try:
-                weight = float(value)
-            except (TypeError, ValueError) as error:
-                raise ValueError(
-                    f"BEV overfit gate {evidence_name} has invalid "
-                    "camera feature scale weights"
-                ) from error
-            scale_entries.append((int(match.group(1)), weight))
-        scale_entries.sort()
-        if (
-            len(scale_entries) < 2
-            or [index for index, _ in scale_entries]
-            != list(range(len(scale_entries)))
-        ):
-            raise ValueError(
-                f"BEV overfit gate {evidence_name} has incomplete "
-                "camera feature scale weights"
-            )
-        feature_scale_weights = []
-        for _, weight in scale_entries:
-            if not math.isfinite(weight) or not 0.0 <= weight <= 1.0:
-                raise ValueError(
-                    f"BEV overfit gate {evidence_name} has invalid "
-                    "camera feature scale weights"
-                )
-            feature_scale_weights.append(weight)
-        if not math.isclose(
-            sum(feature_scale_weights),
-            1.0,
-            rel_tol=0.0,
-            abs_tol=1e-6,
-        ):
-            raise ValueError(
-                f"BEV overfit gate {evidence_name} camera feature "
-                "scale weights do not sum to one"
-            )
-        evidence_world_size = int(evidence["world_size"])
-        for rank in range(evidence_world_size):
-            allocated = int(evidence.get(
-                f"{PEAK_CUDA_ALLOCATED_BYTES_METRIC_PREFIX}{rank}",
-                0,
-            ))
-            reserved = int(evidence.get(
-                f"{PEAK_CUDA_RESERVED_BYTES_METRIC_PREFIX}{rank}",
-                0,
-            ))
-            if allocated <= 0 or reserved < allocated:
-                raise ValueError(
-                    f"BEV overfit gate {evidence_name} has invalid "
-                    f"CUDA memory evidence for rank {rank}"
-                )
-        for class_name in BEV_SEGMENTATION_CLASSES:
-            support = int(evidence.get(
-                f"{OVERFIT_POSITIVE_SAMPLE_SUPPORT_METRIC_PREFIX}"
-                f"{class_name}",
-                0,
-            ))
-            if support < BEV_OVERFIT_MIN_POSITIVE_SAMPLES:
-                raise ValueError(
-                    f"BEV overfit gate {evidence_name} has insufficient "
-                    f"subset support for {class_name}"
-                )
-        for range_name in ("near", "far"):
-            positive_cells = float(evidence.get(
-                f"validation_{BEV_LANE_RANGE_METRIC_PREFIX}"
-                f"{range_name}_positive_cells",
-                float("nan"),
-            ))
-            if not math.isfinite(positive_cells) or positive_cells <= 0.0:
-                raise ValueError(
-                    f"BEV overfit gate {evidence_name} has no "
-                    f"{range_name} lane positives"
-                )
-            for metric_name in (
-                "average_precision",
-                "precision",
-                "recall",
-            ):
-                value = float(evidence.get(
-                    f"validation_{BEV_LANE_RANGE_METRIC_PREFIX}"
-                    f"{range_name}_{metric_name}",
-                    float("nan"),
-                ))
-                if not math.isfinite(value) or not 0.0 <= value <= 1.0:
-                    raise ValueError(
-                        f"BEV overfit gate {evidence_name} has invalid "
-                        f"{range_name} lane {metric_name}"
-                    )
-
-    for name in (
-        "checkpoint_sha256",
-        "dataset_manifest_sha256",
-        "overfit_sample_uid_sha256",
-    ):
-        value = str(metrics.get(name, ""))
-        if re.fullmatch(r"[0-9a-f]{64}", value) is None:
-            raise ValueError(f"BEV overfit gate has invalid {name}")
-        if str(final_history.get(name, "")) != value:
-            raise ValueError(
-                f"BEV overfit gate history disagrees on {name}"
-            )
-
-    pos_weights = []
-    for class_index, class_name in enumerate(BEV_SEGMENTATION_CLASSES):
-        average_precision = float(metrics.get(
-            f"validation_bev_{class_name}_average_precision",
-            float("nan"),
-        ))
-        recall = float(metrics.get(
-            f"validation_bev_{class_name}_recall",
-            float("nan"),
-        ))
-        positive_cells = float(metrics.get(
-            f"validation_bev_{class_name}_positive_cells",
-            float("nan"),
-        ))
-        if (
-            not math.isfinite(average_precision)
-            or average_precision < BEV_OVERFIT_MIN_AP
-        ):
-            raise ValueError(
-                f"BEV overfit gate average precision failed for {class_name}"
-            )
-        if (
-            not math.isfinite(recall)
-            or recall < BEV_OVERFIT_MIN_RECALL
-        ):
-            raise ValueError(
-                f"BEV overfit gate recall failed for {class_name}"
-            )
-        if (
-            not math.isfinite(positive_cells)
-            or positive_cells <= 0.0
-        ):
-            raise ValueError(
-                f"BEV overfit gate has no positives for {class_name}"
-            )
-        weight = float(metrics.get(
-            f"bev_pos_weight_{class_index}",
-            float("nan"),
-        ))
-        if not math.isfinite(weight) or weight < 1.0:
-            raise ValueError(
-                f"BEV overfit gate has invalid weight for {class_name}"
-            )
-        pos_weights.append(weight)
-    if all(abs(weight - 1.0) <= 1e-12 for weight in pos_weights):
-        raise ValueError("BEV overfit gate derived only unit pos weights")
-
-    return str(metrics["dataset_manifest_sha256"])
 
 
 @task(
@@ -881,6 +556,7 @@ def verify_reactive_canary_training(
             "train_route_reconstruction",
             "train_total",
             "train_trajectory",
+            "train_gradient_front_gate_pre_clip_norm",
             "validation_ade_6p4s_m",
             "validation_selection_score",
         )
@@ -899,6 +575,13 @@ def verify_reactive_canary_training(
     stage_b = reports["stage_b"]
     if float(stage_a[0]["train_bev_segmentation"]) <= 0.0:
         raise ValueError("Stage A canary did not execute the BEV loss")
+    if any(
+        float(epoch["train_gradient_front_gate_pre_clip_norm"]) <= 0.0
+        for epoch in stage_a
+    ):
+        raise ValueError(
+            "Stage A canary did not use the native front residual"
+        )
     from data_processing.reactive_training_artifacts import (
         BEV_SEGMENTATION_CLASSES,
     )
@@ -980,6 +663,7 @@ def verify_reactive_canary_training(
         "stage_a_minimum_later_bev_bce": minimum_later_bev_bce,
         "stage_a_minimum_later_bev_dice": minimum_later_bev_dice,
         "stage_a_initial_total": initial_total,
+        "stage_a_front_gate_gradient_verified": True,
         "stage_a_minimum_later_total": minimum_later_total,
         "stage_a_epochs": len(stage_a),
         "stage_b_epochs": len(stage_b),
@@ -1028,8 +712,7 @@ def train_reactive_stage_ray_2(
     bev_weight: float = 1.0,
     route_weight: float = 1.0,
     corridor_pos_weight: float = 1.0,
-    overfit_bev_only: bool = False,
-    overfit_fixed_lr: bool = False,
+    freeze_bevformer: bool = True,
     allow_random_bevformer_init: bool = False,
 ) -> ReactiveRayOutput:
     """Run two-rank training with the production pretrained default."""
@@ -1055,17 +738,12 @@ def train_reactive_stage_ray_2(
         bev_weight=bev_weight,
         route_weight=route_weight,
         corridor_pos_weight=corridor_pos_weight,
-        bev_pos_weight_cap=64.0,
+        bev_pos_weight_cap=BEV_POS_WEIGHT_CAP,
         bev_repeat_frequency_threshold=0.05,
         bev_max_repeat=4,
         bev_min_positive_samples=1,
         bev_min_positive_cells=1,
-        overfit_sample_count=0,
-        overfit_shard_limit=0,
-        overfit_min_ap=0.9,
-        overfit_min_recall=0.9,
-        overfit_bev_only=overfit_bev_only,
-        overfit_fixed_lr=overfit_fixed_lr,
+        freeze_bevformer=freeze_bevformer,
         validation_sample_limit=256,
         allow_random_bevformer_init=allow_random_bevformer_init,
     )
@@ -1085,9 +763,8 @@ def train_reactive_stage_ray_4(
     shards: List[FlyteDirectory],
     stage: str,
     parent_checkpoint: Optional[FlyteFile] = None,
-    gate_metadata: Optional[FlyteFile] = None,
     backbone: str = "res_net_50",
-    epochs: int = 30,
+    epochs: int = 3,
     learning_rate: float = 1e-4,
     weight_decay: float = 1e-2,
     grad_clip: float = 1.0,
@@ -1097,54 +774,15 @@ def train_reactive_stage_ray_4(
     precision: str = "bf16",
     gradient_accumulation_steps: int = 1,
     steps_per_epoch: int = 0,
-    shuffle_buffer: int = 1000,
+    shuffle_buffer: int = 256,
     is_pretrained: bool = True,
     trajectory_weight: float = 1.0,
     bev_weight: float = 1.0,
     route_weight: float = 1.0,
     corridor_pos_weight: float = 1.0,
-    overfit_sample_count: int = 0,
-    overfit_min_ap: float = 0.9,
-    overfit_min_recall: float = 0.9,
-    overfit_bev_only: bool = False,
-    overfit_fixed_lr: bool = False,
+    freeze_bevformer: bool = True,
 ) -> ReactiveRayOutput:
     """Run a four-rank Reactive performance training stage."""
-    if overfit_sample_count:
-        if overfit_bev_only:
-            if gate_metadata is not None:
-                raise ValueError(
-                    "BEV-only capacity probes cannot consume gate metadata"
-                )
-            required_gate_dataset = ""
-        else:
-            if gate_metadata is None:
-                raise ValueError(
-                    "joint overfit gates require capacity gate metadata"
-                )
-            required_gate_dataset = _validated_bev_overfit_gate_dataset(
-                gate_metadata,
-                expected_bev_only=True,
-                expected_trajectory_weight=0.0,
-                expected_bev_weight=1.0,
-                expected_route_weight=0.0,
-                expected_corridor_pos_weight=1.0,
-                expected_training_seed=training_seed,
-            )
-    else:
-        if gate_metadata is None:
-            raise ValueError(
-                "four-rank full training requires joint gate metadata"
-            )
-        required_gate_dataset = _validated_bev_overfit_gate_dataset(
-            gate_metadata,
-            expected_bev_only=False,
-            expected_trajectory_weight=trajectory_weight,
-            expected_bev_weight=bev_weight,
-            expected_route_weight=route_weight,
-            expected_corridor_pos_weight=corridor_pos_weight,
-            expected_training_seed=training_seed,
-        )
     return _run_reactive_stage_task(
         shards=shards,
         stage=stage,
@@ -1167,22 +805,12 @@ def train_reactive_stage_ray_4(
         bev_weight=bev_weight,
         route_weight=route_weight,
         corridor_pos_weight=corridor_pos_weight,
-        bev_pos_weight_cap=64.0,
+        bev_pos_weight_cap=BEV_POS_WEIGHT_CAP,
         bev_repeat_frequency_threshold=0.05,
         bev_max_repeat=4,
-        bev_min_positive_samples=(
-            1 if overfit_sample_count else 20
-        ),
-        bev_min_positive_cells=(
-            1 if overfit_sample_count else 2000
-        ),
-        overfit_sample_count=overfit_sample_count,
-        overfit_shard_limit=(32 if overfit_sample_count else 0),
-        overfit_min_ap=overfit_min_ap,
-        overfit_min_recall=overfit_min_recall,
-        overfit_bev_only=overfit_bev_only,
-        overfit_fixed_lr=overfit_fixed_lr,
-        required_gate_dataset_manifest_sha256=required_gate_dataset,
+        bev_min_positive_samples=20,
+        bev_min_positive_cells=2000,
+        freeze_bevformer=freeze_bevformer,
         validation_sample_limit=1024,
     )
 
@@ -1201,7 +829,6 @@ def train_reactive_stage_ray_8(
     shards: List[FlyteDirectory],
     stage: str,
     parent_checkpoint: Optional[FlyteFile] = None,
-    gate_metadata: Optional[FlyteFile] = None,
     backbone: str = "res_net_50",
     epochs: int = 3,
     learning_rate: float = 1e-4,
@@ -1213,36 +840,15 @@ def train_reactive_stage_ray_8(
     precision: str = "bf16",
     gradient_accumulation_steps: int = 1,
     steps_per_epoch: int = 0,
-    shuffle_buffer: int = 1000,
+    shuffle_buffer: int = 256,
     is_pretrained: bool = True,
     trajectory_weight: float = 1.0,
     bev_weight: float = 1.0,
     route_weight: float = 1.0,
     corridor_pos_weight: float = 1.0,
-    overfit_bev_only: bool = False,
-    overfit_fixed_lr: bool = False,
+    freeze_bevformer: bool = True,
 ) -> ReactiveRayOutput:
     """Run one production-size Reactive DDP stage."""
-    if stage == "nuplan_full":
-        if gate_metadata is None:
-            raise ValueError(
-                "eight-rank Stage A requires BEV overfit gate metadata"
-            )
-        required_gate_dataset = _validated_bev_overfit_gate_dataset(
-            gate_metadata,
-            expected_bev_only=False,
-            expected_trajectory_weight=trajectory_weight,
-            expected_bev_weight=bev_weight,
-            expected_route_weight=route_weight,
-            expected_corridor_pos_weight=corridor_pos_weight,
-            expected_training_seed=training_seed,
-        )
-    else:
-        if gate_metadata is not None:
-            raise ValueError(
-                "Stage B cannot consume BEV overfit gate metadata"
-            )
-        required_gate_dataset = ""
     return _run_reactive_stage_task(
         shards=shards,
         stage=stage,
@@ -1265,18 +871,12 @@ def train_reactive_stage_ray_8(
         bev_weight=bev_weight,
         route_weight=route_weight,
         corridor_pos_weight=corridor_pos_weight,
-        bev_pos_weight_cap=64.0,
+        bev_pos_weight_cap=BEV_POS_WEIGHT_CAP,
         bev_repeat_frequency_threshold=0.05,
         bev_max_repeat=4,
         bev_min_positive_samples=20,
         bev_min_positive_cells=2000,
-        overfit_sample_count=0,
-        overfit_shard_limit=0,
-        overfit_min_ap=0.9,
-        overfit_min_recall=0.9,
-        overfit_bev_only=overfit_bev_only,
-        overfit_fixed_lr=overfit_fixed_lr,
-        required_gate_dataset_manifest_sha256=required_gate_dataset,
+        freeze_bevformer=freeze_bevformer,
         validation_sample_limit=1024,
     )
 
@@ -1287,46 +887,9 @@ def wf_ray_ddp_smoke_4(steps: int = 4) -> FlyteFile:
 
 
 @workflow
-def wf_overfit_reactive_nuplan_ray_4(
-    nuplan_shards: List[FlyteDirectory],
-    sample_count: int = BEV_OVERFIT_SAMPLE_COUNT,
-    epochs: int = BEV_CAPACITY_GATE_EPOCHS,
-    learning_rate: float = BEV_OVERFIT_LEARNING_RATE,
-    val_fraction: float = 0.2,
-    training_seed: int = 149,
-) -> ReactiveRayOutput:
-    """Require near-perfect memorization before corpus-scale training."""
-    return train_reactive_stage_ray_4(
-        shards=nuplan_shards,
-        stage="nuplan_full",
-        parent_checkpoint=None,
-        gate_metadata=None,
-        epochs=epochs,
-        learning_rate=learning_rate,
-        weight_decay=0.0,
-        val_fraction=val_fraction,
-        num_loader_workers=2,
-        training_seed=training_seed,
-        precision="bf16",
-        gradient_accumulation_steps=1,
-        steps_per_epoch=BEV_CAPACITY_GATE_STEPS_PER_EPOCH,
-        shuffle_buffer=256,
-        is_pretrained=True,
-        trajectory_weight=0.0,
-        bev_weight=1.0,
-        route_weight=0.0,
-        overfit_sample_count=sample_count,
-        overfit_min_ap=BEV_OVERFIT_MIN_AP,
-        overfit_min_recall=BEV_OVERFIT_MIN_RECALL,
-        overfit_bev_only=True,
-        overfit_fixed_lr=True,
-    )
-
-
-@workflow
 def wf_train_reactive_nuplan_ray_4(
     nuplan_shards: List[FlyteDirectory],
-    epochs: int = 30,
+    epochs: int = 3,
     learning_rate: float = 1e-4,
     val_fraction: float = 0.2,
     num_loader_workers: int = 2,
@@ -1336,60 +899,11 @@ def wf_train_reactive_nuplan_ray_4(
     bev_weight: float = 1.0,
     route_weight: float = 1.0,
 ) -> ReactiveRayOutput:
-    """Pass capacity and joint gates, then train from initial weights."""
-    capacity_gate = train_reactive_stage_ray_4(
-        shards=nuplan_shards,
-        stage="nuplan_full",
-        parent_checkpoint=None,
-        gate_metadata=None,
-        epochs=BEV_CAPACITY_GATE_EPOCHS,
-        learning_rate=BEV_OVERFIT_LEARNING_RATE,
-        weight_decay=0.0,
-        val_fraction=val_fraction,
-        num_loader_workers=num_loader_workers,
-        training_seed=training_seed,
-        precision=precision,
-        steps_per_epoch=BEV_CAPACITY_GATE_STEPS_PER_EPOCH,
-        shuffle_buffer=256,
-        is_pretrained=True,
-        trajectory_weight=0.0,
-        bev_weight=1.0,
-        route_weight=0.0,
-        overfit_sample_count=BEV_OVERFIT_SAMPLE_COUNT,
-        overfit_min_ap=BEV_OVERFIT_MIN_AP,
-        overfit_min_recall=BEV_OVERFIT_MIN_RECALL,
-        overfit_bev_only=True,
-        overfit_fixed_lr=True,
-    )
-    joint_gate = train_reactive_stage_ray_4(
-        shards=nuplan_shards,
-        stage="nuplan_full",
-        parent_checkpoint=None,
-        gate_metadata=capacity_gate.metadata,
-        epochs=BEV_JOINT_GATE_EPOCHS,
-        learning_rate=BEV_OVERFIT_LEARNING_RATE,
-        weight_decay=0.0,
-        val_fraction=val_fraction,
-        num_loader_workers=num_loader_workers,
-        training_seed=training_seed,
-        precision=precision,
-        steps_per_epoch=BEV_JOINT_GATE_STEPS_PER_EPOCH,
-        shuffle_buffer=256,
-        is_pretrained=True,
-        trajectory_weight=trajectory_weight,
-        bev_weight=bev_weight,
-        route_weight=route_weight,
-        overfit_sample_count=BEV_OVERFIT_SAMPLE_COUNT,
-        overfit_min_ap=BEV_OVERFIT_MIN_AP,
-        overfit_min_recall=BEV_OVERFIT_MIN_RECALL,
-        overfit_bev_only=False,
-        overfit_fixed_lr=True,
-    )
+    """Train Stage A while keeping the pretrained camera BEV frozen."""
     return train_reactive_stage_ray_4(
         shards=nuplan_shards,
         stage="nuplan_full",
         parent_checkpoint=None,
-        gate_metadata=joint_gate.metadata,
         epochs=epochs,
         learning_rate=learning_rate,
         val_fraction=val_fraction,
@@ -1397,13 +911,12 @@ def wf_train_reactive_nuplan_ray_4(
         training_seed=training_seed,
         precision=precision,
         steps_per_epoch=0,
-        shuffle_buffer=1000,
+        shuffle_buffer=256,
         is_pretrained=True,
         trajectory_weight=trajectory_weight,
         bev_weight=bev_weight,
         route_weight=route_weight,
-        overfit_bev_only=False,
-        overfit_fixed_lr=False,
+        freeze_bevformer=True,
     )
 
 
@@ -1423,60 +936,11 @@ def wf_train_reactive_nuplan_l2d_ray_8(
     bev_weight: float = 1.0,
     route_weight: float = 1.0,
 ) -> ReactiveDistributedProgramOutput:
-    """Gate Stage A, then run both eight-rank training stages."""
-    capacity_gate = train_reactive_stage_ray_4(
-        shards=nuplan_shards,
-        stage="nuplan_full",
-        parent_checkpoint=None,
-        gate_metadata=None,
-        epochs=BEV_CAPACITY_GATE_EPOCHS,
-        learning_rate=BEV_OVERFIT_LEARNING_RATE,
-        weight_decay=0.0,
-        val_fraction=val_fraction,
-        num_loader_workers=num_loader_workers,
-        training_seed=training_seed,
-        precision=precision,
-        steps_per_epoch=BEV_CAPACITY_GATE_STEPS_PER_EPOCH,
-        shuffle_buffer=256,
-        is_pretrained=True,
-        trajectory_weight=0.0,
-        bev_weight=1.0,
-        route_weight=0.0,
-        overfit_sample_count=BEV_OVERFIT_SAMPLE_COUNT,
-        overfit_min_ap=BEV_OVERFIT_MIN_AP,
-        overfit_min_recall=BEV_OVERFIT_MIN_RECALL,
-        overfit_bev_only=True,
-        overfit_fixed_lr=True,
-    )
-    joint_gate = train_reactive_stage_ray_4(
-        shards=nuplan_shards,
-        stage="nuplan_full",
-        parent_checkpoint=None,
-        gate_metadata=capacity_gate.metadata,
-        epochs=BEV_JOINT_GATE_EPOCHS,
-        learning_rate=BEV_OVERFIT_LEARNING_RATE,
-        weight_decay=0.0,
-        val_fraction=val_fraction,
-        num_loader_workers=num_loader_workers,
-        training_seed=training_seed,
-        precision=precision,
-        steps_per_epoch=BEV_JOINT_GATE_STEPS_PER_EPOCH,
-        shuffle_buffer=256,
-        is_pretrained=True,
-        trajectory_weight=trajectory_weight,
-        bev_weight=bev_weight,
-        route_weight=route_weight,
-        overfit_sample_count=BEV_OVERFIT_SAMPLE_COUNT,
-        overfit_min_ap=BEV_OVERFIT_MIN_AP,
-        overfit_min_recall=BEV_OVERFIT_MIN_RECALL,
-        overfit_bev_only=False,
-        overfit_fixed_lr=True,
-    )
+    """Run both production stages with the camera BEV frozen."""
     stage_a = train_reactive_stage_ray_8(
         shards=nuplan_shards,
         stage="nuplan_full",
         parent_checkpoint=None,
-        gate_metadata=joint_gate.metadata,
         epochs=stage_a_epochs,
         learning_rate=stage_a_learning_rate,
         val_fraction=val_fraction,
@@ -1486,14 +950,12 @@ def wf_train_reactive_nuplan_l2d_ray_8(
         trajectory_weight=trajectory_weight,
         bev_weight=bev_weight,
         route_weight=route_weight,
-        overfit_bev_only=False,
-        overfit_fixed_lr=False,
+        freeze_bevformer=True,
     )
     stage_b = train_reactive_stage_ray_8(
         shards=l2d_shards,
         stage="l2d_continuation",
         parent_checkpoint=stage_a.checkpoint,
-        gate_metadata=None,
         epochs=stage_b_epochs,
         learning_rate=stage_b_learning_rate,
         val_fraction=val_fraction,
@@ -1503,8 +965,7 @@ def wf_train_reactive_nuplan_l2d_ray_8(
         trajectory_weight=trajectory_weight,
         bev_weight=0.0,
         route_weight=route_weight,
-        overfit_bev_only=False,
-        overfit_fixed_lr=False,
+        freeze_bevformer=True,
     )
     return ReactiveDistributedProgramOutput(
         stage_a_checkpoint=stage_a.checkpoint,
@@ -1540,8 +1001,10 @@ def wf_reactive_multistage_ray_2_canary() -> ReactiveCanaryOutput:
         shuffle_buffer=0,
         is_pretrained=False,
         allow_random_bevformer_init=True,
-        bev_weight=0.1,
+        trajectory_weight=0.1,
+        bev_weight=1.0,
         route_weight=0.1,
+        freeze_bevformer=True,
     )
     stage_b = train_reactive_stage_ray_2(
         shards=[stage_b_data],
@@ -1558,6 +1021,7 @@ def wf_reactive_multistage_ray_2_canary() -> ReactiveCanaryOutput:
         allow_random_bevformer_init=True,
         bev_weight=0.0,
         route_weight=0.1,
+        freeze_bevformer=True,
     )
     gate_report = verify_reactive_canary_training(
         stage_a_metadata=stage_a.metadata,

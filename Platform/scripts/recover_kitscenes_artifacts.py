@@ -461,6 +461,8 @@ def main() -> None:
             )
     if literals["episodes"].scalar.primitive.integer != 0:
         raise RuntimeError("source pack did not target all selected scenes")
+    # This validates the immutable source execution only. The recovered raw
+    # images and labels are repacked at the current 512px workflow default.
     if literals["image_size"].scalar.primitive.integer != 256:
         raise RuntimeError("source pack image_size was not 256")
     if not literals["world_model"].scalar.primitive.boolean:

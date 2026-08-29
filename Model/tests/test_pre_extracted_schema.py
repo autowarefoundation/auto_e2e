@@ -31,11 +31,22 @@ from navigation.supervision import (
     ROUTE_SUPERVISION_ARTIFACT_VERSION,
     empty_route_supervision,
 )
+from reactive_training_contracts import (
+    REACTIVE_BEVFORMER_FRAME_INTERVAL_US,
+    REACTIVE_BEVFORMER_FRAME_OFFSETS,
+    REACTIVE_BEVFORMER_HISTORY_FRAMES,
+    REACTIVE_CAMERA_IMAGE_SIZE,
+    REACTIVE_FRONT_CAMERA_IMAGE_SIZE,
+    REACTIVE_FRONT_CAMERA_INDEX,
+)
 
 
-def _jpeg_bytes(color):
+def _jpeg_bytes(color, *, image_size=256):
     buf = io.BytesIO()
-    Image.new("RGB", (256, 256), color).save(buf, format="JPEG")
+    Image.new("RGB", (image_size, image_size), color).save(
+        buf,
+        format="JPEG",
+    )
     return buf.getvalue()
 
 
@@ -82,6 +93,287 @@ def _navigation_members(
 
 
 class TestDecodeSampleMapSplit:
+    def test_t8_camera_history_and_projection_round_trip(self):
+        projection = np.zeros((8, 3, 4), dtype=np.float32)
+        projection[:, 2, 3] = 1.0
+        history_projection = np.stack([
+            projection + history_index
+            for history_index in range(
+                REACTIVE_BEVFORMER_HISTORY_FRAMES
+            )
+        ])
+        sample = {
+            f"cam_{index}.jpg": _jpeg_bytes(
+                (index, 0, 0),
+                image_size=(
+                    REACTIVE_FRONT_CAMERA_IMAGE_SIZE
+                    if index == REACTIVE_FRONT_CAMERA_INDEX
+                    else REACTIVE_CAMERA_IMAGE_SIZE
+                ),
+            )
+            for index in range(8)
+        }
+        for history_index in range(
+            REACTIVE_BEVFORMER_HISTORY_FRAMES
+        ):
+            for camera_index in range(8):
+                sample[
+                    f"bev_hist_{history_index}_cam_{camera_index}.jpg"
+                ] = _jpeg_bytes(
+                    (history_index, camera_index, 0),
+                    image_size=REACTIVE_CAMERA_IMAGE_SIZE,
+                )
+        front_projection = projection[:1].copy()
+        front_projection[:, :2] *= (
+            REACTIVE_FRONT_CAMERA_IMAGE_SIZE
+            / REACTIVE_CAMERA_IMAGE_SIZE
+        )
+        sample["calib.json"] = canonical_json_bytes({
+            "front_camera_image_size": REACTIVE_FRONT_CAMERA_IMAGE_SIZE,
+            "front_camera_index": REACTIVE_FRONT_CAMERA_INDEX,
+            "front_projection": {
+                "matrix": front_projection.tolist(),
+                "type": "rectified_pinhole",
+            },
+            "geometry_type": "rectified_pinhole",
+            "history_projection": {
+                "matrix": history_projection.tolist(),
+                "reference_frame": "current_ego",
+                "type": "rectified_pinhole",
+            },
+            "image_size": REACTIVE_CAMERA_IMAGE_SIZE,
+            "projection": {
+                "matrix": projection.tolist(),
+                "type": "rectified_pinhole",
+            },
+            "temporal_frame_interval_us": (
+                REACTIVE_BEVFORMER_FRAME_INTERVAL_US
+            ),
+            "temporal_frame_offsets": list(
+                REACTIVE_BEVFORMER_FRAME_OFFSETS
+            ),
+        })
+
+        out = _decode_sample(sample)
+
+        assert out["camera_history_tiles"].shape == (
+            7,
+            8,
+            3,
+            REACTIVE_CAMERA_IMAGE_SIZE,
+            REACTIVE_CAMERA_IMAGE_SIZE,
+        )
+        assert torch.equal(
+            out["camera_history_projection_matrix"],
+            torch.from_numpy(history_projection),
+        )
+
+    def test_t8_camera_history_rejects_non_pinhole_base_projection(self):
+        sample = {
+            "cam_0.jpg": _jpeg_bytes(
+                (0, 0, 0),
+                image_size=REACTIVE_CAMERA_IMAGE_SIZE,
+            ),
+        }
+        for history_index in range(REACTIVE_BEVFORMER_HISTORY_FRAMES):
+            sample[f"bev_hist_{history_index}_cam_0.jpg"] = _jpeg_bytes(
+                (history_index, 0, 0),
+                image_size=REACTIVE_CAMERA_IMAGE_SIZE,
+            )
+        history_projection = np.zeros(
+            (REACTIVE_BEVFORMER_HISTORY_FRAMES, 1, 3, 4),
+            dtype=np.float32,
+        )
+        sample["calib.json"] = canonical_json_bytes({
+            "geometry_type": "ftheta",
+            "history_projection": {
+                "matrix": history_projection.tolist(),
+                "reference_frame": "current_ego",
+                "type": "pinhole",
+            },
+            "projection": {"type": "ftheta"},
+            "temporal_frame_interval_us": (
+                REACTIVE_BEVFORMER_FRAME_INTERVAL_US
+            ),
+            "temporal_frame_offsets": list(
+                REACTIVE_BEVFORMER_FRAME_OFFSETS
+            ),
+        })
+
+        with pytest.raises(
+            ValueError,
+            match="history calibration differs",
+        ):
+            _decode_sample(sample)
+
+    def test_front_camera_keeps_native_tensor_and_stacks_base_tensor(self):
+        projection = np.zeros((8, 3, 4), dtype=np.float32)
+        projection[:, 0, 3] = REACTIVE_CAMERA_IMAGE_SIZE / 2
+        projection[:, 1, 3] = REACTIVE_CAMERA_IMAGE_SIZE / 2
+        projection[:, 2, 3] = 1.0
+        front_projection = projection[
+            REACTIVE_FRONT_CAMERA_INDEX:
+            REACTIVE_FRONT_CAMERA_INDEX + 1
+        ].copy()
+        front_projection[:, :2] *= (
+            REACTIVE_FRONT_CAMERA_IMAGE_SIZE
+            / REACTIVE_CAMERA_IMAGE_SIZE
+        )
+        sample = {
+            f"cam_{index}.jpg": _jpeg_bytes(
+                (index, 0, 0),
+                image_size=(
+                    REACTIVE_FRONT_CAMERA_IMAGE_SIZE
+                    if index == REACTIVE_FRONT_CAMERA_INDEX
+                    else REACTIVE_CAMERA_IMAGE_SIZE
+                ),
+            )
+            for index in range(8)
+        }
+        sample["calib.json"] = canonical_json_bytes({
+            "front_camera_image_size": REACTIVE_FRONT_CAMERA_IMAGE_SIZE,
+            "front_camera_index": REACTIVE_FRONT_CAMERA_INDEX,
+            "front_projection": {
+                "matrix": front_projection.tolist(),
+                "type": "rectified_pinhole",
+            },
+            "geometry_type": "rectified_pinhole",
+            "image_size": REACTIVE_CAMERA_IMAGE_SIZE,
+            "projection": {
+                "matrix": projection.tolist(),
+                "type": "rectified_pinhole",
+            },
+        })
+
+        out = _decode_sample(sample)
+
+        assert out["visual_tiles"].shape == (
+            8,
+            3,
+            REACTIVE_CAMERA_IMAGE_SIZE,
+            REACTIVE_CAMERA_IMAGE_SIZE,
+        )
+        assert out["front_camera_tile"].shape == (
+            3,
+            REACTIVE_FRONT_CAMERA_IMAGE_SIZE,
+            REACTIVE_FRONT_CAMERA_IMAGE_SIZE,
+        )
+        assert out["camera_projection_matrix"].shape == (8, 3, 4)
+        assert out["front_camera_projection_matrix"].shape == (1, 3, 4)
+
+    @pytest.mark.parametrize(
+        ("calibration_update", "message"),
+        [
+            (
+                {"front_camera_index": REACTIVE_FRONT_CAMERA_INDEX},
+                "contract is incomplete",
+            ),
+            (
+                {
+                    "front_camera_image_size":
+                        REACTIVE_FRONT_CAMERA_IMAGE_SIZE,
+                    "front_camera_index": REACTIVE_FRONT_CAMERA_INDEX,
+                    "image_size": 256,
+                },
+                "differs from model contract",
+            ),
+            (
+                {
+                    "front_camera_image_size":
+                        REACTIVE_FRONT_CAMERA_IMAGE_SIZE,
+                    "front_camera_index": REACTIVE_FRONT_CAMERA_INDEX,
+                    "image_size": REACTIVE_CAMERA_IMAGE_SIZE,
+                },
+                "requires pinhole base and native projections",
+            ),
+            (
+                {
+                    "front_camera_image_size":
+                        REACTIVE_FRONT_CAMERA_IMAGE_SIZE,
+                    "front_camera_index": REACTIVE_FRONT_CAMERA_INDEX,
+                    "front_projection": {
+                        "type": "rectified_pinhole",
+                        "matrix": np.zeros(
+                            (1, 3, 4),
+                            dtype=np.float32,
+                        ).tolist(),
+                    },
+                    "image_size": REACTIVE_CAMERA_IMAGE_SIZE,
+                    "projection": None,
+                },
+                "requires pinhole base and native projections",
+            ),
+            (
+                {
+                    "front_camera_image_size":
+                        REACTIVE_FRONT_CAMERA_IMAGE_SIZE,
+                    "front_camera_index": REACTIVE_FRONT_CAMERA_INDEX,
+                    "front_projection": {
+                        "type": "rectified_pinhole",
+                        "matrix": np.zeros(
+                            (1, 3, 4),
+                            dtype=np.float32,
+                        ).tolist(),
+                    },
+                    "image_size": REACTIVE_CAMERA_IMAGE_SIZE,
+                    "projection": {"type": "ftheta"},
+                },
+                "requires pinhole base and native projections",
+            ),
+        ],
+    )
+    def test_front_camera_rejects_incomplete_calibration(
+        self,
+        calibration_update,
+        message,
+    ):
+        sample = {
+            "cam_0.jpg": _jpeg_bytes(
+                (0, 0, 0),
+                image_size=REACTIVE_FRONT_CAMERA_IMAGE_SIZE,
+            ),
+        }
+        calibration = {
+            "geometry_type": "rectified_pinhole",
+            "projection": {
+                "matrix": np.zeros((1, 3, 4), dtype=np.float32).tolist(),
+                "type": "rectified_pinhole",
+            },
+            **calibration_update,
+        }
+        sample["calib.json"] = canonical_json_bytes(calibration)
+
+        with pytest.raises(ValueError, match=message):
+            _decode_sample(sample)
+
+    def test_front_camera_rejects_projection_scale_mismatch(self):
+        projection = np.zeros((1, 3, 4), dtype=np.float32)
+        projection[:, 2, 3] = 1.0
+        sample = {
+            "cam_0.jpg": _jpeg_bytes(
+                (0, 0, 0),
+                image_size=REACTIVE_FRONT_CAMERA_IMAGE_SIZE,
+            ),
+            "calib.json": canonical_json_bytes({
+                "front_camera_image_size":
+                    REACTIVE_FRONT_CAMERA_IMAGE_SIZE,
+                "front_camera_index": REACTIVE_FRONT_CAMERA_INDEX,
+                "front_projection": {
+                    "matrix": (projection + 1.0).tolist(),
+                    "type": "rectified_pinhole",
+                },
+                "geometry_type": "rectified_pinhole",
+                "image_size": REACTIVE_CAMERA_IMAGE_SIZE,
+                "projection": {
+                    "matrix": projection.tolist(),
+                    "type": "rectified_pinhole",
+                },
+            }),
+        }
+
+        with pytest.raises(ValueError, match="base camera frame"):
+            _decode_sample(sample)
+
     def test_sample_uid_is_preserved_for_overlay_inference(self):
         sample = {"cam_0.jpg": _jpeg_bytes((0, 0, 0)),
                   "ego.npy": _ego_bytes(),

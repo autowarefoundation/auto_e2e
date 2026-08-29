@@ -6,18 +6,21 @@ env:
     FLYTE_PROJECT: auto-e2e
     FLYTE_DOMAIN: development
     WORKFLOW_NAME: >-
-      Platform.pipelines.nuplan_dataset.wf_pack_nuplan_snapshot_reactive_dataset
+      Platform.pipelines.distributed_training.wf_train_reactive_nuplan_ray_4
     FLYTE_VERSION: ""
     EXECUTION_NAME: ""
-    SNAPSHOT_MANIFEST_URI: ""
-    DATASETS_BUCKET: ""
-    ARCHIVE_IDS_JSON: "[]"
-    LIMIT_TOTAL_SCENARIOS: "2048"
-    IMAGE_SIZE: "512"
-    SAMPLES_PER_SHARD: "100"
-    MAX_REJECTION_FRACTION: "0.25"
+    NUPLAN_DATASET_URI: ""
+    EPOCHS: "3"
+    LEARNING_RATE: "1e-4"
+    VAL_FRACTION: "0.2"
+    NUM_LOADER_WORKERS: "2"
+    TRAINING_SEED: "149"
+    PRECISION: "bf16"
+    TRAJECTORY_WEIGHT: "1.0"
+    BEV_WEIGHT: "1.0"
+    ROUTE_WEIGHT: "1.0"
     WAIT_FOR_COMPLETION: "false"
-    WAIT_TIMEOUT_SECONDS: "21600"
+    WAIT_TIMEOUT_SECONDS: "28800"
 
 phases:
   install:
@@ -27,32 +30,31 @@ phases:
     commands:
       - test -n "${FLYTE_VERSION}"
       - test -n "${EXECUTION_NAME}"
-      - test -n "${SNAPSHOT_MANIFEST_URI}"
-      - test -n "${DATASETS_BUCKET}"
-      - printf '%s' "${SNAPSHOT_MANIFEST_URI}" | grep -Eq '^s3://'
-      - printf '%s' "${DATASETS_BUCKET}" | grep -Eq '^[a-z0-9][a-z0-9.-]+$'
+      - test -n "${NUPLAN_DATASET_URI}"
+      - printf '%s' "${NUPLAN_DATASET_URI}" | grep -Eq '^s3://'
       - printf '%s' "${EXECUTION_NAME}" | grep -Eq '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
       - test "${#EXECUTION_NAME}" -le 63
-      - printf '%s' "${LIMIT_TOTAL_SCENARIOS}" | grep -Eq '^[0-9]+$'
-      - printf '%s' "${IMAGE_SIZE}" | grep -Eq '^[1-9][0-9]*$'
-      - printf '%s' "${SAMPLES_PER_SHARD}" | grep -Eq '^[1-9][0-9]*$'
+      - printf '%s' "${EPOCHS}" | grep -Eq '^[1-9][0-9]*$'
+      - printf '%s' "${NUM_LOADER_WORKERS}" | grep -Eq '^[0-9]+$'
+      - printf '%s' "${TRAINING_SEED}" | grep -Eq '^[0-9]+$'
+      - printf '%s' "${PRECISION}" | grep -Eq '^(fp32|bf16)$'
       - printf '%s' "${WAIT_FOR_COMPLETION}" | grep -Eq '^(true|false)$'
       - printf '%s' "${WAIT_TIMEOUT_SECONDS}" | grep -Eq '^[1-9][0-9]*$'
       - |
         python3 - <<'PY'
-        import json
         import os
 
-        value = json.loads(os.environ["ARCHIVE_IDS_JSON"])
-        if not isinstance(value, list) or not all(
-            isinstance(item, str) and item for item in value
+        if not 0.0 < float(os.environ["LEARNING_RATE"]):
+            raise ValueError("LEARNING_RATE must be positive")
+        if not 0.0 < float(os.environ["VAL_FRACTION"]) < 1.0:
+            raise ValueError("VAL_FRACTION must be in (0, 1)")
+        for name in (
+            "TRAJECTORY_WEIGHT",
+            "BEV_WEIGHT",
+            "ROUTE_WEIGHT",
         ):
-            raise ValueError("ARCHIVE_IDS_JSON must be a JSON string list")
-        fraction = float(os.environ["MAX_REJECTION_FRACTION"])
-        if not 0.0 <= fraction < 1.0:
-            raise ValueError(
-                "MAX_REJECTION_FRACTION must be in [0, 1)"
-            )
+            if float(os.environ[name]) < 0.0:
+                raise ValueError(f"{name} must be non-negative")
         PY
       - |
         cat > /tmp/flyte.yaml << EOF
@@ -64,7 +66,6 @@ phases:
     commands:
       - |
         python3 - <<'PY'
-        import json
         import os
         import time
 
@@ -76,34 +77,33 @@ phases:
         )
         from flytekit.models.core.execution import WorkflowExecutionPhase
         from flytekit.remote import FlyteRemote
-        from flytekit.types.file import FlyteFile
+        from flytekit.types.directory import FlyteDirectory
 
         project = os.environ["FLYTE_PROJECT"]
         domain = os.environ["FLYTE_DOMAIN"]
         workflow_name = os.environ["WORKFLOW_NAME"]
         version = os.environ["FLYTE_VERSION"]
         execution_name = os.environ["EXECUTION_NAME"]
-        archive_ids = json.loads(os.environ["ARCHIVE_IDS_JSON"])
         wait_for_completion = (
             os.environ["WAIT_FOR_COMPLETION"] == "true"
         )
         inputs = {
-            "snapshot_manifest": FlyteFile(
-                os.environ["SNAPSHOT_MANIFEST_URI"]
+            "nuplan_shards": [
+                FlyteDirectory(os.environ["NUPLAN_DATASET_URI"])
+            ],
+            "epochs": int(os.environ["EPOCHS"]),
+            "learning_rate": float(os.environ["LEARNING_RATE"]),
+            "val_fraction": float(os.environ["VAL_FRACTION"]),
+            "num_loader_workers": int(
+                os.environ["NUM_LOADER_WORKERS"]
             ),
-            "datasets_bucket": os.environ["DATASETS_BUCKET"],
-            "archive_ids": archive_ids or None,
-            "limit_total_scenarios": int(
-                os.environ["LIMIT_TOTAL_SCENARIOS"]
+            "training_seed": int(os.environ["TRAINING_SEED"]),
+            "precision": os.environ["PRECISION"],
+            "trajectory_weight": float(
+                os.environ["TRAJECTORY_WEIGHT"]
             ),
-            "image_size": int(os.environ["IMAGE_SIZE"]),
-            "samples_per_shard": int(
-                os.environ["SAMPLES_PER_SHARD"]
-            ),
-            "max_rejection_fraction": float(
-                os.environ["MAX_REJECTION_FRACTION"]
-            ),
-            "aws_region": os.environ["AWS_DEFAULT_REGION"],
+            "bev_weight": float(os.environ["BEV_WEIGHT"]),
+            "route_weight": float(os.environ["ROUTE_WEIGHT"]),
         }
         remote = FlyteRemote(
             config=Config.auto(config_file="/tmp/flyte.yaml"),
@@ -214,8 +214,14 @@ phases:
         phase_name = WorkflowExecutionPhase.enum_to_string(phase)
         print(f"FLYTE_EXECUTION_PHASE={phase_name}", flush=True)
         if phase != WorkflowExecutionPhase.SUCCEEDED:
+            if execution.error is not None:
+                print(
+                    f"FLYTE_EXECUTION_ERROR={execution.error}",
+                    flush=True,
+                )
             raise SystemExit(
-                f"Flyte execution {execution.id.name} ended in {phase_name}"
+                f"Flyte execution {execution.id.name} "
+                f"ended in {phase_name}"
             )
         print(f"FLYTE_EXECUTION_OUTPUTS={execution.outputs}", flush=True)
         PY

@@ -16,6 +16,7 @@ import numpy as np
 from PIL import Image
 
 from Tools.trajectory_visualization.artifacts import (
+    apply_rig_calibration,
     OverlayReader,
     ShardSample,
     load_overlay,
@@ -252,6 +253,7 @@ def generate_report(
     output_dir: str | Path,
     dataset_manifest_path: str | Path,
     overlay_manifest_path: str | Path,
+    rig_projection_path: str | Path,
     seed_index: int = 0,
     camera_index: int = 0,
     scene_uids: Sequence[str] | None = None,
@@ -293,9 +295,10 @@ def generate_report(
         sample.sample_uid for sample in samples
     ])
     shard_sha256 = _sha256_file(shard_path)
-    publication = validate_report_provenance(
+    publication, rig_projection = validate_report_provenance(
         dataset_manifest_path=dataset_manifest_path,
         overlay_manifest_path=overlay_manifest_path,
+        rig_projection_path=rig_projection_path,
         shard_path=shard_path,
         shard_sha256=shard_sha256,
         overlay_path=overlay_path,
@@ -303,6 +306,7 @@ def generate_report(
         sample_count=len(samples),
         base_seeds=overlay.base_seeds,
     )
+    samples = apply_rig_calibration(samples, rig_projection)
     if requested_scenes:
         available_scenes = {sample.scene_uid for sample in samples}
         missing_scenes = requested_scenes.difference(available_scenes)

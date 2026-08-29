@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import tarfile
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -207,3 +207,56 @@ def read_shard_samples(
         sample.sample_uid,
     ))
     return samples
+
+
+def apply_rig_calibration(
+    samples: list[ShardSample],
+    rig: Mapping[str, Any],
+) -> list[ShardSample]:
+    """Resolve one manifest-selected rig into compact sample calibration."""
+    if rig.get("schema_version") != "v1":
+        raise ValueError("rig projection must use schema_version v1")
+    rig_dataset = str(rig.get("dataset", ""))
+    geometry_type = str(rig.get("geometry_type", ""))
+    image_size = rig.get("image_size")
+    projection = rig.get("projection")
+    if (
+        not rig_dataset
+        or not geometry_type
+        or isinstance(image_size, bool)
+        or not isinstance(image_size, int)
+        or image_size <= 0
+        or (
+            geometry_type != "pseudo"
+            and not isinstance(projection, Mapping)
+        )
+    ):
+        raise ValueError("rig projection contract is incomplete")
+
+    resolved_samples = []
+    for sample in samples:
+        if sample.dataset != rig_dataset:
+            raise ValueError(
+                f"sample {sample.sample_uid!r} dataset differs from rig"
+            )
+        calibration = dict(sample.calibration)
+        for field, rig_value in (
+            ("geometry_type", geometry_type),
+            ("image_size", image_size),
+        ):
+            if field in calibration and calibration[field] != rig_value:
+                raise ValueError(
+                    f"sample {sample.sample_uid!r} {field} differs from rig"
+                )
+            calibration[field] = rig_value
+        if "projection" in calibration and (
+            calibration["projection"] != projection
+        ):
+            raise ValueError(
+                f"sample {sample.sample_uid!r} projection differs from rig"
+            )
+        calibration["projection"] = projection
+        resolved_samples.append(
+            replace(sample, calibration=calibration)
+        )
+    return resolved_samples

@@ -58,7 +58,12 @@ PARSER_VERSION = "v3"
 # training never infers supervision validity from distance values.
 # v9: adds deterministic trajectory_xy.npz, optional bev_segmentation.npz, and
 # the sample_navigation_v3 semantic Map/Route members used by Reactive stages.
-SHARD_SCHEMA_VERSION = "v9"
+# v10: standardizes six 512px camera encodings, stores native 1024px CAM_F0,
+# adds bev_hist_<t>_cam_<v>.jpg for seven history frames, and extends calib.json
+# with front_projection, history_projection, temporal_frame_offsets,
+# temporal_frame_interval_us, and front_camera_*. Rig-constant projection and
+# provenance live once in manifest.json/rig/projection.json.
+SHARD_SCHEMA_VERSION = "v10"
 
 # Calibration / projection spec encoding and raster-map coordinate semantics.
 # v2 queries KITScenes maps in the scene-local pose frame and applies the map
@@ -67,7 +72,12 @@ SHARD_SCHEMA_VERSION = "v9"
 # one-meter geometry with the existing rear-third ego anchor.
 # v4 adds the shared Reactive geometry: 450 x 300 cells at 0.4 m/px with the
 # exact camera-BEV pc_range, used by nuPlan and L2D target artifacts.
-GEOMETRY_VERSION = "v4"
+# v5 replaces L2D pseudo geometry with pinned RDF extrinsics and FOV-derived
+# pinhole intrinsics, and standardizes six-camera semantic slot ordering.
+# v6 derives one square-pixel source focal length from L2D's vertical FOV,
+# then applies the source-to-packed resize instead of fitting incompatible
+# vendor horizontal and vertical angular extents independently.
+GEOMETRY_VERSION = "v6"
 
 # Selection policy for the sparse reasoning-label subset. v2 adds the first
 # valid sample of every split group to the regular frame-index grid so even a

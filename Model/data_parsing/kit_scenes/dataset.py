@@ -33,6 +33,7 @@ from data_parsing.l2d.world_model_windows import (
 
 from .camera import (
     CAMERA_NAMES,
+    CAMERA_SLOT_BY_NAME,
     compute_camera_projection_matrices,
     load_camera_frame,
 )
@@ -153,6 +154,14 @@ class KitScenesDataset(Dataset):
             )
 
         self.camera_names = list(camera_names or CAMERA_NAMES)
+        try:
+            self.camera_slots = [
+                CAMERA_SLOT_BY_NAME[name] for name in self.camera_names
+            ]
+        except KeyError as exc:
+            raise ValueError(
+                f"camera_names contains an unsupported camera: {exc.args[0]}"
+            ) from exc
         self.rasterize_map_at_runtime = rasterize_map_at_runtime
         self.image_size = image_size
         self._wm_enabled = include_world_model_windows
@@ -479,6 +488,8 @@ class KitScenesDataset(Dataset):
             "matrix": reference.tolist(),
             "reference_frame": "top_lidar_flu",
             "ground_z_m": _TRAJECTORY_GROUND_Z_M,
+            "camera_order": list(self.camera_names),
+            "camera_slots": list(self.camera_slots),
         }
 
     def _load_multiview_frame(

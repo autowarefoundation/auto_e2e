@@ -9,7 +9,8 @@ Usage:
 
     loader = make_pre_extracted_loader("/data/shards", batch_size=8)
     for batch in loader:
-        # batch["visual_tiles"]       (B, V, 3, 256, 256)  V real cameras
+        # batch["visual_tiles"]       (B, V, 3, H, W)      base camera tensors
+        # batch["front_camera_tile"]  (B, 3, Hf, Wf)       optional native front
         # batch["map_context"]        (B, C_map, 256, 256) semantic map
         # batch["route_mask"]         (B, 2, 256, 256)     selected route
         # batch["map_valid"]          (B,)                  explicit validity
@@ -18,7 +19,7 @@ Usage:
         # batch["egomotion_history"]  (B, 256)
         # batch["visual_history"]     (B, 896)
         # batch["trajectory_target"]  (B, 128)
-        # batch["camera_params"]      (B, V, 3, 4)         if the manifest has calib
+        # batch["camera_projection_matrix"] (B, V, 3, 4)   when packed per sample
 """
 
 from __future__ import annotations
@@ -36,8 +37,17 @@ from typing import Iterable, Mapping, Sequence
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 import webdataset as wds
 from PIL import Image
+from reactive_training_contracts import (
+    REACTIVE_BEVFORMER_FRAME_INTERVAL_US,
+    REACTIVE_BEVFORMER_FRAME_OFFSETS,
+    REACTIVE_BEVFORMER_HISTORY_FRAMES,
+    REACTIVE_CAMERA_IMAGE_SIZE,
+    REACTIVE_FRONT_CAMERA_IMAGE_SIZE,
+    REACTIVE_FRONT_CAMERA_INDEX,
+)
 from torchvision import transforms
 
 _HISTORY_STEPS = 64
@@ -55,6 +65,7 @@ _TRANSFORM = transforms.Compose([
 # NOT be picked up as a camera view — matching cam_ explicitly (not any ".jpg")
 # keeps V correct and stops the map being double-counted in the BEV projection.
 _CAM_KEY_RE = re.compile(r"^cam_\d+\.jpg$")
+_BEV_HIST_KEY_RE = re.compile(r"^bev_hist_(\d+)_cam_(\d+)\.jpg$")
 # World-Model window frames: hist_<t>_cam_<v>.jpg / fut_<f>_cam_<v>.jpg (#13).
 _HIST_KEY_RE = re.compile(r"^hist_(\d+)_cam_(\d+)\.jpg$")
 _FUT_KEY_RE = re.compile(r"^fut_(\d+)_cam_(\d+)\.jpg$")
@@ -662,25 +673,6 @@ def discover_bev_training_statistics(
     )
 
 
-def summarize_bev_positive_samples(
-    records: Sequence[BEVSampleStatistics],
-    *,
-    val_fraction: float,
-) -> tuple[tuple[str, tuple[int, ...]], ...]:
-    """Return train identities and per-class positive cells."""
-    summaries = tuple(
-        (record.sample_uid, record.positive_cell_count)
-        for record in records
-        if not _is_validation_group(
-            record.split_group_uid,
-            val_fraction,
-        )
-    )
-    if not summaries:
-        raise ValueError("BEV sample discovery selected no training samples")
-    return summaries
-
-
 def select_bev_validation_sample_uids(
     records: Sequence[BEVSampleStatistics],
     *,
@@ -752,18 +744,6 @@ def discover_validation_sample_uids(
     if not selected:
         raise ValueError("sample discovery selected no validation samples")
     return tuple(selected)
-
-
-def discover_bev_positive_samples(
-    shard_dirs: Sequence[str | Path],
-    *,
-    val_fraction: float,
-) -> tuple[tuple[str, tuple[int, ...]], ...]:
-    """Return train identities and per-class positive cells without decoding."""
-    return summarize_bev_positive_samples(
-        discover_bev_sample_statistics(shard_dirs),
-        val_fraction=val_fraction,
-    )
 
 
 def derive_bev_repeat_factors(
@@ -917,11 +897,11 @@ def _decode_sample(
     decode_history_frames: bool = True,
     decode_future_frames: bool = True,
 ) -> dict:
-    """Decode a WebDataset sample into training tensors (geometry-free).
+    """Decode a WebDataset sample into training tensors.
 
-    Calibration is a per-dataset rig constant, not per-sample, so it is NOT
-    decoded here — it is reconstructed once by ``make_pre_extracted_loader`` and
-    exposed on the loader as ``.projection`` / ``.geometry_type``.
+    Pose-compensated datasets carry per-sample calibration here. Rig-constant
+    datasets instead expose one loader-level ``.projection`` /
+    ``.geometry_type`` fallback from their manifest.
 
     ``pool`` is a frame-pool accessor (``frame_id -> jpeg bytes``) for shards packed
     with the deduped WM window (#121 §3.4d): the sample carries a
@@ -934,7 +914,121 @@ def _decode_sample(
         (k for k in sample if _CAM_KEY_RE.match(k)),
         key=lambda k: int(k[len("cam_"):-len(".jpg")]),
     )
+    calibration = (
+        _json_mapping(sample["calib.json"], member_name="calib.json")
+        if "calib.json" in sample
+        else None
+    )
     frames = [_decode_image(sample[k]) for k in cam_keys]
+    bev_history_keys: dict[tuple[int, int], str] = {}
+    for key in sample:
+        match = _BEV_HIST_KEY_RE.match(key)
+        if match is not None:
+            bev_history_keys[
+                (int(match.group(1)), int(match.group(2)))
+            ] = key
+    camera_history_tiles = None
+    if bev_history_keys:
+        expected_history_keys = {
+            (history_index, camera_index)
+            for history_index in range(
+                REACTIVE_BEVFORMER_HISTORY_FRAMES
+            )
+            for camera_index in range(len(frames))
+        }
+        if set(bev_history_keys) != expected_history_keys:
+            raise ValueError(
+                "BEVFormer T8 camera history is incomplete or misindexed"
+            )
+        camera_history_tiles = torch.stack([
+            torch.stack([
+                _decode_image(sample[bev_history_keys[
+                    (history_index, camera_index)
+                ]])
+                for camera_index in range(len(frames))
+            ])
+            for history_index in range(
+                REACTIVE_BEVFORMER_HISTORY_FRAMES
+            )
+        ])
+        if tuple(camera_history_tiles.shape[2:]) != (
+            3,
+            REACTIVE_CAMERA_IMAGE_SIZE,
+            REACTIVE_CAMERA_IMAGE_SIZE,
+        ):
+            raise ValueError(
+                "BEVFormer T8 history camera dimensions differ from contract"
+            )
+    front_camera_tile = None
+    if calibration is not None:
+        front_contract_markers = (
+            "front_camera_index",
+            "front_camera_image_size",
+            "front_projection",
+        )
+        required_front_fields = (
+            "front_camera_index",
+            "front_camera_image_size",
+            "image_size",
+        )
+        present_front_markers = {
+            field for field in front_contract_markers
+            if field in calibration
+        }
+        has_complete_front_dimensions = all(
+            field in calibration for field in required_front_fields
+        )
+        if present_front_markers and not has_complete_front_dimensions:
+            raise ValueError(
+                "front camera calibration contract is incomplete"
+            )
+        if has_complete_front_dimensions:
+            front_index = calibration["front_camera_index"]
+            front_size = calibration["front_camera_image_size"]
+            base_size = calibration["image_size"]
+            if (
+                not isinstance(front_index, int)
+                or isinstance(front_index, bool)
+                or not isinstance(front_size, int)
+                or isinstance(front_size, bool)
+                or not isinstance(base_size, int)
+                or isinstance(base_size, bool)
+                or front_index != REACTIVE_FRONT_CAMERA_INDEX
+                or front_size != REACTIVE_FRONT_CAMERA_IMAGE_SIZE
+                or base_size != REACTIVE_CAMERA_IMAGE_SIZE
+            ):
+                raise ValueError(
+                    "front camera calibration differs from model contract"
+                )
+            if front_index >= len(frames):
+                raise ValueError(
+                    "front camera index exceeds packed camera count"
+                )
+            front_camera_tile = frames[front_index]
+            if tuple(front_camera_tile.shape) != (
+                3,
+                front_size,
+                front_size,
+            ):
+                raise ValueError(
+                    "packed front camera dimensions differ from calibration"
+                )
+            # Keep a base-resolution copy because generic consumers still read
+            # visual_tiles without the optional native-front field.
+            frames[front_index] = F.interpolate(
+                front_camera_tile.unsqueeze(0),
+                size=(base_size, base_size),
+                mode="bilinear",
+                align_corners=False,
+                antialias=True,
+            ).squeeze(0)
+            if any(
+                tuple(frame.shape) != (3, base_size, base_size)
+                for frame in frames
+            ):
+                raise ValueError(
+                    "packed base camera dimensions differ from calibration"
+                )
 
     navigation_base_keys = {
         "map_semantic.npz",
@@ -1214,14 +1308,58 @@ def _decode_sample(
         else ""
     )
     camera_projection_matrix = None
+    front_camera_projection_matrix = None
+    camera_history_projection_matrix = None
     camera_geometry_type = None
-    if "calib.json" in sample:
-        calibration = _json_mapping(
-            sample["calib.json"],
-            member_name="calib.json",
-        )
+    if calibration is not None:
         projection_spec = calibration.get("projection")
+        front_projection_spec = calibration.get("front_projection")
+        history_projection_spec = calibration.get("history_projection")
         geometry_label = calibration.get("geometry_type")
+        temporal_fields = (
+            "temporal_frame_interval_us",
+            "temporal_frame_offsets",
+        )
+        present_temporal_fields = {
+            field for field in temporal_fields
+            if field in calibration
+        }
+        if camera_history_tiles is not None and (
+            present_temporal_fields != set(temporal_fields)
+            or calibration.get("temporal_frame_interval_us")
+            != REACTIVE_BEVFORMER_FRAME_INTERVAL_US
+            or calibration.get("temporal_frame_offsets")
+            != list(REACTIVE_BEVFORMER_FRAME_OFFSETS)
+            or not isinstance(history_projection_spec, Mapping)
+            or history_projection_spec.get("type")
+            not in ("pinhole", "rectified_pinhole")
+            or history_projection_spec.get("reference_frame")
+            != "current_ego"
+            or not isinstance(projection_spec, Mapping)
+            or projection_spec.get("type")
+            not in ("pinhole", "rectified_pinhole")
+        ):
+            raise ValueError(
+                "BEVFormer T8 history calibration differs from contract"
+            )
+        if camera_history_tiles is None and (
+            present_temporal_fields or history_projection_spec is not None
+        ):
+            raise ValueError(
+                "BEVFormer T8 calibration requires packed camera history"
+            )
+        if front_camera_tile is not None and (
+            not isinstance(projection_spec, Mapping)
+            or projection_spec.get("type")
+            not in ("pinhole", "rectified_pinhole")
+            or not isinstance(front_projection_spec, Mapping)
+            or front_projection_spec.get("type")
+            not in ("pinhole", "rectified_pinhole")
+        ):
+            raise ValueError(
+                "front camera calibration requires pinhole base and "
+                "native projections"
+            )
         if projection_spec is not None:
             if (
                 not isinstance(projection_spec, Mapping)
@@ -1246,6 +1384,61 @@ def _decode_sample(
                     matrix.copy()
                 )
                 camera_geometry_type = str(geometry_label)
+                if camera_history_tiles is not None:
+                    assert isinstance(history_projection_spec, Mapping)
+                    history_matrix = np.asarray(
+                        history_projection_spec.get("matrix"),
+                        dtype=np.float32,
+                    )
+                    if (
+                        history_matrix.shape != (
+                            REACTIVE_BEVFORMER_HISTORY_FRAMES,
+                            len(frames),
+                            3,
+                            4,
+                        )
+                        or not np.isfinite(history_matrix).all()
+                    ):
+                        raise ValueError(
+                            "history projection must have shape [7,V,3,4]"
+                        )
+                    camera_history_projection_matrix = torch.from_numpy(
+                        history_matrix.copy()
+                    )
+                if front_camera_tile is not None:
+                    assert isinstance(front_projection_spec, Mapping)
+                    front_matrix = np.asarray(
+                        front_projection_spec.get("matrix"),
+                        dtype=np.float32,
+                    )
+                    if (
+                        front_matrix.shape != (1, 3, 4)
+                        or not np.isfinite(front_matrix).all()
+                    ):
+                        raise ValueError(
+                            "front camera projection must have shape [1,3,4]"
+                        )
+                    expected_front_matrix = matrix[
+                        REACTIVE_FRONT_CAMERA_INDEX:
+                        REACTIVE_FRONT_CAMERA_INDEX + 1
+                    ].copy()
+                    expected_front_matrix[:, :2] *= (
+                        REACTIVE_FRONT_CAMERA_IMAGE_SIZE
+                        / REACTIVE_CAMERA_IMAGE_SIZE
+                    )
+                    if not np.allclose(
+                        front_matrix,
+                        expected_front_matrix,
+                        rtol=1e-5,
+                        atol=1e-5,
+                    ):
+                        raise ValueError(
+                            "front camera projection does not match "
+                            "the base camera frame"
+                        )
+                    front_camera_projection_matrix = torch.from_numpy(
+                        front_matrix.copy()
+                    )
 
     out = {
         # Overlay inference derives noise from this stable identity. Keep it in
@@ -1284,6 +1477,18 @@ def _decode_sample(
     if camera_projection_matrix is not None:
         out["camera_projection_matrix"] = camera_projection_matrix
         out["camera_geometry_type"] = camera_geometry_type
+    if front_camera_tile is not None:
+        out["front_camera_tile"] = front_camera_tile
+    if camera_history_tiles is not None:
+        out["camera_history_tiles"] = camera_history_tiles
+    if camera_history_projection_matrix is not None:
+        out["camera_history_projection_matrix"] = (
+            camera_history_projection_matrix
+        )
+    if front_camera_projection_matrix is not None:
+        out["front_camera_projection_matrix"] = (
+            front_camera_projection_matrix
+        )
 
     pose_data = sample.get("pose.npy")
     gps_data = sample.get("gps.npy")
@@ -1479,8 +1684,8 @@ def load_projection_from_manifest(shard_dir: str):
                         "fw_poly": [...], "cx": [...], "cy": [...],
                         "image_wh": [...], "max_theta": ...}}  # native (W,H), FOV
 
-    A dataset without calibration (pseudo geometry, e.g. L2D) returns
-    ``(None, "pseudo")`` and the caller runs the explicit pseudo path. This is
+    A legacy dataset without calibration returns ``(None, "pseudo")`` and the
+    caller runs the explicit pseudo path. This is
     the single geometry-reconstruction point, keeping the pinhole/f-theta split
     out of the training loop.
     """

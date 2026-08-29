@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import dataclasses
+
 import numpy as np
 import pytest
 import torch
 import torch.nn.functional as F
 
+from data_parsing.camera_slots import CANONICAL_SIX_CAMERA_SLOTS
 from data_processing.reactive_training_artifacts import (
     BEV_SEGMENTATION_ARTIFACT_VERSION,
     BEV_SEGMENTATION_TAXONOMY_VERSION,
@@ -22,7 +25,13 @@ from model_components.losses import (
     TrajectoryXYImitationLoss,
 )
 from navigation.geometry import AUTOE2E_NAVIGATION_GEOMETRY
+from reactive_training_contracts import (
+    REACTIVE_CAMERA_IMAGE_SIZE,
+    REACTIVE_FRONT_CAMERA_IMAGE_SIZE,
+    REACTIVE_FRONT_CAMERA_INDEX,
+)
 from training.reactive_multitask import (
+    AUTOE2E_REACTIVE_BEV_GEOMETRY,
     ReactiveMultitaskObjective,
     ReactiveTrainingStage,
     configure_model_for_stage,
@@ -109,7 +118,13 @@ def _inputs(device: torch.device, *, batch_size: int = 2, views: int = 8):
     }
 
 
-def _model(build_mock_model, device, *, views: int = 8):
+def _model(
+    build_mock_model,
+    device,
+    *,
+    views: int = 8,
+    view_fusion_kwargs: dict[str, object] | None = None,
+):
     return build_mock_model(
         num_views=views,
         device=device,
@@ -119,6 +134,7 @@ def _model(build_mock_model, device, *, views: int = 8):
         planner_mode="gru",
         enable_bev_segmentation=True,
         enable_route_reconstruction=True,
+        view_fusion_kwargs=view_fusion_kwargs or {},
     )
 
 
@@ -150,6 +166,7 @@ def _stage_batch(
     include_bev: bool,
     batch_size: int = 1,
     views: int = 8,
+    image_size: int = 256,
 ) -> dict[str, object]:
     batch: dict[str, object] = {
         "sample_uid": [
@@ -160,8 +177,8 @@ def _stage_batch(
             batch_size,
             views,
             3,
-            256,
-            256,
+            image_size,
+            image_size,
             device=device,
         ),
         "map_context": torch.rand(
@@ -246,9 +263,59 @@ def _stage_batch(
     return batch
 
 
+def _attach_stage_a_camera_context(
+    batch: dict[str, object],
+    *,
+    front_image_size: int,
+) -> dict[str, object]:
+    visual_tiles = batch["visual_tiles"]
+    assert torch.is_tensor(visual_tiles)
+    batch_size, views, _, image_height, image_width = visual_tiles.shape
+    assert image_height == image_width
+    projection = visual_tiles.new_zeros(batch_size, views, 3, 4)
+    focal = float(image_width)
+    center = float(image_width) / 2.0
+    projection[:, :, 0, 0] = center
+    projection[:, :, 0, 1] = -focal
+    projection[:, :, 1, 0] = center
+    projection[:, :, 1, 2] = -focal
+    projection[:, :, 2, 0] = 1.0
+    front_scale = front_image_size / image_width
+    front_projection = projection[:, :1].clone()
+    front_projection[:, :, :2] *= front_scale
+    batch.update({
+        "camera_geometry_type": "rectified_pinhole",
+        "camera_projection_matrix": projection,
+        "front_camera_tile": F.interpolate(
+            visual_tiles[:, 0],
+            size=(front_image_size, front_image_size),
+            mode="bilinear",
+            align_corners=False,
+        ),
+        "front_camera_projection_matrix": front_projection,
+        "camera_history_tiles": visual_tiles[:, None].repeat(
+            1,
+            7,
+            1,
+            1,
+            1,
+            1,
+        ),
+        "camera_history_projection_matrix": projection[:, None].repeat(
+            1,
+            7,
+            1,
+            1,
+            1,
+        ),
+    })
+    return batch
+
+
 def test_common_geometry_matches_camera_bev_contract():
     geometry = AUTOE2E_NAVIGATION_GEOMETRY
     assert (geometry.height_px, geometry.width_px) == (450, 300)
+    assert (geometry.matching_bev_h, geometry.matching_bev_w) == (450, 300)
     assert geometry.meters_per_pixel == pytest.approx(0.4)
     assert geometry.matching_pc_range == (
         -60.0,
@@ -265,20 +332,22 @@ def test_common_geometry_matches_camera_bev_contract():
     )
 
 
-def test_reactive_model_contract_uses_bevformer_t1_latent_grid():
+def test_reactive_model_contract_uses_bevformer_t8_latent_grid():
     kwargs = reactive_model_kwargs(
         ReactiveTrainingStage.NUPLAN_FULL,
-        num_views=8,
+        num_views=6,
     )
 
     assert "image_feature_size" not in kwargs
     assert kwargs["view_fusion_kwargs"] == {
-        "architecture": "bevformer_v2_t1",
+        "architecture": "bevformer_v2_t8",
         "activation_checkpointing": True,
-        "bev_h": 256,
-        "bev_w": 256,
+        "bev_h": 300,
+        "bev_w": 200,
         "feedforward_channels": 512,
-        "image_size": 256,
+        "front_camera_index": REACTIVE_FRONT_CAMERA_INDEX,
+        "front_image_size": REACTIVE_FRONT_CAMERA_IMAGE_SIZE,
+        "image_size": REACTIVE_CAMERA_IMAGE_SIZE,
         "num_encoder_layers": 6,
         "num_heads": 8,
         "num_levels": 4,
@@ -288,7 +357,57 @@ def test_reactive_model_contract_uses_bevformer_t1_latent_grid():
     }
     assert kwargs["map_fusion_mode"] == "deformable"
     assert kwargs["route_encoder_hidden_channels"] == 96
+    assert kwargs["planner_kwargs"] == {"num_points": 16}
     assert kwargs["auxiliary_output_size"] == (450, 300)
+    view_kwargs = kwargs["view_fusion_kwargs"]
+    assert {
+        name: view_kwargs[name]
+        for name in ("bev_h", "bev_w", "pc_range")
+    } == AUTOE2E_REACTIVE_BEV_GEOMETRY.camera_bev_kwargs()
+    pc_range = view_kwargs["pc_range"]
+    longitudinal_pitch = (
+        (pc_range[3] - pc_range[0]) / view_kwargs["bev_h"]
+    )
+    lateral_pitch = (
+        (pc_range[4] - pc_range[1]) / view_kwargs["bev_w"]
+    )
+    assert longitudinal_pitch == pytest.approx(lateral_pitch)
+    assert longitudinal_pitch == pytest.approx(0.6)
+    assert (
+        longitudinal_pitch
+        / AUTOE2E_NAVIGATION_GEOMETRY.meters_per_pixel
+    ) == pytest.approx(1.5)
+
+
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    (
+        ({"bev_h": 0}, "dimensions must be positive"),
+        ({"pc_range": (-60.0,) * 5}, "six finite values"),
+        (
+            {"pc_range": (-60.0, -60.0, float("nan"), 120.0, 60.0, 3.0)},
+            "six finite values",
+        ),
+        (
+            {"pc_range": (0.0, -60.0, -5.0, 0.0, 60.0, 3.0)},
+            "XYZ extents must be positive",
+        ),
+        (
+            {"pc_range": (-60.0, -60.0, 3.0, 120.0, 60.0, 3.0)},
+            "XYZ extents must be positive",
+        ),
+        ({"bev_h": 299}, "isotropic XY pitch"),
+    ),
+)
+def test_reactive_bev_geometry_rejects_invalid_contract(
+    overrides,
+    message,
+):
+    with pytest.raises(ValueError, match=message):
+        dataclasses.replace(
+            AUTOE2E_REACTIVE_BEV_GEOMETRY,
+            **overrides,
+        )
 
 
 def test_bev_head_uses_full_residual_spatial_blocks(device):
@@ -945,7 +1064,7 @@ def test_stage_b_skips_and_freezes_bev_head(build_mock_model, device):
     )
 
 
-def test_bev_only_stage_excludes_and_preserves_non_bev_parameters(
+def test_frozen_bevformer_preserves_camera_and_updates_trainable_heads(
     build_mock_model,
     device,
 ):
@@ -953,26 +1072,29 @@ def test_bev_only_stage_excludes_and_preserves_non_bev_parameters(
     configure_model_for_stage(
         model,
         ReactiveTrainingStage.NUPLAN_FULL,
-        bev_only=True,
+        freeze_bevformer=True,
+        train_bev_head=True,
     )
+    model.train()
     reactive = model.Reactive_E2E
-    trainable = {
-        id(parameter)
-        for parameter in model.parameters()
-        if parameter.requires_grad
-    }
-    expected_trainable = {
-        id(parameter)
-        for module in (
-            reactive.Backbone,
-            reactive.FeatureFusion,
-            reactive.BEVSegmentationHead,
-        )
-        for parameter in module.parameters()
-    }
-    frozen_navigation = {
+    frozen_camera = {
         name: parameter.detach().clone()
-        for name, parameter in reactive.NavigationEncoder.named_parameters()
+        for module_name, module in (
+            ("backbone", reactive.Backbone),
+            ("feature_fusion", reactive.FeatureFusion),
+        )
+        for name, parameter in module.named_parameters()
+        for name in (f"{module_name}.{name}",)
+    }
+    trainable_before = {
+        name: parameter.detach().clone()
+        for module_name, module in (
+            ("bev_head", reactive.BEVSegmentationHead),
+            ("navigation", reactive.NavigationEncoder),
+            ("planner", reactive.TrajectoryPlanner),
+        )
+        for name, parameter in module.named_parameters()
+        for name in (f"{module_name}.{name}",)
     }
     optimizer = torch.optim.AdamW(
         [
@@ -983,30 +1105,99 @@ def test_bev_only_stage_excludes_and_preserves_non_bev_parameters(
         lr=1e-3,
         weight_decay=0.1,
     )
-    optimizer_parameters = {
-        id(parameter)
-        for group in optimizer.param_groups
-        for parameter in group["params"]
-    }
-
-    _, auxiliary = _forward(
-        model,
-        _inputs(device),
-        compute_route_reconstruction=False,
-    )
-    logits = auxiliary["bev_segmentation_logits"]
-    loss = BEVSegmentationAuxiliaryLoss([1.0] * 8).to(device)(
-        logits,
-        torch.ones_like(logits),
-        torch.ones_like(logits, dtype=torch.bool),
+    trajectory, auxiliary = _forward(model, _inputs(device))
+    loss = (
+        trajectory.square().mean()
+        + auxiliary["bev_segmentation_logits"].square().mean()
+        + auxiliary["route_reconstruction_logits"].square().mean()
     )
     loss.backward()
     optimizer.step()
 
-    assert trainable == expected_trainable
-    assert optimizer_parameters == expected_trainable
-    for name, parameter in reactive.NavigationEncoder.named_parameters():
-        assert torch.equal(parameter.detach(), frozen_navigation[name])
+    assert not reactive.Backbone.training
+    assert not reactive.FeatureFusion.training
+    for module_name, module in (
+        ("backbone", reactive.Backbone),
+        ("feature_fusion", reactive.FeatureFusion),
+    ):
+        assert all(not parameter.requires_grad for parameter in module.parameters())
+        for name, parameter in module.named_parameters():
+            assert torch.equal(
+                parameter.detach(),
+                frozen_camera[f"{module_name}.{name}"],
+            )
+    changed_groups = set()
+    for module_name, module in (
+        ("bev_head", reactive.BEVSegmentationHead),
+        ("navigation", reactive.NavigationEncoder),
+        ("planner", reactive.TrajectoryPlanner),
+    ):
+        if any(
+            not torch.equal(
+                parameter.detach(),
+                trainable_before[f"{module_name}.{name}"],
+            )
+            for name, parameter in module.named_parameters()
+        ):
+            changed_groups.add(module_name)
+    assert changed_groups == {"bev_head", "navigation", "planner"}
+
+
+def test_frozen_t8_keeps_only_front_gate_and_running_stats_adaptive(
+    build_mock_model,
+    device,
+):
+    model = _model(
+        build_mock_model,
+        device,
+        views=6,
+        view_fusion_kwargs={
+            "architecture": "bevformer_v2_t8",
+            "activation_checkpointing": False,
+            "image_size": 32,
+            "front_image_size": 64,
+            "num_encoder_layers": 1,
+            "num_points": 2,
+            "query_chunk_size": 64,
+        },
+    )
+    configure_model_for_stage(
+        model,
+        ReactiveTrainingStage.NUPLAN_FULL,
+        freeze_bevformer=True,
+    )
+    model.train()
+    reactive = model.Reactive_E2E
+    gate = reactive.FeatureFusion.view_fusion.front_residual_gate
+
+    assert gate.requires_grad
+    assert all(
+        not parameter.requires_grad
+        for parameter in reactive.Backbone.parameters()
+    )
+    assert all(
+        not parameter.requires_grad
+        for name, parameter in reactive.FeatureFusion.named_parameters()
+        if name != "view_fusion.front_residual_gate"
+    )
+    assert not reactive.Backbone.training
+    assert not reactive.FeatureFusion.training
+    assert reactive.FeatureFusion.temporal_fusion.training
+    assert all(
+        not parameter.requires_grad
+        for parameter in reactive.FeatureFusion.temporal_fusion.parameters()
+    )
+
+    model.eval()
+    assert not reactive.FeatureFusion.temporal_fusion.training
+
+    configure_model_for_stage(
+        model,
+        ReactiveTrainingStage.L2D_CONTINUATION,
+        freeze_bevformer=True,
+    )
+    model.train()
+    assert not reactive.FeatureFusion.temporal_fusion.training
 
 
 def test_packed_reactive_targets_round_trip():
@@ -1063,7 +1254,23 @@ def test_stage_a_to_stage_b_to_semantic_artifact_smoke(
         infer_semantic_occupancy,
     )
 
-    stage_a_model = _model(build_mock_model, device).train()
+    test_camera_size = 32
+    test_front_size = 64
+    t8_view_fusion_kwargs = {
+        "architecture": "bevformer_v2_t8",
+        "activation_checkpointing": False,
+        "image_size": test_camera_size,
+        "front_image_size": test_front_size,
+        "num_encoder_layers": 1,
+        "num_points": 2,
+        "query_chunk_size": 64,
+    }
+    stage_a_model = _model(
+        build_mock_model,
+        device,
+        views=6,
+        view_fusion_kwargs=t8_view_fusion_kwargs,
+    ).train()
     stage_a_objective = ReactiveMultitaskObjective(
         ReactiveTrainingStage.NUPLAN_FULL,
         bev_pos_weight=[1.0] * 8,
@@ -1074,9 +1281,27 @@ def test_stage_a_to_stage_b_to_semantic_artifact_smoke(
         stage_a_model.parameters(),
         lr=1e-4,
     )
+    stage_a_batch = _stage_batch(
+        device,
+        include_bev=True,
+        views=6,
+        image_size=test_camera_size,
+    )
+    with pytest.raises(ValueError, match="native front camera"):
+        run_reactive_epoch(
+            stage_a_model,
+            [stage_a_batch],
+            stage_a_objective,
+            stage_a_optimizer,
+            device=device,
+        )
+    stage_a_batch = _attach_stage_a_camera_context(
+        stage_a_batch,
+        front_image_size=test_front_size,
+    )
     stage_a_metrics = run_reactive_epoch(
         stage_a_model,
-        [_stage_batch(device, include_bev=True)],
+        [stage_a_batch],
         stage_a_objective,
         stage_a_optimizer,
         device=device,
@@ -1091,15 +1316,15 @@ def test_stage_a_to_stage_b_to_semantic_artifact_smoke(
         dataset_manifest_sha256="a" * 64,
         epoch=1,
         model_config={
-            "num_views": 8,
+            "num_views": 6,
+            "camera_slots": list(CANONICAL_SIX_CAMERA_SLOTS),
             "trajectory_weight": 1.0,
             "bev_weight": 0.1,
             "route_weight": 0.01,
             "corridor_pos_weight": 1.0,
             "training_seed": 149,
             "scheduler_identity": "selection_plateau_v1",
-            "overfit_bev_only": False,
-            "overfit_fixed_lr": False,
+            "freeze_bevformer": True,
             "bev_pos_weights": [1.0] * 8,
             "bev_repeat_factors": [1] * 8,
             "bev_taxonomy_version": BEV_SEGMENTATION_TAXONOMY_VERSION,
@@ -1115,14 +1340,27 @@ def test_stage_a_to_stage_b_to_semantic_artifact_smoke(
         build_mock_model,
         device,
         views=6,
+        view_fusion_kwargs=t8_view_fusion_kwargs,
     ).train()
-    lineage = load_stage_a_parent(stage_b_model, checkpoint_path)
+    lineage = load_stage_a_parent(
+        stage_b_model,
+        checkpoint_path,
+        target_camera_slots=CANONICAL_SIX_CAMERA_SLOTS,
+    )
     assert lineage["stage_a_parent_checkpoint_sha256"] == (
         checkpoint_sha256
     )
     assert lineage["bevformer_v2_initialization_mode"] == (
         "explicit_random_init"
     )
+    assert lineage["stage_a_freeze_bevformer"] is True
+    assert lineage["stage_a_camera_embedding_transfer"] == {
+        "policy": "identity",
+        "source_camera_slots": list(CANONICAL_SIX_CAMERA_SLOTS),
+        "source_num_views": 6,
+        "target_camera_slots": list(CANONICAL_SIX_CAMERA_SLOTS),
+        "target_num_views": 6,
+    }
     configure_model_for_stage(
         stage_b_model,
         ReactiveTrainingStage.L2D_CONTINUATION,
@@ -1152,6 +1390,7 @@ def test_stage_a_to_stage_b_to_semantic_artifact_smoke(
         device,
         include_bev=False,
         views=6,
+        image_size=test_camera_size,
     )
     stage_b_metrics = run_reactive_epoch(
         stage_b_model,
@@ -1190,6 +1429,167 @@ def test_stage_a_to_stage_b_to_semantic_artifact_smoke(
     )) <= 1.0 / 255.0
 
 
+def test_stage_b_adapts_stage_a_camera_embeddings_across_rigs(tmp_path):
+    class CameraEmbeddingViewFusion(torch.nn.Module):
+        num_views: int
+
+        def __init__(self, num_views: int):
+            super().__init__()
+            self.num_views = num_views
+            self.camera_embeddings = torch.nn.Parameter(
+                torch.empty(num_views, 4)
+            )
+
+    class CameraEmbeddingModel(torch.nn.Module):
+        def __init__(self, num_views: int):
+            super().__init__()
+            reactive = torch.nn.Module()
+            feature_fusion = torch.nn.Module()
+            view_fusion = CameraEmbeddingViewFusion(num_views)
+            feature_fusion.view_fusion = view_fusion
+            reactive.FeatureFusion = feature_fusion
+            self.Reactive_E2E = reactive
+
+    source_model = CameraEmbeddingModel(8)
+    source_camera_slots = [
+        "front",
+        "front_left",
+        "left",
+        "rear_left",
+        "front_right",
+        "right",
+        "rear_right",
+        "rear",
+    ]
+    source_values = torch.arange(32, dtype=torch.float32).reshape(8, 4)
+    with torch.no_grad():
+        embedding = (
+            source_model.Reactive_E2E.FeatureFusion
+            .view_fusion.camera_embeddings
+        )
+        embedding.copy_(source_values)
+    checkpoint_path = tmp_path / "stage-a-eight-view.pt"
+    save_reactive_checkpoint(
+        checkpoint_path,
+        source_model,
+        stage=ReactiveTrainingStage.NUPLAN_FULL,
+        dataset_manifest_sha256="a" * 64,
+        epoch=1,
+        model_config={
+            "num_views": 8,
+            "camera_slots": source_camera_slots,
+            "trajectory_weight": 1.0,
+            "bev_weight": 1.0,
+            "route_weight": 1.0,
+            "corridor_pos_weight": 1.0,
+            "training_seed": 149,
+            "scheduler_identity": "selection_plateau_v1",
+            "freeze_bevformer": True,
+            "bev_pos_weights": [2.0] * 8,
+            "bev_repeat_factors": [1] * 8,
+            "bev_taxonomy_version": BEV_SEGMENTATION_TAXONOMY_VERSION,
+            "is_pretrained": False,
+            "allow_random_bevformer_init": True,
+        },
+    )
+    target_model = CameraEmbeddingModel(6)
+
+    lineage = load_stage_a_parent(
+        target_model,
+        checkpoint_path,
+        target_camera_slots=CANONICAL_SIX_CAMERA_SLOTS,
+    )
+
+    expected = source_values[[0, 1, 4, 3, 7, 6]]
+    torch.testing.assert_close(
+        target_model.Reactive_E2E.FeatureFusion
+        .view_fusion.camera_embeddings,
+        expected,
+    )
+    assert lineage["stage_a_camera_embedding_transfer"] == {
+        "policy": "semantic_reindex",
+        "source_camera_slots": source_camera_slots,
+        "source_num_views": 8,
+        "target_camera_slots": list(CANONICAL_SIX_CAMERA_SLOTS),
+        "target_num_views": 6,
+    }
+
+
+def test_stage_b_reindexes_equal_count_permuted_camera_embeddings(tmp_path):
+    def camera_embedding_model(values):
+        model = torch.nn.Module()
+        reactive = torch.nn.Module()
+        feature_fusion = torch.nn.Module()
+        view_fusion = torch.nn.Module()
+        view_fusion.num_views = len(values)
+        view_fusion.camera_embeddings = torch.nn.Parameter(values.clone())
+        feature_fusion.view_fusion = view_fusion
+        reactive.FeatureFusion = feature_fusion
+        model.Reactive_E2E = reactive
+        return model
+
+    source_camera_slots = [
+        "rear",
+        "front_right",
+        "front",
+        "rear_right",
+        "front_left",
+        "rear_left",
+    ]
+    source_values = torch.arange(24, dtype=torch.float32).reshape(6, 4)
+    source_model = camera_embedding_model(source_values)
+    checkpoint_path = tmp_path / "stage-a-permuted-six-view.pt"
+    save_reactive_checkpoint(
+        checkpoint_path,
+        source_model,
+        stage=ReactiveTrainingStage.NUPLAN_FULL,
+        dataset_manifest_sha256="a" * 64,
+        epoch=1,
+        model_config={
+            "num_views": 6,
+            "camera_slots": source_camera_slots,
+            "trajectory_weight": 1.0,
+            "bev_weight": 1.0,
+            "route_weight": 1.0,
+            "corridor_pos_weight": 1.0,
+            "training_seed": 149,
+            "scheduler_identity": "selection_plateau_v1",
+            "freeze_bevformer": True,
+            "bev_pos_weights": [2.0] * 8,
+            "bev_repeat_factors": [1] * 8,
+            "bev_taxonomy_version": BEV_SEGMENTATION_TAXONOMY_VERSION,
+            "is_pretrained": False,
+            "allow_random_bevformer_init": True,
+        },
+    )
+    target_model = camera_embedding_model(torch.zeros_like(source_values))
+
+    lineage = load_stage_a_parent(
+        target_model,
+        checkpoint_path,
+        target_camera_slots=CANONICAL_SIX_CAMERA_SLOTS,
+    )
+
+    source_index = {
+        slot: index for index, slot in enumerate(source_camera_slots)
+    }
+    expected_indices = [
+        source_index[slot] for slot in CANONICAL_SIX_CAMERA_SLOTS
+    ]
+    torch.testing.assert_close(
+        target_model.Reactive_E2E.FeatureFusion
+        .view_fusion.camera_embeddings,
+        source_values[expected_indices],
+    )
+    assert lineage["stage_a_camera_embedding_transfer"] == {
+        "policy": "semantic_reindex",
+        "source_camera_slots": source_camera_slots,
+        "source_num_views": 6,
+        "target_camera_slots": list(CANONICAL_SIX_CAMERA_SLOTS),
+        "target_num_views": 6,
+    }
+
+
 def test_multitask_evaluator_reports_partial_horizons_and_route_use(
     build_mock_model,
     device,
@@ -1206,6 +1606,7 @@ def test_multitask_evaluator_reports_partial_horizons_and_route_use(
     report = evaluate_reactive_multitask(
         model,
         [batch],
+        stage=ReactiveTrainingStage.L2D_CONTINUATION,
         device=device,
     )
 
@@ -1238,8 +1639,29 @@ def test_stage_a_b_cross_dataset_retention_matrix_smoke(
     build_mock_model,
     device,
 ):
-    stage_a_model = _model(build_mock_model, device, views=8).eval()
-    stage_b_model = _model(build_mock_model, device, views=6).eval()
+    camera_size = 32
+    front_size = 64
+    view_fusion_kwargs = {
+        "architecture": "bevformer_v2_t8",
+        "activation_checkpointing": False,
+        "image_size": camera_size,
+        "front_image_size": front_size,
+        "num_encoder_layers": 1,
+        "num_points": 2,
+        "query_chunk_size": 64,
+    }
+    stage_a_model = _model(
+        build_mock_model,
+        device,
+        views=6,
+        view_fusion_kwargs=view_fusion_kwargs,
+    ).eval()
+    stage_b_model = _model(
+        build_mock_model,
+        device,
+        views=6,
+        view_fusion_kwargs=view_fusion_kwargs,
+    ).eval()
     with torch.no_grad():
         stage_a_model.Reactive_E2E.MapBEVFusion.alpha.fill_(0.5)
         stage_b_model.Reactive_E2E.MapBEVFusion.alpha.fill_(0.5)
@@ -1247,7 +1669,12 @@ def test_stage_a_b_cross_dataset_retention_matrix_smoke(
         device,
         include_bev=True,
         batch_size=2,
-        views=8,
+        views=6,
+        image_size=camera_size,
+    )
+    _attach_stage_a_camera_context(
+        nuplan_batch,
+        front_image_size=front_size,
     )
     nuplan_batch["sample_uid"] = ["nuplan-a", "nuplan-b"]
     l2d_batch = _stage_batch(
@@ -1255,6 +1682,7 @@ def test_stage_a_b_cross_dataset_retention_matrix_smoke(
         include_bev=False,
         batch_size=2,
         views=6,
+        image_size=camera_size,
     )
     l2d_batch["sample_uid"] = ["l2d-a", "l2d-b"]
 
@@ -1308,6 +1736,7 @@ def test_checkpoint_selection_evaluation_skips_auxiliary_heads(
         metrics = evaluate_reactive_xy(
             model,
             [batch],
+            stage=ReactiveTrainingStage.L2D_CONTINUATION,
             device=device,
         )
     finally:
@@ -1319,12 +1748,34 @@ def test_checkpoint_selection_evaluation_skips_auxiliary_heads(
     assert calls == {"bev": 0, "route": 0}
 
 
+@pytest.mark.parametrize(
+    "evaluator",
+    [evaluate_reactive_xy, evaluate_reactive_multitask],
+)
+def test_stage_a_evaluators_require_front_and_t8_context(
+    evaluator,
+    build_mock_model,
+    device,
+):
+    model = _model(build_mock_model, device).eval()
+    batch = _stage_batch(device, include_bev=True)
+
+    with pytest.raises(ValueError, match="native front camera"):
+        evaluator(
+            model,
+            [batch],
+            stage=ReactiveTrainingStage.NUPLAN_FULL,
+            device=device,
+        )
+
+
 def test_stage_b_rejects_stage_a_without_bevformer_provenance(
     build_mock_model,
     device,
     tmp_path,
 ):
     model = _model(build_mock_model, device)
+    camera_slots = [f"legacy_{index}" for index in range(8)]
     checkpoint_path = tmp_path / "legacy-stage-a.pt"
     save_reactive_checkpoint(
         checkpoint_path,
@@ -1333,14 +1784,15 @@ def test_stage_b_rejects_stage_a_without_bevformer_provenance(
         dataset_manifest_sha256="a" * 64,
         epoch=1,
         model_config={
+            "num_views": 8,
+            "camera_slots": camera_slots,
             "trajectory_weight": 1.0,
             "bev_weight": 1.0,
             "route_weight": 1.0,
             "corridor_pos_weight": 1.0,
             "training_seed": 149,
             "scheduler_identity": "selection_plateau_v1",
-            "overfit_bev_only": False,
-            "overfit_fixed_lr": False,
+            "freeze_bevformer": True,
             "bev_pos_weights": [2.0] * 8,
             "bev_repeat_factors": [1] * 8,
             "bev_taxonomy_version": BEV_SEGMENTATION_TAXONOMY_VERSION,
@@ -1353,7 +1805,11 @@ def test_stage_b_rejects_stage_a_without_bevformer_provenance(
         ValueError,
         match="lacks BEVFormer initialization provenance",
     ):
-        load_stage_a_parent(model, checkpoint_path)
+        load_stage_a_parent(
+            model,
+            checkpoint_path,
+            target_camera_slots=camera_slots,
+        )
 
 
 def test_stage_b_inherits_bevformer_initialization_provenance(
@@ -1362,6 +1818,7 @@ def test_stage_b_inherits_bevformer_initialization_provenance(
     tmp_path,
 ):
     model = _model(build_mock_model, device)
+    camera_slots = [f"legacy_{index}" for index in range(8)]
     checkpoint_path = tmp_path / "pretrained-stage-a.pt"
     source_sha256 = "b" * 64
     initialization = {
@@ -1378,14 +1835,15 @@ def test_stage_b_inherits_bevformer_initialization_provenance(
         dataset_manifest_sha256="a" * 64,
         epoch=1,
         model_config={
+            "num_views": 8,
+            "camera_slots": camera_slots,
             "trajectory_weight": 1.0,
             "bev_weight": 1.0,
             "route_weight": 1.0,
             "corridor_pos_weight": 1.0,
             "training_seed": 149,
             "scheduler_identity": "selection_plateau_v1",
-            "overfit_bev_only": False,
-            "overfit_fixed_lr": False,
+            "freeze_bevformer": True,
             "bev_pos_weights": [2.0] * 8,
             "bev_repeat_factors": [1] * 8,
             "bev_taxonomy_version": BEV_SEGMENTATION_TAXONOMY_VERSION,
@@ -1398,7 +1856,11 @@ def test_stage_b_inherits_bevformer_initialization_provenance(
         },
     )
 
-    inherited = load_stage_a_parent(model, checkpoint_path)
+    inherited = load_stage_a_parent(
+        model,
+        checkpoint_path,
+        target_camera_slots=camera_slots,
+    )
 
     assert inherited["bevformer_v2_initialization"] == initialization
     assert (
@@ -1413,6 +1875,7 @@ def test_stage_b_rejects_stage_a_that_did_not_optimize_bev(
     tmp_path,
 ):
     model = _model(build_mock_model, device)
+    camera_slots = [f"legacy_{index}" for index in range(8)]
     checkpoint_path = tmp_path / "bev-disabled-stage-a.pt"
     save_reactive_checkpoint(
         checkpoint_path,
@@ -1421,14 +1884,15 @@ def test_stage_b_rejects_stage_a_that_did_not_optimize_bev(
         dataset_manifest_sha256="a" * 64,
         epoch=1,
         model_config={
+            "num_views": 8,
+            "camera_slots": camera_slots,
             "trajectory_weight": 1.0,
             "bev_weight": 0.0,
             "route_weight": 1.0,
             "corridor_pos_weight": 1.0,
             "training_seed": 149,
             "scheduler_identity": "selection_plateau_v1",
-            "overfit_bev_only": False,
-            "overfit_fixed_lr": False,
+            "freeze_bevformer": True,
             "bev_pos_weights": [2.0] * 8,
             "bev_repeat_factors": [1] * 8,
             "bev_taxonomy_version": BEV_SEGMENTATION_TAXONOMY_VERSION,
@@ -1436,4 +1900,8 @@ def test_stage_b_rejects_stage_a_that_did_not_optimize_bev(
     )
 
     with pytest.raises(ValueError, match="objective provenance"):
-        load_stage_a_parent(model, checkpoint_path)
+        load_stage_a_parent(
+            model,
+            checkpoint_path,
+            target_camera_slots=camera_slots,
+        )

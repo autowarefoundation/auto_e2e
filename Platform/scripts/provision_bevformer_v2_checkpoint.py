@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Provision the verified BEVFormer V2 t1 checkpoint in the platform account."""
+"""Provision the verified BEVFormer V2 T8 checkpoint in the platform account."""
 
 from __future__ import annotations
 
@@ -17,11 +17,11 @@ sys.path.insert(0, str(REPOSITORY_ROOT / "Model"))
 
 from model_components.bevformer_v2_pretrained import (  # noqa: E402
     BEVFORMER_V2_SOURCE_REPOSITORY,
-    BEVFORMER_V2_T1_CHECKPOINT_MIRROR_KEY,
-    BEVFORMER_V2_T1_CHECKPOINT_SHA256,
+    BEVFORMER_V2_T8_CHECKPOINT_MIRROR_KEY,
+    BEVFORMER_V2_T8_CHECKPOINT_SHA256,
     BEVFORMER_V2_TRAINING_DATA_LICENSE_SPDX,
     BEVFORMER_V2_WEIGHT_LICENSE_SPDX,
-    bevformer_v2_t1_checkpoint_mirror_uri,
+    bevformer_v2_t8_checkpoint_mirror_uri,
     sha256_file,
 )
 
@@ -47,20 +47,20 @@ def provision(
 ) -> dict[str, object]:
     source_path = Path(source)
     digest = sha256_file(source_path)
-    if digest != BEVFORMER_V2_T1_CHECKPOINT_SHA256:
+    if digest != BEVFORMER_V2_T8_CHECKPOINT_SHA256:
         raise ValueError(
             f"checkpoint SHA-256 mismatch: {digest} != "
-            f"{BEVFORMER_V2_T1_CHECKPOINT_SHA256}"
+            f"{BEVFORMER_V2_T8_CHECKPOINT_SHA256}"
         )
     resolved_account = account_id or str(
         boto3.client("sts").get_caller_identity()["Account"]
     )
-    uri = bevformer_v2_t1_checkpoint_mirror_uri(
+    uri = bevformer_v2_t8_checkpoint_mirror_uri(
         resolved_account,
         cluster_name=cluster_name,
     )
     bucket = uri.removeprefix("s3://").split("/", 1)[0]
-    key = BEVFORMER_V2_T1_CHECKPOINT_MIRROR_KEY
+    key = BEVFORMER_V2_T8_CHECKPOINT_MIRROR_KEY
     metadata = {
         "sha256": digest,
         "source-repository": BEVFORMER_V2_SOURCE_REPOSITORY,

@@ -14,6 +14,7 @@ import pytest
 from PIL import Image
 
 from evaluation.metrics import integrate_trajectory
+from data_parsing.l2d.calibration import l2d_projection_spec
 from Platform.pipelines.overlay import (
     BEV_HEATMAP_NAMES,
     BEV_HEATMAP_SIZE,
@@ -114,9 +115,23 @@ def _write_publication_manifests(
     overlay: Path,
     sample_count: int,
     seeds: list[int] | None = None,
-) -> tuple[Path, Path]:
+    rig: dict | None = None,
+) -> tuple[Path, Path, Path]:
     seeds = seeds or [0]
-    rig_sha256 = "5" * 64
+    rig_document = rig or {
+        "schema_version": "v1",
+        "dataset": "yaak-ai/L2D",
+        "geometry_type": "pseudo",
+        "image_size": 64,
+        "projection": None,
+    }
+    rig_path = root / "rig-projection.json"
+    rig_path.write_text(json.dumps(
+        rig_document,
+        indent=2,
+        sort_keys=True,
+    ))
+    rig_sha256 = hashlib.sha256(rig_path.read_bytes()).hexdigest()
     dataset_manifest = {
         "schema_version": "v2",
         "status": "ready",
@@ -178,7 +193,7 @@ def _write_publication_manifests(
         indent=2,
         sort_keys=True,
     ))
-    return dataset_path, overlay_path
+    return dataset_path, overlay_path, rig_path
 
 
 def test_report_integrator_matches_evaluation_reference():
@@ -272,11 +287,13 @@ def test_report_joins_aovl_by_uid_and_writes_scene_artifacts(tmp_path):
         np.array([8.0, 9.0], dtype=np.float32),
         bev_heatmaps=_blank_diagnostics(2),
     )
-    dataset_manifest, overlay_manifest = _write_publication_manifests(
-        tmp_path,
-        shard=shard,
-        overlay=overlay,
-        sample_count=2,
+    dataset_manifest, overlay_manifest, rig_projection = (
+        _write_publication_manifests(
+            tmp_path,
+            shard=shard,
+            overlay=overlay,
+            sample_count=2,
+        )
     )
 
     rendered_sizes = []
@@ -294,6 +311,7 @@ def test_report_joins_aovl_by_uid_and_writes_scene_artifacts(tmp_path):
         output_dir=output,
         dataset_manifest_path=dataset_manifest,
         overlay_manifest_path=overlay_manifest,
+        rig_projection_path=rig_projection,
         video_writer=fake_video_writer,
     )
 
@@ -325,6 +343,68 @@ def test_report_joins_aovl_by_uid_and_writes_scene_artifacts(tmp_path):
     assert json.loads((output / "manifest.json").read_text()) == manifest
 
 
+def test_report_resolves_manifest_rig_for_compact_sample_calibration(tmp_path):
+    sample_uid = "l2d-v1-e000001-f000064"
+    shard = tmp_path / "train-000000.tar"
+    _write_shard(
+        shard,
+        [sample_uid],
+        calibration={
+            "dataset": "yaak-ai/L2D",
+            "geometry_type": "pinhole",
+            "image_size": 64,
+        },
+    )
+    overlay = tmp_path / "overlay.bin.gz"
+    write_overlay(
+        overlay,
+        [sample_uid],
+        np.zeros((1, 1, 64, 2), dtype=np.float32),
+        np.array([8.0], dtype=np.float32),
+        bev_heatmaps=_blank_diagnostics(1),
+    )
+    rig = {
+        "schema_version": "v1",
+        "dataset": "yaak-ai/L2D",
+        "geometry_type": "pinhole",
+        "image_size": 64,
+        "projection": {
+            "type": "pinhole",
+            "ground_z_m": -1.3,
+            "matrix": [[
+                [32.0, -50.0, 0.0, 0.0],
+                [32.0, 0.0, -50.0, 0.0],
+                [1.0, 0.0, 0.0, 0.0],
+            ]],
+        },
+    }
+    dataset_manifest, overlay_manifest, rig_projection = (
+        _write_publication_manifests(
+            tmp_path,
+            shard=shard,
+            overlay=overlay,
+            sample_count=1,
+            rig=rig,
+        )
+    )
+
+    def fake_video_writer(path, frames, _fps):
+        assert len(list(frames)) == 1
+        path.write_bytes(b"synthetic-mp4")
+
+    manifest = generate_report(
+        shard_path=shard,
+        overlay_path=overlay,
+        output_dir=tmp_path / "report",
+        dataset_manifest_path=dataset_manifest,
+        overlay_manifest_path=overlay_manifest,
+        rig_projection_path=rig_projection,
+        video_writer=fake_video_writer,
+    )
+
+    assert manifest["render"]["camera_projection_status"] == "calibrated"
+
+
 def test_report_uses_explicit_scene_frame_selection(tmp_path):
     sample_uids = [
         "l2d-v1-e000001-f000064",
@@ -341,11 +421,13 @@ def test_report_uses_explicit_scene_frame_selection(tmp_path):
         np.array([8.0, 9.0, 10.0], dtype=np.float32),
         bev_heatmaps=_blank_diagnostics(3),
     )
-    dataset_manifest, overlay_manifest = _write_publication_manifests(
-        tmp_path,
-        shard=shard,
-        overlay=overlay,
-        sample_count=3,
+    dataset_manifest, overlay_manifest, rig_projection = (
+        _write_publication_manifests(
+            tmp_path,
+            shard=shard,
+            overlay=overlay,
+            sample_count=3,
+        )
     )
     selection = tmp_path / "selection.json"
     selection.write_text(json.dumps({
@@ -370,6 +452,7 @@ def test_report_uses_explicit_scene_frame_selection(tmp_path):
         output_dir=output,
         dataset_manifest_path=dataset_manifest,
         overlay_manifest_path=overlay_manifest,
+        rig_projection_path=rig_projection,
         scene_selections=load_scene_selections(selection),
         max_frames_per_scene=1,
         video_writer=fake_video_writer,
@@ -407,11 +490,13 @@ def test_report_rejects_overlay_rows_outside_the_shard(tmp_path):
         np.array([8.0, 9.0], dtype=np.float32),
         bev_heatmaps=_blank_diagnostics(2),
     )
-    dataset_manifest, overlay_manifest = _write_publication_manifests(
-        tmp_path,
-        shard=shard,
-        overlay=overlay,
-        sample_count=2,
+    dataset_manifest, overlay_manifest, rig_projection = (
+        _write_publication_manifests(
+            tmp_path,
+            shard=shard,
+            overlay=overlay,
+            sample_count=2,
+        )
     )
 
     with pytest.raises(ValueError, match="exactly match"):
@@ -421,6 +506,7 @@ def test_report_rejects_overlay_rows_outside_the_shard(tmp_path):
             output_dir=tmp_path / "report",
             dataset_manifest_path=dataset_manifest,
             overlay_manifest_path=overlay_manifest,
+            rig_projection_path=rig_projection,
         )
 
 
@@ -436,11 +522,13 @@ def test_report_rejects_overlay_speed_mismatched_with_shard(tmp_path):
         np.array([99.0], dtype=np.float32),
         bev_heatmaps=_blank_diagnostics(1),
     )
-    dataset_manifest, overlay_manifest = _write_publication_manifests(
-        tmp_path,
-        shard=shard,
-        overlay=overlay,
-        sample_count=1,
+    dataset_manifest, overlay_manifest, rig_projection = (
+        _write_publication_manifests(
+            tmp_path,
+            shard=shard,
+            overlay=overlay,
+            sample_count=1,
+        )
     )
 
     with pytest.raises(ValueError, match="disagrees with shard history"):
@@ -450,6 +538,7 @@ def test_report_rejects_overlay_speed_mismatched_with_shard(tmp_path):
             output_dir=tmp_path / "report",
             dataset_manifest_path=dataset_manifest,
             overlay_manifest_path=overlay_manifest,
+            rig_projection_path=rig_projection,
         )
 
 
@@ -465,11 +554,13 @@ def test_report_rejects_changed_dataset_manifest(tmp_path):
         np.array([8.0], dtype=np.float32),
         bev_heatmaps=_blank_diagnostics(1),
     )
-    dataset_manifest, overlay_manifest = _write_publication_manifests(
-        tmp_path,
-        shard=shard,
-        overlay=overlay,
-        sample_count=1,
+    dataset_manifest, overlay_manifest, rig_projection = (
+        _write_publication_manifests(
+            tmp_path,
+            shard=shard,
+            overlay=overlay,
+            sample_count=1,
+        )
     )
     document = json.loads(dataset_manifest.read_text())
     document["total_samples"] = 2
@@ -486,6 +577,7 @@ def test_report_rejects_changed_dataset_manifest(tmp_path):
             output_dir=tmp_path / "report",
             dataset_manifest_path=dataset_manifest,
             overlay_manifest_path=overlay_manifest,
+            rig_projection_path=rig_projection,
         )
 
 
@@ -501,11 +593,13 @@ def test_report_rejects_noncanonical_shard_rig(tmp_path):
         np.array([8.0], dtype=np.float32),
         bev_heatmaps=_blank_diagnostics(1),
     )
-    dataset_manifest, overlay_manifest = _write_publication_manifests(
-        tmp_path,
-        shard=shard,
-        overlay=overlay,
-        sample_count=1,
+    dataset_manifest, overlay_manifest, rig_projection = (
+        _write_publication_manifests(
+            tmp_path,
+            shard=shard,
+            overlay=overlay,
+            sample_count=1,
+        )
     )
     dataset_document = json.loads(dataset_manifest.read_text())
     dataset_document["shard_entries"][0]["rig"]["key"] = (
@@ -533,6 +627,42 @@ def test_report_rejects_noncanonical_shard_rig(tmp_path):
             output_dir=tmp_path / "report",
             dataset_manifest_path=dataset_manifest,
             overlay_manifest_path=overlay_manifest,
+            rig_projection_path=rig_projection,
+        )
+
+
+def test_report_rejects_rig_projection_digest_mismatch(tmp_path):
+    sample_uid = "l2d-v1-e000001-f000064"
+    shard = tmp_path / "train-000000.tar"
+    _write_shard(shard, [sample_uid])
+    overlay = tmp_path / "overlay.bin.gz"
+    write_overlay(
+        overlay,
+        [sample_uid],
+        np.zeros((1, 1, 64, 2), dtype=np.float32),
+        np.array([8.0], dtype=np.float32),
+        bev_heatmaps=_blank_diagnostics(1),
+    )
+    dataset_manifest, overlay_manifest, rig_projection = (
+        _write_publication_manifests(
+            tmp_path,
+            shard=shard,
+            overlay=overlay,
+            sample_count=1,
+        )
+    )
+    rig_document = json.loads(rig_projection.read_text())
+    rig_document["image_size"] = 65
+    rig_projection.write_text(json.dumps(rig_document))
+
+    with pytest.raises(ValueError, match="rig projection SHA-256"):
+        generate_report(
+            shard_path=shard,
+            overlay_path=overlay,
+            output_dir=tmp_path / "report",
+            dataset_manifest_path=dataset_manifest,
+            overlay_manifest_path=overlay_manifest,
+            rig_projection_path=rig_projection,
         )
 
 
@@ -548,11 +678,13 @@ def test_report_rejects_overlay_body_digest_mismatch(tmp_path):
         np.array([8.0], dtype=np.float32),
         bev_heatmaps=_blank_diagnostics(1),
     )
-    dataset_manifest, overlay_manifest = _write_publication_manifests(
-        tmp_path,
-        shard=shard,
-        overlay=overlay,
-        sample_count=1,
+    dataset_manifest, overlay_manifest, rig_projection = (
+        _write_publication_manifests(
+            tmp_path,
+            shard=shard,
+            overlay=overlay,
+            sample_count=1,
+        )
     )
     document = json.loads(overlay_manifest.read_text())
     document["shards"][0]["sha256"] = "f" * 64
@@ -569,6 +701,7 @@ def test_report_rejects_overlay_body_digest_mismatch(tmp_path):
             output_dir=tmp_path / "report",
             dataset_manifest_path=dataset_manifest,
             overlay_manifest_path=overlay_manifest,
+            rig_projection_path=rig_projection,
         )
 
 
@@ -623,6 +756,74 @@ def test_camera_projection_uses_published_ground_plane():
     np.testing.assert_allclose(paths[0], [[0.5, 0.54], [0.5, 0.52]])
     del calibration["projection"]["ground_z_m"]
     assert trajectory_ground_z_m(calibration) == -2.1
+
+
+def test_l2d_projection_uses_assumed_ground_plane_without_collapsing():
+    trajectory = np.array([[10.0, 0.0], [20.0, 0.0], [40.0, 0.0]])
+    projection = l2d_projection_spec(512)
+    calibration = {
+        "dataset": "yaak-ai/L2D",
+        "geometry_type": "pinhole",
+        "image_size": 512,
+        "projection": projection,
+    }
+
+    paths = project_trajectory(
+        calibration,
+        trajectory,
+        camera_index=0,
+        image_wh=(512, 512),
+    )
+
+    assert trajectory_ground_z_m(calibration) == projection["ground_z_m"]
+    assert len(paths) == 1
+    assert len(paths[0]) == 3
+    vertical = [point[1] for point in paths[0]]
+    assert vertical[0] > vertical[1] > vertical[2] > 0.5
+
+
+def test_camera_projection_uses_native_front_matrix_frame():
+    trajectory = np.array([[10.0, 0.0], [20.0, 0.0]])
+    base_matrix = np.array([
+        [0.0, -100.0, 0.0, 2560.0],
+        [0.0, 0.0, -100.0, 2560.0],
+        [1.0, 0.0, 0.0, 0.0],
+    ])
+    front_matrix = base_matrix.copy()
+    front_matrix[:2] *= 2.0
+    calibration = {
+        "geometry_type": "rectified_pinhole",
+        "front_camera_image_size": 1024,
+        "front_camera_index": 0,
+        "image_size": 512,
+        "projection": {
+            "type": "rectified_pinhole",
+            "matrix": [base_matrix.tolist(), base_matrix.tolist()],
+        },
+        "front_projection": {
+            "type": "rectified_pinhole",
+            "matrix": [front_matrix.tolist()],
+        },
+    }
+
+    base_paths = project_trajectory(
+        calibration,
+        trajectory,
+        camera_index=1,
+        image_wh=(512, 512),
+    )
+    front_paths = project_trajectory(
+        calibration,
+        trajectory,
+        camera_index=0,
+        image_wh=(1024, 1024),
+    )
+
+    np.testing.assert_allclose(
+        front_paths[0],
+        [[0.5, 0.5], [0.25, 0.25]],
+    )
+    np.testing.assert_allclose(front_paths, base_paths)
 
 
 def test_render_frame_keeps_camera_and_bev_panels_in_declared_order(tmp_path):

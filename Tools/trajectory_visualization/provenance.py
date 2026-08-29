@@ -62,13 +62,14 @@ def validate_report_provenance(
     *,
     dataset_manifest_path: str | Path,
     overlay_manifest_path: str | Path,
+    rig_projection_path: str | Path,
     shard_path: str | Path,
     shard_sha256: str,
     overlay_path: str | Path,
     overlay_sha256: str,
     sample_count: int,
     base_seeds: Sequence[int],
-) -> dict[str, Any]:
+) -> tuple[dict[str, Any], dict[str, Any]]:
     """Validate report inputs against both immutable publication manifests."""
     dataset_manifest, dataset_manifest_sha256 = _read_manifest(
         dataset_manifest_path,
@@ -126,6 +127,23 @@ def validate_report_provenance(
     expected_rig_key = f"{dataset}/{version}/rig/{rig_sha256}.json"
     if rig.get("key") != expected_rig_key:
         raise ValueError("dataset shard rig key is not canonical")
+    rig_projection, local_rig_sha256 = _read_manifest(
+        rig_projection_path,
+        "rig projection",
+    )
+    if local_rig_sha256 != rig_sha256:
+        raise ValueError(
+            "local rig projection SHA-256 differs from dataset manifest"
+        )
+    source_dataset = str(dataset_manifest.get("source_dataset", ""))
+    if (
+        rig_projection.get("schema_version") != "v1"
+        or not source_dataset
+        or rig_projection.get("dataset") != source_dataset
+    ):
+        raise ValueError(
+            "rig projection identity differs from dataset manifest"
+        )
     overlay_entry = _single_entry(
         overlay_manifest.get("shards"),
         key="shard",
@@ -187,7 +205,7 @@ def validate_report_provenance(
         or num_inference_steps < 1
     ):
         raise ValueError("overlay manifest has incomplete inference identity")
-    return {
+    publication = {
         "dataset": {
             "name": dataset,
             "version": version,
@@ -223,3 +241,4 @@ def validate_report_provenance(
             "noise_policy_version": noise_policy_version,
         },
     }
+    return publication, rig_projection

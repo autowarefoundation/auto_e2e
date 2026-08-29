@@ -4,37 +4,69 @@ Per-GPU inference benchmarks for AutoE2E. To add results for your own GPU, run t
 [benchmarking script](./) in this folder — it documents the meaning of each benchmark
 parameter.
 
-## BEVFormer V2 t1 Training Memory
+## BEVFormer V2 T8 Training Memory
 
-> Measured 2026-08-24 on one NVIDIA L4 (23 GiB), BF16, batch 1, 8 cameras.
-> Production architecture: ResNet50, latent BEV 256x256, supervision 450x300,
+> Measured on 2026-08-25 using one NVIDIA L40S (45 GiB), PyTorch
+> 2.7.1+cu128, BF16, batch 1, and 8 cameras. This measurement predates the
+> canonical six-camera nuPlan contract. Measured unfrozen diagnostic
+> architecture, not the production freeze:
+> ResNet-50, `300 x 200` latent BEV, `450 x 300` supervision, seven
+> `512 x 512` cameras, one `1024 x 1024` front camera, 6 encoder layers,
+> 8 heads, 4 FPN levels, 8 SCA points, seven detached history BEVs plus
+> the current BEV, reentrant encoder/front activation checkpointing, no
+> nested sampling checkpointing, and 79,907,034 parameters.
+
+| Forward | Backward | Step throughput | Peak allocated | Peak reserved | Loss |
+|---------|----------|-----------------|----------------|---------------|------|
+| 8.2008 s | 3.9579 s | 0.0822 samples/s | 21.3265 GiB | 21.5312 GiB | 0.3276 |
+
+The official checkpoint SHA-256 was verified as
+`5585bc4d3ff8b396928cb92d91f773a2c57a81258f83cab0c668ebb2eb9d3307`
+before the measured forward/backward pass.
+
+The distributed gradient-accumulation schedule
+`[sync, sync, no_sync, sync]` also passed its two-rank CPU/Gloo regression
+under PyTorch 2.7.1.
+
+### Historical 256x256 baseline
+
+> Measured at commit `da732932` on 2026-08-24 using one NVIDIA L4 (23 GiB),
+> BF16, batch 1, 8 cameras.
+> Historical architecture: ResNet50, latent BEV 256x256, supervision 450x300,
 > 6 encoder layers, 8 heads, 4 FPN levels, 8 SCA points, activation
-> checkpointing enabled.
+> checkpointing enabled. The T8 configuration above uses a 300x200 latent
+> with seven 512x512 cameras, one 1024x1024 front camera, a front-native
+> 128x128 maximum FPN level, and 79,907,034 parameters. It needs a fresh
+> L4 benchmark before direct same-GPU comparison; the L40S result above is not
+> comparable for latency or memory conclusions. Its BEV has 8.4% fewer tokens
+> than this baseline. Relative to an all-512 camera configuration, its shared
+> camera backbone processes 37.5% more pixels.
 
 | Forward | Backward | Step throughput | Peak allocated | Peak reserved | Loss |
 |---------|----------|-----------------|----------------|---------------|------|
 | 5.0138 s | 13.2946 s | 0.0546 samples/s | 6.6438 GiB | 7.0547 GiB | 0.7791 |
 
-The measurement used
+Both measurements used
 `Model/speed_benchmark/bevformer_v2_memory_benchmark.py` with the official
-checkpoint and includes trajectory, BEV segmentation, and route reconstruction
-heads in the backward pass. The model has 50,180,546 parameters after removal
-of the non-official four-value FPN scale.
+checkpoint and include trajectory, BEV segmentation, and route reconstruction
+heads in the backward pass. This historical 256x256 model has 50,180,546
+parameters after removal of the non-official four-value FPN scale. The
+benchmark JSON now reports `parameter_count` from the live model. The T8
+measurement is an upper bound for production memory and does not represent
+production throughput because it leaves the camera BEV trainable.
 
 Checkpoint evidence:
 
-- SHA-256: `a498acf289307f5bf47501b650e7b171fa9dfcb326430ee62055fdef7c4d3291`
-- Account-local key: `pretrained/bevformer-v2/r50-t1-epoch24-a498acf289307f5bf47501b650e7b171fa9dfcb326430ee62055fdef7c4d3291.pth`
-- Verified platform version ID: `mzD0dLQxZ.FAEdTAgytUKxwx54SNJYfZ`
-- Size: `730956415` bytes
-- Server-side encryption: `AES256`
+- SHA-256: `5585bc4d3ff8b396928cb92d91f773a2c57a81258f83cab0c668ebb2eb9d3307`
+- Account-local key: `pretrained/bevformer-v2/r50-t8-epoch24-5585bc4d3ff8b396928cb92d91f773a2c57a81258f83cab0c668ebb2eb9d3307.pth`
+- Size: `1100738015` bytes
 - Weight license: `NOASSERTION`; training-data license: `CC-BY-NC-SA-4.0`
 
 Provision another platform account with:
 
 ```bash
 python Platform/scripts/provision_bevformer_v2_checkpoint.py \
-  --source /path/to/bevformer-v2-r50-t1-epoch24.pth
+  --source /path/to/bevformerv2-r50-t8-epoch24.pth
 ```
 
 ## NVIDIA GeForce RTX 3060 Laptop GPU

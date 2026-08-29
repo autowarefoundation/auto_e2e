@@ -13,10 +13,18 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import unquote, urlparse
 
+from data_parsing.camera_slots import CANONICAL_SIX_CAMERA_SLOTS
 from data_processing.reactive_training_artifacts import (
     BEV_SEGMENTATION_TAXONOMY_VERSION,
 )
 from navigation.geometry import AUTOE2E_NAVIGATION_GEOMETRY
+from reactive_training_contracts import (
+    REACTIVE_BEVFORMER_FRAME_INTERVAL_US,
+    REACTIVE_BEVFORMER_FRAME_OFFSETS,
+    REACTIVE_CAMERA_IMAGE_SIZE,
+    REACTIVE_FRONT_CAMERA_IMAGE_SIZE,
+    REACTIVE_FRONT_CAMERA_INDEX,
+)
 from training.dataset_policy import (
     L2D_DATASET_NAME,
     NUPLAN_DATASET_NAME,
@@ -46,6 +54,8 @@ class ReactiveDatasetPlan:
 
     dataset: str
     dataset_manifest_sha256: str
+    physical_camera_order: tuple[str, ...]
+    camera_slots: tuple[str, ...]
     num_views: int
     total_samples: int
     shards: tuple[ReactiveShardReference, ...]
@@ -183,7 +193,45 @@ def _validate_reactive_manifest(
         raise ValueError("Reactive DDP requires two route channels")
     if int(manifest.get("num_views", 0)) <= 0:
         raise ValueError("Reactive DDP manifest has no camera views")
+    camera_order = manifest.get("camera_order")
+    camera_slots = manifest.get("camera_slots")
+    if (
+        not isinstance(camera_order, list)
+        or camera_slots != list(CANONICAL_SIX_CAMERA_SLOTS)
+        or len(camera_order) != len(CANONICAL_SIX_CAMERA_SLOTS)
+        or any(
+            not isinstance(camera, str) or not camera
+            for camera in camera_order
+        )
+        or len(set(camera_order)) != len(camera_order)
+        or int(manifest["num_views"]) != len(camera_order)
+    ):
+        raise ValueError(
+            "Reactive DDP requires the canonical six-camera slot contract"
+        )
+    if int(manifest.get("image_size", 0)) != REACTIVE_CAMERA_IMAGE_SIZE:
+        raise ValueError(
+            "Reactive DDP camera image size differs from model contract"
+        )
     if stage is ReactiveTrainingStage.NUPLAN_FULL:
+        if (
+            manifest.get("front_camera_index")
+            != REACTIVE_FRONT_CAMERA_INDEX
+            or manifest.get("front_camera_image_size")
+            != REACTIVE_FRONT_CAMERA_IMAGE_SIZE
+        ):
+            raise ValueError(
+                "Stage A front camera dimensions differ from model contract"
+            )
+        if (
+            manifest.get("temporal_frame_offsets")
+            != list(REACTIVE_BEVFORMER_FRAME_OFFSETS)
+            or manifest.get("temporal_frame_interval_us")
+            != REACTIVE_BEVFORMER_FRAME_INTERVAL_US
+        ):
+            raise ValueError(
+                "Stage A temporal camera history differs from T8 contract"
+            )
         if (
             manifest.get("bev_taxonomy_version")
             != BEV_SEGMENTATION_TAXONOMY_VERSION
@@ -215,6 +263,8 @@ def build_reactive_dataset_plan(
 
     references: list[ReactiveShardReference] = []
     manifest_identities: list[dict[str, Any]] = []
+    physical_camera_orders: set[tuple[str, ...]] = set()
+    camera_slot_orders: set[tuple[str, ...]] = set()
     view_counts: set[int] = set()
     for source_uri in normalized_sources:
         manifest_bytes = read_source_file(source_uri, "manifest.json")
@@ -288,7 +338,15 @@ def build_reactive_dataset_plan(
             )
         num_views = int(manifest["num_views"])
         view_counts.add(num_views)
+        physical_camera_orders.add(tuple(
+            str(camera) for camera in manifest["camera_order"]
+        ))
+        camera_slot_orders.add(tuple(
+            str(slot) for slot in manifest["camera_slots"]
+        ))
         manifest_identities.append({
+            "camera_order": manifest["camera_order"],
+            "camera_slots": manifest["camera_slots"],
             "dataset": manifest["dataset"],
             "manifest_sha256": manifest_sha256,
             "partition_id": partition_id,
@@ -301,6 +359,10 @@ def build_reactive_dataset_plan(
         raise ValueError(
             f"Reactive DDP cannot mix camera counts: {sorted(view_counts)}"
         )
+    if len(physical_camera_orders) != 1:
+        raise ValueError("Reactive DDP cannot mix physical camera orders")
+    if len(camera_slot_orders) != 1:
+        raise ValueError("Reactive DDP cannot mix semantic camera slots")
     references.sort(
         key=lambda item: (
             item.source_uri,
@@ -314,6 +376,8 @@ def build_reactive_dataset_plan(
     return ReactiveDatasetPlan(
         dataset=_expected_dataset(stage),
         dataset_manifest_sha256=dataset_manifest_sha256,
+        physical_camera_order=next(iter(physical_camera_orders)),
+        camera_slots=next(iter(camera_slot_orders)),
         num_views=next(iter(view_counts)),
         total_samples=sum(item.sample_count for item in references),
         shards=tuple(references),

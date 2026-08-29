@@ -10,12 +10,13 @@ entries. Two experiments: imitation-learning and offline-rl.
 """
 import enum
 import functools
+import time
 from flytekit import (
     task, workflow, dynamic, map_task, Resources, Secret, BatchSize,
 )
 from flytekit.types.file import FlyteFile
 from flytekit.types.directory import FlyteDirectory
-from typing import Annotated, NamedTuple, List, Optional
+from typing import Annotated, Any, NamedTuple, List, Optional
 
 from data_processing.contract_versions import (
     GEOMETRY_VERSION as _GEOM_V,
@@ -24,6 +25,7 @@ from data_processing.contract_versions import (
     SHARD_SCHEMA_VERSION as _SHARD_V,
     UID_SCHEMA_VERSION as _UID_V,
 )
+from data_processing.source_revisions import L2D_DATA_REVISION
 from Platform.pipelines.dataset_publication import DatasetPublication
 from Platform.pipelines.overlay_tasks import (
     register_selected_overlay_checkpoint,
@@ -32,6 +34,7 @@ from Platform.pipelines.overlay_tasks import (
 from Platform.pipelines.trajectory_visualization_tasks import (
     export_trajectory_report,
 )
+from reactive_training_contracts import REACTIVE_CAMERA_IMAGE_SIZE
 
 import os as _os
 
@@ -54,15 +57,15 @@ DATA_PREP_IMAGE = _os.environ.get(
 )
 
 MLFLOW_URI = "http://mlflow.mlflow.svc.cluster.local:5000"
-DATASET_PACK_VERSION = "v2.2"
-KITSCENES_NAVIGATION_DATASET_VERSION = "v3.3"
+DATASET_PACK_VERSION = "v2.4"
+KITSCENES_NAVIGATION_DATASET_VERSION = "v3.4"
 BASELINE_TRAINING_OBJECTIVE_VERSION = "trajectory_imitation_v1"
 KITSCENES_NAVIGATION_OBJECTIVE_VERSION = (
     "kitscenes_navigation_objective_v1"
 )
 ROLLOUT_ALIGNED_OBJECTIVE_VERSION = "rollout_aligned_planner_v1"
 ROLLOUT_ALIGNED_CONTROL_OBJECTIVE_VERSION = "rollout_aligned_control_v1"
-L2D_SOURCE_REVISION = "main"
+L2D_SOURCE_REVISION = L2D_DATA_REVISION
 KITSCENES_SOURCE_REVISION = "6fde0034446669e2ed7235e4c7fe323cd23d599d"
 
 # The per-sample S3 label cache is REMOVED (#121 §3.4): at full L2D it was ~10M
@@ -123,8 +126,163 @@ _CACHE_VERSIONS = _cache_versions_for_contracts(
 )
 INGEST_CACHE_VERSION = _CACHE_VERSIONS["ingest"]
 LABEL_CACHE_VERSION = _CACHE_VERSIONS["label"]
-PACK_CACHE_VERSION = _CACHE_VERSIONS["pack"]
+PACK_CACHE_VERSION = (
+    f"{_CACHE_VERSIONS['pack']}-camera{REACTIVE_CAMERA_IMAGE_SIZE}"
+)
 NAVIGATION_QUALITY_CACHE_VERSION = "navigation-quality-v2"
+_FLYTE_DOWNLOAD_GATHER_BATCH_SIZE = 16
+
+
+def _packed_episode_count(
+    episodes: int,
+    group_ids: list[str] | None,
+) -> int:
+    """Return the number of source groups represented by one pack task."""
+    return len(group_ids) if group_ids is not None else episodes
+
+
+def _download_flyte_directory(
+    directory: FlyteDirectory,
+    *,
+    attempts: int = 3,
+    initial_delay_seconds: float = 15.0,
+) -> str:
+    """Bound concurrency and retry transient object-store downloads."""
+    import fsspec
+    from flytekit.exceptions.system import FlyteDownloadDataException
+
+    if attempts <= 0 or initial_delay_seconds < 0:
+        raise ValueError("Flyte directory retry policy is invalid")
+    # fsspec derives its default from RLIMIT_NOFILE. Large pack pods can then
+    # queue thousands of signed S3 requests long enough for the signatures to
+    # expire before a connection becomes available.
+    for key in ("gather_batch_size", "nofiles_gather_batch_size"):
+        configured = fsspec.config.conf.get(key)
+        if (
+            configured is None
+            or int(configured) == -1
+            or int(configured) > _FLYTE_DOWNLOAD_GATHER_BATCH_SIZE
+        ):
+            fsspec.config.conf[key] = _FLYTE_DOWNLOAD_GATHER_BATCH_SIZE
+    for attempt in range(1, attempts + 1):
+        try:
+            return directory.download()
+        except FlyteDownloadDataException:
+            if attempt == attempts:
+                raise
+            delay = initial_delay_seconds * (2 ** (attempt - 1))
+            print(
+                "Flyte directory download failed; retrying "
+                f"attempt={attempt + 1}/{attempts} delay={delay:.0f}s"
+            )
+            time.sleep(delay)
+    raise AssertionError("unreachable Flyte directory retry state")
+
+
+def _bounded_group_coverage_indices(
+    dataset,
+    sample_limit: int,
+) -> list[int]:
+    """Select an exact sample budget while retaining every non-empty group."""
+    if sample_limit <= 0:
+        raise ValueError("sample_limit must be positive")
+    by_group: dict[str, list[int]] = {}
+    for sample_index in range(len(dataset)):
+        group_id = str(dataset.split_group_uid(sample_index))
+        by_group.setdefault(group_id, []).append(sample_index)
+    if not by_group:
+        raise ValueError(
+            "bounded sampling found no valid samples"
+        )
+    if sample_limit < len(by_group):
+        raise ValueError(
+            "sample_limit is smaller than the number of non-empty groups: "
+            f"limit={sample_limit} groups={len(by_group)}"
+        )
+    if sample_limit > len(dataset):
+        raise ValueError(
+            "sample_limit exceeds available samples: "
+            f"limit={sample_limit} available={len(dataset)}"
+        )
+    if sample_limit == len(dataset):
+        return list(range(len(dataset)))
+
+    group_items = sorted(by_group.items(), key=lambda item: item[0])
+    extra_budget = sample_limit - len(group_items)
+    capacities = [
+        len(indices) - 1 for _, indices in group_items
+    ]
+    total_capacity = sum(capacities)
+    weighted = [
+        extra_budget * capacity / total_capacity
+        for capacity in capacities
+    ]
+    extras = [int(value) for value in weighted]
+    unassigned = extra_budget - sum(extras)
+    if unassigned < 0:
+        raise AssertionError("bounded sample allocation is negative")
+    remainder_order = sorted(
+        range(len(group_items)),
+        key=lambda index: (
+            -(weighted[index] - extras[index]),
+            group_items[index][0],
+        ),
+    )
+    for index in remainder_order[:unassigned]:
+        extras[index] += 1
+
+    selected: list[int] = []
+    for (_, indices), extra_count in zip(group_items, extras):
+        quota = 1 + extra_count
+        if quota == 1:
+            positions = [len(indices) // 2]
+        else:
+            positions = [
+                round(position * (len(indices) - 1) / (quota - 1))
+                for position in range(quota)
+            ]
+        selected.extend(indices[position] for position in positions)
+    selected.sort()
+    if len(selected) != sample_limit or len(selected) != len(set(selected)):
+        raise AssertionError(
+            "bounded group-coverage selection produced an invalid budget"
+        )
+    return selected
+
+
+def _allocate_partition_sample_limits(
+    partitions: list[list[str]],
+    total_sample_limit: int,
+) -> list[int]:
+    """Allocate an exact budget enforced by each partition pack task."""
+    if not partitions or any(not partition for partition in partitions):
+        raise ValueError("partitions must be non-empty")
+    group_counts = [len(partition) for partition in partitions]
+    total_groups = sum(group_counts)
+    if total_sample_limit < total_groups:
+        raise ValueError(
+            "total_sample_limit must allow at least one sample per group"
+        )
+    weighted = [
+        total_sample_limit * count / total_groups
+        for count in group_counts
+    ]
+    limits = [int(value) for value in weighted]
+    unassigned = total_sample_limit - sum(limits)
+    if unassigned < 0:
+        raise AssertionError("partition sample allocation is negative")
+    remainder_order = sorted(
+        range(len(partitions)),
+        key=lambda index: (
+            -(weighted[index] - limits[index]),
+            index,
+        ),
+    )
+    for index in remainder_order[:unassigned]:
+        limits[index] += 1
+    if sum(limits) != total_sample_limit:
+        raise AssertionError("partition sample allocation is invalid")
+    return limits
 
 
 def _data_prep_pod_template():
@@ -200,8 +358,12 @@ class MapFusion(enum.Enum):
 def _row_decode_worker_count(dataset: Dataset, row_count: int) -> int:
     """Bound row decoders by each parser's per-process memory footprint."""
     # Each KITScenes child reparses the scene's Lanelet2 map and calibration.
-    # Large scenes exceeded the 64 GiB pod limit with the generic 16-worker cap.
-    max_workers = 2 if dataset == Dataset.KITSCENES else 16
+    # Two children can exceed the 64 GiB pod limit on large scenes. L2D workers
+    # also retain six camera decoders, so cap them below the generic limit.
+    max_workers = {
+        Dataset.KITSCENES: 1,
+        Dataset.L2D: 4,
+    }.get(dataset, 16)
     return max(1, min(max_workers, row_count))
 
 
@@ -1632,8 +1794,8 @@ def plan_fanout_partitions(
     elif dataset == Dataset.L2D:
         if source_revision != L2D_SOURCE_REVISION:
             raise ValueError(
-                "L2D currently supports only revision='main' because the v3.0 "
-                f"tag is stale; got {source_revision!r}"
+                "L2D source_revision must match the audited pinned commit "
+                f"{L2D_SOURCE_REVISION}; got {source_revision!r}"
             )
         if episodes == 0 or start_ep >= 0:
             try:
@@ -1879,16 +2041,16 @@ def data_ingest(
     from huggingface_hub import hf_hub_download
     from concurrent.futures import ThreadPoolExecutor, as_completed
     import time
-    # revision="main" — lerobot 0.5.0 defaults to CODEBASE_VERSION="v3.0", but
+    # The pinned main-branch commit avoids lerobot's stale v3.0 default tag.
     # yaak-ai/L2D's v3.0 TAG points to a stale/broken snapshot (tasks.parquet
     # is 1485 bytes / 1 row at v3.0 vs 135484 bytes / 4219 rows on main;
     # episodes/data parquets are ~20% smaller too). Reading v3.0 causes
     # downstream KeyError in _absolute_to_relative_idx and IndexError in
-    # iloc[task_idx]. Pin to main so we always get the live L2D revision.
+    # iloc[task_idx].
     if source_revision != L2D_SOURCE_REVISION:
         raise ValueError(
-            "L2D ingest supports revision='main' only because its v3.0 tag is "
-            f"stale; got {source_revision!r}"
+            "L2D ingest requires the audited pinned commit "
+            f"{L2D_SOURCE_REVISION}; got {source_revision!r}"
         )
     _meta = LeRobotDatasetMetadata(
         repo_id=dataset.value,
@@ -2007,10 +2169,10 @@ def data_ingest(
     # Process-parallel pack workers use the pod's available cores for camera
     # decode/JPEG. The deduplicated WM path decodes each physical row once.
     # KITScenes one-scene partitions use the same schedulable Guaranteed profile
-    # as ingest. The raw scene plus deduplicated 256px camera pool stays below
-    # the default NodeClass's allocatable ephemeral storage.
-    requests=Resources(cpu="15", mem="64Gi", ephemeral_storage="60Gi"),
-    limits=Resources(cpu="15", mem="64Gi", ephemeral_storage="60Gi"),
+    # as ingest. The 512px camera contract needs four times the image storage of
+    # the former 256px pack.
+    requests=Resources(cpu="15", mem="64Gi", ephemeral_storage="240Gi"),
+    limits=Resources(cpu="15", mem="64Gi", ephemeral_storage="240Gi"),
     # Cache on (raw URI, labels URI, group_ids, world_model, image_size,
     # cache_version) so "processing is rarely needed" holds (#121 §3.4a): an
     # unchanged partition re-uses its shards. Because the raw + labels inputs are
@@ -2033,12 +2195,13 @@ def data_processing(
     source_revision: str = L2D_SOURCE_REVISION,
     dataset_version: str = DATASET_PACK_VERSION,
     hz: int = 10,
-    image_size: int = 256,
+    image_size: int = REACTIVE_CAMERA_IMAGE_SIZE,
     episodes: int = 3,
     world_model: bool = False,
     reasoning_labels: Optional[FlyteDirectory] = None,
     group_ids: Optional[List[str]] = None,
     expected_reasoning_label_count: Optional[int] = None,
+    sample_limit: int = 0,
 ) -> Annotated[FlyteDirectory, BatchSize(4)]:
     """Pre-extract aligned frames + egomotion → WebDataset shards.
 
@@ -2064,6 +2227,8 @@ def data_processing(
     import tarfile
     import tempfile
 
+    if sample_limit < 0:
+        raise ValueError("sample_limit must be non-negative")
     if expected_reasoning_label_count is not None:
         if expected_reasoning_label_count < 0:
             raise ValueError(
@@ -2074,7 +2239,7 @@ def data_processing(
                 "expected_reasoning_label_count requires reasoning_labels"
             )
 
-    raw_path = raw_data.download()
+    raw_path = _download_flyte_directory(raw_data)
     print(f"Processing raw data from: {raw_path} (dataset={dataset.value})")
 
     # Reasoning labels present ⇒ this is a full-loss run, and the JEPA/world-model
@@ -2113,8 +2278,8 @@ def data_processing(
     else:
         if dataset == Dataset.L2D and source_revision != L2D_SOURCE_REVISION:
             raise ValueError(
-                "L2D pack supports revision='main' only because its v3.0 tag is "
-                f"stale; got {source_revision!r}"
+                "L2D pack requires the audited pinned commit "
+                f"{L2D_SOURCE_REVISION}; got {source_revision!r}"
             )
         ep_list = ([int(g) for g in group_ids] if group_ids is not None
                    else (list(range(episodes)) if episodes > 0 else None))
@@ -2147,12 +2312,26 @@ def data_processing(
             # World-Model windows (#16/#13) are only produced when requested, so the
             # imitation-only path stays cheap (no extra frame decode). root=raw_path:
             # read the partition's materialized raw, don't re-hit HF.
-            ds = L2DDataset(repo_id=dataset.value, episodes=ep_list,
-                            include_world_model_windows=world_model, root=raw_path)
+            ds = L2DDataset(
+                repo_id=dataset.value,
+                revision=source_revision,
+                episodes=ep_list,
+                include_world_model_windows=world_model,
+                root=raw_path,
+            )
         n_samples = len(ds)
-        idx_iter = range(n_samples)
+        idx_iter = (
+            _bounded_group_coverage_indices(ds, sample_limit)
+            if sample_limit
+            else range(n_samples)
+        )
+        if sample_limit:
+            print(
+                "Applied bounded group-coverage sampling: "
+                f"available={n_samples} selected={len(idx_iter)}"
+            )
     except ValueError as e:
-        if "No valid samples" not in str(e):
+        if sample_limit or "No valid samples" not in str(e):
             raise
         print(f"Partition has no valid samples ({e}); writing an EMPTY shard dir "
               f"(short episode/clip — nothing to pack).")
@@ -2172,7 +2351,7 @@ def data_processing(
         from data_processing.reasoning_label_generation.targets import (
             load_records_by_sample_id, record_to_json,
         )
-        labels_dir = reasoning_labels.download()
+        labels_dir = _download_flyte_directory(reasoning_labels)
         records_files = sorted(Path(labels_dir).rglob("records.jsonl"))
         if (
             expected_reasoning_label_count is not None
@@ -2208,18 +2387,28 @@ def data_processing(
                 f"loaded={len(labels_by_id)}"
             )
 
-    # Geometry is a per-dataset rig constant, computed once. It is written into
-    # EACH sample's calib.json (self-describing shards) so datasets can later be
-    # merged — a merged loader resolves geometry per sample/dataset rather than
-    # from a single manifest. geometry_type "pseudo" when no calibration exists.
+    # Geometry is a per-dataset rig constant, computed once and stored in the
+    # manifest plus rig/projection.json. Per-sample calib.json retains only the
+    # small identity fields; every child of a merged loader carries its own
+    # loader-level projection from that manifest.
     projection_spec = None
     build_spec = getattr(ds, "projection_spec", None)
     if callable(build_spec) and n_samples:
         projection_spec = build_spec(image_size)
+    camera_order = (
+        list(getattr(ds, "camera_names"))
+        if ds is not None and hasattr(ds, "camera_names")
+        else None
+    )
+    camera_slots = (
+        list(getattr(ds, "camera_slots"))
+        if ds is not None and hasattr(ds, "camera_slots")
+        else None
+    )
     sample_geometry_type = (projection_spec or {}).get("type", "pseudo")
     calib_bytes = json.dumps(
         {"dataset": dataset.value, "geometry_type": sample_geometry_type,
-         "projection": projection_spec}
+         "image_size": image_size}
     ).encode()
 
     out_dir = tempfile.mkdtemp()
@@ -2239,9 +2428,8 @@ def data_processing(
             dataset_version=dataset_version,
         )
 
-    # Projection/calibration is a rig constant. Keep the existing per-sample
-    # calib member for current loaders, and also publish the canonical rig-level
-    # artifact used by the console's camera overlay.
+    # Projection/calibration is a rig constant. Publish one canonical rig-level
+    # artifact for loaders and the console camera overlay.
     rig_dir = os.path.join(out_dir, "rig")
     os.makedirs(rig_dir, exist_ok=True)
     with open(os.path.join(rig_dir, "projection.json"), "w") as f:
@@ -2334,7 +2522,15 @@ def data_processing(
         # reasoning JOIN) from the pool — zero video decode.
         print(f"Packing {len(idx_list)} samples, parent-assembly mode "
               f"(row-level camera workers, world_model={world_model})...")
-        row_init = (dataset.value, ep_list, raw_path, image_size)
+        row_init = (
+            dataset.value,
+            ep_list,
+            raw_path,
+            image_size,
+            "train",
+            source_revision,
+            False,
+        )
 
         # Pass A: unique rows. ds is still alive here (not yet deleted).
         all_rows: set = set()
@@ -2371,6 +2567,8 @@ def data_processing(
             (group_id, frame_index, (group_id, frame_index) in current_rows)
             for group_id, frame_index in sorted(all_rows)
         ]
+        import inspect
+        inspect.signature(parallel_pack.init_row_worker).bind(*row_init)
         with ProcessPoolExecutor(max_workers=row_workers, mp_context=ctx,
                                  initializer=parallel_pack.init_row_worker,
                                  initargs=row_init) as rpool:
@@ -2404,6 +2602,7 @@ def data_processing(
             from data_parsing.l2d import L2DDataset
             ds_asm = L2DDataset(
                 repo_id=dataset.value,
+                revision=source_revision,
                 episodes=ep_list,
                 include_world_model_windows=False,
                 root=raw_path,
@@ -2506,8 +2705,7 @@ def data_processing(
     else:
         # ── Legacy path (imitation-only L2D, NVIDIA, or empty partition) ──
         # Per-sample full-window decode. For NVIDIA there are no WM windows.
-        max_workers_cap = 16  # imitation-only samples are light
-        pack_workers = max(1, min(max_workers_cap, len(idx_list)))
+        pack_workers = _row_decode_worker_count(dataset, len(idx_list))
         print(f"Packing {len(idx_list)} samples, legacy mode "
               f"(world_model={world_model}, per-sample decode)...")
         pack_init = (dataset.value, ep_list, raw_path, image_size, world_model, calib_bytes)
@@ -2577,11 +2775,13 @@ def data_processing(
                 "hz": hz, "image_size": image_size, "dataset": dataset.value,
                 "source_revision": source_revision,
                 "dataset_version": dataset_version,
-                "episodes": episodes,
+                "episodes": _packed_episode_count(episodes, group_ids),
                 "contracts": contract_versions(),
                 # num_views = real cameras only; the map view is stored under a
                 # separate map.jpg key and is NOT counted here (#77).
                 "num_views": num_views if sample_count else 0,
+                "camera_order": camera_order if sample_count else None,
+                "camera_slots": camera_slots if sample_count else None,
                 "has_map": bool(sample_count) and has_map,
                 "has_navigation": (
                     bool(sample_count)
@@ -2626,8 +2826,7 @@ def data_processing(
                     "summary": geo_summary,
                 } if dataset in (Dataset.L2D, Dataset.KITSCENES) else None}
 
-    # Manifest also carries the projection spec (computed once above) for the
-    # single-dataset loader path; the merged loader uses per-sample calib.json.
+    # Manifest carries the rig projection for both single and merged loaders.
     if projection_spec is not None:
         manifest["projection"] = projection_spec
         manifest["geometry_type"] = projection_spec.get("type", "pinhole")
@@ -2864,7 +3063,7 @@ def generate_reasoning_labels(
     )
     from data_processing.reasoning_label_generation.targets import write_records_jsonl
 
-    raw_path = raw_data.download()
+    raw_path = _download_flyte_directory(raw_data)
     print(f"Generating reasoning labels: dataset={dataset.value} split={split} "
           f"teacher={teacher} prompt={prompt_version} raw={raw_path}")
 
@@ -2887,8 +3086,8 @@ def generate_reasoning_labels(
     else:
         if dataset == Dataset.L2D and source_revision != L2D_SOURCE_REVISION:
             raise ValueError(
-                "L2D labeling supports revision='main' only because its v3.0 "
-                f"tag is stale; got {source_revision!r}"
+                "L2D labeling requires the audited pinned commit "
+                f"{L2D_SOURCE_REVISION}; got {source_revision!r}"
             )
         ep_list = ([int(g) for g in group_ids] if group_ids is not None
                    else (list(range(episodes)) if episodes > 0 else None))
@@ -2920,8 +3119,13 @@ def generate_reasoning_labels(
         else:
             from data_parsing.l2d import L2DDataset
             # root=raw_path: read the partition's materialized raw, don't re-hit HF.
-            ds = L2DDataset(repo_id=dataset.value, episodes=ep_list,
-                            reasoning_clip_only=True, root=raw_path)
+            ds = L2DDataset(
+                repo_id=dataset.value,
+                revision=source_revision,
+                episodes=ep_list,
+                reasoning_clip_only=True,
+                root=raw_path,
+            )
         n_samples = len(ds)
         label_indices = _reasoning_label_indices(ds, label_stride)
     except ValueError as e:
@@ -3309,7 +3513,7 @@ def train_il(
 
     # MERGED DataLoader over ALL provided shard dirs. Each dataset keeps its own
     # geometry/num_views; batches are same-dataset (uniform), interleaved across
-    # datasets, each carrying its projection — so L2D (6cam pseudo) and NVIDIA
+    # datasets, each carrying its projection — so L2D (6cam pinhole) and NVIDIA
     # (7cam f-theta) train together. The model is runtime-V-dynamic (projection
     # ABI, #77), so a single model consumes both. num_views only sizes defaults.
     all_shard_dirs = []
@@ -8086,7 +8290,7 @@ def wf_data_processing(
     source_revision: str = L2D_SOURCE_REVISION,
     dataset_version: str = DATASET_PACK_VERSION,
     hz: int = 10,
-    image_size: int = 256,
+    image_size: int = REACTIVE_CAMERA_IMAGE_SIZE,
     episodes: int = 3,
     world_model: bool = False,
     reasoning_labels: Optional[FlyteDirectory] = None,
@@ -8165,7 +8369,7 @@ def wf_create_dataset(
     source_revision: str = L2D_SOURCE_REVISION,
     dataset_version: str = DATASET_PACK_VERSION,
     episodes: int = 3,
-    image_size: int = 256,
+    image_size: int = REACTIVE_CAMERA_IMAGE_SIZE,
     world_model: bool = False,
     reasoning_teacher: str = "none",
     prompt_version: str = "action_relevant_reasoning_v3_temporal_front256",
@@ -8230,6 +8434,7 @@ def _map_dataset_partitions(
     ingest_concurrency: int,
     label_concurrency: int,
     pack_concurrency: int,
+    total_sample_limit: int,
 ) -> List[FlyteDirectory]:
     """Execute each data-prep stage as one bounded Flyte array node."""
     for name, value in (
@@ -8239,6 +8444,27 @@ def _map_dataset_partitions(
     ):
         if value <= 0:
             raise ValueError(f"{name} must be positive, got {value}")
+    if total_sample_limit < 0:
+        raise ValueError(
+            "total_sample_limit must be non-negative, got "
+            f"{total_sample_limit}"
+        )
+    if total_sample_limit and dataset != Dataset.L2D:
+        raise ValueError(
+            "bounded full-pack sampling is currently supported only for L2D"
+        )
+    if total_sample_limit and reasoning_teacher != "none":
+        raise ValueError(
+            "bounded full-pack sampling requires reasoning_teacher='none'"
+        )
+    sample_limits = (
+        _allocate_partition_sample_limits(
+            partitions,
+            total_sample_limit,
+        )
+        if total_sample_limit
+        else [0] * len(partitions)
+    )
 
     ingest = map_task(
         functools.partial(
@@ -8250,6 +8476,26 @@ def _map_dataset_partitions(
         concurrency=ingest_concurrency,
     )
     raw_dirs = ingest(group_ids=partitions)
+    large_l2d_pack = (
+        dataset == Dataset.L2D
+        and max(map(len, partitions), default=0) >= 50
+    )
+
+    def apply_pack_resources(mapped_pack: Any) -> Any:
+        if not large_l2d_pack:
+            return mapped_pack
+        return mapped_pack.with_overrides(
+            requests=Resources(
+                cpu="15",
+                mem="128Gi",
+                ephemeral_storage="800Gi",
+            ),
+            limits=Resources(
+                cpu="15",
+                mem="128Gi",
+                ephemeral_storage="800Gi",
+            ),
+        )
 
     if reasoning_teacher != "none":
         label = map_task(
@@ -8281,11 +8527,12 @@ def _map_dataset_partitions(
             ),
             concurrency=pack_concurrency,
         )
-        return pack(
+        return apply_pack_resources(pack(
             raw_data=raw_dirs,
             reasoning_labels=label_dirs,
             group_ids=partitions,
-        )
+            sample_limit=sample_limits,
+        ))
 
     pack = map_task(
         functools.partial(
@@ -8302,7 +8549,11 @@ def _map_dataset_partitions(
         ),
         concurrency=pack_concurrency,
     )
-    return pack(raw_data=raw_dirs, group_ids=partitions)
+    return apply_pack_resources(pack(
+        raw_data=raw_dirs,
+        group_ids=partitions,
+        sample_limit=sample_limits,
+    ))
 
 
 @dynamic(
@@ -8377,6 +8628,7 @@ def _map_recovered_kitscenes_artifacts(
     expected_label_counts = [
         entry["expected_label_count"] for entry in entries
     ]
+    sample_limits = [0] * len(entries)
 
     pack = map_task(
         functools.partial(
@@ -8396,6 +8648,7 @@ def _map_recovered_kitscenes_artifacts(
         reasoning_labels=label_dirs,
         group_ids=partitions,
         expected_reasoning_label_count=expected_label_counts,
+        sample_limit=sample_limits,
     )
 
 
@@ -8404,7 +8657,7 @@ def wf_repack_existing_kitscenes(
     recovery_manifest: FlyteFile,
     artifact_set_sha256: str,
     dataset_version: str = KITSCENES_NAVIGATION_DATASET_VERSION,
-    image_size: int = 256,
+    image_size: int = REACTIVE_CAMERA_IMAGE_SIZE,
     pack_concurrency: int = 60,
     max_partitions: int = 0,
 ) -> List[FlyteDirectory]:
@@ -8425,7 +8678,7 @@ def wf_audit_recovered_kitscenes_target_reconstruction(
     artifact_set_sha256: str,
     audit_code_revision: str,
     dataset_version: str = KITSCENES_NAVIGATION_DATASET_VERSION,
-    image_size: int = 256,
+    image_size: int = REACTIVE_CAMERA_IMAGE_SIZE,
     pack_concurrency: int = 60,
     max_partitions: int = 0,
     val_fraction: float = 0.1,
@@ -8458,7 +8711,7 @@ def wf_create_dataset_sharded(
     start_ep: int = -1,
     end_ep: int = -1,
     partition_size: int = 1,
-    image_size: int = 256,
+    image_size: int = REACTIVE_CAMERA_IMAGE_SIZE,
     world_model: bool = False,
     reasoning_teacher: str = "none",
     prompt_version: str = "action_relevant_reasoning_v3_temporal_front256",
@@ -8469,6 +8722,7 @@ def wf_create_dataset_sharded(
     ingest_concurrency: int = 60,
     label_concurrency: int = 5,
     pack_concurrency: int = 60,
+    total_sample_limit: int = 0,
 ) -> List[FlyteDirectory]:
     """Fan out immutable source groups through bounded ingest/label/pack arrays.
 
@@ -8502,6 +8756,7 @@ def wf_create_dataset_sharded(
         ingest_concurrency=ingest_concurrency,
         label_concurrency=label_concurrency,
         pack_concurrency=pack_concurrency,
+        total_sample_limit=total_sample_limit,
     )
 
 
@@ -8512,7 +8767,7 @@ def wf_sharded_full_run(
     dataset_version: str = KITSCENES_NAVIGATION_DATASET_VERSION,
     episodes: int = 10,
     partition_size: int = 1,
-    image_size: int = 256,
+    image_size: int = REACTIVE_CAMERA_IMAGE_SIZE,
     reasoning_teacher: str = "openai_compatible",
     prompt_version: str = "action_relevant_reasoning_v3_temporal_front256",
     label_stride: int = 10,
@@ -8522,6 +8777,7 @@ def wf_sharded_full_run(
     ingest_concurrency: int = 60,
     label_concurrency: int = 5,
     pack_concurrency: int = 60,
+    total_sample_limit: int = 0,
     backbone: Backbone = Backbone.SWIN_V2_TINY,
     epochs: int = 10,
     batch_size: int = 1,
@@ -8573,7 +8829,8 @@ def wf_sharded_full_run(
         max_missing_scenes=max_missing_scenes,
         ingest_concurrency=ingest_concurrency,
         label_concurrency=label_concurrency,
-        pack_concurrency=pack_concurrency)
+        pack_concurrency=pack_concurrency,
+        total_sample_limit=total_sample_limit)
     navigation_quality_audit = audit_kitscenes_navigation_quality(
         shards=shards,
     )
@@ -8606,7 +8863,7 @@ def wf_recovered_kitscenes_full_run(
     recovery_manifest: FlyteFile,
     artifact_set_sha256: str,
     dataset_version: str = KITSCENES_NAVIGATION_DATASET_VERSION,
-    image_size: int = 256,
+    image_size: int = REACTIVE_CAMERA_IMAGE_SIZE,
     pack_concurrency: int = 60,
     max_partitions: int = 0,
     backbone: Backbone = Backbone.SWIN_V2_TINY,
@@ -8690,7 +8947,7 @@ def wf_compare_recovered_kitscenes_navigation(
     baseline_checkpoint: FlyteFile,
     baseline_train_metadata: FlyteFile,
     dataset_version: str = KITSCENES_NAVIGATION_DATASET_VERSION,
-    image_size: int = 256,
+    image_size: int = REACTIVE_CAMERA_IMAGE_SIZE,
     pack_concurrency: int = 60,
 ) -> FlyteFile:
     """Run the frozen paired comparison on the cached KITScenes v3 corpus."""
@@ -9190,7 +9447,7 @@ def wf_create_publish_and_precompute_overlays(
     start_ep: int = -1,
     end_ep: int = -1,
     partition_size: int = 1,
-    image_size: int = 256,
+    image_size: int = REACTIVE_CAMERA_IMAGE_SIZE,
     reasoning_teacher: str = "openai_compatible",
     prompt_version: str = "action_relevant_reasoning_v3_temporal_front256",
     label_stride: int = 10,
@@ -9255,6 +9512,7 @@ def wf_export_trajectory_report(
     overlay: FlyteFile,
     dataset_manifest: FlyteFile,
     overlay_manifest: FlyteFile,
+    rig_projection: FlyteFile,
     selection_manifest: Optional[FlyteFile] = None,
     scene_uids: List[str] = [],
     seed_index: int = 0,
@@ -9268,6 +9526,7 @@ def wf_export_trajectory_report(
         overlay=overlay,
         dataset_manifest=dataset_manifest,
         overlay_manifest=overlay_manifest,
+        rig_projection=rig_projection,
         selection_manifest=selection_manifest,
         scene_uids=scene_uids,
         seed_index=seed_index,

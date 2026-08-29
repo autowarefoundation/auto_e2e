@@ -3,28 +3,23 @@
 from __future__ import annotations
 
 import ast
+import io
 import json
 import os
 import re
 import subprocess
 import sys
+import zipfile
 from pathlib import Path
 
 import pytest
 import yaml
 
+from flytekit.core.context_manager import FlyteContextManager
 from flytekit.types.directory import FlyteDirectory
 
 from data_processing.reactive_training_artifacts import (
     BEV_SEGMENTATION_CLASSES,
-)
-from distributed_training.reactive_stage import (
-    BEV_LANE_RANGE_METRIC_PREFIX,
-    CAMERA_FEATURE_SCALE_WEIGHT_METRIC_PREFIX,
-    MIN_OVERFIT_OPTIMIZER_STEPS,
-    OVERFIT_POSITIVE_SAMPLE_SUPPORT_METRIC_PREFIX,
-    PEAK_CUDA_ALLOCATED_BYTES_METRIC_PREFIX,
-    PEAK_CUDA_RESERVED_BYTES_METRIC_PREFIX,
 )
 from Platform.pipelines import (
     distributed_training,
@@ -54,9 +49,8 @@ def test_distributed_workflow_import_is_path_order_independent():
                 "assert 'torch' not in sys.modules; "
                 "assert 'numpy' not in sys.modules; "
                 "import distributed_training as module; "
-                "assert module.BEV_OVERFIT_SAMPLE_COUNT == "
-                "contracts.MIN_OVERFIT_SAMPLE_COUNT; "
-                "print(module.BEV_OVERFIT_SAMPLE_COUNT)"
+                "assert module.BEV_POS_WEIGHT_CAP == 2048.0; "
+                "print(module.BEV_POS_WEIGHT_CAP)"
             ),
         ],
         cwd=repository_root / "Platform" / "pipelines",
@@ -66,11 +60,239 @@ def test_distributed_workflow_import_is_path_order_independent():
         text=True,
     )
 
-    assert result.stdout.strip() == "64"
+    assert result.stdout.strip() == "2048.0"
 
 
-def test_shared_pack_cache_is_unchanged_by_bev_v3_taxonomy():
-    assert workflows.PACK_CACHE_VERSION == "pack-v3-v1-v9-v4"
+def test_shared_pack_cache_includes_camera_resolution_contract():
+    assert (
+        workflows.PACK_CACHE_VERSION
+        == "pack-v3-v1-v10-v6-camera512"
+    )
+
+
+def test_l2d_workflow_defaults_use_reactive_camera_contract():
+    source = Path(workflows.__file__).read_text(encoding="utf-8")
+
+    assert workflows.DATASET_PACK_VERSION == "v2.4"
+    assert workflows.KITSCENES_NAVIGATION_DATASET_VERSION == "v3.4"
+    assert "image_size: int = 256" not in source
+    assert (
+        source.count(
+            "image_size: int = REACTIVE_CAMERA_IMAGE_SIZE"
+        )
+        == 10
+    )
+    for name, dataset_version in (
+        ("buildspec-launch-sharded.yml", "v3.4"),
+        ("buildspec-launch-fullrun.yml", "v3.4"),
+        ("buildspec-launch-recovery.yml", "v3.4"),
+        ("buildspec-launch-overlay.yml", "v2.4"),
+        ("buildspec-launch-reconstruction-audit.yml", "v3.4"),
+    ):
+        buildspec = (
+            Path(workflows.__file__).parents[1] / name
+        ).read_text(encoding="utf-8")
+        assert f"DATASET_VERSION: {dataset_version}" in buildspec
+        assert 'IMAGE_SIZE: "512"' in buildspec
+
+
+def test_l2d_bounded_sampling_retains_every_nonempty_group():
+    class Dataset:
+        groups = ["a"] * 4 + ["b"] * 2 + ["c"] * 3
+
+        def __len__(self):
+            return len(self.groups)
+
+        def split_group_uid(self, index):
+            return self.groups[index]
+
+    selected = workflows._bounded_group_coverage_indices(
+        Dataset(),
+        sample_limit=6,
+    )
+
+    assert len(selected) == 6
+    assert len(set(selected)) == 6
+    assert {
+        Dataset.groups[index] for index in selected
+    } == {"a", "b", "c"}
+    assert workflows._allocate_partition_sample_limits(
+        [["0", "1"], ["2"], ["3", "4"]],
+        total_sample_limit=8,
+    ) == [3, 2, 3]
+
+
+def test_flyte_directory_download_retries_transient_failure(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    import fsspec
+    from flytekit.exceptions.system import FlyteDownloadDataException
+
+    class Directory:
+        attempts = 0
+
+        def download(self):
+            self.attempts += 1
+            if self.attempts < 3:
+                raise FlyteDownloadDataException("transient S3 failure")
+            return "/tmp/downloaded"
+
+    delays: list[float] = []
+    test_config = {
+        "gather_batch_size": 4096,
+        "nofiles_gather_batch_size": -1,
+    }
+    monkeypatch.setattr(fsspec.config, "conf", test_config)
+    monkeypatch.setattr(workflows.time, "sleep", delays.append)
+    directory = Directory()
+
+    assert workflows._download_flyte_directory(directory) == (
+        "/tmp/downloaded"
+    )
+    assert directory.attempts == 3
+    assert delays == [15.0, 30.0]
+    assert test_config == {
+        "gather_batch_size": 16,
+        "nofiles_gather_batch_size": 16,
+    }
+
+
+def test_l2d_bounded_sampling_rejects_insufficient_partition():
+    class Dataset:
+        groups = ["a", "b"]
+
+        def __len__(self):
+            return len(self.groups)
+
+        def split_group_uid(self, index):
+            return self.groups[index]
+
+    with pytest.raises(ValueError, match="exceeds available samples"):
+        workflows._bounded_group_coverage_indices(
+            Dataset(),
+            sample_limit=3,
+        )
+
+
+def test_l2d_bounded_sampling_rejects_empty_partition():
+    class Dataset:
+        def __len__(self):
+            return 0
+
+        def split_group_uid(self, index):
+            raise AssertionError(index)
+
+    with pytest.raises(ValueError, match="found no valid samples"):
+        workflows._bounded_group_coverage_indices(
+            Dataset(),
+            sample_limit=1,
+        )
+
+
+def test_l2d_sharded_workflow_binds_total_sample_limit():
+    _, mapped = workflows.wf_create_dataset_sharded.nodes
+    bindings = {
+        binding.var: binding.binding
+        for binding in mapped.bindings
+    }
+
+    assert (
+        bindings["total_sample_limit"].promise.var
+        == "total_sample_limit"
+    )
+    assert "sample_limit" in workflows.data_processing.python_interface.inputs
+
+    full_run_nodes = workflows.wf_sharded_full_run.nodes
+    dataset_node = next(
+        node
+        for node in full_run_nodes
+        if node.flyte_entity.name.endswith("wf_create_dataset_sharded")
+    )
+    full_run_bindings = {
+        binding.var: binding.binding
+        for binding in dataset_node.bindings
+    }
+    assert (
+        full_run_bindings["total_sample_limit"].promise.var
+        == "total_sample_limit"
+    )
+
+    for filename in (
+        "buildspec-launch-sharded.yml",
+        "buildspec-launch-fullrun.yml",
+    ):
+        buildspec = (
+            Path(workflows.__file__).parents[1] / filename
+        ).read_text(encoding="utf-8")
+        assert "DATASET: KIT-MRT/KITScenes-Multimodal" in buildspec
+        assert 'TOTAL_SAMPLE_LIMIT: "0"' in buildspec
+        assert '--dataset "$DATASET"' in buildspec
+        assert "--total_sample_limit $TOTAL_SAMPLE_LIMIT" in buildspec
+
+
+def test_l2d_bounded_sampling_rejects_reasoning_labels():
+    with pytest.raises(
+        ValueError,
+        match="requires reasoning_teacher='none'",
+    ):
+        workflows._map_dataset_partitions.task_function(
+            partitions=[["0"]],
+            dataset=workflows.Dataset.L2D,
+            source_revision=workflows.L2D_SOURCE_REVISION,
+            dataset_version=workflows.DATASET_PACK_VERSION,
+            image_size=512,
+            world_model=False,
+            reasoning_teacher="mock",
+            prompt_version="test",
+            label_stride=10,
+            label_workers=1,
+            ingest_concurrency=1,
+            label_concurrency=1,
+            pack_concurrency=1,
+            total_sample_limit=1,
+        )
+
+
+@pytest.mark.parametrize("reasoning_teacher", ["none", "mock"])
+def test_l2d_large_partition_resources_apply_to_pack_arrays(
+    reasoning_teacher: str,
+):
+    context = FlyteContextManager.current_context()
+    with FlyteContextManager.with_context(
+        context.with_new_compilation_state()
+    ) as compilation_context:
+        workflows._map_dataset_partitions.task_function(
+            partitions=[[str(index) for index in range(50)]],
+            dataset=workflows.Dataset.L2D,
+            source_revision=workflows.L2D_SOURCE_REVISION,
+            dataset_version=workflows.DATASET_PACK_VERSION,
+            image_size=512,
+            world_model=False,
+            reasoning_teacher=reasoning_teacher,
+            prompt_version="test",
+            label_stride=10,
+            label_workers=1,
+            ingest_concurrency=1,
+            label_concurrency=1,
+            pack_concurrency=1,
+            total_sample_limit=0,
+        )
+        pack_node = compilation_context.compilation_state.nodes[-1]
+
+    assert pack_node._resources is not None
+    expected = {
+        1: "15",
+        3: "128Gi",
+        5: "800Gi",
+    }
+    assert {
+        entry.name: entry.value
+        for entry in pack_node._resources.requests
+    } == expected
+    assert {
+        entry.name: entry.value
+        for entry in pack_node._resources.limits
+    } == expected
 
 
 def test_flyte_entrypoints_do_not_use_mutable_defaults():
@@ -310,30 +532,6 @@ def test_reactive_ray_cpu_contract_has_one_source_of_truth():
         )
 
 
-def test_capacity_and_joint_gates_use_distinct_run_names():
-    common = {
-        "execution_name": "execution.with.unsupported.characters",
-        "stage": "nuplan_full",
-        "num_workers": 4,
-        "overfit_sample_count": 64,
-    }
-
-    capacity = distributed_training._reactive_run_name(
-        **common,
-        overfit_bev_only=True,
-    )
-    joint = distributed_training._reactive_run_name(
-        **common,
-        overfit_bev_only=False,
-    )
-
-    assert capacity.endswith("-capacity-overfit-64")
-    assert joint.endswith("-joint-overfit-64")
-    assert capacity != joint
-    assert "." not in capacity
-    assert "." not in joint
-
-
 def test_ray_tasks_serialize_the_resolved_storage_path():
     expected_environment = {
         "AWS_DEFAULT_REGION": "us-west-2",
@@ -358,14 +556,8 @@ def test_ray_tasks_serialize_the_resolved_storage_path():
 
 
 def test_distributed_program_passes_stage_a_checkpoint_to_stage_b():
-    capacity, joint, stage_a, stage_b = (
+    stage_a, stage_b = (
         distributed_training.wf_train_reactive_nuplan_l2d_ray_8.nodes
-    )
-    assert capacity.flyte_entity.name.endswith(
-        "train_reactive_stage_ray_4"
-    )
-    assert joint.flyte_entity.name.endswith(
-        "train_reactive_stage_ray_4"
     )
     assert stage_a.flyte_entity.name.endswith(
         "train_reactive_stage_ray_8"
@@ -373,55 +565,24 @@ def test_distributed_program_passes_stage_a_checkpoint_to_stage_b():
     assert stage_b.flyte_entity.name.endswith(
         "train_reactive_stage_ray_8"
     )
-    capacity_bindings = {
-        binding.var: binding.binding
-        for binding in capacity.bindings
-    }
-    joint_bindings = {
-        binding.var: binding.binding
-        for binding in joint.bindings
-    }
     stage_a_bindings = {
         binding.var: binding.binding for binding in stage_a.bindings
     }
     stage_b_bindings = {
         binding.var: binding.binding for binding in stage_b.bindings
     }
-    assert capacity_bindings[
-        "overfit_bev_only"
-    ].scalar.primitive.boolean
-    assert capacity_bindings[
-        "overfit_fixed_lr"
-    ].scalar.primitive.boolean
-    assert (
-        capacity_bindings["trajectory_weight"].scalar.primitive.float_value
-        == 0.0
-    )
-    assert capacity_bindings["bev_weight"].scalar.primitive.float_value == 1.0
-    assert capacity_bindings["route_weight"].scalar.primitive.float_value == 0.0
-    capacity_metadata = joint_bindings["gate_metadata"].promise
-    assert capacity_metadata.node_id == capacity.id
-    assert capacity_metadata.var == "metadata"
-    assert joint_bindings["epochs"].scalar.primitive.integer == 10
-    assert joint_bindings["steps_per_epoch"].scalar.primitive.integer == 500
-    assert joint_bindings["weight_decay"].scalar.primitive.float_value == 0.0
-    assert not joint_bindings[
-        "overfit_bev_only"
-    ].scalar.primitive.boolean
-    assert joint_bindings[
-        "overfit_fixed_lr"
-    ].scalar.primitive.boolean
-    for weight in ("trajectory_weight", "bev_weight", "route_weight"):
-        assert joint_bindings[weight].promise.var == weight
     assert stage_a_bindings["stage"].scalar.primitive.string_value == (
         "nuplan_full"
     )
     assert stage_b_bindings["stage"].scalar.primitive.string_value == (
         "l2d_continuation"
     )
-    gate_promise = stage_a_bindings["gate_metadata"].promise
-    assert gate_promise.node_id == joint.id
-    assert gate_promise.var == "metadata"
+    assert stage_a_bindings[
+        "freeze_bevformer"
+    ].scalar.primitive.boolean
+    assert stage_b_bindings[
+        "freeze_bevformer"
+    ].scalar.primitive.boolean
     assert (
         stage_a_bindings[
             "parent_checkpoint"
@@ -463,382 +624,22 @@ def test_distributed_workflow_source_has_no_deployment_account_id():
     ):
         assert {
             "trajectory_weight",
-            "overfit_bev_only",
-            "overfit_fixed_lr",
+            "freeze_bevformer",
         } <= set(task.python_interface.inputs)
 
 
-def test_four_rank_training_requires_capacity_then_joint_gate():
-    capacity, joint, full = (
-        distributed_training.wf_train_reactive_nuplan_ray_4.nodes
-    )
-    capacity_bindings = {
-        binding.var: binding.binding
-        for binding in capacity.bindings
-    }
-    joint_bindings = {
-        binding.var: binding.binding
-        for binding in joint.bindings
-    }
-    full_bindings = {
-        binding.var: binding.binding
-        for binding in full.bindings
-    }
-
-    capacity_values = {
-        "epochs": 10,
-        "overfit_sample_count": 64,
-        "steps_per_epoch": 500,
-    }
-    for name, expected in capacity_values.items():
-        assert capacity_bindings[name].scalar.primitive.integer == expected
-    assert capacity_bindings[
-        "overfit_bev_only"
-    ].scalar.primitive.boolean
-    assert capacity_bindings[
-        "overfit_fixed_lr"
-    ].scalar.primitive.boolean
-    assert (
-        capacity_bindings["weight_decay"].scalar.primitive.float_value
-        == 0.0
-    )
-    assert (
-        capacity_bindings["trajectory_weight"].scalar.primitive.float_value
-        == 0.0
-    )
-    assert capacity_bindings["bev_weight"].scalar.primitive.float_value == 1.0
-    assert capacity_bindings["route_weight"].scalar.primitive.float_value == 0.0
-
-    capacity_metadata = joint_bindings["gate_metadata"].promise
-    assert capacity_metadata.node_id == capacity.id
-    assert capacity_metadata.var == "metadata"
-    assert joint_bindings[
-        "overfit_sample_count"
-    ].scalar.primitive.integer == 64
-    assert joint_bindings["epochs"].scalar.primitive.integer == 10
-    assert joint_bindings["steps_per_epoch"].scalar.primitive.integer == 500
-    assert joint_bindings["weight_decay"].scalar.primitive.float_value == 0.0
-    assert not joint_bindings[
-        "overfit_bev_only"
-    ].scalar.primitive.boolean
-    assert joint_bindings[
-        "overfit_fixed_lr"
-    ].scalar.primitive.boolean
-    for weight in ("trajectory_weight", "bev_weight", "route_weight"):
-        assert joint_bindings[weight].promise.var == weight
-
-    assert (
-        full_bindings[
-            "overfit_sample_count"
-        ].scalar.primitive.integer
-        == 0
-    )
-    assert (
-        full_bindings[
-            "parent_checkpoint"
-        ].scalar.union.value.scalar.none_type
-        is not None
-    )
-    gate_metadata = full_bindings["gate_metadata"].promise
-    assert gate_metadata.node_id == joint.id
-    assert gate_metadata.var == "metadata"
-    assert not full_bindings[
-        "overfit_bev_only"
-    ].scalar.primitive.boolean
-    assert not full_bindings[
-        "overfit_fixed_lr"
-    ].scalar.primitive.boolean
-    for weight in ("trajectory_weight", "bev_weight", "route_weight"):
-        assert full_bindings[weight].promise.var == weight
-
-
-def test_standalone_overfit_workflow_is_bev_capacity_probe():
-    node, = distributed_training.wf_overfit_reactive_nuplan_ray_4.nodes
+def test_four_rank_workflow_runs_one_frozen_multitask_stage():
+    node, = distributed_training.wf_train_reactive_nuplan_ray_4.nodes
     bindings = {
         binding.var: binding.binding for binding in node.bindings
     }
 
+    assert node.flyte_entity.name.endswith("train_reactive_stage_ray_4")
     assert bindings["epochs"].promise.var == "epochs"
-    assert bindings["steps_per_epoch"].scalar.primitive.integer == 500
-    assert bindings["weight_decay"].scalar.primitive.float_value == 0.0
-    assert bindings["trajectory_weight"].scalar.primitive.float_value == 0.0
-    assert bindings["bev_weight"].scalar.primitive.float_value == 1.0
-    assert bindings["route_weight"].scalar.primitive.float_value == 0.0
-    assert bindings["overfit_bev_only"].scalar.primitive.boolean
-    assert bindings["overfit_fixed_lr"].scalar.primitive.boolean
-
-
-def _bev_overfit_gate_metadata(tmp_path, **overrides):
-    metrics = {
-        "checkpoint_sha256": "a" * 64,
-        "dataset_manifest_sha256": "b" * 64,
-        "bev_weight": 1.0,
-        "corridor_pos_weight": 1.0,
-        "executed_optimizer_steps": 5000,
-        "overfit_bev_only": False,
-        "overfit_fixed_lr": True,
-        "overfit_gate_pass": 1,
-        "overfit_sample_count": 64,
-        "overfit_sample_uid_sha256": "c" * 64,
-        "overfit_thresholds_pass": 1,
-        "route_weight": 1.0,
-        "scheduler_identity": "constant_v1",
-        "training_seed": 149,
-        "trajectory_weight": 1.0,
-        "validation_bev_dynamic_macro_average_precision": 0.95,
-        "world_size": 4,
-    }
-    metrics.update({
-        f"{CAMERA_FEATURE_SCALE_WEIGHT_METRIC_PREFIX}{index}": 0.25
-        for index in range(4)
-    })
-    for rank in range(4):
-        metrics[
-            f"{PEAK_CUDA_ALLOCATED_BYTES_METRIC_PREFIX}{rank}"
-        ] = 10_000
-        metrics[
-            f"{PEAK_CUDA_RESERVED_BYTES_METRIC_PREFIX}{rank}"
-        ] = 20_000
-    metrics.update({
-        f"bev_pos_weight_{index}": float(index + 2)
-        for index in range(len(BEV_SEGMENTATION_CLASSES))
-    })
-    metrics.update({
-        f"{OVERFIT_POSITIVE_SAMPLE_SUPPORT_METRIC_PREFIX}{class_name}": 8
-        for class_name in BEV_SEGMENTATION_CLASSES
-    })
-    metrics.update({
-        f"validation_bev_{class_name}_{suffix}": value
-        for class_name in BEV_SEGMENTATION_CLASSES
-        for suffix, value in (
-            ("average_precision", 0.95),
-            ("positive_cells", 10.0),
-            ("recall", 0.95),
-        )
-    })
-    metrics.update({
-        f"validation_{BEV_LANE_RANGE_METRIC_PREFIX}"
-        f"{range_name}_{suffix}": value
-        for range_name in ("near", "far")
-        for suffix, value in (
-            ("average_precision", 0.95),
-            ("positive_cells", 10.0),
-            ("precision", 0.95),
-            ("recall", 0.95),
-        )
-    })
-    metrics.update(overrides)
-    path = tmp_path / "bev-overfit-gate.json"
-    path.write_text(json.dumps({
-        "history": [dict(metrics)],
-        "metrics": metrics,
-    }))
-    return distributed_training.FlyteFile(str(path))
-
-
-def _validate_bev_overfit_gate(metadata, **overrides):
-    expected = {
-        "expected_bev_only": False,
-        "expected_trajectory_weight": 1.0,
-        "expected_bev_weight": 1.0,
-        "expected_route_weight": 1.0,
-        "expected_corridor_pos_weight": 1.0,
-        "expected_training_seed": 149,
-    }
-    expected.update(overrides)
-    return distributed_training._validated_bev_overfit_gate_dataset(
-        metadata,
-        **expected,
-    )
-
-
-def test_bev_overfit_gate_validates_final_evidence(tmp_path):
-    metadata = _bev_overfit_gate_metadata(tmp_path)
-
-    assert _validate_bev_overfit_gate(metadata) == "b" * 64
-
-
-def test_bev_overfit_gate_accepts_128_sample_evidence(tmp_path):
-    metadata = _bev_overfit_gate_metadata(
-        tmp_path,
-        overfit_sample_count=128,
-    )
-
-    assert _validate_bev_overfit_gate(metadata) == "b" * 64
-
-
-def test_bev_overfit_gate_accepts_dynamic_camera_feature_stages(tmp_path):
-    five_stage_weights = {
-        f"{CAMERA_FEATURE_SCALE_WEIGHT_METRIC_PREFIX}{index}": 0.2
-        for index in range(5)
-    }
-    metadata = _bev_overfit_gate_metadata(
-        tmp_path,
-        **five_stage_weights,
-    )
-
-    assert _validate_bev_overfit_gate(metadata) == "b" * 64
-
-
-@pytest.mark.parametrize(
-    ("override_name", "override_value", "match"),
-    [
-        (
-            "validation_bev_lane_boundary_average_precision",
-            0.89,
-            "average precision",
-        ),
-        (
-            "validation_bev_vehicle_recall",
-            0.89,
-            "vehicle",
-        ),
-        (
-            "validation_bev_vehicle_positive_cells",
-            0.0,
-            "no positives",
-        ),
-    ],
-)
-def test_bev_overfit_gate_rejects_weak_evidence(
-    tmp_path,
-    override_name,
-    override_value,
-    match,
-):
-    metadata = _bev_overfit_gate_metadata(
-        tmp_path,
-        **{override_name: override_value},
-    )
-
-    with pytest.raises(ValueError, match=match):
-        _validate_bev_overfit_gate(metadata)
-
-
-@pytest.mark.parametrize(
-    ("override_name", "override_value", "match"),
-    [
-        (
-            "overfit_positive_sample_support_vehicle",
-            7,
-            "subset support",
-        ),
-        (
-            "camera_feature_scale_weight_0",
-            0.5,
-            "do not sum to one",
-        ),
-        (
-            "camera_feature_scale_weight_0",
-            "invalid",
-            "invalid camera feature scale weights",
-        ),
-        (
-            "peak_cuda_allocated_bytes_rank_2",
-            0,
-            "CUDA memory evidence",
-        ),
-        (
-            "validation_bev_lane_boundary_far_positive_cells",
-            0.0,
-            "far lane positives",
-        ),
-    ],
-)
-def test_bev_overfit_gate_rejects_missing_diagnostics(
-    tmp_path,
-    override_name,
-    override_value,
-    match,
-):
-    metadata = _bev_overfit_gate_metadata(
-        tmp_path,
-        **{override_name: override_value},
-    )
-
-    with pytest.raises(ValueError, match=match):
-        _validate_bev_overfit_gate(metadata)
-
-
-def test_bev_overfit_gate_rejects_wrong_mode_and_objective(tmp_path):
-    capacity_metadata = _bev_overfit_gate_metadata(
-        tmp_path,
-        overfit_bev_only=True,
-        trajectory_weight=0.0,
-        route_weight=0.0,
-    )
-    assert _validate_bev_overfit_gate(
-        capacity_metadata,
-        expected_bev_only=True,
-        expected_trajectory_weight=0.0,
-        expected_route_weight=0.0,
-    ) == "b" * 64
-    with pytest.raises(ValueError, match="wrong mode"):
-        _validate_bev_overfit_gate(capacity_metadata)
-
-    joint_metadata = _bev_overfit_gate_metadata(tmp_path)
-    with pytest.raises(ValueError, match="wrong bev_weight"):
-        _validate_bev_overfit_gate(
-            joint_metadata,
-            expected_bev_weight=0.5,
-        )
-
-
-def test_bev_overfit_gate_rejects_incomplete_optimizer_budget(tmp_path):
-    metadata = _bev_overfit_gate_metadata(
-        tmp_path,
-        executed_optimizer_steps=MIN_OVERFIT_OPTIMIZER_STEPS - 1,
-    )
-
-    with pytest.raises(
-        ValueError,
-        match=f"fewer than {MIN_OVERFIT_OPTIMIZER_STEPS}",
-    ):
-        _validate_bev_overfit_gate(metadata)
-
-
-def test_bev_overfit_gate_rejects_unit_weights_and_history_tampering(
-    tmp_path,
-):
-    unit_weights = {
-        f"bev_pos_weight_{index}": 1.0
-        for index in range(len(BEV_SEGMENTATION_CLASSES))
-    }
-    metadata = _bev_overfit_gate_metadata(tmp_path, **unit_weights)
-    with pytest.raises(ValueError, match="unit pos weights"):
-        _validate_bev_overfit_gate(metadata)
-
-    metadata = _bev_overfit_gate_metadata(tmp_path)
-    path = Path(metadata.path)
-    payload = json.loads(path.read_text())
-    payload["history"][-1]["dataset_manifest_sha256"] = "d" * 64
-    path.write_text(json.dumps(payload))
-    with pytest.raises(ValueError, match="history disagrees"):
-        _validate_bev_overfit_gate(metadata)
-
-    metadata = _bev_overfit_gate_metadata(tmp_path)
-    path = Path(metadata.path)
-    payload = json.loads(path.read_text())
-    payload["history"][-1]["route_weight"] = 0.5
-    path.write_text(json.dumps(payload))
-    with pytest.raises(ValueError, match="history has wrong route_weight"):
-        _validate_bev_overfit_gate(metadata)
-
-
-def test_four_rank_full_task_rejects_direct_ungated_call():
-    with pytest.raises(ValueError, match="requires joint gate"):
-        distributed_training.train_reactive_stage_ray_4.task_function(
-            shards=[],
-            stage="nuplan_full",
-        )
-
-
-def test_eight_rank_stage_a_rejects_direct_ungated_call():
-    with pytest.raises(ValueError, match="requires BEV overfit gate"):
-        distributed_training.train_reactive_stage_ray_8.task_function(
-            shards=[],
-            stage="nuplan_full",
-        )
+    assert bindings["trajectory_weight"].promise.var == "trajectory_weight"
+    assert bindings["bev_weight"].promise.var == "bev_weight"
+    assert bindings["route_weight"].promise.var == "route_weight"
+    assert bindings["freeze_bevformer"].scalar.primitive.boolean
 
 
 def test_canary_launcher_is_idempotent_and_retries_flyte_admin():
@@ -897,7 +698,7 @@ def test_nuplan_acquisition_workflow_binds_one_dynamic_import_program():
     assert bindings["concurrency"].promise.var == "concurrency"
 
 
-def test_nuplan_snapshot_pack_uses_bev_v3_cache_and_full_default():
+def test_nuplan_snapshot_pack_uses_front_camera_cache_and_full_default():
     node, = nuplan_dataset.wf_pack_nuplan_snapshot_reactive_dataset.nodes
     bindings = {
         binding.var: binding.binding
@@ -908,7 +709,7 @@ def test_nuplan_snapshot_pack_uses_bev_v3_cache_and_full_default():
         "pack_nuplan_snapshot_reactive_dataset"
     )
     assert node.flyte_entity.metadata.cache_version == (
-        "nuplan-snapshot-pack-v5-parallel"
+        "nuplan-snapshot-pack-v13-manifest-v10"
     )
     assert node.flyte_entity.metadata.retries == 1
     assert (
@@ -919,15 +720,270 @@ def test_nuplan_snapshot_pack_uses_bev_v3_cache_and_full_default():
         Path(nuplan_dataset.__file__).parents[1]
         / "buildspec-launch-nuplan-pack.yml"
     ).read_text()
-    assert 'LIMIT_TOTAL_SCENARIOS: "0"' in buildspec
+    assert 'LIMIT_TOTAL_SCENARIOS: "2048"' in buildspec
+    assert 'IMAGE_SIZE: "512"' in buildspec
     assert "Platform.pipelines.nuplan_dataset." in buildspec
     assert re.search(r"\b[0-9]{12}\b", buildspec) is None
 
 
-def test_nuplan_pack_worker_count_caps_full_and_serializes_limited():
+def test_nuplan_full_pack_plan_covers_every_train_sensor_group():
+    archives = [
+        {
+            "archive_id": "maps-v1.1",
+            "component": "maps",
+            "filename": "nuplan-maps-v1.1.zip",
+        },
+        {
+            "archive_id": "db-train_a",
+            "component": "database",
+            "filename": "a.zip",
+        },
+        {
+            "archive_id": "db-train_b",
+            "component": "database",
+            "filename": "b.zip",
+        },
+    ]
+    for group_index in range(
+        nuplan_dataset.NUPLAN_FULL_TRAIN_GROUP_COUNT
+    ):
+        for modality in ("camera", "lidar"):
+            archives.append({
+                "archive_id": (
+                    "sensor-train-train_"
+                    f"{modality}_{group_index}"
+                ),
+                "component": "sensor_blobs",
+                "filename": f"{modality}_{group_index}.zip",
+            })
+    sensor_groups = {
+        group_index: (
+            f"log-{group_index}-0",
+            f"log-{group_index}-1",
+        )
+        for group_index in range(
+            nuplan_dataset.NUPLAN_FULL_TRAIN_GROUP_COUNT
+        )
+    }
+    database_logs = {
+        "db-train_a": tuple(
+            log_name
+            for group_index, log_names in sensor_groups.items()
+            if group_index % 2 == 0
+            for log_name in log_names
+        ),
+        "db-train_b": tuple(
+            log_name
+            for group_index, log_names in sensor_groups.items()
+            if group_index % 2 == 1
+            for log_name in log_names
+        ),
+    }
+
+    archive_sets, limits = (
+        nuplan_dataset._build_nuplan_train_pack_plan(
+            {
+                "archives": archives,
+                "map_version": "nuplan-maps-v1.1",
+            },
+            sensor_groups,
+            database_logs,
+            total_scenario_limit=131_072,
+        )
+    )
+
+    assert len(archive_sets) == 43
+    assert archive_sets[0] == [
+        "maps-v1.1",
+        "db-train_a",
+        "sensor-train-train_camera_0",
+        "sensor-train-train_lidar_0",
+    ]
+    assert archive_sets[1][1] == "db-train_b"
+    assert len(limits) == 43
+    assert sum(limits) == 131_072
+    assert max(limits) - min(limits) <= 1
+
+
+def test_nuplan_group_budget_requires_and_preserves_log_coverage():
+    log_counts = [1] + [100] * (
+        nuplan_dataset.NUPLAN_FULL_TRAIN_GROUP_COUNT - 1
+    )
+    total_logs = sum(log_counts)
+
+    with pytest.raises(ValueError, match="each of the"):
+        nuplan_dataset._allocate_nuplan_group_scenario_limits(
+            log_counts,
+            total_logs - 1,
+        )
+
+    limits = nuplan_dataset._allocate_nuplan_group_scenario_limits(
+        log_counts,
+        total_logs,
+    )
+    assert limits == log_counts
+
+
+def test_nuplan_s3_range_reader_supports_zip_central_directory():
+    archive_buffer = io.BytesIO()
+    with zipfile.ZipFile(archive_buffer, "w") as archive:
+        archive.writestr("log-a.db", b"sqlite-a")
+        archive.writestr("nested/log-b.db", b"sqlite-b")
+    payload = archive_buffer.getvalue()
+
+    class Body:
+        def __init__(self, data: bytes):
+            self.data = data
+
+        def read(self) -> bytes:
+            return self.data
+
+    class S3:
+        ranges: list[str] = []
+
+        def head_object(self, *, Bucket: str, Key: str):
+            assert (Bucket, Key) == ("datasets", "db.zip")
+            return {"ContentLength": len(payload)}
+
+        def get_object(
+            self,
+            *,
+            Bucket: str,
+            Key: str,
+            Range: str,
+        ):
+            assert (Bucket, Key) == ("datasets", "db.zip")
+            self.ranges.append(Range)
+            start_text, end_text = Range.removeprefix("bytes=").split("-")
+            return {
+                "Body": Body(
+                    payload[int(start_text):int(end_text) + 1]
+                )
+            }
+
+    s3 = S3()
+    reader = nuplan_dataset._S3RangeReader(
+        s3,
+        bucket="datasets",
+        key="db.zip",
+        size=len(payload),
+        archive_id="db-train-test",
+    )
+    with zipfile.ZipFile(reader) as archive:
+        assert archive.namelist() == [
+            "log-a.db",
+            "nested/log-b.db",
+        ]
+        assert archive.read("nested/log-b.db") == b"sqlite-b"
+
+    assert s3.ranges
+    assert all(value.startswith("bytes=") for value in s3.ranges)
+
+
+def test_nuplan_s3_range_reader_rejects_invalid_object_reads():
+    class Body:
+        def read(self) -> bytes:
+            return b"x"
+
+    class S3:
+        content_length = 4
+
+        def head_object(self, **_kwargs):
+            return {"ContentLength": self.content_length}
+
+        def get_object(self, **_kwargs):
+            return {"Body": Body()}
+
+    s3 = S3()
+    with pytest.raises(ValueError, match="archive size changed"):
+        nuplan_dataset._S3RangeReader(
+            s3,
+            bucket="datasets",
+            key="db.zip",
+            size=5,
+            archive_id="db-train-test",
+        )
+
+    reader = nuplan_dataset._S3RangeReader(
+        s3,
+        bucket="datasets",
+        key="db.zip",
+        size=4,
+        archive_id="db-train-test",
+    )
+    with pytest.raises(ValueError, match="negative S3 range seek"):
+        reader.seek(-1)
+    with pytest.raises(ValueError, match="unsupported seek mode"):
+        reader.seek(0, 99)
+    with pytest.raises(OSError, match="short S3 range read"):
+        reader.read(2)
+
+
+def test_nuplan_train_inventory_parser_rejects_incomplete_groups():
+    payload = "\n".join(
+        f"File group: {index}\nlog-{index}"
+        for index in range(
+            nuplan_dataset.NUPLAN_FULL_TRAIN_GROUP_COUNT
+        )
+    )
+    parsed = nuplan_dataset._parse_nuplan_train_sensor_inventory(
+        payload
+    )
+    assert parsed[0] == ("log-0",)
+    assert parsed[42] == ("log-42",)
+
+    with pytest.raises(ValueError, match="empty group"):
+        nuplan_dataset._parse_nuplan_train_sensor_inventory(
+            payload.rsplit("\n", 1)[0]
+        )
+
+
+def test_nuplan_full_pack_workflow_binds_sharded_dynamic_program():
+    node, = (
+        nuplan_dataset
+        .wf_pack_nuplan_snapshot_reactive_dataset_sharded
+        .nodes
+    )
+    bindings = {
+        binding.var: binding.binding
+        for binding in node.bindings
+    }
+
+    assert node.flyte_entity.name.endswith(
+        "_pack_nuplan_snapshot_reactive_dataset_sharded"
+    )
+    assert (
+        bindings["total_scenario_limit"].promise.var
+        == "total_scenario_limit"
+    )
+    assert bindings["concurrency"].promise.var == "concurrency"
+    assert (
+        nuplan_dataset.NUPLAN_FULL_PACK_EPHEMERAL_STORAGE
+        == "1200Gi"
+    )
+
+
+def test_reactive_nuplan_launcher_uses_registered_four_rank_workflow():
+    buildspec = (
+        Path(distributed_training.__file__).parents[1]
+        / "buildspec-launch-reactive-nuplan.yml"
+    ).read_text(encoding="utf-8")
+
+    assert (
+        "Platform.pipelines.distributed_training."
+        "wf_train_reactive_nuplan_ray_4"
+    ) in buildspec
+    assert 'EPOCHS: "3"' in buildspec
+    assert 'PRECISION: "bf16"' in buildspec
+    assert "NUPLAN_DATASET_URI" in buildspec
+    assert re.search(r"\b[0-9]{12}\b", buildspec) is None
+
+
+def test_nuplan_pack_worker_count_caps_full_and_limited():
     assert nuplan_dataset._nuplan_pack_worker_count(2, 0) == 2
     assert nuplan_dataset._nuplan_pack_worker_count(20, 0) == 8
-    assert nuplan_dataset._nuplan_pack_worker_count(20, 64) == 1
+    assert nuplan_dataset._nuplan_pack_worker_count(20, 64) == 8
+    assert nuplan_dataset._nuplan_pack_worker_count(20, 4) == 4
 
 
 def test_two_rank_canary_wires_both_stages_and_gate():
@@ -941,6 +997,29 @@ def test_two_rank_canary_wires_both_stages_and_gate():
         binding.var: binding.binding
         for binding in stage_b.bindings
     }
+    stage_a_bindings = {
+        binding.var: binding.binding
+        for binding in stage_a.bindings
+    }
+    assert (
+        stage_a_bindings["trajectory_weight"]
+        .scalar.primitive.float_value
+        == 0.1
+    )
+    assert (
+        stage_a_bindings["bev_weight"].scalar.primitive.float_value
+        == 1.0
+    )
+    assert (
+        stage_a_bindings["route_weight"].scalar.primitive.float_value
+        == 0.1
+    )
+    assert stage_a_bindings[
+        "freeze_bevformer"
+    ].scalar.primitive.boolean
+    assert stage_b_bindings[
+        "freeze_bevformer"
+    ].scalar.primitive.boolean
     assert stage_b_bindings["parent_checkpoint"].promise.node_id == (
         stage_a.id
     )
@@ -957,6 +1036,7 @@ def test_canary_gate_requires_loss_decrease_and_stage_b_bev_off(tmp_path):
         return distributed_training.FlyteFile(str(path))
 
     common = {
+        "train_gradient_front_gate_pre_clip_norm": 0.1,
         "train_route_reconstruction": 0.2,
         "train_trajectory": 1.0,
         "validation_ade_6p4s_m": 2.0,

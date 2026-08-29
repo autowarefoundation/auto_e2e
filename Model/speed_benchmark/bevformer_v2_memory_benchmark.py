@@ -11,13 +11,18 @@ import torch
 
 from model_components.auto_e2e import AutoE2E
 from model_components.bevformer_v2_pretrained import (
-    BEVFORMER_V2_T1_CHECKPOINT_SHA256,
-    load_bevformer_v2_t1_checkpoint,
+    BEVFORMER_V2_T8_CHECKPOINT_SHA256,
+    load_bevformer_v2_t8_checkpoint,
 )
 from navigation.geometry import (
     AUTOE2E_NAVIGATION_GEOMETRY,
     MAP_CHANNEL_COUNT,
     ROUTE_CHANNEL_COUNT,
+)
+from reactive_training_contracts import (
+    REACTIVE_BEVFORMER_HISTORY_FRAMES,
+    REACTIVE_CAMERA_IMAGE_SIZE,
+    REACTIVE_FRONT_CAMERA_IMAGE_SIZE,
 )
 from training.reactive_multitask import (
     ReactiveTrainingStage,
@@ -37,8 +42,24 @@ def _inputs(
             batch_size,
             num_views,
             3,
-            256,
-            256,
+            REACTIVE_CAMERA_IMAGE_SIZE,
+            REACTIVE_CAMERA_IMAGE_SIZE,
+            device=device,
+        ),
+        "camera_history_tiles": torch.randn(
+            batch_size,
+            REACTIVE_BEVFORMER_HISTORY_FRAMES,
+            num_views,
+            3,
+            REACTIVE_CAMERA_IMAGE_SIZE,
+            REACTIVE_CAMERA_IMAGE_SIZE,
+            device=device,
+        ),
+        "front_camera_tile": torch.randn(
+            batch_size,
+            3,
+            REACTIVE_FRONT_CAMERA_IMAGE_SIZE,
+            REACTIVE_FRONT_CAMERA_IMAGE_SIZE,
             device=device,
         ),
         "map_context": torch.rand(
@@ -99,11 +120,12 @@ def run_benchmark(
             num_views=num_views,
         ),
     ).to(device)
-    initialization = load_bevformer_v2_t1_checkpoint(
+    initialization = load_bevformer_v2_t8_checkpoint(
         model,
         checkpoint_path,
-        expected_sha256=BEVFORMER_V2_T1_CHECKPOINT_SHA256,
+        expected_sha256=BEVFORMER_V2_T8_CHECKPOINT_SHA256,
     )
+    view_fusion = model.Reactive_E2E.FeatureFusion.view_fusion
     model.train(backward)
     inputs = _inputs(
         batch_size=batch_size,
@@ -139,12 +161,19 @@ def run_benchmark(
         "backward": backward,
         "backward_seconds": backward_seconds,
         "batch_size": batch_size,
-        "bev_latent_shape": [256, 256],
+        "bev_latent_shape": [
+            int(view_fusion.bev_h),
+            int(view_fusion.bev_w),
+        ],
         "cuda_device": torch.cuda.get_device_name(device),
         "forward_seconds": forward_seconds,
         "initialization_source_sha256": initialization.source_sha256,
         "loss": float(loss.detach().cpu().item()),
         "num_views": num_views,
+        "parameter_count": sum(
+            parameter.numel()
+            for parameter in model.parameters()
+        ),
         "peak_allocated_gib": (
             torch.cuda.max_memory_allocated(device) / gib
         ),

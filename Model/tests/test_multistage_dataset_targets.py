@@ -6,13 +6,17 @@ import ast
 import hashlib
 import io
 import json
+import pickle
+import sqlite3
 from pathlib import Path
+import sys
 import tarfile
 import types
 
 import networkx as nx
 import numpy as np
 import pytest
+from PIL import Image
 
 import data_parsing.l2d.navigation as l2d_navigation
 import data_parsing.l2d.osm_graph_builder as osm_graph_builder
@@ -23,7 +27,15 @@ from data_parsing.l2d.osm_graph_builder import (
 )
 from data_parsing.nuplan.packing import (
     NUPLAN_CAMERA_CHANNELS,
+    NUPLAN_CAMERA_SLOTS,
+    NUPLAN_CAMERA_SYNC_TOLERANCE_US,
+    NUPLAN_CAMERA_VISIBILITY_HEIGHTS_M,
+    NUPLAN_HISTORY_FALLBACK_MAX_OFFSET_US,
     NuPlanCameraBundle,
+    _camera_rows,
+    _nuplan_point_cloud_xyz,
+    _quaternion_transform,
+    _rectify_camera_rows,
     camera_visibility_from_projection_matrices,
     lidar_observability_from_points,
     pack_nuplan_reactive_scenarios,
@@ -38,6 +50,14 @@ from data_processing.reactive_training_artifacts import (
 )
 from navigation.artifacts import decode_array
 from navigation.geometry import NavigationRasterGeometry
+from reactive_training_contracts import (
+    REACTIVE_BEVFORMER_FRAME_INTERVAL_US,
+    REACTIVE_BEVFORMER_FRAME_OFFSETS,
+    REACTIVE_BEVFORMER_HISTORY_FRAMES,
+    REACTIVE_CAMERA_IMAGE_SIZE,
+    REACTIVE_FRONT_CAMERA_IMAGE_SIZE,
+    REACTIVE_FRONT_CAMERA_INDEX,
+)
 
 
 def _geometry() -> NavigationRasterGeometry:
@@ -58,7 +78,365 @@ def _geometry() -> NavigationRasterGeometry:
         route_corridor_width_m=3.5,
         destination_marker_radius_m=2.0,
         route_rear_clip_m=10.0,
+)
+
+
+def test_nuplan_history_uses_distinct_strictly_ordered_frames(tmp_path):
+    database = tmp_path / "log.db"
+    connection = sqlite3.connect(database)
+    try:
+        connection.executescript(
+            """
+            CREATE TABLE ego_pose (
+                token BLOB PRIMARY KEY,
+                x REAL, y REAL, z REAL,
+                qw REAL, qx REAL, qy REAL, qz REAL
+            );
+            CREATE TABLE lidar_pc (
+                token BLOB PRIMARY KEY,
+                ego_pose_token BLOB,
+                timestamp INTEGER
+            );
+            CREATE TABLE camera (
+                token BLOB PRIMARY KEY,
+                channel TEXT,
+                model TEXT,
+                translation BLOB,
+                rotation BLOB,
+                intrinsic BLOB,
+                distortion BLOB,
+                width INTEGER,
+                height INTEGER
+            );
+            CREATE TABLE image (
+                filename_jpg TEXT,
+                timestamp INTEGER,
+                camera_token BLOB,
+                ego_pose_token BLOB
+            );
+            """
+        )
+        pose_token = b"pose"
+        connection.execute(
+            "INSERT INTO ego_pose VALUES (?, 0, 0, 0, 1, 0, 0, 0)",
+            (pose_token,),
+        )
+        lidar_token = bytes.fromhex("aa")
+        reference_timestamp = 4_000_000
+        connection.execute(
+            "INSERT INTO lidar_pc VALUES (?, ?, ?)",
+            (lidar_token, pose_token, reference_timestamp),
+        )
+        for index, channel in enumerate(NUPLAN_CAMERA_CHANNELS):
+            camera_token = f"camera-{index}".encode("ascii")
+            connection.execute(
+                "INSERT INTO camera VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    camera_token,
+                    channel,
+                    "pinhole",
+                    b"",
+                    b"",
+                    b"",
+                    b"",
+                    1920,
+                    1080,
+                ),
+            )
+            timestamps = tuple(
+                index * REACTIVE_BEVFORMER_FRAME_INTERVAL_US
+                for index in range(1, 9)
+            )
+            for timestamp in timestamps:
+                connection.execute(
+                    "INSERT INTO image VALUES (?, ?, ?, ?)",
+                    (
+                        f"{channel}-{timestamp}.jpg",
+                        timestamp,
+                        camera_token,
+                        pose_token,
+                    ),
+                )
+        connection.commit()
+    finally:
+        connection.close()
+
+    _, current, history = _camera_rows(
+        str(database),
+        lidar_token.hex(),
     )
+
+    assert len(current) == len(NUPLAN_CAMERA_CHANNELS)
+    assert {
+        int(row["timestamp"]) for row in current.values()
+    } == {reference_timestamp}
+    assert len(history) == REACTIVE_BEVFORMER_HISTORY_FRAMES
+    assert all(
+        set(frame) == set(NUPLAN_CAMERA_CHANNELS)
+        for frame in history
+    )
+    assert {
+        int(row["timestamp"]) for row in history[0].values()
+    } == {500_000}
+    for history_index, frame in enumerate(history):
+        target_timestamp = (
+            reference_timestamp
+            + REACTIVE_BEVFORMER_FRAME_OFFSETS[history_index]
+            * REACTIVE_BEVFORMER_FRAME_INTERVAL_US
+        )
+        assert all(
+            abs(int(row["timestamp"]) - target_timestamp)
+            <= NUPLAN_HISTORY_FALLBACK_MAX_OFFSET_US
+            for row in frame.values()
+        )
+        assert {
+            int(row["timestamp"]) for row in frame.values()
+        } == {target_timestamp}
+    for channel in NUPLAN_CAMERA_CHANNELS:
+        channel_timestamps = [
+            int(frame[channel]["timestamp"]) for frame in history
+        ]
+        assert channel_timestamps == sorted(set(channel_timestamps))
+
+
+def test_nuplan_current_camera_rejects_stale_fallback(tmp_path):
+    database = tmp_path / "log.db"
+    connection = sqlite3.connect(database)
+    try:
+        connection.executescript(
+            """
+            CREATE TABLE ego_pose (
+                token BLOB PRIMARY KEY,
+                x REAL, y REAL, z REAL,
+                qw REAL, qx REAL, qy REAL, qz REAL
+            );
+            CREATE TABLE lidar_pc (
+                token BLOB PRIMARY KEY,
+                ego_pose_token BLOB,
+                timestamp INTEGER
+            );
+            CREATE TABLE camera (
+                token BLOB PRIMARY KEY,
+                channel TEXT,
+                model TEXT,
+                translation BLOB,
+                rotation BLOB,
+                intrinsic BLOB,
+                distortion BLOB,
+                width INTEGER,
+                height INTEGER
+            );
+            CREATE TABLE image (
+                filename_jpg TEXT,
+                timestamp INTEGER,
+                camera_token BLOB,
+                ego_pose_token BLOB
+            );
+            """
+        )
+        pose_token = b"pose"
+        connection.execute(
+            "INSERT INTO ego_pose VALUES (?, 0, 0, 0, 1, 0, 0, 0)",
+            (pose_token,),
+        )
+        lidar_token = bytes.fromhex("aa")
+        reference_timestamp = 4_000_000
+        connection.execute(
+            "INSERT INTO lidar_pc VALUES (?, ?, ?)",
+            (lidar_token, pose_token, reference_timestamp),
+        )
+        for index, channel in enumerate(NUPLAN_CAMERA_CHANNELS):
+            camera_token = f"camera-{index}".encode("ascii")
+            connection.execute(
+                "INSERT INTO camera VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    camera_token,
+                    channel,
+                    "pinhole",
+                    b"",
+                    b"",
+                    b"",
+                    b"",
+                    1920,
+                    1080,
+                ),
+            )
+            timestamp = (
+                reference_timestamp
+                - NUPLAN_CAMERA_SYNC_TOLERANCE_US
+                - 1
+                if index == 0
+                else reference_timestamp
+            )
+            connection.execute(
+                "INSERT INTO image VALUES (?, ?, ?, ?)",
+                (
+                    f"{channel}-{timestamp}.jpg",
+                    timestamp,
+                    camera_token,
+                    pose_token,
+                ),
+            )
+        connection.commit()
+    finally:
+        connection.close()
+
+    with pytest.raises(ValueError, match="missing required cameras"):
+        _camera_rows(str(database), lidar_token.hex())
+
+
+def test_history_camera_projection_uses_current_ego_reference(
+    tmp_path,
+    monkeypatch,
+):
+    fake_cv2 = types.SimpleNamespace(
+        getOptimalNewCameraMatrix=lambda intrinsic, *_args: (
+            intrinsic.copy(),
+            None,
+        ),
+        undistort=lambda image, *_args: image,
+    )
+    monkeypatch.setitem(sys.modules, "cv2", fake_cv2)
+    image_path = tmp_path / "history.jpg"
+    Image.new("RGB", (4, 4), color=(1, 2, 3)).save(image_path)
+    identity_quaternion = np.asarray(
+        [1.0, 0.0, 0.0, 0.0],
+        dtype=np.float64,
+    )
+    row = {
+        "distortion": pickle.dumps(np.zeros(5, dtype=np.float64)),
+        "filename_jpg": image_path.name,
+        "height": 4,
+        "intrinsic": pickle.dumps(np.eye(3, dtype=np.float64)),
+        "model": "DesignCore D3CM-IMX390",
+        "qw": 1.0,
+        "qx": 0.0,
+        "qy": 0.0,
+        "qz": 0.0,
+        "rotation": pickle.dumps(identity_quaternion),
+        "timestamp": 6_500_000,
+        "translation": pickle.dumps(np.zeros(3, dtype=np.float64)),
+        "width": 4,
+        "x": 8.0,
+        "y": 0.0,
+        "z": 0.0,
+    }
+    reference_pose = _quaternion_transform(
+        [10.0, 0.0, 0.0],
+        identity_quaternion,
+    )
+
+    _, matrices, front_matrix, metadata = _rectify_camera_rows(
+        {channel: row for channel in NUPLAN_CAMERA_CHANNELS},
+        sensor_root=str(tmp_path),
+        reference_pose=reference_pose,
+        reference_timestamp=10_000_000,
+        image_size=REACTIVE_CAMERA_IMAGE_SIZE,
+        native_front=False,
+    )
+
+    scaled_intrinsic = np.eye(3, dtype=np.float64)
+    scaled_intrinsic[0] *= REACTIVE_CAMERA_IMAGE_SIZE / 4
+    scaled_intrinsic[1] *= REACTIVE_CAMERA_IMAGE_SIZE / 4
+    image_from_current = np.eye(4, dtype=np.float64)
+    image_from_current[0, 3] = 2.0
+    expected = scaled_intrinsic @ image_from_current[:3]
+    np.testing.assert_allclose(matrices[0], expected)
+    assert front_matrix is None
+    assert {
+        camera["sensor_model"] for camera in metadata
+    } == {"DesignCore D3CM-IMX390"}
+
+
+def test_nuplan_camera_rectification_rejects_non_caltech_distortion(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setitem(
+        sys.modules,
+        "cv2",
+        types.SimpleNamespace(),
+    )
+    image_path = tmp_path / "invalid-distortion.jpg"
+    Image.new("RGB", (4, 4), color=(1, 2, 3)).save(image_path)
+    row = {
+        "distortion": pickle.dumps(np.zeros(4, dtype=np.float64)),
+        "filename_jpg": image_path.name,
+        "height": 4,
+        "intrinsic": pickle.dumps(np.eye(3, dtype=np.float64)),
+        "model": "DesignCore D3CM-IMX390",
+        "width": 4,
+    }
+
+    with pytest.raises(ValueError, match="CAM_F0 distortion is invalid"):
+        _rectify_camera_rows(
+            {channel: row for channel in NUPLAN_CAMERA_CHANNELS},
+            sensor_root=str(tmp_path),
+            reference_pose=np.eye(4, dtype=np.float64),
+            reference_timestamp=10_000_000,
+            image_size=REACTIVE_CAMERA_IMAGE_SIZE,
+            native_front=False,
+        )
+
+
+def test_nuplan_projection_inverts_sensor_to_ego_yaw(
+    tmp_path,
+    monkeypatch,
+):
+    fake_cv2 = types.SimpleNamespace(
+        getOptimalNewCameraMatrix=lambda intrinsic, *_args: (
+            intrinsic.copy(),
+            None,
+        ),
+        undistort=lambda image, *_args: image,
+    )
+    monkeypatch.setitem(sys.modules, "cv2", fake_cv2)
+    image_path = tmp_path / "yaw.jpg"
+    Image.new("RGB", (4, 4), color=(1, 2, 3)).save(image_path)
+    root_half = np.sqrt(0.5)
+    sensor_to_ego_yaw_90 = np.asarray(
+        [root_half, 0.0, 0.0, root_half],
+        dtype=np.float64,
+    )
+    row = {
+        "distortion": pickle.dumps(np.zeros(5, dtype=np.float64)),
+        "filename_jpg": image_path.name,
+        "height": 4,
+        "intrinsic": pickle.dumps(np.eye(3, dtype=np.float64)),
+        "model": "DesignCore D3CM-IMX390",
+        "qw": 1.0,
+        "qx": 0.0,
+        "qy": 0.0,
+        "qz": 0.0,
+        "rotation": pickle.dumps(sensor_to_ego_yaw_90),
+        "timestamp": 10_000_000,
+        "translation": pickle.dumps(np.zeros(3, dtype=np.float64)),
+        "width": 4,
+        "x": 0.0,
+        "y": 0.0,
+        "z": 0.0,
+    }
+
+    _, matrices, _, _ = _rectify_camera_rows(
+        {channel: row for channel in NUPLAN_CAMERA_CHANNELS},
+        sensor_root=str(tmp_path),
+        reference_pose=np.eye(4, dtype=np.float64),
+        reference_timestamp=10_000_000,
+        image_size=REACTIVE_CAMERA_IMAGE_SIZE,
+        native_front=False,
+    )
+
+    scaled_intrinsic = np.eye(3, dtype=np.float64)
+    scaled_intrinsic[0] *= REACTIVE_CAMERA_IMAGE_SIZE / 4
+    scaled_intrinsic[1] *= REACTIVE_CAMERA_IMAGE_SIZE / 4
+    camera_from_ego = np.asarray([
+        [0.0, 1.0, 0.0, 0.0],
+        [-1.0, 0.0, 0.0, 0.0],
+        [0.0, 0.0, 1.0, 0.0],
+        [0.0, 0.0, 0.0, 1.0],
+    ])
+    expected = scaled_intrinsic @ camera_from_ego[:3]
+    np.testing.assert_allclose(matrices[0], expected, atol=1e-12)
 
 
 class _Velocity:
@@ -561,8 +939,10 @@ def test_nuplan_visibility_helpers_use_metric_geometry():
         geometry=geometry,
     )
     assert visibility.shape == (40, 20)
-    assert visibility.any()
-    assert not visibility[-1].any()
+    x_grid, _ = geometry.pixel_center_grids()
+    assert visibility[x_grid > 0.0].any()
+    assert not visibility[x_grid < 0.0].any()
+    assert NUPLAN_CAMERA_VISIBILITY_HEIGHTS_M == (-4.0, -2.0, 0.0, 2.0)
 
     lidar = lidar_observability_from_points(
         np.asarray([[5.0, 0.0, 0.0], [8.0, 1.0, 0.0]]),
@@ -572,6 +952,17 @@ def test_nuplan_visibility_helpers_use_metric_geometry():
     assert lidar.shape == visibility.shape
     assert lidar.any()
     assert not lidar[0].any()
+
+
+def test_nuplan_point_cloud_layout_rejects_points_first():
+    channels_first = np.arange(6 * 100, dtype=np.float64).reshape(6, 100)
+
+    xyz = _nuplan_point_cloud_xyz(channels_first)
+
+    assert xyz.shape == (100, 3)
+    np.testing.assert_array_equal(xyz, channels_first[:3].T)
+    with pytest.raises(ValueError, match="channels-first"):
+        _nuplan_point_cloud_xyz(channels_first.T)
 
 
 def test_nuplan_packer_emits_log_grouped_immutable_shards(
@@ -591,17 +982,73 @@ def test_nuplan_packer_emits_log_grouped_immutable_shards(
         (geometry.height_px, geometry.width_px),
         dtype=np.bool_,
     )
+    projection_matrices = np.zeros(
+        (len(NUPLAN_CAMERA_CHANNELS), 3, 4),
+        dtype=np.float32,
+    )
+    projection_matrices[:, 0, 3] = REACTIVE_CAMERA_IMAGE_SIZE / 2
+    projection_matrices[:, 1, 3] = REACTIVE_CAMERA_IMAGE_SIZE / 2
+    projection_matrices[:, 2, 3] = 1.0
+    front_projection_matrix = projection_matrices[
+        REACTIVE_FRONT_CAMERA_INDEX:
+        REACTIVE_FRONT_CAMERA_INDEX + 1
+    ].copy()
+    front_projection_matrix[:, :2] *= (
+        REACTIVE_FRONT_CAMERA_IMAGE_SIZE / REACTIVE_CAMERA_IMAGE_SIZE
+    )
     bundle = NuPlanCameraBundle(
         jpeg_by_channel={
             channel: b"\xff\xd8\xff\xd9"
             for channel in NUPLAN_CAMERA_CHANNELS
         },
-        projection_matrices=np.zeros((8, 3, 4), dtype=np.float32),
+        projection_matrices=projection_matrices,
+        front_projection_matrix=front_projection_matrix,
+        history_jpeg_by_frame=tuple(
+            {
+                channel: b"\xff\xd8\xff\xd9"
+                for channel in NUPLAN_CAMERA_CHANNELS
+            }
+            for _ in range(REACTIVE_BEVFORMER_HISTORY_FRAMES)
+        ),
+        history_projection_matrices=np.repeat(
+            projection_matrices[None],
+            REACTIVE_BEVFORMER_HISTORY_FRAMES,
+            axis=0,
+        ),
         camera_visibility=visibility,
         metadata={
             "camera_order": list(NUPLAN_CAMERA_CHANNELS),
-            "image_size": 256,
+            "camera_slots": list(NUPLAN_CAMERA_SLOTS),
+            "cameras": [
+                {
+                    "channel": channel,
+                    "image_time_offset_us": (
+                        NUPLAN_CAMERA_SYNC_TOLERANCE_US
+                        if index == 0
+                        else 0
+                    ),
+                }
+                for index, channel in enumerate(NUPLAN_CAMERA_CHANNELS)
+            ],
+            "front_camera_image_size": REACTIVE_FRONT_CAMERA_IMAGE_SIZE,
+            "front_camera_index": REACTIVE_FRONT_CAMERA_INDEX,
+            "image_size": REACTIVE_CAMERA_IMAGE_SIZE,
             "rectification_policy": "test",
+            "reference_lidar_timestamp_us": 4_000_000,
+            "temporal_camera_timestamps_us": [
+                [
+                    4_000_000
+                    + offset * REACTIVE_BEVFORMER_FRAME_INTERVAL_US
+                    for _ in NUPLAN_CAMERA_CHANNELS
+                ]
+                for offset in REACTIVE_BEVFORMER_FRAME_OFFSETS[:-1]
+            ],
+            "temporal_frame_interval_us": (
+                REACTIVE_BEVFORMER_FRAME_INTERVAL_US
+            ),
+            "temporal_frame_offsets": list(
+                REACTIVE_BEVFORMER_FRAME_OFFSETS
+            ),
         },
     )
     target = nuplan_targets.NuPlanReactiveTargets(
@@ -656,15 +1103,64 @@ def test_nuplan_packer_emits_log_grouped_immutable_shards(
     )
     assert manifest["split_policy"] == "log_level_hash_bucket"
     assert manifest["navigation_geometry"] == geometry.contract()
+    assert manifest["max_camera_time_offset_us"] == (
+        NUPLAN_CAMERA_SYNC_TOLERANCE_US
+    )
+    assert manifest["max_history_camera_time_offset_us"] == 0
+    assert manifest["history_camera_spread_max_us"] == 100_000
+    assert (
+        manifest["distinct_history_frame_count"]
+        == REACTIVE_BEVFORMER_HISTORY_FRAMES
+    )
     tar_path = tmp_path / manifest["shard_names"][0]
     assert manifest["shard_sha256"][tar_path.name] == hashlib.sha256(
         tar_path.read_bytes()
     ).hexdigest()
     with tarfile.open(fileobj=io.BytesIO(tar_path.read_bytes())) as archive:
         names = archive.getnames()
-        assert sum(name.endswith(".jpg") for name in names) == 8
+        assert sum(name.endswith(".jpg") for name in names) == (
+            len(NUPLAN_CAMERA_CHANNELS)
+            * (REACTIVE_BEVFORMER_HISTORY_FRAMES + 1)
+        )
         assert any(name.endswith(".trajectory_xy.npz") for name in names)
         assert any(name.endswith(".bev_segmentation.npz") for name in names)
         meta_name = next(name for name in names if name.endswith(".meta.json"))
         metadata = json.load(archive.extractfile(meta_name))
         assert metadata["split_group_uid"].startswith("nuplan-log-")
+        calib_name = next(
+            name for name in names if name.endswith(".calib.json")
+        )
+        calibration = json.load(archive.extractfile(calib_name))
+        assert calibration["front_camera_index"] == (
+            REACTIVE_FRONT_CAMERA_INDEX
+        )
+        assert calibration["front_camera_image_size"] == (
+            REACTIVE_FRONT_CAMERA_IMAGE_SIZE
+        )
+        assert np.asarray(
+            calibration["front_projection"]["matrix"]
+        ).shape == (1, 3, 4)
+        expected_front = np.asarray(
+            calibration["projection"]["matrix"],
+            dtype=np.float32,
+        )[REACTIVE_FRONT_CAMERA_INDEX:
+          REACTIVE_FRONT_CAMERA_INDEX + 1].copy()
+        expected_front[:, :2] *= (
+            REACTIVE_FRONT_CAMERA_IMAGE_SIZE
+            / REACTIVE_CAMERA_IMAGE_SIZE
+        )
+        np.testing.assert_allclose(
+            calibration["front_projection"]["matrix"],
+            expected_front,
+        )
+        assert np.asarray(
+            calibration["history_projection"]["matrix"]
+        ).shape == (
+            REACTIVE_BEVFORMER_HISTORY_FRAMES,
+            len(NUPLAN_CAMERA_CHANNELS),
+            3,
+            4,
+        )
+        assert calibration["history_projection"]["reference_frame"] == (
+            "current_ego"
+        )

@@ -39,6 +39,23 @@ class Backbone(nn.Module):
         # expose it; fall back to a one-shot dummy forward and read tensor shapes.
         self.feature_channels = self._infer_feature_channels()
         self.backbone_channels = sum(self.feature_channels)
+        self.norm_eval = input_profile == "bevformer_v2"
+        if self.norm_eval:
+            self._freeze_batch_norm()
+
+    def _freeze_batch_norm(self) -> None:
+        """Keep detector-checkpoint BatchNorm statistics fixed while fine-tuning."""
+        for module in self.backbone.modules():
+            if isinstance(module, nn.modules.batchnorm._BatchNorm):
+                module.eval()
+                for parameter in module.parameters(recurse=False):
+                    parameter.requires_grad_(False)
+
+    def train(self, mode: bool = True):
+        super().train(mode)
+        if self.norm_eval:
+            self._freeze_batch_norm()
+        return self
 
     def _infer_feature_channels(self):
         info = getattr(self.backbone, "feature_info", None)

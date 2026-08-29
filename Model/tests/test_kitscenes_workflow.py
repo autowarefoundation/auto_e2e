@@ -5,6 +5,7 @@ from __future__ import annotations
 import ast
 import functools
 import hashlib
+import inspect
 import io
 import json
 import tarfile
@@ -668,7 +669,10 @@ def test_navigation_contracts_invalidate_old_pack_caches():
     }
     assert workflows.INGEST_CACHE_VERSION == "ingest-v3"
     assert workflows.LABEL_CACHE_VERSION == "label-v3-v1-v2"
-    assert workflows.PACK_CACHE_VERSION == "pack-v3-v1-v9-v4"
+    assert (
+        workflows.PACK_CACHE_VERSION
+        == "pack-v3-v1-v10-v6-camera512"
+    )
 
 
 def test_old_geometry_pack_cache_is_not_aliased():
@@ -687,8 +691,8 @@ def test_old_geometry_pack_cache_is_not_aliased():
     ("dataset", "row_count", "expected"),
     (
         (workflows.Dataset.KITSCENES, 1, 1),
-        (workflows.Dataset.KITSCENES, 2, 2),
-        (workflows.Dataset.KITSCENES, 10_000, 2),
+        (workflows.Dataset.KITSCENES, 2, 1),
+        (workflows.Dataset.KITSCENES, 10_000, 1),
         (workflows.Dataset.L2D, 10_000, 4),
     ),
 )
@@ -696,6 +700,60 @@ def test_row_decode_workers_bound_dataset_memory(
     dataset, row_count, expected
 ):
     assert workflows._row_decode_worker_count(dataset, row_count) == expected
+
+
+def test_legacy_l2d_pack_uses_dataset_decoder_limit():
+    source = inspect.getsource(workflows.data_processing.task_function)
+
+    assert "pack_workers = _row_decode_worker_count(" in source
+    assert "max_workers_cap = 16" not in source
+
+
+def test_row_decode_initializer_matches_worker_abi():
+    source = Path(workflows.__file__).read_text(encoding="utf-8")
+
+    assert (
+        "inspect.signature(parallel_pack.init_row_worker).bind(*row_init)"
+        in source
+    )
+    assert (
+        '            "train",\n'
+        "            source_revision,\n"
+        "            False,\n"
+        "        )"
+    ) in source
+
+
+def test_recovery_pack_maps_explicit_unbounded_sample_limits():
+    tree = ast.parse(
+        inspect.getsource(
+            workflows._map_recovered_kitscenes_artifacts.task_function
+        )
+    )
+    sample_limits = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Assign)
+        and any(
+            isinstance(target, ast.Name)
+            and target.id == "sample_limits"
+            for target in node.targets
+        )
+    )
+    assert isinstance(sample_limits.value, ast.BinOp)
+    assert ast.literal_eval(sample_limits.value.left) == [0]
+    assert isinstance(sample_limits.value.op, ast.Mult)
+
+    pack_call = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "pack"
+    )
+    keywords = {keyword.arg: keyword.value for keyword in pack_call.keywords}
+    assert isinstance(keywords["sample_limit"], ast.Name)
+    assert keywords["sample_limit"].id == "sample_limits"
 
 
 @pytest.mark.parametrize(
@@ -909,7 +967,7 @@ def test_recovery_launcher_requires_audited_artifacts_and_skips_source_stages():
     assert 'test -n "${ARTIFACT_SET_SHA256}"' in buildspec
     assert "--recovery_manifest" in buildspec
     assert "--artifact_set_sha256" in buildspec
-    assert "DATASET_VERSION: v3.3" in buildspec
+    assert "DATASET_VERSION: v3.4" in buildspec
     assert 'EPOCHS: "20"' in buildspec
     assert (
         "TRAINING_OBJECTIVE_VERSION: "
@@ -967,7 +1025,7 @@ def test_overlay_launcher_guards_selected_recovery_checkpoints():
         _REPO_ROOT / "Platform" / "buildspec-launch-overlay.yml"
     ).read_text()
 
-    assert "DATASET_VERSION: v2.2" in buildspec
+    assert "DATASET_VERSION: v2.4" in buildspec
     assert (
         'PYTHONPATH="${CODEBUILD_SRC_DIR}/Model:${CODEBUILD_SRC_DIR}:'
         '${PYTHONPATH:-}"'

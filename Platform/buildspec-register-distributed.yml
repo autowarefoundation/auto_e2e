@@ -15,6 +15,7 @@ phases:
         flytekitplugins-ray==1.16.24
         ray==2.46.0
         numpy
+        Pillow
         torch
         kubernetes
         --extra-index-url https://download.pytorch.org/whl/cpu

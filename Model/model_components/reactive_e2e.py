@@ -41,12 +41,55 @@ class ReactiveE2E(nn.Module):
         camera_architecture = str(
             (view_fusion_kwargs or {}).get("architecture", "legacy")
         )
+        self.camera_input_size: int | None = None
+        self.front_camera_index: int | None = None
+        self.front_camera_input_size: int | None = None
+        self.camera_architecture = camera_architecture
+        if camera_architecture in {"bevformer_v2_t1", "bevformer_v2_t8"}:
+            camera_input_size = (view_fusion_kwargs or {}).get(
+                "image_size",
+                256,
+            )
+            if (
+                not isinstance(camera_input_size, int)
+                or isinstance(camera_input_size, bool)
+                or camera_input_size <= 0
+            ):
+                raise ValueError(
+                    "BEVFormer camera image_size must be a positive integer"
+                )
+            self.camera_input_size = camera_input_size
+            front_camera_index = (view_fusion_kwargs or {}).get(
+                "front_camera_index",
+                0,
+            )
+            front_camera_input_size = (view_fusion_kwargs or {}).get(
+                "front_image_size",
+                1024,
+            )
+            if (
+                not isinstance(front_camera_index, int)
+                or isinstance(front_camera_index, bool)
+                or not 0 <= front_camera_index < num_views
+                or not isinstance(front_camera_input_size, int)
+                or isinstance(front_camera_input_size, bool)
+                or front_camera_input_size < camera_input_size
+                or front_camera_input_size % camera_input_size
+            ):
+                raise ValueError(
+                    "BEVFormer front camera contract is invalid"
+                )
+            self.front_camera_index = front_camera_index
+            self.front_camera_input_size = front_camera_input_size
         self.Backbone = Backbone(
             backbone=backbone,
             is_pretrained=is_pretrained,
             input_profile=(
                 "bevformer_v2"
-                if camera_architecture == "bevformer_v2_t1"
+                if camera_architecture in {
+                    "bevformer_v2_t1",
+                    "bevformer_v2_t8",
+                }
                 else "imagenet"
             ),
         )
@@ -61,6 +104,8 @@ class ReactiveE2E(nn.Module):
             image_feature_size=image_feature_size,
             view_fusion_kwargs=view_fusion_kwargs,
         )
+        self._camera_bev_frozen = False
+        self._adapt_temporal_running_stats = False
 
         self.planner_mode = planner_mode
         self.FusedFeaturePooling = (
@@ -165,6 +210,51 @@ class ReactiveE2E(nn.Module):
         # FutureState module was instantiated here but NEVER called in forward — a
         # gradient-dead parameter block — so it is removed. See auto_e2e.py.
 
+    def freeze_camera_bev(
+        self,
+        *,
+        adapt_temporal_running_stats: bool = False,
+    ) -> None:
+        """Freeze checkpoint weights while retaining the new front gate."""
+        self._camera_bev_frozen = True
+        self._adapt_temporal_running_stats = bool(
+            adapt_temporal_running_stats
+        )
+        for module in (self.Backbone, self.FeatureFusion):
+            module.eval()
+            for parameter in module.parameters():
+                parameter.requires_grad_(False)
+        if self.camera_architecture in {
+            "bevformer_v2_t1",
+            "bevformer_v2_t8",
+        }:
+            front_gate = getattr(
+                self.FeatureFusion.view_fusion,
+                "front_residual_gate",
+                None,
+            )
+            if not isinstance(front_gate, nn.Parameter):
+                raise ValueError("BEVFormer front residual gate is missing")
+            front_gate.requires_grad_(True)
+
+    def train(self, mode: bool = True):
+        super().train(mode)
+        if self._camera_bev_frozen:
+            self.Backbone.eval()
+            self.FeatureFusion.eval()
+            temporal_fusion = getattr(
+                self.FeatureFusion,
+                "temporal_fusion",
+                None,
+            )
+            if temporal_fusion is not None:
+                # Stage A adapts running statistics to real T8 history.
+                # Stage B has no history and retains Stage A statistics.
+                temporal_fusion.train(
+                    mode and self._adapt_temporal_running_stats
+                )
+        return self
+
     def encode_camera_bev(
         self,
         camera_tiles,
@@ -172,6 +262,9 @@ class ReactiveE2E(nn.Module):
         projection=None,
         geometry_type=None,
         image_transform=None,
+        front_camera_tile=None,
+        front_projection=None,
+        front_image_transform=None,
     ):
         """Encode camera tiles without reading navigation inputs."""
         if camera_tiles.ndim != 5:
@@ -179,14 +272,80 @@ class ReactiveE2E(nn.Module):
                 "camera_tiles must have shape [B,V,3,H,W]"
             )
         batch_size, num_views, channels, height, width = camera_tiles.shape
-        features = self.Backbone(
-            camera_tiles.reshape(
+        if channels != 3:
+            raise ValueError("camera_tiles must contain three RGB channels")
+        if (
+            self.camera_input_size is not None
+            and (height, width)
+            != (self.camera_input_size, self.camera_input_size)
+        ):
+            raise ValueError(
+                "camera tile size differs from BEVFormer image_size contract"
+            )
+        if front_camera_tile is None and self.camera_input_size is None:
+            features = self.Backbone(
+                camera_tiles.reshape(
+                    batch_size * num_views,
+                    channels,
+                    height,
+                    width,
+                )
+            )
+            return self.FeatureFusion(
+                features,
+                batch_size,
+                num_views,
+                projection=projection,
+                geometry_type=geometry_type,
+                image_transform=image_transform,
+            )
+        if front_camera_tile is None:
+            if (
+                front_projection is not None
+                or front_image_transform is not None
+            ):
+                raise ValueError(
+                    "front camera geometry requires a native front camera"
+                )
+            features = self.Backbone(camera_tiles.reshape(
                 batch_size * num_views,
                 channels,
                 height,
                 width,
+            ))
+            return self.FeatureFusion(
+                features,
+                batch_size,
+                num_views,
+                projection=projection,
+                geometry_type=geometry_type,
+                image_transform=image_transform,
             )
-        )
+        if (
+            self.front_camera_index is None
+            or self.front_camera_input_size is None
+        ):
+            raise ValueError(
+                "front camera input requires BEVFormer V2 fusion"
+            )
+        if tuple(front_camera_tile.shape) != (
+            batch_size,
+            3,
+            self.front_camera_input_size,
+            self.front_camera_input_size,
+        ):
+            raise ValueError(
+                "front camera tile differs from BEVFormer contract"
+            )
+        # Every T8 frame uses the same ordinary all-view encoder. The native
+        # front pass is additive and never replaces CAM_F0 in that branch.
+        features = self.Backbone(camera_tiles.reshape(
+            batch_size * num_views,
+            channels,
+            height,
+            width,
+        ))
+        front_features = self.Backbone(front_camera_tile)
         return self.FeatureFusion(
             features,
             batch_size,
@@ -194,12 +353,125 @@ class ReactiveE2E(nn.Module):
             projection=projection,
             geometry_type=geometry_type,
             image_transform=image_transform,
+            front_features=front_features,
+            front_projection=front_projection,
+            front_image_transform=front_image_transform,
         )
+
+    def _encode_history_camera_bevs(
+        self,
+        camera_history_tiles,
+        *,
+        history_projections=None,
+        geometry_type=None,
+        image_transform=None,
+    ):
+        if self.camera_architecture != "bevformer_v2_t8":
+            if camera_history_tiles is not None:
+                raise ValueError(
+                    "camera history requires BEVFormer V2 T8"
+                )
+            return []
+        if camera_history_tiles is None:
+            if history_projections is not None:
+                raise ValueError(
+                    "history projections require camera history tiles"
+                )
+            return []
+        if camera_history_tiles.ndim != 6:
+            raise ValueError(
+                "camera_history_tiles must have shape [B,7,V,3,H,W]"
+            )
+        batch_size, history_count, num_views, channels, height, width = (
+            camera_history_tiles.shape
+        )
+        if (
+            history_count != 7
+            or channels != 3
+            or self.camera_input_size is None
+            or (height, width) != (
+                self.camera_input_size,
+                self.camera_input_size,
+            )
+        ):
+            raise ValueError("camera history differs from the T8 contract")
+        if history_projections is not None and len(
+            history_projections
+        ) != history_count:
+            raise ValueError("T8 requires one projection per history frame")
+        backbone_training = self.Backbone.training
+        fusion_training = self.FeatureFusion.training
+        temporal_fusion = getattr(
+            self.FeatureFusion,
+            "temporal_fusion",
+            None,
+        )
+        temporal_training = (
+            temporal_fusion.training
+            if temporal_fusion is not None
+            else None
+        )
+        history_bevs = []
+        self.Backbone.eval()
+        self.FeatureFusion.eval()
+        try:
+            with torch.no_grad():
+                for history_index in range(history_count):
+                    tiles = camera_history_tiles[:, history_index]
+                    features = self.Backbone(tiles.reshape(
+                        batch_size * num_views,
+                        channels,
+                        height,
+                        width,
+                    ))
+                    projection = (
+                        history_projections[history_index]
+                        if history_projections is not None
+                        else None
+                    )
+                    history_bevs.append(self.FeatureFusion(
+                        features,
+                        batch_size,
+                        num_views,
+                        projection=projection,
+                        geometry_type=geometry_type,
+                        image_transform=image_transform,
+                    ).detach())
+        finally:
+            self.Backbone.train(backbone_training)
+            self.FeatureFusion.train(fusion_training)
+            if temporal_fusion is not None:
+                temporal_fusion.train(bool(temporal_training))
+        return history_bevs
+
+    def _fuse_temporal_camera_bevs(
+        self,
+        current_image_bev,
+        history_bevs,
+    ):
+        if self.camera_architecture != "bevformer_v2_t8":
+            if history_bevs:
+                raise ValueError("non-T8 camera path received history BEVs")
+            return current_image_bev
+        if not history_bevs:
+            history_bevs = [
+                current_image_bev.detach()
+                for _ in range(7)
+            ]
+        # Upstream BEVFormer@66b65f3 transformerV2.py:308-324 places the
+        # current frame last in the ordered (-7,-6,-5,-4,-3,-2,-1,0) list.
+        return self.FeatureFusion.fuse_temporal_bevs([
+            *history_bevs,
+            current_image_bev,
+        ])
 
     def forward(self, camera_tiles, map_context, visual_history,
                 egomotion_history, route_mask=None, map_valid=None,
                 route_valid=None,
                 projection=None, geometry_type=None, image_transform=None,
+                camera_history_tiles=None, history_projections=None,
+                front_camera_tile=None, front_projection=None,
+                front_image_transform=None,
                 mode="train", return_auxiliary=False,
                 compute_bev_segmentation=True,
                 compute_route_reconstruction=True,
@@ -220,6 +492,12 @@ class ReactiveE2E(nn.Module):
                 ABI (Pinhole / FTheta / Pseudo). No [B,V,3,4] matrix argument.
             geometry_type: Optional explicit geometry label passed to BEV fusion.
             image_transform: Optional ImageTransform for the model-input frame.
+            front_camera_tile: Optional native-resolution front image tensor.
+            front_projection: Optional one-view projection for the native front.
+            camera_history_tiles: Optional seven-frame camera history ordered
+                oldest to newest, shaped ``[B,7,V,3,H,W]``.
+            history_projections: Optional seven projection operators mapping
+                current ego coordinates into each historical image set.
             mode: "train" returns enabled auxiliary predictions.
             return_auxiliary: also return enabled auxiliary predictions during
                 inference, for offline Dashboard artifact generation.
@@ -231,11 +509,24 @@ class ReactiveE2E(nn.Module):
         B = camera_tiles.shape[0]
 
         # --- Camera branch ---
-        image_bev = self.encode_camera_bev(
+        history_bevs = self._encode_history_camera_bevs(
+            camera_history_tiles,
+            history_projections=history_projections,
+            geometry_type=geometry_type,
+            image_transform=image_transform,
+        )
+        current_image_bev = self.encode_camera_bev(
             camera_tiles,
             projection=projection,
             geometry_type=geometry_type,
             image_transform=image_transform,
+            front_camera_tile=front_camera_tile,
+            front_projection=front_projection,
+            front_image_transform=front_image_transform,
+        )
+        image_bev = self._fuse_temporal_camera_bevs(
+            current_image_bev,
+            history_bevs,
         )
         emit_auxiliary = mode == "train" or bool(return_auxiliary)
         aux_outputs = {}

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Sequence
+from typing import cast
 
 import torch
 import torch.nn as nn
@@ -45,6 +46,54 @@ def _radial_offset_bias(
         dtype=torch.float32,
     ).reshape(1, 1, num_points, 1)
     return (bias * radii).reshape(-1)
+
+
+def _checkpoint_encoder_layer(
+    layer: nn.Module,
+    bev_h: int,
+    bev_w: int,
+    num_views: int,
+    query: torch.Tensor,
+    position: torch.Tensor,
+    reference_2d: torch.Tensor,
+    reference_mask: torch.Tensor,
+    level_embeddings: torch.Tensor,
+    camera_embeddings: torch.Tensor,
+    *features: torch.Tensor,
+) -> torch.Tensor:
+    return layer(
+        query,
+        position,
+        features,
+        reference_2d,
+        reference_mask,
+        bev_h=bev_h,
+        bev_w=bev_w,
+        num_views=num_views,
+        level_embeddings=level_embeddings,
+        camera_embeddings=camera_embeddings,
+    )
+
+
+def _checkpoint_front_cross_attention(
+    attention: nn.Module,
+    query: torch.Tensor,
+    reference_2d: torch.Tensor,
+    reference_mask: torch.Tensor,
+    level_embeddings: torch.Tensor,
+    camera_embeddings: torch.Tensor,
+    *features: torch.Tensor,
+) -> torch.Tensor:
+    return attention(
+        query,
+        features,
+        reference_2d,
+        reference_mask,
+        num_views=1,
+        level_embeddings=level_embeddings,
+        camera_embeddings=camera_embeddings,
+        content_delta_only=True,
+    )
 
 
 class T1DeformableSelfAttention(nn.Module):
@@ -128,10 +177,12 @@ class T1DeformableSelfAttention(nn.Module):
             bev_w,
         )
         rows = (
-            torch.arange(bev_h, device=query.device, dtype=query.dtype) + 0.5
+            torch.arange(bev_h, device=query.device, dtype=torch.float32)
+            + 0.5
         ) / bev_h
         cols = (
-            torch.arange(bev_w, device=query.device, dtype=query.dtype) + 0.5
+            torch.arange(bev_w, device=query.device, dtype=torch.float32)
+            + 0.5
         ) / bev_w
         grid_row, grid_col = torch.meshgrid(rows, cols, indexing="ij")
         reference = torch.stack(
@@ -139,7 +190,11 @@ class T1DeformableSelfAttention(nn.Module):
             dim=-1,
         ).reshape(1, query_count, 1, 1, 2)
         output_chunks = []
-        normalizer = query.new_tensor([bev_w, bev_h])
+        normalizer = torch.tensor(
+            [bev_w, bev_h],
+            device=query.device,
+            dtype=torch.float32,
+        )
         positioned_query = query + query_pos
         predictor_input = torch.cat([query, positioned_query], dim=-1)
         for start in range(0, query_count, self.query_chunk_size):
@@ -168,7 +223,7 @@ class T1DeformableSelfAttention(nn.Module):
             for queue_index in range(self.num_bev_queue):
                 locations = (
                     reference[:, start:stop]
-                    + offsets[:, :, :, queue_index] / normalizer
+                    + offsets[:, :, :, queue_index].float() / normalizer
                 )
                 sample_grid = (
                     locations * 2.0 - 1.0
@@ -178,22 +233,28 @@ class T1DeformableSelfAttention(nn.Module):
                     self.num_points,
                     2,
                 )
-                sampled = F.grid_sample(
-                    value_spatial,
-                    sample_grid,
-                    mode="bilinear",
-                    padding_mode="zeros",
-                    align_corners=False,
-                ).reshape(
-                    batch_size,
-                    self.num_heads,
-                    self.head_dim,
-                    chunk_size,
-                    self.num_points,
-                ).permute(0, 3, 1, 4, 2)
+                with torch.autocast(
+                    device_type=query.device.type,
+                    enabled=False,
+                ):
+                    sampled = F.grid_sample(
+                        value_spatial.float(),
+                        sample_grid,
+                        mode="bilinear",
+                        padding_mode="zeros",
+                        align_corners=False,
+                    ).reshape(
+                        batch_size,
+                        self.num_heads,
+                        self.head_dim,
+                        chunk_size,
+                        self.num_points,
+                    ).permute(0, 3, 1, 4, 2)
                 queue_weight = weights[:, :, :, queue_index]
                 queue_outputs.append(
-                    (sampled * queue_weight.unsqueeze(-1)).sum(dim=3)
+                    (
+                        sampled * queue_weight.float().unsqueeze(-1)
+                    ).sum(dim=3)
                 )
             output_chunks.append(
                 torch.stack(queue_outputs, dim=0).mean(dim=0).reshape(
@@ -202,7 +263,7 @@ class T1DeformableSelfAttention(nn.Module):
                     self.embed_dim,
                 )
             )
-        attended = torch.cat(output_chunks, dim=1)
+        attended = torch.cat(output_chunks, dim=1).to(query.dtype)
         return query + self.dropout(self.output_proj(attended))
 
 
@@ -268,20 +329,28 @@ class MultiScaleSpatialCrossAttention(nn.Module):
         level_weight: torch.Tensor,
     ) -> torch.Tensor:
         batch_size, chunk_size = level_weight.shape[:2]
-        sampled = F.grid_sample(
-            value_per_head,
-            sample_grid,
-            mode="bilinear",
-            padding_mode="zeros",
-            align_corners=False,
-        ).reshape(
-            batch_size,
-            self.num_heads,
-            self.head_dim,
-            chunk_size,
-            self.num_points,
-        ).permute(0, 3, 1, 4, 2)
-        return (sampled * level_weight.unsqueeze(-1)).sum(dim=3)
+        output_dtype = value_per_head.dtype
+        with torch.autocast(
+            device_type=value_per_head.device.type,
+            enabled=False,
+        ):
+            sampled = F.grid_sample(
+                value_per_head.float(),
+                sample_grid.float(),
+                mode="bilinear",
+                padding_mode="zeros",
+                align_corners=False,
+            ).reshape(
+                batch_size,
+                self.num_heads,
+                self.head_dim,
+                chunk_size,
+                self.num_points,
+            ).permute(0, 3, 1, 4, 2)
+            attended = (
+                sampled * level_weight.float().unsqueeze(-1)
+            ).sum(dim=3)
+        return attended.to(output_dtype)
 
     def _project_values(
         self,
@@ -291,6 +360,7 @@ class MultiScaleSpatialCrossAttention(nn.Module):
         num_views: int,
         level_embeddings: torch.Tensor,
         camera_embeddings: torch.Tensor,
+        content_delta_only: bool = False,
     ) -> list[torch.Tensor]:
         projected = []
         for level, feature in enumerate(features):
@@ -310,23 +380,30 @@ class MultiScaleSpatialCrossAttention(nn.Module):
                 height,
                 width,
             )
-            values = values + level_embeddings[level].reshape(
-                1,
-                1,
-                -1,
-                1,
-                1,
-            )
-            values = values + camera_embeddings[:num_views].reshape(
-                1,
-                num_views,
-                -1,
-                1,
-                1,
-            )
-            values = self.value_proj(
-                values.permute(0, 1, 3, 4, 2)
-            ).permute(0, 1, 4, 2, 3).contiguous()
+            values = values.permute(0, 1, 3, 4, 2)
+            if content_delta_only:
+                values = F.linear(
+                    values,
+                    self.value_proj.weight,
+                    bias=None,
+                )
+            else:
+                values = values + level_embeddings[level].reshape(
+                    1,
+                    1,
+                    1,
+                    1,
+                    -1,
+                )
+                values = values + camera_embeddings[:num_views].reshape(
+                    1,
+                    num_views,
+                    1,
+                    1,
+                    -1,
+                )
+                values = self.value_proj(values)
+            values = values.permute(0, 1, 4, 2, 3).contiguous()
             projected.append(values)
         return projected
 
@@ -340,6 +417,7 @@ class MultiScaleSpatialCrossAttention(nn.Module):
         num_views: int,
         level_embeddings: torch.Tensor,
         camera_embeddings: torch.Tensor,
+        content_delta_only: bool = False,
     ) -> torch.Tensor:
         batch_size, query_count, channels = query.shape
         if channels != self.embed_dim or len(features) != self.num_levels:
@@ -350,6 +428,7 @@ class MultiScaleSpatialCrossAttention(nn.Module):
             num_views=num_views,
             level_embeddings=level_embeddings,
             camera_embeddings=camera_embeddings,
+            content_delta_only=content_delta_only,
         )
         projection_batch = reference_points_2d.shape[0]
         if projection_batch not in (1, batch_size):
@@ -424,13 +503,17 @@ class MultiScaleSpatialCrossAttention(nn.Module):
                     view_index,
                     start:stop,
                     anchor_indices,
-                ].to(dtype=query.dtype)
+                ].float()
                 for level, value in enumerate(values):
                     height, width = value.shape[-2:]
-                    normalizer = chunk_query.new_tensor([width, height])
+                    normalizer = torch.tensor(
+                        [width, height],
+                        device=query.device,
+                        dtype=torch.float32,
+                    )
                     locations = (
                         reference.unsqueeze(2)
-                        + offsets[:, :, :, level] / normalizer
+                        + offsets[:, :, :, level].float() / normalizer
                     )
                     sample_grid = (
                         locations * 2.0 - 1.0
@@ -486,6 +569,12 @@ class MultiScaleSpatialCrossAttention(nn.Module):
             camera_outputs = camera_outputs + view_output * view_visible
             camera_counts = camera_counts + view_visible
         attended = camera_outputs / camera_counts.clamp_min(1.0)
+        if content_delta_only:
+            return self.dropout(F.linear(
+                attended,
+                self.output_proj.weight,
+                bias=None,
+            ))
         return query + self.dropout(self.output_proj(attended))
 
 
@@ -500,7 +589,6 @@ class BEVFormerV2T1EncoderLayer(nn.Module):
         feedforward_channels: int,
         dropout: float,
         query_chunk_size: int,
-        activation_checkpointing: bool = False,
     ) -> None:
         super().__init__()
         self.self_attention = T1DeformableSelfAttention(
@@ -517,7 +605,7 @@ class BEVFormerV2T1EncoderLayer(nn.Module):
             num_points=num_points,
             dropout=dropout,
             query_chunk_size=query_chunk_size,
-            activation_checkpointing=activation_checkpointing,
+            activation_checkpointing=False,
         )
         self.ffn = nn.Sequential(
             nn.Linear(embed_dim, feedforward_channels),
@@ -587,6 +675,8 @@ class BEVFormerV2T1ViewFusion(nn.Module):
             3.0,
         ),
         image_size: int = 256,
+        front_camera_index: int = 0,
+        front_image_size: int = 1024,
         num_heads: int = 8,
         num_levels: int = 4,
         num_points: int = 8,
@@ -609,7 +699,12 @@ class BEVFormerV2T1ViewFusion(nn.Module):
                 num_encoder_layers,
                 feedforward_channels,
                 query_chunk_size,
+                image_size,
+                front_image_size,
             ) <= 0
+            or not 0 <= front_camera_index < num_views
+            or front_image_size < image_size
+            or front_image_size % image_size
         ):
             raise ValueError("BEVFormer encoder dimensions are invalid")
         if len(pc_range) != 6:
@@ -623,6 +718,10 @@ class BEVFormerV2T1ViewFusion(nn.Module):
         self.activation_checkpointing = bool(activation_checkpointing)
         self.pc_range = tuple(float(value) for value in pc_range)
         self.image_transform = ImageTransform.square(image_size)
+        self.front_camera_index = front_camera_index
+        self.front_image_transform = ImageTransform.square(
+            front_image_size
+        )
         self.bev_queries = nn.Embedding(bev_h * bev_w, embed_dim)
         self.row_embed = nn.Embedding(bev_h, embed_dim // 2)
         self.col_embed = nn.Embedding(bev_w, embed_dim // 2)
@@ -632,6 +731,7 @@ class BEVFormerV2T1ViewFusion(nn.Module):
         self.camera_embeddings = nn.Parameter(
             torch.empty(num_views, embed_dim)
         )
+        self.front_residual_gate = nn.Parameter(torch.zeros(embed_dim))
         self.pseudo_projection = nn.Parameter(torch.randn(3, 4) * 0.01)
         self.reference_points_3d: torch.Tensor
         self.layers = nn.ModuleList([
@@ -643,13 +743,39 @@ class BEVFormerV2T1ViewFusion(nn.Module):
                 feedforward_channels=feedforward_channels,
                 dropout=dropout,
                 query_chunk_size=query_chunk_size,
-                activation_checkpointing=activation_checkpointing,
             )
             for _ in range(num_encoder_layers)
         ])
+        self.front_cross_attention = MultiScaleSpatialCrossAttention(
+            embed_dim=embed_dim,
+            num_heads=num_heads,
+            num_levels=num_levels,
+            num_points=num_points,
+            dropout=dropout,
+            query_chunk_size=query_chunk_size,
+            activation_checkpointing=False,
+        )
+        final_encoder_layer = cast(
+            BEVFormerV2T1EncoderLayer,
+            self.layers[-1],
+        )
+        self.front_cross_attention.load_state_dict(
+            final_encoder_layer.cross_attention.state_dict()
+        )
+        # The front branch requests a content-only delta, which deliberately
+        # removes these affine terms to keep a zero residual an exact no-op.
+        self.freeze_structurally_unused_parameters()
         nn.init.normal_(self.level_embeddings)
         nn.init.normal_(self.camera_embeddings)
         self._init_reference_points()
+
+    def freeze_structurally_unused_parameters(self) -> None:
+        for bias in (
+            self.front_cross_attention.value_proj.bias,
+            self.front_cross_attention.output_proj.bias,
+        ):
+            if bias is not None:
+                bias.requires_grad_(False)
 
     def _init_reference_points(self) -> None:
         rows = (
@@ -860,50 +986,39 @@ class BEVFormerV2T1ViewFusion(nn.Module):
         )
         position = self._query_position(batch_size).to(query.dtype)
         for layer in self.layers:
-            def run_layer(
-                layer_query,
-                layer_position,
-                layer_reference,
-                layer_mask,
-                level_embeddings,
-                camera_embeddings,
-                *features,
-                layer_module=layer,
-            ):
-                return layer_module(
-                    layer_query,
-                    layer_position,
-                    features,
-                    layer_reference,
-                    layer_mask,
-                    bev_h=self.bev_h,
-                    bev_w=self.bev_w,
-                    num_views=num_views,
-                    level_embeddings=level_embeddings,
-                    camera_embeddings=camera_embeddings,
-                )
-
-            layer_inputs = (
-                query,
-                position,
-                reference_2d,
-                reference_mask,
-                self.level_embeddings,
-                self.camera_embeddings,
-                *multi_scale_features,
-            )
             if (
                 self.activation_checkpointing
                 and self.training
                 and torch.is_grad_enabled()
             ):
                 query = checkpoint(
-                    run_layer,
-                    *layer_inputs,
-                    use_reentrant=False,
+                    _checkpoint_encoder_layer,
+                    layer,
+                    self.bev_h,
+                    self.bev_w,
+                    num_views,
+                    query,
+                    position,
+                    reference_2d,
+                    reference_mask,
+                    self.level_embeddings,
+                    self.camera_embeddings,
+                    *multi_scale_features,
+                    use_reentrant=True,
                 )
             else:
-                query = run_layer(*layer_inputs)
+                query = layer(
+                    query,
+                    position,
+                    multi_scale_features,
+                    reference_2d,
+                    reference_mask,
+                    bev_h=self.bev_h,
+                    bev_w=self.bev_w,
+                    num_views=num_views,
+                    level_embeddings=self.level_embeddings,
+                    camera_embeddings=self.camera_embeddings,
+                )
         observed = reference_mask.any(dim=3).any(dim=1)
         if observed.shape[0] == 1 and batch_size > 1:
             observed = observed.expand(batch_size, -1)
@@ -914,3 +1029,106 @@ class BEVFormerV2T1ViewFusion(nn.Module):
             self.bev_w,
             self.embed_dim,
         ).permute(0, 3, 1, 2).contiguous()
+
+    def fuse_front_camera(
+        self,
+        image_bev: torch.Tensor,
+        native_front_features: Sequence[torch.Tensor],
+        *,
+        projection=None,
+        geometry_type=None,
+        image_transform=None,
+    ) -> torch.Tensor:
+        """Add native-resolution front evidence through a zero-init residual."""
+        if image_bev.ndim != 4 or image_bev.shape[1:] != (
+            self.embed_dim,
+            self.bev_h,
+            self.bev_w,
+        ):
+            raise ValueError("front BEV input shape differs from contract")
+        if len(native_front_features) != self.num_levels:
+            raise ValueError(
+                f"expected {self.num_levels} native front feature levels"
+            )
+        batch_size = image_bev.shape[0]
+        projection_operator = self._resolve_projection(
+            projection,
+            geometry_type,
+            1,
+        )
+        transform = (
+            image_transform
+            if image_transform is not None
+            else self.front_image_transform
+        )
+        reference_2d, reference_mask = self._project_operator(
+            projection_operator,
+            transform,
+        )
+        query = image_bev.permute(0, 2, 3, 1).reshape(
+            batch_size,
+            self.bev_h * self.bev_w,
+            self.embed_dim,
+        )
+        final_layer = cast(
+            BEVFormerV2T1EncoderLayer,
+            self.layers[-1],
+        )
+        camera_embeddings = self.camera_embeddings[
+            self.front_camera_index:self.front_camera_index + 1
+        ]
+        if (
+            self.activation_checkpointing
+            and self.training
+            and torch.is_grad_enabled()
+        ):
+            attended = checkpoint(
+                _checkpoint_front_cross_attention,
+                self.front_cross_attention,
+                query,
+                reference_2d,
+                reference_mask,
+                self.level_embeddings,
+                camera_embeddings,
+                *native_front_features,
+                use_reentrant=True,
+            )
+        else:
+            attended = self.front_cross_attention(
+                query,
+                native_front_features,
+                reference_2d,
+                reference_mask,
+                num_views=1,
+                level_embeddings=self.level_embeddings,
+                camera_embeddings=camera_embeddings,
+                content_delta_only=True,
+            )
+        # Reuse the final post-cross-attention norm while cancelling its
+        # content-independent affine contribution from the gated residual.
+        query_fp32 = query.float()
+        residual = (
+            final_layer.norms[1](query_fp32 + attended.float())
+            - final_layer.norms[1](query_fp32)
+        ).reshape(
+            batch_size,
+            self.bev_h,
+            self.bev_w,
+            self.embed_dim,
+        ).permute(0, 3, 1, 2).contiguous()
+        observed = reference_mask.any(dim=3).any(dim=1)
+        if observed.shape[0] == 1 and batch_size > 1:
+            observed = observed.expand(batch_size, -1)
+        residual = residual * observed.reshape(
+            batch_size,
+            1,
+            self.bev_h,
+            self.bev_w,
+        ).to(residual.dtype)
+        gate = torch.tanh(self.front_residual_gate).reshape(
+            1,
+            self.embed_dim,
+            1,
+            1,
+        ).to(dtype=image_bev.dtype)
+        return image_bev + gate * residual.to(dtype=image_bev.dtype)

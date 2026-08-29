@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -99,6 +99,101 @@ def resolve_reactive_batch_projection(
     )
 
 
+def resolve_reactive_front_projection(
+    batch: Mapping[str, Any],
+    geometry_type: str,
+    *,
+    device: torch.device,
+    required: bool = False,
+) -> Any:
+    """Build the one-view projection matching the native front tensor."""
+    matrix = batch.get("front_camera_projection_matrix")
+    front_camera_tile = batch.get("front_camera_tile")
+    if matrix is None:
+        if front_camera_tile is None and required:
+            raise ValueError(
+                "Stage A requires a native front camera tensor and projection"
+            )
+        if (
+            front_camera_tile is not None
+            and (
+                required
+                or geometry_type in ("pinhole", "rectified_pinhole")
+            )
+        ):
+            raise ValueError(
+                "native front camera requires its packed projection"
+            )
+        return None
+    if front_camera_tile is None:
+        raise ValueError(
+            "front camera projection requires a native front tensor"
+        )
+    if (
+        not torch.is_tensor(matrix)
+        or matrix.ndim != 4
+        or matrix.shape[1:] != (1, 3, 4)
+    ):
+        raise ValueError(
+            "front_camera_projection_matrix must have shape [B,1,3,4]"
+        )
+    from model_components.view_fusion.projection import PinholeProjection
+
+    return PinholeProjection(
+        matrix.to(device),
+        geometry_type=geometry_type,
+    )
+
+
+def resolve_reactive_camera_history(
+    batch: Mapping[str, Any],
+    geometry_type: str,
+    *,
+    device: torch.device,
+    required: bool = False,
+) -> tuple[torch.Tensor | None, tuple[Any, ...] | None]:
+    """Validate T8 history and build current-ego-aligned projections."""
+    tiles = batch.get("camera_history_tiles")
+    matrix = batch.get("camera_history_projection_matrix")
+    if tiles is None and matrix is None:
+        if required:
+            raise ValueError(
+                "Stage A requires T8 camera history tiles and projections"
+            )
+        return None, None
+    if tiles is None or matrix is None:
+        raise ValueError(
+            "T8 camera history tiles and projections must be paired"
+        )
+    if (
+        not torch.is_tensor(tiles)
+        or tiles.ndim != 6
+        or tiles.shape[1] != 7
+        or not torch.is_tensor(matrix)
+        or matrix.ndim != 5
+        or matrix.shape[:3] != tiles.shape[:3]
+        or matrix.shape[1:] != (7, tiles.shape[2], 3, 4)
+    ):
+        raise ValueError(
+            "T8 history must have shapes [B,7,V,3,H,W] and [B,7,V,3,4]"
+        )
+    if geometry_type not in ("pinhole", "rectified_pinhole"):
+        raise ValueError("calibrated T8 history requires pinhole geometry")
+    if not bool(torch.isfinite(matrix).all()):
+        raise ValueError("T8 history projections must be finite")
+    from model_components.view_fusion.projection import PinholeProjection
+
+    device_matrix = matrix.to(device)
+    projections = tuple(
+        PinholeProjection(
+            device_matrix[:, history_index],
+            geometry_type=geometry_type,
+        )
+        for history_index in range(7)
+    )
+    return tiles.to(device, non_blocking=True), projections
+
+
 def _assert_reactive_only(model: torch.nn.Module) -> None:
     if getattr(model, "World_Action_Model_E2E", None) is not None:
         raise ValueError("Reactive multi-stage training requires WM OFF")
@@ -186,6 +281,8 @@ def inspect_reactive_checkpoint_identity(
 def load_stage_a_parent(
     model: torch.nn.Module,
     checkpoint_path: str | Path,
+    *,
+    target_camera_slots: Sequence[str],
 ) -> dict[str, Any]:
     """Load only Stage A model weights and validate Stage B lineage."""
     path = Path(checkpoint_path)
@@ -241,10 +338,8 @@ def load_stage_a_parent(
         or objective_values["route_weight"] < 0.0
         or objective_values["corridor_pos_weight"] < 1.0
         or not isinstance(config.get("training_seed"), int)
-        or config.get("scheduler_identity")
-        not in {"constant_v1", "selection_plateau_v1"}
-        or config.get("overfit_bev_only") is not False
-        or config.get("overfit_fixed_lr") is not False
+        or config.get("scheduler_identity") != "selection_plateau_v1"
+        or config.get("freeze_bevformer") is not True
     ):
         raise ValueError(
             "Stage A parent checkpoint lacks valid objective provenance"
@@ -279,12 +374,119 @@ def load_stage_a_parent(
         raise ValueError("Stage A checkpoint config digest is invalid")
     if payload.get("model_state_sha256") != model_state_sha256:
         raise ValueError("Stage A checkpoint model-state digest is invalid")
-    model.load_state_dict(state_dict)
+    source_num_views = config.get("num_views")
+    if (
+        not isinstance(source_num_views, int)
+        or isinstance(source_num_views, bool)
+        or source_num_views <= 0
+    ):
+        raise ValueError("Stage A checkpoint has invalid num_views")
+    source_camera_slots = config.get("camera_slots")
+    if (
+        not isinstance(source_camera_slots, list)
+        or len(source_camera_slots) != source_num_views
+        or any(
+            not isinstance(slot, str) or not slot
+            for slot in source_camera_slots
+        )
+        or len(set(source_camera_slots)) != source_num_views
+    ):
+        raise ValueError("Stage A checkpoint has invalid camera_slots")
+    normalized_target_slots = tuple(target_camera_slots)
+    if (
+        len(normalized_target_slots) == 0
+        or any(
+            not isinstance(slot, str) or not slot
+            for slot in normalized_target_slots
+        )
+        or len(set(normalized_target_slots)) != len(normalized_target_slots)
+    ):
+        raise ValueError("Stage B target camera_slots is invalid")
+    try:
+        reactive = getattr(model, "Reactive_E2E")
+        feature_fusion = getattr(reactive, "FeatureFusion")
+        target_view_fusion = getattr(feature_fusion, "view_fusion")
+        target_num_views = getattr(target_view_fusion, "num_views")
+    except AttributeError as exc:
+        raise ValueError(
+            "Stage B model does not expose its camera view contract"
+        ) from exc
+    if (
+        not isinstance(target_num_views, int)
+        or isinstance(target_num_views, bool)
+        or target_num_views <= 0
+    ):
+        raise ValueError("Stage B model has invalid num_views")
+    if len(normalized_target_slots) != target_num_views:
+        raise ValueError(
+            "Stage B camera_slots do not match its camera embedding count"
+        )
+
+    camera_embedding_key = (
+        "Reactive_E2E.FeatureFusion.view_fusion.camera_embeddings"
+    )
+    target_state_dict = model.state_dict()
+    source_embedding = state_dict.get(camera_embedding_key)
+    target_embedding = target_state_dict.get(camera_embedding_key)
+    adapted_state_dict = dict(state_dict)
+    adaptation_policy = "not_applicable"
+    if torch.is_tensor(source_embedding) != torch.is_tensor(target_embedding):
+        raise ValueError(
+            "Stage A and Stage B camera embedding contracts differ"
+        )
+    if torch.is_tensor(source_embedding) and torch.is_tensor(target_embedding):
+        assert isinstance(source_embedding, torch.Tensor)
+        assert isinstance(target_embedding, torch.Tensor)
+        if (
+            source_embedding.ndim != 2
+            or target_embedding.ndim != 2
+            or source_embedding.shape[0] != source_num_views
+            or target_embedding.shape[0] != target_num_views
+            or source_embedding.shape[1:] != target_embedding.shape[1:]
+        ):
+            raise ValueError(
+                "Stage A or Stage B camera embedding shape is invalid"
+            )
+        if tuple(source_camera_slots) == normalized_target_slots:
+            adaptation_policy = "identity"
+        else:
+            source_index = {
+                slot: index
+                for index, slot in enumerate(source_camera_slots)
+            }
+            missing_slots = [
+                slot
+                for slot in normalized_target_slots
+                if slot not in source_index
+            ]
+            if missing_slots:
+                raise ValueError(
+                    "Stage A camera embeddings cannot be mapped to Stage B: "
+                    f"missing semantic slots {missing_slots}"
+                )
+            indices = torch.tensor(
+                [source_index[slot] for slot in normalized_target_slots],
+                dtype=torch.long,
+                device=source_embedding.device,
+            )
+            adapted_state_dict[camera_embedding_key] = (
+                source_embedding.index_select(0, indices).clone()
+            )
+            adaptation_policy = "semantic_reindex"
+    model.load_state_dict(adapted_state_dict)
     digest = hashlib.sha256(path.read_bytes()).hexdigest()
     lineage: dict[str, Any] = {
         "stage_a_parent_checkpoint_sha256": digest,
         "stage_a_config_digest": config_sha256,
         "stage_a_model_state_sha256": model_state_sha256,
+        "stage_a_freeze_bevformer": True,
+        "stage_a_camera_embedding_transfer": {
+            "policy": adaptation_policy,
+            "source_camera_slots": list(source_camera_slots),
+            "source_num_views": source_num_views,
+            "target_camera_slots": list(normalized_target_slots),
+            "target_num_views": target_num_views,
+        },
     }
     initialization = config.get("bevformer_v2_initialization")
     source_sha256 = config.get(
@@ -330,12 +532,20 @@ def run_reactive_epoch(
     *,
     device: torch.device,
     grad_clip: float = 1.0,
+    freeze_bevformer: bool = False,
 ) -> dict[str, float]:
     """Run one optimizer epoch with the locked stage objective."""
     if grad_clip <= 0.0:
         raise ValueError("grad_clip must be positive")
     _assert_reactive_only(model)
-    configure_model_for_stage(model, objective.stage)
+    configure_model_for_stage(
+        model,
+        objective.stage,
+        freeze_bevformer=freeze_bevformer,
+    )
+    require_stage_a_camera_context = (
+        objective.stage is ReactiveTrainingStage.NUPLAN_FULL
+    )
     model.train()
     totals: dict[str, list[float]] = {
         "total": [],
@@ -352,6 +562,20 @@ def run_reactive_epoch(
             geometry_type,
             device=device,
         )
+        front_projection = resolve_reactive_front_projection(
+            batch,
+            geometry_type,
+            device=device,
+            required=require_stage_a_camera_context,
+        )
+        camera_history_tiles, history_projections = (
+            resolve_reactive_camera_history(
+                batch,
+                geometry_type,
+                device=device,
+                required=require_stage_a_camera_context,
+            )
+        )
         optimizer.zero_grad(set_to_none=True)
         output = model(
             batch["visual_tiles"],
@@ -363,6 +587,10 @@ def run_reactive_epoch(
             route_valid=batch["route_valid"],
             projection=projection,
             geometry_type=geometry_type,
+            camera_history_tiles=camera_history_tiles,
+            history_projections=history_projections,
+            front_camera_tile=batch.get("front_camera_tile"),
+            front_projection=front_projection,
             mode="train",
             compute_bev_segmentation=(
                 objective.compute_bev_segmentation
@@ -409,12 +637,18 @@ def evaluate_reactive_xy(
     model: torch.nn.Module,
     loader: Iterable[Any],
     *,
+    stage: ReactiveTrainingStage,
     device: torch.device,
 ) -> dict[str, float]:
     """Return lightweight 6.4-second checkpoint-selection metrics."""
     from training.losses.control_rollout import integrate_controls_torch
 
+    if not isinstance(stage, ReactiveTrainingStage):
+        raise TypeError("stage must be a ReactiveTrainingStage")
     _assert_reactive_only(model)
+    require_stage_a_camera_context = (
+        stage is ReactiveTrainingStage.NUPLAN_FULL
+    )
     was_training = model.training
     ade_sum = 0.0
     fde_sum = 0.0
@@ -435,6 +669,20 @@ def evaluate_reactive_xy(
                         device=device,
                     )
                 )
+                front_projection = resolve_reactive_front_projection(
+                    batch,
+                    geometry_type,
+                    device=device,
+                    required=require_stage_a_camera_context,
+                )
+                camera_history_tiles, history_projections = (
+                    resolve_reactive_camera_history(
+                        batch,
+                        geometry_type,
+                        device=device,
+                        required=require_stage_a_camera_context,
+                    )
+                )
                 controls = model(
                     batch["visual_tiles"],
                     batch["map_context"],
@@ -445,6 +693,10 @@ def evaluate_reactive_xy(
                     route_valid=batch["route_valid"],
                     projection=projection,
                     geometry_type=geometry_type,
+                    camera_history_tiles=camera_history_tiles,
+                    history_projections=history_projections,
+                    front_camera_tile=batch.get("front_camera_tile"),
+                    front_projection=front_projection,
                     mode="infer",
                     compute_bev_segmentation=False,
                     compute_route_reconstruction=False,
@@ -610,6 +862,9 @@ def _route_gradient_evidence(
     model: torch.nn.Module,
     batch: Mapping[str, Any],
     projection: Any,
+    front_projection: Any,
+    camera_history_tiles: torch.Tensor | None,
+    history_projections: tuple[Any, ...] | None,
     geometry_type: str,
 ) -> float | None:
     route_valid = batch["route_valid"].to(dtype=torch.bool)
@@ -627,6 +882,10 @@ def _route_gradient_evidence(
             route_valid=batch["route_valid"],
             projection=projection,
             geometry_type=geometry_type,
+            camera_history_tiles=camera_history_tiles,
+            history_projections=history_projections,
+            front_camera_tile=batch.get("front_camera_tile"),
+            front_projection=front_projection,
             mode="infer",
             compute_bev_segmentation=False,
             compute_route_reconstruction=False,
@@ -648,6 +907,7 @@ def evaluate_reactive_multitask(
     model: torch.nn.Module,
     loader: Iterable[Any],
     *,
+    stage: ReactiveTrainingStage,
     device: torch.device,
     include_counterfactuals: bool = True,
     include_route_gradient: bool = True,
@@ -658,7 +918,12 @@ def evaluate_reactive_multitask(
 
     if probability_bins < 10:
         raise ValueError("probability_bins must be at least 10")
+    if not isinstance(stage, ReactiveTrainingStage):
+        raise TypeError("stage must be a ReactiveTrainingStage")
     _assert_reactive_only(model)
+    require_stage_a_camera_context = (
+        stage is ReactiveTrainingStage.NUPLAN_FULL
+    )
     was_training = model.training
     horizon_steps = {
         "1s": 10,
@@ -735,6 +1000,20 @@ def evaluate_reactive_multitask(
                 fallback_geometry_type,
                 device=device,
             )
+            front_projection = resolve_reactive_front_projection(
+                batch,
+                geometry_type,
+                device=device,
+                required=require_stage_a_camera_context,
+            )
+            camera_history_tiles, history_projections = (
+                resolve_reactive_camera_history(
+                    batch,
+                    geometry_type,
+                    device=device,
+                    required=require_stage_a_camera_context,
+                )
+            )
             batch_size = int(batch["visual_tiles"].shape[0])
             sample_count += batch_size
             raw_uids = batch.get("sample_uid")
@@ -757,6 +1036,9 @@ def evaluate_reactive_multitask(
                         model,
                         batch,
                         projection,
+                        front_projection,
+                        camera_history_tiles,
+                        history_projections,
                         geometry_type,
                     )
 
@@ -781,6 +1063,10 @@ def evaluate_reactive_multitask(
                     route_valid=batch["route_valid"],
                     projection=projection,
                     geometry_type=geometry_type,
+                    camera_history_tiles=camera_history_tiles,
+                    history_projections=history_projections,
+                    front_camera_tile=batch.get("front_camera_tile"),
+                    front_projection=front_projection,
                     mode="infer",
                     return_auxiliary=True,
                     compute_bev_segmentation=compute_bev,
@@ -1104,6 +1390,10 @@ def evaluate_reactive_multitask(
                         ),
                         projection=projection,
                         geometry_type=geometry_type,
+                        camera_history_tiles=camera_history_tiles,
+                        history_projections=history_projections,
+                        front_camera_tile=batch.get("front_camera_tile"),
+                        front_projection=front_projection,
                         mode="infer",
                         compute_bev_segmentation=False,
                         compute_route_reconstruction=False,
@@ -1153,6 +1443,12 @@ def evaluate_reactive_multitask(
                             route_valid=swapped_valid,
                             projection=projection,
                             geometry_type=geometry_type,
+                            camera_history_tiles=camera_history_tiles,
+                            history_projections=history_projections,
+                            front_camera_tile=batch.get(
+                                "front_camera_tile"
+                            ),
+                            front_projection=front_projection,
                             mode="infer",
                             compute_bev_segmentation=False,
                             compute_route_reconstruction=False,
@@ -1452,6 +1748,11 @@ def evaluate_reactive_transfer_matrix_models(
                 evaluate_reactive_multitask(
                     model,
                     loader_factories[dataset_name](),
+                    stage=(
+                        ReactiveTrainingStage.NUPLAN_FULL
+                        if dataset_name == "nuplan"
+                        else ReactiveTrainingStage.L2D_CONTINUATION
+                    ),
                     device=device,
                 )
             )
