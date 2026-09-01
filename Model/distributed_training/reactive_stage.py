@@ -11,7 +11,8 @@ import re
 import socket
 import tempfile
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from urllib.parse import unquote, urlparse
@@ -48,7 +49,22 @@ PEAK_CUDA_RESERVED_BYTES_METRIC_PREFIX = (
 BEV_LANE_RANGE_METRIC_PREFIX = "bev_lane_boundary_"
 ROUTE_DESTINATION_LOGIT_RANGE_EPSILON = 1e-6
 ROUTE_VALIDATION_METRICS_VERSION = "route_validation_v1"
+REACTIVE_STEP_CHECKPOINT_VERSION = "reactive_step_checkpoint_v1"
+EPOCH_CHECKPOINT_RETENTION_SCORE_BASE = 1_000_000_000_000.0
 _RUN_NAME_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]*")
+
+
+@dataclass(frozen=True)
+class ReactiveResumeState:
+    """Validated epoch and optimizer position restored by every rank."""
+
+    epoch: int
+    optimizer_step_in_epoch: int
+    best_selection_score: float
+    best_ade_6p4s_m: float
+    epoch_history: list[dict[str, Any]]
+    rank_train_states: tuple[Mapping[str, Any], ...] | None = None
+    rank_rng_states: tuple[Mapping[str, Any], ...] | None = None
 
 
 def validate_reactive_stage_config(config: Mapping[str, Any]) -> None:
@@ -163,6 +179,8 @@ def validate_reactive_stage_config(config: Mapping[str, Any]) -> None:
     override = int(config.get("steps_per_epoch", 0))
     if override < 0:
         raise ValueError("steps_per_epoch cannot be negative")
+    if int(config.get("checkpoint_interval_steps", 0)) <= 0:
+        raise ValueError("checkpoint_interval_steps must be positive")
     freeze_bevformer = config.get("freeze_bevformer")
     if not isinstance(freeze_bevformer, bool):
         raise ValueError("freeze_bevformer must be a boolean")
@@ -450,6 +468,123 @@ def _seed_epoch(seed: int, rank: int, epoch: int) -> None:
     torch.cuda.manual_seed_all(epoch_seed)
 
 
+def _capture_rng_state() -> dict[str, Any]:
+    import torch
+
+    return {
+        "numpy": np.random.get_state(),
+        "python": random.getstate(),
+        "torch_cpu": torch.get_rng_state().cpu(),
+        "torch_cuda": [
+            state.cpu() for state in torch.cuda.get_rng_state_all()
+        ],
+    }
+
+
+def _restore_rng_state(state: Mapping[str, Any]) -> None:
+    import torch
+
+    required = {"numpy", "python", "torch_cpu", "torch_cuda"}
+    missing = sorted(required - set(state))
+    if missing:
+        raise ValueError(f"Reactive resume RNG state is missing {missing}")
+    np.random.set_state(state["numpy"])
+    random.setstate(state["python"])
+    torch.set_rng_state(state["torch_cpu"])
+    torch.cuda.set_rng_state_all(list(state["torch_cuda"]))
+
+
+def _checkpoint_step_due(
+    completed_optimizer_steps: int,
+    *,
+    optimizer_steps: int,
+    checkpoint_interval_steps: int,
+) -> bool:
+    if not 0 < completed_optimizer_steps <= optimizer_steps:
+        raise ValueError("completed optimizer steps are out of range")
+    if checkpoint_interval_steps <= 0:
+        raise ValueError("checkpoint interval must be positive")
+    return completed_optimizer_steps % checkpoint_interval_steps == 0
+
+
+def _validate_checkpoint_interval(
+    checkpoint_interval_steps: int,
+    optimizer_steps: int,
+) -> None:
+    if checkpoint_interval_steps <= 0:
+        raise ValueError("checkpoint interval must be positive")
+    if checkpoint_interval_steps > optimizer_steps:
+        raise ValueError(
+            "checkpoint interval must not exceed optimizer steps per epoch"
+        )
+
+
+def _rank_resume_value(
+    values: tuple[Mapping[str, Any], ...] | None,
+    *,
+    rank: int,
+    world_size: int,
+    name: str,
+) -> Mapping[str, Any] | None:
+    if values is None:
+        return None
+    if len(values) != world_size:
+        raise ValueError(
+            f"Reactive resume {name} count differs from world size"
+        )
+    value = values[rank]
+    if int(value.get("rank", -1)) != rank:
+        raise ValueError(f"Reactive resume {name} rank order is invalid")
+    return value
+
+
+def _rank_resume_value_for_epoch(
+    values: tuple[Mapping[str, Any], ...] | None,
+    *,
+    current_epoch: int,
+    resume_epoch: int,
+    start_optimizer_step: int,
+    rank: int,
+    world_size: int,
+    name: str,
+) -> Mapping[str, Any] | None:
+    if current_epoch != resume_epoch or start_optimizer_step == 0:
+        return None
+    return _rank_resume_value(
+        values,
+        rank=rank,
+        world_size=world_size,
+        name=name,
+    )
+
+
+def _replay_loader_position(
+    iterator,
+    *,
+    skipped_micro_steps: int,
+    expected_restarts: int,
+    expected_samples: int,
+) -> None:
+    replayed_samples = 0
+    for _ in range(skipped_micro_steps):
+        raw_batch, _, _ = _loader_item(next(iterator))
+        replayed_samples += int(raw_batch["visual_tiles"].shape[0])
+    if (
+        iterator.restarts != expected_restarts
+        or replayed_samples != expected_samples
+    ):
+        raise ValueError(
+            "Reactive resume loader position is not deterministic"
+        )
+
+
+def _resume_completed_requested_epochs(
+    state: ReactiveResumeState,
+    requested_epochs: int,
+) -> bool:
+    return state.epoch > requested_epochs
+
+
 def clip_finite_gradients_float64(
     parameters,
     max_norm: float,
@@ -635,6 +770,13 @@ def _train_fixed_steps(
     gradient_accumulation_steps: int,
     grad_clip: float,
     precision: str,
+    start_optimizer_step: int = 0,
+    resume_rank_state: Mapping[str, Any] | None = None,
+    resume_rng_state: Mapping[str, Any] | None = None,
+    checkpoint_interval_steps: int = 0,
+    checkpoint_callback: (
+        Callable[[int, Mapping[str, Any]], None] | None
+    ) = None,
 ) -> dict[str, float]:
     import torch
     import torch.distributed as dist
@@ -644,6 +786,19 @@ def _train_fixed_steps(
         resolve_reactive_camera_history,
         resolve_reactive_front_projection,
     )
+
+    if not 0 <= start_optimizer_step <= optimizer_steps:
+        raise ValueError("resume optimizer step is out of range")
+    if checkpoint_callback is not None and checkpoint_interval_steps <= 0:
+        raise ValueError("checkpoint interval must be positive")
+    if start_optimizer_step > 0 and (
+        resume_rank_state is None or resume_rng_state is None
+    ):
+        raise ValueError("step resume requires rank and RNG state")
+    if start_optimizer_step == 0 and (
+        resume_rank_state is not None or resume_rng_state is not None
+    ):
+        raise ValueError("fresh epoch cannot include step resume state")
 
     model.train()
     iterator = RestartingIterator(loader)
@@ -655,11 +810,20 @@ def _train_fixed_steps(
         "bev_segmentation_dice",
         "route_reconstruction",
     )
-    totals = torch.zeros(
-        len(term_names),
-        dtype=torch.float64,
-        device=device,
-    )
+    if resume_rank_state is None:
+        totals = torch.zeros(
+            len(term_names),
+            dtype=torch.float64,
+            device=device,
+        )
+    else:
+        totals = torch.as_tensor(
+            resume_rank_state["term_totals"],
+            dtype=torch.float64,
+            device=device,
+        )
+        if totals.shape != (len(term_names),):
+            raise ValueError("Reactive resume term totals are invalid")
     gradient_group_names = (
         "camera",
         "front_gate",
@@ -667,17 +831,53 @@ def _train_fixed_steps(
         "planner",
     )
     gradient_groups = reactive_gradient_parameter_groups(model)
-    gradient_totals = torch.zeros(
-        len(gradient_group_names) * 2,
-        dtype=torch.float64,
-        device=device,
-    )
+    if resume_rank_state is None:
+        gradient_totals = torch.zeros(
+            len(gradient_group_names) * 2,
+            dtype=torch.float64,
+            device=device,
+        )
+    else:
+        gradient_totals = torch.as_tensor(
+            resume_rank_state["gradient_totals"],
+            dtype=torch.float64,
+            device=device,
+        )
+        if gradient_totals.shape != (len(gradient_group_names) * 2,):
+            raise ValueError("Reactive resume gradient totals are invalid")
     require_stage_a_camera_context = (
         objective.stage is ReactiveTrainingStage.NUPLAN_FULL
     )
-    consumed_samples = 0
+    consumed_samples = (
+        0
+        if resume_rank_state is None
+        else int(resume_rank_state["consumed_samples"])
+    )
+    skipped_micro_steps = (
+        start_optimizer_step * gradient_accumulation_steps
+    )
+    if skipped_micro_steps:
+        assert resume_rank_state is not None
+        assert resume_rng_state is not None
+        if start_optimizer_step < optimizer_steps:
+            _replay_loader_position(
+                iterator,
+                skipped_micro_steps=skipped_micro_steps,
+                expected_restarts=int(
+                    resume_rank_state["loader_restarts"]
+                ),
+                expected_samples=consumed_samples,
+            )
+        else:
+            iterator.restarts = int(
+                resume_rank_state["loader_restarts"]
+            )
+        _restore_rng_state(resume_rng_state)
     micro_steps = optimizer_steps * gradient_accumulation_steps
-    for optimizer_step_index in range(optimizer_steps):
+    for optimizer_step_index in range(
+        start_optimizer_step,
+        optimizer_steps,
+    ):
         optimizer.zero_grad(set_to_none=True)
         finite_step = torch.ones((), dtype=torch.bool, device=device)
         for accumulation_index in range(gradient_accumulation_steps):
@@ -709,7 +909,7 @@ def _train_fixed_steps(
                 )
             )
             synchronize = _synchronize_gradient_micro_step(
-                optimizer_step_index,
+                optimizer_step_index - start_optimizer_step,
                 accumulation_index,
                 gradient_accumulation_steps,
             )
@@ -818,6 +1018,27 @@ def _train_fixed_steps(
                 "a Reactive DDP rank produced non-finite loss or gradients"
             )
         optimizer.step()
+        completed_optimizer_steps = optimizer_step_index + 1
+        if (
+            checkpoint_callback is not None
+            and _checkpoint_step_due(
+                completed_optimizer_steps,
+                optimizer_steps=optimizer_steps,
+                checkpoint_interval_steps=checkpoint_interval_steps,
+            )
+        ):
+            checkpoint_callback(
+                completed_optimizer_steps,
+                {
+                    "consumed_samples": consumed_samples,
+                    "gradient_totals": (
+                        gradient_totals.detach().cpu().tolist()
+                    ),
+                    "loader_restarts": iterator.restarts,
+                    "rank": dist.get_rank(),
+                    "term_totals": totals.detach().cpu().tolist(),
+                },
+            )
 
     packed = torch.cat([
         totals,
@@ -1660,7 +1881,7 @@ def _load_resume_checkpoint(
     optimizer,
     scheduler,
     expected: Mapping[str, Any],
-) -> tuple[int, float, float, list[dict[str, Any]]]:
+) -> ReactiveResumeState:
     import torch
 
     payload = torch.load(
@@ -1688,15 +1909,91 @@ def _load_resume_checkpoint(
     history = json.loads(history_path.read_text(encoding="ascii"))
     if (
         not isinstance(history, list)
-        or not history
         or any(not isinstance(item, dict) for item in history)
     ):
         raise ValueError("Reactive DDP resume checkpoint has invalid history")
-    return (
-        int(payload["epoch"]) + 1,
-        float(training_state.get("best_selection_score", -float("inf"))),
-        float(training_state.get("best_ade_6p4s_m", float("inf"))),
-        history,
+    checkpoint_kind = str(
+        training_state.get("checkpoint_kind", "epoch")
+    )
+    if checkpoint_kind == "epoch":
+        if not history:
+            raise ValueError(
+                "Reactive epoch checkpoint has empty history"
+            )
+        return ReactiveResumeState(
+            epoch=int(payload["epoch"]) + 1,
+            optimizer_step_in_epoch=0,
+            best_selection_score=float(
+                training_state.get(
+                    "best_selection_score",
+                    -float("inf"),
+                )
+            ),
+            best_ade_6p4s_m=float(
+                training_state.get("best_ade_6p4s_m", float("inf"))
+            ),
+            epoch_history=history,
+        )
+    if checkpoint_kind != "step":
+        raise ValueError(
+            f"unsupported Reactive checkpoint kind {checkpoint_kind}"
+        )
+    if (
+        training_state.get("step_checkpoint_version")
+        != REACTIVE_STEP_CHECKPOINT_VERSION
+    ):
+        raise ValueError("Reactive step checkpoint version differs")
+    optimizer_steps = int(expected["optimizer_steps_per_epoch"])
+    optimizer_step_in_epoch = int(
+        training_state.get("optimizer_step_in_epoch", -1)
+    )
+    if not 0 < optimizer_step_in_epoch <= optimizer_steps:
+        raise ValueError(
+            "Reactive step checkpoint optimizer position is invalid"
+        )
+    rank_train_states = training_state.get("rank_train_states")
+    rank_rng_states = training_state.get("rank_rng_states")
+    world_size = int(expected["distributed_world_size"])
+    required_train_state_keys = {
+        "consumed_samples",
+        "gradient_totals",
+        "loader_restarts",
+        "rank",
+        "term_totals",
+    }
+    if (
+        not isinstance(rank_train_states, list)
+        or not isinstance(rank_rng_states, list)
+        or len(rank_train_states) != world_size
+        or len(rank_rng_states) != world_size
+        or any(
+            not isinstance(item, Mapping)
+            for item in rank_train_states + rank_rng_states
+        )
+    ):
+        raise ValueError("Reactive step checkpoint rank state is invalid")
+    if any(
+        not required_train_state_keys.issubset(item)
+        for item in rank_train_states
+    ):
+        raise ValueError(
+            "Reactive step checkpoint train state is incomplete"
+        )
+    return ReactiveResumeState(
+        epoch=int(payload["epoch"]),
+        optimizer_step_in_epoch=optimizer_step_in_epoch,
+        best_selection_score=float(
+            training_state.get(
+                "best_selection_score",
+                -float("inf"),
+            )
+        ),
+        best_ade_6p4s_m=float(
+            training_state.get("best_ade_6p4s_m", float("inf"))
+        ),
+        epoch_history=history,
+        rank_train_states=tuple(rank_train_states),
+        rank_rng_states=tuple(rank_rng_states),
     )
 
 
@@ -1991,6 +2288,11 @@ def train_loop_per_worker(config: dict[str, Any]) -> None:
         ),
     )
     optimizer_steps = int(config["steps_per_epoch"]) or calculated_steps
+    checkpoint_interval_steps = int(config["checkpoint_interval_steps"])
+    _validate_checkpoint_interval(
+        checkpoint_interval_steps,
+        optimizer_steps,
+    )
     global_batch = (
         world_size
         * int(config["per_rank_batch_size"])
@@ -2007,7 +2309,10 @@ def train_loop_per_worker(config: dict[str, Any]) -> None:
         "distributed_world_size": world_size,
         "gradient_clip_max_norm": float(config["grad_clip"]),
         "gradient_clip_mode": "branch_v1",
+        "epochs": int(config["epochs"]),
+        "optimizer_steps_per_epoch": optimizer_steps,
         "route_metrics_version": ROUTE_VALIDATION_METRICS_VERSION,
+        "step_checkpoint_version": REACTIVE_STEP_CHECKPOINT_VERSION,
         "trajectory_weight": float(config["trajectory_weight"]),
         "bev_weight": float(config["bev_weight"]),
         "route_weight": float(config["route_weight"]),
@@ -2032,10 +2337,13 @@ def train_loop_per_worker(config: dict[str, Any]) -> None:
         ),
         "bevformer_v2_initialization": initialization_metadata,
     }
-    start_epoch = 1
-    best_selection_score = -float("inf")
-    best_ade = float("inf")
-    epoch_history: list[dict[str, Any]] = []
+    resume_state = ReactiveResumeState(
+        epoch=1,
+        optimizer_step_in_epoch=0,
+        best_selection_score=-float("inf"),
+        best_ade_6p4s_m=float("inf"),
+        epoch_history=[],
+    )
     if restored is not None:
         with restored.as_directory() as checkpoint_directory:
             resume_payload = torch.load(
@@ -2091,22 +2399,21 @@ def train_loop_per_worker(config: dict[str, Any]) -> None:
                 lineage_value = resume_config.get(lineage_key)
                 if lineage_value is not None:
                     lineage[lineage_key] = lineage_value
-            (
-                start_epoch,
-                best_selection_score,
-                best_ade,
-                epoch_history,
-            ) = _load_resume_checkpoint(
+            resume_state = _load_resume_checkpoint(
                 checkpoint_directory,
                 model=model,
                 optimizer=optimizer,
                 scheduler=scheduler,
                 expected=expected_resume,
             )
-    if start_epoch > int(config["epochs"]):
-        raise ValueError(
-            "resume checkpoint already completed the requested epochs"
-        )
+    if _resume_completed_requested_epochs(
+        resume_state,
+        int(config["epochs"]),
+    ):
+        return
+    best_selection_score = resume_state.best_selection_score
+    best_ade = resume_state.best_ade_6p4s_m
+    epoch_history = list(resume_state.epoch_history)
 
     hostnames: list[str | None] = [None] * world_size
     dist.all_gather_object(hostnames, socket.gethostname())
@@ -2131,7 +2438,10 @@ def train_loop_per_worker(config: dict[str, Any]) -> None:
         "distributed_world_size": world_size,
         "gradient_clip_max_norm": float(config["grad_clip"]),
         "gradient_clip_mode": "branch_v1",
+        "epochs": int(config["epochs"]),
+        "optimizer_steps_per_epoch": optimizer_steps,
         "route_metrics_version": ROUTE_VALIDATION_METRICS_VERSION,
+        "step_checkpoint_version": REACTIVE_STEP_CHECKPOINT_VERSION,
         "trajectory_weight": float(config["trajectory_weight"]),
         "bev_weight": float(config["bev_weight"]),
         "route_weight": float(config["route_weight"]),
@@ -2164,9 +2474,35 @@ def train_loop_per_worker(config: dict[str, Any]) -> None:
             effective_bev_statistics.metadata()
         )
     started = time.perf_counter()
-    for epoch in range(start_epoch, int(config["epochs"]) + 1):
+    for epoch in range(
+        resume_state.epoch,
+        int(config["epochs"]) + 1,
+    ):
         _seed_epoch(seed, rank, epoch)
         torch.cuda.reset_peak_memory_stats(device)
+        start_optimizer_step = (
+            resume_state.optimizer_step_in_epoch
+            if epoch == resume_state.epoch
+            else 0
+        )
+        resume_rank_train_state = _rank_resume_value_for_epoch(
+            resume_state.rank_train_states,
+            current_epoch=epoch,
+            resume_epoch=resume_state.epoch,
+            start_optimizer_step=start_optimizer_step,
+            rank=rank,
+            world_size=world_size,
+            name="train state",
+        )
+        resume_rank_rng_state = _rank_resume_value_for_epoch(
+            resume_state.rank_rng_states,
+            current_epoch=epoch,
+            resume_epoch=resume_state.epoch,
+            start_optimizer_step=start_optimizer_step,
+            rank=rank,
+            world_size=world_size,
+            name="RNG state",
+        )
         train_loader = make_multi_dataset_loader(
             local_directories,
             batch_size=int(config["per_rank_batch_size"]),
@@ -2180,6 +2516,145 @@ def train_loop_per_worker(config: dict[str, Any]) -> None:
             bev_repeat_policy=bev_repeat_policy,
             nodesplitter=passthrough_nodesplitter,
         )
+
+        def report_step_checkpoint(
+            completed_optimizer_steps: int,
+            local_train_state: Mapping[str, Any],
+        ) -> None:
+            local_rng_state = {
+                "rank": rank,
+                **_capture_rng_state(),
+            }
+            rank_payloads: list[dict[str, Any] | None] = [
+                None
+            ] * world_size
+            dist.all_gather_object(
+                rank_payloads,
+                {
+                    "rank": rank,
+                    "rng_state": local_rng_state,
+                    "train_state": dict(local_train_state),
+                },
+            )
+            if any(
+                not isinstance(payload, Mapping)
+                for payload in rank_payloads
+            ):
+                raise RuntimeError(
+                    "Reactive step checkpoint rank state is incomplete"
+                )
+            validated_payloads = [
+                dict(payload)
+                for payload in rank_payloads
+                if isinstance(payload, Mapping)
+            ]
+            ordered_payloads = sorted(
+                validated_payloads,
+                key=lambda payload: int(payload["rank"]),
+            )
+            if [
+                int(payload["rank"])
+                for payload in ordered_payloads
+            ] != list(range(world_size)):
+                raise RuntimeError(
+                    "Reactive step checkpoint rank order is invalid"
+                )
+            rank_train_states = [
+                dict(payload["train_state"])
+                for payload in ordered_payloads
+            ]
+            rank_rng_states = [
+                dict(payload["rng_state"])
+                for payload in ordered_payloads
+            ]
+            executed_optimizer_steps = (
+                (epoch - 1) * optimizer_steps
+                + completed_optimizer_steps
+            )
+            step_metrics: dict[str, Any] = {
+                "checkpoint_kind": "step",
+                "checkpoint_retention_score": float(
+                    executed_optimizer_steps
+                ),
+                "checkpoint_selection_score": -1.0,
+                "dataset_manifest_sha256": (
+                    plan.dataset_manifest_sha256
+                ),
+                "elapsed_seconds": time.perf_counter() - started,
+                "epoch": epoch,
+                "executed_optimizer_steps": (
+                    executed_optimizer_steps
+                ),
+                "is_best": 0,
+                "optimizer_step_in_epoch": (
+                    completed_optimizer_steps
+                ),
+                "optimizer_steps_per_epoch": optimizer_steps,
+                "step_checkpoint_version": (
+                    REACTIVE_STEP_CHECKPOINT_VERSION
+                ),
+                "world_size": world_size,
+            }
+            checkpoint_sha256: str | None = None
+            with tempfile.TemporaryDirectory() as checkpoint_directory:
+                checkpoint = None
+                if rank == 0:
+                    checkpoint_sha256 = save_reactive_checkpoint(
+                        Path(checkpoint_directory) / "checkpoint.pt",
+                        _base_model(model),
+                        stage=stage,
+                        dataset_manifest_sha256=(
+                            plan.dataset_manifest_sha256
+                        ),
+                        epoch=epoch,
+                        model_config=model_config,
+                        optimizer=optimizer,
+                        scheduler=scheduler,
+                        metrics=step_metrics,
+                        training_state={
+                            "assignment_sha256": assignment_sha256,
+                            "best_ade_6p4s_m": best_ade,
+                            "best_selection_score": (
+                                best_selection_score
+                            ),
+                            "checkpoint_kind": "step",
+                            "global_batch": global_batch,
+                            "optimizer_step_in_epoch": (
+                                completed_optimizer_steps
+                            ),
+                            "optimizer_steps_per_epoch": optimizer_steps,
+                            "rank_rng_states": rank_rng_states,
+                            "rank_train_states": rank_train_states,
+                            "step_checkpoint_version": (
+                                REACTIVE_STEP_CHECKPOINT_VERSION
+                            ),
+                            "world_size": world_size,
+                        },
+                        lineage=lineage,
+                    )
+                    (
+                        Path(checkpoint_directory) / "history.json"
+                    ).write_text(
+                        json.dumps(
+                            epoch_history,
+                            allow_nan=False,
+                            indent=2,
+                            sort_keys=True,
+                        ) + "\n",
+                        encoding="ascii",
+                    )
+                    checkpoint = Checkpoint.from_directory(
+                        checkpoint_directory
+                    )
+                checkpoint_digest: list[str | None] = [
+                    checkpoint_sha256
+                ]
+                dist.broadcast_object_list(checkpoint_digest, src=0)
+                step_metrics["checkpoint_sha256"] = str(
+                    checkpoint_digest[0]
+                )
+                train.report(step_metrics, checkpoint=checkpoint)
+
         train_metrics = _train_fixed_steps(
             model,
             train_loader,
@@ -2192,6 +2667,11 @@ def train_loop_per_worker(config: dict[str, Any]) -> None:
             ),
             grad_clip=float(config["grad_clip"]),
             precision=str(config["precision"]),
+            start_optimizer_step=start_optimizer_step,
+            resume_rank_state=resume_rank_train_state,
+            resume_rng_state=resume_rank_rng_state,
+            checkpoint_interval_steps=checkpoint_interval_steps,
+            checkpoint_callback=report_step_checkpoint,
         )
         validation_loader = make_multi_dataset_loader(
             local_directories,
@@ -2264,11 +2744,10 @@ def train_loop_per_worker(config: dict[str, Any]) -> None:
             if ade_within_guard
             else -1.0
         )
-        checkpoint_retention_score = checkpoint_selection_score
-        if epoch == int(config["epochs"]):
-            checkpoint_retention_score = (
-                2.0 + validation["selection_score"]
-            )
+        checkpoint_retention_score = (
+            EPOCH_CHECKPOINT_RETENTION_SCORE_BASE
+            + epoch
+        )
         if is_best:
             best_selection_score = validation["selection_score"]
         best_ade = min(best_ade, validation["ade_6p4s_m"])
@@ -2326,6 +2805,7 @@ def train_loop_per_worker(config: dict[str, Any]) -> None:
                         "assignment_sha256": assignment_sha256,
                         "best_ade_6p4s_m": best_ade,
                         "best_selection_score": best_selection_score,
+                        "checkpoint_kind": "epoch",
                         "global_batch": global_batch,
                         "optimizer_steps_per_epoch": optimizer_steps,
                         "rank_evidence": rank_evidence,
@@ -2337,6 +2817,7 @@ def train_loop_per_worker(config: dict[str, Any]) -> None:
             dist.broadcast_object_list(checkpoint_digest, src=0)
             metrics = {
                 **diagnostic_metrics,
+                "checkpoint_kind": "epoch",
                 "checkpoint_sha256": str(checkpoint_digest[0]),
                 "checkpoint_selection_score": (
                     checkpoint_selection_score
@@ -2523,25 +3004,30 @@ def run_reactive_stage(config: Mapping[str, Any]) -> dict[str, Any]:
 
     if not ray.is_initialized():
         ray.init(address="auto")
+    scaling_config = train.ScalingConfig(
+        num_workers=int(config["num_workers"]),
+        use_gpu=True,
+        resources_per_worker={
+            "CPU": int(config["worker_cpus"]),
+            "GPU": 1,
+        },
+        placement_strategy="SPREAD",
+    )
+    # Train V2 reloads checkpoint_manager_snapshot.json when a Flyte retry
+    # recreates this trainer with the same stable experiment directory.
     trainer = TorchTrainer(
         train_loop_per_worker=train_loop_per_worker,
         train_loop_config=dict(config),
-        scaling_config=train.ScalingConfig(
-            num_workers=int(config["num_workers"]),
-            use_gpu=True,
-            resources_per_worker={
-                "CPU": int(config["worker_cpus"]),
-                "GPU": 1,
-            },
-            placement_strategy="SPREAD",
-        ),
+        scaling_config=scaling_config,
         run_config=train.RunConfig(
             name=str(config["run_name"]),
             storage_path=str(config["storage_path"]),
             failure_config=train.FailureConfig(max_failures=2),
             checkpoint_config=train.CheckpointConfig(
-                num_to_keep=None,
-                checkpoint_score_attribute="checkpoint_retention_score",
+                num_to_keep=int(config["epochs"]) + 2,
+                checkpoint_score_attribute=(
+                    "checkpoint_retention_score"
+                ),
                 checkpoint_score_order="max",
             ),
         ),

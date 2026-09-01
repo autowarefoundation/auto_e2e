@@ -1,6 +1,49 @@
 apiVersion: karpenter.sh/v1
 kind: NodePool
 metadata:
+  name: gpu-canary
+spec:
+  disruption:
+    budgets:
+      - nodes: 10%
+    consolidationPolicy: WhenEmpty
+    consolidateAfter: 1m
+  template:
+    metadata:
+      labels:
+        workload-type: gpu-canary
+    spec:
+      expireAfter: 456h
+      terminationGracePeriod: 24h
+      nodeClassRef:
+        group: eks.amazonaws.com
+        kind: NodeClass
+        name: auto-e2e-gpu-canary
+      requirements:
+        - key: node.kubernetes.io/instance-type
+          operator: In
+          values: ["g6.2xlarge"]
+        - key: kubernetes.io/arch
+          operator: In
+          values: ["amd64"]
+        - key: karpenter.sh/capacity-type
+          operator: In
+          values: ["reserved"]
+        - key: topology.kubernetes.io/zone
+          operator: In
+          values: ["us-west-2a"]
+      taints:
+        - key: nvidia.com/gpu
+          effect: NoSchedule
+  limits:
+    cpu: "16"
+    memory: 128Gi
+    nodes: "2"
+    nvidia.com/gpu: "2"
+---
+apiVersion: karpenter.sh/v1
+kind: NodePool
+metadata:
   name: gpu-performance-reserved
 spec:
   weight: 100
@@ -12,6 +55,8 @@ spec:
       labels:
         workload-type: gpu-performance
     spec:
+      expireAfter: 456h
+      terminationGracePeriod: 24h
       nodeClassRef:
         group: eks.amazonaws.com
         kind: NodeClass
@@ -52,6 +97,8 @@ spec:
       labels:
         workload-type: gpu-performance
     spec:
+      expireAfter: 456h
+      terminationGracePeriod: 24h
       nodeClassRef:
         group: eks.amazonaws.com
         kind: NodeClass
@@ -88,6 +135,8 @@ spec:
       labels:
         workload-type: gpu-training
     spec:
+      expireAfter: 456h
+      terminationGracePeriod: 24h
       nodeClassRef:
         group: eks.amazonaws.com
         kind: NodeClass
@@ -128,6 +177,8 @@ spec:
       labels:
         workload-type: gpu-burst
     spec:
+      expireAfter: 456h
+      terminationGracePeriod: 24h
       nodeClassRef:
         group: eks.amazonaws.com
         kind: NodeClass
@@ -169,6 +220,8 @@ spec:
       labels:
         workload-type: gpu-smoke
     spec:
+      expireAfter: 456h
+      terminationGracePeriod: 24h
       nodeClassRef:
         group: eks.amazonaws.com
         kind: NodeClass

@@ -367,6 +367,7 @@ def _run_reactive_stage_task(
     precision: str,
     gradient_accumulation_steps: int,
     steps_per_epoch: int,
+    checkpoint_interval_steps: int,
     shuffle_buffer: int,
     is_pretrained: bool,
     trajectory_weight: float,
@@ -447,6 +448,7 @@ def _run_reactive_stage_task(
         ),
         "bevformer_pretrained_checkpoint_uri": pretrained_uri,
         "corridor_pos_weight": corridor_pos_weight,
+        "checkpoint_interval_steps": checkpoint_interval_steps,
         "epochs": epochs,
         "grad_clip": grad_clip,
         "gradient_accumulation_steps": (
@@ -706,6 +708,7 @@ def train_reactive_stage_ray_2(
     precision: str = "fp32",
     gradient_accumulation_steps: int = 1,
     steps_per_epoch: int = 2,
+    checkpoint_interval_steps: int = 1,
     shuffle_buffer: int = 64,
     is_pretrained: bool = True,
     trajectory_weight: float = 1.0,
@@ -732,6 +735,7 @@ def train_reactive_stage_ray_2(
         precision=precision,
         gradient_accumulation_steps=gradient_accumulation_steps,
         steps_per_epoch=steps_per_epoch,
+        checkpoint_interval_steps=checkpoint_interval_steps,
         shuffle_buffer=shuffle_buffer,
         is_pretrained=is_pretrained,
         trajectory_weight=trajectory_weight,
@@ -752,7 +756,7 @@ def train_reactive_stage_ray_2(
 @task(
     task_config=RAY_REACTIVE_4,
     container_image=TRAINING_IMAGE,
-    retries=0,
+    retries=2,
     labels={
         "kueue.x-k8s.io/queue-name": "gpu-performance",
         "kueue.x-k8s.io/priority-class": "research-low",
@@ -774,6 +778,7 @@ def train_reactive_stage_ray_4(
     precision: str = "bf16",
     gradient_accumulation_steps: int = 1,
     steps_per_epoch: int = 0,
+    checkpoint_interval_steps: int = 512,
     shuffle_buffer: int = 256,
     is_pretrained: bool = True,
     trajectory_weight: float = 1.0,
@@ -799,6 +804,7 @@ def train_reactive_stage_ray_4(
         precision=precision,
         gradient_accumulation_steps=gradient_accumulation_steps,
         steps_per_epoch=steps_per_epoch,
+        checkpoint_interval_steps=checkpoint_interval_steps,
         shuffle_buffer=shuffle_buffer,
         is_pretrained=is_pretrained,
         trajectory_weight=trajectory_weight,
@@ -840,6 +846,7 @@ def train_reactive_stage_ray_8(
     precision: str = "bf16",
     gradient_accumulation_steps: int = 1,
     steps_per_epoch: int = 0,
+    checkpoint_interval_steps: int = 512,
     shuffle_buffer: int = 256,
     is_pretrained: bool = True,
     trajectory_weight: float = 1.0,
@@ -865,6 +872,7 @@ def train_reactive_stage_ray_8(
         precision=precision,
         gradient_accumulation_steps=gradient_accumulation_steps,
         steps_per_epoch=steps_per_epoch,
+        checkpoint_interval_steps=checkpoint_interval_steps,
         shuffle_buffer=shuffle_buffer,
         is_pretrained=is_pretrained,
         trajectory_weight=trajectory_weight,
@@ -898,6 +906,7 @@ def wf_train_reactive_nuplan_ray_4(
     trajectory_weight: float = 1.0,
     bev_weight: float = 1.0,
     route_weight: float = 1.0,
+    checkpoint_interval_steps: int = 512,
 ) -> ReactiveRayOutput:
     """Train Stage A while keeping the pretrained camera BEV frozen."""
     return train_reactive_stage_ray_4(
@@ -911,6 +920,7 @@ def wf_train_reactive_nuplan_ray_4(
         training_seed=training_seed,
         precision=precision,
         steps_per_epoch=0,
+        checkpoint_interval_steps=checkpoint_interval_steps,
         shuffle_buffer=256,
         is_pretrained=True,
         trajectory_weight=trajectory_weight,

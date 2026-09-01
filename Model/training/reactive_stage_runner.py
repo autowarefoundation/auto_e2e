@@ -1782,7 +1782,7 @@ def save_reactive_checkpoint(
     model_config: Mapping[str, Any],
     optimizer: torch.optim.Optimizer | None = None,
     scheduler: Any | None = None,
-    metrics: Mapping[str, float] | None = None,
+    metrics: Mapping[str, Any] | None = None,
     training_state: Mapping[str, Any] | None = None,
     lineage: Mapping[str, Any] | None = None,
 ) -> str:

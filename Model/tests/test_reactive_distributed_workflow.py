@@ -365,8 +365,14 @@ def test_reviewed_ray_topologies_have_fixed_worker_groups():
 
 
 def test_four_rank_performance_capacity_matches_ray_contract():
+    head_spec = (
+        distributed_training.RAY_REACTIVE_4.head_node_config
+        .pod_template.pod_spec
+    )
     worker = distributed_training.RAY_REACTIVE_4.worker_node_config[0]
     worker_spec = worker.pod_template.pod_spec
+    assert head_spec.node_selector is None
+    assert not head_spec.tolerations
     assert worker.replicas == 4
     assert worker.ray_start_params["num-cpus"] == "3"
     assert worker_spec.node_selector == {
@@ -397,6 +403,13 @@ def test_four_rank_performance_capacity_matches_ray_contract():
     reserved_class = node_classes[
         "auto-e2e-gpu-performance-reserved"
     ]["spec"]
+    canary_class = node_classes["auto-e2e-gpu-canary"]["spec"]
+    assert canary_class["capacityReservationSelectorTerms"] == [
+        {
+            "ownerID": "REPLACE_WITH_AWS_ACCOUNT_ID",
+            "tags": {"Name": "auto-e2e-gpu-canary"},
+        }
+    ]
     assert reserved_class["capacityReservationSelectorTerms"] == [
         {
             "ownerID": "REPLACE_WITH_AWS_ACCOUNT_ID",
@@ -435,6 +448,17 @@ def test_four_rank_performance_capacity_matches_ray_contract():
     assert reserved_pool["template"]["metadata"]["labels"] == {
         "workload-type": "gpu-performance"
     }
+    for pool_name in (
+        "gpu-canary",
+        "gpu-performance-reserved",
+        "gpu-performance-ondemand",
+        "gpu-training",
+        "gpu-burst",
+        "gpu-smoke",
+    ):
+        pool_spec = node_pools[pool_name]["spec"]["template"]["spec"]
+        assert pool_spec["expireAfter"] == "456h"
+        assert pool_spec["terminationGracePeriod"] == "24h"
     requirements = {
         item["key"]: item["values"]
         for item in reserved_pool["template"]["spec"]["requirements"]
@@ -639,7 +663,15 @@ def test_four_rank_workflow_runs_one_frozen_multitask_stage():
     assert bindings["trajectory_weight"].promise.var == "trajectory_weight"
     assert bindings["bev_weight"].promise.var == "bev_weight"
     assert bindings["route_weight"].promise.var == "route_weight"
+    assert (
+        bindings["checkpoint_interval_steps"].promise.var
+        == "checkpoint_interval_steps"
+    )
     assert bindings["freeze_bevformer"].scalar.primitive.boolean
+    assert (
+        distributed_training.train_reactive_stage_ray_4.metadata.retries
+        == 2
+    )
 
 
 def test_canary_launcher_is_idempotent_and_retries_flyte_admin():

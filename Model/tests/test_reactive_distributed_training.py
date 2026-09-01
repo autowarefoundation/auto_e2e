@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import inspect
 import json
+import random
 import re
 import tarfile
 from contextlib import nullcontext
@@ -14,6 +15,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
+import distributed_training.reactive_stage as reactive_stage_module
 from data_parsing.camera_slots import CANONICAL_SIX_CAMERA_SLOTS
 from data_parsing.pre_extracted import (
     BEVClassRepeatPolicy,
@@ -42,17 +44,28 @@ from distributed_training.reactive_data import (
 )
 from distributed_training.reactive_stage import (
     BEV_LANE_NEAR_RADIUS_M,
+    REACTIVE_STEP_CHECKPOINT_VERSION,
+    ReactiveResumeState,
     _all_reduce_bev_statistics,
     _bev_lane_range_masks,
     _camera_feature_scale_weights,
+    _capture_rng_state,
     _checkpoint_history,
+    _checkpoint_step_due,
     _histogram_average_precision,
     _evaluate_global_reactive,
+    _load_resume_checkpoint,
+    _rank_resume_value,
+    _rank_resume_value_for_epoch,
+    _replay_loader_position,
+    _resume_completed_requested_epochs,
+    _restore_rng_state,
     _route_validation_statistics,
     _select_result_checkpoint,
     _synchronize_gradient_micro_step,
     _synchronize_t8_temporal_batch_norm,
     _train_fixed_steps,
+    _validate_checkpoint_interval,
     clip_finite_gradients_float64,
     normalize_ray_checkpoint_uri,
     reactive_gradient_parameter_groups,
@@ -503,6 +516,201 @@ def test_restarting_iterator_repeats_finite_loader():
         next(RestartingIterator([]))
 
 
+def test_step_checkpoint_schedule_uses_fixed_intervals():
+    due_steps = [
+        step
+        for step in range(1, 1_025)
+        if _checkpoint_step_due(
+            step,
+            optimizer_steps=1_024,
+            checkpoint_interval_steps=512,
+        )
+    ]
+
+    assert due_steps == [512, 1_024]
+    assert not _checkpoint_step_due(
+        7,
+        optimizer_steps=7,
+        checkpoint_interval_steps=512,
+    )
+
+
+def test_checkpoint_interval_must_fit_inside_epoch():
+    _validate_checkpoint_interval(4, 10)
+    with pytest.raises(ValueError, match="positive"):
+        _validate_checkpoint_interval(0, 10)
+    with pytest.raises(ValueError, match="must not exceed"):
+        _validate_checkpoint_interval(11, 10)
+
+
+def test_fixed_step_resume_matches_uninterrupted_training(monkeypatch):
+    torch = pytest.importorskip("torch")
+    import torch.distributed as dist
+
+    class ResumeModel(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.tensor(1.0))
+
+        def forward(self, visual_tiles, *_args, **_kwargs):
+            controls = (
+                visual_tiles.reshape(visual_tiles.shape[0], -1).mean(dim=1)
+                * self.weight
+            )
+            return controls[:, None], {}
+
+    class ResumeObjective:
+        stage = ReactiveTrainingStage.L2D_CONTINUATION
+        compute_bev_segmentation = False
+        compute_route_reconstruction = False
+
+        def __call__(self, predicted_controls, _auxiliary, _batch):
+            total = predicted_controls.mean()
+            zero = total * 0.0
+            return {
+                "total": total,
+                "trajectory": total,
+                "bev_segmentation": zero,
+                "bev_segmentation_bce": zero,
+                "bev_segmentation_dice": zero,
+                "route_reconstruction": zero,
+            }
+
+    batches = [
+        {
+            "visual_tiles": torch.full((1, 1, 1, 1, 1), value),
+            "map_context": torch.zeros(1, 1, 1, 1),
+            "visual_history": torch.zeros(1, 1),
+            "egomotion_history": torch.zeros(1, 1),
+            "route_mask": torch.zeros(1, 1, 1, 1),
+            "map_valid": torch.ones(1, dtype=torch.bool),
+            "route_valid": torch.ones(1, dtype=torch.bool),
+        }
+        for value in (1.0, 2.0)
+    ]
+    monkeypatch.setattr(dist, "all_reduce", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(dist, "get_rank", lambda: 0)
+    monkeypatch.setattr(dist, "get_world_size", lambda: 1)
+    monkeypatch.setattr(
+        reactive_stage_module,
+        "reactive_gradient_parameter_groups",
+        lambda model: {
+            "camera": [],
+            "front_gate": [],
+            "navigation": [],
+            "planner": [model.weight],
+        },
+    )
+
+    uninterrupted_model = ResumeModel()
+    uninterrupted_optimizer = torch.optim.SGD(
+        uninterrupted_model.parameters(),
+        lr=0.1,
+    )
+    saved = {}
+
+    def capture_first_step(step, train_state):
+        if step == 1:
+            saved["model"] = {
+                name: value.detach().clone()
+                for name, value in uninterrupted_model.state_dict().items()
+            }
+            saved["optimizer"] = uninterrupted_optimizer.state_dict()
+            saved["rng"] = _capture_rng_state()
+            saved["train"] = dict(train_state)
+
+    uninterrupted_metrics = _train_fixed_steps(
+        uninterrupted_model,
+        batches,
+        ResumeObjective(),
+        uninterrupted_optimizer,
+        device=torch.device("cpu"),
+        optimizer_steps=2,
+        gradient_accumulation_steps=1,
+        grad_clip=10.0,
+        precision="fp32",
+        checkpoint_interval_steps=1,
+        checkpoint_callback=capture_first_step,
+    )
+
+    resumed_model = ResumeModel()
+    resumed_model.load_state_dict(saved["model"])
+    resumed_optimizer = torch.optim.SGD(
+        resumed_model.parameters(),
+        lr=0.1,
+    )
+    resumed_optimizer.load_state_dict(saved["optimizer"])
+    resumed_metrics = _train_fixed_steps(
+        resumed_model,
+        batches,
+        ResumeObjective(),
+        resumed_optimizer,
+        device=torch.device("cpu"),
+        optimizer_steps=2,
+        gradient_accumulation_steps=1,
+        grad_clip=10.0,
+        precision="fp32",
+        start_optimizer_step=1,
+        resume_rank_state=saved["train"],
+        resume_rng_state=saved["rng"],
+        checkpoint_interval_steps=1,
+    )
+
+    assert resumed_model.weight.item() == pytest.approx(
+        uninterrupted_model.weight.item()
+    )
+    assert resumed_metrics == pytest.approx(uninterrupted_metrics)
+
+
+def test_replay_loader_position_checks_samples_and_restarts():
+    batch = {
+        "visual_tiles": np.zeros((2, 1, 1, 1, 1)),
+    }
+    iterator = RestartingIterator([batch])
+
+    _replay_loader_position(
+        iterator,
+        skipped_micro_steps=2,
+        expected_restarts=1,
+        expected_samples=4,
+    )
+
+    with pytest.raises(ValueError, match="loader position"):
+        _replay_loader_position(
+            RestartingIterator([batch]),
+            skipped_micro_steps=2,
+            expected_restarts=1,
+            expected_samples=3,
+        )
+
+
+def test_reactive_rng_state_round_trips():
+    torch = pytest.importorskip("torch")
+    random.seed(11)
+    np.random.seed(12)
+    torch.manual_seed(13)
+    state = _capture_rng_state()
+    expected = (
+        random.random(),
+        float(np.random.random()),
+        torch.rand(3),
+    )
+
+    random.seed(21)
+    np.random.seed(22)
+    torch.manual_seed(23)
+    _restore_rng_state(state)
+    actual = (
+        random.random(),
+        float(np.random.random()),
+        torch.rand(3),
+    )
+
+    assert actual[0] == expected[0]
+    assert actual[1] == expected[1]
+    assert torch.equal(actual[2], expected[2])
+
+
 def test_float64_gradient_clipping_handles_large_finite_values():
     torch = pytest.importorskip("torch")
     parameter = torch.nn.Parameter(torch.zeros(2))
@@ -640,6 +848,7 @@ def _stage_config(stage: str) -> dict[str, object]:
         "bev_weight": 1.0,
         "allow_random_bevformer_init": True,
         "corridor_pos_weight": 1.0,
+        "checkpoint_interval_steps": 512,
         "epochs": 2,
         "grad_clip": 1.0,
         "gradient_accumulation_steps": 1,
@@ -693,6 +902,11 @@ def test_validate_stage_config_rejects_parent_and_batch_contract_changes():
     with pytest.raises(ValueError, match="derived"):
         validate_reactive_stage_config(caller_weighted)
 
+    invalid_interval = _stage_config("nuplan_full")
+    invalid_interval["checkpoint_interval_steps"] = 0
+    with pytest.raises(ValueError, match="checkpoint_interval_steps"):
+        validate_reactive_stage_config(invalid_interval)
+
 
 def test_validate_stage_config_requires_one_initialization_mode():
     config = _stage_config("nuplan_full")
@@ -714,24 +928,189 @@ def _write_resume_checkpoint(
     model,
     optimizer,
     scheduler,
+    epoch=1,
+    training_state=None,
+    history=None,
 ):
     torch = pytest.importorskip("torch")
     directory.mkdir()
     torch.save(
         {
             "config": config,
-            "epoch": 1,
+            "epoch": epoch,
             "model_state_dict": model.state_dict(),
             "optimizer_state_dict": optimizer.state_dict(),
             "scheduler_state_dict": scheduler.state_dict(),
-            "training_state": {
+            "training_state": training_state or {
                 "best_ade_6p4s_m": 2.0,
                 "best_selection_score": 0.5,
             },
         },
         directory / "checkpoint.pt",
     )
-    (directory / "history.json").write_text(json.dumps([{"epoch": 1}]))
+    (directory / "history.json").write_text(
+        json.dumps(
+            [{"epoch": epoch}] if history is None else history
+        )
+    )
+
+
+def test_step_checkpoint_restores_epoch_position_and_rank_state(tmp_path):
+    torch = pytest.importorskip("torch")
+    model = torch.nn.Linear(2, 1)
+    optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
+    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=1)
+    expected = {
+        "distributed_world_size": 2,
+        "optimizer_steps_per_epoch": 8,
+        "step_checkpoint_version": REACTIVE_STEP_CHECKPOINT_VERSION,
+    }
+    rank_train_states = [
+        {
+            "consumed_samples": 3,
+            "gradient_totals": [0.0] * 8,
+            "loader_restarts": 0,
+            "rank": rank,
+            "term_totals": [0.0] * 6,
+        }
+        for rank in range(2)
+    ]
+    rank_rng_states = [
+        {"rank": rank, **_capture_rng_state()}
+        for rank in range(2)
+    ]
+    checkpoint = tmp_path / "step-checkpoint"
+    _write_resume_checkpoint(
+        checkpoint,
+        config=expected,
+        model=model,
+        optimizer=optimizer,
+        scheduler=scheduler,
+        epoch=2,
+        training_state={
+            "best_ade_6p4s_m": 1.5,
+            "best_selection_score": 0.7,
+            "checkpoint_kind": "step",
+            "optimizer_step_in_epoch": 5,
+            "rank_rng_states": rank_rng_states,
+            "rank_train_states": rank_train_states,
+            "step_checkpoint_version": (
+                REACTIVE_STEP_CHECKPOINT_VERSION
+            ),
+        },
+        history=[{"epoch": 1}],
+    )
+
+    state = _load_resume_checkpoint(
+        str(checkpoint),
+        model=model,
+        optimizer=optimizer,
+        scheduler=scheduler,
+        expected=expected,
+    )
+
+    assert state.epoch == 2
+    assert state.optimizer_step_in_epoch == 5
+    assert state.best_selection_score == 0.7
+    assert state.best_ade_6p4s_m == 1.5
+    assert state.epoch_history == [{"epoch": 1}]
+    assert state.rank_train_states == tuple(rank_train_states)
+    assert state.rank_rng_states is not None
+    assert [item["rank"] for item in state.rank_rng_states] == [0, 1]
+
+
+def test_step_checkpoint_rejects_incomplete_rank_train_state(tmp_path):
+    torch = pytest.importorskip("torch")
+    model = torch.nn.Linear(2, 1)
+    optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
+    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=1)
+    expected = {
+        "distributed_world_size": 1,
+        "optimizer_steps_per_epoch": 8,
+        "step_checkpoint_version": REACTIVE_STEP_CHECKPOINT_VERSION,
+    }
+    checkpoint = tmp_path / "invalid-step-checkpoint"
+    _write_resume_checkpoint(
+        checkpoint,
+        config=expected,
+        model=model,
+        optimizer=optimizer,
+        scheduler=scheduler,
+        epoch=2,
+        training_state={
+            "checkpoint_kind": "step",
+            "optimizer_step_in_epoch": 5,
+            "rank_rng_states": [{"rank": 0, **_capture_rng_state()}],
+            "rank_train_states": [{"rank": 0}],
+            "step_checkpoint_version": REACTIVE_STEP_CHECKPOINT_VERSION,
+        },
+        history=[{"epoch": 1}],
+    )
+
+    with pytest.raises(ValueError, match="train state is incomplete"):
+        _load_resume_checkpoint(
+            str(checkpoint),
+            model=model,
+            optimizer=optimizer,
+            scheduler=scheduler,
+            expected=expected,
+        )
+
+
+def test_rank_resume_state_is_used_only_for_the_resumed_epoch():
+    values = ({"rank": 0, "value": 7},)
+
+    active = _rank_resume_value_for_epoch(
+        values,
+        current_epoch=2,
+        resume_epoch=2,
+        start_optimizer_step=5,
+        rank=0,
+        world_size=1,
+        name="train state",
+    )
+    next_epoch = _rank_resume_value_for_epoch(
+        values,
+        current_epoch=3,
+        resume_epoch=2,
+        start_optimizer_step=0,
+        rank=0,
+        world_size=1,
+        name="train state",
+    )
+
+    assert active == {"rank": 0, "value": 7}
+    assert next_epoch is None
+
+
+def test_rank_resume_state_rejects_world_size_and_order_mismatch():
+    with pytest.raises(ValueError, match="count"):
+        _rank_resume_value(
+            ({"rank": 0},),
+            rank=0,
+            world_size=2,
+            name="train state",
+        )
+    with pytest.raises(ValueError, match="rank order"):
+        _rank_resume_value(
+            ({"rank": 1},),
+            rank=0,
+            world_size=1,
+            name="train state",
+        )
+
+
+def test_completed_resume_skips_worker_training():
+    state = ReactiveResumeState(
+        epoch=4,
+        optimizer_step_in_epoch=0,
+        best_selection_score=0.5,
+        best_ade_6p4s_m=1.0,
+        epoch_history=[{"epoch": 3}],
+    )
+
+    assert _resume_completed_requested_epochs(state, 3)
+    assert not _resume_completed_requested_epochs(state, 4)
 
 
 def test_ray_actor_cpu_reservation_matches_worker_config(
@@ -809,7 +1188,10 @@ def test_ray_actor_cpu_reservation_matches_worker_config(
         "CPU": 3,
         "GPU": 1,
     }
-    assert captured["run_config"].checkpoint_config.num_to_keep is None
+    assert (
+        captured["run_config"].checkpoint_config.num_to_keep
+        == config["epochs"] + 2
+    )
     assert result["selected_epoch"] == 1
     assert result["metrics"]["checkpoint_sha256"] == "a" * 64
 
