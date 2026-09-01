@@ -1,105 +1,51 @@
 apiVersion: eks.amazonaws.com/v1
 kind: NodeClass
 metadata:
-  name: auto-e2e-gpu-canary
+  name: auto-e2e-gpu-validation
 spec:
   role: auto-e2e-platform-node-role
   subnetSelectorTerms:
     - tags:
         Name: auto-e2e-platform-private-us-west-2a
+  securityGroupSelectorTerms:
     - tags:
-        Name: auto-e2e-platform-private-us-west-2b
+        aws:eks:cluster-name: auto-e2e-platform
+  capacityReservationSelectorTerms:
+    - ownerID: "REPLACE_WITH_AWS_ACCOUNT_ID"
+      tags:
+        Name: auto-e2e-gpu-validation
+  placementGroupSelector:
+    name: auto-e2e-distributed-training-pg
+  ephemeralStorage:
+    size: 200Gi
+    iops: 3000
+    throughput: 125
+  networkPolicy: DefaultAllow
+  networkPolicyEventLogs: Disabled
+  snatPolicy: Random
+---
+apiVersion: eks.amazonaws.com/v1
+kind: NodeClass
+metadata:
+  name: auto-e2e-p5en-capacity-block
+spec:
+  role: auto-e2e-platform-node-role
+  subnetSelectorTerms:
+    - tags:
+        Name: auto-e2e-platform-private-us-west-2a
     - tags:
         Name: auto-e2e-platform-private-us-west-2c
-    - tags:
-        Name: auto-e2e-platform-private-us-west-2d
   securityGroupSelectorTerms:
     - tags:
         aws:eks:cluster-name: auto-e2e-platform
   capacityReservationSelectorTerms:
     - ownerID: "REPLACE_WITH_AWS_ACCOUNT_ID"
       tags:
-        Name: auto-e2e-gpu-canary
-  placementGroupSelector:
-    name: auto-e2e-distributed-training-pg
+        Name: auto-e2e-p5en-capacity-block
   ephemeralStorage:
-    size: 200Gi
-    iops: 3000
-    throughput: 125
-  networkPolicy: DefaultAllow
-  networkPolicyEventLogs: Disabled
-  snatPolicy: Random
----
-apiVersion: eks.amazonaws.com/v1
-kind: NodeClass
-metadata:
-  name: auto-e2e-gpu-training
-spec:
-  role: auto-e2e-platform-node-role
-  subnetSelectorTerms:
-    - tags:
-        Name: auto-e2e-platform-private-us-west-2b
-  securityGroupSelectorTerms:
-    - tags:
-        aws:eks:cluster-name: auto-e2e-platform
-  capacityReservationSelectorTerms:
-    - ownerID: "REPLACE_WITH_AWS_ACCOUNT_ID"
-      tags:
-        Name: auto-e2e-distributed-training
-  placementGroupSelector:
-    name: auto-e2e-distributed-training-pg
-  ephemeralStorage:
-    size: 200Gi
-    iops: 3000
-    throughput: 125
-  networkPolicy: DefaultAllow
-  networkPolicyEventLogs: Disabled
-  snatPolicy: Random
----
-apiVersion: eks.amazonaws.com/v1
-kind: NodeClass
-metadata:
-  name: auto-e2e-gpu-performance-reserved
-spec:
-  role: auto-e2e-platform-node-role
-  subnetSelectorTerms:
-    - tags:
-        Name: auto-e2e-platform-private-us-west-2a
-  securityGroupSelectorTerms:
-    - tags:
-        aws:eks:cluster-name: auto-e2e-platform
-  capacityReservationSelectorTerms:
-    - ownerID: "REPLACE_WITH_AWS_ACCOUNT_ID"
-      tags:
-        Name: auto-e2e-gpu-canary
-  placementGroupSelector:
-    name: auto-e2e-distributed-training-pg
-  ephemeralStorage:
-    size: 200Gi
-    iops: 3000
-    throughput: 125
-  networkPolicy: DefaultAllow
-  networkPolicyEventLogs: Disabled
-  snatPolicy: Random
----
-apiVersion: eks.amazonaws.com/v1
-kind: NodeClass
-metadata:
-  name: auto-e2e-gpu-performance-ondemand
-spec:
-  role: auto-e2e-platform-node-role
-  subnetSelectorTerms:
-    - tags:
-        Name: auto-e2e-platform-private-us-west-2a
-  securityGroupSelectorTerms:
-    - tags:
-        aws:eks:cluster-name: auto-e2e-platform
-  placementGroupSelector:
-    name: auto-e2e-distributed-training-pg
-  ephemeralStorage:
-    size: 200Gi
-    iops: 3000
-    throughput: 125
+    size: 2Ti
+    iops: 16000
+    throughput: 1000
   networkPolicy: DefaultAllow
   networkPolicyEventLogs: Disabled
   snatPolicy: Random

@@ -599,14 +599,21 @@ def test_large_shm_tasks_serialize_karpenter_disruption_protection():
         domain="development",
         version="test",
     )
-    expected = {"karpenter.sh/do-not-disrupt": "true"}
-
     for task in (
-        workflows.train_il,
         workflows.evaluate_il_policy,
         workflows.evaluate_rl_policy,
     ):
-        assert task.get_k8s_pod(settings).metadata.annotations == expected
+        assert task.get_k8s_pod(settings).metadata.annotations == {
+            "karpenter.sh/do-not-disrupt": "true"
+        }
+
+    for task in (
+        workflows.train_il,
+        workflows.train_offline_rl,
+    ):
+        assert task.get_k8s_pod(settings).metadata.annotations == {
+            "karpenter.sh/do-not-disrupt": "true"
+        }
 
 
 def test_contract_version_import_is_fail_closed():

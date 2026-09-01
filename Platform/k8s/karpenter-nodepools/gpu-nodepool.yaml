@@ -1,7 +1,7 @@
 apiVersion: karpenter.sh/v1
 kind: NodePool
 metadata:
-  name: gpu-canary
+  name: gpu-validation
 spec:
   disruption:
     budgets:
@@ -11,14 +11,14 @@ spec:
   template:
     metadata:
       labels:
-        workload-type: gpu-canary
+        workload-type: gpu-validation
     spec:
       expireAfter: 456h
       terminationGracePeriod: 24h
       nodeClassRef:
         group: eks.amazonaws.com
         kind: NodeClass
-        name: auto-e2e-gpu-canary
+        name: auto-e2e-gpu-validation
       requirements:
         - key: node.kubernetes.io/instance-type
           operator: In
@@ -44,27 +44,31 @@ spec:
 apiVersion: karpenter.sh/v1
 kind: NodePool
 metadata:
-  name: gpu-performance-reserved
+  name: p5en-capacity-block
 spec:
-  weight: 100
   disruption:
+    # Prevent voluntary consolidation and drift while paid training runs.
+    budgets:
+      - nodes: "0"
     consolidationPolicy: WhenEmpty
-    consolidateAfter: 1m
+    consolidateAfter: Never
   template:
     metadata:
       labels:
-        workload-type: gpu-performance
+        workload-type: p5en-capacity-block
     spec:
-      expireAfter: 456h
-      terminationGracePeriod: 24h
+      expireAfter: 503h
+      # Capacity Block termination leaves a ten-minute Karpenter drain
+      # window. Keep this bound below that window for graceful eviction.
+      terminationGracePeriod: 5m
       nodeClassRef:
         group: eks.amazonaws.com
         kind: NodeClass
-        name: auto-e2e-gpu-performance-reserved
+        name: auto-e2e-p5en-capacity-block
       requirements:
         - key: node.kubernetes.io/instance-type
           operator: In
-          values: ["g6.2xlarge"]
+          values: ["p5en.48xlarge"]
         - key: kubernetes.io/arch
           operator: In
           values: ["amd64"]
@@ -72,178 +76,15 @@ spec:
           operator: In
           values: ["reserved"]
         - key: topology.kubernetes.io/zone
-          operator: In
-          values: ["us-west-2a"]
-      taints:
-        - key: nvidia.com/gpu
-          effect: NoSchedule
-  limits:
-    cpu: "32"
-    memory: 256Gi
-    nodes: "4"
-    nvidia.com/gpu: "4"
----
-apiVersion: karpenter.sh/v1
-kind: NodePool
-metadata:
-  name: gpu-performance-ondemand
-spec:
-  weight: 10
-  disruption:
-    consolidationPolicy: WhenEmpty
-    consolidateAfter: 1m
-  template:
-    metadata:
-      labels:
-        workload-type: gpu-performance
-    spec:
-      expireAfter: 456h
-      terminationGracePeriod: 24h
-      nodeClassRef:
-        group: eks.amazonaws.com
-        kind: NodeClass
-        name: auto-e2e-gpu-performance-ondemand
-      requirements:
-        - key: node.kubernetes.io/instance-type
-          operator: In
-          values: ["g6.2xlarge"]
-        - key: kubernetes.io/arch
-          operator: In
-          values: ["amd64"]
-        - key: karpenter.sh/capacity-type
-          operator: In
-          values: ["on-demand"]
-        - key: topology.kubernetes.io/zone
-          operator: In
-          values: ["us-west-2a"]
-      taints:
-        - key: nvidia.com/gpu
-          effect: NoSchedule
-  limits:
-    cpu: "16"
-    memory: 128Gi
-    nodes: "2"
-    nvidia.com/gpu: "2"
----
-apiVersion: karpenter.sh/v1
-kind: NodePool
-metadata:
-  name: gpu-training
-spec:
-  template:
-    metadata:
-      labels:
-        workload-type: gpu-training
-    spec:
-      expireAfter: 456h
-      terminationGracePeriod: 24h
-      nodeClassRef:
-        group: eks.amazonaws.com
-        kind: NodeClass
-        name: auto-e2e-gpu-training
-      requirements:
-        - key: node.kubernetes.io/instance-type
-          operator: In
-          values: ["g6e.4xlarge"]
-        - key: kubernetes.io/arch
-          operator: In
-          values: ["amd64"]
-        - key: karpenter.sh/capacity-type
-          operator: In
-          values: ["reserved"]
-        # Pinned to the AZ where the GPU ODCR is held (capacity-constrained)
-        - key: topology.kubernetes.io/zone
-          operator: In
-          values: ["us-west-2b"]
-      taints:
-        - key: nvidia.com/gpu
-          effect: NoSchedule
-  limits:
-    cpu: "64"
-    memory: 512Gi
-    nodes: "4"
-    nvidia.com/gpu: "4"
----
-apiVersion: karpenter.sh/v1
-kind: NodePool
-metadata:
-  name: gpu-burst
-spec:
-  disruption:
-    consolidationPolicy: WhenEmpty
-    consolidateAfter: 1m
-  template:
-    metadata:
-      labels:
-        workload-type: gpu-burst
-    spec:
-      expireAfter: 456h
-      terminationGracePeriod: 24h
-      nodeClassRef:
-        group: eks.amazonaws.com
-        kind: NodeClass
-        name: default
-      requirements:
-        - key: node.kubernetes.io/instance-type
           operator: In
           values:
-            # Pinned to the active burst ODCR.
-            - g6e.4xlarge
-        - key: kubernetes.io/arch
-          operator: In
-          values: ["amd64"]
-        - key: karpenter.sh/capacity-type
-          operator: In
-          values: ["on-demand"]
-        - key: topology.kubernetes.io/zone
-          operator: In
-          values: ["us-west-2c"]
+            - us-west-2a
+            - us-west-2c
       taints:
         - key: nvidia.com/gpu
           effect: NoSchedule
   limits:
-    cpu: "96"
-    memory: 1Ti
+    cpu: "192"
+    memory: 2Ti
     nodes: "1"
-    nvidia.com/gpu: "4"
----
-apiVersion: karpenter.sh/v1
-kind: NodePool
-metadata:
-  name: gpu-smoke
-spec:
-  disruption:
-    consolidationPolicy: WhenEmpty
-    consolidateAfter: 1m
-  template:
-    metadata:
-      labels:
-        workload-type: gpu-smoke
-    spec:
-      expireAfter: 456h
-      terminationGracePeriod: 24h
-      nodeClassRef:
-        group: eks.amazonaws.com
-        kind: NodeClass
-        name: default
-      requirements:
-        - key: node.kubernetes.io/instance-type
-          operator: In
-          values: ["g6e.8xlarge"]
-        - key: kubernetes.io/arch
-          operator: In
-          values: ["amd64"]
-        - key: karpenter.sh/capacity-type
-          operator: In
-          values: ["on-demand"]
-        - key: topology.kubernetes.io/zone
-          operator: In
-          values: ["us-west-2b"]
-      taints:
-        - key: nvidia.com/gpu
-          effect: NoSchedule
-  limits:
-    cpu: "64"
-    memory: 512Gi
-    nodes: "1"
-    nvidia.com/gpu: "1"
+    nvidia.com/gpu: "8"

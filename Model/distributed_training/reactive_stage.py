@@ -13,6 +13,7 @@ import tempfile
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import unquote, urlparse
@@ -51,7 +52,18 @@ ROUTE_DESTINATION_LOGIT_RANGE_EPSILON = 1e-6
 ROUTE_VALIDATION_METRICS_VERSION = "route_validation_v1"
 REACTIVE_STEP_CHECKPOINT_VERSION = "reactive_step_checkpoint_v1"
 EPOCH_CHECKPOINT_RETENTION_SCORE_BASE = 1_000_000_000_000.0
+P5EN_MINIMUM_REMAINING_RUNTIME = timedelta(hours=22)
 _RUN_NAME_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]*")
+
+
+def expected_reactive_hostname_count(world_size: int) -> int:
+    """Return the reviewed Ray worker host count for each DDP topology."""
+    if world_size not in SUPPORTED_WORLD_SIZES:
+        raise ValueError(
+            "world_size must be one of "
+            f"{sorted(SUPPORTED_WORLD_SIZES)}, got {world_size}"
+        )
+    return 2 if world_size == 2 else 1
 
 
 @dataclass(frozen=True)
@@ -78,6 +90,35 @@ def validate_reactive_stage_config(config: Mapping[str, Any]) -> None:
         raise ValueError(
             f"num_workers must be one of {sorted(SUPPORTED_WORLD_SIZES)}"
         )
+    capacity_block_end_utc = str(
+        config.get("capacity_block_end_utc") or ""
+    )
+    if world_size > 2:
+        if not capacity_block_end_utc:
+            raise ValueError(
+                "p5en training requires capacity_block_end_utc"
+            )
+        try:
+            capacity_block_end = datetime.fromisoformat(
+                capacity_block_end_utc.replace("Z", "+00:00")
+            )
+        except ValueError as error:
+            raise ValueError(
+                "capacity_block_end_utc must be an ISO-8601 timestamp"
+            ) from error
+        if capacity_block_end.tzinfo is None:
+            raise ValueError(
+                "capacity_block_end_utc must include a UTC offset"
+            )
+        minimum_end = (
+            datetime.now(timezone.utc)
+            + P5EN_MINIMUM_REMAINING_RUNTIME
+        )
+        if capacity_block_end.astimezone(timezone.utc) < minimum_end:
+            raise ValueError(
+                "p5en Capacity Block must have at least 22 hours "
+                "remaining"
+            )
     if int(config.get("worker_cpus", 0)) <= 0:
         raise ValueError("worker_cpus must be positive")
     if int(config.get("epochs", 0)) <= 0:
@@ -2307,6 +2348,9 @@ def train_loop_per_worker(config: dict[str, Any]) -> None:
         "distributed_global_batch": global_batch,
         "distributed_precision": str(config["precision"]),
         "distributed_world_size": world_size,
+        "capacity_block_end_utc": str(
+            config.get("capacity_block_end_utc") or ""
+        ),
         "gradient_clip_max_norm": float(config["grad_clip"]),
         "gradient_clip_mode": "branch_v1",
         "epochs": int(config["epochs"]),
@@ -2418,10 +2462,13 @@ def train_loop_per_worker(config: dict[str, Any]) -> None:
     hostnames: list[str | None] = [None] * world_size
     dist.all_gather_object(hostnames, socket.gethostname())
     unique_hostnames = sorted({str(host) for host in hostnames})
-    if len(unique_hostnames) != world_size:
+    expected_hostname_count = expected_reactive_hostname_count(world_size)
+    if len(unique_hostnames) != expected_hostname_count:
         raise RuntimeError(
-            "one-GPU-per-node invariant failed: "
-            f"world_size={world_size} hosts={unique_hostnames}"
+            "Ray worker placement invariant failed: "
+            f"world_size={world_size} "
+            f"expected_hostname_count={expected_hostname_count} "
+            f"hosts={unique_hostnames}"
         )
 
     model_config = {
@@ -3011,7 +3058,11 @@ def run_reactive_stage(config: Mapping[str, Any]) -> dict[str, Any]:
             "CPU": int(config["worker_cpus"]),
             "GPU": 1,
         },
-        placement_strategy="SPREAD",
+        placement_strategy=(
+            "SPREAD"
+            if int(config["num_workers"]) == 2
+            else "PACK"
+        ),
     )
     # Train V2 reloads checkpoint_manager_snapshot.json when a Flyte retry
     # recreates this trainer with the same stable experiment directory.

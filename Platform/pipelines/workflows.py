@@ -294,7 +294,9 @@ def _data_prep_pod_template():
     )
 
 
-def _large_shm_pod_template():
+def _large_shm_pod_template(
+    workload_type: str = "gpu-validation",
+):
     """PodTemplate that mounts a large tmpfs at /dev/shm (#121 P0).
 
     DataLoader workers (num_workers>0) transport batches to the parent through
@@ -306,12 +308,25 @@ def _large_shm_pod_template():
     """
     from flytekit import PodTemplate
     from kubernetes.client import (
-        V1PodSpec, V1Container, V1Volume, V1VolumeMount, V1EmptyDirVolumeSource,
+        V1Container,
+        V1EmptyDirVolumeSource,
+        V1PodSpec,
+        V1Toleration,
+        V1Volume,
+        V1VolumeMount,
     )
     return PodTemplate(
         annotations={"karpenter.sh/do-not-disrupt": "true"},
         primary_container_name="primary",
         pod_spec=V1PodSpec(
+            node_selector={"workload-type": workload_type},
+            tolerations=[
+                V1Toleration(
+                    key="nvidia.com/gpu",
+                    operator="Exists",
+                    effect="NoSchedule",
+                ),
+            ],
             containers=[
                 V1Container(
                     name="primary",
@@ -3255,12 +3270,15 @@ def generate_reasoning_labels(
 # ============================================================
 @task(
     container_image=TRAINING_IMAGE,
-    # requests == limits (Guaranteed QoS). g6e.4xlarge has 16 vCPU / 44.7 GB
-    # GPU-attached mem; keep pod at 16 GB so multiple non-GPU sidecars can
-    # share the node if needed, but the whole GPU is reserved (gpu="1").
+    # Legacy single-GPU training remains on the validation pool. Production
+    # training uses the four- and eight-GPU Ray tasks.
     requests=Resources(cpu="4", mem="16Gi", gpu="1"),
     limits=Resources(cpu="4", mem="16Gi", gpu="1"),
-    pod_template=_large_shm_pod_template(),  # /dev/shm for DataLoader workers (#121 P0)
+    pod_template=_large_shm_pod_template("gpu-validation"),
+    labels={
+        "kueue.x-k8s.io/queue-name": "gpu-validation",
+        "kueue.x-k8s.io/priority-class": "research-low",
+    },
     environment={"MLFLOW_TRACKING_URI": MLFLOW_URI},
 )
 def train_il(
@@ -6360,6 +6378,11 @@ def train_il(
     # requests == limits (Guaranteed QoS).
     requests=Resources(cpu="4", mem="16Gi", gpu="1"),
     limits=Resources(cpu="4", mem="16Gi", gpu="1"),
+    pod_template=_large_shm_pod_template("gpu-validation"),
+    labels={
+        "kueue.x-k8s.io/queue-name": "gpu-validation",
+        "kueue.x-k8s.io/priority-class": "research-low",
+    },
 )
 def train_offline_rl(
     pretrained: FlyteFile,
@@ -7109,6 +7132,10 @@ def _run_evaluation(
     limits=Resources(cpu="2", mem="8Gi", gpu="1"),
     environment={"MLFLOW_TRACKING_URI": MLFLOW_URI},
     pod_template=_large_shm_pod_template(),  # /dev/shm for eval DataLoader workers (#121 P0)
+    labels={
+        "kueue.x-k8s.io/queue-name": "gpu-validation",
+        "kueue.x-k8s.io/priority-class": "research-low",
+    },
 )
 def evaluate_il_policy(
     checkpoint: FlyteFile,
@@ -7130,6 +7157,10 @@ def evaluate_il_policy(
     limits=Resources(cpu="2", mem="8Gi", gpu="1"),
     environment={"MLFLOW_TRACKING_URI": MLFLOW_URI},
     pod_template=_large_shm_pod_template(),
+    labels={
+        "kueue.x-k8s.io/queue-name": "gpu-validation",
+        "kueue.x-k8s.io/priority-class": "research-low",
+    },
 )
 def evaluate_navigation_records(
     checkpoint: FlyteFile,
@@ -7343,6 +7374,10 @@ def compare_navigation_record_artifacts(
     limits=Resources(cpu="2", mem="8Gi", gpu="1"),
     environment={"MLFLOW_TRACKING_URI": MLFLOW_URI},
     pod_template=_large_shm_pod_template(),  # /dev/shm for eval DataLoader workers (#121 P0)
+    labels={
+        "kueue.x-k8s.io/queue-name": "gpu-validation",
+        "kueue.x-k8s.io/priority-class": "research-low",
+    },
 )
 def evaluate_rl_policy(
     checkpoint: FlyteFile,
@@ -7367,6 +7402,10 @@ def evaluate_rl_policy(
         "AUTO_E2E_EVAL_IMAGE": EVAL_IMAGE,
     },
     pod_template=_large_shm_pod_template(),
+    labels={
+        "kueue.x-k8s.io/queue-name": "gpu-validation",
+        "kueue.x-k8s.io/priority-class": "research-low",
+    },
 )
 def evaluate_kitscenes_benchmark_checkpoint(
     checkpoint: FlyteFile,

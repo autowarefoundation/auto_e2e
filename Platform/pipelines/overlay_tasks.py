@@ -47,13 +47,23 @@ def _large_shm_pod_template():
         V1Container,
         V1EmptyDirVolumeSource,
         V1PodSpec,
+        V1Toleration,
         V1Volume,
         V1VolumeMount,
     )
 
     return PodTemplate(
+        annotations={"karpenter.sh/do-not-disrupt": "true"},
         primary_container_name="primary",
         pod_spec=V1PodSpec(
+            node_selector={"workload-type": "gpu-validation"},
+            tolerations=[
+                V1Toleration(
+                    key="nvidia.com/gpu",
+                    operator="Exists",
+                    effect="NoSchedule",
+                ),
+            ],
             containers=[
                 V1Container(
                     name="primary",
@@ -1496,6 +1506,10 @@ def prepare_overlay_set(
     cache_version=OVERLAY_CACHE_VERSION,
     cache_serialize=True,
     pod_template=_large_shm_pod_template(),
+    labels={
+        "kueue.x-k8s.io/queue-name": "gpu-validation",
+        "kueue.x-k8s.io/priority-class": "research-low",
+    },
 )
 def precompute_overlay_partition(
     checkpoint: FlyteFile,

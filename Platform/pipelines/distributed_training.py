@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import re
+from datetime import timedelta
 from pathlib import Path
 from typing import List, NamedTuple, Optional
 
@@ -53,6 +54,8 @@ RAY_TASK_ENVIRONMENT = {
     "RAY_TRAIN_V2_ENABLED": "1",
 }
 BEV_POS_WEIGHT_CAP = 2048.0
+P5EN_TASK_MAX_RUNTIME = timedelta(hours=20)
+P5EN_SMOKE_MAX_RUNTIME = timedelta(minutes=30)
 
 
 class RaySmokeOutput(NamedTuple):
@@ -126,11 +129,70 @@ def _worker_pod_template(
     cpu: str,
     memory: str,
     shm_size: str,
+    gpu_count: int,
+    ephemeral_storage: str | None = None,
+    require_distinct_hosts: bool = True,
+    protect_from_disruption: bool = True,
 ) -> PodTemplate:
+    worker_labels = {
+        "auto-e2e.training/role": "ray-gpu-worker",
+        "auto-e2e.training/workload-type": workload_type,
+    }
+    affinity = None
+    if require_distinct_hosts:
+        affinity = V1Affinity(
+            pod_affinity=V1PodAffinity(
+                required_during_scheduling_ignored_during_execution=[
+                    V1PodAffinityTerm(
+                        label_selector=V1LabelSelector(
+                            match_expressions=[
+                                V1LabelSelectorRequirement(
+                                    key=(
+                                        "auto-e2e.training/workload-type"
+                                    ),
+                                    operator="In",
+                                    values=[workload_type],
+                                ),
+                            ],
+                        ),
+                        topology_key="topology.kubernetes.io/zone",
+                    ),
+                ],
+            ),
+            pod_anti_affinity=V1PodAntiAffinity(
+                required_during_scheduling_ignored_during_execution=[
+                    V1PodAffinityTerm(
+                        label_selector=V1LabelSelector(
+                            match_expressions=[
+                                V1LabelSelectorRequirement(
+                                    key=(
+                                        "auto-e2e.training/workload-type"
+                                    ),
+                                    operator="In",
+                                    values=[workload_type],
+                                ),
+                            ],
+                        ),
+                        topology_key="kubernetes.io/hostname",
+                    ),
+                ],
+            ),
+        )
+    resources = {
+        "cpu": cpu,
+        "memory": memory,
+        "nvidia.com/gpu": str(gpu_count),
+    }
+    if ephemeral_storage is not None:
+        resources["ephemeral-storage"] = ephemeral_storage
     return PodTemplate(
         primary_container_name="ray-worker",
-        labels={"auto-e2e.training/role": "ray-gpu-worker"},
-        annotations={"karpenter.sh/do-not-disrupt": "true"},
+        labels=worker_labels,
+        annotations=(
+            {"karpenter.sh/do-not-disrupt": "true"}
+            if protect_from_disruption
+            else {}
+        ),
         pod_spec=V1PodSpec(
             service_account_name="default",
             node_selector={"workload-type": workload_type},
@@ -141,40 +203,7 @@ def _worker_pod_template(
                     effect="NoSchedule",
                 ),
             ],
-            affinity=V1Affinity(
-                pod_affinity=V1PodAffinity(
-                    required_during_scheduling_ignored_during_execution=[
-                        V1PodAffinityTerm(
-                            label_selector=V1LabelSelector(
-                                match_expressions=[
-                                    V1LabelSelectorRequirement(
-                                        key="auto-e2e.training/role",
-                                        operator="In",
-                                        values=["ray-gpu-worker"],
-                                    ),
-                                ],
-                            ),
-                            topology_key="topology.kubernetes.io/zone",
-                        ),
-                    ],
-                ),
-                pod_anti_affinity=V1PodAntiAffinity(
-                    required_during_scheduling_ignored_during_execution=[
-                        V1PodAffinityTerm(
-                            label_selector=V1LabelSelector(
-                                match_expressions=[
-                                    V1LabelSelectorRequirement(
-                                        key="auto-e2e.training/role",
-                                        operator="In",
-                                        values=["ray-gpu-worker"],
-                                    ),
-                                ],
-                            ),
-                            topology_key="kubernetes.io/hostname",
-                        ),
-                    ],
-                ),
-            ),
+            affinity=affinity,
             containers=[
                 V1Container(
                     name="ray-worker",
@@ -186,16 +215,8 @@ def _worker_pod_template(
                         ),
                     ],
                     resources=V1ResourceRequirements(
-                        requests={
-                            "cpu": cpu,
-                            "memory": memory,
-                            "nvidia.com/gpu": "1",
-                        },
-                        limits={
-                            "cpu": cpu,
-                            "memory": memory,
-                            "nvidia.com/gpu": "1",
-                        },
+                        requests=dict(resources),
+                        limits=dict(resources),
                     ),
                     volume_mounts=[
                         V1VolumeMount(
@@ -219,12 +240,16 @@ def _worker_pod_template(
 
 
 def _ray_job_config(
-    replicas: int,
+    pod_replicas: int,
     *,
     worker_workload_type: str,
     worker_cpu: str = "4",
     worker_memory: str = "16Gi",
     worker_shm_size: str = "8Gi",
+    gpus_per_pod: int = 1,
+    worker_ephemeral_storage: str | None = None,
+    require_distinct_hosts: bool = True,
+    protect_workers_from_disruption: bool = True,
 ) -> RayJobConfig:
     return RayJobConfig(
         head_node_config=HeadNodeConfig(
@@ -237,18 +262,24 @@ def _ray_job_config(
         worker_node_config=[
             WorkerNodeConfig(
                 group_name="gpu-workers",
-                replicas=replicas,
-                min_replicas=replicas,
-                max_replicas=replicas,
+                replicas=pod_replicas,
+                min_replicas=pod_replicas,
+                max_replicas=pod_replicas,
                 ray_start_params={
                     "num-cpus": worker_cpu,
-                    "num-gpus": "1",
+                    "num-gpus": str(gpus_per_pod),
                 },
                 pod_template=_worker_pod_template(
                     workload_type=worker_workload_type,
                     cpu=worker_cpu,
                     memory=worker_memory,
                     shm_size=worker_shm_size,
+                    gpu_count=gpus_per_pod,
+                    ephemeral_storage=worker_ephemeral_storage,
+                    require_distinct_hosts=require_distinct_hosts,
+                    protect_from_disruption=(
+                        protect_workers_from_disruption
+                    ),
                 ),
             ),
         ],
@@ -261,25 +292,40 @@ def _ray_job_config(
 
 RAY_2 = _ray_job_config(
     2,
-    worker_workload_type="gpu-canary",
+    worker_workload_type="gpu-validation",
     worker_cpu="3",
     worker_memory="12Gi",
     worker_shm_size="4Gi",
 )
 RAY_4 = _ray_job_config(
-    4,
-    worker_workload_type="gpu-training",
+    1,
+    worker_workload_type="p5en-capacity-block",
+    worker_cpu="48",
+    worker_memory="512Gi",
+    worker_shm_size="64Gi",
+    gpus_per_pod=4,
+    worker_ephemeral_storage="500Gi",
+    require_distinct_hosts=False,
 )
 RAY_REACTIVE_4 = _ray_job_config(
-    4,
-    worker_workload_type="gpu-performance",
-    worker_cpu="3",
-    worker_memory="12Gi",
-    worker_shm_size="4Gi",
+    1,
+    worker_workload_type="p5en-capacity-block",
+    worker_cpu="48",
+    worker_memory="512Gi",
+    worker_shm_size="64Gi",
+    gpus_per_pod=4,
+    worker_ephemeral_storage="500Gi",
+    require_distinct_hosts=False,
 )
 RAY_8 = _ray_job_config(
-    8,
-    worker_workload_type="gpu-training",
+    1,
+    worker_workload_type="p5en-capacity-block",
+    worker_cpu="96",
+    worker_memory="1Ti",
+    worker_shm_size="128Gi",
+    gpus_per_pod=8,
+    worker_ephemeral_storage="500Gi",
+    require_distinct_hosts=False,
 )
 
 
@@ -287,13 +333,17 @@ RAY_8 = _ray_job_config(
     task_config=RAY_4,
     container_image=TRAINING_IMAGE,
     retries=1,
+    timeout=P5EN_SMOKE_MAX_RUNTIME,
     labels={
-        "kueue.x-k8s.io/queue-name": "training",
+        "kueue.x-k8s.io/queue-name": "p5en-capacity-block",
         "kueue.x-k8s.io/priority-class": "research-low",
     },
     environment=RAY_TASK_ENVIRONMENT,
 )
-def ray_ddp_smoke_4(steps: int = 4) -> RaySmokeOutput:
+def ray_ddp_smoke_4(
+    capacity_block_end_utc: str,
+    steps: int = 4,
+) -> RaySmokeOutput:
     from distributed_training.ray_smoke import run_smoke
 
     context = current_context()
@@ -312,6 +362,7 @@ def ray_ddp_smoke_4(steps: int = 4) -> RaySmokeOutput:
         steps=steps,
         storage_path=RAY_STORAGE_PATH,
         run_name=run_name,
+        capacity_block_end_utc=capacity_block_end_utc,
     )
     report_path = Path("/tmp/ray-ddp-smoke/report.json")
     report_path.parent.mkdir(parents=True, exist_ok=True)
@@ -333,8 +384,8 @@ def _flyte_remote_uri(value: FlyteDirectory | FlyteFile) -> str:
 
 
 def _reactive_worker_cpus(num_workers: int) -> int:
-    """Match Ray actors to the corresponding worker pod CPU limit."""
-    return 3 if num_workers in {2, 4} else 4
+    """Allocate the equal CPU share available to each Ray actor."""
+    return 3 if num_workers == 2 else 12
 
 
 def _reactive_run_name(
@@ -381,6 +432,7 @@ def _run_reactive_stage_task(
     bev_min_positive_cells: int,
     freeze_bevformer: bool,
     validation_sample_limit: int,
+    capacity_block_end_utc: str,
     allow_random_bevformer_init: bool = False,
 ) -> ReactiveRayOutput:
     from distributed_training.reactive_stage import run_reactive_stage
@@ -448,6 +500,7 @@ def _run_reactive_stage_task(
         ),
         "bevformer_pretrained_checkpoint_uri": pretrained_uri,
         "corridor_pos_weight": corridor_pos_weight,
+        "capacity_block_end_utc": capacity_block_end_utc,
         "checkpoint_interval_steps": checkpoint_interval_steps,
         "epochs": epochs,
         "grad_clip": grad_clip,
@@ -688,7 +741,7 @@ def verify_reactive_canary_training(
     container_image=TRAINING_IMAGE,
     retries=1,
     labels={
-        "kueue.x-k8s.io/queue-name": "gpu-canary",
+        "kueue.x-k8s.io/queue-name": "gpu-validation",
         "kueue.x-k8s.io/priority-class": "research-low",
     },
     environment=RAY_TASK_ENVIRONMENT,
@@ -749,6 +802,7 @@ def train_reactive_stage_ray_2(
         bev_min_positive_cells=1,
         freeze_bevformer=freeze_bevformer,
         validation_sample_limit=256,
+        capacity_block_end_utc="",
         allow_random_bevformer_init=allow_random_bevformer_init,
     )
 
@@ -757,9 +811,10 @@ def train_reactive_stage_ray_2(
     task_config=RAY_REACTIVE_4,
     container_image=TRAINING_IMAGE,
     retries=2,
+    timeout=P5EN_TASK_MAX_RUNTIME,
     labels={
-        "kueue.x-k8s.io/queue-name": "gpu-performance",
-        "kueue.x-k8s.io/priority-class": "research-low",
+        "kueue.x-k8s.io/queue-name": "p5en-capacity-block",
+        "kueue.x-k8s.io/priority-class": "production-high",
     },
     environment=RAY_TASK_ENVIRONMENT,
 )
@@ -778,7 +833,7 @@ def train_reactive_stage_ray_4(
     precision: str = "bf16",
     gradient_accumulation_steps: int = 1,
     steps_per_epoch: int = 0,
-    checkpoint_interval_steps: int = 512,
+    checkpoint_interval_steps: int = 128,
     shuffle_buffer: int = 256,
     is_pretrained: bool = True,
     trajectory_weight: float = 1.0,
@@ -786,6 +841,7 @@ def train_reactive_stage_ray_4(
     route_weight: float = 1.0,
     corridor_pos_weight: float = 1.0,
     freeze_bevformer: bool = True,
+    capacity_block_end_utc: str = "",
 ) -> ReactiveRayOutput:
     """Run a four-rank Reactive performance training stage."""
     return _run_reactive_stage_task(
@@ -818,6 +874,7 @@ def train_reactive_stage_ray_4(
         bev_min_positive_cells=2000,
         freeze_bevformer=freeze_bevformer,
         validation_sample_limit=1024,
+        capacity_block_end_utc=capacity_block_end_utc,
     )
 
 
@@ -825,9 +882,10 @@ def train_reactive_stage_ray_4(
     task_config=RAY_8,
     container_image=TRAINING_IMAGE,
     retries=1,
+    timeout=P5EN_TASK_MAX_RUNTIME,
     labels={
-        "kueue.x-k8s.io/queue-name": "training",
-        "kueue.x-k8s.io/priority-class": "research-low",
+        "kueue.x-k8s.io/queue-name": "p5en-capacity-block",
+        "kueue.x-k8s.io/priority-class": "production-high",
     },
     environment=RAY_TASK_ENVIRONMENT,
 )
@@ -846,7 +904,7 @@ def train_reactive_stage_ray_8(
     precision: str = "bf16",
     gradient_accumulation_steps: int = 1,
     steps_per_epoch: int = 0,
-    checkpoint_interval_steps: int = 512,
+    checkpoint_interval_steps: int = 128,
     shuffle_buffer: int = 256,
     is_pretrained: bool = True,
     trajectory_weight: float = 1.0,
@@ -854,6 +912,7 @@ def train_reactive_stage_ray_8(
     route_weight: float = 1.0,
     corridor_pos_weight: float = 1.0,
     freeze_bevformer: bool = True,
+    capacity_block_end_utc: str = "",
 ) -> ReactiveRayOutput:
     """Run one production-size Reactive DDP stage."""
     return _run_reactive_stage_task(
@@ -886,17 +945,25 @@ def train_reactive_stage_ray_8(
         bev_min_positive_cells=2000,
         freeze_bevformer=freeze_bevformer,
         validation_sample_limit=1024,
+        capacity_block_end_utc=capacity_block_end_utc,
     )
 
 
 @workflow
-def wf_ray_ddp_smoke_4(steps: int = 4) -> FlyteFile:
-    return ray_ddp_smoke_4(steps=steps).report
+def wf_ray_ddp_smoke_4(
+    capacity_block_end_utc: str,
+    steps: int = 4,
+) -> FlyteFile:
+    return ray_ddp_smoke_4(
+        capacity_block_end_utc=capacity_block_end_utc,
+        steps=steps,
+    ).report
 
 
 @workflow
 def wf_train_reactive_nuplan_ray_4(
     nuplan_shards: List[FlyteDirectory],
+    capacity_block_end_utc: str,
     epochs: int = 3,
     learning_rate: float = 1e-4,
     val_fraction: float = 0.2,
@@ -906,7 +973,7 @@ def wf_train_reactive_nuplan_ray_4(
     trajectory_weight: float = 1.0,
     bev_weight: float = 1.0,
     route_weight: float = 1.0,
-    checkpoint_interval_steps: int = 512,
+    checkpoint_interval_steps: int = 128,
 ) -> ReactiveRayOutput:
     """Train Stage A while keeping the pretrained camera BEV frozen."""
     return train_reactive_stage_ray_4(
@@ -927,6 +994,7 @@ def wf_train_reactive_nuplan_ray_4(
         bev_weight=bev_weight,
         route_weight=route_weight,
         freeze_bevformer=True,
+        capacity_block_end_utc=capacity_block_end_utc,
     )
 
 
@@ -934,6 +1002,7 @@ def wf_train_reactive_nuplan_ray_4(
 def wf_train_reactive_nuplan_l2d_ray_8(
     nuplan_shards: List[FlyteDirectory],
     l2d_shards: List[FlyteDirectory],
+    capacity_block_end_utc: str,
     stage_a_epochs: int = 3,
     stage_b_epochs: int = 3,
     stage_a_learning_rate: float = 1e-4,
@@ -961,6 +1030,7 @@ def wf_train_reactive_nuplan_l2d_ray_8(
         bev_weight=bev_weight,
         route_weight=route_weight,
         freeze_bevformer=True,
+        capacity_block_end_utc=capacity_block_end_utc,
     )
     stage_b = train_reactive_stage_ray_8(
         shards=l2d_shards,
@@ -976,6 +1046,7 @@ def wf_train_reactive_nuplan_l2d_ray_8(
         bev_weight=0.0,
         route_weight=route_weight,
         freeze_bevformer=True,
+        capacity_block_end_utc=capacity_block_end_utc,
     )
     return ReactiveDistributedProgramOutput(
         stage_a_checkpoint=stage_a.checkpoint,

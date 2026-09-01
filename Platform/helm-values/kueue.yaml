@@ -1,9 +1,70 @@
-# Kueue v0.18.1 Helm values override
-# Framework integrations are set via Terraform set{} blocks.
-controller:
+# Kueue v0.18.1 Helm values override.
+controllerManager:
+  replicas: 2
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 1
+  topologySpreadConstraints:
+    - maxSkew: 1
+      topologyKey: kubernetes.io/hostname
+      whenUnsatisfiable: DoNotSchedule
+      labelSelector:
+        matchLabels:
+          app.kubernetes.io/name: kueue
+          app.kubernetes.io/instance: kueue
+          control-plane: controller-manager
+  livenessProbe:
+    initialDelaySeconds: 120
   manager:
-    replicas: 1
+    priorityClassName: system-cluster-critical
+    podAnnotations:
+      karpenter.sh/do-not-disrupt: "true"
     resources:
       requests:
-        cpu: 100m
-        memory: 256Mi
+        cpu: 500m
+        memory: 512Mi
+
+managerConfig:
+  controllerManagerConfigYaml: |-
+    apiVersion: config.kueue.x-k8s.io/v1beta2
+    kind: Configuration
+    health:
+      healthProbeBindAddress: :8081
+    metrics:
+      bindAddress: :8443
+    webhook:
+      port: 9443
+    leaderElection:
+      leaderElect: true
+      resourceName: c1f6bfd2.kueue.x-k8s.io
+    controller:
+      groupKindConcurrency:
+        Job.batch: 5
+        Pod: 5
+        Workload.kueue.x-k8s.io: 5
+        LocalQueue.kueue.x-k8s.io: 1
+        ClusterQueue.kueue.x-k8s.io: 1
+        ResourceFlavor.kueue.x-k8s.io: 1
+    clientConnection:
+      qps: 50
+      burst: 100
+    manageJobsWithoutQueueName: false
+    managedJobsNamespaceSelector:
+      matchExpressions:
+        - key: kubernetes.io/metadata.name
+          operator: In
+          values:
+            - auto-e2e-development
+            - auto-e2e-staging
+            - auto-e2e-production
+            - auto-e2e-training
+    internalCertManagement:
+      enable: true
+      webhookServiceName: kueue-webhook-service
+      webhookSecretName: kueue-webhook-server-cert
+    integrations:
+      frameworks:
+        - batch/job
+        - kubeflow.org/pytorchjob
+        - ray.io/rayjob
+        - pod

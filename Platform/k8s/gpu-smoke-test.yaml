@@ -2,12 +2,15 @@ apiVersion: v1
 kind: Pod
 metadata:
   name: train-smoke-test
+  namespace: auto-e2e-development
   labels:
     app: auto-e2e-smoke-test
+    kueue.x-k8s.io/queue-name: gpu-validation
+    kueue.x-k8s.io/priority-class: research-low
 spec:
   restartPolicy: Never
   nodeSelector:
-    workload-type: gpu-training
+    workload-type: gpu-validation
   tolerations:
     - key: nvidia.com/gpu
       operator: Exists
@@ -24,6 +27,8 @@ spec:
       resources:
         limits:
           nvidia.com/gpu: "1"
+          memory: "16Gi"
+          cpu: "2"
         requests:
           nvidia.com/gpu: "1"
           memory: "16Gi"

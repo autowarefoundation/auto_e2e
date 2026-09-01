@@ -1,8 +1,14 @@
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
+
 import pytest
 
-from distributed_training.ray_smoke import validate_smoke_config
+from distributed_training.ray_smoke import (
+    expected_hostname_count,
+    validate_capacity_block_window,
+    validate_smoke_config,
+)
 
 
 @pytest.mark.parametrize("num_workers", [2, 4, 8])
@@ -37,3 +43,26 @@ def test_validate_smoke_config_rejects_invalid_step_or_rate():
             steps=1,
             learning_rate=0.0,
         )
+
+
+@pytest.mark.parametrize(
+    ("num_workers", "hostname_count"),
+    [(2, 2), (4, 1), (8, 1)],
+)
+def test_expected_hostname_count_matches_worker_pod_topology(
+    num_workers,
+    hostname_count,
+):
+    assert expected_hostname_count(num_workers) == hostname_count
+
+
+def test_capacity_block_window_requires_one_remaining_hour():
+    valid_end = datetime.now(timezone.utc) + timedelta(hours=2)
+    validate_capacity_block_window(valid_end.isoformat())
+
+    with pytest.raises(ValueError, match="required"):
+        validate_capacity_block_window("")
+    with pytest.raises(ValueError, match="UTC offset"):
+        validate_capacity_block_window("2099-01-01T00:00:00")
+    with pytest.raises(ValueError, match="one hour"):
+        validate_capacity_block_window("2000-01-01T00:00:00Z")

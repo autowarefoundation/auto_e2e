@@ -35,11 +35,9 @@ EKS Auto Mode-based MLOps platform for autonomous driving model training, evalua
 │  └────────────────────────────────────────────────────────────┘   │
 │                                                                    │
 │  ┌────────────────────────────────────────────────────────────┐   │
-│  │  GPU Pool (Karpenter NodePool: g6e.4xlarge, L40S 48GB)      │   │
-│  │                                                             │   │
-│  │  PyTorchJob (IL Training, AMP bf16)                         │   │
-│  │  Eval Jobs (Open-Loop metrics)                              │   │
-│  │  Offline RL (IQL refinement)                                │   │
+│  │  GPU Pools                                                   │   │
+│  │  g6.2xlarge: inference, validation, and canaries             │   │
+│  │  p5en.48xlarge Capacity Block: 4/8-GPU Ray training          │   │
 │  └────────────────────────────────────────────────────────────┘   │
 │                                                                    │
 └───────────────────────────────┬────────────────────────────────────┘
@@ -78,21 +76,125 @@ Originally planned CARLA Closed-Loop Simulation for Phase 5, but abandoned due t
 
 **Alternative**: Offline RL (IQL) — no simulator needed, learns from recorded data. NAVSIM (2D replay closed-loop) planned for future.
 
-### GPU Capacity Strategy (ODCR)
+### GPU Capacity Strategy
 
-g6e.4xlarge is difficult to acquire on-demand. Secured via On-Demand Capacity Reservation (ODCR):
+Two targeted `g6.2xlarge` ODCR slots are retained for inference,
+validation, and two-rank canaries. Large nuPlan and multi-dataset training
+uses one `p5en.48xlarge` Capacity Block purchased for the run window.
+Capacity purchase is an operator action performed before job submission.
+Kubernetes, Karpenter, Kueue, Flyte, CodeBuild, and task Pods never call
+`PurchaseCapacityBlock`; they only consume an already purchased tagged block.
+Do not add purchase triggers for Pending Pods, queued workloads, retries, or
+autoscaling events.
+
+Verify that the retained reservation is targeted, tagged, and has exactly two
+available slots:
 
 ```bash
-# Training GPU (g6e.4xlarge, us-west-2b)
-aws ec2 create-capacity-reservation \
-  --instance-type g6e.4xlarge \
-  --instance-platform Linux/UNIX \
-  --availability-zone us-west-2b \
-  --instance-count 1 \
-  --end-date-type unlimited
+aws ec2 describe-capacity-reservations \
+  --profile autowarefoundation \
+  --region us-west-2 \
+  --filters \
+    Name=tag:Name,Values=auto-e2e-gpu-validation \
+    Name=instance-type,Values=g6.2xlarge \
+  --query 'CapacityReservations[].{Id:CapacityReservationId,Type:InstanceType,Total:TotalInstanceCount,Available:AvailableInstanceCount,Match:InstanceMatchCriteria,State:State}'
 ```
 
-NodePool is pinned to ODCR AZ. Spot is not used (training interruption risk).
+If an existing two-slot reservation is missing the selector tags, attach them
+before applying the NodeClass:
+
+```bash
+aws ec2 create-tags \
+  --profile autowarefoundation \
+  --region us-west-2 \
+  --resources cr-xxxxxxxxxxxxxxxxx \
+  --tags \
+    Key=Name,Value=auto-e2e-gpu-validation \
+    Key=purpose,Value=inference-validation \
+    Key=retention,Value=keep-until-user-cancels
+```
+
+The p5en Ray topology uses whole-GPU allocation rather than MIG:
+
+| Workload | Worker Pods | GPUs per Pod | Ray Train workers |
+|----------|-------------|--------------|-------------------|
+| Validation | 2 | 1 | 2 |
+| Four-GPU training | 1 | 4 | 4 |
+| Eight-GPU training | 1 | 8 | 8 |
+
+Keeping all workers for one trainer in a single Pod preserves intra-instance
+GPU communication. Two independent four-GPU jobs can share the same p5en
+node when Kueue admits both workloads. The p5en queue is reserved for these
+four- and eight-GPU Ray jobs. Legacy single-GPU training and evaluation use
+the retained g6 validation pool.
+
+The p5en queue uses `BestEffortFIFO`. Priority influences admission among
+workloads that fit, but a four-GPU job may be admitted while a higher-priority
+eight-GPU job is blocked on the full-node quota. This avoids leaving half of
+the node idle, at the cost of possible delay for an eight-GPU job. An admitted
+training workload is never preempted to make room for a later workload.
+
+Search for a block without purchasing it:
+
+```bash
+python3 Platform/scripts/p5en_capacity_block.py \
+  --profile autowarefoundation \
+  --region us-west-2 \
+  search \
+  --duration-hours 24 \
+  --start-after 2026-09-02T00:00:00Z \
+  --end-before 2026-09-09T23:59:59Z
+```
+
+The platform CLI accepts Capacity Blocks from one through 14 days. This keeps
+the purchased window below the EKS Auto Mode NodePool lifetime limit.
+
+The CLI requests offerings across all Availability Zones, then keeps only
+`us-west-2a` and `us-west-2c`, where this VPC has private subnets. This
+prevents purchasing a block that the cluster cannot use.
+
+The purchase command defaults to the AWS DryRun path. The maximum fee is an
+independent spend ceiling in addition to the exact expected fee:
+
+```bash
+python3 Platform/scripts/p5en_capacity_block.py \
+  --profile autowarefoundation \
+  --region us-west-2 \
+  purchase \
+  --offering-id cb-xxxxxxxxxxxxxxxxx \
+  --expected-upfront-fee 0000.0000 \
+  --max-upfront-fee 1500.0000 \
+  --confirm "PURCHASE cb-xxxxxxxxxxxxxxxxx 0000.0000" \
+  --duration-hours 24 \
+  --start-after 2026-09-02T00:00:00Z \
+  --end-before 2026-09-09T23:59:59Z
+```
+
+Repeat the same command with `--execute` only after reviewing the selected
+Availability Zone, start time, end time, and upfront fee. The execute path
+performs AWS DryRun again before sending the real purchase request.
+
+Wait until the purchased reservation is active before launching Flyte:
+
+```bash
+python3 Platform/scripts/p5en_capacity_block.py \
+  --profile autowarefoundation \
+  --region us-west-2 \
+  wait-ready
+```
+
+`wait-ready` refuses to return a block with less than 22 hours remaining.
+It accepts a consumed active reservation so a second independent four-GPU
+job can use the other half of an already running p5en node.
+The nuPlan launcher reads the active reservation EndDate and passes it into
+the workflow. The p5en training task has a 20-hour timeout and rejects any
+start with less than 22 hours remaining. Production tasks save an S3
+checkpoint every 128 optimizer steps, so a Flyte retry in the same execution
+can resume from the latest persisted optimizer step. Use a longer Capacity
+Block when the planned training cannot finish inside one 20-hour task window.
+The sequential two-stage 8-GPU workflow needs at least 42 hours remaining:
+20 hours for each task and a 2-hour safety margin before each task starts.
+Purchase a 48-hour or longer block for that workflow.
 
 ### Flyte S3 Authentication Constraint
 
@@ -119,7 +221,7 @@ HuggingFace Dataset → IngestAdapter → WebDataset (.tar shards) → S3
 ### IL Training (Imitation Learning)
 
 ```
-S3 Shards → PyTorchJob (Kueue managed) → GPU g6e.4xlarge → MLflow
+S3 Shards → Ray Train (Kueue managed) → p5en.48xlarge → MLflow
 ```
 
 - **Kueue**: GPU quota management, priority-based admission
@@ -193,14 +295,20 @@ terraform apply -var-file=environments/dev/terraform.tfvars \
 # Post-apply (kubeconfig + K8s resources)
 aws eks update-kubeconfig --name auto-e2e-platform --region us-west-2 --profile autowarefoundation
 
-# GPU NodePool
-kubectl apply -f Platform/k8s/gpu-nodepool.yaml
+# GPU NodeClasses and NodePools
+ACCOUNT=$(aws sts get-caller-identity \
+  --profile autowarefoundation \
+  --query Account \
+  --output text)
+sed "s/REPLACE_WITH_AWS_ACCOUNT_ID/${ACCOUNT}/g" \
+  ../k8s/karpenter-nodepools/gpu-nodeclass.yaml | kubectl apply -f -
+kubectl apply -f ../k8s/karpenter-nodepools/gpu-nodepool.yaml
 
 # Kueue config
-kubectl apply -f Platform/k8s/kueue-config.yaml
+kubectl apply -f ../k8s/kueue-config/kueue-objects.yaml
 
 # Flyte S3 patch (required after every terraform apply)
-./Platform/infra/post-apply-phase2.sh
+AWS_PROFILE=autowarefoundation ./post-apply-phase2.sh
 ```
 
 ### Cross-Account Migration
@@ -209,7 +317,8 @@ kubectl apply -f Platform/k8s/kueue-config.yaml
 2. Create S3 backend bucket in new account
 3. `terraform init -backend-config=...` to switch backend
 4. `terraform apply` — all resources created in new account
-5. ODCR created manually (depends on AZ/instance-type availability)
+5. Retain the two-slot g6 validation ODCR
+6. Search and explicitly purchase a p5en Capacity Block for each large run
 
 ---
 
@@ -277,14 +386,16 @@ Platform/
 | Resource | Monthly (USD) |
 |----------|-----------|
 | EKS Auto Mode cluster | $73 |
-| g6e.4xlarge ODCR (1 node, 24h) | ~$1,300 |
+| g6.2xlarge validation ODCR (2 slots) | Region price |
+| p5en Capacity Block | Offering-specific upfront fee |
 | System nodes (3x c6a.large) | ~$180 |
 | RDS (db.t4g.micro) | ~$15 |
 | NAT Gateway | ~$35 |
 | S3 + CloudFront | ~$5 |
-| **Total** | **~$1,600/mo** |
+| **Fixed subtotal** | **~$308/mo plus storage and GPU capacity** |
 
-GPU nodes scale to zero when idle. ODCR holds capacity reservation.
+GPU nodes scale to zero when idle. The validation ODCR remains active, while
+p5en capacity exists only for the purchased block window.
 
 ---
 

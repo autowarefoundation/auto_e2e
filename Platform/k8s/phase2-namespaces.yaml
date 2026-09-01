@@ -28,7 +28,6 @@ metadata:
   name: auto-e2e-training
   labels:
     kubernetes.io/metadata.name: auto-e2e-training
-    kueue.x-k8s.io/default-queue: gpu-queue
 ---
 # ServiceAccount for training pods (Pod Identity → s3-access role)
 apiVersion: v1

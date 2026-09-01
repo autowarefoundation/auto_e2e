@@ -10,10 +10,10 @@ spec: {}
 apiVersion: kueue.x-k8s.io/v1beta2
 kind: ResourceFlavor
 metadata:
-  name: gpu-flavor
+  name: gpu-validation-flavor
 spec:
   nodeLabels:
-    workload-type: gpu-training
+    workload-type: gpu-validation
   tolerations:
     - key: nvidia.com/gpu
       operator: Exists
@@ -22,22 +22,10 @@ spec:
 apiVersion: kueue.x-k8s.io/v1beta2
 kind: ResourceFlavor
 metadata:
-  name: gpu-canary-flavor
+  name: p5en-capacity-block-flavor
 spec:
   nodeLabels:
-    workload-type: gpu-canary
-  tolerations:
-    - key: nvidia.com/gpu
-      operator: Exists
-      effect: NoSchedule
----
-apiVersion: kueue.x-k8s.io/v1beta2
-kind: ResourceFlavor
-metadata:
-  name: gpu-performance-flavor
-spec:
-  nodeLabels:
-    workload-type: gpu-performance
+    workload-type: p5en-capacity-block
   tolerations:
     - key: nvidia.com/gpu
       operator: Exists
@@ -60,7 +48,7 @@ description: "High priority for production training"
 apiVersion: kueue.x-k8s.io/v1beta2
 kind: ClusterQueue
 metadata:
-  name: training-queue
+  name: gpu-validation-queue
 spec:
   namespaceSelector:
     matchExpressions:
@@ -77,43 +65,13 @@ spec:
         - name: default-flavor
           resources:
             - name: cpu
-              nominalQuota: "40"
+              nominalQuota: "12"
             - name: memory
-              nominalQuota: 160Gi
+              nominalQuota: 48Gi
     - coveredResources:
         - nvidia.com/gpu
       flavors:
-        - name: gpu-flavor
-          resources:
-            - name: nvidia.com/gpu
-              nominalQuota: "8"
-  preemption:
-    withinClusterQueue: LowerPriority
-    reclaimWithinCohort: Never
----
-apiVersion: kueue.x-k8s.io/v1beta2
-kind: ClusterQueue
-metadata:
-  name: gpu-canary-queue
-spec:
-  namespaceSelector:
-    matchLabels:
-      kubernetes.io/metadata.name: auto-e2e-development
-  resourceGroups:
-    - coveredResources:
-        - cpu
-        - memory
-      flavors:
-        - name: default-flavor
-          resources:
-            - name: cpu
-              nominalQuota: "16"
-            - name: memory
-              nominalQuota: 64Gi
-    - coveredResources:
-        - nvidia.com/gpu
-      flavors:
-        - name: gpu-canary-flavor
+        - name: gpu-validation-flavor
           resources:
             - name: nvidia.com/gpu
               nominalQuota: "2"
@@ -124,29 +82,36 @@ spec:
 apiVersion: kueue.x-k8s.io/v1beta2
 kind: ClusterQueue
 metadata:
-  name: gpu-performance-queue
+  name: p5en-capacity-block-queue
 spec:
+  queueingStrategy: BestEffortFIFO
   namespaceSelector:
-    matchLabels:
-      kubernetes.io/metadata.name: auto-e2e-development
+    matchExpressions:
+      - key: kubernetes.io/metadata.name
+        operator: In
+        values:
+          - auto-e2e-development
   resourceGroups:
     - coveredResources:
         - cpu
         - memory
+        - ephemeral-storage
       flavors:
         - name: default-flavor
           resources:
             - name: cpu
-              nominalQuota: "24"
+              nominalQuota: "128"
             - name: memory
-              nominalQuota: 96Gi
+              nominalQuota: 1536Gi
+            - name: ephemeral-storage
+              nominalQuota: 1500Gi
     - coveredResources:
         - nvidia.com/gpu
       flavors:
-        - name: gpu-performance-flavor
+        - name: p5en-capacity-block-flavor
           resources:
             - name: nvidia.com/gpu
-              nominalQuota: "4"
+              nominalQuota: "8"
   preemption:
     withinClusterQueue: Never
     reclaimWithinCohort: Never
@@ -154,35 +119,59 @@ spec:
 apiVersion: kueue.x-k8s.io/v1beta2
 kind: LocalQueue
 metadata:
-  name: training
+  name: gpu-validation
+  namespace: auto-e2e-development
+spec:
+  clusterQueue: gpu-validation-queue
+---
+apiVersion: kueue.x-k8s.io/v1beta2
+kind: LocalQueue
+metadata:
+  name: gpu-validation
   namespace: auto-e2e-training
-  annotations:
-    kueue.x-k8s.io/default-queue: "true"
 spec:
-  clusterQueue: training-queue
+  clusterQueue: gpu-validation-queue
 ---
 apiVersion: kueue.x-k8s.io/v1beta2
 kind: LocalQueue
 metadata:
-  name: gpu-canary
-  namespace: auto-e2e-development
+  name: gpu-validation
+  namespace: auto-e2e-staging
 spec:
-  clusterQueue: gpu-canary-queue
+  clusterQueue: gpu-validation-queue
+  stopPolicy: HoldAndDrain
 ---
 apiVersion: kueue.x-k8s.io/v1beta2
 kind: LocalQueue
 metadata:
-  name: gpu-performance
-  namespace: auto-e2e-development
+  name: gpu-validation
+  namespace: auto-e2e-production
 spec:
-  clusterQueue: gpu-performance-queue
+  clusterQueue: gpu-validation-queue
+  stopPolicy: HoldAndDrain
 ---
 apiVersion: kueue.x-k8s.io/v1beta2
 kind: LocalQueue
 metadata:
-  name: training
+  name: p5en-capacity-block
   namespace: auto-e2e-development
-  annotations:
-    kueue.x-k8s.io/default-queue: "true"
 spec:
-  clusterQueue: training-queue
+  clusterQueue: p5en-capacity-block-queue
+---
+apiVersion: kueue.x-k8s.io/v1beta2
+kind: LocalQueue
+metadata:
+  name: p5en-capacity-block
+  namespace: auto-e2e-staging
+spec:
+  clusterQueue: p5en-capacity-block-queue
+  stopPolicy: HoldAndDrain
+---
+apiVersion: kueue.x-k8s.io/v1beta2
+kind: LocalQueue
+metadata:
+  name: p5en-capacity-block
+  namespace: auto-e2e-production
+spec:
+  clusterQueue: p5en-capacity-block-queue
+  stopPolicy: HoldAndDrain

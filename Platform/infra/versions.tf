@@ -33,7 +33,6 @@ terraform {
 provider "aws" {
   region  = var.region
   profile = "autowarefoundation"
-  # us-west-2: ODCR confirmed for g6e.4xlarge @ us-west-2b
 
   default_tags {
     tags = {

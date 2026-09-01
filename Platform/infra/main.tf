@@ -1,7 +1,6 @@
 locals {
-  # VPC spans 3 AZs for EKS HA; GPU NodePool is pinned to ODCR AZ only
+  # VPC spans 3 AZs for EKS HA and GPU capacity selection.
   vpc_azs = ["us-west-2a", "us-west-2b", "us-west-2c"]
-  gpu_azs = var.gpu_azs
 }
 
 module "vpc" {
@@ -19,8 +18,6 @@ module "eks" {
   cluster_name       = var.cluster_name
   vpc_id             = module.vpc.vpc_id
   private_subnet_ids = module.vpc.private_subnet_ids
-  gpu_instance_types = var.gpu_instance_types
-  gpu_azs            = local.gpu_azs
   environment        = var.environment
 }
 

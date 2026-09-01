@@ -34,7 +34,7 @@ typecheck: deps ## mypy over the project (same as CI)
 	cd Model && mypy .
 
 test: deps ## unit tests (same selection as CI)
-	$(PYTEST) Model/tests -v
+	$(PYTEST) Model/tests Platform/tests -v
 
 # map suite runs from Model/ so `data_parsing.*` imports resolve (no __init__.py).
 # The integration suite is slow and downloads pretrained backbone weights on first run.

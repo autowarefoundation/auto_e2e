@@ -46,6 +46,7 @@ from distributed_training.reactive_stage import (
     BEV_LANE_NEAR_RADIUS_M,
     REACTIVE_STEP_CHECKPOINT_VERSION,
     ReactiveResumeState,
+    expected_reactive_hostname_count,
     _all_reduce_bev_statistics,
     _bev_lane_range_masks,
     _camera_feature_scale_weights,
@@ -848,6 +849,7 @@ def _stage_config(stage: str) -> dict[str, object]:
         "bev_weight": 1.0,
         "allow_random_bevformer_init": True,
         "corridor_pos_weight": 1.0,
+        "capacity_block_end_utc": "2099-01-01T00:00:00Z",
         "checkpoint_interval_steps": 512,
         "epochs": 2,
         "grad_clip": 1.0,
@@ -886,6 +888,17 @@ def test_validate_stage_config_accepts_locked_program(stage):
     validate_reactive_stage_config(_stage_config(stage))
 
 
+@pytest.mark.parametrize(
+    ("world_size", "hostname_count"),
+    ((2, 2), (4, 1), (8, 1)),
+)
+def test_expected_reactive_hostname_count_matches_ray_topology(
+    world_size,
+    hostname_count,
+):
+    assert expected_reactive_hostname_count(world_size) == hostname_count
+
+
 def test_validate_stage_config_rejects_parent_and_batch_contract_changes():
     stage_a = _stage_config("nuplan_full")
     stage_a["parent_checkpoint_uri"] = "s3://checkpoints/parent.pt"
@@ -906,6 +919,28 @@ def test_validate_stage_config_rejects_parent_and_batch_contract_changes():
     invalid_interval["checkpoint_interval_steps"] = 0
     with pytest.raises(ValueError, match="checkpoint_interval_steps"):
         validate_reactive_stage_config(invalid_interval)
+
+
+def test_p5en_stage_requires_a_safe_capacity_block_window():
+    missing = _stage_config("nuplan_full")
+    missing["capacity_block_end_utc"] = ""
+    with pytest.raises(ValueError, match="capacity_block_end_utc"):
+        validate_reactive_stage_config(missing)
+
+    missing_offset = _stage_config("nuplan_full")
+    missing_offset["capacity_block_end_utc"] = "2099-01-01T00:00:00"
+    with pytest.raises(ValueError, match="UTC offset"):
+        validate_reactive_stage_config(missing_offset)
+
+    expired = _stage_config("nuplan_full")
+    expired["capacity_block_end_utc"] = "2000-01-01T00:00:00Z"
+    with pytest.raises(ValueError, match="at least 22 hours"):
+        validate_reactive_stage_config(expired)
+
+    validation = _stage_config("nuplan_full")
+    validation["num_workers"] = 2
+    validation["capacity_block_end_utc"] = ""
+    validate_reactive_stage_config(validation)
 
 
 def test_validate_stage_config_requires_one_initialization_mode():

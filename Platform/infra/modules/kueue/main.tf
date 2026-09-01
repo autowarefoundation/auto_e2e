@@ -8,14 +8,5 @@ resource "helm_release" "kueue" {
   namespace        = "kueue-system"
   create_namespace = true
 
-  set {
-    name  = "controller.manager.configuration.integrations.frameworks[0]"
-    value = "batch/job"
-  }
-  set {
-    name  = "controller.manager.configuration.integrations.frameworks[1]"
-    value = "kubeflow.org/pytorchjob"
-  }
-
   values = [file("${path.module}/../../../helm-values/kueue.yaml")]
 }

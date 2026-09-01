@@ -19,6 +19,7 @@ env:
     TRAJECTORY_WEIGHT: "1.0"
     BEV_WEIGHT: "1.0"
     ROUTE_WEIGHT: "1.0"
+    CAPACITY_BLOCK_MINIMUM_REMAINING_SECONDS: "79200"
     WAIT_FOR_COMPLETION: "false"
     WAIT_TIMEOUT_SECONDS: "28800"
 
@@ -41,10 +42,21 @@ phases:
       - printf '%s' "${PRECISION}" | grep -Eq '^(fp32|bf16)$'
       - printf '%s' "${WAIT_FOR_COMPLETION}" | grep -Eq '^(true|false)$'
       - printf '%s' "${WAIT_TIMEOUT_SECONDS}" | grep -Eq '^[1-9][0-9]*$'
+      - printf '%s' "${CAPACITY_BLOCK_MINIMUM_REMAINING_SECONDS}" | grep -Eq '^[1-9][0-9]*$'
+      - |
+        aws ec2 describe-capacity-reservations \
+          --filters \
+            Name=tag:Name,Values=auto-e2e-p5en-capacity-block \
+            Name=instance-type,Values=p5en.48xlarge \
+            Name=state,Values=active \
+          --query 'CapacityReservations[].{Id:CapacityReservationId,AvailabilityZone:AvailabilityZone,EndDate:EndDate,ReservationType:ReservationType,TotalInstanceCount:TotalInstanceCount}' \
+          --output json > /tmp/p5en-capacity-blocks.json
       - |
         python3 - <<'PY'
+        from datetime import datetime, timedelta, timezone
         import os
         import json
+        from pathlib import Path
 
         with open(
             "/tmp/nuplan-dataset-uris.json",
@@ -76,6 +88,65 @@ phases:
         ):
             if float(os.environ[name]) < 0.0:
                 raise ValueError(f"{name} must be non-negative")
+
+        with open(
+            "/tmp/p5en-capacity-blocks.json",
+            encoding="ascii",
+        ) as stream:
+            capacity_blocks = json.load(stream)
+        if len(capacity_blocks) != 1:
+            raise ValueError(
+                "exactly one active tagged p5en Capacity Block is required"
+            )
+        capacity_block = capacity_blocks[0]
+        if (
+            capacity_block["ReservationType"] != "capacity-block"
+            or int(capacity_block["TotalInstanceCount"]) != 1
+        ):
+            raise ValueError(
+                "p5en reservation must be one Capacity Block instance"
+            )
+        if capacity_block.get("AvailabilityZone") not in {
+            "us-west-2a",
+            "us-west-2c",
+        }:
+            raise ValueError(
+                "p5en Capacity Block must be in us-west-2a or us-west-2c"
+            )
+        capacity_block_end_value = capacity_block.get("EndDate")
+        if not isinstance(capacity_block_end_value, str):
+            raise ValueError(
+                "active p5en Capacity Block is missing EndDate"
+            )
+        capacity_block_end_utc = capacity_block_end_value
+        capacity_block_end = datetime.fromisoformat(
+            capacity_block_end_utc.replace("Z", "+00:00")
+        )
+        minimum_remaining_seconds = int(
+            os.environ[
+                "CAPACITY_BLOCK_MINIMUM_REMAINING_SECONDS"
+            ]
+        )
+        workflow_name = os.environ["WORKFLOW_NAME"]
+        if workflow_name.endswith(
+            "wf_train_reactive_nuplan_l2d_ray_8"
+        ):
+            minimum_remaining_seconds = max(
+                minimum_remaining_seconds,
+                42 * 60 * 60,
+            )
+        minimum_end = datetime.now(timezone.utc) + timedelta(
+            seconds=minimum_remaining_seconds
+        )
+        if capacity_block_end.astimezone(timezone.utc) < minimum_end:
+            raise ValueError(
+                "p5en Capacity Block remaining window is shorter than "
+                "CAPACITY_BLOCK_MINIMUM_REMAINING_SECONDS"
+            )
+        Path("/tmp/p5en-capacity-block-end.txt").write_text(
+            capacity_block_end_utc,
+            encoding="ascii",
+        )
         PY
       - |
         cat > /tmp/flyte.yaml << EOF
@@ -114,6 +185,11 @@ phases:
             encoding="ascii",
         ) as stream:
             dataset_uris = json.load(stream)
+        with open(
+            "/tmp/p5en-capacity-block-end.txt",
+            encoding="ascii",
+        ) as stream:
+            capacity_block_end_utc = stream.read().strip()
         inputs = {
             "nuplan_shards": [
                 FlyteDirectory(uri) for uri in dataset_uris
@@ -131,6 +207,7 @@ phases:
             ),
             "bev_weight": float(os.environ["BEV_WEIGHT"]),
             "route_weight": float(os.environ["ROUTE_WEIGHT"]),
+            "capacity_block_end_utc": capacity_block_end_utc,
         }
         remote = FlyteRemote(
             config=Config.auto(config_file="/tmp/flyte.yaml"),

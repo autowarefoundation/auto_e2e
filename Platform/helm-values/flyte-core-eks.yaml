@@ -377,6 +377,8 @@ cluster_resource_manager:
                 value: "5"
             - projectQuotaMemory:
                 value: "4000Mi"
+            - projectQuotaGpu:
+                value: "0"
             - defaultIamRole:
                 value: "arn:aws:iam::{{ .Values.userSettings.accountNumber }}:role/flyte-user-role"
         - staging:
@@ -384,6 +386,8 @@ cluster_resource_manager:
                 value: "2"
             - projectQuotaMemory:
                 value: "3000Mi"
+            - projectQuotaGpu:
+                value: "0"
             - defaultIamRole:
                 value: "arn:aws:iam::{{ .Values.userSettings.accountNumber }}:role/flyte-user-role"
         - development:
@@ -394,6 +398,8 @@ cluster_resource_manager:
                 value: "1000"
             - projectQuotaMemory:
                 value: "8Ti"
+            - projectQuotaGpu:
+                value: "10"
             - defaultIamRole:
                 value: "arn:aws:iam::{{ .Values.userSettings.accountNumber }}:role/flyte-user-role"
 
@@ -433,6 +439,7 @@ cluster_resource_manager:
             limits.memory: {{ projectQuotaMemory }}
             requests.cpu: {{ projectQuotaCpu }}
             requests.memory: {{ projectQuotaMemory }}
+            requests.nvidia.com/gpu: {{ projectQuotaGpu }}
 
 
 

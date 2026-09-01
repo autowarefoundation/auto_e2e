@@ -58,8 +58,30 @@ resource "aws_iam_role_policy" "codebuild" {
       },
       {
         Effect   = "Allow"
+        Action   = "ec2:DescribeCapacityReservations"
+        Resource = "*"
+      },
+      {
+        Effect   = "Allow"
         Action   = ["s3:GetObject", "s3:PutObject", "s3:GetBucketLocation"]
         Resource = ["${aws_s3_bucket.cache.arn}", "${aws_s3_bucket.cache.arn}/*"]
+      },
+      {
+        Effect = "Allow"
+        Action = ["s3:GetObject", "s3:GetBucketLocation"]
+        Resource = [
+          "arn:aws:s3:::${var.cluster_name}-checkpoints-${local.account_id}",
+          "arn:aws:s3:::${var.cluster_name}-checkpoints-${local.account_id}/*",
+          "arn:aws:s3:::${var.cluster_name}-datasets-${local.account_id}",
+          "arn:aws:s3:::${var.cluster_name}-datasets-${local.account_id}/*",
+        ]
+      },
+      {
+        Effect = "Allow"
+        Action = ["s3:PutObject"]
+        Resource = [
+          "arn:aws:s3:::${var.cluster_name}-datasets-${local.account_id}/*/odd/configs/*",
+        ]
       },
     ]
   })

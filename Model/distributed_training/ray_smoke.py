@@ -14,11 +14,22 @@ import os
 import socket
 import tempfile
 import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
 
 SUPPORTED_WORLD_SIZES = frozenset({2, 4, 8})
+P5EN_SMOKE_MINIMUM_REMAINING_RUNTIME = timedelta(hours=1)
+
+
+def expected_hostname_count(num_workers: int) -> int:
+    if num_workers not in SUPPORTED_WORLD_SIZES:
+        raise ValueError(
+            "num_workers must be one of "
+            f"{sorted(SUPPORTED_WORLD_SIZES)}, got {num_workers}"
+        )
+    return 2 if num_workers == 2 else 1
 
 
 def validate_smoke_config(
@@ -38,6 +49,31 @@ def validate_smoke_config(
         raise ValueError(
             "learning_rate must be in (0, 1], got "
             f"{learning_rate}"
+        )
+
+
+def validate_capacity_block_window(capacity_block_end_utc: str) -> None:
+    if not capacity_block_end_utc:
+        raise ValueError("capacity_block_end_utc is required")
+    try:
+        capacity_block_end = datetime.fromisoformat(
+            capacity_block_end_utc.replace("Z", "+00:00")
+        )
+    except ValueError as error:
+        raise ValueError(
+            "capacity_block_end_utc must be an ISO-8601 timestamp"
+        ) from error
+    if capacity_block_end.tzinfo is None:
+        raise ValueError(
+            "capacity_block_end_utc must include a UTC offset"
+        )
+    minimum_end = (
+        datetime.now(timezone.utc)
+        + P5EN_SMOKE_MINIMUM_REMAINING_RUNTIME
+    )
+    if capacity_block_end.astimezone(timezone.utc) < minimum_end:
+        raise ValueError(
+            "p5en Capacity Block must have at least one hour remaining"
         )
 
 
@@ -213,10 +249,13 @@ def train_loop_per_worker(config: dict[str, Any]) -> None:
     hostnames: list[str | None] = [None] * world_size
     dist.all_gather_object(hostnames, socket.gethostname())
     unique_hostnames = sorted({str(host) for host in hostnames})
-    if len(unique_hostnames) != world_size:
+    required_hostname_count = int(config["expected_hostname_count"])
+    if len(unique_hostnames) != required_hostname_count:
         raise RuntimeError(
-            "one-GPU-per-node invariant failed: "
-            f"world_size={world_size} hosts={unique_hostnames}"
+            "Ray worker placement invariant failed: "
+            f"world_size={world_size} "
+            f"expected_hostname_count={required_hostname_count} "
+            f"hosts={unique_hostnames}"
         )
 
     batch = _fixed_rank_batch(
@@ -318,6 +357,7 @@ def run_smoke(
     steps: int,
     storage_path: str,
     run_name: str,
+    capacity_block_end_utc: str = "",
     learning_rate: float = 1e-4,
     seed: int = 149,
 ) -> dict[str, Any]:
@@ -326,6 +366,8 @@ def run_smoke(
         steps=steps,
         learning_rate=learning_rate,
     )
+    if num_workers > 2:
+        validate_capacity_block_window(capacity_block_end_utc)
     if not storage_path.startswith("s3://"):
         raise ValueError("storage_path must be an S3 URI")
     if not run_name or "/" in run_name:
@@ -345,6 +387,9 @@ def run_smoke(
             "learning_rate": learning_rate,
             "num_views": 6,
             "num_workers": num_workers,
+            "expected_hostname_count": expected_hostname_count(
+                num_workers
+            ),
             "seed": seed,
             "steps": steps,
         },
@@ -352,7 +397,9 @@ def run_smoke(
             num_workers=num_workers,
             use_gpu=True,
             resources_per_worker={"CPU": 4, "GPU": 1},
-            placement_strategy="SPREAD",
+            placement_strategy=(
+                "SPREAD" if num_workers == 2 else "PACK"
+            ),
         ),
         run_config=train.RunConfig(
             name=run_name,
@@ -383,6 +430,7 @@ def main() -> None:
     parser.add_argument("--steps", type=int, default=4)
     parser.add_argument("--learning-rate", type=float, default=1e-4)
     parser.add_argument("--seed", type=int, default=149)
+    parser.add_argument("--capacity-block-end-utc", default="")
     parser.add_argument(
         "--storage-path",
         default=os.environ.get(
@@ -405,6 +453,7 @@ def main() -> None:
         steps=args.steps,
         storage_path=args.storage_path,
         run_name=args.run_name,
+        capacity_block_end_utc=args.capacity_block_end_utc,
         learning_rate=args.learning_rate,
         seed=args.seed,
     )

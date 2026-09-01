@@ -10,6 +10,7 @@ import re
 import subprocess
 import sys
 import zipfile
+from datetime import timedelta
 from pathlib import Path
 
 import pytest
@@ -343,6 +344,57 @@ def test_flyte_entrypoints_do_not_use_mutable_defaults():
     assert mutable_defaults == []
 
 
+def test_single_gpu_flyte_tasks_target_validation_capacity():
+    template = workflows._large_shm_pod_template()
+    pod_spec = template.pod_spec
+    assert pod_spec.node_selector == {
+        "workload-type": "gpu-validation"
+    }
+    assert [
+        (
+            toleration.key,
+            toleration.operator,
+            toleration.effect,
+        )
+        for toleration in pod_spec.tolerations
+    ] == [("nvidia.com/gpu", "Exists", "NoSchedule")]
+
+    source_path = Path(workflows.__file__)
+    tree = ast.parse(source_path.read_text(encoding="utf-8"))
+    missing_templates = []
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        for decorator in node.decorator_list:
+            if not isinstance(decorator, ast.Call):
+                continue
+            target = decorator.func
+            if not isinstance(target, ast.Name) or target.id != "task":
+                continue
+            keywords = {
+                keyword.arg: keyword.value
+                for keyword in decorator.keywords
+                if keyword.arg is not None
+            }
+            requests = keywords.get("requests")
+            if not isinstance(requests, ast.Call):
+                continue
+            resource_keywords = {
+                keyword.arg: keyword.value
+                for keyword in requests.keywords
+                if keyword.arg is not None
+            }
+            gpu = resource_keywords.get("gpu")
+            if not (
+                isinstance(gpu, ast.Constant)
+                and gpu.value == "1"
+            ):
+                continue
+            if "pod_template" not in keywords:
+                missing_templates.append(node.name)
+    assert missing_templates == []
+
+
 def test_reviewed_ray_topologies_have_fixed_worker_groups():
     assert (
         distributed_training.RAY_2.worker_node_config[0].replicas
@@ -350,7 +402,7 @@ def test_reviewed_ray_topologies_have_fixed_worker_groups():
     )
     assert (
         distributed_training.RAY_8.worker_node_config[0].replicas
-        == 8
+        == 1
     )
     for config in (
         distributed_training.RAY_2,
@@ -362,6 +414,16 @@ def test_reviewed_ray_topologies_have_fixed_worker_groups():
         assert workers.min_replicas == workers.replicas
         assert workers.max_replicas == workers.replicas
         assert config.enable_autoscaling is False
+    assert (
+        distributed_training.RAY_REACTIVE_4.worker_node_config[0]
+        .ray_start_params["num-gpus"]
+        == "4"
+    )
+    assert (
+        distributed_training.RAY_8.worker_node_config[0]
+        .ray_start_params["num-gpus"]
+        == "8"
+    )
 
 
 def test_four_rank_performance_capacity_matches_ray_contract():
@@ -373,21 +435,29 @@ def test_four_rank_performance_capacity_matches_ray_contract():
     worker_spec = worker.pod_template.pod_spec
     assert head_spec.node_selector is None
     assert not head_spec.tolerations
-    assert worker.replicas == 4
-    assert worker.ray_start_params["num-cpus"] == "3"
+    assert worker.replicas == 1
+    assert worker.ray_start_params == {
+        "num-cpus": "48",
+        "num-gpus": "4",
+    }
     assert worker_spec.node_selector == {
-        "workload-type": "gpu-performance"
+        "workload-type": "p5en-capacity-block"
+    }
+    assert worker_spec.affinity is None
+    assert worker.pod_template.annotations == {
+        "karpenter.sh/do-not-disrupt": "true"
     }
     assert worker_spec.containers[0].resources.requests == {
-        "cpu": "3",
-        "memory": "12Gi",
-        "nvidia.com/gpu": "1",
+        "cpu": "48",
+        "memory": "512Gi",
+        "nvidia.com/gpu": "4",
+        "ephemeral-storage": "500Gi",
     }
     assert (
         distributed_training.train_reactive_stage_ray_4.metadata.labels[
             "kueue.x-k8s.io/queue-name"
         ]
-        == "gpu-performance"
+        == "p5en-capacity-block"
     )
 
     platform_root = Path(distributed_training.__file__).parents[1]
@@ -400,33 +470,36 @@ def test_four_rank_performance_capacity_matches_ray_contract():
             ).read_text()
         )
     }
-    reserved_class = node_classes[
-        "auto-e2e-gpu-performance-reserved"
-    ]["spec"]
-    canary_class = node_classes["auto-e2e-gpu-canary"]["spec"]
-    assert canary_class["capacityReservationSelectorTerms"] == [
-        {
-            "ownerID": "REPLACE_WITH_AWS_ACCOUNT_ID",
-            "tags": {"Name": "auto-e2e-gpu-canary"},
-        }
-    ]
-    assert reserved_class["capacityReservationSelectorTerms"] == [
-        {
-            "ownerID": "REPLACE_WITH_AWS_ACCOUNT_ID",
-            "tags": {"Name": "auto-e2e-gpu-canary"},
-        }
-    ]
-    assert reserved_class["placementGroupSelector"] == {
-        "name": "auto-e2e-distributed-training-pg"
+    assert set(node_classes) == {
+        "auto-e2e-gpu-validation",
+        "auto-e2e-p5en-capacity-block",
     }
-    assert "capacityReservationSelectorTerms" not in node_classes[
-        "auto-e2e-gpu-performance-ondemand"
+    validation_class = node_classes[
+        "auto-e2e-gpu-validation"
     ]["spec"]
-    training_class = node_classes["auto-e2e-gpu-training"]["spec"]
-    assert training_class["capacityReservationSelectorTerms"] == [{
-        "ownerID": "REPLACE_WITH_AWS_ACCOUNT_ID",
-        "tags": {"Name": "auto-e2e-distributed-training"},
-    }]
+    assert validation_class["capacityReservationSelectorTerms"] == [
+        {
+            "ownerID": "REPLACE_WITH_AWS_ACCOUNT_ID",
+            "tags": {"Name": "auto-e2e-gpu-validation"},
+        }
+    ]
+    capacity_block_class = node_classes[
+        "auto-e2e-p5en-capacity-block"
+    ]["spec"]
+    assert capacity_block_class[
+        "capacityReservationSelectorTerms"
+    ] == [
+        {
+            "ownerID": "REPLACE_WITH_AWS_ACCOUNT_ID",
+            "tags": {"Name": "auto-e2e-p5en-capacity-block"},
+        }
+    ]
+    assert "placementGroupSelector" not in capacity_block_class
+    assert capacity_block_class["ephemeralStorage"] == {
+        "size": "2Ti",
+        "iops": 16000,
+        "throughput": 1000,
+    }
 
     node_pools = {
         item["metadata"]["name"]: item
@@ -437,52 +510,45 @@ def test_four_rank_performance_capacity_matches_ray_contract():
             ).read_text()
         )
     }
-    reserved_pool = node_pools["gpu-performance-reserved"]["spec"]
-    assert reserved_pool["weight"] == 100
-    assert reserved_pool["limits"] == {
-        "cpu": "32",
-        "memory": "256Gi",
-        "nodes": "4",
-        "nvidia.com/gpu": "4",
+    assert set(node_pools) == {
+        "gpu-validation",
+        "p5en-capacity-block",
     }
-    assert reserved_pool["template"]["metadata"]["labels"] == {
-        "workload-type": "gpu-performance"
+    validation_pool = node_pools["gpu-validation"]["spec"]
+    assert validation_pool["limits"] == {
+        "cpu": "16",
+        "memory": "128Gi",
+        "nodes": "2",
+        "nvidia.com/gpu": "2",
     }
-    for pool_name in (
-        "gpu-canary",
-        "gpu-performance-reserved",
-        "gpu-performance-ondemand",
-        "gpu-training",
-        "gpu-burst",
-        "gpu-smoke",
-    ):
-        pool_spec = node_pools[pool_name]["spec"]["template"]["spec"]
-        assert pool_spec["expireAfter"] == "456h"
-        assert pool_spec["terminationGracePeriod"] == "24h"
+    assert validation_pool["template"]["metadata"]["labels"] == {
+        "workload-type": "gpu-validation"
+    }
+    validation_template = validation_pool["template"]["spec"]
+    assert validation_template["expireAfter"] == "456h"
+    assert validation_template["terminationGracePeriod"] == "24h"
+    capacity_block_pool = node_pools["p5en-capacity-block"]["spec"]
+    capacity_block_template = capacity_block_pool["template"]["spec"]
+    assert capacity_block_template["expireAfter"] == "503h"
+    assert capacity_block_template["terminationGracePeriod"] == "5m"
+    assert capacity_block_pool["disruption"] == {
+        "budgets": [{"nodes": "0"}],
+        "consolidationPolicy": "WhenEmpty",
+        "consolidateAfter": "Never",
+    }
     requirements = {
         item["key"]: item["values"]
-        for item in reserved_pool["template"]["spec"]["requirements"]
+        for item in capacity_block_template["requirements"]
     }
     assert requirements["node.kubernetes.io/instance-type"] == [
-        "g6.2xlarge"
+        "p5en.48xlarge"
     ]
     assert requirements["karpenter.sh/capacity-type"] == ["reserved"]
-    training_pool = node_pools["gpu-training"]["spec"]
-    assert training_pool["template"]["spec"]["nodeClassRef"]["name"] == (
-        "auto-e2e-gpu-training"
-    )
-    training_requirements = {
-        item["key"]: item["values"]
-        for item in training_pool["template"]["spec"]["requirements"]
-    }
-    assert training_requirements["karpenter.sh/capacity-type"] == [
-        "reserved"
-    ]
-    assert training_pool["limits"] == {
-        "cpu": "64",
-        "memory": "512Gi",
-        "nodes": "4",
-        "nvidia.com/gpu": "4",
+    assert capacity_block_pool["limits"] == {
+        "cpu": "192",
+        "memory": "2Ti",
+        "nodes": "1",
+        "nvidia.com/gpu": "8",
     }
 
     queue_objects = {
@@ -499,21 +565,99 @@ def test_four_rank_performance_capacity_matches_ray_contract():
         )
     }
     performance_queue = queue_objects[
-        ("ClusterQueue", "gpu-performance-queue", None)
+        ("ClusterQueue", "p5en-capacity-block-queue", None)
     ]["spec"]
+    assert performance_queue["queueingStrategy"] == "BestEffortFIFO"
+    assert performance_queue["namespaceSelector"] == {
+        "matchExpressions": [
+            {
+                "key": "kubernetes.io/metadata.name",
+                "operator": "In",
+                "values": ["auto-e2e-development"],
+            }
+        ]
+    }
+    compute_group = next(
+        group
+        for group in performance_queue["resourceGroups"]
+        if group["coveredResources"]
+        == ["cpu", "memory", "ephemeral-storage"]
+    )
+    assert compute_group["flavors"][0]["resources"] == [
+        {"name": "cpu", "nominalQuota": "128"},
+        {"name": "memory", "nominalQuota": "1536Gi"},
+        {"name": "ephemeral-storage", "nominalQuota": "1500Gi"},
+    ]
     gpu_group = next(
         group
         for group in performance_queue["resourceGroups"]
         if group["coveredResources"] == ["nvidia.com/gpu"]
     )
     assert gpu_group["flavors"][0]["resources"] == [
-        {"name": "nvidia.com/gpu", "nominalQuota": "4"}
+        {"name": "nvidia.com/gpu", "nominalQuota": "8"}
     ]
     assert (
         "LocalQueue",
-        "gpu-performance",
+        "p5en-capacity-block",
         "auto-e2e-development",
     ) in queue_objects
+    for namespace in (
+        "auto-e2e-staging",
+        "auto-e2e-production",
+    ):
+        p5en_queue = queue_objects[
+            "LocalQueue",
+            "p5en-capacity-block",
+            namespace,
+        ]
+        validation_local_queue = queue_objects[
+            "LocalQueue",
+            "gpu-validation",
+            namespace,
+        ]
+        assert p5en_queue["spec"]["stopPolicy"] == "HoldAndDrain"
+        assert (
+            validation_local_queue["spec"]["stopPolicy"]
+            == "HoldAndDrain"
+        )
+    assert (
+        "LocalQueue",
+        "gpu-validation",
+        "auto-e2e-training",
+    ) in queue_objects
+    validation_queue = queue_objects[
+        ("ClusterQueue", "gpu-validation-queue", None)
+    ]["spec"]
+    assert validation_queue["namespaceSelector"] == {
+        "matchExpressions": [
+            {
+                "key": "kubernetes.io/metadata.name",
+                "operator": "In",
+                "values": [
+                    "auto-e2e-development",
+                    "auto-e2e-training",
+                ],
+            }
+        ]
+    }
+    validation_compute_group = next(
+        group
+        for group in validation_queue["resourceGroups"]
+        if group["coveredResources"] == ["cpu", "memory"]
+    )
+    assert validation_compute_group["flavors"][0]["resources"] == [
+        {"name": "cpu", "nominalQuota": "12"},
+        {"name": "memory", "nominalQuota": "48Gi"},
+    ]
+    assert (
+        "ClusterQueue",
+        "training-queue",
+        None,
+    ) not in queue_objects
+    training_queue = queue_objects[
+        ("LocalQueue", "gpu-validation", "auto-e2e-training")
+    ]
+    assert "annotations" not in training_queue["metadata"]
 
     deploy_script = (platform_root / "infra/post-apply.sh").read_text()
     render_index = deploy_script.index(
@@ -524,8 +668,85 @@ def test_four_rank_performance_capacity_matches_ray_contract():
     )
     assert render_index < node_pool_index
     assert "kueue-config/kueue-objects.yaml" in deploy_script
-    assert "nodepool/gpu-performance-reserved" in deploy_script
+    assert "nodepool/gpu-validation" in deploy_script
+    assert "nodeclass/auto-e2e-p5en-capacity-block" in deploy_script
+    assert "kueue-manager-config" in deploy_script
+    assert "wait_for_gpu_quota auto-e2e-development 10" in deploy_script
+    assert "wait_for_gpu_quota auto-e2e-staging 0" in deploy_script
+    assert "wait_for_gpu_quota auto-e2e-production 0" in deploy_script
+    assert '"limits.nvidia.com/gpu" not in hard' in deploy_script
+    assert "limits.nvidia.com~1gpu" in deploy_script
+    assert "--timeout=900s" in deploy_script
+    assert "kubectl describe" in deploy_script
+    for framework in (
+        "batch/job",
+        "kubeflow.org/pytorchjob",
+        "ray.io/rayjob",
+        "pod",
+    ):
+        assert framework in deploy_script
+    assert "nodepool/gpu-training" in deploy_script
+    assert "nodeclass/auto-e2e-gpu-training" in deploy_script
     assert re.search(r"\b[0-9]{12}\b", deploy_script) is None
+    kueue_values = yaml.safe_load(
+        (platform_root / "helm-values/kueue.yaml").read_text()
+    )
+    controller_manager = kueue_values["controllerManager"]
+    assert controller_manager["replicas"] == 2
+    assert controller_manager["podDisruptionBudget"] == {
+        "enabled": True,
+        "minAvailable": 1,
+    }
+    assert controller_manager["topologySpreadConstraints"] == [
+        {
+            "maxSkew": 1,
+            "topologyKey": "kubernetes.io/hostname",
+            "whenUnsatisfiable": "DoNotSchedule",
+            "labelSelector": {
+                "matchLabels": {
+                    "app.kubernetes.io/name": "kueue",
+                    "app.kubernetes.io/instance": "kueue",
+                    "control-plane": "controller-manager",
+                }
+            },
+        }
+    ]
+    assert controller_manager["livenessProbe"] == {
+        "initialDelaySeconds": 120
+    }
+    assert controller_manager["manager"]["podAnnotations"] == {
+        "karpenter.sh/do-not-disrupt": "true"
+    }
+    assert (
+        controller_manager["manager"]["priorityClassName"]
+        == "system-cluster-critical"
+    )
+    assert controller_manager["manager"]["resources"]["requests"] == {
+        "cpu": "500m",
+        "memory": "512Mi",
+    }
+    manager_config = kueue_values["managerConfig"][
+        "controllerManagerConfigYaml"
+    ]
+    for framework in (
+        "batch/job",
+        "kubeflow.org/pytorchjob",
+        "ray.io/rayjob",
+        "pod",
+    ):
+        assert f"- {framework}" in manager_config
+    assert "manageJobsWithoutQueueName: false" in manager_config
+    for namespace in (
+        "auto-e2e-development",
+        "auto-e2e-staging",
+        "auto-e2e-production",
+        "auto-e2e-training",
+    ):
+        assert f"- {namespace}" in manager_config
+    kueue_terraform = (
+        platform_root / "infra/modules/kueue/main.tf"
+    ).read_text()
+    assert "controller.manager.configuration" not in kueue_terraform
     for relative_path in re.findall(
         r"\.\./k8s/[A-Za-z0-9_./-]+\.yaml",
         deploy_script,
@@ -536,13 +757,25 @@ def test_four_rank_performance_capacity_matches_ray_contract():
             / relative_path
         ).resolve().is_file()
 
+    smoke_test = yaml.safe_load(
+        (platform_root / "k8s/gpu-smoke-test.yaml").read_text()
+    )
+    smoke_resources = smoke_test["spec"]["containers"][0]["resources"]
+    assert smoke_resources["requests"] == {
+        "cpu": "2",
+        "memory": "16Gi",
+        "nvidia.com/gpu": "1",
+    }
+    assert smoke_resources["limits"] == smoke_resources["requests"]
+
 
 def test_reactive_ray_cpu_contract_has_one_source_of_truth():
-    for config in (
-        distributed_training.RAY_2,
-        distributed_training.RAY_REACTIVE_4,
-        distributed_training.RAY_8,
-    ):
+    expected_actor_capacity = (
+        (distributed_training.RAY_2, 2, 3),
+        (distributed_training.RAY_REACTIVE_4, 4, 12),
+        (distributed_training.RAY_8, 8, 12),
+    )
+    for config, actor_count, actor_cpus in expected_actor_capacity:
         worker = config.worker_node_config[0]
         cpu = worker.ray_start_params["num-cpus"]
         resources = (
@@ -551,9 +784,7 @@ def test_reactive_ray_cpu_contract_has_one_source_of_truth():
         )
         assert resources.requests["cpu"] == cpu
         assert resources.limits["cpu"] == cpu
-        assert int(cpu) == distributed_training._reactive_worker_cpus(
-            worker.replicas
-        )
+        assert int(cpu) * worker.replicas == actor_count * actor_cpus
 
 
 def test_ray_tasks_serialize_the_resolved_storage_path():
@@ -664,6 +895,10 @@ def test_four_rank_workflow_runs_one_frozen_multitask_stage():
     assert bindings["bev_weight"].promise.var == "bev_weight"
     assert bindings["route_weight"].promise.var == "route_weight"
     assert (
+        bindings["capacity_block_end_utc"].promise.var
+        == "capacity_block_end_utc"
+    )
+    assert (
         bindings["checkpoint_interval_steps"].promise.var
         == "checkpoint_interval_steps"
     )
@@ -672,6 +907,59 @@ def test_four_rank_workflow_runs_one_frozen_multitask_stage():
         distributed_training.train_reactive_stage_ray_4.metadata.retries
         == 2
     )
+    assert (
+        distributed_training.train_reactive_stage_ray_4.metadata.timeout
+        == timedelta(hours=20)
+    )
+    for task in (
+        distributed_training.train_reactive_stage_ray_4,
+        distributed_training.train_reactive_stage_ray_8,
+    ):
+        assert task.metadata.labels == {
+            "kueue.x-k8s.io/queue-name": "p5en-capacity-block",
+            "kueue.x-k8s.io/priority-class": "production-high",
+        }
+    assert distributed_training.ray_ddp_smoke_4.metadata.labels == {
+        "kueue.x-k8s.io/queue-name": "p5en-capacity-block",
+        "kueue.x-k8s.io/priority-class": "research-low",
+    }
+    assert (
+        distributed_training.ray_ddp_smoke_4.metadata.timeout
+        == timedelta(minutes=30)
+    )
+    assert "capacity_block_end_utc" in (
+        distributed_training.ray_ddp_smoke_4.python_interface.inputs
+    )
+
+
+def test_gpu_tasks_use_separate_training_and_validation_capacity():
+    for task in (workflows.train_il, workflows.train_offline_rl):
+        assert task.pod_template.pod_spec.node_selector == {
+            "workload-type": "gpu-validation"
+        }
+        assert task.pod_template.annotations == {
+            "karpenter.sh/do-not-disrupt": "true"
+        }
+        assert task.metadata.labels == {
+            "kueue.x-k8s.io/queue-name": "gpu-validation",
+            "kueue.x-k8s.io/priority-class": "research-low",
+        }
+
+    for task in (
+        workflows.evaluate_il_policy,
+        workflows.evaluate_navigation_records,
+        workflows.evaluate_rl_policy,
+        workflows.evaluate_kitscenes_benchmark_checkpoint,
+    ):
+        assert task.pod_template.pod_spec.node_selector == {
+            "workload-type": "gpu-validation"
+        }
+        assert task.pod_template.annotations == {
+            "karpenter.sh/do-not-disrupt": "true"
+        }
+        assert task.metadata.labels[
+            "kueue.x-k8s.io/queue-name"
+        ] == "gpu-validation"
 
 
 def test_canary_launcher_is_idempotent_and_retries_flyte_admin():
@@ -1011,8 +1299,51 @@ def test_reactive_nuplan_launcher_uses_registered_four_rank_workflow():
     assert "len(dataset_uris) != 43" in buildspec
     assert "len(set(dataset_uris)) != 43" in buildspec
     assert "FlyteDirectory(uri) for uri in dataset_uris" in buildspec
+    assert "describe-capacity-reservations" in buildspec
+    assert "CAPACITY_BLOCK_MINIMUM_REMAINING_SECONDS" in buildspec
+    assert "Name=state,Values=active" in buildspec
+    assert "AvailableInstanceCount" not in buildspec
+    assert "exactly one active tagged p5en Capacity Block" in buildspec
+    assert 'capacity_block["ReservationType"] != "capacity-block"' in buildspec
+    assert "active p5en Capacity Block is missing EndDate" in buildspec
+    assert "p5en Capacity Block must be in us-west-2a" in buildspec
+    assert "42 * 60 * 60" in buildspec
+    assert '"capacity_block_end_utc": capacity_block_end_utc' in buildspec
+    codebuild_terraform = (
+        Path(distributed_training.__file__).parents[1]
+        / "infra/modules/codebuild/main.tf"
+    ).read_text(encoding="utf-8")
+    assert '"ec2:DescribeCapacityReservations"' in codebuild_terraform
+    assert '"ec2:PurchaseCapacityBlock"' not in codebuild_terraform
     assert "NUPLAN_DATASET_URI:" not in buildspec
     assert re.search(r"\b[0-9]{12}\b", buildspec) is None
+
+
+def test_flyte_resource_quota_tracks_all_gpu_capacity():
+    values_path = (
+        Path(distributed_training.__file__).parents[1]
+        / "helm-values/flyte-core-eks.yaml"
+    )
+    values_text = values_path.read_text(encoding="utf-8")
+    values = yaml.safe_load(values_text)
+    custom_data = values["cluster_resource_manager"]["config"][
+        "cluster_resources"
+    ]["customData"]
+    domains = {
+        domain: {
+            entry_name: entry["value"]
+            for item in settings
+            for entry_name, entry in item.items()
+        }
+        for item in custom_data
+        for domain, settings in item.items()
+    }
+
+    assert domains["development"]["projectQuotaGpu"] == "10"
+    assert domains["staging"]["projectQuotaGpu"] == "0"
+    assert domains["production"]["projectQuotaGpu"] == "0"
+    assert "limits.nvidia.com/gpu: {{ projectQuotaGpu }}" not in values_text
+    assert "requests.nvidia.com/gpu: {{ projectQuotaGpu }}" in values_text
 
 
 def test_nuplan_pack_worker_count_caps_full_and_limited():
