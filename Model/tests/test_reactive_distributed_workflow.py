@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import inspect
 import io
 import json
 import os
@@ -929,6 +930,23 @@ def test_four_rank_workflow_runs_one_frozen_multitask_stage():
     )
     assert "capacity_block_end_utc" in (
         distributed_training.ray_ddp_smoke_4.python_interface.inputs
+    )
+
+
+def test_production_checkpoint_interval_defaults_to_256_steps():
+    for task in (
+        distributed_training.train_reactive_stage_ray_4,
+        distributed_training.train_reactive_stage_ray_8,
+    ):
+        parameters = inspect.signature(task.task_function).parameters
+        assert parameters["checkpoint_interval_steps"].default == 256
+
+    workflow_parameters = inspect.signature(
+        distributed_training.wf_train_reactive_nuplan_ray_4
+    ).parameters
+    assert (
+        workflow_parameters["checkpoint_interval_steps"].default
+        == 256
     )
 
 

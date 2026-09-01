@@ -833,7 +833,7 @@ def train_reactive_stage_ray_4(
     precision: str = "bf16",
     gradient_accumulation_steps: int = 1,
     steps_per_epoch: int = 0,
-    checkpoint_interval_steps: int = 128,
+    checkpoint_interval_steps: int = 256,
     shuffle_buffer: int = 256,
     is_pretrained: bool = True,
     trajectory_weight: float = 1.0,
@@ -904,7 +904,7 @@ def train_reactive_stage_ray_8(
     precision: str = "bf16",
     gradient_accumulation_steps: int = 1,
     steps_per_epoch: int = 0,
-    checkpoint_interval_steps: int = 128,
+    checkpoint_interval_steps: int = 256,
     shuffle_buffer: int = 256,
     is_pretrained: bool = True,
     trajectory_weight: float = 1.0,
@@ -973,7 +973,7 @@ def wf_train_reactive_nuplan_ray_4(
     trajectory_weight: float = 1.0,
     bev_weight: float = 1.0,
     route_weight: float = 1.0,
-    checkpoint_interval_steps: int = 128,
+    checkpoint_interval_steps: int = 256,
 ) -> ReactiveRayOutput:
     """Train Stage A while keeping the pretrained camera BEV frozen."""
     return train_reactive_stage_ray_4(
