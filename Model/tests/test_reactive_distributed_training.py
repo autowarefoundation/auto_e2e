@@ -1223,6 +1223,8 @@ def test_ray_actor_cpu_reservation_matches_worker_config(
         "CPU": 3,
         "GPU": 1,
     }
+    assert captured["torch_config"].init_method == "tcp"
+    assert captured["torch_config"].timeout_s == 300
     assert (
         captured["run_config"].checkpoint_config.num_to_keep
         == config["epochs"] + 2

@@ -3047,7 +3047,7 @@ def run_reactive_stage(config: Mapping[str, Any]) -> dict[str, Any]:
     validate_reactive_stage_config(config)
     import ray
     from ray import train
-    from ray.train.torch import TorchTrainer
+    from ray.train.torch import TorchConfig, TorchTrainer
 
     if not ray.is_initialized():
         ray.init(address="auto")
@@ -3069,6 +3069,10 @@ def run_reactive_stage(config: Mapping[str, Any]) -> dict[str, Any]:
     trainer = TorchTrainer(
         train_loop_per_worker=train_loop_per_worker,
         train_loop_config=dict(config),
+        torch_config=TorchConfig(
+            init_method="tcp",
+            timeout_s=300,
+        ),
         scaling_config=scaling_config,
         run_config=train.RunConfig(
             name=str(config["run_name"]),
