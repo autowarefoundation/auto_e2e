@@ -1294,6 +1294,46 @@ def test_prepared_cuda_backend_initializes_rank_environment(monkeypatch):
     ]
 
 
+def test_prepared_cuda_backend_binds_nccl_device(monkeypatch):
+    device = ray_torch_backend.torch.device("cuda:0")
+    captured = {}
+
+    monkeypatch.setattr(
+        ray_torch_backend,
+        "get_device",
+        lambda: device,
+    )
+    monkeypatch.setattr(
+        ray_torch_backend.dist,
+        "init_process_group",
+        lambda **kwargs: captured.update(kwargs),
+    )
+    monkeypatch.delenv(
+        "TORCH_NCCL_ASYNC_ERROR_HANDLING",
+        raising=False,
+    )
+
+    ray_torch_backend._setup_prepared_torch_process_group(
+        backend="nccl",
+        world_rank=0,
+        world_size=8,
+        init_method="tcp://127.0.0.1:29500",
+        timeout_s=300,
+    )
+
+    assert captured["backend"] == "nccl"
+    assert captured["rank"] == 0
+    assert captured["world_size"] == 8
+    assert captured["device_id"] == device
+    assert captured["timeout"].total_seconds() == 300
+    assert (
+        ray_torch_backend.os.environ[
+            "TORCH_NCCL_ASYNC_ERROR_HANDLING"
+        ]
+        == "1"
+    )
+
+
 def test_validate_stage_config_rejects_missing_worker_cpu_contract():
     config = _stage_config("nuplan_full")
     config.pop("worker_cpus")
