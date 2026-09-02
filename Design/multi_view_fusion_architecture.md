@@ -44,12 +44,14 @@
 > contains only native front image evidence. Official checkpoint-derived
 > Backbone, encoder, front-attention, LayerNorm, and temporal-fusion parameters
 > stay frozen. Only the new per-channel front residual gate is optimized.
-> The official temporal ResNetFusion remains uncheckpointed. In nuPlan Stage A,
-> its frozen BatchNorm affine parameters use synchronized batch statistics and
-> update running statistics once per micro-step. L2D Stage B retains those
-> Stage A running statistics because it has no real T8 history. Reactive DDP uses
-> `static_graph=True` and `find_unused_parameters=False`, which supports that
-> recomputation even when calibrated batches leave `pseudo_projection` unused.
+> The official temporal ResNetFusion is not activation-checkpointed. In nuPlan Stage A,
+> its frozen BatchNorm affine parameters and pretrained running statistics are
+> evaluated in inference mode. L2D Stage B retains the same pretrained
+> statistics because it has no real T8 history. No SyncBatchNorm collective is
+> added while BEVFormer is frozen. Reactive DDP uses
+> `static_graph=True` and `find_unused_parameters=False`; the trainable graph is
+> fixed to the front residual gate, navigation encoders, auxiliary heads, and
+> trajectory planner selected by the loss configuration.
 > The first optimizer step synchronizes every accumulation micro-step to
 > initialize the static reducer before later micro-steps use `DDP.no_sync()`.
 > ResNet-50 weights, BatchNorm statistics, and affine parameters are frozen.

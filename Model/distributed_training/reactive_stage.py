@@ -834,6 +834,38 @@ def _synchronize_t8_temporal_batch_norm(model) -> int:
     return sync_count
 
 
+def _configure_t8_temporal_normalization(
+    model,
+    *,
+    freeze_bevformer: bool,
+) -> tuple[str, int]:
+    """Select the T8 normalization contract for this training run."""
+    import torch.nn as nn
+
+    feature_fusion = _base_model(model).Reactive_E2E.FeatureFusion
+    if getattr(feature_fusion, "architecture", None) != "bevformer_v2_t8":
+        return "not_applicable_v1", 0
+    temporal_fusion = getattr(feature_fusion, "temporal_fusion", None)
+    if temporal_fusion is None:
+        raise ValueError("BEVFormer V2 T8 temporal fusion is missing")
+    if freeze_bevformer:
+        if any(
+            isinstance(module, nn.SyncBatchNorm)
+            for module in temporal_fusion.modules()
+        ):
+            raise ValueError("frozen T8 temporal fusion must not use SyncBatchNorm")
+        if not any(
+            type(module) is nn.BatchNorm2d
+            for module in temporal_fusion.modules()
+        ):
+            raise ValueError("BEVFormer V2 T8 temporal fusion has no BatchNorm")
+        return "frozen_pretrained_running_stats_v1", 0
+    return (
+        "sync_batch_norm_running_stats_v1",
+        _synchronize_t8_temporal_batch_norm(model),
+    )
+
+
 def _synchronize_gradient_micro_step(
     optimizer_step_index: int,
     accumulation_index: int,
@@ -968,6 +1000,8 @@ def _train_fixed_steps(
         *,
         step_started: float,
     ) -> None:
+        if device.type == "cuda":
+            torch.cuda.synchronize(device)
         print(
             "Reactive first-step phase "
             f"rank={rank} phase={phase} "
@@ -2381,11 +2415,13 @@ def train_loop_per_worker(config: dict[str, Any]) -> None:
         train_bev_head=float(config["bev_weight"]) > 0.0,
     )
     freeze_bevformer = bool(config["freeze_bevformer"])
-    synchronized_temporal_batch_norm_count = 0
-    if not freeze_bevformer:
-        synchronized_temporal_batch_norm_count = (
-            _synchronize_t8_temporal_batch_norm(model)
-        )
+    (
+        temporal_normalization_identity,
+        synchronized_temporal_batch_norm_count,
+    ) = _configure_t8_temporal_normalization(
+        model,
+        freeze_bevformer=freeze_bevformer,
+    )
     objective = ReactiveMultitaskObjective(
         stage,
         bev_pos_weight=bev_pos_weights,
@@ -2455,9 +2491,6 @@ def train_loop_per_worker(config: dict[str, Any]) -> None:
         "distributed_global_batch": global_batch,
         "distributed_precision": str(config["precision"]),
         "distributed_world_size": world_size,
-        "capacity_block_end_utc": str(
-            config.get("capacity_block_end_utc") or ""
-        ),
         "gradient_clip_max_norm": float(config["grad_clip"]),
         "gradient_clip_mode": "branch_v1",
         "epochs": int(config["epochs"]),
@@ -2471,7 +2504,7 @@ def train_loop_per_worker(config: dict[str, Any]) -> None:
         "training_seed": seed,
         "scheduler_identity": scheduler_identity,
         "temporal_normalization_identity": (
-            "sync_batch_norm_running_stats_v1"
+            temporal_normalization_identity
         ),
         "synchronized_temporal_batch_norm_count": (
             synchronized_temporal_batch_norm_count
@@ -2599,6 +2632,9 @@ def train_loop_per_worker(config: dict[str, Any]) -> None:
         "distributed_global_batch": global_batch,
         "distributed_precision": str(config["precision"]),
         "distributed_world_size": world_size,
+        "capacity_block_end_utc": str(
+            config.get("capacity_block_end_utc") or ""
+        ),
         "gradient_clip_max_norm": float(config["grad_clip"]),
         "gradient_clip_mode": "branch_v1",
         "epochs": int(config["epochs"]),
@@ -2612,7 +2648,7 @@ def train_loop_per_worker(config: dict[str, Any]) -> None:
         "training_seed": seed,
         "scheduler_identity": scheduler_identity,
         "temporal_normalization_identity": (
-            "sync_batch_norm_running_stats_v1"
+            temporal_normalization_identity
         ),
         "synchronized_temporal_batch_norm_count": (
             synchronized_temporal_batch_norm_count
@@ -2920,6 +2956,10 @@ def train_loop_per_worker(config: dict[str, Any]) -> None:
         }
         diagnostic_metrics["synchronized_temporal_batch_norm_count"] = (
             synchronized_temporal_batch_norm_count
+        )
+        diagnostic_metrics["temporal_normalization_frozen_pretrained"] = int(
+            temporal_normalization_identity
+            == "frozen_pretrained_running_stats_v1"
         )
         for evidence in rank_evidence:
             if not isinstance(evidence, Mapping):

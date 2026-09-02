@@ -54,6 +54,7 @@ from distributed_training.reactive_stage import (
     _capture_rng_state,
     _checkpoint_history,
     _checkpoint_step_due,
+    _configure_t8_temporal_normalization,
     _histogram_average_precision,
     _evaluate_global_reactive,
     _load_resume_checkpoint,
@@ -66,7 +67,6 @@ from distributed_training.reactive_stage import (
     _route_validation_statistics,
     _select_result_checkpoint,
     _synchronize_gradient_micro_step,
-    _synchronize_t8_temporal_batch_norm,
     _train_fixed_steps,
     _validate_checkpoint_interval,
     clip_finite_gradients_float64,
@@ -347,7 +347,30 @@ def test_reactive_ddp_uses_static_graph_and_frozen_buffers():
     assert source.count("_assert_ddp_model_state_consistent(model)") == 2
     assert "_synchronize_gradient_micro_step" in fixed_step_source
     assert "Reactive first-step phase" in fixed_step_source
+    synchronize_position = fixed_step_source.index(
+        "torch.cuda.synchronize(device)"
+    )
+    timestamp_position = fixed_step_source.index(
+        "time.perf_counter() - step_started"
+    )
+    assert synchronize_position < timestamp_position
     assert "optimizer_step_index == 0" in synchronization_source
+    expected_resume_source = source.split(
+        "expected_resume = {",
+        maxsplit=1,
+    )[1].split(
+        "resume_state = ReactiveResumeState(",
+        maxsplit=1,
+    )[0]
+    model_config_source = source.split(
+        "model_config = {",
+        maxsplit=1,
+    )[1].split(
+        "if raw_bev_statistics is not None:",
+        maxsplit=1,
+    )[0]
+    assert '"capacity_block_end_utc"' not in expected_resume_source
+    assert '"capacity_block_end_utc"' in model_config_source
 
 
 def test_model_state_sha256_covers_parameters_and_scalar_buffers():
@@ -572,7 +595,10 @@ def test_checkpoint_interval_must_fit_inside_epoch():
         _validate_checkpoint_interval(11, 10)
 
 
-def test_fixed_step_resume_matches_uninterrupted_training(monkeypatch):
+def test_fixed_step_resume_matches_uninterrupted_training(
+    monkeypatch,
+    capsys,
+):
     torch = pytest.importorskip("torch")
     import torch.distributed as dist
 
@@ -661,6 +687,18 @@ def test_fixed_step_resume_matches_uninterrupted_training(monkeypatch):
         checkpoint_interval_steps=1,
         checkpoint_callback=capture_first_step,
     )
+    expected_phases = [
+        "forward_start",
+        "forward_complete",
+        "backward_complete",
+        "gradient_check_complete",
+        "finite_collective_complete",
+        "optimizer_complete",
+    ]
+    assert re.findall(
+        r"Reactive first-step phase rank=0 phase=([a-z_]+)",
+        capsys.readouterr().out,
+    ) == expected_phases
 
     resumed_model = ResumeModel()
     resumed_model.load_state_dict(saved["model"])
@@ -684,6 +722,10 @@ def test_fixed_step_resume_matches_uninterrupted_training(monkeypatch):
         resume_rng_state=saved["rng"],
         checkpoint_interval_steps=1,
     )
+    assert re.findall(
+        r"Reactive first-step phase rank=0 phase=([a-z_]+)",
+        capsys.readouterr().out,
+    ) == expected_phases
 
     assert resumed_model.weight.item() == pytest.approx(
         uninterrupted_model.weight.item()
@@ -1478,8 +1520,12 @@ def test_t8_temporal_batch_norm_is_synchronized():
     for parameter in temporal_fusion.parameters():
         parameter.requires_grad_(False)
 
-    count = _synchronize_t8_temporal_batch_norm(model)
+    identity, count = _configure_t8_temporal_normalization(
+        model,
+        freeze_bevformer=False,
+    )
 
+    assert identity == "sync_batch_norm_running_stats_v1"
     assert count == 2
     assert sum(
         isinstance(module, torch.nn.SyncBatchNorm)
@@ -1493,6 +1539,52 @@ def test_t8_temporal_batch_norm_is_synchronized():
         not parameter.requires_grad
         for parameter in feature_fusion.temporal_fusion.parameters()
     )
+
+
+def test_frozen_t8_temporal_batch_norm_is_not_synchronized():
+    torch = pytest.importorskip("torch")
+    temporal_fusion = torch.nn.Sequential(
+        torch.nn.Conv2d(4, 4, 1),
+        torch.nn.BatchNorm2d(4),
+    )
+    feature_fusion = SimpleNamespace(
+        architecture="bevformer_v2_t8",
+        temporal_fusion=temporal_fusion,
+    )
+    model = SimpleNamespace(
+        Reactive_E2E=SimpleNamespace(FeatureFusion=feature_fusion),
+    )
+
+    identity, count = _configure_t8_temporal_normalization(
+        model,
+        freeze_bevformer=True,
+    )
+
+    assert identity == "frozen_pretrained_running_stats_v1"
+    assert count == 0
+    assert sum(
+        isinstance(module, torch.nn.SyncBatchNorm)
+        for module in temporal_fusion.modules()
+    ) == 0
+    assert sum(
+        type(module) is torch.nn.BatchNorm2d
+        for module in temporal_fusion.modules()
+    ) == 1
+
+
+def test_non_t8_temporal_normalization_is_not_applicable():
+    feature_fusion = SimpleNamespace(
+        architecture="bevformer_v2_t1",
+        temporal_fusion=None,
+    )
+    model = SimpleNamespace(
+        Reactive_E2E=SimpleNamespace(FeatureFusion=feature_fusion),
+    )
+
+    assert _configure_t8_temporal_normalization(
+        model,
+        freeze_bevformer=True,
+    ) == ("not_applicable_v1", 0)
 
 
 def test_camera_feature_scale_diagnostics_are_normalized():
