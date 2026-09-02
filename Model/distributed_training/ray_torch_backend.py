@@ -47,6 +47,7 @@ def _setup_prepared_torch_process_group(
             "TORCH_NCCL_ASYNC_ERROR_HANDLING",
             "1",
         )
+        os.environ["NCCL_NVLS_ENABLE"] = "0"
     kwargs = {}
     device = get_device()
     if backend == "nccl" and device.type == "cuda":

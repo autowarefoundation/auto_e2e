@@ -1312,6 +1312,7 @@ def test_prepared_cuda_backend_binds_nccl_device(monkeypatch):
         "TORCH_NCCL_ASYNC_ERROR_HANDLING",
         raising=False,
     )
+    monkeypatch.delenv("NCCL_NVLS_ENABLE", raising=False)
 
     ray_torch_backend._setup_prepared_torch_process_group(
         backend="nccl",
@@ -1332,6 +1333,7 @@ def test_prepared_cuda_backend_binds_nccl_device(monkeypatch):
         ]
         == "1"
     )
+    assert ray_torch_backend.os.environ["NCCL_NVLS_ENABLE"] == "0"
 
 
 def test_validate_stage_config_rejects_missing_worker_cpu_contract():
