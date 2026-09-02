@@ -961,10 +961,28 @@ def _train_fixed_steps(
             )
         _restore_rng_state(resume_rng_state)
     micro_steps = optimizer_steps * gradient_accumulation_steps
+    rank = dist.get_rank()
+
+    def report_first_step_phase(
+        phase: str,
+        *,
+        step_started: float,
+    ) -> None:
+        print(
+            "Reactive first-step phase "
+            f"rank={rank} phase={phase} "
+            f"elapsed_seconds={time.perf_counter() - step_started:.3f}",
+            flush=True,
+        )
+
     for optimizer_step_index in range(
         start_optimizer_step,
         optimizer_steps,
     ):
+        first_optimizer_step = (
+            optimizer_step_index == start_optimizer_step
+        )
+        step_started = time.perf_counter()
         optimizer.zero_grad(set_to_none=True)
         finite_step = torch.ones((), dtype=torch.bool, device=device)
         for accumulation_index in range(gradient_accumulation_steps):
@@ -1005,6 +1023,11 @@ def _train_fixed_steps(
                 if synchronize
                 else model.no_sync()
             )
+            if first_optimizer_step and accumulation_index == 0:
+                report_first_step_phase(
+                    "forward_start",
+                    step_started=step_started,
+                )
             with sync_context:
                 with torch.autocast(
                     device_type="cuda",
@@ -1050,7 +1073,17 @@ def _train_fixed_steps(
                         terms["total"]
                         / gradient_accumulation_steps
                     )
+                if first_optimizer_step and accumulation_index == 0:
+                    report_first_step_phase(
+                        "forward_complete",
+                        step_started=step_started,
+                    )
                 scaled_loss.backward()
+                if first_optimizer_step and accumulation_index == 0:
+                    report_first_step_phase(
+                        "backward_complete",
+                        step_started=step_started,
+                    )
             totals += torch.stack([
                 terms[name].detach().to(torch.float64)
                 for name in term_names
@@ -1100,11 +1133,26 @@ def _train_fixed_steps(
             finite_step.logical_and_(finite_gradient)
             gradient_totals[group_index * 2] += gradient_norm
             gradient_totals[group_index * 2 + 1] += clip_scale
+        if first_optimizer_step:
+            report_first_step_phase(
+                "gradient_check_complete",
+                step_started=step_started,
+            )
         if not _collective_true(finite_step, device):
             raise FloatingPointError(
                 "a Reactive DDP rank produced non-finite loss or gradients"
             )
+        if first_optimizer_step:
+            report_first_step_phase(
+                "finite_collective_complete",
+                step_started=step_started,
+            )
         optimizer.step()
+        if first_optimizer_step:
+            report_first_step_phase(
+                "optimizer_complete",
+                step_started=step_started,
+            )
         completed_optimizer_steps = optimizer_step_index + 1
         if (
             checkpoint_callback is not None
@@ -2332,9 +2380,12 @@ def train_loop_per_worker(config: dict[str, Any]) -> None:
         freeze_bevformer=bool(config["freeze_bevformer"]),
         train_bev_head=float(config["bev_weight"]) > 0.0,
     )
-    synchronized_temporal_batch_norm_count = (
-        _synchronize_t8_temporal_batch_norm(model)
-    )
+    freeze_bevformer = bool(config["freeze_bevformer"])
+    synchronized_temporal_batch_norm_count = 0
+    if not freeze_bevformer:
+        synchronized_temporal_batch_norm_count = (
+            _synchronize_t8_temporal_batch_norm(model)
+        )
     objective = ReactiveMultitaskObjective(
         stage,
         bev_pos_weight=bev_pos_weights,
@@ -2355,16 +2406,13 @@ def train_loop_per_worker(config: dict[str, Any]) -> None:
         model,
         parallel_strategy="ddp",
         parallel_strategy_kwargs={
-            # State equivalence is verified above. Frozen buffers do not need
-            # the large coalesced broadcast that DDP performs before forward.
-            "broadcast_buffers": False,
+            # State equivalence is verified before DDP and after resume.
+            "broadcast_buffers": not freeze_bevformer,
             "bucket_cap_mb": REACTIVE_DDP_BUCKET_CAP_MB,
-            # This keeps the first reduction split by bucket_cap_mb instead of
-            # allocating one model-sized bucket.
-            "find_unused_parameters": True,
+            "find_unused_parameters": False,
             "gradient_as_bucket_view": True,
             "init_sync": False,
-            "static_graph": False,
+            "static_graph": True,
         },
     )
     _seed_epoch(seed, rank, 0)
@@ -2509,6 +2557,15 @@ def train_loop_per_worker(config: dict[str, Any]) -> None:
                 scheduler=scheduler,
                 expected=expected_resume,
             )
+            resume_model_state_sha256 = (
+                _assert_ddp_model_state_consistent(model)
+            )
+            if rank == 0:
+                print(
+                    "Verified resumed DDP model state: "
+                    f"{resume_model_state_sha256}",
+                    flush=True,
+                )
     if _resume_completed_requested_epochs(
         resume_state,
         int(config["epochs"]),

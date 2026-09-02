@@ -1143,7 +1143,7 @@ def test_frozen_bevformer_preserves_camera_and_updates_trainable_heads(
     assert changed_groups == {"bev_head", "navigation", "planner"}
 
 
-def test_frozen_t8_keeps_only_front_gate_and_running_stats_adaptive(
+def test_frozen_t8_keeps_only_front_gate_trainable(
     build_mock_model,
     device,
 ):
@@ -1182,7 +1182,7 @@ def test_frozen_t8_keeps_only_front_gate_and_running_stats_adaptive(
     )
     assert not reactive.Backbone.training
     assert not reactive.FeatureFusion.training
-    assert reactive.FeatureFusion.temporal_fusion.training
+    assert not reactive.FeatureFusion.temporal_fusion.training
     assert all(
         not parameter.requires_grad
         for parameter in reactive.FeatureFusion.temporal_fusion.parameters()

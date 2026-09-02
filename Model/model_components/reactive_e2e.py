@@ -248,8 +248,6 @@ class ReactiveE2E(nn.Module):
                 None,
             )
             if temporal_fusion is not None:
-                # Stage A adapts running statistics to real T8 history.
-                # Stage B has no history and retains Stage A statistics.
                 temporal_fusion.train(
                     mode and self._adapt_temporal_running_stats
                 )

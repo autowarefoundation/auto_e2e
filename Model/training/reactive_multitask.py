@@ -160,11 +160,7 @@ def configure_model_for_stage(
         freeze_camera_bev = getattr(reactive, "freeze_camera_bev", None)
         if not callable(freeze_camera_bev):
             raise ValueError("model cannot freeze the camera BEV modules")
-        freeze_camera_bev(
-            adapt_temporal_running_stats=(
-                stage is ReactiveTrainingStage.NUPLAN_FULL
-            ),
-        )
+        freeze_camera_bev(adapt_temporal_running_stats=False)
     train_bev = (
         stage is ReactiveTrainingStage.NUPLAN_FULL
         and bool(train_bev_head)

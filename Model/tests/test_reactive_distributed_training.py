@@ -332,20 +332,21 @@ def test_stage_b_rejects_previous_camera_image_size(tmp_path):
         )
 
 
-def test_reactive_ddp_avoids_large_initial_collectives():
+def test_reactive_ddp_uses_static_graph_and_frozen_buffers():
     source = inspect.getsource(train_loop_per_worker)
     fixed_step_source = inspect.getsource(_train_fixed_steps)
     synchronization_source = inspect.getsource(
         _synchronize_gradient_micro_step
     )
 
-    assert '"broadcast_buffers": False' in source
+    assert '"broadcast_buffers": not freeze_bevformer' in source
     assert '"bucket_cap_mb": REACTIVE_DDP_BUCKET_CAP_MB' in source
-    assert '"find_unused_parameters": True' in source
+    assert '"find_unused_parameters": False' in source
     assert '"init_sync": False' in source
-    assert '"static_graph": False' in source
-    assert "_assert_ddp_model_state_consistent(model)" in source
+    assert '"static_graph": True' in source
+    assert source.count("_assert_ddp_model_state_consistent(model)") == 2
     assert "_synchronize_gradient_micro_step" in fixed_step_source
+    assert "Reactive first-step phase" in fixed_step_source
     assert "optimizer_step_index == 0" in synchronization_source
 
 
