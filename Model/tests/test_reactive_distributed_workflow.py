@@ -799,6 +799,21 @@ def test_reactive_ray_cpu_contract_has_one_source_of_truth():
         assert int(cpu) * worker.replicas == actor_count * actor_cpus
 
 
+def test_ray_gpu_workers_avoid_detail_process_group_wrapper():
+    for config in (
+        distributed_training.RAY_2,
+        distributed_training.RAY_REACTIVE_4,
+        distributed_training.RAY_8,
+    ):
+        worker = config.worker_node_config[0]
+        environment = {
+            item.name: item.value
+            for item in worker.pod_template.pod_spec.containers[0].env
+        }
+        assert environment["NCCL_DEBUG"] == "INFO"
+        assert environment["TORCH_DISTRIBUTED_DEBUG"] == "INFO"
+
+
 def test_ray_tasks_serialize_the_resolved_storage_path():
     expected_environment = {
         "AWS_DEFAULT_REGION": "us-west-2",

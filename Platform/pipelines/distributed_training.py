@@ -211,7 +211,7 @@ def _worker_pod_template(
                         V1EnvVar(name="NCCL_DEBUG", value="INFO"),
                         V1EnvVar(
                             name="TORCH_DISTRIBUTED_DEBUG",
-                            value="DETAIL",
+                            value="INFO",
                         ),
                     ],
                     resources=V1ResourceRequirements(
