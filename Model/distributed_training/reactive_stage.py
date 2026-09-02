@@ -51,6 +51,7 @@ BEV_LANE_RANGE_METRIC_PREFIX = "bev_lane_boundary_"
 ROUTE_DESTINATION_LOGIT_RANGE_EPSILON = 1e-6
 ROUTE_VALIDATION_METRICS_VERSION = "route_validation_v1"
 REACTIVE_STEP_CHECKPOINT_VERSION = "reactive_step_checkpoint_v1"
+REACTIVE_DDP_BUCKET_CAP_MB = 16
 EPOCH_CHECKPOINT_RETENTION_SCORE_BASE = 1_000_000_000_000.0
 P5EN_MINIMUM_REMAINING_RUNTIME = timedelta(hours=22)
 _RUN_NAME_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]*")
@@ -507,6 +508,51 @@ def _seed_epoch(seed: int, rank: int, epoch: int) -> None:
     np.random.seed(epoch_seed % (2**32))
     torch.manual_seed(epoch_seed)
     torch.cuda.manual_seed_all(epoch_seed)
+
+
+def _model_state_sha256(model) -> str:
+    import torch
+
+    digest = hashlib.sha256()
+    for name, value in model.state_dict().items():
+        if not torch.is_tensor(value):
+            raise TypeError(f"model state {name} is not a tensor")
+        tensor = value.detach()
+        if tensor.layout != torch.strided:
+            tensor = tensor.to_dense()
+        tensor = tensor.contiguous()
+        metadata = json.dumps(
+            {
+                "name": name,
+                "shape": list(tensor.shape),
+                "dtype": str(tensor.dtype),
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        digest.update(metadata.encode("ascii"))
+        byte_view = (
+            tensor.reshape(-1)
+            .view(torch.uint8)
+            .cpu()
+            .numpy()
+        )
+        digest.update(memoryview(byte_view))
+    return digest.hexdigest()
+
+
+def _assert_ddp_model_state_consistent(model) -> str:
+    import torch.distributed as dist
+
+    local_digest = _model_state_sha256(model)
+    rank_digests: list[str | None] = [None] * dist.get_world_size()
+    dist.all_gather_object(rank_digests, local_digest)
+    if len(set(rank_digests)) != 1:
+        raise RuntimeError(
+            "DDP model state differs across ranks: "
+            f"{rank_digests}"
+        )
+    return local_digest
 
 
 def _capture_rng_state() -> dict[str, Any]:
@@ -2225,7 +2271,7 @@ def train_loop_per_worker(config: dict[str, Any]) -> None:
         )
 
     seed = int(config["training_seed"])
-    _seed_epoch(seed, rank, 0)
+    _seed_epoch(seed, 0, 0)
     constructor_kwargs = reactive_model_kwargs(
         stage,
         num_views=plan.num_views,
@@ -2298,17 +2344,27 @@ def train_loop_per_worker(config: dict[str, Any]) -> None:
         corridor_pos_weight=float(config["corridor_pos_weight"]),
     ).to(device)
 
+    ddp_model_state_sha256 = _assert_ddp_model_state_consistent(model)
+    if rank == 0:
+        print(
+            "Verified deterministic DDP model state: "
+            f"{ddp_model_state_sha256}",
+            flush=True,
+        )
     model = prepare_model(
         model,
         parallel_strategy="ddp",
         parallel_strategy_kwargs={
             # Reentrant activation checkpoints require static DDP when a stage
             # leaves parameters such as pseudo_projection unused.
+            "bucket_cap_mb": REACTIVE_DDP_BUCKET_CAP_MB,
             "find_unused_parameters": False,
             "gradient_as_bucket_view": True,
+            "init_sync": False,
             "static_graph": True,
         },
     )
+    _seed_epoch(seed, rank, 0)
     optimizer = torch.optim.AdamW(
         [
             parameter

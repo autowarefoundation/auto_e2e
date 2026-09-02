@@ -57,6 +57,7 @@ from distributed_training.reactive_stage import (
     _histogram_average_precision,
     _evaluate_global_reactive,
     _load_resume_checkpoint,
+    _model_state_sha256,
     _rank_resume_value,
     _rank_resume_value_for_epoch,
     _replay_loader_position,
@@ -338,10 +339,34 @@ def test_reactive_ddp_uses_static_graph_for_reentrant_checkpoints():
         _synchronize_gradient_micro_step
     )
 
+    assert '"bucket_cap_mb": REACTIVE_DDP_BUCKET_CAP_MB' in source
     assert '"find_unused_parameters": False' in source
+    assert '"init_sync": False' in source
     assert '"static_graph": True' in source
+    assert "_assert_ddp_model_state_consistent(model)" in source
     assert "_synchronize_gradient_micro_step" in fixed_step_source
     assert "optimizer_step_index == 0" in synchronization_source
+
+
+def test_model_state_sha256_covers_parameters_and_scalar_buffers():
+    torch = pytest.importorskip("torch")
+
+    class StateModule(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.arange(4.0))
+            self.register_buffer(
+                "scalar",
+                torch.tensor(2.0, dtype=torch.bfloat16),
+            )
+
+    left = StateModule()
+    right = StateModule()
+
+    assert _model_state_sha256(left) == _model_state_sha256(right)
+    with torch.no_grad():
+        right.weight[0] = 9.0
+    assert _model_state_sha256(left) != _model_state_sha256(right)
 
 
 def _run_static_graph_gloo_worker(
