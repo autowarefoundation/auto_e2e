@@ -15,6 +15,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
+import distributed_training.ray_torch_backend as ray_torch_backend
 import distributed_training.reactive_stage as reactive_stage_module
 from data_parsing.camera_slots import CANONICAL_SIX_CAMERA_SLOTS
 from data_parsing.pre_extracted import (
@@ -1226,11 +1227,71 @@ def test_ray_actor_cpu_reservation_matches_worker_config(
     assert captured["torch_config"].init_method == "tcp"
     assert captured["torch_config"].timeout_s == 300
     assert (
+        type(captured["torch_config"]).__name__
+        == "PreparedCudaTorchConfig"
+    )
+    assert (
         captured["run_config"].checkpoint_config.num_to_keep
         == config["epochs"] + 2
     )
     assert result["selected_epoch"] == 1
     assert result["metrics"]["checkpoint_sha256"] == "a" * 64
+
+
+def test_prepared_cuda_backend_initializes_rank_environment(monkeypatch):
+    context = SimpleNamespace(
+        get_local_rank=lambda: 2,
+        get_local_world_size=lambda: 8,
+        get_node_rank=lambda: 0,
+        get_world_rank=lambda: 2,
+        get_world_size=lambda: 8,
+    )
+    device = ray_torch_backend.torch.device("cuda:0")
+    calls = []
+
+    monkeypatch.setattr(
+        ray_torch_backend.train,
+        "get_context",
+        lambda: context,
+    )
+    monkeypatch.setattr(
+        ray_torch_backend,
+        "get_device",
+        lambda: device,
+    )
+    monkeypatch.setattr(
+        ray_torch_backend.torch.cuda,
+        "set_device",
+        lambda value: calls.append(("set_device", value)),
+    )
+    monkeypatch.setattr(
+        ray_torch_backend.torch,
+        "empty",
+        lambda *args, **kwargs: calls.append(
+            ("empty", args, kwargs)
+        ),
+    )
+    monkeypatch.setattr(
+        ray_torch_backend.torch.cuda,
+        "synchronize",
+        lambda value: calls.append(("synchronize", value)),
+    )
+
+    ray_torch_backend._prepare_torch_worker()
+
+    assert ray_torch_backend.os.environ["LOCAL_RANK"] == "2"
+    assert ray_torch_backend.os.environ["LOCAL_WORLD_SIZE"] == "8"
+    assert ray_torch_backend.os.environ["NODE_RANK"] == "0"
+    assert ray_torch_backend.os.environ["RANK"] == "2"
+    assert ray_torch_backend.os.environ["WORLD_SIZE"] == "8"
+    assert ray_torch_backend.os.environ["ACCELERATE_TORCH_DEVICE"] == (
+        "cuda:0"
+    )
+    assert calls == [
+        ("set_device", device),
+        ("empty", (1,), {"device": device}),
+        ("synchronize", device),
+    ]
 
 
 def test_validate_stage_config_rejects_missing_worker_cpu_contract():
