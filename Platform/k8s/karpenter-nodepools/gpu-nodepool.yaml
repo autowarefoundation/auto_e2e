@@ -68,7 +68,7 @@ spec:
       requirements:
         - key: node.kubernetes.io/instance-type
           operator: In
-          values: ["p5en.48xlarge"]
+          values: ["p5en.48xlarge", "p5.48xlarge"]
         - key: kubernetes.io/arch
           operator: In
           values: ["amd64"]
@@ -79,6 +79,7 @@ spec:
           operator: In
           values:
             - us-west-2a
+            - us-west-2b
             - us-west-2c
       taints:
         - key: nvidia.com/gpu

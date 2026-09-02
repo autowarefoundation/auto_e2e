@@ -6,18 +6,18 @@ env:
     FLYTE_PROJECT: auto-e2e
     FLYTE_DOMAIN: development
     WORKFLOW_NAME: >-
-      Platform.pipelines.distributed_training.wf_train_reactive_nuplan_ray_4
+      Platform.pipelines.distributed_training.wf_train_reactive_nuplan_ray_8
     FLYTE_VERSION: ""
     EXECUTION_NAME: ""
     NUPLAN_DATASET_URIS_URI: ""
     EPOCHS: "3"
     LEARNING_RATE: "1e-4"
-    VAL_FRACTION: "0.2"
+    VAL_FRACTION: "0.1"
     NUM_LOADER_WORKERS: "2"
     TRAINING_SEED: "149"
     PRECISION: "bf16"
     TRAJECTORY_WEIGHT: "1.0"
-    BEV_WEIGHT: "1.0"
+    BEV_WEIGHT: "0.0"
     ROUTE_WEIGHT: "1.0"
     CAPACITY_BLOCK_MINIMUM_REMAINING_SECONDS: "79200"
     WAIT_FOR_COMPLETION: "false"
@@ -47,9 +47,9 @@ phases:
         aws ec2 describe-capacity-reservations \
           --filters \
             Name=tag:Name,Values=auto-e2e-p5en-capacity-block \
-            Name=instance-type,Values=p5en.48xlarge \
+            Name=instance-type,Values=p5en.48xlarge,p5.48xlarge \
             Name=state,Values=active \
-          --query 'CapacityReservations[].{Id:CapacityReservationId,AvailabilityZone:AvailabilityZone,EndDate:EndDate,ReservationType:ReservationType,TotalInstanceCount:TotalInstanceCount}' \
+          --query 'CapacityReservations[].{Id:CapacityReservationId,InstanceType:InstanceType,AvailabilityZone:AvailabilityZone,EndDate:EndDate,ReservationType:ReservationType,TotalInstanceCount:TotalInstanceCount}' \
           --output json > /tmp/p5en-capacity-blocks.json
       - |
         python3 - <<'PY'
@@ -96,7 +96,7 @@ phases:
             capacity_blocks = json.load(stream)
         if len(capacity_blocks) != 1:
             raise ValueError(
-                "exactly one active tagged p5en Capacity Block is required"
+                "exactly one active tagged P5 Capacity Block is required"
             )
         capacity_block = capacity_blocks[0]
         if (
@@ -104,19 +104,28 @@ phases:
             or int(capacity_block["TotalInstanceCount"]) != 1
         ):
             raise ValueError(
-                "p5en reservation must be one Capacity Block instance"
+                "P5 reservation must be one Capacity Block instance"
+            )
+        if capacity_block.get("InstanceType") not in {
+            "p5en.48xlarge",
+            "p5.48xlarge",
+        }:
+            raise ValueError(
+                "Capacity Block instance type must be p5en or p5"
             )
         if capacity_block.get("AvailabilityZone") not in {
             "us-west-2a",
+            "us-west-2b",
             "us-west-2c",
         }:
             raise ValueError(
-                "p5en Capacity Block must be in us-west-2a or us-west-2c"
+                "P5 Capacity Block must be in us-west-2a, "
+                "us-west-2b, or us-west-2c"
             )
         capacity_block_end_value = capacity_block.get("EndDate")
         if not isinstance(capacity_block_end_value, str):
             raise ValueError(
-                "active p5en Capacity Block is missing EndDate"
+                "active P5 Capacity Block is missing EndDate"
             )
         capacity_block_end_utc = capacity_block_end_value
         capacity_block_end = datetime.fromisoformat(
@@ -140,7 +149,7 @@ phases:
         )
         if capacity_block_end.astimezone(timezone.utc) < minimum_end:
             raise ValueError(
-                "p5en Capacity Block remaining window is shorter than "
+                "P5 Capacity Block remaining window is shorter than "
                 "CAPACITY_BLOCK_MINIMUM_REMAINING_SECONDS"
             )
         Path("/tmp/p5en-capacity-block-end.txt").write_text(

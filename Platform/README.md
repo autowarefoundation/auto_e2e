@@ -80,7 +80,9 @@ Originally planned CARLA Closed-Loop Simulation for Phase 5, but abandoned due t
 
 Two targeted `g6.2xlarge` ODCR slots are retained for inference,
 validation, and two-rank canaries. Large nuPlan and multi-dataset training
-uses one `p5en.48xlarge` Capacity Block purchased for the run window.
+uses one eight-GPU P5 Capacity Block purchased for the run window.
+`p5en.48xlarge` is preferred, with `p5.48xlarge` as the fallback when no
+supported p5en offering is available.
 Capacity purchase is an operator action performed before job submission.
 Kubernetes, Karpenter, Kueue, Flyte, CodeBuild, and task Pods never call
 `PurchaseCapacityBlock`; they only consume an already purchased tagged block.
@@ -114,7 +116,7 @@ aws ec2 create-tags \
     Key=retention,Value=keep-until-user-cancels
 ```
 
-The p5en Ray topology uses whole-GPU allocation rather than MIG:
+The P5 Ray topology uses whole-GPU allocation rather than MIG:
 
 | Workload | Worker Pods | GPUs per Pod | Ray Train workers |
 |----------|-------------|--------------|-------------------|
@@ -189,7 +191,7 @@ job can use the other half of an already running p5en node.
 The nuPlan launcher reads the active reservation EndDate and passes it into
 the workflow. The p5en training task has a 20-hour timeout and rejects any
 start with less than 22 hours remaining. Production tasks save an S3
-checkpoint every 128 optimizer steps, so a Flyte retry in the same execution
+checkpoint every 256 optimizer steps, so a Flyte retry in the same execution
 can resume from the latest persisted optimizer step. Use a longer Capacity
 Block when the planned training cannot finish inside one 20-hour task window.
 The sequential two-stage 8-GPU workflow needs at least 42 hours remaining:

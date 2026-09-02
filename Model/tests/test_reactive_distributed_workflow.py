@@ -501,6 +501,11 @@ def test_four_rank_performance_capacity_matches_ray_contract():
         "iops": 16000,
         "throughput": 1000,
     }
+    assert capacity_block_class["subnetSelectorTerms"] == [
+        {"tags": {"Name": "auto-e2e-platform-private-us-west-2a"}},
+        {"tags": {"Name": "auto-e2e-platform-private-us-west-2b"}},
+        {"tags": {"Name": "auto-e2e-platform-private-us-west-2c"}},
+    ]
 
     node_pools = {
         item["metadata"]["name"]: item
@@ -542,7 +547,13 @@ def test_four_rank_performance_capacity_matches_ray_contract():
         for item in capacity_block_template["requirements"]
     }
     assert requirements["node.kubernetes.io/instance-type"] == [
-        "p5en.48xlarge"
+        "p5en.48xlarge",
+        "p5.48xlarge",
+    ]
+    assert requirements["topology.kubernetes.io/zone"] == [
+        "us-west-2a",
+        "us-west-2b",
+        "us-west-2c",
     ]
     assert requirements["karpenter.sh/capacity-type"] == ["reserved"]
     assert capacity_block_pool["limits"] == {
@@ -933,6 +944,35 @@ def test_four_rank_workflow_runs_one_frozen_multitask_stage():
     )
 
 
+def test_eight_rank_workflow_runs_one_frozen_trajectory_route_stage():
+    node, = distributed_training.wf_train_reactive_nuplan_ray_8.nodes
+    bindings = {
+        binding.var: binding.binding for binding in node.bindings
+    }
+
+    assert node.flyte_entity.name.endswith("train_reactive_stage_ray_8")
+    assert bindings["epochs"].promise.var == "epochs"
+    assert bindings["trajectory_weight"].promise.var == "trajectory_weight"
+    assert bindings["bev_weight"].promise.var == "bev_weight"
+    assert bindings["route_weight"].promise.var == "route_weight"
+    assert (
+        bindings["capacity_block_end_utc"].promise.var
+        == "capacity_block_end_utc"
+    )
+    assert (
+        bindings["checkpoint_interval_steps"].promise.var
+        == "checkpoint_interval_steps"
+    )
+    assert bindings["freeze_bevformer"].scalar.primitive.boolean
+
+    parameters = inspect.signature(
+        distributed_training.wf_train_reactive_nuplan_ray_8
+    ).parameters
+    assert parameters["trajectory_weight"].default == 1.0
+    assert parameters["bev_weight"].default == 0.0
+    assert parameters["route_weight"].default == 1.0
+
+
 def test_production_checkpoint_interval_defaults_to_256_steps():
     for task in (
         distributed_training.train_reactive_stage_ray_4,
@@ -941,13 +981,15 @@ def test_production_checkpoint_interval_defaults_to_256_steps():
         parameters = inspect.signature(task.task_function).parameters
         assert parameters["checkpoint_interval_steps"].default == 256
 
-    workflow_parameters = inspect.signature(
-        distributed_training.wf_train_reactive_nuplan_ray_4
-    ).parameters
-    assert (
-        workflow_parameters["checkpoint_interval_steps"].default
-        == 256
-    )
+    for workflow in (
+        distributed_training.wf_train_reactive_nuplan_ray_4,
+        distributed_training.wf_train_reactive_nuplan_ray_8,
+    ):
+        workflow_parameters = inspect.signature(workflow).parameters
+        assert (
+            workflow_parameters["checkpoint_interval_steps"].default
+            == 256
+        )
 
 
 def test_gpu_tasks_use_separate_training_and_validation_capacity():
@@ -1301,7 +1343,7 @@ def test_nuplan_full_pack_workflow_binds_sharded_dynamic_program():
     )
 
 
-def test_reactive_nuplan_launcher_uses_registered_four_rank_workflow():
+def test_reactive_nuplan_launcher_uses_registered_eight_rank_workflow():
     buildspec = (
         Path(distributed_training.__file__).parents[1]
         / "buildspec-launch-reactive-nuplan.yml"
@@ -1309,10 +1351,14 @@ def test_reactive_nuplan_launcher_uses_registered_four_rank_workflow():
 
     assert (
         "Platform.pipelines.distributed_training."
-        "wf_train_reactive_nuplan_ray_4"
+        "wf_train_reactive_nuplan_ray_8"
     ) in buildspec
     assert 'EPOCHS: "3"' in buildspec
     assert 'PRECISION: "bf16"' in buildspec
+    assert 'VAL_FRACTION: "0.1"' in buildspec
+    assert 'TRAJECTORY_WEIGHT: "1.0"' in buildspec
+    assert 'BEV_WEIGHT: "0.0"' in buildspec
+    assert 'ROUTE_WEIGHT: "1.0"' in buildspec
     assert "NUPLAN_DATASET_URIS_URI" in buildspec
     assert "len(dataset_uris) != 43" in buildspec
     assert "len(set(dataset_uris)) != 43" in buildspec
@@ -1321,10 +1367,11 @@ def test_reactive_nuplan_launcher_uses_registered_four_rank_workflow():
     assert "CAPACITY_BLOCK_MINIMUM_REMAINING_SECONDS" in buildspec
     assert "Name=state,Values=active" in buildspec
     assert "AvailableInstanceCount" not in buildspec
-    assert "exactly one active tagged p5en Capacity Block" in buildspec
+    assert "exactly one active tagged P5 Capacity Block" in buildspec
     assert 'capacity_block["ReservationType"] != "capacity-block"' in buildspec
-    assert "active p5en Capacity Block is missing EndDate" in buildspec
-    assert "p5en Capacity Block must be in us-west-2a" in buildspec
+    assert "active P5 Capacity Block is missing EndDate" in buildspec
+    assert "Capacity Block instance type must be p5en or p5" in buildspec
+    assert "P5 Capacity Block must be in us-west-2a" in buildspec
     assert "42 * 60 * 60" in buildspec
     assert '"capacity_block_end_utc": capacity_block_end_utc' in buildspec
     codebuild_terraform = (

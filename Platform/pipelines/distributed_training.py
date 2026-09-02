@@ -999,6 +999,44 @@ def wf_train_reactive_nuplan_ray_4(
 
 
 @workflow
+def wf_train_reactive_nuplan_ray_8(
+    nuplan_shards: List[FlyteDirectory],
+    capacity_block_end_utc: str,
+    epochs: int = 3,
+    learning_rate: float = 1e-4,
+    val_fraction: float = 0.1,
+    num_loader_workers: int = 2,
+    training_seed: int = 149,
+    precision: str = "bf16",
+    trajectory_weight: float = 1.0,
+    bev_weight: float = 0.0,
+    route_weight: float = 1.0,
+    checkpoint_interval_steps: int = 256,
+) -> ReactiveRayOutput:
+    """Train nuPlan on one eight-GPU node with the camera BEV frozen."""
+    return train_reactive_stage_ray_8(
+        shards=nuplan_shards,
+        stage="nuplan_full",
+        parent_checkpoint=None,
+        epochs=epochs,
+        learning_rate=learning_rate,
+        val_fraction=val_fraction,
+        num_loader_workers=num_loader_workers,
+        training_seed=training_seed,
+        precision=precision,
+        steps_per_epoch=0,
+        checkpoint_interval_steps=checkpoint_interval_steps,
+        shuffle_buffer=256,
+        is_pretrained=True,
+        trajectory_weight=trajectory_weight,
+        bev_weight=bev_weight,
+        route_weight=route_weight,
+        freeze_bevformer=True,
+        capacity_block_end_utc=capacity_block_end_utc,
+    )
+
+
+@workflow
 def wf_train_reactive_nuplan_l2d_ray_8(
     nuplan_shards: List[FlyteDirectory],
     l2d_shards: List[FlyteDirectory],
