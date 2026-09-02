@@ -2355,13 +2355,16 @@ def train_loop_per_worker(config: dict[str, Any]) -> None:
         model,
         parallel_strategy="ddp",
         parallel_strategy_kwargs={
-            # Reentrant activation checkpoints require static DDP when a stage
-            # leaves parameters such as pseudo_projection unused.
+            # State equivalence is verified above. Frozen buffers do not need
+            # the large coalesced broadcast that DDP performs before forward.
+            "broadcast_buffers": False,
             "bucket_cap_mb": REACTIVE_DDP_BUCKET_CAP_MB,
-            "find_unused_parameters": False,
+            # This keeps the first reduction split by bucket_cap_mb instead of
+            # allocating one model-sized bucket.
+            "find_unused_parameters": True,
             "gradient_as_bucket_view": True,
             "init_sync": False,
-            "static_graph": True,
+            "static_graph": False,
         },
     )
     _seed_epoch(seed, rank, 0)
