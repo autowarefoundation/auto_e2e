@@ -10,10 +10,12 @@ env:
     FLYTE_VERSION: ""
     EXECUTION_NAME: ""
     NUPLAN_DATASET_URIS_URI: ""
+    RESUME_CHECKPOINT_URI: ""
     EPOCHS: "3"
     LEARNING_RATE: "1e-4"
     VAL_FRACTION: "0.1"
     NUM_LOADER_WORKERS: "2"
+    PER_RANK_BATCH_SIZE: "4"
     TRAINING_SEED: "149"
     PRECISION: "bf16"
     TRAJECTORY_WEIGHT: "1.0"
@@ -33,11 +35,13 @@ phases:
       - test -n "${EXECUTION_NAME}"
       - test -n "${NUPLAN_DATASET_URIS_URI}"
       - printf '%s' "${NUPLAN_DATASET_URIS_URI}" | grep -Eq '^s3://'
+      - test -z "${RESUME_CHECKPOINT_URI}" || printf '%s' "${RESUME_CHECKPOINT_URI}" | grep -Eq '^s3://'
       - aws s3 cp "${NUPLAN_DATASET_URIS_URI}" /tmp/nuplan-dataset-uris.json
       - printf '%s' "${EXECUTION_NAME}" | grep -Eq '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
       - test "${#EXECUTION_NAME}" -le 63
       - printf '%s' "${EPOCHS}" | grep -Eq '^[1-9][0-9]*$'
       - printf '%s' "${NUM_LOADER_WORKERS}" | grep -Eq '^[0-9]+$'
+      - printf '%s' "${PER_RANK_BATCH_SIZE}" | grep -Eq '^(1|4)$'
       - printf '%s' "${TRAINING_SEED}" | grep -Eq '^[0-9]+$'
       - printf '%s' "${PRECISION}" | grep -Eq '^(fp32|bf16)$'
       - printf '%s' "${WAIT_FOR_COMPLETION}" | grep -Eq '^(true|false)$'
@@ -203,11 +207,21 @@ phases:
             "nuplan_shards": [
                 FlyteDirectory(uri) for uri in dataset_uris
             ],
+            "resume_checkpoint": (
+                FlyteDirectory(
+                    os.environ["RESUME_CHECKPOINT_URI"].rstrip("/")
+                )
+                if os.environ["RESUME_CHECKPOINT_URI"]
+                else None
+            ),
             "epochs": int(os.environ["EPOCHS"]),
             "learning_rate": float(os.environ["LEARNING_RATE"]),
             "val_fraction": float(os.environ["VAL_FRACTION"]),
             "num_loader_workers": int(
                 os.environ["NUM_LOADER_WORKERS"]
+            ),
+            "per_rank_batch_size": int(
+                os.environ["PER_RANK_BATCH_SIZE"]
             ),
             "training_seed": int(os.environ["TRAINING_SEED"]),
             "precision": os.environ["PRECISION"],

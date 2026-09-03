@@ -9,6 +9,7 @@ import random
 import re
 import tarfile
 from contextlib import nullcontext
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -45,10 +46,13 @@ from distributed_training.reactive_data import (
 )
 from distributed_training.reactive_stage import (
     BEV_LANE_NEAR_RADIUS_M,
+    REACTIVE_PERFORMANCE_LOG_INTERVAL_STEPS,
+    REACTIVE_PERFORMANCE_LOG_VERSION,
     REACTIVE_STEP_CHECKPOINT_VERSION,
     ReactiveResumeState,
     expected_reactive_hostname_count,
     _all_reduce_bev_statistics,
+    _aggregate_reactive_performance,
     _bev_lane_range_masks,
     _camera_feature_scale_weights,
     _capture_rng_state,
@@ -59,6 +63,8 @@ from distributed_training.reactive_stage import (
     _evaluate_global_reactive,
     _load_resume_checkpoint,
     _model_state_sha256,
+    _parse_nvidia_smi_csv,
+    _performance_sample_due,
     _rank_resume_value,
     _rank_resume_value_for_epoch,
     _replay_loader_position,
@@ -347,6 +353,9 @@ def test_reactive_ddp_uses_static_graph_and_frozen_buffers():
     assert source.count("_assert_ddp_model_state_consistent(model)") == 2
     assert "_synchronize_gradient_micro_step" in fixed_step_source
     assert "Reactive first-step phase" in fixed_step_source
+    assert "Reactive performance" in fixed_step_source
+    assert "_aggregate_reactive_performance" in fixed_step_source
+    assert "performance_metrics" in fixed_step_source
     synchronize_position = fixed_step_source.index(
         "torch.cuda.synchronize(device)"
     )
@@ -371,6 +380,59 @@ def test_reactive_ddp_uses_static_graph_and_frozen_buffers():
     )[0]
     assert '"capacity_block_end_utc"' not in expected_resume_source
     assert '"capacity_block_end_utc"' in model_config_source
+
+
+def test_reactive_performance_sampling_and_nvidia_metrics():
+    assert REACTIVE_PERFORMANCE_LOG_INTERVAL_STEPS == 64
+    assert REACTIVE_PERFORMANCE_LOG_VERSION == "reactive_performance_v1"
+    assert not _performance_sample_due(63, interval_steps=64)
+    assert _performance_sample_due(64, interval_steps=64)
+    with pytest.raises(ValueError, match="positive"):
+        _performance_sample_due(0, interval_steps=64)
+    with pytest.raises(ValueError, match="positive"):
+        _performance_sample_due(1, interval_steps=0)
+
+    metrics = _parse_nvidia_smi_csv(
+        "50, 16, 7166, 81559, 235.0\n"
+        "70, 20, 8192, 81559, 260.0\n"
+    )
+
+    assert metrics["performance_gpu_count"] == 2.0
+    assert metrics["performance_gpu_utilization_percent_min"] == 50.0
+    assert metrics["performance_gpu_utilization_percent_avg"] == 60.0
+    assert metrics["performance_gpu_utilization_percent_max"] == 70.0
+    assert metrics["performance_memory_used_mib_max"] == 8192.0
+    assert metrics["performance_power_watts_avg"] == pytest.approx(247.5)
+    assert _parse_nvidia_smi_csv("not supported") == {}
+
+
+def test_reactive_performance_aggregation_reports_rank_skew(monkeypatch):
+    torch = pytest.importorskip("torch")
+    import torch.distributed as dist
+
+    monkeypatch.setattr(dist, "all_reduce", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(dist, "get_rank", lambda: 0)
+    monkeypatch.setattr(dist, "get_world_size", lambda: 1)
+    phase_seconds = {
+        name: float(index + 1) / 10.0
+        for index, name in enumerate(
+            reactive_stage_module.REACTIVE_PERFORMANCE_PHASES
+        )
+    }
+
+    metrics = _aggregate_reactive_performance(
+        phase_seconds,
+        local_samples=8,
+        device=torch.device("cpu"),
+    )
+
+    assert metrics["performance_loader_wait_seconds_avg"] == 0.1
+    assert metrics["performance_loader_wait_seconds_max"] == 0.1
+    assert metrics["performance_step_seconds_max"] == 0.9
+    assert metrics["performance_global_samples_per_second"] == (
+        pytest.approx(8.0 / 0.9)
+    )
+    assert metrics["performance_gpu_allocated_bytes_max"] == 0.0
 
 
 def test_model_state_sha256_covers_parameters_and_scalar_buffers():
@@ -934,6 +996,7 @@ def _stage_config(stage: str) -> dict[str, object]:
             if stage == "l2d_continuation"
             else ""
         ),
+        "resume_checkpoint_uri": "",
         "per_rank_batch_size": 1,
         "precision": "bf16",
         "route_weight": 1.0,
@@ -958,6 +1021,13 @@ def test_validate_stage_config_accepts_locked_program(stage):
     validate_reactive_stage_config(_stage_config(stage))
 
 
+def test_validate_stage_config_accepts_production_batch_four():
+    config = _stage_config("nuplan_full")
+    config["per_rank_batch_size"] = 4
+
+    validate_reactive_stage_config(config)
+
+
 @pytest.mark.parametrize(
     ("world_size", "hostname_count"),
     ((2, 2), (4, 1), (8, 1)),
@@ -980,6 +1050,13 @@ def test_validate_stage_config_rejects_parent_and_batch_contract_changes():
     with pytest.raises(ValueError, match="per_rank_batch_size"):
         validate_reactive_stage_config(stage_b)
 
+    conflicting_resume = _stage_config("l2d_continuation")
+    conflicting_resume["resume_checkpoint_uri"] = (
+        "s3://checkpoints/resume"
+    )
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        validate_reactive_stage_config(conflicting_resume)
+
     caller_weighted = _stage_config("nuplan_full")
     caller_weighted["bev_pos_weights"] = [1.0] * 8
     with pytest.raises(ValueError, match="derived"):
@@ -989,6 +1066,11 @@ def test_validate_stage_config_rejects_parent_and_batch_contract_changes():
     invalid_interval["checkpoint_interval_steps"] = 0
     with pytest.raises(ValueError, match="checkpoint_interval_steps"):
         validate_reactive_stage_config(invalid_interval)
+
+    invalid_performance_interval = _stage_config("nuplan_full")
+    invalid_performance_interval["performance_log_interval_steps"] = 0
+    with pytest.raises(ValueError, match="performance_log_interval_steps"):
+        validate_reactive_stage_config(invalid_performance_interval)
 
 
 def test_p5en_stage_requires_a_safe_capacity_block_window():
@@ -1006,6 +1088,19 @@ def test_p5en_stage_requires_a_safe_capacity_block_window():
     expired["capacity_block_end_utc"] = "2000-01-01T00:00:00Z"
     with pytest.raises(ValueError, match="at least 22 hours"):
         validate_reactive_stage_config(expired)
+
+    expired_resume = _stage_config("nuplan_full")
+    expired_resume["resume_checkpoint_uri"] = "s3://checkpoints/resume"
+    expired_resume["capacity_block_end_utc"] = "2000-01-01T00:00:00Z"
+    with pytest.raises(ValueError, match="at least 2 hours"):
+        validate_reactive_stage_config(expired_resume)
+
+    short_resume = _stage_config("nuplan_full")
+    short_resume["resume_checkpoint_uri"] = "s3://checkpoints/resume"
+    short_resume["capacity_block_end_utc"] = (
+        datetime.now(timezone.utc) + timedelta(hours=3)
+    ).isoformat()
+    validate_reactive_stage_config(short_resume)
 
     validation = _stage_config("nuplan_full")
     validation["num_workers"] = 2
@@ -1299,10 +1394,7 @@ def test_ray_actor_cpu_reservation_matches_worker_config(
         type(captured["torch_config"]).__name__
         == "PreparedCudaTorchConfig"
     )
-    assert (
-        captured["run_config"].checkpoint_config.num_to_keep
-        == config["epochs"] + 2
-    )
+    assert captured["run_config"].checkpoint_config.num_to_keep is None
     assert result["selected_epoch"] == 1
     assert result["metrics"]["checkpoint_sha256"] == "a" * 64
 
@@ -2034,6 +2126,66 @@ def test_result_checkpoint_selection_honors_ade_guard(tmp_path):
     assert selected is checkpoint
     assert metrics == accepted
     assert _checkpoint_history(checkpoint) == history
+
+
+def test_epoch_resume_allows_batch_change_but_step_resume_rejects_it(
+    tmp_path,
+):
+    torch = pytest.importorskip("torch")
+    model = torch.nn.Linear(2, 2)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer)
+    expected = {
+        "distributed_global_batch": 32,
+        "optimizer_steps_per_epoch": 4,
+    }
+
+    def write_checkpoint(kind):
+        directory = tmp_path / kind
+        directory.mkdir()
+        torch.save(
+            {
+                "config": {
+                    "distributed_global_batch": 8,
+                    "optimizer_steps_per_epoch": 16,
+                },
+                "epoch": 1,
+                "model_state_dict": model.state_dict(),
+                "optimizer_state_dict": optimizer.state_dict(),
+                "scheduler_state_dict": scheduler.state_dict(),
+                "training_state": {
+                    "checkpoint_kind": kind,
+                    "optimizer_step_in_epoch": 1,
+                    "step_checkpoint_version": (
+                        REACTIVE_STEP_CHECKPOINT_VERSION
+                    ),
+                },
+            },
+            directory / "checkpoint.pt",
+        )
+        (directory / "history.json").write_text(
+            json.dumps([{"epoch": 1}]),
+            encoding="ascii",
+        )
+        return directory
+
+    state = _load_resume_checkpoint(
+        str(write_checkpoint("epoch")),
+        model=model,
+        optimizer=optimizer,
+        scheduler=scheduler,
+        expected=expected,
+    )
+
+    assert state.epoch == 2
+    with pytest.raises(ValueError, match="resume contract differs"):
+        _load_resume_checkpoint(
+            str(write_checkpoint("step")),
+            model=model,
+            optimizer=optimizer,
+            scheduler=scheduler,
+            expected=expected,
+        )
 
 
 def test_bev_repeat_factors_are_frequency_aware_and_clipped():

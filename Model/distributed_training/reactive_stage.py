@@ -9,6 +9,7 @@ import math
 import random
 import re
 import socket
+import subprocess
 import tempfile
 import time
 from collections.abc import Callable, Mapping
@@ -36,6 +37,7 @@ from training.reactive_multitask import ReactiveTrainingStage
 
 
 SUPPORTED_WORLD_SIZES = frozenset({2, 4, 8})
+SUPPORTED_PER_RANK_BATCH_SIZES = frozenset({1, 4})
 SUPPORTED_PRECISIONS = frozenset({"fp32", "bf16"})
 BEV_LANE_NEAR_RADIUS_M = 30.0
 CAMERA_FEATURE_SCALE_WEIGHT_METRIC_PREFIX = (
@@ -52,8 +54,22 @@ ROUTE_DESTINATION_LOGIT_RANGE_EPSILON = 1e-6
 ROUTE_VALIDATION_METRICS_VERSION = "route_validation_v1"
 REACTIVE_STEP_CHECKPOINT_VERSION = "reactive_step_checkpoint_v1"
 REACTIVE_DDP_BUCKET_CAP_MB = 16
+REACTIVE_PERFORMANCE_LOG_INTERVAL_STEPS = 64
+REACTIVE_PERFORMANCE_LOG_VERSION = "reactive_performance_v1"
+REACTIVE_PERFORMANCE_PHASES = (
+    "loader_wait",
+    "host_to_device",
+    "input_prepare",
+    "forward",
+    "backward",
+    "gradient",
+    "finite_collective",
+    "optimizer",
+    "step",
+)
 EPOCH_CHECKPOINT_RETENTION_SCORE_BASE = 1_000_000_000_000.0
 P5EN_MINIMUM_REMAINING_RUNTIME = timedelta(hours=22)
+P5EN_RESUME_MINIMUM_REMAINING_RUNTIME = timedelta(hours=2)
 _RUN_NAME_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]*")
 
 
@@ -91,6 +107,7 @@ def validate_reactive_stage_config(config: Mapping[str, Any]) -> None:
         raise ValueError(
             f"num_workers must be one of {sorted(SUPPORTED_WORLD_SIZES)}"
         )
+    resume_uri = str(config.get("resume_checkpoint_uri") or "")
     capacity_block_end_utc = str(
         config.get("capacity_block_end_utc") or ""
     )
@@ -111,22 +128,31 @@ def validate_reactive_stage_config(config: Mapping[str, Any]) -> None:
             raise ValueError(
                 "capacity_block_end_utc must include a UTC offset"
             )
-        minimum_end = (
-            datetime.now(timezone.utc)
-            + P5EN_MINIMUM_REMAINING_RUNTIME
+        minimum_runtime = (
+            P5EN_RESUME_MINIMUM_REMAINING_RUNTIME
+            if resume_uri
+            else P5EN_MINIMUM_REMAINING_RUNTIME
         )
+        minimum_end = datetime.now(timezone.utc) + minimum_runtime
         if capacity_block_end.astimezone(timezone.utc) < minimum_end:
+            minimum_hours = int(
+                minimum_runtime.total_seconds() // 3600
+            )
             raise ValueError(
-                "p5en Capacity Block must have at least 22 hours "
-                "remaining"
+                "p5en Capacity Block must have at least "
+                f"{minimum_hours} hours remaining"
             )
     if int(config.get("worker_cpus", 0)) <= 0:
         raise ValueError("worker_cpus must be positive")
     if int(config.get("epochs", 0)) <= 0:
         raise ValueError("epochs must be positive")
-    if int(config.get("per_rank_batch_size", 0)) != 1:
+    per_rank_batch_size = int(
+        config.get("per_rank_batch_size", 0)
+    )
+    if per_rank_batch_size not in SUPPORTED_PER_RANK_BATCH_SIZES:
         raise ValueError(
-            "Reactive DDP v1 requires per_rank_batch_size=1"
+            "per_rank_batch_size must be one of "
+            f"{sorted(SUPPORTED_PER_RANK_BATCH_SIZES)}"
         )
     if int(config.get("gradient_accumulation_steps", 0)) <= 0:
         raise ValueError("gradient_accumulation_steps must be positive")
@@ -179,9 +205,19 @@ def validate_reactive_stage_config(config: Mapping[str, Any]) -> None:
     if not storage_path.startswith("s3://"):
         raise ValueError("storage_path must be an S3 URI")
     parent_uri = str(config.get("parent_checkpoint_uri") or "")
+    if parent_uri and resume_uri:
+        raise ValueError(
+            "parent and resume checkpoints are mutually exclusive"
+        )
+    if resume_uri and not resume_uri.startswith("s3://"):
+        raise ValueError("resume checkpoint must be an S3 URI")
     if stage is ReactiveTrainingStage.NUPLAN_FULL and parent_uri:
         raise ValueError("Stage A cannot load a parent checkpoint")
-    if stage is ReactiveTrainingStage.L2D_CONTINUATION and not parent_uri:
+    if (
+        stage is ReactiveTrainingStage.L2D_CONTINUATION
+        and not parent_uri
+        and not resume_uri
+    ):
         raise ValueError("Stage B requires the exact Stage A checkpoint")
     is_pretrained = config.get("is_pretrained")
     allow_random_init = config.get(
@@ -197,7 +233,7 @@ def validate_reactive_stage_config(config: Mapping[str, Any]) -> None:
         raise ValueError(
             "exactly one BEVFormer initialization mode must be selected"
         )
-    if is_pretrained and not parent_uri:
+    if is_pretrained and not parent_uri and not resume_uri:
         pretrained_uri = str(
             config.get("bevformer_pretrained_checkpoint_uri") or ""
         )
@@ -223,6 +259,15 @@ def validate_reactive_stage_config(config: Mapping[str, Any]) -> None:
         raise ValueError("steps_per_epoch cannot be negative")
     if int(config.get("checkpoint_interval_steps", 0)) <= 0:
         raise ValueError("checkpoint_interval_steps must be positive")
+    if int(
+        config.get(
+            "performance_log_interval_steps",
+            REACTIVE_PERFORMANCE_LOG_INTERVAL_STEPS,
+        )
+    ) <= 0:
+        raise ValueError(
+            "performance_log_interval_steps must be positive"
+        )
     freeze_bevformer = config.get("freeze_bevformer")
     if not isinstance(freeze_bevformer, bool):
         raise ValueError("freeze_bevformer must be a boolean")
@@ -305,6 +350,176 @@ def _collective_true(value, device) -> bool:
     flag = flag.to(dtype=torch.int32)
     dist.all_reduce(flag, op=dist.ReduceOp.MIN)
     return bool(flag.item())
+
+
+def _performance_sample_due(
+    completed_optimizer_steps: int,
+    *,
+    interval_steps: int,
+) -> bool:
+    if completed_optimizer_steps <= 0:
+        raise ValueError("completed optimizer steps must be positive")
+    if interval_steps <= 0:
+        raise ValueError("performance log interval must be positive")
+    return completed_optimizer_steps % interval_steps == 0
+
+
+def _parse_nvidia_smi_csv(output: str) -> dict[str, float]:
+    columns = (
+        "gpu_utilization_percent",
+        "memory_utilization_percent",
+        "memory_used_mib",
+        "memory_total_mib",
+        "power_watts",
+    )
+    values = {name: [] for name in columns}
+    for raw_line in output.splitlines():
+        fields = [field.strip() for field in raw_line.split(",")]
+        if len(fields) != len(columns):
+            continue
+        try:
+            parsed = [float(field) for field in fields]
+        except ValueError:
+            continue
+        for name, value in zip(columns, parsed, strict=True):
+            values[name].append(value)
+    if not values[columns[0]]:
+        return {}
+    metrics: dict[str, float] = {
+        "performance_gpu_count": float(len(values[columns[0]])),
+    }
+    for name in columns:
+        metrics[f"performance_{name}_min"] = min(values[name])
+        metrics[f"performance_{name}_avg"] = (
+            sum(values[name]) / len(values[name])
+        )
+        metrics[f"performance_{name}_max"] = max(values[name])
+    return metrics
+
+
+def _nvidia_smi_snapshot() -> dict[str, float]:
+    try:
+        result = subprocess.run(
+            [
+                "nvidia-smi",
+                "--query-gpu="
+                "utilization.gpu,utilization.memory,"
+                "memory.used,memory.total,power.draw",
+                "--format=csv,noheader,nounits",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return {}
+    return _parse_nvidia_smi_csv(result.stdout)
+
+
+def _aggregate_reactive_performance(
+    local_phase_seconds: Mapping[str, float],
+    *,
+    local_samples: int,
+    device,
+) -> dict[str, float]:
+    import torch
+    import torch.distributed as dist
+
+    missing = [
+        name
+        for name in REACTIVE_PERFORMANCE_PHASES
+        if name not in local_phase_seconds
+    ]
+    if missing:
+        raise ValueError(
+            f"Reactive performance phases are missing {missing}"
+        )
+    local_values = torch.tensor(
+        [
+            *[
+                float(local_phase_seconds[name])
+                for name in REACTIVE_PERFORMANCE_PHASES
+            ],
+            float(local_samples),
+            float(
+                torch.cuda.memory_allocated(device)
+                if device.type == "cuda"
+                else 0
+            ),
+            float(
+                torch.cuda.memory_reserved(device)
+                if device.type == "cuda"
+                else 0
+            ),
+        ],
+        dtype=torch.float64,
+        device=device,
+    )
+    summed = local_values.clone()
+    maximum = local_values.clone()
+    dist.all_reduce(summed, op=dist.ReduceOp.SUM)
+    dist.all_reduce(maximum, op=dist.ReduceOp.MAX)
+    world_size = dist.get_world_size()
+    metrics: dict[str, float] = {}
+    for index, name in enumerate(REACTIVE_PERFORMANCE_PHASES):
+        metrics[f"performance_{name}_seconds_avg"] = (
+            float(summed[index].item()) / world_size
+        )
+        metrics[f"performance_{name}_seconds_max"] = float(
+            maximum[index].item()
+        )
+    sample_index = len(REACTIVE_PERFORMANCE_PHASES)
+    allocated_index = sample_index + 1
+    reserved_index = sample_index + 2
+    maximum_step_seconds = metrics[
+        "performance_step_seconds_max"
+    ]
+    metrics["performance_global_samples_per_second"] = (
+        float(summed[sample_index].item())
+        / max(maximum_step_seconds, np.finfo(np.float64).tiny)
+    )
+    metrics["performance_gpu_allocated_bytes_max"] = float(
+        maximum[allocated_index].item()
+    )
+    metrics["performance_gpu_reserved_bytes_max"] = float(
+        maximum[reserved_index].item()
+    )
+    accounted_seconds = sum(
+        metrics[f"performance_{name}_seconds_avg"]
+        for name in REACTIVE_PERFORMANCE_PHASES
+        if name != "step"
+    )
+    metrics["performance_unaccounted_seconds_avg"] = max(
+        0.0,
+        metrics["performance_step_seconds_avg"] - accounted_seconds,
+    )
+    hardware_payload: list[dict[str, float] | None] = [
+        (
+            _nvidia_smi_snapshot()
+            if dist.get_rank() == 0 and device.type == "cuda"
+            else None
+        )
+    ]
+    if device.type == "cuda":
+        dist.broadcast_object_list(hardware_payload, src=0)
+    hardware_metrics = hardware_payload[0]
+    if hardware_metrics:
+        metrics.update(hardware_metrics)
+    return metrics
+
+
+def _distributed_max_seconds(value: float, device) -> float:
+    import torch
+    import torch.distributed as dist
+
+    duration = torch.tensor(
+        float(value),
+        dtype=torch.float64,
+        device=device,
+    )
+    dist.all_reduce(duration, op=dist.ReduceOp.MAX)
+    return float(duration.item())
 
 
 def _all_reduce_bev_statistics(local_statistics, device):
@@ -896,6 +1111,9 @@ def _train_fixed_steps(
     checkpoint_callback: (
         Callable[[int, Mapping[str, Any]], None] | None
     ) = None,
+    performance_log_interval_steps: int = (
+        REACTIVE_PERFORMANCE_LOG_INTERVAL_STEPS
+    ),
 ) -> dict[str, float]:
     import torch
     import torch.distributed as dist
@@ -910,6 +1128,8 @@ def _train_fixed_steps(
         raise ValueError("resume optimizer step is out of range")
     if checkpoint_callback is not None and checkpoint_interval_steps <= 0:
         raise ValueError("checkpoint interval must be positive")
+    if performance_log_interval_steps <= 0:
+        raise ValueError("performance log interval must be positive")
     if start_optimizer_step > 0 and (
         resume_rank_state is None or resume_rng_state is None
     ):
@@ -994,6 +1214,7 @@ def _train_fixed_steps(
         _restore_rng_state(resume_rng_state)
     micro_steps = optimizer_steps * gradient_accumulation_steps
     rank = dist.get_rank()
+    latest_performance_metrics: dict[str, float] = {}
 
     def report_first_step_phase(
         phase: str,
@@ -1009,22 +1230,69 @@ def _train_fixed_steps(
             flush=True,
         )
 
+    def record_performance_phase(
+        enabled: bool,
+        phase_seconds: dict[str, float],
+        phase: str,
+        phase_started: float,
+    ) -> None:
+        if not enabled:
+            return
+        if device.type == "cuda":
+            torch.cuda.synchronize(device)
+        phase_seconds[phase] += time.perf_counter() - phase_started
+
     for optimizer_step_index in range(
         start_optimizer_step,
         optimizer_steps,
     ):
+        completed_optimizer_steps = optimizer_step_index + 1
+        capture_performance = _performance_sample_due(
+            completed_optimizer_steps,
+            interval_steps=performance_log_interval_steps,
+        )
+        if capture_performance and device.type == "cuda":
+            torch.cuda.synchronize(device)
         first_optimizer_step = (
             optimizer_step_index == start_optimizer_step
         )
         step_started = time.perf_counter()
+        step_consumed_samples = consumed_samples
+        performance_seconds = {
+            name: 0.0 for name in REACTIVE_PERFORMANCE_PHASES
+        }
+        performance_term_totals = (
+            torch.zeros(
+                len(term_names),
+                dtype=torch.float64,
+                device=device,
+            )
+            if capture_performance
+            else None
+        )
         optimizer.zero_grad(set_to_none=True)
         finite_step = torch.ones((), dtype=torch.bool, device=device)
         for accumulation_index in range(gradient_accumulation_steps):
+            phase_started = time.perf_counter()
             raw_batch, fallback_projection, fallback_geometry_type = (
                 _loader_item(next(iterator))
             )
+            record_performance_phase(
+                capture_performance,
+                performance_seconds,
+                "loader_wait",
+                phase_started,
+            )
+            phase_started = time.perf_counter()
             batch = _batch_to_device(raw_batch, device)
+            record_performance_phase(
+                capture_performance,
+                performance_seconds,
+                "host_to_device",
+                phase_started,
+            )
             consumed_samples += int(batch["visual_tiles"].shape[0])
+            phase_started = time.perf_counter()
             projection, geometry_type = (
                 resolve_reactive_batch_projection(
                     batch,
@@ -1047,6 +1315,12 @@ def _train_fixed_steps(
                     required=require_stage_a_camera_context,
                 )
             )
+            record_performance_phase(
+                capture_performance,
+                performance_seconds,
+                "input_prepare",
+                phase_started,
+            )
             synchronize = _synchronize_gradient_micro_step(
                 optimizer_step_index - start_optimizer_step,
                 accumulation_index,
@@ -1062,6 +1336,7 @@ def _train_fixed_steps(
                     "forward_start",
                     step_started=step_started,
                 )
+            phase_started = time.perf_counter()
             with sync_context:
                 with torch.autocast(
                     device_type="cuda",
@@ -1107,12 +1382,25 @@ def _train_fixed_steps(
                         terms["total"]
                         / gradient_accumulation_steps
                     )
+                record_performance_phase(
+                    capture_performance,
+                    performance_seconds,
+                    "forward",
+                    phase_started,
+                )
                 if first_optimizer_step and accumulation_index == 0:
                     report_first_step_phase(
                         "forward_complete",
                         step_started=step_started,
                     )
+                phase_started = time.perf_counter()
                 scaled_loss.backward()
+                record_performance_phase(
+                    capture_performance,
+                    performance_seconds,
+                    "backward",
+                    phase_started,
+                )
                 if first_optimizer_step and accumulation_index == 0:
                     report_first_step_phase(
                         "backward_complete",
@@ -1122,7 +1410,14 @@ def _train_fixed_steps(
                 terms[name].detach().to(torch.float64)
                 for name in term_names
             ])
+            if capture_performance:
+                assert performance_term_totals is not None
+                performance_term_totals += torch.stack([
+                    terms[name].detach().to(torch.float64)
+                    for name in term_names
+                ])
 
+        phase_started = time.perf_counter()
         for group_index, group_name in enumerate(gradient_group_names):
             parameters = gradient_groups[group_name]
             if parameters:
@@ -1167,27 +1462,95 @@ def _train_fixed_steps(
             finite_step.logical_and_(finite_gradient)
             gradient_totals[group_index * 2] += gradient_norm
             gradient_totals[group_index * 2 + 1] += clip_scale
+        record_performance_phase(
+            capture_performance,
+            performance_seconds,
+            "gradient",
+            phase_started,
+        )
         if first_optimizer_step:
             report_first_step_phase(
                 "gradient_check_complete",
                 step_started=step_started,
             )
+        phase_started = time.perf_counter()
         if not _collective_true(finite_step, device):
             raise FloatingPointError(
                 "a Reactive DDP rank produced non-finite loss or gradients"
             )
+        record_performance_phase(
+            capture_performance,
+            performance_seconds,
+            "finite_collective",
+            phase_started,
+        )
         if first_optimizer_step:
             report_first_step_phase(
                 "finite_collective_complete",
                 step_started=step_started,
             )
+        phase_started = time.perf_counter()
         optimizer.step()
+        record_performance_phase(
+            capture_performance,
+            performance_seconds,
+            "optimizer",
+            phase_started,
+        )
         if first_optimizer_step:
             report_first_step_phase(
                 "optimizer_complete",
                 step_started=step_started,
             )
-        completed_optimizer_steps = optimizer_step_index + 1
+        if capture_performance:
+            if device.type == "cuda":
+                torch.cuda.synchronize(device)
+            performance_seconds["step"] = (
+                time.perf_counter() - step_started
+            )
+            latest_performance_metrics = (
+                _aggregate_reactive_performance(
+                    performance_seconds,
+                    local_samples=(
+                        consumed_samples - step_consumed_samples
+                    ),
+                    device=device,
+                )
+            )
+            assert performance_term_totals is not None
+            dist.all_reduce(
+                performance_term_totals,
+                op=dist.ReduceOp.SUM,
+            )
+            loss_denominator = (
+                dist.get_world_size() * gradient_accumulation_steps
+            )
+            latest_performance_metrics.update({
+                f"performance_loss_{name}": float(
+                    performance_term_totals[index].item()
+                    / loss_denominator
+                )
+                for index, name in enumerate(term_names)
+            })
+            if rank == 0:
+                print(
+                    "Reactive performance "
+                    + json.dumps(
+                        {
+                            "completed_optimizer_steps": (
+                                completed_optimizer_steps
+                            ),
+                            "version": (
+                                REACTIVE_PERFORMANCE_LOG_VERSION
+                            ),
+                            **latest_performance_metrics,
+                        },
+                        allow_nan=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ),
+                    flush=True,
+                )
         if (
             checkpoint_callback is not None
             and _checkpoint_step_due(
@@ -1204,6 +1567,9 @@ def _train_fixed_steps(
                         gradient_totals.detach().cpu().tolist()
                     ),
                     "loader_restarts": iterator.restarts,
+                    "performance_metrics": dict(
+                        latest_performance_metrics
+                    ),
                     "rank": dist.get_rank(),
                     "term_totals": totals.detach().cpu().tolist(),
                 },
@@ -1249,6 +1615,7 @@ def _train_fixed_steps(
             packed[len(term_names) + group_index * 2 + 1].item()
             / gradient_denominator
         )
+    metrics.update(latest_performance_metrics)
     return metrics
 
 
@@ -2061,19 +2428,53 @@ def _load_resume_checkpoint(
     config = payload.get("config")
     if not isinstance(config, Mapping):
         raise ValueError("Reactive DDP resume checkpoint has no config")
+    training_state = payload.get("training_state") or {}
+    checkpoint_kind = str(
+        training_state.get("checkpoint_kind", "epoch")
+    )
+    epoch_boundary_batch_change = (
+        checkpoint_kind == "epoch"
+        and config.get("distributed_global_batch")
+        != expected.get("distributed_global_batch")
+    )
+    allowed_mismatches = (
+        {
+            "distributed_global_batch",
+            "optimizer_steps_per_epoch",
+        }
+        if epoch_boundary_batch_change
+        else set()
+    )
     mismatches = {
         name: (config.get(name), value)
         for name, value in expected.items()
         if config.get(name) != value
+        and name not in allowed_mismatches
     }
     if mismatches:
         raise ValueError(
             f"Reactive DDP resume contract differs: {mismatches}"
         )
+    if epoch_boundary_batch_change:
+        print(
+            "Reactive epoch-boundary batch change "
+            + json.dumps(
+                {
+                    name: {
+                        "checkpoint": config.get(name),
+                        "requested": expected.get(name),
+                    }
+                    for name in sorted(allowed_mismatches)
+                },
+                allow_nan=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+            flush=True,
+        )
     _base_model(model).load_state_dict(payload["model_state_dict"])
     optimizer.load_state_dict(payload["optimizer_state_dict"])
     scheduler.load_state_dict(payload["scheduler_state_dict"])
-    training_state = payload.get("training_state") or {}
     history_path = Path(checkpoint_directory) / "history.json"
     history = json.loads(history_path.read_text(encoding="ascii"))
     if (
@@ -2081,9 +2482,6 @@ def _load_resume_checkpoint(
         or any(not isinstance(item, dict) for item in history)
     ):
         raise ValueError("Reactive DDP resume checkpoint has invalid history")
-    checkpoint_kind = str(
-        training_state.get("checkpoint_kind", "epoch")
-    )
     if checkpoint_kind == "epoch":
         if not history:
             raise ValueError(
@@ -2359,7 +2757,21 @@ def train_loop_per_worker(config: dict[str, Any]) -> None:
         num_views=plan.num_views,
     )
     parent_uri = str(config.get("parent_checkpoint_uri") or "")
+    resume_uri = str(config.get("resume_checkpoint_uri") or "").rstrip("/")
     restored = train.get_checkpoint()
+    if restored is not None and resume_uri:
+        raise RuntimeError(
+            "Ray-managed and explicit resume checkpoints cannot be combined"
+        )
+    if restored is None and resume_uri:
+        resume_directory = cache_root / "explicit-resume"
+        resume_directory.mkdir(parents=True, exist_ok=True)
+        for filename in ("checkpoint.pt", "history.json"):
+            _download_checkpoint(
+                f"{resume_uri}/{filename}",
+                resume_directory / filename,
+            )
+        restored = Checkpoint.from_directory(str(resume_directory))
     initialize_bevformer = (
         bool(config["is_pretrained"])
         and not parent_uri
@@ -2473,6 +2885,12 @@ def train_loop_per_worker(config: dict[str, Any]) -> None:
     )
     optimizer_steps = int(config["steps_per_epoch"]) or calculated_steps
     checkpoint_interval_steps = int(config["checkpoint_interval_steps"])
+    performance_log_interval_steps = int(
+        config.get(
+            "performance_log_interval_steps",
+            REACTIVE_PERFORMANCE_LOG_INTERVAL_STEPS,
+        )
+    )
     _validate_checkpoint_interval(
         checkpoint_interval_steps,
         optimizer_steps,
@@ -2619,6 +3037,61 @@ def train_loop_per_worker(config: dict[str, Any]) -> None:
             f"expected_hostname_count={expected_hostname_count} "
             f"hosts={unique_hostnames}"
         )
+    if rank == 0:
+        base_model = _base_model(model)
+        gradient_groups = reactive_gradient_parameter_groups(model)
+        device_properties = torch.cuda.get_device_properties(device)
+        print(
+            "Reactive runtime "
+            + json.dumps(
+                {
+                    "cuda_device_name": device_properties.name,
+                    "cuda_total_memory_bytes": (
+                        device_properties.total_memory
+                    ),
+                    "freeze_bevformer": freeze_bevformer,
+                    "global_batch": global_batch,
+                    "gradient_accumulation_steps": int(
+                        config["gradient_accumulation_steps"]
+                    ),
+                    "loader_workers_per_rank": int(
+                        config["num_loader_workers"]
+                    ),
+                    "optimizer_steps_per_epoch": optimizer_steps,
+                    "parameter_count": sum(
+                        parameter.numel()
+                        for parameter in base_model.parameters()
+                    ),
+                    "performance_log_interval_steps": (
+                        performance_log_interval_steps
+                    ),
+                    "performance_log_version": (
+                        REACTIVE_PERFORMANCE_LOG_VERSION
+                    ),
+                    "per_rank_batch_size": int(
+                        config["per_rank_batch_size"]
+                    ),
+                    "precision": str(config["precision"]),
+                    "trainable_parameter_count": sum(
+                        parameter.numel()
+                        for parameter in base_model.parameters()
+                        if parameter.requires_grad
+                    ),
+                    "trainable_parameter_count_by_group": {
+                        name: sum(
+                            parameter.numel()
+                            for parameter in parameters
+                        )
+                        for name, parameters in gradient_groups.items()
+                    },
+                    "world_size": world_size,
+                },
+                allow_nan=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+            flush=True,
+        )
 
     model_config = {
         "model_architecture_version": REACTIVE_MODEL_ARCHITECTURE_VERSION,
@@ -2639,6 +3112,10 @@ def train_loop_per_worker(config: dict[str, Any]) -> None:
         "gradient_clip_mode": "branch_v1",
         "epochs": int(config["epochs"]),
         "optimizer_steps_per_epoch": optimizer_steps,
+        "performance_log_interval_steps": (
+            performance_log_interval_steps
+        ),
+        "performance_log_version": REACTIVE_PERFORMANCE_LOG_VERSION,
         "route_metrics_version": ROUTE_VALIDATION_METRICS_VERSION,
         "step_checkpoint_version": REACTIVE_STEP_CHECKPOINT_VERSION,
         "trajectory_weight": float(config["trajectory_weight"]),
@@ -2720,6 +3197,7 @@ def train_loop_per_worker(config: dict[str, Any]) -> None:
             completed_optimizer_steps: int,
             local_train_state: Mapping[str, Any],
         ) -> None:
+            checkpoint_started = time.perf_counter()
             local_rng_state = {
                 "rank": rank,
                 **_capture_rng_state(),
@@ -2766,6 +3244,33 @@ def train_loop_per_worker(config: dict[str, Any]) -> None:
                 dict(payload["rng_state"])
                 for payload in ordered_payloads
             ]
+            performance_payloads = [
+                state.get("performance_metrics")
+                for state in rank_train_states
+            ]
+            available_performance = [
+                dict(payload)
+                for payload in performance_payloads
+                if isinstance(payload, Mapping) and payload
+            ]
+            if available_performance:
+                if len(available_performance) != world_size:
+                    raise RuntimeError(
+                        "Reactive performance metrics are incomplete"
+                    )
+                canonical_performance = {
+                    json.dumps(
+                        payload,
+                        allow_nan=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    )
+                    for payload in available_performance
+                }
+                if len(canonical_performance) != 1:
+                    raise RuntimeError(
+                        "Reactive performance metrics differ across ranks"
+                    )
             executed_optimizer_steps = (
                 (epoch - 1) * optimizer_steps
                 + completed_optimizer_steps
@@ -2789,11 +3294,16 @@ def train_loop_per_worker(config: dict[str, Any]) -> None:
                     completed_optimizer_steps
                 ),
                 "optimizer_steps_per_epoch": optimizer_steps,
+                "performance_log_version": (
+                    REACTIVE_PERFORMANCE_LOG_VERSION
+                ),
                 "step_checkpoint_version": (
                     REACTIVE_STEP_CHECKPOINT_VERSION
                 ),
                 "world_size": world_size,
             }
+            if available_performance:
+                step_metrics.update(available_performance[0])
             checkpoint_sha256: str | None = None
             with tempfile.TemporaryDirectory() as checkpoint_directory:
                 checkpoint = None
@@ -2852,8 +3362,59 @@ def train_loop_per_worker(config: dict[str, Any]) -> None:
                 step_metrics["checkpoint_sha256"] = str(
                     checkpoint_digest[0]
                 )
+                checkpoint_timing: list[dict[str, float] | None] = [
+                    (
+                        {
+                            "checkpoint_bytes": float(
+                                (
+                                    Path(checkpoint_directory)
+                                    / "checkpoint.pt"
+                                ).stat().st_size
+                            ),
+                            "checkpoint_prepare_seconds": (
+                                time.perf_counter()
+                                - checkpoint_started
+                            ),
+                        }
+                        if rank == 0
+                        else None
+                    )
+                ]
+                dist.broadcast_object_list(checkpoint_timing, src=0)
+                if checkpoint_timing[0] is not None:
+                    step_metrics.update(checkpoint_timing[0])
+                report_started = time.perf_counter()
                 train.report(step_metrics, checkpoint=checkpoint)
+                if rank == 0:
+                    print(
+                        "Reactive checkpoint performance "
+                        + json.dumps(
+                            {
+                                "completed_optimizer_steps": (
+                                    completed_optimizer_steps
+                                ),
+                                "report_seconds": (
+                                    time.perf_counter()
+                                    - report_started
+                                ),
+                                "total_seconds": (
+                                    time.perf_counter()
+                                    - checkpoint_started
+                                ),
+                                **(
+                                    checkpoint_timing[0]
+                                    if checkpoint_timing[0] is not None
+                                    else {}
+                                ),
+                            },
+                            allow_nan=False,
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        ),
+                        flush=True,
+                    )
 
+        epoch_train_started = time.perf_counter()
         train_metrics = _train_fixed_steps(
             model,
             train_loader,
@@ -2871,6 +3432,13 @@ def train_loop_per_worker(config: dict[str, Any]) -> None:
             resume_rng_state=resume_rank_rng_state,
             checkpoint_interval_steps=checkpoint_interval_steps,
             checkpoint_callback=report_step_checkpoint,
+            performance_log_interval_steps=(
+                performance_log_interval_steps
+            ),
+        )
+        train_epoch_seconds = _distributed_max_seconds(
+            time.perf_counter() - epoch_train_started,
+            device,
         )
         validation_loader = make_multi_dataset_loader(
             local_directories,
@@ -2885,6 +3453,7 @@ def train_loop_per_worker(config: dict[str, Any]) -> None:
             decode_future_frames=False,
             nodesplitter=passthrough_nodesplitter,
         )
+        validation_started = time.perf_counter()
         validation = _evaluate_global_reactive(
             model,
             validation_loader,
@@ -2893,6 +3462,10 @@ def train_loop_per_worker(config: dict[str, Any]) -> None:
             device=device,
             probability_bins=int(config["bev_ap_bins"]),
             ade_scale_m=float(config["selection_ade_scale_m"]),
+        )
+        validation_seconds = _distributed_max_seconds(
+            time.perf_counter() - validation_started,
+            device,
         )
         scheduler.step(validation["selection_score"])
         executed_optimizer_steps = epoch * optimizer_steps
@@ -2985,6 +3558,18 @@ def train_loop_per_worker(config: dict[str, Any]) -> None:
         checkpoint_metrics["executed_optimizer_steps"] = (
             executed_optimizer_steps
         )
+        checkpoint_metrics["train_epoch_seconds"] = (
+            train_epoch_seconds
+        )
+        checkpoint_metrics["validation_seconds"] = validation_seconds
+        checkpoint_metrics["performance_log_version"] = (
+            REACTIVE_PERFORMANCE_LOG_VERSION
+        )
+        checkpoint_metrics.update({
+            f"train_{name}": value
+            for name, value in train_metrics.items()
+            if name.startswith("performance_")
+        })
         checkpoint_sha256: str | None = None
         with tempfile.TemporaryDirectory() as checkpoint_directory:
             checkpoint = None
@@ -3049,6 +3634,9 @@ def train_loop_per_worker(config: dict[str, Any]) -> None:
                 ),
                 "maximum_parameter_delta": maximum_delta,
                 "optimizer_steps_per_epoch": optimizer_steps,
+                "performance_log_version": (
+                    REACTIVE_PERFORMANCE_LOG_VERSION
+                ),
                 "freeze_bevformer": int(
                     bool(config["freeze_bevformer"])
                 ),
@@ -3071,6 +3659,7 @@ def train_loop_per_worker(config: dict[str, Any]) -> None:
                 ],
                 "train_total": train_metrics["total"],
                 "train_trajectory": train_metrics["trajectory"],
+                "train_epoch_seconds": train_epoch_seconds,
                 "validation_ade_6p4s_m": validation["ade_6p4s_m"],
                 "validation_complete_samples": validation[
                     "complete_samples"
@@ -3083,12 +3672,18 @@ def train_loop_per_worker(config: dict[str, Any]) -> None:
                 "validation_sample_uid_sha256": (
                     validation_sample_uid_sha256
                 ),
+                "validation_seconds": validation_seconds,
                 "training_seed": seed,
                 "trajectory_weight": float(
                     config["trajectory_weight"]
                 ),
                 "world_size": world_size,
             }
+            metrics.update({
+                f"train_{name}": value
+                for name, value in train_metrics.items()
+                if name.startswith("performance_")
+            })
             for name, value in validation.items():
                 if name not in {
                     "ade_6p4s_m",
@@ -3239,7 +3834,10 @@ def run_reactive_stage(config: Mapping[str, Any]) -> dict[str, Any]:
             storage_path=str(config["storage_path"]),
             failure_config=train.FailureConfig(max_failures=2),
             checkpoint_config=train.CheckpointConfig(
-                num_to_keep=int(config["epochs"]) + 2,
+                # The training role intentionally has append-only checkpoint
+                # access. Keep every checkpoint instead of asking Ray to
+                # prune S3 objects with DeleteObject.
+                num_to_keep=None,
                 checkpoint_score_attribute=(
                     "checkpoint_retention_score"
                 ),

@@ -921,6 +921,13 @@ def test_four_rank_workflow_runs_one_frozen_multitask_stage():
     assert bindings["trajectory_weight"].promise.var == "trajectory_weight"
     assert bindings["bev_weight"].promise.var == "bev_weight"
     assert bindings["route_weight"].promise.var == "route_weight"
+    assert bindings["resume_checkpoint"].promise.var == (
+        "resume_checkpoint"
+    )
+    assert (
+        bindings["per_rank_batch_size"].promise.var
+        == "per_rank_batch_size"
+    )
     assert (
         bindings["capacity_block_end_utc"].promise.var
         == "capacity_block_end_utc"
@@ -970,6 +977,9 @@ def test_eight_rank_workflow_runs_one_frozen_trajectory_route_stage():
     assert bindings["trajectory_weight"].promise.var == "trajectory_weight"
     assert bindings["bev_weight"].promise.var == "bev_weight"
     assert bindings["route_weight"].promise.var == "route_weight"
+    assert bindings["resume_checkpoint"].promise.var == (
+        "resume_checkpoint"
+    )
     assert (
         bindings["capacity_block_end_utc"].promise.var
         == "capacity_block_end_utc"
@@ -986,6 +996,11 @@ def test_eight_rank_workflow_runs_one_frozen_trajectory_route_stage():
     assert parameters["trajectory_weight"].default == 1.0
     assert parameters["bev_weight"].default == 0.0
     assert parameters["route_weight"].default == 1.0
+    assert parameters["per_rank_batch_size"].default == 4
+    task_parameters = inspect.signature(
+        distributed_training.train_reactive_stage_ray_8.task_function
+    ).parameters
+    assert task_parameters["per_rank_batch_size"].default == 4
 
 
 def test_production_checkpoint_interval_defaults_to_256_steps():
@@ -1371,6 +1386,8 @@ def test_reactive_nuplan_launcher_uses_registered_eight_rank_workflow():
     assert 'EPOCHS: "3"' in buildspec
     assert 'PRECISION: "bf16"' in buildspec
     assert 'VAL_FRACTION: "0.1"' in buildspec
+    assert 'PER_RANK_BATCH_SIZE: "4"' in buildspec
+    assert 'RESUME_CHECKPOINT_URI: ""' in buildspec
     assert 'TRAJECTORY_WEIGHT: "1.0"' in buildspec
     assert 'BEV_WEIGHT: "0.0"' in buildspec
     assert 'ROUTE_WEIGHT: "1.0"' in buildspec
@@ -1389,6 +1406,11 @@ def test_reactive_nuplan_launcher_uses_registered_eight_rank_workflow():
     assert "P5 Capacity Block must be in us-west-2a" in buildspec
     assert "42 * 60 * 60" in buildspec
     assert '"capacity_block_end_utc": capacity_block_end_utc' in buildspec
+    assert (
+        '"per_rank_batch_size": int('
+        in buildspec
+    )
+    assert '"resume_checkpoint": (' in buildspec
     codebuild_terraform = (
         Path(distributed_training.__file__).parents[1]
         / "infra/modules/codebuild/main.tf"
