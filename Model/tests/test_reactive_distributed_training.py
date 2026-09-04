@@ -1021,9 +1021,10 @@ def test_validate_stage_config_accepts_locked_program(stage):
     validate_reactive_stage_config(_stage_config(stage))
 
 
-def test_validate_stage_config_accepts_production_batch_four():
+@pytest.mark.parametrize("batch_size", [2, 4])
+def test_validate_stage_config_accepts_production_batch_sizes(batch_size):
     config = _stage_config("nuplan_full")
-    config["per_rank_batch_size"] = 4
+    config["per_rank_batch_size"] = batch_size
 
     validate_reactive_stage_config(config)
 
@@ -1046,7 +1047,7 @@ def test_validate_stage_config_rejects_parent_and_batch_contract_changes():
         validate_reactive_stage_config(stage_a)
 
     stage_b = _stage_config("l2d_continuation")
-    stage_b["per_rank_batch_size"] = 2
+    stage_b["per_rank_batch_size"] = 3
     with pytest.raises(ValueError, match="per_rank_batch_size"):
         validate_reactive_stage_config(stage_b)
 

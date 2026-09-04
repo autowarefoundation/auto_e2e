@@ -996,11 +996,15 @@ def test_eight_rank_workflow_runs_one_frozen_trajectory_route_stage():
     assert parameters["trajectory_weight"].default == 1.0
     assert parameters["bev_weight"].default == 0.0
     assert parameters["route_weight"].default == 1.0
-    assert parameters["per_rank_batch_size"].default == 4
+    assert parameters["per_rank_batch_size"].default == 2
     task_parameters = inspect.signature(
         distributed_training.train_reactive_stage_ray_8.task_function
     ).parameters
-    assert task_parameters["per_rank_batch_size"].default == 4
+    assert task_parameters["per_rank_batch_size"].default == 2
+    multistage_parameters = inspect.signature(
+        distributed_training.wf_train_reactive_nuplan_l2d_ray_8
+    ).parameters
+    assert multistage_parameters["per_rank_batch_size"].default == 2
 
 
 def test_production_checkpoint_interval_defaults_to_256_steps():
@@ -1386,7 +1390,8 @@ def test_reactive_nuplan_launcher_uses_registered_eight_rank_workflow():
     assert 'EPOCHS: "3"' in buildspec
     assert 'PRECISION: "bf16"' in buildspec
     assert 'VAL_FRACTION: "0.1"' in buildspec
-    assert 'PER_RANK_BATCH_SIZE: "4"' in buildspec
+    assert 'PER_RANK_BATCH_SIZE: "2"' in buildspec
+    assert "'^(1|2|4)$'" in buildspec
     assert 'RESUME_CHECKPOINT_URI: ""' in buildspec
     assert 'TRAJECTORY_WEIGHT: "1.0"' in buildspec
     assert 'BEV_WEIGHT: "0.0"' in buildspec

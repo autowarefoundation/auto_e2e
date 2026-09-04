@@ -37,7 +37,7 @@ from training.reactive_multitask import ReactiveTrainingStage
 
 
 SUPPORTED_WORLD_SIZES = frozenset({2, 4, 8})
-SUPPORTED_PER_RANK_BATCH_SIZES = frozenset({1, 4})
+SUPPORTED_PER_RANK_BATCH_SIZES = frozenset({1, 2, 4})
 SUPPORTED_PRECISIONS = frozenset({"fp32", "bf16"})
 BEV_LANE_NEAR_RADIUS_M = 30.0
 CAMERA_FEATURE_SCALE_WEIGHT_METRIC_PREFIX = (
