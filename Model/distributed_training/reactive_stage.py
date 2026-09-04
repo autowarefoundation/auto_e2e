@@ -3834,10 +3834,7 @@ def run_reactive_stage(config: Mapping[str, Any]) -> dict[str, Any]:
             storage_path=str(config["storage_path"]),
             failure_config=train.FailureConfig(max_failures=2),
             checkpoint_config=train.CheckpointConfig(
-                # The training role intentionally has append-only checkpoint
-                # access. Keep every checkpoint instead of asking Ray to
-                # prune S3 objects with DeleteObject.
-                num_to_keep=None,
+                num_to_keep=int(config["epochs"]) + 2,
                 checkpoint_score_attribute=(
                     "checkpoint_retention_score"
                 ),

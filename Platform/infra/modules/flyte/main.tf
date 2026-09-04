@@ -5,7 +5,7 @@ variable "datasets_bucket" {
   type        = string
 }
 variable "checkpoints_bucket" {
-  description = "Versioned bucket for immutable training checkpoints."
+  description = "Versioned bucket for Ray training and immutable published checkpoints."
   type        = string
   default     = ""
 }
@@ -115,6 +115,15 @@ resource "aws_iam_role_policy" "flyte_user_s3" {
           Action = ["s3:GetObject", "s3:PutObject"]
           Resource = [
             "arn:aws:s3:::${var.checkpoints_bucket}/*",
+          ]
+        },
+        # Ray Train prunes superseded step checkpoints through the task role.
+        # Keep deletion scoped away from immutable published checkpoints.
+        {
+          Effect = "Allow"
+          Action = ["s3:DeleteObject"]
+          Resource = [
+            "arn:aws:s3:::${var.checkpoints_bucket}/ray-train/*",
           ]
         },
         {

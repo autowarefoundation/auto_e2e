@@ -1394,7 +1394,10 @@ def test_ray_actor_cpu_reservation_matches_worker_config(
         type(captured["torch_config"]).__name__
         == "PreparedCudaTorchConfig"
     )
-    assert captured["run_config"].checkpoint_config.num_to_keep is None
+    assert (
+        captured["run_config"].checkpoint_config.num_to_keep
+        == config["epochs"] + 2
+    )
     assert result["selected_epoch"] == 1
     assert result["metrics"]["checkpoint_sha256"] == "a" * 64
 
