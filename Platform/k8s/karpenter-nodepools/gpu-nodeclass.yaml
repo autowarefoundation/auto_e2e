@@ -17,7 +17,7 @@ spec:
   placementGroupSelector:
     name: auto-e2e-distributed-training-pg
   ephemeralStorage:
-    size: 200Gi
+    size: 500Gi
     iops: 3000
     throughput: 125
   networkPolicy: DefaultAllow

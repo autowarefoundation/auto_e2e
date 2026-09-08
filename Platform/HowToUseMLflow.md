@@ -23,10 +23,12 @@ The three experiments that matter:
 |------------|-----------|----------|
 | **`imitation-learning`** | `evaluate_il_policy` | IL-trained policies + their eval metrics |
 | **`offline-rl`** | `evaluate_rl_policy` | IQL-refined policies + their eval metrics |
+| **`reactive-training`** | Reactive Ray training task | Multi-task epoch history and checkpoint lineage |
+| **`reactive-bev-evaluation`** | `evaluate_reactive_bev_checkpoint` | Class-level BEV validation and registered BEV checkpoints |
 | `Default` | — | empty / unused |
 
 There is also a **Models** tab (top nav) for the Model Registry
-(`auto-e2e-driving-policy`).
+(`auto-e2e-driving-policy` and `auto-e2e-bev-segmentation`).
 
 ---
 
@@ -160,6 +162,8 @@ model/            the checkpoint (.pt), also registered in the Model Registry
 1. Top nav → **Models**.
 2. Open **`auto-e2e-driving-policy`** — every evaluated checkpoint is registered as
    a new **version** here.
+   Reactive BEV-only checkpoints are stored separately under
+   **`auto-e2e-bev-segmentation`**.
 3. For a version you can:
    - View its **source run** (links back to the experiment run with all metrics).
    - Add a **description** / tags.
@@ -178,8 +182,12 @@ model/            the checkpoint (.pt), also registered in the Model Registry
 
 **You are**: watching a run that is still training.
 
-- MLflow runs are created by the **evaluation** task, which runs **after** training,
-  so live per-epoch curves appear once evaluation starts logging.
+- Legacy IL and Offline-RL runs are consolidated by the **evaluation** task,
+  which runs **after** training.
+- Reactive Ray training creates a `reactive-training` MLflow run before GPU
+  training begins. On success it logs every epoch from the Ray history. On
+  failure it recovers the latest S3 checkpoint history before setting the run
+  status to `FAILED`.
 - To watch training epoch-by-epoch **as it happens**, use the **Flyte** task logs
   (see `HowToUseFlyte.md`, Use case F). MLflow is for the consolidated post-run view.
 

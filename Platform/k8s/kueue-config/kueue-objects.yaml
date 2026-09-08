@@ -68,9 +68,9 @@ spec:
             - name: cpu
               nominalQuota: "12"
             - name: memory
-              nominalQuota: 48Gi
+              nominalQuota: 56Gi
             - name: ephemeral-storage
-              nominalQuota: 200Gi
+              nominalQuota: 1000Gi
     - coveredResources:
         - nvidia.com/gpu
       flavors:

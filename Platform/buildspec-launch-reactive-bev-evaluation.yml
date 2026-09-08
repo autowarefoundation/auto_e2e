@@ -1,0 +1,236 @@
+version: 0.2
+
+env:
+  variables:
+    AWS_DEFAULT_REGION: us-west-2
+    FLYTE_PROJECT: auto-e2e
+    FLYTE_DOMAIN: development
+    WORKFLOW_NAME: >-
+      Platform.pipelines.distributed_training.wf_evaluate_reactive_bev_checkpoint
+    FLYTE_VERSION: ""
+    EXECUTION_NAME: ""
+    NUPLAN_DATASET_URIS_URI: ""
+    CHECKPOINT_URI: ""
+    SOURCE_TRAINING_MLFLOW_RUN_ID: ""
+    VAL_FRACTION: "0.1"
+    BATCH_SIZE: "1"
+    NUM_LOADER_WORKERS: "2"
+    PROBABILITY_BINS: "1024"
+    WAIT_FOR_COMPLETION: "false"
+    WAIT_TIMEOUT_SECONDS: "172800"
+
+phases:
+  install:
+    commands:
+      - pip install -q flytekit==1.16.24 grpcio
+  pre_build:
+    commands:
+      - test -n "${FLYTE_VERSION}"
+      - test -n "${EXECUTION_NAME}"
+      - test -n "${NUPLAN_DATASET_URIS_URI}"
+      - test -n "${CHECKPOINT_URI}"
+      - printf '%s' "${NUPLAN_DATASET_URIS_URI}" | grep -Eq '^s3://'
+      - printf '%s' "${CHECKPOINT_URI}" | grep -Eq '^s3://'
+      - printf '%s' "${EXECUTION_NAME}" | grep -Eq '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
+      - test "${#EXECUTION_NAME}" -le 63
+      - printf '%s' "${BATCH_SIZE}" | grep -Eq '^[1-4]$'
+      - printf '%s' "${NUM_LOADER_WORKERS}" | grep -Eq '^[0-4]$'
+      - printf '%s' "${PROBABILITY_BINS}" | grep -Eq '^[0-9]+$'
+      - printf '%s' "${WAIT_FOR_COMPLETION}" | grep -Eq '^(true|false)$'
+      - printf '%s' "${WAIT_TIMEOUT_SECONDS}" | grep -Eq '^[1-9][0-9]*$'
+      - >
+        test -z "${SOURCE_TRAINING_MLFLOW_RUN_ID}"
+        || printf '%s' "${SOURCE_TRAINING_MLFLOW_RUN_ID}"
+        | grep -Eq '^[0-9a-f]{32}$'
+      - aws s3 cp "${NUPLAN_DATASET_URIS_URI}" /tmp/nuplan-dataset-uris.json
+      - |
+        python3 - <<'PY'
+        import json
+        import os
+
+        with open(
+            "/tmp/nuplan-dataset-uris.json",
+            encoding="ascii",
+        ) as stream:
+            dataset_uris = json.load(stream)
+        if (
+            not isinstance(dataset_uris, list)
+            or len(dataset_uris) != 43
+            or len(set(dataset_uris)) != 43
+            or any(
+                not isinstance(uri, str)
+                or not uri.startswith("s3://")
+                for uri in dataset_uris
+            )
+        ):
+            raise ValueError(
+                "nuPlan dataset URI manifest must contain "
+                "43 unique S3 URIs"
+            )
+        if not 0.0 < float(os.environ["VAL_FRACTION"]) < 1.0:
+            raise ValueError("VAL_FRACTION must be in (0, 1)")
+        if int(os.environ["PROBABILITY_BINS"]) < 256:
+            raise ValueError("PROBABILITY_BINS must be at least 256")
+        PY
+      - |
+        cat > /tmp/flyte.yaml << EOF
+        admin:
+          endpoint: dns:///k8s-flyte-flyteadm-be92e7737c-cf0d1a0f3df10f77.elb.us-west-2.amazonaws.com:81
+          insecure: true
+        EOF
+  build:
+    commands:
+      - |
+        python3 - <<'PY'
+        import json
+        import os
+        import time
+
+        import grpc
+        from flytekit.configuration import Config
+        from flytekit.exceptions.user import (
+            FlyteEntityAlreadyExistsException,
+            FlyteEntityNotExistException,
+        )
+        from flytekit.models.core.execution import WorkflowExecutionPhase
+        from flytekit.remote import FlyteRemote
+        from flytekit.types.directory import FlyteDirectory
+        from flytekit.types.file import FlyteFile
+
+        project = os.environ["FLYTE_PROJECT"]
+        domain = os.environ["FLYTE_DOMAIN"]
+        workflow_name = os.environ["WORKFLOW_NAME"]
+        version = os.environ["FLYTE_VERSION"]
+        execution_name = os.environ["EXECUTION_NAME"]
+        with open(
+            "/tmp/nuplan-dataset-uris.json",
+            encoding="ascii",
+        ) as stream:
+            dataset_uris = json.load(stream)
+        inputs = {
+            "checkpoint": FlyteFile(os.environ["CHECKPOINT_URI"]),
+            "shards": [
+                FlyteDirectory(uri) for uri in dataset_uris
+            ],
+            "dataset": "nuplan/nuplan-v1.1",
+            "benchmark_inventory": None,
+            "split": "validation_holdout",
+            "val_fraction": float(os.environ["VAL_FRACTION"]),
+            "batch_size": int(os.environ["BATCH_SIZE"]),
+            "num_loader_workers": int(
+                os.environ["NUM_LOADER_WORKERS"]
+            ),
+            "probability_bins": int(
+                os.environ["PROBABILITY_BINS"]
+            ),
+            "source_training_mlflow_run_id": os.environ[
+                "SOURCE_TRAINING_MLFLOW_RUN_ID"
+            ],
+        }
+        remote = FlyteRemote(
+            config=Config.auto(config_file="/tmp/flyte.yaml"),
+            default_project=project,
+            default_domain=domain,
+        )
+        launch_plan = remote.fetch_launch_plan(
+            project=project,
+            domain=domain,
+            name=workflow_name,
+            version=version,
+        )
+
+        def grpc_code(error):
+            visited = set()
+            candidate = error
+            while candidate is not None and id(candidate) not in visited:
+                visited.add(id(candidate))
+                if isinstance(candidate, grpc.RpcError):
+                    return candidate.code()
+                candidate = (
+                    candidate.__cause__
+                    if candidate.__cause__ is not None
+                    else candidate.__context__
+                )
+            return None
+
+        transient_codes = {
+            grpc.StatusCode.DEADLINE_EXCEEDED,
+            grpc.StatusCode.INTERNAL,
+            grpc.StatusCode.RESOURCE_EXHAUSTED,
+            grpc.StatusCode.UNAVAILABLE,
+            grpc.StatusCode.UNKNOWN,
+        }
+        deadline = time.monotonic() + 300
+        execution = None
+        while execution is None:
+            try:
+                execution = remote.fetch_execution(
+                    project=project,
+                    domain=domain,
+                    name=execution_name,
+                )
+            except FlyteEntityNotExistException:
+                pass
+            except Exception as error:
+                if grpc_code(error) not in transient_codes:
+                    raise
+            if execution is None:
+                try:
+                    execution = remote.execute(
+                        launch_plan,
+                        inputs=inputs,
+                        execution_name=execution_name,
+                        wait=False,
+                    )
+                except FlyteEntityAlreadyExistsException:
+                    pass
+                except Exception as error:
+                    if grpc_code(error) not in transient_codes:
+                        raise
+            if execution is None:
+                if time.monotonic() >= deadline:
+                    raise TimeoutError(
+                        "timed out fetching or creating "
+                        "Flyte evaluation execution"
+                    )
+                time.sleep(5)
+
+        print(f"FLYTE_EXECUTION_ID={execution.id.name}", flush=True)
+        if os.environ["WAIT_FOR_COMPLETION"] != "true":
+            print("FLYTE_EXECUTION_DETACHED=true", flush=True)
+            raise SystemExit(0)
+
+        terminal_phases = {
+            WorkflowExecutionPhase.ABORTED,
+            WorkflowExecutionPhase.FAILED,
+            WorkflowExecutionPhase.SUCCEEDED,
+            WorkflowExecutionPhase.TIMED_OUT,
+        }
+        deadline = (
+            time.monotonic()
+            + int(os.environ["WAIT_TIMEOUT_SECONDS"])
+        )
+        while True:
+            execution = remote.sync_execution(
+                execution,
+                sync_nodes=True,
+            )
+            if execution.closure.phase in terminal_phases:
+                break
+            if time.monotonic() >= deadline:
+                raise TimeoutError(
+                    f"timed out waiting for {execution_name}"
+                )
+            time.sleep(30)
+        phase_name = WorkflowExecutionPhase.enum_to_string(
+            execution.closure.phase
+        )
+        print(f"FLYTE_EXECUTION_PHASE={phase_name}", flush=True)
+        if (
+            execution.closure.phase
+            != WorkflowExecutionPhase.SUCCEEDED
+        ):
+            raise RuntimeError(
+                f"Flyte evaluation ended in {phase_name}"
+            )
+        PY

@@ -10,9 +10,11 @@ import os
 import re
 import subprocess
 import sys
+import types
 import zipfile
 from datetime import timedelta
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import yaml
@@ -416,11 +418,16 @@ def test_reactive_bev_evaluation_uses_validation_gpu_contract():
         distributed_training.evaluate_reactive_bev_checkpoint
         .python_interface.inputs
     )
-    node, = (
-        distributed_training.wf_evaluate_reactive_bev_checkpoint.nodes
+    evaluation_node, publication_node = (
+        distributed_training
+        .wf_evaluate_reactive_bev_checkpoint
+        .nodes
     )
-    assert node.flyte_entity is (
+    assert evaluation_node.flyte_entity is (
         distributed_training.evaluate_reactive_bev_checkpoint
+    )
+    assert publication_node.flyte_entity is (
+        distributed_training.publish_reactive_bev_evaluation
     )
     source = inspect.getsource(
         distributed_training.evaluate_reactive_bev_checkpoint.task_function
@@ -431,6 +438,144 @@ def test_reactive_bev_evaluation_uses_validation_gpu_contract():
     assert '"evaluation_sample_count": expected_sample_count' in source
     assert "validate_kitscenes_benchmark_inventory_coverage" in source
     assert '"evaluation_sample_uid_sha256"' in source
+    assert "_log_reactive_bev_evaluation_to_mlflow" not in source
+    publish_source = inspect.getsource(
+        distributed_training.publish_reactive_bev_evaluation.task_function
+    )
+    assert "_log_reactive_bev_evaluation_to_mlflow" in publish_source
+    assert "checkpoint_hasher.hexdigest()" in publish_source
+    assert (
+        distributed_training
+        .publish_reactive_bev_evaluation
+        .environment["MLFLOW_TRACKING_URI"]
+        == distributed_training.MLFLOW_URI
+    )
+    resources = (
+        distributed_training.evaluate_reactive_bev_checkpoint.resources
+    )
+    assert resources.requests.cpu == "6"
+    assert resources.requests.mem == "28Gi"
+    assert resources.requests.gpu == "1"
+    assert resources.requests.ephemeral_storage == "420Gi"
+    assert resources.limits == resources.requests
+    assert set(
+        distributed_training.ReactiveBEVEvaluationOutput.__annotations__
+    ) == {
+        "report",
+        "report_sha256",
+        "checkpoint_sha256",
+        "checkpoint_epoch",
+    }
+    assert set(
+        distributed_training
+        .ReactiveBEVEvaluationWorkflowOutput
+        .__annotations__
+    ) == {
+        "report",
+        "report_sha256",
+        "checkpoint_sha256",
+        "checkpoint_epoch",
+        "mlflow_run_id",
+        "registered_model_name",
+        "registered_model_version",
+    }
+
+
+def test_reactive_bev_evaluation_metrics_flatten_numeric_values():
+    metrics = distributed_training._reactive_bev_evaluation_metrics({
+        "sample_count": 4,
+        "evaluation_valid": True,
+        "classes": {
+            "vehicle": {
+                "average_precision": 0.75,
+                "availability": "computed",
+                "nonfinite": float("nan"),
+            },
+        },
+        "class_order": ["vehicle"],
+    })
+
+    assert metrics == {
+        "eval/sample_count": 4.0,
+        "eval/classes/vehicle/average_precision": 0.75,
+    }
+
+
+def test_reactive_bev_model_registration_is_idempotent():
+    version_tags = {}
+    created_models = []
+    created_versions = []
+
+    class Client:
+        def get_registered_model(self, name):
+            if not created_models:
+                raise RuntimeError("not found")
+            assert name == "auto-e2e-bev-segmentation"
+
+        def create_registered_model(self, name):
+            created_models.append(name)
+
+        def search_model_versions(self, query):
+            assert query == "name='auto-e2e-bev-segmentation'"
+            return created_versions
+
+        def create_model_version(self, *, name, source, run_id):
+            version = SimpleNamespace(
+                version="7",
+                source=source,
+                run_id=run_id,
+                tags={},
+            )
+            created_versions.append(version)
+            return version
+
+        def set_model_version_tag(self, name, version, key, value):
+            assert name == "auto-e2e-bev-segmentation"
+            assert version == "7"
+            version_tags[key] = value
+            created_versions[0].tags[key] = value
+
+    report = {
+        "dataset": "nuplan/nuplan-v1.1",
+        "macro_average_precision_supported_classes": 0.42,
+        "sample_count": 4096,
+        "schema_version": "bev_segmentation_evaluation_v7",
+    }
+    client = Client()
+    first = distributed_training._register_reactive_bev_model_version(
+        client,
+        run_id="a" * 32,
+        checkpoint_artifact_uri="runs:/run/model/checkpoint.pt",
+        checkpoint_source_uri="s3://bucket/checkpoint.pt",
+        checkpoint_sha256="b" * 64,
+        checkpoint_epoch=2,
+        report=report,
+        report_sha256="c" * 64,
+        source_training_mlflow_run_id="d" * 32,
+    )
+    second = distributed_training._register_reactive_bev_model_version(
+        client,
+        run_id="a" * 32,
+        checkpoint_artifact_uri="runs:/run/model/checkpoint.pt",
+        checkpoint_source_uri="s3://bucket/checkpoint.pt",
+        checkpoint_sha256="b" * 64,
+        checkpoint_epoch=2,
+        report=report,
+        report_sha256="c" * 64,
+        source_training_mlflow_run_id="d" * 32,
+    )
+
+    assert first == second == "7"
+    assert created_models == ["auto-e2e-bev-segmentation"]
+    assert len(created_versions) == 1
+    assert version_tags["checkpoint_sha256"] == "b" * 64
+    assert version_tags["model_role"] == (
+        "bev_segmentation_candidate"
+    )
+    assert version_tags[
+        "nuplan_nuplan_v1_1_macro_average_precision"
+    ] == "0.42"
+    assert version_tags["source_training_mlflow_run_id"] == "d" * 32
 
 
 def test_reviewed_ray_topologies_have_fixed_worker_groups():
@@ -548,6 +693,11 @@ def test_four_rank_performance_capacity_matches_ray_contract():
     validation_class = node_classes[
         "auto-e2e-gpu-validation"
     ]["spec"]
+    assert validation_class["ephemeralStorage"] == {
+        "size": "500Gi",
+        "iops": 3000,
+        "throughput": 125,
+    }
     assert validation_class["capacityReservationSelectorTerms"] == [
         {
             "ownerID": "REPLACE_WITH_AWS_ACCOUNT_ID",
@@ -730,8 +880,8 @@ def test_four_rank_performance_capacity_matches_ray_contract():
     )
     assert validation_compute_group["flavors"][0]["resources"] == [
         {"name": "cpu", "nominalQuota": "12"},
-        {"name": "memory", "nominalQuota": "48Gi"},
-        {"name": "ephemeral-storage", "nominalQuota": "200Gi"},
+        {"name": "memory", "nominalQuota": "56Gi"},
+        {"name": "ephemeral-storage", "nominalQuota": "1000Gi"},
     ]
     assert (
         "ClusterQueue",
@@ -892,6 +1042,7 @@ def test_ray_tasks_serialize_the_resolved_storage_path():
         "AUTO_E2E_RAY_STORAGE_PATH": (
             distributed_training.RAY_STORAGE_PATH
         ),
+        "MLFLOW_TRACKING_URI": distributed_training.MLFLOW_URI,
         "RAY_TRAIN_V2_ENABLED": "1",
     }
 
@@ -907,6 +1058,248 @@ def test_ray_tasks_serialize_the_resolved_storage_path():
     assert distributed_training.train_reactive_stage_ray_8.environment == (
         expected_environment
     )
+
+
+def test_reactive_mlflow_helpers_record_stable_numeric_history():
+    config = {
+        "backbone": "res_net_50",
+        "bev_encoder_learning_rate": 1e-5,
+        "bev_weight": 1.0,
+        "checkpoint_interval_steps": 256,
+        "epochs": 5,
+        "freeze_bevformer": False,
+        "gradient_accumulation_steps": 1,
+        "is_pretrained": True,
+        "learning_rate": 1e-4,
+        "num_loader_workers": 4,
+        "num_workers": 8,
+        "per_rank_batch_size": 4,
+        "precision": "bf16",
+        "route_weight": 0.0,
+        "source_uris": ["s3://dataset/part-0", "s3://dataset/part-1"],
+        "stage": "nuplan_full",
+        "training_scope": "bev_only",
+        "training_seed": 149,
+        "trajectory_weight": 0.0,
+        "val_fraction": 0.1,
+        "validation_sample_limit": 4096,
+        "weight_decay": 1e-2,
+    }
+
+    digest = distributed_training._reactive_mlflow_config_sha256(config)
+    assert len(digest) == 64
+    assert digest == distributed_training._reactive_mlflow_config_sha256(
+        dict(reversed(tuple(config.items())))
+    )
+    params = distributed_training._reactive_mlflow_params(
+        config,
+        execution_name="reactive-test",
+    )
+    assert params["ctx/flyte_execution_id"] == "reactive-test"
+    assert params["data/source_partition_count"] == 2
+    assert params["train/training_scope"] == "bev_only"
+    assert params["train/world_size"] == 8
+    assert distributed_training._reactive_mlflow_metrics({
+        "epoch": 2,
+        "finite": 0.25,
+        "boolean": True,
+        "digest": "abc",
+        "nan": float("nan"),
+        "infinite": float("inf"),
+    }) == {
+        "epoch": 2.0,
+        "finite": 0.25,
+    }
+
+
+def test_reactive_ray_task_persists_mlflow_result_and_failure_state():
+    source = inspect.getsource(
+        distributed_training._run_reactive_stage_task
+    )
+
+    assert "_start_reactive_mlflow_run" in source
+    assert "_log_reactive_mlflow_result" in source
+    assert "_mark_reactive_mlflow_failed" in source
+    assert "config=training_config" in source
+    assert '"mlflow_run_id": mlflow_run_id' in source
+    assert (
+        distributed_training.REACTIVE_MLFLOW_EXPERIMENT
+        == "reactive-training"
+    )
+
+
+def test_reactive_mlflow_run_is_reused_for_flyte_retry(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    config = {
+        "backbone": "res_net_50",
+        "bev_encoder_learning_rate": 1e-5,
+        "bev_weight": 0.0,
+        "checkpoint_interval_steps": 256,
+        "epochs": 3,
+        "freeze_bevformer": True,
+        "gradient_accumulation_steps": 1,
+        "is_pretrained": True,
+        "learning_rate": 1e-4,
+        "num_loader_workers": 2,
+        "num_workers": 8,
+        "per_rank_batch_size": 4,
+        "precision": "bf16",
+        "route_weight": 1.0,
+        "source_uris": ["s3://dataset/part-0"],
+        "stage": "nuplan_full",
+        "training_scope": "multitask",
+        "training_seed": 149,
+        "trajectory_weight": 1.0,
+        "val_fraction": 0.1,
+        "validation_sample_limit": 1024,
+        "weight_decay": 1e-2,
+    }
+    created_runs = []
+    logged_params = {}
+    tags = {}
+
+    class Client:
+        def search_runs(self, **kwargs):
+            assert kwargs["max_results"] == 2
+            return created_runs
+
+        def create_run(self, *, experiment_id, start_time, tags):
+            assert experiment_id == "11"
+            assert start_time > 0
+            run = SimpleNamespace(
+                info=SimpleNamespace(run_id="a" * 32),
+                data=SimpleNamespace(tags=dict(tags)),
+            )
+            created_runs.append(run)
+            return run
+
+        def log_param(self, run_id, name, value):
+            assert run_id == "a" * 32
+            logged_params[name] = value
+
+        def set_tag(self, run_id, name, value):
+            assert run_id == "a" * 32
+            tags[name] = value
+
+    client = Client()
+    mlflow_module = types.ModuleType("mlflow")
+    mlflow_module.set_tracking_uri = lambda uri: tags.setdefault(
+        "tracking_uri",
+        uri,
+    )
+    mlflow_module.set_experiment = lambda name: SimpleNamespace(
+        experiment_id="11",
+        name=name,
+    )
+    tracking_module = types.ModuleType("mlflow.tracking")
+    tracking_module.MlflowClient = lambda: client
+    monkeypatch.setitem(sys.modules, "mlflow", mlflow_module)
+    monkeypatch.setitem(
+        sys.modules,
+        "mlflow.tracking",
+        tracking_module,
+    )
+    monkeypatch.setenv(
+        "MLFLOW_TRACKING_URI",
+        "http://mlflow.test:5000",
+    )
+
+    first_client, first_run_id = (
+        distributed_training._start_reactive_mlflow_run(
+            config,
+            execution_name="reactive-test",
+            run_name="reactive-test-nuplan_full-ray-8-full",
+        )
+    )
+    second_client, second_run_id = (
+        distributed_training._start_reactive_mlflow_run(
+            config,
+            execution_name="reactive-test",
+            run_name="reactive-test-nuplan_full-ray-8-full",
+        )
+    )
+
+    assert first_client is second_client is client
+    assert first_run_id == second_run_id == "a" * 32
+    assert len(created_runs) == 1
+    assert logged_params["train/world_size"] == 8
+    assert tags["tracking_uri"] == "http://mlflow.test:5000"
+    assert tags["flyte_retry_reused"] == "true"
+    assert tags["task_status"] == "RUNNING"
+
+
+def test_reactive_mlflow_failure_recovers_latest_s3_history():
+    history = [
+        {
+            "checkpoint_sha256": "a" * 64,
+            "epoch": 1,
+            "train_total": 0.9,
+        },
+        {
+            "checkpoint_sha256": "b" * 64,
+            "epoch": 2,
+            "train_total": 0.7,
+        },
+    ]
+    snapshot = {
+        "latest_checkpoint_result": {
+            "checkpoint_dir_name": "checkpoint_0002",
+            "metrics": {
+                "checkpoint_sha256": "c" * 64,
+                "epoch": 3,
+                "executed_optimizer_steps": 7168,
+            },
+        },
+    }
+
+    class Client:
+        def __init__(self):
+            self.requested = []
+
+        def get_object(self, *, Bucket, Key):
+            self.requested.append((Bucket, Key))
+            payload = (
+                snapshot
+                if Key.endswith("checkpoint_manager_snapshot.json")
+                else history
+            )
+            return {
+                "Body": io.BytesIO(
+                    json.dumps(payload).encode("utf-8")
+                )
+            }
+
+    client = Client()
+    recovered = (
+        distributed_training._recover_reactive_mlflow_checkpoint(
+            {
+                "run_name": "reactive-test",
+                "storage_path": "s3://checkpoint-bucket/ray-train",
+            },
+            s3_client=client,
+        )
+    )
+
+    assert recovered == {
+        "checkpoint_uri": (
+            "s3://checkpoint-bucket/ray-train/reactive-test/"
+            "checkpoint_0002/checkpoint.pt"
+        ),
+        "history": history,
+        "metrics": snapshot["latest_checkpoint_result"]["metrics"],
+    }
+    assert client.requested == [
+        (
+            "checkpoint-bucket",
+            "ray-train/reactive-test/"
+            "checkpoint_manager_snapshot.json",
+        ),
+        (
+            "checkpoint-bucket",
+            "ray-train/reactive-test/checkpoint_0002/history.json",
+        ),
+    ]
 
 
 def test_distributed_program_passes_stage_a_checkpoint_to_stage_b():

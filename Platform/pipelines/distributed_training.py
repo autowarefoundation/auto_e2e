@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import os
 import re
+import time
 from datetime import timedelta
 from pathlib import Path
-from typing import List, NamedTuple, Optional
+from typing import Any, List, Mapping, NamedTuple, Optional
+from urllib.parse import urlparse
 
 from flytekit import (
     PodTemplate,
@@ -49,9 +52,19 @@ RAY_STORAGE_PATH = os.environ.get(
     "AUTO_E2E_RAY_STORAGE_PATH",
     "s3://auto-e2e-platform-checkpoints/ray-train",
 )
+MLFLOW_URI = os.environ.get(
+    "MLFLOW_TRACKING_URI",
+    "http://mlflow.mlflow.svc.cluster.local:5000",
+)
+REACTIVE_MLFLOW_EXPERIMENT = "reactive-training"
+REACTIVE_BEV_EVALUATION_MLFLOW_EXPERIMENT = (
+    "reactive-bev-evaluation"
+)
+REACTIVE_BEV_REGISTERED_MODEL = "auto-e2e-bev-segmentation"
 RAY_TASK_ENVIRONMENT = {
     "AWS_DEFAULT_REGION": "us-west-2",
     "AUTO_E2E_RAY_STORAGE_PATH": RAY_STORAGE_PATH,
+    "MLFLOW_TRACKING_URI": MLFLOW_URI,
     "RAY_TRAIN_V2_ENABLED": "1",
 }
 BEV_POS_WEIGHT_CAP = 64.0
@@ -103,6 +116,23 @@ class ReactiveBEVEvaluationOutput(NamedTuple):
     report: FlyteFile
     report_sha256: str
     checkpoint_sha256: str
+    checkpoint_epoch: int
+
+
+class ReactiveBEVPublicationOutput(NamedTuple):
+    mlflow_run_id: str
+    registered_model_name: str
+    registered_model_version: str
+
+
+class ReactiveBEVEvaluationWorkflowOutput(NamedTuple):
+    report: FlyteFile
+    report_sha256: str
+    checkpoint_sha256: str
+    checkpoint_epoch: int
+    mlflow_run_id: str
+    registered_model_name: str
+    registered_model_version: str
 
 
 def _head_pod_template() -> PodTemplate:
@@ -464,6 +494,583 @@ def _reactive_run_name(
     )
 
 
+def _reactive_mlflow_config_sha256(
+    config: Mapping[str, Any],
+) -> str:
+    payload = json.dumps(
+        dict(config),
+        allow_nan=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _reactive_mlflow_params(
+    config: Mapping[str, Any],
+    *,
+    execution_name: str,
+) -> dict[str, Any]:
+    return {
+        "ctx/flyte_execution_id": execution_name,
+        "data/stage": config["stage"],
+        "data/source_partition_count": len(config["source_uris"]),
+        "model/backbone": config["backbone"],
+        "model/freeze_bevformer": config["freeze_bevformer"],
+        "model/is_pretrained": config["is_pretrained"],
+        "train/bev_encoder_learning_rate": config[
+            "bev_encoder_learning_rate"
+        ],
+        "train/bev_weight": config["bev_weight"],
+        "train/checkpoint_interval_steps": config[
+            "checkpoint_interval_steps"
+        ],
+        "train/epochs": config["epochs"],
+        "train/gradient_accumulation_steps": config[
+            "gradient_accumulation_steps"
+        ],
+        "train/learning_rate": config["learning_rate"],
+        "train/num_loader_workers": config["num_loader_workers"],
+        "train/per_rank_batch_size": config["per_rank_batch_size"],
+        "train/precision": config["precision"],
+        "train/route_weight": config["route_weight"],
+        "train/seed": config["training_seed"],
+        "train/training_scope": config["training_scope"],
+        "train/trajectory_weight": config["trajectory_weight"],
+        "train/validation_fraction": config["val_fraction"],
+        "train/validation_sample_limit": config[
+            "validation_sample_limit"
+        ],
+        "train/weight_decay": config["weight_decay"],
+        "train/world_size": config["num_workers"],
+    }
+
+
+def _reactive_mlflow_metrics(
+    metrics: Mapping[str, Any],
+) -> dict[str, float]:
+    result = {}
+    for name, value in metrics.items():
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+        ):
+            continue
+        numeric_value = float(value)
+        if math.isfinite(numeric_value):
+            result[str(name)] = numeric_value
+    return result
+
+
+def _start_reactive_mlflow_run(
+    config: Mapping[str, Any],
+    *,
+    execution_name: str,
+    run_name: str,
+):
+    import mlflow
+    from mlflow.tracking import MlflowClient
+
+    mlflow.set_tracking_uri(os.environ["MLFLOW_TRACKING_URI"])
+    experiment = mlflow.set_experiment(REACTIVE_MLFLOW_EXPERIMENT)
+    client = MlflowClient()
+    config_sha256 = _reactive_mlflow_config_sha256(config)
+    matches = client.search_runs(
+        experiment_ids=[experiment.experiment_id],
+        filter_string=f"tags.reactive_run_key = '{run_name}'",
+        max_results=2,
+    )
+    if len(matches) > 1:
+        raise RuntimeError(
+            f"multiple MLflow runs use Reactive key {run_name}"
+        )
+    if matches:
+        run = matches[0]
+        recorded_sha256 = run.data.tags.get(
+            "reactive_config_sha256"
+        )
+        if recorded_sha256 != config_sha256:
+            raise ValueError(
+                "Reactive MLflow run config differs from the Flyte retry"
+            )
+        run_id = run.info.run_id
+        client.set_tag(run_id, "task_status", "RUNNING")
+        client.set_tag(run_id, "flyte_retry_reused", "true")
+        return client, run_id
+
+    tags = {
+        "mlflow.runName": run_name,
+        "pipeline": REACTIVE_MLFLOW_EXPERIMENT,
+        "reactive_run_key": run_name,
+        "reactive_config_sha256": config_sha256,
+        "flyte_execution_id": execution_name,
+        "stage": str(config["stage"]),
+        "training_scope": str(config["training_scope"]),
+        "task_status": "RUNNING",
+    }
+    run = client.create_run(
+        experiment_id=experiment.experiment_id,
+        start_time=int(time.time() * 1000),
+        tags=tags,
+    )
+    run_id = run.info.run_id
+    for name, value in _reactive_mlflow_params(
+        config,
+        execution_name=execution_name,
+    ).items():
+        client.log_param(run_id, name, value)
+    return client, run_id
+
+
+def _log_reactive_mlflow_result(
+    client,
+    run_id: str,
+    result: Mapping[str, Any],
+    *,
+    metadata_path: Path,
+) -> None:
+    _log_reactive_mlflow_history(
+        client,
+        run_id,
+        result["history"],
+    )
+    selected_metrics = result["metrics"]
+    final_metrics = result["final_metrics"]
+    tags = {
+        "checkpoint_sha256": str(
+            selected_metrics["checkpoint_sha256"]
+        ),
+        "checkpoint_uri": str(result["checkpoint_file_uri"]),
+        "dataset_manifest_sha256": str(
+            selected_metrics["dataset_manifest_sha256"]
+        ),
+        "final_checkpoint_sha256": str(
+            final_metrics["checkpoint_sha256"]
+        ),
+        "selected_checkpoint_epoch": str(result["selected_epoch"]),
+        "task_status": "FINISHED",
+    }
+    for name, value in tags.items():
+        client.set_tag(run_id, name, value)
+    client.log_artifact(
+        run_id,
+        str(metadata_path),
+        artifact_path="training",
+    )
+    client.set_terminated(run_id, status="FINISHED")
+
+
+def _log_reactive_mlflow_history(
+    client,
+    run_id: str,
+    history: list[Mapping[str, Any]],
+) -> None:
+    from mlflow.entities import Metric
+
+    timestamp = int(time.time() * 1000)
+    for row in history:
+        step = int(row["epoch"])
+        entries = [
+            Metric(
+                key=name,
+                value=value,
+                timestamp=timestamp,
+                step=step,
+            )
+            for name, value in _reactive_mlflow_metrics(row).items()
+        ]
+        for offset in range(0, len(entries), 500):
+            client.log_batch(
+                run_id,
+                metrics=entries[offset : offset + 500],
+            )
+
+
+def _recover_reactive_mlflow_checkpoint(
+    config: Mapping[str, Any],
+    *,
+    s3_client=None,
+) -> dict[str, Any] | None:
+    storage_path = str(config["storage_path"]).rstrip("/")
+    parsed = urlparse(storage_path)
+    if parsed.scheme != "s3" or not parsed.netloc:
+        return None
+    if s3_client is None:
+        import boto3
+
+        s3_client = boto3.client("s3")
+    prefix = "/".join(
+        part
+        for part in (
+            parsed.path.strip("/"),
+            str(config["run_name"]),
+        )
+        if part
+    )
+
+    def read_json(key: str):
+        body = s3_client.get_object(
+            Bucket=parsed.netloc,
+            Key=key,
+        )["Body"]
+        return json.loads(body.read())
+
+    try:
+        snapshot = read_json(
+            f"{prefix}/checkpoint_manager_snapshot.json"
+        )
+    except Exception:
+        return None
+    latest = snapshot.get("latest_checkpoint_result")
+    if not isinstance(latest, Mapping):
+        return None
+    checkpoint_directory = latest.get("checkpoint_dir_name")
+    metrics = latest.get("metrics")
+    if (
+        not isinstance(checkpoint_directory, str)
+        or not checkpoint_directory
+        or not isinstance(metrics, Mapping)
+    ):
+        return None
+    history = read_json(
+        f"{prefix}/{checkpoint_directory}/history.json"
+    )
+    if (
+        not isinstance(history, list)
+        or any(not isinstance(row, Mapping) for row in history)
+    ):
+        raise ValueError("Reactive S3 recovery history is invalid")
+    return {
+        "checkpoint_uri": (
+            f"{storage_path}/{config['run_name']}/"
+            f"{checkpoint_directory}/checkpoint.pt"
+        ),
+        "history": history,
+        "metrics": dict(metrics),
+    }
+
+
+def _mark_reactive_mlflow_failed(
+    client,
+    run_id: str,
+    error: Exception,
+    *,
+    config: Mapping[str, Any],
+    run_name: str,
+) -> None:
+    failure_path = (
+        Path("/tmp/reactive-ray")
+        / run_name
+        / "failure.json"
+    )
+    failure_path.parent.mkdir(parents=True, exist_ok=True)
+    failure_path.write_text(
+        json.dumps(
+            {
+                "error_message": str(error),
+                "error_type": type(error).__name__,
+                "run_name": run_name,
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    client.set_tag(run_id, "error_type", type(error).__name__)
+    client.set_tag(run_id, "error_message", str(error)[:4000])
+    client.set_tag(run_id, "task_status", "FAILED")
+    try:
+        recovered = _recover_reactive_mlflow_checkpoint(config)
+        if recovered is not None:
+            _log_reactive_mlflow_history(
+                client,
+                run_id,
+                recovered["history"],
+            )
+            recovered_metrics = recovered["metrics"]
+            recovered_tags = {
+                "completed_epoch": str(
+                    len(recovered["history"])
+                ),
+                "latest_recovery_checkpoint_sha256": str(
+                    recovered_metrics["checkpoint_sha256"]
+                ),
+                "latest_recovery_checkpoint_uri": str(
+                    recovered["checkpoint_uri"]
+                ),
+                "latest_recovery_epoch": str(
+                    recovered_metrics["epoch"]
+                ),
+                "latest_recovery_optimizer_step": str(
+                    recovered_metrics.get(
+                        "executed_optimizer_steps",
+                        0,
+                    )
+                ),
+            }
+            for name, value in recovered_tags.items():
+                client.set_tag(run_id, name, value)
+    except Exception as recovery_error:
+        client.set_tag(
+            run_id,
+            "history_recovery_error",
+            str(recovery_error)[:4000],
+        )
+    client.log_artifact(
+        run_id,
+        str(failure_path),
+        artifact_path="training",
+    )
+    client.set_terminated(run_id, status="FAILED")
+
+
+def _reactive_bev_evaluation_metrics(
+    report: Mapping[str, Any],
+) -> dict[str, float]:
+    metrics: dict[str, float] = {}
+
+    def visit(prefix: str, value: Any) -> None:
+        if isinstance(value, Mapping):
+            for child_name, child_value in value.items():
+                child_prefix = (
+                    f"{prefix}/{child_name}"
+                    if prefix
+                    else str(child_name)
+                )
+                visit(child_prefix, child_value)
+            return
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+        ):
+            return
+        numeric_value = float(value)
+        if math.isfinite(numeric_value):
+            metrics[f"eval/{prefix}"] = numeric_value
+
+    visit("", report)
+    return metrics
+
+
+def _register_reactive_bev_model_version(
+    client,
+    *,
+    run_id: str,
+    checkpoint_artifact_uri: str,
+    checkpoint_source_uri: str,
+    checkpoint_sha256: str,
+    checkpoint_epoch: int,
+    report: Mapping[str, Any],
+    report_sha256: str,
+    source_training_mlflow_run_id: str,
+) -> str:
+    try:
+        client.get_registered_model(REACTIVE_BEV_REGISTERED_MODEL)
+    except Exception:
+        try:
+            client.create_registered_model(
+                REACTIVE_BEV_REGISTERED_MODEL
+            )
+        except Exception:
+            client.get_registered_model(
+                REACTIVE_BEV_REGISTERED_MODEL
+            )
+
+    version = None
+    for existing in client.search_model_versions(
+        f"name='{REACTIVE_BEV_REGISTERED_MODEL}'"
+    ):
+        existing_tags = getattr(existing, "tags", {}) or {}
+        if (
+            str(existing_tags.get("checkpoint_sha256", ""))
+            == checkpoint_sha256
+        ) or (
+            str(getattr(existing, "run_id", "")) == run_id
+            and str(getattr(existing, "source", ""))
+            == checkpoint_artifact_uri
+        ):
+            version = str(existing.version)
+            break
+    if version is None:
+        registered = client.create_model_version(
+            name=REACTIVE_BEV_REGISTERED_MODEL,
+            source=checkpoint_artifact_uri,
+            run_id=run_id,
+        )
+        version = str(registered.version)
+
+    dataset = str(report["dataset"])
+    dataset_tag_prefix = re.sub(
+        r"[^a-z0-9]+",
+        "_",
+        dataset.lower(),
+    ).strip("_")
+    version_tags = {
+        "checkpoint_artifact_uri": checkpoint_artifact_uri,
+        "checkpoint_epoch": str(checkpoint_epoch),
+        "checkpoint_s3_uri": checkpoint_source_uri,
+        "checkpoint_sha256": checkpoint_sha256,
+        "evaluation_dataset": dataset,
+        "evaluation_report_sha256": report_sha256,
+        "evaluation_schema_version": str(
+            report["schema_version"]
+        ),
+        "model_role": "bev_segmentation_candidate",
+        (
+            f"{dataset_tag_prefix}_macro_average_precision"
+        ): str(
+            report["macro_average_precision_supported_classes"]
+        ),
+        (
+            f"{dataset_tag_prefix}_evaluation_sample_count"
+        ): str(report["sample_count"]),
+    }
+    if source_training_mlflow_run_id:
+        version_tags["source_training_mlflow_run_id"] = (
+            source_training_mlflow_run_id
+        )
+    for name, value in version_tags.items():
+        client.set_model_version_tag(
+            REACTIVE_BEV_REGISTERED_MODEL,
+            version,
+            name,
+            value,
+        )
+    return version
+
+
+def _log_reactive_bev_evaluation_to_mlflow(
+    *,
+    report: Mapping[str, Any],
+    report_path: Path,
+    report_sha256: str,
+    checkpoint_path: Path,
+    checkpoint_source_uri: str,
+    checkpoint_sha256: str,
+    checkpoint_epoch: int,
+    source_training_mlflow_run_id: str,
+) -> tuple[str, str]:
+    import mlflow
+    from mlflow.entities import Metric
+    from mlflow.tracking import MlflowClient
+
+    mlflow.set_tracking_uri(os.environ["MLFLOW_TRACKING_URI"])
+    experiment = mlflow.set_experiment(
+        REACTIVE_BEV_EVALUATION_MLFLOW_EXPERIMENT
+    )
+    client = MlflowClient()
+    evaluation_key = (
+        f"{checkpoint_sha256}:{report['dataset']}:{report_sha256}"
+    )
+    matches = client.search_runs(
+        experiment_ids=[experiment.experiment_id],
+        filter_string=(
+            "tags.reactive_bev_evaluation_key = "
+            f"'{evaluation_key}'"
+        ),
+        max_results=2,
+    )
+    if len(matches) > 1:
+        raise RuntimeError(
+            "multiple MLflow runs use one Reactive BEV evaluation key"
+        )
+    if matches:
+        run_id = matches[0].info.run_id
+        client.set_tag(run_id, "flyte_retry_reused", "true")
+    else:
+        run_name = (
+            f"bev-{str(report['dataset']).split('/')[-1]}-"
+            f"e{checkpoint_epoch}-{checkpoint_sha256[:12]}"
+        )
+        tags = {
+            "mlflow.runName": run_name,
+            "pipeline": REACTIVE_BEV_EVALUATION_MLFLOW_EXPERIMENT,
+            "reactive_bev_evaluation_key": evaluation_key,
+            "checkpoint_sha256": checkpoint_sha256,
+            "checkpoint_s3_uri": checkpoint_source_uri,
+            "evaluation_dataset": str(report["dataset"]),
+            "evaluation_report_sha256": report_sha256,
+            "task_status": "RUNNING",
+        }
+        if source_training_mlflow_run_id:
+            tags["source_training_mlflow_run_id"] = (
+                source_training_mlflow_run_id
+            )
+        run = client.create_run(
+            experiment_id=experiment.experiment_id,
+            start_time=int(time.time() * 1000),
+            tags=tags,
+        )
+        run_id = run.info.run_id
+        params = {
+            "data/dataset": report["dataset"],
+            "data/split": report["split"],
+            "eval/batch_size": report["evaluation_batch_size_counts"],
+            "eval/precision": report["evaluation_precision"],
+            "eval/probability_bins": report[
+                "training_probability_bins"
+            ],
+            "eval/sample_count": report["sample_count"],
+            "model/checkpoint_epoch": checkpoint_epoch,
+            "model/checkpoint_sha256": checkpoint_sha256,
+            "model/checkpoint_source_uri": checkpoint_source_uri,
+        }
+        for name, value in params.items():
+            client.log_param(run_id, name, str(value)[:500])
+
+    timestamp = int(time.time() * 1000)
+    metrics = [
+        Metric(
+            key=name,
+            value=value,
+            timestamp=timestamp,
+            step=checkpoint_epoch,
+        )
+        for name, value in _reactive_bev_evaluation_metrics(
+            report
+        ).items()
+    ]
+    for offset in range(0, len(metrics), 500):
+        client.log_batch(
+            run_id,
+            metrics=metrics[offset : offset + 500],
+        )
+    client.log_artifact(
+        run_id,
+        str(report_path),
+        artifact_path="evaluation",
+    )
+    client.log_artifact(
+        run_id,
+        str(checkpoint_path),
+        artifact_path="model",
+    )
+    checkpoint_artifact_uri = (
+        f"runs:/{run_id}/model/{checkpoint_path.name}"
+    )
+    version = _register_reactive_bev_model_version(
+        client,
+        run_id=run_id,
+        checkpoint_artifact_uri=checkpoint_artifact_uri,
+        checkpoint_source_uri=checkpoint_source_uri,
+        checkpoint_sha256=checkpoint_sha256,
+        checkpoint_epoch=checkpoint_epoch,
+        report=report,
+        report_sha256=report_sha256,
+        source_training_mlflow_run_id=(
+            source_training_mlflow_run_id
+        ),
+    )
+    client.set_tag(run_id, "registered_model_name", (
+        REACTIVE_BEV_REGISTERED_MODEL
+    ))
+    client.set_tag(run_id, "registered_model_version", version)
+    client.set_tag(run_id, "task_status", "FINISHED")
+    client.set_terminated(run_id, status="FINISHED")
+    return run_id, version
+
+
 def _run_reactive_stage_task(
     *,
     shards: List[FlyteDirectory],
@@ -557,7 +1164,7 @@ def _run_reactive_stage_task(
                     "auto-e2e-platform",
                 ),
             )
-    result = run_reactive_stage({
+    training_config = {
         "allow_bounded_bev_canary": allow_bounded_bev_canary,
         "allow_random_bevformer_init": allow_random_bevformer_init,
         "allow_single_worker_smoke": allow_single_worker_smoke,
@@ -611,7 +1218,27 @@ def _run_reactive_stage_task(
         "validation_sample_limit": validation_sample_limit,
         "weight_decay": weight_decay,
         "worker_cpus": _reactive_worker_cpus(num_workers),
-    })
+    }
+    mlflow_client, mlflow_run_id = _start_reactive_mlflow_run(
+        training_config,
+        execution_name=execution_name,
+        run_name=run_name,
+    )
+    try:
+        result = run_reactive_stage(training_config)
+    except Exception as error:
+        _mark_reactive_mlflow_failed(
+            mlflow_client,
+            mlflow_run_id,
+            error,
+            config=training_config,
+            run_name=run_name,
+        )
+        raise
+    result["tracking"] = {
+        "mlflow_experiment": REACTIVE_MLFLOW_EXPERIMENT,
+        "mlflow_run_id": mlflow_run_id,
+    }
     metadata_path = (
         Path("/tmp/reactive-ray")
         / run_name
@@ -621,6 +1248,12 @@ def _run_reactive_stage_task(
     metadata_path.write_text(
         json.dumps(result, indent=2, sort_keys=True) + "\n",
         encoding="ascii",
+    )
+    _log_reactive_mlflow_result(
+        mlflow_client,
+        mlflow_run_id,
+        result,
+        metadata_path=metadata_path,
     )
     metrics = result["metrics"]
     return ReactiveRayOutput(
@@ -1594,8 +2227,18 @@ def train_reactive_stage_ray_8(
 
 @task(
     container_image=TRAINING_IMAGE,
-    requests=Resources(cpu="8", mem="64Gi", gpu="1"),
-    limits=Resources(cpu="8", mem="64Gi", gpu="1"),
+    requests=Resources(
+        cpu="6",
+        mem="28Gi",
+        gpu="1",
+        ephemeral_storage="420Gi",
+    ),
+    limits=Resources(
+        cpu="6",
+        mem="28Gi",
+        gpu="1",
+        ephemeral_storage="420Gi",
+    ),
     retries=1,
     labels={
         "kueue.x-k8s.io/queue-name": "gpu-validation",
@@ -2040,10 +2683,93 @@ def evaluate_reactive_bev_checkpoint(
         / "report.json"
     )
     output.write_bytes(report_bytes)
+    report_sha256 = hashlib.sha256(report_bytes).hexdigest()
     return ReactiveBEVEvaluationOutput(
         report=FlyteFile(str(output)),
-        report_sha256=hashlib.sha256(report_bytes).hexdigest(),
+        report_sha256=report_sha256,
         checkpoint_sha256=checkpoint_sha256,
+        checkpoint_epoch=checkpoint_epoch,
+    )
+
+
+@task(
+    container_image=TRAINING_IMAGE,
+    requests=Resources(
+        cpu="2",
+        mem="4Gi",
+        ephemeral_storage="4Gi",
+    ),
+    limits=Resources(
+        cpu="2",
+        mem="4Gi",
+        ephemeral_storage="4Gi",
+    ),
+    retries=2,
+    environment={"MLFLOW_TRACKING_URI": MLFLOW_URI},
+)
+def publish_reactive_bev_evaluation(
+    checkpoint: FlyteFile,
+    report: FlyteFile,
+    report_sha256: str,
+    checkpoint_sha256: str,
+    checkpoint_epoch: int,
+    source_training_mlflow_run_id: str = "",
+) -> ReactiveBEVPublicationOutput:
+    """Persist one verified BEV report and checkpoint in MLflow."""
+    report_path = Path(report.download())
+    report_bytes = report_path.read_bytes()
+    actual_report_sha256 = hashlib.sha256(report_bytes).hexdigest()
+    if actual_report_sha256 != report_sha256:
+        raise ValueError(
+            "Reactive BEV report digest differs before MLflow publish"
+        )
+    try:
+        report_payload = json.loads(report_bytes)
+    except json.JSONDecodeError as error:
+        raise ValueError(
+            "Reactive BEV report is invalid JSON"
+        ) from error
+    if (
+        not isinstance(report_payload, dict)
+        or report_payload.get("evaluation_valid") is not True
+        or report_payload.get("checkpoint_sha256")
+        != checkpoint_sha256
+        or report_payload.get("checkpoint_epoch")
+        != checkpoint_epoch
+    ):
+        raise ValueError(
+            "Reactive BEV report identity differs before MLflow publish"
+        )
+
+    checkpoint_source_uri = _flyte_remote_uri(checkpoint)
+    checkpoint_path = Path(checkpoint.download())
+    checkpoint_hasher = hashlib.sha256()
+    with checkpoint_path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(8 * 1024 * 1024), b""):
+            checkpoint_hasher.update(chunk)
+    if checkpoint_hasher.hexdigest() != checkpoint_sha256:
+        raise ValueError(
+            "Reactive BEV checkpoint digest differs before MLflow publish"
+        )
+
+    mlflow_run_id, registered_model_version = (
+        _log_reactive_bev_evaluation_to_mlflow(
+            report=report_payload,
+            report_path=report_path,
+            report_sha256=report_sha256,
+            checkpoint_path=checkpoint_path,
+            checkpoint_source_uri=checkpoint_source_uri,
+            checkpoint_sha256=checkpoint_sha256,
+            checkpoint_epoch=checkpoint_epoch,
+            source_training_mlflow_run_id=(
+                source_training_mlflow_run_id
+            ),
+        )
+    )
+    return ReactiveBEVPublicationOutput(
+        mlflow_run_id=mlflow_run_id,
+        registered_model_name=REACTIVE_BEV_REGISTERED_MODEL,
+        registered_model_version=registered_model_version,
     )
 
 
@@ -2069,8 +2795,9 @@ def wf_evaluate_reactive_bev_checkpoint(
     batch_size: int = 1,
     num_loader_workers: int = 2,
     probability_bins: int = 1024,
-) -> ReactiveBEVEvaluationOutput:
-    return evaluate_reactive_bev_checkpoint(
+    source_training_mlflow_run_id: str = "",
+) -> ReactiveBEVEvaluationWorkflowOutput:
+    evaluation = evaluate_reactive_bev_checkpoint(
         checkpoint=checkpoint,
         shards=shards,
         dataset=dataset,
@@ -2080,6 +2807,27 @@ def wf_evaluate_reactive_bev_checkpoint(
         batch_size=batch_size,
         num_loader_workers=num_loader_workers,
         probability_bins=probability_bins,
+    )
+    publication = publish_reactive_bev_evaluation(
+        checkpoint=checkpoint,
+        report=evaluation.report,
+        report_sha256=evaluation.report_sha256,
+        checkpoint_sha256=evaluation.checkpoint_sha256,
+        checkpoint_epoch=evaluation.checkpoint_epoch,
+        source_training_mlflow_run_id=(
+            source_training_mlflow_run_id
+        ),
+    )
+    return ReactiveBEVEvaluationWorkflowOutput(
+        report=evaluation.report,
+        report_sha256=evaluation.report_sha256,
+        checkpoint_sha256=evaluation.checkpoint_sha256,
+        checkpoint_epoch=evaluation.checkpoint_epoch,
+        mlflow_run_id=publication.mlflow_run_id,
+        registered_model_name=publication.registered_model_name,
+        registered_model_version=(
+            publication.registered_model_version
+        ),
     )
 
 

@@ -69,6 +69,10 @@ aws codebuild start-build --project-name auto-e2e-platform-flyte-register \
   - `auto-e2e/il-training` — training loss, hyperparams
   - `auto-e2e/evaluation` — ADE, FDE, gate pass/fail
   - `auto-e2e/offline-rl` — IQL losses
+  - `reactive-training` — Ray training losses, validation metrics,
+    checkpoint lineage, and failure recovery
+  - `reactive-bev-evaluation` — standalone nuPlan or KITScenes BEV
+    validation reports for immutable Reactive checkpoints
 - Compare runs: select multiple runs → **Compare** button
 - Filter by `model/backbone`, `model/fusion_mode`, or `git_commit`
 
@@ -114,6 +118,16 @@ Each training run records:
 | **Metrics** (plotted as charts) | `train_loss` (per epoch), `ade`, `fde` |
 | **Artifacts** (downloadable) | `best.pt` (checkpoint), `config.yaml` |
 | **Model Registry** | Versioned under `auto-e2e-driving-policy` |
+
+Reactive Ray runs store their selected checkpoint URI and SHA-256 as tags.
+If training fails after an epoch or step checkpoint, the task recovers the
+latest `history.json` from Ray's S3 storage and records the completed epoch
+metrics before marking the MLflow run failed.
+
+Reactive BEV evaluation runs store the full report and checkpoint as MLflow
+artifacts, then register the immutable artifact under
+`auto-e2e-bev-segmentation`. The evaluation run links back to the source
+training run without changing the source run's status.
 
 ### Comparing Experiments
 
