@@ -414,6 +414,7 @@ def test_reactive_bev_evaluation_uses_validation_gpu_contract():
         "batch_size",
         "num_loader_workers",
         "probability_bins",
+        "validation_sample_limit",
     } == set(
         distributed_training.evaluate_reactive_bev_checkpoint
         .python_interface.inputs
@@ -458,6 +459,12 @@ def test_reactive_bev_evaluation_uses_validation_gpu_contract():
     assert resources.requests.gpu == "1"
     assert resources.requests.ephemeral_storage == "420Gi"
     assert resources.limits == resources.requests
+    buildspec = (
+        Path(distributed_training.__file__).parents[1]
+        / "buildspec-launch-reactive-bev-evaluation.yml"
+    ).read_text(encoding="utf-8")
+    assert 'VALIDATION_SAMPLE_LIMIT: "4096"' in buildspec
+    assert '"validation_sample_limit": int(' in buildspec
     assert set(
         distributed_training.ReactiveBEVEvaluationOutput.__annotations__
     ) == {
@@ -479,6 +486,28 @@ def test_reactive_bev_evaluation_uses_validation_gpu_contract():
         "registered_model_name",
         "registered_model_version",
     }
+
+
+def test_reactive_bev_evaluation_resolves_legacy_validation_sample_limit():
+    assert distributed_training._resolve_nuplan_validation_sample_limit(
+        {},
+        4096,
+    ) == (4096, "workflow_input_legacy_checkpoint")
+    assert distributed_training._resolve_nuplan_validation_sample_limit(
+        {"validation_sample_limit": 4096},
+        0,
+    ) == (4096, "checkpoint")
+    assert distributed_training._resolve_nuplan_validation_sample_limit(
+        {"validation_sample_limit": 4096},
+        4096,
+    ) == (4096, "checkpoint")
+    with pytest.raises(ValueError, match="set the workflow input"):
+        distributed_training._resolve_nuplan_validation_sample_limit({}, 0)
+    with pytest.raises(ValueError, match="differs from the checkpoint"):
+        distributed_training._resolve_nuplan_validation_sample_limit(
+            {"validation_sample_limit": 1024},
+            4096,
+        )
 
 
 def test_reactive_bev_evaluation_metrics_flatten_numeric_values():

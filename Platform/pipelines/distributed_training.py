@@ -74,6 +74,46 @@ BEV_CANARY_RARE_AP_LIFT_RELATIVE_REGRESSION_TOLERANCE = 0.1
 P5EN_SMOKE_MAX_RUNTIME = timedelta(minutes=30)
 
 
+def _resolve_nuplan_validation_sample_limit(
+    config: Mapping[str, Any],
+    requested_sample_limit: int,
+) -> tuple[int, str]:
+    """Resolve legacy checkpoint provenance from an explicit workflow input."""
+    if (
+        isinstance(requested_sample_limit, bool)
+        or not isinstance(requested_sample_limit, int)
+        or requested_sample_limit < 0
+    ):
+        raise ValueError(
+            "nuPlan evaluation validation_sample_limit is invalid"
+        )
+    checkpoint_sample_limit = config.get("validation_sample_limit")
+    if checkpoint_sample_limit is None:
+        if requested_sample_limit <= 0:
+            raise ValueError(
+                "nuPlan checkpoint lacks validation_sample_limit provenance; "
+                "set the workflow input from the source training execution"
+            )
+        return requested_sample_limit, "workflow_input_legacy_checkpoint"
+    if (
+        isinstance(checkpoint_sample_limit, bool)
+        or not isinstance(checkpoint_sample_limit, int)
+        or checkpoint_sample_limit <= 0
+    ):
+        raise ValueError(
+            "nuPlan checkpoint validation_sample_limit is invalid"
+        )
+    if (
+        requested_sample_limit > 0
+        and requested_sample_limit != checkpoint_sample_limit
+    ):
+        raise ValueError(
+            "nuPlan evaluation validation_sample_limit differs from the "
+            "checkpoint"
+        )
+    return checkpoint_sample_limit, "checkpoint"
+
+
 class RaySmokeOutput(NamedTuple):
     report: FlyteFile
 
@@ -2256,6 +2296,7 @@ def evaluate_reactive_bev_checkpoint(
     batch_size: int = 1,
     num_loader_workers: int = 2,
     probability_bins: int = 1024,
+    validation_sample_limit: int = 0,
 ) -> ReactiveBEVEvaluationOutput:
     """Evaluate one Reactive checkpoint with exact T8 class supervision."""
     import hashlib
@@ -2434,15 +2475,13 @@ def evaluate_reactive_bev_checkpoint(
             raise ValueError(
                 "nuPlan evaluation val_fraction differs from the checkpoint"
             )
-        if "validation_sample_limit" not in config:
-            raise ValueError(
-                "nuPlan checkpoint lacks validation_sample_limit provenance"
-            )
-        validation_sample_limit = int(config["validation_sample_limit"])
-        if validation_sample_limit <= 0:
-            raise ValueError(
-                "nuPlan checkpoint validation_sample_limit is invalid"
-            )
+        (
+            resolved_validation_sample_limit,
+            validation_sample_limit_source,
+        ) = _resolve_nuplan_validation_sample_limit(
+            config,
+            validation_sample_limit,
+        )
         world_size = int(config.get("distributed_world_size", 0))
         plan = build_reactive_dataset_plan(
             tuple(source_directories),
@@ -2488,7 +2527,7 @@ def evaluate_reactive_bev_checkpoint(
             select_distributed_bev_validation_sample_uids(
                 records_by_rank,
                 val_fraction=val_fraction,
-                sample_limit=validation_sample_limit,
+                sample_limit=resolved_validation_sample_limit,
             )
         )
         calibration_digest = hashlib.sha256(
@@ -2538,6 +2577,10 @@ def evaluate_reactive_bev_checkpoint(
         split_contract = {
             "role": "validation_holdout",
             "validation_fraction": val_fraction,
+            "validation_sample_limit": resolved_validation_sample_limit,
+            "validation_sample_limit_source": (
+                validation_sample_limit_source
+            ),
             "calibration_sample_count": len(calibration_uids),
             "calibration_sample_uid_sha256": calibration_digest,
             "calibration_split_group_count": len(
@@ -2795,6 +2838,7 @@ def wf_evaluate_reactive_bev_checkpoint(
     batch_size: int = 1,
     num_loader_workers: int = 2,
     probability_bins: int = 1024,
+    validation_sample_limit: int = 0,
     source_training_mlflow_run_id: str = "",
 ) -> ReactiveBEVEvaluationWorkflowOutput:
     evaluation = evaluate_reactive_bev_checkpoint(
@@ -2807,6 +2851,7 @@ def wf_evaluate_reactive_bev_checkpoint(
         batch_size=batch_size,
         num_loader_workers=num_loader_workers,
         probability_bins=probability_bins,
+        validation_sample_limit=validation_sample_limit,
     )
     publication = publish_reactive_bev_evaluation(
         checkpoint=checkpoint,

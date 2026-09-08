@@ -16,6 +16,7 @@ env:
     BATCH_SIZE: "1"
     NUM_LOADER_WORKERS: "2"
     PROBABILITY_BINS: "1024"
+    VALIDATION_SAMPLE_LIMIT: "4096"
     WAIT_FOR_COMPLETION: "false"
     WAIT_TIMEOUT_SECONDS: "172800"
 
@@ -36,6 +37,7 @@ phases:
       - printf '%s' "${BATCH_SIZE}" | grep -Eq '^[1-4]$'
       - printf '%s' "${NUM_LOADER_WORKERS}" | grep -Eq '^[0-4]$'
       - printf '%s' "${PROBABILITY_BINS}" | grep -Eq '^[0-9]+$'
+      - printf '%s' "${VALIDATION_SAMPLE_LIMIT}" | grep -Eq '^[1-9][0-9]*$'
       - printf '%s' "${WAIT_FOR_COMPLETION}" | grep -Eq '^(true|false)$'
       - printf '%s' "${WAIT_TIMEOUT_SECONDS}" | grep -Eq '^[1-9][0-9]*$'
       - >
@@ -122,6 +124,9 @@ phases:
             ),
             "probability_bins": int(
                 os.environ["PROBABILITY_BINS"]
+            ),
+            "validation_sample_limit": int(
+                os.environ["VALIDATION_SAMPLE_LIMIT"]
             ),
             "source_training_mlflow_run_id": os.environ[
                 "SOURCE_TRAINING_MLFLOW_RUN_ID"
