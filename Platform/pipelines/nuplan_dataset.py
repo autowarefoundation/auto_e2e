@@ -1037,6 +1037,8 @@ def pack_nuplan_snapshot_reactive_dataset(
         packed.get("front_camera_index") != REACTIVE_FRONT_CAMERA_INDEX
         or packed.get("front_camera_image_size")
         != REACTIVE_FRONT_CAMERA_IMAGE_SIZE
+        or packed.get("front_camera_fpn_image_size")
+        != image_size
     ):
         raise ValueError(
             "nuPlan packer did not emit the front camera contract"

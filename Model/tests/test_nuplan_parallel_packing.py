@@ -489,6 +489,10 @@ def test_nuplan_partition_merge_preserves_current_manifest(
         merged["front_camera_image_size"]
         == REACTIVE_FRONT_CAMERA_IMAGE_SIZE
     )
+    assert (
+        merged["front_camera_fpn_image_size"]
+        == REACTIVE_CAMERA_IMAGE_SIZE
+    )
     assert merged["packing_workers"] == 2
     assert merged["total_samples"] == 4
     assert merged["bev_segmentation_count"] == 4

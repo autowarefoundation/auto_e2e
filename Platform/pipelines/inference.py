@@ -108,6 +108,16 @@ def _planner(model: torch.nn.Module) -> torch.nn.Module:
         ) from exc
 
 
+def create_stateful_camera_fpn_cache(model: torch.nn.Module) -> Any:
+    """Create one explicit per-stream BEVFormer T8 inference cache."""
+    factory = getattr(model, "create_stateful_camera_fpn_cache", None)
+    if not callable(factory):
+        raise ValueError(
+            "model does not support a stateful camera FPN cache"
+        )
+    return factory()
+
+
 def predict_control(
     model: torch.nn.Module,
     batch: Mapping[str, Any],
@@ -118,8 +128,18 @@ def predict_control(
     base_seed: int = 0,
     projection: Any = None,
     geometry_type: str = "pseudo",
+    camera_fpn_cache: Any = None,
+    camera_fpn_stream_ids: Sequence[str] | None = None,
+    camera_fpn_timestamps_us: Any = None,
 ) -> np.ndarray:
-    """Return raw ``[B,T,S]`` acceleration/curvature controls for one batch."""
+    """Return raw ``[B,T,S]`` acceleration/curvature controls for one batch.
+
+    Stateful callers must provide stable stream IDs across consecutive calls.
+    Changing an ID marks a scene transition and resets that cache lane.
+    Source timestamps must also be explicit and exactly 500 ms apart. Do not
+    synthesize timestamps across dropped source frames.
+    """
+    model.eval()
     planner = _planner(model)
     num_timesteps = int(planner.num_timesteps)
     num_signals = int(planner.num_signals)
@@ -176,12 +196,74 @@ def predict_control(
     if hasattr(model, "reset_visual_history"):
         model.reset_visual_history()
 
+    front_camera_fpn_tile = None
+    front_camera_fpn_available = None
+    if camera_fpn_cache is not None:
+        if camera_fpn_stream_ids is None:
+            raise ValueError(
+                "stateful camera FPN cache requires explicit stream IDs"
+            )
+        if isinstance(camera_fpn_stream_ids, str):
+            normalized_stream_ids = (camera_fpn_stream_ids,)
+        else:
+            normalized_stream_ids = tuple(camera_fpn_stream_ids)
+        if (
+            len(normalized_stream_ids) != batch_size
+            or any(
+                not isinstance(value, str) or not value
+                for value in normalized_stream_ids
+            )
+        ):
+            raise ValueError(
+                "stateful camera FPN cache requires one explicit stream ID "
+                "per sample"
+            )
+        camera_fpn_stream_ids = normalized_stream_ids
+        if camera_fpn_timestamps_us is None:
+            raise ValueError(
+                "stateful camera FPN cache requires explicit source timestamps"
+            )
+        front_camera_fpn_tile = batch.get("front_camera_fpn_tile")
+        front_camera_fpn_available = batch.get(
+            "front_camera_fpn_available"
+        )
+        front_camera_tile = batch.get("front_camera_tile")
+        if (front_camera_tile is None) != (
+            front_camera_fpn_tile is None
+        ):
+            raise ValueError(
+                "stateful camera FPN cache requires native and exact "
+                "base-resolution Front tiles together"
+            )
+        if front_camera_tile is not None:
+            if front_camera_fpn_available is None:
+                raise ValueError(
+                    "stateful camera FPN cache requires Front companion "
+                    "availability"
+                )
+            available = torch.as_tensor(
+                front_camera_fpn_available,
+                dtype=torch.bool,
+            ).reshape(-1)
+            if available.numel() != batch_size or not bool(
+                available.all().item()
+            ):
+                raise ValueError(
+                    "stateful camera FPN cache requires an exact Front "
+                    "companion for every sample"
+                )
+
     kwargs: dict[str, Any] = {
         "projection": projection,
         "geometry_type": geometry_type,
         "camera_history_tiles": camera_history_tiles,
         "history_projections": history_projections,
+        "camera_fpn_cache": camera_fpn_cache,
+        "camera_fpn_stream_ids": camera_fpn_stream_ids,
+        "camera_fpn_timestamps_us": camera_fpn_timestamps_us,
         "front_camera_tile": batch.get("front_camera_tile"),
+        "front_camera_fpn_tile": front_camera_fpn_tile,
+        "front_camera_fpn_available": front_camera_fpn_available,
         "front_projection": front_projection,
         "mode": "infer",
         "initial_noise": initial_noise,

@@ -91,6 +91,63 @@ class FeatureFusion(nn.Module):
             fusion_mode, num_views, embed_dim, **view_kwargs
         )
 
+    def build_bevformer_pyramid(
+        self,
+        features,
+    ) -> tuple[torch.Tensor, ...]:
+        """Build the cacheable FPN representation for BEVFormer cameras."""
+        if self.architecture not in {"bevformer_v2_t1", "bevformer_v2_t8"}:
+            raise ValueError("camera FPN cache requires BEVFormer fusion")
+        if self.feature_pyramid is None:
+            raise RuntimeError("BEVFormer feature pyramid is missing")
+        if features is None:
+            raise ValueError(
+                "BEVFormer fusion requires base-resolution camera features"
+            )
+        return tuple(self.feature_pyramid(features))
+
+    def fuse_bevformer_pyramid(
+        self,
+        pyramid,
+        B,
+        V,
+        *,
+        projection=None,
+        geometry_type=None,
+        image_transform=None,
+    ):
+        """Project one cached multi-view FPN into the current BEV frame."""
+        if self.architecture not in {"bevformer_v2_t1", "bevformer_v2_t8"}:
+            raise ValueError("camera FPN cache requires BEVFormer fusion")
+        return self.view_fusion(
+            pyramid,
+            B,
+            V,
+            projection=projection,
+            geometry_type=geometry_type,
+            image_transform=image_transform,
+        )
+
+    def fuse_front_bevformer_pyramid(
+        self,
+        image_bev,
+        front_pyramid,
+        *,
+        projection=None,
+        geometry_type=None,
+        image_transform=None,
+    ):
+        """Fuse the current high-resolution front FPN into an image BEV."""
+        if self.architecture not in {"bevformer_v2_t1", "bevformer_v2_t8"}:
+            raise ValueError("front camera FPN requires BEVFormer fusion")
+        return self.view_fusion.fuse_front_camera(
+            image_bev,
+            front_pyramid,
+            projection=projection,
+            geometry_type=geometry_type,
+            image_transform=image_transform,
+        )
+
     def forward(
         self,
         features,
@@ -102,17 +159,12 @@ class FeatureFusion(nn.Module):
         front_features=None,
         front_projection=None,
         front_image_transform=None,
+        return_base_pyramid=False,
     ):
         # features: list of 4 multi-scale feature maps from backbone (channels-first)
         if self.architecture in {"bevformer_v2_t1", "bevformer_v2_t8"}:
-            if self.feature_pyramid is None:
-                raise RuntimeError("BEVFormer feature pyramid is missing")
-            if features is None:
-                raise ValueError(
-                    "BEVFormer fusion requires base-resolution camera features"
-                )
-            pyramid = self.feature_pyramid(features)
-            image_bev = self.view_fusion(
+            pyramid = self.build_bevformer_pyramid(features)
+            image_bev = self.fuse_bevformer_pyramid(
                 pyramid,
                 B,
                 V,
@@ -121,14 +173,24 @@ class FeatureFusion(nn.Module):
                 image_transform=image_transform,
             )
             if front_features is None:
-                return image_bev
-            native_front_pyramid = self.feature_pyramid(front_features)
-            return self.view_fusion.fuse_front_camera(
-                image_bev,
-                native_front_pyramid,
-                projection=front_projection,
-                geometry_type=geometry_type,
-                image_transform=front_image_transform,
+                output = image_bev
+            else:
+                native_front_pyramid = self.build_bevformer_pyramid(
+                    front_features
+                )
+                output = self.fuse_front_bevformer_pyramid(
+                    image_bev,
+                    native_front_pyramid,
+                    projection=front_projection,
+                    geometry_type=geometry_type,
+                    image_transform=front_image_transform,
+                )
+            if return_base_pyramid:
+                return output, pyramid
+            return output
+        if return_base_pyramid:
+            raise ValueError(
+                "base camera FPN output requires BEVFormer fusion"
             )
         if len(features) != len(self.lateral_projections):
             raise ValueError(

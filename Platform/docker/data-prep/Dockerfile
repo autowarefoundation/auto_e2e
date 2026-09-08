@@ -8,13 +8,9 @@ WORKDIR /workspace
 # CPU-only torch first (lerobot-dataset omits torch, so ours stays)
 RUN pip install --no-cache-dir torch==2.4.1 torchvision==0.19.1 --index-url https://download.pytorch.org/whl/cpu
 
-# Install flytekit FIRST and PINNED, so its transitive deps (botocore/s3transfer,
-# adlfs, gcsfs, …) are resolved by ONE package's constraints. An unpinned
-# "flytekit>=1.14,<2" mixed with the rest let pip try the newest boto3/adlfs and
-# backtrack for many minutes (downloading metadata for dozens of releases in
-# descending order) before landing on a compatible set. Pinning flytekit to a
-# concrete 1.14.x makes the resolve deterministic and fast.
-RUN pip install --no-cache-dir "flytekit==1.14.9"
+# Keep task-definition semantics identical to registration and training.
+# In particular, repository tasks use labels, which requires Flytekit 1.16.
+RUN pip install --no-cache-dir "flytekit==1.16.24"
 
 # KITScenes API + the matching vendored Python 3.12 Lanelet2 wheel. Pinning the
 # SDK commit keeps the official scene split and on-disk parser contract aligned

@@ -96,6 +96,41 @@ class BEVSegmentationHead(nn.Module):
             )
         return logits
 
+    def initialize_output_bias(
+        self,
+        class_logit_bias: torch.Tensor | list[float] | tuple[float, ...],
+        *,
+        classifier_weight_std: float = 0.01,
+    ) -> None:
+        """Initialize the classifier near a reviewed training-set prior."""
+        classifier = self.decoder[-1]
+        if not isinstance(classifier, nn.Conv2d) or classifier.bias is None:
+            raise RuntimeError("BEV segmentation classifier bias is missing")
+        if (
+            not torch.isfinite(torch.tensor(classifier_weight_std))
+            or classifier_weight_std <= 0.0
+        ):
+            raise ValueError("classifier_weight_std must be finite and positive")
+        bias = torch.as_tensor(
+            class_logit_bias,
+            dtype=classifier.bias.dtype,
+            device=classifier.bias.device,
+        )
+        if (
+            bias.shape != classifier.bias.shape
+            or not torch.isfinite(bias).all()
+        ):
+            raise ValueError(
+                "class_logit_bias must be finite and match BEV classes"
+            )
+        with torch.no_grad():
+            nn.init.normal_(
+                classifier.weight,
+                mean=0.0,
+                std=float(classifier_weight_std),
+            )
+            classifier.bias.copy_(bias)
+
 
 class RouteReconstructionHead(nn.Module):
     """Decode route logits from the gated navigation contribution."""

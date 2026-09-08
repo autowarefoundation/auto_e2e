@@ -32,7 +32,7 @@ env:
 phases:
   install:
     commands:
-      - pip install -q flytekit==1.14.9 numpy torch kubernetes --extra-index-url https://download.pytorch.org/whl/cpu
+      - pip install -q flytekit==1.16.24 numpy torch kubernetes --extra-index-url https://download.pytorch.org/whl/cpu
   pre_build:
     commands:
       - test -n "${IMAGE_TAG}"

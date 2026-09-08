@@ -12,10 +12,13 @@ intrinsics scaled to match the backbone's actual resize/crop transform.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+
 import numpy as np
 import torch
 from kitscenes.sensors import SensorDataLoader
 from PIL import Image
+from scipy.spatial.transform import Rotation
 from torchvision.transforms import Compose
 
 # Shared, dataset-agnostic intrinsic scaling (re-exported for backward compat).
@@ -41,6 +44,67 @@ CAMERA_NAMES: list[str] = [
 NUM_VIEWS = len(CAMERA_NAMES)
 CAMERA_SLOTS = CANONICAL_SIX_CAMERA_SLOTS
 CAMERA_SLOT_BY_NAME = dict(zip(CAMERA_NAMES, CAMERA_SLOTS))
+
+
+def _target_hw(
+    image_size: int | tuple[int, int] | None,
+) -> tuple[int, int] | None:
+    if isinstance(image_size, int):
+        return (image_size, image_size)
+    return image_size
+
+
+def _scaled_intrinsic(
+    loader: SensorDataLoader,
+    camera_name: str,
+    *,
+    transform: Compose | None,
+    target_hw: tuple[int, int] | None,
+) -> tuple[np.ndarray, np.ndarray]:
+    calib = loader.get_camera_calibration(camera_name)
+    source_wh = calib.image_size
+    if source_wh is None:
+        source_wh = loader.get_camera_image_size(
+            camera_name,
+            frame_idx=0,
+        )
+    if target_hw is not None:
+        target_h, target_w = target_hw
+        source_w, source_h = source_wh
+        intrinsic = calib.intrinsic.copy().astype(np.float64)
+        intrinsic[0, :] *= target_w / source_w
+        intrinsic[1, :] *= target_h / source_h
+    else:
+        assert transform is not None
+        intrinsic = scale_intrinsic(
+            calib.intrinsic,
+            source_wh,
+            transform,
+        )
+    return intrinsic, np.asarray(calib.extrinsic, dtype=np.float64)
+
+
+def _pose_matrix(pose: object) -> np.ndarray:
+    translation = np.asarray(
+        getattr(pose, "translation"),
+        dtype=np.float64,
+    )
+    rotation = np.asarray(
+        getattr(pose, "rotation"),
+        dtype=np.float64,
+    )
+    if (
+        translation.shape != (3,)
+        or rotation.shape != (4,)
+        or not np.isfinite(translation).all()
+        or not np.isfinite(rotation).all()
+    ):
+        raise ValueError("KITScenes ego pose is invalid")
+    matrix = np.eye(4, dtype=np.float64)
+    matrix[:3, :3] = Rotation.from_quat(rotation).as_matrix()
+    matrix[:3, 3] = translation
+    return matrix
+
 
 def compute_camera_projection_matrices(
     loader: SensorDataLoader,
@@ -70,37 +134,86 @@ def compute_camera_projection_matrices(
     if (transform is None) == (image_size is None):
         raise ValueError("provide exactly one of transform or image_size")
 
-    target_hw: tuple[int, int] | None
-    if isinstance(image_size, int):
-        target_hw = (image_size, image_size)
-    else:
-        target_hw = image_size
+    target_hw = _target_hw(image_size)
  
     matrices = []
     for cam_name in camera_names:
-        calib = loader.get_camera_calibration(cam_name)
- 
-        source_wh = calib.image_size
-        if source_wh is None:
-            source_wh = loader.get_camera_image_size(cam_name, frame_idx=0)
-        if target_hw is not None:
-            target_h, target_w = target_hw
-            source_w, source_h = source_wh
-            K_scaled = calib.intrinsic.copy().astype(np.float64)
-            K_scaled[0, :] *= target_w / source_w
-            K_scaled[1, :] *= target_h / source_h
-        else:
-            assert transform is not None
-            K_scaled = scale_intrinsic(
-                calib.intrinsic, source_wh, transform
-            )
- 
-        # invert calib.extrinsic to get T_ref_to_cam.
-        T_ref_to_cam = np.linalg.inv(calib.extrinsic)   # (4, 4)
-        P = K_scaled @ T_ref_to_cam[:3, :]              # (3, 4)
+        intrinsic, camera_to_reference = _scaled_intrinsic(
+            loader,
+            cam_name,
+            transform=transform,
+            target_hw=target_hw,
+        )
+        reference_to_camera = np.linalg.inv(camera_to_reference)
+        P = intrinsic @ reference_to_camera[:3, :]
         matrices.append(P)
  
     return torch.tensor(np.stack(matrices, axis=0), dtype=torch.float32)  # (V, 3, 4)
+
+
+def compute_temporal_camera_projection_matrices(
+    loader: SensorDataLoader,
+    poses: Sequence[object],
+    *,
+    reference_frame_idx: int,
+    history_frame_indices: Sequence[int],
+    camera_names: list[str] | None = None,
+    image_size: int | tuple[int, int],
+) -> torch.Tensor:
+    """Map current reference-frame points into historical camera images."""
+    if camera_names is None:
+        camera_names = CAMERA_NAMES
+    if not history_frame_indices:
+        raise ValueError("history_frame_indices must not be empty")
+    if not 0 <= reference_frame_idx < len(poses):
+        raise IndexError("reference_frame_idx leaves the pose sequence")
+    typed_history = [int(index) for index in history_frame_indices]
+    if any(
+        index < 0 or index >= len(poses)
+        for index in typed_history
+    ):
+        raise IndexError("history frame leaves the pose sequence")
+    if typed_history != sorted(typed_history) or any(
+        left >= right
+        for left, right in zip(typed_history, typed_history[1:])
+    ):
+        raise ValueError("history frames must be strictly increasing")
+    if typed_history[-1] >= reference_frame_idx:
+        raise ValueError("history frames must precede the reference frame")
+
+    target_hw = _target_hw(image_size)
+    current_global_from_reference = _pose_matrix(
+        poses[reference_frame_idx]
+    )
+    camera_contracts = [
+        _scaled_intrinsic(
+            loader,
+            camera_name,
+            transform=None,
+            target_hw=target_hw,
+        )
+        for camera_name in camera_names
+    ]
+    frame_matrices = []
+    for history_index in typed_history:
+        history_reference_from_current_reference = (
+            np.linalg.inv(_pose_matrix(poses[history_index]))
+            @ current_global_from_reference
+        )
+        camera_matrices = []
+        for intrinsic, camera_to_reference in camera_contracts:
+            camera_from_current_reference = (
+                np.linalg.inv(camera_to_reference)
+                @ history_reference_from_current_reference
+            )
+            camera_matrices.append(
+                intrinsic @ camera_from_current_reference[:3, :]
+            )
+        frame_matrices.append(np.stack(camera_matrices))
+    matrices = np.stack(frame_matrices).astype(np.float32)
+    if not np.isfinite(matrices).all():
+        raise ValueError("KITScenes temporal projection is non-finite")
+    return torch.from_numpy(matrices)
 
 
 def load_camera_frame(

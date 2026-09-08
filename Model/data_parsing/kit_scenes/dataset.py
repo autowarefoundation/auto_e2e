@@ -35,6 +35,7 @@ from .camera import (
     CAMERA_NAMES,
     CAMERA_SLOT_BY_NAME,
     compute_camera_projection_matrices,
+    compute_temporal_camera_projection_matrices,
     load_camera_frame,
 )
 from .egomotion import (
@@ -51,6 +52,11 @@ from .temporal_contract import (
     KITSCENES_BENCHMARK_HISTORY_STEPS,
     KITSCENES_TRAINING_FUTURE_STEPS,
     KITSCENES_TRAINING_HISTORY_STEPS,
+)
+from reactive_training_contracts import (
+    REACTIVE_BEVFORMER_FRAME_INTERVAL_US,
+    REACTIVE_BEVFORMER_FRAME_OFFSETS,
+    REACTIVE_BEVFORMER_HISTORY_FRAMES,
 )
 
 logger = logging.getLogger(__name__)
@@ -199,6 +205,7 @@ class KitScenesDataset(Dataset):
             )
 
         self._scene_egomotion: dict[str, np.ndarray] = {}
+        self._scene_poses: dict[str, tuple[Any, ...]] = {}
         self._scene_positions_local: dict[str, np.ndarray] = {}
         self._scene_latlon: dict[str, np.ndarray] = {}
         self._scene_yaws: dict[str, np.ndarray] = {}
@@ -275,6 +282,7 @@ class KitScenesDataset(Dataset):
         )
 
         self._scene_egomotion[scene_id] = egomotion
+        self._scene_poses[scene_id] = poses[:usable]
         self._scene_positions_local[scene_id] = positions_local
         self._scene_latlon[scene_id] = _utm32_to_wgs84(positions_utm)
         self._scene_yaws[scene_id] = yaws
@@ -368,6 +376,122 @@ class KitScenesDataset(Dataset):
                 )
             rows.append((scene_id, row))
         return rows
+
+    def bevformer_history_rows(
+        self,
+        idx: int,
+    ) -> list[tuple[str, int]]:
+        """Return seven 0.5-second history rows in oldest-to-newest order."""
+        scene_id, frame_idx = self._samples[idx]
+        row_stride = round(
+            (REACTIVE_BEVFORMER_FRAME_INTERVAL_US / 1_000_000)
+            * self._source_hz
+        )
+        if row_stride <= 0 or not np.isclose(
+            row_stride / self._source_hz,
+            REACTIVE_BEVFORMER_FRAME_INTERVAL_US / 1_000_000,
+            rtol=0.0,
+            atol=1e-9,
+        ):
+            raise ValueError(
+                "KITScenes source frequency cannot represent T8 interval"
+            )
+        rows = [
+            frame_idx + offset * row_stride
+            for offset in REACTIVE_BEVFORMER_FRAME_OFFSETS[:-1]
+        ]
+        if (
+            len(rows) != REACTIVE_BEVFORMER_HISTORY_FRAMES
+            or rows != sorted(rows)
+            or rows[-1] >= frame_idx
+            or rows[0] < 0
+        ):
+            raise IndexError("KITScenes T8 history leaves the scene")
+        timestamps = self._scene_timestamps_ns[scene_id]
+        reference_timestamp = int(timestamps[frame_idx])
+        maximum_error_ns = 0
+        for offset, row in zip(
+            REACTIVE_BEVFORMER_FRAME_OFFSETS[:-1],
+            rows,
+            strict=True,
+        ):
+            expected = (
+                reference_timestamp
+                + offset * REACTIVE_BEVFORMER_FRAME_INTERVAL_US * 1000
+            )
+            maximum_error_ns = max(
+                maximum_error_ns,
+                abs(int(timestamps[row]) - expected),
+            )
+        if maximum_error_ns > 50_000_000:
+            raise ValueError(
+                "KITScenes T8 history timestamp error exceeds 50 ms"
+            )
+        return [(scene_id, row) for row in rows]
+
+    def bevformer_history_frame_ids(
+        self,
+        idx: int,
+    ) -> list[list[str]]:
+        """Return shared-pool frame IDs for the seven T8 history rows."""
+        return [
+            [
+                f"kitscenes-{UID_SCHEMA_VERSION}-{scene_id}-"
+                f"r{row:06d}-c{view}"
+                for view in range(len(self.camera_names))
+            ]
+            for scene_id, row in self.bevformer_history_rows(idx)
+        ]
+
+    def reactive_calibration_for(
+        self,
+        idx: int,
+        *,
+        image_size: int,
+    ) -> dict[str, object]:
+        """Return current and current-ego-aligned T8 camera projections."""
+        scene_id, frame_idx = self._samples[idx]
+        history_rows = self.bevformer_history_rows(idx)
+        history_indices = [row for _, row in history_rows]
+        current_projection = (
+            self._scene_camera_params[scene_id]
+            if image_size == self.image_size
+            else compute_camera_projection_matrices(
+                self._sdk.get_sensor_loader(scene_id),
+                camera_names=self.camera_names,
+                image_size=image_size,
+            )
+        )
+        history_projection = (
+            compute_temporal_camera_projection_matrices(
+                self._sdk.get_sensor_loader(scene_id),
+                self._scene_poses[scene_id],
+                reference_frame_idx=frame_idx,
+                history_frame_indices=history_indices,
+                camera_names=self.camera_names,
+                image_size=image_size,
+            )
+        )
+        return {
+            "dataset": "KIT-MRT/KITScenes-Multimodal",
+            "geometry_type": "pinhole",
+            "image_size": image_size,
+            "projection": {
+                "matrix": current_projection.tolist(),
+                "type": "pinhole",
+            },
+            "history_projection": {
+                "matrix": history_projection.tolist(),
+                "reference_frame": "current_ego",
+                "type": "pinhole",
+            },
+            "temporal_frame_interval_us": (
+                REACTIVE_BEVFORMER_FRAME_INTERVAL_US
+            ),
+            "temporal_frame_offsets": list(
+                REACTIVE_BEVFORMER_FRAME_OFFSETS
+            ),
+        }
 
     def egomotion_for(self, idx: int) -> tuple[torch.Tensor, torch.Tensor]:
         ego_history, trajectory, _, _ = self.numeric_for(idx)

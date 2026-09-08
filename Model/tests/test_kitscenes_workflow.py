@@ -678,7 +678,7 @@ def test_navigation_contracts_invalidate_old_pack_caches():
     assert workflows.LABEL_CACHE_VERSION == "label-v3-v1-v2"
     assert (
         workflows.PACK_CACHE_VERSION
-        == "pack-v3-v1-v10-v6-camera512"
+        == "pack-v3-v1-v12-v6-camera512"
     )
 
 
@@ -724,9 +724,9 @@ def test_row_decode_initializer_matches_worker_abi():
         in source
     )
     assert (
-        '            "train",\n'
+        "            source_split,\n"
         "            source_revision,\n"
-        "            False,\n"
+        "            benchmark_protocol,\n"
         "        )"
     ) in source
 
@@ -943,12 +943,7 @@ def test_loader_wiring_avoids_training_peek_and_bounds_eval_prefetch():
 def test_remote_registration_buildspecs_pin_runtime_contracts(buildspec_name):
     buildspec = (_REPO_ROOT / "Platform" / buildspec_name).read_text()
 
-    expected_flytekit = (
-        "flytekit==1.16.24"
-        if buildspec_name == "buildspec-register.yml"
-        else "flytekit==1.14.9"
-    )
-    assert expected_flytekit in buildspec
+    assert "flytekit==1.16.24" in buildspec
     assert (
         'export PYTHONPATH="${CODEBUILD_SRC_DIR}/Model:'
         '${CODEBUILD_SRC_DIR}:${PYTHONPATH:-}"'
@@ -963,6 +958,33 @@ def test_remote_registration_buildspecs_pin_runtime_contracts(buildspec_name):
     ):
         assert variable in buildspec
     assert '--image "${AUTO_E2E_TRAINING_IMAGE}"' in buildspec
+
+
+@pytest.mark.parametrize(
+    "buildspec_name",
+    (
+        "buildspec-register.yml",
+        "buildspec-register-distributed.yml",
+    ),
+)
+def test_registration_buildspecs_disable_fast_source_copy(buildspec_name):
+    buildspec = (_REPO_ROOT / "Platform" / buildspec_name).read_text()
+
+    assert "--copy none" in buildspec
+
+
+def test_all_flyte_runtime_installations_pin_the_shared_sdk_version():
+    candidates = tuple((_REPO_ROOT / "Platform").glob("buildspec*.yml")) + tuple(
+        (_REPO_ROOT / "Platform" / "docker").glob("*/Dockerfile")
+    )
+    runtime_files = []
+    for path in candidates:
+        source = path.read_text(encoding="utf-8")
+        if "flytekit" in source:
+            runtime_files.append(path)
+            assert "flytekit==1.16.24" in source, path
+            assert "flytekit==1.14.9" not in source, path
+    assert runtime_files
 
 
 def test_recovery_launcher_requires_audited_artifacts_and_skips_source_stages():

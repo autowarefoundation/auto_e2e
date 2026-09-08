@@ -399,7 +399,8 @@ cluster_resource_manager:
             - projectQuotaMemory:
                 value: "8Ti"
             - projectQuotaGpu:
-                value: "10"
+                # Two p5 Capacity Block nodes plus two retained g6 validation GPUs.
+                value: "18"
             - defaultIamRole:
                 value: "arn:aws:iam::{{ .Values.userSettings.accountNumber }}:role/flyte-user-role"
 

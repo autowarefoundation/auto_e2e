@@ -3,7 +3,7 @@ from typing import Any, Dict, Optional
 import torch
 import torch.nn as nn
 
-from .reactive_e2e import ReactiveE2E
+from .reactive_e2e import ReactiveE2E, StatefulCameraFPNCache
 from .world_action_model import RollingHistoryBuffer, WorldActionModel
 
 # Egomotion history is 64 timesteps x [speed, acceleration, yaw_rate, curvature]
@@ -169,19 +169,30 @@ class AutoE2E(nn.Module):
             self.visual_history_buffer = RollingHistoryBuffer(
                 history_len=self.visual_history_buffer.history_len)
 
+    def create_stateful_camera_fpn_cache(
+        self,
+    ) -> StatefulCameraFPNCache:
+        """Create an inference cache for one BEVFormer T8 camera stream."""
+        return self.Reactive_E2E.create_stateful_camera_fpn_cache()
 
     def forward(self, camera_tiles, map_context, visual_history,
                 egomotion_history, route_mask=None, map_valid=None,
                 route_valid=None,
                 projection=None, geometry_type=None, image_transform=None,
                 camera_history_tiles=None, history_projections=None,
-                front_camera_tile=None, front_projection=None,
+                camera_fpn_cache=None,
+                camera_fpn_stream_ids=None,
+                camera_fpn_timestamps_us=None,
+                front_camera_tile=None, front_camera_fpn_tile=None,
+                front_camera_fpn_available=None,
+                front_projection=None,
                 front_image_transform=None,
                 mode="train", trajectory_target=None,
                 history_frames=None, future_frames=None,
                 return_auxiliary=False,
                 compute_bev_segmentation=True,
                 compute_route_reconstruction=True,
+                bev_only=False,
                 **kwargs):
         """
         Run the full autonomous-driving pipeline.
@@ -213,9 +224,17 @@ class AutoE2E(nn.Module):
                 "rectified_pinhole", "ftheta", "pseudo") passed to BEV fusion.
             image_transform: Optional ImageTransform for the model-input frame.
             front_camera_tile: Optional native-resolution front image tensor.
+            front_camera_fpn_tile: Optional base-resolution Front image packed
+                identically to historical Front frames for cache insertion.
+            front_camera_fpn_available: Per-sample validity for the exact
+                base-resolution Front companion.
             front_projection: Optional one-view projection for the native front.
             camera_history_tiles: Optional seven-frame camera history for T8.
             history_projections: Optional current-ego-aligned history geometry.
+            camera_fpn_cache: Optional per-stream stateful T8 FPN cache.
+            camera_fpn_stream_ids: Ordered scene or stream identity per sample.
+            camera_fpn_timestamps_us: Source timestamps sampled exactly every
+                500 ms. Do not synthesize continuity across dropped frames.
             mode: "train" also returns aux branch outputs for their losses.
 
         Returns:
@@ -313,13 +332,19 @@ class AutoE2E(nn.Module):
             image_transform=image_transform,
             camera_history_tiles=camera_history_tiles,
             history_projections=history_projections,
+            camera_fpn_cache=camera_fpn_cache,
+            camera_fpn_stream_ids=camera_fpn_stream_ids,
+            camera_fpn_timestamps_us=camera_fpn_timestamps_us,
             front_camera_tile=front_camera_tile,
+            front_camera_fpn_tile=front_camera_fpn_tile,
+            front_camera_fpn_available=front_camera_fpn_available,
             front_projection=front_projection,
             front_image_transform=front_image_transform,
             mode=mode,
             return_auxiliary=return_auxiliary,
             compute_bev_segmentation=compute_bev_segmentation,
             compute_route_reconstruction=compute_route_reconstruction,
+            bev_only=bev_only,
             trajectory_target=trajectory_target,
             **kwargs,
         )

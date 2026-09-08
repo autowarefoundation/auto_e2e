@@ -29,6 +29,14 @@ from reactive_training_contracts import (
 
 
 SIMPLE_XY_IMITATION_OBJECTIVE_VERSION = "simple_xy_imitation_v1"
+BEV_ONLY_OBJECTIVE_VERSION = "bev_segmentation_auxiliary_v5"
+BEV_SAMPLING_IMPORTANCE_CORRECTION_VERSION = (
+    "global_raw_distribution_rank_corrected_horvitz_thompson_"
+    "epoch_shard_randomized_total_exclusion_v4"
+)
+BEV_HEAD_INITIALIZATION_VERSION = (
+    "sample_normalized_weighted_prevalence_small_classifier_v4"
+)
 REACTIVE_MODEL_ARCHITECTURE_VERSION = (
     "bevformer_v2_t8_split_navigation_v5"
 )
@@ -81,6 +89,11 @@ AUTOE2E_REACTIVE_BEV_GEOMETRY: Final = ReactiveBEVLatentGeometry(
 class ReactiveTrainingStage(str, enum.Enum):
     NUPLAN_FULL = "nuplan_full"
     L2D_CONTINUATION = "l2d_continuation"
+
+
+class ReactiveTrainingScope(str, enum.Enum):
+    MULTITASK = "multitask"
+    BEV_ONLY = "bev_only"
 
 
 def reactive_model_kwargs(
@@ -145,8 +158,12 @@ def configure_model_for_stage(
     *,
     freeze_bevformer: bool = False,
     train_bev_head: bool = True,
+    training_scope: ReactiveTrainingScope | str = (
+        ReactiveTrainingScope.MULTITASK
+    ),
 ) -> None:
     """Apply trainability rules after loading the stage checkpoint."""
+    scope = ReactiveTrainingScope(training_scope)
     try:
         reactive = getattr(model, "Reactive_E2E")
         bev_head = getattr(reactive, "BEVSegmentationHead")
@@ -156,6 +173,60 @@ def configure_model_for_stage(
         ) from exc
     if not isinstance(bev_head, nn.Module):
         raise ValueError("multi-stage training requires the BEV head")
+    if scope is ReactiveTrainingScope.BEV_ONLY:
+        if (
+            stage is not ReactiveTrainingStage.NUPLAN_FULL
+            or freeze_bevformer
+            or not train_bev_head
+        ):
+            raise ValueError(
+                "BEV-only training requires nuPlan full with an unfrozen "
+                "camera BEV and trainable segmentation head"
+            )
+        if bool(getattr(reactive, "_camera_bev_frozen", False)):
+            raise ValueError(
+                "a frozen camera BEV cannot be reconfigured for fine-tuning"
+            )
+        for parameter in model.parameters():
+            parameter.requires_grad_(False)
+        for module in (
+            reactive.Backbone,
+            reactive.FeatureFusion,
+            bev_head,
+        ):
+            for parameter in module.parameters():
+                parameter.requires_grad_(True)
+        enable_bev_finetuning = getattr(
+            reactive,
+            "enable_bev_finetuning",
+            None,
+        )
+        if not callable(enable_bev_finetuning):
+            raise ValueError("model cannot configure camera BEV fine-tuning")
+        enable_bev_finetuning()
+        freeze_structurally_unused = getattr(
+            reactive.FeatureFusion,
+            "freeze_structurally_unused_parameters",
+            None,
+        )
+        if callable(freeze_structurally_unused):
+            freeze_structurally_unused()
+        view_fusion = getattr(
+            reactive.FeatureFusion,
+            "view_fusion",
+            None,
+        )
+        pseudo_projection = getattr(
+            view_fusion,
+            "pseudo_projection",
+            None,
+        )
+        if isinstance(pseudo_projection, nn.Parameter):
+            pseudo_projection.requires_grad_(False)
+        # Resolve norm_eval before optimizer and DDP parameter discovery.
+        reactive.Backbone.train(True)
+        bev_head.train(True)
+        return
     if freeze_bevformer:
         freeze_camera_bev = getattr(reactive, "freeze_camera_bev", None)
         if not callable(freeze_camera_bev):
@@ -178,10 +249,17 @@ class ReactiveMultitaskObjective(nn.Module):
         stage: ReactiveTrainingStage,
         *,
         bev_pos_weight: Sequence[float] | torch.Tensor,
+        bev_class_weight: Sequence[float] | torch.Tensor | None = None,
+        bev_positive_pair_frequency: (
+            Sequence[float] | torch.Tensor | None
+        ) = None,
         trajectory_weight: float = 1.0,
         bev_weight: float = 1.0,
         route_weight: float = 1.0,
         corridor_pos_weight: float = 1.0,
+        training_scope: ReactiveTrainingScope | str = (
+            ReactiveTrainingScope.MULTITASK
+        ),
     ) -> None:
         super().__init__()
         task_weights = {
@@ -202,12 +280,26 @@ class ReactiveMultitaskObjective(nn.Module):
                 "corridor_pos_weight must be finite and between one and 1000"
             )
         self.stage = stage
+        self.training_scope = ReactiveTrainingScope(training_scope)
         self.trajectory_weight = float(trajectory_weight)
         self.bev_weight = float(bev_weight)
         self.route_weight = float(route_weight)
+        if self.training_scope is ReactiveTrainingScope.BEV_ONLY and (
+            stage is not ReactiveTrainingStage.NUPLAN_FULL
+            or self.trajectory_weight != 0.0
+            or self.bev_weight <= 0.0
+            or self.route_weight != 0.0
+        ):
+            raise ValueError(
+                "BEV-only objective requires nuPlan full with only BEV loss"
+            )
         self.trajectory_loss = TrajectoryXYImitationLoss()
         self.bev_loss = (
-            BEVSegmentationAuxiliaryLoss(bev_pos_weight)
+            BEVSegmentationAuxiliaryLoss(
+                bev_pos_weight,
+                class_weight=bev_class_weight,
+                positive_pair_frequency=bev_positive_pair_frequency,
+            )
             if stage is ReactiveTrainingStage.NUPLAN_FULL
             else None
         )
@@ -222,6 +314,10 @@ class ReactiveMultitaskObjective(nn.Module):
     @property
     def compute_route_reconstruction(self) -> bool:
         return self.route_weight > 0.0
+
+    @property
+    def is_bev_only(self) -> bool:
+        return self.training_scope is ReactiveTrainingScope.BEV_ONLY
 
     def forward(
         self,
@@ -251,7 +347,10 @@ class ReactiveMultitaskObjective(nn.Module):
                 batch["route_channel_valid"],
             )
         importance = batch.get("bev_sampling_importance")
-        if importance is not None:
+        if importance is not None and (
+            self.trajectory_weight > 0.0
+            or self.compute_route_reconstruction
+        ):
             importance = torch.as_tensor(
                 importance,
                 device=predicted_controls.device,
@@ -297,6 +396,7 @@ class ReactiveMultitaskObjective(nn.Module):
                 bev_logits,
                 batch["bev_segmentation_target"],
                 batch["bev_segmentation_valid"],
+                sampling_importance=importance,
             )
             bev = bev_components["total"]
             bev_bce = bev_components["bce"]

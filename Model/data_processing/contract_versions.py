@@ -63,7 +63,10 @@ PARSER_VERSION = "v3"
 # with front_projection, history_projection, temporal_frame_offsets,
 # temporal_frame_interval_us, and front_camera_*. Rig-constant projection and
 # provenance live once in manifest.json/rig/projection.json.
-SHARD_SCHEMA_VERSION = "v10"
+# v11: adds the base-resolution Front companion used by the stateful FPN cache.
+# v12: KITScenes stores an exact 0.5-second T8 history pool index and per-sample
+# current-ego-aligned historical camera projection matrices.
+SHARD_SCHEMA_VERSION = "v12"
 
 # Calibration / projection spec encoding and raster-map coordinate semantics.
 # v2 queries KITScenes maps in the scene-local pose frame and applies the map

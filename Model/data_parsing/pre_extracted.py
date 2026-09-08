@@ -11,6 +11,7 @@ Usage:
     for batch in loader:
         # batch["visual_tiles"]       (B, V, 3, H, W)      base camera tensors
         # batch["front_camera_tile"]  (B, 3, Hf, Wf)       optional native front
+        # batch["front_camera_fpn_tile"] (B, 3, H, W)      optional cache front
         # batch["map_context"]        (B, C_map, 256, 256) semantic map
         # batch["route_mask"]         (B, 2, 256, 256)     selected route
         # batch["map_valid"]          (B,)                  explicit validity
@@ -29,6 +30,7 @@ import hashlib
 import io
 import json
 import math
+import random
 import re
 from collections import deque
 from dataclasses import dataclass
@@ -66,12 +68,13 @@ _TRANSFORM = transforms.Compose([
 # keeps V correct and stops the map being double-counted in the BEV projection.
 _CAM_KEY_RE = re.compile(r"^cam_\d+\.jpg$")
 _BEV_HIST_KEY_RE = re.compile(r"^bev_hist_(\d+)_cam_(\d+)\.jpg$")
+_BEV_HISTORY_INDEX_MEMBER = "bev_history_index.json"
 # World-Model window frames: hist_<t>_cam_<v>.jpg / fut_<f>_cam_<v>.jpg (#13).
 _HIST_KEY_RE = re.compile(r"^hist_(\d+)_cam_(\d+)\.jpg$")
 _FUT_KEY_RE = re.compile(r"^fut_(\d+)_cam_(\d+)\.jpg$")
 
 NAVIGATION_REPEAT_POLICY_VERSION = "navigation_repeat_v1"
-BEV_CLASS_REPEAT_POLICY_VERSION = "bev_class_repeat_v1"
+BEV_CLASS_REPEAT_POLICY_VERSION = "bev_class_repeat_v3"
 _DECISIVE_ROUTE_MANEUVERS = frozenset({
     "left",
     "right",
@@ -329,8 +332,10 @@ class BEVTrainingStatistics:
 
     sample_count: int
     effective_exposure_count: int
+    active_sample_count: tuple[int, ...]
     positive_sample_count: tuple[int, ...]
     positive_cell_count: tuple[int, ...]
+    positive_fraction_sum: tuple[float, ...]
     positive_mass: tuple[float, ...]
     valid_cell_count: tuple[int, ...]
     exposure_digest: str
@@ -342,8 +347,10 @@ class BEVTrainingStatistics:
 
         class_count = len(BEV_SEGMENTATION_CLASSES)
         vectors = (
+            self.active_sample_count,
             self.positive_sample_count,
             self.positive_cell_count,
+            self.positive_fraction_sum,
             self.positive_mass,
             self.valid_cell_count,
         )
@@ -354,10 +361,35 @@ class BEVTrainingStatistics:
         ):
             raise ValueError("BEV training statistics have invalid shape")
         if (
-            any(value < 0 for value in self.positive_sample_count)
+            any(
+                value < 0 or value > self.effective_exposure_count
+                for value in self.active_sample_count
+            )
+            or any(value < 0 for value in self.positive_sample_count)
             or any(value < 0 for value in self.positive_cell_count)
-            or any(value < 0.0 for value in self.positive_mass)
+            or any(
+                not math.isfinite(value) or value < 0.0
+                for value in self.positive_fraction_sum
+            )
+            or any(
+                not math.isfinite(value) or value < 0.0
+                for value in self.positive_mass
+            )
             or any(value < 0 for value in self.valid_cell_count)
+            or any(
+                positive > active
+                for positive, active in zip(
+                    self.positive_sample_count,
+                    self.active_sample_count,
+                )
+            )
+            or any(
+                positive > active + 1e-9
+                for positive, active in zip(
+                    self.positive_fraction_sum,
+                    self.active_sample_count,
+                )
+            )
             or any(
                 positive > valid
                 for positive, valid in zip(
@@ -373,6 +405,10 @@ class BEVTrainingStatistics:
                 )
             )
             or len(self.exposure_digest) != 64
+            or any(
+                character not in "0123456789abcdef"
+                for character in self.exposure_digest
+            )
         ):
             raise ValueError("BEV training statistics are inconsistent")
 
@@ -382,10 +418,12 @@ class BEVTrainingStatistics:
         )
 
         return {
+            "active_sample_count": list(self.active_sample_count),
             "classes": list(BEV_SEGMENTATION_CLASSES),
             "effective_exposure_count": self.effective_exposure_count,
             "exposure_digest": self.exposure_digest,
             "positive_cell_count": list(self.positive_cell_count),
+            "positive_fraction_sum": list(self.positive_fraction_sum),
             "positive_mass": list(self.positive_mass),
             "positive_sample_count": list(self.positive_sample_count),
             "sample_count": self.sample_count,
@@ -416,7 +454,10 @@ class BEVSampleStatistics:
             or len(self.positive_mass) != class_count
             or len(self.valid_cell_count) != class_count
             or any(value < 0 for value in self.positive_cell_count)
-            or any(value < 0.0 for value in self.positive_mass)
+            or any(
+                not math.isfinite(value) or value < 0.0
+                for value in self.positive_mass
+            )
             or any(value < 0 for value in self.valid_cell_count)
             or any(
                 positive > valid
@@ -450,15 +491,25 @@ def _is_validation_group(group_uid: str, val_fraction: float) -> bool:
     if not 0.0 < val_fraction < 1.0:
         raise ValueError("val_fraction must be between zero and one")
     buckets = 10
-    val_buckets = max(1, min(
-        buckets - 1,
-        round(val_fraction * buckets),
-    ))
+    scaled_fraction = val_fraction * buckets
+    val_buckets = round(scaled_fraction)
+    if not math.isclose(
+        scaled_fraction,
+        val_buckets,
+        rel_tol=0.0,
+        abs_tol=1e-12,
+    ):
+        raise ValueError(
+            "val_fraction must be representable by the ten-bucket split"
+        )
+    val_buckets = max(1, min(buckets - 1, val_buckets))
     return _split_bucket(group_uid, buckets) < val_buckets
 
 
 def discover_bev_sample_statistics(
     shard_dirs: Sequence[str | Path],
+    *,
+    shard_files: Sequence[str | Path] | None = None,
 ) -> tuple[BEVSampleStatistics, ...]:
     """Read each packed sample/BEV-stat pair exactly once."""
     import tarfile
@@ -471,45 +522,69 @@ def discover_bev_sample_statistics(
     roots = [Path(shard_dir) for shard_dir in shard_dirs]
     if not roots:
         raise ValueError("at least one shard directory is required")
+    if shard_files is None:
+        tarfiles = [
+            tar_path
+            for root in roots
+            for tar_path in sorted(root.glob("*.tar"))
+        ]
+        for root in roots:
+            if not any(root == path.parent for path in tarfiles):
+                raise FileNotFoundError(f"No .tar shards found in {root}")
+    else:
+        tarfiles = [Path(path) for path in shard_files]
+        if not tarfiles or len(set(tarfiles)) != len(tarfiles):
+            raise ValueError(
+                "explicit BEV statistic shards must be non-empty and unique"
+            )
+        resolved_roots = {root.resolve() for root in roots}
+        for tar_path in tarfiles:
+            resolved = tar_path.resolve()
+            if (
+                not resolved.is_file()
+                or resolved.suffix != ".tar"
+                or resolved.parent not in resolved_roots
+            ):
+                raise ValueError(
+                    "BEV statistic shard must be a direct .tar child of a "
+                    f"configured directory: {tar_path}"
+                )
+        tarfiles.sort()
 
     records: dict[str, dict[str, object]] = {}
     stats_suffix = f".{BEV_SEGMENTATION_STATS_MEMBER}"
-    for root in roots:
-        tarfiles = sorted(root.glob("*.tar"))
-        if not tarfiles:
-            raise FileNotFoundError(f"No .tar shards found in {root}")
-        for tar_path in tarfiles:
-            with tarfile.open(tar_path, "r:*") as archive:
-                for member in archive:
-                    if not member.isfile():
-                        continue
-                    if member.name.endswith(stats_suffix):
-                        sample_uid = member.name.removesuffix(stats_suffix)
-                        record_key = "stats"
-                    elif member.name.endswith(".meta.json"):
-                        sample_uid = member.name.removesuffix(".meta.json")
-                        record_key = "sample"
-                    else:
-                        continue
-                    extracted = archive.extractfile(member)
-                    if extracted is None:
-                        raise ValueError(
-                            f"could not read {member.name} from {tar_path}"
-                        )
-                    record = records.setdefault(sample_uid, {})
-                    if record_key in record:
-                        raise ValueError(
-                            f"duplicate {member.name} for {sample_uid!r}"
-                        )
-                    payload = extracted.read()
-                    record[record_key] = (
-                        decode_bev_segmentation_stats(payload)
-                        if record_key == "stats"
-                        else _json_mapping(
-                            payload,
-                            member_name=f"{member.name} in {tar_path}",
-                        )
+    for tar_path in tarfiles:
+        with tarfile.open(tar_path, "r:*") as archive:
+            for member in archive:
+                if not member.isfile():
+                    continue
+                if member.name.endswith(stats_suffix):
+                    sample_uid = member.name.removesuffix(stats_suffix)
+                    record_key = "stats"
+                elif member.name.endswith(".meta.json"):
+                    sample_uid = member.name.removesuffix(".meta.json")
+                    record_key = "sample"
+                else:
+                    continue
+                extracted = archive.extractfile(member)
+                if extracted is None:
+                    raise ValueError(
+                        f"could not read {member.name} from {tar_path}"
                     )
+                record = records.setdefault(sample_uid, {})
+                if record_key in record:
+                    raise ValueError(
+                        f"duplicate {member.name} for {sample_uid!r}"
+                    )
+                payload = extracted.read()
+                record[record_key] = (
+                    decode_bev_segmentation_stats(payload)
+                    if record_key == "stats"
+                    else _json_mapping(
+                        payload,
+                        member_name=f"{member.name} in {tar_path}",
+                    )
+                )
 
     sample_statistics = []
     for sample_uid, record in sorted(records.items()):
@@ -594,10 +669,15 @@ def summarize_bev_training_statistics(
     else:
         allowed_samples = None
 
-    positive_samples = np.zeros(class_count, dtype=np.int64)
-    positive_cells = np.zeros(class_count, dtype=np.int64)
-    positive_mass = np.zeros(class_count, dtype=np.float64)
-    valid_cells = np.zeros(class_count, dtype=np.int64)
+    active_samples: np.ndarray = np.zeros(class_count, dtype=np.int64)
+    positive_samples: np.ndarray = np.zeros(class_count, dtype=np.int64)
+    positive_cells: np.ndarray = np.zeros(class_count, dtype=np.int64)
+    positive_fraction_sum: np.ndarray = np.zeros(
+        class_count,
+        dtype=np.float64,
+    )
+    positive_mass: np.ndarray = np.zeros(class_count, dtype=np.float64)
+    valid_cells: np.ndarray = np.zeros(class_count, dtype=np.int64)
     exposure_records: list[tuple[str, int]] = []
     for record in records:
         sample_uid = record.sample_uid
@@ -621,6 +701,13 @@ def summarize_bev_training_statistics(
             dtype=np.int64,
         )
         present = sample_positive_cells > 0
+        active = sample_valid_cells > 0
+        positive_fraction = np.divide(
+            sample_positive_mass,
+            sample_valid_cells,
+            out=np.zeros(class_count, dtype=np.float64),
+            where=active,
+        )
         repeat = max(
             (
                 factors[index]
@@ -628,8 +715,10 @@ def summarize_bev_training_statistics(
             ),
             default=1,
         )
+        active_samples += active.astype(np.int64) * repeat
         positive_samples += present.astype(np.int64) * repeat
         positive_cells += sample_positive_cells * repeat
+        positive_fraction_sum += positive_fraction * repeat
         positive_mass += sample_positive_mass * repeat
         valid_cells += sample_valid_cells * repeat
         exposure_records.append((sample_uid, repeat))
@@ -645,11 +734,17 @@ def summarize_bev_training_statistics(
         effective_exposure_count=sum(
             repeat for _, repeat in exposure_records
         ),
+        active_sample_count=tuple(
+            int(value) for value in active_samples
+        ),
         positive_sample_count=tuple(
             int(value) for value in positive_samples
         ),
         positive_cell_count=tuple(
             int(value) for value in positive_cells
+        ),
+        positive_fraction_sum=tuple(
+            float(value) for value in positive_fraction_sum
         ),
         positive_mass=tuple(float(value) for value in positive_mass),
         valid_cell_count=tuple(int(value) for value in valid_cells),
@@ -680,6 +775,10 @@ def select_bev_validation_sample_uids(
     sample_limit: int,
 ) -> tuple[str, ...]:
     """Choose a deterministic class-aware validation subset."""
+    from data_processing.reactive_training_artifacts import (
+        BEV_SEGMENTATION_CLASSES,
+    )
+
     if sample_limit <= 0:
         raise ValueError("BEV validation sample limit must be positive")
     candidates = sorted(
@@ -698,8 +797,9 @@ def select_bev_validation_sample_uids(
 
     selected: dict[str, BEVSampleStatistics] = {}
     covered: set[int] = set()
-    while len(selected) < sample_limit and covered != set(range(8)):
-        remaining = set(range(8)) - covered
+    all_classes = set(range(len(BEV_SEGMENTATION_CLASSES)))
+    while len(selected) < sample_limit and covered != all_classes:
+        remaining = all_classes - covered
         eligible = [
             record
             for record in candidates
@@ -712,17 +812,94 @@ def select_bev_validation_sample_uids(
             eligible,
             key=lambda record: (
                 -len(set(record.positive_classes).intersection(remaining)),
-                record.sample_uid,
+                -sum(
+                    record.positive_cell_count[index]
+                    for index in remaining
+                ),
+                hashlib.sha256(record.sample_uid.encode("utf-8")).digest(),
             ),
         )
         selected[chosen.sample_uid] = chosen
         covered.update(chosen.positive_classes)
 
-    for record in candidates:
+    remaining_candidates = sorted(
+        candidates,
+        key=lambda record: hashlib.sha256(
+            record.sample_uid.encode("utf-8")
+        ).digest(),
+    )
+    for record in remaining_candidates:
         if len(selected) >= sample_limit:
             break
         selected.setdefault(record.sample_uid, record)
     return tuple(sorted(selected))
+
+
+def select_bev_validation_holdout_sample_uids(
+    records: Sequence[BEVSampleStatistics],
+    *,
+    val_fraction: float,
+    excluded_sample_uids: Sequence[str],
+) -> tuple[str, ...]:
+    """Return a validation holdout disjoint at split-group granularity."""
+    requested = tuple(str(value) for value in excluded_sample_uids)
+    excluded = frozenset(requested)
+    if not excluded or len(excluded) != len(requested):
+        raise ValueError(
+            "excluded BEV validation samples must be non-empty and unique"
+        )
+    validation_records = {
+        record.sample_uid: record
+        for record in records
+        if _is_validation_group(record.split_group_uid, val_fraction)
+    }
+    if not excluded.issubset(validation_records):
+        missing = sorted(excluded - validation_records.keys())
+        raise ValueError(
+            "excluded BEV validation samples are outside the validation "
+            f"split: {missing[:8]}"
+        )
+    excluded_groups = {
+        validation_records[sample_uid].split_group_uid
+        for sample_uid in excluded
+    }
+    holdout = tuple(sorted(
+        sample_uid
+        for sample_uid, record in validation_records.items()
+        if record.split_group_uid not in excluded_groups
+    ))
+    if not holdout:
+        raise ValueError("BEV validation holdout is empty")
+    return holdout
+
+
+def select_distributed_bev_validation_sample_uids(
+    records_by_rank: Sequence[Sequence[BEVSampleStatistics]],
+    *,
+    val_fraction: float,
+    sample_limit: int,
+) -> tuple[str, ...]:
+    """Reproduce the rank-local calibration subset used by DDP training."""
+    world_size = len(records_by_rank)
+    if world_size <= 0 or sample_limit < world_size:
+        raise ValueError(
+            "distributed BEV validation needs one sample per rank"
+        )
+    local_sample_limit = math.ceil(sample_limit / world_size)
+    selected = tuple(sorted(
+        sample_uid
+        for rank_records in records_by_rank
+        for sample_uid in select_bev_validation_sample_uids(
+            rank_records,
+            val_fraction=val_fraction,
+            sample_limit=local_sample_limit,
+        )
+    ))
+    if len(set(selected)) != len(selected):
+        raise ValueError(
+            "distributed BEV validation subset contains duplicate samples"
+        )
+    return selected
 
 
 def discover_validation_sample_uids(
@@ -735,11 +912,17 @@ def discover_validation_sample_uids(
     if sample_limit <= 0:
         raise ValueError("validation sample limit must be positive")
     inventory = discover_split_inventory(shard_dirs)
-    selected = sorted(
+    candidates = (
         sample_uid
         for group_uid, sample_uids in inventory.sample_uids_by_group
         if _is_validation_group(group_uid, val_fraction)
         for sample_uid in sample_uids
+    )
+    selected = sorted(
+        candidates,
+        key=lambda sample_uid: hashlib.sha256(
+            sample_uid.encode("utf-8")
+        ).digest(),
     )[:sample_limit]
     if not selected:
         raise ValueError("sample discovery selected no validation samples")
@@ -752,7 +935,7 @@ def derive_bev_repeat_factors(
     frequency_threshold: float = 0.05,
     max_repeat: int = 4,
 ) -> tuple[int, ...]:
-    """Return deterministic integer repeat factors using repeat sampling."""
+    """Repeat samples only when a class is rare at the sample level."""
     if not 0.0 < frequency_threshold <= 1.0:
         raise ValueError("BEV repeat frequency threshold must be in (0,1]")
     if max_repeat < 1:
@@ -762,7 +945,9 @@ def derive_bev_repeat_factors(
         if positive_samples <= 0:
             raise ValueError("every BEV class needs a positive train sample")
         frequency = positive_samples / statistics.sample_count
-        repeat = math.ceil(math.sqrt(frequency_threshold / frequency))
+        repeat = math.ceil(
+            math.sqrt(frequency_threshold / frequency)
+        )
         factors.append(max(1, min(max_repeat, repeat)))
     return tuple(factors)
 
@@ -774,7 +959,7 @@ def derive_bev_pos_weights(
     min_positive_samples: int = 1,
     min_positive_cells: int = 1,
 ) -> tuple[float, ...]:
-    """Derive clipped BCE positive weights from effective valid-cell mass."""
+    """Derive clipped BCE positive weights from sample-normalized prevalence."""
     if max_weight < 1.0:
         raise ValueError("BEV maximum positive weight must be at least one")
     if min_positive_samples <= 0 or min_positive_cells <= 0:
@@ -783,17 +968,22 @@ def derive_bev_pos_weights(
     for class_index, (
         sample_count,
         cell_count,
+        active_sample_count,
+        positive_fraction_sum,
         positive_mass,
-        valid_count,
     ) in enumerate(zip(
         statistics.positive_sample_count,
         statistics.positive_cell_count,
+        statistics.active_sample_count,
+        statistics.positive_fraction_sum,
         statistics.positive_mass,
-        statistics.valid_cell_count,
     )):
         if (
             sample_count < min_positive_samples
             or cell_count < min_positive_cells
+            or active_sample_count <= 0
+            or positive_fraction_sum <= 0.0
+            or positive_fraction_sum >= active_sample_count
             or positive_mass <= 0.0
         ):
             raise ValueError(
@@ -801,10 +991,155 @@ def derive_bev_pos_weights(
                 f"class_index={class_index} samples={sample_count} "
                 f"cells={cell_count}"
             )
-        negative_mass = valid_count - positive_mass
-        ratio = negative_mass / positive_mass
+        negative_fraction_sum = (
+            active_sample_count - positive_fraction_sum
+        )
+        ratio = negative_fraction_sum / positive_fraction_sum
         weights.append(float(np.clip(ratio, 1.0, max_weight)))
     return tuple(weights)
+
+
+def derive_bev_positive_pair_frequencies(
+    statistics: BEVTrainingStatistics,
+) -> tuple[float, ...]:
+    """Return raw per-class positive-sample frequencies for Dice scaling."""
+    if statistics.sample_count <= 0:
+        raise ValueError("BEV statistics must contain training samples")
+    frequencies = tuple(
+        positive_samples / statistics.sample_count
+        for positive_samples in statistics.positive_sample_count
+    )
+    if any(
+        not math.isfinite(value) or not 0.0 < value <= 1.0
+        for value in frequencies
+    ):
+        raise ValueError(
+            "every BEV class needs a finite positive-sample frequency"
+        )
+    return frequencies
+
+
+def derive_bev_gradient_budget_weights(
+    statistics: BEVTrainingStatistics,
+    pos_weights: Sequence[float],
+    *,
+    max_relative_weight: float = 8.0,
+) -> tuple[float, ...]:
+    """Equalize expected per-class BCE gradient mass without shifting priors."""
+    positive_fraction_sum = np.asarray(
+        statistics.positive_fraction_sum,
+        dtype=np.float64,
+    )
+    active_sample_count = np.asarray(
+        statistics.active_sample_count,
+        dtype=np.float64,
+    )
+    weights = np.asarray(tuple(pos_weights), dtype=np.float64)
+    if (
+        positive_fraction_sum.shape != active_sample_count.shape
+        or weights.shape != positive_fraction_sum.shape
+        or positive_fraction_sum.ndim != 1
+        or not np.isfinite(positive_fraction_sum).all()
+        or not np.isfinite(active_sample_count).all()
+        or not np.isfinite(weights).all()
+        or np.any(positive_fraction_sum <= 0.0)
+        or np.any(positive_fraction_sum >= active_sample_count)
+        or np.any(weights < 1.0)
+        or not math.isfinite(max_relative_weight)
+        or max_relative_weight < 1.0
+    ):
+        raise ValueError("BEV gradient-budget statistics are invalid")
+    prevalence = positive_fraction_sum / active_sample_count
+    weighted_prevalence = (
+        weights * prevalence
+        / (1.0 - prevalence + weights * prevalence)
+    )
+    expected_gradient_mass = (
+        weights * prevalence * (1.0 - weighted_prevalence)
+        + (1.0 - prevalence) * weighted_prevalence
+    )
+    effective_exposure_count = float(
+        statistics.effective_exposure_count
+    )
+    if (
+        not math.isfinite(effective_exposure_count)
+        or effective_exposure_count <= 0.0
+        or np.any(active_sample_count > effective_exposure_count)
+    ):
+        raise ValueError("BEV active-sample statistics are invalid")
+    expected_gradient_mass *= (
+        active_sample_count / effective_exposure_count
+    )
+    if (
+        not np.isfinite(expected_gradient_mass).all()
+        or np.any(expected_gradient_mass <= 0.0)
+    ):
+        raise ValueError("BEV expected gradient mass is invalid")
+    inverse_mass = 1.0 / expected_gradient_mass
+    median = float(np.median(inverse_mass))
+    bounded = np.clip(
+        inverse_mass,
+        median / max_relative_weight,
+        median * max_relative_weight,
+    )
+    normalized = bounded / bounded.mean()
+    return tuple(float(value) for value in normalized)
+
+
+def derive_bev_rank_importance_scale(
+    *,
+    local_effective_exposure_count: int,
+    global_sample_count: int,
+    world_size: int,
+) -> float:
+    """Scale one rank so equal-rank DDP averaging recovers the raw corpus."""
+    if (
+        local_effective_exposure_count <= 0
+        or global_sample_count <= 0
+        or world_size <= 0
+    ):
+        raise ValueError("BEV rank importance inputs must be positive")
+    scale = (
+        world_size
+        * local_effective_exposure_count
+        / global_sample_count
+    )
+    if not math.isfinite(scale) or scale <= 0.0:
+        raise ValueError("BEV rank importance scale is invalid")
+    return float(scale)
+
+
+def bev_rank_full_microbatch_capacity(
+    records_by_directory: Sequence[Sequence[BEVSampleStatistics]],
+    *,
+    val_fraction: float,
+    repeat_factors: Sequence[int],
+    batch_size: int,
+) -> int:
+    """Count complete rank-local batches after split, repeat, and drop_last."""
+    if not records_by_directory:
+        raise ValueError("BEV rank capacity needs at least one directory")
+    if batch_size <= 0:
+        raise ValueError("BEV rank batch size must be positive")
+    capacity = 0
+    for records in records_by_directory:
+        has_train_records = any(
+            not _is_validation_group(record.split_group_uid, val_fraction)
+            for record in records
+        )
+        if not has_train_records:
+            continue
+        capacity += (
+            summarize_bev_training_statistics(
+                records,
+                val_fraction=val_fraction,
+                repeat_factors=repeat_factors,
+            ).effective_exposure_count
+            // batch_size
+        )
+    if capacity <= 0:
+        raise ValueError("BEV rank loader has no complete microbatches")
+    return capacity
 
 
 @dataclass(frozen=True)
@@ -812,7 +1147,7 @@ class BEVClassRepeatPolicy:
     """Repeat rare-positive samples before decode with importance evidence."""
 
     repeat_factors: tuple[int, ...]
-    mean_repeat: float
+    importance_scale: float
     version: str = BEV_CLASS_REPEAT_POLICY_VERSION
 
     def __post_init__(self) -> None:
@@ -824,8 +1159,8 @@ class BEVClassRepeatPolicy:
             self.version != BEV_CLASS_REPEAT_POLICY_VERSION
             or len(self.repeat_factors) != len(BEV_SEGMENTATION_CLASSES)
             or any(value < 1 for value in self.repeat_factors)
-            or not math.isfinite(self.mean_repeat)
-            or self.mean_repeat < 1.0
+            or not math.isfinite(self.importance_scale)
+            or self.importance_scale <= 0.0
         ):
             raise ValueError("invalid BEV class repeat policy")
 
@@ -855,7 +1190,7 @@ class BEVClassRepeatPolicy:
                 **sample,
                 "__bev_repeat_factor__": repeat,
                 "__bev_sampling_importance__": (
-                    self.mean_repeat / repeat
+                    self.importance_scale / repeat
                 ),
             }
             for _ in range(repeat):
@@ -896,6 +1231,7 @@ def _decode_sample(
     *,
     decode_history_frames: bool = True,
     decode_future_frames: bool = True,
+    decode_front_camera_fpn: bool = True,
 ) -> dict:
     """Decode a WebDataset sample into training tensors.
 
@@ -927,6 +1263,11 @@ def _decode_sample(
             bev_history_keys[
                 (int(match.group(1)), int(match.group(2)))
             ] = key
+    bev_history_index_blob = sample.get(_BEV_HISTORY_INDEX_MEMBER)
+    if bev_history_keys and bev_history_index_blob is not None:
+        raise ValueError(
+            "BEVFormer T8 history cannot use direct members and a pool index"
+        )
     camera_history_tiles = None
     if bev_history_keys:
         expected_history_keys = {
@@ -951,6 +1292,42 @@ def _decode_sample(
                 REACTIVE_BEVFORMER_HISTORY_FRAMES
             )
         ])
+    elif bev_history_index_blob is not None:
+        if pool is None:
+            raise ValueError(
+                "BEVFormer T8 history index requires the sibling frame pool"
+            )
+        try:
+            history_index = json.loads(
+                bev_history_index_blob.decode()
+                if isinstance(bev_history_index_blob, (bytes, bytearray))
+                else bev_history_index_blob
+            )
+        except (AttributeError, TypeError, UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise ValueError(
+                "BEVFormer T8 history index is invalid JSON"
+            ) from error
+        if (
+            not isinstance(history_index, list)
+            or len(history_index) != REACTIVE_BEVFORMER_HISTORY_FRAMES
+            or any(
+                not isinstance(frame, list)
+                or len(frame) != len(frames)
+                or any(
+                    not isinstance(frame_id, str) or not frame_id
+                    for frame_id in frame
+                )
+                for frame in history_index
+            )
+        ):
+            raise ValueError(
+                "BEVFormer T8 history index differs from contract"
+            )
+        camera_history_tiles = _decode_window_from_index(
+            history_index,
+            pool,
+        )
+    if camera_history_tiles is not None:
         if tuple(camera_history_tiles.shape[2:]) != (
             3,
             REACTIVE_CAMERA_IMAGE_SIZE,
@@ -960,6 +1337,12 @@ def _decode_sample(
                 "BEVFormer T8 history camera dimensions differ from contract"
             )
     front_camera_tile = None
+    front_camera_fpn_tile = None
+    front_camera_fpn_available = None
+    if calibration is None and "front_camera_fpn.jpg" in sample:
+        raise ValueError(
+            "front camera FPN image requires camera calibration"
+        )
     if calibration is not None:
         front_contract_markers = (
             "front_camera_index",
@@ -978,6 +1361,17 @@ def _decode_sample(
         has_complete_front_dimensions = all(
             field in calibration for field in required_front_fields
         )
+        has_front_camera_fpn_member = "front_camera_fpn.jpg" in sample
+        has_front_camera_fpn_contract = (
+            "front_camera_fpn_image_size" in calibration
+        )
+        if (
+            has_front_camera_fpn_member
+            != has_front_camera_fpn_contract
+        ):
+            raise ValueError(
+                "front camera FPN cache contract and image must coexist"
+            )
         if present_front_markers and not has_complete_front_dimensions:
             raise ValueError(
                 "front camera calibration contract is incomplete"
@@ -1029,6 +1423,44 @@ def _decode_sample(
                 raise ValueError(
                     "packed base camera dimensions differ from calibration"
                 )
+            front_camera_fpn_available = torch.tensor(
+                False,
+                dtype=torch.bool,
+            )
+            if has_front_camera_fpn_member:
+                front_camera_fpn_size = calibration[
+                    "front_camera_fpn_image_size"
+                ]
+                if (
+                    not isinstance(front_camera_fpn_size, int)
+                    or isinstance(front_camera_fpn_size, bool)
+                    or front_camera_fpn_size != base_size
+                ):
+                    raise ValueError(
+                        "front camera FPN dimensions differ from "
+                        "the base camera contract"
+                    )
+                if decode_front_camera_fpn:
+                    front_camera_fpn_tile = _decode_image(
+                        sample["front_camera_fpn.jpg"]
+                    )
+                    if tuple(front_camera_fpn_tile.shape) != (
+                        3,
+                        base_size,
+                        base_size,
+                    ):
+                        raise ValueError(
+                            "packed front camera FPN image differs from "
+                            "the base camera contract"
+                        )
+                    front_camera_fpn_available = torch.tensor(
+                        True,
+                        dtype=torch.bool,
+                    )
+        elif has_front_camera_fpn_member:
+            raise ValueError(
+                "front camera FPN image requires the native Front contract"
+            )
 
     navigation_base_keys = {
         "map_semantic.npz",
@@ -1479,6 +1911,12 @@ def _decode_sample(
         out["camera_geometry_type"] = camera_geometry_type
     if front_camera_tile is not None:
         out["front_camera_tile"] = front_camera_tile
+    if front_camera_fpn_tile is not None:
+        out["front_camera_fpn_tile"] = front_camera_fpn_tile
+    if front_camera_fpn_available is not None:
+        out["front_camera_fpn_available"] = (
+            front_camera_fpn_available
+        )
     if camera_history_tiles is not None:
         out["camera_history_tiles"] = camera_history_tiles
     if camera_history_projection_matrix is not None:
@@ -1811,6 +2249,32 @@ class _ExplicitSplitGroupFilter:
         return in_validation if self.keep_validation else not in_validation
 
 
+@dataclass(frozen=True)
+class _KeepAllSplitFilter:
+    """Picklable selector used by unsplit and zero-validation loaders."""
+
+    def __call__(self, sample) -> bool:
+        return True
+
+
+@dataclass(frozen=True)
+class _HashSplitGroupFilter:
+    """Picklable stable-hash train or validation group selector."""
+
+    buckets: int
+    validation_buckets: int
+    keep_validation: bool
+
+    def __call__(self, sample) -> bool:
+        bucket = _split_bucket(_split_group_of(sample), self.buckets)
+        in_validation = bucket < self.validation_buckets
+        return (
+            in_validation
+            if self.keep_validation
+            else not in_validation
+        )
+
+
 def _split_keep(
     split: str,
     val_fraction: float,
@@ -1830,7 +2294,7 @@ def _split_keep(
     if split not in {"all", "train", "val"}:
         raise ValueError(f"unsupported split {split!r}")
     if split == "all":
-        return lambda sample: True
+        return _KeepAllSplitFilter()
     if validation_group_uids is not None:
         requested = [str(uid) for uid in validation_group_uids]
         validation_groups = frozenset(requested)
@@ -1847,16 +2311,14 @@ def _split_keep(
             keep_validation=(split == "val"),
         )
     if val_fraction <= 0.0:
-        return lambda sample: True
+        return _KeepAllSplitFilter()
     buckets = 10
     val_buckets = max(1, min(buckets - 1, round(val_fraction * buckets)))
-
-    def keep(sample):
-        b = _split_bucket(_split_group_of(sample), buckets)
-        in_val = b < val_buckets
-        return in_val if split == "val" else (not in_val)
-
-    return keep
+    return _HashSplitGroupFilter(
+        buckets=buckets,
+        validation_buckets=val_buckets,
+        keep_validation=(split == "val"),
+    )
 
 
 @dataclass(frozen=True)
@@ -2020,8 +2482,10 @@ def make_pre_extracted_loader(
     validation_group_uids: Sequence[str] | None = None,
     decode_history_frames: bool = True,
     decode_future_frames: bool = True,
+    decode_front_camera_fpn: bool = False,
     navigation_repeat_policy: NavigationRepeatPolicy | None = None,
     bev_repeat_policy: BEVClassRepeatPolicy | None = None,
+    drop_last: bool = False,
     nodesplitter=None,
 ) -> wds.WebLoader:
     """Create a WebDataset DataLoader reading from local EBS shard cache.
@@ -2059,10 +2523,16 @@ def make_pre_extracted_loader(
         decode_future_frames: decode World-Model target images. Benchmark
             inference disables this so future camera frames cannot enter its
             input batch; training keeps the default because JEPA needs them.
+        decode_front_camera_fpn: decode the exact base-resolution Front
+            companion required by the stateful T8 inference cache. Training
+            and stateless inference leave this disabled to avoid unused image
+            decode, worker IPC, and device transfer.
         navigation_repeat_policy: optional raw-sample repeat transform. Training
             applies it after split filtering and before shuffle/decode.
         bev_repeat_policy: optional BEV rare-class repeat transform. It is
             mutually exclusive with navigation repetition and train-only.
+        drop_last: discard an incomplete final batch. Fixed-step DDP training
+            enables this so every optimizer step has the same sample scale.
         nodesplitter: optional WebDataset node splitter. Distributed callers
             with explicit rank-owned shards use ``passthrough_nodesplitter``;
             the default rejects accidental multi-node iteration.
@@ -2089,6 +2559,8 @@ def make_pre_extracted_loader(
             )
         if resolved.suffix != ".tar":
             raise ValueError(f"shard file must use .tar suffix: {path}")
+    if shuffle > 0:
+        random.Random(shuffle_seed).shuffle(tarfiles)
 
     urls = [str(p) for p in tarfiles]
 
@@ -2153,6 +2625,7 @@ def make_pre_extracted_loader(
         pool=pool,
         decode_history_frames=decode_history_frames,
         decode_future_frames=decode_future_frames,
+        decode_front_camera_fpn=decode_front_camera_fpn,
     ))
 
     # split_by_worker shards the .tar list across workers, so more workers than
@@ -2160,7 +2633,11 @@ def make_pre_extracted_loader(
     # soon as that partition is exhausted, so workers MUST NOT persist beyond the
     # iterator lifetime. prefetch_factor overlaps decode with the GPU step.
     eff_workers = min(num_workers, len(tarfiles)) if num_workers > 0 else 0
-    loader_kwargs: dict = {"batch_size": batch_size, "num_workers": eff_workers}
+    loader_kwargs: dict = {
+        "batch_size": batch_size,
+        "drop_last": bool(drop_last),
+        "num_workers": eff_workers,
+    }
     if eff_workers > 0:
         loader_kwargs.update(
             persistent_workers=False,
@@ -2262,7 +2739,10 @@ class MergedDatasetLoader:
         return _ActiveLoader(loader=loader, iterator=iterator, owned=owned)
 
     def __iter__(self):
-        pending = iter(self._sources)
+        sources = list(self._sources)
+        if self.shuffle_seed is not None:
+            random.Random(self.shuffle_seed).shuffle(sources)
+        pending = iter(sources)
         active: deque[_ActiveLoader] = deque()
 
         def fill_active():
@@ -2324,6 +2804,7 @@ def make_multi_dataset_loader(
     decode_future_frames: bool = True,
     navigation_repeat_policy: NavigationRepeatPolicy | None = None,
     bev_repeat_policy: BEVClassRepeatPolicy | None = None,
+    drop_last: bool = False,
     nodesplitter=None,
 ) -> MergedDatasetLoader:
     """Build a :class:`MergedDatasetLoader` over several shard directories.
@@ -2374,6 +2855,7 @@ def make_multi_dataset_loader(
             decode_future_frames=decode_future_frames,
             navigation_repeat_policy=navigation_repeat_policy,
             bev_repeat_policy=bev_repeat_policy,
+            drop_last=drop_last,
             nodesplitter=nodesplitter,
         )
         for index, d in enumerate(shard_dirs)

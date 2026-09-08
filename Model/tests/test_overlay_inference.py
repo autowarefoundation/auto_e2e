@@ -7,6 +7,7 @@ import torch
 
 from Platform.pipelines.inference import (
     INFERENCE_CONTRACT_VERSION,
+    create_stateful_camera_fpn_cache,
     load_policy,
     noise_from,
     predict_control,
@@ -69,6 +70,9 @@ class _NoiseEchoPolicy(torch.nn.Module):
         self.Reactive_E2E = _FakeReactive()
         self.reset_count = 0
         self.last_egomotion_history = None
+        self.last_camera_fpn_cache = None
+        self.last_camera_fpn_stream_ids = None
+        self.last_camera_fpn_timestamps_us = None
 
     def reset_visual_history(self):
         self.reset_count += 1
@@ -87,6 +91,13 @@ class _NoiseEchoPolicy(torch.nn.Module):
         **kwargs,
     ):
         self.last_egomotion_history = egomotion_history.detach().clone()
+        self.last_camera_fpn_cache = kwargs.get("camera_fpn_cache")
+        self.last_camera_fpn_stream_ids = kwargs.get(
+            "camera_fpn_stream_ids"
+        )
+        self.last_camera_fpn_timestamps_us = kwargs.get(
+            "camera_fpn_timestamps_us"
+        )
         return initial_noise + self.anchor
 
 
@@ -207,6 +218,7 @@ def test_predict_control_uses_packed_projection_and_native_front():
     batch["camera_projection_matrix"] = matrix
     batch["camera_geometry_type"] = ["rectified_pinhole"]
     batch["front_camera_tile"] = torch.zeros(1, 3, 8, 8)
+    batch["front_camera_fpn_tile"] = torch.zeros(1, 3, 4, 4)
     batch["front_camera_projection_matrix"] = front_matrix
     fallback = PinholeProjection(torch.ones_like(matrix))
 
@@ -225,7 +237,92 @@ def test_predict_control_uses_packed_projection_and_native_front():
     assert torch.equal(model.kwargs["projection"].matrix, matrix)
     assert torch.equal(model.kwargs["front_projection"].matrix, front_matrix)
     assert model.kwargs["front_camera_tile"] is batch["front_camera_tile"]
+    assert model.kwargs["front_camera_fpn_tile"] is None
+    assert model.kwargs["front_camera_fpn_available"] is None
     assert model.kwargs["geometry_type"] == "rectified_pinhole"
+
+
+def test_predict_control_forwards_explicit_stateful_camera_fpn_cache():
+    class StatefulPolicy(_NoiseEchoPolicy):
+        def __init__(self):
+            super().__init__()
+            self.cache = object()
+
+        def create_stateful_camera_fpn_cache(self):
+            return self.cache
+
+    model = StatefulPolicy().eval()
+    cache = create_stateful_camera_fpn_cache(model)
+    batch = _batch(1)
+    batch["front_camera_tile"] = torch.zeros(1, 3, 8, 8)
+    batch["front_camera_fpn_tile"] = torch.zeros(1, 3, 4, 4)
+    batch["front_camera_fpn_available"] = torch.tensor([True])
+    timestamps_us = torch.tensor([4_000_000])
+
+    predict_control(
+        model,
+        batch,
+        sample_uids=["sample"],
+        model_artifact_id="model-sha",
+        dataset_manifest_digest="manifest-sha",
+        camera_fpn_cache=cache,
+        camera_fpn_stream_ids=["scene-a"],
+        camera_fpn_timestamps_us=timestamps_us,
+    )
+
+    assert cache is model.cache
+    assert model.last_camera_fpn_cache is cache
+    assert model.last_camera_fpn_stream_ids == ("scene-a",)
+    assert torch.equal(
+        model.last_camera_fpn_timestamps_us,
+        timestamps_us,
+    )
+
+
+def test_predict_control_rejects_stateful_cache_without_stream_identity():
+    with pytest.raises(ValueError, match="requires explicit stream IDs"):
+        predict_control(
+            _NoiseEchoPolicy().eval(),
+            _batch(1),
+            sample_uids=["sample"],
+            model_artifact_id="model-sha",
+            dataset_manifest_digest="manifest-sha",
+            camera_fpn_cache=object(),
+        )
+
+
+def test_predict_control_rejects_stateful_cache_without_timestamp():
+    batch = _batch(1)
+
+    with pytest.raises(ValueError, match="explicit source timestamps"):
+        predict_control(
+            _NoiseEchoPolicy().eval(),
+            batch,
+            sample_uids=["sample"],
+            model_artifact_id="model-sha",
+            dataset_manifest_digest="manifest-sha",
+            camera_fpn_cache=object(),
+            camera_fpn_stream_ids=["scene-a"],
+        )
+
+
+def test_predict_control_rejects_legacy_front_companion_for_cache():
+    batch = _batch(1)
+    batch["front_camera_tile"] = torch.zeros(1, 3, 8, 8)
+    batch["front_camera_fpn_tile"] = torch.zeros(1, 3, 4, 4)
+    batch["front_camera_fpn_available"] = torch.tensor([False])
+
+    with pytest.raises(ValueError, match="exact Front companion"):
+        predict_control(
+            _NoiseEchoPolicy().eval(),
+            batch,
+            sample_uids=["sample"],
+            model_artifact_id="model-sha",
+            dataset_manifest_digest="manifest-sha",
+            camera_fpn_cache=object(),
+            camera_fpn_stream_ids=["scene-a"],
+            camera_fpn_timestamps_us=torch.tensor([4_000_000]),
+        )
 
 
 def test_infer_loader_controls_emits_seed_fan_and_v0():

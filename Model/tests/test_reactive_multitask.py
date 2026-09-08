@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import dataclasses
+import hashlib
+import math
 
 import numpy as np
 import pytest
@@ -32,7 +34,9 @@ from reactive_training_contracts import (
 )
 from training.reactive_multitask import (
     AUTOE2E_REACTIVE_BEV_GEOMETRY,
+    BEV_SAMPLING_IMPORTANCE_CORRECTION_VERSION,
     ReactiveMultitaskObjective,
+    ReactiveTrainingScope,
     ReactiveTrainingStage,
     configure_model_for_stage,
     reactive_model_kwargs,
@@ -42,6 +46,8 @@ from training.reactive_stage_runner import (
     evaluate_reactive_transfer_matrix_models,
     evaluate_reactive_xy,
     load_stage_a_parent,
+    reactive_config_sha256,
+    reactive_metrics_sha256,
     reactive_model_state_sha256,
     run_reactive_epoch,
     save_reactive_checkpoint,
@@ -411,6 +417,7 @@ def test_reactive_bev_geometry_rejects_invalid_contract(
 
 
 def test_bev_head_uses_full_residual_spatial_blocks(device):
+    torch.manual_seed(149)
     head = BEVSegmentationHead(
         embed_dim=16,
         hidden_channels=8,
@@ -429,6 +436,16 @@ def test_bev_head_uses_full_residual_spatial_blocks(device):
     assert len(spatial_convolutions) == 4
     assert all(module.groups == 1 for module in spatial_convolutions)
     assert head.decoder[-1].bias is not None
+    head.initialize_output_bias([-1.0, 0.0, 1.0])
+    torch.testing.assert_close(
+        head.decoder[-1].bias,
+        torch.tensor([-1.0, 0.0, 1.0], device=device),
+    )
+    assert head.decoder[-1].weight.std().item() == pytest.approx(
+        0.01,
+        rel=0.35,
+    )
+    assert head.decoder[-1].weight.abs().max().item() < 0.05
 
     image_bev = torch.randn(
         2,
@@ -609,6 +626,205 @@ def test_bev_loss_stays_fp32_and_handles_empty_targets():
     assert torch.isfinite(negative_logits.grad).all()
 
 
+def test_bev_loss_keeps_fixed_mixture_when_batch_has_no_positive_pairs():
+    loss_fn = BEVSegmentationAuxiliaryLoss(
+        [64.0, 64.0],
+        class_weight=[0.5, 1.5],
+    )
+    logits = torch.zeros(2, 2, 3, 3, requires_grad=True)
+    target = torch.zeros_like(logits)
+    valid = torch.ones_like(logits, dtype=torch.bool)
+
+    components = loss_fn.components(logits, target, valid)
+    components["total"].backward()
+
+    torch.testing.assert_close(
+        components["total"],
+        0.5 * components["bce"],
+    )
+    assert components["dice"].item() == 0.0
+    assert logits.grad is not None
+    assert bool(torch.isfinite(logits.grad).all())
+
+
+def test_bev_loss_uses_packed_positive_threshold_for_dice():
+    loss_fn = BEVSegmentationAuxiliaryLoss(
+        [1.0],
+        positive_pair_frequency=[1.0],
+    )
+    logits = torch.zeros(1, 1, 2, 2, requires_grad=True)
+    target = torch.full_like(logits, 0.49)
+    valid = torch.ones_like(logits, dtype=torch.bool)
+
+    components = loss_fn.components(logits, target, valid)
+
+    assert components["dice"].item() == 0.0
+    torch.testing.assert_close(
+        components["total"],
+        0.5 * components["bce"],
+    )
+
+
+def test_bev_loss_preserves_single_cell_dice_error():
+    loss_fn = BEVSegmentationAuxiliaryLoss([1.0])
+    logits = torch.full((1, 1, 1, 1), -20.0)
+    target = torch.ones_like(logits)
+    valid = torch.ones_like(logits, dtype=torch.bool)
+
+    components = loss_fn.components(logits, target, valid)
+
+    assert components["dice"].item() > 0.99
+
+
+def test_bev_loss_normalizes_active_class_weights_below_one():
+    logits_a = torch.zeros(1, 1, 2, 2, requires_grad=True)
+    logits_b = logits_a.detach().clone().requires_grad_(True)
+    target = torch.zeros_like(logits_a)
+    target[:, :, 0, 0] = 1.0
+    valid = torch.ones_like(logits_a, dtype=torch.bool)
+
+    small_weight = BEVSegmentationAuxiliaryLoss(
+        [3.0],
+        class_weight=[0.1],
+    )
+    unit_weight = BEVSegmentationAuxiliaryLoss(
+        [3.0],
+        class_weight=[1.0],
+    )
+    small_loss = small_weight(logits_a, target, valid)
+    unit_loss = unit_weight(logits_b, target, valid)
+    small_loss.backward()
+    unit_loss.backward()
+
+    torch.testing.assert_close(small_loss, unit_loss)
+    torch.testing.assert_close(logits_a.grad, logits_b.grad)
+
+
+def test_bev_loss_keeps_fixed_taxonomy_weight_for_inactive_classes():
+    loss_fn = BEVSegmentationAuxiliaryLoss(
+        [1.0, 1.0],
+        class_weight=[1.0, 1.0],
+    )
+    logits = torch.zeros(2, 2, 1, 1, requires_grad=True)
+    target = torch.zeros_like(logits)
+    valid = torch.ones_like(logits, dtype=torch.bool)
+    valid[1, 0] = False
+
+    components = loss_fn.components(logits, target, valid)
+    components["bce"].backward()
+
+    assert components["bce"].item() == pytest.approx(
+        0.75 * math.log(2.0)
+    )
+    class_gradient = logits.grad.abs().sum(dim=(0, 2, 3))
+    assert class_gradient[1].item() == pytest.approx(
+        2.0 * class_gradient[0].item()
+    )
+
+
+def test_bev_loss_rejects_mixed_valid_and_fully_invalid_samples():
+    loss_fn = BEVSegmentationAuxiliaryLoss([1.0])
+    logits = torch.zeros(2, 1, 2, 2)
+    target = torch.zeros_like(logits)
+    valid = torch.ones_like(logits, dtype=torch.bool)
+    valid[1] = False
+
+    with pytest.raises(ValueError, match="fully invalid"):
+        loss_fn(logits, target, valid)
+
+
+def test_bev_loss_ignores_nonfinite_logits_outside_valid_region():
+    loss_fn = BEVSegmentationAuxiliaryLoss([4.0])
+    logits = torch.zeros(1, 1, 2, 2, requires_grad=True)
+    with torch.no_grad():
+        logits[0, 0, 1, 1] = float("inf")
+    target = torch.zeros_like(logits)
+    target[0, 0, 0, 0] = 1.0
+    valid = torch.ones_like(logits, dtype=torch.bool)
+    valid[0, 0, 1, 1] = False
+
+    loss = loss_fn(logits, target, valid)
+    loss.backward()
+
+    assert torch.isfinite(loss)
+    assert logits.grad is not None
+    assert torch.isfinite(logits.grad).all()
+    assert logits.grad[0, 0, 1, 1].item() == 0.0
+
+
+def test_bev_class_weight_changes_gradient_budget_without_shifting_optimum():
+    target = torch.zeros(1, 2, 2, 2)
+    target[:, :, 0, 0] = 1.0
+    valid = torch.ones_like(target, dtype=torch.bool)
+    baseline_logits = torch.zeros_like(target, requires_grad=True)
+    weighted_logits = torch.zeros_like(target, requires_grad=True)
+
+    baseline = BEVSegmentationAuxiliaryLoss(
+        [3.0, 3.0],
+        class_weight=[1.0, 1.0],
+    )
+    weighted = BEVSegmentationAuxiliaryLoss(
+        [3.0, 3.0],
+        class_weight=[0.5, 1.5],
+    )
+    baseline(baseline_logits, target, valid).backward()
+    weighted(weighted_logits, target, valid).backward()
+
+    baseline_ratio = (
+        baseline_logits.grad[:, 1].abs().sum()
+        / baseline_logits.grad[:, 0].abs().sum()
+    )
+    weighted_ratio = (
+        weighted_logits.grad[:, 1].abs().sum()
+        / weighted_logits.grad[:, 0].abs().sum()
+    )
+    assert baseline_ratio.item() == pytest.approx(1.0)
+    assert weighted_ratio.item() == pytest.approx(3.0)
+
+
+def test_bev_loss_separates_rare_positive_and_negative_logits():
+    positive_counts = (128, 64, 32, 16, 8, 4, 2, 1)
+    target = torch.zeros(1, 8, 16, 16)
+    for class_index, positive_count in enumerate(positive_counts):
+        target[0, class_index].flatten()[:positive_count] = 1.0
+    valid = torch.ones_like(target, dtype=torch.bool)
+    pos_weight = [
+        min(64.0, (256 - positive_count) / positive_count)
+        for positive_count in positive_counts
+    ]
+    class_weight = (0.45, 0.4, 0.45, 0.55, 0.75, 1.0, 1.9, 2.5)
+    class_logits = torch.nn.Parameter(torch.zeros(8, 2))
+    optimizer = torch.optim.AdamW(
+        [class_logits],
+        lr=0.15,
+        weight_decay=0.0,
+    )
+    loss_fn = BEVSegmentationAuxiliaryLoss(
+        pos_weight,
+        class_weight=class_weight,
+    )
+
+    initial_loss = None
+    for _ in range(120):
+        logits = torch.where(
+            target.to(dtype=torch.bool),
+            class_logits[:, 1].view(1, 8, 1, 1),
+            class_logits[:, 0].view(1, 8, 1, 1),
+        )
+        loss = loss_fn(logits, target, valid)
+        if initial_loss is None:
+            initial_loss = float(loss.detach())
+        optimizer.zero_grad(set_to_none=True)
+        loss.backward()
+        optimizer.step()
+
+    assert initial_loss is not None
+    assert float(loss.detach()) < initial_loss * 0.02
+    assert bool(
+        ((class_logits[:, 1] - class_logits[:, 0]) > 8.0).all()
+    )
+
+
 def test_repeat_importance_preserves_non_bev_objective_mean():
     objective = ReactiveMultitaskObjective(
         ReactiveTrainingStage.L2D_CONTINUATION,
@@ -702,6 +918,7 @@ def test_bev_only_objective_skips_inactive_inputs_and_gradients():
         trajectory_weight=0.0,
         bev_weight=1.0,
         route_weight=0.0,
+        training_scope=ReactiveTrainingScope.BEV_ONLY,
     )
     controls = torch.randn(1, 128, requires_grad=True)
     bev_logits = torch.zeros(1, 1, 4, 4, requires_grad=True)
@@ -723,12 +940,234 @@ def test_bev_only_objective_skips_inactive_inputs_and_gradients():
 
     assert objective.compute_bev_segmentation
     assert not objective.compute_route_reconstruction
+    assert objective.is_bev_only
     assert terms["trajectory"].item() == 0.0
     assert terms["route_reconstruction"].item() == 0.0
     assert controls.grad is not None
     assert torch.count_nonzero(controls.grad).item() == 0
     assert bev_logits.grad is not None
     assert torch.count_nonzero(bev_logits.grad).item() > 0
+
+
+def test_bev_repeat_importance_preserves_loss_and_gradient():
+    objective = ReactiveMultitaskObjective(
+        ReactiveTrainingStage.NUPLAN_FULL,
+        bev_pos_weight=[3.0, 7.0],
+        bev_class_weight=[0.75, 1.25],
+        bev_positive_pair_frequency=[0.5, 0.5],
+        trajectory_weight=0.0,
+        bev_weight=1.0,
+        route_weight=0.0,
+        training_scope=ReactiveTrainingScope.BEV_ONLY,
+    )
+    target = torch.zeros(2, 2, 2, 2)
+    target[0, 0, 0, 0] = 1.0
+    target[1, 1, 1, 1] = 1.0
+    valid = torch.ones_like(target, dtype=torch.bool)
+    baseline_logits = torch.tensor(
+        [
+            [
+                [[0.2, -0.3], [0.1, -0.4]],
+                [[-0.5, 0.3], [-0.2, 0.1]],
+            ],
+            [
+                [[-0.4, 0.2], [0.3, -0.1]],
+                [[0.1, -0.2], [0.4, 0.5]],
+            ],
+        ],
+        requires_grad=True,
+    )
+    baseline = objective(
+        torch.zeros(2, 0),
+        {"bev_segmentation_logits": baseline_logits},
+        {
+            "bev_segmentation_available": torch.ones(
+                2,
+                dtype=torch.bool,
+            ),
+            "bev_segmentation_target": target,
+            "bev_segmentation_valid": valid,
+        },
+    )
+    baseline["total"].backward()
+
+    repeated_logits = baseline_logits.detach().clone().requires_grad_(True)
+    repeated_indices = torch.tensor([0, 1, 1, 1, 1])
+    repeated = objective(
+        torch.zeros(5, 0),
+        {
+            "bev_segmentation_logits": repeated_logits[
+                repeated_indices
+            ],
+        },
+        {
+            "bev_sampling_importance": torch.tensor(
+                [2.5, 0.625, 0.625, 0.625, 0.625],
+            ),
+            "bev_segmentation_available": torch.ones(
+                5,
+                dtype=torch.bool,
+            ),
+            "bev_segmentation_target": target[repeated_indices],
+            "bev_segmentation_valid": valid[repeated_indices],
+        },
+    )
+    repeated["total"].backward()
+
+    for name in (
+        "total",
+        "bev_segmentation",
+        "bev_segmentation_bce",
+        "bev_segmentation_dice",
+    ):
+        torch.testing.assert_close(repeated[name], baseline[name])
+    torch.testing.assert_close(
+        repeated_logits.grad,
+        baseline_logits.grad,
+    )
+
+
+def test_bev_only_scope_skips_navigation_and_planner(
+    build_mock_model,
+    device,
+):
+    model = _model(build_mock_model, device).train()
+    configure_model_for_stage(
+        model,
+        ReactiveTrainingStage.NUPLAN_FULL,
+        freeze_bevformer=False,
+        train_bev_head=True,
+        training_scope=ReactiveTrainingScope.BEV_ONLY,
+    )
+    reactive = model.Reactive_E2E
+    skipped_modules = (
+        reactive.NavigationEncoder,
+        reactive.MapBEVFusion,
+        reactive.TrajectoryPlanner,
+    )
+    calls = 0
+
+    def record_call(_module, _inputs, _output):
+        nonlocal calls
+        calls += 1
+
+    handles = [
+        module.register_forward_hook(record_call)
+        for module in skipped_modules
+    ]
+    try:
+        controls, auxiliary = _forward(
+            model,
+            _inputs(device),
+            compute_bev_segmentation=True,
+            compute_route_reconstruction=False,
+            bev_only=True,
+        )
+    finally:
+        for handle in handles:
+            handle.remove()
+
+    assert controls.shape == (2, 0)
+    assert "bev_segmentation_logits" in auxiliary
+    assert calls == 0
+    for module in (
+        reactive.Backbone,
+        reactive.FeatureFusion,
+        reactive.BEVSegmentationHead,
+    ):
+        assert any(parameter.requires_grad for parameter in module.parameters())
+    for module in skipped_modules:
+        assert all(
+            not parameter.requires_grad
+            for parameter in module.parameters()
+        )
+
+
+def test_bev_only_scope_freezes_structurally_unused_t8_parameters(
+    build_mock_model,
+    device,
+):
+    model = _model(
+        build_mock_model,
+        device,
+        views=6,
+        view_fusion_kwargs={
+            "architecture": "bevformer_v2_t8",
+            "activation_checkpointing": False,
+            "image_size": 32,
+            "front_image_size": 64,
+            "num_encoder_layers": 1,
+            "num_points": 2,
+            "query_chunk_size": 64,
+        },
+    )
+    configure_model_for_stage(
+        model,
+        ReactiveTrainingStage.NUPLAN_FULL,
+        freeze_bevformer=False,
+        train_bev_head=True,
+        training_scope=ReactiveTrainingScope.BEV_ONLY,
+    )
+    view_fusion = model.Reactive_E2E.FeatureFusion.view_fusion
+
+    assert not view_fusion.pseudo_projection.requires_grad
+    assert not view_fusion.front_cross_attention.value_proj.bias.requires_grad
+    assert not view_fusion.front_cross_attention.output_proj.bias.requires_grad
+    assert view_fusion.front_residual_gate.requires_grad
+    assert view_fusion.camera_embeddings.requires_grad
+
+
+def test_bev_only_scope_resolves_norm_eval_before_optimizer_discovery():
+    class NormEvalBackbone(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.convolution = torch.nn.Conv2d(3, 4, 1)
+            self.batch_norm = torch.nn.BatchNorm2d(4)
+
+        def train(self, mode=True):
+            super().train(mode)
+            self.batch_norm.eval()
+            for parameter in self.batch_norm.parameters():
+                parameter.requires_grad_(False)
+            return self
+
+    class Reactive(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.Backbone = NormEvalBackbone()
+            self.FeatureFusion = torch.nn.Conv2d(4, 4, 1)
+            self.BEVSegmentationHead = torch.nn.Conv2d(4, 8, 1)
+            self._camera_bev_frozen = False
+
+        def enable_bev_finetuning(self):
+            return None
+
+    class Model(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.Reactive_E2E = Reactive()
+
+    model = Model()
+    configure_model_for_stage(
+        model,
+        ReactiveTrainingStage.NUPLAN_FULL,
+        training_scope=ReactiveTrainingScope.BEV_ONLY,
+    )
+
+    reactive = model.Reactive_E2E
+    assert all(
+        parameter.requires_grad
+        for parameter in reactive.Backbone.convolution.parameters()
+    )
+    assert all(
+        not parameter.requires_grad
+        for parameter in reactive.Backbone.batch_norm.parameters()
+    )
+    assert not reactive.Backbone.batch_norm.training
+    assert all(
+        parameter.requires_grad
+        for parameter in reactive.BEVSegmentationHead.parameters()
+    )
 
 
 @pytest.mark.parametrize(
@@ -1335,6 +1774,19 @@ def test_stage_a_to_stage_b_to_semantic_artifact_smoke(
         metrics=stage_a_metrics,
     )
     assert len(checkpoint_sha256) == 64
+    legacy_payload = torch.load(
+        checkpoint_path,
+        map_location="cpu",
+        weights_only=False,
+    )
+    legacy_payload["config"].pop("bev_loss_version")
+    legacy_payload["config_sha256"] = reactive_config_sha256(
+        legacy_payload["config"]
+    )
+    torch.save(legacy_payload, checkpoint_path)
+    checkpoint_sha256 = hashlib.sha256(
+        checkpoint_path.read_bytes()
+    ).hexdigest()
 
     stage_b_model = _model(
         build_mock_model,
@@ -1354,6 +1806,9 @@ def test_stage_a_to_stage_b_to_semantic_artifact_smoke(
         "explicit_random_init"
     )
     assert lineage["stage_a_freeze_bevformer"] is True
+    assert lineage["stage_a_training_scope"] == "multitask"
+    assert lineage["stage_a_bev_loss_version"] is None
+    assert lineage["stage_a_weight_transfer_scope"] == "full_model_v1"
     assert lineage["stage_a_camera_embedding_transfer"] == {
         "policy": "identity",
         "source_camera_slots": list(CANONICAL_SIX_CAMERA_SLOTS),
@@ -1588,6 +2043,218 @@ def test_stage_b_reindexes_equal_count_permuted_camera_embeddings(tmp_path):
         "target_camera_slots": list(CANONICAL_SIX_CAMERA_SLOTS),
         "target_num_views": 6,
     }
+
+
+def test_stage_b_loads_only_trained_modules_from_bev_only_parent(
+    build_mock_model,
+    device,
+    tmp_path,
+):
+    source_model = _model(build_mock_model, device)
+    target_model = _model(build_mock_model, device)
+    with torch.no_grad():
+        for parameter in source_model.parameters():
+            parameter.fill_(0.25)
+        for parameter in target_model.parameters():
+            parameter.fill_(-0.5)
+    untouched_before = {
+        name: parameter.detach().clone()
+        for name, parameter in target_model.named_parameters()
+        if name.startswith(
+            (
+                "Reactive_E2E.MapEncoder.",
+                "Reactive_E2E.RouteEncoder.",
+                "Reactive_E2E.TrajectoryPlanner.",
+            )
+        )
+    }
+    checkpoint_path = tmp_path / "bev-only-stage-a.pt"
+    camera_slots = [f"legacy_{index}" for index in range(8)]
+    save_reactive_checkpoint(
+        checkpoint_path,
+        source_model,
+        stage=ReactiveTrainingStage.NUPLAN_FULL,
+        dataset_manifest_sha256="a" * 64,
+        epoch=1,
+        model_config={
+            "num_views": 8,
+            "camera_slots": camera_slots,
+            "trajectory_weight": 0.0,
+            "bev_weight": 1.0,
+            "route_weight": 0.0,
+            "corridor_pos_weight": 1.0,
+            "training_seed": 149,
+            "training_scope": "bev_only",
+            "scheduler_identity": "bev_ap_plateau_v1",
+            "optimizer_identity": "bev_discriminative_adamw_v1",
+            "bev_encoder_learning_rate": 1e-5,
+            "freeze_bevformer": False,
+            "bev_pos_weights": [2.0] * 8,
+            "bev_class_weights": [1.0] * 8,
+            "bev_positive_pair_frequencies": [0.5] * 8,
+            "bev_repeat_factors": [1] * 8,
+            "bev_sampling_importance_correction": (
+                BEV_SAMPLING_IMPORTANCE_CORRECTION_VERSION
+            ),
+            "bev_taxonomy_version": BEV_SEGMENTATION_TAXONOMY_VERSION,
+            "is_pretrained": False,
+            "allow_random_bevformer_init": True,
+        },
+        metrics={
+            "single_worker_smoke": 0,
+            "bounded_bev_canary": 0,
+            "checkpoint_quality_guard_enforced": 1,
+            "bev_checkpoint_class_guard_pass": 1,
+            "bev_parent_promotion_eligible": 1,
+        },
+    )
+
+    lineage = load_stage_a_parent(
+        target_model,
+        checkpoint_path,
+        target_camera_slots=camera_slots,
+        required_training_scope="bev_only",
+    )
+
+    source_state = source_model.state_dict()
+    target_state = target_model.state_dict()
+    for prefix in (
+        "Reactive_E2E.Backbone.",
+        "Reactive_E2E.FeatureFusion.",
+        "Reactive_E2E.BEVSegmentationHead.",
+    ):
+        for name, value in target_state.items():
+            if name.startswith(prefix):
+                torch.testing.assert_close(value, source_state[name])
+    for name, value in untouched_before.items():
+        torch.testing.assert_close(target_state[name], value)
+    assert lineage["stage_a_freeze_bevformer"] is False
+    assert lineage["stage_a_training_scope"] == "bev_only"
+    assert lineage["stage_a_bev_loss_version"] is not None
+    assert lineage["stage_a_weight_transfer_scope"] == "bev_modules_v1"
+
+    valid_payload = torch.load(
+        checkpoint_path,
+        map_location="cpu",
+        weights_only=False,
+    )
+    with pytest.raises(ValueError, match="training scope differs"):
+        load_stage_a_parent(
+            target_model,
+            checkpoint_path,
+            target_camera_slots=camera_slots,
+            required_training_scope="multitask",
+        )
+
+    invalid_payload = {
+        **valid_payload,
+        "config": dict(valid_payload["config"]),
+    }
+    invalid_payload["config"].pop("bev_loss_version")
+    invalid_payload["config_sha256"] = reactive_config_sha256(
+        invalid_payload["config"]
+    )
+    torch.save(invalid_payload, checkpoint_path)
+    with pytest.raises(
+        ValueError,
+        match="bev_loss_version",
+    ):
+        load_stage_a_parent(
+            target_model,
+            checkpoint_path,
+            target_camera_slots=camera_slots,
+            required_training_scope="bev_only",
+        )
+
+    smoke_payload = {
+        **valid_payload,
+        "config": {
+            **valid_payload["config"],
+            "single_worker_smoke": True,
+        },
+        "metrics": {
+            **valid_payload["metrics"],
+            "single_worker_smoke": 1,
+            "bev_parent_promotion_eligible": 0,
+        },
+    }
+    smoke_payload["config_sha256"] = reactive_config_sha256(
+        smoke_payload["config"]
+    )
+    smoke_payload["metrics_sha256"] = reactive_metrics_sha256(
+        smoke_payload["metrics"]
+    )
+    torch.save(smoke_payload, checkpoint_path)
+    with pytest.raises(ValueError, match="smoke checkpoint"):
+        load_stage_a_parent(
+            target_model,
+            checkpoint_path,
+            target_camera_slots=camera_slots,
+            required_training_scope="bev_only",
+        )
+
+    canary_payload = {
+        **valid_payload,
+        "config": {
+            **valid_payload["config"],
+            "bounded_bev_canary": True,
+        },
+        "metrics": {
+            **valid_payload["metrics"],
+            "bounded_bev_canary": 1,
+            "bev_parent_promotion_eligible": 0,
+        },
+    }
+    canary_payload["config_sha256"] = reactive_config_sha256(
+        canary_payload["config"]
+    )
+    canary_payload["metrics_sha256"] = reactive_metrics_sha256(
+        canary_payload["metrics"]
+    )
+    torch.save(canary_payload, checkpoint_path)
+    with pytest.raises(ValueError, match="canary checkpoint"):
+        load_stage_a_parent(
+            target_model,
+            checkpoint_path,
+            target_camera_slots=camera_slots,
+            required_training_scope="bev_only",
+        )
+
+    failed_quality_payload = {
+        **valid_payload,
+        "metrics": {
+            **valid_payload["metrics"],
+            "bev_checkpoint_class_guard_pass": 0,
+            "bev_parent_promotion_eligible": 0,
+        },
+    }
+    failed_quality_payload["metrics_sha256"] = reactive_metrics_sha256(
+        failed_quality_payload["metrics"]
+    )
+    torch.save(failed_quality_payload, checkpoint_path)
+    with pytest.raises(ValueError, match="production-quality eligible"):
+        load_stage_a_parent(
+            target_model,
+            checkpoint_path,
+            target_camera_slots=camera_slots,
+            required_training_scope="bev_only",
+        )
+
+    tampered_metrics_payload = {
+        **valid_payload,
+        "metrics": {
+            **valid_payload["metrics"],
+            "bev_checkpoint_class_guard_pass": 0,
+        },
+    }
+    torch.save(tampered_metrics_payload, checkpoint_path)
+    with pytest.raises(ValueError, match="metrics digest"):
+        load_stage_a_parent(
+            target_model,
+            checkpoint_path,
+            target_camera_slots=camera_slots,
+            required_training_scope="bev_only",
+        )
 
 
 def test_multitask_evaluator_reports_partial_horizons_and_route_use(

@@ -13,6 +13,7 @@ from data_parsing.kit_scenes.camera import (
     CAMERA_NAMES,
     NUM_VIEWS,
     compute_camera_projection_matrices,
+    compute_temporal_camera_projection_matrices,
     load_camera_frame,
 )
 from data_parsing.kit_scenes.dataset import (
@@ -37,6 +38,11 @@ def _dataset_stub(samples):
     dataset.camera_slots = ["front", "front_left"]
     dataset._scene_egomotion = {
         scene_id: np.zeros((200, 4), dtype=np.float32)
+        for scene_id, _ in samples
+    }
+    dataset._source_hz = 10.0
+    dataset._scene_timestamps_ns = {
+        scene_id: np.arange(200, dtype=np.int64) * 100_000_000
         for scene_id, _ in samples
     }
     return dataset
@@ -88,6 +94,24 @@ def test_world_model_ids_and_rows_never_leave_scene():
         (scene, 130),
         (scene, 140),
     ]
+
+
+def test_bevformer_history_rows_use_exact_half_second_intervals():
+    scene = "fd1d1b6b-59bf-4292-8295-5028aa6aa5e3"
+    dataset = _dataset_stub([(scene, 100)])
+
+    assert dataset.bevformer_history_rows(0) == [
+        (scene, 65),
+        (scene, 70),
+        (scene, 75),
+        (scene, 80),
+        (scene, 85),
+        (scene, 90),
+        (scene, 95),
+    ]
+    frame_ids = dataset.bevformer_history_frame_ids(0)
+    assert len(frame_ids) == 7
+    assert all(len(frame) == 2 for frame in frame_ids)
 
 
 def test_heading_conversion_uses_absolute_yaw_not_yaw_rate():
@@ -279,6 +303,30 @@ def test_camera_pipeline_resizes_without_normalizing_and_scales_intrinsics():
     assert projection[0, 1, 1] == pytest.approx(320.0)
     assert projection[0, 0, 2] == pytest.approx(16.0)
     assert projection[0, 1, 2] == pytest.approx(16.0)
+
+
+def test_temporal_projection_maps_current_reference_into_history_camera():
+    loader = _CameraLoader()
+    poses = [
+        SimpleNamespace(
+            translation=np.array([float(index), 0.0, 0.0]),
+            rotation=np.array([0.0, 0.0, 0.0, 1.0]),
+        )
+        for index in range(3)
+    ]
+
+    projection = compute_temporal_camera_projection_matrices(
+        loader,
+        poses,
+        reference_frame_idx=2,
+        history_frame_indices=[0, 1],
+        camera_names=["front"],
+        image_size=32,
+    )
+
+    assert projection.shape == (2, 1, 3, 4)
+    assert projection[0, 0, 0, 3] == pytest.approx(320.0)
+    assert projection[1, 0, 0, 3] == pytest.approx(160.0)
 
 
 def test_projection_spec_describes_top_lidar_ground_plane():

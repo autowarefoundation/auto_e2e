@@ -326,13 +326,15 @@ def test_history_camera_projection_uses_current_ego_reference(
         identity_quaternion,
     )
 
-    _, matrices, front_matrix, metadata = _rectify_camera_rows(
-        {channel: row for channel in NUPLAN_CAMERA_CHANNELS},
-        sensor_root=str(tmp_path),
-        reference_pose=reference_pose,
-        reference_timestamp=10_000_000,
-        image_size=REACTIVE_CAMERA_IMAGE_SIZE,
-        native_front=False,
+    _, front_fpn_jpeg, matrices, front_matrix, metadata = (
+        _rectify_camera_rows(
+            {channel: row for channel in NUPLAN_CAMERA_CHANNELS},
+            sensor_root=str(tmp_path),
+            reference_pose=reference_pose,
+            reference_timestamp=10_000_000,
+            image_size=REACTIVE_CAMERA_IMAGE_SIZE,
+            native_front=False,
+        )
     )
 
     scaled_intrinsic = np.eye(3, dtype=np.float64)
@@ -342,6 +344,7 @@ def test_history_camera_projection_uses_current_ego_reference(
     image_from_current[0, 3] = 2.0
     expected = scaled_intrinsic @ image_from_current[:3]
     np.testing.assert_allclose(matrices[0], expected)
+    assert front_fpn_jpeg is None
     assert front_matrix is None
     assert {
         camera["sensor_model"] for camera in metadata
@@ -377,6 +380,83 @@ def test_nuplan_camera_rectification_rejects_non_caltech_distortion(
             image_size=REACTIVE_CAMERA_IMAGE_SIZE,
             native_front=False,
         )
+
+
+def test_nuplan_current_front_emits_direct_base_resolution_jpeg(
+    tmp_path,
+    monkeypatch,
+):
+    fake_cv2 = types.SimpleNamespace(
+        getOptimalNewCameraMatrix=lambda intrinsic, *_args: (
+            intrinsic.copy(),
+            None,
+        ),
+        undistort=lambda image, *_args: image,
+    )
+    monkeypatch.setitem(sys.modules, "cv2", fake_cv2)
+    image_path = tmp_path / "front.jpg"
+    pixels = np.arange(8 * 8 * 3, dtype=np.uint8).reshape(8, 8, 3)
+    Image.fromarray(pixels).save(image_path, quality=95)
+    identity_quaternion = np.asarray(
+        [1.0, 0.0, 0.0, 0.0],
+        dtype=np.float64,
+    )
+    row = {
+        "distortion": pickle.dumps(np.zeros(5, dtype=np.float64)),
+        "filename_jpg": image_path.name,
+        "height": 8,
+        "intrinsic": pickle.dumps(np.eye(3, dtype=np.float64)),
+        "model": "DesignCore D3CM-IMX390",
+        "qw": 1.0,
+        "qx": 0.0,
+        "qy": 0.0,
+        "qz": 0.0,
+        "rotation": pickle.dumps(identity_quaternion),
+        "timestamp": 10_000_000,
+        "translation": pickle.dumps(np.zeros(3, dtype=np.float64)),
+        "width": 8,
+        "x": 0.0,
+        "y": 0.0,
+        "z": 0.0,
+    }
+
+    jpegs, front_fpn_jpeg, _, front_matrix, _ = (
+        _rectify_camera_rows(
+            {channel: row for channel in NUPLAN_CAMERA_CHANNELS},
+            sensor_root=str(tmp_path),
+            reference_pose=np.eye(4, dtype=np.float64),
+            reference_timestamp=10_000_000,
+            image_size=REACTIVE_CAMERA_IMAGE_SIZE,
+            native_front=True,
+        )
+    )
+
+    assert front_fpn_jpeg is not None
+    assert front_matrix is not None
+    with Image.open(io.BytesIO(jpegs[NUPLAN_CAMERA_CHANNELS[0]])) as image:
+        assert image.size == (
+            REACTIVE_FRONT_CAMERA_IMAGE_SIZE,
+            REACTIVE_FRONT_CAMERA_IMAGE_SIZE,
+        )
+    with Image.open(io.BytesIO(front_fpn_jpeg)) as image:
+        assert image.size == (
+            REACTIVE_CAMERA_IMAGE_SIZE,
+            REACTIVE_CAMERA_IMAGE_SIZE,
+        )
+    with Image.open(image_path) as source:
+        rectified = np.asarray(source.convert("RGB"), dtype=np.uint8)
+    expected = io.BytesIO()
+    Image.fromarray(rectified).resize(
+        (REACTIVE_CAMERA_IMAGE_SIZE, REACTIVE_CAMERA_IMAGE_SIZE),
+        resample=Image.Resampling.BILINEAR,
+    ).save(
+        expected,
+        format="JPEG",
+        quality=90,
+        optimize=False,
+        progressive=False,
+    )
+    assert front_fpn_jpeg == expected.getvalue()
 
 
 def test_nuplan_projection_inverts_sensor_to_ego_yaw(
@@ -417,7 +497,7 @@ def test_nuplan_projection_inverts_sensor_to_ego_yaw(
         "z": 0.0,
     }
 
-    _, matrices, _, _ = _rectify_camera_rows(
+    _, front_fpn_jpeg, matrices, _, _ = _rectify_camera_rows(
         {channel: row for channel in NUPLAN_CAMERA_CHANNELS},
         sensor_root=str(tmp_path),
         reference_pose=np.eye(4, dtype=np.float64),
@@ -425,6 +505,7 @@ def test_nuplan_projection_inverts_sensor_to_ego_yaw(
         image_size=REACTIVE_CAMERA_IMAGE_SIZE,
         native_front=False,
     )
+    assert front_fpn_jpeg is None
 
     scaled_intrinsic = np.eye(3, dtype=np.float64)
     scaled_intrinsic[0] *= REACTIVE_CAMERA_IMAGE_SIZE / 4
@@ -1001,6 +1082,7 @@ def test_nuplan_packer_emits_log_grouped_immutable_shards(
             channel: b"\xff\xd8\xff\xd9"
             for channel in NUPLAN_CAMERA_CHANNELS
         },
+        front_camera_fpn_jpeg=b"\xff\xd8\xff\xd9",
         projection_matrices=projection_matrices,
         front_projection_matrix=front_projection_matrix,
         history_jpeg_by_frame=tuple(
@@ -1031,6 +1113,7 @@ def test_nuplan_packer_emits_log_grouped_immutable_shards(
                 for index, channel in enumerate(NUPLAN_CAMERA_CHANNELS)
             ],
             "front_camera_image_size": REACTIVE_FRONT_CAMERA_IMAGE_SIZE,
+            "front_camera_fpn_image_size": REACTIVE_CAMERA_IMAGE_SIZE,
             "front_camera_index": REACTIVE_FRONT_CAMERA_INDEX,
             "image_size": REACTIVE_CAMERA_IMAGE_SIZE,
             "rectification_policy": "test",
@@ -1121,6 +1204,11 @@ def test_nuplan_packer_emits_log_grouped_immutable_shards(
         assert sum(name.endswith(".jpg") for name in names) == (
             len(NUPLAN_CAMERA_CHANNELS)
             * (REACTIVE_BEVFORMER_HISTORY_FRAMES + 1)
+            + 1
+        )
+        assert any(
+            name.endswith(".front_camera_fpn.jpg")
+            for name in names
         )
         assert any(name.endswith(".trajectory_xy.npz") for name in names)
         assert any(name.endswith(".bev_segmentation.npz") for name in names)
@@ -1136,6 +1224,9 @@ def test_nuplan_packer_emits_log_grouped_immutable_shards(
         )
         assert calibration["front_camera_image_size"] == (
             REACTIVE_FRONT_CAMERA_IMAGE_SIZE
+        )
+        assert calibration["front_camera_fpn_image_size"] == (
+            REACTIVE_CAMERA_IMAGE_SIZE
         )
         assert np.asarray(
             calibration["front_projection"]["matrix"]

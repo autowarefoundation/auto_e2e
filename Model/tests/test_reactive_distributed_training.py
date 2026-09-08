@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import hashlib
 import inspect
+import io
 import json
+import math
 import random
 import re
 import tarfile
@@ -21,14 +23,23 @@ import distributed_training.reactive_stage as reactive_stage_module
 from data_parsing.camera_slots import CANONICAL_SIX_CAMERA_SLOTS
 from data_parsing.pre_extracted import (
     BEVClassRepeatPolicy,
+    BEVSampleStatistics,
     BEVTrainingStatistics,
+    bev_rank_full_microbatch_capacity,
+    derive_bev_gradient_budget_weights,
+    derive_bev_positive_pair_frequencies,
     derive_bev_pos_weights,
+    derive_bev_rank_importance_scale,
     derive_bev_repeat_factors,
+    discover_bev_sample_statistics,
     discover_bev_training_statistics,
     make_pre_extracted_loader,
     passthrough_nodesplitter,
+    select_bev_validation_holdout_sample_uids,
+    select_distributed_bev_validation_sample_uids,
 )
 from data_processing.reactive_training_artifacts import (
+    BEV_SEGMENTATION_CLASSES,
     BEV_SEGMENTATION_STATS_MEMBER,
     BEV_SEGMENTATION_TAXONOMY_VERSION,
     encode_bev_segmentation_stats,
@@ -45,21 +56,31 @@ from distributed_training.reactive_data import (
     stage_rank_reactive_shards,
 )
 from distributed_training.reactive_stage import (
+    BEV_AP_BOOTSTRAP_MAX_WEIGHT,
+    BEV_AP_BOOTSTRAP_VERSION,
+    BEV_AP_BOOTSTRAP_WEIGHT_SCALE,
     BEV_LANE_NEAR_RADIUS_M,
+    REACTIVE_DDP_TIMEOUT_SECONDS,
     REACTIVE_PERFORMANCE_LOG_INTERVAL_STEPS,
     REACTIVE_PERFORMANCE_LOG_VERSION,
+    REACTIVE_SAMPLE_STREAM_DIGEST_VERSION,
+    REACTIVE_SAMPLE_STREAM_INITIAL_SHA256,
     REACTIVE_STEP_CHECKPOINT_VERSION,
     ReactiveResumeState,
     expected_reactive_hostname_count,
     _all_reduce_bev_statistics,
     _aggregate_reactive_performance,
     _bev_lane_range_masks,
+    _bev_checkpoint_class_guard,
+    _bev_validation_positive_sample_counts,
+    _build_reactive_scheduler,
     _camera_feature_scale_weights,
     _capture_rng_state,
     _checkpoint_history,
     _checkpoint_step_due,
     _configure_t8_temporal_normalization,
     _histogram_average_precision,
+    _histogram_best_iou_operating_point,
     _evaluate_global_reactive,
     _load_resume_checkpoint,
     _model_state_sha256,
@@ -67,13 +88,24 @@ from distributed_training.reactive_stage import (
     _performance_sample_due,
     _rank_resume_value,
     _rank_resume_value_for_epoch,
+    _reactive_dataset_split_metrics,
+    _reactive_optimizer_parameter_groups,
+    _extend_sample_stream_sha256,
+    _reduce_reactive_validation_state,
+    _raise_distributed_validation_contract_errors,
+    _required_parent_training_scope,
+    _weighted_bev_prior_logit_biases,
     _replay_loader_position,
+    _resolve_resume_sources,
     _resume_completed_requested_epochs,
     _restore_rng_state,
     _route_validation_statistics,
     _select_result_checkpoint,
+    _should_initialize_bev_head_from_training_statistics,
+    _should_enforce_bev_checkpoint_quality_guard,
     _synchronize_gradient_micro_step,
     _train_fixed_steps,
+    _validate_bev_rank_truncation,
     _validate_checkpoint_interval,
     clip_finite_gradients_float64,
     normalize_ray_checkpoint_uri,
@@ -95,7 +127,22 @@ from reactive_training_contracts import (
     REACTIVE_FRONT_CAMERA_INDEX,
 )
 from training.dataset_policy import L2D_DATASET_NAME
-from training.reactive_multitask import ReactiveTrainingStage
+from training.reactive_multitask import (
+    ReactiveMultitaskObjective,
+    ReactiveTrainingScope,
+    ReactiveTrainingStage,
+)
+
+
+@pytest.mark.parametrize(
+    ("stage", "expected"),
+    (
+        (ReactiveTrainingStage.NUPLAN_FULL, "bev_only"),
+        (ReactiveTrainingStage.L2D_CONTINUATION, "multitask"),
+    ),
+)
+def test_continuation_stage_requires_reviewed_parent_scope(stage, expected):
+    assert _required_parent_training_scope(stage) == expected
 
 
 def test_bev_taxonomy_version_is_single_sourced():
@@ -380,11 +427,31 @@ def test_reactive_ddp_uses_static_graph_and_frozen_buffers():
     )[0]
     assert '"capacity_block_end_utc"' not in expected_resume_source
     assert '"capacity_block_end_utc"' in model_config_source
+    assert '"bev_ap_bins": int(config["bev_ap_bins"])' in (
+        expected_resume_source
+    )
+    assert '"bev_ap_bins": int(config["bev_ap_bins"])' in (
+        model_config_source
+    )
+    for field in (
+        '"num_loader_workers": int(config["num_loader_workers"])',
+        '"shuffle_buffer": int(config["shuffle_buffer"])',
+        '"sample_stream_digest_version"',
+        '"bev_checkpoint_quality_guard_version"',
+        '"bev_checkpoint_min_class_iou"',
+        '"bev_checkpoint_min_class_precision"',
+    ):
+        assert field in expected_resume_source
+        assert field in model_config_source
 
 
 def test_reactive_performance_sampling_and_nvidia_metrics():
     assert REACTIVE_PERFORMANCE_LOG_INTERVAL_STEPS == 64
     assert REACTIVE_PERFORMANCE_LOG_VERSION == "reactive_performance_v1"
+    assert (
+        REACTIVE_SAMPLE_STREAM_DIGEST_VERSION
+        == "reactive_sample_stream_v1"
+    )
     assert not _performance_sample_due(63, interval_steps=64)
     assert _performance_sample_due(64, interval_steps=64)
     with pytest.raises(ValueError, match="positive"):
@@ -514,7 +581,15 @@ def _run_static_graph_gloo_worker(
                     requires_grad=True,
                 )
                 with sync_context:
-                    model(value).square().mean().backward()
+                    output = model(value)
+                    loss = output.square().mean()
+                    diagnostic_gradient = torch.autograd.grad(
+                        loss,
+                        output,
+                        retain_graph=True,
+                    )[0]
+                    assert torch.isfinite(diagnostic_gradient).all()
+                    loss.backward()
             gradient = model.module.used.weight.grad
             assert gradient is not None
             assert torch.isfinite(gradient).all()
@@ -535,6 +610,175 @@ def test_static_graph_gloo_executes_production_no_sync_warmup(tmp_path):
         args=(2, str(tmp_path / "gloo-init")),
         nprocs=2,
         join=True,
+    )
+
+
+def _run_reactive_validation_reduction_gloo_worker(
+    rank: int,
+    world_size: int,
+    init_file: str,
+) -> None:
+    import torch
+    import torch.distributed as dist
+
+    dist.init_process_group(
+        "gloo",
+        init_method=f"file://{init_file}",
+        rank=rank,
+        world_size=world_size,
+    )
+    try:
+        expected_uids = tuple(
+            f"sample-{index}" for index in range(world_size)
+        )
+        expected_digest = hashlib.sha256(
+            "\n".join(expected_uids).encode("utf-8")
+        ).hexdigest()
+        integer_state = torch.tensor(
+            [rank + 1, (rank + 1) * 10],
+            dtype=torch.int64,
+        )
+        floating_state = torch.tensor(
+            [rank + 0.25],
+            dtype=torch.float64,
+        )
+        sample_uids = _reduce_reactive_validation_state(
+            (integer_state, floating_state),
+            local_sample_uids=(f"sample-{rank}",),
+            expected_sample_count=world_size,
+            expected_sample_uid_sha256=expected_digest,
+        )
+
+        assert integer_state.tolist() == [3, 30]
+        assert floating_state.tolist() == pytest.approx([1.5])
+        assert sample_uids == ("sample-0", "sample-1")
+        dist.barrier()
+    finally:
+        dist.destroy_process_group()
+
+
+def test_reactive_validation_reduction_uses_real_gloo_collectives(tmp_path):
+    torch = pytest.importorskip("torch")
+    if not torch.distributed.is_gloo_available():
+        pytest.skip("PyTorch was built without Gloo")
+
+    torch.multiprocessing.spawn(
+        _run_reactive_validation_reduction_gloo_worker,
+        args=(2, str(tmp_path / "validation-gloo-init")),
+        nprocs=2,
+        join=True,
+    )
+
+
+def _run_reactive_validation_uid_mismatch_gloo_worker(
+    rank: int,
+    world_size: int,
+    init_file: str,
+) -> None:
+    import torch
+    import torch.distributed as dist
+
+    dist.init_process_group(
+        "gloo",
+        init_method=f"file://{init_file}",
+        rank=rank,
+        world_size=world_size,
+    )
+    try:
+        expected_uids = tuple(
+            f"sample-{index}" for index in range(world_size)
+        )
+        expected_digest = hashlib.sha256(
+            "\n".join(expected_uids).encode("utf-8")
+        ).hexdigest()
+        local_uid = "replacement" if rank == 1 else f"sample-{rank}"
+        with pytest.raises(ValueError, match="frozen manifest"):
+            _reduce_reactive_validation_state(
+                (torch.ones(1, dtype=torch.float64),),
+                local_sample_uids=(local_uid,),
+                expected_sample_count=world_size,
+                expected_sample_uid_sha256=expected_digest,
+            )
+        dist.barrier()
+    finally:
+        dist.destroy_process_group()
+
+
+def test_reactive_validation_reduction_rejects_equal_count_uid_substitution(
+    tmp_path,
+):
+    torch = pytest.importorskip("torch")
+    if not torch.distributed.is_gloo_available():
+        pytest.skip("PyTorch was built without Gloo")
+
+    torch.multiprocessing.spawn(
+        _run_reactive_validation_uid_mismatch_gloo_worker,
+        args=(2, str(tmp_path / "validation-uid-mismatch-gloo-init")),
+        nprocs=2,
+        join=True,
+    )
+
+
+def _run_reactive_validation_error_gloo_worker(
+    rank: int,
+    world_size: int,
+    init_file: str,
+) -> None:
+    import torch.distributed as dist
+
+    dist.init_process_group(
+        "gloo",
+        init_method=f"file://{init_file}",
+        rank=rank,
+        world_size=world_size,
+    )
+    try:
+        local_errors = (
+            ["FloatingPointError: rank-local non-finite BEV logits"]
+            if rank == 1
+            else []
+        )
+        with pytest.raises(
+            ValueError,
+            match="rank-local non-finite BEV logits",
+        ):
+            _raise_distributed_validation_contract_errors(local_errors)
+        dist.barrier()
+    finally:
+        dist.destroy_process_group()
+
+
+def test_reactive_validation_errors_use_real_gloo_collectives(tmp_path):
+    torch = pytest.importorskip("torch")
+    if not torch.distributed.is_gloo_available():
+        pytest.skip("PyTorch was built without Gloo")
+
+    torch.multiprocessing.spawn(
+        _run_reactive_validation_error_gloo_worker,
+        args=(2, str(tmp_path / "validation-error-gloo-init")),
+        nprocs=2,
+        join=True,
+    )
+
+
+@pytest.mark.parametrize(
+    ("optimizer_steps", "expected"),
+    (
+        (1, {0}),
+        (4, {0, 1, 2, 3}),
+        (8, set(range(8))),
+        (15, {0, 2, 4, 6, 8, 10, 12, 14}),
+    ),
+)
+def test_bev_gradient_diagnostics_span_the_epoch(
+    optimizer_steps,
+    expected,
+):
+    assert (
+        reactive_stage_module._bev_gradient_diagnostic_step_indices(
+            optimizer_steps
+        )
+        == expected
     )
 
 
@@ -695,6 +939,7 @@ def test_fixed_step_resume_matches_uninterrupted_training(
 
     batches = [
         {
+            "sample_uid": [f"resume-sample-{index}"],
             "visual_tiles": torch.full((1, 1, 1, 1, 1), value),
             "map_context": torch.zeros(1, 1, 1, 1),
             "visual_history": torch.zeros(1, 1),
@@ -703,7 +948,7 @@ def test_fixed_step_resume_matches_uninterrupted_training(
             "map_valid": torch.ones(1, dtype=torch.bool),
             "route_valid": torch.ones(1, dtype=torch.bool),
         }
-        for value in (1.0, 2.0)
+        for index, value in enumerate((1.0, 2.0))
     ]
     monkeypatch.setattr(dist, "all_reduce", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(dist, "get_rank", lambda: 0)
@@ -797,16 +1042,24 @@ def test_fixed_step_resume_matches_uninterrupted_training(
 
 def test_replay_loader_position_checks_samples_and_restarts():
     batch = {
+        "sample_uid": ["sample-a", "sample-b"],
         "visual_tiles": np.zeros((2, 1, 1, 1, 1)),
     }
     iterator = RestartingIterator([batch])
+    expected_sha256 = REACTIVE_SAMPLE_STREAM_INITIAL_SHA256
+    for _ in range(2):
+        expected_sha256 = _extend_sample_stream_sha256(
+            expected_sha256,
+            batch["sample_uid"],
+        )
 
-    _replay_loader_position(
+    assert _replay_loader_position(
         iterator,
         skipped_micro_steps=2,
         expected_restarts=1,
         expected_samples=4,
-    )
+        expected_sample_stream_sha256=expected_sha256,
+    ) == expected_sha256
 
     with pytest.raises(ValueError, match="loader position"):
         _replay_loader_position(
@@ -814,6 +1067,20 @@ def test_replay_loader_position_checks_samples_and_restarts():
             skipped_micro_steps=2,
             expected_restarts=1,
             expected_samples=3,
+            expected_sample_stream_sha256=expected_sha256,
+        )
+
+    reversed_batch = {
+        **batch,
+        "sample_uid": list(reversed(batch["sample_uid"])),
+    }
+    with pytest.raises(ValueError, match="loader position"):
+        _replay_loader_position(
+            RestartingIterator([reversed_batch]),
+            skipped_micro_steps=2,
+            expected_restarts=1,
+            expected_samples=4,
+            expected_sample_stream_sha256=expected_sha256,
         )
 
 
@@ -963,6 +1230,69 @@ def test_ray_checkpoint_uri_rejects_paths_outside_storage():
         )
 
 
+def test_ray_managed_recovery_checkpoint_wins_after_explicit_resume():
+    ray_checkpoint = object()
+
+    restored, explicit_uri, ignored_explicit = (
+        _resolve_resume_sources(
+            ray_checkpoint,
+            "s3://checkpoints/original/checkpoint_0001/",
+        )
+    )
+
+    assert restored is ray_checkpoint
+    assert explicit_uri == ""
+    assert ignored_explicit is True
+
+
+def test_explicit_checkpoint_is_used_without_ray_checkpoint():
+    restored, explicit_uri, ignored_explicit = (
+        _resolve_resume_sources(
+            None,
+            "s3://checkpoints/original/checkpoint_0001/",
+        )
+    )
+
+    assert restored is None
+    assert explicit_uri == "s3://checkpoints/original/checkpoint_0001"
+    assert ignored_explicit is False
+
+
+@pytest.mark.parametrize(
+    (
+        "training_scope",
+        "parent_uri",
+        "restored_checkpoint",
+        "expected",
+    ),
+    (
+        (ReactiveTrainingScope.BEV_ONLY, "", None, True),
+        (
+            ReactiveTrainingScope.BEV_ONLY,
+            "s3://checkpoints/parent.pt",
+            None,
+            False,
+        ),
+        (ReactiveTrainingScope.BEV_ONLY, "", object(), False),
+        (ReactiveTrainingScope.MULTITASK, "", None, False),
+    ),
+)
+def test_bev_head_dataset_prior_initialization_is_fresh_start_only(
+    training_scope,
+    parent_uri,
+    restored_checkpoint,
+    expected,
+):
+    assert (
+        _should_initialize_bev_head_from_training_statistics(
+            training_scope,
+            parent_uri=parent_uri,
+            restored_checkpoint=restored_checkpoint,
+        )
+        is expected
+    )
+
+
 def test_rank_owned_nodesplitter_preserves_every_assigned_shard():
     urls = ["rank-000-part-000.tar", "rank-000-part-003.tar"]
 
@@ -1007,6 +1337,7 @@ def _stage_config(stage: str) -> dict[str, object]:
         "stage": stage,
         "steps_per_epoch": 0,
         "storage_path": "s3://checkpoints/ray-train",
+        "shuffle_buffer": 64,
         "training_seed": 149,
         "trajectory_weight": 1.0,
         "val_fraction": 0.1,
@@ -1016,9 +1347,290 @@ def _stage_config(stage: str) -> dict[str, object]:
     }
 
 
+def _single_worker_smoke_config() -> dict[str, object]:
+    config = _stage_config("nuplan_full")
+    config.update({
+        "allow_random_bevformer_init": False,
+        "allow_single_worker_smoke": True,
+        "backbone": "res_net_50",
+        "bev_encoder_learning_rate": 1e-5,
+        "bevformer_pretrained_checkpoint_sha256": "a" * 64,
+        "bevformer_pretrained_checkpoint_uri": "s3://bucket/model.pth",
+        "capacity_block_end_utc": "",
+        "checkpoint_interval_steps": 4,
+        "epochs": 1,
+        "freeze_bevformer": False,
+        "is_pretrained": True,
+        "num_workers": 1,
+        "parent_checkpoint_uri": "",
+        "per_rank_batch_size": 1,
+        "precision": "bf16",
+        "resume_checkpoint_uri": "",
+        "route_weight": 0.0,
+        "source_uris": [
+            "s3://datasets/reactive-000",
+            "s3://datasets/reactive-001",
+        ],
+        "steps_per_epoch": 8,
+        "training_scope": "bev_only",
+        "trajectory_weight": 0.0,
+        "validation_sample_limit": 128,
+        "worker_cpus": 3,
+    })
+    return config
+
+
 @pytest.mark.parametrize("stage", ["nuplan_full", "l2d_continuation"])
 def test_validate_stage_config_accepts_locked_program(stage):
     validate_reactive_stage_config(_stage_config(stage))
+
+
+def test_validate_stage_config_accepts_restricted_single_worker_smoke():
+    validate_reactive_stage_config(_single_worker_smoke_config())
+
+
+@pytest.mark.parametrize(
+    ("override", "match"),
+    [
+        ({"allow_single_worker_smoke": False}, "requires"),
+        ({"epochs": 2}, "single-worker smoke"),
+        ({"steps_per_epoch": 0}, "single-worker smoke"),
+        ({"steps_per_epoch": 1}, "single-worker smoke"),
+        ({"steps_per_epoch": 17}, "single-worker smoke"),
+        ({"checkpoint_interval_steps": 9}, "single-worker smoke"),
+        ({"per_rank_batch_size": 2}, "single-worker smoke"),
+        ({"gradient_accumulation_steps": 2}, "single-worker smoke"),
+        ({"backbone": "swin_v2_tiny"}, "single-worker smoke"),
+        (
+            {"capacity_block_end_utc": "2099-01-01T00:00:00Z"},
+            "single-worker smoke",
+        ),
+        ({"validation_sample_limit": 257}, "single-worker smoke"),
+        (
+            {
+                "source_uris": [
+                    "s3://datasets/reactive-000",
+                    "s3://datasets/reactive-001",
+                    "s3://datasets/reactive-002",
+                ],
+            },
+            "single-worker smoke",
+        ),
+    ],
+)
+def test_validate_stage_config_rejects_broadened_single_worker_smoke(
+    override,
+    match,
+):
+    config = _single_worker_smoke_config()
+    config.update(override)
+
+    with pytest.raises(ValueError, match=match):
+        validate_reactive_stage_config(config)
+
+
+def test_validate_stage_config_rejects_smoke_flag_on_production_topology():
+    config = _stage_config("nuplan_full")
+    config["allow_single_worker_smoke"] = True
+
+    with pytest.raises(ValueError, match="requires num_workers=1"):
+        validate_reactive_stage_config(config)
+
+
+@pytest.mark.parametrize("fraction", [0.0, 0.125])
+def test_bev_rank_truncation_guard_accepts_production_limit(fraction):
+    _validate_bev_rank_truncation(
+        fraction,
+        single_worker_smoke=False,
+        bounded_bev_canary=False,
+    )
+
+
+def test_bev_rank_truncation_guard_rejects_production_tail():
+    with pytest.raises(ValueError, match="truncation exceeds"):
+        _validate_bev_rank_truncation(
+            0.125001,
+            single_worker_smoke=False,
+            bounded_bev_canary=False,
+        )
+
+
+def test_bev_rank_truncation_guard_allows_bounded_smoke_prefix():
+    _validate_bev_rank_truncation(
+        0.999,
+        single_worker_smoke=True,
+        bounded_bev_canary=False,
+    )
+
+
+def test_bev_rank_truncation_guard_allows_bounded_canary_prefix():
+    _validate_bev_rank_truncation(
+        0.999,
+        single_worker_smoke=False,
+        bounded_bev_canary=True,
+    )
+
+
+@pytest.mark.parametrize(
+    (
+        "single_worker_smoke",
+        "bounded_bev_canary",
+        "expected",
+    ),
+    (
+        (False, False, True),
+        (True, False, False),
+        (False, True, False),
+    ),
+)
+def test_bev_checkpoint_quality_guard_is_production_only(
+    single_worker_smoke,
+    bounded_bev_canary,
+    expected,
+):
+    assert (
+        _should_enforce_bev_checkpoint_quality_guard(
+            single_worker_smoke=single_worker_smoke,
+            bounded_bev_canary=bounded_bev_canary,
+        )
+        is expected
+    )
+
+
+@pytest.mark.parametrize("fraction", [-0.1, 1.1, float("nan")])
+def test_bev_rank_truncation_guard_rejects_invalid_fraction(fraction):
+    with pytest.raises(RuntimeError, match="fraction is invalid"):
+        _validate_bev_rank_truncation(
+            fraction,
+            single_worker_smoke=True,
+            bounded_bev_canary=False,
+        )
+
+
+def test_validate_stage_config_accepts_bev_only_scope():
+    config = _stage_config("nuplan_full")
+    config.update({
+        "bev_encoder_learning_rate": 1e-5,
+        "bev_repeat_frequency_threshold": 0.01,
+        "freeze_bevformer": False,
+        "training_scope": "bev_only",
+        "trajectory_weight": 0.0,
+        "bev_weight": 1.0,
+        "route_weight": 0.0,
+        "validation_sample_limit": 4096,
+    })
+
+    validate_reactive_stage_config(config)
+
+
+def test_validate_stage_config_accepts_bounded_eight_rank_bev_canary():
+    config = _stage_config("nuplan_full")
+    config.update({
+        "allow_bounded_bev_canary": True,
+        "bev_encoder_learning_rate": 1e-5,
+        "bev_repeat_frequency_threshold": 0.05,
+        "capacity_block_end_utc": (
+            datetime.now(timezone.utc) + timedelta(hours=24)
+        ).isoformat(),
+        "epochs": 2,
+        "freeze_bevformer": False,
+        "num_workers": 8,
+        "per_rank_batch_size": 4,
+        "precision": "bf16",
+        "steps_per_epoch": 128,
+        "training_scope": "bev_only",
+        "trajectory_weight": 0.0,
+        "bev_weight": 1.0,
+        "route_weight": 0.0,
+    })
+
+    validate_reactive_stage_config(config)
+
+
+@pytest.mark.parametrize(
+    "override",
+    (
+        {"num_workers": 4},
+        {"epochs": 3},
+        {"steps_per_epoch": 0},
+        {"steps_per_epoch": 257},
+        {"per_rank_batch_size": 2},
+        {"precision": "fp32"},
+        {"freeze_bevformer": True},
+        {"training_scope": "multitask"},
+    ),
+)
+def test_validate_stage_config_rejects_broadened_bounded_bev_canary(
+    override,
+):
+    config = _stage_config("nuplan_full")
+    config.update({
+        "allow_bounded_bev_canary": True,
+        "bev_encoder_learning_rate": 1e-5,
+        "bev_repeat_frequency_threshold": 0.05,
+        "capacity_block_end_utc": (
+            datetime.now(timezone.utc) + timedelta(hours=24)
+        ).isoformat(),
+        "epochs": 2,
+        "freeze_bevformer": False,
+        "num_workers": 8,
+        "per_rank_batch_size": 4,
+        "precision": "bf16",
+        "steps_per_epoch": 128,
+        "training_scope": "bev_only",
+        "trajectory_weight": 0.0,
+        "bev_weight": 1.0,
+        "route_weight": 0.0,
+    })
+    config.update(override)
+
+    with pytest.raises(ValueError, match="allow_bounded_bev_canary"):
+        validate_reactive_stage_config(config)
+
+
+def test_validate_stage_config_rejects_unrepresentable_validation_fraction():
+    config = _stage_config("nuplan_full")
+    config["val_fraction"] = 0.15
+
+    with pytest.raises(ValueError, match="ten-bucket split"):
+        validate_reactive_stage_config(config)
+
+
+@pytest.mark.parametrize("shuffle_buffer", (0, 1))
+def test_validate_stage_config_rejects_disabled_shuffle(shuffle_buffer):
+    config = _stage_config("nuplan_full")
+    config["shuffle_buffer"] = shuffle_buffer
+
+    with pytest.raises(ValueError, match="shuffle_buffer"):
+        validate_reactive_stage_config(config)
+
+
+@pytest.mark.parametrize(
+    ("override", "match"),
+    [
+        ({"trajectory_weight": 1.0}, "only BEV loss"),
+        ({"route_weight": 1.0}, "only BEV loss"),
+        ({"bev_weight": 0.0}, "only BEV loss"),
+        ({"freeze_bevformer": True}, "unfrozen BEVFormer"),
+        ({"stage": "l2d_continuation"}, "nuPlan full"),
+    ],
+)
+def test_validate_stage_config_rejects_invalid_bev_only_scope(
+    override,
+    match,
+):
+    config = _stage_config("nuplan_full")
+    config.update({
+        "freeze_bevformer": False,
+        "training_scope": "bev_only",
+        "trajectory_weight": 0.0,
+        "bev_weight": 1.0,
+        "route_weight": 0.0,
+    })
+    config.update(override)
+
+    with pytest.raises(ValueError, match=match):
+        validate_reactive_stage_config(config)
 
 
 @pytest.mark.parametrize("batch_size", [2, 4])
@@ -1031,7 +1643,7 @@ def test_validate_stage_config_accepts_production_batch_sizes(batch_size):
 
 @pytest.mark.parametrize(
     ("world_size", "hostname_count"),
-    ((2, 2), (4, 1), (8, 1)),
+    ((1, 1), (2, 2), (4, 1), (8, 1)),
 )
 def test_expected_reactive_hostname_count_matches_ray_topology(
     world_size,
@@ -1043,8 +1655,22 @@ def test_expected_reactive_hostname_count_matches_ray_topology(
 def test_validate_stage_config_rejects_parent_and_batch_contract_changes():
     stage_a = _stage_config("nuplan_full")
     stage_a["parent_checkpoint_uri"] = "s3://checkpoints/parent.pt"
-    with pytest.raises(ValueError, match="Stage A"):
-        validate_reactive_stage_config(stage_a)
+    validate_reactive_stage_config(stage_a)
+
+    trainable_parent = dict(stage_a)
+    trainable_parent["freeze_bevformer"] = False
+    with pytest.raises(ValueError, match="frozen BEVFormer"):
+        validate_reactive_stage_config(trainable_parent)
+
+    bev_only_parent = dict(stage_a)
+    bev_only_parent.update({
+        "freeze_bevformer": False,
+        "training_scope": "bev_only",
+        "trajectory_weight": 0.0,
+        "route_weight": 0.0,
+    })
+    with pytest.raises(ValueError, match="multitask"):
+        validate_reactive_stage_config(bev_only_parent)
 
     stage_b = _stage_config("l2d_continuation")
     stage_b["per_rank_batch_size"] = 3
@@ -1168,10 +1794,15 @@ def test_step_checkpoint_restores_epoch_position_and_rank_state(tmp_path):
     }
     rank_train_states = [
         {
+            "bev_logit_gradient_batches": 0,
+            "bev_logit_gradient_totals": [],
             "consumed_samples": 3,
             "gradient_totals": [0.0] * 8,
             "loader_restarts": 0,
             "rank": rank,
+            "sample_stream_sha256": (
+                REACTIVE_SAMPLE_STREAM_INITIAL_SHA256
+            ),
             "term_totals": [0.0] * 6,
         }
         for rank in range(2)
@@ -1249,6 +1880,53 @@ def test_step_checkpoint_rejects_incomplete_rank_train_state(tmp_path):
     )
 
     with pytest.raises(ValueError, match="train state is incomplete"):
+        _load_resume_checkpoint(
+            str(checkpoint),
+            model=model,
+            optimizer=optimizer,
+            scheduler=scheduler,
+            expected=expected,
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "checkpoint_value", "requested_value"),
+    (
+        ("num_loader_workers", 2, 4),
+        ("shuffle_buffer", 64, 512),
+    ),
+)
+def test_resume_rejects_loader_topology_drift(
+    tmp_path,
+    field,
+    checkpoint_value,
+    requested_value,
+):
+    torch = pytest.importorskip("torch")
+    model = torch.nn.Linear(2, 1)
+    optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
+    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=1)
+    checkpoint_config = {
+        "distributed_world_size": 1,
+        "num_loader_workers": 2,
+        "optimizer_steps_per_epoch": 8,
+        "shuffle_buffer": 64,
+    }
+    checkpoint_config[field] = checkpoint_value
+    expected = {
+        **checkpoint_config,
+        field: requested_value,
+    }
+    checkpoint = tmp_path / f"loader-drift-{field}"
+    _write_resume_checkpoint(
+        checkpoint,
+        config=checkpoint_config,
+        model=model,
+        optimizer=optimizer,
+        scheduler=scheduler,
+    )
+
+    with pytest.raises(ValueError, match="resume contract differs"):
         _load_resume_checkpoint(
             str(checkpoint),
             model=model,
@@ -1390,7 +2068,10 @@ def test_ray_actor_cpu_reservation_matches_worker_config(
         "GPU": 1,
     }
     assert captured["torch_config"].init_method == "tcp"
-    assert captured["torch_config"].timeout_s == 300
+    assert (
+        captured["torch_config"].timeout_s
+        == REACTIVE_DDP_TIMEOUT_SECONDS
+    )
     assert (
         type(captured["torch_config"]).__name__
         == "PreparedCudaTorchConfig"
@@ -1404,6 +2085,15 @@ def test_ray_actor_cpu_reservation_matches_worker_config(
 
 
 def test_prepared_cuda_backend_initializes_rank_environment(monkeypatch):
+    for name in (
+        "ACCELERATE_TORCH_DEVICE",
+        "LOCAL_RANK",
+        "LOCAL_WORLD_SIZE",
+        "NODE_RANK",
+        "RANK",
+        "WORLD_SIZE",
+    ):
+        monkeypatch.setenv(name, "test-sentinel")
     context = SimpleNamespace(
         get_local_rank=lambda: 2,
         get_local_world_size=lambda: 8,
@@ -1721,9 +2411,13 @@ def test_bev_statistics_all_reduce_preserves_vector_offsets(monkeypatch):
 
     local = BEVTrainingStatistics(
         sample_count=2,
-        effective_exposure_count=3,
+        effective_exposure_count=10,
+        active_sample_count=(10,) * 8,
         positive_sample_count=tuple(range(1, 9)),
         positive_cell_count=tuple(range(11, 19)),
+        positive_fraction_sum=tuple(
+            (index + 1) / 10.0 for index in range(8)
+        ),
         positive_mass=tuple(index + 0.5 for index in range(21, 29)),
         valid_cell_count=tuple(range(101, 109)),
         exposure_digest="a" * 64,
@@ -1743,13 +2437,17 @@ def test_bev_statistics_all_reduce_preserves_vector_offsets(monkeypatch):
     combined = _all_reduce_bev_statistics(local, torch.device("cpu"))
 
     assert combined.sample_count == 4
-    assert combined.effective_exposure_count == 6
+    assert combined.effective_exposure_count == 20
+    assert combined.active_sample_count == (20,) * 8
     assert combined.positive_sample_count == tuple(
         2 * value for value in range(1, 9)
     )
     assert combined.positive_cell_count == tuple(
         2 * value for value in range(11, 19)
     )
+    assert combined.positive_fraction_sum == pytest.approx(tuple(
+        2 * (index + 1) / 10.0 for index in range(8)
+    ))
     assert combined.positive_mass == pytest.approx(tuple(
         2 * (index + 0.5) for index in range(21, 29)
     ))
@@ -1767,6 +2465,354 @@ def test_histogram_average_precision_matches_hand_calculation():
     )
 
     assert average_precision == pytest.approx(5.0 / 6.0)
+
+
+def test_histogram_best_iou_operating_point_prefers_clean_threshold():
+    torch = pytest.importorskip("torch")
+
+    threshold, iou, precision, recall = (
+        _histogram_best_iou_operating_point(
+            torch.tensor([0.0, 0.0, 1.0, 2.0]),
+            torch.tensor([3.0, 1.0, 0.0, 0.0]),
+        )
+    )
+
+    assert threshold == pytest.approx(0.5)
+    assert iou == 1.0
+    assert precision == 1.0
+    assert recall == 1.0
+
+
+def test_bev_only_optimizer_uses_discriminative_rates_and_no_decay_norms():
+    torch = pytest.importorskip("torch")
+
+    class ReactiveModules(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.Backbone = torch.nn.Sequential(
+                torch.nn.Conv2d(3, 4, 1),
+                torch.nn.BatchNorm2d(4),
+            )
+            self.FeatureFusion = torch.nn.Sequential(
+                torch.nn.Conv2d(4, 4, 1),
+                torch.nn.GroupNorm(1, 4),
+            )
+            self.FeatureFusion.add_module(
+                "bev_queries",
+                torch.nn.Embedding(4, 4),
+            )
+            self.FeatureFusion.register_parameter(
+                "camera_embeddings",
+                torch.nn.Parameter(torch.ones(2, 4)),
+            )
+            self.FeatureFusion.register_parameter(
+                "level_embeddings",
+                torch.nn.Parameter(torch.ones(2, 4)),
+            )
+            self.BEVSegmentationHead = torch.nn.Conv2d(4, 8, 1)
+
+    class Model(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.Reactive_E2E = ReactiveModules()
+
+    model = Model()
+    groups = _reactive_optimizer_parameter_groups(
+        model,
+        training_scope=ReactiveTrainingScope.BEV_ONLY,
+        learning_rate=1e-4,
+        bev_encoder_learning_rate=1e-5,
+        weight_decay=1e-2,
+    )
+
+    assert {group["name"] for group in groups} == {
+        "bev_encoder_decay",
+        "bev_encoder_no_decay",
+        "bev_head_decay",
+        "bev_head_no_decay",
+    }
+    assert {
+        group["lr"]
+        for group in groups
+        if group["name"].startswith("bev_encoder")
+    } == {1e-5}
+    assert {
+        group["lr"]
+        for group in groups
+        if group["name"].startswith("bev_head")
+    } == {1e-4}
+    assert {
+        group["weight_decay"]
+        for group in groups
+        if group["name"].endswith("no_decay")
+    } == {0.0}
+    no_decay_ids = {
+        id(parameter)
+        for group in groups
+        if group["name"].endswith("no_decay")
+        for parameter in group["params"]
+    }
+    assert id(model.Reactive_E2E.FeatureFusion.bev_queries.weight) in (
+        no_decay_ids
+    )
+    assert id(model.Reactive_E2E.FeatureFusion.camera_embeddings) in (
+        no_decay_ids
+    )
+    assert id(model.Reactive_E2E.FeatureFusion.level_embeddings) in (
+        no_decay_ids
+    )
+    assigned = [
+        id(parameter)
+        for group in groups
+        for parameter in group["params"]
+    ]
+    assert len(assigned) == len(set(assigned))
+    assert set(assigned) == {
+        id(parameter)
+        for parameter in model.parameters()
+        if parameter.requires_grad
+    }
+
+
+def test_bev_checkpoint_class_guard_requires_every_class():
+    validation = {"bev_min_ap_lift": 0.01}
+    for class_name in BEV_SEGMENTATION_CLASSES:
+        validation[f"bev_{class_name}_supported"] = 1.0
+        validation[
+            f"bev_{class_name}_ap_lift_bootstrap_lower_95"
+        ] = 0.001
+        validation[f"bev_{class_name}_positive_prevalence"] = 0.01
+        validation[
+            f"bev_{class_name}_best_iou_on_validation_set"
+        ] = 0.1
+        validation[
+            f"bev_{class_name}_best_iou_precision_on_validation_set"
+        ] = 0.2
+        validation[
+            f"bev_{class_name}_best_iou_recall_on_validation_set"
+        ] = 0.3
+
+    assert _bev_checkpoint_class_guard(validation)
+
+    validation[
+        "bev_other_obstacle_ap_lift_bootstrap_lower_95"
+    ] = -0.001
+    assert not _bev_checkpoint_class_guard(validation)
+
+    validation[
+        "bev_other_obstacle_ap_lift_bootstrap_lower_95"
+    ] = 0.001
+    validation[
+        "bev_other_obstacle_best_iou_precision_on_validation_set"
+    ] = 0.01
+    assert not _bev_checkpoint_class_guard(validation)
+
+    validation[
+        "bev_other_obstacle_best_iou_precision_on_validation_set"
+    ] = 0.149
+    assert not _bev_checkpoint_class_guard(validation)
+
+    validation[
+        "bev_other_obstacle_best_iou_precision_on_validation_set"
+    ] = 0.2
+    validation[
+        "bev_other_obstacle_best_iou_on_validation_set"
+    ] = 0.099
+    assert not _bev_checkpoint_class_guard(validation)
+
+
+def test_weighted_bev_prior_bias_matches_bce_constant_optimum():
+    statistics = BEVTrainingStatistics(
+        sample_count=10,
+        effective_exposure_count=10,
+        active_sample_count=(10,) * 8,
+        positive_sample_count=(10,) * 8,
+        positive_cell_count=(10,) * 8,
+        positive_fraction_sum=(1.0,) * 8,
+        positive_mass=(1.0,) * 8,
+        valid_cell_count=(100,) * 8,
+        exposure_digest="a" * 64,
+    )
+
+    biases = _weighted_bev_prior_logit_biases(
+        statistics,
+        (9.0,) * 8,
+    )
+
+    expected_probability = 0.5
+    expected_bias = math.log(
+        expected_probability / (1.0 - expected_probability)
+    )
+    assert biases == pytest.approx((expected_bias,) * 8)
+
+
+def test_bev_weighting_uses_sample_normalized_prevalence():
+    sample_prevalence = (0.5 + 1.0 / 64.0) / 2.0
+    statistics = BEVTrainingStatistics(
+        sample_count=2,
+        effective_exposure_count=2,
+        active_sample_count=(2,) * 8,
+        positive_sample_count=(2,) * 8,
+        positive_cell_count=(3,) * 8,
+        positive_fraction_sum=(
+            2.0 * sample_prevalence,
+        ) * 8,
+        positive_mass=(3.0,) * 8,
+        valid_cell_count=(68,) * 8,
+        exposure_digest="a" * 64,
+    )
+
+    pos_weights = derive_bev_pos_weights(
+        statistics,
+        max_weight=64.0,
+    )
+    expected_pos_weight = (
+        1.0 - sample_prevalence
+    ) / sample_prevalence
+    assert pos_weights == pytest.approx((expected_pos_weight,) * 8)
+    assert pos_weights[0] != pytest.approx((68.0 - 3.0) / 3.0)
+
+    biases = _weighted_bev_prior_logit_biases(
+        statistics,
+        (8.0,) * 8,
+    )
+    expected_probability = (
+        8.0 * sample_prevalence
+        / (1.0 - sample_prevalence + 8.0 * sample_prevalence)
+    )
+    expected_bias = math.log(
+        expected_probability / (1.0 - expected_probability)
+    )
+    assert biases == pytest.approx((expected_bias,) * 8)
+
+
+def test_bev_gradient_budget_weights_equalize_capped_bce_mass():
+    prevalence = (
+        0.35,
+        0.05,
+        0.17,
+        0.014,
+        0.01,
+        0.019,
+        0.001,
+        0.0008,
+    )
+    valid_count = 1_000_000
+    statistics = BEVTrainingStatistics(
+        sample_count=100,
+        effective_exposure_count=100,
+        active_sample_count=(100,) * 8,
+        positive_sample_count=(100,) * 8,
+        positive_cell_count=tuple(
+            int(value * valid_count) for value in prevalence
+        ),
+        positive_fraction_sum=tuple(
+            value * 100 for value in prevalence
+        ),
+        positive_mass=tuple(
+            value * valid_count for value in prevalence
+        ),
+        valid_cell_count=(valid_count,) * 8,
+        exposure_digest="a" * 64,
+    )
+    pos_weights = derive_bev_pos_weights(statistics, max_weight=64.0)
+    class_weights = derive_bev_gradient_budget_weights(
+        statistics,
+        pos_weights,
+    )
+    probability = np.asarray(prevalence)
+    positive_weight = np.asarray(pos_weights)
+    weighted_prior = (
+        positive_weight * probability
+        / (
+            1.0
+            - probability
+            + positive_weight * probability
+        )
+    )
+    gradient_mass = (
+        positive_weight * probability * (1.0 - weighted_prior)
+        + (1.0 - probability) * weighted_prior
+    ) * np.asarray(class_weights)
+
+    assert np.mean(class_weights) == pytest.approx(1.0)
+    assert class_weights[6] > 1.0
+    assert class_weights[7] > class_weights[6]
+    assert gradient_mass.max() / gradient_mass.min() < 1.15
+
+
+def test_bev_gradient_budget_weights_include_class_activity_rate():
+    statistics = BEVTrainingStatistics(
+        sample_count=100,
+        effective_exposure_count=100,
+        active_sample_count=(25, 100, 100, 100, 100, 100, 100, 100),
+        positive_sample_count=(10,) * 8,
+        positive_cell_count=(100,) * 8,
+        positive_fraction_sum=(2.5, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0),
+        positive_mass=(100.0,) * 8,
+        valid_cell_count=(1_000,) * 8,
+        exposure_digest="a" * 64,
+    )
+
+    class_weights = derive_bev_gradient_budget_weights(
+        statistics,
+        (9.0,) * 8,
+        max_relative_weight=16.0,
+    )
+
+    assert class_weights[0] == pytest.approx(
+        4.0 * class_weights[1]
+    )
+
+
+def test_bev_scheduler_warms_up_and_cosine_decays_per_step():
+    torch = pytest.importorskip("torch")
+    parameter = torch.nn.Parameter(torch.tensor(1.0))
+    optimizer = torch.optim.AdamW([parameter], lr=1e-4)
+
+    identity, scheduler = _build_reactive_scheduler(
+        optimizer,
+        training_scope=ReactiveTrainingScope.BEV_ONLY,
+        total_optimizer_steps=100,
+    )
+    learning_rates = [float(optimizer.param_groups[0]["lr"])]
+    for _ in range(100):
+        optimizer.step()
+        scheduler.step()
+        learning_rates.append(float(optimizer.param_groups[0]["lr"]))
+
+    assert identity == "bev_linear_warmup_cosine_v1"
+    assert learning_rates[0] == pytest.approx(5e-5)
+    assert max(learning_rates) == pytest.approx(1e-4)
+    assert learning_rates[-1] == pytest.approx(1e-5)
+    assert all(
+        earlier >= later
+        for earlier, later in zip(
+            learning_rates[2:],
+            learning_rates[3:],
+        )
+    )
+
+
+def test_reactive_dataset_split_metrics_report_actual_sample_ratio():
+    metrics = _reactive_dataset_split_metrics(
+        total_samples=131_072,
+        train_split_sample_count=121_750,
+        validation_evaluated_sample_count=1_024,
+        configured_validation_fraction=0.1,
+    )
+
+    assert metrics["validation_pool_sample_count"] == 9_322
+    assert metrics["configured_train_fraction"] == pytest.approx(0.9)
+    assert metrics["actual_train_fraction"] == pytest.approx(
+        0.9288787841796875
+    )
+    assert metrics["actual_validation_fraction"] == pytest.approx(
+        0.0711212158203125
+    )
+    assert metrics[
+        "validation_evaluated_fraction_of_pool"
+    ] == pytest.approx(1_024 / 9_322)
 
 
 def test_lane_range_masks_partition_physical_bev():
@@ -1913,7 +2959,13 @@ def test_stage_b_validation_emits_route_metrics(monkeypatch):
     torch = pytest.importorskip("torch")
     import torch.distributed as dist
 
-    target = torch.zeros(1, 2, 3, 5)
+    geometry = AUTOE2E_NAVIGATION_GEOMETRY
+    target = torch.zeros(
+        1,
+        2,
+        geometry.height_px,
+        geometry.width_px,
+    )
     target[0, 0, 1, 1:4] = 1.0
     target[0, 1, 2, 4] = 1.0
     logits = torch.full_like(target, -20.0)
@@ -1938,7 +2990,12 @@ def test_stage_b_validation_emits_route_metrics(monkeypatch):
     model = RouteValidationModel()
     batch = {
         "visual_tiles": torch.zeros(1, 1, 3, 2, 2),
-        "map_context": torch.zeros(1, 14, 3, 5),
+        "map_context": torch.zeros(
+            1,
+            14,
+            geometry.height_px,
+            geometry.width_px,
+        ),
         "visual_history": torch.zeros(1, 1),
         "egomotion_history": torch.zeros(1, 1),
         "route_mask": target,
@@ -1983,6 +3040,8 @@ def test_stage_a_validation_skips_disabled_route_decoder(monkeypatch):
     torch = pytest.importorskip("torch")
     import torch.distributed as dist
 
+    geometry = AUTOE2E_NAVIGATION_GEOMETRY
+
     class CapacityValidationModel(torch.nn.Module):
         def __init__(self):
             super().__init__()
@@ -1996,7 +3055,12 @@ def test_stage_a_validation_skips_disabled_route_decoder(monkeypatch):
             )
             return controls, {
                 "bev_segmentation_logits": visual_tiles.new_full(
-                    (visual_tiles.shape[0], 8, 3, 5),
+                    (
+                        visual_tiles.shape[0],
+                        8,
+                        geometry.height_px,
+                        geometry.width_px,
+                    ),
                     20.0,
                 ),
             }
@@ -2004,22 +3068,38 @@ def test_stage_a_validation_skips_disabled_route_decoder(monkeypatch):
     model = CapacityValidationModel()
     batch = {
         "visual_tiles": torch.zeros(1, 1, 3, 2, 2),
-        "map_context": torch.zeros(1, 14, 3, 5),
+        "map_context": torch.zeros(
+            1,
+            14,
+            geometry.height_px,
+            geometry.width_px,
+        ),
         "visual_history": torch.zeros(1, 1),
         "egomotion_history": torch.zeros(1, 1),
-        "route_mask": torch.zeros(1, 2, 3, 5),
+        "route_mask": torch.zeros(
+            1,
+            2,
+            geometry.height_px,
+            geometry.width_px,
+        ),
         "map_valid": torch.ones(1, dtype=torch.bool),
         "route_valid": torch.ones(1, dtype=torch.bool),
         "route_channel_valid": torch.ones(1, 2, dtype=torch.bool),
         "trajectory_xy_m": torch.zeros(1, 64, 2),
         "trajectory_valid": torch.ones(1, 64, dtype=torch.bool),
         "initial_speed_mps": torch.zeros(1),
-        "bev_segmentation_target": torch.ones(1, 8, 3, 5),
+        "sample_uid": ["stage-a-validation"],
+        "bev_segmentation_target": torch.ones(
+            1,
+            8,
+            geometry.height_px,
+            geometry.width_px,
+        ),
         "bev_segmentation_valid": torch.ones(
             1,
             8,
-            3,
-            5,
+            geometry.height_px,
+            geometry.width_px,
             dtype=torch.bool,
         ),
     }
@@ -2095,6 +3175,110 @@ def test_stage_a_validation_skips_disabled_route_decoder(monkeypatch):
     assert model.forward_options["compute_route_reconstruction"] is False
 
 
+def test_bev_only_validation_does_not_require_trajectory(monkeypatch):
+    torch = pytest.importorskip("torch")
+    import torch.distributed as dist
+
+    class BEVOnlyValidationModel(torch.nn.Module):
+        def __init__(self, logits):
+            super().__init__()
+            self.logits = logits
+            self.forward_options = None
+
+        def forward(self, visual_tiles, *args, **kwargs):
+            self.forward_options = kwargs
+            return visual_tiles.new_zeros(
+                visual_tiles.shape[0],
+                0,
+            ), {
+                "bev_segmentation_logits": self.logits,
+            }
+
+    target = torch.zeros(1, 8, 4, 4)
+    for class_index in range(8):
+        target[0, class_index, class_index // 4, class_index % 4] = 1.0
+    logits = torch.where(
+        target > 0.5,
+        torch.full_like(target, 20.0),
+        torch.full_like(target, -20.0),
+    )
+    model = BEVOnlyValidationModel(logits)
+    projection = torch.zeros(1, 1, 3, 4)
+    projection[:, :, 2, 0] = 1.0
+    batch = {
+        "visual_tiles": torch.zeros(1, 1, 3, 2, 2),
+        "map_context": torch.zeros(1, 14, 4, 4),
+        "visual_history": torch.zeros(1, 1),
+        "egomotion_history": torch.zeros(1, 1),
+        "route_mask": torch.zeros(1, 2, 4, 4),
+        "map_valid": torch.ones(1, dtype=torch.bool),
+        "route_valid": torch.ones(1, dtype=torch.bool),
+        "route_channel_valid": torch.ones(1, 2, dtype=torch.bool),
+        "sample_uid": ["bev-only-validation"],
+        "bev_segmentation_target": target,
+        "bev_segmentation_valid": torch.ones_like(
+            target,
+            dtype=torch.bool,
+        ),
+        "camera_projection_matrix": projection,
+        "camera_geometry_type": "rectified_pinhole",
+        "front_camera_tile": torch.zeros(1, 3, 4, 4),
+        "front_camera_projection_matrix": projection.clone(),
+        "camera_history_tiles": torch.zeros(1, 7, 1, 3, 2, 2),
+        "camera_history_projection_matrix": (
+            projection[:, None].repeat(1, 7, 1, 1, 1)
+        ),
+    }
+    objective = ReactiveMultitaskObjective(
+        ReactiveTrainingStage.NUPLAN_FULL,
+        bev_pos_weight=[1.0] * 8,
+        trajectory_weight=0.0,
+        bev_weight=1.0,
+        route_weight=0.0,
+        training_scope=ReactiveTrainingScope.BEV_ONLY,
+    )
+    monkeypatch.setattr(dist, "all_reduce", lambda *_args, **_kwargs: None)
+
+    metrics = _evaluate_global_reactive(
+        model,
+        [batch],
+        objective,
+        stage=ReactiveTrainingStage.NUPLAN_FULL,
+        device=torch.device("cpu"),
+        probability_bins=8,
+        ade_scale_m=5.0,
+    )
+
+    assert "ade_6p4s_m" not in metrics
+    assert metrics["bev_all_classes_supported"] == 1.0
+    assert metrics["selection_score"] == pytest.approx(1.0)
+    for class_name in BEV_SEGMENTATION_CLASSES:
+        assert metrics[f"bev_{class_name}_average_precision"] == 1.0
+        assert (
+            metrics[
+                f"bev_{class_name}_best_iou_on_validation_set"
+            ]
+            == 1.0
+        )
+        assert metrics[f"bev_{class_name}_iou_at_0p5"] == 1.0
+        assert metrics[f"bev_{class_name}_precision_at_0p5"] == 1.0
+        assert metrics[f"bev_{class_name}_recall_at_0p5"] == 1.0
+    assert metrics["bev_threshold_selection"] == (
+        "same_validation_set_oracle"
+    )
+    assert metrics["bev_ap_bootstrap_version"] == (
+        BEV_AP_BOOTSTRAP_VERSION
+    )
+    assert metrics["bev_ap_bootstrap_weight_scale"] == float(
+        BEV_AP_BOOTSTRAP_WEIGHT_SCALE
+    )
+    assert metrics["bev_ap_bootstrap_max_weight"] == (
+        BEV_AP_BOOTSTRAP_MAX_WEIGHT
+    )
+    assert model.forward_options["bev_only"] is True
+    assert model.forward_options["compute_route_reconstruction"] is False
+
+
 def test_result_checkpoint_selection_honors_ade_guard(tmp_path):
     directory = tmp_path / "checkpoint"
     directory.mkdir()
@@ -2130,6 +3314,178 @@ def test_result_checkpoint_selection_honors_ade_guard(tmp_path):
     assert selected is checkpoint
     assert metrics == accepted
     assert _checkpoint_history(checkpoint) == history
+
+
+def test_result_checkpoint_selection_accepts_smoke_without_quality_gate():
+    checkpoint = SimpleNamespace(path="smoke")
+    metrics = {
+        "checkpoint_selection_score": -0.2,
+        "checkpoint_sha256": "a" * 64,
+        "epoch": 1,
+        "is_best": 1,
+        "single_worker_smoke": 1,
+    }
+    result = SimpleNamespace(
+        best_checkpoints=[(checkpoint, metrics)],
+        checkpoint=checkpoint,
+        metrics=metrics,
+    )
+
+    selected, selected_metrics = _select_result_checkpoint(result)
+
+    assert selected is checkpoint
+    assert selected_metrics == metrics
+
+
+def test_result_checkpoint_selection_retains_best_failed_quality_epoch():
+    lower_checkpoint = SimpleNamespace(path="epoch-1")
+    higher_checkpoint = SimpleNamespace(path="epoch-2")
+    common = {
+        "checkpoint_kind": "epoch",
+        "checkpoint_selection_score": -1.0,
+        "is_best": 0,
+        "single_worker_smoke": 0,
+        "bounded_bev_canary": 0,
+        "checkpoint_quality_guard_enforced": 1,
+        "bev_checkpoint_class_guard_pass": 0,
+        "bev_parent_promotion_eligible": 0,
+    }
+    lower = {
+        **common,
+        "checkpoint_sha256": "a" * 64,
+        "epoch": 1,
+        "validation_selection_score": 0.35,
+    }
+    higher = {
+        **common,
+        "checkpoint_sha256": "b" * 64,
+        "epoch": 2,
+        "validation_selection_score": 0.42,
+    }
+    result = SimpleNamespace(
+        best_checkpoints=[
+            (lower_checkpoint, lower),
+            (higher_checkpoint, higher),
+        ],
+        checkpoint=higher_checkpoint,
+        metrics=higher,
+    )
+
+    selected, selected_metrics = _select_result_checkpoint(result)
+
+    assert selected is higher_checkpoint
+    assert selected_metrics["selected_for_evaluation_only"] == 1
+    assert selected_metrics["bev_parent_promotion_eligible"] == 0
+    assert selected_metrics["checkpoint_sha256"] == "b" * 64
+
+
+def test_result_checkpoint_selection_prefers_accepted_quality_epoch():
+    accepted_checkpoint = SimpleNamespace(path="accepted")
+    failed_checkpoint = SimpleNamespace(path="failed")
+    accepted = {
+        "checkpoint_kind": "epoch",
+        "checkpoint_selection_score": 0.30,
+        "validation_selection_score": 0.30,
+        "checkpoint_sha256": "a" * 64,
+        "epoch": 1,
+        "is_best": 1,
+        "single_worker_smoke": 0,
+        "bounded_bev_canary": 0,
+        "checkpoint_quality_guard_enforced": 1,
+        "bev_checkpoint_class_guard_pass": 1,
+        "bev_parent_promotion_eligible": 1,
+    }
+    failed = {
+        **accepted,
+        "checkpoint_selection_score": -1.0,
+        "validation_selection_score": 0.50,
+        "checkpoint_sha256": "b" * 64,
+        "epoch": 2,
+        "is_best": 0,
+        "bev_checkpoint_class_guard_pass": 0,
+        "bev_parent_promotion_eligible": 0,
+    }
+    result = SimpleNamespace(
+        best_checkpoints=[
+            (accepted_checkpoint, accepted),
+            (failed_checkpoint, failed),
+        ],
+        checkpoint=failed_checkpoint,
+        metrics=failed,
+    )
+
+    selected, selected_metrics = _select_result_checkpoint(result)
+
+    assert selected is accepted_checkpoint
+    assert selected_metrics == accepted
+
+
+@pytest.mark.parametrize(
+    "invalid_metrics",
+    (
+        {"checkpoint_kind": "step"},
+        {"single_worker_smoke": 1},
+        {"bounded_bev_canary": 1},
+        {"checkpoint_quality_guard_enforced": 0},
+        {"validation_selection_score": float("nan")},
+    ),
+)
+def test_result_checkpoint_selection_rejects_invalid_evaluation_fallback(
+    invalid_metrics,
+):
+    checkpoint = SimpleNamespace(path="invalid")
+    metrics = {
+        "checkpoint_kind": "epoch",
+        "checkpoint_selection_score": -1.0,
+        "validation_selection_score": 0.4,
+        "checkpoint_sha256": "a" * 64,
+        "epoch": 1,
+        "is_best": 0,
+        "single_worker_smoke": 0,
+        "bounded_bev_canary": 0,
+        "checkpoint_quality_guard_enforced": 1,
+        "bev_checkpoint_class_guard_pass": 0,
+        "bev_parent_promotion_eligible": 0,
+        **invalid_metrics,
+    }
+    result = SimpleNamespace(
+        best_checkpoints=[(checkpoint, metrics)],
+        checkpoint=checkpoint,
+        metrics=metrics,
+    )
+
+    with pytest.raises(RuntimeError, match="no accepted best checkpoint"):
+        _select_result_checkpoint(result)
+
+
+def test_resume_rejects_smoke_provenance_change(tmp_path):
+    torch = pytest.importorskip("torch")
+    model = torch.nn.Linear(2, 1)
+    optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
+    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=1)
+    checkpoint = tmp_path / "smoke-resume"
+    _write_resume_checkpoint(
+        checkpoint,
+        config={
+            "distributed_world_size": 1,
+            "single_worker_smoke": True,
+        },
+        model=model,
+        optimizer=optimizer,
+        scheduler=scheduler,
+    )
+
+    with pytest.raises(ValueError, match="smoke provenance differs"):
+        _load_resume_checkpoint(
+            str(checkpoint),
+            model=model,
+            optimizer=optimizer,
+            scheduler=scheduler,
+            expected={
+                "distributed_world_size": 1,
+                "single_worker_smoke": False,
+            },
+        )
 
 
 def test_epoch_resume_allows_batch_change_but_step_resume_rejects_it(
@@ -2192,13 +3548,201 @@ def test_epoch_resume_allows_batch_change_but_step_resume_rejects_it(
         )
 
 
+def test_legacy_frozen_bev_epoch_resume_allows_batch_and_epoch_extension(
+    tmp_path,
+):
+    torch = pytest.importorskip("torch")
+    model = torch.nn.Linear(2, 2)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer)
+    checkpoint = tmp_path / "legacy-epoch"
+    checkpoint.mkdir()
+    torch.save(
+        {
+            "config": {
+                "bev_weight": 0.0,
+                "distributed_global_batch": 32,
+                "epochs": 3,
+                "freeze_bevformer": True,
+                "optimizer_steps_per_epoch": 3687,
+                "route_weight": 1.0,
+                "scheduler_identity": "selection_plateau_v1",
+                "trajectory_weight": 1.0,
+            },
+            "epoch": 3,
+            "model_state_dict": model.state_dict(),
+            "optimizer_state_dict": optimizer.state_dict(),
+            "scheduler_state_dict": scheduler.state_dict(),
+            "training_state": {
+                "checkpoint_kind": "epoch",
+            },
+        },
+        checkpoint / "checkpoint.pt",
+    )
+    (checkpoint / "history.json").write_text(
+        json.dumps([{"epoch": epoch} for epoch in range(1, 4)]),
+        encoding="ascii",
+    )
+
+    state = _load_resume_checkpoint(
+        str(checkpoint),
+        model=model,
+        optimizer=optimizer,
+        scheduler=scheduler,
+        expected={
+            "bev_ap_bins": 1024,
+            "bev_checkpoint_min_class_iou": 0.1,
+            "bev_checkpoint_min_class_precision": 0.15,
+            "bev_checkpoint_quality_guard_version": "guard-v1",
+            "bev_class_weights": [1.0] * 8,
+            "bev_encoder_learning_rate": None,
+            "bev_head_initialization": "head-v1",
+            "bev_loss_version": "loss-v1",
+            "bev_positive_pair_frequencies": [1.0] * 8,
+            "bev_rank_sampling_evidence": [],
+            "bev_sampling_importance_correction": "sampling-v1",
+            "bev_weight": 0.0,
+            "bounded_bev_canary": False,
+            "dataset_split_metrics": {},
+            "distributed_global_batch": 16,
+            "epochs": 10,
+            "freeze_bevformer": True,
+            "num_loader_workers": 2,
+            "optimizer_identity": "adamw_v1",
+            "optimizer_steps_per_epoch": 7374,
+            "route_weight": 1.0,
+            "sample_stream_digest_version": "stream-v1",
+            "scheduler_identity": "selection_plateau_v1",
+            "shuffle_buffer": 256,
+            "step_checkpoint_version": "step-v3",
+            "training_scope": ReactiveTrainingScope.MULTITASK.value,
+            "trajectory_weight": 1.0,
+            "validation_fraction": 0.1,
+            "validation_positive_sample_counts": [1] * 8,
+            "validation_sample_limit": 1024,
+        },
+    )
+
+    assert state.epoch == 4
+    assert [item["epoch"] for item in state.epoch_history] == [1, 2, 3]
+
+
+def test_legacy_epoch_resume_does_not_ignore_active_contract_changes(
+    tmp_path,
+):
+    torch = pytest.importorskip("torch")
+    model = torch.nn.Linear(2, 2)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer)
+    checkpoint = tmp_path / "legacy-epoch"
+    checkpoint.mkdir()
+    torch.save(
+        {
+            "config": {
+                "bev_weight": 0.0,
+                "distributed_global_batch": 32,
+                "epochs": 3,
+                "freeze_bevformer": True,
+                "optimizer_steps_per_epoch": 3687,
+                "route_weight": 1.0,
+                "scheduler_identity": "selection_plateau_v1",
+                "trajectory_weight": 1.0,
+            },
+            "epoch": 3,
+            "model_state_dict": model.state_dict(),
+            "optimizer_state_dict": optimizer.state_dict(),
+            "scheduler_state_dict": scheduler.state_dict(),
+            "training_state": {
+                "checkpoint_kind": "epoch",
+            },
+        },
+        checkpoint / "checkpoint.pt",
+    )
+    (checkpoint / "history.json").write_text(
+        json.dumps([{"epoch": epoch} for epoch in range(1, 4)]),
+        encoding="ascii",
+    )
+
+    with pytest.raises(ValueError, match="route_weight"):
+        _load_resume_checkpoint(
+            str(checkpoint),
+            model=model,
+            optimizer=optimizer,
+            scheduler=scheduler,
+            expected={
+                "bev_weight": 0.0,
+                "distributed_global_batch": 16,
+                "epochs": 10,
+                "freeze_bevformer": True,
+                "num_loader_workers": 2,
+                "optimizer_identity": "adamw_v1",
+                "optimizer_steps_per_epoch": 7374,
+                "route_weight": 0.0,
+                "scheduler_identity": "selection_plateau_v1",
+                "shuffle_buffer": 256,
+                "training_scope": ReactiveTrainingScope.MULTITASK.value,
+                "trajectory_weight": 1.0,
+            },
+        )
+
+
+def test_bev_fixed_step_scheduler_rejects_epoch_batch_change(tmp_path):
+    torch = pytest.importorskip("torch")
+    model = torch.nn.Linear(2, 2)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
+    scheduler = torch.optim.lr_scheduler.LambdaLR(
+        optimizer,
+        lr_lambda=lambda _: 1.0,
+    )
+    directory = tmp_path / "epoch"
+    directory.mkdir()
+    torch.save(
+        {
+            "config": {
+                "distributed_global_batch": 8,
+                "optimizer_steps_per_epoch": 16,
+                "scheduler_identity": "bev_linear_warmup_cosine_v1",
+            },
+            "epoch": 1,
+            "model_state_dict": model.state_dict(),
+            "optimizer_state_dict": optimizer.state_dict(),
+            "scheduler_state_dict": scheduler.state_dict(),
+            "training_state": {
+                "checkpoint_kind": "epoch",
+            },
+        },
+        directory / "checkpoint.pt",
+    )
+    (directory / "history.json").write_text(
+        json.dumps([{"epoch": 1}]),
+        encoding="ascii",
+    )
+
+    with pytest.raises(ValueError, match="resume contract differs"):
+        _load_resume_checkpoint(
+            str(directory),
+            model=model,
+            optimizer=optimizer,
+            scheduler=scheduler,
+            expected={
+                "distributed_global_batch": 32,
+                "optimizer_steps_per_epoch": 4,
+                "scheduler_identity": "bev_linear_warmup_cosine_v1",
+            },
+        )
+
+
 def test_bev_repeat_factors_are_frequency_aware_and_clipped():
     positive_samples = (100, 25, 4, 1, 100, 25, 4, 1)
     statistics = BEVTrainingStatistics(
         sample_count=100,
         effective_exposure_count=100,
+        active_sample_count=(100,) * 8,
         positive_sample_count=positive_samples,
         positive_cell_count=positive_samples,
+        positive_fraction_sum=tuple(
+            value / 100.0 for value in positive_samples
+        ),
         positive_mass=tuple(float(value) for value in positive_samples),
         valid_cell_count=(100,) * 8,
         exposure_digest="a" * 64,
@@ -2211,6 +3755,175 @@ def test_bev_repeat_factors_are_frequency_aware_and_clipped():
     ) == (1, 1, 3, 4, 1, 1, 3, 4)
 
 
+def test_bev_repeat_factors_do_not_repeat_common_small_objects():
+    statistics = BEVTrainingStatistics(
+        sample_count=100,
+        effective_exposure_count=100,
+        active_sample_count=(100,) * 8,
+        positive_sample_count=(90,) * 8,
+        positive_cell_count=(90,) * 8,
+        positive_fraction_sum=(1.0,) * 8,
+        positive_mass=(1.0,) * 8,
+        valid_cell_count=(100_000,) * 8,
+        exposure_digest="a" * 64,
+    )
+
+    assert derive_bev_repeat_factors(
+        statistics,
+        frequency_threshold=0.05,
+        max_repeat=4,
+    ) == (1,) * 8
+
+
+def test_bev_positive_pair_frequencies_use_raw_sample_support():
+    statistics = BEVTrainingStatistics(
+        sample_count=100,
+        effective_exposure_count=132,
+        active_sample_count=(132,) * 8,
+        positive_sample_count=(100, 80, 60, 40, 20, 10, 4, 1),
+        positive_cell_count=(100,) * 8,
+        positive_fraction_sum=(10.0,) * 8,
+        positive_mass=(100.0,) * 8,
+        valid_cell_count=(1_000,) * 8,
+        exposure_digest="a" * 64,
+    )
+
+    assert derive_bev_positive_pair_frequencies(
+        statistics
+    ) == pytest.approx(
+        (1.0, 0.8, 0.6, 0.4, 0.2, 0.1, 0.04, 0.01)
+    )
+
+
+def test_bev_validation_support_is_checked_before_training():
+    records = [
+        SimpleNamespace(
+            sample_uid="sample-a",
+            positive_cell_count=(1, 0, 1, 0, 1, 0, 1, 0),
+        ),
+        SimpleNamespace(
+            sample_uid="sample-b",
+            positive_cell_count=(0, 1, 0, 1, 0, 1, 0, 1),
+        ),
+    ]
+
+    assert _bev_validation_positive_sample_counts(
+        records,
+        ("sample-a", "sample-b"),
+    ) == (1,) * len(BEV_SEGMENTATION_CLASSES)
+
+    with pytest.raises(ValueError, match="missing selected samples"):
+        _bev_validation_positive_sample_counts(
+            records,
+            ("sample-a", "missing"),
+        )
+
+
+def test_distributed_bev_validation_reproduces_rank_local_limits():
+    records_by_rank = []
+    for rank in range(2):
+        records_by_rank.append(tuple(
+            BEVSampleStatistics(
+                sample_uid=f"rank-{rank}-sample-{index}",
+                split_group_uid="group-8",
+                positive_cell_count=(1, 0, 0, 0, 0, 0, 0, 0),
+                positive_mass=(1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
+                valid_cell_count=(4,) * 8,
+            )
+            for index in range(2)
+        ))
+
+    selected = select_distributed_bev_validation_sample_uids(
+        records_by_rank,
+        val_fraction=0.1,
+        sample_limit=3,
+    )
+
+    assert selected == (
+        "rank-0-sample-0",
+        "rank-0-sample-1",
+        "rank-1-sample-0",
+        "rank-1-sample-1",
+    )
+
+
+def test_bev_validation_holdout_excludes_calibration_split_groups():
+    records = (
+        BEVSampleStatistics(
+            sample_uid="calibration",
+            split_group_uid="group-8",
+            positive_cell_count=(1,) * 8,
+            positive_mass=(1.0,) * 8,
+            valid_cell_count=(4,) * 8,
+        ),
+        BEVSampleStatistics(
+            sample_uid="adjacent-frame",
+            split_group_uid="group-8",
+            positive_cell_count=(1,) * 8,
+            positive_mass=(1.0,) * 8,
+            valid_cell_count=(4,) * 8,
+        ),
+        BEVSampleStatistics(
+            sample_uid="independent-holdout",
+            split_group_uid="group-17",
+            positive_cell_count=(1,) * 8,
+            positive_mass=(1.0,) * 8,
+            valid_cell_count=(4,) * 8,
+        ),
+    )
+
+    assert select_bev_validation_holdout_sample_uids(
+        records,
+        val_fraction=0.1,
+        excluded_sample_uids=("calibration",),
+    ) == ("independent-holdout",)
+
+
+def test_bev_sample_statistics_can_scan_explicit_rank_shards(tmp_path):
+    def write_shard(path, sample_uid):
+        target = np.zeros((8, 2, 2), dtype=np.float32)
+        target[0, 0, 0] = 1.0
+        members = {
+            f"{sample_uid}.meta.json": json.dumps({
+                "sample_uid": sample_uid,
+                "split_group_uid": "group-8",
+            }).encode("ascii"),
+            f"{sample_uid}.{BEV_SEGMENTATION_STATS_MEMBER}": (
+                encode_bev_segmentation_stats(
+                    target,
+                    np.ones_like(target, dtype=np.bool_),
+                )
+            ),
+        }
+        with tarfile.open(path, "w") as archive:
+            for name, payload in members.items():
+                info = tarfile.TarInfo(name)
+                info.size = len(payload)
+                archive.addfile(info, io.BytesIO(payload))
+
+    shard_a = tmp_path / "a.tar"
+    shard_b = tmp_path / "b.tar"
+    write_shard(shard_a, "sample-a")
+    write_shard(shard_b, "sample-b")
+
+    records = discover_bev_sample_statistics(
+        [tmp_path],
+        shard_files=[shard_b],
+    )
+
+    assert [record.sample_uid for record in records] == ["sample-b"]
+
+
+def test_bev_statistics_reject_fully_invalid_samples():
+    target = np.zeros((8, 2, 2), dtype=np.float32)
+
+    with pytest.raises(ValueError, match="at least one valid cell"):
+        encode_bev_segmentation_stats(
+            target,
+            np.zeros_like(target, dtype=np.bool_),
+        )
+
+
 def test_bev_repeat_policy_preserves_non_bev_importance_mass():
     target = np.zeros((8, 2, 2), dtype=np.float32)
     target[3, 0, 0] = 1.0
@@ -2220,7 +3933,7 @@ def test_bev_repeat_policy_preserves_non_bev_importance_mass():
     )
     policy = BEVClassRepeatPolicy(
         repeat_factors=(1, 1, 1, 4, 1, 1, 1, 1),
-        mean_repeat=2.0,
+        importance_scale=2.0,
     )
 
     repeated = list(policy([{
@@ -2236,3 +3949,78 @@ def test_bev_repeat_policy_preserves_non_bev_importance_mass():
         float(item["__bev_sampling_importance__"])
         for item in repeated
     ) == pytest.approx(2.0)
+
+
+def test_rank_corrected_bev_importance_recovers_global_raw_mean():
+    global_values = (
+        ((1.0, 1), (3.0, 3)),
+        ((5.0, 1),),
+    )
+    global_sample_count = sum(len(values) for values in global_values)
+    rank_losses = []
+    for rank_values in global_values:
+        effective_count = sum(repeat for _, repeat in rank_values)
+        importance_scale = derive_bev_rank_importance_scale(
+            local_effective_exposure_count=effective_count,
+            global_sample_count=global_sample_count,
+            world_size=len(global_values),
+        )
+        weighted_exposures = []
+        for value, repeat in rank_values:
+            weighted_exposures.extend(
+                [value * importance_scale / repeat] * repeat
+            )
+        rank_losses.append(
+            sum(weighted_exposures) / len(weighted_exposures)
+        )
+
+    assert sum(rank_losses) / len(rank_losses) == pytest.approx(3.0)
+
+
+def test_bev_rank_capacity_counts_drop_last_per_directory():
+    def records(prefix, count):
+        return tuple(
+            BEVSampleStatistics(
+                sample_uid=f"{prefix}-{index}",
+                split_group_uid=f"{prefix}-group-{index}",
+                positive_cell_count=(1,) * 8,
+                positive_mass=(1.0,) * 8,
+                valid_cell_count=(4,) * 8,
+            )
+            for index in range(count)
+        )
+
+    capacity = bev_rank_full_microbatch_capacity(
+        (records("a", 5), records("b", 3)),
+        val_fraction=0.1,
+        repeat_factors=(1,) * 8,
+        batch_size=4,
+    )
+
+    assert capacity == 1
+
+
+def test_bev_rank_capacity_ignores_validation_only_directory():
+    train_record = BEVSampleStatistics(
+        sample_uid="train",
+        split_group_uid="group-0",
+        positive_cell_count=(1,) * 8,
+        positive_mass=(1.0,) * 8,
+        valid_cell_count=(4,) * 8,
+    )
+    validation_record = BEVSampleStatistics(
+        sample_uid="validation",
+        split_group_uid="group-8",
+        positive_cell_count=(1,) * 8,
+        positive_mass=(1.0,) * 8,
+        valid_cell_count=(4,) * 8,
+    )
+
+    capacity = bev_rank_full_microbatch_capacity(
+        ((validation_record,), (train_record,) * 4),
+        val_fraction=0.1,
+        repeat_factors=(1,) * 8,
+        batch_size=4,
+    )
+
+    assert capacity == 1

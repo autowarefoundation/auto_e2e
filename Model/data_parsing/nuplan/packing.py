@@ -65,7 +65,7 @@ NUPLAN_HISTORY_CAMERA_SPREAD_MAX_US = (
 )
 NUPLAN_CAMERA_VISIBILITY_HEIGHTS_M = (-4.0, -2.0, 0.0, 2.0)
 NUPLAN_RECTIFICATION_POLICY_VERSION = "nuplan_rectified_pinhole_v1"
-NUPLAN_PACK_MANIFEST_VERSION = "nuplan_reactive_manifest_v10"
+NUPLAN_PACK_MANIFEST_VERSION = "nuplan_reactive_manifest_v11"
 _NUPLAN_MANIFEST_INVARIANT_KEYS = (
     "bev_taxonomy_version",
     "camera_order",
@@ -79,6 +79,7 @@ _NUPLAN_MANIFEST_INVARIANT_KEYS = (
     "has_reactive_navigation",
     "has_route_reconstruction",
     "has_trajectory_xy",
+    "front_camera_fpn_image_size",
     "front_camera_image_size",
     "front_camera_index",
     "history_fallback_max_offset_us",
@@ -109,6 +110,7 @@ class NuPlanCameraBundle:
     history_projection_matrices: np.ndarray
     camera_visibility: np.ndarray
     metadata: Mapping[str, object]
+    front_camera_fpn_jpeg: bytes = b""
 
 
 @dataclasses.dataclass(frozen=True)
@@ -468,6 +470,7 @@ def _rectify_camera_rows(
     native_front: bool,
 ) -> tuple[
     dict[str, bytes],
+    bytes | None,
     np.ndarray,
     np.ndarray | None,
     list[dict[str, object]],
@@ -480,6 +483,7 @@ def _rectify_camera_rows(
         ) from exc
 
     jpegs: dict[str, bytes] = {}
+    front_camera_fpn_jpeg = None
     matrices = []
     front_projection_matrix = None
     camera_metadata = []
@@ -550,6 +554,22 @@ def _rectify_camera_rows(
             progressive=False,
         )
         jpegs[channel] = output.getvalue()
+        if (
+            native_front
+            and camera_index == REACTIVE_FRONT_CAMERA_INDEX
+        ):
+            base_output = io.BytesIO()
+            Image.fromarray(rectified).resize(
+                (image_size, image_size),
+                resample=Image.Resampling.BILINEAR,
+            ).save(
+                base_output,
+                format="JPEG",
+                quality=90,
+                optimize=False,
+                progressive=False,
+            )
+            front_camera_fpn_jpeg = base_output.getvalue()
 
         base_scaled_intrinsic = rectified_intrinsic.copy()
         base_scaled_intrinsic[0] *= image_size / native_width
@@ -607,6 +627,7 @@ def _rectify_camera_rows(
         })
     return (
         jpegs,
+        front_camera_fpn_jpeg,
         np.stack(matrices).astype(np.float32),
         (
             np.asarray(front_projection_matrix, dtype=np.float32)[None]
@@ -655,6 +676,7 @@ def load_nuplan_camera_bundle(
     reference_timestamp = int(reference["timestamp"])
     (
         jpegs,
+        front_camera_fpn_jpeg,
         projection_matrices,
         front_projection_matrix,
         camera_metadata,
@@ -668,12 +690,15 @@ def load_nuplan_camera_bundle(
     )
     if front_projection_matrix is None:
         raise RuntimeError("nuPlan front camera projection was not produced")
+    if front_camera_fpn_jpeg is None:
+        raise RuntimeError("nuPlan base-resolution front image was not produced")
     history_jpegs = []
     history_matrices = []
     history_timestamps = []
     for frame_rows in history_rows:
         (
             frame_jpegs,
+            _frame_front_camera_fpn_jpeg,
             frame_matrices,
             _front_matrix,
             frame_metadata,
@@ -702,6 +727,7 @@ def load_nuplan_camera_bundle(
     )
     return NuPlanCameraBundle(
         jpeg_by_channel=jpegs,
+        front_camera_fpn_jpeg=front_camera_fpn_jpeg,
         projection_matrices=projection_matrices,
         front_projection_matrix=front_projection_matrix,
         history_jpeg_by_frame=tuple(history_jpegs),
@@ -716,6 +742,7 @@ def load_nuplan_camera_bundle(
             "front_camera_image_size": (
                 REACTIVE_FRONT_CAMERA_IMAGE_SIZE
             ),
+            "front_camera_fpn_image_size": image_size,
             "front_camera_index": REACTIVE_FRONT_CAMERA_INDEX,
             "image_size": image_size,
             "rectification_policy": NUPLAN_RECTIFICATION_POLICY_VERSION,
@@ -930,6 +957,8 @@ def nuplan_reactive_sample_members(
         != REACTIVE_FRONT_CAMERA_INDEX
         or bundle.metadata.get("front_camera_image_size")
         != REACTIVE_FRONT_CAMERA_IMAGE_SIZE
+        or bundle.metadata.get("front_camera_fpn_image_size")
+        != REACTIVE_CAMERA_IMAGE_SIZE
         or bundle.metadata.get("camera_order")
         != list(NUPLAN_CAMERA_CHANNELS)
         or bundle.metadata.get("camera_slots")
@@ -1025,6 +1054,13 @@ def nuplan_reactive_sample_members(
             raise ValueError(
                 f"nuPlan camera bundle lacks {channel}"
             ) from exc
+    if not isinstance(bundle.front_camera_fpn_jpeg, bytes) or not (
+        bundle.front_camera_fpn_jpeg
+    ):
+        raise ValueError(
+            "nuPlan camera bundle lacks the base-resolution front image"
+        )
+    members["front_camera_fpn.jpg"] = bundle.front_camera_fpn_jpeg
     for history_index, history_jpegs in enumerate(
         bundle.history_jpeg_by_frame
     ):
@@ -2211,6 +2247,7 @@ def pack_nuplan_reactive_scenarios(
         "has_reactive_navigation": True,
         "has_route_reconstruction": True,
         "has_trajectory_xy": True,
+        "front_camera_fpn_image_size": REACTIVE_CAMERA_IMAGE_SIZE,
         "front_camera_image_size": REACTIVE_FRONT_CAMERA_IMAGE_SIZE,
         "front_camera_index": REACTIVE_FRONT_CAMERA_INDEX,
         "history_fallback_max_offset_us": (

@@ -16,8 +16,13 @@ from data_processing.reactive_training_artifacts import (
     BEV_SEGMENTATION_CLASSES,
     BEV_SEGMENTATION_TAXONOMY_VERSION,
 )
+from model_components.losses import (
+    BEV_SEGMENTATION_AUXILIARY_LOSS_VERSION,
+)
 from navigation.geometry import AUTOE2E_NAVIGATION_GEOMETRY
 from training.reactive_multitask import (
+    BEV_ONLY_OBJECTIVE_VERSION,
+    BEV_SAMPLING_IMPORTANCE_CORRECTION_VERSION,
     REACTIVE_MODEL_ARCHITECTURE_VERSION,
     SIMPLE_XY_IMITATION_OBJECTIVE_VERSION,
     ReactiveMultitaskObjective,
@@ -215,6 +220,17 @@ def reactive_config_sha256(config: Mapping[str, Any]) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
+def reactive_metrics_sha256(metrics: Mapping[str, Any]) -> str:
+    payload = json.dumps(
+        dict(metrics),
+        allow_nan=False,
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("ascii")
+    return hashlib.sha256(payload).hexdigest()
+
+
 def reactive_model_state_sha256(
     state_dict: Mapping[str, Any],
 ) -> str:
@@ -259,17 +275,25 @@ def inspect_reactive_checkpoint_identity(
         weights_only=False,
     )
     config = payload.get("config")
+    metrics = payload.get("metrics")
     state_dict = payload.get("model_state_dict")
-    if not isinstance(config, Mapping) or not isinstance(
-        state_dict, Mapping
+    if (
+        not isinstance(config, Mapping)
+        or not isinstance(metrics, Mapping)
+        or not isinstance(state_dict, Mapping)
     ):
         raise ValueError("Reactive checkpoint identity fields are missing")
     actual = {
         "checkpoint_sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
         "config_sha256": reactive_config_sha256(config),
+        "metrics_sha256": reactive_metrics_sha256(metrics),
         "model_state_sha256": reactive_model_state_sha256(state_dict),
     }
-    for field in ("config_sha256", "model_state_sha256"):
+    for field in (
+        "config_sha256",
+        "metrics_sha256",
+        "model_state_sha256",
+    ):
         recorded = payload.get(field)
         if recorded != actual[field]:
             raise ValueError(
@@ -283,8 +307,9 @@ def load_stage_a_parent(
     checkpoint_path: str | Path,
     *,
     target_camera_slots: Sequence[str],
+    required_training_scope: str | None = None,
 ) -> dict[str, Any]:
-    """Load only Stage A model weights and validate Stage B lineage."""
+    """Load reviewed nuPlan parent weights and validate their lineage."""
     path = Path(checkpoint_path)
     payload = torch.load(
         path,
@@ -294,11 +319,32 @@ def load_stage_a_parent(
     config = payload.get("config")
     if not isinstance(config, Mapping):
         raise ValueError("Stage A checkpoint has no config mapping")
+    if bool(config.get("single_worker_smoke", False)):
+        raise ValueError(
+            "single-worker smoke checkpoint cannot be used as a parent"
+        )
+    if bool(config.get("bounded_bev_canary", False)):
+        raise ValueError(
+            "bounded BEV canary checkpoint cannot be used as a parent"
+        )
+    training_scope = str(config.get("training_scope", "multitask"))
+    if (
+        required_training_scope is not None
+        and training_scope != required_training_scope
+    ):
+        raise ValueError(
+            "Stage A parent training scope differs: "
+            f"actual={training_scope!r} "
+            f"required={required_training_scope!r}"
+        )
+    expected_objective_version = (
+        BEV_ONLY_OBJECTIVE_VERSION
+        if training_scope == "bev_only"
+        else SIMPLE_XY_IMITATION_OBJECTIVE_VERSION
+    )
     required = {
         "model_architecture_version": REACTIVE_MODEL_ARCHITECTURE_VERSION,
-        "training_objective_version": (
-            SIMPLE_XY_IMITATION_OBJECTIVE_VERSION
-        ),
+        "training_objective_version": expected_objective_version,
         "training_stage": ReactiveTrainingStage.NUPLAN_FULL.value,
         "navigation_geometry_id": (
             AUTOE2E_NAVIGATION_GEOMETRY.geometry_id
@@ -308,6 +354,10 @@ def load_stage_a_parent(
         "planner_mode": "gru",
         "bev_taxonomy_version": BEV_SEGMENTATION_TAXONOMY_VERSION,
     }
+    if training_scope == "bev_only":
+        required["bev_loss_version"] = (
+            BEV_SEGMENTATION_AUXILIARY_LOSS_VERSION
+        )
     mismatches = {
         key: (config.get(key), expected)
         for key, expected in required.items()
@@ -331,25 +381,89 @@ def load_stage_a_parent(
                 "Stage A parent checkpoint lacks valid objective provenance"
             )
         objective_values[name] = float(value)
-    if (
-        any(not math.isfinite(value) for value in objective_values.values())
-        or objective_values["trajectory_weight"] <= 0.0
-        or objective_values["bev_weight"] <= 0.0
-        or objective_values["route_weight"] < 0.0
-        or objective_values["corridor_pos_weight"] < 1.0
-        or not isinstance(config.get("training_seed"), int)
-        or config.get("scheduler_identity") != "selection_plateau_v1"
-        or config.get("freeze_bevformer") is not True
-    ):
+    common_objective_provenance_valid = (
+        all(math.isfinite(value) for value in objective_values.values())
+        and objective_values["bev_weight"] > 0.0
+        and objective_values["corridor_pos_weight"] >= 1.0
+        and isinstance(config.get("training_seed"), int)
+    )
+    if training_scope == "multitask":
+        objective_provenance_valid = (
+            common_objective_provenance_valid
+            and objective_values["trajectory_weight"] > 0.0
+            and objective_values["route_weight"] >= 0.0
+            and config.get("scheduler_identity") == "selection_plateau_v1"
+            and config.get("freeze_bevformer") is True
+        )
+        weight_transfer_scope = "full_model_v1"
+    elif training_scope == "bev_only":
+        encoder_learning_rate = config.get("bev_encoder_learning_rate")
+        objective_provenance_valid = (
+            common_objective_provenance_valid
+            and objective_values["trajectory_weight"] == 0.0
+            and objective_values["route_weight"] == 0.0
+            and config.get("scheduler_identity") in {
+                "bev_ap_plateau_v1",
+                "bev_linear_warmup_cosine_v1",
+            }
+            and config.get("freeze_bevformer") is False
+            and config.get("optimizer_identity")
+            == "bev_discriminative_adamw_v1"
+            and isinstance(encoder_learning_rate, (int, float))
+            and math.isfinite(float(encoder_learning_rate))
+            and float(encoder_learning_rate) > 0.0
+        )
+        weight_transfer_scope = "bev_modules_v1"
+    else:
+        objective_provenance_valid = False
+        weight_transfer_scope = ""
+    if not objective_provenance_valid:
         raise ValueError(
             "Stage A parent checkpoint lacks valid objective provenance"
         )
+    metrics = payload.get("metrics")
+    if not isinstance(metrics, Mapping):
+        raise ValueError("Stage A checkpoint has no metrics mapping")
+    metrics_sha256 = reactive_metrics_sha256(metrics)
+    if payload.get("metrics_sha256") != metrics_sha256:
+        raise ValueError("Stage A checkpoint metrics digest is invalid")
+    if training_scope == "bev_only":
+        required_promotion_metrics = {
+            "single_worker_smoke": 0,
+            "bounded_bev_canary": 0,
+            "checkpoint_quality_guard_enforced": 1,
+            "bev_checkpoint_class_guard_pass": 1,
+            "bev_parent_promotion_eligible": 1,
+        }
+        invalid_promotion_metrics = {
+            name: (metrics.get(name), expected)
+            for name, expected in required_promotion_metrics.items()
+            if (
+                not isinstance(metrics.get(name), (int, float))
+                or isinstance(metrics.get(name), bool)
+                or not math.isfinite(float(metrics[name]))
+                or float(metrics[name]) != float(expected)
+            )
+        }
+        if invalid_promotion_metrics:
+            raise ValueError(
+                "BEV-only Stage A parent is not production-quality "
+                f"eligible: {invalid_promotion_metrics}"
+            )
     pos_weights = np.asarray(
         config.get("bev_pos_weights", ()),
         dtype=np.float64,
     )
+    class_weights = np.asarray(
+        config.get("bev_class_weights", ()),
+        dtype=np.float64,
+    )
     repeat_factors = np.asarray(
         config.get("bev_repeat_factors", ()),
+        dtype=np.float64,
+    )
+    positive_pair_frequencies = np.asarray(
+        config.get("bev_positive_pair_frequencies", ()),
         dtype=np.float64,
     )
     class_count = len(BEV_SEGMENTATION_CLASSES)
@@ -361,6 +475,20 @@ def load_stage_a_parent(
         or not np.isfinite(repeat_factors).all()
         or np.any(repeat_factors < 1.0)
         or np.any(repeat_factors != np.floor(repeat_factors))
+        or (
+            training_scope == "bev_only"
+            and (
+                class_weights.shape != (class_count,)
+                or not np.isfinite(class_weights).all()
+                or np.any(class_weights <= 0.0)
+                or positive_pair_frequencies.shape != (class_count,)
+                or not np.isfinite(positive_pair_frequencies).all()
+                or np.any(positive_pair_frequencies <= 0.0)
+                or np.any(positive_pair_frequencies > 1.0)
+                or config.get("bev_sampling_importance_correction")
+                != BEV_SAMPLING_IMPORTANCE_CORRECTION_VERSION
+            )
+        )
     ):
         raise ValueError(
             "Stage A parent checkpoint lacks valid BEV weighting evidence"
@@ -473,13 +601,53 @@ def load_stage_a_parent(
                 source_embedding.index_select(0, indices).clone()
             )
             adaptation_policy = "semantic_reindex"
-    model.load_state_dict(adapted_state_dict)
+    if training_scope == "bev_only":
+        transfer_prefixes = (
+            "Reactive_E2E.Backbone.",
+            "Reactive_E2E.FeatureFusion.",
+            "Reactive_E2E.BEVSegmentationHead.",
+        )
+        transferred_state_dict = {
+            key: value
+            for key, value in adapted_state_dict.items()
+            if key.startswith(transfer_prefixes)
+        }
+        expected_transfer_keys = {
+            key
+            for key in target_state_dict
+            if key.startswith(transfer_prefixes)
+        }
+        if set(transferred_state_dict) != expected_transfer_keys:
+            missing = sorted(
+                expected_transfer_keys - set(transferred_state_dict)
+            )
+            unexpected = sorted(
+                set(transferred_state_dict) - expected_transfer_keys
+            )
+            raise ValueError(
+                "Stage A BEV-only transfer state differs from the target: "
+                f"missing={missing} unexpected={unexpected}"
+            )
+        incompatible = model.load_state_dict(
+            transferred_state_dict,
+            strict=False,
+        )
+        if incompatible.unexpected_keys:
+            raise ValueError(
+                "Stage A BEV-only transfer produced unexpected keys: "
+                f"{incompatible.unexpected_keys}"
+            )
+    else:
+        model.load_state_dict(adapted_state_dict)
     digest = hashlib.sha256(path.read_bytes()).hexdigest()
     lineage: dict[str, Any] = {
         "stage_a_parent_checkpoint_sha256": digest,
         "stage_a_config_digest": config_sha256,
         "stage_a_model_state_sha256": model_state_sha256,
-        "stage_a_freeze_bevformer": True,
+        "stage_a_freeze_bevformer": bool(config["freeze_bevformer"]),
+        "stage_a_training_scope": training_scope,
+        "stage_a_bev_loss_version": config.get("bev_loss_version"),
+        "stage_a_weight_transfer_scope": weight_transfer_scope,
         "stage_a_camera_embedding_transfer": {
             "policy": adaptation_policy,
             "source_camera_slots": list(source_camera_slots),
@@ -1797,12 +1965,16 @@ def save_reactive_checkpoint(
         raise ValueError("dataset manifest digest must be SHA-256")
     if epoch <= 0:
         raise ValueError("checkpoint epoch must be positive")
+    training_scope = str(model_config.get("training_scope", "multitask"))
+    objective_version = (
+        BEV_ONLY_OBJECTIVE_VERSION
+        if training_scope == "bev_only"
+        else SIMPLE_XY_IMITATION_OBJECTIVE_VERSION
+    )
     config: dict[str, Any] = {
         **dict(model_config),
         "model_architecture_version": REACTIVE_MODEL_ARCHITECTURE_VERSION,
-        "training_objective_version": (
-            SIMPLE_XY_IMITATION_OBJECTIVE_VERSION
-        ),
+        "training_objective_version": objective_version,
         "training_stage": stage.value,
         "navigation_geometry_id": (
             AUTOE2E_NAVIGATION_GEOMETRY.geometry_id
@@ -1812,19 +1984,25 @@ def save_reactive_checkpoint(
         "planner_mode": "gru",
         "dataset_manifest_sha256": dataset_manifest_sha256,
     }
+    if stage is ReactiveTrainingStage.NUPLAN_FULL:
+        config["bev_loss_version"] = (
+            BEV_SEGMENTATION_AUXILIARY_LOSS_VERSION
+        )
     if stage is ReactiveTrainingStage.L2D_CONTINUATION:
         config["stage_b_dataset_manifest_sha256"] = (
             dataset_manifest_sha256
         )
     config.update(dict(lineage or {}))
     state_dict = model.state_dict()
+    checkpoint_metrics = dict(metrics or {})
     payload: dict[str, Any] = {
         "model_state_dict": state_dict,
         "config": config,
         "config_sha256": reactive_config_sha256(config),
+        "metrics_sha256": reactive_metrics_sha256(checkpoint_metrics),
         "model_state_sha256": reactive_model_state_sha256(state_dict),
         "epoch": int(epoch),
-        "metrics": dict(metrics or {}),
+        "metrics": checkpoint_metrics,
         "training_state": dict(training_state or {}),
     }
     if optimizer is not None:

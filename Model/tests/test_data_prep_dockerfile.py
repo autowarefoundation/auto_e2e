@@ -10,6 +10,7 @@ def test_data_prep_image_installs_and_imports_nuplan_map_backend() -> None:
         / "Dockerfile"
     ).read_text(encoding="utf-8")
 
+    assert '"flytekit==1.16.24"' in dockerfile
     assert '"pyogrio==0.12.1"' in dockerfile
     assert '"rasterio==1.4.3"' in dockerfile
     assert '"pytest==9.0.3"' in dockerfile

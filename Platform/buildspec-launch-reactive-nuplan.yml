@@ -6,21 +6,25 @@ env:
     FLYTE_PROJECT: auto-e2e
     FLYTE_DOMAIN: development
     WORKFLOW_NAME: >-
-      Platform.pipelines.distributed_training.wf_train_reactive_nuplan_ray_8
+      Platform.pipelines.distributed_training.wf_train_reactive_nuplan_bev_ray_8
     FLYTE_VERSION: ""
     EXECUTION_NAME: ""
     NUPLAN_DATASET_URIS_URI: ""
     RESUME_CHECKPOINT_URI: ""
-    EPOCHS: "3"
+    EPOCHS: "5"
+    CANARY_EPOCHS: "2"
+    STEPS_PER_EPOCH: "128"
+    VALIDATION_SAMPLE_LIMIT: "1024"
     LEARNING_RATE: "1e-4"
+    BEV_ENCODER_LEARNING_RATE: "1e-5"
     VAL_FRACTION: "0.1"
-    NUM_LOADER_WORKERS: "2"
+    NUM_LOADER_WORKERS: "4"
     PER_RANK_BATCH_SIZE: "4"
     TRAINING_SEED: "149"
     PRECISION: "bf16"
-    TRAJECTORY_WEIGHT: "1.0"
-    BEV_WEIGHT: "0.0"
-    ROUTE_WEIGHT: "1.0"
+    TRAJECTORY_WEIGHT: "0.0"
+    BEV_WEIGHT: "1.0"
+    ROUTE_WEIGHT: "0.0"
     CAPACITY_BLOCK_MINIMUM_REMAINING_SECONDS: "79200"
     WAIT_FOR_COMPLETION: "false"
     WAIT_TIMEOUT_SECONDS: "28800"
@@ -40,6 +44,9 @@ phases:
       - printf '%s' "${EXECUTION_NAME}" | grep -Eq '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
       - test "${#EXECUTION_NAME}" -le 63
       - printf '%s' "${EPOCHS}" | grep -Eq '^[1-9][0-9]*$'
+      - test "${CANARY_EPOCHS}" = "2"
+      - printf '%s' "${STEPS_PER_EPOCH}" | grep -Eq '^[1-9][0-9]*$'
+      - printf '%s' "${VALIDATION_SAMPLE_LIMIT}" | grep -Eq '^[1-9][0-9]*$'
       - printf '%s' "${NUM_LOADER_WORKERS}" | grep -Eq '^[0-9]+$'
       - printf '%s' "${PER_RANK_BATCH_SIZE}" | grep -Eq '^(1|2|4)$'
       - printf '%s' "${TRAINING_SEED}" | grep -Eq '^[0-9]+$'
@@ -83,6 +90,10 @@ phases:
 
         if not 0.0 < float(os.environ["LEARNING_RATE"]):
             raise ValueError("LEARNING_RATE must be positive")
+        if not 0.0 < float(os.environ["BEV_ENCODER_LEARNING_RATE"]):
+            raise ValueError(
+                "BEV_ENCODER_LEARNING_RATE must be positive"
+            )
         if not 0.0 < float(os.environ["VAL_FRACTION"]) < 1.0:
             raise ValueError("VAL_FRACTION must be in (0, 1)")
         for name in (
@@ -203,7 +214,7 @@ phases:
             encoding="ascii",
         ) as stream:
             capacity_block_end_utc = stream.read().strip()
-        inputs = {
+        common_inputs = {
             "nuplan_shards": [
                 FlyteDirectory(uri) for uri in dataset_uris
             ],
@@ -225,13 +236,38 @@ phases:
             ),
             "training_seed": int(os.environ["TRAINING_SEED"]),
             "precision": os.environ["PRECISION"],
-            "trajectory_weight": float(
-                os.environ["TRAJECTORY_WEIGHT"]
-            ),
-            "bev_weight": float(os.environ["BEV_WEIGHT"]),
-            "route_weight": float(os.environ["ROUTE_WEIGHT"]),
             "capacity_block_end_utc": capacity_block_end_utc,
         }
+        if workflow_name.endswith(
+            "wf_train_reactive_nuplan_bev_ray_8_canary"
+        ):
+            inputs = {
+                "nuplan_shards": common_inputs["nuplan_shards"],
+                "capacity_block_end_utc": capacity_block_end_utc,
+                "epochs": int(os.environ["CANARY_EPOCHS"]),
+                "steps_per_epoch": int(
+                    os.environ["STEPS_PER_EPOCH"]
+                ),
+                "validation_sample_limit": int(
+                    os.environ["VALIDATION_SAMPLE_LIMIT"]
+                ),
+            }
+        elif workflow_name.endswith(
+            "wf_train_reactive_nuplan_bev_ray_8"
+        ):
+            inputs = common_inputs
+            inputs["bev_encoder_learning_rate"] = float(
+                os.environ["BEV_ENCODER_LEARNING_RATE"]
+            )
+        else:
+            inputs = common_inputs
+            inputs.update({
+                "trajectory_weight": float(
+                    os.environ["TRAJECTORY_WEIGHT"]
+                ),
+                "bev_weight": float(os.environ["BEV_WEIGHT"]),
+                "route_weight": float(os.environ["ROUTE_WEIGHT"]),
+            })
         remote = FlyteRemote(
             config=Config.auto(config_file="/tmp/flyte.yaml"),
             default_project=project,

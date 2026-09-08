@@ -51,7 +51,7 @@ def test_distributed_workflow_import_is_path_order_independent():
                 "assert 'torch' not in sys.modules; "
                 "assert 'numpy' not in sys.modules; "
                 "import distributed_training as module; "
-                "assert module.BEV_POS_WEIGHT_CAP == 2048.0; "
+                "assert module.BEV_POS_WEIGHT_CAP == 64.0; "
                 "print(module.BEV_POS_WEIGHT_CAP)"
             ),
         ],
@@ -62,13 +62,13 @@ def test_distributed_workflow_import_is_path_order_independent():
         text=True,
     )
 
-    assert result.stdout.strip() == "2048.0"
+    assert result.stdout.strip() == "64.0"
 
 
 def test_shared_pack_cache_includes_camera_resolution_contract():
     assert (
         workflows.PACK_CACHE_VERSION
-        == "pack-v3-v1-v10-v6-camera512"
+        == "pack-v3-v1-v12-v6-camera512"
     )
 
 
@@ -396,7 +396,48 @@ def test_single_gpu_flyte_tasks_target_validation_capacity():
     assert missing_templates == []
 
 
+def test_reactive_bev_evaluation_uses_validation_gpu_contract():
+    template = distributed_training._bev_evaluation_pod_template()
+    assert template.pod_spec.node_selector == {
+        "workload-type": "gpu-validation"
+    }
+    assert template.pod_spec.volumes[0].empty_dir.size_limit == "16Gi"
+    assert {
+        "checkpoint",
+        "shards",
+        "dataset",
+        "benchmark_inventory",
+        "split",
+        "val_fraction",
+        "batch_size",
+        "num_loader_workers",
+        "probability_bins",
+    } == set(
+        distributed_training.evaluate_reactive_bev_checkpoint
+        .python_interface.inputs
+    )
+    node, = (
+        distributed_training.wf_evaluate_reactive_bev_checkpoint.nodes
+    )
+    assert node.flyte_entity is (
+        distributed_training.evaluate_reactive_bev_checkpoint
+    )
+    source = inspect.getsource(
+        distributed_training.evaluate_reactive_bev_checkpoint.task_function
+    )
+    assert "checkpoint_bev_probability_bins(config)" in source
+    assert "expected_sample_uids=expected_sample_uids" in source
+    assert "expected_sample_count=expected_sample_count" in source
+    assert '"evaluation_sample_count": expected_sample_count' in source
+    assert "validate_kitscenes_benchmark_inventory_coverage" in source
+    assert '"evaluation_sample_uid_sha256"' in source
+
+
 def test_reviewed_ray_topologies_have_fixed_worker_groups():
+    assert (
+        distributed_training.RAY_1.worker_node_config[0].replicas
+        == 1
+    )
     assert (
         distributed_training.RAY_2.worker_node_config[0].replicas
         == 2
@@ -406,6 +447,7 @@ def test_reviewed_ray_topologies_have_fixed_worker_groups():
         == 1
     )
     for config in (
+        distributed_training.RAY_1,
         distributed_training.RAY_2,
         distributed_training.RAY_4,
         distributed_training.RAY_REACTIVE_4,
@@ -415,6 +457,34 @@ def test_reviewed_ray_topologies_have_fixed_worker_groups():
         assert workers.min_replicas == workers.replicas
         assert workers.max_replicas == workers.replicas
         assert config.enable_autoscaling is False
+    smoke_worker = distributed_training.RAY_1.worker_node_config[0]
+    assert smoke_worker.ray_start_params == {
+        "num-cpus": "3",
+        "num-gpus": "1",
+    }
+    assert smoke_worker.pod_template.pod_spec.containers[
+        0
+    ].resources.requests == {
+        "cpu": "3",
+        "ephemeral-storage": "100Gi",
+        "memory": "24Gi",
+        "nvidia.com/gpu": "1",
+    }
+    assert (
+        distributed_training.train_reactive_nuplan_bev_ray_1_smoke
+        .metadata.labels["kueue.x-k8s.io/queue-name"]
+        == "gpu-validation"
+    )
+    assert distributed_training._reactive_worker_cpus(1) == 3
+    smoke_source = inspect.getsource(
+        distributed_training.train_reactive_nuplan_bev_ray_1_smoke
+        .task_function
+    )
+    assert "allow_single_worker_smoke=True" in smoke_source
+    assert (
+        "checkpoint_interval_steps=min(4, steps_per_epoch)"
+        in smoke_source
+    )
     assert (
         distributed_training.RAY_REACTIVE_4.worker_node_config[0]
         .ray_start_params["num-gpus"]
@@ -557,10 +627,10 @@ def test_four_rank_performance_capacity_matches_ray_contract():
     ]
     assert requirements["karpenter.sh/capacity-type"] == ["reserved"]
     assert capacity_block_pool["limits"] == {
-        "cpu": "192",
-        "memory": "2Ti",
-        "nodes": "1",
-        "nvidia.com/gpu": "8",
+        "cpu": "384",
+        "memory": "4Ti",
+        "nodes": "2",
+        "nvidia.com/gpu": "16",
     }
 
     queue_objects = {
@@ -596,8 +666,8 @@ def test_four_rank_performance_capacity_matches_ray_contract():
         == ["cpu", "memory", "ephemeral-storage"]
     )
     assert compute_group["flavors"][0]["resources"] == [
-        {"name": "cpu", "nominalQuota": "128"},
-        {"name": "memory", "nominalQuota": "1536Gi"},
+        {"name": "cpu", "nominalQuota": "256"},
+        {"name": "memory", "nominalQuota": "3Ti"},
         {"name": "ephemeral-storage", "nominalQuota": "1500Gi"},
     ]
     gpu_group = next(
@@ -606,7 +676,7 @@ def test_four_rank_performance_capacity_matches_ray_contract():
         if group["coveredResources"] == ["nvidia.com/gpu"]
     )
     assert gpu_group["flavors"][0]["resources"] == [
-        {"name": "nvidia.com/gpu", "nominalQuota": "8"}
+        {"name": "nvidia.com/gpu", "nominalQuota": "16"}
     ]
     assert (
         "LocalQueue",
@@ -655,11 +725,13 @@ def test_four_rank_performance_capacity_matches_ray_contract():
     validation_compute_group = next(
         group
         for group in validation_queue["resourceGroups"]
-        if group["coveredResources"] == ["cpu", "memory"]
+        if group["coveredResources"]
+        == ["cpu", "memory", "ephemeral-storage"]
     )
     assert validation_compute_group["flavors"][0]["resources"] == [
         {"name": "cpu", "nominalQuota": "12"},
         {"name": "memory", "nominalQuota": "48Gi"},
+        {"name": "ephemeral-storage", "nominalQuota": "200Gi"},
     ]
     assert (
         "ClusterQueue",
@@ -683,7 +755,7 @@ def test_four_rank_performance_capacity_matches_ray_contract():
     assert "nodepool/gpu-validation" in deploy_script
     assert "nodeclass/auto-e2e-p5en-capacity-block" in deploy_script
     assert "kueue-manager-config" in deploy_script
-    assert "wait_for_gpu_quota auto-e2e-development 10" in deploy_script
+    assert "wait_for_gpu_quota auto-e2e-development 18" in deploy_script
     assert "wait_for_gpu_quota auto-e2e-staging 0" in deploy_script
     assert "wait_for_gpu_quota auto-e2e-production 0" in deploy_script
     assert '"limits.nvidia.com/gpu" not in hard' in deploy_script
@@ -941,14 +1013,11 @@ def test_four_rank_workflow_runs_one_frozen_multitask_stage():
         distributed_training.train_reactive_stage_ray_4.metadata.retries
         == 2
     )
-    assert (
-        distributed_training.train_reactive_stage_ray_4.metadata.timeout
-        == timedelta(hours=20)
-    )
     for task in (
         distributed_training.train_reactive_stage_ray_4,
         distributed_training.train_reactive_stage_ray_8,
     ):
+        assert task.metadata.timeout == 0
         assert task.metadata.labels == {
             "kueue.x-k8s.io/queue-name": "p5en-capacity-block",
             "kueue.x-k8s.io/priority-class": "production-high",
@@ -1007,6 +1076,140 @@ def test_eight_rank_workflow_runs_one_frozen_trajectory_route_stage():
     assert multistage_parameters["per_rank_batch_size"].default == 4
 
 
+def test_eight_rank_bev_workflow_is_locked_to_segmentation_only():
+    node, = distributed_training.wf_train_reactive_nuplan_bev_ray_8.nodes
+    bindings = {
+        binding.var: binding.binding for binding in node.bindings
+    }
+
+    assert node.flyte_entity.name.endswith("train_reactive_stage_ray_8")
+    assert bindings["epochs"].promise.var == "epochs"
+    assert bindings["learning_rate"].promise.var == "learning_rate"
+    assert (
+        bindings["bev_encoder_learning_rate"].promise.var
+        == "bev_encoder_learning_rate"
+    )
+    assert bindings["trajectory_weight"].scalar.primitive.float_value == 0.0
+    assert bindings["bev_weight"].scalar.primitive.float_value == 1.0
+    assert bindings["route_weight"].scalar.primitive.float_value == 0.0
+    assert not bindings["freeze_bevformer"].scalar.primitive.boolean
+    assert bindings["training_scope"].scalar.primitive.string_value == (
+        "bev_only"
+    )
+    assert (
+        bindings[
+            "bev_repeat_frequency_threshold"
+        ].scalar.primitive.float_value
+        == pytest.approx(0.05)
+    )
+    assert (
+        bindings["validation_sample_limit"].scalar.primitive.integer
+        == 4096
+    )
+    parameters = inspect.signature(
+        distributed_training.wf_train_reactive_nuplan_bev_ray_8
+    ).parameters
+    assert parameters["epochs"].default == 5
+    assert parameters["learning_rate"].default == 1e-4
+    assert parameters["bev_encoder_learning_rate"].default == 1e-5
+    assert parameters["num_loader_workers"].default == 4
+    assert parameters["per_rank_batch_size"].default == 4
+
+
+def test_two_rank_real_bev_canary_uses_the_production_objective():
+    node, = (
+        distributed_training
+        .wf_train_reactive_nuplan_bev_ray_2_canary
+        .nodes
+    )
+    bindings = {
+        binding.var: binding.binding for binding in node.bindings
+    }
+
+    assert node.flyte_entity.name.endswith("train_reactive_stage_ray_2")
+    assert bindings["epochs"].promise.var == "epochs"
+    assert bindings["steps_per_epoch"].promise.var == "steps_per_epoch"
+    assert bindings["per_rank_batch_size"].scalar.primitive.integer == 1
+    assert bindings["precision"].scalar.primitive.string_value == "bf16"
+    assert bindings["trajectory_weight"].scalar.primitive.float_value == 0.0
+    assert bindings["bev_weight"].scalar.primitive.float_value == 1.0
+    assert bindings["route_weight"].scalar.primitive.float_value == 0.0
+    assert not bindings["freeze_bevformer"].scalar.primitive.boolean
+    assert bindings["training_scope"].scalar.primitive.string_value == (
+        "bev_only"
+    )
+
+
+def test_eight_rank_real_bev_canary_matches_production_topology():
+    nodes = (
+        distributed_training
+        .wf_train_reactive_nuplan_bev_ray_8_canary
+        .nodes
+    )
+    node = next(
+        item
+        for item in nodes
+        if item.flyte_entity.name.endswith("train_reactive_stage_ray_8")
+    )
+    gate = next(
+        item
+        for item in nodes
+        if item.flyte_entity.name.endswith(
+            "verify_reactive_bev_canary_training"
+        )
+    )
+    bindings = {
+        binding.var: binding.binding for binding in node.bindings
+    }
+
+    assert node.flyte_entity.name.endswith("train_reactive_stage_ray_8")
+    assert bindings["epochs"].promise.var == "epochs"
+    assert bindings["steps_per_epoch"].promise.var == "steps_per_epoch"
+    assert (
+        bindings["capacity_block_end_utc"].promise.var
+        == "capacity_block_end_utc"
+    )
+    assert bindings["per_rank_batch_size"].scalar.primitive.integer == 4
+    assert bindings["num_loader_workers"].scalar.primitive.integer == 4
+    assert bindings["precision"].scalar.primitive.string_value == "bf16"
+    assert bindings["trajectory_weight"].scalar.primitive.float_value == 0.0
+    assert bindings["bev_weight"].scalar.primitive.float_value == 1.0
+    assert bindings["route_weight"].scalar.primitive.float_value == 0.0
+    assert not bindings["freeze_bevformer"].scalar.primitive.boolean
+    assert bindings["training_scope"].scalar.primitive.string_value == (
+        "bev_only"
+    )
+    assert bindings[
+        "allow_bounded_bev_canary"
+    ].scalar.primitive.boolean
+    assert (
+        bindings["validation_sample_limit"].promise.var
+        == "validation_sample_limit"
+    )
+    assert {item.id for item in gate.upstream_nodes} == {node.id}
+
+
+def test_nuplan_trajectory_workflow_consumes_a_frozen_bev_parent():
+    node, = (
+        distributed_training
+        .wf_train_reactive_nuplan_from_bev_ray_8
+        .nodes
+    )
+    bindings = {
+        binding.var: binding.binding for binding in node.bindings
+    }
+
+    assert node.flyte_entity.name.endswith("train_reactive_stage_ray_8")
+    assert bindings["parent_checkpoint"].promise.var == "bev_checkpoint"
+    assert bindings["trajectory_weight"].scalar.primitive.float_value == 1.0
+    assert bindings["bev_weight"].scalar.primitive.float_value == 0.0
+    assert bindings["route_weight"].scalar.primitive.float_value == 1.0
+    assert bindings["freeze_bevformer"].scalar.primitive.boolean
+    assert bindings["training_scope"].scalar.primitive.string_value == (
+        "multitask"
+    )
+
+
 def test_production_checkpoint_interval_defaults_to_256_steps():
     for task in (
         distributed_training.train_reactive_stage_ray_4,
@@ -1018,6 +1221,7 @@ def test_production_checkpoint_interval_defaults_to_256_steps():
     for workflow in (
         distributed_training.wf_train_reactive_nuplan_ray_4,
         distributed_training.wf_train_reactive_nuplan_ray_8,
+        distributed_training.wf_train_reactive_nuplan_bev_ray_8,
     ):
         workflow_parameters = inspect.signature(workflow).parameters
         assert (
@@ -1385,17 +1589,24 @@ def test_reactive_nuplan_launcher_uses_registered_eight_rank_workflow():
 
     assert (
         "Platform.pipelines.distributed_training."
-        "wf_train_reactive_nuplan_ray_8"
+        "wf_train_reactive_nuplan_bev_ray_8"
     ) in buildspec
-    assert 'EPOCHS: "3"' in buildspec
+    assert 'EPOCHS: "5"' in buildspec
+    assert 'CANARY_EPOCHS: "2"' in buildspec
+    assert 'test "${CANARY_EPOCHS}" = "2"' in buildspec
+    assert 'STEPS_PER_EPOCH: "128"' in buildspec
+    assert 'VALIDATION_SAMPLE_LIMIT: "1024"' in buildspec
+    assert 'LEARNING_RATE: "1e-4"' in buildspec
+    assert 'BEV_ENCODER_LEARNING_RATE: "1e-5"' in buildspec
     assert 'PRECISION: "bf16"' in buildspec
     assert 'VAL_FRACTION: "0.1"' in buildspec
+    assert 'NUM_LOADER_WORKERS: "4"' in buildspec
     assert 'PER_RANK_BATCH_SIZE: "4"' in buildspec
     assert "'^(1|2|4)$'" in buildspec
     assert 'RESUME_CHECKPOINT_URI: ""' in buildspec
-    assert 'TRAJECTORY_WEIGHT: "1.0"' in buildspec
-    assert 'BEV_WEIGHT: "0.0"' in buildspec
-    assert 'ROUTE_WEIGHT: "1.0"' in buildspec
+    assert 'TRAJECTORY_WEIGHT: "0.0"' in buildspec
+    assert 'BEV_WEIGHT: "1.0"' in buildspec
+    assert 'ROUTE_WEIGHT: "0.0"' in buildspec
     assert "NUPLAN_DATASET_URIS_URI" in buildspec
     assert "len(dataset_uris) != 43" in buildspec
     assert "len(set(dataset_uris)) != 43" in buildspec
@@ -1416,6 +1627,13 @@ def test_reactive_nuplan_launcher_uses_registered_eight_rank_workflow():
         in buildspec
     )
     assert '"resume_checkpoint": (' in buildspec
+    assert (
+        '"wf_train_reactive_nuplan_bev_ray_8_canary"'
+        in buildspec
+    )
+    assert '"steps_per_epoch": int(' in buildspec
+    assert '"validation_sample_limit": int(' in buildspec
+    assert '"epochs": int(os.environ["CANARY_EPOCHS"])' in buildspec
     codebuild_terraform = (
         Path(distributed_training.__file__).parents[1]
         / "infra/modules/codebuild/main.tf"
@@ -1446,7 +1664,7 @@ def test_flyte_resource_quota_tracks_all_gpu_capacity():
         for domain, settings in item.items()
     }
 
-    assert domains["development"]["projectQuotaGpu"] == "10"
+    assert domains["development"]["projectQuotaGpu"] == "18"
     assert domains["staging"]["projectQuotaGpu"] == "0"
     assert domains["production"]["projectQuotaGpu"] == "0"
     assert "limits.nvidia.com/gpu: {{ projectQuotaGpu }}" not in values_text
@@ -1525,10 +1743,10 @@ def test_canary_gate_requires_loss_decrease_and_stage_b_bev_off(tmp_path):
             f"validation_bev_{class_name}_{suffix}": value
             for class_name in BEV_SEGMENTATION_CLASSES
             for suffix, value in (
-                ("average_precision", 0.5),
-                ("positive_cells", 10.0),
-                ("recall", 0.5),
-            )
+                    ("average_precision", 0.5),
+                    ("positive_cells", 10.0),
+                    ("recall_at_0p5", 0.5),
+                )
         },
     }
     stage_a = metadata(
@@ -1580,3 +1798,437 @@ def test_canary_gate_requires_loss_decrease_and_stage_b_bev_off(tmp_path):
     )
 
     assert json.loads(Path(report.path).read_text())["thresholds_pass"]
+
+
+def test_bev_canary_gate_requires_learning_and_class_coverage(tmp_path):
+    class_metrics = {
+        f"validation_bev_{class_name}_{suffix}": value
+        for class_name in BEV_SEGMENTATION_CLASSES
+        for suffix, value in (
+            ("ap_lift", 0.2),
+            ("ap_lift_bootstrap_lower_95", 0.1),
+            ("ap_lift_bootstrap_upper_95", 0.3),
+            ("average_precision", 0.3),
+            ("best_iou_on_validation_set", 0.25),
+            ("best_iou_precision_on_validation_set", 0.4),
+            ("best_iou_recall_on_validation_set", 0.5),
+            ("best_iou_threshold_on_validation_set", 0.6),
+            ("positive_cells", 10.0),
+            ("positive_prevalence", 0.01),
+            ("supported", 1.0),
+        )
+    }
+    class_metrics[
+        "validation_bev_vulnerable_road_user_ap_lift"
+    ] = 0.028
+    class_metrics[
+        "validation_bev_vulnerable_road_user_"
+        "ap_lift_bootstrap_lower_95"
+    ] = 0.01
+    class_metrics[
+        "validation_bev_other_obstacle_ap_lift"
+    ] = 0.0015
+    class_metrics[
+        "validation_bev_other_obstacle_ap_lift_bootstrap_lower_95"
+    ] = 0.0002
+    for class_name, iou, precision, prevalence in (
+        ("vulnerable_road_user", 0.004, 0.006, 0.0008),
+        ("other_obstacle", 0.001, 0.0015, 0.0004),
+    ):
+        class_metrics[
+            f"validation_bev_{class_name}_best_iou_on_validation_set"
+        ] = iou
+        class_metrics[
+            f"validation_bev_{class_name}_"
+            "best_iou_precision_on_validation_set"
+        ] = precision
+        class_metrics[
+            f"validation_bev_{class_name}_positive_prevalence"
+        ] = prevalence
+    common = {
+        **class_metrics,
+        **{
+            f"bev_pos_weight_{index}": float(index + 2)
+            for index in range(len(BEV_SEGMENTATION_CLASSES))
+        },
+        **{
+            f"bev_class_weight_{index}": (
+                2.5 if index >= 6 else 0.5
+            )
+            for index in range(len(BEV_SEGMENTATION_CLASSES))
+        },
+        **{
+            f"bev_positive_pair_frequency_{index}": (
+                0.02 if index >= 6 else 0.5
+            )
+            for index in range(len(BEV_SEGMENTATION_CLASSES))
+        },
+        **{
+            f"bev_repeat_factor_{index}": (
+                4 if index >= 6 else 1
+            )
+            for index in range(len(BEV_SEGMENTATION_CLASSES))
+        },
+        **{
+            f"train_bev_logit_gradient_l1_class_{index}": 0.1
+            for index in range(len(BEV_SEGMENTATION_CLASSES))
+        },
+        **{
+            f"train_bev_logit_gradient_share_class_{index}": 0.125
+            for index in range(len(BEV_SEGMENTATION_CLASSES))
+        },
+        "train_bev_logit_gradient_diagnostic_batches": 16.0,
+        "bounded_bev_canary": 1.0,
+        "train_bev_segmentation_bce": 0.6,
+        "train_bev_segmentation_dice": 0.7,
+        "train_gradient_camera_pre_clip_norm": 0.2,
+        "train_gradient_front_gate_pre_clip_norm": 0.1,
+        "train_loader_restarts": 0.0,
+        "bev_rank_min_full_microbatch_capacity": 32.0,
+        "bev_rank_max_full_microbatch_capacity": 36.0,
+        "bev_rank_min_drop_last_fraction": 0.0,
+        "bev_rank_max_drop_last_fraction": 0.01,
+        "bev_rank_min_importance_scale": 0.8,
+        "bev_rank_max_importance_scale": 1.2,
+        "bev_rank_min_optimizer_tail_fraction": 0.0,
+        "bev_rank_max_optimizer_tail_fraction": 0.09,
+        "bev_rank_min_truncation_fraction": 0.0,
+        "bev_rank_max_truncation_fraction": 0.1,
+        "validation_bev_all_classes_supported": 1.0,
+        "validation_bev_dynamic_macro_ap_lift": 0.2,
+        "validation_bev_min_ap_lift": 0.0015,
+        "validation_bev_static_macro_ap_lift": 0.2,
+        "validation_selection_score": 0.2,
+    }
+    improved_class_metrics = {
+        key: (
+            value + 0.01
+            if key.endswith("_ap_lift")
+            else value + 0.12
+            if key.endswith("_best_iou_threshold_on_validation_set")
+            else value
+        )
+        for key, value in class_metrics.items()
+    }
+    improved_class_metrics[
+        "validation_bev_vulnerable_road_user_ap_lift"
+    ] = 0.027
+    improved_class_metrics[
+        "validation_bev_other_obstacle_ap_lift"
+    ] = 0.0014
+    path = tmp_path / "bev-canary.json"
+    path.write_text(
+        json.dumps({
+            "history": [
+                {
+                    **common,
+                    "epoch": 1,
+                    "is_best": 1,
+                    "train_bev_segmentation": 0.8,
+                },
+                {
+                    **common,
+                    **improved_class_metrics,
+                    "epoch": 2,
+                    "is_best": 1,
+                    "train_bev_segmentation": 0.7,
+                    "validation_selection_score": 0.201,
+                },
+            ]
+        })
+    )
+
+    report = (
+        distributed_training
+        .verify_reactive_bev_canary_training
+        .task_function(
+            metadata=distributed_training.FlyteFile(str(path)),
+        )
+    )
+
+    payload = json.loads(Path(report.path).read_text())
+    assert payload["thresholds_pass"]
+    assert payload["all_classes_supported"]
+    assert payload["all_classes_beat_prevalence"]
+    assert payload["all_classes_have_useful_operating_points"]
+    assert payload["schema_version"] == "reactive_bev_canary_report_v7"
+    assert payload["operating_point_requirement"] == (
+        "beats_prevalence_with_positive_recall_v1"
+    )
+    assert payload["production_quality_guard_deferred"] is True
+    assert payload["class_order"] == list(BEV_SEGMENTATION_CLASSES)
+    assert payload["second_epoch_selection_gain"] == pytest.approx(0.001)
+    assert payload["selection_gain_minimum"] == pytest.approx(0.001)
+    assert payload["threshold_stability_gate_enforced"] is False
+    assert payload[
+        "ap_lift_absolute_regression_tolerance"
+    ] == pytest.approx(0.001)
+    assert payload[
+        "rare_ap_lift_relative_regression_tolerance"
+    ] == pytest.approx(0.1)
+    assert payload["selected_checkpoint_epoch"] == 2
+    assert payload["positive_weights_by_class"] == {
+        class_name: float(index + 2)
+        for index, class_name in enumerate(BEV_SEGMENTATION_CLASSES)
+    }
+    assert payload["repeat_factors_by_class"] == {
+        class_name: (4 if index >= 6 else 1)
+        for index, class_name in enumerate(BEV_SEGMENTATION_CLASSES)
+    }
+    assert payload["ap_lift_regression_tolerance_by_class"] == {
+        "drivable_area": pytest.approx(0.001),
+        "lane_boundary": pytest.approx(0.001),
+        "intersection": pytest.approx(0.001),
+        "crosswalk": pytest.approx(0.001),
+        "stop_line": pytest.approx(0.001),
+        "vehicle": pytest.approx(0.001),
+        "vulnerable_road_user": pytest.approx(0.001),
+        "other_obstacle": pytest.approx(0.00015),
+    }
+
+
+@pytest.mark.parametrize(
+    (
+        "selection_score",
+        "regressed_class",
+        "first_class_lift",
+        "second_class_lift",
+        "threshold_drift",
+        "match",
+    ),
+    (
+        (
+            0.2005,
+            None,
+            None,
+            None,
+            0.0,
+            "selection score did not improve enough",
+        ),
+        (0.21, "vehicle", 0.2, 0.19, 0.0, "AP lift regressed"),
+        (
+            0.21,
+            "other_obstacle",
+            0.02,
+            0.0175,
+            0.0,
+            "AP lift regressed",
+        ),
+        (
+            0.21,
+            None,
+            None,
+            None,
+            0.5,
+            "invalid calibrated threshold",
+        ),
+    ),
+)
+def test_bev_canary_gate_rejects_weak_second_epoch(
+    tmp_path,
+    selection_score,
+    regressed_class,
+    first_class_lift,
+    second_class_lift,
+    threshold_drift,
+    match,
+):
+    def epoch(*, loss, selection, lift, threshold):
+        values = {
+            "epoch": 1,
+            "is_best": 1,
+            "bounded_bev_canary": 1.0,
+            "train_bev_segmentation": loss,
+            "train_bev_segmentation_bce": 0.6,
+            "train_bev_segmentation_dice": 0.7,
+            "train_bev_logit_gradient_diagnostic_batches": 16.0,
+            "train_gradient_camera_pre_clip_norm": 0.2,
+            "train_gradient_front_gate_pre_clip_norm": 0.1,
+            "train_loader_restarts": 0.0,
+            "bev_rank_min_full_microbatch_capacity": 32.0,
+            "bev_rank_max_full_microbatch_capacity": 36.0,
+            "bev_rank_min_drop_last_fraction": 0.0,
+            "bev_rank_max_drop_last_fraction": 0.01,
+            "bev_rank_min_importance_scale": 0.8,
+            "bev_rank_max_importance_scale": 1.2,
+            "bev_rank_min_optimizer_tail_fraction": 0.0,
+            "bev_rank_max_optimizer_tail_fraction": 0.09,
+            "bev_rank_min_truncation_fraction": 0.0,
+            "bev_rank_max_truncation_fraction": 0.1,
+            "validation_bev_all_classes_supported": 1.0,
+            "validation_bev_dynamic_macro_ap_lift": lift,
+            "validation_bev_min_ap_lift": lift,
+            "validation_bev_static_macro_ap_lift": lift,
+            "validation_selection_score": selection,
+        }
+        for index, class_name in enumerate(BEV_SEGMENTATION_CLASSES):
+            values.update({
+                f"bev_pos_weight_{index}": float(index + 2),
+                f"bev_class_weight_{index}": (
+                    2.5 if index >= 6 else 0.5
+                ),
+                f"bev_positive_pair_frequency_{index}": (
+                    0.02 if index >= 6 else 0.5
+                ),
+                f"bev_repeat_factor_{index}": 1,
+                f"train_bev_logit_gradient_l1_class_{index}": 0.1,
+                f"train_bev_logit_gradient_share_class_{index}": 0.125,
+                f"validation_bev_{class_name}_ap_lift": lift,
+                f"validation_bev_{class_name}_"
+                "ap_lift_bootstrap_lower_95": lift * 0.5,
+                f"validation_bev_{class_name}_"
+                "ap_lift_bootstrap_upper_95": lift * 1.5,
+                f"validation_bev_{class_name}_average_precision": 0.3,
+                f"validation_bev_{class_name}_"
+                "best_iou_on_validation_set": 0.25,
+                f"validation_bev_{class_name}_"
+                "best_iou_precision_on_validation_set": 0.4,
+                f"validation_bev_{class_name}_"
+                "best_iou_recall_on_validation_set": 0.5,
+                f"validation_bev_{class_name}_"
+                "best_iou_threshold_on_validation_set": threshold,
+                f"validation_bev_{class_name}_positive_cells": 10.0,
+                f"validation_bev_{class_name}_positive_prevalence": 0.01,
+                f"validation_bev_{class_name}_supported": 1.0,
+            })
+        return values
+
+    first = epoch(
+        loss=0.8,
+        selection=0.2,
+        lift=0.2,
+        threshold=0.6,
+    )
+    second = epoch(
+        loss=0.7,
+        selection=selection_score,
+        lift=0.21,
+        threshold=0.6 + threshold_drift,
+    )
+    second["epoch"] = 2
+    if regressed_class is not None:
+        metric_name = (
+            f"validation_bev_{regressed_class}_ap_lift"
+        )
+        first[metric_name] = first_class_lift
+        second[metric_name] = second_class_lift
+    path = tmp_path / "weak-bev-canary.json"
+    path.write_text(json.dumps({"history": [first, second]}))
+
+    with pytest.raises(ValueError, match=match):
+        (
+            distributed_training.verify_reactive_bev_canary_training
+            .task_function(
+                metadata=distributed_training.FlyteFile(str(path)),
+            )
+        )
+
+
+@pytest.mark.parametrize(
+    ("epoch_numbers", "match"),
+    (
+        ((1, 1), "unique and contiguous"),
+        ((2, 3), "unique and contiguous"),
+        ((1, 3), "unique and contiguous"),
+        ((True, 2), "invalid epoch number"),
+        ((1.5, 2), "invalid epoch number"),
+        ((None, 2), "invalid epoch number"),
+    ),
+)
+def test_bev_canary_gate_rejects_invalid_epoch_history(
+    tmp_path,
+    epoch_numbers,
+    match,
+):
+    class_metrics = {
+        f"validation_bev_{class_name}_{suffix}": value
+        for class_name in BEV_SEGMENTATION_CLASSES
+        for suffix, value in (
+            ("ap_lift", 0.2),
+            ("ap_lift_bootstrap_lower_95", 0.1),
+            ("ap_lift_bootstrap_upper_95", 0.3),
+            ("average_precision", 0.3),
+            ("best_iou_on_validation_set", 0.25),
+            ("best_iou_precision_on_validation_set", 0.4),
+            ("best_iou_recall_on_validation_set", 0.5),
+            ("best_iou_threshold_on_validation_set", 0.6),
+            ("positive_cells", 10.0),
+            ("supported", 1.0),
+        )
+    }
+    common = {
+        **class_metrics,
+        **{
+            f"bev_pos_weight_{index}": float(index + 2)
+            for index in range(len(BEV_SEGMENTATION_CLASSES))
+        },
+        **{
+            f"bev_class_weight_{index}": (
+                2.5 if index >= 6 else 0.5
+            )
+            for index in range(len(BEV_SEGMENTATION_CLASSES))
+        },
+        **{
+            f"bev_positive_pair_frequency_{index}": (
+                0.02 if index >= 6 else 0.5
+            )
+            for index in range(len(BEV_SEGMENTATION_CLASSES))
+        },
+        **{
+            f"bev_repeat_factor_{index}": 1
+            for index in range(len(BEV_SEGMENTATION_CLASSES))
+        },
+        **{
+            f"train_bev_logit_gradient_l1_class_{index}": 0.1
+            for index in range(len(BEV_SEGMENTATION_CLASSES))
+        },
+        **{
+            f"train_bev_logit_gradient_share_class_{index}": 0.125
+            for index in range(len(BEV_SEGMENTATION_CLASSES))
+        },
+        "is_best": 1,
+        "train_bev_logit_gradient_diagnostic_batches": 16.0,
+        "train_bev_segmentation_bce": 0.6,
+        "train_bev_segmentation_dice": 0.7,
+        "train_gradient_camera_pre_clip_norm": 0.2,
+        "train_gradient_front_gate_pre_clip_norm": 0.1,
+        "train_loader_restarts": 0.0,
+        "bev_rank_min_full_microbatch_capacity": 32.0,
+        "bev_rank_max_full_microbatch_capacity": 36.0,
+        "bev_rank_min_drop_last_fraction": 0.0,
+        "bev_rank_max_drop_last_fraction": 0.01,
+        "bev_rank_min_importance_scale": 0.8,
+        "bev_rank_max_importance_scale": 1.2,
+        "bev_rank_min_optimizer_tail_fraction": 0.0,
+        "bev_rank_max_optimizer_tail_fraction": 0.09,
+        "bev_rank_min_truncation_fraction": 0.0,
+        "bev_rank_max_truncation_fraction": 0.1,
+        "validation_bev_all_classes_supported": 1.0,
+        "validation_bev_dynamic_macro_ap_lift": 0.2,
+        "validation_bev_min_ap_lift": 0.2,
+        "validation_bev_static_macro_ap_lift": 0.2,
+        "validation_selection_score": 0.2,
+    }
+    history = [
+        {
+            **common,
+            "epoch": epoch_numbers[0],
+            "train_bev_segmentation": 0.8,
+        },
+        {
+            **common,
+            "epoch": epoch_numbers[1],
+            "train_bev_segmentation": 0.7,
+            "validation_selection_score": 0.21,
+        },
+    ]
+    path = tmp_path / "invalid-epoch-bev-canary.json"
+    path.write_text(json.dumps({"history": history}))
+
+    with pytest.raises(ValueError, match=match):
+        (
+            distributed_training.verify_reactive_bev_canary_training
+            .task_function(
+                metadata=distributed_training.FlyteFile(str(path)),
+            )
+        )

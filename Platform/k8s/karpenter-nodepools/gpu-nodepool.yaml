@@ -85,7 +85,7 @@ spec:
         - key: nvidia.com/gpu
           effect: NoSchedule
   limits:
-    cpu: "192"
-    memory: 2Ti
-    nodes: "1"
-    nvidia.com/gpu: "8"
+    cpu: "384"
+    memory: 4Ti
+    nodes: "2"
+    nvidia.com/gpu: "16"

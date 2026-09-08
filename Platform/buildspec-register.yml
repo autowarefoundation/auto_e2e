@@ -50,5 +50,6 @@ phases:
         pyflyte --config /tmp/flyte.yaml register
         --project $FLYTE_PROJECT
         --domain $FLYTE_DOMAIN
+        --copy none
         --image "${AUTO_E2E_TRAINING_IMAGE}"
         Platform/pipelines/workflows.py

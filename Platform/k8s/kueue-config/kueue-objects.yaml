@@ -61,6 +61,7 @@ spec:
     - coveredResources:
         - cpu
         - memory
+        - ephemeral-storage
       flavors:
         - name: default-flavor
           resources:
@@ -68,6 +69,8 @@ spec:
               nominalQuota: "12"
             - name: memory
               nominalQuota: 48Gi
+            - name: ephemeral-storage
+              nominalQuota: 200Gi
     - coveredResources:
         - nvidia.com/gpu
       flavors:
@@ -100,9 +103,9 @@ spec:
         - name: default-flavor
           resources:
             - name: cpu
-              nominalQuota: "128"
+              nominalQuota: "256"
             - name: memory
-              nominalQuota: 1536Gi
+              nominalQuota: 3Ti
             - name: ephemeral-storage
               nominalQuota: 1500Gi
     - coveredResources:
@@ -111,7 +114,7 @@ spec:
         - name: p5en-capacity-block-flavor
           resources:
             - name: nvidia.com/gpu
-              nominalQuota: "8"
+              nominalQuota: "16"
   preemption:
     withinClusterQueue: Never
     reclaimWithinCohort: Never

@@ -6,6 +6,7 @@ from botocore.exceptions import ClientError
 
 from Platform.scripts.p5en_capacity_block import (
     DEFAULT_MINIMUM_REMAINING_SECONDS,
+    FALLBACK_INSTANCE_TYPE,
     RESERVATION_NAME,
     SUPPORTED_AVAILABILITY_ZONES,
     _purchase_confirmation,
@@ -99,6 +100,18 @@ def test_search_sorts_by_start_then_fee():
     ] == ["cb-cheaper", "cb-expensive", "cb-later"]
 
 
+def test_search_supports_p5_fallback():
+    start_after, end_before = _range()
+    ec2 = _FakeEC2([])
+    search_offerings(
+        ec2,
+        duration_hours=24,
+        start_after=start_after,
+        end_before=end_before,
+        instance_type=FALLBACK_INSTANCE_TYPE,
+    )
+
+
 def test_search_excludes_zones_without_cluster_subnets():
     start_after, end_before = _range()
     supported_zone = sorted(SUPPORTED_AVAILABILITY_ZONES)[0]
@@ -183,6 +196,76 @@ def test_purchase_requires_exact_fee_and_confirmation():
             end_before=end_before,
         )
     assert wrong_confirmation.purchase_requests == []
+
+
+def test_purchase_allows_non_overlapping_successor():
+    start_after, end_before = _range()
+    successor_start = datetime(2026, 9, 3, tzinfo=timezone.utc)
+    offering = {
+        "CapacityBlockOfferingId": "cb-successor",
+        "AvailabilityZone": "us-west-2a",
+        "StartDate": successor_start,
+        "EndDate": successor_start + timedelta(days=1),
+        "UpfrontFee": "100.00",
+    }
+    existing = {
+        "CapacityReservationId": "cr-existing",
+        "ReservationType": "capacity-block",
+        "InstanceType": FALLBACK_INSTANCE_TYPE,
+        "State": "active",
+        "StartDate": successor_start - timedelta(days=1),
+        "EndDate": successor_start,
+    }
+    ec2 = _FakeEC2([offering], [existing])
+    fee = Decimal("100.00")
+    result = purchase_offering(
+        ec2,
+        offering_id="cb-successor",
+        expected_upfront_fee=fee,
+        max_upfront_fee=fee,
+        confirmation=_purchase_confirmation("cb-successor", fee),
+        duration_hours=24,
+        start_after=start_after,
+        end_before=end_before,
+        instance_type=FALLBACK_INSTANCE_TYPE,
+        execute=True,
+    )
+    assert result["CapacityReservation"]["State"] == "scheduled"
+
+
+def test_purchase_rejects_overlapping_successor():
+    start_after, end_before = _range()
+    successor_start = datetime(2026, 9, 3, tzinfo=timezone.utc)
+    offering = {
+        "CapacityBlockOfferingId": "cb-overlap",
+        "AvailabilityZone": "us-west-2a",
+        "StartDate": successor_start,
+        "EndDate": successor_start + timedelta(days=1),
+        "UpfrontFee": "100.00",
+    }
+    existing = {
+        "CapacityReservationId": "cr-existing",
+        "ReservationType": "capacity-block",
+        "InstanceType": FALLBACK_INSTANCE_TYPE,
+        "State": "active",
+        "StartDate": successor_start - timedelta(days=1),
+        "EndDate": successor_start + timedelta(minutes=1),
+    }
+    ec2 = _FakeEC2([offering], [existing])
+    fee = Decimal("100.00")
+    with pytest.raises(ValueError, match="overlaps"):
+        purchase_offering(
+            ec2,
+            offering_id="cb-overlap",
+            expected_upfront_fee=fee,
+            max_upfront_fee=fee,
+            confirmation=_purchase_confirmation("cb-overlap", fee),
+            duration_hours=24,
+            start_after=start_after,
+            end_before=end_before,
+            instance_type=FALLBACK_INSTANCE_TYPE,
+            execute=True,
+        )
 
 
 def test_purchase_stops_when_dry_run_returns_success():

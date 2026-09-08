@@ -258,6 +258,8 @@ def encode_bev_segmentation(
         raise ValueError("BEV target must have shape [8,H,W]")
     if valid.shape != target_f32.shape:
         raise ValueError("BEV valid mask must match target")
+    if not bool(valid.any()):
+        raise ValueError("BEV valid mask must contain at least one valid cell")
     if (
         not np.isfinite(target_f32).all()
         or float(target_f32.min(initial=0.0)) < 0.0
@@ -290,6 +292,10 @@ def encode_bev_segmentation_stats(
         or valid.shape != target_f32.shape
     ):
         raise ValueError("BEV statistics inputs must have shape [8,H,W]")
+    if not bool(valid.any()):
+        raise ValueError(
+            "BEV statistics valid mask must contain at least one valid cell"
+        )
     if (
         not np.isfinite(target_f32).all()
         or float(target_f32.min(initial=0.0)) < 0.0

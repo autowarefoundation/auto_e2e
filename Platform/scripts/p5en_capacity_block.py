@@ -13,6 +13,10 @@ from typing import Any, Sequence
 import boto3
 
 INSTANCE_TYPE = "p5en.48xlarge"
+FALLBACK_INSTANCE_TYPE = "p5.48xlarge"
+SUPPORTED_INSTANCE_TYPES = frozenset(
+    {INSTANCE_TYPE, FALLBACK_INSTANCE_TYPE}
+)
 INSTANCE_COUNT = 1
 RESERVATION_NAME = "auto-e2e-p5en-capacity-block"
 INSTANCE_PLATFORM = "Linux/UNIX"
@@ -58,12 +62,15 @@ def search_offerings(
     duration_hours: int,
     start_after: datetime,
     end_before: datetime,
+    instance_type: str = INSTANCE_TYPE,
 ) -> list[dict[str, Any]]:
     _validate_duration(duration_hours)
+    if instance_type not in SUPPORTED_INSTANCE_TYPES:
+        raise ValueError("unsupported Capacity Block instance type")
     if end_before <= start_after:
         raise ValueError("end-before must be later than start-after")
     request = {
-        "InstanceType": INSTANCE_TYPE,
+        "InstanceType": instance_type,
         "InstanceCount": INSTANCE_COUNT,
         "CapacityDurationHours": duration_hours,
         "StartDateRange": start_after,
@@ -113,8 +120,11 @@ def purchase_offering(
     duration_hours: int,
     start_after: datetime,
     end_before: datetime,
+    instance_type: str = INSTANCE_TYPE,
     execute: bool = False,
 ) -> dict[str, Any]:
+    if instance_type not in SUPPORTED_INSTANCE_TYPES:
+        raise ValueError("unsupported Capacity Block instance type")
     if max_upfront_fee <= 0:
         raise ValueError("maximum upfront fee must be positive")
     if expected_upfront_fee > max_upfront_fee:
@@ -127,15 +137,20 @@ def purchase_offering(
         for block in describe_blocks(ec2)
         if block["State"] not in TERMINAL_BLOCK_STATES
     ]
-    if existing:
+    undated = [
+        block
+        for block in existing
+        if block.get("StartDate") is None or block.get("EndDate") is None
+    ]
+    if undated:
         identifiers = ", ".join(
             sorted(
                 block["CapacityReservationId"]
-                for block in existing
+                for block in undated
             )
         )
         raise ValueError(
-            "an active or scheduled p5en Capacity Block already exists: "
+            "an active or scheduled Capacity Block has no bounded window: "
             f"{identifiers}"
         )
     matching = [
@@ -145,11 +160,34 @@ def purchase_offering(
             duration_hours=duration_hours,
             start_after=start_after,
             end_before=end_before,
+            instance_type=instance_type,
         )
         if offering["CapacityBlockOfferingId"] == offering_id
     ]
     if len(matching) != 1:
         raise ValueError("capacity block offering is no longer available")
+    offering_start = matching[0]["StartDate"]
+    offering_end = matching[0].get(
+        "EndDate",
+        offering_start + timedelta(hours=duration_hours),
+    )
+    overlapping = []
+    for block in existing:
+        block_start = block["StartDate"]
+        block_end = block["EndDate"]
+        if block_start < offering_end and offering_start < block_end:
+            overlapping.append(block)
+    if overlapping:
+        identifiers = ", ".join(
+            sorted(
+                block["CapacityReservationId"]
+                for block in overlapping
+            )
+        )
+        raise ValueError(
+            "the requested Capacity Block overlaps an active or scheduled "
+            f"block: {identifiers}"
+        )
     actual_fee = Decimal(str(matching[0]["UpfrontFee"]))
     if actual_fee != expected_upfront_fee:
         raise ValueError(
@@ -185,7 +223,7 @@ def purchase_offering(
                     },
                     {
                         "Key": "instance-type",
-                        "Value": INSTANCE_TYPE,
+                        "Value": instance_type,
                     },
                     {
                         "Key": "capacity-block-offering-id",
@@ -223,7 +261,10 @@ def describe_blocks(ec2: Any) -> list[dict[str, Any]]:
     for page in paginator.paginate(
         Filters=[
             {"Name": "tag:Name", "Values": [RESERVATION_NAME]},
-            {"Name": "instance-type", "Values": [INSTANCE_TYPE]},
+            {
+                "Name": "instance-type",
+                "Values": sorted(SUPPORTED_INSTANCE_TYPES),
+            },
         ]
     ):
         reservations.extend(page.get("CapacityReservations", ()))
@@ -284,6 +325,11 @@ def _parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     search = subparsers.add_parser("search")
+    search.add_argument(
+        "--instance-type",
+        choices=sorted(SUPPORTED_INSTANCE_TYPES),
+        default=INSTANCE_TYPE,
+    )
     search.add_argument("--duration-hours", type=int, required=True)
     search.add_argument(
         "--start-after",
@@ -297,6 +343,11 @@ def _parser() -> argparse.ArgumentParser:
     )
 
     purchase = subparsers.add_parser("purchase")
+    purchase.add_argument(
+        "--instance-type",
+        choices=sorted(SUPPORTED_INSTANCE_TYPES),
+        default=INSTANCE_TYPE,
+    )
     purchase.add_argument("--offering-id", required=True)
     purchase.add_argument(
         "--expected-upfront-fee",
@@ -345,6 +396,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             duration_hours=args.duration_hours,
             start_after=args.start_after,
             end_before=args.end_before,
+            instance_type=args.instance_type,
         )
     elif args.command == "purchase":
         result = purchase_offering(
@@ -356,6 +408,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             duration_hours=args.duration_hours,
             start_after=args.start_after,
             end_before=args.end_before,
+            instance_type=args.instance_type,
             execute=args.execute,
         )
     elif args.command == "status":
