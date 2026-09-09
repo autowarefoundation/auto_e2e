@@ -64,6 +64,7 @@ SUPPORTED_PRECISIONS = frozenset({"fp32", "bf16"})
 SINGLE_WORKER_SMOKE_MAX_STEPS = 16
 SINGLE_WORKER_SMOKE_MAX_SOURCES = 2
 SINGLE_WORKER_SMOKE_MAX_VALIDATION_SAMPLES = 256
+KITSCENES_MAX_RANK_TRUNCATION_FRACTION = 0.05
 BEV_LANE_NEAR_RADIUS_M = 30.0
 CAMERA_FEATURE_SCALE_WEIGHT_METRIC_PREFIX = (
     "camera_feature_scale_weight_"
@@ -180,7 +181,10 @@ def _required_parent_training_scope(
     """Return the only checkpoint scope accepted by a continuation stage."""
     if stage is ReactiveTrainingStage.NUPLAN_FULL:
         return ReactiveTrainingScope.BEV_ONLY.value
-    if stage is ReactiveTrainingStage.L2D_CONTINUATION:
+    if stage in {
+        ReactiveTrainingStage.L2D_CONTINUATION,
+        ReactiveTrainingStage.KITSCENES_FINETUNE,
+    }:
         return ReactiveTrainingScope.MULTITASK.value
     return None
 
@@ -380,10 +384,19 @@ def validate_reactive_stage_config(config: Mapping[str, Any]) -> None:
     if not storage_path.startswith("s3://"):
         raise ValueError("storage_path must be an S3 URI")
     parent_uri = str(config.get("parent_checkpoint_uri") or "")
+    parent_profile = str(config.get("parent_profile") or "")
+    parent_checkpoint_sha256 = str(
+        config.get("parent_checkpoint_sha256") or ""
+    )
+    parent_checkpoint_epoch = int(
+        config.get("parent_checkpoint_epoch", 0)
+    )
     if parent_uri and resume_uri:
         raise ValueError(
             "parent and resume checkpoints are mutually exclusive"
         )
+    if parent_uri and not parent_uri.startswith("s3://"):
+        raise ValueError("parent checkpoint must be an S3 URI")
     if resume_uri and not resume_uri.startswith("s3://"):
         raise ValueError("resume checkpoint must be an S3 URI")
     if (
@@ -404,6 +417,39 @@ def validate_reactive_stage_config(config: Mapping[str, Any]) -> None:
         and not resume_uri
     ):
         raise ValueError("Stage B requires the exact Stage A checkpoint")
+    if stage is ReactiveTrainingStage.KITSCENES_FINETUNE:
+        if not parent_uri and not resume_uri:
+            raise ValueError(
+                "KITScenes fine-tuning requires the nuPlan parent checkpoint"
+            )
+        if (
+            training_scope is not ReactiveTrainingScope.MULTITASK
+            or not bool(config.get("freeze_bevformer", False))
+            or float(config["trajectory_weight"]) <= 0.0
+            or float(config["bev_weight"]) != 0.0
+            or float(config["route_weight"]) <= 0.0
+            or config.get("is_pretrained") is not True
+            or config.get("allow_random_bevformer_init") is not False
+            or parent_profile != "nuplan_trajectory_route_v1"
+            or re.fullmatch(
+                r"[0-9a-f]{64}",
+                parent_checkpoint_sha256,
+            )
+            is None
+            or parent_checkpoint_epoch != 5
+        ):
+            raise ValueError(
+                "KITScenes fine-tuning requires the frozen Epoch 5 nuPlan "
+                "trajectory and route parent profile"
+            )
+    elif (
+        parent_profile
+        or parent_checkpoint_sha256
+        or parent_checkpoint_epoch
+    ):
+        raise ValueError(
+            "parent checkpoint profile fields are reserved for KITScenes"
+        )
     is_pretrained = config.get("is_pretrained")
     allow_random_init = config.get(
         "allow_random_bevformer_init",
@@ -940,6 +986,21 @@ def _raise_distributed_validation_contract_errors(
             "Reactive distributed validation contract failed: "
             f"{failures}"
         )
+
+
+def _rank_validation_sample_filter(
+    stage: ReactiveTrainingStage,
+    sample_uids: Sequence[str],
+) -> tuple[str, ...] | None:
+    """Let an empty KITScenes rank participate in global validation."""
+    resolved = tuple(str(sample_uid) for sample_uid in sample_uids)
+    if any(not sample_uid for sample_uid in resolved):
+        raise ValueError("validation sample UIDs must be non-empty strings")
+    if resolved:
+        return resolved
+    if stage is ReactiveTrainingStage.KITSCENES_FINETUNE:
+        return None
+    raise ValueError("validation sample subset must not be empty")
 
 
 def _bev_validation_positive_sample_counts(
@@ -1831,6 +1892,8 @@ def _train_fixed_steps(
     import torch.distributed as dist
 
     from training.reactive_stage_runner import (
+        apply_reactive_egomotion_policy,
+        reactive_training_policy,
         resolve_reactive_batch_projection,
         resolve_reactive_camera_history,
         resolve_reactive_front_projection,
@@ -1929,8 +1992,12 @@ def _train_fixed_steps(
             raise ValueError(
                 "Reactive resume BEV gradient diagnostics are invalid"
             )
-    require_stage_a_camera_context = (
-        objective.stage is ReactiveTrainingStage.NUPLAN_FULL
+    require_reactive_camera_context = objective.stage in {
+        ReactiveTrainingStage.NUPLAN_FULL,
+        ReactiveTrainingStage.KITSCENES_FINETUNE,
+    }
+    trajectory_training_policy = reactive_training_policy(
+        objective.stage
     )
     consumed_samples = (
         0
@@ -2066,6 +2133,10 @@ def _train_fixed_steps(
             )
             phase_started = time.perf_counter()
             batch = _batch_to_device(raw_batch, device)
+            batch = apply_reactive_egomotion_policy(
+                batch,
+                trajectory_training_policy,
+            )
             record_performance_phase(
                 capture_performance,
                 performance_seconds,
@@ -2086,14 +2157,14 @@ def _train_fixed_steps(
                 batch,
                 geometry_type,
                 device=device,
-                required=require_stage_a_camera_context,
+                required=require_reactive_camera_context,
             )
             camera_history_tiles, history_projections = (
                 resolve_reactive_camera_history(
                     batch,
                     geometry_type,
                     device=device,
-                    required=require_stage_a_camera_context,
+                    required=require_reactive_camera_context,
                 )
             )
             record_performance_phase(
@@ -3022,6 +3093,8 @@ def _evaluate_global_reactive(
     )
     from training.losses.control_rollout import integrate_controls_torch
     from training.reactive_stage_runner import (
+        apply_reactive_egomotion_policy,
+        reactive_training_policy,
         resolve_reactive_batch_projection,
         resolve_reactive_camera_history,
         resolve_reactive_front_projection,
@@ -3045,6 +3118,7 @@ def _evaluate_global_reactive(
     ):
         raise ValueError("Reactive validation sample digest is invalid")
     was_training = base.training
+    trajectory_training_policy = reactive_training_policy(stage)
     is_bev_only = bool(getattr(objective, "is_bev_only", False))
     if (
         stage is ReactiveTrainingStage.NUPLAN_FULL
@@ -3105,7 +3179,7 @@ def _evaluate_global_reactive(
     bev_dice_sum = 0.0
     bev_loss_samples = 0
     seen_validation_sample_uids: set[str] = set()
-    local_bev_contract_errors: list[str] = []
+    local_validation_contract_errors: list[str] = []
     route_values = torch.zeros(20, dtype=torch.float64, device=device)
     open_loop_values = torch.zeros(
         len(OPEN_LOOP_STATISTIC_NAMES),
@@ -3119,6 +3193,10 @@ def _evaluate_global_reactive(
                     _loader_item(item)
                 )
                 batch = _batch_to_device(raw_batch, device)
+                batch = apply_reactive_egomotion_policy(
+                    batch,
+                    trajectory_training_policy,
+                )
                 projection, geometry_type = (
                     resolve_reactive_batch_projection(
                         batch,
@@ -3131,18 +3209,20 @@ def _evaluate_global_reactive(
                     batch,
                     geometry_type,
                     device=device,
-                    required=(
-                        stage is ReactiveTrainingStage.NUPLAN_FULL
-                    ),
+                    required=stage in {
+                        ReactiveTrainingStage.NUPLAN_FULL,
+                        ReactiveTrainingStage.KITSCENES_FINETUNE,
+                    },
                 )
                 camera_history_tiles, history_projections = (
                     resolve_reactive_camera_history(
                         batch,
                         geometry_type,
                         device=device,
-                        required=(
-                            stage is ReactiveTrainingStage.NUPLAN_FULL
-                        ),
+                        required=stage in {
+                            ReactiveTrainingStage.NUPLAN_FULL,
+                            ReactiveTrainingStage.KITSCENES_FINETUNE,
+                        },
                     )
                 )
                 with torch.autocast(
@@ -3182,7 +3262,7 @@ def _evaluate_global_reactive(
                 else:
                     controls = output
                     auxiliary = {}
-                if stage is ReactiveTrainingStage.NUPLAN_FULL:
+                if expected_sample_count is not None:
                     try:
                         batch_sample_uids = batch.get("sample_uid")
                         if (
@@ -3196,7 +3276,7 @@ def _evaluate_global_reactive(
                             )
                         ):
                             raise ValueError(
-                                "BEV validation requires one sample UID "
+                                "Reactive validation requires one sample UID "
                                 "per item"
                             )
                         duplicate_uids = (
@@ -3209,10 +3289,17 @@ def _evaluate_global_reactive(
                             or duplicate_uids
                         ):
                             raise ValueError(
-                                "BEV validation sample UIDs contain "
+                                "Reactive validation sample UIDs contain "
                                 f"duplicates: {sorted(duplicate_uids)}"
                             )
                         seen_validation_sample_uids.update(batch_sample_uids)
+                    except ValueError as error:
+                        if len(local_validation_contract_errors) < 8:
+                            local_validation_contract_errors.append(
+                                f"{type(error).__name__}: {error}"
+                            )
+                if stage is ReactiveTrainingStage.NUPLAN_FULL:
+                    try:
                         (
                             batch_bev_loss,
                             batch_bev_bce,
@@ -3256,8 +3343,8 @@ def _evaluate_global_reactive(
                         OverflowError,
                         ValueError,
                     ) as error:
-                        if len(local_bev_contract_errors) < 8:
-                            local_bev_contract_errors.append(
+                        if len(local_validation_contract_errors) < 8:
+                            local_validation_contract_errors.append(
                                 f"{type(error).__name__}: {error}"
                             )
                 if is_bev_only:
@@ -3333,9 +3420,9 @@ def _evaluate_global_reactive(
     finally:
         base.train(was_training)
 
-    if stage is ReactiveTrainingStage.NUPLAN_FULL:
+    if expected_sample_count is not None:
         _raise_distributed_validation_contract_errors(
-            local_bev_contract_errors
+            local_validation_contract_errors
         )
     values = torch.tensor(
         [ade_sum, fde_sum, float(sample_count)],
@@ -3352,10 +3439,7 @@ def _evaluate_global_reactive(
         dtype=torch.float64,
         device=device,
     )
-    verify_sample_coverage = (
-        stage is ReactiveTrainingStage.NUPLAN_FULL
-        and expected_sample_count is not None
-    )
+    verify_sample_coverage = expected_sample_count is not None
     _reduce_reactive_validation_state(
         (
             values,
@@ -3960,6 +4044,7 @@ def train_loop_per_worker(config: dict[str, Any]) -> None:
         derive_bev_rank_importance_scale,
         derive_bev_repeat_factors,
         discover_bev_sample_statistics,
+        discover_split_inventory,
         discover_validation_sample_uids,
         make_multi_dataset_loader,
         passthrough_nodesplitter,
@@ -3982,6 +4067,12 @@ def train_loop_per_worker(config: dict[str, Any]) -> None:
     from training.reactive_stage_runner import (
         load_stage_a_parent,
         save_reactive_checkpoint,
+    )
+    from training.dataset_policy import (
+        configured_validation_group_uids,
+        training_policy_for_dataset,
+        validation_group_uids as resolve_validation_group_uids,
+        validation_sample_identity,
     )
 
     validate_reactive_stage_config(config)
@@ -4021,9 +4112,16 @@ def train_loop_per_worker(config: dict[str, Any]) -> None:
         list(config["source_uris"]),
         stage=stage,
     )
+    trajectory_training_policy = training_policy_for_dataset(plan.dataset)
+    fixed_validation_groups = (
+        configured_validation_group_uids(trajectory_training_policy)
+        if stage is ReactiveTrainingStage.KITSCENES_FINETUNE
+        else None
+    )
     assignments = assign_reactive_shards(
         plan.shards,
         world_size=world_size,
+        validation_group_uids=fixed_validation_groups,
     )
     assignment_sha256 = reactive_assignment_sha256(assignments)
     rank_shards = assignments[rank]
@@ -4056,6 +4154,9 @@ def train_loop_per_worker(config: dict[str, Any]) -> None:
         if local_bev_records_by_directory is not None
         else None
     )
+    exact_train_sample_count: int | None = None
+    kitscenes_local_train_sample_count = 0
+    kitscenes_local_train_microbatch_capacity = 0
     validation_sample_uids: tuple[str, ...] | None = None
     validation_sample_uid_sha256 = ""
     validation_sample_count = 0
@@ -4073,6 +4174,134 @@ def train_loop_per_worker(config: dict[str, Any]) -> None:
                 val_fraction=float(config["val_fraction"]),
                 sample_limit=local_validation_limit,
             )
+        elif stage is ReactiveTrainingStage.KITSCENES_FINETUNE:
+            local_inventory = discover_split_inventory(
+                local_directories
+            )
+            rank_inventories: list[Any] = [None] * world_size
+            dist.all_gather_object(
+                rank_inventories,
+                {
+                    "sample_uids_by_group": (
+                        local_inventory.sample_uids_by_group
+                    ),
+                },
+            )
+            sample_uids_by_group: dict[str, set[str]] = {}
+            all_sample_uids: set[str] = set()
+            for rank_inventory in rank_inventories:
+                if not isinstance(rank_inventory, Mapping):
+                    raise ValueError(
+                        "KITScenes split inventory is incomplete"
+                    )
+                rank_groups = rank_inventory.get(
+                    "sample_uids_by_group"
+                )
+                if not isinstance(rank_groups, (list, tuple)):
+                    raise ValueError(
+                        "KITScenes rank split inventory is invalid"
+                    )
+                for group_uid, sample_uids in rank_groups:
+                    normalized_group_uid = str(group_uid)
+                    normalized_sample_uids = {
+                        str(sample_uid) for sample_uid in sample_uids
+                    }
+                    if (
+                        not normalized_group_uid
+                        or any(not uid for uid in normalized_sample_uids)
+                        or len(normalized_sample_uids)
+                        != len(sample_uids)
+                        or all_sample_uids & normalized_sample_uids
+                    ):
+                        raise ValueError(
+                            "KITScenes packed split identities are invalid"
+                        )
+                    sample_uids_by_group.setdefault(
+                        normalized_group_uid,
+                        set(),
+                    ).update(normalized_sample_uids)
+                    all_sample_uids.update(normalized_sample_uids)
+            global_group_uids = tuple(sorted(sample_uids_by_group))
+            global_sample_uid_digest = hashlib.sha256(
+                "\n".join(sorted(all_sample_uids)).encode("utf-8")
+            ).hexdigest()
+            resolved_validation_groups = resolve_validation_group_uids(
+                global_group_uids,
+                val_fraction=float(config["val_fraction"]),
+                policy=trajectory_training_policy,
+                source_revision=plan.source_revision,
+                packed_dataset_version=plan.dataset_version,
+                packed_contract_digest=plan.packed_contract_digest,
+                packed_partition_count=plan.partition_count,
+                empty_partition_count=plan.empty_partition_count,
+                packed_sample_count=len(all_sample_uids),
+                packed_sample_uid_digest=global_sample_uid_digest,
+            )
+            if (
+                resolved_validation_groups is None
+                or resolved_validation_groups != fixed_validation_groups
+            ):
+                raise ValueError(
+                    "KITScenes packed split differs from assignment policy"
+                )
+            expected_validation_count, expected_validation_digest = (
+                validation_sample_identity(trajectory_training_policy)
+            )
+            selected_validation_uids = sorted(
+                sample_uid
+                for group_uid in fixed_validation_groups
+                for sample_uid in sample_uids_by_group[group_uid]
+            )
+            if (
+                len(selected_validation_uids)
+                != expected_validation_count
+                or hashlib.sha256(
+                    "\n".join(selected_validation_uids).encode("utf-8")
+                ).hexdigest()
+                != expected_validation_digest
+            ):
+                raise ValueError(
+                    "KITScenes fixed validation samples differ from the "
+                    "frozen split manifest"
+                )
+            if (
+                int(config.get("validation_sample_limit", 0))
+                != expected_validation_count
+            ):
+                raise ValueError(
+                    "KITScenes validation_sample_limit must equal the frozen "
+                    f"sample count {expected_validation_count}"
+                )
+            local_samples_by_group = dict(
+                local_inventory.sample_uids_by_group
+            )
+            validation_sample_uids = tuple(sorted(
+                sample_uid
+                for group_uid in fixed_validation_groups
+                for sample_uid in local_samples_by_group.get(group_uid, ())
+            ))
+            exact_train_sample_count = (
+                len(all_sample_uids) - expected_validation_count
+            )
+            validation_group_set = set(fixed_validation_groups)
+            for directory in local_directories:
+                directory_inventory = discover_split_inventory(
+                    (directory,),
+                    allow_single_group=True,
+                )
+                directory_train_count = sum(
+                    len(sample_uids)
+                    for group_uid, sample_uids
+                    in directory_inventory.sample_uids_by_group
+                    if group_uid not in validation_group_set
+                )
+                kitscenes_local_train_sample_count += (
+                    directory_train_count
+                )
+                kitscenes_local_train_microbatch_capacity += (
+                    directory_train_count
+                    // int(config["per_rank_batch_size"])
+                )
         else:
             validation_sample_uids = discover_validation_sample_uids(
                 local_directories,
@@ -4105,6 +4334,19 @@ def train_loop_per_worker(config: dict[str, Any]) -> None:
     validation_sample_uid_sha256 = hashlib.sha256(
         "\n".join(global_validation_uids).encode("utf-8")
     ).hexdigest()
+    if stage is ReactiveTrainingStage.KITSCENES_FINETUNE:
+        expected_validation_count, expected_validation_digest = (
+            validation_sample_identity(trajectory_training_policy)
+        )
+        if (
+            validation_sample_count != expected_validation_count
+            or validation_sample_uid_sha256
+            != expected_validation_digest
+        ):
+            raise ValueError(
+                "distributed KITScenes validation coverage differs from the "
+                "frozen split manifest"
+            )
     if stage is ReactiveTrainingStage.NUPLAN_FULL:
         assert local_bev_records is not None
         assert validation_sample_uids is not None
@@ -4235,6 +4477,16 @@ def train_loop_per_worker(config: dict[str, Any]) -> None:
                 config["val_fraction"]
             ),
         )
+    elif stage is ReactiveTrainingStage.KITSCENES_FINETUNE:
+        assert exact_train_sample_count is not None
+        dataset_split_metrics = _reactive_dataset_split_metrics(
+            total_samples=plan.total_samples,
+            train_split_sample_count=exact_train_sample_count,
+            validation_evaluated_sample_count=validation_sample_count,
+            configured_validation_fraction=float(
+                config["val_fraction"]
+            ),
+        )
     bev_head_initialization: dict[str, object] | None = None
     if (
         training_scope is ReactiveTrainingScope.BEV_ONLY
@@ -4320,6 +4572,21 @@ def train_loop_per_worker(config: dict[str, Any]) -> None:
                 parent_path,
                 target_camera_slots=plan.camera_slots,
                 required_training_scope=_required_parent_training_scope(stage),
+                required_parent_profile=(
+                    str(config.get("parent_profile"))
+                    if config.get("parent_profile")
+                    else None
+                ),
+                required_checkpoint_sha256=(
+                    str(config.get("parent_checkpoint_sha256"))
+                    if config.get("parent_checkpoint_sha256")
+                    else None
+                ),
+                required_checkpoint_epoch=(
+                    int(config.get("parent_checkpoint_epoch"))
+                    if int(config.get("parent_checkpoint_epoch", 0)) > 0
+                    else None
+                ),
             )
         )
         inherited_initialization = lineage.get(
@@ -4436,6 +4703,39 @@ def train_loop_per_worker(config: dict[str, Any]) -> None:
                 "BEV-only rank-local loaders cannot supply one optimizer step"
             )
         calculated_steps = bev_optimizer_step_capacity
+    elif stage is ReactiveTrainingStage.KITSCENES_FINETUNE:
+        assert exact_train_sample_count is not None
+        local_train_count_tensor = torch.tensor(
+            kitscenes_local_train_sample_count,
+            dtype=torch.int64,
+            device=device,
+        )
+        dist.all_reduce(
+            local_train_count_tensor,
+            op=dist.ReduceOp.SUM,
+        )
+        if int(local_train_count_tensor.item()) != exact_train_sample_count:
+            raise ValueError(
+                "KITScenes rank-local train counts differ from the frozen "
+                "training sample count"
+            )
+        capacity_tensor = torch.tensor(
+            kitscenes_local_train_microbatch_capacity,
+            dtype=torch.int64,
+            device=device,
+        )
+        dist.all_reduce(capacity_tensor, op=dist.ReduceOp.MIN)
+        minimum_rank_microbatch_capacity = int(
+            capacity_tensor.item()
+        )
+        calculated_steps = (
+            minimum_rank_microbatch_capacity
+            // int(config["gradient_accumulation_steps"])
+        )
+        if calculated_steps <= 0:
+            raise ValueError(
+                "KITScenes rank-local loaders cannot supply one optimizer step"
+            )
     else:
         calculated_steps = optimizer_steps_per_epoch(
             total_samples=plan.total_samples,
@@ -4453,6 +4753,13 @@ def train_loop_per_worker(config: dict[str, Any]) -> None:
     ):
         raise ValueError(
             "configured BEV-only steps exceed rank-local loader capacity"
+        )
+    if (
+        stage is ReactiveTrainingStage.KITSCENES_FINETUNE
+        and configured_steps > calculated_steps
+    ):
+        raise ValueError(
+            "configured KITScenes steps exceed rank-local loader capacity"
         )
     optimizer_steps = configured_steps or calculated_steps
     consumed_microbatch_capacity = (
@@ -4542,6 +4849,67 @@ def train_loop_per_worker(config: dict[str, Any]) -> None:
         )
     else:
         rank_sampling_evidence = []
+    kitscenes_rank_sampling_evidence: list[
+        dict[str, Any] | None
+    ] = []
+    if stage is ReactiveTrainingStage.KITSCENES_FINETUNE:
+        batch_size = int(config["per_rank_batch_size"])
+        retained_sample_capacity = (
+            kitscenes_local_train_microbatch_capacity * batch_size
+        )
+        consumed_sample_capacity = (
+            consumed_microbatch_capacity * batch_size
+        )
+        if not (
+            0
+            < consumed_sample_capacity
+            <= retained_sample_capacity
+            <= kitscenes_local_train_sample_count
+        ):
+            raise RuntimeError(
+                "KITScenes rank sample capacity is invalid"
+            )
+        truncation_fraction = (
+            kitscenes_local_train_sample_count
+            - consumed_sample_capacity
+        ) / kitscenes_local_train_sample_count
+        kitscenes_rank_sampling_evidence = [None] * world_size
+        dist.all_gather_object(
+            kitscenes_rank_sampling_evidence,
+            {
+                "consumed_sample_capacity": consumed_sample_capacity,
+                "microbatch_capacity": (
+                    kitscenes_local_train_microbatch_capacity
+                ),
+                "rank": rank,
+                "retained_sample_capacity": retained_sample_capacity,
+                "train_sample_count": (
+                    kitscenes_local_train_sample_count
+                ),
+                "truncation_fraction": truncation_fraction,
+            },
+        )
+        if any(
+            not isinstance(evidence, Mapping)
+            for evidence in kitscenes_rank_sampling_evidence
+        ):
+            raise RuntimeError(
+                "KITScenes rank sampling evidence is incomplete"
+            )
+        maximum_truncation_fraction = max(
+            float(evidence["truncation_fraction"])
+            for evidence in kitscenes_rank_sampling_evidence
+            if isinstance(evidence, Mapping)
+        )
+        if (
+            maximum_truncation_fraction
+            > KITSCENES_MAX_RANK_TRUNCATION_FRACTION
+        ):
+            raise ValueError(
+                "KITScenes rank-local truncation exceeds the reviewed limit: "
+                f"{maximum_truncation_fraction:.6f} > "
+                f"{KITSCENES_MAX_RANK_TRUNCATION_FRACTION:.6f}"
+            )
     scheduler_identity, scheduler = _build_reactive_scheduler(
         optimizer,
         training_scope=training_scope,
@@ -4601,6 +4969,9 @@ def train_loop_per_worker(config: dict[str, Any]) -> None:
         ),
         "corridor_pos_weight": float(config["corridor_pos_weight"]),
         "training_seed": seed,
+        "trajectory_training_policy": (
+            trajectory_training_policy.metadata()
+        ),
         "scheduler_identity": scheduler_identity,
         "temporal_normalization_identity": (
             temporal_normalization_identity
@@ -4620,6 +4991,9 @@ def train_loop_per_worker(config: dict[str, Any]) -> None:
             BEV_SAMPLING_IMPORTANCE_CORRECTION_VERSION
         ),
         "bev_rank_sampling_evidence": rank_sampling_evidence,
+        "kitscenes_rank_sampling_evidence": (
+            kitscenes_rank_sampling_evidence
+        ),
         "bev_taxonomy_version": BEV_SEGMENTATION_TAXONOMY_VERSION,
         "bev_loss_version": BEV_SEGMENTATION_AUXILIARY_LOSS_VERSION,
         "bev_checkpoint_quality_guard_version": (
@@ -4703,6 +5077,8 @@ def train_loop_per_worker(config: dict[str, Any]) -> None:
             )
             for lineage_key in (
                 "stage_a_parent_checkpoint_sha256",
+                "stage_a_parent_checkpoint_epoch",
+                "stage_a_parent_profile",
                 "stage_a_config_digest",
                 "stage_a_model_state_sha256",
                 "stage_a_freeze_bevformer",
@@ -4865,6 +5241,9 @@ def train_loop_per_worker(config: dict[str, Any]) -> None:
         ),
         "corridor_pos_weight": float(config["corridor_pos_weight"]),
         "training_seed": seed,
+        "trajectory_training_policy": (
+            trajectory_training_policy.metadata()
+        ),
         "scheduler_identity": scheduler_identity,
         "temporal_normalization_identity": (
             temporal_normalization_identity
@@ -4883,6 +5262,9 @@ def train_loop_per_worker(config: dict[str, Any]) -> None:
             BEV_SAMPLING_IMPORTANCE_CORRECTION_VERSION
         ),
         "bev_rank_sampling_evidence": rank_sampling_evidence,
+        "kitscenes_rank_sampling_evidence": (
+            kitscenes_rank_sampling_evidence
+        ),
         "bev_taxonomy_version": BEV_SEGMENTATION_TAXONOMY_VERSION,
         "bev_loss_version": BEV_SEGMENTATION_AUXILIARY_LOSS_VERSION,
         "bev_checkpoint_quality_guard_version": (
@@ -4961,6 +5343,7 @@ def train_loop_per_worker(config: dict[str, Any]) -> None:
             pin_memory=True,
             decode_future_frames=False,
             bev_repeat_policy=bev_repeat_policy,
+            validation_group_uids=fixed_validation_groups,
             drop_last=True,
             nodesplitter=passthrough_nodesplitter,
         )
@@ -5214,11 +5597,15 @@ def train_loop_per_worker(config: dict[str, Any]) -> None:
             ),
         )
         if (
-            objective.is_bev_only
+            (
+                objective.is_bev_only
+                or stage
+                is ReactiveTrainingStage.KITSCENES_FINETUNE
+            )
             and float(train_metrics["loader_restarts"]) != 0.0
         ):
             raise RuntimeError(
-                "BEV-only training exhausted a rank-local loader"
+                "fixed-capacity training exhausted a rank-local loader"
             )
         train_epoch_seconds = _distributed_max_seconds(
             time.perf_counter() - epoch_train_started,
@@ -5233,7 +5620,11 @@ def train_loop_per_worker(config: dict[str, Any]) -> None:
             shuffle=0,
             pin_memory=True,
             max_active_loaders=1,
-            sample_uids=validation_sample_uids,
+            sample_uids=_rank_validation_sample_filter(
+                stage,
+                validation_sample_uids,
+            ),
+            validation_group_uids=fixed_validation_groups,
             decode_future_frames=False,
             nodesplitter=passthrough_nodesplitter,
         )

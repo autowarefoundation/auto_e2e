@@ -66,7 +66,10 @@ PARSER_VERSION = "v3"
 # v11: adds the base-resolution Front companion used by the stateful FPN cache.
 # v12: KITScenes stores an exact 0.5-second T8 history pool index and per-sample
 # current-ego-aligned historical camera projection matrices.
-SHARD_SCHEMA_VERSION = "v12"
+# v13: KITScenes adds pose-space trajectory targets, native 1024px current Front
+# images with a 512px FPN companion, an immutable frame-pool archive, and
+# complete Reactive manifest provenance.
+SHARD_SCHEMA_VERSION = "v13"
 
 # Calibration / projection spec encoding and raster-map coordinate semantics.
 # v2 queries KITScenes maps in the scene-local pose frame and applies the map
@@ -80,7 +83,9 @@ SHARD_SCHEMA_VERSION = "v12"
 # v6 derives one square-pixel source focal length from L2D's vertical FOV,
 # then applies the source-to-packed resize instead of fitting incompatible
 # vendor horizontal and vertical angular extents independently.
-GEOMETRY_VERSION = "v6"
+# v7 moves KITScenes navigation rasters onto the shared 450x300 AutoE2E grid and
+# records native-Front projection matrices alongside the 512px surround rig.
+GEOMETRY_VERSION = "v7"
 
 # Selection policy for the sparse reasoning-label subset. v2 adds the first
 # valid sample of every split group to the regular frame-index grid so even a

@@ -19,7 +19,12 @@ pytest.importorskip("webdataset")  # module imports webdataset at top level
 
 from PIL import Image
 
-from data_parsing.pre_extracted import _decode_sample, load_projection_from_manifest
+from data_parsing.pre_extracted import (
+    _decode_sample,
+    _make_pool_accessor,
+    load_projection_from_manifest,
+    packed_sample_tar_paths,
+)
 from navigation.artifacts import (
     SAMPLE_NAVIGATION_ARTIFACT_VERSION,
     encode_array,
@@ -53,6 +58,68 @@ def _jpeg_bytes(color, *, image_size=256):
 
 def _ego_bytes():
     return np.zeros(384, dtype=np.float32).tobytes()
+
+
+def _write_frame_pool_archive(root, members):
+    import hashlib
+    import tarfile
+
+    archive_path = root / "frame_pool.tar"
+    with tarfile.open(archive_path, "w") as archive:
+        for name, payload in members:
+            member = tarfile.TarInfo(name)
+            member.size = len(payload)
+            archive.addfile(member, io.BytesIO(payload))
+    (root / "manifest.json").write_text(
+        json.dumps({
+            "frame_pool_archive": archive_path.name,
+            "frame_pool_archive_sha256": hashlib.sha256(
+                archive_path.read_bytes()
+            ).hexdigest(),
+            "frame_pool_frame_count": len(members),
+        }),
+        encoding="ascii",
+    )
+    return archive_path
+
+
+def test_frame_pool_archive_is_verified_and_extracted(tmp_path):
+    payload = _jpeg_bytes((1, 2, 3))
+    _write_frame_pool_archive(
+        tmp_path,
+        [("frame-a.jpg", payload)],
+    )
+
+    accessor = _make_pool_accessor(str(tmp_path))
+
+    assert accessor is not None
+    assert accessor("frame-a") == payload
+    assert (tmp_path / "pool" / "frame-a.jpg").is_file()
+
+
+def test_frame_pool_archive_rejects_path_traversal(tmp_path):
+    _write_frame_pool_archive(
+        tmp_path,
+        [("../escape.jpg", b"unsafe")],
+    )
+
+    with pytest.raises(ValueError, match="unsafe frame-pool"):
+        _make_pool_accessor(str(tmp_path))
+
+
+def test_packed_sample_tar_paths_excludes_frame_pool_archive(tmp_path):
+    sample_shard = tmp_path / "train-000000.tar"
+    sample_shard.write_bytes(b"sample")
+    _write_frame_pool_archive(
+        tmp_path,
+        [("frame-a.jpg", _jpeg_bytes((1, 2, 3)))],
+    )
+    manifest_path = tmp_path / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="ascii"))
+    manifest["shard_names"] = [sample_shard.name]
+    manifest_path.write_text(json.dumps(manifest), encoding="ascii")
+
+    assert packed_sample_tar_paths(tmp_path) == (sample_shard,)
 
 
 def _navigation_members(

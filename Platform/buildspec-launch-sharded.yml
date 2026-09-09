@@ -16,7 +16,7 @@ env:
     FLYTE_PROJECT: auto-e2e
     FLYTE_DOMAIN: development
     DATASET: KIT-MRT/KITScenes-Multimodal
-    DATASET_VERSION: v3.4
+    DATASET_VERSION: v3.5
     IMAGE_SIZE: "512"
     EPISODES: "10"
     PARTITION_SIZE: "1"

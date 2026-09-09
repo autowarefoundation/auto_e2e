@@ -72,6 +72,9 @@ BEV_CANARY_MIN_SELECTION_GAIN = 1e-3
 BEV_CANARY_AP_LIFT_ABSOLUTE_REGRESSION_TOLERANCE = 1e-3
 BEV_CANARY_RARE_AP_LIFT_RELATIVE_REGRESSION_TOLERANCE = 0.1
 P5EN_SMOKE_MAX_RUNTIME = timedelta(minutes=30)
+NUPLAN_EPOCH5_TRAJECTORY_ROUTE_CHECKPOINT_SHA256 = (
+    "ca8b43d7a777d6fd9195bb253d1452f3cd645f7aab3bd0e36b1f74ffb31df29b"
+)
 
 
 def _resolve_nuplan_validation_sample_limit(
@@ -153,6 +156,13 @@ class ReactiveBEVCanaryOutput(NamedTuple):
 
 
 class ReactiveBEVEvaluationOutput(NamedTuple):
+    report: FlyteFile
+    report_sha256: str
+    checkpoint_sha256: str
+    checkpoint_epoch: int
+
+
+class ReactiveKITScenesEvaluationOutput(NamedTuple):
     report: FlyteFile
     report_sha256: str
     checkpoint_sha256: str
@@ -1150,6 +1160,9 @@ def _run_reactive_stage_task(
     allow_random_bevformer_init: bool = False,
     allow_single_worker_smoke: bool = False,
     allow_bounded_bev_canary: bool = False,
+    parent_profile: str = "",
+    parent_checkpoint_sha256: str = "",
+    parent_checkpoint_epoch: int = 0,
 ) -> ReactiveRayOutput:
     from distributed_training.reactive_stage import run_reactive_stage
     from model_components.bevformer_v2_pretrained import (
@@ -1238,6 +1251,9 @@ def _run_reactive_stage_task(
         "num_loader_workers": num_loader_workers,
         "num_workers": num_workers,
         "parent_checkpoint_uri": parent_uri,
+        "parent_profile": parent_profile,
+        "parent_checkpoint_sha256": parent_checkpoint_sha256,
+        "parent_checkpoint_epoch": parent_checkpoint_epoch,
         "resume_checkpoint_uri": resume_uri,
         "per_rank_batch_size": per_rank_batch_size,
         "precision": precision,
@@ -2224,6 +2240,9 @@ def train_reactive_stage_ray_8(
     bev_repeat_frequency_threshold: float = 0.05,
     validation_sample_limit: int = 1024,
     allow_bounded_bev_canary: bool = False,
+    parent_profile: str = "",
+    parent_checkpoint_sha256: str = "",
+    parent_checkpoint_epoch: int = 0,
 ) -> ReactiveRayOutput:
     """Run one production-size Reactive DDP stage."""
     return _run_reactive_stage_task(
@@ -2262,6 +2281,9 @@ def train_reactive_stage_ray_8(
         training_scope=training_scope,
         bev_encoder_learning_rate=bev_encoder_learning_rate,
         allow_bounded_bev_canary=allow_bounded_bev_canary,
+        parent_profile=parent_profile,
+        parent_checkpoint_sha256=parent_checkpoint_sha256,
+        parent_checkpoint_epoch=parent_checkpoint_epoch,
     )
 
 
@@ -2738,6 +2760,228 @@ def evaluate_reactive_bev_checkpoint(
 @task(
     container_image=TRAINING_IMAGE,
     requests=Resources(
+        cpu="6",
+        mem="28Gi",
+        gpu="1",
+        ephemeral_storage="420Gi",
+    ),
+    limits=Resources(
+        cpu="6",
+        mem="28Gi",
+        gpu="1",
+        ephemeral_storage="420Gi",
+    ),
+    retries=1,
+    labels={
+        "kueue.x-k8s.io/queue-name": "gpu-validation",
+        "kueue.x-k8s.io/priority-class": "research-low",
+    },
+    pod_template=_bev_evaluation_pod_template(),
+)
+def evaluate_reactive_kitscenes_checkpoint(
+    checkpoint: FlyteFile,
+    shards: List[FlyteDirectory],
+    source_split: str = "val",
+    batch_size: int = 1,
+    num_loader_workers: int = 4,
+) -> ReactiveKITScenesEvaluationOutput:
+    """Evaluate a KITScenes fine-tuned checkpoint without checkpoint selection."""
+    import tempfile
+
+    import torch
+
+    from data_parsing.pre_extracted import (
+        discover_split_inventory,
+        make_multi_dataset_loader,
+    )
+    from data_parsing.kit_scenes.temporal_contract import (
+        KITSCENES_BENCHMARK_FUTURE_STEPS,
+        kitscenes_temporal_contract,
+    )
+    from distributed_training.reactive_data import (
+        build_reactive_dataset_plan,
+    )
+    from model_components.auto_e2e import AutoE2E
+    from training.reactive_multitask import (
+        ReactiveTrainingStage,
+        reactive_model_kwargs,
+    )
+    from training.reactive_stage_runner import (
+        evaluate_reactive_multitask,
+        inspect_reactive_checkpoint_identity,
+    )
+
+    if source_split not in {"val", "overlap_train_val"}:
+        raise ValueError(
+            "KITScenes labeled evaluation requires val or overlap_train_val"
+        )
+    if not 1 <= batch_size <= 2:
+        raise ValueError("KITScenes evaluation batch size must be one or two")
+    if not 0 <= num_loader_workers <= 4:
+        raise ValueError(
+            "KITScenes evaluation loader workers must be between zero and four"
+        )
+    if not shards:
+        raise ValueError("KITScenes evaluation shards must not be empty")
+
+    remote_uris = [_flyte_remote_uri(shard) for shard in shards]
+    plan = build_reactive_dataset_plan(
+        remote_uris,
+        stage=ReactiveTrainingStage.KITSCENES_FINETUNE,
+    )
+    shard_directories: list[str] = []
+    manifest_identities: list[dict[str, object]] = []
+    for shard in shards:
+        directory = Path(shard.download())
+        manifest_path = directory / "manifest.json"
+        manifest_bytes = manifest_path.read_bytes()
+        manifest = json.loads(manifest_bytes)
+        if (
+            not isinstance(manifest, dict)
+            or manifest.get("source_split") != source_split
+            or manifest.get("data_role") != "benchmark"
+            or manifest.get("temporal_sampling")
+            != kitscenes_temporal_contract(benchmark_protocol=True)
+        ):
+            raise ValueError(
+                "KITScenes evaluation manifest has the wrong split, role, "
+                "or temporal contract"
+            )
+        if int(manifest.get("total_samples", 0)) > 0:
+            shard_directories.append(str(directory))
+        manifest_identities.append({
+            "manifest_sha256": hashlib.sha256(
+                manifest_bytes
+            ).hexdigest(),
+            "partition_id": str(manifest.get("partition_id") or ""),
+            "total_samples": int(manifest.get("total_samples", 0)),
+        })
+    if not shard_directories:
+        raise ValueError("KITScenes evaluation has no non-empty shards")
+
+    inventory = discover_split_inventory(shard_directories)
+    if inventory.sample_count != plan.total_samples:
+        raise ValueError(
+            "KITScenes evaluation sample inventory differs from manifests"
+        )
+
+    checkpoint_path = Path(checkpoint.download())
+    checkpoint_identity = inspect_reactive_checkpoint_identity(
+        checkpoint_path
+    )
+    payload = torch.load(
+        checkpoint_path,
+        map_location="cpu",
+        weights_only=False,
+    )
+    config = payload.get("config")
+    state_dict = payload.get("model_state_dict")
+    checkpoint_epoch = payload.get("epoch")
+    if (
+        not isinstance(config, Mapping)
+        or not isinstance(state_dict, Mapping)
+        or isinstance(checkpoint_epoch, bool)
+        or not isinstance(checkpoint_epoch, int)
+        or checkpoint_epoch <= 0
+        or config.get("training_stage")
+        != ReactiveTrainingStage.KITSCENES_FINETUNE.value
+    ):
+        raise ValueError(
+            "checkpoint is not a reviewed KITScenes fine-tuning checkpoint"
+        )
+    stage = ReactiveTrainingStage.KITSCENES_FINETUNE
+    model = AutoE2E(
+        backbone=str(config["backbone"]),
+        embed_dim=int(config["embed_dim"]),
+        is_pretrained=False,
+        **reactive_model_kwargs(
+            stage,
+            num_views=int(config["num_views"]),
+        ),
+    )
+    model.load_state_dict(state_dict)
+    device = torch.device("cuda")
+    if not torch.cuda.is_available():
+        raise RuntimeError("KITScenes evaluation requires a GPU")
+    model.to(device)
+    loader = make_multi_dataset_loader(
+        shard_directories,
+        batch_size=batch_size,
+        num_workers=num_loader_workers,
+        split="all",
+        val_fraction=0.0,
+        shuffle=0,
+        pin_memory=True,
+        prefetch_factor=1,
+        max_active_loaders=1,
+        decode_future_frames=False,
+    )
+    metrics = evaluate_reactive_multitask(
+        model,
+        loader,
+        stage=stage,
+        device=device,
+        include_counterfactuals=True,
+        include_route_gradient=True,
+    )
+    trajectory_metrics = metrics.get("trajectory")
+    if not isinstance(trajectory_metrics, dict):
+        raise ValueError("KITScenes evaluation omitted trajectory metrics")
+    trajectory_metrics["ade_6p4s_m"] = None
+    trajectory_metrics["fde_6p4s_m"] = None
+    trajectory_metrics["ade_6p4s_sample_count"] = 0
+    trajectory_metrics["fde_6p4s_sample_count"] = 0
+    if (
+        metrics.get("sample_count") != inventory.sample_count
+        or metrics.get("sample_uid_sha256")
+        != inventory.sample_uid_digest
+    ):
+        raise ValueError(
+            "KITScenes evaluation did not cover the exact packed inventory"
+        )
+    report = {
+        "schema_version": "reactive_kitscenes_labeled_evaluation_v1",
+        "checkpoint_epoch": checkpoint_epoch,
+        "checkpoint_sha256": checkpoint_identity["checkpoint_sha256"],
+        "dataset": plan.dataset,
+        "dataset_version": plan.dataset_version,
+        "evaluation_role": "labeled_external_benchmark",
+        "maximum_labeled_horizon_steps": (
+            KITSCENES_BENCHMARK_FUTURE_STEPS
+        ),
+        "manifest_identities": sorted(
+            manifest_identities,
+            key=lambda item: str(item["partition_id"]),
+        ),
+        "metrics": metrics,
+        "source_revision": plan.source_revision,
+        "source_split": source_split,
+    }
+    report_bytes = (
+        json.dumps(
+            report,
+            allow_nan=False,
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n"
+    ).encode("ascii")
+    report_path = (
+        Path(tempfile.mkdtemp(prefix="reactive-kitscenes-eval-"))
+        / "report.json"
+    )
+    report_path.write_bytes(report_bytes)
+    return ReactiveKITScenesEvaluationOutput(
+        report=FlyteFile(str(report_path)),
+        report_sha256=hashlib.sha256(report_bytes).hexdigest(),
+        checkpoint_sha256=checkpoint_identity["checkpoint_sha256"],
+        checkpoint_epoch=checkpoint_epoch,
+    )
+
+
+@task(
+    container_image=TRAINING_IMAGE,
+    requests=Resources(
         cpu="2",
         mem="4Gi",
         ephemeral_storage="4Gi",
@@ -2957,6 +3201,72 @@ def wf_train_reactive_nuplan_ray_8(
         route_weight=route_weight,
         freeze_bevformer=True,
         capacity_block_end_utc=capacity_block_end_utc,
+    )
+
+
+@workflow
+def wf_train_reactive_kitscenes_ray_8(
+    kitscenes_shards: List[FlyteDirectory],
+    nuplan_epoch5_checkpoint: FlyteFile,
+    capacity_block_end_utc: str,
+    epochs: int = 10,
+    learning_rate: float = 3e-5,
+    val_fraction: float = 0.1,
+    num_loader_workers: int = 4,
+    per_rank_batch_size: int = 2,
+    training_seed: int = 149,
+    precision: str = "bf16",
+    checkpoint_interval_steps: int = 256,
+) -> ReactiveRayOutput:
+    """Fine-tune trajectory and route on the frozen KITScenes split."""
+    return train_reactive_stage_ray_8(
+        shards=kitscenes_shards,
+        stage="kitscenes_finetune",
+        parent_checkpoint=nuplan_epoch5_checkpoint,
+        resume_checkpoint=None,
+        epochs=epochs,
+        learning_rate=learning_rate,
+        weight_decay=1e-2,
+        grad_clip=1.0,
+        val_fraction=val_fraction,
+        num_loader_workers=num_loader_workers,
+        per_rank_batch_size=per_rank_batch_size,
+        training_seed=training_seed,
+        precision=precision,
+        gradient_accumulation_steps=1,
+        steps_per_epoch=0,
+        checkpoint_interval_steps=checkpoint_interval_steps,
+        shuffle_buffer=512,
+        is_pretrained=True,
+        trajectory_weight=1.0,
+        bev_weight=0.0,
+        route_weight=1.0,
+        corridor_pos_weight=1.0,
+        freeze_bevformer=True,
+        capacity_block_end_utc=capacity_block_end_utc,
+        training_scope="multitask",
+        validation_sample_limit=3820,
+        parent_profile="nuplan_trajectory_route_v1",
+        parent_checkpoint_sha256=(
+            NUPLAN_EPOCH5_TRAJECTORY_ROUTE_CHECKPOINT_SHA256
+        ),
+        parent_checkpoint_epoch=5,
+    )
+
+
+@workflow
+def wf_evaluate_reactive_kitscenes(
+    checkpoint: FlyteFile,
+    evaluation_shards: List[FlyteDirectory],
+    source_split: str = "val",
+) -> ReactiveKITScenesEvaluationOutput:
+    """Evaluate the selected checkpoint on an official labeled split."""
+    return evaluate_reactive_kitscenes_checkpoint(
+        checkpoint=checkpoint,
+        shards=evaluation_shards,
+        source_split=source_split,
+        batch_size=1,
+        num_loader_workers=4,
     )
 
 

@@ -16,6 +16,7 @@ from Platform.pipelines.dataset_publication_tasks import (
     _content_identity,
     _copy_immutable,
     _geo_inventory,
+    _plan_partition_artifact_copies,
     _put_immutable,
 )
 
@@ -81,6 +82,75 @@ def _source() -> dict:
         "size": size,
         "content_identity": _content_identity(etag, size),
     }
+
+
+def test_partition_copy_plan_separates_frame_pool_archive():
+    sample = {
+        **_source(),
+        "relative": "train-000000.tar",
+    }
+    archive = {
+        **_source(),
+        "relative": "frame_pool.tar",
+    }
+
+    copy_sources, shards, pool_sources = _plan_partition_artifact_copies(
+        [sample, archive],
+        {
+            "shard_names": ["train-000000.tar"],
+            "frame_pool_archive": "frame_pool.tar",
+            "partition_id": "partition-a",
+        },
+        published_dataset="kitscenes",
+        dataset_version="v3.5",
+    )
+
+    assert [shard["name"] for shard in shards] == ["train-000000.tar"]
+    assert [source["relative"] for source in pool_sources] == [
+        "frame_pool.tar"
+    ]
+    assert len(copy_sources) == 2
+    archive_copy = next(
+        source
+        for source in copy_sources
+        if source["relative"] == "frame_pool.tar"
+    )
+    assert archive_copy["destination_key"].endswith(
+        "/pool/partition-a/frame_pool.tar"
+    )
+
+    second_copy_sources, _, _ = _plan_partition_artifact_copies(
+        [sample, archive],
+        {
+            "shard_names": ["train-000000.tar"],
+            "frame_pool_archive": "frame_pool.tar",
+            "partition_id": "partition-b",
+        },
+        published_dataset="kitscenes",
+        dataset_version="v3.5",
+    )
+    second_archive_copy = next(
+        source
+        for source in second_copy_sources
+        if source["relative"] == "frame_pool.tar"
+    )
+    assert (
+        second_archive_copy["destination_key"]
+        != archive_copy["destination_key"]
+    )
+
+
+def test_partition_copy_plan_rejects_undeclared_top_level_tar():
+    with pytest.raises(ValueError, match="undeclared top-level"):
+        _plan_partition_artifact_copies(
+            [{
+                **_source(),
+                "relative": "unexpected.tar",
+            }],
+            {"shard_names": []},
+            published_dataset="kitscenes",
+            dataset_version="v3.5",
+        )
 
 
 def test_copy_uses_destination_and_source_preconditions():

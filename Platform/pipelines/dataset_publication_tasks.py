@@ -154,6 +154,110 @@ def _content_type(key: str) -> str:
     return "application/octet-stream"
 
 
+def _plan_partition_artifact_copies(
+    objects: list[dict],
+    manifest: dict,
+    *,
+    published_dataset: str,
+    dataset_version: str,
+) -> tuple[list[dict], list[dict], list[dict]]:
+    from Platform.pipelines.dataset_publication import (
+        episode_path_key,
+        pool_key,
+        shard_key,
+    )
+
+    expected_names = manifest.get("shard_names", [])
+    if (
+        not isinstance(expected_names, list)
+        or any(
+            not isinstance(name, str)
+            or not name.endswith(".tar")
+            or "/" in name
+            for name in expected_names
+        )
+        or len(set(expected_names)) != len(expected_names)
+    ):
+        raise ValueError("partition manifest has an invalid shard inventory")
+    expected_name_set = set(expected_names)
+    archive_name = manifest.get("frame_pool_archive")
+    partition_id = manifest.get("partition_id")
+    if archive_name is not None and (
+        not isinstance(archive_name, str)
+        or not archive_name
+        or "/" in archive_name
+        or archive_name in expected_name_set
+        or not isinstance(partition_id, str)
+        or not partition_id
+        or "/" in partition_id
+        or partition_id in {".", ".."}
+    ):
+        raise ValueError("partition manifest has an invalid frame-pool archive")
+
+    copy_sources = []
+    shards = []
+    pool_sources = []
+    unknown_top_level_tars = []
+    for original_source in objects:
+        source = dict(original_source)
+        relative = source["relative"]
+        destination_key = None
+        if relative in expected_name_set:
+            destination_key = shard_key(
+                published_dataset,
+                dataset_version,
+                relative,
+            )
+            shards.append({
+                "name": relative,
+                "key": destination_key,
+                "byte_size": source["size"],
+                "content_identity": source["content_identity"],
+            })
+        elif relative == archive_name:
+            destination_key = pool_key(
+                published_dataset,
+                dataset_version,
+                f"pool/{partition_id}/{relative}",
+            )
+            pool_sources.append(source)
+        elif "/" not in relative and relative.endswith(".tar"):
+            unknown_top_level_tars.append(relative)
+        elif relative.startswith("pool/"):
+            destination_key = pool_key(
+                published_dataset,
+                dataset_version,
+                relative,
+            )
+            pool_sources.append(source)
+        elif relative.startswith("geo/episode_paths/"):
+            destination_key = episode_path_key(
+                published_dataset,
+                dataset_version,
+                relative.removeprefix("geo/episode_paths/"),
+            )
+        if destination_key is not None:
+            source["destination_key"] = destination_key
+            copy_sources.append(source)
+
+    if unknown_top_level_tars:
+        raise ValueError(
+            "partition contains undeclared top-level tar files: "
+            f"{sorted(unknown_top_level_tars)}"
+        )
+    actual_names = sorted(shard["name"] for shard in shards)
+    if sorted(expected_names) != actual_names:
+        raise ValueError(
+            "partition shard inventory differs: "
+            f"{sorted(expected_names)} != {actual_names}"
+        )
+    if archive_name is not None and not any(
+        source["relative"] == archive_name for source in pool_sources
+    ):
+        raise ValueError("partition frame-pool archive is missing")
+    return copy_sources, shards, pool_sources
+
+
 def _copy_immutable(
     s3,
     source: dict,
@@ -419,10 +523,7 @@ def publish_dataset_partition(
     from Platform.pipelines.dataset_publication import (
         canonical_json_bytes,
         dataset_prefix,
-        episode_path_key,
-        pool_key,
         sha256_bytes,
-        shard_key,
     )
 
     _required(datasets_bucket, "datasets_bucket")
@@ -459,43 +560,12 @@ def publish_dataset_partition(
         )
     )
 
-    copy_sources = []
-    shards = []
-    pool_sources = []
-    for source in objects:
-        relative = source["relative"]
-        destination_key = None
-        if "/" not in relative and relative.endswith(".tar"):
-            destination_key = shard_key(
-                published_dataset, dataset_version, relative
-            )
-            shards.append({
-                "name": relative,
-                "key": destination_key,
-                "byte_size": source["size"],
-                "content_identity": source["content_identity"],
-            })
-        elif relative.startswith("pool/"):
-            destination_key = pool_key(
-                published_dataset, dataset_version, relative
-            )
-            pool_sources.append(source)
-        elif relative.startswith("geo/episode_paths/"):
-            destination_key = episode_path_key(
-                published_dataset,
-                dataset_version,
-                relative.removeprefix("geo/episode_paths/"),
-            )
-        if destination_key is not None:
-            source["destination_key"] = destination_key
-            copy_sources.append(source)
-
-    expected_names = sorted(manifest.get("shard_names", []))
-    actual_names = sorted(shard["name"] for shard in shards)
-    if expected_names != actual_names:
-        raise ValueError(
-            f"partition shard inventory differs: {expected_names} != {actual_names}"
-        )
+    copy_sources, shards, pool_sources = _plan_partition_artifact_copies(
+        objects,
+        manifest,
+        published_dataset=published_dataset,
+        dataset_version=dataset_version,
+    )
     if (
         manifest.get("total_samples", 0)
         and manifest.get("has_world_model", False)

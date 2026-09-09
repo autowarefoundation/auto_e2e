@@ -90,12 +90,19 @@ def init_pack_worker(
             )
 
 
-def _jpeg(frame_tensor) -> bytes:
+def _jpeg(frame_tensor, output_size: int | None = None) -> bytes:
     """Resize a RAW (3,H,W) frame to a JPEG byte string (the single pack resize)."""
+    from torchvision import transforms
+
     t = frame_tensor.cpu()
     if t.dtype.is_floating_point:
         t = t.clamp(0, 1)
-    f = _RESIZE(_TO_PIL(t))
+    resize = (
+        _RESIZE
+        if output_size is None
+        else transforms.Resize((output_size, output_size))
+    )
+    f = resize(_TO_PIL(t))
     b = io.BytesIO()
     f.save(b, format="JPEG", quality=90)
     return b.getvalue()
@@ -193,6 +200,11 @@ def decode_row(
         raise ValueError(f"decode_row expects 2 or 3 values, got {task!r}")
 
     if _DATASET_VALUE == "KIT-MRT/KITScenes-Multimodal":
+        from reactive_training_contracts import (
+            REACTIVE_FRONT_CAMERA_IMAGE_SIZE,
+            REACTIVE_FRONT_CAMERA_INDEX,
+        )
+
         scene_id = str(group_id)
         visual = _DS._load_multiview_frame(scene_id, frame_index)
         kitscenes_cams = {
@@ -202,7 +214,25 @@ def decode_row(
             ): _jpeg(visual[view])
             for view in range(visual.shape[0])
         }
-        return (scene_id, frame_index), kitscenes_cams, None
+        extras = None
+        if include_map:
+            front_frame_id = (
+                f"kitscenes-{UID_SCHEMA_VERSION}-{scene_id}-"
+                f"r{frame_index:06d}-c{REACTIVE_FRONT_CAMERA_INDEX}"
+            )
+            native_front = _DS.front_camera_for_row(
+                scene_id,
+                frame_index,
+                image_size=REACTIVE_FRONT_CAMERA_IMAGE_SIZE,
+            )
+            extras = {
+                "front_camera_native_jpeg": _jpeg(
+                    native_front,
+                    REACTIVE_FRONT_CAMERA_IMAGE_SIZE,
+                ),
+                "front_camera_fpn_jpeg": kitscenes_cams[front_frame_id],
+            }
+        return (scene_id, frame_index), kitscenes_cams, extras
 
     from data_parsing.l2d.dataset import CAMERA_NAMES, MAP_VIEW_NAME
 

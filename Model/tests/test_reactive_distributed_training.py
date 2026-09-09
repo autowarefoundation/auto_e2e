@@ -34,6 +34,7 @@ from data_parsing.pre_extracted import (
     discover_bev_sample_statistics,
     discover_bev_training_statistics,
     make_pre_extracted_loader,
+    packed_sample_tar_paths,
     passthrough_nodesplitter,
     select_bev_validation_holdout_sample_uids,
     select_distributed_bev_validation_sample_uids,
@@ -48,6 +49,7 @@ from distributed_training.reactive_canary_data import (
     write_reactive_canary_dataset,
 )
 from distributed_training.reactive_data import (
+    ReactiveShardReference,
     RestartingIterator,
     assign_reactive_shards,
     build_reactive_dataset_plan,
@@ -88,6 +90,7 @@ from distributed_training.reactive_stage import (
     _performance_sample_due,
     _rank_resume_value,
     _rank_resume_value_for_epoch,
+    _rank_validation_sample_filter,
     _reactive_dataset_split_metrics,
     _reactive_optimizer_parameter_groups,
     _extend_sample_stream_sha256,
@@ -126,7 +129,10 @@ from reactive_training_contracts import (
     REACTIVE_FRONT_CAMERA_IMAGE_SIZE,
     REACTIVE_FRONT_CAMERA_INDEX,
 )
-from training.dataset_policy import L2D_DATASET_NAME
+from training.dataset_policy import (
+    KITSCENES_DATASET_NAME,
+    L2D_DATASET_NAME,
+)
 from training.reactive_multitask import (
     ReactiveMultitaskObjective,
     ReactiveTrainingScope,
@@ -139,6 +145,7 @@ from training.reactive_multitask import (
     (
         (ReactiveTrainingStage.NUPLAN_FULL, "bev_only"),
         (ReactiveTrainingStage.L2D_CONTINUATION, "multitask"),
+        (ReactiveTrainingStage.KITSCENES_FINETUNE, "multitask"),
     ),
 )
 def test_continuation_stage_requires_reviewed_parent_scope(stage, expected):
@@ -173,6 +180,7 @@ def _write_source(
     shard_counts: list[int],
     include_bev: bool,
     num_views: int,
+    include_direct_camera_context: bool | None = None,
 ):
     root.mkdir()
     names = []
@@ -196,7 +204,15 @@ def _write_source(
             f"camera_{index}" for index in range(num_views)
         ],
         "camera_slots": list(CANONICAL_SIX_CAMERA_SLOTS),
+        "contracts": {
+            "geometry": "test-geometry",
+            "parser": "test-parser",
+            "reasoning_label_policy": "test-label-policy",
+            "shard_schema": "test-shard",
+            "uid_schema": "test-uid",
+        },
         "dataset": dataset,
+        "dataset_version": "test-dataset-version",
         "has_bev_segmentation": include_bev,
         "has_reactive_navigation": True,
         "has_route_reconstruction": True,
@@ -208,6 +224,11 @@ def _write_source(
         ),
         "num_views": num_views,
         "partition_id": root.name,
+        "split_group_uids": (
+            [f"kitscenes-{root.name}"]
+            if dataset == KITSCENES_DATASET_NAME
+            else None
+        ),
         "route_channels": 2,
         "shard_names": names,
         "shard_sample_counts": counts,
@@ -215,7 +236,11 @@ def _write_source(
         "source_revision": "test-revision",
         "total_samples": sum(shard_counts),
     }
-    if include_bev:
+    if (
+        include_bev
+        if include_direct_camera_context is None
+        else include_direct_camera_context
+    ):
         manifest.update({
             "front_camera_image_size": (
                 REACTIVE_FRONT_CAMERA_IMAGE_SIZE
@@ -227,6 +252,21 @@ def _write_source(
             "temporal_frame_offsets": list(
                 REACTIVE_BEVFORMER_FRAME_OFFSETS
             ),
+        })
+    if dataset == KITSCENES_DATASET_NAME:
+        frame_payload = b"frame-pool-test-jpeg"
+        archive_path = root / "frame_pool.tar"
+        with tarfile.open(archive_path, "w") as archive:
+            member = tarfile.TarInfo("frame-test.jpg")
+            member.size = len(frame_payload)
+            archive.addfile(member, io.BytesIO(frame_payload))
+        manifest.update({
+            "frame_pool_archive": archive_path.name,
+            "frame_pool_archive_schema": "frame_pool_archive_v1",
+            "frame_pool_archive_sha256": hashlib.sha256(
+                archive_path.read_bytes()
+            ).hexdigest(),
+            "frame_pool_frame_count": 1,
         })
     (root / "manifest.json").write_text(
         json.dumps(manifest, sort_keys=True),
@@ -279,6 +319,48 @@ def test_dataset_plan_and_assignment_are_deterministic(tmp_path):
     assert reactive_assignment_sha256(assignments) == (
         reactive_assignment_sha256(assignments)
     )
+
+
+def test_validation_aware_assignment_balances_train_capacity():
+    sizes = (120, 118, 116, 114, 112, 110, 108, 106, 104, 102, 100, 98)
+    shards = tuple(
+        ReactiveShardReference(
+            source_uri=f"s3://bucket/scene-{index}",
+            manifest_sha256="a" * 64,
+            partition_id=f"partition-{index}",
+            split_group_uid=f"group-{index}",
+            shard_name="train-000000.tar",
+            shard_sha256="b" * 64,
+            sample_count=size,
+        )
+        for index, size in enumerate(sizes)
+    )
+    validation_groups = ("group-0", "group-1", "group-2", "group-3")
+
+    assignments = assign_reactive_shards(
+        shards,
+        world_size=4,
+        validation_group_uids=validation_groups,
+    )
+    train_totals = [
+        sum(
+            shard.sample_count
+            for shard in rank_shards
+            if shard.split_group_uid not in validation_groups
+        )
+        for rank_shards in assignments
+    ]
+    validation_totals = [
+        sum(
+            shard.sample_count
+            for shard in rank_shards
+            if shard.split_group_uid in validation_groups
+        )
+        for rank_shards in assignments
+    ]
+
+    assert max(train_totals) - min(train_totals) <= 4
+    assert sorted(validation_totals) == [114, 116, 118, 120]
 
 
 def test_dataset_plan_rejects_mixed_physical_camera_orders(tmp_path):
@@ -385,6 +467,27 @@ def test_stage_b_rejects_previous_camera_image_size(tmp_path):
         )
 
 
+def test_kitscenes_plan_requires_direct_camera_context_without_bev(tmp_path):
+    source = tmp_path / "kitscenes"
+    manifest = _write_source(
+        source,
+        dataset=KITSCENES_DATASET_NAME,
+        shard_counts=[4],
+        include_bev=False,
+        num_views=6,
+        include_direct_camera_context=True,
+    )
+
+    plan = build_reactive_dataset_plan(
+        [str(source)],
+        stage=ReactiveTrainingStage.KITSCENES_FINETUNE,
+    )
+
+    assert plan.dataset == KITSCENES_DATASET_NAME
+    assert plan.total_samples == 4
+    assert manifest["has_bev_segmentation"] is False
+
+
 def test_reactive_ddp_uses_static_graph_and_frozen_buffers():
     source = inspect.getsource(train_loop_per_worker)
     fixed_step_source = inspect.getsource(_train_fixed_steps)
@@ -399,6 +502,7 @@ def test_reactive_ddp_uses_static_graph_and_frozen_buffers():
     assert '"static_graph": True' in source
     assert source.count("_assert_ddp_model_state_consistent(model)") == 2
     assert "_synchronize_gradient_micro_step" in fixed_step_source
+    assert "apply_reactive_egomotion_policy" in fixed_step_source
     assert "Reactive first-step phase" in fixed_step_source
     assert "Reactive performance" in fixed_step_source
     assert "_aggregate_reactive_performance" in fixed_step_source
@@ -837,12 +941,46 @@ def test_rank_staging_verifies_tar_and_manifest_digests(tmp_path):
     assert sorted(path.name for path in staged.glob("*.tar")) == [
         assignments[0][0].shard_name
     ]
+    assert packed_sample_tar_paths(staged) == (
+        staged / assignments[0][0].shard_name,
+    )
 
     source_shard = source / assignments[1][0].shard_name
     source_shard.write_bytes(b"corrupt")
     with pytest.raises(ValueError, match="digest mismatch"):
         stage_rank_reactive_shards(
             assignments[1],
+            cache_root=tmp_path / "cache-corrupt",
+        )
+
+
+def test_kitscenes_rank_staging_verifies_frame_pool_archive(tmp_path):
+    source = tmp_path / "kitscenes"
+    _write_source(
+        source,
+        dataset=KITSCENES_DATASET_NAME,
+        shard_counts=[3],
+        include_bev=False,
+        num_views=6,
+        include_direct_camera_context=True,
+    )
+    plan = build_reactive_dataset_plan(
+        [str(source)],
+        stage=ReactiveTrainingStage.KITSCENES_FINETUNE,
+    )
+
+    local_directories = stage_rank_reactive_shards(
+        plan.shards,
+        cache_root=tmp_path / "cache",
+    )
+
+    staged = Path(local_directories[0])
+    assert (staged / "frame_pool.tar").is_file()
+
+    (source / "frame_pool.tar").write_bytes(b"corrupt")
+    with pytest.raises(ValueError, match="source file digest mismatch"):
+        stage_rank_reactive_shards(
+            plan.shards,
             cache_root=tmp_path / "cache-corrupt",
         )
 
@@ -1300,7 +1438,7 @@ def test_rank_owned_nodesplitter_preserves_every_assigned_shard():
 
 
 def _stage_config(stage: str) -> dict[str, object]:
-    return {
+    config: dict[str, object] = {
         "backbone": "swin_v2_tiny",
         "bev_ap_bins": 1024,
         "bev_max_repeat": 4,
@@ -1323,9 +1461,15 @@ def _stage_config(stage: str) -> dict[str, object]:
         "freeze_bevformer": True,
         "parent_checkpoint_uri": (
             "s3://checkpoints/stage-a/checkpoint.pt"
-            if stage == "l2d_continuation"
+            if stage in {
+                "l2d_continuation",
+                "kitscenes_finetune",
+            }
             else ""
         ),
+        "parent_profile": "",
+        "parent_checkpoint_sha256": "",
+        "parent_checkpoint_epoch": 0,
         "resume_checkpoint_uri": "",
         "per_rank_batch_size": 1,
         "precision": "bf16",
@@ -1345,6 +1489,19 @@ def _stage_config(stage: str) -> dict[str, object]:
         "weight_decay": 0.01,
         "worker_cpus": 3,
     }
+    if stage == "kitscenes_finetune":
+        config.update({
+            "allow_random_bevformer_init": False,
+            "bev_weight": 0.0,
+            "epochs": 10,
+            "is_pretrained": True,
+            "parent_profile": "nuplan_trajectory_route_v1",
+            "parent_checkpoint_sha256": "a" * 64,
+            "parent_checkpoint_epoch": 5,
+            "per_rank_batch_size": 2,
+            "validation_sample_limit": 3820,
+        })
+    return config
 
 
 def _single_worker_smoke_config() -> dict[str, object]:
@@ -1380,9 +1537,37 @@ def _single_worker_smoke_config() -> dict[str, object]:
     return config
 
 
-@pytest.mark.parametrize("stage", ["nuplan_full", "l2d_continuation"])
+@pytest.mark.parametrize(
+    "stage",
+    [
+        "nuplan_full",
+        "l2d_continuation",
+        "kitscenes_finetune",
+    ],
+)
 def test_validate_stage_config_accepts_locked_program(stage):
     validate_reactive_stage_config(_stage_config(stage))
+
+
+@pytest.mark.parametrize(
+    ("override", "match"),
+    (
+        ({"bev_weight": 1.0}, "Epoch 5"),
+        ({"freeze_bevformer": False}, "Epoch 5"),
+        ({"parent_checkpoint_epoch": 4}, "Epoch 5"),
+        ({"parent_checkpoint_sha256": "b" * 63}, "Epoch 5"),
+        ({"parent_profile": ""}, "Epoch 5"),
+    ),
+)
+def test_validate_kitscenes_stage_rejects_parent_contract_drift(
+    override,
+    match,
+):
+    config = _stage_config("kitscenes_finetune")
+    config.update(override)
+
+    with pytest.raises(ValueError, match=match):
+        validate_reactive_stage_config(config)
 
 
 def test_validate_stage_config_accepts_restricted_single_worker_smoke():
@@ -3036,6 +3221,96 @@ def test_stage_b_validation_emits_route_metrics(monkeypatch):
     assert model.forward_options["compute_route_reconstruction"] is True
 
 
+def test_kitscenes_validation_masks_future_derived_acceleration(
+    monkeypatch,
+):
+    torch = pytest.importorskip("torch")
+    import torch.distributed as dist
+
+    geometry = AUTOE2E_NAVIGATION_GEOMETRY
+    target = torch.zeros(
+        1,
+        2,
+        geometry.height_px,
+        geometry.width_px,
+    )
+
+    class MaskValidationModel(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.egomotion_history = None
+
+        def forward(
+            self,
+            visual_tiles,
+            map_context,
+            visual_history,
+            egomotion_history,
+            **_kwargs,
+        ):
+            self.egomotion_history = egomotion_history.detach().clone()
+            controls = visual_tiles.new_zeros(
+                visual_tiles.shape[0],
+                128,
+            )
+            return controls, {
+                "route_reconstruction_logits": target.new_zeros(
+                    target.shape
+                ),
+            }
+
+    model = MaskValidationModel()
+    egomotion_history = torch.zeros(1, 256)
+    egomotion_history[0, 253] = 9.0
+    projection = torch.zeros(1, 1, 3, 4)
+    projection[:, :, 2, 3] = 1.0
+    batch = {
+        "visual_tiles": torch.zeros(1, 1, 3, 2, 2),
+        "map_context": torch.zeros(
+            1,
+            14,
+            geometry.height_px,
+            geometry.width_px,
+        ),
+        "visual_history": torch.zeros(1, 1),
+        "egomotion_history": egomotion_history,
+        "route_mask": target,
+        "map_valid": torch.ones(1, dtype=torch.bool),
+        "route_valid": torch.ones(1, dtype=torch.bool),
+        "route_channel_valid": torch.ones(1, 2, dtype=torch.bool),
+        "trajectory_xy_m": torch.zeros(1, 64, 2),
+        "trajectory_valid": torch.ones(1, 64, dtype=torch.bool),
+        "initial_speed_mps": torch.zeros(1),
+        "camera_projection_matrix": projection,
+        "camera_geometry_type": "rectified_pinhole",
+        "front_camera_tile": torch.zeros(1, 3, 4, 4),
+        "front_camera_projection_matrix": projection.clone(),
+        "camera_history_tiles": torch.zeros(1, 7, 1, 3, 2, 2),
+        "camera_history_projection_matrix": (
+            projection[:, None].repeat(1, 7, 1, 1, 1)
+        ),
+    }
+    objective = SimpleNamespace(
+        compute_route_reconstruction=True,
+        route_loss=RouteReconstructionLoss(),
+    )
+    monkeypatch.setattr(dist, "all_reduce", lambda *_args, **_kwargs: None)
+
+    _evaluate_global_reactive(
+        model,
+        [batch],
+        objective,
+        stage=ReactiveTrainingStage.KITSCENES_FINETUNE,
+        device=torch.device("cpu"),
+        probability_bins=8,
+        ade_scale_m=5.0,
+    )
+
+    assert model.egomotion_history is not None
+    assert model.egomotion_history[0, 253].item() == 0.0
+    assert batch["egomotion_history"][0, 253].item() == 9.0
+
+
 def test_stage_a_validation_skips_disabled_route_decoder(monkeypatch):
     torch = pytest.importorskip("torch")
     import torch.distributed as dist
@@ -4024,3 +4299,19 @@ def test_bev_rank_capacity_ignores_validation_only_directory():
     )
 
     assert capacity == 1
+
+
+def test_kitscenes_empty_rank_validation_uses_group_filter_only():
+    assert _rank_validation_sample_filter(
+        ReactiveTrainingStage.KITSCENES_FINETUNE,
+        (),
+    ) is None
+    assert _rank_validation_sample_filter(
+        ReactiveTrainingStage.KITSCENES_FINETUNE,
+        ("sample-a",),
+    ) == ("sample-a",)
+    with pytest.raises(ValueError, match="must not be empty"):
+        _rank_validation_sample_filter(
+            ReactiveTrainingStage.NUPLAN_FULL,
+            (),
+        )

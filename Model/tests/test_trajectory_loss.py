@@ -288,10 +288,10 @@ class TestTrajectoryImitationLoss:
                 source_revision=(
                     "6fde0034446669e2ed7235e4c7fe323cd23d599d"
                 ),
-                packed_dataset_version="v3.3",
+                packed_dataset_version="v3.5",
                 packed_contract_digest=(
-                    "6fb9d857d877e570522a59a38097b0f6"
-                    "b3320d8f702bbd05ec9670faa4be6d96"
+                    "192b35293e7168adeb97eb65c0ceddc4"
+                    "e9f5c0cffe82c27dc2d1933f9a589a86"
                 ),
                 packed_partition_count=533,
                 empty_partition_count=129,
@@ -429,16 +429,16 @@ class TestTrajectoryImitationLoss:
         )
         assert payload["training_sample_count"] == 38847
         assert payload["validation_sample_count"] == 3820
-        assert payload["dataset_version"] == "v3.3"
+        assert payload["dataset_version"] == "v3.5"
         assert payload["packed_contract_digest"] == (
-            "6fb9d857d877e570522a59a38097b0f6"
-            "b3320d8f702bbd05ec9670faa4be6d96"
+            "192b35293e7168adeb97eb65c0ceddc4"
+            "e9f5c0cffe82c27dc2d1933f9a589a86"
         )
         assert payload["sample_inventory_parent"] == {
-            "manifest": "kitscenes_train_dev_v2.json",
+            "manifest": "kitscenes_train_dev_v3.json",
             "sha256": (
-                "b22d3ee109b7d7e5489339b4fe7a1a57"
-                "d4060524807acd9711005845ad87225f"
+                "cce899cef9f7e7702360c8cb66c316b4"
+                "36cabb51bdf28e073476b57754075840"
             ),
         }
         assert group_uid_digest(selected) == (

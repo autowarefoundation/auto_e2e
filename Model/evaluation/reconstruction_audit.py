@@ -15,6 +15,7 @@ import numpy as np
 import torch
 from numpy.typing import ArrayLike
 
+from data_parsing.pre_extracted import packed_sample_tar_paths
 from data_processing.geospatial import decode_gps_future, decode_pose
 from training.losses.control_rollout import integrate_controls_torch
 
@@ -84,7 +85,7 @@ def load_packed_reconstruction_inputs(
 
     records: dict[str, dict[str, bytes]] = {}
     for root in roots:
-        tar_paths = sorted(root.glob("*.tar"))
+        tar_paths = packed_sample_tar_paths(root)
         if not tar_paths:
             raise FileNotFoundError(f"No .tar shards found in {root}")
         for tar_path in tar_paths:

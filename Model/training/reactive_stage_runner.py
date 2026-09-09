@@ -20,6 +20,14 @@ from model_components.losses import (
     BEV_SEGMENTATION_AUXILIARY_LOSS_VERSION,
 )
 from navigation.geometry import AUTOE2E_NAVIGATION_GEOMETRY
+from training.dataset_policy import (
+    KITSCENES_DATASET_NAME,
+    L2D_DATASET_NAME,
+    NUPLAN_DATASET_NAME,
+    DatasetTrainingPolicy,
+    adapt_egomotion_history,
+    training_policy_for_dataset,
+)
 from training.reactive_multitask import (
     BEV_ONLY_OBJECTIVE_VERSION,
     BEV_SAMPLING_IMPORTANCE_CORRECTION_VERSION,
@@ -29,6 +37,35 @@ from training.reactive_multitask import (
     ReactiveTrainingStage,
     configure_model_for_stage,
 )
+
+
+def reactive_training_policy(
+    stage: ReactiveTrainingStage,
+) -> DatasetTrainingPolicy:
+    """Return the dataset policy owned by one Reactive stage."""
+    dataset_by_stage = {
+        ReactiveTrainingStage.NUPLAN_FULL: NUPLAN_DATASET_NAME,
+        ReactiveTrainingStage.L2D_CONTINUATION: L2D_DATASET_NAME,
+        ReactiveTrainingStage.KITSCENES_FINETUNE: KITSCENES_DATASET_NAME,
+    }
+    return training_policy_for_dataset(dataset_by_stage[stage])
+
+
+def apply_reactive_egomotion_policy(
+    batch: Mapping[str, Any],
+    policy: DatasetTrainingPolicy,
+) -> dict[str, Any]:
+    """Apply corpus-specific causal masking before every model invocation."""
+    history = batch.get("egomotion_history")
+    if not torch.is_tensor(history):
+        raise ValueError("Reactive batch has no egomotion_history tensor")
+    if not policy.mask_latest_history_acceleration:
+        return dict(batch)
+    adapted = adapt_egomotion_history(history, policy)
+    return {
+        **batch,
+        "egomotion_history": adapted,
+    }
 
 
 def _batch_to_device(
@@ -308,14 +345,35 @@ def load_stage_a_parent(
     *,
     target_camera_slots: Sequence[str],
     required_training_scope: str | None = None,
+    required_parent_profile: str | None = None,
+    required_checkpoint_sha256: str | None = None,
+    required_checkpoint_epoch: int | None = None,
 ) -> dict[str, Any]:
     """Load reviewed nuPlan parent weights and validate their lineage."""
     path = Path(checkpoint_path)
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    if (
+        required_checkpoint_sha256 is not None
+        and digest != required_checkpoint_sha256
+    ):
+        raise ValueError(
+            "Stage A parent checkpoint digest differs from the required "
+            "checkpoint"
+        )
     payload = torch.load(
         path,
         map_location="cpu",
         weights_only=False,
     )
+    if (
+        required_checkpoint_epoch is not None
+        and payload.get("epoch") != required_checkpoint_epoch
+    ):
+        raise ValueError(
+            "Stage A parent checkpoint epoch differs: "
+            f"actual={payload.get('epoch')!r} "
+            f"required={required_checkpoint_epoch}"
+        )
     config = payload.get("config")
     if not isinstance(config, Mapping):
         raise ValueError("Stage A checkpoint has no config mapping")
@@ -383,23 +441,45 @@ def load_stage_a_parent(
         objective_values[name] = float(value)
     common_objective_provenance_valid = (
         all(math.isfinite(value) for value in objective_values.values())
-        and objective_values["bev_weight"] > 0.0
         and objective_values["corridor_pos_weight"] >= 1.0
         and isinstance(config.get("training_seed"), int)
     )
     if training_scope == "multitask":
-        objective_provenance_valid = (
-            common_objective_provenance_valid
-            and objective_values["trajectory_weight"] > 0.0
-            and objective_values["route_weight"] >= 0.0
-            and config.get("scheduler_identity") == "selection_plateau_v1"
-            and config.get("freeze_bevformer") is True
-        )
+        if required_parent_profile == "nuplan_trajectory_route_v1":
+            objective_provenance_valid = (
+                common_objective_provenance_valid
+                and objective_values["trajectory_weight"] > 0.0
+                and objective_values["bev_weight"] == 0.0
+                and objective_values["route_weight"] > 0.0
+                and config.get("scheduler_identity")
+                == "selection_plateau_v1"
+                and config.get("freeze_bevformer") is True
+            )
+        elif required_parent_profile is None:
+            objective_provenance_valid = (
+                common_objective_provenance_valid
+                and objective_values["trajectory_weight"] > 0.0
+                and objective_values["bev_weight"] > 0.0
+                and objective_values["route_weight"] >= 0.0
+                and config.get("scheduler_identity")
+                == "selection_plateau_v1"
+                and config.get("freeze_bevformer") is True
+            )
+        else:
+            raise ValueError(
+                f"unsupported Stage A parent profile "
+                f"{required_parent_profile!r}"
+            )
         weight_transfer_scope = "full_model_v1"
     elif training_scope == "bev_only":
+        if required_parent_profile is not None:
+            raise ValueError(
+                "Stage A parent profiles apply only to multitask checkpoints"
+            )
         encoder_learning_rate = config.get("bev_encoder_learning_rate")
         objective_provenance_valid = (
             common_objective_provenance_valid
+            and objective_values["bev_weight"] > 0.0
             and objective_values["trajectory_weight"] == 0.0
             and objective_values["route_weight"] == 0.0
             and config.get("scheduler_identity") in {
@@ -639,9 +719,10 @@ def load_stage_a_parent(
             )
     else:
         model.load_state_dict(adapted_state_dict)
-    digest = hashlib.sha256(path.read_bytes()).hexdigest()
     lineage: dict[str, Any] = {
         "stage_a_parent_checkpoint_sha256": digest,
+        "stage_a_parent_checkpoint_epoch": payload.get("epoch"),
+        "stage_a_parent_profile": required_parent_profile,
         "stage_a_config_digest": config_sha256,
         "stage_a_model_state_sha256": model_state_sha256,
         "stage_a_freeze_bevformer": bool(config["freeze_bevformer"]),
@@ -711,9 +792,11 @@ def run_reactive_epoch(
         objective.stage,
         freeze_bevformer=freeze_bevformer,
     )
-    require_stage_a_camera_context = (
-        objective.stage is ReactiveTrainingStage.NUPLAN_FULL
-    )
+    require_reactive_camera_context = objective.stage in {
+        ReactiveTrainingStage.NUPLAN_FULL,
+        ReactiveTrainingStage.KITSCENES_FINETUNE,
+    }
+    training_policy = reactive_training_policy(objective.stage)
     model.train()
     totals: dict[str, list[float]] = {
         "total": [],
@@ -724,6 +807,10 @@ def run_reactive_epoch(
     for item in loader:
         raw_batch, projection, geometry_type = _loader_item(item)
         batch = _batch_to_device(raw_batch, device)
+        batch = apply_reactive_egomotion_policy(
+            batch,
+            training_policy,
+        )
         projection, geometry_type = resolve_reactive_batch_projection(
             batch,
             projection,
@@ -734,14 +821,14 @@ def run_reactive_epoch(
             batch,
             geometry_type,
             device=device,
-            required=require_stage_a_camera_context,
+            required=require_reactive_camera_context,
         )
         camera_history_tiles, history_projections = (
             resolve_reactive_camera_history(
                 batch,
                 geometry_type,
                 device=device,
-                required=require_stage_a_camera_context,
+                required=require_reactive_camera_context,
             )
         )
         optimizer.zero_grad(set_to_none=True)
@@ -814,9 +901,11 @@ def evaluate_reactive_xy(
     if not isinstance(stage, ReactiveTrainingStage):
         raise TypeError("stage must be a ReactiveTrainingStage")
     _assert_reactive_only(model)
-    require_stage_a_camera_context = (
-        stage is ReactiveTrainingStage.NUPLAN_FULL
-    )
+    training_policy = reactive_training_policy(stage)
+    require_reactive_camera_context = stage in {
+        ReactiveTrainingStage.NUPLAN_FULL,
+        ReactiveTrainingStage.KITSCENES_FINETUNE,
+    }
     was_training = model.training
     ade_sum = 0.0
     fde_sum = 0.0
@@ -829,6 +918,10 @@ def evaluate_reactive_xy(
                     _loader_item(item)
                 )
                 batch = _batch_to_device(raw_batch, device)
+                batch = apply_reactive_egomotion_policy(
+                    batch,
+                    training_policy,
+                )
                 projection, geometry_type = (
                     resolve_reactive_batch_projection(
                         batch,
@@ -841,14 +934,14 @@ def evaluate_reactive_xy(
                     batch,
                     geometry_type,
                     device=device,
-                    required=require_stage_a_camera_context,
+                    required=require_reactive_camera_context,
                 )
                 camera_history_tiles, history_projections = (
                     resolve_reactive_camera_history(
                         batch,
                         geometry_type,
                         device=device,
-                        required=require_stage_a_camera_context,
+                        required=require_reactive_camera_context,
                     )
                 )
                 controls = model(
@@ -1089,9 +1182,11 @@ def evaluate_reactive_multitask(
     if not isinstance(stage, ReactiveTrainingStage):
         raise TypeError("stage must be a ReactiveTrainingStage")
     _assert_reactive_only(model)
-    require_stage_a_camera_context = (
-        stage is ReactiveTrainingStage.NUPLAN_FULL
-    )
+    training_policy = reactive_training_policy(stage)
+    require_reactive_camera_context = stage in {
+        ReactiveTrainingStage.NUPLAN_FULL,
+        ReactiveTrainingStage.KITSCENES_FINETUNE,
+    }
     was_training = model.training
     horizon_steps = {
         "1s": 10,
@@ -1162,6 +1257,10 @@ def evaluate_reactive_multitask(
                 _loader_item(item)
             )
             batch = _batch_to_device(raw_batch, device)
+            batch = apply_reactive_egomotion_policy(
+                batch,
+                training_policy,
+            )
             projection, geometry_type = resolve_reactive_batch_projection(
                 batch,
                 fallback_projection,
@@ -1172,14 +1271,14 @@ def evaluate_reactive_multitask(
                 batch,
                 geometry_type,
                 device=device,
-                required=require_stage_a_camera_context,
+                required=require_reactive_camera_context,
             )
             camera_history_tiles, history_projections = (
                 resolve_reactive_camera_history(
                     batch,
                     geometry_type,
                     device=device,
-                    required=require_stage_a_camera_context,
+                    required=require_reactive_camera_context,
                 )
             )
             batch_size = int(batch["visual_tiles"].shape[0])

@@ -70,7 +70,7 @@ def test_distributed_workflow_import_is_path_order_independent():
 def test_shared_pack_cache_includes_camera_resolution_contract():
     assert (
         workflows.PACK_CACHE_VERSION
-        == "pack-v3-v1-v12-v6-camera512"
+        == "pack-v3-v1-v13-v7-camera512"
     )
 
 
@@ -78,20 +78,20 @@ def test_l2d_workflow_defaults_use_reactive_camera_contract():
     source = Path(workflows.__file__).read_text(encoding="utf-8")
 
     assert workflows.DATASET_PACK_VERSION == "v2.4"
-    assert workflows.KITSCENES_NAVIGATION_DATASET_VERSION == "v3.4"
+    assert workflows.KITSCENES_NAVIGATION_DATASET_VERSION == "v3.5"
     assert "image_size: int = 256" not in source
     assert (
         source.count(
             "image_size: int = REACTIVE_CAMERA_IMAGE_SIZE"
         )
-        == 10
+        == 11
     )
     for name, dataset_version in (
-        ("buildspec-launch-sharded.yml", "v3.4"),
-        ("buildspec-launch-fullrun.yml", "v3.4"),
-        ("buildspec-launch-recovery.yml", "v3.4"),
+        ("buildspec-launch-sharded.yml", "v3.5"),
+        ("buildspec-launch-fullrun.yml", "v3.5"),
+        ("buildspec-launch-recovery.yml", "v3.5"),
         ("buildspec-launch-overlay.yml", "v2.4"),
-        ("buildspec-launch-reconstruction-audit.yml", "v3.4"),
+        ("buildspec-launch-reconstruction-audit.yml", "v3.5"),
     ):
         buildspec = (
             Path(workflows.__file__).parents[1] / name
@@ -1496,6 +1496,56 @@ def test_eight_rank_workflow_runs_one_frozen_trajectory_route_stage():
         distributed_training.wf_train_reactive_nuplan_l2d_ray_8
     ).parameters
     assert multistage_parameters["per_rank_batch_size"].default == 4
+
+
+def test_kitscenes_workflow_is_locked_to_epoch5_trajectory_route_parent():
+    node, = distributed_training.wf_train_reactive_kitscenes_ray_8.nodes
+    bindings = {
+        binding.var: binding.binding for binding in node.bindings
+    }
+
+    assert node.flyte_entity.name.endswith("train_reactive_stage_ray_8")
+    assert bindings["stage"].scalar.primitive.string_value == (
+        "kitscenes_finetune"
+    )
+    assert bindings["parent_checkpoint"].promise.var == (
+        "nuplan_epoch5_checkpoint"
+    )
+    resume_binding = bindings["resume_checkpoint"].scalar
+    assert resume_binding.union is not None
+    assert (
+        type(resume_binding.union.value.scalar.none_type).__name__
+        == "Void"
+    )
+    assert bindings["trajectory_weight"].scalar.primitive.float_value == 1.0
+    assert bindings["bev_weight"].scalar.primitive.float_value == 0.0
+    assert bindings["route_weight"].scalar.primitive.float_value == 1.0
+    assert bindings["freeze_bevformer"].scalar.primitive.boolean
+    assert bindings["training_scope"].scalar.primitive.string_value == (
+        "multitask"
+    )
+    assert bindings["validation_sample_limit"].scalar.primitive.integer == (
+        3820
+    )
+    assert bindings["parent_profile"].scalar.primitive.string_value == (
+        "nuplan_trajectory_route_v1"
+    )
+    assert (
+        bindings[
+            "parent_checkpoint_sha256"
+        ].scalar.primitive.string_value
+        == distributed_training
+        .NUPLAN_EPOCH5_TRAJECTORY_ROUTE_CHECKPOINT_SHA256
+    )
+    assert bindings["parent_checkpoint_epoch"].scalar.primitive.integer == 5
+
+    parameters = inspect.signature(
+        distributed_training.wf_train_reactive_kitscenes_ray_8
+    ).parameters
+    assert parameters["epochs"].default == 10
+    assert parameters["learning_rate"].default == 3e-5
+    assert parameters["per_rank_batch_size"].default == 2
+    assert parameters["checkpoint_interval_steps"].default == 256
 
 
 def test_eight_rank_bev_workflow_is_locked_to_segmentation_only():

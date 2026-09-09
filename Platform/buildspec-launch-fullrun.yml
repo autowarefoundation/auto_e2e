@@ -15,7 +15,7 @@ env:
     FLYTE_PROJECT: auto-e2e
     FLYTE_DOMAIN: development
     DATASET: KIT-MRT/KITScenes-Multimodal
-    DATASET_VERSION: v3.4
+    DATASET_VERSION: v3.5
     IMAGE_SIZE: "512"
     # 0 = all 533 available scenes. KITScenes always uses one scene per pod.
     EPISODES: "0"

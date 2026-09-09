@@ -89,6 +89,7 @@ AUTOE2E_REACTIVE_BEV_GEOMETRY: Final = ReactiveBEVLatentGeometry(
 class ReactiveTrainingStage(str, enum.Enum):
     NUPLAN_FULL = "nuplan_full"
     L2D_CONTINUATION = "l2d_continuation"
+    KITSCENES_FINETUNE = "kitscenes_finetune"
 
 
 class ReactiveTrainingScope(str, enum.Enum):

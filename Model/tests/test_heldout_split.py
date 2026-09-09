@@ -237,3 +237,21 @@ def test_discover_split_group_uids_scans_packed_metadata(tmp_path):
     assert sample_digest == hashlib.sha256(
         b"partition-a-sample-1\npartition-b-sample-0"
     ).hexdigest()
+
+
+def test_discover_split_inventory_allows_single_partition_group_explicitly(
+    tmp_path,
+):
+    partition = tmp_path / "partition"
+    _write_group_metadata_tar(partition, ["kitscenes-scene-a"])
+
+    with pytest.raises(ValueError, match="at least two"):
+        discover_split_inventory([partition])
+
+    inventory = discover_split_inventory(
+        [partition],
+        allow_single_group=True,
+    )
+
+    assert inventory.group_uids == ("kitscenes-scene-a",)
+    assert inventory.sample_count == 1

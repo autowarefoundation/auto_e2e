@@ -43,6 +43,8 @@ from reactive_training_contracts import (
     REACTIVE_BEVFORMER_FRAME_OFFSETS,
     REACTIVE_BEVFORMER_HISTORY_FRAMES,
     REACTIVE_CAMERA_IMAGE_SIZE,
+    REACTIVE_FRONT_CAMERA_IMAGE_SIZE,
+    REACTIVE_FRONT_CAMERA_INDEX,
 )
 
 import os as _os
@@ -67,7 +69,7 @@ DATA_PREP_IMAGE = _os.environ.get(
 
 MLFLOW_URI = "http://mlflow.mlflow.svc.cluster.local:5000"
 DATASET_PACK_VERSION = "v2.4"
-KITSCENES_NAVIGATION_DATASET_VERSION = "v3.4"
+KITSCENES_NAVIGATION_DATASET_VERSION = "v3.5"
 KITSCENES_BENCHMARK_DATASET_VERSION = "v3.3-benchmark-v3"
 BASELINE_TRAINING_OBJECTIVE_VERSION = "trajectory_imitation_v1"
 KITSCENES_NAVIGATION_OBJECTIVE_VERSION = (
@@ -2590,11 +2592,10 @@ def data_processing(
     samples_per_shard = 1000
     current_tar = None
 
-    # Shared frame pool (#121 §3.4d): WM window frames are content-addressed by a
-    # global frame_id and written ONCE here, deduping the ~8x cross-sample overlap
-    # (10Hz samples × 1Hz stride-10 window). The pool is a SIBLING pool/ DIRECTORY,
-    # NOT inside the .tar shards, so the loader's glob("*.tar") + split_by_worker
-    # never shards it away — every DataLoader worker reaches any frame_id by path.
+    # Shared frame pool (#121 §3.4d): window frames are content-addressed by a
+    # global frame_id and written once, deduping cross-sample overlap. The loose
+    # files are sealed into one deterministic archive before publication so a
+    # distributed worker can stage and verify the complete pool with one object.
     pool_dir = os.path.join(out_dir, "pool")
     os.makedirs(pool_dir, exist_ok=True)
     seen_frame_ids: set = set()
@@ -2638,6 +2639,9 @@ def data_processing(
     has_wm = False
     has_bevformer_history = False
     navigation_artifact_summary = None
+    trajectory_xy_count = 0
+    bev_segmentation_count = 0
+    reactive_navigation_count = 0
 
     if _use_parent_assembly_pack(
         dataset,
@@ -2695,9 +2699,8 @@ def data_processing(
 
         del ds  # free before spawning workers
 
-        # row_map contains camera JPEGs and an optional legacy map JPEG. KITScenes
-        # navigation is generated once in the parent assembly below, never in a
-        # camera worker.
+        # row_map contains base camera JPEGs and current-row extras. KITScenes
+        # navigation is generated once in the parent assembly below.
         row_map: dict = {}
         row_workers = _row_decode_worker_count(dataset, len(all_rows))
         current_rows = set(sample_cur_rows.values())
@@ -2710,12 +2713,12 @@ def data_processing(
         with ProcessPoolExecutor(max_workers=row_workers, mp_context=ctx,
                                  initializer=parallel_pack.init_row_worker,
                                  initargs=row_init) as rpool:
-            for row_key, cam_jpegs, legacy_map in rpool.map(
+            for row_key, cam_jpegs, row_extras in rpool.map(
                     parallel_pack.decode_row, decode_tasks):
-                row_map[row_key] = (cam_jpegs, legacy_map)
+                row_map[row_key] = (cam_jpegs, row_extras)
                 for fid, blob in cam_jpegs.items():
                     _write_pool(fid, blob)
-                if dataset != Dataset.KITSCENES and legacy_map is not None:
+                if dataset != Dataset.KITSCENES and row_extras is not None:
                     has_map = True
         num_views = len(next(iter(row_map.values()))[0]) if row_map else 0
         print(f"Frame pool: {pool_frames_written} unique frames decoded "
@@ -2815,19 +2818,29 @@ def data_processing(
             # row_map[(ep_idx, cur_fi)][0] — the same jpegs already written to pool.
             cur_key = sample_cur_rows.get(si)
             if cur_key and cur_key in row_map:
-                cur_cams, legacy_map = row_map[cur_key]
+                cur_cams, row_extras = row_map[cur_key]
                 # cam_cams is {frame_id: bytes}; sort by cam index embedded in fid.
                 for fid, blob in sorted(cur_cams.items(),
                                         key=lambda kv: int(kv[0].rsplit("-c", 1)[-1])):
                     cam_i = int(fid.rsplit("-c", 1)[-1])
                     members[f"cam_{cam_i}.jpg"] = blob
                 if dataset == Dataset.KITSCENES:
+                    if not isinstance(row_extras, dict):
+                        raise ValueError(
+                            "KITScenes current row lacks native Front images"
+                        )
+                    members[
+                        f"cam_{REACTIVE_FRONT_CAMERA_INDEX}.jpg"
+                    ] = row_extras["front_camera_native_jpeg"]
+                    members["front_camera_fpn.jpg"] = row_extras[
+                        "front_camera_fpn_jpeg"
+                    ]
                     members.update(
                         ds_asm.navigation_members_for_row(*cur_key)
                     )
                     has_map = True
-                elif legacy_map is not None:
-                    members["map.jpg"] = legacy_map
+                elif row_extras is not None:
+                    members["map.jpg"] = row_extras
 
             # ego + meta + calib (no video decode).
             ego_hist, traj, pose_current, gps_future = ds_asm.numeric_for(si)
@@ -2841,6 +2854,30 @@ def data_processing(
                 "pose_current": pose_current,
                 "gps_future": gps_future,
             }))
+            if dataset == Dataset.KITSCENES:
+                from data_processing.reactive_training_artifacts import (
+                    TRAJECTORY_XY_MEMBER,
+                    encode_trajectory_xy,
+                    wgs84_future_to_ego_xy,
+                )
+
+                trajectory_xy, trajectory_valid = wgs84_future_to_ego_xy(
+                    gps_future,
+                    current_latitude_deg=float(
+                        pose_current["latitude_deg"]
+                    ),
+                    current_longitude_deg=float(
+                        pose_current["longitude_deg"]
+                    ),
+                    heading_deg_cw_from_north=float(
+                        pose_current["heading_deg_cw_from_north"]
+                    ),
+                    valid_future_steps=ds_asm.sampling_future_steps,
+                )
+                members[TRAJECTORY_XY_MEMBER] = encode_trajectory_xy(
+                    trajectory_xy,
+                    trajectory_valid,
+                )
             members["meta.json"] = json.dumps({
                 "idx": si, "dataset": dataset.value,
                 "sample_uid": uid, "split_group_uid": split_group,
@@ -2863,6 +2900,13 @@ def data_processing(
 
             for suffix, blob in members.items():
                 _add_member(uid, suffix, blob)
+            trajectory_xy_count += int("trajectory_xy.npz" in members)
+            bev_segmentation_count += int(
+                "bev_segmentation.npz" in members
+            )
+            reactive_navigation_count += int(
+                "navigation_meta.json" in members
+            )
             if _record_to_json is not None:
                 record = labels_by_id.get(uid)
                 if record is not None:
@@ -2900,6 +2944,15 @@ def data_processing(
                     or "map_semantic.npz" in members
                 )
                 has_wm = has_wm or ("window_index.json" in members)
+                trajectory_xy_count += int(
+                    "trajectory_xy.npz" in members
+                )
+                bev_segmentation_count += int(
+                    "bev_segmentation.npz" in members
+                )
+                reactive_navigation_count += int(
+                    "navigation_meta.json" in members
+                )
                 if _record_to_json is not None:
                     record = labels_by_id.get(sample_key)
                     if record is not None:
@@ -2916,6 +2969,71 @@ def data_processing(
 
     if current_tar:
         current_tar.close()
+    import hashlib
+
+    frame_pool_archive_name = None
+    frame_pool_archive_sha256 = None
+    frame_pool_archive_schema = None
+    if pool_frames_written:
+        frame_pool_archive_name = "frame_pool.tar"
+        frame_pool_archive_schema = "frame_pool_archive_v1"
+        frame_pool_archive_path = Path(
+            out_dir,
+            frame_pool_archive_name,
+        )
+        with tarfile.open(frame_pool_archive_path, "w") as archive:
+            pool_paths = sorted(Path(pool_dir).glob("*.jpg"))
+            if len(pool_paths) != pool_frames_written:
+                raise ValueError(
+                    "frame-pool file count differs from decoded frame count"
+                )
+            for pool_path in pool_paths:
+                frame_name = pool_path.name
+                if (
+                    Path(frame_name).name != frame_name
+                    or not frame_name.endswith(".jpg")
+                ):
+                    raise ValueError(
+                        f"invalid frame-pool member name {frame_name!r}"
+                    )
+                payload = pool_path.read_bytes()
+                member = tarfile.TarInfo(frame_name)
+                member.size = len(payload)
+                member.mtime = 0
+                member.mode = 0o444
+                member.uid = 0
+                member.gid = 0
+                member.uname = ""
+                member.gname = ""
+                archive.addfile(member, io.BytesIO(payload))
+        frame_pool_archive_sha256 = hashlib.sha256(
+            frame_pool_archive_path.read_bytes()
+        ).hexdigest()
+        import shutil
+
+        shutil.rmtree(pool_dir)
+    else:
+        Path(pool_dir).rmdir()
+
+    shard_sha256 = {
+        name: hashlib.sha256(
+            Path(out_dir, name).read_bytes()
+        ).hexdigest()
+        for name in shard_names
+    }
+    if (
+        dataset == Dataset.KITSCENES
+        and sample_count
+        and (
+            trajectory_xy_count != sample_count
+            or reactive_navigation_count != sample_count
+        )
+    ):
+        raise ValueError(
+            "KITScenes Reactive target packing was incomplete: "
+            f"trajectory={trajectory_xy_count}/{sample_count} "
+            f"navigation={reactive_navigation_count}/{sample_count}"
+        )
 
     if expected_reasoning_label_count is not None:
         unjoined_ids = set(labels_by_id) - joined_reasoning_ids
@@ -2942,7 +3060,15 @@ def data_processing(
         GPS_SCHEMA_VERSION,
         POSE_SCHEMA_VERSION,
     )
-    from navigation.geometry import DEFAULT_NAVIGATION_GEOMETRY
+    from data_processing.reactive_training_artifacts import (
+        BEV_SEGMENTATION_ARTIFACT_VERSION,
+        REACTIVE_NAVIGATION_ARTIFACT_VERSION,
+        TRAJECTORY_XY_ARTIFACT_VERSION,
+    )
+    from navigation.geometry import (
+        AUTOE2E_NAVIGATION_GEOMETRY,
+        DEFAULT_NAVIGATION_GEOMETRY,
+    )
     from navigation.supervision import (
         ROUTE_SUPERVISION_ARTIFACT_VERSION,
     )
@@ -2950,7 +3076,14 @@ def data_processing(
     manifest = {"total_samples": sample_count, "shards": shard_idx,
                 "shard_names": shard_names,
                 "shard_sample_counts": shard_sample_counts,
+                "shard_sha256": shard_sha256,
                 "partition_id": partition_id or None,
+                "split_group_uids": (
+                    [f"kitscenes-{group_id}" for group_id in group_ids]
+                    if dataset == Dataset.KITSCENES
+                    and group_ids is not None
+                    else None
+                ),
                 "hz": hz, "image_size": image_size, "dataset": dataset.value,
                 "source_revision": source_revision,
                 "source_split": source_split,
@@ -2970,14 +3103,43 @@ def data_processing(
                 "num_views": num_views if sample_count else 0,
                 "camera_order": camera_order if sample_count else None,
                 "camera_slots": camera_slots if sample_count else None,
+                "front_camera_index": (
+                    REACTIVE_FRONT_CAMERA_INDEX
+                    if sample_count and dataset == Dataset.KITSCENES
+                    else None
+                ),
+                "front_camera_image_size": (
+                    REACTIVE_FRONT_CAMERA_IMAGE_SIZE
+                    if sample_count and dataset == Dataset.KITSCENES
+                    else None
+                ),
+                "front_camera_fpn_image_size": (
+                    REACTIVE_CAMERA_IMAGE_SIZE
+                    if sample_count and dataset == Dataset.KITSCENES
+                    else None
+                ),
                 "has_map": bool(sample_count) and has_map,
                 "has_navigation": (
                     bool(sample_count)
                     and navigation_artifact_summary is not None
                 ),
+                "has_reactive_navigation": (
+                    bool(sample_count)
+                    and reactive_navigation_count == sample_count
+                ),
+                "reactive_navigation_count": reactive_navigation_count,
+                "reactive_navigation_version": (
+                    REACTIVE_NAVIGATION_ARTIFACT_VERSION
+                    if reactive_navigation_count
+                    else None
+                ),
                 "has_route_supervision": (
                     bool(sample_count)
                     and navigation_artifact_summary is not None
+                ),
+                "has_route_reconstruction": (
+                    bool(sample_count)
+                    and reactive_navigation_count == sample_count
                 ),
                 "route_supervision_version": (
                     ROUTE_SUPERVISION_ARTIFACT_VERSION
@@ -2989,7 +3151,11 @@ def data_processing(
                 ),
                 "navigation": navigation_artifact_summary,
                 "navigation_geometry": (
-                    DEFAULT_NAVIGATION_GEOMETRY.contract()
+                    (
+                        AUTOE2E_NAVIGATION_GEOMETRY.contract()
+                        if dataset == Dataset.KITSCENES
+                        else DEFAULT_NAVIGATION_GEOMETRY.contract()
+                    )
                     if navigation_artifact_summary is not None
                     else None
                 ),
@@ -2997,11 +3163,35 @@ def data_processing(
                     14 if navigation_artifact_summary is not None else 3
                 ),
                 "route_channels": 2,
+                "has_trajectory_xy": (
+                    bool(sample_count)
+                    and trajectory_xy_count == sample_count
+                ),
+                "trajectory_xy_count": trajectory_xy_count,
+                "trajectory_xy_version": (
+                    TRAJECTORY_XY_ARTIFACT_VERSION
+                    if trajectory_xy_count
+                    else None
+                ),
+                "has_bev_segmentation": (
+                    bool(sample_count)
+                    and bev_segmentation_count == sample_count
+                ),
+                "bev_segmentation_count": bev_segmentation_count,
+                "bev_segmentation_version": (
+                    BEV_SEGMENTATION_ARTIFACT_VERSION
+                    if bev_segmentation_count
+                    else None
+                ),
                 # World-Model windows present when packed (enables JEPA training).
                 "has_world_model": bool(sample_count) and has_wm,
                 "has_bevformer_history": (
                     bool(sample_count) and has_bevformer_history
                 ),
+                "frame_pool_archive": frame_pool_archive_name,
+                "frame_pool_archive_schema": frame_pool_archive_schema,
+                "frame_pool_archive_sha256": frame_pool_archive_sha256,
+                "frame_pool_frame_count": pool_frames_written,
                 "bevformer_temporal_contract": (
                     {
                         "frame_count": len(
@@ -3018,6 +3208,16 @@ def data_processing(
                         ),
                         "history_reference_frame": "current_ego",
                     }
+                    if sample_count and has_bevformer_history
+                    else None
+                ),
+                "temporal_frame_offsets": (
+                    list(REACTIVE_BEVFORMER_FRAME_OFFSETS)
+                    if sample_count and has_bevformer_history
+                    else None
+                ),
+                "temporal_frame_interval_us": (
+                    REACTIVE_BEVFORMER_FRAME_INTERVAL_US
                     if sample_count and has_bevformer_history
                     else None
                 ),
@@ -9279,6 +9479,7 @@ def _map_recovered_kitscenes_artifacts(
     image_size: int,
     pack_concurrency: int,
     max_partitions: int,
+    include_reasoning_labels: bool,
 ) -> List[FlyteDirectory]:
     """Map only pack tasks over an audited raw/label artifact set."""
     if pack_concurrency <= 0:
@@ -9333,15 +9534,37 @@ def _map_recovered_kitscenes_artifacts(
     raw_dirs = [
         FlyteDirectory(entry["raw_uri"]) for entry in entries
     ]
+    partitions = [[entry["scene_id"]] for entry in entries]
+    sample_limits = [0] * len(entries)
+
+    if not include_reasoning_labels:
+        pack = map_task(
+            functools.partial(
+                data_processing,
+                dataset=Dataset.KITSCENES,
+                source_revision=KITSCENES_SOURCE_REVISION,
+                dataset_version=dataset_version,
+                hz=10,
+                image_size=image_size,
+                episodes=0,
+                world_model=False,
+                reasoning_labels=None,
+                expected_reasoning_label_count=None,
+            ),
+            concurrency=pack_concurrency,
+        )
+        return pack(
+            raw_data=raw_dirs,
+            group_ids=partitions,
+            sample_limit=sample_limits,
+        )
+
     label_dirs = [
         FlyteDirectory(entry["label_uri"]) for entry in entries
     ]
-    partitions = [[entry["scene_id"]] for entry in entries]
     expected_label_counts = [
         entry["expected_label_count"] for entry in entries
     ]
-    sample_limits = [0] * len(entries)
-
     pack = map_task(
         functools.partial(
             data_processing,
@@ -9372,6 +9595,7 @@ def wf_repack_existing_kitscenes(
     image_size: int = REACTIVE_CAMERA_IMAGE_SIZE,
     pack_concurrency: int = 60,
     max_partitions: int = 0,
+    include_reasoning_labels: bool = True,
 ) -> List[FlyteDirectory]:
     """Repack audited raw/Cosmos artifacts without ingest or teacher calls."""
     return _map_recovered_kitscenes_artifacts(
@@ -9381,6 +9605,7 @@ def wf_repack_existing_kitscenes(
         image_size=image_size,
         pack_concurrency=pack_concurrency,
         max_partitions=max_partitions,
+        include_reasoning_labels=include_reasoning_labels,
     )
 
 
@@ -9472,6 +9697,47 @@ def wf_create_dataset_sharded(
         total_sample_limit=total_sample_limit,
         source_split="train",
         data_role="training",
+    )
+
+
+@workflow
+def wf_create_kitscenes_evaluation_sharded(
+    source_split: str = "val",
+    dataset_version: str = KITSCENES_NAVIGATION_DATASET_VERSION,
+    image_size: int = REACTIVE_CAMERA_IMAGE_SIZE,
+    ingest_concurrency: int = 30,
+    pack_concurrency: int = 30,
+) -> List[FlyteDirectory]:
+    """Pack a labeled official KITScenes split for external evaluation."""
+    partitions = plan_fanout_partitions(
+        dataset=Dataset.KITSCENES,
+        source_revision=KITSCENES_SOURCE_REVISION,
+        episodes=0,
+        start_ep=-1,
+        end_ep=-1,
+        partition_size=1,
+        max_partitions=600,
+        max_missing_scenes=0,
+        split=source_split,
+        data_role="benchmark",
+    )
+    return _map_dataset_partitions(
+        partitions=partitions,
+        dataset=Dataset.KITSCENES,
+        source_revision=KITSCENES_SOURCE_REVISION,
+        dataset_version=dataset_version,
+        image_size=image_size,
+        world_model=False,
+        reasoning_teacher="none",
+        prompt_version="action_relevant_reasoning_v3_temporal_front256",
+        label_stride=10,
+        label_workers=1,
+        ingest_concurrency=ingest_concurrency,
+        label_concurrency=1,
+        pack_concurrency=pack_concurrency,
+        total_sample_limit=0,
+        source_split=source_split,
+        data_role="benchmark",
     )
 
 

@@ -112,7 +112,7 @@ NVIDIA_TRAINING_POLICY = DatasetTrainingPolicy(
 )
 
 # AutoE2E retains its 64-step input/output horizon and temporal weighting for
-# KITScenes. The navigation v3 repack preserves the frozen v2.2 sample
+# KITScenes. The navigation v3.5 repack preserves the frozen v2.2 sample
 # inventory, so the population statistics and exact train/dev groups remain
 # unchanged while the packed contract is versioned independently.
 KITSCENES_TRAINING_POLICY = DatasetTrainingPolicy(
@@ -128,8 +128,8 @@ KITSCENES_TRAINING_POLICY = DatasetTrainingPolicy(
     mask_latest_history_acceleration=True,
     validation_strategy="exact_group_fraction",
     validation_split_id="kitscenes_train_dev_v1",
-    validation_manifest="splits/kitscenes_train_dev_v3.json",
-    validation_manifest_schema="kitscenes_train_dev_split_v3",
+    validation_manifest="splits/kitscenes_train_dev_v4.json",
+    validation_manifest_schema="kitscenes_train_dev_split_v4",
 )
 
 # Checkpoints produced before dataset policies were recorded used L2D signal
@@ -372,6 +372,33 @@ def validation_sample_identity(
         _manifest_count(payload, "validation_sample_count"),
         _manifest_digest(payload, "validation_sample_uid_digest"),
     )
+
+
+def configured_validation_group_uids(
+    policy: DatasetTrainingPolicy,
+) -> tuple[str, ...]:
+    """Return the immutable group allowlist before shard assignment."""
+    payload = _load_validation_manifest(policy)
+    values = payload.get("validation_group_uids")
+    if not isinstance(values, list):
+        raise ValueError(
+            "validation manifest has no validation_group_uids list"
+        )
+    normalized = tuple(str(value) for value in values)
+    if (
+        not normalized
+        or any(not value for value in normalized)
+        or len(set(normalized)) != len(normalized)
+        or tuple(sorted(normalized)) != normalized
+        or len(normalized)
+        != _manifest_count(payload, "validation_group_count")
+        or group_uid_digest(normalized)
+        != _manifest_digest(payload, "validation_group_uid_digest")
+    ):
+        raise ValueError(
+            "validation manifest group allowlist is inconsistent"
+        )
+    return normalized
 
 
 def validation_group_uids(

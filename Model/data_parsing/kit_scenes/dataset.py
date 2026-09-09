@@ -57,6 +57,8 @@ from reactive_training_contracts import (
     REACTIVE_BEVFORMER_FRAME_INTERVAL_US,
     REACTIVE_BEVFORMER_FRAME_OFFSETS,
     REACTIVE_BEVFORMER_HISTORY_FRAMES,
+    REACTIVE_FRONT_CAMERA_IMAGE_SIZE,
+    REACTIVE_FRONT_CAMERA_INDEX,
 )
 
 logger = logging.getLogger(__name__)
@@ -71,6 +73,8 @@ class KitScenesSample(TypedDict):
     egomotion_history: torch.Tensor
     visual_history: torch.Tensor
     trajectory_target: torch.Tensor
+    trajectory_xy_m: np.ndarray
+    trajectory_valid: np.ndarray
     scene_id: str
     frame_idx: int
     pose_current: dict[str, float | int]
@@ -293,6 +297,9 @@ class KitScenesDataset(Dataset):
             image_size=self.image_size,
         )
         if self._include_navigation:
+            from navigation.geometry import AUTOE2E_NAVIGATION_GEOMETRY
+            from navigation.rasterizer import NativeNavigationRasterizer
+
             self._scene_navigation[scene_id] = build_scene_navigation(
                 scene_id=scene_id,
                 scene_path=loader.scene_path,
@@ -300,6 +307,9 @@ class KitScenesDataset(Dataset):
                 yaws_rad=yaws,
                 timestamps_ns=timestamps_ns,
                 source_revision=self._source_revision,
+                rasterizer=NativeNavigationRasterizer(
+                    AUTOE2E_NAVIGATION_GEOMETRY
+                ),
             )
 
         return [
@@ -309,6 +319,11 @@ class KitScenesDataset(Dataset):
 
     def __len__(self) -> int:
         return len(self._samples)
+
+    @property
+    def sampling_future_steps(self) -> int:
+        """Return the number of source-labeled future steps."""
+        return self._sampling_future_steps
 
     def sample_uid(self, idx: int) -> str:
         scene_id, frame_idx = self._samples[idx]
@@ -472,10 +487,24 @@ class KitScenesDataset(Dataset):
                 image_size=image_size,
             )
         )
+        front_projection = compute_camera_projection_matrices(
+            self._sdk.get_sensor_loader(scene_id),
+            camera_names=[
+                self.camera_names[REACTIVE_FRONT_CAMERA_INDEX]
+            ],
+            image_size=REACTIVE_FRONT_CAMERA_IMAGE_SIZE,
+        )
         return {
             "dataset": "KIT-MRT/KITScenes-Multimodal",
             "geometry_type": "pinhole",
             "image_size": image_size,
+            "front_camera_index": REACTIVE_FRONT_CAMERA_INDEX,
+            "front_camera_image_size": REACTIVE_FRONT_CAMERA_IMAGE_SIZE,
+            "front_camera_fpn_image_size": image_size,
+            "front_projection": {
+                "matrix": front_projection.tolist(),
+                "type": "pinhole",
+            },
             "projection": {
                 "matrix": current_projection.tolist(),
                 "type": "pinhole",
@@ -626,6 +655,23 @@ class KitScenesDataset(Dataset):
             image_size=self.image_size,
         )
 
+    def front_camera_for_row(
+        self,
+        scene_id: str,
+        frame_idx: int,
+        *,
+        image_size: int = REACTIVE_FRONT_CAMERA_IMAGE_SIZE,
+    ) -> torch.Tensor:
+        """Load the native-resolution current Front camera only."""
+        return load_camera_frame(
+            self._sdk.get_sensor_loader(scene_id),
+            frame_idx,
+            camera_names=[
+                self.camera_names[REACTIVE_FRONT_CAMERA_INDEX]
+            ],
+            image_size=image_size,
+        )[0]
+
     def map_for_row(self, scene_id: str, frame_idx: int) -> torch.Tensor:
         """Rasterize one raw uint8 map tile without loading camera images."""
         if not self.rasterize_map_at_runtime:
@@ -708,6 +754,19 @@ class KitScenesDataset(Dataset):
             pose_current,
             gps_future,
         ) = self.numeric_for(idx)
+        from data_processing.reactive_training_artifacts import (
+            wgs84_future_to_ego_xy,
+        )
+
+        trajectory_xy_m, trajectory_valid = wgs84_future_to_ego_xy(
+            gps_future,
+            current_latitude_deg=float(pose_current["latitude_deg"]),
+            current_longitude_deg=float(pose_current["longitude_deg"]),
+            heading_deg_cw_from_north=float(
+                pose_current["heading_deg_cw_from_north"]
+            ),
+            valid_future_steps=self._sampling_future_steps,
+        )
         sample = KitScenesSample(
             visual_tiles=visual_tiles,
             egomotion_history=egomotion_history,
@@ -715,6 +774,8 @@ class KitScenesDataset(Dataset):
                 _VISUAL_HISTORY_DIM, dtype=torch.float32
             ),
             trajectory_target=trajectory_target,
+            trajectory_xy_m=trajectory_xy_m,
+            trajectory_valid=trajectory_valid,
             scene_id=scene_id,
             frame_idx=frame_idx,
             pose_current=pose_current,

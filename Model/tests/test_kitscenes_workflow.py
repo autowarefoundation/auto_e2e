@@ -126,7 +126,6 @@ def test_kitscenes_data_roles_keep_benchmark_splits_out_of_training():
         data_role="benchmark",
         source_split="overlap_train_val",
     )
-
     with pytest.raises(ValueError, match="training accepts only"):
         workflows._validate_kitscenes_data_role(
             data_role="training",
@@ -136,6 +135,11 @@ def test_kitscenes_data_roles_keep_benchmark_splits_out_of_training():
         workflows._validate_kitscenes_data_role(
             data_role="benchmark",
             source_split="train",
+        )
+    with pytest.raises(ValueError, match="unsupported KITScenes data_role"):
+        workflows._validate_kitscenes_data_role(
+            data_role="evaluation",
+            source_split="test_e2e",
         )
 
 
@@ -678,7 +682,7 @@ def test_navigation_contracts_invalidate_old_pack_caches():
     assert workflows.LABEL_CACHE_VERSION == "label-v3-v1-v2"
     assert (
         workflows.PACK_CACHE_VERSION
-        == "pack-v3-v1-v12-v6-camera512"
+        == "pack-v3-v1-v13-v7-camera512"
     )
 
 
@@ -996,7 +1000,7 @@ def test_recovery_launcher_requires_audited_artifacts_and_skips_source_stages():
     assert 'test -n "${ARTIFACT_SET_SHA256}"' in buildspec
     assert "--recovery_manifest" in buildspec
     assert "--artifact_set_sha256" in buildspec
-    assert "DATASET_VERSION: v3.4" in buildspec
+    assert "DATASET_VERSION: v3.5" in buildspec
     assert 'EPOCHS: "20"' in buildspec
     assert (
         "TRAINING_OBJECTIVE_VERSION: "

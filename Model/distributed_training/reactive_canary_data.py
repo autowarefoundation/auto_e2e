@@ -17,6 +17,7 @@ from data_parsing.l2d.calibration import l2d_projection_spec
 from data_parsing.l2d.camera import CAMERA_NAMES as L2D_CAMERA_NAMES
 from data_parsing.nuplan.packing import NUPLAN_CAMERA_CHANNELS
 from data_processing.dataset_snapshot import split_bucket
+from data_processing.contract_versions import contract_versions
 from data_processing.reactive_training_artifacts import (
     BEV_SEGMENTATION_MEMBER,
     BEV_SEGMENTATION_STATS_MEMBER,
@@ -337,6 +338,7 @@ def write_reactive_canary_dataset(
         "camera_slots": list(CANONICAL_SIX_CAMERA_SLOTS),
         "dataset": dataset,
         "dataset_version": REACTIVE_CANARY_SCHEMA_VERSION,
+        "contracts": contract_versions(),
         "geometry_type": (
             "rectified_pinhole"
             if stage is ReactiveTrainingStage.NUPLAN_FULL

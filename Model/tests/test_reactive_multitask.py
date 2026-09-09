@@ -1660,6 +1660,32 @@ def test_packed_reactive_targets_round_trip():
     assert np.array_equal(decoded_bev_valid, valid)
 
 
+def test_wgs84_target_masks_padded_kitscenes_benchmark_horizon():
+    from data_processing.reactive_training_artifacts import (
+        wgs84_future_to_ego_xy,
+    )
+
+    latitude = 49.0
+    longitude = 8.0
+    gps = np.column_stack([
+        latitude + np.arange(65, dtype=np.float64) * 1e-6,
+        np.full(65, longitude, dtype=np.float64),
+    ])
+    gps[51:] = gps[50]
+
+    trajectory, valid = wgs84_future_to_ego_xy(
+        gps,
+        current_latitude_deg=latitude,
+        current_longitude_deg=longitude,
+        heading_deg_cw_from_north=0.0,
+        valid_future_steps=50,
+    )
+
+    assert valid[:50].all()
+    assert not valid[50:].any()
+    assert np.array_equal(trajectory[50:], np.zeros((14, 2)))
+
+
 def test_semantic_artifact_accepts_prequantized_frames():
     from Platform.pipelines.semantic_occupancy import (
         encode_semantic_occupancy,
@@ -1968,6 +1994,64 @@ def test_stage_b_adapts_stage_a_camera_embeddings_across_rigs(tmp_path):
         "target_camera_slots": list(CANONICAL_SIX_CAMERA_SLOTS),
         "target_num_views": 6,
     }
+
+
+def test_kitscenes_parent_profile_accepts_exact_epoch5_trajectory_route(
+    build_mock_model,
+    device,
+    tmp_path,
+):
+    source_model = _model(build_mock_model, device, views=6)
+    target_model = _model(build_mock_model, device, views=6)
+    checkpoint_path = tmp_path / "nuplan-epoch5.pt"
+    checkpoint_sha256 = save_reactive_checkpoint(
+        checkpoint_path,
+        source_model,
+        stage=ReactiveTrainingStage.NUPLAN_FULL,
+        dataset_manifest_sha256="a" * 64,
+        epoch=5,
+        model_config={
+            "num_views": 6,
+            "camera_slots": list(CANONICAL_SIX_CAMERA_SLOTS),
+            "trajectory_weight": 1.0,
+            "bev_weight": 0.0,
+            "route_weight": 1.0,
+            "corridor_pos_weight": 1.0,
+            "training_seed": 149,
+            "scheduler_identity": "selection_plateau_v1",
+            "freeze_bevformer": True,
+            "bev_pos_weights": [1.0] * 8,
+            "bev_repeat_factors": [1] * 8,
+            "bev_taxonomy_version": BEV_SEGMENTATION_TAXONOMY_VERSION,
+            "is_pretrained": False,
+            "allow_random_bevformer_init": True,
+        },
+    )
+
+    with pytest.raises(ValueError, match="objective provenance"):
+        load_stage_a_parent(
+            target_model,
+            checkpoint_path,
+            target_camera_slots=CANONICAL_SIX_CAMERA_SLOTS,
+            required_training_scope="multitask",
+        )
+
+    lineage = load_stage_a_parent(
+        target_model,
+        checkpoint_path,
+        target_camera_slots=CANONICAL_SIX_CAMERA_SLOTS,
+        required_training_scope="multitask",
+        required_parent_profile="nuplan_trajectory_route_v1",
+        required_checkpoint_sha256=checkpoint_sha256,
+        required_checkpoint_epoch=5,
+    )
+
+    assert lineage["stage_a_parent_checkpoint_epoch"] == 5
+    assert (
+        lineage["stage_a_parent_profile"]
+        == "nuplan_trajectory_route_v1"
+    )
+    assert lineage["stage_a_weight_transfer_scope"] == "full_model_v1"
 
 
 def test_stage_b_reindexes_equal_count_permuted_camera_embeddings(tmp_path):

@@ -89,6 +89,99 @@ def passthrough_nodesplitter(urls: Iterable[str]) -> Iterable[str]:
     yield from urls
 
 
+def packed_sample_tar_paths(
+    shard_dir: str | Path,
+) -> tuple[Path, ...]:
+    """Return only sample shards, excluding sibling transport archives."""
+    root = Path(shard_dir)
+    manifest_path = root / "manifest.json"
+    rank_inventory_path = root / "rank_shards.json"
+    archive_name = "frame_pool.tar"
+    if manifest_path.is_file():
+        try:
+            manifest_bytes = manifest_path.read_bytes()
+            manifest = json.loads(manifest_bytes)
+        except (OSError, UnicodeError, ValueError) as error:
+            raise ValueError(
+                f"invalid packed manifest at {manifest_path}"
+            ) from error
+        if not isinstance(manifest, Mapping):
+            raise ValueError(
+                f"packed manifest must be an object at {manifest_path}"
+            )
+        configured_archive = manifest.get("frame_pool_archive")
+        if configured_archive is not None:
+            if (
+                not isinstance(configured_archive, str)
+                or not configured_archive
+                or Path(configured_archive).name != configured_archive
+            ):
+                raise ValueError(
+                    f"invalid frame-pool archive name at {manifest_path}"
+                )
+            archive_name = configured_archive
+        configured_shards = manifest.get("shard_names")
+        if configured_shards is not None:
+            if (
+                not isinstance(configured_shards, list)
+                or any(
+                    not isinstance(name, str)
+                    or not name.endswith(".tar")
+                    or Path(name).name != name
+                    or name == archive_name
+                    for name in configured_shards
+                )
+                or len(set(configured_shards)) != len(configured_shards)
+            ):
+                raise ValueError(
+                    f"invalid sample shard inventory at {manifest_path}"
+                )
+            selected_shards = configured_shards
+            if rank_inventory_path.is_file():
+                try:
+                    rank_inventory = json.loads(
+                        rank_inventory_path.read_text(encoding="ascii")
+                    )
+                except (OSError, UnicodeError, ValueError) as error:
+                    raise ValueError(
+                        f"invalid rank shard inventory at {rank_inventory_path}"
+                    ) from error
+                if not isinstance(rank_inventory, Mapping):
+                    raise ValueError(
+                        "rank shard inventory must be an object"
+                    )
+                selected_shards = rank_inventory.get("shard_names")
+                if (
+                    rank_inventory.get("schema_version")
+                    != "reactive_rank_shards_v1"
+                    or rank_inventory.get("manifest_sha256")
+                    != hashlib.sha256(manifest_bytes).hexdigest()
+                    or not isinstance(selected_shards, list)
+                    or any(
+                        not isinstance(name, str)
+                        or name not in configured_shards
+                        for name in selected_shards
+                    )
+                    or not selected_shards
+                    or len(set(selected_shards)) != len(selected_shards)
+                ):
+                    raise ValueError(
+                        f"invalid rank shard inventory at {rank_inventory_path}"
+                    )
+            paths = tuple(root / name for name in selected_shards)
+            missing = [str(path) for path in paths if not path.is_file()]
+            if missing:
+                raise FileNotFoundError(
+                    f"packed sample shards are missing: {missing}"
+                )
+            return paths
+    return tuple(
+        path
+        for path in sorted(root.glob("*.tar"))
+        if path.name != archive_name
+    )
+
+
 def _json_mapping(value, *, member_name: str) -> Mapping[str, object]:
     try:
         decoded = json.loads(
@@ -221,7 +314,7 @@ def discover_navigation_exposure(
 
     records: dict[str, dict[str, Mapping[str, object]]] = {}
     for root in roots:
-        tarfiles = sorted(root.glob("*.tar"))
+        tarfiles = packed_sample_tar_paths(root)
         if not tarfiles:
             raise FileNotFoundError(f"No .tar shards found in {root}")
         for tar_path in tarfiles:
@@ -526,7 +619,7 @@ def discover_bev_sample_statistics(
         tarfiles = [
             tar_path
             for root in roots
-            for tar_path in sorted(root.glob("*.tar"))
+            for tar_path in packed_sample_tar_paths(root)
         ]
         for root in roots:
             if not any(root == path.parent for path in tarfiles):
@@ -1220,8 +1313,93 @@ class _PoolAccessor:
 
 
 def _make_pool_accessor(shard_dir: str):
-    """Return a ``_PoolAccessor`` if ``<shard_dir>/pool/`` exists, else None."""
-    pool_dir = Path(shard_dir) / "pool"
+    """Return a verified frame-pool accessor for one packed partition."""
+    import hashlib
+    import shutil
+    import tarfile
+    import tempfile
+
+    root = Path(shard_dir)
+    pool_dir = root / "pool"
+    archive_path = root / "frame_pool.tar"
+    if not pool_dir.is_dir() and archive_path.is_file():
+        try:
+            manifest = json.loads(
+                (root / "manifest.json").read_text(encoding="ascii")
+            )
+        except (OSError, UnicodeError, json.JSONDecodeError) as error:
+            raise ValueError(
+                "frame-pool archive requires a valid manifest"
+            ) from error
+        expected_name = manifest.get("frame_pool_archive")
+        expected_sha256 = manifest.get("frame_pool_archive_sha256")
+        expected_count = manifest.get("frame_pool_frame_count")
+        if (
+            expected_name != archive_path.name
+            or not isinstance(expected_sha256, str)
+            or len(expected_sha256) != 64
+            or any(
+                character not in "0123456789abcdef"
+                for character in expected_sha256
+            )
+            or not isinstance(expected_count, int)
+            or isinstance(expected_count, bool)
+            or expected_count <= 0
+        ):
+            raise ValueError(
+                "frame-pool manifest contract is incomplete"
+            )
+        actual_sha256 = hashlib.sha256(
+            archive_path.read_bytes()
+        ).hexdigest()
+        if actual_sha256 != expected_sha256:
+            raise ValueError("frame-pool archive digest mismatch")
+        temporary_root = Path(
+            tempfile.mkdtemp(
+                prefix=".frame-pool-",
+                dir=root,
+            )
+        )
+        temporary_pool = temporary_root / "pool"
+        temporary_pool.mkdir()
+        try:
+            with tarfile.open(archive_path, "r:") as archive:
+                members = archive.getmembers()
+                if len(members) != expected_count:
+                    raise ValueError(
+                        "frame-pool archive member count differs from manifest"
+                    )
+                member_names: set[str] = set()
+                for member in members:
+                    name = member.name
+                    if (
+                        not member.isfile()
+                        or member.issym()
+                        or member.islnk()
+                        or Path(name).name != name
+                        or not name.endswith(".jpg")
+                        or name in member_names
+                    ):
+                        raise ValueError(
+                            f"unsafe frame-pool archive member {name!r}"
+                        )
+                    member_names.add(name)
+                    source = archive.extractfile(member)
+                    if source is None:
+                        raise ValueError(
+                            f"could not read frame-pool member {name!r}"
+                        )
+                    with (
+                        source,
+                        (temporary_pool / name).open("wb") as destination,
+                    ):
+                        shutil.copyfileobj(source, destination)
+            try:
+                temporary_pool.rename(pool_dir)
+            except FileExistsError:
+                pass
+        finally:
+            shutil.rmtree(temporary_root, ignore_errors=True)
     return _PoolAccessor(str(pool_dir)) if pool_dir.is_dir() else None
 
 
@@ -2359,6 +2537,8 @@ class PackedSplitInventory:
 
 def discover_split_inventory(
     shard_dirs: Sequence[str | Path],
+    *,
+    allow_single_group: bool = False,
 ) -> PackedSplitInventory:
     """Read exact group and sample identities from packed shard metadata.
 
@@ -2377,7 +2557,7 @@ def discover_split_inventory(
     sample_uids: set[str] = set()
     sample_uids_by_group: dict[str, list[str]] = {}
     for root in roots:
-        tarfiles = sorted(root.glob("*.tar"))
+        tarfiles = packed_sample_tar_paths(root)
         if not tarfiles:
             raise FileNotFoundError(f"No .tar shards found in {root}")
         for tar_path in tarfiles:
@@ -2427,7 +2607,11 @@ def discover_split_inventory(
                         group_uid, []
                     ).append(sample_uid)
 
-    if not sample_uids or len(group_uids) < 2:
+    if not sample_uids:
+        raise ValueError(
+            "exact validation splitting requires packed sample metadata"
+        )
+    if not allow_single_group and len(group_uids) < 2:
         raise ValueError(
             "exact validation splitting requires metadata for at least two "
             "split groups"
@@ -2543,19 +2727,30 @@ def make_pre_extracted_loader(
       - ``.geometry_type``: "pinhole" / "rectified_pinhole" / "ftheta" / "pseudo".
     Pass these to the model's forward alongside each batch.
     """
+    shard_root = Path(shard_dir).resolve()
+    available_tarfiles = packed_sample_tar_paths(shard_root)
+    available_resolved = {
+        path.resolve() for path in available_tarfiles
+    }
     tarfiles = (
         sorted(Path(path) for path in shard_files)
         if shard_files is not None
-        else sorted(Path(shard_dir).glob("*.tar"))
+        else list(available_tarfiles)
     )
     if not tarfiles:
         raise FileNotFoundError(f"No .tar shards found in {shard_dir}")
-    shard_root = Path(shard_dir).resolve()
+    if len(set(tarfiles)) != len(tarfiles):
+        raise ValueError("shard files must be unique")
     for path in tarfiles:
         resolved = path.resolve()
-        if not resolved.is_file() or resolved.parent != shard_root:
+        if (
+            not resolved.is_file()
+            or resolved.parent != shard_root
+            or resolved not in available_resolved
+        ):
             raise ValueError(
-                f"shard file must be a direct .tar child of {shard_root}: {path}"
+                "shard file must be declared as a sample shard under "
+                f"{shard_root}: {path}"
             )
         if resolved.suffix != ".tar":
             raise ValueError(f"shard file must use .tar suffix: {path}")
