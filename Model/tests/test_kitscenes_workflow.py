@@ -767,6 +767,33 @@ def test_recovery_pack_maps_explicit_unbounded_sample_limits():
     assert keywords["sample_limit"].id == "sample_limits"
 
 
+def test_recovery_pack_fixes_training_role_before_map_compilation():
+    tree = ast.parse(
+        inspect.getsource(
+            workflows._map_recovered_kitscenes_artifacts.task_function
+        )
+    )
+    data_processing_partials = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "partial"
+        and node.args
+        and isinstance(node.args[0], ast.Name)
+        and node.args[0].id == "data_processing"
+    ]
+
+    assert len(data_processing_partials) == 2
+    for partial_call in data_processing_partials:
+        keywords = {
+            keyword.arg: keyword.value
+            for keyword in partial_call.keywords
+        }
+        assert ast.literal_eval(keywords["source_split"]) == "train"
+        assert ast.literal_eval(keywords["data_role"]) == "training"
+
+
 @pytest.mark.parametrize(
     (
         "dataset",

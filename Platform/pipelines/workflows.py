@@ -9550,6 +9550,8 @@ def _map_recovered_kitscenes_artifacts(
                 world_model=False,
                 reasoning_labels=None,
                 expected_reasoning_label_count=None,
+                source_split="train",
+                data_role="training",
             ),
             concurrency=pack_concurrency,
         )
@@ -9575,6 +9577,8 @@ def _map_recovered_kitscenes_artifacts(
             image_size=image_size,
             episodes=0,
             world_model=True,
+            source_split="train",
+            data_role="training",
         ),
         concurrency=pack_concurrency,
     )
