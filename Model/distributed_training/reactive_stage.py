@@ -129,6 +129,20 @@ EPOCH_CHECKPOINT_RETENTION_SCORE_BASE = 1_000_000_000_000.0
 P5EN_MINIMUM_REMAINING_RUNTIME = timedelta(hours=22)
 P5EN_RESUME_MINIMUM_REMAINING_RUNTIME = timedelta(hours=2)
 _RUN_NAME_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]*")
+_STAGE_A_LINEAGE_KEYS = (
+    "stage_a_parent_checkpoint_sha256",
+    "stage_a_parent_checkpoint_epoch",
+    "stage_a_parent_profile",
+    "stage_a_config_digest",
+    "stage_a_metrics_digest",
+    "stage_a_metrics_identity_mode",
+    "stage_a_model_state_sha256",
+    "stage_a_freeze_bevformer",
+    "stage_a_training_scope",
+    "stage_a_bev_loss_version",
+    "stage_a_weight_transfer_scope",
+    "stage_a_camera_embedding_transfer",
+)
 
 
 def expected_reactive_hostname_count(world_size: int) -> int:
@@ -187,6 +201,17 @@ def _required_parent_training_scope(
     }:
         return ReactiveTrainingScope.MULTITASK.value
     return None
+
+
+def _restore_stage_a_lineage(
+    resume_config: Mapping[str, Any],
+    lineage: dict[str, Any],
+) -> None:
+    """Preserve parent checkpoint provenance across resumed training."""
+    for lineage_key in _STAGE_A_LINEAGE_KEYS:
+        lineage_value = resume_config.get(lineage_key)
+        if lineage_value is not None:
+            lineage[lineage_key] = lineage_value
 
 
 @dataclass(frozen=True)
@@ -5075,21 +5100,14 @@ def train_loop_per_worker(config: dict[str, Any]) -> None:
             expected_resume["bevformer_v2_initialization"] = (
                 initialization_metadata
             )
-            for lineage_key in (
-                "stage_a_parent_checkpoint_sha256",
-                "stage_a_parent_checkpoint_epoch",
-                "stage_a_parent_profile",
-                "stage_a_config_digest",
-                "stage_a_model_state_sha256",
-                "stage_a_freeze_bevformer",
-                "stage_a_training_scope",
-                "stage_a_weight_transfer_scope",
-                "stage_a_camera_embedding_transfer",
-                "bevformer_v2_initialization_mode",
-            ):
-                lineage_value = resume_config.get(lineage_key)
-                if lineage_value is not None:
-                    lineage[lineage_key] = lineage_value
+            _restore_stage_a_lineage(resume_config, lineage)
+            initialization_mode = resume_config.get(
+                "bevformer_v2_initialization_mode"
+            )
+            if initialization_mode is not None:
+                lineage["bevformer_v2_initialization_mode"] = (
+                    initialization_mode
+                )
             resume_state = _load_resume_checkpoint(
                 checkpoint_directory,
                 model=model,

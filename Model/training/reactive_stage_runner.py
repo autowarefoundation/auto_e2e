@@ -505,7 +505,25 @@ def load_stage_a_parent(
     if not isinstance(metrics, Mapping):
         raise ValueError("Stage A checkpoint has no metrics mapping")
     metrics_sha256 = reactive_metrics_sha256(metrics)
-    if payload.get("metrics_sha256") != metrics_sha256:
+    recorded_metrics_sha256 = payload.get("metrics_sha256")
+    metrics_identity_mode = "embedded_digest_v1"
+    if "metrics_sha256" not in payload:
+        checkpoint_epoch = payload.get("epoch")
+        exact_pinned_legacy_parent = (
+            required_checkpoint_sha256 is not None
+            and digest == required_checkpoint_sha256
+            and required_checkpoint_epoch is not None
+            and type(checkpoint_epoch) is int
+            and checkpoint_epoch == required_checkpoint_epoch
+            and required_parent_profile == "nuplan_trajectory_route_v1"
+        )
+        if not exact_pinned_legacy_parent:
+            raise ValueError("Stage A checkpoint metrics digest is missing")
+        metrics_identity_mode = "pinned_checkpoint_sha256_v1"
+    elif (
+        not isinstance(recorded_metrics_sha256, str)
+        or recorded_metrics_sha256 != metrics_sha256
+    ):
         raise ValueError("Stage A checkpoint metrics digest is invalid")
     if training_scope == "bev_only":
         required_promotion_metrics = {
@@ -724,6 +742,8 @@ def load_stage_a_parent(
         "stage_a_parent_checkpoint_epoch": payload.get("epoch"),
         "stage_a_parent_profile": required_parent_profile,
         "stage_a_config_digest": config_sha256,
+        "stage_a_metrics_digest": metrics_sha256,
+        "stage_a_metrics_identity_mode": metrics_identity_mode,
         "stage_a_model_state_sha256": model_state_sha256,
         "stage_a_freeze_bevformer": bool(config["freeze_bevformer"]),
         "stage_a_training_scope": training_scope,

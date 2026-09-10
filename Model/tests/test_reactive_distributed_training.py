@@ -97,6 +97,7 @@ from distributed_training.reactive_stage import (
     _reduce_reactive_validation_state,
     _raise_distributed_validation_contract_errors,
     _required_parent_training_scope,
+    _restore_stage_a_lineage,
     _weighted_bev_prior_logit_biases,
     _replay_loader_position,
     _resolve_resume_sources,
@@ -2034,6 +2035,22 @@ def test_step_checkpoint_restores_epoch_position_and_rank_state(tmp_path):
     assert state.rank_train_states == tuple(rank_train_states)
     assert state.rank_rng_states is not None
     assert [item["rank"] for item in state.rank_rng_states] == [0, 1]
+
+
+def test_resume_preserves_stage_a_metrics_identity_lineage():
+    lineage = {"current_run": "kitscenes"}
+    resume_config = {
+        "stage_a_metrics_digest": "a" * 64,
+        "stage_a_metrics_identity_mode": "pinned_checkpoint_sha256_v1",
+        "stage_a_bev_loss_version": "bev_loss_v1",
+    }
+
+    _restore_stage_a_lineage(resume_config, lineage)
+
+    assert lineage == {
+        "current_run": "kitscenes",
+        **resume_config,
+    }
 
 
 def test_step_checkpoint_rejects_incomplete_rank_train_state(tmp_path):

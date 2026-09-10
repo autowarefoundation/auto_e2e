@@ -2051,7 +2051,142 @@ def test_kitscenes_parent_profile_accepts_exact_epoch5_trajectory_route(
         lineage["stage_a_parent_profile"]
         == "nuplan_trajectory_route_v1"
     )
+    assert lineage["stage_a_metrics_identity_mode"] == "embedded_digest_v1"
     assert lineage["stage_a_weight_transfer_scope"] == "full_model_v1"
+
+    legacy_payload = torch.load(
+        checkpoint_path,
+        map_location="cpu",
+        weights_only=False,
+    )
+    expected_metrics_digest = legacy_payload.pop("metrics_sha256")
+    torch.save(legacy_payload, checkpoint_path)
+    legacy_checkpoint_sha256 = hashlib.sha256(
+        checkpoint_path.read_bytes()
+    ).hexdigest()
+
+    with pytest.raises(ValueError, match="metrics digest is missing"):
+        load_stage_a_parent(
+            target_model,
+            checkpoint_path,
+            target_camera_slots=CANONICAL_SIX_CAMERA_SLOTS,
+            required_training_scope="multitask",
+            required_parent_profile="nuplan_trajectory_route_v1",
+            required_checkpoint_epoch=5,
+        )
+
+    with pytest.raises(ValueError, match="metrics digest is missing"):
+        load_stage_a_parent(
+            target_model,
+            checkpoint_path,
+            target_camera_slots=CANONICAL_SIX_CAMERA_SLOTS,
+            required_training_scope="multitask",
+            required_parent_profile="nuplan_trajectory_route_v1",
+            required_checkpoint_sha256=legacy_checkpoint_sha256,
+        )
+
+    with pytest.raises(ValueError, match="checkpoint epoch differs"):
+        load_stage_a_parent(
+            target_model,
+            checkpoint_path,
+            target_camera_slots=CANONICAL_SIX_CAMERA_SLOTS,
+            required_training_scope="multitask",
+            required_parent_profile="nuplan_trajectory_route_v1",
+            required_checkpoint_sha256=legacy_checkpoint_sha256,
+            required_checkpoint_epoch=4,
+        )
+
+    with pytest.raises(ValueError, match="objective provenance"):
+        load_stage_a_parent(
+            target_model,
+            checkpoint_path,
+            target_camera_slots=CANONICAL_SIX_CAMERA_SLOTS,
+            required_training_scope="multitask",
+            required_checkpoint_sha256=legacy_checkpoint_sha256,
+            required_checkpoint_epoch=5,
+        )
+
+    with pytest.raises(ValueError, match="unsupported Stage A parent profile"):
+        load_stage_a_parent(
+            target_model,
+            checkpoint_path,
+            target_camera_slots=CANONICAL_SIX_CAMERA_SLOTS,
+            required_training_scope="multitask",
+            required_parent_profile="nuplan_bev_v1",
+            required_checkpoint_sha256=legacy_checkpoint_sha256,
+            required_checkpoint_epoch=5,
+        )
+
+    legacy_lineage = load_stage_a_parent(
+        target_model,
+        checkpoint_path,
+        target_camera_slots=CANONICAL_SIX_CAMERA_SLOTS,
+        required_training_scope="multitask",
+        required_parent_profile="nuplan_trajectory_route_v1",
+        required_checkpoint_sha256=legacy_checkpoint_sha256,
+        required_checkpoint_epoch=5,
+    )
+    assert legacy_lineage["stage_a_metrics_digest"] == (
+        expected_metrics_digest
+    )
+    assert legacy_lineage["stage_a_metrics_identity_mode"] == (
+        "pinned_checkpoint_sha256_v1"
+    )
+
+    tampered_metrics = dict(legacy_payload["metrics"])
+    tampered_metrics["ade_6p4s_m"] = 0.0
+    legacy_payload["metrics"] = tampered_metrics
+    torch.save(legacy_payload, checkpoint_path)
+    tampered_checkpoint_sha256 = hashlib.sha256(
+        checkpoint_path.read_bytes()
+    ).hexdigest()
+    tampered_lineage = load_stage_a_parent(
+        target_model,
+        checkpoint_path,
+        target_camera_slots=CANONICAL_SIX_CAMERA_SLOTS,
+        required_training_scope="multitask",
+        required_parent_profile="nuplan_trajectory_route_v1",
+        required_checkpoint_sha256=tampered_checkpoint_sha256,
+        required_checkpoint_epoch=5,
+    )
+    assert tampered_lineage["stage_a_metrics_digest"] == (
+        reactive_metrics_sha256(tampered_metrics)
+    )
+    assert tampered_lineage["stage_a_metrics_identity_mode"] == (
+        "pinned_checkpoint_sha256_v1"
+    )
+
+    legacy_payload["metrics_sha256"] = None
+    torch.save(legacy_payload, checkpoint_path)
+    null_digest_checkpoint_sha256 = hashlib.sha256(
+        checkpoint_path.read_bytes()
+    ).hexdigest()
+    with pytest.raises(ValueError, match="metrics digest is invalid"):
+        load_stage_a_parent(
+            target_model,
+            checkpoint_path,
+            target_camera_slots=CANONICAL_SIX_CAMERA_SLOTS,
+            required_training_scope="multitask",
+            required_parent_profile="nuplan_trajectory_route_v1",
+            required_checkpoint_sha256=null_digest_checkpoint_sha256,
+            required_checkpoint_epoch=5,
+        )
+
+    legacy_payload["metrics_sha256"] = "0" * 64
+    torch.save(legacy_payload, checkpoint_path)
+    mismatched_checkpoint_sha256 = hashlib.sha256(
+        checkpoint_path.read_bytes()
+    ).hexdigest()
+    with pytest.raises(ValueError, match="metrics digest is invalid"):
+        load_stage_a_parent(
+            target_model,
+            checkpoint_path,
+            target_camera_slots=CANONICAL_SIX_CAMERA_SLOTS,
+            required_training_scope="multitask",
+            required_parent_profile="nuplan_trajectory_route_v1",
+            required_checkpoint_sha256=mismatched_checkpoint_sha256,
+            required_checkpoint_epoch=5,
+        )
 
 
 def test_stage_b_reindexes_equal_count_permuted_camera_embeddings(tmp_path):
