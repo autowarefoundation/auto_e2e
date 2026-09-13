@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import copy
 import hashlib
 import inspect
 import io
@@ -802,6 +803,8 @@ def test_kitscenes_route_usage_policies_are_exact():
         == {
             "counterfactuals_enabled": True,
             "input_gradient_enabled": False,
+            "reuse_precomputed_image_bev": True,
+            "route_swap_counterfactual_enabled": False,
             "version": (
                 distributed_training
                 .KITSCENES_PRIMARY_VAL_ROUTE_USAGE_POLICY
@@ -816,6 +819,8 @@ def test_kitscenes_route_usage_policies_are_exact():
         == {
             "counterfactuals_enabled": False,
             "input_gradient_enabled": False,
+            "reuse_precomputed_image_bev": False,
+            "route_swap_counterfactual_enabled": False,
             "version": (
                 distributed_training
                 .KITSCENES_CAMERA_ONLY_ROUTE_USAGE_POLICY
@@ -837,7 +842,10 @@ def test_kitscenes_val_publication_requires_official_map_route_inventory():
         "partition_count": 117,
         "expected_partition_count": 117,
         "expected_sample_count": 11_035,
-        "inference_cache_policy": "stateless",
+        "inference_cache_policy": (
+            distributed_training
+            .KITSCENES_STATEFUL_CAMERA_FPN_POLICY
+        ),
         "evaluation_batch_size": (
             distributed_training.KITSCENES_PRIMARY_VAL_BATCH_SIZE
         ),
@@ -866,6 +874,10 @@ def test_kitscenes_val_publication_requires_official_map_route_inventory():
                 "route_input_gradient_mean_abs": None,
                 "route_zero_sample_count": 11_035,
                 "route_zero_trajectory_delta_m": 0.25,
+                "route_swap_sample_count": 0,
+                "route_swap_trajectory_delta_m": None,
+                "route_swap_directional_sample_count": 0,
+                "route_swap_directional_correctness": None,
             },
         },
     }
@@ -883,6 +895,18 @@ def test_kitscenes_val_publication_requires_official_map_route_inventory():
         official_report,
         expected_model_version="66",
     )
+    drifted_swap_report = copy.deepcopy(official_report)
+    drifted_swap_report["metrics"]["route"][
+        "route_swap_sample_count"
+    ] = 1
+    with pytest.raises(
+        ValueError,
+        match="exact official inventory",
+    ):
+        distributed_training._validate_kitscenes_publication_binding(
+            drifted_swap_report,
+            expected_model_version="66",
+        )
     with pytest.raises(
         ValueError,
         match="exact official inventory",
@@ -1020,7 +1044,10 @@ def test_kitscenes_val_publication_rejects_trajectory_policy_drift():
         "partition_count": 117,
         "expected_partition_count": 117,
         "expected_sample_count": 11_035,
-        "inference_cache_policy": "stateless",
+        "inference_cache_policy": (
+            distributed_training
+            .KITSCENES_STATEFUL_CAMERA_FPN_POLICY
+        ),
         "evaluation_batch_size": (
             distributed_training.KITSCENES_PRIMARY_VAL_BATCH_SIZE
         ),
@@ -1049,6 +1076,10 @@ def test_kitscenes_val_publication_rejects_trajectory_policy_drift():
                 "route_input_gradient_mean_abs": None,
                 "route_zero_sample_count": 11_035,
                 "route_zero_trajectory_delta_m": 0.25,
+                "route_swap_sample_count": 0,
+                "route_swap_trajectory_delta_m": None,
+                "route_swap_directional_sample_count": 0,
+                "route_swap_directional_correctness": None,
             },
         },
     }
@@ -1596,12 +1627,17 @@ def test_kitscenes_val_workflow_enforces_primary_inventory():
     assert (
         bindings["batch_size"].scalar.primitive.integer
         == distributed_training.KITSCENES_PRIMARY_VAL_BATCH_SIZE
-        == 1
+        == 5
     )
     assert (
         bindings["expected_val_partition_count"]
         .scalar.primitive.integer
         == 117
+    )
+    assert (
+        bindings["use_stateful_camera_fpn_cache"]
+        .scalar.primitive.boolean
+        is True
     )
     assert publisher.flyte_entity is (
         distributed_training.publish_reactive_kitscenes_evaluation
@@ -1665,7 +1701,7 @@ def test_kitscenes_test_sharded_workflow_enforces_official_inventory():
     )
 
 
-def test_kitscenes_evaluation_rejects_batch_larger_than_four():
+def test_kitscenes_stateless_evaluation_rejects_batch_larger_than_four():
     with pytest.raises(
         ValueError,
         match="exceeds the selected inference policy",
@@ -1705,10 +1741,24 @@ def test_kitscenes_evaluation_accepts_batch_four():
         )
 
 
+def test_kitscenes_stateful_val_evaluation_accepts_batch_five():
+    with pytest.raises(
+        ValueError,
+        match="immutable S3 inputs",
+    ):
+        distributed_training.evaluate_reactive_kitscenes_checkpoint.task_function(
+            checkpoint=FlyteFile("/tmp/missing-checkpoint.pt"),
+            shards=[FlyteDirectory("/tmp/missing-shard")],
+            source_split="val",
+            batch_size=5,
+            use_stateful_camera_fpn_cache=True,
+        )
+
+
 def test_kitscenes_stateful_evaluation_rejects_batch_four():
     with pytest.raises(
         ValueError,
-        match="requires test data and batch size 5",
+        match="requires official scene data and batch size 5",
     ):
         distributed_training.evaluate_reactive_kitscenes_checkpoint.task_function(
             checkpoint=FlyteFile("/tmp/missing-checkpoint.pt"),
@@ -1722,7 +1772,7 @@ def test_kitscenes_stateful_evaluation_rejects_batch_four():
 def test_kitscenes_official_val_rejects_batch_drift_before_download():
     with pytest.raises(
         ValueError,
-        match="official KITScenes val evaluation requires batch size 1",
+        match="official KITScenes val evaluation requires batch size 5",
     ):
         distributed_training.evaluate_reactive_kitscenes_checkpoint.task_function(
             checkpoint=FlyteFile("/tmp/missing-checkpoint.pt"),
@@ -2097,7 +2147,10 @@ def test_kitscenes_checkpoint_evaluator_routes_inventory_policy():
     assert "_validate_kitscenes_official_val_sdk_split(" in source
     assert '"counterfactuals_enabled"' in source
     assert '"input_gradient_enabled"' in source
+    assert '"route_swap_counterfactual_enabled"' in source
     assert "include_counterfactuals=bool(" in source
+    assert "include_route_swap_counterfactual=bool(" in source
+    assert "reuse_precomputed_image_bev=bool(" in source
     assert "include_route_gradient=bool(" in source
 
 

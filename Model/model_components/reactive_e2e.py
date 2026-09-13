@@ -1243,6 +1243,8 @@ class ReactiveE2E(nn.Module):
                 front_projection=None,
                 front_image_transform=None,
                 mode="train", return_auxiliary=False,
+                precomputed_image_bev=None,
+                return_image_bev=False,
                 compute_bev_segmentation=True,
                 compute_route_reconstruction=True,
                 bev_only=False,
@@ -1273,6 +1275,10 @@ class ReactiveE2E(nn.Module):
             camera_fpn_stream_ids: Ordered scene or stream identity per sample.
             camera_fpn_timestamps_us: Source timestamps sampled exactly every
                 500 ms. Do not synthesize continuity across dropped frames.
+            precomputed_image_bev: Optional detached image BEV from an earlier
+                inference pass over the same camera inputs.
+            return_image_bev: Return the detached image BEV in auxiliary output
+                for route-only counterfactual inference.
             front_camera_fpn_tile: Optional base-resolution Front image packed
                 identically to historical Front frames for cache insertion.
             front_camera_fpn_available: Per-sample validity for the exact
@@ -1289,7 +1295,42 @@ class ReactiveE2E(nn.Module):
 
         # --- Camera branch ---
         prepared_camera_fpn_frame = None
-        if camera_fpn_cache is not None:
+        if precomputed_image_bev is not None:
+            if (
+                mode == "train"
+                or self.training
+                or torch.is_grad_enabled()
+                or camera_fpn_cache is not None
+                or camera_fpn_stream_ids is not None
+                or camera_fpn_timestamps_us is not None
+                or projection is not None
+                or geometry_type is not None
+                or image_transform is not None
+                or camera_history_tiles is not None
+                or history_projections is not None
+                or front_camera_tile is not None
+                or front_camera_fpn_tile is not None
+                or front_camera_fpn_available is not None
+                or front_projection is not None
+                or front_image_transform is not None
+            ):
+                raise ValueError(
+                    "precomputed image BEV requires camera-argument-free "
+                    "inference with gradients disabled"
+                )
+            if (
+                not torch.is_tensor(precomputed_image_bev)
+                or precomputed_image_bev.ndim != 4
+                or precomputed_image_bev.shape[0] != B
+                or precomputed_image_bev.device != camera_tiles.device
+                or precomputed_image_bev.requires_grad
+            ):
+                raise ValueError(
+                    "precomputed image BEV must be a detached same-device "
+                    "[B,C,H,W] tensor"
+                )
+            image_bev = precomputed_image_bev
+        elif camera_fpn_cache is not None:
             if not isinstance(
                 camera_fpn_cache,
                 StatefulCameraFPNCache,
@@ -1428,12 +1469,20 @@ class ReactiveE2E(nn.Module):
                 front_projection=front_projection,
                 front_image_transform=front_image_transform,
             )
-        image_bev = self._fuse_temporal_camera_bevs(
-            current_image_bev,
-            history_bevs,
-        )
+        if precomputed_image_bev is None:
+            image_bev = self._fuse_temporal_camera_bevs(
+                current_image_bev,
+                history_bevs,
+            )
         emit_auxiliary = mode == "train" or bool(return_auxiliary)
         aux_outputs = {}
+        if return_image_bev:
+            if not emit_auxiliary or mode == "train" or torch.is_grad_enabled():
+                raise ValueError(
+                    "image BEV export requires auxiliary inference with "
+                    "gradients disabled"
+                )
+            aux_outputs["_evaluation_image_bev"] = image_bev.detach()
         if (
             self.BEVSegmentationHead is not None
             and emit_auxiliary

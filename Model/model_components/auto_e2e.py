@@ -190,6 +190,8 @@ class AutoE2E(nn.Module):
                 mode="train", trajectory_target=None,
                 history_frames=None, future_frames=None,
                 return_auxiliary=False,
+                precomputed_image_bev=None,
+                return_image_bev=False,
                 compute_bev_segmentation=True,
                 compute_route_reconstruction=True,
                 bev_only=False,
@@ -235,6 +237,10 @@ class AutoE2E(nn.Module):
             camera_fpn_stream_ids: Ordered scene or stream identity per sample.
             camera_fpn_timestamps_us: Source timestamps sampled exactly every
                 500 ms. Do not synthesize continuity across dropped frames.
+            precomputed_image_bev: Optional detached image BEV from an earlier
+                inference pass over the same camera inputs.
+            return_image_bev: Return the detached image BEV for route-only
+                counterfactual inference.
             mode: "train" also returns aux branch outputs for their losses.
 
         Returns:
@@ -342,6 +348,8 @@ class AutoE2E(nn.Module):
             front_image_transform=front_image_transform,
             mode=mode,
             return_auxiliary=return_auxiliary,
+            precomputed_image_bev=precomputed_image_bev,
+            return_image_bev=return_image_bev,
             compute_bev_segmentation=compute_bev_segmentation,
             compute_route_reconstruction=compute_route_reconstruction,
             bev_only=bev_only,

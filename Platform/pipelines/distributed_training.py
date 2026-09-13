@@ -107,7 +107,7 @@ KITSCENES_OFFICIAL_VAL_SAMPLE_COUNT = 11_035
 KITSCENES_OFFICIAL_TEST_SAMPLE_COUNT = 23_690
 KITSCENES_OFFICIAL_VAL_DATASET_VERSION = "v3.5"
 KITSCENES_OFFICIAL_TEST_DATASET_VERSION = "v3.5-test-camera-only-v1"
-KITSCENES_PRIMARY_VAL_BATCH_SIZE = 1
+KITSCENES_PRIMARY_VAL_BATCH_SIZE = 5
 KITSCENES_STATEFUL_CAMERA_FPN_BATCH_SIZE = 5
 KITSCENES_STATEFUL_CAMERA_FPN_POLICY = (
     "stateful_camera_fpn_5lane_v1"
@@ -116,7 +116,7 @@ KITSCENES_TRAJECTORY_INFERENCE_POLICY = (
     "deterministic_gru_no_noise_v1"
 )
 KITSCENES_PRIMARY_VAL_ROUTE_USAGE_POLICY = (
-    "route_zero_counterfactual_no_grad_v1"
+    "route_zero_reused_image_bev_no_grad_v2"
 )
 KITSCENES_CAMERA_ONLY_ROUTE_USAGE_POLICY = (
     "not_applicable_camera_only_v1"
@@ -138,6 +138,8 @@ def _kitscenes_route_usage_evaluation_policy(
     return {
         "counterfactuals_enabled": not mapless_test,
         "input_gradient_enabled": False,
+        "reuse_precomputed_image_bev": not mapless_test,
+        "route_swap_counterfactual_enabled": False,
         "version": (
             KITSCENES_CAMERA_ONLY_ROUTE_USAGE_POLICY
             if mapless_test
@@ -1409,7 +1411,7 @@ def _validate_kitscenes_publication_binding(
             and report_payload.get("scene_uid_sha256")
             == KITSCENES_OFFICIAL_VAL_SCENE_UID_SHA256
             and report_payload.get("inference_cache_policy")
-            == "stateless"
+            == KITSCENES_STATEFUL_CAMERA_FPN_POLICY
             and has_integral_batch_size
             and evaluation_batch_size
             == KITSCENES_PRIMARY_VAL_BATCH_SIZE
@@ -1462,6 +1464,33 @@ def _validate_kitscenes_publication_binding(
                     route_metrics["route_zero_trajectory_delta_m"]
                 )
             )
+            and isinstance(
+                route_metrics.get("route_swap_sample_count"),
+                int,
+            )
+            and not isinstance(
+                route_metrics.get("route_swap_sample_count"),
+                bool,
+            )
+            and route_metrics["route_swap_sample_count"] == 0
+            and route_metrics.get("route_swap_trajectory_delta_m") is None
+            and isinstance(
+                route_metrics.get(
+                    "route_swap_directional_sample_count"
+                ),
+                int,
+            )
+            and not isinstance(
+                route_metrics.get(
+                    "route_swap_directional_sample_count"
+                ),
+                bool,
+            )
+            and route_metrics["route_swap_directional_sample_count"] == 0
+            and route_metrics.get(
+                "route_swap_directional_correctness"
+            )
+            is None
         )
     else:
         valid = (
@@ -3361,11 +3390,11 @@ def evaluate_reactive_kitscenes_checkpoint(
 
     mapless_test = source_split == "test"
     if use_stateful_camera_fpn_cache and (
-        not mapless_test
+        source_split not in {"val", "test"}
         or batch_size != KITSCENES_STATEFUL_CAMERA_FPN_BATCH_SIZE
     ):
         raise ValueError(
-            "stateful camera FPN evaluation requires test data and "
+            "stateful camera FPN evaluation requires official scene data and "
             f"batch size {KITSCENES_STATEFUL_CAMERA_FPN_BATCH_SIZE}"
         )
     if not mapless_test and expected_test_partition_count:
@@ -3713,6 +3742,16 @@ def evaluate_reactive_kitscenes_checkpoint(
             include_counterfactuals=bool(
                 route_usage_evaluation_policy[
                     "counterfactuals_enabled"
+                ]
+            ),
+            include_route_swap_counterfactual=bool(
+                route_usage_evaluation_policy[
+                    "route_swap_counterfactual_enabled"
+                ]
+            ),
+            reuse_precomputed_image_bev=bool(
+                route_usage_evaluation_policy[
+                    "reuse_precomputed_image_bev"
                 ]
             ),
             include_route_gradient=bool(
@@ -5001,6 +5040,7 @@ def wf_evaluate_reactive_kitscenes_val(
         batch_size=KITSCENES_PRIMARY_VAL_BATCH_SIZE,
         num_loader_workers=4,
         expected_val_partition_count=KITSCENES_OFFICIAL_VAL_SCENE_COUNT,
+        use_stateful_camera_fpn_cache=True,
     )
     publication = publish_reactive_kitscenes_evaluation(
         checkpoint=checkpoint,

@@ -1196,6 +1196,8 @@ def evaluate_reactive_multitask(
     stage: ReactiveTrainingStage,
     device: torch.device,
     include_counterfactuals: bool = True,
+    include_route_swap_counterfactual: bool | None = None,
+    reuse_precomputed_image_bev: bool | None = None,
     include_route_gradient: bool = True,
     probability_bins: int = 100,
     initial_noise_provider: (
@@ -1214,12 +1216,38 @@ def evaluate_reactive_multitask(
         raise ValueError("probability_bins must be at least 10")
     if not isinstance(stage, ReactiveTrainingStage):
         raise TypeError("stage must be a ReactiveTrainingStage")
-    if camera_fpn_cache is not None and (
-        include_counterfactuals or include_route_gradient
+    if include_route_swap_counterfactual is None:
+        include_route_swap_counterfactual = include_counterfactuals
+    if reuse_precomputed_image_bev is None:
+        reuse_precomputed_image_bev = include_counterfactuals
+    if (
+        not isinstance(include_route_swap_counterfactual, bool)
+        or (
+            include_route_swap_counterfactual
+            and not include_counterfactuals
+        )
     ):
         raise ValueError(
-            "stateful camera FPN evaluation cannot run counterfactuals "
-            "or route gradients"
+            "route swap counterfactual requires counterfactual evaluation"
+        )
+    if (
+        not isinstance(reuse_precomputed_image_bev, bool)
+        or reuse_precomputed_image_bev and not include_counterfactuals
+    ):
+        raise ValueError(
+            "precomputed image BEV reuse requires counterfactual evaluation"
+        )
+    if (
+        camera_fpn_cache is not None
+        and include_counterfactuals
+        and not reuse_precomputed_image_bev
+    ):
+        raise ValueError(
+            "stateful camera FPN counterfactuals require image BEV reuse"
+        )
+    if camera_fpn_cache is not None and include_route_gradient:
+        raise ValueError(
+            "stateful camera FPN evaluation cannot run route gradients"
         )
     _assert_reactive_only(model)
     training_policy = reactive_training_policy(stage)
@@ -1525,6 +1553,7 @@ def evaluate_reactive_multitask(
                     mode="infer",
                     initial_noise=initial_noise,
                     return_auxiliary=True,
+                    return_image_bev=reuse_precomputed_image_bev,
                     compute_bev_segmentation=compute_bev,
                     compute_route_reconstruction=True,
                 )
@@ -1533,6 +1562,33 @@ def evaluate_reactive_multitask(
                         "Reactive evaluator requires auxiliary outputs"
                     )
                 controls, auxiliary = output
+                evaluation_image_bev = auxiliary.get(
+                    "_evaluation_image_bev"
+                )
+                if reuse_precomputed_image_bev and (
+                    not torch.is_tensor(evaluation_image_bev)
+                    or evaluation_image_bev.ndim != 4
+                    or evaluation_image_bev.shape[0] != batch_size
+                ):
+                    raise RuntimeError(
+                        "route counterfactuals require the baseline image BEV"
+                    )
+                counterfactual_camera_kwargs = (
+                    {
+                        "precomputed_image_bev": evaluation_image_bev,
+                    }
+                    if reuse_precomputed_image_bev
+                    else {
+                        "projection": projection,
+                        "geometry_type": geometry_type,
+                        "camera_history_tiles": camera_history_tiles,
+                        "history_projections": history_projections,
+                        "front_camera_tile": batch.get(
+                            "front_camera_tile"
+                        ),
+                        "front_projection": front_projection,
+                    }
+                )
                 controls_3d = controls.reshape(batch_size, -1, 2)
                 finite_samples = torch.isfinite(controls_3d).all(
                     dim=(1, 2)
@@ -1844,16 +1900,11 @@ def evaluate_reactive_multitask(
                             batch["route_valid"],
                             dtype=torch.bool,
                         ),
-                        projection=projection,
-                        geometry_type=geometry_type,
-                        camera_history_tiles=camera_history_tiles,
-                        history_projections=history_projections,
-                        front_camera_tile=batch.get("front_camera_tile"),
-                        front_projection=front_projection,
                         mode="infer",
                         initial_noise=initial_noise,
                         compute_bev_segmentation=False,
                         compute_route_reconstruction=False,
+                        **counterfactual_camera_kwargs,
                     )
                     if isinstance(zero_controls, tuple):
                         zero_controls = zero_controls[0]
@@ -1879,7 +1930,10 @@ def evaluate_reactive_multitask(
                             zero_eligible.sum().item()
                         )
 
-                    if batch_size > 1:
+                    if (
+                        include_route_swap_counterfactual
+                        and batch_size > 1
+                    ):
                         donor_indices = torch.roll(
                             torch.arange(batch_size, device=device),
                             shifts=1,
@@ -1898,18 +1952,11 @@ def evaluate_reactive_multitask(
                             route_mask=swapped_route,
                             map_valid=batch["map_valid"],
                             route_valid=swapped_valid,
-                            projection=projection,
-                            geometry_type=geometry_type,
-                            camera_history_tiles=camera_history_tiles,
-                            history_projections=history_projections,
-                            front_camera_tile=batch.get(
-                                "front_camera_tile"
-                            ),
-                            front_projection=front_projection,
                             mode="infer",
                             initial_noise=initial_noise,
                             compute_bev_segmentation=False,
                             compute_route_reconstruction=False,
+                            **counterfactual_camera_kwargs,
                         )
                         if isinstance(swap_controls, tuple):
                             swap_controls = swap_controls[0]

@@ -1403,6 +1403,106 @@ def test_route_changes_reconstruction_and_planner_output(
     assert not torch.equal(first_controls, second_controls)
 
 
+def test_route_counterfactual_reuses_image_bev_exactly(
+    build_mock_model,
+    device,
+):
+    model = _model(build_mock_model, device).eval()
+    values = _inputs(device)
+    batch_size = values["visual"].shape[0]
+    map_valid = torch.ones(
+        batch_size,
+        dtype=torch.bool,
+        device=device,
+    )
+    route_valid = torch.zeros_like(map_valid)
+    zero_route = torch.zeros_like(values["route"])
+
+    with torch.no_grad():
+        _, auxiliary = model(
+            values["visual"],
+            values["map"],
+            values["visual_history"],
+            values["egomotion"],
+            route_mask=values["route"],
+            map_valid=map_valid,
+            route_valid=torch.ones_like(map_valid),
+            mode="infer",
+            return_auxiliary=True,
+            return_image_bev=True,
+        )
+        full_counterfactual = model(
+            values["visual"],
+            values["map"],
+            values["visual_history"],
+            values["egomotion"],
+            route_mask=zero_route,
+            map_valid=map_valid,
+            route_valid=route_valid,
+            mode="infer",
+            compute_bev_segmentation=False,
+            compute_route_reconstruction=False,
+        )
+        reused_counterfactual = model(
+            values["visual"],
+            values["map"],
+            values["visual_history"],
+            values["egomotion"],
+            route_mask=zero_route,
+            map_valid=map_valid,
+            route_valid=route_valid,
+            mode="infer",
+            precomputed_image_bev=auxiliary[
+                "_evaluation_image_bev"
+            ],
+            compute_bev_segmentation=False,
+            compute_route_reconstruction=False,
+        )
+
+    torch.testing.assert_close(
+        reused_counterfactual,
+        full_counterfactual,
+    )
+
+
+def test_precomputed_image_bev_rejects_camera_arguments(
+    build_mock_model,
+    device,
+):
+    model = _model(build_mock_model, device).eval()
+    values = _inputs(device)
+
+    with torch.no_grad():
+        _, auxiliary = model(
+            values["visual"],
+            values["map"],
+            values["visual_history"],
+            values["egomotion"],
+            route_mask=values["route"],
+            mode="infer",
+            return_auxiliary=True,
+            return_image_bev=True,
+        )
+        with pytest.raises(
+            ValueError,
+            match="camera-argument-free inference",
+        ):
+            model(
+                values["visual"],
+                values["map"],
+                values["visual_history"],
+                values["egomotion"],
+                route_mask=values["route"],
+                camera_history_tiles=values["visual"].unsqueeze(1),
+                mode="infer",
+                precomputed_image_bev=auxiliary[
+                    "_evaluation_image_bev"
+                ],
+                compute_bev_segmentation=False,
+                compute_route_reconstruction=False,
+            )
+
+
 def test_stage_a_optimizer_smoke(build_mock_model, device):
     model = _model(build_mock_model, device).train()
     configure_model_for_stage(model, ReactiveTrainingStage.NUPLAN_FULL)
@@ -2538,11 +2638,13 @@ def test_multitask_evaluator_keeps_route_counterfactuals_without_gradient(
         stage=ReactiveTrainingStage.L2D_CONTINUATION,
         device=device,
         include_counterfactuals=True,
+        include_route_swap_counterfactual=False,
+        reuse_precomputed_image_bev=True,
         include_route_gradient=False,
     )
 
     assert report["route"]["route_zero_sample_count"] == 2
-    assert report["route"]["route_swap_sample_count"] == 2
+    assert report["route"]["route_swap_sample_count"] == 0
     assert report["route"]["route_input_gradient_mean_abs"] is None
 
 
@@ -2694,13 +2796,24 @@ def test_multitask_evaluator_advances_stateful_camera_cache(
         int(planner.num_timesteps) * int(planner.num_signals)
     )
 
+    backbone_calls = 0
+
+    def count_backbone_calls(_module, _inputs, _output):
+        nonlocal backbone_calls
+        backbone_calls += 1
+
+    hook = model.Reactive_E2E.Backbone.register_forward_hook(
+        count_backbone_calls
+    )
     cache = model.create_stateful_camera_fpn_cache()
     report = evaluate_reactive_multitask(
         model,
         batches,
         stage=ReactiveTrainingStage.KITSCENES_FINETUNE,
         device=device,
-        include_counterfactuals=False,
+        include_counterfactuals=True,
+        include_route_swap_counterfactual=False,
+        reuse_precomputed_image_bev=True,
         include_route_gradient=False,
         initial_noise_provider=lambda sample_uids, noise_device, noise_dtype: (
             torch.zeros(
@@ -2712,8 +2825,12 @@ def test_multitask_evaluator_advances_stateful_camera_cache(
         ),
         camera_fpn_cache=cache,
     )
+    hook.remove()
 
     assert report["sample_count"] == 10
+    assert report["route"]["route_zero_sample_count"] == 10
+    assert report["route"]["route_swap_sample_count"] == 0
+    assert backbone_calls == 13
     assert cache.stream_ids == tuple(
         f"scene-a:lane:{lane_index}"
         for lane_index in range(5)
