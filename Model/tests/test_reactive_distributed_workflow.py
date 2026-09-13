@@ -1822,6 +1822,49 @@ def test_kitscenes_official_val_sample_inventory_requires_exact_coverage(
             )
 
 
+@pytest.mark.parametrize("input_track", [None, "camera_map_route"])
+def test_kitscenes_val_manifest_accepts_reviewed_input_tracks(input_track):
+    distributed_training._validate_kitscenes_val_manifest_contract({
+        "has_map": True,
+        "has_navigation": True,
+        "has_reactive_navigation": True,
+        "has_route_reconstruction": True,
+        "has_trajectory_xy": True,
+        "input_track": input_track,
+    })
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("has_map", False),
+        ("has_navigation", False),
+        ("has_reactive_navigation", False),
+        ("has_route_reconstruction", False),
+        ("has_trajectory_xy", False),
+        ("input_track", "camera_only_missing_map_route"),
+    ],
+)
+def test_kitscenes_val_manifest_rejects_missing_map_route_contract(
+    field,
+    value,
+):
+    manifest = {
+        "has_map": True,
+        "has_navigation": True,
+        "has_reactive_navigation": True,
+        "has_route_reconstruction": True,
+        "has_trajectory_xy": True,
+        "input_track": "camera_map_route",
+    }
+    manifest[field] = value
+
+    with pytest.raises(ValueError, match="camera-map-route contract"):
+        distributed_training._validate_kitscenes_val_manifest_contract(
+            manifest
+        )
+
+
 def test_kitscenes_checkpoint_evaluator_routes_inventory_policy():
     source = inspect.getsource(
         distributed_training.evaluate_reactive_kitscenes_checkpoint
@@ -1831,10 +1874,7 @@ def test_kitscenes_checkpoint_evaluator_routes_inventory_policy():
     assert "_discover_kitscenes_evaluation_inventory(" in source
     assert "mapless_test=mapless_test" in source
     assert 'source_split in {"val", "test"}' in source
-    assert '"has_map": True' in source
-    assert '"has_navigation": True' in source
-    assert '"has_reactive_navigation": True' in source
-    assert '"has_route_reconstruction": True' in source
+    assert "_validate_kitscenes_val_manifest_contract(" in source
     assert "_kitscenes_test_scene_identity(" in source
     assert "_kitscenes_val_scene_identity(" in source
     assert "_validate_kitscenes_official_val_sdk_split(" in source

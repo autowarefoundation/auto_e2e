@@ -317,6 +317,31 @@ def _validate_kitscenes_official_val_sample_inventory(
         )
 
 
+def _validate_kitscenes_val_manifest_contract(
+    manifest: Mapping[str, Any],
+) -> None:
+    expected_flags = {
+        "has_map": True,
+        "has_navigation": True,
+        "has_reactive_navigation": True,
+        "has_route_reconstruction": True,
+        "has_trajectory_xy": True,
+    }
+    mismatches = {
+        key: manifest.get(key)
+        for key, expected in expected_flags.items()
+        if manifest.get(key) is not expected
+    }
+    input_track = manifest.get("input_track")
+    if input_track not in {None, "camera_map_route"}:
+        mismatches["input_track"] = input_track
+    if mismatches:
+        raise ValueError(
+            "KITScenes val manifest violates the camera-map-route "
+            f"contract: {mismatches}"
+        )
+
+
 def _resolve_nuplan_validation_sample_limit(
     config: Mapping[str, Any],
     requested_sample_limit: int,
@@ -3352,24 +3377,7 @@ def evaluate_reactive_kitscenes_checkpoint(
                     f"missing-map contract: {mismatches}"
                 )
         if source_split == "val" and total_samples > 0:
-            expected_val_contract = {
-                "has_map": True,
-                "has_navigation": True,
-                "has_reactive_navigation": True,
-                "has_route_reconstruction": True,
-                "has_trajectory_xy": True,
-                "input_track": "camera_map_route",
-            }
-            mismatches = {
-                key: manifest.get(key)
-                for key, expected in expected_val_contract.items()
-                if manifest.get(key) != expected
-            }
-            if mismatches:
-                raise ValueError(
-                    "KITScenes val manifest violates the camera-map-route "
-                    f"contract: {mismatches}"
-                )
+            _validate_kitscenes_val_manifest_contract(manifest)
         if mapless_test and total_samples == 0 and any(
             bool(manifest.get(field, False))
             for field in (
