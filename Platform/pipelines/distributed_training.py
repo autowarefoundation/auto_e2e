@@ -107,6 +107,7 @@ KITSCENES_OFFICIAL_VAL_SAMPLE_COUNT = 11_035
 KITSCENES_OFFICIAL_TEST_SAMPLE_COUNT = 23_690
 KITSCENES_OFFICIAL_VAL_DATASET_VERSION = "v3.5"
 KITSCENES_OFFICIAL_TEST_DATASET_VERSION = "v3.5-test-camera-only-v1"
+KITSCENES_PRIMARY_VAL_BATCH_SIZE = 1
 KITSCENES_STATEFUL_CAMERA_FPN_BATCH_SIZE = 5
 KITSCENES_STATEFUL_CAMERA_FPN_POLICY = (
     "stateful_camera_fpn_5lane_v1"
@@ -1361,6 +1362,11 @@ def _validate_kitscenes_publication_binding(
             "version"
         )
     metrics = report_payload.get("metrics")
+    evaluation_batch_size = report_payload.get("evaluation_batch_size")
+    has_integral_batch_size = (
+        isinstance(evaluation_batch_size, int)
+        and not isinstance(evaluation_batch_size, bool)
+    )
     if source_split == "val":
         valid = (
             evaluation_role == "official_val_camera_map_route"
@@ -1378,6 +1384,9 @@ def _validate_kitscenes_publication_binding(
             == KITSCENES_OFFICIAL_VAL_SCENE_UID_SHA256
             and report_payload.get("inference_cache_policy")
             == "stateless"
+            and has_integral_batch_size
+            and evaluation_batch_size
+            == KITSCENES_PRIMARY_VAL_BATCH_SIZE
             and report_payload.get("maximum_labeled_horizon_steps") == 50
             and isinstance(
                 report_payload.get("trajectory_inference_policy"),
@@ -1418,6 +1427,9 @@ def _validate_kitscenes_publication_binding(
             == KITSCENES_OFFICIAL_TEST_SCENE_UID_SHA256
             and report_payload.get("inference_cache_policy")
             == KITSCENES_STATEFUL_CAMERA_FPN_POLICY
+            and has_integral_batch_size
+            and evaluation_batch_size
+            == KITSCENES_STATEFUL_CAMERA_FPN_BATCH_SIZE
             and report_payload.get("maximum_labeled_horizon_steps") == 50
             and isinstance(
                 report_payload.get("trajectory_inference_policy"),
@@ -3262,6 +3274,10 @@ def evaluate_reactive_kitscenes_checkpoint(
         evaluate_reactive_multitask,
         inspect_reactive_checkpoint_identity,
     )
+    if not isinstance(batch_size, int) or isinstance(batch_size, bool):
+        raise ValueError(
+            "KITScenes evaluation batch size must be an integer"
+        )
     if source_split not in {"val", "overlap_train_val", "test"}:
         raise ValueError(
             "KITScenes labeled evaluation requires val, overlap_train_val, "
@@ -3300,6 +3316,15 @@ def evaluate_reactive_kitscenes_checkpoint(
     if source_split != "val" and expected_val_partition_count:
         raise ValueError(
             "expected_val_partition_count is only valid for val data"
+        )
+    if (
+        expected_val_partition_count
+        == KITSCENES_OFFICIAL_VAL_SCENE_COUNT
+        and batch_size != KITSCENES_PRIMARY_VAL_BATCH_SIZE
+    ):
+        raise ValueError(
+            "official KITScenes val evaluation requires batch size "
+            f"{KITSCENES_PRIMARY_VAL_BATCH_SIZE}"
         )
     if mapless_test and expected_val_partition_count:
         raise ValueError(
@@ -3665,6 +3690,7 @@ def evaluate_reactive_kitscenes_checkpoint(
             if use_stateful_camera_fpn_cache
             else "stateless"
         ),
+        "evaluation_batch_size": batch_size,
         "trajectory_inference_policy": {
             "planner": "gru",
             "stochastic_noise": False,
@@ -3806,6 +3832,13 @@ def aggregate_reactive_kitscenes_test_evaluations(
             or payload.get("maximum_labeled_horizon_steps") != 50
             or payload.get("inference_cache_policy")
             != KITSCENES_STATEFUL_CAMERA_FPN_POLICY
+            or not isinstance(
+                payload.get("evaluation_batch_size"),
+                int,
+            )
+            or isinstance(payload.get("evaluation_batch_size"), bool)
+            or payload["evaluation_batch_size"]
+            != KITSCENES_STATEFUL_CAMERA_FPN_BATCH_SIZE
             or not isinstance(
                 payload.get("trajectory_inference_policy"),
                 dict,
@@ -4064,6 +4097,9 @@ def aggregate_reactive_kitscenes_test_evaluations(
         ),
         "input_track": "camera_only_missing_map_route",
         "inference_cache_policy": KITSCENES_STATEFUL_CAMERA_FPN_POLICY,
+        "evaluation_batch_size": (
+            KITSCENES_STATEFUL_CAMERA_FPN_BATCH_SIZE
+        ),
         "manifest_identities": sorted(
             manifest_identities,
             key=lambda item: str(item["partition_id"]),
@@ -4241,6 +4277,9 @@ def publish_reactive_kitscenes_evaluation(
                 "evaluation_input_track": str(
                     report_payload["input_track"]
                 ),
+                "evaluation_batch_size": str(
+                    report_payload["evaluation_batch_size"]
+                ),
                 "evaluation_report_sha256": report_sha256,
                 "evaluation_role": str(
                     report_payload["evaluation_role"]
@@ -4257,6 +4296,7 @@ def publish_reactive_kitscenes_evaluation(
             "data/source_revision": report_payload["source_revision"],
             "data/source_split": split,
             "eval/evaluation_role": report_payload["evaluation_role"],
+            "eval/batch_size": report_payload["evaluation_batch_size"],
             "eval/expected_partition_count": report_payload.get(
                 "expected_partition_count",
                 0,
@@ -4386,6 +4426,9 @@ def publish_reactive_kitscenes_evaluation(
         f"{split_tag}_evaluation_input_track": (
             report_payload["input_track"]
         ),
+        f"{split_tag}_evaluation_batch_size": (
+            report_payload["evaluation_batch_size"]
+        ),
         f"{split_tag}_inference_cache_policy": (
             report_payload.get("inference_cache_policy", "")
         ),
@@ -4453,6 +4496,9 @@ def publish_reactive_kitscenes_evaluation(
             "primary_evaluation_split": split,
             "primary_evaluation_input_track": (
                 report_payload["input_track"]
+            ),
+            "primary_evaluation_batch_size": (
+                report_payload["evaluation_batch_size"]
             ),
             "primary_evaluation_report_sha256": report_sha256,
             "primary_evaluation_run_id": run_id,
@@ -4806,7 +4852,7 @@ def wf_evaluate_reactive_kitscenes_val(
         checkpoint=checkpoint,
         shards=evaluation_shards,
         source_split="val",
-        batch_size=1,
+        batch_size=KITSCENES_PRIMARY_VAL_BATCH_SIZE,
         num_loader_workers=4,
         expected_val_partition_count=KITSCENES_OFFICIAL_VAL_SCENE_COUNT,
     )

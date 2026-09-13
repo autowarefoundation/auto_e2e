@@ -733,6 +733,10 @@ def test_kitscenes_test_publication_requires_expected_model_version():
             distributed_training
             .KITSCENES_STATEFUL_CAMERA_FPN_POLICY
         ),
+        "evaluation_batch_size": (
+            distributed_training
+            .KITSCENES_STATEFUL_CAMERA_FPN_BATCH_SIZE
+        ),
         "maximum_labeled_horizon_steps": 50,
         "scene_uid_sha256": (
             distributed_training
@@ -781,6 +785,9 @@ def test_kitscenes_val_publication_requires_official_map_route_inventory():
         "expected_partition_count": 117,
         "expected_sample_count": 11_035,
         "inference_cache_policy": "stateless",
+        "evaluation_batch_size": (
+            distributed_training.KITSCENES_PRIMARY_VAL_BATCH_SIZE
+        ),
         "maximum_labeled_horizon_steps": 50,
         "scene_uid_sha256": (
             distributed_training
@@ -818,6 +825,71 @@ def test_kitscenes_val_publication_requires_official_map_route_inventory():
             {**official_report, "input_track": "camera_only"},
             expected_model_version="66",
         )
+    with pytest.raises(
+        ValueError,
+        match="exact official inventory",
+    ):
+        distributed_training._validate_kitscenes_publication_binding(
+            {**official_report, "evaluation_batch_size": 2},
+            expected_model_version="66",
+        )
+    for invalid_batch_size in (None, True, 1.0, "1"):
+        with pytest.raises(
+            ValueError,
+            match="exact official inventory",
+        ):
+            distributed_training._validate_kitscenes_publication_binding(
+                {
+                    **official_report,
+                    "evaluation_batch_size": invalid_batch_size,
+                },
+                expected_model_version="66",
+            )
+
+
+def test_kitscenes_test_publication_rejects_batch_size_drift():
+    official_report = {
+        "source_split": "test",
+        "dataset": distributed_training.KITSCENES_REPO_ID,
+        "dataset_version": (
+            distributed_training.KITSCENES_OFFICIAL_TEST_DATASET_VERSION
+        ),
+        "source_revision": distributed_training.KITSCENES_DATA_REVISION,
+        "evaluation_role": (
+            "official_test_camera_only_missing_map_route"
+        ),
+        "input_track": "camera_only_missing_map_route",
+        "partition_count": 206,
+        "expected_partition_count": 206,
+        "evaluation_batch_size": 1,
+        "inference_cache_policy": (
+            distributed_training
+            .KITSCENES_STATEFUL_CAMERA_FPN_POLICY
+        ),
+        "maximum_labeled_horizon_steps": 50,
+        "scene_uid_sha256": (
+            distributed_training
+            .KITSCENES_OFFICIAL_TEST_SCENE_UID_SHA256
+        ),
+        "trajectory_inference_policy": {
+            "planner": "gru",
+            "stochastic_noise": False,
+            "version": (
+                distributed_training
+                .KITSCENES_TRAJECTORY_INFERENCE_POLICY
+            ),
+        },
+        "metrics": {"sample_count": 23_690},
+    }
+
+    with pytest.raises(
+        ValueError,
+        match="exact official inventory",
+    ):
+        distributed_training._validate_kitscenes_publication_binding(
+            official_report,
+            expected_model_version="67",
+        )
 
 
 def test_kitscenes_generic_val_publication_is_not_an_official_binding():
@@ -844,6 +916,9 @@ def test_kitscenes_val_publication_rejects_trajectory_policy_drift():
         "expected_partition_count": 117,
         "expected_sample_count": 11_035,
         "inference_cache_policy": "stateless",
+        "evaluation_batch_size": (
+            distributed_training.KITSCENES_PRIMARY_VAL_BATCH_SIZE
+        ),
         "maximum_labeled_horizon_steps": 50,
         "scene_uid_sha256": (
             distributed_training
@@ -1400,7 +1475,11 @@ def test_kitscenes_val_workflow_enforces_primary_inventory():
     }
 
     assert bindings["source_split"].scalar.primitive.string_value == "val"
-    assert bindings["batch_size"].scalar.primitive.integer == 1
+    assert (
+        bindings["batch_size"].scalar.primitive.integer
+        == distributed_training.KITSCENES_PRIMARY_VAL_BATCH_SIZE
+        == 1
+    )
     assert (
         bindings["expected_val_partition_count"]
         .scalar.primitive.integer
@@ -1481,6 +1560,20 @@ def test_kitscenes_evaluation_rejects_batch_larger_than_four():
         )
 
 
+@pytest.mark.parametrize("batch_size", [True, 1.0])
+def test_kitscenes_evaluation_requires_integer_batch_size(batch_size):
+    with pytest.raises(
+        ValueError,
+        match="batch size must be an integer",
+    ):
+        distributed_training.evaluate_reactive_kitscenes_checkpoint.task_function(
+            checkpoint=FlyteFile("/tmp/missing-checkpoint.pt"),
+            shards=[FlyteDirectory("/tmp/missing-shard")],
+            source_split="test",
+            batch_size=batch_size,
+        )
+
+
 def test_kitscenes_evaluation_accepts_batch_four():
     with pytest.raises(
         ValueError,
@@ -1505,6 +1598,22 @@ def test_kitscenes_stateful_evaluation_rejects_batch_four():
             source_split="test",
             batch_size=4,
             use_stateful_camera_fpn_cache=True,
+        )
+
+
+def test_kitscenes_official_val_rejects_batch_drift_before_download():
+    with pytest.raises(
+        ValueError,
+        match="official KITScenes val evaluation requires batch size 1",
+    ):
+        distributed_training.evaluate_reactive_kitscenes_checkpoint.task_function(
+            checkpoint=FlyteFile("/tmp/missing-checkpoint.pt"),
+            shards=[FlyteDirectory("/tmp/missing-shard")],
+            source_split="val",
+            batch_size=2,
+            expected_val_partition_count=(
+                distributed_training.KITSCENES_OFFICIAL_VAL_SCENE_COUNT
+            ),
         )
 
 
@@ -1932,6 +2041,10 @@ def test_kitscenes_test_partition_aggregation_is_exact(tmp_path):
                 distributed_training
                 .KITSCENES_STATEFUL_CAMERA_FPN_POLICY
             ),
+            "evaluation_batch_size": (
+                distributed_training
+                .KITSCENES_STATEFUL_CAMERA_FPN_BATCH_SIZE
+            ),
             "input_track": "camera_only_missing_map_route",
             "manifest_identities": [{
                 "manifest_sha256": (
@@ -2001,6 +2114,9 @@ def test_kitscenes_test_partition_aggregation_is_exact(tmp_path):
     assert report["expected_partition_count"] == 3
     assert report["inference_cache_policy"] == (
         distributed_training.KITSCENES_STATEFUL_CAMERA_FPN_POLICY
+    )
+    assert report["evaluation_batch_size"] == (
+        distributed_training.KITSCENES_STATEFUL_CAMERA_FPN_BATCH_SIZE
     )
     assert report["trajectory_inference_policy"]["version"] == (
         distributed_training.KITSCENES_TRAJECTORY_INFERENCE_POLICY
