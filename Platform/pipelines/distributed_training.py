@@ -10,7 +10,7 @@ import re
 import time
 from datetime import timedelta
 from pathlib import Path
-from typing import Any, List, Mapping, NamedTuple, Optional
+from typing import TYPE_CHECKING, Any, List, Mapping, NamedTuple, Optional
 from urllib.parse import urlparse
 
 from flytekit import (
@@ -49,6 +49,9 @@ from data_parsing.kit_scenes.source import (
     KITSCENES_STANDARD_TEST_SCENE_COUNT,
     KITSCENES_STANDARD_TEST_SCENE_UID_SHA256,
 )
+
+if TYPE_CHECKING:
+    from data_parsing.pre_extracted import PackedSplitInventory
 
 TRAINING_IMAGE = os.environ.get(
     "AUTO_E2E_TRAINING_IMAGE",
@@ -91,6 +94,30 @@ KITSCENES_OFFICIAL_TEST_SCENE_COUNT = (
 KITSCENES_OFFICIAL_TEST_SCENE_UID_SHA256 = (
     KITSCENES_STANDARD_TEST_SCENE_UID_SHA256
 )
+
+
+def _discover_kitscenes_evaluation_inventory(
+    shard_directories: list[str],
+    *,
+    mapless_test: bool,
+) -> PackedSplitInventory:
+    from data_parsing.pre_extracted import discover_split_inventory
+
+    return discover_split_inventory(
+        shard_directories,
+        allow_single_group=mapless_test,
+    )
+
+
+def _validate_kitscenes_test_inventory_groups(
+    inventory_group_uids: tuple[str, ...],
+    manifest_group_uids: list[str],
+) -> None:
+    expected_group_uids = tuple(sorted(manifest_group_uids))
+    if inventory_group_uids != expected_group_uids:
+        raise ValueError(
+            "KITScenes test packed scene identities differ from manifests"
+        )
 
 
 def _resolve_nuplan_validation_sample_limit(
@@ -2908,10 +2935,7 @@ def evaluate_reactive_kitscenes_checkpoint(
 
     import torch
 
-    from data_parsing.pre_extracted import (
-        discover_split_inventory,
-        make_multi_dataset_loader,
-    )
+    from data_parsing.pre_extracted import make_multi_dataset_loader
     from data_parsing.kit_scenes.temporal_contract import (
         KITSCENES_BENCHMARK_FUTURE_STEPS,
         kitscenes_temporal_contract,
@@ -2955,6 +2979,7 @@ def evaluate_reactive_kitscenes_checkpoint(
     dataset_names: set[str] = set()
     dataset_versions: set[str] = set()
     source_revisions: set[str] = set()
+    test_manifest_group_uids: list[str] = []
     expected_sample_count = 0
     for shard in shards:
         directory = Path(shard.download())
@@ -3030,6 +3055,8 @@ def evaluate_reactive_kitscenes_checkpoint(
             raise ValueError(
                 "KITScenes test partition lacks one scene identity"
             )
+        if mapless_test and total_samples > 0:
+            test_manifest_group_uids.append(split_group_uids[0])
         manifest_identities.append({
             "manifest_sha256": hashlib.sha256(
                 manifest_bytes
@@ -3051,7 +3078,10 @@ def evaluate_reactive_kitscenes_checkpoint(
         )
 
     inventory = (
-        discover_split_inventory(shard_directories)
+        _discover_kitscenes_evaluation_inventory(
+            shard_directories,
+            mapless_test=mapless_test,
+        )
         if shard_directories
         else None
     )
@@ -3064,6 +3094,11 @@ def evaluate_reactive_kitscenes_checkpoint(
         )
     if inventory is None and (not mapless_test or expected_sample_count != 0):
         raise ValueError("KITScenes evaluation has no non-empty shards")
+    if inventory is not None and mapless_test:
+        _validate_kitscenes_test_inventory_groups(
+            inventory.group_uids,
+            test_manifest_group_uids,
+        )
 
     checkpoint_path = Path(checkpoint.download())
     checkpoint_identity = inspect_reactive_checkpoint_identity(

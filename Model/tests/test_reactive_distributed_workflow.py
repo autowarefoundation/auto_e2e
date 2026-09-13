@@ -1276,6 +1276,70 @@ def test_kitscenes_test_sharded_workflow_enforces_official_inventory():
     )
 
 
+@pytest.mark.parametrize(
+    ("mapless_test", "expected_allow_single_group"),
+    [(True, True), (False, False)],
+)
+def test_kitscenes_evaluation_inventory_group_policy(
+    monkeypatch,
+    mapless_test,
+    expected_allow_single_group,
+):
+    from data_parsing import pre_extracted
+
+    calls = []
+    expected = object()
+
+    def fake_discover(shard_directories, *, allow_single_group=False):
+        calls.append((shard_directories, allow_single_group))
+        return expected
+
+    monkeypatch.setattr(
+        pre_extracted,
+        "discover_split_inventory",
+        fake_discover,
+    )
+
+    result = (
+        distributed_training._discover_kitscenes_evaluation_inventory(
+            ["/tmp/test-scene"],
+            mapless_test=mapless_test,
+        )
+    )
+
+    assert result is expected
+    assert calls == [
+        (["/tmp/test-scene"], expected_allow_single_group)
+    ]
+
+
+def test_kitscenes_test_inventory_must_match_manifest_scene():
+    distributed_training._validate_kitscenes_test_inventory_groups(
+        ("kitscenes-scene-a",),
+        ["kitscenes-scene-a"],
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="packed scene identities differ",
+    ):
+        distributed_training._validate_kitscenes_test_inventory_groups(
+            ("kitscenes-scene-b",),
+            ["kitscenes-scene-a"],
+        )
+
+
+def test_kitscenes_checkpoint_evaluator_routes_inventory_policy():
+    source = inspect.getsource(
+        distributed_training.evaluate_reactive_kitscenes_checkpoint
+        .task_function
+    )
+
+    assert "_discover_kitscenes_evaluation_inventory(" in source
+    assert "mapless_test=mapless_test" in source
+    assert "if mapless_test and total_samples > 0:" in source
+
+
 def test_kitscenes_test_partition_aggregation_is_exact(tmp_path):
     checkpoint_sha256 = "a" * 64
     report_paths = []
