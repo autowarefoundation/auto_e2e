@@ -715,23 +715,56 @@ def test_reactive_policy_evaluation_enforces_expected_model_version():
 
 
 def test_kitscenes_test_publication_requires_expected_model_version():
+    official_report = {
+        "source_split": "test",
+        "evaluation_role": (
+            "official_test_camera_only_missing_map_route"
+        ),
+        "partition_count": 206,
+        "expected_partition_count": 206,
+        "scene_uid_sha256": (
+            distributed_training
+            .KITSCENES_OFFICIAL_TEST_SCENE_UID_SHA256
+        ),
+        "metrics": {"sample_count": 23_690},
+    }
     with pytest.raises(
         ValueError,
         match="requires an existing model version",
     ):
         distributed_training._validate_kitscenes_publication_binding(
-            {"source_split": "test"},
+            official_report,
             expected_model_version="",
         )
 
     distributed_training._validate_kitscenes_publication_binding(
-        {"source_split": "test"},
+        official_report,
         expected_model_version="67",
     )
     distributed_training._validate_kitscenes_publication_binding(
         {"source_split": "val"},
         expected_model_version="",
     )
+
+
+def test_kitscenes_test_publication_rejects_subset_inventory():
+    with pytest.raises(
+        ValueError,
+        match="exact official inventory",
+    ):
+        distributed_training._validate_kitscenes_publication_binding(
+            {
+                "source_split": "test",
+                "evaluation_role": (
+                    "test_subset_camera_only_missing_map_route"
+                ),
+                "partition_count": 1,
+                "expected_partition_count": 0,
+                "scene_uid_sha256": "a" * 64,
+                "metrics": {"sample_count": 410},
+            },
+            expected_model_version="67",
+        )
 
 
 def test_reviewed_ray_topologies_have_fixed_worker_groups():
@@ -1246,15 +1279,14 @@ def test_kitscenes_test_sharded_workflow_enforces_official_inventory():
     }
 
     assert evaluator.flyte_entity is (
-        distributed_training.evaluate_reactive_kitscenes_test_partitions
+        distributed_training.evaluate_reactive_kitscenes_checkpoint
     )
     assert (
-        distributed_training.evaluate_reactive_kitscenes_test_partitions
-        .environment["AUTO_E2E_TRAINING_IMAGE"]
-        == distributed_training.TRAINING_IMAGE
+        bindings["source_split"].scalar.primitive.string_value
+        == "test"
     )
     assert (
-        bindings["expected_partition_count"]
+        bindings["expected_test_partition_count"]
         .scalar.primitive.integer
         == 206
     )
@@ -1329,6 +1361,109 @@ def test_kitscenes_test_inventory_must_match_manifest_scene():
         )
 
 
+def test_kitscenes_test_scene_identity_distinguishes_subset():
+    digest, is_official = (
+        distributed_training._kitscenes_test_scene_identity(
+            ["kitscenes-scene-a"],
+            expected_partition_count=0,
+        )
+    )
+
+    assert digest == hashlib.sha256(
+        b"kitscenes-scene-a"
+    ).hexdigest()
+    assert not is_official
+
+
+def test_kitscenes_test_scene_identity_accepts_official_set(monkeypatch):
+    scene_uids = ["kitscenes-scene-a", "kitscenes-scene-b"]
+    digest = hashlib.sha256(
+        "\n".join(scene_uids).encode()
+    ).hexdigest()
+    monkeypatch.setattr(
+        distributed_training,
+        "KITSCENES_OFFICIAL_TEST_SCENE_COUNT",
+        2,
+    )
+    monkeypatch.setattr(
+        distributed_training,
+        "KITSCENES_OFFICIAL_TEST_SCENE_UID_SHA256",
+        digest,
+    )
+
+    actual_digest, is_official = (
+        distributed_training._kitscenes_test_scene_identity(
+            list(reversed(scene_uids)),
+            expected_partition_count=2,
+        )
+    )
+
+    assert actual_digest == digest
+    assert is_official
+
+
+def test_kitscenes_test_scene_identity_rejects_partial_official_set():
+    with pytest.raises(
+        ValueError,
+        match="does not cover the expected 206 partitions",
+    ):
+        distributed_training._kitscenes_test_scene_identity(
+            ["kitscenes-scene-a"],
+            expected_partition_count=206,
+        )
+
+
+def test_kitscenes_test_scene_identity_rejects_duplicate_scenes():
+    with pytest.raises(
+        ValueError,
+        match="duplicate scene identities",
+    ):
+        distributed_training._kitscenes_test_scene_identity(
+            ["kitscenes-scene-a", "kitscenes-scene-a"],
+            expected_partition_count=0,
+        )
+
+
+def test_kitscenes_official_sample_inventory_requires_exact_coverage(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        distributed_training,
+        "KITSCENES_OFFICIAL_TEST_SCENE_COUNT",
+        2,
+    )
+    monkeypatch.setattr(
+        distributed_training,
+        "KITSCENES_OFFICIAL_TEST_SAMPLE_COUNT",
+        5,
+    )
+
+    distributed_training._validate_kitscenes_official_sample_inventory(
+        expected_partition_count=2,
+        empty_partition_count=0,
+        manifest_sample_count=5,
+        inventory_sample_count=5,
+    )
+    for values in (
+        (1, 5, 5),
+        (0, 4, 4),
+        (0, 5, None),
+    ):
+        with pytest.raises(
+            ValueError,
+            match="sample inventory differs",
+        ):
+            (
+                distributed_training
+                ._validate_kitscenes_official_sample_inventory(
+                    expected_partition_count=2,
+                    empty_partition_count=values[0],
+                    manifest_sample_count=values[1],
+                    inventory_sample_count=values[2],
+                )
+            )
+
+
 def test_kitscenes_checkpoint_evaluator_routes_inventory_policy():
     source = inspect.getsource(
         distributed_training.evaluate_reactive_kitscenes_checkpoint
@@ -1338,6 +1473,7 @@ def test_kitscenes_checkpoint_evaluator_routes_inventory_policy():
     assert "_discover_kitscenes_evaluation_inventory(" in source
     assert "mapless_test=mapless_test" in source
     assert "if mapless_test and total_samples > 0:" in source
+    assert "_kitscenes_test_scene_identity(" in source
 
 
 def test_kitscenes_test_partition_aggregation_is_exact(tmp_path):
@@ -1396,7 +1532,7 @@ def test_kitscenes_test_partition_aggregation_is_exact(tmp_path):
             "dataset": "kitscenes",
             "dataset_version": "v3.5-test-camera-only-v1",
             "evaluation_role": (
-                "official_test_camera_only_missing_map_route"
+                "test_subset_camera_only_missing_map_route"
             ),
             "input_track": "camera_only_missing_map_route",
             "manifest_identities": [{
