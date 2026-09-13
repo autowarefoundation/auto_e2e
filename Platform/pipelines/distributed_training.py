@@ -115,6 +115,12 @@ KITSCENES_STATEFUL_CAMERA_FPN_POLICY = (
 KITSCENES_TRAJECTORY_INFERENCE_POLICY = (
     "deterministic_gru_no_noise_v1"
 )
+KITSCENES_PRIMARY_VAL_ROUTE_USAGE_POLICY = (
+    "route_zero_counterfactual_no_grad_v1"
+)
+KITSCENES_CAMERA_ONLY_ROUTE_USAGE_POLICY = (
+    "not_applicable_camera_only_v1"
+)
 
 
 def _sha256_file(path: Path) -> str:
@@ -123,6 +129,21 @@ def _sha256_file(path: Path) -> str:
         for chunk in iter(lambda: stream.read(8 * 1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _kitscenes_route_usage_evaluation_policy(
+    *,
+    mapless_test: bool,
+) -> dict[str, object]:
+    return {
+        "counterfactuals_enabled": not mapless_test,
+        "input_gradient_enabled": False,
+        "version": (
+            KITSCENES_CAMERA_ONLY_ROUTE_USAGE_POLICY
+            if mapless_test
+            else KITSCENES_PRIMARY_VAL_ROUTE_USAGE_POLICY
+        ),
+    }
 
 
 def _discover_kitscenes_evaluation_inventory(
@@ -1362,6 +1383,11 @@ def _validate_kitscenes_publication_binding(
             "version"
         )
     metrics = report_payload.get("metrics")
+    route_metrics = (
+        metrics.get("route")
+        if isinstance(metrics, dict)
+        else None
+    )
     evaluation_batch_size = report_payload.get("evaluation_batch_size")
     has_integral_batch_size = (
         isinstance(evaluation_batch_size, int)
@@ -1400,6 +1426,10 @@ def _validate_kitscenes_publication_binding(
                 "stochastic_noise"
             )
             is False
+            and report_payload.get("route_usage_evaluation_policy")
+            == _kitscenes_route_usage_evaluation_policy(
+                mapless_test=False,
+            )
             and isinstance(metrics, dict)
             and isinstance(metrics.get("sample_count"), int)
             and not isinstance(metrics.get("sample_count"), bool)
@@ -1407,6 +1437,31 @@ def _validate_kitscenes_publication_binding(
             == KITSCENES_OFFICIAL_VAL_SAMPLE_COUNT
             and report_payload.get("expected_sample_count")
             == KITSCENES_OFFICIAL_VAL_SAMPLE_COUNT
+            and isinstance(route_metrics, dict)
+            and route_metrics.get("route_input_gradient_mean_abs") is None
+            and isinstance(
+                route_metrics.get("route_zero_sample_count"),
+                int,
+            )
+            and not isinstance(
+                route_metrics.get("route_zero_sample_count"),
+                bool,
+            )
+            and route_metrics["route_zero_sample_count"]
+            == KITSCENES_OFFICIAL_VAL_SAMPLE_COUNT
+            and isinstance(
+                route_metrics.get("route_zero_trajectory_delta_m"),
+                (int, float),
+            )
+            and not isinstance(
+                route_metrics.get("route_zero_trajectory_delta_m"),
+                bool,
+            )
+            and math.isfinite(
+                float(
+                    route_metrics["route_zero_trajectory_delta_m"]
+                )
+            )
         )
     else:
         valid = (
@@ -1443,6 +1498,10 @@ def _validate_kitscenes_publication_binding(
                 "stochastic_noise"
             )
             is False
+            and report_payload.get("route_usage_evaluation_policy")
+            == _kitscenes_route_usage_evaluation_policy(
+                mapless_test=True,
+            )
             and isinstance(metrics, dict)
             and metrics.get("sample_count")
             == KITSCENES_OFFICIAL_TEST_SAMPLE_COUNT
@@ -3571,6 +3630,11 @@ def evaluate_reactive_kitscenes_checkpoint(
         raise ValueError(
             "checkpoint is not a reviewed KITScenes fine-tuning checkpoint"
         )
+    route_usage_evaluation_policy = (
+        _kitscenes_route_usage_evaluation_policy(
+            mapless_test=mapless_test,
+        )
+    )
     if inventory is None:
         trajectory_metrics: dict[str, float | int | None] = {
             "valid_timestep_count": 0,
@@ -3646,8 +3710,16 @@ def evaluate_reactive_kitscenes_checkpoint(
             loader,
             stage=stage,
             device=device,
-            include_counterfactuals=not mapless_test,
-            include_route_gradient=not mapless_test,
+            include_counterfactuals=bool(
+                route_usage_evaluation_policy[
+                    "counterfactuals_enabled"
+                ]
+            ),
+            include_route_gradient=bool(
+                route_usage_evaluation_policy[
+                    "input_gradient_enabled"
+                ]
+            ),
             camera_fpn_cache=camera_fpn_cache,
         )
     trajectory_metrics = metrics.get("trajectory")
@@ -3696,6 +3768,9 @@ def evaluate_reactive_kitscenes_checkpoint(
             "stochastic_noise": False,
             "version": KITSCENES_TRAJECTORY_INFERENCE_POLICY,
         },
+        "route_usage_evaluation_policy": (
+            route_usage_evaluation_policy
+        ),
         "maximum_labeled_horizon_steps": (
             KITSCENES_BENCHMARK_FUTURE_STEPS
         ),
@@ -3851,6 +3926,10 @@ def aggregate_reactive_kitscenes_test_evaluations(
                 "stochastic_noise"
             )
             is not False
+            or payload.get("route_usage_evaluation_policy")
+            != _kitscenes_route_usage_evaluation_policy(
+                mapless_test=True,
+            )
             or payload.get("checkpoint_sha256")
             != checkpoint_sha256s[0]
             or payload.get("checkpoint_epoch") != checkpoint_epochs[0]
@@ -4115,6 +4194,11 @@ def aggregate_reactive_kitscenes_test_evaluations(
         "trajectory_inference_policy": json.loads(
             next(iter(inference_policy_identities))
         ),
+        "route_usage_evaluation_policy": (
+            _kitscenes_route_usage_evaluation_policy(
+                mapless_test=True,
+            )
+        ),
     }
     report_bytes = (
         json.dumps(
@@ -4248,6 +4332,11 @@ def publish_reactive_kitscenes_evaluation(
             "multiple MLflow runs use one KITScenes evaluation key"
         )
     split = str(report_payload["source_split"])
+    route_usage_policy = report_payload.get(
+        "route_usage_evaluation_policy"
+    )
+    if not isinstance(route_usage_policy, dict):
+        route_usage_policy = {}
     evaluation_priority = (
         "primary"
         if report_payload.get("evaluation_role")
@@ -4283,6 +4372,9 @@ def publish_reactive_kitscenes_evaluation(
                 "evaluation_report_sha256": report_sha256,
                 "evaluation_role": str(
                     report_payload["evaluation_role"]
+                ),
+                "route_usage_evaluation_policy": str(
+                    route_usage_policy.get("version", "")
                 ),
                 "evaluation_split": split,
                 "evaluation_priority": evaluation_priority,
@@ -4346,6 +4438,15 @@ def publish_reactive_kitscenes_evaluation(
                 )
                 else ""
             ),
+            "eval/route_usage_evaluation_policy": (
+                route_usage_policy.get("version", "")
+            ),
+            "eval/route_counterfactuals_enabled": (
+                route_usage_policy.get("counterfactuals_enabled", "")
+            ),
+            "eval/route_input_gradient_enabled": (
+                route_usage_policy.get("input_gradient_enabled", "")
+            ),
             "model/checkpoint_epoch": checkpoint_epoch,
             "model/checkpoint_sha256": checkpoint_sha256,
         }.items():
@@ -4373,6 +4474,18 @@ def publish_reactive_kitscenes_evaluation(
     numeric_metrics[f"{split}/sample_count"] = float(
         metrics_payload["sample_count"]
     )
+    route = metrics_payload.get("route")
+    if isinstance(route, dict):
+        numeric_metrics.update({
+            f"{split}/route/{name}": float(value)
+            for name, value in route.items()
+            if (
+                value is not None
+                and not isinstance(value, bool)
+                and isinstance(value, (int, float))
+                and math.isfinite(float(value))
+            )
+        })
     client.log_batch(
         run_id,
         metrics=[
@@ -4416,6 +4529,19 @@ def publish_reactive_kitscenes_evaluation(
             "ade_5s_m",
             "fde_5s_m",
             "nonfinite_prediction_rate",
+        }
+        and value is not None
+    }
+    route_tags = {
+        name: value
+        for name, value in (
+            route.items() if isinstance(route, dict) else ()
+        )
+        if name in {
+            "route_zero_trajectory_delta_m",
+            "route_zero_sample_count",
+            "route_swap_trajectory_delta_m",
+            "route_swap_sample_count",
         }
         and value is not None
     }
@@ -4486,9 +4612,22 @@ def publish_reactive_kitscenes_evaluation(
             )
             else ""
         ),
+        f"{split_tag}_route_usage_evaluation_policy": (
+            route_usage_policy.get("version", "")
+        ),
+        f"{split_tag}_route_counterfactuals_enabled": (
+            route_usage_policy.get("counterfactuals_enabled", "")
+        ),
+        f"{split_tag}_route_input_gradient_enabled": (
+            route_usage_policy.get("input_gradient_enabled", "")
+        ),
         **{
             f"{split_tag}_{name}": value
             for name, value in trajectory_tags.items()
+        },
+        **{
+            f"{split_tag}_{name}": value
+            for name, value in route_tags.items()
         },
     }
     if evaluation_priority == "primary":
@@ -4505,9 +4644,16 @@ def publish_reactive_kitscenes_evaluation(
             "primary_evaluation_sample_count": (
                 metrics_payload["sample_count"]
             ),
+            "primary_route_usage_evaluation_policy": (
+                route_usage_policy.get("version", "")
+            ),
             **{
                 f"primary_{name}": value
                 for name, value in trajectory_tags.items()
+            },
+            **{
+                f"primary_{name}": value
+                for name, value in route_tags.items()
             },
         })
     for name, value in version_tags.items():

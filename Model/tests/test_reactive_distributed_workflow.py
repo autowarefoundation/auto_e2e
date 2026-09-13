@@ -750,6 +750,12 @@ def test_kitscenes_test_publication_requires_expected_model_version():
                 .KITSCENES_TRAJECTORY_INFERENCE_POLICY
             ),
         },
+        "route_usage_evaluation_policy": (
+            distributed_training
+            ._kitscenes_route_usage_evaluation_policy(
+                mapless_test=True,
+            )
+        ),
         "metrics": {"sample_count": 23_690},
     }
     with pytest.raises(
@@ -765,9 +771,56 @@ def test_kitscenes_test_publication_requires_expected_model_version():
         official_report,
         expected_model_version="67",
     )
+    with pytest.raises(
+        ValueError,
+        match="exact official inventory",
+    ):
+        distributed_training._validate_kitscenes_publication_binding(
+            {
+                **official_report,
+                "route_usage_evaluation_policy": (
+                    distributed_training
+                    ._kitscenes_route_usage_evaluation_policy(
+                        mapless_test=False,
+                    )
+                ),
+            },
+            expected_model_version="67",
+        )
     distributed_training._validate_kitscenes_publication_binding(
         {"source_split": "overlap_train_val"},
         expected_model_version="",
+    )
+
+
+def test_kitscenes_route_usage_policies_are_exact():
+    assert (
+        distributed_training
+        ._kitscenes_route_usage_evaluation_policy(
+            mapless_test=False,
+        )
+        == {
+            "counterfactuals_enabled": True,
+            "input_gradient_enabled": False,
+            "version": (
+                distributed_training
+                .KITSCENES_PRIMARY_VAL_ROUTE_USAGE_POLICY
+            ),
+        }
+    )
+    assert (
+        distributed_training
+        ._kitscenes_route_usage_evaluation_policy(
+            mapless_test=True,
+        )
+        == {
+            "counterfactuals_enabled": False,
+            "input_gradient_enabled": False,
+            "version": (
+                distributed_training
+                .KITSCENES_CAMERA_ONLY_ROUTE_USAGE_POLICY
+            ),
+        }
     )
 
 
@@ -801,7 +854,20 @@ def test_kitscenes_val_publication_requires_official_map_route_inventory():
                 .KITSCENES_TRAJECTORY_INFERENCE_POLICY
             ),
         },
-        "metrics": {"sample_count": 11_035},
+        "route_usage_evaluation_policy": (
+            distributed_training
+            ._kitscenes_route_usage_evaluation_policy(
+                mapless_test=False,
+            )
+        ),
+        "metrics": {
+            "sample_count": 11_035,
+            "route": {
+                "route_input_gradient_mean_abs": None,
+                "route_zero_sample_count": 11_035,
+                "route_zero_trajectory_delta_m": 0.25,
+            },
+        },
     }
 
     with pytest.raises(
@@ -830,7 +896,40 @@ def test_kitscenes_val_publication_requires_official_map_route_inventory():
         match="exact official inventory",
     ):
         distributed_training._validate_kitscenes_publication_binding(
+            {
+                **official_report,
+                "metrics": {
+                    **official_report["metrics"],
+                    "route": {
+                        "route_input_gradient_mean_abs": None,
+                        "route_zero_sample_count": 0,
+                        "route_zero_trajectory_delta_m": None,
+                    },
+                },
+            },
+            expected_model_version="66",
+        )
+    with pytest.raises(
+        ValueError,
+        match="exact official inventory",
+    ):
+        distributed_training._validate_kitscenes_publication_binding(
             {**official_report, "evaluation_batch_size": 2},
+            expected_model_version="66",
+        )
+    with pytest.raises(
+        ValueError,
+        match="exact official inventory",
+    ):
+        distributed_training._validate_kitscenes_publication_binding(
+            {
+                **official_report,
+                "route_usage_evaluation_policy": {
+                    "counterfactuals_enabled": True,
+                    "input_gradient_enabled": True,
+                    "version": "full_input_gradient_v1",
+                },
+            },
             expected_model_version="66",
         )
     for invalid_batch_size in (None, True, 1.0, "1"):
@@ -879,6 +978,12 @@ def test_kitscenes_test_publication_rejects_batch_size_drift():
                 .KITSCENES_TRAJECTORY_INFERENCE_POLICY
             ),
         },
+        "route_usage_evaluation_policy": (
+            distributed_training
+            ._kitscenes_route_usage_evaluation_policy(
+                mapless_test=True,
+            )
+        ),
         "metrics": {"sample_count": 23_690},
     }
 
@@ -932,7 +1037,20 @@ def test_kitscenes_val_publication_rejects_trajectory_policy_drift():
                 .KITSCENES_TRAJECTORY_INFERENCE_POLICY
             ),
         },
-        "metrics": {"sample_count": 11_035},
+        "route_usage_evaluation_policy": (
+            distributed_training
+            ._kitscenes_route_usage_evaluation_policy(
+                mapless_test=False,
+            )
+        ),
+        "metrics": {
+            "sample_count": 11_035,
+            "route": {
+                "route_input_gradient_mean_abs": None,
+                "route_zero_sample_count": 11_035,
+                "route_zero_trajectory_delta_m": 0.25,
+            },
+        },
     }
 
     with pytest.raises(
@@ -1977,6 +2095,10 @@ def test_kitscenes_checkpoint_evaluator_routes_inventory_policy():
     assert "_kitscenes_test_scene_identity(" in source
     assert "_kitscenes_val_scene_identity(" in source
     assert "_validate_kitscenes_official_val_sdk_split(" in source
+    assert '"counterfactuals_enabled"' in source
+    assert '"input_gradient_enabled"' in source
+    assert "include_counterfactuals=bool(" in source
+    assert "include_route_gradient=bool(" in source
 
 
 def test_kitscenes_test_partition_aggregation_is_exact(tmp_path):
@@ -2082,6 +2204,12 @@ def test_kitscenes_test_partition_aggregation_is_exact(tmp_path):
                     .KITSCENES_TRAJECTORY_INFERENCE_POLICY
                 ),
             },
+            "route_usage_evaluation_policy": (
+                distributed_training
+                ._kitscenes_route_usage_evaluation_policy(
+                    mapless_test=True,
+                )
+            ),
         }
         report_path = tmp_path / f"{partition_id}.json"
         report_bytes = (
@@ -2121,6 +2249,12 @@ def test_kitscenes_test_partition_aggregation_is_exact(tmp_path):
     assert report["trajectory_inference_policy"]["version"] == (
         distributed_training.KITSCENES_TRAJECTORY_INFERENCE_POLICY
     )
+    assert report["route_usage_evaluation_policy"] == (
+        distributed_training
+        ._kitscenes_route_usage_evaluation_policy(
+            mapless_test=True,
+        )
+    )
     assert (
         report["evaluation_role"]
         == "test_subset_camera_only_missing_map_route"
@@ -2144,6 +2278,37 @@ def test_kitscenes_test_partition_aggregation_is_exact(tmp_path):
     )
     assert trajectory["ade_6p4s_m"] is None
     assert trajectory["ade_6p4s_sample_count"] == 0
+
+    drifted_report_path = Path(report_paths[0].path)
+    drifted_payload = json.loads(drifted_report_path.read_text())
+    drifted_payload["route_usage_evaluation_policy"] = (
+        distributed_training
+        ._kitscenes_route_usage_evaluation_policy(
+            mapless_test=False,
+        )
+    )
+    drifted_bytes = (
+        json.dumps(drifted_payload, sort_keys=True) + "\n"
+    ).encode("ascii")
+    drifted_report_path.write_bytes(drifted_bytes)
+    with pytest.raises(
+        ValueError,
+        match="partition report identity differs",
+    ):
+        (
+            distributed_training
+            .aggregate_reactive_kitscenes_test_evaluations
+            .task_function(
+                reports=report_paths,
+                report_sha256s=[
+                    hashlib.sha256(drifted_bytes).hexdigest(),
+                    *report_sha256s[1:],
+                ],
+                checkpoint_sha256s=[checkpoint_sha256] * 3,
+                checkpoint_epochs=[5, 5, 5],
+                expected_partition_count=3,
+            )
+        )
 
 
 def test_kitscenes_test_partition_aggregation_rejects_partial_inventory(

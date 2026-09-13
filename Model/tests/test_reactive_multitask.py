@@ -2521,6 +2521,31 @@ def test_multitask_evaluator_reports_partial_horizons_and_route_use(
     assert report["route"]["route_input_gradient_mean_abs"] > 0.0
 
 
+def test_multitask_evaluator_keeps_route_counterfactuals_without_gradient(
+    build_mock_model,
+    device,
+):
+    model = _model(build_mock_model, device).eval()
+    batch = _stage_batch(
+        device,
+        include_bev=True,
+        batch_size=2,
+    )
+
+    report = evaluate_reactive_multitask(
+        model,
+        [batch],
+        stage=ReactiveTrainingStage.L2D_CONTINUATION,
+        device=device,
+        include_counterfactuals=True,
+        include_route_gradient=False,
+    )
+
+    assert report["route"]["route_zero_sample_count"] == 2
+    assert report["route"]["route_swap_sample_count"] == 2
+    assert report["route"]["route_input_gradient_mean_abs"] is None
+
+
 def test_multitask_evaluator_uses_per_sample_initial_noise(
     build_mock_model,
     device,
