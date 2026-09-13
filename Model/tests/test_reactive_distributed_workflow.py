@@ -738,6 +738,10 @@ def test_kitscenes_test_publication_requires_expected_model_version():
             distributed_training
             .KITSCENES_STATEFUL_CAMERA_FPN_BATCH_SIZE
         ),
+        "evaluation_precision_policy": (
+            distributed_training
+            ._kitscenes_evaluation_precision_policy()
+        ),
         "maximum_labeled_horizon_steps": 50,
         "scene_uid_sha256": (
             distributed_training
@@ -796,6 +800,18 @@ def test_kitscenes_test_publication_requires_expected_model_version():
 
 def test_kitscenes_route_usage_policies_are_exact():
     assert (
+        distributed_training._kitscenes_evaluation_precision_policy()
+        == {
+            "autocast_enabled": True,
+            "device_type": "cuda",
+            "dtype": "bfloat16",
+            "version": (
+                distributed_training
+                .KITSCENES_EVALUATION_PRECISION_POLICY
+            ),
+        }
+    )
+    assert (
         distributed_training
         ._kitscenes_route_usage_evaluation_policy(
             mapless_test=False,
@@ -848,6 +864,10 @@ def test_kitscenes_val_publication_requires_official_map_route_inventory():
         ),
         "evaluation_batch_size": (
             distributed_training.KITSCENES_PRIMARY_VAL_BATCH_SIZE
+        ),
+        "evaluation_precision_policy": (
+            distributed_training
+            ._kitscenes_evaluation_precision_policy()
         ),
         "maximum_labeled_horizon_steps": 50,
         "scene_uid_sha256": (
@@ -948,6 +968,22 @@ def test_kitscenes_val_publication_requires_official_map_route_inventory():
         distributed_training._validate_kitscenes_publication_binding(
             {
                 **official_report,
+                "evaluation_precision_policy": {
+                    "autocast_enabled": False,
+                    "device_type": "cuda",
+                    "dtype": "float32",
+                    "version": "cuda_float32_v1",
+                },
+            },
+            expected_model_version="66",
+        )
+    with pytest.raises(
+        ValueError,
+        match="exact official inventory",
+    ):
+        distributed_training._validate_kitscenes_publication_binding(
+            {
+                **official_report,
                 "route_usage_evaluation_policy": {
                     "counterfactuals_enabled": True,
                     "input_gradient_enabled": True,
@@ -988,6 +1024,10 @@ def test_kitscenes_test_publication_rejects_batch_size_drift():
         "inference_cache_policy": (
             distributed_training
             .KITSCENES_STATEFUL_CAMERA_FPN_POLICY
+        ),
+        "evaluation_precision_policy": (
+            distributed_training
+            ._kitscenes_evaluation_precision_policy()
         ),
         "maximum_labeled_horizon_steps": 50,
         "scene_uid_sha256": (
@@ -1050,6 +1090,10 @@ def test_kitscenes_val_publication_rejects_trajectory_policy_drift():
         ),
         "evaluation_batch_size": (
             distributed_training.KITSCENES_PRIMARY_VAL_BATCH_SIZE
+        ),
+        "evaluation_precision_policy": (
+            distributed_training
+            ._kitscenes_evaluation_precision_policy()
         ),
         "maximum_labeled_horizon_steps": 50,
         "scene_uid_sha256": (
@@ -2152,6 +2196,32 @@ def test_kitscenes_checkpoint_evaluator_routes_inventory_policy():
     assert "include_route_swap_counterfactual=bool(" in source
     assert "reuse_precomputed_image_bev=bool(" in source
     assert "include_route_gradient=bool(" in source
+    assert "KITSCENES_EVALUATION_PRECISION_BF16" in source
+    assert "inference_autocast_dtype=(" in source
+    assert "runtime precision differs from policy" in source
+
+
+def test_kitscenes_evaluation_precision_policy_supports_canary_fp32():
+    assert distributed_training._kitscenes_evaluation_precision_policy() == {
+        "autocast_enabled": True,
+        "device_type": "cuda",
+        "dtype": "bfloat16",
+        "version": "cuda_bfloat16_autocast_v1",
+    }
+    assert (
+        distributed_training._kitscenes_evaluation_precision_policy("fp32")
+        == {
+            "autocast_enabled": False,
+            "device_type": "cuda",
+            "dtype": "float32",
+            "version": "cuda_float32_v1",
+        }
+    )
+    with pytest.raises(
+        ValueError,
+        match="must be bf16 or fp32",
+    ):
+        distributed_training._kitscenes_evaluation_precision_policy("fp16")
 
 
 def test_kitscenes_test_partition_aggregation_is_exact(tmp_path):
@@ -2219,6 +2289,10 @@ def test_kitscenes_test_partition_aggregation_is_exact(tmp_path):
             "evaluation_batch_size": (
                 distributed_training
                 .KITSCENES_STATEFUL_CAMERA_FPN_BATCH_SIZE
+            ),
+            "evaluation_precision_policy": (
+                distributed_training
+                ._kitscenes_evaluation_precision_policy()
             ),
             "input_track": "camera_only_missing_map_route",
             "manifest_identities": [{
@@ -2299,6 +2373,19 @@ def test_kitscenes_test_partition_aggregation_is_exact(tmp_path):
     assert report["evaluation_batch_size"] == (
         distributed_training.KITSCENES_STATEFUL_CAMERA_FPN_BATCH_SIZE
     )
+    assert report["evaluation_precision_policy"] == (
+        distributed_training._kitscenes_evaluation_precision_policy()
+    )
+    assert metrics["inference_precision"] == {
+        key: distributed_training._kitscenes_evaluation_precision_policy()[
+            key
+        ]
+        for key in (
+            "autocast_enabled",
+            "device_type",
+            "dtype",
+        )
+    }
     assert report["trajectory_inference_policy"]["version"] == (
         distributed_training.KITSCENES_TRAJECTORY_INFERENCE_POLICY
     )
@@ -2355,6 +2442,46 @@ def test_kitscenes_test_partition_aggregation_is_exact(tmp_path):
                 reports=report_paths,
                 report_sha256s=[
                     hashlib.sha256(drifted_bytes).hexdigest(),
+                    *report_sha256s[1:],
+                ],
+                checkpoint_sha256s=[checkpoint_sha256] * 3,
+                checkpoint_epochs=[5, 5, 5],
+                expected_partition_count=3,
+            )
+        )
+
+    precision_drifted_payload = {
+        **drifted_payload,
+        "evaluation_precision_policy": {
+            "autocast_enabled": False,
+            "device_type": "cuda",
+            "dtype": "float32",
+            "version": "cuda_float32_v1",
+        },
+        "route_usage_evaluation_policy": (
+            distributed_training
+            ._kitscenes_route_usage_evaluation_policy(
+                mapless_test=True,
+            )
+        ),
+    }
+    precision_drifted_bytes = (
+        json.dumps(precision_drifted_payload, sort_keys=True) + "\n"
+    ).encode("ascii")
+    drifted_report_path.write_bytes(precision_drifted_bytes)
+    with pytest.raises(
+        ValueError,
+        match="partition report identity differs",
+    ):
+        (
+            distributed_training
+            .aggregate_reactive_kitscenes_test_evaluations
+            .task_function(
+                reports=report_paths,
+                report_sha256s=[
+                    hashlib.sha256(
+                        precision_drifted_bytes
+                    ).hexdigest(),
                     *report_sha256s[1:],
                 ],
                 checkpoint_sha256s=[checkpoint_sha256] * 3,

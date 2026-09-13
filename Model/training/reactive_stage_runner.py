@@ -6,6 +6,7 @@ import hashlib
 import json
 import math
 from collections.abc import Callable, Iterable, Mapping, Sequence
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
 
@@ -1208,14 +1209,57 @@ def evaluate_reactive_multitask(
         | None
     ) = None,
     camera_fpn_cache: Any = None,
+    inference_autocast_dtype: torch.dtype | None = None,
 ) -> dict[str, Any]:
-    """Evaluate trajectory, BEV semantics, and route retention/use."""
+    """Evaluate trajectory, BEV semantics, and route retention/use.
+
+    ``inference_autocast_dtype`` only changes model-forward precision. Metric
+    calculations remain FP32, and CUDA BF16 requires native hardware support.
+    """
     from training.losses.control_rollout import integrate_controls_torch
 
     if probability_bins < 10:
         raise ValueError("probability_bins must be at least 10")
     if not isinstance(stage, ReactiveTrainingStage):
         raise TypeError("stage must be a ReactiveTrainingStage")
+    if inference_autocast_dtype not in {
+        None,
+        torch.bfloat16,
+    }:
+        raise ValueError(
+            "inference autocast dtype must be bfloat16 or None"
+        )
+    if inference_autocast_dtype is not None and include_route_gradient:
+        raise ValueError(
+            "inference autocast does not support route input gradients"
+        )
+    if inference_autocast_dtype is not None and device.type != "cuda":
+        raise ValueError("inference autocast requires a CUDA device")
+    if (
+        inference_autocast_dtype is torch.bfloat16
+        and torch.cuda.get_device_capability(device)[0] < 8
+    ):
+        raise RuntimeError(
+            "inference autocast requires native CUDA bfloat16 support"
+        )
+    inference_precision = {
+        "autocast_enabled": inference_autocast_dtype is not None,
+        "device_type": device.type,
+        "dtype": (
+            "bfloat16"
+            if inference_autocast_dtype is torch.bfloat16
+            else "float32"
+        ),
+    }
+
+    def inference_autocast():
+        if inference_autocast_dtype is None:
+            return nullcontext()
+        return torch.autocast(
+            device_type="cuda",
+            dtype=inference_autocast_dtype,
+        )
+
     if include_route_swap_counterfactual is None:
         include_route_swap_counterfactual = include_counterfactuals
     if reuse_precomputed_image_bev is None:
@@ -1527,41 +1571,43 @@ def evaluate_reactive_multitask(
                 )
             )
             with torch.no_grad():
-                output = model(
-                    batch["visual_tiles"],
-                    batch["map_context"],
-                    batch["visual_history"],
-                    batch["egomotion_history"],
-                    route_mask=batch["route_mask"],
-                    map_valid=batch["map_valid"],
-                    route_valid=batch["route_valid"],
-                    projection=projection,
-                    geometry_type=geometry_type,
-                    camera_history_tiles=camera_history_tiles,
-                    history_projections=history_projections,
-                    front_camera_tile=batch.get("front_camera_tile"),
-                    front_camera_fpn_tile=front_camera_fpn_tile,
-                    front_camera_fpn_available=(
-                        front_camera_fpn_available
-                    ),
-                    front_projection=front_projection,
-                    camera_fpn_cache=camera_fpn_cache,
-                    camera_fpn_stream_ids=camera_fpn_stream_ids,
-                    camera_fpn_timestamps_us=(
-                        camera_fpn_timestamps_us
-                    ),
-                    mode="infer",
-                    initial_noise=initial_noise,
-                    return_auxiliary=True,
-                    return_image_bev=reuse_precomputed_image_bev,
-                    compute_bev_segmentation=compute_bev,
-                    compute_route_reconstruction=True,
-                )
+                with inference_autocast():
+                    output = model(
+                        batch["visual_tiles"],
+                        batch["map_context"],
+                        batch["visual_history"],
+                        batch["egomotion_history"],
+                        route_mask=batch["route_mask"],
+                        map_valid=batch["map_valid"],
+                        route_valid=batch["route_valid"],
+                        projection=projection,
+                        geometry_type=geometry_type,
+                        camera_history_tiles=camera_history_tiles,
+                        history_projections=history_projections,
+                        front_camera_tile=batch.get("front_camera_tile"),
+                        front_camera_fpn_tile=front_camera_fpn_tile,
+                        front_camera_fpn_available=(
+                            front_camera_fpn_available
+                        ),
+                        front_projection=front_projection,
+                        camera_fpn_cache=camera_fpn_cache,
+                        camera_fpn_stream_ids=camera_fpn_stream_ids,
+                        camera_fpn_timestamps_us=(
+                            camera_fpn_timestamps_us
+                        ),
+                        mode="infer",
+                        initial_noise=initial_noise,
+                        return_auxiliary=True,
+                        return_image_bev=reuse_precomputed_image_bev,
+                        compute_bev_segmentation=compute_bev,
+                        compute_route_reconstruction=True,
+                    )
                 if not isinstance(output, tuple):
                     raise RuntimeError(
                         "Reactive evaluator requires auxiliary outputs"
                     )
                 controls, auxiliary = output
+                controls = controls.to(torch.float32)
                 evaluation_image_bev = auxiliary.get(
                     "_evaluation_image_bev"
                 )
@@ -1658,8 +1704,9 @@ def evaluate_reactive_multitask(
                         raise RuntimeError(
                             "BEV teacher is present but logits are missing"
                         )
+                    bev_logits = bev_logits.to(torch.float32)
                     bev_target = batch["bev_segmentation_target"].to(
-                        dtype=bev_logits.dtype
+                        dtype=torch.float32
                     )
                     bev_valid = batch["bev_segmentation_valid"].to(
                         dtype=torch.bool
@@ -1834,8 +1881,9 @@ def evaluate_reactive_multitask(
                     raise RuntimeError(
                         "route reconstruction logits are missing"
                     )
+                route_logits = route_logits.to(torch.float32)
                 route_target = batch["route_mask"].to(
-                    dtype=route_logits.dtype
+                    dtype=torch.float32
                 )
                 route_channel_valid = batch[
                     "route_channel_valid"
@@ -1889,25 +1937,29 @@ def evaluate_reactive_multitask(
                     )
 
                 if include_counterfactuals:
-                    zero_controls = model(
-                        batch["visual_tiles"],
-                        batch["map_context"],
-                        batch["visual_history"],
-                        batch["egomotion_history"],
-                        route_mask=torch.zeros_like(batch["route_mask"]),
-                        map_valid=batch["map_valid"],
-                        route_valid=torch.zeros_like(
-                            batch["route_valid"],
-                            dtype=torch.bool,
-                        ),
-                        mode="infer",
-                        initial_noise=initial_noise,
-                        compute_bev_segmentation=False,
-                        compute_route_reconstruction=False,
-                        **counterfactual_camera_kwargs,
-                    )
+                    with inference_autocast():
+                        zero_controls = model(
+                            batch["visual_tiles"],
+                            batch["map_context"],
+                            batch["visual_history"],
+                            batch["egomotion_history"],
+                            route_mask=torch.zeros_like(
+                                batch["route_mask"]
+                            ),
+                            map_valid=batch["map_valid"],
+                            route_valid=torch.zeros_like(
+                                batch["route_valid"],
+                                dtype=torch.bool,
+                            ),
+                            mode="infer",
+                            initial_noise=initial_noise,
+                            compute_bev_segmentation=False,
+                            compute_route_reconstruction=False,
+                            **counterfactual_camera_kwargs,
+                        )
                     if isinstance(zero_controls, tuple):
                         zero_controls = zero_controls[0]
+                    zero_controls = zero_controls.to(torch.float32)
                     zero_xy, _, _ = integrate_controls_torch(
                         zero_controls,
                         batch["initial_speed_mps"],
@@ -1944,22 +1996,24 @@ def evaluate_reactive_multitask(
                         swapped_valid = batch["route_valid"][
                             donor_indices
                         ]
-                        swap_controls = model(
-                            batch["visual_tiles"],
-                            batch["map_context"],
-                            batch["visual_history"],
-                            batch["egomotion_history"],
-                            route_mask=swapped_route,
-                            map_valid=batch["map_valid"],
-                            route_valid=swapped_valid,
-                            mode="infer",
-                            initial_noise=initial_noise,
-                            compute_bev_segmentation=False,
-                            compute_route_reconstruction=False,
-                            **counterfactual_camera_kwargs,
-                        )
+                        with inference_autocast():
+                            swap_controls = model(
+                                batch["visual_tiles"],
+                                batch["map_context"],
+                                batch["visual_history"],
+                                batch["egomotion_history"],
+                                route_mask=swapped_route,
+                                map_valid=batch["map_valid"],
+                                route_valid=swapped_valid,
+                                mode="infer",
+                                initial_noise=initial_noise,
+                                compute_bev_segmentation=False,
+                                compute_route_reconstruction=False,
+                                **counterfactual_camera_kwargs,
+                            )
                         if isinstance(swap_controls, tuple):
                             swap_controls = swap_controls[0]
+                        swap_controls = swap_controls.to(torch.float32)
                         swap_xy, _, _ = integrate_controls_torch(
                             swap_controls,
                             batch["initial_speed_mps"],
@@ -2211,6 +2265,7 @@ def evaluate_reactive_multitask(
         "sample_uid_sha256": hashlib.sha256(
             "\n".join(sorted(sample_uids)).encode("utf-8")
         ).hexdigest(),
+        "inference_precision": inference_precision,
         "trajectory": trajectory_metrics,
         "bev_segmentation": {
             "available": bool(bev_valid_count.sum() > 0.0),

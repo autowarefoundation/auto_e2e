@@ -2687,6 +2687,132 @@ def test_multitask_evaluator_uses_per_sample_initial_noise(
     assert report["sample_count"] == 2
 
 
+def test_multitask_evaluator_rejects_invalid_autocast_policy(
+    build_mock_model,
+    device,
+):
+    model = _model(build_mock_model, device).eval()
+
+    with pytest.raises(
+        ValueError,
+        match="bfloat16 or None",
+    ):
+        evaluate_reactive_multitask(
+            model,
+            [],
+            stage=ReactiveTrainingStage.KITSCENES_FINETUNE,
+            device=device,
+            inference_autocast_dtype=torch.float32,
+        )
+
+    with pytest.raises(
+        ValueError,
+        match="does not support route input gradients",
+    ):
+        evaluate_reactive_multitask(
+            model,
+            [],
+            stage=ReactiveTrainingStage.KITSCENES_FINETUNE,
+            device=device,
+            inference_autocast_dtype=torch.bfloat16,
+        )
+
+    with pytest.raises(
+        ValueError,
+        match="requires a CUDA device",
+    ):
+        evaluate_reactive_multitask(
+            model,
+            [],
+            stage=ReactiveTrainingStage.KITSCENES_FINETUNE,
+            device=torch.device("cpu"),
+            inference_autocast_dtype=torch.bfloat16,
+            include_route_gradient=False,
+        )
+
+    with pytest.raises(
+        ValueError,
+        match="bfloat16 or None",
+    ):
+        evaluate_reactive_multitask(
+            model,
+            [],
+            stage=ReactiveTrainingStage.KITSCENES_FINETUNE,
+            device=device,
+            inference_autocast_dtype=torch.float16,
+            include_route_gradient=False,
+        )
+
+
+def test_multitask_evaluator_requires_native_bfloat16(
+    build_mock_model,
+    monkeypatch,
+):
+    model = _model(build_mock_model, torch.device("cpu")).eval()
+    monkeypatch.setattr(
+        torch.cuda,
+        "get_device_capability",
+        lambda device: (7, 5),
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="native CUDA bfloat16 support",
+    ):
+        evaluate_reactive_multitask(
+            model,
+            [],
+            stage=ReactiveTrainingStage.KITSCENES_FINETUNE,
+            device=torch.device("cuda"),
+            inference_autocast_dtype=torch.bfloat16,
+            include_route_gradient=False,
+        )
+
+
+def test_multitask_evaluator_converts_bfloat16_outputs_for_metrics(
+    build_mock_model,
+    device,
+    monkeypatch,
+):
+    model = _model(build_mock_model, device).eval()
+    original_forward = model.forward
+
+    def bfloat16_forward(*args, **kwargs):
+        output = original_forward(*args, **kwargs)
+        if isinstance(output, tuple):
+            controls, auxiliary = output
+            return controls.to(torch.bfloat16), {
+                key: (
+                    value.to(torch.bfloat16)
+                    if torch.is_tensor(value)
+                    and value.is_floating_point()
+                    else value
+                )
+                for key, value in auxiliary.items()
+            }
+        return output.to(torch.bfloat16)
+
+    monkeypatch.setattr(model, "forward", bfloat16_forward)
+    report = evaluate_reactive_multitask(
+        model,
+        [_stage_batch(device, include_bev=True, batch_size=2)],
+        stage=ReactiveTrainingStage.L2D_CONTINUATION,
+        device=device,
+        include_route_gradient=False,
+    )
+
+    assert report["inference_precision"] == {
+        "autocast_enabled": False,
+        "device_type": device.type,
+        "dtype": "float32",
+    }
+    assert report["trajectory"]["nonfinite_prediction_count"] == 0
+    assert report["bev_segmentation"]["available"] is True
+    assert report["route"]["corridor_valid_sample_count"] == 2
+    assert report["route"]["route_zero_sample_count"] == 2
+    assert report["route"]["route_swap_sample_count"] == 2
+
+
 def test_multitask_stateful_evaluation_rejects_more_than_five_lanes(
     build_mock_model,
     device,

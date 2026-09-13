@@ -115,6 +115,12 @@ KITSCENES_STATEFUL_CAMERA_FPN_POLICY = (
 KITSCENES_TRAJECTORY_INFERENCE_POLICY = (
     "deterministic_gru_no_noise_v1"
 )
+KITSCENES_EVALUATION_PRECISION_POLICY = (
+    "cuda_bfloat16_autocast_v1"
+)
+KITSCENES_FP32_EVALUATION_PRECISION_POLICY = "cuda_float32_v1"
+KITSCENES_EVALUATION_PRECISION_BF16 = "bf16"
+KITSCENES_EVALUATION_PRECISION_FP32 = "fp32"
 KITSCENES_PRIMARY_VAL_ROUTE_USAGE_POLICY = (
     "route_zero_reused_image_bev_no_grad_v2"
 )
@@ -145,6 +151,28 @@ def _kitscenes_route_usage_evaluation_policy(
             if mapless_test
             else KITSCENES_PRIMARY_VAL_ROUTE_USAGE_POLICY
         ),
+    }
+
+
+def _kitscenes_evaluation_precision_policy(
+    precision: str = KITSCENES_EVALUATION_PRECISION_BF16,
+) -> dict[str, object]:
+    if precision == KITSCENES_EVALUATION_PRECISION_FP32:
+        return {
+            "autocast_enabled": False,
+            "device_type": "cuda",
+            "dtype": "float32",
+            "version": KITSCENES_FP32_EVALUATION_PRECISION_POLICY,
+        }
+    if precision != KITSCENES_EVALUATION_PRECISION_BF16:
+        raise ValueError(
+            "KITScenes evaluation precision must be bf16 or fp32"
+        )
+    return {
+        "autocast_enabled": True,
+        "device_type": "cuda",
+        "dtype": "bfloat16",
+        "version": KITSCENES_EVALUATION_PRECISION_POLICY,
     }
 
 
@@ -1428,6 +1456,8 @@ def _validate_kitscenes_publication_binding(
                 "stochastic_noise"
             )
             is False
+            and report_payload.get("evaluation_precision_policy")
+            == _kitscenes_evaluation_precision_policy()
             and report_payload.get("route_usage_evaluation_policy")
             == _kitscenes_route_usage_evaluation_policy(
                 mapless_test=False,
@@ -1527,6 +1557,8 @@ def _validate_kitscenes_publication_binding(
                 "stochastic_noise"
             )
             is False
+            and report_payload.get("evaluation_precision_policy")
+            == _kitscenes_evaluation_precision_policy()
             and report_payload.get("route_usage_evaluation_policy")
             == _kitscenes_route_usage_evaluation_policy(
                 mapless_test=True,
@@ -3338,6 +3370,7 @@ def evaluate_reactive_kitscenes_checkpoint(
     expected_test_partition_count: int = 0,
     expected_val_partition_count: int = 0,
     use_stateful_camera_fpn_cache: bool = False,
+    evaluation_precision: str = KITSCENES_EVALUATION_PRECISION_BF16,
 ) -> ReactiveKITScenesEvaluationOutput:
     """Evaluate a KITScenes fine-tuned checkpoint without checkpoint selection."""
     import tempfile
@@ -3371,6 +3404,9 @@ def evaluate_reactive_kitscenes_checkpoint(
             "KITScenes labeled evaluation requires val, overlap_train_val, "
             "or test"
         )
+    evaluation_precision_policy = (
+        _kitscenes_evaluation_precision_policy(evaluation_precision)
+    )
     maximum_batch_size = (
         KITSCENES_STATEFUL_CAMERA_FPN_BATCH_SIZE
         if use_stateful_camera_fpn_cache
@@ -3683,6 +3719,14 @@ def evaluate_reactive_kitscenes_checkpoint(
             "schema_version": "reactive_multitask_evaluation_v1",
             "sample_count": 0,
             "sample_uid_sha256": hashlib.sha256(b"").hexdigest(),
+            "inference_precision": {
+                key: evaluation_precision_policy[key]
+                for key in (
+                    "autocast_enabled",
+                    "device_type",
+                    "dtype",
+                )
+            },
             "trajectory": trajectory_metrics,
             "bev_segmentation": {
                 "available": False,
@@ -3760,6 +3804,25 @@ def evaluate_reactive_kitscenes_checkpoint(
                 ]
             ),
             camera_fpn_cache=camera_fpn_cache,
+            inference_autocast_dtype=(
+                torch.bfloat16
+                if evaluation_precision
+                == KITSCENES_EVALUATION_PRECISION_BF16
+                else None
+            ),
+        )
+    runtime_precision = metrics.get("inference_precision")
+    expected_runtime_precision = {
+        key: evaluation_precision_policy[key]
+        for key in (
+            "autocast_enabled",
+            "device_type",
+            "dtype",
+        )
+    }
+    if runtime_precision != expected_runtime_precision:
+        raise RuntimeError(
+            "KITScenes evaluator runtime precision differs from policy"
         )
     trajectory_metrics = metrics.get("trajectory")
     if not isinstance(trajectory_metrics, dict):
@@ -3802,6 +3865,7 @@ def evaluate_reactive_kitscenes_checkpoint(
             else "stateless"
         ),
         "evaluation_batch_size": batch_size,
+        "evaluation_precision_policy": evaluation_precision_policy,
         "trajectory_inference_policy": {
             "planner": "gru",
             "stochastic_noise": False,
@@ -3965,6 +4029,8 @@ def aggregate_reactive_kitscenes_test_evaluations(
                 "stochastic_noise"
             )
             is not False
+            or payload.get("evaluation_precision_policy")
+            != _kitscenes_evaluation_precision_policy()
             or payload.get("route_usage_evaluation_policy")
             != _kitscenes_route_usage_evaluation_policy(
                 mapless_test=True,
@@ -4178,6 +4244,14 @@ def aggregate_reactive_kitscenes_test_evaluations(
         "schema_version": "reactive_multitask_evaluation_v1",
         "sample_count": sample_count,
         "sample_uid_sha256": None,
+        "inference_precision": {
+            key: _kitscenes_evaluation_precision_policy()[key]
+            for key in (
+                "autocast_enabled",
+                "device_type",
+                "dtype",
+            )
+        },
         "partition_sample_uid_sha256": hashlib.sha256(
             "\n".join(sorted(partition_uid_identities)).encode("utf-8")
         ).hexdigest(),
@@ -4217,6 +4291,9 @@ def aggregate_reactive_kitscenes_test_evaluations(
         "inference_cache_policy": KITSCENES_STATEFUL_CAMERA_FPN_POLICY,
         "evaluation_batch_size": (
             KITSCENES_STATEFUL_CAMERA_FPN_BATCH_SIZE
+        ),
+        "evaluation_precision_policy": (
+            _kitscenes_evaluation_precision_policy()
         ),
         "manifest_identities": sorted(
             manifest_identities,
@@ -4376,6 +4453,11 @@ def publish_reactive_kitscenes_evaluation(
     )
     if not isinstance(route_usage_policy, dict):
         route_usage_policy = {}
+    evaluation_precision_policy = report_payload.get(
+        "evaluation_precision_policy"
+    )
+    if not isinstance(evaluation_precision_policy, dict):
+        evaluation_precision_policy = {}
     evaluation_priority = (
         "primary"
         if report_payload.get("evaluation_role")
@@ -4412,6 +4494,9 @@ def publish_reactive_kitscenes_evaluation(
                 "evaluation_role": str(
                     report_payload["evaluation_role"]
                 ),
+                "evaluation_precision_policy": str(
+                    evaluation_precision_policy.get("version", "")
+                ),
                 "route_usage_evaluation_policy": str(
                     route_usage_policy.get("version", "")
                 ),
@@ -4442,6 +4527,15 @@ def publish_reactive_kitscenes_evaluation(
             ),
             "eval/input_track": report_payload["input_track"],
             "eval/priority": evaluation_priority,
+            "eval/evaluation_precision_policy": (
+                evaluation_precision_policy.get("version", "")
+            ),
+            "eval/evaluation_precision_dtype": (
+                evaluation_precision_policy.get("dtype", "")
+            ),
+            "eval/evaluation_autocast_enabled": (
+                evaluation_precision_policy.get("autocast_enabled", "")
+            ),
             "eval/partition_count": report_payload.get(
                 "partition_count",
                 0,
@@ -4601,6 +4695,15 @@ def publish_reactive_kitscenes_evaluation(
             report_payload["evaluation_role"]
         ),
         f"{split_tag}_evaluation_priority": evaluation_priority,
+        f"{split_tag}_evaluation_precision_policy": (
+            evaluation_precision_policy.get("version", "")
+        ),
+        f"{split_tag}_evaluation_precision_dtype": (
+            evaluation_precision_policy.get("dtype", "")
+        ),
+        f"{split_tag}_evaluation_autocast_enabled": (
+            evaluation_precision_policy.get("autocast_enabled", "")
+        ),
         f"{split_tag}_evaluation_report_sha256": report_sha256,
         f"{split_tag}_evaluation_run_id": run_id,
         f"{split_tag}_expected_partition_count": (
@@ -4682,6 +4785,18 @@ def publish_reactive_kitscenes_evaluation(
             "primary_evaluation_run_id": run_id,
             "primary_evaluation_sample_count": (
                 metrics_payload["sample_count"]
+            ),
+            "primary_evaluation_precision_policy": (
+                evaluation_precision_policy.get("version", "")
+            ),
+            "primary_evaluation_precision_dtype": (
+                evaluation_precision_policy.get("dtype", "")
+            ),
+            "primary_evaluation_autocast_enabled": (
+                evaluation_precision_policy.get(
+                    "autocast_enabled",
+                    "",
+                )
             ),
             "primary_route_usage_evaluation_policy": (
                 route_usage_policy.get("version", "")
