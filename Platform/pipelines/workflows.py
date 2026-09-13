@@ -142,6 +142,9 @@ LABEL_CACHE_VERSION = _CACHE_VERSIONS["label"]
 PACK_CACHE_VERSION = (
     f"{_CACHE_VERSIONS['pack']}-camera{REACTIVE_CAMERA_IMAGE_SIZE}"
 )
+KITSCENES_TEST_DIRECT_PACK_CACHE_VERSION = (
+    f"kitscenes-test-direct-{INGEST_CACHE_VERSION}-{PACK_CACHE_VERSION}-v1"
+)
 NAVIGATION_QUALITY_CACHE_VERSION = "navigation-quality-v2"
 _FLYTE_DOWNLOAD_GATHER_BATCH_SIZE = 16
 
@@ -3278,6 +3281,85 @@ def data_processing(
 
     print(f"Processed {dataset.value}: {sample_count} samples → {shard_idx} shards")
     return FlyteDirectory(out_dir)
+
+
+# ============================================================
+# Task: Direct KITScenes test ingest + pack
+# ============================================================
+@task(
+    container_image=DATA_PREP_IMAGE,
+    pod_template=_data_prep_pod_template(),
+    # data_processing already fits raw download plus packed output in 240Gi.
+    # The direct path runs ingest first and deletes its source archive before
+    # packing, so the two stages do not add their peak storage requirements.
+    requests=Resources(cpu="15", mem="64Gi", ephemeral_storage="240Gi"),
+    limits=Resources(cpu="15", mem="64Gi", ephemeral_storage="240Gi"),
+    secret_requests=[Secret(
+        group="hf-token",
+        key="HF_TOKEN",
+        mount_requirement=Secret.MountType.ENV_VAR,
+    )],
+    cache=True,
+    cache_version=KITSCENES_TEST_DIRECT_PACK_CACHE_VERSION,
+    # A retry after packing starts must download the source scene again. This is
+    # the deliberate tradeoff for not publishing the raw tree to object storage.
+    retries=2,
+    environment={"_F_P_WRITE_CHUNK_SIZE": "8388608"},
+)
+def ingest_and_process_kitscenes_test_partition(
+    group_ids: List[str],
+    source_revision: str,
+    dataset_version: str,
+    image_size: int,
+) -> Annotated[FlyteDirectory, BatchSize(4)]:
+    """Pack one standard-test scene without staging raw files in object storage."""
+    if len(group_ids) != 1:
+        raise ValueError(
+            "KITScenes test direct pack requires exactly one scene"
+        )
+    if source_revision != KITSCENES_SOURCE_REVISION:
+        raise ValueError(
+            "KITScenes test direct pack requires pinned source revision "
+            f"{KITSCENES_SOURCE_REVISION!r}"
+        )
+    if dataset_version != KITSCENES_TEST_DATASET_VERSION:
+        raise ValueError(
+            "KITScenes test direct pack requires dataset version "
+            f"{KITSCENES_TEST_DATASET_VERSION!r}"
+        )
+    if image_size != REACTIVE_CAMERA_IMAGE_SIZE:
+        raise ValueError(
+            "KITScenes test direct pack requires the 512px camera contract"
+        )
+
+    raw_data = data_ingest.task_function(
+        dataset=Dataset.KITSCENES,
+        source_revision=source_revision,
+        episodes=0,
+        group_ids=group_ids,
+        source_split="test",
+        data_role="benchmark",
+    )
+    # Packing is offline. Do not expose the Hub token to row-worker subprocesses.
+    import os
+
+    os.environ.pop("HF_TOKEN", None)
+    return data_processing.task_function(
+        raw_data=raw_data,
+        dataset=Dataset.KITSCENES,
+        source_revision=source_revision,
+        dataset_version=dataset_version,
+        hz=10,
+        image_size=image_size,
+        episodes=0,
+        world_model=False,
+        reasoning_labels=None,
+        group_ids=group_ids,
+        expected_reasoning_label_count=None,
+        sample_limit=0,
+        source_split="test",
+        data_role="benchmark",
+    )
 
 
 # ============================================================
@@ -9502,6 +9584,50 @@ def _map_dataset_partitions(
     container_image=DATA_PREP_IMAGE,
     environment={"AUTO_E2E_DATA_PREP_IMAGE": DATA_PREP_IMAGE},
 )
+def _map_kitscenes_test_partitions(
+    partitions: List[List[str]],
+    dataset_version: str,
+    image_size: int,
+    ingest_concurrency: int,
+    pack_concurrency: int,
+) -> List[FlyteDirectory]:
+    """Pack standard-test scenes in one task per scene."""
+    for name, value in (
+        ("ingest_concurrency", ingest_concurrency),
+        ("pack_concurrency", pack_concurrency),
+    ):
+        if value <= 0:
+            raise ValueError(f"{name} must be positive, got {value}")
+    if not partitions or any(len(partition) != 1 for partition in partitions):
+        raise ValueError(
+            "KITScenes test partitions must contain exactly one scene each"
+        )
+    if dataset_version != KITSCENES_TEST_DATASET_VERSION:
+        raise ValueError(
+            "KITScenes test direct pack requires dataset version "
+            f"{KITSCENES_TEST_DATASET_VERSION!r}"
+        )
+    if image_size != REACTIVE_CAMERA_IMAGE_SIZE:
+        raise ValueError(
+            "KITScenes test direct pack requires the 512px camera contract"
+        )
+
+    direct_pack = map_task(
+        functools.partial(
+            ingest_and_process_kitscenes_test_partition,
+            source_revision=KITSCENES_SOURCE_REVISION,
+            dataset_version=dataset_version,
+            image_size=image_size,
+        ),
+        concurrency=min(ingest_concurrency, pack_concurrency),
+    )
+    return direct_pack(group_ids=partitions)
+
+
+@dynamic(
+    container_image=DATA_PREP_IMAGE,
+    environment={"AUTO_E2E_DATA_PREP_IMAGE": DATA_PREP_IMAGE},
+)
 def _map_recovered_kitscenes_artifacts(
     recovery_manifest: FlyteFile,
     artifact_set_sha256: str,
@@ -9795,23 +9921,12 @@ def wf_create_kitscenes_test_evaluation_sharded(
         split="test",
         data_role="benchmark",
     )
-    return _map_dataset_partitions(
+    return _map_kitscenes_test_partitions(
         partitions=partitions,
-        dataset=Dataset.KITSCENES,
-        source_revision=KITSCENES_SOURCE_REVISION,
         dataset_version=KITSCENES_TEST_DATASET_VERSION,
         image_size=image_size,
-        world_model=False,
-        reasoning_teacher="none",
-        prompt_version="unused",
-        label_stride=10,
-        label_workers=1,
         ingest_concurrency=ingest_concurrency,
-        label_concurrency=1,
         pack_concurrency=pack_concurrency,
-        total_sample_limit=0,
-        source_split="test",
-        data_role="benchmark",
     )
 
 

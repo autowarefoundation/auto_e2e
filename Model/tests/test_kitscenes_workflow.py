@@ -17,6 +17,7 @@ pytest.importorskip("flytekit")
 
 from flytekit import map_task
 from flytekit.configuration import ImageConfig, SerializationSettings
+from flytekit.core.context_manager import FlyteContextManager
 
 from Platform.pipelines import workflows
 from data_parsing.kit_scenes.source import InventoryResolution, SceneArchive
@@ -107,6 +108,138 @@ def test_ingest_map_binds_scalars_and_maps_only_group_ids():
         "source_split",
         "data_role",
     }
+
+
+def test_direct_test_pack_keeps_raw_data_in_the_same_task(monkeypatch):
+    raw_data = object()
+    packed_data = object()
+    calls = {}
+
+    def fake_ingest(**kwargs):
+        calls["ingest"] = kwargs
+        return raw_data
+
+    def fake_process(**kwargs):
+        calls["process"] = kwargs
+        return packed_data
+
+    monkeypatch.setattr(
+        workflows.data_ingest,
+        "_task_function",
+        fake_ingest,
+    )
+    monkeypatch.setattr(
+        workflows.data_processing,
+        "_task_function",
+        fake_process,
+    )
+
+    result = (
+        workflows.ingest_and_process_kitscenes_test_partition
+        .task_function(
+            group_ids=["scene-a"],
+            source_revision=workflows.KITSCENES_SOURCE_REVISION,
+            dataset_version=workflows.KITSCENES_TEST_DATASET_VERSION,
+            image_size=workflows.REACTIVE_CAMERA_IMAGE_SIZE,
+        )
+    )
+
+    assert result is packed_data
+    assert calls["ingest"] == {
+        "dataset": workflows.Dataset.KITSCENES,
+        "source_revision": workflows.KITSCENES_SOURCE_REVISION,
+        "episodes": 0,
+        "group_ids": ["scene-a"],
+        "source_split": "test",
+        "data_role": "benchmark",
+    }
+    assert calls["process"] == {
+        "raw_data": raw_data,
+        "dataset": workflows.Dataset.KITSCENES,
+        "source_revision": workflows.KITSCENES_SOURCE_REVISION,
+        "dataset_version": workflows.KITSCENES_TEST_DATASET_VERSION,
+        "hz": 10,
+        "image_size": workflows.REACTIVE_CAMERA_IMAGE_SIZE,
+        "episodes": 0,
+        "world_model": False,
+        "reasoning_labels": None,
+        "group_ids": ["scene-a"],
+        "expected_reasoning_label_count": None,
+        "sample_limit": 0,
+        "source_split": "test",
+        "data_role": "benchmark",
+    }
+
+
+def test_local_flyte_directory_download_is_a_noop(tmp_path):
+    directory = workflows.FlyteDirectory(str(tmp_path))
+
+    assert workflows._download_flyte_directory(directory) == str(tmp_path)
+    assert directory.remote_source is None
+
+
+def test_direct_test_pack_rejects_non_singleton_partition():
+    with pytest.raises(ValueError, match="exactly one scene"):
+        (
+            workflows.ingest_and_process_kitscenes_test_partition
+            .task_function(
+                group_ids=["scene-a", "scene-b"],
+                source_revision=workflows.KITSCENES_SOURCE_REVISION,
+                dataset_version=workflows.KITSCENES_TEST_DATASET_VERSION,
+                image_size=workflows.REACTIVE_CAMERA_IMAGE_SIZE,
+            )
+        )
+
+
+def test_direct_test_pack_map_binds_only_group_ids():
+    context = FlyteContextManager.current_context()
+    with FlyteContextManager.with_context(
+        context.with_new_compilation_state()
+    ) as compilation_context:
+        workflows._map_kitscenes_test_partitions.task_function(
+            partitions=[["scene-a"]],
+            dataset_version=workflows.KITSCENES_TEST_DATASET_VERSION,
+            image_size=workflows.REACTIVE_CAMERA_IMAGE_SIZE,
+            ingest_concurrency=8,
+            pack_concurrency=5,
+        )
+        mapped_node = compilation_context.compilation_state.nodes[-1]
+
+    assert mapped_node.flyte_entity.bound_inputs == {
+        "dataset_version",
+        "image_size",
+        "source_revision",
+    }
+    assert mapped_node.flyte_entity.concurrency == 5
+    assert {
+        binding.var for binding in mapped_node.bindings
+    } == {
+        "dataset_version",
+        "group_ids",
+        "image_size",
+        "source_revision",
+    }
+
+
+def test_direct_test_pack_map_rejects_wrong_camera_contract():
+    with pytest.raises(ValueError, match="512px camera contract"):
+        workflows._map_kitscenes_test_partitions.task_function(
+            partitions=[["scene-a"]],
+            dataset_version=workflows.KITSCENES_TEST_DATASET_VERSION,
+            image_size=256,
+            ingest_concurrency=1,
+            pack_concurrency=1,
+        )
+
+
+def test_test_pack_workflow_uses_direct_same_task_path():
+    assert [
+        node.flyte_entity.name
+        for node in workflows.wf_create_kitscenes_test_evaluation_sharded.nodes
+    ] == [
+        workflows.plan_fanout_partitions.name,
+        workflows._map_kitscenes_test_partitions.name,
+    ]
 
 
 def test_kitscenes_data_roles_keep_benchmark_splits_out_of_training():
