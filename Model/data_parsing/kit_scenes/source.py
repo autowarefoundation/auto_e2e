@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import logging
 import shutil
 import tempfile
@@ -15,6 +16,10 @@ KITSCENES_REPO_ID = "KIT-MRT/KITScenes-Multimodal"
 KITSCENES_DATA_REVISION = "6fde0034446669e2ed7235e4c7fe323cd23d599d"
 KITSCENES_SDK_REVISION = "7765cdec5490894266070ab46e23724b58b3da42"
 KITSCENES_MANIFEST_PATH = "data/sequence_archives.csv"
+KITSCENES_STANDARD_VAL_SCENE_COUNT = 117
+KITSCENES_STANDARD_VAL_SCENE_UID_SHA256 = (
+    "421858c6c6767deb6b486cc8d64628a7dd5eded25858e4d2a8354af15f4c369a"
+)
 KITSCENES_STANDARD_TEST_SCENE_COUNT = 206
 KITSCENES_STANDARD_TEST_SCENE_UID_SHA256 = (
     "0b96c9835d40841d2302e2949a3baf9be79e987d333c6526570267cb71d2a05e"
@@ -26,6 +31,10 @@ _SPLIT_FILES = {
     "test": "test.txt",
     "test_e2e": "test-e2e.txt",
     "overlap_train_val": "overlap_train_val.txt",
+}
+_PINNED_SPLIT_FILE_SHA256 = {
+    "train": "e50314410398b67f9960a0c5f0449e7aea271037706bad08e6898862574f2bf6",
+    "val": "4a78dd31f4340e0e7953b7c117e83f80d1cd99f22a0ca127c4eb5c60cad70a21",
 }
 
 logger = logging.getLogger(__name__)
@@ -68,15 +77,32 @@ def sdk_split_scene_ids(split: str) -> list[str]:
         raise ValueError(
             f"unknown KITScenes split {split!r}; expected {sorted(_SPLIT_FILES)}"
         ) from exc
-    split_file = (
-        resources.files("kitscenes")
-        .joinpath("split")
-        .joinpath("generated_splits")
-        .joinpath("default_geo_split_v1_0")
-        .joinpath(filename)
-    )
+    if split in _PINNED_SPLIT_FILE_SHA256:
+        split_path = (
+            Path(__file__).with_name("pinned_splits")
+            / "default_geo_split_v1_0"
+            / filename
+        )
+        split_bytes = split_path.read_bytes()
+        if (
+            hashlib.sha256(split_bytes).hexdigest()
+            != _PINNED_SPLIT_FILE_SHA256[split]
+        ):
+            raise ValueError(
+                f"vendored KITScenes SDK split {split!r} digest differs"
+            )
+        split_text = split_bytes.decode("ascii")
+    else:
+        split_file = (
+            resources.files("kitscenes")
+            .joinpath("split")
+            .joinpath("generated_splits")
+            .joinpath("default_geo_split_v1_0")
+            .joinpath(filename)
+        )
+        split_text = split_file.read_text()
     scene_ids = [
-        line.strip() for line in split_file.read_text().splitlines()
+        line.strip() for line in split_text.splitlines()
         if line.strip()
     ]
     if len(scene_ids) != len(set(scene_ids)):

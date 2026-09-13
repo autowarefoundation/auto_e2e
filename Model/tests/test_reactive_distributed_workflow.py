@@ -718,15 +718,22 @@ def test_reactive_policy_evaluation_enforces_expected_model_version():
 def test_kitscenes_test_publication_requires_expected_model_version():
     official_report = {
         "source_split": "test",
+        "dataset": distributed_training.KITSCENES_REPO_ID,
+        "dataset_version": (
+            distributed_training.KITSCENES_OFFICIAL_TEST_DATASET_VERSION
+        ),
+        "source_revision": distributed_training.KITSCENES_DATA_REVISION,
         "evaluation_role": (
             "official_test_camera_only_missing_map_route"
         ),
+        "input_track": "camera_only_missing_map_route",
         "partition_count": 206,
         "expected_partition_count": 206,
         "inference_cache_policy": (
             distributed_training
             .KITSCENES_STATEFUL_CAMERA_FPN_POLICY
         ),
+        "maximum_labeled_horizon_steps": 50,
         "scene_uid_sha256": (
             distributed_training
             .KITSCENES_OFFICIAL_TEST_SCENE_UID_SHA256
@@ -755,9 +762,112 @@ def test_kitscenes_test_publication_requires_expected_model_version():
         expected_model_version="67",
     )
     distributed_training._validate_kitscenes_publication_binding(
-        {"source_split": "val"},
+        {"source_split": "overlap_train_val"},
         expected_model_version="",
     )
+
+
+def test_kitscenes_val_publication_requires_official_map_route_inventory():
+    official_report = {
+        "source_split": "val",
+        "dataset": distributed_training.KITSCENES_REPO_ID,
+        "dataset_version": (
+            distributed_training.KITSCENES_OFFICIAL_VAL_DATASET_VERSION
+        ),
+        "source_revision": distributed_training.KITSCENES_DATA_REVISION,
+        "evaluation_role": "official_val_camera_map_route",
+        "input_track": "camera_map_route",
+        "partition_count": 117,
+        "expected_partition_count": 117,
+        "expected_sample_count": 11_035,
+        "inference_cache_policy": "stateless",
+        "maximum_labeled_horizon_steps": 50,
+        "scene_uid_sha256": (
+            distributed_training
+            .KITSCENES_OFFICIAL_VAL_SCENE_UID_SHA256
+        ),
+        "trajectory_inference_policy": {
+            "planner": "gru",
+            "stochastic_noise": False,
+            "version": (
+                distributed_training
+                .KITSCENES_TRAJECTORY_INFERENCE_POLICY
+            ),
+        },
+        "metrics": {"sample_count": 11_035},
+    }
+
+    with pytest.raises(
+        ValueError,
+        match="requires an existing model version",
+    ):
+        distributed_training._validate_kitscenes_publication_binding(
+            official_report,
+            expected_model_version="",
+        )
+
+    distributed_training._validate_kitscenes_publication_binding(
+        official_report,
+        expected_model_version="66",
+    )
+    with pytest.raises(
+        ValueError,
+        match="exact official inventory",
+    ):
+        distributed_training._validate_kitscenes_publication_binding(
+            {**official_report, "input_track": "camera_only"},
+            expected_model_version="66",
+        )
+
+
+def test_kitscenes_generic_val_publication_is_not_an_official_binding():
+    distributed_training._validate_kitscenes_publication_binding(
+        {
+            "source_split": "val",
+            "evaluation_role": "labeled_external_benchmark",
+        },
+        expected_model_version="",
+    )
+
+
+def test_kitscenes_val_publication_rejects_trajectory_policy_drift():
+    report = {
+        "source_split": "val",
+        "dataset": distributed_training.KITSCENES_REPO_ID,
+        "dataset_version": (
+            distributed_training.KITSCENES_OFFICIAL_VAL_DATASET_VERSION
+        ),
+        "source_revision": distributed_training.KITSCENES_DATA_REVISION,
+        "evaluation_role": "official_val_camera_map_route",
+        "input_track": "camera_map_route",
+        "partition_count": 117,
+        "expected_partition_count": 117,
+        "expected_sample_count": 11_035,
+        "inference_cache_policy": "stateless",
+        "maximum_labeled_horizon_steps": 50,
+        "scene_uid_sha256": (
+            distributed_training
+            .KITSCENES_OFFICIAL_VAL_SCENE_UID_SHA256
+        ),
+        "trajectory_inference_policy": {
+            "planner": "gru",
+            "stochastic_noise": True,
+            "version": (
+                distributed_training
+                .KITSCENES_TRAJECTORY_INFERENCE_POLICY
+            ),
+        },
+        "metrics": {"sample_count": 11_035},
+    }
+
+    with pytest.raises(
+        ValueError,
+        match="exact official inventory",
+    ):
+        distributed_training._validate_kitscenes_publication_binding(
+            report,
+            expected_model_version="66",
+        )
 
 
 def test_kitscenes_test_publication_rejects_subset_inventory():
@@ -1280,6 +1390,37 @@ def test_kitscenes_evaluation_workflow_publishes_to_mlflow():
     )
 
 
+def test_kitscenes_val_workflow_enforces_primary_inventory():
+    evaluator, publisher = (
+        distributed_training.wf_evaluate_reactive_kitscenes_val.nodes
+    )
+    bindings = {
+        binding.var: binding.binding
+        for binding in evaluator.bindings
+    }
+
+    assert bindings["source_split"].scalar.primitive.string_value == "val"
+    assert bindings["batch_size"].scalar.primitive.integer == 1
+    assert (
+        bindings["expected_val_partition_count"]
+        .scalar.primitive.integer
+        == 117
+    )
+    assert publisher.flyte_entity is (
+        distributed_training.publish_reactive_kitscenes_evaluation
+    )
+
+
+def test_kitscenes_generic_evaluation_preserves_batch_one():
+    evaluator, _ = distributed_training.wf_evaluate_reactive_kitscenes.nodes
+    bindings = {
+        binding.var: binding.binding
+        for binding in evaluator.bindings
+    }
+
+    assert bindings["batch_size"].scalar.primitive.integer == 1
+
+
 def test_kitscenes_test_sharded_workflow_enforces_official_inventory():
     evaluator, publisher = (
         distributed_training
@@ -1483,6 +1624,124 @@ def test_kitscenes_test_scene_identity_rejects_duplicate_scenes():
         )
 
 
+def test_kitscenes_val_scene_identity_accepts_official_set(monkeypatch):
+    scene_uids = ["kitscenes-scene-a", "kitscenes-scene-b"]
+    digest = hashlib.sha256(
+        "\n".join(scene_uids).encode()
+    ).hexdigest()
+    monkeypatch.setattr(
+        distributed_training,
+        "KITSCENES_OFFICIAL_VAL_SCENE_COUNT",
+        2,
+    )
+    monkeypatch.setattr(
+        distributed_training,
+        "KITSCENES_OFFICIAL_VAL_SCENE_UID_SHA256",
+        digest,
+    )
+
+    actual_digest, is_official = (
+        distributed_training._kitscenes_val_scene_identity(
+            list(reversed(scene_uids)),
+            expected_partition_count=2,
+        )
+    )
+
+    assert actual_digest == digest
+    assert is_official
+
+
+def test_kitscenes_val_scene_identity_does_not_promote_generic_val(
+    monkeypatch,
+):
+    scene_uids = ["kitscenes-scene-a", "kitscenes-scene-b"]
+    digest = hashlib.sha256(
+        "\n".join(scene_uids).encode()
+    ).hexdigest()
+    monkeypatch.setattr(
+        distributed_training,
+        "KITSCENES_OFFICIAL_VAL_SCENE_COUNT",
+        2,
+    )
+    monkeypatch.setattr(
+        distributed_training,
+        "KITSCENES_OFFICIAL_VAL_SCENE_UID_SHA256",
+        digest,
+    )
+
+    _, is_official = distributed_training._kitscenes_val_scene_identity(
+        scene_uids,
+        expected_partition_count=0,
+    )
+
+    assert not is_official
+
+
+def test_kitscenes_official_val_inventory_pins_are_executable():
+    val_scene_uids = sorted(
+        f"kitscenes-{scene_id}"
+        for scene_id in distributed_training.sdk_split_scene_ids("val")
+    )
+    train_scene_uids = {
+        f"kitscenes-{scene_id}"
+        for scene_id in distributed_training.sdk_split_scene_ids("train")
+    }
+
+    assert distributed_training.KITSCENES_OFFICIAL_VAL_SCENE_COUNT == 117
+    assert len(val_scene_uids) == 117
+    assert len(train_scene_uids) == 534
+    assert (
+        distributed_training.KITSCENES_OFFICIAL_VAL_SCENE_UID_SHA256
+        == "421858c6c6767deb6b486cc8d64628a7dd5eded25858e4d2a8354af15f4c369a"
+    )
+    assert hashlib.sha256(
+        "\n".join(val_scene_uids).encode()
+    ).hexdigest() == (
+        distributed_training.KITSCENES_OFFICIAL_VAL_SCENE_UID_SHA256
+    )
+    assert not set(val_scene_uids) & train_scene_uids
+    assert distributed_training.KITSCENES_OFFICIAL_VAL_SAMPLE_COUNT == 11_035
+
+
+def test_kitscenes_official_val_matches_sdk_and_excludes_train(
+    monkeypatch,
+):
+    split_scene_ids = {
+        "val": ["scene-a", "scene-b"],
+        "train": ["scene-c", "scene-d"],
+    }
+    scene_uids = ["kitscenes-scene-a", "kitscenes-scene-b"]
+    digest = hashlib.sha256(
+        "\n".join(scene_uids).encode()
+    ).hexdigest()
+    monkeypatch.setattr(
+        distributed_training,
+        "KITSCENES_OFFICIAL_VAL_SCENE_COUNT",
+        2,
+    )
+    monkeypatch.setattr(
+        distributed_training,
+        "KITSCENES_OFFICIAL_VAL_SCENE_UID_SHA256",
+        digest,
+    )
+    monkeypatch.setattr(
+        distributed_training,
+        "sdk_split_scene_ids",
+        lambda split: split_scene_ids[split],
+    )
+
+    distributed_training._validate_kitscenes_official_val_sdk_split(
+        list(reversed(scene_uids)),
+        expected_partition_count=2,
+    )
+    split_scene_ids["train"] = ["scene-b", "scene-d"]
+    with pytest.raises(ValueError, match="overlaps"):
+        distributed_training._validate_kitscenes_official_val_sdk_split(
+            scene_uids,
+            expected_partition_count=2,
+        )
+
+
 def test_kitscenes_official_sample_inventory_requires_exact_coverage(
     monkeypatch,
 ):
@@ -1523,6 +1782,46 @@ def test_kitscenes_official_sample_inventory_requires_exact_coverage(
             )
 
 
+def test_kitscenes_official_val_sample_inventory_requires_exact_coverage(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        distributed_training,
+        "KITSCENES_OFFICIAL_VAL_SCENE_COUNT",
+        2,
+    )
+    monkeypatch.setattr(
+        distributed_training,
+        "KITSCENES_OFFICIAL_VAL_SAMPLE_COUNT",
+        5,
+    )
+
+    distributed_training._validate_kitscenes_official_val_sample_inventory(
+        expected_partition_count=2,
+        empty_partition_count=0,
+        manifest_sample_count=5,
+        inventory_sample_count=5,
+    )
+    for values in (
+        (1, 5, 5),
+        (0, 4, 4),
+        (0, 5, None),
+    ):
+        with pytest.raises(
+            ValueError,
+            match="official val sample inventory differs",
+        ):
+            (
+                distributed_training
+                ._validate_kitscenes_official_val_sample_inventory(
+                    expected_partition_count=2,
+                    empty_partition_count=values[0],
+                    manifest_sample_count=values[1],
+                    inventory_sample_count=values[2],
+                )
+            )
+
+
 def test_kitscenes_checkpoint_evaluator_routes_inventory_policy():
     source = inspect.getsource(
         distributed_training.evaluate_reactive_kitscenes_checkpoint
@@ -1531,8 +1830,14 @@ def test_kitscenes_checkpoint_evaluator_routes_inventory_policy():
 
     assert "_discover_kitscenes_evaluation_inventory(" in source
     assert "mapless_test=mapless_test" in source
-    assert "if mapless_test and total_samples > 0:" in source
+    assert 'source_split in {"val", "test"}' in source
+    assert '"has_map": True' in source
+    assert '"has_navigation": True' in source
+    assert '"has_reactive_navigation": True' in source
+    assert '"has_route_reconstruction": True' in source
     assert "_kitscenes_test_scene_identity(" in source
+    assert "_kitscenes_val_scene_identity(" in source
+    assert "_validate_kitscenes_official_val_sdk_split(" in source
 
 
 def test_kitscenes_test_partition_aggregation_is_exact(tmp_path):

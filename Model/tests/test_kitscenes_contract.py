@@ -30,6 +30,8 @@ from data_parsing.kit_scenes import map as map_module
 from data_parsing.kit_scenes.source import (
     KITSCENES_STANDARD_TEST_SCENE_COUNT,
     KITSCENES_STANDARD_TEST_SCENE_UID_SHA256,
+    KITSCENES_STANDARD_VAL_SCENE_COUNT,
+    KITSCENES_STANDARD_VAL_SCENE_UID_SHA256,
     sdk_split_scene_ids,
 )
 
@@ -83,6 +85,18 @@ def test_standard_test_split_identity_is_pinned_and_not_test_e2e():
     assert hashlib.sha256(
         "\n".join(test_scene_uids).encode("utf-8")
     ).hexdigest() == KITSCENES_STANDARD_TEST_SCENE_UID_SHA256
+
+
+def test_standard_val_split_identity_is_pinned():
+    val_scene_uids = sorted(
+        f"kitscenes-{scene_id}"
+        for scene_id in sdk_split_scene_ids("val")
+    )
+
+    assert len(val_scene_uids) == KITSCENES_STANDARD_VAL_SCENE_COUNT
+    assert hashlib.sha256(
+        "\n".join(val_scene_uids).encode("utf-8")
+    ).hexdigest() == KITSCENES_STANDARD_VAL_SCENE_UID_SHA256
 
 
 def test_sample_uid_is_stable_across_scene_subsets():
