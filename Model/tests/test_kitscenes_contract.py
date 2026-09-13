@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import xml.etree.ElementTree as ET
 from types import SimpleNamespace
 
@@ -19,12 +20,18 @@ from data_parsing.kit_scenes.camera import (
 from data_parsing.kit_scenes.dataset import (
     KitScenesDataset,
     _heading_cw_from_north,
+    _local_future_to_ego_xy,
     _local_xy_to_absolute_utm,
     _utm32_to_wgs84,
 )
 from data_parsing.kit_scenes.egomotion import load_egomotion
 from data_parsing.kit_scenes import dataset as dataset_module
 from data_parsing.kit_scenes import map as map_module
+from data_parsing.kit_scenes.source import (
+    KITSCENES_STANDARD_TEST_SCENE_COUNT,
+    KITSCENES_STANDARD_TEST_SCENE_UID_SHA256,
+    sdk_split_scene_ids,
+)
 
 
 def _dataset_stub(samples):
@@ -59,6 +66,23 @@ def test_camera_view_contract_uses_six_non_redundant_views():
     ]
     assert NUM_VIEWS == len(CAMERA_NAMES) == 6
     assert "camera_ring_front" not in CAMERA_NAMES
+
+
+def test_standard_test_split_identity_is_pinned_and_not_test_e2e():
+    test_scene_uids = sorted(
+        f"kitscenes-{scene_id}"
+        for scene_id in sdk_split_scene_ids("test")
+    )
+    test_e2e_scene_ids = set(sdk_split_scene_ids("test_e2e"))
+
+    assert len(test_scene_uids) == KITSCENES_STANDARD_TEST_SCENE_COUNT
+    assert not {
+        scene_uid.removeprefix("kitscenes-")
+        for scene_uid in test_scene_uids
+    }.intersection(test_e2e_scene_ids)
+    assert hashlib.sha256(
+        "\n".join(test_scene_uids).encode("utf-8")
+    ).hexdigest() == KITSCENES_STANDARD_TEST_SCENE_UID_SHA256
 
 
 def test_sample_uid_is_stable_across_scene_subsets():
@@ -253,6 +277,105 @@ def test_geographic_output_requires_map_origin(monkeypatch, tmp_path):
 
     with pytest.raises(ValueError, match="no loadable map origin"):
         _local_xy_to_absolute_utm(tmp_path, np.zeros((1, 2)))
+
+
+def test_local_future_trajectory_uses_current_ego_frame():
+    positions = np.array([
+        [0.0, 0.0],
+        [1.0, 0.0],
+        [1.0, 2.0],
+        [-1.0, 2.0],
+    ])
+
+    trajectory, valid = _local_future_to_ego_xy(
+        positions,
+        frame_idx=1,
+        yaw_rad=np.pi / 2,
+        future_steps=2,
+    )
+
+    np.testing.assert_allclose(
+        trajectory[:2],
+        [[2.0, 0.0], [2.0, 2.0]],
+        rtol=0.0,
+        atol=1e-6,
+    )
+    np.testing.assert_array_equal(valid[:2], True)
+    np.testing.assert_array_equal(valid[2:], False)
+    np.testing.assert_array_equal(trajectory[2:], 0.0)
+
+
+def test_mapless_track_ignores_an_accidentally_present_map(monkeypatch, tmp_path):
+    scene_id = "scene"
+    loader = SimpleNamespace(
+        scene_path=tmp_path,
+        get_camera_names=lambda: list(CAMERA_NAMES),
+        get_frame_indices=lambda _: list(range(100)),
+        get_reference_timestamps=lambda: list(range(100)),
+    )
+    dataset = object.__new__(KitScenesDataset)
+    dataset.camera_names = list(CAMERA_NAMES)
+    dataset.image_size = 512
+    dataset._sampling_history_steps = 40
+    dataset._sampling_future_steps = 50
+    dataset._allow_mapless = True
+    dataset._include_navigation = False
+    dataset._sdk = SimpleNamespace(
+        get_sensor_loader=lambda _: loader,
+    )
+    dataset._scene_egomotion = {}
+    dataset._scene_poses = {}
+    dataset._scene_positions_local = {}
+    dataset._scene_latlon = {}
+    dataset._scene_yaws = {}
+    dataset._scene_timestamps_ns = {}
+    dataset._scene_camera_params = {}
+    dataset._scene_navigation = {}
+
+    poses = [
+        SimpleNamespace(timestamp_ns=index * 100_000_000)
+        for index in range(100)
+    ]
+    monkeypatch.setattr(
+        dataset_module,
+        "load_ego_poses",
+        lambda _: poses,
+    )
+    monkeypatch.setattr(
+        dataset_module,
+        "poses_to_arrays",
+        lambda _: (
+            np.zeros((100, 4), dtype=np.float32),
+            np.column_stack([
+                np.arange(100, dtype=np.float64),
+                np.zeros(100, dtype=np.float64),
+            ]),
+        ),
+    )
+    monkeypatch.setattr(
+        dataset_module,
+        "pose_yaws",
+        lambda _: np.zeros(100, dtype=np.float64),
+    )
+    monkeypatch.setattr(
+        dataset_module,
+        "compute_camera_projection_matrices",
+        lambda *args, **kwargs: torch.zeros(
+            len(CAMERA_NAMES),
+            3,
+            4,
+        ),
+    )
+    monkeypatch.setattr(
+        dataset_module,
+        "_cached_scene_map",
+        lambda _: pytest.fail("mapless track must not read the map"),
+    )
+
+    samples = dataset._valid_samples_for_scene(scene_id)
+
+    assert samples
+    assert scene_id not in dataset._scene_latlon
 
 
 class _CameraLoader:

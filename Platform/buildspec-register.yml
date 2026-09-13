@@ -18,6 +18,7 @@ phases:
       - ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
       - ECR_URL="${ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com"
       - test -n "${IMAGE_TAG}"
+      - test -n "${FLYTE_VERSION:-${IMAGE_TAG}}"
       - export ECR_PREFIX="${ECR_URL}"
       - export PYTHONPATH="${CODEBUILD_SRC_DIR}/Model:${CODEBUILD_SRC_DIR}:${PYTHONPATH:-}"
       - |
@@ -50,6 +51,7 @@ phases:
         pyflyte --config /tmp/flyte.yaml register
         --project $FLYTE_PROJECT
         --domain $FLYTE_DOMAIN
+        --version "${FLYTE_VERSION:-${IMAGE_TAG}}"
         --copy none
         --image "${AUTO_E2E_TRAINING_IMAGE}"
         Platform/pipelines/workflows.py

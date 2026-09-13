@@ -17,6 +17,7 @@ from flytekit import (
     PodTemplate,
     Resources,
     current_context,
+    dynamic,
     task,
     workflow,
 )
@@ -44,6 +45,11 @@ from kubernetes.client import (
     V1VolumeMount,
 )
 
+from data_parsing.kit_scenes.source import (
+    KITSCENES_STANDARD_TEST_SCENE_COUNT,
+    KITSCENES_STANDARD_TEST_SCENE_UID_SHA256,
+)
+
 TRAINING_IMAGE = os.environ.get(
     "AUTO_E2E_TRAINING_IMAGE",
     "auto-e2e/training:latest",
@@ -60,7 +66,11 @@ REACTIVE_MLFLOW_EXPERIMENT = "reactive-training"
 REACTIVE_BEV_EVALUATION_MLFLOW_EXPERIMENT = (
     "reactive-bev-evaluation"
 )
+REACTIVE_POLICY_EVALUATION_MLFLOW_EXPERIMENT = (
+    "reactive-policy-evaluation"
+)
 REACTIVE_BEV_REGISTERED_MODEL = "auto-e2e-bev-segmentation"
+REACTIVE_POLICY_REGISTERED_MODEL = "auto-e2e-driving-policy"
 RAY_TASK_ENVIRONMENT = {
     "AWS_DEFAULT_REGION": "us-west-2",
     "AUTO_E2E_RAY_STORAGE_PATH": RAY_STORAGE_PATH,
@@ -74,6 +84,12 @@ BEV_CANARY_RARE_AP_LIFT_RELATIVE_REGRESSION_TOLERANCE = 0.1
 P5EN_SMOKE_MAX_RUNTIME = timedelta(minutes=30)
 NUPLAN_EPOCH5_TRAJECTORY_ROUTE_CHECKPOINT_SHA256 = (
     "ca8b43d7a777d6fd9195bb253d1452f3cd645f7aab3bd0e36b1f74ffb31df29b"
+)
+KITSCENES_OFFICIAL_TEST_SCENE_COUNT = (
+    KITSCENES_STANDARD_TEST_SCENE_COUNT
+)
+KITSCENES_OFFICIAL_TEST_SCENE_UID_SHA256 = (
+    KITSCENES_STANDARD_TEST_SCENE_UID_SHA256
 )
 
 
@@ -169,7 +185,23 @@ class ReactiveKITScenesEvaluationOutput(NamedTuple):
     checkpoint_epoch: int
 
 
+class ReactiveKITScenesEvaluationWorkflowOutput(NamedTuple):
+    report: FlyteFile
+    report_sha256: str
+    checkpoint_sha256: str
+    checkpoint_epoch: int
+    mlflow_run_id: str
+    registered_model_name: str
+    registered_model_version: str
+
+
 class ReactiveBEVPublicationOutput(NamedTuple):
+    mlflow_run_id: str
+    registered_model_name: str
+    registered_model_version: str
+
+
+class ReactivePolicyPublicationOutput(NamedTuple):
     mlflow_run_id: str
     registered_model_name: str
     registered_model_version: str
@@ -988,6 +1020,78 @@ def _register_reactive_bev_model_version(
             value,
         )
     return version
+
+
+def _register_reactive_policy_model_version(
+    client,
+    *,
+    checkpoint_uri: str,
+    checkpoint_sha256: str,
+    evaluation_run_id: str,
+    expected_model_version: str = "",
+) -> str:
+    """Resolve one checkpoint to exactly one policy model version."""
+    try:
+        client.get_registered_model(REACTIVE_POLICY_REGISTERED_MODEL)
+    except Exception:
+        try:
+            client.create_registered_model(
+                REACTIVE_POLICY_REGISTERED_MODEL
+            )
+        except Exception:
+            client.get_registered_model(
+                REACTIVE_POLICY_REGISTERED_MODEL
+            )
+
+    if expected_model_version:
+        existing = client.get_model_version(
+            REACTIVE_POLICY_REGISTERED_MODEL,
+            expected_model_version,
+        )
+        tags = getattr(existing, "tags", {}) or {}
+        existing_sha256 = str(tags.get("checkpoint_sha256", ""))
+        existing_source = str(getattr(existing, "source", "") or "")
+        if (
+            existing_source != checkpoint_uri
+            or existing_sha256 != checkpoint_sha256
+        ):
+            raise RuntimeError(
+                "expected policy model version does not match the checkpoint"
+            )
+        return str(existing.version)
+
+    matches = []
+    for existing in client.search_model_versions(
+        f"name='{REACTIVE_POLICY_REGISTERED_MODEL}'"
+    ):
+        tags = getattr(existing, "tags", {}) or {}
+        existing_sha256 = str(tags.get("checkpoint_sha256", ""))
+        existing_source = str(getattr(existing, "source", "") or "")
+        source_matches = existing_source == checkpoint_uri
+        digest_matches = existing_sha256 == checkpoint_sha256
+        if source_matches and existing_sha256 not in (
+            "",
+            checkpoint_sha256,
+        ):
+            raise RuntimeError(
+                "policy checkpoint source has a conflicting SHA-256"
+            )
+        if source_matches or digest_matches:
+            matches.append(existing)
+
+    if len(matches) > 1:
+        raise RuntimeError(
+            "policy checkpoint resolves to multiple model versions"
+        )
+    if matches:
+        return str(matches[0].version)
+
+    registered = client.create_model_version(
+        name=REACTIVE_POLICY_REGISTERED_MODEL,
+        source=checkpoint_uri,
+        run_id=evaluation_run_id,
+    )
+    return str(registered.version)
 
 
 def _log_reactive_bev_evaluation_to_mlflow(
@@ -2811,9 +2915,10 @@ def evaluate_reactive_kitscenes_checkpoint(
         inspect_reactive_checkpoint_identity,
     )
 
-    if source_split not in {"val", "overlap_train_val"}:
+    if source_split not in {"val", "overlap_train_val", "test"}:
         raise ValueError(
-            "KITScenes labeled evaluation requires val or overlap_train_val"
+            "KITScenes labeled evaluation requires val, overlap_train_val, "
+            "or test"
         )
     if not 1 <= batch_size <= 2:
         raise ValueError("KITScenes evaluation batch size must be one or two")
@@ -2824,13 +2929,19 @@ def evaluate_reactive_kitscenes_checkpoint(
     if not shards:
         raise ValueError("KITScenes evaluation shards must not be empty")
 
+    mapless_test = source_split == "test"
     remote_uris = [_flyte_remote_uri(shard) for shard in shards]
     plan = build_reactive_dataset_plan(
         remote_uris,
         stage=ReactiveTrainingStage.KITSCENES_FINETUNE,
+        allow_mapless_kitscenes_evaluation=mapless_test,
     )
     shard_directories: list[str] = []
     manifest_identities: list[dict[str, object]] = []
+    dataset_names: set[str] = set()
+    dataset_versions: set[str] = set()
+    source_revisions: set[str] = set()
+    expected_sample_count = 0
     for shard in shards:
         directory = Path(shard.download())
         manifest_path = directory / "manifest.json"
@@ -2847,23 +2958,98 @@ def evaluate_reactive_kitscenes_checkpoint(
                 "KITScenes evaluation manifest has the wrong split, role, "
                 "or temporal contract"
             )
-        if int(manifest.get("total_samples", 0)) > 0:
+        total_samples = int(manifest.get("total_samples", 0))
+        if total_samples < 0:
+            raise ValueError(
+                "KITScenes evaluation manifest has invalid sample count"
+            )
+        if mapless_test and total_samples > 0:
+            expected_test_contract = {
+                "has_gps": False,
+                "has_map": False,
+                "has_navigation": False,
+                "has_reactive_navigation": False,
+                "has_route_reconstruction": False,
+                "has_trajectory_xy": True,
+                "input_track": "camera_only_missing_map_route",
+            }
+            mismatches = {
+                key: manifest.get(key)
+                for key, expected in expected_test_contract.items()
+                if manifest.get(key) != expected
+            }
+            if mismatches:
+                raise ValueError(
+                    "KITScenes test manifest violates the camera-only "
+                    f"missing-map contract: {mismatches}"
+                )
+        if mapless_test and total_samples == 0 and any(
+            bool(manifest.get(field, False))
+            for field in (
+                "has_gps",
+                "has_map",
+                "has_navigation",
+                "has_reactive_navigation",
+                "has_route_reconstruction",
+                "has_trajectory_xy",
+            )
+        ):
+            raise ValueError(
+                "empty KITScenes test partition advertises target data"
+            )
+        if total_samples > 0:
             shard_directories.append(str(directory))
+        expected_sample_count += total_samples
+        dataset_names.add(str(manifest.get("dataset") or ""))
+        dataset_versions.add(str(manifest.get("dataset_version") or ""))
+        source_revisions.add(str(manifest.get("source_revision") or ""))
+        split_group_uids = manifest.get("split_group_uids")
+        if (
+            mapless_test
+            and (
+                not isinstance(split_group_uids, list)
+                or len(split_group_uids) != 1
+                or not isinstance(split_group_uids[0], str)
+                or not split_group_uids[0].startswith("kitscenes-")
+            )
+        ):
+            raise ValueError(
+                "KITScenes test partition lacks one scene identity"
+            )
         manifest_identities.append({
             "manifest_sha256": hashlib.sha256(
                 manifest_bytes
             ).hexdigest(),
             "partition_id": str(manifest.get("partition_id") or ""),
+            "split_group_uids": split_group_uids,
             "total_samples": int(manifest.get("total_samples", 0)),
         })
-    if not shard_directories:
-        raise ValueError("KITScenes evaluation has no non-empty shards")
+    if (
+        len(dataset_names) != 1
+        or "" in dataset_names
+        or len(dataset_versions) != 1
+        or "" in dataset_versions
+        or len(source_revisions) != 1
+        or "" in source_revisions
+    ):
+        raise ValueError(
+            "KITScenes evaluation manifests mix dataset provenance"
+        )
 
-    inventory = discover_split_inventory(shard_directories)
-    if inventory.sample_count != plan.total_samples:
+    inventory = (
+        discover_split_inventory(shard_directories)
+        if shard_directories
+        else None
+    )
+    if expected_sample_count != plan.total_samples or (
+        inventory is not None
+        and inventory.sample_count != plan.total_samples
+    ):
         raise ValueError(
             "KITScenes evaluation sample inventory differs from manifests"
         )
+    if inventory is None and (not mapless_test or expected_sample_count != 0):
+        raise ValueError("KITScenes evaluation has no non-empty shards")
 
     checkpoint_path = Path(checkpoint.download())
     checkpoint_identity = inspect_reactive_checkpoint_identity(
@@ -2889,41 +3075,71 @@ def evaluate_reactive_kitscenes_checkpoint(
         raise ValueError(
             "checkpoint is not a reviewed KITScenes fine-tuning checkpoint"
         )
-    stage = ReactiveTrainingStage.KITSCENES_FINETUNE
-    model = AutoE2E(
-        backbone=str(config["backbone"]),
-        embed_dim=int(config["embed_dim"]),
-        is_pretrained=False,
-        **reactive_model_kwargs(
-            stage,
-            num_views=int(config["num_views"]),
-        ),
-    )
-    model.load_state_dict(state_dict)
-    device = torch.device("cuda")
-    if not torch.cuda.is_available():
-        raise RuntimeError("KITScenes evaluation requires a GPU")
-    model.to(device)
-    loader = make_multi_dataset_loader(
-        shard_directories,
-        batch_size=batch_size,
-        num_workers=num_loader_workers,
-        split="all",
-        val_fraction=0.0,
-        shuffle=0,
-        pin_memory=True,
-        prefetch_factor=1,
-        max_active_loaders=1,
-        decode_future_frames=False,
-    )
-    metrics = evaluate_reactive_multitask(
-        model,
-        loader,
-        stage=stage,
-        device=device,
-        include_counterfactuals=True,
-        include_route_gradient=True,
-    )
+    if inventory is None:
+        trajectory_metrics: dict[str, float | int | None] = {
+            "valid_timestep_count": 0,
+            "total_timestep_count": 0,
+            "valid_horizon_coverage": None,
+            "mean_abs_longitudinal_error_m": None,
+            "mean_abs_lateral_error_m": None,
+            "nonfinite_prediction_count": 0,
+            "nonfinite_prediction_rate": None,
+        }
+        for horizon in ("1s", "2s", "3s", "5s", "6p4s"):
+            trajectory_metrics[f"ade_{horizon}_m"] = None
+            trajectory_metrics[f"fde_{horizon}_m"] = None
+            trajectory_metrics[f"ade_{horizon}_sample_count"] = 0
+            trajectory_metrics[f"fde_{horizon}_sample_count"] = 0
+        metrics = {
+            "schema_version": "reactive_multitask_evaluation_v1",
+            "sample_count": 0,
+            "sample_uid_sha256": hashlib.sha256(b"").hexdigest(),
+            "trajectory": trajectory_metrics,
+            "bev_segmentation": {
+                "available": False,
+                "reason": "targets_unavailable",
+            },
+            "route": {
+                "available": False,
+                "reason": "input_and_targets_unavailable",
+            },
+        }
+    else:
+        stage = ReactiveTrainingStage.KITSCENES_FINETUNE
+        model = AutoE2E(
+            backbone=str(config["backbone"]),
+            embed_dim=int(config["embed_dim"]),
+            is_pretrained=False,
+            **reactive_model_kwargs(
+                stage,
+                num_views=int(config["num_views"]),
+            ),
+        )
+        model.load_state_dict(state_dict)
+        device = torch.device("cuda")
+        if not torch.cuda.is_available():
+            raise RuntimeError("KITScenes evaluation requires a GPU")
+        model.to(device)
+        loader = make_multi_dataset_loader(
+            shard_directories,
+            batch_size=batch_size,
+            num_workers=num_loader_workers,
+            split="all",
+            val_fraction=0.0,
+            shuffle=0,
+            pin_memory=True,
+            prefetch_factor=1,
+            max_active_loaders=1,
+            decode_future_frames=False,
+        )
+        metrics = evaluate_reactive_multitask(
+            model,
+            loader,
+            stage=stage,
+            device=device,
+            include_counterfactuals=not mapless_test,
+            include_route_gradient=not mapless_test,
+        )
     trajectory_metrics = metrics.get("trajectory")
     if not isinstance(trajectory_metrics, dict):
         raise ValueError("KITScenes evaluation omitted trajectory metrics")
@@ -2931,7 +3147,7 @@ def evaluate_reactive_kitscenes_checkpoint(
     trajectory_metrics["fde_6p4s_m"] = None
     trajectory_metrics["ade_6p4s_sample_count"] = 0
     trajectory_metrics["fde_6p4s_sample_count"] = 0
-    if (
+    if inventory is not None and (
         metrics.get("sample_count") != inventory.sample_count
         or metrics.get("sample_uid_sha256")
         != inventory.sample_uid_digest
@@ -2943,9 +3159,18 @@ def evaluate_reactive_kitscenes_checkpoint(
         "schema_version": "reactive_kitscenes_labeled_evaluation_v1",
         "checkpoint_epoch": checkpoint_epoch,
         "checkpoint_sha256": checkpoint_identity["checkpoint_sha256"],
-        "dataset": plan.dataset,
-        "dataset_version": plan.dataset_version,
-        "evaluation_role": "labeled_external_benchmark",
+        "dataset": next(iter(dataset_names)),
+        "dataset_version": next(iter(dataset_versions)),
+        "evaluation_role": (
+            "official_test_camera_only_missing_map_route"
+            if mapless_test
+            else "labeled_external_benchmark"
+        ),
+        "input_track": (
+            "camera_only_missing_map_route"
+            if mapless_test
+            else "camera_map_route"
+        ),
         "maximum_labeled_horizon_steps": (
             KITSCENES_BENCHMARK_FUTURE_STEPS
         ),
@@ -2954,7 +3179,7 @@ def evaluate_reactive_kitscenes_checkpoint(
             key=lambda item: str(item["partition_id"]),
         ),
         "metrics": metrics,
-        "source_revision": plan.source_revision,
+        "source_revision": next(iter(source_revisions)),
         "source_split": source_split,
     }
     report_bytes = (
@@ -2976,6 +3201,603 @@ def evaluate_reactive_kitscenes_checkpoint(
         report_sha256=hashlib.sha256(report_bytes).hexdigest(),
         checkpoint_sha256=checkpoint_identity["checkpoint_sha256"],
         checkpoint_epoch=checkpoint_epoch,
+    )
+
+
+@task(
+    container_image=TRAINING_IMAGE,
+    requests=Resources(
+        cpu="2",
+        mem="4Gi",
+        ephemeral_storage="4Gi",
+    ),
+    limits=Resources(
+        cpu="2",
+        mem="4Gi",
+        ephemeral_storage="4Gi",
+    ),
+    retries=2,
+)
+def aggregate_reactive_kitscenes_test_evaluations(
+    reports: List[FlyteFile],
+    report_sha256s: List[str],
+    checkpoint_sha256s: List[str],
+    checkpoint_epochs: List[int],
+    expected_partition_count: int,
+) -> ReactiveKITScenesEvaluationOutput:
+    """Aggregate exact per-scene KITScenes test trajectory statistics."""
+    import tempfile
+
+    lengths = {
+        len(reports),
+        len(report_sha256s),
+        len(checkpoint_sha256s),
+        len(checkpoint_epochs),
+    }
+    if len(lengths) != 1 or not reports:
+        raise ValueError(
+            "KITScenes test aggregation inputs must be non-empty and aligned"
+        )
+    if (
+        isinstance(expected_partition_count, bool)
+        or not isinstance(expected_partition_count, int)
+        or expected_partition_count <= 0
+    ):
+        raise ValueError(
+            "KITScenes test expected partition count must be positive"
+        )
+    if len(reports) != expected_partition_count:
+        raise ValueError(
+            "KITScenes test aggregation does not cover the expected "
+            f"{expected_partition_count} partitions"
+        )
+    if len(set(checkpoint_sha256s)) != 1:
+        raise ValueError(
+            "KITScenes test partitions used different checkpoints"
+        )
+    if len(set(checkpoint_epochs)) != 1:
+        raise ValueError(
+            "KITScenes test partitions used different checkpoint epochs"
+        )
+
+    payloads = []
+    seen_partitions: set[str] = set()
+    seen_scene_uids: set[str] = set()
+    for report, expected_sha256 in zip(
+        reports,
+        report_sha256s,
+        strict=True,
+    ):
+        report_path = Path(report.download())
+        report_bytes = report_path.read_bytes()
+        if hashlib.sha256(report_bytes).hexdigest() != expected_sha256:
+            raise ValueError(
+                "KITScenes test partition report digest differs"
+            )
+        payload = json.loads(report_bytes)
+        if (
+            not isinstance(payload, dict)
+            or payload.get("source_split") != "test"
+            or payload.get("input_track")
+            != "camera_only_missing_map_route"
+            or payload.get("evaluation_role")
+            != "official_test_camera_only_missing_map_route"
+            or payload.get("maximum_labeled_horizon_steps") != 50
+            or payload.get("checkpoint_sha256")
+            != checkpoint_sha256s[0]
+            or payload.get("checkpoint_epoch") != checkpoint_epochs[0]
+        ):
+            raise ValueError(
+                "KITScenes test partition report identity differs"
+            )
+        identities = payload.get("manifest_identities")
+        if not isinstance(identities, list) or len(identities) != 1:
+            raise ValueError(
+                "KITScenes test report must cover exactly one partition"
+            )
+        partition_id = str(identities[0].get("partition_id") or "")
+        if not partition_id or partition_id in seen_partitions:
+            raise ValueError(
+                "KITScenes test reports contain duplicate partitions"
+            )
+        split_group_uids = identities[0].get("split_group_uids")
+        if (
+            not isinstance(split_group_uids, list)
+            or len(split_group_uids) != 1
+            or not isinstance(split_group_uids[0], str)
+            or not split_group_uids[0].startswith("kitscenes-")
+            or split_group_uids[0] in seen_scene_uids
+        ):
+            raise ValueError(
+                "KITScenes test reports contain invalid scene identities"
+            )
+        seen_partitions.add(partition_id)
+        seen_scene_uids.add(split_group_uids[0])
+        payloads.append(payload)
+
+    datasets = {str(payload.get("dataset") or "") for payload in payloads}
+    dataset_versions = {
+        str(payload.get("dataset_version") or "")
+        for payload in payloads
+    }
+    source_revisions = {
+        str(payload.get("source_revision") or "")
+        for payload in payloads
+    }
+    if (
+        len(datasets) != 1
+        or "" in datasets
+        or len(dataset_versions) != 1
+        or "" in dataset_versions
+        or len(source_revisions) != 1
+        or "" in source_revisions
+    ):
+        raise ValueError(
+            "KITScenes test partition reports mix dataset provenance"
+        )
+
+    trajectory_rows = []
+    sample_count = 0
+    partition_uid_identities = []
+    for payload in payloads:
+        metrics = payload.get("metrics")
+        trajectory = (
+            metrics.get("trajectory")
+            if isinstance(metrics, dict)
+            else None
+        )
+        partition_sample_count = (
+            metrics.get("sample_count")
+            if isinstance(metrics, dict)
+            else None
+        )
+        sample_uid_sha256 = (
+            metrics.get("sample_uid_sha256")
+            if isinstance(metrics, dict)
+            else None
+        )
+        if (
+            not isinstance(trajectory, dict)
+            or isinstance(partition_sample_count, bool)
+            or not isinstance(partition_sample_count, int)
+            or partition_sample_count < 0
+            or not isinstance(sample_uid_sha256, str)
+            or len(sample_uid_sha256) != 64
+            or int(
+                payload["manifest_identities"][0]["total_samples"]
+            )
+            != partition_sample_count
+        ):
+            raise ValueError(
+                "KITScenes test partition metrics are incomplete"
+            )
+        sample_count += partition_sample_count
+        trajectory_rows.append(trajectory)
+        partition_id = str(
+            payload["manifest_identities"][0]["partition_id"]
+        )
+        partition_uid_identities.append(
+            f"{partition_id}:{sample_uid_sha256}"
+        )
+    if sample_count <= 0:
+        raise ValueError("KITScenes test evaluation has no labeled samples")
+    scene_uid_sha256 = hashlib.sha256(
+        "\n".join(sorted(seen_scene_uids)).encode("utf-8")
+    ).hexdigest()
+    if (
+        expected_partition_count
+        == KITSCENES_OFFICIAL_TEST_SCENE_COUNT
+        and scene_uid_sha256
+        != KITSCENES_OFFICIAL_TEST_SCENE_UID_SHA256
+    ):
+        raise ValueError(
+            "KITScenes test reports do not cover the official scene set"
+        )
+
+    def sum_integer(name: str) -> int:
+        values = [row.get(name) for row in trajectory_rows]
+        if any(
+            isinstance(value, bool) or not isinstance(value, int)
+            for value in values
+        ):
+            raise ValueError(
+                f"KITScenes trajectory metric {name!r} is not integral"
+            )
+        return sum(values)
+
+    def weighted_mean(
+        value_name: str,
+        count_name: str,
+    ) -> float | None:
+        numerator = 0.0
+        denominator = 0
+        for row in trajectory_rows:
+            value = row.get(value_name)
+            count = row.get(count_name)
+            if (
+                isinstance(count, bool)
+                or not isinstance(count, int)
+                or count < 0
+            ):
+                raise ValueError(
+                    f"KITScenes trajectory count {count_name!r} is invalid"
+                )
+            if count == 0:
+                if value is not None:
+                    raise ValueError(
+                        f"KITScenes metric {value_name!r} has no samples"
+                    )
+                continue
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(float(value))
+            ):
+                raise ValueError(
+                    f"KITScenes metric {value_name!r} is invalid"
+                )
+            numerator += float(value) * count
+            denominator += count
+        return numerator / denominator if denominator else None
+
+    valid_timestep_count = sum_integer("valid_timestep_count")
+    total_timestep_count = sum_integer("total_timestep_count")
+    nonfinite_prediction_count = sum_integer(
+        "nonfinite_prediction_count"
+    )
+    trajectory_metrics: dict[str, float | int | None] = {
+        "valid_timestep_count": valid_timestep_count,
+        "total_timestep_count": total_timestep_count,
+        "valid_horizon_coverage": (
+            valid_timestep_count / total_timestep_count
+            if total_timestep_count
+            else None
+        ),
+        "mean_abs_longitudinal_error_m": weighted_mean(
+            "mean_abs_longitudinal_error_m",
+            "valid_timestep_count",
+        ),
+        "mean_abs_lateral_error_m": weighted_mean(
+            "mean_abs_lateral_error_m",
+            "valid_timestep_count",
+        ),
+        "nonfinite_prediction_count": nonfinite_prediction_count,
+        "nonfinite_prediction_rate": (
+            nonfinite_prediction_count / sample_count
+        ),
+    }
+    for horizon in ("1s", "2s", "3s", "5s", "6p4s"):
+        ade_count_name = f"ade_{horizon}_sample_count"
+        fde_count_name = f"fde_{horizon}_sample_count"
+        trajectory_metrics[f"ade_{horizon}_m"] = weighted_mean(
+            f"ade_{horizon}_m",
+            ade_count_name,
+        )
+        trajectory_metrics[f"fde_{horizon}_m"] = weighted_mean(
+            f"fde_{horizon}_m",
+            fde_count_name,
+        )
+        trajectory_metrics[ade_count_name] = sum_integer(ade_count_name)
+        trajectory_metrics[fde_count_name] = sum_integer(fde_count_name)
+
+    metrics = {
+        "schema_version": "reactive_multitask_evaluation_v1",
+        "sample_count": sample_count,
+        "sample_uid_sha256": None,
+        "partition_sample_uid_sha256": hashlib.sha256(
+            "\n".join(sorted(partition_uid_identities)).encode("utf-8")
+        ).hexdigest(),
+        "trajectory": trajectory_metrics,
+        "bev_segmentation": {
+            "available": False,
+            "reason": "targets_unavailable",
+        },
+        "route": {
+            "available": False,
+            "reason": "input_and_targets_unavailable",
+        },
+    }
+
+    manifest_identities = [
+        identity
+        for payload in payloads
+        for identity in payload["manifest_identities"]
+    ]
+    report_payload = {
+        "schema_version": (
+            "reactive_kitscenes_test_sharded_evaluation_v1"
+        ),
+        "checkpoint_epoch": checkpoint_epochs[0],
+        "checkpoint_sha256": checkpoint_sha256s[0],
+        "dataset": next(iter(datasets)),
+        "dataset_version": next(iter(dataset_versions)),
+        "evaluation_role": (
+            "official_test_camera_only_missing_map_route"
+        ),
+        "input_track": "camera_only_missing_map_route",
+        "manifest_identities": sorted(
+            manifest_identities,
+            key=lambda item: str(item["partition_id"]),
+        ),
+        "maximum_labeled_horizon_steps": 50,
+        "metrics": metrics,
+        "partition_count": len(payloads),
+        "expected_partition_count": expected_partition_count,
+        "scene_uid_sha256": scene_uid_sha256,
+        "partition_report_sha256s": sorted(report_sha256s),
+        "source_revision": next(iter(source_revisions)),
+        "source_split": "test",
+    }
+    report_bytes = (
+        json.dumps(
+            report_payload,
+            allow_nan=False,
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n"
+    ).encode("ascii")
+    output = (
+        Path(tempfile.mkdtemp(prefix="reactive-kitscenes-test-aggregate-"))
+        / "report.json"
+    )
+    output.write_bytes(report_bytes)
+    return ReactiveKITScenesEvaluationOutput(
+        report=FlyteFile(str(output)),
+        report_sha256=hashlib.sha256(report_bytes).hexdigest(),
+        checkpoint_sha256=checkpoint_sha256s[0],
+        checkpoint_epoch=checkpoint_epochs[0],
+    )
+
+
+@dynamic(container_image=TRAINING_IMAGE)
+def evaluate_reactive_kitscenes_test_partitions(
+    checkpoint: FlyteFile,
+    shards: List[FlyteDirectory],
+    expected_partition_count: int = KITSCENES_OFFICIAL_TEST_SCENE_COUNT,
+) -> ReactiveKITScenesEvaluationOutput:
+    """Evaluate each KITScenes test scene within one G6 disk budget."""
+    reports: List[FlyteFile] = []
+    report_sha256s: List[str] = []
+    checkpoint_sha256s: List[str] = []
+    checkpoint_epochs: List[int] = []
+    for shard in shards:
+        evaluation = evaluate_reactive_kitscenes_checkpoint(
+            checkpoint=checkpoint,
+            shards=[shard],
+            source_split="test",
+            batch_size=1,
+            num_loader_workers=4,
+        )
+        reports.append(evaluation.report)
+        report_sha256s.append(evaluation.report_sha256)
+        checkpoint_sha256s.append(evaluation.checkpoint_sha256)
+        checkpoint_epochs.append(evaluation.checkpoint_epoch)
+    return aggregate_reactive_kitscenes_test_evaluations(
+        reports=reports,
+        report_sha256s=report_sha256s,
+        checkpoint_sha256s=checkpoint_sha256s,
+        checkpoint_epochs=checkpoint_epochs,
+        expected_partition_count=expected_partition_count,
+    )
+
+
+@task(
+    container_image=TRAINING_IMAGE,
+    requests=Resources(
+        cpu="2",
+        mem="4Gi",
+        ephemeral_storage="4Gi",
+    ),
+    limits=Resources(
+        cpu="2",
+        mem="4Gi",
+        ephemeral_storage="4Gi",
+    ),
+    retries=2,
+    environment={"MLFLOW_TRACKING_URI": MLFLOW_URI},
+)
+def publish_reactive_kitscenes_evaluation(
+    checkpoint: FlyteFile,
+    report: FlyteFile,
+    report_sha256: str,
+    checkpoint_sha256: str,
+    checkpoint_epoch: int,
+    expected_model_version: str = "",
+) -> ReactivePolicyPublicationOutput:
+    """Register one exact KITScenes evaluation against its checkpoint."""
+    import mlflow
+    from mlflow.entities import Metric
+    from mlflow.tracking import MlflowClient
+
+    report_path = Path(report.download())
+    report_bytes = report_path.read_bytes()
+    if hashlib.sha256(report_bytes).hexdigest() != report_sha256:
+        raise ValueError("KITScenes evaluation report digest differs")
+    report_payload = json.loads(report_bytes)
+    if (
+        not isinstance(report_payload, dict)
+        or report_payload.get("checkpoint_sha256") != checkpoint_sha256
+        or report_payload.get("checkpoint_epoch") != checkpoint_epoch
+    ):
+        raise ValueError("KITScenes evaluation report identity differs")
+
+    checkpoint_path = Path(checkpoint.download())
+    checkpoint_hasher = hashlib.sha256()
+    with checkpoint_path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(8 * 1024 * 1024), b""):
+            checkpoint_hasher.update(chunk)
+    if checkpoint_hasher.hexdigest() != checkpoint_sha256:
+        raise ValueError("KITScenes evaluation checkpoint digest differs")
+
+    mlflow.set_tracking_uri(os.environ["MLFLOW_TRACKING_URI"])
+    experiment = mlflow.set_experiment(
+        REACTIVE_POLICY_EVALUATION_MLFLOW_EXPERIMENT
+    )
+    client = MlflowClient()
+    evaluation_key = (
+        f"{checkpoint_sha256}:{report_payload['source_split']}:"
+        f"{report_sha256}"
+    )
+    matches = client.search_runs(
+        experiment_ids=[experiment.experiment_id],
+        filter_string=(
+            "tags.reactive_policy_evaluation_key = "
+            f"'{evaluation_key}'"
+        ),
+        max_results=2,
+    )
+    if len(matches) > 1:
+        raise RuntimeError(
+            "multiple MLflow runs use one KITScenes evaluation key"
+        )
+    if matches:
+        run_id = matches[0].info.run_id
+        client.set_tag(run_id, "flyte_retry_reused", "true")
+    else:
+        split = str(report_payload["source_split"])
+        run_name = (
+            f"kitscenes-{split}-e{checkpoint_epoch}-"
+            f"{checkpoint_sha256[:12]}"
+        )
+        run = client.create_run(
+            experiment_id=experiment.experiment_id,
+            start_time=int(time.time() * 1000),
+            tags={
+                "mlflow.runName": run_name,
+                "pipeline": REACTIVE_POLICY_EVALUATION_MLFLOW_EXPERIMENT,
+                "reactive_policy_evaluation_key": evaluation_key,
+                "checkpoint_sha256": checkpoint_sha256,
+                "checkpoint_s3_uri": _flyte_remote_uri(checkpoint),
+                "evaluation_dataset": str(report_payload["dataset"]),
+                "evaluation_input_track": str(
+                    report_payload["input_track"]
+                ),
+                "evaluation_report_sha256": report_sha256,
+                "evaluation_role": str(
+                    report_payload["evaluation_role"]
+                ),
+                "evaluation_split": split,
+                "task_status": "RUNNING",
+            },
+        )
+        run_id = run.info.run_id
+        for name, value in {
+            "data/dataset": report_payload["dataset"],
+            "data/dataset_version": report_payload["dataset_version"],
+            "data/source_revision": report_payload["source_revision"],
+            "data/source_split": split,
+            "eval/input_track": report_payload["input_track"],
+            "model/checkpoint_epoch": checkpoint_epoch,
+            "model/checkpoint_sha256": checkpoint_sha256,
+        }.items():
+            client.log_param(run_id, name, str(value)[:500])
+
+    metrics_payload = report_payload.get("metrics")
+    trajectory = (
+        metrics_payload.get("trajectory")
+        if isinstance(metrics_payload, dict)
+        else None
+    )
+    if not isinstance(trajectory, dict):
+        raise ValueError("KITScenes report has no trajectory metrics")
+    timestamp = int(time.time() * 1000)
+    split = str(report_payload["source_split"])
+    numeric_metrics = {
+        f"{split}/trajectory/{name}": float(value)
+        for name, value in trajectory.items()
+        if (
+            value is not None
+            and not isinstance(value, bool)
+            and isinstance(value, (int, float))
+            and math.isfinite(float(value))
+        )
+    }
+    numeric_metrics[f"{split}/sample_count"] = float(
+        metrics_payload["sample_count"]
+    )
+    client.log_batch(
+        run_id,
+        metrics=[
+            Metric(
+                key=name,
+                value=value,
+                timestamp=timestamp,
+                step=checkpoint_epoch,
+            )
+            for name, value in sorted(numeric_metrics.items())
+        ],
+    )
+    client.log_artifact(
+        run_id,
+        str(report_path),
+        artifact_path="evaluation",
+    )
+
+    checkpoint_uri = _flyte_remote_uri(checkpoint)
+    version = _register_reactive_policy_model_version(
+        client,
+        checkpoint_uri=checkpoint_uri,
+        checkpoint_sha256=checkpoint_sha256,
+        evaluation_run_id=run_id,
+        expected_model_version=expected_model_version,
+    )
+
+    split_tag = re.sub(
+        r"[^a-z0-9]+",
+        "_",
+        split.lower(),
+    ).strip("_")
+    trajectory_tags = {
+        name: value
+        for name, value in trajectory.items()
+        if name in {
+            "ade_1s_m",
+            "fde_1s_m",
+            "ade_3s_m",
+            "fde_3s_m",
+            "ade_5s_m",
+            "fde_5s_m",
+            "nonfinite_prediction_rate",
+        }
+        and value is not None
+    }
+    version_tags = {
+        "checkpoint_epoch": checkpoint_epoch,
+        "checkpoint_s3_uri": checkpoint_uri,
+        "checkpoint_sha256": checkpoint_sha256,
+        f"{split_tag}_evaluation_input_track": (
+            report_payload["input_track"]
+        ),
+        f"{split_tag}_evaluation_report_sha256": report_sha256,
+        f"{split_tag}_evaluation_run_id": run_id,
+        f"{split_tag}_evaluation_sample_count": (
+            metrics_payload["sample_count"]
+        ),
+        **{
+            f"{split_tag}_{name}": value
+            for name, value in trajectory_tags.items()
+        },
+    }
+    for name, value in version_tags.items():
+        client.set_model_version_tag(
+            REACTIVE_POLICY_REGISTERED_MODEL,
+            version,
+            name,
+            str(value),
+        )
+    client.set_tag(
+        run_id,
+        "registered_model_name",
+        REACTIVE_POLICY_REGISTERED_MODEL,
+    )
+    client.set_tag(run_id, "registered_model_version", version)
+    client.set_tag(run_id, "task_status", "FINISHED")
+    client.set_terminated(run_id, status="FINISHED")
+    return ReactivePolicyPublicationOutput(
+        mlflow_run_id=run_id,
+        registered_model_name=REACTIVE_POLICY_REGISTERED_MODEL,
+        registered_model_version=version,
     )
 
 
@@ -3259,14 +4081,63 @@ def wf_evaluate_reactive_kitscenes(
     checkpoint: FlyteFile,
     evaluation_shards: List[FlyteDirectory],
     source_split: str = "val",
-) -> ReactiveKITScenesEvaluationOutput:
+    expected_model_version: str = "",
+) -> ReactiveKITScenesEvaluationWorkflowOutput:
     """Evaluate the selected checkpoint on an official labeled split."""
-    return evaluate_reactive_kitscenes_checkpoint(
+    evaluation = evaluate_reactive_kitscenes_checkpoint(
         checkpoint=checkpoint,
         shards=evaluation_shards,
         source_split=source_split,
         batch_size=1,
         num_loader_workers=4,
+    )
+    publication = publish_reactive_kitscenes_evaluation(
+        checkpoint=checkpoint,
+        report=evaluation.report,
+        report_sha256=evaluation.report_sha256,
+        checkpoint_sha256=evaluation.checkpoint_sha256,
+        checkpoint_epoch=evaluation.checkpoint_epoch,
+        expected_model_version=expected_model_version,
+    )
+    return ReactiveKITScenesEvaluationWorkflowOutput(
+        report=evaluation.report,
+        report_sha256=evaluation.report_sha256,
+        checkpoint_sha256=evaluation.checkpoint_sha256,
+        checkpoint_epoch=evaluation.checkpoint_epoch,
+        mlflow_run_id=publication.mlflow_run_id,
+        registered_model_name=publication.registered_model_name,
+        registered_model_version=publication.registered_model_version,
+    )
+
+
+@workflow
+def wf_evaluate_reactive_kitscenes_test_sharded(
+    checkpoint: FlyteFile,
+    evaluation_shards: List[FlyteDirectory],
+    expected_model_version: str,
+) -> ReactiveKITScenesEvaluationWorkflowOutput:
+    """Evaluate all official KITScenes test scenes within G6 disk limits."""
+    evaluation = evaluate_reactive_kitscenes_test_partitions(
+        checkpoint=checkpoint,
+        shards=evaluation_shards,
+        expected_partition_count=KITSCENES_OFFICIAL_TEST_SCENE_COUNT,
+    )
+    publication = publish_reactive_kitscenes_evaluation(
+        checkpoint=checkpoint,
+        report=evaluation.report,
+        report_sha256=evaluation.report_sha256,
+        checkpoint_sha256=evaluation.checkpoint_sha256,
+        checkpoint_epoch=evaluation.checkpoint_epoch,
+        expected_model_version=expected_model_version,
+    )
+    return ReactiveKITScenesEvaluationWorkflowOutput(
+        report=evaluation.report,
+        report_sha256=evaluation.report_sha256,
+        checkpoint_sha256=evaluation.checkpoint_sha256,
+        checkpoint_epoch=evaluation.checkpoint_epoch,
+        mlflow_run_id=publication.mlflow_run_id,
+        registered_model_name=publication.registered_model_name,
+        registered_model_version=publication.registered_model_version,
     )
 
 

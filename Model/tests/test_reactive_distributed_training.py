@@ -322,6 +322,80 @@ def test_dataset_plan_and_assignment_are_deterministic(tmp_path):
     )
 
 
+def test_kitscenes_dataset_plan_allows_explicit_mapless_evaluation(tmp_path):
+    source = tmp_path / "kitscenes-test"
+    manifest = _write_source(
+        source,
+        dataset=KITSCENES_DATASET_NAME,
+        shard_counts=[4],
+        include_bev=False,
+        num_views=6,
+        include_direct_camera_context=True,
+    )
+    manifest.update({
+        "has_map": False,
+        "has_navigation": False,
+        "has_reactive_navigation": False,
+        "has_route_reconstruction": False,
+        "input_track": "camera_only_missing_map_route",
+        "navigation_geometry": None,
+    })
+    (source / "manifest.json").write_text(
+        json.dumps(manifest, sort_keys=True),
+        encoding="ascii",
+    )
+
+    plan = build_reactive_dataset_plan(
+        [str(source)],
+        stage=ReactiveTrainingStage.KITSCENES_FINETUNE,
+        allow_mapless_kitscenes_evaluation=True,
+    )
+
+    assert plan.total_samples == 4
+    with pytest.raises(ValueError, match="target coverage is incomplete"):
+        build_reactive_dataset_plan(
+            [str(source)],
+            stage=ReactiveTrainingStage.KITSCENES_FINETUNE,
+        )
+
+
+def test_kitscenes_dataset_plan_allows_empty_mapless_scene(tmp_path):
+    source = tmp_path / "kitscenes-empty-test"
+    manifest = _write_source(
+        source,
+        dataset=KITSCENES_DATASET_NAME,
+        shard_counts=[],
+        include_bev=False,
+        num_views=0,
+        include_direct_camera_context=False,
+    )
+    manifest.update({
+        "has_map": False,
+        "has_navigation": False,
+        "has_reactive_navigation": False,
+        "has_route_reconstruction": False,
+        "has_trajectory_xy": False,
+        "input_track": "camera_only_missing_map_route",
+        "navigation_geometry": None,
+    })
+    (source / "manifest.json").write_text(
+        json.dumps(manifest, sort_keys=True),
+        encoding="ascii",
+    )
+
+    plan = build_reactive_dataset_plan(
+        [str(source)],
+        stage=ReactiveTrainingStage.KITSCENES_FINETUNE,
+        allow_mapless_kitscenes_evaluation=True,
+    )
+
+    assert plan.total_samples == 0
+    assert plan.empty_partition_count == 1
+    assert plan.num_views == 0
+    assert plan.physical_camera_order == ()
+    assert plan.camera_slots == CANONICAL_SIX_CAMERA_SLOTS
+
+
 def test_validation_aware_assignment_balances_train_capacity():
     sizes = (120, 118, 116, 114, 112, 110, 108, 106, 104, 102, 100, 98)
     shards = tuple(

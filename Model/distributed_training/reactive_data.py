@@ -166,6 +166,7 @@ def _validate_reactive_manifest(
     *,
     stage: ReactiveTrainingStage,
     source_uri: str,
+    allow_mapless_kitscenes_evaluation: bool = False,
 ) -> None:
     expected_dataset = _expected_dataset(stage)
     if manifest.get("dataset") != expected_dataset:
@@ -185,11 +186,30 @@ def _validate_reactive_manifest(
                 f"empty Reactive partition contains shards in {source_uri}"
             )
         return
-    required_flags = {
-        "has_reactive_navigation": True,
-        "has_route_reconstruction": True,
-        "has_trajectory_xy": True,
-    }
+    if (
+        allow_mapless_kitscenes_evaluation
+        and stage is not ReactiveTrainingStage.KITSCENES_FINETUNE
+    ):
+        raise ValueError(
+            "mapless evaluation is supported only for KITScenes"
+        )
+    required_flags = {"has_trajectory_xy": True}
+    if allow_mapless_kitscenes_evaluation:
+        required_flags.update({
+            "has_map": False,
+            "has_navigation": False,
+            "has_reactive_navigation": False,
+            "has_route_reconstruction": False,
+        })
+        if manifest.get("input_track") != "camera_only_missing_map_route":
+            raise ValueError(
+                "mapless KITScenes evaluation has the wrong input track"
+            )
+    else:
+        required_flags.update({
+            "has_reactive_navigation": True,
+            "has_route_reconstruction": True,
+        })
     if stage is ReactiveTrainingStage.NUPLAN_FULL:
         required_flags["has_bev_segmentation"] = True
     mismatches = {
@@ -202,13 +222,14 @@ def _validate_reactive_manifest(
             f"Reactive target coverage is incomplete in {source_uri}: "
             f"{mismatches}"
         )
-    if (
-        manifest.get("navigation_geometry")
-        != AUTOE2E_NAVIGATION_GEOMETRY.contract()
-    ):
-        raise ValueError(
-            f"navigation geometry differs in {source_uri}"
-        )
+    if not allow_mapless_kitscenes_evaluation:
+        if (
+            manifest.get("navigation_geometry")
+            != AUTOE2E_NAVIGATION_GEOMETRY.contract()
+        ):
+            raise ValueError(
+                f"navigation geometry differs in {source_uri}"
+            )
     if int(manifest.get("map_context_channels", 0)) != 14:
         raise ValueError("Reactive DDP requires 14 map channels")
     if int(manifest.get("route_channels", 0)) != 2:
@@ -293,6 +314,7 @@ def build_reactive_dataset_plan(
     source_uris: Sequence[str],
     *,
     stage: ReactiveTrainingStage,
+    allow_mapless_kitscenes_evaluation: bool = False,
 ) -> ReactiveDatasetPlan:
     """Validate manifests and return a deterministic global shard inventory."""
     normalized_sources = tuple(
@@ -330,6 +352,9 @@ def build_reactive_dataset_plan(
             manifest,
             stage=stage,
             source_uri=source_uri,
+            allow_mapless_kitscenes_evaluation=(
+                allow_mapless_kitscenes_evaluation
+            ),
         )
         source_revision = str(manifest.get("source_revision") or "")
         dataset_version = str(manifest.get("dataset_version") or "")
@@ -442,14 +467,32 @@ def build_reactive_dataset_plan(
             "total_samples": total_samples,
         })
 
-    if len(view_counts) != 1:
-        raise ValueError(
-            f"Reactive DDP cannot mix camera counts: {sorted(view_counts)}"
-        )
-    if len(physical_camera_orders) != 1:
-        raise ValueError("Reactive DDP cannot mix physical camera orders")
-    if len(camera_slot_orders) != 1:
-        raise ValueError("Reactive DDP cannot mix semantic camera slots")
+    all_empty_mapless = (
+        allow_mapless_kitscenes_evaluation
+        and not references
+        and empty_partition_count == len(normalized_sources)
+    )
+    if all_empty_mapless:
+        physical_camera_order: tuple[str, ...] = ()
+        camera_slots = tuple(CANONICAL_SIX_CAMERA_SLOTS)
+        num_views = 0
+    else:
+        if len(view_counts) != 1:
+            raise ValueError(
+                "Reactive DDP cannot mix camera counts: "
+                f"{sorted(view_counts)}"
+            )
+        if len(physical_camera_orders) != 1:
+            raise ValueError(
+                "Reactive DDP cannot mix physical camera orders"
+            )
+        if len(camera_slot_orders) != 1:
+            raise ValueError(
+                "Reactive DDP cannot mix semantic camera slots"
+            )
+        physical_camera_order = next(iter(physical_camera_orders))
+        camera_slots = next(iter(camera_slot_orders))
+        num_views = next(iter(view_counts))
     if len(source_revisions) != 1:
         raise ValueError("Reactive DDP cannot mix source revisions")
     if len(dataset_versions) != 1:
@@ -469,9 +512,9 @@ def build_reactive_dataset_plan(
     return ReactiveDatasetPlan(
         dataset=_expected_dataset(stage),
         dataset_manifest_sha256=dataset_manifest_sha256,
-        physical_camera_order=next(iter(physical_camera_orders)),
-        camera_slots=next(iter(camera_slot_orders)),
-        num_views=next(iter(view_counts)),
+        physical_camera_order=physical_camera_order,
+        camera_slots=camera_slots,
+        num_views=num_views,
         total_samples=sum(item.sample_count for item in references),
         shards=tuple(references),
         source_revision=next(iter(source_revisions)),

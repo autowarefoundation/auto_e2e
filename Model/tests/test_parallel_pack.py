@@ -411,6 +411,38 @@ def test_init_row_worker_preserves_kitscenes_source_contract(monkeypatch):
     assert captured["source_revision"] == "revision-held-out"
     assert captured["scene_ids"] == ["scene-held-out"]
     assert captured["benchmark_protocol"] is True
+    assert captured["allow_mapless"] is False
+
+
+def test_init_row_worker_propagates_mapless_kitscenes_test(monkeypatch):
+    captured = {}
+
+    class _FakeKitScenesDataset:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    fake_module = types.ModuleType("data_parsing.kit_scenes")
+    fake_module.KitScenesDataset = _FakeKitScenesDataset
+    monkeypatch.setitem(
+        sys.modules,
+        "data_parsing.kit_scenes",
+        fake_module,
+    )
+
+    pp.init_row_worker(
+        "KIT-MRT/KITScenes-Multimodal",
+        ["scene-test"],
+        "/raw",
+        IMAGE_SIZE,
+        "test",
+        "revision-test",
+        True,
+        True,
+    )
+
+    assert captured["split"] == "test"
+    assert captured["benchmark_protocol"] is True
+    assert captured["allow_mapless"] is True
 
 
 def test_init_row_worker_preserves_l2d_source_revision(monkeypatch):

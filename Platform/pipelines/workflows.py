@@ -71,6 +71,7 @@ MLFLOW_URI = "http://mlflow.mlflow.svc.cluster.local:5000"
 DATASET_PACK_VERSION = "v2.4"
 KITSCENES_NAVIGATION_DATASET_VERSION = "v3.5"
 KITSCENES_BENCHMARK_DATASET_VERSION = "v3.3-benchmark-v3"
+KITSCENES_TEST_DATASET_VERSION = "v3.5-test-camera-only-v1"
 BASELINE_TRAINING_OBJECTIVE_VERSION = "trajectory_imitation_v1"
 KITSCENES_NAVIGATION_OBJECTIVE_VERSION = (
     "kitscenes_navigation_objective_v1"
@@ -365,6 +366,10 @@ class Dataset(enum.Enum):
 
 KITSCENES_TRAINING_SPLIT = "train"
 KITSCENES_BENCHMARK_SPLITS = frozenset({"val", "overlap_train_val"})
+KITSCENES_LABELED_EVALUATION_SPLITS = frozenset({
+    *KITSCENES_BENCHMARK_SPLITS,
+    "test",
+})
 
 
 def _validate_kitscenes_data_role(
@@ -381,10 +386,10 @@ def _validate_kitscenes_data_role(
             )
         return
     if data_role == "benchmark":
-        if source_split not in KITSCENES_BENCHMARK_SPLITS:
+        if source_split not in KITSCENES_LABELED_EVALUATION_SPLITS:
             raise ValueError(
-                "KITScenes benchmark preparation accepts only val and "
-                f"overlap_train_val, got {source_split!r}"
+                "KITScenes labeled evaluation preparation accepts only val, "
+                f"overlap_train_val, and test, got {source_split!r}"
             )
         return
     raise ValueError(f"unsupported KITScenes data_role {data_role!r}")
@@ -2359,6 +2364,11 @@ def data_processing(
     benchmark_protocol = (
         dataset == Dataset.KITSCENES and data_role == "benchmark"
     )
+    mapless_kitscenes_test = (
+        dataset == Dataset.KITSCENES
+        and data_role == "benchmark"
+        and source_split == "test"
+    )
     if expected_reasoning_label_count is not None:
         if expected_reasoning_label_count < 0:
             raise ValueError(
@@ -2438,6 +2448,7 @@ def data_processing(
                 include_navigation=False,
                 source_revision=source_revision,
                 benchmark_protocol=benchmark_protocol,
+                allow_mapless=mapless_kitscenes_test,
             )
         else:
             from data_parsing.l2d import L2DDataset
@@ -2550,7 +2561,11 @@ def data_processing(
     # parquet; publication can merge the partition summaries without scanning
     # the tar files or DynamoDB.
     geo_summary = None
-    if ds is not None and dataset in (Dataset.L2D, Dataset.KITSCENES):
+    if (
+        ds is not None
+        and dataset in (Dataset.L2D, Dataset.KITSCENES)
+        and bool(getattr(ds, "has_geospatial", True))
+    ):
         from data_processing.geospatial import write_geo_artifacts
         geo_summary = write_geo_artifacts(
             ds,
@@ -2642,6 +2657,7 @@ def data_processing(
     trajectory_xy_count = 0
     bev_segmentation_count = 0
     reactive_navigation_count = 0
+    geospatial_count = 0
 
     if _use_parent_assembly_pack(
         dataset,
@@ -2669,6 +2685,7 @@ def data_processing(
             source_split,
             source_revision,
             benchmark_protocol,
+            mapless_kitscenes_test,
         )
 
         # Pass A: unique rows. ds is still alive here (not yet deleted).
@@ -2736,9 +2753,10 @@ def data_processing(
                 scene_ids=ep_list,
                 image_size=image_size,
                 include_world_model_windows=False,
-                include_navigation=True,
+                include_navigation=not mapless_kitscenes_test,
                 source_revision=source_revision,
                 benchmark_protocol=benchmark_protocol,
+                allow_mapless=mapless_kitscenes_test,
             )
         else:
             from data_parsing.l2d import L2DDataset
@@ -2750,7 +2768,7 @@ def data_processing(
                 root=raw_path,
             )
 
-        if dataset == Dataset.KITSCENES:
+        if dataset == Dataset.KITSCENES and not mapless_kitscenes_test:
             import hashlib
 
             artifact_records = []
@@ -2835,44 +2853,41 @@ def data_processing(
                     members["front_camera_fpn.jpg"] = row_extras[
                         "front_camera_fpn_jpeg"
                     ]
-                    members.update(
-                        ds_asm.navigation_members_for_row(*cur_key)
-                    )
-                    has_map = True
+                    if not mapless_kitscenes_test:
+                        members.update(
+                            ds_asm.navigation_members_for_row(*cur_key)
+                        )
+                        has_map = True
                 elif row_extras is not None:
                     members["map.jpg"] = row_extras
 
             # ego + meta + calib (no video decode).
-            ego_hist, traj, pose_current, gps_future = ds_asm.numeric_for(si)
+            ego_hist, traj = ds_asm.egomotion_for(si)
             ego_data = np.concatenate([
                 ego_hist.numpy() if torch.is_tensor(ego_hist) else np.asarray(ego_hist),
                 traj.numpy() if torch.is_tensor(traj) else np.asarray(traj),
             ]).astype(np.float32)
             members["ego.npy"] = ego_data.tobytes()
-            from data_processing.geospatial import geospatial_members
-            members.update(geospatial_members({
-                "pose_current": pose_current,
-                "gps_future": gps_future,
-            }))
+            if (
+                dataset != Dataset.KITSCENES
+                or bool(getattr(ds_asm, "has_geospatial", False))
+            ):
+                _, _, pose_current, gps_future = ds_asm.numeric_for(si)
+                from data_processing.geospatial import geospatial_members
+
+                members.update(geospatial_members({
+                    "pose_current": pose_current,
+                    "gps_future": gps_future,
+                }))
+                geospatial_count += 1
             if dataset == Dataset.KITSCENES:
                 from data_processing.reactive_training_artifacts import (
                     TRAJECTORY_XY_MEMBER,
                     encode_trajectory_xy,
-                    wgs84_future_to_ego_xy,
                 )
 
-                trajectory_xy, trajectory_valid = wgs84_future_to_ego_xy(
-                    gps_future,
-                    current_latitude_deg=float(
-                        pose_current["latitude_deg"]
-                    ),
-                    current_longitude_deg=float(
-                        pose_current["longitude_deg"]
-                    ),
-                    heading_deg_cw_from_north=float(
-                        pose_current["heading_deg_cw_from_north"]
-                    ),
-                    valid_future_steps=ds_asm.sampling_future_steps,
+                trajectory_xy, trajectory_valid = (
+                    ds_asm.trajectory_xy_for(si)
                 )
                 members[TRAJECTORY_XY_MEMBER] = encode_trajectory_xy(
                     trajectory_xy,
@@ -2953,6 +2968,9 @@ def data_processing(
                 reactive_navigation_count += int(
                     "navigation_meta.json" in members
                 )
+                geospatial_count += int(
+                    "pose.npy" in members and "gps.npy" in members
+                )
                 if _record_to_json is not None:
                     record = labels_by_id.get(sample_key)
                     if record is not None:
@@ -3026,7 +3044,10 @@ def data_processing(
         and sample_count
         and (
             trajectory_xy_count != sample_count
-            or reactive_navigation_count != sample_count
+            or (
+                not mapless_kitscenes_test
+                and reactive_navigation_count != sample_count
+            )
         )
     ):
         raise ValueError(
@@ -3088,6 +3109,11 @@ def data_processing(
                 "source_revision": source_revision,
                 "source_split": source_split,
                 "data_role": data_role,
+                "input_track": (
+                    "camera_only_missing_map_route"
+                    if mapless_kitscenes_test
+                    else "camera_map_route"
+                ),
                 "dataset_version": dataset_version,
                 "episodes": _packed_episode_count(episodes, group_ids),
                 "temporal_sampling": (
@@ -3160,7 +3186,10 @@ def data_processing(
                     else None
                 ),
                 "map_context_channels": (
-                    14 if navigation_artifact_summary is not None else 3
+                    14
+                    if dataset == Dataset.KITSCENES
+                    or navigation_artifact_summary is not None
+                    else 3
                 ),
                 "route_channels": 2,
                 "has_trajectory_xy": (
@@ -3223,8 +3252,9 @@ def data_processing(
                 ),
                 "has_reasoning_labels": reasoning_label_count > 0,
                 "reasoning_label_count": reasoning_label_count,
-                "has_gps": bool(sample_count) and dataset in (
-                    Dataset.L2D, Dataset.KITSCENES,
+                "has_gps": (
+                    bool(sample_count)
+                    and geospatial_count == sample_count
                 ),
                 "geospatial": {
                     "pose_schema": POSE_SCHEMA_VERSION,
@@ -3234,7 +3264,7 @@ def data_processing(
                     "stored_coordinate_dtype": "float64",
                     "timestamp_dtype": "int64_ns",
                     "summary": geo_summary,
-                } if dataset in (Dataset.L2D, Dataset.KITSCENES) else None}
+                } if geo_summary is not None else None}
 
     # Manifest carries the rig projection for both single and merged loaders.
     if projection_spec is not None:
@@ -9741,6 +9771,46 @@ def wf_create_kitscenes_evaluation_sharded(
         pack_concurrency=pack_concurrency,
         total_sample_limit=0,
         source_split=source_split,
+        data_role="benchmark",
+    )
+
+
+@workflow
+def wf_create_kitscenes_test_evaluation_sharded(
+    scene_limit: int = 0,
+    image_size: int = REACTIVE_CAMERA_IMAGE_SIZE,
+    ingest_concurrency: int = 30,
+    pack_concurrency: int = 30,
+) -> List[FlyteDirectory]:
+    """Pack the official labeled mapless KITScenes test split."""
+    partitions = plan_fanout_partitions(
+        dataset=Dataset.KITSCENES,
+        source_revision=KITSCENES_SOURCE_REVISION,
+        episodes=scene_limit,
+        start_ep=-1,
+        end_ep=-1,
+        partition_size=1,
+        max_partitions=300,
+        max_missing_scenes=0,
+        split="test",
+        data_role="benchmark",
+    )
+    return _map_dataset_partitions(
+        partitions=partitions,
+        dataset=Dataset.KITSCENES,
+        source_revision=KITSCENES_SOURCE_REVISION,
+        dataset_version=KITSCENES_TEST_DATASET_VERSION,
+        image_size=image_size,
+        world_model=False,
+        reasoning_teacher="none",
+        prompt_version="unused",
+        label_stride=10,
+        label_workers=1,
+        ingest_concurrency=ingest_concurrency,
+        label_concurrency=1,
+        pack_concurrency=pack_concurrency,
+        total_sample_limit=0,
+        source_split="test",
         data_role="benchmark",
     )
 

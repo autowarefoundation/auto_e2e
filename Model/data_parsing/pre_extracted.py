@@ -1790,8 +1790,31 @@ def _decode_sample(
             map_context = _decode_image(sample["map.jpg"])
             map_valid = torch.tensor(True, dtype=torch.bool)
         else:
-            ref = frames[0] if frames else torch.zeros(3, 256, 256)
-            map_context = torch.zeros_like(ref)
+            is_kitscenes = (
+                isinstance(calibration, dict)
+                and calibration.get("dataset")
+                == "KIT-MRT/KITScenes-Multimodal"
+            )
+            if is_kitscenes:
+                from navigation.geometry import (
+                    AUTOE2E_NAVIGATION_GEOMETRY,
+                    MAP_CHANNEL_COUNT,
+                )
+
+                geometry = AUTOE2E_NAVIGATION_GEOMETRY
+                map_context = torch.zeros(
+                    MAP_CHANNEL_COUNT,
+                    geometry.height_px,
+                    geometry.width_px,
+                    dtype=torch.float32,
+                )
+            else:
+                ref = (
+                    frames[0]
+                    if frames
+                    else torch.zeros(3, 256, 256)
+                )
+                map_context = torch.zeros_like(ref)
             map_valid = torch.tensor(False, dtype=torch.bool)
         route_mask = torch.zeros(
             2,

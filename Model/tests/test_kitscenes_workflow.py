@@ -126,12 +126,19 @@ def test_kitscenes_data_roles_keep_benchmark_splits_out_of_training():
         data_role="benchmark",
         source_split="overlap_train_val",
     )
+    workflows._validate_kitscenes_data_role(
+        data_role="benchmark",
+        source_split="test",
+    )
     with pytest.raises(ValueError, match="training accepts only"):
         workflows._validate_kitscenes_data_role(
             data_role="training",
             source_split="val",
         )
-    with pytest.raises(ValueError, match="benchmark preparation accepts"):
+    with pytest.raises(
+        ValueError,
+        match="labeled evaluation preparation accepts",
+    ):
         workflows._validate_kitscenes_data_role(
             data_role="benchmark",
             source_split="train",
@@ -731,6 +738,7 @@ def test_row_decode_initializer_matches_worker_abi():
         "            source_split,\n"
         "            source_revision,\n"
         "            benchmark_protocol,\n"
+        "            mapless_kitscenes_test,\n"
         "        )"
     ) in source
 

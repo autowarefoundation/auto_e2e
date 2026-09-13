@@ -676,6 +676,27 @@ class TestDecodeSampleMapSplit:
         assert not out["map_valid"]
         assert not out["route_valid"]
 
+    def test_kitscenes_missing_map_uses_semantic_zero_contract(self):
+        sample = {
+            f"cam_{i}.jpg": _jpeg_bytes((i, 0, 0))
+            for i in range(6)
+        }
+        sample["ego.npy"] = _ego_bytes()
+        sample["calib.json"] = canonical_json_bytes({
+            "dataset": "KIT-MRT/KITScenes-Multimodal",
+            "geometry_type": "pseudo",
+            "image_size": 256,
+        })
+
+        out = _decode_sample(sample)
+
+        assert out["map_context"].shape == (14, 450, 300)
+        assert out["route_mask"].shape == (2, 450, 300)
+        assert out["map_context"].abs().max() == 0.0
+        assert out["route_mask"].abs().max() == 0.0
+        assert not out["map_valid"]
+        assert not out["route_valid"]
+
     def test_semantic_navigation_is_lossless_and_not_rgb_normalized(self):
         sample = {
             "cam_0.jpg": _jpeg_bytes((0, 0, 0)),

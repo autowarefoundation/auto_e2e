@@ -116,6 +116,7 @@ def init_row_worker(
     source_split: str,
     source_revision: str,
     benchmark_protocol: bool = False,
+    allow_mapless: bool = False,
 ) -> None:
     """Build this process's PLAIN-mode dataset for row-level decode (#121 decode-dedup).
 
@@ -152,6 +153,7 @@ def init_row_worker(
             include_navigation=False,
             source_revision=source_revision,
             benchmark_protocol=benchmark_protocol,
+            allow_mapless=allow_mapless,
         )
     else:
         from data_parsing.l2d import L2DDataset

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import hashlib
 import inspect
 import io
 import json
@@ -84,7 +85,7 @@ def test_l2d_workflow_defaults_use_reactive_camera_contract():
         source.count(
             "image_size: int = REACTIVE_CAMERA_IMAGE_SIZE"
         )
-        == 11
+        == 12
     )
     for name, dataset_version in (
         ("buildspec-launch-sharded.yml", "v3.5"),
@@ -607,6 +608,112 @@ def test_reactive_bev_model_registration_is_idempotent():
     assert version_tags["source_training_mlflow_run_id"] == "d" * 32
 
 
+def test_reactive_policy_evaluation_reuses_checkpoint_model_version():
+    created_models = []
+    created_versions = []
+    checkpoint_uri = "s3://bucket/checkpoint.pt"
+    checkpoint_sha256 = "a" * 64
+    existing = SimpleNamespace(
+        version="67",
+        source=checkpoint_uri,
+        run_id="internal-validation-run",
+        tags={"checkpoint_sha256": checkpoint_sha256},
+    )
+
+    class Client:
+        def get_registered_model(self, name):
+            assert name == "auto-e2e-driving-policy"
+
+        def create_registered_model(self, name):
+            created_models.append(name)
+
+        def search_model_versions(self, query):
+            assert query == "name='auto-e2e-driving-policy'"
+            return [existing]
+
+        def create_model_version(self, *, name, source, run_id):
+            created_versions.append((name, source, run_id))
+            return SimpleNamespace(version="68")
+
+    version = (
+        distributed_training
+        ._register_reactive_policy_model_version(
+            Client(),
+            checkpoint_uri=checkpoint_uri,
+            checkpoint_sha256=checkpoint_sha256,
+            evaluation_run_id="external-test-run",
+        )
+    )
+
+    assert version == "67"
+    assert created_models == []
+    assert created_versions == []
+
+
+def test_reactive_policy_evaluation_rejects_registry_conflict():
+    checkpoint_uri = "s3://bucket/checkpoint.pt"
+    existing = SimpleNamespace(
+        version="67",
+        source=checkpoint_uri,
+        run_id="internal-validation-run",
+        tags={"checkpoint_sha256": "b" * 64},
+    )
+
+    class Client:
+        def get_registered_model(self, name):
+            assert name == "auto-e2e-driving-policy"
+
+        def search_model_versions(self, query):
+            assert query == "name='auto-e2e-driving-policy'"
+            return [existing]
+
+    with pytest.raises(RuntimeError, match="conflicting SHA-256"):
+        (
+            distributed_training
+            ._register_reactive_policy_model_version(
+                Client(),
+                checkpoint_uri=checkpoint_uri,
+                checkpoint_sha256="a" * 64,
+                evaluation_run_id="external-test-run",
+            )
+        )
+
+
+def test_reactive_policy_evaluation_enforces_expected_model_version():
+    checkpoint_uri = "s3://bucket/checkpoint.pt"
+    checkpoint_sha256 = "a" * 64
+    existing = SimpleNamespace(
+        version="66",
+        source=checkpoint_uri,
+        tags={"checkpoint_sha256": checkpoint_sha256},
+    )
+
+    class Client:
+        def get_registered_model(self, name):
+            assert name == "auto-e2e-driving-policy"
+
+        def get_model_version(self, name, version):
+            assert name == "auto-e2e-driving-policy"
+            assert version == "66"
+            return existing
+
+        def search_model_versions(self, query):
+            raise AssertionError("expected version must bypass registry search")
+
+    version = (
+        distributed_training
+        ._register_reactive_policy_model_version(
+            Client(),
+            checkpoint_uri=checkpoint_uri,
+            checkpoint_sha256=checkpoint_sha256,
+            evaluation_run_id="external-test-run",
+            expected_model_version="66",
+        )
+    )
+
+    assert version == "66"
+
+
 def test_reviewed_ray_topologies_have_fixed_worker_groups():
     assert (
         distributed_training.RAY_1.worker_node_config[0].replicas
@@ -1087,6 +1194,222 @@ def test_ray_tasks_serialize_the_resolved_storage_path():
     assert distributed_training.train_reactive_stage_ray_8.environment == (
         expected_environment
     )
+
+
+def test_kitscenes_evaluation_workflow_publishes_to_mlflow():
+    evaluator, publisher = (
+        distributed_training.wf_evaluate_reactive_kitscenes.nodes
+    )
+
+    assert evaluator.flyte_entity.name.endswith(
+        "evaluate_reactive_kitscenes_checkpoint"
+    )
+    assert publisher.flyte_entity.name.endswith(
+        "publish_reactive_kitscenes_evaluation"
+    )
+    assert (
+        distributed_training.publish_reactive_kitscenes_evaluation
+        .environment["MLFLOW_TRACKING_URI"]
+        == distributed_training.MLFLOW_URI
+    )
+
+
+def test_kitscenes_test_sharded_workflow_enforces_official_inventory():
+    evaluator, publisher = (
+        distributed_training
+        .wf_evaluate_reactive_kitscenes_test_sharded
+        .nodes
+    )
+    bindings = {
+        binding.var: binding.binding
+        for binding in evaluator.bindings
+    }
+
+    assert evaluator.flyte_entity is (
+        distributed_training.evaluate_reactive_kitscenes_test_partitions
+    )
+    assert (
+        bindings["expected_partition_count"]
+        .scalar.primitive.integer
+        == 206
+    )
+    assert publisher.flyte_entity is (
+        distributed_training.publish_reactive_kitscenes_evaluation
+    )
+    assert (
+        distributed_training.KITSCENES_OFFICIAL_TEST_SCENE_COUNT
+        == 206
+    )
+    publisher_bindings = {
+        binding.var: binding.binding
+        for binding in publisher.bindings
+    }
+    assert (
+        publisher_bindings["expected_model_version"]
+        .promise.var
+        == "expected_model_version"
+    )
+
+
+def test_kitscenes_test_partition_aggregation_is_exact(tmp_path):
+    checkpoint_sha256 = "a" * 64
+    report_paths = []
+    report_sha256s = []
+
+    def trajectory_metrics(
+        *,
+        sample_count: int,
+        ade_m: float | None,
+        fde_m: float | None,
+        longitudinal_m: float | None,
+    ):
+        metrics = {
+            "valid_timestep_count": sample_count * 50,
+            "total_timestep_count": sample_count * 64,
+            "valid_horizon_coverage": (
+                50 / 64 if sample_count else None
+            ),
+            "mean_abs_longitudinal_error_m": longitudinal_m,
+            "mean_abs_lateral_error_m": (
+                longitudinal_m / 2
+                if longitudinal_m is not None
+                else None
+            ),
+            "nonfinite_prediction_count": 0,
+            "nonfinite_prediction_rate": (
+                0.0 if sample_count else None
+            ),
+        }
+        for horizon in ("1s", "2s", "3s", "5s"):
+            metrics[f"ade_{horizon}_m"] = ade_m
+            metrics[f"fde_{horizon}_m"] = fde_m
+            metrics[f"ade_{horizon}_sample_count"] = sample_count
+            metrics[f"fde_{horizon}_sample_count"] = sample_count
+        metrics.update({
+            "ade_6p4s_m": None,
+            "fde_6p4s_m": None,
+            "ade_6p4s_sample_count": 0,
+            "fde_6p4s_sample_count": 0,
+        })
+        return metrics
+
+    for partition_id, sample_count, ade_m, fde_m, longitudinal_m in (
+        ("scene-a", 2, 1.0, 2.0, 0.5),
+        ("scene-b", 3, 3.0, 4.0, 1.5),
+        ("scene-empty", 0, None, None, None),
+    ):
+        payload = {
+            "schema_version": (
+                "reactive_kitscenes_labeled_evaluation_v1"
+            ),
+            "checkpoint_epoch": 5,
+            "checkpoint_sha256": checkpoint_sha256,
+            "dataset": "kitscenes",
+            "dataset_version": "v3.5-test-camera-only-v1",
+            "evaluation_role": (
+                "official_test_camera_only_missing_map_route"
+            ),
+            "input_track": "camera_only_missing_map_route",
+            "manifest_identities": [{
+                "manifest_sha256": (
+                    hashlib.sha256(partition_id.encode()).hexdigest()
+                ),
+                "partition_id": partition_id,
+                "split_group_uids": [
+                    f"kitscenes-{partition_id}"
+                ],
+                "total_samples": sample_count,
+            }],
+            "maximum_labeled_horizon_steps": 50,
+            "metrics": {
+                "schema_version": "reactive_multitask_evaluation_v1",
+                "sample_count": sample_count,
+                "sample_uid_sha256": hashlib.sha256(
+                    f"{partition_id}-samples".encode()
+                ).hexdigest(),
+                "trajectory": trajectory_metrics(
+                    sample_count=sample_count,
+                    ade_m=ade_m,
+                    fde_m=fde_m,
+                    longitudinal_m=longitudinal_m,
+                ),
+                "bev_segmentation": {"available": False},
+                "route": {},
+            },
+            "source_revision": "source-revision",
+            "source_split": "test",
+        }
+        report_path = tmp_path / f"{partition_id}.json"
+        report_bytes = (
+            json.dumps(payload, sort_keys=True) + "\n"
+        ).encode("ascii")
+        report_path.write_bytes(report_bytes)
+        report_paths.append(
+            distributed_training.FlyteFile(str(report_path))
+        )
+        report_sha256s.append(
+            hashlib.sha256(report_bytes).hexdigest()
+        )
+
+    output = (
+        distributed_training
+        .aggregate_reactive_kitscenes_test_evaluations
+        .task_function(
+            reports=report_paths,
+            report_sha256s=report_sha256s,
+            checkpoint_sha256s=[checkpoint_sha256] * 3,
+            checkpoint_epochs=[5, 5, 5],
+            expected_partition_count=3,
+        )
+    )
+    report = json.loads(Path(output.report.path).read_text())
+    metrics = report["metrics"]
+    trajectory = metrics["trajectory"]
+
+    assert report["partition_count"] == 3
+    assert report["expected_partition_count"] == 3
+    assert metrics["sample_count"] == 5
+    assert metrics["sample_uid_sha256"] is None
+    assert metrics["bev_segmentation"] == {
+        "available": False,
+        "reason": "targets_unavailable",
+    }
+    assert metrics["route"] == {
+        "available": False,
+        "reason": "input_and_targets_unavailable",
+    }
+    assert trajectory["valid_timestep_count"] == 250
+    assert trajectory["total_timestep_count"] == 320
+    assert trajectory["ade_1s_m"] == pytest.approx(2.2)
+    assert trajectory["fde_5s_m"] == pytest.approx(3.2)
+    assert trajectory["mean_abs_longitudinal_error_m"] == (
+        pytest.approx(1.1)
+    )
+    assert trajectory["ade_6p4s_m"] is None
+    assert trajectory["ade_6p4s_sample_count"] == 0
+
+
+def test_kitscenes_test_partition_aggregation_rejects_partial_inventory(
+    tmp_path,
+):
+    report = tmp_path / "report.json"
+    report.write_text("{}")
+
+    with pytest.raises(
+        ValueError,
+        match="does not cover the expected 206 partitions",
+    ):
+        (
+            distributed_training
+            .aggregate_reactive_kitscenes_test_evaluations
+            .task_function(
+                reports=[distributed_training.FlyteFile(str(report))],
+                report_sha256s=[hashlib.sha256(b"{}").hexdigest()],
+                checkpoint_sha256s=["a" * 64],
+                checkpoint_epochs=[5],
+                expected_partition_count=206,
+            )
+        )
 
 
 def test_reactive_mlflow_helpers_record_stable_numeric_history():
