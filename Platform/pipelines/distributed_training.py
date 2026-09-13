@@ -3049,8 +3049,10 @@ def evaluate_reactive_kitscenes_checkpoint(
             "KITScenes labeled evaluation requires val, overlap_train_val, "
             "or test"
         )
-    if not 1 <= batch_size <= 2:
-        raise ValueError("KITScenes evaluation batch size must be one or two")
+    if not 1 <= batch_size <= 4:
+        raise ValueError(
+            "KITScenes evaluation batch size must be between one and four"
+        )
     if not 0 <= num_loader_workers <= 4:
         raise ValueError(
             "KITScenes evaluation loader workers must be between zero and four"
@@ -4389,7 +4391,7 @@ def wf_evaluate_reactive_kitscenes_test_sharded(
         checkpoint=checkpoint,
         shards=evaluation_shards,
         source_split="test",
-        batch_size=1,
+        batch_size=4,
         num_loader_workers=4,
         expected_test_partition_count=(
             KITSCENES_OFFICIAL_TEST_SCENE_COUNT

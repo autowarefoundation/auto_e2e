@@ -22,6 +22,7 @@ import yaml
 
 from flytekit.core.context_manager import FlyteContextManager
 from flytekit.types.directory import FlyteDirectory
+from flytekit.types.file import FlyteFile
 
 from data_processing.reactive_training_artifacts import (
     BEV_SEGMENTATION_CLASSES,
@@ -1290,6 +1291,7 @@ def test_kitscenes_test_sharded_workflow_enforces_official_inventory():
         .scalar.primitive.integer
         == 206
     )
+    assert bindings["batch_size"].scalar.primitive.integer == 4
     assert publisher.flyte_entity is (
         distributed_training.publish_reactive_kitscenes_evaluation
     )
@@ -1306,6 +1308,32 @@ def test_kitscenes_test_sharded_workflow_enforces_official_inventory():
         .promise.var
         == "expected_model_version"
     )
+
+
+def test_kitscenes_evaluation_rejects_batch_larger_than_four():
+    with pytest.raises(
+        ValueError,
+        match="between one and four",
+    ):
+        distributed_training.evaluate_reactive_kitscenes_checkpoint.task_function(
+            checkpoint=FlyteFile("/tmp/missing-checkpoint.pt"),
+            shards=[FlyteDirectory("/tmp/missing-shard")],
+            source_split="test",
+            batch_size=5,
+        )
+
+
+def test_kitscenes_evaluation_accepts_batch_four():
+    with pytest.raises(
+        ValueError,
+        match="immutable S3 inputs",
+    ):
+        distributed_training.evaluate_reactive_kitscenes_checkpoint.task_function(
+            checkpoint=FlyteFile("/tmp/missing-checkpoint.pt"),
+            shards=[FlyteDirectory("/tmp/missing-shard")],
+            source_split="test",
+            batch_size=4,
+        )
 
 
 @pytest.mark.parametrize(
