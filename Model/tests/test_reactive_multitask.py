@@ -2521,6 +2521,194 @@ def test_multitask_evaluator_reports_partial_horizons_and_route_use(
     assert report["route"]["route_input_gradient_mean_abs"] > 0.0
 
 
+def test_multitask_evaluator_uses_per_sample_initial_noise(
+    build_mock_model,
+    device,
+):
+    model = _model(build_mock_model, device).eval()
+    batch = _stage_batch(
+        device,
+        include_bev=False,
+        batch_size=2,
+    )
+    calls = []
+    planner = model.Reactive_E2E.TrajectoryPlanner
+    trajectory_dim = (
+        int(planner.num_timesteps) * int(planner.num_signals)
+    )
+
+    def initial_noise_provider(sample_uids, noise_device, noise_dtype):
+        calls.append(tuple(sample_uids))
+        return torch.zeros(
+            len(sample_uids),
+            trajectory_dim,
+            device=noise_device,
+            dtype=noise_dtype,
+        )
+
+    report = evaluate_reactive_multitask(
+        model,
+        [batch],
+        stage=ReactiveTrainingStage.L2D_CONTINUATION,
+        device=device,
+        include_counterfactuals=False,
+        include_route_gradient=False,
+        initial_noise_provider=initial_noise_provider,
+    )
+
+    assert calls == [("synthetic-sample-0", "synthetic-sample-1")]
+    assert report["sample_count"] == 2
+
+
+def test_multitask_stateful_evaluation_rejects_more_than_five_lanes(
+    build_mock_model,
+    device,
+):
+    model = _model(build_mock_model, device).eval()
+    batch = _stage_batch(
+        device,
+        include_bev=False,
+        batch_size=6,
+    )
+    batch.update({
+        "source_frame_index": torch.arange(
+            40,
+            46,
+            dtype=torch.int64,
+            device=device,
+        ),
+        "source_frame_interval_us": torch.full(
+            (6,),
+            100_000,
+            dtype=torch.int64,
+            device=device,
+        ),
+        "split_group_uid": ["scene-a"] * 6,
+    })
+
+    with pytest.raises(
+        ValueError,
+        match="exceeds the cache lane stride",
+    ):
+        evaluate_reactive_multitask(
+            model,
+            [batch],
+            stage=ReactiveTrainingStage.L2D_CONTINUATION,
+            device=device,
+            include_counterfactuals=False,
+            include_route_gradient=False,
+            camera_fpn_cache=object(),
+        )
+
+
+def test_multitask_evaluator_advances_stateful_camera_cache(
+    build_mock_model,
+    device,
+):
+    camera_size = 32
+    front_size = 64
+    model = _model(
+        build_mock_model,
+        device,
+        views=6,
+        view_fusion_kwargs={
+            "architecture": "bevformer_v2_t8",
+            "activation_checkpointing": False,
+            "image_size": camera_size,
+            "front_image_size": front_size,
+            "num_encoder_layers": 1,
+            "num_points": 2,
+            "query_chunk_size": 64,
+        },
+    ).eval()
+    batches = []
+    for first_frame_index in (40, 45):
+        frame_indices = list(
+            range(first_frame_index, first_frame_index + 5)
+        )
+        batch = _stage_batch(
+            device,
+            include_bev=False,
+            batch_size=5,
+            views=6,
+            image_size=camera_size,
+        )
+        _attach_stage_a_camera_context(
+            batch,
+            front_image_size=front_size,
+        )
+        visual_tiles = batch["visual_tiles"]
+        assert torch.is_tensor(visual_tiles)
+        batch.update({
+            "front_camera_fpn_tile": visual_tiles[:, 0].clone(),
+            "front_camera_fpn_available": torch.ones(
+                5,
+                dtype=torch.bool,
+                device=device,
+            ),
+            "sample_uid": [
+                f"scene-a-frame-{frame_index}"
+                for frame_index in frame_indices
+            ],
+            "source_frame_index": torch.tensor(
+                frame_indices,
+                dtype=torch.int64,
+                device=device,
+            ),
+            "source_frame_interval_us": torch.full(
+                (5,),
+                100_000,
+                dtype=torch.int64,
+                device=device,
+            ),
+            "split_group_uid": ["scene-a"] * 5,
+        })
+        batches.append(batch)
+    planner = model.Reactive_E2E.TrajectoryPlanner
+    trajectory_dim = (
+        int(planner.num_timesteps) * int(planner.num_signals)
+    )
+
+    cache = model.create_stateful_camera_fpn_cache()
+    report = evaluate_reactive_multitask(
+        model,
+        batches,
+        stage=ReactiveTrainingStage.KITSCENES_FINETUNE,
+        device=device,
+        include_counterfactuals=False,
+        include_route_gradient=False,
+        initial_noise_provider=lambda sample_uids, noise_device, noise_dtype: (
+            torch.zeros(
+                len(sample_uids),
+                trajectory_dim,
+                device=noise_device,
+                dtype=noise_dtype,
+            )
+        ),
+        camera_fpn_cache=cache,
+    )
+
+    assert report["sample_count"] == 10
+    assert cache.stream_ids == tuple(
+        f"scene-a:lane:{lane_index}"
+        for lane_index in range(5)
+    )
+    assert cache.last_committed_timestamps_us == (
+        4_500_000,
+        4_600_000,
+        4_700_000,
+        4_800_000,
+        4_900_000,
+    )
+    assert cache.frame_timestamps_us[0] == (
+        1_500_000,
+        1_600_000,
+        1_700_000,
+        1_800_000,
+        1_900_000,
+    )
+
+
 def test_stage_a_b_cross_dataset_retention_matrix_smoke(
     build_mock_model,
     device,

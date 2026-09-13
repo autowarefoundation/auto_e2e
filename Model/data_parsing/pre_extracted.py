@@ -17,6 +17,8 @@ Usage:
         # batch["map_valid"]          (B,)                  explicit validity
         # batch["route_valid"]        (B,)                  explicit validity
         # batch["route_supervision"]  dict of loss-only route fields
+        # batch["source_frame_index"] (B,)                  source sequence index
+        # batch["source_frame_interval_us"] (B,)            source cadence
         # batch["egomotion_history"]  (B, 256)
         # batch["visual_history"]     (B, 896)
         # batch["trajectory_target"]  (B, 128)
@@ -68,6 +70,7 @@ _TRANSFORM = transforms.Compose([
 # keeps V correct and stops the map being double-counted in the BEV projection.
 _CAM_KEY_RE = re.compile(r"^cam_\d+\.jpg$")
 _BEV_HIST_KEY_RE = re.compile(r"^bev_hist_(\d+)_cam_(\d+)\.jpg$")
+_KITSCENES_HISTORY_FRAME_ID_RE = re.compile(r"-r(\d+)-c(\d+)$")
 _BEV_HISTORY_INDEX_MEMBER = "bev_history_index.json"
 # World-Model window frames: hist_<t>_cam_<v>.jpg / fut_<f>_cam_<v>.jpg (#13).
 _HIST_KEY_RE = re.compile(r"^hist_(\d+)_cam_(\d+)\.jpg$")
@@ -82,6 +85,47 @@ _DECISIVE_ROUTE_MANEUVERS = frozenset({
     "merge",
     "exit",
 })
+
+
+def _source_frame_interval_us_from_history_index(
+    history_index: object,
+    *,
+    current_frame_index: int,
+) -> int:
+    """Infer the packed source cadence from an exact KITScenes T8 index."""
+    if (
+        current_frame_index < 0
+        or not isinstance(history_index, list)
+        or len(history_index) != REACTIVE_BEVFORMER_HISTORY_FRAMES
+    ):
+        return -1
+    rows = []
+    for frame in history_index:
+        if not isinstance(frame, list) or not frame:
+            return -1
+        frame_rows = []
+        for camera_index, frame_id in enumerate(frame):
+            match = _KITSCENES_HISTORY_FRAME_ID_RE.search(str(frame_id))
+            if match is None or int(match.group(2)) != camera_index:
+                return -1
+            frame_rows.append(int(match.group(1)))
+        if len(set(frame_rows)) != 1:
+            return -1
+        rows.append(frame_rows[0])
+    differences = [
+        current - previous
+        for previous, current in zip(rows, rows[1:])
+    ]
+    if not differences or len(set(differences)) != 1:
+        return -1
+    row_stride = differences[0]
+    if (
+        row_stride <= 0
+        or current_frame_index - rows[-1] != row_stride
+        or REACTIVE_BEVFORMER_FRAME_INTERVAL_US % row_stride != 0
+    ):
+        return -1
+    return REACTIVE_BEVFORMER_FRAME_INTERVAL_US // row_stride
 
 
 def passthrough_nodesplitter(urls: Iterable[str]) -> Iterable[str]:
@@ -1434,6 +1478,7 @@ def _decode_sample(
         else None
     )
     frames = [_decode_image(sample[k]) for k in cam_keys]
+    history_index: object = None
     bev_history_keys: dict[tuple[int, int], str] = {}
     for key in sample:
         match = _BEV_HIST_KEY_RE.match(key)
@@ -1940,6 +1985,20 @@ def _decode_sample(
         if isinstance(raw_split_group_uid, str)
         else ""
     )
+    raw_source_frame_index = sample_metadata.get("frame_idx", -1)
+    source_frame_index = (
+        raw_source_frame_index
+        if (
+            isinstance(raw_source_frame_index, int)
+            and not isinstance(raw_source_frame_index, bool)
+            and raw_source_frame_index >= 0
+        )
+        else -1
+    )
+    source_frame_interval_us = _source_frame_interval_us_from_history_index(
+        history_index,
+        current_frame_index=source_frame_index,
+    )
     camera_projection_matrix = None
     front_camera_projection_matrix = None
     camera_history_projection_matrix = None
@@ -2078,6 +2137,14 @@ def _decode_sample(
         # every batch so predictions do not depend on batch position or size.
         "sample_uid": sample.get("__key__", ""),
         "split_group_uid": split_group_uid,
+        "source_frame_index": torch.tensor(
+            source_frame_index,
+            dtype=torch.int64,
+        ),
+        "source_frame_interval_us": torch.tensor(
+            source_frame_interval_us,
+            dtype=torch.int64,
+        ),
         "visual_tiles": torch.stack(frames),
         "map_context": map_context,
         "route_mask": route_mask,
@@ -3020,6 +3087,7 @@ def make_multi_dataset_loader(
     validation_group_uids: Sequence[str] | None = None,
     decode_history_frames: bool = True,
     decode_future_frames: bool = True,
+    decode_front_camera_fpn: bool = False,
     navigation_repeat_policy: NavigationRepeatPolicy | None = None,
     bev_repeat_policy: BEVClassRepeatPolicy | None = None,
     drop_last: bool = False,
@@ -3038,6 +3106,9 @@ def make_multi_dataset_loader(
     four partition loaders are active. Evaluation can use
     ``max_active_loaders=1`` together with a small
     ``prefetch_factor`` to bound its larger batches.
+
+    ``decode_front_camera_fpn`` forwards the exact base-resolution Front
+    companion request to every child loader.
     """
     if num_workers < 0:
         raise ValueError("num_workers must be non-negative")
@@ -3071,6 +3142,7 @@ def make_multi_dataset_loader(
             validation_group_uids=validation_group_uids,
             decode_history_frames=decode_history_frames,
             decode_future_frames=decode_future_frames,
+            decode_front_camera_fpn=decode_front_camera_fpn,
             navigation_repeat_policy=navigation_repeat_policy,
             bev_repeat_policy=bev_repeat_policy,
             drop_last=drop_last,

@@ -95,6 +95,13 @@ KITSCENES_OFFICIAL_TEST_SCENE_UID_SHA256 = (
     KITSCENES_STANDARD_TEST_SCENE_UID_SHA256
 )
 KITSCENES_OFFICIAL_TEST_SAMPLE_COUNT = 23_690
+KITSCENES_STATEFUL_CAMERA_FPN_BATCH_SIZE = 5
+KITSCENES_STATEFUL_CAMERA_FPN_POLICY = (
+    "stateful_camera_fpn_5lane_v1"
+)
+KITSCENES_TRAJECTORY_INFERENCE_POLICY = (
+    "deterministic_gru_no_noise_v1"
+)
 
 
 def _sha256_file(path: Path) -> str:
@@ -1216,6 +1223,20 @@ def _validate_kitscenes_publication_binding(
         != KITSCENES_OFFICIAL_TEST_SCENE_COUNT
         or report_payload.get("scene_uid_sha256")
         != KITSCENES_OFFICIAL_TEST_SCENE_UID_SHA256
+        or report_payload.get("inference_cache_policy")
+        != KITSCENES_STATEFUL_CAMERA_FPN_POLICY
+        or not isinstance(
+            report_payload.get("trajectory_inference_policy"),
+            dict,
+        )
+        or report_payload["trajectory_inference_policy"].get("version")
+        != KITSCENES_TRAJECTORY_INFERENCE_POLICY
+        or report_payload["trajectory_inference_policy"].get("planner")
+        != "gru"
+        or report_payload["trajectory_inference_policy"].get(
+            "stochastic_noise"
+        )
+        is not False
         or not isinstance(metrics, dict)
         or metrics.get("sample_count")
         != KITSCENES_OFFICIAL_TEST_SAMPLE_COUNT
@@ -3020,6 +3041,7 @@ def evaluate_reactive_kitscenes_checkpoint(
     batch_size: int = 1,
     num_loader_workers: int = 4,
     expected_test_partition_count: int = 0,
+    use_stateful_camera_fpn_cache: bool = False,
 ) -> ReactiveKITScenesEvaluationOutput:
     """Evaluate a KITScenes fine-tuned checkpoint without checkpoint selection."""
     import tempfile
@@ -3035,6 +3057,7 @@ def evaluate_reactive_kitscenes_checkpoint(
         build_reactive_dataset_plan,
     )
     from model_components.auto_e2e import AutoE2E
+    from model_components.trajectory_planning.gru_planner import GRUPlanner
     from training.reactive_multitask import (
         ReactiveTrainingStage,
         reactive_model_kwargs,
@@ -3043,15 +3066,20 @@ def evaluate_reactive_kitscenes_checkpoint(
         evaluate_reactive_multitask,
         inspect_reactive_checkpoint_identity,
     )
-
     if source_split not in {"val", "overlap_train_val", "test"}:
         raise ValueError(
             "KITScenes labeled evaluation requires val, overlap_train_val, "
             "or test"
         )
-    if not 1 <= batch_size <= 4:
+    maximum_batch_size = (
+        KITSCENES_STATEFUL_CAMERA_FPN_BATCH_SIZE
+        if use_stateful_camera_fpn_cache
+        else 4
+    )
+    if not 1 <= batch_size <= maximum_batch_size:
         raise ValueError(
-            "KITScenes evaluation batch size must be between one and four"
+            "KITScenes evaluation batch size exceeds the selected "
+            "inference policy"
         )
     if not 0 <= num_loader_workers <= 4:
         raise ValueError(
@@ -3061,6 +3089,14 @@ def evaluate_reactive_kitscenes_checkpoint(
         raise ValueError("KITScenes evaluation shards must not be empty")
 
     mapless_test = source_split == "test"
+    if use_stateful_camera_fpn_cache and (
+        not mapless_test
+        or batch_size != KITSCENES_STATEFUL_CAMERA_FPN_BATCH_SIZE
+    ):
+        raise ValueError(
+            "stateful camera FPN evaluation requires test data and "
+            f"batch size {KITSCENES_STATEFUL_CAMERA_FPN_BATCH_SIZE}"
+        )
     if not mapless_test and expected_test_partition_count:
         raise ValueError(
             "expected_test_partition_count is only valid for test data"
@@ -3221,7 +3257,6 @@ def evaluate_reactive_kitscenes_checkpoint(
         raise ValueError(
             "KITScenes evaluation manifests mix dataset provenance"
         )
-
     inventory = (
         _discover_kitscenes_evaluation_inventory(
             shard_directories,
@@ -3331,6 +3366,18 @@ def evaluate_reactive_kitscenes_checkpoint(
         if not torch.cuda.is_available():
             raise RuntimeError("KITScenes evaluation requires a GPU")
         model.to(device)
+        planner = model.Reactive_E2E.TrajectoryPlanner
+        if not isinstance(planner, GRUPlanner):
+            raise ValueError(
+                "KITScenes evaluation requires the reviewed deterministic "
+                "GRU planner"
+            )
+
+        camera_fpn_cache = (
+            model.create_stateful_camera_fpn_cache()
+            if use_stateful_camera_fpn_cache
+            else None
+        )
         loader = make_multi_dataset_loader(
             shard_directories,
             batch_size=batch_size,
@@ -3342,6 +3389,7 @@ def evaluate_reactive_kitscenes_checkpoint(
             prefetch_factor=1,
             max_active_loaders=1,
             decode_future_frames=False,
+            decode_front_camera_fpn=use_stateful_camera_fpn_cache,
         )
         metrics = evaluate_reactive_multitask(
             model,
@@ -3350,6 +3398,7 @@ def evaluate_reactive_kitscenes_checkpoint(
             device=device,
             include_counterfactuals=not mapless_test,
             include_route_gradient=not mapless_test,
+            camera_fpn_cache=camera_fpn_cache,
         )
     trajectory_metrics = metrics.get("trajectory")
     if not isinstance(trajectory_metrics, dict):
@@ -3384,6 +3433,16 @@ def evaluate_reactive_kitscenes_checkpoint(
             if mapless_test
             else "camera_map_route"
         ),
+        "inference_cache_policy": (
+            KITSCENES_STATEFUL_CAMERA_FPN_POLICY
+            if use_stateful_camera_fpn_cache
+            else "stateless"
+        ),
+        "trajectory_inference_policy": {
+            "planner": "gru",
+            "stochastic_noise": False,
+            "version": KITSCENES_TRAJECTORY_INFERENCE_POLICY,
+        },
         "maximum_labeled_horizon_steps": (
             KITSCENES_BENCHMARK_FUTURE_STEPS
         ),
@@ -3510,6 +3569,20 @@ def aggregate_reactive_kitscenes_test_evaluations(
                 "test_subset_camera_only_missing_map_route",
             }
             or payload.get("maximum_labeled_horizon_steps") != 50
+            or payload.get("inference_cache_policy")
+            != KITSCENES_STATEFUL_CAMERA_FPN_POLICY
+            or not isinstance(
+                payload.get("trajectory_inference_policy"),
+                dict,
+            )
+            or payload["trajectory_inference_policy"].get("version")
+            != KITSCENES_TRAJECTORY_INFERENCE_POLICY
+            or payload["trajectory_inference_policy"].get("planner")
+            != "gru"
+            or payload["trajectory_inference_policy"].get(
+                "stochastic_noise"
+            )
+            is not False
             or payload.get("checkpoint_sha256")
             != checkpoint_sha256s[0]
             or payload.get("checkpoint_epoch") != checkpoint_epochs[0]
@@ -3551,6 +3624,13 @@ def aggregate_reactive_kitscenes_test_evaluations(
         str(payload.get("source_revision") or "")
         for payload in payloads
     }
+    inference_policy_identities = {
+        json.dumps(
+            payload["trajectory_inference_policy"],
+            sort_keys=True,
+        )
+        for payload in payloads
+    }
     if (
         len(datasets) != 1
         or "" in datasets
@@ -3558,6 +3638,7 @@ def aggregate_reactive_kitscenes_test_evaluations(
         or "" in dataset_versions
         or len(source_revisions) != 1
         or "" in source_revisions
+        or len(inference_policy_identities) != 1
     ):
         raise ValueError(
             "KITScenes test partition reports mix dataset provenance"
@@ -3747,6 +3828,7 @@ def aggregate_reactive_kitscenes_test_evaluations(
             else "test_subset_camera_only_missing_map_route"
         ),
         "input_track": "camera_only_missing_map_route",
+        "inference_cache_policy": KITSCENES_STATEFUL_CAMERA_FPN_POLICY,
         "manifest_identities": sorted(
             manifest_identities,
             key=lambda item: str(item["partition_id"]),
@@ -3759,6 +3841,9 @@ def aggregate_reactive_kitscenes_test_evaluations(
         "partition_report_sha256s": sorted(report_sha256s),
         "source_revision": next(iter(source_revisions)),
         "source_split": "test",
+        "trajectory_inference_policy": json.loads(
+            next(iter(inference_policy_identities))
+        ),
     }
     report_bytes = (
         json.dumps(
@@ -3801,8 +3886,9 @@ def evaluate_reactive_kitscenes_test_partitions(
             checkpoint=checkpoint,
             shards=[shard],
             source_split="test",
-            batch_size=1,
+            batch_size=KITSCENES_STATEFUL_CAMERA_FPN_BATCH_SIZE,
             num_loader_workers=4,
+            use_stateful_camera_fpn_cache=True,
         )
         reports.append(evaluation.report)
         report_sha256s.append(evaluation.report_sha256)
@@ -3935,6 +4021,10 @@ def publish_reactive_kitscenes_evaluation(
                 "expected_sample_count",
                 0,
             ),
+            "eval/inference_cache_policy": report_payload.get(
+                "inference_cache_policy",
+                "",
+            ),
             "eval/input_track": report_payload["input_track"],
             "eval/partition_count": report_payload.get(
                 "partition_count",
@@ -3943,6 +4033,33 @@ def publish_reactive_kitscenes_evaluation(
             "eval/scene_uid_sha256": report_payload.get(
                 "scene_uid_sha256",
                 "",
+            ),
+            "eval/trajectory_inference_policy": (
+                report_payload.get("trajectory_inference_policy", {})
+                .get("version", "")
+                if isinstance(
+                    report_payload.get("trajectory_inference_policy"),
+                    dict,
+                )
+                else ""
+            ),
+            "eval/trajectory_planner": (
+                report_payload.get("trajectory_inference_policy", {})
+                .get("planner", "")
+                if isinstance(
+                    report_payload.get("trajectory_inference_policy"),
+                    dict,
+                )
+                else ""
+            ),
+            "eval/trajectory_stochastic_noise": (
+                report_payload.get("trajectory_inference_policy", {})
+                .get("stochastic_noise", "")
+                if isinstance(
+                    report_payload.get("trajectory_inference_policy"),
+                    dict,
+                )
+                else ""
             ),
             "model/checkpoint_epoch": checkpoint_epoch,
             "model/checkpoint_sha256": checkpoint_sha256,
@@ -4024,6 +4141,9 @@ def publish_reactive_kitscenes_evaluation(
         f"{split_tag}_evaluation_input_track": (
             report_payload["input_track"]
         ),
+        f"{split_tag}_inference_cache_policy": (
+            report_payload.get("inference_cache_policy", "")
+        ),
         f"{split_tag}_evaluation_role": (
             report_payload["evaluation_role"]
         ),
@@ -4043,6 +4163,39 @@ def publish_reactive_kitscenes_evaluation(
         ),
         f"{split_tag}_evaluation_sample_count": (
             metrics_payload["sample_count"]
+        ),
+        f"{split_tag}_trajectory_inference_policy": (
+            report_payload.get("trajectory_inference_policy", {}).get(
+                "version",
+                "",
+            )
+            if isinstance(
+                report_payload.get("trajectory_inference_policy"),
+                dict,
+            )
+            else ""
+        ),
+        f"{split_tag}_trajectory_planner": (
+            report_payload.get("trajectory_inference_policy", {}).get(
+                "planner",
+                "",
+            )
+            if isinstance(
+                report_payload.get("trajectory_inference_policy"),
+                dict,
+            )
+            else ""
+        ),
+        f"{split_tag}_trajectory_stochastic_noise": (
+            report_payload.get("trajectory_inference_policy", {}).get(
+                "stochastic_noise",
+                "",
+            )
+            if isinstance(
+                report_payload.get("trajectory_inference_policy"),
+                dict,
+            )
+            else ""
         ),
         **{
             f"{split_tag}_{name}": value
@@ -4391,11 +4544,12 @@ def wf_evaluate_reactive_kitscenes_test_sharded(
         checkpoint=checkpoint,
         shards=evaluation_shards,
         source_split="test",
-        batch_size=4,
+        batch_size=KITSCENES_STATEFUL_CAMERA_FPN_BATCH_SIZE,
         num_loader_workers=4,
         expected_test_partition_count=(
             KITSCENES_OFFICIAL_TEST_SCENE_COUNT
         ),
+        use_stateful_camera_fpn_cache=True,
     )
     publication = publish_reactive_kitscenes_evaluation(
         checkpoint=checkpoint,

@@ -22,6 +22,7 @@ from PIL import Image
 from data_parsing.pre_extracted import (
     _decode_sample,
     _make_pool_accessor,
+    _source_frame_interval_us_from_history_index,
     load_projection_from_manifest,
     packed_sample_tar_paths,
 )
@@ -168,10 +169,8 @@ class TestDecodeSampleMapSplit:
             dtype=np.float32,
         )
         history_index = [
-            [f"history-{history_index}-camera-0"]
-            for history_index in range(
-                REACTIVE_BEVFORMER_HISTORY_FRAMES
-            )
+            [f"kitscenes-scene-r{row_index:06d}-c0"]
+            for row_index in range(5, 40, 5)
         ]
         pool = {
             frame[0]: _jpeg_bytes(
@@ -188,6 +187,9 @@ class TestDecodeSampleMapSplit:
             "bev_history_index.json": canonical_json_bytes(
                 history_index
             ),
+            "meta.json": canonical_json_bytes({
+                "frame_idx": 40,
+            }),
             "calib.json": canonical_json_bytes({
                 "geometry_type": "pinhole",
                 "history_projection": {
@@ -222,6 +224,23 @@ class TestDecodeSampleMapSplit:
             out["camera_history_projection_matrix"],
             torch.from_numpy(history_projection),
         )
+        assert out["source_frame_index"].item() == 40
+        assert out["source_frame_interval_us"].item() == 100_000
+
+    def test_kitscenes_history_index_rejects_mixed_camera_rows(self):
+        history_index = [
+            [
+                f"kitscenes-scene-r{row_index:06d}-c0",
+                f"kitscenes-scene-r{row_index:06d}-c1",
+            ]
+            for row_index in range(5, 40, 5)
+        ]
+        history_index[3][1] = "kitscenes-scene-r000021-c1"
+
+        assert _source_frame_interval_us_from_history_index(
+            history_index,
+            current_frame_index=40,
+        ) == -1
 
     def test_t8_camera_history_pool_index_requires_pool(self):
         sample = {
@@ -622,6 +641,7 @@ class TestDecodeSampleMapSplit:
             "cam_0.jpg": _jpeg_bytes((0, 0, 0)),
             "ego.npy": _ego_bytes(),
             "meta.json": json.dumps({
+                "frame_idx": 42,
                 "split_group_uid": "kitscenes-scene-001",
             }).encode("ascii"),
         }
@@ -629,6 +649,19 @@ class TestDecodeSampleMapSplit:
         out = _decode_sample(sample)
 
         assert out["split_group_uid"] == "kitscenes-scene-001"
+        assert out["source_frame_index"].item() == 42
+        assert out["source_frame_interval_us"].item() == -1
+
+    def test_missing_source_frame_index_uses_invalid_sentinel(self):
+        sample = {
+            "cam_0.jpg": _jpeg_bytes((0, 0, 0)),
+            "ego.npy": _ego_bytes(),
+        }
+
+        out = _decode_sample(sample)
+
+        assert out["source_frame_index"].item() == -1
+        assert out["source_frame_interval_us"].item() == -1
 
     def test_dataset_metadata_does_not_infer_stateful_stream_identity(self):
         sample = {
@@ -1333,6 +1366,7 @@ class TestMergedDatasetLoader:
             num_workers=4,
             shuffle=1000,
             shuffle_seed=700,
+            decode_front_camera_fpn=True,
             drop_last=True,
         )
 
@@ -1346,6 +1380,10 @@ class TestMergedDatasetLoader:
         assert len(calls) == 4
         assert all(kwargs["num_workers"] == 1 for _, kwargs in calls)
         assert all(kwargs["drop_last"] is True for _, kwargs in calls)
+        assert all(
+            kwargs["decode_front_camera_fpn"] is True
+            for _, kwargs in calls
+        )
         assert [
             kwargs["shuffle_seed"] for _, kwargs in calls
         ] == [

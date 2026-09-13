@@ -723,10 +723,22 @@ def test_kitscenes_test_publication_requires_expected_model_version():
         ),
         "partition_count": 206,
         "expected_partition_count": 206,
+        "inference_cache_policy": (
+            distributed_training
+            .KITSCENES_STATEFUL_CAMERA_FPN_POLICY
+        ),
         "scene_uid_sha256": (
             distributed_training
             .KITSCENES_OFFICIAL_TEST_SCENE_UID_SHA256
         ),
+        "trajectory_inference_policy": {
+            "planner": "gru",
+            "stochastic_noise": False,
+            "version": (
+                distributed_training
+                .KITSCENES_TRAJECTORY_INFERENCE_POLICY
+            ),
+        },
         "metrics": {"sample_count": 23_690},
     }
     with pytest.raises(
@@ -1291,7 +1303,12 @@ def test_kitscenes_test_sharded_workflow_enforces_official_inventory():
         .scalar.primitive.integer
         == 206
     )
-    assert bindings["batch_size"].scalar.primitive.integer == 4
+    assert bindings["batch_size"].scalar.primitive.integer == 5
+    assert (
+        bindings["use_stateful_camera_fpn_cache"]
+        .scalar.primitive.boolean
+        is True
+    )
     assert publisher.flyte_entity is (
         distributed_training.publish_reactive_kitscenes_evaluation
     )
@@ -1313,7 +1330,7 @@ def test_kitscenes_test_sharded_workflow_enforces_official_inventory():
 def test_kitscenes_evaluation_rejects_batch_larger_than_four():
     with pytest.raises(
         ValueError,
-        match="between one and four",
+        match="exceeds the selected inference policy",
     ):
         distributed_training.evaluate_reactive_kitscenes_checkpoint.task_function(
             checkpoint=FlyteFile("/tmp/missing-checkpoint.pt"),
@@ -1333,6 +1350,20 @@ def test_kitscenes_evaluation_accepts_batch_four():
             shards=[FlyteDirectory("/tmp/missing-shard")],
             source_split="test",
             batch_size=4,
+        )
+
+
+def test_kitscenes_stateful_evaluation_rejects_batch_four():
+    with pytest.raises(
+        ValueError,
+        match="requires test data and batch size 5",
+    ):
+        distributed_training.evaluate_reactive_kitscenes_checkpoint.task_function(
+            checkpoint=FlyteFile("/tmp/missing-checkpoint.pt"),
+            shards=[FlyteDirectory("/tmp/missing-shard")],
+            source_split="test",
+            batch_size=4,
+            use_stateful_camera_fpn_cache=True,
         )
 
 
@@ -1562,6 +1593,10 @@ def test_kitscenes_test_partition_aggregation_is_exact(tmp_path):
             "evaluation_role": (
                 "test_subset_camera_only_missing_map_route"
             ),
+            "inference_cache_policy": (
+                distributed_training
+                .KITSCENES_STATEFUL_CAMERA_FPN_POLICY
+            ),
             "input_track": "camera_only_missing_map_route",
             "manifest_identities": [{
                 "manifest_sha256": (
@@ -1591,6 +1626,14 @@ def test_kitscenes_test_partition_aggregation_is_exact(tmp_path):
             },
             "source_revision": "source-revision",
             "source_split": "test",
+            "trajectory_inference_policy": {
+                "planner": "gru",
+                "stochastic_noise": False,
+                "version": (
+                    distributed_training
+                    .KITSCENES_TRAJECTORY_INFERENCE_POLICY
+                ),
+            },
         }
         report_path = tmp_path / f"{partition_id}.json"
         report_bytes = (
@@ -1621,6 +1664,12 @@ def test_kitscenes_test_partition_aggregation_is_exact(tmp_path):
 
     assert report["partition_count"] == 3
     assert report["expected_partition_count"] == 3
+    assert report["inference_cache_policy"] == (
+        distributed_training.KITSCENES_STATEFUL_CAMERA_FPN_POLICY
+    )
+    assert report["trajectory_inference_policy"]["version"] == (
+        distributed_training.KITSCENES_TRAJECTORY_INFERENCE_POLICY
+    )
     assert (
         report["evaluation_role"]
         == "test_subset_camera_only_missing_map_route"

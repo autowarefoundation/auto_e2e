@@ -20,6 +20,9 @@ from model_components.losses import (
     BEV_SEGMENTATION_AUXILIARY_LOSS_VERSION,
 )
 from navigation.geometry import AUTOE2E_NAVIGATION_GEOMETRY
+from reactive_training_contracts import (
+    REACTIVE_BEVFORMER_FRAME_INTERVAL_US,
+)
 from training.dataset_policy import (
     KITSCENES_DATASET_NAME,
     L2D_DATASET_NAME,
@@ -1147,6 +1150,7 @@ def _route_gradient_evidence(
     camera_history_tiles: torch.Tensor | None,
     history_projections: tuple[Any, ...] | None,
     geometry_type: str,
+    initial_noise: torch.Tensor | None = None,
 ) -> float | None:
     route_valid = batch["route_valid"].to(dtype=torch.bool)
     if not bool(route_valid.any()):
@@ -1168,6 +1172,7 @@ def _route_gradient_evidence(
             front_camera_tile=batch.get("front_camera_tile"),
             front_projection=front_projection,
             mode="infer",
+            initial_noise=initial_noise,
             compute_bev_segmentation=False,
             compute_route_reconstruction=False,
         )
@@ -1193,6 +1198,14 @@ def evaluate_reactive_multitask(
     include_counterfactuals: bool = True,
     include_route_gradient: bool = True,
     probability_bins: int = 100,
+    initial_noise_provider: (
+        Callable[
+            [Sequence[str], torch.device, torch.dtype],
+            torch.Tensor,
+        ]
+        | None
+    ) = None,
+    camera_fpn_cache: Any = None,
 ) -> dict[str, Any]:
     """Evaluate trajectory, BEV semantics, and route retention/use."""
     from training.losses.control_rollout import integrate_controls_torch
@@ -1201,6 +1214,13 @@ def evaluate_reactive_multitask(
         raise ValueError("probability_bins must be at least 10")
     if not isinstance(stage, ReactiveTrainingStage):
         raise TypeError("stage must be a ReactiveTrainingStage")
+    if camera_fpn_cache is not None and (
+        include_counterfactuals or include_route_gradient
+    ):
+        raise ValueError(
+            "stateful camera FPN evaluation cannot run counterfactuals "
+            "or route gradients"
+        )
     _assert_reactive_only(model)
     training_policy = reactive_training_policy(stage)
     require_reactive_camera_context = stage in {
@@ -1317,6 +1337,144 @@ def evaluate_reactive_multitask(
                 raise ValueError("sample UID count differs from batch size")
             sample_uids.extend(batch_uids)
 
+            initial_noise = (
+                initial_noise_provider(
+                    batch_uids,
+                    device,
+                    batch["visual_tiles"].dtype,
+                )
+                if initial_noise_provider is not None
+                else None
+            )
+            camera_fpn_stream_ids = None
+            camera_fpn_timestamps_us = None
+            front_camera_fpn_tile = None
+            front_camera_fpn_available = None
+            if camera_fpn_cache is not None:
+                raw_stream_ids = batch.get("split_group_uid")
+                source_stream_ids: tuple[str, ...]
+                if isinstance(raw_stream_ids, str):
+                    source_stream_ids = (raw_stream_ids,)
+                elif isinstance(raw_stream_ids, Sequence):
+                    source_stream_ids = tuple(
+                        str(value) for value in raw_stream_ids
+                    )
+                else:
+                    raise ValueError(
+                        "stateful camera FPN evaluation requires stream IDs"
+                    )
+                if (
+                    len(source_stream_ids) != batch_size
+                    or any(not value for value in source_stream_ids)
+                    or len(set(source_stream_ids)) != 1
+                ):
+                    raise ValueError(
+                        "stateful camera FPN evaluation requires one scene "
+                        "per batch"
+                    )
+                source_frame_index = batch.get("source_frame_index")
+                source_frame_interval_us = batch.get(
+                    "source_frame_interval_us"
+                )
+                if (
+                    not torch.is_tensor(source_frame_index)
+                    or not torch.is_tensor(source_frame_interval_us)
+                ):
+                    raise ValueError(
+                        "stateful camera FPN evaluation requires frame "
+                        "indices and source cadence"
+                    )
+                source_frame_index = source_frame_index.reshape(-1)
+                source_frame_interval_us = (
+                    source_frame_interval_us.reshape(-1)
+                )
+                if (
+                    source_frame_index.numel() != batch_size
+                    or source_frame_interval_us.numel() != batch_size
+                    or bool((source_frame_index < 0).any().item())
+                    or bool((source_frame_interval_us <= 0).any().item())
+                ):
+                    raise ValueError(
+                        "stateful camera FPN evaluation has invalid timing"
+                    )
+                source_intervals = {
+                    int(value)
+                    for value in source_frame_interval_us.detach()
+                    .cpu()
+                    .tolist()
+                }
+                if len(source_intervals) != 1:
+                    raise ValueError(
+                        "stateful camera FPN evaluation mixes source cadence"
+                    )
+                source_interval_us = next(iter(source_intervals))
+                if (
+                    REACTIVE_BEVFORMER_FRAME_INTERVAL_US
+                    % source_interval_us
+                    != 0
+                ):
+                    raise ValueError(
+                        "stateful camera FPN source cadence is off the T8 grid"
+                    )
+                lane_stride = (
+                    REACTIVE_BEVFORMER_FRAME_INTERVAL_US
+                    // source_interval_us
+                )
+                if batch_size > lane_stride:
+                    raise ValueError(
+                        "stateful camera FPN batch exceeds the cache lane "
+                        "stride"
+                    )
+                frame_indices = [
+                    int(value)
+                    for value in source_frame_index.detach().cpu().tolist()
+                ]
+                if any(
+                    current != previous + 1
+                    for previous, current in zip(
+                        frame_indices,
+                        frame_indices[1:],
+                    )
+                ):
+                    raise ValueError(
+                        "stateful camera FPN evaluation requires consecutive "
+                        "source frames"
+                    )
+                camera_fpn_stream_ids = tuple(
+                    f"{source_stream_ids[index]}:lane:"
+                    f"{frame_index % lane_stride}"
+                    for index, frame_index in enumerate(frame_indices)
+                )
+                if len(set(camera_fpn_stream_ids)) != batch_size:
+                    raise ValueError(
+                        "stateful camera FPN evaluation produced duplicate "
+                        "cache lanes"
+                    )
+                camera_fpn_timestamps_us = (
+                    source_frame_index.to(dtype=torch.int64)
+                    * source_interval_us
+                )
+                front_camera_fpn_tile = batch.get(
+                    "front_camera_fpn_tile"
+                )
+                front_camera_fpn_available = batch.get(
+                    "front_camera_fpn_available"
+                )
+                if (
+                    front_camera_fpn_tile is None
+                    or front_camera_fpn_available is None
+                    or not bool(
+                        torch.as_tensor(
+                            front_camera_fpn_available,
+                            dtype=torch.bool,
+                        ).all()
+                    )
+                ):
+                    raise ValueError(
+                        "stateful camera FPN evaluation requires exact "
+                        "Front companions"
+                    )
+
             if include_route_gradient and route_gradient_l1 is None:
                 with torch.enable_grad():
                     route_gradient_l1 = _route_gradient_evidence(
@@ -1327,6 +1485,7 @@ def evaluate_reactive_multitask(
                         camera_history_tiles,
                         history_projections,
                         geometry_type,
+                        initial_noise=initial_noise,
                     )
 
             bev_available = batch.get("bev_segmentation_available")
@@ -1353,8 +1512,18 @@ def evaluate_reactive_multitask(
                     camera_history_tiles=camera_history_tiles,
                     history_projections=history_projections,
                     front_camera_tile=batch.get("front_camera_tile"),
+                    front_camera_fpn_tile=front_camera_fpn_tile,
+                    front_camera_fpn_available=(
+                        front_camera_fpn_available
+                    ),
                     front_projection=front_projection,
+                    camera_fpn_cache=camera_fpn_cache,
+                    camera_fpn_stream_ids=camera_fpn_stream_ids,
+                    camera_fpn_timestamps_us=(
+                        camera_fpn_timestamps_us
+                    ),
                     mode="infer",
+                    initial_noise=initial_noise,
                     return_auxiliary=True,
                     compute_bev_segmentation=compute_bev,
                     compute_route_reconstruction=True,
@@ -1682,6 +1851,7 @@ def evaluate_reactive_multitask(
                         front_camera_tile=batch.get("front_camera_tile"),
                         front_projection=front_projection,
                         mode="infer",
+                        initial_noise=initial_noise,
                         compute_bev_segmentation=False,
                         compute_route_reconstruction=False,
                     )
@@ -1737,6 +1907,7 @@ def evaluate_reactive_multitask(
                             ),
                             front_projection=front_projection,
                             mode="infer",
+                            initial_noise=initial_noise,
                             compute_bev_segmentation=False,
                             compute_route_reconstruction=False,
                         )
