@@ -1249,6 +1249,11 @@ def test_kitscenes_test_sharded_workflow_enforces_official_inventory():
         distributed_training.evaluate_reactive_kitscenes_test_partitions
     )
     assert (
+        distributed_training.evaluate_reactive_kitscenes_test_partitions
+        .environment["AUTO_E2E_TRAINING_IMAGE"]
+        == distributed_training.TRAINING_IMAGE
+    )
+    assert (
         bindings["expected_partition_count"]
         .scalar.primitive.integer
         == 206

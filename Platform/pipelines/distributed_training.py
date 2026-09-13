@@ -3569,7 +3569,10 @@ def aggregate_reactive_kitscenes_test_evaluations(
     )
 
 
-@dynamic(container_image=TRAINING_IMAGE)
+@dynamic(
+    container_image=TRAINING_IMAGE,
+    environment={"AUTO_E2E_TRAINING_IMAGE": TRAINING_IMAGE},
+)
 def evaluate_reactive_kitscenes_test_partitions(
     checkpoint: FlyteFile,
     shards: List[FlyteDirectory],
