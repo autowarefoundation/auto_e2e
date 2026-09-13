@@ -1094,6 +1094,20 @@ def _register_reactive_policy_model_version(
     return str(registered.version)
 
 
+def _validate_kitscenes_publication_binding(
+    report_payload: dict[str, object],
+    *,
+    expected_model_version: str,
+) -> None:
+    if (
+        report_payload.get("source_split") == "test"
+        and not expected_model_version
+    ):
+        raise ValueError(
+            "KITScenes test publication requires an existing model version"
+        )
+
+
 def _log_reactive_bev_evaluation_to_mlflow(
     *,
     report: Mapping[str, Any],
@@ -3503,6 +3517,9 @@ def aggregate_reactive_kitscenes_test_evaluations(
         for payload in payloads
         for identity in payload["manifest_identities"]
     ]
+    is_official_test = (
+        expected_partition_count == KITSCENES_OFFICIAL_TEST_SCENE_COUNT
+    )
     report_payload = {
         "schema_version": (
             "reactive_kitscenes_test_sharded_evaluation_v1"
@@ -3513,6 +3530,8 @@ def aggregate_reactive_kitscenes_test_evaluations(
         "dataset_version": next(iter(dataset_versions)),
         "evaluation_role": (
             "official_test_camera_only_missing_map_route"
+            if is_official_test
+            else "test_subset_camera_only_missing_map_route"
         ),
         "input_track": "camera_only_missing_map_route",
         "manifest_identities": sorted(
@@ -3621,6 +3640,10 @@ def publish_reactive_kitscenes_evaluation(
         or report_payload.get("checkpoint_epoch") != checkpoint_epoch
     ):
         raise ValueError("KITScenes evaluation report identity differs")
+    _validate_kitscenes_publication_binding(
+        report_payload,
+        expected_model_version=expected_model_version,
+    )
 
     checkpoint_path = Path(checkpoint.download())
     checkpoint_hasher = hashlib.sha256()

@@ -759,7 +759,7 @@ class KitScenesDataset(Dataset):
 
     def map_for_row(self, scene_id: str, frame_idx: int) -> torch.Tensor:
         """Rasterize one raw uint8 map tile without loading camera images."""
-        if not self.rasterize_map_at_runtime:
+        if self._allow_mapless or not self.rasterize_map_at_runtime:
             return torch.zeros(
                 (3, self.image_size, self.image_size), dtype=torch.uint8
             )

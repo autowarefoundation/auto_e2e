@@ -316,6 +316,7 @@ def test_mapless_track_ignores_an_accidentally_present_map(monkeypatch, tmp_path
     dataset = object.__new__(KitScenesDataset)
     dataset.camera_names = list(CAMERA_NAMES)
     dataset.image_size = 512
+    dataset.rasterize_map_at_runtime = True
     dataset._sampling_history_steps = 40
     dataset._sampling_future_steps = 50
     dataset._allow_mapless = True
@@ -371,11 +372,19 @@ def test_mapless_track_ignores_an_accidentally_present_map(monkeypatch, tmp_path
         "_cached_scene_map",
         lambda _: pytest.fail("mapless track must not read the map"),
     )
+    monkeypatch.setattr(
+        dataset_module,
+        "generate_bev_map_tile",
+        lambda **_: pytest.fail("mapless track must not rasterize the map"),
+    )
 
     samples = dataset._valid_samples_for_scene(scene_id)
+    map_tile = dataset.map_for_row(scene_id, samples[0][1])
 
     assert samples
     assert scene_id not in dataset._scene_latlon
+    assert map_tile.shape == (3, 512, 512)
+    assert not torch.any(map_tile)
 
 
 class _CameraLoader:

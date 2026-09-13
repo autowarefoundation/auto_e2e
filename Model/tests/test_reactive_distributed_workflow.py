@@ -714,6 +714,26 @@ def test_reactive_policy_evaluation_enforces_expected_model_version():
     assert version == "66"
 
 
+def test_kitscenes_test_publication_requires_expected_model_version():
+    with pytest.raises(
+        ValueError,
+        match="requires an existing model version",
+    ):
+        distributed_training._validate_kitscenes_publication_binding(
+            {"source_split": "test"},
+            expected_model_version="",
+        )
+
+    distributed_training._validate_kitscenes_publication_binding(
+        {"source_split": "test"},
+        expected_model_version="67",
+    )
+    distributed_training._validate_kitscenes_publication_binding(
+        {"source_split": "val"},
+        expected_model_version="",
+    )
+
+
 def test_reviewed_ray_topologies_have_fixed_worker_groups():
     assert (
         distributed_training.RAY_1.worker_node_config[0].replicas
@@ -1368,6 +1388,10 @@ def test_kitscenes_test_partition_aggregation_is_exact(tmp_path):
 
     assert report["partition_count"] == 3
     assert report["expected_partition_count"] == 3
+    assert (
+        report["evaluation_role"]
+        == "test_subset_camera_only_missing_map_route"
+    )
     assert metrics["sample_count"] == 5
     assert metrics["sample_uid_sha256"] is None
     assert metrics["bev_segmentation"] == {
