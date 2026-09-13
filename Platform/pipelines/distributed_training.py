@@ -126,14 +126,13 @@ def _sha256_file(path: Path) -> str:
 
 def _discover_kitscenes_evaluation_inventory(
     shard_directories: list[str],
-    *,
-    mapless_test: bool,
 ) -> PackedSplitInventory:
     from data_parsing.pre_extracted import discover_split_inventory
 
+    # Evaluation canaries may intentionally cover one exact scene.
     return discover_split_inventory(
         shard_directories,
-        allow_single_group=mapless_test,
+        allow_single_group=True,
     )
 
 
@@ -3467,7 +3466,6 @@ def evaluate_reactive_kitscenes_checkpoint(
     inventory = (
         _discover_kitscenes_evaluation_inventory(
             shard_directories,
-            mapless_test=mapless_test,
         )
         if shard_directories
         else None

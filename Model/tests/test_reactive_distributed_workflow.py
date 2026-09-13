@@ -1508,14 +1508,8 @@ def test_kitscenes_stateful_evaluation_rejects_batch_four():
         )
 
 
-@pytest.mark.parametrize(
-    ("mapless_test", "expected_allow_single_group"),
-    [(True, True), (False, False)],
-)
-def test_kitscenes_evaluation_inventory_group_policy(
+def test_kitscenes_evaluation_inventory_allows_single_scene_canaries(
     monkeypatch,
-    mapless_test,
-    expected_allow_single_group,
 ):
     from data_parsing import pre_extracted
 
@@ -1535,14 +1529,11 @@ def test_kitscenes_evaluation_inventory_group_policy(
     result = (
         distributed_training._discover_kitscenes_evaluation_inventory(
             ["/tmp/test-scene"],
-            mapless_test=mapless_test,
         )
     )
 
     assert result is expected
-    assert calls == [
-        (["/tmp/test-scene"], expected_allow_single_group)
-    ]
+    assert calls == [(["/tmp/test-scene"], True)]
 
 
 def test_kitscenes_test_inventory_must_match_manifest_scene():
@@ -1872,7 +1863,6 @@ def test_kitscenes_checkpoint_evaluator_routes_inventory_policy():
     )
 
     assert "_discover_kitscenes_evaluation_inventory(" in source
-    assert "mapless_test=mapless_test" in source
     assert 'source_split in {"val", "test"}' in source
     assert "_validate_kitscenes_val_manifest_contract(" in source
     assert "_kitscenes_test_scene_identity(" in source
