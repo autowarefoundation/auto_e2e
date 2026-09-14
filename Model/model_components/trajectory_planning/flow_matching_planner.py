@@ -388,3 +388,74 @@ class FlowMatchingPlanner(BasePlanner):
                               horizon_tokens=reasoning_horizon_tokens)
             x = x + dt * v
         return x
+
+    def sample_k_trajectories(
+        self,
+        bev_features: torch.Tensor,
+        visual_history: torch.Tensor,
+        egomotion_history: torch.Tensor,
+        num_samples: int = 8,
+    ) -> torch.Tensor:
+        """Sample K independent trajectories per scene via batch-repeat.
+
+        Expands the batch by a factor of ``num_samples`` using
+        ``repeat_interleave``, then calls ``forward()`` once.  Each of the
+        B*K rows draws a fresh ``x_0 ~ N(0, I_128)`` noise tensor inside
+        ``forward()``, so the K trajectories per scene are genuinely
+        independent — not deterministic variants of a single seed.
+
+        This satisfies the WG multi-path output requirement (related to
+        issue #17): when the BEV segmentation auxiliary loss (#17) lands
+        and provides drivable-area labels from KITScenes, the downstream
+        ``TrajectoryComplianceScorer.drivable_area_compliance`` step can
+        upgrade from pixel-colour heuristics to label-based lookup with
+        no change to this API.
+
+        Note: this method is intentionally added to ``FlowMatchingPlanner``
+        only, not to ``BasePlanner`` ABC.  ``GRUPlanner`` cannot sample
+        independently across K because its sequential rollout is seeded by
+        shared hidden state; adding this to the ABC would force a broken
+        GRU implementation.
+
+        Args:
+            bev_features:      [B, embed_dim, H, W]
+            visual_history:    [B, visual_history_dim]
+            egomotion_history: [B, egomotion_dim]
+            num_samples:       K — number of independent trajectory samples
+                               per scene.  Must be >= 1.
+
+        Returns:
+            trajectories: [B, K, trajectory_dim] — K independent samples
+                for each of the B input scenes.
+
+        Example::
+
+            planner = FlowMatchingPlanner(embed_dim=256)
+            paths = planner.sample_k_trajectories(
+                bev_features,      # [2, 256, 8, 8]
+                visual_history,    # [2, 896]
+                egomotion_history, # [2, 256]
+                num_samples=8,
+            )
+            # paths.shape == (2, 8, 128)
+        """
+        if num_samples < 1:
+            raise ValueError(
+                f"num_samples must be >= 1, got {num_samples}."
+            )
+        B = bev_features.shape[0]
+        K = num_samples
+
+        # Expand each scene K times: scene i occupies rows [i*K : (i+1)*K].
+        # repeat_interleave keeps scenes contiguous so .view(B, K, ...) is safe.
+        bev_K = bev_features.repeat_interleave(K, dim=0)        # [B*K, C, H, W]
+        vh_K  = visual_history.repeat_interleave(K, dim=0)      # [B*K, 896]
+        em_K  = egomotion_history.repeat_interleave(K, dim=0)   # [B*K, 256]
+
+        # Single forward pass.  Independence guarantee: each of the B*K rows
+        # draws its own x_0 ~ N(0, I_128) inside forward() at the line
+        #   x = torch.randn(B, self.trajectory_dim, ...)
+        # With B replaced by B*K here, that gives K genuinely separate noise
+        # draws per scene — no shared state, no broadcasting.
+        trajectories = self.forward(bev_K, vh_K, em_K)           # [B*K, 128]
+        return trajectories.view(B, K, self.trajectory_dim)      # [B, K, 128]
