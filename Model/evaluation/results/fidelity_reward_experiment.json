@@ -1,0 +1,34 @@
+{
+  "version": "v1_safety_comfort_progress_gated_wm",
+  "source": "constructed_expert_vs_jerky",
+  "fidelity_temperature": 1.0,
+  "fidelity_saturation": 0.9,
+  "jerky_max_abs_accel": 7.901507377624512,
+  "jerky_max_abs_ego_y": 0.9882224798202515,
+  "jerky_max_abs_cross_track": 0.9882224798202515,
+  "base": {
+    "expert": 1.0,
+    "jerky": -2.8394618034362793,
+    "expert_minus_jerky": 3.8394618034362793,
+    "winner": "expert",
+    "safety_expert": -0.0,
+    "safety_jerky": -0.0,
+    "progress_expert": 1.0,
+    "progress_jerky": 1.4938430786132812,
+    "comfort_expert": -0.0,
+    "comfort_jerky": -8.666609764099121
+  },
+  "faithful_wm": {
+    "expert": -6.678924083709717,
+    "jerky": -2.8394618034362793,
+    "winner": "jerky",
+    "fidelity_mean": 0.8999999761581421
+  },
+  "noise_wm": {
+    "expert": 0.9999995827674866,
+    "jerky": -2.8394618034362793,
+    "winner": "expert",
+    "fidelity_mean": 2.6142050302269126e-08,
+    "ranking_matches_base": true
+  }
+}
