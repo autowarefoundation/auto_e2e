@@ -12,9 +12,31 @@ Usage:
     passed = gate_check(metrics)
 """
 
-from __future__ import annotations
+from typing import Literal, overload
 
 import numpy as np
+
+
+@overload
+def integrate_trajectory(
+    accel: np.ndarray,
+    curvature: np.ndarray,
+    v0: float,
+    theta0: float = 0.0,
+    dt: float = 0.1,
+    return_headings: Literal[False] = False,
+) -> np.ndarray: ...
+
+
+@overload
+def integrate_trajectory(
+    accel: np.ndarray,
+    curvature: np.ndarray,
+    v0: float,
+    theta0: float = 0.0,
+    dt: float = 0.1,
+    return_headings: Literal[True] = ...,
+) -> tuple[np.ndarray, np.ndarray]: ...
 
 
 def integrate_trajectory(
@@ -23,7 +45,8 @@ def integrate_trajectory(
     v0: float,
     theta0: float = 0.0,
     dt: float = 0.1,
-) -> np.ndarray:
+    return_headings: bool = False,
+) -> np.ndarray | tuple[np.ndarray, np.ndarray]:
     """Integrate acceleration + curvature into (x, y) positions.
 
     Args:
@@ -32,12 +55,15 @@ def integrate_trajectory(
         v0: Initial speed (m/s) from egomotion history.
         theta0: Initial heading (rad). Default 0 = ego-centric frame.
         dt: Timestep (s). Default 0.1 = 10Hz.
+        return_headings: If True, returns a (positions, headings) tuple.
 
     Returns:
-        (T, 2) array of [x, y] positions relative to initial pose.
+        (T, 2) array of [x, y] positions relative to initial pose, or
+        tuple ((T, 2) positions, (T,) headings) if return_headings=True.
     """
     T = len(accel)
     positions = np.zeros((T, 2), dtype=np.float64)
+    headings = np.zeros(T, dtype=np.float64)
     v = float(v0)
     theta = float(theta0)
     x, y = 0.0, 0.0
@@ -48,7 +74,10 @@ def integrate_trajectory(
         x = x + v * np.cos(theta) * dt
         y = y + v * np.sin(theta) * dt
         positions[t] = [x, y]
+        headings[t] = theta
 
+    if return_headings:
+        return positions, headings
     return positions
 
 
@@ -80,10 +109,12 @@ def compute_open_loop_metrics(
     ade_1s, ade_2s, ade_3s, fde_3s = [], [], [], []
 
     for i in range(B):
-        pred_xy = integrate_trajectory(pred_accel[i], pred_curv[i],
-                                       initial_speed[i], initial_heading[i])
-        gt_xy = integrate_trajectory(gt_accel[i], gt_curv[i],
-                                     initial_speed[i], initial_heading[i])
+        pred_xy = integrate_trajectory(
+            pred_accel[i], pred_curv[i], initial_speed[i], initial_heading[i]
+        )
+        gt_xy = integrate_trajectory(
+            gt_accel[i], gt_curv[i], initial_speed[i], initial_heading[i]
+        )
         errors = np.linalg.norm(pred_xy - gt_xy, axis=1)
 
         ade_1s.append(errors[:10].mean())
@@ -128,13 +159,13 @@ def gate_check(
 
 # nuPlan comfort bounds (the full set from nuplan-devkit `ego_is_comfortable`).
 COMFORT_THRESHOLDS = {
-    "lon_accel_max": 2.40,    # m/s^2   upper bound on longitudinal accel
-    "lon_accel_min": -4.05,   # m/s^2   lower bound (braking)
-    "lat_accel": 4.89,        # m/s^2   |lateral accel|
-    "yaw_rate": 0.95,         # rad/s   |yaw rate|
-    "yaw_accel": 1.93,        # rad/s^2 |yaw acceleration|
-    "lon_jerk": 4.13,         # m/s^3   |longitudinal jerk|
-    "mag_jerk": 8.37,         # m/s^3   |jerk magnitude| = sqrt(lon_jerk^2 + lat_jerk^2)
+    "lon_accel_max": 2.40,  # m/s^2   upper bound on longitudinal accel
+    "lon_accel_min": -4.05,  # m/s^2   lower bound (braking)
+    "lat_accel": 4.89,  # m/s^2   |lateral accel|
+    "yaw_rate": 0.95,  # rad/s   |yaw rate|
+    "yaw_accel": 1.93,  # rad/s^2 |yaw acceleration|
+    "lon_jerk": 4.13,  # m/s^3   |longitudinal jerk|
+    "mag_jerk": 8.37,  # m/s^3   |jerk magnitude| = sqrt(lon_jerk^2 + lat_jerk^2)
 }
 
 
@@ -165,17 +196,17 @@ def compute_comfort_metrics(
         pred_accel, pred_curv: ``(B, T)`` predicted action signals.
         initial_speed: ``(B,)`` speed at the prediction start.
     """
-    accel = np.asarray(pred_accel, dtype=np.float64)                 # (B, T)
-    curv = np.asarray(pred_curv, dtype=np.float64)                   # (B, T)
+    accel = np.asarray(pred_accel, dtype=np.float64)  # (B, T)
+    curv = np.asarray(pred_curv, dtype=np.float64)  # (B, T)
     v0 = np.asarray(initial_speed, dtype=np.float64)[:, None]
 
-    v = np.clip(v0 + np.cumsum(accel, axis=1) * dt, 0.0, None)       # (B, T)
-    lat_accel = v ** 2 * curv                                        # (B, T)
-    yaw_rate = v * curv                                              # (B, T)
-    lon_jerk = np.diff(accel, axis=1) / dt                           # (B, T-1)
-    lat_jerk = np.diff(lat_accel, axis=1) / dt                       # (B, T-1)
-    yaw_accel = np.diff(yaw_rate, axis=1) / dt                       # (B, T-1)
-    mag_jerk = np.hypot(lon_jerk, lat_jerk)                          # (B, T-1)
+    v = np.clip(v0 + np.cumsum(accel, axis=1) * dt, 0.0, None)  # (B, T)
+    lat_accel = v**2 * curv  # (B, T)
+    yaw_rate = v * curv  # (B, T)
+    lon_jerk = np.diff(accel, axis=1) / dt  # (B, T-1)
+    lat_jerk = np.diff(lat_accel, axis=1) / dt  # (B, T-1)
+    yaw_accel = np.diff(yaw_rate, axis=1) / dt  # (B, T-1)
+    mag_jerk = np.hypot(lon_jerk, lat_jerk)  # (B, T-1)
 
     out: dict[str, float] = {}
     violated = np.zeros(accel.shape[0], dtype=bool)
@@ -184,7 +215,9 @@ def compute_comfort_metrics(
     lon_max, lon_min = accel.max(axis=1), accel.min(axis=1)
     out["max_lon_accel"] = float(lon_max.mean())
     out["min_lon_accel"] = float(lon_min.mean())
-    lon_exceed = (lon_max > thresholds["lon_accel_max"]) | (lon_min < thresholds["lon_accel_min"])
+    lon_exceed = (lon_max > thresholds["lon_accel_max"]) | (
+        lon_min < thresholds["lon_accel_min"]
+    )
     out["lon_accel_violation_rate"] = float(lon_exceed.mean())
     violated |= lon_exceed
 
@@ -217,11 +250,11 @@ def _erode_drivable(mask: np.ndarray, iterations: int) -> np.ndarray:
     eroded = np.asarray(mask, dtype=bool)
     for _ in range(max(0, int(iterations))):
         nb = eroded.copy()
-        nb[1:, :] &= eroded[:-1, :]      # up neighbour
-        nb[:-1, :] &= eroded[1:, :]      # down neighbour
-        nb[:, 1:] &= eroded[:, :-1]      # left neighbour
-        nb[:, :-1] &= eroded[:, 1:]      # right neighbour
-        nb[0, :] = nb[-1, :] = nb[:, 0] = nb[:, -1] = False   # border = off-road
+        nb[1:, :] &= eroded[:-1, :]  # up neighbour
+        nb[:-1, :] &= eroded[1:, :]  # down neighbour
+        nb[:, 1:] &= eroded[:, :-1]  # left neighbour
+        nb[:, :-1] &= eroded[:, 1:]  # right neighbour
+        nb[0, :] = nb[-1, :] = nb[:, 0] = nb[:, -1] = False  # border = off-road
         eroded = nb
     return eroded
 
@@ -262,41 +295,48 @@ def offroad_rate(
     Returns:
         Fraction of trajectories that leave the drivable area.
     """
-    mask = _erode_drivable(drivable_mask, dilation_px) if dilation_px > 0 \
+    mask = (
+        _erode_drivable(drivable_mask, dilation_px)
+        if dilation_px > 0
         else np.asarray(drivable_mask, dtype=bool)
+    )
     H, W = mask.shape
     cr, cc = center_px if center_px is not None else (H // 2, W // 2)
     pos = np.asarray(positions, dtype=np.float64)
     B, T, _ = pos.shape
 
     if ego_size is None:
-        query = pos[:, :, None, :]                                   # (B, T, 1, 2)
+        query = pos[:, :, None, :]  # (B, T, 1, 2)
     else:
         length, width = ego_size
-        corners = np.array([                                         # ego frame
-            [length / 2, width / 2], [length / 2, -width / 2],
-            [-length / 2, width / 2], [-length / 2, -width / 2],
-        ])                                                           # (4, 2)
+        corners = np.array(
+            [  # ego frame
+                [length / 2, width / 2],
+                [length / 2, -width / 2],
+                [-length / 2, width / 2],
+                [-length / 2, -width / 2],
+            ]
+        )  # (4, 2)
         if headings is not None:
             theta = np.asarray(headings, dtype=np.float64)
         elif T >= 2:
             d = np.diff(pos, axis=1)
-            d = np.concatenate([d[:, :1, :], d], axis=1)             # (B, T, 2)
-            theta = np.arctan2(d[..., 1], d[..., 0])                 # (B, T)
+            d = np.concatenate([d[:, :1, :], d], axis=1)  # (B, T, 2)
+            theta = np.arctan2(d[..., 1], d[..., 0])  # (B, T)
         else:
             theta = np.zeros((B, T))
-        cos, sin = np.cos(theta), np.sin(theta)                      # (B, T)
-        cx, cy = corners[:, 0], corners[:, 1]                        # (4,)
-        qx = pos[..., 0:1] + cos[..., None] * cx - sin[..., None] * cy   # (B, T, 4)
-        qy = pos[..., 1:2] + sin[..., None] * cx + cos[..., None] * cy   # (B, T, 4)
-        query = np.stack([qx, qy], axis=-1)                          # (B, T, 4, 2)
+        cos, sin = np.cos(theta), np.sin(theta)  # (B, T)
+        cx, cy = corners[:, 0], corners[:, 1]  # (4,)
+        qx = pos[..., 0:1] + cos[..., None] * cx - sin[..., None] * cy  # (B, T, 4)
+        qy = pos[..., 1:2] + sin[..., None] * cx + cos[..., None] * cy  # (B, T, 4)
+        query = np.stack([qx, qy], axis=-1)  # (B, T, 4, 2)
 
     offroad = 0
     for i in range(B):
         rows = np.round(cr - query[i, ..., 0] / meters_per_pixel).astype(int)
         cols = np.round(cc - query[i, ..., 1] / meters_per_pixel).astype(int)
         inside = (rows >= 0) & (rows < H) & (cols >= 0) & (cols < W)
-        on_road = inside.copy()                                      # OOB = off-road
+        on_road = inside.copy()  # OOB = off-road
         on_road[inside] = mask[rows[inside], cols[inside]]
         if not on_road.all():
             offroad += 1
