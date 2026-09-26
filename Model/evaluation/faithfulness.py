@@ -50,6 +50,7 @@ def reasoning_intervention_delta(
     projection: Optional[Any] = None,
     geometry_type: Optional[str] = None,
     image_transform: Optional[Any] = None,
+    **forward_kwargs: Any,
 ) -> dict[str, float]:
     """Mean trajectory L2 between the reasoning-coupled and bypassed runs.
 
@@ -57,6 +58,12 @@ def reasoning_intervention_delta(
         model: an ``AutoE2E`` built with ``enable_reasoning=True``.
         camera_tiles / map_input / visual_history / egomotion_history: one batch.
         projection / geometry_type / image_transform: current geometry ABI.
+        forward_kwargs: extra forward inputs threaded identically into both runs —
+            navigation (``route_mask`` / ``map_valid`` / ``route_valid``) so the
+            delta is read at the checkpoint's real operating point, and a fixed
+            ``initial_noise`` so a stochastic planner uses the SAME noise in the
+            coupled and bypassed runs (otherwise the delta is noise, not the
+            intervention).
 
     Returns:
         ``{"trajectory_l2": float}`` — 0.0 while the coupling gate is untrained.
@@ -76,7 +83,7 @@ def reasoning_intervention_delta(
     model.eval()
     restore_buffer = _snapshot_buffer(model)
     fwd = dict(projection=projection, geometry_type=geometry_type,
-               image_transform=image_transform, mode="infer")
+               image_transform=image_transform, mode="infer", **forward_kwargs)
 
     try:
         with torch.no_grad():
@@ -108,6 +115,7 @@ def horizon_intervention_delta(
     projection: Optional[Any] = None,
     geometry_type: Optional[str] = None,
     image_transform: Optional[Any] = None,
+    **forward_kwargs: Any,
 ) -> dict[str, float]:
     """Trajectory delta under a targeted intervention on the horizon tokens.
 
@@ -155,7 +163,7 @@ def horizon_intervention_delta(
     model.eval()
     restore_buffer = _snapshot_buffer(model)
     fwd = dict(projection=projection, geometry_type=geometry_type,
-               image_transform=image_transform, mode="infer")
+               image_transform=image_transform, mode="infer", **forward_kwargs)
 
     original_forward = head.forward
 

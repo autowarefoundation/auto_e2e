@@ -1688,3 +1688,64 @@ def test_resume_load_keeps_rng_tensors_on_cpu():
     keywords = {item.arg: item.value for item in resume_load.keywords}
     assert ast.literal_eval(keywords["map_location"]) == "cpu"
     assert ast.literal_eval(keywords["weights_only"]) is False
+
+
+class _ReasoningMetricModel(_MetricModel):
+    """`_MetricModel` with a bypassable reasoning head. The trajectory picks up a
+    fixed bump while ``Reactive_E2E.ReasoningHead`` is present, so the intervention
+    (which sets the head to None) moves the trajectory by exactly that bump — the
+    quantity the gate metric must report."""
+
+    _BUMP = 1e-3
+
+    def __init__(self):
+        super().__init__()
+        self.Reactive_E2E = SimpleNamespace(ReasoningHead=object())
+
+    def __call__(self, visual, *args, **kwargs):
+        out = super().__call__(visual, *args, **kwargs)
+        if self.Reactive_E2E.ReasoningHead is not None:
+            out = out + self._BUMP
+        return out
+
+
+def test_intervention_delta_reported_when_opted_in():
+    model = _ReasoningMetricModel()
+    loader = [
+        (_validation_batch(["sample-b", "sample-a"]), None, "pseudo")
+    ]
+
+    metrics = workflows._evaluate_open_loop(
+        model, loader, torch.device("cpu"), report_intervention=True
+    )
+
+    assert "reasoning_intervention_delta" in metrics
+    # a fixed initial_noise is threaded into both runs, so the delta reflects only
+    # the reasoning bump (1e-3 across 128 signals): ||1e-3||_2 = 1e-3 * sqrt(128).
+    assert metrics["reasoning_intervention_delta"] == pytest.approx(
+        _ReasoningMetricModel._BUMP * 128 ** 0.5, abs=1e-4
+    )
+    assert model.training is True  # eval mode restored after the intervention
+
+
+def test_no_intervention_delta_without_reasoning_head():
+    model = _MetricModel()  # no Reactive_E2E.ReasoningHead
+    loader = [(_validation_batch(["sample-a"]), None, "pseudo")]
+
+    metrics = workflows._evaluate_open_loop(
+        model, loader, torch.device("cpu"), report_intervention=True
+    )
+
+    assert "reasoning_intervention_delta" not in metrics
+
+
+def test_no_intervention_delta_by_default():
+    model = _ReasoningMetricModel()
+    loader = [(_validation_batch(["sample-a"]), None, "pseudo")]
+
+    # report_intervention defaults to False -> no cost, no metric (training path).
+    metrics = workflows._evaluate_open_loop(
+        model, loader, torch.device("cpu")
+    )
+
+    assert "reasoning_intervention_delta" not in metrics
