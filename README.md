@@ -93,6 +93,7 @@ Review our academic paper, access our knowledge base and read through our work o
 ### Next steps
 - Explore the [Model](./Model/) folder for the model components, training and inference.
 - Follow the [Trial Guide](./TRIAL.md) to run the inference test on AWS EC2.
+- Read [Training on a local machine](./Docs/training_on_a_local_machine.md) to run KITScenes training outside the cluster.
 
 ## Architecture at a glance
 
