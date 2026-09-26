@@ -1688,3 +1688,46 @@ def test_resume_load_keeps_rng_tensors_on_cpu():
     keywords = {item.arg: item.value for item in resume_load.keywords}
     assert ast.literal_eval(keywords["map_location"]) == "cpu"
     assert ast.literal_eval(keywords["weights_only"]) is False
+
+
+def test_camera_bev_grid_override_changes_only_the_grid():
+    """The 6 GB workaround must not silently change what the BEV covers.
+
+    Shrinking the grid is safe only if pc_range is left alone: the BEV then
+    covers the same ground area with coarser cells, and the map BEV stays
+    aligned. If pc_range moved too, the model would be looking at a smaller
+    patch of the world and the metric would not be comparable.
+    """
+    from navigation.geometry import DEFAULT_NAVIGATION_GEOMETRY
+
+    base = DEFAULT_NAVIGATION_GEOMETRY.camera_bev_kwargs()
+    resized = workflows._camera_bev_kwargs_with_grid(base, 64)
+
+    assert resized["bev_h"] == 64
+    assert resized["bev_w"] == 64
+    changed = {k for k in base if base[k] != resized.get(k)}
+    assert changed == {"bev_h", "bev_w"}, (
+        f"resizing the grid must not touch anything else, but changed {changed}"
+    )
+    assert base["bev_h"] != 64, "fixture would be vacuous if the default were 64"
+    # The caller must not have its own dict mutated underneath it.
+    assert base["bev_h"] == DEFAULT_NAVIGATION_GEOMETRY.camera_bev_kwargs()["bev_h"]
+
+
+@pytest.mark.parametrize("bad", [0, -1, -256])
+def test_camera_bev_grid_override_rejects_non_positive(bad):
+    from navigation.geometry import DEFAULT_NAVIGATION_GEOMETRY
+
+    base = DEFAULT_NAVIGATION_GEOMETRY.camera_bev_kwargs()
+    with pytest.raises(ValueError, match="camera_bev_size must be positive"):
+        workflows._camera_bev_kwargs_with_grid(base, bad)
+
+
+def test_camera_bev_grid_defaults_to_the_geometry():
+    """With the parameter unset the run must be byte-identical to before."""
+    source = inspect.getsource(workflows.train_il.task_function)
+    assert "camera_bev_size: Optional[int] = None" in source
+    assert "if camera_bev_size is not None:" in source, (
+        "the override must be opt-in; an unconditional call would change the "
+        "default grid for every existing run"
+    )

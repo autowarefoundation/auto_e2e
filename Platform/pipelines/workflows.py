@@ -416,6 +416,27 @@ def _training_num_views_from_manifests(
     return max(dataset_views.values())
 
 
+def _camera_bev_kwargs_with_grid(
+    base: dict,
+    size: int,
+) -> dict:
+    """Return ``base`` with the camera BEV grid resized to ``size`` per side.
+
+    Only ``bev_h``/``bev_w`` change. ``pc_range`` is deliberately untouched, so
+    the BEV still covers the ground area the navigation geometry defines and the
+    map BEV stays aligned with it -- the grid is coarser, not smaller.
+
+    The KITScenes geometry pins the grid at 256, which allocates 65,536 BEV
+    queries and does not fit in 6 GB of VRAM.
+    """
+    if size < 1:
+        raise ValueError(f"camera_bev_size must be positive, got {size}")
+    resized = dict(base)
+    resized["bev_h"] = size
+    resized["bev_w"] = size
+    return resized
+
+
 def _training_source_revision(
     manifests: dict[str, dict],
     *,
@@ -3127,6 +3148,11 @@ def train_il(
     # GPU step. Effective parallelism is capped by shard count, so scale needs more
     # (smaller) shards too.
     num_workers: int = 0,
+    # Camera BEV grid, in cells per side. None keeps the value the KITScenes
+    # geometry defines (256), which allocates 65,536 queries and does not fit in
+    # 6 GB of VRAM. Only the grid changes: pc_range stays as the geometry
+    # defines it, so the BEV covers the same ground area with coarser cells.
+    camera_bev_size: Optional[int] = None,
     resume_from: Optional[FlyteFile] = None,
     early_stopping_patience: int = 5,
     allow_resume_policy_transition: bool = False,
@@ -3405,6 +3431,16 @@ def train_il(
         view_fusion_kwargs = (
             DEFAULT_NAVIGATION_GEOMETRY.camera_bev_kwargs()
         )
+        if camera_bev_size is not None:
+            view_fusion_kwargs = _camera_bev_kwargs_with_grid(
+                view_fusion_kwargs, camera_bev_size
+            )
+            print(
+                f"Camera BEV grid overridden: {camera_bev_size}x{camera_bev_size} "
+                f"({camera_bev_size ** 2} cells; geometry default is "
+                f"{DEFAULT_NAVIGATION_GEOMETRY.camera_bev_kwargs()['bev_h']}x"
+                f"{DEFAULT_NAVIGATION_GEOMETRY.camera_bev_kwargs()['bev_w']})"
+            )
 
     from Platform.pipelines.training_checkpoint import stable_digest
 
@@ -8748,6 +8784,7 @@ def wf_train_il(
     val_fraction: float = 0.1,
     validation_scope: str = "full",
     num_workers: int = 0,
+    camera_bev_size: Optional[int] = None,
     resume_from: Optional[FlyteFile] = None,
     early_stopping_patience: int = 5,
     allow_resume_policy_transition: bool = False,
@@ -8784,7 +8821,8 @@ def wf_train_il(
                    enable_reasoning=enable_reasoning, reasoning_mode=reasoning_mode,
                    enable_world_model=enable_world_model, val_fraction=val_fraction,
                    validation_scope=validation_scope,
-                   num_workers=num_workers, resume_from=resume_from,
+                   num_workers=num_workers, camera_bev_size=camera_bev_size,
+                   resume_from=resume_from,
                    early_stopping_patience=early_stopping_patience,
                    allow_resume_policy_transition=allow_resume_policy_transition)
     return evaluate_il_policy(checkpoint=out.checkpoint, shards=shards, dataset=dataset,
