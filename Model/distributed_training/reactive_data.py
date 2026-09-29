@@ -570,15 +570,18 @@ def assign_reactive_shards(
             ),
         )
 
-    if validation_group_uids is None:
+    def place(values) -> None:
         totals = [0] * world_size
-        for shard in ordered(shards):
+        for shard in ordered(values):
             rank = min(
                 range(world_size),
                 key=lambda item: (totals[item], item),
             )
             assignments[rank].append(shard)
             totals[rank] += shard.sample_count
+
+    if validation_group_uids is None:
+        place(shards)
     else:
         train_shards = [
             shard
@@ -596,22 +599,8 @@ def assign_reactive_shards(
             raise ValueError(
                 "validation-aware assignment is missing frozen groups"
             )
-        train_totals = [0] * world_size
-        for shard in ordered(train_shards):
-            rank = min(
-                range(world_size),
-                key=lambda item: (train_totals[item], item),
-            )
-            assignments[rank].append(shard)
-            train_totals[rank] += shard.sample_count
-        validation_totals = [0] * world_size
-        for shard in ordered(validation_shards):
-            rank = min(
-                range(world_size),
-                key=lambda item: (validation_totals[item], item),
-            )
-            assignments[rank].append(shard)
-            validation_totals[rank] += shard.sample_count
+        place(train_shards)
+        place(validation_shards)
     return tuple(
         tuple(
             sorted(
