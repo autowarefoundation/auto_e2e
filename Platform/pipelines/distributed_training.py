@@ -117,9 +117,6 @@ KITSCENES_TRAJECTORY_INFERENCE_POLICY = (
 KITSCENES_EVALUATION_PRECISION_POLICY = (
     "cuda_bfloat16_autocast_v1"
 )
-KITSCENES_FP32_EVALUATION_PRECISION_POLICY = "cuda_float32_v1"
-KITSCENES_EVALUATION_PRECISION_BF16 = "bf16"
-KITSCENES_EVALUATION_PRECISION_FP32 = "fp32"
 KITSCENES_PRIMARY_VAL_ROUTE_USAGE_POLICY = (
     "route_zero_reused_image_bev_no_grad_v2"
 )
@@ -153,20 +150,7 @@ def _kitscenes_route_usage_evaluation_policy(
     }
 
 
-def _kitscenes_evaluation_precision_policy(
-    precision: str = KITSCENES_EVALUATION_PRECISION_BF16,
-) -> dict[str, object]:
-    if precision == KITSCENES_EVALUATION_PRECISION_FP32:
-        return {
-            "autocast_enabled": False,
-            "device_type": "cuda",
-            "dtype": "float32",
-            "version": KITSCENES_FP32_EVALUATION_PRECISION_POLICY,
-        }
-    if precision != KITSCENES_EVALUATION_PRECISION_BF16:
-        raise ValueError(
-            "KITScenes evaluation precision must be bf16 or fp32"
-        )
+def _kitscenes_evaluation_precision_policy() -> dict[str, object]:
     return {
         "autocast_enabled": True,
         "device_type": "cuda",
@@ -3369,7 +3353,6 @@ def evaluate_reactive_kitscenes_checkpoint(
     expected_test_partition_count: int = 0,
     expected_val_partition_count: int = 0,
     use_stateful_camera_fpn_cache: bool = False,
-    evaluation_precision: str = KITSCENES_EVALUATION_PRECISION_BF16,
 ) -> ReactiveKITScenesEvaluationOutput:
     """Evaluate a KITScenes fine-tuned checkpoint without checkpoint selection."""
     import tempfile
@@ -3403,9 +3386,7 @@ def evaluate_reactive_kitscenes_checkpoint(
             "KITScenes labeled evaluation requires val, overlap_train_val, "
             "or test"
         )
-    evaluation_precision_policy = (
-        _kitscenes_evaluation_precision_policy(evaluation_precision)
-    )
+    evaluation_precision_policy = _kitscenes_evaluation_precision_policy()
     maximum_batch_size = (
         KITSCENES_STATEFUL_CAMERA_FPN_BATCH_SIZE
         if use_stateful_camera_fpn_cache
@@ -3803,12 +3784,7 @@ def evaluate_reactive_kitscenes_checkpoint(
                 ]
             ),
             camera_fpn_cache=camera_fpn_cache,
-            inference_autocast_dtype=(
-                torch.bfloat16
-                if evaluation_precision
-                == KITSCENES_EVALUATION_PRECISION_BF16
-                else None
-            ),
+            inference_autocast_dtype=torch.bfloat16,
         )
     runtime_precision = metrics.get("inference_precision")
     expected_runtime_precision = {

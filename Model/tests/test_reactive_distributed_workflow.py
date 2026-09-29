@@ -2168,32 +2168,17 @@ def test_kitscenes_checkpoint_evaluator_routes_inventory_policy():
     assert "include_route_swap_counterfactual=bool(" in source
     assert "reuse_precomputed_image_bev=bool(" in source
     assert "include_route_gradient=bool(" in source
-    assert "KITSCENES_EVALUATION_PRECISION_BF16" in source
-    assert "inference_autocast_dtype=(" in source
+    assert "inference_autocast_dtype=torch.bfloat16" in source
     assert "runtime precision differs from policy" in source
 
 
-def test_kitscenes_evaluation_precision_policy_supports_canary_fp32():
+def test_kitscenes_evaluation_precision_policy_is_bfloat16():
     assert distributed_training._kitscenes_evaluation_precision_policy() == {
         "autocast_enabled": True,
         "device_type": "cuda",
         "dtype": "bfloat16",
         "version": "cuda_bfloat16_autocast_v1",
     }
-    assert (
-        distributed_training._kitscenes_evaluation_precision_policy("fp32")
-        == {
-            "autocast_enabled": False,
-            "device_type": "cuda",
-            "dtype": "float32",
-            "version": "cuda_float32_v1",
-        }
-    )
-    with pytest.raises(
-        ValueError,
-        match="must be bf16 or fp32",
-    ):
-        distributed_training._kitscenes_evaluation_precision_policy("fp16")
 
 
 def test_reactive_mlflow_helpers_record_stable_numeric_history():
