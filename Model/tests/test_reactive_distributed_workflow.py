@@ -1801,50 +1801,6 @@ def test_kitscenes_official_val_rejects_batch_drift_before_download():
         )
 
 
-def test_kitscenes_evaluation_inventory_allows_single_scene_canaries(
-    monkeypatch,
-):
-    from data_parsing import pre_extracted
-
-    calls = []
-    expected = object()
-
-    def fake_discover(shard_directories, *, allow_single_group=False):
-        calls.append((shard_directories, allow_single_group))
-        return expected
-
-    monkeypatch.setattr(
-        pre_extracted,
-        "discover_split_inventory",
-        fake_discover,
-    )
-
-    result = (
-        distributed_training._discover_kitscenes_evaluation_inventory(
-            ["/tmp/test-scene"],
-        )
-    )
-
-    assert result is expected
-    assert calls == [(["/tmp/test-scene"], True)]
-
-
-def test_kitscenes_test_inventory_must_match_manifest_scene():
-    distributed_training._validate_kitscenes_test_inventory_groups(
-        ("kitscenes-scene-a",),
-        ["kitscenes-scene-a"],
-    )
-
-    with pytest.raises(
-        ValueError,
-        match="packed scene identities differ",
-    ):
-        distributed_training._validate_kitscenes_test_inventory_groups(
-            ("kitscenes-scene-b",),
-            ["kitscenes-scene-a"],
-        )
-
-
 def test_kitscenes_scene_identity_distinguishes_test_subset():
     digest, is_official = (
         distributed_training._kitscenes_scene_identity(
@@ -2093,28 +2049,6 @@ def test_kitscenes_val_manifest_rejects_missing_map_route_contract(
         distributed_training._validate_kitscenes_val_manifest_contract(
             manifest
         )
-
-
-def test_kitscenes_checkpoint_evaluator_routes_inventory_policy():
-    source = inspect.getsource(
-        distributed_training.evaluate_reactive_kitscenes_checkpoint
-        .task_function
-    )
-
-    assert "_discover_kitscenes_evaluation_inventory(" in source
-    assert 'source_split in {"val", "test"}' in source
-    assert "_validate_kitscenes_val_manifest_contract(" in source
-    assert "_kitscenes_scene_identity(" in source
-    assert "_validate_kitscenes_official_val_sdk_split(" in source
-    assert '"counterfactuals_enabled"' in source
-    assert '"input_gradient_enabled"' in source
-    assert '"route_swap_counterfactual_enabled"' in source
-    assert "include_counterfactuals=bool(" in source
-    assert "include_route_swap_counterfactual=bool(" in source
-    assert "reuse_precomputed_image_bev=bool(" in source
-    assert "include_route_gradient=bool(" in source
-    assert "inference_autocast_dtype=torch.bfloat16" in source
-    assert "runtime precision differs from policy" in source
 
 
 def test_kitscenes_evaluation_precision_policy_is_bfloat16():

@@ -333,6 +333,7 @@ def test_kitscenes_dataset_plan_allows_explicit_mapless_evaluation(tmp_path):
         include_direct_camera_context=True,
     )
     manifest.update({
+        "has_gps": False,
         "has_map": False,
         "has_navigation": False,
         "has_reactive_navigation": False,
@@ -352,6 +353,17 @@ def test_kitscenes_dataset_plan_allows_explicit_mapless_evaluation(tmp_path):
     )
 
     assert plan.total_samples == 4
+    manifest["has_gps"] = True
+    (source / "manifest.json").write_text(
+        json.dumps(manifest, sort_keys=True),
+        encoding="ascii",
+    )
+    with pytest.raises(ValueError, match="target coverage is incomplete"):
+        build_reactive_dataset_plan(
+            [str(source)],
+            stage=ReactiveTrainingStage.KITSCENES_FINETUNE,
+            allow_mapless_kitscenes_evaluation=True,
+        )
     with pytest.raises(ValueError, match="target coverage is incomplete"):
         build_reactive_dataset_plan(
             [str(source)],

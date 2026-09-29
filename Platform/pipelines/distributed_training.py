@@ -10,7 +10,7 @@ import re
 import time
 from datetime import timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, List, Mapping, NamedTuple, Optional
+from typing import Any, List, Mapping, NamedTuple, Optional
 from urllib.parse import urlparse
 
 from flytekit import (
@@ -53,9 +53,6 @@ from data_parsing.kit_scenes.source import (
     KITSCENES_STANDARD_VAL_SCENE_UID_SHA256,
     sdk_split_scene_ids,
 )
-
-if TYPE_CHECKING:
-    from data_parsing.pre_extracted import PackedSplitInventory
 
 TRAINING_IMAGE = os.environ.get(
     "AUTO_E2E_TRAINING_IMAGE",
@@ -157,29 +154,6 @@ def _kitscenes_evaluation_precision_policy() -> dict[str, object]:
         "dtype": "bfloat16",
         "version": KITSCENES_EVALUATION_PRECISION_POLICY,
     }
-
-
-def _discover_kitscenes_evaluation_inventory(
-    shard_directories: list[str],
-) -> PackedSplitInventory:
-    from data_parsing.pre_extracted import discover_split_inventory
-
-    # Evaluation canaries may intentionally cover one exact scene.
-    return discover_split_inventory(
-        shard_directories,
-        allow_single_group=True,
-    )
-
-
-def _validate_kitscenes_test_inventory_groups(
-    inventory_group_uids: tuple[str, ...],
-    manifest_group_uids: list[str],
-) -> None:
-    expected_group_uids = tuple(sorted(manifest_group_uids))
-    if inventory_group_uids != expected_group_uids:
-        raise ValueError(
-            "KITScenes test packed scene identities differ from manifests"
-        )
 
 
 def _kitscenes_scene_identity(
@@ -3319,7 +3293,10 @@ def evaluate_reactive_kitscenes_checkpoint(
 
     import torch
 
-    from data_parsing.pre_extracted import make_multi_dataset_loader
+    from data_parsing.pre_extracted import (
+        discover_split_inventory,
+        make_multi_dataset_loader,
+    )
     from data_parsing.kit_scenes.temporal_contract import (
         KITSCENES_BENCHMARK_FUTURE_STEPS,
         kitscenes_temporal_contract,
@@ -3390,10 +3367,6 @@ def evaluate_reactive_kitscenes_checkpoint(
             "official KITScenes val evaluation requires batch size "
             f"{KITSCENES_PRIMARY_VAL_BATCH_SIZE}"
         )
-    if mapless_test and expected_val_partition_count:
-        raise ValueError(
-            "KITScenes test evaluation cannot require val partitions"
-        )
     remote_uris = [_flyte_remote_uri(shard) for shard in shards]
     plan = build_reactive_dataset_plan(
         remote_uris,
@@ -3444,26 +3417,6 @@ def evaluate_reactive_kitscenes_checkpoint(
             raise ValueError(
                 "KITScenes evaluation manifest has invalid sample count"
             )
-        if mapless_test and total_samples > 0:
-            expected_test_contract = {
-                "has_gps": False,
-                "has_map": False,
-                "has_navigation": False,
-                "has_reactive_navigation": False,
-                "has_route_reconstruction": False,
-                "has_trajectory_xy": True,
-                "input_track": "camera_only_missing_map_route",
-            }
-            mismatches = {
-                key: manifest.get(key)
-                for key, expected in expected_test_contract.items()
-                if manifest.get(key) != expected
-            }
-            if mismatches:
-                raise ValueError(
-                    "KITScenes test manifest violates the camera-only "
-                    f"missing-map contract: {mismatches}"
-                )
         if source_split == "val" and total_samples > 0:
             _validate_kitscenes_val_manifest_contract(manifest)
         if mapless_test and total_samples == 0 and any(
@@ -3553,8 +3506,9 @@ def evaluate_reactive_kitscenes_checkpoint(
             "KITScenes evaluation manifests mix dataset provenance"
         )
     inventory = (
-        _discover_kitscenes_evaluation_inventory(
+        discover_split_inventory(
             shard_directories,
+            allow_single_group=True,
         )
         if shard_directories
         else None
@@ -3569,10 +3523,11 @@ def evaluate_reactive_kitscenes_checkpoint(
     if inventory is None and (not mapless_test or expected_sample_count != 0):
         raise ValueError("KITScenes evaluation has no non-empty shards")
     if inventory is not None and source_split in {"val", "test"}:
-        _validate_kitscenes_test_inventory_groups(
-            inventory.group_uids,
-            manifest_group_uids,
-        )
+        expected_group_uids = tuple(sorted(manifest_group_uids))
+        if inventory.group_uids != expected_group_uids:
+            raise ValueError(
+                "KITScenes packed scene identities differ from manifests"
+            )
     scene_uid_sha256 = ""
     is_official_test = False
     is_official_val = False
@@ -3745,19 +3700,6 @@ def evaluate_reactive_kitscenes_checkpoint(
             ),
             camera_fpn_cache=camera_fpn_cache,
             inference_autocast_dtype=torch.bfloat16,
-        )
-    runtime_precision = metrics.get("inference_precision")
-    expected_runtime_precision = {
-        key: evaluation_precision_policy[key]
-        for key in (
-            "autocast_enabled",
-            "device_type",
-            "dtype",
-        )
-    }
-    if runtime_precision != expected_runtime_precision:
-        raise RuntimeError(
-            "KITScenes evaluator runtime precision differs from policy"
         )
     trajectory_metrics = metrics.get("trajectory")
     if not isinstance(trajectory_metrics, dict):

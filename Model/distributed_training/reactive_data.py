@@ -196,6 +196,7 @@ def _validate_reactive_manifest(
     required_flags = {"has_trajectory_xy": True}
     if allow_mapless_kitscenes_evaluation:
         required_flags.update({
+            "has_gps": False,
             "has_map": False,
             "has_navigation": False,
             "has_reactive_navigation": False,
