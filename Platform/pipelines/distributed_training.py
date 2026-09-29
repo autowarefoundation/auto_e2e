@@ -1149,6 +1149,16 @@ def _reactive_bev_evaluation_metrics(
     return metrics
 
 
+def _ensure_registered_model(client, name: str) -> None:
+    try:
+        client.get_registered_model(name)
+    except Exception:
+        try:
+            client.create_registered_model(name)
+        except Exception:
+            client.get_registered_model(name)
+
+
 def _register_reactive_bev_model_version(
     client,
     *,
@@ -1161,17 +1171,7 @@ def _register_reactive_bev_model_version(
     report_sha256: str,
     source_training_mlflow_run_id: str,
 ) -> str:
-    try:
-        client.get_registered_model(REACTIVE_BEV_REGISTERED_MODEL)
-    except Exception:
-        try:
-            client.create_registered_model(
-                REACTIVE_BEV_REGISTERED_MODEL
-            )
-        except Exception:
-            client.get_registered_model(
-                REACTIVE_BEV_REGISTERED_MODEL
-            )
+    _ensure_registered_model(client, REACTIVE_BEV_REGISTERED_MODEL)
 
     version = None
     for existing in client.search_model_versions(
@@ -1245,17 +1245,7 @@ def _register_reactive_policy_model_version(
     expected_model_version: str = "",
 ) -> str:
     """Resolve one checkpoint to exactly one policy model version."""
-    try:
-        client.get_registered_model(REACTIVE_POLICY_REGISTERED_MODEL)
-    except Exception:
-        try:
-            client.create_registered_model(
-                REACTIVE_POLICY_REGISTERED_MODEL
-            )
-        except Exception:
-            client.get_registered_model(
-                REACTIVE_POLICY_REGISTERED_MODEL
-            )
+    _ensure_registered_model(client, REACTIVE_POLICY_REGISTERED_MODEL)
 
     if expected_model_version:
         existing = client.get_model_version(
