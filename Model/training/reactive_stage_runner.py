@@ -1151,7 +1151,6 @@ def _route_gradient_evidence(
     camera_history_tiles: torch.Tensor | None,
     history_projections: tuple[Any, ...] | None,
     geometry_type: str,
-    initial_noise: torch.Tensor | None = None,
 ) -> float | None:
     route_valid = batch["route_valid"].to(dtype=torch.bool)
     if not bool(route_valid.any()):
@@ -1173,7 +1172,6 @@ def _route_gradient_evidence(
             front_camera_tile=batch.get("front_camera_tile"),
             front_projection=front_projection,
             mode="infer",
-            initial_noise=initial_noise,
             compute_bev_segmentation=False,
             compute_route_reconstruction=False,
         )
@@ -1201,13 +1199,6 @@ def evaluate_reactive_multitask(
     reuse_precomputed_image_bev: bool | None = None,
     include_route_gradient: bool = True,
     probability_bins: int = 100,
-    initial_noise_provider: (
-        Callable[
-            [Sequence[str], torch.device, torch.dtype],
-            torch.Tensor,
-        ]
-        | None
-    ) = None,
     camera_fpn_cache: Any = None,
     inference_autocast_dtype: torch.dtype | None = None,
 ) -> dict[str, Any]:
@@ -1409,15 +1400,6 @@ def evaluate_reactive_multitask(
                 raise ValueError("sample UID count differs from batch size")
             sample_uids.extend(batch_uids)
 
-            initial_noise = (
-                initial_noise_provider(
-                    batch_uids,
-                    device,
-                    batch["visual_tiles"].dtype,
-                )
-                if initial_noise_provider is not None
-                else None
-            )
             camera_fpn_stream_ids = None
             camera_fpn_timestamps_us = None
             front_camera_fpn_tile = None
@@ -1557,7 +1539,6 @@ def evaluate_reactive_multitask(
                         camera_history_tiles,
                         history_projections,
                         geometry_type,
-                        initial_noise=initial_noise,
                     )
 
             bev_available = batch.get("bev_segmentation_available")
@@ -1596,7 +1577,6 @@ def evaluate_reactive_multitask(
                             camera_fpn_timestamps_us
                         ),
                         mode="infer",
-                        initial_noise=initial_noise,
                         return_auxiliary=True,
                         return_image_bev=reuse_precomputed_image_bev,
                         compute_bev_segmentation=compute_bev,
@@ -1952,7 +1932,6 @@ def evaluate_reactive_multitask(
                                 dtype=torch.bool,
                             ),
                             mode="infer",
-                            initial_noise=initial_noise,
                             compute_bev_segmentation=False,
                             compute_route_reconstruction=False,
                             **counterfactual_camera_kwargs,
@@ -2006,7 +1985,6 @@ def evaluate_reactive_multitask(
                                 map_valid=batch["map_valid"],
                                 route_valid=swapped_valid,
                                 mode="infer",
-                                initial_noise=initial_noise,
                                 compute_bev_segmentation=False,
                                 compute_route_reconstruction=False,
                                 **counterfactual_camera_kwargs,

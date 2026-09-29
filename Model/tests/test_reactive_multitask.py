@@ -2648,45 +2648,6 @@ def test_multitask_evaluator_keeps_route_counterfactuals_without_gradient(
     assert report["route"]["route_input_gradient_mean_abs"] is None
 
 
-def test_multitask_evaluator_uses_per_sample_initial_noise(
-    build_mock_model,
-    device,
-):
-    model = _model(build_mock_model, device).eval()
-    batch = _stage_batch(
-        device,
-        include_bev=False,
-        batch_size=2,
-    )
-    calls = []
-    planner = model.Reactive_E2E.TrajectoryPlanner
-    trajectory_dim = (
-        int(planner.num_timesteps) * int(planner.num_signals)
-    )
-
-    def initial_noise_provider(sample_uids, noise_device, noise_dtype):
-        calls.append(tuple(sample_uids))
-        return torch.zeros(
-            len(sample_uids),
-            trajectory_dim,
-            device=noise_device,
-            dtype=noise_dtype,
-        )
-
-    report = evaluate_reactive_multitask(
-        model,
-        [batch],
-        stage=ReactiveTrainingStage.L2D_CONTINUATION,
-        device=device,
-        include_counterfactuals=False,
-        include_route_gradient=False,
-        initial_noise_provider=initial_noise_provider,
-    )
-
-    assert calls == [("synthetic-sample-0", "synthetic-sample-1")]
-    assert report["sample_count"] == 2
-
-
 def test_multitask_evaluator_rejects_invalid_autocast_policy(
     build_mock_model,
     device,
@@ -2917,11 +2878,6 @@ def test_multitask_evaluator_advances_stateful_camera_cache(
             "split_group_uid": ["scene-a"] * 5,
         })
         batches.append(batch)
-    planner = model.Reactive_E2E.TrajectoryPlanner
-    trajectory_dim = (
-        int(planner.num_timesteps) * int(planner.num_signals)
-    )
-
     backbone_calls = 0
 
     def count_backbone_calls(_module, _inputs, _output):
@@ -2941,14 +2897,6 @@ def test_multitask_evaluator_advances_stateful_camera_cache(
         include_route_swap_counterfactual=False,
         reuse_precomputed_image_bev=True,
         include_route_gradient=False,
-        initial_noise_provider=lambda sample_uids, noise_device, noise_dtype: (
-            torch.zeros(
-                len(sample_uids),
-                trajectory_dim,
-                device=noise_device,
-                dtype=noise_dtype,
-            )
-        ),
         camera_fpn_cache=cache,
     )
     hook.remove()
