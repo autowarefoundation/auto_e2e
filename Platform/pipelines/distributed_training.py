@@ -182,22 +182,35 @@ def _validate_kitscenes_test_inventory_groups(
         )
 
 
-def _kitscenes_test_scene_identity(
+def _kitscenes_scene_identity(
     scene_uids: list[str],
     *,
+    source_split: str,
     expected_partition_count: int,
 ) -> tuple[str, bool]:
+    if source_split == "test":
+        official_scene_count = KITSCENES_OFFICIAL_TEST_SCENE_COUNT
+        official_scene_uid_sha256 = (
+            KITSCENES_OFFICIAL_TEST_SCENE_UID_SHA256
+        )
+    elif source_split == "val":
+        official_scene_count = KITSCENES_OFFICIAL_VAL_SCENE_COUNT
+        official_scene_uid_sha256 = KITSCENES_OFFICIAL_VAL_SCENE_UID_SHA256
+    else:
+        raise ValueError("KITScenes scene identity requires val or test")
     if (
         isinstance(expected_partition_count, bool)
         or not isinstance(expected_partition_count, int)
         or expected_partition_count < 0
     ):
         raise ValueError(
-            "KITScenes test expected partition count must be non-negative"
+            f"KITScenes {source_split} expected partition count must be "
+            "non-negative"
         )
     if len(scene_uids) != len(set(scene_uids)):
         raise ValueError(
-            "KITScenes test manifests contain duplicate scene identities"
+            f"KITScenes {source_split} manifests contain duplicate scene "
+            "identities"
         )
     scene_uid_sha256 = hashlib.sha256(
         "\n".join(sorted(scene_uids)).encode("utf-8")
@@ -207,67 +220,26 @@ def _kitscenes_test_scene_identity(
         and len(scene_uids) != expected_partition_count
     ):
         raise ValueError(
-            "KITScenes test evaluation does not cover the expected "
+            f"KITScenes {source_split} evaluation does not cover the expected "
             f"{expected_partition_count} partitions"
         )
-    is_official_test = (
-        len(scene_uids) == KITSCENES_OFFICIAL_TEST_SCENE_COUNT
-        and scene_uid_sha256
-        == KITSCENES_OFFICIAL_TEST_SCENE_UID_SHA256
+    is_official = (
+        len(scene_uids) == official_scene_count
+        and scene_uid_sha256 == official_scene_uid_sha256
+        and (
+            source_split == "test"
+            or expected_partition_count == official_scene_count
+        )
     )
     if (
-        expected_partition_count
-        == KITSCENES_OFFICIAL_TEST_SCENE_COUNT
-        and not is_official_test
+        expected_partition_count == official_scene_count
+        and not is_official
     ):
         raise ValueError(
-            "KITScenes test manifests do not cover the official scene set"
+            f"KITScenes {source_split} manifests do not cover the official "
+            "scene set"
         )
-    return scene_uid_sha256, is_official_test
-
-
-def _kitscenes_val_scene_identity(
-    scene_uids: list[str],
-    *,
-    expected_partition_count: int,
-) -> tuple[str, bool]:
-    if (
-        isinstance(expected_partition_count, bool)
-        or not isinstance(expected_partition_count, int)
-        or expected_partition_count < 0
-    ):
-        raise ValueError(
-            "KITScenes val expected partition count must be non-negative"
-        )
-    if len(scene_uids) != len(set(scene_uids)):
-        raise ValueError(
-            "KITScenes val manifests contain duplicate scene identities"
-        )
-    scene_uid_sha256 = hashlib.sha256(
-        "\n".join(sorted(scene_uids)).encode("utf-8")
-    ).hexdigest()
-    if (
-        expected_partition_count
-        and len(scene_uids) != expected_partition_count
-    ):
-        raise ValueError(
-            "KITScenes val evaluation does not cover the expected "
-            f"{expected_partition_count} partitions"
-    )
-    is_official_val = (
-        expected_partition_count == KITSCENES_OFFICIAL_VAL_SCENE_COUNT
-        and len(scene_uids) == KITSCENES_OFFICIAL_VAL_SCENE_COUNT
-        and scene_uid_sha256
-        == KITSCENES_OFFICIAL_VAL_SCENE_UID_SHA256
-    )
-    if (
-        expected_partition_count == KITSCENES_OFFICIAL_VAL_SCENE_COUNT
-        and not is_official_val
-    ):
-        raise ValueError(
-            "KITScenes val manifests do not cover the official scene set"
-        )
-    return scene_uid_sha256, is_official_val
+    return scene_uid_sha256, is_official
 
 
 def _validate_kitscenes_official_val_sdk_split(
@@ -312,42 +284,30 @@ def _validate_kitscenes_official_val_sdk_split(
 
 def _validate_kitscenes_official_sample_inventory(
     *,
+    source_split: str,
     expected_partition_count: int,
     empty_partition_count: int,
     manifest_sample_count: int,
     inventory_sample_count: int | None,
 ) -> None:
-    if expected_partition_count != KITSCENES_OFFICIAL_TEST_SCENE_COUNT:
+    if source_split == "test":
+        official_scene_count = KITSCENES_OFFICIAL_TEST_SCENE_COUNT
+        official_sample_count = KITSCENES_OFFICIAL_TEST_SAMPLE_COUNT
+    elif source_split == "val":
+        official_scene_count = KITSCENES_OFFICIAL_VAL_SCENE_COUNT
+        official_sample_count = KITSCENES_OFFICIAL_VAL_SAMPLE_COUNT
+    else:
+        raise ValueError("KITScenes sample inventory requires val or test")
+    if expected_partition_count != official_scene_count:
         return
     if (
         empty_partition_count != 0
-        or manifest_sample_count != KITSCENES_OFFICIAL_TEST_SAMPLE_COUNT
-        or inventory_sample_count
-        != KITSCENES_OFFICIAL_TEST_SAMPLE_COUNT
+        or manifest_sample_count != official_sample_count
+        or inventory_sample_count != official_sample_count
     ):
         raise ValueError(
-            "KITScenes official test sample inventory differs from "
-            f"{KITSCENES_OFFICIAL_TEST_SAMPLE_COUNT}"
-        )
-
-
-def _validate_kitscenes_official_val_sample_inventory(
-    *,
-    expected_partition_count: int,
-    empty_partition_count: int,
-    manifest_sample_count: int,
-    inventory_sample_count: int | None,
-) -> None:
-    if expected_partition_count != KITSCENES_OFFICIAL_VAL_SCENE_COUNT:
-        return
-    if (
-        empty_partition_count != 0
-        or manifest_sample_count != KITSCENES_OFFICIAL_VAL_SAMPLE_COUNT
-        or inventory_sample_count != KITSCENES_OFFICIAL_VAL_SAMPLE_COUNT
-    ):
-        raise ValueError(
-            "KITScenes official val sample inventory differs from "
-            f"{KITSCENES_OFFICIAL_VAL_SAMPLE_COUNT}"
+            f"KITScenes official {source_split} sample inventory differs from "
+            f"{official_sample_count}"
         )
 
 
@@ -3618,15 +3578,17 @@ def evaluate_reactive_kitscenes_checkpoint(
     is_official_val = False
     if mapless_test:
         scene_uid_sha256, is_official_test = (
-            _kitscenes_test_scene_identity(
+            _kitscenes_scene_identity(
                 scene_uids,
+                source_split="test",
                 expected_partition_count=expected_test_partition_count,
             )
         )
     elif source_split == "val":
         scene_uid_sha256, is_official_val = (
-            _kitscenes_val_scene_identity(
+            _kitscenes_scene_identity(
                 scene_uids,
+                source_split="val",
                 expected_partition_count=expected_val_partition_count,
             )
         )
@@ -3634,22 +3596,20 @@ def evaluate_reactive_kitscenes_checkpoint(
             scene_uids,
             expected_partition_count=expected_val_partition_count,
         )
-    _validate_kitscenes_official_sample_inventory(
-        expected_partition_count=expected_test_partition_count,
-        empty_partition_count=plan.empty_partition_count,
-        manifest_sample_count=expected_sample_count,
-        inventory_sample_count=(
-            inventory.sample_count if inventory is not None else None
-        ),
-    )
-    _validate_kitscenes_official_val_sample_inventory(
-        expected_partition_count=expected_val_partition_count,
-        empty_partition_count=plan.empty_partition_count,
-        manifest_sample_count=expected_sample_count,
-        inventory_sample_count=(
-            inventory.sample_count if inventory is not None else None
-        ),
-    )
+    if source_split in {"val", "test"}:
+        _validate_kitscenes_official_sample_inventory(
+            source_split=source_split,
+            expected_partition_count=(
+                expected_test_partition_count
+                if mapless_test
+                else expected_val_partition_count
+            ),
+            empty_partition_count=plan.empty_partition_count,
+            manifest_sample_count=expected_sample_count,
+            inventory_sample_count=(
+                inventory.sample_count if inventory is not None else None
+            ),
+        )
 
     checkpoint_path = Path(checkpoint.download())
     checkpoint_identity = inspect_reactive_checkpoint_identity(

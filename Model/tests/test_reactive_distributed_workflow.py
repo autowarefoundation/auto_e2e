@@ -1845,10 +1845,11 @@ def test_kitscenes_test_inventory_must_match_manifest_scene():
         )
 
 
-def test_kitscenes_test_scene_identity_distinguishes_subset():
+def test_kitscenes_scene_identity_distinguishes_test_subset():
     digest, is_official = (
-        distributed_training._kitscenes_test_scene_identity(
+        distributed_training._kitscenes_scene_identity(
             ["kitscenes-scene-a"],
+            source_split="test",
             expected_partition_count=0,
         )
     )
@@ -1859,25 +1860,30 @@ def test_kitscenes_test_scene_identity_distinguishes_subset():
     assert not is_official
 
 
-def test_kitscenes_test_scene_identity_accepts_official_set(monkeypatch):
+@pytest.mark.parametrize("source_split", ["test", "val"])
+def test_kitscenes_scene_identity_accepts_official_set(
+    monkeypatch,
+    source_split,
+):
     scene_uids = ["kitscenes-scene-a", "kitscenes-scene-b"]
     digest = hashlib.sha256(
         "\n".join(scene_uids).encode()
     ).hexdigest()
     monkeypatch.setattr(
         distributed_training,
-        "KITSCENES_OFFICIAL_TEST_SCENE_COUNT",
+        f"KITSCENES_OFFICIAL_{source_split.upper()}_SCENE_COUNT",
         2,
     )
     monkeypatch.setattr(
         distributed_training,
-        "KITSCENES_OFFICIAL_TEST_SCENE_UID_SHA256",
+        f"KITSCENES_OFFICIAL_{source_split.upper()}_SCENE_UID_SHA256",
         digest,
     )
 
     actual_digest, is_official = (
-        distributed_training._kitscenes_test_scene_identity(
+        distributed_training._kitscenes_scene_identity(
             list(reversed(scene_uids)),
+            source_split=source_split,
             expected_partition_count=2,
         )
     )
@@ -1886,56 +1892,31 @@ def test_kitscenes_test_scene_identity_accepts_official_set(monkeypatch):
     assert is_official
 
 
-def test_kitscenes_test_scene_identity_rejects_partial_official_set():
+def test_kitscenes_scene_identity_rejects_partial_official_set():
     with pytest.raises(
         ValueError,
         match="does not cover the expected 206 partitions",
     ):
-        distributed_training._kitscenes_test_scene_identity(
+        distributed_training._kitscenes_scene_identity(
             ["kitscenes-scene-a"],
+            source_split="test",
             expected_partition_count=206,
         )
 
 
-def test_kitscenes_test_scene_identity_rejects_duplicate_scenes():
+def test_kitscenes_scene_identity_rejects_duplicate_scenes():
     with pytest.raises(
         ValueError,
         match="duplicate scene identities",
     ):
-        distributed_training._kitscenes_test_scene_identity(
+        distributed_training._kitscenes_scene_identity(
             ["kitscenes-scene-a", "kitscenes-scene-a"],
+            source_split="test",
             expected_partition_count=0,
         )
 
 
-def test_kitscenes_val_scene_identity_accepts_official_set(monkeypatch):
-    scene_uids = ["kitscenes-scene-a", "kitscenes-scene-b"]
-    digest = hashlib.sha256(
-        "\n".join(scene_uids).encode()
-    ).hexdigest()
-    monkeypatch.setattr(
-        distributed_training,
-        "KITSCENES_OFFICIAL_VAL_SCENE_COUNT",
-        2,
-    )
-    monkeypatch.setattr(
-        distributed_training,
-        "KITSCENES_OFFICIAL_VAL_SCENE_UID_SHA256",
-        digest,
-    )
-
-    actual_digest, is_official = (
-        distributed_training._kitscenes_val_scene_identity(
-            list(reversed(scene_uids)),
-            expected_partition_count=2,
-        )
-    )
-
-    assert actual_digest == digest
-    assert is_official
-
-
-def test_kitscenes_val_scene_identity_does_not_promote_generic_val(
+def test_kitscenes_scene_identity_does_not_promote_generic_val(
     monkeypatch,
 ):
     scene_uids = ["kitscenes-scene-a", "kitscenes-scene-b"]
@@ -1953,8 +1934,9 @@ def test_kitscenes_val_scene_identity_does_not_promote_generic_val(
         digest,
     )
 
-    _, is_official = distributed_training._kitscenes_val_scene_identity(
+    _, is_official = distributed_training._kitscenes_scene_identity(
         scene_uids,
+        source_split="val",
         expected_partition_count=0,
     )
 
@@ -2026,21 +2008,24 @@ def test_kitscenes_official_val_matches_sdk_and_excludes_train(
         )
 
 
+@pytest.mark.parametrize("source_split", ["test", "val"])
 def test_kitscenes_official_sample_inventory_requires_exact_coverage(
     monkeypatch,
+    source_split,
 ):
     monkeypatch.setattr(
         distributed_training,
-        "KITSCENES_OFFICIAL_TEST_SCENE_COUNT",
+        f"KITSCENES_OFFICIAL_{source_split.upper()}_SCENE_COUNT",
         2,
     )
     monkeypatch.setattr(
         distributed_training,
-        "KITSCENES_OFFICIAL_TEST_SAMPLE_COUNT",
+        f"KITSCENES_OFFICIAL_{source_split.upper()}_SAMPLE_COUNT",
         5,
     )
 
     distributed_training._validate_kitscenes_official_sample_inventory(
+        source_split=source_split,
         expected_partition_count=2,
         empty_partition_count=0,
         manifest_sample_count=5,
@@ -2058,46 +2043,7 @@ def test_kitscenes_official_sample_inventory_requires_exact_coverage(
             (
                 distributed_training
                 ._validate_kitscenes_official_sample_inventory(
-                    expected_partition_count=2,
-                    empty_partition_count=values[0],
-                    manifest_sample_count=values[1],
-                    inventory_sample_count=values[2],
-                )
-            )
-
-
-def test_kitscenes_official_val_sample_inventory_requires_exact_coverage(
-    monkeypatch,
-):
-    monkeypatch.setattr(
-        distributed_training,
-        "KITSCENES_OFFICIAL_VAL_SCENE_COUNT",
-        2,
-    )
-    monkeypatch.setattr(
-        distributed_training,
-        "KITSCENES_OFFICIAL_VAL_SAMPLE_COUNT",
-        5,
-    )
-
-    distributed_training._validate_kitscenes_official_val_sample_inventory(
-        expected_partition_count=2,
-        empty_partition_count=0,
-        manifest_sample_count=5,
-        inventory_sample_count=5,
-    )
-    for values in (
-        (1, 5, 5),
-        (0, 4, 4),
-        (0, 5, None),
-    ):
-        with pytest.raises(
-            ValueError,
-            match="official val sample inventory differs",
-        ):
-            (
-                distributed_training
-                ._validate_kitscenes_official_val_sample_inventory(
+                    source_split=source_split,
                     expected_partition_count=2,
                     empty_partition_count=values[0],
                     manifest_sample_count=values[1],
@@ -2158,8 +2104,7 @@ def test_kitscenes_checkpoint_evaluator_routes_inventory_policy():
     assert "_discover_kitscenes_evaluation_inventory(" in source
     assert 'source_split in {"val", "test"}' in source
     assert "_validate_kitscenes_val_manifest_contract(" in source
-    assert "_kitscenes_test_scene_identity(" in source
-    assert "_kitscenes_val_scene_identity(" in source
+    assert "_kitscenes_scene_identity(" in source
     assert "_validate_kitscenes_official_val_sdk_split(" in source
     assert '"counterfactuals_enabled"' in source
     assert '"input_gradient_enabled"' in source
