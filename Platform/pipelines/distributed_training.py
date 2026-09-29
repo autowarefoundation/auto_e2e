@@ -1329,6 +1329,50 @@ def _validate_kitscenes_publication_binding(
             "KITScenes official publication requires an existing model "
             "version"
         )
+
+    mapless_test = source_split == "test"
+    if mapless_test:
+        official_scene_count = KITSCENES_OFFICIAL_TEST_SCENE_COUNT
+        official_sample_count = KITSCENES_OFFICIAL_TEST_SAMPLE_COUNT
+        expected_values = {
+            "dataset_version": KITSCENES_OFFICIAL_TEST_DATASET_VERSION,
+            "evaluation_batch_size": (
+                KITSCENES_STATEFUL_CAMERA_FPN_BATCH_SIZE
+            ),
+            "evaluation_role": (
+                "official_test_camera_only_missing_map_route"
+            ),
+            "input_track": "camera_only_missing_map_route",
+            "scene_uid_sha256": KITSCENES_OFFICIAL_TEST_SCENE_UID_SHA256,
+        }
+    else:
+        official_scene_count = KITSCENES_OFFICIAL_VAL_SCENE_COUNT
+        official_sample_count = KITSCENES_OFFICIAL_VAL_SAMPLE_COUNT
+        expected_values = {
+            "dataset_version": KITSCENES_OFFICIAL_VAL_DATASET_VERSION,
+            "evaluation_batch_size": KITSCENES_PRIMARY_VAL_BATCH_SIZE,
+            "evaluation_role": "official_val_camera_map_route",
+            "expected_sample_count": official_sample_count,
+            "input_track": "camera_map_route",
+            "scene_uid_sha256": KITSCENES_OFFICIAL_VAL_SCENE_UID_SHA256,
+        }
+    expected_values.update({
+        "dataset": KITSCENES_REPO_ID,
+        "evaluation_precision_policy": (
+            _kitscenes_evaluation_precision_policy()
+        ),
+        "expected_partition_count": official_scene_count,
+        "inference_cache_policy": KITSCENES_STATEFUL_CAMERA_FPN_POLICY,
+        "maximum_labeled_horizon_steps": 50,
+        "partition_count": official_scene_count,
+        "route_usage_evaluation_policy": (
+            _kitscenes_route_usage_evaluation_policy(
+                mapless_test=mapless_test,
+            )
+        ),
+        "source_revision": KITSCENES_DATA_REVISION,
+    })
+
     metrics = report_payload.get("metrics")
     route_metrics = (
         metrics.get("route")
@@ -1336,68 +1380,37 @@ def _validate_kitscenes_publication_binding(
         else None
     )
     evaluation_batch_size = report_payload.get("evaluation_batch_size")
-    has_integral_batch_size = (
-        isinstance(evaluation_batch_size, int)
+    trajectory_policy = report_payload.get("trajectory_inference_policy")
+    valid = (
+        {
+            key: report_payload.get(key)
+            for key in expected_values
+        }
+        == expected_values
+        and isinstance(evaluation_batch_size, int)
         and not isinstance(evaluation_batch_size, bool)
-    )
-    if source_split == "val":
-        valid = (
-            evaluation_role == "official_val_camera_map_route"
-            and report_payload.get("dataset") == KITSCENES_REPO_ID
-            and report_payload.get("dataset_version")
-            == KITSCENES_OFFICIAL_VAL_DATASET_VERSION
-            and report_payload.get("source_revision")
-            == KITSCENES_DATA_REVISION
-            and report_payload.get("input_track") == "camera_map_route"
-            and report_payload.get("partition_count")
-            == KITSCENES_OFFICIAL_VAL_SCENE_COUNT
-            and report_payload.get("expected_partition_count")
-            == KITSCENES_OFFICIAL_VAL_SCENE_COUNT
-            and report_payload.get("scene_uid_sha256")
-            == KITSCENES_OFFICIAL_VAL_SCENE_UID_SHA256
-            and report_payload.get("inference_cache_policy")
-            == KITSCENES_STATEFUL_CAMERA_FPN_POLICY
-            and has_integral_batch_size
-            and evaluation_batch_size
-            == KITSCENES_PRIMARY_VAL_BATCH_SIZE
-            and report_payload.get("maximum_labeled_horizon_steps") == 50
-            and isinstance(
-                report_payload.get("trajectory_inference_policy"),
-                dict,
-            )
-            and report_payload["trajectory_inference_policy"].get("version")
+        and isinstance(trajectory_policy, dict)
+        and trajectory_policy.get("version")
             == KITSCENES_TRAJECTORY_INFERENCE_POLICY
-            and report_payload["trajectory_inference_policy"].get("planner")
-            == "gru"
-            and report_payload["trajectory_inference_policy"].get(
-                "stochastic_noise"
-            )
-            is False
-            and report_payload.get("evaluation_precision_policy")
-            == _kitscenes_evaluation_precision_policy()
-            and report_payload.get("route_usage_evaluation_policy")
-            == _kitscenes_route_usage_evaluation_policy(
-                mapless_test=False,
-            )
-            and isinstance(metrics, dict)
+        and trajectory_policy.get("planner") == "gru"
+        and trajectory_policy.get("stochastic_noise") is False
+        and isinstance(metrics, dict)
+        and metrics.get("sample_count") == official_sample_count
+    )
+    if not mapless_test:
+        valid = (
+            valid
             and isinstance(metrics.get("sample_count"), int)
             and not isinstance(metrics.get("sample_count"), bool)
-            and metrics["sample_count"]
-            == KITSCENES_OFFICIAL_VAL_SAMPLE_COUNT
-            and report_payload.get("expected_sample_count")
-            == KITSCENES_OFFICIAL_VAL_SAMPLE_COUNT
             and isinstance(route_metrics, dict)
             and route_metrics.get("route_input_gradient_mean_abs") is None
-            and isinstance(
-                route_metrics.get("route_zero_sample_count"),
-                int,
-            )
+            and isinstance(route_metrics.get("route_zero_sample_count"), int)
             and not isinstance(
                 route_metrics.get("route_zero_sample_count"),
                 bool,
             )
             and route_metrics["route_zero_sample_count"]
-            == KITSCENES_OFFICIAL_VAL_SAMPLE_COUNT
+            == official_sample_count
             and isinstance(
                 route_metrics.get("route_zero_trajectory_delta_m"),
                 (int, float),
@@ -1407,14 +1420,9 @@ def _validate_kitscenes_publication_binding(
                 bool,
             )
             and math.isfinite(
-                float(
-                    route_metrics["route_zero_trajectory_delta_m"]
-                )
+                float(route_metrics["route_zero_trajectory_delta_m"])
             )
-            and isinstance(
-                route_metrics.get("route_swap_sample_count"),
-                int,
-            )
+            and isinstance(route_metrics.get("route_swap_sample_count"), int)
             and not isinstance(
                 route_metrics.get("route_swap_sample_count"),
                 bool,
@@ -1422,67 +1430,15 @@ def _validate_kitscenes_publication_binding(
             and route_metrics["route_swap_sample_count"] == 0
             and route_metrics.get("route_swap_trajectory_delta_m") is None
             and isinstance(
-                route_metrics.get(
-                    "route_swap_directional_sample_count"
-                ),
+                route_metrics.get("route_swap_directional_sample_count"),
                 int,
             )
             and not isinstance(
-                route_metrics.get(
-                    "route_swap_directional_sample_count"
-                ),
+                route_metrics.get("route_swap_directional_sample_count"),
                 bool,
             )
             and route_metrics["route_swap_directional_sample_count"] == 0
-            and route_metrics.get(
-                "route_swap_directional_correctness"
-            )
-            is None
-        )
-    else:
-        valid = (
-            evaluation_role
-            == "official_test_camera_only_missing_map_route"
-            and report_payload.get("dataset") == KITSCENES_REPO_ID
-            and report_payload.get("dataset_version")
-            == KITSCENES_OFFICIAL_TEST_DATASET_VERSION
-            and report_payload.get("source_revision")
-            == KITSCENES_DATA_REVISION
-            and report_payload.get("input_track")
-            == "camera_only_missing_map_route"
-            and report_payload.get("partition_count")
-            == KITSCENES_OFFICIAL_TEST_SCENE_COUNT
-            and report_payload.get("expected_partition_count")
-            == KITSCENES_OFFICIAL_TEST_SCENE_COUNT
-            and report_payload.get("scene_uid_sha256")
-            == KITSCENES_OFFICIAL_TEST_SCENE_UID_SHA256
-            and report_payload.get("inference_cache_policy")
-            == KITSCENES_STATEFUL_CAMERA_FPN_POLICY
-            and has_integral_batch_size
-            and evaluation_batch_size
-            == KITSCENES_STATEFUL_CAMERA_FPN_BATCH_SIZE
-            and report_payload.get("maximum_labeled_horizon_steps") == 50
-            and isinstance(
-                report_payload.get("trajectory_inference_policy"),
-                dict,
-            )
-            and report_payload["trajectory_inference_policy"].get("version")
-            == KITSCENES_TRAJECTORY_INFERENCE_POLICY
-            and report_payload["trajectory_inference_policy"].get("planner")
-            == "gru"
-            and report_payload["trajectory_inference_policy"].get(
-                "stochastic_noise"
-            )
-            is False
-            and report_payload.get("evaluation_precision_policy")
-            == _kitscenes_evaluation_precision_policy()
-            and report_payload.get("route_usage_evaluation_policy")
-            == _kitscenes_route_usage_evaluation_policy(
-                mapless_test=True,
-            )
-            and isinstance(metrics, dict)
-            and metrics.get("sample_count")
-            == KITSCENES_OFFICIAL_TEST_SAMPLE_COUNT
+            and route_metrics.get("route_swap_directional_correctness") is None
         )
     if not valid:
         raise ValueError(
