@@ -153,6 +153,22 @@ def _kitscenes_evaluation_precision_policy() -> dict[str, object]:
     }
 
 
+def _finite_numeric_metrics(
+    prefix: str,
+    values: Mapping[str, object],
+) -> dict[str, float]:
+    return {
+        f"{prefix}/{name}": float(value)
+        for name, value in values.items()
+        if (
+            value is not None
+            and not isinstance(value, bool)
+            and isinstance(value, (int, float))
+            and math.isfinite(float(value))
+        )
+    }
+
+
 def _kitscenes_scene_identity(
     scene_uids: list[str],
     *,
@@ -3827,6 +3843,11 @@ def publish_reactive_kitscenes_evaluation(
     )
     if not isinstance(evaluation_precision_policy, dict):
         evaluation_precision_policy = {}
+    trajectory_inference_policy = report_payload.get(
+        "trajectory_inference_policy"
+    )
+    if not isinstance(trajectory_inference_policy, dict):
+        trajectory_inference_policy = {}
     evaluation_priority = (
         "primary"
         if report_payload.get("evaluation_role")
@@ -3914,31 +3935,13 @@ def publish_reactive_kitscenes_evaluation(
                 "",
             ),
             "eval/trajectory_inference_policy": (
-                report_payload.get("trajectory_inference_policy", {})
-                .get("version", "")
-                if isinstance(
-                    report_payload.get("trajectory_inference_policy"),
-                    dict,
-                )
-                else ""
+                trajectory_inference_policy.get("version", "")
             ),
             "eval/trajectory_planner": (
-                report_payload.get("trajectory_inference_policy", {})
-                .get("planner", "")
-                if isinstance(
-                    report_payload.get("trajectory_inference_policy"),
-                    dict,
-                )
-                else ""
+                trajectory_inference_policy.get("planner", "")
             ),
             "eval/trajectory_stochastic_noise": (
-                report_payload.get("trajectory_inference_policy", {})
-                .get("stochastic_noise", "")
-                if isinstance(
-                    report_payload.get("trajectory_inference_policy"),
-                    dict,
-                )
-                else ""
+                trajectory_inference_policy.get("stochastic_noise", "")
             ),
             "eval/route_usage_evaluation_policy": (
                 route_usage_policy.get("version", "")
@@ -3963,31 +3966,18 @@ def publish_reactive_kitscenes_evaluation(
     if not isinstance(trajectory, dict):
         raise ValueError("KITScenes report has no trajectory metrics")
     timestamp = int(time.time() * 1000)
-    numeric_metrics = {
-        f"{split}/trajectory/{name}": float(value)
-        for name, value in trajectory.items()
-        if (
-            value is not None
-            and not isinstance(value, bool)
-            and isinstance(value, (int, float))
-            and math.isfinite(float(value))
-        )
-    }
+    numeric_metrics = _finite_numeric_metrics(
+        f"{split}/trajectory",
+        trajectory,
+    )
     numeric_metrics[f"{split}/sample_count"] = float(
         metrics_payload["sample_count"]
     )
     route = metrics_payload.get("route")
     if isinstance(route, dict):
-        numeric_metrics.update({
-            f"{split}/route/{name}": float(value)
-            for name, value in route.items()
-            if (
-                value is not None
-                and not isinstance(value, bool)
-                and isinstance(value, (int, float))
-                and math.isfinite(float(value))
-            )
-        })
+        numeric_metrics.update(
+            _finite_numeric_metrics(f"{split}/route", route)
+        )
     client.log_batch(
         run_id,
         metrics=[
@@ -4047,91 +4037,68 @@ def publish_reactive_kitscenes_evaluation(
         }
         and value is not None
     }
+    evaluation_tag_values = {
+        "evaluation_input_track": report_payload["input_track"],
+        "evaluation_batch_size": report_payload["evaluation_batch_size"],
+        "inference_cache_policy": report_payload.get(
+            "inference_cache_policy",
+            "",
+        ),
+        "evaluation_role": report_payload["evaluation_role"],
+        "evaluation_priority": evaluation_priority,
+        "evaluation_precision_policy": evaluation_precision_policy.get(
+            "version",
+            "",
+        ),
+        "evaluation_precision_dtype": evaluation_precision_policy.get(
+            "dtype",
+            "",
+        ),
+        "evaluation_autocast_enabled": evaluation_precision_policy.get(
+            "autocast_enabled",
+            "",
+        ),
+        "evaluation_report_sha256": report_sha256,
+        "evaluation_run_id": run_id,
+        "expected_partition_count": report_payload.get(
+            "expected_partition_count",
+            0,
+        ),
+        "expected_sample_count": report_payload.get(
+            "expected_sample_count",
+            0,
+        ),
+        "partition_count": report_payload.get("partition_count", 0),
+        "scene_uid_sha256": report_payload.get("scene_uid_sha256", ""),
+        "evaluation_sample_count": metrics_payload["sample_count"],
+        "trajectory_inference_policy": (
+            trajectory_inference_policy.get("version", "")
+        ),
+        "trajectory_planner": trajectory_inference_policy.get("planner", ""),
+        "trajectory_stochastic_noise": (
+            trajectory_inference_policy.get("stochastic_noise", "")
+        ),
+        "route_usage_evaluation_policy": route_usage_policy.get(
+            "version",
+            "",
+        ),
+        "route_counterfactuals_enabled": route_usage_policy.get(
+            "counterfactuals_enabled",
+            "",
+        ),
+        "route_input_gradient_enabled": route_usage_policy.get(
+            "input_gradient_enabled",
+            "",
+        ),
+    }
     version_tags = {
         "checkpoint_epoch": checkpoint_epoch,
         "checkpoint_s3_uri": checkpoint_uri,
         "checkpoint_sha256": checkpoint_sha256,
-        f"{split_tag}_evaluation_input_track": (
-            report_payload["input_track"]
-        ),
-        f"{split_tag}_evaluation_batch_size": (
-            report_payload["evaluation_batch_size"]
-        ),
-        f"{split_tag}_inference_cache_policy": (
-            report_payload.get("inference_cache_policy", "")
-        ),
-        f"{split_tag}_evaluation_role": (
-            report_payload["evaluation_role"]
-        ),
-        f"{split_tag}_evaluation_priority": evaluation_priority,
-        f"{split_tag}_evaluation_precision_policy": (
-            evaluation_precision_policy.get("version", "")
-        ),
-        f"{split_tag}_evaluation_precision_dtype": (
-            evaluation_precision_policy.get("dtype", "")
-        ),
-        f"{split_tag}_evaluation_autocast_enabled": (
-            evaluation_precision_policy.get("autocast_enabled", "")
-        ),
-        f"{split_tag}_evaluation_report_sha256": report_sha256,
-        f"{split_tag}_evaluation_run_id": run_id,
-        f"{split_tag}_expected_partition_count": (
-            report_payload.get("expected_partition_count", 0)
-        ),
-        f"{split_tag}_expected_sample_count": (
-            report_payload.get("expected_sample_count", 0)
-        ),
-        f"{split_tag}_partition_count": (
-            report_payload.get("partition_count", 0)
-        ),
-        f"{split_tag}_scene_uid_sha256": (
-            report_payload.get("scene_uid_sha256", "")
-        ),
-        f"{split_tag}_evaluation_sample_count": (
-            metrics_payload["sample_count"]
-        ),
-        f"{split_tag}_trajectory_inference_policy": (
-            report_payload.get("trajectory_inference_policy", {}).get(
-                "version",
-                "",
-            )
-            if isinstance(
-                report_payload.get("trajectory_inference_policy"),
-                dict,
-            )
-            else ""
-        ),
-        f"{split_tag}_trajectory_planner": (
-            report_payload.get("trajectory_inference_policy", {}).get(
-                "planner",
-                "",
-            )
-            if isinstance(
-                report_payload.get("trajectory_inference_policy"),
-                dict,
-            )
-            else ""
-        ),
-        f"{split_tag}_trajectory_stochastic_noise": (
-            report_payload.get("trajectory_inference_policy", {}).get(
-                "stochastic_noise",
-                "",
-            )
-            if isinstance(
-                report_payload.get("trajectory_inference_policy"),
-                dict,
-            )
-            else ""
-        ),
-        f"{split_tag}_route_usage_evaluation_policy": (
-            route_usage_policy.get("version", "")
-        ),
-        f"{split_tag}_route_counterfactuals_enabled": (
-            route_usage_policy.get("counterfactuals_enabled", "")
-        ),
-        f"{split_tag}_route_input_gradient_enabled": (
-            route_usage_policy.get("input_gradient_enabled", "")
-        ),
+        **{
+            f"{split_tag}_{name}": value
+            for name, value in evaluation_tag_values.items()
+        },
         **{
             f"{split_tag}_{name}": value
             for name, value in trajectory_tags.items()
@@ -4142,34 +4109,23 @@ def publish_reactive_kitscenes_evaluation(
         },
     }
     if evaluation_priority == "primary":
+        primary_tag_suffixes = (
+            "evaluation_input_track",
+            "evaluation_batch_size",
+            "evaluation_report_sha256",
+            "evaluation_run_id",
+            "evaluation_sample_count",
+            "evaluation_precision_policy",
+            "evaluation_precision_dtype",
+            "evaluation_autocast_enabled",
+            "route_usage_evaluation_policy",
+        )
         version_tags.update({
             "primary_evaluation_split": split,
-            "primary_evaluation_input_track": (
-                report_payload["input_track"]
-            ),
-            "primary_evaluation_batch_size": (
-                report_payload["evaluation_batch_size"]
-            ),
-            "primary_evaluation_report_sha256": report_sha256,
-            "primary_evaluation_run_id": run_id,
-            "primary_evaluation_sample_count": (
-                metrics_payload["sample_count"]
-            ),
-            "primary_evaluation_precision_policy": (
-                evaluation_precision_policy.get("version", "")
-            ),
-            "primary_evaluation_precision_dtype": (
-                evaluation_precision_policy.get("dtype", "")
-            ),
-            "primary_evaluation_autocast_enabled": (
-                evaluation_precision_policy.get(
-                    "autocast_enabled",
-                    "",
-                )
-            ),
-            "primary_route_usage_evaluation_policy": (
-                route_usage_policy.get("version", "")
-            ),
+            **{
+                f"primary_{name}": evaluation_tag_values[name]
+                for name in primary_tag_suffixes
+            },
             **{
                 f"primary_{name}": value
                 for name, value in trajectory_tags.items()
