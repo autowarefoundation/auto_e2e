@@ -1760,32 +1760,6 @@ def test_packed_reactive_targets_round_trip():
     assert np.array_equal(decoded_bev_valid, valid)
 
 
-def test_wgs84_target_masks_padded_kitscenes_benchmark_horizon():
-    from data_processing.reactive_training_artifacts import (
-        wgs84_future_to_ego_xy,
-    )
-
-    latitude = 49.0
-    longitude = 8.0
-    gps = np.column_stack([
-        latitude + np.arange(65, dtype=np.float64) * 1e-6,
-        np.full(65, longitude, dtype=np.float64),
-    ])
-    gps[51:] = gps[50]
-
-    trajectory, valid = wgs84_future_to_ego_xy(
-        gps,
-        current_latitude_deg=latitude,
-        current_longitude_deg=longitude,
-        heading_deg_cw_from_north=0.0,
-        valid_future_steps=50,
-    )
-
-    assert valid[:50].all()
-    assert not valid[50:].any()
-    assert np.array_equal(trajectory[50:], np.zeros((14, 2)))
-
-
 def test_semantic_artifact_accepts_prequantized_frames():
     from Platform.pipelines.semantic_occupancy import (
         encode_semantic_occupancy,

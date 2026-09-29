@@ -141,14 +141,11 @@ def wgs84_future_to_ego_xy(
     current_latitude_deg: float,
     current_longitude_deg: float,
     heading_deg_cw_from_north: float,
-    valid_future_steps: int = 64,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Project current+future WGS84 points into current ego FLU."""
     gps = np.asarray(gps_future_lat_lon, dtype=np.float64)
     if gps.shape != (65, 2):
         raise ValueError("gps future must have shape [65,2]")
-    if not 1 <= valid_future_steps <= 64:
-        raise ValueError("valid_future_steps must be between one and 64")
     pose = np.asarray(
         [
             current_latitude_deg,
@@ -184,7 +181,6 @@ def wgs84_future_to_ego_xy(
         np.isfinite(trajectory).all(axis=1),
         dtype=np.bool_,
     )
-    finite[valid_future_steps:] = False
     trajectory[~finite] = 0.0
     return trajectory, finite
 
