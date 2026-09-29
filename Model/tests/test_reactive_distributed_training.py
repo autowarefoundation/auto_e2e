@@ -1034,7 +1034,7 @@ def test_rank_staging_verifies_tar_and_manifest_digests(tmp_path):
 
     source_shard = source / assignments[1][0].shard_name
     source_shard.write_bytes(b"corrupt")
-    with pytest.raises(ValueError, match="digest mismatch"):
+    with pytest.raises(ValueError, match="tar shard digest mismatch"):
         stage_rank_reactive_shards(
             assignments[1],
             cache_root=tmp_path / "cache-corrupt",

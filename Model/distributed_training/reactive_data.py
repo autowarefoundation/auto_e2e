@@ -675,12 +675,17 @@ def _copy_or_download_shard(
     shard: ReactiveShardReference,
     destination: Path,
 ) -> None:
-    _copy_or_download_source_file(
-        shard.source_uri,
-        shard.shard_name,
-        destination,
-        expected_sha256=shard.shard_sha256,
-    )
+    try:
+        _copy_or_download_source_file(
+            shard.source_uri,
+            shard.shard_name,
+            destination,
+            expected_sha256=shard.shard_sha256,
+        )
+    except ValueError as error:
+        raise ValueError(
+            f"tar shard digest mismatch for {shard.identity}"
+        ) from error
 
 
 def _copy_or_download_source_file(
