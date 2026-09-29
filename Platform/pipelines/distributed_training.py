@@ -123,8 +123,11 @@ KITSCENES_CAMERA_ONLY_ROUTE_USAGE_POLICY = (
 
 
 def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
     with path.open("rb") as stream:
-        return hashlib.file_digest(stream, "sha256").hexdigest()
+        for chunk in iter(lambda: stream.read(8 * 1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _kitscenes_route_usage_evaluation_policy(
