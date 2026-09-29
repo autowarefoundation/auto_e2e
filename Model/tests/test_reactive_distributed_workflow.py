@@ -2052,12 +2052,34 @@ def test_kitscenes_val_manifest_rejects_missing_map_route_contract(
 
 
 def test_kitscenes_evaluation_precision_policy_is_bfloat16():
-    assert distributed_training._kitscenes_evaluation_precision_policy() == {
+    policy = distributed_training._kitscenes_evaluation_precision_policy()
+    assert policy == {
         "autocast_enabled": True,
         "device_type": "cuda",
         "dtype": "bfloat16",
         "version": "cuda_bfloat16_autocast_v1",
     }
+    distributed_training._validate_kitscenes_runtime_precision(
+        {
+            "inference_precision": {
+                "autocast_enabled": True,
+                "device_type": "cuda",
+                "dtype": "bfloat16",
+            }
+        },
+        policy,
+    )
+    with pytest.raises(RuntimeError, match="differs from policy"):
+        distributed_training._validate_kitscenes_runtime_precision(
+            {
+                "inference_precision": {
+                    "autocast_enabled": False,
+                    "device_type": "cuda",
+                    "dtype": "float32",
+                }
+            },
+            policy,
+        )
 
 
 def test_reactive_mlflow_helpers_record_stable_numeric_history():

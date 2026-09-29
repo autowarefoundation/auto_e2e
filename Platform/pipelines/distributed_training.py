@@ -169,6 +169,20 @@ def _finite_numeric_metrics(
     }
 
 
+def _validate_kitscenes_runtime_precision(
+    metrics: Mapping[str, object],
+    policy: Mapping[str, object],
+) -> None:
+    expected = {
+        key: policy[key]
+        for key in ("autocast_enabled", "device_type", "dtype")
+    }
+    if metrics.get("inference_precision") != expected:
+        raise RuntimeError(
+            "KITScenes evaluator runtime precision differs from policy"
+        )
+
+
 def _kitscenes_scene_identity(
     scene_uids: list[str],
     *,
@@ -3660,6 +3674,10 @@ def evaluate_reactive_kitscenes_checkpoint(
             camera_fpn_cache=camera_fpn_cache,
             inference_autocast_dtype=torch.bfloat16,
         )
+    _validate_kitscenes_runtime_precision(
+        metrics,
+        evaluation_precision_policy,
+    )
     trajectory_metrics = metrics.get("trajectory")
     if not isinstance(trajectory_metrics, dict):
         raise ValueError("KITScenes evaluation omitted trajectory metrics")
