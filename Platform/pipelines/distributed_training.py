@@ -4660,40 +4660,6 @@ def wf_train_reactive_kitscenes_ray_8(
 
 
 @workflow
-def wf_evaluate_reactive_kitscenes(
-    checkpoint: FlyteFile,
-    evaluation_shards: List[FlyteDirectory],
-    source_split: str = "val",
-    expected_model_version: str = "",
-) -> ReactiveKITScenesEvaluationWorkflowOutput:
-    """Evaluate the selected checkpoint on an official labeled split."""
-    evaluation = evaluate_reactive_kitscenes_checkpoint(
-        checkpoint=checkpoint,
-        shards=evaluation_shards,
-        source_split=source_split,
-        batch_size=1,
-        num_loader_workers=4,
-    )
-    publication = publish_reactive_kitscenes_evaluation(
-        checkpoint=checkpoint,
-        report=evaluation.report,
-        report_sha256=evaluation.report_sha256,
-        checkpoint_sha256=evaluation.checkpoint_sha256,
-        checkpoint_epoch=evaluation.checkpoint_epoch,
-        expected_model_version=expected_model_version,
-    )
-    return ReactiveKITScenesEvaluationWorkflowOutput(
-        report=evaluation.report,
-        report_sha256=evaluation.report_sha256,
-        checkpoint_sha256=evaluation.checkpoint_sha256,
-        checkpoint_epoch=evaluation.checkpoint_epoch,
-        mlflow_run_id=publication.mlflow_run_id,
-        registered_model_name=publication.registered_model_name,
-        registered_model_version=publication.registered_model_version,
-    )
-
-
-@workflow
 def wf_evaluate_reactive_kitscenes_val(
     checkpoint: FlyteFile,
     evaluation_shards: List[FlyteDirectory],

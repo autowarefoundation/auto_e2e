@@ -1640,24 +1640,6 @@ def test_ray_tasks_serialize_the_resolved_storage_path():
     )
 
 
-def test_kitscenes_evaluation_workflow_publishes_to_mlflow():
-    evaluator, publisher = (
-        distributed_training.wf_evaluate_reactive_kitscenes.nodes
-    )
-
-    assert evaluator.flyte_entity.name.endswith(
-        "evaluate_reactive_kitscenes_checkpoint"
-    )
-    assert publisher.flyte_entity.name.endswith(
-        "publish_reactive_kitscenes_evaluation"
-    )
-    assert (
-        distributed_training.publish_reactive_kitscenes_evaluation
-        .environment["MLFLOW_TRACKING_URI"]
-        == distributed_training.MLFLOW_URI
-    )
-
-
 def test_kitscenes_val_workflow_enforces_primary_inventory():
     evaluator, publisher = (
         distributed_training.wf_evaluate_reactive_kitscenes_val.nodes
@@ -1686,16 +1668,6 @@ def test_kitscenes_val_workflow_enforces_primary_inventory():
     assert publisher.flyte_entity is (
         distributed_training.publish_reactive_kitscenes_evaluation
     )
-
-
-def test_kitscenes_generic_evaluation_preserves_batch_one():
-    evaluator, _ = distributed_training.wf_evaluate_reactive_kitscenes.nodes
-    bindings = {
-        binding.var: binding.binding
-        for binding in evaluator.bindings
-    }
-
-    assert bindings["batch_size"].scalar.primitive.integer == 1
 
 
 def test_kitscenes_test_sharded_workflow_enforces_official_inventory():
