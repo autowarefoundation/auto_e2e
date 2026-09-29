@@ -686,31 +686,12 @@ def _copy_or_download_shard(
     shard: ReactiveShardReference,
     destination: Path,
 ) -> None:
-    local = _local_source_path(shard.source_uri)
-    if local is not None:
-        source = local / shard.shard_name
-        try:
-            os.link(source, destination)
-        except OSError:
-            shutil.copyfile(source, destination)
-    else:
-        import boto3
-
-        bucket, key = _s3_location(
-            shard.source_uri,
-            shard.shard_name,
-        )
-        boto3.client("s3").download_file(
-            bucket,
-            key,
-            str(destination),
-        )
-    actual_sha256 = hashlib.sha256(destination.read_bytes()).hexdigest()
-    if actual_sha256 != shard.shard_sha256:
-        destination.unlink(missing_ok=True)
-        raise ValueError(
-            f"tar shard digest mismatch for {shard.identity}"
-        )
+    _copy_or_download_source_file(
+        shard.source_uri,
+        shard.shard_name,
+        destination,
+        expected_sha256=shard.shard_sha256,
+    )
 
 
 def _copy_or_download_source_file(
