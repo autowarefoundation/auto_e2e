@@ -1,0 +1,88 @@
+{
+  "version": "navigation_robustness_v1",
+  "baseline_mode": "map_route",
+  "conditions": [
+    {
+      "mode": "map_route",
+      "ade_m": 0.7489318853975678,
+      "fde_m": 1.4092806561835154,
+      "ade_delta_m": 0.0,
+      "fde_delta_m": 0.0,
+      "n": 6,
+      "extras": {}
+    },
+    {
+      "mode": "map_only",
+      "ade_m": 9.061647648046849,
+      "fde_m": 18.237646832622683,
+      "ade_delta_m": 8.312715762649281,
+      "fde_delta_m": 16.828366176439168,
+      "n": 6,
+      "extras": {}
+    },
+    {
+      "mode": "route_only",
+      "ade_m": 4.389810727742549,
+      "fde_m": 8.146617660837016,
+      "ade_delta_m": 3.6408788423449807,
+      "fde_delta_m": 6.737337004653501,
+      "n": 6,
+      "extras": {}
+    },
+    {
+      "mode": "blank",
+      "ade_m": 15.102746080078083,
+      "fde_m": 30.39607805437114,
+      "ade_delta_m": 14.353814194680515,
+      "fde_delta_m": 28.986797398187626,
+      "n": 6,
+      "extras": {}
+    },
+    {
+      "mode": "shuffled",
+      "ade_m": 2.4156407595523968,
+      "fde_m": 6.357481169561382,
+      "ade_delta_m": 1.6667088741548288,
+      "fde_delta_m": 4.948200513377866,
+      "n": 6,
+      "extras": {}
+    },
+    {
+      "mode": "wrong_route",
+      "ade_m": 3.056698996538954,
+      "fde_m": 8.136345995827298,
+      "ade_delta_m": 2.307767111141386,
+      "fde_delta_m": 6.727065339643783,
+      "n": 6,
+      "extras": {}
+    },
+    {
+      "mode": "map_dropout",
+      "ade_m": 1.984909298116731,
+      "fde_m": 3.6439668143875594,
+      "ade_delta_m": 1.235977412719163,
+      "fde_delta_m": 2.234686158204044,
+      "n": 6,
+      "extras": {}
+    },
+    {
+      "mode": "route_dropout",
+      "ade_m": 4.905289766722209,
+      "fde_m": 9.823463744403098,
+      "ade_delta_m": 4.156357881324642,
+      "fde_delta_m": 8.414183088219582,
+      "n": 6,
+      "extras": {}
+    },
+    {
+      "mode": "yaw_perturb",
+      "ade_m": 2.16583708289869,
+      "fde_m": 2.654914681848183,
+      "ade_delta_m": 1.416905197501122,
+      "fde_delta_m": 1.2456340256646676,
+      "n": 6,
+      "extras": {}
+    }
+  ],
+  "source": "corridor_scenes"
+}
