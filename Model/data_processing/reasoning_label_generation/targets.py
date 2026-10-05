@@ -43,6 +43,7 @@ _SOURCE_WEIGHT: Dict[str, float] = {
     "direct_gt": 0.9,
     "derived_gt": 0.7,
     "counterfactual_gt": 0.8,
+    "counterfactual_weak": 0.3,
     "teacher_gt": 0.5,
     "weak_gt": 0.3,
     "teacher_error": 0.0,

@@ -1,0 +1,217 @@
+{
+  "claim": "synthetic_unit_protocol",
+  "source": "synthetic_geometry_unit_protocol",
+  "not_claimed": [
+    "kit_lidar_object_gt",
+    "issue_122_external_truth_validation"
+  ],
+  "n_scenes": 12,
+  "min_delta": 0.001,
+  "relative_to_max": 0.5,
+  "conflict_half_width_m": 1.75,
+  "teacher_half_width_m": 4.0,
+  "provenance_emitted": "counterfactual_weak",
+  "oracle_vs_geometry": {
+    "precision": 1.0,
+    "recall": 0.9230769230769231,
+    "f1": 0.9600000000000001,
+    "n_scenes": 12.0
+  },
+  "blind_vs_geometry": {
+    "precision": 0.4166666666666667,
+    "recall": 0.38461538461538464,
+    "f1": 0.4,
+    "n_scenes": 12.0
+  },
+  "oracle_vs_geometry_teacher_jaccard": {
+    "mean_jaccard": 0.5972222222222222,
+    "n": 12.0
+  },
+  "blind_vs_geometry_teacher_jaccard": {
+    "mean_jaccard": 0.47222222222222227,
+    "n": 12.0
+  },
+  "oracle_scenes": [
+    {
+      "scene_id": "ped_in_crosswalk",
+      "truth": [
+        "pedestrian_crossing"
+      ],
+      "pred": [
+        "pedestrian_crossing"
+      ],
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1": 1.0,
+      "tp": 1.0,
+      "fp": 0.0,
+      "fn": 0.0
+    },
+    {
+      "scene_id": "vru_entering_path",
+      "truth": [
+        "vru_conflict"
+      ],
+      "pred": [
+        "vru_conflict"
+      ],
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1": 1.0,
+      "tp": 1.0,
+      "fp": 0.0,
+      "fn": 0.0
+    },
+    {
+      "scene_id": "red_light_ahead",
+      "truth": [
+        "red_light"
+      ],
+      "pred": [
+        "red_light"
+      ],
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1": 1.0,
+      "tp": 1.0,
+      "fp": 0.0,
+      "fn": 0.0
+    },
+    {
+      "scene_id": "stopped_lead",
+      "truth": [
+        "stopped_lead_vehicle"
+      ],
+      "pred": [
+        "stopped_lead_vehicle"
+      ],
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1": 1.0,
+      "tp": 1.0,
+      "fp": 0.0,
+      "fn": 0.0
+    },
+    {
+      "scene_id": "cut_in",
+      "truth": [
+        "cut_in_vehicle"
+      ],
+      "pred": [
+        "cut_in_vehicle"
+      ],
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1": 1.0,
+      "tp": 1.0,
+      "fp": 0.0,
+      "fn": 0.0
+    },
+    {
+      "scene_id": "cross_traffic",
+      "truth": [
+        "cross_traffic"
+      ],
+      "pred": [
+        "cross_traffic"
+      ],
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1": 1.0,
+      "tp": 1.0,
+      "fp": 0.0,
+      "fn": 0.0
+    },
+    {
+      "scene_id": "object_blocking",
+      "truth": [
+        "object_blocking_path"
+      ],
+      "pred": [
+        "object_blocking_path"
+      ],
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1": 1.0,
+      "tp": 1.0,
+      "fp": 0.0,
+      "fn": 0.0
+    },
+    {
+      "scene_id": "stop_sign",
+      "truth": [
+        "stop_sign"
+      ],
+      "pred": [
+        "stop_sign"
+      ],
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1": 1.0,
+      "tp": 1.0,
+      "fp": 0.0,
+      "fn": 0.0
+    },
+    {
+      "scene_id": "lane_ending",
+      "truth": [
+        "lane_ending"
+      ],
+      "pred": [
+        "lane_ending"
+      ],
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1": 1.0,
+      "tp": 1.0,
+      "fp": 0.0,
+      "fn": 0.0
+    },
+    {
+      "scene_id": "ped_about_to_cross",
+      "truth": [
+        "pedestrian_about_to_cross"
+      ],
+      "pred": [
+        "pedestrian_about_to_cross"
+      ],
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1": 1.0,
+      "tp": 1.0,
+      "fp": 0.0,
+      "fn": 0.0
+    },
+    {
+      "scene_id": "road_closed",
+      "truth": [
+        "road_closed"
+      ],
+      "pred": [
+        "road_closed"
+      ],
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1": 1.0,
+      "tp": 1.0,
+      "fp": 0.0,
+      "fn": 0.0
+    },
+    {
+      "scene_id": "slippery_plus_lead",
+      "truth": [
+        "slippery_road",
+        "slow_lead_vehicle"
+      ],
+      "pred": [
+        "slippery_road"
+      ],
+      "precision": 1.0,
+      "recall": 0.5,
+      "f1": 0.6666666666666666,
+      "tp": 1.0,
+      "fp": 0.0,
+      "fn": 1.0
+    }
+  ]
+}

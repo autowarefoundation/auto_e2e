@@ -52,7 +52,8 @@ class ReasoningHorizonLabel:
             rule_response: single-label response axes.
         confidence: teacher confidence for this horizon in [0, 1].
         provenance: label source (audited_gt / direct_gt / derived_gt /
-            teacher_gt / weak_gt / counterfactual_gt / teacher_error).
+            teacher_gt / weak_gt / counterfactual_weak / counterfactual_gt /
+            teacher_error).
         evidence: optional free-text rationale — audit/debug only, never a
             training signal.
         (optional v2 fields): scene/topology/actor context + timing regressions.
