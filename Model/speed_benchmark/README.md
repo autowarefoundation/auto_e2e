@@ -2,6 +2,8 @@
 
 `speed_benchmark.py` loads dummy data, warms up the GPU, and performs inference on 100 samples to calculate inference speed benchmarks of the model.
 
+For **quality** metrics of the World Model (JEPA reconstruction, Reactive vs Combined trajectory impact, open-loop ADE/FDE pairs), see [`../evaluation/QUALITY_BENCHMARKS.md`](../evaluation/QUALITY_BENCHMARKS.md).
+
 ## Tracked Parameters
 
 The script outputs:
