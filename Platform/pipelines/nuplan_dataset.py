@@ -151,10 +151,13 @@ def _nuplan_pack_worker_count(
     return min(8, db_file_count, limit_total_scenarios or db_file_count)
 
 
-def _parse_nuplan_train_sensor_inventory(
+def _parse_nuplan_sensor_inventory(
     payload: str,
+    *,
+    split: str,
+    group_count: int,
 ) -> dict[int, tuple[str, ...]]:
-    """Parse the official train sensor group inventory."""
+    """Parse one official nuPlan sensor group inventory."""
     groups: dict[int, list[str]] = {}
     current_group: int | None = None
     for line_number, raw_line in enumerate(payload.splitlines(), start=1):
@@ -166,27 +169,27 @@ def _parse_nuplan_train_sensor_inventory(
             current_group = int(match.group(1))
             if current_group in groups:
                 raise ValueError(
-                    "duplicate nuPlan train sensor group "
+                    f"duplicate nuPlan {split} sensor group "
                     f"{current_group} at line {line_number}"
                 )
             groups[current_group] = []
             continue
         if current_group is None:
             raise ValueError(
-                "nuPlan train sensor inventory has a log before its "
+                f"nuPlan {split} sensor inventory has a log before its "
                 f"group header at line {line_number}"
             )
         groups[current_group].append(line)
 
-    expected_groups = set(range(NUPLAN_FULL_TRAIN_GROUP_COUNT))
+    expected_groups = set(range(group_count))
     if set(groups) != expected_groups:
         raise ValueError(
-            "nuPlan train sensor inventory group mismatch: "
+            f"nuPlan {split} sensor inventory group mismatch: "
             f"expected={sorted(expected_groups)} actual={sorted(groups)}"
         )
     flattened = [
         log_name
-        for group_index in range(NUPLAN_FULL_TRAIN_GROUP_COUNT)
+        for group_index in range(group_count)
         for log_name in groups[group_index]
     ]
     if (
@@ -196,13 +199,24 @@ def _parse_nuplan_train_sensor_inventory(
         or any(not log_names for log_names in groups.values())
     ):
         raise ValueError(
-            "nuPlan train sensor inventory contains an empty group or "
+            f"nuPlan {split} sensor inventory contains an empty group or "
             "duplicate logs"
         )
     return {
         group_index: tuple(groups[group_index])
-        for group_index in range(NUPLAN_FULL_TRAIN_GROUP_COUNT)
+        for group_index in range(group_count)
     }
+
+
+def _parse_nuplan_train_sensor_inventory(
+    payload: str,
+) -> dict[int, tuple[str, ...]]:
+    """Parse the official train sensor group inventory."""
+    return _parse_nuplan_sensor_inventory(
+        payload,
+        split="train",
+        group_count=NUPLAN_FULL_TRAIN_GROUP_COUNT,
+    )
 
 
 def _allocate_nuplan_group_scenario_limits(
