@@ -71,7 +71,8 @@ NUPLAN_DATASET_ID = "nuplan/nuplan-v1.1"
 # 10 Hz cadence used by trajectory targets and Console playback.
 NUPLAN_SCENE_FRAME_STRIDE = 2
 NUPLAN_SCENE_FRAME_INTERVAL_US = 100_000
-NUPLAN_SCENE_PARTITION_SCHEMA_VERSION = "nuplan_scene_partition_v1"
+NUPLAN_SCENE_PARTITION_SCHEMA_VERSION = "nuplan_scene_partition_v2"
+NUPLAN_SCENE_UID_SCHEMA_VERSION = "v1"
 NUPLAN_SCENE_SET_SCHEMA_VERSION = "nuplan_scene_set_v1"
 # Calibration matrices map the rear-axle ego frame; camera centres sit about
 # 1.5 m above its origin, so the road plane is z = 0.
@@ -2679,6 +2680,55 @@ def nuplan_scene_partition_id(scenario: Any) -> str:
     return f"nuplan-{digest}"
 
 
+def nuplan_scene_episode_id(partition_id: str) -> str:
+    """Return the Console episode id of one scene partition."""
+    episode_id = partition_id.removeprefix("nuplan-")
+    if episode_id == partition_id or not episode_id.isalnum():
+        raise ValueError(f"invalid nuPlan scene partition id {partition_id!r}")
+    return episode_id
+
+
+def nuplan_scene_sample_uid(partition_id: str, frame_index: int) -> str:
+    """Return a scene sample uid in the ``<dataset>-v1-<episode>-f<frame>`` form.
+
+    KITScenes, L2D, and NVIDIA samples use the same layout, so the Console
+    derives the episode and the 10 Hz frame from the key alone.
+    """
+    if isinstance(frame_index, bool) or not isinstance(frame_index, int):
+        raise ValueError("nuPlan scene frame index must be an integer")
+    if frame_index < 0:
+        raise ValueError("nuPlan scene frame index must be non-negative")
+    return (
+        f"nuplan-{NUPLAN_SCENE_UID_SCHEMA_VERSION}-"
+        f"{nuplan_scene_episode_id(partition_id)}-f{frame_index:06d}"
+    )
+
+
+def _scene_frame_members(
+    members: Mapping[str, bytes],
+    *,
+    source_sample_uid: str,
+    sample_uid: str,
+    episode_id: str,
+    frame_index: int,
+    iteration: int,
+) -> dict[str, bytes]:
+    """Re-key one training-built frame as a scene frame."""
+    meta = json.loads(members["meta.json"])
+    if meta.get("sample_uid") != source_sample_uid:
+        raise ValueError("nuPlan sample metadata uid differs from builder")
+    meta.update({
+        "episode_id": episode_id,
+        "frame_idx": frame_index,
+        "sample_uid": sample_uid,
+        "source_iteration": iteration,
+        "source_sample_uid": source_sample_uid,
+    })
+    scene_members = dict(members)
+    scene_members["meta.json"] = canonical_json_bytes(meta)
+    return scene_members
+
+
 def nuplan_static_rig_projection(
     calib: Mapping[str, Any],
 ) -> dict[str, object]:
@@ -2773,6 +2823,7 @@ def _pack_nuplan_reactive_scene(
             f"required={required_iterations}"
         )
     partition_id = nuplan_scene_partition_id(scenario)
+    episode_id = nuplan_scene_episode_id(partition_id)
     destination = partition_root / partition_id
     if destination.exists():
         raise FileExistsError(f"nuPlan scene {partition_id} already exists")
@@ -2790,11 +2841,24 @@ def _pack_nuplan_reactive_scene(
     try:
         with tarfile.open(staging / shard_name, mode="w") as archive:
             for frame_index in range(frames_per_scene):
-                sample_uid, split_group_uid, members = sample_builder(
+                iteration = frame_index * frame_stride
+                source_sample_uid, split_group_uid, members = sample_builder(
                     scenario,
-                    iteration=frame_index * frame_stride,
+                    iteration=iteration,
                     image_size=image_size,
                     source_revision=source_revision,
+                )
+                sample_uid = nuplan_scene_sample_uid(
+                    partition_id,
+                    frame_index,
+                )
+                members = _scene_frame_members(
+                    members,
+                    source_sample_uid=source_sample_uid,
+                    sample_uid=sample_uid,
+                    episode_id=episode_id,
+                    frame_index=frame_index,
+                    iteration=iteration,
                 )
                 (
                     camera_time_offset_us,
@@ -2860,6 +2924,7 @@ def _pack_nuplan_reactive_scene(
             "reasoning_label_count": 0,
             "sample_uid_digest": _sample_uid_digest(sample_uids),
             "scene": {
+                "episode_id": episode_id,
                 "first_iteration": 0,
                 "frame_count": len(sample_uids),
                 "log_name": str(scenario.log_name),
