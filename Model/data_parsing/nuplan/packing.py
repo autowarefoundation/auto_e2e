@@ -24,6 +24,13 @@ from PIL import Image
 
 from data_parsing.camera_slots import CANONICAL_SIX_CAMERA_SLOTS
 from data_processing.contract_versions import contract_versions
+from data_processing.geospatial import (
+    EPISODE_PATH_SCHEMA_VERSION,
+    GPS_SCHEMA_VERSION,
+    POSE_SCHEMA_VERSION,
+    geospatial_members,
+    write_geo_artifacts,
+)
 from data_processing.reactive_training_artifacts import (
     BEV_SEGMENTATION_TAXONOMY_VERSION,
 )
@@ -41,6 +48,12 @@ from reactive_training_contracts import (
     REACTIVE_FRONT_CAMERA_INDEX,
 )
 
+from .geospatial import (
+    NuPlanGeoProjector,
+    NuPlanSceneGeoRecords,
+    nuplan_frame_geospatial,
+    nuplan_map_projected_crs,
+)
 from .targets import (
     NuPlanReactiveTargets,
     build_nuplan_reactive_targets,
@@ -2022,6 +2035,29 @@ def _order_nuplan_scene_candidates(
     return [scenario for _, scenario in sorted(enumerate(scenarios), key=key)]
 
 
+def _nuplan_local_frame_geospatial(
+    map_root: Path,
+) -> Callable[[Any, int], tuple[dict[str, Any], Any]]:
+    """Return a WGS84 pose function using each city's map package CRS."""
+    projectors: dict[str, NuPlanGeoProjector] = {}
+
+    def frame_geospatial(
+        scenario: Any,
+        iteration: int,
+    ) -> tuple[dict[str, Any], Any]:
+        map_name = str(scenario.map_api.map_name)
+        projector = projectors.get(map_name)
+        if projector is None:
+            projector = NuPlanGeoProjector(
+                map_name,
+                nuplan_map_projected_crs(map_root, map_name),
+            )
+            projectors[map_name] = projector
+        return nuplan_frame_geospatial(scenario, iteration, projector)
+
+    return frame_geospatial
+
+
 def pack_nuplan_local_scenes(
     *,
     data_root: str | Path,
@@ -2100,6 +2136,7 @@ def pack_nuplan_local_scenes(
         frames_per_scene=frames_per_scene,
         image_size=image_size,
         candidate_issue=_nuplan_local_sensor_asset_issue,
+        frame_geospatial=_nuplan_local_frame_geospatial(local_map),
     )
 
 
@@ -2712,6 +2749,7 @@ def _scene_frame_members(
     episode_id: str,
     frame_index: int,
     iteration: int,
+    geospatial: tuple[Mapping[str, Any], Any] | None,
 ) -> dict[str, bytes]:
     """Re-key one training-built frame as a scene frame."""
     meta = json.loads(members["meta.json"])
@@ -2726,6 +2764,12 @@ def _scene_frame_members(
     })
     scene_members = dict(members)
     scene_members["meta.json"] = canonical_json_bytes(meta)
+    if geospatial is not None:
+        pose_current, gps_future = geospatial
+        scene_members.update(geospatial_members({
+            "pose_current": pose_current,
+            "gps_future": gps_future,
+        }))
     return scene_members
 
 
@@ -2805,6 +2849,9 @@ def _pack_nuplan_reactive_scene(
     frame_stride: int,
     image_size: int,
     sample_builder: Callable[..., tuple[str, str, dict[str, bytes]]],
+    frame_geospatial: (
+        Callable[[Any, int], tuple[dict[str, Any], Any]] | None
+    ) = None,
 ) -> dict[str, object]:
     """Pack one scenario as a contiguous 10 Hz publishable partition."""
     interval_s = float(getattr(scenario, "database_interval", 0.05))
@@ -2838,6 +2885,11 @@ def _pack_nuplan_reactive_scene(
     history_time_offsets_us: list[int] = []
     distinct_history_frame_counts: list[int] = []
     rig: dict[str, object] | None = None
+    geo_records = (
+        NuPlanSceneGeoRecords(episode_id)
+        if frame_geospatial is not None
+        else None
+    )
     try:
         with tarfile.open(staging / shard_name, mode="w") as archive:
             for frame_index in range(frames_per_scene):
@@ -2852,6 +2904,11 @@ def _pack_nuplan_reactive_scene(
                     partition_id,
                     frame_index,
                 )
+                geospatial = (
+                    frame_geospatial(scenario, iteration)
+                    if frame_geospatial is not None
+                    else None
+                )
                 members = _scene_frame_members(
                     members,
                     source_sample_uid=source_sample_uid,
@@ -2859,7 +2916,14 @@ def _pack_nuplan_reactive_scene(
                     episode_id=episode_id,
                     frame_index=frame_index,
                     iteration=iteration,
+                    geospatial=geospatial,
                 )
+                if geo_records is not None and geospatial is not None:
+                    geo_records.add(
+                        sample_uid=sample_uid,
+                        frame_index=frame_index,
+                        pose=dict(geospatial[0]),
+                    )
                 (
                     camera_time_offset_us,
                     history_time_offset_us,
@@ -2893,6 +2957,16 @@ def _pack_nuplan_reactive_scene(
                 )
         if len(split_group_uids) != 1 or rig is None:
             raise ValueError("nuPlan scene must come from exactly one log")
+        geo_summary = (
+            write_geo_artifacts(
+                geo_records,
+                staging,
+                dataset_name=NUPLAN_DATASET_ID,
+                dataset_version=publication_version,
+            )
+            if geo_records is not None
+            else None
+        )
         manifest: dict[str, object] = {
             **_nuplan_shard_contract_fields(
                 image_size=image_size,
@@ -2908,7 +2982,7 @@ def _pack_nuplan_reactive_scene(
             "episodes": 1,
             "frame_interval_us": NUPLAN_SCENE_FRAME_INTERVAL_US,
             "frame_stride": frame_stride,
-            "has_gps": False,
+            "has_gps": geo_summary is not None,
             "has_map": True,
             "has_reasoning_labels": False,
             "has_world_model": False,
@@ -2944,6 +3018,20 @@ def _pack_nuplan_reactive_scene(
             "total_samples": len(sample_uids),
             "trajectory_xy_count": len(sample_uids),
         }
+        if geo_summary is not None:
+            manifest["geospatial"] = {
+                "pose_schema": POSE_SCHEMA_VERSION,
+                "gps_schema": GPS_SCHEMA_VERSION,
+                "episode_path_schema": EPISODE_PATH_SCHEMA_VERSION,
+                "source_coordinate_dtype": geo_summary[
+                    "source_coordinate_dtype"
+                ],
+                "stored_coordinate_dtype": geo_summary[
+                    "stored_coordinate_dtype"
+                ],
+                "timestamp_dtype": geo_summary["timestamp_dtype"],
+                "summary": geo_summary,
+            }
         rig_directory = staging / "rig"
         rig_directory.mkdir()
         (rig_directory / "projection.json").write_bytes(
@@ -2972,6 +3060,9 @@ def pack_nuplan_reactive_scene_partitions(
         nuplan_reactive_sample_members
     ),
     candidate_issue: Callable[[Any], str | None] | None = None,
+    frame_geospatial: (
+        Callable[[Any, int], tuple[dict[str, Any], Any]] | None
+    ) = None,
 ) -> dict[str, object]:
     """Pack contiguous scenes, one publishable partition per scene.
 
@@ -3032,6 +3123,7 @@ def pack_nuplan_reactive_scene_partitions(
                     frame_stride=frame_stride,
                     image_size=image_size,
                     sample_builder=sample_builder,
+                    frame_geospatial=frame_geospatial,
                 )
             except Exception as error:
                 rejected.append({
