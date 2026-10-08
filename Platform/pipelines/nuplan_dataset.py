@@ -1468,7 +1468,7 @@ def wf_pack_nuplan_snapshot_reactive_dataset_sharded(
         ephemeral_storage=NUPLAN_FULL_PACK_EPHEMERAL_STORAGE,
     ),
     cache=True,
-    cache_version="nuplan-scene-pack-v1-manifest-v11",
+    cache_version="nuplan-scene-pack-v2-manifest-v11",
     retries=1,
 )
 def pack_nuplan_snapshot_scene_partitions(
@@ -1481,6 +1481,7 @@ def pack_nuplan_snapshot_scene_partitions(
     preferred_scenario_types: List[str] = NUPLAN_SCENE_PREFERRED_TYPES,
     image_size: int = REACTIVE_CAMERA_IMAGE_SIZE,
     scene_workers: int = NUPLAN_SCENE_WORKERS,
+    require_mission_goal: bool = False,
     aws_region: str = "us-west-2",
 ) -> List[FlyteDirectory]:
     """Pack contiguous 10 Hz scenes with the training sample builder.
@@ -1524,6 +1525,7 @@ def pack_nuplan_snapshot_scene_partitions(
         preferred_scenario_types=preferred_scenario_types,
         image_size=image_size,
         scene_workers=scene_workers,
+        require_mission_goal=require_mission_goal,
     )
     provenance = {
         "raw_archive_ids": [
@@ -1539,6 +1541,7 @@ def pack_nuplan_snapshot_scene_partitions(
             snapshot.manifest["source_contract_sha256"]
         ),
         "materialized_map_version": materialized.map_version,
+        "require_mission_goal": require_mission_goal,
         "sensor_complete_log_count": len(materialized.sensor_log_names),
     }
     partitions: List[FlyteDirectory] = []
@@ -1601,6 +1604,7 @@ def _pack_nuplan_snapshot_scene_dataset(
     preferred_scenario_types: List[str],
     image_size: int,
     scene_workers: int,
+    require_mission_goal: bool,
     aws_region: str,
 ) -> List[FlyteDirectory]:
     """Resolve one split's sensor groups and pack scenes from each group."""
@@ -1668,6 +1672,7 @@ def _pack_nuplan_snapshot_scene_dataset(
             preferred_scenario_types=preferred_scenario_types,
             image_size=image_size,
             scene_workers=scene_workers,
+            require_mission_goal=require_mission_goal,
             aws_region=aws_region,
         )
         for index in group_indices
@@ -1687,9 +1692,15 @@ def wf_pack_nuplan_snapshot_scene_dataset(
     preferred_scenario_types: List[str] = NUPLAN_SCENE_PREFERRED_TYPES,
     image_size: int = REACTIVE_CAMERA_IMAGE_SIZE,
     scene_workers: int = NUPLAN_SCENE_WORKERS,
+    require_mission_goal: bool = False,
     aws_region: str = "us-west-2",
 ) -> List[FlyteDirectory]:
-    """Pack Console-publishable 10 Hz scenes from held-out nuPlan logs."""
+    """Pack Console-publishable 10 Hz scenes from held-out nuPlan logs.
+
+    The official test logs omit the mission goal of many scenes, so goals
+    are optional by default; the route corridor is still taken from the
+    scene roadblocks and only the destination channel becomes invalid.
+    """
     return _pack_nuplan_snapshot_scene_dataset(
         snapshot_manifest=snapshot_manifest,
         datasets_bucket=datasets_bucket,
@@ -1701,5 +1712,6 @@ def wf_pack_nuplan_snapshot_scene_dataset(
         preferred_scenario_types=preferred_scenario_types,
         image_size=image_size,
         scene_workers=scene_workers,
+        require_mission_goal=require_mission_goal,
         aws_region=aws_region,
     )
