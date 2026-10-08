@@ -1966,6 +1966,73 @@ def _nuplan_local_scenarios(
     ))
 
 
+def pack_nuplan_local_scenes(
+    *,
+    data_root: str | Path,
+    map_root: str | Path,
+    sensor_root: str | Path,
+    db_files: Sequence[str | Path],
+    output_directory: str | Path,
+    source_revision: str,
+    map_version: str,
+    publication_version: str,
+    scene_count: int,
+    frames_per_scene: int,
+    preferred_scenario_types: Sequence[str] = (),
+    image_size: int = REACTIVE_CAMERA_IMAGE_SIZE,
+) -> dict[str, object]:
+    """Pack contiguous scenes from one materialized nuPlan dataset.
+
+    Scenarios come from the same builder and filter as training. Within each
+    log, scenarios whose type appears in ``preferred_scenario_types`` are
+    tried first in that order; the builder order breaks ties.
+    """
+    local_data, local_map, local_sensor, resolved_db_files = (
+        _resolve_nuplan_local_inputs(
+            data_root=data_root,
+            map_root=map_root,
+            sensor_root=sensor_root,
+            db_files=db_files,
+        )
+    )
+    _pin_nuplan_pack_thread_environment()
+    scenarios = _nuplan_local_scenarios(
+        data_root=local_data,
+        map_root=local_map,
+        sensor_root=local_sensor,
+        db_files=resolved_db_files,
+        map_version=map_version,
+    )
+    priority = {
+        scenario_type: index
+        for index, scenario_type in enumerate(preferred_scenario_types)
+    }
+    ordered = [
+        scenario
+        for _, scenario in sorted(
+            enumerate(scenarios),
+            key=lambda item: (
+                priority.get(
+                    str(getattr(item[1], "scenario_type", "")),
+                    len(priority),
+                ),
+                item[0],
+            ),
+        )
+    ]
+    return pack_nuplan_reactive_scene_partitions(
+        ordered,
+        output_directory,
+        source_revision=source_revision,
+        map_version=map_version,
+        publication_version=publication_version,
+        scene_count=scene_count,
+        frames_per_scene=frames_per_scene,
+        image_size=image_size,
+        candidate_issue=_nuplan_local_sensor_asset_issue,
+    )
+
+
 def pack_nuplan_local_dataset(
     *,
     data_root: str | Path,
