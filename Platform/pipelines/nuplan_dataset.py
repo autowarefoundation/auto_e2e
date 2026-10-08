@@ -593,6 +593,87 @@ def _validate_nuplan_pack_contract(packed: Mapping[str, Any]) -> None:
         raise ValueError("nuPlan packer omitted BEV segmentation samples")
 
 
+def _resolve_nuplan_split_sensor_plan(
+    manifest: Mapping[str, Any],
+    *,
+    datasets_bucket: str,
+    aws_region: str,
+    split: str,
+    group_count: int,
+) -> tuple[dict[int, tuple[str, ...]], dict[str, tuple[str, ...]]]:
+    """Read the official sensor inventory and DB log names of one split."""
+    from pathlib import PurePosixPath
+    from urllib.parse import urlsplit
+    import zipfile
+
+    import boto3
+
+    s3 = boto3.client("s3", region_name=aws_region)
+
+    def object_location(archive: Mapping[str, Any]) -> tuple[str, str]:
+        parsed = urlsplit(str(archive["object_uri"]))
+        bucket = parsed.netloc
+        key = parsed.path.lstrip("/")
+        if bucket != datasets_bucket or not key:
+            raise ValueError(
+                f"nuPlan {split} pack archive is outside datasets_bucket: "
+                f"{archive['archive_id']!r}"
+            )
+        return bucket, key
+
+    inventory_id = f"sensor-{split}-public_set_{split}_sensor"
+    inventory_archives = [
+        archive
+        for archive in manifest["archives"]
+        if archive["archive_id"] == inventory_id
+    ]
+    if len(inventory_archives) != 1:
+        raise ValueError(
+            f"nuPlan {split} pack requires the official {split} sensor "
+            "inventory"
+        )
+    inventory_bucket, inventory_key = object_location(
+        inventory_archives[0]
+    )
+    inventory_payload = s3.get_object(
+        Bucket=inventory_bucket,
+        Key=inventory_key,
+    )["Body"].read().decode("utf-8")
+    sensor_groups = _parse_nuplan_sensor_inventory(
+        inventory_payload,
+        split=split,
+        group_count=group_count,
+    )
+
+    database_logs: dict[str, tuple[str, ...]] = {}
+    for archive in manifest["archives"]:
+        if not _is_nuplan_split_database(archive, split):
+            continue
+        archive_id = str(archive["archive_id"])
+        bucket, key = object_location(archive)
+        with zipfile.ZipFile(
+            _S3RangeReader(
+                s3,
+                bucket=bucket,
+                key=key,
+                size=int(archive["size_bytes"]),
+                archive_id=archive_id,
+            )
+        ) as source:
+            log_names = tuple(sorted({
+                PurePosixPath(info.filename).stem
+                for info in source.infolist()
+                if not info.is_dir()
+                and PurePosixPath(info.filename).suffix == ".db"
+            }))
+        if not log_names:
+            raise ValueError(
+                f"nuPlan DB archive {archive_id!r} contains no DB logs"
+            )
+        database_logs[archive_id] = log_names
+    return sensor_groups, database_logs
+
+
 @task(
     container_image=DATA_PREP_IMAGE,
     pod_template=_data_prep_pod_template(),
@@ -1236,11 +1317,7 @@ def _pack_nuplan_snapshot_reactive_dataset_sharded(
 ) -> List[FlyteDirectory]:
     """Resolve all train logs, then map one bounded pack task per sensor group."""
     import json
-    from pathlib import Path, PurePosixPath
-    from urllib.parse import urlsplit
-    import zipfile
-
-    import boto3
+    from pathlib import Path
 
     from data_parsing.nuplan.materialization import (
         load_nuplan_snapshot_manifest,
@@ -1255,74 +1332,18 @@ def _pack_nuplan_snapshot_reactive_dataset_sharded(
     manifest = load_nuplan_snapshot_manifest(
         Path(snapshot_manifest.download()).read_bytes()
     )
-    s3 = boto3.client("s3", region_name=aws_region)
-
-    def object_location(archive: Mapping[str, Any]) -> tuple[str, str]:
-        parsed = urlsplit(str(archive["object_uri"]))
-        bucket = parsed.netloc
-        key = parsed.path.lstrip("/")
-        if bucket != datasets_bucket or not key:
-            raise ValueError(
-                "nuPlan full pack archive is outside datasets_bucket: "
-                f"{archive['archive_id']!r}"
-            )
-        return bucket, key
-
-    inventory_archives = [
-        archive
-        for archive in manifest["archives"]
-        if archive["archive_id"]
-        == "sensor-train-public_set_train_sensor"
-    ]
-    if len(inventory_archives) != 1:
-        raise ValueError(
-            "nuPlan full pack requires the official train sensor inventory"
-        )
-    inventory_bucket, inventory_key = object_location(
-        inventory_archives[0]
-    )
-    inventory_payload = s3.get_object(
-        Bucket=inventory_bucket,
-        Key=inventory_key,
-    )["Body"].read().decode("utf-8")
-    sensor_groups = _parse_nuplan_train_sensor_inventory(
-        inventory_payload
+    sensor_groups, database_logs = _resolve_nuplan_split_sensor_plan(
+        manifest,
+        datasets_bucket=datasets_bucket,
+        aws_region=aws_region,
+        split="train",
+        group_count=NUPLAN_FULL_TRAIN_GROUP_COUNT,
     )
     if sum(map(len, sensor_groups.values())) != NUPLAN_FULL_TRAIN_LOG_COUNT:
         raise ValueError(
             "nuPlan train sensor inventory no longer contains the audited "
             f"{NUPLAN_FULL_TRAIN_LOG_COUNT} logs"
         )
-
-    database_logs: dict[str, tuple[str, ...]] = {}
-    for archive in manifest["archives"]:
-        archive_id = str(archive["archive_id"])
-        if (
-            archive["component"] != "database"
-            or not archive_id.startswith("db-train_")
-        ):
-            continue
-        bucket, key = object_location(archive)
-        with zipfile.ZipFile(
-            _S3RangeReader(
-                s3,
-                bucket=bucket,
-                key=key,
-                size=int(archive["size_bytes"]),
-                archive_id=archive_id,
-            )
-        ) as source:
-            log_names = tuple(sorted({
-                PurePosixPath(info.filename).stem
-                for info in source.infolist()
-                if not info.is_dir()
-                and PurePosixPath(info.filename).suffix == ".db"
-            }))
-        if not log_names:
-            raise ValueError(
-                f"nuPlan DB archive {archive_id!r} contains no DB logs"
-            )
-        database_logs[archive_id] = log_names
 
     archive_sets, scenario_limits = _build_nuplan_train_pack_plan(
         manifest,
