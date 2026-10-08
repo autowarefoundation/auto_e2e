@@ -258,6 +258,44 @@ def _plan_partition_artifact_copies(
     return copy_sources, shards, pool_sources
 
 
+def _attach_destination_etags(
+    copy_sources: list[dict],
+    shards: list[dict],
+    destination_etags: list[str],
+) -> None:
+    if len(copy_sources) != len(destination_etags):
+        raise ValueError("copy source and destination ETag counts differ")
+    copied_by_relative = {}
+    for source, destination_etag in zip(
+        copy_sources, destination_etags, strict=True
+    ):
+        source["destination_etag"] = destination_etag
+        copied_by_relative[source["relative"]] = source
+    for shard in shards:
+        source = copied_by_relative.get(shard["name"])
+        if source is None:
+            raise ValueError(
+                f"published shard {shard['name']!r} has no copy source"
+            )
+        shard["etag"] = source["destination_etag"]
+
+
+def _planned_objects_by_relative(
+    objects_by_relative: dict[str, dict],
+    copy_sources: list[dict],
+) -> dict[str, dict]:
+    planned = dict(objects_by_relative)
+    for source in copy_sources:
+        relative = source["relative"]
+        original = objects_by_relative.get(relative)
+        if original is None:
+            raise ValueError(f"copy source {relative!r} is absent from inventory")
+        if original["content_identity"] != source["content_identity"]:
+            raise ValueError(f"copy source {relative!r} changed identity")
+        planned[relative] = source
+    return planned
+
+
 def _copy_immutable(
     s3,
     source: dict,
@@ -566,6 +604,10 @@ def publish_dataset_partition(
         published_dataset=published_dataset,
         dataset_version=dataset_version,
     )
+    planned_by_relative = _planned_objects_by_relative(
+        by_relative,
+        copy_sources,
+    )
     if (
         manifest.get("total_samples", 0)
         and manifest.get("has_world_model", False)
@@ -583,12 +625,7 @@ def publish_dataset_partition(
             ),
             copy_sources,
         ))
-    for source, destination_etag in zip(
-        copy_sources, destination_etags, strict=True
-    ):
-        source["destination_etag"] = destination_etag
-    for shard in shards:
-        shard["etag"] = by_relative[shard["name"]]["destination_etag"]
+    _attach_destination_etags(copy_sources, shards, destination_etags)
 
     pool_digest = hashlib.sha256()
     for source in pool_sources:
@@ -596,7 +633,7 @@ def publish_dataset_partition(
         pool_digest.update(b"\0")
         pool_digest.update(source["content_identity"].encode())
         pool_digest.update(b"\n")
-    geo = _geo_inventory(s3, by_relative)
+    geo = _geo_inventory(s3, planned_by_relative)
     result = {
         "schema_version": PUBLICATION_SCHEMA,
         "source_uri": source_uri.rstrip("/"),

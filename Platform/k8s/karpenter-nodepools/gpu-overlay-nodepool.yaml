@@ -1,0 +1,98 @@
+# NodePools behind the Kueue gpu-overlay-queue (flavor gpu-overlay-flavor,
+# nodeLabels workload-type=gpu-overlay). The queue and flavor are live in the
+# cluster but not yet in kueue-config/kueue-objects.yaml, so post-apply.sh does
+# not apply this file; apply it with kubectl when the queue exists.
+apiVersion: karpenter.sh/v1
+kind: NodePool
+metadata:
+  name: gpu-overlay
+  # Kueue gpu-overlay-flavor schedules overlay precompute onto this label.
+  # Only L4 types: the overlay finalizer rejects mixed GPU models.
+spec:
+  disruption:
+    budgets:
+      - nodes: 10%
+    consolidationPolicy: WhenEmpty
+    consolidateAfter: 5m
+  template:
+    metadata:
+      labels:
+        workload-type: gpu-overlay
+    spec:
+      expireAfter: 456h
+      terminationGracePeriod: 24h
+      nodeClassRef:
+        group: eks.amazonaws.com
+        kind: NodeClass
+        name: default
+      requirements:
+        - key: workload-type
+          operator: In
+          values: ["gpu-overlay"]
+        # One GPU model per overlay set: the finalizer rejects partitions
+        # whose recorded gpu_model differs.
+        - key: node.kubernetes.io/instance-type
+          operator: In
+          values: ["g6.xlarge", "g6.2xlarge", "g6.4xlarge", "g6.8xlarge", "g6.12xlarge", "g6.16xlarge", "g6.24xlarge", "g6.48xlarge", "gr6.4xlarge", "gr6.8xlarge"]
+        - key: kubernetes.io/arch
+          operator: In
+          values: ["amd64"]
+        - key: karpenter.sh/capacity-type
+          operator: In
+          values: ["on-demand", "spot"]
+      taints:
+        - key: nvidia.com/gpu
+          effect: NoSchedule
+  limits:
+    cpu: "400"
+    memory: 3200Gi
+    nodes: "20"
+    nvidia.com/gpu: "20"
+---
+apiVersion: karpenter.sh/v1
+kind: NodePool
+metadata:
+  name: gpu-overlay-reserved
+  # Prefer the g6.2xlarge reservation shared with gpu-validation.
+spec:
+  weight: 50
+  disruption:
+    budgets:
+      - nodes: 10%
+    consolidationPolicy: WhenEmpty
+    consolidateAfter: 5m
+  template:
+    metadata:
+      labels:
+        workload-type: gpu-overlay
+    spec:
+      expireAfter: 456h
+      terminationGracePeriod: 24h
+      nodeClassRef:
+        group: eks.amazonaws.com
+        kind: NodeClass
+        name: auto-e2e-gpu-validation
+      requirements:
+        - key: workload-type
+          operator: In
+          values: ["gpu-overlay"]
+        - key: node.kubernetes.io/instance-type
+          operator: In
+          values: ["g6.2xlarge"]
+        - key: kubernetes.io/arch
+          operator: In
+          values: ["amd64"]
+        - key: karpenter.sh/capacity-type
+          operator: In
+          values: ["reserved"]
+        - key: topology.kubernetes.io/zone
+          operator: In
+          values: ["us-west-2a"]
+      taints:
+        - key: nvidia.com/gpu
+          effect: NoSchedule
+  limits:
+    cpu: "8"
+    memory: 64Gi
+    nodes: "1"
+    nvidia.com/gpu: "1"
