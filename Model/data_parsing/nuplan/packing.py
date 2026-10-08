@@ -1885,6 +1885,87 @@ def _merge_nuplan_pack_partitions(
     return merged
 
 
+def _resolve_nuplan_local_inputs(
+    *,
+    data_root: str | Path,
+    map_root: str | Path,
+    sensor_root: str | Path,
+    db_files: Sequence[str | Path],
+) -> tuple[Path, Path, Path, list[Path]]:
+    """Resolve and validate one materialized nuPlan dataset layout."""
+    local_data = Path(data_root).resolve()
+    local_map = Path(map_root).resolve()
+    local_sensor = Path(sensor_root).resolve()
+    for name, path in (
+        ("data_root", local_data),
+        ("map_root", local_map),
+        ("sensor_root", local_sensor),
+    ):
+        if not path.is_dir():
+            raise FileNotFoundError(f"nuPlan {name} is not a directory: {path}")
+    resolved_db_files = [Path(path).resolve() for path in db_files]
+    if not resolved_db_files:
+        raise ValueError("nuPlan db_files must not be empty")
+    if len(set(resolved_db_files)) != len(resolved_db_files):
+        raise ValueError("nuPlan db_files contains duplicate paths")
+    db_stems = [path.stem for path in resolved_db_files]
+    if len(set(db_stems)) != len(db_stems):
+        raise ValueError("nuPlan db_files contains duplicate log names")
+    for db_path in resolved_db_files:
+        if not db_path.is_file() or db_path.suffix != ".db":
+            raise FileNotFoundError(f"nuPlan DB is missing: {db_path}")
+    return local_data, local_map, local_sensor, resolved_db_files
+
+
+def _nuplan_local_scenarios(
+    *,
+    data_root: Path,
+    map_root: Path,
+    sensor_root: Path,
+    db_files: Sequence[Path],
+    map_version: str,
+) -> list[Any]:
+    """Build every tagged scenario of local DBs with the training filter."""
+    from nuplan.planning.scenario_builder.nuplan_db.nuplan_scenario_builder import (
+        NuPlanScenarioBuilder,
+    )
+    from nuplan.planning.scenario_builder.scenario_filter import (
+        ScenarioFilter,
+    )
+    from nuplan.planning.utils.multithreading.worker_sequential import (
+        Sequential,
+    )
+
+    os.environ["NUPLAN_DATA_STORE"] = "local"
+    builder = NuPlanScenarioBuilder(
+        data_root=str(data_root),
+        map_root=str(map_root),
+        sensor_root=str(sensor_root),
+        db_files=[str(path) for path in db_files],
+        map_version=map_version,
+        include_cameras=True,
+        max_workers=1,
+        verbose=False,
+    )
+    scenario_filter = ScenarioFilter(
+        scenario_types=None,
+        scenario_tokens=None,
+        log_names=None,
+        map_names=None,
+        num_scenarios_per_type=None,
+        limit_total_scenarios=None,
+        timestamp_threshold_s=None,
+        ego_displacement_minimum_m=None,
+        expand_scenarios=False,
+        remove_invalid_goals=True,
+        shuffle=False,
+    )
+    return list(builder.get_scenarios(
+        scenario_filter,
+        Sequential(),
+    ))
+
+
 def pack_nuplan_local_dataset(
     *,
     data_root: str | Path,
@@ -1914,27 +1995,14 @@ def pack_nuplan_local_dataset(
         raise ValueError("nuPlan packing limits are invalid")
     if pack_workers <= 0:
         raise ValueError("nuPlan pack_workers must be positive")
-    local_data = Path(data_root).resolve()
-    local_map = Path(map_root).resolve()
-    local_sensor = Path(sensor_root).resolve()
-    for name, path in (
-        ("data_root", local_data),
-        ("map_root", local_map),
-        ("sensor_root", local_sensor),
-    ):
-        if not path.is_dir():
-            raise FileNotFoundError(f"nuPlan {name} is not a directory: {path}")
-    resolved_db_files = [Path(path).resolve() for path in db_files]
-    if not resolved_db_files:
-        raise ValueError("nuPlan db_files must not be empty")
-    if len(set(resolved_db_files)) != len(resolved_db_files):
-        raise ValueError("nuPlan db_files contains duplicate paths")
-    db_stems = [path.stem for path in resolved_db_files]
-    if len(set(db_stems)) != len(db_stems):
-        raise ValueError("nuPlan db_files contains duplicate log names")
-    for db_path in resolved_db_files:
-        if not db_path.is_file() or db_path.suffix != ".db":
-            raise FileNotFoundError(f"nuPlan DB is missing: {db_path}")
+    local_data, local_map, local_sensor, resolved_db_files = (
+        _resolve_nuplan_local_inputs(
+            data_root=data_root,
+            map_root=map_root,
+            sensor_root=sensor_root,
+            db_files=db_files,
+        )
+    )
     _pin_nuplan_pack_thread_environment()
 
     if pack_workers > 1:
@@ -2001,43 +2069,12 @@ def pack_nuplan_local_dataset(
             require_full_log_coverage=require_full_log_coverage,
         )
 
-    from nuplan.planning.scenario_builder.nuplan_db.nuplan_scenario_builder import (
-        NuPlanScenarioBuilder,
-    )
-    from nuplan.planning.scenario_builder.scenario_filter import (
-        ScenarioFilter,
-    )
-    from nuplan.planning.utils.multithreading.worker_sequential import (
-        Sequential,
-    )
-
-    os.environ["NUPLAN_DATA_STORE"] = "local"
-    builder = NuPlanScenarioBuilder(
-        data_root=str(local_data),
-        map_root=str(local_map),
-        sensor_root=str(local_sensor),
-        db_files=[str(path) for path in resolved_db_files],
+    scenarios = _nuplan_local_scenarios(
+        data_root=local_data,
+        map_root=local_map,
+        sensor_root=local_sensor,
+        db_files=resolved_db_files,
         map_version=map_version,
-        include_cameras=True,
-        max_workers=1,
-        verbose=False,
-    )
-    scenario_filter = ScenarioFilter(
-        scenario_types=None,
-        scenario_tokens=None,
-        log_names=None,
-        map_names=None,
-        num_scenarios_per_type=None,
-        limit_total_scenarios=None,
-        timestamp_threshold_s=None,
-        ego_displacement_minimum_m=None,
-        expand_scenarios=False,
-        remove_invalid_goals=True,
-        shuffle=False,
-    )
-    scenarios = builder.get_scenarios(
-        scenario_filter,
-        Sequential(),
     )
     return pack_nuplan_reactive_scenarios(
         scenarios,
