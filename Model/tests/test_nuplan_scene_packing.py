@@ -24,7 +24,9 @@ from data_parsing.nuplan.packing import (
     _NuPlanSceneWorkerConfig,
     _initialize_nuplan_pack_worker,
     _sample_identity,
+    nuplan_scene_episode_id,
     nuplan_scene_partition_id,
+    nuplan_scene_sample_uid,
     nuplan_static_rig_projection,
     pack_nuplan_local_scenes,
     pack_nuplan_reactive_scene_partitions,
@@ -254,15 +256,31 @@ def test_scene_partitions_are_contiguous_and_publishable(tmp_path: Path):
         assert packed_sample_tar_paths(directory) == (
             directory / shard_name,
         )
-        frames = []
+        metas = []
         with tarfile.open(directory / shard_name) as archive:
             for member in archive.getmembers():
                 if not member.name.endswith(".meta.json"):
                     continue
                 stream = archive.extractfile(member)
                 assert stream is not None
-                frames.append(json.loads(stream.read())["frame_idx"])
-        assert frames == [0, 2, 4, 6]
+                meta = json.loads(stream.read())
+                assert member.name == f"{meta['sample_uid']}.meta.json"
+                metas.append(meta)
+        episode_id = nuplan_scene_episode_id(partition_id)
+        assert [meta["frame_idx"] for meta in metas] == [0, 1, 2, 3]
+        assert [meta["source_iteration"] for meta in metas] == [0, 2, 4, 6]
+        assert [meta["sample_uid"] for meta in metas] == [
+            f"nuplan-v1-{episode_id}-f{frame:06d}" for frame in range(4)
+        ]
+        assert {meta["episode_id"] for meta in metas} == {episode_id}
+        assert metas[0]["source_sample_uid"] == _sample_identity(
+            next(
+                scenario
+                for scenario in scenarios
+                if nuplan_scene_partition_id(scenario) == partition_id
+            )
+        )[0]
+        assert manifest["has_gps"] is False
 
         objects = [
             {
@@ -583,7 +601,7 @@ def test_scene_workflow_binds_the_shared_scene_pack_task():
         == "require_mission_goal"
     )
     assert task.metadata.cache_version == (
-        "nuplan-scene-pack-v2-manifest-v11"
+        "nuplan-scene-pack-v3-manifest-v11"
     )
     assert task.metadata.retries == 1
     assert task.python_interface.inputs["archive_ids"] is not None
@@ -690,3 +708,131 @@ def test_parallel_scene_workers_receive_the_goal_policy(
     )
 
     assert seen == [False]
+
+
+def test_scene_sample_uids_follow_the_console_episode_frame_layout():
+    assert nuplan_scene_sample_uid("nuplan-398cd2903ae3a6e9", 12) == (
+        "nuplan-v1-398cd2903ae3a6e9-f000012"
+    )
+    assert nuplan_scene_episode_id("nuplan-398cd2903ae3a6e9") == (
+        "398cd2903ae3a6e9"
+    )
+    with pytest.raises(ValueError, match="partition id"):
+        nuplan_scene_episode_id("kitscenes-0001")
+    with pytest.raises(ValueError, match="non-negative"):
+        nuplan_scene_sample_uid("nuplan-398cd2903ae3a6e9", -1)
+
+
+def _fake_geospatial(scenario: SimpleNamespace, iteration: int):
+    lat = 42.35 + 1e-5 * iteration
+    pose = {
+        "latitude_deg": lat,
+        "longitude_deg": -71.05,
+        "heading_deg_cw_from_north": 90.0,
+        "timestamp_ns": 1_000_000_000 + iteration * 50_000_000,
+        "gps_accuracy_m": float("nan"),
+    }
+    gps_future = np.tile([[lat, -71.05]], (65, 1))
+    return pose, gps_future
+
+
+def test_scene_partitions_publish_wgs84_poses_and_episode_paths(
+    tmp_path: Path,
+):
+    scenarios = [
+        _scene_scenario(f"log-{index}", f"0c{index:02d}")
+        for index in range(5)
+    ]
+
+    summary = _pack(
+        scenarios,
+        tmp_path / "output",
+        scene_count=5,
+        frames_per_scene=24,
+        frame_geospatial=_fake_geospatial,
+    )
+
+    results = []
+    for scenario in scenarios:
+        partition_id = nuplan_scene_partition_id(scenario)
+        episode_id = nuplan_scene_episode_id(partition_id)
+        directory = tmp_path / "output" / "partitions" / partition_id
+        manifest = json.loads((directory / "manifest.json").read_bytes())
+        assert manifest["has_gps"] is True
+        assert manifest["geospatial"]["summary"]["sample_pose_count"] == 24
+        path = np.frombuffer(
+            (directory / "geo" / "episode_paths" / f"{episode_id}.f64")
+            .read_bytes(),
+            dtype="<f8",
+        ).reshape(-1, 4)
+        # The first and last ten frames are excluded from published paths.
+        assert path.shape == (4, 4)
+        np.testing.assert_allclose(path[0, 0], 42.35 + 1e-5 * 20)
+        shard_name = manifest["shard_names"][0]
+        with tarfile.open(directory / shard_name) as archive:
+            names = set(archive.getnames())
+        uid = nuplan_scene_sample_uid(partition_id, 3)
+        assert {f"{uid}.pose.npy", f"{uid}.gps.npy"} <= names
+
+        objects = [
+            {
+                "relative": str(file.relative_to(directory)),
+                "key": f"source/{file.relative_to(directory)}",
+                "size": file.stat().st_size,
+                "content_identity": f"identity-{file.name}",
+            }
+            for file in sorted(directory.rglob("*"))
+            if file.is_file()
+        ]
+        copies, shards, _ = _plan_partition_artifact_copies(
+            objects,
+            manifest,
+            published_dataset="nuplan-test",
+            dataset_version="v1.0",
+        )
+        assert f"geo/episode_paths/{episode_id}.f64" in {
+            copy["relative"] for copy in copies
+        }
+        results.append({
+            "schema_version": PUBLICATION_SCHEMA,
+            "source_uri": f"s3://artifacts/{partition_id}",
+            "source_manifest_sha256": "0" * 64,
+            "dataset_version": "v1.0",
+            "manifest": manifest,
+            "rig": json.loads(
+                (directory / "rig" / "projection.json").read_bytes()
+            ),
+            "shards": [{**shard, "etag": '"etag"'} for shard in shards],
+            "pool": {"object_count": 0, "byte_size": 0, "digest": "0"},
+            "geo": {
+                "privacy": manifest["geospatial"]["summary"]["privacy"],
+                "source_coordinate_dtype": "float32",
+                "stored_coordinate_dtype": "float64",
+                "timestamp_dtype": "int64_ns",
+                "gps_accuracy_available": False,
+                "sample_pose_count": 24,
+                "sample_pose_source": None,
+                "episode_paths": [{
+                    "filename": f"{episode_id}.f64",
+                    "point_count": 4,
+                }],
+                "cells": [{
+                    "lat_cell": 4235,
+                    "lon_cell": -7105,
+                    "sample_count": 4,
+                    "episode_count": 1,
+                }],
+            },
+        })
+
+    published, _, heatmap = merge_partition_results(
+        results,
+        dataset="nuplan-test",
+        version="v1.0",
+    )
+    assert summary["scene_count"] == 5
+    assert published["has_gps"] is True
+    assert published["episodes"] == 5
+    assert published["geo"]["sample_pose_count"] == 120
+    assert heatmap is not None
+    assert len(heatmap["features"]) == 1
