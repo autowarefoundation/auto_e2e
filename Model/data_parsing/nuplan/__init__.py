@@ -14,7 +14,11 @@ from .packing import (
     load_nuplan_camera_bundle,
     load_nuplan_lidar_observability,
     nuplan_reactive_sample_members,
+    nuplan_scene_partition_id,
+    nuplan_static_rig_projection,
     pack_nuplan_local_dataset,
+    pack_nuplan_local_scenes,
+    pack_nuplan_reactive_scene_partitions,
     pack_nuplan_reactive_scenarios,
 )
 from .targets import (
@@ -42,6 +46,10 @@ __all__ = [
     "load_nuplan_lidar_observability",
     "nuplan_reactive_sample_members",
     "nuplan_reactive_target_members",
+    "nuplan_scene_partition_id",
+    "nuplan_static_rig_projection",
     "pack_nuplan_local_dataset",
+    "pack_nuplan_local_scenes",
+    "pack_nuplan_reactive_scene_partitions",
     "pack_nuplan_reactive_scenarios",
 ]
