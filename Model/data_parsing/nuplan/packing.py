@@ -66,6 +66,7 @@ NUPLAN_HISTORY_CAMERA_SPREAD_MAX_US = (
 NUPLAN_CAMERA_VISIBILITY_HEIGHTS_M = (-4.0, -2.0, 0.0, 2.0)
 NUPLAN_RECTIFICATION_POLICY_VERSION = "nuplan_rectified_pinhole_v1"
 NUPLAN_PACK_MANIFEST_VERSION = "nuplan_reactive_manifest_v11"
+NUPLAN_DATASET_ID = "nuplan/nuplan-v1.1"
 _NUPLAN_MANIFEST_INVARIANT_KEYS = (
     "bev_taxonomy_version",
     "camera_order",
@@ -2231,8 +2232,53 @@ def pack_nuplan_reactive_scenarios(
         group_uid for _, group_uid in accepted
     })
     manifest: dict[str, object] = {
+        **_nuplan_shard_contract_fields(
+            image_size=image_size,
+            map_version=map_version,
+            source_revision=source_revision,
+        ),
         "bev_segmentation_count": len(accepted),
         "bev_statistics_count": len(accepted),
+        "max_camera_time_offset_us": max(
+            accepted_camera_time_offsets_us,
+            default=0,
+        ),
+        "max_history_camera_time_offset_us": max(
+            accepted_history_time_offsets_us,
+            default=0,
+        ),
+        "distinct_history_frame_count": min(
+            accepted_distinct_history_frame_counts,
+            default=0,
+        ),
+        "prefiltered_count": len(prefiltered),
+        "prefiltered_samples": prefiltered,
+        "rejected_samples": rejected,
+        "rejection_count": len(rejected),
+        "rejection_fraction": rejection_fraction,
+        "sample_uid_digest": _sample_uid_digest(
+            sample_uid for sample_uid, _ in accepted
+        ),
+        "shard_names": shard_names,
+        "shard_sample_counts": shard_sample_counts,
+        "shard_sha256": shard_hashes,
+        "split_group_count": len(split_group_uids),
+        "split_group_uids": split_group_uids,
+        "total_samples": len(accepted),
+        "trajectory_xy_count": len(accepted),
+    }
+    _write_nuplan_manifest_atomic(output, manifest)
+    return manifest
+
+
+def _nuplan_shard_contract_fields(
+    *,
+    image_size: int,
+    map_version: str,
+    source_revision: str,
+) -> dict[str, object]:
+    """Return the sample-ABI contract shared by every nuPlan shard manifest."""
+    return {
         "bev_taxonomy_version": BEV_SEGMENTATION_TAXONOMY_VERSION,
         "camera_order": list(NUPLAN_CAMERA_CHANNELS),
         "camera_slots": list(NUPLAN_CAMERA_SLOTS),
@@ -2240,7 +2286,7 @@ def pack_nuplan_reactive_scenarios(
             NUPLAN_CAMERA_VISIBILITY_HEIGHTS_M
         ),
         "contracts": contract_versions(),
-        "dataset": "nuplan/nuplan-v1.1",
+        "dataset": NUPLAN_DATASET_ID,
         "dataset_version": source_revision,
         "geometry_type": "rectified_pinhole",
         "has_bev_segmentation": True,
@@ -2259,28 +2305,11 @@ def pack_nuplan_reactive_scenarios(
         "image_size": image_size,
         "map_context_channels": 14,
         "map_version": map_version,
-        "max_camera_time_offset_us": max(
-            accepted_camera_time_offsets_us,
-            default=0,
-        ),
-        "max_history_camera_time_offset_us": max(
-            accepted_history_time_offsets_us,
-            default=0,
-        ),
-        "distinct_history_frame_count": min(
-            accepted_distinct_history_frame_counts,
-            default=0,
-        ),
         "navigation_geometry": (
             AUTOE2E_NAVIGATION_GEOMETRY.contract()
         ),
         "num_views": len(NUPLAN_CAMERA_CHANNELS),
         "projection_scope": "per_sample",
-        "prefiltered_count": len(prefiltered),
-        "prefiltered_samples": prefiltered,
-        "rejected_samples": rejected,
-        "rejection_count": len(rejected),
-        "rejection_fraction": rejection_fraction,
         "route_channels": 2,
         "temporal_frame_interval_us": (
             REACTIVE_BEVFORMER_FRAME_INTERVAL_US
@@ -2288,21 +2317,15 @@ def pack_nuplan_reactive_scenarios(
         "temporal_frame_offsets": list(
             REACTIVE_BEVFORMER_FRAME_OFFSETS
         ),
-        "sample_uid_digest": hashlib.sha256(
-            "\n".join(
-                sorted(sample_uid for sample_uid, _ in accepted)
-            ).encode("ascii")
-        ).hexdigest(),
         "schema_version": NUPLAN_PACK_MANIFEST_VERSION,
-        "shard_names": shard_names,
-        "shard_sample_counts": shard_sample_counts,
-        "shard_sha256": shard_hashes,
         "source_revision": source_revision,
-        "split_group_count": len(split_group_uids),
-        "split_group_uids": split_group_uids,
         "split_policy": "log_level_hash_bucket",
-        "total_samples": len(accepted),
-        "trajectory_xy_count": len(accepted),
     }
-    _write_nuplan_manifest_atomic(output, manifest)
-    return manifest
+
+
+def _sample_uid_digest(sample_uids: Iterable[str]) -> str:
+    return hashlib.sha256(
+        "\n".join(sorted(sample_uids)).encode("ascii")
+    ).hexdigest()
+
+
