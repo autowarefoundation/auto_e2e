@@ -18,6 +18,8 @@
 [![LinkedIn](https://img.shields.io/badge/LinkedIn-0077B5?style=for-the-badge&logo=linkedin&logoColor=white)](https://www.linkedin.com/company/the-autoware-foundation)
 [![YouTube](https://img.shields.io/badge/YouTube-FF0000?style=for-the-badge&logo=youtube&logoColor=white)](https://www.youtube.com/@autowarefoundation)
 [![Website](https://img.shields.io/badge/website-000000?style=for-the-badge&logo=About.me&logoColor=white)](https://autoware.org/)
+[![Hugging Face](https://img.shields.io/badge/Hugging%20Face-AutoE2E-FFD21E?style=for-the-badge&logo=huggingface&logoColor=black)](https://huggingface.co/AutowareFoundation/auto_e2e)
+[![Hugging Face downloads](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fhuggingface.co%2Fapi%2Fmodels%2FAutowareFoundation%2Fauto_e2e&query=%24.downloads&label=downloads%2Fmonth&logo=huggingface&color=FFD21E&style=for-the-badge)](https://huggingface.co/AutowareFoundation/auto_e2e)
 </div>
 
 <div align="center">
@@ -25,6 +27,18 @@
 ⭐ Star us on GitHub — your support motivates us a lot!
 
 </div>
+
+## Pretrained checkpoints on Hugging Face
+
+The [AutoE2E v1.0 release on Hugging Face](https://huggingface.co/AutowareFoundation/auto_e2e)
+provides two trajectory-planning checkpoints with their evaluation reports:
+
+- **nuPlan Epoch 5**, the baseline model trained on nuPlan;
+- **KITScenes Epoch 5**, the same model fine-tuned on KITScenes-Multimodal.
+
+The model card lists ADE/FDE on the KITScenes validation and official test splits and
+includes a loading example. The KITScenes validation shards used by the community
+benchmark are published in the same repository.
 
 ## DataModelConsole dashboard
 
