@@ -398,6 +398,201 @@ def _build_nuplan_train_pack_plan(
     return archive_sets, limits
 
 
+def _validate_datasets_bucket(datasets_bucket: str) -> None:
+    if (
+        not datasets_bucket
+        or datasets_bucket.startswith("s3://")
+        or "/" in datasets_bucket
+    ):
+        raise ValueError("datasets_bucket must be one S3 bucket name")
+
+
+class _MaterializedNuPlanSnapshot(NamedTuple):
+    manifest: dict[str, Any]
+    manifest_bytes: bytes
+    selected: list[dict[str, Any]]
+    extracted: list[dict[str, object]]
+    materialized: Any
+    workspace: Any
+
+
+def _materialize_nuplan_snapshot(
+    snapshot_manifest: FlyteFile,
+    *,
+    datasets_bucket: str,
+    archive_ids: Optional[List[str]],
+    aws_region: str,
+) -> _MaterializedNuPlanSnapshot:
+    """Download, verify, and extract selected immutable snapshot archives."""
+    import tempfile
+    from pathlib import Path
+    from urllib.parse import urlsplit
+
+    import boto3
+    from boto3.s3.transfer import TransferConfig
+
+    from data_parsing.nuplan.materialization import (
+        discover_materialized_nuplan,
+        extract_nuplan_archive,
+        load_nuplan_snapshot_manifest,
+        select_snapshot_archives,
+        verify_archive_file,
+    )
+
+    _validate_datasets_bucket(datasets_bucket)
+    manifest_bytes = Path(snapshot_manifest.download()).read_bytes()
+    manifest = load_nuplan_snapshot_manifest(manifest_bytes)
+    selected = select_snapshot_archives(manifest, archive_ids)
+    workspace = Path(tempfile.mkdtemp(prefix="nuplan-snapshot-pack-"))
+    dataset_root = workspace / "dataset"
+    archive_root = workspace / "archives"
+    archive_root.mkdir(parents=True)
+    s3 = boto3.client("s3", region_name=aws_region)
+    transfer_config = TransferConfig(
+        multipart_threshold=64 * 1024 * 1024,
+        multipart_chunksize=64 * 1024 * 1024,
+        max_concurrency=16,
+        use_threads=True,
+    )
+    extracted: list[dict[str, object]] = []
+    for archive in selected:
+        parsed = urlsplit(str(archive["object_uri"]))
+        bucket = parsed.netloc
+        key = parsed.path.lstrip("/")
+        if bucket != datasets_bucket:
+            raise ValueError(
+                "nuPlan snapshot object is outside datasets_bucket: "
+                f"{archive['archive_id']!r}"
+            )
+        head = s3.head_object(Bucket=bucket, Key=key)
+        if int(head["ContentLength"]) != int(archive["size_bytes"]):
+            raise ValueError(
+                "nuPlan snapshot object size changed for "
+                f"{archive['archive_id']!r}"
+            )
+        archive_path = (
+            archive_root
+            / str(archive["archive_id"])
+            / str(archive["filename"])
+        )
+        archive_path.parent.mkdir(parents=True)
+        s3.download_file(
+            bucket,
+            key,
+            str(archive_path),
+            Config=transfer_config,
+        )
+        verify_archive_file(archive_path, archive)
+        stats = extract_nuplan_archive(
+            archive_path,
+            archive,
+            dataset_root,
+            map_version=str(manifest["map_version"]),
+        )
+        archive_path.unlink()
+        extracted.append({
+            "archive_id": archive["archive_id"],
+            **stats,
+        })
+
+    return _MaterializedNuPlanSnapshot(
+        manifest=manifest,
+        manifest_bytes=manifest_bytes,
+        selected=selected,
+        extracted=extracted,
+        materialized=discover_materialized_nuplan(dataset_root),
+        workspace=workspace,
+    )
+
+
+def _validate_nuplan_pack_contract(packed: Mapping[str, Any]) -> None:
+    """Reject packer output that differs from the Reactive sample contract."""
+    if (
+        packed.get("bev_taxonomy_version")
+        != BEV_SEGMENTATION_TAXONOMY_VERSION
+    ):
+        raise ValueError("nuPlan packer did not emit the current BEV taxonomy")
+    if packed.get("schema_version") != NUPLAN_PACK_MANIFEST_VERSION:
+        raise ValueError(
+            "nuPlan packer did not emit manifest schema "
+            f"{NUPLAN_PACK_MANIFEST_VERSION}"
+        )
+    if (
+        packed.get("front_camera_index") != REACTIVE_FRONT_CAMERA_INDEX
+        or packed.get("front_camera_image_size")
+        != REACTIVE_FRONT_CAMERA_IMAGE_SIZE
+        or packed.get("front_camera_fpn_image_size")
+        != REACTIVE_CAMERA_IMAGE_SIZE
+    ):
+        raise ValueError(
+            "nuPlan packer did not emit the front camera contract"
+        )
+    if (
+        packed.get("temporal_frame_offsets")
+        != list(REACTIVE_BEVFORMER_FRAME_OFFSETS)
+        or packed.get("temporal_frame_interval_us")
+        != REACTIVE_BEVFORMER_FRAME_INTERVAL_US
+    ):
+        raise ValueError(
+            "nuPlan packer did not emit the T8 temporal contract"
+        )
+    max_camera_time_offset_us = packed.get(
+        "max_camera_time_offset_us"
+    )
+    if (
+        not isinstance(max_camera_time_offset_us, int)
+        or isinstance(max_camera_time_offset_us, bool)
+        or not 0
+        <= max_camera_time_offset_us
+        <= NUPLAN_CAMERA_SYNC_TOLERANCE_US
+    ):
+        raise ValueError(
+            "nuPlan packer exceeded the current camera sync tolerance"
+        )
+    max_history_camera_time_offset_us = packed.get(
+        "max_history_camera_time_offset_us"
+    )
+    if (
+        packed.get("history_fallback_max_offset_us")
+        != NUPLAN_HISTORY_FALLBACK_MAX_OFFSET_US
+        or packed.get("history_camera_spread_max_us")
+        != NUPLAN_HISTORY_CAMERA_SPREAD_MAX_US
+        or not isinstance(max_history_camera_time_offset_us, int)
+        or isinstance(max_history_camera_time_offset_us, bool)
+        or not 0
+        <= max_history_camera_time_offset_us
+        <= NUPLAN_HISTORY_FALLBACK_MAX_OFFSET_US
+        or packed.get("distinct_history_frame_count")
+        != REACTIVE_BEVFORMER_HISTORY_FRAMES
+    ):
+        raise ValueError(
+            "nuPlan packer exceeded the T8 history timing contract"
+        )
+    packed_counts = {
+        name: packed.get(name)
+        for name in (
+            "bev_statistics_count",
+            "bev_segmentation_count",
+            "total_samples",
+        )
+    }
+    if any(
+        not isinstance(value, int) or isinstance(value, bool)
+        for value in packed_counts.values()
+    ):
+        raise ValueError("nuPlan packer emitted invalid sample counts")
+    if (
+        packed_counts["bev_statistics_count"]
+        != packed_counts["total_samples"]
+    ):
+        raise ValueError("nuPlan packer omitted BEV v3 sample statistics")
+    if (
+        packed_counts["bev_segmentation_count"]
+        != packed_counts["total_samples"]
+    ):
+        raise ValueError("nuPlan packer omitted BEV segmentation samples")
+
+
 @task(
     container_image=DATA_PREP_IMAGE,
     pod_template=_data_prep_pod_template(),
@@ -951,28 +1146,10 @@ def pack_nuplan_snapshot_reactive_dataset(
 ) -> FlyteDirectory:
     """Materialize an immutable raw snapshot and emit BEV v3 shards."""
     import hashlib
-    import tempfile
-    from pathlib import Path
-    from urllib.parse import urlsplit
-
-    import boto3
-    from boto3.s3.transfer import TransferConfig
 
     from data_parsing.nuplan import pack_nuplan_local_dataset
-    from data_parsing.nuplan.materialization import (
-        discover_materialized_nuplan,
-        extract_nuplan_archive,
-        load_nuplan_snapshot_manifest,
-        select_snapshot_archives,
-        verify_archive_file,
-    )
 
-    if (
-        not datasets_bucket
-        or datasets_bucket.startswith("s3://")
-        or "/" in datasets_bucket
-    ):
-        raise ValueError("datasets_bucket must be one S3 bucket name")
+    _validate_datasets_bucket(datasets_bucket)
     if limit_total_scenarios < 0:
         raise ValueError("limit_total_scenarios must be non-negative")
     if (
@@ -986,64 +1163,19 @@ def pack_nuplan_snapshot_reactive_dataset(
     if not 0.0 <= max_rejection_fraction < 1.0:
         raise ValueError("max_rejection_fraction must be in [0, 1)")
 
-    manifest_bytes = Path(snapshot_manifest.download()).read_bytes()
-    manifest = load_nuplan_snapshot_manifest(manifest_bytes)
-    selected = select_snapshot_archives(manifest, archive_ids)
-    workspace = Path(tempfile.mkdtemp(prefix="nuplan-snapshot-pack-"))
-    dataset_root = workspace / "dataset"
-    archive_root = workspace / "archives"
-    output = workspace / "shards"
-    archive_root.mkdir(parents=True)
-    output.mkdir()
-    s3 = boto3.client("s3", region_name=aws_region)
-    transfer_config = TransferConfig(
-        multipart_threshold=64 * 1024 * 1024,
-        multipart_chunksize=64 * 1024 * 1024,
-        max_concurrency=16,
-        use_threads=True,
+    snapshot = _materialize_nuplan_snapshot(
+        snapshot_manifest,
+        datasets_bucket=datasets_bucket,
+        archive_ids=archive_ids,
+        aws_region=aws_region,
     )
-    extracted: list[dict[str, object]] = []
-    for archive in selected:
-        parsed = urlsplit(str(archive["object_uri"]))
-        bucket = parsed.netloc
-        key = parsed.path.lstrip("/")
-        if bucket != datasets_bucket:
-            raise ValueError(
-                "nuPlan snapshot object is outside datasets_bucket: "
-                f"{archive['archive_id']!r}"
-            )
-        head = s3.head_object(Bucket=bucket, Key=key)
-        if int(head["ContentLength"]) != int(archive["size_bytes"]):
-            raise ValueError(
-                "nuPlan snapshot object size changed for "
-                f"{archive['archive_id']!r}"
-            )
-        archive_path = (
-            archive_root
-            / str(archive["archive_id"])
-            / str(archive["filename"])
-        )
-        archive_path.parent.mkdir(parents=True)
-        s3.download_file(
-            bucket,
-            key,
-            str(archive_path),
-            Config=transfer_config,
-        )
-        verify_archive_file(archive_path, archive)
-        stats = extract_nuplan_archive(
-            archive_path,
-            archive,
-            dataset_root,
-            map_version=str(manifest["map_version"]),
-        )
-        archive_path.unlink()
-        extracted.append({
-            "archive_id": archive["archive_id"],
-            **stats,
-        })
-
-    materialized = discover_materialized_nuplan(dataset_root)
+    manifest = snapshot.manifest
+    manifest_bytes = snapshot.manifest_bytes
+    selected = snapshot.selected
+    extracted = snapshot.extracted
+    materialized = snapshot.materialized
+    output = snapshot.workspace / "shards"
+    output.mkdir()
     pack_workers = _nuplan_pack_worker_count(
         len(materialized.db_files),
         limit_total_scenarios,
@@ -1062,90 +1194,7 @@ def pack_nuplan_snapshot_reactive_dataset(
         max_rejection_fraction=max_rejection_fraction,
         pack_workers=pack_workers,
     )
-    if (
-        packed.get("bev_taxonomy_version")
-        != BEV_SEGMENTATION_TAXONOMY_VERSION
-    ):
-        raise ValueError("nuPlan packer did not emit the current BEV taxonomy")
-    if packed.get("schema_version") != NUPLAN_PACK_MANIFEST_VERSION:
-        raise ValueError(
-            "nuPlan packer did not emit manifest schema "
-            f"{NUPLAN_PACK_MANIFEST_VERSION}"
-        )
-    if (
-        packed.get("front_camera_index") != REACTIVE_FRONT_CAMERA_INDEX
-        or packed.get("front_camera_image_size")
-        != REACTIVE_FRONT_CAMERA_IMAGE_SIZE
-        or packed.get("front_camera_fpn_image_size")
-        != image_size
-    ):
-        raise ValueError(
-            "nuPlan packer did not emit the front camera contract"
-        )
-    if (
-        packed.get("temporal_frame_offsets")
-        != list(REACTIVE_BEVFORMER_FRAME_OFFSETS)
-        or packed.get("temporal_frame_interval_us")
-        != REACTIVE_BEVFORMER_FRAME_INTERVAL_US
-    ):
-        raise ValueError(
-            "nuPlan packer did not emit the T8 temporal contract"
-        )
-    max_camera_time_offset_us = packed.get(
-        "max_camera_time_offset_us"
-    )
-    if (
-        not isinstance(max_camera_time_offset_us, int)
-        or isinstance(max_camera_time_offset_us, bool)
-        or not 0
-        <= max_camera_time_offset_us
-        <= NUPLAN_CAMERA_SYNC_TOLERANCE_US
-    ):
-        raise ValueError(
-            "nuPlan packer exceeded the current camera sync tolerance"
-        )
-    max_history_camera_time_offset_us = packed.get(
-        "max_history_camera_time_offset_us"
-    )
-    if (
-        packed.get("history_fallback_max_offset_us")
-        != NUPLAN_HISTORY_FALLBACK_MAX_OFFSET_US
-        or packed.get("history_camera_spread_max_us")
-        != NUPLAN_HISTORY_CAMERA_SPREAD_MAX_US
-        or not isinstance(max_history_camera_time_offset_us, int)
-        or isinstance(max_history_camera_time_offset_us, bool)
-        or not 0
-        <= max_history_camera_time_offset_us
-        <= NUPLAN_HISTORY_FALLBACK_MAX_OFFSET_US
-        or packed.get("distinct_history_frame_count")
-        != REACTIVE_BEVFORMER_HISTORY_FRAMES
-    ):
-        raise ValueError(
-            "nuPlan packer exceeded the T8 history timing contract"
-        )
-    packed_counts = {
-        name: packed.get(name)
-        for name in (
-            "bev_statistics_count",
-            "bev_segmentation_count",
-            "total_samples",
-        )
-    }
-    if any(
-        not isinstance(value, int) or isinstance(value, bool)
-        for value in packed_counts.values()
-    ):
-        raise ValueError("nuPlan packer emitted invalid sample counts")
-    if (
-        packed_counts["bev_statistics_count"]
-        != packed_counts["total_samples"]
-    ):
-        raise ValueError("nuPlan packer omitted BEV v3 sample statistics")
-    if (
-        packed_counts["bev_segmentation_count"]
-        != packed_counts["total_samples"]
-    ):
-        raise ValueError("nuPlan packer omitted BEV segmentation samples")
+    _validate_nuplan_pack_contract(packed)
 
     packed.update({
         "raw_archive_ids": [
