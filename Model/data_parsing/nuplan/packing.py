@@ -159,6 +159,7 @@ class _NuPlanSceneWorkerConfig:
     frames_per_scene: int
     preferred_scenario_types: tuple[str, ...]
     image_size: int
+    require_mission_goal: bool = True
 
 
 class _NuPlanNoScenariosError(ValueError):
@@ -1939,8 +1940,14 @@ def _nuplan_local_scenarios(
     sensor_root: Path,
     db_files: Sequence[Path],
     map_version: str,
+    require_mission_goal: bool = True,
 ) -> list[Any]:
-    """Build every tagged scenario of local DBs with the training filter."""
+    """Build every tagged scenario of local DBs with the training filter.
+
+    ``require_mission_goal`` maps to the devkit ``remove_invalid_goals``
+    filter. The route corridor comes from scene roadblock ids and does not
+    depend on the goal; only the destination channel does.
+    """
     from nuplan.planning.scenario_builder.nuplan_db.nuplan_scenario_builder import (
         NuPlanScenarioBuilder,
     )
@@ -1972,13 +1979,46 @@ def _nuplan_local_scenarios(
         timestamp_threshold_s=None,
         ego_displacement_minimum_m=None,
         expand_scenarios=False,
-        remove_invalid_goals=True,
+        remove_invalid_goals=require_mission_goal,
         shuffle=False,
     )
     return list(builder.get_scenarios(
         scenario_filter,
         Sequential(),
     ))
+
+
+def _order_nuplan_scene_candidates(
+    scenarios: Sequence[Any],
+    *,
+    preferred_scenario_types: Sequence[str],
+    prefer_mission_goal: bool,
+) -> list[Any]:
+    """Order one log's scenarios for scene packing.
+
+    Scenarios that keep a mission goal come first when goals are optional, so
+    the destination channel stays valid whenever the log provides it. The
+    preferred scenario types and then the builder order break ties.
+    """
+    priority = {
+        scenario_type: index
+        for index, scenario_type in enumerate(preferred_scenario_types)
+    }
+
+    def key(item: tuple[int, Any]) -> tuple[int, int, int]:
+        index, scenario = item
+        goal_rank = (
+            int(scenario.get_mission_goal() is None)
+            if prefer_mission_goal
+            else 0
+        )
+        type_rank = priority.get(
+            str(getattr(scenario, "scenario_type", "")),
+            len(priority),
+        )
+        return goal_rank, type_rank, index
+
+    return [scenario for _, scenario in sorted(enumerate(scenarios), key=key)]
 
 
 def pack_nuplan_local_scenes(
@@ -1996,6 +2036,7 @@ def pack_nuplan_local_scenes(
     preferred_scenario_types: Sequence[str] = (),
     image_size: int = REACTIVE_CAMERA_IMAGE_SIZE,
     scene_workers: int = 1,
+    require_mission_goal: bool = True,
 ) -> dict[str, object]:
     """Pack contiguous scenes from one materialized nuPlan dataset.
 
@@ -2003,7 +2044,9 @@ def pack_nuplan_local_scenes(
     log, scenarios whose type appears in ``preferred_scenario_types`` are
     tried first in that order; the builder order breaks ties. With more than
     one worker, logs are packed in parallel in sorted order and later logs
-    only replace logs that produced no valid scene.
+    only replace logs that produced no valid scene. The official nuPlan test
+    logs omit the mission goal of many scenes, so scene packing there passes
+    ``require_mission_goal=False`` and keeps the destination channel invalid.
     """
     local_data, local_map, local_sensor, resolved_db_files = (
         _resolve_nuplan_local_inputs(
@@ -2031,6 +2074,7 @@ def pack_nuplan_local_scenes(
             preferred_scenario_types=tuple(preferred_scenario_types),
             image_size=image_size,
             scene_workers=scene_workers,
+            require_mission_goal=require_mission_goal,
         )
     scenarios = _nuplan_local_scenarios(
         data_root=local_data,
@@ -2038,24 +2082,13 @@ def pack_nuplan_local_scenes(
         sensor_root=local_sensor,
         db_files=resolved_db_files,
         map_version=map_version,
+        require_mission_goal=require_mission_goal,
     )
-    priority = {
-        scenario_type: index
-        for index, scenario_type in enumerate(preferred_scenario_types)
-    }
-    ordered = [
-        scenario
-        for _, scenario in sorted(
-            enumerate(scenarios),
-            key=lambda item: (
-                priority.get(
-                    str(getattr(item[1], "scenario_type", "")),
-                    len(priority),
-                ),
-                item[0],
-            ),
-        )
-    ]
+    ordered = _order_nuplan_scene_candidates(
+        scenarios,
+        preferred_scenario_types=preferred_scenario_types,
+        prefer_mission_goal=not require_mission_goal,
+    )
     return pack_nuplan_reactive_scene_partitions(
         ordered,
         output_directory,
@@ -2087,6 +2120,7 @@ def _pack_nuplan_scene_log(
             frames_per_scene=config.frames_per_scene,
             preferred_scenario_types=config.preferred_scenario_types,
             image_size=config.image_size,
+            require_mission_goal=config.require_mission_goal,
         )
     except ValueError as error:
         return {
@@ -2111,6 +2145,7 @@ def _pack_nuplan_local_scenes_parallel(
     preferred_scenario_types: tuple[str, ...],
     image_size: int,
     scene_workers: int,
+    require_mission_goal: bool,
 ) -> dict[str, object]:
     if scene_count <= 0 or frames_per_scene <= 0:
         raise ValueError("nuPlan scene packing limits are invalid")
@@ -2147,6 +2182,7 @@ def _pack_nuplan_local_scenes_parallel(
                     frames_per_scene=frames_per_scene,
                     preferred_scenario_types=preferred_scenario_types,
                     image_size=image_size,
+                    require_mission_goal=require_mission_goal,
                 )
                 for db_file in batch
             ]
