@@ -67,6 +67,12 @@ NUPLAN_CAMERA_VISIBILITY_HEIGHTS_M = (-4.0, -2.0, 0.0, 2.0)
 NUPLAN_RECTIFICATION_POLICY_VERSION = "nuplan_rectified_pinhole_v1"
 NUPLAN_PACK_MANIFEST_VERSION = "nuplan_reactive_manifest_v11"
 NUPLAN_DATASET_ID = "nuplan/nuplan-v1.1"
+# nuPlan LiDAR point clouds arrive at 20 Hz; every second iteration gives the
+# 10 Hz cadence used by trajectory targets and Console playback.
+NUPLAN_SCENE_FRAME_STRIDE = 2
+NUPLAN_SCENE_FRAME_INTERVAL_US = 100_000
+NUPLAN_SCENE_PARTITION_SCHEMA_VERSION = "nuplan_scene_partition_v1"
+NUPLAN_SCENE_SET_SCHEMA_VERSION = "nuplan_scene_set_v1"
 # Calibration matrices map the rear-axle ego frame; camera centres sit about
 # 1.5 m above its origin, so the road plane is z = 0.
 NUPLAN_RIG_REFERENCE_FRAME = "nuplan_ego_rear_axle"
@@ -2354,6 +2360,18 @@ def _sample_uid_digest(sample_uids: Iterable[str]) -> str:
     ).hexdigest()
 
 
+def nuplan_scene_partition_id(scenario: Any) -> str:
+    """Return the stable partition id of one nuPlan scenario scene."""
+    log_name = str(getattr(scenario, "log_name", ""))
+    token = str(getattr(scenario, "token", ""))
+    if not log_name or not token:
+        raise ValueError("nuPlan scenario lacks log name or token")
+    digest = hashlib.sha256(
+        f"{log_name}:{token}".encode("utf-8")
+    ).hexdigest()[:16]
+    return f"nuplan-{digest}"
+
+
 def nuplan_static_rig_projection(
     calib: Mapping[str, Any],
 ) -> dict[str, object]:
@@ -2419,3 +2437,268 @@ def nuplan_static_rig_projection(
     }
 
 
+def _pack_nuplan_reactive_scene(
+    scenario: Any,
+    partition_root: Path,
+    *,
+    source_revision: str,
+    map_version: str,
+    publication_version: str,
+    frames_per_scene: int,
+    frame_stride: int,
+    image_size: int,
+    sample_builder: Callable[..., tuple[str, str, dict[str, bytes]]],
+) -> dict[str, object]:
+    """Pack one scenario as a contiguous 10 Hz publishable partition."""
+    interval_s = float(getattr(scenario, "database_interval", 0.05))
+    frame_interval_us = round(interval_s * frame_stride * 1_000_000)
+    if frame_interval_us != NUPLAN_SCENE_FRAME_INTERVAL_US:
+        raise ValueError(
+            "nuPlan scene stride does not produce 10 Hz frames: "
+            f"interval={interval_s} stride={frame_stride}"
+        )
+    required_iterations = (frames_per_scene - 1) * frame_stride + 1
+    available_iterations = int(scenario.get_number_of_iterations())
+    if available_iterations < required_iterations:
+        raise ValueError(
+            "nuPlan scenario is shorter than the scene: "
+            f"iterations={available_iterations} "
+            f"required={required_iterations}"
+        )
+    partition_id = nuplan_scene_partition_id(scenario)
+    destination = partition_root / partition_id
+    if destination.exists():
+        raise FileExistsError(f"nuPlan scene {partition_id} already exists")
+    staging = partition_root / f".staging-{partition_id}"
+    if staging.exists():
+        shutil.rmtree(staging)
+    staging.mkdir(parents=True)
+    shard_name = f"{partition_id}-000000.tar"
+    sample_uids: list[str] = []
+    split_group_uids: set[str] = set()
+    camera_time_offsets_us: list[int] = []
+    history_time_offsets_us: list[int] = []
+    distinct_history_frame_counts: list[int] = []
+    rig: dict[str, object] | None = None
+    try:
+        with tarfile.open(staging / shard_name, mode="w") as archive:
+            for frame_index in range(frames_per_scene):
+                sample_uid, split_group_uid, members = sample_builder(
+                    scenario,
+                    iteration=frame_index * frame_stride,
+                    image_size=image_size,
+                    source_revision=source_revision,
+                )
+                (
+                    camera_time_offset_us,
+                    history_time_offset_us,
+                    distinct_history_frame_count,
+                ) = _sample_camera_timing_metrics(members)
+                frame_rig = nuplan_static_rig_projection(
+                    json.loads(members["calib.json"])
+                )
+                if rig is None:
+                    rig = frame_rig
+                elif frame_rig != rig:
+                    raise ValueError(
+                        "nuPlan camera calibration changed inside a scene"
+                    )
+                if sample_uid in sample_uids:
+                    raise ValueError(
+                        f"nuPlan scene repeats sample uid {sample_uid}"
+                    )
+                for suffix, payload in sorted(members.items()):
+                    _add_tar_member(
+                        archive,
+                        f"{sample_uid}.{suffix}",
+                        payload,
+                    )
+                sample_uids.append(sample_uid)
+                split_group_uids.add(split_group_uid)
+                camera_time_offsets_us.append(camera_time_offset_us)
+                history_time_offsets_us.append(history_time_offset_us)
+                distinct_history_frame_counts.append(
+                    distinct_history_frame_count
+                )
+        if len(split_group_uids) != 1 or rig is None:
+            raise ValueError("nuPlan scene must come from exactly one log")
+        manifest: dict[str, object] = {
+            **_nuplan_shard_contract_fields(
+                image_size=image_size,
+                map_version=map_version,
+                source_revision=source_revision,
+            ),
+            "bev_segmentation_count": len(sample_uids),
+            "bev_statistics_count": len(sample_uids),
+            "dataset_version": publication_version,
+            "distinct_history_frame_count": min(
+                distinct_history_frame_counts
+            ),
+            "episodes": 1,
+            "frame_interval_us": NUPLAN_SCENE_FRAME_INTERVAL_US,
+            "frame_stride": frame_stride,
+            "has_gps": False,
+            "has_map": True,
+            "has_reasoning_labels": False,
+            "has_world_model": False,
+            "hz": 1_000_000 // NUPLAN_SCENE_FRAME_INTERVAL_US,
+            "max_camera_time_offset_us": max(camera_time_offsets_us),
+            "max_history_camera_time_offset_us": max(
+                history_time_offsets_us
+            ),
+            "partition_id": partition_id,
+            "partition_schema_version": (
+                NUPLAN_SCENE_PARTITION_SCHEMA_VERSION
+            ),
+            "reasoning_label_count": 0,
+            "sample_uid_digest": _sample_uid_digest(sample_uids),
+            "scene": {
+                "first_iteration": 0,
+                "frame_count": len(sample_uids),
+                "log_name": str(scenario.log_name),
+                "scenario_token": str(scenario.token),
+                "scenario_type": str(
+                    getattr(scenario, "scenario_type", "")
+                ),
+            },
+            "shard_names": [shard_name],
+            "shard_sample_counts": {shard_name: len(sample_uids)},
+            "shard_sha256": {
+                shard_name: _sha256_file(staging / shard_name)
+            },
+            "shards": 1,
+            "split_group_count": 1,
+            "split_group_uids": sorted(split_group_uids),
+            "total_samples": len(sample_uids),
+            "trajectory_xy_count": len(sample_uids),
+        }
+        rig_directory = staging / "rig"
+        rig_directory.mkdir()
+        (rig_directory / "projection.json").write_bytes(
+            canonical_json_bytes(rig)
+        )
+        _write_nuplan_manifest_atomic(staging, manifest)
+        staging.replace(destination)
+    except BaseException:
+        shutil.rmtree(staging, ignore_errors=True)
+        raise
+    return manifest
+
+
+def pack_nuplan_reactive_scene_partitions(
+    scenarios: Iterable[Any],
+    output_directory: str | Path,
+    *,
+    source_revision: str,
+    map_version: str,
+    publication_version: str,
+    scene_count: int,
+    frames_per_scene: int,
+    frame_stride: int = NUPLAN_SCENE_FRAME_STRIDE,
+    image_size: int = REACTIVE_CAMERA_IMAGE_SIZE,
+    sample_builder: Callable[..., tuple[str, str, dict[str, bytes]]] = (
+        nuplan_reactive_sample_members
+    ),
+    candidate_issue: Callable[[Any], str | None] | None = None,
+) -> dict[str, object]:
+    """Pack contiguous scenes, one publishable partition per scene.
+
+    Every frame uses the same sample builder as training. Scenes are taken
+    from distinct logs in sorted log order; a scene with any rejected frame
+    is discarded as a whole so playback never contains gaps.
+    """
+    if not source_revision or not map_version or not publication_version:
+        raise ValueError(
+            "nuPlan source, map, and publication versions must be pinned"
+        )
+    if (
+        image_size != REACTIVE_CAMERA_IMAGE_SIZE
+        or scene_count <= 0
+        or frames_per_scene <= 0
+        or frame_stride <= 0
+    ):
+        raise ValueError("nuPlan scene packing limits are invalid")
+    output = Path(output_directory)
+    output.mkdir(parents=True, exist_ok=True)
+    if any(output.iterdir()):
+        raise FileExistsError("nuPlan output directory must be empty")
+    partition_root = output / "partitions"
+    partition_root.mkdir()
+
+    by_log: dict[str, list[Any]] = {}
+    for scenario in scenarios:
+        by_log.setdefault(
+            str(getattr(scenario, "log_name", "")),
+            [],
+        ).append(scenario)
+    accepted: list[dict[str, object]] = []
+    rejected: list[dict[str, str]] = []
+    for log_name in sorted(by_log):
+        if len(accepted) >= scene_count:
+            break
+        for scenario in by_log[log_name]:
+            issue = (
+                candidate_issue(scenario)
+                if candidate_issue is not None
+                else None
+            )
+            if issue is not None:
+                rejected.append({
+                    "error": f"prefiltered: {issue}",
+                    "log_name": log_name,
+                    "scenario_token": str(getattr(scenario, "token", "")),
+                })
+                continue
+            try:
+                manifest = _pack_nuplan_reactive_scene(
+                    scenario,
+                    partition_root,
+                    source_revision=source_revision,
+                    map_version=map_version,
+                    publication_version=publication_version,
+                    frames_per_scene=frames_per_scene,
+                    frame_stride=frame_stride,
+                    image_size=image_size,
+                    sample_builder=sample_builder,
+                )
+            except Exception as error:
+                rejected.append({
+                    "error": f"{type(error).__name__}: {error}",
+                    "log_name": log_name,
+                    "scenario_token": str(getattr(scenario, "token", "")),
+                })
+                continue
+            accepted.append(manifest)
+            break
+    if len(accepted) != scene_count:
+        reasons = sorted(
+            Counter(item["error"] for item in rejected).items(),
+            key=lambda item: (-item[1], item[0]),
+        )[:3]
+        raise ValueError(
+            "nuPlan scene candidates did not fill the target: "
+            f"accepted={len(accepted)} rejected={len(rejected)} "
+            f"logs={len(by_log)} target={scene_count} "
+            f"top_rejection_reasons={reasons}"
+        )
+    summary: dict[str, object] = {
+        "schema_version": NUPLAN_SCENE_SET_SCHEMA_VERSION,
+        "dataset": NUPLAN_DATASET_ID,
+        "dataset_version": publication_version,
+        "frame_stride": frame_stride,
+        "frames_per_scene": frames_per_scene,
+        "map_version": map_version,
+        "partition_ids": [
+            str(manifest["partition_id"]) for manifest in accepted
+        ],
+        "rejected_scenes": rejected,
+        "scene_count": len(accepted),
+        "scenes": [manifest["scene"] for manifest in accepted],
+        "source_revision": source_revision,
+        "total_samples": sum(
+            int(cast(int, manifest["total_samples"]))
+            for manifest in accepted
+        ),
+    }
+    _write_nuplan_manifest_atomic(output, summary)
+    return summary
