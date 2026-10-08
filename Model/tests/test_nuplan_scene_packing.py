@@ -578,8 +578,12 @@ def test_scene_workflow_binds_the_shared_scene_pack_task():
     )
     assert bindings["group_indices"].promise.var == "group_indices"
     assert bindings["split"].promise.var == "split"
+    assert (
+        bindings["require_mission_goal"].promise.var
+        == "require_mission_goal"
+    )
     assert task.metadata.cache_version == (
-        "nuplan-scene-pack-v1-manifest-v11"
+        "nuplan-scene-pack-v2-manifest-v11"
     )
     assert task.metadata.retries == 1
     assert task.python_interface.inputs["archive_ids"] is not None
@@ -587,3 +591,102 @@ def test_scene_workflow_binds_the_shared_scene_pack_task():
         nuplan_dataset.NUPLAN_SPLIT_GROUP_COUNTS["test"]
         == nuplan_dataset.NUPLAN_TEST_GROUP_COUNT
     )
+
+
+def test_scene_candidates_prefer_goals_then_preferred_types():
+    def scenario(token: str, scenario_type: str, has_goal: bool):
+        return SimpleNamespace(
+            token=token,
+            scenario_type=scenario_type,
+            get_mission_goal=lambda: object() if has_goal else None,
+        )
+
+    scenarios = [
+        scenario("no-goal-turn", "starting_left_turn", False),
+        scenario("goal-other", "stationary", True),
+        scenario("goal-turn", "starting_left_turn", True),
+        scenario("no-goal-other", "stationary", False),
+    ]
+
+    goal_first = nuplan_packing._order_nuplan_scene_candidates(
+        scenarios,
+        preferred_scenario_types=("starting_left_turn",),
+        prefer_mission_goal=True,
+    )
+    type_only = nuplan_packing._order_nuplan_scene_candidates(
+        scenarios,
+        preferred_scenario_types=("starting_left_turn",),
+        prefer_mission_goal=False,
+    )
+
+    assert [item.token for item in goal_first] == [
+        "goal-turn",
+        "goal-other",
+        "no-goal-turn",
+        "no-goal-other",
+    ]
+    assert [item.token for item in type_only] == [
+        "no-goal-turn",
+        "goal-turn",
+        "goal-other",
+        "no-goal-other",
+    ]
+
+
+def test_parallel_scene_workers_receive_the_goal_policy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    data_root = tmp_path / "data"
+    for name in ("data", "maps", "sensors"):
+        (tmp_path / name).mkdir()
+    db_file = data_root / "log-a.db"
+    db_file.write_bytes(b"")
+    seen: list[bool] = []
+
+    class InlineExecutor:
+        def __init__(self, **_kwargs: object):
+            pass
+
+        def __enter__(self) -> InlineExecutor:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def map(self, function, configs):
+            return [function(config) for config in configs]
+
+    def fake_scene_log(config: _NuPlanSceneWorkerConfig) -> dict[str, object]:
+        seen.append(config.require_mission_goal)
+        return _pack(
+            [_scene_scenario("log-a", "log-a-token")],
+            Path(config.output_directory),
+            scene_count=1,
+            frames_per_scene=config.frames_per_scene,
+        )
+
+    monkeypatch.setattr(
+        nuplan_packing.multiprocessing,
+        "get_context",
+        lambda _method: "context",
+    )
+    monkeypatch.setattr(nuplan_packing, "ProcessPoolExecutor", InlineExecutor)
+    monkeypatch.setattr(nuplan_packing, "_pack_nuplan_scene_log", fake_scene_log)
+
+    pack_nuplan_local_scenes(
+        data_root=data_root,
+        map_root=tmp_path / "maps",
+        sensor_root=tmp_path / "sensors",
+        db_files=[db_file],
+        output_directory=tmp_path / "output",
+        source_revision="nuplan-v1.1-complete",
+        map_version="nuplan-maps-v1.0",
+        publication_version="v1.0",
+        scene_count=1,
+        frames_per_scene=2,
+        scene_workers=2,
+        require_mission_goal=False,
+    )
+
+    assert seen == [False]
