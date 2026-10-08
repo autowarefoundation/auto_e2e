@@ -67,6 +67,10 @@ NUPLAN_CAMERA_VISIBILITY_HEIGHTS_M = (-4.0, -2.0, 0.0, 2.0)
 NUPLAN_RECTIFICATION_POLICY_VERSION = "nuplan_rectified_pinhole_v1"
 NUPLAN_PACK_MANIFEST_VERSION = "nuplan_reactive_manifest_v11"
 NUPLAN_DATASET_ID = "nuplan/nuplan-v1.1"
+# Calibration matrices map the rear-axle ego frame; camera centres sit about
+# 1.5 m above its origin, so the road plane is z = 0.
+NUPLAN_RIG_REFERENCE_FRAME = "nuplan_ego_rear_axle"
+NUPLAN_EGO_GROUND_Z_M = 0.0
 _NUPLAN_MANIFEST_INVARIANT_KEYS = (
     "bev_taxonomy_version",
     "camera_order",
@@ -2348,5 +2352,70 @@ def _sample_uid_digest(sample_uids: Iterable[str]) -> str:
     return hashlib.sha256(
         "\n".join(sorted(sample_uids)).encode("ascii")
     ).hexdigest()
+
+
+def nuplan_static_rig_projection(
+    calib: Mapping[str, Any],
+) -> dict[str, object]:
+    """Return the motion-free rig projection of one nuPlan camera calibration.
+
+    Per-sample ``calib.json`` matrices compensate ego motion between the LiDAR
+    reference time and each camera exposure. A Console rig is the static
+    calibration shared by every sample of one log, so it uses the same
+    rectified intrinsics and ``sensor_to_ego`` extrinsics without that
+    millisecond-scale pose correction.
+    """
+    cameras = calib.get("cameras")
+    if (
+        not isinstance(cameras, list)
+        or [
+            camera.get("channel") if isinstance(camera, Mapping) else None
+            for camera in cameras
+        ]
+        != list(NUPLAN_CAMERA_CHANNELS)
+    ):
+        raise ValueError(
+            "nuPlan calibration camera order differs from the rig contract"
+        )
+    image_size = calib.get("image_size")
+    if image_size != REACTIVE_CAMERA_IMAGE_SIZE:
+        raise ValueError("nuPlan calibration image size differs from rig")
+    matrices = []
+    for camera in cameras:
+        intrinsic = np.asarray(
+            camera.get("base_scaled_rectified_intrinsic"),
+            dtype=np.float64,
+        )
+        ego_from_camera = np.asarray(
+            camera.get("sensor_to_ego"),
+            dtype=np.float64,
+        )
+        if (
+            intrinsic.shape != (3, 3)
+            or ego_from_camera.shape != (4, 4)
+            or not np.isfinite(intrinsic).all()
+            or not np.isfinite(ego_from_camera).all()
+        ):
+            raise ValueError(
+                f"nuPlan {camera.get('channel')} calibration is invalid"
+            )
+        matrices.append(
+            intrinsic @ np.linalg.inv(ego_from_camera)[:3]
+        )
+    return {
+        "schema_version": "v1",
+        "dataset": NUPLAN_DATASET_ID,
+        "geometry_type": "rectified_pinhole",
+        "image_size": int(image_size),
+        "projection": {
+            "type": "rectified_pinhole",
+            "camera_order": list(NUPLAN_CAMERA_CHANNELS),
+            "camera_slots": list(NUPLAN_CAMERA_SLOTS),
+            "matrix": np.asarray(matrices, dtype=np.float32).tolist(),
+            "reference_frame": NUPLAN_RIG_REFERENCE_FRAME,
+            "ground_z_m": NUPLAN_EGO_GROUND_Z_M,
+            "rectification_policy": calib.get("rectification_policy"),
+        },
+    }
 
 
