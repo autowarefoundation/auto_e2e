@@ -12,11 +12,13 @@ from botocore.exceptions import ClientError
 pytest.importorskip("flytekit")
 
 from Platform.pipelines.dataset_publication_tasks import (
+    _attach_destination_etags,
     _assert_compatible_or_absent,
     _content_identity,
     _copy_immutable,
     _geo_inventory,
     _plan_partition_artifact_copies,
+    _planned_objects_by_relative,
     _put_immutable,
 )
 
@@ -137,6 +139,68 @@ def test_partition_copy_plan_separates_frame_pool_archive():
     assert (
         second_archive_copy["destination_key"]
         != archive_copy["destination_key"]
+    )
+
+
+def test_destination_etags_are_attached_to_published_shards():
+    sample = {
+        **_source(),
+        "relative": "train-000000.tar",
+    }
+    archive = {
+        **_source(),
+        "relative": "frame_pool.tar",
+    }
+    copy_sources, shards, _ = _plan_partition_artifact_copies(
+        [sample, archive],
+        {
+            "shard_names": ["train-000000.tar"],
+            "frame_pool_archive": "frame_pool.tar",
+            "partition_id": "partition-a",
+        },
+        published_dataset="kitscenes-val",
+        dataset_version="v3.5",
+    )
+
+    _attach_destination_etags(
+        copy_sources,
+        shards,
+        ['"sample-etag"', '"pool-etag"'],
+    )
+
+    assert shards == [{
+        "name": "train-000000.tar",
+        "key": "kitscenes-val/v3.5/shards/train-000000.tar",
+        "byte_size": 12,
+        "content_identity": _content_identity("abc123", 12),
+        "etag": '"sample-etag"',
+    }]
+
+
+def test_copy_plan_supplies_geo_episode_destination_key():
+    summary = {
+        **_source(),
+        "relative": "geo/summary.json",
+    }
+    path = {
+        **_source(),
+        "relative": "geo/episode_paths/scene.f64",
+    }
+    objects = [summary, path]
+    copy_sources, _, _ = _plan_partition_artifact_copies(
+        objects,
+        {"shard_names": []},
+        published_dataset="kitscenes-val",
+        dataset_version="v3.5",
+    )
+
+    planned = _planned_objects_by_relative(
+        {source["relative"]: source for source in objects},
+        copy_sources,
+    )
+
+    assert planned["geo/episode_paths/scene.f64"]["destination_key"] == (
+        "kitscenes-val/v3.5/geo/episode_paths/scene.f64"
     )
 
 
