@@ -52,7 +52,7 @@ NUPLAN_SPLIT_GROUP_COUNTS = {
     "train": NUPLAN_FULL_TRAIN_GROUP_COUNT,
     "test": NUPLAN_TEST_GROUP_COUNT,
 }
-NUPLAN_SCENE_PUBLICATION_VERSION = "v1.0"
+NUPLAN_SCENE_PUBLICATION_VERSION = "v1.1"
 NUPLAN_SCENE_FRAMES = 150
 NUPLAN_SCENE_WORKERS = 10
 # Within each log, turns and signalized intersections are packed first so a
@@ -1468,7 +1468,7 @@ def wf_pack_nuplan_snapshot_reactive_dataset_sharded(
         ephemeral_storage=NUPLAN_FULL_PACK_EPHEMERAL_STORAGE,
     ),
     cache=True,
-    cache_version="nuplan-scene-pack-v2-manifest-v11",
+    cache_version="nuplan-scene-pack-v3-manifest-v11",
     retries=1,
 )
 def pack_nuplan_snapshot_scene_partitions(
