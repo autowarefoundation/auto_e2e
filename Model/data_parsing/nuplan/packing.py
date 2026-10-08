@@ -919,13 +919,31 @@ def _nuplan_split_group_uid(log_name: str) -> str:
     return f"nuplan-log-{log_digest}"
 
 
-def _sample_identity(scenario: Any) -> tuple[str, str]:
+def _sample_identity(
+    scenario: Any,
+    *,
+    iteration: int = 0,
+) -> tuple[str, str]:
+    """Return the sample and split identity of one scenario iteration.
+
+    Iteration zero keeps the identity used by every training shard. Later
+    iterations of the same scenario append the iteration to stay unique.
+    """
     log_name = str(getattr(scenario, "log_name", ""))
     token = str(getattr(scenario, "token", ""))
     if not log_name or not token:
         raise ValueError("nuPlan scenario lacks log name or token")
+    if isinstance(iteration, bool) or not isinstance(iteration, int):
+        raise ValueError("nuPlan scenario iteration must be an integer")
+    if iteration < 0:
+        raise ValueError("nuPlan scenario iteration must be non-negative")
+    identity = (
+        f"{log_name}:{token}"
+        if iteration == 0
+        else f"{log_name}:{token}:{iteration}"
+    )
     sample_digest = hashlib.sha256(
-        f"{log_name}:{token}".encode("utf-8")
+        identity.encode("utf-8")
     ).hexdigest()[:24]
     return f"nuplan-{sample_digest}", _nuplan_split_group_uid(log_name)
 
@@ -1038,7 +1056,10 @@ def nuplan_reactive_sample_members(
         camera_visibility=bundle.camera_visibility,
         lidar_observability=lidar_mask,
     )
-    sample_uid, split_group_uid = _sample_identity(scenario)
+    sample_uid, split_group_uid = _sample_identity(
+        scenario,
+        iteration=iteration,
+    )
     members = nuplan_reactive_target_members(
         targets,
         metadata={
