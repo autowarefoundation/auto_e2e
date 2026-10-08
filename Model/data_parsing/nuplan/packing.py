@@ -146,6 +146,21 @@ class _NuPlanPackWorkerConfig:
     samples_per_shard: int
 
 
+@dataclasses.dataclass(frozen=True)
+class _NuPlanSceneWorkerConfig:
+    db_file: str
+    data_root: str
+    map_root: str
+    sensor_root: str
+    output_directory: str
+    source_revision: str
+    map_version: str
+    publication_version: str
+    frames_per_scene: int
+    preferred_scenario_types: tuple[str, ...]
+    image_size: int
+
+
 class _NuPlanNoScenariosError(ValueError):
     """Signal that filtering removed every scenario in one DB partition."""
 
@@ -1980,12 +1995,15 @@ def pack_nuplan_local_scenes(
     frames_per_scene: int,
     preferred_scenario_types: Sequence[str] = (),
     image_size: int = REACTIVE_CAMERA_IMAGE_SIZE,
+    scene_workers: int = 1,
 ) -> dict[str, object]:
     """Pack contiguous scenes from one materialized nuPlan dataset.
 
     Scenarios come from the same builder and filter as training. Within each
     log, scenarios whose type appears in ``preferred_scenario_types`` are
-    tried first in that order; the builder order breaks ties.
+    tried first in that order; the builder order breaks ties. With more than
+    one worker, logs are packed in parallel in sorted order and later logs
+    only replace logs that produced no valid scene.
     """
     local_data, local_map, local_sensor, resolved_db_files = (
         _resolve_nuplan_local_inputs(
@@ -1995,7 +2013,25 @@ def pack_nuplan_local_scenes(
             db_files=db_files,
         )
     )
+    if scene_workers <= 0:
+        raise ValueError("nuPlan scene_workers must be positive")
     _pin_nuplan_pack_thread_environment()
+    if scene_workers > 1:
+        return _pack_nuplan_local_scenes_parallel(
+            data_root=local_data,
+            map_root=local_map,
+            sensor_root=local_sensor,
+            db_files=resolved_db_files,
+            output_directory=Path(output_directory),
+            source_revision=source_revision,
+            map_version=map_version,
+            publication_version=publication_version,
+            scene_count=scene_count,
+            frames_per_scene=frames_per_scene,
+            preferred_scenario_types=tuple(preferred_scenario_types),
+            image_size=image_size,
+            scene_workers=scene_workers,
+        )
     scenarios = _nuplan_local_scenarios(
         data_root=local_data,
         map_root=local_map,
@@ -2031,6 +2067,137 @@ def pack_nuplan_local_scenes(
         image_size=image_size,
         candidate_issue=_nuplan_local_sensor_asset_issue,
     )
+
+
+def _pack_nuplan_scene_log(
+    config: _NuPlanSceneWorkerConfig,
+) -> dict[str, object]:
+    """Pack at most one scene from one log in a spawned worker."""
+    try:
+        return pack_nuplan_local_scenes(
+            data_root=config.data_root,
+            map_root=config.map_root,
+            sensor_root=config.sensor_root,
+            db_files=[config.db_file],
+            output_directory=config.output_directory,
+            source_revision=config.source_revision,
+            map_version=config.map_version,
+            publication_version=config.publication_version,
+            scene_count=1,
+            frames_per_scene=config.frames_per_scene,
+            preferred_scenario_types=config.preferred_scenario_types,
+            image_size=config.image_size,
+        )
+    except ValueError as error:
+        return {
+            "empty_log": True,
+            "error": f"{type(error).__name__}: {error}",
+            "log_name": Path(config.db_file).stem,
+        }
+
+
+def _pack_nuplan_local_scenes_parallel(
+    *,
+    data_root: Path,
+    map_root: Path,
+    sensor_root: Path,
+    db_files: Sequence[Path],
+    output_directory: Path,
+    source_revision: str,
+    map_version: str,
+    publication_version: str,
+    scene_count: int,
+    frames_per_scene: int,
+    preferred_scenario_types: tuple[str, ...],
+    image_size: int,
+    scene_workers: int,
+) -> dict[str, object]:
+    if scene_count <= 0 or frames_per_scene <= 0:
+        raise ValueError("nuPlan scene packing limits are invalid")
+    output = output_directory
+    output.mkdir(parents=True, exist_ok=True)
+    if any(output.iterdir()):
+        raise FileExistsError("nuPlan output directory must be empty")
+    partition_root = output / "partitions"
+    partition_root.mkdir()
+    worker_root = output / ".workers"
+    worker_root.mkdir()
+    remaining = sorted(db_files, key=lambda path: path.stem)
+    accepted: dict[str, dict[str, object]] = {}
+    empty_logs: list[dict[str, object]] = []
+    context = multiprocessing.get_context("spawn")
+    with ProcessPoolExecutor(
+        max_workers=min(scene_workers, scene_count),
+        mp_context=context,
+        initializer=_initialize_nuplan_pack_worker,
+    ) as executor:
+        while len(accepted) < scene_count and remaining:
+            batch = remaining[:scene_count - len(accepted)]
+            remaining = remaining[len(batch):]
+            configs = [
+                _NuPlanSceneWorkerConfig(
+                    db_file=str(db_file),
+                    data_root=str(data_root),
+                    map_root=str(map_root),
+                    sensor_root=str(sensor_root),
+                    output_directory=str(worker_root / db_file.stem),
+                    source_revision=source_revision,
+                    map_version=map_version,
+                    publication_version=publication_version,
+                    frames_per_scene=frames_per_scene,
+                    preferred_scenario_types=preferred_scenario_types,
+                    image_size=image_size,
+                )
+                for db_file in batch
+            ]
+            for config, result in zip(
+                configs,
+                executor.map(_pack_nuplan_scene_log, configs),
+                strict=True,
+            ):
+                if result.get("empty_log"):
+                    empty_logs.append(result)
+                    continue
+                accepted[Path(config.db_file).stem] = result
+    if len(accepted) != scene_count:
+        raise ValueError(
+            "nuPlan logs did not fill the scene target: "
+            f"accepted={len(accepted)} empty_logs={len(empty_logs)} "
+            f"target={scene_count} "
+            f"first_errors={[item['error'] for item in empty_logs[:3]]}"
+        )
+    scenes = []
+    partition_ids = []
+    rejected: list[object] = []
+    total_samples = 0
+    for log_name in sorted(accepted):
+        summary = accepted[log_name]
+        partition_id, = cast(list[str], summary["partition_ids"])
+        (worker_root / log_name / "partitions" / partition_id).replace(
+            partition_root / partition_id
+        )
+        partition_ids.append(partition_id)
+        scenes.extend(cast(list[object], summary["scenes"]))
+        rejected.extend(cast(list[object], summary["rejected_scenes"]))
+        total_samples += int(cast(int, summary["total_samples"]))
+    shutil.rmtree(worker_root)
+    combined: dict[str, object] = {
+        "schema_version": NUPLAN_SCENE_SET_SCHEMA_VERSION,
+        "dataset": NUPLAN_DATASET_ID,
+        "dataset_version": publication_version,
+        "empty_logs": empty_logs,
+        "frame_stride": NUPLAN_SCENE_FRAME_STRIDE,
+        "frames_per_scene": frames_per_scene,
+        "map_version": map_version,
+        "partition_ids": partition_ids,
+        "rejected_scenes": rejected,
+        "scene_count": len(partition_ids),
+        "scenes": scenes,
+        "source_revision": source_revision,
+        "total_samples": total_samples,
+    }
+    _write_nuplan_manifest_atomic(output, combined)
+    return combined
 
 
 def pack_nuplan_local_dataset(
