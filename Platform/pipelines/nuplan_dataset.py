@@ -268,13 +268,22 @@ def _allocate_nuplan_group_scenario_limits(
     return limits
 
 
-def _build_nuplan_train_pack_plan(
+def _is_nuplan_split_database(archive: Mapping[str, Any], split: str) -> bool:
+    archive_id = str(archive.get("archive_id", ""))
+    return archive.get("component") == "database" and (
+        archive_id == f"db-{split}" or archive_id.startswith(f"db-{split}_")
+    )
+
+
+def _nuplan_split_archive_sets(
     manifest: Mapping[str, Any],
     sensor_groups: Mapping[int, Sequence[str]],
     database_logs: Mapping[str, Sequence[str]],
-    total_scenario_limit: int,
+    *,
+    split: str,
+    group_count: int,
 ) -> tuple[list[list[str]], list[int]]:
-    """Build validated archive sets and limits for all train sensor groups."""
+    """Build validated archive sets and log counts for every sensor group."""
     archives = manifest.get("archives")
     if not isinstance(archives, list):
         raise ValueError("nuPlan snapshot archives must be a list")
@@ -287,7 +296,7 @@ def _build_nuplan_train_pack_plan(
     ]
     if len(map_candidates) != 1:
         raise ValueError(
-            "nuPlan train pack requires exactly one matching map archive"
+            f"nuPlan {split} pack requires exactly one matching map archive"
         )
     map_archive_id = map_candidates[0]
 
@@ -296,7 +305,7 @@ def _build_nuplan_train_pack_plan(
         "lidar": {},
     }
     pattern = re.compile(
-        r"^sensor-train-train_(camera|lidar)_(\d+)$"
+        rf"^sensor-{re.escape(split)}-{re.escape(split)}_(camera|lidar)_(\d+)$"
     )
     for archive in archives:
         match = pattern.fullmatch(str(archive.get("archive_id", "")))
@@ -305,22 +314,21 @@ def _build_nuplan_train_pack_plan(
             sensor_archive_ids[modality][int(group_text)] = str(
                 archive["archive_id"]
             )
-    expected_groups = set(range(NUPLAN_FULL_TRAIN_GROUP_COUNT))
+    expected_groups = set(range(group_count))
     for modality, group_archives in sensor_archive_ids.items():
         if set(group_archives) != expected_groups:
             raise ValueError(
-                f"nuPlan train {modality} archive group mismatch"
+                f"nuPlan {split} {modality} archive group mismatch"
             )
 
     database_order = {
         str(archive["archive_id"]): index
         for index, archive in enumerate(archives)
-        if archive.get("component") == "database"
-        and str(archive.get("archive_id", "")).startswith("db-train_")
+        if _is_nuplan_split_database(archive, split)
     }
     if set(database_logs) != set(database_order):
         raise ValueError(
-            "nuPlan train DB inventory does not match snapshot DB archives"
+            f"nuPlan {split} DB inventory does not match snapshot DB archives"
         )
     database_by_log: dict[str, str] = {}
     for archive_id, log_names in database_logs.items():
@@ -333,18 +341,18 @@ def _build_nuplan_train_pack_plan(
 
     archive_sets: list[list[str]] = []
     group_log_counts: list[int] = []
-    for group_index in range(NUPLAN_FULL_TRAIN_GROUP_COUNT):
+    for group_index in range(group_count):
         log_names = tuple(sensor_groups.get(group_index, ()))
         if not log_names:
             raise ValueError(
-                f"nuPlan train sensor group {group_index} is empty"
+                f"nuPlan {split} sensor group {group_index} is empty"
             )
         missing_logs = sorted(
             set(log_names) - set(database_by_log)
         )
         if missing_logs:
             raise ValueError(
-                "nuPlan train sensor logs have no matching DB archive: "
+                f"nuPlan {split} sensor logs have no matching DB archive: "
                 f"{missing_logs[:3]}"
             )
         group_databases = sorted(
@@ -361,11 +369,28 @@ def _build_nuplan_train_pack_plan(
 
     used_logs = {
         log_name
-        for group_index in range(NUPLAN_FULL_TRAIN_GROUP_COUNT)
+        for group_index in range(group_count)
         for log_name in sensor_groups[group_index]
     }
     if len(used_logs) != sum(group_log_counts):
-        raise ValueError("nuPlan train sensor groups overlap")
+        raise ValueError(f"nuPlan {split} sensor groups overlap")
+    return archive_sets, group_log_counts
+
+
+def _build_nuplan_train_pack_plan(
+    manifest: Mapping[str, Any],
+    sensor_groups: Mapping[int, Sequence[str]],
+    database_logs: Mapping[str, Sequence[str]],
+    total_scenario_limit: int,
+) -> tuple[list[list[str]], list[int]]:
+    """Build validated archive sets and limits for all train sensor groups."""
+    archive_sets, group_log_counts = _nuplan_split_archive_sets(
+        manifest,
+        sensor_groups,
+        database_logs,
+        split="train",
+        group_count=NUPLAN_FULL_TRAIN_GROUP_COUNT,
+    )
     limits = _allocate_nuplan_group_scenario_limits(
         group_log_counts,
         total_scenario_limit,
