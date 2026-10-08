@@ -47,6 +47,23 @@ NUPLAN_FULL_TRAIN_GROUP_COUNT = 43
 NUPLAN_FULL_TRAIN_LOG_COUNT = 1_085
 NUPLAN_FULL_TRAIN_SAMPLE_LIMIT = 131_072
 NUPLAN_FULL_PACK_EPHEMERAL_STORAGE = "1200Gi"
+NUPLAN_TEST_GROUP_COUNT = 12
+NUPLAN_SPLIT_GROUP_COUNTS = {
+    "train": NUPLAN_FULL_TRAIN_GROUP_COUNT,
+    "test": NUPLAN_TEST_GROUP_COUNT,
+}
+NUPLAN_SCENE_PUBLICATION_VERSION = "v1.0"
+NUPLAN_SCENE_FRAMES = 150
+NUPLAN_SCENE_WORKERS = 10
+# Within each log, turns and signalized intersections are packed first so a
+# small scene set still shows the planner reacting to road geometry.
+NUPLAN_SCENE_PREFERRED_TYPES = [
+    "starting_left_turn",
+    "starting_right_turn",
+    "traversing_traffic_light_intersection",
+    "traversing_intersection",
+    "high_magnitude_speed",
+]
 
 
 class NuPlanRawSnapshotOutput(NamedTuple):
@@ -1434,4 +1451,255 @@ def wf_pack_nuplan_snapshot_reactive_dataset_sharded(
         max_rejection_fraction=max_rejection_fraction,
         aws_region=aws_region,
         concurrency=concurrency,
+    )
+
+
+@task(
+    container_image=DATA_PREP_IMAGE,
+    pod_template=_data_prep_pod_template(),
+    requests=Resources(
+        cpu="16",
+        mem="64Gi",
+        ephemeral_storage=NUPLAN_FULL_PACK_EPHEMERAL_STORAGE,
+    ),
+    limits=Resources(
+        cpu="16",
+        mem="64Gi",
+        ephemeral_storage=NUPLAN_FULL_PACK_EPHEMERAL_STORAGE,
+    ),
+    cache=True,
+    cache_version="nuplan-scene-pack-v1-manifest-v11",
+    retries=1,
+)
+def pack_nuplan_snapshot_scene_partitions(
+    snapshot_manifest: FlyteFile,
+    datasets_bucket: str,
+    archive_ids: List[str],
+    scene_count: int,
+    frames_per_scene: int = NUPLAN_SCENE_FRAMES,
+    publication_version: str = NUPLAN_SCENE_PUBLICATION_VERSION,
+    preferred_scenario_types: List[str] = NUPLAN_SCENE_PREFERRED_TYPES,
+    image_size: int = REACTIVE_CAMERA_IMAGE_SIZE,
+    scene_workers: int = NUPLAN_SCENE_WORKERS,
+    aws_region: str = "us-west-2",
+) -> List[FlyteDirectory]:
+    """Pack contiguous 10 Hz scenes with the training sample builder.
+
+    Each returned directory is one publishable partition: one log, one
+    scene shard, its manifest, and its static camera rig.
+    """
+    import hashlib
+    import json
+
+    from data_parsing.nuplan import pack_nuplan_local_scenes
+
+    if (
+        scene_count <= 0
+        or frames_per_scene <= 0
+        or scene_workers <= 0
+        or image_size != REACTIVE_CAMERA_IMAGE_SIZE
+    ):
+        raise ValueError("nuPlan scene pack limits are invalid")
+    if not archive_ids:
+        raise ValueError("nuPlan scene pack requires explicit archives")
+    snapshot = _materialize_nuplan_snapshot(
+        snapshot_manifest,
+        datasets_bucket=datasets_bucket,
+        archive_ids=archive_ids,
+        aws_region=aws_region,
+    )
+    materialized = snapshot.materialized
+    output = snapshot.workspace / "scenes"
+    summary = pack_nuplan_local_scenes(
+        data_root=materialized.data_root,
+        map_root=materialized.map_root,
+        sensor_root=materialized.sensor_root,
+        db_files=materialized.db_files,
+        output_directory=output,
+        source_revision=str(snapshot.manifest["dataset_revision"]),
+        map_version=materialized.map_version,
+        publication_version=publication_version,
+        scene_count=scene_count,
+        frames_per_scene=frames_per_scene,
+        preferred_scenario_types=preferred_scenario_types,
+        image_size=image_size,
+        scene_workers=scene_workers,
+    )
+    provenance = {
+        "raw_archive_ids": [
+            archive["archive_id"] for archive in snapshot.selected
+        ],
+        "raw_archive_materialization": snapshot.extracted,
+        "raw_snapshot_id": snapshot.manifest["snapshot_id"],
+        "raw_snapshot_manifest_sha256": hashlib.sha256(
+            snapshot.manifest_bytes
+        ).hexdigest(),
+        "raw_snapshot_map_version": snapshot.manifest["map_version"],
+        "raw_source_contract_sha256": (
+            snapshot.manifest["source_contract_sha256"]
+        ),
+        "materialized_map_version": materialized.map_version,
+        "sensor_complete_log_count": len(materialized.sensor_log_names),
+    }
+    partitions: List[FlyteDirectory] = []
+    for partition_id in summary["partition_ids"]:
+        directory = output / "partitions" / str(partition_id)
+        manifest_path = directory / "manifest.json"
+        partition_manifest = json.loads(manifest_path.read_bytes())
+        _validate_nuplan_pack_contract(partition_manifest)
+        if (
+            partition_manifest.get("partition_id") != partition_id
+            or partition_manifest.get("dataset_version")
+            != publication_version
+            or not (directory / "rig" / "projection.json").is_file()
+        ):
+            raise ValueError(
+                f"nuPlan scene partition {partition_id} is not publishable"
+            )
+        partition_manifest.update(provenance)
+        temporary_manifest = directory / ".manifest.json.tmp"
+        temporary_manifest.write_bytes(
+            canonical_json_bytes(partition_manifest)
+        )
+        temporary_manifest.replace(manifest_path)
+        partitions.append(FlyteDirectory(str(directory)))
+    print(json.dumps({
+        "partition_ids": summary["partition_ids"],
+        "rejected_scene_count": len(summary["rejected_scenes"]),
+        "scene_count": summary["scene_count"],
+        "scenes": summary["scenes"],
+        "total_samples": summary["total_samples"],
+    }, sort_keys=True))
+    return partitions
+
+
+@task(
+    container_image=DATA_PREP_IMAGE,
+    requests=Resources(cpu="1", mem="1Gi"),
+    limits=Resources(cpu="1", mem="1Gi"),
+    retries=2,
+)
+def flatten_nuplan_scene_partitions(
+    groups: List[List[FlyteDirectory]],
+) -> List[FlyteDirectory]:
+    """Concatenate per-group scene partitions without copying shard bytes."""
+    return [partition for group in groups for partition in group]
+
+
+@dynamic(
+    container_image=DATA_PREP_IMAGE,
+    environment={"AUTO_E2E_DATA_PREP_IMAGE": DATA_PREP_IMAGE},
+)
+def _pack_nuplan_snapshot_scene_dataset(
+    snapshot_manifest: FlyteFile,
+    datasets_bucket: str,
+    split: str,
+    group_indices: List[int],
+    scenes_per_group: int,
+    frames_per_scene: int,
+    publication_version: str,
+    preferred_scenario_types: List[str],
+    image_size: int,
+    scene_workers: int,
+    aws_region: str,
+) -> List[FlyteDirectory]:
+    """Resolve one split's sensor groups and pack scenes from each group."""
+    import json
+    from pathlib import Path
+
+    from data_parsing.nuplan.materialization import (
+        load_nuplan_snapshot_manifest,
+    )
+
+    group_count = NUPLAN_SPLIT_GROUP_COUNTS.get(split)
+    if group_count is None:
+        raise ValueError(f"unsupported nuPlan scene split {split!r}")
+    if (
+        not group_indices
+        or len(set(group_indices)) != len(group_indices)
+        or any(
+            not 0 <= index < group_count for index in group_indices
+        )
+    ):
+        raise ValueError("nuPlan scene group indices are invalid")
+    if scenes_per_group <= 0:
+        raise ValueError("scenes_per_group must be positive")
+    manifest = load_nuplan_snapshot_manifest(
+        Path(snapshot_manifest.download()).read_bytes()
+    )
+    sensor_groups, database_logs = _resolve_nuplan_split_sensor_plan(
+        manifest,
+        datasets_bucket=datasets_bucket,
+        aws_region=aws_region,
+        split=split,
+        group_count=group_count,
+    )
+    archive_sets, group_log_counts = _nuplan_split_archive_sets(
+        manifest,
+        sensor_groups,
+        database_logs,
+        split=split,
+        group_count=group_count,
+    )
+    for index in group_indices:
+        if scenes_per_group > group_log_counts[index]:
+            raise ValueError(
+                f"nuPlan {split} group {index} has only "
+                f"{group_log_counts[index]} logs for {scenes_per_group} "
+                "scenes"
+            )
+    print(json.dumps({
+        "archive_sets": [archive_sets[index] for index in group_indices],
+        "group_indices": group_indices,
+        "group_log_counts": [
+            group_log_counts[index] for index in group_indices
+        ],
+        "scenes_per_group": scenes_per_group,
+        "split": split,
+    }, sort_keys=True))
+    packed = [
+        pack_nuplan_snapshot_scene_partitions(
+            snapshot_manifest=snapshot_manifest,
+            datasets_bucket=datasets_bucket,
+            archive_ids=archive_sets[index],
+            scene_count=scenes_per_group,
+            frames_per_scene=frames_per_scene,
+            publication_version=publication_version,
+            preferred_scenario_types=preferred_scenario_types,
+            image_size=image_size,
+            scene_workers=scene_workers,
+            aws_region=aws_region,
+        )
+        for index in group_indices
+    ]
+    return flatten_nuplan_scene_partitions(groups=packed)
+
+
+@workflow
+def wf_pack_nuplan_snapshot_scene_dataset(
+    snapshot_manifest: FlyteFile,
+    datasets_bucket: str,
+    group_indices: List[int],
+    split: str = "test",
+    scenes_per_group: int = 10,
+    frames_per_scene: int = NUPLAN_SCENE_FRAMES,
+    publication_version: str = NUPLAN_SCENE_PUBLICATION_VERSION,
+    preferred_scenario_types: List[str] = NUPLAN_SCENE_PREFERRED_TYPES,
+    image_size: int = REACTIVE_CAMERA_IMAGE_SIZE,
+    scene_workers: int = NUPLAN_SCENE_WORKERS,
+    aws_region: str = "us-west-2",
+) -> List[FlyteDirectory]:
+    """Pack Console-publishable 10 Hz scenes from held-out nuPlan logs."""
+    return _pack_nuplan_snapshot_scene_dataset(
+        snapshot_manifest=snapshot_manifest,
+        datasets_bucket=datasets_bucket,
+        split=split,
+        group_indices=group_indices,
+        scenes_per_group=scenes_per_group,
+        frames_per_scene=frames_per_scene,
+        publication_version=publication_version,
+        preferred_scenario_types=preferred_scenario_types,
+        image_size=image_size,
+        scene_workers=scene_workers,
+        aws_region=aws_region,
     )
