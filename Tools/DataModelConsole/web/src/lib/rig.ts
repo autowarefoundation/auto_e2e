@@ -18,6 +18,8 @@
 //           6 ring_rear_right
 //   6-view: 0 base_front_center, 1 ring_front_left, 2 ring_front_right,
 //           3 ring_rear, 4 ring_rear_left, 5 ring_rear_right
+// nuPlan (nuplan/packing.py): 6 cameras
+//   0 CAM_F0, 1 CAM_L0, 2 CAM_R0, 3 CAM_L2, 4 CAM_B0, 5 CAM_R2
 
 export interface RigCam {
   label: string;
@@ -81,9 +83,21 @@ const KITSCENES_SIX_VIEW_RIG: Record<string, RigCam> = {
   cam_5: { label: "rear-right", row: 2, col: 3 },
 };
 
+// Same 2x3 bird's-eye layout as KITScenes six-view, but nuPlan packs the rear
+// pair as rear-left (cam_3) then rear (cam_4).
+const NUPLAN_RIG: Record<string, RigCam> = {
+  cam_0: { label: "front-center", row: 1, col: 2 },
+  cam_1: { label: "front-left", row: 1, col: 1 },
+  cam_2: { label: "front-right", row: 1, col: 3 },
+  cam_3: { label: "rear-left", row: 2, col: 1 },
+  cam_4: { label: "rear", row: 2, col: 2 },
+  cam_5: { label: "rear-right", row: 2, col: 3 },
+};
+
 const RIGS: Record<string, Record<string, RigCam>> = {
   nvidia_av: NVIDIA_RIG,
   l2d: L2D_RIG,
+  "nuplan-test": NUPLAN_RIG,
 };
 
 function isKITScenesDataset(dataset: string): boolean {
@@ -148,12 +162,12 @@ export function camLabel(
 
 // displayAspectRatio is the width/height a camera tile should reserve for a
 // dataset, so the frame matches the packed image and there is no letterbox gap.
-// KITScenes cameras are packed 256x256 (1:1); the default 16:9 is kept for the
-// other datasets to avoid changing their existing layout. The canvas still
+// KITScenes and nuPlan cameras are packed square (1:1); the default 16:9 is
+// kept for the other datasets to avoid changing their existing layout. The canvas still
 // object-contain-fits the real bitmap, so a stray off-ratio image is letterboxed
 // rather than stretched — this only sets the frame's shape.
 export function displayAspectRatio(dataset: string): number {
-  return isKITScenesDataset(dataset) ? 1 : 16 / 9;
+  return isKITScenesDataset(dataset) || dataset === "nuplan-test" ? 1 : 16 / 9;
 }
 
 // gridDimensions returns the number of rows/cols spanned by a dataset's rig,
