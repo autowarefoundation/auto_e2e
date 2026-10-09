@@ -35,6 +35,7 @@ import {
   listDatasetVersions,
   listShardsForEpisode,
 } from "@/lib/api";
+import { friendlyDataset } from "@/lib/format";
 
 function ScenesPageInner() {
   const { data, error, loading, reload } = useApi(listDatasets);
@@ -273,7 +274,7 @@ function ScenesPageInner() {
                 <CardHeader className="pb-2">
                   <CardTitle className="flex items-center gap-2 font-mono text-sm">
                     <Clapperboard className="size-4 text-blue-500" />
-                    {ds.name}
+                    {friendlyDataset(ds.name)}
                   </CardTitle>
                 </CardHeader>
                 <CardContent className="text-xs text-slate-400">
@@ -308,7 +309,7 @@ function ScenesPageInner() {
               {!data?.length && <option value="">—</option>}
               {(data ?? []).map((ds) => (
                 <option key={ds.name} value={ds.name}>
-                  {ds.name}
+                  {friendlyDataset(ds.name)}
                 </option>
               ))}
             </select>
