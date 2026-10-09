@@ -550,7 +550,11 @@ func (s *S3Service) ShardRigProjection(
 	if err != nil {
 		return nil, "", err
 	}
-	if !requiresPublicationManifest(version) {
+	hasManifest, err := s.hasPublicationManifest(ctx, dataset, version)
+	if err != nil {
+		return nil, version, err
+	}
+	if !hasManifest {
 		return nil, version, ErrNotFound
 	}
 	entry, err := s.publishedShard(ctx, dataset, version, shard)
