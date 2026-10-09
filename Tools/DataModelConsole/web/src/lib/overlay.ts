@@ -51,7 +51,9 @@ export function parseOverlay(buffer: ArrayBuffer): OverlayArtifact {
   const bevHeatmapNames =
     formatVersion === 2
       ? LEGACY_BEV_HEATMAP_NAMES
-      : formatVersion === 3 || formatVersion === 4
+      : formatVersion === 3 ||
+          formatVersion === 4 ||
+          formatVersion === 5
         ? BEV_HEATMAP_NAMES
         : [];
   const heatmapCount = bevHeatmapNames.length;
@@ -59,7 +61,8 @@ export function parseOverlay(buffer: ArrayBuffer): OverlayArtifact {
     (formatVersion !== 1 &&
       formatVersion !== 2 &&
       formatVersion !== 3 &&
-      formatVersion !== 4) ||
+      formatVersion !== 4 &&
+      formatVersion !== 5) ||
     horizon !== HORIZON ||
     dims !== DIMS ||
     reserved !== heatmapCount
