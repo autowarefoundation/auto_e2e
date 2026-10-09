@@ -88,8 +88,12 @@ const fallbackVersion = "v1.0"
 // avoids a per-request ListObjects while still picking up new versions.
 const versionTTL = 2 * time.Minute
 
-// knownDatasets is the production dataset allowlist exposed by the console.
-var knownDatasets = []string{"kitscenes"}
+// knownDatasets is ordered by production evaluation priority. KITScenes Val
+// is the route-conditioned primary evaluation; nuPlan Test holds held-out
+// 10 Hz scenes from the official nuPlan test logs.
+var knownDatasets = []string{
+	"kitscenes-val", "kitscenes-test", "nuplan-test", "kitscenes",
+}
 
 const kitScenesSmokePrefix = "kitscenes-smoke-"
 
@@ -270,7 +274,12 @@ func (s *S3Service) ListDatasets(ctx context.Context) []model.Dataset {
 
 // ValidDataset reports whether name is an exposed dataset.
 func (s *S3Service) ValidDataset(name string) bool {
-	return name == "kitscenes"
+	for _, known := range knownDatasets {
+		if name == known {
+			return true
+		}
+	}
+	return false
 }
 
 func smokeDatasetNameFromPrefix(prefix string) (string, bool) {
