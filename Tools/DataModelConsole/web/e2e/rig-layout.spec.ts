@@ -158,3 +158,23 @@ test("unknown datasets fall back to sequential placement and raw labels", () => 
   expect(rigCam("mystery", "cam_4", 4)).toMatchObject({ row: 2, col: 2 });
   expect(camLabel("mystery", "cam_0")).toBe("cam_0");
 });
+
+test("nuPlan test cameras form the square 3x2 surround grid", () => {
+  const packed = ["cam_0", "cam_1", "cam_2", "cam_3", "cam_4", "cam_5"];
+  const displayed = packed.filter(
+    (cam) => !isHiddenCam("nuplan-test", cam, packed.length),
+  );
+  expect(displayed).toEqual(packed);
+  expect(gridDimensions("nuplan-test", displayed)).toEqual({
+    rows: 2,
+    cols: 3,
+  });
+  const at = (cam: string) => rigCam("nuplan-test", cam, 0);
+  expect(at("cam_0")).toMatchObject({ label: "front-center", row: 1, col: 2 });
+  expect(at("cam_1")).toMatchObject({ label: "front-left", row: 1, col: 1 });
+  expect(at("cam_2")).toMatchObject({ label: "front-right", row: 1, col: 3 });
+  expect(at("cam_3")).toMatchObject({ label: "rear-left", row: 2, col: 1 });
+  expect(at("cam_4")).toMatchObject({ label: "rear", row: 2, col: 2 });
+  expect(at("cam_5")).toMatchObject({ label: "rear-right", row: 2, col: 3 });
+  expect(displayAspectRatio("nuplan-test")).toBe(1);
+});
