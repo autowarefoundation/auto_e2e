@@ -206,7 +206,7 @@ function model(
     input_contract: "autoe2e-packed-calibrated-camera-v1",
     supported_classes: [
       "drivable_area",
-      "lane_area",
+      "lane_boundary",
       "intersection",
       "crosswalk",
       "stop_line",
