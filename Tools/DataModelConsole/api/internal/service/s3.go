@@ -2031,6 +2031,7 @@ func decodeEgoPayload(b []byte) ([]float32, error) {
 // sample key. Handles current content-addressed ids and historical conventions:
 //   - "l2d-v1-e000012-f000064" -> ("12", 64)
 //   - "nv-v1-<uuid>-f000064"   -> ("<uuid>", 64)
+//   - "nuplan-v1-<scene>-f000064" -> ("<scene>", 64)
 //   - "ep0_000064"        -> ("0", 64)          (L2D episode-prefixed)
 //   - "25cd4769_000064"   -> ("25cd4769", 64)   (nvidia hash-prefixed)
 //   - "s00000064"         -> ("", 64)           (flat s%08d global index)
@@ -2064,7 +2065,8 @@ func parseSampleKey(key string) (episodeID string, frameIdx int, ok bool) {
 					if len(parts) == 3 {
 						return parts[2], frame, true
 					}
-				case strings.HasPrefix(identity, "kitscenes-"):
+				case strings.HasPrefix(identity, "kitscenes-"),
+					strings.HasPrefix(identity, "nuplan-"):
 					parts := strings.SplitN(identity, "-", 3)
 					if len(parts) == 3 {
 						return parts[2], frame, true
