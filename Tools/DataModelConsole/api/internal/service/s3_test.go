@@ -82,6 +82,45 @@ func TestDecodeNavigationNPZValidatesArrayContract(t *testing.T) {
 	}
 }
 
+func TestDecodeNavigationRouteNPZThresholdsFloatRasters(t *testing.T) {
+	shape := [3]int{2, 450, 300}
+	cells := shape[0] * shape[1] * shape[2]
+	floats := make([]byte, cells*4)
+	binary.LittleEndian.PutUint32(floats[4*7:4*8], math.Float32bits(1))
+	binary.LittleEndian.PutUint32(floats[4*9:4*10], math.Float32bits(0.4))
+	binary.LittleEndian.PutUint32(
+		floats[4*(cells-1):],
+		math.Float32bits(0.75),
+	)
+
+	mask, height, width, err := decodeNavigationRouteNPZ(
+		navigationNPZFixture(t, "<f4", shape, floats),
+	)
+	if err != nil {
+		t.Fatalf("decode float route NPZ: %v", err)
+	}
+	if height != shape[1] || width != shape[2] || len(mask) != cells {
+		t.Fatalf("decoded route shape = %dx%d (%d cells)", height, width, len(mask))
+	}
+	if mask[7] != 1 || mask[9] != 0 || mask[cells-1] != 1 {
+		t.Fatalf("float route threshold = %d %d %d", mask[7], mask[9], mask[cells-1])
+	}
+
+	uint8Mask := make([]byte, cells)
+	uint8Mask[3] = 1
+	mask, _, _, err = decodeNavigationRouteNPZ(
+		navigationNPZFixture(t, "|u1", shape, uint8Mask),
+	)
+	if err != nil || !bytes.Equal(mask, uint8Mask) {
+		t.Fatalf("uint8 route mask changed: err=%v", err)
+	}
+	if _, _, _, err := decodeNavigationRouteNPZ(
+		navigationNPZFixture(t, "<f8", shape, make([]byte, cells*8)),
+	); err == nil {
+		t.Fatal("float64 route raster was accepted")
+	}
+}
+
 func TestRenderNavigationPNGUsesSemanticAndRouteLayers(t *testing.T) {
 	const height = 256
 	const width = 256
