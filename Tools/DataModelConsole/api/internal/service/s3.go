@@ -66,12 +66,16 @@ const MaxOverlayBytes = 16 << 20
 const MaxSemanticOccupancyBytes = 512 << 20
 
 const (
-	navigationRasterSize      = 256
 	navigationMapChannels     = 14
 	navigationRouteChannels   = 2
 	maxNavigationArrayBytes   = 8 << 20
 	navigationArrayMemberName = "array.npy"
 )
+
+var navigationRasterShapes = [][2]int{
+	{256, 256},
+	{450, 300},
+}
 
 // maxConcurrentFullTarScans bounds full-shard streams across index, listing,
 // detail, and legacy member reads. A package-global semaphore makes the limit
@@ -1333,35 +1337,37 @@ func (s *S3Service) SampleNavigationMap(
 	if err != nil {
 		return nil, "", index.Version, err
 	}
-	mapBytes, err := decodeNavigationNPZ(
+	mapBytes, mapHeight, mapWidth, err := decodeNavigationNPZ(
 		mapPayload,
 		"<f4",
-		[3]int{
-			navigationMapChannels,
-			navigationRasterSize,
-			navigationRasterSize,
-		},
+		navigationMapChannels,
 	)
 	if err != nil {
 		return nil, "", index.Version, fmt.Errorf(
 			"decode semantic navigation raster: %w", err,
 		)
 	}
-	routeBytes, err := decodeNavigationNPZ(
+	routeBytes, routeHeight, routeWidth, err := decodeNavigationNPZ(
 		routePayload,
 		"|u1",
-		[3]int{
-			navigationRouteChannels,
-			navigationRasterSize,
-			navigationRasterSize,
-		},
+		navigationRouteChannels,
 	)
 	if err != nil {
 		return nil, "", index.Version, fmt.Errorf(
 			"decode route navigation raster: %w", err,
 		)
 	}
-	body, err := renderNavigationPNG(mapBytes, routeBytes)
+	if mapHeight != routeHeight || mapWidth != routeWidth {
+		return nil, "", index.Version, fmt.Errorf(
+			"semantic and route navigation raster shapes differ",
+		)
+	}
+	body, err := renderNavigationPNG(
+		mapBytes,
+		routeBytes,
+		mapHeight,
+		mapWidth,
+	)
 	if err != nil {
 		return nil, "", index.Version, err
 	}
@@ -1395,33 +1401,36 @@ func (s *S3Service) readShardMember(
 func decodeNavigationNPZ(
 	payload []byte,
 	descr string,
-	shape [3]int,
-) ([]byte, error) {
+	channels int,
+) ([]byte, int, int, error) {
 	archive, err := zip.NewReader(bytes.NewReader(payload), int64(len(payload)))
 	if err != nil {
-		return nil, fmt.Errorf("open NPZ: %w", err)
+		return nil, 0, 0, fmt.Errorf("open NPZ: %w", err)
 	}
 	if len(archive.File) != 1 || archive.File[0].Name != navigationArrayMemberName {
-		return nil, fmt.Errorf("NPZ must contain only %s", navigationArrayMemberName)
+		return nil, 0, 0, fmt.Errorf(
+			"NPZ must contain only %s",
+			navigationArrayMemberName,
+		)
 	}
 	entry := archive.File[0]
 	if entry.UncompressedSize64 > maxNavigationArrayBytes {
-		return nil, fmt.Errorf("NPY exceeds uncompressed size limit")
+		return nil, 0, 0, fmt.Errorf("NPY exceeds uncompressed size limit")
 	}
 	stream, err := entry.Open()
 	if err != nil {
-		return nil, fmt.Errorf("open NPY: %w", err)
+		return nil, 0, 0, fmt.Errorf("open NPY: %w", err)
 	}
 	defer stream.Close()
 	npy, err := io.ReadAll(io.LimitReader(stream, maxNavigationArrayBytes+1))
 	if err != nil {
-		return nil, fmt.Errorf("read NPY: %w", err)
+		return nil, 0, 0, fmt.Errorf("read NPY: %w", err)
 	}
 	if len(npy) > maxNavigationArrayBytes {
-		return nil, fmt.Errorf("NPY exceeds uncompressed size limit")
+		return nil, 0, 0, fmt.Errorf("NPY exceeds uncompressed size limit")
 	}
 	if len(npy) < 10 || string(npy[:6]) != "\x93NUMPY" {
-		return nil, fmt.Errorf("invalid NPY magic")
+		return nil, 0, 0, fmt.Errorf("invalid NPY magic")
 	}
 	headerStart := 10
 	headerLength := 0
@@ -1430,40 +1439,70 @@ func decodeNavigationNPZ(
 		headerLength = int(binary.LittleEndian.Uint16(npy[8:10]))
 	case 2, 3:
 		if len(npy) < 12 {
-			return nil, fmt.Errorf("truncated NPY v%d header", npy[6])
+			return nil, 0, 0, fmt.Errorf(
+				"truncated NPY v%d header",
+				npy[6],
+			)
 		}
 		headerStart = 12
 		headerLength = int(binary.LittleEndian.Uint32(npy[8:12]))
 	default:
-		return nil, fmt.Errorf("unsupported NPY version %d", npy[6])
+		return nil, 0, 0, fmt.Errorf(
+			"unsupported NPY version %d",
+			npy[6],
+		)
 	}
 	if headerLength <= 0 || headerStart+headerLength > len(npy) {
-		return nil, fmt.Errorf("invalid NPY header length")
+		return nil, 0, 0, fmt.Errorf("invalid NPY header length")
 	}
 	header := string(npy[headerStart : headerStart+headerLength])
-	expectedShape := fmt.Sprintf("(%d, %d, %d)", shape[0], shape[1], shape[2])
 	if !strings.Contains(header, fmt.Sprintf("'descr': '%s'", descr)) ||
-		!strings.Contains(header, "'fortran_order': False") ||
-		!strings.Contains(header, fmt.Sprintf("'shape': %s", expectedShape)) {
-		return nil, fmt.Errorf("NPY dtype, order, or shape differs from contract")
+		!strings.Contains(header, "'fortran_order': False") {
+		return nil, 0, 0, fmt.Errorf(
+			"NPY dtype or order differs from contract",
+		)
+	}
+	height, width := 0, 0
+	for _, shape := range navigationRasterShapes {
+		expectedShape := fmt.Sprintf(
+			"(%d, %d, %d)",
+			channels,
+			shape[0],
+			shape[1],
+		)
+		if strings.Contains(
+			header,
+			fmt.Sprintf("'shape': %s", expectedShape),
+		) {
+			height, width = shape[0], shape[1]
+			break
+		}
+	}
+	if height == 0 || width == 0 {
+		return nil, 0, 0, fmt.Errorf(
+			"NPY shape differs from supported navigation contracts",
+		)
 	}
 	itemSize := 1
 	if descr == "<f4" {
 		itemSize = 4
 	}
-	expectedDataSize := shape[0] * shape[1] * shape[2] * itemSize
+	expectedDataSize := channels * height * width * itemSize
 	data := npy[headerStart+headerLength:]
 	if len(data) != expectedDataSize {
-		return nil, fmt.Errorf(
+		return nil, 0, 0, fmt.Errorf(
 			"NPY data size mismatch: expected %d, got %d",
 			expectedDataSize, len(data),
 		)
 	}
-	return data, nil
+	return data, height, width, nil
 }
 
-func renderNavigationPNG(mapBytes, routeBytes []byte) ([]byte, error) {
-	pixels := navigationRasterSize * navigationRasterSize
+func renderNavigationPNG(
+	mapBytes, routeBytes []byte,
+	height, width int,
+) ([]byte, error) {
+	pixels := height * width
 	if len(mapBytes) != navigationMapChannels*pixels*4 ||
 		len(routeBytes) != navigationRouteChannels*pixels {
 		return nil, fmt.Errorf("navigation raster byte size differs from contract")
@@ -1477,9 +1516,7 @@ func renderNavigationPNG(mapBytes, routeBytes []byte) ([]byte, error) {
 	route := func(channel, pixel int) bool {
 		return routeBytes[channel*pixels+pixel] != 0
 	}
-	canvas := image.NewRGBA(image.Rect(
-		0, 0, navigationRasterSize, navigationRasterSize,
-	))
+	canvas := image.NewRGBA(image.Rect(0, 0, width, height))
 	for pixel := 0; pixel < pixels; pixel++ {
 		value := color.RGBA{R: 11, G: 15, B: 20, A: 255}
 		switch {
@@ -1515,8 +1552,8 @@ func renderNavigationPNG(mapBytes, routeBytes []byte) ([]byte, error) {
 		if route(1, pixel) {
 			value = color.RGBA{R: 239, G: 77, B: 65, A: 255}
 		}
-		x := pixel % navigationRasterSize
-		y := pixel / navigationRasterSize
+		x := pixel % width
+		y := pixel / width
 		canvas.SetRGBA(x, y, value)
 	}
 	var output bytes.Buffer
