@@ -115,7 +115,7 @@ function uidHash(uid: string): bigint {
   return createHash("sha256").update(uid).digest().readBigUInt64LE(0);
 }
 
-function overlayBody(formatVersion: 2 | 3 | 4 = 4): Buffer {
+function overlayBody(formatVersion: 2 | 3 | 4 | 5 = 4): Buffer {
   const sampleCount = SAMPLE_UIDS.length;
   const seedCount = 3;
   const horizon = 64;
@@ -125,7 +125,7 @@ function overlayBody(formatVersion: 2 | 3 | 4 = 4): Buffer {
   const controlsBytes = sampleCount * seedCount * horizon * 2 * 4;
   const heatmapCount = formatVersion === 2 ? 3 : 6;
   const heatmapScaleCount =
-    sampleCount * (formatVersion === 4 ? heatmapCount : 1);
+    sampleCount * (formatVersion >= 4 ? heatmapCount : 1);
   const heatmapScalesBytes = heatmapScaleCount * 4;
   const heatmapBytes = sampleCount * heatmapCount * 32 * 32;
   const body = Buffer.alloc(
@@ -184,7 +184,7 @@ function overlayBody(formatVersion: 2 | 3 | 4 = 4): Buffer {
       body.writeFloatLE((row + 1) * 10, scalesOffset + row * 4);
     }
     for (let branch = 0; branch < heatmapCount; branch++) {
-      if (formatVersion === 4) {
+      if (formatVersion >= 4) {
         body.writeFloatLE(
           (row + 1) * (branch + 1),
           scalesOffset + (row * heatmapCount + branch) * 4,
@@ -331,22 +331,24 @@ test("legacy overlays use one shared heatmap scale per sample", () => {
   }
 });
 
-test("v4 overlays use one heatmap scale per encoder", () => {
-  const body = overlayBody(4);
-  const buffer = body.buffer.slice(
-    body.byteOffset,
-    body.byteOffset + body.byteLength,
-  ) as ArrayBuffer;
-  const overlay = parseOverlay(buffer);
+for (const version of [4, 5] as const) {
+  test(`v${version} overlays use one heatmap scale per encoder`, () => {
+    const body = overlayBody(version);
+    const buffer = body.buffer.slice(
+      body.byteOffset,
+      body.byteOffset + body.byteLength,
+    ) as ArrayBuffer;
+    const overlay = parseOverlay(buffer);
 
-  expect(overlay.bevHeatmapScales?.length).toBe(
-    SAMPLE_UIDS.length * 6,
-  );
-  expect(bevHeatmapForRow(overlay, 0, "image")?.scale).toBe(1);
-  expect(bevHeatmapForRow(overlay, 0, "fused")?.scale).toBe(6);
-  expect(bevHeatmapForRow(overlay, 1, "image")?.scale).toBe(2);
-  expect(bevHeatmapForRow(overlay, 1, "fused")?.scale).toBe(12);
-});
+    expect(overlay.bevHeatmapScales?.length).toBe(
+      SAMPLE_UIDS.length * 6,
+    );
+    expect(bevHeatmapForRow(overlay, 0, "image")?.scale).toBe(1);
+    expect(bevHeatmapForRow(overlay, 0, "fused")?.scale).toBe(6);
+    expect(bevHeatmapForRow(overlay, 1, "image")?.scale).toBe(2);
+    expect(bevHeatmapForRow(overlay, 1, "fused")?.scale).toBe(12);
+  });
+}
 
 function episodePath(): Buffer {
   const body = Buffer.alloc(80 * 32);
