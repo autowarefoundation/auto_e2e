@@ -1347,10 +1347,8 @@ func (s *S3Service) SampleNavigationMap(
 			"decode semantic navigation raster: %w", err,
 		)
 	}
-	routeBytes, routeHeight, routeWidth, err := decodeNavigationNPZ(
+	routeBytes, routeHeight, routeWidth, err := decodeNavigationRouteNPZ(
 		routePayload,
-		"|u1",
-		navigationRouteChannels,
 	)
 	if err != nil {
 		return nil, "", index.Version, fmt.Errorf(
@@ -1496,6 +1494,38 @@ func decodeNavigationNPZ(
 		)
 	}
 	return data, height, width, nil
+}
+
+// decodeNavigationRouteNPZ returns the route raster as one byte per cell.
+// KITScenes packs binary uint8 masks. nuPlan packs float32 rasters whose
+// destination channel is a soft heatmap, so cells above 0.5 are kept.
+func decodeNavigationRouteNPZ(payload []byte) ([]byte, int, int, error) {
+	routeBytes, height, width, err := decodeNavigationNPZ(
+		payload,
+		"|u1",
+		navigationRouteChannels,
+	)
+	if err == nil {
+		return routeBytes, height, width, nil
+	}
+	floats, height, width, floatErr := decodeNavigationNPZ(
+		payload,
+		"<f4",
+		navigationRouteChannels,
+	)
+	if floatErr != nil {
+		return nil, 0, 0, err
+	}
+	mask := make([]byte, len(floats)/4)
+	for index := range mask {
+		value := math.Float32frombits(
+			binary.LittleEndian.Uint32(floats[index*4 : index*4+4]),
+		)
+		if value > 0.5 {
+			mask[index] = 1
+		}
+	}
+	return mask, height, width, nil
 }
 
 func renderNavigationPNG(
