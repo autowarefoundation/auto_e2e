@@ -100,6 +100,24 @@ test("compact six-slot cameras use the canonical v3.0 positions", () => {
   );
 });
 
+for (const dataset of ["kitscenes-test", "kitscenes-val"]) {
+  test(`${dataset} uses the compact six-camera rig`, () => {
+    expect(
+      gridDimensions(dataset, KIT_SIX_PACKED, KIT_SIX_PACKED.length),
+    ).toEqual({ rows: 2, cols: 3 });
+    expect(
+      rigCam(dataset, "cam_1", 0, KIT_SIX_PACKED.length),
+    ).toMatchObject({ label: "front-left", row: 1, col: 1 });
+    expect(
+      rigCam(dataset, "cam_0", 0, KIT_SIX_PACKED.length),
+    ).toMatchObject({ label: "front-center", row: 1, col: 2 });
+    expect(
+      isHiddenCam(dataset, "cam_1", KIT_SIX_PACKED.length),
+    ).toBe(false);
+    expect(displayAspectRatio(dataset)).toBe(1);
+  });
+}
+
 test("NVIDIA and L2D rigs are unchanged (still 3x3, ego cell free)", () => {
   const nvidia = [
     "cam_0",
