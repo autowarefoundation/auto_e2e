@@ -36,7 +36,11 @@ import {
   listDatasetVersions,
   listShards,
 } from "@/lib/api";
-import { formatBytes, formatNumber } from "@/lib/format";
+import {
+  formatBytes,
+  formatNumber,
+  friendlyDataset,
+} from "@/lib/format";
 import type { DatasetVersion, Shard } from "@/types";
 
 const PAGE_SIZE = 50;
@@ -237,9 +241,11 @@ function DatasetDetailInner({ dataset }: { dataset: string }) {
             <Link href="/datasets" className="hover:text-slate-300">
               Datasets
             </Link>{" "}
-            / <span className="font-mono">{dataset}</span>
+            / <span>{friendlyDataset(dataset)}</span>
           </p>
-          <h2 className="mt-1 font-mono text-lg font-semibold">{dataset}</h2>
+          <h2 className="mt-1 text-lg font-semibold">
+            {friendlyDataset(dataset)}
+          </h2>
           <p className="text-sm text-slate-400">
             Select a dataset version to see its full training composition.
           </p>
