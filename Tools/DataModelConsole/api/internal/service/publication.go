@@ -298,6 +298,30 @@ func (s *S3Service) loadPublicationManifest(
 	return manifest, nil
 }
 
+func (s *S3Service) hasPublicationManifest(
+	ctx context.Context,
+	dataset, version string,
+) (bool, error) {
+	if requiresPublicationManifest(version) {
+		return true, nil
+	}
+	manifestKey := shardsPrefix(dataset, version) + "manifest.json"
+	head, err := s.client.HeadObject(ctx, &s3.HeadObjectInput{
+		Bucket: aws.String(s.bucket),
+		Key:    aws.String(manifestKey),
+	})
+	if err != nil {
+		if isS3NotFound(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("head publication manifest: %w", err)
+	}
+	return metadataValue(
+		head.Metadata,
+		"publication-schema",
+	) == publicationSchema, nil
+}
+
 func (s *S3Service) validatePublicationShards(
 	ctx context.Context,
 	manifest *publicationManifest,

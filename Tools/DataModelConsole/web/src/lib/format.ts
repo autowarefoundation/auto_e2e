@@ -5,6 +5,10 @@
 // console browses datasets by their friendly id. Map the raw partition names
 // back so every page shows one canonical id; unknown names pass through.
 const REASONING_DATASET_ALIAS: Record<string, string> = {
+  "kitscenes-val": "KITScenes Val",
+  "kitscenes-test": "KITScenes Test",
+  "nuplan-test": "nuPlan Test",
+  kitscenes: "KITScenes",
   "nvidia_PhysicalAI-Autonomous-Vehicles": "nvidia_av",
   "yaak-ai_L2D": "l2d",
 };

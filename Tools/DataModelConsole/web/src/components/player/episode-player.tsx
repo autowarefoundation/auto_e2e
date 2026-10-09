@@ -44,6 +44,7 @@ import {
   getShardOverlay,
   getShardSemanticOccupancy,
   listShardOverlayModels,
+  listShardSemanticOccupancyModels,
 } from "@/lib/api";
 import { FrameStore } from "@/lib/frame-store";
 import { isHiddenCam } from "@/lib/rig";
@@ -207,6 +208,8 @@ export function EpisodePlayer({
   );
   const [semanticOccupancy, setSemanticOccupancy] =
     useState<SemanticOccupancyArtifact | null>(null);
+  const [semanticModelIDs, setSemanticModelIDs] =
+    useState<Set<string> | null>(null);
   const [semanticRows, setSemanticRows] = useState<Map<string, number>>(
     new Map(),
   );
@@ -246,6 +249,28 @@ export function EpisodePlayer({
         if (cancelled) return;
         console.warn("trajectory model listing failed", err);
         setOverlayStatus("error");
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [dataset, shard, version]);
+
+  useEffect(() => {
+    let cancelled = false;
+    setSemanticModelIDs(null);
+    listShardSemanticOccupancyModels(dataset, shard, version)
+      .then((response) => {
+        if (cancelled) return;
+        setSemanticModelIDs(
+          new Set(response.models.map((model) => model.model_artifact_id)),
+        );
+      })
+      .catch((err: unknown) => {
+        if (cancelled) return;
+        if (!(err instanceof ApiError && err.status === 404)) {
+          console.warn("semantic occupancy model listing failed", err);
+        }
+        setSemanticModelIDs(new Set());
       });
     return () => {
       cancelled = true;
@@ -302,10 +327,16 @@ export function EpisodePlayer({
   }, [dataset, shard, selectedModelID, version, index.samples]);
 
   useEffect(() => {
-    if (!selectedModelID) {
+    if (!selectedModelID || semanticModelIDs === null) {
       setSemanticOccupancy(null);
       setSemanticRows(new Map());
-      setSemanticStatus("idle");
+      setSemanticStatus(selectedModelID ? "loading" : "idle");
+      return;
+    }
+    if (!semanticModelIDs.has(selectedModelID)) {
+      setSemanticOccupancy(null);
+      setSemanticRows(new Map());
+      setSemanticStatus("unavailable");
       return;
     }
     let cancelled = false;
@@ -338,7 +369,14 @@ export function EpisodePlayer({
     return () => {
       cancelled = true;
     };
-  }, [dataset, shard, selectedModelID, version, index.samples]);
+  }, [
+    dataset,
+    shard,
+    selectedModelID,
+    semanticModelIDs,
+    version,
+    index.samples,
+  ]);
 
   // Buffer-readiness predicate for the buffer-gated clock: a frame is ready
   // when every currently-visible camera has a decoded bitmap for it. Defined

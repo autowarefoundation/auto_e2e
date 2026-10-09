@@ -75,6 +75,20 @@ function classLabel(classIndex: number, laneLabel: string): string {
   return classIndex === 1 ? laneLabel : CLASS_LABELS[classIndex];
 }
 
+function classNameForIndex(
+  classIndex: number,
+  supportedClassNames: ReadonlySet<string>,
+): string {
+  if (classIndex !== 1) {
+    return SEMANTIC_OCCUPANCY_CLASS_NAMES[classIndex];
+  }
+  return supportedClassNames.has("lane_boundary")
+    ? "lane_boundary"
+    : supportedClassNames.has("lane_area")
+      ? "lane_area"
+      : "lane_boundary";
+}
+
 interface PointerReading {
   rasterRow: number;
   rasterCol: number;
@@ -544,14 +558,20 @@ export function SemanticOccupancyView({
       enabled.map(
         (isEnabled, index) =>
           isEnabled &&
-          supportedClassNames.has(SEMANTIC_OCCUPANCY_CLASS_NAMES[index]),
+          supportedClassNames.has(
+            classNameForIndex(index, supportedClassNames),
+          ),
       ),
     [enabled, supportedClassNames],
   );
   const visibleClassIndices = useMemo(
     () =>
-      SEMANTIC_OCCUPANCY_CLASS_NAMES.flatMap((className, index) =>
-        supportedClassNames.has(className) ? [index] : [],
+      SEMANTIC_OCCUPANCY_CLASS_NAMES.flatMap((_, index) =>
+        supportedClassNames.has(
+          classNameForIndex(index, supportedClassNames),
+        )
+          ? [index]
+          : [],
       ),
     [supportedClassNames],
   );
@@ -619,8 +639,8 @@ export function SemanticOccupancyView({
   );
 
   const pointerRows = pointer
-    ? SEMANTIC_OCCUPANCY_CLASS_NAMES.map((name, index) => ({
-        name,
+    ? SEMANTIC_OCCUPANCY_CLASS_NAMES.map((_, index) => ({
+        name: classNameForIndex(index, supportedClassNames),
         label: classLabel(index, laneLabel),
         color: CLASS_COLORS[index],
         value: pointer.values[index],
@@ -873,7 +893,7 @@ export function SemanticOccupancyView({
             </legend>
             {visibleClassIndices.map((index) => (
               <label
-                key={SEMANTIC_OCCUPANCY_CLASS_NAMES[index]}
+                key={classNameForIndex(index, supportedClassNames)}
                 className="flex min-w-0 items-center gap-2 text-[10px] text-slate-300"
               >
                 <input

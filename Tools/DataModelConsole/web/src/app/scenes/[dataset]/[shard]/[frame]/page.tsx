@@ -31,6 +31,7 @@ import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useApi } from "@/hooks/use-api";
 import { getShardIndex, listShardsForEpisode } from "@/lib/api";
+import { friendlyDataset } from "@/lib/format";
 
 function PlayerPageInner({
   dataset,
@@ -196,7 +197,7 @@ function PlayerPageInner({
               href={`/datasets/${encodeURIComponent(dataset)}${versionQuery}`}
               className="font-mono hover:text-slate-300"
             >
-              {dataset}
+              {friendlyDataset(dataset)}
             </Link>{" "}
             / <span className="font-mono">{shard}</span>
           </p>

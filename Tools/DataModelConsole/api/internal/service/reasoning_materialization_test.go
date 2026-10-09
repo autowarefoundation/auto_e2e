@@ -465,9 +465,10 @@ func TestReasoningDiscoveryUsesMaterializedInventoryOnly(t *testing.T) {
 		}
 		service.publicationCache[dataset+"/v2.1"] =
 			&publicationManifest{
-				Dataset: dataset,
-				Version: "v2.1",
-				SHA256:  testManifestSHA,
+				Dataset:             dataset,
+				Version:             "v2.1",
+				SHA256:              testManifestSHA,
+				ReasoningLabelCount: 1,
 			}
 		fakeStore.stats[reasoningStoreKey(
 			dataset,
@@ -503,6 +504,71 @@ func TestReasoningDiscoveryUsesMaterializedInventoryOnly(t *testing.T) {
 	)
 	if err != nil || detail.Stats.NRecords != 1 {
 		t.Fatalf("ReasoningStatsDetail = %+v, %v", detail, err)
+	}
+}
+
+func TestReasoningPromptVersionsReturnsEmptyForDatasetWithoutLabels(
+	t *testing.T,
+) {
+	service := &S3Service{
+		store: &fakeReasoningStore{
+			inventories: make(map[string]model.ReasoningInventory),
+		},
+		publicationCache: map[string]*publicationManifest{
+			"kitscenes/v2.1": testPublication(
+				"part-000000.tar",
+				1024,
+				0,
+			),
+		},
+	}
+
+	prompts, err := service.ReasoningPromptVersionsAtVersion(
+		context.Background(),
+		"kitscenes",
+		"v2.1",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(prompts) != 0 {
+		t.Fatalf("prompt versions = %+v, want empty", prompts)
+	}
+}
+
+func TestReasoningPromptVersionsReturnsEmptyForLegacyVersionManifest(
+	t *testing.T,
+) {
+	client := &fakePublicationS3{
+		objects: map[string]fakePublicationObject{
+			"kitscenes/v1.0/shards/manifest.json": {
+				body: []byte(`{"reasoning_label_count":0}`),
+			},
+			"kitscenes/v1.0/shards/part-000000.tar": {
+				body: []byte("test"),
+			},
+		},
+		getCalls:  make(map[string]int),
+		headCalls: make(map[string]int),
+	}
+	service := &S3Service{
+		client: client,
+		bucket: "datasets",
+		store: &fakeReasoningStore{
+			inventories: make(map[string]model.ReasoningInventory),
+		},
+	}
+
+	prompts, err := service.ReasoningPromptVersionsAtVersion(
+		context.Background(),
+		"kitscenes",
+		"v1.0",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(prompts) != 0 {
+		t.Fatalf("prompt versions = %+v, want empty", prompts)
 	}
 }
 

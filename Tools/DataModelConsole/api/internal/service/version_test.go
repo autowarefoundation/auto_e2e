@@ -8,15 +8,26 @@ import (
 	"time"
 )
 
-func TestValidDatasetAllowsOnlyCanonicalKITScenes(t *testing.T) {
+func TestValidDatasetAllowsPublishedKITScenesDatasets(t *testing.T) {
 	service := &S3Service{}
-	if !service.ValidDataset("kitscenes") {
-		t.Fatal(`ValidDataset("kitscenes") = false`)
+	for _, dataset := range []string{
+		"kitscenes-val",
+		"kitscenes-test",
+		"nuplan-test",
+		"kitscenes",
+	} {
+		if !service.ValidDataset(dataset) {
+			t.Fatalf("ValidDataset(%q) = false", dataset)
+		}
 	}
 	for _, dataset := range []string{
 		"KITScenes",
 		"l2d",
 		"nvidia_av",
+		"kitscenes-val-v1",
+		"kitscenes-test-v1",
+		"nuplan",
+		"nuplan-test-v1",
 		"kitscenes-smoke-8aec8355b11",
 		"kitscenes-smoke-8aec8355b116",
 		"kitscenes-smoke-8aec8355b1160",
@@ -30,31 +41,66 @@ func TestValidDatasetAllowsOnlyCanonicalKITScenes(t *testing.T) {
 	}
 }
 
-func TestListDatasetsReturnsOnlyPublishedKITScenes(t *testing.T) {
+func TestListDatasetsReturnsPublishedKITScenesDatasets(t *testing.T) {
 	service := &S3Service{
+		client: &fakePublicationS3{
+			objects: map[string]fakePublicationObject{
+				"kitscenes-val/v3.5/shards/val.tar": {
+					body: []byte("val"),
+				},
+				"kitscenes-test/v1.0/shards/test.tar": {
+					body: []byte("test"),
+				},
+			},
+		},
 		versionCache: map[string]cachedVersion{
+			"kitscenes-val": {
+				version: "v3.5",
+				at:      time.Now(),
+			},
 			"kitscenes": {
 				version: "v2.2",
+				at:      time.Now(),
+			},
+			"kitscenes-test": {
+				version: "v1.0",
 				at:      time.Now(),
 			},
 		},
 	}
 
 	datasets := service.ListDatasets(context.Background())
-	if len(datasets) != 1 {
-		t.Fatalf("ListDatasets length = %d, want 1", len(datasets))
+	if len(datasets) != 3 {
+		t.Fatalf("ListDatasets length = %d, want 3", len(datasets))
 	}
-	got := datasets[0]
-	if got.Name != "kitscenes" || got.Version != "v2.2" ||
-		got.Prefix != "kitscenes/v2.2/shards/" {
+	if datasets[0].Name != "kitscenes-val" ||
+		datasets[0].Version != "v3.5" ||
+		datasets[0].Prefix != "kitscenes-val/v3.5/shards/" ||
+		datasets[1].Name != "kitscenes-test" ||
+		datasets[1].Version != "v1.0" ||
+		datasets[1].Prefix != "kitscenes-test/v1.0/shards/" ||
+		datasets[2].Name != "kitscenes" ||
+		datasets[2].Version != "v2.2" ||
+		datasets[2].Prefix != "kitscenes/v2.2/shards/" {
 		t.Fatalf("ListDatasets = %+v", datasets)
 	}
 }
 
-func TestListDatasetsOmitsUnpublishedKITScenes(t *testing.T) {
+func TestListDatasetsOmitsUnpublishedKITScenesDatasets(t *testing.T) {
 	service := &S3Service{
+		client: &fakePublicationS3{
+			objects: map[string]fakePublicationObject{},
+		},
 		versionCache: map[string]cachedVersion{
+			"kitscenes-val": {
+				version: fallbackVersion,
+				at:      time.Now(),
+			},
 			"kitscenes": {
+				version: fallbackVersion,
+				at:      time.Now(),
+			},
+			"kitscenes-test": {
 				version: fallbackVersion,
 				at:      time.Now(),
 			},

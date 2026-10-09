@@ -6,7 +6,7 @@ const FLAG_TEACHER_PRESENT = 1 << 0;
 
 export const SEMANTIC_OCCUPANCY_CLASS_NAMES = [
   "drivable_area",
-  "lane_area",
+  "lane_boundary",
   "intersection",
   "crosswalk",
   "stop_line",

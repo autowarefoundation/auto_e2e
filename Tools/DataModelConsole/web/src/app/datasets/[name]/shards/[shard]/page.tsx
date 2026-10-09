@@ -19,7 +19,7 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useApi } from "@/hooks/use-api";
 import { listSamples } from "@/lib/api";
-import { formatBytes } from "@/lib/format";
+import { formatBytes, friendlyDataset } from "@/lib/format";
 import type { Sample } from "@/types";
 
 const PAGE_SIZE = 60;
@@ -96,7 +96,7 @@ function ShardSamplesInner({
               href={`/datasets/${encodeURIComponent(dataset)}${versionQuery}`}
               className="font-mono hover:text-slate-300"
             >
-              {dataset}
+              {friendlyDataset(dataset)}
             </Link>{" "}
             / <span className="font-mono">{shardName}</span>
           </p>

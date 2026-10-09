@@ -29,6 +29,7 @@ const (
 var occupancyClassNames = map[string]struct{}{
 	"drivable_area":        {},
 	"lane_area":            {},
+	"lane_boundary":        {},
 	"intersection":         {},
 	"crosswalk":            {},
 	"stop_line":            {},

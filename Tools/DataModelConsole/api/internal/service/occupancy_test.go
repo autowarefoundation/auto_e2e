@@ -178,6 +178,43 @@ func TestDecodeOccupancySetManifestBindsPublicationAndBodyKeys(t *testing.T) {
 	}
 }
 
+func TestDecodeOccupancySetManifestAcceptsLaneBoundaryTaxonomy(t *testing.T) {
+	datasetDigest := strings.Repeat("a", 64)
+	modelDigest := strings.Repeat("d", 64)
+	payload := semanticOccupancyGzipFixture(t, "lane-boundary")
+	manifest, key, _ := validOccupancySetFixture(
+		t,
+		datasetDigest,
+		modelDigest,
+		"scene-a-train-000000.tar",
+		payload,
+	)
+	manifest.SupportedClasses = []string{
+		"drivable_area",
+		"lane_boundary",
+		"intersection",
+		"crosswalk",
+		"stop_line",
+		"vehicle",
+		"vulnerable_road_user",
+		"other_obstacle",
+	}
+	body, err := json.Marshal(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := decodeOccupancySetManifest(
+		body,
+		key,
+		"kitscenes",
+		"v2.1",
+		datasetDigest,
+	); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestDecodeOccupancySetManifestRejectsInvalidContracts(t *testing.T) {
 	datasetDigest := strings.Repeat("a", 64)
 	modelDigest := strings.Repeat("d", 64)

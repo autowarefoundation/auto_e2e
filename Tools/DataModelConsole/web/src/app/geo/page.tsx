@@ -22,6 +22,7 @@ import {
   listDatasets,
   listDatasetVersions,
 } from "@/lib/api";
+import { friendlyDataset } from "@/lib/format";
 import { fitGeoBounds } from "@/lib/geo";
 import type {
   Dataset,
@@ -118,6 +119,7 @@ function GeoPageInner() {
     if (catalogLoading || catalogError || datasets.length === 0) return "";
     return (
       datasets.find((item) => item.name === urlDataset)?.name ??
+      datasets.find((item) => item.name === "kitscenes-val")?.name ??
       datasets.find((item) => item.name === "kitscenes")?.name ??
       datasets[0].name
     );
@@ -351,7 +353,7 @@ function GeoPageInner() {
           >
             {datasets.map((item) => (
               <option key={item.name} value={item.name}>
-                {item.name}
+                {friendlyDataset(item.name)}
               </option>
             ))}
           </select>

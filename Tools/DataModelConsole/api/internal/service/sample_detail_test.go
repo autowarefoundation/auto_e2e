@@ -19,6 +19,8 @@ func TestParseSampleKey(t *testing.T) {
 		{"v2.1 l2d identity", "l2d-v1-e000012-f000064", "12", 64, true},
 		{"v2.1 nvidia identity", "nv-v1-fd1d1b6b-59bf-4292-8295-5028aa6aa5e3-f000007", "fd1d1b6b-59bf-4292-8295-5028aa6aa5e3", 7, true},
 		{"v2.1 kitscenes identity", "kitscenes-v1-scene-0042-f000123", "scene-0042", 123, true},
+		{"nuplan scene identity", "nuplan-v1-398cd2903ae3a6e9-f000012", "398cd2903ae3a6e9", 12, true},
+		{"nuplan training uid has no frame", "nuplan-398cd2903ae3a6e94eb37deb", "", 0, false},
 		{"l2d ep prefix stripped", "ep0_000064", "0", 64, true},
 		{"l2d multi-digit episode", "ep12_000100", "12", 100, true},
 		{"nvidia hex hash kept verbatim", "25cd4769_000064", "25cd4769", 64, true},

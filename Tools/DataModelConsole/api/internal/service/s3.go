@@ -66,12 +66,16 @@ const MaxOverlayBytes = 16 << 20
 const MaxSemanticOccupancyBytes = 512 << 20
 
 const (
-	navigationRasterSize      = 256
 	navigationMapChannels     = 14
 	navigationRouteChannels   = 2
 	maxNavigationArrayBytes   = 8 << 20
 	navigationArrayMemberName = "array.npy"
 )
+
+var navigationRasterShapes = [][2]int{
+	{256, 256},
+	{450, 300},
+}
 
 // maxConcurrentFullTarScans bounds full-shard streams across index, listing,
 // detail, and legacy member reads. A package-global semaphore makes the limit
@@ -88,8 +92,12 @@ const fallbackVersion = "v1.0"
 // avoids a per-request ListObjects while still picking up new versions.
 const versionTTL = 2 * time.Minute
 
-// knownDatasets is the production dataset allowlist exposed by the console.
-var knownDatasets = []string{"kitscenes"}
+// knownDatasets is ordered by production evaluation priority. KITScenes Val
+// is the route-conditioned primary evaluation; nuPlan Test holds held-out
+// 10 Hz scenes from the official nuPlan test logs.
+var knownDatasets = []string{
+	"kitscenes-val", "kitscenes-test", "nuplan-test", "kitscenes",
+}
 
 const kitScenesSmokePrefix = "kitscenes-smoke-"
 
@@ -256,7 +264,8 @@ func (s *S3Service) ListDatasets(ctx context.Context) []model.Dataset {
 	out := make([]model.Dataset, 0, len(knownDatasets))
 	for _, name := range knownDatasets {
 		version := s.resolveVersion(ctx, name)
-		if version == fallbackVersion {
+		if version == fallbackVersion &&
+			!s.versionHasShards(ctx, name, version) {
 			continue
 		}
 		out = append(out, model.Dataset{
@@ -270,7 +279,12 @@ func (s *S3Service) ListDatasets(ctx context.Context) []model.Dataset {
 
 // ValidDataset reports whether name is an exposed dataset.
 func (s *S3Service) ValidDataset(name string) bool {
-	return name == "kitscenes"
+	for _, known := range knownDatasets {
+		if name == known {
+			return true
+		}
+	}
+	return false
 }
 
 func smokeDatasetNameFromPrefix(prefix string) (string, bool) {
@@ -540,7 +554,11 @@ func (s *S3Service) ShardRigProjection(
 	if err != nil {
 		return nil, "", err
 	}
-	if !requiresPublicationManifest(version) {
+	hasManifest, err := s.hasPublicationManifest(ctx, dataset, version)
+	if err != nil {
+		return nil, version, err
+	}
+	if !hasManifest {
 		return nil, version, ErrNotFound
 	}
 	entry, err := s.publishedShard(ctx, dataset, version, shard)
@@ -1319,35 +1337,35 @@ func (s *S3Service) SampleNavigationMap(
 	if err != nil {
 		return nil, "", index.Version, err
 	}
-	mapBytes, err := decodeNavigationNPZ(
+	mapBytes, mapHeight, mapWidth, err := decodeNavigationNPZ(
 		mapPayload,
 		"<f4",
-		[3]int{
-			navigationMapChannels,
-			navigationRasterSize,
-			navigationRasterSize,
-		},
+		navigationMapChannels,
 	)
 	if err != nil {
 		return nil, "", index.Version, fmt.Errorf(
 			"decode semantic navigation raster: %w", err,
 		)
 	}
-	routeBytes, err := decodeNavigationNPZ(
+	routeBytes, routeHeight, routeWidth, err := decodeNavigationRouteNPZ(
 		routePayload,
-		"|u1",
-		[3]int{
-			navigationRouteChannels,
-			navigationRasterSize,
-			navigationRasterSize,
-		},
 	)
 	if err != nil {
 		return nil, "", index.Version, fmt.Errorf(
 			"decode route navigation raster: %w", err,
 		)
 	}
-	body, err := renderNavigationPNG(mapBytes, routeBytes)
+	if mapHeight != routeHeight || mapWidth != routeWidth {
+		return nil, "", index.Version, fmt.Errorf(
+			"semantic and route navigation raster shapes differ",
+		)
+	}
+	body, err := renderNavigationPNG(
+		mapBytes,
+		routeBytes,
+		mapHeight,
+		mapWidth,
+	)
 	if err != nil {
 		return nil, "", index.Version, err
 	}
@@ -1381,33 +1399,36 @@ func (s *S3Service) readShardMember(
 func decodeNavigationNPZ(
 	payload []byte,
 	descr string,
-	shape [3]int,
-) ([]byte, error) {
+	channels int,
+) ([]byte, int, int, error) {
 	archive, err := zip.NewReader(bytes.NewReader(payload), int64(len(payload)))
 	if err != nil {
-		return nil, fmt.Errorf("open NPZ: %w", err)
+		return nil, 0, 0, fmt.Errorf("open NPZ: %w", err)
 	}
 	if len(archive.File) != 1 || archive.File[0].Name != navigationArrayMemberName {
-		return nil, fmt.Errorf("NPZ must contain only %s", navigationArrayMemberName)
+		return nil, 0, 0, fmt.Errorf(
+			"NPZ must contain only %s",
+			navigationArrayMemberName,
+		)
 	}
 	entry := archive.File[0]
 	if entry.UncompressedSize64 > maxNavigationArrayBytes {
-		return nil, fmt.Errorf("NPY exceeds uncompressed size limit")
+		return nil, 0, 0, fmt.Errorf("NPY exceeds uncompressed size limit")
 	}
 	stream, err := entry.Open()
 	if err != nil {
-		return nil, fmt.Errorf("open NPY: %w", err)
+		return nil, 0, 0, fmt.Errorf("open NPY: %w", err)
 	}
 	defer stream.Close()
 	npy, err := io.ReadAll(io.LimitReader(stream, maxNavigationArrayBytes+1))
 	if err != nil {
-		return nil, fmt.Errorf("read NPY: %w", err)
+		return nil, 0, 0, fmt.Errorf("read NPY: %w", err)
 	}
 	if len(npy) > maxNavigationArrayBytes {
-		return nil, fmt.Errorf("NPY exceeds uncompressed size limit")
+		return nil, 0, 0, fmt.Errorf("NPY exceeds uncompressed size limit")
 	}
 	if len(npy) < 10 || string(npy[:6]) != "\x93NUMPY" {
-		return nil, fmt.Errorf("invalid NPY magic")
+		return nil, 0, 0, fmt.Errorf("invalid NPY magic")
 	}
 	headerStart := 10
 	headerLength := 0
@@ -1416,40 +1437,102 @@ func decodeNavigationNPZ(
 		headerLength = int(binary.LittleEndian.Uint16(npy[8:10]))
 	case 2, 3:
 		if len(npy) < 12 {
-			return nil, fmt.Errorf("truncated NPY v%d header", npy[6])
+			return nil, 0, 0, fmt.Errorf(
+				"truncated NPY v%d header",
+				npy[6],
+			)
 		}
 		headerStart = 12
 		headerLength = int(binary.LittleEndian.Uint32(npy[8:12]))
 	default:
-		return nil, fmt.Errorf("unsupported NPY version %d", npy[6])
+		return nil, 0, 0, fmt.Errorf(
+			"unsupported NPY version %d",
+			npy[6],
+		)
 	}
 	if headerLength <= 0 || headerStart+headerLength > len(npy) {
-		return nil, fmt.Errorf("invalid NPY header length")
+		return nil, 0, 0, fmt.Errorf("invalid NPY header length")
 	}
 	header := string(npy[headerStart : headerStart+headerLength])
-	expectedShape := fmt.Sprintf("(%d, %d, %d)", shape[0], shape[1], shape[2])
 	if !strings.Contains(header, fmt.Sprintf("'descr': '%s'", descr)) ||
-		!strings.Contains(header, "'fortran_order': False") ||
-		!strings.Contains(header, fmt.Sprintf("'shape': %s", expectedShape)) {
-		return nil, fmt.Errorf("NPY dtype, order, or shape differs from contract")
+		!strings.Contains(header, "'fortran_order': False") {
+		return nil, 0, 0, fmt.Errorf(
+			"NPY dtype or order differs from contract",
+		)
+	}
+	height, width := 0, 0
+	for _, shape := range navigationRasterShapes {
+		expectedShape := fmt.Sprintf(
+			"(%d, %d, %d)",
+			channels,
+			shape[0],
+			shape[1],
+		)
+		if strings.Contains(
+			header,
+			fmt.Sprintf("'shape': %s", expectedShape),
+		) {
+			height, width = shape[0], shape[1]
+			break
+		}
+	}
+	if height == 0 || width == 0 {
+		return nil, 0, 0, fmt.Errorf(
+			"NPY shape differs from supported navigation contracts",
+		)
 	}
 	itemSize := 1
 	if descr == "<f4" {
 		itemSize = 4
 	}
-	expectedDataSize := shape[0] * shape[1] * shape[2] * itemSize
+	expectedDataSize := channels * height * width * itemSize
 	data := npy[headerStart+headerLength:]
 	if len(data) != expectedDataSize {
-		return nil, fmt.Errorf(
+		return nil, 0, 0, fmt.Errorf(
 			"NPY data size mismatch: expected %d, got %d",
 			expectedDataSize, len(data),
 		)
 	}
-	return data, nil
+	return data, height, width, nil
 }
 
-func renderNavigationPNG(mapBytes, routeBytes []byte) ([]byte, error) {
-	pixels := navigationRasterSize * navigationRasterSize
+// decodeNavigationRouteNPZ returns the route raster as one byte per cell.
+// KITScenes packs binary uint8 masks. nuPlan packs float32 rasters whose
+// destination channel is a soft heatmap, so cells above 0.5 are kept.
+func decodeNavigationRouteNPZ(payload []byte) ([]byte, int, int, error) {
+	routeBytes, height, width, err := decodeNavigationNPZ(
+		payload,
+		"|u1",
+		navigationRouteChannels,
+	)
+	if err == nil {
+		return routeBytes, height, width, nil
+	}
+	floats, height, width, floatErr := decodeNavigationNPZ(
+		payload,
+		"<f4",
+		navigationRouteChannels,
+	)
+	if floatErr != nil {
+		return nil, 0, 0, err
+	}
+	mask := make([]byte, len(floats)/4)
+	for index := range mask {
+		value := math.Float32frombits(
+			binary.LittleEndian.Uint32(floats[index*4 : index*4+4]),
+		)
+		if value > 0.5 {
+			mask[index] = 1
+		}
+	}
+	return mask, height, width, nil
+}
+
+func renderNavigationPNG(
+	mapBytes, routeBytes []byte,
+	height, width int,
+) ([]byte, error) {
+	pixels := height * width
 	if len(mapBytes) != navigationMapChannels*pixels*4 ||
 		len(routeBytes) != navigationRouteChannels*pixels {
 		return nil, fmt.Errorf("navigation raster byte size differs from contract")
@@ -1463,9 +1546,7 @@ func renderNavigationPNG(mapBytes, routeBytes []byte) ([]byte, error) {
 	route := func(channel, pixel int) bool {
 		return routeBytes[channel*pixels+pixel] != 0
 	}
-	canvas := image.NewRGBA(image.Rect(
-		0, 0, navigationRasterSize, navigationRasterSize,
-	))
+	canvas := image.NewRGBA(image.Rect(0, 0, width, height))
 	for pixel := 0; pixel < pixels; pixel++ {
 		value := color.RGBA{R: 11, G: 15, B: 20, A: 255}
 		switch {
@@ -1501,8 +1582,8 @@ func renderNavigationPNG(mapBytes, routeBytes []byte) ([]byte, error) {
 		if route(1, pixel) {
 			value = color.RGBA{R: 239, G: 77, B: 65, A: 255}
 		}
-		x := pixel % navigationRasterSize
-		y := pixel / navigationRasterSize
+		x := pixel % width
+		y := pixel / width
 		canvas.SetRGBA(x, y, value)
 	}
 	var output bytes.Buffer
@@ -1950,6 +2031,7 @@ func decodeEgoPayload(b []byte) ([]float32, error) {
 // sample key. Handles current content-addressed ids and historical conventions:
 //   - "l2d-v1-e000012-f000064" -> ("12", 64)
 //   - "nv-v1-<uuid>-f000064"   -> ("<uuid>", 64)
+//   - "nuplan-v1-<scene>-f000064" -> ("<scene>", 64)
 //   - "ep0_000064"        -> ("0", 64)          (L2D episode-prefixed)
 //   - "25cd4769_000064"   -> ("25cd4769", 64)   (nvidia hash-prefixed)
 //   - "s00000064"         -> ("", 64)           (flat s%08d global index)
@@ -1983,7 +2065,8 @@ func parseSampleKey(key string) (episodeID string, frameIdx int, ok bool) {
 					if len(parts) == 3 {
 						return parts[2], frame, true
 					}
-				case strings.HasPrefix(identity, "kitscenes-"):
+				case strings.HasPrefix(identity, "kitscenes-"),
+					strings.HasPrefix(identity, "nuplan-"):
 					parts := strings.SplitN(identity, "-", 3)
 					if len(parts) == 3 {
 						return parts[2], frame, true
@@ -2100,7 +2183,51 @@ func (s *S3Service) ReasoningPromptVersionsAtVersion(
 	ctx context.Context,
 	dataset, version string,
 ) ([]model.ReasoningPromptVersion, error) {
-	inventory, _, _, err := s.reasoningInventory(ctx, dataset, version)
+	resolvedVersion, err := s.publishedVersion(ctx, dataset, version)
+	if err != nil {
+		return nil, err
+	}
+	if requiresPublicationManifest(resolvedVersion) {
+		manifest, err := s.loadPublicationManifest(
+			ctx, dataset, resolvedVersion,
+		)
+		if err != nil {
+			return nil, err
+		}
+		if manifest.ReasoningLabelCount == 0 {
+			return []model.ReasoningPromptVersion{}, nil
+		}
+	} else {
+		body, err := s.getObjectBytesFromBucket(
+			ctx,
+			s.bucket,
+			shardsPrefix(dataset, resolvedVersion)+"manifest.json",
+			maxPublicationManifestBytes,
+		)
+		if err != nil && !errors.Is(err, ErrNotFound) {
+			return nil, err
+		}
+		if err == nil {
+			var manifest struct {
+				ReasoningLabelCount *int `json:"reasoning_label_count"`
+			}
+			if err := json.Unmarshal(body, &manifest); err != nil {
+				return nil, fmt.Errorf(
+					"decode reasoning count for %s/%s: %w",
+					dataset,
+					resolvedVersion,
+					err,
+				)
+			}
+			if manifest.ReasoningLabelCount != nil &&
+				*manifest.ReasoningLabelCount == 0 {
+				return []model.ReasoningPromptVersion{}, nil
+			}
+		}
+	}
+	inventory, _, _, err := s.reasoningInventory(
+		ctx, dataset, resolvedVersion,
+	)
 	if err != nil {
 		return nil, err
 	}

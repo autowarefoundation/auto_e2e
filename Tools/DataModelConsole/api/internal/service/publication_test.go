@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"maps"
 	"strings"
 	"sync"
 	"testing"
@@ -605,6 +606,72 @@ func TestShardRigProjectionUsesManifestBinding(t *testing.T) {
 	rig, _ := validRigFixture()
 	if client.getCalls[rig["key"].(string)] != 1 {
 		t.Fatal("manifest-bound rig was not fetched exactly once")
+	}
+}
+
+func TestShardRigProjectionUsesManifestMetadataBeforeV21(t *testing.T) {
+	service, client := newPublicationTestService(t)
+	manifestKey := "kitscenes/v2.1/shards/manifest.json"
+	manifestObject := client.objects[manifestKey]
+	var manifest map[string]any
+	if err := json.Unmarshal(manifestObject.body, &manifest); err != nil {
+		t.Fatal(err)
+	}
+	manifest["version"] = "v1.0"
+	manifest["has_gps"] = false
+	delete(manifest, "geo_artifacts")
+	for _, rawEntry := range manifest["shard_entries"].([]any) {
+		entry := rawEntry.(map[string]any)
+		entry["key"] = strings.Replace(
+			entry["key"].(string),
+			"/v2.1/",
+			"/v1.0/",
+			1,
+		)
+		rig := entry["rig"].(map[string]any)
+		rig["key"] = strings.Replace(
+			rig["key"].(string),
+			"/v2.1/",
+			"/v1.0/",
+			1,
+		)
+	}
+	manifestObject.body = encodePublication(t, manifest)
+	decoded, err := decodePublicationManifest(
+		manifestObject.body,
+		"kitscenes",
+		"v1.0",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifestObject.metadata["sha256"] = decoded.SHA256
+	delete(client.objects, manifestKey)
+	client.objects["kitscenes/v1.0/shards/manifest.json"] = manifestObject
+	for key, object := range maps.Clone(client.objects) {
+		if strings.Contains(key, "/v2.1/") {
+			delete(client.objects, key)
+			client.objects[strings.Replace(
+				key,
+				"/v2.1/",
+				"/v1.0/",
+				1,
+			)] = object
+		}
+	}
+
+	body, version, err := service.ShardRigProjection(
+		context.Background(),
+		"kitscenes",
+		"v1.0",
+		"scene-a-train-000000.tar",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, wantBody := validRigFixture()
+	if version != "v1.0" || !bytes.Equal(body, wantBody) {
+		t.Fatalf("rig projection = version %q body %q", version, body)
 	}
 }
 

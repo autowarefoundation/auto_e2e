@@ -14,6 +14,7 @@ import {
 import { Skeleton } from "@/components/ui/skeleton";
 import { useApi } from "@/hooks/use-api";
 import { listDatasets } from "@/lib/api";
+import { friendlyDataset } from "@/lib/format";
 
 export default function DatasetsPage() {
   const { data, error, loading, reload } = useApi(listDatasets);
@@ -43,7 +44,7 @@ export default function DatasetsPage() {
                 <CardHeader className="pb-2">
                   <CardTitle className="flex items-center gap-2 font-mono text-base">
                     <Database className="size-4 text-blue-500" />
-                    {ds.name}
+                    {friendlyDataset(ds.name)}
                   </CardTitle>
                 </CardHeader>
                 <CardContent className="space-y-3">

@@ -103,6 +103,37 @@ test("pinhole rig projects ego points into normalized camera pixels", () => {
   expect(result.cam_0[0][1].v).toBeCloseTo(100 / 256, 12);
 });
 
+test("pinhole rig normalizes each camera with its encoded size", () => {
+  const matrix = [
+    [0, 0, 0, 256],
+    [0, 0, 0, 256],
+    [0, 0, 0, 1],
+  ];
+  const rig: RigProjectionDocument = {
+    schema_version: "v1",
+    dataset: "kitscenes",
+    geometry_type: "pinhole",
+    image_size: 1024,
+    camera_image_sizes: [1024, 512],
+    projection: {
+      type: "pinhole",
+      matrix: [matrix, matrix],
+    },
+  };
+  const trajectory = [
+    { x: 1, y: 0, heading: 0 },
+    { x: 2, y: 0, heading: 0 },
+  ];
+
+  const center = projectTrajectoryToCameras(rig, trajectory);
+  expect(center.cam_0[0][0]).toEqual({ u: 0.25, v: 0.25 });
+  expect(center.cam_1[0][0]).toEqual({ u: 0.5, v: 0.5 });
+
+  const ribbon = projectTrajectoryRibbonToCameras(rig, trajectory);
+  expect(ribbon.cam_0[0].left[0]).toEqual({ u: 0.25, v: 0.25 });
+  expect(ribbon.cam_1[0].left[0]).toEqual({ u: 0.5, v: 0.5 });
+});
+
 test("production KITScenes calibration projects ribbons onto the ground", () => {
   const rig: RigProjectionDocument = {
     schema_version: "v1",
@@ -128,6 +159,41 @@ test("production KITScenes calibration projects ribbons onto the ground", () => 
   expect(ribbon.left).toHaveLength(2);
   expect(ribbon.right).toHaveLength(2);
   expect(ribbon.left[0].u).toBeLessThan(ribbon.right[0].u);
+});
+
+test("side-camera ribbons exclude near-plane projection spikes", () => {
+  const rig: RigProjectionDocument = {
+    schema_version: "v1",
+    dataset: "kitscenes",
+    geometry_type: "pinhole",
+    image_size: 512,
+    projection: {
+      type: "pinhole",
+      matrix: [
+        [
+          [0, 200, 0, 256],
+          [0, 0, 0, 256],
+          [0.5, 1, 0, 0],
+        ],
+      ],
+    },
+  };
+  const trajectory = [
+    { x: 2, y: 0, heading: 0 },
+    { x: 3, y: 0, heading: 0 },
+    { x: 4, y: 0, heading: 0 },
+  ];
+
+  const ribbons = projectTrajectoryRibbonToCameras(rig, trajectory).cam_0;
+
+  expect(ribbons).toHaveLength(1);
+  expect(ribbons[0].left).toHaveLength(2);
+  for (const point of [...ribbons[0].left, ...ribbons[0].right]) {
+    expect(point.u).toBeGreaterThanOrEqual(0);
+    expect(point.u).toBeLessThanOrEqual(1);
+    expect(point.v).toBeGreaterThanOrEqual(0);
+    expect(point.v).toBeLessThanOrEqual(1);
+  }
 });
 
 test("f-theta rig preserves the ego-FLU to optical-axis convention", () => {

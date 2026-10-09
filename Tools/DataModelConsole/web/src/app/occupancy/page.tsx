@@ -24,6 +24,7 @@ import {
   listShardsForEpisode,
   listShardSemanticOccupancyModels,
 } from "@/lib/api";
+import { friendlyDataset } from "@/lib/format";
 import {
   parseSemanticOccupancy,
   resolveSemanticOccupancyRows,
@@ -64,7 +65,8 @@ export default function OccupancyPage() {
     if (!available.length) return;
     if (!available.some((entry) => entry.name === dataset)) {
       setDataset(
-        available.find((entry) => entry.name === "kitscenes")?.name ??
+        available.find((entry) => entry.name === "kitscenes-val")?.name ??
+          available.find((entry) => entry.name === "kitscenes")?.name ??
           available[0].name,
       );
     }
@@ -302,7 +304,7 @@ export default function OccupancyPage() {
             {!datasets.data?.length && <option value="">Unavailable</option>}
             {(datasets.data ?? []).map((entry) => (
               <option key={entry.name} value={entry.name}>
-                {entry.name}
+                {friendlyDataset(entry.name)}
               </option>
             ))}
           </select>
