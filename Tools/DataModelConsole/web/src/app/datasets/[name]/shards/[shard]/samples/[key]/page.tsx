@@ -24,6 +24,7 @@ import {
   getSample,
   getShardIndex,
 } from "@/lib/api";
+import { friendlyDataset } from "@/lib/format";
 
 // Sample keys come in two forms: "ep0_000064" (episode id + "_" + 6-digit
 // frame) and "s00000139" (flat index, no underscore). Step the trailing number
@@ -154,7 +155,7 @@ function SampleDetailInner({
               href={`/datasets/${encodeURIComponent(dataset)}${versionQuery}`}
               className="font-mono hover:text-slate-300"
             >
-              {dataset}
+              {friendlyDataset(dataset)}
             </Link>{" "}
             /{" "}
             <Link
