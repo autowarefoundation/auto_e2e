@@ -50,6 +50,7 @@ function ScenesPageInner() {
     if (!data || data.length === 0) return "";
     return (
       data.find((item) => item.name === urlDataset)?.name ??
+      data.find((item) => item.name === "kitscenes-val")?.name ??
       data.find((item) => item.name === "kitscenes")?.name ??
       data[0].name
     );
